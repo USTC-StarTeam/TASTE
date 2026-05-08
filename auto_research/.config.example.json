@@ -1,0 +1,41 @@
+{
+  "research_interest": "AI for Science, materials discovery, generative models for scientific hypothesis generation, multimodal reasoning over papers, code, and experimental signals.",
+  "researcher_profile": "Demo profile for a fictional researcher: I work on AI-assisted scientific discovery with a focus on materials design and interpretable generative modeling. I prefer papers that connect model design to measurable experiments, useful datasets, or reproducible code. I am interested in methods that combine language models, graph neural networks, diffusion models, active learning, or simulation workflows. Please avoid recommendations that are only broadly about AI, privacy, surveillance, or generic benchmarks unless they directly support scientific discovery or materials research.",
+  "provider": "openai",
+  "base_url": "https://api.openai.com/v1",
+  "api_key": "",
+  "model": "gpt-4o-mini",
+  "temperature": 0.4,
+  "llm_roles": {
+    "find": {"provider": "", "base_url": "", "api_key": "", "model": "", "temperature": null},
+    "read": {"provider": "", "base_url": "", "api_key": "", "model": "", "temperature": null},
+    "idea_generator": {"provider": "", "base_url": "", "api_key": "", "model": "", "temperature": null},
+    "idea_judge": {"provider": "", "base_url": "", "api_key": "", "model": "", "temperature": null},
+    "plan_generator": {"provider": "", "base_url": "", "api_key": "", "model": "", "temperature": null},
+    "plan_evaluator": {"provider": "", "base_url": "", "api_key": "", "model": "", "temperature": null}
+  },
+  "llm_concurrency": 8,
+  "idea_parallel_workers": 1,
+  "max_fetch_papers": 40,
+  "max_recommended_papers": 20,
+  "max_ideas": 6,
+  "venue_title_scan_limit": 200,
+  "venue_title_scan_fraction": 1.0,
+  "arxiv_categories": ["cs.AI", "cs.LG", "cs.CL"],
+  "arxiv_start_date": "",
+  "arxiv_end_date": "",
+  "github_languages": ["all"],
+  "github_since": "weekly",
+  "hf_include_papers": true,
+  "hf_include_models": true,
+  "email": {
+    "smtp_server": "",
+    "smtp_port": 465,
+    "sender": "",
+    "receivers": [],
+    "smtp_password": "",
+    "manual_enabled": true,
+    "auto_send_enabled": false,
+    "auto_send_stages": ["find", "read", "idea", "plan"]
+  }
+}

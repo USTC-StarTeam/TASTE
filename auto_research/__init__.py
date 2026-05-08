@@ -1,0 +1,2 @@
+"""Local TASTE web application."""
+
