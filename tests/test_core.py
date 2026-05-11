@@ -49,7 +49,9 @@ def test_markdown_contains_classification_source():
 def test_catalog_has_reference_entries():
     catalog = load_catalog()
     assert isinstance(catalog, list)
-    assert any(item["source"] in {"ccf", "openreview"} for item in catalog)
+    assert len(catalog) >= 600
+    assert any(item["source"] == "ccf" for item in catalog)
+    assert any(item["id"] == "openreview_iclr" for item in catalog)
 
 
 def test_neurips_detail_parser_extracts_openreview_and_pdf():
@@ -145,9 +147,9 @@ def test_catalog_dynamic_iclr_years():
     assert {2023, 2024, 2025, 2026}.issubset(set(iclr["years"]))
 
 
-def test_default_catalog_has_kdd_dblp_address():
+def test_packaged_ccf_catalog_has_sigkdd_dblp_address():
     catalog = load_catalog()
-    kdd = next(item for item in catalog if item["name"] == "KDD")
+    kdd = next(item for item in catalog if item["name"] == "SIGKDD")
     assert kdd["address"].endswith("/db/conf/kdd/")
 
 

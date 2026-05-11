@@ -24,6 +24,9 @@ FIELD_LABELS = {
 ADDRESS_OVERRIDES = {
     ("HPCA", "IEEE International Symposium on High Performance Computer Architecture"): "https://dblp.uni-trier.de/db/conf/hpca/",
 }
+NAME_ALIASES = {
+    "kdd": "sigkdd",
+}
 
 
 def _safe_id(*parts: str) -> str:
@@ -32,6 +35,11 @@ def _safe_id(*parts: str) -> str:
     for ch in joined:
         allowed.append(ch if ch.isalnum() else "_")
     return "_".join(filter(None, "".join(allowed).split("_")))
+
+
+def _venue_name_key(name: str) -> str:
+    normalized = str(name or "").strip().lower()
+    return _safe_id(NAME_ALIASES.get(normalized, normalized))
 
 
 def load_ccf_catalog() -> list[dict[str, Any]]:
@@ -97,6 +105,10 @@ def load_default_catalog() -> list[dict[str, Any]]:
     return _load_json_catalog(DATA_DIR / "default_venues.json", "default")
 
 
+def load_packaged_ccf_catalog() -> list[dict[str, Any]]:
+    return _load_json_catalog(DATA_DIR / "ccf_venues.json", "ccf")
+
+
 def load_custom_catalog() -> list[dict[str, Any]]:
     return _load_json_catalog(DATA_DIR / "custom_venues.json", "custom")
 
@@ -123,7 +135,14 @@ def load_openreview_catalog() -> list[dict[str, Any]]:
 
 def load_catalog() -> list[dict[str, Any]]:
     by_id: dict[str, dict[str, Any]] = {}
-    for venue in load_default_catalog() + load_openreview_catalog() + load_ccf_catalog() + load_custom_catalog():
+    ccf_venues = load_packaged_ccf_catalog() + load_ccf_catalog()
+    ccf_names = {_venue_name_key(venue.get("name", "")) for venue in ccf_venues}
+    default_venues = [
+        venue
+        for venue in load_default_catalog()
+        if venue.get("id") == "openreview_iclr" or _venue_name_key(venue.get("name", "")) not in ccf_names
+    ]
+    for venue in default_venues + load_openreview_catalog() + ccf_venues + load_custom_catalog():
         by_id[venue["id"]] = venue
     return sorted(by_id.values(), key=lambda item: (item["source"], item["field"], item["type"], item["rank"], item["name"]))
 

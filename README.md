@@ -30,7 +30,7 @@ http://127.0.0.1:8765
 
 ## 功能亮点
 
-- **定向论文发现**：支持默认高优先级 AI 会议、OpenReview、DBLP、arXiv、Hugging Face、GitHub。
+- **定向论文发现**：内置完整 CCF 会议/期刊目录，并补充 ICLR、OpenReview、DBLP、arXiv、Hugging Face、GitHub 等来源。
 - **严格两阶段筛选**：先按标题批筛选，再抓摘要/详情做二次评分，输出 `fit_score`、`diversity_score` 和最终排名。
 - **完整研究流水线**：Find -> Read -> Ideas -> Plan -> Email/export。
 - **多角色 LLM 配置**：Find、Read、Idea Generator、Idea Judge、Plan Generator、Plan Evaluator 可分别指定模型。
@@ -336,11 +336,12 @@ python scripts/smoke_api.py
 本项目在设计和实现过程中参考了若干项目的思路与部分实现方式：
 
 - **iDeer**：研究助手流程、信息源聚合、报告生成和邮件报告设计。
-- **openccf**：CCF 目录结构、会议/期刊元数据组织和 DBLP 抓取策略。
+- **openccf**：CCF 目录结构、会议/期刊元数据组织和 DBLP 抓取策略；本仓库内置的 `auto_research/data/ccf_venues.json` 是基于 openccf 公开 CCF 数据整理出的归一化 venue catalog。
 - **ICLR2026-Guide-CN**：OpenReview/ICLR 论文收集、组织和展示方式。
 - **ccf-deadlines**：会议信息组织和用户侧 venue 工作流设计。
+
+开源发布版不会包含 `reference_repo/` 目录。如果你需要直接复用这些参考项目，请查看其原始仓库和对应许可证。
 
 ## 许可证
 
 TASTE 使用 GNU Affero General Public License v3.0。详见 [LICENSE](LICENSE)。
-

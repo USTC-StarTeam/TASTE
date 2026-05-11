@@ -30,7 +30,7 @@ http://127.0.0.1:8765
 
 ## Highlights
 
-- **Targeted discovery** from default high-priority AI venues, OpenReview, DBLP, arXiv, Hugging Face, and GitHub.
+- **Targeted discovery** with a packaged full CCF venue/journal catalog plus ICLR, OpenReview, DBLP, arXiv, Hugging Face, and GitHub.
 - **Strict two-stage triage**: title screening first, then abstract/detail scoring with `fit_score`, `diversity_score`, and final ranking.
 - **Research workflow**: Find -> Read -> Ideas -> Plan -> Email/export.
 - **Role-specific LLMs** for Find, Read, Idea Generator, Idea Judge, Plan Generator, and Plan Evaluator.
@@ -316,7 +316,7 @@ python scripts/smoke_api.py
 This project was built with reference to several open-source and local prototype repositories during design and implementation. In particular:
 
 - **iDeer**: inspired parts of the research-assistant workflow, source aggregation ideas, report generation patterns, and email-report design.
-- **openccf**: informed the CCF venue catalog design and DBLP-oriented crawling strategy.
+- **openccf**: informed the CCF venue catalog design and DBLP-oriented crawling strategy; the packaged `auto_research/data/ccf_venues.json` is a normalized venue catalog derived from public openccf CCF data.
 - **ICLR2026-Guide-CN**: informed early OpenReview/ICLR paper collection and display ideas.
 - **ccf-deadlines**: provided reference ideas for conference metadata organization and user-facing venue workflows.
 
@@ -325,4 +325,3 @@ The `reference_repo/` directory is intentionally **not included** in this open-s
 ## License
 
 TASTE is licensed under the GNU Affero General Public License v3.0. See [LICENSE](LICENSE).
-
