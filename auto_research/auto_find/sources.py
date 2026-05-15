@@ -858,11 +858,6 @@ def fetch_venue_title_index(venue: dict, years: list[int], max_items: int) -> tu
         if papers:
             return papers[:max_items], "neurips_virtual"
 
-    if is_openreview_supported_venue(venue):
-        papers = fetch_openreview_venue(venue, years, max_items)
-        if papers:
-            return papers, "openreview"
-
     if venue.get("address"):
         papers = fetch_dblp_venue(venue, years, max_items)
         if papers:
@@ -932,11 +927,7 @@ def fetch_venue_sample(venue: dict, year: int, sample_limit: int = 3) -> dict:
                 papers = fetch_dblp_venue(venue, [year], sample_limit)
         else:
             papers = []
-            if is_openreview_supported_venue(venue):
-                adapter = "openreview"
-                papers = fetch_openreview_venue(venue, [year], sample_limit)
-            if not papers and venue.get("address"):
-                adapter = "dblp"
+            if venue.get("address"):
                 papers = fetch_dblp_venue(venue, [year], sample_limit)
             if not papers and is_iclr_venue(venue):
                 adapter = "openreview"
