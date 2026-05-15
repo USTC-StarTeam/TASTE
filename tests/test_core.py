@@ -281,7 +281,7 @@ def test_openreview_sample_falls_back_to_dblp_when_empty(monkeypatch):
     assert calls == ["openreview", "neurips_virtual", "dblp"]
 
 
-def test_icml_title_index_falls_back_to_openreview_when_databases_empty(monkeypatch):
+def test_icml_title_index_uses_openreview_before_databases(monkeypatch):
     calls = []
     paper = {"id": "p1", "title": "ICML OpenReview paper", "url": "https://openreview.net/forum?id=x"}
 
@@ -302,10 +302,10 @@ def test_icml_title_index_falls_back_to_openreview_when_databases_empty(monkeypa
 
     assert adapter == "openreview"
     assert papers == [paper]
-    assert calls == ["dblp", "pmlr", "openreview"]
+    assert calls == ["openreview"]
 
 
-def test_new_openreview_supported_title_index_falls_back_when_databases_empty(monkeypatch):
+def test_new_openreview_supported_title_index_uses_openreview_before_databases(monkeypatch):
     calls = []
     paper = {"id": "p1", "title": "AISTATS OpenReview paper", "url": "https://openreview.net/forum?id=x"}
 
@@ -326,10 +326,34 @@ def test_new_openreview_supported_title_index_falls_back_when_databases_empty(mo
 
     assert adapter == "openreview"
     assert papers == [paper]
-    assert calls == ["dblp", "pmlr", "openreview"]
+    assert calls == ["openreview"]
 
 
-def test_icml_sample_falls_back_to_openreview_when_databases_empty(monkeypatch):
+def test_openreview_supported_title_index_falls_back_to_existing_sources_when_empty(monkeypatch):
+    calls = []
+    paper = {"id": "p1", "title": "AISTATS PMLR paper", "url": "https://proceedings.mlr.press/example"}
+
+    monkeypatch.setattr("auto_research.auto_find.sources.fetch_openreview_venue", lambda *_args: (calls.append("openreview") or []))
+    monkeypatch.setattr("auto_research.auto_find.sources.fetch_dblp_venue", lambda *_args: (calls.append("dblp") or []))
+    monkeypatch.setattr("auto_research.auto_find.sources.fetch_pmlr_index", lambda *_args: (calls.append("pmlr") or [paper]))
+
+    papers, adapter = fetch_venue_title_index(
+        {
+            "id": "ccf_ai_conference_a_aistats_artificial_intelligence_and_statistics",
+            "name": "AISTATS",
+            "full_name": "International Conference on Artificial Intelligence and Statistics",
+            "address": "https://dblp.org/db/conf/aistats/",
+        },
+        [2025],
+        1,
+    )
+
+    assert adapter == "pmlr"
+    assert papers == [paper]
+    assert calls == ["openreview", "dblp", "pmlr"]
+
+
+def test_icml_sample_uses_openreview_before_databases(monkeypatch):
     calls = []
     paper = {"id": "p1", "title": "ICML OpenReview paper", "url": "https://openreview.net/forum?id=x", "abstract": "Abstract."}
 
@@ -351,7 +375,7 @@ def test_icml_sample_falls_back_to_openreview_when_databases_empty(monkeypatch):
     assert result["ok"] is True
     assert result["source_adapter"] == "openreview"
     assert result["sample_count"] == 1
-    assert calls == ["dblp", "pmlr", "openreview"]
+    assert calls == ["openreview"]
 
 
 def test_arxiv_returns_status_for_success(monkeypatch):
