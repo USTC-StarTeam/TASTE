@@ -118,6 +118,15 @@ def is_iclr_venue(venue: dict) -> bool:
     return "iclr" in text or "learning representations" in text
 
 
+def is_icml_venue(venue: dict) -> bool:
+    text = f"{venue.get('name', '')} {venue.get('full_name', '')}".lower()
+    return "icml" in text or "international conference on machine learning" in text
+
+
+def is_openreview_supported_venue(venue: dict) -> bool:
+    return is_iclr_venue(venue) or is_neurips_venue(venue) or is_icml_venue(venue)
+
+
 def is_cvf_venue(venue: dict) -> bool:
     text = f"{venue.get('name', '')} {venue.get('full_name', '')}".lower()
     return any(key in text for key in ["cvpr", "iccv", "eccv"])
@@ -231,15 +240,21 @@ def _content_list(content: dict, key: str) -> list[str]:
     return []
 
 
+def _openreview_venue_ids(venue: dict, year: int) -> list[str]:
+    venue_name = f"{venue.get('name', '')} {venue.get('full_name', '')}".lower()
+    if "neurips" in venue_name or "neural information processing systems" in venue_name:
+        return [f"NeurIPS.cc/{year}/Conference"]
+    if "iclr" in venue_name or "learning representations" in venue_name:
+        return [f"ICLR.cc/{year}/Conference"]
+    if "icml" in venue_name or "international conference on machine learning" in venue_name:
+        return [f"ICML.cc/{year}/Conference"]
+    return []
+
+
 def fetch_openreview_venue(venue: dict, years: list[int], max_items: int) -> list[dict]:
     papers: list[dict] = []
-    venue_name = f"{venue.get('name', '')} {venue.get('full_name', '')}".lower()
     for year in years:
-        venue_ids: list[str] = []
-        if "neurips" in venue_name or "neural information processing systems" in venue_name:
-            venue_ids.append(f"NeurIPS.cc/{year}/Conference")
-        elif "iclr" in venue_name:
-            venue_ids.append(f"ICLR.cc/{year}/Conference")
+        venue_ids = _openreview_venue_ids(venue, year)
         for venue_id in venue_ids:
             notes = []
             try:
@@ -795,6 +810,11 @@ def fetch_venue_title_index(venue: dict, years: list[int], max_items: int) -> tu
         if papers:
             return papers, "pmlr"
 
+    if is_openreview_supported_venue(venue):
+        papers = fetch_openreview_venue(venue, years, max_items)
+        if papers:
+            return papers, "openreview"
+
     return [], "none"
 
 
@@ -858,6 +878,9 @@ def fetch_venue_sample(venue: dict, year: int, sample_limit: int = 3) -> dict:
             elif not papers and is_pmlr_venue(venue):
                 adapter = "pmlr"
                 papers = fetch_pmlr_index(venue, [year], sample_limit)
+            if not papers and is_openreview_supported_venue(venue):
+                adapter = "openreview"
+                papers = fetch_openreview_venue(venue, [year], sample_limit)
         samples = [
             {
                 "title": paper.get("title", ""),
