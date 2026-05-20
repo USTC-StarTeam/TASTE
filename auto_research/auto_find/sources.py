@@ -916,11 +916,39 @@ def enrich_with_semantic_scholar(papers: list[dict], limit: int = 20, api_key: s
     return papers
 
 
+def _arxiv_entry_id(entry_id: str) -> str:
+    text = (entry_id or "").rstrip("/")
+    if "/abs/" in text:
+        text = text.rsplit("/abs/", 1)[1]
+    if "/pdf/" in text:
+        text = text.rsplit("/pdf/", 1)[1]
+    return re.sub(r"\.pdf$", "", text)
+
+
+def _request_arxiv_page(url: str, attempts: int = 3):
+    last_error: Exception | None = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            try:
+                return _request(url, timeout=20)
+            except TypeError:
+                return _request(url)
+        except Exception as exc:
+            last_error = exc
+            if attempt < attempts:
+                time.sleep(0.8 * attempt)
+    if last_error:
+        raise last_error
+    raise RuntimeError("arXiv request failed")
+
+
 def fetch_arxiv(categories: list[str], max_items: int, start_date: str = "", end_date: str = "") -> tuple[list[dict], dict]:
     papers: list[dict] = []
+    by_key: dict[str, dict] = {}
     start_date = normalize_date(start_date)
     end_date = normalize_date(end_date)
     categories = [category.strip() for category in (categories or []) if category.strip()] or ["cs.AI"]
+    page_size = max(1, min(100, int(max_items or 100)))
     status = {
         "source": "arxiv",
         "ok": False,
@@ -932,6 +960,8 @@ def fetch_arxiv(categories: list[str], max_items: int, start_date: str = "", end
         "end_date": end_date,
         "queries": [],
         "errors": [],
+        "pages_fetched": 0,
+        "deduped_count": 0,
     }
     for category in categories:
         query_text = f"cat:{category}"
@@ -940,52 +970,73 @@ def fetch_arxiv(categories: list[str], max_items: int, start_date: str = "", end
             end_stamp = (end_date or "3000-01-01").replace("-", "") + "2359"
             query_text = f"{query_text} AND submittedDate:[{start_stamp} TO {end_stamp}]"
         query = quote_plus(query_text)
-        url = f"https://export.arxiv.org/api/query?search_query={query}&sortBy=submittedDate&sortOrder=descending&max_results={max_items}"
         status["queries"].append(query_text)
-        try:
-            text = _request(url).text
-            root = ET.fromstring(text)
-        except Exception as exc:
-            status["errors"].append(f"{category}: {exc}")
-            continue
-        ns = {"a": "http://www.w3.org/2005/Atom"}
-        for entry in root.findall("a:entry", ns):
-            published = (entry.findtext("a:published", default="", namespaces=ns) or "")[:10]
-            if not _in_date_range(published, start_date, end_date):
-                continue
-            title = " ".join((entry.findtext("a:title", default="", namespaces=ns) or "").split())
-            abstract = " ".join((entry.findtext("a:summary", default="", namespaces=ns) or "").split())
-            entry_id = entry.findtext("a:id", default="", namespaces=ns) or ""
-            pdf_url = entry_id.replace("/abs/", "/pdf/") if "/abs/" in entry_id else ""
-            papers.append({
-                "id": stable_id("paper", entry_id or title),
-                "source": "arxiv",
-                "title": title,
-                "authors": ", ".join(author.findtext("a:name", default="", namespaces=ns) or "" for author in entry.findall("a:author", ns)),
-                "abstract": abstract,
-                "url": entry_id,
-                "pdf_url": pdf_url,
-                "venue": "arXiv",
-                "year": int(published[:4]) if published[:4].isdigit() else date.today().year,
-                "category": category,
-                "classification_source": "llm_inferred",
-                "metadata": {"published": published, "arxiv_category": category},
-            })
-            if len(papers) >= max_items:
-                status["count"] = len(papers)
-                status["ok"] = True
-                status["message"] = f"ok; queries={'; '.join(status['queries'])}"
-                return papers, status
+        start = 0
+        while True:
+            url = f"https://export.arxiv.org/api/query?search_query={query}&sortBy=submittedDate&sortOrder=descending&start={start}&max_results={page_size}"
+            try:
+                text = _request_arxiv_page(url).text
+                root = ET.fromstring(text)
+            except Exception as exc:
+                status["errors"].append(f"{category} start={start}: {exc}")
+                break
+            status["pages_fetched"] += 1
+            ns = {"a": "http://www.w3.org/2005/Atom"}
+            entries = root.findall("a:entry", ns)
+            if not entries:
+                break
+            for entry in entries:
+                published = (entry.findtext("a:published", default="", namespaces=ns) or "")[:10]
+                updated = (entry.findtext("a:updated", default="", namespaces=ns) or "")[:10]
+                if not _in_date_range(published, start_date, end_date):
+                    continue
+                title = " ".join((entry.findtext("a:title", default="", namespaces=ns) or "").split())
+                abstract = " ".join((entry.findtext("a:summary", default="", namespaces=ns) or "").split())
+                entry_id = entry.findtext("a:id", default="", namespaces=ns) or ""
+                arxiv_id = _arxiv_entry_id(entry_id)
+                key = arxiv_id or title.lower()
+                paper = by_key.get(key)
+                if paper:
+                    categories_seen = paper.setdefault("categories", [paper.get("category", "")])
+                    if category not in categories_seen:
+                        categories_seen.append(category)
+                    paper.setdefault("metadata", {})["all_categories"] = categories_seen
+                    continue
+                pdf_url = entry_id.replace("/abs/", "/pdf/") if "/abs/" in entry_id else ""
+                all_categories = [category]
+                paper = {
+                    "id": stable_id("paper", entry_id or title),
+                    "source": "arxiv",
+                    "arxiv_id": arxiv_id,
+                    "title": title,
+                    "authors": ", ".join(author.findtext("a:name", default="", namespaces=ns) or "" for author in entry.findall("a:author", ns)),
+                    "abstract": abstract,
+                    "url": entry_id,
+                    "pdf_url": pdf_url,
+                    "venue": "arXiv",
+                    "year": int(published[:4]) if published[:4].isdigit() else date.today().year,
+                    "category": category,
+                    "categories": all_categories,
+                    "classification_source": "llm_inferred",
+                    "metadata": {"published": published, "updated": updated, "arxiv_category": category, "primary_category": category, "all_categories": all_categories},
+                }
+                by_key[key] = paper
+                papers.append(paper)
+            if len(entries) < page_size:
+                break
+            start += page_size
+            time.sleep(0.5)
         time.sleep(0.5)
     status["count"] = len(papers)
+    status["deduped_count"] = len(papers)
     status["ok"] = bool(papers)
     if papers:
-        status["message"] = f"ok; queries={'; '.join(status['queries'])}"
+        status["message"] = f"ok; fetched all available pages; queries={'; '.join(status['queries'])}"
     elif status["errors"]:
         status["message"] = "arXiv unavailable or query failed: " + " | ".join(status["errors"][:3])
     else:
         status["message"] = f"No arXiv papers found; queries={'; '.join(status['queries'])}"
-    return papers[:max_items], status
+    return papers, status
 
 
 def fetch_huggingface(

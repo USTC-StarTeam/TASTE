@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "venue_id": "openreview_neurips",
+  "venue": "NeurIPS",
+  "full_name": "Conference on Neural Information Processing Systems",
+  "year": 2026,
+  "source": "openreview",
+  "source_adapter": "openreview_api2",
+  "paper_count": 0,
+  "category_count": 0,
+  "category_counts": {},
+  "category_summary": [],
+  "built_at": "2026-05-14T13:27:11.310951Z",
+  "source_file": "auto_research/local_database/openreview_neurips/2026/papers.json"
+}

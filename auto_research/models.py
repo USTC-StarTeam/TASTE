@@ -48,6 +48,8 @@ class AppConfig(BaseModel):
     arxiv_categories: list[str] = Field(default_factory=lambda: ["cs.AI"])
     arxiv_start_date: str = ""
     arxiv_end_date: str = ""
+    arxiv_llm_candidate_limit: int = 200
+    arxiv_llm_candidates_per_category: int = 100
     github_languages: list[str] = Field(default_factory=lambda: ["all"])
     github_since: Literal["daily", "weekly", "monthly"] = "daily"
     hf_include_papers: bool = True

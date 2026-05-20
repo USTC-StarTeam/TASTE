@@ -1,4 +1,5 @@
 from auto_research.auto_find.catalog import load_catalog
+from auto_research.auto_find.local_rank import rank_papers_tfidf
 from auto_research.auto_find.sources import _dblp_page_url, _parse_neurips_detail, _parse_neurips_list, fetch_arxiv, fetch_dblp_stream_api, fetch_openreview_venue, fetch_venue_sample, fetch_venue_title_index, normalize_date
 from auto_research.llm import LLMClient, clamp_workers, extract_json, fallback_score, keyword_category
 from auto_research.markdown import paper_markdown
@@ -269,6 +270,107 @@ def test_arxiv_returns_status_for_failure(monkeypatch):
     assert items == []
     assert status["ok"] is False
     assert "network down" in status["message"]
+
+
+def test_arxiv_paginates_and_dedupes(monkeypatch):
+    pages = {
+        0: """<?xml version='1.0' encoding='UTF-8'?>
+        <feed xmlns="http://www.w3.org/2005/Atom">
+          <entry>
+            <id>http://arxiv.org/abs/2604.00001v1</id>
+            <title>Research agents for literature review</title>
+            <summary>Agentic literature review.</summary>
+            <published>2026-04-30T00:00:00Z</published>
+            <updated>2026-04-30T00:00:00Z</updated>
+            <author><name>Alice</name></author>
+          </entry>
+        </feed>""",
+        1: """<?xml version='1.0' encoding='UTF-8'?>
+        <feed xmlns="http://www.w3.org/2005/Atom">
+          <entry>
+            <id>http://arxiv.org/abs/2604.00001v1</id>
+            <title>Research agents for literature review</title>
+            <summary>Duplicate from another category.</summary>
+            <published>2026-04-30T00:00:00Z</published>
+            <updated>2026-04-30T00:00:00Z</updated>
+            <author><name>Alice</name></author>
+          </entry>
+          <entry>
+            <id>http://arxiv.org/abs/2604.00002v1</id>
+            <title>Unrelated optimization note</title>
+            <summary>Optimization.</summary>
+            <published>2026-04-29T00:00:00Z</published>
+            <updated>2026-04-29T00:00:00Z</updated>
+            <author><name>Bob</name></author>
+          </entry>
+        </feed>""",
+        2: """<?xml version='1.0' encoding='UTF-8'?>
+        <feed xmlns="http://www.w3.org/2005/Atom"></feed>""",
+    }
+
+    class Response:
+        def __init__(self, text):
+            self.text = text
+
+    def fake_request(url):
+        if "cat%3Acs.AI" in url:
+            return Response(pages[0] if "start=0" in url else pages[2])
+        return Response(pages[1] if "start=0" in url else pages[2])
+
+    monkeypatch.setattr("auto_research.auto_find.sources._request", fake_request)
+    items, status = fetch_arxiv(["cs.AI", "cs.CL"], 1, "", "")
+
+    assert len(items) == 2
+    assert status["pages_fetched"] == 4
+    assert status["deduped_count"] == 2
+    duplicate = next(item for item in items if item["arxiv_id"] == "2604.00001v1")
+    assert duplicate["categories"] == ["cs.AI", "cs.CL"]
+
+
+def test_tfidf_ranker_uses_research_profile_and_boosted_title():
+    papers = [
+        {"id": "p1", "title": "Research agents for literature review", "abstract": "A system for academic paper triage.", "category": "cs.AI"},
+        {"id": "p2", "title": "Image segmentation", "abstract": "Vision model for medical scans.", "category": "cs.CV"},
+    ]
+
+    selected, report = rank_papers_tfidf(papers, "academic research agents literature review", global_limit=1)
+
+    assert selected[0]["id"] == "p1"
+    assert selected[0]["local_score"] > 0
+    assert report["selected_count"] == 1
+
+
+def test_tfidf_ranker_boosts_research_automation_and_penalizes_avoid_topics():
+    papers = [
+        {
+            "id": "agent",
+            "title": "Agent Evaluation for Academic Research Automation",
+            "abstract": "We evaluate information-seeking LLM agents for literature review, paper triage, and experiment planning.",
+            "category": "cs.AI",
+        },
+        {
+            "id": "education",
+            "title": "Agentic AI Ecosystems in Higher Education",
+            "abstract": "Conversational AI tools for students in education settings.",
+            "category": "cs.AI",
+        },
+        {
+            "id": "vision",
+            "title": "Vision-Language Image Generation Benchmark",
+            "abstract": "A computer vision benchmark for image generation and segmentation.",
+            "category": "cs.CV",
+        },
+    ]
+
+    selected, _report = rank_papers_tfidf(
+        papers,
+        "LLM agents for academic research automation, literature review, paper triage, information-seeking agent evaluation, RAG",
+        global_limit=3,
+    )
+
+    assert selected[0]["id"] == "agent"
+    assert selected[0]["local_positive_matches"]
+    assert selected[-1]["id"] == "vision"
 
 
 def test_role_llm_config_inherits_and_overrides_global():
