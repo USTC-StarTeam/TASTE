@@ -118,6 +118,87 @@ def is_iclr_venue(venue: dict) -> bool:
     return "iclr" in text or "learning representations" in text
 
 
+def is_icml_venue(venue: dict) -> bool:
+    text = f"{venue.get('name', '')} {venue.get('full_name', '')}".lower()
+    return "icml" in text or "international conference on machine learning" in text
+
+
+OPENREVIEW_VENUE_PATTERNS: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
+    (
+        ("neurips", "neural information processing systems"),
+        ("NeurIPS.cc/{year}/Conference",),
+    ),
+    (
+        ("iclr", "learning representations"),
+        ("ICLR.cc/{year}/Conference",),
+    ),
+    (
+        ("icml", "international conference on machine learning"),
+        ("ICML.cc/{year}/Conference",),
+    ),
+    (
+        ("aistats", "artificial intelligence and statistics"),
+        ("aistats.org/AISTATS/{year}/Conference",),
+    ),
+    (
+        ("uai", "uncertainty in artificial intelligence"),
+        ("auai.org/UAI/{year}/Conference",),
+    ),
+    (
+        ("colt", "conference on learning theory"),
+        ("learningtheory.org/COLT/{year}/Conference",),
+    ),
+    (
+        ("corl", "conference on robot learning"),
+        ("robot-learning.org/CoRL/{year}/Conference",),
+    ),
+    (
+        ("colm", "conference on language modeling"),
+        ("colmweb.org/COLM/{year}/Conference",),
+    ),
+    (
+        ("rlc", "reinforcement learning conference"),
+        ("rl-conference.cc/RLC/{year}/Conference",),
+    ),
+    (
+        ("log", "learning on graphs"),
+        ("logconference.io/LOG/{year}/Conference",),
+    ),
+    (
+        ("midl", "medical imaging with deep learning"),
+        ("MIDL.io/{year}/Conference",),
+    ),
+    (
+        ("tmlr", "transactions on machine learning research"),
+        ("TMLR",),
+    ),
+]
+
+
+def _venue_text(venue: dict) -> str:
+    return f"{venue.get('name', '')} {venue.get('full_name', '')} {venue.get('address', '')}".lower()
+
+
+def _matches_venue_keyword(text: str, keyword: str) -> bool:
+    keyword = keyword.lower()
+    if " " in keyword:
+        return keyword in text
+    return re.search(rf"(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])", text) is not None
+
+
+def _openreview_patterns_for_venue(venue: dict) -> list[str]:
+    text = _venue_text(venue)
+    patterns: list[str] = []
+    for keywords, venue_patterns in OPENREVIEW_VENUE_PATTERNS:
+        if any(_matches_venue_keyword(text, keyword) for keyword in keywords):
+            patterns.extend(venue_patterns)
+    return patterns
+
+
+def is_openreview_supported_venue(venue: dict) -> bool:
+    return bool(_openreview_patterns_for_venue(venue))
+
+
 def is_cvf_venue(venue: dict) -> bool:
     text = f"{venue.get('name', '')} {venue.get('full_name', '')}".lower()
     return any(key in text for key in ["cvpr", "iccv", "eccv"])
@@ -231,16 +312,22 @@ def _content_list(content: dict, key: str) -> list[str]:
     return []
 
 
+def _openreview_venue_ids(venue: dict, year: int) -> list[str]:
+    venue_ids = []
+    for pattern in _openreview_patterns_for_venue(venue):
+        venue_ids.append(pattern.format(year=year) if "{year}" in pattern else pattern)
+    return list(dict.fromkeys(venue_ids))
+
+
 def fetch_openreview_venue(venue: dict, years: list[int], max_items: int) -> list[dict]:
     papers: list[dict] = []
-    venue_name = f"{venue.get('name', '')} {venue.get('full_name', '')}".lower()
+    queried_venue_ids: set[str] = set()
     for year in years:
-        venue_ids: list[str] = []
-        if "neurips" in venue_name or "neural information processing systems" in venue_name:
-            venue_ids.append(f"NeurIPS.cc/{year}/Conference")
-        elif "iclr" in venue_name:
-            venue_ids.append(f"ICLR.cc/{year}/Conference")
+        venue_ids = _openreview_venue_ids(venue, year)
         for venue_id in venue_ids:
+            if venue_id in queried_venue_ids:
+                continue
+            queried_venue_ids.add(venue_id)
             notes = []
             try:
                 response = requests.get(
@@ -795,6 +882,11 @@ def fetch_venue_title_index(venue: dict, years: list[int], max_items: int) -> tu
         if papers:
             return papers, "pmlr"
 
+    if is_openreview_supported_venue(venue):
+        papers = fetch_openreview_venue(venue, years, max_items)
+        if papers:
+            return papers, "openreview"
+
     return [], "none"
 
 
@@ -858,6 +950,9 @@ def fetch_venue_sample(venue: dict, year: int, sample_limit: int = 3) -> dict:
             elif not papers and is_pmlr_venue(venue):
                 adapter = "pmlr"
                 papers = fetch_pmlr_index(venue, [year], sample_limit)
+            if not papers and is_openreview_supported_venue(venue):
+                adapter = "openreview"
+                papers = fetch_openreview_venue(venue, [year], sample_limit)
         samples = [
             {
                 "title": paper.get("title", ""),
