@@ -3,7 +3,7 @@ from auto_research.auto_idea.pipeline import patch_idea, run_idea
 from auto_research.auto_plan.pipeline import run_plan
 from auto_research.auto_read.pipeline import run_read
 from auto_research.models import AppConfig, FindRequest, IdeaPatch, IdeaRequest, PlanRequest, ReadRequest, VenueSelection
-from auto_research.storage import delete_run, run_dir
+from auto_research.storage import delete_run, read_json, run_dir
 
 
 def test_mock_pipeline_arxiv_disabled_external_optional():
@@ -29,6 +29,12 @@ def test_mock_pipeline_arxiv_disabled_external_optional():
     )
     run_id = result["run_id"]
     assert result["articles"]
+    stage0_path = run_dir(run_id) / "stage0_profile.json"
+    assert stage0_path.exists()
+    stage0 = read_json(stage0_path, {})
+    assert stage0["fallback_used"] is True
+    assert stage0["profile"]["explicit_profile"]["research_interest_summary"] == "LLM agents retrieval"
+    assert result["stage0_profile"] == stage0
 
     read_result = run_read(ReadRequest(run_id=run_id, max_papers=1), cfg, log=lambda _msg: None)
     assert read_result["readings"]

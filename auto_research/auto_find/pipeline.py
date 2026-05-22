@@ -14,6 +14,7 @@ from auto_research.storage import create_run_dir, redacted_config, sync_latest, 
 from .catalog import catalog_by_id
 from .category_select import filter_papers_by_selected_categories, select_relevant_categories
 from .local_rank import rank_papers_tfidf
+from .profile_normalize import normalize_user_profile, profile_retrieval_text
 from .local_index import load_local_venue_year
 from .sources import (
     enrich_with_semantic_scholar,
@@ -604,6 +605,21 @@ def run_find(
     log(f"Created run {run_id}")
 
     llm = LLMClient(config, "find")
+    stage0_profile, stage0_fallback_used, stage0_error = normalize_user_profile(config, llm)
+    stage0_retrieval_text = profile_retrieval_text(stage0_profile)
+    effective_config = config.model_copy(update={
+        "research_interest": stage0_retrieval_text,
+        "researcher_profile": "",
+    })
+    stage0_result = {
+        "profile": stage0_profile,
+        "retrieval_text": stage0_retrieval_text,
+        "fallback_used": stage0_fallback_used,
+        "llm_error": stage0_error,
+    }
+    write_json(run_dir / "stage0_profile.json", stage0_result)
+    log("Stage 0 profile normalization complete")
+
     catalog = catalog_by_id()
     venue_papers: list[dict] = []
     title_candidates: list[dict] = []
@@ -636,7 +652,7 @@ def run_find(
 
         log(f"Fetching title index for {venue.get('name')} years {request.selection.years}")
         progress("venue_title_index", venue_index, len(request.selection.venue_ids), f"Fetching title index: {venue.get('name')}")
-        local_result = _load_local_category_guided_index(venue, request.selection.years, config, llm, title_scan_limit, log)
+        local_result = _load_local_category_guided_index(venue, request.selection.years, effective_config, llm, title_scan_limit, log)
         if local_result:
             title_index, reports = local_result
             adapter = "local_database"
@@ -650,7 +666,7 @@ def run_find(
         log(f"{venue.get('name')}: fetched {len(title_index)} candidate titles via {adapter}")
         selected_titles = _prefilter_titles(
             title_index,
-            config,
+            effective_config,
             llm,
             venue.get("name", venue_id),
             log,
@@ -676,7 +692,7 @@ def run_find(
     if request.selection.venue_ids:
         source_status.append(_source_status("venues", bool(venue_papers), len(venue_papers), "ok" if venue_papers else "No venue papers fetched. See venue_health_report.json."))
 
-    evaluated_candidates = _evaluate_items(venue_papers, config, llm, "articles", log, should_cancel, progress)
+    evaluated_candidates = _evaluate_items(venue_papers, effective_config, llm, "articles", log, should_cancel, progress)
     article_items = _recommended(evaluated_candidates, config)
 
     if request.selection.include_arxiv:
@@ -690,7 +706,7 @@ def run_find(
             config.arxiv_end_date,
         )
         arxiv_raw_items = arxiv_items
-        query_text = "\n".join(part for part in [config.research_interest, config.researcher_profile] if part).strip()
+        query_text = stage0_retrieval_text
         arxiv_prefiltered_items, arxiv_prefilter_report = rank_papers_tfidf(
             arxiv_items,
             query_text,
@@ -702,7 +718,7 @@ def run_find(
         arxiv_status["prefilter"] = arxiv_prefilter_report
         log(f"arXiv: fetched {len(arxiv_raw_items)} raw records; TF-IDF shortlisted {len(arxiv_prefiltered_items)} for LLM scoring")
         source_status.append(arxiv_status)
-        arxiv_evaluated = _evaluate_items(arxiv_prefiltered_items, config, llm, "arxiv", log, should_cancel, progress)
+        arxiv_evaluated = _evaluate_items(arxiv_prefiltered_items, effective_config, llm, "arxiv", log, should_cancel, progress)
         evaluated_candidates.extend(arxiv_evaluated)
         article_items.extend(arxiv_evaluated)
         article_items = _recommended(article_items, config)
@@ -722,7 +738,7 @@ def run_find(
             end_date=config.arxiv_end_date,
         )
         source_status.append(hf_status)
-        hf_items = _evaluate_items(hf_papers + hf_models, config, llm, "huggingface", log, should_cancel, progress)[: config.max_recommended_papers]
+        hf_items = _evaluate_items(hf_papers + hf_models, effective_config, llm, "huggingface", log, should_cancel, progress)[: config.max_recommended_papers]
         progress("huggingface", 1, 1, "HuggingFace complete")
 
     github_items: list[dict] = []
@@ -740,7 +756,7 @@ def run_find(
         source_status.append(github_status)
         github_items = _evaluate_items(
             github_raw,
-            config,
+            effective_config,
             llm,
             "github",
             log,
@@ -760,6 +776,7 @@ def run_find(
         "articles": article_items,
         "huggingface": hf_items,
         "github": github_items,
+        "stage0_profile": stage0_result,
         "source_status": source_status,
         "venue_health_report": venue_health_report,
         "category_scan_report": category_scan_report,
@@ -772,6 +789,7 @@ def run_find(
     write_json(run_dir / "venue_health_report.json", {"run_id": run_id, "results": venue_health_report})
     write_json(run_dir / "category_scan_report.json", {"run_id": run_id, "results": category_scan_report})
     write_json(run_dir / "title_filter_report.json", {"run_id": run_id, "results": title_filter_report})
+    write_json(run_dir / "stage0_profile.json", stage0_result)
     write_json(run_dir / "arxiv_raw.json", {"run_id": run_id, "results": arxiv_raw_items})
     write_json(run_dir / "arxiv_prefiltered.json", {"run_id": run_id, "results": arxiv_prefiltered_items, "report": arxiv_prefilter_report})
 
