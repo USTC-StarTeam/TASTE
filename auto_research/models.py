@@ -50,6 +50,16 @@ class AppConfig(BaseModel):
     arxiv_end_date: str = ""
     arxiv_llm_candidate_limit: int = 200
     arxiv_llm_candidates_per_category: int = 100
+    nature_journals: list[str] = Field(default_factory=lambda: ["nature", "natmachintell", "natcomputsci", "nmeth", "ncomms"])
+    nature_article_types: list[str] = Field(default_factory=lambda: ["article"])
+    nature_start_date: str = ""
+    nature_end_date: str = ""
+    nature_candidate_limit: int = 200
+    science_journals: list[str] = Field(default_factory=lambda: ["science", "sciadv"])
+    science_article_types: list[str] = Field(default_factory=lambda: ["Research Article"])
+    science_start_date: str = ""
+    science_end_date: str = ""
+    science_candidate_limit: int = 200
     github_languages: list[str] = Field(default_factory=lambda: ["all"])
     github_since: Literal["daily", "weekly", "monthly"] = "daily"
     hf_include_papers: bool = True
@@ -63,6 +73,8 @@ class VenueSelection(BaseModel):
     include_arxiv: bool = True
     include_huggingface: bool = True
     include_github: bool = True
+    include_nature: bool = False
+    include_science: bool = False
 
 
 class FindRequest(BaseModel):

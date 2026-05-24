@@ -1,6 +1,6 @@
 from auto_research.auto_find.catalog import load_catalog
 from auto_research.auto_find.local_rank import rank_papers_tfidf
-from auto_research.auto_find.sources import _dblp_page_url, _openreview_venue_ids, _parse_neurips_detail, _parse_neurips_list, fetch_arxiv, fetch_dblp_stream_api, fetch_openreview_venue, fetch_venue_sample, fetch_venue_title_index, normalize_date
+from auto_research.auto_find.sources import _dblp_page_url, _openreview_venue_ids, _parse_neurips_detail, _parse_neurips_list, enrich_science_details, fetch_arxiv, fetch_dblp_stream_api, fetch_nature_portfolio, fetch_openreview_venue, fetch_science_family, fetch_venue_sample, fetch_venue_title_index, normalize_date
 from auto_research.llm import LLMClient, clamp_workers, extract_json, fallback_score, keyword_category
 from auto_research.markdown import paper_markdown
 from auto_research.models import AppConfig, LLMRoleConfig
@@ -160,6 +160,52 @@ def test_openreview_dynamic_icml_years(monkeypatch):
     monkeypatch.setattr("auto_research.auto_find.sources.requests.get", fake_get)
     fetch_openreview_venue({"name": "ICML", "full_name": "International Conference on Machine Learning"}, [2023, 2024, 2025], 2)
     assert captured == ["ICML.cc/2023/Conference", "ICML.cc/2024/Conference", "ICML.cc/2025/Conference"]
+
+
+def test_openreview_fetch_pages_api2_large_requests(monkeypatch):
+    captured = []
+
+    class Response:
+        def __init__(self, notes):
+            self._notes = notes
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"notes": self._notes}
+
+    def note(index):
+        return {
+            "id": f"note_{index}",
+            "forum": f"forum_{index}",
+            "content": {
+                "title": {"value": f"Paged OpenReview Paper {index}"},
+                "authors": {"value": ["A. Author"]},
+                "abstract": {"value": "A paged abstract."},
+                "venueid": {"value": "ICLR.cc/2026/Conference"},
+            },
+        }
+
+    def fake_get(url, params=None, **_kwargs):
+        if url == "https://api2.openreview.net/notes":
+            captured.append(params)
+            offset = int(params.get("offset", 0))
+            limit = int(params.get("limit", 0))
+            assert limit <= 1000
+            if offset == 0:
+                return Response([note(i) for i in range(limit)])
+            if offset == 1000:
+                return Response([note(i) for i in range(offset, offset + 2)])
+            return Response([])
+        return Response([])
+
+    monkeypatch.setattr("auto_research.auto_find.sources.requests.get", fake_get)
+    papers = fetch_openreview_venue({"name": "ICLR", "full_name": "International Conference on Learning Representations"}, [2026], 1002)
+
+    assert len(papers) == 1002
+    assert [item["offset"] for item in captured] == [0, 1000]
+    assert papers[-1]["title"] == "Paged OpenReview Paper 1001"
 
 
 def test_openreview_dynamic_supported_venue_ids():
@@ -398,6 +444,237 @@ def test_arxiv_returns_status_for_success(monkeypatch):
     assert status["ok"] is True
     assert status["count"] == 1
     assert status["queries"] == ["cat:cs.AI"]
+
+
+def test_nature_feed_parses_and_filters_dates(monkeypatch):
+    feed = """<?xml version="1.0" encoding="utf-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <title>AI agents accelerate scientific discovery</title>
+        <link rel="alternate" href="https://www.nature.com/articles/s41586-026-00001-1" />
+        <published>2026-05-01T00:00:00Z</published>
+        <summary>Research article summary.</summary>
+        <author><name>Ada Lovelace</name></author>
+      </entry>
+      <entry>
+        <title>Older Nature article</title>
+        <link rel="alternate" href="https://www.nature.com/articles/s41586-025-00001-1" />
+        <published>2025-01-01T00:00:00Z</published>
+      </entry>
+    </feed>
+    """
+
+    class Response:
+        text = feed
+
+    monkeypatch.setattr("auto_research.auto_find.sources._request", lambda _url, **_kwargs: Response())
+    items, status = fetch_nature_portfolio(["nature"], ["article"], 10, "2026-01-01", "2026-12-31")
+
+    assert status["ok"] is True
+    assert status["count"] == 1
+    assert items[0]["source"] == "nature"
+    assert items[0]["venue"] == "Nature"
+    assert items[0]["metadata"]["journal_tier"] == "0"
+
+
+def test_nature_fetches_paginated_listing_until_date_boundary(monkeypatch):
+    empty_feed = """<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom"></feed>"""
+    page_1 = """
+    <html><body>
+      <article>
+        <h3><a href="/articles/s41586-026-10652-y">A multi-agent system for automating scientific discovery</a></h3>
+        <time>19 May 2026</time>
+        <p>Robin automates hypothesis generation and data analysis.</p>
+      </article>
+    </body></html>
+    """
+    page_2 = """
+    <html><body>
+      <article>
+        <h3><a href="/articles/s41586-026-10658-6">An AI system to help scientists write expert-level empirical software</a></h3>
+        <time>19 May 2026</time>
+        <p>An AI system writes empirical software for scientific tasks.</p>
+      </article>
+    </body></html>
+    """
+    page_3 = """
+    <html><body>
+      <article>
+        <h3><a href="/articles/s41586-025-00001-1">Older Nature article</a></h3>
+        <time>01 Jan 2025</time>
+      </article>
+    </body></html>
+    """
+
+    class Response:
+        def __init__(self, text: str):
+            self.text = text
+
+    seen_urls: list[str] = []
+
+    def fake_request(url, **_kwargs):
+        seen_urls.append(url)
+        if "format=feed" in url:
+            return Response(empty_feed)
+        if "page=2" in url:
+            return Response(page_2)
+        if "page=3" in url:
+            return Response(page_3)
+        if "/articles/s41586-" in url:
+            return Response("<html><head></head><body></body></html>")
+        return Response(page_1)
+
+    monkeypatch.setattr("auto_research.auto_find.sources._request", fake_request)
+    items, status = fetch_nature_portfolio(["nature"], ["article"], 10, "2026-01-01", "2026-12-31")
+
+    titles = [item["title"] for item in items]
+    assert "A multi-agent system for automating scientific discovery" in titles
+    assert "An AI system to help scientists write expert-level empirical software" in titles
+    assert "Older Nature article" not in titles
+    assert status["count"] == 2
+    assert status["pages_scanned"] == 3
+    assert any("page=2" in url for url in seen_urls)
+    assert any("page=3" in url for url in seen_urls)
+
+
+def test_science_feed_parses_and_filters_article_type(monkeypatch):
+    feed = """<?xml version="1.0" encoding="UTF-8"?>
+    <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+      xmlns="http://purl.org/rss/1.0/"
+      xmlns:dc="http://purl.org/dc/elements/1.1/"
+      xmlns:prism="http://prismstandard.org/namespaces/basic/2.0/">
+      <item>
+        <title>AI systems for scientific discovery</title>
+        <link>https://www.science.org/doi/abs/10.1126/science.test</link>
+        <description>Science, Volume 1, Page 1, May 2026.</description>
+        <dc:identifier>doi:10.1126/science.test</dc:identifier>
+        <dc:date>2026-05-21T06:00:10Z</dc:date>
+        <dc:type>Research Article</dc:type>
+        <dc:creator>Ada Lovelace</dc:creator>
+        <prism:publicationName>Science</prism:publicationName>
+        <prism:doi>10.1126/science.test</prism:doi>
+      </item>
+      <item>
+        <title>Science editorial item</title>
+        <dc:date>2026-05-21T06:00:10Z</dc:date>
+        <dc:type>Editorial</dc:type>
+      </item>
+    </rdf:RDF>
+    """
+
+    class Response:
+        text = feed
+
+    monkeypatch.setattr("auto_research.auto_find.sources._request", lambda _url, **_kwargs: Response())
+    items, status = fetch_science_family(["science"], ["Research Article"], 10, "2026-01-01", "2026-12-31")
+
+    assert status["ok"] is True
+    assert status["count"] == 1
+    assert items[0]["source"] == "science"
+    assert items[0]["venue"] == "Science"
+    assert items[0]["metadata"]["doi"] == "10.1126/science.test"
+
+
+def test_science_crossref_fetches_date_range_pages(monkeypatch):
+    page_1 = {
+        "message": {
+            "items": [
+                {
+                    "DOI": "10.1126/science.a1",
+                    "title": ["AI system for scientific discovery"],
+                    "container-title": ["Science"],
+                    "published-print": {"date-parts": [[2026, 5, 21]]},
+                    "URL": "https://doi.org/10.1126/science.a1",
+                    "author": [{"given": "Ada", "family": "Lovelace"}],
+                }
+            ]
+        }
+    }
+    page_2 = {
+        "message": {
+            "items": [
+                {
+                    "DOI": "10.1126/science.a2",
+                    "title": ["Automated research workflow for empirical science"],
+                    "container-title": ["Science"],
+                    "published-print": {"date-parts": [[2026, 5, 14]]},
+                    "URL": "https://doi.org/10.1126/science.a2",
+                }
+            ]
+        }
+    }
+    feed = """<?xml version="1.0" encoding="UTF-8"?>
+    <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+      xmlns="http://purl.org/rss/1.0/"
+      xmlns:dc="http://purl.org/dc/elements/1.1/"
+      xmlns:prism="http://prismstandard.org/namespaces/basic/2.0/">
+    </rdf:RDF>
+    """
+
+    class Response:
+        def __init__(self, text: str = "", data: dict | None = None):
+            self.text = text
+            self._data = data
+
+        def json(self):
+            return self._data
+
+    seen_urls: list[str] = []
+
+    def fake_request(url, **_kwargs):
+        seen_urls.append(url)
+        if "api.crossref.org" in url and "offset=100" in url:
+            return Response(data=page_2)
+        if "api.crossref.org" in url:
+            return Response(data=page_1)
+        return Response(text=feed)
+
+    monkeypatch.setattr("auto_research.auto_find.sources._request", fake_request)
+    items, status = fetch_science_family(["science"], ["Research Article"], 200, "2026-05-01", "2026-05-23")
+
+    titles = [item["title"] for item in items]
+    assert "AI system for scientific discovery" in titles
+    assert "Automated research workflow for empirical science" in titles
+    assert status["count"] == 2
+    assert status["pages_scanned"] == 2
+    assert status["date_coverage"] == {"newest": "2026-05-21", "oldest": "2026-05-14"}
+    assert any("api.crossref.org" in url for url in seen_urls)
+    assert any("action/showFeed" in url for url in seen_urls)
+
+
+def test_science_detail_enrichment_fills_missing_abstract(monkeypatch):
+    page = """
+    <html>
+      <head>
+        <meta name="citation_doi" content="10.1126/science.detail" />
+      </head>
+      <body>
+        <section class="abstract">
+          <h2>Abstract</h2>
+          <p>We present an AI system for automated scientific discovery.</p>
+        </section>
+      </body>
+    </html>
+    """
+
+    class Response:
+        text = page
+
+    monkeypatch.setattr("auto_research.auto_find.sources._request", lambda _url, **_kwargs: Response())
+    papers = [{
+        "id": "s1",
+        "title": "AI system for scientific discovery",
+        "abstract": "",
+        "url": "https://www.science.org/doi/abs/10.1126/science.detail",
+        "pdf_url": "",
+        "metadata": {"doi": "10.1126/science.detail"},
+    }]
+
+    enriched, stats = enrich_science_details(papers)
+
+    assert stats == {"attempted": 1, "abstracts_filled": 1, "pdfs_filled": 1, "dois_filled": 0}
+    assert enriched[0]["abstract"] == "We present an AI system for automated scientific discovery."
+    assert enriched[0]["pdf_url"] == "https://www.science.org/doi/pdf/10.1126/science.detail"
 
 
 def test_arxiv_returns_status_for_failure(monkeypatch):

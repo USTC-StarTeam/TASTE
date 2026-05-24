@@ -126,6 +126,36 @@ def _normalize_conditional_exclusions(value: Any) -> list[dict[str, Any]]:
     return result
 
 
+def _canonical_condition(value: str) -> str:
+    text = _as_string(value).lower()
+    text = re.sub(r"^unless\s+(?:they\s+)?directly support\s+", "exclude only if they do not directly support ", text)
+    text = re.sub(r"^unless\s+(?:it\s+)?directly supports\s+", "exclude only if they do not directly support ", text)
+    text = re.sub(r"^unless\s+", "exclude only if the exception is not met: ", text)
+    text = text.replace("do not directly supports", "do not directly support")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip(" .")
+
+
+def _dedupe_conditional_exclusions(value: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[tuple[str, ...], str]] = set()
+    for item in value:
+        terms = _as_string_list(item.get("terms"))
+        condition = _as_string(item.get("condition"))
+        if not terms or not condition:
+            continue
+        canonical_terms = tuple(sorted(term.lower() for term in terms))
+        canonical_condition = _canonical_condition(condition)
+        key = (canonical_terms, canonical_condition)
+        if key in seen:
+            continue
+        seen.add(key)
+        if condition.lower().startswith("unless "):
+            condition = canonical_condition
+        result.append({"terms": terms, "condition": condition})
+    return result
+
+
 def normalize_profile_shape(data: Any) -> dict[str, Any]:
     if not isinstance(data, dict):
         data = {}
@@ -295,10 +325,15 @@ def _postprocess_profile(profile: dict[str, Any], config: AppConfig) -> dict[str
     for exclusion in _extract_conditional_exclusions(raw_text):
         if exclusion not in conditional_exclusions:
             conditional_exclusions.append(exclusion)
+    filtering_hints["conditional_exclusions"] = _dedupe_conditional_exclusions(conditional_exclusions)
 
-    conditional_terms = {term.lower() for item in conditional_exclusions for term in item.get("terms", [])}
+    conditional_terms = {term.lower() for item in filtering_hints["conditional_exclusions"] for term in item.get("terms", [])}
     filtering_hints["hard_exclusions"] = [
         term for term in filtering_hints["hard_exclusions"]
+        if " unless " not in term.lower() and term.lower() not in conditional_terms
+    ]
+    profile["explicit_retrieval_signals"]["excluded_terms"] = [
+        term for term in profile["explicit_retrieval_signals"]["excluded_terms"]
         if " unless " not in term.lower() and term.lower() not in conditional_terms
     ]
 
@@ -423,7 +458,15 @@ def profile_retrieval_text(profile: dict[str, Any]) -> str:
         parts.extend(_as_string_list(explicit_signals.get(key)))
     parts.extend(item["term"] for item in _normalize_expansions(safe_expansions.get("synonyms_or_abbreviations")))
     hard_exclusions = _as_string_list(filtering_hints.get("hard_exclusions"))
-    excluded_terms = _as_string_list(explicit_signals.get("excluded_terms"))
+    conditional_terms = {
+        term.lower()
+        for item in _normalize_conditional_exclusions(filtering_hints.get("conditional_exclusions"))
+        for term in item.get("terms", [])
+    }
+    excluded_terms = [
+        term for term in _as_string_list(explicit_signals.get("excluded_terms"))
+        if term.lower() not in conditional_terms
+    ]
     if hard_exclusions or excluded_terms:
         exclusions = list(dict.fromkeys([*excluded_terms, *hard_exclusions]))
         parts.append("Excluded topics: " + ", ".join(exclusions))

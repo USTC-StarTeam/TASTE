@@ -120,6 +120,58 @@ def test_conditional_exclusion_is_not_hard_exclusion():
     )
 
 
+class ConditionalLeakLLM:
+    enabled = True
+
+    def json_or_none(self, _prompt):
+        return {
+            "explicit_profile": {
+                "research_interest_summary": "AI agents for academic research automation",
+                "researcher_background": None,
+            },
+            "explicit_retrieval_signals": {
+                "core_concepts": ["AI agents", "academic research automation"],
+                "method_terms": ["LLM agents", "RAG"],
+                "application_terms": ["paper discovery"],
+                "domain_terms": ["academic research automation"],
+                "excluded_terms": ["generic LLM training", "vision", "robotics", "theory papers"],
+            },
+            "safe_expansions": {"synonyms_or_abbreviations": []},
+            "filtering_hints": {
+                "hard_exclusions": ["generic LLM training", "vision", "robotics", "theory papers"],
+                "conditional_exclusions": [
+                    {
+                        "terms": ["generic LLM training", "vision", "robotics", "theory papers"],
+                        "condition": "unless they directly support academic research automation",
+                    }
+                ],
+                "soft_penalties": [],
+                "must_keep_if_present": [],
+                "preference_hints": [],
+            },
+            "uncertainty": {"ambiguous_terms": [], "needs_clarification": False},
+        }
+
+
+def test_conditional_terms_do_not_leak_into_unconditional_retrieval_text():
+    cfg = AppConfig(
+        research_interest="AI agents for academic research automation",
+        researcher_profile="Avoid generic LLM training, vision, robotics, or theory papers unless they directly support academic research automation.",
+    )
+
+    profile, fallback_used, error = normalize_user_profile(cfg, ConditionalLeakLLM())
+    text = profile_retrieval_text(profile)
+
+    assert fallback_used is False
+    assert error == ""
+    assert profile["explicit_retrieval_signals"]["excluded_terms"] == []
+    assert profile["filtering_hints"]["hard_exclusions"] == []
+    assert len(profile["filtering_hints"]["conditional_exclusions"]) == 1
+    assert "Excluded topics:" not in text
+    assert "Conditional exclusion:" in text
+    assert "do not directly support academic research automation" in text
+
+
 def test_preference_hints_are_not_ambiguity():
     cfg = AppConfig(
         provider="mock",

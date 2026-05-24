@@ -15,6 +15,7 @@ from auto_research.paths import PROJECT_ROOT
 
 
 VENUE_ID = "openreview_iclr"
+CACHE_KEY = "iclr"
 VENUE_NAME = "ICLR"
 VENUE_FULL_NAME = "International Conference on Learning Representations"
 DEFAULT_YEARS = [2026, 2025]
@@ -275,7 +276,7 @@ def build_iclr_year(
         "papers": papers,
     }
 
-    target = output_root / VENUE_ID / str(year) / "papers.json"
+    target = output_root / CACHE_KEY / str(year) / "papers.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return target

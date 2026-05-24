@@ -19,6 +19,63 @@ HEADERS = {
 }
 
 
+NATURE_JOURNALS: dict[str, dict[str, str]] = {
+    "nature": {"name": "Nature", "tier": "0", "group": "flagship"},
+    "natmachintell": {"name": "Nature Machine Intelligence", "tier": "1", "group": "ai_computational"},
+    "natcomputsci": {"name": "Nature Computational Science", "tier": "1", "group": "ai_computational"},
+    "nmeth": {"name": "Nature Methods", "tier": "1", "group": "ai_computational"},
+    "nbt": {"name": "Nature Biotechnology", "tier": "1", "group": "ai_computational"},
+    "natbiomedeng": {"name": "Nature Biomedical Engineering", "tier": "1", "group": "ai_computational"},
+    "ncomms": {"name": "Nature Communications", "tier": "1", "group": "ai_computational"},
+    "nmat": {"name": "Nature Materials", "tier": "2", "group": "ai_science_materials"},
+    "nchem": {"name": "Nature Chemistry", "tier": "2", "group": "ai_science_materials"},
+    "natchemeng": {"name": "Nature Chemical Engineering", "tier": "2", "group": "ai_science_materials"},
+    "natcatal": {"name": "Nature Catalysis", "tier": "2", "group": "ai_science_materials"},
+    "natsynth": {"name": "Nature Synthesis", "tier": "2", "group": "ai_science_materials"},
+    "nphys": {"name": "Nature Physics", "tier": "2", "group": "ai_science_materials"},
+    "natelectron": {"name": "Nature Electronics", "tier": "2", "group": "ai_science_materials"},
+    "nnano": {"name": "Nature Nanotechnology", "tier": "2", "group": "ai_science_materials"},
+    "nphoton": {"name": "Nature Photonics", "tier": "2", "group": "ai_science_materials"},
+    "nenergy": {"name": "Nature Energy", "tier": "2", "group": "ai_science_materials"},
+    "nm": {"name": "Nature Medicine", "tier": "3", "group": "broad_interdisciplinary"},
+    "ng": {"name": "Nature Genetics", "tier": "3", "group": "broad_interdisciplinary"},
+    "neuro": {"name": "Nature Neuroscience", "tier": "3", "group": "broad_interdisciplinary"},
+    "nathumbehav": {"name": "Nature Human Behaviour", "tier": "3", "group": "broad_interdisciplinary"},
+    "nclimate": {"name": "Nature Climate Change", "tier": "3", "group": "broad_interdisciplinary"},
+    "sustainability": {"name": "Nature Sustainability", "tier": "3", "group": "broad_interdisciplinary"},
+    "ngeo": {"name": "Nature Geoscience", "tier": "3", "group": "broad_interdisciplinary"},
+    "natecolevol": {"name": "Nature Ecology & Evolution", "tier": "3", "group": "broad_interdisciplinary"},
+    "s41545": {"name": "Nature Water", "tier": "3", "group": "broad_interdisciplinary"},
+    "s43016": {"name": "Nature Food", "tier": "3", "group": "broad_interdisciplinary"},
+}
+
+
+SCIENCE_JOURNALS: dict[str, dict[str, str]] = {
+    "science": {"name": "Science", "tier": "0", "group": "science_core", "issn": "0036-8075"},
+    "sciadv": {"name": "Science Advances", "tier": "1", "group": "science_core", "issn": "2375-2548"},
+    "scirobotics": {"name": "Science Robotics", "tier": "1", "group": "ai_robotics_engineering", "issn": "2470-9476"},
+    "stm": {"name": "Science Translational Medicine", "tier": "2", "group": "bio_medicine", "issn": "1946-6234"},
+    "sciimmunol": {"name": "Science Immunology", "tier": "2", "group": "bio_medicine", "issn": "2470-9468"},
+    "stke": {"name": "Science Signaling", "tier": "2", "group": "bio_medicine", "issn": "1937-9145"},
+    "adi": {"name": "Advanced Devices & Instrumentation", "tier": "SPJ", "group": "science_partner_journals"},
+    "bmr": {"name": "Biomaterials Research", "tier": "SPJ", "group": "science_partner_journals"},
+    "bmef": {"name": "BME Frontiers", "tier": "SPJ", "group": "science_partner_journals"},
+    "csbj": {"name": "Computational and Structural Biotechnology Journal", "tier": "SPJ", "group": "science_partner_journals"},
+    "csbr": {"name": "Computational and Structural Biotechnology Reports", "tier": "SPJ", "group": "science_partner_journals"},
+    "ehs": {"name": "Ecosystem Health and Sustainability", "tier": "SPJ", "group": "science_partner_journals"},
+    "energymatadv": {"name": "Energy Material Advances", "tier": "SPJ", "group": "science_partner_journals"},
+    "hds": {"name": "Health Data Science", "tier": "SPJ", "group": "science_partner_journals"},
+    "icomputing": {"name": "Intelligent Computing", "tier": "SPJ", "group": "science_partner_journals"},
+    "jemdr": {"name": "Journal of EMDR Practice and Research", "tier": "SPJ", "group": "science_partner_journals"},
+    "remotesensing": {"name": "Journal of Remote Sensing", "tier": "SPJ", "group": "science_partner_journals"},
+    "olar": {"name": "Ocean-Land-Atmosphere Research", "tier": "SPJ", "group": "science_partner_journals"},
+    "research": {"name": "Research", "tier": "SPJ", "group": "science_partner_journals"},
+    "space": {"name": "Space: Science & Technology", "tier": "SPJ", "group": "science_partner_journals"},
+    "ultrafastscience": {"name": "Ultrafast Science", "tier": "SPJ", "group": "science_partner_journals"},
+    "plantphenomics": {"name": "Plant Phenomics", "tier": "SPJ", "group": "science_partner_journals", "status": "migrated"},
+}
+
+
 def stable_id(prefix: str, value: str) -> str:
     digest = hashlib.sha1(value.encode("utf-8", errors="ignore")).hexdigest()[:12]
     return f"{prefix}_{digest}"
@@ -26,6 +83,11 @@ def stable_id(prefix: str, value: str) -> str:
 
 def _clean_text(value: str) -> str:
     return " ".join((value or "").split())
+
+
+def _title_key(value: str) -> str:
+    text = html.unescape(_clean_text(value)).lower()
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
 
 
 def _looks_like_paper_title(value: str) -> bool:
@@ -312,11 +374,64 @@ def _content_list(content: dict, key: str) -> list[str]:
     return []
 
 
+def _content_first_text(content: dict, keys: list[str]) -> str:
+    for key in keys:
+        value = _content_value(content, key)
+        if value:
+            return value
+    return ""
+
+
+def _content_keywords(content: dict) -> list[str]:
+    values: list[str] = []
+    for key in ["keywords", "Keywords", "TLDR", "tldr"]:
+        raw_list = _content_list(content, key)
+        if raw_list:
+            values.extend(raw_list)
+            continue
+        raw_text = _content_value(content, key)
+        if raw_text:
+            values.extend(item.strip() for item in re.split(r"[,;]", raw_text) if item.strip())
+    return list(dict.fromkeys(values))
+
+
 def _openreview_venue_ids(venue: dict, year: int) -> list[str]:
     venue_ids = []
     for pattern in _openreview_patterns_for_venue(venue):
         venue_ids.append(pattern.format(year=year) if "{year}" in pattern else pattern)
     return list(dict.fromkeys(venue_ids))
+
+
+def _openreview_api2_notes(venue_id: str, max_items: int) -> list[dict]:
+    notes: list[dict] = []
+    max_total = max(1, int(max_items or 1000))
+    page_limit = max(1, min(1000, max_total))
+    offset = 0
+    while len(notes) < max_total:
+        limit = min(page_limit, max_total - len(notes))
+        try:
+            response = requests.get(
+                "https://api2.openreview.net/notes",
+                params={
+                    "content.venueid": venue_id,
+                    "details": "replyCount,invitation,original",
+                    "limit": limit,
+                    "offset": offset,
+                },
+                headers=HEADERS,
+                timeout=12,
+            )
+            response.raise_for_status()
+            batch = response.json().get("notes", [])
+        except Exception:
+            return notes
+        if not isinstance(batch, list) or not batch:
+            break
+        notes.extend(batch)
+        if len(batch) < limit:
+            break
+        offset += len(batch)
+    return notes[:max_total]
 
 
 def fetch_openreview_venue(venue: dict, years: list[int], max_items: int) -> list[dict]:
@@ -328,18 +443,7 @@ def fetch_openreview_venue(venue: dict, years: list[int], max_items: int) -> lis
             if venue_id in queried_venue_ids:
                 continue
             queried_venue_ids.add(venue_id)
-            notes = []
-            try:
-                response = requests.get(
-                    "https://api2.openreview.net/notes",
-                    params={"content.venueid": venue_id, "details": "replyCount,invitation,original", "limit": max_items},
-                    headers=HEADERS,
-                    timeout=12,
-                )
-                response.raise_for_status()
-                notes = response.json().get("notes", [])
-            except Exception:
-                notes = []
+            notes = _openreview_api2_notes(venue_id, max_items)
             if not notes:
                 for invitation in [f"{venue_id}/-/Blind_Submission", f"{venue_id}/-/Submission"]:
                     try:
@@ -363,6 +467,10 @@ def fetch_openreview_venue(venue: dict, years: list[int], max_items: int) -> lis
                 note_id = note.get("id", "")
                 forum = note.get("forum", note_id)
                 url = f"https://openreview.net/forum?id={forum or note_id}"
+                primary_area = _content_first_text(content, ["primary_area", "Primary Area", "area", "Area", "subject_area", "Subject Area"])
+                track = _content_first_text(content, ["track", "Track", "venue", "Venue"])
+                category = primary_area or track or _content_first_text(content, ["category", "Category"])
+                keywords = _content_keywords(content)
                 papers.append({
                     "id": stable_id("paper", url),
                     "source": "openreview",
@@ -373,9 +481,18 @@ def fetch_openreview_venue(venue: dict, years: list[int], max_items: int) -> lis
                     "pdf_url": f"https://openreview.net/pdf?id={note_id}" if note_id else "",
                     "venue": venue.get("name", ""),
                     "year": year,
-                    "category": "",
-                    "classification_source": "llm_inferred",
-                    "metadata": {"venue_id": venue.get("id"), "openreview_venueid": venue_id},
+                    "category": category,
+                    "primary_area": primary_area,
+                    "track": track,
+                    "keywords": keywords,
+                    "classification_source": "official" if category or keywords else "llm_inferred",
+                    "metadata": {
+                        "venue_id": venue.get("id"),
+                        "openreview_venueid": venue_id,
+                        "note_id": str(note_id or ""),
+                        "forum": str(forum or ""),
+                        "content_keys": sorted(str(key) for key in content.keys()),
+                    },
                 })
                 if len(papers) >= max_items:
                     return papers
@@ -517,6 +634,87 @@ def fetch_pmlr_index(venue: dict, years: list[int], max_items: int) -> list[dict
                 return papers
         time.sleep(0.2)
     return papers
+
+
+def _pmlr_detail_url(paper: dict) -> str:
+    if paper.get("url"):
+        return str(paper.get("url") or "")
+    metadata = paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}
+    if metadata.get("pmlr_url"):
+        return str(metadata.get("pmlr_url") or "")
+    source_records = metadata.get("source_records") if isinstance(metadata.get("source_records"), dict) else {}
+    pmlr_record = source_records.get("pmlr") if isinstance(source_records.get("pmlr"), dict) else {}
+    return str(pmlr_record.get("url") or "")
+
+
+def _extract_pmlr_abstract(soup: BeautifulSoup) -> str:
+    abstract_node = soup.find(id=re.compile("abstract", re.I))
+    if abstract_node:
+        text = _clean_text(abstract_node.get_text(" ", strip=True))
+        if text.lower().startswith("abstract "):
+            text = text[len("abstract "):].strip()
+        if text:
+            return text
+    heading = soup.find(lambda tag: tag.name in {"h2", "h3", "h4", "h5"} and _clean_text(tag.get_text(" ", strip=True)).lower() == "abstract")
+    if heading:
+        parts: list[str] = []
+        for sibling in heading.next_siblings:
+            if getattr(sibling, "name", None) in {"h1", "h2", "h3", "h4", "h5", "hr"}:
+                break
+            text = _clean_text(sibling.get_text(" ", strip=True) if hasattr(sibling, "get_text") else str(sibling))
+            if text:
+                parts.append(text)
+        text = _clean_text(" ".join(parts))
+        if text:
+            return text
+    bibtex = soup.find(string=re.compile(r"abstract\s*=", re.I))
+    if bibtex:
+        match = re.search(r"abstract\s*=\s*\{(.+?)\}\s*\}", str(bibtex), flags=re.I | re.S)
+        if match:
+            return _clean_text(match.group(1))
+    return ""
+
+
+def enrich_pmlr_details(papers: list[dict], limit: int | None = None) -> tuple[list[dict], dict]:
+    attempted = 0
+    abstracts_filled = 0
+    urls_filled = 0
+    pdfs_filled = 0
+    candidates = papers if limit is None else papers[:limit]
+    for paper in candidates:
+        url = _pmlr_detail_url(paper)
+        if not url or "proceedings.mlr.press" not in url:
+            continue
+        attempted += 1
+        if not paper.get("url"):
+            paper["url"] = url
+            urls_filled += 1
+        try:
+            soup = BeautifulSoup(_request(url).text, "html.parser")
+        except Exception:
+            continue
+        if not paper.get("abstract"):
+            abstract = _extract_pmlr_abstract(soup)
+            if abstract:
+                paper["abstract"] = abstract
+                paper.setdefault("metadata", {})["abstract_source"] = "pmlr"
+                abstracts_filled += 1
+        if not paper.get("pdf_url"):
+            pdf_link = soup.find("a", string=re.compile("download pdf", re.I))
+            if not pdf_link:
+                pdf_link = soup.find("a", href=re.compile(r"\.pdf(?:$|\?)", re.I))
+            if pdf_link and pdf_link.get("href"):
+                paper["pdf_url"] = requests.compat.urljoin(url, pdf_link["href"])
+                pdfs_filled += 1
+        if paper.get("abstract") or paper.get("pdf_url"):
+            paper.setdefault("metadata", {})["detail_source"] = "pmlr"
+        time.sleep(0.1)
+    return papers, {
+        "attempted": attempted,
+        "abstracts_filled": abstracts_filled,
+        "urls_filled": urls_filled,
+        "pdfs_filled": pdfs_filled,
+    }
 
 
 def _openreview_pdf_url(url: str) -> str:
@@ -707,16 +905,23 @@ def _parse_dblp_year_links(address: str, years: list[int], max_years: int = 4) -
     return links
 
 
-def fetch_dblp_venue(venue: dict, years: list[int], max_items: int) -> list[dict]:
-    papers = fetch_dblp_stream_api(venue, years, max_items)
-    if papers:
-        return papers
+def fetch_dblp_venue(venue: dict, years: list[int], max_items: int | None) -> list[dict]:
+    if max_items is not None:
+        papers = fetch_dblp_stream_api(venue, years, max_items)
+        if papers:
+            return papers
 
-    links = _parse_dblp_year_links(venue.get("address", ""), years)
-    papers = []
+    def reached_limit() -> bool:
+        return max_items is not None and len(papers) >= max_items
+
+    papers: list[dict] = []
+    links = _parse_dblp_year_links(venue.get("address", ""), years, max_years=max(4, len(years)))
+    if not links:
+        return papers
     for year, url in links:
         url = _dblp_page_url(url)
         xml_url = re.sub(r"\.html?$", ".xml", url)
+        count_before_xml = len(papers)
         try:
             xml_text = _request(xml_url).text
             for record in re.findall(r"<(?:article|inproceedings)[^>]*>.*?</(?:article|inproceedings)>", xml_text, flags=re.S):
@@ -743,9 +948,9 @@ def fetch_dblp_venue(venue: dict, years: list[int], max_items: int) -> list[dict
                     "classification_source": "llm_inferred",
                     "metadata": {"venue_id": venue.get("id"), "dblp_url": url, "dblp_xml_url": xml_url},
                 })
-                if len(papers) >= max_items:
+                if reached_limit():
                     return papers
-            if papers:
+            if len(papers) > count_before_xml:
                 continue
         except Exception:
             pass
@@ -778,7 +983,7 @@ def fetch_dblp_venue(venue: dict, years: list[int], max_items: int) -> list[dict
                 "classification_source": "llm_inferred",
                 "metadata": {"venue_id": venue.get("id"), "dblp_url": url},
             })
-            if len(papers) >= max_items:
+            if reached_limit():
                 return papers
         time.sleep(0.5)
     return papers
@@ -884,6 +1089,148 @@ def fetch_venue_title_index(venue: dict, years: list[int], max_items: int) -> tu
 
     if is_openreview_supported_venue(venue):
         papers = fetch_openreview_venue(venue, years, max_items)
+        if papers:
+            return papers, "openreview"
+
+    return [], "none"
+
+
+def _merge_enrichment(base: dict, enrichment: dict, adapter: str) -> dict:
+    merged = dict(base)
+    metadata = dict(base.get("metadata") or {})
+    enrichment_metadata = dict(enrichment.get("metadata") or {})
+    sources = metadata.setdefault("enrichment_sources", [])
+    if adapter not in sources:
+        sources.append(adapter)
+    source_records = metadata.setdefault("source_records", {})
+    source_records[adapter] = {
+        "source": enrichment.get("source", adapter),
+        "url": enrichment.get("url", ""),
+        "pdf_url": enrichment.get("pdf_url", ""),
+        "metadata": enrichment_metadata,
+    }
+    for key in ["abstract", "url", "pdf_url"]:
+        if not merged.get(key) and enrichment.get(key):
+            merged[key] = enrichment[key]
+    if enrichment.get("url"):
+        metadata.setdefault(f"{adapter}_url", enrichment.get("url"))
+    if enrichment.get("category") and not merged.get("category"):
+        merged["category"] = enrichment["category"]
+    for key in ["primary_area", "track"]:
+        if enrichment.get(key) and not merged.get(key):
+            merged[key] = enrichment[key]
+    if isinstance(enrichment.get("keywords"), list):
+        keywords = merged.get("keywords") if isinstance(merged.get("keywords"), list) else []
+        merged["keywords"] = list(dict.fromkeys([*keywords, *[str(item) for item in enrichment["keywords"] if str(item)]]))
+    if enrichment.get("classification_source") == "official":
+        merged["classification_source"] = "official"
+    merged["metadata"] = metadata
+    return merged
+
+
+def _merge_enrichments(base_papers: list[dict], enrichments: list[tuple[str, list[dict]]]) -> tuple[list[dict], list[str]]:
+    merged = [dict(paper) for paper in base_papers]
+    by_title_year = {
+        (_title_key(paper.get("title", "")), int(paper.get("year") or 0)): index
+        for index, paper in enumerate(merged)
+        if _title_key(paper.get("title", ""))
+    }
+    used_adapters: list[str] = []
+    for adapter, records in enrichments:
+        matched = 0
+        for record in records:
+            key = (_title_key(record.get("title", "")), int(record.get("year") or 0))
+            index = by_title_year.get(key)
+            if index is None:
+                continue
+            merged[index] = _merge_enrichment(merged[index], record, adapter)
+            matched += 1
+        if matched:
+            used_adapters.append(f"{adapter}:{matched}")
+    return merged, used_adapters
+
+
+def _fetch_enrichment_sources(venue: dict, years: list[int]) -> list[tuple[str, list[dict]]]:
+    enrichments: list[tuple[str, list[dict]]] = []
+    if is_openreview_supported_venue(venue):
+        papers = fetch_openreview_venue(venue, years, 100000)
+        if papers:
+            enrichments.append(("openreview", papers))
+    if is_neurips_venue(venue):
+        papers: list[dict] = []
+        for year in years:
+            papers.extend(fetch_neurips_title_index(year, 100000))
+        if papers:
+            enrichments.append(("neurips_virtual", papers))
+    if is_acl_family_venue(venue):
+        papers = fetch_acl_anthology(venue, years, 100000)
+        if papers:
+            enrichments.append(("acl_anthology", papers))
+    if is_cvf_venue(venue):
+        papers = fetch_cvf_openaccess(venue, years, 100000)
+        if papers:
+            enrichments.append(("cvf_openaccess", papers))
+        if (venue.get("name") or "").upper() == "ECCV":
+            papers = fetch_eccv_virtual(years, 100000)
+            if papers:
+                enrichments.append(("eccv_virtual", papers))
+    if is_pmlr_venue(venue):
+        papers = fetch_pmlr_index(venue, years, 100000)
+        if papers:
+            enrichments.append(("pmlr", papers))
+    return enrichments
+
+
+def fetch_venue_title_index_all(venue: dict, years: list[int]) -> tuple[list[dict], str]:
+    if venue.get("address"):
+        base_papers = fetch_dblp_venue(venue, years, None)
+        if base_papers:
+            merged, used_adapters = _merge_enrichments(base_papers, _fetch_enrichment_sources(venue, years))
+            adapter = "dblp"
+            if used_adapters:
+                adapter = f"dblp+{'+'.join(used_adapters)}"
+            return merged, adapter
+
+    if is_iclr_venue(venue):
+        papers = fetch_openreview_venue(venue, years, 100000)
+        if papers:
+            return papers, "openreview"
+        if 2026 in years:
+            papers = fetch_openreview_iclr_2026(100000)
+            if papers:
+                return papers, "openreview_reference"
+
+    if is_neurips_venue(venue):
+        papers = fetch_openreview_venue(venue, years, 100000)
+        if papers:
+            return papers, "openreview"
+        papers = []
+        for year in years:
+            papers.extend(fetch_neurips_title_index(year, 100000))
+        if papers:
+            return papers, "neurips_virtual"
+
+    if is_acl_family_venue(venue):
+        papers = fetch_acl_anthology(venue, years, 100000)
+        if papers:
+            return papers, "acl_anthology"
+
+    if is_cvf_venue(venue):
+        papers = fetch_cvf_openaccess(venue, years, 100000)
+        if papers:
+            return papers, "cvf_openaccess"
+        if (venue.get("name") or "").upper() == "ECCV":
+            papers = fetch_eccv_virtual(years, 100000)
+            if papers:
+                return papers, "eccv_virtual"
+
+    if is_pmlr_venue(venue):
+        papers = fetch_pmlr_index(venue, years, 100000)
+        if papers:
+            return papers, "pmlr"
+
+    if is_openreview_supported_venue(venue):
+        papers = fetch_openreview_venue(venue, years, 100000)
         if papers:
             return papers, "openreview"
 
@@ -1009,6 +1356,763 @@ def enrich_with_semantic_scholar(papers: list[dict], limit: int = 20, api_key: s
         except Exception:
             continue
     return papers
+
+
+def _nature_journal_meta(slug: str) -> dict[str, str]:
+    slug = (slug or "").strip().strip("/")
+    return NATURE_JOURNALS.get(slug, {"name": slug or "Nature Portfolio", "tier": "", "group": "custom"})
+
+
+def _nature_feed_url(slug: str, article_type: str) -> str:
+    params = {"type": article_type or "article", "format": "feed"}
+    return f"https://www.nature.com/{slug}/articles?" + urlencode(params)
+
+
+def _nature_listing_url(slug: str, article_type: str, page: int) -> str:
+    params: dict[str, str | int] = {"type": article_type or "article"}
+    if page > 1:
+        params["page"] = page
+    return f"https://www.nature.com/{slug}/articles?" + urlencode(params)
+
+
+def _looks_like_xml(text: str) -> bool:
+    stripped = (text or "").lstrip()[:120].lower()
+    return stripped.startswith("<?xml") or stripped.startswith("<feed") or stripped.startswith("<rss")
+
+
+def _xml_text(node: ET.Element | None, names: list[str]) -> str:
+    if node is None:
+        return ""
+    for name in names:
+        found = node.find(name)
+        if found is not None and found.text:
+            return _clean_text(found.text)
+    return ""
+
+
+def _xml_attr(node: ET.Element | None, names: list[str], attr: str, value: str = "") -> str:
+    if node is None:
+        return ""
+    for name in names:
+        for found in node.findall(name):
+            if value and found.attrib.get(attr) != value:
+                continue
+            href = found.attrib.get("href") or found.attrib.get("url") or ""
+            if href:
+                return href
+    return ""
+
+
+def _parse_nature_feed(xml_text: str, slug: str, article_type: str, feed_url: str) -> list[dict]:
+    journal = _nature_journal_meta(slug)
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return []
+    entries = list(root.findall(".//{http://www.w3.org/2005/Atom}entry"))
+    if not entries:
+        entries = list(root.findall(".//item"))
+    papers: list[dict] = []
+    for entry in entries:
+        title = _xml_text(entry, ["{http://www.w3.org/2005/Atom}title", "title"])
+        if not _looks_like_paper_title(title):
+            continue
+        url = _xml_attr(entry, ["{http://www.w3.org/2005/Atom}link", "link"], "rel", "alternate")
+        if not url:
+            url = _xml_text(entry, ["{http://www.w3.org/2005/Atom}id", "guid", "link"])
+        url = requests.compat.urljoin(feed_url, url)
+        published = _xml_text(entry, ["{http://www.w3.org/2005/Atom}published", "{http://www.w3.org/2005/Atom}updated", "pubDate"])
+        summary = _xml_text(entry, ["{http://www.w3.org/2005/Atom}summary", "{http://www.w3.org/2005/Atom}content", "description"])
+        authors = []
+        for author in entry.findall("{http://www.w3.org/2005/Atom}author"):
+            name = _xml_text(author, ["{http://www.w3.org/2005/Atom}name", "name"])
+            if name:
+                authors.append(name)
+        year = int(published[:4]) if published[:4].isdigit() else date.today().year
+        papers.append({
+            "id": stable_id("nature", url or title),
+            "source": "nature",
+            "title": title,
+            "authors": ", ".join(authors),
+            "abstract": summary,
+            "url": url,
+            "pdf_url": "",
+            "venue": journal["name"],
+            "year": year,
+            "category": article_type,
+            "classification_source": "official",
+            "metadata": {
+                "journal_slug": slug,
+                "journal_tier": journal.get("tier", ""),
+                "journal_group": journal.get("group", ""),
+                "article_type": article_type,
+                "published": normalize_date(published[:10]),
+                "feed_url": feed_url,
+            },
+        })
+    return papers
+
+
+def _parse_nature_listing_html(page_text: str, slug: str, article_type: str, page_url: str) -> list[dict]:
+    journal = _nature_journal_meta(slug)
+    soup = BeautifulSoup(page_text, "html.parser")
+    papers: list[dict] = []
+    seen: set[str] = set()
+    for link in soup.select("article h3 a[href*='/articles/'], article a[href*='/articles/']"):
+        title = _clean_text(link.get_text(" ", strip=True))
+        if not _looks_like_paper_title(title):
+            continue
+        url = requests.compat.urljoin(page_url, link.get("href", ""))
+        if url in seen:
+            continue
+        seen.add(url)
+        container = link.find_parent("article") or link.find_parent("li") or link.parent
+        text = _clean_text(container.get_text(" ", strip=True) if container else "")
+        date_match = re.search(r"\b(\d{1,2}\s+[A-Z][a-z]{2}\s+20\d{2})\b", text)
+        published = ""
+        if date_match:
+            try:
+                published = datetime.strptime(date_match.group(1), "%d %b %Y").date().isoformat()
+            except ValueError:
+                published = ""
+        summary = ""
+        if container:
+            for paragraph in container.find_all("p"):
+                summary = _clean_text(paragraph.get_text(" ", strip=True))
+                if summary and summary != title:
+                    break
+        papers.append({
+            "id": stable_id("nature", url or title),
+            "source": "nature",
+            "title": title,
+            "authors": "",
+            "abstract": summary,
+            "url": url,
+            "pdf_url": "",
+            "venue": journal["name"],
+            "year": int(published[:4]) if published[:4].isdigit() else date.today().year,
+            "category": article_type,
+            "classification_source": "official",
+            "metadata": {
+                "journal_slug": slug,
+                "journal_tier": journal.get("tier", ""),
+                "journal_group": journal.get("group", ""),
+                "article_type": article_type,
+                "published": published,
+                "listing_url": page_url,
+            },
+        })
+    return papers
+
+
+def _extract_nature_doi(soup: BeautifulSoup) -> str:
+    for selector in ["meta[name='citation_doi']", "meta[name='dc.identifier']", "meta[property='og:url']"]:
+        node = soup.select_one(selector)
+        if not node or not node.get("content"):
+            continue
+        content = str(node["content"])
+        if selector == "meta[property='og:url']" and "/articles/" in content:
+            return content.rstrip("/").rsplit("/", 1)[-1]
+        return content.replace("doi:", "").strip()
+    return ""
+
+
+def enrich_nature_details(papers: list[dict], limit: int | None = None) -> tuple[list[dict], dict]:
+    attempted = 0
+    abstracts_filled = 0
+    pdfs_filled = 0
+    dois_filled = 0
+    candidates = papers if limit is None else papers[:limit]
+    for paper in candidates:
+        url = str(paper.get("url") or "")
+        if not url:
+            continue
+        attempted += 1
+        try:
+            soup = BeautifulSoup(_request(url).text, "html.parser")
+        except Exception:
+            continue
+        if not paper.get("abstract"):
+            abstract_node = soup.select_one("[data-test='abstract'], section[aria-labelledby='Abs1'], #Abs1-content")
+            if abstract_node:
+                abstract = _clean_text(abstract_node.get_text(" ", strip=True))
+                if abstract:
+                    paper["abstract"] = abstract
+                    abstracts_filled += 1
+        if not paper.get("pdf_url"):
+            pdf_link = soup.select_one("a[href$='.pdf'], a[href*='.pdf?'], a[href*='/pdf/']")
+            if pdf_link and pdf_link.get("href"):
+                paper["pdf_url"] = requests.compat.urljoin(url, pdf_link["href"])
+                pdfs_filled += 1
+        doi = _extract_nature_doi(soup)
+        if doi:
+            paper.setdefault("metadata", {})["doi"] = doi
+            dois_filled += 1
+        time.sleep(0.1)
+    return papers, {
+        "attempted": attempted,
+        "abstracts_filled": abstracts_filled,
+        "pdfs_filled": pdfs_filled,
+        "dois_filled": dois_filled,
+    }
+
+
+def fetch_nature_portfolio(
+    journals: list[str],
+    article_types: list[str],
+    max_items: int | None = None,
+    start_date: str = "",
+    end_date: str = "",
+    enrich_details: bool = True,
+) -> tuple[list[dict], dict]:
+    start_date = normalize_date(start_date)
+    end_date = normalize_date(end_date)
+    journals = [journal.strip().strip("/") for journal in journals if journal.strip()] or ["nature"]
+    article_types = [item.strip() for item in article_types if item.strip()] or ["article"]
+    status = {
+        "source": "nature",
+        "ok": False,
+        "limited": False,
+        "count": 0,
+        "message": "",
+        "journals": journals,
+        "article_types": article_types,
+        "start_date": start_date,
+        "end_date": end_date,
+        "errors": [],
+        "feeds": [],
+        "pages": [],
+        "stopped_reason": "",
+    }
+    by_key: dict[str, dict] = {}
+    item_limit = max(1, int(max_items)) if max_items is not None else None
+    max_pages = max(1, min(100, (item_limit + 19) // 20 + 5)) if item_limit is not None else None
+
+    def reached_limit() -> bool:
+        return item_limit is not None and len(by_key) >= item_limit
+
+    def add_papers(papers: list[dict]) -> int:
+        added = 0
+        for paper in papers:
+            published = paper.get("metadata", {}).get("published", "")
+            if not _in_date_range(published, start_date, end_date):
+                continue
+            key = str(paper.get("url") or paper.get("title") or "").lower()
+            if key and key not in by_key:
+                by_key[key] = paper
+                added += 1
+            if reached_limit():
+                break
+        return added
+
+    def older_than_start(papers: list[dict]) -> bool:
+        if not start_date:
+            return False
+        dates = [
+            normalize_date(str(paper.get("metadata", {}).get("published", ""))[:10])
+            for paper in papers
+        ]
+        dates = [value for value in dates if value]
+        return bool(dates) and max(dates) < start_date
+
+    for slug in journals:
+        for article_type in article_types:
+            feed_url = _nature_feed_url(slug, article_type)
+            feed_report = {"journal": slug, "article_type": article_type, "url": feed_url, "count": 0, "ok": False, "message": ""}
+            try:
+                page_text = _request(feed_url).text
+                papers = _parse_nature_feed(page_text, slug, article_type, feed_url)
+                if not papers and not _looks_like_xml(page_text):
+                    papers = _parse_nature_listing_html(page_text, slug, article_type, feed_url)
+                feed_report.update({"count": len(papers), "ok": bool(papers), "message": "ok" if papers else "empty feed"})
+            except Exception as exc:
+                papers = []
+                feed_report["message"] = str(exc)
+                status["errors"].append(f"{slug}/{article_type}: {exc}")
+            status["feeds"].append(feed_report)
+            add_papers(papers)
+            if reached_limit():
+                status["stopped_reason"] = "item limit"
+                break
+
+            page = 1
+            while max_pages is None or page <= max_pages:
+                page_url = _nature_listing_url(slug, article_type, page)
+                page_report = {
+                    "journal": slug,
+                    "article_type": article_type,
+                    "page": page,
+                    "url": page_url,
+                    "count": 0,
+                    "added": 0,
+                    "ok": False,
+                    "message": "",
+                }
+                try:
+                    page_text = _request(page_url).text
+                    page_papers = _parse_nature_listing_html(page_text, slug, article_type, page_url)
+                    added = add_papers(page_papers)
+                    page_report.update({
+                        "count": len(page_papers),
+                        "added": added,
+                        "ok": bool(page_papers),
+                        "message": "ok" if page_papers else "empty page",
+                    })
+                except Exception as exc:
+                    page_papers = []
+                    page_report["message"] = str(exc)
+                    status["errors"].append(f"{slug}/{article_type}/page{page}: {exc}")
+                status["pages"].append(page_report)
+                if reached_limit():
+                    status["stopped_reason"] = "item limit"
+                    break
+                if not page_papers:
+                    status["stopped_reason"] = "empty page"
+                    break
+                if older_than_start(page_papers):
+                    status["stopped_reason"] = "date boundary"
+                    break
+                if page > 1 and page_report["added"] == 0:
+                    status["stopped_reason"] = "no new items"
+                    break
+                page += 1
+                time.sleep(0.1)
+            else:
+                status["stopped_reason"] = "safety page limit"
+        if reached_limit():
+            break
+    papers = list(by_key.values())
+    if item_limit is not None:
+        papers = papers[:item_limit]
+    if papers and enrich_details:
+        papers, detail_stats = enrich_nature_details(papers, limit=len(papers) if item_limit is None else min(len(papers), item_limit))
+        status["detail_enrichment"] = detail_stats
+    elif papers:
+        status["detail_enrichment"] = {
+            "attempted": 0,
+            "abstracts_filled": 0,
+            "pdfs_filled": 0,
+            "dois_filled": 0,
+            "skipped": True,
+        }
+    status["count"] = len(papers)
+    status["ok"] = bool(papers)
+    status["limited"] = reached_limit()
+    page_reports = status.get("pages") if isinstance(status.get("pages"), list) else []
+    status["pages_scanned"] = len(page_reports)
+    dates = [
+        normalize_date(str(paper.get("metadata", {}).get("published", ""))[:10])
+        for paper in papers
+    ]
+    dates = [value for value in dates if value]
+    if dates:
+        status["date_coverage"] = {
+            "newest": max(dates),
+            "oldest": min(dates),
+        }
+    if papers:
+        message = "ok"
+        if status["pages_scanned"]:
+            message += f"; scanned {status['pages_scanned']} listing pages"
+        if dates:
+            message += f"; date coverage {min(dates)} to {max(dates)}"
+        if status.get("stopped_reason"):
+            message += f"; stopped: {status['stopped_reason']}"
+        status["message"] = message
+    elif status["errors"]:
+        status["message"] = "Nature feeds unavailable or failed: " + " | ".join(status["errors"][:3])
+    else:
+        status["message"] = "No Nature items found for selected journals/types/date range."
+    return papers, status
+
+
+def _science_journal_meta(slug: str) -> dict[str, str]:
+    slug = (slug or "").strip()
+    return SCIENCE_JOURNALS.get(slug, {"name": slug or "Science Family", "tier": "", "group": "custom"})
+
+
+def _science_feed_url(slug: str) -> str:
+    return "https://www.science.org/action/showFeed?" + urlencode({"type": "etoc", "feed": "rss", "jc": slug})
+
+
+def _science_pdf_url(doi: str) -> str:
+    doi = (doi or "").replace("doi:", "").strip()
+    return f"https://www.science.org/doi/pdf/{doi}" if doi else ""
+
+
+def _science_abs_url(doi: str, fallback_url: str = "") -> str:
+    doi = (doi or "").replace("doi:", "").strip()
+    return f"https://www.science.org/doi/abs/{doi}" if doi else fallback_url
+
+
+def _extract_science_doi(soup: BeautifulSoup) -> str:
+    for selector in ["meta[name='citation_doi']", "meta[name='dc.Identifier']", "meta[name='dc.identifier']"]:
+        node = soup.select_one(selector)
+        if node and node.get("content"):
+            return str(node["content"]).replace("doi:", "").strip()
+    return ""
+
+
+def _extract_science_abstract(soup: BeautifulSoup) -> str:
+    for selector in [
+        "meta[name='description']",
+        "meta[property='og:description']",
+        "meta[name='citation_abstract']",
+    ]:
+        node = soup.select_one(selector)
+        if node and node.get("content"):
+            text = _clean_text(str(node["content"]))
+            if text:
+                return text
+    for selector in [
+        "section.abstract",
+        "section[class*='abstract']",
+        "div.abstract",
+        "div[class*='abstract']",
+        "[id*='abstract']",
+        "[class*='Abstract']",
+    ]:
+        node = soup.select_one(selector)
+        if node:
+            text = _clean_text(node.get_text(" ", strip=True))
+            text = re.sub(r"^Abstract\s*", "", text, flags=re.I).strip()
+            if text:
+                return text
+    return ""
+
+
+def enrich_science_details(papers: list[dict], limit: int | None = None) -> tuple[list[dict], dict]:
+    attempted = 0
+    abstracts_filled = 0
+    pdfs_filled = 0
+    dois_filled = 0
+    candidates = papers if limit is None else papers[:limit]
+    for paper in candidates:
+        metadata = paper.setdefault("metadata", {})
+        doi = str(metadata.get("doi") or "").replace("doi:", "").strip()
+        url = str(paper.get("url") or _science_abs_url(doi))
+        if not url:
+            continue
+        attempted += 1
+        try:
+            soup = BeautifulSoup(_request(url).text, "html.parser")
+        except Exception:
+            continue
+        if not paper.get("abstract"):
+            abstract = _extract_science_abstract(soup)
+            if abstract:
+                paper["abstract"] = abstract
+                metadata["abstract_source"] = "science_detail"
+                abstracts_filled += 1
+        extracted_doi = _extract_science_doi(soup)
+        if extracted_doi and not metadata.get("doi"):
+            metadata["doi"] = extracted_doi
+            doi = extracted_doi
+            dois_filled += 1
+        if not paper.get("pdf_url"):
+            pdf_url = _science_pdf_url(doi)
+            if pdf_url:
+                paper["pdf_url"] = pdf_url
+                pdfs_filled += 1
+        if not paper.get("url") and url:
+            paper["url"] = url
+        time.sleep(0.1)
+    return papers, {
+        "attempted": attempted,
+        "abstracts_filled": abstracts_filled,
+        "pdfs_filled": pdfs_filled,
+        "dois_filled": dois_filled,
+    }
+
+
+def _crossref_date(item: dict) -> str:
+    for key in ["published-print", "published-online", "published"]:
+        parts = item.get(key, {}).get("date-parts")
+        if not parts or not parts[0]:
+            continue
+        values = [int(part) for part in parts[0]]
+        year = values[0]
+        month = values[1] if len(values) > 1 else 1
+        day = values[2] if len(values) > 2 else 1
+        try:
+            return date(year, month, day).isoformat()
+        except ValueError:
+            continue
+    return ""
+
+
+def _crossref_first_text(value: object) -> str:
+    if isinstance(value, list) and value:
+        value = value[0]
+    return _clean_text(BeautifulSoup(str(value or ""), "html.parser").get_text(" ", strip=True))
+
+
+def _crossref_authors(value: object) -> str:
+    if not isinstance(value, list):
+        return ""
+    authors: list[str] = []
+    for author in value[:12]:
+        if not isinstance(author, dict):
+            continue
+        name = _clean_text(" ".join(part for part in [author.get("given", ""), author.get("family", "")] if part))
+        if name:
+            authors.append(name)
+    return ", ".join(authors)
+
+
+def _science_crossref_url(issn: str, start_date: str, end_date: str, rows: int, offset: int) -> str:
+    filters = [f"issn:{issn}", "type:journal-article"]
+    if start_date:
+        filters.append(f"from-pub-date:{start_date}")
+    if end_date:
+        filters.append(f"until-pub-date:{end_date}")
+    return "https://api.crossref.org/works?" + urlencode({
+        "filter": ",".join(filters),
+        "rows": max(1, min(100, rows)),
+        "offset": max(0, offset),
+        "sort": "published",
+        "order": "desc",
+    })
+
+
+def _parse_science_crossref_items(items: list[dict], slug: str) -> list[dict]:
+    journal = _science_journal_meta(slug)
+    papers: list[dict] = []
+    for item in items:
+        doi = str(item.get("DOI") or "").strip()
+        title = _crossref_first_text(item.get("title"))
+        if not doi or not _looks_like_paper_title(title):
+            continue
+        container = _crossref_first_text(item.get("container-title")) or journal["name"]
+        published = _crossref_date(item)
+        abstract = _crossref_first_text(item.get("abstract"))
+        year = int(published[:4]) if published[:4].isdigit() else date.today().year
+        papers.append({
+            "id": stable_id("science", doi),
+            "source": "science",
+            "title": title,
+            "authors": _crossref_authors(item.get("author")),
+            "abstract": abstract,
+            "url": _science_abs_url(doi, str(item.get("URL") or "")),
+            "pdf_url": _science_pdf_url(doi),
+            "venue": container,
+            "year": year,
+            "category": "journal-article",
+            "classification_source": "official",
+            "metadata": {
+                "journal_slug": slug,
+                "journal_tier": journal.get("tier", ""),
+                "journal_group": journal.get("group", ""),
+                "article_type": "journal-article",
+                "doi": doi,
+                "published": published,
+                "crossref_url": str(item.get("URL") or ""),
+            },
+        })
+    return papers
+
+
+def _parse_science_feed(xml_text: str, slug: str, allowed_types: set[str], feed_url: str) -> list[dict]:
+    journal = _science_journal_meta(slug)
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return []
+    ns = {
+        "rss": "http://purl.org/rss/1.0/",
+        "dc": "http://purl.org/dc/elements/1.1/",
+        "prism": "http://prismstandard.org/namespaces/basic/2.0/",
+        "content": "http://purl.org/rss/1.0/modules/content/",
+    }
+    papers: list[dict] = []
+    for item in root.findall(".//rss:item", ns):
+        title = _xml_text(item, ["{http://purl.org/rss/1.0/}title"])
+        if not _looks_like_paper_title(title):
+            continue
+        article_type = _xml_text(item, ["{http://purl.org/dc/elements/1.1/}type"])
+        if allowed_types and article_type.lower() not in allowed_types:
+            continue
+        doi = _xml_text(item, ["{http://prismstandard.org/namespaces/basic/2.0/}doi", "{http://purl.org/dc/elements/1.1/}identifier"]).replace("doi:", "").strip()
+        url = _xml_text(item, ["{http://prismstandard.org/namespaces/basic/2.0/}url", "{http://purl.org/rss/1.0/}link"])
+        published = _xml_text(item, ["{http://purl.org/dc/elements/1.1/}date", "{http://prismstandard.org/namespaces/basic/2.0/}coverDate"])
+        description = _xml_text(item, ["{http://purl.org/rss/1.0/}description", "{http://purl.org/rss/1.0/modules/content/}encoded"])
+        authors = _xml_text(item, ["{http://purl.org/dc/elements/1.1/}creator"])
+        publication = _xml_text(item, ["{http://prismstandard.org/namespaces/basic/2.0/}publicationName"]) or journal["name"]
+        published_date = normalize_date(published[:10])
+        year = int(published_date[:4]) if published_date[:4].isdigit() else date.today().year
+        canonical_url = _science_abs_url(doi, url)
+        papers.append({
+            "id": stable_id("science", doi or canonical_url or title),
+            "source": "science",
+            "title": title,
+            "authors": authors,
+            "abstract": description,
+            "url": canonical_url,
+            "pdf_url": _science_pdf_url(doi),
+            "venue": publication,
+            "year": year,
+            "category": article_type,
+            "classification_source": "official",
+            "metadata": {
+                "journal_slug": slug,
+                "journal_tier": journal.get("tier", ""),
+                "journal_group": journal.get("group", ""),
+                "article_type": article_type,
+                "doi": doi,
+                "published": published_date,
+                "feed_url": feed_url,
+            },
+        })
+    return papers
+
+
+def fetch_science_family(
+    journals: list[str],
+    article_types: list[str],
+    max_items: int | None = None,
+    start_date: str = "",
+    end_date: str = "",
+) -> tuple[list[dict], dict]:
+    start_date = normalize_date(start_date)
+    end_date = normalize_date(end_date)
+    journals = [journal.strip() for journal in journals if journal.strip()] or ["science"]
+    article_types = [item.strip() for item in article_types if item.strip()] or ["Research Article"]
+    allowed_types = {item.lower() for item in article_types if item.lower() not in {"all", "*"}}
+    status = {
+        "source": "science",
+        "ok": False,
+        "limited": False,
+        "count": 0,
+        "message": "",
+        "journals": journals,
+        "article_types": article_types,
+        "start_date": start_date,
+        "end_date": end_date,
+        "errors": [],
+        "feeds": [],
+        "crossref_pages": [],
+        "stopped_reason": "",
+    }
+    by_key: dict[str, dict] = {}
+    item_limit = max(1, int(max_items)) if max_items is not None else None
+    rows = 100
+
+    def reached_limit() -> bool:
+        return item_limit is not None and len(by_key) >= item_limit
+
+    def add_papers(papers: list[dict]) -> int:
+        added = 0
+        for paper in papers:
+            published = paper.get("metadata", {}).get("published", "")
+            if not _in_date_range(published, start_date, end_date):
+                continue
+            key = str(paper.get("metadata", {}).get("doi") or paper.get("url") or paper.get("title") or "").lower()
+            if key and key not in by_key:
+                by_key[key] = paper
+                added += 1
+            if reached_limit():
+                break
+        return added
+
+    for slug in journals:
+        journal = _science_journal_meta(slug)
+        issn = journal.get("issn", "")
+        if issn:
+            offset = 0
+            while not reached_limit():
+                crossref_url = _science_crossref_url(issn, start_date, end_date, rows, offset)
+                page_report = {
+                    "journal": slug,
+                    "issn": issn,
+                    "offset": offset,
+                    "rows": rows,
+                    "url": crossref_url,
+                    "count": 0,
+                    "added": 0,
+                    "ok": False,
+                    "message": "",
+                }
+                try:
+                    response = _request(crossref_url, timeout=20)
+                    payload = response.json()
+                    records = payload.get("message", {}).get("items", [])
+                    papers = _parse_science_crossref_items(records, slug)
+                    added = add_papers(papers)
+                    page_report.update({
+                        "count": len(papers),
+                        "added": added,
+                        "ok": bool(papers),
+                        "message": "ok" if papers else "empty crossref page",
+                    })
+                except Exception as exc:
+                    records = []
+                    page_report["message"] = str(exc)
+                    status["errors"].append(f"{slug}/crossref/{offset}: {exc}")
+                status["crossref_pages"].append(page_report)
+                if reached_limit():
+                    status["stopped_reason"] = "item limit"
+                    break
+                if not records:
+                    status["stopped_reason"] = "empty crossref page"
+                    break
+                if len(records) < rows:
+                    status["stopped_reason"] = "end of crossref results"
+                    break
+                if page_report["added"] == 0 and offset > 0:
+                    status["stopped_reason"] = "no new items"
+                    break
+                offset += rows
+                time.sleep(0.1)
+        if reached_limit():
+            status["stopped_reason"] = "item limit"
+            break
+
+        feed_url = _science_feed_url(slug)
+        feed_report = {"journal": slug, "url": feed_url, "count": 0, "ok": False, "message": ""}
+        try:
+            papers = _parse_science_feed(_request(feed_url).text, slug, allowed_types, feed_url)
+            feed_report.update({"count": len(papers), "ok": bool(papers), "message": "ok" if papers else "empty feed after type filter"})
+        except Exception as exc:
+            papers = []
+            feed_report["message"] = str(exc)
+            status["errors"].append(f"{slug}: {exc}")
+        status["feeds"].append(feed_report)
+        add_papers(papers)
+        if reached_limit():
+            status["stopped_reason"] = "item limit"
+            break
+    papers = list(by_key.values())
+    if item_limit is not None:
+        papers = papers[:item_limit]
+    status["count"] = len(papers)
+    status["ok"] = bool(papers)
+    status["limited"] = reached_limit()
+    crossref_reports = status.get("crossref_pages") if isinstance(status.get("crossref_pages"), list) else []
+    status["pages_scanned"] = len(crossref_reports)
+    dates = [
+        normalize_date(str(paper.get("metadata", {}).get("published", ""))[:10])
+        for paper in papers
+    ]
+    dates = [value for value in dates if value]
+    if dates:
+        status["date_coverage"] = {
+            "newest": max(dates),
+            "oldest": min(dates),
+        }
+    if papers:
+        message = "ok"
+        if status["pages_scanned"]:
+            message += f"; scanned {status['pages_scanned']} Crossref pages"
+        if dates:
+            message += f"; date coverage {min(dates)} to {max(dates)}"
+        if status.get("stopped_reason"):
+            message += f"; stopped: {status['stopped_reason']}"
+        status["message"] = message
+    elif status["errors"]:
+        status["message"] = "Science feeds unavailable or failed: " + " | ".join(status["errors"][:3])
+    else:
+        status["message"] = "No Science items found for selected journals/types/date range."
+    return papers, status
 
 
 def _arxiv_entry_id(entry_id: str) -> str:
