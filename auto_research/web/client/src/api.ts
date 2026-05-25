@@ -17,6 +17,16 @@ export type Config = {
   arxiv_categories: string[];
   arxiv_start_date: string;
   arxiv_end_date: string;
+  nature_journals: string[];
+  nature_article_types: string[];
+  nature_start_date: string;
+  nature_end_date: string;
+  nature_candidate_limit: number;
+  science_journals: string[];
+  science_article_types: string[];
+  science_start_date: string;
+  science_end_date: string;
+  science_candidate_limit: number;
   github_languages: string[];
   github_since: "daily" | "weekly" | "monthly";
   hf_include_papers: boolean;

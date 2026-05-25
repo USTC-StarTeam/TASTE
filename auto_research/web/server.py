@@ -324,7 +324,7 @@ def api_artifacts(run_id: str) -> dict:
         path = directory / name
         if path.exists():
             artifacts.append({"name": name, "kind": "markdown", "content": path.read_text(encoding="utf-8"), "path": str(path)})
-    for name in ["find_results.json", "venue_health_report.json", "read_results.json", "ideas.json", "plans.json", "config.json", "selection.json", "email_report.json"]:
+    for name in ["find_results.json", "stage0_profile.json", "venue_health_report.json", "category_scan_report.json", "title_filter_report.json", "venue_filter1.json", "filter2_trace.json", "filter2_survivors.json", "enriched_pre_filter3.json", "arxiv_raw.json", "arxiv_prefiltered.json", "nature_raw.json", "science_raw.json", "huggingface_raw.json", "github_raw.json", "read_results.json", "ideas.json", "plans.json", "config.json", "selection.json", "email_report.json"]:
         path = directory / name
         if path.exists():
             content = read_json(path, {})

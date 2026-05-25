@@ -45,6 +45,16 @@ const DEFAULT_CONFIG: Config = {
   arxiv_categories: ["cs.AI"],
   arxiv_start_date: "",
   arxiv_end_date: "",
+  nature_journals: ["nature", "natmachintell", "natcomputsci", "nmeth", "ncomms"],
+  nature_article_types: ["article"],
+  nature_start_date: "",
+  nature_end_date: "",
+  nature_candidate_limit: 200,
+  science_journals: ["science", "sciadv"],
+  science_article_types: ["Research Article"],
+  science_start_date: "",
+  science_end_date: "",
+  science_candidate_limit: 200,
   github_languages: ["all"],
   github_since: "daily",
   hf_include_papers: true,
@@ -60,6 +70,99 @@ const DEFAULT_CONFIG: Config = {
     auto_send_stages: ["find", "read", "idea", "plan"],
   },
 };
+
+const NATURE_JOURNALS = [
+  { slug: "nature", name: "Nature", tier: "T0" },
+  { slug: "natmachintell", name: "Nature Machine Intelligence", tier: "T1" },
+  { slug: "natcomputsci", name: "Nature Computational Science", tier: "T1" },
+  { slug: "nmeth", name: "Nature Methods", tier: "T1" },
+  { slug: "nbt", name: "Nature Biotechnology", tier: "T1" },
+  { slug: "natbiomedeng", name: "Nature Biomedical Engineering", tier: "T1" },
+  { slug: "ncomms", name: "Nature Communications", tier: "T1" },
+  { slug: "nmat", name: "Nature Materials", tier: "T2" },
+  { slug: "nchem", name: "Nature Chemistry", tier: "T2" },
+  { slug: "natchemeng", name: "Nature Chemical Engineering", tier: "T2" },
+  { slug: "natcatal", name: "Nature Catalysis", tier: "T2" },
+  { slug: "natsynth", name: "Nature Synthesis", tier: "T2" },
+  { slug: "nphys", name: "Nature Physics", tier: "T2" },
+  { slug: "natelectron", name: "Nature Electronics", tier: "T2" },
+  { slug: "nnano", name: "Nature Nanotechnology", tier: "T2" },
+  { slug: "nphoton", name: "Nature Photonics", tier: "T2" },
+  { slug: "nenergy", name: "Nature Energy", tier: "T2" },
+  { slug: "nm", name: "Nature Medicine", tier: "T3" },
+  { slug: "ng", name: "Nature Genetics", tier: "T3" },
+  { slug: "neuro", name: "Nature Neuroscience", tier: "T3" },
+  { slug: "nathumbehav", name: "Nature Human Behaviour", tier: "T3" },
+  { slug: "nclimate", name: "Nature Climate Change", tier: "T3" },
+  { slug: "sustainability", name: "Nature Sustainability", tier: "T3" },
+  { slug: "ngeo", name: "Nature Geoscience", tier: "T3" },
+  { slug: "natecolevol", name: "Nature Ecology & Evolution", tier: "T3" },
+  { slug: "s41545", name: "Nature Water", tier: "T3" },
+  { slug: "s43016", name: "Nature Food", tier: "T3" },
+];
+
+const NATURE_PRESETS = [
+  {
+    id: "core",
+    name: "Core AI / Computational",
+    journals: ["nature", "natmachintell", "natcomputsci", "nmeth", "ncomms"],
+  },
+  {
+    id: "methods",
+    name: "Methods / Bioengineering",
+    journals: ["nmeth", "nbt", "natbiomedeng", "ncomms"],
+  },
+  {
+    id: "materials",
+    name: "AI for Science / Materials",
+    journals: ["nmat", "nchem", "natchemeng", "natcatal", "natsynth", "nphys", "natelectron", "nnano", "nphoton", "nenergy"],
+  },
+  {
+    id: "broad",
+    name: "Broad Nature Research",
+    journals: ["nm", "ng", "neuro", "nathumbehav", "nclimate", "sustainability", "ngeo", "natecolevol", "s41545", "s43016"],
+  },
+];
+
+const NATURE_JOURNAL_NAMES = Object.fromEntries(NATURE_JOURNALS.map((journal) => [journal.slug, journal.name]));
+
+const SCIENCE_JOURNALS = [
+  { slug: "science", name: "Science", tier: "T0" },
+  { slug: "sciadv", name: "Science Advances", tier: "T1" },
+  { slug: "scirobotics", name: "Science Robotics", tier: "T1" },
+  { slug: "stm", name: "Science Translational Medicine", tier: "T2" },
+  { slug: "sciimmunol", name: "Science Immunology", tier: "T2" },
+  { slug: "stke", name: "Science Signaling", tier: "T2" },
+];
+
+const SCIENCE_PARTNER_JOURNALS = [
+  { slug: "adi", name: "Advanced Devices & Instrumentation", tier: "SPJ" },
+  { slug: "bmr", name: "Biomaterials Research", tier: "SPJ" },
+  { slug: "bmef", name: "BME Frontiers", tier: "SPJ" },
+  { slug: "csbj", name: "Computational and Structural Biotechnology Journal", tier: "SPJ" },
+  { slug: "csbr", name: "Computational and Structural Biotechnology Reports", tier: "SPJ" },
+  { slug: "ehs", name: "Ecosystem Health and Sustainability", tier: "SPJ" },
+  { slug: "energymatadv", name: "Energy Material Advances", tier: "SPJ" },
+  { slug: "hds", name: "Health Data Science", tier: "SPJ" },
+  { slug: "icomputing", name: "Intelligent Computing", tier: "SPJ" },
+  { slug: "jemdr", name: "Journal of EMDR Practice and Research", tier: "SPJ" },
+  { slug: "remotesensing", name: "Journal of Remote Sensing", tier: "SPJ" },
+  { slug: "olar", name: "Ocean-Land-Atmosphere Research", tier: "SPJ" },
+  { slug: "research", name: "Research", tier: "SPJ" },
+  { slug: "space", name: "Space: Science & Technology", tier: "SPJ" },
+  { slug: "ultrafastscience", name: "Ultrafast Science", tier: "SPJ" },
+  { slug: "plantphenomics", name: "Plant Phenomics", tier: "migrated", disabled: true },
+];
+
+const SCIENCE_PRESETS = [
+  { id: "core", name: "Science Core", journals: ["science", "sciadv"] },
+  { id: "ai_robotics", name: "AI / Robotics / Engineering", journals: ["science", "sciadv", "scirobotics"] },
+  { id: "bio_medicine", name: "Bio / Medicine", journals: ["stm", "sciimmunol", "stke", "sciadv"] },
+  { id: "all", name: "All Science Family", journals: ["science", "sciadv", "scirobotics", "stm", "sciimmunol", "stke"] },
+  { id: "spj_verified", name: "Science Partner Journals", journals: SCIENCE_PARTNER_JOURNALS.filter((journal) => !journal.disabled).map((journal) => journal.slug) },
+];
+
+const SCIENCE_JOURNAL_NAMES = Object.fromEntries([...SCIENCE_JOURNALS, ...SCIENCE_PARTNER_JOURNALS].map((journal) => [journal.slug, journal.name]));
 
 type Tab = "find" | "read" | "ideas" | "plan";
 type Lang = "zh" | "en";
@@ -129,8 +232,8 @@ const TEXT = {
     recommendLimitHelp: "Find 阶段最终写入 article.md 的论文数量上限。",
     ideaLimit: "Idea 最大数量",
     ideaLimitHelp: "Idea 阶段生成的研究想法数量上限。",
-    titleScanLimit: "会议标题扫描数量",
-    titleScanLimitHelp: "没有官方分类的会议会先抓论文标题池，再由 LLM/关键词筛选值得抓详情的论文。",
+    titleScanLimit: "会议候选数量",
+    titleScanLimitHelp: "Filter2 后最多进入详情抓取和 Filter3 评分的会议论文数量。",
     titleScanFraction: "标题扫描比例",
     titleScanFractionHelp: "对已抓到的标题池取多少比例做预筛选，1 表示全部，0.25 表示前 25%。",
     saveConfig: "保存配置",
@@ -156,12 +259,32 @@ const TEXT = {
     plan: "计划",
     runFind: "运行 Find",
     venues: "会议 / 期刊",
-    venueHelp: "选择一个或多个会议/期刊。ICLR 使用官方分类；CCF/DBLP 分类由 LLM 推断并标注。",
-    selectedVenuesTitle: "已选会议",
+    venueHelp: "选择一个或多个会议；Nature / Science 期刊在下方单独选择。",
+    selectedVenuesTitle: "已选会议/期刊",
     availableVenuesTitle: "未选会议",
+    naturePortfolio: "Nature Portfolio",
+    natureHelp: "作为独立期刊流抓取重要 Nature-branded 期刊，并合并进入论文推荐。",
+    naturePresets: "Nature 预设",
+    natureJournals: "Nature 期刊范围",
+    natureDateHelp: "可选日期范围；留空时使用 Nature 最新可用 feed，不继承 arXiv 日期。",
+    natureCandidateLimit: "Nature 候选数量",
+    natureCandidateLimitTooltip: "最多从 Nature Portfolio 收集多少篇候选文章进入评分；不是最终推荐数量。",
+    natureArticleTypes: "Nature 文章类型",
+    natureArticleTypesTooltip: "默认 article 表示只抓研究论文类内容，避免 News、Editorial、Comment、Career 等噪声。建议保持默认。",
+    scienceFamily: "Science Family",
+    scienceHelp: "作为独立期刊流抓取 AAAS Science 系列期刊，并合并进入论文推荐。",
+    sciencePresets: "Science 预设",
+    scienceJournals: "Science 期刊范围",
+    sciencePartnerJournals: "Science Partner Journals",
+    sciencePartnerHelp: "默认不选。这里只展示已验证 RSS 可抓取的 SPJ；Plant Phenomics 标记为 migrated，不参与抓取。",
+    scienceDateHelp: "可选日期范围；留空时使用 Science 最新可用 feed，不继承 arXiv 日期。",
+    scienceCandidateLimit: "Science 候选数量",
+    scienceCandidateLimitTooltip: "最多从 Science 系列收集多少篇候选文章进入评分；不是最终推荐数量。",
+    scienceArticleTypes: "Science 文章类型",
+    scienceArticleTypesTooltip: "默认 Research Article 表示只抓研究论文类内容，避免 Books、Editorial、News 等噪声。建议保持默认。",
     add: "添加",
     remove: "移除",
-    venueSearch: "搜索会议、期刊、领域或 rank",
+    venueSearch: "搜索会议、领域或 rank",
     years: "年份",
     yearsHelp: "可输入多个年份，用逗号或空格隔开，例如 2025, 2026。",
     selected: "已选",
@@ -242,8 +365,8 @@ const TEXT = {
     recommendLimitHelp: "Maximum papers written to article.md by the Find stage.",
     ideaLimit: "Max ideas",
     ideaLimitHelp: "Maximum research ideas generated in the Idea stage.",
-    titleScanLimit: "Venue title scan count",
-    titleScanLimitHelp: "For venues without official categories, the app first collects a title pool and filters titles before fetching details.",
+    titleScanLimit: "Venue candidate limit",
+    titleScanLimitHelp: "Maximum venue papers sent to detail fetching and Filter3 scoring after Filter2.",
     titleScanFraction: "Title scan fraction",
     titleScanFractionHelp: "Fraction of the collected title pool to prefilter. 1 means all, 0.25 means the first 25%.",
     saveConfig: "Save Config",
@@ -269,12 +392,32 @@ const TEXT = {
     plan: "Plan",
     runFind: "Run Find",
     venues: "Venues",
-    venueHelp: "Select one or more conferences/journals. ICLR uses official categories; CCF/DBLP categories are LLM-inferred and labeled.",
+    venueHelp: "Select one or more conferences; Nature and Science journals are selected below.",
     selectedVenuesTitle: "Selected Venues",
     availableVenuesTitle: "Available Venues",
+    naturePortfolio: "Nature Portfolio",
+    natureHelp: "Fetch important Nature-branded journals through a separate journal stream and merge them into paper recommendations.",
+    naturePresets: "Nature presets",
+    natureJournals: "Nature journal range",
+    natureDateHelp: "Optional date range; when blank, Nature uses the latest available feed and does not inherit arXiv dates.",
+    natureCandidateLimit: "Nature candidate limit",
+    natureCandidateLimitTooltip: "Maximum Nature Portfolio candidates collected for scoring; this is not the final recommendation count.",
+    natureArticleTypes: "Nature article types",
+    natureArticleTypesTooltip: "Default article means research-article content only, avoiding noisier News, Editorial, Comment, and Career items. Keep the default unless you need broader content.",
+    scienceFamily: "Science Family",
+    scienceHelp: "Fetch AAAS Science-family journals through a separate journal stream and merge them into paper recommendations.",
+    sciencePresets: "Science presets",
+    scienceJournals: "Science journal range",
+    sciencePartnerJournals: "Science Partner Journals (Advanced)",
+    sciencePartnerHelp: "Disabled by default. Only SPJs with verified RSS are selectable; Plant Phenomics is marked migrated and is not fetched.",
+    scienceDateHelp: "Optional date range; when blank, Science uses the latest available feed and does not inherit arXiv dates.",
+    scienceCandidateLimit: "Science candidate limit",
+    scienceCandidateLimitTooltip: "Maximum Science-family candidates collected for scoring; this is not the final recommendation count.",
+    scienceArticleTypes: "Science article types",
+    scienceArticleTypesTooltip: "Default Research Article means research-article content only, avoiding noisier Books, Editorial, and News items. Keep the default unless you need broader content.",
     add: "Add",
     remove: "Remove",
-    venueSearch: "Search venue, journal, field, or rank",
+    venueSearch: "Search conference, field, or rank",
     years: "Years",
     yearsHelp: "Enter multiple years separated by commas or spaces, e.g. 2025, 2026.",
     selected: "selected",
@@ -431,6 +574,8 @@ function App() {
   const [includeArxiv, setIncludeArxiv] = useState(true);
   const [includeHf, setIncludeHf] = useState(true);
   const [includeGithub, setIncludeGithub] = useState(true);
+  const [includeNature, setIncludeNature] = useState(false);
+  const [includeScience, setIncludeScience] = useState(false);
   const [selectedPapers, setSelectedPapers] = useState<string[]>([]);
   const [planIdeaIds, setPlanIdeaIds] = useState<string[]>([]);
   const [planRepairRounds, setPlanRepairRounds] = useState(3);
@@ -458,7 +603,7 @@ function App() {
   async function bootstrap() {
     try {
       const [cfg, meta, venueData, runData, jobData] = await Promise.all([getConfig(), getConfigMeta(), getVenues(), getRuns(), getJobs()]);
-      setConfig(cfg);
+      setConfig({ ...DEFAULT_CONFIG, ...cfg, email: { ...DEFAULT_CONFIG.email, ...(cfg.email || {}) } });
       setConfigPath(meta.path);
       setVenues(venueData);
       setRuns(runData);
@@ -489,6 +634,56 @@ function App() {
   function updateConfig<K extends keyof Config>(key: K, value: Config[K]) {
     setConfig((prev) => ({ ...prev, [key]: value }));
     setSaveMessage("");
+  }
+
+  function toggleNatureJournal(slug: string, checked: boolean) {
+    const current = config.nature_journals || [];
+    updateConfig("nature_journals", checked ? [...new Set([...current, slug])] : current.filter((item) => item !== slug));
+  }
+
+  function toggleNaturePreset(journals: string[], checked: boolean) {
+    const current = config.nature_journals || [];
+    if (checked) {
+      updateConfig("nature_journals", [...new Set([...current, ...journals])]);
+      return;
+    }
+    const remove = new Set(journals);
+    updateConfig("nature_journals", current.filter((item) => !remove.has(item)));
+  }
+
+  function naturePresetState(journals: string[]) {
+    const selected = new Set(config.nature_journals || []);
+    const count = journals.filter((journal) => selected.has(journal)).length;
+    return {
+      checked: count === journals.length,
+      partial: count > 0 && count < journals.length,
+      count,
+    };
+  }
+
+  function toggleScienceJournal(slug: string, checked: boolean) {
+    const current = config.science_journals || [];
+    updateConfig("science_journals", checked ? [...new Set([...current, slug])] : current.filter((item) => item !== slug));
+  }
+
+  function toggleSciencePreset(journals: string[], checked: boolean) {
+    const current = config.science_journals || [];
+    if (checked) {
+      updateConfig("science_journals", [...new Set([...current, ...journals])]);
+      return;
+    }
+    const remove = new Set(journals);
+    updateConfig("science_journals", current.filter((item) => !remove.has(item)));
+  }
+
+  function sciencePresetState(journals: string[]) {
+    const selected = new Set(config.science_journals || []);
+    const count = journals.filter((journal) => selected.has(journal)).length;
+    return {
+      checked: count === journals.length,
+      partial: count > 0 && count < journals.length,
+      count,
+    };
   }
 
   function updateRoleConfig(role: string, key: string, value: string | number | null) {
@@ -590,6 +785,8 @@ function App() {
       include_arxiv: includeArxiv,
       include_huggingface: includeHf,
       include_github: includeGithub,
+      include_nature: includeNature,
+      include_science: includeScience,
     });
     attachJob(nextJob, "read");
   }
@@ -864,12 +1061,6 @@ function App() {
           <label>{t.ideaWorkers}</label>
           <p className="help">{t.ideaWorkersHelp}</p>
           <input value={config.idea_parallel_workers} onChange={(e) => updateConfig("idea_parallel_workers", Math.max(1, Math.min(8, Number(e.target.value))))} type="number" min="1" max="8" />
-          <label>{t.titleScanLimit}</label>
-          <p className="help">{t.titleScanLimitHelp}</p>
-          <input value={config.venue_title_scan_limit} onChange={(e) => updateConfig("venue_title_scan_limit", Number(e.target.value))} type="number" min="1" />
-          <label>{t.titleScanFraction}</label>
-          <p className="help">{t.titleScanFractionHelp}</p>
-          <input value={config.venue_title_scan_fraction} onChange={(e) => updateConfig("venue_title_scan_fraction", Number(e.target.value))} type="number" min="0.01" max="1" step="0.05" />
           <div className="saveBar">
             <button className="primary" onClick={handleSaveConfig} disabled={savingConfig}>
               {savingConfig ? t.saving : t.saveConfig}
@@ -917,58 +1108,198 @@ function App() {
               <div className="panel">
                 <h3>{t.venues}</h3>
                 <p className="help">{t.venueHelp}</p>
-                <label>{t.venueSearch}</label>
-                <input value={venueQuery} onChange={(e) => setVenueQuery(e.target.value)} placeholder={t.venueSearch} />
-                <label>{t.years}</label>
-                <p className="help">{t.yearsHelp}</p>
-                <input value={years} onChange={(e) => setYears(e.target.value)} placeholder="2025, 2026" />
-                <div className="countLine">{selectedVenues.length} {t.selected} / {Math.min(availableVenues.length, 300)} {t.shown}</div>
-                <div className="venuePicker">
-                  <div>
-                    <h4>{t.selectedVenuesTitle}</h4>
-                    <div className="venueList compactList">
-                      {selectedVenueItems.map((venue) => {
-                        const health = venueHealth[venue.id];
-                        return (
-                          <div className="venueRow" key={venue.id}>
-                            <div>
-                              <strong>{venue.name}</strong>
-                              <small>{venue.field} / {venue.rank} / {venue.classification_source}</small>
-                              {health && (
-                                <small className={health.ok ? "health ok" : "health fail"}>
-                                  {health.ok ? t.healthOk : t.healthFail} / {health.source_adapter} / {health.sample_count}
-                                </small>
-                              )}
+                <details className="subPanel collapsiblePanel">
+                  <summary>
+                    <span>{t.selectedVenuesTitle}</span>
+                    <small>{selectedVenues.length} {t.selected} / {Math.min(availableVenues.length, 300)} {t.shown}</small>
+                  </summary>
+                  <label>{t.years}</label>
+                  <p className="help">{t.yearsHelp}</p>
+                  <input value={years} onChange={(e) => setYears(e.target.value)} placeholder="2025, 2026" />
+                  <label>{t.titleScanLimit}</label>
+                  <p className="help">{t.titleScanLimitHelp}</p>
+                  <input value={config.venue_title_scan_limit} onChange={(e) => updateConfig("venue_title_scan_limit", Number(e.target.value))} type="number" min="1" />
+                  <label>{t.titleScanFraction}</label>
+                  <p className="help">{t.titleScanFractionHelp}</p>
+                  <input value={config.venue_title_scan_fraction} onChange={(e) => updateConfig("venue_title_scan_fraction", Number(e.target.value))} type="number" min="0.01" max="1" step="0.05" />
+                  <label>{t.venueSearch}</label>
+                  <input value={venueQuery} onChange={(e) => setVenueQuery(e.target.value)} placeholder={t.venueSearch} />
+                  <div className="countLine">{selectedVenues.length} {t.selected} / {Math.min(availableVenues.length, 300)} {t.shown}</div>
+                  <div className="venuePicker">
+                    <div>
+                      <h4>{t.selectedVenuesTitle}</h4>
+                      <div className="venueList compactList">
+                        {selectedVenueItems.map((venue) => {
+                          const health = venueHealth[venue.id];
+                          return (
+                            <div className="venueRow" key={venue.id}>
+                              <div>
+                                <strong>{venue.name}</strong>
+                                <small>{venue.field} / {venue.rank} / {venue.classification_source}</small>
+                                {health && (
+                                  <small className={health.ok ? "health ok" : "health fail"}>
+                                    {health.ok ? t.healthOk : t.healthFail} / {health.source_adapter} / {health.sample_count}
+                                  </small>
+                                )}
+                              </div>
+                              <button className="smallButton" onClick={() => setSelectedVenues((prev) => prev.filter((id) => id !== venue.id))}>{t.remove}</button>
                             </div>
-                            <button className="smallButton" onClick={() => setSelectedVenues((prev) => prev.filter((id) => id !== venue.id))}>{t.remove}</button>
-                          </div>
-                        );
-                      })}
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <div>
+                      <h4>{t.availableVenuesTitle}</h4>
+                      <div className="venueList">
+                        {availableVenues.slice(0, 300).map((venue) => {
+                          const health = venueHealth[venue.id];
+                          return (
+                            <div className="venueRow" key={venue.id}>
+                              <div>
+                                <strong>{venue.name}</strong>
+                                <small>{venue.field} / {venue.rank} / {venue.classification_source}</small>
+                                {health && (
+                                  <small className={health.ok ? "health ok" : "health fail"}>
+                                    {health.ok ? t.healthOk : t.healthFail} / {health.source_adapter} / {health.sample_count}
+                                  </small>
+                                )}
+                              </div>
+                              <button className="smallButton" onClick={() => setSelectedVenues((prev) => prev.includes(venue.id) ? prev : [...prev, venue.id])}>{t.add}</button>
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
                   </div>
-                  <div>
-                    <h4>{t.availableVenuesTitle}</h4>
-                    <div className="venueList">
-                      {availableVenues.slice(0, 300).map((venue) => {
-                        const health = venueHealth[venue.id];
-                        return (
-                          <div className="venueRow" key={venue.id}>
-                            <div>
-                              <strong>{venue.name}</strong>
-                              <small>{venue.field} / {venue.rank} / {venue.classification_source}</small>
-                              {health && (
-                                <small className={health.ok ? "health ok" : "health fail"}>
-                                  {health.ok ? t.healthOk : t.healthFail} / {health.source_adapter} / {health.sample_count}
-                                </small>
-                              )}
-                            </div>
-                            <button className="smallButton" onClick={() => setSelectedVenues((prev) => prev.includes(venue.id) ? prev : [...prev, venue.id])}>{t.add}</button>
-                          </div>
-                        );
-                      })}
-                    </div>
+                </details>
+                <details className="subPanel collapsiblePanel">
+                  <summary>
+                    <span>{t.naturePortfolio}</span>
+                    <small>{includeNature ? "on" : "off"} / {(config.nature_journals || []).length} {t.selected}</small>
+                  </summary>
+                  <label className="switch"><input type="checkbox" checked={includeNature} onChange={(e) => setIncludeNature(e.target.checked)} /> {t.naturePortfolio}</label>
+                  <p className="help">{t.natureHelp}</p>
+                  <label>{t.naturePresets}</label>
+                  <div className="presetGrid">
+                    {NATURE_PRESETS.map((preset) => {
+                      const state = naturePresetState(preset.journals);
+                      const title = preset.journals.map((slug) => NATURE_JOURNAL_NAMES[slug] || slug).join("\n");
+                      return (
+                        <label className={state.partial ? "presetItem partial" : "presetItem"} key={preset.id} title={title}>
+                          <input
+                            type="checkbox"
+                            checked={state.checked}
+                            onChange={(e) => toggleNaturePreset(preset.journals, e.target.checked)}
+                          />
+                          <span>{preset.name}</span>
+                          <small>{state.count}/{preset.journals.length}</small>
+                        </label>
+                      );
+                    })}
                   </div>
-                </div>
+                  <label>{t.natureJournals}</label>
+                  <div className="checkGrid">
+                    {NATURE_JOURNALS.map((journal) => (
+                      <label className="checkItem" key={journal.slug}>
+                        <input
+                          type="checkbox"
+                          checked={(config.nature_journals || []).includes(journal.slug)}
+                          onChange={(e) => toggleNatureJournal(journal.slug, e.target.checked)}
+                        />
+                        <span>{journal.name}</span>
+                        <small>{journal.tier}</small>
+                      </label>
+                    ))}
+                  </div>
+                  <label className="labelWithHelp">
+                    <span>{t.natureArticleTypes}</span>
+                    <span className="helpDot" tabIndex={0} data-tooltip={t.natureArticleTypesTooltip}>?</span>
+                  </label>
+                  <input value={(config.nature_article_types || ["article"]).join(", ")} onChange={(e) => updateConfig("nature_article_types", splitList(e.target.value))} placeholder="article" />
+                  <p className="help">{t.natureDateHelp}</p>
+                  <div className="row">
+                    <input value={config.nature_start_date || ""} onChange={(e) => updateConfig("nature_start_date", e.target.value)} placeholder={t.startDate} />
+                    <input value={config.nature_end_date || ""} onChange={(e) => updateConfig("nature_end_date", e.target.value)} placeholder={t.endDate} />
+                  </div>
+                  <label className="labelWithHelp">
+                    <span>{t.natureCandidateLimit}</span>
+                    <span className="helpDot" tabIndex={0} data-tooltip={t.natureCandidateLimitTooltip}>?</span>
+                  </label>
+                  <input type="number" min={1} max={1000} value={config.nature_candidate_limit || 200} onChange={(e) => updateConfig("nature_candidate_limit", Number(e.target.value))} />
+                </details>
+                <details className="subPanel collapsiblePanel">
+                  <summary>
+                    <span>{t.scienceFamily}</span>
+                    <small>{includeScience ? "on" : "off"} / {(config.science_journals || []).length} {t.selected}</small>
+                  </summary>
+                  <label className="switch"><input type="checkbox" checked={includeScience} onChange={(e) => setIncludeScience(e.target.checked)} /> {t.scienceFamily}</label>
+                  <p className="help">{t.scienceHelp}</p>
+                  <label>{t.sciencePresets}</label>
+                  <div className="presetGrid">
+                    {SCIENCE_PRESETS.map((preset) => {
+                      const state = sciencePresetState(preset.journals);
+                      const title = preset.journals.map((slug) => SCIENCE_JOURNAL_NAMES[slug] || slug).join("\n");
+                      return (
+                        <label className={state.partial ? "presetItem partial" : "presetItem"} key={preset.id} title={title}>
+                          <input
+                            type="checkbox"
+                            checked={state.checked}
+                            onChange={(e) => toggleSciencePreset(preset.journals, e.target.checked)}
+                          />
+                          <span>{preset.name}</span>
+                          <small>{state.count}/{preset.journals.length}</small>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  <label>{t.scienceJournals}</label>
+                  <div className="checkGrid">
+                    {SCIENCE_JOURNALS.map((journal) => (
+                      <label className="checkItem" key={journal.slug}>
+                        <input
+                          type="checkbox"
+                          checked={(config.science_journals || []).includes(journal.slug)}
+                          onChange={(e) => toggleScienceJournal(journal.slug, e.target.checked)}
+                        />
+                        <span>{journal.name}</span>
+                        <small>{journal.tier}</small>
+                      </label>
+                    ))}
+                  </div>
+                  <details className="nestedDetails">
+                    <summary>{t.sciencePartnerJournals}</summary>
+                    <p className="help">{t.sciencePartnerHelp}</p>
+                    <div className="checkGrid">
+                      {SCIENCE_PARTNER_JOURNALS.map((journal) => (
+                        <label className={journal.disabled ? "checkItem disabled" : "checkItem"} key={journal.slug}>
+                          <input
+                            type="checkbox"
+                            disabled={Boolean(journal.disabled)}
+                            checked={(config.science_journals || []).includes(journal.slug)}
+                            onChange={(e) => toggleScienceJournal(journal.slug, e.target.checked)}
+                          />
+                          <span>{journal.name}</span>
+                          <small>{journal.tier}</small>
+                        </label>
+                      ))}
+                    </div>
+                  </details>
+                  <label className="labelWithHelp">
+                    <span>{t.scienceArticleTypes}</span>
+                    <span className="helpDot" tabIndex={0} data-tooltip={t.scienceArticleTypesTooltip}>?</span>
+                  </label>
+                  <input value={(config.science_article_types || ["Research Article"]).join(", ")} onChange={(e) => updateConfig("science_article_types", splitList(e.target.value))} placeholder="Research Article" />
+                  <p className="help">{t.scienceDateHelp}</p>
+                  <div className="row">
+                    <input value={config.science_start_date || ""} onChange={(e) => updateConfig("science_start_date", e.target.value)} placeholder={t.startDate} />
+                    <input value={config.science_end_date || ""} onChange={(e) => updateConfig("science_end_date", e.target.value)} placeholder={t.endDate} />
+                  </div>
+                  <label className="labelWithHelp">
+                    <span>{t.scienceCandidateLimit}</span>
+                    <span className="helpDot" tabIndex={0} data-tooltip={t.scienceCandidateLimitTooltip}>?</span>
+                  </label>
+                  <input type="number" min={1} max={1000} value={config.science_candidate_limit || 200} onChange={(e) => updateConfig("science_candidate_limit", Number(e.target.value))} />
+                </details>
               </div>
               <div className="panel">
                 <h3>{t.sources}</h3>

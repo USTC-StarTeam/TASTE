@@ -21,7 +21,7 @@ def _source_items(directory) -> list[dict]:
     find_results = read_json(directory / "find_results.json", {})
     read_results = read_json(directory / "read_results.json", {})
     items = []
-    for source_name in ("articles", "huggingface", "github"):
+    for source_name in ("articles", "nature", "science", "huggingface", "github"):
         for item in find_results.get(source_name, []):
             items.append({
                 "source": source_name,

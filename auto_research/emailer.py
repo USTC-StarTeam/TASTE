@@ -16,7 +16,7 @@ LogFn = Callable[[str], None]
 CancelFn = Callable[[], bool]
 
 
-DEFAULT_EMAIL_ARTIFACTS = ["article.md", "read.md", "idea.md", "plan.md", "hf.md", "github.md", "source_status.md"]
+DEFAULT_EMAIL_ARTIFACTS = ["article.md", "read.md", "idea.md", "plan.md", "nature.md", "science.md", "hf.md", "github.md", "source_status.md"]
 
 
 def _escape(value: object) -> str:
