@@ -5,7 +5,7 @@ import html
 import re
 import time
 import xml.etree.ElementTree as ET
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from urllib.parse import quote_plus, urlencode
 
 import requests
@@ -2055,7 +2055,7 @@ def fetch_science_family(
                 if not records:
                     status["stopped_reason"] = "empty crossref page"
                     break
-                if len(records) < rows:
+                if len(records) < rows and offset > 0:
                     status["stopped_reason"] = "end of crossref results"
                     break
                 if page_report["added"] == 0 and offset > 0:
@@ -2235,6 +2235,135 @@ def fetch_arxiv(categories: list[str], max_items: int, start_date: str = "", end
         status["message"] = "arXiv unavailable or query failed: " + " | ".join(status["errors"][:3])
     else:
         status["message"] = f"No arXiv papers found; queries={'; '.join(status['queries'])}"
+    return papers, status
+
+
+def _biorxiv_default_start_date() -> str:
+    return (date.today() - timedelta(days=30)).isoformat()
+
+
+def _biorxiv_category_matches(category: str, selected: list[str]) -> bool:
+    if not selected or any(item.lower() == "all" for item in selected):
+        return True
+    normalized = category.strip().lower()
+    return normalized in {item.strip().lower() for item in selected if item.strip()}
+
+
+def _biorxiv_content_url(doi: str, version: str = "") -> str:
+    if not doi:
+        return ""
+    suffix = f"v{version}" if str(version).strip() else ""
+    return f"https://www.biorxiv.org/content/{doi}{suffix}"
+
+
+def fetch_biorxiv(categories: list[str], max_items: int, start_date: str = "", end_date: str = "") -> tuple[list[dict], dict]:
+    papers: list[dict] = []
+    by_key: dict[str, dict] = {}
+    start_date = normalize_date(start_date) or _biorxiv_default_start_date()
+    end_date = normalize_date(end_date) or date.today().isoformat()
+    categories = [category.strip() for category in (categories or []) if category.strip()] or ["bioinformatics"]
+    max_items = max(1, int(max_items or 100))
+    status = {
+        "source": "biorxiv",
+        "ok": False,
+        "limited": False,
+        "count": 0,
+        "message": "",
+        "categories": categories,
+        "start_date": start_date,
+        "end_date": end_date,
+        "queries": [f"server:biorxiv date:{start_date}..{end_date} categories:{', '.join(categories)}"],
+        "errors": [],
+        "pages_fetched": 0,
+        "deduped_count": 0,
+        "raw_count": 0,
+    }
+    cursor = 0
+    while len(papers) < max_items:
+        url = f"https://api.biorxiv.org/details/biorxiv/{start_date}/{end_date}/{cursor}/json"
+        try:
+            response = _request(url, timeout=20)
+            data = response.json()
+        except Exception as exc:
+            status["errors"].append(f"cursor={cursor}: {exc}")
+            break
+        status["pages_fetched"] += 1
+        records = data.get("collection") if isinstance(data, dict) else []
+        if not isinstance(records, list) or not records:
+            break
+        status["raw_count"] += len(records)
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            published = normalize_date(str(record.get("date") or ""))
+            if not _in_date_range(published, start_date, end_date):
+                continue
+            category = str(record.get("category") or "").strip()
+            if not _biorxiv_category_matches(category, categories):
+                continue
+            title = " ".join(str(record.get("title") or "").split())
+            abstract = " ".join(str(record.get("abstract") or "").split())
+            doi = str(record.get("doi") or "").strip()
+            version = str(record.get("version") or "").strip()
+            key = doi.lower() or title.lower()
+            if not key:
+                continue
+            paper = by_key.get(key)
+            if paper:
+                categories_seen = paper.setdefault("categories", [paper.get("category", "")])
+                if category and category not in categories_seen:
+                    categories_seen.append(category)
+                paper.setdefault("metadata", {})["all_categories"] = categories_seen
+                continue
+            url = _biorxiv_content_url(doi, version)
+            pdf_url = f"{url}.full.pdf" if url else ""
+            all_categories = [category] if category else []
+            paper = {
+                "id": stable_id("paper", doi or title),
+                "source": "biorxiv",
+                "biorxiv_doi": doi,
+                "title": title,
+                "authors": str(record.get("authors") or ""),
+                "abstract": abstract,
+                "url": url,
+                "pdf_url": pdf_url,
+                "venue": "bioRxiv",
+                "year": int(published[:4]) if published[:4].isdigit() else date.today().year,
+                "category": category,
+                "categories": all_categories,
+                "classification_source": "llm_inferred",
+                "metadata": {
+                    "published": published,
+                    "biorxiv_category": category,
+                    "primary_category": category,
+                    "all_categories": all_categories,
+                    "doi": doi,
+                    "version": version,
+                    "license": record.get("license") or "",
+                    "server": record.get("server") or "biorxiv",
+                    "type": record.get("type") or "",
+                    "published_journal": record.get("published") or "",
+                },
+            }
+            by_key[key] = paper
+            papers.append(paper)
+            if len(papers) >= max_items:
+                status["limited"] = True
+                break
+        if len(records) < 100:
+            break
+        cursor += len(records)
+        time.sleep(0.5)
+    status["count"] = len(papers)
+    status["deduped_count"] = len(papers)
+    status["ok"] = bool(papers)
+    if papers:
+        limit_message = "limited by max_items" if status["limited"] else "fetched available pages"
+        status["message"] = f"ok; {limit_message}; queries={'; '.join(status['queries'])}"
+    elif status["errors"]:
+        status["message"] = "bioRxiv unavailable or query failed: " + " | ".join(status["errors"][:3])
+    else:
+        status["message"] = f"No bioRxiv papers found; queries={'; '.join(status['queries'])}"
     return papers, status
 
 

@@ -30,7 +30,7 @@ http://127.0.0.1:8765
 
 ## 功能亮点
 
-- **定向论文发现**：内置完整 CCF 会议/期刊目录，并补充 ICLR、OpenReview、DBLP、arXiv、Hugging Face、GitHub 等来源。
+- **定向论文发现**：内置完整 CCF 会议/期刊目录，并补充 ICLR、OpenReview、DBLP、arXiv、bioRxiv、Hugging Face、GitHub 等来源。
 - **严格两阶段筛选**：先按标题批筛选，再抓摘要/详情做二次评分，输出 `fit_score`、`diversity_score` 和最终排名。
 - **完整研究流水线**：Find -> Read -> Ideas -> Plan -> Email/export。
 - **多角色 LLM 配置**：Find、Read、Idea Generator、Idea Judge、Plan Generator、Plan Evaluator 可分别指定模型。
@@ -151,6 +151,8 @@ TASTE 使用 OpenAI-compatible Chat Completions API。
 | `venue_title_scan_limit` | 无官方分类时先扫描多少标题。 |
 | `arxiv_categories` | 支持多个分类，例如 `cs.AI, cs.CV, cs.CL`。 |
 | `arxiv_start_date`, `arxiv_end_date` | 可选日期范围，留空则使用最新/默认 feed 行为。 |
+| `biorxiv_categories` | 支持多个 bioRxiv 学科分类，例如 `bioinformatics, neuroscience`；`all` 表示不过滤分类。 |
+| `biorxiv_start_date`, `biorxiv_end_date` | 可选日期范围，留空则抓取最近 30 天。 |
 
 ### 邮件报告
 
@@ -172,13 +174,13 @@ TASTE 可以把 Markdown 产物渲染成 HTML 后发送邮件。
 1. 填写研究兴趣和研究者画像。
 2. 在会议列表中搜索并添加 venue。
 3. 输入一个或多个年份，例如 `2024, 2025, 2026`。
-4. 选择是否包含 arXiv、Hugging Face 和 GitHub。
+4. 选择是否包含 arXiv、bioRxiv、Hugging Face 和 GitHub。
 5. 启动 Find，并在 job 面板查看进度。
 
 Find 使用 append 式两阶段筛选：
 
 ```text
-venues/arXiv/HF/GitHub
+venues/arXiv/bioRxiv/HF/GitHub
 -> title index
 -> 每 10 篇标题一批交给 LLM
 -> append 到 title_candidates
