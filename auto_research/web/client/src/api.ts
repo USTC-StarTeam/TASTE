@@ -17,6 +17,9 @@ export type Config = {
   arxiv_categories: string[];
   arxiv_start_date: string;
   arxiv_end_date: string;
+  biorxiv_categories: string[];
+  biorxiv_start_date: string;
+  biorxiv_end_date: string;
   nature_journals: string[];
   nature_article_types: string[];
   nature_start_date: string;

@@ -50,6 +50,11 @@ class AppConfig(BaseModel):
     arxiv_end_date: str = ""
     arxiv_llm_candidate_limit: int = 200
     arxiv_llm_candidates_per_category: int = 100
+    biorxiv_categories: list[str] = Field(default_factory=lambda: ["bioinformatics"])
+    biorxiv_start_date: str = ""
+    biorxiv_end_date: str = ""
+    biorxiv_llm_candidate_limit: int = 200
+    biorxiv_llm_candidates_per_category: int = 100
     nature_journals: list[str] = Field(default_factory=lambda: ["nature", "natmachintell", "natcomputsci", "nmeth", "ncomms"])
     nature_article_types: list[str] = Field(default_factory=lambda: ["article"])
     nature_start_date: str = ""
@@ -71,6 +76,7 @@ class VenueSelection(BaseModel):
     venue_ids: list[str] = Field(default_factory=list)
     years: list[int] = Field(default_factory=lambda: [date.today().year])
     include_arxiv: bool = True
+    include_biorxiv: bool = False
     include_huggingface: bool = True
     include_github: bool = True
     include_nature: bool = False

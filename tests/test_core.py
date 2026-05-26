@@ -1,6 +1,6 @@
 from auto_research.auto_find.catalog import load_catalog
 from auto_research.auto_find.local_rank import rank_papers_tfidf
-from auto_research.auto_find.sources import _dblp_page_url, _openreview_venue_ids, _parse_neurips_detail, _parse_neurips_list, enrich_science_details, fetch_arxiv, fetch_dblp_stream_api, fetch_nature_portfolio, fetch_openreview_venue, fetch_science_family, fetch_venue_sample, fetch_venue_title_index, normalize_date
+from auto_research.auto_find.sources import _dblp_page_url, _openreview_venue_ids, _parse_neurips_detail, _parse_neurips_list, enrich_science_details, fetch_arxiv, fetch_biorxiv, fetch_dblp_stream_api, fetch_nature_portfolio, fetch_openreview_venue, fetch_science_family, fetch_venue_sample, fetch_venue_title_index, normalize_date
 from auto_research.llm import LLMClient, clamp_workers, extract_json, fallback_score, keyword_category
 from auto_research.markdown import paper_markdown
 from auto_research.models import AppConfig, LLMRoleConfig
@@ -741,6 +741,106 @@ def test_arxiv_paginates_and_dedupes(monkeypatch):
     assert status["deduped_count"] == 2
     duplicate = next(item for item in items if item["arxiv_id"] == "2604.00001v1")
     assert duplicate["categories"] == ["cs.AI", "cs.CL"]
+
+
+def test_biorxiv_returns_status_for_success(monkeypatch):
+    class Response:
+        def json(self):
+            return {
+                "collection": [
+                    {
+                        "doi": "10.1101/2026.05.01.123456",
+                        "title": "AI models for biological discovery",
+                        "authors": "Alice; Bob",
+                        "abstract": "Abstract text.",
+                        "date": "2026-05-01",
+                        "version": "1",
+                        "category": "Bioinformatics",
+                        "license": "cc_by",
+                        "server": "biorxiv",
+                    }
+                ]
+            }
+
+    monkeypatch.setattr("auto_research.auto_find.sources._request", lambda _url, **_kwargs: Response())
+    items, status = fetch_biorxiv(["bioinformatics"], 3, "2026-05-01", "2026-05-31")
+    assert len(items) == 1
+    assert status["ok"] is True
+    assert status["count"] == 1
+    assert status["categories"] == ["bioinformatics"]
+    assert items[0]["source"] == "biorxiv"
+    assert items[0]["venue"] == "bioRxiv"
+    assert items[0]["url"] == "https://www.biorxiv.org/content/10.1101/2026.05.01.123456v1"
+    assert items[0]["pdf_url"] == "https://www.biorxiv.org/content/10.1101/2026.05.01.123456v1.full.pdf"
+
+
+def test_biorxiv_returns_status_for_failure(monkeypatch):
+    def fail(_url, **_kwargs):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr("auto_research.auto_find.sources._request", fail)
+    items, status = fetch_biorxiv(["bioinformatics"], 3, "2026-05-01", "2026-05-31")
+    assert items == []
+    assert status["ok"] is False
+    assert "network down" in status["message"]
+
+
+def test_biorxiv_paginates_filters_and_dedupes(monkeypatch):
+    relevant = {
+        "doi": "10.1101/2026.05.01.123456",
+        "title": "Research agents for cell biology",
+        "authors": "Alice",
+        "abstract": "Agentic biology.",
+        "date": "2026-05-01",
+        "version": "1",
+        "category": "Bioinformatics",
+    }
+    unrelated = {
+        "doi": "10.1101/2026.05.01.999999",
+        "title": "Unrelated ecology note",
+        "date": "2026-05-01",
+        "version": "1",
+        "category": "Ecology",
+    }
+    duplicate = {
+        **relevant,
+        "abstract": "Duplicate record.",
+        "version": "2",
+    }
+    second_relevant = {
+        "doi": "10.1101/2026.05.02.000001",
+        "title": "Neural methods for biological datasets",
+        "authors": "Bob",
+        "abstract": "Neural methods.",
+        "date": "2026-05-02",
+        "version": "1",
+        "category": "Bioinformatics",
+    }
+    page_1 = [relevant] + [unrelated for _ in range(99)]
+    page_2 = [duplicate, second_relevant]
+
+    class Response:
+        def __init__(self, records):
+            self.records = records
+
+        def json(self):
+            return {"collection": self.records}
+
+    seen_urls: list[str] = []
+
+    def fake_request(url, **_kwargs):
+        seen_urls.append(url)
+        return Response(page_2 if "/100/json" in url else page_1)
+
+    monkeypatch.setattr("auto_research.auto_find.sources._request", fake_request)
+    items, status = fetch_biorxiv(["bioinformatics"], 10, "2026-05-01", "2026-05-31")
+
+    assert len(items) == 2
+    assert status["pages_fetched"] == 2
+    assert status["raw_count"] == 102
+    assert status["deduped_count"] == 2
+    assert all(item["category"] == "Bioinformatics" for item in items)
+    assert any("/100/json" in url for url in seen_urls)
 
 
 def test_tfidf_ranker_uses_research_profile_and_boosted_title():

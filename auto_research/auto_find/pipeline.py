@@ -22,6 +22,7 @@ from .sources import (
     enrich_with_semantic_scholar,
     enrich_pmlr_details,
     fetch_arxiv,
+    fetch_biorxiv,
     fetch_github_trending,
     fetch_huggingface,
     enrich_nature_details,
@@ -879,6 +880,11 @@ def run_find(
     arxiv_prefiltered_items: list[dict] = []
     arxiv_prefiltered_snapshot: list[dict] = []
     arxiv_prefilter_report: dict = {}
+    biorxiv_raw_items: list[dict] = []
+    biorxiv_raw_snapshot: list[dict] = []
+    biorxiv_prefiltered_items: list[dict] = []
+    biorxiv_prefiltered_snapshot: list[dict] = []
+    biorxiv_prefilter_report: dict = {}
     nature_items: list[dict] = []
     nature_raw_items: list[dict] = []
     nature_raw_snapshot: list[dict] = []
@@ -1087,6 +1093,37 @@ def run_find(
         article_items = _recommended(article_items, config)
         progress("arxiv", 1, 1, "arXiv complete")
 
+    if request.selection.include_biorxiv:
+        _raise_if_cancelled(should_cancel)
+        log(f"Fetching bioRxiv categories: {', '.join(config.biorxiv_categories)}")
+        progress("biorxiv", 0, 1, "Fetching bioRxiv")
+        biorxiv_items, biorxiv_status = fetch_biorxiv(
+            config.biorxiv_categories,
+            config.max_fetch_papers,
+            config.biorxiv_start_date,
+            config.biorxiv_end_date,
+        )
+        biorxiv_raw_items = biorxiv_items
+        biorxiv_raw_snapshot = _snapshot_items(biorxiv_raw_items)
+        query_text = stage0_retrieval_text
+        biorxiv_prefiltered_items, biorxiv_prefilter_report = rank_papers_tfidf(
+            biorxiv_items,
+            query_text,
+            per_category_limit=config.biorxiv_llm_candidates_per_category,
+            global_limit=config.biorxiv_llm_candidate_limit,
+        )
+        biorxiv_prefiltered_snapshot = _snapshot_items(biorxiv_prefiltered_items)
+        biorxiv_status["raw_count"] = len(biorxiv_raw_items)
+        biorxiv_status["prefiltered_count"] = len(biorxiv_prefiltered_items)
+        biorxiv_status["prefilter"] = biorxiv_prefilter_report
+        log(f"bioRxiv: fetched {len(biorxiv_raw_items)} raw records; TF-IDF shortlisted {len(biorxiv_prefiltered_items)} for LLM scoring")
+        source_status.append(biorxiv_status)
+        biorxiv_evaluated = _evaluate_items(biorxiv_prefiltered_items, effective_config, llm, "biorxiv", log, should_cancel, progress)
+        evaluated_candidates.extend(biorxiv_evaluated)
+        article_items.extend(biorxiv_evaluated)
+        article_items = _recommended(article_items, config)
+        progress("biorxiv", 1, 1, "bioRxiv complete")
+
     hf_items: list[dict] = []
     if request.selection.include_huggingface:
         _raise_if_cancelled(should_cancel)
@@ -1159,6 +1196,9 @@ def run_find(
         "arxiv_raw": arxiv_raw_snapshot,
         "arxiv_prefiltered": arxiv_prefiltered_snapshot,
         "arxiv_prefilter_report": arxiv_prefilter_report,
+        "biorxiv_raw": biorxiv_raw_snapshot,
+        "biorxiv_prefiltered": biorxiv_prefiltered_snapshot,
+        "biorxiv_prefilter_report": biorxiv_prefilter_report,
         "nature_raw": nature_raw_snapshot,
         "science_raw": science_raw_snapshot,
         "huggingface_raw": hf_raw_snapshot,
@@ -1175,6 +1215,8 @@ def run_find(
     write_json(run_dir / "stage0_profile.json", stage0_result)
     write_json(run_dir / "arxiv_raw.json", {"run_id": run_id, "results": arxiv_raw_snapshot})
     write_json(run_dir / "arxiv_prefiltered.json", {"run_id": run_id, "results": arxiv_prefiltered_snapshot, "report": arxiv_prefilter_report})
+    write_json(run_dir / "biorxiv_raw.json", {"run_id": run_id, "results": biorxiv_raw_snapshot})
+    write_json(run_dir / "biorxiv_prefiltered.json", {"run_id": run_id, "results": biorxiv_prefiltered_snapshot, "report": biorxiv_prefilter_report})
     write_json(run_dir / "nature_raw.json", {"run_id": run_id, "results": nature_raw_snapshot})
     write_json(run_dir / "science_raw.json", {"run_id": run_id, "results": science_raw_snapshot})
     write_json(run_dir / "huggingface_raw.json", {"run_id": run_id, "results": hf_raw_snapshot})

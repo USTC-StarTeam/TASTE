@@ -30,7 +30,7 @@ http://127.0.0.1:8765
 
 ## Highlights
 
-- **Targeted discovery** with a packaged full CCF venue/journal catalog plus ICLR, OpenReview, DBLP, arXiv, Hugging Face, and GitHub.
+- **Targeted discovery** with a packaged full CCF venue/journal catalog plus ICLR, OpenReview, DBLP, arXiv, bioRxiv, Hugging Face, and GitHub.
 - **Strict two-stage triage**: title screening first, then abstract/detail scoring with `fit_score`, `diversity_score`, and final ranking.
 - **Research workflow**: Find -> Read -> Ideas -> Plan -> Email/export.
 - **Role-specific LLMs** for Find, Read, Idea Generator, Idea Judge, Plan Generator, and Plan Evaluator.
@@ -140,6 +140,8 @@ Role-specific overrides are available for `find`, `read`, `idea_generator`, `ide
 | `venue_title_scan_limit` | Number of venue titles to scan before LLM triage. |
 | `arxiv_categories` | Multiple categories are supported, such as `cs.AI, cs.CV, cs.CL`. |
 | `arxiv_start_date`, `arxiv_end_date` | Optional date range. Empty means latest/default feed behavior. |
+| `biorxiv_categories` | Multiple bioRxiv subject categories are supported, such as `bioinformatics, neuroscience`; use `all` to skip category filtering. |
+| `biorxiv_start_date`, `biorxiv_end_date` | Optional date range. Empty means the latest 30 days. |
 
 ### Email Reports
 
@@ -161,13 +163,13 @@ TASTE can send rendered HTML email reports.
 1. Fill in your research interest and researcher profile.
 2. Search and add venues from the available venue list.
 3. Enter one or more years, for example `2024, 2025, 2026`.
-4. Choose whether to include arXiv, Hugging Face, and GitHub.
+4. Choose whether to include arXiv, bioRxiv, Hugging Face, and GitHub.
 5. Start Find and watch the job progress panel.
 
 Find uses a strict append-style pipeline:
 
 ```text
-venues/arXiv/HF/GitHub
+venues/arXiv/bioRxiv/HF/GitHub
 -> title index
 -> LLM title batches of 10
 -> appended title_candidates

@@ -45,6 +45,9 @@ const DEFAULT_CONFIG: Config = {
   arxiv_categories: ["cs.AI"],
   arxiv_start_date: "",
   arxiv_end_date: "",
+  biorxiv_categories: ["bioinformatics"],
+  biorxiv_start_date: "",
+  biorxiv_end_date: "",
   nature_journals: ["nature", "natmachintell", "natcomputsci", "nmeth", "ncomms"],
   nature_article_types: ["article"],
   nature_start_date: "",
@@ -290,10 +293,13 @@ const TEXT = {
     selected: "已选",
     shown: "显示",
     sources: "Sources",
-    sourcesHelp: "控制是否额外收集 arXiv、HuggingFace 和 GitHub 热门内容。",
+    sourcesHelp: "控制是否额外收集 arXiv、bioRxiv、HuggingFace 和 GitHub 热门内容。",
     arxivCategories: "arXiv categories",
     arxivHelp: "可输入多个分类，用逗号或空格隔开，例如 cs.AI, cs.CV。",
     arxivDateHelp: "可选日期范围，格式 YYYY-MM-DD 或 YYYY/MM/DD；arXiv/HuggingFace/GitHub 共用，两个日期都留空则默认全时间段或最新可用 feed。",
+    biorxivCategories: "bioRxiv categories",
+    biorxivHelp: "可输入多个 bioRxiv 学科分类，用逗号或空格隔开，例如 bioinformatics, neuroscience；输入 all 表示不过滤分类。",
+    biorxivDateHelp: "可选日期范围，格式 YYYY-MM-DD 或 YYYY/MM/DD；留空时默认抓取最近 30 天。",
     sourceStatus: "Source 状态",
     githubLanguages: "GitHub languages",
     githubLanguagesHelp: "GitHub Trending 语言过滤，可输入 all 或 python, javascript 等。",
@@ -423,10 +429,13 @@ const TEXT = {
     selected: "selected",
     shown: "shown",
     sources: "Sources",
-    sourcesHelp: "Choose whether to also collect arXiv, HuggingFace, and GitHub trending signals.",
+    sourcesHelp: "Choose whether to also collect arXiv, bioRxiv, HuggingFace, and GitHub trending signals.",
     arxivCategories: "arXiv categories",
     arxivHelp: "Enter multiple categories separated by commas or spaces, e.g. cs.AI, cs.CV.",
     arxivDateHelp: "Optional date range in YYYY-MM-DD or YYYY/MM/DD; shared by arXiv/HuggingFace/GitHub. Leave both empty for all-time or the latest available feed.",
+    biorxivCategories: "bioRxiv categories",
+    biorxivHelp: "Enter bioRxiv subject categories separated by commas or spaces, e.g. bioinformatics, neuroscience; use all to skip category filtering.",
+    biorxivDateHelp: "Optional date range in YYYY-MM-DD or YYYY/MM/DD. Leave blank to fetch the latest 30 days.",
     sourceStatus: "Source Status",
     githubLanguages: "GitHub languages",
     githubLanguagesHelp: "GitHub Trending language filter, such as all, python, javascript.",
@@ -572,6 +581,7 @@ function App() {
   const [years, setYears] = useState("2026");
   const [venueQuery, setVenueQuery] = useState("");
   const [includeArxiv, setIncludeArxiv] = useState(true);
+  const [includeBiorxiv, setIncludeBiorxiv] = useState(false);
   const [includeHf, setIncludeHf] = useState(true);
   const [includeGithub, setIncludeGithub] = useState(true);
   const [includeNature, setIncludeNature] = useState(false);
@@ -783,6 +793,7 @@ function App() {
       venue_ids: selectedVenues,
       years: parsedYears.length ? parsedYears : [2026],
       include_arxiv: includeArxiv,
+      include_biorxiv: includeBiorxiv,
       include_huggingface: includeHf,
       include_github: includeGithub,
       include_nature: includeNature,
@@ -1312,10 +1323,19 @@ function App() {
                   <input value={config.arxiv_start_date} onChange={(e) => updateConfig("arxiv_start_date", e.target.value)} placeholder={t.startDate} />
                   <input value={config.arxiv_end_date} onChange={(e) => updateConfig("arxiv_end_date", e.target.value)} placeholder={t.endDate} />
                 </div>
+                <label>{t.biorxivCategories}</label>
+                <p className="help">{t.biorxivHelp}</p>
+                <input value={(config.biorxiv_categories || ["bioinformatics"]).join(", ")} onChange={(e) => updateConfig("biorxiv_categories", splitList(e.target.value))} placeholder="bioinformatics, neuroscience" />
+                <p className="help">{t.biorxivDateHelp}</p>
+                <div className="row">
+                  <input value={config.biorxiv_start_date || ""} onChange={(e) => updateConfig("biorxiv_start_date", e.target.value)} placeholder={t.startDate} />
+                  <input value={config.biorxiv_end_date || ""} onChange={(e) => updateConfig("biorxiv_end_date", e.target.value)} placeholder={t.endDate} />
+                </div>
                 <label>{t.githubLanguages}</label>
                 <p className="help">{t.githubLanguagesHelp}</p>
                 <input value={config.github_languages.join(", ")} onChange={(e) => updateConfig("github_languages", splitList(e.target.value))} placeholder="all, python" />
                 <label className="switch"><input type="checkbox" checked={includeArxiv} onChange={(e) => setIncludeArxiv(e.target.checked)} /> arXiv</label>
+                <label className="switch"><input type="checkbox" checked={includeBiorxiv} onChange={(e) => setIncludeBiorxiv(e.target.checked)} /> bioRxiv</label>
                 <label className="switch"><input type="checkbox" checked={includeHf} onChange={(e) => setIncludeHf(e.target.checked)} /> HuggingFace</label>
                 <label className="switch"><input type="checkbox" checked={includeGithub} onChange={(e) => setIncludeGithub(e.target.checked)} /> GitHub</label>
                 {sourceStatus.length > 0 && (
