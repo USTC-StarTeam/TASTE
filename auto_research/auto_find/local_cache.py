@@ -13,6 +13,10 @@ from .local_index import LOCAL_DATABASE_DIR, _venue_id_candidates, venue_cache_k
 SCHEMA_VERSION = "1.0"
 
 
+def _json_path(path: Path) -> str:
+    return path.as_posix()
+
+
 def cache_directory(venue: dict[str, Any], year: int, root: Path = LOCAL_DATABASE_DIR) -> Path:
     return root / venue_cache_key(venue) / str(year)
 
@@ -113,10 +117,10 @@ def load_cached_venue_year(venue: dict[str, Any], year: int, root: Path = LOCAL_
     return {
         "venue_id": papers_data.get("venue_id") or venue.get("id", ""),
         "year": year,
-        "directory": str(directory),
-        "papers_path": str(papers_path),
-        "category_summary_path": str(summary_path) if summary_path.exists() else "",
-        "source_report_path": str(report_path) if report_path.exists() else "",
+        "directory": _json_path(directory),
+        "papers_path": _json_path(papers_path),
+        "category_summary_path": _json_path(summary_path) if summary_path.exists() else "",
+        "source_report_path": _json_path(report_path) if report_path.exists() else "",
         "papers": papers,
         "category_summary": summary,
         "source_report": report,
@@ -156,7 +160,7 @@ def write_venue_year_cache(
         "source_adapter": adapter,
         "paper_count": len(normalized),
         "fetched_at": fetched_at,
-        "cache_directory": str(directory),
+        "cache_directory": _json_path(directory),
     }
     category_summary = build_category_summary(venue, year, normalized, adapter)
     write_json(directory / "papers.json", paper_payload)
@@ -165,10 +169,10 @@ def write_venue_year_cache(
     return {
         "venue_id": venue.get("id", ""),
         "year": year,
-        "directory": str(directory),
-        "papers_path": str(directory / "papers.json"),
-        "category_summary_path": str(directory / "category_summary.json"),
-        "source_report_path": str(directory / "source_report.json"),
+        "directory": _json_path(directory),
+        "papers_path": _json_path(directory / "papers.json"),
+        "category_summary_path": _json_path(directory / "category_summary.json"),
+        "source_report_path": _json_path(directory / "source_report.json"),
         "papers": normalized,
         "category_summary": category_summary,
         "source_report": source_report,
