@@ -426,6 +426,8 @@ def test_icml_sample_falls_back_to_openreview_when_databases_empty(monkeypatch):
 
 
 def test_arxiv_returns_status_for_success(monkeypatch):
+    captured = []
+
     class Response:
         text = """<?xml version='1.0' encoding='UTF-8'?>
         <feed xmlns="http://www.w3.org/2005/Atom">
@@ -438,12 +440,16 @@ def test_arxiv_returns_status_for_success(monkeypatch):
           </entry>
         </feed>"""
 
-    monkeypatch.setattr("auto_research.auto_find.sources._request", lambda _url: Response())
-    items, status = fetch_arxiv(["cs.AI"], 3, "", "")
+    def fake_request(url):
+        captured.append(url)
+        return Response()
+
+    monkeypatch.setattr("auto_research.auto_find.sources._request", fake_request)
+    items, status = fetch_arxiv(["cs.AI"], 3, "2026-04-01", "2026-04-30")
     assert len(items) == 1
     assert status["ok"] is True
     assert status["count"] == 1
-    assert status["queries"] == ["cat:cs.AI"]
+    assert status["queries"] == ["cat:cs.AI AND submittedDate:[202604010000 TO 202604302359]"]
 
 
 def test_nature_feed_parses_and_filters_dates(monkeypatch):
@@ -688,6 +694,60 @@ def test_arxiv_returns_status_for_failure(monkeypatch):
     assert "network down" in status["message"]
 
 
+def test_arxiv_recent_fallback_when_api_unavailable(monkeypatch):
+    list_html = """<!doctype html>
+    <html><body>
+      <h3>Tue, 26 May 2026 (showing first 1 of 1 entries)</h3>
+      <dl>
+        <dt>
+          <a href="/abs/2605.26114" id="2605.26114" title="Abstract">arXiv:2605.26114</a>
+          [<a href="/pdf/2605.26114" title="Download PDF">pdf</a>]
+        </dt>
+        <dd>
+          <div class="meta">
+            <div class="list-title mathjax"><span class="descriptor">Title:</span> Mobile GUI Agent Research</div>
+            <div class="list-authors"><a>Dingbang Wu</a>, <a>Rui Hao</a></div>
+            <div class="list-subjects"><span class="descriptor">Subjects:</span> <span class="primary-subject">Artificial Intelligence (cs.AI)</span>; Computation and Language (cs.CL)</div>
+          </div>
+        </dd>
+      </dl>
+    </body></html>"""
+    abs_html = """<!doctype html>
+    <html><head>
+      <meta name="citation_title" content="MobileGym: A Verifiable Simulation Platform">
+      <meta name="citation_author" content="Wu, Dingbang">
+      <meta name="citation_author" content="Hao, Rui">
+      <meta name="citation_date" content="2026/05/25">
+      <meta name="citation_pdf_url" content="https://arxiv.org/pdf/2605.26114">
+      <meta name="citation_arxiv_id" content="2605.26114">
+      <meta name="citation_abstract" content="A mobile GUI agent benchmark.">
+    </head><body></body></html>"""
+
+    class Response:
+        def __init__(self, text):
+            self.text = text
+
+    def fake_request(url, timeout=12):
+        if "export.arxiv.org" in url:
+            raise RuntimeError("api rate limited")
+        if "/list/cs.AI/recent" in url:
+            return Response(list_html)
+        if "/abs/2605.26114" in url:
+            return Response(abs_html)
+        raise AssertionError(url)
+
+    monkeypatch.setattr("auto_research.auto_find.sources._request", fake_request)
+    items, status = fetch_arxiv(["cs.AI"], 5, "2026-05-01", "2026-05-31")
+
+    assert len(items) == 1
+    assert status["ok"] is True
+    assert status["fallback_used"] is True
+    assert status["fallback_pages_fetched"] == 1
+    assert items[0]["title"] == "MobileGym: A Verifiable Simulation Platform"
+    assert items[0]["abstract"] == "A mobile GUI agent benchmark."
+    assert items[0]["metadata"]["published"] == "2026-05-25"
+
+
 def test_arxiv_paginates_and_dedupes(monkeypatch):
     pages = {
         0: """<?xml version='1.0' encoding='UTF-8'?>
@@ -737,7 +797,7 @@ def test_arxiv_paginates_and_dedupes(monkeypatch):
     items, status = fetch_arxiv(["cs.AI", "cs.CL"], 1, "", "")
 
     assert len(items) == 2
-    assert status["pages_fetched"] == 4
+    assert status["pages_fetched"] == 2
     assert status["deduped_count"] == 2
     duplicate = next(item for item in items if item["arxiv_id"] == "2604.00001v1")
     assert duplicate["categories"] == ["cs.AI", "cs.CL"]

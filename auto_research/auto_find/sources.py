@@ -6,7 +6,8 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta
-from urllib.parse import quote_plus, urlencode
+from typing import Any
+from urllib.parse import quote, quote_plus, urlencode, urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -2141,6 +2142,138 @@ def _request_arxiv_page(url: str, attempts: int = 3):
     raise RuntimeError("arXiv request failed")
 
 
+def _arxiv_date_stamp(value: str, fallback: str, suffix: str) -> str:
+    normalized = normalize_date(value) or fallback
+    return normalized.replace("-", "") + suffix
+
+
+def _arxiv_add_or_merge_paper(by_key: dict[str, dict], papers: list[dict], paper: dict, category: str) -> None:
+    key = paper.get("arxiv_id") or str(paper.get("title", "")).lower()
+    if not key:
+        return
+    existing = by_key.get(key)
+    if existing:
+        categories_seen = existing.setdefault("categories", [existing.get("category", "")])
+        if category not in categories_seen:
+            categories_seen.append(category)
+        existing.setdefault("metadata", {})["all_categories"] = categories_seen
+        return
+    by_key[key] = paper
+    papers.append(paper)
+
+
+def _arxiv_abs_metadata(abs_url: str) -> dict[str, Any]:
+    try:
+        text = _request_arxiv_page(abs_url, attempts=2).text
+    except Exception:
+        return {}
+    soup = BeautifulSoup(text, "html.parser")
+
+    def meta_values(name: str) -> list[str]:
+        return [str(node.get("content") or "").strip() for node in soup.select(f'meta[name="{name}"]') if node.get("content")]
+
+    abstract_values = meta_values("citation_abstract")
+    abstract = abstract_values[0] if abstract_values else ""
+    if not abstract:
+        abstract_node = soup.select_one("blockquote.abstract")
+        if abstract_node:
+            abstract = re.sub(r"^Abstract:\s*", "", abstract_node.get_text(" ", strip=True))
+    return {
+        "title": (meta_values("citation_title") or [""])[0],
+        "authors": ", ".join(meta_values("citation_author")),
+        "published": normalize_date((meta_values("citation_date") or [""])[0]),
+        "pdf_url": (meta_values("citation_pdf_url") or [""])[0],
+        "arxiv_id": (meta_values("citation_arxiv_id") or [""])[0],
+        "abstract": " ".join(abstract.split()),
+    }
+
+
+def _parse_arxiv_list_date(text: str) -> str:
+    match = re.search(r"\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+(\d{1,2}\s+\w{3}\s+\d{4})", text or "")
+    if not match:
+        return ""
+    try:
+        return datetime.strptime(match.group(1), "%d %b %Y").date().isoformat()
+    except ValueError:
+        return ""
+
+
+def _fetch_arxiv_recent_fallback(
+    category: str,
+    max_items: int,
+    start_date: str,
+    end_date: str,
+    by_key: dict[str, dict],
+    papers: list[dict],
+) -> tuple[int, list[str], bool]:
+    errors: list[str] = []
+    fetched = 0
+    reached_older_date = False
+    page_size = max(1, min(100, int(max_items or 100)))
+    category_count_before = len(papers)
+    category_path = quote(category, safe=".")
+    for start in range(0, max(1, max_items), page_size):
+        url = f"https://arxiv.org/list/{category_path}/recent?skip={start}&show={page_size}"
+        try:
+            text = _request_arxiv_page(url).text
+        except Exception as exc:
+            errors.append(f"{category} recent start={start}: {exc}")
+            break
+        fetched += 1
+        soup = BeautifulSoup(text, "html.parser")
+        page_date = _parse_arxiv_list_date(" ".join(node.get_text(" ", strip=True) for node in soup.select("h3")))
+        entries = list(zip(soup.select("dl dt"), soup.select("dl dd")))
+        if not entries:
+            break
+        added_this_page = 0
+        for dt_node, dd_node in entries:
+            abs_link = dt_node.select_one('a[title="Abstract"]')
+            if not abs_link:
+                continue
+            abs_url = urljoin("https://arxiv.org", abs_link.get("href") or "")
+            arxiv_id = _arxiv_entry_id(abs_url) or str(abs_link.get("id") or "")
+            title_node = dd_node.select_one(".list-title")
+            title = title_node.get_text(" ", strip=True) if title_node else ""
+            title = re.sub(r"^Title:\s*", "", title)
+            authors = ", ".join(node.get_text(" ", strip=True) for node in dd_node.select(".list-authors a"))
+            pdf_link = dt_node.select_one('a[title="Download PDF"]')
+            pdf_url = urljoin("https://arxiv.org", pdf_link.get("href") or "") if pdf_link else f"https://arxiv.org/pdf/{arxiv_id}"
+            subjects_text = (dd_node.select_one(".list-subjects") or dd_node).get_text(" ", strip=True)
+            all_categories = re.findall(r"\(([a-z-]+\.[A-Z]{2})\)", subjects_text) or [category]
+            metadata = _arxiv_abs_metadata(abs_url)
+            published = metadata.get("published") or page_date
+            if not _in_date_range(published, start_date, end_date):
+                if start_date and published and published < start_date:
+                    reached_older_date = True
+                continue
+            arxiv_id = metadata.get("arxiv_id") or arxiv_id
+            paper = {
+                "id": stable_id("paper", abs_url or title),
+                "source": "arxiv",
+                "arxiv_id": arxiv_id,
+                "title": metadata.get("title") or title,
+                "authors": metadata.get("authors") or authors,
+                "abstract": metadata.get("abstract") or "",
+                "url": abs_url,
+                "pdf_url": metadata.get("pdf_url") or pdf_url,
+                "venue": "arXiv",
+                "year": int(published[:4]) if published[:4].isdigit() else date.today().year,
+                "category": category,
+                "categories": all_categories,
+                "classification_source": "llm_inferred",
+                "metadata": {"published": published, "updated": "", "arxiv_category": category, "primary_category": category, "all_categories": all_categories, "fallback": "arxiv_recent"},
+            }
+            before = len(papers)
+            _arxiv_add_or_merge_paper(by_key, papers, paper, category)
+            added_this_page += len(papers) - before
+            if len(papers) - category_count_before >= max_items:
+                break
+        if reached_older_date or len(papers) - category_count_before >= max_items or added_this_page == 0:
+            break
+        time.sleep(0.5)
+    return fetched, errors, reached_older_date
+
+
 def fetch_arxiv(categories: list[str], max_items: int, start_date: str = "", end_date: str = "") -> tuple[list[dict], dict]:
     papers: list[dict] = []
     by_key: dict[str, dict] = {}
@@ -2160,17 +2293,20 @@ def fetch_arxiv(categories: list[str], max_items: int, start_date: str = "", end
         "queries": [],
         "errors": [],
         "pages_fetched": 0,
+        "fallback_pages_fetched": 0,
+        "fallback_used": False,
         "deduped_count": 0,
     }
     for category in categories:
         query_text = f"cat:{category}"
         if start_date or end_date:
-            start_stamp = (start_date or "1991-01-01").replace("-", "") + "0000"
-            end_stamp = (end_date or "3000-01-01").replace("-", "") + "2359"
+            start_stamp = _arxiv_date_stamp(start_date, "1991-01-01", "0000")
+            end_stamp = _arxiv_date_stamp(end_date, "3000-01-01", "2359")
             query_text = f"{query_text} AND submittedDate:[{start_stamp} TO {end_stamp}]"
         query = quote_plus(query_text)
         status["queries"].append(query_text)
         start = 0
+        category_count_before = len(papers)
         while True:
             url = f"https://export.arxiv.org/api/query?search_query={query}&sortBy=submittedDate&sortOrder=descending&start={start}&max_results={page_size}"
             try:
@@ -2219,18 +2355,29 @@ def fetch_arxiv(categories: list[str], max_items: int, start_date: str = "", end
                     "classification_source": "llm_inferred",
                     "metadata": {"published": published, "updated": updated, "arxiv_category": category, "primary_category": category, "all_categories": all_categories},
                 }
-                by_key[key] = paper
-                papers.append(paper)
+                _arxiv_add_or_merge_paper(by_key, papers, paper, category)
+                if len(papers) - category_count_before >= max_items:
+                    break
+            if len(papers) - category_count_before >= max_items:
+                break
             if len(entries) < page_size:
                 break
             start += page_size
             time.sleep(0.5)
+        if len(papers) == category_count_before:
+            fallback_pages, fallback_errors, fallback_limited = _fetch_arxiv_recent_fallback(category, max_items, start_date, end_date, by_key, papers)
+            if fallback_pages:
+                status["fallback_used"] = True
+                status["fallback_pages_fetched"] += fallback_pages
+                status["limited"] = status["limited"] or fallback_limited
+            status["errors"].extend(fallback_errors)
         time.sleep(0.5)
     status["count"] = len(papers)
     status["deduped_count"] = len(papers)
     status["ok"] = bool(papers)
     if papers:
-        status["message"] = f"ok; fetched all available pages; queries={'; '.join(status['queries'])}"
+        suffix = "; used arxiv.org recent fallback" if status["fallback_used"] else ""
+        status["message"] = f"ok{suffix}; queries={'; '.join(status['queries'])}"
     elif status["errors"]:
         status["message"] = "arXiv unavailable or query failed: " + " | ".join(status["errors"][:3])
     else:
