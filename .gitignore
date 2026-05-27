@@ -1,9 +1,14 @@
 .venv/
+.conda/
+.mamba/
+env/
+conda-meta/
 __pycache__/
 .pytest_cache/
 node_modules/
 auto_research/runs/
 auto_research/state/
+auto_research/local_database/*/
 auto_research/web/client/dist/
 auto_research/**/*.pdf
 auto_research/.config.json

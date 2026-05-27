@@ -1,6 +1,6 @@
 from auto_research.auto_find.catalog import load_catalog
 from auto_research.auto_find.local_rank import rank_papers_tfidf
-from auto_research.auto_find.sources import _dblp_page_url, _openreview_venue_ids, _parse_neurips_detail, _parse_neurips_list, enrich_science_details, fetch_arxiv, fetch_biorxiv, fetch_dblp_stream_api, fetch_nature_portfolio, fetch_openreview_venue, fetch_science_family, fetch_venue_sample, fetch_venue_title_index, normalize_date
+from auto_research.auto_find.sources import _dblp_page_url, _openreview_venue_ids, _parse_dblp_year_links, _parse_neurips_detail, _parse_neurips_list, enrich_science_details, fetch_arxiv, fetch_biorxiv, fetch_dblp_stream_api, fetch_dblp_venue, fetch_nature_portfolio, fetch_openreview_venue, fetch_science_family, fetch_venue_sample, fetch_venue_title_index, normalize_date
 from auto_research.llm import LLMClient, clamp_workers, extract_json, fallback_score, keyword_category
 from auto_research.markdown import paper_markdown
 from auto_research.models import AppConfig, LLMRoleConfig
@@ -275,6 +275,65 @@ def test_dblp_stream_api_parses_json_hits(monkeypatch):
     assert papers[0]["title"] == "Generative Systems Paper"
     assert papers[0]["authors"] == "Alice, Bob"
     assert papers[0]["year"] == 2025
+
+
+def test_dblp_year_links_accept_volume_suffix_in_href(monkeypatch):
+    class Response:
+        text = """
+        <html><body>
+          <a href="kdd2026-1.html">table of contents in dblp</a>
+          <a href="kdd2025-1.html">table of contents in dblp</a>
+        </body></html>
+        """
+
+    monkeypatch.setattr("auto_research.auto_find.sources._request", lambda *_args, **_kwargs: Response())
+
+    links = _parse_dblp_year_links("https://dblp.uni-trier.de/db/conf/kdd/", [2026])
+
+    assert links == [(2026, "https://dblp.uni-trier.de/db/conf/kdd/kdd2026-1.html")]
+
+
+def test_dblp_full_fetch_uses_stream_api(monkeypatch):
+    captured = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "hits": {
+                        "hit": [
+                            {
+                                "info": {
+                                    "title": "KDD Full Fetch Paper.",
+                                    "year": "2026",
+                                    "authors": {"author": [{"text": "Alice"}]},
+                                    "ee": "https://doi.org/10.1145/example",
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+
+    def fake_get(_url, params=None, **_kwargs):
+        captured.append(params)
+        return Response()
+
+    monkeypatch.setattr("auto_research.auto_find.sources.requests.get", fake_get)
+
+    papers = fetch_dblp_venue(
+        {"id": "kdd", "name": "SIGKDD", "address": "https://dblp.uni-trier.de/db/conf/kdd/"},
+        [2026],
+        None,
+    )
+
+    assert papers[0]["title"] == "KDD Full Fetch Paper"
+    assert papers[0]["year"] == 2026
+    assert captured[0]["q"] == "stream:streams/conf/kdd:"
+    assert captured[0]["h"] == 1000
 
 
 def test_openreview_known_venues_are_checked_before_dblp(monkeypatch):

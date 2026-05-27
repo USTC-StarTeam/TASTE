@@ -310,15 +310,16 @@ def _dblp_authors(value: object) -> str:
     return ""
 
 
-def fetch_dblp_stream_api(venue: dict, years: list[int], max_items: int) -> list[dict]:
+def fetch_dblp_stream_api(venue: dict, years: list[int], max_items: int | None) -> list[dict]:
     stream_id = _dblp_stream_id(venue.get("address", ""))
     if not stream_id:
         return []
     wanted = {str(year) for year in years}
+    request_size = 1000 if max_items is None else min(1000, max(100, max_items * 20))
     try:
         response = requests.get(
             "http://dblp.org/search/publ/api",
-            params={"q": f"stream:streams/{stream_id}:", "h": max(100, max_items * 20), "format": "json"},
+            params={"q": f"stream:streams/{stream_id}:", "h": request_size, "format": "json"},
             headers=HEADERS,
             timeout=12,
         )
@@ -352,7 +353,7 @@ def fetch_dblp_stream_api(venue: dict, years: list[int], max_items: int) -> list
             "classification_source": "llm_inferred",
             "metadata": {"venue_id": venue.get("id"), "dblp_stream": stream_id},
         })
-        if len(papers) >= max_items:
+        if max_items is not None and len(papers) >= max_items:
             return papers
     return papers
 
@@ -883,20 +884,20 @@ def _parse_dblp_year_links(address: str, years: list[int], max_years: int = 4) -
     links: list[tuple[int, str]] = []
     for anchor in soup.find_all("a", href=True):
         text = anchor.get_text(" ", strip=True)
-        match = re.search(r"\b(20\d{2}|19\d{2})\b", text)
-        if not match or match.group(1) not in wanted:
-            continue
         href = anchor["href"]
         if href.startswith("http") and "dblp" not in href:
             continue
         if not href.startswith("http"):
             href = requests.compat.urljoin(address, href)
         href = _dblp_page_url(href)
+        matched_years = [year for year in re.findall(r"(20\d{2}|19\d{2})", f"{text} {href}") if year in wanted]
+        if not matched_years:
+            continue
         if "#" in href:
             continue
         if "/rec/conf/" in href:
             continue
-        year = int(match.group(1))
+        year = int(matched_years[0])
         if (year, href) not in links:
             links.append((year, href))
         if len(links) >= max_years:
@@ -907,15 +908,14 @@ def _parse_dblp_year_links(address: str, years: list[int], max_years: int = 4) -
 
 
 def fetch_dblp_venue(venue: dict, years: list[int], max_items: int | None) -> list[dict]:
-    if max_items is not None:
-        papers = fetch_dblp_stream_api(venue, years, max_items)
-        if papers:
-            return papers
+    papers = fetch_dblp_stream_api(venue, years, max_items)
+    if papers:
+        return papers
 
     def reached_limit() -> bool:
         return max_items is not None and len(papers) >= max_items
 
-    papers: list[dict] = []
+    papers = []
     links = _parse_dblp_year_links(venue.get("address", ""), years, max_years=max(4, len(years)))
     if not links:
         return papers
