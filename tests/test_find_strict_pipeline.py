@@ -116,6 +116,31 @@ class Filter2LLM:
         return {"ok": True, "error": "", "data": {"decisions": rows}}
 
 
+class OmittingFilter2LLM:
+    enabled = True
+
+    def __init__(self):
+        self.prompts = []
+
+    def json_or_error(self, prompt: str):
+        self.prompts.append(prompt)
+        ids = re.findall(r"paper_\d+", prompt)
+        rows = []
+        for item_id in ids:
+            if item_id == "paper_1" and len(ids) > 1:
+                continue
+            rows.append({
+                "id": item_id,
+                "decision": "keep",
+                "fit_score": 8,
+                "diversity_score": 6,
+                "hit_directions": ["agents"],
+                "category": "Research Agents",
+                "reason": "明确相关。",
+            })
+        return {"ok": True, "error": "", "data": {"decisions": rows}}
+
+
 def test_filter2_keeps_uncertain_and_rejects_only_clear_mismatches():
     items = [{"id": f"paper_{index}", "title": f"Paper title {index}"} for index in range(3)]
     cfg = AppConfig(provider="mock", research_interest="LLM agents for research automation", max_fetch_papers=10)
@@ -132,6 +157,28 @@ def test_filter2_keeps_uncertain_and_rejects_only_clear_mismatches():
     assert [item["id"] for item in selected] == ["paper_0", "paper_1"]
     assert selected[0]["filter2_decision"] == "keep"
     assert selected[1]["filter2_decision"] == "uncertain"
+
+
+def test_filter2_retries_llm_omitted_batch_items():
+    items = [{"id": f"paper_{index}", "title": f"Paper title {index}"} for index in range(3)]
+    llm = OmittingFilter2LLM()
+    cfg = AppConfig(provider="mock", research_interest="LLM agents for research automation", max_fetch_papers=10)
+    logs: list[str] = []
+
+    selected = _prefilter_titles(
+        items,
+        cfg,
+        llm,
+        "TestVenue",
+        log=logs.append,
+        should_cancel=lambda: False,
+    )
+
+    by_id = {item["id"]: item for item in selected}
+    assert set(by_id) == {"paper_0", "paper_1", "paper_2"}
+    assert len(llm.prompts) == 2
+    assert any("omitted 1 items" in line and "single-item retry" in line for line in logs)
+    assert by_id["paper_1"]["reason_source"] == "llm filter2"
 
 
 def test_abstract_evaluation_filters_low_fit_recommendations():

@@ -260,19 +260,18 @@ def _prefilter_titles(
             ]
         else:
             batches_with_context = [(batch, "") for batch in _chunks(scanned, batch_size)]
-        prompts: list[str] = []
-        for batch_index, (batch, context) in enumerate(batches_with_context, 1):
-            _raise_if_cancelled(should_cancel)
+
+        def title_filter_prompt(batch: list[dict], batch_index: int, total_batches: int, context: str) -> str:
             title_lines = "\n".join(f"- {item.get('id')}: {item.get('title')}" for item in batch)
             context_block = f"\nBatch context:\n{context}\n" if context else ""
-            prompts.append(f"""
+            return f"""
 You are allocating a title-level Filter 2 budget before expensive abstract/PDF fetching.
 
 Research interest/profile:
 {interest}
 {context_block}
 
-Paper titles, batch {batch_index}/{len(batches_with_context)}:
+Paper titles, batch {batch_index}/{total_batches}:
 {title_lines}
 
 Return strict JSON:
@@ -287,10 +286,46 @@ Rules:
 - fit_score is the core match to the profile. Use strict scoring: 9-10 exceptional, 7-8 strong, 6 possible, <=5 weak.
 - diversity_score only rewards hitting multiple real user directions or adding a complementary method/domain. It cannot rescue low fit.
 - Do not reject merely because the title lacks detail.
-""")
+"""
+
+        def apply_title_filter_row(row: dict) -> dict | None:
+            item = by_id.get(str(row.get("id") or ""))
+            if not item:
+                return None
+            item["fit_score"] = _as_float(row.get("fit_score"), _as_float(row.get("score"), item.get("fit_score") or 0))
+            item["diversity_score"] = _as_float(row.get("diversity_score"), item.get("diversity_score") or 0)
+            item["score"] = _combined_score(item["fit_score"], item["diversity_score"])
+            item["hit_directions"] = _normalize_hit_directions(row.get("hit_directions"))
+            item["category"] = str(row.get("category") or item.get("category") or "")
+            item["title_reason"] = str(row.get("reason") or item.get("title_reason") or "")
+            item["fit_explanation"] = item["title_reason"]
+            item["reason_source"] = "llm filter2"
+            item["filter2_decision"] = _normalize_filter2_decision(row.get("decision"), item.get("fit_score"))
+            item["filter2_reason"] = item["title_reason"]
+            group = group_by_id.get(str(item.get("id") or ""))
+            if group:
+                item["title_filter_context"] = {
+                    "venue": group["venue"],
+                    "year": group["year"],
+                    "category": group["category"],
+                    "category_size": group["category_size"],
+                    "venue_year_total": group["venue_year_total"],
+                    "category_ratio": group["category_ratio"],
+                    "strictness": group["policy"]["label"],
+                    "min_fit_score": group["policy"]["min_score"],
+                    "keep_ratio": group["policy"]["keep_ratio"],
+                }
+            _apply_relevance_guard(item)
+            return item
+
+        prompts: list[str] = []
+        for batch_index, (batch, context) in enumerate(batches_with_context, 1):
+            _raise_if_cancelled(should_cancel)
+            prompts.append(title_filter_prompt(batch, batch_index, len(batches_with_context), context))
         workers = clamp_workers(config.llm_concurrency, default=16, maximum=32)
         results = parallel_json(llm, prompts, workers)
         seen: set[str] = set()
+        omitted_for_retry: list[tuple[dict, str]] = []
         total_batches = len(batches_with_context)
         for batch_index, ((batch, _context), result) in enumerate(zip(batches_with_context, results, strict=False), 1):
             _raise_if_cancelled(should_cancel)
@@ -303,38 +338,23 @@ Rules:
                     rows = [rows]
             else:
                 rows = None
+            batch_returned_ids: set[str] = set()
             if isinstance(rows, list):
                 for row in rows:
-                    item = by_id.get(str(row.get("id") or ""))
-                    if not item or item.get("id") in seen:
+                    item = apply_title_filter_row(row)
+                    if not item:
                         continue
-                    item["fit_score"] = _as_float(row.get("fit_score"), _as_float(row.get("score"), item.get("fit_score") or 0))
-                    item["diversity_score"] = _as_float(row.get("diversity_score"), item.get("diversity_score") or 0)
-                    item["score"] = _combined_score(item["fit_score"], item["diversity_score"])
-                    item["hit_directions"] = _normalize_hit_directions(row.get("hit_directions"))
-                    item["category"] = str(row.get("category") or item.get("category") or "")
-                    item["title_reason"] = str(row.get("reason") or item.get("title_reason") or "")
-                    item["fit_explanation"] = item["title_reason"]
-                    item["reason_source"] = "llm filter2"
-                    item["filter2_decision"] = _normalize_filter2_decision(row.get("decision"), item.get("fit_score"))
-                    item["filter2_reason"] = item["title_reason"]
-                    group = group_by_id.get(str(item.get("id") or ""))
-                    if group:
-                        item["title_filter_context"] = {
-                            "venue": group["venue"],
-                            "year": group["year"],
-                            "category": group["category"],
-                            "category_size": group["category_size"],
-                            "venue_year_total": group["venue_year_total"],
-                            "category_ratio": group["category_ratio"],
-                            "strictness": group["policy"]["label"],
-                            "min_fit_score": group["policy"]["min_score"],
-                            "keep_ratio": group["policy"]["keep_ratio"],
-                        }
-                    _apply_relevance_guard(item)
+                    item_id = str(item.get("id") or "")
+                    batch_returned_ids.add(item_id)
+                    if item_id in seen:
+                        continue
                     if item.get("filter2_decision") != "reject":
                         selected.append(item)
-                        seen.add(item.get("id", ""))
+                        seen.add(item_id)
+            for item in batch:
+                item_id = str(item.get("id") or "")
+                if item_id and item_id not in batch_returned_ids:
+                    omitted_for_retry.append((item, _context))
             pct = round(batch_index / total_batches * 100)
             progress(
                 "llm_title_filter",
@@ -342,6 +362,48 @@ Rules:
                 total_batches,
                 f"{venue_name}: title filtering {pct}% ({batch_index}/{total_batches} batches), candidates={len(selected)}",
             )
+        if omitted_for_retry:
+            retry_limit = min(len(omitted_for_retry), max(1, int(config.venue_title_scan_limit or 200)))
+            log(f"{venue_name}: LLM title filter omitted {len(omitted_for_retry)} items; queued {retry_limit} for bounded single-item retry")
+            retry_items = omitted_for_retry[:retry_limit]
+            retry_prompts = [
+                title_filter_prompt([item], index, len(retry_items), context)
+                for index, (item, context) in enumerate(retry_items, 1)
+            ]
+            retry_results = parallel_json(llm, retry_prompts, workers)
+            retry_returned_ids: set[str] = set()
+            for (item, _context), result in zip(retry_items, retry_results, strict=False):
+                _raise_if_cancelled(should_cancel)
+                data = result.get("data")
+                rows = data.get("decisions") if isinstance(data, dict) else None
+                if not isinstance(rows, list) and isinstance(data, dict):
+                    rows = data.get("selected")
+                if isinstance(rows, dict):
+                    rows = [rows]
+                if isinstance(rows, list):
+                    for row in rows:
+                        retried = apply_title_filter_row(row)
+                        if not retried:
+                            continue
+                        item_id = str(retried.get("id") or "")
+                        if item_id != str(item.get("id") or ""):
+                            continue
+                        retry_returned_ids.add(item_id)
+                        if item_id in seen:
+                            continue
+                        if retried.get("filter2_decision") != "reject":
+                            selected.append(retried)
+                            seen.add(item_id)
+                item_id = str(item.get("id") or "")
+                if item_id not in retry_returned_ids and item_id not in seen and item.get("filter2_decision") != "reject":
+                    selected.append(item)
+                    seen.add(item_id)
+            if len(omitted_for_retry) > retry_limit:
+                for item, _context in omitted_for_retry[retry_limit:]:
+                    item_id = str(item.get("id") or "")
+                    if item_id and item_id not in seen and item.get("filter2_decision") != "reject":
+                        selected.append(item)
+                        seen.add(item_id)
         if selected:
             selected.sort(key=lambda row: float(row.get("score") or 0), reverse=True)
             decision_counts = Counter(str(item.get("filter2_decision") or "") for item in selected)
