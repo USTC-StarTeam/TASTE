@@ -733,7 +733,7 @@
     "rank": "B",
     "field": "Architecture / Distributed / Storage",
     "field_key": "ARCH_DCP_SS",
-    "address": "http://dblp.uni-trier.de/db/conf/performance/",
+    "address": "https://dblp.org/db/conf/sigmetrics/",
     "years": [
       2026,
       2025,
@@ -2433,7 +2433,7 @@
     "rank": "B",
     "field": "Computer Networks",
     "field_key": "CN",
-    "address": "http://dblp.uni-trier.de/db/conf/ipsn/",
+    "address": "https://dblp.org/db/conf/sensys/",
     "years": [
       2026,
       2025,
@@ -3833,7 +3833,7 @@
     "rank": "B",
     "field": "Network and Information Security",
     "field_key": "NIS",
-    "address": "http://dblp.uni-trier.de/db/conf/fse/",
+    "address": "https://dblp.org/db/journals/tosc/",
     "years": [
       2026,
       2025,
@@ -3908,7 +3908,7 @@
     "rank": "B",
     "field": "Network and Information Security",
     "field_key": "NIS",
-    "address": "http://dblp.uni-trier.de/db/conf/ches/",
+    "address": "https://dblp.org/db/journals/tches/",
     "years": [
       2026,
       2025,
@@ -4533,7 +4533,7 @@
     "rank": "C",
     "field": "Network and Information Security",
     "field_key": "NIS",
-    "address": "http://dblp.uni-trier.de/db/conf/pet/",
+    "address": "https://dblp.org/db/journals/popets/",
     "years": [
       2026,
       2025,
@@ -5683,7 +5683,7 @@
     "rank": "B",
     "field": "Software Engineering / Systems / PL",
     "field_key": "TCSE_SS_PDL",
-    "address": "http://dblp.uni-trier.de/db/conf/wcre/",
+    "address": "https://dblp.org/db/conf/saner/",
     "years": [
       2026,
       2025,
@@ -6258,7 +6258,7 @@
     "rank": "C",
     "field": "Software Engineering / Systems / PL",
     "field_key": "TCSE_SS_PDL",
-    "address": "http://paris.utdallas.edu/qrs/",
+    "address": "https://dblp.org/db/conf/qrs/",
     "years": [
       2026,
       2025,
@@ -6483,7 +6483,7 @@
     "rank": "C",
     "field": "Software Engineering / Systems / PL",
     "field_key": "TCSE_SS_PDL",
-    "address": "http://dblp.uni-trier.de/db/conf/wicsa/",
+    "address": "https://dblp.org/db/conf/icsa/",
     "years": [
       2026,
       2025,
@@ -6708,7 +6708,7 @@
     "rank": "B",
     "field": "Software Engineering / Systems / PL",
     "field_key": "TCSE_SS_PDL",
-    "address": "http://dblp.uni-trier.de/db/journals/iee/index.html",
+    "address": "https://dblp.org/db/journals/iet-sen/",
     "years": [
       2026,
       2025,
@@ -6958,7 +6958,7 @@
     "rank": "C",
     "field": "Software Engineering / Systems / PL",
     "field_key": "TCSE_SS_PDL",
-    "address": "http://dblp.uni-trier.de/db/journals/cl/index.html",
+    "address": "https://dblp.org/db/journals/cl/",
     "years": [
       2026,
       2025,
@@ -7283,7 +7283,7 @@
     "rank": "A",
     "field": "Database / Data Mining / IR",
     "field_key": "DM_CS",
-    "address": "http://dblp.uni-trier.de/db/conf/vldb/",
+    "address": "https://dblp.org/db/journals/pvldb/",
     "years": [
       2026,
       2025,
@@ -9233,7 +9233,7 @@
     "rank": "C",
     "field": "Theory",
     "field_key": "TCS",
-    "address": "http://dblp.uni-trier.de/db/conf/rta/",
+    "address": "https://dblp.org/db/conf/fscd/",
     "years": [
       2026,
       2025,
@@ -10108,7 +10108,7 @@
     "rank": "A",
     "field": "Graphics and Multimedia",
     "field_key": "CGAndMT",
-    "address": "http://dblp.uni-trier.de/db/conf/visualization/index.html",
+    "address": "https://dblp.org/db/journals/tvcg/",
     "years": [
       2026,
       2025,
@@ -10183,7 +10183,7 @@
     "rank": "B",
     "field": "Graphics and Multimedia",
     "field_key": "CGAndMT",
-    "address": "http://dblp.uni-trier.de/db/conf/sca/index.html",
+    "address": "https://dblp.org/db/journals/pacmcgit/",
     "years": [
       2026,
       2025,
@@ -10283,7 +10283,7 @@
     "rank": "B",
     "field": "Graphics and Multimedia",
     "field_key": "CGAndMT",
-    "address": "http://dblp.uni-trier.de/db/conf/sgp/",
+    "address": "https://dblp.org/db/journals/cgf/",
     "years": [
       2026,
       2025,
@@ -10308,7 +10308,7 @@
     "rank": "B",
     "field": "Graphics and Multimedia",
     "field_key": "CGAndMT",
-    "address": "http://dblp.uni-trier.de/db/conf/rt/",
+    "address": "https://dblp.org/db/journals/cgf/",
     "years": [
       2026,
       2025,
@@ -10433,7 +10433,7 @@
     "rank": "B",
     "field": "Graphics and Multimedia",
     "field_key": "CGAndMT",
-    "address": "http://dblp.uni-trier.de/db/conf/sma/",
+    "address": "https://dblp.org/db/journals/cgf/",
     "years": [
       2026,
       2025,
@@ -10508,7 +10508,7 @@
     "rank": "C",
     "field": "Graphics and Multimedia",
     "field_key": "CGAndMT",
-    "address": "http://dblp.uni-trier.de/db/conf/cgi/",
+    "address": "https://dblp.org/db/journals/cgf/",
     "years": [
       2026,
       2025,
@@ -10558,7 +10558,7 @@
     "rank": "C",
     "field": "Graphics and Multimedia",
     "field_key": "CGAndMT",
-    "address": "http://dblp.uni-trier.de/db/conf/gmp/",
+    "address": "https://dblp.org/db/journals/cgf/",
     "years": [
       2026,
       2025,
@@ -10633,7 +10633,7 @@
     "rank": "C",
     "field": "Graphics and Multimedia",
     "field_key": "CGAndMT",
-    "address": "https://dblp.uni-trier.de/db/conf/cadgraphics/",
+    "address": "https://dblp.org/db/journals/cgf/",
     "years": [
       2026,
       2025,
@@ -10733,7 +10733,7 @@
     "rank": "C",
     "field": "Graphics and Multimedia",
     "field_key": "CGAndMT",
-    "address": "http://dblp.uni-trier.de/db/conf/smi/",
+    "address": "https://dblp.org/db/journals/cgf/",
     "years": [
       2026,
       2025,
@@ -11783,7 +11783,7 @@
     "rank": "B",
     "field": "Artificial Intelligence",
     "field_key": "AI",
-    "address": "http://dblp.uni-trier.de/db/conf/aips/",
+    "address": "https://dblp.org/db/conf/icaps/",
     "years": [
       2026,
       2025,
@@ -11908,7 +11908,7 @@
     "rank": "B",
     "field": "Artificial Intelligence",
     "field_key": "AI",
-    "address": "http://dblp.uni-trier.de/db/conf/atal/index.html",
+    "address": "https://dblp.org/db/conf/ifaamas/",
     "years": [
       2026,
       2025,
@@ -12108,7 +12108,7 @@
     "rank": "C",
     "field": "Artificial Intelligence",
     "field_key": "AI",
-    "address": "http://dblp.uni-trier.de/db/conf/conll",
+    "address": "https://dblp.org/db/conf/acl/",
     "years": [
       2026,
       2025,
@@ -14183,7 +14183,7 @@
     "rank": "B",
     "field": "HCI and Pervasive Computing",
     "field_key": "HCIAndPC",
-    "address": "http://dblp.uni-trier.de/db/conf/tabletop/",
+    "address": "https://dblp.org/db/journals/pacmhci/",
     "years": [
       2026,
       2025,
@@ -15033,7 +15033,7 @@
     "rank": "B",
     "field": "Interdisciplinary / Emerging",
     "field_key": "Cross_Compre_Emerging",
-    "address": "http://cognitivesciencesociety.org/conference2013/index.html",
+    "address": "https://dblp.org/db/conf/cogsci/",
     "years": [
       2026,
       2025,
@@ -16133,7 +16133,7 @@
     "rank": "C",
     "field": "Interdisciplinary / Emerging",
     "field_key": "Cross_Compre_Emerging",
-    "address": "https://dblp.org/db/journals/jeric/index.html",
+    "address": "https://dblp.org/db/journals/toce/",
     "years": [
       2026,
       2025,

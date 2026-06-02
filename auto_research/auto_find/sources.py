@@ -104,7 +104,41 @@ def _looks_like_paper_title(value: str) -> bool:
         "neurips 2025",
         "papers",
     ]
-    return not any(item == lowered or lowered.startswith(item) for item in blocked)
+    front_matter = [
+        "copyright",
+        "editorial",
+        "editorial board",
+        "issue information",
+        "publication information",
+        "society information",
+        "proceedings",
+        "technical program committee",
+        "conference technical program",
+        "organizing and program committees",
+        "organizing committee",
+        "program committee",
+        "author index",
+        "author information page",
+        "contributor page",
+        "table of contents",
+        "subject index page",
+        "list reviewer page",
+        "toc",
+        "commentary",
+        "welcome message",
+        "welcome",
+        "cover page",
+        "message from",
+        "reviewers",
+        "sponsors",
+        "steering committee",
+        "conference committee",
+        "committees",
+        "half title page",
+        "title page",
+        "journal track paper abstract",
+    ]
+    return not any(item == lowered or lowered.startswith(item) for item in blocked) and not any(item in lowered for item in front_matter)
 
 
 def normalize_date(value: str = "") -> str:
@@ -267,9 +301,1093 @@ def is_cvf_venue(venue: dict) -> bool:
     return any(key in text for key in ["cvpr", "iccv", "eccv"])
 
 
+def is_bmvc_venue(venue: dict) -> bool:
+    text = f"{venue.get('name', '')} {venue.get('full_name', '')}".lower()
+    return "bmvc" in text or "british machine vision" in text
+
+
 def is_pmlr_venue(venue: dict) -> bool:
     text = f"{venue.get('name', '')} {venue.get('full_name', '')}".lower()
-    return any(key in text for key in ["icml", "aistats", "colt", "uai"])
+    return any(key in text for key in ["icml", "aistats", "colt", "uai", "acml"])
+
+
+CROSSREF_PROCEEDINGS_QUERIES: list[tuple[tuple[str, ...], str, tuple[str, ...]]] = [
+    (
+        ("chi", "human factors in computing systems"),
+        "Proceedings of the {year} CHI Conference on Human Factors in Computing Systems",
+        ("chi conference on human factors in computing systems",),
+    ),
+    (
+        ("cscw", "computer supported cooperative work and social computing"),
+        "Companion Publication of the {year} Conference on Computer-Supported Cooperative Work and Social Computing",
+        ("computer supported cooperative work and social computing",),
+    ),
+    (
+        ("uist", "user interface software and technology"),
+        "Proceedings of the 38th Annual ACM Symposium on User Interface Software and Technology",
+        ("symposium on user interface software and technology",),
+    ),
+    (
+        ("ubicomp", "pervasive and ubiquitous computing"),
+        "Companion of the {year} ACM International Joint Conference on Pervasive and Ubiquitous Computing",
+        ("pervasive and ubiquitous computing",),
+    ),
+    (
+        ("group", "supporting group work"),
+        "The {year} ACM International Conference on Supporting Group Work",
+        ("international conference on supporting group work",),
+    ),
+    (
+        ("i3d", "interactive 3d graphics and games"),
+        "Companion Proceedings of the ACM SIGGRAPH Symposium on Interactive 3D Graphics and Games",
+        ("symposium on interactive 3d graphics and games",),
+    ),
+    (
+        ("icassp", "acoustics", "speech and signal processing"),
+        "{year} IEEE International Conference on Acoustics, Speech, and Signal Processing Workshops (ICASSPW)",
+        ("acoustics speech and signal processing", "icassp"),
+    ),
+    (
+        ("icme", "multimedia expo", "multimedia and expo"),
+        "{year} IEEE International Conference on Multimedia and Expo (ICME)",
+        ("multimedia and expo", "icme"),
+    ),
+    (
+        ("icmr", "multimedia retrieval"),
+        "Proceedings of the {year} International Conference on Multimedia Retrieval",
+        ("international conference on multimedia retrieval",),
+    ),
+    (
+        ("ismar", "mixed and augmented reality"),
+        "{year} IEEE International Symposium on Mixed and Augmented Reality (ISMAR)",
+        ("mixed and augmented reality", "ismar"),
+    ),
+    (
+        ("3dv", "3d vision"),
+        "{year} International Conference on 3D Vision (3DV)",
+        ("3d vision", "3dv"),
+    ),
+    (
+        ("icvrv", "virtual reality and visualization"),
+        "{year} International Conference on Virtual Reality and Visualization (ICVRV)",
+        ("virtual reality and visualization", "icvrv"),
+    ),
+    (
+        ("pacificvis", "pacific visualization"),
+        "{year} IEEE 18th Pacific Visualization Conference (PacificVis)",
+        ("pacific visualization", "pacificvis"),
+    ),
+    (
+        ("vrst", "virtual reality software and technology"),
+        "Proceedings of the {year} 31st ACM Symposium on Virtual Reality Software and Technology",
+        ("virtual reality software and technology",),
+    ),
+    (
+        ("acm mm", "acm international conference on multimedia"),
+        "Proceedings of the 33rd ACM International Conference on Multimedia",
+        ("acm international conference on multimedia",),
+    ),
+    (
+        ("dcc", "data compression conference"),
+        "{year} Data Compression Conference (DCC)",
+        ("data compression conference", "dcc"),
+    ),
+    (
+        ("wsdm", "web search and data mining"),
+        "Proceedings of the Eighteenth ACM International Conference on Web Search and Data Mining",
+        ("international conference on web search and data mining",),
+    ),
+    (
+        ("mdm", "mobile data management"),
+        "{year} IEEE International Conference on Mobile Data Management (MDM)",
+        ("mobile data management", "mdm"),
+    ),
+    (
+        ("sstd", "spatial and temporal databases"),
+        "Proceedings of the 19th International Symposium on Spatial and Temporal Data",
+        ("spatial and temporal data",),
+    ),
+    (
+        ("icde", "international conference on data engineering"),
+        "{year} IEEE 41st International Conference on Data Engineering (ICDE)",
+        ("international conference on data engineering", "icde"),
+    ),
+    (
+        ("sigir", "research and development in information retrieval"),
+        "Proceedings of the 48th International ACM SIGIR Conference on Research and Development in Information Retrieval",
+        ("sigir conference on research and development in information retrieval",),
+    ),
+    (
+        ("sigkdd", "knowledge discovery and data mining"),
+        "Proceedings of the 31st ACM SIGKDD Conference on Knowledge Discovery and Data Mining",
+        ("sigkdd conference on knowledge discovery and data mining",),
+    ),
+    (
+        ("cikm", "information and knowledge management"),
+        "Proceedings of the 34th ACM International Conference on Information and Knowledge Management",
+        ("international conference on information and knowledge management",),
+    ),
+    (
+        ("icdm", "international conference on data mining"),
+        "{year} IEEE International Conference on Data Mining (ICDM)",
+        ("international conference on data mining", "icdm"),
+    ),
+    (
+        ("pods", "principles of database systems"),
+        "Companion of the 44th Symposium on Principles of Database Systems",
+        ("symposium on principles of database systems",),
+    ),
+    (
+        ("recsys", "recommender systems"),
+        "Proceedings of the Nineteenth ACM Conference on Recommender Systems",
+        ("conference on recommender systems",),
+    ),
+    (
+        ("nossdav", "network and operating system support for digital audio and video"),
+        "Proceedings of the {nossdav_year} edition of the Workshop on Network and Operating System Support for Digital Audio and Video",
+        ("workshop on network and operating system support for digital audio and video",),
+    ),
+    (
+        ("apnoms", "asia-pacific network operations and management symposium"),
+        "{year} Asia-Pacific Network Operations and Management Symposium (APNOMS)",
+        ("asia pacific network operations and management symposium", "apnoms"),
+    ),
+    (
+        ("globecom", "global communications conference"),
+        "GLOBECOM {year} - {year} IEEE Global Communications Conference",
+        ("globecom", "global communications conference"),
+    ),
+    (
+        ("hotnets", "hot topics in networks"),
+        "Proceedings of the {hotnets_year} ACM Workshop on Hot Topics in Networks",
+        ("workshop on hot topics in networks",),
+    ),
+    (
+        ("icc", "international conference on communications"),
+        "ICC {year} - IEEE International Conference on Communications",
+        ("icc", "international conference on communications"),
+    ),
+    (
+        ("icccn", "computer communications and networks"),
+        "{year} International Conference on Computer Communications and Networks (ICCCN)",
+        ("computer communications and networks", "icccn"),
+    ),
+    (
+        ("ipccc", "performance computing and communications"),
+        "{year} IEEE International Performance, Computing, and Communications Conference (IPCCC)",
+        ("performance computing and communications conference", "ipccc"),
+    ),
+    (
+        ("iscc", "symposium on computers and communications"),
+        "{year} IEEE Symposium on Computers and Communications (ISCC)",
+        ("symposium on computers and communications", "iscc"),
+    ),
+    (
+        ("lcn", "local computer networks"),
+        "{year} IEEE 50th Conference on Local Computer Networks (LCN)",
+        ("local computer networks", "lcn"),
+    ),
+    (
+        ("mass", "mobile ad-hoc and sensor systems", "mobile ad hoc and sensor systems"),
+        "{year} IEEE 22nd International Conference on Mobile Ad-Hoc and Smart Systems (MASS)",
+        ("mobile ad hoc and smart systems", "mass"),
+    ),
+    (
+        ("msn", "mobility, sensing and networking", "mobility sensing and networking"),
+        "{year} International Conference on Mobility, Sensing and Networking (MSN)",
+        ("mobility sensing and networking", "msn"),
+    ),
+    (
+        ("mswim", "modeling, analysis and simulation of wireless and mobile systems"),
+        "{year} International Conference on Modeling, Analysis and Simulation of Wireless and Mobile Systems (MSWiM)",
+        ("modeling analysis and simulation of wireless and mobile systems", "mswim"),
+    ),
+    (
+        ("wcnc", "wireless communications and networking conference"),
+        "{year} IEEE Wireless Communications and Networking Conference (WCNC)",
+        ("wireless communications and networking conference", "wcnc"),
+    ),
+    (
+        ("wowmom", "world of wireless mobile and multimedia networks"),
+        "{year} IEEE 26th International Symposium on a World of Wireless, Mobile and Multimedia Networks (WoWMoM)",
+        ("world of wireless mobile and multimedia networks", "wowmom"),
+    ),
+    (
+        ("ccgrid", "cluster cloud and grid computing", "cluster cloud and internet computing"),
+        "{year} IEEE 25th International Symposium on Cluster, Cloud and Internet Computing (CCGrid)",
+        ("ccgrid",),
+    ),
+    (
+        ("fpt", "field-programmable technology", "field programmable technology"),
+        "{year} International Conference on Field Programmable Technology (ICFPT)",
+        ("field programmable technology",),
+    ),
+    (
+        ("hpcc", "high performance computing and communications"),
+        "{year} IEEE International Conference on High Performance Computing and Communications (HPCC)",
+        ("hpcc", "high performance computing and communications"),
+    ),
+    (
+        ("ispa", "parallel and distributed processing with applications"),
+        "{year} IEEE International Symposium on Parallel and Distributed Processing with Applications (ISPA)",
+        ("ispa", "parallel and distributed processing with applications"),
+    ),
+    (
+        ("wicsa", "software architecture"),
+        "{year} IEEE International Conference on Software Architecture (ICSA)",
+        ("international conference on software architecture",),
+    ),
+    (
+        ("qrs", "software quality", "reliability", "security"),
+        "{year} IEEE International Conference on Software Quality, Reliability and Security (QRS)",
+        ("software quality", "reliability", "security"),
+    ),
+    (
+        ("icaps", "automated planning and scheduling"),
+        "Proceedings of the International Conference on Automated Planning and Scheduling",
+        ("international conference on automated planning and scheduling",),
+    ),
+]
+
+
+DBLP_DIRECT_YEAR_LINKS = {
+    "ccf_hciandpc_conference_a_chi_acm_conference_on_human_factors_in_computing_systems": "https://dblp.org/db/conf/chi/chi{year}.html",
+    "ccf_nis_conference_b_fse_fast_software_encryption": "https://dblp.org/db/journals/tosc/tosc{year}.html",
+}
+
+
+DBLP_DIRECT_VOLUME_LINKS = {
+    "ccf_hciandpc_journal_b_ijhci_international_journal_of_human_computer_interaction": (
+        "https://dblp.org/db/journals/ijhci/ijhci{volume}.html",
+        1984,
+    ),
+    "ccf_nis_journal_b_computers_security_computers_security": (
+        "https://dblp.org/db/journals/compsec/compsec{volume}.html",
+        1876,
+    ),
+    "ccf_nis_journal_a_journal_of_cryptology_journal_of_cryptology": (
+        "https://dblp.org/db/journals/joc/joc{volume}.html",
+        1987,
+    ),
+    "ccf_nis_journal_a_tdsc_ieee_transactions_on_dependable_and_secure_computing": (
+        "https://dblp.org/db/journals/tdsc/tdsc{volume}.html",
+        2003,
+    ),
+    "ccf_nis_journal_c_jisa_journal_of_information_security_and_applications": (
+        "https://dblp.org/db/journals/istr/istr{volume}.html",
+        1970,
+    ),
+    "ccf_arch_dcp_ss_journal_b_jsa_journal_of_systems_architecture_embedded_software_design": (
+        "https://dblp.org/db/journals/jsa/jsa{volume}.html",
+        1866,
+    ),
+    "ccf_dm_cs_conference_a_vldb_international_conference_on_very_large_data_bases": (
+        "https://dblp.org/db/journals/pvldb/pvldb{volume}.html",
+        2006,
+    ),
+    "ccf_cgandmt_conference_a_ieee_vis_ieee_visualization_conference": (
+        "https://dblp.org/db/journals/tvcg/tvcg{volume}.html",
+        1994,
+    ),
+    "ccf_tcse_ss_pdl_journal_b_iets_iet_software": (
+        "https://dblp.org/db/journals/iet-sen/iet-sen{volume}.html",
+        2011,
+    ),
+    "ccf_tcse_ss_pdl_journal_c_cl_computer_languages_systems_and_structures": (
+        "https://dblp.org/db/journals/cl/cl{volume}.html",
+        1975,
+    ),
+    "ccf_tcse_ss_pdl_journal_b_scp_science_of_computer_programming": (
+        "https://dblp.org/db/journals/scp/scp{volume}.html",
+        1981,
+    ),
+    "ccf_tcse_ss_pdl_journal_b_jss_journal_of_systems_and_software": (
+        "https://dblp.org/db/journals/jss/jss{volume}.html",
+        1974,
+    ),
+    "ccf_tcs_journal_b_fmsd_formal_methods_in_system_design": (
+        "https://dblp.org/db/journals/fmsd/fmsd{volume}.html",
+        1992,
+    ),
+    "ccf_tcs_journal_b_jcss_journal_of_computer_and_system_sciences": (
+        "https://dblp.org/db/journals/jcss/jcss{volume}.html",
+        1967,
+    ),
+    "ccf_cgandmt_conference_b_egsr_eurographics_symposium_on_rendering": (
+        "https://dblp.org/db/journals/cgf/cgf{volume}.html",
+        1981,
+    ),
+    "ccf_cgandmt_conference_b_sgp_eurographics_symposium_on_geometry_processing": (
+        "https://dblp.org/db/journals/cgf/cgf{volume}.html",
+        1981,
+    ),
+    "ccf_cgandmt_conference_c_cgi_computer_graphics_international": (
+        "https://dblp.org/db/journals/cgf/cgf{volume}.html",
+        1981,
+    ),
+    "ccf_cgandmt_conference_c_gmp_geometric_modeling_and_processing": (
+        "https://dblp.org/db/journals/cgf/cgf{volume}.html",
+        1981,
+    ),
+    "ccf_cgandmt_conference_c_smi_shape_modeling_international": (
+        "https://dblp.org/db/journals/cgf/cgf{volume}.html",
+        1981,
+    ),
+    "ccf_cgandmt_conference_c_cad_graphics_international_conference_on_computer_aided_design_and_computer_graphics": (
+        "https://dblp.org/db/journals/cgf/cgf{volume}.html",
+        1981,
+    ),
+    "ccf_cgandmt_conference_b_spm_symposium_on_solid_and_physical_modeling": (
+        "https://dblp.org/db/journals/cgf/cgf{volume}.html",
+        1981,
+    ),
+    "ccf_cgandmt_conference_b_sca_acm_siggraph_eurographics_symposium_on_computer_animation": (
+        "https://dblp.org/db/journals/pacmcgit/pacmcgit{volume}.html",
+        2017,
+    ),
+    "ccf_hciandpc_conference_b_its_acm_international_conference_on_interactive_tabletops_and_surfaces": (
+        "https://dblp.org/db/journals/pacmhci/pacmhci{volume}.html",
+        2017,
+    ),
+}
+
+
+CROSSREF_JOURNAL_QUERIES: list[tuple[tuple[str, ...], str, tuple[str, ...]]] = [
+    (
+        ("siam journal on imaging sciences",),
+        "SIAM Journal on Imaging Sciences",
+        ("siam journal on imaging sciences",),
+    ),
+    (
+        ("speech communication",),
+        "Speech Communication",
+        ("speech communication",),
+    ),
+    (
+        ("ieee transactions on circuits and systems for video technology",),
+        "IEEE Transactions on Circuits and Systems for Video Technology",
+        ("ieee transactions on circuits and systems for video technology",),
+    ),
+    (
+        ("ieee transactions on multimedia",),
+        "IEEE Transactions on Multimedia",
+        ("ieee transactions on multimedia",),
+    ),
+    (
+        ("computers & graphics", "computers graphics"),
+        "Computers & Graphics",
+        ("computers graphics",),
+    ),
+    (
+        ("computer animation", "virtual worlds"),
+        "Computer Animation and Virtual Worlds",
+        ("computer animation and virtual worlds",),
+    ),
+    (
+        ("computational geometry",),
+        "Computational Geometry",
+        ("computational geometry",),
+    ),
+    (
+        ("computational visual media",),
+        "Computational Visual Media",
+        ("computational visual media",),
+    ),
+    (
+        ("discrete & computational geometry", "discrete computational geometry"),
+        "Discrete & Computational Geometry",
+        ("discrete computational geometry",),
+    ),
+    (
+        ("iet image processing",),
+        "IET Image Processing",
+        ("iet image processing",),
+    ),
+    (
+        ("iet intelligent transport systems",),
+        "IET Intelligent Transport Systems",
+        ("iet intelligent transport systems",),
+    ),
+    (
+        ("signal processing image communication",),
+        "Signal Processing: Image Communication",
+        ("signal processing image communication",),
+    ),
+    (
+        ("journal of visual communication and image representation",),
+        "Journal of Visual Communication and Image Representation",
+        ("journal of visual communication and image representation",),
+    ),
+    (
+        ("multimedia systems",),
+        "Multimedia Systems",
+        ("multimedia systems",),
+    ),
+    (
+        ("multimedia tools and applications",),
+        "Multimedia Tools and Applications",
+        ("multimedia tools and applications",),
+    ),
+    (
+        ("signal processing",),
+        "Signal Processing",
+        ("signal processing",),
+    ),
+    (
+        ("ieee signal processing letters",),
+        "IEEE Signal Processing Letters",
+        ("ieee signal processing letters",),
+    ),
+    (
+        ("visual computer",),
+        "The Visual Computer",
+        ("visual computer",),
+    ),
+    (
+        ("ieee transactions on image processing",),
+        "IEEE Transactions on Image Processing",
+        ("ieee transactions on image processing",),
+    ),
+    (
+        ("computer-aided design", "computer aided design"),
+        "Computer-Aided Design",
+        ("computer aided design",),
+    ),
+    (
+        ("computer aided geometric design",),
+        "Computer Aided Geometric Design",
+        ("computer aided geometric design",),
+    ),
+    (
+        ("computer graphics forum",),
+        "Computer Graphics Forum",
+        ("computer graphics forum",),
+    ),
+    (
+        ("graphical models",),
+        "Graphical Models",
+        ("graphical models",),
+    ),
+    (
+        ("journal of the acoustical society of america",),
+        "The Journal of the Acoustical Society of America",
+        ("journal of the acoustical society of america",),
+    ),
+    (
+        ("knowledge and information systems",),
+        "Knowledge and Information Systems",
+        ("knowledge and information systems",),
+    ),
+    (
+        ("acm transactions on knowledge", "knowledge discovery from data"),
+        "ACM Transactions on Knowledge Discovery from Data",
+        ("acm transactions on knowledge discovery from data",),
+    ),
+    (
+        ("acm transactions on the web",),
+        "ACM Transactions on the Web",
+        ("acm transactions on the web",),
+    ),
+    (
+        ("distributed and parallel databases",),
+        "Distributed and Parallel Databases",
+        ("distributed and parallel databases",),
+    ),
+    (
+        ("data science and engineering",),
+        "Data Science and Engineering",
+        ("data science and engineering",),
+    ),
+    (
+        ("information & management", "information management"),
+        "Information & Management",
+        ("information management",),
+    ),
+    (
+        ("international journal of cooperative information systems",),
+        "International Journal of Cooperative Information Systems",
+        ("international journal of cooperative information systems",),
+    ),
+    (
+        ("international journal of geographical information science",),
+        "International Journal of Geographical Information Science",
+        ("international journal of geographical information science",),
+    ),
+    (
+        ("international journal of knowledge management",),
+        "International Journal of Knowledge Management",
+        ("international journal of knowledge management",),
+    ),
+    (
+        ("international journal on semantic web and information systems",),
+        "International Journal on Semantic Web and Information Systems",
+        ("international journal on semantic web and information systems",),
+    ),
+    (
+        ("information processing letters",),
+        "Information Processing Letters",
+        ("information processing letters",),
+    ),
+    (
+        ("journal of computer information systems",),
+        "Journal of Computer Information Systems",
+        ("journal of computer information systems",),
+    ),
+    (
+        ("journal of database management",),
+        "Journal of Database Management",
+        ("journal of database management",),
+    ),
+    (
+        ("journal of global information technology management",),
+        "Journal of Global Information Technology Management",
+        ("journal of global information technology management",),
+    ),
+    (
+        ("journal of intelligent information systems",),
+        "Journal of Intelligent Information Systems",
+        ("journal of intelligent information systems",),
+    ),
+    (
+        ("journal of strategic information systems",),
+        "The Journal of Strategic Information Systems",
+        ("journal of strategic information systems",),
+    ),
+    (
+        ("ieee transactions on knowledge and data engineering",),
+        "IEEE Transactions on Knowledge and Data Engineering",
+        ("ieee transactions on knowledge and data engineering",),
+    ),
+    (
+        ("acm transactions on database systems",),
+        "ACM Transactions on Database Systems",
+        ("acm transactions on database systems",),
+    ),
+    (
+        ("acm transactions on information systems",),
+        "ACM Transactions on Information Systems",
+        ("acm transactions on information systems",),
+    ),
+    (
+        ("vldb journal",),
+        "The VLDB Journal",
+        ("vldb journal",),
+    ),
+    (
+        ("advanced engineering informatics",),
+        "Advanced Engineering Informatics",
+        ("advanced engineering informatics",),
+    ),
+    (
+        ("geoinformatica",),
+        "GeoInformatica",
+        ("geoinformatica",),
+    ),
+    (
+        ("information systems",),
+        "Information Systems",
+        ("information systems",),
+    ),
+    (
+        ("information sciences",),
+        "Information Sciences",
+        ("information sciences",),
+    ),
+    (
+        ("journal of web semantics",),
+        "Journal of Web Semantics",
+        ("journal of web semantics",),
+    ),
+    (
+        ("acm transactions on multimedia computing", "tomm"),
+        "ACM Transactions on Multimedia Computing, Communications, and Applications",
+        ("acm transactions on multimedia computing communications and applications",),
+    ),
+    (
+        ("acm transactions on sensor networks",),
+        "ACM Transactions on Sensor Networks",
+        ("acm transactions on sensor networks",),
+    ),
+    (
+        ("ieee transactions on wireless communications",),
+        "IEEE Transactions on Wireless Communications",
+        ("ieee transactions on wireless communications",),
+    ),
+    (
+        ("ad hoc networks",),
+        "Ad Hoc Networks",
+        ("ad hoc networks",),
+    ),
+    (
+        ("iet communications",),
+        "IET Communications",
+        ("iet communications",),
+    ),
+    (
+        ("ieee internet of things journal",),
+        "IEEE Internet of Things Journal",
+        ("ieee internet of things journal",),
+    ),
+    (
+        ("journal of network and computer applications",),
+        "Journal of Network and Computer Applications",
+        ("journal of network and computer applications",),
+    ),
+    (
+        ("mobile networks and applications",),
+        "Mobile Networks and Applications",
+        ("mobile networks and applications",),
+    ),
+    (
+        ("networks",),
+        "Networks",
+        ("networks",),
+    ),
+    (
+        ("wireless communications and mobile computing",),
+        "Wireless Communications and Mobile Computing",
+        ("wireless communications and mobile computing",),
+    ),
+    (
+        ("data & knowledge engineering", "data knowledge engineering"),
+        "Data & Knowledge Engineering",
+        ("data knowledge engineering",),
+    ),
+    (
+        ("pattern recognition",),
+        "Pattern Recognition",
+        ("pattern recognition",),
+    ),
+    (
+        ("acm transactions on applied perception",),
+        "ACM Transactions on Applied Perception",
+        ("acm transactions on applied perception",),
+    ),
+    (
+        ("ieee/acm transactions on audio", "transactions on audio speech and language processing"),
+        "IEEE Transactions on Audio, Speech and Language Processing",
+        ("ieee transactions on audio speech and language processing",),
+    ),
+    (
+        ("ieee transactions on evolutionary computation",),
+        "IEEE Transactions on Evolutionary Computation",
+        ("ieee transactions on evolutionary computation",),
+    ),
+    (
+        ("ieee transactions on fuzzy systems",),
+        "IEEE Transactions on Fuzzy Systems",
+        ("ieee transactions on fuzzy systems",),
+    ),
+    (
+        ("ieee transactions on neural networks",),
+        "IEEE Transactions on Neural Networks and Learning Systems",
+        ("ieee transactions on neural networks and learning systems",),
+    ),
+    (
+        ("artificial intelligence in medicine",),
+        "Artificial Intelligence in Medicine",
+        ("artificial intelligence in medicine",),
+    ),
+    (
+        ("applied intelligence",),
+        "Applied Intelligence",
+        ("applied intelligence",),
+    ),
+    (
+        ("artificial life",),
+        "Artificial Life",
+        ("artificial life",),
+    ),
+    (
+        ("computational intelligence",),
+        "Computational Intelligence",
+        ("computational intelligence",),
+    ),
+    (
+        ("computer speech & language", "computer speech and language"),
+        "Computer Speech & Language",
+        ("computer speech language",),
+    ),
+    (
+        ("connection science",),
+        "Connection Science",
+        ("connection science",),
+    ),
+    (
+        ("decision support systems",),
+        "Decision Support Systems",
+        ("decision support systems",),
+    ),
+    (
+        ("engineering applications of artificial intelligence",),
+        "Engineering Applications of Artificial Intelligence",
+        ("engineering applications of artificial intelligence",),
+    ),
+    (
+        ("expert systems with applications",),
+        "Expert Systems with Applications",
+        ("expert systems with applications",),
+    ),
+    (
+        ("expert systems",),
+        "Expert Systems",
+        ("expert systems",),
+    ),
+    (
+        ("fuzzy sets and systems",),
+        "Fuzzy Sets and Systems",
+        ("fuzzy sets and systems",),
+    ),
+    (
+        ("intelligent data analysis",),
+        "Intelligent Data Analysis",
+        ("intelligent data analysis",),
+    ),
+    (
+        ("iet signal processing",),
+        "IET Signal Processing",
+        ("iet signal processing",),
+    ),
+    (
+        ("iet computer vision",),
+        "IET Computer Vision",
+        ("iet computer vision",),
+    ),
+    (
+        ("international journal of computational intelligence and applications",),
+        "International Journal of Computational Intelligence and Applications",
+        ("international journal of computational intelligence and applications",),
+    ),
+    (
+        ("journal of experimental and theoretical artificial intelligence",),
+        "Journal of Experimental & Theoretical Artificial Intelligence",
+        ("journal of experimental theoretical artificial intelligence",),
+    ),
+    (
+        ("knowledge-based systems", "knowledge based systems"),
+        "Knowledge-Based Systems",
+        ("knowledge based systems",),
+    ),
+    (
+        ("neural computing and applications",),
+        "Neural Computing and Applications",
+        ("neural computing and applications",),
+    ),
+    (
+        ("neurocomputing",),
+        "Neurocomputing",
+        ("neurocomputing",),
+    ),
+    (
+        ("concurrency and computation", "practice and experience"),
+        "Concurrency and Computation: Practice and Experience",
+        ("concurrency and computation", "practice and experience"),
+    ),
+    (
+        ("distributed computing",),
+        "Distributed Computing",
+        ("distributed computing",),
+    ),
+    (
+        ("future generation computer systems", "fgcs"),
+        "Future Generation Computer Systems",
+        ("future generation computer systems",),
+    ),
+    (
+        ("acm journal on emerging technologies in computing systems", "jetc"),
+        "ACM Journal on Emerging Technologies in Computing Systems",
+        ("acm journal on emerging technologies in computing systems",),
+    ),
+    (
+        ("journal of electronic testing", "jetta"),
+        "Journal of Electronic Testing",
+        ("journal of electronic testing",),
+    ),
+    (
+        ("journal of grid computing",),
+        "Journal of Grid Computing",
+        ("journal of grid computing",),
+    ),
+    (
+        ("real-time systems", "real time systems"),
+        "Real-Time Systems",
+        ("real time systems",),
+    ),
+    (
+        ("ieee transactions on circuits and systems i", "tcasi"),
+        "IEEE Transactions on Circuits and Systems I: Regular Papers",
+        ("ieee transactions on circuits and systems i", "regular papers"),
+    ),
+    (
+        ("ieee transactions on cloud computing",),
+        "IEEE Transactions on Cloud Computing",
+        ("ieee transactions on cloud computing",),
+    ),
+    (
+        ("journal of supercomputing",),
+        "The Journal of Supercomputing",
+        ("journal of supercomputing",),
+    ),
+    (
+        ("ieee transactions on sustainable computing",),
+        "IEEE Transactions on Sustainable Computing",
+        ("ieee transactions on sustainable computing",),
+    ),
+    (
+        ("ieee journal on selected areas in communications", "jsac"),
+        "IEEE Journal on Selected Areas in Communications",
+        ("ieee journal on selected areas in communications",),
+    ),
+    (
+        ("ieee transactions on mobile computing",),
+        "IEEE Transactions on Mobile Computing",
+        ("ieee transactions on mobile computing",),
+    ),
+    (
+        ("ieee/acm transactions on networking", "ieee transactions on networking"),
+        "IEEE Transactions on Networking",
+        ("ieee transactions on networking",),
+    ),
+    (
+        ("ieee transactions on communications",),
+        "IEEE Transactions on Communications",
+        ("ieee transactions on communications",),
+    ),
+    (
+        ("acm transactions on internet technology",),
+        "ACM Transactions on Internet Technology",
+        ("acm transactions on internet technology",),
+    ),
+    (
+        ("cognition",),
+        "Cognition",
+        ("cognition",),
+    ),
+    (
+        ("forensic science international", "digital investigation"),
+        "Forensic Science International: Digital Investigation",
+        ("forensic science international digital investigation",),
+    ),
+    (
+        ("natural language engineering",),
+        "Natural Language Engineering",
+        ("natural language engineering",),
+    ),
+    (
+        ("machine translation",),
+        "Machine Translation",
+        ("machine translation",),
+    ),
+    (
+        ("computer languages", "systems and structures", "journal of computer languages"),
+        "Journal of Computer Languages",
+        ("journal of computer languages",),
+    ),
+    (
+        ("iet software",),
+        "IET Software",
+        ("iet software",),
+    ),
+    (
+        ("journal of speech", "hearing research"),
+        "Journal of Speech, Language, and Hearing Research",
+        ("journal of speech language and hearing research",),
+    ),
+    (
+        ("iacr transactions on symmetric cryptology", "tosc"),
+        "IACR Transactions on Symmetric Cryptology",
+        ("iacr transactions on symmetric cryptology",),
+    ),
+    (
+        ("pacmcgit", "computer graphics and interactive techniques"),
+        "Proceedings of the ACM on Computer Graphics and Interactive Techniques",
+        ("proceedings of the acm on computer graphics and interactive techniques",),
+    ),
+]
+
+
+def _crossref_query_patterns(
+    venue: dict,
+    table: list[tuple[tuple[str, ...], str, tuple[str, ...]]],
+) -> list[tuple[str, tuple[str, ...]]]:
+    text = _venue_text(venue)
+    patterns: list[tuple[str, tuple[str, ...]]] = []
+    for keywords, query, required_terms in table:
+        if any(_matches_venue_keyword(text, keyword) for keyword in keywords):
+            patterns.append((query, required_terms))
+    return patterns
+
+
+def _crossref_patterns_for_venue(venue: dict) -> list[tuple[str, tuple[str, ...]]]:
+    return _crossref_query_patterns(venue, CROSSREF_PROCEEDINGS_QUERIES)
+
+
+def _crossref_journal_patterns_for_venue(venue: dict) -> list[tuple[str, tuple[str, ...]]]:
+    return _crossref_query_patterns(venue, CROSSREF_JOURNAL_QUERIES)
+
+
+def _crossref_date_year(item: dict, fallback_year: int) -> int:
+    for key in ["published-print", "published-online", "published", "issued"]:
+        date_parts = item.get(key, {}).get("date-parts") if isinstance(item.get(key), dict) else None
+        if date_parts and isinstance(date_parts, list) and date_parts[0]:
+            try:
+                return int(date_parts[0][0])
+            except (TypeError, ValueError):
+                continue
+    return fallback_year
+
+
+def _crossref_authors(item: dict) -> str:
+    authors = []
+    for author in item.get("author", []) if isinstance(item.get("author"), list) else []:
+        given = str(author.get("given") or "").strip()
+        family = str(author.get("family") or "").strip()
+        name = " ".join(part for part in [given, family] if part)
+        if name:
+            authors.append(name)
+    return ", ".join(authors)
+
+
+def _crossref_match_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", html.unescape(value).lower()).strip()
+
+
+def fetch_crossref_proceedings(venue: dict, years: list[int], max_items: int) -> list[dict]:
+    patterns = _crossref_patterns_for_venue(venue)
+    if not patterns:
+        return []
+    papers: list[dict] = []
+    seen: set[str] = set()
+    for year in years:
+        for query_template, required_terms in patterns:
+            query = query_template.format(year=year, nossdav_year=year - 1990, hotnets_year=year - 2001)
+            for article_type in ("proceedings-article", "journal-article"):
+                try:
+                    response = requests.get(
+                        "https://api.crossref.org/works",
+                        params={
+                            "query.bibliographic": query,
+                            "filter": f"from-pub-date:{year}-01-01,until-pub-date:{year}-12-31,type:{article_type}",
+                            "rows": min(max(1, max_items), 1000),
+                        },
+                        headers=HEADERS,
+                        timeout=15,
+                    )
+                    response.raise_for_status()
+                    items = response.json().get("message", {}).get("items", [])
+                except Exception:
+                    continue
+                matched = False
+                for item in items if isinstance(items, list) else []:
+                    containers = [str(value) for value in item.get("container-title", []) if value]
+                    container_text = _crossref_match_text(" ".join(containers))
+                    if not all(_crossref_match_text(term) in container_text for term in required_terms):
+                        continue
+                    item_year = _crossref_date_year(item, year)
+                    if item_year != year:
+                        continue
+                    title = _clean_text(_crossref_first_text(item.get("title"))).rstrip(".")
+                    if not _looks_like_paper_title(title):
+                        continue
+                    doi = str(item.get("DOI") or "")
+                    url = str(item.get("URL") or (f"https://doi.org/{doi}" if doi else ""))
+                    key = doi or url or title
+                    if not key or key in seen:
+                        continue
+                    seen.add(key)
+                    matched = True
+                    papers.append({
+                        "id": stable_id("paper", f"{venue.get('id')}:{year}:{key}"),
+                        "source": "crossref_proceedings",
+                        "title": title,
+                        "authors": _crossref_authors(item),
+                        "abstract": _clean_text(str(item.get("abstract") or "")),
+                        "url": url,
+                        "pdf_url": "",
+                        "venue": venue.get("name", ""),
+                        "year": year,
+                        "category": "",
+                        "classification_source": "llm_inferred",
+                        "metadata": {
+                            "venue_id": venue.get("id"),
+                            "crossref_query": query,
+                            "doi": doi,
+                            "container_title": containers[0] if containers else "",
+                        },
+                    })
+                    if len(papers) >= max_items:
+                        return papers
+                if matched:
+                    break
+                time.sleep(0.2)
+    return papers
+
+
+def fetch_crossref_journal(venue: dict, years: list[int], max_items: int) -> list[dict]:
+    if (venue.get("type") or "").lower() != "journal":
+        return []
+    patterns = _crossref_journal_patterns_for_venue(venue)
+    if not patterns:
+        return []
+    papers: list[dict] = []
+    seen: set[str] = set()
+    for year in years:
+        for query, required_terms in patterns:
+            try:
+                response = requests.get(
+                    "https://api.crossref.org/works",
+                    params={
+                        "query.container-title": query,
+                        "filter": f"from-pub-date:{year}-01-01,until-pub-date:{year}-12-31,type:journal-article",
+                        "rows": min(max(1, max_items), 1000),
+                    },
+                    headers=HEADERS,
+                    timeout=15,
+                )
+                response.raise_for_status()
+                items = response.json().get("message", {}).get("items", [])
+            except Exception:
+                continue
+            for item in items if isinstance(items, list) else []:
+                containers = [str(value) for value in item.get("container-title", []) if value]
+                container_text = _crossref_match_text(" ".join(containers))
+                if not all(_crossref_match_text(term) in container_text for term in required_terms):
+                    continue
+                item_year = _crossref_date_year(item, year)
+                if item_year != year:
+                    continue
+                title = _clean_text(_crossref_first_text(item.get("title"))).rstrip(".")
+                if not _looks_like_paper_title(title):
+                    continue
+                doi = str(item.get("DOI") or "")
+                url = str(item.get("URL") or (f"https://doi.org/{doi}" if doi else ""))
+                key = doi or url or title
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                papers.append({
+                    "id": stable_id("paper", f"{venue.get('id')}:{year}:{key}"),
+                    "source": "crossref_journal",
+                    "title": title,
+                    "authors": _crossref_authors(item),
+                    "abstract": _clean_text(str(item.get("abstract") or "")),
+                    "url": url,
+                    "pdf_url": "",
+                    "venue": venue.get("name", ""),
+                    "year": year,
+                    "category": "journal-article",
+                    "classification_source": "llm_inferred",
+                    "metadata": {
+                        "venue_id": venue.get("id"),
+                        "crossref_query": query,
+                        "doi": doi,
+                        "container_title": containers[0] if containers else "",
+                    },
+                })
+                if len(papers) >= max_items:
+                    return papers
+            time.sleep(0.2)
+    return papers
 
 
 def _request(url: str, timeout: int = 12) -> requests.Response:
@@ -292,6 +1410,15 @@ def _dblp_stream_id(address: str) -> str:
     if not match:
         return ""
     return f"{match.group(1)}/{match.group(2)}"
+
+
+def _has_dblp_route(venue: dict) -> bool:
+    venue_id = str(venue.get("id") or "")
+    return bool(
+        _dblp_stream_id(venue.get("address", ""))
+        or venue_id in DBLP_DIRECT_YEAR_LINKS
+        or venue_id in DBLP_DIRECT_VOLUME_LINKS
+    )
 
 
 def _dblp_authors(value: object) -> str:
@@ -533,6 +1660,61 @@ def fetch_cvf_openaccess(venue: dict, years: list[int], max_items: int) -> list[
             if len(papers) >= max_items:
                 return papers
         time.sleep(0.2)
+    return papers
+
+
+def fetch_bmvc_proceedings(venue: dict, years: list[int], max_items: int) -> list[dict]:
+    papers: list[dict] = []
+    seen: set[str] = set()
+    for year in years:
+        index_url = f"https://bmvc{year}.bmva.org/proceedings/conference-proceedings/"
+        try:
+            soup = BeautifulSoup(_request(index_url).text, "html.parser")
+        except Exception:
+            continue
+        paper_paths: list[str] = []
+        for anchor in soup.find_all("a", href=True):
+            match = re.search(r"/proceedings/(\d+)/?$", anchor["href"])
+            if not match:
+                continue
+            path = f"/proceedings/{match.group(1)}/"
+            if path not in paper_paths:
+                paper_paths.append(path)
+        for path in paper_paths:
+            paper_url = requests.compat.urljoin(index_url, path)
+            try:
+                page = BeautifulSoup(_request(paper_url).text, "html.parser")
+            except Exception:
+                continue
+            title_node = page.find("title")
+            title = _clean_text(title_node.get_text(" ", strip=True)) if title_node else ""
+            for suffix in (f" | BMVC {year}", " | BMVC", " - BMVC"):
+                if title.endswith(suffix):
+                    title = title[: -len(suffix)].strip()
+            if not _looks_like_paper_title(title):
+                continue
+            paper_id = path.strip("/").split("/")[-1]
+            pdf_url = f"https://bmva-archive.org.uk/bmvc/{year}/assets/papers/Paper_{paper_id}/paper.pdf"
+            if title in seen:
+                continue
+            seen.add(title)
+            papers.append({
+                "id": stable_id("paper", f"{venue.get('id')}:{year}:{title}"),
+                "source": "bmvc_proceedings",
+                "title": title,
+                "authors": "",
+                "abstract": "",
+                "url": paper_url,
+                "pdf_url": pdf_url,
+                "venue": venue.get("name", ""),
+                "year": year,
+                "category": "",
+                "classification_source": "llm_inferred",
+                "metadata": {"venue_id": venue.get("id"), "bmvc_url": paper_url, "bmvc_index_url": index_url},
+            })
+            if len(papers) >= max_items:
+                return papers
+            time.sleep(0.05)
     return papers
 
 
@@ -916,7 +2098,15 @@ def fetch_dblp_venue(venue: dict, years: list[int], max_items: int | None) -> li
         return max_items is not None and len(papers) >= max_items
 
     papers = []
-    links = _parse_dblp_year_links(venue.get("address", ""), years, max_years=max(4, len(years)))
+    direct_year_link = DBLP_DIRECT_YEAR_LINKS.get(str(venue.get("id") or ""))
+    direct_volume_link = DBLP_DIRECT_VOLUME_LINKS.get(str(venue.get("id") or ""))
+    if direct_year_link:
+        links = [(year, direct_year_link.format(year=year)) for year in years]
+    elif direct_volume_link:
+        template, offset = direct_volume_link
+        links = [(year, template.format(year=year, volume=year - offset)) for year in years]
+    else:
+        links = _parse_dblp_year_links(venue.get("address", ""), years, max_years=max(4, len(years)))
     if not links:
         return papers
     for year, url in links:
@@ -1064,7 +2254,7 @@ def fetch_venue_title_index(venue: dict, years: list[int], max_items: int) -> tu
         if papers:
             return papers[:max_items], "neurips_virtual"
 
-    if venue.get("address"):
+    if _has_dblp_route(venue):
         papers = fetch_dblp_venue(venue, years, max_items)
         if papers:
             return papers, "dblp"
@@ -1092,6 +2282,14 @@ def fetch_venue_title_index(venue: dict, years: list[int], max_items: int) -> tu
         papers = fetch_openreview_venue(venue, years, max_items)
         if papers:
             return papers, "openreview"
+
+    papers = fetch_crossref_journal(venue, years, max_items)
+    if papers:
+        return papers, "crossref_journal"
+
+    papers = fetch_crossref_proceedings(venue, years, max_items)
+    if papers:
+        return papers, "crossref_proceedings"
 
     return [], "none"
 
@@ -1183,7 +2381,7 @@ def _fetch_enrichment_sources(venue: dict, years: list[int]) -> list[tuple[str, 
 
 
 def fetch_venue_title_index_all(venue: dict, years: list[int]) -> tuple[list[dict], str]:
-    if venue.get("address"):
+    if _has_dblp_route(venue):
         base_papers = fetch_dblp_venue(venue, years, None)
         if base_papers:
             merged, used_adapters = _merge_enrichments(base_papers, _fetch_enrichment_sources(venue, years))
@@ -1225,6 +2423,11 @@ def fetch_venue_title_index_all(venue: dict, years: list[int]) -> tuple[list[dic
             if papers:
                 return papers, "eccv_virtual"
 
+    if is_bmvc_venue(venue):
+        papers = fetch_bmvc_proceedings(venue, years, 100000)
+        if papers:
+            return papers, "bmvc_proceedings"
+
     if is_pmlr_venue(venue):
         papers = fetch_pmlr_index(venue, years, 100000)
         if papers:
@@ -1234,6 +2437,14 @@ def fetch_venue_title_index_all(venue: dict, years: list[int]) -> tuple[list[dic
         papers = fetch_openreview_venue(venue, years, 100000)
         if papers:
             return papers, "openreview"
+
+    papers = fetch_crossref_journal(venue, years, 100000)
+    if papers:
+        return papers, "crossref_journal"
+
+    papers = fetch_crossref_proceedings(venue, years, 100000)
+    if papers:
+        return papers, "crossref_proceedings"
 
     return [], "none"
 
@@ -1301,6 +2512,12 @@ def fetch_venue_sample(venue: dict, year: int, sample_limit: int = 3) -> dict:
             if not papers and is_openreview_supported_venue(venue):
                 adapter = "openreview"
                 papers = fetch_openreview_venue(venue, [year], sample_limit)
+            if not papers:
+                adapter = "crossref_journal"
+                papers = fetch_crossref_journal(venue, [year], sample_limit)
+            if not papers:
+                adapter = "crossref_proceedings"
+                papers = fetch_crossref_proceedings(venue, [year], sample_limit)
         samples = [
             {
                 "title": paper.get("title", ""),
