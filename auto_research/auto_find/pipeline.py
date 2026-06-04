@@ -10,7 +10,7 @@ from auto_research.llm import LLMClient, clamp_workers, fallback_score, keyword_
 from auto_research.markdown import paper_markdown
 from auto_research.models import AppConfig, FindRequest
 from auto_research.jobs import JobCancelled
-from auto_research.storage import create_run_dir, redacted_config, sync_latest, update_manifest, write_json, write_text
+from auto_research.storage import create_run_dir, redacted_config, stage_dir, sync_latest, update_manifest, write_json, write_text
 
 from .catalog import catalog_by_id
 from .category_select import filter_papers_by_selected_categories, select_relevant_categories
@@ -905,8 +905,9 @@ def run_find(
 ) -> dict:
     config = request.config or AppConfig()
     run_id, run_dir = create_run_dir("find")
-    write_json(run_dir / "config.json", redacted_config(config.model_dump()))
-    write_json(run_dir / "selection.json", request.selection.model_dump())
+    find_dir = stage_dir(run_dir, "find")
+    write_json(find_dir / "config.json", redacted_config(config.model_dump()))
+    write_json(find_dir / "selection.json", request.selection.model_dump())
     log(f"Created run {run_id}")
 
     llm = LLMClient(config, "find")
@@ -922,7 +923,7 @@ def run_find(
         "fallback_used": stage0_fallback_used,
         "llm_error": stage0_error,
     }
-    write_json(run_dir / "stage0_profile.json", stage0_result)
+    write_json(find_dir / "stage0_profile.json", stage0_result)
     log("Stage 0 profile normalization complete")
 
     catalog = catalog_by_id()
@@ -1266,23 +1267,23 @@ def run_find(
         "huggingface_raw": hf_raw_snapshot,
         "github_raw": github_raw_snapshot,
     }
-    write_json(run_dir / "find_results.json", artifacts)
-    write_json(run_dir / "venue_health_report.json", {"run_id": run_id, "results": venue_health_report})
-    write_json(run_dir / "category_scan_report.json", {"run_id": run_id, "results": category_scan_report})
-    write_json(run_dir / "title_filter_report.json", {"run_id": run_id, "results": title_filter_report})
-    write_json(run_dir / "venue_filter1.json", {"run_id": run_id, "results": venue_filter1_items})
-    write_json(run_dir / "filter2_trace.json", {"run_id": run_id, "results": filter2_trace})
-    write_json(run_dir / "filter2_survivors.json", {"run_id": run_id, "results": filter2_survivors})
-    write_json(run_dir / "enriched_pre_filter3.json", {"run_id": run_id, "results": enriched_pre_filter3})
-    write_json(run_dir / "stage0_profile.json", stage0_result)
-    write_json(run_dir / "arxiv_raw.json", {"run_id": run_id, "results": arxiv_raw_snapshot})
-    write_json(run_dir / "arxiv_prefiltered.json", {"run_id": run_id, "results": arxiv_prefiltered_snapshot, "report": arxiv_prefilter_report})
-    write_json(run_dir / "biorxiv_raw.json", {"run_id": run_id, "results": biorxiv_raw_snapshot})
-    write_json(run_dir / "biorxiv_prefiltered.json", {"run_id": run_id, "results": biorxiv_prefiltered_snapshot, "report": biorxiv_prefilter_report})
-    write_json(run_dir / "nature_raw.json", {"run_id": run_id, "results": nature_raw_snapshot})
-    write_json(run_dir / "science_raw.json", {"run_id": run_id, "results": science_raw_snapshot})
-    write_json(run_dir / "huggingface_raw.json", {"run_id": run_id, "results": hf_raw_snapshot})
-    write_json(run_dir / "github_raw.json", {"run_id": run_id, "results": github_raw_snapshot})
+    write_json(find_dir / "find_results.json", artifacts)
+    write_json(find_dir / "venue_health_report.json", {"run_id": run_id, "results": venue_health_report})
+    write_json(find_dir / "category_scan_report.json", {"run_id": run_id, "results": category_scan_report})
+    write_json(find_dir / "title_filter_report.json", {"run_id": run_id, "results": title_filter_report})
+    write_json(find_dir / "venue_filter1.json", {"run_id": run_id, "results": venue_filter1_items})
+    write_json(find_dir / "filter2_trace.json", {"run_id": run_id, "results": filter2_trace})
+    write_json(find_dir / "filter2_survivors.json", {"run_id": run_id, "results": filter2_survivors})
+    write_json(find_dir / "enriched_pre_filter3.json", {"run_id": run_id, "results": enriched_pre_filter3})
+    write_json(find_dir / "stage0_profile.json", stage0_result)
+    write_json(find_dir / "arxiv_raw.json", {"run_id": run_id, "results": arxiv_raw_snapshot})
+    write_json(find_dir / "arxiv_prefiltered.json", {"run_id": run_id, "results": arxiv_prefiltered_snapshot, "report": arxiv_prefilter_report})
+    write_json(find_dir / "biorxiv_raw.json", {"run_id": run_id, "results": biorxiv_raw_snapshot})
+    write_json(find_dir / "biorxiv_prefiltered.json", {"run_id": run_id, "results": biorxiv_prefiltered_snapshot, "report": biorxiv_prefilter_report})
+    write_json(find_dir / "nature_raw.json", {"run_id": run_id, "results": nature_raw_snapshot})
+    write_json(find_dir / "science_raw.json", {"run_id": run_id, "results": science_raw_snapshot})
+    write_json(find_dir / "huggingface_raw.json", {"run_id": run_id, "results": hf_raw_snapshot})
+    write_json(find_dir / "github_raw.json", {"run_id": run_id, "results": github_raw_snapshot})
 
     article_md = paper_markdown(article_items, "Recommended Articles")
     nature_md = paper_markdown(nature_items, "Nature Portfolio Articles")
@@ -1290,18 +1291,18 @@ def run_find(
     hf_md = paper_markdown(hf_items, "HuggingFace Papers and Models")
     github_md = paper_markdown(github_items, "GitHub Trending Repositories")
     status_md = _status_markdown(source_status)
-    write_text(run_dir / "article.md", article_md)
-    write_text(run_dir / "nature.md", nature_md)
-    write_text(run_dir / "science.md", science_md)
-    write_text(run_dir / "hf.md", hf_md)
-    write_text(run_dir / "github.md", github_md)
-    write_text(run_dir / "source_status.md", status_md)
-    sync_latest("auto_find", "article.md", run_dir / "article.md")
-    sync_latest("auto_find", "nature.md", run_dir / "nature.md")
-    sync_latest("auto_find", "science.md", run_dir / "science.md")
-    sync_latest("auto_find", "hf.md", run_dir / "hf.md")
-    sync_latest("auto_find", "github.md", run_dir / "github.md")
-    sync_latest("auto_find", "source_status.md", run_dir / "source_status.md")
+    write_text(find_dir / "article.md", article_md)
+    write_text(find_dir / "nature.md", nature_md)
+    write_text(find_dir / "science.md", science_md)
+    write_text(find_dir / "hf.md", hf_md)
+    write_text(find_dir / "github.md", github_md)
+    write_text(find_dir / "source_status.md", status_md)
+    sync_latest("auto_find", "article.md", find_dir / "article.md")
+    sync_latest("auto_find", "nature.md", find_dir / "nature.md")
+    sync_latest("auto_find", "science.md", find_dir / "science.md")
+    sync_latest("auto_find", "hf.md", find_dir / "hf.md")
+    sync_latest("auto_find", "github.md", find_dir / "github.md")
+    sync_latest("auto_find", "source_status.md", find_dir / "source_status.md")
     update_manifest(run_dir, "find")
     log("Find stage complete")
     return artifacts

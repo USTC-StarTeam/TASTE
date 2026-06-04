@@ -1,7 +1,7 @@
 from auto_research.auto_find.catalog import load_catalog
 from auto_research.auto_find.local_rank import rank_papers_tfidf
 from auto_research.auto_find.sources import _dblp_page_url, _openreview_venue_ids, _parse_dblp_year_links, _parse_neurips_detail, _parse_neurips_list, enrich_science_details, fetch_arxiv, fetch_biorxiv, fetch_dblp_stream_api, fetch_dblp_venue, fetch_nature_portfolio, fetch_openreview_venue, fetch_science_family, fetch_venue_sample, fetch_venue_title_index, normalize_date
-from auto_research.llm import LLMClient, clamp_workers, extract_json, fallback_score, keyword_category
+from auto_research.llm import LLMClient, clamp_workers, extract_json, fallback_score, keyword_category, parallel_json
 from auto_research.markdown import paper_markdown
 from auto_research.models import AppConfig, LLMRoleConfig
 from auto_research.storage import redacted_config
@@ -1022,6 +1022,55 @@ def test_role_llm_config_inherits_and_overrides_global():
     assert client.base_url == "https://global.example/v1"
     assert client.model == "judge-model"
     assert client.temperature == 0.1
+
+
+def test_claude_code_provider_uses_session_without_api_key(monkeypatch):
+    calls = []
+    inputs = []
+
+    def fake_run(command, input, capture_output, text, timeout, check):
+        calls.append(command)
+        inputs.append(input)
+
+        class Result:
+            returncode = 0
+            stdout = '{"result": "{\\"ok\\": true}"}'
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr("auto_research.llm.subprocess.run", fake_run)
+    cfg = AppConfig(provider="claude-code", api_key="", model="")
+    client = LLMClient(cfg, "read", conversation_key="run:test-worker", persist_session=False)
+
+    assert client.enabled is True
+    assert client.serial_only is True
+    assert client.json_or_none("Return JSON") == {"ok": True}
+    assert calls
+    assert "--session-id" in calls[0]
+    assert "--no-session-persistence" in calls[0]
+    assert "--tools" not in calls[0]
+    assert "Return JSON" not in calls[0]
+    assert inputs == ["Return JSON"]
+    assert client.summary()["session_id"] == calls[0][calls[0].index("--session-id") + 1]
+
+
+def test_parallel_json_runs_serially_for_claude_code_sessions():
+    class SerialClient:
+        serial_only = True
+
+        def __init__(self):
+            self.calls = []
+
+        def json_or_error(self, prompt):
+            self.calls.append(prompt)
+            return {"ok": True, "data": prompt, "error": ""}
+
+    client = SerialClient()
+    result = parallel_json(client, ["one", "two"], max_workers=8)
+
+    assert [item["data"] for item in result] == ["one", "two"]
+    assert client.calls == ["one", "two"]
 
 
 def test_clamp_workers_bounds_values():

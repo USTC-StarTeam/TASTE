@@ -5,7 +5,7 @@ from typing import Callable
 from auto_research.jobs import JobCancelled
 from auto_research.llm import LLMClient, clamp_workers, parallel_json
 from auto_research.models import AppConfig, IdeaPatch, IdeaRequest
-from auto_research.storage import read_json, run_dir, sync_latest, update_manifest, write_json, write_text
+from auto_research.storage import existing_stage_path, read_json, run_dir, stage_dir, sync_latest, update_manifest, write_json, write_text
 
 
 LogFn = Callable[[str], None]
@@ -18,8 +18,8 @@ def _raise_if_cancelled(should_cancel: CancelFn) -> None:
 
 
 def _source_items(directory) -> list[dict]:
-    find_results = read_json(directory / "find_results.json", {})
-    read_results = read_json(directory / "read_results.json", {})
+    find_results = read_json(existing_stage_path(directory, "find", "find_results.json"), {})
+    read_results = read_json(existing_stage_path(directory, "read", "read_results.json"), {})
     items = []
     for source_name in ("articles", "nature", "science", "huggingface", "github"):
         for item in find_results.get(source_name, []):
@@ -30,12 +30,27 @@ def _source_items(directory) -> list[dict]:
                 "summary": item.get("reason") or item.get("abstract", "")[:500],
             })
     for item in read_results.get("readings", []):
+        content = item.get("content", {}) if isinstance(item, dict) else {}
+        if not isinstance(content, dict):
+            content = {}
+        title = content.get("title", item.get("title", "") if isinstance(item, dict) else "")
+        summary = content.get("summary", item.get("summary", "") if isinstance(item, dict) else "")
         items.append({
             "source": "read",
-            "title": item.get("title", ""),
-            "url": item.get("url", ""),
-            "summary": item.get("summary", ""),
+            "title": title,
+            "url": "",
+            "summary": summary,
         })
+    cross_summary = read_results.get("cross_summary", {})
+    if isinstance(cross_summary, dict):
+        summary = " ".join(str(cross_summary.get(key, "")) for key in ["overview", "common_themes", "method_comparison", "limitations_comparison", "next_stage_notes"]).strip()
+        if summary:
+            items.append({
+                "source": "read_synthesis",
+                "title": "Cross-paper synthesis",
+                "url": "",
+                "summary": summary,
+            })
     return items
 
 
@@ -88,11 +103,13 @@ def _item_windows(items: list[dict], workers: int) -> list[list[dict]]:
 
 def run_idea(request: IdeaRequest, config: AppConfig, log: LogFn = print, should_cancel: CancelFn = lambda: False) -> dict:
     directory = run_dir(request.run_id)
+    idea_dir = stage_dir(directory, "idea")
     _raise_if_cancelled(should_cancel)
     items = _source_items(directory)
     max_ideas = request.max_ideas or config.max_ideas
-    generator = LLMClient(config, "idea_generator")
-    judge = LLMClient(config, "idea_judge")
+    agent_conversation = f"run:{request.run_id}:main"
+    generator = LLMClient(config, "idea_generator", conversation_key=agent_conversation)
+    judge = LLMClient(config, "idea_judge", conversation_key=agent_conversation)
     workers = clamp_workers(request.parallel_workers or config.idea_parallel_workers, default=1, maximum=8)
     candidate_multiplier = max(1, int(request.candidate_multiplier or 2))
     ideas = _fallback_ideas(items, max_ideas)
@@ -184,15 +201,15 @@ Return strict JSON:
         log(f"Generated {len(candidate_pool)} candidates, selected {len(ideas)} ideas")
 
     _raise_if_cancelled(should_cancel)
-    write_json(directory / "ideas.json", {
+    write_json(idea_dir / "ideas.json", {
         "run_id": request.run_id,
         "ideas": ideas,
         "candidate_pool": candidate_pool,
         "judge_scores": judge_scores,
         "llm": {"generator": generator.summary(), "judge": judge.summary(), "workers": workers},
     })
-    write_text(directory / "idea.md", render_ideas_markdown(ideas))
-    sync_latest("auto_idea", "idea.md", directory / "idea.md")
+    write_text(idea_dir / "idea.md", render_ideas_markdown(ideas))
+    sync_latest("auto_idea", "idea.md", idea_dir / "idea.md")
     update_manifest(directory, "idea")
     return {"run_id": request.run_id, "ideas": ideas}
 
@@ -225,13 +242,14 @@ def render_ideas_markdown(ideas: list[dict]) -> str:
 
 def patch_idea(run_id: str, idea_id: str, patch: IdeaPatch) -> dict:
     directory = run_dir(run_id)
-    data = read_json(directory / "ideas.json", {"run_id": run_id, "ideas": []})
+    idea_dir = stage_dir(directory, "idea")
+    data = read_json(existing_stage_path(directory, "idea", "ideas.json"), {"run_id": run_id, "ideas": []})
     for idea in data.get("ideas", []):
         if idea.get("id") == idea_id:
             updates = patch.model_dump(exclude_none=True)
             idea.update(updates)
             break
-    write_json(directory / "ideas.json", data)
-    write_text(directory / "idea.md", render_ideas_markdown(data.get("ideas", [])))
-    sync_latest("auto_idea", "idea.md", directory / "idea.md")
+    write_json(idea_dir / "ideas.json", data)
+    write_text(idea_dir / "idea.md", render_ideas_markdown(data.get("ideas", [])))
+    sync_latest("auto_idea", "idea.md", idea_dir / "idea.md")
     return data

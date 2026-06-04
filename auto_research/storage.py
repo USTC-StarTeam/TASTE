@@ -8,6 +8,13 @@ from typing import Any
 
 from .paths import RUNS_DIR, ensure_directories, stage_latest_path
 
+STAGE_DIR_NAMES = {
+    "find": "autoFind",
+    "read": "autoRead",
+    "idea": "autoIdea",
+    "plan": "autoPlan",
+}
+
 
 def utc_run_id() -> str:
     return datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
@@ -26,6 +33,21 @@ def run_dir(run_id: str) -> Path:
     if not path.exists():
         raise FileNotFoundError(f"Run not found: {run_id}")
     return path
+
+
+def stage_dir(directory: Path, stage: str) -> Path:
+    return directory / STAGE_DIR_NAMES.get(stage, stage)
+
+
+def stage_path(directory: Path, stage: str, filename: str) -> Path:
+    return stage_dir(directory, stage) / filename
+
+
+def existing_stage_path(directory: Path, stage: str, filename: str) -> Path:
+    path = stage_path(directory, stage, filename)
+    if path.exists():
+        return path
+    return directory / filename
 
 
 def write_json(path: Path, data: Any) -> None:

@@ -5,7 +5,7 @@ from auto_research.auto_plan.pipeline import finish_plan, polish_plan
 from auto_research.emailer import build_run_email_html
 from auto_research.jobs import JobCancelled
 from auto_research.models import AppConfig, EmailJobRequest, PlanPolishRequest, PlanRequest
-from auto_research.storage import create_run_dir, delete_run, read_json, write_json, write_text
+from auto_research.storage import create_run_dir, delete_run, read_json, stage_dir, write_json, write_text
 from auto_research.web.server import JOBS, api_artifacts, start_job
 
 
@@ -52,7 +52,7 @@ def test_plan_uses_only_selected_approved_ideas():
     run_id, directory = create_run_dir("plan_test")
     try:
         write_json(
-            directory / "ideas.json",
+            stage_dir(directory, "idea") / "ideas.json",
             {
                 "run_id": run_id,
                 "ideas": [
@@ -79,14 +79,14 @@ def test_plan_polish_appends_version_without_overwriting():
     run_id, directory = create_run_dir("polish_test")
     try:
         write_json(
-            directory / "ideas.json",
+            stage_dir(directory, "idea") / "ideas.json",
             {"run_id": run_id, "ideas": [{"id": "approved", "title": "Approved idea", "hypothesis": "H", "status": "approved"}]},
         )
         cfg = AppConfig(provider="mock")
         result = run_plan(PlanRequest(run_id=run_id, idea_ids=["approved"], repair_rounds=1), cfg, log=lambda _msg: None)
         plan_id = result["plans"][0]["plan_id"]
         polish_plan(PlanPolishRequest(run_id=run_id, plan_id=plan_id, version_id="v1", rounds=1), cfg, log=lambda _msg: None)
-        data = read_json(directory / "plans.json", {})
+        data = read_json(stage_dir(directory, "plan") / "plans.json", {})
         versions = data["plans"][0]["versions"]
         assert [version["version_id"] for version in versions] == ["v1", "v2"]
     finally:
@@ -97,7 +97,7 @@ def test_finish_plan_hides_rounds_in_markdown_but_keeps_json():
     run_id, directory = create_run_dir("finish_plan_test")
     try:
         write_json(
-            directory / "ideas.json",
+            stage_dir(directory, "idea") / "ideas.json",
             {"run_id": run_id, "ideas": [{"id": "approved", "title": "Approved idea", "hypothesis": "H", "status": "approved"}]},
         )
         cfg = AppConfig(provider="mock")
@@ -106,9 +106,9 @@ def test_finish_plan_hides_rounds_in_markdown_but_keeps_json():
         data = finish_plan(run_id, plan_id)
         assert data["plans"][0]["completed"] is True
         assert data["plans"][0]["completed_at"]
-        markdown = (directory / "plan.md").read_text(encoding="utf-8")
+        markdown = (stage_dir(directory, "plan") / "plan.md").read_text(encoding="utf-8")
         assert "Evaluation / Repair Rounds" not in markdown
-        stored = read_json(directory / "plans.json", {})
+        stored = read_json(stage_dir(directory, "plan") / "plans.json", {})
         assert stored["plans"][0]["versions"][0]["evaluation_rounds"]
     finally:
         delete_run(run_id)
@@ -117,9 +117,10 @@ def test_finish_plan_hides_rounds_in_markdown_but_keeps_json():
 def test_email_report_renders_markdown_and_ranking_html():
     run_id, directory = create_run_dir("email_test")
     try:
-        write_text(directory / "article.md", "# Report\n\n- **Item**: value")
+        find_dir = stage_dir(directory, "find")
+        write_text(find_dir / "article.md", "# Report\n\n- **Item**: value")
         write_json(
-            directory / "find_results.json",
+            find_dir / "find_results.json",
             {
                 "screened_ranking": [
                     {
@@ -140,7 +141,7 @@ def test_email_report_renders_markdown_and_ranking_html():
         assert "<h1>TASTE Report:" in html
         assert "<strong>Item</strong>" in html
         assert "Full Screened Ranking" in html
-        assert str(directory / "article.md") in html
+        assert str(find_dir / "article.md") in html
     finally:
         delete_run(run_id)
 
@@ -148,10 +149,10 @@ def test_email_report_renders_markdown_and_ranking_html():
 def test_artifact_api_returns_paths():
     run_id, directory = create_run_dir("artifact_path_test")
     try:
-        write_text(directory / "article.md", "# Article")
+        article_path = stage_dir(directory, "find") / "article.md"
+        write_text(article_path, "# Article")
         response = api_artifacts(run_id)
         article = next(item for item in response["artifacts"] if item["name"] == "article.md")
-        assert article["path"] == str(directory / "article.md")
+        assert article["path"] == str(article_path)
     finally:
         delete_run(run_id)
-

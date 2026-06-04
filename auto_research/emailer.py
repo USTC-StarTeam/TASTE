@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from auto_research.models import AppConfig, EmailJobRequest
-from auto_research.storage import read_json, run_dir, write_json
+from auto_research.storage import existing_stage_path, read_json, run_dir, write_json
 
 
 LogFn = Callable[[str], None]
@@ -72,7 +72,7 @@ def markdown_to_html(markdown: str) -> str:
 
 
 def _ranking_html(directory: Path) -> str:
-    data = read_json(directory / "find_results.json", {})
+    data = read_json(existing_stage_path(directory, "find", "find_results.json"), {})
     ranking = data.get("screened_ranking")
     if not isinstance(ranking, list):
         ranking = [
@@ -147,7 +147,18 @@ def build_run_email_html(request: EmailJobRequest) -> str:
         if ranking:
             sections.append(ranking)
     for name in artifact_names:
-        path = directory / name
+        stage = {
+            "article.md": "find",
+            "nature.md": "find",
+            "science.md": "find",
+            "hf.md": "find",
+            "github.md": "find",
+            "source_status.md": "find",
+            "read.md": "read",
+            "idea.md": "idea",
+            "plan.md": "plan",
+        }.get(name, "")
+        path = existing_stage_path(directory, stage, name) if stage else directory / name
         if not path.exists() or path.suffix.lower() != ".md":
             continue
         content = path.read_text(encoding="utf-8")

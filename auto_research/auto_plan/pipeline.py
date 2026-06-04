@@ -6,7 +6,7 @@ from typing import Callable
 from auto_research.jobs import JobCancelled
 from auto_research.llm import LLMClient
 from auto_research.models import AppConfig, PlanPolishRequest, PlanRequest
-from auto_research.storage import read_json, run_dir, sync_latest, update_manifest, write_json, write_text
+from auto_research.storage import existing_stage_path, read_json, run_dir, stage_dir, sync_latest, update_manifest, write_json, write_text
 
 
 LogFn = Callable[[str], None]
@@ -167,7 +167,8 @@ def _build_version(version_id: str, idea: dict, initial_plan: dict, rounds: int,
 
 def run_plan(request: PlanRequest, config: AppConfig, log: LogFn = print, should_cancel: CancelFn = lambda: False) -> dict:
     directory = run_dir(request.run_id)
-    ideas_data = read_json(directory / "ideas.json", {"ideas": []})
+    plan_dir = stage_dir(directory, "plan")
+    ideas_data = read_json(existing_stage_path(directory, "idea", "ideas.json"), {"ideas": []})
     approved_ideas = [idea for idea in ideas_data.get("ideas", []) if idea.get("status") == "approved"]
     ideas = approved_ideas
     if request.idea_ids:
@@ -175,8 +176,8 @@ def run_plan(request: PlanRequest, config: AppConfig, log: LogFn = print, should
         ideas = [idea for idea in approved_ideas if idea.get("id") in allowed]
     if not ideas:
         log("No approved ideas selected for planning.")
-        write_json(directory / "plans.json", {"run_id": request.run_id, "plans": []})
-        write_text(directory / "plan.md", "# Research Plans\n\nNo approved ideas selected for planning.\n")
+        write_json(plan_dir / "plans.json", {"run_id": request.run_id, "plans": []})
+        write_text(plan_dir / "plan.md", "# Research Plans\n\nNo approved ideas selected for planning.\n")
         update_manifest(directory, "plan")
         return {"run_id": request.run_id, "plans": []}
 
@@ -200,9 +201,9 @@ def run_plan(request: PlanRequest, config: AppConfig, log: LogFn = print, should
         plans.append(plan)
 
     _raise_if_cancelled(should_cancel)
-    write_json(directory / "plans.json", {"run_id": request.run_id, "plans": plans})
-    write_text(directory / "plan.md", render_plan_markdown(plans))
-    sync_latest("auto_plan", "plan.md", directory / "plan.md")
+    write_json(plan_dir / "plans.json", {"run_id": request.run_id, "plans": plans})
+    write_text(plan_dir / "plan.md", render_plan_markdown(plans))
+    sync_latest("auto_plan", "plan.md", plan_dir / "plan.md")
     update_manifest(directory, "plan")
     log("Plan stage complete")
     return {"run_id": request.run_id, "plans": plans}
@@ -210,8 +211,9 @@ def run_plan(request: PlanRequest, config: AppConfig, log: LogFn = print, should
 
 def polish_plan(request: PlanPolishRequest, config: AppConfig, log: LogFn = print, should_cancel: CancelFn = lambda: False) -> dict:
     directory = run_dir(request.run_id)
-    data = read_json(directory / "plans.json", {"run_id": request.run_id, "plans": []})
-    ideas_data = read_json(directory / "ideas.json", {"ideas": []})
+    plan_dir = stage_dir(directory, "plan")
+    data = read_json(existing_stage_path(directory, "plan", "plans.json"), {"run_id": request.run_id, "plans": []})
+    ideas_data = read_json(existing_stage_path(directory, "idea", "ideas.json"), {"ideas": []})
     ideas_by_id = {idea.get("id"): idea for idea in ideas_data.get("ideas", [])}
     generator = LLMClient(config, "plan_generator")
     evaluator = LLMClient(config, "plan_evaluator")
@@ -230,25 +232,26 @@ def polish_plan(request: PlanPolishRequest, config: AppConfig, log: LogFn = prin
         plan["completed"] = False
         plan["completed_at"] = ""
         break
-    write_json(directory / "plans.json", data)
-    write_text(directory / "plan.md", render_plan_markdown(data.get("plans", [])))
-    sync_latest("auto_plan", "plan.md", directory / "plan.md")
+    write_json(plan_dir / "plans.json", data)
+    write_text(plan_dir / "plan.md", render_plan_markdown(data.get("plans", [])))
+    sync_latest("auto_plan", "plan.md", plan_dir / "plan.md")
     update_manifest(directory, "plan")
     return data
 
 
 def finish_plan(run_id: str, plan_id: str) -> dict:
     directory = run_dir(run_id)
-    data = read_json(directory / "plans.json", {"run_id": run_id, "plans": []})
+    plan_dir = stage_dir(directory, "plan")
+    data = read_json(existing_stage_path(directory, "plan", "plans.json"), {"run_id": run_id, "plans": []})
     for plan in data.get("plans", []):
         if plan.get("plan_id") != plan_id:
             continue
         if not plan.get("completed"):
             plan["completed"] = True
             plan["completed_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-        write_json(directory / "plans.json", data)
-        write_text(directory / "plan.md", render_plan_markdown(data.get("plans", [])))
-        sync_latest("auto_plan", "plan.md", directory / "plan.md")
+        write_json(plan_dir / "plans.json", data)
+        write_text(plan_dir / "plan.md", render_plan_markdown(data.get("plans", [])))
+        sync_latest("auto_plan", "plan.md", plan_dir / "plan.md")
         update_manifest(directory, "plan")
         return data
     raise ValueError(f"Plan not found: {plan_id}")

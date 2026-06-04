@@ -1,14 +1,18 @@
 import re
 
-from auto_research.auto_idea.pipeline import run_idea
+from auto_research.auto_idea.pipeline import _source_items, run_idea
 from auto_research.models import AppConfig, IdeaRequest
-from auto_research.storage import create_run_dir, delete_run, write_json
+from auto_research.storage import create_run_dir, delete_run, stage_dir, write_json
 
 
 class FakeIdeaLLM:
-    def __init__(self, _config, role=None):
+    instances = []
+
+    def __init__(self, _config, role=None, conversation_key=""):
         self.role = role
+        self.conversation_key = conversation_key
         self.enabled = True
+        self.instances.append(self)
 
     def summary(self):
         return {"role": self.role, "enabled": True}
@@ -40,11 +44,13 @@ class FakeIdeaLLM:
 
 
 def test_parallel_idea_generation_uses_candidate_pool_and_judge(monkeypatch):
+    FakeIdeaLLM.instances = []
     monkeypatch.setattr("auto_research.auto_idea.pipeline.LLMClient", FakeIdeaLLM)
     run_id, directory = create_run_dir("idea_parallel_test")
     try:
+        find_dir = stage_dir(directory, "find")
         write_json(
-            directory / "find_results.json",
+            find_dir / "find_results.json",
             {
                 "run_id": run_id,
                 "articles": [{"title": f"Paper {index}", "url": f"https://example.com/{index}", "reason": "summary"} for index in range(8)],
@@ -55,5 +61,33 @@ def test_parallel_idea_generation_uses_candidate_pool_and_judge(monkeypatch):
         assert len(result["ideas"]) == 3
         assert result["ideas"][0]["judge_score"] == 9.5
         assert result["ideas"][0]["id"] == "idea-001"
+        assert {client.conversation_key for client in FakeIdeaLLM.instances} == {f"run:{run_id}:main"}
+    finally:
+        delete_run(run_id)
+
+
+def test_idea_stage_uses_read_content_without_metadata():
+    run_id, directory = create_run_dir("idea_content_only_test")
+    try:
+        write_json(stage_dir(directory, "find") / "find_results.json", {"run_id": run_id, "articles": []})
+        write_json(
+            stage_dir(directory, "read") / "read_results.json",
+            {
+                "run_id": run_id,
+                "readings": [
+                    {
+                        "content": {"title": "Readable Title", "summary": "Content summary"},
+                        "metadata": {"url": "https://metadata.example/paper", "paper_id": "secret-id"},
+                    }
+                ],
+                "cross_summary": {"overview": "Content-only synthesis", "common_themes": "", "method_comparison": "", "limitations_comparison": "", "next_stage_notes": ""},
+            },
+        )
+
+        items = _source_items(directory)
+
+        read_items = [item for item in items if item["source"] == "read"]
+        assert read_items == [{"source": "read", "title": "Readable Title", "url": "", "summary": "Content summary"}]
+        assert all("metadata.example" not in str(item) and "secret-id" not in str(item) for item in items)
     finally:
         delete_run(run_id)

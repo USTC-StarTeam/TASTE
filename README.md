@@ -122,7 +122,7 @@ TASTE 使用 OpenAI-compatible Chat Completions API。
 
 | 字段 | 说明 |
 | --- | --- |
-| `provider` | 供应商标签，例如 `openai`、`deepseek`、`local`。 |
+| `provider` | 供应商标签，例如 `openai`、`deepseek`、`local`；`claude-code` 会通过本机 Claude Code CLI 运行，不需要 API key。 |
 | `base_url` | API base URL，例如 `https://api.openai.com/v1`。 |
 | `api_key` | 本地 API key，请勿提交到 Git。 |
 | `model` | 模型名称。 |

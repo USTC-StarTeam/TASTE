@@ -8,9 +8,9 @@
   "temperature": 0.4,
   "llm_roles": {
     "find": {"provider": "", "base_url": "", "api_key": "", "model": "", "temperature": null},
-    "read": {"provider": "", "base_url": "", "api_key": "", "model": "", "temperature": null},
-    "idea_generator": {"provider": "", "base_url": "", "api_key": "", "model": "", "temperature": null},
-    "idea_judge": {"provider": "", "base_url": "", "api_key": "", "model": "", "temperature": null},
+    "read": {"provider": "claude-code", "base_url": "", "api_key": "", "model": "sonnet", "temperature": null},
+    "idea_generator": {"provider": "claude-code", "base_url": "", "api_key": "", "model": "sonnet", "temperature": null},
+    "idea_judge": {"provider": "claude-code", "base_url": "", "api_key": "", "model": "sonnet", "temperature": null},
     "plan_generator": {"provider": "", "base_url": "", "api_key": "", "model": "", "temperature": null},
     "plan_evaluator": {"provider": "", "base_url": "", "api_key": "", "model": "", "temperature": null}
   },

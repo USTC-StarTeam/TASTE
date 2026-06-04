@@ -23,7 +23,7 @@ from auto_research.emailer import send_run_email
 from auto_research.jobs import JobCancelled
 from auto_research.models import AppConfig, EmailJobRequest, FindRequest, IdeaPatch, IdeaRequest, PlanPolishRequest, PlanRequest, ReadRequest, VenueHealthRequest
 from auto_research.paths import CONFIG_PATH, ensure_directories
-from auto_research.storage import delete_run, list_runs, read_json, redacted_config, run_dir, write_json
+from auto_research.storage import delete_run, existing_stage_path, list_runs, read_json, redacted_config, run_dir, write_json
 
 
 ensure_directories()
@@ -320,12 +320,28 @@ def api_runs() -> list[dict]:
 def api_artifacts(run_id: str) -> dict:
     directory = run_dir(run_id)
     artifacts = []
-    for name in ["article.md", "hf.md", "github.md", "source_status.md", "read.md", "idea.md", "plan.md"]:
-        path = directory / name
+    markdown_artifacts = [
+        ("find", "article.md"),
+        ("find", "hf.md"),
+        ("find", "github.md"),
+        ("find", "source_status.md"),
+        ("read", "read.md"),
+        ("idea", "idea.md"),
+        ("plan", "plan.md"),
+    ]
+    for stage, name in markdown_artifacts:
+        path = existing_stage_path(directory, stage, name)
         if path.exists():
             artifacts.append({"name": name, "kind": "markdown", "content": path.read_text(encoding="utf-8"), "path": str(path)})
-    for name in ["find_results.json", "stage0_profile.json", "venue_health_report.json", "category_scan_report.json", "title_filter_report.json", "venue_filter1.json", "filter2_trace.json", "filter2_survivors.json", "enriched_pre_filter3.json", "arxiv_raw.json", "arxiv_prefiltered.json", "biorxiv_raw.json", "biorxiv_prefiltered.json", "nature_raw.json", "science_raw.json", "huggingface_raw.json", "github_raw.json", "read_results.json", "ideas.json", "plans.json", "config.json", "selection.json", "email_report.json"]:
-        path = directory / name
+    json_artifacts = [
+        *[("find", name) for name in ["find_results.json", "stage0_profile.json", "venue_health_report.json", "category_scan_report.json", "title_filter_report.json", "venue_filter1.json", "filter2_trace.json", "filter2_survivors.json", "enriched_pre_filter3.json", "arxiv_raw.json", "arxiv_prefiltered.json", "biorxiv_raw.json", "biorxiv_prefiltered.json", "nature_raw.json", "science_raw.json", "huggingface_raw.json", "github_raw.json", "config.json", "selection.json"]],
+        ("read", "read_results.json"),
+        ("idea", "ideas.json"),
+        ("plan", "plans.json"),
+        ("", "email_report.json"),
+    ]
+    for stage, name in json_artifacts:
+        path = existing_stage_path(directory, stage, name) if stage else directory / name
         if path.exists():
             content = read_json(path, {})
             if name == "config.json" and isinstance(content, dict):

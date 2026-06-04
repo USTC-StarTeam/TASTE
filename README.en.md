@@ -120,7 +120,7 @@ TASTE uses an OpenAI-compatible Chat Completions API.
 
 | Field | Purpose |
 | --- | --- |
-| `provider` | Display label, for example `openai`, `deepseek`, or `local`. |
+| `provider` | Display label, for example `openai`, `deepseek`, or `local`; `claude-code` runs through the local Claude Code CLI and does not require an API key. |
 | `base_url` | API base URL, for example `https://api.openai.com/v1`. |
 | `api_key` | Your local API key. Keep it out of Git. |
 | `model` | Model name. |

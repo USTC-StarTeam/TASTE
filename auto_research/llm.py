@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 from openai import OpenAI
 
@@ -28,7 +31,7 @@ def extract_json(raw: str) -> Any:
 
 
 class LLMClient:
-    def __init__(self, config: AppConfig, role: LLMRole | str | None = None):
+    def __init__(self, config: AppConfig, role: LLMRole | str | None = None, conversation_key: str = "", persist_session: bool = True):
         self.config = config
         self.role = role or "global"
         self.provider = config.provider
@@ -36,6 +39,8 @@ class LLMClient:
         self.api_key = config.api_key
         self.model = config.model
         self.temperature = config.temperature
+        self.conversation_key = conversation_key
+        self.persist_session = persist_session
         if role:
             override = config.llm_roles.get(str(role))
             if override:
@@ -44,9 +49,12 @@ class LLMClient:
                 self.api_key = override.api_key or self.api_key
                 self.model = override.model or self.model
                 self.temperature = config.temperature if override.temperature is None else override.temperature
-        self.enabled = bool(self.api_key and self.model and self.provider.lower() != "mock")
+        self.backend = self.provider.lower().replace("_", "-")
+        self.uses_claude_code = self.backend in {"claude-code", "claude"}
+        self.serial_only = self.uses_claude_code
+        self.enabled = self.uses_claude_code or bool(self.api_key and self.model and self.backend != "mock")
         self.client = None
-        if self.enabled:
+        if self.enabled and not self.uses_claude_code:
             self.client = OpenAI(api_key=self.api_key, base_url=self.base_url or None)
 
     def summary(self) -> dict:
@@ -57,10 +65,16 @@ class LLMClient:
             "model": self.model,
             "temperature": self.temperature,
             "enabled": self.enabled,
+            "backend": "claude-code" if self.uses_claude_code else "chat-completions",
+            "session_id": self._claude_session_id() if self.uses_claude_code else "",
         }
 
     def chat(self, prompt: str, temperature: float | None = None) -> str:
-        if not self.enabled or self.client is None:
+        if not self.enabled:
+            raise RuntimeError("LLM is not configured")
+        if self.uses_claude_code:
+            return self._chat_claude_code(prompt)
+        if self.client is None:
             raise RuntimeError("LLM is not configured")
         result = self.client.chat.completions.create(
             model=self.model,
@@ -68,6 +82,37 @@ class LLMClient:
             temperature=self.temperature if temperature is None else temperature,
         )
         return result.choices[0].message.content or ""
+
+    def _claude_session_id(self) -> str:
+        key = self.conversation_key or f"{Path.cwd()}:{self.role}"
+        return str(uuid5(NAMESPACE_URL, f"TASTE:{key}"))
+
+    def _chat_claude_code(self, prompt: str) -> str:
+        command = [
+            "claude",
+            "-p",
+            "--output-format",
+            "json",
+            "--session-id",
+            self._claude_session_id(),
+        ]
+        if not self.persist_session:
+            command.append("--no-session-persistence")
+        if self.model and self.model not in {"gpt-4o-mini", "mock"}:
+            command.extend(["--model", self.model])
+        result = subprocess.run(command, input=prompt, capture_output=True, text=True, timeout=900, check=False)
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout or "claude-code failed").strip())
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return result.stdout
+        if isinstance(payload, dict):
+            for key in ("result", "content", "response"):
+                value = payload.get(key)
+                if isinstance(value, str):
+                    return value
+        return result.stdout
 
     def json_or_none(self, prompt: str) -> Any | None:
         try:
@@ -93,6 +138,8 @@ def clamp_workers(value: int | None, default: int = 16, maximum: int = 32) -> in
 def parallel_json(client: LLMClient, prompts: list[str], max_workers: int) -> list[dict]:
     if not prompts:
         return []
+    if getattr(client, "serial_only", False):
+        return [client.json_or_error(prompt) for prompt in prompts]
     workers = clamp_workers(max_workers, default=1, maximum=max_workers)
     results: list[dict] = [{"ok": False, "data": None, "error": "not started"} for _ in prompts]
     with ThreadPoolExecutor(max_workers=workers) as executor:
