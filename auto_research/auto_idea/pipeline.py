@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 
 from auto_research.jobs import JobCancelled
-from auto_research.llm import LLMClient, clamp_workers, parallel_json
+from auto_research.llm import LLMClient, clamp_workers
 from auto_research.models import AppConfig, IdeaPatch, IdeaRequest
 from auto_research.storage import existing_stage_path, read_json, run_dir, stage_dir, sync_latest, update_manifest, write_json, write_text
 
@@ -108,12 +110,209 @@ def _score_value(item: dict) -> float:
         return 0.0
 
 
-def _item_windows(items: list[dict], workers: int) -> list[list[dict]]:
-    if not items:
-        return []
-    active = min(max(1, workers), len(items))
-    size = max(1, (len(items) + active - 1) // active)
-    return [items[index:index + size] for index in range(0, len(items), size)][:active]
+def _evaluate_methods(directory, main_agent: LLMClient, log: LogFn) -> dict:
+    if not main_agent.enabled:
+        return {}
+    profile_result = read_json(existing_stage_path(directory, "find", "stage0_profile.json"), {})
+    read_results = read_json(existing_stage_path(directory, "read", "read_results.json"), {})
+    profile = profile_result.get("profile", {}) if isinstance(profile_result, dict) else {}
+    readings = read_results.get("readings", []) if isinstance(read_results, dict) else []
+    if not isinstance(profile, dict) or not isinstance(readings, list) or not readings:
+        return {}
+    content_only = [
+        reading.get("content", {})
+        for reading in readings
+        if isinstance(reading, dict) and isinstance(reading.get("content"), dict)
+    ]
+    if not content_only:
+        return {}
+    context = {
+        "main_agent_summary": read_results.get("main_agent_summary") or read_results.get("cross_summary", {}),
+        "method_analysis": read_results.get("method_analysis", {}),
+        "readings": content_only,
+    }
+    prompt = f"""
+Continue as the main research agent from the auto_read stage.
+Evaluate the methods in the structured reading results against the normalized researcher profile.
+Do not generate research ideas or experimental plans yet.
+
+Normalized researcher profile:
+{json.dumps(profile, ensure_ascii=False, indent=2)}
+
+Structured auto_read results:
+{json.dumps(context, ensure_ascii=False, indent=2)}
+
+Return one strict JSON object:
+{{
+  "summary": "overall assessment",
+  "methods": [
+    {{
+      "title": "paper or method title",
+      "profile_alignment": "assessment",
+      "reusable_contribution": "assessment",
+      "evidence_strength": "assessment",
+      "feasibility": "assessment",
+      "required_resources": "assessment",
+      "limitations_and_risks": "assessment",
+      "extension_opportunities": "assessment",
+      "combination_opportunities": "assessment"
+    }}
+  ],
+  "cross_method_assessment": "comparison across methods",
+  "recommended_focus": ["method-level direction worth prioritizing"]
+}}
+Use Chinese. Base the evaluation only on the normalized profile and structured reading evidence.
+"""
+    result = main_agent.json_or_error(prompt)
+    data = result.get("data")
+    if result.get("ok") and isinstance(data, dict):
+        log("Main agent method evaluation accepted")
+        return data
+    log(f"Main agent method evaluation unavailable: {str(result.get('error') or '')[:300]}")
+    return {}
+
+
+def _generate_worker_candidates(
+    run_id: str,
+    config: AppConfig,
+    workers: int,
+    candidate_count: int,
+    profile: dict,
+    method_evaluation: dict,
+    evidence: dict,
+    log: LogFn,
+) -> tuple[list[dict], list[dict]]:
+    perspectives = [
+        "Extend weaknesses and limitations into research opportunities.",
+        "Combine complementary methods into a coherent new direction.",
+        "Adapt the methods to the researcher's target workflow and constraints.",
+        "Develop evaluation or benchmark-centered research directions.",
+        "Explore high-risk, high-novelty directions grounded in the evidence.",
+    ][:workers]
+
+    def run_worker(worker_index: int, perspective: str) -> tuple[list[dict], dict]:
+        worker = LLMClient(
+            config,
+            "idea_generator",
+            conversation_key=f"run:{run_id}:worker:auto_idea:{worker_index}",
+            persist_session=False,
+        )
+        prompt = f"""
+You are an idea-exploration worker supporting a main research agent.
+
+Explore only this perspective:
+{perspective}
+
+Normalized researcher profile:
+{json.dumps(profile, ensure_ascii=False, indent=2)}
+
+Main-agent method evaluation:
+{json.dumps(method_evaluation, ensure_ascii=False, indent=2)}
+
+Relevant research evidence:
+{json.dumps(evidence, ensure_ascii=False, indent=2)}
+
+Generate {candidate_count} distinct research idea candidates.
+Do not select final ideas or create detailed experimental plans.
+
+Each idea must directly match the normalized researcher profile, identify the evidence or limitation that motivates it, state a testable hypothesis, explain its novelty relative to the supplied methods, and include only a brief feasibility note.
+
+Return one strict JSON array:
+[
+  {{
+    "title": "Chinese title",
+    "hypothesis": "testable Chinese hypothesis",
+    "motivation": "evidence-backed motivation",
+    "novelty": "specific novelty",
+    "feasibility": "brief feasibility assessment",
+    "inspired_by": ["paper or method title"]
+  }}
+]
+"""
+        result = worker.json_or_error(prompt)
+        data = result.get("data")
+        candidates = data if result.get("ok") and isinstance(data, list) else []
+        if not candidates:
+            log(f"Idea worker {worker_index} unavailable: {str(result.get('error') or 'no JSON candidates returned')[:300]}")
+        return [item for item in candidates if isinstance(item, dict)], worker.summary()
+
+    candidate_groups: list[list[dict]] = [[] for _ in perspectives]
+    summaries: list[dict] = [{} for _ in perspectives]
+    with ThreadPoolExecutor(max_workers=len(perspectives)) as executor:
+        futures = {
+            executor.submit(run_worker, index, perspective): index
+            for index, perspective in enumerate(perspectives, 1)
+        }
+        for future in as_completed(futures):
+            index = futures[future] - 1
+            candidate_groups[index], summaries[index] = future.result()
+            for candidate in candidate_groups[index]:
+                candidate["worker_perspective"] = perspectives[index]
+    return [candidate for group in candidate_groups for candidate in group], summaries
+
+
+def _synthesize_worker_candidates(
+    main_agent: LLMClient,
+    max_candidates: int,
+    profile: dict,
+    method_evaluation: dict,
+    worker_candidates: list[dict],
+    broad_signals: list[dict],
+    log: LogFn,
+) -> tuple[list[dict], list[dict]]:
+    prompt = f"""
+Continue as the main research agent.
+
+Using your existing auto_read context, method evaluation, and worker candidate ideas, produce a diverse candidate pool for later preliminary experimental planning.
+
+Normalized researcher profile:
+{json.dumps(profile, ensure_ascii=False, indent=2)}
+
+Method evaluation:
+{json.dumps(method_evaluation, ensure_ascii=False, indent=2)}
+
+Worker candidates:
+{json.dumps(worker_candidates, ensure_ascii=False, indent=2)}
+
+Broad discovery signals:
+{json.dumps(broad_signals, ensure_ascii=False, indent=2)}
+
+Review, merge, reject, and improve worker candidates.
+Do not create detailed experimental plans yet.
+
+Return one strict JSON object:
+{{
+  "candidate_ideas": [
+    {{
+      "title": "Chinese title",
+      "hypothesis": "testable Chinese hypothesis",
+      "motivation": "evidence-backed motivation",
+      "novelty": "specific novelty",
+      "feasibility": "brief feasibility assessment",
+      "inspired_by": ["paper or method title"]
+    }}
+  ],
+  "rejected_candidates": [
+    {{
+      "title": "candidate title",
+      "reason": "rejection reason"
+    }}
+  ]
+}}
+Return at most {max_candidates} candidate ideas.
+"""
+    result = main_agent.json_or_error(prompt)
+    data = result.get("data")
+    if result.get("ok") and isinstance(data, dict):
+        candidates = data.get("candidate_ideas", [])
+        rejected = data.get("rejected_candidates", [])
+        log(f"Main agent synthesized {len(candidates) if isinstance(candidates, list) else 0} idea candidates")
+        return (
+            [item for item in candidates if isinstance(item, dict)] if isinstance(candidates, list) else [],
+            [item for item in rejected if isinstance(item, dict)] if isinstance(rejected, list) else [],
+        )
+    log(f"Main agent idea synthesis unavailable: {str(result.get('error') or '')[:300]}")
+    return [], []
 
 
 def run_idea(request: IdeaRequest, config: AppConfig, log: LogFn = print, should_cancel: CancelFn = lambda: False) -> dict:
@@ -130,49 +329,66 @@ def run_idea(request: IdeaRequest, config: AppConfig, log: LogFn = print, should
     ideas = _fallback_ideas(items, max_ideas)
     candidate_pool: list[dict] = []
     judge_scores: list[dict] = []
+    method_evaluation: dict = {}
+    worker_candidates: list[dict] = []
+    rejected_candidates: list[dict] = []
+    worker_summaries: list[dict] = []
 
     if generator.enabled and items:
         _raise_if_cancelled(should_cancel)
-        windows = _item_windows(items, workers)
-        prompts: list[str] = []
-        for batch_index, window in enumerate(windows, 1):
-            prompt_items = "\n".join(f"- [{item['source']}] {item['title']} :: {item['summary'][:500]} URL={item['url']}" for item in window)
-            prompts.append(f"""
-Generate {candidate_multiplier * max_ideas} research ideas for this researcher.
+        method_evaluation = _evaluate_methods(directory, generator, log)
+        _raise_if_cancelled(should_cancel)
+        profile_result = read_json(existing_stage_path(directory, "find", "stage0_profile.json"), {})
+        profile = profile_result.get("profile", {}) if isinstance(profile_result, dict) else {}
+        read_results = read_json(existing_stage_path(directory, "read", "read_results.json"), {})
+        content_only = [
+            reading.get("content", {})
+            for reading in read_results.get("readings", [])
+            if isinstance(reading, dict) and isinstance(reading.get("content"), dict)
+        ]
+        evidence = {
+            "main_agent_summary": read_results.get("main_agent_summary") or read_results.get("cross_summary", {}),
+            "method_analysis": read_results.get("method_analysis", {}),
+            "readings": content_only,
+        }
+        active_workers = min(workers, 5)
+        worker_candidates, worker_summaries = _generate_worker_candidates(
+            request.run_id,
+            config,
+            active_workers,
+            candidate_multiplier * max_ideas,
+            profile,
+            method_evaluation,
+            evidence,
+            log,
+        )
+        _raise_if_cancelled(should_cancel)
+        synthesized, rejected_candidates = _synthesize_worker_candidates(
+            generator,
+            candidate_multiplier * max_ideas,
+            profile,
+            method_evaluation,
+            worker_candidates,
+            [item for item in items if item.get("source") not in {"read", "main_agent_summary", "method_analysis"}],
+            log,
+        )
+        for index, item in enumerate(synthesized or worker_candidates, 1):
+            item.setdefault("id", f"idea-candidate-{index:03d}")
+            item.setdefault("status", "pending")
+            item.setdefault("inspired_by", [])
+            item["inspired_by"] = [
+                source if isinstance(source, dict) else {"title": str(source), "source": "read", "url": ""}
+                for source in item["inspired_by"]
+            ]
+            item.setdefault("min_experiment", "")
+            item.setdefault("score", 0)
+            candidate_pool.append(item)
 
-Research interest:
-{config.research_interest}
-
-Researcher profile:
-{config.researcher_profile}
-
-Signals:
-{prompt_items}
-
-Return strict JSON array. Each item:
-{{"id":"idea-001","title":"Chinese title","hypothesis":"Chinese hypothesis","min_experiment":"Chinese min experiment","novelty":"HIGH/MEDIUM/LOW","feasibility":"HIGH/MEDIUM/LOW","score":8.5,"inspired_by":[{{"title":"","source":"","url":""}}]}}
-
-Batch index: {batch_index}. Use only the signals shown in this batch.
-"""
-)
-        generator_results = parallel_json(generator, prompts, workers)
-        finalist_pool: list[dict] = []
-        for batch_index, result in enumerate(generator_results, 1):
-            data = result.get("data")
-            batch_candidates = data if isinstance(data, list) else []
-            normalized: list[dict] = []
-            for index, item in enumerate(batch_candidates, 1):
-                if not isinstance(item, dict):
-                    continue
-                item.setdefault("id", f"idea-b{batch_index}-{index:03d}")
-                item.setdefault("status", "pending")
-                item.setdefault("inspired_by", [])
-                item["generator_batch"] = batch_index
-                normalized.append(item)
-            candidate_pool.extend(normalized)
-            finalist_pool.extend(sorted(normalized, key=_score_value, reverse=True)[:2])
-
-        finalist_pool = _dedupe_ideas(finalist_pool)
+        finalist_pool = _dedupe_ideas(candidate_pool)
+        if finalist_pool:
+            ideas = sorted(finalist_pool, key=_score_value, reverse=True)[:max_ideas]
+        else:
+            log("No agent-generated idea candidates accepted; preserving fallback ideas.")
         if judge.enabled and finalist_pool:
             _raise_if_cancelled(should_cancel)
             judge_items = "\n".join(f"- {item.get('id')}: {item.get('title')} | score={item.get('score')} | hypothesis={item.get('hypothesis')}" for item in finalist_pool)
@@ -207,8 +423,8 @@ Return strict JSON:
                 judge_scores.append({"id": item.get("id"), "judge_score": item["judge_score"], "judge_reason": item["judge_reason"]})
             if selected:
                 ideas = sorted(_dedupe_ideas(selected), key=lambda item: float(item.get("judge_score") or 0), reverse=True)[:max_ideas]
-        else:
-            ideas = sorted(_dedupe_ideas(finalist_pool), key=_score_value, reverse=True)[:max_ideas]
+            else:
+                log("Idea judge returned no usable selection; preserving ranked generated candidates.")
 
         for index, idea in enumerate(ideas, 1):
             idea["id"] = f"idea-{index:03d}"
@@ -221,12 +437,15 @@ Return strict JSON:
         "ideas": ideas,
         "candidate_pool": candidate_pool,
         "judge_scores": judge_scores,
-        "llm": {"generator": generator.summary(), "judge": judge.summary(), "workers": workers},
+        "method_evaluation": method_evaluation,
+        "worker_candidates": worker_candidates,
+        "rejected_candidates": rejected_candidates,
+        "llm": {"generator": generator.summary(), "judge": judge.summary(), "workers": workers, "idea_workers": worker_summaries},
     })
     write_text(idea_dir / "idea.md", render_ideas_markdown(ideas))
     sync_latest("auto_idea", "idea.md", idea_dir / "idea.md")
     update_manifest(directory, "idea")
-    return {"run_id": request.run_id, "ideas": ideas}
+    return {"run_id": request.run_id, "ideas": ideas, "method_evaluation": method_evaluation}
 
 
 def render_ideas_markdown(ideas: list[dict]) -> str:
@@ -264,6 +483,22 @@ def patch_idea(run_id: str, idea_id: str, patch: IdeaPatch) -> dict:
             updates = patch.model_dump(exclude_none=True)
             idea.update(updates)
             break
+    write_json(idea_dir / "ideas.json", data)
+    write_text(idea_dir / "idea.md", render_ideas_markdown(data.get("ideas", [])))
+    sync_latest("auto_idea", "idea.md", idea_dir / "idea.md")
+    return data
+
+
+def confirm_idea(run_id: str, idea_id: str) -> dict:
+    directory = run_dir(run_id)
+    idea_dir = stage_dir(directory, "idea")
+    data = read_json(existing_stage_path(directory, "idea", "ideas.json"), {"run_id": run_id, "ideas": []})
+    selected = next((idea for idea in data.get("ideas", []) if idea.get("id") == idea_id), None)
+    if not selected:
+        raise ValueError(f"Idea not found: {idea_id}")
+    for idea in data.get("ideas", []):
+        idea["status"] = "approved" if idea.get("id") == idea_id else "deleted"
+    data["selected_idea_id"] = idea_id
     write_json(idea_dir / "ideas.json", data)
     write_text(idea_dir / "idea.md", render_ideas_markdown(data.get("ideas", [])))
     sync_latest("auto_idea", "idea.md", idea_dir / "idea.md")

@@ -1,9 +1,9 @@
 from auto_research.auto_find.pipeline import run_find
-from auto_research.auto_idea.pipeline import patch_idea, run_idea
+from auto_research.auto_idea.pipeline import confirm_idea, run_idea
 from auto_research.auto_plan.pipeline import run_plan
 from auto_research.auto_read import pipeline as read_pipeline
 from auto_research.auto_read.pipeline import run_read
-from auto_research.models import AppConfig, FindRequest, IdeaPatch, IdeaRequest, PlanRequest, ReadRequest, VenueSelection
+from auto_research.models import AppConfig, FindRequest, IdeaRequest, PlanRequest, ReadRequest, VenueSelection
 from auto_research.storage import create_run_dir, delete_run, read_json, run_dir, stage_dir, write_json
 
 
@@ -44,7 +44,9 @@ def test_mock_pipeline_arxiv_disabled_external_optional():
     idea_result = run_idea(IdeaRequest(run_id=run_id, max_ideas=2), cfg, log=lambda _msg: None)
     assert idea_result["ideas"]
     idea_id = idea_result["ideas"][0]["id"]
-    patch_idea(run_id, idea_id, IdeaPatch(status="approved"))
+    confirmed = confirm_idea(run_id, idea_id)
+    assert confirmed["selected_idea_id"] == idea_id
+    assert [idea["status"] for idea in confirmed["ideas"]] == ["approved", "deleted"]
 
     plan_result = run_plan(PlanRequest(run_id=run_id, idea_ids=[idea_id]), cfg, log=lambda _msg: None)
     assert plan_result["plans"]

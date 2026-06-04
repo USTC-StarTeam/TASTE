@@ -38,6 +38,7 @@ class LLMClient:
         conversation_key: str = "",
         persist_session: bool = True,
         resume_session: bool = False,
+        tools: str = "",
     ):
         self.config = config
         self.role = role or "global"
@@ -49,6 +50,7 @@ class LLMClient:
         self.conversation_key = conversation_key
         self.persist_session = persist_session
         self.resume_session = resume_session
+        self.tools = tools
         self._session_id = ""
         if role:
             override = config.llm_roles.get(str(role))
@@ -79,6 +81,7 @@ class LLMClient:
             "conversation_key": self.conversation_key,
             "persist_session": self.persist_session,
             "resume_session": self.resume_session,
+            "tools": self.tools,
         }
 
     def chat(self, prompt: str, temperature: float | None = None) -> str:
@@ -108,6 +111,15 @@ class LLMClient:
             "-p",
             "--output-format",
             "json",
+            "--tools",
+            self.tools,
+            "--append-system-prompt",
+            (
+                "This is a structured pipeline call. Use only the available read/search tools and do not write files. "
+                "Return only the JSON requested by the user prompt, with no prose or markdown."
+                if self.tools
+                else "This is a structured pipeline call. Do not use tools or write files. Return only the JSON requested by the user prompt, with no prose or markdown."
+            ),
         ]
         command.extend(["--resume" if self.resume_session else "--session-id", self._claude_session_id()])
         if not self.persist_session:

@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from auto_research.auto_find.catalog import catalog_by_id, load_catalog
 from auto_research.auto_find.pipeline import run_find
 from auto_research.auto_find.sources import fetch_venue_sample
-from auto_research.auto_idea.pipeline import patch_idea, run_idea
+from auto_research.auto_idea.pipeline import confirm_idea, patch_idea, run_idea
 from auto_research.auto_plan.pipeline import finish_plan, polish_plan, run_plan
 from auto_research.auto_read.pipeline import run_read
 from auto_research.emailer import send_run_email
@@ -359,6 +359,18 @@ def api_delete_run(run_id: str) -> dict:
 @app.patch("/api/runs/{run_id}/ideas/{idea_id}")
 def api_patch_idea(run_id: str, idea_id: str, patch: IdeaPatch) -> dict:
     return patch_idea(run_id, idea_id, patch)
+
+
+@app.post("/api/runs/{run_id}/ideas/{idea_id}/confirm")
+def api_confirm_idea(run_id: str, idea_id: str):
+    try:
+        confirm_idea(run_id, idea_id)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    config = load_config()
+    request = PlanRequest(run_id=run_id, idea_ids=[idea_id])
+    job = start_job("plan", lambda log, should_cancel, _progress: run_plan(request, config, log, should_cancel))
+    return job.as_dict()
 
 
 @app.get("/health")

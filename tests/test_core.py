@@ -1049,7 +1049,8 @@ def test_claude_code_provider_uses_session_without_api_key(monkeypatch):
     assert calls
     assert "--session-id" in calls[0]
     assert "--no-session-persistence" in calls[0]
-    assert "--tools" not in calls[0]
+    assert calls[0][calls[0].index("--tools") + 1] == ""
+    assert "Return only the JSON requested" in calls[0][calls[0].index("--append-system-prompt") + 1]
     assert "Return JSON" not in calls[0]
     assert inputs == ["Return JSON"]
     assert client.summary()["session_id"] == calls[0][calls[0].index("--session-id") + 1]
@@ -1086,6 +1087,33 @@ def test_claude_code_main_agent_can_resume_session(monkeypatch):
     assert "--resume" in calls[0]
     assert "--session-id" not in calls[0]
     assert client.summary()["resume_session"] is True
+
+
+def test_claude_code_reference_worker_can_use_read_search_tools(monkeypatch):
+    calls = []
+
+    def fake_run(command, input, capture_output, text, timeout, check):
+        calls.append(command)
+
+        class Result:
+            returncode = 0
+            stdout = '{"result": "{\\"references\\": []}"}'
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr("auto_research.llm.subprocess.run", fake_run)
+    client = LLMClient(
+        AppConfig(provider="claude-code", model=""),
+        "plan_generator",
+        conversation_key="run:test:worker:references",
+        persist_session=False,
+        tools="WebSearch,WebFetch,Read,Glob,Grep",
+    )
+
+    assert client.json_or_none("Inspect references") == {"references": []}
+    assert calls[0][calls[0].index("--tools") + 1] == "WebSearch,WebFetch,Read,Glob,Grep"
+    assert "do not write files" in calls[0][calls[0].index("--append-system-prompt") + 1]
 
 
 def test_parallel_json_runs_serially_for_claude_code_sessions():

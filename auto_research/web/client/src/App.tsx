@@ -7,6 +7,7 @@ import {
   Venue,
   cancelJob,
   checkVenueHealth,
+  confirmIdea,
   deleteRun,
   finishPlan,
   getArtifacts,
@@ -308,9 +309,8 @@ const TEXT = {
     runRead: "运行 Read",
     runIdeas: "生成 Idea",
     runPlan: "生成 Plan",
-    approve: "通过",
-    pending: "待定",
-    delete: "删除",
+    chooseIdeaHelp: "请选择一个想继续研究的 Idea。确认后将进入初步实验计划阶段。",
+    confirmIdea: "确认选择并继续",
     job: "任务",
     artifacts: "产物",
     artifactHelp: "选择一个产物查看，避免一次展开过多内容。",
@@ -444,9 +444,8 @@ const TEXT = {
     runRead: "Run Read",
     runIdeas: "Generate Ideas",
     runPlan: "Generate Plan",
-    approve: "Approve",
-    pending: "Pending",
-    delete: "Delete",
+    chooseIdeaHelp: "Choose one idea to continue. Confirmation moves to the preliminary experimental plan stage.",
+    confirmIdea: "Confirm selection and continue",
     job: "Job",
     artifacts: "Artifacts",
     artifactHelp: "Choose one artifact to view so the panel stays readable.",
@@ -587,6 +586,8 @@ function App() {
   const [includeNature, setIncludeNature] = useState(false);
   const [includeScience, setIncludeScience] = useState(false);
   const [selectedPapers, setSelectedPapers] = useState<string[]>([]);
+  const [selectedIdeaId, setSelectedIdeaId] = useState("");
+  const [confirmingIdea, setConfirmingIdea] = useState(false);
   const [planIdeaIds, setPlanIdeaIds] = useState<string[]>([]);
   const [planRepairRounds, setPlanRepairRounds] = useState(3);
   const [polishRounds, setPolishRounds] = useState<Record<string, number>>({});
@@ -809,6 +810,7 @@ function App() {
 
   async function runIdeas() {
     if (!runId) return;
+    setSelectedIdeaId("");
     attachJob(await startIdea(runId, config.max_ideas, config.idea_parallel_workers), "ideas");
   }
 
@@ -840,6 +842,8 @@ function App() {
   const ideas = useMemo(() => artifacts.find((a) => a.name === "ideas.json")?.content?.ideas ?? [], [artifacts]);
   const plans = useMemo(() => artifacts.find((a) => a.name === "plans.json")?.content?.plans ?? [], [artifacts]);
   const approvedIdeas = useMemo(() => ideas.filter((idea: any) => idea.status === "approved"), [ideas]);
+  const ideaJobActive = jobs.some((job) => job.stage === "idea" && ["queued", "running", "cancelling"].includes(job.status));
+  const planJobActive = jobs.some((job) => job.stage === "plan" && ["queued", "running", "cancelling"].includes(job.status));
   const selectedRunArtifacts = useMemo(() => artifacts.filter((a) => a.kind === "markdown"), [artifacts]);
   const t = TEXT[lang];
   const filteredVenues = useMemo(() => {
@@ -879,11 +883,26 @@ function App() {
     });
   }, [runId, approvedIdeas]);
 
-  async function setIdeaStatus(ideaId: string, status: "approved" | "deleted" | "pending") {
-    if (!runId) return;
-    await patchIdea(runId, ideaId, { status });
-    await loadRun(runId);
-    setPlanIdeaIds((prev) => status === "approved" ? Array.from(new Set([...prev, ideaId])) : prev.filter((id) => id !== ideaId));
+  useEffect(() => {
+    setSelectedIdeaId("");
+  }, [runId]);
+
+  useEffect(() => {
+    const approved = ideas.find((idea: any) => idea.status === "approved");
+    if (approved) setSelectedIdeaId(approved.id);
+  }, [ideas]);
+
+  async function handleConfirmIdea() {
+    if (!runId || !selectedIdeaId || confirmingIdea || planJobActive) return;
+    setConfirmingIdea(true);
+    try {
+      const planJob = await confirmIdea(runId, selectedIdeaId);
+      await loadRun(runId);
+      setPlanIdeaIds([selectedIdeaId]);
+      attachJob(planJob, "plan");
+    } finally {
+      setConfirmingIdea(false);
+    }
   }
 
   async function editIdea(ideaId: string, field: string, value: string) {
@@ -1410,23 +1429,34 @@ function App() {
           <section className="stage">
             <div className="toolbar">
               <h2>{t.ideas}</h2>
-              <button className="primary" onClick={runIdeas} disabled={!runId}>{t.runIdeas}</button>
+              <button className="primary" onClick={runIdeas} disabled={!runId || ideaJobActive}>{t.runIdeas}</button>
             </div>
+            <p className="help">{t.chooseIdeaHelp}</p>
             <div className="ideaGrid">
               {ideas.map((idea: any) => (
-                <article className={`idea ${idea.status}`} key={idea.id}>
+                <article
+                  className={`idea selectable ${selectedIdeaId === idea.id ? "selected" : ""}`}
+                  key={idea.id}
+                  role="radio"
+                  aria-checked={selectedIdeaId === idea.id}
+                  tabIndex={0}
+                  onClick={() => setSelectedIdeaId(idea.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") setSelectedIdeaId(idea.id);
+                  }}
+                >
                   <input className="ideaTitle" value={idea.title} onChange={(e) => editIdea(idea.id, "title", e.target.value)} />
                   <textarea value={idea.hypothesis} onChange={(e) => editIdea(idea.id, "hypothesis", e.target.value)} />
-                  <textarea value={idea.min_experiment} onChange={(e) => editIdea(idea.id, "min_experiment", e.target.value)} />
-                  <div className="ideaMeta">{idea.novelty} / {idea.feasibility} / {idea.score}</div>
-                  <div className="actions">
-                    <button onClick={() => setIdeaStatus(idea.id, "approved")}>{t.approve}</button>
-                    <button onClick={() => setIdeaStatus(idea.id, "pending")}>{t.pending}</button>
-                    <button onClick={() => setIdeaStatus(idea.id, "deleted")}>{t.delete}</button>
-                  </div>
+                  {idea.min_experiment && <textarea value={idea.min_experiment} onChange={(e) => editIdea(idea.id, "min_experiment", e.target.value)} />}
+                  <div className="ideaMeta">{idea.novelty} / {idea.feasibility} / {idea.judge_score ?? idea.score}</div>
                 </article>
               ))}
             </div>
+            {ideas.length > 0 && (
+              <div className="ideaConfirmBar">
+                <button className="primary" onClick={handleConfirmIdea} disabled={!selectedIdeaId || confirmingIdea || planJobActive}>{t.confirmIdea}</button>
+              </div>
+            )}
           </section>
         )}
 

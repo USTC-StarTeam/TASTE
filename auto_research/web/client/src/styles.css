@@ -766,12 +766,25 @@ summary {
   padding: 0.9rem;
 }
 
-.idea.approved {
-  border-color: #2d8a62;
+.idea.selectable {
+  cursor: pointer;
+  transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease;
 }
 
-.idea.deleted {
-  opacity: 0.6;
+.idea.selectable:hover {
+  border-color: #7ba9a3;
+}
+
+.idea.selected {
+  border-color: #1e5a5a;
+  background: #f3faf8;
+  box-shadow: 0 0 0 3px rgba(30, 90, 90, 0.16);
+}
+
+.ideaConfirmBar {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 1rem;
 }
 
 .ideaTitle {

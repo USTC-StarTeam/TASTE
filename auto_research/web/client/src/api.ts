@@ -236,6 +236,14 @@ export async function patchIdea(runId: string, ideaId: string, patch: Record<str
   );
 }
 
+export async function confirmIdea(runId: string, ideaId: string) {
+  return json<Job>(
+    await fetch(`/api/runs/${runId}/ideas/${ideaId}/confirm`, {
+      method: "POST",
+    }),
+  );
+}
+
 export function watchJob(jobId: string, onMessage: (message: any) => void) {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const socket = new WebSocket(`${protocol}://${window.location.host}/ws/jobs/${jobId}`);
