@@ -41,13 +41,28 @@ def _source_items(directory) -> list[dict]:
             "url": "",
             "summary": summary,
         })
-    cross_summary = read_results.get("cross_summary", {})
+    cross_summary = read_results.get("main_agent_summary") or read_results.get("cross_summary", {})
     if isinstance(cross_summary, dict):
         summary = " ".join(str(cross_summary.get(key, "")) for key in ["overview", "common_themes", "method_comparison", "limitations_comparison", "next_stage_notes"]).strip()
         if summary:
             items.append({
-                "source": "read_synthesis",
-                "title": "Cross-paper synthesis",
+                "source": "main_agent_summary",
+                "title": "Main agent synthesis",
+                "url": "",
+                "summary": summary,
+            })
+    method_analysis = read_results.get("method_analysis", {})
+    if isinstance(method_analysis, dict):
+        pros_cons = method_analysis.get("pros_cons", [])
+        summary = " ".join([
+            str(method_analysis.get("summary", "")),
+            str(method_analysis.get("method_differences", "")),
+            str(pros_cons),
+        ]).strip()
+        if summary:
+            items.append({
+                "source": "method_analysis",
+                "title": "Method cross-comparison",
                 "url": "",
                 "summary": summary,
             })
@@ -108,8 +123,8 @@ def run_idea(request: IdeaRequest, config: AppConfig, log: LogFn = print, should
     items = _source_items(directory)
     max_ideas = request.max_ideas or config.max_ideas
     agent_conversation = f"run:{request.run_id}:main"
-    generator = LLMClient(config, "idea_generator", conversation_key=agent_conversation)
-    judge = LLMClient(config, "idea_judge", conversation_key=agent_conversation)
+    generator = LLMClient(config, "idea_generator", conversation_key=agent_conversation, resume_session=True)
+    judge = LLMClient(config, "idea_judge", conversation_key=agent_conversation, resume_session=True)
     workers = clamp_workers(request.parallel_workers or config.idea_parallel_workers, default=1, maximum=8)
     candidate_multiplier = max(1, int(request.candidate_multiplier or 2))
     ideas = _fallback_ideas(items, max_ideas)

@@ -181,8 +181,9 @@ def run_plan(request: PlanRequest, config: AppConfig, log: LogFn = print, should
         update_manifest(directory, "plan")
         return {"run_id": request.run_id, "plans": []}
 
-    generator = LLMClient(config, "plan_generator")
-    evaluator = LLMClient(config, "plan_evaluator")
+    main_agent_key = f"run:{request.run_id}:main"
+    generator = LLMClient(config, "plan_generator", conversation_key=main_agent_key, resume_session=True)
+    evaluator = LLMClient(config, "plan_evaluator", conversation_key=main_agent_key, resume_session=True)
     plans = []
     for idea in ideas:
         _raise_if_cancelled(should_cancel)
@@ -215,8 +216,9 @@ def polish_plan(request: PlanPolishRequest, config: AppConfig, log: LogFn = prin
     data = read_json(existing_stage_path(directory, "plan", "plans.json"), {"run_id": request.run_id, "plans": []})
     ideas_data = read_json(existing_stage_path(directory, "idea", "ideas.json"), {"ideas": []})
     ideas_by_id = {idea.get("id"): idea for idea in ideas_data.get("ideas", [])}
-    generator = LLMClient(config, "plan_generator")
-    evaluator = LLMClient(config, "plan_evaluator")
+    main_agent_key = f"run:{request.run_id}:main"
+    generator = LLMClient(config, "plan_generator", conversation_key=main_agent_key, resume_session=True)
+    evaluator = LLMClient(config, "plan_evaluator", conversation_key=main_agent_key, resume_session=True)
     for plan in data.get("plans", []):
         if plan.get("plan_id") != request.plan_id:
             continue

@@ -16,7 +16,8 @@ from auto_research.storage import existing_stage_path, read_json, run_dir, stage
 LogFn = Callable[[str], None]
 CancelFn = Callable[[], bool]
 
-CONTENT_FIELDS = ["summary", "problem", "method", "experiments", "limitations", "relevance"]
+CONTENT_FIELDS = ["summary", "motivation", "method_summary", "experiments", "limitations", "relevance"]
+REQUIRED_AGENT_FIELDS = ["motivation", "method_summary", "limitations"]
 
 
 def _raise_if_cancelled(should_cancel: CancelFn) -> None:
@@ -48,6 +49,19 @@ def _download_pdf(url: str, target: Path, retries: int = 2) -> tuple[bool, int, 
     return False, retries + 1, last_error
 
 
+def _get_cached_or_download_pdf(url: str, target: Path) -> tuple[bool, bool, int, str]:
+    if target.exists():
+        try:
+            with target.open("rb") as handle:
+                header = handle.read(4)
+            if header == b"%PDF":
+                return True, True, 0, ""
+        except OSError:
+            pass
+    downloaded, attempts, error = _download_pdf(url, target)
+    return downloaded, False, attempts, error
+
+
 def _extract_pdf_text(path: Path) -> tuple[str, int, str]:
     try:
         import fitz
@@ -70,8 +84,8 @@ def _base_content(paper: dict, text: str) -> dict:
         "venue": str(paper.get("venue") or paper.get("source") or ""),
         "year": str(paper.get("year") or ""),
         "summary": basis[:1200] if basis else "No readable full text was available; using title and abstract only.",
-        "problem": "Inferred from title and abstract.",
-        "method": "No agent structured reading was available; fallback mode kept content fields from available paper text.",
+        "motivation": "Inferred from title and abstract.",
+        "method_summary": "No agent structured reading was available; fallback mode kept content fields from available paper text.",
         "experiments": "Not extracted by fallback reader.",
         "limitations": "Fallback mode cannot reliably inspect all experimental details.",
         "relevance": str(paper.get("reason") or ""),
@@ -87,6 +101,7 @@ def _base_metadata(paper: dict, index: int, pdf_path: Path) -> dict:
         "paper_index": index,
         "pdf_path": str(pdf_path),
         "pdf_downloaded": False,
+        "pdf_cache_hit": False,
         "pdf_download_attempts": 0,
         "pdf_error": "",
         "pdf_pages": 0,
@@ -113,7 +128,7 @@ def _agent_prompt(content: dict, source_text: str) -> str:
 Read this paper for a researcher. Return one strict JSON object only.
 Do not include paper_id, url, pdf_url, file paths, or other pipeline metadata.
 Required JSON keys:
-summary, problem, method, experiments, limitations, relevance.
+summary, motivation, method_summary, experiments, limitations, relevance.
 Use Chinese.
 
 Content fields already known:
@@ -131,7 +146,7 @@ def _repair_prompt(content: dict, source_text: str) -> str:
     return f"""
 Your previous answer was not valid for the required schema.
 Return strict JSON only, with exactly these keys:
-summary, problem, method, experiments, limitations, relevance.
+summary, motivation, method_summary, experiments, limitations, relevance.
 Use Chinese. Do not include metadata, markdown, or explanations.
 
 Title: {content.get('title', '')}
@@ -146,13 +161,17 @@ def _apply_agent_content(content: dict, data: dict) -> None:
         content[key] = str(data.get(key, content.get(key, "")))
 
 
+def _valid_agent_data(data: Any) -> bool:
+    return isinstance(data, dict) and all(str(data.get(key, "")).strip() for key in REQUIRED_AGENT_FIELDS)
+
+
 def _run_agent_read(llm: LLMClient, content: dict, source_text: str) -> tuple[dict | None, str, str, int]:
     result = llm.json_or_error(_agent_prompt(content, source_text))
-    if result.get("ok") and isinstance(result.get("data"), dict):
+    if result.get("ok") and _valid_agent_data(result.get("data")):
         return result["data"], "accepted", "", 1
-    first_error = str(result.get("error") or "Agent returned non-object JSON")
+    first_error = str(result.get("error") or "Agent response omitted mandatory reading fields")
     retry = llm.json_or_error(_repair_prompt(content, source_text))
-    if retry.get("ok") and isinstance(retry.get("data"), dict):
+    if retry.get("ok") and _valid_agent_data(retry.get("data")):
         return retry["data"], "repaired", first_error, 2
     return None, "fallback", str(retry.get("error") or first_error), 2
 
@@ -162,12 +181,21 @@ def _content_for_agent(reading: dict) -> dict:
     return content if isinstance(content, dict) else {}
 
 
-def _render_single_reading(content: dict) -> str:
+def _venue_with_year(content: dict) -> str:
+    venue = str(content.get("venue", ""))
+    year = str(content.get("year", ""))
+    return f"{venue} ({year})" if venue and year else venue or year
+
+
+def _render_single_reading(reading: dict) -> str:
+    content = _content_for_agent(reading)
+    metadata = reading.get("metadata", {}) if isinstance(reading.get("metadata"), dict) else {}
     lines = [
         f"# {content.get('title', 'Untitled')}",
         "",
-        f"- **Venue**: {content.get('venue', '')}",
-        f"- **Year**: {content.get('year', '')}",
+        f"- **Venue**: {_venue_with_year(content)}",
+        f"- **URL**: {metadata.get('url', '')}",
+        f"- **PDF URL**: {metadata.get('pdf_url', '')}",
         "",
         "## Abstract",
         content.get("abstract", ""),
@@ -175,11 +203,11 @@ def _render_single_reading(content: dict) -> str:
         "## Summary",
         content.get("summary", ""),
         "",
-        "## Problem",
-        content.get("problem", ""),
+        "## Motivation",
+        content.get("motivation", ""),
         "",
-        "## Method",
-        content.get("method", ""),
+        "## Method Summary",
+        content.get("method_summary", ""),
         "",
         "## Experiments",
         content.get("experiments", ""),
@@ -196,7 +224,7 @@ def _render_single_reading(content: dict) -> str:
 
 def _fallback_cross_summary(readings: list[dict]) -> dict:
     titles = [str(_content_for_agent(item).get("title", "Untitled")) for item in readings]
-    methods = [str(_content_for_agent(item).get("method", "")) for item in readings if _content_for_agent(item).get("method")]
+    methods = [str(_content_for_agent(item).get("method_summary", "")) for item in readings if _content_for_agent(item).get("method_summary")]
     limitations = [str(_content_for_agent(item).get("limitations", "")) for item in readings if _content_for_agent(item).get("limitations")]
     return {
         "overview": f"Processed {len(readings)} paper(s): " + "; ".join(titles),
@@ -207,13 +235,51 @@ def _fallback_cross_summary(readings: list[dict]) -> dict:
     }
 
 
-def _cross_summary_prompt(readings: list[dict]) -> str:
+def _fallback_method_analysis(readings: list[dict]) -> dict:
+    content_items = [_content_for_agent(item) for item in readings]
+    return {
+        "summary": "Fallback method analysis based on individual worker readings.",
+        "method_differences": " | ".join(str(item.get("method_summary", "")) for item in content_items if item.get("method_summary")),
+        "pros_cons": [
+            {
+                "title": str(item.get("title", "Untitled")),
+                "pros": str(item.get("relevance", "")),
+                "cons": str(item.get("limitations", "")),
+            }
+            for item in content_items
+        ],
+    }
+
+
+def _main_agent_prompt(readings: list[dict], is_rerun: bool = False) -> str:
     content_only = [_content_for_agent(item) for item in readings]
+    rerun_instruction = (
+        "This is an auto_read rerun. Replace your previous read-stage understanding with these latest worker results; treat them as authoritative."
+        if is_rerun
+        else "This is the first auto_read result for this research run."
+    )
     return f"""
-Synthesize these paper reading notes for the next idea-generation stage.
+You are the persistent main research agent. Synthesize these worker reading notes and retain their important context for later stages.
+{rerun_instruction}
 Use only the content fields below. Do not mention or infer pipeline metadata.
-Return strict JSON with keys:
-overview, common_themes, method_comparison, limitations_comparison, next_stage_notes.
+Return strict JSON with this shape:
+{{
+  "cross_summary": {{
+    "overview": "",
+    "common_themes": "",
+    "method_comparison": "",
+    "limitations_comparison": "",
+    "next_stage_notes": ""
+  }},
+  "method_analysis": {{
+    "summary": "",
+    "method_differences": "",
+    "pros_cons": [
+      {{"title": "", "pros": "", "cons": ""}}
+    ]
+  }}
+}}
+Compare how the methods differ and clearly explain the pros and cons of each method.
 Use Chinese.
 
 Paper contents:
@@ -221,29 +287,63 @@ Paper contents:
 """
 
 
-def _run_cross_summary(run_id: str, readings: list[dict], config: AppConfig, log: LogFn) -> dict:
-    summary = _fallback_cross_summary(readings)
-    llm = LLMClient(config, "read", conversation_key=f"run:{run_id}:worker:auto_read:synthesis")
+def _run_main_agent(run_id: str, readings: list[dict], config: AppConfig, log: LogFn, resume_session: bool = False) -> tuple[dict, dict, dict]:
+    cross_summary = _fallback_cross_summary(readings)
+    method_analysis = _fallback_method_analysis(readings)
+    conversation_key = f"run:{run_id}:main"
+    llm = LLMClient(config, "read", conversation_key=conversation_key, persist_session=True, resume_session=resume_session)
+    llm_summary = llm.summary()
+    main_agent = {
+        **llm_summary,
+        "conversation_key": conversation_key,
+        "persist_session": True,
+        "resume_session": resume_session,
+        "invocation": "resumed" if resume_session else "created",
+        "status": "disabled",
+        "error": "",
+    }
+    log(
+        "Read main agent: "
+        f"provider={llm_summary.get('provider', '')}, "
+        f"backend={llm_summary.get('backend', '')}, "
+        f"enabled={llm_summary.get('enabled')}, "
+        f"invocation={main_agent['invocation']}, "
+        f"session={llm_summary.get('session_id', '') or 'n/a'}"
+    )
     if not llm.enabled or not readings:
-        return summary
-    result = llm.json_or_error(_cross_summary_prompt(readings))
+        return cross_summary, method_analysis, main_agent
+    result = llm.json_or_error(_main_agent_prompt(readings, is_rerun=resume_session))
     data = result.get("data")
-    if result.get("ok") and isinstance(data, dict):
-        log("Read synthesis: cross-paper summary accepted")
-        return {key: str(data.get(key, summary.get(key, ""))) for key in summary}
-    log(f"Read synthesis: fallback used: {str(result.get('error') or '')[:300]}")
-    return summary
+    received_cross_summary = data.get("cross_summary") if isinstance(data, dict) else None
+    received_method_analysis = data.get("method_analysis") if isinstance(data, dict) else None
+    if result.get("ok") and isinstance(received_cross_summary, dict) and isinstance(received_method_analysis, dict):
+        cross_summary = {key: str(received_cross_summary.get(key, cross_summary.get(key, ""))) for key in cross_summary}
+        pros_cons = received_method_analysis.get("pros_cons")
+        method_analysis = {
+            "summary": str(received_method_analysis.get("summary", method_analysis["summary"])),
+            "method_differences": str(received_method_analysis.get("method_differences", method_analysis["method_differences"])),
+            "pros_cons": pros_cons if isinstance(pros_cons, list) else method_analysis["pros_cons"],
+        }
+        main_agent["status"] = "accepted"
+        log("Read main agent: synthesis and method analysis accepted")
+        return cross_summary, method_analysis, main_agent
+    main_agent["status"] = "fallback"
+    main_agent["error"] = str(result.get("error") or "Main agent returned invalid synthesis output")
+    log(f"Read main agent: fallback used: {main_agent['error'][:300]}")
+    return cross_summary, method_analysis, main_agent
 
 
-def _render_read_markdown(readings: list[dict], cross_summary: dict) -> str:
+def _render_read_markdown(readings: list[dict], cross_summary: dict, method_analysis: dict) -> str:
     lines = ["# Paper Readings", ""]
     for index, reading in enumerate(readings, 1):
         content = _content_for_agent(reading)
+        metadata = reading.get("metadata", {}) if isinstance(reading.get("metadata"), dict) else {}
         lines.extend([
             f"## {index}. {content.get('title', 'Untitled')}",
             "",
-            f"- **Venue**: {content.get('venue', '')}",
-            f"- **Year**: {content.get('year', '')}",
+            f"- **Venue**: {_venue_with_year(content)}",
+            f"- **URL**: {metadata.get('url', '')}",
+            f"- **PDF URL**: {metadata.get('pdf_url', '')}",
             "",
             "### Abstract",
             content.get("abstract", ""),
@@ -251,11 +351,11 @@ def _render_read_markdown(readings: list[dict], cross_summary: dict) -> str:
             "### Summary",
             content.get("summary", ""),
             "",
-            "### Problem",
-            content.get("problem", ""),
+            "### Motivation",
+            content.get("motivation", ""),
             "",
-            "### Method",
-            content.get("method", ""),
+            "### Method Summary",
+            content.get("method_summary", ""),
             "",
             "### Experiments",
             content.get("experiments", ""),
@@ -268,7 +368,7 @@ def _render_read_markdown(readings: list[dict], cross_summary: dict) -> str:
             "",
         ])
     lines.extend([
-        "## Cross-Paper Synthesis",
+        "## Main Agent Synthesis",
         "",
         "### Overview",
         cross_summary.get("overview", ""),
@@ -285,13 +385,33 @@ def _render_read_markdown(readings: list[dict], cross_summary: dict) -> str:
         "### Next Stage Notes",
         cross_summary.get("next_stage_notes", ""),
         "",
+        "## Method Cross-Comparison",
+        "",
+        "### Summary",
+        method_analysis.get("summary", ""),
+        "",
+        "### Method Differences",
+        method_analysis.get("method_differences", ""),
+        "",
+        "### Pros and Cons",
     ])
+    for item in method_analysis.get("pros_cons", []):
+        if isinstance(item, dict):
+            lines.extend([
+                f"#### {item.get('title', 'Untitled')}",
+                f"- **Pros**: {item.get('pros', '')}",
+                f"- **Cons**: {item.get('cons', '')}",
+                "",
+            ])
     return "\n".join(lines).rstrip() + "\n"
 
 
 def run_read(request: ReadRequest, config: AppConfig, log: LogFn = print, should_cancel: CancelFn = lambda: False) -> dict:
     directory = run_dir(request.run_id)
     read_dir = stage_dir(directory, "read")
+    previous_read_results = read_json(existing_stage_path(directory, "read", "read_results.json"), {})
+    previous_main_agent = previous_read_results.get("main_agent", {}) if isinstance(previous_read_results, dict) else {}
+    resume_main_agent = bool(isinstance(previous_main_agent, dict) and previous_main_agent.get("session_id"))
     find_results = read_json(existing_stage_path(directory, "find", "find_results.json"), {})
     papers = find_results.get("articles", [])
     if request.paper_ids:
@@ -301,19 +421,20 @@ def run_read(request: ReadRequest, config: AppConfig, log: LogFn = print, should
     selected = selected[: request.max_papers]
 
     readings: list[dict] = []
-    pdf_dir = read_dir / "pdfs"
+    pdf_dir = directory / "pdf"
     log(f"Read selected {len(selected)} paper(s)")
 
     for index, paper in enumerate(selected, 1):
         _raise_if_cancelled(should_cancel)
         log(f"Read worker {index}/{len(selected)} assigned: {paper.get('title', 'Untitled')}")
         pdf_path = pdf_dir / f"{_safe_id(paper.get('id'), f'paper-{index}')}.pdf"
-        downloaded, download_attempts, download_error = _download_pdf(paper.get("pdf_url", ""), pdf_path)
+        downloaded, cache_hit, download_attempts, download_error = _get_cached_or_download_pdf(paper.get("pdf_url", ""), pdf_path)
         text, pdf_pages, extract_error = _extract_pdf_text(pdf_path) if downloaded else ("", 0, "")
         content = _base_content(paper, text)
         metadata = _base_metadata(paper, index, pdf_path)
         metadata.update({
             "pdf_downloaded": downloaded,
+            "pdf_cache_hit": cache_hit,
             "pdf_download_attempts": download_attempts,
             "pdf_error": extract_error or download_error,
             "pdf_pages": pdf_pages,
@@ -321,7 +442,7 @@ def run_read(request: ReadRequest, config: AppConfig, log: LogFn = print, should
             "source_mode": "full_pdf_text" if text else "abstract_only",
             "full_text_available": bool(text),
         })
-        log(f"Read worker {index}: pdf_downloaded={downloaded}, attempts={download_attempts}, pdf_text_chars={len(text)}, pdf_pages={pdf_pages}")
+        log(f"Read worker {index}: pdf_downloaded={downloaded}, cache_hit={cache_hit}, attempts={download_attempts}, pdf_text_chars={len(text)}, pdf_pages={pdf_pages}")
 
         llm = LLMClient(config, "read", conversation_key=_read_worker_key(request.run_id, paper, index), persist_session=False)
         llm_summary = llm.summary()
@@ -357,13 +478,21 @@ def run_read(request: ReadRequest, config: AppConfig, log: LogFn = print, should
         readings.append(reading)
         suffix = f"{index:03d}"
         write_json(read_dir / f"read_paper_{suffix}.json", reading)
-        write_text(read_dir / f"read_paper_{suffix}.md", _render_single_reading(content))
+        write_text(read_dir / f"read_paper_{suffix}.md", _render_single_reading(reading))
 
     _raise_if_cancelled(should_cancel)
-    cross_summary = _run_cross_summary(request.run_id, readings, config, log)
-    write_json(read_dir / "read_results.json", {"run_id": request.run_id, "readings": readings, "cross_summary": cross_summary})
-    write_text(read_dir / "read.md", _render_read_markdown(readings, cross_summary))
+    cross_summary, method_analysis, main_agent = _run_main_agent(request.run_id, readings, config, log, resume_session=resume_main_agent)
+    result = {
+        "run_id": request.run_id,
+        "readings": readings,
+        "main_agent_summary": cross_summary,
+        "cross_summary": cross_summary,
+        "method_analysis": method_analysis,
+        "main_agent": main_agent,
+    }
+    write_json(read_dir / "read_results.json", result)
+    write_text(read_dir / "read.md", _render_read_markdown(readings, cross_summary, method_analysis))
     sync_latest("auto_read", "read.md", read_dir / "read.md")
     update_manifest(directory, "read")
     log("Read stage complete")
-    return {"run_id": request.run_id, "readings": readings, "cross_summary": cross_summary}
+    return result

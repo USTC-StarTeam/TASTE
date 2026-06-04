@@ -8,9 +8,10 @@ from auto_research.storage import create_run_dir, delete_run, stage_dir, write_j
 class FakeIdeaLLM:
     instances = []
 
-    def __init__(self, _config, role=None, conversation_key=""):
+    def __init__(self, _config, role=None, conversation_key="", resume_session=False):
         self.role = role
         self.conversation_key = conversation_key
+        self.resume_session = resume_session
         self.enabled = True
         self.instances.append(self)
 
@@ -62,6 +63,7 @@ def test_parallel_idea_generation_uses_candidate_pool_and_judge(monkeypatch):
         assert result["ideas"][0]["judge_score"] == 9.5
         assert result["ideas"][0]["id"] == "idea-001"
         assert {client.conversation_key for client in FakeIdeaLLM.instances} == {f"run:{run_id}:main"}
+        assert all(client.resume_session for client in FakeIdeaLLM.instances)
     finally:
         delete_run(run_id)
 
@@ -81,6 +83,11 @@ def test_idea_stage_uses_read_content_without_metadata():
                     }
                 ],
                 "cross_summary": {"overview": "Content-only synthesis", "common_themes": "", "method_comparison": "", "limitations_comparison": "", "next_stage_notes": ""},
+                "method_analysis": {
+                    "summary": "Method summary",
+                    "method_differences": "Method differences",
+                    "pros_cons": [{"title": "Readable Title", "pros": "Strong", "cons": "Costly"}],
+                },
             },
         )
 
@@ -88,6 +95,9 @@ def test_idea_stage_uses_read_content_without_metadata():
 
         read_items = [item for item in items if item["source"] == "read"]
         assert read_items == [{"source": "read", "title": "Readable Title", "url": "", "summary": "Content summary"}]
+        method_items = [item for item in items if item["source"] == "method_analysis"]
+        assert len(method_items) == 1
+        assert "Method differences" in method_items[0]["summary"]
         assert all("metadata.example" not in str(item) and "secret-id" not in str(item) for item in items)
     finally:
         delete_run(run_id)

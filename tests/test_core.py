@@ -1055,6 +1055,39 @@ def test_claude_code_provider_uses_session_without_api_key(monkeypatch):
     assert client.summary()["session_id"] == calls[0][calls[0].index("--session-id") + 1]
 
 
+def test_non_persistent_claude_workers_get_fresh_session_ids():
+    cfg = AppConfig(provider="claude-code", model="")
+    first = LLMClient(cfg, "read", conversation_key="run:test:worker", persist_session=False)
+    second = LLMClient(cfg, "read", conversation_key="run:test:worker", persist_session=False)
+
+    first_session = first.summary()["session_id"]
+
+    assert first_session == first.summary()["session_id"]
+    assert first_session != second.summary()["session_id"]
+
+
+def test_claude_code_main_agent_can_resume_session(monkeypatch):
+    calls = []
+
+    def fake_run(command, input, capture_output, text, timeout, check):
+        calls.append(command)
+
+        class Result:
+            returncode = 0
+            stdout = '{"result": "{\\"ok\\": true}"}'
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr("auto_research.llm.subprocess.run", fake_run)
+    client = LLMClient(AppConfig(provider="claude-code", model=""), "idea_generator", conversation_key="run:test:main", resume_session=True)
+
+    assert client.json_or_none("Continue") == {"ok": True}
+    assert "--resume" in calls[0]
+    assert "--session-id" not in calls[0]
+    assert client.summary()["resume_session"] is True
+
+
 def test_parallel_json_runs_serially_for_claude_code_sessions():
     class SerialClient:
         serial_only = True

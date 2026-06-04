@@ -6,7 +6,7 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from openai import OpenAI
 
@@ -31,7 +31,14 @@ def extract_json(raw: str) -> Any:
 
 
 class LLMClient:
-    def __init__(self, config: AppConfig, role: LLMRole | str | None = None, conversation_key: str = "", persist_session: bool = True):
+    def __init__(
+        self,
+        config: AppConfig,
+        role: LLMRole | str | None = None,
+        conversation_key: str = "",
+        persist_session: bool = True,
+        resume_session: bool = False,
+    ):
         self.config = config
         self.role = role or "global"
         self.provider = config.provider
@@ -41,6 +48,8 @@ class LLMClient:
         self.temperature = config.temperature
         self.conversation_key = conversation_key
         self.persist_session = persist_session
+        self.resume_session = resume_session
+        self._session_id = ""
         if role:
             override = config.llm_roles.get(str(role))
             if override:
@@ -67,6 +76,9 @@ class LLMClient:
             "enabled": self.enabled,
             "backend": "claude-code" if self.uses_claude_code else "chat-completions",
             "session_id": self._claude_session_id() if self.uses_claude_code else "",
+            "conversation_key": self.conversation_key,
+            "persist_session": self.persist_session,
+            "resume_session": self.resume_session,
         }
 
     def chat(self, prompt: str, temperature: float | None = None) -> str:
@@ -84,8 +96,11 @@ class LLMClient:
         return result.choices[0].message.content or ""
 
     def _claude_session_id(self) -> str:
+        if self._session_id:
+            return self._session_id
         key = self.conversation_key or f"{Path.cwd()}:{self.role}"
-        return str(uuid5(NAMESPACE_URL, f"TASTE:{key}"))
+        self._session_id = str(uuid5(NAMESPACE_URL, f"TASTE:{key}")) if self.persist_session else str(uuid4())
+        return self._session_id
 
     def _chat_claude_code(self, prompt: str) -> str:
         command = [
@@ -93,9 +108,8 @@ class LLMClient:
             "-p",
             "--output-format",
             "json",
-            "--session-id",
-            self._claude_session_id(),
         ]
+        command.extend(["--resume" if self.resume_session else "--session-id", self._claude_session_id()])
         if not self.persist_session:
             command.append("--no-session-persistence")
         if self.model and self.model not in {"gpt-4o-mini", "mock"}:
