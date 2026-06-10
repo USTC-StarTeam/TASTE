@@ -603,6 +603,34 @@ def test_running_claude_environment_job_uses_panel_stage_and_public_progress():
     assert "executable=" not in text
 
 
+def test_environment_loader_passed_progress_maps_to_reference_probe(monkeypatch):
+    message = "环境阶段已选择当前候选基底：example/repo；真实数据/loader 已通过，等待参考协议/环境 manifest 探针。"
+    monkeypatch.setattr(
+        server,
+        "project_summary",
+        lambda _project: {
+            "status": "blocked_fresh_base_reference_probe_required",
+            "full_research_cycle": {"status": "blocked_fresh_base_reference_probe_required", "summary": message},
+            "stages": {"environment": {"summary": message}},
+        },
+    )
+
+    row = server._compact_job_for_list({
+        "job_id": "claude-message_demo",
+        "stage": "environment",
+        "status": "blocked",
+        "created_at": "2026-06-10T00:00:00Z",
+        "progress": {"phase": "blocked_fresh_base_data_required", "current": 1, "total": 1, "percent": 100, "message": message},
+        "logs": [message],
+        "result": {"project": "demo", "action": "claude-message", "requested_stage": "environment", "panel_stage": "environment", "status": "blocked_fresh_base_data_required"},
+    })
+
+    assert row["stage"] == "environment"
+    assert row["status"] == "blocked_fresh_base_reference_probe_required"
+    assert row["progress"]["phase"] == "blocked_fresh_base_reference_probe_required"
+    assert "真实数据/loader 已通过" in row["progress"]["message"]
+
+
 def test_environment_public_logs_fold_raw_command_progress():
     logs = server._public_job_logs(
         "environment",

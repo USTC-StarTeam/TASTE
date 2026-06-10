@@ -6894,7 +6894,12 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
             compact_result["summary"] = fallback
         progress_phase = str(public_progress.get("phase") or "").strip()
         progress_message = str(public_progress.get("message") or "")
-        if "真实数据/loader" in progress_message or "real dataset/loader" in progress_message.lower():
+        if "真实数据/loader 已通过" in progress_message or "等待参考协议" in progress_message or "reference-protocol" in progress_message.lower():
+            public_status = "blocked_fresh_base_reference_probe_required"
+            if progress_phase in {"", "blocked", "blocked_fresh_base_data_required"}:
+                public_progress["phase"] = public_status
+            compact_result["status"] = public_status
+        elif "真实数据/loader" in progress_message or "real dataset/loader" in progress_message.lower():
             public_status = "blocked_fresh_base_data_required"
             if progress_phase in {"", "blocked"}:
                 public_progress["phase"] = public_status
@@ -6905,7 +6910,12 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
     if public_stage == "environment":
         progress_phase = str(public_progress.get("phase") or "").strip()
         progress_message = str(public_progress.get("message") or "")
-        if "真实数据/loader" in progress_message or "real dataset/loader" in progress_message.lower():
+        if "真实数据/loader 已通过" in progress_message or "等待参考协议" in progress_message or "reference-protocol" in progress_message.lower():
+            public_status = "blocked_fresh_base_reference_probe_required"
+            if progress_phase in {"", "blocked", "blocked_fresh_base_data_required"}:
+                public_progress["phase"] = public_status
+            compact_result["status"] = public_status
+        elif "真实数据/loader" in progress_message or "real dataset/loader" in progress_message.lower():
             public_status = "blocked_fresh_base_data_required"
             if progress_phase in {"", "blocked"}:
                 public_progress["phase"] = public_status
