@@ -1322,13 +1322,6 @@ def _current_verified_venue_metadata_rows(project_id: str, root: Path | None = N
             if manifest and _as_int(manifest.get("paper_count"), 0) > 0:
                 effective_years.append(yeint)
                 break
-            for fallback_year in range(yeint - 1, yeint - 3, -1):
-                fallback_manifest = _read_local_venue_cache_manifest(str(venue_id), fallback_year)
-                if fallback_manifest and _as_int(fallback_manifest.get("paper_count"), 0) > 0:
-                    manifest = fallback_manifest
-                    effective_years.append(fallback_year)
-                    fallback_reasons.append(f"requested years [{yeint}] had no usable papers")
-                    break
             if manifest and effective_years:
                 break
         if not manifest:
@@ -1374,10 +1367,6 @@ def _current_verified_venue_metadata_rows(project_id: str, root: Path | None = N
             f"metadata={manifest.get('metadata_completeness_status') or 'unknown'}",
             f"category={category_status}",
         ]
-        if fallback_reasons:
-            parts.extend(fallback_reasons)
-            if effective_years:
-                parts.append(f"using local_database backfill year {effective_years[0]}")
         rows.append({
             "source": manifest.get("venue") or str(venue_id),
             "source_kind": "venue",

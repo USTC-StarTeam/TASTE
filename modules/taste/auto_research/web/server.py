@@ -12,6 +12,7 @@ import sys
 import time
 import threading
 import traceback
+from concurrent.futures import TimeoutError as FutureTimeoutError, ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -7002,6 +7003,41 @@ def api_catalog() -> list[dict]:
     )
 
 
+def _venue_health_timeout_sec() -> float:
+    try:
+        value = float(os.environ.get("VENUE_HEALTH_TIMEOUT_SEC", "8") or 8)
+    except (TypeError, ValueError):
+        value = 8.0
+    return max(2.0, min(30.0, value))
+
+
+def _venue_health_failure(venue_id: str, year: int, message: str, adapter: str = "timeout") -> dict:
+    return {
+        "venue_id": venue_id,
+        "year": year,
+        "ok": False,
+        "sample_count": 0,
+        "source_adapter": adapter,
+        "message": message,
+        "samples": [],
+    }
+
+
+def _fetch_venue_sample_with_timeout(venue: dict, venue_id: str, year: int, sample_limit: int) -> dict:
+    timeout_sec = _venue_health_timeout_sec()
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="venue-health")
+    future = executor.submit(fetch_venue_sample, venue, year, sample_limit)
+    try:
+        return future.result(timeout=timeout_sec)
+    except FutureTimeoutError:
+        future.cancel()
+        return _venue_health_failure(venue_id, year, f"Venue health check timed out after {timeout_sec:.0f}s.")
+    except Exception as exc:
+        return _venue_health_failure(venue_id, year, str(exc) or "Venue health check failed.", adapter="error")
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
 @app.post("/api/catalog/venue-health")
 def api_venue_health(request: VenueHealthRequest) -> dict:
     catalog = catalog_by_id()
@@ -7044,20 +7080,13 @@ def api_venue_health(request: VenueHealthRequest) -> dict:
         return pairs
 
     results = []
+    sample_limit = max(1, request.sample_limit)
     for venue_id, year in normalize_pairs():
         venue = catalog.get(venue_id)
         if not venue:
-            results.append({
-                "venue_id": venue_id,
-                "year": year,
-                "ok": False,
-                "sample_count": 0,
-                "source_adapter": "unknown",
-                "message": "Unknown venue id.",
-                "samples": [],
-            })
+            results.append(_venue_health_failure(venue_id, year, "Unknown venue id.", adapter="unknown"))
             continue
-        results.append(fetch_venue_sample(venue, year, max(1, request.sample_limit)))
+        results.append(_fetch_venue_sample_with_timeout(venue, venue_id, year, sample_limit))
     return {"results": results}
 
 

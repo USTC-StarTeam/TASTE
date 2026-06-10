@@ -2365,6 +2365,19 @@ def _abstract_lookup_failure_reason(item: dict) -> str:
     return "; ".join(reasons[:4])
 
 
+def _find_selection_allows_arxiv(config: AppConfig) -> bool:
+    selection = config.default_find_selection if isinstance(config.default_find_selection, dict) else {}
+    return bool(selection.get("include_arxiv"))
+
+
+def _abstract_enrichment_timed_out(started_at: float, wall_limit: float) -> bool:
+    return datetime.now(timezone.utc).timestamp() - started_at >= wall_limit
+
+
+def _abstract_enrichment_filled_count(selected: list[dict], before: int) -> int:
+    return max(0, sum(1 for item in selected if str(item.get("abstract") or "").strip()) - before)
+
+
 def _enrich_missing_abstracts_for_adaptive_recall(
     detailed: list[dict],
     config: AppConfig,
@@ -2379,6 +2392,10 @@ def _enrich_missing_abstracts_for_adaptive_recall(
     interest = _topic_interest_text(config)
     adaptive_limit, general_limit = _abstract_enrichment_limits(config, len(missing))
     adaptive_recall = [item for item in missing if interest and _has_adaptive_recall_hit(item, interest)]
+    allow_arxiv_title_match = _find_selection_allows_arxiv(config)
+    enrichment_sources = ["semantic_scholar", "openalex"]
+    if allow_arxiv_title_match:
+        enrichment_sources.append("arxiv_title_match")
 
     selected: list[dict] = []
     seen: set[str] = set()
@@ -2401,7 +2418,9 @@ def _enrich_missing_abstracts_for_adaptive_recall(
         if id(item) in selected_ids:
             item["abstract_enrichment_attempted"] = True
             metadata["abstract_enrichment_attempted"] = True
-            metadata["abstract_enrichment_sources"] = ["semantic_scholar", "openalex", "arxiv_title_match"]
+            metadata["abstract_enrichment_sources"] = enrichment_sources
+            if not allow_arxiv_title_match:
+                metadata["arxiv_title_match_skipped"] = "include_arxiv_disabled"
         else:
             item["abstract_enrichment_attempted"] = False
             metadata["abstract_enrichment_failure"] = "not_selected_within_abstract_enrichment_budget"
@@ -2410,7 +2429,7 @@ def _enrich_missing_abstracts_for_adaptive_recall(
     if not selected:
         return detailed
     before = sum(1 for item in selected if str(item.get("abstract") or "").strip())
-    batch_size = max(1, int(os.environ.get("ABSTRACT_ENRICH_BATCH_SIZE", "0") or 0) or 12)
+    batch_size = max(1, int(os.environ.get("ABSTRACT_ENRICH_BATCH_SIZE", "0") or 0) or 4)
     total = len(selected)
     configured_wall = float(os.environ.get("ABSTRACT_ENRICH_WALL_TIMEOUT_SEC", "0") or 0)
     if configured_wall > 0:
@@ -2418,31 +2437,48 @@ def _enrich_missing_abstracts_for_adaptive_recall(
     else:
         wall_limit = max(180.0, min(1200.0, 45.0 + total * 2.5))
     started_at = datetime.now(timezone.utc).timestamp()
-    progress("abstract_enrichment", 0, total, f"{venue_name}: enriching abstracts for adaptive profile/detail candidates")
+    source_text = ", ".join(enrichment_sources)
+    progress("abstract_enrichment", 0, total, f"{venue_name}: enriching abstracts via {source_text}")
     processed = 0
     timed_out = False
     for batch in _chunks(selected, batch_size):
+        batch_start = processed + 1
+        batch_end = min(total, processed + len(batch))
         _raise_if_cancelled(should_cancel)
-        if datetime.now(timezone.utc).timestamp() - started_at >= wall_limit:
+        if _abstract_enrichment_timed_out(started_at, wall_limit):
             timed_out = True
             break
+        progress("abstract_enrichment", processed, total, f"{venue_name}: semantic_scholar lookup {batch_start}-{batch_end}/{total}")
         enrich_with_semantic_scholar(batch, limit=len(batch))
         _raise_if_cancelled(should_cancel)
-        if datetime.now(timezone.utc).timestamp() - started_at >= wall_limit:
+        if _abstract_enrichment_timed_out(started_at, wall_limit):
             timed_out = True
             break
+        current_filled = _abstract_enrichment_filled_count(selected, before)
+        progress("abstract_enrichment", processed, total, f"{venue_name}: semantic_scholar done {batch_start}-{batch_end}/{total}, filled {current_filled}")
         still_missing = [item for item in batch if not str(item.get("abstract") or "").strip()]
         if still_missing:
+            progress("abstract_enrichment", processed, total, f"{venue_name}: openalex lookup {batch_start}-{batch_end}/{total}")
             enrich_with_openalex(still_missing, limit=len(still_missing))
         _raise_if_cancelled(should_cancel)
-        if datetime.now(timezone.utc).timestamp() - started_at >= wall_limit:
+        if _abstract_enrichment_timed_out(started_at, wall_limit):
             timed_out = True
             break
+        current_filled = _abstract_enrichment_filled_count(selected, before)
+        progress("abstract_enrichment", processed, total, f"{venue_name}: openalex done {batch_start}-{batch_end}/{total}, filled {current_filled}")
         still_missing = [item for item in batch if not str(item.get("abstract") or "").strip()]
-        if still_missing:
+        if still_missing and allow_arxiv_title_match:
+            progress("abstract_enrichment", processed, total, f"{venue_name}: arxiv title match {batch_start}-{batch_end}/{total}")
             enrich_with_arxiv_title_match(still_missing, limit=len(still_missing))
+            _raise_if_cancelled(should_cancel)
+            if _abstract_enrichment_timed_out(started_at, wall_limit):
+                timed_out = True
+                break
+        elif still_missing:
+            for item in still_missing:
+                item.setdefault("metadata", {})["arxiv_title_match_skipped"] = "include_arxiv_disabled"
         processed += len(batch)
-        current_filled = max(0, sum(1 for item in selected if str(item.get("abstract") or "").strip()) - before)
+        current_filled = _abstract_enrichment_filled_count(selected, before)
         progress(
             "abstract_enrichment",
             processed,
@@ -2469,7 +2505,7 @@ def _enrich_missing_abstracts_for_adaptive_recall(
     log(
         f"{venue_name}: abstract enrichment filled {filled}/{len(selected)} missing abstracts; "
         f"adaptive-profile priority={min(len(adaptive_recall), adaptive_limit)}, "
-        f"general_limit={general_limit}, total_missing={len(missing)}, batch_size={batch_size}"
+        f"general_limit={general_limit}, total_missing={len(missing)}, batch_size={batch_size}, sources={source_text}"
     )
     final_current = processed if timed_out else total
     final_message = f"{venue_name}: abstract enrichment stopped at {processed}/{total} by wall timeout" if timed_out else f"{venue_name}: abstract enrichment complete"
@@ -3060,7 +3096,7 @@ def _load_local_category_guided_index(
         if not local:
             continue
         if int(local.get("paper_count") or 0) <= 0:
-            log(f"{venue.get('name', '')} {year}: local database exists but has 0 papers; trying live source or backfill year")
+            log(f"{venue.get('name', '')} {year}: local database exists but has 0 papers; trying the selected-year live source")
             continue
         local_years.append(local)
     if not local_years:
@@ -4825,9 +4861,12 @@ def run_find(
     progress: ProgressFn = lambda *_args: None,
 ) -> dict:
     config = request.config or AppConfig()
+    selection_payload = request.selection.model_dump()
+    if config.default_find_selection != selection_payload:
+        config = config.model_copy(update={"default_find_selection": selection_payload})
     run_id, run_dir = create_run_dir("find")
     write_json(run_dir / "config.json", redacted_config(config.model_dump()))
-    write_json(run_dir / "selection.json", request.selection.model_dump())
+    write_json(run_dir / "selection.json", selection_payload)
     log(f"Created run {run_id}")
 
     llm = LLMClient(config, "find")
@@ -5112,36 +5151,8 @@ def run_find(
             title_corpus_index = title_index
             venue_metadata_audit = _online_venue_metadata_audit(title_corpus_index, adapter)
             if not title_index:
-                requested_set = {int(year) for year in requested_years if str(year).isdigit()}
-                for fallback_year in _venue_yewindow(requested_years, max_backfill_years=3):
-                    if fallback_year in requested_set:
-                        continue
-                    fallback_local = _load_local_category_guided_index(venue, [fallback_year], effective_config, llm, title_scan_limit, log)
-                    if fallback_local:
-                        title_index, fallback_reports, title_corpus_index = fallback_local
-                        adapter = "local_database"
-                        category_scan_report.extend(fallback_reports)
-                        venue_metadata_audit = _combined_metadata_audit([report.get("metadata_audit") for report in fallback_reports], adapter)
-                        effective_years = [fallback_year]
-                        year_fallback_reason = (
-                            f"requested years {requested_years} had no usable papers; "
-                            f"using local_database backfill year {fallback_year}"
-                        )
-                        log(f"{venue.get('name')}: {year_fallback_reason}")
-                        break
-                    fallback_titles, fallback_adapter = _fetch_venue_title_index_for_find(venue, [fallback_year], title_scan_limit)
-                    if fallback_titles:
-                        title_index = fallback_titles
-                        title_corpus_index = fallback_titles
-                        adapter = fallback_adapter
-                        venue_metadata_audit = _online_venue_metadata_audit(title_corpus_index, adapter)
-                        effective_years = [fallback_year]
-                        year_fallback_reason = (
-                            f"requested years {requested_years} had no usable papers via {adapter}; "
-                            f"using latest online year {fallback_year}"
-                        )
-                        log(f"{venue.get('name')}: {year_fallback_reason}")
-                        break
+                year_fallback_reason = f"requested years {requested_years} had no usable papers via {adapter}; no fallback year was used"
+                log(f"{venue.get('name')}: {year_fallback_reason}")
         metadata_fields = _venue_metadata_status_fields(venue_metadata_audit)
         metadata_limited = bool(metadata_fields.get("metadata_completeness_limited"))
         source_error = "" if title_index else "No title index found."
@@ -5162,7 +5173,7 @@ def run_find(
             "source_observed_date": datetime.now(timezone.utc).date().isoformat() if title_index else "",
             "release_signal_source": "source_observed_available" if title_index and not metadata_limited else ("source_observed_partial" if title_index else ""),
             "error": source_error,
-            "suggested_fix": "" if title_index and not metadata_limited else ("Venue/year metadata source is partial; repair the source adapter or build a verified local database before treating it as a complete Find corpus." if title_index else "High-priority venue may need a dedicated proceedings adapter or a broader year backfill."),
+            "suggested_fix": "" if title_index and not metadata_limited else ("Venue/year metadata source is partial; repair the source adapter or build a verified local database before treating it as a complete Find corpus." if title_index else "High-priority venue may need a dedicated proceedings adapter, verified selected-year cache, or an explicitly selected different year."),
             **metadata_fields,
         })
         if not title_index:

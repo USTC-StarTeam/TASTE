@@ -425,6 +425,102 @@ function selectedYearLabel(years: number[], label = "Selected year") {
   return `${label}${colon}${selected.length ? selected.join(separator) : DEFAULT_FIND_YEAR}`;
 }
 
+function uniqueYearsDesc(values: Array<number | string | undefined | null>) {
+  const years = values
+    .map((item) => Number(item))
+    .filter((year) => Number.isInteger(year) && year >= 2000 && year <= 2100);
+  return Array.from(new Set(years)).sort((a, b) => b - a);
+}
+
+function normalizeVenueIdentityText(value: any) {
+  return String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function venueIdentityKey(venue?: Venue, fallbackId = "") {
+  const name = normalizeVenueIdentityText(venue?.name);
+  const fullName = normalizeVenueIdentityText(venue?.full_name);
+  if (name || fullName) return `${name}::${fullName || name}`;
+  return normalizeVenueIdentityText(fallbackId || venue?.id).replace(/[_-](19|20)\d{2}$/, "");
+}
+
+function uniqueVenuesByIdentity(venues: Venue[]) {
+  const seen = new Set<string>();
+  return venues.filter((venue) => {
+    const key = venueIdentityKey(venue, venue.id);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function selectedVenueIdForVenue(selectedVenueIds: string[], targetVenue: Venue, venueById: Map<string, Venue>) {
+  const targetKey = venueIdentityKey(targetVenue, targetVenue.id);
+  return selectedVenueIds.find((id) => venueIdentityKey(venueById.get(id) || CORE_VENUE_FALLBACKS[id], id) === targetKey) || "";
+}
+
+function dedupeVenueIdsByIdentity(venueIds: string[], venueById: Map<string, Venue>) {
+  const seen = new Set<string>();
+  return venueIds.filter((id) => {
+    const key = venueIdentityKey(venueById.get(id) || CORE_VENUE_FALLBACKS[id], id);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function sameStringArray(left: string[], right: string[]) {
+  return left.length === right.length && left.every((item, index) => item === right[index]);
+}
+
+function defaultVenueYearMap(venueIds: string[] = CORE_VENUE_IDS) {
+  return Object.fromEntries(venueIds.map((venueId) => [venueId, [DEFAULT_FIND_YEAR]])) as Record<string, number[]>;
+}
+
+function venueYearMapFromSelection(selection: any, venueIds: string[]) {
+  const result: Record<string, number[]> = {};
+  const addYears = (venueId: string, rawYears: any) => {
+    const id = String(venueId || "").trim();
+    if (!id) return;
+    const values = Array.isArray(rawYears) ? rawYears : [rawYears];
+    result[id] = uniqueYearsDesc([...(result[id] || []), ...values]);
+  };
+  if (Array.isArray(selection?.venue_years) && selection.venue_years.length) {
+    for (const item of selection.venue_years) {
+      if (!item || typeof item !== "object") continue;
+      addYears(item.venue_id || item.venue || item.id, Array.isArray(item.years) ? item.years : item.year);
+    }
+  }
+  if (!Object.keys(result).length) {
+    const selectedYears = Array.isArray(selection?.years) && selection.years.length
+      ? normalizeSelectedYears(selection.years)
+      : [DEFAULT_FIND_YEAR];
+    for (const venueId of venueIds) addYears(venueId, selectedYears);
+  }
+  for (const venueId of venueIds) {
+    if (!result[venueId]?.length) result[venueId] = [DEFAULT_FIND_YEAR];
+  }
+  return result;
+}
+
+function yearsForVenue(map: Record<string, number[]>, venueId: string) {
+  return map[venueId]?.length ? map[venueId] : [DEFAULT_FIND_YEAR];
+}
+
+function addYearsForVenue(map: Record<string, number[]>, venueId: string, years: number[]) {
+  return {
+    ...map,
+    [venueId]: uniqueYearsDesc([...(map[venueId] || []), ...years]),
+  };
+}
+
+function venueYearPairs(venueIds: string[], map: Record<string, number[]>) {
+  return venueIds.flatMap((venueId) => yearsForVenue(map, venueId).map((year) => ({ venue_id: venueId, year })));
+}
+
+function yearsFromVenueYearMap(venueIds: string[], map: Record<string, number[]>) {
+  return uniqueYearsDesc(venueYearPairs(venueIds, map).map((pair) => pair.year));
+}
+
 function venueMetaLabel(venue: Venue, labels?: Record<string, string>, selectedYears?: number[]) {
   const yearLabel = selectedYears && selectedYears.length
     ? selectedYearLabel(selectedYears, labels?.selectedYear || "Selected year")
@@ -522,12 +618,17 @@ function sourceStatusMessageText(value: any, lang: Lang) {
   if (lang !== "zh") return text.replace(/_/g, " ");
   const lowered = text.toLowerCase();
   if (lowered.startsWith("requested years") && lowered.includes("no usable papers")) {
-    return text.replace(/^requested years/i, "请求年份").replace(/had no usable papers/i, "暂无可用论文");
+    return text
+      .replace(/^requested years/i, "请求年份")
+      .replace(/had no usable papers/i, "暂无可用论文")
+      .replace(/ via ([^;]+)/i, "（适配器 $1）");
   }
-  if (lowered.startsWith("using local_database backfill year")) {
-    const year = text.match(/\b\d{4}\b/)?.[0] || "";
-    return `年份回退: 使用本地数据库${year ? ` ${year}` : ""} 作为可审计回填`;
-  }
+  if (lowered === "no fallback year was used") return "未使用年份回退";
+  if (lowered === "no title index found.") return "未找到标题索引。";
+  if (lowered.startsWith("adapter did not provide an explicit venue metadata completeness audit")) return "适配器尚未提供完整元数据审计";
+  if (lowered.startsWith("official icml downloads/virtual page is reachable")) return "ICML 官方下载页可访问，已扫描符合条件的论文链接";
+  if (lowered.startsWith("dblp paginated stream search over the current dblp index")) return "已扫描当前 DBLP 索引；这只验证标题索引";
+  if (lowered.includes("the workflow skips category pruning and uses title llm screening")) return "无官方分类时，直接对标题库做 LLM 标题筛选";
   if (lowered === "ok") return "抓取正常";
   return text.replace(/_/g, " ");
 }
@@ -801,8 +902,9 @@ const TEXT = {
     remove: "移除",
     venueSearch: "搜索会议、期刊、领域或等级",
     years: "年份",
-    yearsHelp: "默认只选择最新一年；可输入多个年份并用逗号或空格分隔，系统会完整抓取每个已选会议的每个年份。",
+    yearsHelp: "默认待添加年份为最新一年；修改这里不会改变已选会议，点击下方会议的添加后才会把年份加入该会议。",
     selectedYear: "选择年份",
+    addYears: "待添加年份",
     availableYears: "可用年份",
     notIndexed: "未索引",
     selected: "已选",
@@ -1342,8 +1444,9 @@ const TEXT = {
     remove: "Remove",
     venueSearch: "Search venue, journal, field, or rank",
     years: "Years",
-    yearsHelp: "The default is the latest single year; enter multiple years separated by commas or spaces to fetch every selected venue-year.",
+    yearsHelp: "The default pending year is the latest year; editing this field does not change selected venues until you click Add on a venue below.",
     selectedYear: "Selected year",
+    addYears: "Pending years",
     availableYears: "Available years",
     notIndexed: "not indexed",
     selected: "selected",
@@ -2986,6 +3089,7 @@ function App() {
   const [currentFindArtifactsLoading, setCurrentFindArtifactsLoading] = useState(false);
   const [runArtifactsLoading, setRunArtifactsLoading] = useState(false);
   const [selectedVenues, setSelectedVenues] = useState<string[]>(CORE_VENUE_IDS);
+  const [selectedVenueYears, setSelectedVenueYears] = useState<Record<string, number[]>>(() => defaultVenueYearMap(CORE_VENUE_IDS));
   const [years, setYears] = useState(String(DEFAULT_FIND_YEAR));
   const [venueQuery, setVenueQuery] = useState("");
   const [showAllAvailableVenues, setShowAllAvailableVenues] = useState(false);
@@ -3130,13 +3234,13 @@ function App() {
     setResearchResearchInterest(runPreferences.research_interest || "");
     setResearchResearcherProfile(runPreferences.researcher_profile || "");
     setCodingBackend(runPreferences.coding_agent?.backend || "");
-    if (Array.isArray(selection.venue_ids) && selection.venue_ids.length) {
-      setSelectedVenues(selection.venue_ids);
-    } else {
-      setSelectedVenues([]);
-    }
+    const nextSelectedVenues = Array.isArray(selection.venue_ids) && selection.venue_ids.length
+      ? Array.from(new Set(selection.venue_ids.map((item: any) => String(item || "").trim()).filter(Boolean)))
+      : [];
+    setSelectedVenues(nextSelectedVenues);
+    setSelectedVenueYears(venueYearMapFromSelection(selection, nextSelectedVenues));
     if (Array.isArray(selection.years) && selection.years.length) {
-      setYears(normalizeSelectedYears(selection.years.join(", ")).join(", "));
+      setYears(normalizeSelectedYears(selection.years).join(", "));
     } else {
       setYears(String(DEFAULT_FIND_YEAR));
     }
@@ -3281,11 +3385,11 @@ function App() {
   }
 
   function currentFindSelection() {
-    const selectedYears = normalizeSelectedYears(years);
+    const pairs = venueYearPairs(selectedVenues, selectedVenueYears);
     return {
       venue_ids: selectedVenues,
-      years: selectedYears,
-      venue_years: selectedVenues.flatMap((venueId) => selectedYears.map((year) => ({ venue_id: venueId, year }))),
+      years: yearsFromVenueYearMap(selectedVenues, selectedVenueYears),
+      venue_years: pairs,
       include_arxiv: includeArxiv,
       include_biorxiv: includeBiorxiv,
       include_huggingface: includeHf,
@@ -3580,6 +3684,11 @@ function App() {
   function attachJob(nextJob: Job, nextTab?: Tab) {
     updateJob(nextJob);
     setError("");
+    const nextRunId = runIdFromJob(nextJob);
+    if (nextRunId) {
+      setRunId(nextRunId);
+      void loadRun(nextRunId, { clear: false, loading: false }).catch(() => {});
+    }
     watchExistingJob(nextJob.job_id, nextTab);
   }
 
@@ -3590,6 +3699,7 @@ function App() {
     }
     try {
       setError("");
+      setVenueHealth({});
       const nextConfig = configWithCurrentFindSelection();
       const savedConfig = await saveConfig(nextConfig);
       setConfig(savedConfig);
@@ -3713,6 +3823,14 @@ function App() {
   const findProgress = useMemo(() => currentFindArtifactSource.find((a) => a.name === "find_progress.json")?.content, [currentFindArtifactSource]);
   const hasCurrentFindResults = Boolean(findResults && currentProjectFindRunId && String(findResults.run_id || "") === currentProjectFindRunId);
   const viewingActiveIncompleteFindRun = Boolean(activeFindRunId && runId === activeFindRunId && !hasCurrentFindResults);
+  const selectedFindJobForRun = useMemo(
+    () => jobs.find((job) => isFindRunJob(job) && runIdFromJob(job) === (activeFindRunId || runId)),
+    [activeFindRunId, jobs, runId],
+  );
+  const activeFindJobForRun = useMemo(
+    () => selectedFindJobForRun && isLiveJob(selectedFindJobForRun) ? selectedFindJobForRun : undefined,
+    [selectedFindJobForRun],
+  );
   const useCurrentFindPacket = Boolean(currentProjectFindRunId && !hasCurrentFindResults && !viewingActiveIncompleteFindRun);
   const runFindState = hasCurrentFindResults ? findResults : findProgress;
   const expectedCurrentFindDownstreamCount = Number(
@@ -3810,9 +3928,35 @@ function App() {
   const expectedReadCandidateCount = Number(currentReadings.length || researchLiteratureCounts.readings || researchLiteratureCounts.read_candidates || researchLiteratureCounts.strong_recommendations || researchLiteratureSurvey?.read_candidates_count || researchLiteratureSurvey?.strong_recommendations_count || 0);
   const readCandidatesStillSyncing = Boolean(!currentReadings.length && expectedReadCandidateCount > 0 && (!readResultsArtifact || currentFindArtifactLoading || (useCurrentFindPacket && readCandidatePool.length === 0)));
   const hasSurveyCandidates = retrievalPool.length > 0 || readCandidatePool.length > 0 || readCandidatesStillSyncing || expectedReadCandidateCount > 0 || Number(literatureCounts.evaluated || 0) > 0 || Number(literatureCounts.arxivCandidates || 0) > 0 || (!viewingActiveIncompleteFindRun && Number(researchLiteratureCounts.survey_candidates || 0) > 0);
+  const venueHealthSourceStatus = useMemo(() => {
+    const byId = new Map(venues.map((venue) => [venue.id, venue]));
+    const ids = selectedVenues.length ? selectedVenues : Object.keys(venueHealth);
+    return ids.map((id) => {
+      const health = venueHealth[id];
+      if (!health) return null;
+      const venue = byId.get(id) || CORE_VENUE_FALLBACKS[id];
+      return {
+        source: venue?.name || id,
+        source_kind: "venue_health",
+        venue_id: id,
+        venue: venue?.name || id,
+        ok: Boolean(health.ok),
+        count: health.sample_count,
+        sample_count: health.sample_count,
+        adapter: health.source_adapter,
+        source_adapter: health.source_adapter,
+        message: health.message || (health.ok ? "ok" : "No papers fetched."),
+        requested_years: yearsForVenue(selectedVenueYears, id),
+        effective_years: yearsForVenue(selectedVenueYears, id),
+      };
+    }).filter(Boolean);
+  }, [selectedVenueYears, selectedVenues, venueHealth, venues]);
+
   const sourceStatus = useMemo(() => {
     const runRows = filterBySourceSelection(expandedSourceStatusRows(runFindState), selectedRunSelection);
+    if (venueHealthSourceStatus.length) return venueHealthSourceStatus;
     if (runRows.length) return runRows;
+    if (viewingActiveIncompleteFindRun) return [];
     return [...researchSourceLimitations, ...researchMissingVenueIndexes].map((item: any) => ({
       ...item,
       source: item.source || item.venue || item.venue_id || "TASTE literature source",
@@ -3821,7 +3965,7 @@ function App() {
       count: item.count || 0,
       message: item.message || item.reason || "",
     }));
-  }, [researchMissingVenueIndexes, researchSourceLimitations, runFindState, selectedRunSelection]);
+  }, [researchMissingVenueIndexes, researchSourceLimitations, runFindState, selectedRunSelection, venueHealthSourceStatus, viewingActiveIncompleteFindRun]);
   const ideasArtifact = useMemo(() => currentFindArtifactSource.find((a) => a.name === "ideas.json"), [currentFindArtifactSource]);
   const plansArtifact = useMemo(() => currentFindArtifactSource.find((a) => a.name === "plans.json"), [currentFindArtifactSource]);
   const ideas = useMemo(() => ideasArtifact?.content?.ideas ?? [], [ideasArtifact]);
@@ -5026,8 +5170,12 @@ function App() {
     () => selectedVenues.map((id) => venueById.get(id) || CORE_VENUE_FALLBACKS[id]).filter((venue): venue is Venue => Boolean(venue)),
     [selectedVenues, venueById],
   );
-  const selectedScanYears = useMemo(() => normalizeSelectedYears(years), [years]);
-  const availableVenues = useMemo(() => filteredVenues.filter((venue) => !selectedVenues.includes(venue.id)), [filteredVenues, selectedVenues]);
+  useEffect(() => {
+    const deduped = dedupeVenueIdsByIdentity(selectedVenues, venueById);
+    if (!sameStringArray(deduped, selectedVenues)) setSelectedVenues(deduped);
+  }, [selectedVenues, venueById]);
+  const addCandidateYears = useMemo(() => normalizeSelectedYears(years), [years]);
+  const availableVenues = useMemo(() => uniqueVenuesByIdentity(filteredVenues), [filteredVenues]);
   const availableVenueDisplayLimit = venueQuery.trim() || showAllAvailableVenues ? 300 : 24;
   const visibleAvailableVenues = availableVenues.slice(0, availableVenueDisplayLimit);
   const hiddenAvailableVenueCount = Math.max(0, Math.min(availableVenues.length, 300) - visibleAvailableVenues.length);
@@ -5084,9 +5232,8 @@ function App() {
 
   useEffect(() => {
     if (!activeFindRunId || userSelectedRunRef.current || runId === activeFindRunId) return;
-    if (!runs.some((run) => run.run_id === activeFindRunId)) return;
     void loadRun(activeFindRunId);
-  }, [activeFindRunId, runId, runs]);
+  }, [activeFindRunId, runId]);
 
   useEffect(() => {
     if (!activeFindRunId || runId !== activeFindRunId) return;
@@ -5161,15 +5308,17 @@ function App() {
     try {
       setCheckingVenues(true);
       setError("");
-      const requestYears = normalizeSelectedYears(years);
       const highPriority = ["ICLR", "NeurIPS", "ICML", "CVPR", "ICCV", "ECCV", "ACL", "EMNLP", "NAACL", "AAAI", "IJCAI"];
       const ids = selectedVenues.length
         ? selectedVenues
         : venues.filter((venue) => highPriority.includes(venue.name)).map((venue) => venue.id);
+      const pairs = selectedVenues.length
+        ? venueYearPairs(selectedVenues, selectedVenueYears)
+        : ids.flatMap((venueId) => addCandidateYears.map((year) => ({ venue_id: venueId, year })));
       const response = await checkVenueHealth({
         venue_ids: ids,
-        years: requestYears,
-        venue_years: ids.flatMap((venueId) => requestYears.map((year) => ({ venue_id: venueId, year }))),
+        years: selectedVenues.length ? yearsFromVenueYearMap(selectedVenues, selectedVenueYears) : addCandidateYears,
+        venue_years: pairs,
         sample_limit: 2,
       });
       const next: Record<string, { ok: boolean; message: string; source_adapter: string; sample_count: number }> = {};
@@ -5350,6 +5499,8 @@ function App() {
   function findSourceStatusRows() {
     const literature = researchLiteratureSurvey || {};
     const freshFindActive = freshFindRunning || String(literature.status || "").toLowerCase() === "fresh_find_running";
+    if (venueHealthSourceStatus.length) return venueHealthSourceStatus.slice(0, 12);
+    if (sourceStatus.length) return sourceStatus.slice(0, 12);
     return (freshFindActive ? researchSourceStatus : (researchSourceStatus.length ? researchSourceStatus : sourceStatus)).slice(0, 12);
   }
 
@@ -5393,7 +5544,9 @@ function App() {
     );
     const literature = researchLiteratureSurvey || {};
     const stageCounts = (publicFindStage?.counts || {}) as any;
-    const counts = { ...(researchLiteratureCounts || {}), ...stageCounts } as any;
+    const counts = viewingActiveIncompleteFindRun
+      ? { ...(literatureCounts || {}), ...stageCounts } as any
+      : { ...(researchLiteratureCounts || {}), ...(literatureCounts || {}), ...stageCounts } as any;
     const freshFindActive = freshFindRunning || String(literature.status || "").toLowerCase() === "fresh_find_running";
     const currentFindCounts: any = freshFindActive ? {} : literatureCounts || {};
     const sourceLimitations = freshFindActive ? [] : [...researchSourceLimitations, ...researchMissingVenueIndexes].slice(0, 4);
@@ -5410,10 +5563,22 @@ function App() {
     );
     const recommendedCount = freshFindActive ? Number(counts.strong_recommendations || 0) : Number(counts.strong_recommendations || (currentFindCounts as any).strong || activeStrongLiteratureRows.length || researchStrongRecommendations.length || 0);
     const sourceRows = findSourceStatusRows();
-    const liveProgress = (literature.current_find_pipeline && literature.current_find_pipeline.live_progress) || currentFindPipeline?.live_progress || {};
+    const selectedFindStatus = String(selectedFindJobForRun?.status || "").toLowerCase();
+    const selectedFindStopped = Boolean(selectedFindJobForRun && ["cancelled", "error", "blocked"].includes(selectedFindStatus));
+    const stoppedFindProgress = selectedFindStopped
+      ? {
+        phase: selectedFindStatus,
+        current: selectedFindJobForRun?.progress?.current || 0,
+        total: selectedFindJobForRun?.progress?.total || 1,
+        percent: selectedFindJobForRun?.progress?.percent ?? 0,
+        message: selectedFindJobForRun?.error || selectedFindJobForRun?.progress?.message || jobStatusLabel(selectedFindStatus, lang),
+      }
+      : null;
+    const artifactLiveProgress = selectedFindStopped ? {} : (runFindState?.live_progress || (literature.current_find_pipeline && literature.current_find_pipeline.live_progress) || currentFindPipeline?.live_progress || {});
+    const liveProgress = activeFindJobForRun?.progress || stoppedFindProgress || artifactLiveProgress || {};
     const livePhase = String(liveProgress.phase || "");
     const liveProgressText = liveProgress.message
-      ? `${displayValue(livePhase || "fresh_find_running")}：${displayMaybe(liveProgress.message)}${liveProgress.total ? ` (${liveProgress.current || 0}/${liveProgress.total}${liveProgress.percent !== undefined ? `, ${liveProgress.percent}%` : ""})` : ""}`
+      ? `${jobStatusLabel(livePhase || "fresh_find_running", lang)}：${displayMaybe(liveProgress.message)}${liveProgress.total ? ` (${liveProgress.current || 0}/${liveProgress.total}${liveProgress.percent !== undefined ? `, ${liveProgress.percent}%` : ""})` : ""}`
       : "";
     const hasSurveyState = Boolean(
       sourceRows.length
@@ -5422,6 +5587,7 @@ function App() {
       || detailFetched
       || evaluated
       || recommendedCount
+      || liveProgressText
       || literature.status,
     );
     if (!hasSurveyState) {
@@ -6131,26 +6297,27 @@ function App() {
                 <label>{t.years}</label>
                 <p className="help">{t.yearsHelp}</p>
                 <input value={years} onChange={(e) => setYears(e.target.value)} onBlur={(e) => setYears(normalizeSelectedYears(e.target.value).join(", "))} placeholder="2026" />
-                <div className="countLine">{selectedVenues.length} {t.selected} / {visibleAvailableVenues.length} {t.shown} · {selectedYearLabel(selectedScanYears, t.selectedYear)}</div>
+                <div className="countLine">{selectedVenues.length} {t.selected} / {visibleAvailableVenues.length} {t.shown} · {selectedYearLabel(addCandidateYears, t.addYears)}</div>
                 <div className="venuePicker">
                   <div>
                     <h4>{t.selectedVenuesTitle}</h4>
                     <div className="venueList compactList">
                       {selectedVenueItems.map((venue) => {
                         const health = venueHealth[venue.id];
+                        const venueSelectedYears = yearsForVenue(selectedVenueYears, venue.id);
                         return (
                           <div className="venueRow" key={venue.id}>
 	                            <div>
 	                              <strong>{venue.name}</strong>
 	                              <small>{venue.full_name}</small>
-	                              <small>{venueMetaLabel(venue, t, selectedScanYears)}</small>
+	                              <small>{venueMetaLabel(venue, t, venueSelectedYears)}</small>
 	                              {health && (
 	                                <small className={health.ok ? "health ok" : "health fail"}>
 	                                  {health.ok ? t.healthOk : t.healthFail} / {health.source_adapter} / {health.sample_count}
                                 </small>
                               )}
                             </div>
-                            <button className="smallButton" onClick={() => setSelectedVenues((prev) => prev.filter((id) => id !== venue.id))}>{t.remove}</button>
+                            <button className="smallButton" onClick={() => { setSelectedVenues((prev) => prev.filter((id) => id !== venue.id)); setSelectedVenueYears((prev) => { const next = { ...prev }; delete next[venue.id]; return next; }); }}>{t.remove}</button>
                           </div>
                         );
                       })}
@@ -6161,7 +6328,7 @@ function App() {
                       <h4>{t.availableVenuesTitle}</h4>
                       {hiddenAvailableVenueCount > 0 && <button className="smallButton" onClick={() => setShowAllAvailableVenues(true)}>{lang === "zh" ? `显示更多 ${hiddenAvailableVenueCount}` : `Show ${hiddenAvailableVenueCount} more`}</button>}
                     </div>
-                    {!venueQuery.trim() && hiddenAvailableVenueCount > 0 && <p className="help">{lang === "zh" ? "默认只显示前 24 个未选会议；用搜索框定位会议，或展开更多。" : "Showing the first 24 unselected venues by default; search to narrow the list or expand more."}</p>}
+                    {!venueQuery.trim() && hiddenAvailableVenueCount > 0 && <p className="help">{lang === "zh" ? "默认只显示前 24 个会议；用搜索框定位会议，或展开更多。" : "Showing the first 24 venues by default; search to narrow the list or expand more."}</p>}
                     <div className="venueList">
                       {visibleAvailableVenues.map((venue) => {
                         const health = venueHealth[venue.id];
@@ -6177,7 +6344,7 @@ function App() {
                                 </small>
                               )}
                             </div>
-                            <button className="smallButton" onClick={() => setSelectedVenues((prev) => prev.includes(venue.id) ? prev : [...prev, venue.id])}>{t.add}</button>
+                            <button className="smallButton" onClick={() => { const targetVenueId = selectedVenueIdForVenue(selectedVenues, venue, venueById) || venue.id; setSelectedVenues((prev) => selectedVenueIdForVenue(prev, venue, venueById) ? prev : [...prev, venue.id]); setSelectedVenueYears((prev) => addYearsForVenue(prev, targetVenueId, addCandidateYears)); }}>{t.add}</button>
                           </div>
                         );
                       })}
