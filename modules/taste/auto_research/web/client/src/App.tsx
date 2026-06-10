@@ -2718,8 +2718,9 @@ function normalizeJobForState(job: any): Job | null {
   const jobId = String(job.job_id || "").trim();
   if (!jobId) return null;
   const allowedStatuses = new Set<Job["status"]>(["queued", "running", "stale", "done", "blocked", "error", "cancelling", "cancelled", "preview_available", "needs_writing", "preview_pdf_blocked"]);
-  const rawStatus = String(job.status || "queued") as Job["status"];
-  const status = allowedStatuses.has(rawStatus) ? rawStatus : "queued";
+  const rawStatusText = String(job.status || "queued");
+  const rawStatus = rawStatusText as Job["status"];
+  const status = (allowedStatuses.has(rawStatus) || rawStatusText.startsWith("blocked")) ? rawStatus : "queued";
   const progress = job.progress && typeof job.progress === "object" ? {
     phase: String(job.progress.phase || ""),
     current: Number(job.progress.current || 0),
