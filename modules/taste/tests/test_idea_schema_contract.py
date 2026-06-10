@@ -26,7 +26,7 @@ def _v4_deep_read_fields(title: str = "Full Paper") -> dict:
     )
     motivation = (
         "论文动机是解决传统协同推荐在稀疏用户和长尾物品上语义泛化不足、纯语义推荐又容易削弱真实交互偏好的矛盾。"
-        "已有序列推荐或扩散推荐方法通常只优化平均排序指标，缺少对语义条件、噪声时间步和用户真实偏好之间冲突的细粒度分析。"
+        "已有序列推荐或检索基准方法通常只优化平均排序指标，缺少对语义条件、噪声时间步和用户真实偏好之间冲突的细粒度分析。"
         "作者希望通过扩散式生成过程把偏好恢复、语义条件和排序优化统一起来，从而判断哪些信号真正改善推荐质量，哪些改动只是增加计算量或引入不可控偏差。"
         "这种动机要求精读时同时记录问题背景、既有方法不足、目标用户场景和评测协议限制。"
     )
@@ -43,7 +43,7 @@ def _v4_deep_read_fields(title: str = "Full Paper") -> dict:
         "测试夹具还要覆盖论文精读对变量定义、模块依赖、训练数据流、推理数据流、消融开关和可复现实验入口的描述要求，确保短方法总结不能被误判为合格全文精读。"
     )
     experiments = (
-        "实验设置覆盖多个公开推荐数据集或等价用户行为任务，使用固定数据划分、负采样协议和随机种子来比较传统序列推荐、语义重排、生成式推荐和扩散推荐基线。"
+        "实验设置覆盖多个公开推荐数据集或等价用户行为任务，使用固定数据划分、负采样协议和随机种子来比较传统序列推荐、语义重排、生成式推荐和检索基准基线。"
         "论文报告 Recall、NDCG、HR、AUC 或相邻排序指标，并给出主结果表来说明候选模型相对基线的收益，同时记录标准差或多次运行稳定性。"
         "消融实验分别去掉语义条件、扩散时间步编码、排序损失、奖励约束或关键门控模块，以验证各组成部分对最终排序质量、长尾切片和语义冲突坏例的影响。"
         "效率实验需要记录训练预算、采样步数、推理时延、显存占用和候选集规模，确保性能提升不是由额外计算或不一致协议造成。"
@@ -135,11 +135,11 @@ def test_claude_artifact_freshness_uses_file_mtime_when_payload_has_date_only_ge
 def test_generic_initial_experiment_placeholder_is_removed_from_idea_schema():
     idea = {
         "id": "idea-old-placeholder",
-        "title": "LLM semantic gated diffusion recommender",
-        "hypothesis": "通过门控机制把语义信号注入离散扩散推荐过程，验证语义泛化是否能补充协同行为信号。",
+        "title": "LLM semantic gated retrieval planner",
+        "hypothesis": "通过门控机制把语义信号注入离散检索基准过程，验证语义泛化是否能补充协同行为信号。",
         "mechanism": "在反向去噪阶段加入语义专家与协同专家，依据 token 类型和扩散时间步动态选择专家输出。",
         "min_experiment": "After environment-stage base selection, run a minimal same-protocol baseline/candidate/ablation experiment with audited metrics and bad cases.",
-        "inspired_by": [{"title": "Fading to Grow", "reason": "preference fading diffusion"}],
+        "inspired_by": [{"title": "Fading to Grow", "reason": "evidence fading retrieval"}],
     }
 
     normalized = _normalize_idea_schema(idea)
@@ -158,16 +158,16 @@ def test_generic_initial_experiment_placeholder_is_removed_from_idea_schema():
 def test_current_find_idea_ready_requires_three_research_fields_and_inspiration():
     old_schema = {
         "title": "Old schema idea",
-        "hypothesis": "通过门控机制把语义信号注入离散扩散推荐过程，验证语义泛化是否能补充协同行为信号。",
+        "hypothesis": "通过门控机制把语义信号注入离散检索基准过程，验证语义泛化是否能补充协同行为信号。",
         "mechanism": "在反向去噪阶段加入语义专家与协同专家，依据 token 类型和扩散时间步动态选择专家输出。",
         "min_experiment": "After environment review, run a minimal same-protocol baseline/candidate/ablation experiment with audited metrics and bad cases.",
         "supporting_papers": [{"title": "Fading to Grow"}],
     }
     unscored_schema = {
-        "title": "Semantic-gated discrete diffusion recommendation",
-        "new_method": "提出一个语义门控的离散扩散推荐方法，在偏好衰减和反向重建之间加入协同专家与语言语义专家，并用扩散时间步控制二者权重。",
+        "title": "Semantic-gated discrete retrieval benchmark",
+        "new_method": "提出一个语义门控的离散检索基准方法，在偏好衰减和反向重建之间加入协同专家与语言语义专家，并用扩散时间步控制二者权重。",
         "initial_experiment": "基于 PreferGrow 的离散偏好衰减框架实现一个最小变体，对比原始 PreferGrow、仅语义重排和语义门控扩散三组，并报告 Recall@K、NDCG@K、长尾切片和语义冲突坏例。",
-        "inspired_by": [{"title": "Fading to Grow", "reason": "preference fading diffusion"}],
+        "inspired_by": [{"title": "Fading to Grow", "reason": "evidence fading retrieval"}],
     }
     ready_schema = _with_scored_idea_contract(unscored_schema, 0)
 
@@ -199,9 +199,9 @@ def test_run_idea_syncs_generated_ideas_to_project_state(monkeypatch, tmp_path):
                 "strong_recommendations": [
                     {
                         "id": "paper-1",
-                        "title": "Semantic diffusion recommendation",
+                        "title": "Semantic retrieval benchmark",
                         "url": "https://example.test/paper",
-                        "reason": "diffusion recommendation and LLM semantic evidence",
+                        "reason": "retrieval benchmark and LLM semantic evidence",
                         "score": 9.0,
                     }
                 ],
@@ -213,8 +213,8 @@ def test_run_idea_syncs_generated_ideas_to_project_state(monkeypatch, tmp_path):
                 "run_id": run_id,
                 "readings": [
                     {
-                        "title": "Semantic diffusion recommendation",
-                        "summary": "LLM semantic signals improve diffusion recommendation.",
+                        "title": "Semantic retrieval benchmark",
+                        "summary": "LLM semantic signals improve retrieval benchmark.",
                     }
                 ],
             },
@@ -226,7 +226,7 @@ def test_run_idea_syncs_generated_ideas_to_project_state(monkeypatch, tmp_path):
 
         result = run_idea(
             IdeaRequest(run_id=run_id, max_ideas=2),
-            AppConfig(provider="mock", research_interest="LLM diffusion recommendation", max_ideas=2),
+            AppConfig(provider="mock", research_interest="LLM-assisted retrieval benchmark", max_ideas=2),
             log=lambda _msg: None,
         )
 
@@ -331,9 +331,9 @@ def test_current_find_plan_markdown_prefers_specific_initial_experiment_over_gen
     plan = {
         "plan_id": "plan-specific",
         "idea_id": "idea-specific",
-        "title": "语义门控扩散推荐计划",
+        "title": "语义门控检索基准计划",
         "status": "waiting_for_environment_base_selection",
-        "new_method": "提出语义门控离散扩散推荐方法，将 LLM 语义嵌入注入偏好衰减和反向重建过程。",
+        "new_method": "提出语义门控离散检索基准方法，将 LLM 语义嵌入注入偏好衰减和反向重建过程。",
         "initial_experiment": "基于 PreferGrow 实现最小语义门控变体，对比 PreferGrow、仅语义重排和语义门控扩散，报告 HR@10、NDCG@10、长尾切片和语义冲突坏例。",
         "inspired_by": [{"title": "Fading to Grow", "reason": "离散偏好衰减"}],
         "versions": [
@@ -367,7 +367,7 @@ def test_current_find_markdown_hides_empty_machine_fields_and_keeps_scores():
     plan = {
         "plan_id": "plan-004",
         "idea_id": idea["id"],
-        "title": "扩散推荐模型的排名偏好对齐后训练实验计划",
+        "title": "检索基准模型的排名偏好对齐后训练实验计划",
         "status": "waiting_for_environment_base_selection",
         "selected_for_execution": True,
         "steps": ["基于当前基底执行同协议 baseline/candidate/ablation，并记录指标和坏例。"],
@@ -530,7 +530,7 @@ def test_current_find_reading_validation_rejects_short_full_text_synthesis():
         "url": "https://example.test/paper",
         "verdict": "core_reading",
         "support_role": "core_method_reference",
-        "abstract_zh": "论文提出一个扩散推荐方法，包含前向扰动、反向去噪和排序实验。",
+        "abstract_zh": "论文提出一个检索基准方法，包含前向扰动、反向去噪和排序实验。",
         "motivation_zh": "动机是改善推荐。",
         "method_details_zh": "方法是扩散去噪推荐。",
         "experiments_zh": "实验报告推荐指标。",
@@ -659,7 +659,7 @@ def test_selects_higher_quality_same_paper_fragment_over_short_repair():
     short_repair = {
         "paper_id": "paper-1",
         "title": "Quality Selection Paper",
-        "abstract_zh": "论文提出扩散推荐方法。",
+        "abstract_zh": "论文提出检索基准方法。",
         "motivation_zh": "动机是提升推荐。",
         "method_details_zh": "方法是扩散去噪。",
         "experiments_zh": "实验报告指标。",
@@ -796,10 +796,10 @@ def test_run_plan_reads_project_same_run_ideas_and_syncs_project_plans(monkeypat
                     {
                         "idea_id": "idea-1",
                         "title": "Project edited semantic diffusion idea",
-                        "new_method": "项目侧同一 Find run 写入的新方法，说明语义门控离散扩散推荐的机制和训练作用点。",
+                        "new_method": "项目侧同一 Find run 写入的新方法，说明语义门控离散检索基准的机制和训练作用点。",
                         "method_details": "用协同专家和语义专家在扩散时间步上动态融合。",
                         "initial_experiment": "基于 PreferGrow 做最小语义门控变体，对比原始 PreferGrow、仅语义重排和语义门控扩散，报告 HR@10、NDCG@10 与长尾坏例。",
-                        "inspired_by": [{"title": "Fading to Grow", "reason": "preference fading diffusion"}],
+                        "inspired_by": [{"title": "Fading to Grow", "reason": "evidence fading retrieval"}],
                         "approved_for_planning": True,
                     }
                 ],
@@ -1330,7 +1330,7 @@ def test_normalize_absorbs_current_find_deep_read_fragments_when_read_results_pe
     find_results = {
         "run_id": run_id,
         "strong_recommendations": [
-            {"id": "paper-1", "title": title, "url": "https://example.test/fragment", "pdf_url": "https://example.test/fragment.pdf", "venue": "ICLR", "year": 2026, "score": 9.1, "evidence_tier": "strong_recommendation", "find_recommendation": True, "recommended_by_llm_ranking": True, "abstract": "A complete abstract about diffusion recommendation experiments and limitations.", "abstract_zh": "本文提供一个用于测试的扩散推荐论文摘要，包含方法、实验和局限。"}
+            {"id": "paper-1", "title": title, "url": "https://example.test/fragment", "pdf_url": "https://example.test/fragment.pdf", "venue": "ICLR", "year": 2026, "score": 9.1, "evidence_tier": "strong_recommendation", "find_recommendation": True, "recommended_by_llm_ranking": True, "abstract": "A complete abstract about retrieval benchmark experiments and limitations.", "abstract_zh": "本文提供一个用于测试的检索基准论文摘要，包含方法、实验和局限。"}
         ],
     }
     reading = {
@@ -1411,7 +1411,7 @@ def test_load_claude_outputs_uses_file_mtime_when_generated_at_missing(tmp_path)
             "status": "approved",
             "new_method": "设计一个结合扩散去噪和语义条件的推荐模块，明确输入、门控、训练目标、反向重建位置和为什么能改善推荐排序。",
             "initial_experiment": "基于环境阶段选出的可审计基底做最小模块替换，说明替换的文件和模块，对比 baseline、control、ablation，记录 Recall、NDCG 和坏例切片。",
-            "inspired_by": [{"title": "Mtime Paper", "reason": "条件扩散推荐机制"}],
+            "inspired_by": [{"title": "Mtime Paper", "reason": "条件检索基准机制"}],
         }
         for idx in range(5)
     ]
@@ -1455,9 +1455,9 @@ def test_full_text_packet_update_makes_claude_outputs_stale(tmp_path):
         "url": "https://example.test/paper",
         "verdict": "core_reading",
         "support_role": "core_method_reference",
-        "abstract_zh": "本文围绕扩散推荐模型展开，说明如何利用全文证据分析论文动机、方法和实验，并报告推荐系统实验结果。",
-        "motivation_zh": "论文动机是解决扩散推荐中的语义条件和协同偏好融合问题。",
-        "method_details_zh": "论文方法构造一个条件化扩散推荐模型，在前向过程加入偏好扰动，在反向过程中结合用户历史、物品语义和时间步嵌入恢复偏好表示，并通过排序损失输出候选物品分数。",
+        "abstract_zh": "本文围绕检索基准模型展开，说明如何利用全文证据分析论文动机、方法和实验，并报告推荐系统实验结果。",
+        "motivation_zh": "论文动机是解决检索基准中的语义条件和协同偏好融合问题。",
+        "method_details_zh": "论文方法构造一个条件化检索基准模型，在前向过程加入偏好扰动，在反向过程中结合用户历史、物品语义和时间步嵌入恢复偏好表示，并通过排序损失输出候选物品分数。",
         "experiments_zh": "实验比较多个推荐基线，报告 Recall、NDCG 等指标，并通过移除语义条件、时间步编码和排序损失验证模块贡献。",
         "limitations_zh": "局限包括采样成本较高、语义表示质量敏感以及负采样协议会影响指标。",
         "full_text_available": True,
@@ -1472,7 +1472,7 @@ def test_full_text_packet_update_makes_claude_outputs_stale(tmp_path):
             "status": "approved",
             "new_method": "设计一个结合扩散去噪和语义条件的推荐模块，明确输入、门控、训练目标、反向重建位置和为什么能改善推荐排序。",
             "initial_experiment": "基于环境阶段选出的可审计基底做最小模块替换，说明替换的文件和模块，对比 baseline、control、ablation，记录 Recall、NDCG 和坏例切片。",
-            "inspired_by": [{"title": "Packet Paper", "reason": "条件扩散推荐机制"}],
+            "inspired_by": [{"title": "Packet Paper", "reason": "条件检索基准机制"}],
         }
         for idx in range(5)
     ]
@@ -1533,9 +1533,9 @@ def test_load_claude_outputs_accepts_chinese_deep_read_schema_without_legacy_fie
             "id": f"idea-{idx}",
             "title": f"Idea {idx}",
             "status": "approved",
-            "new_method": "设计一个语义门控的离散扩散推荐模块，明确协同专家、语义专家和扩散时间步门控的输入输出，并说明该模块如何改善推荐排序。",
-            "initial_experiment": "基于环境阶段选出的可审计扩散推荐基底做最小模块替换，对比 baseline、仅语义重排、语义门控扩散和去门控消融，记录 Recall、NDCG 与语义冲突坏例。",
-            "inspired_by": [{"title": "Chinese Schema Paper", "reason": "语义条件扩散推荐机制"}],
+            "new_method": "设计一个语义门控的离散检索基准模块，明确协同专家、语义专家和扩散时间步门控的输入输出，并说明该模块如何改善推荐排序。",
+            "initial_experiment": "基于环境阶段选出的可审计检索基准基底做最小模块替换，对比 baseline、仅语义重排、语义门控扩散和去门控消融，记录 Recall、NDCG 与语义冲突坏例。",
+            "inspired_by": [{"title": "Chinese Schema Paper", "reason": "语义条件检索基准机制"}],
         }
         for idx in range(5)
     ]
@@ -1595,14 +1595,14 @@ def test_load_claude_outputs_sanitizes_reading_public_text(tmp_path):
         "paper_id": "paper-1",
         "title": "Full Paper",
         "verdict": "core_reading",
-        "summary": "论文完整讨论可信扩散推荐问题，给出用户偏好扰动、反向去噪重建、可信子空间约束和多数据集评测，因此可以作为当前精读条目。",
-        "abstract_zh": "论文完整讨论可信扩散推荐问题，给出用户偏好扰动、反向去噪重建、可信子空间约束和多数据集评测，因此可以作为当前精读条目。",
-        "motivation_zh": "推荐系统和扩散模型相关。project_topic 命中当前主题。论文动机是让扩散推荐不仅优化点击或排序准确率，还显式降低不可信内容被推荐的风险。",
-        "relevance": "推荐系统和扩散模型相关。project_topic 命中当前主题。论文动机是让扩散推荐不仅优化点击或排序准确率，还显式降低不可信内容被推荐的风险。",
+        "summary": "论文完整讨论可信检索基准问题，给出用户偏好扰动、反向去噪重建、可信子空间约束和多数据集评测，因此可以作为当前精读条目。",
+        "abstract_zh": "论文完整讨论可信检索基准问题，给出用户偏好扰动、反向去噪重建、可信子空间约束和多数据集评测，因此可以作为当前精读条目。",
+        "motivation_zh": "推荐系统和扩散模型相关。project_topic 命中当前主题。论文动机是让检索基准不仅优化点击或排序准确率，还显式降低不可信内容被推荐的风险。",
+        "relevance": "推荐系统和扩散模型相关。project_topic 命中当前主题。论文动机是让检索基准不仅优化点击或排序准确率，还显式降低不可信内容被推荐的风险。",
         "method": "论文方法先用扩散过程扰动用户交互，再在反向重建中分离偏好相关信号和不可信内容信号，并用子空间投影抑制不可信方向。模型还把重建目标、可信约束和候选排序目标联合起来，使去噪网络同时学习协同偏好、内容风险方向和最终排序分数。" + dirty_method + "模型通过联合重建目标和可信约束训练，使生成候选同时保留协同过滤信息和内容可信度控制。",
         "method_details_zh": "论文方法先用扩散过程扰动用户交互，再在反向重建中分离偏好相关信号和不可信内容信号，并用子空间投影抑制不可信方向。模型还把重建目标、可信约束和候选排序目标联合起来，使去噪网络同时学习协同偏好、内容风险方向和最终排序分数。" + dirty_method + "模型通过联合重建目标和可信约束训练，使生成候选同时保留协同过滤信息和内容可信度控制。",
-        "experiments": "实验比较扩散推荐、传统推荐和可信约束变体，在多个真实内容推荐数据集上报告准确率、可信度和消融结果，并进一步用去除投影、去除可信约束和只保留重建目标的消融确认各模块作用。Strong/foundation anchors may guide planning, but only local repo/data/env/experiment gate can support paper claims.",
-        "experiments_zh": "实验比较扩散推荐、传统推荐和可信约束变体，在多个真实内容推荐数据集上报告准确率、可信度和消融结果，并进一步用去除投影、去除可信约束和只保留重建目标的消融确认各模块作用。Strong/foundation anchors may guide planning, but only local repo/data/env/experiment gate can support paper claims.",
+        "experiments": "实验比较检索基准、传统推荐和可信约束变体，在多个真实内容推荐数据集上报告准确率、可信度和消融结果，并进一步用去除投影、去除可信约束和只保留重建目标的消融确认各模块作用。Strong/foundation anchors may guide planning, but only local repo/data/env/experiment gate can support paper claims.",
+        "experiments_zh": "实验比较检索基准、传统推荐和可信约束变体，在多个真实内容推荐数据集上报告准确率、可信度和消融结果，并进一步用去除投影、去除可信约束和只保留重建目标的消融确认各模块作用。Strong/foundation anchors may guide planning, but only local repo/data/env/experiment gate can support paper claims.",
         "limitations": "局限包括可信标签依赖、子空间估计误差和跨领域迁移不确定性，且论文没有证明该机制可直接覆盖所有序列推荐或冷启动设置。Guardrail: no claim promotion.",
         "limitations_zh": "局限包括可信标签依赖、子空间估计误差和跨领域迁移不确定性，且论文没有证明该机制可直接覆盖所有序列推荐或冷启动设置。Guardrail: no claim promotion.",
         "support_role": "core_method_reference",
@@ -1620,7 +1620,7 @@ def test_load_claude_outputs_sanitizes_reading_public_text(tmp_path):
             "status": "approved",
             "new_method": "设计一个结合扩散去噪和语义条件的推荐模块，明确输入、门控、训练目标、反向重建位置和为什么能改善可信推荐排序。",
             "initial_experiment": "基于环境阶段选出的可审计基底做最小模块替换，说明替换的文件和模块，对比 baseline/control/ablation，记录 HR、NDCG、运行日志和坏例切片。",
-            "inspired_by": [{"title": "Full Paper", "reason": "可信扩散推荐机制"}],
+            "inspired_by": [{"title": "Full Paper", "reason": "可信检索基准机制"}],
         }
         for idx in range(5)
     ]
@@ -2226,7 +2226,7 @@ def test_current_find_plan_state_clears_stale_failure_fields_when_ready(tmp_path
             "allowed_actions": ["stale repair command"],
         },
     )
-    targeted_queries = ["diffusion recommendation semantics", "LLM semantic recommender", "discrete diffusion recommender"]
+    targeted_queries = ["retrieval benchmark semantics", "LLM semantic recommender", "discrete retrieval system"]
     for name, key in [("read_results.json", "readings"), ("ideas.json", "ideas"), ("plans.json", "plans")]:
         ensure_current_find_research_plan.save_json(
             taste_dir / name,
@@ -2245,10 +2245,10 @@ def test_current_find_plan_state_clears_stale_failure_fields_when_ready(tmp_path
             "url": "https://example.test/paper",
             "support_role": "positive_anchor_for_planning",
             "claim_ready_anchor": True,
-            "abstract_zh": "本文研究扩散推荐中的语义条件建模，围绕用户偏好、物品语义和去噪生成过程展开，并报告推荐排序实验。",
-            "motivation_zh": "论文动机是解决扩散推荐难以同时利用协同偏好和语义泛化信号的问题。",
+            "abstract_zh": "本文研究检索基准中的语义条件建模，围绕用户偏好、物品语义和去噪生成过程展开，并报告推荐排序实验。",
+            "motivation_zh": "论文动机是解决检索基准难以同时利用协同偏好和语义泛化信号的问题。",
             "method_details_zh": "论文方法把用户交互表示作为扩散状态，在前向过程中逐步扰动偏好表示，反向网络结合用户历史、物品语义和时间步嵌入恢复偏好，并用排序头输出候选物品分数。",
-            "experiments_zh": "实验比较传统推荐、语义推荐和扩散推荐基线，报告 Recall、NDCG 等排序指标，并通过移除语义条件和时间步编码做消融。",
+            "experiments_zh": "实验比较传统推荐、语义推荐和检索基准基线，报告 Recall、NDCG 等排序指标，并通过移除语义条件和时间步编码做消融。",
             "limitations_zh": "局限包括扩散采样成本、语义表示质量敏感，以及不同数据切分和负采样协议可能影响指标。",
             "full_text_available": True,
             "full_text_status": "pdf_text_read",
@@ -2322,7 +2322,7 @@ def test_current_find_plan_state_allows_explicit_selected_plan_when_ready(tmp_pa
         state_dir / "current_find_claude_reading_validation.json",
         {"run_id": run_id, "valid": True, "policy_version": ensure_current_find_research_plan.FULL_TEXT_READ_POLICY_VERSION, "expected_recommendation_count": 1, "actual_reading_count": 1, "full_text_evidence_count": 1, "full_text_reading_count": 1, "pending_full_text_reading_count": 0, "pending_deep_read_synthesis_count": 0, "blockers": []},
     )
-    targeted_queries = ["semantic diffusion recommendation", "LLM recommender gating", "discrete diffusion recommender"]
+    targeted_queries = ["semantic retrieval benchmark", "LLM recommender gating", "discrete retrieval system"]
     for name, key in [("read_results.json", "readings"), ("ideas.json", "ideas"), ("plans.json", "plans")]:
         ensure_current_find_research_plan.save_json(
             taste_dir / name,
@@ -2398,7 +2398,7 @@ def test_current_find_plan_state_blocks_ambiguous_selected_plans(tmp_path, monke
         state_dir / "current_find_claude_reading_validation.json",
         {"run_id": run_id, "valid": True, "policy_version": ensure_current_find_research_plan.FULL_TEXT_READ_POLICY_VERSION, "expected_recommendation_count": 1, "actual_reading_count": 1, "full_text_evidence_count": 1, "full_text_reading_count": 1, "pending_full_text_reading_count": 0, "pending_deep_read_synthesis_count": 0, "blockers": []},
     )
-    targeted_queries = ["semantic diffusion recommendation", "LLM recommender gating", "discrete diffusion recommender"]
+    targeted_queries = ["semantic retrieval benchmark", "LLM recommender gating", "discrete retrieval system"]
     for name, key in [("read_results.json", "readings"), ("ideas.json", "ideas"), ("plans.json", "plans")]:
         ensure_current_find_research_plan.save_json(
             taste_dir / name,

@@ -206,16 +206,16 @@ def _mock_offline_venue_title_index(venue: dict, years: list[int], max_items: in
     year = year_values[0] if year_values else date.today().year
     rows = [
         (
-            "Discrete Diffusion Retrieval Construction for Reliable Recommendation",
-            "This paper studies discrete diffusion retrieval construction for recommendation systems. "
-            "It introduces a reusable denoising objective, controlled candidate generation protocol, "
-            "and benchmark evaluation that connect diffusion modeling with ranking and retrieval quality.",
-            "recommender systems",
+            "Structured Retrieval Benchmark Construction for Reliable Agents",
+            "This paper studies structured retrieval benchmark construction for autonomous agents. "
+            "It introduces a reusable evidence-selection objective, controlled candidate generation protocol, "
+            "and benchmark evaluation that connect retrieval planning with audit quality.",
+            "retrieval systems",
         ),
         (
-            "Language Model Guided Diffusion Recommenders with Auditable Retrieval",
-            "This work presents a language model guided diffusion recommender that records retrieval evidence, "
-            "scores candidate items with title and abstract signals, and evaluates robustness across public datasets. "
+            "Language Model Guided Retrieval Agents with Auditable Evidence",
+            "This work presents a language model guided retrieval agent that records evidence provenance, "
+            "scores candidate papers with title and abstract signals, and evaluates robustness across public datasets. "
             "The method is useful as an offline smoke-test candidate for downstream reading and planning.",
             "machine learning",
         ),

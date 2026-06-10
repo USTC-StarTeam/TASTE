@@ -97,7 +97,7 @@ def test_title_prefilter_ignores_local_topic_pseudo_categories_for_dynamic_group
     items = [
         {
             "id": f"paper_{index}",
-            "title": f"LLM Diffusion Recommendation Candidate {index}",
+            "title": f"LLM Retrieval Benchmark Candidate {index}",
             "venue": "ICML",
             "year": 2026,
             "category": f"Local topic: candidate / {index}",
@@ -111,7 +111,7 @@ def test_title_prefilter_ignores_local_topic_pseudo_categories_for_dynamic_group
     llm = BatchLLM()
     selected = _prefilter_titles(
         items,
-        AppConfig(provider="mock", research_interest="LLM diffusion recommender systems", max_recommended_papers=20),
+        AppConfig(provider="mock", research_interest="LLM-assisted retrieval benchmark systems", max_recommended_papers=20),
         llm,
         "ICML",
         log=lambda _msg: None,
@@ -309,15 +309,15 @@ def test_final_scoring_prompt_preserves_valid_subdirections():
         provider="openai",
         api_key="test-key",
         model="test-model",
-        research_interest="Generic semantic-conditioning diffusion recommendation benchmark; discrete diffusion retrieval smoke test",
+        research_interest="Generic semantic-conditioning retrieval benchmark; discrete retrieval smoke test",
         max_recommended_papers=5,
         llm_concurrency=1,
     )
     items = [
         {
             "id": "paper_001",
-            "title": "Collaborative Diffusion Models for Recommendation",
-            "abstract": "A recommender system uses diffusion and denoising for collaborative recommendation.",
+            "title": "Collaborative Retrieval Models for Benchmarking",
+            "abstract": "A retrieval system uses diffusion and denoising for collaborative retrieval.",
             "classification_source": "llm_inferred",
         },
     ]
@@ -331,7 +331,7 @@ def test_final_scoring_prompt_preserves_valid_subdirections():
 
 def test_topic_evidence_uses_source_text_not_llm_explanation():
     llm = BatchLLM()
-    cfg = AppConfig(provider="mock", research_interest="LLM diffusion recommendation", max_recommended_papers=5, llm_concurrency=1)
+    cfg = AppConfig(provider="mock", research_interest="LLM-assisted retrieval benchmark", max_recommended_papers=5, llm_concurrency=1)
     items = [
         {
             "id": "paper_001",
@@ -409,7 +409,7 @@ def test_diagnostics_reports_strong_and_read_candidate_semantics():
 def test_category_selection_defaults_to_adaptive_deterministic_fallback(monkeypatch):
     monkeypatch.delenv("USE_LLM_CATEGORY_SELECT", raising=False)
     llm = BatchLLM()
-    cfg = AppConfig(provider="mock", research_interest="LLM diffusion recommendation")
+    cfg = AppConfig(provider="mock", research_interest="LLM-assisted retrieval benchmark")
     category_summary = {
         "venue_id": "test",
         "venue": "TestVenue",
@@ -450,7 +450,7 @@ def test_category_selection_is_deterministic_by_default_even_when_llm_available(
             }
 
     llm = CategoryLLM()
-    cfg = AppConfig(provider="openai", api_key="test-key", model="test-model", research_interest="LLM diffusion recommendation")
+    cfg = AppConfig(provider="openai", api_key="test-key", model="test-model", research_interest="LLM-assisted retrieval benchmark")
     category_summary = {
         "venue_id": "test",
         "venue": "TestVenue",
@@ -485,7 +485,7 @@ def test_category_selection_uses_llm_only_when_explicitly_enabled(monkeypatch):
             return {"selected_categories": [{"name": "generative models", "reason": "matches the current profile"}]}
 
     llm = CategoryLLM()
-    cfg = AppConfig(provider="openai", api_key="test-key", model="test-model", research_interest="LLM diffusion recommendation")
+    cfg = AppConfig(provider="openai", api_key="test-key", model="test-model", research_interest="LLM-assisted retrieval benchmark")
     category_summary = {
         "venue_id": "test",
         "venue": "TestVenue",
@@ -507,12 +507,12 @@ def test_category_selection_uses_llm_only_when_explicitly_enabled(monkeypatch):
 
 def test_final_display_score_is_recommendation_score_with_stable_audit_score():
     llm = BatchLLM()
-    cfg = AppConfig(provider="mock", research_interest="LLM diffusion recommendation", max_recommended_papers=5, llm_concurrency=1)
+    cfg = AppConfig(provider="mock", research_interest="LLM-assisted retrieval benchmark", max_recommended_papers=5, llm_concurrency=1)
     items = [
         {
             "id": "paper_001",
             "title": "Diffusion Recommender with Language Model Signals",
-            "abstract": "A recommender system uses discrete diffusion and large language model semantic signals for preference ranking.",
+            "abstract": "A retrieval system uses discrete retrieval and large language model semantic signals for preference ranking.",
             "classification_source": "llm_inferred",
             "local_score": 0.2,
             "local_rank": 3,
@@ -533,12 +533,12 @@ def test_final_display_score_is_recommendation_score_with_stable_audit_score():
 
 def test_topic_routes_allow_diffusion_recommendation_without_llm():
     llm = BatchLLM()
-    cfg = AppConfig(provider="mock", research_interest="LLM semantic condition diffusion recommendation; discrete diffusion recommendation", max_recommended_papers=5, llm_concurrency=1)
+    cfg = AppConfig(provider="mock", research_interest="LLM semantic condition retrieval benchmark; discrete retrieval benchmark", max_recommended_papers=5, llm_concurrency=1)
     items = [
         {
             "id": "paper_001",
             "title": "Discrete Diffusion for Sequential Recommendation",
-            "abstract": "A recommender system uses discrete diffusion and denoising to model user preferences for sequential recommendation.",
+            "abstract": "A retrieval system uses discrete retrieval and denoising to model user preferences for sequential retrieval.",
             "classification_source": "llm_inferred",
         }
     ]
@@ -566,15 +566,15 @@ def test_passed_single_alternative_route_is_not_weakened_by_unmatched_routes():
                             "category": "Discrete diffusion",
                             "fit_score": 7,
                             "diversity_score": 4,
-                            "hit_directions": ["discrete diffusion"],
-                            "topic_evidence": "passed: discrete diffusion language model route",
+                            "hit_directions": ["discrete retrieval"],
+                            "topic_evidence": "passed: discrete retrieval language model route",
                             "topic_evidence_supported": True,
-                            "matched_topic_route": "discrete diffusion language model",
+                            "matched_topic_route": "discrete retrieval language model",
                             "topic_evidence_basis": "abstract",
                             "missing_topic_evidence": ["recommendation application", "route-specific deployment details"],
                             "fit_explanation": "摘要直接支持离散扩散语言模型路线。",
                             "fit_explanation_zh": "摘要直接支持离散扩散语言模型路线。",
-                            "fit_explanation_en": "The abstract directly supports the discrete diffusion language-model route.",
+                            "fit_explanation_en": "The abstract directly supports the discrete retrieval language-model route.",
                             "reason": "该论文命中一个由当前研究主题自动生成的替代路线；未覆盖其他路线不应削弱该证据。",
                             "reason_zh": "该论文命中一个由当前研究主题自动生成的替代路线；未覆盖其他路线不应削弱该证据。",
                             "reason_en": "It hits one generated alternative route; missing other routes should not weaken it.",
@@ -586,7 +586,7 @@ def test_passed_single_alternative_route_is_not_weakened_by_unmatched_routes():
     llm = RouteLLM()
     cfg = AppConfig(
         provider="mock",
-        research_interest="LLM semantic condition diffusion recommendation; discrete diffusion language model",
+        research_interest="LLM semantic condition retrieval benchmark; discrete retrieval language model",
         max_recommended_papers=5,
         llm_concurrency=1,
     )
@@ -594,7 +594,7 @@ def test_passed_single_alternative_route_is_not_weakened_by_unmatched_routes():
         {
             "id": "paper_001",
             "title": "Scaling Behavior of Discrete Diffusion Language Models",
-            "abstract": "This paper studies scaling laws for discrete diffusion language models and generation behavior.",
+            "abstract": "This paper studies scaling laws for discrete retrieval language models and generation behavior.",
             "classification_source": "llm_inferred",
         }
     ]
@@ -613,11 +613,11 @@ def test_passed_single_alternative_route_is_not_weakened_by_unmatched_routes():
 
 def test_local_rank_reports_adaptive_recall_not_keyword_table():
     papers = [
-        {"id": "hit", "title": "Discrete diffusion recommendation", "abstract": "A recommender uses discrete diffusion."},
+        {"id": "hit", "title": "Discrete retrieval benchmark", "abstract": "A recommender uses discrete retrieval."},
         {"id": "miss", "title": "Vision benchmark", "abstract": "A visual recognition benchmark."},
     ]
 
-    ranked, report = rank_papers_tfidf(papers, "discrete diffusion recommendation", global_limit=2)
+    ranked, report = rank_papers_tfidf(papers, "discrete retrieval benchmark", global_limit=2)
 
     assert ranked[0]["id"] == "hit"
     assert report["adaptive_profile_signal_count"] > 0
@@ -635,7 +635,7 @@ def test_local_rank_fills_global_recall_when_single_category_cap_is_smaller():
         {
             "id": f"paper_{index}",
             "title": f"Diffusion recommendation candidate {index}",
-            "abstract": "A recommender system uses diffusion modeling for user preference prediction.",
+            "abstract": "A retrieval system uses diffusion modeling for user preference prediction.",
             "category": "unknown",
         }
         for index in range(350)
@@ -643,7 +643,7 @@ def test_local_rank_fills_global_recall_when_single_category_cap_is_smaller():
 
     ranked, report = rank_papers_tfidf(
         papers,
-        "diffusion recommendation",
+        "retrieval benchmark",
         per_category_limit=200,
         global_limit=300,
     )
@@ -687,10 +687,10 @@ def test_contradictory_passed_topic_evidence_is_not_strong():
             "title": "Diffusion Language Model",
             "fit_score": 8,
             "score": 8,
-            "topic_evidence": "passed:discrete diffusion method; weak due to missing recommendation application",
+            "topic_evidence": "passed:discrete retrieval method; weak due to missing recommendation application",
             "topic_evidence_supported": True,
             "reason_source": "llm abstract evaluation",
-            "abstract": "This paper studies discrete diffusion language models for text generation.",
+            "abstract": "This paper studies discrete retrieval language models for text generation.",
         }
     ]
 
@@ -717,14 +717,14 @@ def test_foundation_borrowing_route_is_not_user_visible_recommendation():
                             "diversity_score": 5.5,
                             "hit_directions_zh": ["基础借鉴路线"],
                             "hit_directions_en": ["foundation route"],
-                            "topic_evidence": "passed:foundation:diffusion recommender backbone for the current compound topic",
+                            "topic_evidence": "passed:foundation:retrieval benchmark backbone for the current compound topic",
                             "topic_evidence_supported": True,
-                            "matched_topic_route": "foundation diffusion recommender backbone",
+                            "matched_topic_route": "foundation retrieval benchmark backbone",
                             "topic_evidence_basis": "abstract",
                             "missing_topic_evidence": ["LLM component not covered by this foundation paper"],
-                            "fit_explanation": "摘要支持可借鉴的扩散推荐基础路线，但不声称覆盖完整复合目标。",
-                            "fit_explanation_zh": "摘要支持可借鉴的扩散推荐基础路线，但不声称覆盖完整复合目标。",
-                            "fit_explanation_en": "The abstract supports a useful diffusion-recommender foundation route without claiming the full compound target.",
+                            "fit_explanation": "摘要支持可借鉴的检索基准基础路线，但不声称覆盖完整复合目标。",
+                            "fit_explanation_zh": "摘要支持可借鉴的检索基准基础路线，但不声称覆盖完整复合目标。",
+                            "fit_explanation_en": "The abstract supports a useful retrieval-benchmark foundation route without claiming the full compound target.",
                             "reason": "该论文可作为当前复合研究目标的基础借鉴论文；缺失的完整目标组件只作为未覆盖路线记录。",
                             "reason_zh": "该论文可作为当前复合研究目标的基础借鉴论文；缺失的完整目标组件只作为未覆盖路线记录。",
                             "reason_en": "This is a foundation/borrowing paper for the current compound topic; missing full-target components are recorded as unmatched routes.",
@@ -743,8 +743,8 @@ def test_foundation_borrowing_route_is_not_user_visible_recommendation():
     items = [
         {
             "id": "paper_001",
-            "title": "Collaborative Diffusion Models for Recommendation",
-            "abstract": "This paper develops a diffusion backbone for collaborative recommendation with denoising-based preference modeling.",
+            "title": "Collaborative Retrieval Models for Benchmarking",
+            "abstract": "This paper develops a diffusion backbone for collaborative retrieval with denoising-based preference modeling.",
             "classification_source": "llm_inferred",
         }
     ]
@@ -774,18 +774,18 @@ def test_source_guard_allows_missing_route_specific_phrase_without_treating_it_a
                             "category": "Diffusion recommendation",
                             "fit_score": 5.0,
                             "diversity_score": 4.0,
-                            "hit_directions": ["diffusion recommendation"],
-                            "topic_evidence": "weak: missing LLM and discrete diffusion route-specific deployment recommendation",
+                            "hit_directions": ["retrieval benchmark"],
+                            "topic_evidence": "weak: missing LLM and discrete retrieval route-specific deployment recommendation",
                             "topic_evidence_supported": False,
                             "matched_topic_route": "",
                             "topic_evidence_basis": "abstract",
-                            "missing_topic_evidence": ["No large models or LLMs; no semantic condition; no discrete diffusion or route-specific deployment recommendation"],
+                            "missing_topic_evidence": ["No large models or LLMs; no semantic condition; no discrete retrieval or route-specific deployment recommendation"],
                             "fit_explanation": "缺少其他替代路线组件。",
                             "fit_explanation_zh": "缺少其他替代路线组件。",
                             "fit_explanation_en": "Missing other alternative-route components.",
-                            "reason": "摘要明确是扩散推荐，但缺少特定部署路线。",
-                            "reason_zh": "摘要明确是扩散推荐，但缺少特定部署路线。",
-                            "reason_en": "The abstract clearly supports diffusion recommendation but lacks the route-specific deployment route.",
+                            "reason": "摘要明确是检索基准，但缺少特定部署路线。",
+                            "reason_zh": "摘要明确是检索基准，但缺少特定部署路线。",
+                            "reason_en": "The abstract clearly supports retrieval benchmark but lacks the route-specific deployment route.",
                         }
                     ]
                 },
@@ -796,15 +796,15 @@ def test_source_guard_allows_missing_route_specific_phrase_without_treating_it_a
         provider="openai",
         api_key="test-key",
         model="test-model",
-        research_interest="Generic semantic-conditioning diffusion recommendation benchmark; discrete diffusion retrieval smoke test",
+        research_interest="Generic semantic-conditioning retrieval benchmark; discrete retrieval smoke test",
         max_recommended_papers=5,
         llm_concurrency=1,
     )
     items = [
         {
             "id": "paper_001",
-            "title": "Unleashing the Potential of Diffusion Models Towards Diversified Sequential Recommendations",
-            "abstract": "This paper designs a diffusion model for diversified sequential recommendation. It uses diffusion inference and user-item preference modeling to improve recommender systems.",
+            "title": "Unleashing Retrieval Benchmarks for Diversified Sequential Evidence Selection",
+            "abstract": "This paper designs a retrieval benchmark for diversified sequential evidence selection. It uses retrieval inference and query-evidence modeling to improve retrieval systems.",
             "classification_source": "llm_inferred",
         }
     ]
@@ -835,14 +835,14 @@ def test_passed_topic_evidence_fit_score_is_consistent_with_strong_gate():
                             "category": "Foundation",
                             "fit_score": 1.5,
                             "diversity_score": 1.0,
-                            "hit_directions": ["diffusion recommendation"],
+                            "hit_directions": ["retrieval benchmark"],
                             "topic_evidence": "passed:foundation:collaborative diffusion models for recommendation",
                             "topic_evidence_supported": True,
-                            "matched_topic_route": "foundation diffusion recommendation",
+                            "matched_topic_route": "foundation retrieval benchmark",
                             "topic_evidence_basis": "abstract",
                             "missing_topic_evidence": [],
-                            "fit_explanation": "摘要支持扩散推荐基础路线。",
-                            "fit_explanation_zh": "摘要支持扩散推荐基础路线。",
+                            "fit_explanation": "摘要支持检索基准基础路线。",
+                            "fit_explanation_zh": "摘要支持检索基准基础路线。",
                             "fit_explanation_en": "The abstract supports a diffusion-recommendation foundation route.",
                             "reason": "LLM给出了passed证据但fit分数过低。",
                             "reason_zh": "LLM给出了passed证据但fit分数过低。",
@@ -853,8 +853,8 @@ def test_passed_topic_evidence_fit_score_is_consistent_with_strong_gate():
             }
 
     llm = PassedLowFitLLM()
-    cfg = AppConfig(provider="openai", api_key="test-key", model="test-model", research_interest="diffusion recommendation", max_recommended_papers=5, llm_concurrency=1)
-    items = [{"id": "paper_001", "title": "Collaborative Diffusion Models for Recommendation", "abstract": "This paper develops diffusion models for recommender systems with collaborative denoising over user-item preference signals.", "classification_source": "llm_inferred"}]
+    cfg = AppConfig(provider="openai", api_key="test-key", model="test-model", research_interest="retrieval benchmark", max_recommended_papers=5, llm_concurrency=1)
+    items = [{"id": "paper_001", "title": "Collaborative Retrieval Models for Benchmarking", "abstract": "This paper develops retrieval models for benchmark systems with collaborative evidence selection over query-document signals.", "classification_source": "llm_inferred"}]
 
     evaluated = _evaluate_items(items, cfg, llm, "articles", log=lambda _msg: None)
     recommended = _recommended(evaluated, cfg)
@@ -881,7 +881,7 @@ def test_source_guard_repairs_llm_or_route_false_negative_for_diffusion_recommen
                             "category": "Diffusion recommendation",
                             "fit_score": 2.0,
                             "diversity_score": 3.0,
-                            "hit_directions": ["diffusion recommendation"],
+                            "hit_directions": ["retrieval benchmark"],
                             "topic_evidence": "weak:no direct match because the paper lacks LLM, semantic condition, and discrete route-specific deployment components",
                             "topic_evidence_supported": False,
                             "matched_topic_route": "",
@@ -907,15 +907,15 @@ def test_source_guard_repairs_llm_or_route_false_negative_for_diffusion_recommen
         provider="openai",
         api_key="test-key",
         model="test-model",
-        research_interest="Generic semantic-conditioning diffusion recommendation benchmark; discrete diffusion retrieval smoke test",
+        research_interest="Generic semantic-conditioning retrieval benchmark; discrete retrieval smoke test",
         max_recommended_papers=5,
         llm_concurrency=1,
     )
     items = [
         {
             "id": "paper_001",
-            "title": "Collaborative Diffusion Models for Recommendation",
-            "abstract": "This paper develops diffusion models for recommender systems. It denoises user-item preference signals and improves collaborative recommendation with a diffusion-based backbone.",
+            "title": "Collaborative Retrieval Models for Benchmarking",
+            "abstract": "This paper develops retrieval models for benchmark systems. It denoises query-document evidence signals and improves collaborative retrieval with a diffusion-based backbone.",
             "classification_source": "llm_inferred",
         }
     ]
@@ -936,7 +936,7 @@ def test_self_contradictory_foundation_explanation_is_demoted_from_strong():
         provider="openai",
         api_key="test-key",
         model="test-model",
-        research_interest="Generic semantic-conditioning diffusion recommendation benchmark; discrete diffusion retrieval smoke test",
+        research_interest="Generic semantic-conditioning retrieval benchmark; discrete retrieval smoke test",
         max_recommended_papers=5,
     )
     items = [
@@ -985,14 +985,14 @@ def test_framework_does_not_demote_foundation_by_hard_coded_project_topic_words(
                             "diversity_score": 6.0,
                             "hit_directions_zh": ["基础借鉴路线"],
                             "hit_directions_en": ["foundation route"],
-                            "topic_evidence": "passed:foundation:generic discrete diffusion method",
+                            "topic_evidence": "passed:foundation:generic discrete retrieval method",
                             "topic_evidence_supported": True,
-                            "matched_topic_route": "foundation discrete diffusion method",
+                            "matched_topic_route": "foundation discrete retrieval method",
                             "topic_evidence_basis": "abstract",
                             "missing_topic_evidence": [],
                             "fit_explanation": "摘要支持通用离散扩散方法；是否足以服务当前项目由本轮 LLM 路由和后续精读决定。",
                             "fit_explanation_zh": "摘要支持通用离散扩散方法；是否足以服务当前项目由本轮 LLM 路由和后续精读决定。",
-                            "fit_explanation_en": "The abstract supports a generic discrete diffusion method; whether it serves the current project is determined by the run-specific LLM route and later reading.",
+                            "fit_explanation_en": "The abstract supports a generic discrete retrieval method; whether it serves the current project is determined by the run-specific LLM route and later reading.",
                             "reason": "该论文提供可借鉴的扩散方法基础，但不能证明推荐、LLM语义条件或特定部署组件成立。",
                             "reason_zh": "该论文提供可借鉴的扩散方法基础，但不能证明推荐、LLM语义条件或特定部署组件成立。",
                             "reason_en": "The paper provides a reusable diffusion-method foundation, but it does not prove recommendation, LLM semantic conditioning, or route-specific deployment components.",
@@ -1006,7 +1006,7 @@ def test_framework_does_not_demote_foundation_by_hard_coded_project_topic_words(
         provider="openai",
         api_key="test-key",
         model="test-model",
-        research_interest="Generic semantic-conditioning diffusion recommendation benchmark; discrete diffusion retrieval smoke test",
+        research_interest="Generic semantic-conditioning retrieval benchmark; discrete retrieval smoke test",
         max_recommended_papers=5,
         llm_concurrency=1,
     )
@@ -1014,7 +1014,7 @@ def test_framework_does_not_demote_foundation_by_hard_coded_project_topic_words(
         {
             "id": "paper_001",
             "title": "Generalized Discrete Diffusion with Self-Correction",
-            "abstract": "This paper improves discrete diffusion sampling for language generation and categorical generative modeling.",
+            "abstract": "This paper improves discrete retrieval sampling for language generation and categorical generative modeling.",
             "classification_source": "llm_inferred",
         }
     ]
@@ -1033,8 +1033,8 @@ def test_chinese_llm_diffusion_fusion_interest_allows_diffrec_route():
     items = [
         {
             "id": "paper_001",
-            "title": "Collaborative Diffusion Models for Recommendation",
-            "abstract": "A recommender system uses diffusion and denoising for collaborative recommendation.",
+            "title": "Collaborative Retrieval Models for Benchmarking",
+            "abstract": "A retrieval system uses diffusion and denoising for collaborative retrieval.",
             "classification_source": "llm_inferred",
         }
     ]
@@ -1047,7 +1047,7 @@ def test_chinese_llm_diffusion_fusion_interest_allows_diffrec_route():
 
 def test_topic_routes_block_diffusion_personalization_false_positive():
     llm = BatchLLM()
-    cfg = AppConfig(provider="mock", research_interest="LLM semantic condition diffusion recommendation; discrete diffusion recommendation", max_recommended_papers=5, llm_concurrency=1)
+    cfg = AppConfig(provider="mock", research_interest="LLM semantic condition retrieval benchmark; discrete retrieval benchmark", max_recommended_papers=5, llm_concurrency=1)
     items = [
         {
             "id": "paper_001",
@@ -1066,12 +1066,12 @@ def test_topic_routes_block_diffusion_personalization_false_positive():
 
 def test_generative_recommendation_is_not_diffusion_evidence():
     llm = BatchLLM()
-    cfg = AppConfig(provider="openai", api_key="test-key", model="test-model", research_interest="discrete diffusion recommendation", max_recommended_papers=5, llm_concurrency=1)
+    cfg = AppConfig(provider="openai", api_key="test-key", model="test-model", research_interest="discrete retrieval benchmark", max_recommended_papers=5, llm_concurrency=1)
     items = [
         {
             "id": "paper_001",
             "title": "Distributionally Robust Generative Recommendation",
-            "abstract": "A recommender system optimizes generated candidates with robust preference learning and candidate reranking.",
+            "abstract": "A retrieval system optimizes generated candidates with robust preference learning and candidate reranking.",
             "classification_source": "llm_inferred",
         }
     ]
@@ -1099,12 +1099,12 @@ def test_abstract_enrichment_prioritizes_adaptive_recall_candidates(monkeypatch)
     monkeypatch.setattr("auto_research.auto_find.pipeline.enrich_with_openalex", fake_openalex)
     monkeypatch.setattr("auto_research.auto_find.pipeline.enrich_with_semantic_scholar", fake_enrich)
     monkeypatch.setattr("auto_research.auto_find.pipeline.enrich_with_arxiv_title_match", lambda papers, limit=40: papers)
-    cfg = AppConfig(research_interest="LLM semantic condition diffusion recommendation; discrete diffusion recommendation")
+    cfg = AppConfig(research_interest="LLM semantic condition retrieval benchmark; discrete retrieval benchmark")
     generic = [
         {"id": f"generic_{index}", "title": f"Generic Machine Learning Paper {index}", "abstract": ""}
         for index in range(25)
     ]
-    adaptive = {"id": "adaptive_topic", "title": "Discrete Diffusion for Sequential Recommendation", "abstract": ""}
+    adaptive = {"id": "adaptive_topic", "title": "Discrete Retrieval for Sequential Benchmarking", "abstract": ""}
 
     enriched = _enrich_missing_abstracts_for_adaptive_recall(generic + [adaptive], cfg, "TestVenue", log=lambda _msg: None, progress=lambda *_args: None)
 
@@ -1127,7 +1127,7 @@ def test_semantic_scholar_doi_enrichment_fills_kdd_acm_abstract(monkeypatch, tmp
                 "externalIds": {"DOI": "10.1145/3770854.3780288", "ArXiv": "2512.16576"},
                 "url": "https://www.semanticscholar.org/paper/s2-paper",
                 "title": "InfoDCL: Informative Noise Enhanced Diffusion Based Contrastive Learning",
-                "abstract": "This paper proposes a diffusion-based contrastive learning method for recommender systems with benchmark evaluation.",
+                "abstract": "This paper proposes a retrieval-based contrastive learning method for benchmark systems with benchmark evaluation.",
                 "openAccessPdf": {"url": ""},
             }
 
@@ -1206,8 +1206,8 @@ def test_openalex_enrichment_uses_inverted_abstract_cache(monkeypatch, tmp_path)
     monkeypatch.setattr(sources, "_openalex_cache_path", lambda: str(cache_path))
     monkeypatch.setattr(sources.requests, "get", fake_get)
 
-    first = [{"title": "Cached Diffusion Recommendation", "url": "https://doi.org/10.1145/example", "abstract": ""}]
-    second = [{"title": "Cached Diffusion Recommendation", "url": "https://doi.org/10.1145/example", "abstract": ""}]
+    first = [{"title": "Cached Retrieval Benchmark", "url": "https://doi.org/10.1145/example", "abstract": ""}]
+    second = [{"title": "Cached Retrieval Benchmark", "url": "https://doi.org/10.1145/example", "abstract": ""}]
     sources.enrich_with_openalex(first, limit=1)
     sources.enrich_with_openalex(second, limit=1)
 
@@ -1362,8 +1362,8 @@ def test_semantic_scholar_enrichment_uses_title_cache(monkeypatch, tmp_path):
     monkeypatch.setattr(sources, "_semantic_scholar_cache_path", lambda: str(cache_path))
     monkeypatch.setattr(sources.requests, "get", fake_get)
 
-    first = [{"title": "Cached Diffusion Recommendation", "abstract": ""}]
-    second = [{"title": "Cached Diffusion Recommendation", "abstract": ""}]
+    first = [{"title": "Cached Retrieval Benchmark", "abstract": ""}]
+    second = [{"title": "Cached Retrieval Benchmark", "abstract": ""}]
     sources.enrich_with_semantic_scholar(first, limit=1)
     sources.enrich_with_semantic_scholar(second, limit=1)
 
@@ -1389,8 +1389,8 @@ def test_semantic_scholar_retryable_429_is_not_cached_as_permanent_miss(monkeypa
     monkeypatch.setattr(sources, "_semantic_scholar_cache_path", lambda: str(cache_path))
     monkeypatch.setattr(sources.requests, "get", fake_get)
 
-    first = [{"title": "KDD DOI Diffusion Recommendation", "abstract": "", "doi": "10.1145/3770854.3780206"}]
-    second = [{"title": "KDD DOI Diffusion Recommendation", "abstract": "", "doi": "10.1145/3770854.3780206"}]
+    first = [{"title": "KDD DOI Retrieval Benchmark", "abstract": "", "doi": "10.1145/3770854.3780206"}]
+    second = [{"title": "KDD DOI Retrieval Benchmark", "abstract": "", "doi": "10.1145/3770854.3780206"}]
 
     sources.enrich_with_semantic_scholar(first, limit=1)
     first_call_count = len(calls)
@@ -1497,7 +1497,7 @@ def test_attach_abstract_language_fields_translates_english_abstracts():
                 "error": "",
             }
 
-    items = [{"id": "paper_001", "title": "Paper", "abstract": "This paper studies diffusion recommendation systems with language models.", "find_recommendation": True}]
+    items = [{"id": "paper_001", "title": "Paper", "abstract": "This paper studies retrieval benchmark systems with language models.", "find_recommendation": True}]
     llm = TranslationLLM()
 
     _attach_abstract_language_fields(items, llm, log=lambda _msg: None, should_cancel=lambda: False)
@@ -1545,7 +1545,7 @@ def test_attach_abstract_language_fields_translates_recommended_articles_before_
 
     items = [
         {"id": "audit_1", "title": "Audit-only paper", "abstract": "This audit-only paper studies an adjacent diffusion topic."},
-        {"id": "visible_1", "title": "Recommended paper one", "abstract": "This recommended paper studies discrete diffusion recommender systems.", "_user_visible_recommendation": True},
+        {"id": "visible_1", "title": "Recommended paper one", "abstract": "This recommended paper studies discrete retrieval system systems.", "_user_visible_recommendation": True},
         {"id": "visible_2", "title": "Recommended paper two", "abstract": "This recommended paper studies language model signals for recommendation.", "_user_visible_recommendation": True},
     ]
 
@@ -1576,7 +1576,7 @@ def test_attach_abstract_language_fields_retries_untranslated_abstracts_singly()
                 return {"ok": True, "data": {"translations": []}, "error": ""}
             return {"ok": True, "data": {"abstract_zh": "重试后得到的中文摘要。"}, "error": ""}
 
-    items = [{"id": "paper_001", "title": "Paper", "abstract": "This paper studies discrete diffusion for recommender systems.", "find_recommendation": True}]
+    items = [{"id": "paper_001", "title": "Paper", "abstract": "This paper studies discrete retrieval for retrieval systems.", "find_recommendation": True}]
     llm = RetryTranslationLLM()
 
     _attach_abstract_language_fields(items, llm, log=lambda _msg: None, should_cancel=lambda: False)
@@ -1600,7 +1600,7 @@ def test_attach_abstract_language_fields_single_retry_accepts_id_wrapped_transla
                 return {"ok": True, "data": {"translations": []}, "error": ""}
             return {"ok": True, "data": {"id": "paper_001", "abstract_zh": "这是一段由单条重试返回的完整中文摘要。"}, "error": ""}
 
-    items = [{"id": "paper_001", "title": "Paper", "abstract": "This paper studies discrete diffusion for recommender systems with benchmark evidence.", "find_recommendation": True}]
+    items = [{"id": "paper_001", "title": "Paper", "abstract": "This paper studies discrete retrieval for retrieval systems with benchmark evidence.", "find_recommendation": True}]
 
     result = _attach_abstract_language_fields(items, RetryTranslationLLM(), log=lambda _msg: None, should_cancel=lambda: False)
 
@@ -1622,7 +1622,7 @@ def test_attach_abstract_language_fields_single_retry_rejects_mismatched_id():
                 return {"ok": True, "data": {"translations": []}, "error": ""}
             return {"ok": True, "data": {"id": "other_paper", "abstract_zh": "这是一段不应被写入的中文摘要。"}, "error": ""}
 
-    items = [{"id": "paper_001", "title": "Paper", "abstract": "This paper studies discrete diffusion for recommender systems with benchmark evidence.", "find_recommendation": True}]
+    items = [{"id": "paper_001", "title": "Paper", "abstract": "This paper studies discrete retrieval for retrieval systems with benchmark evidence.", "find_recommendation": True}]
 
     result = _attach_abstract_language_fields(items, RetryTranslationLLM(), log=lambda _msg: None, should_cancel=lambda: False)
 
@@ -1639,7 +1639,7 @@ def test_attach_abstract_language_fields_cleans_escape_residue_tail():
         def json_or_error(self, prompt: str, temperature=None, max_tokens=None):
             return {"ok": True, "data": {"translations": [{"id": "paper_001", "abstract_zh": "这是一段完整中文摘要包含足够长度并且末尾带转义残留n"}]}, "error": ""}
 
-    items = [{"id": "paper_001", "title": "Paper", "abstract": "This paper studies a benchmarked diffusion recommender system.", "find_recommendation": True}]
+    items = [{"id": "paper_001", "title": "Paper", "abstract": "This paper studies a benchmarked diffusion retrieval system.", "find_recommendation": True}]
 
     result = _attach_abstract_language_fields(items, TranslationLLM(), log=lambda _msg: None, should_cancel=lambda: False)
 
@@ -1788,58 +1788,58 @@ def test_source_guard_refuses_title_only_adaptive_match():
     assert _has_strong_topic_evidence(item) is False
 
 
-def test_source_guard_refuses_partial_llm_recommendation_without_diffusion_core():
+def test_source_guard_refuses_partial_llm_summary_without_retrieval_core():
     item = {
-        "id": "paper_partial_llm_rec",
-        "title": "Efficient LLM-based Recommendation",
-        "abstract": "Large language models have become a new paradigm for recommender systems. This paper trains efficient LLM recommendation models for long user histories, but it does not use diffusion, denoising, or generative diffusion processes.",
+        "id": "paper_partial_llm_summary",
+        "title": "Efficient LLM-based Research Summarization",
+        "abstract": "Large language models help summarize long research logs and user notes, but this method does not use retrieval, indexing, or benchmark-grounded evidence selection.",
         "fit_score": 5.8,
         "diversity_score": 4.0,
         "score": 5.4,
-        "topic_evidence": "weak: missing diffusion component",
+        "topic_evidence": "weak: missing retrieval benchmark component",
         "topic_evidence_supported": False,
-        "missing_topic_evidence": ["missing semantic condition and diffusion"],
-        "reason": "Boundary foundation candidate; it covers LLM recommendation but lacks the diffusion core.",
+        "missing_topic_evidence": ["missing semantic condition and retrieval benchmark"],
+        "reason": "Boundary foundation candidate; it covers LLM summarization but lacks the retrieval benchmark core.",
     }
 
-    repaired = _repair_llm_alternative_route_false_negative(item, "LLM semantic condition diffusion recommendation")
+    repaired = _repair_llm_alternative_route_false_negative(item, "LLM semantic condition retrieval benchmark")
 
     assert repaired is False
     assert item["source_supported_adaptive_route"] == ""
-    assert set(item["source_supported_adaptive_terms"]) >= {"llm", "recommendation"}
-    assert "diffusion" in item["source_missing_adaptive_terms"]
+    assert set(item["source_supported_adaptive_terms"]) >= {"llm"}
+    assert "retrieval" in item["source_missing_adaptive_terms"]
     assert _has_strong_topic_evidence(item) is False
 
 
-def test_source_guard_allows_llm_recommendation_when_current_route_has_no_diffusion():
+def test_source_guard_allows_llm_evaluation_when_current_route_matches():
     item = {
-        "id": "paper_llm_rec",
-        "title": "Efficient LLM-based Recommendation",
-        "abstract": "Large language models have become a new paradigm for recommender systems. This paper trains efficient LLM recommendation models for long user histories and improves item ranking quality.",
+        "id": "paper_llm_eval",
+        "title": "Efficient LLM-based Evaluation",
+        "abstract": "Large language models support evaluation workflows for long research traces and improve audit quality with structured rubrics.",
         "fit_score": 5.8,
         "diversity_score": 4.0,
         "score": 5.4,
         "topic_evidence": "weak: missing another route component",
         "topic_evidence_supported": False,
         "missing_topic_evidence": ["missing another component"],
-        "reason": "Boundary foundation candidate; it directly supports the current LLM recommendation route.",
+        "reason": "Boundary foundation candidate; it directly supports the current LLM evaluation route.",
     }
 
-    repaired = _repair_llm_alternative_route_false_negative(item, "LLM recommendation")
+    repaired = _repair_llm_alternative_route_false_negative(item, "LLM evaluation")
 
     assert repaired is True
     assert item["source_guard_audit_only"] is True
-    assert item["source_supported_adaptive_route"] == "LLM recommendation"
-    assert set(item["source_supported_adaptive_terms"]) >= {"llm", "recommendation"}
+    assert item["source_supported_adaptive_route"] == "LLM evaluation"
+    assert set(item["source_supported_adaptive_terms"]) >= {"llm", "evaluation"}
     assert item["not_positive_support"] is True
     assert _has_strong_topic_evidence(item) is False
 
 
 def test_source_guard_backfills_hit_directions_for_repaired_foundation_route():
     item = {
-        "id": "paper_repaired_diffusion_rec",
-        "title": "Diffusion Recommendation with User Preference Denoising",
-        "abstract": "This paper designs diffusion models for recommender systems. It performs denoising over user-item preference signals and improves sequential recommendation with a diffusion-based backbone.",
+        "id": "paper_repaired_retrieval_benchmark",
+        "title": "Retrieval Benchmark with Query Planning",
+        "abstract": "This paper designs a retrieval benchmark for query planning agents. It evaluates evidence selection, indexing quality, and multi-step retrieval reliability with ablation studies.",
         "fit_score": 5.8,
         "diversity_score": 4.0,
         "score": 5.4,
@@ -1849,16 +1849,16 @@ def test_source_guard_backfills_hit_directions_for_repaired_foundation_route():
         "topic_evidence": "weak: missing another route component",
         "topic_evidence_supported": False,
         "missing_topic_evidence": ["missing LLM semantic condition"],
-        "reason": "Near-threshold foundation candidate; it directly supports the diffusion recommendation route.",
+        "reason": "Near-threshold foundation candidate; it directly supports the retrieval benchmark route.",
     }
 
-    repaired = _repair_llm_alternative_route_false_negative(item, "LLM semantic condition diffusion recommendation")
+    repaired = _repair_llm_alternative_route_false_negative(item, "LLM semantic condition retrieval benchmark")
 
     assert repaired is True
     assert item["source_guard_audit_only"] is True
     assert item["topic_evidence"].startswith("weak:")
-    assert item["source_supported_adaptive_route"] == "LLM semantic condition diffusion recommendation"
-    assert set(item["source_supported_adaptive_terms"]) >= {"diffusion", "recommendation"}
+    assert item["source_supported_adaptive_route"] == "LLM semantic condition retrieval benchmark"
+    assert set(item["source_supported_adaptive_terms"]) >= {"retrieval", "benchmark"}
     assert set(item["source_missing_adaptive_terms"]) >= {"llm", "semantic", "condition"}
     assert item["not_positive_support"] is True
     assert _has_strong_topic_evidence(item) is False
@@ -1936,7 +1936,7 @@ def test_find_rejects_llm_passed_route_when_source_text_does_not_support_route_t
         provider="openai",
         api_key="test-key",
         model="test-model",
-        research_interest="Generic semantic-conditioning diffusion recommendation benchmark; discrete diffusion retrieval smoke test",
+        research_interest="Generic semantic-conditioning retrieval benchmark; discrete retrieval smoke test",
         max_recommended_papers=5,
     )
     items = [
@@ -1948,7 +1948,7 @@ def test_find_rejects_llm_passed_route_when_source_text_does_not_support_route_t
             "diversity_score": 6.0,
             "score": 8.0,
             "reason_source": "llm abstract evaluation",
-            "topic_evidence": "passed:LLM semantic condition diffusion recommendation",
+            "topic_evidence": "passed:LLM semantic condition retrieval benchmark",
             "topic_evidence_supported": True,
             "evidence_role": "direct_target",
             "topic_evidence_basis": "abstract",
@@ -1996,12 +1996,12 @@ def test_framework_does_not_hard_reject_agent_memory_terms_when_current_topic_ma
 
 
 def test_find_recommendation_does_not_require_deep_read_entrypoint():
-    cfg = AppConfig(provider="openai", api_key="test-key", model="test-model", research_interest="dynamic route recommender systems", max_recommended_papers=2)
+    cfg = AppConfig(provider="openai", api_key="test-key", model="test-model", research_interest="dynamic route retrieval systems", max_recommended_papers=2)
     items = [
         {
             "id": "ordinary_abstract_only",
             "title": "High Score Ordinary Abstract Only",
-            "abstract": "This paper studies dynamic route recommender systems with benchmark evaluation.",
+            "abstract": "This paper studies dynamic route retrieval systems with benchmark evaluation.",
             "url": "https://example.test/conference/abstract-only",
             "venue": "TestConf",
             "fit_score": 9.5,
@@ -2011,7 +2011,7 @@ def test_find_recommendation_does_not_require_deep_read_entrypoint():
         {
             "id": "icml_abstract_only",
             "title": "High Score ICML Abstract Only",
-            "abstract": "This paper studies dynamic route recommender systems with benchmark evaluation.",
+            "abstract": "This paper studies dynamic route retrieval systems with benchmark evaluation.",
             "url": "https://icml.cc/virtual/2026/poster/66818",
             "venue": "ICML",
             "fit_score": 9.0,
@@ -2021,7 +2021,7 @@ def test_find_recommendation_does_not_require_deep_read_entrypoint():
         {
             "id": "openreview_ready",
             "title": "OpenReview Ready Paper",
-            "abstract": "This paper studies dynamic route recommender systems with benchmark evaluation.",
+            "abstract": "This paper studies dynamic route retrieval systems with benchmark evaluation.",
             "url": "https://openreview.net/forum?id=ready",
             "pdf_url": "https://openreview.net/pdf?id=ready",
             "fit_score": 8.0,
@@ -2042,19 +2042,19 @@ def test_find_recommendation_topn_includes_six_when_it_ranks_next():
         provider="openai",
         api_key="test-key",
         model="test-model",
-        research_interest="discrete diffusion recommendation",
+        research_interest="discrete retrieval benchmark",
         max_recommended_papers=5,
     )
     items = [
         {
             "id": "audit_only_six",
             "title": "Diffusion Session Recommendation",
-            "abstract": "A recommender system uses diffusion for session-based recommendation.",
+            "abstract": "A retrieval system uses diffusion for session-based recommendation.",
             "fit_score": 6.0,
             "diversity_score": 6.0,
             "score": 6.0,
             "reason_source": "llm abstract evaluation",
-            "topic_evidence": "passed:diffusion recommendation",
+            "topic_evidence": "passed:retrieval benchmark",
             "topic_evidence_supported": True,
             "evidence_role": "direct_target",
             "evidence_tier": "strong_recommendation",
@@ -2063,13 +2063,13 @@ def test_find_recommendation_topn_includes_six_when_it_ranks_next():
         },
         {
             "id": "recommended_seven",
-            "title": "Discrete Diffusion Recommendation with Benchmarks",
-            "abstract": "This paper studies discrete diffusion recommendation with reusable benchmark evaluation and ablation evidence.",
+            "title": "Discrete Retrieval Benchmark with Benchmarks",
+            "abstract": "This paper studies discrete retrieval benchmark with reusable benchmark evaluation and ablation evidence.",
             "fit_score": 7.0,
             "diversity_score": 6.0,
             "score": 7.0,
             "reason_source": "llm abstract evaluation",
-            "topic_evidence": "passed:diffusion recommendation",
+            "topic_evidence": "passed:retrieval benchmark",
             "topic_evidence_supported": True,
             "evidence_role": "direct_target",
             "topic_evidence_basis": "abstract",
@@ -2092,7 +2092,7 @@ def test_read_and_critique_candidates_do_not_mutate_recommended_items():
         {
             "id": "recommended_reader",
             "title": "Useful semantic recommendation paper",
-            "abstract": "This paper studies semantic recommendation models with benchmark evaluation and reusable training protocols.",
+            "abstract": "This paper studies semantic retrieval models with benchmark evaluation and reusable training protocols.",
             "fit_score": 7.0,
             "diversity_score": 6.0,
             "score": 7.0,
@@ -2123,19 +2123,19 @@ def test_legacy_claim_reject_reason_does_not_create_second_find_ranking():
         provider="openai",
         api_key="test-key",
         model="test-model",
-        research_interest="semantic conditioned diffusion recommendation",
+        research_interest="semantic conditioned retrieval benchmark",
         max_recommended_papers=5,
     )
     items = [
         {
             "id": "reading_anchor",
-            "title": "Efficiency Effectiveness Trade-off of Diffusion-based Recommenders",
-            "abstract": "This paper studies diffusion-based recommender systems, efficiency, effectiveness, and benchmark evaluation for recommendation models.",
+            "title": "Efficiency Effectiveness Trade-off of Retrieval Benchmarks",
+            "abstract": "This paper studies retrieval-based benchmark systems, efficiency, effectiveness, and benchmark evaluation for retrieval models.",
             "fit_score": 9.0,
             "diversity_score": 6.0,
             "score": 9.0,
             "reason_source": "llm abstract evaluation",
-            "topic_evidence": "passed:diffusion recommender benchmark foundation",
+            "topic_evidence": "passed:retrieval benchmark foundation",
             "topic_evidence_supported": True,
             "evidence_role": "direct_target",
             "topic_evidence_basis": "abstract",
@@ -2150,18 +2150,18 @@ def test_legacy_claim_reject_reason_does_not_create_second_find_ranking():
     assert not items[0].get("not_positive_support")
 
 def test_strict_anchor_count_is_capped_to_user_visible_recommendations():
-    cfg = AppConfig(provider="openai", api_key="test-key", model="test-model", research_interest="dynamic route recommender systems", max_recommended_papers=2)
+    cfg = AppConfig(provider="openai", api_key="test-key", model="test-model", research_interest="dynamic route retrieval systems", max_recommended_papers=2)
     items = []
     for index in range(5):
         items.append({
             "id": f"paper_{index}",
             "title": f"Dynamic Route Recommender Systems {index}",
-            "abstract": "This paper studies dynamic route recommender systems with benchmark evaluation and reusable algorithms.",
+            "abstract": "This paper studies dynamic route retrieval systems with benchmark evaluation and reusable algorithms.",
             "fit_score": 8.0 - index * 0.1,
             "diversity_score": 6.0,
             "score": 8.0 - index * 0.1,
             "reason_source": "llm abstract evaluation",
-            "topic_evidence": "passed:dynamic route recommender systems",
+            "topic_evidence": "passed:dynamic route retrieval systems",
             "topic_evidence_supported": True,
             "evidence_role": "direct_target",
             "topic_evidence_basis": "abstract",
@@ -2174,12 +2174,12 @@ def test_strict_anchor_count_is_capped_to_user_visible_recommendations():
 
 
 def test_llm_audit_booleans_do_not_create_hidden_find_gate():
-    cfg = AppConfig(provider="openai", api_key="test-key", model="test-model", research_interest="dynamic route recommender systems", max_recommended_papers=5)
+    cfg = AppConfig(provider="openai", api_key="test-key", model="test-model", research_interest="dynamic route retrieval systems", max_recommended_papers=5)
     items = [
         {
             "id": "llm_high_score_audit_false",
             "title": "Dynamic Route Recommender Systems",
-            "abstract": "This paper studies dynamic route recommender systems with benchmark evaluation.",
+            "abstract": "This paper studies dynamic route retrieval systems with benchmark evaluation.",
             "fit_score": 8.0,
             "diversity_score": 7.0,
             "score": 8.0,
@@ -2217,7 +2217,7 @@ def test_llm_audit_booleans_do_not_create_hidden_find_gate():
     assert "find_recommendation_reject_reason" not in items[1]
 
 def test_title_filtered_candidate_without_real_abstract_cannot_be_recommended():
-    cfg = AppConfig(provider="openai", api_key="test-key", model="test-model", research_interest="dynamic route recommender systems", max_recommended_papers=5)
+    cfg = AppConfig(provider="openai", api_key="test-key", model="test-model", research_interest="dynamic route retrieval systems", max_recommended_papers=5)
     items = [{
         "id": "title_only",
         "title": "Dynamic Route Recommender Systems",
@@ -2226,7 +2226,7 @@ def test_title_filtered_candidate_without_real_abstract_cannot_be_recommended():
         "diversity_score": 7.0,
         "score": 9.0,
         "reason_source": "llm abstract evaluation",
-        "topic_evidence": "passed:dynamic route recommender systems",
+        "topic_evidence": "passed:dynamic route retrieval systems",
         "topic_evidence_supported": True,
         "evidence_role": "direct_target",
         "topic_evidence_basis": "title_only",
@@ -2238,18 +2238,18 @@ def test_title_filtered_candidate_without_real_abstract_cannot_be_recommended():
 
 
 def test_find_recommendation_ranking_ignores_stable_source_score():
-    cfg = AppConfig(provider="openai", api_key="test-key", model="test-model", research_interest="dynamic route recommender systems", max_recommended_papers=2)
+    cfg = AppConfig(provider="openai", api_key="test-key", model="test-model", research_interest="dynamic route retrieval systems", max_recommended_papers=2)
     items = [
         {
             "id": "lower_llm_high_stable",
             "title": "Lower LLM score with high source score",
-            "abstract": "This paper studies dynamic route recommender systems with benchmark evaluation.",
+            "abstract": "This paper studies dynamic route retrieval systems with benchmark evaluation.",
             "fit_score": 7.0,
             "diversity_score": 5.0,
             "recommendation_score": 7.0,
             "stable_rank_score": 10.0,
             "reason_source": "llm abstract evaluation",
-            "topic_evidence": "passed:dynamic route recommender systems",
+            "topic_evidence": "passed:dynamic route retrieval systems",
             "topic_evidence_supported": True,
             "evidence_role": "direct_target",
             "topic_evidence_basis": "abstract",
@@ -2258,13 +2258,13 @@ def test_find_recommendation_ranking_ignores_stable_source_score():
         {
             "id": "higher_llm_low_stable",
             "title": "Higher LLM score with low source score",
-            "abstract": "This paper studies dynamic route recommender systems with reusable algorithms and evaluation.",
+            "abstract": "This paper studies dynamic route retrieval systems with reusable algorithms and evaluation.",
             "fit_score": 8.0,
             "diversity_score": 5.0,
             "recommendation_score": 8.0,
             "stable_rank_score": 1.0,
             "reason_source": "llm abstract evaluation",
-            "topic_evidence": "passed:dynamic route recommender systems",
+            "topic_evidence": "passed:dynamic route retrieval systems",
             "topic_evidence_supported": True,
             "evidence_role": "direct_target",
             "topic_evidence_basis": "abstract",
@@ -2361,11 +2361,11 @@ def test_recommendation_readability_rewrites_stale_internal_find_notes():
         provider="openai",
         api_key="test-key",
         model="test-model",
-        research_interest="LLM semantic condition diffusion recommendation",
+        research_interest="LLM semantic condition retrieval benchmark",
         max_recommended_papers=1,
     )
     stale_zh = (
-        "《Semantic Diffusion Recommendation》值得推荐和精读。"
+        "《Semantic Retrieval Benchmark》值得推荐和精读。"
         "阅读提示：题名筛选线索只进入详情评分；"
         "只有取得真实摘要并完成最终相关性评分后才会展示为推荐论文。"
     )
@@ -2373,20 +2373,20 @@ def test_recommendation_readability_rewrites_stale_internal_find_notes():
     items = [
         {
             "id": "stale_internal_note",
-            "title": "Semantic Diffusion Recommendation",
-            "abstract": "This paper studies semantic conditioning for diffusion recommendation with datasets, metrics, baselines, ablations, and limitations described in the abstract.",
-            "abstract_zh": "本文研究面向扩散推荐的语义条件机制，并在摘要中说明数据集、指标、基线、消融和局限。",
+            "title": "Semantic Retrieval Benchmark",
+            "abstract": "This paper studies semantic conditioning for retrieval benchmark with datasets, metrics, baselines, ablations, and limitations described in the abstract.",
+            "abstract_zh": "本文研究面向检索基准的语义条件机制，并在摘要中说明数据集、指标、基线、消融和局限。",
             "fit_score": 8.0,
             "llm_fit_score": 8.0,
             "diversity_score": 5.0,
             "score": 8.0,
             "reason_source": "llm abstract evaluation",
-            "hit_directions_zh": ["语义条件扩散推荐"],
-            "hit_directions_en": ["semantic conditioning for diffusion recommendation"],
+            "hit_directions_zh": ["语义条件检索基准"],
+            "hit_directions_en": ["semantic conditioning for retrieval benchmark"],
             "fit_explanation_zh": stale_zh,
             "fit_explanation_en": stale_en,
-            "fit_explanation_zh_original": "摘要明确描述语义条件、扩散推荐、数据集、指标、基线和消融，可为精读阶段提供具体方法与实验协议线索。",
-            "fit_explanation_en_original": "The abstract describes semantic conditioning, diffusion recommendation, datasets, metrics, baselines, and ablations, giving concrete method and protocol clues for deep reading.",
+            "fit_explanation_zh_original": "摘要明确描述语义条件、检索基准、数据集、指标、基线和消融，可为精读阶段提供具体方法与实验协议线索。",
+            "fit_explanation_en_original": "The abstract describes semantic conditioning, retrieval benchmark, datasets, metrics, baselines, and ablations, giving concrete method and protocol clues for deep reading.",
             "reason_zh": stale_zh,
             "reason_en": stale_en,
             "recommendation_note_zh": "题名筛选线索：尚未通过最终相关性评分，不展示为推荐论文。",
@@ -2415,9 +2415,9 @@ def test_recommendation_quality_flags_generic_short_reasons():
     rows = [
         {
             "id": "short_reason",
-            "title": "Diffusion Recommendation",
-            "abstract": "This paper proposes a diffusion recommender with datasets, metrics, baselines, and ablations for evaluation.",
-            "abstract_zh": "本文提出扩散推荐方法，并包含数据集、指标、基线和消融实验。",
+            "title": "Retrieval Benchmark",
+            "abstract": "This paper proposes a retrieval benchmark with datasets, metrics, baselines, and ablations for evaluation.",
+            "abstract_zh": "本文提出检索基准方法，并包含数据集、指标、基线和消融实验。",
             "reason_zh": "推荐精读：方法相关，需全文确认实验协议。",
         }
     ]
@@ -2430,8 +2430,8 @@ def test_recommendation_quality_flags_generic_short_reasons():
 
 def test_final_scoring_prompt_forbids_foundation_passed_route():
     llm = BatchLLM()
-    cfg = AppConfig(provider="openai", api_key="test-key", model="test-model", research_interest="LLM diffusion recommendation", max_recommended_papers=5, llm_concurrency=1)
-    items = [{"id": "paper_001", "title": "Diffusion Recommendation", "abstract": "A recommender system uses diffusion for preference modeling.", "classification_source": "llm_inferred"}]
+    cfg = AppConfig(provider="openai", api_key="test-key", model="test-model", research_interest="LLM-assisted retrieval benchmark", max_recommended_papers=5, llm_concurrency=1)
+    items = [{"id": "paper_001", "title": "Retrieval Benchmark", "abstract": "A retrieval system uses diffusion for preference modeling.", "classification_source": "llm_inferred"}]
 
     _evaluate_items(items, cfg, llm, "articles", log=lambda _msg: None)
 
@@ -2525,7 +2525,7 @@ def test_large_venue_title_screen_uses_configured_recall_budget(monkeypatch):
     monkeypatch.setenv("DISABLE_LLM_TITLE_FILTER", "1")
     cfg = AppConfig(
         provider="openai",
-        research_interest="LLM diffusion recommender systems",
+        research_interest="LLM-assisted retrieval benchmark systems",
         find_recall_count=3000,
         detail_fetch_count=800,
         max_recommended_papers=100,
@@ -2544,7 +2544,7 @@ def test_large_venue_title_screen_uses_configured_recall_budget(monkeypatch):
     for idx, title in enumerate([
         "Discrete Diffusion for Recommendation",
         "LLM Semantic Diffusion Recommender Systems",
-        "Diffusion Recommendation with Item Semantics",
+        "Retrieval Benchmark with Item Semantics",
     ]):
         items[idx]["title"] = title
 
@@ -2561,11 +2561,11 @@ def test_large_uncategorized_venue_scores_full_title_pool_with_llm(monkeypatch):
     monkeypatch.setenv("LARGE_TITLE_POOL_THRESHOLD", "50")
     monkeypatch.setenv("LLM_TITLE_FILTER_MAX_TITLES", "50")
     monkeypatch.setenv("TITLE_DETAIL_CANDIDATE_TARGET", "60")
-    cfg = AppConfig(provider="openai", api_key="test", model="test", research_interest="LLM diffusion recommender systems", llm_concurrency=1, max_recommended_papers=20)
+    cfg = AppConfig(provider="openai", api_key="test", model="test", research_interest="LLM-assisted retrieval benchmark systems", llm_concurrency=1, max_recommended_papers=20)
     items = [
         {
             "id": f"paper_{idx}",
-            "title": f"LLM Diffusion Recommendation Candidate {idx}",
+            "title": f"LLM Retrieval Benchmark Candidate {idx}",
             "abstract": "",
             "venue": "ICML",
             "year": 2026,
@@ -2614,14 +2614,14 @@ def test_llm_title_scoring_retains_ranked_budget_not_sparse_selected(monkeypatch
     monkeypatch.setenv("TITLE_DETAIL_CANDIDATE_TARGET", "20")
     cfg = AppConfig(
         provider="openai",
-        research_interest="LLM diffusion recommender systems",
+        research_interest="LLM-assisted retrieval benchmark systems",
         max_recommended_papers=20,
         default_find_selection={"venue_ids": ["openreview_iclr_2026", "openreview_neurips", "dblp_icml", "dblp_kdd"]},
     )
     items = [
         {
             "id": f"paper_{idx}",
-            "title": f"LLM Diffusion Recommendation Candidate {idx}",
+            "title": f"LLM Retrieval Benchmark Candidate {idx}",
             "abstract": "",
             "venue": "ICML",
             "year": 2026,
@@ -2727,12 +2727,12 @@ def test_parallel_title_filter_cancel_exits_without_waiting_for_blocked_workers(
         provider="openai",
         api_key="test-key",
         model="test-model",
-        research_interest="LLM diffusion recommender systems",
+        research_interest="LLM-assisted retrieval benchmark systems",
         max_recommended_papers=20,
         llm_concurrency=4,
     )
     items = [
-        {"id": f"paper_{idx:03d}", "title": f"LLM diffusion recommendation candidate {idx}", "venue": "ICML", "year": 2026}
+        {"id": f"paper_{idx:03d}", "title": f"LLM-assisted retrieval benchmark candidate {idx}", "venue": "ICML", "year": 2026}
         for idx in range(40)
     ]
     checks = 0
@@ -2756,14 +2756,14 @@ def test_parallel_final_scoring_cancel_exits_without_waiting_for_blocked_workers
         provider="openai",
         api_key="test-key",
         model="test-model",
-        research_interest="LLM diffusion recommender systems",
+        research_interest="LLM-assisted retrieval benchmark systems",
         max_recommended_papers=20,
     )
     items = [
         {
             "id": f"paper_{idx:03d}",
-            "title": f"LLM diffusion recommendation candidate {idx}",
-            "abstract": "This paper studies diffusion models and large language model semantic signals for recommender systems.",
+            "title": f"LLM-assisted retrieval benchmark candidate {idx}",
+            "abstract": "This paper studies retrieval models and large language model semantic signals for benchmark systems.",
             "classification_source": "llm_inferred",
         }
         for idx in range(24)
@@ -2869,7 +2869,7 @@ def test_local_title_only_database_skips_category_selection_even_with_pseudo_cat
     papers = [
         {
             "id": f"paper_{idx}",
-            "title": f"LLM Diffusion Recommendation Candidate {idx}",
+            "title": f"LLM Retrieval Benchmark Candidate {idx}",
             "abstract": "",
             "category": f"Local topic: singleton / {idx}",
             "primary_area": f"Local topic: singleton / {idx}",
@@ -2920,7 +2920,7 @@ def test_local_title_only_database_skips_category_selection_even_with_pseudo_cat
 
 def test_local_dblp_cache_complete_means_title_index_not_official_accepted_list():
     papers = [
-        {"id": "kdd_1", "title": "Diffusion Recommendation with LLM Semantics", "abstract": ""},
+        {"id": "kdd_1", "title": "Retrieval Benchmark with LLM Semantics", "abstract": ""},
         {"id": "kdd_2", "title": "Sequential Recommendation with Denoising", "abstract": ""},
     ]
     local_payload = {
@@ -2968,7 +2968,7 @@ def test_dblp_stream_api_marks_index_scope_not_official_accepted_list(monkeypatc
             {
                 "info": {
                     "year": str(year),
-                    "title": "Diffusion Recommendation via User Preference Denoising",
+                    "title": "Retrieval Benchmark via User Preference Denoising",
                     "ee": "https://doi.org/10.1145/example",
                     "doi": "10.1145/example",
                     "key": "conf/kdd/example",
@@ -3017,8 +3017,8 @@ def test_abstract_enrichment_tries_semantic_scholar_before_openalex_and_arxiv(mo
     monkeypatch.setattr("auto_research.auto_find.pipeline.enrich_with_semantic_scholar", fake_semantic)
     monkeypatch.setattr("auto_research.auto_find.pipeline.enrich_with_openalex", fake_openalex)
     monkeypatch.setattr("auto_research.auto_find.pipeline.enrich_with_arxiv_title_match", fake_arxiv)
-    cfg = AppConfig(research_interest="LLM diffusion recommendation")
-    items = [{"id": "kdd_doi", "title": "Diffusion Recommendation", "abstract": "", "doi": "10.1145/example", "metadata": {"doi": "10.1145/example"}}]
+    cfg = AppConfig(research_interest="LLM-assisted retrieval benchmark", default_find_selection={"include_arxiv": True})
+    items = [{"id": "kdd_doi", "title": "Retrieval Benchmark", "abstract": "", "doi": "10.1145/example", "metadata": {"doi": "10.1145/example"}}]
 
     _enrich_missing_abstracts_for_adaptive_recall(items, cfg, "KDD", log=lambda _msg: None, progress=lambda *_args: None)
 
@@ -3047,8 +3047,8 @@ def test_abstract_enrichment_falls_through_when_semantic_scholar_has_no_abstract
     monkeypatch.setattr("auto_research.auto_find.pipeline.enrich_with_semantic_scholar", fake_semantic)
     monkeypatch.setattr("auto_research.auto_find.pipeline.enrich_with_openalex", fake_openalex)
     monkeypatch.setattr("auto_research.auto_find.pipeline.enrich_with_arxiv_title_match", fake_arxiv)
-    cfg = AppConfig(research_interest="LLM diffusion recommendation")
-    items = [{"id": "kdd_doi", "title": "Diffusion Recommendation", "abstract": "", "doi": "10.1145/example", "metadata": {"doi": "10.1145/example"}}]
+    cfg = AppConfig(research_interest="LLM-assisted retrieval benchmark", default_find_selection={"include_arxiv": True})
+    items = [{"id": "kdd_doi", "title": "Retrieval Benchmark", "abstract": "", "doi": "10.1145/example", "metadata": {"doi": "10.1145/example"}}]
 
     _enrich_missing_abstracts_for_adaptive_recall(items, cfg, "KDD", log=lambda _msg: None, progress=lambda *_args: None)
 
@@ -3063,7 +3063,7 @@ def test_venue_metadata_cache_manifest_keeps_title_only_source_limited(tmp_path)
     cache_dir = tmp_path / "dblp_kdd" / "2026"
     cache_dir.mkdir(parents=True)
     papers = [
-        {"id": "kdd_1", "title": "Diffusion Recommendation with Semantic Signals", "abstract": ""},
+        {"id": "kdd_1", "title": "Retrieval Benchmark with Semantic Signals", "abstract": ""},
         {"id": "kdd_2", "title": "Sequential Recommender Systems with Denoising", "abstract": ""},
     ]
     (cache_dir / "papers.json").write_text(
@@ -3117,7 +3117,7 @@ def test_venue_metadata_cache_manifest_uses_adapter_not_dblp_prefix_for_icml(tmp
     cache_dir = tmp_path / "dblp_icml" / "2026"
     cache_dir.mkdir(parents=True)
     papers = [
-        {"id": "icml_1", "title": "Diffusion Recommendation with Semantic Signals", "abstract": ""},
+        {"id": "icml_1", "title": "Retrieval Benchmark with Semantic Signals", "abstract": ""},
         {"id": "icml_2", "title": "LLM Conditioned Sequential Recommendation", "abstract": ""},
     ]
     (cache_dir / "papers.json").write_text(
@@ -3168,10 +3168,10 @@ def test_venue_metadata_cache_manifest_treats_official_categories_as_find_ready(
     cache_dir = tmp_path / "openreview_iclr_2026" / "2026"
     cache_dir.mkdir(parents=True)
     papers = [
-        {"id": "iclr_1", "title": "Diffusion Recommendation with Semantic Signals", "abstract": "", "primary_area": "recommender systems"},
-        {"id": "iclr_2", "title": "Sequential Denoising for Recommendation", "abstract": "", "primary_area": "recommender systems"},
+        {"id": "iclr_1", "title": "Retrieval Benchmark with Semantic Signals", "abstract": "", "primary_area": "retrieval systems"},
+        {"id": "iclr_2", "title": "Sequential Evidence Selection for Retrieval", "abstract": "", "primary_area": "retrieval systems"},
     ]
-    categories = [{"name": "recommender systems", "count": len(papers)}]
+    categories = [{"name": "retrieval systems", "count": len(papers)}]
     (cache_dir / "papers.json").write_text(
         json.dumps({
             "venue_id": "openreview_iclr_2026",

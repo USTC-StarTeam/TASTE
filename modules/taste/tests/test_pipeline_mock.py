@@ -76,7 +76,7 @@ def test_read_marks_metadata_only_recommendations_pending_full_text(monkeypatch)
                         "venue": "ICLR",
                         "year": 2026,
                         "abstract": "This paper studies diffusion models for recommendation with credibility constraints.",
-                        "reason_zh": "论文摘要显示其讨论扩散推荐和可信内容约束，值得读正文后判断方法细节。",
+                        "reason_zh": "论文摘要显示其讨论检索基准和可信内容约束，值得读正文后判断方法细节。",
                         "pdf_url": "",
                         "url": "https://example.test/paper-1",
                     }
@@ -236,12 +236,12 @@ def test_read_sanitizes_llm_public_output_before_persisting(monkeypatch):
 
         def json_or_none(self, _prompt):
             return {
-                "summary": "原论文摘要：论文提出可信扩散推荐框架，通过在候选生成和排序阶段联合建模用户偏好、内容可信度和去噪轨迹，缓解低可信内容被高相关性信号误推的问题。对系统实现的直接含义：该条目是当前用户可见推荐文章。",
-                "abstract_zh": "中文摘要：论文研究可信扩散推荐，提出一种将内容可信度约束并入扩散去噪排序的框架，在候选生成、轨迹校正和最终重排三个环节同时考虑偏好匹配与可信风险，从而降低低可信内容进入推荐结果的概率。论文还分析了不同可信度信号在去噪轨迹中的作用，并说明该框架可以在不完全牺牲排序相关性的前提下提升结果可靠性。",
+                "summary": "原论文摘要：论文提出可信检索基准框架，通过在候选生成和排序阶段联合建模用户偏好、内容可信度和去噪轨迹，缓解低可信内容被高相关性信号误推的问题。对系统实现的直接含义：该条目是当前用户可见推荐文章。",
+                "abstract_zh": "中文摘要：论文研究可信检索基准，提出一种将内容可信度约束并入扩散去噪排序的框架，在候选生成、轨迹校正和最终重排三个环节同时考虑偏好匹配与可信风险，从而降低低可信内容进入推荐结果的概率。论文还分析了不同可信度信号在去噪轨迹中的作用，并说明该框架可以在不完全牺牲排序相关性的前提下提升结果可靠性。",
                 "motivation_zh": "论文动机：现有推荐系统容易把点击率或相似度较高但可信度不足的内容推给用户，导致相关性和可靠性之间出现冲突。project_topic 命中当前项目配置，作者希望通过扩散生成过程的逐步校正能力，将可信度作为生成轨迹中的显式约束，而不是在排序后端简单过滤。",
-                "method_family_zh": "可信约束扩散推荐方法。",
+                "method_family_zh": "可信约束检索基准方法。",
                 "method_details_zh": "详细方法：第一步，模型把用户历史、候选内容表示和可信度特征编码到统一状态空间，形成扩散去噪的条件输入。第二步，在反向去噪过程中加入可信度引导项，使每个时间步同时优化偏好匹配和风险抑制。第三步，最终重排模块根据去噪后的候选分布、可信度分数和用户偏好分数联合输出排序结果。第四步，训练目标同时包含排序损失、可信度一致性损失和轨迹平滑正则，使模型在学习用户兴趣时避免把不可靠内容当作高质量正样本。\n实验与证据限制：摘要级线索不能当作本地实验结果",
-                "experiments_zh": "实验：论文在多个推荐数据集上比较排序指标和可信内容暴露率，基线包括传统序列推荐、可信度后过滤方法以及不含可信约束的扩散推荐模型。Strong/foundation anchors may guide planning, but only local repo/data/env/experiment gate can support paper claims. 结果显示该方法在保持点击相关指标的同时降低低可信内容命中率，并通过消融验证可信度引导项和扩散轨迹校正均有贡献。论文还报告不同约束强度下的相关性和可靠性权衡，用于说明方法不是简单牺牲准确率换取过滤效果。",
+                "experiments_zh": "实验：论文在多个推荐数据集上比较排序指标和可信内容暴露率，基线包括传统序列推荐、可信度后过滤方法以及不含可信约束的检索基准模型。Strong/foundation anchors may guide planning, but only local repo/data/env/experiment gate can support paper claims. 结果显示该方法在保持点击相关指标的同时降低低可信内容命中率，并通过消融验证可信度引导项和扩散轨迹校正均有贡献。论文还报告不同约束强度下的相关性和可靠性权衡，用于说明方法不是简单牺牲准确率换取过滤效果。",
                 "limitations_zh": "局限：方法需要可靠的内容可信度标注或外部可信度估计器，若该信号噪声较大，去噪引导会放大错误约束。Guardrail: no claim promotion. 论文还需要更多跨领域数据和长周期在线评估来确认可信度约束不会过度牺牲多样性，同时也需要分析约束强度过高时对长尾内容曝光和用户兴趣探索的影响。",
                 "method_advantages_zh": ["扩散机制可在多个去噪步骤中逐步融合可信度和偏好信号，因此比事后过滤更细粒度。", "paper claim 不能直接写，但该方法设计清楚地区分了偏好匹配和可信风险两个目标。"],
                 "method_disadvantages_zh": ["论文 claim 仍需实验，因为方法依赖可信度标签或外部估计器，数据噪声会影响排序可靠性。", "对系统实现的直接含义不应显示，但从论文机制看，该方法会增加训练和推理阶段的约束调参复杂度。"],
@@ -260,7 +260,7 @@ def test_read_sanitizes_llm_public_output_before_persisting(monkeypatch):
                         "title": "Credible Diffusion Recommendation",
                         "venue": "ICLR",
                         "year": 2026,
-                        "abstract": "A paper about credible diffusion recommendation.",
+                        "abstract": "A paper about credible retrieval benchmark.",
                         "pdf_url": "https://example.test/paper.pdf",
                         "url": "https://example.test/paper",
                     }
@@ -350,9 +350,9 @@ def _quality_item(*, venue: str, track: str, topic_evidence: str = "strong: dire
         "fit_score": 8.0,
         "diversity_score": 6.0,
         "topic_evidence": topic_evidence,
-        "category": "recommender systems",
-        "reason": "directly relevant to LLM diffusion recommendation",
-        "fit_explanation": "directly relevant to recommender systems, diffusion, and LLM fusion",
+        "category": "retrieval systems",
+        "reason": "directly relevant to LLM-assisted retrieval benchmark",
+        "fit_explanation": "directly relevant to retrieval systems, diffusion, and LLM fusion",
         "abstract": "A real abstract supports the current adaptive topic route.",
     }
 
@@ -422,7 +422,7 @@ def test_stable_ranking_adds_gated_big3_freshness_without_weakening_topic_gate()
     strong_recent = _quality_item(venue="ICML", track="poster")
     strong_recent.update({
         "title": "Diffusion Recommender with Language Model Signals",
-        "abstract": "A recommender system uses discrete diffusion and large language model semantic signals.",
+        "abstract": "A retrieval system uses discrete retrieval and large language model semantic signals.",
         "year": 2026,
         "reason_source": "llm abstract evaluation",
     })
@@ -437,8 +437,8 @@ def test_stable_ranking_adds_gated_big3_freshness_without_weakening_topic_gate()
     assert context["venue"] == "ICML"
     assert context["release_signal_source"] == "known_release_date"
     _attach_latest_released_venue_context([strong_recent, weak_recent], context)
-    _apply_stable_ranking_score(strong_recent, "LLM diffusion recommendation")
-    _apply_stable_ranking_score(weak_recent, "LLM diffusion recommendation")
+    _apply_stable_ranking_score(strong_recent, "LLM-assisted retrieval benchmark")
+    _apply_stable_ranking_score(weak_recent, "LLM-assisted retrieval benchmark")
 
     assert strong_recent["source_context_bonus"] == 0.18
     assert strong_recent["freshness_eligible_latest_released_venue"] is True
@@ -460,9 +460,9 @@ def test_kdd_and_sigir_never_receive_freshness_bonus_even_when_newer():
     sigir = _quality_item(venue="SIGIR", track="poster")
     sigir.update({"year": 2026, "reason_source": "llm abstract evaluation", "abstract": "direct abstract"})
     _attach_latest_released_venue_context([icml, kdd, sigir], context)
-    _apply_stable_ranking_score(icml, "LLM diffusion recommendation")
-    _apply_stable_ranking_score(kdd, "LLM diffusion recommendation")
-    _apply_stable_ranking_score(sigir, "LLM diffusion recommendation")
+    _apply_stable_ranking_score(icml, "LLM-assisted retrieval benchmark")
+    _apply_stable_ranking_score(kdd, "LLM-assisted retrieval benchmark")
+    _apply_stable_ranking_score(sigir, "LLM-assisted retrieval benchmark")
 
     assert context["venue"] == "ICML"
     assert icml["source_context_bonus"] == 0.18
@@ -481,8 +481,8 @@ def test_icml_2026_becomes_latest_release_signal_when_available():
     icml = _quality_item(venue="ICML", track="poster")
     icml.update({"year": 2026, "reason_source": "llm abstract evaluation", "abstract": "direct abstract"})
     _attach_latest_released_venue_context([iclr, icml], context)
-    _apply_stable_ranking_score(iclr, "LLM diffusion recommendation")
-    _apply_stable_ranking_score(icml, "LLM diffusion recommendation")
+    _apply_stable_ranking_score(iclr, "LLM-assisted retrieval benchmark")
+    _apply_stable_ranking_score(icml, "LLM-assisted retrieval benchmark")
 
     assert context["venue"] == "ICML"
     assert icml["source_context_bonus"] == 0.18
@@ -493,7 +493,7 @@ def test_icml_2026_becomes_latest_release_signal_when_available():
 def test_title_pool_honors_detail_fetch_floor_for_large_single_category_sources(monkeypatch):
     monkeypatch.delenv("TITLE_RANK_PER_CATEGORY", raising=False)
     cfg = AppConfig(
-        research_interest="diffusion recommendation",
+        research_interest="retrieval benchmark",
         max_recommended_papers=100,
         find_recall_count=3000,
         detail_fetch_count=800,
@@ -502,7 +502,7 @@ def test_title_pool_honors_detail_fetch_floor_for_large_single_category_sources(
         {
             "id": f"paper_{index}",
             "title": f"Diffusion recommendation candidate {index}",
-            "abstract": "A recommender system uses diffusion modeling for user preference prediction.",
+            "abstract": "A retrieval system uses diffusion modeling for user preference prediction.",
             "venue": "ICML",
             "year": 2026,
         }

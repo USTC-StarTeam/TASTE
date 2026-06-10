@@ -742,8 +742,8 @@ def test_plan_markdown_prefers_initial_experiment_over_generic_gate_steps():
             "plan_id": "plan-specific",
             "idea_id": "idea-specific",
             "title": "Specific plan",
-            "new_method": "Semantic gated discrete diffusion recommender with LLM item embeddings in preference fading and reconstruction.",
-            "initial_experiment": "Implement a minimal PreferGrow-based semantic gated variant, compare against PreferGrow and semantic reranking, and report HR@10, NDCG@10, long-tail slices, and semantic-conflict bad cases.",
+            "new_method": "Semantic gated discrete retrieval planner with LLM evidence embeddings in candidate fading and reconstruction.",
+            "initial_experiment": "Implement a minimal PreferGrow-based semantic gated variant, compare against a baseline planner and semantic reranking, and report HR@10, NDCG@10, long-tail slices, and semantic-conflict bad cases.",
             "versions": [
                 {
                     "version_id": "v1",
@@ -1224,7 +1224,7 @@ def test_runtime_detect_endpoint_calls_detector(monkeypatch):
 def test_environment_repo_search_ignores_find_source_toggles(monkeypatch):
     monkeypatch.syspath_prepend(str(server.WORKSPACE_ROOT / "scripts"))
     env_stage = importlib.import_module("run_environment_stage")
-    monkeypatch.setattr(env_stage, "project_search_queries", lambda _project: ["diffusion recommender repo"])
+    monkeypatch.setattr(env_stage, "project_search_queries", lambda _project: ["retrieval benchmark repo"])
     calls = []
     monkeypatch.setattr(env_stage, "run_optional", lambda cmd, _cwd: calls.append(cmd) or 0)
 
