@@ -3121,6 +3121,7 @@ function App() {
   const [llmProbeResult, setLLMProbeResult] = useState<{ ok: boolean; error: string; summary?: Record<string, any> } | null>(null);
   const [checkingVenues, setCheckingVenues] = useState(false);
   const [venueHealth, setVenueHealth] = useState<Record<string, { ok: boolean; message: string; source_adapter: string; sample_count: number }>>({});
+  const [venueHealthStatusRows, setVenueHealthStatusRows] = useState<any[]>([]);
   const [rawArtifacts, setRawArtifacts] = useState<Record<string, boolean>>({});
   const [activeArtifact, setActiveArtifact] = useState("");
   const [emailReceiversOverride, setEmailReceiversOverride] = useState("");
@@ -3700,6 +3701,7 @@ function App() {
     try {
       setError("");
       setVenueHealth({});
+      setVenueHealthStatusRows([]);
       const nextConfig = configWithCurrentFindSelection();
       const savedConfig = await saveConfig(nextConfig);
       setConfig(savedConfig);
@@ -3929,6 +3931,15 @@ function App() {
   const readCandidatesStillSyncing = Boolean(!currentReadings.length && expectedReadCandidateCount > 0 && (!readResultsArtifact || currentFindArtifactLoading || (useCurrentFindPacket && readCandidatePool.length === 0)));
   const hasSurveyCandidates = retrievalPool.length > 0 || readCandidatePool.length > 0 || readCandidatesStillSyncing || expectedReadCandidateCount > 0 || Number(literatureCounts.evaluated || 0) > 0 || Number(literatureCounts.arxivCandidates || 0) > 0 || (!viewingActiveIncompleteFindRun && Number(researchLiteratureCounts.survey_candidates || 0) > 0);
   const venueHealthSourceStatus = useMemo(() => {
+    const selectedPairs = venueYearPairs(selectedVenues, selectedVenueYears);
+    const selectedPairKeys = new Set(selectedPairs.map((pair) => `${pair.venue_id}:${pair.year}`));
+    const selectedIds = new Set(selectedVenues);
+    const explicitRows = venueHealthStatusRows.filter((row: any) => {
+      const rowKey = `${row?.venue_id || ""}:${row?.year || ""}`;
+      const rowVenueId = String(row?.venue_id || "");
+      return selectedPairKeys.size ? selectedPairKeys.has(rowKey) : !selectedIds.size || selectedIds.has(rowVenueId);
+    });
+    if (explicitRows.length) return explicitRows;
     const byId = new Map(venues.map((venue) => [venue.id, venue]));
     const ids = selectedVenues.length ? selectedVenues : Object.keys(venueHealth);
     return ids.map((id) => {
@@ -3950,7 +3961,7 @@ function App() {
         effective_years: yearsForVenue(selectedVenueYears, id),
       };
     }).filter(Boolean);
-  }, [selectedVenueYears, selectedVenues, venueHealth, venues]);
+  }, [selectedVenueYears, selectedVenues, venueHealth, venueHealthStatusRows, venues]);
 
   const sourceStatus = useMemo(() => {
     const runRows = filterBySourceSelection(expandedSourceStatusRows(runFindState), selectedRunSelection);
@@ -5322,6 +5333,26 @@ function App() {
         sample_limit: 2,
       });
       const next: Record<string, { ok: boolean; message: string; source_adapter: string; sample_count: number }> = {};
+      const byId = new Map(venues.map((venue) => [venue.id, venue]));
+      const statusRows = response.results.map((result) => {
+        const venue = byId.get(result.venue_id) || CORE_VENUE_FALLBACKS[result.venue_id];
+        const venueName = venue?.name || result.venue_id;
+        return {
+          source: `${venueName} ${result.year || ""}`.trim(),
+          source_kind: "venue_health",
+          venue_id: result.venue_id,
+          venue: venueName,
+          year: result.year,
+          ok: Boolean(result.ok),
+          count: result.sample_count,
+          sample_count: result.sample_count,
+          adapter: result.source_adapter,
+          source_adapter: result.source_adapter,
+          message: result.message || (result.ok ? "ok" : "No papers fetched."),
+          requested_years: result.year ? [result.year] : [],
+          effective_years: result.year ? [result.year] : [],
+        };
+      });
       for (const result of response.results) {
         const current = next[result.venue_id];
         next[result.venue_id] = {
@@ -5331,6 +5362,7 @@ function App() {
           sample_count: (current?.sample_count || 0) + result.sample_count,
         };
       }
+      setVenueHealthStatusRows(statusRows);
       setVenueHealth((prev) => ({ ...prev, ...next }));
     } catch (err) {
       setError(String(err));

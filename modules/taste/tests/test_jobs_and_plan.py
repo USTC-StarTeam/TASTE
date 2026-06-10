@@ -132,6 +132,13 @@ def test_arxiv_configured_date_window_is_preserved():
     assert source == "configured"
 
 
+def test_default_find_selection_does_not_enable_arxiv():
+    from auto_research.source_selection import default_source_selection, normalize_source_selection
+
+    assert default_source_selection()["include_arxiv"] is False
+    assert normalize_source_selection({})["include_arxiv"] is False
+
+
 def test_find_request_uses_project_research_profile_when_api_config_is_partial(tmp_path, monkeypatch):
     project_root = tmp_path / "projects" / "demo_project"
     project_root.mkdir(parents=True)
@@ -3222,7 +3229,7 @@ def test_full_text_repair_accepts_high_author_overlap_preprint_title_variant():
     )
 
     assert accepted["accepted"] is True
-    assert accepted["title_similarity"] == 0.8
+    assert accepted["title_similarity"] >= 0.8
     assert len(accepted["author_overlap"]) >= 3
     assert rejected["accepted"] is False
 

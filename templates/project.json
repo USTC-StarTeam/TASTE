@@ -44,9 +44,8 @@
   },
   "discovery": {
     "enabled_sources": [
-      "arxiv",
-      "github",
-      "manual"
+      "manual",
+      "semantic_scholar"
     ],
     "arxiv": {
       "max_results": 5,

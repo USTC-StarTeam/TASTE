@@ -5,6 +5,7 @@ import argparse
 import json
 import re
 import sys
+import time
 import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,7 +20,9 @@ from project_paths import build_paths
 FULL_TEXT_MIN_CHARS = 1200
 PAPER_BODY_MIN_CHARS = 8000
 USER_AGENT = "research-workflow/full-text-repair"
-ARXIV_SEARCH_QUERY_VERSION = "v2_exact_title_multiquery"
+ARXIV_SEARCH_QUERY_VERSION = "v4_latex_unicode_title_variants"
+ARXIV_MAX_SEARCH_QUERIES = 6
+ARXIV_SEARCH_COOLDOWN_SEC = 2.0
 
 
 def now_iso() -> str:
@@ -48,6 +51,54 @@ def norm_title(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
 
 
+LATEX_SYMBOL_NAMES = {
+    "alpha", "beta", "gamma", "delta", "epsilon", "varepsilon", "zeta", "eta", "theta", "vartheta",
+    "iota", "kappa", "lambda", "mu", "nu", "xi", "pi", "rho", "sigma", "tau", "upsilon", "phi",
+    "varphi", "chi", "psi", "omega",
+}
+
+UNICODE_TITLE_REPLACEMENTS = {
+    "α": "alpha", "β": "beta", "γ": "gamma", "δ": "delta", "ε": "epsilon", "θ": "theta",
+    "λ": "lambda", "μ": "mu", "π": "pi", "ρ": "rho", "σ": "sigma", "τ": "tau", "φ": "phi", "ω": "omega",
+    "Α": "Alpha", "Β": "Beta", "Γ": "Gamma", "Δ": "Delta", "Θ": "Theta", "Λ": "Lambda", "Π": "Pi", "Σ": "Sigma", "Τ": "Tau", "Φ": "Phi", "Ω": "Omega",
+    "⁰": "0", "¹": "1", "²": "2", "³": "3", "⁴": "4", "⁵": "5", "⁶": "6", "⁷": "7", "⁸": "8", "⁹": "9",
+    "–": "-", "—": "-", "−": "-",
+}
+
+
+def latex_plain_title(value: Any) -> str:
+    text = str(value or "")
+    for src, dst in UNICODE_TITLE_REPLACEMENTS.items():
+        text = text.replace(src, dst)
+    text = text.replace("\\\\", "\\")
+    text = re.sub(r"\\(?:texttt|textbf|emph|mathrm|mathbf|mathsf|operatorname)\{([^{}]+)\}", r"\1", text)
+    for name in sorted(LATEX_SYMBOL_NAMES, key=len, reverse=True):
+        text = re.sub(rf"\\{name}\b", name, text)
+    text = re.sub(r"\$+", " ", text)
+    text = re.sub(r"\{([^{}]+)\}", r"\1", text)
+    text = re.sub(r"([A-Za-z]+)\s*\^\s*([0-9]+)", r"\1\2", text)
+    text = re.sub(r"([A-Za-z]+)\s*\^\s*([A-Za-z]+)", r"\1 \2", text)
+    text = re.sub(r"[^A-Za-z0-9:;,.+\-/ ]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def title_query_variants(value: Any) -> list[str]:
+    original = " ".join(str(value or "").split())
+    plain = latex_plain_title(original)
+    variants = [plain, original]
+    if plain:
+        variants.append(re.sub(r"\b([A-Za-z]+)([0-9]+)\b", r"\1 \2", plain))
+        variants.append(re.sub(r"\b([A-Za-z])\s+([0-9]+)\s*([A-Za-z]+)\b", r"\1\2\3", plain))
+        variants.append(re.sub(r"\b(tau)\s+([0-9]+)\b", r"\1\2", plain, flags=re.I))
+    out: list[str] = []
+    for item in variants:
+        item = re.sub(r"\s+", " ", str(item or "").strip())
+        item = item.strip(" :;,.+-")
+        if item and item not in out:
+            out.append(item)
+    return out
+
+
 def safe_slug(value: Any, fallback: str = "paper") -> str:
     text = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or fallback)).strip("_")
     return (text or fallback)[:80]
@@ -59,9 +110,13 @@ def identity_values(row: dict[str, Any]) -> set[str]:
         value = str(row.get(key) or "").strip().lower()
         if value:
             values.add(f"{key}:{value}")
-    title = norm_title(row.get("title") or row.get("paper_title"))
+    raw_title = row.get("title") or row.get("paper_title")
+    title = norm_title(raw_title)
     if title:
         values.add(f"title:{title}")
+    plain_title = norm_title(latex_plain_title(raw_title))
+    if plain_title and plain_title != title:
+        values.add(f"title:{plain_title}")
     return values
 
 
@@ -228,8 +283,18 @@ def github_raw_readme_candidates(url: str) -> list[str]:
 
 
 def title_tokens(value: Any) -> set[str]:
-    stopwords = {"the", "and", "for", "with", "from", "into", "that", "this", "using", "based", "large", "language", "models", "model"}
-    return {token for token in re.findall(r"[a-z0-9]{3,}", norm_title(value)) if token not in stopwords}
+    stopwords = {"the", "and", "for", "with", "from", "into", "that", "this", "using", "based", "large", "language", "models", "model", "texttt", "mathrm", "mathbf"}
+    normalized = norm_title(latex_plain_title(value))
+    tokens = {token for token in re.findall(r"[a-z0-9]{2,}", normalized) if token not in stopwords}
+    expanded: set[str] = set(tokens)
+    for token in tokens:
+        match = re.match(r"([a-z]+)([0-9]+)$", token)
+        if match:
+            expanded.update({match.group(1), match.group(2)})
+        match = re.match(r"([a-z])([0-9]+)([a-z]+)$", token)
+        if match:
+            expanded.update({match.group(1), match.group(2), match.group(3), match.group(1) + match.group(2)})
+    return expanded
 
 
 def title_similarity(a: Any, b: Any) -> float:
@@ -430,14 +495,17 @@ def openalex_repository_candidates(row: dict[str, Any]) -> tuple[list[dict[str, 
         except Exception as exc:
             attempts.append({"kind": "openalex_doi_lookup", "url": url, "status_code": 0, "accepted": False, "error": exc.__class__.__name__})
     if title and not candidates:
-        url = f"https://api.openalex.org/works?search={quote_plus(title)}&per-page=5"
-        try:
-            response = requests.get(url, timeout=30, headers={"User-Agent": USER_AGENT})
-            attempts.append({"kind": "openalex_title_search", "url": url, "status_code": response.status_code, "accepted": False})
-            if response.status_code == 200:
-                consume_payload(response.json(), "openalex_title_search", url)
-        except Exception as exc:
-            attempts.append({"kind": "openalex_title_search", "url": url, "status_code": 0, "accepted": False, "error": exc.__class__.__name__})
+        for query_title in title_query_variants(title):
+            url = f"https://api.openalex.org/works?search={quote_plus(query_title)}&per-page=5"
+            try:
+                response = requests.get(url, timeout=30, headers={"User-Agent": USER_AGENT})
+                attempts.append({"kind": "openalex_title_search", "url": url, "query_title": query_title, "status_code": response.status_code, "accepted": False})
+                if response.status_code == 200:
+                    consume_payload(response.json(), "openalex_title_search", url)
+                if candidates:
+                    break
+            except Exception as exc:
+                attempts.append({"kind": "openalex_title_search", "url": url, "query_title": query_title, "status_code": 0, "accepted": False, "error": exc.__class__.__name__})
     return candidates, attempts
 
 
@@ -469,24 +537,37 @@ def download_pdf_text(paths: Any, rank: int, paper: dict[str, Any], pdf_url: str
 
 
 def arxiv_search_queries(title: str) -> list[str]:
-    clean_title = " ".join(re.findall(r"[A-Za-z0-9]+", title or ""))
-    terms = [
-        term
-        for term in re.findall(r"[A-Za-z0-9][A-Za-z0-9_.+-]*", title or "")
-        if len(term) >= 3 and term.lower() not in {"and", "for", "the", "with", "via"}
-    ]
     queries: list[str] = []
-    if clean_title:
-        queries.append(f'ti:"{clean_title}"')
-        queries.append(f'all:"{clean_title}"')
-    if terms:
-        queries.append(" AND ".join(f"ti:{term}" for term in terms[:16]))
-        queries.append(" AND ".join(f"all:{term}" for term in terms[:10]))
+    for variant in title_query_variants(title):
+        clean_title = " ".join(re.findall(r"[A-Za-z0-9]+", variant or ""))
+        terms = [
+            term
+            for term in re.findall(r"[A-Za-z0-9][A-Za-z0-9_.+-]*", variant or "")
+            if len(term) >= 3 and term.lower() not in {"and", "for", "the", "with", "via", "texttt"}
+        ]
+        lowered_terms = {term.lower().replace("-", "") for term in terms}
+        token_set = title_tokens(variant)
+        if "tau2" in token_set or ("tau" in token_set and "bench" in token_set):
+            queries.extend(['all:"tau2 Bench"', 'all:"tau 2 Bench"', 'all:"Dual Control Environment"'])
+        if "tau" in token_set and "knowledge" in token_set:
+            queries.extend(['all:"tau Knowledge"', 'all:"Unstructured Knowledge"'])
+        if "r3" in token_set or "dao" in token_set or "r3dao" in lowered_terms:
+            queries.extend(['all:"R3DAO"', 'all:"R3 DAO"', 'all:"Reactive Recovery Reconstruction"'])
+        if clean_title:
+            queries.append(f'ti:"{clean_title}"')
+            queries.append(f'all:"{clean_title}"')
+        if terms:
+            head_terms = [re.sub(r"[^A-Za-z0-9]+", " ", term).strip() for term in terms[:8]]
+            head = " ".join(term for term in head_terms if term)
+            if len(head.split()) >= 3:
+                queries.append(f'ti:"{head}"')
+                queries.append(f'all:"{head}"')
+            queries.append(" AND ".join(f"all:{term}" for term in terms[:8]))
     out: list[str] = []
     for query in queries:
         if query and query not in out:
             out.append(query)
-    return out
+    return out[:ARXIV_MAX_SEARCH_QUERIES]
 
 
 def parse_arxiv_search_feed(row: dict[str, Any], content: bytes, url: str, status: int, content_type: str, final_url: str) -> list[dict[str, Any]]:
@@ -531,11 +612,15 @@ def arxiv_search_candidates(paper: dict[str, Any] | str, max_results: int = 5) -
         return []
     all_candidates: list[dict[str, Any]] = []
     seen_entries: set[str] = set()
-    for query in queries:
+    for index, query in enumerate(queries):
+        if index:
+            time.sleep(ARXIV_SEARCH_COOLDOWN_SEC)
         url = "https://export.arxiv.org/api/query?" + urlencode({"search_query": query, "start": 0, "max_results": max_results})
         status, content_type, content, final_url = fetch_url(url, timeout=45)
         if status != 200:
             all_candidates.append({"kind": "arxiv_search", "url": url, "query": query, "status_code": status, "content_type": content_type, "final_url": final_url, "accepted": False})
+            if status == 429:
+                break
             continue
         candidates = parse_arxiv_search_feed(row, content, url, status, content_type, final_url)
         for candidate in candidates:
