@@ -39,6 +39,69 @@ def recommended_paper(paper_id: str, title: str) -> dict:
 
 
 
+def test_sync_ars_uses_defined_source_lists(monkeypatch, tmp_path):
+    syncer = importlib.import_module("sync_third_party_research_stack")
+    monkeypatch.setattr(syncer, "THIRD_PARTY", tmp_path / "third_party")
+    monkeypatch.setattr(syncer, "PROVENANCE_ROOT", tmp_path / "provenance")
+    monkeypatch.setattr(syncer, "SKILL_ROOT", tmp_path / "skills")
+    repo = tmp_path / "third_party" / "academic-research-skills"
+    (repo / "academic-pipeline").mkdir(parents=True)
+    (repo / "academic-pipeline" / "SKILL.md").write_text("---\ndescription: Academic pipeline.\n---\n# Academic Pipeline\n", encoding="utf-8")
+    (repo / "shared").mkdir()
+    (repo / "shared" / syncer.ARS_SHARED[0]).write_text("shared protocol", encoding="utf-8")
+    (repo / "scripts").mkdir()
+    (repo / "scripts" / syncer.ARS_SCRIPTS[0]).write_text("print('audit')\n", encoding="utf-8")
+
+    modules, skills = syncer.sync_ars({"name": "academic", "repository": "example", "local_path": "third_party/academic-research-skills"})
+
+    assert any(row["name"] == "academic-pipeline" and row["available"] for row in modules)
+    assert skills and skills[0]["path"].endswith("SKILL.md")
+    assert (tmp_path / skills[0]["path"]).exists()
+
+
+
+
+def test_missing_source_method_sync_does_not_rewrite_existing_adapters(monkeypatch, tmp_path):
+    syncer = importlib.import_module("sync_third_party_research_stack")
+    monkeypatch.setattr(syncer, "THIRD_PARTY", tmp_path / "third_party")
+    monkeypatch.setattr(syncer, "PROVENANCE_ROOT", tmp_path / "provenance")
+    trajectory = tmp_path / "provenance" / "method-source-trajectory-system" / "SKILL.md"
+    paper = tmp_path / "provenance" / "method-source-paper-production" / "SKILL.md"
+    trajectory.parent.mkdir(parents=True)
+    paper.parent.mkdir(parents=True)
+    trajectory.write_text("existing trajectory adapter", encoding="utf-8")
+    paper.write_text("existing paper adapter", encoding="utf-8")
+
+    evo_modules, evo_skills = syncer.sync_evoscientist({"name": "EvoScientist"})
+    paper_modules, paper_skills = syncer.sync_paper_orchestra({"name": "PaperOrchestra"})
+
+    assert evo_modules and all(not row["available"] for row in evo_modules)
+    assert paper_modules and all(not row["available"] for row in paper_modules)
+    assert evo_skills == []
+    assert paper_skills == []
+    assert trajectory.read_text(encoding="utf-8") == "existing trajectory adapter"
+    assert paper.read_text(encoding="utf-8") == "existing paper adapter"
+
+
+def test_venue_health_result_keeps_requested_venue_and_year(monkeypatch):
+    monkeypatch.setattr(server, "fetch_venue_sample", lambda _venue, _year, _limit: {
+        "venue_id": "",
+        "year": "",
+        "ok": True,
+        "sample_count": "2",
+        "source_adapter": "openreview",
+        "message": "ok",
+        "samples": [{"title": "paper"}],
+    })
+
+    result = server._fetch_venue_sample_with_timeout({"name": "ICLR"}, "openreview_iclr_2026", 2026, 2)
+
+    assert result["venue_id"] == "openreview_iclr_2026"
+    assert result["year"] == 2026
+    assert result["ok"] is True
+    assert result["sample_count"] == 2
+
+
 def test_hollow_done_find_without_run_id_is_hidden_from_taskbar():
     item = {
         "job_id": "find_empty",
@@ -1016,6 +1079,76 @@ def test_compact_job_list_hides_raw_historical_command():
     assert compact["result"]["project"] == "demo_project"
     assert "command" not in compact["result"]
 
+
+
+def test_full_cycle_blocked_job_uses_current_reference_dependency_blocker(monkeypatch):
+    from auto_research.web import server
+
+    blocker = "assafelovic/gpt-researcher reference protocol/import probe 已运行；代码结构存在，但当前环境依赖缺失（缺失 39/46 个 requirements），首个 import blocker: No module named 'json_repair'。"
+    monkeypatch.setattr(
+        server,
+        "project_summary",
+        lambda _project, compact=True: {
+            "status": "blocked_fresh_base_reference_probe_required",
+            "current_blocker": {"category": "fresh_base_reference_probe_required", "summary": blocker},
+        },
+    )
+
+    row = server._compact_job_for_list({
+        "job_id": "full-cycle_demo",
+        "stage": "full-cycle",
+        "status": "blocked",
+        "created_at": "2026-06-10T00:00:00Z",
+        "logs": [
+            "Detached full-cycle worker is no longer running",
+            "门控阻塞：stale route blocker",
+            "summary=stale route blocker",
+        ],
+        "result": {"project": "demo_project", "summary": "历史 full-cycle 启动器已停止；当前状态以项目摘要和实验模块为准。"},
+        "progress": {"phase": "environment", "message": "历史 full-cycle 启动器已停止；当前状态以项目摘要和实验模块为准。"},
+    })
+
+    assert row["status"] == "blocked_fresh_base_reference_probe_required"
+    assert row["progress"]["phase"] == "blocked_fresh_base_reference_probe_required"
+    assert "39/46" in row["progress"]["message"]
+    assert "json_repair" in row["result"]["summary"]
+
+
+
+
+
+def test_full_cycle_blocked_job_uses_current_cycle_summary(monkeypatch):
+    from auto_research.web import server
+
+    current_summary = "完整科研自循环已停止；当前状态=blocked_no_viable_reference_base；没有正在运行的 full-cycle。"
+    monkeypatch.setattr(
+        server,
+        "project_summary",
+        lambda _project, compact=True: {
+            "status": "blocked_no_viable_reference_base",
+            "summary": current_summary,
+            "full_research_cycle": {"status": "blocked_no_viable_reference_base", "summary": current_summary},
+            "current_blocker": {"category": "submission_readiness", "summary": "venue_policy_known"},
+        },
+    )
+
+    row = server._compact_job_for_list({
+        "job_id": "full-cycle_stopped",
+        "stage": "full-cycle",
+        "status": "blocked",
+        "created_at": "2026-06-10T00:00:00Z",
+        "logs": ["Detached full-cycle worker is no longer running"],
+        "result": {"project": "demo_project", "summary": "历史 full-cycle 启动器已停止；当前状态以项目摘要和实验模块为准。"},
+        "progress": {"phase": "environment", "message": "历史 full-cycle 启动器已停止；当前状态以项目摘要和实验模块为准。"},
+    })
+
+    assert row["status"] == "blocked_no_viable_reference_base"
+    assert row["progress"]["phase"] == "blocked_no_viable_reference_base"
+    assert "blocked_no_viable_reference_base" in row["progress"]["message"]
+    assert row["result"]["summary"] == current_summary
+    assert any("blocked_no_viable_reference_base" in line for line in row["logs"])
+    assert not any("当前状态以项目门控摘要为准" in line for line in row["logs"])
+    assert not any("stale route blocker" in line for line in row["logs"])
 
 
 def test_compact_job_list_hides_internal_json_log_chunks():

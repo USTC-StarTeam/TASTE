@@ -281,16 +281,16 @@ def sync_evoscientist(source: dict[str, Any]) -> tuple[list[dict[str, Any]], lis
         }
         for path in files
     ]
-    excerpts = []
-    for path in files:
-        if path.exists():
-            excerpts.append(f"## {relative(path)}\n\n{read_text(path, 2600)}")
+    existing_files = [path for path in files if path.exists()]
+    if not existing_files:
+        return modules, []
+    excerpts = [f"## {relative(path)}\n\n{read_text(path, 2600)}" for path in existing_files]
     skill = write_skill_adapter(
         slug_name="method-source-trajectory-system",
         title="TASTE Method Provenance: trajectory system",
         description="Audit-only source method record for multi-step TASTE trajectory optimization.",
         source=source,
-        source_files=files,
+        source_files=existing_files,
         operating_contract=[
             "Map planner/research/code/debug/data-analysis/writing stages onto native roles instead of running a one-shot agent.",
             "Use memory, tool-error, context-overflow, async-watcher, tool-selector, and model-fallback middleware concepts when designing retries and long-running Claude Code calls.",
@@ -303,9 +303,9 @@ def sync_evoscientist(source: dict[str, Any]) -> tuple[list[dict[str, Any]], lis
 
 def sync_ars(source: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     repo = THIRD_PARTY / "academic-research-skills"
-    skill_files = [repo / name / "SKILL.md" for name in TASTES_SKILLS]
-    shared_files = [repo / "shared" / name for name in TASTES_SHARED]
-    script_files = [repo / "scripts" / name for name in TASTES_SCRIPTS]
+    skill_files = [repo / name / "SKILL.md" for name in ARS_SKILLS]
+    shared_files = [repo / "shared" / name for name in ARS_SHARED]
+    script_files = [repo / "scripts" / name for name in ARS_SCRIPTS]
     modules = []
     for path in skill_files:
         modules.append({"name": path.parent.name, "kind": "skill", "path": relative(path), "available": path.exists(), "sha256": sha256(path)})
@@ -342,19 +342,22 @@ def sync_paper_orchestra(source: dict[str, Any]) -> tuple[list[dict[str, Any]], 
         {"name": path.parent.name, "kind": "skill", "path": relative(path), "available": path.exists(), "sha256": sha256(path)}
         for path in source_files
     ]
+    existing_files = [path for path in source_files if path.exists()]
+    if not existing_files:
+        return modules, []
     # The source skills are mirrored by the paper bridge; this adapter binds their useful pattern to the native paper-production layer.
     skill = write_skill_adapter(
         slug_name="method-source-paper-production",
         title="TASTE Method Provenance: paper production",
         description="Audit-only source method record for TASTE evidence-bound paper production and venue gates.",
         source=source,
-        source_files=source_files,
+        source_files=existing_files,
         operating_contract=[
             "Use section/outline/literature/plotting/review stages for paper generation and revision.",
             "Keep the workflow as the final gatekeeper: venue template, citation provenance, figure quality, and evidence readiness must pass before showing a paper as accepted preview.",
             "If paper output is weak, run preview/figure/citation repair loops rather than hand-editing scientific claims.",
         ],
-        source_excerpt="\n\n".join(f"## {relative(path)}\n\n{read_text(path, 1800)}" for path in source_files if path.exists()),
+        source_excerpt="\n\n".join(f"## {relative(path)}\n\n{read_text(path, 1800)}" for path in existing_files),
     )
     return modules, [skill]
 

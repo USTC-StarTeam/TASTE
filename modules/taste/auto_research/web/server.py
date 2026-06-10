@@ -1866,7 +1866,7 @@ def _public_full_cycle_job_logs(logs: Any, progress: Any = None, result: Any = N
     if message:
         if result.get("process_alive") is not True and any(marker in message.lower() for marker in ["gate=", "候选路线", "独立授权", "base_switch", "selected_base", "deterministic"]):
             message = "历史 full-cycle 启动器已停止；当前状态以项目摘要和实验模块为准。"
-        elif "正在运行" in message and result.get("process_alive") is not True:
+        elif "正在运行" in message and "没有正在运行" not in message and result.get("process_alive") is not True:
             message = "历史 full-cycle 启动器已停止；当前状态以项目门控摘要为准。"
         cleaned_message = _public_text(message)
         if cleaned_message:
@@ -1882,8 +1882,11 @@ def _public_full_cycle_job_logs(logs: Any, progress: Any = None, result: Any = N
             out.append("Claude 最近动作：" + text[:650])
     if status:
         out.append("阶段状态：" + status)
+    current_summary = str(result.get("summary") or "").strip()
     for line in raw:
         low = line.lower()
+        if result.get("process_alive") is not True and current_summary and (line.startswith("summary=") or line.startswith("门控阻塞：")) and current_summary not in line:
+            continue
         if line.startswith("Workflow command:"):
             out.append("命令：" + _public_paper_command(line.split(":", 1)[1]))
             continue
@@ -6928,12 +6931,38 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
             compact_result["summary"] = "历史 full-cycle 启动器已停止；当前状态以项目摘要和实验模块为准。"
         if isinstance(public_progress.get("message"), str) and any(marker in public_progress["message"].lower() for marker in ["候选路线", "独立授权", "base_switch", "selected_base", "deterministic", "historical_pid"]):
             public_progress["message"] = "历史 full-cycle 启动器已停止；当前状态以项目摘要和实验模块为准。"
+        project_id = str(compact_result.get("project") or result.get("project") or "").strip()
+        if project_id and (public_status in {"blocked", "error", "cancelled"} or str(public_status).startswith("blocked")):
+            try:
+                live_summary = project_summary(project_id, compact=True)
+            except TypeError:
+                live_summary = project_summary(project_id)
+            except Exception:
+                live_summary = {}
+            live_payload = live_summary if isinstance(live_summary, dict) else {}
+            blocker = live_payload.get("current_blocker") if isinstance(live_payload.get("current_blocker"), dict) else {}
+            live_cycle = live_payload.get("full_research_cycle") if isinstance(live_payload.get("full_research_cycle"), dict) else {}
+            live_status = str(live_payload.get("status") or live_cycle.get("status") or "").strip()
+            blocker_category = str(blocker.get("category") or "").strip()
+            blocker_message = str(blocker.get("summary") or blocker.get("human_summary") or blocker.get("issue") or "").strip()
+            cycle_message = str(live_cycle.get("summary") or live_cycle.get("summary_zh") or live_payload.get("summary") or "").strip()
+            live_message = blocker_message if (live_status == "blocked_fresh_base_reference_probe_required" or blocker_category == "fresh_base_reference_probe_required") else (cycle_message or blocker_message)
+            if live_message:
+                public_status = live_status or public_status
+                compact_result["status"] = public_status
+                compact_result["summary"] = live_message
+                public_progress["phase"] = public_status
+                public_progress["message"] = live_message
+                public_progress["current"] = 1
+                public_progress["total"] = 1
+                public_progress["percent"] = 100
+    public_log_result = compact_result if full_cycle_job else result
     payload = {
         "job_id": item.get("job_id", ""),
         "stage": public_stage,
         "status": public_status,
         "created_at": item.get("created_at", ""),
-        "logs": _public_job_logs(panel_stage or ("paper" if paper_job else ("full-cycle" if full_cycle_job else raw_stage)), item.get("logs"), public_progress, result, limit=40),
+        "logs": _public_job_logs(panel_stage or ("paper" if paper_job else ("full-cycle" if full_cycle_job else raw_stage)), item.get("logs"), public_progress, public_log_result, limit=40),
         "log_count": item.get("log_count", 0),
         "run_id": item.get("run_id", ""),
         "result": compact_result,
@@ -7304,12 +7333,31 @@ def _venue_health_failure(venue_id: str, year: int, message: str, adapter: str =
     }
 
 
+def _venue_health_result_for_request(result: Any, venue_id: str, year: int) -> dict:
+    payload = dict(result) if isinstance(result, dict) else {}
+    payload["venue_id"] = str(payload.get("venue_id") or venue_id)
+    try:
+        payload["year"] = int(payload.get("year") or year)
+    except (TypeError, ValueError):
+        payload["year"] = int(year)
+    payload["ok"] = bool(payload.get("ok"))
+    try:
+        payload["sample_count"] = int(payload.get("sample_count") or 0)
+    except (TypeError, ValueError):
+        payload["sample_count"] = 0
+    payload["source_adapter"] = str(payload.get("source_adapter") or payload.get("adapter") or "unknown")
+    payload["message"] = str(payload.get("message") or ("ok" if payload["ok"] else "No papers fetched."))
+    if not isinstance(payload.get("samples"), list):
+        payload["samples"] = []
+    return payload
+
+
 def _fetch_venue_sample_with_timeout(venue: dict, venue_id: str, year: int, sample_limit: int) -> dict:
     timeout_sec = _venue_health_timeout_sec()
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="venue-health")
     future = executor.submit(fetch_venue_sample, venue, year, sample_limit)
     try:
-        return future.result(timeout=timeout_sec)
+        return _venue_health_result_for_request(future.result(timeout=timeout_sec), venue_id, year)
     except FutureTimeoutError:
         future.cancel()
         return _venue_health_failure(venue_id, year, f"Venue health check timed out after {timeout_sec:.0f}s.")
