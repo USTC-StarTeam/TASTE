@@ -568,6 +568,47 @@ def test_compact_claude_job_preserves_panel_stage():
 
 
 
+
+def test_environment_job_list_uses_compact_public_logs(monkeypatch):
+    JOBS.clear()
+    monkeypatch.setattr(server, "_reconcile_detached_launcher_jobs", lambda: None)
+    monkeypatch.setattr(server, "_live_jobs_from_projects", lambda compact=True: [])
+    monkeypatch.setattr(server, "_cached_list_runs", lambda: [])
+    job = server.JobState("environment_demo", "environment")
+    job.status = "blocked"
+    job.progress = {"phase": "blocked", "current": 1, "total": 1, "percent": 100, "message": "项目：demo；状态：blocked_environment_base_selection_required。"}
+    job.result = {
+        "project": "demo",
+        "status": "blocked",
+        "action": "environment",
+        "panel_stage": "environment",
+        "summary": {
+            "summary": "audit complete; audited=12; ready=0",
+            "current_blocker": {"human_summary": "仍未选择 evidence-ready 仓库。"},
+        },
+    }
+    job.logs = [
+        "$ /tmp/taste-local/miniforge/envs/management/bin/python3.11 scripts/select_evidence_ready_repo.py --project demo",
+        "[literature-base-audit] candidate 1/4 query: \"Noisy historical query\"",
+        "selected_active_repo=none",
+        "Traceback (most recent call last): File \"/tmp/taste-local/TASTE/scripts/x.py\"",
+        "environment blocked",
+    ]
+    JOBS[job.job_id] = job
+
+    rows = server.api_jobs(compact=True, limit=10, include_history=True)
+
+    listed = next(row for row in rows if row.get("job_id") == job.job_id)
+    log_text = "\n".join(listed.get("logs") or [])
+    assert "当前状态：项目：demo" in log_text
+    assert "详细日志：已保留" in log_text
+    assert "未选择可审计基底仓库" in log_text
+    assert "/tmp/taste-local" not in log_text
+    assert "select_evidence_ready_repo.py" not in log_text
+    assert "Noisy historical query" not in log_text
+    assert "Traceback" not in log_text
+
+
 def test_agent_guidance_receipt_remains_visible_and_fetchable(monkeypatch):
     JOBS.clear()
     monkeypatch.setattr(server, "_reconcile_detached_launcher_jobs", lambda: None)

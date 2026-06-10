@@ -1919,6 +1919,98 @@ def _public_full_cycle_job_logs(logs: Any, progress: Any = None, result: Any = N
     return dedup[-limit:]
 
 
+def _public_stage_job_logs(stage: Any, logs: Any, progress: Any = None, result: Any = None, *, limit: int = 8) -> list[str]:
+    """Compact environment/experiment taskbar logs without exposing raw commands."""
+    raw = [str(line or "").strip() for line in (logs if isinstance(logs, list) else []) if str(line or "").strip()]
+    progress = progress if isinstance(progress, dict) else {}
+    result = result if isinstance(result, dict) else {}
+    public_stage = _public_taste_stage(stage)
+    stage_label = "环境配置" if public_stage == "environment" else ("实验迭代" if public_stage == "experiment" else public_stage)
+    public_prefixes = ("当前状态：", "阶段摘要：", "门控：", "审计进展：", "详细日志：", "产物：", "日志：")
+    if raw and all(any(line.startswith(prefix) for prefix in public_prefixes) for line in raw):
+        deduped: list[str] = []
+        seen_public: set[str] = set()
+        for line in raw:
+            if line in seen_public:
+                continue
+            seen_public.add(line)
+            deduped.append(line)
+        return deduped[-max(1, min(limit, 8)):]
+
+    def clean(value: Any, max_len: int = 220) -> str:
+        text = str(_strip_public_taste_marker(value or "")).strip()
+        if not text:
+            return ""
+        text = re.sub(r"(?i)(api[_-]?key|authorization|bearer|token)(\s*[:=]\s*)[^\s,'\"]+", r"\1\2***", text)
+        text = re.sub(r"(?i)(sk-[A-Za-z0-9_-]{8,})", "sk-***", text)
+        text = re.sub(r"/[^\s;,'\"]*/(?:miniforge|workspace|\.nvm)[^\s;,'\"]*", "[local-path]", text)
+        text = re.sub(r"\s+", " ", text)
+        return text[: max_len - 1].rstrip() + "…" if len(text) > max_len else text
+
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(prefix: str, value: Any, max_len: int = 220) -> None:
+        text = clean(value, max_len=max_len)
+        if not text:
+            return
+        line = f"{prefix}{text}" if prefix else text
+        if line in seen:
+            return
+        seen.add(line)
+        out.append(line)
+
+    status = result.get("status") or progress.get("phase")
+    message = progress.get("message")
+    if message:
+        add("当前状态：", message)
+    elif status:
+        add("当前状态：", status)
+
+    summary = result.get("summary")
+    if isinstance(summary, dict):
+        add("阶段摘要：", summary.get("progress_summary") or summary.get("summary") or summary.get("status"), max_len=260)
+        blocker = summary.get("current_blocker") if isinstance(summary.get("current_blocker"), dict) else {}
+        add("门控：", blocker.get("human_summary") or blocker.get("summary") or blocker.get("issue"), max_len=260)
+    else:
+        add("阶段摘要：", summary, max_len=260)
+
+    for key, label in [("artifact_dir", "产物"), ("log_path", "日志")]:
+        if result.get(key):
+            add(f"{label}：", "已记录，完整内容保留在后端任务审计。")
+
+    if raw:
+        checkpoints: list[str] = []
+        for line in raw:
+            lowered = line.lower()
+            if line.startswith("$") or "bin/python" in lowered or "claude -p" in lowered:
+                continue
+            if "traceback" in lowered or "file \"" in lowered:
+                continue
+            if "optional command failed" in lowered:
+                checkpoints.append("有可恢复的候选审计命令失败；当前门控仍按阶段摘要展示。")
+                continue
+            if "environment blocked" in lowered:
+                checkpoints.append("环境配置停在真实门控阻塞状态。")
+                continue
+            if "experiment blocked" in lowered:
+                checkpoints.append("实验迭代停在真实门控阻塞状态。")
+                continue
+            if "selected_active_repo=none" in lowered:
+                checkpoints.append("未选择可审计基底仓库。")
+                continue
+            if "repo_search_running" in lowered or "audit complete" in lowered or "ready=0" in lowered:
+                checkpoints.append(clean(line, max_len=180))
+                continue
+        for line in checkpoints[-3:]:
+            add("审计进展：", line, max_len=220)
+        add("详细日志：", f"已保留 {len(raw)} 行原始日志；任务栏只显示当前摘要。")
+    elif not out:
+        add("当前状态：", f"{stage_label}任务已记录。")
+
+    return out[-max(1, limit):]
+
+
 def _public_job_logs(stage: Any, logs: Any, progress: Any = None, result: Any = None, *, limit: int = 40) -> list[str]:
     """Return taskbar logs that are useful to a human, not raw JSON dumps."""
     raw = [str(line or "").strip() for line in (logs if isinstance(logs, list) else []) if str(line or "").strip()]
@@ -1929,6 +2021,9 @@ def _public_job_logs(stage: Any, logs: Any, progress: Any = None, result: Any = 
 
     if _is_full_cycle_job(raw_stage, "", result, raw):
         return _public_full_cycle_job_logs(raw, progress, result, limit=limit)
+
+    if public_stage in {"environment", "experiment"}:
+        return _public_stage_job_logs(public_stage, raw, progress, result, limit=min(limit, 8))
 
     if public_stage == "paper" or raw_stage.startswith("paper"):
         out: list[str] = []
