@@ -958,6 +958,7 @@ Hard rules:
 - Do not fabricate metrics, claims, citations, data availability, or paper readiness.
 - Cite exact local files/paths you inspected.
 - Do not recreate or mutate a locked conda environment unless explicitly instructed and justified by local evidence.
+- Reference-protocol/import/env probes are experiment-environment checks: run repo imports and dependency probes with `$EXPERIMENT_PYTHON`/`$PROJECT_PYTHON` or the resolved project experiment Python. Never use the Web management Python, `cfg.python_executable`, `sys.executable`, or bare `python` for selected-repo imports. If the project experiment Python lacks dependencies, record a dependency blocker; do not fall back to the management environment.
 - If stewardship memory exists, follow it unless your fresh local inspection contradicts it; if contradicted, explain the evidence and write the needed repo/env/data action for TASTE.
 - You own repo, data, and conda-environment implementation decisions for this project: decide whether to keep/modify the current repo or switch/search, whether to reuse/repair/create a project env, and whether to use/download/place/search data.
 - Never silently delete an existing conda environment; if a rebuild is needed, create or recommend a new project-specific env and preserve old state.
