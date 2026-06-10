@@ -1933,6 +1933,10 @@ def test_reference_protocol_import_probe_surfaces_dependency_blocker(monkeypatch
 
     assert protocol["status"] == "reference_protocol_probe_blocked"
     assert protocol["decision"] == "dependency_install_required"
+    assert "32/46" in summary["summary"]
+    assert "json_repair" in summary["summary"]
+    assert "等待参考协议/环境 manifest 探针" not in summary["summary"]
+    assert summary["human_gate_summary"]["title"] == "参考协议依赖缺失"
     assert "32/46" in summary["current_blocker"]["summary"]
     assert "json_repair" in summary["current_blocker"]["summary"]
     assert "补齐缺失依赖" in summary["current_blocker"]["next_action"]

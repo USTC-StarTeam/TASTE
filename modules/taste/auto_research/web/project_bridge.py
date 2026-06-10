@@ -10308,7 +10308,8 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     elif status == "blocked_fresh_base_data_required":
         summary = f"环境阶段已选择当前候选基底：{base_title}；但真实数据/loader 尚未通过，不能进入实验或论文证据。"
     elif status == "blocked_fresh_base_reference_probe_required":
-        summary = f"环境阶段已选择当前候选基底：{base_title}；真实数据/loader 已通过，等待参考协议/环境 manifest 探针。"
+        protocol_blocker_summary = _reference_protocol_probe_blocker_summary(protocol_probe, base_title)
+        summary = f"环境阶段已选择当前候选基底：{base_title}；" + (protocol_blocker_summary or "真实数据/loader 已通过，等待参考协议/环境 manifest 探针。")
     elif reference_full_job_live:
         ref_pid = str(reference_full_job.get("pid") or "")
         ref_title = base_title or "当前基底"
@@ -10616,7 +10617,8 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     live_reference_job = reference_full_job if reference_full_job else safe_dict(tick.get("full_reference_job"))
     supervision = {**_empty_supervision_payload(), "status": selected_plan_gate["status"] if selected_plan_gate.get("blocked") else "blocked_literature_llm_quota_exhausted" if llm_quota_blocked else "running" if fresh_find_running else supervision_status, "action": _public_internal_names(tick.get("action", "")), "generated_at": tick.get("generated_at", ""), "next_action": _public_internal_names(blocker_next_action), "full_reference_job": live_reference_job, "full_cycle_job": public_full_job, "environment_base_selection": _public_environment_selection_summary(env), "claude_current_find_state": safe_dict(tick.get("claude_current_find_state"))}
     blocker_category = selected_plan_gate["category"] if selected_plan_gate.get("blocked") else "literature_llm_quota_exhausted" if llm_quota_blocked else "fresh_find_running" if fresh_find_running else "literature_recommendation_shortfall" if literature_gate_blocked else "experiment_evidence_audit" if selected_base_viability_blocked else "fresh_base_reference_reproduction_running" if reference_full_job_live else "fresh_base_reference_probe_required" if status == "blocked_fresh_base_reference_probe_required" else "submission_readiness" if submission_blockers else str(ref_gate.get("decision") or ref_gate.get("status") or "")
-    blocker_title = selected_plan_gate["title"] if selected_plan_gate.get("blocked") else "LLM API 额度/配置不可用" if llm_quota_blocked else "Find 正在运行" if fresh_find_running else "Find 推荐门控阻塞" if literature_gate_blocked else "候选实验运行中" if selected_base_viability_blocked and active_experiment_training else "缺少审计就绪候选实验证据" if base_switch_gate_unresolved else "缺少当前主线候选实验证据" if selected_base_viability_blocked else "参考复现正在运行" if reference_full_job_live else "等待参考协议/环境 manifest 探针" if status == "blocked_fresh_base_reference_probe_required" else "论文证据/投稿门控阻塞" if submission_blockers else ("当前项目门控状态" if env.get("valid") else "等待环境阶段 Claude Code 选择当前基底")
+    reference_probe_has_dependency_blocker = bool(_reference_protocol_probe_blocker_summary(protocol_probe, base_title))
+    blocker_title = selected_plan_gate["title"] if selected_plan_gate.get("blocked") else "LLM API 额度/配置不可用" if llm_quota_blocked else "Find 正在运行" if fresh_find_running else "Find 推荐门控阻塞" if literature_gate_blocked else "候选实验运行中" if selected_base_viability_blocked and active_experiment_training else "缺少审计就绪候选实验证据" if base_switch_gate_unresolved else "缺少当前主线候选实验证据" if selected_base_viability_blocked else "参考复现正在运行" if reference_full_job_live else "参考协议依赖缺失" if status == "blocked_fresh_base_reference_probe_required" and reference_probe_has_dependency_blocker else "等待参考协议/环境 manifest 探针" if status == "blocked_fresh_base_reference_probe_required" else "论文证据/投稿门控阻塞" if submission_blockers else ("当前项目门控状态" if env.get("valid") else "等待环境阶段 Claude Code 选择当前基底")
     legacy_control = {"policy": "历史仓库、实验和参考复现只保留为审计记录；当前主线以本轮 Find 后的环境审查选择为准。", "details_hidden": True}
     if literature_gate_blocked and env.get("blocked_selection"):
         legacy_control["blocked_environment_selection"] = env.get("blocked_selection")
@@ -11267,7 +11269,8 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
     elif status == 'blocked_fresh_base_data_required':
         summary = f'环境阶段已选择当前候选基底：{base_title}；但真实数据/loader 尚未通过，不能进入实验或论文证据。'
     elif status == 'blocked_fresh_base_reference_probe_required':
-        summary = f'环境阶段已选择当前候选基底：{base_title}；真实数据/loader 已通过，等待参考协议/环境 manifest 探针。'
+        protocol_blocker_summary = _reference_protocol_probe_blocker_summary(protocol_probe, base_title)
+        summary = f'环境阶段已选择当前候选基底：{base_title}；' + (protocol_blocker_summary or '真实数据/loader 已通过，等待参考协议/环境 manifest 探针。')
     else:
         summary = str(full_cycle_raw.get('summary_zh') or full_cycle_raw.get('summary') or f'项目：{topic}；状态：{status}。当前基底：{base_title}。')
     summary = _public_run_summary_without_action_plan(summary)
@@ -11319,8 +11322,8 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
         next_action = '等待 full reference reproduction 完成；随后自动刷新参考复现、科学进展、论文证据、投稿准备度和阻塞行动计划门控。'
     elif status == 'blocked_fresh_base_reference_probe_required':
         blocker_category = 'fresh_base_reference_probe_required'
-        blocker_title = '等待参考协议/环境 manifest 探针'
         protocol_blocker_summary = _reference_protocol_probe_blocker_summary(protocol_probe, base_title)
+        blocker_title = '参考协议依赖缺失' if protocol_blocker_summary else '等待参考协议/环境 manifest 探针'
         blocker_summary = protocol_blocker_summary or f'{base_title} 数据和 loader/import probe 已通过；当前等待参考协议/环境 manifest 探针。'
         next_action = '使用当前配置的实验环境补齐缺失依赖后重新运行 reference-protocol/import probe；通过前不训练、不写论文、不提升结论。' if protocol_blocker_summary else '记录当前基底最小环境 manifest，并对 ready 数据集运行有界只读 reference-protocol/import probe；通过前不训练、不写论文、不提升结论。'
     elif submission_blockers:
