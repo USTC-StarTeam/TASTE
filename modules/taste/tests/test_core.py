@@ -71,6 +71,22 @@ def test_extract_json_from_fenced_response():
     assert extract_json("```json\n{\"a\": 1}\n```") == {"a": 1}
 
 
+
+def test_source_selection_expands_multiple_years_into_venue_year_pairs():
+    from auto_research.source_selection import normalize_source_selection
+
+    selection = normalize_source_selection({
+        "venue_ids": ["openreview_iclr_2026", "openreview_iclr_2026"],
+        "years": [2026, 2025, 2026],
+    })
+
+    assert selection["venue_ids"] == ["openreview_iclr_2026"]
+    assert selection["years"] == [2026, 2025]
+    assert selection["venue_years"] == [
+        {"venue_id": "openreview_iclr_2026", "year": 2026},
+        {"venue_id": "openreview_iclr_2026", "year": 2025},
+    ]
+
 def test_keyword_category_detects_llm():
     assert keyword_category("A Large Language Model Method", "").startswith("Local topic")
 

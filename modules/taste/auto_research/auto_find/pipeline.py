@@ -9,7 +9,7 @@ from collections import Counter
 from math import ceil
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import date, datetime, timezone
-from typing import Callable
+from typing import Any, Callable
 
 from auto_research.llm import LLMClient, clamp_workers, fallback_score, keyword_category, parallel_json
 from auto_research.markdown import paper_markdown
@@ -2068,16 +2068,91 @@ def _combined_metadata_audit(audits: list[dict], adapter: str) -> dict:
     }
 
 
+def _selection_list_value(selection: object, name: str, fallback_name: str = "") -> list[Any]:
+    value: Any = None
+    if isinstance(selection, dict):
+        value = selection.get(name)
+        if value is None and fallback_name:
+            value = selection.get(fallback_name)
+    else:
+        value = getattr(selection, name, None)
+        if value is None and fallback_name:
+            value = getattr(selection, fallback_name, None)
+    return value if isinstance(value, list) else []
+
+
+def _normalize_selection_years(value: Any) -> list[int]:
+    raw_values = value if isinstance(value, list) else ([] if value is None else [value])
+    years: list[int] = []
+    seen: set[int] = set()
+    for item in raw_values:
+        try:
+            year = int(item)
+        except (TypeError, ValueError):
+            continue
+        if year < 2000 or year > 2100 or year in seen:
+            continue
+        seen.add(year)
+        years.append(year)
+    return years or [date.today().year]
+
+
+def _selection_venue_year_pairs(selection: object) -> list[dict[str, int | str]]:
+    raw_pairs = _selection_list_value(selection, "venue_years")
+    pairs: list[dict[str, int | str]] = []
+    seen: set[tuple[str, int]] = set()
+    for item in raw_pairs:
+        venue_id = ""
+        raw_years: Any = None
+        if isinstance(item, dict):
+            venue_id = str(item.get("venue_id") or item.get("venue") or item.get("id") or "").strip()
+            raw_years = item.get("years") if isinstance(item.get("years"), list) else item.get("year")
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            venue_id = str(item[0] or "").strip()
+            raw_years = item[1]
+        if not venue_id:
+            continue
+        for year in _normalize_selection_years(raw_years):
+            key = (venue_id, year)
+            if key in seen:
+                continue
+            seen.add(key)
+            pairs.append({"venue_id": venue_id, "year": year})
+    if pairs:
+        return pairs
+    venue_ids = [str(item or "").strip() for item in _selection_list_value(selection, "venue_ids", "venues")]
+    venue_ids = [item for index, item in enumerate(venue_ids) if item and item not in venue_ids[:index]]
+    years = _normalize_selection_years(_selection_list_value(selection, "years"))
+    for venue_id in venue_ids:
+        for year in years:
+            key = (venue_id, year)
+            if key in seen:
+                continue
+            seen.add(key)
+            pairs.append({"venue_id": venue_id, "year": year})
+    return pairs
+
+
+def _selection_venue_year_groups(selection: object) -> list[tuple[str, list[int]]]:
+    return [(str(pair["venue_id"]), [int(pair["year"])]) for pair in _selection_venue_year_pairs(selection)]
+
+
+def _selection_venue_unit_count(selection: object) -> int:
+    pairs = _selection_venue_year_pairs(selection)
+    if pairs:
+        return len(pairs)
+    venues = _selection_list_value(selection, "venue_ids", "venues")
+    return len(venues)
+
+
 def _source_count_hint(selection: object) -> int:
     if not isinstance(selection, dict):
         return 0
-    venues = selection.get("venue_ids") or selection.get("venues") or []
-    count = len(venues) if isinstance(venues, list) else 0
+    count = _selection_venue_unit_count(selection)
     for name in ("include_arxiv", "include_biorxiv", "include_huggingface", "include_github", "include_nature", "include_science"):
         if selection.get(name):
             count += 1
     return count
-
 
 def _recommendation_target_hint(config: AppConfig) -> int:
     configured = int(os.environ.get("STRONG_RECOMMENDATION_TARGET_COUNT", "0") or 0)
@@ -3982,10 +4057,7 @@ def _strong_ranked(items: list[dict], config: AppConfig | None) -> list[dict]:
 
 
 def _selection_source_count(selection: object) -> int:
-    venues = getattr(selection, "venue_ids", None)
-    if venues is None and isinstance(selection, dict):
-        venues = selection.get("venue_ids") or selection.get("venues")
-    count = len(venues or [])
+    count = _selection_venue_unit_count(selection)
     for name in ("include_arxiv", "include_biorxiv", "include_huggingface", "include_github", "include_nature", "include_science"):
         enabled = getattr(selection, name, None)
         if enabled is None and isinstance(selection, dict):
@@ -3993,7 +4065,6 @@ def _selection_source_count(selection: object) -> int:
         if enabled:
             count += 1
     return max(1, count)
-
 
 def _strong_recommendation_target_count(config: AppConfig, source_count: int | None = None) -> int:
     configured_target = int(os.environ.get("STRONG_RECOMMENDATION_TARGET_COUNT", "0") or 0)
@@ -4940,8 +5011,9 @@ def run_find(
     # emergency safety cap when set to a positive value. A zero/empty value means
     # use the all-corpus venue fetch path.
     title_scan_limit = _venue_title_fetch_limit(config)
-    _progress("venue_title_index", 0, max(1, len(request.selection.venue_ids)), "Starting venue title index fetch")
-    for venue_index, venue_id in enumerate(request.selection.venue_ids, 1):
+    venue_year_groups = _selection_venue_year_groups(request.selection)
+    _progress("venue_title_index", 0, max(1, len(venue_year_groups)), "Starting venue title index fetch")
+    for venue_index, (venue_id, requested_years) in enumerate(venue_year_groups, 1):
         _raise_if_cancelled(should_cancel)
         venue = catalog.get(venue_id)
         if not venue:
@@ -4949,7 +5021,7 @@ def run_find(
             venue_health_report.append({
                 "venue_id": venue_id,
                 "venue": venue_id,
-                "requested_years": request.selection.years,
+                "requested_years": requested_years,
                 "effective_years": [],
                 "adapter": "unknown",
                 "sample_count": 0,
@@ -4958,7 +5030,7 @@ def run_find(
                 "suggested_fix": "Add this venue to catalog/custom_venues.json or choose a supported venue id.",
             })
             continue
-        effective_years, year_fallback_reason = _resolve_venue_years(venue, request.selection.years)
+        effective_years, year_fallback_reason = _resolve_venue_years(venue, requested_years)
         if year_fallback_reason:
             log(f"{venue.get('name')}: {year_fallback_reason}")
 
@@ -4978,7 +5050,7 @@ def run_find(
             venue_health_report.append({
                 "venue_id": venue_id,
                 "venue": venue.get("name"),
-                "requested_years": request.selection.years,
+                "requested_years": requested_years,
                 "effective_years": effective_years,
                 "year_fallback_reason": year_fallback_reason,
                 "adapter": adapter,
@@ -5024,7 +5096,7 @@ def run_find(
             continue
 
         log(f"Fetching title index for {venue.get('name')} years {effective_years}")
-        _progress("venue_title_index", venue_index, len(request.selection.venue_ids), f"Fetching title index: {venue.get('name')}")
+        _progress("venue_title_index", venue_index, len(venue_year_groups), f"Fetching title index: {venue.get('name')}")
         local_result = _load_local_category_guided_index(venue, effective_years, effective_config, llm, title_scan_limit, log)
         venue_metadata_audit: dict = {}
         if local_result:
@@ -5040,8 +5112,8 @@ def run_find(
             title_corpus_index = title_index
             venue_metadata_audit = _online_venue_metadata_audit(title_corpus_index, adapter)
             if not title_index:
-                requested_set = {int(year) for year in request.selection.years if str(year).isdigit()}
-                for fallback_year in _venue_yewindow(request.selection.years, max_backfill_years=3):
+                requested_set = {int(year) for year in requested_years if str(year).isdigit()}
+                for fallback_year in _venue_yewindow(requested_years, max_backfill_years=3):
                     if fallback_year in requested_set:
                         continue
                     fallback_local = _load_local_category_guided_index(venue, [fallback_year], effective_config, llm, title_scan_limit, log)
@@ -5052,7 +5124,7 @@ def run_find(
                         venue_metadata_audit = _combined_metadata_audit([report.get("metadata_audit") for report in fallback_reports], adapter)
                         effective_years = [fallback_year]
                         year_fallback_reason = (
-                            f"requested years {request.selection.years} had no usable papers; "
+                            f"requested years {requested_years} had no usable papers; "
                             f"using local_database backfill year {fallback_year}"
                         )
                         log(f"{venue.get('name')}: {year_fallback_reason}")
@@ -5065,7 +5137,7 @@ def run_find(
                         venue_metadata_audit = _online_venue_metadata_audit(title_corpus_index, adapter)
                         effective_years = [fallback_year]
                         year_fallback_reason = (
-                            f"requested years {request.selection.years} had no usable papers via {adapter}; "
+                            f"requested years {requested_years} had no usable papers via {adapter}; "
                             f"using latest online year {fallback_year}"
                         )
                         log(f"{venue.get('name')}: {year_fallback_reason}")
@@ -5078,7 +5150,7 @@ def run_find(
         venue_health_report.append({
             "venue_id": venue_id,
             "venue": venue.get("name"),
-            "requested_years": request.selection.years,
+            "requested_years": requested_years,
             "effective_years": effective_years,
             "year_fallback_reason": year_fallback_reason,
             "adapter": adapter,
@@ -5137,7 +5209,7 @@ def run_find(
     raw_title_index = _dedupe_items(raw_title_index)
     title_candidates = _dedupe_items(title_candidates)
     venue_papers = _dedupe_items(venue_papers)
-    if request.selection.venue_ids:
+    if venue_year_groups:
         source_status.extend(_venue_source_status_rows())
         # Do not append an anonymous aggregate venue row here. The UI and
         # source_status.md render each requested venue from venue_health_report;

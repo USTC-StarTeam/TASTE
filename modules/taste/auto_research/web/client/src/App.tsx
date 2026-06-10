@@ -419,7 +419,10 @@ function venueYearLabel(venue: Venue, label = "Available years", empty = "not in
 
 function selectedYearLabel(years: number[], label = "Selected year") {
   const selected = years.filter(Boolean);
-  return `${label}: ${selected.length ? selected.join(", ") : DEFAULT_FIND_YEAR}`;
+  const zh = /[一-鿿]/.test(label);
+  const separator = zh ? "，" : ", ";
+  const colon = zh ? "：" : ": ";
+  return `${label}${colon}${selected.length ? selected.join(separator) : DEFAULT_FIND_YEAR}`;
 }
 
 function venueMetaLabel(venue: Venue, labels?: Record<string, string>, selectedYears?: number[]) {
@@ -798,7 +801,7 @@ const TEXT = {
     remove: "移除",
     venueSearch: "搜索会议、期刊、领域或等级",
     years: "年份",
-    yearsHelp: "默认只选择最新一年；如果输入多个年份，系统只使用最大的年份。",
+    yearsHelp: "默认只选择最新一年；可输入多个年份并用逗号或空格分隔，系统会完整抓取每个已选会议的每个年份。",
     selectedYear: "选择年份",
     availableYears: "可用年份",
     notIndexed: "未索引",
@@ -1339,7 +1342,7 @@ const TEXT = {
     remove: "Remove",
     venueSearch: "Search venue, journal, field, or rank",
     years: "Years",
-    yearsHelp: "Only the latest single year is used; if multiple years are entered, the largest year is used.",
+    yearsHelp: "The default is the latest single year; enter multiple years separated by commas or spaces to fetch every selected venue-year.",
     selectedYear: "Selected year",
     availableYears: "Available years",
     notIndexed: "not indexed",
@@ -1732,11 +1735,13 @@ function splitList(value: string) {
   return value.split(/[,\s]+/).map((item) => item.trim()).filter(Boolean);
 }
 
-function normalizeSelectedYears(value: string) {
-  const years = splitList(value)
+function normalizeSelectedYears(value: string | number[]) {
+  const rawItems = Array.isArray(value) ? value : splitList(String(value || ""));
+  const years = rawItems
     .map((item) => Number(item))
     .filter((year) => Number.isInteger(year) && year >= 2000 && year <= 2100);
-  return [years.length ? Math.max(...years) : DEFAULT_FIND_YEAR];
+  const uniqueYears = Array.from(new Set(years)).sort((a, b) => b - a);
+  return uniqueYears.length ? uniqueYears : [DEFAULT_FIND_YEAR];
 }
 
 function escapeHtml(value: string) {
@@ -3276,9 +3281,11 @@ function App() {
   }
 
   function currentFindSelection() {
+    const selectedYears = normalizeSelectedYears(years);
     return {
       venue_ids: selectedVenues,
-      years: normalizeSelectedYears(years),
+      years: selectedYears,
+      venue_years: selectedVenues.flatMap((venueId) => selectedYears.map((year) => ({ venue_id: venueId, year }))),
       include_arxiv: includeArxiv,
       include_biorxiv: includeBiorxiv,
       include_huggingface: includeHf,
@@ -5159,7 +5166,12 @@ function App() {
       const ids = selectedVenues.length
         ? selectedVenues
         : venues.filter((venue) => highPriority.includes(venue.name)).map((venue) => venue.id);
-      const response = await checkVenueHealth({ venue_ids: ids, years: requestYears, sample_limit: 2 });
+      const response = await checkVenueHealth({
+        venue_ids: ids,
+        years: requestYears,
+        venue_years: ids.flatMap((venueId) => requestYears.map((year) => ({ venue_id: venueId, year }))),
+        sample_limit: 2,
+      });
       const next: Record<string, { ok: boolean; message: string; source_adapter: string; sample_count: number }> = {};
       for (const result of response.results) {
         const current = next[result.venue_id];
@@ -6119,7 +6131,7 @@ function App() {
                 <label>{t.years}</label>
                 <p className="help">{t.yearsHelp}</p>
                 <input value={years} onChange={(e) => setYears(e.target.value)} onBlur={(e) => setYears(normalizeSelectedYears(e.target.value).join(", "))} placeholder="2026" />
-                <div className="countLine">{selectedVenues.length} {t.selected} / {visibleAvailableVenues.length} {t.shown} · {t.selectedYear}: {selectedScanYears.join(", ")}</div>
+                <div className="countLine">{selectedVenues.length} {t.selected} / {visibleAvailableVenues.length} {t.shown} · {selectedYearLabel(selectedScanYears, t.selectedYear)}</div>
                 <div className="venuePicker">
                   <div>
                     <h4>{t.selectedVenuesTitle}</h4>

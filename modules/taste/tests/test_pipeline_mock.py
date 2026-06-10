@@ -2,7 +2,7 @@ import auto_research.auto_read.pipeline as read_pipeline
 
 from datetime import date
 
-from auto_research.auto_find.pipeline import SCORING_POLICY_VERSION, _apply_quality_bonus, _apply_stable_ranking_score, _attach_latest_released_venue_context, _latest_released_venue_context, _min_title_candidates, _resolve_venue_years, _score_title_pool, run_find
+from auto_research.auto_find.pipeline import SCORING_POLICY_VERSION, _apply_quality_bonus, _apply_stable_ranking_score, _attach_latest_released_venue_context, _latest_released_venue_context, _min_title_candidates, _resolve_venue_years, _score_title_pool, _selection_source_count, _selection_venue_year_groups, run_find
 from auto_research.paths import RUNS_DIR
 from auto_research.storage import read_json
 from auto_research.auto_idea.pipeline import patch_idea, run_idea
@@ -11,6 +11,16 @@ from auto_research.auto_read.pipeline import run_read
 from auto_research.models import AppConfig, FindRequest, IdeaPatch, IdeaRequest, PlanRequest, ReadRequest, VenueSelection
 from auto_research.storage import delete_run, run_dir
 
+
+
+def test_pipeline_selection_venue_year_groups_preserve_multiple_years():
+    selection = VenueSelection(venue_ids=["openreview_iclr_2026"], years=[2026, 2025])
+
+    assert _selection_venue_year_groups(selection) == [
+        ("openreview_iclr_2026", [2026]),
+        ("openreview_iclr_2026", [2025]),
+    ]
+    assert _selection_source_count(selection) == 2
 
 def test_mock_pipeline_arxiv_disabled_external_optional():
     cfg = AppConfig(

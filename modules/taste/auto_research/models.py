@@ -89,6 +89,7 @@ class AppConfig(BaseModel):
 class VenueSelection(BaseModel):
     venue_ids: list[str] = Field(default_factory=list)
     years: list[int] = Field(default_factory=lambda: [date.today().year])
+    venue_years: list[dict[str, Any]] = Field(default_factory=list)
     include_arxiv: bool = False
     include_biorxiv: bool = False
     include_huggingface: bool = False
@@ -135,6 +136,7 @@ class PlanPolishRequest(BaseModel):
 class VenueHealthRequest(BaseModel):
     venue_ids: list[str] = Field(default_factory=list)
     years: list[int] = Field(default_factory=lambda: [date.today().year])
+    venue_years: list[dict[str, Any]] = Field(default_factory=list)
     sample_limit: int = 3
 
 

@@ -22,10 +22,82 @@ DEFAULT_VENUE_IDS = [
 ]
 
 
+def _unique_strings(values: list[Any]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        item = str(value or "").strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def _normalize_year_values(value: Any, default_years: list[int] | None = None) -> list[int]:
+    raw_values = value if isinstance(value, list) else ([] if value is None else [value])
+    years: list[int] = []
+    seen: set[int] = set()
+    for item in raw_values:
+        try:
+            year = int(item)
+        except (TypeError, ValueError):
+            continue
+        if year < 2000 or year > 2100 or year in seen:
+            continue
+        seen.add(year)
+        years.append(year)
+    if years:
+        return years
+    return list(default_years or [])
+
+
+def _normalize_venue_year_pairs(value: Any) -> list[dict[str, int | str]]:
+    if not isinstance(value, list):
+        return []
+    pairs: list[dict[str, int | str]] = []
+    seen: set[tuple[str, int]] = set()
+    for item in value:
+        venue_id = ""
+        raw_years: Any = None
+        if isinstance(item, dict):
+            venue_id = str(item.get("venue_id") or item.get("venue") or item.get("id") or "").strip()
+            raw_years = item.get("years") if isinstance(item.get("years"), list) else item.get("year")
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            venue_id = str(item[0] or "").strip()
+            raw_years = item[1]
+        if not venue_id:
+            continue
+        for year in _normalize_year_values(raw_years, []):
+            key = (venue_id, year)
+            if key in seen:
+                continue
+            seen.add(key)
+            pairs.append({"venue_id": venue_id, "year": year})
+    return pairs
+
+
+def _pairs_from_venues_and_years(venue_ids: list[str], years: list[int]) -> list[dict[str, int | str]]:
+    pairs: list[dict[str, int | str]] = []
+    seen: set[tuple[str, int]] = set()
+    for venue_id in venue_ids:
+        for year in years:
+            key = (venue_id, int(year))
+            if key in seen:
+                continue
+            seen.add(key)
+            pairs.append({"venue_id": venue_id, "year": int(year)})
+    return pairs
+
+
 def default_source_selection() -> dict[str, Any]:
+    default_year = date.today().year
+    venue_ids = list(DEFAULT_VENUE_IDS)
+    years = [default_year]
     return {
-        "venue_ids": list(DEFAULT_VENUE_IDS),
-        "years": [date.today().year],
+        "venue_ids": venue_ids,
+        "years": years,
+        "venue_years": _pairs_from_venues_and_years(venue_ids, years),
         "include_arxiv": False,
         "include_biorxiv": False,
         "include_huggingface": False,
@@ -38,23 +110,20 @@ def default_source_selection() -> dict[str, Any]:
 def normalize_source_selection(selection: Any) -> dict[str, Any]:
     raw = selection if isinstance(selection, dict) else {}
     defaults = default_source_selection()
-    venue_ids = raw.get("venue_ids") or raw.get("venues") or defaults["venue_ids"]
-    if not isinstance(venue_ids, list):
-        venue_ids = defaults["venue_ids"]
-    years = raw.get("years") or defaults["years"]
-    if not isinstance(years, list):
-        years = defaults["years"]
-    normalized_years: list[int] = []
-    for item in years:
-        try:
-            normalized_years.append(int(item))
-        except (TypeError, ValueError):
-            continue
-    if not normalized_years:
-        normalized_years = defaults["years"]
+    raw_venue_ids = raw.get("venue_ids", raw.get("venues", defaults["venue_ids"]))
+    venue_ids = _unique_strings(raw_venue_ids if isinstance(raw_venue_ids, list) else defaults["venue_ids"])
+    raw_years = raw.get("years", defaults["years"])
+    years = _normalize_year_values(raw_years if isinstance(raw_years, list) else raw_years, defaults["years"])
+    venue_years = _normalize_venue_year_pairs(raw.get("venue_years"))
+    if not venue_years:
+        venue_years = _pairs_from_venues_and_years(venue_ids, years)
+    if venue_years:
+        venue_ids = _unique_strings([pair["venue_id"] for pair in venue_years])
+        years = _normalize_year_values([pair["year"] for pair in venue_years], years)
     return {
-        "venue_ids": [str(item) for item in venue_ids if str(item).strip()],
-        "years": normalized_years,
+        "venue_ids": venue_ids,
+        "years": years,
+        "venue_years": venue_years,
         "include_arxiv": bool(raw.get("include_arxiv", defaults["include_arxiv"])),
         "include_biorxiv": bool(raw.get("include_biorxiv", defaults["include_biorxiv"])),
         "include_huggingface": bool(raw.get("include_huggingface", defaults["include_huggingface"])),
@@ -62,7 +131,6 @@ def normalize_source_selection(selection: Any) -> dict[str, Any]:
         "include_nature": bool(raw.get("include_nature", defaults["include_nature"])),
         "include_science": bool(raw.get("include_science", defaults["include_science"])),
     }
-
 
 def _read_json(path: Path | None, default: Any) -> Any:
     if path is None or not path.exists():

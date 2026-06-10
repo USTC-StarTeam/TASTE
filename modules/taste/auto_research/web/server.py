@@ -2521,13 +2521,37 @@ def _find_artifact_run_dir_for_project(root: Path, run_id: str) -> Path:
 def _find_selection_source_count(selection: Any) -> int:
     if not isinstance(selection, dict):
         return 1
+    pairs = []
+    seen_pairs: set[tuple[str, int]] = set()
+    for item in selection.get("venue_years") or []:
+        if not isinstance(item, dict):
+            continue
+        venue_id = str(item.get("venue_id") or item.get("venue") or item.get("id") or "").strip()
+        raw_years = item.get("years") if isinstance(item.get("years"), list) else [item.get("year")]
+        if not venue_id:
+            continue
+        for raw_year in raw_years:
+            try:
+                year = int(raw_year)
+            except (TypeError, ValueError):
+                continue
+            key = (venue_id, year)
+            if key not in seen_pairs:
+                seen_pairs.add(key)
+                pairs.append(key)
     venues = selection.get("venue_ids") or selection.get("venues") or []
-    count = len(venues) if isinstance(venues, list) else 0
+    years = selection.get("years") or []
+    if pairs:
+        count = len(pairs)
+    elif isinstance(venues, list):
+        year_count = len(years) if isinstance(years, list) and years else 1
+        count = len(venues) * max(1, year_count)
+    else:
+        count = 0
     for name in ("include_arxiv", "include_biorxiv", "include_huggingface", "include_github", "include_nature", "include_science"):
         if selection.get(name):
             count += 1
     return max(1, count)
-
 
 def _strict_find_projection_config(config: AppConfig) -> AppConfig:
     updates: dict[str, Any] = {}
@@ -6981,24 +7005,59 @@ def api_catalog() -> list[dict]:
 @app.post("/api/catalog/venue-health")
 def api_venue_health(request: VenueHealthRequest) -> dict:
     catalog = catalog_by_id()
-    venue_ids = request.venue_ids or list(catalog.keys())
+
+    def normalize_pairs() -> list[tuple[str, int]]:
+        pairs: list[tuple[str, int]] = []
+        seen: set[tuple[str, int]] = set()
+        for item in request.venue_years or []:
+            if not isinstance(item, dict):
+                continue
+            venue_id = str(item.get("venue_id") or item.get("venue") or item.get("id") or "").strip()
+            raw_years = item.get("years") if isinstance(item.get("years"), list) else [item.get("year")]
+            if not venue_id:
+                continue
+            for raw_year in raw_years:
+                try:
+                    year = int(raw_year)
+                except (TypeError, ValueError):
+                    continue
+                key = (venue_id, year)
+                if key in seen:
+                    continue
+                seen.add(key)
+                pairs.append(key)
+        if pairs:
+            return pairs
+        venue_ids = request.venue_ids or list(catalog.keys())
+        years = request.years or [datetime.now(UTC).year]
+        for venue_id in venue_ids:
+            for raw_year in years:
+                try:
+                    year = int(raw_year)
+                except (TypeError, ValueError):
+                    continue
+                key = (str(venue_id), year)
+                if key in seen:
+                    continue
+                seen.add(key)
+                pairs.append(key)
+        return pairs
+
     results = []
-    for venue_id in venue_ids:
+    for venue_id, year in normalize_pairs():
         venue = catalog.get(venue_id)
         if not venue:
-            for year in request.years:
-                results.append({
-                    "venue_id": venue_id,
-                    "year": year,
-                    "ok": False,
-                    "sample_count": 0,
-                    "source_adapter": "unknown",
-                    "message": "Unknown venue id.",
-                    "samples": [],
-                })
+            results.append({
+                "venue_id": venue_id,
+                "year": year,
+                "ok": False,
+                "sample_count": 0,
+                "source_adapter": "unknown",
+                "message": "Unknown venue id.",
+                "samples": [],
+            })
             continue
-        for year in request.years:
-            results.append(fetch_venue_sample(venue, year, max(1, request.sample_limit)))
+        results.append(fetch_venue_sample(venue, year, max(1, request.sample_limit)))
     return {"results": results}
 
 
