@@ -1919,23 +1919,40 @@ def _public_full_cycle_job_logs(logs: Any, progress: Any = None, result: Any = N
     return dedup[-limit:]
 
 
+def _public_stage_label(stage: Any) -> str:
+    public_stage = _public_taste_stage(stage)
+    if public_stage == "environment":
+        return "环境配置"
+    if public_stage == "experiment":
+        return "实验迭代"
+    return public_stage
+
+
+def _public_stage_command_message(stage: Any, value: Any) -> str:
+    text = str(value or "").strip()
+    lowered = text.lower()
+    if not text:
+        return ""
+    if (
+        text.startswith("$")
+        or lowered.startswith("workflow command:")
+        or "bin/python" in lowered
+        or " scripts/" in lowered
+        or "claude -p" in lowered
+        or lowered.startswith("runtime path head:")
+    ):
+        return f"{_public_stage_label(stage)}正在运行阶段审计命令，完整命令保留在后端任务审计。"
+    return ""
+
+
 def _public_stage_job_logs(stage: Any, logs: Any, progress: Any = None, result: Any = None, *, limit: int = 8) -> list[str]:
     """Compact environment/experiment taskbar logs without exposing raw commands."""
     raw = [str(line or "").strip() for line in (logs if isinstance(logs, list) else []) if str(line or "").strip()]
     progress = progress if isinstance(progress, dict) else {}
     result = result if isinstance(result, dict) else {}
     public_stage = _public_taste_stage(stage)
-    stage_label = "环境配置" if public_stage == "environment" else ("实验迭代" if public_stage == "experiment" else public_stage)
+    stage_label = _public_stage_label(public_stage)
     public_prefixes = ("当前状态：", "阶段摘要：", "门控：", "审计进展：", "详细日志：", "产物：", "日志：")
-
-    def command_status(value: Any) -> str:
-        text = str(value or "").strip()
-        lowered = text.lower()
-        if not text:
-            return ""
-        if text.startswith("$") or lowered.startswith("workflow command:") or "bin/python" in lowered or " scripts/" in lowered or lowered.startswith("runtime path head:"):
-            return f"{stage_label}正在运行阶段审计命令，完整命令保留在后端任务审计。"
-        return ""
 
     def strip_public_prefixes(value: Any) -> str:
         text = str(value or "").strip()
@@ -1953,7 +1970,7 @@ def _public_stage_job_logs(stage: Any, logs: Any, progress: Any = None, result: 
         seen_public: set[str] = set()
         for line in raw:
             if line.startswith("当前状态："):
-                replacement = command_status(line.removeprefix("当前状态："))
+                replacement = _public_stage_command_message(public_stage, line.removeprefix("当前状态："))
                 if replacement:
                     line = "当前状态：" + replacement
             if line in seen_public:
@@ -1988,7 +2005,7 @@ def _public_stage_job_logs(stage: Any, logs: Any, progress: Any = None, result: 
     status = result.get("status") or progress.get("phase")
     message = progress.get("message")
     if message:
-        add("当前状态：", command_status(message) or message)
+        add("当前状态：", _public_stage_command_message(public_stage, message) or message)
     elif status:
         add("当前状态：", status)
 
@@ -6792,6 +6809,10 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
         elif paper_status:
             public_status = "needs_writing" if paper_status.startswith("blocked") or paper_status in {"normality_blocked", "preview_pdf_blocked"} else paper_status
     public_progress = dict(item.get("progress")) if isinstance(item.get("progress"), dict) else {}
+    if public_stage in {"environment", "experiment"}:
+        command_message = _public_stage_command_message(public_stage, public_progress.get("message"))
+        if command_message:
+            public_progress["message"] = command_message
     if public_stage == "environment" and public_status == "blocked":
         project_id = str(compact_result.get("project") or result.get("project") or "").strip()
         if project_id:
@@ -6820,6 +6841,36 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
                     compact_result["summary"] = live_message
                     if live_status:
                         compact_result["status"] = live_status
+        stale_message = str(public_progress.get("message") or "")
+        if "not_started" in stale_message:
+            fallback = "历史环境配置任务已阻塞；当前状态以最新环境任务和项目摘要为准。"
+            public_progress["message"] = fallback
+            public_progress["phase"] = public_progress.get("phase") or "blocked"
+            public_progress["current"] = public_progress.get("current") or 1
+            public_progress["total"] = public_progress.get("total") or 1
+            public_progress["percent"] = public_progress.get("percent") or 100
+            compact_result["summary"] = fallback
+        progress_phase = str(public_progress.get("phase") or "").strip()
+        progress_message = str(public_progress.get("message") or "")
+        if "真实数据/loader" in progress_message or "real dataset/loader" in progress_message.lower():
+            public_status = "blocked_fresh_base_data_required"
+            if progress_phase in {"", "blocked"}:
+                public_progress["phase"] = public_status
+            compact_result["status"] = public_status
+        elif public_status == "done" and progress_phase.startswith("blocked"):
+            public_status = progress_phase
+            compact_result["status"] = public_status
+    if public_stage == "environment":
+        progress_phase = str(public_progress.get("phase") or "").strip()
+        progress_message = str(public_progress.get("message") or "")
+        if "真实数据/loader" in progress_message or "real dataset/loader" in progress_message.lower():
+            public_status = "blocked_fresh_base_data_required"
+            if progress_phase in {"", "blocked"}:
+                public_progress["phase"] = public_status
+            compact_result["status"] = public_status
+        elif public_status == "done" and progress_phase.startswith("blocked"):
+            public_status = progress_phase
+            compact_result["status"] = public_status
     if full_cycle_job:
         if isinstance(compact_result.get("summary"), str) and any(marker in compact_result["summary"].lower() for marker in ["候选路线", "独立授权", "base_switch", "selected_base", "deterministic"]):
             compact_result["summary"] = "历史 full-cycle 启动器已停止；当前状态以项目摘要和实验模块为准。"
@@ -8347,7 +8398,11 @@ async def ws_job(websocket: WebSocket, job_id: str):
                 for line in new_logs:
                     await websocket.send_json({"type": "log", "message": line})
                 sent = len(logs)
-                await websocket.send_json({"type": "progress", "progress": _strip_public_taste_marker(live_job.get("progress") or {})})
+                live_progress_payload = _strip_public_taste_marker(live_job.get("progress") or {})
+                if live_stage in {"environment", "experiment"}:
+                    compact_live_job = _compact_job_for_list(live_job)
+                    live_progress_payload = _strip_public_taste_marker(compact_live_job.get("progress") or live_progress_payload)
+                await websocket.send_json({"type": "progress", "progress": live_progress_payload})
                 await asyncio.sleep(2.0)
                 continue
             job = JOBS.get(job_id)
@@ -8369,7 +8424,11 @@ async def ws_job(websocket: WebSocket, job_id: str):
                 await websocket.send_json({"type": "log", "message": line})
             sent = len(job.logs)
             if job.progress_version != sent_progress:
-                await websocket.send_json({"type": "progress", "progress": _strip_public_taste_marker(job.progress)})
+                job_progress_payload = _strip_public_taste_marker(job.progress)
+                if job_stage in {"environment", "experiment"}:
+                    compact_job = _compact_job_for_list(job.as_dict(compact=True))
+                    job_progress_payload = _strip_public_taste_marker(compact_job.get("progress") or job_progress_payload)
+                await websocket.send_json({"type": "progress", "progress": job_progress_payload})
                 sent_progress = job.progress_version
             await asyncio.sleep(0.5)
     except WebSocketDisconnect:

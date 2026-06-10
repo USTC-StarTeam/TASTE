@@ -590,6 +590,82 @@ def test_environment_public_logs_fold_raw_command_progress():
 
 
 
+def test_environment_compact_job_sanitizes_running_progress_command():
+    row = server._compact_job_for_list({
+        "job_id": "environment_running",
+        "stage": "environment",
+        "status": "running",
+        "created_at": "2026-06-10T00:00:00Z",
+        "progress": {
+            "phase": "environment",
+            "current": 3,
+            "total": 0,
+            "percent": 0,
+            "message": "$ /tmp/taste-local/miniforge/envs/management/bin/python3.11 scripts/select_evidence_ready_repo.py --project demo",
+        },
+        "logs": ["$ /tmp/taste-local/miniforge/envs/management/bin/python3.11 scripts/select_evidence_ready_repo.py --project demo"],
+        "result": {"project": "demo", "action": "environment", "panel_stage": "environment"},
+    })
+
+    assert "环境配置正在运行阶段审计命令" in row["progress"]["message"]
+    assert "/tmp/taste-local" not in row["progress"]["message"]
+    assert "select_evidence_ready_repo.py" not in row["progress"]["message"]
+    joined_logs = "\n".join(row["logs"])
+    assert "环境配置正在运行阶段审计命令" in joined_logs
+    assert "/tmp/taste-local" not in joined_logs
+    assert "select_evidence_ready_repo.py" not in joined_logs
+
+
+def test_environment_compact_job_promotes_data_blocker_over_done_status():
+    row = server._compact_job_for_list({
+        "job_id": "environment_done_but_data_blocked",
+        "stage": "environment",
+        "status": "done",
+        "created_at": "2026-06-10T00:00:00Z",
+        "progress": {
+            "phase": "blocked",
+            "current": 1,
+            "total": 1,
+            "percent": 100,
+            "message": "环境阶段已选择当前候选基底：example/repo；但真实数据/loader 尚未通过，不能进入实验或论文证据。",
+        },
+        "logs": ["environment done"],
+        "result": {"project": "demo", "action": "environment", "panel_stage": "environment", "status": "done"},
+    })
+
+    assert row["status"] == "blocked_fresh_base_data_required"
+    assert row["progress"]["phase"] == "blocked_fresh_base_data_required"
+    assert row["result"]["status"] == "blocked_fresh_base_data_required"
+    assert "真实数据/loader" in row["progress"]["message"]
+
+
+def test_environment_compact_job_hides_stale_not_started_history(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "project_summary",
+        lambda _project: {
+            "status": "running",
+            "full_research_cycle": {"status": "running", "summary_zh": "环境配置任务正在运行。"},
+            "stages": {"environment": {"summary": "环境配置任务正在运行。"}},
+        },
+    )
+    row = server._compact_job_for_list({
+        "job_id": "environment_old",
+        "stage": "environment",
+        "status": "blocked",
+        "created_at": "2026-06-10T00:00:00Z",
+        "progress": {"phase": "blocked", "current": 1, "total": 1, "percent": 100, "message": "项目：demo；状态：not_started。"},
+        "logs": ["当前状态：项目：demo；状态：not_started。", "environment blocked"],
+        "result": {"project": "demo", "action": "environment", "panel_stage": "environment", "status": "blocked"},
+    })
+
+    assert "not_started" not in row["progress"]["message"]
+    assert "历史环境配置任务已阻塞" in row["progress"]["message"]
+    joined_logs = "\n".join(row["logs"])
+    assert "not_started" not in joined_logs
+    assert "历史环境配置任务已阻塞" in joined_logs
+
+
 def test_environment_compact_job_refreshes_blocked_progress_from_project_summary(monkeypatch):
     monkeypatch.setattr(
         server,
