@@ -1172,6 +1172,17 @@ def run_claude(project: str, instruction: str, stage: str, timeout_sec: int, res
             'blocked_at': dt.datetime.now(dt.timezone.utc).isoformat(),
         }
         save_json(paths.state / 'claude_tool_policy_last_block.json', tool_policy_report)
+        active_proc = proc
+        if active_proc is not None and active_proc.poll() is None:
+            tool_policy_report['process_terminate_requested_at'] = dt.datetime.now(dt.timezone.utc).isoformat()
+            save_json(paths.state / 'claude_tool_policy_last_block.json', tool_policy_report)
+            stop_process(active_proc, signal.SIGTERM)
+            try:
+                active_proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                tool_policy_report['process_sigkill_requested_at'] = dt.datetime.now(dt.timezone.utc).isoformat()
+                save_json(paths.state / 'claude_tool_policy_last_block.json', tool_policy_report)
+                stop_process(active_proc, signal.SIGKILL)
         if 'trajectory supervisor recursion' in reason:
             recursion_report = dict(tool_policy_report)
             recursion_report.update({

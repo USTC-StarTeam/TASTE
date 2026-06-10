@@ -677,9 +677,10 @@ function sourceAbstractAvailabilityText(item: any, lang: Lang) {
 function sourceStatusDetail(item: any, lang: Lang = "zh") {
   const zh = lang === "zh";
   const labels = zh
-    ? { status: "状态", ok: "正常", limited: "受限", failed: "失败", raw: "标题库总量", screen: "标题筛选输入", detail: "元数据详情", adapter: "来源适配器", years: "有效年份", requested: "请求年份", metadata: "元数据完整性" }
-    : { status: "Status", ok: "ok", limited: "limited", failed: "failed", raw: "title-index total", screen: "title-screen input", detail: "metadata details", adapter: "adapter", years: "effective years", requested: "requested years", metadata: "metadata completeness" };
-  const state = item?.limited ? labels.limited : item?.ok ? labels.ok : labels.failed;
+    ? { status: "状态", ok: "正常", limited: "受限", failed: "失败", checking: "检查中", raw: "标题库总量", screen: "标题筛选输入", detail: "元数据详情", adapter: "来源适配器", years: "有效年份", requested: "请求年份", metadata: "元数据完整性" }
+    : { status: "Status", ok: "ok", limited: "limited", failed: "failed", checking: "checking", raw: "title-index total", screen: "title-screen input", detail: "metadata details", adapter: "adapter", years: "effective years", requested: "requested years", metadata: "metadata completeness" };
+  const rawStatus = String(item?.status || item?.phase || "").trim().toLowerCase();
+  const state = rawStatus === "checking" || rawStatus === "fetching" ? labels.checking : item?.limited ? labels.limited : item?.ok ? labels.ok : labels.failed;
   const parts: string[] = [];
   const seen = new Set<string>();
   const pushPart = (value: any) => {
@@ -844,7 +845,7 @@ const TEXT = {
     fetchLimit: "非会议来源详情预算",
     fetchLimitHelp: "只用于 arXiv/HuggingFace/GitHub 等非会议来源。会议库默认先全量扫描标题，再由主题筛选和详情评分决定精读候选。",
     recommendLimit: "推荐文章检查预算",
-    recommendLimitHelp: "发现阶段的推荐文章检查/输出预算；启用 N 个渠道时目标为 5 x N 篇推荐文章。推荐门控通过多少就展示多少，不会为了凑数把边界论文写成推荐。",
+    recommendLimitHelp: "发现阶段最终推荐论文的最大数量；召回和详情评分会保留更宽的候选池，最终只展示通过真实摘要和 LLM 评分门控的前 N 篇。",
     ideaLimit: "想法最大数量",
     ideaLimitHelp: "想法阶段生成的研究想法数量上限。",
     titleScanLimit: "会议标题全扫保护上限",
@@ -1386,7 +1387,7 @@ const TEXT = {
     fetchLimit: "Non-venue detail budget",
     fetchLimitHelp: "Used for arXiv/HuggingFace/GitHub. Venue libraries scan titles broadly first, then topic filtering and detail scoring choose read candidates.",
     recommendLimit: "Recommended paper budget",
-    recommendLimitHelp: "Find targets 5 x N recommended papers for N enabled channels. It displays only rows that pass the evidence gate and never pads recommendations with boundary candidates.",
+    recommendLimitHelp: "Maximum final recommended papers. Find keeps a wider recall/detail pool, then displays only the top N rows that pass real-abstract and LLM scoring gates.",
     ideaLimit: "Max ideas",
     ideaLimitHelp: "Maximum research ideas generated in the Idea stage.",
     titleScanLimit: "Venue full-scan safety cap",
@@ -5316,6 +5317,7 @@ function App() {
   }
 
   async function runVenueHealth() {
+    if (!researchProjectsLoaded || researchProjectLoading || !researchSummary) return;
     try {
       setCheckingVenues(true);
       setError("");
@@ -5326,6 +5328,28 @@ function App() {
       const pairs = selectedVenues.length
         ? venueYearPairs(selectedVenues, selectedVenueYears)
         : ids.flatMap((venueId) => addCandidateYears.map((year) => ({ venue_id: venueId, year })));
+      const byId = new Map(venues.map((venue) => [venue.id, venue]));
+      const pendingRows = pairs.map((pair) => {
+        const venue = byId.get(pair.venue_id) || CORE_VENUE_FALLBACKS[pair.venue_id];
+        const venueName = venue?.name || pair.venue_id;
+        return {
+          source: `${venueName} ${pair.year || ""}`.trim(),
+          source_kind: "venue_health",
+          venue_id: pair.venue_id,
+          venue: venueName,
+          year: pair.year,
+          status: "checking",
+          ok: false,
+          count: "",
+          sample_count: "",
+          adapter: "",
+          source_adapter: "",
+          message: lang === "zh" ? "正在检查可抓取性" : "checking fetchability",
+          requested_years: pair.year ? [pair.year] : [],
+          effective_years: pair.year ? [pair.year] : [],
+        };
+      });
+      if (pendingRows.length) setVenueHealthStatusRows(pendingRows);
       const response = await checkVenueHealth({
         venue_ids: ids,
         years: selectedVenues.length ? yearsFromVenueYearMap(selectedVenues, selectedVenueYears) : addCandidateYears,
@@ -5333,7 +5357,6 @@ function App() {
         sample_limit: 2,
       });
       const next: Record<string, { ok: boolean; message: string; source_adapter: string; sample_count: number }> = {};
-      const byId = new Map(venues.map((venue) => [venue.id, venue]));
       const statusRows = response.results.map((result) => {
         const venue = byId.get(result.venue_id) || CORE_VENUE_FALLBACKS[result.venue_id];
         const venueName = venue?.name || result.venue_id;
@@ -5631,7 +5654,7 @@ function App() {
           <div className="sourceStatus compactSourceStatus">
             <h4 data-testid="find-source-status-heading">{t.sourceStatus}</h4>
             {sourceRows.map((item: any, index: number) => (
-              <div className={item.ok ? "sourceRow ok" : "sourceRow fail"} key={`${item.source || item.venue || "source"}-${index}`}>
+              <div className={String(item.status || "").toLowerCase() === "checking" ? "sourceRow" : item.ok ? "sourceRow ok" : "sourceRow fail"} key={`${item.source || item.venue || "source"}-${index}`}>
                 <span>{sourceStatusLabel(item)}</span>
                 <small>{sourceStatusDetail(item, lang)}</small>
               </div>
@@ -6315,7 +6338,7 @@ function App() {
             <div className="toolbar">
               <h2>{t.find}</h2>
               <div className="toolbarActions">
-                <button onClick={runVenueHealth} disabled={checkingVenues}>{checkingVenues ? t.checking : t.checkVenue}</button>
+                <button onClick={runVenueHealth} disabled={checkingVenues || researchProjectLoading || !researchProjectsLoaded || !researchSummary}>{checkingVenues ? t.checking : t.checkVenue}</button>
                 <button className="primary" onClick={runFind} disabled={stageLaunchDisabledByFullCycle}>{t.runFind}</button>
               </div>
             </div>

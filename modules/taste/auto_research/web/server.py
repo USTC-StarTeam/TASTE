@@ -7170,7 +7170,7 @@ def _request_targets_current_project_find(request: ReadRequest, project: str, ro
     return bool(current_run_id and (not requested_run_id or requested_run_id == current_run_id))
 
 
-def _current_find_read_is_incomplete(root: Path, run_id: str) -> bool:
+def _current_find_read_is_incomplete(root: Path, run_id: str, idea_count: int = 1) -> bool:
     run_id = str(run_id or "").strip()
     if not run_id:
         return False
@@ -7201,9 +7201,15 @@ def _current_find_read_is_incomplete(root: Path, run_id: str) -> bool:
     readings = (read_payload if isinstance(read_payload, dict) else {}).get("readings")
     if not isinstance(readings, list) or not readings:
         return True
-    if not same_run(idea_payload) or not isinstance((idea_payload if isinstance(idea_payload, dict) else {}).get("ideas"), list):
+    try:
+        required_ideas = max(1, int(idea_count or 1))
+    except (TypeError, ValueError):
+        required_ideas = 1
+    ideas = (idea_payload if isinstance(idea_payload, dict) else {}).get("ideas")
+    plans = (plan_payload if isinstance(plan_payload, dict) else {}).get("plans")
+    if not same_run(idea_payload) or not isinstance(ideas, list) or len(ideas) < required_ideas:
         return True
-    if not same_run(plan_payload) or not isinstance((plan_payload if isinstance(plan_payload, dict) else {}).get("plans"), list):
+    if not same_run(plan_payload) or not isinstance(plans, list) or len(plans) < required_ideas:
         return True
     return False
 
@@ -7289,8 +7295,13 @@ def _run_current_find_claude_read_job(project: str, root: Path, request: ReadReq
     if should_cancel():
         raise JobCancelled("Task cancelled by user.")
     progress("current_find_claude_takeover", 0, 1, "主控 Claude Code 正在接管当前 Find 的全文精读、idea 和 plan。")
-    repair_mode = _current_find_read_validation_requires_repair(root, run_id)
     management_python = os.environ.get("MANAGEMENT_PYTHON") or sys.executable
+    try:
+        configured_idea_count = int(getattr(load_config(), "max_ideas", 0) or 0)
+    except Exception:
+        configured_idea_count = 0
+    idea_count = max(1, configured_idea_count or AppConfig().max_ideas)
+    repair_mode = _current_find_read_validation_requires_repair(root, run_id) or _current_find_read_is_incomplete(root, run_id, idea_count=idea_count)
     cmd = [
         management_python,
         str(WORKSPACE_ROOT / "scripts" / "ensure_current_find_research_plan.py"),
@@ -7298,6 +7309,8 @@ def _run_current_find_claude_read_job(project: str, root: Path, request: ReadReq
         project,
         "--read-limit",
         "0",
+        "--idea-count",
+        str(idea_count),
     ]
     if repair_mode:
         cmd.append("--force")
@@ -7361,6 +7374,7 @@ def _run_current_find_claude_read_job(project: str, root: Path, request: ReadReq
         "run_id": run_id,
         "source": "current_find_claude_read_idea_plan_wrapper",
         "repair_mode": repair_mode,
+        "idea_count": idea_count,
         "return_code": rc,
         "readings": len((read_payload if isinstance(read_payload, dict) else {}).get("readings") or []),
         "ideas": len((idea_payload if isinstance(idea_payload, dict) else {}).get("ideas") or []),

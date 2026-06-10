@@ -112,6 +112,15 @@ def test_default_full_venue_fetch_does_not_cap_recall_to_max_fetch_papers():
     assert find_pipeline._venue_recall_result_limit(config, 2000) == 1000
 
 
+def test_final_recommendation_target_respects_configured_top_n():
+    from auto_research.auto_find import pipeline as find_pipeline
+
+    config = AppConfig(max_recommended_papers=4)
+
+    assert find_pipeline._strong_recommendation_target_count(config, source_count=1) == 4
+    assert find_pipeline._strong_recommendation_target_count(config, source_count=4) == 4
+
+
 def test_arxiv_empty_date_window_defaults_to_recent_half_year():
     from auto_research.auto_find import sources
 
@@ -252,6 +261,26 @@ def test_read_request_for_historical_run_can_use_ordinary_read_after_current_fin
     assert server._read_request_should_use_current_find_wrapper(request, "demo_project", root) is False
 
 
+def test_current_find_read_is_incomplete_when_idea_or_plan_contract_is_empty(tmp_path):
+    root = tmp_path / "projects" / "demo_project"
+    taste_dir = root / "planning" / "finding"
+    state_dir = root / "state"
+    taste_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    write_json(taste_dir / "find_results.json", {"run_id": "find_current"})
+    write_json(taste_dir / "read_results.json", {"run_id": "find_current", "source": "claude_code_current_find_takeover", "readings": [{"title": "Current Paper"}]})
+    write_json(taste_dir / "ideas.json", {"run_id": "find_current", "source": "claude_code_current_find_takeover", "ideas": []})
+    write_json(taste_dir / "plans.json", {"run_id": "find_current", "source": "claude_code_current_find_takeover", "plans": []})
+    write_json(state_dir / "current_find_claude_reading_validation.json", {"run_id": "find_current", "valid": True})
+
+    assert server._current_find_read_is_incomplete(root, "find_current", idea_count=2) is True
+
+    write_json(taste_dir / "ideas.json", {"run_id": "find_current", "source": "claude_code_current_find_takeover", "ideas": [{"id": "idea-1"}, {"id": "idea-2"}]})
+    write_json(taste_dir / "plans.json", {"run_id": "find_current", "source": "claude_code_current_find_takeover", "plans": [{"plan_id": "plan-1"}, {"plan_id": "plan-2"}]})
+
+    assert server._current_find_read_is_incomplete(root, "find_current", idea_count=2) is False
+
+
 def test_current_find_read_validation_requires_repair_only_for_pending_current_run(tmp_path):
     root = tmp_path / "projects" / "demo_project"
     state_dir = root / "state"
@@ -281,6 +310,180 @@ def test_current_find_read_validation_requires_repair_only_for_pending_current_r
         {"run_id": "find_old", "valid": False, "pending_full_text_reading_count": 5},
     )
     assert server._current_find_read_validation_requires_repair(root, "find_demo") is False
+
+
+def test_current_find_read_job_passes_configured_idea_count(tmp_path, monkeypatch):
+    root = tmp_path / "projects" / "demo_project"
+    taste_dir = root / "planning" / "finding"
+    taste_dir.mkdir(parents=True)
+    write_json(taste_dir / "find_results.json", {"run_id": "find_current"})
+    captured: dict[str, list[str]] = {}
+
+    class FakePopen:
+        def __init__(self, cmd, **_kwargs):
+            captured["cmd"] = list(cmd)
+            self.stdout = iter(['{"status":"current_find_claude_read_complete"}\n'])
+
+        def wait(self, timeout=None):
+            return 0
+
+        def terminate(self):
+            return None
+
+    monkeypatch.setattr(server, "load_config", lambda: AppConfig(max_ideas=2))
+    monkeypatch.setattr(server.subprocess, "Popen", FakePopen)
+
+    result = server._run_current_find_claude_read_job(
+        "demo_project",
+        root,
+        ReadRequest(run_id="find_current", max_papers=0),
+        lambda _line: None,
+        lambda: False,
+        lambda *_args: None,
+    )
+
+    assert captured["cmd"][captured["cmd"].index("--idea-count") + 1] == "2"
+    assert result["idea_count"] == 2
+
+
+def test_repair_deep_read_fragment_source_is_current_and_preferred(tmp_path):
+    import importlib.util
+
+    module_path = Path(__file__).resolve().parents[3] / "scripts" / "ensure_current_find_research_plan.py"
+    spec = importlib.util.spec_from_file_location("ensure_current_find_research_plan_test", module_path)
+    ensure_plan = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(ensure_plan)
+
+    taste_dir = tmp_path / "planning" / "finding"
+    fragment_dir = taste_dir / "current_find_deep_read_fragments"
+    fragment_dir.mkdir(parents=True)
+    run_id = "find_demo"
+    title = "Repair Fragment Selection Paper"
+
+    def reading(limitations: str) -> dict:
+        return {
+            "paper_id": "paper-1",
+            "title": title,
+            "abstract_zh": "中文摘要" * 120,
+            "motivation_zh": "研究动机" * 90,
+            "method_details_zh": "方法细节" * 260,
+            "experiments_zh": "实验结果" * 150,
+            "limitations_zh": limitations,
+            "method_advantages_zh": ["优势说明" * 40, "另一个优势" * 35],
+            "method_disadvantages_zh": ["不足说明" * 40, "另一个不足" * 35],
+            "full_text_available": True,
+            "full_text_status": "pdf_text_read",
+            "pdf_text_chars": 12000,
+            "subagent_deep_read": True,
+            "deep_read_audit": {"mode": "task_subagent", "subagent_used": True, "status": "completed"},
+        }
+
+    write_json(
+        fragment_dir / "01_paper-1.json",
+        {"run_id": run_id, "source": ensure_plan.CURRENT_FIND_DEEP_READ_FRAGMENT_SOURCE, "reading": reading("短局限")},
+    )
+    write_json(
+        fragment_dir / "01_paper-1_repair_attempt2.json",
+        {"run_id": run_id, "source": ensure_plan.CURRENT_FIND_DEEP_READ_FRAGMENT_REPAIR_SOURCE, "reading": reading("返修后的详细局限" * 90)},
+    )
+
+    rows = ensure_plan._current_find_deep_read_fragment_rows(taste_dir, run_id)
+    selected = ensure_plan._select_current_find_readings_from_candidates(
+        rows,
+        {"run_id": run_id, "strong_recommendations": [{"id": "paper-1", "title": title}]},
+        {},
+    )
+
+    assert len(rows) == 2
+    assert selected[0]["deep_read_audit"]["fragment_path"].endswith("01_paper-1_repair_attempt2.json")
+    assert selected[0]["deep_read_source"] == ensure_plan.CURRENT_FIND_DEEP_READ_FRAGMENT_REPAIR_SOURCE
+
+
+def test_nested_plan_selection_is_lifted_into_current_find_contract():
+    import importlib.util
+
+    module_path = Path(__file__).resolve().parents[3] / "scripts" / "ensure_current_find_research_plan.py"
+    spec = importlib.util.spec_from_file_location("ensure_current_find_research_plan_test_selection", module_path)
+    ensure_plan = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(ensure_plan)
+
+    idea = {
+        "id": "idea-1",
+        "title": "Idea One",
+        "new_method": "new method",
+        "initial_experiment": "initial experiment",
+    }
+    raw_plan = {
+        "plan_id": "plan-1",
+        "idea_id": "idea-1",
+        "title": "Plan One",
+        "steps": ["specific step with measurable protocol"],
+        "plans_selection": {
+            "selected": True,
+            "selected_by": "main_claude_code_after_deep_read",
+            "reason": "best evidence alignment",
+        },
+    }
+
+    plan = ensure_plan._sanitize_plan(raw_plan, idea, 1, [], [], [])
+    selection = ensure_plan.apply_current_find_execution_selection([idea], [plan], executable=True)
+
+    assert plan["selected_for_execution"] is True
+    assert plan["execute_next"] is True
+    assert plan["execution_selection"]["reason"] == "best evidence alignment"
+    assert selection["selected_plan_id"] == "plan-1"
+    assert selection["selection_issue"] == ""
+
+
+def test_ensure_claude_plan_state_respects_configured_idea_count(tmp_path, monkeypatch):
+    import importlib.util
+    from types import SimpleNamespace
+
+    module_path = Path(__file__).resolve().parents[3] / "scripts" / "ensure_current_find_research_plan.py"
+    spec = importlib.util.spec_from_file_location("ensure_current_find_research_plan_test_state", module_path)
+    ensure_plan = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(ensure_plan)
+    monkeypatch.setattr(ensure_plan, "load_project_config", lambda _project: {"target_venue": "ICLR"})
+
+    paths = SimpleNamespace(root=tmp_path, state=tmp_path / "state", planning=tmp_path / "planning")
+    finding = paths.planning / "finding"
+    finding.mkdir(parents=True)
+    paths.state.mkdir(parents=True)
+    write_json(finding / "find_results.json", {"run_id": "find_demo", "strong_recommendations": [{"title": "Paper 1"}, {"title": "Paper 2"}]})
+    write_json(finding / "read_results.json", {"run_id": "find_demo", "source": ensure_plan.CLAUDE_TAKEOVER_SOURCE, "readings": [{"title": "Paper 1"}, {"title": "Paper 2"}], "targeted_search_queries": ["query one", "query two", "query three"]})
+    write_json(paths.state / "current_find_claude_reading_validation.json", {"run_id": "find_demo", "valid": True, "policy_version": ensure_plan.FULL_TEXT_READ_POLICY_VERSION, "actual_reading_count": 2, "full_text_reading_count": 2, "pending_full_text_reading_count": 0, "blockers": []})
+
+    def idea(idx: int) -> dict:
+        return {
+            "id": f"idea-{idx}",
+            "title": f"Idea {idx}",
+            "new_method": "new method " * 8,
+            "initial_experiment": "initial experiment " * 8,
+            "inspired_by": [{"title": "Paper 1", "inspiration": "method"}],
+            "supporting_papers": [{"title": "Paper 1"}],
+            "objective_scores": {key: 7.5 for key in ensure_plan.IDEA_OBJECTIVE_SCORE_KEYS},
+            "score": 7.5,
+            "idea_score": 7.5,
+            "idea_score_audit": {"mode": "task_subagent", "subagent_used": True, "status": "completed"},
+        }
+
+    ideas = [idea(1), idea(2)]
+    plans = [
+        {"plan_id": "plan-1", "idea_id": "idea-1", "title": "Plan 1", "steps": ["specific step"], "selected_for_execution": True, "execute_next": True, "execution_selection": {"selected": True, "selected_by": "main_claude_code_after_deep_read", "reason": "best"}},
+        {"plan_id": "plan-2", "idea_id": "idea-2", "title": "Plan 2", "steps": ["specific step"], "selected_for_execution": False, "execute_next": False, "execution_selection": {"selected": False, "selected_by": "not_selected_candidate_backlog", "reason": "backlog"}},
+    ]
+    write_json(finding / "ideas.json", {"run_id": "find_demo", "source": ensure_plan.CLAUDE_TAKEOVER_SOURCE, "ideas": ideas, "targeted_search_queries": ["query one", "query two", "query three"]})
+    write_json(finding / "plans.json", {"run_id": "find_demo", "source": ensure_plan.CLAUDE_TAKEOVER_SOURCE, "plans": plans, "targeted_search_queries": ["query one", "query two", "query three"]})
+
+    payload = ensure_plan.ensure_claude_plan_state("demo_project", paths, "find_demo", [{"title": "Paper 1"}, {"title": "Paper 2"}], ideas, plans, {"status": "completed", "return_code": 0}, idea_count=2)
+
+    assert payload["status"] == "claude_current_find_read_idea_plan_ready_waiting_for_environment_base_selection"
+    assert payload["current_find_idea_count"] == 2
+    assert payload["selected_plan_id"] == "plan-1"
+    assert not payload.get("idea_contract_issues")
 
 
 def test_compact_read_job_result_does_not_project_paper_status(monkeypatch):

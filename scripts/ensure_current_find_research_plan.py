@@ -259,6 +259,8 @@ CURRENT_FIND_CONTENT_ARTIFACT_NAMES = (
 CURRENT_FIND_JSON_ARTIFACT_NAMES = ("read_results.json", "ideas.json", "plans.json")
 CURRENT_FIND_DEEP_READ_FRAGMENT_DIR_NAME = "current_find_deep_read_fragments"
 CURRENT_FIND_DEEP_READ_FRAGMENT_SOURCE = "claude_subagent_deep_read_fragment"
+CURRENT_FIND_DEEP_READ_FRAGMENT_REPAIR_SOURCE = "claude_subagent_deep_read_fragment_repair"
+CURRENT_FIND_DEEP_READ_FRAGMENT_SOURCES = {CURRENT_FIND_DEEP_READ_FRAGMENT_SOURCE, CURRENT_FIND_DEEP_READ_FRAGMENT_REPAIR_SOURCE}
 
 
 def _safe_timestamp_for_path(value: str) -> str:
@@ -1761,7 +1763,7 @@ def _fragment_delivery_audit_ok(row: dict[str, Any]) -> bool:
     audit = row.get("deep_read_audit") if isinstance(row.get("deep_read_audit"), dict) else {}
     source = str(row.get("deep_read_source") or audit.get("source") or "").strip()
     fragment_path = str(audit.get("fragment_path") or row.get("fragment_path") or "").strip()
-    return source == CURRENT_FIND_DEEP_READ_FRAGMENT_SOURCE and bool(fragment_path)
+    return source in CURRENT_FIND_DEEP_READ_FRAGMENT_SOURCES and bool(fragment_path)
 
 
 def _subagent_reading_audit_report(readings: list[dict[str, Any]], paths: Any, run_id: str) -> dict[str, Any]:
@@ -3349,6 +3351,9 @@ def write_claude_takeover_prompt(paths, project: str, run_id: str, read_limit: i
     prompt_path = paths.state / ("current_find_claude_takeover_prompt.md" if attempt <= 1 else f"current_find_claude_takeover_repair_prompt_attempt{attempt}.md")
     target_venue = project_target_venue(project) or "ICLR"
     repair_block = ""
+    idea_plan_count = max(1, _positive_int(idea_count) or 5)
+    not_selected_count = max(0, idea_plan_count - 1)
+    read_item_count = max(0, _positive_int(read_limit) or 0)
     if isinstance(repair_validation, dict) and repair_validation:
         repair_payload = _compact_validation_for_prompt(repair_validation)
         repair_block = f"""
@@ -3369,15 +3374,15 @@ def write_claude_takeover_prompt(paths, project: str, run_id: str, read_limit: i
 - full_text_packet_conflict_titles 表示 TASTE 已取得可读正文 text_path/pdf_url/text_chars，但上一轮 read_results/read.md 仍声称全文不可访问、摘要仅或 metadata-only；必须以 full_text_packet 为准，打开对应 text_path，删除不可访问结论并重写该论文精读。
 - deep_read_content_gap_details 是逐篇字段合同失败清单；必须按其中列出的字段写入 `abstract_zh`、`motivation_zh`、`method_details_zh` 或中文 `method`、`experiments_zh` 或中文 `experiments`、`limitations_zh` 或中文 `limitations`，并写入 `method_advantages_zh`、`method_disadvantages_zh` 各至少两条。`abstract_from_find` 可以作为论文原摘要溯源来生成/迁移 `abstract_zh`，但不能替代 `motivation_zh`、`method_details_zh`、`experiments_zh`、`limitations_zh`、优点和不足；英文-only method/experiments/limitations、`relevance=direct_target|foundation_borrowing|boundary_audit` 枚举值也不能替代这些字段。
 - 如果 deep_read_content_gap_details 指出字段过短、摘要冒充、方法/实验关键词不足或优缺点缺失，必须重新打开对应 `text_path` 全文逐篇重写；禁止在旧短句上补几个形容词冒充精读。
-- idea_contract_issues 表示上一轮 idea 不是合格科研 idea：缺 `objective_scores`、`score/idea_score` 为 None、没有独立评分子任务、初步实验仍绑定历史基底/旧 base switch gate，或 `new_method`/`initial_experiment`/`inspired_by` 三段缺失。必须重新基于精读结果生成 5 个 idea；每个 idea 都要先由主控 Claude 写出详细 `new_method`、`initial_experiment`、`inspired_by`，再调用独立 Task/subagent 客观评分，写入 `objective_scores={{novelty,evidence_alignment,feasibility,experimentability,risk_control,overall}}`、`score`、`idea_score` 和 `idea_score_audit={{mode:"task_subagent",subagent_used:true,status:"completed"}}`。`overall < 7.0` 的 idea 必须由主控 Claude 深思修改后重新评分；不得把 None/空分数或旧路线记忆当成通过。
+- idea_contract_issues 表示上一轮 idea 不是合格科研 idea：缺 `objective_scores`、`score/idea_score` 为 None、没有独立评分子任务、初步实验仍绑定历史基底/旧 base switch gate，或 `new_method`/`initial_experiment`/`inspired_by` 三段缺失。必须重新基于精读结果生成 {idea_plan_count} 个 idea；每个 idea 都要先由主控 Claude 写出详细 `new_method`、`initial_experiment`、`inspired_by`，再调用独立 Task/subagent 客观评分，写入 `objective_scores={{novelty,evidence_alignment,feasibility,experimentability,risk_control,overall}}`、`score`、`idea_score` 和 `idea_score_audit={{mode:"task_subagent",subagent_used:true,status:"completed"}}`。`overall < 7.0` 的 idea 必须由主控 Claude 深思修改后重新评分；不得把 None/空分数或旧路线记忆当成通过。
 - 如果 idea_contract_issues 含 `stale_or_preselected_base_binding_detected`，说明 idea/实验仍继承了历史基底或旧执行 gate，例如旧候选 repo、base switch gate、已通过参考复现等。必须新开主控 Claude Code 重新阅读当前 `工作状态.txt`、当前 Find 精读和当前 main route 状态，生成不继承旧会话记忆的 idea。Find/Read/Idea/Plan 阶段仍不得直接选择或绑定 repo/data/训练命令；若必须提及实验基底，只能写“环境阶段选出的当前基底”，并说明后续由 environment gate 决定。
 - unlabeled_non_positive_titles 表示当前推荐论文在 Find 里是 boundary/critique/weak/borrowed/foundation 价值，但 reading 没有明确非 claim 角色；必须补 `support_role`/`verdict`，说明为什么值得精读、能借鉴什么、不能证明什么。若 Find 行本身已有 `evidence_role=foundation_borrowing`、`evidence_tier=critique_or_boundary_case`、`not_positive_support=true` 或 `weak_candidate_for_critique=true`，优先沿用该边界角色，不要把它改成 claim-ready。
 - pending_without_evidence_titles 表示还缺正文证据；必须读取可用 PDF/OpenReview/网页/代码说明，若确实无法访问，要记录具体不可访问原因，不能写“待补”冒充精读。
 - subagent_deep_read_audit 表示主控 Claude Code 没有把每篇推荐论文交给可审计的 Task/subagent 做全文精读，或没有把交付记录写入每个 reading；这会被视为未精读。必须对每篇推荐论文调用 Task/subagent（若工具名为 Task，直接使用 Task；若当前 Claude 工具面板没有 Task/subagent，立即停止并报告 `blocked: task_subagent_unavailable_for_deep_reading`，不要由主控自己短写替代）。每个 reading 必须写 `subagent_deep_read=true`，并写 `deep_read_audit={{"mode":"task_subagent","subagent_used":true,"status":"completed","text_path":"...","evidence_chars":...}}`。
 - 如果上一轮 takeover.tool_policy_guard.policy_type 是 current_find_artifact_writer，说明你尝试用 Bash/Python/cat/heredoc 批量写科研 artifact，或用 Edit/MultiEdit 局部修补 `read_results.json`/`ideas.json`/`plans.json`，已被 TASTE 拦截；本轮精读只能使用 Claude Code 文件工具写逐篇分片，路径为 `planning/finding/current_find_deep_read_fragments/<rank>_<paper_id>.json` 或唯一返修分片，并用 Write 完整重写 `ideas.json` 和 `plans.json`。禁止分段 Edit/MultiEdit 大 JSON；即使只改一个字符串、分数或 blocked_reason，也必须用 Write 重写对应完整 JSON artifact。禁止任何标点、引号、措辞润色类局部 Edit/MultiEdit：例如把 `"自信错误"` 改成 `「自信错误」` 这种微调也会导致整个 current-Find 事务回滚。写完完整 JSON 后，如果只是发现标点/引号/短语风格问题，要么用 Write 再完整重写对应 JSON 一次，要么停止并交给 wrapper 校验；绝不能调用 Edit/MultiEdit。单篇 deep-read fragment JSON 可以用 Claude 文件工具自审修正，但不得用 Bash/Python/cat/heredoc/json.dump/open(..., "w") 生成或补丁式改写；禁止写 `read.md`/`idea.md`/`plan.md`，这些 Markdown 由 wrapper 在 JSON 校验后自动生成。禁止在 Bash 中出现 `open(...read_results.json`、`Path(...current_find_deep_read_fragments`、`json.dump`、`python <<`、`cat > planning/finding`、heredoc 或任何会写入 Read/Idea/Plan artifact/分片的命令。Bash 只允许只读检查，例如 `{management_python()} -m json.tool planning/finding/ideas.json >/dev/null`、`rg`、`sed -n`、`head`、`tail`、`wc`。如果分片 JSON 校验失败，必须用 Claude 文件工具重新写该论文完整分片；绝不能用 Bash/Python 修补。若当前 Claude Code 会话没有文件写入工具，必须停止并在最终输出中报告 `blocked: write_tool_unavailable_for_current_find_artifacts`。若上一轮 policy_type 是 current_find_gate_state_writer，说明你直接改写了 TASTE-owned gate/state 文件；本轮只能写 planning/finding 的逐篇精读分片、ideas.json、plans.json，state/current_find_research_plan.json、state/idea_candidates.json、state/experiment_plan.json 必须保持只读，由 wrapper 在机器校验后统一写入。
 - 返修时不得覆盖已有 `current_find_deep_read_fragments/*.json`。如果某篇已有分片但 validation 指出字段缺口，必须写一个新的 `planning/finding/current_find_deep_read_fragments/<rank>_<paper_id>_repair_attempt{attempt}.json` 或带时间戳的新分片；wrapper 会按全文证据、字段完整度和质量分选择最佳分片。禁止用较短、字段更少或 evidence 更弱的新分片覆盖旧分片。
-- 返修后 20 个精读分片、ideas.json、plans.json 必须同一 run_id、同一推荐列表、同一 5 个 idea/plan，并且 plans.json 必须显式且只能显式选择一个执行计划；read_results.json/read.md/idea.md/plan.md 由 wrapper 生成或刷新。
-- failure_type=missing_selected_plan/ambiguous_selected_plan/selected_plan_id_missing/selected_plan_missing_matching_idea 表示精读、idea、plan 内容可能已经合格，但主控 Claude Code 没有在 5 个计划中作出唯一最佳执行选择，或多个计划被同时标记选择。必须基于全文精读结果重新比较 5 个 plan，写出 exactly one `selected_for_execution=true` 且 `execute_next=true` 的 plan，其余 plan 必须显式 `selected_for_execution=false`、`execute_next=false`、`execution_selection.selected=false` 并作为 backlog。
+- 返修后 {read_item_count} 个精读分片、ideas.json、plans.json 必须同一 run_id、同一推荐列表、同一 {idea_plan_count} 个 idea/plan，并且 plans.json 必须显式且只能显式选择一个执行计划；read_results.json/read.md/idea.md/plan.md 由 wrapper 生成或刷新。
+- failure_type=missing_selected_plan/ambiguous_selected_plan/selected_plan_id_missing/selected_plan_missing_matching_idea 表示精读、idea、plan 内容可能已经合格，但主控 Claude Code 没有在 {idea_plan_count} 个计划中作出唯一最佳执行选择，或多个计划被同时标记选择。必须基于全文精读结果重新比较 {idea_plan_count} 个 plan，写出 exactly one `selected_for_execution=true` 且 `execute_next=true` 的 plan，其余 plan 必须显式 `selected_for_execution=false`、`execute_next=false`、`execution_selection.selected=false` 并作为 backlog。
 """
     prompt = f"""
 你是 项目 `{project}` 的持久 Claude Code 科研会话。现在由 TASTE 控制你接管当前 Find 后面的 Read/Idea/Plan，不允许用确定性模板伪造科研判断。
@@ -3387,7 +3392,7 @@ def write_claude_takeover_prompt(paths, project: str, run_id: str, read_limit: i
 - `planning/finding/find_results.json`
 - `planning/finding/article.md`
 - `planning/finding/source_status.md`
-- `planning/finding/full_text_reading/full_text_packet.json`；如果该文件存在且 run_id 匹配，必须优先读取其中 20 篇的 `text_path` 全文抽取文本，不要重新下载同一 PDF，也不要只引用题录/摘要。
+- `planning/finding/full_text_reading/full_text_packet.json`；如果该文件存在且 run_id 匹配，必须优先读取其中 {read_item_count} 篇的 `text_path` 全文抽取文本，不要重新下载同一 PDF，也不要只引用题录/摘要。
 - `planning/finding/full_text_reading/texts/*.txt` 中与推荐论文对应的正文抽取文件；写逐篇精读分片时必须把这些正文证据归一化为 `source_evidence`/`full_text_evidence`/`pdf_text_chars`。
 - `planning/finding/current_find_deep_read_fragments/`：这是本轮精读唯一允许的逐篇内容写入目录。每篇论文一个 JSON 文件，文件由 Claude Code 文件工具写入或修正，禁止 Bash/Python/cat/heredoc 生成。wrapper 会合并这些分片为 read_results.json/read.md。
 - `state/literature_tool_packet.json` 或 `planning/literature_tool_packet.md`
@@ -3405,22 +3410,22 @@ def write_claude_takeover_prompt(paths, project: str, run_id: str, read_limit: i
 2. 推荐列表里的论文可以是 strict positive、foundation/borrowing 或 boundary/critique 价值，但都必须写入 `read_results.json.readings`。未达到 strict positive 条件的推荐论文必须标为 `support_role=boundary_audit|search_expansion`、`verdict=recommended_reading_boundary|critique_only|boundary_only`，说明为什么值得读、能借鉴什么、不能证明什么。
 3. 严禁把 `triage_candidates/audit_candidates/evaluated_candidates/title_candidates/retrieval_candidates` 中未进入推荐列表或 strict positive 白名单的论文写成 `claim_ready_anchor`、`positive_anchor_for_planning`、`supporting_evidence` 或 `component_reference`。TASTE 守卫会直接拒绝这种输出。
 4. 检查每篇候选是否真与当前科研主题相关；把无关、泛主题、泛 agent、泛 memory、仅新闻/论文选择/平台选择的文章降为 critique，不得作为 strong evidence。
-5. Idea 必须生成 5 个，并且每个 idea 都要综合多篇强锚点、边界审计结论和当前 repo/data/env 约束，不能照抄单篇论文。每个 idea 必须包含三段：`new_method`（详细的新方法，原 hypothesis 的升级版，说明核心机制/模块/训练或推理作用点）、`initial_experiment`（初步详细实验，说明基于哪篇工作或哪个可审计基底、做什么最小改动、对比哪些 baseline/control/ablation、指标和坏例切片）、`inspired_by`（启发该方法的论文/工作及启发点）。严禁继承旧会话记忆里的历史基底、旧 base switch gate、已通过参考复现基底或已经废弃的路线；Find/Read/Idea/Plan 阶段不能把任何仓库写成已选基底。
+5. Idea 必须生成 {idea_plan_count} 个，并且每个 idea 都要综合多篇强锚点、边界审计结论和当前 repo/data/env 约束，不能照抄单篇论文。每个 idea 必须包含三段：`new_method`（详细的新方法，原 hypothesis 的升级版，说明核心机制/模块/训练或推理作用点）、`initial_experiment`（初步详细实验，说明基于哪篇工作或哪个可审计基底、做什么最小改动、对比哪些 baseline/control/ablation、指标和坏例切片）、`inspired_by`（启发该方法的论文/工作及启发点）。严禁继承旧会话记忆里的历史基底、旧 base switch gate、已通过参考复现基底或已经废弃的路线；Find/Read/Idea/Plan 阶段不能把任何仓库写成已选基底。
 6. 主控 Claude Code 必须为每个 idea 调用独立 Task/subagent 做客观评分，不得由主控直接填 None 或空分数。评分项必须写入 `objective_scores`，字段为 `novelty`、`evidence_alignment`、`feasibility`、`experimentability`、`risk_control`、`overall`，每项 0-10 分；同时写入 `score` 和 `idea_score`，且 `idea_score_audit={{"mode":"task_subagent","subagent_used":true,"status":"completed","criteria":"TASTE-like objective idea scoring"}}`。若 `overall < 7.0` 或任一项为 0，主控必须先修改 idea 再重新评分；不能把低分 idea 交给 plan。
 7. 你要自行决定至少 3 个补充检索主题，并写入 `targeted_search_queries`。当当前推荐门控短缺且本轮 run 尚未刚完成受控补检索时，优先调用一次 TASTE 统一 literature tool 做受控补检索并刷新 packet：`python3 scripts/run_literature_tool.py --project {project} --venue {target_venue} --query "<topic 1>" --query "<topic 2>" --query "<topic 3>" --fast-mode`。如果 `state/literature_tool_last_run.json` 已显示刚完成的 `current_find_run_id` 等于当前 run_id，或当前任务就是为了把刚产生的新 Find run 同步成 Read/Idea/Plan，则不要再启动下一轮 Find；只记录/复用 `targeted_search_queries`，先为当前 run 写出一致的 Read/Idea/Plan。严禁绕过 wrapper 直接调用会失去审计的原始 TASTE 命令。
-7. 为 5 个 idea 分别生成 plan：环境阶段如何比较强推荐论文、如何审计 repo/data/protocol、最小实验、baseline/ablation、bad-case slice、success gate、失败时的停止条件。主控 Claude Code 必须在 5 个 plan 中选择唯一最佳执行计划；唯一选中的 plan 必须写 `selected_for_execution=true`、`execute_next=true`、`execution_selection={{"selected": true, "reason": "...", "selected_by": "main_claude_code_after_deep_read"}}`，并具有非空 `plan_id` 与匹配 `idea_id`；其他 4 个 plan 必须显式写 `selected_for_execution=false`、`execute_next=false`、`execution_selection={{"selected": false, "selected_by": "not_selected_candidate_backlog", "reason": "..."}}`。禁止按第一个、分数、排序或模板代选；必须用精读证据说明为什么被选中的 plan 最值得进入环境阶段。
+7. 为 {idea_plan_count} 个 idea 分别生成 plan：环境阶段如何比较强推荐论文、如何审计 repo/data/protocol、最小实验、baseline/ablation、bad-case slice、success gate、失败时的停止条件。主控 Claude Code 必须在 {idea_plan_count} 个 plan 中选择唯一最佳执行计划；唯一选中的 plan 必须写 `selected_for_execution=true`、`execute_next=true`、`execution_selection={{"selected": true, "reason": "...", "selected_by": "main_claude_code_after_deep_read"}}`，并具有非空 `plan_id` 与匹配 `idea_id`；其他 {not_selected_count} 个 plan 必须显式写 `selected_for_execution=false`、`execute_next=false`、`execution_selection={{"selected": false, "selected_by": "not_selected_candidate_backlog", "reason": "..."}}`。禁止按第一个、分数、排序或模板代选；必须用精读证据说明为什么被选中的 plan 最值得进入环境阶段。
 8. Find/Read/Idea/Plan 阶段严禁选择当前基底、严禁写入 `repo_path`、严禁写具体数据集训练命令、严禁标记 `ready_to_execute`。基底选择必须留给后续环境阶段 Claude Code，并写入 `state/evidence_ready_repo_selection.json`。
 9. 不启动论文 claim promotion；没有环境阶段基底选择和 repo/data/env/experiment gate 证据时，计划必须保持 `waiting_for_environment_base_selection` / `ready_for_gate`，而不是声称已经有结论。
-10. 写内容产物必须使用 Claude Code 文件工具；这是强制要求，不是偏好。精读内容必须写成逐篇 JSON 分片，避免一次性写 20 篇大 JSON 把语法或内容写坏。禁止用 Edit/MultiEdit 分段拼接或局部修补 `read_results.json`、`ideas.json`、`plans.json` 这类大 JSON；如果某个分片 JSON 校验失败，用 Claude 文件工具重新写该论文完整分片；如果 `ideas.json` 或 `plans.json` 只需修改一个字段，也必须用 Write 重写整个 JSON 文件。Bash 只允许用于只读检查、JSON 解析校验或必要的官方 wrapper；不要用 Bash/Python/cat here-doc 代替文件工具来批量写 `read_results.json`、`current_find_deep_read_fragments/*.json`、`ideas.json`、`plans.json`，也不要写 `read.md`、`idea.md`、`plan.md`。严禁写入或修改 `state/current_find_research_plan.json`、`state/idea_candidates.json`、`state/experiment_plan.json`；这些 TASTE-owned gate/state 文件由 wrapper 在机器校验后统一写入。如果必须用临时脚本校验 JSON，只能写到 `/tmp`，不得启动实验、训练、Find、full-cycle 或后台进程。如果你无法用文件写入工具写这些 artifact，必须报告 blocked，不能尝试脚本 fallback。
+10. 写内容产物必须使用 Claude Code 文件工具；这是强制要求，不是偏好。精读内容必须写成逐篇 JSON 分片，避免一次性写 {read_item_count} 篇大 JSON 把语法或内容写坏。禁止用 Edit/MultiEdit 分段拼接或局部修补 `read_results.json`、`ideas.json`、`plans.json` 这类大 JSON；如果某个分片 JSON 校验失败，用 Claude 文件工具重新写该论文完整分片；如果 `ideas.json` 或 `plans.json` 只需修改一个字段，也必须用 Write 重写整个 JSON 文件。Bash 只允许用于只读检查、JSON 解析校验或必要的官方 wrapper；不要用 Bash/Python/cat here-doc 代替文件工具来批量写 `read_results.json`、`current_find_deep_read_fragments/*.json`、`ideas.json`、`plans.json`，也不要写 `read.md`、`idea.md`、`plan.md`。严禁写入或修改 `state/current_find_research_plan.json`、`state/idea_candidates.json`、`state/experiment_plan.json`；这些 TASTE-owned gate/state 文件由 wrapper 在机器校验后统一写入。如果必须用临时脚本校验 JSON，只能写到 `/tmp`，不得启动实验、训练、Find、full-cycle 或后台进程。如果你无法用文件写入工具写这些 artifact，必须报告 blocked，不能尝试脚本 fallback。
 
 必须写入这些结构化 JSON 内容产物，且 JSON 必须可解析。不要写 Markdown artifact，wrapper 会从分片/JSON 渲染 `read.md`、`idea.md`、`plan.md`：
 - `planning/finding/current_find_deep_read_fragments/<rank>_<paper_id>.json`，每篇论文一个文件；返修轮次优先使用 `<rank>_<paper_id>_repair_attempt{attempt}.json` 或唯一时间戳文件名。字段：`run_id`, `source="claude_subagent_deep_read_fragment"`, `reading`。`reading` 至少含 `paper_id`, `title`, `verdict`, `support_role`, `critique_reason`, `abstract_zh`, `motivation_zh`, `method_details_zh` 或中文 `method`, `experiments_zh` 或中文 `experiments`, `limitations_zh` 或中文 `limitations`, `method_advantages_zh`, `method_disadvantages_zh`, `full_text_available`, `full_text_status`, `subagent_deep_read=true`, `deep_read_audit`，并在成功读取 PDF/HTML 正文时写入正文长度证据字段。`abstract_from_find` 可以保留作溯源，但不能替代 `abstract_zh`。
-- `planning/finding/ideas.json`，字段：`run_id`, `source="claude_code_current_find_takeover"`, `ideas`，恰好 5 个 idea，均为 approved 或 blocked_with_reason。每个 idea 必须含 `id`, `title`, `new_method`, `initial_experiment`, `inspired_by`, `supporting_papers`；可选兼容字段 `method_details`/`mechanism` 可用于内部计划，但用户可见 `idea.md` 只呈现 `new_method`, `initial_experiment`, `inspired_by` 三段；兼容字段 `hypothesis` 应等同 `new_method`，`min_experiment` 应等同 `initial_experiment`。
-- `planning/finding/plans.json`，字段：`run_id`, `source="claude_code_current_find_takeover"`, `plans`，对应 5 个 idea。`plans` 中必须且只能有一个 plan 同时满足：非空 `plan_id`、匹配某个 idea 的 `idea_id`、`selected_for_execution=true`、`execute_next=true`、`execution_selection.selected=true`、`execution_selection.selected_by="main_claude_code_after_deep_read"`、`execution_selection.reason` 说明基于精读证据的选择理由。其余 plan 必须显式为 backlog，不能留下空白让 TASTE 代选。
+- `planning/finding/ideas.json`，字段：`run_id`, `source="claude_code_current_find_takeover"`, `ideas`，恰好 {idea_plan_count} 个 idea，均为 approved 或 blocked_with_reason。每个 idea 必须含 `id`, `title`, `new_method`, `initial_experiment`, `inspired_by`, `supporting_papers`；可选兼容字段 `method_details`/`mechanism` 可用于内部计划，但用户可见 `idea.md` 只呈现 `new_method`, `initial_experiment`, `inspired_by` 三段；兼容字段 `hypothesis` 应等同 `new_method`，`min_experiment` 应等同 `initial_experiment`。
+- `planning/finding/plans.json`，字段：`run_id`, `source="claude_code_current_find_takeover"`, `plans`，对应 {idea_plan_count} 个 idea。`plans` 中必须且只能有一个 plan 同时满足：非空 `plan_id`、匹配某个 idea 的 `idea_id`、`selected_for_execution=true`、`execute_next=true`、`execution_selection.selected=true`、`execution_selection.selected_by="main_claude_code_after_deep_read"`、`execution_selection.reason` 说明基于精读证据的选择理由。其余 plan 必须显式为 backlog，不能留下空白让 TASTE 代选。
 
 不要写入或修改这些 TASTE-owned gate/state 文件：`state/current_find_research_plan.json`、`state/idea_candidates.json`、`state/experiment_plan.json`。wrapper 会在读取上述内容产物并通过/阻塞机器校验后，同步这些 state 文件。
 
-最后输出简短中文 Markdown：读了哪些论文、每篇全文/PDF访问状态、剔除了哪些误推荐、5 个 idea 标题、下一步 gate/实验阻塞。
+最后输出简短中文 Markdown：读了哪些论文、每篇全文/PDF访问状态、剔除了哪些误推荐、{idea_plan_count} 个 idea 标题、下一步 gate/实验阻塞。
 """.strip() + "\n"
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
     prompt_path.write_text(prompt, encoding="utf-8")
@@ -3498,18 +3503,19 @@ def run_claude_current_find_takeover(project: str, paths, run_id: str, read_limi
     return result
 
 
-def write_claude_selection_prompt(paths, project: str, run_id: str, observed: dict[str, Any] | None = None, attempt: int = 1) -> Path:
+def write_claude_selection_prompt(paths, project: str, run_id: str, observed: dict[str, Any] | None = None, attempt: int = 1, idea_count: int = 5) -> Path:
     prompt_path = paths.state / ("current_find_claude_selection_prompt.md" if attempt <= 1 else f"current_find_claude_selection_prompt_attempt{attempt}.md")
     observed_payload = observed if isinstance(observed, dict) else {}
+    idea_plan_count = max(1, _positive_int(idea_count) or 5)
     prompt = f"""
-你是 项目 `{project}` 的主控 Claude Code。当前 Find 的全文精读、5 个 idea 和 5 个 plan 已经通过内容合同，但没有唯一执行计划。
+你是 项目 `{project}` 的主控 Claude Code。当前 Find 的全文精读、{idea_plan_count} 个 idea 和 {idea_plan_count} 个 plan 已经通过内容合同，但没有唯一执行计划。
 
 本阶段是 selection-only，不是重新精读、不是重新生成 idea、不是重新生成 plan 正文。
 
 必须先读取：
 - `planning/finding/read_results.json` 和 `planning/finding/read.md`：完整精读证据。
-- `planning/finding/ideas.json` 和 `planning/finding/idea.md`：5 个候选 idea，三段字段为 `new_method`、`initial_experiment`、`inspired_by`。
-- `planning/finding/plans.json` 和 `planning/finding/plan.md`：5 个候选 plan。
+- `planning/finding/ideas.json` 和 `planning/finding/idea.md`：{idea_plan_count} 个候选 idea，三段字段为 `new_method`、`initial_experiment`、`inspired_by`。
+- `planning/finding/plans.json` 和 `planning/finding/plan.md`：{idea_plan_count} 个候选 plan。
 - `state/current_find_claude_reading_validation.json`、`state/current_find_research_plan.json`、`state/experiment_plan.json` 只读，用于确认阻塞原因。
 
 机器观测到的合同状态：
@@ -3524,7 +3530,7 @@ def write_claude_selection_prompt(paths, project: str, run_id: str, observed: di
 - 不准启动 Find、full-cycle、环境、训练、实验、论文写作或任何后台任务。
 
 选择合同：
-1. 基于完整精读结果，比较 5 个 idea/plan 的新方法价值、初步实验可执行性、受哪些论文启发、与当前 repo/data/env gate 的兼容性、失败边界和最小可测性。
+1. 基于完整精读结果，比较 {idea_plan_count} 个 idea/plan 的新方法价值、初步实验可执行性、受哪些论文启发、与当前 repo/data/env gate 的兼容性、失败边界和最小可测性。
 2. 只选择一个最佳 plan 作为后续环境/实验入口。唯一选中的 plan 必须包含：
    - `selected_for_execution: true`
    - `execute_next: true`
@@ -3544,8 +3550,8 @@ def write_claude_selection_prompt(paths, project: str, run_id: str, observed: di
     return prompt_path
 
 
-def run_claude_current_find_selection(project: str, paths, run_id: str, observed: dict[str, Any] | None = None, attempt: int = 1) -> dict[str, Any]:
-    prompt_path = write_claude_selection_prompt(paths, project, run_id, observed=observed, attempt=attempt)
+def run_claude_current_find_selection(project: str, paths, run_id: str, observed: dict[str, Any] | None = None, attempt: int = 1, idea_count: int = 5) -> dict[str, Any]:
+    prompt_path = write_claude_selection_prompt(paths, project, run_id, observed=observed, attempt=attempt, idea_count=idea_count)
     snapshot = snapshot_current_find_artifacts(paths, run_id, 200 + attempt)
     cmd = [
         sys.executable,
@@ -3898,7 +3904,8 @@ def _sync_current_find_plan_reading_validation(payload: dict[str, Any], validati
     return payload
 
 
-def current_find_contract_failure_type(validation: Any, observed: Any) -> str:
+def current_find_contract_failure_type(validation: Any, observed: Any, idea_count: int = 5) -> str:
+    required_idea_count = max(1, _positive_int(idea_count) or 5)
     if isinstance(validation, dict) and (validation.get("status") == "artifact_parse_failed" or validation.get("artifact_parse_failures")):
         return "artifact_parse_failed"
     if isinstance(observed, dict):
@@ -3935,15 +3942,15 @@ def current_find_contract_failure_type(validation: Any, observed: Any) -> str:
             return selection_issue
         if _positive_int(observed.get("raw_artifact_reading_count")) == 0:
             return "claude_artifacts_missing"
-        if _positive_int(observed.get("raw_artifact_idea_count")) < 5 or _positive_int(observed.get("raw_artifact_plan_count")) < 5:
+        if _positive_int(observed.get("raw_artifact_idea_count")) < required_idea_count or _positive_int(observed.get("raw_artifact_plan_count")) < required_idea_count:
             return "idea_plan_artifacts_incomplete"
         if selection_issue:
             return selection_issue
     return "contract_validation_failed"
 
 
-def current_find_contract_next_required_action(validation: Any, observed: Any) -> str:
-    failure_type = current_find_contract_failure_type(validation, observed)
+def current_find_contract_next_required_action(validation: Any, observed: Any, idea_count: int = 5) -> str:
+    failure_type = current_find_contract_failure_type(validation, observed, idea_count=idea_count)
     if failure_type == "full_text_evidence_missing":
         return "acquire_current_find_full_text_evidence"
     if failure_type == "stale_or_missing_current_find_takeover":
@@ -3967,11 +3974,11 @@ def current_find_contract_next_required_action(validation: Any, observed: Any) -
     return "rerun_current_find_claude_takeover_repair"
 
 
-def record_claude_takeover_contract_result(paths, run_id: str, takeover: dict[str, Any], valid: bool, validation: dict[str, Any], observed: dict[str, Any], attempt: int) -> dict[str, Any]:
+def record_claude_takeover_contract_result(paths, run_id: str, takeover: dict[str, Any], valid: bool, validation: dict[str, Any], observed: dict[str, Any], attempt: int, idea_count: int = 5) -> dict[str, Any]:
     failure = None
     if not valid:
-        failure_type = current_find_contract_failure_type(validation, observed)
-        next_required_action = current_find_contract_next_required_action(validation, observed)
+        failure_type = current_find_contract_failure_type(validation, observed, idea_count=idea_count)
+        next_required_action = current_find_contract_next_required_action(validation, observed, idea_count=idea_count)
         failure = {
             "status": "failed_contract_validation",
             "failure_type": failure_type,
@@ -3987,7 +3994,7 @@ def record_claude_takeover_contract_result(paths, run_id: str, takeover: dict[st
                 "repair_attempt": takeover.get("repair_attempt"),
                 "tool_policy_guard": takeover.get("tool_policy_guard") if isinstance(takeover.get("tool_policy_guard"), dict) else {},
             },
-            "policy": "Claude process return_code=0 is not sufficient. Current-Find Read/Idea/Plan is complete only after full-text evidence, non-placeholder deep-read synthesis, five three-part ideas, five plans, exactly one explicit selected_plan_id, and targeted search topics pass TASTE validation. If full-text evidence is missing, The workflow must acquire or prove the missing PDF/HTML/page source before rerunning Claude; recoverable artifact writer, deep-read synthesis, or selected-plan failures may be rerun as repair prompts.",
+            "policy": f"Claude process return_code=0 is not sufficient. Current-Find Read/Idea/Plan is complete only after full-text evidence, non-placeholder deep-read synthesis, {max(1, _positive_int(idea_count) or 5)} three-part ideas, {max(1, _positive_int(idea_count) or 5)} plans, exactly one explicit selected_plan_id, and targeted search topics pass TASTE validation. If full-text evidence is missing, The workflow must acquire or prove the missing PDF/HTML/page source before rerunning Claude; recoverable artifact writer, deep-read synthesis, or selected-plan failures may be rerun as repair prompts.",
         }
         save_json(paths.state / "current_find_claude_takeover_contract_failure.json", failure)
     updated = {**takeover, "contract_validation_valid": bool(valid), "repair_attempt": attempt}
@@ -4019,16 +4026,16 @@ def maybe_repair_current_find_takeover(project: str, paths, taste_dir: Path, run
         taste_dir,
         validation,
     )
-    takeover = record_claude_takeover_contract_result(paths, run_id, takeover, ready, validation, observed, int(takeover.get("repair_attempt") or 1))
-    next_required_action = current_find_contract_next_required_action(validation, observed)
-    failure_type = current_find_contract_failure_type(validation, observed)
+    takeover = record_claude_takeover_contract_result(paths, run_id, takeover, ready, validation, observed, int(takeover.get("repair_attempt") or 1), idea_count=idea_count)
+    next_required_action = current_find_contract_next_required_action(validation, observed, idea_count=idea_count)
+    failure_type = current_find_contract_failure_type(validation, observed, idea_count=idea_count)
     content_ready_without_selection = _current_find_content_ready_without_selection(readings, ideas, plans, targeted_queries, validation, run_id, min_required_readings, idea_count, find_revision)
     if ready or next_required_action == "acquire_current_find_full_text_evidence":
         return takeover, readings, ideas, plans, targeted_queries, validation, ""
     current_attempt = max(1, _positive_int(takeover.get("repair_attempt")) or 1)
     if failure_type in CURRENT_FIND_SELECTION_FAILURE_TYPES and content_ready_without_selection:
         failure = load_json(paths.state / "current_find_claude_takeover_contract_failure.json", {})
-        selection_takeover = run_claude_current_find_selection(project, paths, run_id, observed=failure if isinstance(failure, dict) and failure else observed, attempt=current_attempt + 1)
+        selection_takeover = run_claude_current_find_selection(project, paths, run_id, observed=failure if isinstance(failure, dict) and failure else observed, attempt=current_attempt + 1, idea_count=idea_count)
         changed_run = _find_run_changed(paths, run_id)
         if changed_run:
             return selection_takeover, readings, ideas, plans, targeted_queries, validation, changed_run
@@ -4607,7 +4614,7 @@ def _fragment_payload_is_current(payload: Any, file_path: Path, run_id: str, cur
     if payload_run and expected_run and payload_run != expected_run:
         return False
     source = str(payload.get("source") or payload.get("artifact_source") or "").strip()
-    if source and source not in {CURRENT_FIND_DEEP_READ_FRAGMENT_SOURCE, CLAUDE_TAKEOVER_SOURCE}:
+    if source and source not in (CURRENT_FIND_DEEP_READ_FRAGMENT_SOURCES | {CLAUDE_TAKEOVER_SOURCE}):
         return False
     # Per-paper fragments are immutable deliveries for a specific Find run.  A
     # later full_text_packet/current revision can arrive after an already valid
@@ -4635,6 +4642,7 @@ def _current_find_deep_read_fragment_rows(taste_dir: Path, run_id: str, current_
         payload, error = load_json_with_error(path, {})
         if error or not _fragment_payload_is_current(payload, path, run_id, current_revision):
             continue
+        source = str((payload if isinstance(payload, dict) else {}).get("source") or (payload if isinstance(payload, dict) else {}).get("artifact_source") or "").strip()
         payload_rows: list[dict[str, Any]] = []
         if isinstance(payload, dict) and isinstance(payload.get("reading"), dict):
             payload_rows.append(payload["reading"])
@@ -4650,9 +4658,11 @@ def _current_find_deep_read_fragment_rows(taste_dir: Path, run_id: str, current_
             audit.setdefault("subagent_used", True)
             audit.setdefault("status", "completed")
             audit.setdefault("fragment_path", str(path))
+            if source:
+                audit.setdefault("source", source)
             clean["deep_read_audit"] = audit
             clean["subagent_deep_read"] = True
-            clean.setdefault("deep_read_source", CURRENT_FIND_DEEP_READ_FRAGMENT_SOURCE)
+            clean.setdefault("deep_read_source", source or CURRENT_FIND_DEEP_READ_FRAGMENT_SOURCE)
             rows.append(clean)
     return rows
 
@@ -5061,7 +5071,7 @@ def extract_targeted_search_queries(paths, read_results: dict[str, Any], ideas_r
     return out
 
 
-def ensure_claude_plan_state(project: str, paths, run_id: str, readings: list[dict[str, Any]], ideas: list[dict[str, Any]], plans: list[dict[str, Any]], takeover: dict[str, Any]) -> dict[str, Any]:
+def ensure_claude_plan_state(project: str, paths, run_id: str, readings: list[dict[str, Any]], ideas: list[dict[str, Any]], plans: list[dict[str, Any]], takeover: dict[str, Any], idea_count: int = 5) -> dict[str, Any]:
     payload = load_json(paths.state / "current_find_research_plan.json", {})
     if not isinstance(payload, dict):
         payload = {}
@@ -5079,15 +5089,16 @@ def ensure_claude_plan_state(project: str, paths, run_id: str, readings: list[di
     find_results_for_coverage = load_json(paths.planning / "finding" / "find_results.json", {})
     current_recommendation_rows = _current_recommendation_rows(find_results_for_coverage if isinstance(find_results_for_coverage, dict) else {})
     expected_recommendation_readings = len(current_recommendation_rows) or len(_current_recommendation_identities(find_results_for_coverage if isinstance(find_results_for_coverage, dict) else {})[1]) or 0
+    required_idea_count = max(1, _positive_int(idea_count) or 5)
     raw_ideas = [row for row in as_list((idea_payload if isinstance(idea_payload, dict) else {}).get("ideas")) if isinstance(row, dict)]
-    idea_contract_issues = _idea_rows_contract_issues(ideas, 5)
-    raw_idea_contract_issues = _idea_rows_contract_issues(raw_ideas, 5)
-    idea_schema_ready = len(ideas) >= 5 and not idea_contract_issues
+    idea_contract_issues = _idea_rows_contract_issues(ideas, required_idea_count)
+    raw_idea_contract_issues = _idea_rows_contract_issues(raw_ideas, required_idea_count)
+    idea_schema_ready = len(ideas) >= required_idea_count and not idea_contract_issues
     validation = load_json(paths.state / "current_find_claude_reading_validation.json", {})
     if not isinstance(validation, dict):
         validation = {}
     validation_ready = current_reading_validation_ready(validation, run_id, expected_recommendation_readings)
-    counts_ready = bool(readings and len(ideas) >= 5 and len(plans) >= 5 and len(targeted_queries) >= 3 and idea_schema_ready)
+    counts_ready = bool(readings and len(ideas) >= required_idea_count and len(plans) >= required_idea_count and len(targeted_queries) >= 3 and idea_schema_ready)
     if expected_recommendation_readings and len(readings) != expected_recommendation_readings:
         counts_ready = False
     content_ready = bool(counts_ready and validation_ready)
@@ -5149,14 +5160,14 @@ def ensure_claude_plan_state(project: str, paths, run_id: str, readings: list[di
             strip_verbose_claude_takeover(read_payload)
             save_json(paths.planning / "finding" / "read_results.json", read_payload)
     if not idea_schema_ready:
-        literature_blockers.append("Claude Code takeover must rewrite and objectively score 5 ideas: each idea needs detailed new_method, initial_experiment, inspired_by, objective_scores, score, idea_score, and completed Task/subagent scoring audit; stale candidate/base-switch bindings are rejected.")
+        literature_blockers.append(f"Claude Code takeover must rewrite and objectively score {required_idea_count} ideas: each idea needs detailed new_method, initial_experiment, inspired_by, objective_scores, score, idea_score, and completed Task/subagent scoring audit; stale candidate/base-switch bindings are rejected.")
         literature_blockers.extend(_idea_contract_issue_summary_zh(idea_contract_issues or raw_idea_contract_issues))
     validation_needs_full_text = current_reading_validation_needs_full_text_evidence(validation)
     if not validation_ready:
         validation_blockers = [str(item) for item in as_list(validation.get("blockers")) if str(item).strip()]
         literature_blockers.extend(validation_blockers or ["current-Find reading validation has not passed the full-text deep-read policy."])
     if not counts_ready and not validation_needs_full_text:
-        literature_blockers.append(f"Claude Code takeover must read exactly the current user-visible recommendations ({expected_recommendation_readings}), generate 5 ideas/plans, and record at least 3 supplemental search topics.")
+        literature_blockers.append(f"Claude Code takeover must read exactly the current user-visible recommendations ({expected_recommendation_readings}), generate {required_idea_count} ideas/plans, and record at least 3 supplemental search topics.")
     failure_type = ""
     next_required_action = "environment_base_selection_and_repo_data_protocol_audit"
     if literature_gate_blocked:
@@ -5558,6 +5569,48 @@ def _plan_specific_steps(initial_experiment: str, new_method: str) -> list[str]:
     return steps
 
 
+
+def _normalized_plan_selection_fields(row: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(row, dict):
+        return {}
+    selection_payload: dict[str, Any] = {}
+    for key in ["execution_selection", "plans_selection", "plan_selection", "selection", "selected_execution"]:
+        value = row.get(key)
+        if isinstance(value, dict):
+            selection_payload.update(value)
+    selected_value = None
+    for key in ["selected_for_execution", "execute_next", "selected", "primary", "best_plan"]:
+        if key in row:
+            selected_value = row.get(key)
+            break
+    for key in ["selected", "selected_for_execution", "execute_next", "primary", "best_plan"]:
+        if selected_value is None and key in selection_payload:
+            selected_value = selection_payload.get(key)
+            break
+    if selected_value is None:
+        decision = str(row.get("execution_decision") or row.get("selection_decision") or selection_payload.get("decision") or selection_payload.get("selection_decision") or "").strip().lower()
+        if decision in CURRENT_FIND_EXECUTION_TRUE_VALUES:
+            selected_value = True
+        elif decision in CURRENT_FIND_EXECUTION_FALSE_VALUES:
+            selected_value = False
+    if selected_value is None:
+        return {}
+    selected = _execution_truthy(selected_value)
+    if not selected and not _execution_falsey(selected_value):
+        return {}
+    reason = first_text(selection_payload, "reason", "selection_reason", "rationale") or first_text(row, "selection_reason", "selected_reason", "reason")
+    selected_by = first_text(selection_payload, "selected_by", "source") or ("main_claude_code_after_deep_read" if selected else "not_selected_candidate_backlog")
+    return {
+        "selected_for_execution": selected,
+        "execute_next": selected,
+        "execution_selection": {
+            "selected": selected,
+            "selected_by": selected_by,
+            "reason": reason,
+            "source": CLAUDE_TAKEOVER_SOURCE,
+        },
+    }
+
 def _sanitize_plan(row: dict[str, Any], idea: dict[str, Any], idx: int, strong_refs: list[dict[str, Any]], audit_refs: list[dict[str, Any]], queries: list[str]) -> dict[str, Any]:
     title = _safe_plan_text(first_text(row, "title") or first_text(idea, "title"), f"current Find guarded plan {idx}: wait for environment-stage base selection", 240)
     plan_id = row.get("plan_id") or f"plan-{idea.get('id') or idx}"
@@ -5577,7 +5630,7 @@ def _sanitize_plan(row: dict[str, Any], idea: dict[str, Any], idx: int, strong_r
     steps = base_steps or _plan_specific_steps(plan_initial_experiment, new_method)
     steps = (steps + generic_gate_steps)[:12]
     inspired_by = _normalize_inspired_refs(row.get("inspired_by") or idea.get("inspired_by"), as_list(row.get("supporting_papers") or idea.get("supporting_papers") or idea.get("positive_anchor_papers")) or strong_refs)
-    return {
+    plan = {
         "plan_id": plan_id,
         "idea_id": idea.get("id") or idea.get("idea_id") or row.get("idea_id") or f"idea-current-find-guarded-{idx:03d}",
         "title": title,
@@ -5616,6 +5669,8 @@ def _sanitize_plan(row: dict[str, Any], idea: dict[str, Any], idx: int, strong_r
             "llm": {"generator": "claude_code_current_find_takeover_guarded", "evaluator": "current_find_environment_selection_gate"},
         }],
     }
+    plan.update(_normalized_plan_selection_fields(row))
+    return plan
 
 def _latest_find_results(paths) -> dict[str, Any]:
     payload = load_json(paths.planning / "finding" / "find_results.json", {})
@@ -5825,7 +5880,7 @@ def normalize_claude_outputs_to_current_find_policy(project: str, paths, run_id:
     write_text(taste_dir / "idea.md", render_idea_md(ideas, run_id))
     write_text(taste_dir / "plan.md", render_plan_md(plans, run_id))
     copy_to_taste_run(paths, run_id, ["read_results.json", "ideas.json", "plans.json", "read.md", "idea.md", "plan.md"])
-    state_payload = ensure_claude_plan_state(project, paths, run_id, readings, ideas, plans, {**takeover, "normalized": True, "normalization_source": "current_find_policy_guard"})
+    state_payload = ensure_claude_plan_state(project, paths, run_id, readings, ideas, plans, {**takeover, "normalized": True, "normalization_source": "current_find_policy_guard"}, idea_count=idea_count)
     update_literature_packet(paths, run_id, readings, ideas, plans)
     update_frontend_state(paths, run_id, readings, ideas, plans)
     return readings, ideas, plans, state_payload
@@ -6498,7 +6553,7 @@ def main() -> int:
             takeover = latest_takeover if isinstance(latest_takeover, dict) and latest_takeover else {"status": "existing_current_find_fragments_refreshed", "return_code": 0, "started_at": now_iso(), "finished_at": now_iso(), "prompt_path": ""}
             existing_readings, existing_ideas, existing_plans, targeted_queries, positive_validation = _refresh_current_find_claude_outputs(paths, taste_dir, run_id, find_results, effective_read_limit, find_revision)
             write_current_find_structured_artifacts(paths, taste_dir, run_id, existing_readings, existing_ideas, existing_plans, takeover, positive_validation)
-            payload = ensure_claude_plan_state(args.project, paths, run_id, existing_readings, existing_ideas, existing_plans, takeover)
+            payload = ensure_claude_plan_state(args.project, paths, run_id, existing_readings, existing_ideas, existing_plans, takeover, idea_count=args.idea_count)
             update_literature_packet(paths, run_id, existing_readings, existing_ideas, existing_plans)
             update_frontend_state(paths, run_id, existing_readings, existing_ideas, existing_plans)
             ready_now = _current_find_contract_ready(existing_readings, existing_ideas, existing_plans, targeted_queries, positive_validation, run_id, min_required_readings, args.idea_count, find_revision)
@@ -6597,7 +6652,7 @@ def main() -> int:
                 "artifact_validated_without_repair_rerun": True,
             }
             write_current_find_structured_artifacts(paths, taste_dir, run_id, existing_readings, existing_ideas, existing_plans, takeover, positive_validation)
-            payload = ensure_claude_plan_state(args.project, paths, run_id, existing_readings, existing_ideas, existing_plans, takeover)
+            payload = ensure_claude_plan_state(args.project, paths, run_id, existing_readings, existing_ideas, existing_plans, takeover, idea_count=args.idea_count)
             update_literature_packet(paths, run_id, existing_readings, existing_ideas, existing_plans)
             update_frontend_state(paths, run_id, existing_readings, existing_ideas, existing_plans)
             selection_receipt = sync_current_find_selection_success_receipt(
@@ -6637,7 +6692,7 @@ def main() -> int:
         validation_ok = bool(current_reading_validation_ready(positive_validation, run_id, min_readings) and claude_output_payloads_are_current([positive_validation], find_revision))
         if _current_find_contract_ready(existing_readings, existing_ideas, existing_plans, targeted_queries, positive_validation, run_id, min_readings, args.idea_count, find_revision):
             write_current_find_structured_artifacts(paths, taste_dir, run_id, existing_readings, existing_ideas, existing_plans, takeover, positive_validation)
-            payload = ensure_claude_plan_state(args.project, paths, run_id, existing_readings, existing_ideas, existing_plans, takeover)
+            payload = ensure_claude_plan_state(args.project, paths, run_id, existing_readings, existing_ideas, existing_plans, takeover, idea_count=args.idea_count)
             update_literature_packet(paths, run_id, existing_readings, existing_ideas, existing_plans)
             update_frontend_state(paths, run_id, existing_readings, existing_ideas, existing_plans)
             selection_fields = current_find_selection_fields(existing_ideas, existing_plans, source=CLAUDE_TAKEOVER_SOURCE, executable=True)
@@ -6669,8 +6724,8 @@ def main() -> int:
             taste_dir,
             reading_validation,
         )
-        failure_type = current_find_contract_failure_type(reading_validation, observed)
-        next_action = current_find_contract_next_required_action(reading_validation, observed)
+        failure_type = current_find_contract_failure_type(reading_validation, observed, idea_count=args.idea_count)
+        next_action = current_find_contract_next_required_action(reading_validation, observed, idea_count=args.idea_count)
         if existing_readings:
             # Keep the project-visible Read artifact tied to the current Find run
             # even when strict validation still blocks downstream execution. This
@@ -6767,13 +6822,13 @@ def main() -> int:
                 execution_plan["base_selection_status"] = "blocked_by_current_find_idea_contract"
                 execution_plan["observed"] = {**observed, "reading_validation": validation_payload if isinstance(validation_payload, dict) else {}}
                 execution_plan["blockers"] = [
-                    "Claude Code takeover must rewrite and objectively score 5 ideas before TASTE can continue current-Find planning."
+                    f"Claude Code takeover must rewrite and objectively score {args.idea_count} ideas before TASTE can continue current-Find planning."
                 ] + _idea_contract_issue_summary_zh(idea_contract_issues or raw_idea_contract_issues)
             if content_ready and not selection_ready:
                 selection_issue = current_find_selected_execution_issue(ideas, plans)
                 execution_plan["status"] = "blocked_ambiguous_selected_plan" if selection_issue == "ambiguous_selected_plan" else "blocked_missing_selected_plan"
                 execution_plan["failure_type"] = selection_issue or "missing_selected_plan"
-                execution_plan["next_required_action"] = current_find_contract_next_required_action(validation_payload, {"selected_execution_issue": selection_issue or "missing_selected_plan"})
+                execution_plan["next_required_action"] = current_find_contract_next_required_action(validation_payload, {"selected_execution_issue": selection_issue or "missing_selected_plan"}, idea_count=args.idea_count)
                 execution_plan["next_required_stage"] = execution_plan["next_required_action"]
                 execution_plan["base_selection_status"] = execution_plan["status"]
                 execution_plan["selected_execution_issue"] = selection_issue or "missing_selected_plan"
@@ -6802,13 +6857,13 @@ def main() -> int:
                     "raw_idea_contract_issues": _idea_rows_contract_issues(raw_ideas, args.idea_count)[:20],
                     "targeted_search_queries": len(extract_targeted_search_queries(paths, read_results if isinstance(read_results, dict) else {}, ideas_results if isinstance(ideas_results, dict) else {}, plans_results if isinstance(plans_results, dict) else {}, execution_plan)),
                 }
-                failure_type = current_find_contract_failure_type(validation_payload, observed)
-                next_action = current_find_contract_next_required_action(validation_payload, observed)
+                failure_type = current_find_contract_failure_type(validation_payload, observed, idea_count=args.idea_count)
+                next_action = current_find_contract_next_required_action(validation_payload, observed, idea_count=args.idea_count)
                 execution_plan["status"] = "blocked_current_find_full_text_evidence_pending" if failure_type == "full_text_evidence_missing" else "blocked_current_find_idea_contract_failed" if failure_type == "idea_contract_failed" else "blocked_current_find_deep_read_validation_pending"
                 execution_plan["failure_type"] = failure_type
                 execution_plan["next_required_action"] = next_action
                 execution_plan["observed"] = {**observed, "reading_validation": validation_payload if isinstance(validation_payload, dict) else {}}
-                execution_plan["blockers"] = (validation_blockers or ["current-Find reading validation has not passed the full-text deep-read policy."]) if failure_type != "idea_contract_failed" else ["Claude Code takeover must rewrite and objectively score 5 ideas before TASTE can continue current-Find planning."] + _idea_contract_issue_summary_zh(observed.get("idea_contract_issues") or observed.get("raw_idea_contract_issues") or [])
+                execution_plan["blockers"] = (validation_blockers or ["current-Find reading validation has not passed the full-text deep-read policy."]) if failure_type != "idea_contract_failed" else [f"Claude Code takeover must rewrite and objectively score {args.idea_count} ideas before TASTE can continue current-Find planning."] + _idea_contract_issue_summary_zh(observed.get("idea_contract_issues") or observed.get("raw_idea_contract_issues") or [])
                 execution_plan["base_selection_status"] = "blocked_by_current_find_full_text_evidence" if failure_type == "full_text_evidence_missing" else "blocked_by_current_find_idea_contract" if failure_type == "idea_contract_failed" else "blocked_by_current_find_reading_validation"
                 execution_plan["next_required_stage"] = "acquire_current_find_full_text_evidence" if failure_type == "full_text_evidence_missing" else next_action if failure_type == "idea_contract_failed" else "repair_current_find_claude_reading_validation"
         selection_fields = {key: execution_plan.get(key) for key in CURRENT_FIND_SELECTION_FIELD_KEYS}

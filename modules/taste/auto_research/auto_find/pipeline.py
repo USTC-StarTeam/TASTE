@@ -4106,14 +4106,14 @@ def _strong_recommendation_target_count(config: AppConfig, source_count: int | N
     configured_target = int(os.environ.get("STRONG_RECOMMENDATION_TARGET_COUNT", "0") or 0)
     if configured_target > 0:
         return configured_target
+    requested = int(getattr(config, "max_recommended_papers", 0) or 0)
+    if requested > 0:
+        return requested
     if source_count is not None:
         return max(1, int(source_count or 1)) * 5
     source_hint = _source_count_hint(config.default_find_selection or {})
     if source_hint > 0:
         return source_hint * 5
-    requested = int(getattr(config, "max_recommended_papers", 0) or 0)
-    if requested > 0:
-        return requested
     return 20
 
 def _strong_recommendation_output_count(config: AppConfig, source_count: int | None = None) -> int:
