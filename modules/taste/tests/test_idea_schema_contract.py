@@ -1663,7 +1663,7 @@ python3 /tmp/build_plans.py
         "current-find-claude-read-idea-plan",
     ) == ""
 
-    readonly_tail_monitor = """tail -f /workspace/ar/projects/sample_project/artifacts/sample_run/stdout_stderr.log &
+    readonly_tail_monitor = """tail -f /workspace/taste/projects/sample_project/artifacts/sample_run/stdout_stderr.log &
 BGPID=$!
 sleep 180 && kill $BGPID 2>/dev/null
 """
@@ -1673,7 +1673,7 @@ sleep 180 && kill $BGPID 2>/dev/null
         "experiment",
     ) == ""
 
-    readonly_delayed_tail = "sleep 300 && tail -30 /workspace/ar/projects/sample_project/artifacts/run/stdout_stderr.log 2>/dev/null"
+    readonly_delayed_tail = "sleep 300 && tail -30 /workspace/taste/projects/sample_project/artifacts/run/stdout_stderr.log 2>/dev/null"
     assert claude_project_session.bash_command_tool_policy_issue(
         readonly_delayed_tail,
         "sample_project",
@@ -1793,7 +1793,7 @@ def test_current_find_artifact_writer_policy_is_recoverable_tool_policy():
 
     generator = """python3 << 'PYEOF'
 import json
-with open('/workspace/ar/projects/demo/planning/finding/read_results.json', 'w') as f:
+with open('/workspace/taste/projects/demo/planning/finding/read_results.json', 'w') as f:
     json.dump({'readings': []}, f)
 PYEOF
 """
@@ -1809,7 +1809,7 @@ PYEOF
 
     temp_diagnostic = """python3 << PYEOF
 import json
-with open(/workspace/ar/projects/demo/planning/finding/ideas.json) as f:
+with open(/workspace/taste/projects/demo/planning/finding/ideas.json) as f:
     content = f.read()
 content = content.replace(bad, fixed)
 with open(/tmp/ideas_fixed.json, w) as f:
@@ -1838,17 +1838,17 @@ import json
 json.load(open('state/current_find_research_plan.json'))
 PYEOF
 """
-    read_content_artifact = """python3 -c "import json; json.load(open('/workspace/ar/projects/demo/planning/finding/read_results.json'))" 2>&1 | head -3"""
+    read_content_artifact = """python3 -c "import json; json.load(open('/workspace/taste/projects/demo/planning/finding/read_results.json'))" 2>&1 | head -3"""
     write_state = """python3 - << 'PYEOF'
 from pathlib import Path
 Path('state/current_find_research_plan.json').write_text('{}')
 PYEOF
 """
     edit_state = {
-        "file_path": "/workspace/ar/projects/demo/state/current_find_research_plan.json",
+        "file_path": "/workspace/taste/projects/demo/state/current_find_research_plan.json",
     }
     edit_content = {
-        "file_path": "/workspace/ar/projects/demo/planning/finding/read_results.json",
+        "file_path": "/workspace/taste/projects/demo/planning/finding/read_results.json",
     }
 
     assert claude_project_session.bash_command_tool_policy_issue(
@@ -2597,7 +2597,7 @@ def test_stale_or_missing_takeover_cannot_validate_ready_current_find_outputs(tm
             "prompt_path": str(state_dir / "current_find_claude_takeover_repair_prompt_attempt2.md"),
         }
 
-    def fake_selection(project, paths_arg, run_id_arg, observed=None, attempt=1):
+    def fake_selection(project, paths_arg, run_id_arg, observed=None, attempt=1, **_kwargs):
         selection_calls.append({"observed": observed, "attempt": attempt})
         plan_payload = ensure_current_find_research_plan.load_json(taste_dir / "plans.json", {})
         updated_plans = []
@@ -3097,7 +3097,7 @@ def test_current_find_artifact_writer_policy_marks_turn_for_termination():
     spec.loader.exec_module(claude_project_session)
 
     reason = claude_project_session.bash_command_tool_policy_issue(
-        "python3 << 'PYEOF'\nimport json\nopen('/workspace/ar/projects/demo/planning/finding/read_results.json','w').write('{}')\nPYEOF\n",
+        "python3 << 'PYEOF'\nimport json\nopen('/workspace/taste/projects/demo/planning/finding/read_results.json','w').write('{}')\nPYEOF\n",
         "demo_project",
         "current-find-claude-read-idea-plan",
     )
@@ -3191,18 +3191,18 @@ def test_current_find_json_artifacts_are_write_only():
     stage = "current-find-claude-read-idea-plan"
     assert claude_project_session.current_find_tool_policy_issue(
         "Edit",
-        {"file_path": "/workspace/ar/projects/demo/planning/finding/read_results.json"},
+        {"file_path": "/workspace/taste/projects/demo/planning/finding/read_results.json"},
         stage,
     )
     assert claude_project_session.current_find_tool_policy_issue(
         "Edit",
-        {"file": "/workspace/ar/projects/demo/planning/finding/read_results.json"},
+        {"file": "/workspace/taste/projects/demo/planning/finding/read_results.json"},
         stage,
     )
     assert claude_project_session.current_find_tool_policy_issue(
         "Edit",
         {
-            "file_path": "/workspace/ar/projects/demo/planning/finding/read_results.json",
+            "file_path": "/workspace/taste/projects/demo/planning/finding/read_results.json",
             "old_string": '块大小激活了模型中不同"专家"子网络。固定块大小导致偏向特定',
             "new_string": "块大小激活了模型中不同「专家」子网络。固定块大小导致偏向特定",
             "replace_all": False,
@@ -3212,7 +3212,7 @@ def test_current_find_json_artifacts_are_write_only():
     assert claude_project_session.current_find_tool_policy_issue(
         "Edit",
         {
-            "file_path": "/workspace/ar/projects/demo/planning/finding/read_results.json",
+            "file_path": "/workspace/taste/projects/demo/planning/finding/read_results.json",
             "old_string": '块大小激活了模型中不同"专家"子网络。固定块大小导致偏向特定',
             "new_string": "块大小激活了模型中不同专家子网络。并且新增了科研内容。",
             "replace_all": False,
@@ -3221,26 +3221,26 @@ def test_current_find_json_artifacts_are_write_only():
     )
     assert claude_project_session.current_find_tool_policy_issue(
         "MultiEdit",
-        {"file_path": "/workspace/ar/projects/demo/planning/finding/ideas.json"},
+        {"file_path": "/workspace/taste/projects/demo/planning/finding/ideas.json"},
         stage,
     )
     assert claude_project_session.current_find_tool_policy_issue(
         "MultiEdit",
-        {"file": "/workspace/ar/projects/demo/planning/finding/plans.json"},
+        {"file": "/workspace/taste/projects/demo/planning/finding/plans.json"},
         stage,
     )
     assert not claude_project_session.current_find_tool_policy_issue(
         "Write",
-        {"file_path": "/workspace/ar/projects/demo/planning/finding/read_results.json"},
+        {"file_path": "/workspace/taste/projects/demo/planning/finding/read_results.json"},
         stage,
     )
-    fragment_path = "/workspace/ar/projects/demo/planning/finding/current_find_deep_read_fragments/01_paper.json"
+    fragment_path = "/workspace/taste/projects/demo/planning/finding/current_find_deep_read_fragments/01_paper.json"
     assert not claude_project_session.current_find_tool_policy_issue("Write", {"file_path": fragment_path}, stage)
     assert not claude_project_session.current_find_tool_policy_issue("Edit", {"file_path": fragment_path}, stage)
     assert not claude_project_session.current_find_tool_policy_issue("MultiEdit", {"file_path": fragment_path}, stage)
     markdown_reason = claude_project_session.current_find_tool_policy_issue(
         "Write",
-        {"file": "/workspace/ar/projects/demo/planning/finding/read.md"},
+        {"file": "/workspace/taste/projects/demo/planning/finding/read.md"},
         stage,
     )
     assert "Markdown artifacts" in markdown_reason
@@ -3255,7 +3255,7 @@ def test_current_find_deep_read_fragments_allow_claude_file_repairs_not_bash_gen
     spec.loader.exec_module(claude_project_session)
 
     stage = "current-find-claude-read-idea-plan"
-    fragment = "/workspace/ar/projects/demo/planning/finding/current_find_deep_read_fragments/01_paper.json"
+    fragment = "/workspace/taste/projects/demo/planning/finding/current_find_deep_read_fragments/01_paper.json"
     assert not claude_project_session.current_find_tool_policy_issue("Write", {"file_path": fragment}, stage)
     assert not claude_project_session.current_find_tool_policy_issue("Edit", {"file_path": fragment}, stage)
     assert not claude_project_session.current_find_tool_policy_issue("MultiEdit", {"file_path": fragment}, stage)
@@ -3478,10 +3478,10 @@ def test_current_find_selection_stage_only_allows_complete_plans_write():
     spec.loader.exec_module(claude_project_session)
 
     stage = "current-find-claude-select-plan"
-    plans_path = "/workspace/ar/projects/demo/planning/finding/plans.json"
-    read_path = "/workspace/ar/projects/demo/planning/finding/read_results.json"
-    ideas_path = "/workspace/ar/projects/demo/planning/finding/ideas.json"
-    fragment_path = "/workspace/ar/projects/demo/planning/finding/current_find_deep_read_fragments/01_paper.json"
+    plans_path = "/workspace/taste/projects/demo/planning/finding/plans.json"
+    read_path = "/workspace/taste/projects/demo/planning/finding/read_results.json"
+    ideas_path = "/workspace/taste/projects/demo/planning/finding/ideas.json"
+    fragment_path = "/workspace/taste/projects/demo/planning/finding/current_find_deep_read_fragments/01_paper.json"
 
     assert not claude_project_session.current_find_tool_policy_issue("Write", {"file_path": plans_path}, stage)
     assert claude_project_session.is_current_find_artifact_policy_reason(

@@ -3904,7 +3904,7 @@ def _is_inspection_or_wrapper_cmd(command: Any) -> bool:
         inspection_terms = [
             "curl -ss",
             "api/jobs",
-            "api/ar/projects",
+            "api/projects",
             "state/full_research_cycle.json",
             "state/reference_reproduction_gate.json",
             "fresh_base_reference_full_reproduction_job.json",

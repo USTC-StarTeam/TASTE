@@ -1766,7 +1766,7 @@ def _remote_process_rows() -> list[dict[str, Any]]:
             "curl -sS",
             "curl -ss",
             "api/jobs",
-            "api/ar/projects",
+            "api/projects",
             "urllib.request",
             "json.load",
             "json.loads",
