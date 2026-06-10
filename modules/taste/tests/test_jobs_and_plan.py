@@ -14,6 +14,44 @@ from auto_research.web import server
 from auto_research.web.server import JOBS, api_artifacts, start_job
 
 
+def test_script_llm_config_reads_runtime_env_overrides(monkeypatch):
+    llm_client = importlib.import_module("llm_client")
+    for key in ["LLM_API_KEY", "DEEPSEEK_API_KEY"]:
+        monkeypatch.delenv(key, raising=False)
+    cfg = {
+        "llm": {"provider": "deepseek", "api_base": "https://example.test/v1", "model": "model", "api_key_env": "DEEPSEEK_API_KEY"},
+        "runtime": {"env_overrides": {"DEEPSEEK_API_KEY": "secret-key", "LLM_RESPONSE_FORMAT": "json_object"}},
+    }
+
+    settings = llm_client.get_llm_config(cfg)
+
+    assert settings["api_key"] == "secret-key"
+    assert settings["response_format"] == "json_object"
+
+
+def test_check_llm_ready_accepts_json_ok_response():
+    check_llm_ready = importlib.import_module("check_llm_ready")
+
+    assert check_llm_ready.readiness_response_ok('{"ok": true}') is True
+    assert check_llm_ready.readiness_response_ok('{"status": "ready"}') is True
+    assert check_llm_ready.readiness_response_ok('ok') is True
+    assert check_llm_ready.readiness_response_ok('{"ok": false}') is False
+
+
+def test_run_frontend_default_uses_management_python(monkeypatch, tmp_path):
+    run_frontend = importlib.import_module("run_frontend")
+    management_python = tmp_path / "python"
+    management_python.write_text("#!/bin/sh\n", encoding="utf-8")
+    management_python.chmod(0o755)
+    monkeypatch.setenv("MANAGEMENT_PYTHON", str(management_python))
+    args = type("Args", (), {"env_name": ""})()
+    driver = tmp_path / "run_driver.py"
+
+    cmd = run_frontend.driver_python_command(args, {}, driver)
+
+    assert cmd == [str(management_python), str(driver)]
+
+
 def recommended_paper(paper_id: str, title: str) -> dict:
     abstract = (
         f"{title} studies a concrete recommendation method with a reusable benchmark, detailed evaluation protocol, "
@@ -499,6 +537,65 @@ def test_nested_plan_selection_is_lifted_into_current_find_contract():
     assert selection["selected_plan_id"] == "plan-1"
     assert selection["selection_issue"] == ""
 
+
+
+
+def test_current_find_plan_bridge_gate_blocks_stale_plan(tmp_path):
+    from types import SimpleNamespace
+
+    full_cycle = importlib.import_module("run_full_research_cycle")
+    paths = SimpleNamespace(state=tmp_path / "state", planning=tmp_path / "planning")
+    finding = paths.planning / "finding"
+    finding.mkdir(parents=True)
+    paths.state.mkdir(parents=True)
+
+    write_json(finding / "find_results.json", {"run_id": "find_new", "strong_recommendations": [recommended_paper("p1", "Paper 1")]})
+    write_json(finding / "read_results.json", {"run_id": "find_old", "readings": [{"title": "Paper 1"}]})
+    write_json(finding / "ideas.json", {"run_id": "find_old", "ideas": []})
+    write_json(finding / "plans.json", {"run_id": "find_old", "plans": []})
+    write_json(paths.state / "current_find_research_plan.json", {"run_id": "find_old", "status": "ready", "read_idea_plan_ready": True, "claude_current_find_ready": True})
+    write_json(paths.state / "current_find_claude_reading_validation.json", {"run_id": "find_old", "valid": True, "policy_version": full_cycle.CURRENT_FIND_FULL_TEXT_POLICY_VERSION, "actual_reading_count": 1, "full_text_reading_count": 1, "pending_full_text_reading_count": 0, "blockers": []})
+
+    gate = full_cycle.current_find_plan_bridge_gate_status(paths, {"bridge_return_code": 0})
+
+    assert gate["blocking"] is True
+    assert gate["status"] == "blocked_current_find_plan_bridge"
+    assert any("stale" in blocker for blocker in gate["blockers"])
+
+
+def test_current_find_plan_bridge_gate_passes_current_ready_plan(tmp_path):
+    from types import SimpleNamespace
+
+    full_cycle = importlib.import_module("run_full_research_cycle")
+    paths = SimpleNamespace(state=tmp_path / "state", planning=tmp_path / "planning")
+    finding = paths.planning / "finding"
+    finding.mkdir(parents=True)
+    paths.state.mkdir(parents=True)
+    recommendations = [recommended_paper(f"p{idx}", f"Paper {idx}") for idx in range(1, 6)]
+    readings = [{"title": row["title"], "full_text_evidence": {"available": True}} for row in recommendations]
+    ideas = [{"id": f"idea-{idx}", "title": f"Idea {idx}"} for idx in range(1, 6)]
+    plans = [
+        {
+            "plan_id": f"plan-{idx}",
+            "idea_id": f"idea-{idx}",
+            "title": f"Plan {idx}",
+            "selected_for_execution": idx == 1,
+            "execute_next": idx == 1,
+        }
+        for idx in range(1, 6)
+    ]
+    write_json(finding / "find_results.json", {"run_id": "find_new", "strong_recommendations": recommendations})
+    write_json(finding / "read_results.json", {"run_id": "find_new", "readings": readings})
+    write_json(finding / "ideas.json", {"run_id": "find_new", "ideas": ideas})
+    write_json(finding / "plans.json", {"run_id": "find_new", "plans": plans})
+    write_json(paths.state / "current_find_research_plan.json", {"run_id": "find_new", "status": "claude_current_find_read_idea_plan_ready_waiting_for_environment_base_selection", "read_idea_plan_ready": True, "claude_current_find_ready": True, "selected_plan_id": "plan-1", "ideas": ideas, "plans": plans})
+    write_json(paths.state / "current_find_claude_reading_validation.json", {"run_id": "find_new", "valid": True, "policy_version": full_cycle.CURRENT_FIND_FULL_TEXT_POLICY_VERSION, "actual_reading_count": 5, "full_text_reading_count": 5, "pending_full_text_reading_count": 0, "blockers": []})
+
+    gate = full_cycle.current_find_plan_bridge_gate_status(paths, {"bridge_return_code": 0})
+
+    assert gate["blocking"] is False
+    assert gate["status"] == "pass"
+    assert gate["selected_plan_id"] == "plan-1"
 
 def test_ensure_claude_plan_state_respects_configured_idea_count(tmp_path, monkeypatch):
     import importlib.util
@@ -1598,6 +1695,8 @@ def test_live_jobs_lists_all_active_project_workers(monkeypatch, tmp_path):
         "latest_step": {"stage": "experiment", "status": "stale"},
     })
     write_json(root / "planning" / "finding" / "find_progress.json", {"run_id": "find_demo", "status": "complete"})
+    write_json(state_dir / "finding_frontend.json", {"taste_run_id": "find_demo", "status": "find_completed"})
+    write_json(state_dir / "current_find_research_plan.json", {"run_id": "find_old", "status": "historical"})
     monkeypatch.setattr(server, "PROJECT_IDS_ROOT", tmp_path / "projects")
     monkeypatch.setattr(server, "list_projects", lambda: [{"id": project, "path": str(root)}])
     monkeypatch.setattr(server, "_pid_alive_local", lambda pid: str(pid) in {"201", "202"})
@@ -1664,11 +1763,85 @@ def test_live_jobs_lists_active_worker_while_full_cycle_controller_runs(monkeypa
     worker_rows = [row for row in jobs if str(row.get("job_id", "")).startswith("experiment-worker_")]
     assert len(full_rows) == 1
     assert full_rows[0]["status"] == "running"
+    assert full_rows[0]["run_id"] == "find_demo"
     assert full_rows[0]["result"]["pid"] == "100"
     assert {row["result"]["pid"] for row in worker_rows} == {"202"}
     assert worker_rows[0]["result"]["not_full_cycle_controller"] is True
     assert "由当前完整科研循环管理" in worker_rows[0]["result"]["summary"]
     assert "控制器已停止" not in worker_rows[0]["result"]["summary"]
+
+
+def test_current_find_worker_uses_live_frontend_run_id(monkeypatch, tmp_path):
+    from auto_research.web import server
+
+    project = "demo_project"
+    root = tmp_path / "projects" / project
+    state_dir = root / "state"
+    state_dir.mkdir(parents=True)
+    (root / "planning" / "finding").mkdir(parents=True)
+    write_json(state_dir / "finding_frontend.json", {"taste_run_id": "find_new", "status": "find_completed"})
+    write_json(state_dir / "current_find_research_plan.json", {"run_id": "find_old", "status": "historical"})
+    find_progress = {"run_id": "find_new", "phase": "complete"}
+    monkeypatch.setattr(server, "_pid_alive_local", lambda pid: str(pid) == "202")
+    monkeypatch.setattr(server, "_latest_project_log", lambda *_args, **_kwargs: "")
+
+    job = server._active_project_worker_job(
+        project,
+        root,
+        {"pid": "202", "phase": "read", "kind": "current_find_claude_child", "cmd": "python scripts/ensure_current_find_research_plan.py"},
+        {},
+        {"run_id": "find_old"},
+        find_progress,
+        compact=True,
+        controller_alive=True,
+    )
+
+    assert job["run_id"] == "find_new"
+    assert job["stage"] == "read"
+
+
+def test_full_text_repair_replaces_stale_packet_before_first_attempt(monkeypatch, tmp_path):
+    repair = importlib.import_module("repair_current_find_full_text_evidence")
+
+    project = "demo_project"
+    root = tmp_path / "projects" / project
+    planning = root / "planning"
+    finding = planning / "finding"
+    state = root / "state"
+    (finding / "full_text_reading").mkdir(parents=True)
+    state.mkdir(parents=True)
+    paths = type("Paths", (), {"root": root, "planning": planning, "state": state, "name": project})()
+    write_json(
+        finding / "find_results.json",
+        {"run_id": "find_new", "strong_recommendations": [{"title": "Paper One", "id": "paper-one", "pdf_url": "https://example.test/paper.pdf"}]},
+    )
+    write_json(
+        finding / "full_text_reading" / "full_text_packet.json",
+        {"run_id": "find_old", "source": "old", "papers": [{"title": "Old Paper", "text_path": "old.txt", "text_chars": 9000}]},
+    )
+    write_json(
+        state / "current_find_claude_reading_validation.json",
+        {"run_id": "find_new", "generated_at": "2026-06-10T00:00:00+00:00", "pending_without_evidence_titles": ["Paper One"]},
+    )
+    seen_run_ids = []
+
+    def fake_try(paths_arg, paper, rank):
+        seen_run_ids.append(repair.load_json(repair.full_text_packet_path(paths_arg), {}).get("run_id"))
+        return None, [{"kind": "fake_attempt", "accepted": False}]
+
+    monkeypatch.setattr(repair, "build_paths", lambda _project: paths)
+    monkeypatch.setattr(repair, "try_acquire_for_paper", fake_try)
+    monkeypatch.setattr(repair, "record_unavailable_full_text_evidence_blocker", lambda *_args, **_kwargs: {"status": "recorded"})
+
+    rc, receipt = repair.repair_current_find_full_text_evidence(project, force=True)
+
+    packet = repair.load_json(repair.full_text_packet_path(paths), {})
+    assert rc == 2
+    assert receipt["run_id"] == "find_new"
+    assert seen_run_ids == ["find_new"]
+    assert packet["run_id"] == "find_new"
+    assert packet["previous_packet_run_id"] == "find_old"
+    assert packet["papers"][0]["title"] == "Paper One"
 
 
 def test_cancel_worker_job_uses_exact_pid_from_job_id(monkeypatch, tmp_path):

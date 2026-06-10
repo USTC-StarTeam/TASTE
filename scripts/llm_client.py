@@ -12,20 +12,31 @@ from typing import Any
 def get_llm_config(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg = cfg or {}
     llm = cfg.get('llm', {}) if isinstance(cfg, dict) else {}
-    # Project config is authoritative for TASTE runs. Shell LLM_* variables are
-    # startup/default fallbacks only; otherwise an old interactive shell can
-    # silently override the LLM settings saved from the web UI.
-    provider = str(llm.get('provider') or os.environ.get('LLM_PROVIDER') or 'none')
-    api_base = str(llm.get('api_base') or os.environ.get('LLM_API_BASE') or '')
-    model = str(llm.get('model') or os.environ.get('LLM_MODEL') or '')
-    api_key_env = str(llm.get('api_key_env') or os.environ.get('LLM_API_KEY_ENV') or 'OPENAI_API_KEY')
-    api_key = str(llm.get('api_key') or os.environ.get('LLM_API_KEY') or os.environ.get(api_key_env, '') or '')
-    timeout_sec = int(llm.get('timeout_sec') or os.environ.get('LLM_TIMEOUT_SEC') or 120)
-    max_tokens = int(llm.get('max_tokens') or os.environ.get('LLM_MAX_TOKENS') or 2000)
-    response_format = str(llm.get('response_format') or os.environ.get('LLM_RESPONSE_FORMAT') or '')
-    api_mode = str(llm.get('api_mode') or os.environ.get('LLM_API_MODE') or 'chat_completions')
-    temperature = float(llm.get('temperature') if llm.get('temperature') is not None else os.environ.get('LLM_TEMPERATURE', 0.2) or 0.2)
-    enabled = str(llm.get('enabled', os.environ.get('LLM_ENABLED', True))).lower() not in {'0', 'false', 'no'}
+    runtime = cfg.get('runtime', {}) if isinstance(cfg, dict) and isinstance(cfg.get('runtime', {}), dict) else {}
+    env_overrides = runtime.get('env_overrides', {}) if isinstance(runtime.get('env_overrides', {}), dict) else {}
+
+    def env_value(name: str, default: Any = '') -> Any:
+        value = os.environ.get(name)
+        if value not in (None, ''):
+            return value
+        value = env_overrides.get(name)
+        if value not in (None, ''):
+            return value
+        return default
+
+    # Project config is authoritative for TASTE runs. Shell LLM_* variables and
+    # saved runtime env overrides are startup/default fallbacks for empty saved fields.
+    provider = str(llm.get('provider') or env_value('LLM_PROVIDER') or 'none')
+    api_base = str(llm.get('api_base') or env_value('LLM_API_BASE') or '')
+    model = str(llm.get('model') or env_value('LLM_MODEL') or '')
+    api_key_env = str(llm.get('api_key_env') or env_value('LLM_API_KEY_ENV') or 'OPENAI_API_KEY')
+    api_key = str(llm.get('api_key') or env_value('LLM_API_KEY') or env_value(api_key_env) or '')
+    timeout_sec = int(llm.get('timeout_sec') or env_value('LLM_TIMEOUT_SEC') or 120)
+    max_tokens = int(llm.get('max_tokens') or env_value('LLM_MAX_TOKENS') or 2000)
+    response_format = str(llm.get('response_format') or env_value('LLM_RESPONSE_FORMAT') or '')
+    api_mode = str(llm.get('api_mode') or env_value('LLM_API_MODE') or 'chat_completions')
+    temperature = float(llm.get('temperature') if llm.get('temperature') is not None else env_value('LLM_TEMPERATURE', 0.2) or 0.2)
+    enabled = str(llm.get('enabled', env_value('LLM_ENABLED', True))).lower() not in {'0', 'false', 'no'}
     return {
         'enabled': enabled,
         'provider': provider,
@@ -81,6 +92,18 @@ def _chat_url(api_base: str) -> str:
     return url + '/chat/completions'
 
 
+def _wants_json_response(settings: dict[str, Any]) -> bool:
+    return settings.get('response_format') in {'json_object', 'json'}
+
+
+def _prompt_with_json_response_hint(prompt: str) -> str:
+    text = str(prompt or '')
+    if 'json' in text.lower():
+        return text
+    suffix = 'Return valid JSON.'
+    return f'{text.rstrip()}\n\n{suffix}' if text.strip() else suffix
+
+
 def _extract_response_text(raw: Any) -> tuple[str, str, list[str]]:
     if not isinstance(raw, dict):
         return '', '', []
@@ -115,28 +138,32 @@ def _extract_response_text(raw: Any) -> tuple[str, str, list[str]]:
 
 
 def _build_responses_payload(prompt: str, settings: dict[str, Any], system_prompt: str = '') -> dict[str, Any]:
+    wants_json_response = _wants_json_response(settings)
+    request_prompt = _prompt_with_json_response_hint(prompt) if wants_json_response else prompt
     payload: dict[str, Any] = {
         'model': settings['model'],
-        'input': prompt if not system_prompt else [
+        'input': request_prompt if not system_prompt else [
             {'role': 'system', 'content': [{'type': 'input_text', 'text': system_prompt}]},
-            {'role': 'user', 'content': [{'type': 'input_text', 'text': prompt}]},
+            {'role': 'user', 'content': [{'type': 'input_text', 'text': request_prompt}]},
         ],
         'temperature': settings['temperature'],
         'max_output_tokens': settings['max_tokens'],
     }
-    if settings.get('response_format') in {'json_object', 'json'}:
+    if wants_json_response:
         payload['text'] = {'format': {'type': 'json_object'}}
     return payload
 
 
 def _build_chat_payload(prompt: str, settings: dict[str, Any], system_prompt: str = '') -> dict[str, Any]:
+    wants_json_response = _wants_json_response(settings)
+    request_prompt = _prompt_with_json_response_hint(prompt) if wants_json_response else prompt
     payload = {
         'model': settings['model'],
-        'messages': ([{'role': 'system', 'content': system_prompt}] if system_prompt else []) + [{'role': 'user', 'content': prompt}],
+        'messages': ([{'role': 'system', 'content': system_prompt}] if system_prompt else []) + [{'role': 'user', 'content': request_prompt}],
         'temperature': settings['temperature'],
         'max_tokens': settings['max_tokens'],
     }
-    if settings.get('response_format') in {'json_object', 'json'}:
+    if wants_json_response:
         payload['response_format'] = {'type': 'json_object'}
     return payload
 

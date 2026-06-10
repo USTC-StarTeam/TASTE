@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -20,9 +21,11 @@ from project_paths import build_paths
 FULL_TEXT_MIN_CHARS = 1200
 PAPER_BODY_MIN_CHARS = 8000
 USER_AGENT = "research-workflow/full-text-repair"
+REQUEST_TIMEOUT_SEC = max(5, int(os.environ.get("FULL_TEXT_REQUEST_TIMEOUT_SEC", "18")))
+FULL_TEXT_REPAIR_TIMEOUT_SEC = max(60, int(os.environ.get("FULL_TEXT_REPAIR_TIMEOUT_SEC", "360")))
 ARXIV_SEARCH_QUERY_VERSION = "v4_latex_unicode_title_variants"
-ARXIV_MAX_SEARCH_QUERIES = 6
-ARXIV_SEARCH_COOLDOWN_SEC = 2.0
+ARXIV_MAX_SEARCH_QUERIES = 4
+ARXIV_SEARCH_COOLDOWN_SEC = 0.75
 
 
 def now_iso() -> str:
@@ -198,6 +201,49 @@ def packet_index(packet: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return index
 
 
+def save_repair_progress(
+    packet_path: Path,
+    receipt_path: Path,
+    packet: dict[str, Any],
+    *,
+    project: str,
+    run_id: str,
+    pending: list[str],
+    acquired: list[dict[str, Any]],
+    unavailable: list[dict[str, Any]],
+    attempts: list[dict[str, Any]],
+    current_title: str = "",
+    status: str = "full_text_evidence_repair_running",
+    validation_generated_at: str = "",
+) -> dict[str, Any]:
+    packet["run_id"] = run_id
+    packet.setdefault("source", "repair_current_find_full_text_evidence.py")
+    packet["updated_at"] = now_iso()
+    packet["repair_source"] = "repair_current_find_full_text_evidence.py"
+    save_json(packet_path, packet)
+    processed_titles = [str(row.get("title") or "").strip() for row in acquired + unavailable if str(row.get("title") or "").strip()]
+    receipt = {
+        "project": project,
+        "run_id": run_id,
+        "status": status,
+        "generated_at": now_iso(),
+        "validation_generated_at": validation_generated_at,
+        "pending_titles": pending,
+        "processed_count": len(processed_titles),
+        "remaining_count": max(0, len(pending) - len(processed_titles)),
+        "current_title": current_title,
+        "acquired_count": len(acquired),
+        "unavailable_count": len(unavailable),
+        "acquired": acquired,
+        "unavailable": unavailable,
+        "attempts_tail": attempts[-10:],
+        "files": {"full_text_packet": str(packet_path), "receipt": str(receipt_path)},
+        "policy": "Full-text repair writes same-run packet progress after each paper so web state never shows a stale packet while evidence acquisition is active.",
+    }
+    save_json(receipt_path, receipt)
+    return receipt
+
+
 def ensure_packet_entry(packet: dict[str, Any], paper: dict[str, Any], rank: int) -> dict[str, Any]:
     papers = packet.setdefault("papers", [])
     if not isinstance(papers, list):
@@ -241,7 +287,7 @@ def extract_pdf_text(pdf_path: Path, max_chars: int = 140000) -> tuple[str, int]
         return "", 0
 
 
-def fetch_url(url: str, timeout: int = 45) -> tuple[int, str, bytes, str]:
+def fetch_url(url: str, timeout: int = REQUEST_TIMEOUT_SEC) -> tuple[int, str, bytes, str]:
     if not url.startswith("http"):
         return 0, "", b"", "missing_url"
     try:
@@ -488,7 +534,7 @@ def openalex_repository_candidates(row: dict[str, Any]) -> tuple[list[dict[str, 
     if doi:
         url = f"https://api.openalex.org/works/doi:{doi}"
         try:
-            response = requests.get(url, timeout=30, headers={"User-Agent": USER_AGENT})
+            response = requests.get(url, timeout=REQUEST_TIMEOUT_SEC, headers={"User-Agent": USER_AGENT})
             attempts.append({"kind": "openalex_doi_lookup", "url": url, "status_code": response.status_code, "accepted": False})
             if response.status_code == 200:
                 consume_payload(response.json(), "openalex_doi_lookup", url)
@@ -498,7 +544,7 @@ def openalex_repository_candidates(row: dict[str, Any]) -> tuple[list[dict[str, 
         for query_title in title_query_variants(title):
             url = f"https://api.openalex.org/works?search={quote_plus(query_title)}&per-page=5"
             try:
-                response = requests.get(url, timeout=30, headers={"User-Agent": USER_AGENT})
+                response = requests.get(url, timeout=REQUEST_TIMEOUT_SEC, headers={"User-Agent": USER_AGENT})
                 attempts.append({"kind": "openalex_title_search", "url": url, "query_title": query_title, "status_code": response.status_code, "accepted": False})
                 if response.status_code == 200:
                     consume_payload(response.json(), "openalex_title_search", url)
@@ -616,7 +662,7 @@ def arxiv_search_candidates(paper: dict[str, Any] | str, max_results: int = 5) -
         if index:
             time.sleep(ARXIV_SEARCH_COOLDOWN_SEC)
         url = "https://export.arxiv.org/api/query?" + urlencode({"search_query": query, "start": 0, "max_results": max_results})
-        status, content_type, content, final_url = fetch_url(url, timeout=45)
+        status, content_type, content, final_url = fetch_url(url, timeout=REQUEST_TIMEOUT_SEC)
         if status != 200:
             all_candidates.append({"kind": "arxiv_search", "url": url, "query": query, "status_code": status, "content_type": content_type, "final_url": final_url, "accepted": False})
             if status == 429:
@@ -876,7 +922,13 @@ def repair_current_find_full_text_evidence(project: str, *, force: bool = False)
     acquired: list[dict[str, Any]] = []
     unavailable: list[dict[str, Any]] = []
     all_attempts: list[dict[str, Any]] = []
+    deadline = time.monotonic() + FULL_TEXT_REPAIR_TIMEOUT_SEC
+    save_repair_progress(packet_path, receipt_path, packet, project=project, run_id=run_id, pending=pending, acquired=acquired, unavailable=unavailable, attempts=all_attempts, status="full_text_evidence_repair_running", validation_generated_at=validation_generated_at)
     for title in pending:
+        if time.monotonic() >= deadline:
+            unavailable.append({"title": title, "reason": "full_text_repair_timeout_before_paper", "attempt_count": 0})
+            save_repair_progress(packet_path, receipt_path, packet, project=project, run_id=run_id, pending=pending, acquired=acquired, unavailable=unavailable, attempts=all_attempts, current_title=title, status="partial_full_text_evidence_repair_timeout", validation_generated_at=validation_generated_at)
+            continue
         paper = find_row_for_title(recommendations, title)
         if not paper:
             paper = {"title": title, "id": safe_slug(title)}
@@ -923,6 +975,7 @@ def repair_current_find_full_text_evidence(project: str, *, force: bool = False)
                 "checked_at": now_iso(),
             })
             unavailable.append({"title": title, "reason": "no accepted PDF/HTML paper text source", "attempt_count": len(attempts)})
+        save_repair_progress(packet_path, receipt_path, packet, project=project, run_id=run_id, pending=pending, acquired=acquired, unavailable=unavailable, attempts=all_attempts, current_title=title, status="full_text_evidence_repair_running", validation_generated_at=validation_generated_at)
 
     packet["updated_at"] = now_iso()
     packet["repair_source"] = "repair_current_find_full_text_evidence.py"

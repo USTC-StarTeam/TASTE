@@ -9,6 +9,25 @@ from llm_client import call_llm, get_llm_config, llm_available, llm_disabled_rea
 from project_paths import build_paths, load_project_config
 
 
+def readiness_response_ok(content: str) -> bool:
+    text = str(content or '').strip()
+    if not text:
+        return False
+    try:
+        data = json.loads(text)
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        if 'ok' in data:
+            value = data.get('ok')
+            return value is True or str(value).strip().lower() in {'true', 'ok', 'yes', '1'}
+        if 'status' in data:
+            status = str(data.get('status') or '').strip().lower()
+            return status in {'ok', 'ready', 'success'}
+        return False
+    return 'ok' in text.lower()[:80]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Check whether the generic OpenAI-compatible LLM API is configured and callable.")
     parser.add_argument("--project", required=True)
@@ -31,10 +50,16 @@ def main() -> None:
     }
     if args.live and result["configured"]:
         try:
-            response = call_llm("Return exactly: ok", cfg, system_prompt="You are a readiness checker. Reply with ok only.")
-            content = str(response.get("content", "")).strip().lower()
-            result["live_ok"] = "ok" in content[:20]
+            response = call_llm(
+                'Return valid JSON exactly: {"ok": true}',
+                cfg,
+                system_prompt='You are a readiness checker. Return valid JSON only.',
+            )
+            content = str(response.get("content", "")).strip()
+            result["live_ok"] = readiness_response_ok(content)
             result["model"] = response.get("model", "")
+            if not result["live_ok"]:
+                result["live_error"] = f"unexpected readiness response: {content[:200] or '<empty>'}"
         except Exception as exc:
             result["live_error"] = str(exc)
     out = paths.reports / "llm_readiness.json"

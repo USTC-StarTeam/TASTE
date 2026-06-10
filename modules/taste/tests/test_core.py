@@ -1,3 +1,5 @@
+import json
+
 from auto_research.auto_find.catalog import load_catalog
 from auto_research.auto_find.sources import _acm_metadata_from_doi, _dblp_page_url, _parse_neurips_detail, _parse_neurips_list, fetch_arxiv, fetch_dblp_stream_api, fetch_openreview_venue, fetch_venue_sample, fetch_venue_title_index, normalize_date
 from auto_research.llm import LLMClient, clamp_workers, extract_json, fallback_score, keyword_category
@@ -256,6 +258,48 @@ def test_normalize_date_accepts_slash_and_dash_formats():
     assert normalize_date("") == ""
 
 
+def test_openreview_fetch_caps_large_page_size(monkeypatch):
+    calls = []
+
+    class Response:
+        def __init__(self, notes):
+            self._notes = notes
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"notes": self._notes}
+
+    def fake_get(_url, params=None, headers=None, timeout=None):
+        params = params or {}
+        calls.append(dict(params))
+        assert int(params.get("limit") or 0) <= 1000
+        offset = int(params.get("offset") or 0)
+        if offset > 0:
+            return Response([])
+        notes = [
+            {
+                "id": "note1",
+                "forum": "forum1",
+                "content": {
+                    "title": {"value": "A Strong OpenReview Paper"},
+                    "abstract": {"value": "This paper has a reusable benchmark, datasets, baselines, metrics, ablations, and limitations."},
+                    "authors": {"value": ["Alice"]},
+                },
+            }
+        ]
+        return Response(notes)
+
+    monkeypatch.setattr("auto_research.auto_find.sources.requests.get", fake_get)
+
+    papers = fetch_openreview_venue({"name": "ICLR", "full_name": "International Conference on Learning Representations"}, [2026], 100000)
+
+    assert len(papers) == 1
+    assert calls[0]["limit"] == 1000
+    assert calls[0]["offset"] == 0
+
+
 def test_openreview_dynamic_iclr_years(monkeypatch):
     captured = []
 
@@ -437,6 +481,36 @@ def test_role_llm_config_inherits_and_overrides_global():
     assert client.base_url == "https://global.example/v1"
     assert client.model == "judge-model"
     assert client.temperature == 0.1
+
+
+def test_llm_json_response_format_adds_user_prompt_json_hint(monkeypatch):
+    captured = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            payload = {"choices": [{"message": {"content": '{"ok":true}'}}]}
+            return json.dumps(payload).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        captured.append(json.loads(request.data.decode("utf-8")))
+        return Response()
+
+    monkeypatch.setenv("LLM_RESPONSE_FORMAT", "json_object")
+    monkeypatch.setattr("auto_research.llm.urllib.request.urlopen", fake_urlopen)
+    cfg = AppConfig(provider="openai_compatible", base_url="https://llm.example/v1", api_key="key", model="model")
+
+    text = LLMClient(cfg, "find").chat("Return an object with ok true")
+
+    assert text == '{"ok":true}'
+    payload = captured[0]
+    assert payload["response_format"] == {"type": "json_object"}
+    assert "json" in payload["messages"][-1]["content"].lower()
 
 
 def test_clamp_workers_bounds_values():

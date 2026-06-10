@@ -14,7 +14,7 @@ import time
 import sys
 from pathlib import Path
 
-from project_paths import ROOT, build_paths, conda_executable
+from project_paths import ROOT, build_paths, conda_executable, management_python
 
 WORKSPACE_ROOT = ROOT / "modules" / "taste"
 if str(WORKSPACE_ROOT) not in sys.path:
@@ -22,7 +22,7 @@ if str(WORKSPACE_ROOT) not in sys.path:
 from auto_research.source_selection import canonical_source_selection, normalize_source_selection
 from project_paths import build_paths as _build_project_paths
 
-DEFAULT_ENV = "taste"
+DEFAULT_ENV = os.environ.get("FIND_ENV_NAME") or os.environ.get("CONDA_ENV_NAME", "")
 DEFAULT_CORE_VENUE_IDS = ["openreview_iclr_2026", "openreview_neurips", "dblp_icml", "dblp_kdd"]
 
 DRIVER_TEMPLATE = r'''
@@ -457,6 +457,29 @@ for name in ["find_results.json", "find_progress.json", "read_results.json", "id
 payload = _write_frontend_state("plan_completed", result, read_result=read, idea_result=idea, plan_result=plan)
 print(json.dumps(payload, ensure_ascii=False))
 '''
+
+
+def driver_python_command(args: argparse.Namespace, cfg: dict, driver: Path) -> list[str]:
+    env_name = str(getattr(args, "env_name", "") or "").strip()
+    if env_name:
+        conda = conda_executable(cfg)
+        if not conda:
+            raise RuntimeError(f"conda not found for --env-name {env_name}; use MANAGEMENT_PYTHON or clear --env-name")
+        return [conda, "run", "--no-capture-output", "-n", env_name, "python", str(driver)]
+
+    runtime = cfg.get("runtime", {}) if isinstance(cfg.get("runtime", {}), dict) else {}
+    for candidate in [
+        os.environ.get("MANAGEMENT_PYTHON", ""),
+        runtime.get("management_python"),
+        runtime.get("python_executable"),
+        cfg.get("python_executable"),
+        management_python(),
+        sys.executable,
+    ]:
+        value = str(candidate or "").strip()
+        if value and Path(value).expanduser().exists():
+            return [str(Path(value).expanduser()), str(driver)]
+    return [sys.executable, str(driver)]
 
 
 def run(cmd: list[str], cwd: Path = ROOT, env: dict[str, str] | None = None, timeout_sec: int = 900, live_log_path: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -1029,8 +1052,6 @@ def main() -> int:
                 str(ROOT / "scripts" / "update_local_database.py"),
                 "--project",
                 args.project,
-                "--env-name",
-                args.env_name,
                 "--if-missing",
             ]
             years = os.environ.get("YEARS", "").strip()
@@ -1039,6 +1060,8 @@ def main() -> int:
             venues = os.environ.get("LOCAL_DB_VENUES", "").strip()
             if venues:
                 refresh_cmd.extend(["--venues", venues])
+            if args.env_name:
+                refresh_cmd.extend(["--env-name", args.env_name])
             subprocess.run(refresh_cmd, cwd=ROOT, text=True, capture_output=True, timeout=min(args.timeout_sec, int(os.environ.get("DB_UPDATE_TIMEOUT_SEC", "1800")) + 60))
 
     if args.fast_mode:
@@ -1061,10 +1084,6 @@ def main() -> int:
 
     if not WORKSPACE_ROOT.exists():
         print(f"missing module root: {WORKSPACE_ROOT}", file=sys.stderr)
-        return 2
-    conda = conda_executable()
-    if not conda:
-        print("conda not found", file=sys.stderr)
         return 2
     source_selection = _effective_source_selection(args)
     reuse_payload = maybe_reuse_taste_run(args, extra_queries)
@@ -1102,7 +1121,13 @@ def main() -> int:
         if not run_env.get(env_key) and llm.get(cfg_key):
             run_env[env_key] = str(llm.get(cfg_key))
     try:
-        proc = run([conda, "run", "--no-capture-output", "-n", args.env_name, "python", str(driver)], cwd=ROOT, env=run_env, timeout_sec=args.timeout_sec, live_log_path=log_path)
+        driver_cmd = driver_python_command(args, cfg, driver)
+    except RuntimeError as exc:
+        log_path.write_text(str(exc) + "\n", encoding="utf-8")
+        print(str(exc), file=sys.stderr)
+        return 2
+    try:
+        proc = run(driver_cmd, cwd=ROOT, env=run_env, timeout_sec=args.timeout_sec, live_log_path=log_path)
     except subprocess.TimeoutExpired as exc:
         elapsed = time.time() - start
         stdout = redact(exc.stdout or "") if isinstance(exc.stdout, str) else ""

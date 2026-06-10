@@ -2302,11 +2302,12 @@ PROJECT_ARTIFACT_NAMES = {
 def _payload_run_id(value: Any) -> str:
     if not isinstance(value, dict):
         return ""
-    return str(value.get("run_id") or value.get("source_run_id") or value.get("find_run_id") or value.get("current_find_run_id") or "").strip()
+    return str(value.get("run_id") or value.get("taste_run_id") or value.get("source_run_id") or value.get("find_run_id") or value.get("current_find_run_id") or "").strip()
 
 
 def _project_current_find_run_id(project_root: Path) -> str:
     for rel in [
+        "state/finding_frontend.json",
         "planning/finding/find_progress.json",
         "planning/finding/find_results.json",
         "state/current_find_research_plan.json",
@@ -5766,10 +5767,13 @@ def _current_stage(full_cycle: dict[str, Any], log_path: str = "") -> tuple[str,
     return phase, line_value, tail, raw_stage
 
 
-def _latest_find_run_id_from_runs() -> str:
-    runs_dir = Path(__file__).resolve().parents[1] / "runs"
+def _latest_find_run_id_from_runs(project_root: Path | None = None) -> str:
+    if project_root is not None:
+        current = _project_current_find_run_id(project_root)
+        if current:
+            return current
     try:
-        candidates = [path for path in runs_dir.glob("find_*") if path.is_dir()]
+        candidates = [path for path in RUNS_DIR.glob("find_*") if path.is_dir()]
     except Exception:
         return ""
     if not candidates:
@@ -5789,14 +5793,16 @@ def _active_project_worker_job(project: str, root: Path, worker: dict[str, Any],
     kind = str(worker.get("kind") or "active_project_worker").strip() or "active_project_worker"
     cmd = str(worker.get("cmd") or "")
     elapsed = str(worker.get("elapsed") or "")
-    run_id = ""
-    for source in [current_plan, find_progress, full_cycle]:
-        if isinstance(source, dict):
-            run_id = str(source.get("run_id") or source.get("source_run_id") or source.get("current_find_run_id") or source.get("find_run_id") or "").strip()
-            if run_id:
-                break
-    controller_note = "由当前完整科研循环管理；不是完整科研循环控制器。" if controller_alive else "不是完整科研循环控制器；控制器未存活或需恢复。"
     current_find_worker = kind.startswith("current_find") or phase == "read"
+    run_id = _project_current_find_run_id(root) if current_find_worker else ""
+    if not run_id:
+        sources = [find_progress, current_plan, full_cycle] if phase == "literature" else [current_plan, find_progress, full_cycle]
+        for source in sources:
+            if isinstance(source, dict):
+                run_id = str(source.get("run_id") or source.get("taste_run_id") or source.get("source_run_id") or source.get("current_find_run_id") or source.get("find_run_id") or "").strip()
+                if run_id:
+                    break
+    controller_note = "由当前完整科研循环管理；不是完整科研循环控制器。" if controller_alive else "不是完整科研循环控制器；控制器未存活或需恢复。"
     if current_find_worker:
         worker_summary = f"当前 Find 精读/想法/计划 worker 正在运行；{controller_note}"
     else:
@@ -6027,16 +6033,16 @@ def _live_jobs_from_projects(*, compact: bool = True) -> list[dict[str, Any]]:
         cmd = str(full_job.get("cmd") or full_job.get("command") or child_cmd or ps_row.get("cmd") or "")
         elapsed = str(ps_row.get("elapsed") or full_job.get("elapsed") or full_job.get("elapsed_sec") or "")
         run_id = ""
-        if fresh_find_running:
-            run_id = _latest_find_run_id_from_runs()
+        if fresh_find_running or phase == "literature":
+            run_id = _latest_find_run_id_from_runs(root)
         if not run_id:
             # The taskbar should point at the current project Find packet. Older
             # full-cycle snapshots and selected-base provenance may mention the
             # Find run that originally selected the base; that is audit history,
             # not the current Find/read/idea/plan surface.
-            for source in [current_plan, find_progress, literature_packet, tick, full_cycle]:
+            for source in [find_progress, literature_packet, current_plan, tick, full_cycle]:
                 if isinstance(source, dict):
-                    run_id = str(source.get("run_id") or source.get("source_run_id") or source.get("current_find_run_id") or source.get("find_run_id") or "").strip()
+                    run_id = str(source.get("run_id") or source.get("taste_run_id") or source.get("source_run_id") or source.get("current_find_run_id") or source.get("find_run_id") or "").strip()
                     if run_id:
                         break
         live_find_progress = find_progress if isinstance(find_progress, dict) else {}

@@ -229,6 +229,100 @@ def current_find_full_text_gate_status(paths) -> dict[str, Any]:
     }
 
 
+def current_find_plan_bridge_gate_status(paths, bridge_summary: Any | None = None) -> dict[str, Any]:
+    """Validate that current-Find Read/Idea/Plan artifacts belong to the latest Find run.
+
+    This is stricter than checking a worker return code. Full-cycle must not feed
+    stale or blocked Read/Idea/Plan state into environment, experiment, or Claude
+    repair stages.
+    """
+    bridge_summary = bridge_summary if isinstance(bridge_summary, dict) else {}
+    taste_dir = paths.planning / "finding"
+    find_results = read_json(taste_dir / "find_results.json", {})
+    if not isinstance(find_results, dict):
+        find_results = {}
+    run_id = str(find_results.get("run_id") or "").strip()
+    expected_readings = count_rows(find_results.get("strong_recommendations")) or count_rows(find_results.get("articles"))
+    read_results = read_json(taste_dir / "read_results.json", {})
+    ideas = read_json(taste_dir / "ideas.json", {})
+    plans = read_json(taste_dir / "plans.json", {})
+    current_plan = read_json(paths.state / "current_find_research_plan.json", {})
+    validation = read_json(paths.state / "current_find_claude_reading_validation.json", {})
+    selected_contract = current_find_execution_contract(paths)
+
+    plan_run_id = str(current_plan.get("run_id") or "").strip() if isinstance(current_plan, dict) else ""
+    plan_status = str(current_plan.get("status") or "").strip() if isinstance(current_plan, dict) else ""
+    read_count = count_rows(read_results.get("readings")) if isinstance(read_results, dict) else 0
+    idea_count = count_rows(ideas.get("ideas")) if isinstance(ideas, dict) else 0
+    plan_count = count_rows(plans.get("plans")) if isinstance(plans, dict) else 0
+    bridge_return_code = bridge_summary.get("bridge_return_code")
+    if bridge_return_code is None and "return_code" in bridge_summary:
+        bridge_return_code = bridge_summary.get("return_code")
+
+    blockers: list[str] = []
+    if not run_id:
+        blockers.append("missing latest Find run_id")
+    if bridge_return_code not in (None, 0):
+        blockers.append(f"current-Find Read/Idea/Plan bridge returned {bridge_return_code}")
+    if not isinstance(current_plan, dict) or not current_plan:
+        blockers.append("state/current_find_research_plan.json is missing")
+    elif run_id and plan_run_id != run_id:
+        blockers.append("state/current_find_research_plan.json is stale for the latest Find run_id")
+    if plan_status.startswith("blocked") or plan_status.startswith("failed") or plan_status.startswith("error"):
+        blockers.append(f"current-Find plan bridge status is {plan_status}")
+    if expected_readings and read_count != expected_readings:
+        blockers.append(f"read_results count {read_count} does not match current Find recommendation count {expected_readings}")
+    if isinstance(read_results, dict) and run_id and str(read_results.get("run_id") or "").strip() != run_id:
+        blockers.append("read_results.json is stale for the latest Find run_id")
+    if isinstance(ideas, dict) and run_id and str(ideas.get("run_id") or "").strip() != run_id:
+        blockers.append("ideas.json is stale for the latest Find run_id")
+    if isinstance(plans, dict) and run_id and str(plans.get("run_id") or "").strip() != run_id:
+        blockers.append("plans.json is stale for the latest Find run_id")
+    if idea_count < 5:
+        blockers.append(f"current-Find idea count {idea_count} is below required 5")
+    if plan_count < 5:
+        blockers.append(f"current-Find plan count {plan_count} is below required 5")
+    if not current_find_validation_ready(validation, run_id, expected_readings):
+        blockers.append("current-Find full-text reading validation is not ready for the latest Find run")
+    if isinstance(current_plan, dict):
+        if current_plan.get("read_idea_plan_ready") is not True:
+            blockers.append("current_find_research_plan.read_idea_plan_ready is not true")
+        if current_plan.get("claude_current_find_ready") is not True:
+            blockers.append("current_find_research_plan.claude_current_find_ready is not true")
+    if selected_contract.get("required") and not str(selected_contract.get("selected_plan_id") or "").strip():
+        blockers.append(str(selected_contract.get("reason") or "current Find plan selection is missing"))
+    contract_run_id = str(selected_contract.get("run_id") or "").strip()
+    if run_id and contract_run_id and contract_run_id != run_id:
+        blockers.append("current-Find selected plan contract is stale for the latest Find run_id")
+
+    status = "pass" if not blockers else "blocked_current_find_plan_bridge"
+    return {
+        "status": status,
+        "blocking": bool(blockers),
+        "run_id": run_id,
+        "plan_run_id": plan_run_id,
+        "bridge_return_code": bridge_return_code,
+        "bridge_status": plan_status,
+        "readings": read_count,
+        "ideas": idea_count,
+        "plans": plan_count,
+        "expected_readings": expected_readings,
+        "selected_plan_id": str(selected_contract.get("selected_plan_id") or ""),
+        "selection_issue": str(selected_contract.get("selection_issue") or ""),
+        "blockers": blockers,
+        "evidence": [
+            str(taste_dir / "find_results.json"),
+            str(taste_dir / "read_results.json"),
+            str(taste_dir / "ideas.json"),
+            str(taste_dir / "plans.json"),
+            str(paths.state / "current_find_claude_reading_validation.json"),
+            str(paths.state / "current_find_research_plan.json"),
+            str(paths.state / "taste_plan_bridge.json"),
+        ],
+        "next_action": "Repair current-Find full-text evidence and rerun scripts/ensure_current_find_research_plan.py --project <project>; do not continue environment, experiment, paper, or Claude repair stages with stale or blocked plan artifacts.",
+    }
+
+
 def enabled_literature_source_count(selection: Any) -> int:
     if not isinstance(selection, dict):
         return 0
@@ -2310,7 +2404,6 @@ Return concise Markdown with: Idea/Route Decision, Evidence Inspected, Actions T
         step_fn(result)
         refreshed = read_json(self.paths.state / "current_find_research_plan.json", {})
         summary.update({
-            "current": result.get("return_code") == 0,
             "bridge_return_code": result.get("return_code"),
             "bridge_status": refreshed.get("status") if isinstance(refreshed, dict) else "",
             "bridge_source": refreshed.get("source") if isinstance(refreshed, dict) else "",
@@ -2318,6 +2411,13 @@ Return concise Markdown with: Idea/Route Decision, Evidence Inspected, Actions T
             "readings": refreshed.get("current_find_reading_count", summary.get("readings")) if isinstance(refreshed, dict) else summary.get("readings"),
             "ideas": refreshed.get("current_find_idea_count", summary.get("ideas")) if isinstance(refreshed, dict) else summary.get("ideas"),
             "plans": refreshed.get("current_find_plan_count", summary.get("plans")) if isinstance(refreshed, dict) else summary.get("plans"),
+        })
+        plan_gate = current_find_plan_bridge_gate_status(self.paths, summary)
+        summary.update({
+            "current": not plan_gate.get("blocking"),
+            "blocking": bool(plan_gate.get("blocking")),
+            "plan_bridge_gate": plan_gate,
+            "blockers": plan_gate.get("blockers", []),
         })
         self.state["current_find_research_plan_status"] = summary
         self.save()
@@ -2742,6 +2842,72 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
         self.save()
         return cycle
 
+    def finish_current_find_plan_bridge_gate_block(self, cycle: dict[str, Any], pdf_before: dict[str, Any], plan_gate: dict[str, Any]) -> dict[str, Any]:
+        plan_gate = plan_gate if isinstance(plan_gate, dict) else {}
+        pdf_after = self.latest_pdf_fingerprint()
+        gate = self.gate_snapshot()
+        gate["current_find_plan_bridge_gate"] = plan_gate
+        gate["pdf_before"] = pdf_before
+        gate["pdf_after"] = pdf_after
+        gate["pdf_changed_this_cycle"] = self.pdf_changed(pdf_before, pdf_after)
+        gate["paper_pipeline_skipped"] = True
+        gate["paper_pipeline_skipped_reason"] = "Current Find Read/Idea/Plan bridge is missing, stale, blocked, or lacks a unique selected_plan_id; downstream execution is stopped"
+        issue = "; ".join(str(item) for item in plan_gate.get("blockers", [])[:5]) or "Current Find Read/Idea/Plan bridge is not ready for downstream execution."
+        blockers = [
+            {
+                "category": "current_find_plan_bridge_gate",
+                "severity": "block",
+                "issue": issue,
+                "human_summary": "当前 Find 的精读、idea、plan 或唯一执行计划没有和最新 Find run 对齐；系统不会继续环境、实验、论文或 Claude 修复。",
+                "run_id": plan_gate.get("run_id", ""),
+                "plan_run_id": plan_gate.get("plan_run_id", ""),
+                "selected_plan_id": plan_gate.get("selected_plan_id", ""),
+                "evidence": plan_gate.get("evidence", []),
+                "next_action": plan_gate.get("next_action") or "Repair the current-Find bridge and rerun scripts/ensure_current_find_research_plan.py --project <project>.",
+            }
+        ]
+        blocker_action_plan = read_json(self.paths.state / "blocker_action_plan.json", {})
+        gate["blocker_action_plan"] = {
+            "status": blocker_action_plan.get("status", "") if isinstance(blocker_action_plan, dict) else "",
+            "summary": blocker_action_plan.get("summary", {}) if isinstance(blocker_action_plan, dict) else {},
+            "top_actions": (blocker_action_plan.get("actions", [])[:8] if isinstance(blocker_action_plan, dict) and isinstance(blocker_action_plan.get("actions", []), list) else []),
+        }
+        stop_payload = {
+            "project": self.args.project,
+            "target_venue": self.args.venue,
+            "status": "blocked_current_find_plan_bridge",
+            "generated_at": now_iso(),
+            "plan_bridge_gate": plan_gate,
+            "policy": "Full-cycle cannot enter environment, experiment, paper, claim, or Claude repair stages until current-Find Read/Idea/Plan artifacts are current, unblocked, fully validated, and have exactly one selected_plan_id.",
+        }
+        write_json(self.paths.state / "current_find_plan_bridge_gate_stop.json", stop_payload)
+        cycle.update(
+            {
+                "finished_at": now_iso(),
+                "status": "blocked_current_find_plan_bridge",
+                "gate": gate,
+                "blockers": blockers,
+                "pdf_after": pdf_after,
+                "pdf_changed": gate["pdf_changed_this_cycle"],
+                "paper_pipeline_skipped": True,
+            }
+        )
+        self.state["status"] = "blocked_current_find_plan_bridge"
+        self.state["latest_gate"] = gate
+        self.state["latest_blockers"] = blockers
+        self.state["latest_blocker_action_plan"] = gate["blocker_action_plan"]
+        self.state["latest_pdf_info"] = pdf_after
+        self.state["current_find_plan_bridge_gate"] = plan_gate
+        self.state["paper_iteration_required"] = False
+        self.state["paper_pipeline_skipped"] = True
+        self.state["paper_pipeline_skipped_reason"] = gate["paper_pipeline_skipped_reason"]
+        self.state["continuation_required"] = True
+        self.state["continuation_reason"] = issue
+        self.state["current_goal"] = "repair current-Find Read/Idea/Plan bridge before downstream TASTE execution"
+        self.save()
+        return cycle
+
+
     def current_find_selected_plan_gate_blocking(self, contract: dict[str, Any]) -> bool:
         if not isinstance(contract, dict) or not contract.get("required"):
             return False
@@ -3077,6 +3243,10 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
             self.save()
         if not discovery_first:
             cycle["current_find_research_plan_status"] = self.ensure_current_find_research_plan(step, stage_suffix="-preflight")
+            plan_bridge_gate_preflight = current_find_plan_bridge_gate_status(self.paths, cycle["current_find_research_plan_status"])
+            if plan_bridge_gate_preflight.get("blocking"):
+                step(self.run([sys.executable, str(SCRIPTS / "build_blocker_action_plan.py"), "--project", self.args.project, "--venue", self.args.venue], stage="blocker-action-plan-current-find-plan-gate-preflight", required=False, timeout=180))
+                return self.finish_current_find_plan_bridge_gate_block(cycle, pdf_before, plan_bridge_gate_preflight)
             full_text_gate_preflight = current_find_full_text_gate_status(self.paths)
             if full_text_gate_preflight.get("blocking"):
                 step(self.run([sys.executable, str(SCRIPTS / "build_blocker_action_plan.py"), "--project", self.args.project, "--venue", self.args.venue], stage="blocker-action-plan-current-find-read-gate-preflight", required=False, timeout=180))
@@ -3155,6 +3325,10 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
             step(self.run([sys.executable, str(SCRIPTS / "sync_outputs.py"), "--project", self.args.project, "--allow-empty"], stage="literature-sync", timeout=180))
             step(self.run([sys.executable, str(SCRIPTS / "build_literature_tool_packet.py"), "--project", self.args.project, "--venue", self.args.venue], stage="literature-tool-packet", timeout=180))
             cycle["current_find_research_plan_status"] = self.ensure_current_find_research_plan(step)
+            plan_bridge_gate_after_read = current_find_plan_bridge_gate_status(self.paths, cycle["current_find_research_plan_status"])
+            if plan_bridge_gate_after_read.get("blocking"):
+                step(self.run([sys.executable, str(SCRIPTS / "build_blocker_action_plan.py"), "--project", self.args.project, "--venue", self.args.venue], stage="blocker-action-plan-current-find-plan-gate", required=False, timeout=180))
+                return self.finish_current_find_plan_bridge_gate_block(cycle, pdf_before, plan_bridge_gate_after_read)
             full_text_gate_after_read = current_find_full_text_gate_status(self.paths)
             if full_text_gate_after_read.get("blocking"):
                 step(self.run([sys.executable, str(SCRIPTS / "build_blocker_action_plan.py"), "--project", self.args.project, "--venue", self.args.venue], stage="blocker-action-plan-current-find-read-gate", required=False, timeout=180))
@@ -3178,6 +3352,10 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
             step(self.run([sys.executable, str(SCRIPTS / "sync_outputs.py"), "--project", self.args.project, "--allow-empty"], stage="literature-sync-existing", required=False, timeout=180))
             step(self.run([sys.executable, str(SCRIPTS / "build_literature_tool_packet.py"), "--project", self.args.project, "--venue", self.args.venue], stage="literature-tool-packet-refresh", required=False, timeout=180))
             cycle["current_find_research_plan_status"] = self.ensure_current_find_research_plan(step, stage_suffix="-refresh")
+            plan_bridge_gate_after_read = current_find_plan_bridge_gate_status(self.paths, cycle["current_find_research_plan_status"])
+            if plan_bridge_gate_after_read.get("blocking"):
+                step(self.run([sys.executable, str(SCRIPTS / "build_blocker_action_plan.py"), "--project", self.args.project, "--venue", self.args.venue], stage="blocker-action-plan-current-find-plan-gate-refresh", required=False, timeout=180))
+                return self.finish_current_find_plan_bridge_gate_block(cycle, pdf_before, plan_bridge_gate_after_read)
             full_text_gate_after_read = current_find_full_text_gate_status(self.paths)
             if full_text_gate_after_read.get("blocking"):
                 step(self.run([sys.executable, str(SCRIPTS / "build_blocker_action_plan.py"), "--project", self.args.project, "--venue", self.args.venue], stage="blocker-action-plan-current-find-read-gate-refresh", required=False, timeout=180))

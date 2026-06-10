@@ -21,7 +21,7 @@
     "full_name": "ACM SIGKDD Conference on Knowledge Discovery and Data Mining",
     "type": "conference",
     "rank": "high-level",
-    "field": "Data Mining / Recommendation",
+    "field": "Data Mining",
     "field_key": "DM_CS",
     "address": "https://dblp.uni-trier.de/db/conf/kdd/",
     "years": [
@@ -36,7 +36,7 @@
     "full_name": "ACM SIGIR Conference on Research and Development in Information Retrieval",
     "type": "conference",
     "rank": "high-level",
-    "field": "Information Retrieval / Recommendation",
+    "field": "Information Retrieval",
     "field_key": "DM_CS",
     "address": "https://dblp.uni-trier.de/db/conf/sigir/",
     "years": [
@@ -51,7 +51,7 @@
     "full_name": "The Web Conference",
     "type": "conference",
     "rank": "high-level",
-    "field": "Web / Recommendation / IR",
+    "field": "Web / IR",
     "field_key": "DM_CS",
     "address": "https://dblp.uni-trier.de/db/conf/www/",
     "years": [
@@ -66,24 +66,9 @@
     "full_name": "ACM International Conference on Web Search and Data Mining",
     "type": "conference",
     "rank": "high-level",
-    "field": "Web Search / Data Mining / Recommendation",
+    "field": "Web Search / Data Mining",
     "field_key": "DM_CS",
     "address": "https://dblp.uni-trier.de/db/conf/wsdm/",
-    "years": [
-      2026
-    ],
-    "classification_source": "topic_policy"
-  },
-  {
-    "id": "dblp_recsys",
-    "source": "dblp",
-    "name": "RecSys",
-    "full_name": "ACM Conference on Recommender Systems",
-    "type": "conference",
-    "rank": "high-level",
-    "field": "Recommender Systems",
-    "field_key": "DM_CS",
-    "address": "https://dblp.uni-trier.de/db/conf/recsys/",
     "years": [
       2026
     ],
@@ -111,7 +96,7 @@
     "full_name": "ACM International Conference on Multimedia",
     "type": "conference",
     "rank": "high-level",
-    "field": "Multimedia / Recommendation",
+    "field": "Multimedia",
     "field_key": "CGAndMT",
     "address": "https://dblp.uni-trier.de/db/conf/mm/",
     "years": [

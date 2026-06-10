@@ -111,6 +111,14 @@ def _recover_expected_json(raw: str) -> Any:
     raise
 
 
+def _prompt_with_json_response_hint(prompt: str) -> str:
+    text = str(prompt or "")
+    if "json" in text.lower():
+        return text
+    suffix = "Return valid JSON."
+    return f"{text.rstrip()}\n\n{suffix}" if text.strip() else suffix
+
+
 def extract_json(raw: str) -> Any:
     text = _strip_json_fences(raw)
     try:
@@ -309,29 +317,31 @@ class LLMClient:
         retry_statuses = {408, 409, 429, 500, 502, 503, 504}
 
         def build_payload(*, include_response_format: bool, include_thinking_controls: bool) -> dict[str, Any]:
+            wants_json_response = include_response_format and response_format in {"json", "json_object"}
+            request_prompt = _prompt_with_json_response_hint(prompt) if wants_json_response else prompt
             if use_responses:
                 payload: dict[str, Any] = {
                     "model": self.model,
                     "input": [
                         {"role": "system", "content": [{"type": "input_text", "text": "You are a strict JSON generator. Put the final answer in output_text only. Return valid JSON only, with no markdown."}]},
-                        {"role": "user", "content": [{"type": "input_text", "text": prompt}]},
+                        {"role": "user", "content": [{"type": "input_text", "text": request_prompt}]},
                     ],
                     "temperature": self.temperature if temperature is None else temperature,
                     "max_output_tokens": int(max_tokens or self.max_tokens),
                 }
-                if include_response_format and response_format in {"json", "json_object"}:
+                if wants_json_response:
                     payload["text"] = {"format": {"type": "json_object"}}
             else:
                 payload = {
                     "model": self.model,
                     "messages": [
                         {"role": "system", "content": "You are a strict JSON generator. Put the final answer in message.content only. Do not put the answer in reasoning_content. Return valid JSON only, with no markdown."},
-                        {"role": "user", "content": prompt},
+                        {"role": "user", "content": request_prompt},
                     ],
                     "temperature": self.temperature if temperature is None else temperature,
                     "max_tokens": int(max_tokens or self.max_tokens),
                 }
-                if include_response_format and response_format in {"json", "json_object"}:
+                if wants_json_response:
                     payload["response_format"] = {"type": "json_object"}
             if reasoning_effort and reasoning_effort not in {"none", "off", "disable", "disabled", "0", "false", "no"}:
                 payload["reasoning_effort"] = reasoning_effort

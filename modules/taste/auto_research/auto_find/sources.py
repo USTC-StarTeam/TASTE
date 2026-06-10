@@ -908,6 +908,39 @@ def _content_list(content: dict, key: str) -> list[str]:
     return []
 
 
+def _openreview_notes_paginated(url: str, base_params: dict[str, object], max_items: int) -> list[dict]:
+    try:
+        requested = int(max_items or 0)
+    except (TypeError, ValueError):
+        requested = 0
+    requested = max(1, requested)
+    try:
+        page_size = int(os.environ.get("OPENREVIEW_PAGE_SIZE", "1000") or 1000)
+    except (TypeError, ValueError):
+        page_size = 1000
+    page_size = max(1, min(1000, page_size, requested))
+    try:
+        max_pages = int(os.environ.get("OPENREVIEW_MAX_PAGES", "200") or 200)
+    except (TypeError, ValueError):
+        max_pages = 200
+    notes: list[dict] = []
+    offset = 0
+    for _page in range(max(1, max_pages)):
+        params = dict(base_params)
+        params["limit"] = min(page_size, requested - len(notes))
+        params["offset"] = offset
+        response = requests.get(url, params=params, headers=HEADERS, timeout=12)
+        response.raise_for_status()
+        batch = response.json().get("notes", [])
+        if not isinstance(batch, list) or not batch:
+            break
+        notes.extend(note for note in batch if isinstance(note, dict))
+        if len(notes) >= requested or len(batch) < int(params["limit"]):
+            break
+        offset += len(batch)
+    return notes[:requested]
+
+
 def fetch_openreview_venue(venue: dict, years: list[int], max_items: int) -> list[dict]:
     papers: list[dict] = []
     queried_venue_ids: set[str] = set()
@@ -919,27 +952,21 @@ def fetch_openreview_venue(venue: dict, years: list[int], max_items: int) -> lis
             queried_venue_ids.add(venue_id)
             notes = []
             try:
-                response = requests.get(
+                notes = _openreview_notes_paginated(
                     "https://api2.openreview.net/notes",
-                    params={"content.venueid": venue_id, "details": "replyCount,invitation,original", "limit": max_items},
-                    headers=HEADERS,
-                    timeout=12,
+                    {"content.venueid": venue_id, "details": "replyCount,invitation,original"},
+                    max_items,
                 )
-                response.raise_for_status()
-                notes = response.json().get("notes", [])
             except Exception:
                 notes = []
             if not notes:
                 for invitation in [f"{venue_id}/-/Blind_Submission", f"{venue_id}/-/Submission"]:
                     try:
-                        response = requests.get(
+                        notes = _openreview_notes_paginated(
                             "https://api.openreview.net/notes",
-                            params={"invitation": invitation, "limit": max_items},
-                            headers=HEADERS,
-                            timeout=12,
+                            {"invitation": invitation},
+                            max_items,
                         )
-                        response.raise_for_status()
-                        notes = response.json().get("notes", [])
                     except Exception:
                         notes = []
                     if notes:

@@ -2034,6 +2034,7 @@ function badgeClass(status: string) {
 
 function jobStatusLabel(status: any, lang: Lang = "zh") {
   const value = String(status || "").trim();
+  if (value.toLowerCase().startsWith("stale")) return lang === "zh" ? "已停止" : "stopped";
   const labels: Record<string, { zh: string; en: string }> = {
     queued: { zh: "排队中", en: "queued" },
     running: { zh: "运行中", en: "running" },
@@ -2669,6 +2670,22 @@ function isLiveJob(job: any) {
   return ["queued", "running", "cancelling"].includes(String(job?.status || ""));
 }
 
+function isStoppedWorkflowStatus(status: any) {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (!normalized) return false;
+  return (
+    normalized === "stale" ||
+    normalized.startsWith("stale_") ||
+    normalized.startsWith("historical_") ||
+    normalized.startsWith("blocked_") ||
+    normalized.startsWith("cancelled") ||
+    normalized.startsWith("done") ||
+    normalized.startsWith("complete") ||
+    normalized.startsWith("error") ||
+    normalized.startsWith("failed")
+  );
+}
+
 function runIdFromJob(job: any) {
   const explicitRunId = String(job?.run_id || "").trim();
   if (explicitRunId) return explicitRunId;
@@ -2720,7 +2737,7 @@ function normalizeJobForState(job: any): Job | null {
   const allowedStatuses = new Set<Job["status"]>(["queued", "running", "stale", "done", "blocked", "error", "cancelling", "cancelled", "preview_available", "needs_writing", "preview_pdf_blocked"]);
   const rawStatusText = String(job.status || "queued");
   const rawStatus = rawStatusText as Job["status"];
-  const status = (allowedStatuses.has(rawStatus) || rawStatusText.startsWith("blocked")) ? rawStatus : "queued";
+  const status = (allowedStatuses.has(rawStatus) || rawStatusText.startsWith("blocked") || rawStatusText.startsWith("stale")) ? rawStatus : "queued";
   const progress = job.progress && typeof job.progress === "object" ? {
     phase: String(job.progress.phase || ""),
     current: Number(job.progress.current || 0),
@@ -4520,7 +4537,8 @@ function App() {
   const researchFullCycle = useMemo(() => researchSummary?.full_research_cycle || researchSummary?.state?.full_research_cycle || researchStages?.experiment?.full_research_cycle || {}, [researchSummary, researchStages]);
   const researchFullCycleJob = useMemo(() => researchFullCycle?.full_cycle_job || {}, [researchFullCycle]);
   const liveFullCycleJobFromJobs = useMemo(() => jobs.find((job) => {
-    if (!isLiveJob(job)) return false;
+    const status = String(job?.status || "").trim().toLowerCase();
+    if (!isLiveJob(job) || isStoppedWorkflowStatus(status) || jobProcessAliveValue(job) === false) return false;
     const stage = String(job.stage || "").toLowerCase();
     const jobId = String(job.job_id || "").toLowerCase();
     const command = String(job.result?.command || job.result?.cmd || "").toLowerCase();
@@ -4533,7 +4551,7 @@ function App() {
     const status = String(researchFullCycleJob?.status || "").trim().toLowerCase();
     const pid = String(researchFullCycleJob?.pid || "").trim();
     if (researchFullCycleJob?.process_alive === true || researchFullCycleJob?.alive === true) return true;
-    if (status === "stale" || researchFullCycleJob?.process_alive === false || researchFullCycleJob?.alive === false) return false;
+    if (isStoppedWorkflowStatus(status) || researchFullCycleJob?.process_alive === false || researchFullCycleJob?.alive === false) return false;
     return Boolean(pid && status === "running");
   }, [researchFullCycleJob, liveFullCycleJobFromJobs]);
   const fullCycleLaunchDisabled = Boolean(!researchProject || fullCycleProcessAlive);
