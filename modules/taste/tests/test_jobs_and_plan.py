@@ -570,6 +570,39 @@ def test_compact_claude_job_preserves_panel_stage():
 
 
 
+def test_running_claude_environment_job_uses_panel_stage_and_public_progress():
+    initial = server._initial_project_agent_job_result({"action": "claude-message", "project": "demo", "stage": "environment", "agent_id": "main"}, "claude-message")
+    assert initial["panel_stage"] == "environment"
+    row = server._compact_job_for_list({
+        "job_id": "claude-message_demo",
+        "stage": "claude-message",
+        "status": "running",
+        "created_at": "2026-06-10T00:00:00Z",
+        "progress": {
+            "phase": "running",
+            "current": 5,
+            "total": 0,
+            "percent": 0,
+            "message": "Claude: 调用工具: Read file=/tmp/taste-local/TASTE/projects/demo/state/repo_data_requirements.json",
+        },
+        "logs": [
+            "claude-message started",
+            "Workflow command: /tmp/taste-local/miniforge/bin/python /tmp/taste-local/TASTE/scripts/claude_project_session.py --project demo --stage environment --message secret details",
+            "claude: executable=/tmp/taste-local/.nvm/versions/node/v22/bin/claude",
+            "Claude: 调用工具: Read file=/tmp/taste-local/TASTE/projects/demo/state/repo_data_requirements.json",
+        ],
+        "result": initial,
+    })
+
+    assert row["stage"] == "environment"
+    assert row["progress"]["message"] == "项目代理正在读取/修改当前项目证据以处理环境配置门控。"
+    text = "\n".join(row["logs"])
+    assert "Workflow command" not in text
+    assert "claude_project_session.py" not in text
+    assert "/tmp/taste-local" not in text
+    assert "executable=" not in text
+
+
 def test_environment_public_logs_fold_raw_command_progress():
     logs = server._public_job_logs(
         "environment",
@@ -1755,6 +1788,82 @@ def test_selected_pending_environment_repo_summary_is_data_blocked(tmp_path, mon
     assert summary["main_route"]["repo_name"] == "example/repo"
     assert summary["stages"]["environment"]["status"] == "selected"
     assert summary["stages"]["environment"]["data_status"] == "waiting_for_real_data_loader_evidence"
+
+def test_loader_ready_evidence_advances_selected_base_to_reference_probe(monkeypatch, tmp_path):
+    from auto_research.web import project_bridge
+
+    project = "demo_project"
+    root = tmp_path / project
+    state = root / "state"
+    finding = root / "planning" / "finding"
+    repo = root / "repos" / "selected" / "example_repo"
+    state.mkdir(parents=True)
+    finding.mkdir(parents=True)
+    repo.mkdir(parents=True)
+    run_id = "find_current"
+    dataset = "demo_ready_dataset"
+
+    write_json(finding / "find_progress.json", {"run_id": run_id, "phase": "complete"})
+    write_json(state / "current_find_research_plan.json", {"run_id": run_id, "status": "ready"})
+    write_json(
+        state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": run_id,
+            "selection_stage": "environment_claude_code",
+            "selection_gate": "accepted_by_claude_transformable_pending_loader_bootstrap",
+            "accepted_by_claude": True,
+            "selected": {
+                "name": "example/repo",
+                "url": "https://example.test/repo",
+                "repo_path": str(repo),
+                "fresh_find_run_id": run_id,
+                "probe_summary": {"claim_ready_datasets": []},
+            },
+        },
+    )
+    write_json(state / "active_repo.json", {"name": "example/repo", "repo_path": str(repo), "claim_ready_datasets": []})
+    write_json(
+        state / "fresh_base_implementation_plan.json",
+        {
+            "fresh_find_run_id": run_id,
+            "status": "implementation_ready",
+            "repo": {"name": "example/repo", "repo_path": str(repo)},
+            "ready_datasets": [dataset],
+            "blocked_datasets": [],
+            "blocker_reasons": [],
+        },
+    )
+    write_json(
+        state / "real_dataset_probe.json",
+        {
+            "repo_path": str(repo),
+            "status": "passed",
+            "decision": "loader_probe_complete",
+            "ready_datasets": [dataset],
+            "blocked_datasets": [],
+            "blocker_reasons": [],
+            "probes": [{"dataset": dataset}],
+        },
+    )
+    write_json(state / "reference_reproduction_gate.json", {"status": "blocked", "decision": "no_viable_base_switch_route", "human_summary": "stale no viable route"})
+    write_json(state / "full_research_cycle.json", {"status": "blocked_no_viable_base_switch_route", "current_goal": "stale no viable route"})
+    monkeypatch.setattr(project_bridge, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(project_bridge, "_remote_process_rows", lambda: [])
+    monkeypatch.setattr(project_bridge, "_current_project_source_selection", lambda _project, _root: {"venue_ids": ["openreview_iclr_2026"], "years": [2026]})
+
+    summary = project_bridge._fast_project_summary(project, root, {"name": project, "topic": "Demo topic", "target_venue": "ICLR"})
+
+    assert summary["status"] == "blocked_fresh_base_reference_probe_required"
+    assert "真实数据/loader 已通过" in summary["summary"]
+    assert "尚未通过" not in summary["summary"]
+    assert summary["main_route"]["dataset"] == dataset
+    assert summary["main_route"]["ready_datasets"] == [dataset]
+    assert summary["stages"]["environment"]["data_status"] == "real_data_loader_ready"
+    assert summary["stages"]["environment"]["reference_reproduction_gate"]["decision"] == "fresh_base_reference_probe_required"
+    assert summary["stages"]["experiment"]["reference_reproduction_gate"]["decision"] == "fresh_base_reference_probe_required"
+    assert summary["current_blocker"]["category"] == "fresh_base_reference_probe_required"
+    assert "reference-protocol/import probe" in summary["current_blocker"]["next_action"]
+
 
 def test_select_fresh_base_marks_stale_implementation_plan(monkeypatch, tmp_path):
     monkeypatch.syspath_prepend(str(server.WORKSPACE_ROOT / "scripts"))

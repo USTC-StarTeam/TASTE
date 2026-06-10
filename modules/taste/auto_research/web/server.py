@@ -727,6 +727,25 @@ def _panel_stage_from_project_agent_result(result: Any) -> str:
     return ""
 
 
+def _initial_project_agent_job_result(payload: Any, stage: Any) -> dict[str, Any]:
+    row = payload if isinstance(payload, dict) else {}
+    action = str(row.get("action") or stage or "").strip()
+    requested_stage = str(row.get("stage") or "").strip()
+    panel_stage = _normalize_project_agent_panel_stage(requested_stage)
+    if not panel_stage:
+        panel_stage = _normalize_project_agent_panel_stage(action)
+    if action not in {"claude-message", "agent-guidance"} and not panel_stage:
+        return {}
+    return {
+        "project": str(row.get("project") or "").strip(),
+        "action": action,
+        "agent_id": str(row.get("agent_id") or "main").strip() or "main",
+        "requested_stage": requested_stage,
+        "panel_stage": panel_stage,
+        "status": "running",
+    }
+
+
 def _is_project_agent_panel_job(stage: Any = "", job_id: Any = "", result: Any = None) -> bool:
     parts = [str(stage or ""), str(job_id or "")]
     if isinstance(result, dict):
@@ -1943,6 +1962,27 @@ def _public_stage_command_message(stage: Any, value: Any) -> str:
     ):
         return f"{_public_stage_label(stage)}正在运行阶段审计命令，完整命令保留在后端任务审计。"
     return ""
+
+
+def _public_project_agent_progress_message(stage: Any, value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    command = _public_stage_command_message(stage, text)
+    if command:
+        return command
+    lowered = text.lower()
+    stage_label = _public_stage_label(stage)
+    if lowered.startswith("running claude-message") or lowered.startswith("claude-message started"):
+        return f"项目代理正在处理{stage_label}请求。"
+    if lowered.startswith("claude: executable=") or lowered.startswith("claude: permission_mode") or lowered.startswith("claude: session_key="):
+        return f"项目代理会话已启动，正在处理{stage_label}请求。"
+    if "调用工具" in text or "tool use" in lowered or "read file=" in lowered or "edit file=" in lowered or "bash command=" in lowered:
+        return f"项目代理正在读取/修改当前项目证据以处理{stage_label}门控。"
+    text = _redact_public_log_text(_public_text(text))
+    text = re.sub(r'/[^\s;,\"\']*/(?:workspace|TASTE|projects|runtime|\.nvm|miniforge)[^\s;,\"\']*', '[local-path]', text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:220]
 
 
 def _public_stage_job_logs(stage: Any, logs: Any, progress: Any = None, result: Any = None, *, limit: int = 8) -> list[str]:
@@ -6813,6 +6853,8 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
         command_message = _public_stage_command_message(public_stage, public_progress.get("message"))
         if command_message:
             public_progress["message"] = command_message
+        elif _is_project_agent_panel_job(raw_stage, item.get("job_id", ""), result):
+            public_progress["message"] = _public_project_agent_progress_message(public_stage, public_progress.get("message"))
     if public_stage == "environment" and public_status == "blocked":
         project_id = str(compact_result.get("project") or result.get("project") or "").strip()
         if project_id:
@@ -8085,7 +8127,15 @@ def api_job(payload: dict[str, Any]) -> dict:
         return JSONResponse(status_code=409, content=stage_blocker)
     job_id = f"{stage}_{uuid4().hex[:10]}"
     payload_with_job = {**payload, "web_job_id": job_id}
+    initial_result = _initial_project_agent_job_result(payload_with_job, stage)
     job = start_job(stage, lambda log, should_cancel, progress: run_action(payload_with_job, log, should_cancel, progress), job_id=job_id)
+    if initial_result:
+        job.result = initial_result
+        panel_stage = str(initial_result.get("panel_stage") or "").strip()
+        if panel_stage:
+            job.progress = {"phase": panel_stage, "current": 0, "total": 0, "percent": 0, "message": f"项目代理正在处理{_public_stage_label(panel_stage)}请求。"}
+            job.progress_version += 1
+        _persist_jobs()
     return job.as_dict()
 
 

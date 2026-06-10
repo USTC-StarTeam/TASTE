@@ -2269,11 +2269,11 @@ def _fresh_base_state_names(root: Path, suffix: str) -> list[str]:
 
 
 def _fresh_base_loader_probe(root: Path) -> dict[str, Any]:
-    real_probe = _read_project_json(root / "state" / "real_dataset_probe.json", {})
+    real_probe = _read_json(root / "state" / "real_dataset_probe.json", {})
     if isinstance(real_probe, dict) and real_probe:
         return real_probe
     for name in _fresh_base_state_names(root, "loader_contract_probe"):
-        payload = _read_project_json(root / "state" / name, {})
+        payload = _read_json(root / "state" / name, {})
         if _state_payload_matches_current_repo(root, payload):
             return payload
     return {}
@@ -2341,18 +2341,97 @@ def _fresh_base_reference_full_job(root: Path) -> dict[str, Any]:
     return {}
 
 
+def _normalize_ready_dataset_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def _payload_repo_paths(*payloads: Any) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        nested = payload.get("repo") if isinstance(payload.get("repo"), dict) else None
+        candidates = [payload]
+        if nested:
+            candidates.append(nested)
+        for row in candidates:
+            for key in ("repo_path", "local_path", "path"):
+                text = str(row.get(key) or "").strip()
+                if text and text not in seen:
+                    seen.add(text)
+                    paths.append(text)
+    return paths
+
+
+def _fresh_base_evidence_matches_route(
+    impl: Any,
+    real_probe: Any,
+    selected: dict[str, Any] | None = None,
+    active_repo: dict[str, Any] | None = None,
+    repo: dict[str, Any] | None = None,
+) -> bool:
+    current_paths = _payload_repo_paths(selected or {}, active_repo or {}, repo or {})
+    evidence_paths = _payload_repo_paths(impl if isinstance(impl, dict) else {}, real_probe if isinstance(real_probe, dict) else {})
+    if len(set(evidence_paths)) > 1:
+        return False
+    if current_paths and evidence_paths and not any(path in current_paths for path in evidence_paths):
+        return False
+    return True
+
+
+def _fresh_base_ready_datasets_from_evidence(
+    root: Path,
+    selected: dict[str, Any] | None = None,
+    active_repo: dict[str, Any] | None = None,
+    repo: dict[str, Any] | None = None,
+    existing: Any = None,
+) -> list[str]:
+    ready = _normalize_ready_dataset_list(existing)
+    impl = _read_json(root / "state" / "fresh_base_implementation_plan.json", {})
+    real_probe = _read_json(root / "state" / "real_dataset_probe.json", {})
+    if _fresh_base_loader_contract_passed(root) and _fresh_base_evidence_matches_route(impl, real_probe, selected, active_repo, repo):
+        if isinstance(real_probe, dict):
+            ready.extend(_normalize_ready_dataset_list(real_probe.get("ready_datasets")))
+        if isinstance(impl, dict):
+            ready.extend(_normalize_ready_dataset_list(impl.get("ready_datasets")))
+    return _normalize_ready_dataset_list(ready)
+
+
 def _fresh_base_loader_contract_passed(root: Path) -> bool:
     impl = _read_json(root / "state" / "fresh_base_implementation_plan.json", {})
     real_probe = _read_json(root / "state" / "real_dataset_probe.json", {})
-    if isinstance(impl, dict) and impl.get("status") == "implementation_ready_for_reference_probe":
-        ready = impl.get("ready_datasets", []) if isinstance(impl.get("ready_datasets"), list) else []
-        blockers = impl.get("blocker_reasons", []) if isinstance(impl.get("blocker_reasons"), list) else []
-        repo = impl.get("repo", {}) if isinstance(impl.get("repo"), dict) else {}
-        repo_path = str(repo.get("repo_path") or "").strip()
-        probe_repo_path = str(real_probe.get("repo_path") or "").strip() if isinstance(real_probe, dict) else ""
+    if isinstance(impl, dict):
+        impl_status = str(impl.get("status") or "").strip()
+        impl_ready = impl_status in {"implementation_ready", "implementation_ready_for_reference_probe"}
+        impl_ready_datasets = _normalize_ready_dataset_list(impl.get("ready_datasets"))
+        impl_blockers = _normalize_ready_dataset_list(impl.get("blocker_reasons"))
+        real_ready_datasets = _normalize_ready_dataset_list(real_probe.get("ready_datasets")) if isinstance(real_probe, dict) else []
+        real_blockers = _normalize_ready_dataset_list(real_probe.get("blocker_reasons")) if isinstance(real_probe, dict) else []
+        probe_status = str(real_probe.get("status") or "").strip() if isinstance(real_probe, dict) else ""
+        probe_decision = str(real_probe.get("decision") or "").strip() if isinstance(real_probe, dict) else ""
         probe_rows = real_probe.get("probes", []) if isinstance(real_probe, dict) and isinstance(real_probe.get("probes"), list) else []
-        has_loader_success = any(isinstance(row, dict) and row.get("claim_ready") and row.get("loader_probe_success") for row in probe_rows)
-        if ready and not blockers and (not repo_path or not probe_repo_path or repo_path == probe_repo_path) and has_loader_success:
+        row_loader_success = any(isinstance(row, dict) and row.get("claim_ready") and row.get("loader_probe_success") for row in probe_rows)
+        probe_passed = probe_status in {"passed", "real_dataset_probe_passed", "loader_probe_passed"} or probe_decision in {"loader_probe_complete", "loader_contract_passed", "ready_for_reference_probe"}
+        if (
+            impl_ready
+            and (impl_ready_datasets or real_ready_datasets)
+            and not (impl_blockers or real_blockers)
+            and _fresh_base_evidence_matches_route(impl, real_probe)
+            and (probe_passed or row_loader_success)
+        ):
             return True
     data = _read_json(root / "state" / "fresh_base_data_acquisition.json", {})
     loader = _fresh_base_loader_probe(root)
@@ -3333,6 +3412,24 @@ def _compact_text(value: Any, max_chars: int = 600) -> str:
     return text[: max_chars - 1].rstrip() + "…"
 
 
+def _reference_gate_for_current_route_display(ref_gate: dict[str, Any], status: str, ready_datasets: Any) -> dict[str, Any]:
+    public = _public_gate_status_summary(ref_gate)
+    ready = _normalize_ready_dataset_list(ready_datasets)
+    decision = str(public.get("decision") or (ref_gate.get("decision") if isinstance(ref_gate, dict) else "") or "").strip()
+    if status == "blocked_fresh_base_reference_probe_required" or (ready and decision == "no_viable_base_switch_route"):
+        message = "当前基底真实数据/loader 已通过；等待参考协议/环境 manifest 探针。"
+        return {
+            "status": "blocked",
+            "decision": "fresh_base_reference_probe_required",
+            "human_summary": message,
+            "summary": message,
+            "reason": message,
+            "blockers": [],
+            "warnings": [],
+        }
+    return public
+
+
 def _public_environment_stage(
     *,
     status: str,
@@ -3382,10 +3479,10 @@ def _public_environment_stage(
     ).strip()
     required_files_ok = claim_ready_probe.get("required_files_ok")
     loader_probe = claim_ready_probe.get("loader_probe") if isinstance(claim_ready_probe.get("loader_probe"), dict) else {}
-    loader_status = "passed" if (required_files_ok is True or loader_probe.get("return_code") == 0 or probe_summary.get("probe_return_code") == 0) else "pending"
+    loader_status = "passed" if (route_ready or required_files_ok is True or loader_probe.get("return_code") == 0 or probe_summary.get("probe_return_code") == 0) else "pending"
     data_status = "real_data_loader_ready" if (dataset or ready_datasets) and loader_status == "passed" else "waiting_for_real_data_loader_evidence"
     repo_status = "selected" if repo_path else "waiting_for_repo_selection"
-    ref_public = _public_gate_status_summary(ref_gate)
+    ref_public = _reference_gate_for_current_route_display(ref_gate, status, ready_datasets)
     ref_status = str(ref_public.get("status") or ref_gate.get("status") or "").strip()
     ref_decision = str(ref_public.get("decision") or ref_gate.get("decision") or "").strip()
     progress_summary = str(env.get("progress_summary") or "").strip()
@@ -4101,7 +4198,7 @@ def _human_supervision_summary(root: Path, compact: dict[str, Any], raw_summary:
     has_current_fresh_base_gate = bool(
         fresh_gate_decision in {"fresh_base_implementation_required", "fresh_base_reference_probe_required", "fresh_base_reference_smoke_required", "fresh_base_reference_reproduction_required"}
         or fresh_gate_status in {"blocked_fresh_base_implementation_required", "blocked_fresh_base_data_required", "blocked_fresh_base_reference_probe_required", "blocked_fresh_base_reference_smoke_required", "blocked_fresh_base_reference_reproduction_required"}
-        or (isinstance(fresh_impl, dict) and fresh_impl.get("status") in {"implementation_ready_for_reference_probe", "blocked_fresh_base_data_required", "blocked_fresh_base_implementation_required"})
+        or (isinstance(fresh_impl, dict) and fresh_impl.get("status") in {"implementation_ready", "implementation_ready_for_reference_probe", "blocked_fresh_base_data_required", "blocked_fresh_base_implementation_required"})
     )
     if not has_current_fresh_base_gate and not _selected_base_gate_active(project_id, root, cfg if isinstance(cfg, dict) else {}):
         active_repo = _read_json(root / "state" / "active_repo.json", {})
@@ -4196,11 +4293,7 @@ def _human_supervision_summary(root: Path, compact: dict[str, Any], raw_summary:
     selected_current = env_selection.get("selected", {}) if env_selection.get("valid") and isinstance(env_selection.get("selected"), dict) else {}
     title = str(selected_current.get("title") or selected_current.get("literature_base_title") or selected_current.get("selected_base_title") or selected_current.get("name") or fresh_base.get("title") or find_plan.get("selected_base_title") or cfg.get("title") or cfg.get("topic") or "")
     repo_path = str(selected_current.get("repo_path") or selected_current.get("local_path") or repo.get("repo_path") or repo.get("local_path") or "")
-    route_ready_datasets = selected_current.get("claim_ready_datasets") or selected_current.get("ready_datasets") or []
-    if isinstance(route_ready_datasets, str):
-        route_ready_datasets = [route_ready_datasets]
-    if not isinstance(route_ready_datasets, list):
-        route_ready_datasets = []
+    route_ready_datasets = _fresh_base_ready_datasets_from_evidence(root, selected_current, active_repo, repo, selected_current.get("claim_ready_datasets") or selected_current.get("ready_datasets") or [])
     route_dataset = str(selected_current.get("dataset") or selected_current.get("claim_ready_dataset") or (route_ready_datasets[0] if route_ready_datasets else "") or "")
     required_files = loader_probe.get("required_files_per_dataset") if isinstance(loader_probe, dict) else None
     if not isinstance(required_files, list) or not required_files:
@@ -4249,6 +4342,10 @@ def _human_supervision_summary(root: Path, compact: dict[str, Any], raw_summary:
     blocker_category = str(current_blocker.get("category") or "")
     protocol_passed = bool(isinstance(protocol_probe, dict) and protocol_probe.get("status") == "reference_protocol_probe_passed" and protocol_probe.get("decision") == "ready_for_bounded_reference_smoke")
     smoke_passed = bool(isinstance(smoke_probe, dict) and smoke_probe.get("status") == "reference_smoke_passed" and smoke_probe.get("decision") == "ready_for_reference_reproduction_audit")
+    if loader_contract_passed and status == "blocked_fresh_base_data_required":
+        status = "blocked_fresh_base_reference_probe_required"
+    if loader_contract_passed and blocker_category == "fresh_base_data_required":
+        blocker_category = "fresh_base_reference_probe_required"
     paper_level_reproduction_passed = bool(
         isinstance(reference_audit, dict)
         and reference_audit.get("mode") == "full"
@@ -10017,12 +10114,9 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     repo_name = str(selected.get("name") or selected.get("repo") or active_repo.get("name") or active_repo.get("repo") or repo.get("name") or "")
     repo_url = str(selected.get("url") or selected.get("repo_url") or active_repo.get("url") or active_repo.get("repo_url") or repo.get("url") or "")
     repo_path = str(selected.get("repo_path") or selected.get("local_path") or active_repo.get("repo_path") or active_repo.get("local_path") or repo.get("repo_path") or repo.get("local_path") or "")
-    route_ready_datasets = selected.get("claim_ready_datasets") or selected.get("ready_datasets") or active_repo.get("ready_datasets") or []
-    if isinstance(route_ready_datasets, str):
-        route_ready_datasets = [route_ready_datasets]
-    if not isinstance(route_ready_datasets, list):
-        route_ready_datasets = []
+    route_ready_datasets = _fresh_base_ready_datasets_from_evidence(root, selected, active_repo, repo, selected.get("claim_ready_datasets") or selected.get("ready_datasets") or active_repo.get("ready_datasets") or [])
     route_dataset = str(selected.get("dataset") or selected.get("claim_ready_dataset") or active_repo.get("dataset") or (route_ready_datasets[0] if route_ready_datasets else "") or "")
+    route_loader_contract_passed = bool(route_ready_datasets and _fresh_base_loader_contract_passed(root))
     latest_step = full_cycle.get("latest_step") if isinstance(full_cycle.get("latest_step"), dict) else {}
     running_step = full_cycle.get("current_running_stage") if isinstance(full_cycle.get("current_running_stage"), dict) else {}
     latest_stage = str(running_step.get("stage") or latest_step.get("stage") or "")
@@ -10135,6 +10229,8 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         status = "blocked_environment_base_selection_required"
     elif not full_job_live and env.get("valid") and not route_ready_datasets and not literature_gate_blocked:
         status = "blocked_fresh_base_data_required"
+    elif not full_job_live and env.get("valid") and route_loader_contract_passed and status in {"blocked_fresh_base_data_required", "blocked_fresh_base_implementation_required", "blocked_no_viable_base_switch_route"}:
+        status = "blocked_fresh_base_reference_probe_required"
     if status == "running" and pid and full_job_live:
         public_phase = _public_phase_for_full_cycle(latest_stage or full_job.get("stage"), project, root)
         summary = f"完整科研自循环正在运行；阶段={public_phase}；PID={pid}" + (f"；运行时长={elapsed}" if elapsed else "")
@@ -10148,6 +10244,8 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         summary = "完整科研自循环已停在实验门控；参考复现已通过，但当前主线还缺少可审计、可写入论文的候选实验证据。"
     elif status == "blocked_fresh_base_data_required":
         summary = f"环境阶段已选择当前候选基底：{base_title}；但真实数据/loader 尚未通过，不能进入实验或论文证据。"
+    elif status == "blocked_fresh_base_reference_probe_required":
+        summary = f"环境阶段已选择当前候选基底：{base_title}；真实数据/loader 已通过，等待参考协议/环境 manifest 探针。"
     elif reference_full_job_live:
         ref_pid = str(reference_full_job.get("pid") or "")
         ref_title = base_title or "当前基底"
@@ -10402,6 +10500,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     running_experiment_next_action = "等待当前训练日志和指标落盘；完成后由 项目代理写本地审计记录、登记实验表，并刷新科学进展、论文证据、投稿准备度和阻塞行动计划门控。"
     base_switch_gate_summary = "参考复现已通过；当前主线还缺少可审计、可写入论文的候选实验结果。项目代理需要补齐候选实验的来源、数据、协议、完整运行和本地产物审计；完成前不会更换当前基底或提升论文结论。"
     base_switch_gate_next_action = "继续补齐候选实验的来源、数据加载、协议、完整运行和本地产物审计；完成后刷新科学进展、论文证据和投稿准备度。"
+    reference_probe_next_action = "记录当前基底最小环境 manifest，并对 ready 数据集运行有界只读 reference-protocol/import probe；通过前不训练、不写论文、不提升结论。"
     selected_base_label = "当前基底"
     selected_base_viability_next_action = base_switch_gate_next_action if base_switch_gate_unresolved else running_experiment_next_action if active_experiment_training else "保持当前基底不变；project agent 继续设计、运行并审计当前主线下真实候选实验。历史路线只保留为审计记录，不在主状态中展开。"
     submission_blocker_next_action = "参考复现和实验门控通过后，继续补齐结论台账、坏例/反例和可靠性证据；在投稿准备度通过前保持只写草稿，禁止论文定稿或结论提升。"
@@ -10421,18 +10520,20 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         blocker_summary = "参考复现已通过；当前主线还缺少可审计、可写入论文的候选实验证据。项目代理应继续实验迭代并刷新门控；论文预览可以生成，但不能被标记为投稿通过。"
     elif reference_full_job_live:
         blocker_summary = "TASTE 正在跑当前参考工作的论文级 full reference reproduction；完成并刷新门控前，不启动候选实验、论文写作或结论提升。"
+    elif status == "blocked_fresh_base_reference_probe_required":
+        blocker_summary = f"{base_title} 数据和 loader/import probe 已通过；当前等待参考协议/环境 manifest 探针。"
     elif submission_blockers:
         blocker_summary = _public_blocker_summary(submission_blockers[0], "submission_readiness blocked")
     if not env.get("valid") and not literature_gate_blocked:
         blocker_summary = blocker_summary or "当前 Find/Read/Idea/Plan 已准备；必须由环境阶段 Claude Code 基于当前 run 选择基底，不能使用旧 active_repo。"
     public_blocker_row = _public_blocker_row({
-        "category": selected_plan_gate["category"] if selected_plan_gate.get("blocked") else "literature_llm_quota_exhausted" if llm_quota_blocked else "fresh_find_running" if fresh_find_running else "literature_recommendation_shortfall" if literature_gate_blocked else "experiment_evidence_audit" if selected_base_viability_blocked else "fresh_base_reference_reproduction_running" if reference_full_job_live else "submission_readiness" if submission_blockers else str(ref_gate.get("decision") or ref_gate.get("status") or ""),
+        "category": selected_plan_gate["category"] if selected_plan_gate.get("blocked") else "literature_llm_quota_exhausted" if llm_quota_blocked else "fresh_find_running" if fresh_find_running else "literature_recommendation_shortfall" if literature_gate_blocked else "experiment_evidence_audit" if selected_base_viability_blocked else "fresh_base_reference_reproduction_running" if reference_full_job_live else "fresh_base_reference_probe_required" if status == "blocked_fresh_base_reference_probe_required" else "submission_readiness" if submission_blockers else str(ref_gate.get("decision") or ref_gate.get("status") or ""),
         "severity": "block",
         "issue": blocker_summary,
         "summary": blocker_summary,
         "human_summary": blocker_summary,
     })
-    public_current_goal = selected_plan_gate["next_action"] if selected_plan_gate.get("blocked") else running_experiment_next_action if active_experiment_training else _public_text_for_gate(full_cycle.get("current_goal") or "")
+    public_current_goal = selected_plan_gate["next_action"] if selected_plan_gate.get("blocked") else running_experiment_next_action if active_experiment_training else reference_probe_next_action if status == "blocked_fresh_base_reference_probe_required" else _public_text_for_gate(full_cycle.get("current_goal") or "")
     public_continuation_required = False if (full_job_live or active_experiment_training) else bool(full_cycle.get("continuation_required"))
     full_cycle_compact = {"status": status, "summary": summary, "summary_zh": summary, "summary_en": _public_status_summary_en(status, base_title=base_title, active_experiment_training=active_experiment_training, reference_full_job_live=reference_full_job_live, fresh_find_running=fresh_find_running, recommendation_shortfall=recommendation_shortfall), "current_goal": _public_internal_names(public_current_goal), "continuation_required": public_continuation_required, "continuation_reason": _public_internal_names(str(full_cycle.get("continuation_reason") or "")), "updated_at": str(full_cycle.get("updated_at") or tick.get("generated_at") or ""), "started_at": str(full_cycle.get("started_at") or full_job.get("started_at") or ""), "latest_step": {**latest_step, "stage": latest_stage or latest_step.get("stage", ""), "phase": latest_phase, "line_count": line_count}, "latest_blockers": [public_blocker_row] if public_blocker_row.get("summary") else [], "experiment_evidence_policy": {"status": str(selected_base_viability.get("status") or base_switch_gate.get("status") or ""), "decision": _public_internal_names(selected_base_viability.get("decision") or base_switch_gate.get("decision") or ""), "authorized": bool(base_switch_authorized), "updated_at": str(selected_base_viability.get("updated_at") or base_switch_gate.get("updated_at") or "")}, "reference_full_job": scalar(reference_full_job, ["status", "decision", "pid", "process_alive", "log_path"]), "full_cycle_job": public_full_job}
     stale_full_job = str(full_job.get("status") or "").lower() == "stale" and not full_job_live
@@ -10446,14 +10547,17 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     if literature_gate_blocked and not fresh_find_running:
         supervision_status = "blocked_literature_recommendation_gate"
     reference_running_next_action = "等待 full reference reproduction 完成；随后自动刷新参考复现、科学进展、论文证据、投稿准备度和阻塞行动计划门控。"
-    blocker_next_action = selected_plan_gate["next_action"] if selected_plan_gate.get("blocked") else literature_gate_next_action if (fresh_find_running or literature_gate_blocked) else selected_base_viability_next_action if selected_base_viability_blocked else reference_running_next_action if reference_full_job_live else submission_blocker_next_action if submission_blockers else _clean_stale_active_worker_text(tick.get("next_action", "") if isinstance(tick, dict) else "", stale_next_action) if stale_full_job else str(tick.get("next_action") or full_cycle.get("current_goal") or "")
+    blocker_next_action = selected_plan_gate["next_action"] if selected_plan_gate.get("blocked") else literature_gate_next_action if (fresh_find_running or literature_gate_blocked) else selected_base_viability_next_action if selected_base_viability_blocked else reference_running_next_action if reference_full_job_live else reference_probe_next_action if status == "blocked_fresh_base_reference_probe_required" else submission_blocker_next_action if submission_blockers else _clean_stale_active_worker_text(tick.get("next_action", "") if isinstance(tick, dict) else "", stale_next_action) if stale_full_job else str(tick.get("next_action") or full_cycle.get("current_goal") or "")
+    if public_blocker_row.get("summary"):
+        public_blocker_row["next_action"] = _public_internal_names(blocker_next_action)
     live_reference_job = reference_full_job if reference_full_job else safe_dict(tick.get("full_reference_job"))
     supervision = {**_empty_supervision_payload(), "status": selected_plan_gate["status"] if selected_plan_gate.get("blocked") else "blocked_literature_llm_quota_exhausted" if llm_quota_blocked else "running" if fresh_find_running else supervision_status, "action": _public_internal_names(tick.get("action", "")), "generated_at": tick.get("generated_at", ""), "next_action": _public_internal_names(blocker_next_action), "full_reference_job": live_reference_job, "full_cycle_job": public_full_job, "environment_base_selection": _public_environment_selection_summary(env), "claude_current_find_state": safe_dict(tick.get("claude_current_find_state"))}
-    blocker_category = selected_plan_gate["category"] if selected_plan_gate.get("blocked") else "literature_llm_quota_exhausted" if llm_quota_blocked else "fresh_find_running" if fresh_find_running else "literature_recommendation_shortfall" if literature_gate_blocked else "experiment_evidence_audit" if selected_base_viability_blocked else "fresh_base_reference_reproduction_running" if reference_full_job_live else "submission_readiness" if submission_blockers else str(ref_gate.get("decision") or ref_gate.get("status") or "")
-    blocker_title = selected_plan_gate["title"] if selected_plan_gate.get("blocked") else "LLM API 额度/配置不可用" if llm_quota_blocked else "Find 正在运行" if fresh_find_running else "Find 推荐门控阻塞" if literature_gate_blocked else "候选实验运行中" if selected_base_viability_blocked and active_experiment_training else "缺少审计就绪候选实验证据" if base_switch_gate_unresolved else "缺少当前主线候选实验证据" if selected_base_viability_blocked else "参考复现正在运行" if reference_full_job_live else "论文证据/投稿门控阻塞" if submission_blockers else ("当前项目门控状态" if env.get("valid") else "等待环境阶段 Claude Code 选择当前基底")
+    blocker_category = selected_plan_gate["category"] if selected_plan_gate.get("blocked") else "literature_llm_quota_exhausted" if llm_quota_blocked else "fresh_find_running" if fresh_find_running else "literature_recommendation_shortfall" if literature_gate_blocked else "experiment_evidence_audit" if selected_base_viability_blocked else "fresh_base_reference_reproduction_running" if reference_full_job_live else "fresh_base_reference_probe_required" if status == "blocked_fresh_base_reference_probe_required" else "submission_readiness" if submission_blockers else str(ref_gate.get("decision") or ref_gate.get("status") or "")
+    blocker_title = selected_plan_gate["title"] if selected_plan_gate.get("blocked") else "LLM API 额度/配置不可用" if llm_quota_blocked else "Find 正在运行" if fresh_find_running else "Find 推荐门控阻塞" if literature_gate_blocked else "候选实验运行中" if selected_base_viability_blocked and active_experiment_training else "缺少审计就绪候选实验证据" if base_switch_gate_unresolved else "缺少当前主线候选实验证据" if selected_base_viability_blocked else "参考复现正在运行" if reference_full_job_live else "等待参考协议/环境 manifest 探针" if status == "blocked_fresh_base_reference_probe_required" else "论文证据/投稿门控阻塞" if submission_blockers else ("当前项目门控状态" if env.get("valid") else "等待环境阶段 Claude Code 选择当前基底")
     legacy_control = {"policy": "历史仓库、实验和参考复现只保留为审计记录；当前主线以本轮 Find 后的环境审查选择为准。", "details_hidden": True}
     if literature_gate_blocked and env.get("blocked_selection"):
         legacy_control["blocked_environment_selection"] = env.get("blocked_selection")
+    display_ref_gate = _reference_gate_for_current_route_display(ref_gate, status, route_ready_datasets)
     human_gate_summary = {
         "status": status,
         "title": blocker_title,
@@ -10462,9 +10566,9 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         "main_route_title": main_route.get("base_title", ""),
         "main_route_repo": main_route.get("repo_name", ""),
         "reference_reproduction": {
-            "status": ref_gate.get("status", ""),
-            "decision": ref_gate.get("decision", ""),
-            "summary": _public_text_for_gate(ref_gate.get("human_summary") or ref_gate.get("decision_reason") or ref_gate),
+            "status": display_ref_gate.get("status", ""),
+            "decision": display_ref_gate.get("decision", ""),
+            "summary": _public_text_for_gate(display_ref_gate.get("human_summary") or display_ref_gate.get("summary") or display_ref_gate),
         },
         "scientific_progress": {
             "status": selected_plan_gate["status"] if selected_plan_gate.get("blocked") else scientific_progress_gate.get("status", ""),
@@ -10781,7 +10885,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
             "source": "current_find_reading_output" if plan_count else "",
         },
     }
-    stages = {**planning_stages, "environment": environment_stage, "experiment": {"status": experiment_stage_status, **experiment_module_summary, "human_gate_summary": human_gate_summary, "experiment_count": current_experiment_count, "completed_experiment_count": current_completed_count, "experiment_count_label": experiment_count_label, "experiment_count_help": experiment_count_help, "recent_experiments": current_experiments, "experiments": current_experiments, "experiment_record": current_experiment_record, **experiment_display_flags, "legacy_experiment_audit": legacy_experiment_audit, "reference_reproduction_gate": scalar(ref_gate, ["status", "decision", "decision_reason", "human_summary"]), "scientific_progress_gate": _public_gate_status_summary(scientific_progress_gate), "experiment_iteration_audit": _public_gate_status_summary(experiment_iteration_audit), "full_research_cycle": full_cycle_compact}, "paper": paper_stage}
+    stages = {**planning_stages, "environment": environment_stage, "experiment": {"status": experiment_stage_status, **experiment_module_summary, "human_gate_summary": human_gate_summary, "experiment_count": current_experiment_count, "completed_experiment_count": current_completed_count, "experiment_count_label": experiment_count_label, "experiment_count_help": experiment_count_help, "recent_experiments": current_experiments, "experiments": current_experiments, "experiment_record": current_experiment_record, **experiment_display_flags, "legacy_experiment_audit": legacy_experiment_audit, "reference_reproduction_gate": scalar(display_ref_gate, ["status", "decision", "decision_reason", "human_summary"]), "scientific_progress_gate": _public_gate_status_summary(scientific_progress_gate), "experiment_iteration_audit": _public_gate_status_summary(experiment_iteration_audit), "full_research_cycle": full_cycle_compact}, "paper": paper_stage}
     artifacts = [item for item in [artifact("find_progress.json", root / "planning" / "finding" / "find_progress.json"), current_run_artifact("find_results.json", root / "planning" / "finding" / "find_results.json"), artifact("article.md", root / "planning" / "finding" / "article.md", "markdown") if run_id else None, current_run_artifact("read_results.json", root / "planning" / "finding" / "read_results.json"), current_run_artifact("ideas.json", root / "planning" / "finding" / "ideas.json"), current_run_artifact("plans.json", root / "planning" / "finding" / "plans.json"), current_run_artifact("current_find_research_plan.json", root / "state" / "current_find_research_plan.json"), artifact("evidence_ready_repo_selection.json", root / "state" / "evidence_ready_repo_selection.json") if not downstream_waiting_on_find else None, artifact("blocker_action_plan.json", root / "state" / "blocker_action_plan.json") if not downstream_waiting_on_find else None, artifact("reference_reproduction_gate.json", root / "state" / "reference_reproduction_gate.json"), artifact("scientific_progress_gate.json", root / "state" / "scientific_progress_gate.json") if not downstream_waiting_on_find else None, artifact("experiment_iteration_audit.json", root / "state" / "experiment_iteration_audit.json") if not downstream_waiting_on_find else None, artifact("full_research_cycle.json", root / "state" / "full_research_cycle.json"), artifact("experiment_records.csv", root / "experiments" / "experiment_records.csv", "text") if not downstream_waiting_on_find else None, artifact("experiment_record_table.json", root / "state" / "experiment_record_table.json") if not downstream_waiting_on_find else None, artifact("supervision_tick.json", root / "state" / "supervision_tick.json"), artifact("paper.pdf", pdf_path, "pdf") if (pdf_path and not paper_blocked) else None] if item]
     runtime = runtime_payload()
     claude_status = _claude_status_payload(root)
@@ -10797,7 +10901,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     runtime_compact = dict(runtime) if isinstance(runtime, dict) else {}
     runtime_compact["runtime"] = runtime_public
     run_preferences = _public_run_preferences(project, root, cfg, runtime_public, selection)
-    result = {"project": project, "topic": topic, "summary": summary, "status": status, "config": _public_project_identity_config(project, cfg, topic), "run_preferences": run_preferences, "path": str(root), "full_research_cycle": full_cycle_compact, "blockers": full_cycle_compact.get("latest_blockers", []), "current_blocker": public_blocker_row, "human_supervision": human, "human_gate_summary": human_gate_summary, "main_route": main_route, "stages": stages, "state": {"stages": stages, "full_research_cycle": full_cycle_compact, "literature_survey": literature_survey, "human_gate_summary": human_gate_summary, "experiment_count": current_experiment_count, "completed_experiment_count": current_completed_count, "experiment_count_label": experiment_count_label, "experiment_count_help": experiment_count_help, "recent_experiments": current_experiments[:8] if current_experiments else [], "legacy_experiment_audit": legacy_experiment_audit, "experiment_record": {**current_experiment_record, "rows": []}, **experiment_display_flags, "reference_reproduction_gate": scalar(ref_gate, ["status", "decision", "decision_reason", "human_summary"]), "scientific_progress_gate": _public_gate_status_summary(scientific_progress_gate), "experiment_iteration_audit": _public_gate_status_summary(experiment_iteration_audit), "submission_readiness": scalar(submission_state, ["status", "submission_ready", "promotion_gate"]), "paper_pdf_count": 1 if (pdf_path and not paper_blocked) else 0, "human_supervision": human, "runtime": runtime_compact, "claude_status": claude_status}, "literature_survey": literature_survey, "current_find_pipeline": literature_survey["current_find_pipeline"], "readings": completed_read_count, "read_artifacts": raw_read_count, "full_text_reading_count": full_text_read_count, "pending_full_text_reading_count": pending_full_text_read_count, "ideas": idea_count, "plans": plan_count, "fresh_base": {"title": base_title, "venue": main_route.get("base_venue", ""), "year": main_route.get("base_year", ""), "repo_name": repo_name, "repo_path": repo_path, "dataset": main_route.get("dataset", ""), "ready_datasets": main_route.get("ready_datasets", [])}, "supervision": human["supervision"], "queued_guidance": queued_guidance, "runtime": runtime_compact, "claude_status": claude_status, "artifacts": artifacts, "payload_bytes": 0}
+    result = {"project": project, "topic": topic, "summary": summary, "status": status, "config": _public_project_identity_config(project, cfg, topic), "run_preferences": run_preferences, "path": str(root), "full_research_cycle": full_cycle_compact, "blockers": full_cycle_compact.get("latest_blockers", []), "current_blocker": public_blocker_row, "human_supervision": human, "human_gate_summary": human_gate_summary, "main_route": main_route, "stages": stages, "state": {"stages": stages, "full_research_cycle": full_cycle_compact, "literature_survey": literature_survey, "human_gate_summary": human_gate_summary, "experiment_count": current_experiment_count, "completed_experiment_count": current_completed_count, "experiment_count_label": experiment_count_label, "experiment_count_help": experiment_count_help, "recent_experiments": current_experiments[:8] if current_experiments else [], "legacy_experiment_audit": legacy_experiment_audit, "experiment_record": {**current_experiment_record, "rows": []}, **experiment_display_flags, "reference_reproduction_gate": scalar(display_ref_gate, ["status", "decision", "decision_reason", "human_summary"]), "scientific_progress_gate": _public_gate_status_summary(scientific_progress_gate), "experiment_iteration_audit": _public_gate_status_summary(experiment_iteration_audit), "submission_readiness": scalar(submission_state, ["status", "submission_ready", "promotion_gate"]), "paper_pdf_count": 1 if (pdf_path and not paper_blocked) else 0, "human_supervision": human, "runtime": runtime_compact, "claude_status": claude_status}, "literature_survey": literature_survey, "current_find_pipeline": literature_survey["current_find_pipeline"], "readings": completed_read_count, "read_artifacts": raw_read_count, "full_text_reading_count": full_text_read_count, "pending_full_text_reading_count": pending_full_text_read_count, "ideas": idea_count, "plans": plan_count, "fresh_base": {"title": base_title, "venue": main_route.get("base_venue", ""), "year": main_route.get("base_year", ""), "repo_name": repo_name, "repo_path": repo_path, "dataset": main_route.get("dataset", ""), "ready_datasets": main_route.get("ready_datasets", [])}, "supervision": human["supervision"], "queued_guidance": queued_guidance, "runtime": runtime_compact, "claude_status": claude_status, "artifacts": artifacts, "payload_bytes": 0}
     current_config_venue = run_preferences.get("target_venue") or run_preferences.get("venue") or venue
     if current_config_venue:
         result["target_venue"] = current_config_venue
@@ -10904,12 +11008,9 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
     repo_name = str(selected.get('name') or selected.get('repo') or active_repo.get('name') or active_repo.get('repo') or repo.get('name') or '')
     repo_url = str(selected.get('url') or selected.get('repo_url') or active_repo.get('url') or active_repo.get('repo_url') or repo.get('url') or '')
     repo_path = str(selected.get('repo_path') or selected.get('local_path') or active_repo.get('repo_path') or active_repo.get('local_path') or repo.get('repo_path') or repo.get('local_path') or '')
-    route_ready_datasets = selected.get('claim_ready_datasets') or selected.get('ready_datasets') or active_repo.get('ready_datasets') or []
-    if isinstance(route_ready_datasets, str):
-        route_ready_datasets = [route_ready_datasets]
-    if not isinstance(route_ready_datasets, list):
-        route_ready_datasets = []
+    route_ready_datasets = _fresh_base_ready_datasets_from_evidence(root, selected, active_repo, repo, selected.get('claim_ready_datasets') or selected.get('ready_datasets') or active_repo.get('ready_datasets') or [])
     route_dataset = str(selected.get('dataset') or selected.get('claim_ready_dataset') or active_repo.get('dataset') or (route_ready_datasets[0] if route_ready_datasets else '') or '')
+    route_loader_contract_passed = bool(route_ready_datasets and _fresh_base_loader_contract_passed(root))
 
     experiment_registry = _read_json(root / 'state' / 'experiment_registry.json', [])
     experiments = safe_list(experiment_registry)
@@ -10988,6 +11089,8 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
     status = 'running' if (full_job_live or reference_full_job_live) else ('stale_full_research_cycle_snapshot' if raw_cycle_status == 'running' else raw_cycle_status)
     if not (full_job_live or reference_full_job_live) and env.get('valid') and not route_ready_datasets:
         status = 'blocked_fresh_base_data_required'
+    elif not (full_job_live or reference_full_job_live) and env.get('valid') and route_loader_contract_passed and status in {'blocked_fresh_base_data_required', 'blocked_fresh_base_implementation_required', 'blocked_no_viable_base_switch_route'}:
+        status = 'blocked_fresh_base_reference_probe_required'
     elapsed = str(full_job.get('elapsed') or full_job.get('elapsed_sec') or '') if isinstance(full_job, dict) else ''
     command = str(full_job.get('cmd') or '') if isinstance(full_job, dict) else ''
     full_job_kind = str(full_job.get('kind') or '') if isinstance(full_job, dict) else ''
@@ -11099,6 +11202,8 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
         summary = f'完整科研自循环进程已停止；没有正在运行的 full-cycle。当前基底：{base_title}。'
     elif status == 'blocked_fresh_base_data_required':
         summary = f'环境阶段已选择当前候选基底：{base_title}；但真实数据/loader 尚未通过，不能进入实验或论文证据。'
+    elif status == 'blocked_fresh_base_reference_probe_required':
+        summary = f'环境阶段已选择当前候选基底：{base_title}；真实数据/loader 已通过，等待参考协议/环境 manifest 探针。'
     else:
         summary = str(full_cycle_raw.get('summary_zh') or full_cycle_raw.get('summary') or f'项目：{topic}；状态：{status}。当前基底：{base_title}。')
     summary = _public_run_summary_without_action_plan(summary)
@@ -11148,6 +11253,11 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
         blocker_title = '参考复现正在运行'
         blocker_summary = 'TASTE 正在跑当前参考工作的论文级 full reference reproduction；完成并刷新门控前，不启动候选实验、论文写作或结论提升。'
         next_action = '等待 full reference reproduction 完成；随后自动刷新参考复现、科学进展、论文证据、投稿准备度和阻塞行动计划门控。'
+    elif status == 'blocked_fresh_base_reference_probe_required':
+        blocker_category = 'fresh_base_reference_probe_required'
+        blocker_title = '等待参考协议/环境 manifest 探针'
+        blocker_summary = f'{base_title} 数据和 loader/import probe 已通过；当前等待参考协议/环境 manifest 探针。'
+        next_action = '记录当前基底最小环境 manifest，并对 ready 数据集运行有界只读 reference-protocol/import probe；通过前不训练、不写论文、不提升结论。'
     elif submission_blockers:
         top_submission_blocker = submission_blockers[0]
         blocker_category = str(top_submission_blocker.get('category') or 'submission_readiness')
@@ -11201,13 +11311,14 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
         full_cycle_compact.pop('finished_at', None)
         full_cycle_compact.pop('completed_at', None)
 
+    display_ref_gate = _reference_gate_for_current_route_display(ref_gate, status, route_ready_datasets)
     blocker = {
         'category': _public_internal_names(blocker_category),
         'title': blocker_title,
         'summary': _public_internal_names(blocker_summary),
         'next_action': _public_internal_names(next_action),
-        'reference_gate_status': ref_gate.get('status', ''),
-        'reference_gate_decision': ref_gate.get('decision', ''),
+        'reference_gate_status': display_ref_gate.get('status', ''),
+        'reference_gate_decision': display_ref_gate.get('decision', ''),
         'paper_level_reproduction_passed': bool(ref_gate.get('status') == 'pass' and ref_gate.get('decision') == 'continue_base'),
         'ready_datasets': route_ready_datasets[:8],
         'blocked_datasets': active_repo.get('blocked_datasets') or selected.get('blocked_datasets') or [],
@@ -11374,7 +11485,7 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
     )
     stages = {
         'environment': environment_stage,
-        'experiment': {'status': status, **experiment_module_summary, 'experiment_count': experiment_count, 'completed_experiment_count': completed_count, 'experiment_count_label': '实验/复现记录', 'experiment_count_help': '这是当前主线下实验与参考复现记录的审计统计，不是完整科研流程完成进度；论文结论仍以科学进展、证据和投稿审计为准。', **experiment_display_flags, 'recent_experiments': _public_experiment_rows(current_route_experiments_all, 12), 'experiments': _public_experiment_rows(current_route_experiments_all, 12), 'experiment_record': experiment_record_compact, 'legacy_experiment_audit': {'experiment_count': legacy_experiment_count, 'completed_experiment_count': legacy_completed_count, 'csv_path': experiment_record_compact.get('csv_path', ''), 'note': '旧实验记录保留为 CSV/registry 审计；当前摘要只统计当前主线记录。'} if legacy_experiment_count > experiment_count else {}, 'reference_reproduction_gate': scalar(ref_gate, ['status', 'decision', 'decision_reason', 'human_summary']), 'scientific_progress_gate': _public_gate_status_summary(scientific_progress_gate_light), 'experiment_iteration_audit': _public_gate_status_summary(experiment_iteration_audit_light), 'full_research_cycle': full_cycle_compact},
+        'experiment': {'status': status, **experiment_module_summary, 'experiment_count': experiment_count, 'completed_experiment_count': completed_count, 'experiment_count_label': '实验/复现记录', 'experiment_count_help': '这是当前主线下实验与参考复现记录的审计统计，不是完整科研流程完成进度；论文结论仍以科学进展、数据/loader、参考复现和投稿审计为准。', **experiment_display_flags, 'recent_experiments': _public_experiment_rows(current_route_experiments_all, 12), 'experiments': _public_experiment_rows(current_route_experiments_all, 12), 'experiment_record': experiment_record_compact, 'legacy_experiment_audit': {'experiment_count': legacy_experiment_count, 'completed_experiment_count': legacy_completed_count, 'csv_path': experiment_record_compact.get('csv_path', ''), 'note': '旧实验记录保留为 CSV/registry 审计；当前摘要只统计当前主线记录。'} if legacy_experiment_count > experiment_count else {}, 'reference_reproduction_gate': scalar(display_ref_gate, ['status', 'decision', 'decision_reason', 'human_summary']), 'scientific_progress_gate': _public_gate_status_summary(scientific_progress_gate_light), 'experiment_iteration_audit': _public_gate_status_summary(experiment_iteration_audit_light), 'full_research_cycle': full_cycle_compact},
         'paper': paper_stage,
     }
 
