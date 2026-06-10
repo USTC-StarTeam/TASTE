@@ -5,10 +5,14 @@ import argparse
 import difflib
 import datetime as dt
 import json
+import os
 import re
+import select
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -348,6 +352,52 @@ def restore_current_find_artifact_snapshot(paths, snapshot: dict[str, Any], reas
         "policy": "Current-Find content artifacts are transaction-protected. If Claude is stopped by tool policy, exits nonzero, or leaves invalid JSON, TASTE restores the previous parseable artifacts and records this receipt instead of accepting partial scientific content.",
     }
     save_json(paths.state / "current_find_artifact_transaction_restore.json", receipt)
+    return receipt
+
+
+def _pending_current_find_artifact_payload(name: str, run_id: str, reason: str) -> dict[str, Any]:
+    payload = {"run_id": run_id, "source": f"pending_after_{reason}", "status": "pending", "created_at": now_iso()}
+    if name == "read_results.json":
+        payload["readings"] = []
+    elif name == "ideas.json":
+        payload["ideas"] = []
+    elif name == "plans.json":
+        payload["plans"] = []
+    return payload
+
+
+def quarantine_corrupt_current_find_json_artifacts(paths, run_id: str, failures: list[dict[str, Any]], reason: str) -> dict[str, Any]:
+    if not failures:
+        return {"status": "not_needed", "run_id": run_id, "reason": reason, "files": []}
+    created_at = now_iso()
+    backup_dir = paths.state / "current_find_artifact_backups" / f"corrupt_{_safe_timestamp_for_path(created_at)}"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    files: list[dict[str, Any]] = []
+    for failure in failures:
+        name = str((failure if isinstance(failure, dict) else {}).get("artifact") or "").strip()
+        if name not in CURRENT_FIND_JSON_ARTIFACT_NAMES:
+            continue
+        target = _current_find_artifact_path(paths, name)
+        backup = backup_dir / name
+        record = {"name": name, "target": str(target), "backup": str(backup), "reason": reason}
+        if target.exists():
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(target, backup)
+            record["size"] = backup.stat().st_size
+        save_json(target, _pending_current_find_artifact_payload(name, run_id, reason))
+        record["action"] = "quarantined_and_reset_to_pending"
+        files.append(record)
+    receipt = {
+        "status": "quarantined_corrupt_json_artifacts",
+        "run_id": run_id,
+        "created_at": created_at,
+        "reason": reason,
+        "parse_failures": failures,
+        "backup_dir": str(backup_dir),
+        "files": files,
+        "policy": "A new current-Find Claude takeover must not snapshot already-corrupt JSON as the rollback base; corrupt artifacts are quarantined and replaced by same-run pending shells before the next Claude attempt.",
+    }
+    save_json(paths.state / "current_find_corrupt_artifact_quarantine.json", receipt)
     return receipt
 
 
@@ -3285,9 +3335,179 @@ def render_idea_md(ideas: list[dict[str, Any]], run_id: str) -> str:
 
 def _claude_takeover_timeout() -> int:
     try:
-        return int(__import__("os").environ.get("CURRENT_FIND_CLAUDE_TIMEOUT_SEC", "3600") or 3600)
+        return int(os.environ.get("CURRENT_FIND_CLAUDE_TIMEOUT_SEC", "3600") or 3600)
     except Exception:
         return 3600
+
+
+def _claude_takeover_no_progress_timeout() -> int:
+    try:
+        return int(os.environ.get("CURRENT_FIND_CLAUDE_NO_PROGRESS_TIMEOUT_SEC", "300") or 300)
+    except Exception:
+        return 300
+
+
+def _current_find_artifact_latest_mtime(paths) -> float:
+    candidates: list[Path] = []
+    finding = paths.planning / "finding"
+    for name in CURRENT_FIND_CONTENT_ARTIFACT_NAMES:
+        candidates.append(finding / name)
+    fragment_dir = finding / CURRENT_FIND_DEEP_READ_FRAGMENT_DIR_NAME
+    if fragment_dir.exists():
+        candidates.extend(fragment_dir.glob("*.json"))
+    candidates.extend([
+        paths.state / "current_find_claude_reading_validation.json",
+        paths.state / "current_find_full_text_evidence_repair.json",
+    ])
+    latest = 0.0
+    for path in candidates:
+        try:
+            latest = max(latest, path.stat().st_mtime)
+        except OSError:
+            continue
+    return latest
+
+
+def _terminate_process_group(proc: subprocess.Popen, *, grace_sec: float = 3.0) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except Exception:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    deadline = time.monotonic() + max(0.1, grace_sec)
+    while proc.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.1)
+    if proc.poll() is None:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
+def _trim_text_tail(lines: list[str], limit: int = 8000) -> str:
+    text = "\n".join(lines)
+    return text[-limit:]
+
+
+def _write_live_claude_result(path: Path, payload: dict[str, Any]) -> None:
+    try:
+        save_json(path, payload)
+    except Exception:
+        pass
+
+
+def _run_claude_session_streaming(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    paths,
+    result_path: Path,
+    stdout_path: Path,
+    prompt_path: Path,
+    run_id: str,
+    attempt: int,
+    stage: str,
+    timeout_sec: int,
+    started: str,
+) -> dict[str, Any]:
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    output_lines: list[str] = []
+    stdout_chars = 0
+    last_activity = time.monotonic()
+    last_artifact_mtime = _current_find_artifact_latest_mtime(paths)
+    no_progress_timeout = max(60, _claude_takeover_no_progress_timeout())
+    hard_timeout = max(60, int(timeout_sec or 3600) + 180)
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(cwd),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=1,
+        start_new_session=True,
+    )
+    status = "running"
+    stop_reason = ""
+    started_mono = time.monotonic()
+    last_status_write = 0.0
+    with stdout_path.open("w", encoding="utf-8") as stdout_handle:
+        assert proc.stdout is not None
+        while True:
+            now = time.monotonic()
+            ready, _, _ = select.select([proc.stdout], [], [], 1.0)
+            if ready:
+                line = proc.stdout.readline()
+                if line:
+                    line = line.rstrip("\n")
+                    stdout_handle.write(line + "\n")
+                    stdout_handle.flush()
+                    print(line, flush=True)
+                    output_lines.append(line)
+                    if len(output_lines) > 2000:
+                        output_lines = output_lines[-1000:]
+                    stdout_chars += len(line) + 1
+                    last_activity = now
+                elif proc.poll() is not None:
+                    break
+            artifact_mtime = _current_find_artifact_latest_mtime(paths)
+            if artifact_mtime > last_artifact_mtime:
+                last_artifact_mtime = artifact_mtime
+                last_activity = now
+            if now - last_status_write >= 5:
+                _write_live_claude_result(
+                    result_path,
+                    {
+                        "status": "running",
+                        "stage": stage,
+                        "run_id": run_id,
+                        "return_code": None,
+                        "started_at": started,
+                        "updated_at": now_iso(),
+                        "prompt_path": str(prompt_path),
+                        "repair_attempt": attempt,
+                        "stdout_tail": _trim_text_tail(output_lines),
+                        "stdout_path": str(stdout_path),
+                        "stdout_chcount": stdout_chars,
+                        "no_progress_timeout_sec": no_progress_timeout,
+                    },
+                )
+                last_status_write = now
+            if proc.poll() is not None:
+                break
+            if now - started_mono > hard_timeout:
+                status = "timeout"
+                stop_reason = "claude_session_hard_timeout"
+                _terminate_process_group(proc)
+                break
+            if now - last_activity > no_progress_timeout:
+                status = "timeout_no_progress"
+                stop_reason = "claude_session_no_progress_timeout"
+                _terminate_process_group(proc)
+                break
+    rc = proc.poll()
+    if rc is None:
+        rc = proc.wait(timeout=5)
+    if status == "running":
+        status = "completed" if rc == 0 else "failed"
+    return {
+        "status": status,
+        "return_code": int(rc or 0),
+        "stop_reason": stop_reason,
+        "stdout_tail": _trim_text_tail(output_lines),
+        "stdout_path": str(stdout_path),
+        "stdout_chcount": stdout_chars,
+        "stderr_tail": "",
+        "no_progress_timeout_sec": no_progress_timeout,
+    }
 
 
 def _compact_validation_for_prompt(validation: Any) -> dict[str, Any]:
@@ -3435,6 +3655,17 @@ def write_claude_takeover_prompt(paths, project: str, run_id: str, read_limit: i
 def run_claude_current_find_takeover(project: str, paths, run_id: str, read_limit: int, idea_count: int, repair_validation: dict[str, Any] | None = None, attempt: int = 1) -> dict[str, Any]:
     fragment_dir = paths.planning / "finding" / CURRENT_FIND_DEEP_READ_FRAGMENT_DIR_NAME
     fragment_dir.mkdir(parents=True, exist_ok=True)
+    preexisting_parse_failures = current_find_json_artifact_failures(paths)
+    if preexisting_parse_failures:
+        quarantine = quarantine_corrupt_current_find_json_artifacts(paths, run_id, preexisting_parse_failures, "pre_takeover_parse_failure")
+        repair_validation = {
+            **(repair_validation if isinstance(repair_validation, dict) else {}),
+            "status": "artifact_parse_failed",
+            "artifact_parse_failures": preexisting_parse_failures,
+            "corrupt_artifact_quarantine": quarantine,
+            "next_required_action": "rerun_current_find_claude_takeover_repair_rewrite_parseable_artifacts",
+        }
+        record_current_find_artifact_parse_failure(paths.state, run_id, preexisting_parse_failures)
     prompt_path = write_claude_takeover_prompt(paths, project, run_id, read_limit, idea_count, repair_validation=repair_validation, attempt=attempt)
     snapshot = snapshot_current_find_artifacts(paths, run_id, attempt)
     cmd = [
@@ -3453,23 +3684,44 @@ def run_claude_current_find_takeover(project: str, paths, run_id: str, read_limi
         "--no-resume",
     ]
     started = now_iso()
-    env = __import__("os").environ.copy()
+    env = os.environ.copy()
     env.setdefault("USE_EXISTING_LITERATURE_PACKET", "1")
     env.setdefault("CLAUDE_FIRST_OUTPUT_TIMEOUT_SEC", "180")
     env.setdefault("CLAUDE_NO_EVENT_TIMEOUT_SEC", "300")
     env.setdefault("CLAUDE_MAX_PARTIAL_OUTPUT_BYTES", "8000000")
     env.setdefault("CLAUDE_MAX_STDOUT_CHUNKS_PER_TICK", "64")
-    proc = subprocess.run(cmd, cwd=ROOT, env=env, text=True, capture_output=True, timeout=_claude_takeover_timeout() + 180)
+    result_path = paths.state / "current_find_claude_takeover_result.json"
+    stdout_path = paths.state / f"current_find_claude_takeover_attempt{attempt}_stdout.log"
+    stream = _run_claude_session_streaming(
+        cmd,
+        cwd=ROOT,
+        env=env,
+        paths=paths,
+        result_path=result_path,
+        stdout_path=stdout_path,
+        prompt_path=prompt_path,
+        run_id=run_id,
+        attempt=attempt,
+        stage="current-find-claude-read-idea-plan",
+        timeout_sec=_claude_takeover_timeout(),
+        started=started,
+    )
     session_result_path = paths.state / "claude_project_session_last_result.json"
     session_result = load_json(session_result_path, {})
     session_status = str(session_result.get("status") or "").strip() if isinstance(session_result, dict) else ""
-    tool_policy_guard = session_result.get("tool_policy_guard") if isinstance(session_result, dict) and isinstance(session_result.get("tool_policy_guard"), dict) else {}
+    tool_policy_guard = session_result.get("tool_policy_guard") if isinstance(session_result, dict) and isinstance(session_result.get("tool_policy_guard", {}), dict) else {}
     parse_failures = current_find_json_artifact_failures(paths)
-    status = session_status or ("completed" if proc.returncode == 0 else "failed")
+    return_code = int(stream.get("return_code") or 0)
+    stream_status = str(stream.get("status") or "").strip()
+    status = stream_status if stream_status.startswith("timeout") else (session_status or stream_status or ("completed" if return_code == 0 else "failed"))
     restore_reason = ""
     if parse_failures:
         restore_reason = "artifact_parse_failed_after_claude_takeover"
-    elif proc.returncode != 0:
+    elif stream_status == "timeout_no_progress":
+        restore_reason = "claude_takeover_no_progress_timeout"
+    elif stream_status == "timeout":
+        restore_reason = "claude_takeover_timeout"
+    elif return_code != 0:
         restore_reason = "claude_takeover_nonzero_return"
     elif isinstance(tool_policy_guard, dict) and tool_policy_guard.get("status") == "blocked":
         restore_reason = "claude_takeover_tool_policy_blocked"
@@ -3482,24 +3734,30 @@ def run_claude_current_find_takeover(project: str, paths, run_id: str, read_limi
         artifact_transaction = restore_current_find_artifact_snapshot(paths, snapshot, restore_reason, parse_failures)
         artifact_transaction["post_restore_parse_failures"] = current_find_json_artifact_failures(paths)
         save_json(paths.state / "current_find_artifact_transaction_restore.json", artifact_transaction)
-        if parse_failures and proc.returncode == 0:
+        if parse_failures and return_code == 0:
             status = "artifact_parse_failed_restored"
+    stdout_tail = str(stream.get("stdout_tail") or "")
+    if isinstance(session_result, dict) and session_result.get("stdout"):
+        stdout_tail = (stdout_tail + "\n" + str(session_result.get("stdout") or ""))[-8000:]
     result = {
         "status": status,
-        "return_code": proc.returncode,
+        "return_code": return_code,
+        "stop_reason": str(stream.get("stop_reason") or ""),
         "started_at": started,
         "finished_at": now_iso(),
         "prompt_path": str(prompt_path),
         "repair_attempt": attempt,
-        "stdout_tail": ((str(proc.stdout or "") + "\n" + str(session_result.get("stdout") or ""))[-8000:] if isinstance(session_result, dict) else str(proc.stdout or "")[-8000:]),
-        "stderr_tail": proc.stderr[-4000:],
+        "stdout_tail": stdout_tail[-8000:],
+        "stdout_path": str(stream.get("stdout_path") or ""),
+        "stdout_chcount": int(stream.get("stdout_chcount") or 0),
+        "stderr_tail": str(stream.get("stderr_tail") or "")[-4000:],
         "claude_session_result_path": str(session_result_path),
         "claude_session_status": session_status,
         "claude_session_id": str(session_result.get("session_id") or "") if isinstance(session_result, dict) else "",
         "tool_policy_guard": tool_policy_guard,
         "artifact_transaction": artifact_transaction,
     }
-    save_json(paths.state / "current_find_claude_takeover_result.json", result)
+    save_json(result_path, result)
     return result
 
 
@@ -4018,7 +4276,8 @@ def maybe_repair_current_find_takeover(project: str, paths, taste_dir: Path, run
         takeover = {"status": "missing_current_find_takeover", "return_code": 0, "prompt_path": ""}
     takeover_current = claude_takeover_is_current(takeover, find_revision)
     artifacts_current = current_find_artifacts_follow_takeover(takeover, taste_dir, validation)
-    ready = bool(takeover_current and artifacts_current and _current_find_contract_ready(readings, ideas, plans, targeted_queries, validation, run_id, min_required_readings, idea_count, find_revision))
+    contract_ready = _current_find_contract_ready(readings, ideas, plans, targeted_queries, validation, run_id, min_required_readings, idea_count, find_revision)
+    ready = bool(takeover_current and contract_ready)
     observed = _current_find_observed_with_takeover(
         current_find_takeover_observed(taste_dir, readings, ideas, plans, targeted_queries, validation, idea_count),
         takeover,
@@ -4066,12 +4325,14 @@ def maybe_repair_current_find_takeover(project: str, paths, taste_dir: Path, run
     changed_run = _find_run_changed(paths, run_id)
     if changed_run:
         return repair_takeover, readings, ideas, plans, targeted_queries, validation, changed_run
-    repair_started = parse_iso_time(repair_takeover.get("started_at")) if isinstance(repair_takeover, dict) else None
-    refresh_revision = max([value for value in [find_revision, repair_started] if value is not None], default=find_revision)
-    readings, ideas, plans, targeted_queries, validation = _refresh_current_find_claude_outputs(paths, taste_dir, run_id, find_results, effective_read_limit, refresh_revision)
+    # A repair attempt start time is not a scientific-content revision boundary.
+    # Same-run Claude artifacts that are current to the Find revision must remain
+    # eligible; otherwise a no-op repair can erase valid ideas/plans as stale.
+    readings, ideas, plans, targeted_queries, validation = _refresh_current_find_claude_outputs(paths, taste_dir, run_id, find_results, effective_read_limit, find_revision)
     repair_current = claude_takeover_is_current(repair_takeover, find_revision)
     repair_artifacts_current = current_find_artifacts_follow_takeover(repair_takeover, taste_dir, validation)
-    ready = bool(repair_current and repair_artifacts_current and _current_find_contract_ready(readings, ideas, plans, targeted_queries, validation, run_id, min_required_readings, idea_count, refresh_revision))
+    repair_contract_ready = _current_find_contract_ready(readings, ideas, plans, targeted_queries, validation, run_id, min_required_readings, idea_count, find_revision)
+    ready = bool(repair_current and repair_contract_ready)
     observed = _current_find_observed_with_takeover(
         current_find_takeover_observed(taste_dir, readings, ideas, plans, targeted_queries, validation, idea_count),
         repair_takeover,
@@ -6263,6 +6524,20 @@ def write_current_find_structured_artifacts(
     validation = validation if isinstance(validation, dict) else {}
     validation_ok = validation.get("valid") is True
     normalization_source = "validated_current_find_deep_read_fragments" if validation_ok else "current_find_deep_read_fragments_pending_contract"
+    existing_idea_payload = load_json(taste_dir / "ideas.json", {})
+    existing_plan_payload = load_json(taste_dir / "plans.json", {})
+    if not ideas and isinstance(existing_idea_payload, dict):
+        same_run = str(existing_idea_payload.get("run_id") or existing_idea_payload.get("current_find_run_id") or "").strip() == str(run_id or "").strip()
+        same_source = existing_idea_payload.get("source") == CLAUDE_TAKEOVER_SOURCE
+        preserved_ideas = [row for row in as_list(existing_idea_payload.get("ideas")) if _valid_claude_idea(row)]
+        if same_run and same_source and preserved_ideas:
+            ideas = preserved_ideas
+    if not plans and isinstance(existing_plan_payload, dict):
+        same_run = str(existing_plan_payload.get("run_id") or existing_plan_payload.get("current_find_run_id") or "").strip() == str(run_id or "").strip()
+        same_source = existing_plan_payload.get("source") == CLAUDE_TAKEOVER_SOURCE
+        preserved_plans = [row for row in as_list(existing_plan_payload.get("plans")) if _valid_claude_plan(row)]
+        if same_run and same_source and preserved_plans:
+            plans = preserved_plans
     selection_fields = current_find_selection_fields(
         ideas,
         plans,
@@ -6285,9 +6560,7 @@ def write_current_find_structured_artifacts(
         },
         **selection_fields,
     }
-    idea_payload = load_json(taste_dir / "ideas.json", {})
-    if not isinstance(idea_payload, dict):
-        idea_payload = {}
+    idea_payload = existing_idea_payload if isinstance(existing_idea_payload, dict) else {}
     idea_payload.update({
         "run_id": run_id,
         "source": CLAUDE_TAKEOVER_SOURCE,
@@ -6296,9 +6569,7 @@ def write_current_find_structured_artifacts(
         "ideas": ideas,
         **selection_fields,
     })
-    plan_payload = load_json(taste_dir / "plans.json", {})
-    if not isinstance(plan_payload, dict):
-        plan_payload = {}
+    plan_payload = existing_plan_payload if isinstance(existing_plan_payload, dict) else {}
     plan_payload.update({
         "run_id": run_id,
         "source": CLAUDE_TAKEOVER_SOURCE,
@@ -6557,7 +6828,31 @@ def main() -> int:
             update_literature_packet(paths, run_id, existing_readings, existing_ideas, existing_plans)
             update_frontend_state(paths, run_id, existing_readings, existing_ideas, existing_plans)
             ready_now = _current_find_contract_ready(existing_readings, existing_ideas, existing_plans, targeted_queries, positive_validation, run_id, min_required_readings, args.idea_count, find_revision)
-            print(json.dumps({"status": payload.get("status"), "source": payload.get("source"), "run_id": run_id, "readings": len(existing_readings), "ideas": len(existing_ideas), "plans": len(existing_plans), "targeted_search_queries": len(targeted_queries), "reading_validation": {"valid": positive_validation.get("valid"), "full_text_reading_count": positive_validation.get("full_text_reading_count"), "pending_full_text_reading_count": positive_validation.get("pending_full_text_reading_count")}, "validated_against_current_find": True, "public_projection": "refreshed"}, ensure_ascii=False, indent=2))
+            selection_receipt = None
+            if ready_now:
+                selection_receipt = sync_current_find_selection_success_receipt(
+                    paths,
+                    run_id,
+                    takeover,
+                    existing_ideas,
+                    existing_plans,
+                    positive_validation,
+                    reason="valid_artifacts_ready",
+                )
+                save_json(paths.state / "current_find_claude_takeover_result.json", {
+                    **takeover,
+                    "status": "already_current_valid_claude_artifacts",
+                    "run_id": run_id,
+                    "return_code": takeover.get("return_code", 0),
+                    "contract_validation_valid": True,
+                    "contract_failure": None,
+                    "reading_validation": positive_validation,
+                    "selected_execution": (selection_receipt if isinstance(selection_receipt, dict) else {}).get("selected_execution", {}),
+                    "selected_plan_id": (selection_receipt if isinstance(selection_receipt, dict) else {}).get("selected_plan_id"),
+                    "selected_idea_id": (selection_receipt if isinstance(selection_receipt, dict) else {}).get("selected_idea_id"),
+                    "validated_at": now_iso(),
+                })
+            print(json.dumps({"status": payload.get("status"), "source": payload.get("source"), "run_id": run_id, "readings": len(existing_readings), "ideas": len(existing_ideas), "plans": len(existing_plans), "targeted_search_queries": len(targeted_queries), "reading_validation": {"valid": positive_validation.get("valid"), "full_text_reading_count": positive_validation.get("full_text_reading_count"), "pending_full_text_reading_count": positive_validation.get("pending_full_text_reading_count")}, "claude_selection": selection_receipt, "validated_against_current_find": True, "public_projection": "refreshed"}, ensure_ascii=False, indent=2))
             return 0 if ready_now else 2
         if args.force_selection:
             latest_takeover = load_json(paths.state / "current_find_claude_takeover_result.json", {})

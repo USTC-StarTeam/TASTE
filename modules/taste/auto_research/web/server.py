@@ -248,6 +248,7 @@ def _current_project_research_preferences() -> dict[str, str]:
     return {
         "research_interest": str(project_config.get("research_interest") or ""),
         "researcher_profile": str(project_config.get("researcher_profile") or ""),
+        "topic": str(project_config.get("topic") or ""),
     }
 
 
@@ -262,6 +263,11 @@ def _config_with_project_research_preferences(config: AppConfig, provided_fields
         project_value = str(project_prefs.get(key) or "").strip()
         if not current and project_value:
             updates[key] = project_value
+    effective_interest = str(updates.get("research_interest") or getattr(config, "research_interest", "") or "").strip()
+    effective_profile = str(updates.get("researcher_profile") or getattr(config, "researcher_profile", "") or "").strip()
+    project_topic = str(project_prefs.get("topic") or "").strip()
+    if not effective_interest and not effective_profile and project_topic:
+        updates["research_interest"] = project_topic
     return config.model_copy(update=updates) if updates else config
 
 
@@ -5767,18 +5773,25 @@ def _current_stage(full_cycle: dict[str, Any], log_path: str = "") -> tuple[str,
     return phase, line_value, tail, raw_stage
 
 
-def _latest_find_run_id_from_runs(project_root: Path | None = None) -> str:
+def _latest_find_run_id_from_runs(project_root: Path | None = None, *, prefer_run_dir: bool = False) -> str:
+    def latest_run_dir_id() -> str:
+        try:
+            candidates = [path for path in RUNS_DIR.glob("find_*") if path.is_dir()]
+        except Exception:
+            return ""
+        if not candidates:
+            return ""
+        return sorted(candidates, key=lambda path: path.name)[-1].name
+
+    if prefer_run_dir:
+        latest = latest_run_dir_id()
+        if latest:
+            return latest
     if project_root is not None:
         current = _project_current_find_run_id(project_root)
         if current:
             return current
-    try:
-        candidates = [path for path in RUNS_DIR.glob("find_*") if path.is_dir()]
-    except Exception:
-        return ""
-    if not candidates:
-        return ""
-    return sorted(candidates, key=lambda path: path.name)[-1].name
+    return latest_run_dir_id()
 
 
 def _active_project_worker_job(project: str, root: Path, worker: dict[str, Any], full_cycle: dict[str, Any], current_plan: dict[str, Any], find_progress: dict[str, Any], *, compact: bool = True, controller_alive: bool = False) -> dict[str, Any]:
@@ -6034,7 +6047,7 @@ def _live_jobs_from_projects(*, compact: bool = True) -> list[dict[str, Any]]:
         elapsed = str(ps_row.get("elapsed") or full_job.get("elapsed") or full_job.get("elapsed_sec") or "")
         run_id = ""
         if fresh_find_running or phase == "literature":
-            run_id = _latest_find_run_id_from_runs(root)
+            run_id = _latest_find_run_id_from_runs(root, prefer_run_dir=True)
         if not run_id:
             # The taskbar should point at the current project Find packet. Older
             # full-cycle snapshots and selected-base provenance may mention the

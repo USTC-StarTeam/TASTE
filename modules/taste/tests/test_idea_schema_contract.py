@@ -1898,18 +1898,17 @@ def test_claude_takeover_restores_artifacts_after_tool_policy_or_parse_failure(t
     (taste_dir / "read.md").write_text("old read", encoding="utf-8")
     paths = type("Paths", (), {"planning": project_root / "planning", "state": state_dir})()
 
-    class FakeProc:
-        returncode = 3
-        stdout = "blocked by tool policy"
-        stderr = ""
-
-    def fake_run(*_args, **_kwargs):
+    def fake_run_streaming(*_args, **kwargs):
+        stdout_path = kwargs.get("stdout_path")
+        if stdout_path:
+            stdout_path.write_text("blocked by tool policy\n", encoding="utf-8")
         (taste_dir / "read_results.json").write_text('{"run_id": "find_demo_transaction_restore", "source": "claude_code_current_find_takeover", "readings": [', encoding="utf-8")
         ensure_current_find_research_plan.save_json(
             state_dir / "claude_project_session_last_result.json",
             {
                 "status": "blocked_tool_policy",
                 "return_code": 3,
+                "stdout": "blocked by tool policy",
                 "tool_policy_guard": {
                     "status": "blocked",
                     "policy_type": "current_find_artifact_writer",
@@ -1917,9 +1916,18 @@ def test_claude_takeover_restores_artifacts_after_tool_policy_or_parse_failure(t
                 },
             },
         )
-        return FakeProc()
+        return {
+            "status": "failed",
+            "return_code": 3,
+            "stop_reason": "",
+            "stdout_tail": "blocked by tool policy",
+            "stdout_path": str(stdout_path or ""),
+            "stdout_chcount": len("blocked by tool policy\n"),
+            "stderr_tail": "",
+            "no_progress_timeout_sec": 300,
+        }
 
-    monkeypatch.setattr(ensure_current_find_research_plan.subprocess, "run", fake_run)
+    monkeypatch.setattr(ensure_current_find_research_plan, "_run_claude_session_streaming", fake_run_streaming)
     monkeypatch.setattr(ensure_current_find_research_plan, "_claude_takeover_timeout", lambda: 10)
 
     result = ensure_current_find_research_plan.run_claude_current_find_takeover(

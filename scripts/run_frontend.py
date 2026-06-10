@@ -1025,7 +1025,6 @@ def main() -> int:
         os.environ.setdefault("DETAIL_FETCH_COUNT", "800")
         os.environ.setdefault("MIN_TITLE_CANDIDATES", "240")
         os.environ.setdefault("MIN_DETAIL_CANDIDATES", "80")
-        os.environ.setdefault("STRONG_RECOMMENDATION_MAX_COUNT", "50")
         os.environ.setdefault("ABSTRACT_SCORING_BATCH_SIZE", "10")
         os.environ.setdefault("ABSTRACT_SCORING_MAX_BATCH_SIZE", "10")
         os.environ.setdefault("ABSTRACT_SCORING_MAX_TOKENS", "12000")

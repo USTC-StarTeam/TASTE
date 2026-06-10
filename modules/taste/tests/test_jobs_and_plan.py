@@ -222,6 +222,16 @@ def test_final_recommendation_target_respects_configured_top_n():
     assert find_pipeline._strong_recommendation_target_count(config, source_count=4) == 4
 
 
+def test_final_recommendation_max_count_never_expands_visible_target(monkeypatch):
+    from auto_research.auto_find import pipeline as find_pipeline
+
+    monkeypatch.setenv("STRONG_RECOMMENDATION_MAX_COUNT", "50")
+    config = AppConfig(max_recommended_papers=20)
+
+    assert find_pipeline._strong_recommendation_target_count(config, source_count=5) == 20
+    assert find_pipeline._strong_recommendation_output_count(config, source_count=5) == 20
+
+
 def test_arxiv_empty_date_window_defaults_to_recent_half_year():
     from auto_research.auto_find import sources
 
@@ -289,6 +299,23 @@ def test_find_request_preserves_explicit_empty_research_profile(tmp_path, monkey
     cfg = server._request_config_with_persisted_secrets(AppConfig(research_interest="", researcher_profile="", provider="mock", model="mock"))
 
     assert cfg.research_interest == ""
+    assert cfg.researcher_profile == ""
+
+
+def test_find_request_uses_project_topic_when_web_config_has_empty_profile(tmp_path, monkeypatch):
+    project_root = tmp_path / "projects" / "demo_project"
+    project_root.mkdir(parents=True)
+    project_path = project_root / "project.json"
+    write_json(project_path, {"name": "demo_project", "topic": "adaptive retrieval benchmark"})
+    config_path = tmp_path / "runtime" / ".config.json"
+    config_path.parent.mkdir(parents=True)
+    write_json(config_path, {"provider": "mock", "model": "mock", "api_key": ""})
+    monkeypatch.setattr(server, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(server, "project_config_path", lambda: project_path)
+
+    cfg = server._request_config_with_persisted_secrets(AppConfig(research_interest="", researcher_profile="", provider="mock", model="mock"))
+
+    assert cfg.research_interest == "adaptive retrieval benchmark"
     assert cfg.researcher_profile == ""
 
 
@@ -644,6 +671,151 @@ def test_ensure_claude_plan_state_respects_configured_idea_count(tmp_path, monke
     assert payload["current_find_idea_count"] == 2
     assert payload["selected_plan_id"] == "plan-1"
     assert not payload.get("idea_contract_issues")
+
+
+def test_structured_artifacts_preserve_same_run_claude_ideas_when_refresh_is_empty(tmp_path, monkeypatch):
+    import importlib.util
+    from types import SimpleNamespace
+
+    module_path = Path(__file__).resolve().parents[3] / "scripts" / "ensure_current_find_research_plan.py"
+    spec = importlib.util.spec_from_file_location("ensure_current_find_research_plan_test_preserve", module_path)
+    ensure_plan = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(ensure_plan)
+
+    paths = SimpleNamespace(root=tmp_path, state=tmp_path / "state", planning=tmp_path / "planning")
+    finding = paths.planning / "finding"
+    finding.mkdir(parents=True)
+    paths.state.mkdir(parents=True)
+    run_id = "find_demo"
+
+    def idea(idx: int) -> dict:
+        return {
+            "id": f"idea-{idx}",
+            "title": f"Idea {idx}",
+            "new_method": "specific current-find method " * 4,
+            "initial_experiment": "specific minimum experiment " * 4,
+            "inspired_by": [{"title": "Paper 1", "inspiration": "method"}],
+            "supporting_papers": [{"title": "Paper 1"}],
+            "objective_scores": {key: 7.5 for key in ensure_plan.IDEA_OBJECTIVE_SCORE_KEYS},
+            "score": 7.5,
+            "idea_score": 7.5,
+            "idea_score_audit": {"mode": "task_subagent", "subagent_used": True, "status": "completed"},
+        }
+
+    ideas = [idea(1), idea(2)]
+    plans = [
+        {"plan_id": "plan-1", "idea_id": "idea-1", "title": "Plan 1", "steps": ["specific step"], "selected_for_execution": True, "execute_next": True, "execution_selection": {"selected": True, "selected_by": "main_claude_code_after_deep_read", "reason": "best"}},
+        {"plan_id": "plan-2", "idea_id": "idea-2", "title": "Plan 2", "steps": ["specific step"], "selected_for_execution": False, "execute_next": False, "execution_selection": {"selected": False, "selected_by": "not_selected_candidate_backlog", "reason": "backlog"}},
+    ]
+    write_json(finding / "ideas.json", {"run_id": run_id, "source": ensure_plan.CLAUDE_TAKEOVER_SOURCE, "ideas": ideas})
+    write_json(finding / "plans.json", {"run_id": run_id, "source": ensure_plan.CLAUDE_TAKEOVER_SOURCE, "plans": plans})
+
+    ensure_plan.write_current_find_structured_artifacts(
+        paths,
+        finding,
+        run_id,
+        readings=[{"title": "Paper 1"}],
+        ideas=[],
+        plans=[],
+        takeover={"status": "completed", "return_code": 0},
+        validation={"valid": True},
+    )
+
+    preserved_ideas = read_json(finding / "ideas.json")["ideas"]
+    preserved_plans = read_json(finding / "plans.json")["plans"]
+    assert len(preserved_ideas) == 2
+    assert len(preserved_plans) == 2
+    assert read_json(finding / "plans.json")["selected_plan_id"] == "plan-1"
+
+
+def test_repair_accepts_find_current_artifacts_even_when_before_repair_start(tmp_path, monkeypatch):
+    import importlib.util
+    from types import SimpleNamespace
+
+    module_path = Path(__file__).resolve().parents[3] / "scripts" / "ensure_current_find_research_plan.py"
+    spec = importlib.util.spec_from_file_location("ensure_current_find_research_plan_test_repair_current", module_path)
+    ensure_plan = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(ensure_plan)
+
+    paths = SimpleNamespace(root=tmp_path, state=tmp_path / "state", planning=tmp_path / "planning")
+    finding = paths.planning / "finding"
+    finding.mkdir(parents=True)
+    paths.state.mkdir(parents=True)
+    run_id = "find_demo"
+    find_revision = ensure_plan.parse_iso_time("2026-06-10T21:17:00+00:00")
+    artifact_time = "2026-06-10T21:37:00+00:00"
+
+    def idea(idx: int) -> dict:
+        return {
+            "id": f"idea-{idx}",
+            "title": f"Idea {idx}",
+            "new_method": "specific current-find method " * 4,
+            "initial_experiment": "specific minimum experiment " * 4,
+            "inspired_by": [{"title": "Paper 1", "inspiration": "method"}],
+            "supporting_papers": [{"title": "Paper 1"}],
+            "objective_scores": {key: 7.5 for key in ensure_plan.IDEA_OBJECTIVE_SCORE_KEYS},
+            "score": 7.5,
+            "idea_score": 7.5,
+            "idea_score_audit": {"mode": "task_subagent", "subagent_used": True, "status": "completed"},
+        }
+
+    readings = [{"title": "Paper 1"}, {"title": "Paper 2"}]
+    ideas = [idea(1), idea(2)]
+    plans = [
+        {"plan_id": "plan-1", "idea_id": "idea-1", "title": "Plan 1", "steps": ["specific step"], "selected_for_execution": True, "execute_next": True, "execution_selection": {"selected": True, "selected_by": "main_claude_code_after_deep_read", "reason": "best"}},
+        {"plan_id": "plan-2", "idea_id": "idea-2", "title": "Plan 2", "steps": ["specific step"], "selected_for_execution": False, "execute_next": False, "execution_selection": {"selected": False, "selected_by": "not_selected_candidate_backlog", "reason": "backlog"}},
+    ]
+    validation = {
+        "run_id": run_id,
+        "valid": True,
+        "policy_version": ensure_plan.FULL_TEXT_READ_POLICY_VERSION,
+        "generated_at": artifact_time,
+        "actual_reading_count": 2,
+        "full_text_reading_count": 2,
+        "pending_full_text_reading_count": 0,
+        "blockers": [],
+    }
+    write_json(finding / "ideas.json", {"run_id": run_id, "source": ensure_plan.CLAUDE_TAKEOVER_SOURCE, "generated_at": artifact_time, "ideas": ideas})
+    write_json(finding / "plans.json", {"run_id": run_id, "source": ensure_plan.CLAUDE_TAKEOVER_SOURCE, "generated_at": artifact_time, "plans": plans})
+    write_json(finding / "read_results.json", {"run_id": run_id, "source": ensure_plan.CLAUDE_TAKEOVER_SOURCE, "generated_at": artifact_time, "readings": readings})
+
+    def fail_takeover(*_args, **_kwargs):
+        raise AssertionError("valid same-run artifacts should not trigger another repair")
+
+    monkeypatch.setattr(ensure_plan, "run_claude_current_find_takeover", fail_takeover)
+    takeover = {
+        "status": "completed",
+        "return_code": 0,
+        "started_at": "2026-06-10T21:42:00+00:00",
+        "finished_at": "2026-06-10T21:46:00+00:00",
+        "prompt_path": "prompt.md",
+    }
+
+    result = ensure_plan.maybe_repair_current_find_takeover(
+        "demo_project",
+        paths,
+        finding,
+        run_id,
+        {"run_id": run_id, "strong_recommendations": [{"title": "Paper 1"}, {"title": "Paper 2"}]},
+        takeover,
+        readings,
+        ideas,
+        plans,
+        ["query one", "query two", "query three"],
+        validation,
+        effective_read_limit=2,
+        min_required_readings=2,
+        idea_count=2,
+        find_revision=find_revision,
+    )
+
+    updated_takeover, _readings, updated_ideas, updated_plans, _queries, _validation, changed_run = result
+    assert changed_run == ""
+    assert updated_takeover["contract_validation_valid"] is True
+    assert len(updated_ideas) == 2
+    assert len(updated_plans) == 2
 
 
 def test_compact_read_job_result_does_not_project_paper_status(monkeypatch):
@@ -1148,6 +1320,24 @@ def test_create_project_cli_preserves_prompt_and_conda_env(tmp_path, monkeypatch
     activate_text = activate.read_text(encoding="utf-8")
     assert 'ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"' in activate_text
     assert 'exec "$ROOT/scripts/run_in_conda.sh" "demo_project" "$@"' in activate_text
+
+
+
+def test_running_fresh_find_prefers_latest_runtime_run_id(tmp_path, monkeypatch):
+    from auto_research.web import server
+
+    runs = tmp_path / "runtime" / "runs"
+    (runs / "find_20260610_100000_000000").mkdir(parents=True)
+    (runs / "find_20260610_110000_000000").mkdir(parents=True)
+    project_root = tmp_path / "projects" / "demo_project"
+    state = project_root / "state"
+    state.mkdir(parents=True)
+    write_json(state / "finding_frontend.json", {"run_id": "find_20260610_100000_000000"})
+
+    monkeypatch.setattr(server, "RUNS_DIR", runs)
+
+    assert server._latest_find_run_id_from_runs(project_root) == "find_20260610_100000_000000"
+    assert server._latest_find_run_id_from_runs(project_root, prefer_run_dir=True) == "find_20260610_110000_000000"
 
 
 def test_compact_job_list_hides_raw_historical_command():

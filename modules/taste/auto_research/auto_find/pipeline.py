@@ -4102,24 +4102,32 @@ def _selection_source_count(selection: object) -> int:
             count += 1
     return max(1, count)
 
+def _strong_recommendation_count_cap(target: int, source_count: int | None = None) -> int:
+    limits = [max(1, int(target or 1))]
+    configured_max = int(os.environ.get("STRONG_RECOMMENDATION_MAX_COUNT", "0") or 0)
+    if configured_max > 0:
+        limits.append(configured_max)
+    if source_count is not None:
+        limits.append(max(1, int(source_count or 1)) * 5)
+    return max(1, min(limits))
+
+
 def _strong_recommendation_target_count(config: AppConfig, source_count: int | None = None) -> int:
     configured_target = int(os.environ.get("STRONG_RECOMMENDATION_TARGET_COUNT", "0") or 0)
     if configured_target > 0:
-        return configured_target
+        return _strong_recommendation_count_cap(configured_target, source_count)
     requested = int(getattr(config, "max_recommended_papers", 0) or 0)
     if requested > 0:
-        return requested
+        return _strong_recommendation_count_cap(requested, source_count)
     if source_count is not None:
-        return max(1, int(source_count or 1)) * 5
+        return _strong_recommendation_count_cap(max(1, int(source_count or 1)) * 5, source_count)
     source_hint = _source_count_hint(config.default_find_selection or {})
     if source_hint > 0:
-        return source_hint * 5
-    return 20
+        return _strong_recommendation_count_cap(source_hint * 5, source_hint)
+    return _strong_recommendation_count_cap(20)
 
 def _strong_recommendation_output_count(config: AppConfig, source_count: int | None = None) -> int:
-    target = _strong_recommendation_target_count(config, source_count)
-    configured_max = int(os.environ.get("STRONG_RECOMMENDATION_MAX_COUNT", "0") or 0)
-    return max(target, configured_max) if configured_max > 0 else target
+    return _strong_recommendation_target_count(config, source_count)
 
 
 def _recommended(items: list[dict], config: AppConfig, source_count: int | None = None) -> list[dict]:
