@@ -3504,6 +3504,34 @@ def _ps_row_for_pid(pid: Any) -> dict[str, Any]:
 
 
 
+def _suppress_same_phase_descendant_workers(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep one taskbar row for a stage wrapper and fold its children into logs.
+
+    A standalone environment/experiment/paper launch often starts a Python
+    wrapper which then spawns selector/probe/Claude child processes. Showing each
+    child as another project-worker makes the UI look like duplicate launches.
+    """
+    by_pid = {str(row.get('pid') or ''): row for row in rows if isinstance(row, dict) and str(row.get('pid') or '')}
+
+    def has_same_phase_ancestor(row: dict[str, Any]) -> bool:
+        phase = str(row.get('phase') or '').strip().lower()
+        current = str(row.get('ppid') or '').strip()
+        seen: set[str] = set()
+        while current and current not in seen:
+            seen.add(current)
+            parent = by_pid.get(current)
+            if not parent:
+                return False
+            parent_phase = str(parent.get('phase') or '').strip().lower()
+            parent_kind = str(parent.get('kind') or '').strip().lower()
+            if phase and parent_phase == phase and parent_kind != 'full_cycle':
+                return True
+            current = str(parent.get('ppid') or '').strip()
+        return False
+
+    return [row for row in rows if isinstance(row, dict) and not has_same_phase_ancestor(row)]
+
+
 def _active_project_child_processes(project: str, root: Path, phase_hint: str = "") -> list[dict[str, Any]]:
     markers = [str(project), str(root), str(root / "tmp" / "finding")]
     try:
@@ -3580,6 +3608,7 @@ def _active_project_child_processes(project: str, root: Path, phase_hint: str = 
         if not kind:
             continue
         rows.append({"pid": proc_row.get("pid"), "ppid": proc_row.get("ppid"), "stat": proc_row.get("stat"), "elapsed": proc_row.get("elapsed"), "pcpu": proc_row.get("pcpu"), "pmem": proc_row.get("pmem"), "cmd": cmd, "cwd": cwd, "kind": kind, "phase": phase, "priority": priority})
+    rows = _suppress_same_phase_descendant_workers(rows)
     target_phase = str(phase_hint or "").strip().lower()
     if target_phase:
         phase_rows = [row for row in rows if str(row.get("phase") or "").strip().lower() == target_phase]
@@ -7493,6 +7522,46 @@ def _safe_project_root(project: str) -> Path:
     return root
 
 
+PROJECT_STAGE_EXCLUSIVE_ACTIONS = {"environment", "experiment", "paper", "full-cycle", "full_research_cycle", "autonomous"}
+PROJECT_STAGE_EXCLUSIVE_PHASES = {"environment", "experiment", "paper"}
+
+
+def _project_stage_running_blocker(payload: dict[str, Any], stage: str) -> dict[str, Any] | None:
+    stage_key = str(stage or "").strip().lower()
+    if stage_key not in PROJECT_STAGE_EXCLUSIVE_ACTIONS:
+        return None
+    project = str(payload.get("project") or "").strip()
+    if not project:
+        return None
+    try:
+        root = _safe_project_root(project)
+    except ValueError:
+        return None
+    workers = [
+        row for row in _active_project_child_processes(project, root, phase_hint=stage_key)
+        if str(row.get("phase") or "").strip().lower() in PROJECT_STAGE_EXCLUSIVE_PHASES
+    ]
+    if not workers:
+        return None
+    worker = workers[0]
+    return {
+        "error": "project_stage_already_running",
+        "status": "blocked_existing_project_stage_running",
+        "project": project,
+        "action": str(payload.get("action") or stage_key),
+        "stage": stage_key,
+        "message": "A project environment/experiment/paper stage worker is already running; duplicate launch is blocked.",
+        "message_zh": "当前项目已有环境/实验/论文阶段任务正在运行；已阻止重复启动。",
+        "existing_worker": {
+            "pid": worker.get("pid"),
+            "phase": worker.get("phase"),
+            "kind": worker.get("kind"),
+            "elapsed": worker.get("elapsed"),
+            "cmd": worker.get("cmd"),
+        },
+    }
+
+
 def _claude_json_result_from_text(text: Any) -> str:
     raw = str(text or "").strip()
     if not raw:
@@ -7811,6 +7880,9 @@ def api_job(payload: dict[str, Any]) -> dict:
     if blocker:
         return JSONResponse(status_code=409, content=blocker)
     stage = job_stage(payload)
+    stage_blocker = _project_stage_running_blocker(payload, stage)
+    if stage_blocker:
+        return JSONResponse(status_code=409, content=stage_blocker)
     job_id = f"{stage}_{uuid4().hex[:10]}"
     payload_with_job = {**payload, "web_job_id": job_id}
     job = start_job(stage, lambda log, should_cancel, progress: run_action(payload_with_job, log, should_cancel, progress), job_id=job_id)
@@ -7931,6 +8003,25 @@ def api_jobs(
             if not (
                 str((item.get("result") if isinstance(item.get("result"), dict) else {}).get("project") or "") in active_current_find_projects
                 and str((item.get("result") if isinstance(item.get("result"), dict) else {}).get("kind") or "") in {"current_find_claude_read_idea_plan", "current_find_claude_session", "current_find_claude_child"}
+            )
+        ]
+    current_project_context = _current_project_for_find_guard()
+    current_project_id = current_project_context[0] if current_project_context else ""
+    exclusive_stage_jobs = {
+        (
+            str((item.get("result") if isinstance(item.get("result"), dict) else {}).get("project") or _project_from_job_payload(item.get("job_id"), item) or current_project_id),
+            str(item.get("stage") or "").strip().lower(),
+        )
+        for item in persisted
+        if str(item.get("stage") or "").strip().lower() in PROJECT_STAGE_EXCLUSIVE_PHASES
+        and str(item.get("status") or "").strip().lower() in {"queued", "running", "cancelling"}
+    }
+    if exclusive_stage_jobs:
+        dynamic = [
+            item for item in dynamic
+            if not (
+                (str((item.get("result") if isinstance(item.get("result"), dict) else {}).get("project") or ""), str(item.get("stage") or "").strip().lower()) in exclusive_stage_jobs
+                and str(item.get("job_id") or "").startswith(("project-worker_", "experiment-worker_"))
             )
         ]
     dynamic_ids = {str(item.get("job_id") or "") for item in dynamic}

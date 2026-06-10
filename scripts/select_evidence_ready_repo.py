@@ -10,6 +10,7 @@ import shutil
 import signal
 import tarfile
 import tempfile
+import time
 import urllib.request
 import shlex
 import subprocess
@@ -130,8 +131,20 @@ def github_archive_fallback(url: str, target: Path, timeout: int) -> dict[str, A
         archive_path = target.parent / f'.{target.name}.{branch}.tar.gz'
         try:
             req = urllib.request.Request(archive_url, headers={'User-Agent': 'TASTE-FreshBaseRepoAudit/0.1'})
-            with urllib.request.urlopen(req, timeout=timeout) as response:
-                archive_path.write_bytes(response.read())
+            deadline = time.monotonic() + max(5, timeout)
+            max_bytes = int(os.environ.get('REPO_ARCHIVE_MAX_BYTES', str(80 * 1024 * 1024)) or str(80 * 1024 * 1024))
+            total = 0
+            with urllib.request.urlopen(req, timeout=timeout) as response, archive_path.open('wb') as handle:
+                while True:
+                    if time.monotonic() > deadline:
+                        raise TimeoutError(f'archive download exceeded {timeout}s')
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise RuntimeError(f'archive download exceeded {max_bytes} bytes')
+                    handle.write(chunk)
             extracted = safe_extract_tar(archive_path, target.parent)
             archive_path.unlink(missing_ok=True)
             if extracted and extracted.exists():
@@ -160,6 +173,12 @@ def clone_or_reuse(paths, row: dict[str, Any]) -> tuple[Path | None, dict[str, A
     if target.exists() and (target / '.git').exists():
         return target.resolve(), {'status': 'reused_existing_clone', 'path': str(target)}
     if target.exists():
+        try:
+            has_files = any(child.name != '.git' for child in target.iterdir())
+        except Exception:
+            has_files = False
+        if has_files:
+            return target.resolve(), {'status': 'reused_existing_archive', 'path': str(target)}
         shutil.rmtree(target, ignore_errors=True)
     clone_timeout = int(os.environ.get('REPO_CLONE_TIMEOUT_SEC', '45'))
     proc = run([
@@ -557,25 +576,21 @@ def run_claude_review(project: str, payload: dict[str, Any], timeout_sec: int = 
         json.dumps(compact, ensure_ascii=False, indent=2)
     )
     prompt_path.write_text(prompt, encoding='utf-8')
-    claude_cmd = shlex.quote(claude) if '/' in claude else claude
-    # Wrap Claude in GNU timeout and stdin redirection. Some Claude Code builds emit the answer
-    # but keep the process alive; timeout makes review optional rather than a pipeline blocker.
-    prompt_arg = shlex.quote(str(prompt_path))
     soft_timeout = max(30, min(int(timeout_sec), 180))
-    shell_cmd = (
-        f"timeout {soft_timeout}s {claude_cmd} -p --permission-mode bypassPermissions --output-format text < {prompt_arg}"
-    )
-    proc = subprocess.run(
-        ['bash', '-c', shell_cmd],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        timeout=soft_timeout + 15,
-        env=env,
-    )
-    if proc.returncode == 124 and proc.stdout:
-        # Claude produced a usable review before timeout killed a lingering process.
-        proc.returncode = 0
+    cmd = [claude, '-p', '--tools', '', '--permission-mode', 'default', '--system-prompt', 'You are a read-only repo/data reviewer. Do not use tools, subagents, XML, or Markdown task tags. Do not edit files. Base your answer only on the prompt text and return a concise review.', '--output-format', 'text']
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=ROOT,
+            input=prompt_path.read_text(encoding='utf-8'),
+            text=True,
+            capture_output=True,
+            timeout=soft_timeout + 15,
+            env=env,
+            start_new_session=True,
+        )
+    except subprocess.TimeoutExpired as exc:
+        proc = subprocess.CompletedProcess(cmd, 124, exc.stdout or '', exc.stderr or '')
     output = proc.stdout or proc.stderr or ''
     if proc.returncode != 0 and ('not logged in' in output.lower() or 'login' in output.lower()):
         output = output + '\n\nTASTE note: Claude Code review is unavailable because the CLI is not logged in in this shell. Evidence gates still rely on local loader probes and will not fabricate results.\n'
@@ -597,8 +612,30 @@ def run_claude_topic_decision(project: str, payload: dict[str, Any], timeout_sec
     decision_path = paths.reports / 'repo_topic_fit_decision.json'
     prompt_path = paths.reports / 'repo_topic_fit_decision_prompt.txt'
     compact = compact_review_payload(payload)
+    find_results = load_json(paths.planning / 'finding' / 'find_results.json', {})
+    profile = find_results.get('stage0_profile', {}).get('profile', {}) if isinstance(find_results, dict) else {}
+    explicit_profile = profile.get('explicit_profile', {}) if isinstance(profile, dict) else {}
+    retrieval_text = str((find_results.get('stage0_profile', {}) if isinstance(find_results, dict) else {}).get('retrieval_text') or '').strip()
+    current_find_summary = str(explicit_profile.get('research_interest_summary') or '').strip()
+    if not current_find_summary and retrieval_text:
+        current_find_summary = retrieval_text.splitlines()[0].strip()
+    plans_payload = load_json(paths.planning / 'finding' / 'plans.json', {})
+    plan_rows = plans_payload.get('plans', []) if isinstance(plans_payload, dict) else []
+    selected_plan = next((row for row in plan_rows if isinstance(row, dict) and (row.get('selected_for_execution') or row.get('execute_next') or (isinstance(row.get('execution_selection'), dict) and row['execution_selection'].get('selected')))), {})
+    recommended_titles = [str(row.get('title') or '').strip() for row in (find_results.get('recommended_papers') or find_results.get('papers') or []) if isinstance(row, dict) and str(row.get('title') or '').strip()]
+    configured_topic = str(cfg.get('topic') or '').strip()
+    topic_slug = re.sub(r'[^a-z0-9]+', '', configured_topic.lower())
+    project_slug = re.sub(r'[^a-z0-9]+', '', project.lower())
+    placeholder_topic = (not configured_topic) or (topic_slug and topic_slug == project_slug)
+    effective_topic = current_find_summary if placeholder_topic and current_find_summary else configured_topic
     topic_context = {
-        'topic': cfg.get('topic', ''),
+        'topic': effective_topic,
+        'configured_topic': configured_topic,
+        'configured_topic_looks_like_project_id': bool(placeholder_topic),
+        'current_find_research_interest_summary': current_find_summary,
+        'selected_plan_title': selected_plan.get('title', '') if isinstance(selected_plan, dict) else '',
+        'selected_plan_id': selected_plan.get('plan_id', '') if isinstance(selected_plan, dict) else '',
+        'recommended_paper_titles': recommended_titles[:6],
         'user_prompt': cfg.get('user_prompt', ''),
         'researcher_profile': cfg.get('researcher_profile', ''),
         'project': project,
@@ -622,16 +659,21 @@ def run_claude_topic_decision(project: str, payload: dict[str, Any], timeout_sec
         'Repo/data audit:\n' + json.dumps(compact, ensure_ascii=False, indent=2)
     )
     prompt_path.write_text(prompt, encoding='utf-8')
-    claude_cmd = shlex.quote(claude) if '/' in claude else claude
-    prompt_arg = shlex.quote(str(prompt_path))
     soft_timeout = max(30, min(int(timeout_sec), 180))
-    shell_cmd = (
-        f"timeout {soft_timeout}s {claude_cmd} -p --permission-mode bypassPermissions --output-format text < {prompt_arg}"
-    )
+    cmd = [claude, '-p', '--tools', '', '--permission-mode', 'default', '--system-prompt', 'You are a JSON-only repo-selection classifier. Do not use tools, subagents, XML, or Markdown. Do not edit files. Base your answer only on the prompt text. Return exactly one valid JSON object with the requested keys.', '--output-format', 'text']
     try:
-        proc = subprocess.run(['bash', '-c', shell_cmd], cwd=ROOT, text=True, capture_output=True, timeout=soft_timeout + 15, env=env)
+        proc = subprocess.run(
+            cmd,
+            cwd=ROOT,
+            input=prompt_path.read_text(encoding='utf-8'),
+            text=True,
+            capture_output=True,
+            timeout=soft_timeout + 15,
+            env=env,
+            start_new_session=True,
+        )
     except subprocess.TimeoutExpired as exc:
-        proc = subprocess.CompletedProcess(['bash', '-c', shell_cmd], 124, exc.stdout or '', exc.stderr or '')
+        proc = subprocess.CompletedProcess(cmd, 124, exc.stdout or '', exc.stderr or '')
     output = proc.stdout or proc.stderr or ''
     raw_json = extract_json_object(output)
     if not raw_json:
@@ -749,7 +791,39 @@ def main() -> int:
         other_rows = sorted(other_rows, key=lambda r: (-float(r.get('repo_reuse_score', r.get('score', -999)) or -999), str(r.get('name', ''))))
     candidates = active_rows + other_rows[:max(0, max(1, args.limit) - len(active_rows))]
 
-    def save_selection_progress(status: str, audited_rows: list[dict[str, Any]], ready_rows: list[dict[str, Any]]) -> None:
+    audit_started_at = time.monotonic()
+    total_candidates = len(candidates)
+
+    def save_selection_progress(
+        status: str,
+        audited_rows: list[dict[str, Any]],
+        ready_rows: list[dict[str, Any]],
+        *,
+        row: dict[str, Any] | None = None,
+        index: int = 0,
+        action: str = '',
+    ) -> None:
+        current_candidate: dict[str, Any] = {}
+        if isinstance(row, dict) and row:
+            current_candidate = {
+                'index': index,
+                'total': total_candidates,
+                'name': str(row.get('name') or ''),
+                'url': str(row.get('url') or ''),
+                'source': str(row.get('_source') or row.get('source') or 'candidate_pool'),
+                'fresh_find_run_id': str(row.get('fresh_find_run_id') or ''),
+                'action': action or status,
+            }
+        progress_bits = []
+        if current_candidate:
+            label = current_candidate.get('name') or 'candidate'
+            idx = current_candidate.get('index') or 0
+            total = current_candidate.get('total') or 0
+            progress_bits.append(f"{action or status}: {label} ({idx}/{total})")
+        elif status:
+            progress_bits.append(status)
+        progress_bits.append(f"audited={len(audited_rows)}")
+        progress_bits.append(f"ready={len(ready_rows)}")
         save_json(paths.state / 'evidence_ready_repo_selection.json', {
             'generated_at': dt.datetime.now(dt.timezone.utc).isoformat(),
             'project': args.project,
@@ -760,6 +834,13 @@ def main() -> int:
             'status': status,
             'audited_count': len(audited_rows),
             'evidence_ready_count': len(ready_rows),
+            'candidate_count': total_candidates,
+            'current_candidate_index': index,
+            'current_candidate_total': total_candidates,
+            'current_action': action,
+            'current_candidate': current_candidate,
+            'progress_summary': '; '.join(progress_bits),
+            'elapsed_sec': round(time.monotonic() - audit_started_at, 1),
             'selected': ready_rows[0] if ready_rows else {},
             'audited_candidates': audited_rows,
             'selection_gate': 'auditing_candidates',
@@ -770,7 +851,7 @@ def main() -> int:
     original_req = load_json(paths.state / 'repo_data_requirements.json', {})
     original_probe = load_json(paths.state / 'real_dataset_probe.json', {})
     original_registry = load_json(paths.state / 'dataset_registry.json', [])
-    for row in candidates:
+    for candidate_index, row in enumerate(candidates, start=1):
         item = {
             'name': row.get('name', ''),
             'url': row.get('url', ''),
@@ -782,14 +863,16 @@ def main() -> int:
             'literature_base_rank': row.get('literature_base_rank', ''),
             'metadata_topic_mismatch_allowed': bool(row.get('hard_topic_mismatch') and str(row.get('source') or '') == 'fresh_literature_github_search'),
         }
+        save_selection_progress('cloning_repo_candidate', audited, ready, row=row, index=candidate_index, action='clone')
         repo, clone_info = clone_or_reuse(paths, row)
         item['clone'] = clone_info
         if not repo:
             item['decision'] = 'reject_clone_unavailable'
             audited.append(item)
-            save_selection_progress('running_repo_candidate_audit', audited, ready)
+            save_selection_progress('running_repo_candidate_audit', audited, ready, row=row, index=candidate_index, action='clone_failed')
             continue
         signals = quick_signals(repo)
+        save_selection_progress('probing_repo_dataset', audited, ready, row=row, index=candidate_index, action='probe')
         probe = probe_repo(args.project, repo, env_name, args.timeout_sec)
         claim_ready = [p for p in probe.get('probes', []) if p.get('claim_ready')]
         # Candidate probing updates global probe/registry state; restore after each non-active audit so
@@ -821,7 +904,7 @@ def main() -> int:
         else:
             item['decision'] = 'not_evidence_ready'
         audited.append(item)
-        save_selection_progress('running_repo_candidate_audit', audited, ready)
+        save_selection_progress('running_repo_candidate_audit', audited, ready, row=row, index=candidate_index, action='audited')
 
     ready = sorted(ready, key=lambda x: (-float(x.get('selection_score', 0)), str(x.get('name', ''))))
     selected = ready[0] if ready else {}
@@ -834,6 +917,13 @@ def main() -> int:
         'requirement': 'A selected environment repo must have runnable code signals and at least one real dataset whose repo loader probe succeeds.',
         'audited_count': len(audited),
         'evidence_ready_count': len(ready),
+        'candidate_count': total_candidates,
+        'current_candidate_index': 0,
+        'current_candidate_total': total_candidates,
+        'current_action': 'complete',
+        'current_candidate': {},
+        'progress_summary': f"audit complete; audited={len(audited)}; ready={len(ready)}",
+        'elapsed_sec': round(time.monotonic() - audit_started_at, 1),
         'selected': selected,
         'audited_candidates': audited,
         'guardrails': [
@@ -844,7 +934,9 @@ def main() -> int:
         ],
     }
     if args.use_claude_review:
+        save_selection_progress('running_claude_review', audited, ready, action='claude_review')
         payload['claude_review'] = run_claude_review(args.project, payload)
+        save_selection_progress('running_claude_topic_decision', audited, ready, action='claude_topic_decision')
         topic_decision = run_claude_topic_decision(args.project, payload)
         payload['claude_topic_decision'] = topic_decision
         payload['repo_env_strategy'] = write_repo_env_strategy(
@@ -880,11 +972,22 @@ def main() -> int:
                     pending['selected_by_stage'] = selection_stage
                     pending['pending_reason'] = 'Claude accepted this as the best transformable candidate, but repo/data loader evidence is not claim-ready yet.'
                     payload['pending_environment_candidate'] = pending
-                    payload['selection_gate'] = 'blocked_pending_data_loader_for_claude_best_candidate'
+                    if selection_stage == 'environment_claude_code':
+                        pending['pending_loader_bootstrap'] = True
+                        pending['anchor_selection_policy'] = 'Environment-stage Claude Code selected this transformable base for bootstrap; experiment execution remains blocked until data/loader gates pass.'
+                        selected = pending
+                        payload['selected'] = selected
+                        payload['selection_gate'] = 'accepted_by_claude_transformable_pending_loader_bootstrap'
+                        payload['selection_stage'] = selection_stage
+                        payload['selected_by_stage'] = selection_stage
+                    else:
+                        payload['selection_gate'] = 'blocked_pending_data_loader_for_claude_best_candidate'
+                        payload['selected'] = {}
+                        selected = {}
                 else:
                     payload['selection_gate'] = 'continued_search_required_claude_choice_not_evidence_ready'
-                payload['selected'] = {}
-                selected = {}
+                    payload['selected'] = {}
+                    selected = {}
         elif selected and args.allow_topic_gap_fallback:
             selected['fresh_find_run_id'] = args.fresh_find_run_id or selected.get('fresh_find_run_id', '')
             selected['selection_stage'] = selection_stage or 'local_topic_gap_fallback'
@@ -968,10 +1071,10 @@ def main() -> int:
             'selected_by_stage': payload.get('selected_by_stage', payload.get('selection_stage', '')),
             'anchor_selection_policy': 'Anchor/base accepted only through environment-stage Claude Code with repo/data evidence; Find ranking is not an anchor-selection decision.' if payload.get('selection_stage') == 'environment_claude_code' else 'Local repo/data probe only; not an environment-stage Claude Code anchor decision.',
             'selected_base_title': selected.get('literature_base_title') or active_payload.get('selected_base_title') or '',
-            'selection_bucket': 'claude_transformable_evidence_ready' if selected.get('missing_topic_groups') else 'evidence_ready',
+            'selection_bucket': 'claude_transformable_pending_loader_bootstrap' if selected.get('pending_loader_bootstrap') else 'claude_transformable_evidence_ready' if selected.get('missing_topic_groups') else 'evidence_ready',
             'repo_reuse_score': display_reuse_score,
             'evidence_selection_score': selected.get('selection_score', 0),
-            'repo_execution_ready': True,
+            'repo_execution_ready': bool(selected.get('claim_ready_dataset')),
             'repo_support_signals': [key for key, ok in selected.get('signals', {}).items() if ok is True],
             'claim_ready_dataset': selected.get('claim_ready_dataset', ''),
             'claim_ready_datasets': selected.get('probe_summary', {}).get('claim_ready_datasets', []),

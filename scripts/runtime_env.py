@@ -93,11 +93,17 @@ def update_project_runtime(project: str, patch: dict[str, Any]) -> dict[str, Any
     runtime["bashrc_path"] = ""
     for key in ["nvm_dir", "node_bin", "claude_path", "codex_path", "conda_base", "python_executable", "management_python", "experiment_python"]:
         if key in patch:
-            runtime[key] = str(patch.get(key) or "").strip()
+            value = str(patch.get(key) or "").strip()
+            if value:
+                runtime[key] = value
     if "python_executable" in patch and "management_python" not in patch:
-        runtime["management_python"] = str(patch.get("python_executable") or "").strip()
+        management_value = str(patch.get("python_executable") or "").strip()
+        if management_value:
+            runtime["management_python"] = management_value
     if "conda_env" in patch:
-        cfg["conda_env"] = str(patch.get("conda_env") or "").strip()
+        conda_env_value = str(patch.get("conda_env") or "").strip()
+        if conda_env_value:
+            cfg["conda_env"] = conda_env_value
     if "extra_path" in patch:
         value = patch.get("extra_path")
         if isinstance(value, str):
@@ -152,7 +158,7 @@ def detect_project_runtime(project: str) -> dict[str, Any]:
     conda_base = runtime_conda_base(cfg)
     cfg_for_experiment = dict(cfg)
     cfg_for_experiment["runtime"] = {**(cfg.get("runtime") if isinstance(cfg.get("runtime"), dict) else {}), "conda_base": conda_base}
-    management_python = management_python()
+    management_python_path = management_python()
     experiment_python = project_experiment_python_from_config(cfg_for_experiment)
     patch = {
         "source_bashrc": False,
@@ -162,8 +168,8 @@ def detect_project_runtime(project: str) -> dict[str, Any]:
         "claude_path": find_binary("claude", project, cfg) or shutil.which("claude", path=env.get("PATH", "")) or "",
         "codex_path": find_binary("codex", project, cfg) or shutil.which("codex", path=env.get("PATH", "")) or "",
         "conda_base": conda_base,
-        "management_python": management_python,
-        "python_executable": management_python,
+        "management_python": management_python_path,
+        "python_executable": management_python_path,
         "experiment_python": experiment_python,
     }
     patch = {key: value for key, value in patch.items() if value is not None and value != ""}

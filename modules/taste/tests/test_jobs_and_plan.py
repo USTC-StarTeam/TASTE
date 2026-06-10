@@ -3906,3 +3906,142 @@ def test_claude_experiment_latest_response_keeps_main_as_fallback_only(tmp_path)
     assert status["stage_session_key"] == "main"
     assert status["stage_local"] is False
     assert status["fallback_from_session_key"] == "main"
+
+
+def test_project_search_queries_ignore_project_id_and_use_find_context(tmp_path, monkeypatch):
+    import importlib.util
+    from types import SimpleNamespace
+
+    module_path = Path(__file__).resolve().parents[3] / 'scripts' / 'run_environment_stage.py'
+    spec = importlib.util.spec_from_file_location('run_environment_stage_test', module_path)
+    env_stage = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(env_stage)
+
+    planning = tmp_path / 'planning' / 'finding'
+    reports = tmp_path / 'reports'
+    state = tmp_path / 'state'
+    planning.mkdir(parents=True)
+    reports.mkdir(parents=True)
+    state.mkdir(parents=True)
+    write_json(planning / 'find_results.json', {
+        'stage0_profile': {'profile': {'explicit_profile': {'research_interest_summary': 'evaluate autonomous scientific workflow agents with real benchmark traces'}}},
+        'recommended_papers': [{'title': 'Scientific Agent Evaluation Benchmark'}],
+    })
+    write_json(planning / 'plans.json', {'plans': [{'title': 'Trace-based workflow evaluation', 'selected_for_execution': True}]})
+    write_json(reports / 'repo_topic_fit_decision.json', {
+        'stewardship_memory': "Priority search terms: 'scientific agent evaluation', 'LLM science benchmark'.",
+        'rationale': "If no repo is good enough, say 'needs-more-search'. Current search found 8 candidates, none data-ready.",
+    })
+
+    monkeypatch.setattr(env_stage, 'load_project_config', lambda _project: {'topic': 'taste_smoke_web'})
+    monkeypatch.setattr(env_stage, 'build_paths', lambda _project: SimpleNamespace(planning=tmp_path / 'planning', reports=reports, state=state))
+
+    queries = env_stage.project_search_queries('taste_smoke_web')
+
+    assert 'taste_smoke_web' not in queries
+    assert queries[0] == 'scientific agent evaluation'
+    assert any('autonomous scientific workflow agents' in query for query in queries)
+    assert 'LLM science benchmark' in queries
+    assert all('needs-more-search' not in query.lower() for query in queries)
+    assert all('current search found' not in query.lower() for query in queries)
+    assert all('none data-ready' not in query.lower() for query in queries)
+
+
+def test_same_phase_descendant_workers_are_folded_into_parent_row():
+    rows = [
+        {'pid': '100', 'ppid': '1', 'phase': 'environment', 'kind': 'environment_stage'},
+        {'pid': '101', 'ppid': '100', 'phase': 'environment', 'kind': 'environment_stage'},
+        {'pid': '102', 'ppid': '100', 'phase': 'paper', 'kind': 'paper_pipeline'},
+    ]
+
+    kept = server._suppress_same_phase_descendant_workers(rows)
+
+    assert [row['pid'] for row in kept] == ['100', '102']
+
+
+def test_running_stage_job_hides_synthetic_project_worker(monkeypatch, tmp_path):
+    JOBS.clear()
+    monkeypatch.setattr(server, '_reconcile_detached_launcher_jobs', lambda: None)
+    monkeypatch.setattr(server, '_current_project_for_find_guard', lambda: ('demo_project', tmp_path))
+    monkeypatch.setattr(server, '_live_jobs_from_projects', lambda compact=True: [{
+        'job_id': 'project-worker_demo_project_123',
+        'stage': 'environment',
+        'status': 'running',
+        'created_at': '2026-06-10T00:00:01Z',
+        'logs': [],
+        'result': {'project': 'demo_project', 'pid': '123', 'kind': 'environment_stage', 'phase': 'environment', 'process_alive': True},
+        'progress': {'phase': 'environment', 'current': 0, 'total': 0, 'percent': 0, 'message': 'environment worker running'},
+    }])
+
+    job = server.JobState('environment_real', 'environment')
+    job.status = 'running'
+    job.created_at = '2026-06-10T00:00:02Z'
+    job.result = {}
+    job.progress = {'phase': 'environment', 'current': 1, 'total': 0, 'percent': 0, 'message': 'real environment job'}
+    JOBS[job.job_id] = job
+
+    rows = server.api_jobs(compact=True, limit=10, include_history=False)
+    ids = [row['job_id'] for row in rows]
+
+    assert 'environment_real' in ids
+    assert 'project-worker_demo_project_123' not in ids
+
+
+def test_project_search_queries_extract_unquoted_stewardship_phrases(tmp_path, monkeypatch):
+    import importlib.util
+    from types import SimpleNamespace
+
+    module_path = Path(__file__).resolve().parents[3] / 'scripts' / 'run_environment_stage.py'
+    spec = importlib.util.spec_from_file_location('run_environment_stage_test_unquoted', module_path)
+    env_stage = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(env_stage)
+
+    planning = tmp_path / 'planning' / 'finding'
+    reports = tmp_path / 'reports'
+    state = tmp_path / 'state'
+    planning.mkdir(parents=True)
+    reports.mkdir(parents=True)
+    state.mkdir(parents=True)
+    write_json(planning / 'find_results.json', {'stage0_profile': {'profile': {'explicit_profile': {'research_interest_summary': 'broad project sentence'}}}})
+    write_json(reports / 'repo_topic_fit_decision.json', {
+        'stewardship_memory': 'Search for repositories explicitly related to evaluating autonomous scientific workflow agents, literature discovery, experiment planning, or evidence-grounded paper drafting.'
+    })
+    monkeypatch.setattr(env_stage, 'load_project_config', lambda _project: {'topic': 'taste_smoke_web'})
+    monkeypatch.setattr(env_stage, 'build_paths', lambda _project: SimpleNamespace(planning=tmp_path / 'planning', reports=reports, state=state))
+
+    queries = env_stage.project_search_queries('taste_smoke_web')
+
+    assert queries[:4] == [
+        'autonomous scientific workflow agents',
+        'literature discovery',
+        'experiment planning',
+        'evidence-grounded paper drafting',
+    ]
+
+def test_repo_archive_directory_is_reused_without_redownload(tmp_path, monkeypatch):
+    import importlib.util
+
+    script_path = Path(__file__).resolve().parents[3] / "scripts" / "select_evidence_ready_repo.py"
+    spec = importlib.util.spec_from_file_location("select_evidence_ready_repo_under_test", script_path)
+    selector = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(selector)
+
+    class Paths:
+        repos_selected = tmp_path
+
+    target = tmp_path / "owner_repo"
+    target.mkdir()
+    (target / "README.md").write_text("cached archive", encoding="utf-8")
+
+    def fail_archive(*_args, **_kwargs):
+        raise AssertionError("archive fallback should not run for an existing extracted repo")
+
+    monkeypatch.setattr(selector, "github_archive_fallback", fail_archive)
+
+    repo, info = selector.clone_or_reuse(Paths, {"name": "owner/repo", "url": "https://github.com/owner/repo"})
+
+    assert repo == target.resolve()
+    assert info["status"] == "reused_existing_archive"

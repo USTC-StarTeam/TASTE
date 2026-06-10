@@ -3564,16 +3564,21 @@ function App() {
     }
   }
 
+  function envConfigPatchFromDraft() {
+    const fallback = environmentDraftFromSummary(researchSummary);
+    return {
+      conda_env: researchEnvDraft.conda_env || fallback.conda_env || "",
+      conda_base: researchEnvDraft.conda_base || fallback.conda_base || "",
+      experiment_python: researchEnvDraft.experiment_python || fallback.experiment_python || "",
+    };
+  }
+
   async function saveEnvConfig() {
     if (!researchProject) return;
     try {
       setResearchEnvSaving(true);
       setError("");
-      await saveRuntime(researchProject, {
-        conda_env: researchEnvDraft.conda_env || "",
-        conda_base: researchEnvDraft.conda_base || "",
-        experiment_python: researchEnvDraft.experiment_python || "",
-      });
+      await saveRuntime(researchProject, envConfigPatchFromDraft());
       const summary = await getProject(researchProject);
       setProjectSummary(summary);
       setResearchEnvDraft(environmentDraftFromSummary(summary));
@@ -3588,11 +3593,7 @@ function App() {
 
   async function persistEnvConfigForRun() {
     if (!researchProject || environmentLocked) return;
-    await saveRuntime(researchProject, {
-      conda_env: researchEnvDraft.conda_env || "",
-      conda_base: researchEnvDraft.conda_base || "",
-      experiment_python: researchEnvDraft.experiment_python || "",
-    });
+    await saveRuntime(researchProject, envConfigPatchFromDraft());
     const summary = await getProject(researchProject);
     setProjectSummary(summary);
     setResearchEnvDraft(environmentDraftFromSummary(summary));
@@ -4533,6 +4534,21 @@ function App() {
   }, [researchFullCycleJob, liveFullCycleJobFromJobs]);
   const fullCycleLaunchDisabled = Boolean(!researchProject || fullCycleProcessAlive);
   const stageLaunchDisabledByFullCycle = Boolean(fullCycleProcessAlive);
+  const liveProjectStageJob = useMemo(() => {
+    const exclusiveStages = new Set(["environment", "experiment", "paper"]);
+    return jobs.find((job) => {
+      if (!isLiveJob(job)) return false;
+      const stage = String(job.stage || "").toLowerCase();
+      if (!exclusiveStages.has(stage)) return false;
+      const result = (job.result && typeof job.result === "object") ? job.result : {};
+      const project = String(result.project || "").trim();
+      return !researchProject || !project || project === researchProject || String(job.job_id || "").includes(researchProject);
+    }) || null;
+  }, [jobs, researchProject]);
+  const environmentStageRunning = String(liveProjectStageJob?.stage || "").toLowerCase() === "environment";
+  const experimentStageRunning = String(liveProjectStageJob?.stage || "").toLowerCase() === "experiment";
+  const paperStageRunning = String(liveProjectStageJob?.stage || "").toLowerCase() === "paper";
+  const stageLaunchDisabledByProjectWorker = Boolean(liveProjectStageJob);
   const stageLaunchLockedText = useMemo(() => {
     if (!stageLaunchDisabledByFullCycle) return "";
     return lang === "zh"
@@ -5429,7 +5445,8 @@ function App() {
 
   async function saveProjectConfigDraft(options: { silent?: boolean; propagateError?: boolean } = {}) {
     if (!researchProject) return researchSummary;
-    const venueDraft = researchVenue.trim();
+    const inferredVenue = selectedVenueItems[0]?.name || selectedVenues[0] || "";
+    const venueDraft = researchVenue.trim() || inferredVenue;
     if (!venueDraft) {
       if (!options.silent) setError(lang === "zh" ? "投稿会议/期刊不能为空。" : "Target venue cannot be empty.");
       return researchSummary;
@@ -5473,6 +5490,10 @@ function App() {
     const exclusiveAction = ["full-cycle", "environment", "experiment", "paper", "autonomous", "current-find-selection"].includes(action);
     if (stageLaunchDisabledByFullCycle && exclusiveAction) {
       setError(stageLaunchLockedText);
+      return;
+    }
+    if ((action === "environment" && environmentStageRunning) || (action === "experiment" && (environmentStageRunning || experimentStageRunning)) || (action === "paper" && paperStageRunning)) {
+      setError(lang === "zh" ? "当前项目已有环境/实验/论文阶段任务正在运行；已阻止重复启动。" : "A project environment/experiment/paper stage job is already running; duplicate launch is blocked.");
       return;
     }
     if (literatureGateBlocked && action === "experiment") {
@@ -6734,7 +6755,7 @@ function App() {
               <div className="toolbarActions">
                 <button onClick={() => refreshProject()} disabled={!researchProject}>{t.researchRefresh}</button>
                 <button onClick={() => runAR("healthcheck")} disabled={!researchProject}>{t.researchHealth}</button>
-                <button className="primary" onClick={() => runAR("environment")} disabled={!researchProject || environmentLocked || stageLaunchDisabledByFullCycle}>{environmentLocked ? t.envLockedCreated : t.firstCreateEnv}</button>
+                <button className="primary" onClick={() => runAR("environment")} disabled={!researchProject || environmentLocked || stageLaunchDisabledByFullCycle || environmentStageRunning || stageLaunchDisabledByProjectWorker}>{environmentLocked ? t.envLockedCreated : environmentStageRunning ? t.researchRunningTask : t.firstCreateEnv}</button>
               </div>
             </div>
             {!researchProjectsLoaded ? <div className="emptyState">{t.researchProjectLoading}</div> : !researchProject ? <div className="emptyState">{t.researchNoProject}</div> : !researchSummary ? (
@@ -6880,7 +6901,7 @@ function App() {
                 <button onClick={() => refreshProject()} disabled={!researchProject}>{t.researchRefresh}</button>
                 <button className="primary" onClick={() => runAR("full-cycle")} disabled={fullCycleLaunchDisabled}>{freshBaseMainBlocked ? (lang === "zh" ? "继续全流程" : "Continue workflow") : t.runFullResearchCycle}</button>
                 <button className="primary" onClick={() => runAR("full-cycle", { freshDiscovery: true })} disabled={fullCycleLaunchDisabled}>{lang === "zh" ? "重新启动完整流程" : "Restart full workflow"}</button>
-                <button onClick={() => runAR("experiment")} disabled={!researchProject || freshBaseMainBlocked || literatureGateBlocked || stageLaunchDisabledByFullCycle}>{t.runExperimentLoop}</button>
+                <button onClick={() => runAR("experiment")} disabled={!researchProject || freshBaseMainBlocked || literatureGateBlocked || stageLaunchDisabledByFullCycle || stageLaunchDisabledByProjectWorker}>{t.runExperimentLoop}</button>
               </div>
             </div>
             {fullCycleProcessAlive && (
@@ -6929,7 +6950,7 @@ function App() {
           <section className="stage researchStage">
             <div className="toolbar">
               <div><h2>{t.paperWrite}</h2><p className="help">{t.paperHelp}</p></div>
-              <div className="toolbarActions"><button onClick={() => refreshProject()} disabled={!researchProject}>{t.researchRefresh}</button><button className="primary" onClick={() => runAR("paper")} disabled={!researchProject || !researchVenue || stageLaunchDisabledByFullCycle}>{t.runPaperWriting}</button></div>
+              <div className="toolbarActions"><button onClick={() => refreshProject()} disabled={!researchProject}>{t.researchRefresh}</button><button className="primary" onClick={() => runAR("paper")} disabled={!researchProject || !researchVenue || stageLaunchDisabledByFullCycle || stageLaunchDisabledByProjectWorker}>{t.runPaperWriting}</button></div>
             </div>
             {!researchSummary ? (
               <div className="emptyState">{lang === "zh" ? "正在加载当前 项目状态..." : "Loading current research project state..."}</div>

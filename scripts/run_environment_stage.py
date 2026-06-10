@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -97,13 +98,17 @@ def select_current_run_environment_repo(project: str, paths, env_name: str, max_
     ]
     for round_index in range(1, max(1, max_rounds) + 1):
         print(f'TASTE current-run environment repo-selection iteration {round_index}/{max_rounds}', flush=True)
-        rc = run_optional(selector, ROOT)
+        round_selector = list(selector)
+        if round_index > 1 and '--candidate-source' in round_selector:
+            source_index = round_selector.index('--candidate-source')
+            del round_selector[source_index:source_index + 2]
+        rc = run_optional(round_selector, ROOT)
         selection = load_json(paths.state / 'evidence_ready_repo_selection.json', {})
         selected = selection.get('selected') if isinstance(selection, dict) and isinstance(selection.get('selected'), dict) else {}
         repo = str(selected.get('repo_path') or selected.get('local_path') or '').strip()
         if rc == 0 and repo and Path(repo).exists() and current_env_selection_valid(paths):
             return repo
-        expand_repo_search(project, round_index)
+        expand_repo_search(project, round_index, fresh_find_run_id=run_id)
     blocker_reason = 'Current Find environment-stage selection did not find an evidence-ready repo; old active_repo remains legacy/control only.'
     write_repo_selection_blocker(paths, blocker_reason, selection=load_json(paths.state / 'evidence_ready_repo_selection.json', {}))
     write_fresh_base_implementation_blocker(paths, run_id, blocker_reason)
@@ -252,34 +257,169 @@ def env_bootstrap_should_run(paths, cfg: dict, env_name: str, repo: str, strateg
 
 
 
+def _query_placeholder_key(value: str) -> str:
+    return re.sub(r'[^a-z0-9]+', '', str(value or '').lower())
+
+
+def _query_looks_like_project_id(value: str, project: str) -> bool:
+    text = str(value or '').strip()
+    if not text:
+        return True
+    project_key = _query_placeholder_key(project)
+    text_key = _query_placeholder_key(text)
+    return bool(project_key and text_key == project_key)
+
+
+def _append_query(queries: list[str], value: object, project: str) -> None:
+    text = ' '.join(str(value or '').split()).strip()
+    lowered = text.lower()
+    if not text or _query_looks_like_project_id(text, project):
+        return
+    if any(marker in lowered for marker in ['no repo selected', 'future memory', 'none satisfied', 'none data-ready', 'no data-ready', 'current search found', 'needs-more-search', 'if no repo is good enough', 'after auditing', 'after reviewing', 'selected_active_repo=none']):
+        return
+    # Search backends work better with concise, evidence-bearing phrases than
+    # long generated paragraphs. Keep titles intact, trim only oversized text.
+    if len(text) > 180:
+        text = text[:180].rsplit(' ', 1)[0].strip() or text[:180]
+    if text:
+        queries.append(text)
+
+
+def _quoted_search_terms(text: object) -> list[str]:
+    raw = str(text or '')
+    terms = re.findall(r"['\"]([^'\"]{4,120})['\"]", raw)
+    out: list[str] = []
+    for term in terms:
+        cleaned = ' '.join(term.split()).strip()
+        if cleaned and cleaned not in out:
+            out.append(cleaned)
+    return out
+
+
+def _stewardship_short_phrases(text: object) -> list[str]:
+    raw = ' '.join(str(text or '').replace('；', ',').replace('，', ',').split())
+    if not raw:
+        return []
+    first_sentence = re.split(r'[。.!?]\s+', raw, maxsplit=1)[0]
+    first_sentence = re.sub(r'^(?:Search|Look)\s+for\s+(?:repositories|repos)\s+(?:explicitly\s+)?(?:related\s+to\s+)?', '', first_sentence, flags=re.I)
+    first_sentence = re.sub(r'^Prioritize\s+(?:repositories|repos)\s+(?:with\s+)?', '', first_sentence, flags=re.I)
+    pieces = re.split(r',|\bor\b|\band\b|/|、|\s+for\s+', first_sentence)
+    phrases: list[str] = []
+    for piece in pieces:
+        cleaned = ' '.join(piece.split()).strip(' .;:')
+        cleaned = re.sub(r'^(?:with|for|the|a|an|or)\s+', '', cleaned, flags=re.I)
+        cleaned = re.sub(r'^(?:evaluating|evaluate|evaluation\s+of)\s+', '', cleaned, flags=re.I)
+        if 4 <= len(cleaned) <= 90 and not re.search(r'\b(no|none|without|lack|lacking|missing)\b', cleaned, flags=re.I):
+            phrases.append(cleaned)
+    out: list[str] = []
+    for phrase in phrases:
+        if phrase and phrase.lower() not in {item.lower() for item in out}:
+            out.append(phrase)
+    return out
+
+
+
+def _stewardship_memory_is_search_guidance(text: object) -> bool:
+    lowered = str(text or '').lower().strip()
+    if not lowered:
+        return False
+    if lowered.startswith(('after auditing', 'after reviewing', 'after the audit')) or any(marker in lowered for marker in ['none satisfied', 'none data-ready', 'current search found', 'needs-more-search', 'no repo selected', 'future memory']):
+        return False
+    if any(marker in lowered for marker in ['search for', 'priority search', 'target repos', 'target repositories', 'next search', 'continue searching for']):
+        return True
+    return False
+
+
+def _current_find_query_context(paths, project: str) -> list[str]:
+    queries: list[str] = []
+    find_results = load_json(paths.planning / 'finding' / 'find_results.json', {})
+    if isinstance(find_results, dict):
+        stage0 = find_results.get('stage0_profile') if isinstance(find_results.get('stage0_profile'), dict) else {}
+        profile = stage0.get('profile') if isinstance(stage0.get('profile'), dict) else {}
+        explicit = profile.get('explicit_profile') if isinstance(profile.get('explicit_profile'), dict) else {}
+        summary = explicit.get('research_interest_summary')
+        for phrase in _stewardship_short_phrases(summary):
+            _append_query(queries, phrase, project)
+        _append_query(queries, summary, project)
+        retrieval_text = stage0.get('retrieval_text')
+        for phrase in _stewardship_short_phrases(retrieval_text):
+            _append_query(queries, phrase, project)
+        _append_query(queries, retrieval_text, project)
+        for row in (find_results.get('recommended_papers') or find_results.get('papers') or [])[:6]:
+            if isinstance(row, dict):
+                title = str(row.get('title') or '').strip()
+                if title:
+                    _append_query(queries, f'{title} code dataset', project)
+    plans_payload = load_json(paths.planning / 'finding' / 'plans.json', {})
+    plan_rows = plans_payload.get('plans', []) if isinstance(plans_payload, dict) else []
+    selected = next((row for row in plan_rows if isinstance(row, dict) and (row.get('selected_for_execution') or row.get('execute_next') or (isinstance(row.get('execution_selection'), dict) and row['execution_selection'].get('selected')))), {})
+    if isinstance(selected, dict):
+        _append_query(queries, selected.get('title'), project)
+        _append_query(queries, selected.get('objective') or selected.get('summary'), project)
+    return queries
+
+
+def _stewardship_query_context(paths, project: str) -> list[str]:
+    queries: list[str] = []
+    sources = [
+        load_json(paths.reports / 'repo_topic_fit_decision.json', {}),
+        (load_json(paths.state / 'evidence_ready_repo_selection.json', {}) or {}).get('claude_topic_decision', {}),
+    ]
+    for payload in sources:
+        if not isinstance(payload, dict):
+            continue
+        memory = payload.get('stewardship_memory')
+        if _stewardship_memory_is_search_guidance(memory):
+            for term in _quoted_search_terms(memory):
+                _append_query(queries, term, project)
+            for phrase in _stewardship_short_phrases(memory):
+                _append_query(queries, phrase, project)
+            first_sentence = re.split(r'[。.!?]\s+', str(memory or '').strip(), maxsplit=1)[0]
+            _append_query(queries, first_sentence, project)
+        for key in ['data_action_reason', 'repo_action_reason', 'rationale']:
+            for term in _quoted_search_terms(payload.get(key)):
+                _append_query(queries, term, project)
+    return queries
+
+
 def project_search_queries(project: str) -> list[str]:
     cfg = load_project_config(project)
-    queries: list[str] = []
+    paths = build_paths(project)
+    explicit_queries: list[str] = []
+    config_context: list[str] = []
     if isinstance(cfg, dict):
-        for key in ("queries", "github_queries", "repo_search_queries", "literature_queries"):
+        for key in ('queries', 'github_queries', 'repo_search_queries', 'literature_queries'):
             values = cfg.get(key)
             if isinstance(values, list):
-                queries.extend(str(value).strip() for value in values if str(value).strip())
-        for key in ("topic", "research_interest", "user_prompt"):
-            value = str(cfg.get(key) or "").strip()
-            if value:
-                queries.append(value)
+                for value in values:
+                    _append_query(explicit_queries, value, project)
+        for key in ('topic', 'research_interest', 'user_prompt'):
+            _append_query(config_context, cfg.get(key), project)
+    queries: list[str] = []
+    queries.extend(explicit_queries)
+    queries.extend(_stewardship_query_context(paths, project))
+    # If the saved config topic is only a project id, the current Find/Plan
+    # outputs are the authoritative research context for environment search.
+    queries.extend(_current_find_query_context(paths, project))
+    queries.extend(config_context)
     seen: set[str] = set()
     out: list[str] = []
     for query in queries:
         key = query.lower()
-        if key and key not in seen:
+        if key and key not in seen and not _query_looks_like_project_id(query, project):
             seen.add(key)
             out.append(query)
-    return out or ["reproducible scientific code with real dataset"]
+    return out or ['reproducible scientific code with real dataset']
 
-
-def expand_repo_search(project: str, round_index: int, limit: int = 6) -> None:
+def expand_repo_search(project: str, round_index: int, limit: int = 6, fresh_find_run_id: str = '') -> None:
     queries = project_search_queries(project)
     query = queries[(round_index - 1) % len(queries)]
     print(f"TASTE autonomous repo-search round {round_index}: {query}", flush=True)
     print("Environment repo search ignores Find-only source toggles; repo/data audit needs code evidence.", flush=True)
-    run_optional([sys.executable, "scripts/discover_github_repos.py", "--project", project, "--query", query, "--limit", str(limit), "--sort", "stars", "--order", "desc", "--ignore-source-selection"], ROOT)
+    github_cmd = [sys.executable, "scripts/discover_github_repos.py", "--project", project, "--query", query, "--limit", str(limit), "--sort", "stars", "--order", "desc", "--ignore-source-selection", "--candidate-source", "environment_expanded_github_search"]
+    if fresh_find_run_id:
+        github_cmd.extend(["--fresh-find-run-id", fresh_find_run_id])
+    run_optional(github_cmd, ROOT)
     run_optional([sys.executable, "scripts/discover_arxiv.py", "--project", project, "--query", query, "--max-results", "5", "--ignore-source-selection"], ROOT)
     run_optional([sys.executable, "scripts/ingest_discovery.py", "--project", project, "--limit", "12"], ROOT)
     run_optional([sys.executable, "scripts/assess_repo_candidates.py", "--project", project], ROOT)

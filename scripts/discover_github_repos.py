@@ -30,6 +30,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--sort')
     parser.add_argument('--order')
     parser.add_argument('--ignore-source-selection', action='store_true')
+    parser.add_argument('--fresh-find-run-id', default='', help='Attach the current Find run id when GitHub search is part of environment-stage expansion.')
+    parser.add_argument('--candidate-source', default='github_search', help='Source label written to repo_candidates.json for this search.')
     return parser.parse_args()
 
 
@@ -82,9 +84,9 @@ def main() -> int:
     reference_time = now_utc()
     ts = reference_time.strftime('%Y%m%dT%H%M%SZ')
 
-    params = urllib.parse.urlencode({'q': query, 'per_page': limit, 'sort': sort, 'order': order})
-    url = f'{API}?{params}'
-    out = paths.discover / f"{ts}_github_{'_'.join(query.lower().split())[:80]}.json"
+    safe_query = ''.join(ch if (ch.isalnum() or ch in {'-', '_'}) else '_' for ch in query.lower())
+    safe_query = '_'.join(part for part in safe_query.split('_') if part)[:80] or 'query'
+    out = paths.discover / f"{ts}_github_{safe_query}.json"
     headers = {
         'User-Agent': os.environ.get('GITHUB_USER_AGENT', DEFAULT_USER_AGENT),
         'Accept': 'application/vnd.github+json',
@@ -103,16 +105,45 @@ def main() -> int:
         'items': [],
         'status': 'prepared',
     }
+    attempts = [(query, sort, order)]
+    if sort != 'updated':
+        attempts.append((query, 'updated', order))
+    narrowed_query = f"{query} in:name,description,readme"
+    if narrowed_query != query:
+        attempts.append((narrowed_query, 'updated', order))
+    payload['attempts'] = []
+    raw = None
+    used_query = query
     try:
-        request = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(request, timeout=int(os.environ.get('GITHUB_TIMEOUT_SEC', '30'))) as response:
-            raw = json.loads(response.read().decode('utf-8', 'ignore'))
+        timeout = int(os.environ.get('GITHUB_TIMEOUT_SEC', '30'))
+        last_error = ''
+        for attempt_query, attempt_sort, attempt_order in attempts:
+            params = urllib.parse.urlencode({'q': attempt_query, 'per_page': limit, 'sort': attempt_sort, 'order': attempt_order})
+            url = f'{API}?{params}'
+            try:
+                request = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    raw = json.loads(response.read().decode('utf-8', 'ignore'))
+                used_query = attempt_query
+                payload['attempts'].append({'query': attempt_query, 'sort': attempt_sort, 'order': attempt_order, 'status': 'ok'})
+                break
+            except HTTPError as exc:
+                last_error = str(exc)
+                payload['attempts'].append({'query': attempt_query, 'sort': attempt_sort, 'order': attempt_order, 'status': 'unavailable', 'error': last_error})
+                if exc.code < 500:
+                    raise
+            except (URLError, TimeoutError) as exc:
+                last_error = str(exc)
+                payload['attempts'].append({'query': attempt_query, 'sort': attempt_sort, 'order': attempt_order, 'status': 'unavailable', 'error': last_error})
+        if raw is None:
+            raise RuntimeError(last_error or 'GitHub search failed')
+        payload['used_query'] = used_query
         items = []
         imported_rows = []
         for item in raw.get('items', []) or []:
             topics = item.get('topics', []) or []
             row: dict[str, object] = {
-                'source': 'github_search',
+                'source': args.candidate_source or 'github_search',
                 'name': item.get('full_name') or item.get('name') or '',
                 'url': item.get('html_url') or '',
                 'summary': item.get('description') or '',
@@ -137,7 +168,10 @@ def main() -> int:
                 'is_archived': bool(item.get('archived')),
                 'is_fork': bool(item.get('fork')),
                 'default_branch': item.get('default_branch') or '',
-                'query': query,
+                'query': used_query,
+                'original_query': query,
+                'fresh_find_run_id': args.fresh_find_run_id,
+                'project': args.project,
             }
             row['task_fit'] = row['repo_topic_match_score'] > 0 if 'repo_topic_match_score' in row else False
             row.update(score_repo_candidate(row, cfg, reference_time=reference_time))
@@ -149,7 +183,7 @@ def main() -> int:
         payload['items'] = items
         payload['status'] = 'ok'
         update_repo_registry(paths, imported_rows)
-    except (HTTPError, URLError, TimeoutError) as exc:
+    except (HTTPError, URLError, TimeoutError, RuntimeError) as exc:
         payload['status'] = 'unavailable'
         payload['error'] = str(exc)
 

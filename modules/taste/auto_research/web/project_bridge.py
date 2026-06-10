@@ -19,7 +19,7 @@ from auto_research.source_selection import canonical_source_selection, filter_pa
 from auto_research.paths import CONFIG_PATH, LOCAL_DATABASE_DIR, RUNS_DIR
 from auto_research.jobs import JobCancelled
 from agent_state import append_agent_log, list_agents, queue_guidance, refresh_process_flags, upsert_agent
-from runtime_env import detect_project_runtime, interactive_env, runtime_diagnostics, update_project_runtime
+from runtime_env import detect_project_runtime, interactive_env, project_runtime_config, runtime_diagnostics, update_project_runtime
 from project_paths import management_python
 from project_config import create_project_settings, project_source_selection, project_target_venue, update_project_settings
 from run_project import current_find_execution_contract
@@ -323,7 +323,7 @@ def _venue_requirements_summary(root: Path, venue: str, paper_state: dict[str, A
 
 def _runtime_diagnostics_light(project: str, cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg = cfg if isinstance(cfg, dict) else {}
-    runtime = cfg.get("runtime") if isinstance(cfg.get("runtime"), dict) else {}
+    runtime = project_runtime_config(project, cfg)
     try:
         path_head = interactive_env(project, cfg).get("PATH", "").split(os.pathsep)[:12]
     except Exception:
@@ -2156,6 +2156,7 @@ def _current_environment_selection(root: Path) -> dict[str, Any]:
         public_selection_gate = raw_selection_gate or ("accepted_by_deterministic_base_switch_gate" if authorized_switch else "accepted_by_claude_topic_fit")
     in_current_find = selected_title_in_current_find(root, selected, decision)
     valid = bool(selected and (stage == "environment_claude_code" or authorized_switch) and accepted and in_current_find)
+    current_candidate = selection.get("current_candidate") if isinstance(selection.get("current_candidate"), dict) else {}
     return {
         "valid": valid,
         "current_find_run_id": current_run,
@@ -2165,6 +2166,16 @@ def _current_environment_selection(root: Path) -> dict[str, Any]:
         "selected": selected,
         "selection_gate": public_selection_gate,
         "raw_selection_gate": raw_selection_gate,
+        "selection_status": str(selection.get("status") or ""),
+        "audited_count": selection.get("audited_count", 0),
+        "evidence_ready_count": selection.get("evidence_ready_count", 0),
+        "candidate_count": selection.get("candidate_count", 0),
+        "current_candidate_index": selection.get("current_candidate_index", 0),
+        "current_candidate_total": selection.get("current_candidate_total", 0),
+        "current_action": str(selection.get("current_action") or ""),
+        "current_candidate": current_candidate,
+        "progress_summary": str(selection.get("progress_summary") or ""),
+        "elapsed_sec": selection.get("elapsed_sec", 0),
         "reason": "current_environment_base_selected" if valid else ("selected_base_not_in_current_find_recommendations" if not in_current_find else "environment_base_selection_pending_or_stale"),
     }
 
@@ -2784,6 +2795,13 @@ def _public_environment_selection_summary(env: Any) -> dict[str, Any]:
         "base_selection_status": str(src.get("base_selection_status") or ("selected" if src.get("valid") else "waiting_for_environment_review")),
         "selection_stage": _public_internal_names(src.get("selection_stage") or selected.get("selection_stage") or ""),
         "selection_gate": _public_internal_names(src.get("selection_gate") or src.get("raw_selection_gate") or ""),
+        "selection_status": str(src.get("selection_status") or ""),
+        "audited_count": src.get("audited_count", 0),
+        "evidence_ready_count": src.get("evidence_ready_count", 0),
+        "candidate_count": src.get("candidate_count", 0),
+        "current_candidate": src.get("current_candidate") if isinstance(src.get("current_candidate"), dict) else {},
+        "current_action": str(src.get("current_action") or ""),
+        "progress_summary": str(src.get("progress_summary") or ""),
         "accepted_by_claude": bool(src.get("accepted_by_claude") or selected.get("accept_as_current_best")),
         "reason": _public_internal_names(src.get("reason") or ""),
         "selected": {
@@ -3370,10 +3388,13 @@ def _public_environment_stage(
     ref_public = _public_gate_status_summary(ref_gate)
     ref_status = str(ref_public.get("status") or ref_gate.get("status") or "").strip()
     ref_decision = str(ref_public.get("decision") or ref_gate.get("decision") or "").strip()
+    progress_summary = str(env.get("progress_summary") or "").strip()
     if env.get("valid"):
         module_summary = "当前基底已由环境阶段选定；本步骤只展示仓库、真实数据/loader、实验环境和参考复现状态。"
     elif status == "waiting_for_current_find_results":
         module_summary = "环境配置等待当前 Find 产物稳定后再选择基底。"
+    elif progress_summary:
+        module_summary = "环境配置正在审计候选仓库：" + _public_internal_names(progress_summary)
     else:
         module_summary = "环境配置等待基底选择和真实数据/loader 证据。"
 
@@ -3383,6 +3404,13 @@ def _public_environment_stage(
         "fresh_find_run_id": env.get("fresh_find_run_id", ""),
         "selection_stage": _public_internal_names(env.get("selection_stage", "")),
         "selection_gate": _public_internal_names(env.get("selection_gate", "")),
+        "selection_status": str(env.get("selection_status") or ""),
+        "audited_count": env.get("audited_count", 0),
+        "evidence_ready_count": env.get("evidence_ready_count", 0),
+        "candidate_count": env.get("candidate_count", 0),
+        "current_candidate": env.get("current_candidate") if isinstance(env.get("current_candidate"), dict) else {},
+        "current_action": str(env.get("current_action") or ""),
+        "progress_summary": progress_summary,
         "accepted_by_claude": bool(env.get("accepted_by_claude")),
         "reason": env.get("reason", ""),
     }
