@@ -1893,6 +1893,51 @@ def test_loader_ready_evidence_advances_selected_base_to_reference_probe(monkeyp
     assert "reference-protocol/import probe" in summary["current_blocker"]["next_action"]
 
 
+def test_reference_protocol_import_probe_surfaces_dependency_blocker(monkeypatch, tmp_path):
+    from auto_research.web import project_bridge
+
+    project = "demo_project"
+    root = tmp_path / project
+    state = root / "state"
+    finding = root / "planning" / "finding"
+    repo = root / "repos" / "selected" / "example_repo"
+    state.mkdir(parents=True)
+    finding.mkdir(parents=True)
+    repo.mkdir(parents=True)
+    run_id = "find_current"
+    dataset = "demo_ready_dataset"
+
+    write_json(finding / "find_progress.json", {"run_id": run_id, "phase": "complete"})
+    write_json(state / "current_find_research_plan.json", {"run_id": run_id, "status": "ready"})
+    write_json(
+        state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": run_id,
+            "selection_stage": "environment_claude_code",
+            "selection_gate": "accepted_by_claude_transformable_pending_loader_bootstrap",
+            "accepted_by_claude": True,
+            "selected": {"name": "example/repo", "repo_path": str(repo), "fresh_find_run_id": run_id},
+        },
+    )
+    write_json(state / "active_repo.json", {"name": "example/repo", "repo_path": str(repo)})
+    write_json(state / "fresh_base_implementation_plan.json", {"fresh_find_run_id": run_id, "status": "implementation_ready", "repo": {"name": "example/repo", "repo_path": str(repo)}, "ready_datasets": [dataset], "blocked_datasets": [], "blocker_reasons": []})
+    write_json(state / "real_dataset_probe.json", {"repo_path": str(repo), "status": "passed", "decision": "loader_probe_complete", "ready_datasets": [dataset], "blocked_datasets": [], "blocker_reasons": []})
+    write_json(state / "full_research_cycle.json", {"status": "blocked_no_viable_base_switch_route"})
+    write_json(state / "reference_protocol_import_probe.json", {"repo_path": str(repo), "verdict": "code_present_deps_missing", "results": {"direct_import": {"status": "failed", "blocker": "No module named 'json_repair'"}, "dependency_audit": {"missing": 32, "total_requirements": 46}}})
+    monkeypatch.setattr(project_bridge, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(project_bridge, "_remote_process_rows", lambda: [])
+    monkeypatch.setattr(project_bridge, "_current_project_source_selection", lambda _project, _root: {"venue_ids": ["openreview_iclr_2026"], "years": [2026]})
+
+    protocol = project_bridge._fresh_base_protocol_probe(root)
+    summary = project_bridge._fast_project_summary(project, root, {"name": project, "topic": "Demo topic", "target_venue": "ICLR"})
+
+    assert protocol["status"] == "reference_protocol_probe_blocked"
+    assert protocol["decision"] == "dependency_install_required"
+    assert "32/46" in summary["current_blocker"]["summary"]
+    assert "json_repair" in summary["current_blocker"]["summary"]
+    assert "补齐缺失依赖" in summary["current_blocker"]["next_action"]
+
+
 def test_select_fresh_base_marks_stale_implementation_plan(monkeypatch, tmp_path):
     monkeypatch.syspath_prepend(str(server.WORKSPACE_ROOT / "scripts"))
     selector = importlib.import_module("select_fresh_research_base")

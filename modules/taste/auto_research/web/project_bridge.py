@@ -2279,12 +2279,51 @@ def _fresh_base_loader_probe(root: Path) -> dict[str, Any]:
     return {}
 
 
+def _reference_protocol_import_probe_public_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    out = dict(payload)
+    verdict = str(out.get("verdict") or "").strip()
+    results = out.get("results") if isinstance(out.get("results"), dict) else {}
+    direct_import = results.get("direct_import") if isinstance(results.get("direct_import"), dict) else {}
+    audit = results.get("dependency_audit") if isinstance(results.get("dependency_audit"), dict) else {}
+    missing = audit.get("missing")
+    total = audit.get("total_requirements")
+    first_blocker = str(direct_import.get("blocker") or "").strip()
+    if verdict == "code_present_deps_missing" or str(direct_import.get("status") or "") == "failed":
+        out.setdefault("status", "reference_protocol_probe_blocked")
+        out.setdefault("decision", "dependency_install_required")
+        summary = "reference protocol/import probe 已运行；代码结构存在，但当前环境依赖缺失"
+        if missing not in (None, "") and total:
+            summary += f"（缺失 {missing}/{total} 个 requirements）"
+        if first_blocker:
+            summary += f"，首个 import blocker: {first_blocker}"
+        summary += "。"
+        out.setdefault("human_summary", summary)
+        out.setdefault("summary", summary)
+    return out
+
+
 def _fresh_base_protocol_probe(root: Path) -> dict[str, Any]:
-    for name in _fresh_base_state_names(root, "reference_protocol_probe"):
+    names = list(dict.fromkeys([*_fresh_base_state_names(root, "reference_protocol_probe"), "reference_protocol_import_probe.json"]))
+    for name in names:
         payload = _read_json(root / "state" / name, {})
-        if _artifact_matches_current_repo(root, payload):
+        if isinstance(payload, dict) and payload and _artifact_matches_current_repo(root, payload):
+            if name == "reference_protocol_import_probe.json":
+                return _reference_protocol_import_probe_public_payload(payload)
             return payload
     return {}
+
+
+def _reference_protocol_probe_blocker_summary(protocol_probe: Any, base_display: str) -> str:
+    if not isinstance(protocol_probe, dict) or not protocol_probe:
+        return ""
+    status = str(protocol_probe.get("status") or "").strip()
+    decision = str(protocol_probe.get("decision") or "").strip()
+    if status != "reference_protocol_probe_blocked" and decision != "dependency_install_required":
+        return ""
+    summary = str(protocol_probe.get("human_summary") or protocol_probe.get("summary") or "").strip()
+    if summary:
+        return f"{base_display} {summary}"
+    return f"{base_display} reference protocol/import probe 已运行，但当前环境依赖缺失；需要先补齐依赖并重新验证 import。"
 
 
 def _fresh_base_smoke_probe(root: Path) -> dict[str, Any]:
@@ -4410,8 +4449,9 @@ def _human_supervision_summary(root: Path, compact: dict[str, Any], raw_summary:
         )
     elif fresh_reference_blocked:
         blocker_title = f"{base_display} 参考协议/环境 manifest 未完成"
-        blocker_summary = f"{base_display} 数据和 loader/import probe 已通过；当前只阻塞在最小环境 manifest、参考协议只读探针和 reference reproduction 审计。"
-        next_action = f"记录 {base_display} 最小环境 manifest，并对 ready 数据集运行有界只读 reference-protocol/import probe；通过前不训练、不写论文、不提升结论。"
+        protocol_blocker_summary = _reference_protocol_probe_blocker_summary(protocol_probe, base_display)
+        blocker_summary = protocol_blocker_summary or f"{base_display} 数据和 loader/import probe 已通过；当前只阻塞在最小环境 manifest、参考协议只读探针和 reference reproduction 审计。"
+        next_action = "使用当前配置的实验环境补齐缺失依赖后重新运行 reference-protocol/import probe；通过前不训练、不写论文、不提升结论。" if protocol_blocker_summary else f"记录 {base_display} 最小环境 manifest，并对 ready 数据集运行有界只读 reference-protocol/import probe；通过前不训练、不写论文、不提升结论。"
         summary_zh = (
             f"主线：{base_display}；投稿目标：{venue}；状态：阻塞在当前基底参考协议/环境 manifest 只读探针。"
             f" 当前 Find 已精读 {read_count} 篇、形成 {idea_count} 个 idea 和 {plan_count} 个 plan。"
@@ -9842,6 +9882,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     base_switch_gate = safe_dict(_read_json(root / "state" / "base_switch_gate.json", {}))
     base_switch_execution = safe_dict(_read_json(root / "state" / "base_switch_execution.json", {}))
     reference_full_job = safe_dict(_fresh_base_reference_full_job(root))
+    protocol_probe = safe_dict(_fresh_base_protocol_probe(root))
     scientific_progress_gate = safe_dict(_read_json(root / "state" / "scientific_progress_gate.json", {}))
     experiment_iteration_audit = safe_dict(_read_json(root / "state" / "experiment_iteration_audit.json", {}))
     fresh_impl = safe_dict(_read_json(root / "state" / "fresh_base_implementation_plan.json", {}))
@@ -10500,7 +10541,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     running_experiment_next_action = "等待当前训练日志和指标落盘；完成后由 项目代理写本地审计记录、登记实验表，并刷新科学进展、论文证据、投稿准备度和阻塞行动计划门控。"
     base_switch_gate_summary = "参考复现已通过；当前主线还缺少可审计、可写入论文的候选实验结果。项目代理需要补齐候选实验的来源、数据、协议、完整运行和本地产物审计；完成前不会更换当前基底或提升论文结论。"
     base_switch_gate_next_action = "继续补齐候选实验的来源、数据加载、协议、完整运行和本地产物审计；完成后刷新科学进展、论文证据和投稿准备度。"
-    reference_probe_next_action = "记录当前基底最小环境 manifest，并对 ready 数据集运行有界只读 reference-protocol/import probe；通过前不训练、不写论文、不提升结论。"
+    reference_probe_next_action = "使用当前配置的实验环境补齐缺失依赖后重新运行 reference-protocol/import probe；通过前不训练、不写论文、不提升结论。" if _reference_protocol_probe_blocker_summary(protocol_probe, base_title) else "记录当前基底最小环境 manifest，并对 ready 数据集运行有界只读 reference-protocol/import probe；通过前不训练、不写论文、不提升结论。"
     selected_base_label = "当前基底"
     selected_base_viability_next_action = base_switch_gate_next_action if base_switch_gate_unresolved else running_experiment_next_action if active_experiment_training else "保持当前基底不变；project agent 继续设计、运行并审计当前主线下真实候选实验。历史路线只保留为审计记录，不在主状态中展开。"
     submission_blocker_next_action = "参考复现和实验门控通过后，继续补齐结论台账、坏例/反例和可靠性证据；在投稿准备度通过前保持只写草稿，禁止论文定稿或结论提升。"
@@ -10521,7 +10562,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     elif reference_full_job_live:
         blocker_summary = "TASTE 正在跑当前参考工作的论文级 full reference reproduction；完成并刷新门控前，不启动候选实验、论文写作或结论提升。"
     elif status == "blocked_fresh_base_reference_probe_required":
-        blocker_summary = f"{base_title} 数据和 loader/import probe 已通过；当前等待参考协议/环境 manifest 探针。"
+        blocker_summary = _reference_protocol_probe_blocker_summary(protocol_probe, base_title) or f"{base_title} 数据和 loader/import probe 已通过；当前等待参考协议/环境 manifest 探针。"
     elif submission_blockers:
         blocker_summary = _public_blocker_summary(submission_blockers[0], "submission_readiness blocked")
     if not env.get("valid") and not literature_gate_blocked:
@@ -10967,6 +11008,7 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
     current_plan = safe_dict(_read_json(root / 'state' / 'current_find_research_plan.json', {}))
     fresh_impl = safe_dict(_read_json(root / 'state' / 'fresh_base_implementation_plan.json', {}))
     ref_gate = safe_dict(_read_json(root / 'state' / 'reference_reproduction_gate.json', {}))
+    protocol_probe = safe_dict(_fresh_base_protocol_probe(root))
     selected_base_viability = safe_dict(_read_json(root / 'state' / 'selected_base_viability_gate.json', {}))
     base_switch_gate = safe_dict(_read_json(root / 'state' / 'base_switch_gate.json', {}))
     full_cycle_raw = safe_dict(_read_json(root / 'state' / 'full_research_cycle.json', {}))
@@ -11256,8 +11298,9 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
     elif status == 'blocked_fresh_base_reference_probe_required':
         blocker_category = 'fresh_base_reference_probe_required'
         blocker_title = '等待参考协议/环境 manifest 探针'
-        blocker_summary = f'{base_title} 数据和 loader/import probe 已通过；当前等待参考协议/环境 manifest 探针。'
-        next_action = '记录当前基底最小环境 manifest，并对 ready 数据集运行有界只读 reference-protocol/import probe；通过前不训练、不写论文、不提升结论。'
+        protocol_blocker_summary = _reference_protocol_probe_blocker_summary(protocol_probe, base_title)
+        blocker_summary = protocol_blocker_summary or f'{base_title} 数据和 loader/import probe 已通过；当前等待参考协议/环境 manifest 探针。'
+        next_action = '使用当前配置的实验环境补齐缺失依赖后重新运行 reference-protocol/import probe；通过前不训练、不写论文、不提升结论。' if protocol_blocker_summary else '记录当前基底最小环境 manifest，并对 ready 数据集运行有界只读 reference-protocol/import probe；通过前不训练、不写论文、不提升结论。'
     elif submission_blockers:
         top_submission_blocker = submission_blockers[0]
         blocker_category = str(top_submission_blocker.get('category') or 'submission_readiness')
