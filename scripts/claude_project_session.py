@@ -1022,12 +1022,7 @@ def run_claude(project: str, instruction: str, stage: str, timeout_sec: int, res
     session_id = str(session.get('session_id') or '') if resume else ''
     if resume and session_id:
         cmd.extend(['--resume', session_id])
-    model = str(
-        coding_cfg.get('claude_model')
-        or os.environ.get('ANTHROPIC_MODEL')
-        or os.environ.get('LLM_MODEL')
-        or ''
-    ).strip()
+    model = str(coding_cfg.get('claude_model') or '').strip()
     if model:
         cmd.extend(['--model', model])
     launch_command = ' '.join(shlex.quote(item) for item in cmd) + ' < ' + shlex.quote(str(prompt_file))

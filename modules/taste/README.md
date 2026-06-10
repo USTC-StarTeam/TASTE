@@ -120,7 +120,7 @@ cp ../../config.example.json ../../runtime/auto_research/.config.json
 
 ### LLM 配置
 
-TASTE 使用 OpenAI-compatible Chat Completions API。
+TASTE 使用 OpenAI-compatible Chat Completions API。此配置只供 TASTE 自身的 Find/Read/Idea/Plan 使用；Claude Code 账号、API key、base URL 和默认模型必须由用户在自己的 Claude Code 环境中配置，TASTE 不会写入或覆盖。
 
 | 字段 | 说明 |
 | --- | --- |
@@ -150,9 +150,9 @@ TASTE 使用 OpenAI-compatible Chat Completions API。
 | `max_fetch_papers` | 最多抓取论文数量。 |
 | `max_recommended_papers` | 最终推荐论文最大数量。 |
 | `max_ideas` | 最终推荐 idea 数量。 |
-| `venue_title_scan_limit` | 无官方分类时先扫描多少标题。 |
+| `venue_title_scan_limit` | 会议标题抓取默认全量；`0` 表示不设数量上限，正数只用于测试或异常数据源保护。 |
 | `arxiv_categories` | 支持多个分类，例如 `cs.AI, cs.CV, cs.CL`。 |
-| `arxiv_start_date`, `arxiv_end_date` | 可选日期范围，留空则使用最新/默认 feed 行为。 |
+| `arxiv_start_date`, `arxiv_end_date` | 可选日期范围；两者都留空时 arXiv 默认抓取近半年。 |
 
 ### 邮件报告
 

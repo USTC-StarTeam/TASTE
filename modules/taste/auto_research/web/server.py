@@ -237,6 +237,56 @@ def _sync_project_llm_from_config(config: AppConfig) -> None:
     write_json(project_path, project_config)
 
 
+def _current_project_research_preferences() -> dict[str, str]:
+    project_path = project_config_path()
+    if project_path is None:
+        return {}
+    project_config = read_json(project_path, {})
+    if not isinstance(project_config, dict):
+        return {}
+    return {
+        "research_interest": str(project_config.get("research_interest") or ""),
+        "researcher_profile": str(project_config.get("researcher_profile") or ""),
+    }
+
+
+def _config_with_project_research_preferences(config: AppConfig, provided_fields: set[str] | None = None) -> AppConfig:
+    provided = provided_fields or set()
+    project_prefs = _current_project_research_preferences()
+    updates: dict[str, Any] = {}
+    for key in ("research_interest", "researcher_profile"):
+        if key in provided:
+            continue
+        current = str(getattr(config, key, "") or "").strip()
+        project_value = str(project_prefs.get(key) or "").strip()
+        if not current and project_value:
+            updates[key] = project_value
+    return config.model_copy(update=updates) if updates else config
+
+
+def _sync_project_research_preferences_from_config(config: AppConfig) -> None:
+    project_path = project_config_path()
+    if project_path is None:
+        return
+    project_config = read_json(project_path, {})
+    if not isinstance(project_config, dict):
+        return
+    updates: dict[str, str] = {}
+    for key in ("research_interest", "researcher_profile"):
+        value = str(getattr(config, key, "") or "").strip()
+        if value:
+            updates[key] = value
+    if not updates:
+        return
+    changed = False
+    for key, value in updates.items():
+        if project_config.get(key) != value:
+            project_config[key] = value
+            changed = True
+    if changed:
+        write_json(project_path, project_config)
+
+
 def save_config(config: AppConfig) -> AppConfig:
     canonical = save_canonical_source_selection(config.default_find_selection, project_config_path=project_config_path())
     config = config.model_copy(update={"default_find_selection": canonical})
@@ -244,13 +294,14 @@ def save_config(config: AppConfig) -> AppConfig:
     if read_json(CONFIG_PATH, {}) != payload:
         write_json(CONFIG_PATH, payload)
     _sync_project_llm_from_config(config)
+    _sync_project_research_preferences_from_config(config)
     return config
 
 
 def _request_config_with_persisted_secrets(request_config: AppConfig | None) -> AppConfig:
     base_config = load_config()
     if request_config is None:
-        return base_config
+        return _config_with_project_research_preferences(base_config, set())
 
     # API callers often send a partial run override. Pydantic fills omitted
     # fields with model defaults, so merge omitted fields back from the saved UI
@@ -291,6 +342,7 @@ def _request_config_with_persisted_secrets(request_config: AppConfig | None) -> 
         updates["llm_roles"] = merged_roles
     if updates:
         merged = merged.model_copy(update=updates)
+    merged = _config_with_project_research_preferences(merged, provided_fields)
     return _config_with_env_overrides(merged)
 
 
@@ -6972,6 +7024,14 @@ def api_find(request: FindRequest) -> dict:
     # Starting a run must not mutate the persisted config. The UI saves config
     # explicitly via /api/config; API callers may pass temporary run overrides.
     config = _request_config_with_persisted_secrets(request.config)
+    if not (str(config.research_interest or "").strip() or str(config.researcher_profile or "").strip()):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "code": "research_profile_required",
+                "message": "Research interest/profile is required before starting Find; otherwise final title+abstract LLM scoring is skipped.",
+            },
+        )
     selection = normalize_source_selection(request.selection.model_dump() if request.selection else canonical_source_selection(project_config_path=project_config_path()))
     selection_type = type(request.selection) if request.selection else FindRequest.model_fields["selection"].default_factory().__class__
 

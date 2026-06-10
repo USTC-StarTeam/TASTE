@@ -217,7 +217,7 @@ claude --version
 codex --version
 ```
 
-系统不会把 `.claude/settings.json` 提交到 Git。公开仓库只保留 agents、commands、skills 模板。
+TASTE 只检测和调用用户已配置好的 `claude`/`codex` CLI，不写入、不覆盖 Claude Code 的账号、API key、base URL 或默认模型。系统不会把 `.claude/settings.json` 提交到 Git。公开仓库只保留 agents、commands、skills 模板。
 
 ## 使用说明
 

@@ -1,6 +1,8 @@
 import importlib
 import json
 import time
+from datetime import date
+from pathlib import Path
 
 from auto_research.auto_plan.pipeline import run_plan
 from auto_research.auto_plan.pipeline import finish_plan, polish_plan, render_plan_markdown
@@ -80,34 +82,129 @@ def test_multiple_jobs_are_visible_and_soft_cancelled():
     assert job.cancelled_at
 
 
-def test_deepseek_saved_llm_config_injects_claude_code_env(tmp_path, monkeypatch):
-    from auto_research.web import project_bridge
+def test_venue_title_scan_limit_zero_means_full_fetch(monkeypatch):
+    from auto_research.auto_find import pipeline as find_pipeline
 
-    projects = tmp_path / "projects"
-    project = projects / "demo_project"
-    project.mkdir(parents=True)
-    write_json(project / "project.json", {})
+    monkeypatch.delenv("VENUE_TITLE_SCAN_LIMIT", raising=False)
+    monkeypatch.delenv("FIND_VENUE_TITLE_SCAN_LIMIT", raising=False)
+
+    assert find_pipeline._venue_title_fetch_limit(AppConfig()) is None
+    assert find_pipeline._venue_title_fetch_limit(AppConfig(venue_title_scan_limit=0)) is None
+    assert find_pipeline._venue_title_fetch_limit(AppConfig(venue_title_scan_limit=200)) == 200
+
+    monkeypatch.setenv("VENUE_TITLE_SCAN_LIMIT", "0")
+    assert find_pipeline._venue_title_fetch_limit(AppConfig(venue_title_scan_limit=200)) is None
+    monkeypatch.setenv("VENUE_TITLE_SCAN_LIMIT", "50")
+    assert find_pipeline._venue_title_fetch_limit(AppConfig()) == 50
+
+
+def test_default_full_venue_fetch_does_not_cap_recall_to_max_fetch_papers():
+    from auto_research.auto_find import pipeline as find_pipeline
+
+    config = AppConfig(
+        venue_title_scan_limit=0,
+        max_fetch_papers=120,
+        find_recall_count=1000,
+        detail_fetch_count=160,
+        max_recommended_papers=20,
+    )
+
+    assert find_pipeline._venue_recall_result_limit(config, 2000) == 1000
+
+
+def test_arxiv_empty_date_window_defaults_to_recent_half_year():
+    from auto_research.auto_find import sources
+
+    start_date, end_date, source = sources._arxiv_date_window("", "", today=date(2026, 6, 10))
+
+    assert start_date == "2025-12-12"
+    assert end_date == "2026-06-10"
+    assert source == "default_recent_180_days"
+
+
+def test_arxiv_configured_date_window_is_preserved():
+    from auto_research.auto_find import sources
+
+    start_date, end_date, source = sources._arxiv_date_window("2026/01/02", "", today=date(2026, 6, 10))
+
+    assert start_date == "2026-01-02"
+    assert end_date == ""
+    assert source == "configured"
+
+
+def test_find_request_uses_project_research_profile_when_api_config_is_partial(tmp_path, monkeypatch):
+    project_root = tmp_path / "projects" / "demo_project"
+    project_root.mkdir(parents=True)
+    project_path = project_root / "project.json"
+    write_json(project_path, {
+        "research_interest": "autonomous scientific workflow agents",
+        "researcher_profile": "prefer reproducible evaluation evidence",
+    })
     config_path = tmp_path / "runtime" / ".config.json"
+    config_path.parent.mkdir(parents=True)
     write_json(config_path, {
         "provider": "deepseek",
         "base_url": "https://api.deepseek.com/v1",
         "model": "deepseek-v4-flash",
         "api_key": "sk-test-secret",
     })
-    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
-    monkeypatch.setattr(project_bridge, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(server, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(server, "project_config_path", lambda: project_path)
 
-    env = {}
-    project_bridge._inject_saved_llm_env(env, "demo_project")
+    cfg = server._request_config_with_persisted_secrets(AppConfig(provider="deepseek", model="deepseek-v4-flash"))
 
-    assert env["LLM_PROVIDER"] == "deepseek"
-    assert env["LLM_API_BASE"] == "https://api.deepseek.com/v1"
-    assert env["LLM_MODEL"] == "deepseek-v4-flash"
-    assert env["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com"
-    assert env["ANTHROPIC_MODEL"] == "deepseek-v4-flash"
-    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "deepseek-v4-flash"
-    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "deepseek-v4-flash"
-    assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-test-secret"
+    assert cfg.research_interest == "autonomous scientific workflow agents"
+    assert cfg.researcher_profile == "prefer reproducible evaluation evidence"
+    assert cfg.api_key == "sk-test-secret"
+
+
+def test_find_request_preserves_explicit_empty_research_profile(tmp_path, monkeypatch):
+    project_root = tmp_path / "projects" / "demo_project"
+    project_root.mkdir(parents=True)
+    project_path = project_root / "project.json"
+    write_json(project_path, {"research_interest": "old project topic", "researcher_profile": "old profile"})
+    config_path = tmp_path / "runtime" / ".config.json"
+    config_path.parent.mkdir(parents=True)
+    write_json(config_path, {"provider": "mock", "model": "mock", "api_key": ""})
+    monkeypatch.setattr(server, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(server, "project_config_path", lambda: project_path)
+
+    cfg = server._request_config_with_persisted_secrets(AppConfig(research_interest="", researcher_profile="", provider="mock", model="mock"))
+
+    assert cfg.research_interest == ""
+    assert cfg.researcher_profile == ""
+
+
+def test_save_config_syncs_nonempty_research_profile_to_project(tmp_path, monkeypatch):
+    project_root = tmp_path / "projects" / "demo_project"
+    project_root.mkdir(parents=True)
+    project_path = project_root / "project.json"
+    write_json(project_path, {})
+    config_path = tmp_path / "runtime" / ".config.json"
+    config_path.parent.mkdir(parents=True)
+    monkeypatch.setattr(server, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(server, "project_config_path", lambda: project_path)
+
+    server.save_config(AppConfig(research_interest="new topic", researcher_profile="new profile", provider="mock", model="mock"))
+
+    saved_project = read_json(project_path, {})
+    assert saved_project["research_interest"] == "new topic"
+    assert saved_project["researcher_profile"] == "new profile"
+
+
+def test_claude_code_launch_does_not_derive_account_from_taste_llm_config():
+    from auto_research.web import project_bridge
+
+    bridge_source = Path(project_bridge.__file__).read_text()
+    session_source = (Path(__file__).resolve().parents[3] / "scripts" / "claude_project_session.py").read_text()
+
+    assert "_inject_saved_llm_env" not in bridge_source
+    assert "ANTHROPIC_AUTH_TOKEN" not in bridge_source
+    assert "ANTHROPIC_API_KEY" not in bridge_source
+    assert "ANTHROPIC_BASE_URL" not in bridge_source
+    assert "CLAUDE_CODE_SUBAGENT_MODEL" not in bridge_source
+    assert "os.environ.get('LLM_MODEL')" not in session_source
+    assert "os.environ.get('ANTHROPIC_MODEL')" not in session_source
 
 
 def test_read_request_for_historical_run_uses_current_find_wrapper_when_current_read_is_pending(tmp_path):

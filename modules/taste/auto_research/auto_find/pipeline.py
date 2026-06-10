@@ -37,6 +37,7 @@ from .sources import (
     fetch_science_family,
     fetch_selected_venue_details,
     fetch_venue_title_index,
+    fetch_venue_title_index_all,
     venue_metadata_audit_from_papers,
 )
 
@@ -1796,6 +1797,28 @@ def _apply_topic_evidence_guard(item: dict, interest: str) -> None:
 def _scan_count(total: int, config: AppConfig) -> int:
     fraction = max(0.01, min(1.0, float(config.venue_title_scan_fraction or 1.0)))
     return max(1, min(total, int(total * fraction) or 1))
+
+
+def _venue_title_fetch_limit(config: AppConfig) -> int | None:
+    for name in ("VENUE_TITLE_SCAN_LIMIT", "FIND_VENUE_TITLE_SCAN_LIMIT"):
+        raw = os.environ.get(name)
+        if raw not in (None, ""):
+            try:
+                value = int(str(raw).strip())
+            except ValueError:
+                value = 0
+            return max(1, value) if value > 0 else None
+    try:
+        value = int(getattr(config, "venue_title_scan_limit", 0) or 0)
+    except (TypeError, ValueError):
+        value = 0
+    return max(1, value) if value > 0 else None
+
+
+def _fetch_venue_title_index_for_find(venue: dict, years: list[int], limit: int | None) -> tuple[list[dict], str]:
+    if limit is None:
+        return fetch_venue_title_index_all(venue, years)
+    return fetch_venue_title_index(venue, years, limit)
 
 
 def _target_recall_count(config: AppConfig, scanned_count: int) -> int:
@@ -4912,10 +4935,11 @@ def run_find(
                     }
                 })
 
-    # Venue sources should be scanned broadly. max_fetch_papers only controls
-    # non-venue sources; venue_title_scan_limit is a safety cap for abnormal
-    # sources, not an intended sample size.
-    title_scan_limit = max(1, int(config.venue_title_scan_limit or 0) or 12000)
+    # Venue sources should be scanned fully by default. max_fetch_papers only
+    # controls non-venue sources; venue_title_scan_limit is an explicit testing or
+    # emergency safety cap when set to a positive value. A zero/empty value means
+    # use the all-corpus venue fetch path.
+    title_scan_limit = _venue_title_fetch_limit(config)
     _progress("venue_title_index", 0, max(1, len(request.selection.venue_ids)), "Starting venue title index fetch")
     for venue_index, venue_id in enumerate(request.selection.venue_ids, 1):
         _raise_if_cancelled(should_cancel)
@@ -4940,9 +4964,9 @@ def run_find(
 
         if venue.get("classification_source") == "official":
             log(f"Fetching official venue data for {venue.get('name')}")
-            titles, adapter = fetch_venue_title_index(venue, effective_years, title_scan_limit)
+            titles, adapter = _fetch_venue_title_index_for_find(venue, effective_years, title_scan_limit)
             if not titles and str(getattr(config, "provider", "")).lower() == "mock":
-                titles = _mock_offline_venue_title_index(venue, effective_years, title_scan_limit)
+                titles = _mock_offline_venue_title_index(venue, effective_years, title_scan_limit or 100000)
                 adapter = "mock_offline"
             metadata_audit = _online_venue_metadata_audit(titles, adapter)
             metadata_fields = _venue_metadata_status_fields(metadata_audit)
@@ -4979,7 +5003,7 @@ def run_find(
                 should_cancel,
                 _progress,
                 dynamic_title_filter=True,
-                result_limit=title_scan_limit,
+                result_limit=_venue_recall_result_limit(config, len(titles)),
                 scan_all=True,
                 title_filter_reports=title_filter_report,
             )
@@ -5009,9 +5033,9 @@ def run_find(
             category_scan_report.extend(reports)
             venue_metadata_audit = _combined_metadata_audit([report.get("metadata_audit") for report in reports], adapter)
         else:
-            title_index, adapter = fetch_venue_title_index(venue, effective_years, title_scan_limit)
+            title_index, adapter = _fetch_venue_title_index_for_find(venue, effective_years, title_scan_limit)
             if not title_index and str(getattr(config, "provider", "")).lower() == "mock":
-                title_index = _mock_offline_venue_title_index(venue, effective_years, title_scan_limit)
+                title_index = _mock_offline_venue_title_index(venue, effective_years, title_scan_limit or 100000)
                 adapter = "mock_offline"
             title_corpus_index = title_index
             venue_metadata_audit = _online_venue_metadata_audit(title_corpus_index, adapter)
@@ -5033,7 +5057,7 @@ def run_find(
                         )
                         log(f"{venue.get('name')}: {year_fallback_reason}")
                         break
-                    fallback_titles, fallback_adapter = fetch_venue_title_index(venue, [fallback_year], title_scan_limit)
+                    fallback_titles, fallback_adapter = _fetch_venue_title_index_for_find(venue, [fallback_year], title_scan_limit)
                     if fallback_titles:
                         title_index = fallback_titles
                         title_corpus_index = fallback_titles
@@ -5084,7 +5108,7 @@ def run_find(
             should_cancel,
             _progress,
             dynamic_title_filter=adapter == "local_database" and trusted_categories,
-            result_limit=title_scan_limit if adapter == "local_database" else _venue_recall_result_limit(config, len(title_index)),
+            result_limit=_venue_recall_result_limit(config, len(title_index)),
             scan_all=adapter == "local_database",
             title_filter_reports=title_filter_report,
         )

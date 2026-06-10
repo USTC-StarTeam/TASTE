@@ -731,52 +731,6 @@ def _active_stage_is_fresh_find(stage: Any) -> bool:
     return any(marker in text for marker in ["literature-survey", "run-finding", "run-finding.py"])
 
 
-def _claude_code_base_url_for_llm(provider: str, base_url: str) -> str:
-    provider_text = str(provider or "").strip().lower()
-    base_text = str(base_url or "").strip().rstrip("/")
-    if provider_text == "deepseek" or "api.deepseek.com" in base_text.lower():
-        return re.sub(r"/v1/?$", "", base_text, flags=re.IGNORECASE)
-    return ""
-
-
-def _inject_saved_llm_env(env: dict[str, str], project: str) -> None:
-    project_cfg = _read_json(PROJECTS / project / "project.json", {})
-    llm = project_cfg.get("llm", {}) if isinstance(project_cfg, dict) and isinstance(project_cfg.get("llm"), dict) else {}
-    taste_cfg = _read_json(CONFIG_PATH, {})
-    if not isinstance(taste_cfg, dict):
-        taste_cfg = {}
-    provider = str(llm.get("provider") or taste_cfg.get("provider") or env.get("LLM_PROVIDER") or "openai_compatible").strip()
-    base_url = str(llm.get("api_base") or taste_cfg.get("base_url") or env.get("LLM_API_BASE") or "").strip()
-    model = str(llm.get("model") or taste_cfg.get("model") or env.get("LLM_MODEL") or "").strip()
-    api_mode = str(llm.get("api_mode") or env.get("LLM_API_MODE") or "chat_completions").strip()
-    api_key_env = str(llm.get("api_key_env") or env.get("LLM_API_KEY_ENV") or "OPENAI_API_KEY").strip()
-    api_key = str(llm.get("api_key") or taste_cfg.get("api_key") or env.get("LLM_API_KEY") or env.get(api_key_env, "")).strip()
-    if provider:
-        env["LLM_PROVIDER"] = provider
-    if base_url:
-        env["LLM_API_BASE"] = base_url
-    if model:
-        env["LLM_MODEL"] = model
-    if api_mode:
-        env["LLM_API_MODE"] = api_mode
-    if api_key_env:
-        env["LLM_API_KEY_ENV"] = api_key_env
-    if api_key:
-        env["LLM_API_KEY"] = api_key
-        if api_key_env:
-            env[api_key_env] = api_key
-    claude_base = _claude_code_base_url_for_llm(provider, base_url)
-    if claude_base and api_key:
-        env["ANTHROPIC_AUTH_TOKEN"] = api_key
-        env["ANTHROPIC_API_KEY"] = api_key
-        env["ANTHROPIC_BASE_URL"] = claude_base
-        if model:
-            env["ANTHROPIC_MODEL"] = model
-            env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model
-            env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
-            env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model
-            env["CLAUDE_CODE_SUBAGENT_MODEL"] = model
-
 
 def _is_current_find_read_worker_cmd(cmd: str) -> bool:
     lowered = str(cmd or "").lower()
@@ -12691,7 +12645,6 @@ def run_action(payload: dict[str, Any], log: LogFn, should_cancel: CancelFn, pro
     env.setdefault("PYTHONUNBUFFERED", "1")
     env["PROJECT_ID"] = project
     env["PROJECT_CONFIG"] = str(PROJECTS / project / "project.json")
-    _inject_saved_llm_env(env, project)
     log("Runtime PATH head: " + " | ".join(env.get("PATH", "").split(os.pathsep)[:6]))
     append_agent_log(project, agent_id, "Runtime PATH head: " + " | ".join(env.get("PATH", "").split(os.pathsep)[:6]))
     if action == "agent-guidance":

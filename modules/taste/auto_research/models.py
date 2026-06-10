@@ -45,7 +45,7 @@ class AppConfig(BaseModel):
     max_fetch_papers: int = 120
     max_recommended_papers: int = 20
     max_ideas: int = 6
-    venue_title_scan_limit: int = 12000
+    venue_title_scan_limit: int = 0
     venue_title_scan_fraction: float = 1.0
     find_recall_count: int = 1000
     detail_fetch_count: int = 160

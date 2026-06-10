@@ -52,7 +52,7 @@ const DEFAULT_CONFIG: Config = {
   max_fetch_papers: 120,
   max_recommended_papers: 20,
   max_ideas: 6,
-  venue_title_scan_limit: 12000,
+  venue_title_scan_limit: 0,
   venue_title_scan_fraction: 1.0,
   find_recall_count: 1000,
   detail_fetch_count: 160,
@@ -744,7 +744,7 @@ const TEXT = {
     ideaLimit: "想法最大数量",
     ideaLimitHelp: "想法阶段生成的研究想法数量上限。",
     titleScanLimit: "会议标题全扫保护上限",
-    titleScanLimitHelp: "会议库会尽量全扫该会议/年份的标题。这个数只是防止异常数据源返回无限列表的安全保护；正常会议少于该数时就是全扫。",
+    titleScanLimitHelp: "会议库默认全扫该会议/年份的标题；填 0 表示不设数量上限。只有测试或异常数据源保护时才填正数。",
     titleScanFraction: "标题扫描比例",
     titleScanFractionHelp: "对已抓到的会议标题池抽取多少比例，1 表示全扫；只有想省时间时才调低。",
     recallCount: "主题候选保留上限",
@@ -808,7 +808,7 @@ const TEXT = {
     sourcesHelp: "控制是否额外收集 arXiv、bioRxiv、Nature、Science、HuggingFace 和 GitHub 热门内容；未勾选不会进入本轮 Find。",
     arxivCategories: "arXiv 分类",
     arxivHelp: "可输入多个分类，用逗号或空格隔开，例如 cs.AI, cs.CV。",
-    arxivDateHelp: "可选日期范围，格式 YYYY-MM-DD 或 YYYY/MM/DD；arXiv/HuggingFace/GitHub 共用，两个日期都留空则默认全时间段或最新可用信息流。",
+    arxivDateHelp: "可选日期范围，格式 YYYY-MM-DD 或 YYYY/MM/DD；arXiv/HuggingFace/GitHub 共用。arXiv 两个日期都留空时默认抓取近半年。",
     sourceStatus: "来源状态",
     biorxivCategories: "bioRxiv 分类",
     biorxivHelp: "可输入多个 bioRxiv 学科分类，用逗号或空格隔开，例如 bioinformatics, neuroscience；输入 all 表示不过滤分类。",
@@ -1285,7 +1285,7 @@ const TEXT = {
     ideaLimit: "Max ideas",
     ideaLimitHelp: "Maximum research ideas generated in the Idea stage.",
     titleScanLimit: "Venue full-scan safety cap",
-    titleScanLimitHelp: "Venue libraries are scanned as fully as possible. This is only a safety cap for abnormal sources, not the number TASTE tries to read.",
+    titleScanLimitHelp: "Venue libraries are full-scanned by default; 0 means no configured count cap. Set a positive value only for tests or abnormal-source protection.",
     titleScanFraction: "Title scan fraction",
     titleScanFractionHelp: "Fraction of the collected title pool to prefilter. 1 means all, 0.25 means the first 25%.",
     recallCount: "Topic-candidate cap",
@@ -1349,7 +1349,7 @@ const TEXT = {
     sourcesHelp: "Choose whether to also collect arXiv, bioRxiv, Nature, Science, HuggingFace, and GitHub signals. Disabled sources are not used in this Find run.",
     arxivCategories: "arXiv categories",
     arxivHelp: "Enter multiple categories separated by commas or spaces, e.g. cs.AI, cs.CV.",
-    arxivDateHelp: "Optional date range in YYYY-MM-DD or YYYY/MM/DD; shared by arXiv/HuggingFace/GitHub. Leave both empty for all-time or the latest available feed.",
+    arxivDateHelp: "Optional date range in YYYY-MM-DD or YYYY/MM/DD; shared by arXiv/HuggingFace/GitHub. For arXiv, leaving both empty defaults to the most recent 180 days.",
     sourceStatus: "Source Status",
     biorxivCategories: "bioRxiv categories",
     biorxivHelp: "Enter bioRxiv subject categories separated by commas or spaces, e.g. bioinformatics, neuroscience; use all to skip category filtering.",
@@ -3291,6 +3291,8 @@ function App() {
   function configWithCurrentFindSelection(nextConfig = config): Config {
     return {
       ...nextConfig,
+      research_interest: researchProject ? researchResearchInterest : nextConfig.research_interest,
+      researcher_profile: researchProject ? researchResearcherProfile : nextConfig.researcher_profile,
       default_find_selection: currentFindSelection(),
     };
   }
@@ -3579,17 +3581,22 @@ function App() {
       setError(stageLaunchLockedText);
       return;
     }
-    const nextConfig = configWithCurrentFindSelection();
-    const savedConfig = await saveConfig(nextConfig);
-    setConfig(savedConfig);
-    if (researchProject) {
-      void loadProject(researchProject, { resetDrafts: false }).catch(() => {});
+    try {
+      setError("");
+      const nextConfig = configWithCurrentFindSelection();
+      const savedConfig = await saveConfig(nextConfig);
+      setConfig(savedConfig);
+      if (researchProject) {
+        void loadProject(researchProject, { resetDrafts: false }).catch(() => {});
+      }
+      const nextJob = await startFind(savedConfig, savedConfig.default_find_selection, {
+        human_approved_new_find: true,
+        approval_reason: "user_explicit_find_run_from_web",
+      });
+      attachJob(nextJob, "read");
+    } catch (err) {
+      setError(String(err));
     }
-    const nextJob = await startFind(savedConfig, savedConfig.default_find_selection, {
-      human_approved_new_find: true,
-      approval_reason: "user_explicit_find_run_from_web",
-    });
-    attachJob(nextJob, "read");
   }
 
   async function runRead() {
@@ -6044,7 +6051,7 @@ function App() {
           <input value={config.idea_parallel_workers} onChange={(e) => updateConfig("idea_parallel_workers", Math.max(1, Math.min(8, Number(e.target.value))))} type="number" min="1" max="8" />
           <label>{t.titleScanLimit}</label>
           <p className="help">{t.titleScanLimitHelp}</p>
-          <input value={config.venue_title_scan_limit} onChange={(e) => updateConfig("venue_title_scan_limit", Number(e.target.value))} type="number" min="1" />
+          <input value={config.venue_title_scan_limit} onChange={(e) => updateConfig("venue_title_scan_limit", Math.max(0, Number(e.target.value)))} type="number" min="0" />
           <label>{t.titleScanFraction}</label>
           <p className="help">{t.titleScanFractionHelp}</p>
           <input value={config.venue_title_scan_fraction} onChange={(e) => updateConfig("venue_title_scan_fraction", Number(e.target.value))} type="number" min="0.01" max="1" step="0.05" />

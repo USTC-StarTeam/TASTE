@@ -388,7 +388,12 @@ def test_arxiv_returns_status_for_success(monkeypatch):
     assert len(items) == 1
     assert status["ok"] is True
     assert status["count"] == 1
-    assert status["queries"] == ["cat:cs.AI"]
+    assert status["date_window_source"] == "default_recent_180_days"
+    assert status["default_recent_days"] == 180
+    assert len(status["queries"]) == 1
+    assert status["queries"][0].startswith("cat:cs.AI AND submittedDate:")
+    assert status["start_date"].replace("-", "") in status["queries"][0]
+    assert status["end_date"].replace("-", "") in status["queries"][0]
 
 
 def test_arxiv_returns_status_for_failure(monkeypatch):

@@ -3731,11 +3731,22 @@ def _append_arxiv_entry(papers: list[dict], by_key: dict[str, dict], entry, ns: 
     papers.append(paper)
 
 
+ARXIV_DEFAULT_RECENT_DAYS = 180
+
+
+def _arxiv_date_window(start_date: str = "", end_date: str = "", *, today: date | None = None) -> tuple[str, str, str]:
+    start = normalize_date(start_date)
+    end = normalize_date(end_date)
+    if start or end:
+        return start, end, "configured"
+    current_day = today or date.today()
+    return (current_day - timedelta(days=ARXIV_DEFAULT_RECENT_DAYS)).isoformat(), current_day.isoformat(), "default_recent_180_days"
+
+
 def fetch_arxiv(categories: list[str], max_items: int, start_date: str = "", end_date: str = "", topic_queries: list[str] | None = None, log=None, progress=None, should_cancel=None, max_queries: int | None = None, per_query_limit: int | None = None, timeout_sec: int | None = None) -> tuple[list[dict], dict]:
     papers: list[dict] = []
     by_key: dict[str, dict] = {}
-    start_date = normalize_date(start_date)
-    end_date = normalize_date(end_date)
+    start_date, end_date, date_window_source = _arxiv_date_window(start_date, end_date)
     categories = [category.strip() for category in (categories or []) if category.strip()] or ["cs.AI"]
     full_scan = os.environ.get("ARXIV_FULL_SCAN", "0").lower() in {"1", "true", "yes", "on"}
     env_per_query = int(os.environ.get("ARXIV_PER_QUERY_LIMIT", "0") or 0)
@@ -3755,6 +3766,8 @@ def fetch_arxiv(categories: list[str], max_items: int, start_date: str = "", end
         "categories": categories,
         "start_date": start_date,
         "end_date": end_date,
+        "date_window_source": date_window_source,
+        "default_recent_days": ARXIV_DEFAULT_RECENT_DAYS,
         "queries": [],
         "errors": [],
         "query_limit": max_queries,

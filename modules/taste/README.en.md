@@ -118,7 +118,7 @@ Be specific. TASTE works best when the profile defines what counts as a real mat
 
 ### LLM
 
-The workflow uses an OpenAI-compatible Chat Completions API.
+The workflow uses an OpenAI-compatible Chat Completions API. These settings are only for TASTE's own Find/Read/Idea/Plan stages; Claude Code account credentials, API keys, base URLs, and default models must be configured by the user in their own Claude Code environment, and TASTE does not write or override them.
 
 | Field | Purpose |
 | --- | --- |
@@ -139,9 +139,9 @@ Role-specific overrides are available for `find`, `read`, `idea_generator`, `ide
 | `max_fetch_papers` | Maximum number of papers to fetch. |
 | `max_recommended_papers` | Maximum final recommended papers. |
 | `max_ideas` | Maximum final ideas. |
-| `venue_title_scan_limit` | Number of venue titles to scan before LLM triage. |
+| `venue_title_scan_limit` | Venue title fetch is full by default; `0` means no configured count cap, positive values are for tests or abnormal-source protection. |
 | `arxiv_categories` | Multiple categories are supported, such as `cs.AI, cs.CV, cs.CL`. |
-| `arxiv_start_date`, `arxiv_end_date` | Optional date range. Empty means latest/default feed behavior. |
+| `arxiv_start_date`, `arxiv_end_date` | Optional date range. When both are empty, arXiv defaults to the most recent 180 days. |
 
 ### Email Reports
 

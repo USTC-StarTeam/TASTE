@@ -55,7 +55,7 @@
   "max_fetch_papers": 120,
   "max_recommended_papers": 20,
   "max_ideas": 6,
-  "venue_title_scan_limit": 12000,
+  "venue_title_scan_limit": 0,
   "venue_title_scan_fraction": 1.0,
   "find_recall_count": 1000,
   "detail_fetch_count": 160,
