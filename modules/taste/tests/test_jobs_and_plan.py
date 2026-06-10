@@ -1936,6 +1936,12 @@ def test_reference_protocol_import_probe_surfaces_dependency_blocker(monkeypatch
     assert "32/46" in summary["current_blocker"]["summary"]
     assert "json_repair" in summary["current_blocker"]["summary"]
     assert "补齐缺失依赖" in summary["current_blocker"]["next_action"]
+    env_gate = summary["stages"]["environment"]["reference_reproduction_gate"]
+    experiment_gate = summary["stages"]["experiment"]["reference_reproduction_gate"]
+    assert env_gate["decision"] == "dependency_install_required"
+    assert "32/46" in env_gate["human_summary"]
+    assert experiment_gate["decision"] == "dependency_install_required"
+    assert "json_repair" in experiment_gate["human_summary"]
 
 
 def test_select_fresh_base_marks_stale_implementation_plan(monkeypatch, tmp_path):

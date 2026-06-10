@@ -3451,15 +3451,22 @@ def _compact_text(value: Any, max_chars: int = 600) -> str:
     return text[: max_chars - 1].rstrip() + "…"
 
 
-def _reference_gate_for_current_route_display(ref_gate: dict[str, Any], status: str, ready_datasets: Any) -> dict[str, Any]:
+def _reference_gate_for_current_route_display(
+    ref_gate: dict[str, Any],
+    status: str,
+    ready_datasets: Any,
+    protocol_probe: Any = None,
+    base_display: str = "当前基底",
+) -> dict[str, Any]:
     public = _public_gate_status_summary(ref_gate)
     ready = _normalize_ready_dataset_list(ready_datasets)
     decision = str(public.get("decision") or (ref_gate.get("decision") if isinstance(ref_gate, dict) else "") or "").strip()
-    if status == "blocked_fresh_base_reference_probe_required" or (ready and decision == "no_viable_base_switch_route"):
-        message = "当前基底真实数据/loader 已通过；等待参考协议/环境 manifest 探针。"
+    protocol_blocker_summary = _reference_protocol_probe_blocker_summary(protocol_probe, base_display)
+    if protocol_blocker_summary or status == "blocked_fresh_base_reference_probe_required" or (ready and decision == "no_viable_base_switch_route"):
+        message = protocol_blocker_summary or "当前基底真实数据/loader 已通过；等待参考协议/环境 manifest 探针。"
         return {
             "status": "blocked",
-            "decision": "fresh_base_reference_probe_required",
+            "decision": "dependency_install_required" if protocol_blocker_summary else "fresh_base_reference_probe_required",
             "human_summary": message,
             "summary": message,
             "reason": message,
@@ -3482,6 +3489,7 @@ def _public_environment_stage(
     reference_full_job: dict[str, Any] | None = None,
     route_dataset: str = "",
     route_ready_datasets: list[Any] | None = None,
+    protocol_probe: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     env = env if isinstance(env, dict) else {}
     selected = selected if isinstance(selected, dict) else {}
@@ -3521,7 +3529,7 @@ def _public_environment_stage(
     loader_status = "passed" if (route_ready or required_files_ok is True or loader_probe.get("return_code") == 0 or probe_summary.get("probe_return_code") == 0) else "pending"
     data_status = "real_data_loader_ready" if (dataset or ready_datasets) and loader_status == "passed" else "waiting_for_real_data_loader_evidence"
     repo_status = "selected" if repo_path else "waiting_for_repo_selection"
-    ref_public = _reference_gate_for_current_route_display(ref_gate, status, ready_datasets)
+    ref_public = _reference_gate_for_current_route_display(ref_gate, status, ready_datasets, protocol_probe, repo_name or "当前基底")
     ref_status = str(ref_public.get("status") or ref_gate.get("status") or "").strip()
     ref_decision = str(ref_public.get("decision") or ref_gate.get("decision") or "").strip()
     progress_summary = str(env.get("progress_summary") or "").strip()
@@ -10598,7 +10606,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     legacy_control = {"policy": "历史仓库、实验和参考复现只保留为审计记录；当前主线以本轮 Find 后的环境审查选择为准。", "details_hidden": True}
     if literature_gate_blocked and env.get("blocked_selection"):
         legacy_control["blocked_environment_selection"] = env.get("blocked_selection")
-    display_ref_gate = _reference_gate_for_current_route_display(ref_gate, status, route_ready_datasets)
+    display_ref_gate = _reference_gate_for_current_route_display(ref_gate, status, route_ready_datasets, protocol_probe, base_title or "当前基底")
     human_gate_summary = {
         "status": status,
         "title": blocker_title,
@@ -10787,7 +10795,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
             paper_stage["summary_zh"] = paper_stage["summary"]
     environment_status = selected_plan_gate["status"] if selected_plan_gate.get("blocked") else "waiting_for_current_find_results" if fresh_find_running else "blocked_by_literature_gate" if literature_gate_blocked else ("selected" if env.get("valid") else "waiting_for_environment_base_selection")
     experiment_stage_status = selected_plan_gate["status"] if selected_plan_gate.get("blocked") else "fresh_find_running" if fresh_find_running else "blocked_by_literature_gate" if literature_gate_blocked else status
-    environment_stage = _public_environment_stage(status=environment_status, env=env, selected=selected, active_repo=active_repo, repo_name=repo_name, repo_url=repo_url, repo_path=repo_path, ref_gate=ref_gate, reference_full_job=reference_full_job, route_dataset=route_dataset, route_ready_datasets=route_ready_datasets)
+    environment_stage = _public_environment_stage(status=environment_status, env=env, selected=selected, active_repo=active_repo, repo_name=repo_name, repo_url=repo_url, repo_path=repo_path, ref_gate=ref_gate, reference_full_job=reference_full_job, route_dataset=route_dataset, route_ready_datasets=route_ready_datasets, protocol_probe=protocol_probe)
     experiment_module_summary = _public_experiment_module_summary(
         status=experiment_stage_status,
         reference_gate=ref_gate,
@@ -11354,7 +11362,7 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
         full_cycle_compact.pop('finished_at', None)
         full_cycle_compact.pop('completed_at', None)
 
-    display_ref_gate = _reference_gate_for_current_route_display(ref_gate, status, route_ready_datasets)
+    display_ref_gate = _reference_gate_for_current_route_display(ref_gate, status, route_ready_datasets, protocol_probe, base_title or "当前基底")
     blocker = {
         'category': _public_internal_names(blocker_category),
         'title': blocker_title,
@@ -11507,7 +11515,7 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
         artifact('paper.pdf', pdf_path, 'pdf') if pdf_path else None,
     ] if item]
 
-    environment_stage = _public_environment_stage(status='waiting_for_current_find_results' if fresh_find_running else 'selected' if env.get('valid') else 'waiting_for_environment_base_selection', env=env, selected=selected, active_repo=active_repo, repo_name=repo_name, repo_url=repo_url, repo_path=repo_path, ref_gate=ref_gate, reference_full_job=reference_full_job, route_dataset=route_dataset, route_ready_datasets=route_ready_datasets)
+    environment_stage = _public_environment_stage(status='waiting_for_current_find_results' if fresh_find_running else 'selected' if env.get('valid') else 'waiting_for_environment_base_selection', env=env, selected=selected, active_repo=active_repo, repo_name=repo_name, repo_url=repo_url, repo_path=repo_path, ref_gate=ref_gate, reference_full_job=reference_full_job, route_dataset=route_dataset, route_ready_datasets=route_ready_datasets, protocol_probe=protocol_probe)
     scientific_progress_gate_light = _read_json(root / 'state' / 'scientific_progress_gate.json', {})
     experiment_iteration_audit_light = _read_json(root / 'state' / 'experiment_iteration_audit.json', {})
     experiment_module_summary = _public_experiment_module_summary(
