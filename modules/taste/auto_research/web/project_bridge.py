@@ -16,7 +16,7 @@ from uuid import uuid4
 sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from auto_research.source_selection import canonical_source_selection, filter_papers_by_source_selection, filter_source_status_by_selection, normalize_source_selection
-from auto_research.paths import CONFIG_PATH
+from auto_research.paths import CONFIG_PATH, LOCAL_DATABASE_DIR, RUNS_DIR
 from auto_research.jobs import JobCancelled
 from agent_state import append_agent_log, list_agents, queue_guidance, refresh_process_flags, upsert_agent
 from runtime_env import detect_project_runtime, interactive_env, runtime_diagnostics, update_project_runtime
@@ -450,7 +450,7 @@ def _source_selection_matches_current(project_id: str, selection: Any) -> bool:
 
 
 def _latest_find_run_id_from_runs() -> str:
-    runs_dir = ROOT / "modules" / "taste" / "auto_research" / "runs"
+    runs_dir = RUNS_DIR
     try:
         candidates = [path for path in runs_dir.glob("find_*") if path.is_dir()]
     except Exception:
@@ -1177,7 +1177,7 @@ def _read_local_venue_cache_manifest(venue_id: str, year: int) -> dict[str, Any]
     if "kdd" in lowered or "sigkdd" in lowered:
         aliases.append("dblp_kdd")
     aliases = list(dict.fromkeys(item for item in aliases if item))
-    local_root = ROOT / "runtime" / "auto_research" / "local_database"
+    local_root = LOCAL_DATABASE_DIR
     for alias in aliases:
         directory = local_root / alias / str(yeint)
         papers_path = directory / "papers.json"
@@ -10058,7 +10058,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         live_find_run_id = _latest_find_run_id_from_runs()
         if live_find_run_id:
             run_id = live_find_run_id
-        live_find_progress_payload = safe_dict(_read_json(ROOT / "modules" / "taste" / "auto_research" / "runs" / run_id / "find_progress.json", {})) if run_id else {}
+        live_find_progress_payload = safe_dict(_read_json(RUNS_DIR / run_id / "find_progress.json", {})) if run_id else {}
         strong_count = 0
         recommendation_target_count = 0
         recommendation_shortfall = 0
@@ -10969,7 +10969,7 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
     if fresh_find_running:
         live_run_id = _latest_find_run_id_from_runs()
         if live_run_id:
-            live_find_progress_payload = safe_dict(_read_json(ROOT / 'modules' / 'taste' / 'auto_research' / 'runs' / live_run_id / 'find_progress.json', {}))
+            live_find_progress_payload = safe_dict(_read_json(RUNS_DIR / live_run_id / 'find_progress.json', {}))
         live_progress = safe_dict(live_find_progress_payload.get('live_progress'))
         live_counts = safe_dict(live_find_progress_payload.get('counts'))
         find_summary = {**find_summary, 'run_id': live_run_id or find_summary.get('run_id')}

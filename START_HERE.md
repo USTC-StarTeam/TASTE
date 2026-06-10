@@ -8,11 +8,11 @@ This is the short takeover path for a new TASTE workspace.
 python -m pip install -r modules/taste/requirements.txt
 npm --prefix modules/taste/auto_research/web/client install
 npm --prefix modules/taste/auto_research/web/client run build
-mkdir -p runtime/auto_research
-cp config.example.json runtime/auto_research/.config.json
+mkdir -p runtime
+cp config.example.json runtime/.config.json
 ```
 
-Set LLM credentials through the web UI or `runtime/auto_research/.config.json`; environment variables are only startup fallbacks for empty saved fields. Keep credentials out of Git. If your TASTE management environment and experiment/training environment are different, set `MANAGEMENT_PYTHON` and `EXPERIMENT_PYTHON`, or save those paths in the web runtime/environment panels.
+Set LLM credentials through the web UI or `runtime/.config.json`; environment variables are only startup fallbacks for empty saved fields. Keep credentials out of Git. If your TASTE management environment and experiment/training environment are different, set `MANAGEMENT_PYTHON` and `EXPERIMENT_PYTHON`, or save those paths in the web runtime/environment panels.
 
 If you will use the paper-writing module, restore the runtime-only writing references:
 

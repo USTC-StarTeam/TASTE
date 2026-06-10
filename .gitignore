@@ -79,7 +79,7 @@ outputs/
 *.rar
 *.7z
 
-# runtime config/runs
+# Legacy package-local generated runtime dirs; canonical runtime is /runtime and ignored above.
 modules/taste/auto_research/runs/
 modules/taste/auto_research/.config.json
 modules/taste/auto_research/local_database/

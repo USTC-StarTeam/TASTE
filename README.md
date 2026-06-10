@@ -38,7 +38,7 @@ http://127.0.0.1:8765
 - **管理环境与实验环境分离**：`management_python` 跑 Web/调度脚本，`experiment_python` 跑训练、评估和实验 guard，避免训练命令误用 Web 管理环境。
 - **证据门控**：环境、数据、参考复现、实验迭代、论文引用、图表和投稿格式都有审计脚本；证据不足时不会假装完成。
 - **本地优先**：默认只监听 `127.0.0.1`，项目状态、日志、下载仓库和生成论文都留在本地。
-- **开源安全默认值**：`runtime/auto_research/.config.json`、`.claude/settings.json`、`projects/*`、logs、runtime、tmp、third_party 等默认不进入 Git。
+- **开源安全默认值**：`runtime/.config.json`、`.claude/settings.json`、`projects/*`、logs、runtime、tmp、third_party 等默认不进入 Git。
 
 ## 仓库结构
 
@@ -109,11 +109,11 @@ npm --prefix modules/taste/auto_research/web/client run build
 ### 4. 创建本地配置
 
 ```bash
-mkdir -p runtime/auto_research
-cp config.example.json runtime/auto_research/.config.json
+mkdir -p runtime
+cp config.example.json runtime/.config.json
 ```
 
-`runtime/auto_research/.config.json` 是唯一的本机网页配置文件，已被 `.gitignore` 忽略。不要提交 API key。也可以不复制模板，直接在网页配置面板保存。
+`runtime/.config.json` 是唯一的本机网页配置文件，已被 `.gitignore` 忽略。不要提交 API key。也可以不复制模板，直接在网页配置面板保存。
 
 ### 5. 创建项目
 
@@ -160,7 +160,7 @@ curl http://127.0.0.1:8765/health
 
 ### LLM 配置
 
-网页配置面板和 `runtime/auto_research/.config.json` 是 LLM/Find/Email 交互配置的权威源；环境变量只在保存配置为空时作为启动兜底；项目配置只保存非密钥摘要和项目运行时信息。
+网页配置面板和 `runtime/.config.json` 是 LLM/Find/Email 交互配置的权威源；环境变量只在保存配置为空时作为启动兜底；项目配置只保存非密钥摘要和项目运行时信息。
 
 常用环境变量：
 
@@ -363,7 +363,7 @@ curl http://127.0.0.1:8765/api/frontend/version
 
 不要提交：
 
-- `runtime/auto_research/.config.json`
+- `runtime/.config.json`
 - `.claude/settings.json`
 - `projects/*` 真实项目工作区
 - `logs/`、`runtime/`、`tmp/`、`third_party/`

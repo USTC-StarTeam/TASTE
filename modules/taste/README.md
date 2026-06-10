@@ -88,21 +88,21 @@ Linux：
 TASTE 的本地配置文件是：
 
 ```text
-../../runtime/auto_research/.config.json
+../../runtime/.config.json
 ```
 
 该文件已被 `.gitignore` 忽略。你可以从安全示例开始：
 
 ```powershell
-New-Item -ItemType Directory -Force ..\..\runtime\auto_research | Out-Null
-Copy-Item ..\..\config.example.json ..\..\runtime\auto_research\.config.json
+New-Item -ItemType Directory -Force ..\..\runtime | Out-Null
+Copy-Item ..\..\config.example.json ..\..\runtime\.config.json
 ```
 
 Linux：
 
 ```bash
-mkdir -p ../../runtime/auto_research
-cp ../../config.example.json ../../runtime/auto_research/.config.json
+mkdir -p ../../runtime
+cp ../../config.example.json ../../runtime/.config.json
 ```
 
 也可以直接在网页里填写配置，然后点击 **Save Config**。
@@ -270,7 +270,7 @@ sequenceDiagram
 每次运行保存在：
 
 ```text
-auto_research/runs/{run_id}/
+runtime/runs/{run_id}/
 ```
 
 常见产物：
@@ -296,10 +296,10 @@ email_report.json
 最新 Markdown 也会同步到阶段目录，例如：
 
 ```text
-auto_research/auto_find/article.md
-auto_research/auto_read/read.md
-auto_research/auto_idea/idea.md
-auto_research/auto_plan/plan.md
+runtime/auto_find/article.md
+runtime/auto_read/read.md
+runtime/auto_idea/idea.md
+runtime/auto_plan/plan.md
 ```
 
 这些生成文件可能包含私人研究上下文，请勿提交到 Git。
@@ -328,7 +328,7 @@ python scripts/smoke_api.py
 ## 安全说明
 
 - 默认只监听 `127.0.0.1`。
-- 不要提交 `../../runtime/auto_research/.config.json`。
+- 不要提交 `../../runtime/.config.json`。
 - 不要提交 API key、SMTP password、私人研究画像、PDF 或 run 产物。
 - run artifact 会隐藏 API key 和 SMTP password，但仍可能包含私人研究上下文。
 - TASTE 只下载公开可访问 PDF，不绕过付费墙。

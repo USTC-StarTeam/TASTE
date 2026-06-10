@@ -3543,12 +3543,12 @@ def test_project_bridge_public_names_normalizes_stale_sibling_workspace_paths():
 
     old_name = "".join(["A", "R"])
     old_root = project_bridge.ROOT.parent / old_name
-    stale = f"artifact={old_root}/runtime/auto_research/runs/find_demo/read.md"
+    stale = f"artifact={old_root}/runtime/runs/find_demo/read.md"
 
     rendered = project_bridge._public_internal_names(stale)
 
     assert str(old_root) not in rendered
-    assert str(project_bridge.ROOT / "runtime" / "auto_research" / "runs" / "find_demo" / "read.md") in rendered
+    assert str(project_bridge.ROOT / "runtime" / "runs" / "find_demo" / "read.md") in rendered
 
 
 def test_api_save_config_preserves_saved_secrets_and_never_writes_project_api_key(tmp_path, monkeypatch):

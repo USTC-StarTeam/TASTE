@@ -88,21 +88,21 @@ Linux:
 TASTE stores local settings in:
 
 ```text
-../../runtime/auto_research/.config.json
+../../runtime/.config.json
 ```
 
 This file is ignored by Git. Start from the safe example:
 
 ```powershell
-New-Item -ItemType Directory -Force ..\..\runtime\auto_research | Out-Null
-Copy-Item ..\..\config.example.json ..\..\runtime\auto_research\.config.json
+New-Item -ItemType Directory -Force ..\..\runtime | Out-Null
+Copy-Item ..\..\config.example.json ..\..\runtime\.config.json
 ```
 
 Linux:
 
 ```bash
-mkdir -p ../../runtime/auto_research
-cp ../../config.example.json ../../runtime/auto_research/.config.json
+mkdir -p ../../runtime
+cp ../../config.example.json ../../runtime/.config.json
 ```
 
 You can also configure everything in the web UI and click **Save Config**.
@@ -259,7 +259,7 @@ sequenceDiagram
 Each run is saved under:
 
 ```text
-auto_research/runs/{run_id}/
+runtime/runs/{run_id}/
 ```
 
 Common artifacts:
@@ -308,7 +308,7 @@ python scripts/smoke_api.py
 ## Security
 
 - TASTE defaults to `127.0.0.1`.
-- Do not commit `../../runtime/auto_research/.config.json`.
+- Do not commit `../../runtime/.config.json`.
 - Do not commit API keys, SMTP passwords, private researcher profiles, PDFs, or run artifacts.
 - Run artifacts redact API keys and SMTP passwords, but may still contain private research context.
 - TASTE only downloads publicly accessible PDFs and does not bypass paywalls.

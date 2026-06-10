@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .paths import ROOT, RUNS_DIR, ensure_directories, stage_latest_path
+from .paths import LEGACY_RUNS_DIRS, ROOT, RUNS_DIR, ensure_directories, stage_latest_path
 
 
 def utc_run_id() -> str:
@@ -23,10 +23,11 @@ def create_run_dir(prefix: str = "run") -> tuple[str, Path]:
 
 
 def run_dir(run_id: str) -> Path:
-    path = RUNS_DIR / run_id
-    if not path.exists():
-        raise FileNotFoundError(f"Run not found: {run_id}")
-    return path
+    for runs_root in (RUNS_DIR, *LEGACY_RUNS_DIRS):
+        path = runs_root / run_id
+        if path.exists():
+            return path
+    raise FileNotFoundError(f"Run not found: {run_id}")
 
 
 def write_json(path: Path, data: Any) -> None:
@@ -175,16 +176,21 @@ def sync_latest(stage: str, filename: str, source_path: Path) -> None:
 def list_runs() -> list[dict]:
     ensure_directories()
     items = []
-    for path in RUNS_DIR.iterdir():
-        if not path.is_dir():
+    seen: set[str] = set()
+    for runs_root in (RUNS_DIR, *LEGACY_RUNS_DIRS):
+        if not runs_root.exists():
             continue
-        manifest = read_json(path / "manifest.json", {})
-        items.append({
-            "run_id": path.name,
-            "created_at": manifest.get("created_at", ""),
-            "stages": manifest.get("stages", []),
-            "path": str(path),
-        })
+        for path in runs_root.iterdir():
+            if not path.is_dir() or path.name in seen:
+                continue
+            seen.add(path.name)
+            manifest = read_json(path / "manifest.json", {})
+            items.append({
+                "run_id": path.name,
+                "created_at": manifest.get("created_at", ""),
+                "stages": manifest.get("stages", []),
+                "path": str(path),
+            })
     return sorted(items, key=lambda item: item["run_id"], reverse=True)
 
 

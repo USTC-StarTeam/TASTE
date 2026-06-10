@@ -4,11 +4,11 @@ The workflow is designed as a local-first research assistant. Please keep privat
 
 ## Do Not Commit
 
-- `runtime/auto_research/.config.json`
+- `runtime/.config.json`
 - LLM API keys
 - SMTP passwords or app passwords
 - private researcher profiles
-- generated run artifacts in `runtime/auto_research/runs/`
+- generated run artifacts in `runtime/runs/`
 - downloaded PDFs or paper caches
 - private email reports
 

@@ -7217,6 +7217,56 @@ def _read_request_should_use_current_find_wrapper(request: ReadRequest, project:
     return _current_find_read_is_incomplete(root, current_run_id)
 
 
+def _current_find_downstream_gate_blocker(stage: str) -> dict[str, Any] | None:
+    current = _current_project_for_find_guard()
+    if not current:
+        return None
+    project, root = current
+    run_id = _current_project_find_run_id(root)
+    if not run_id or not _current_find_read_is_incomplete(root, run_id):
+        return None
+    validation = _read_project_json(root / "state" / "current_find_claude_reading_validation.json", {})
+    state_plan = _read_project_json(root / "state" / "current_find_research_plan.json", {})
+    try:
+        pending = int((validation if isinstance(validation, dict) else {}).get("pending_full_text_reading_count") or 0)
+    except (TypeError, ValueError):
+        pending = 0
+    status = str((validation if isinstance(validation, dict) else {}).get("status") or (state_plan if isinstance(state_plan, dict) else {}).get("status") or "blocked_current_find_read_incomplete").strip()
+    next_action = str((state_plan if isinstance(state_plan, dict) else {}).get("next_required_action") or "run_read_for_current_find").strip()
+    return {
+        "code": "current_find_read_gate_blocked",
+        "stage": stage,
+        "project": project,
+        "run_id": run_id,
+        "status": status,
+        "pending_full_text_reading_count": pending,
+        "next_required_action": next_action,
+        "message": "当前 Find 的全文精读/阅读验证尚未通过；不能生成想法或计划。请先运行或修复精读，补齐同一论文的 PDF/HTML/页面全文证据。",
+    }
+
+
+def _current_find_downstream_blocked_job(stage: str, blocker: dict[str, Any]) -> JobState:
+    message = str(blocker.get("message") or "当前 Find 的精读验证尚未通过；下游阶段已暂停。").strip()
+    job = JobState(f"{stage}_{uuid4().hex[:10]}", stage)
+    job.status = "blocked"
+    job.run_id = str(blocker.get("run_id") or "")
+    job.result = {
+        "status": "blocked_current_find_read_gate",
+        "stage": stage,
+        "project": blocker.get("project"),
+        "run_id": job.run_id,
+        "source": "current_find_read_gate",
+        "blocker": blocker,
+        "summary": message,
+    }
+    JOBS[job.job_id] = job
+    job.set_progress("blocked", 1, 1, message)
+    job.log(f"{stage} blocked: {message}")
+    job.done.set()
+    _persist_jobs()
+    return job
+
+
 def _current_find_read_validation_requires_repair(root: Path, run_id: str) -> bool:
     validation = _read_project_json(root / "state" / "current_find_claude_reading_validation.json", {})
     if not isinstance(validation, dict) or validation.get("valid") is True:
@@ -7352,6 +7402,9 @@ def api_idea(request: IdeaRequest) -> dict:
     blocker = _taste_stage_live_full_cycle_blocker("idea")
     if blocker:
         return JSONResponse(status_code=409, content=blocker)
+    downstream_blocker = _current_find_downstream_gate_blocker("idea")
+    if downstream_blocker:
+        return _current_find_downstream_blocked_job("idea", downstream_blocker).as_dict()
     config = load_config()
     job = start_job("idea", lambda log, should_cancel, _progress: run_idea(request, config, log, should_cancel))
     return job.as_dict()
@@ -7362,6 +7415,9 @@ def api_plan(request: PlanRequest) -> dict:
     blocker = _taste_stage_live_full_cycle_blocker("plan")
     if blocker:
         return JSONResponse(status_code=409, content=blocker)
+    downstream_blocker = _current_find_downstream_gate_blocker("plan")
+    if downstream_blocker:
+        return _current_find_downstream_blocked_job("plan", downstream_blocker).as_dict()
     config = load_config()
     job = start_job("plan", lambda log, should_cancel, _progress: run_plan(request, config, log, should_cancel))
     return job.as_dict()
@@ -7372,6 +7428,9 @@ def api_plan_polish(request: PlanPolishRequest) -> dict:
     blocker = _taste_stage_live_full_cycle_blocker("plan-polish")
     if blocker:
         return JSONResponse(status_code=409, content=blocker)
+    downstream_blocker = _current_find_downstream_gate_blocker("plan-polish")
+    if downstream_blocker:
+        return _current_find_downstream_blocked_job("plan-polish", downstream_blocker).as_dict()
     config = load_config()
     job = start_job("plan-polish", lambda log, should_cancel, _progress: polish_plan(request, config, log, should_cancel))
     return job.as_dict()

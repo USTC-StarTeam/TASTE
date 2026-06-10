@@ -44,8 +44,6 @@ def resolve_taste_run_dir(run_id: str, state: Any | None = None) -> Path | None:
     candidates.extend([
         RUNS_DIR / run_id,
         LEGACY_RUNS_DIR / run_id,
-        ROOT / "runtime" / "auto_research" / "runs" / run_id,
-        WORKSPACE_ROOT / "auto_research" / "runs" / run_id,
     ])
     seen: set[str] = set()
     for candidate in candidates:
@@ -125,7 +123,10 @@ def sync_current_find_progress(state: Any, taste_dir: Path) -> dict[str, Any]:
     if run_dir_text:
         candidates.append(Path(run_dir_text) / "find_progress.json")
     if run_id:
-        candidates.append(WORKSPACE_ROOT / "auto_research" / "runs" / run_id / "find_progress.json")
+        candidates.extend([
+            RUNS_DIR / run_id / "find_progress.json",
+            LEGACY_RUNS_DIR / run_id / "find_progress.json",
+        ])
     target = taste_dir / "find_progress.json"
     for source in candidates:
         if not source.exists():

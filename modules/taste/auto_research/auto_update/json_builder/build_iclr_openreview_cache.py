@@ -292,7 +292,7 @@ def parse_years(value: str) -> list[int]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build local ICLR OpenReview paper index JSON files.")
     parser.add_argument("--years", default=",".join(str(year) for year in DEFAULT_YEARS), help="Comma/space separated years, default: 2026,2025.")
-    parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT), help="Output root, default: auto_research/local_database.")
+    parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT), help="Output root, default: runtime/local_database.")
     parser.add_argument("--page-size", type=int, default=1000)
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--retries", type=int, default=2)
