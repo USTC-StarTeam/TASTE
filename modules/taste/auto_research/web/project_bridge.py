@@ -10133,6 +10133,8 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         status = "running"
     elif not full_job_live and not env.get("valid") and not literature_gate_blocked and run_id:
         status = "blocked_environment_base_selection_required"
+    elif not full_job_live and env.get("valid") and not route_ready_datasets and not literature_gate_blocked:
+        status = "blocked_fresh_base_data_required"
     if status == "running" and pid and full_job_live:
         public_phase = _public_phase_for_full_cycle(latest_stage or full_job.get("stage"), project, root)
         summary = f"完整科研自循环正在运行；阶段={public_phase}；PID={pid}" + (f"；运行时长={elapsed}" if elapsed else "")
@@ -10144,6 +10146,8 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         summary = "完整科研自循环已停在实验证据审计；参考复现已通过，但当前主线还缺少可审计、可写入论文的候选实验结果。"
     elif selected_base_viability_blocked:
         summary = "完整科研自循环已停在实验门控；参考复现已通过，但当前主线还缺少可审计、可写入论文的候选实验证据。"
+    elif status == "blocked_fresh_base_data_required":
+        summary = f"环境阶段已选择当前候选基底：{base_title}；但真实数据/loader 尚未通过，不能进入实验或论文证据。"
     elif reference_full_job_live:
         ref_pid = str(reference_full_job.get("pid") or "")
         ref_title = base_title or "当前基底"
@@ -10982,6 +10986,8 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
     reference_full_job_live = bool(reference_full_job.get('process_alive') is True and reference_full_job.get('pid') and _pid_alive(reference_full_job.get('pid')))
     raw_cycle_status = str(full_cycle_raw.get('status') or 'not_started')
     status = 'running' if (full_job_live or reference_full_job_live) else ('stale_full_research_cycle_snapshot' if raw_cycle_status == 'running' else raw_cycle_status)
+    if not (full_job_live or reference_full_job_live) and env.get('valid') and not route_ready_datasets:
+        status = 'blocked_fresh_base_data_required'
     elapsed = str(full_job.get('elapsed') or full_job.get('elapsed_sec') or '') if isinstance(full_job, dict) else ''
     command = str(full_job.get('cmd') or '') if isinstance(full_job, dict) else ''
     full_job_kind = str(full_job.get('kind') or '') if isinstance(full_job, dict) else ''
@@ -11091,6 +11097,8 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
         summary = f'完整科研自循环已停止在最大轮次后；没有正在运行的 full-cycle。当前基底：{base_title}。'
     elif isinstance(full_job, dict) and str(full_job.get('status') or '').lower() == 'stale':
         summary = f'完整科研自循环进程已停止；没有正在运行的 full-cycle。当前基底：{base_title}。'
+    elif status == 'blocked_fresh_base_data_required':
+        summary = f'环境阶段已选择当前候选基底：{base_title}；但真实数据/loader 尚未通过，不能进入实验或论文证据。'
     else:
         summary = str(full_cycle_raw.get('summary_zh') or full_cycle_raw.get('summary') or f'项目：{topic}；状态：{status}。当前基底：{base_title}。')
     summary = _public_run_summary_without_action_plan(summary)

@@ -506,13 +506,22 @@ def sync_selected_candidate(paths, selected: dict[str, Any]) -> None:
             continue
         if str(row.get('local_path') or '') != selected_path and str(row.get('url') or '') != str(selected.get('url') or ''):
             continue
-        row['repo_execution_ready'] = True
-        row['repo_selection_bucket'] = 'evidence_ready_fallback' if selected.get('missing_topic_groups') else 'evidence_ready'
+        loader_ready = bool(claim_ready or selected.get('claim_ready_dataset'))
+        pending_bootstrap = bool(selected.get('pending_loader_bootstrap') or selected.get('pending_reason'))
+        row['repo_execution_ready'] = loader_ready
+        if pending_bootstrap and not loader_ready:
+            row['repo_selection_bucket'] = 'claude_transformable_pending_loader_bootstrap'
+        else:
+            row['repo_selection_bucket'] = 'evidence_ready_fallback' if selected.get('missing_topic_groups') else 'evidence_ready'
         row['evidence_selection_score'] = evidence_score
         row['claim_ready_datasets'] = claim_ready
         row['claim_ready_dataset'] = selected.get('claim_ready_dataset', '')
         row['repo_support_signals'] = [key for key, ok in selected.get('signals', {}).items() if ok is True]
-        row['notes'] = 'Evidence-ready fallback: local code and real dataset loader probes passed; topic gaps remain and must be addressed by experiment design.'
+        row['notes'] = (
+            'Claude accepted this as the best transformable pending-loader route; experiments remain blocked until real dataset loader evidence passes.'
+            if pending_bootstrap and not loader_ready
+            else 'Evidence-ready fallback: local code and real dataset loader probes passed; topic gaps remain and must be addressed by experiment design.'
+        )
         # Keep the original topic/reuse score as historical taste signal, but prevent UI/planner from treating this as unusable.
         original = float(row.get('repo_reuse_score', row.get('score', 0)) or 0)
         row['repo_reuse_score'] = max(original, 9.0)

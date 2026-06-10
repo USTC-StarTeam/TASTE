@@ -569,6 +569,62 @@ def test_compact_claude_job_preserves_panel_stage():
 
 
 
+
+def test_environment_public_logs_fold_raw_command_progress():
+    logs = server._public_job_logs(
+        "environment",
+        [
+            "Workflow command: /tmp/taste-local/miniforge/bin/python scripts/run_environment_stage.py --project demo",
+            "$ /tmp/taste-local/miniforge/bin/python scripts/select_evidence_ready_repo.py --project demo",
+            "Runtime PATH head: /tmp/taste-local/bin | /tmp/taste-local/conda/bin",
+        ],
+        {"message": "$ /tmp/taste-local/miniforge/bin/python scripts/select_evidence_ready_repo.py --project demo"},
+        {},
+        limit=8,
+    )
+    text = "\n".join(logs)
+    assert "环境配置正在运行阶段审计命令" in text
+    assert "select_evidence_ready_repo.py" not in text
+    assert "/tmp/taste-local" not in text
+    assert "Runtime PATH head" not in text
+
+
+
+def test_environment_compact_job_refreshes_blocked_progress_from_project_summary(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "project_summary",
+        lambda _project: {
+            "status": "blocked_fresh_base_data_required",
+            "full_research_cycle": {
+                "status": "blocked_fresh_base_data_required",
+                "summary_zh": "环境阶段已选择当前候选基底：example/repo；但真实数据/loader 尚未通过，不能进入实验或论文证据。",
+            },
+            "stages": {"environment": {"summary": "当前基底已选定，等待真实数据/loader。"}},
+        },
+    )
+    item = {
+        "job_id": "environment_old",
+        "stage": "environment",
+        "status": "blocked",
+        "created_at": "2026-06-10T00:00:00Z",
+        "progress": {"phase": "blocked", "current": 1, "total": 1, "percent": 100, "message": "项目：demo；状态：not_started。"},
+        "logs": ["environment blocked"],
+        "result": {"project": "demo_project", "action": "environment", "panel_stage": "environment", "status": "blocked"},
+    }
+
+    row = server._compact_job_for_list(item)
+
+    assert row["progress"]["phase"] == "blocked_fresh_base_data_required"
+    assert "not_started" not in row["progress"]["message"]
+    assert "example/repo" in row["progress"]["message"]
+    assert row["result"]["summary"] == row["progress"]["message"]
+    joined_logs = "\n".join(row["logs"])
+    assert "not_started" not in joined_logs
+    assert "未选择可审计基底仓库" not in joined_logs
+    assert "example/repo" in joined_logs
+    assert "审计进展：审计进展" not in joined_logs
+
 def test_environment_job_list_uses_compact_public_logs(monkeypatch):
     JOBS.clear()
     monkeypatch.setattr(server, "_reconcile_detached_launcher_jobs", lambda: None)
@@ -602,7 +658,6 @@ def test_environment_job_list_uses_compact_public_logs(monkeypatch):
     log_text = "\n".join(listed.get("logs") or [])
     assert "当前状态：项目：demo" in log_text
     assert "详细日志：已保留" in log_text
-    assert "未选择可审计基底仓库" in log_text
     assert "/tmp/taste-local" not in log_text
     assert "select_evidence_ready_repo.py" not in log_text
     assert "Noisy historical query" not in log_text
@@ -1488,6 +1543,23 @@ def test_environment_repo_search_ignores_find_source_toggles(monkeypatch):
     assert any("scripts/ingest_discovery.py" in cmd for cmd in calls)
 
 
+
+def test_environment_run_optional_timeout_returns_124(monkeypatch, tmp_path, capsys):
+    monkeypatch.syspath_prepend(str(server.WORKSPACE_ROOT / "scripts"))
+    env_stage = importlib.import_module("run_environment_stage")
+
+    def fake_run(cmd, cwd, text=True, timeout=None):
+        assert timeout == 7
+        raise env_stage.subprocess.TimeoutExpired(cmd, timeout)
+
+    monkeypatch.setattr(env_stage.subprocess, "run", fake_run)
+
+    rc = env_stage.run_optional(["selector", "--project", "demo"], tmp_path, timeout=7)
+
+    assert rc == 124
+    assert "optional command timed out after 7s" in capsys.readouterr().out
+
+
 def test_environment_blocker_replaces_stale_implementation_plan(monkeypatch, tmp_path):
     monkeypatch.syspath_prepend(str(server.WORKSPACE_ROOT / "scripts"))
     env_stage = importlib.import_module("run_environment_stage")
@@ -1507,6 +1579,106 @@ def test_environment_blocker_replaces_stale_implementation_plan(monkeypatch, tmp
     assert impl["fresh_find_run_id"] == "find_new"
     assert impl["repo"] == {}
 
+
+
+def test_generic_data_plan_without_project_adapter_marks_selected_repo_data_blocked(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(server.WORKSPACE_ROOT / "scripts"))
+    build_req = importlib.reload(importlib.import_module("build_repo_data_requirements"))
+    probe = importlib.reload(importlib.import_module("probe_repo_dataset"))
+    build_plan = importlib.reload(importlib.import_module("build_fresh_base_implementation_plan"))
+    for module in [build_req, probe, build_plan]:
+        monkeypatch.setattr(module, "ROOT", tmp_path)
+
+    project = "demo_project"
+    root = tmp_path / "projects" / project
+    state = root / "state"
+    planning = root / "planning" / "finding"
+    repo = root / "repos" / "selected" / "example_repo"
+    repo.mkdir(parents=True)
+    state.mkdir(parents=True)
+    planning.mkdir(parents=True)
+    write_json(planning / "find_progress.json", {"run_id": "find_current"})
+    write_json(
+        state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": "find_current",
+            "selection_stage": "environment_claude_code",
+            "selection_gate": "accepted_by_claude_transformable_pending_loader_bootstrap",
+            "evidence_ready_count": 0,
+            "selected": {
+                "name": "example/repo",
+                "repo_path": str(repo),
+                "fresh_find_run_id": "find_current",
+                "selection_stage": "environment_claude_code",
+                "pending_loader_bootstrap": True,
+                "probe_summary": {"claim_ready_datasets": []},
+            },
+        },
+    )
+    adapter = root / "scripts" / "adapters" / "build_fresh_base_implementation_plan.py"
+
+    assert build_req.write_generic_requirement(project, str(repo), root / "scripts" / "adapters" / "build_repo_data_requirements.py") == 0
+    assert probe.write_generic_probe(project, str(repo), "demo_env", root / "scripts" / "adapters" / "probe_repo_dataset.py") == 0
+    assert build_plan.write_generic_plan(project, adapter) == 0
+
+    req = read_json(state / "repo_data_requirements.json")
+    real_probe = read_json(state / "real_dataset_probe.json")
+    plan = read_json(state / "fresh_base_implementation_plan.json")
+    assert req["status"] == "blocked_missing_project_data_adapter"
+    assert real_probe["status"] == "blocked_missing_project_dataset_probe_adapter"
+    assert plan["status"] == "blocked_fresh_base_data_required"
+    assert plan["repo"]["name"] == "example/repo"
+    assert plan["ready_datasets"] == []
+    assert plan["blocked_datasets"]
+
+
+def test_selected_pending_environment_repo_summary_is_data_blocked(tmp_path, monkeypatch):
+    from auto_research.web import project_bridge
+
+    project = "demo_project"
+    root = tmp_path / project
+    state = root / "state"
+    planning = root / "planning" / "finding"
+    repo = root / "repos" / "selected" / "example_repo"
+    repo.mkdir(parents=True)
+    state.mkdir(parents=True)
+    planning.mkdir(parents=True)
+    write_json(root / "project.json", {"name": project, "topic": "Demo topic", "target_venue": "ICLR"})
+    write_json(planning / "find_progress.json", {"run_id": "find_current", "phase": "complete", "strong_recommendation_count": 4, "recommendation_target_count": 4, "recommendation_shortfall": 0})
+    write_json(planning / "find_results.json", {"run_id": "find_current", "strong_recommendations": [recommended_paper("p1", "Paper One")]})
+    write_json(state / "current_find_research_plan.json", {"run_id": "find_current", "status": "claude_takeover_ready"})
+    write_json(
+        state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": "find_current",
+            "selection_stage": "environment_claude_code",
+            "selection_gate": "accepted_by_claude_transformable_pending_loader_bootstrap",
+            "evidence_ready_count": 0,
+            "selected": {
+                "name": "example/repo",
+                "url": "https://example.test/repo",
+                "repo_path": str(repo),
+                "fresh_find_run_id": "find_current",
+                "selection_stage": "environment_claude_code",
+                "pending_loader_bootstrap": True,
+                "probe_summary": {"claim_ready_datasets": []},
+            },
+        },
+    )
+    write_json(state / "fresh_base_implementation_plan.json", {"fresh_find_run_id": "find_current", "status": "blocked_fresh_base_data_required", "repo": {"name": "example/repo", "repo_path": str(repo)}, "ready_datasets": []})
+    write_json(state / "full_research_cycle.json", {"status": "not_started"})
+    monkeypatch.setattr(project_bridge, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(project_bridge, "_remote_process_rows", lambda: [])
+    monkeypatch.setattr(project_bridge, "_current_project_source_selection", lambda _project, _root: {"venue_ids": ["openreview_iclr_2026"], "years": [2026]})
+
+    summary = project_bridge._fast_project_summary(project, root, {"name": project, "topic": "Demo topic", "target_venue": "ICLR"})
+
+    assert summary["status"] == "blocked_fresh_base_data_required"
+    assert "not_started" not in summary["summary"]
+    assert "example/repo" in summary["summary"]
+    assert summary["main_route"]["repo_name"] == "example/repo"
+    assert summary["stages"]["environment"]["status"] == "selected"
+    assert summary["stages"]["environment"]["data_status"] == "waiting_for_real_data_loader_evidence"
 
 def test_select_fresh_base_marks_stale_implementation_plan(monkeypatch, tmp_path):
     monkeypatch.syspath_prepend(str(server.WORKSPACE_ROOT / "scripts"))

@@ -1927,10 +1927,35 @@ def _public_stage_job_logs(stage: Any, logs: Any, progress: Any = None, result: 
     public_stage = _public_taste_stage(stage)
     stage_label = "环境配置" if public_stage == "environment" else ("实验迭代" if public_stage == "experiment" else public_stage)
     public_prefixes = ("当前状态：", "阶段摘要：", "门控：", "审计进展：", "详细日志：", "产物：", "日志：")
-    if raw and all(any(line.startswith(prefix) for prefix in public_prefixes) for line in raw):
+
+    def command_status(value: Any) -> str:
+        text = str(value or "").strip()
+        lowered = text.lower()
+        if not text:
+            return ""
+        if text.startswith("$") or lowered.startswith("workflow command:") or "bin/python" in lowered or " scripts/" in lowered or lowered.startswith("runtime path head:"):
+            return f"{stage_label}正在运行阶段审计命令，完整命令保留在后端任务审计。"
+        return ""
+
+    def strip_public_prefixes(value: Any) -> str:
+        text = str(value or "").strip()
+        changed = True
+        while changed:
+            changed = False
+            for prefix in public_prefixes:
+                if text.startswith(prefix):
+                    text = text[len(prefix):].strip()
+                    changed = True
+        return text
+
+    if raw and all(any(line.startswith(prefix) for prefix in public_prefixes) for line in raw) and not (progress.get("message") or result.get("summary")):
         deduped: list[str] = []
         seen_public: set[str] = set()
         for line in raw:
+            if line.startswith("当前状态："):
+                replacement = command_status(line.removeprefix("当前状态："))
+                if replacement:
+                    line = "当前状态：" + replacement
             if line in seen_public:
                 continue
             seen_public.add(line)
@@ -1963,7 +1988,7 @@ def _public_stage_job_logs(stage: Any, logs: Any, progress: Any = None, result: 
     status = result.get("status") or progress.get("phase")
     message = progress.get("message")
     if message:
-        add("当前状态：", message)
+        add("当前状态：", command_status(message) or message)
     elif status:
         add("当前状态：", status)
 
@@ -1982,10 +2007,11 @@ def _public_stage_job_logs(stage: Any, logs: Any, progress: Any = None, result: 
     if raw:
         checkpoints: list[str] = []
         for line in raw:
-            lowered = line.lower()
-            if line.startswith("$") or "bin/python" in lowered or "claude -p" in lowered:
+            line_text = strip_public_prefixes(line)
+            lowered = line_text.lower()
+            if line_text.startswith("$") or "bin/python" in lowered or "claude -p" in lowered or lowered.startswith("workflow command:") or lowered.startswith("runtime path head:"):
                 continue
-            if "traceback" in lowered or "file \"" in lowered:
+            if "traceback" in lowered or 'file "' in lowered:
                 continue
             if "optional command failed" in lowered:
                 checkpoints.append("有可恢复的候选审计命令失败；当前门控仍按阶段摘要展示。")
@@ -1999,8 +2025,8 @@ def _public_stage_job_logs(stage: Any, logs: Any, progress: Any = None, result: 
             if "selected_active_repo=none" in lowered:
                 checkpoints.append("未选择可审计基底仓库。")
                 continue
-            if "repo_search_running" in lowered or "audit complete" in lowered or "ready=0" in lowered:
-                checkpoints.append(clean(line, max_len=180))
+            if "repo_search_running" in lowered or "audit complete" in lowered or "ready=0" in lowered or "ingested=" in lowered:
+                checkpoints.append(clean(line_text, max_len=180))
                 continue
         for line in checkpoints[-3:]:
             add("审计进展：", line, max_len=220)
@@ -6766,6 +6792,34 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
         elif paper_status:
             public_status = "needs_writing" if paper_status.startswith("blocked") or paper_status in {"normality_blocked", "preview_pdf_blocked"} else paper_status
     public_progress = dict(item.get("progress")) if isinstance(item.get("progress"), dict) else {}
+    if public_stage == "environment" and public_status == "blocked":
+        project_id = str(compact_result.get("project") or result.get("project") or "").strip()
+        if project_id:
+            try:
+                live_summary = project_summary(project_id)
+            except Exception:
+                live_summary = {}
+            if isinstance(live_summary, dict):
+                full_cycle = live_summary.get("full_research_cycle") if isinstance(live_summary.get("full_research_cycle"), dict) else {}
+                stages = live_summary.get("stages") if isinstance(live_summary.get("stages"), dict) else {}
+                environment = stages.get("environment") if isinstance(stages.get("environment"), dict) else {}
+                live_status = str(live_summary.get("status") or full_cycle.get("status") or public_status).strip()
+                live_message = _human_progress_message(full_cycle or live_summary, fallback=str(environment.get("summary") or ""))
+                has_specific_environment_gate = bool(
+                    live_status.startswith("blocked_fresh_base")
+                    or "真实数据/loader" in live_message
+                    or "环境阶段已选择" in live_message
+                    or "current candidate base" in live_message.lower()
+                )
+                if live_message and has_specific_environment_gate:
+                    public_progress["message"] = live_message
+                    public_progress["phase"] = live_status or public_progress.get("phase") or "blocked"
+                    public_progress["current"] = 1
+                    public_progress["total"] = 1
+                    public_progress["percent"] = 100
+                    compact_result["summary"] = live_message
+                    if live_status:
+                        compact_result["status"] = live_status
     if full_cycle_job:
         if isinstance(compact_result.get("summary"), str) and any(marker in compact_result["summary"].lower() for marker in ["候选路线", "独立授权", "base_switch", "selected_base", "deterministic"]):
             compact_result["summary"] = "历史 full-cycle 启动器已停止；当前状态以项目摘要和实验模块为准。"
@@ -8277,29 +8331,46 @@ async def ws_job(websocket: WebSocket, job_id: str):
                     live_job = next((item for item in _live_jobs_from_projects(compact=True) if str((item.get("result") if isinstance(item.get("result"), dict) else {}).get("project") or "") == project_id), None)
             if live_job:
                 live_job = _strip_public_taste_marker(live_job)
+                live_status = str(live_job.get("status") or "")
+                live_stage = _public_taste_stage(live_job.get("stage"))
+                if live_status in {"done", "error", "cancelled", "blocked"} or live_status.startswith("blocked"):
+                    compact_live_job = _compact_job_for_list(live_job) if live_stage in {"environment", "experiment"} else live_job
+                    for line in (compact_live_job.get("logs") or []):
+                        await websocket.send_json({"type": "log", "message": str(line)})
+                    await websocket.send_json({"type": "progress", "progress": _strip_public_taste_marker(compact_live_job.get("progress") or {})})
+                    await websocket.send_json({"type": "complete", "job": compact_live_job})
+                    return
                 logs = [str(line) for line in (live_job.get("logs") or [])]
-                for line in logs[sent:]:
+                new_logs = logs[sent:]
+                if live_stage in {"environment", "experiment"}:
+                    new_logs = _public_job_logs(live_job.get("stage"), new_logs, {}, {}, limit=6)
+                for line in new_logs:
                     await websocket.send_json({"type": "log", "message": line})
                 sent = len(logs)
                 await websocket.send_json({"type": "progress", "progress": _strip_public_taste_marker(live_job.get("progress") or {})})
-                if str(live_job.get("status") or "") in {"done", "error", "cancelled", "blocked"}:
-                    await websocket.send_json({"type": "complete", "job": live_job})
-                    return
                 await asyncio.sleep(2.0)
                 continue
             job = JOBS.get(job_id)
             if not job:
                 await websocket.send_json({"type": "error", "message": "job not found"})
                 return
-            for line in _strip_public_taste_marker(job.logs[sent:]):
+            job_stage = _public_taste_stage(job.stage)
+            if job.status in {"done", "error", "cancelled", "blocked"}:
+                compact_job = _compact_job_for_list(job.as_dict(compact=True)) if job_stage in {"environment", "experiment"} else job.as_dict(compact=True)
+                for line in (compact_job.get("logs") or []):
+                    await websocket.send_json({"type": "log", "message": str(line)})
+                await websocket.send_json({"type": "progress", "progress": _strip_public_taste_marker(compact_job.get("progress") or {})})
+                await websocket.send_json({"type": "complete", "job": compact_job})
+                return
+            new_logs = _strip_public_taste_marker(job.logs[sent:])
+            if job_stage in {"environment", "experiment"}:
+                new_logs = _public_job_logs(job.stage, new_logs, {}, {}, limit=6)
+            for line in new_logs:
                 await websocket.send_json({"type": "log", "message": line})
             sent = len(job.logs)
             if job.progress_version != sent_progress:
                 await websocket.send_json({"type": "progress", "progress": _strip_public_taste_marker(job.progress)})
                 sent_progress = job.progress_version
-            if job.status in {"done", "error", "cancelled", "blocked"}:
-                await websocket.send_json({"type": "complete", "job": job.as_dict(compact=True)})
-                return
             await asyncio.sleep(0.5)
     except WebSocketDisconnect:
         return

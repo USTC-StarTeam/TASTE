@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import re
 import subprocess
 import sys
@@ -102,7 +103,8 @@ def select_current_run_environment_repo(project: str, paths, env_name: str, max_
         if round_index > 1 and '--candidate-source' in round_selector:
             source_index = round_selector.index('--candidate-source')
             del round_selector[source_index:source_index + 2]
-        rc = run_optional(round_selector, ROOT)
+        selector_timeout = int(os.environ.get('ENV_REPO_SELECTOR_TIMEOUT_SEC', '900') or '900')
+        rc = run_optional(round_selector, ROOT, timeout=selector_timeout)
         selection = load_json(paths.state / 'evidence_ready_repo_selection.json', {})
         selected = selection.get('selected') if isinstance(selection, dict) and isinstance(selection.get('selected'), dict) else {}
         repo = str(selected.get('repo_path') or selected.get('local_path') or '').strip()
@@ -114,17 +116,25 @@ def select_current_run_environment_repo(project: str, paths, env_name: str, max_
     write_fresh_base_implementation_blocker(paths, run_id, blocker_reason)
     raise SystemExit(2)
 
-def run(cmd: list[str], cwd: Path) -> int:
+def run(cmd: list[str], cwd: Path, timeout: int | None = None) -> int:
     print('$ ' + ' '.join(cmd), flush=True)
-    proc = subprocess.run(cmd, cwd=cwd, text=True)
+    try:
+        proc = subprocess.run(cmd, cwd=cwd, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print(f'command timed out after {timeout}s: {" ".join(cmd)}', flush=True)
+        raise SystemExit(124)
     if proc.returncode != 0:
         raise SystemExit(proc.returncode)
     return proc.returncode
 
 
-def run_optional(cmd: list[str], cwd: Path) -> int:
+def run_optional(cmd: list[str], cwd: Path, timeout: int | None = None) -> int:
     print('$ ' + ' '.join(cmd), flush=True)
-    proc = subprocess.run(cmd, cwd=cwd, text=True)
+    try:
+        proc = subprocess.run(cmd, cwd=cwd, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print(f'optional command timed out after {timeout}s: {" ".join(cmd)}', flush=True)
+        return 124
     if proc.returncode != 0:
         print(f'optional command failed rc={proc.returncode}: {" ".join(cmd)}', flush=True)
     return proc.returncode
@@ -503,7 +513,8 @@ def maybe_switch_to_evidence_ready_repo(project: str, paths, env_name: str, curr
     ]
     for round_index in range(1, max(1, max_rounds) + 1):
         print(f'TASTE repo-selection iteration {round_index}/{max_rounds}', flush=True)
-        rc = run_optional(selector, ROOT)
+        selector_timeout = int(os.environ.get('ENV_REPO_SELECTOR_TIMEOUT_SEC', '900') or '900')
+        rc = run_optional(selector, ROOT, timeout=selector_timeout)
         selection = load_json(paths.state / 'evidence_ready_repo_selection.json', {})
         active = load_json(paths.state / 'active_repo.json', {})
         next_repo = str(active.get('repo_path', '') if isinstance(active, dict) else '')
