@@ -2285,10 +2285,24 @@ def _reference_protocol_import_probe_public_payload(payload: dict[str, Any]) -> 
     results = out.get("results") if isinstance(out.get("results"), dict) else {}
     direct_import = results.get("direct_import") if isinstance(results.get("direct_import"), dict) else {}
     audit = results.get("dependency_audit") if isinstance(results.get("dependency_audit"), dict) else {}
+    if not audit and isinstance(out.get("dependency_audit"), dict):
+        audit = out.get("dependency_audit") or {}
     missing = audit.get("missing")
-    total = audit.get("total_requirements")
-    first_blocker = str(direct_import.get("blocker") or "").strip()
-    if verdict == "code_present_deps_missing" or str(direct_import.get("status") or "") == "failed":
+    if missing in (None, "") and isinstance(audit.get("missing_packages"), list):
+        missing = len(audit.get("missing_packages") or [])
+    total = audit.get("total_requirements") or audit.get("total")
+    first_blocker = str(direct_import.get("blocker") or direct_import.get("error") or "").strip()
+    import_failed = str(direct_import.get("status") or "") == "failed"
+    imports = out.get("imports") if isinstance(out.get("imports"), dict) else {}
+    if not first_blocker and imports:
+        for item in imports.values():
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("status") or "") == "failed":
+                import_failed = True
+                first_blocker = str(item.get("blocker") or item.get("error") or "").strip()
+                break
+    if verdict == "code_present_deps_missing" or import_failed:
         out.setdefault("status", "reference_protocol_probe_blocked")
         out.setdefault("decision", "dependency_install_required")
         summary = "reference protocol/import probe 已运行；代码结构存在，但当前环境依赖缺失"

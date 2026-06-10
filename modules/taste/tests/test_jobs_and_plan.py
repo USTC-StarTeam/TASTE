@@ -1943,6 +1943,15 @@ def test_reference_protocol_import_probe_surfaces_dependency_blocker(monkeypatch
     assert experiment_gate["decision"] == "dependency_install_required"
     assert "json_repair" in experiment_gate["human_summary"]
 
+    top_level_probe = project_bridge._reference_protocol_import_probe_public_payload({
+        "verdict": "code_present_deps_missing",
+        "dependency_audit": {"missing": 39, "total": 46},
+        "imports": {"gpt_researcher": {"status": "failed", "error": "No module named 'json_repair'"}},
+    })
+    assert top_level_probe["decision"] == "dependency_install_required"
+    assert "39/46" in top_level_probe["human_summary"]
+    assert "json_repair" in top_level_probe["human_summary"]
+
 
 def test_select_fresh_base_marks_stale_implementation_plan(monkeypatch, tmp_path):
     monkeypatch.syspath_prepend(str(server.WORKSPACE_ROOT / "scripts"))
