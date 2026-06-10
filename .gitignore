@@ -1,0 +1,93 @@
+# framework: track source, prompts, templates, docs, and project config.
+# Do NOT track downloaded research repos, datasets, runs, generated papers, logs, or caches.
+
+# Python / node caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+modules/taste/.venv/
+modules/taste/auto_research/web/client/node_modules/
+modules/taste/auto_research/web/client/dist/
+modules/taste/auto_research/web/client/tsconfig.tsbuildinfo
+
+# Runtime logs and temporary files
+*.log
+logs/
+tmp/
+.tmp/
+tmp_*.txt
+.probe/
+.runtime/
+runtime/
+taste_web*.log
+backups/
+
+# Local workspace config and takeover notes. Keep examples/templates in Git,
+# but never publish a machine-specific default project, API-key state, or handoff.
+/config.json
+/工作状态.txt
+/handoff/
+
+# Imported local patch bundles, macOS resource forks, and manual pre-patch copies.
+# They are useful as local recovery material but are not part of the framework.
+local_imports_from_mac/
+.claude/settings.json
+.claude/scheduled_tasks.json
+.claude/projects/
+._*
+**/._*
+*.orig
+*.rej
+
+# External reference checkouts are kept on disk for provenance/sync, but the
+# TASTE tracks adapters and manifests rather than vendored git repos.
+third_party/
+modules/writing/vendor/
+
+# Top-level generated research outputs
+artifacts/
+obsidian/
+raw/
+discover/
+reports/
+state/
+wiki/
+shared/
+gaps/
+wandb/
+outputs/
+
+# Large artifacts anywhere
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+*.npz
+*.npy
+*.parquet
+*.csv
+*.tsv
+*.pdf
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# runtime config/runs
+modules/taste/auto_research/runs/
+modules/taste/auto_research/.config.json
+modules/taste/auto_research/local_database/
+
+# Per-project generated state and research-object material.
+# Project workspaces are private/runtime by default. They often include local
+# paths, API-key state, downloaded repos, datasets, generated papers, and
+# unpublished scientific conclusions. Use templates/project.json and
+# scripts/create_project.py to create a local project after cloning.
+projects/*
+!projects/.gitkeep

@@ -1,0 +1,130 @@
+{
+  "research_interest": "Describe the project topic here. Keep framework examples domain-neutral; project-specific science belongs in projects/<project>/project.json.",
+  "researcher_profile": "Prefer papers with real abstracts, reproducible code, data, benchmarks, and clear evaluation evidence. Put actual scientific preferences in the project config.",
+  "provider": "openai_compatible",
+  "base_url": "",
+  "api_key": "",
+  "model": "",
+  "temperature": 0.4,
+  "llm_roles": {
+    "find": {
+      "provider": "",
+      "base_url": "",
+      "api_key": "",
+      "model": "",
+      "temperature": null
+    },
+    "read": {
+      "provider": "",
+      "base_url": "",
+      "api_key": "",
+      "model": "",
+      "temperature": null
+    },
+    "idea_generator": {
+      "provider": "",
+      "base_url": "",
+      "api_key": "",
+      "model": "",
+      "temperature": null
+    },
+    "idea_judge": {
+      "provider": "",
+      "base_url": "",
+      "api_key": "",
+      "model": "",
+      "temperature": null
+    },
+    "plan_generator": {
+      "provider": "",
+      "base_url": "",
+      "api_key": "",
+      "model": "",
+      "temperature": null
+    },
+    "plan_evaluator": {
+      "provider": "",
+      "base_url": "",
+      "api_key": "",
+      "model": "",
+      "temperature": null
+    }
+  },
+  "llm_concurrency": 8,
+  "idea_parallel_workers": 2,
+  "max_fetch_papers": 120,
+  "max_recommended_papers": 20,
+  "max_ideas": 6,
+  "venue_title_scan_limit": 12000,
+  "venue_title_scan_fraction": 1.0,
+  "find_recall_count": 1000,
+  "detail_fetch_count": 160,
+  "full_venue_corpus_audit": true,
+  "title_filter_timeout_sec": 120,
+  "abstract_scoring_max_workers": 8,
+  "abstract_scoring_batch_size": 6,
+  "abstract_scoring_timeout_sec": 180,
+  "arxiv_max_queries": 3,
+  "arxiv_per_query_limit": 50,
+  "arxiv_timeout_sec": 15,
+  "arxiv_categories": [
+    "cs.AI"
+  ],
+  "arxiv_queries": [],
+  "arxiv_start_date": "",
+  "arxiv_end_date": "",
+  "arxiv_llm_candidate_limit": 200,
+  "arxiv_llm_candidates_per_category": 100,
+  "biorxiv_categories": [
+    "bioinformatics"
+  ],
+  "biorxiv_start_date": "",
+  "biorxiv_end_date": "",
+  "biorxiv_llm_candidate_limit": 200,
+  "biorxiv_llm_candidates_per_category": 100,
+  "nature_journals": [
+    "nature",
+    "natmachintell",
+    "natcomputsci",
+    "nmeth",
+    "ncomms"
+  ],
+  "nature_article_types": [
+    "article"
+  ],
+  "nature_start_date": "",
+  "nature_end_date": "",
+  "nature_candidate_limit": 200,
+  "science_journals": [
+    "science",
+    "sciadv"
+  ],
+  "science_article_types": [
+    "Research Article"
+  ],
+  "science_start_date": "",
+  "science_end_date": "",
+  "science_candidate_limit": 200,
+  "github_languages": [
+    "all"
+  ],
+  "github_since": "daily",
+  "hf_include_papers": true,
+  "hf_include_models": true,
+  "default_find_selection": {},
+  "email": {
+    "smtp_server": "",
+    "smtp_port": 465,
+    "sender": "",
+    "receivers": [],
+    "smtp_password": "",
+    "manual_enabled": true,
+    "auto_send_enabled": false,
+    "auto_send_stages": [
+      "find",
+      "read",
+      "idea",
+      "plan"
+    ]
+  }
+}

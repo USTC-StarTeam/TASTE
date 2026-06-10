@@ -1,0 +1,34 @@
+{
+  "roles": [
+    {
+      "id": "literature_mapper",
+      "title": "Literature Mapper",
+      "goal": "Track papers, update wiki structure, summarize claims, and extract contradictions or missing baselines.",
+      "primary_outputs": [
+        "wiki/",
+        "gaps/research_gaps.md",
+        "reports/shared_research.md"
+      ]
+    },
+    {
+      "id": "repo_dataset_scout",
+      "title": "Repo and Dataset Scout",
+      "goal": "Identify the best codebases to adapt, audit runnable entrypoints, and verify dataset readiness.",
+      "primary_outputs": [
+        "reports/repo_candidates.md",
+        "reports/dataset_registry.md",
+        "planning/init_brief.md"
+      ]
+    },
+    {
+      "id": "skeptic_executor",
+      "title": "Skeptic and Executor",
+      "goal": "Challenge assumptions, find failure cases, define experiments, and maintain the experiment log and benchmark matrix.",
+      "primary_outputs": [
+        "experiments/experiment_log.md",
+        "benchmarks/benchmark_matrix.md",
+        "reports/healthcheck.md"
+      ]
+    }
+  ]
+}

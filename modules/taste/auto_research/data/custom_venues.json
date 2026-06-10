@@ -1,0 +1,137 @@
+[
+  {
+    "id": "dblp_icml",
+    "source": "dblp",
+    "name": "ICML",
+    "full_name": "International Conference on Machine Learning",
+    "type": "conference",
+    "rank": "high-level",
+    "field": "Artificial Intelligence / Machine Learning",
+    "field_key": "AI",
+    "address": "https://dblp.uni-trier.de/db/conf/icml/",
+    "years": [
+      2026
+    ],
+    "classification_source": "topic_policy"
+  },
+  {
+    "id": "dblp_kdd",
+    "source": "dblp",
+    "name": "KDD",
+    "full_name": "ACM SIGKDD Conference on Knowledge Discovery and Data Mining",
+    "type": "conference",
+    "rank": "high-level",
+    "field": "Data Mining / Recommendation",
+    "field_key": "DM_CS",
+    "address": "https://dblp.uni-trier.de/db/conf/kdd/",
+    "years": [
+      2026
+    ],
+    "classification_source": "topic_policy"
+  },
+  {
+    "id": "dblp_sigir",
+    "source": "dblp",
+    "name": "SIGIR",
+    "full_name": "ACM SIGIR Conference on Research and Development in Information Retrieval",
+    "type": "conference",
+    "rank": "high-level",
+    "field": "Information Retrieval / Recommendation",
+    "field_key": "DM_CS",
+    "address": "https://dblp.uni-trier.de/db/conf/sigir/",
+    "years": [
+      2026
+    ],
+    "classification_source": "topic_policy"
+  },
+  {
+    "id": "dblp_www",
+    "source": "dblp",
+    "name": "WWW",
+    "full_name": "The Web Conference",
+    "type": "conference",
+    "rank": "high-level",
+    "field": "Web / Recommendation / IR",
+    "field_key": "DM_CS",
+    "address": "https://dblp.uni-trier.de/db/conf/www/",
+    "years": [
+      2026
+    ],
+    "classification_source": "topic_policy"
+  },
+  {
+    "id": "dblp_wsdm",
+    "source": "dblp",
+    "name": "WSDM",
+    "full_name": "ACM International Conference on Web Search and Data Mining",
+    "type": "conference",
+    "rank": "high-level",
+    "field": "Web Search / Data Mining / Recommendation",
+    "field_key": "DM_CS",
+    "address": "https://dblp.uni-trier.de/db/conf/wsdm/",
+    "years": [
+      2026
+    ],
+    "classification_source": "topic_policy"
+  },
+  {
+    "id": "dblp_recsys",
+    "source": "dblp",
+    "name": "RecSys",
+    "full_name": "ACM Conference on Recommender Systems",
+    "type": "conference",
+    "rank": "high-level",
+    "field": "Recommender Systems",
+    "field_key": "DM_CS",
+    "address": "https://dblp.uni-trier.de/db/conf/recsys/",
+    "years": [
+      2026
+    ],
+    "classification_source": "topic_policy"
+  },
+  {
+    "id": "dblp_cikm",
+    "source": "dblp",
+    "name": "CIKM",
+    "full_name": "ACM International Conference on Information and Knowledge Management",
+    "type": "conference",
+    "rank": "strong",
+    "field": "Information Retrieval / Knowledge Management",
+    "field_key": "DM_CS",
+    "address": "https://dblp.uni-trier.de/db/conf/cikm/",
+    "years": [
+      2026
+    ],
+    "classification_source": "topic_policy"
+  },
+  {
+    "id": "dblp_acmmm",
+    "source": "dblp",
+    "name": "ACMMM",
+    "full_name": "ACM International Conference on Multimedia",
+    "type": "conference",
+    "rank": "high-level",
+    "field": "Multimedia / Recommendation",
+    "field_key": "CGAndMT",
+    "address": "https://dblp.uni-trier.de/db/conf/mm/",
+    "years": [
+      2026
+    ],
+    "classification_source": "topic_policy"
+  },
+  {
+    "id": "dblp_colm",
+    "source": "dblp",
+    "name": "COLM",
+    "full_name": "Conference on Language Modeling",
+    "type": "conference",
+    "rank": "high-level",
+    "field": "Language Modeling",
+    "field_key": "AI",
+    "address": "https://dblp.uni-trier.de/db/conf/colm/",
+    "years": [
+      2026
+    ],
+    "classification_source": "topic_policy"
+  }
+]

@@ -1,0 +1,223 @@
+{
+  "name": "replace_me",
+  "topic": "replace_me",
+  "user_prompt": "replace me with a natural-language research goal",
+  "conda_env": "",
+  "python_executable": "python3",
+  "runtime": {
+    "management_python": "",
+    "experiment_python": "",
+    "conda_base": "",
+    "nvm_dir": "",
+    "node_bin": "",
+    "claude_path": "",
+    "codex_path": "",
+    "extra_path": []
+  },
+  "queries": [
+    "replace me"
+  ],
+  "startup": {
+    "last_bootstrap_request": "replace me with a natural-language research goal"
+  },
+  "llm": {
+    "enabled": true,
+    "provider": "openai_compatible",
+    "api_base": "",
+    "model": "",
+    "api_key_env": "OPENAI_API_KEY",
+    "timeout_sec": 120,
+    "max_tokens": 2500,
+    "temperature": 0.2
+  },
+  "coding_agent": {
+    "backend": "claude",
+    "allow_codex_fallback": true,
+    "max_repair_rounds": 2,
+    "allow_llm_fallback": true,
+    "allow_claude_fallback": true,
+    "timeout_sec": 1200,
+    "llm_team_timeout_sec": 600,
+    "claude_permission_mode": "bypassPermissions",
+    "claude_path_hint": "",
+    "codex_path_hint": ""
+  },
+  "discovery": {
+    "enabled_sources": [
+      "arxiv",
+      "github",
+      "manual"
+    ],
+    "arxiv": {
+      "max_results": 5,
+      "sort_by": "submittedDate",
+      "sort_order": "descending"
+    },
+    "github": {
+      "enabled": true,
+      "limit": 5,
+      "sort": "updated",
+      "order": "desc"
+    },
+    "semantic_scholar": {
+      "enabled": false,
+      "limit": 5,
+      "fields": [
+        "title",
+        "year",
+        "authors",
+        "url",
+        "citationCount",
+        "influentialCitationCount",
+        "externalIds",
+        "tldr",
+        "venue",
+        "journal",
+        "publicationVenue",
+        "publicationDate",
+        "openAccessPdf"
+      ]
+    }
+  },
+  "literature": {
+    "primary_window_days": 180,
+    "secondary_window_days": 365,
+    "deprioritize_older_than_days": 730,
+    "max_foundational_age_days": 1825,
+    "max_foundational_older_papers": 3,
+    "foundational_citation_threshold": 200,
+    "recent_high_quality_floor": 11.0,
+    "recent_candidate_floor": 7.0,
+    "github_recent_activity_days": 180,
+    "github_deprioritize_activity_days": 365,
+    "repo_min_stars_for_trust": 30,
+    "repo_high_stthreshold": 200,
+    "repo_candidate_floor": 8.0,
+    "idea_pursue_floor": 15.0,
+    "idea_watch_floor": 11.0,
+    "preferred_venues": [
+      "NeurIPS",
+      "ICLR",
+      "ICML",
+      "CVPR",
+      "ICCV",
+      "ECCV",
+      "ACL",
+      "EMNLP",
+      "NAACL",
+      "AAAI",
+      "IJCAI",
+      "KDD",
+      "COLM",
+      "AISTATS",
+      "CoRL",
+      "RSS",
+      "MICCAI",
+      "SIGGRAPH"
+    ],
+    "secondary_venues": [
+      "UAI",
+      "AAMAS",
+      "WWW",
+      "SIGIR",
+      "WSDM",
+      "COLING",
+      "CoNLL",
+      "ECAI",
+      "ICRA",
+      "IROS",
+      "ICASSP",
+      "ACMMM"
+    ],
+    "preferred_journals": [
+      "Nature Machine Intelligence",
+      "Journal of Machine Learning Research",
+      "JMLR",
+      "Transactions on Machine Learning Research",
+      "TMLR",
+      "IEEE Transactions on Pattern Analysis and Machine Intelligence",
+      "TPAMI",
+      "International Journal of Computer Vision",
+      "IJCV",
+      "Artificial Intelligence",
+      "Journal of Artificial Intelligence Research",
+      "JAIR",
+      "Machine Learning"
+    ]
+  },
+  "loop": {
+    "discover_retries": 1,
+    "ingest_limit": 5,
+    "compile_limit": 8,
+    "llm_enabled": true,
+    "obsidian_export": true,
+    "lint_after_each_run": true,
+    "compile_backend": "llm_or_codex_or_bootstrap"
+  },
+  "repo_selection": {
+    "enabled": true,
+    "target_count": 5,
+    "selection_strategy": "prefer-runnable-active-well-scoped",
+    "required_signals": [
+      "readme",
+      "license",
+      "install",
+      "train_or_eval_entry"
+    ]
+  },
+  "dataset_check": {
+    "enabled": true,
+    "required_fields": [
+      "name",
+      "task",
+      "access",
+      "format",
+      "split",
+      "metric"
+    ],
+    "min_ready_datasets": 1
+  },
+  "experiment": {
+    "enabled": true,
+    "log_every_run": true,
+    "artifact_dir": "artifacts",
+    "benchmark_file": "benchmarks/benchmark_matrix.md"
+  },
+  "environment": {
+    "auto_bootstrap": true,
+    "gpu_aware": true,
+    "python_version": "",
+    "preferred_cuda": "",
+    "torch_channel": "pytorch",
+    "install_strategy": "repo-first-adaptive",
+    "fallback_cpu_ok": false,
+    "conda_base_hint": ""
+  },
+  "parallel_experiments": {
+    "enabled": true,
+    "max_concurrent_methods": 3,
+    "max_concurrent_trials_per_method": 2,
+    "resource_policy": "fit-to-visible-gpus"
+  },
+  "failure_analysis": {
+    "enabled": true,
+    "analyze_bad_cases": true,
+    "check_hparams": true,
+    "check_module_coordination": true,
+    "check_implementation_risks": true,
+    "min_followup_attempts": 2,
+    "max_total_attempts_per_method": 6,
+    "early_drop_patience": 2
+  },
+  "git_management": {
+    "enabled": true,
+    "auto_init_if_missing": true,
+    "commit_experiment_checkpoints": true,
+    "ignore_large_artifacts": true,
+    "max_tracked_file_mb": 10
+  },
+  "external_research_tools": {
+    "web_search_mode": "manual_or_api",
+    "paper_import_mode": "local_and_discovery"
+  }
+}
