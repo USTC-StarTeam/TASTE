@@ -1,8 +1,8 @@
 # TASTE: 本地自动科研工作流
 
-TASTE 是一个本地优先的自动科研系统。它把论文发现、精读、idea、plan、环境配置、实验迭代和论文撰写放进同一个网页工作流：网页负责配置和状态展示，后端负责任务队列和产物管理，Claude Code 项目代理负责真实代码、实验和论文修复。
+TASTE 是一个本地优先的自动科研系统。它把论文发现、精读、想法生成、实验计划、环境配置、实验迭代和论文撰写放进同一个网页工作台：网页负责配置和状态展示，后端负责任务队列、运行记录和产物管理，Claude Code 项目代理负责真实代码、实验和论文修复。
 
-本仓库只提交框架代码、模板、网页和测试。真实项目目录 `projects/*`、运行配置 `runtime/.config.json`、日志、下载仓库、数据集、实验结果、论文草稿和 API key 都是本机运行态内容，默认不进入 Git。
+TASTE 的设计边界是“框架代码可共享，科研现场留在本机”。仓库提交框架代码、模板、网页和测试；具体项目目录、运行配置、日志、下载仓库、数据集、实验结果、论文草稿和密钥都属于本机运行态内容。
 
 默认网页地址：
 
@@ -12,21 +12,19 @@ http://127.0.0.1:8765
 
 ## 必要环境
 
-只需要准备这些环境即可运行 TASTE：
-
 | 环境 | 用途 | 建议 |
 | --- | --- | --- |
-| Conda / Mamba + Python | 运行 TASTE 后端、调度脚本和测试 | Python 3.10+，推荐 3.11 |
-| Node.js + npm | 构建 React/Vite 网页前端 | 按 Node.js 官网推荐版本安装；需要版本管理时按官网页面选择 nvm 等方式 |
-| Claude Code CLI (`claude`) | Read/Idea/Plan 的 Claude 接管，以及 Environment/Experiment/Paper 项目代理 | 用户自己安装、登录和维护账号 |
-| Find 阶段 LLM API | Find 的标题筛选、摘要评分和推荐排序 | 在网页配置，密钥不要提交 Git |
+| Conda / Mamba + Python | 运行 TASTE 后端、调度脚本、Find 和审计脚本 | Python 3.10+，推荐 3.11 |
+| Node.js + npm | 构建 React/Vite 网页前端 | 按 Node.js 官网推荐版本安装 |
+| Claude Code CLI (`claude`) | Read/Ideas/Plan 的默认接管，以及 Environment/Experiment/Paper 项目代理 | 用户自己安装、登录和维护账号 |
+| Find 阶段 LLM API | Find 的标题筛选、摘要评分和推荐排序 | 在网页里配置，密钥只保存到本机运行态配置 |
 
 TASTE 区分两类 Python：
 
-- `management_python`：运行 Web、调度、Find、审计等框架脚本；启动网页前就应该可用。
-- `experiment_python`：运行具体科研项目的训练、评估和仓库脚本；不要在首次打开网页时强行配置，等进入 Environment/环境配置阶段后，由项目环境部署流程检测或保存。
+- `management_python`：运行 Web、调度、Find、审计等 TASTE 框架脚本；启动网页前就应该可用。
+- `experiment_python`：运行具体科研项目的训练、评估和仓库脚本；在 Environment/环境配置阶段配置或由项目环境部署流程检测。
 
-两者可以相同，但真实实验建议分离。
+两者可以相同，但真实实验建议分离，避免训练依赖污染 TASTE 管理环境。
 
 ## 快速开始
 
@@ -48,7 +46,7 @@ python -m pip install --upgrade pip
 python -m pip install -r modules/taste/requirements.txt
 ```
 
-如果你不用 Conda，也可以用 venv：
+不用 Conda 时也可以用 venv：
 
 ```bash
 python3 -m venv .venv
@@ -59,7 +57,7 @@ python -m pip install -r modules/taste/requirements.txt
 
 ### 3. 安装 Node.js
 
-Node.js、npm 和 nvm/版本管理方式直接按 Node.js 官网下载页操作：<https://nodejs.org/zh-cn/download/>。
+Node.js、npm 和版本管理方式直接按 Node.js 官网下载页操作：<https://nodejs.org/zh-cn/download/>。
 
 安装完成后确认：
 
@@ -78,7 +76,7 @@ TASTE 不配置 Claude Code 账号/API，也不会覆盖用户已有 Claude Code
 npm install -g @anthropic-ai/claude-code
 ```
 
-验证：
+确认当前终端可找到 Claude Code：
 
 ```bash
 claude --version
@@ -86,65 +84,160 @@ claude --version
 
 ### 5. 启动网页
 
-启动命令：
-
 ```bash
 cd TASTE
 conda activate taste
 scripts/start_web.sh
 ```
 
-脚本会自动构建前端，并使用默认地址 `127.0.0.1:8765`。需要改端口或绑定地址时加环境变量：
+启动脚本会自动补齐前端依赖、构建前端，并使用默认地址 `127.0.0.1:8765`。需要改端口时只设置端口变量：
 
 ```bash
 WEB_PORT=<port> scripts/start_web.sh
 ```
 
-Windows 原生 PowerShell 如果不使用 Git Bash，可用下面的等价启动方式：
+Windows 可以在 Git Bash、PowerShell 或 WSL 中运行。推荐安装 Git for Windows 后直接在 PowerShell 中调用同一个启动脚本：
 
 ```powershell
-$env:WORKSPACE_ROOT = (Get-Location).Path
-$env:PYTHONPATH = "$($PWD.Path)\modules\taste;$($PWD.Path);$($PWD.Path)\scripts"
-python -m uvicorn auto_research.web.server:app --host 127.0.0.1 --port 8765
+bash scripts/start_web.sh
 ```
 
-若 TASTE 部署在服务器，远端仍然用 `scripts/start_web.sh` 启动；本地浏览器通过 SSH tunnel 访问：
+如果 TASTE 部署在服务器，远端仍然执行 `scripts/start_web.sh`，本地浏览器通过 SSH tunnel 访问：
 
 ```bash
 ssh -L 127.0.0.1:8765:127.0.0.1:8765 <user>@<server>
 ```
 
-打开网页：
+随后在浏览器打开：
 
 ```text
-127.0.0.1:8765
+http://127.0.0.1:8765
 ```
 
-## 网页配置
+## 配置教程
 
-第一次打开网页后，先配置左侧栏配置：
+第一次打开网页后，先在左侧栏创建或选择项目，再填写研究画像、Find 阶段 LLM 和运行环境。投稿目标、实验 Python、实验轮数等配置分别在对应模块里设置，不放在全局侧栏。
 
-1. 项目：选择或创建当前项目，写好研究主题和研究画像。
-2. LLM：填写 Find 阶段使用的 provider、base URL、model 和 API key。API key 只保存在运行态配置。
-3. 运行环境：点击自动检测；检查 `management_python`、`node_bin`、`claude_path` 等启动工具路径。
+配置保存原则：
 
-## 工作流
+| 类别 | 保存位置 | 说明 |
+| --- | --- | --- |
+| 公开模板 | `config.example.json`、`templates/project.json` | 给新用户和新项目提供默认结构，不含真实密钥和真实项目内容。 |
+| 本机网页配置 | `runtime/.config.json` | 保存 LLM 密钥、邮件密码等本机运行态信息。 |
+| 具体科研项目 | `projects/<project>/` | 保存项目配置、状态、运行记录、产物、仓库、数据和论文草稿。 |
+| 前端静态产物 | 网页客户端构建目录 | 由启动脚本或 npm build 生成，网页服务读取这里的文件。 |
 
-```text
-Find -> Read -> Ideas -> Plan -> Environment -> Experiment -> Paper
-```
+### 左侧栏配置
 
-- Find 使用 LLM 做标题/摘要筛选和推荐排序。
-- Read、Ideas、Plan 默认让 Claude Code 接管当前 Find 结果；Claude Code 不可用时才回退到 LLM 路线。
-- Environment、Experiment、Paper 使用 Claude Code 项目代理和审计脚本，不走通用 LLM 路线。
-- 网页任务历史、日志和产物都跟随项目和 run ID 保存。
+| 区域 | 配置项 | 作用 | 建议 |
+| --- | --- | --- | --- |
+| 项目 | 当前项目 | 选择正在操作的项目，网页状态、运行历史和产物都会跟随项目切换。 | 默认会加载最近使用的项目；需要新课题时再创建新项目。 |
+| 项目 | 创建项目 / 项目 ID | 创建 `projects/<project>/`，建立稳定项目身份。 | 使用小写字母、数字、下划线或连字符，例如 `my_retrieval_study`。 |
+| 项目 | 研究主题 | 当前项目的核心研究问题。 | 写成一句清楚的问题或方向；后续 Find、Read、Ideas、Plan 都会读取。 |
+| 画像 | 研究兴趣 | 描述问题、方法、领域、约束和偏好的论文类型。 | 尽量写具体，例如任务、数据、方法偏好、可用算力和不想做的方向。 |
+| 画像 | 研究者画像 | 描述已有项目、实验条件、长期方向和评价标准。 | 用来帮助 Claude Code 判断哪些想法值得推进。 |
+| LLM | provider | Find 阶段 LLM 供应商类型。 | OpenAI 兼容服务通常填 `openai_compatible`；也可按服务端支持填写。 |
+| LLM | base URL | LLM API 地址。 | 填供应商提供的 `/v1` 兼容地址。 |
+| LLM | model | Find 使用的模型名。 | 选择稳定、便宜、支持 JSON 输出的模型。 |
+| LLM | API key | Find 阶段调用 LLM 的密钥。 | 只在网页保存；页面不会回显完整 key。 |
+| LLM | temperature | Find 评分和少量兜底生成的随机性。 | 过滤/评分建议 0.2-0.6，默认 0.4。 |
+| LLM | 角色 LLM 配置 | 高级兼容项：Find 可独立覆盖；Read/Ideas/Plan 只在 Claude Code 不可用时作为兜底。 | 普通使用留空，继承全局 LLM。 |
+| LLM | 邮件配置 | 手动或自动发送当前 run 的 Markdown 产物。 | 不需要邮件通知时保持默认即可。 |
+| 运行环境 | node_bin | Node/npm 所在目录。 | 自动检测优先；网页找不到 node/npm 时再手动填写。 |
+| 运行环境 | claude_path | Claude Code 可执行文件路径。 | 普通终端能执行 `claude` 时通常无需填写；检测失败时填绝对路径。 |
+| 运行环境 | management_python | TASTE 管理 Python。 | 启动网页的 Python 通常会自动写入；需要固定环境时手动填写。 |
+| 运行环境 | extra_path | 额外 PATH 目录。 | 只在工具安装在非标准目录时填写，多个目录用 `:` 分隔。 |
+| 历史运行 | run 列表 | 查看当前项目的历史 run、阶段和产物。 | 一个项目可以有多个历史运行；切换 run 只影响页面展示，不会修改产物。 |
 
-Find 默认逻辑：
+### 七个模块配置
 
-- Find 默认不选择任何会议或非会议来源；添加会议后才扫描所选会议/年份的标题池。
-- `venue_title_scan_limit=0` 表示不设标题数量上限；只有测试或异常数据源保护时才设正数。
-- arXiv 只有勾选时才抓取；日期留空时默认最近 180 天。
-- 最终推荐数量由“推荐文章数量”控制，默认 20。
+| 模块 | 配置项 | 作用 | 默认 / 建议 |
+| --- | --- | --- | --- |
+| Find | 会议搜索 | 从会议库里搜索会议/期刊。 | 默认只显示部分会议；用搜索框定位后点击添加。 |
+| Find | 选择年份 | 设置“待添加年份”。 | 默认最新一年；修改年份不会改变已选会议，只有点击“添加”才写入该会议。 |
+| Find | 已选会议 | 决定会议标题池来源。 | 默认全不选；同一会议可添加多个年份，并按年份独立抓取。 |
+| Find | 检查可抓取 | 检查所选来源是否可访问并显示来源状态。 | 正式运行前建议点一次。 |
+| Find | arXiv / bioRxiv / Nature / Science / HuggingFace / GitHub | 非会议来源开关。 | 默认全不选；只勾选本轮确实需要的来源。 |
+| Find | arXiv 分类、检索词、日期 | 控制 arXiv 的分类、主题 query 和时间窗。 | 日期留空时默认最近 180 天；检索词留空时由主题自动生成。 |
+| Find | bioRxiv 分类、日期 | 控制 bioRxiv 学科分类和时间窗。 | `all` 表示不过滤分类。 |
+| Find | Nature / Science 预设、期刊、文章类型、日期 | 控制期刊流来源。 | 默认关闭；打开后再选择具体期刊和文章类型。 |
+| Find | GitHub 语言 | 控制 GitHub 趋势榜语言过滤。 | 可填 `all`、`python`、`javascript` 等。 |
+| Find | 推荐文章数量 | Find 最终展示的推荐论文上限。 | 默认 20；这是最终展示数量，不是抓取上限。 |
+| Find | LLM 评估并发数 | 控制 Find 评分请求并发。 | 默认 8；慢速或限流 API 建议 4-8。 |
+| Find | 高级预算 | 非会议抓取、arXiv query 数、会议标题扫描上限、召回池和详情池。 | 标准使用保持默认；`venue_title_scan_limit=0` 表示会议标题不设数量上限。 |
+| Read | 运行精读 | 对当前 Find 推荐论文执行精读和边界审计。 | 需要先有当前 Find run。 |
+| Read | 精读状态 | 展示推荐论文数、当前展示数、全文精读完成数和待补项。 | 主要用于判断 Read 是否拿到足够证据。 |
+| Ideas | 想法最大数量 | 控制生成研究想法数量上限。 | 默认 6。 |
+| Ideas | 想法生成并发数 | 控制并行生成 worker 数。 | 默认 2，范围 1-8。 |
+| Ideas | 想法卡片编辑 | 编辑标题、新方法、初步实验和 Inspired by。 | 可以人工修正，再标记通过、待定或删除。 |
+| Plan | 选择想法 | 从已通过想法中选择计划输入。 | 必须至少选择一个已通过想法。 |
+| Plan | 修复轮数 | 生成计划时执行“草稿 -> 评估 -> 修复”的轮数。 | 默认至少 1。 |
+| Plan | 候选计划操作对象 | 选择要继续润色或完成的候选计划。 | 不会默认把第一个候选当执行计划，需要显式选择。 |
+| Plan | 让主控 Claude Code 选择唯一执行计划 | 将候选计划交给主控 Claude Code，形成执行合同。 | 进入实验前建议完成。 |
+| Environment | conda 环境名称 | 具体科研项目使用的实验环境名。 | 在环境配置阶段填写；不是左侧栏全局配置。 |
+| Environment | conda base | Conda/Mamba 安装根目录。 | 自动检测优先；检测失败时手动填写。 |
+| Environment | 实验 Python | 训练和评估命令使用的 Python。 | 可由 conda base + 环境名派生，也可显式填写绝对路径。 |
+| Environment | 真实创建 Conda 环境 | 是否让环境步骤实际创建/检查实验环境。 | 首次环境部署时开启；环境锁定后网页不再重复创建。 |
+| Environment | 自然语言请求 | 给项目代理的环境部署说明。 | 说明仓库、数据、复现目标和限制。 |
+| Experiment | 科研迭代轮数 | 控制实验子循环轮数。 | 从小轮数开始，确认日志和证据正常后再扩大。 |
+| Experiment | 每轮最多实验数 | 控制每轮可启动的实验数量。 | 根据显存、时间和数据大小设置。 |
+| Experiment | 执行实验计划 | 是否让项目代理按当前执行计划改代码并运行实验。 | 通常开启。 |
+| Experiment | 准备环境计划 | 是否在实验阶段补做环境准备。 | 环境已锁定时一般无需重复准备。 |
+| Experiment | 自动科研后跳过论文 | 实验完成后是否跳过论文阶段。 | 只想验证实验时开启。 |
+| Paper | 投稿会议/期刊 | 论文模板、格式门控和页面限制目标。 | 只在论文撰写页配置；不要写在左侧栏主题里。 |
+| Paper | 论文标题 | 论文草稿标题。 | 可先留空或写工作标题，后续由项目代理修订。 |
+| Paper | 自动安装 LaTeX | 允许论文阶段尝试安装或补齐 LaTeX 工具。 | 服务器可安装依赖时开启；受限环境中关闭并手动准备。 |
+| Paper | 生成与修订论文 | 启动论文代理，生成/修复 TeX、PDF、引用、图表和证据门控。 | 预览 PDF 不等于投稿通过；投稿状态以门控为准。 |
+
+## 使用说明
+
+### 左侧栏
+
+左侧栏负责“项目级上下文”和“运行工具”。项目、研究兴趣、研究者画像会参与 Find、Read、Ideas、Plan 和后续项目代理判断；LLM 只负责 Find 的标题/摘要评分和少量兼容兜底；运行环境只负责让网页后端找到 `node`、`npm`、`claude` 和管理 Python。
+
+TASTE 不管理 Claude Code 账号，也不会写入用户的 Claude Code API。只要当前用户终端能正常运行 `claude`，网页通常可以通过自动检测找到它；检测失败时再填写 `claude_path` 或 `extra_path`。
+
+### Find：发现候选论文和代码线索
+
+Find 的输入来自研究主题、研究兴趣、研究者画像、已选会议/年份和勾选的非会议来源。会议来源会先扫描所选会议/年份的标题池，再按主题相关性保留候选进入详情抓取；非会议来源按各自 API 或 RSS 获取候选。之后系统会抓取摘要/详情，用 Find LLM 做评分和排序，最终只展示通过真实摘要和评分门控的推荐论文。
+
+Find 页面同时展示来源状态、调研验收计数和当前 run 产物。会议默认不设标题数量上限，`venue_title_scan_limit=0` 表示全扫；测试或异常源保护时才需要设正数。arXiv 只有勾选后才抓取，日期留空时默认最近 180 天。
+
+### Read：精读推荐论文
+
+Read 读取当前 Find run 的推荐论文，默认交给 Claude Code 根据论文、摘要、链接和可用全文信息做精读与边界审计。它关注论文真正解决了什么、证据是什么、可复现资源在哪里、哪些结论不能被当前信息支持。页面只展示当前 Find 对应的精读状态，避免把历史 run 的内容混入当前项目判断。
+
+### Ideas：生成和筛选研究想法
+
+Ideas 基于当前 Find/Read 产物生成可实验化的研究想法。每张卡片包含标题、新方法、初步实验和启发来源，用户可以直接编辑，也可以把想法标记为通过、待定或删除。只有通过的想法会进入 Plan 的候选输入。
+
+默认情况下 Ideas 使用 Claude Code 接管；如果 Claude Code 不可用，才使用 LLM 兼容路线。想法数量和并发数只影响 Ideas，不影响 Read、Plan、Environment、Experiment 或 Paper。
+
+### Plan：形成可执行实验计划
+
+Plan 从已通过想法中选择输入，生成候选实验计划，并对计划执行评估和修复。候选计划不会自动变成主线执行计划；需要用户显式选择，或点击“让主控 Claude Code 选择唯一执行计划”生成执行合同。完成计划后，页面和 `plan.md` 只保留最终正文，评估与修复过程仍保留在结构化产物中。
+
+### Environment：选择基底、检查数据并锁定实验环境
+
+Environment 根据 Find/Plan 的证据选择最适合跟进的仓库或基底，检查真实数据/loader 是否可用，并准备具体科研项目使用的 Conda/Python 环境。这个阶段配置的是 `experiment_python`，它只服务训练、评估和外部仓库脚本，不应混同于 TASTE 管理 Python。
+
+环境配置是一次性创建逻辑：成功创建或确认后会锁定，网页不会反复安装、修改或重建环境。之后 Experiment 和 Paper 复用已经锁定的环境状态与证据。
+
+### Experiment：真实代码和实验迭代
+
+Experiment 由 Claude Code 项目代理执行。它会围绕当前执行计划检查代码、修改实现、启动实验、读取日志/loss、分析坏例、记录指标和下一步行动。页面展示实验与复现门控、当前主线摘要、实验记录表和证据路径；旧历史记录不会被当成当前路线的新证据。
+
+实验结果只有在真实数据、loader、复现和审计证据满足门控时才会进入可写论文的候选证据。失败、阻塞和负结果也会保留在记录中，用于后续判断。
+
+### Paper：生成论文预览并执行门控修复
+
+Paper 根据投稿会议/期刊、当前计划、实验记录和审计证据生成或修订论文。项目代理会检查官方模板、页面限制、引用渲染、图表质量、自审发现和证据门控。页面可以展示 PDF/TeX 预览，但预览稿不代表投稿通过；是否可投稿以门控状态为准。
+
+如果实验或证据门控未通过，Paper 仍可生成目标 venue 预览，方便查看结构和格式，但不会把缺失证据包装成正式结论。
+
+### 任务栏和产物
+
+页面底部任务栏展示当前项目的 job/run 状态、阶段进度、最近日志、命令和产物路径。Find/Read/Ideas/Plan 的 Markdown 产物只在对应页面展开；Environment、Experiment、Paper 展示各自阶段的真实状态与证据，避免把文献调研日志误看成实验或论文结论。
 
 ## 重要目录
 
@@ -156,7 +249,7 @@ Find 默认逻辑：
 ├── templates/project.json
 ├── scripts/
 ├── modules/taste/
-│   └── auto_research/web/
+│   └── 网页后端与前端代码
 ├── prompts/
 ├── automation/
 ├── .claude/
@@ -175,8 +268,7 @@ Find 默认逻辑：
 | `scripts/run_environment_stage.py` | 环境配置阶段。 |
 | `scripts/run_coding_agent.py` | 实验代理入口。 |
 | `scripts/run_paper_orchestra_bridge.py` | 论文生成、修复和门控。 |
-| `modules/taste/auto_research/web/server.py` | FastAPI 后端。 |
-| `modules/taste/auto_research/web/client/src/App.tsx` | React 网页。 |
+| `modules/taste/` | TASTE Python 包、FastAPI 后端和 React 网页。 |
 
 运行态项目目录：
 
@@ -192,6 +284,10 @@ projects/<project>/
 ```
 
 这些目录通常包含私人路径、下载仓库、数据、日志、论文草稿和未公开结论。
+
+## 参考与致谢
+
+TASTE 的网页与任务系统使用 FastAPI、React 和 Vite 构建；科研执行侧依赖用户本机配置的 Claude Code CLI。Find 模块会按用户选择使用 arXiv、bioRxiv、Nature、Science、HuggingFace、GitHub、DBLP/CCF/会议索引等公开来源。感谢这些开源工具、公开数据源和论文社区让本地可审计的科研自动化成为可能。
 
 ## 许可证
 
