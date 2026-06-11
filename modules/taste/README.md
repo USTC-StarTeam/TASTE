@@ -335,14 +335,18 @@ python scripts/smoke_api.py
 
 ## 参考与致谢
 
-本项目在设计和实现过程中参考了若干项目的思路与部分实现方式：
+本项目在设计和实现过程中参考了若干项目的思路与部分实现方式。相关第三方项目各自遵循其原始许可证，TASTE 在本仓库中保留可审计的来源说明。
 
 - **iDeer**：研究助手流程、信息源聚合、报告生成和邮件报告设计。
 - **openccf**：CCF 目录结构、会议/期刊元数据组织和 DBLP 抓取策略；本仓库内置的 `auto_research/data/ccf_venues.json` 是基于 openccf 公开 CCF 数据整理出的归一化 venue catalog。
-- **ICLR2026-Guide-CN**：OpenReview/ICLR 论文收集、组织和展示方式。
-- **ccf-deadlines**：会议信息组织和用户侧 venue 工作流设计。
+- **[ICLR2026-Guide-CN](https://github.com/JenniferZhao0531/ICLR2026-Guide-CN)**：OpenReview/ICLR 论文收集、组织和展示方式。
+- **[ccf-deadlines](https://github.com/ccfddl/ccf-deadlines)**：会议信息组织、截止日期元数据和用户侧 venue 工作流设计。
+- **[academic-research-skills](https://github.com/Imbad0202/academic-research-skills)**：Claude Code 学术研究技能组织方式，以及 research -> write -> review -> revise -> finalize 的阶段化写作/审稿思路。
+- **[PaperOrchestra](https://github.com/Ar9av/PaperOrchestra)**：多代理论文写作、outline/plot/literature/section/refinement 分工、引用核验、图表检查和论文质量自评思路。
+- **[nature-skills](https://github.com/Yuan1z0825/nature-skills)**：面向 Nature 风格论文的学术表达、图表规范和写作检查技能设计。
+
+TASTE 也感谢 FastAPI、React、Vite、Claude Code 以及 arXiv、bioRxiv、Nature、Science、HuggingFace、GitHub、DBLP/CCF/会议索引等公开工具与数据源；这些基础设施让本地可审计的科研自动化成为可能。
 
 ## 许可证
 
 TASTE 使用 GNU Affero General Public License v3.0。详见 [LICENSE](LICENSE)。
-
