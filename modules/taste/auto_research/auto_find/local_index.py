@@ -7,9 +7,26 @@ from typing import Any
 from auto_research.paths import LOCAL_DATABASE_DIR
 
 
+def venue_cache_key(venue: dict[str, Any]) -> str:
+    name = str(venue.get("name") or "").strip().lower()
+    if name:
+        key = "".join(char for char in name if char.isalnum())
+        if key:
+            return key
+    full_name = str(venue.get("full_name") or "").strip().lower()
+    words = [word for word in full_name.split() if word[:1].isalnum()]
+    if words:
+        return "".join(char for char in words[0] if char.isalnum()) or "unknown"
+    venue_id = str(venue.get("id") or "unknown").strip().lower()
+    return "".join(char if char.isalnum() else "_" for char in venue_id).strip("_") or "unknown"
+
+
 def _venue_id_candidates(venue: dict[str, Any]) -> list[str]:
     venue_id = str(venue.get("id") or "").strip()
     candidates = []
+    cache_key = venue_cache_key(venue)
+    if cache_key:
+        candidates.append(cache_key)
     if venue_id:
         candidates.append(venue_id)
         for suffix in ("_2026", "_2025", "_2024", "_2023", "_2022"):

@@ -22,6 +22,7 @@ from .category_select import filter_papers_by_selected_categories, select_releva
 from .local_index import load_local_venue_year
 from .local_rank import rank_papers_tfidf
 from .profile_normalize import normalize_user_profile, profile_retrieval_text
+from .quality import attach_quality_metadata_many
 from .sources import (
     enrich_nature_details,
     enrich_pmlr_details,
@@ -547,6 +548,17 @@ def _presentation_bonus_allowed(item: dict) -> bool:
     return _has_strong_topic_evidence(item) and _has_real_abstract(item)
 
 
+
+def _quality_table_bonus(item: dict) -> tuple[float, str]:
+    available = round(max(0.0, min(0.4, _as_float(item.get("quality_bonus_available")))), 2)
+    if not available:
+        return 0.0, ""
+    tier = str(item.get("quality_tier") or "").strip()
+    kind = str(item.get("quality_kind") or "quality").strip()
+    source = str(item.get("quality_source") or "quality table").strip()
+    label = f"{kind}:{tier}" if tier else kind
+    return available, f"结构化质量表: {label} +{available:.2f} ({source})"
+
 def _venue_bonus(item: dict) -> tuple[float, str]:
     text = _quality_signal_text(item)
     elite_general_bonus = {
@@ -582,8 +594,15 @@ def _apply_quality_bonus(item: dict) -> None:
     presentation_bonus, presentation_reason = _presentation_bonus(item)
     if presentation_bonus and allow_presentation_bonus:
         bonuses.append((presentation_bonus, presentation_reason))
+    table_bonus, table_reason = _quality_table_bonus(item)
+    if table_bonus and allow_venue_bonus:
+        # Avoid double-counting the same official presentation signal. For oral/spotlight
+        # rows, keep the stricter current presentation bonus; for journals/CCF ranks,
+        # the table supplies the only deterministic quality signal.
+        if not presentation_bonus or table_bonus > presentation_bonus:
+            bonuses.append((table_bonus, table_reason))
     venue_bonus, venue_reason = _venue_bonus(item)
-    if venue_bonus and allow_venue_bonus:
+    if venue_bonus and allow_venue_bonus and not table_bonus:
         bonuses.append((venue_bonus, venue_reason))
     if not bonuses:
         item["score"] = base_score
@@ -2982,6 +3001,7 @@ def _title_filter_groups(items: list[dict]) -> list[dict]:
             "items": group_items,
             "category_size": len(group_items),
             "venue_yetotal": total,
+            "venue_year_total": total,
             "category_ratio": ratio,
             "policy": policy,
         })
@@ -3016,7 +3036,11 @@ def _dynamic_title_prune(selected: list[dict], groups: list[dict], log: LogFn, v
             continue
         policy = group["policy"]
         items.sort(key=_title_rank_key)
-        kept = items
+        min_score = _as_float(policy.get("min_score"), 0.0)
+        keep_floor = max(1, ceil(len(items) * max(0.0, _as_float(policy.get("keep_ratio"), 0.0))))
+        kept = [item for item in items if _as_float(item.get("title_llm_fit_score"), item.get("fit_score")) >= min_score]
+        if not kept:
+            kept = items[:keep_floor]
         pruned.extend(kept)
         group["title_selected_scored"] = len(items)
         group["after_dynamic_prune"] = len(kept)
@@ -5139,6 +5163,7 @@ def run_find(
                     f"pdfs {pmlr_stats.get('pdfs_filled', 0)}/{pmlr_stats.get('attempted', 0)}"
                 )
             detailed = _enrich_missing_abstracts_for_adaptive_recall(detailed, effective_config, venue.get("name", venue_id), log, _progress, should_cancel)
+            detailed = attach_quality_metadata_many(detailed)
             venue_papers.extend(detailed)
             continue
 
@@ -5224,6 +5249,7 @@ def run_find(
                 f"pdfs {pmlr_stats.get('pdfs_filled', 0)}/{pmlr_stats.get('attempted', 0)}"
             )
         detailed = _enrich_missing_abstracts_for_adaptive_recall(detailed, effective_config, venue.get("name", venue_id), log, _progress, should_cancel)
+        detailed = attach_quality_metadata_many(detailed)
         venue_papers.extend(detailed)
     raw_title_index = _dedupe_items(raw_title_index)
     title_candidates = _dedupe_items(title_candidates)
@@ -5285,6 +5311,7 @@ def run_find(
         nature_status["prefiltered_count"] = len(nature_prefiltered_items)
         nature_status["detail_enrichment"] = nature_detail_stats
         progress("nature_detail_enrichment", len(nature_prefiltered_items), max(1, len(nature_prefiltered_items)), "Nature Portfolio: detail enrichment complete")
+        nature_detailed_items = attach_quality_metadata_many(nature_detailed_items)
         evaluated_candidates.extend(_evaluate_items(nature_detailed_items, effective_config, llm, "nature", log, should_cancel, progress))
         progress("nature", 1, 1, "Nature Portfolio complete")
 
@@ -5319,6 +5346,7 @@ def run_find(
         science_status["prefiltered_count"] = len(science_prefiltered_items)
         science_status["detail_enrichment"] = science_detail_stats
         progress("science_detail_enrichment", len(science_prefiltered_items), max(1, len(science_prefiltered_items)), "Science Family: detail enrichment complete")
+        science_detailed_items = attach_quality_metadata_many(science_detailed_items)
         evaluated_candidates.extend(_evaluate_items(science_detailed_items, effective_config, llm, "science", log, should_cancel, progress))
         progress("science", 1, 1, "Science Family complete")
 

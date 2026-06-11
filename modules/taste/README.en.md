@@ -10,6 +10,7 @@ Do not copy only `modules/taste/` to run TASTE. The framework needs the full tra
 | --- | --- |
 | `auto_research/` | Core Python code for Find/Read/Ideas/Plan/Web backend. |
 | `auto_research/web/client/` | React/Vite frontend source. Generated `dist/` files are not committed. |
+| `auto_research/data/quality/` | Static conference/journal quality tables used only for deterministic metadata and small ranking signals. |
 | `tests/` | Backend and workflow regression tests. |
 | `requirements.txt` | Python dependencies for the TASTE management environment. |
 | `LICENSE` | Package-level license copy. The root README also links the license. |

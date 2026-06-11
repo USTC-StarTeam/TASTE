@@ -10,6 +10,7 @@
 | --- | --- |
 | `auto_research/` | Find/Read/Ideas/Plan/Web 后端等核心 Python 代码。 |
 | `auto_research/web/client/` | React/Vite 前端源码。构建产物 `dist/` 不提交。 |
+| `auto_research/data/quality/` | 包内静态会议/期刊质量表，只提供确定性元数据和小幅排序信号。 |
 | `tests/` | 后端和流程回归测试。 |
 | `requirements.txt` | TASTE 管理环境所需 Python 依赖。 |
 | `LICENSE` | 包内许可证副本。根目录 README 中也有许可证说明。 |

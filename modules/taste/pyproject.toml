@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "taste-research"
 version = "0.1.0"
@@ -18,3 +22,10 @@ dependencies = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["auto_research*"]
+
+[tool.setuptools.package-data]
+auto_research = ["data/**/*.json"]
