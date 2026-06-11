@@ -462,9 +462,9 @@ def _latest_find_run_id_from_runs() -> str:
 
 def _current_find_run_id_from_state(root: Path) -> str:
     for rel in [
-        ("state", "current_find_recommendation_projection.json"),
         ("planning", "finding", "find_results.json"),
         ("planning", "finding", "find_progress.json"),
+        ("state", "current_find_recommendation_projection.json"),
         ("state", "current_find_research_plan.json"),
         ("state", "literature_tool_packet.json"),
     ]:
@@ -1456,6 +1456,34 @@ def _normalize_venue_metadata_status_row(row: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _venue_status_has_run_evidence(row: dict[str, Any]) -> bool:
+    if bool(row.get("ok")):
+        return True
+    count = _as_int(
+        row.get("raw_title_index_count")
+        or row.get("corpus_count")
+        or row.get("sample_count")
+        or row.get("candidate_count")
+        or row.get("count"),
+        0,
+    )
+    return count > 0 or bool(row.get("effective_years"))
+
+
+def _venue_status_is_missing_cache(row: dict[str, Any]) -> bool:
+    message = str(row.get("message") or row.get("metadata_completeness_basis") or "").lower()
+    status = str(row.get("metadata_completeness_status") or "").lower()
+    count = _as_int(
+        row.get("raw_title_index_count")
+        or row.get("corpus_count")
+        or row.get("sample_count")
+        or row.get("candidate_count")
+        or row.get("count"),
+        0,
+    )
+    return not row.get("ok") and count <= 0 and (status == "missing" or "metadata cache missing" in message)
+
+
 def _merge_verified_venue_metadata_rows(current_rows: Any, verified_rows: Any) -> list[dict[str, Any]]:
     rows = [_normalize_venue_metadata_status_row(dict(row)) for row in _json_rows(current_rows)]
     verified = [_normalize_venue_metadata_status_row(dict(row)) for row in _json_rows(verified_rows)]
@@ -1468,6 +1496,10 @@ def _merge_verified_venue_metadata_rows(current_rows: Any, verified_rows: Any) -
         key = _venue_source_key(row)
         replacement = by_key.get(key)
         if replacement:
+            used.add(key)
+            if _venue_status_is_missing_cache(replacement) and _venue_status_has_run_evidence(row):
+                merged.append(row)
+                continue
             combined = {**row, **replacement}
             row_candidate = _as_int(row.get("candidate_count") or row.get("count"), 0)
             row_selected = _as_int(row.get("selected_category_count") or row.get("selected_category_papers"), 0)
@@ -1485,7 +1517,6 @@ def _merge_verified_venue_metadata_rows(current_rows: Any, verified_rows: Any) -
             if run_detail not in (None, "", 0):
                 combined["detail_fetched_count"] = run_detail
             merged.append(_normalize_venue_metadata_status_row(combined))
-            used.add(key)
         else:
             merged.append(row)
     for key, row in by_key.items():
@@ -2123,12 +2154,37 @@ def _selected_base_viability_current_selection(root: Path, current_run: str = ""
 
 def _current_environment_selection(root: Path) -> dict[str, Any]:
     current_run = _current_find_run_id_for_project(root)
+    selected_contract = _current_find_selected_execution_summary(root)
+    current_selected_plan_id = str(selected_contract.get("selected_plan_id") or "").strip() if isinstance(selected_contract, dict) else ""
+    current_selected_idea_id = str(selected_contract.get("selected_idea_id") or "").strip() if isinstance(selected_contract, dict) else ""
+    selected_plan_required = bool((selected_contract or {}).get("required")) if isinstance(selected_contract, dict) else False
+
+    def invalid_selection(reason: str, *, selected_run: str = "", selection_plan_id: str = "", selection_idea_id: str = "") -> dict[str, Any]:
+        return {
+            "valid": False,
+            "current_find_run_id": current_run,
+            "fresh_find_run_id": selected_run,
+            "selected_plan_id": selection_plan_id,
+            "selected_idea_id": selection_idea_id,
+            "current_selected_plan_id": current_selected_plan_id,
+            "current_selected_idea_id": current_selected_idea_id,
+            "reason": reason,
+        }
+
+    if selected_plan_required and not current_selected_plan_id:
+        return invalid_selection("missing_current_find_selected_plan_id")
+    viability_mismatch: dict[str, Any] = {}
     viability_current = _selected_base_viability_current_selection(root, current_run)
     if viability_current:
-        return viability_current
+        viability_selected = viability_current.get("selected") if isinstance(viability_current.get("selected"), dict) else {}
+        viability_plan_id = str(viability_current.get("selected_plan_id") or viability_selected.get("selected_plan_id") or "").strip()
+        if not selected_plan_required or viability_plan_id == current_selected_plan_id:
+            viability_idea_id = str(viability_current.get("selected_idea_id") or viability_selected.get("selected_idea_id") or "").strip()
+            return {**viability_current, "selected_plan_id": viability_plan_id, "selected_idea_id": viability_idea_id, "current_selected_plan_id": current_selected_plan_id, "current_selected_idea_id": current_selected_idea_id}
+        viability_mismatch = invalid_selection("environment_selection_selected_plan_missing_or_stale", selected_run=str(viability_current.get("fresh_find_run_id") or ""), selection_plan_id=viability_plan_id, selection_idea_id=str(viability_current.get("selected_idea_id") or viability_selected.get("selected_idea_id") or "").strip())
     selection = _read_json(root / "state" / "evidence_ready_repo_selection.json", {})
     if not isinstance(selection, dict):
-        return {"valid": False, "current_find_run_id": current_run, "reason": "missing_evidence_ready_repo_selection"}
+        return viability_mismatch or invalid_selection("missing_evidence_ready_repo_selection")
     execution = _read_json(root / "state" / "base_switch_execution.json", {})
     executed_route = execution.get("new_route", {}) if isinstance(execution, dict) and isinstance(execution.get("new_route"), dict) else {}
     authorized_switch = bool(
@@ -2140,6 +2196,10 @@ def _current_environment_selection(root: Path) -> dict[str, Any]:
     if authorized_switch:
         selected = {**selected, **{key: value for key, value in executed_route.items() if value not in (None, "", [])}}
     selected_run = str(selected.get("fresh_find_run_id") or selection.get("fresh_find_run_id") or "").strip()
+    selection_plan_id = str(selection.get("selected_plan_id") or selected.get("selected_plan_id") or "").strip()
+    selection_idea_id = str(selection.get("selected_idea_id") or selected.get("selected_idea_id") or current_selected_idea_id or "").strip()
+    if selected_plan_required and selection_plan_id != current_selected_plan_id:
+        return viability_mismatch or invalid_selection("environment_selection_selected_plan_missing_or_stale", selected_run=selected_run, selection_plan_id=selection_plan_id, selection_idea_id=selection_idea_id)
     stage = str(selection.get("selection_stage") or selection.get("selected_by_stage") or selected.get("selection_stage") or selected.get("selected_by_stage") or "").strip()
     decision = selection.get("claude_topic_decision") if isinstance(selection.get("claude_topic_decision"), dict) else {}
     raw_selection_gate = str(selection.get("selection_gate") or selected.get("selection_gate") or "").strip()
@@ -2154,19 +2214,32 @@ def _current_environment_selection(root: Path) -> dict[str, Any]:
     public_selection_gate = raw_selection_gate
     if accepted and not raw_selection_gate.startswith(("accepted_by_claude", "accepted_by_deterministic_base_switch_gate")):
         public_selection_gate = raw_selection_gate or ("accepted_by_deterministic_base_switch_gate" if authorized_switch else "accepted_by_claude_topic_fit")
-    in_current_find = selected_title_in_current_find(root, selected, decision)
+    in_current_find = selected_title_in_current_find(root, selected, decision) if selected else True
     valid = bool(selected and (stage == "environment_claude_code" or authorized_switch) and accepted and in_current_find)
     current_candidate = selection.get("current_candidate") if isinstance(selection.get("current_candidate"), dict) else {}
+    selection_status = str(selection.get("status") or "")
+    if valid:
+        reason = "current_environment_base_selected"
+    elif not selected:
+        reason = "environment_repo_selection_blocked_current_run" if raw_selection_gate.startswith("continued_search") or selection_status.lower().startswith("blocked") else "environment_base_selection_pending_or_stale"
+    elif not in_current_find:
+        reason = "selected_base_not_in_current_find_recommendations"
+    else:
+        reason = "environment_base_selection_pending_or_stale"
     return {
         "valid": valid,
         "current_find_run_id": current_run,
         "fresh_find_run_id": selected_run,
+        "selected_plan_id": selection_plan_id,
+        "selected_idea_id": selection_idea_id,
+        "current_selected_plan_id": current_selected_plan_id,
+        "current_selected_idea_id": current_selected_idea_id,
         "selection_stage": stage or ("environment_claude_code" if authorized_switch else ""),
         "accepted_by_claude": accepted,
         "selected": selected,
         "selection_gate": public_selection_gate,
         "raw_selection_gate": raw_selection_gate,
-        "selection_status": str(selection.get("status") or ""),
+        "selection_status": selection_status,
         "audited_count": selection.get("audited_count", 0),
         "evidence_ready_count": selection.get("evidence_ready_count", 0),
         "candidate_count": selection.get("candidate_count", 0),
@@ -2176,7 +2249,7 @@ def _current_environment_selection(root: Path) -> dict[str, Any]:
         "current_candidate": current_candidate,
         "progress_summary": str(selection.get("progress_summary") or ""),
         "elapsed_sec": selection.get("elapsed_sec", 0),
-        "reason": "current_environment_base_selected" if valid else ("selected_base_not_in_current_find_recommendations" if not in_current_find else "environment_base_selection_pending_or_stale"),
+        "reason": reason,
     }
 
 
@@ -2924,6 +2997,10 @@ def _public_environment_selection_summary(env: Any) -> dict[str, Any]:
         "valid": bool(src.get("valid")),
         "current_find_run_id": str(src.get("current_find_run_id") or ""),
         "fresh_find_run_id": str(src.get("fresh_find_run_id") or ""),
+        "selected_plan_id": str(src.get("selected_plan_id") or selected.get("selected_plan_id") or ""),
+        "selected_idea_id": str(src.get("selected_idea_id") or selected.get("selected_idea_id") or ""),
+        "current_selected_plan_id": str(src.get("current_selected_plan_id") or ""),
+        "current_selected_idea_id": str(src.get("current_selected_idea_id") or ""),
         "base_selection_status": str(src.get("base_selection_status") or ("selected" if src.get("valid") else "waiting_for_environment_review")),
         "selection_stage": _public_internal_names(src.get("selection_stage") or selected.get("selection_stage") or ""),
         "selection_gate": _public_internal_names(src.get("selection_gate") or src.get("raw_selection_gate") or ""),
@@ -9302,7 +9379,7 @@ def _current_find_pipeline_summary(root: Path) -> dict[str, Any]:
 
     state_run_id = payload_run_id(state_plan)
     find_run_id = payload_run_id(find_results)
-    run_id = str(state_run_id or find_run_id or "")
+    run_id = str(find_run_id or state_run_id or "")
 
     def same_current_run_payload(payload: Any) -> bool:
         payload_id = payload_run_id(payload)
@@ -9331,6 +9408,54 @@ def _current_find_pipeline_summary(root: Path) -> dict[str, Any]:
     read_source = str(read_results.get("source") or "") if isinstance(read_results, dict) else ""
     idea_source = str(ideas_results.get("source") or "") if isinstance(ideas_results, dict) else ""
     plan_source = str(plans_results.get("source") or "") if isinstance(plans_results, dict) else ""
+    current_read_artifact = same_current_run_payload(read_results)
+    current_idea_artifact = same_current_run_payload(ideas_results)
+    current_plan_artifact = same_current_run_payload(plans_results)
+
+    def execution_truthy(value: Any) -> bool:
+        return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on", "selected", "approved", "accept", "accepted", "pass", "passed", "ready", "done", "completed"}
+
+    def row_selected_for_execution(row: dict[str, Any]) -> bool:
+        if any(execution_truthy(row.get(key)) for key in ["selected_for_execution", "execute_next", "primary", "selected", "best_plan", "best_idea"]):
+            return True
+        selection = row.get("execution_selection") if isinstance(row.get("execution_selection"), dict) else {}
+        return any(execution_truthy(selection.get(key)) for key in ["selected", "selected_for_execution", "execute_next", "primary"])
+
+    def idea_approved_for_planning(row: dict[str, Any]) -> bool:
+        status = str(row.get("status") or row.get("decision") or "").strip().lower()
+        return status in {"approved", "accepted", "accept", "pass", "passed", "selected", "ready"} or row_selected_for_execution(row)
+
+    persisted_selected_idea_id = str(
+        (state_plan.get("selected_idea_id") if isinstance(state_plan, dict) else "")
+        or (ideas_results.get("selected_idea_id") if isinstance(ideas_results, dict) else "")
+        or (plans_results.get("selected_idea_id") if isinstance(plans_results, dict) else "")
+        or ""
+    ).strip()
+    persisted_selected_plan_id = str(
+        (state_plan.get("selected_plan_id") if isinstance(state_plan, dict) else "")
+        or (plans_results.get("selected_plan_id") if isinstance(plans_results, dict) else "")
+        or ""
+    ).strip()
+    approved_ideas = [
+        row for row in ideas
+        if isinstance(row, dict)
+        and (
+            idea_approved_for_planning(row)
+            or (persisted_selected_idea_id and str(row.get("id") or row.get("idea_id") or "").strip() == persisted_selected_idea_id)
+        )
+    ]
+    approved_idea_ids = {str(row.get("id") or row.get("idea_id") or "").strip() for row in approved_ideas if str(row.get("id") or row.get("idea_id") or "").strip()}
+    plans_for_approved_ideas = [
+        row for row in plans
+        if isinstance(row, dict)
+        and (
+            not approved_idea_ids
+            or str(row.get("idea_id") or "").strip() in approved_idea_ids
+            or (persisted_selected_plan_id and str(row.get("plan_id") or row.get("id") or "").strip() == persisted_selected_plan_id)
+        )
+    ]
+    ideas_ready = bool(current_idea_artifact and ideas and (approved_ideas or persisted_selected_plan_id))
+    plans_ready = bool(current_plan_artifact and plans and (plans_for_approved_ideas or persisted_selected_plan_id))
     selected_execution = _current_find_selected_execution_summary(root)
     selected_plan_id = str(selected_execution.get("selected_plan_id") or "").strip()
     selected_idea_id = str(selected_execution.get("selected_idea_id") or "").strip()
@@ -9372,33 +9497,37 @@ def _current_find_pipeline_summary(root: Path) -> dict[str, Any]:
     validation = best_wrapper_validation if wrapper_validation_priority(best_wrapper_validation)[0] else computed_validation
     content_ready = bool(
         run_id
-        and read_source == required_source
-        and idea_source == required_source
-        and plan_source == required_source
+        and current_read_artifact
+        and current_idea_artifact
+        and current_plan_artifact
         and validation.get("valid")
         and len(readings) == int(validation.get("expected_recommendation_count") or len(readings) or 0)
-        and len(ideas) >= 5
-        and len(plans) >= 5
+        and ideas_ready
+        and plans_ready
     )
     execution_ready = bool(content_ready and selected_plan_id and not selected_execution_issue)
     takeover_ready = execution_ready
     blockers: list[str] = []
-    if read_source != required_source:
-        blockers.append(f"read_results source={read_source or 'missing'}; required={required_source}")
-    if idea_source != required_source:
-        blockers.append(f"ideas source={idea_source or 'missing'}; required={required_source}")
-    if plan_source != required_source:
-        blockers.append(f"plans source={plan_source or 'missing'}; required={required_source}")
+    if not current_read_artifact:
+        blockers.append("read_results missing or stale for current Find run")
+    if not current_idea_artifact:
+        blockers.append("ideas missing or stale for current Find run")
+    if not current_plan_artifact:
+        blockers.append("plans missing or stale for current Find run")
     blockers.extend(str(item) for item in validation.get("blockers", []) if str(item).strip())
     expected_readings = int(validation.get("expected_recommendation_count") or validation.get("expected_positive_count") or 0)
     if expected_readings and len(readings) != expected_readings:
         blockers.append(f"readings must equal current recommendations: {len(readings)}/{expected_readings}")
     elif len(readings) < min(10, max(expected_readings, 1)):
         blockers.append(f"readings below required current-Find coverage: {len(readings)}")
-    if len(ideas) < 5:
-        blockers.append(f"ideas below 5: {len(ideas)}")
-    if len(plans) < 5:
-        blockers.append(f"plans below 5: {len(plans)}")
+    if not ideas:
+        blockers.append("ideas missing for current Find run")
+    elif not approved_ideas:
+        blockers.append("no approved ideas for current Find run; approve at least one idea before planning")
+    if not plans:
+        blockers.append("plans missing for current Find run")
+    elif approved_idea_ids and not plans_for_approved_ideas:
+        blockers.append("plans do not match approved current-Find ideas")
     selection_blocked = bool(content_ready and len(plans) >= 1 and (not selected_plan_id or selected_execution_issue))
     if selection_blocked:
         if selected_execution_issue == "ambiguous_selected_plan":
@@ -9484,10 +9613,10 @@ def _current_find_pipeline_summary(root: Path) -> dict[str, Any]:
         failure_type = "claude_artifacts_missing"
         next_required_action = "rerun_current_find_claude_takeover_repair"
         status = "blocked_or_refreshing_claude_takeover"
-    elif len(ideas) < 5 or len(plans) < 5:
+    elif not ideas_ready or not plans_ready:
         failure_type = "idea_plan_artifacts_incomplete"
-        next_required_action = "rerun_current_find_claude_takeover_repair"
-        status = "blocked_claude_current_find_takeover_incomplete"
+        next_required_action = "run_or_approve_current_find_idea_plan"
+        status = "blocked_current_find_idea_plan_incomplete"
     else:
         failure_type = "contract_validation_failed"
         next_required_action = "rerun_current_find_claude_takeover_repair"
@@ -10316,6 +10445,8 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         summary = f"参考复现正在运行；阶段=experiment；PID={ref_pid}；当前基底：{ref_title}"
     elif status == "blocked_after_max_cycles":
         summary = f"完整科研自循环已停止在最大轮次后；最后步骤={latest_stage or 'full-cycle'}；阶段={latest_phase or 'full-cycle'}；没有正在运行的 full-cycle。"
+    elif status == "blocked_environment_base_selection_required":
+        summary = "当前 Find/Read/Idea/Plan 已准备；等待环境阶段基于当前 selected_plan_id 选择基底、验证 repo/data/protocol，旧环境和旧参考复现不作为当前结果。"
     elif str(full_job.get("status") or "").lower() == "stale":
         summary = f"完整科研自循环进程已停止；最后步骤={latest_stage or 'full-cycle'}；阶段={latest_phase or 'full-cycle'}；没有正在运行的 full-cycle。"
     elif llm_quota_blocked:
@@ -10552,10 +10683,21 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
             "note_i18n": {"zh": "新的 Find 正在运行；旧推荐统计暂不作为当前结果展示，等待本轮产物落盘。", "en": "Fresh Find is running; previous recommendation statistics are hidden until the new run lands."},
         })
     base_selection_status = selected_plan_gate["status"] if selected_plan_gate.get("blocked") else "waiting_for_current_find_results" if fresh_find_running else "blocked_by_literature_gate" if literature_gate_blocked else ("selected" if env.get("valid") else "waiting_for_environment_claude_code")
+    current_route_ref_gate = ref_gate
+    if not env.get("valid") and not literature_gate_blocked and not fresh_find_running and not selected_plan_gate.get("blocked"):
+        current_route_ref_gate = {
+            "status": "not_started",
+            "decision": "blocked_until_environment_base_selection",
+            "human_summary": "环境阶段尚未为当前 selected_plan_id 选择基底；旧参考复现只保留为历史审计，不作为当前主线结果。",
+            "summary": "环境阶段尚未为当前 selected_plan_id 选择基底；旧参考复现只保留为历史审计，不作为当前主线结果。",
+        }
     if selected_plan_gate.get("blocked"):
         status = selected_plan_gate["status"]
         summary = selected_plan_gate["summary"]
-    selected_base_run_id = str(selected.get("fresh_find_run_id") or active_repo.get("fresh_find_run_id") or env.get("fresh_find_run_id") or "").strip()
+    if env.get("valid"):
+        selected_base_run_id = str(selected.get("fresh_find_run_id") or active_repo.get("fresh_find_run_id") or env.get("fresh_find_run_id") or "").strip()
+    else:
+        selected_base_run_id = str(env.get("fresh_find_run_id") or selected.get("fresh_find_run_id") or active_repo.get("fresh_find_run_id") or "").strip()
     current_public_find_run_id = str(env.get("current_find_run_id") or run_id or "").strip()
     main_route = {"base_title": base_title, "base_venue": selected.get("venue") or active_repo.get("selected_base_venue") or "", "base_year": selected.get("year") or active_repo.get("selected_base_year") or "", "repo_name": repo_name, "repo_url": repo_url, "repo_path": repo_path, "dataset": route_dataset, "ready_datasets": route_ready_datasets[:8], "find_run_id": current_public_find_run_id, "base_selection_find_run_id": selected_base_run_id if selected_base_run_id and selected_base_run_id != current_public_find_run_id else "", "base_selection_status": base_selection_status, "selection_stage": _public_internal_names(env.get("selection_stage", "")), "selection_gate": _public_internal_names(env.get("selection_gate", "")), "readings": completed_read_count, "read_artifacts": raw_read_count, "raw_reading_count": raw_read_count, "full_text_reading_count": full_text_read_count, "pending_full_text_reading_count": pending_full_text_read_count, "ideas": idea_count, "plans": plan_count}
     blocker_summary = str(ref_gate.get("human_summary") or ref_gate.get("decision_reason") or full_cycle.get("current_goal") or "")
@@ -10622,7 +10764,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     legacy_control = {"policy": "历史仓库、实验和参考复现只保留为审计记录；当前主线以本轮 Find 后的环境审查选择为准。", "details_hidden": True}
     if literature_gate_blocked and env.get("blocked_selection"):
         legacy_control["blocked_environment_selection"] = env.get("blocked_selection")
-    display_ref_gate = _reference_gate_for_current_route_display(ref_gate, status, route_ready_datasets, protocol_probe, base_title or "当前基底")
+    display_ref_gate = _reference_gate_for_current_route_display(current_route_ref_gate, status, route_ready_datasets, protocol_probe, base_title or "当前基底")
     human_gate_summary = {
         "status": status,
         "title": blocker_title,
@@ -10811,10 +10953,10 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
             paper_stage["summary_zh"] = paper_stage["summary"]
     environment_status = selected_plan_gate["status"] if selected_plan_gate.get("blocked") else "waiting_for_current_find_results" if fresh_find_running else "blocked_by_literature_gate" if literature_gate_blocked else ("selected" if env.get("valid") else "waiting_for_environment_base_selection")
     experiment_stage_status = selected_plan_gate["status"] if selected_plan_gate.get("blocked") else "fresh_find_running" if fresh_find_running else "blocked_by_literature_gate" if literature_gate_blocked else status
-    environment_stage = _public_environment_stage(status=environment_status, env=env, selected=selected, active_repo=active_repo, repo_name=repo_name, repo_url=repo_url, repo_path=repo_path, ref_gate=ref_gate, reference_full_job=reference_full_job, route_dataset=route_dataset, route_ready_datasets=route_ready_datasets, protocol_probe=protocol_probe)
+    environment_stage = _public_environment_stage(status=environment_status, env=env, selected=selected, active_repo=active_repo, repo_name=repo_name, repo_url=repo_url, repo_path=repo_path, ref_gate=current_route_ref_gate, reference_full_job=reference_full_job, route_dataset=route_dataset, route_ready_datasets=route_ready_datasets, protocol_probe=protocol_probe)
     experiment_module_summary = _public_experiment_module_summary(
         status=experiment_stage_status,
-        reference_gate=ref_gate,
+        reference_gate=current_route_ref_gate,
         scientific_progress_gate=scientific_progress_gate,
         experiment_iteration_audit=experiment_iteration_audit,
         experiment_rows=current_route_experiments_all if not downstream_waiting_on_find else [],
@@ -11379,7 +11521,7 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
         full_cycle_compact.pop('finished_at', None)
         full_cycle_compact.pop('completed_at', None)
 
-    display_ref_gate = _reference_gate_for_current_route_display(ref_gate, status, route_ready_datasets, protocol_probe, base_title or "当前基底")
+    display_ref_gate = _reference_gate_for_current_route_display(current_route_ref_gate, status, route_ready_datasets, protocol_probe, base_title or "当前基底")
     blocker = {
         'category': _public_internal_names(blocker_category),
         'title': blocker_title,

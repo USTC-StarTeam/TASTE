@@ -2912,10 +2912,11 @@ function runtimeDraftFromSummary(summary: ProjectSummary | null) {
 }
 
 function environmentDraftFromSummary(summary: ProjectSummary | null) {
-  const runtime = summary?.runtime?.runtime || summary?.state?.runtime?.runtime || summary?.config?.runtime || {};
-  const environment = summary?.config?.environment || {};
+  const runPreferences = (summary as any)?.run_preferences || {};
+  const runtime = summary?.runtime?.runtime || summary?.state?.runtime?.runtime || runPreferences.runtime || summary?.config?.runtime || {};
+  const environment = summary?.config?.environment || runPreferences.environment || {};
   return {
-    conda_env: summary?.config?.conda_env || "",
+    conda_env: runPreferences.conda_env || summary?.config?.conda_env || "",
     conda_base: runtime.conda_base || environment.conda_base_hint || "",
     experiment_python: runtime.experiment_python || environment.experiment_python || "",
     python_executable: runtime.management_python || runtime.python_executable || summary?.config?.python_executable || "",
@@ -3088,7 +3089,7 @@ function App() {
   const [researchCodingBackend, setCodingBackend] = useState("");
   const [researchExecutePlan, setExecutePlan] = useState(false);
   const [researchPrepareEnv, setPrepareEnv] = useState(false);
-  const [researchRealBootstrapEnv, setRealBootstrapEnv] = useState(false);
+  const [researchRealBootstrapEnv, setRealBootstrapEnv] = useState(true);
   const [researchSkipPaper, setSkipPaper] = useState(false);
   const [researchAutoInstallLatex, setAutoInstallLatex] = useState(false);
   const [activeProjectArtifact, setActiveProjectArtifact] = useState("");
@@ -5459,7 +5460,7 @@ function App() {
       execute_plan: researchExecutePlan,
       prepare_env: researchPrepareEnv,
       real_bootstrap_env: researchRealBootstrapEnv,
-      conda_env: researchEnvDraft.conda_env || researchSummary?.config?.conda_env || "",
+      conda_env: researchEnvDraft.conda_env || (researchSummary as any)?.run_preferences?.conda_env || researchSummary?.config?.conda_env || "",
       skip_paper: researchSkipPaper,
       refresh_current_paper: action === "paper",
       refresh_current_venue: action === "paper",

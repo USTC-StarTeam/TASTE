@@ -2177,6 +2177,15 @@ def test_environment_repo_search_ignores_find_source_toggles(monkeypatch):
 
 
 
+def test_environment_stage_explicit_env_name_overrides_strategy_recommendation(monkeypatch):
+    monkeypatch.syspath_prepend(str(server.WORKSPACE_ROOT / "scripts"))
+    env_stage = importlib.reload(importlib.import_module("run_environment_stage"))
+    strategy = {"env_action": "create_new_project_env", "recommended_env_name": "taste_smoke_web"}
+
+    assert env_stage.strategy_env_name(strategy, "llm_diff_rec", explicit_env_name="llm_diff_rec") == "llm_diff_rec"
+    assert env_stage.strategy_env_name(strategy, "fallback_env", explicit_env_name="") == "taste_smoke_web"
+
+
 def test_environment_run_optional_timeout_returns_124(monkeypatch, tmp_path, capsys):
     monkeypatch.syspath_prepend(str(server.WORKSPACE_ROOT / "scripts"))
     env_stage = importlib.import_module("run_environment_stage")
@@ -2200,6 +2209,15 @@ def test_environment_blocker_replaces_stale_implementation_plan(monkeypatch, tmp
     paths.state.mkdir(parents=True)
     (paths.planning / "finding").mkdir(parents=True)
     write_json(paths.planning / "finding" / "find_progress.json", {"run_id": "find_new"})
+    write_json(
+        paths.planning / "finding" / "plans.json",
+        {
+            "run_id": "find_new",
+            "selected_plan_id": "plan-current",
+            "selected_idea_id": "idea-current",
+            "plans": [{"plan_id": "plan-current", "idea_id": "idea-current", "selected_for_execution": True}],
+        },
+    )
 
     env_stage.write_repo_selection_blocker(paths, "no current repo", selection={"fresh_find_run_id": "find_new", "selection_gate": "continued_search_required_by_claude_topic_fit", "selection_stage": "environment_claude_code"})
     env_stage.write_fresh_base_implementation_blocker(paths, "find_new", "no current repo")
@@ -2207,9 +2225,13 @@ def test_environment_blocker_replaces_stale_implementation_plan(monkeypatch, tmp
     blocker = read_json(paths.state / "repo_selection_blocker.json")
     impl = read_json(paths.state / "fresh_base_implementation_plan.json")
     assert blocker["fresh_find_run_id"] == "find_new"
+    assert blocker["selected_plan_id"] == "plan-current"
+    assert blocker["selected_idea_id"] == "idea-current"
     assert blocker["blocker_type"] == "environment_repo_selection_blocked"
     assert impl["status"] == "blocked_environment_repo_selection_required"
     assert impl["fresh_find_run_id"] == "find_new"
+    assert impl["selected_plan_id"] == "plan-current"
+    assert impl["selected_idea_id"] == "idea-current"
     assert impl["repo"] == {}
 
 
@@ -3154,6 +3176,227 @@ def test_web_current_find_pipeline_uses_state_contract_when_artifacts_are_stale(
     assert summary["selected_idea_id"] == "idea-selected"
 
 
+def test_current_find_pipeline_accepts_web_generated_idea_plan_as_current_run_content(tmp_path, monkeypatch):
+    from auto_research.web import project_bridge
+
+    project_root = tmp_path / "demo_project"
+    taste_dir = project_root / "planning" / "finding"
+    state_dir = project_root / "state"
+    taste_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    run_id = "find_web"
+    write_json(taste_dir / "find_results.json", {"run_id": run_id, "strong_recommendations": [recommended_paper("p1", "Paper One"), recommended_paper("p2", "Paper Two")]})
+    write_json(taste_dir / "read_results.json", {"run_id": run_id, "source": "claude_code_current_find_takeover", "readings": [{"title": "Paper One"}, {"title": "Paper Two"}]})
+    write_json(
+        taste_dir / "ideas.json",
+        {
+            "run_id": run_id,
+            "source": "taste_auto_idea",
+            "ideas": [
+                {"id": "idea-001", "title": "Approved idea", "status": "approved"},
+                {"id": "idea-002", "title": "Backlog idea", "status": "pending"},
+            ],
+        },
+    )
+    write_json(
+        taste_dir / "plans.json",
+        {
+            "run_id": run_id,
+            "source": "taste_auto_plan",
+            "plans": [{"plan_id": "plan-idea-001", "idea_id": "idea-001", "title": "Approved idea plan"}],
+            "selection_issue": "missing_selected_plan",
+        },
+    )
+    write_json(
+        state_dir / "current_find_research_plan.json",
+        {
+            "run_id": run_id,
+            "reading_validation": {
+                "valid": True,
+                "actual_reading_count": 2,
+                "expected_recommendation_count": 2,
+                "full_text_reading_count": 2,
+                "full_text_evidence_count": 2,
+                "pending_full_text_reading_count": 0,
+                "pending_without_evidence_count": 0,
+                "pending_deep_read_synthesis_count": 0,
+                "blockers": [],
+            },
+        },
+    )
+    monkeypatch.setattr(project_bridge, "_current_find_results_light", lambda root, project: read_json(root / "planning" / "finding" / "find_results.json", {}))
+
+    summary = project_bridge._current_find_pipeline_summary(project_root)
+
+    assert summary["content_ready"] is True
+    assert summary["status"] == "blocked_missing_selected_plan"
+    assert summary["failure_type"] == "missing_selected_plan"
+    assert summary["ideas"] == 2
+    assert summary["plans"] == 1
+    assert not any("below 5" in item for item in summary["blockers"])
+    assert not any("source=" in item for item in summary["blockers"])
+
+
+def test_finish_plan_marks_completed_plan_as_selected_execution(monkeypatch, tmp_path):
+    from auto_research.auto_plan import pipeline as plan_pipeline
+
+    run_id = "find_finish"
+    run_root = tmp_path / run_id
+    run_root.mkdir()
+    write_json(
+        run_root / "ideas.json",
+        {"run_id": run_id, "ideas": [{"id": "idea-001", "title": "Idea", "status": "approved"}]},
+    )
+    write_json(
+        run_root / "plans.json",
+        {
+            "run_id": run_id,
+            "plans": [
+                {"plan_id": "plan-1", "idea_id": "idea-001", "title": "Plan 1"},
+                {"plan_id": "plan-2", "idea_id": "idea-001", "title": "Plan 2"},
+            ],
+        },
+    )
+    monkeypatch.setattr(plan_pipeline, "run_dir", lambda _run_id: run_root)
+    monkeypatch.setattr(plan_pipeline, "sync_latest", lambda *args, **kwargs: None)
+    monkeypatch.setattr(plan_pipeline, "update_manifest", lambda *args, **kwargs: None)
+    monkeypatch.setattr(plan_pipeline, "_sync_project_plans", lambda *args, **kwargs: None)
+
+    result = plan_pipeline.finish_plan(run_id, "plan-1")
+
+    by_id = {plan["plan_id"]: plan for plan in result["plans"]}
+    assert by_id["plan-1"]["completed"] is True
+    assert by_id["plan-1"]["selected_for_execution"] is True
+    assert by_id["plan-1"]["execute_next"] is True
+    assert by_id["plan-2"]["selected_for_execution"] is False
+    assert result["selected_plan_id"] == "plan-1"
+    assert result["selected_idea_id"] == "idea-001"
+    assert result["selection_issue"] == ""
+
+
+def test_environment_selection_requires_current_selected_plan_id(tmp_path):
+    from auto_research.web import project_bridge
+
+    root = tmp_path / "demo_project"
+    finding = root / "planning" / "finding"
+    state = root / "state"
+    repo = root / "repos" / "selected" / "demo_repo"
+    finding.mkdir(parents=True)
+    state.mkdir(parents=True)
+    repo.mkdir(parents=True)
+    run_id = "find_env_plan_contract"
+    write_json(finding / "find_progress.json", {"run_id": run_id})
+    write_json(finding / "ideas.json", {"run_id": run_id, "ideas": [{"id": "idea-current", "title": "Current Idea", "status": "approved"}]})
+    write_json(
+        finding / "plans.json",
+        {
+            "run_id": run_id,
+            "selected_plan_id": "plan-current",
+            "selected_idea_id": "idea-current",
+            "plans": [{"plan_id": "plan-current", "idea_id": "idea-current", "title": "Current Plan", "selected_for_execution": True, "execute_next": True}],
+        },
+    )
+    selected_base = {
+        "name": "Demo Repo",
+        "title": "Selected Base Paper",
+        "repo_path": str(repo),
+        "local_path": str(repo),
+        "fresh_find_run_id": run_id,
+        "selection_stage": "environment_claude_code",
+    }
+    write_json(
+        state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": run_id,
+            "selection_stage": "environment_claude_code",
+            "selection_gate": "accepted_by_claude_topic_fit",
+            "accepted_by_claude": True,
+            "selected": dict(selected_base),
+        },
+    )
+
+    stale = project_bridge._current_environment_selection(root)
+
+    assert stale["valid"] is False
+    assert stale["reason"] == "environment_selection_selected_plan_missing_or_stale"
+    assert stale["current_selected_plan_id"] == "plan-current"
+
+    selected_base["selected_plan_id"] = "plan-current"
+    write_json(
+        state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": run_id,
+            "selected_plan_id": "plan-current",
+            "selected_idea_id": "idea-current",
+            "selection_stage": "environment_claude_code",
+            "selection_gate": "accepted_by_claude_topic_fit",
+            "accepted_by_claude": True,
+            "selected": selected_base,
+        },
+    )
+
+    current = project_bridge._current_environment_selection(root)
+
+    assert current["valid"] is True
+    assert current["selected_plan_id"] == "plan-current"
+    assert current["selected_idea_id"] == "idea-current"
+    assert current["current_selected_plan_id"] == "plan-current"
+    assert current["current_selected_idea_id"] == "idea-current"
+
+
+def test_current_environment_pending_selection_prefers_current_run_over_stale_viability(tmp_path):
+    from auto_research.web import project_bridge
+
+    root = tmp_path / "demo_project"
+    finding = root / "planning" / "finding"
+    state = root / "state"
+    finding.mkdir(parents=True)
+    state.mkdir(parents=True)
+    run_id = "find_current_env_blocker"
+    write_json(finding / "find_progress.json", {"run_id": run_id})
+    write_json(
+        finding / "plans.json",
+        {
+            "run_id": run_id,
+            "selected_plan_id": "plan-current",
+            "selected_idea_id": "idea-current",
+            "plans": [{"plan_id": "plan-current", "idea_id": "idea-current", "selected_for_execution": True, "execute_next": True}],
+        },
+    )
+    write_json(
+        state / "selected_base_viability_gate.json",
+        {
+            "status": "blocked",
+            "decision": "base_switch_gate_required",
+            "fresh_find_run_id": "find_old",
+            "current_selected_repo": "old/repo",
+            "current_selected_repo_path": "/old/repo",
+            "selected_base_title": "Old Base",
+        },
+    )
+    write_json(
+        state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": run_id,
+            "selected_plan_id": "plan-current",
+            "selected_idea_id": "idea-current",
+            "selection_stage": "environment_claude_code",
+            "selection_gate": "continued_search_required_by_claude_topic_fit",
+            "selected": {},
+        },
+    )
+
+    pending = project_bridge._current_environment_selection(root)
+
+    assert pending["valid"] is False
+    assert pending["fresh_find_run_id"] == run_id
+    assert pending["selected_plan_id"] == "plan-current"
+    assert pending["selected_idea_id"] == "idea-current"
+    assert pending["current_selected_plan_id"] == "plan-current"
+    assert pending["current_selected_idea_id"] == "idea-current"
+    assert pending["reason"] == "environment_repo_selection_blocked_current_run"
+
+
 def test_current_find_pipeline_counts_unread_recommendations_as_pending_full_text(tmp_path, monkeypatch):
     from auto_research.web import project_bridge
 
@@ -3740,6 +3983,57 @@ def test_verified_venue_metadata_overrides_stale_kdd_but_keeps_category_screen_i
     counts = project_bridge._venue_metadata_counts(merged)
     assert counts["raw_title_index_papers"] == 5607
     assert counts["venue_title_filter_input_papers"] == 2319
+
+
+def test_missing_verified_venue_cache_does_not_override_current_run_status():
+    from auto_research.web import project_bridge
+
+    current_rows = [
+        {
+            "source": "ICLR",
+            "source_kind": "venue",
+            "venue_id": "openreview_iclr_2026",
+            "venue": "ICLR",
+            "ok": True,
+            "limited": True,
+            "count": 200,
+            "candidate_count": 200,
+            "raw_title_index_count": 200,
+            "requested_years": [2026],
+            "effective_years": [2026],
+            "detail_fetched_count": 40,
+            "message": "adapter=openreview; years=2026; corpus=200; screen_input=200; fetched=200",
+        }
+    ]
+    verified_rows = [
+        {
+            "source": "openreview_iclr_2026",
+            "source_kind": "venue",
+            "venue_id": "openreview_iclr_2026",
+            "venue": "openreview_iclr_2026",
+            "ok": False,
+            "limited": True,
+            "count": 0,
+            "message": "verified local venue metadata cache missing",
+            "requested_years": [2026],
+            "effective_years": [],
+            "raw_title_index_count": 0,
+            "candidate_count": 0,
+            "metadata_completeness_status": "missing",
+            "metadata_completeness_ok": False,
+        }
+    ]
+
+    merged = project_bridge._merge_verified_venue_metadata_rows(current_rows, verified_rows)
+
+    assert len(merged) == 1
+    assert merged[0]["source"] == "ICLR"
+    assert merged[0]["ok"] is True
+    assert merged[0]["count"] == 200
+    assert merged[0]["candidate_count"] == 200
+    assert merged[0]["effective_years"] == [2026]
+    assert merged[0]["detail_fetched_count"] == 40
+    assert "metadata cache missing" not in merged[0].get("message", "")
 
 
 def test_venue_metadata_normalization_trusts_adapter_over_stale_scope():
@@ -4934,6 +5228,61 @@ def test_project_search_queries_ignore_project_id_and_use_find_context(tmp_path,
     assert all('none data-ready' not in query.lower() for query in queries)
 
 
+def test_project_search_queries_use_current_find_artifact_shape(tmp_path, monkeypatch):
+    import importlib.util
+    from types import SimpleNamespace
+
+    module_path = Path(__file__).resolve().parents[3] / 'scripts' / 'run_environment_stage.py'
+    spec = importlib.util.spec_from_file_location('run_environment_stage_test_current_shape', module_path)
+    env_stage = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(env_stage)
+
+    planning = tmp_path / 'planning' / 'finding'
+    reports = tmp_path / 'reports'
+    state = tmp_path / 'state'
+    planning.mkdir(parents=True)
+    reports.mkdir(parents=True)
+    state.mkdir(parents=True)
+    write_json(planning / 'find_results.json', {
+        'stage0_profile': {
+            'profile': {'explicit_profile': {'research_interest_summary': 'taste_smoke_web taste_smoke_web'}},
+            'retrieval_text': 'taste_smoke_web taste_smoke_web Research goal: taste_smoke_web taste_smoke_web The workflow should prioritize papers and ideas that directly help the current research loop.',
+        },
+        'articles': [
+            {'title': 'FlowRL: Matching Reward Distributions for LLM Reasoning'},
+            {'title': 'COMAL: A Convergent Meta-Algorithm for Aligning LLMs with General Preferences'},
+        ],
+    })
+    write_json(planning / 'plans.json', {
+        'selected_plan_id': 'plan-iteration-001',
+        'plans': [
+            {'plan_id': 'plan-iteration-001', 'title': 'FlowBalance-Align execution plan', 'selected_for_execution': True},
+        ],
+    })
+    write_json(planning / 'ideas.json', {
+        'selected_idea_id': 'idea-001',
+        'ideas': [
+            {'id': 'idea-001', 'title': 'FlowBalance-Align: reward distribution matching with game-theoretic preference alignment', 'selected_for_execution': True},
+        ],
+    })
+
+    monkeypatch.setattr(env_stage, 'load_project_config', lambda _project: {'topic': 'taste_smoke_web', 'queries': ['taste_smoke_web']})
+    monkeypatch.setattr(env_stage, 'build_paths', lambda _project: SimpleNamespace(planning=tmp_path / 'planning', reports=reports, state=state))
+
+    queries = env_stage.project_search_queries('taste_smoke_web')
+
+    assert queries[:4] == [
+        'FlowBalance-Align execution plan',
+        'FlowBalance-Align: reward distribution matching with game-theoretic preference alignment',
+        'FlowRL: Matching Reward Distributions for LLM Reasoning code dataset',
+        'COMAL: A Convergent Meta-Algorithm for Aligning LLMs with General Preferences code dataset',
+    ]
+    assert all(query != 'taste_smoke_web taste_smoke_web' for query in queries)
+    assert all('research goal:' not in query.lower() for query in queries)
+    assert all('current research loop' not in query.lower() for query in queries)
+
+
 def test_same_phase_descendant_workers_are_folded_into_parent_row():
     rows = [
         {'pid': '100', 'ppid': '1', 'phase': 'environment', 'kind': 'environment_stage'},
@@ -4944,6 +5293,25 @@ def test_same_phase_descendant_workers_are_folded_into_parent_row():
     kept = server._suppress_same_phase_descendant_workers(rows)
 
     assert [row['pid'] for row in kept] == ['100', '102']
+
+
+def test_cancel_running_project_job_without_live_child_marks_cancelled(monkeypatch, tmp_path):
+    JOBS.clear()
+    monkeypatch.setattr(server, "JOBS_PATH", tmp_path / "web_jobs.json")
+    monkeypatch.setattr(server, "_live_jobs_from_projects", lambda compact=False: [])
+    monkeypatch.setattr(server, "_pid_from_project_worker_job_id", lambda _job_id: "")
+    monkeypatch.setattr(server, "_project_from_job_payload", lambda _job_id, _live_job, _known_job: "")
+
+    job = server.JobState("environment_demo", "environment")
+    job.status = "running"
+    JOBS[job.job_id] = job
+
+    result = server.api_cancel_job(job.job_id)
+
+    assert result["status"] == "cancelled"
+    assert job.status == "cancelled"
+    assert job.progress["phase"] == "cancelled"
+    assert job.cancel_requested is True
 
 
 def test_running_stage_job_hides_synthetic_project_worker(monkeypatch, tmp_path):
@@ -5006,6 +5374,118 @@ def test_project_search_queries_extract_unquoted_stewardship_phrases(tmp_path, m
         'evidence-grounded paper drafting',
     ]
 
+
+def test_selected_base_reference_audit_supports_seekbench_analysis_repo(tmp_path):
+    import importlib.util
+
+    script_path = Path(__file__).resolve().parents[3] / "scripts" / "run_selected_base_reference_reproduction_audit.py"
+    spec = importlib.util.spec_from_file_location("selected_base_reference_audit_under_test", script_path)
+    audit = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(audit)
+
+    repo = tmp_path / "seekbench"
+    (repo / "analysis").mkdir(parents=True)
+    (repo / "data").mkdir()
+    (repo / "analysis" / "grounded_reason.py").write_text("", encoding="utf-8")
+    (repo / "data" / "seekbench_data.jsonl").write_text("{}\n", encoding="utf-8")
+
+    assert audit.repo_adapter(repo) == "seekbench_analysis_quickstart"
+    cmd = audit.official_command(repo, "taste_smoke_web_benchmark_v1", "bounded", 1)
+    assert cmd[:4] == ["analysis/grounded_reason.py", "--input", "data/seekbench_data.jsonl", "--outdir"]
+    assert "--n_boot" in cmd
+    metrics = audit.parse_metrics("Loaded 40 traces\nTrajectory rows: 40\nAll figures saved to outputs/taste_reference_bounded/\n")
+    assert metrics["trace_count"] == 40
+    assert metrics["trajectory_rows"] == 40
+    assert metrics["analysis_outputs_saved"] == 1
+
+
+def test_bootstrap_repo_env_uses_target_python_module_pip(tmp_path, monkeypatch):
+    import importlib.util
+
+    script_path = Path(__file__).resolve().parents[3] / "scripts" / "bootstrap_repo_env.py"
+    spec = importlib.util.spec_from_file_location("bootstrap_repo_env_under_test", script_path)
+    bootstrap = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(bootstrap)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "requirements.txt").write_text("numpy\n", encoding="utf-8")
+    (repo / "setup.py").write_text("from setuptools import setup\nsetup(name='demo')\n", encoding="utf-8")
+    monkeypatch.setattr(bootstrap, "conda_env_exists", lambda *_args: True)
+
+    steps = bootstrap.infer_install_steps(repo, "demo_env", "3.10", {}, "/conda")
+
+    assert ["run", "-n", "demo_env", "python", "-m", "pip", "install", "-r", str(repo / "requirements.txt")] in steps
+    assert ["run", "-n", "demo_env", "python", "-m", "pip", "install", "-e", str(repo)] in steps
+    assert not any(step[:4] == ["run", "-n", "demo_env", "pip"] for step in steps)
+
+def test_bootstrap_repo_env_skips_editable_for_setup_helper_script(tmp_path, monkeypatch):
+    import importlib.util
+
+    script_path = Path(__file__).resolve().parents[3] / "scripts" / "bootstrap_repo_env.py"
+    spec = importlib.util.spec_from_file_location("bootstrap_repo_env_setup_helper_under_test", script_path)
+    bootstrap = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(bootstrap)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "requirements.txt").write_text("numpy\n", encoding="utf-8")
+    (repo / "setup.py").write_text(
+        "import subprocess\n\n"
+        "def main():\n"
+        "    subprocess.check_call(['python', '-m', 'pip', '--version'])\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bootstrap, "conda_env_exists", lambda *_args: True)
+
+    steps = bootstrap.infer_install_steps(repo, "demo_env", "3.10", {}, "/conda")
+
+    assert ["run", "-n", "demo_env", "python", "-m", "pip", "install", "-r", str(repo / "requirements.txt")] in steps
+    assert not any("-e" in step for step in steps)
+    assert bootstrap.repo_has_editable_package(repo) is False
+
+
+
+def test_bootstrap_repo_env_repairs_missing_python_pip(monkeypatch):
+    import importlib.util
+
+    script_path = Path(__file__).resolve().parents[3] / "scripts" / "bootstrap_repo_env.py"
+    spec = importlib.util.spec_from_file_location("bootstrap_repo_env_repair_under_test", script_path)
+    bootstrap = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(bootstrap)
+
+    class Proc:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    checks = {"count": 0}
+    calls = []
+
+    def fake_run(cmd, cwd=None):
+        calls.append(cmd)
+        if cmd == ["/conda", "run", "-n", "demo_env", "python", "-m", "pip", "--version"]:
+            checks["count"] += 1
+            if checks["count"] == 1:
+                return Proc(1, "", "No module named pip")
+            return Proc(0, "pip 25.0")
+        if cmd == ["/conda", "install", "-y", "-n", "demo_env", "pip"]:
+            return Proc(0, "installed pip")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(bootstrap, "run", fake_run)
+
+    ready, records = bootstrap.ensure_env_python_pip("/conda", "demo_env")
+
+    assert ready is True
+    assert [record["reason"] for record in records] == ["check-python-pip", "install-conda-pip", "verify-after-install-conda-pip"]
+    assert calls[1] == ["/conda", "install", "-y", "-n", "demo_env", "pip"]
+
 def test_repo_archive_directory_is_reused_without_redownload(tmp_path, monkeypatch):
     import importlib.util
 
@@ -5031,3 +5511,117 @@ def test_repo_archive_directory_is_reused_without_redownload(tmp_path, monkeypat
 
     assert repo == target.resolve()
     assert info["status"] == "reused_existing_archive"
+
+
+def test_configured_max_ideas_reads_runtime_config(monkeypatch, tmp_path):
+    project_paths = importlib.import_module("project_paths")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    write_json(runtime / ".config.json", {"max_ideas": 2})
+    monkeypatch.setenv("WORKFLOW_RUNTIME_DIR", str(runtime))
+
+    assert project_paths.configured_max_ideas("", {}, default=5) == 2
+    assert project_paths.configured_max_ideas("", {}, explicit=3, default=5) == 3
+
+
+def test_ensure_current_find_loads_web_generated_idea_plan_sources(tmp_path):
+    import importlib.util
+
+    module_path = Path(__file__).resolve().parents[3] / "scripts" / "ensure_current_find_research_plan.py"
+    spec = importlib.util.spec_from_file_location("ensure_current_find_research_plan_test_web_sources", module_path)
+    ensure_plan = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(ensure_plan)
+
+    finding = tmp_path / "finding"
+    finding.mkdir()
+    run_id = "find_web_sources"
+    find_results = {"run_id": run_id, "strong_recommendations": [recommended_paper("p1", "Paper One")]}
+    write_json(
+        finding / "read_results.json",
+        {
+            "run_id": run_id,
+            "source": "auto_read_recommended_articles",
+            "readings": [{"paper_id": "p1", "title": "Paper One", "abstract_zh": "中文摘要", "method_details_zh": "具体方法细节"}],
+        },
+    )
+    write_json(
+        finding / "ideas.json",
+        {
+            "run_id": run_id,
+            "source": "taste_auto_idea",
+            "ideas": [{"id": "idea-001", "title": "Web idea", "new_method": "具体新方法", "mechanism": "机制说明"}],
+        },
+    )
+    write_json(
+        finding / "plans.json",
+        {
+            "run_id": run_id,
+            "source": "taste_auto_plan",
+            "plans": [{"plan_id": "plan-001", "idea_id": "idea-001", "title": "Web plan", "steps": ["step"]}],
+        },
+    )
+
+    readings, ideas, plans = ensure_plan.load_claude_outputs(finding, run_id, find_results, read_limit=1, write_pending_validation=False)
+
+    assert len(readings) == 1
+    assert [idea["id"] for idea in ideas] == ["idea-001"]
+    assert [plan["plan_id"] for plan in plans] == ["plan-001"]
+
+
+def test_ensure_claude_plan_state_accepts_selected_web_generated_plan(tmp_path, monkeypatch):
+    import importlib.util
+    from types import SimpleNamespace
+
+    module_path = Path(__file__).resolve().parents[3] / "scripts" / "ensure_current_find_research_plan.py"
+    spec = importlib.util.spec_from_file_location("ensure_current_find_research_plan_test_web_selected", module_path)
+    ensure_plan = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(ensure_plan)
+    monkeypatch.setattr(ensure_plan, "load_project_config", lambda _project: {"target_venue": "ICLR"})
+
+    paths = SimpleNamespace(root=tmp_path / "demo_project", name="demo_project", state=tmp_path / "demo_project" / "state", planning=tmp_path / "demo_project" / "planning")
+    finding = paths.planning / "finding"
+    finding.mkdir(parents=True)
+    paths.state.mkdir(parents=True)
+    run_id = "find_web_selected"
+    readings = [
+        {"paper_id": "p1", "title": "Paper One", "abstract_zh": "中文摘要", "method_details_zh": "具体方法细节", "full_text_available": True},
+        {"paper_id": "p2", "title": "Paper Two", "abstract_zh": "中文摘要", "method_details_zh": "具体方法细节", "full_text_available": True},
+    ]
+    ideas = [
+        {"id": "idea-001", "title": "Selected idea", "status": "approved", "new_method": "一个足够具体的新方法", "mechanism": "机制说明"},
+        {"id": "idea-002", "title": "Backlog idea", "status": "approved", "new_method": "另一个足够具体的新方法", "mechanism": "机制说明"},
+    ]
+    plans = [
+        {"plan_id": "plan-001", "idea_id": "idea-001", "title": "Selected plan", "steps": ["step"], "selected_for_execution": True, "execute_next": True, "execution_selection": {"selected": True, "selected_by": "human_supervision", "reason": "best"}},
+        {"plan_id": "plan-002", "idea_id": "idea-002", "title": "Backlog plan", "steps": ["step"], "selected_for_execution": False, "execute_next": False},
+    ]
+    write_json(finding / "find_results.json", {"run_id": run_id, "strong_recommendations": [recommended_paper("p1", "Paper One"), recommended_paper("p2", "Paper Two")]})
+    write_json(finding / "read_results.json", {"run_id": run_id, "source": "auto_read_recommended_articles", "readings": readings})
+    write_json(finding / "ideas.json", {"run_id": run_id, "source": "taste_auto_idea", "ideas": ideas})
+    write_json(finding / "plans.json", {"run_id": run_id, "source": "taste_auto_plan", "plans": plans})
+    write_json(
+        paths.state / "current_find_claude_reading_validation.json",
+        {
+            "run_id": run_id,
+            "valid": True,
+            "policy_version": ensure_plan.FULL_TEXT_READ_POLICY_VERSION,
+            "expected_recommendation_count": 2,
+            "actual_reading_count": 2,
+            "full_text_reading_count": 2,
+            "pending_full_text_reading_count": 0,
+            "blockers": [],
+        },
+    )
+
+    payload = ensure_plan.ensure_claude_plan_state("demo_project", paths, run_id, readings, ideas, plans, {"status": "web_artifacts", "return_code": 0}, idea_count=2)
+
+    assert payload["status"] == "claude_current_find_read_idea_plan_ready_waiting_for_environment_base_selection"
+    assert payload["source"] == "current_find_execution_contract"
+    assert payload["execution_ready"] is True
+    assert payload["selected_plan_id"] == "plan-001"
+    assert payload["selected_idea_id"] == "idea-001"
+    assert payload["selected_execution_issue"] == ""
+    assert payload["idea_schema_ready"] is True
+    assert payload["targeted_search_query_count"] == 0

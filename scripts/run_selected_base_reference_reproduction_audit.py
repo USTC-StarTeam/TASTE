@@ -148,6 +148,8 @@ def repo_adapter(repo: Path) -> str:
         return "selected_base_official_two_stage"
     if any((repo / name).exists() for name in ["train.py", "single_train.py"]):
         return "official_training_entrypoint"
+    if (repo / "analysis" / "grounded_reason.py").exists() and (repo / "data" / "seekbench_data.jsonl").exists():
+        return "seekbench_analysis_quickstart"
     return "unknown"
 
 
@@ -165,6 +167,10 @@ def ready_dataset(impl: dict[str, Any], protocol: dict[str, Any]) -> str:
 
 
 def official_command(repo: Path, dataset: str, mode: str, epoch: int) -> list[str]:
+    if (repo / "analysis" / "grounded_reason.py").exists() and (repo / "data" / "seekbench_data.jsonl").exists():
+        outdir = "outputs/taste_reference_full" if mode == "full" else "outputs/taste_reference_bounded"
+        n_boot = "2000" if mode == "full" else "20"
+        return ["analysis/grounded_reason.py", "--input", "data/seekbench_data.jsonl", "--outdir", outdir, "--n_boot", n_boot]
     run_sh = repo / "run.sh"
     preferred: list[str] = []
     if run_sh.exists():
@@ -262,6 +268,15 @@ def final_reference_progress(last_progress: dict[str, Any], total_epoch: int, mo
 
 def parse_metrics(stdout: str) -> dict[str, Any]:
     metrics: dict[str, Any] = {}
+    loaded_match = re.search(r"Loaded\s+(\d+)\s+traces", stdout)
+    if loaded_match:
+        metrics["trace_count"] = int(loaded_match.group(1))
+    trajectory_match = re.search(r"Trajectory rows:\s*(\d+)", stdout)
+    if trajectory_match:
+        metrics["trajectory_rows"] = int(trajectory_match.group(1))
+    saved_match = re.search(r"All figures saved to\s+(.+)", stdout)
+    if saved_match:
+        metrics["analysis_outputs_saved"] = 1
     header: list[str] = []
     for line in stdout.splitlines():
         if all(token in line for token in ["HR@10", "NDCG@10", "HR@20", "NDCG@20"]):

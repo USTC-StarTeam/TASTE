@@ -271,7 +271,12 @@ def _apply_execution_selection(ideas: list[dict], plans: list[dict], *, source: 
     explicit_plan_rows = [plan for plan in plan_rows if _explicit_execution_selection(plan, kind="plan")]
     selected_plan: dict | None = explicit_plan_rows[0] if len(explicit_plan_rows) == 1 else None
     selected_by = "claude_or_human_explicit_plan_selection" if selected_plan is not None else "no_explicit_current_find_selection"
-    selection_issue = "ambiguous_selected_plan" if len(explicit_plan_rows) > 1 else "missing_selected_plan" if plan_rows else ""
+    if len(explicit_plan_rows) > 1:
+        selection_issue = "ambiguous_selected_plan"
+    elif len(explicit_plan_rows) == 0 and plan_rows:
+        selection_issue = "missing_selected_plan"
+    else:
+        selection_issue = ""
     selected_idea: dict | None = None
     if selected_plan is not None:
         plan_idea_id = str(selected_plan.get("idea_id") or "").strip()
@@ -608,7 +613,7 @@ def run_plan(request: PlanRequest, config: AppConfig, log: LogFn = print, should
         plans.append(plan)
 
     _raise_if_cancelled(should_cancel)
-    data = {"run_id": request.run_id, "plans": plans}
+    data = {"run_id": request.run_id, "source": "taste_auto_plan", "plans": plans}
     _write_plan_outputs(directory, data, ideas=ideas)
     update_manifest(directory, "plan")
     log("Plan stage complete")
@@ -648,16 +653,24 @@ def polish_plan(request: PlanPolishRequest, config: AppConfig, log: LogFn = prin
 def finish_plan(run_id: str, plan_id: str) -> dict:
     directory = run_dir(run_id)
     data = _load_plans_data(directory, run_id)
+    ideas_data = _load_ideas_data(directory, run_id)
+    found = False
     for plan in data.get("plans", []):
-        if plan.get("plan_id") != plan_id:
+        is_target = str(plan.get("plan_id") or plan.get("id") or "").strip() == str(plan_id or "").strip()
+        plan["selected_for_execution"] = is_target
+        plan["execute_next"] = is_target
+        if not is_target:
             continue
+        found = True
         if not plan.get("completed"):
             plan["completed"] = True
             plan["completed_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        _write_plan_outputs(directory, data)
-        update_manifest(directory, "plan")
-        return data
-    raise ValueError(f"Plan not found: {plan_id}")
+    if not found:
+        raise ValueError(f"Plan not found: {plan_id}")
+    data.setdefault("source", "taste_auto_plan")
+    _write_plan_outputs(directory, data, ideas=ideas_data.get("ideas", []))
+    update_manifest(directory, "plan")
+    return data
 
 
 def _append_plan_section(lines: list[str], title: str, value: object) -> None:

@@ -114,7 +114,7 @@ def _blocked_datasets(req: dict[str, Any], probe: dict[str, Any], selected: dict
 def _repo_payload(selected: dict[str, Any]) -> dict[str, Any]:
     keys = [
         'name', 'repo', 'url', 'repo_url', 'repo_path', 'local_path', 'path', 'source',
-        'fresh_find_run_id', 'literature_base_title', 'selected_base_title', 'selection_stage',
+        'fresh_find_run_id', 'selected_plan_id', 'selected_idea_id', 'literature_base_title', 'selected_base_title', 'selection_stage',
         'selected_by_stage', 'selection_gate', 'decision', 'selection_score', 'pending_loader_bootstrap',
         'pending_reason', 'anchor_selection_policy',
     ]
@@ -143,6 +143,8 @@ def write_generic_plan(project: str, adapter: Path) -> int:
     probe = load_json(state / 'real_dataset_probe.json', {})
     selected = _selected_repo(selection if isinstance(selection, dict) else {}, active if isinstance(active, dict) else {})
     run_id = str((selection.get('fresh_find_run_id') if isinstance(selection, dict) else '') or _current_find_run_id(project)).strip()
+    selected_plan_id = str((selection.get('selected_plan_id') if isinstance(selection, dict) else '') or selected.get('selected_plan_id') or '').strip()
+    selected_idea_id = str((selection.get('selected_idea_id') if isinstance(selection, dict) else '') or selected.get('selected_idea_id') or '').strip()
     now = dt.datetime.now(dt.timezone.utc).isoformat()
     if not selected or not _repo_path(selected):
         reason = 'No current environment-stage repo has been selected for this Find run.'
@@ -150,6 +152,8 @@ def write_generic_plan(project: str, adapter: Path) -> int:
             'updated_at': now,
             'project': project,
             'fresh_find_run_id': run_id,
+            'selected_plan_id': selected_plan_id,
+            'selected_idea_id': selected_idea_id,
             'status': 'blocked_environment_repo_selection_required',
             'reason': reason,
             'repo': {},
@@ -178,6 +182,8 @@ def write_generic_plan(project: str, adapter: Path) -> int:
         'updated_at': now,
         'project': project,
         'fresh_find_run_id': run_id,
+        'selected_plan_id': selected_plan_id,
+        'selected_idea_id': selected_idea_id,
         'status': status,
         'reason': reason,
         'repo': repo,

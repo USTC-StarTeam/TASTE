@@ -540,6 +540,7 @@ Return strict JSON:
     ideas = [_normalize_idea_schema(idea) for idea in ideas]
     idea_payload = {
         "run_id": request.run_id,
+        "source": "taste_auto_idea",
         "ideas": ideas,
         "candidate_pool": candidate_pool,
         "judge_scores": judge_scores,

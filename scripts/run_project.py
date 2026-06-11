@@ -213,11 +213,19 @@ def _current_find_payloads(paths) -> list[dict]:
 
 def current_find_execution_contract(paths) -> dict:
     all_payloads = _current_find_payloads(paths)
+    find_results_payload = load_json(paths.planning / "finding" / "find_results.json")
+    find_progress_payload = load_json(paths.planning / "finding" / "find_progress.json")
+    planning_plan_payload = load_json(paths.planning / "finding" / "plans.json")
+    planning_idea_payload = load_json(paths.planning / "finding" / "ideas.json")
+    state_plan_payload = load_json(paths.state / "current_find_research_plan.json")
+    experiment_plan_payload = load_json(paths.state / "experiment_plan.json")
     primary_sources = [
-        load_json(paths.state / "current_find_research_plan.json"),
-        load_json(paths.state / "experiment_plan.json"),
-        load_json(paths.planning / "finding" / "plans.json"),
-        load_json(paths.planning / "finding" / "ideas.json"),
+        find_results_payload,
+        find_progress_payload,
+        planning_plan_payload,
+        planning_idea_payload,
+        state_plan_payload,
+        experiment_plan_payload,
     ]
     primary_payloads = [payload for payload in primary_sources if isinstance(payload, dict)]
     run_id = ''
@@ -231,8 +239,23 @@ def current_find_execution_contract(paths) -> dict:
         return bool(not run_id or not payload_run_id or payload_run_id == run_id)
 
     primary_payloads = [payload for payload in primary_payloads if payload_matches_current_run(payload)]
-    primary_has_rows = any(isinstance(payload.get('ideas'), list) or isinstance(payload.get('plans'), list) for payload in primary_payloads)
-    payloads = primary_payloads if primary_has_rows else [payload for payload in all_payloads if isinstance(payload, dict) and payload_matches_current_run(payload)]
+    planning_plan_authoritative = (
+        isinstance(planning_plan_payload, dict)
+        and payload_matches_current_run(planning_plan_payload)
+        and isinstance(planning_plan_payload.get('plans'), list)
+    )
+    if planning_plan_authoritative:
+        payloads = [planning_plan_payload]
+        if isinstance(planning_idea_payload, dict) and payload_matches_current_run(planning_idea_payload):
+            payloads.append(planning_idea_payload)
+        if not any(isinstance(payload.get('ideas'), list) for payload in payloads):
+            for fallback in [state_plan_payload] + [payload for payload in all_payloads if isinstance(payload, dict)]:
+                if isinstance(fallback, dict) and payload_matches_current_run(fallback) and isinstance(fallback.get('ideas'), list):
+                    payloads.append({'run_id': _payload_run_id(fallback) or run_id, 'ideas': fallback.get('ideas')})
+                    break
+    else:
+        primary_has_rows = any(isinstance(payload.get('ideas'), list) or isinstance(payload.get('plans'), list) for payload in primary_payloads)
+        payloads = primary_payloads if primary_has_rows else [payload for payload in all_payloads if isinstance(payload, dict) and payload_matches_current_run(payload)]
 
     contract: dict = {
         'required': False,
@@ -276,7 +299,7 @@ def current_find_execution_contract(paths) -> dict:
 
     ideas = unique_rows(ideas, 'idea')
     plans = unique_rows(plans, 'plan')
-    contract['required'] = bool(plans or ideas or contract.get('run_id'))
+    contract['required'] = bool(plans or ideas or contract.get('selected_plan_id'))
     if contract.get('selected_plan_id') and plans:
         selected_plan_id = str(contract.get('selected_plan_id') or '').strip()
         matching_plans = [row for row in plans if str(row.get('plan_id') or row.get('id') or '').strip() == selected_plan_id]

@@ -19,7 +19,7 @@ from typing import Any
 from agent_state import append_agent_log, mark_agent, upsert_agent
 from auto_research.paths import CONFIG_PATH
 from paper_common import get_active_paper_state
-from project_paths import ROOT, build_paths, load_project_config, management_python, project_experiment_python_from_config
+from project_paths import ROOT, build_paths, configured_max_ideas, load_project_config, management_python, project_experiment_python_from_config
 from project_config import project_target_venue
 from pipeline_guard import fresh_base_state_names, guard_fresh_base_blocker_entry
 from guard_selected_base_route import repair_project as guard_selected_base_route
@@ -249,6 +249,7 @@ def current_find_plan_bridge_gate_status(paths, bridge_summary: Any | None = Non
     current_plan = read_json(paths.state / "current_find_research_plan.json", {})
     validation = read_json(paths.state / "current_find_claude_reading_validation.json", {})
     selected_contract = current_find_execution_contract(paths)
+    required_idea_count = configured_max_ideas(getattr(paths, "name", ""), default=5)
 
     plan_run_id = str(current_plan.get("run_id") or "").strip() if isinstance(current_plan, dict) else ""
     plan_status = str(current_plan.get("status") or "").strip() if isinstance(current_plan, dict) else ""
@@ -278,10 +279,10 @@ def current_find_plan_bridge_gate_status(paths, bridge_summary: Any | None = Non
         blockers.append("ideas.json is stale for the latest Find run_id")
     if isinstance(plans, dict) and run_id and str(plans.get("run_id") or "").strip() != run_id:
         blockers.append("plans.json is stale for the latest Find run_id")
-    if idea_count < 5:
-        blockers.append(f"current-Find idea count {idea_count} is below required 5")
-    if plan_count < 5:
-        blockers.append(f"current-Find plan count {plan_count} is below required 5")
+    if idea_count < required_idea_count:
+        blockers.append(f"current-Find idea count {idea_count} is below required {required_idea_count}")
+    if plan_count < required_idea_count:
+        blockers.append(f"current-Find plan count {plan_count} is below required {required_idea_count}")
     if not current_find_validation_ready(validation, run_id, expected_readings):
         blockers.append("current-Find full-text reading validation is not ready for the latest Find run")
     if isinstance(current_plan, dict):
@@ -1588,7 +1589,8 @@ class FullCycle:
                 f"P0 HARD STOP: Current Find full-text reading gate is blocked: full-text readings {full_text_gate.get('full_text_reading_count')}/{full_text_gate.get('expected_recommendation_count')}, pending={full_text_gate.get('pending_full_text_reading_count')}.",
                 "P0 ALLOWED ACTION ONLY: acquire or prove the missing current-Find full-text/PDF/HTML/page evidence, or repair the Find recommendation acceptance packet so user-visible recommendations are all fully readable. Do not rerun Claude over unchanged missing evidence; do not select bases, launch experiments, write papers, repair citations, or promote claims until this gate passes.",
             ])
-        if isinstance(current_plan, dict) and (safe_int(current_plan.get("current_find_idea_count"), 0) < 5 or safe_int(current_plan.get("current_find_plan_count"), 0) < 5):
+        required_idea_count = configured_max_ideas(self.project, default=5)
+        if isinstance(current_plan, dict) and (safe_int(current_plan.get("current_find_idea_count"), 0) < required_idea_count or safe_int(current_plan.get("current_find_plan_count"), 0) < required_idea_count):
             hard_lines.append("P0: current Find Read/Idea/Plan downstream artifacts are incomplete; repair the research pipeline/output parsing before environment or paper promotion.")
         hard_lines.append(json.dumps(authoritative, ensure_ascii=False, indent=2, sort_keys=True)[:18000])
         return "\n\n".join(hard_lines)

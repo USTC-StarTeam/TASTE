@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 from project_paths import ROOT, build_paths, load_project_config
+from run_project import current_find_execution_contract
 
 WORKSPACE_ROOT = ROOT / "modules" / "taste"
 if str(WORKSPACE_ROOT) not in sys.path:
@@ -69,16 +70,35 @@ def current_find_run_id(paths) -> str:
     return str(fresh.get('fresh_find_run_id') or '').strip() if isinstance(fresh, dict) else ''
 
 
+def current_selected_execution_ids(paths) -> tuple[str, str]:
+    try:
+        contract = current_find_execution_contract(paths)
+    except Exception:
+        return '', ''
+    if not isinstance(contract, dict):
+        return '', ''
+    return str(contract.get('selected_plan_id') or '').strip(), str(contract.get('selected_idea_id') or '').strip()
+
+
+def current_selected_plan_id(paths) -> str:
+    selected_plan_id, _ = current_selected_execution_ids(paths)
+    return selected_plan_id
+
+
 def current_env_selection_valid(paths) -> bool:
     run_id = current_find_run_id(paths)
+    selected_plan_id = current_selected_plan_id(paths)
+    if not selected_plan_id:
+        return False
     selection = load_json(paths.state / 'evidence_ready_repo_selection.json', {})
     if not isinstance(selection, dict):
         return False
     selected = selection.get('selected') if isinstance(selection.get('selected'), dict) else {}
     selected_run = str(selection.get('fresh_find_run_id') or selected.get('fresh_find_run_id') or '').strip()
+    selection_plan_id = str(selection.get('selected_plan_id') or selected.get('selected_plan_id') or '').strip()
     stage = str(selection.get('selection_stage') or selection.get('selected_by_stage') or selected.get('selection_stage') or '').strip()
     accepted = bool(str(selection.get('selection_gate') or '').startswith(('accepted_by_claude', 'accepted_by_deterministic_base_switch_gate')) or (isinstance(selection.get('claude_topic_decision'), dict) and selection['claude_topic_decision'].get('accept_as_current_best')))
-    return bool(run_id and selected and selected_run == run_id and stage == 'environment_claude_code' and accepted)
+    return bool(run_id and selected_plan_id and selection_plan_id == selected_plan_id and selected and selected_run == run_id and stage == 'environment_claude_code' and accepted)
 
 
 def select_current_run_environment_repo(project: str, paths, env_name: str, max_rounds: int = 3) -> str:
@@ -239,7 +259,9 @@ def load_repo_env_strategy(paths) -> dict:
     return {}
 
 
-def strategy_env_name(strategy: dict, fallback: str) -> str:
+def strategy_env_name(strategy: dict, fallback: str, *, explicit_env_name: str = '') -> str:
+    if explicit_env_name:
+        return explicit_env_name
     if not isinstance(strategy, dict):
         return fallback
     if str(strategy.get('env_action') or '') == 'create_new_project_env':
@@ -277,7 +299,13 @@ def _query_looks_like_project_id(value: str, project: str) -> bool:
         return True
     project_key = _query_placeholder_key(project)
     text_key = _query_placeholder_key(text)
-    return bool(project_key and text_key == project_key)
+    if not project_key:
+        return False
+    if text_key == project_key:
+        return True
+    # Generated smoke/default prompts can repeat the project id; those are still
+    # placeholders and should never become repo-search queries.
+    return bool(text_key and not text_key.replace(project_key, ''))
 
 
 def _append_query(queries: list[str], value: object, project: str) -> None:
@@ -285,7 +313,21 @@ def _append_query(queries: list[str], value: object, project: str) -> None:
     lowered = text.lower()
     if not text or _query_looks_like_project_id(text, project):
         return
-    if any(marker in lowered for marker in ['no repo selected', 'future memory', 'none satisfied', 'none data-ready', 'no data-ready', 'current search found', 'needs-more-search', 'if no repo is good enough', 'after auditing', 'after reviewing', 'selected_active_repo=none']):
+    if any(marker in lowered for marker in ['no repo selected', 'no repo has been selected', 'no audited repos exist', 'zero audited candidates', 'zero evidence-ready', 'initial search phase', 'future memory', 'none satisfied', 'none data-ready', 'no data-ready', 'current search found', 'needs-more-search', 'if no repo is good enough', 'after auditing', 'after reviewing', 'selected_active_repo=none']):
+        return
+    if lowered.startswith('topic ') and _query_looks_like_project_id(lowered.removeprefix('topic '), project):
+        return
+    generic_find_markers = [
+        'ideas that directly help the current research loop',
+        'the workflow should prioritize papers and ideas that directly help the current research loop',
+    ]
+    project_key = _query_placeholder_key(project)
+    text_key = _query_placeholder_key(text)
+    if any(marker in lowered for marker in generic_find_markers) and (
+        lowered in generic_find_markers
+        or 'research goal:' in lowered
+        or bool(project_key and project_key in text_key)
+    ):
         return
     # Search backends work better with concise, evidence-bearing phrases than
     # long generated paragraphs. Keep titles intact, trim only oversized text.
@@ -335,6 +377,8 @@ def _stewardship_memory_is_search_guidance(text: object) -> bool:
         return False
     if lowered.startswith(('after auditing', 'after reviewing', 'after the audit')) or any(marker in lowered for marker in ['none satisfied', 'none data-ready', 'current search found', 'needs-more-search', 'no repo selected', 'future memory']):
         return False
+    if any(marker in lowered for marker in ['no repo has been selected', 'no audited repos exist', 'zero audited candidates', 'zero evidence-ready', 'initial search phase']):
+        return False
     if any(marker in lowered for marker in ['search for', 'priority search', 'target repos', 'target repositories', 'next search', 'continue searching for']):
         return True
     return False
@@ -342,8 +386,54 @@ def _stewardship_memory_is_search_guidance(text: object) -> bool:
 
 def _current_find_query_context(paths, project: str) -> list[str]:
     queries: list[str] = []
+
+    def selected_row(rows: object, selected_id: str, id_keys: tuple[str, ...]) -> dict:
+        if not isinstance(rows, list):
+            return {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if row.get('selected_for_execution') or row.get('execute_next'):
+                return row
+            selection = row.get('execution_selection')
+            if isinstance(selection, dict) and selection.get('selected'):
+                return row
+            if selected_id and any(str(row.get(key) or '').strip() == selected_id for key in id_keys):
+                return row
+        return {}
+
+    plans_payload = load_json(paths.planning / 'finding' / 'plans.json', {})
+    if isinstance(plans_payload, dict):
+        selected_plan = selected_row(plans_payload.get('plans'), str(plans_payload.get('selected_plan_id') or '').strip(), ('plan_id', 'id'))
+        if selected_plan:
+            for key in ('title', 'objective', 'summary', 'research_question', 'description'):
+                _append_query(queries, selected_plan.get(key), project)
+
+    ideas_payload = load_json(paths.planning / 'finding' / 'ideas.json', {})
+    if isinstance(ideas_payload, dict):
+        selected_idea = selected_row(ideas_payload.get('ideas'), str(ideas_payload.get('selected_idea_id') or '').strip(), ('id', 'idea_id'))
+        if selected_idea:
+            for key in ('title', 'objective', 'summary', 'hypothesis', 'method'):
+                _append_query(queries, selected_idea.get(key), project)
+
     find_results = load_json(paths.planning / 'finding' / 'find_results.json', {})
     if isinstance(find_results, dict):
+        paper_rows: list[dict] = []
+        for key in ('articles', 'read_candidates', 'strong_recommendations', 'recommended_papers', 'papers'):
+            rows = find_results.get(key)
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if isinstance(row, dict):
+                    paper_rows.append(row)
+        seen_titles: set[str] = set()
+        for row in paper_rows[:12]:
+            title = str(row.get('title') or '').strip()
+            title_key = title.lower()
+            if title and title_key not in seen_titles:
+                seen_titles.add(title_key)
+                _append_query(queries, f'{title} code dataset', project)
+
         stage0 = find_results.get('stage0_profile') if isinstance(find_results.get('stage0_profile'), dict) else {}
         profile = stage0.get('profile') if isinstance(stage0.get('profile'), dict) else {}
         explicit = profile.get('explicit_profile') if isinstance(profile.get('explicit_profile'), dict) else {}
@@ -355,17 +445,6 @@ def _current_find_query_context(paths, project: str) -> list[str]:
         for phrase in _stewardship_short_phrases(retrieval_text):
             _append_query(queries, phrase, project)
         _append_query(queries, retrieval_text, project)
-        for row in (find_results.get('recommended_papers') or find_results.get('papers') or [])[:6]:
-            if isinstance(row, dict):
-                title = str(row.get('title') or '').strip()
-                if title:
-                    _append_query(queries, f'{title} code dataset', project)
-    plans_payload = load_json(paths.planning / 'finding' / 'plans.json', {})
-    plan_rows = plans_payload.get('plans', []) if isinstance(plans_payload, dict) else []
-    selected = next((row for row in plan_rows if isinstance(row, dict) and (row.get('selected_for_execution') or row.get('execute_next') or (isinstance(row.get('execution_selection'), dict) and row['execution_selection'].get('selected')))), {})
-    if isinstance(selected, dict):
-        _append_query(queries, selected.get('title'), project)
-        _append_query(queries, selected.get('objective') or selected.get('summary'), project)
     return queries
 
 
@@ -446,15 +525,21 @@ def append_search_memory(paths, payload: dict) -> None:
 
 def write_repo_selection_blocker(paths, reason: str, *, selection: dict | None = None) -> None:
     selection = selection or {}
+    selected = selection.get('selected', {}) if isinstance(selection.get('selected'), dict) else {}
+    current_plan_id, current_idea_id = current_selected_execution_ids(paths)
     run_id = str(selection.get('fresh_find_run_id') or current_find_run_id(paths) or '').strip()
+    selected_plan_id = str(selection.get('selected_plan_id') or selected.get('selected_plan_id') or current_plan_id or '').strip()
+    selected_idea_id = str(selection.get('selected_idea_id') or selected.get('selected_idea_id') or current_idea_id or '').strip()
     payload = {
         'status': 'blocked',
         'blocker_type': 'environment_repo_selection_blocked',
         'fresh_find_run_id': run_id,
+        'selected_plan_id': selected_plan_id,
+        'selected_idea_id': selected_idea_id,
         'reason': reason,
         'selection_gate': selection.get('selection_gate', ''),
         'selection_stage': selection.get('selection_stage', ''),
-        'selected': selection.get('selected', {}),
+        'selected': selected,
         'rejected_selected': selection.get('rejected_selected', {}),
         'updated_at': dt.datetime.now(dt.timezone.utc).isoformat(),
     }
@@ -462,9 +547,12 @@ def write_repo_selection_blocker(paths, reason: str, *, selection: dict | None =
 
 
 def write_fresh_base_implementation_blocker(paths, run_id: str, reason: str) -> None:
+    selected_plan_id, selected_idea_id = current_selected_execution_ids(paths)
     payload = {
         'status': 'blocked_environment_repo_selection_required',
         'fresh_find_run_id': run_id,
+        'selected_plan_id': selected_plan_id,
+        'selected_idea_id': selected_idea_id,
         'reason': reason,
         'repo': {},
         'ready_datasets': [],
@@ -556,14 +644,15 @@ def main() -> int:
     args = parser.parse_args()
     paths = build_paths(args.project)
     cfg = load_project_config(args.project)
-    env_name = args.env_name or cfg.get('conda_env', '') or f"{args.project}_env".replace('-', '_')
+    explicit_env_name = str(args.env_name or cfg.get('conda_env', '') or '').strip()
+    env_name = explicit_env_name or f"{args.project}_env".replace('-', '_')
     if args.repo_path:
         repo = infer_repo(paths, args.repo_path)
     elif current_env_selection_valid(paths):
         repo = infer_repo(paths, '')
     else:
         repo = select_current_run_environment_repo(args.project, paths, env_name, max_rounds=args.repo_search_rounds)
-    env_name = args.env_name or cfg.get('conda_env', '') or f"{args.project}_{Path(repo).name}".replace('-', '_')
+    env_name = explicit_env_name or f"{args.project}_{Path(repo).name}".replace('-', '_')
     print(f'TASTE environment stage: project={args.project}', flush=True)
     print(f'selected repo={repo}', flush=True)
     print(f'conda env={env_name}', flush=True)
@@ -572,8 +661,15 @@ def main() -> int:
     if current_env_selection_valid(paths):
         repo = maybe_switch_to_evidence_ready_repo(args.project, paths, env_name, repo, max_rounds=args.repo_search_rounds)
     strategy = load_repo_env_strategy(paths)
-    env_name = strategy_env_name(strategy, env_name)
+    recommended_env_name = str(strategy.get('recommended_env_name') or '').strip() if isinstance(strategy, dict) else ''
+    env_name = strategy_env_name(strategy, env_name, explicit_env_name=explicit_env_name)
     if strategy:
+        if explicit_env_name and recommended_env_name and recommended_env_name != explicit_env_name:
+            print(
+                f"Explicit environment name {explicit_env_name} overrides Claude recommended_env_name={recommended_env_name}; "
+                "environment stage will repair/reuse the configured environment instead of switching names.",
+                flush=True,
+            )
         print(
             f"Claude stewardship strategy: repo_action={strategy.get('repo_action', '')} "
             f"env_action={strategy.get('env_action', '')} data_action={strategy.get('data_action', '')} "

@@ -7181,7 +7181,13 @@ def _load_persisted_jobs() -> None:
             job.set_progress("blocked", 1, 1, message[:240])
             job.log("Reclassified LLM readiness preflight result as blocked, not complete.")
         if job.status in {"queued", "running", "cancelling"}:
-            if stage.startswith(("full-cycle", "environment", "experiment", "paper", "autonomous")):
+            if job.cancel_requested:
+                job.status = "cancelled"
+                job.error = ""
+                job.cancelled_at = job.cancelled_at or datetime.now(UTC).isoformat().replace("+00:00", "Z")
+                job.set_progress("cancelled", 0, 1, "服务重启前已请求取消，且没有恢复为活动进程；任务已标记为取消。")
+                job.log("Marked cancelled after restart because cancellation had already been requested.")
+            elif stage.startswith(("full-cycle", "environment", "experiment", "paper", "autonomous")):
                 job.status = "blocked"
                 job.error = ""
                 job.set_progress("interrupted", 0, 1, "服务重启，旧 workflow 任务已停止；请以项目 state/full_research_cycle.json 和 evidence gate 为准。")
@@ -8453,9 +8459,18 @@ def api_cancel_job(job_id: str) -> dict:
             termination = _terminate_process_tree(pid) if pid else {"requested_pid": "", "terminated_pids": [], "terminated_pgids": []}
             if pid:
                 known_job.log(f"Termination requested for exact research job child PID={pid}.")
+                status = "cancelling"
+            else:
+                known_job.status = "cancelled"
+                known_job.error = ""
+                known_job.cancelled_at = known_job.cancelled_at or datetime.now(UTC).isoformat().replace("+00:00", "Z")
+                known_job.set_progress("cancelled", 0, 1, "没有发现可终止的活动子进程；任务已标记为取消。")
+                known_job.log("No active child process found for cancellation; marked job cancelled immediately.")
+                status = "cancelled"
+                exact_job = known_job.as_dict(compact=False)
             _LIVE_JOBS_CACHE.clear()
             _persist_jobs()
-            return {**_strip_public_taste_marker(exact_job), "cancel_requested": True, "status": "cancelling", "termination": termination}
+            return {**_strip_public_taste_marker(exact_job), "cancel_requested": True, "status": status, "termination": termination}
         project_id = _project_from_job_payload(job_id, live_job, known_job)
         phase_hint = _phase_hint_from_job(job_id, live_job, known_job)
         if not live_job and project_id and not worker_pid:

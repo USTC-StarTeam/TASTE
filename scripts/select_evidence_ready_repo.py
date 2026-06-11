@@ -697,6 +697,16 @@ def run_claude_topic_decision(project: str, payload: dict[str, Any], timeout_sec
     decision_path.write_text(json.dumps(parsed, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
     return parsed
 
+def current_selected_plan_context(paths) -> dict[str, str]:
+    plans_payload = load_json(paths.planning / 'finding' / 'plans.json', {})
+    plan_rows = plans_payload.get('plans', []) if isinstance(plans_payload, dict) else []
+    selected_plan = next((row for row in plan_rows if isinstance(row, dict) and (row.get('selected_for_execution') or row.get('execute_next') or (isinstance(row.get('execution_selection'), dict) and row['execution_selection'].get('selected')))), {})
+    selected_plan_id = str((plans_payload.get('selected_plan_id') if isinstance(plans_payload, dict) else '') or (selected_plan.get('plan_id') if isinstance(selected_plan, dict) else '') or (selected_plan.get('id') if isinstance(selected_plan, dict) else '') or '').strip()
+    selected_idea_id = str((plans_payload.get('selected_idea_id') if isinstance(plans_payload, dict) else '') or (selected_plan.get('idea_id') if isinstance(selected_plan, dict) else '') or '').strip()
+    selected_plan_title = str((selected_plan.get('title') if isinstance(selected_plan, dict) else '') or '').strip()
+    return {'selected_plan_id': selected_plan_id, 'selected_idea_id': selected_idea_id, 'selected_plan_title': selected_plan_title}
+
+
 def active_repo_candidate(active: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(active, dict) or not active.get('repo_path'):
         return None
@@ -802,6 +812,9 @@ def main() -> int:
 
     audit_started_at = time.monotonic()
     total_candidates = len(candidates)
+    selected_plan_context = current_selected_plan_context(paths)
+    selected_plan_id = selected_plan_context.get('selected_plan_id', '')
+    selected_idea_id = selected_plan_context.get('selected_idea_id', '')
 
     def save_selection_progress(
         status: str,
@@ -838,6 +851,8 @@ def main() -> int:
             'project': args.project,
             'env_name': env_name,
             'fresh_find_run_id': args.fresh_find_run_id,
+            'selected_plan_id': selected_plan_id,
+            'selected_idea_id': selected_idea_id,
             'selection_stage': selection_stage,
             'requirement': 'A selected environment repo must have runnable code signals and at least one real dataset whose repo loader probe succeeds.',
             'status': status,
@@ -922,6 +937,8 @@ def main() -> int:
         'project': args.project,
         'env_name': env_name,
         'fresh_find_run_id': args.fresh_find_run_id,
+        'selected_plan_id': selected_plan_id,
+        'selected_idea_id': selected_idea_id,
         'selection_stage': selection_stage,
         'requirement': 'A selected environment repo must have runnable code signals and at least one real dataset whose repo loader probe succeeds.',
         'audited_count': len(audited),
@@ -1018,6 +1035,12 @@ def main() -> int:
         payload['selection_gate'] = 'accepted_by_local_evidence_no_claude_review' if selected else 'continued_search_required_no_evidence_ready_repo'
         payload['selection_stage'] = selection_stage or 'local_repo_data_probe'
         payload['selected_by_stage'] = (selection_stage or 'local_repo_data_probe') if selected else ''
+    payload['selected_plan_id'] = selected_plan_id
+    payload['selected_idea_id'] = selected_idea_id
+    if selected:
+        selected['selected_plan_id'] = selected_plan_id
+        selected['selected_idea_id'] = selected_idea_id
+        payload['selected'] = selected
     save_json(paths.state / 'evidence_ready_repo_selection.json', payload)
 
     lines = ['# Evidence-Ready Repo Selection\n\n']
@@ -1076,6 +1099,8 @@ def main() -> int:
             'repo_path': selected.get('repo_path', ''),
             'selected_at': active_payload.get('selected_at') or dt.datetime.now(dt.timezone.utc).isoformat(),
             'selected_by': args.fresh_find_run_id or active_payload.get('selected_by') or '',
+            'selected_plan_id': selected_plan_id,
+            'selected_idea_id': selected_idea_id,
             'selection_stage': payload.get('selection_stage', ''),
             'selected_by_stage': payload.get('selected_by_stage', payload.get('selection_stage', '')),
             'anchor_selection_policy': 'Anchor/base accepted only through environment-stage Claude Code with repo/data evidence; Find ranking is not an anchor-selection decision.' if payload.get('selection_stage') == 'environment_claude_code' else 'Local repo/data probe only; not an environment-stage Claude Code anchor decision.',

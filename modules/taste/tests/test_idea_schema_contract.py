@@ -2503,6 +2503,54 @@ def test_current_find_execution_contract_counts_current_run_plans_once(tmp_path)
     assert contract["execution_policy"]["status"] == "no_selected_plan"
 
 
+def test_current_find_execution_contract_prefers_current_project_plans_over_stale_experiment_plan(tmp_path):
+    import run_project
+
+    run_id = "find_contract_prefers_project_plan"
+    project_root = tmp_path / "demo_project"
+    taste_dir = project_root / "planning" / "finding"
+    state_dir = project_root / "state"
+    taste_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    ensure_current_find_research_plan.save_json(
+        taste_dir / "ideas.json",
+        {
+            "run_id": run_id,
+            "ideas": [{"id": "idea-current", "title": "Current Idea", "status": "approved"}],
+        },
+    )
+    ensure_current_find_research_plan.save_json(
+        taste_dir / "plans.json",
+        {
+            "run_id": run_id,
+            "plans": [{"plan_id": "plan-current", "idea_id": "idea-current", "title": "Current Plan"}],
+            "selected_plan_id": "",
+            "selection_issue": "missing_selected_plan",
+        },
+    )
+    ensure_current_find_research_plan.save_json(
+        state_dir / "experiment_plan.json",
+        {
+            "run_id": run_id,
+            "selected_plan_id": "stale-plan",
+            "selected_idea_id": "stale-idea",
+            "plans": [{"plan_id": "stale-plan", "idea_id": "stale-idea", "selected_for_execution": True}],
+            "ideas": [{"id": "stale-idea", "title": "Stale Idea", "selected_for_execution": True}],
+        },
+    )
+    paths = type("Paths", (), {"planning": project_root / "planning", "state": state_dir})()
+
+    contract = run_project.current_find_execution_contract(paths)
+
+    assert contract["required"] is True
+    assert contract["run_id"] == run_id
+    assert contract["candidate_counts"] == {"ideas": 1, "plans": 1}
+    assert contract["selected_plan_id"] == ""
+    assert contract["selected_idea_id"] == ""
+    assert contract["status"] == "blocked_missing_selected_plan"
+    assert contract["selection_issue"] == "missing_selected_plan"
+
+
 def test_current_reading_validation_missing_full_text_does_not_force_claude_rerun():
     run_id = "find_demo_missing_evidence"
     validation = {

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from literature_policy import build_literature_policy, core_topic_fit_from_text, score_paper
-from project_paths import ROOT, build_paths, load_project_config, management_python
+from project_paths import ROOT, build_paths, configured_max_ideas, load_project_config, management_python
 from project_config import project_target_venue
 from auto_research.paths import LEGACY_RUNS_DIR, RUNS_DIR
 
@@ -4371,6 +4371,68 @@ def maybe_repair_current_find_takeover(project: str, paths, taste_dir: Path, run
 CURRENT_FIND_MAX_TAKEOVER_REPAIR_ATTEMPTS = 3
 
 CLAUDE_TAKEOVER_SOURCE = "claude_code_current_find_takeover"
+CURRENT_FIND_READ_ARTIFACT_SOURCES = {CLAUDE_TAKEOVER_SOURCE, "auto_read_recommended_articles", "taste_auto_read", "current_find_bridge", "current_find_bridge_compatibility_only"}
+CURRENT_FIND_IDEA_ARTIFACT_SOURCES = {CLAUDE_TAKEOVER_SOURCE, "taste_auto_idea", "current_find_bridge", "current_find_bridge_compatibility_only"}
+CURRENT_FIND_PLAN_ARTIFACT_SOURCES = {CLAUDE_TAKEOVER_SOURCE, "taste_auto_plan", "current_find_bridge", "current_find_bridge_compatibility_only"}
+
+
+def _current_find_execution_contract(paths: Any) -> dict[str, Any]:
+    try:
+        from run_project import current_find_execution_contract as build_contract
+    except Exception:
+        return {}
+    try:
+        contract = build_contract(paths)
+    except Exception:
+        return {}
+    return contract if isinstance(contract, dict) else {}
+
+
+def _contract_selected_for_run(contract: Any, run_id: str) -> bool:
+    if not isinstance(contract, dict):
+        return False
+    contract_run = str(contract.get("run_id") or "").strip()
+    if run_id and contract_run and contract_run != str(run_id).strip():
+        return False
+    return bool(str(contract.get("selected_plan_id") or "").strip() and not str(contract.get("selection_issue") or "").strip())
+
+
+def _current_payload_source_allowed(payload: Any, allowed_sources: set[str]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    source = str(payload.get("source") or "").strip()
+    return not source or source in allowed_sources
+
+
+def _current_payload_is_current(payload: Any, path: Path, run_id: str, allowed_sources: set[str], current_revision: dt.datetime | None) -> bool:
+    return bool(
+        isinstance(payload, dict)
+        and str(payload.get("run_id") or payload.get("current_find_run_id") or "").strip() == str(run_id or "").strip()
+        and _current_payload_source_allowed(payload, allowed_sources)
+        and claude_output_payloads_or_files_are_current([payload], [path], current_revision)
+    )
+
+
+def _state_source_for_current_artifacts(read_payload: Any, idea_payload: Any, plan_payload: Any) -> str:
+    sources = [
+        str((plan_payload if isinstance(plan_payload, dict) else {}).get("source") or "").strip(),
+        str((idea_payload if isinstance(idea_payload, dict) else {}).get("source") or "").strip(),
+        str((read_payload if isinstance(read_payload, dict) else {}).get("source") or "").strip(),
+    ]
+    if any(source and source != CLAUDE_TAKEOVER_SOURCE for source in sources):
+        return "current_find_execution_contract"
+    return CLAUDE_TAKEOVER_SOURCE
+
+
+def _apply_contract_selection_fields(selection_fields: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
+    if not _contract_selected_for_run(contract, str(contract.get("run_id") or "")):
+        return selection_fields
+    merged = dict(selection_fields)
+    for key in CURRENT_FIND_SELECTION_FIELD_KEYS:
+        value = contract.get(key)
+        if value not in (None, "", [], {}):
+            merged[key] = value
+    return merged
 
 
 def _reading_visible_blob(row: dict[str, Any]) -> str:
@@ -4516,6 +4578,17 @@ def _valid_claude_idea(row: dict[str, Any]) -> bool:
     has_allowed_status = status.startswith("approved") or "blocked" in status or status.startswith("pursue") or status.startswith("watch")
     contract_ready = not _idea_contract_issues(row)
     return has_title and (has_allowed_status or contract_ready) and _idea_parseable_for_audit(row)
+
+
+def _valid_current_find_idea(row: dict[str, Any]) -> bool:
+    if not isinstance(row, dict):
+        return False
+    has_id_or_title = bool(str(row.get("id") or row.get("idea_id") or row.get("title") or "").strip())
+    has_method_signal = bool(
+        compact(row.get("new_method") or row.get("hypothesis") or row.get("mechanism"), 400)
+        or compact(row.get("method_details") or row.get("summary") or row.get("description"), 400)
+    )
+    return bool(has_id_or_title and has_method_signal and not _contains_stale_execution_binding(row))
 
 
 def _valid_claude_plan(row: dict[str, Any]) -> bool:
@@ -5166,24 +5239,9 @@ def load_claude_outputs(taste_dir: Path, run_id: str, find_results: dict[str, An
         if blocking_failures:
             record_current_find_artifact_parse_failure(state_dir, run_id, blocking_failures)
             return [], [], []
-    idea_current = bool(
-        isinstance(idea_payload, dict)
-        and idea_payload.get("run_id") == run_id
-        and idea_payload.get("source") == CLAUDE_TAKEOVER_SOURCE
-        and claude_output_payloads_or_files_are_current([idea_payload], [idea_payload_path], current_revision)
-    )
-    plan_current = bool(
-        isinstance(plan_payload, dict)
-        and plan_payload.get("run_id") == run_id
-        and plan_payload.get("source") == CLAUDE_TAKEOVER_SOURCE
-        and claude_output_payloads_or_files_are_current([plan_payload], [plan_payload_path], current_revision)
-    )
-    read_current = bool(
-        isinstance(read_payload, dict)
-        and read_payload.get("run_id") == run_id
-        and read_payload.get("source") == CLAUDE_TAKEOVER_SOURCE
-        and claude_output_payloads_or_files_are_current([read_payload], [read_payload_path], current_revision)
-    )
+    idea_current = _current_payload_is_current(idea_payload, idea_payload_path, run_id, CURRENT_FIND_IDEA_ARTIFACT_SOURCES, current_revision)
+    plan_current = _current_payload_is_current(plan_payload, plan_payload_path, run_id, CURRENT_FIND_PLAN_ARTIFACT_SOURCES, current_revision)
+    read_current = _current_payload_is_current(read_payload, read_payload_path, run_id, CURRENT_FIND_READ_ARTIFACT_SOURCES, current_revision)
     recommendation_index: dict[str, dict[str, Any]] = {}
     if isinstance(find_results, dict):
         for recommendation_row in _current_recommendation_rows(find_results):
@@ -5218,7 +5276,12 @@ def load_claude_outputs(taste_dir: Path, run_id: str, find_results: dict[str, An
             plan_payload if isinstance(plan_payload, dict) else {},
             current_revision,
         )
-    ideas = [row for row in as_list(idea_payload.get("ideas")) if _valid_claude_idea(row)] if idea_current else []
+    if idea_current:
+        strict_idea_source = str(idea_payload.get("source") or "").strip() == CLAUDE_TAKEOVER_SOURCE
+        idea_validator = _valid_claude_idea if strict_idea_source else _valid_current_find_idea
+        ideas = [row for row in as_list(idea_payload.get("ideas")) if idea_validator(row)]
+    else:
+        ideas = []
     plans = [row for row in as_list(plan_payload.get("plans")) if _valid_claude_plan(row)] if plan_current else []
     if _contains_stale_execution_binding({"ideas": ideas, "plans": plans}):
         return [], [], []
@@ -5352,9 +5415,19 @@ def ensure_claude_plan_state(project: str, paths, run_id: str, readings: list[di
     expected_recommendation_readings = len(current_recommendation_rows) or len(_current_recommendation_identities(find_results_for_coverage if isinstance(find_results_for_coverage, dict) else {})[1]) or 0
     required_idea_count = max(1, _positive_int(idea_count) or 5)
     raw_ideas = [row for row in as_list((idea_payload if isinstance(idea_payload, dict) else {}).get("ideas")) if isinstance(row, dict)]
-    idea_contract_issues = _idea_rows_contract_issues(ideas, required_idea_count)
-    raw_idea_contract_issues = _idea_rows_contract_issues(raw_ideas, required_idea_count)
-    idea_schema_ready = len(ideas) >= required_idea_count and not idea_contract_issues
+    selected_contract = _current_find_execution_contract(paths)
+    selected_contract_ready_for_run = _contract_selected_for_run(selected_contract, run_id)
+    state_source = _state_source_for_current_artifacts(read_payload, idea_payload, plan_payload)
+    relaxed_current_contract = bool(
+        selected_contract_ready_for_run
+        and (
+            _current_payload_source_allowed(idea_payload, CURRENT_FIND_IDEA_ARTIFACT_SOURCES)
+            or _current_payload_source_allowed(plan_payload, CURRENT_FIND_PLAN_ARTIFACT_SOURCES)
+        )
+    )
+    idea_contract_issues = [] if relaxed_current_contract else _idea_rows_contract_issues(ideas, required_idea_count)
+    raw_idea_contract_issues = [] if relaxed_current_contract else _idea_rows_contract_issues(raw_ideas, required_idea_count)
+    idea_schema_ready = bool(ideas) if relaxed_current_contract else (len(ideas) >= required_idea_count and not idea_contract_issues)
     validation = load_json(paths.state / "current_find_claude_reading_validation.json", {})
     if not isinstance(validation, dict):
         validation = {}
@@ -5362,8 +5435,17 @@ def ensure_claude_plan_state(project: str, paths, run_id: str, readings: list[di
     counts_ready = bool(readings and len(ideas) >= required_idea_count and len(plans) >= required_idea_count and len(targeted_queries) >= 3 and idea_schema_ready)
     if expected_recommendation_readings and len(readings) != expected_recommendation_readings:
         counts_ready = False
+    contract_counts_ready = bool(
+        relaxed_current_contract
+        and readings
+        and ideas
+        and plans
+        and (not expected_recommendation_readings or len(readings) == expected_recommendation_readings)
+    )
+    if contract_counts_ready:
+        counts_ready = True
     content_ready = bool(counts_ready and validation_ready)
-    selection_issue = current_find_selected_execution_issue(ideas, plans) if content_ready else ""
+    selection_issue = "" if selected_contract_ready_for_run and content_ready else (current_find_selected_execution_issue(ideas, plans) if content_ready else "")
     execution_ready = bool(content_ready and not selection_issue)
     ready = execution_ready
     positive_anchor_readings = sum(
@@ -5483,9 +5565,11 @@ def ensure_claude_plan_state(project: str, paths, run_id: str, readings: list[di
         "baseline 与候选方法复现审计通过",
         "reference/scientific/evidence gates 通过",
     ]
-    execution_selection = apply_current_find_execution_selection(ideas, plans, source=CLAUDE_TAKEOVER_SOURCE, executable=execution_ready)
+    execution_selection = apply_current_find_execution_selection(ideas, plans, source=state_source, executable=execution_ready)
     selection_fields = {key: execution_selection.get(key) for key in CURRENT_FIND_SELECTION_FIELD_KEYS}
-    selected_execution_issue = selection_issue or str(execution_selection.get("selection_issue") or "")
+    if selected_contract_ready_for_run:
+        selection_fields = _apply_contract_selection_fields(selection_fields, selected_contract)
+    selected_execution_issue = "" if selected_contract_ready_for_run and content_ready else (selection_issue or str(execution_selection.get("selection_issue") or ""))
     if content_ready and selected_execution_issue:
         plan_status = "blocked_ambiguous_selected_plan" if selected_execution_issue == "ambiguous_selected_plan" else "blocked_missing_selected_plan"
         failure_type = selected_execution_issue
@@ -5499,7 +5583,7 @@ def ensure_claude_plan_state(project: str, paths, run_id: str, readings: list[di
     payload.update({
         "project": project,
         "generated_at": now_iso(),
-        "source": CLAUDE_TAKEOVER_SOURCE,
+        "source": state_source,
         "run_id": run_id,
         "status": plan_status,
         "content_ready": content_ready,
@@ -5551,13 +5635,13 @@ def ensure_claude_plan_state(project: str, paths, run_id: str, readings: list[di
     })
     payload = _sync_current_find_plan_reading_validation(payload, validation)
     save_json(paths.state / "current_find_research_plan.json", payload)
-    save_json(paths.state / "idea_candidates.json", {"generated_at": now_iso(), "project": project, "source": "claude_code_current_find_takeover", "current_find_run_id": run_id, "ideas": ideas, **selection_fields, "summary": {"idea_count": len(ideas), "pursue_count": sum(1 for row in ideas if str(row.get("recommendation", row.get("status", ""))).startswith(("pursue", "approved"))), "current_find_run_id": run_id}})
+    save_json(paths.state / "idea_candidates.json", {"generated_at": now_iso(), "project": project, "source": state_source, "current_find_run_id": run_id, "ideas": ideas, **selection_fields, "summary": {"idea_count": len(ideas), "pursue_count": sum(1 for row in ideas if str(row.get("recommendation", row.get("status", ""))).startswith(("pursue", "approved"))), "current_find_run_id": run_id}})
     experiment_plan = load_json(paths.state / "experiment_plan.json", {})
     if not isinstance(experiment_plan, dict):
         experiment_plan = {}
     experiment_plan.update({
         "project": project,
-        "source": "claude_code_current_find_takeover",
+        "source": state_source,
         "run_id": run_id,
         "status": payload["status"],
         "content_ready": content_ready,
@@ -6764,13 +6848,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Ensure The workflow uses the latest Find for reading, ideas, plans, and Claude Code execution planning without launching raw or duplicate Find jobs.")
     parser.add_argument("--project", required=True)
     parser.add_argument("--read-limit", type=int, default=0, help="0 means read every current user-visible recommendation from strong_recommendations/articles.")
-    parser.add_argument("--idea-count", type=int, default=5)
+    parser.add_argument("--idea-count", type=int, default=0)
     parser.add_argument("--skip-claude", action="store_true", help="Use the deterministic compatibility bridge instead of Claude Code takeover.")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--force-selection", action="store_true", help="Only run the main-Claude selected-plan step when current Find Read/Idea/Plan content is already valid.")
     args = parser.parse_args()
     paths = build_paths(args.project)
     cfg = load_project_config(args.project)
+    args.idea_count = configured_max_ideas(args.project, cfg, explicit=args.idea_count, default=5)
     taste_dir = paths.planning / "finding"
     find_results = load_json(taste_dir / "find_results.json", {})
     if not isinstance(find_results, dict) or not find_results.get("run_id"):

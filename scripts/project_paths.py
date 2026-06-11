@@ -80,6 +80,51 @@ def load_project_config(name: str) -> dict:
     return json.loads((get_project_root(name) / 'project.json').read_text(encoding='utf-8'))
 
 
+def load_runtime_config() -> dict:
+    runtime_dir = Path(os.environ.get('WORKFLOW_RUNTIME_DIR') or ROOT / 'runtime').expanduser()
+    for candidate in [runtime_dir / '.config.json', ROOT / 'runtime' / '.config.json']:
+        try:
+            payload = json.loads(candidate.read_text(encoding='utf-8'))
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}
+
+
+def _positive_config_int(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
+
+
+def configured_max_ideas(name: str = '', cfg: dict[str, Any] | None = None, *, explicit: Any = None, default: int = 5) -> int:
+    explicit_value = _positive_config_int(explicit)
+    if explicit_value:
+        return explicit_value
+    payloads: list[dict[str, Any]] = []
+    if isinstance(cfg, dict):
+        payloads.append(cfg)
+    if name:
+        try:
+            loaded = load_project_config(name)
+        except Exception:
+            loaded = {}
+        if isinstance(loaded, dict) and loaded is not cfg:
+            payloads.append(loaded)
+    runtime = load_runtime_config()
+    if isinstance(runtime, dict):
+        payloads.append(runtime)
+    for payload in payloads:
+        for container in [payload, payload.get('research') if isinstance(payload.get('research'), dict) else {}, payload.get('workflow') if isinstance(payload.get('workflow'), dict) else {}]:
+            value = _positive_config_int((container or {}).get('max_ideas') if isinstance(container, dict) else None)
+            if value:
+                return value
+    fallback = _positive_config_int(default)
+    return fallback or 5
+
 
 def _path_text(value: Any) -> str:
     return str(value or '').strip()

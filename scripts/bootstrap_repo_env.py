@@ -5,6 +5,7 @@ import argparse
 import datetime as dt
 import json
 import platform
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -109,6 +110,24 @@ def infer_channels(accelerator: dict) -> list[str]:
     return ['-c', 'conda-forge']
 
 
+def setup_py_declares_package(setup_py: Path) -> bool:
+    try:
+        text = setup_py.read_text(encoding='utf-8', errors='ignore')
+    except Exception:
+        return False
+    declares_setup = bool(re.search(r'(^|[^A-Za-z0-9_])(?:setuptools\.)?setup\s*\(', text))
+    imports_packaging = 'setuptools' in text or 'distutils' in text
+    return declares_setup and imports_packaging
+
+
+def repo_has_editable_package(repo: Path) -> bool:
+    pyproject = repo / 'pyproject.toml'
+    setup_py = repo / 'setup.py'
+    if pyproject.exists():
+        return True
+    return setup_py.exists() and setup_py_declares_package(setup_py)
+
+
 def infer_install_steps(repo: Path, env_name: str, python_version: str, accelerator: dict, conda_exe: str = '') -> list[list[str]]:
     channels = infer_channels(accelerator)
     py_spec = f'python={python_version}' if python_version else 'python=3.10'
@@ -117,18 +136,16 @@ def infer_install_steps(repo: Path, env_name: str, python_version: str, accelera
         steps.append(['create', '-y', '-n', env_name, py_spec, 'pip', *channels])
     env_file = repo / 'environment.yml'
     req_file = repo / 'requirements.txt'
-    pyproject = repo / 'pyproject.toml'
-    setup_py = repo / 'setup.py'
     if env_file.exists():
         steps.append(['env', 'update', '-n', env_name, '-f', str(env_file)])
     else:
         if req_file.exists():
-            steps.append(['run', '-n', env_name, 'pip', 'install', '-r', str(req_file)])
+            steps.append(['run', '-n', env_name, 'python', '-m', 'pip', 'install', '-r', str(req_file)])
         inferred = infer_pip_packages(repo)
         if inferred:
-            steps.append(['run', '-n', env_name, 'pip', 'install', *inferred])
-        if pyproject.exists() or setup_py.exists():
-            steps.append(['run', '-n', env_name, 'pip', 'install', '-e', str(repo)])
+            steps.append(['run', '-n', env_name, 'python', '-m', 'pip', 'install', *inferred])
+        if repo_has_editable_package(repo):
+            steps.append(['run', '-n', env_name, 'python', '-m', 'pip', 'install', '-e', str(repo)])
     # Verify imports needed by the repo loader. CUDA availability is informative, not a hard gate for dataset probing.
     steps.append(['run', '-n', env_name, 'python', '-c', 'import torch, scipy, numpy, yaml; print("imports-ok"); print("cuda", torch.cuda.is_available())'])
     return steps
@@ -136,6 +153,57 @@ def infer_install_steps(repo: Path, env_name: str, python_version: str, accelera
 
 def conda_cmd(conda_exe: str, step: list[str]) -> list[str]:
     return [conda_exe, *step]
+
+
+def command_record(cmd: list[str], proc: subprocess.CompletedProcess[str], reason: str = '') -> dict:
+    record = {
+        'command': ' '.join(cmd),
+        'return_code': proc.returncode,
+        'stdout': proc.stdout[-4000:],
+        'stderr': proc.stderr[-4000:],
+    }
+    if reason:
+        record['reason'] = reason
+    return record
+
+
+def is_python_pip_step(step: list[str], env_name: str) -> bool:
+    return step[:6] == ['run', '-n', env_name, 'python', '-m', 'pip']
+
+
+def ensure_env_python_pip(conda_exe: str, env_name: str) -> tuple[bool, list[dict]]:
+    records: list[dict] = []
+    check = [conda_exe, 'run', '-n', env_name, 'python', '-m', 'pip', '--version']
+    proc = run(check, cwd=WORKSPACE_ROOT)
+    records.append(command_record(check, proc, 'check-python-pip'))
+    if proc.returncode == 0:
+        return True, records
+
+    repairs = [
+        ([conda_exe, 'install', '-y', '-n', env_name, 'pip'], 'install-conda-pip'),
+        ([conda_exe, 'run', '-n', env_name, 'python', '-m', 'ensurepip', '--upgrade'], 'ensurepip-upgrade'),
+    ]
+    for repair_cmd, reason in repairs:
+        repair_proc = run(repair_cmd, cwd=WORKSPACE_ROOT)
+        records.append(command_record(repair_cmd, repair_proc, reason))
+        verify_proc = run(check, cwd=WORKSPACE_ROOT)
+        records.append(command_record(check, verify_proc, f'verify-after-{reason}'))
+        if verify_proc.returncode == 0:
+            return True, records
+    return False, records
+
+
+def append_execution_log(lines: list[str], record: dict, heading: str | None = None) -> None:
+    title = heading or record.get('reason') or record.get('command', 'command')
+    lines.extend([
+        f"\n## {title}\n\n",
+        f"`{record.get('command', '')}`\n\n",
+        '```\n',
+        record.get('stdout', ''),
+        '\n--- STDERR ---\n',
+        record.get('stderr', ''),
+        '\n```\n',
+    ])
 
 
 def missing_import_from_output(output: str) -> str:
@@ -150,7 +218,7 @@ def install_missing_import(conda_exe: str, env_name: str, import_name: str) -> s
     package = IMPORT_TO_PACKAGE.get(import_name)
     if not package:
         return None
-    return run([conda_exe, 'run', '-n', env_name, 'pip', 'install', package], cwd=WORKSPACE_ROOT)
+    return run([conda_exe, 'run', '-n', env_name, 'python', '-m', 'pip', 'install', package], cwd=WORKSPACE_ROOT)
 
 
 IMPORT_TO_PACKAGE = {
@@ -284,14 +352,21 @@ def main() -> None:
 
     if not args.prepare_only and conda_exe:
         payload['status'] = 'running'
+        python_pip_checked = False
         for step in steps:
+            if is_python_pip_step(step, env_name) and not python_pip_checked:
+                python_pip_checked = True
+                pip_ready, pip_records = ensure_env_python_pip(conda_exe, env_name)
+                payload['executed'].extend(pip_records)
+                for record in pip_records:
+                    append_execution_log(lines, record)
+                if not pip_ready:
+                    payload['status'] = 'failed'
+                    payload['failed_step'] = pip_records[-1]['command'] if pip_records else 'python -m pip readiness'
+                    payload['missing_import'] = 'pip'
+                    break
             proc = run(conda_cmd(conda_exe, step), cwd=repo)
-            step_record = {
-                'command': ' '.join(conda_cmd(conda_exe, step)),
-                'return_code': proc.returncode,
-                'stdout': proc.stdout[-4000:],
-                'stderr': proc.stderr[-4000:],
-            }
+            step_record = command_record(conda_cmd(conda_exe, step), proc)
             payload['executed'].append(step_record)
             lines.extend([
                 f"\n## {' '.join(conda_cmd(conda_exe, step))}\n\n",
@@ -309,7 +384,7 @@ def main() -> None:
                     if install_proc is not None:
                         package = IMPORT_TO_PACKAGE.get(missing_import, missing_import)
                         retry_record = {
-                            'command': ' '.join([conda_exe, 'run', '-n', env_name, 'pip', 'install', package]),
+                            'command': ' '.join([conda_exe, 'run', '-n', env_name, 'python', '-m', 'pip', 'install', package]),
                             'return_code': install_proc.returncode,
                             'stdout': install_proc.stdout[-4000:],
                             'stderr': install_proc.stderr[-4000:],
