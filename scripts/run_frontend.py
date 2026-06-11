@@ -147,8 +147,9 @@ if not topic_queries:
         ])
 
 deep_survey = os.environ.get("DEEP_SURVEY", "0").lower() in {{"1", "true", "yes", "on"}}
+DEFAULT_ARXIV_WINDOW_DAYS = 180
 literature_cfg = cfg.get("literature", {{}}) if isinstance(cfg.get("literature", {{}}), dict) else {{}}
-arxiv_window_days = env_int("WINDOW_DAYS", literature_cfg.get("secondary_window_days", 120) or 120)
+arxiv_window_days = env_int("WINDOW_DAYS", literature_cfg.get("arxiv_window_days", DEFAULT_ARXIV_WINDOW_DAYS) or DEFAULT_ARXIV_WINDOW_DAYS)
 venue_scan_limit = env_int("VENUE_TITLE_SCAN_LIMIT", 12000 if deep_survey else 3000)
 find_recall_count = env_int("FIND_RECALL_COUNT", 1000 if deep_survey else 200)
 detail_fetch_count = env_int("DETAIL_FETCH_COUNT", 240 if deep_survey else 50)

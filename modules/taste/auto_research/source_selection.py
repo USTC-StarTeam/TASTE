@@ -9,8 +9,13 @@ import json
 import os
 
 
-WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
-PROJECTS_ROOT = WORKSPACE_ROOT / "projects"
+def _workspace_root() -> Path:
+    return Path(os.environ.get("WORKSPACE_ROOT") or Path(__file__).resolve().parents[3]).expanduser()
+
+
+def _projects_root() -> Path:
+    return _workspace_root() / "projects"
+
 PROJECT_CONFIG_ENV = "PROJECT_CONFIG"
 PROJECT_ENV = "PROJECT_ID"
 
@@ -153,9 +158,10 @@ def _configured_project_path() -> Path | None:
         return candidate if candidate.exists() else None
     project = os.environ.get(PROJECT_ENV, "").strip()
     if project:
-        candidate = PROJECTS_ROOT / project / "project.json"
+        candidate = _projects_root() / project / "project.json"
         return candidate if candidate.exists() else None
-    candidates = sorted(PROJECTS_ROOT.glob("*/project.json")) if PROJECTS_ROOT.exists() else []
+    projects_root = _projects_root()
+    candidates = sorted(projects_root.glob("*/project.json")) if projects_root.exists() else []
     return candidates[0] if len(candidates) == 1 else None
 
 

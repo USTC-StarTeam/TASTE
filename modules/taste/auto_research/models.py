@@ -134,6 +134,7 @@ class PlanPolishRequest(BaseModel):
 
 
 class VenueHealthRequest(BaseModel):
+    project: str = ""
     venue_ids: list[str] = Field(default_factory=list)
     years: list[int] = Field(default_factory=lambda: [date.today().year])
     venue_years: list[dict[str, Any]] = Field(default_factory=list)

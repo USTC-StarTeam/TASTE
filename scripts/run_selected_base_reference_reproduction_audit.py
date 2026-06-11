@@ -143,13 +143,27 @@ def selected_repo(project: str) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     return Path(""), impl if isinstance(impl, dict) else {}, env if isinstance(env, dict) else {}
 
 
+def analysis_quickstart_command(repo: Path, mode: str) -> list[str]:
+    analysis_dir = repo / "analysis"
+    data_dir = repo / "data"
+    if not analysis_dir.exists() or not data_dir.exists():
+        return []
+    scripts = sorted(path for path in analysis_dir.glob("*.py") if path.is_file())
+    datasets = sorted(path for path in data_dir.glob("*.jsonl") if path.is_file())
+    if not scripts or not datasets:
+        return []
+    outdir = "outputs/reference_full" if mode == "full" else "outputs/reference_bounded"
+    n_boot = "2000" if mode == "full" else "20"
+    return [str(scripts[0].relative_to(repo)), "--input", str(datasets[0].relative_to(repo)), "--outdir", outdir, "--n_boot", n_boot]
+
+
 def repo_adapter(repo: Path) -> str:
     if (repo / "main.py").exists() and (repo / "finetune.py").exists() and (repo / "run.sh").exists():
         return "selected_base_official_two_stage"
     if any((repo / name).exists() for name in ["train.py", "single_train.py"]):
         return "official_training_entrypoint"
-    if (repo / "analysis" / "grounded_reason.py").exists() and (repo / "data" / "seekbench_data.jsonl").exists():
-        return "seekbench_analysis_quickstart"
+    if analysis_quickstart_command(repo, "bounded"):
+        return "analysis_data_quickstart"
     return "unknown"
 
 
@@ -167,10 +181,9 @@ def ready_dataset(impl: dict[str, Any], protocol: dict[str, Any]) -> str:
 
 
 def official_command(repo: Path, dataset: str, mode: str, epoch: int) -> list[str]:
-    if (repo / "analysis" / "grounded_reason.py").exists() and (repo / "data" / "seekbench_data.jsonl").exists():
-        outdir = "outputs/taste_reference_full" if mode == "full" else "outputs/taste_reference_bounded"
-        n_boot = "2000" if mode == "full" else "20"
-        return ["analysis/grounded_reason.py", "--input", "data/seekbench_data.jsonl", "--outdir", outdir, "--n_boot", n_boot]
+    analysis_command = analysis_quickstart_command(repo, mode)
+    if analysis_command:
+        return analysis_command
     run_sh = repo / "run.sh"
     preferred: list[str] = []
     if run_sh.exists():

@@ -1627,6 +1627,46 @@ def _expand_source_status_rows(source_rows: Any, venue_health_rows: Any) -> list
     return rows
 
 
+def _current_health_check_source_status_rows(project_id: str, root: Path | None = None, selection: Any = None) -> list[dict[str, Any]]:
+    project_root = root or (PROJECTS / project_id)
+    payload = _read_json(project_root / "state" / "venue_health_status.json", {})
+    if not isinstance(payload, dict):
+        return []
+    rows = _json_rows(payload.get("source_status"))
+    if not rows:
+        return []
+    source_selection = normalize_source_selection(selection) if isinstance(selection, dict) else _current_project_source_selection(project_id, project_root)
+    selected_ids = {str(item or "").strip() for item in (source_selection.get("venue_ids") or []) if str(item or "").strip()}
+    selected_years = {_as_int(item, 0) for item in (source_selection.get("years") or [])}
+    selected_years.discard(0)
+    selected_pairs: set[tuple[str, int]] = set()
+    for item in source_selection.get("venue_years") or []:
+        if not isinstance(item, dict):
+            continue
+        venue_id = str(item.get("venue_id") or item.get("venue") or item.get("id") or "").strip()
+        raw_years = item.get("years") if isinstance(item.get("years"), list) else [item.get("year")]
+        for raw_year in raw_years:
+            year = _as_int(raw_year, 0)
+            if venue_id and year:
+                selected_pairs.add((venue_id, year))
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        venue_id = str(row.get("venue_id") or "").strip()
+        year = _as_int(row.get("year"), 0)
+        if not year:
+            years = row.get("effective_years") or row.get("requested_years") or []
+            if isinstance(years, list) and years:
+                year = _as_int(years[0], 0)
+        if selected_pairs and (venue_id, year) not in selected_pairs:
+            continue
+        if selected_ids and venue_id and venue_id not in selected_ids:
+            continue
+        if selected_years and year and year not in selected_years:
+            continue
+        filtered.append(dict(row))
+    return filtered
+
+
 def _first_non_empty_rows(*values: Any) -> list[dict[str, Any]]:
     for value in values:
         if isinstance(value, list):
@@ -2908,7 +2948,6 @@ PUBLIC_INTERNAL_NAME_REPLACEMENTS = [
     ("run-finding", "run-finding"),
     ("PaperOrchestra", "writing"),
     ("project agent", "research project agent"),
-    ("project agent", "research project agent"),
     ("Claude Code", "project agent"),
     ("claim-ready", "audit-ready"),
     ("claim_ready", "audit_ready"),
@@ -2953,6 +2992,7 @@ def _public_internal_names(value: Any) -> str:
     text = re.sub(r"main\s+Claude Code", "__MAIN_CLAUDE_CODE_EN__", text, flags=re.IGNORECASE)
     for source, target in PUBLIC_INTERNAL_NAME_REPLACEMENTS:
         text = text.replace(source, target)
+    text = re.sub(r"\bresearch\s+research\s+project\s+agent\b", "research project agent", text, flags=re.IGNORECASE)
     for token, replacement in protected.items():
         text = text.replace(token, replacement)
     return _normalize_public_workspace_paths(text)
@@ -5318,6 +5358,7 @@ def _light_find_survey_from_progress(project_dir: Path) -> dict[str, Any]:
     source_status = progress.get("source_status") if isinstance(progress.get("source_status"), list) else []
     selection = progress.get("selection") if isinstance(progress.get("selection"), dict) else _current_project_source_selection(project_dir.name, project_dir)
     verified_rows = _current_verified_venue_metadata_rows(project_dir.name, project_dir, selection)
+    health_check_source_status = _current_health_check_source_status_rows(project_dir.name, project_dir, selection)
     source_status = _merge_verified_venue_metadata_rows(source_status, verified_rows)
     venue_counts = _venue_metadata_counts(source_status or verified_rows)
     progress_counts = progress.get("counts") if isinstance(progress.get("counts"), dict) else {}
@@ -5335,6 +5376,7 @@ def _light_find_survey_from_progress(project_dir: Path) -> dict[str, Any]:
         "run_id": run_id,
         "status": "recommendation_shortfall" if shortfall else "current_find_packet_ready" if run_id else "missing_find_packet",
         "source_status": source_status[:20],
+        "health_check_source_status": health_check_source_status[:20],
         "selection": selection,
         "venue_sources": source_status[:20],
         "counts": {
@@ -10572,6 +10614,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         "summary_en": f"Current Find has {strong_count} recommendations, {completed_read_count} full-text readings, {pending_full_text_read_count} pending full-text readings, {idea_count} ideas, and {plan_count} plans.",
     }
     selected_plan_gate = _current_find_selected_plan_gate_public(current_find_pipeline)
+    health_check_source_status = _current_health_check_source_status_rows(project, root, selection)
     literature_survey = {
         "run_id": run_id,
         "status": literature_status,
@@ -10580,6 +10623,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         "recommendation_gate_status": "shortfall" if recommendation_shortfall else "pass" if recommendation_target_count else "unknown",
         "selection": selection,
         "source_status": source_status[:20],
+        "health_check_source_status": health_check_source_status[:20],
         "venue_sources": venue_health[:20],
         "strong_recommendations": _public_find_recommendation_rows(strong_rows, 20),
         "strong_recommendations_count": strong_count,
@@ -11326,6 +11370,7 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
     else:
         live_progress = {}
         live_counts = {}
+    health_check_source_status = _current_health_check_source_status_rows(project, root, source_selection)
     literature_survey = {
         **find_summary,
         'status': 'fresh_find_running' if fresh_find_running else 'recommendation_shortfall' if recommendation_shortfall else 'current_find_packet_ready' if find_results else 'missing_find_packet',
@@ -11334,6 +11379,7 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
         'recommendation_gate_status': 'running' if fresh_find_running else 'shortfall' if recommendation_shortfall else 'pass' if recommendation_target_count else 'unknown',
         'selection': live_find_progress_payload.get('selection') if isinstance(live_find_progress_payload.get('selection'), dict) else find_results.get('selection') if isinstance(find_results.get('selection'), dict) else _current_project_source_selection(project, root),
         'source_status': (safe_list(live_find_progress_payload.get('source_status')) if fresh_find_running else source_status)[:20],
+        'health_check_source_status': health_check_source_status[:20],
         'venue_sources': (safe_list(live_find_progress_payload.get('venue_health_report')) if fresh_find_running else venue_rows)[:20],
         'counts': {
             'raw_title_index_papers': live_counts.get('raw_title_index', live_counts.get('raw_title_index_papers', 0)) if fresh_find_running else find_summary.get('raw_title_index_papers', 0),

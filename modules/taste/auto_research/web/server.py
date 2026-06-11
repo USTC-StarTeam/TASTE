@@ -7338,6 +7338,69 @@ def api_catalog() -> list[dict]:
     )
 
 
+def _venue_health_source_rows(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    catalog = catalog_by_id()
+    checked_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    rows: list[dict[str, Any]] = []
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        venue_id = str(result.get("venue_id") or "").strip()
+        venue = catalog.get(venue_id, {}) if venue_id else {}
+        venue_name = str(result.get("venue") or venue.get("name") or venue_id or "venue").strip()
+        try:
+            year = int(result.get("year") or 0)
+        except (TypeError, ValueError):
+            year = 0
+        try:
+            sample_count = int(result.get("sample_count") or 0)
+        except (TypeError, ValueError):
+            sample_count = 0
+        adapter = str(result.get("source_adapter") or result.get("adapter") or "unknown").strip()
+        ok = bool(result.get("ok"))
+        rows.append({
+            "source": f"{venue_name} {year}".strip() if year else venue_name,
+            "source_kind": "venue_health",
+            "venue_id": venue_id,
+            "venue": venue_name,
+            "year": year,
+            "status": "ok" if ok else "failed",
+            "ok": ok,
+            "limited": False,
+            "count": sample_count,
+            "sample_count": sample_count,
+            "raw_title_index_count": sample_count,
+            "candidate_count": sample_count,
+            "adapter": adapter,
+            "source_adapter": adapter,
+            "message": str(result.get("message") or ("ok" if ok else "No papers fetched.")),
+            "requested_years": [year] if year else [],
+            "effective_years": [year] if year and ok else [],
+            "checked_at": checked_at,
+        })
+    return rows
+
+
+def _record_project_venue_health(project: str, results: list[dict[str, Any]]) -> None:
+    project_id = str(project or "").strip()
+    if not project_id:
+        return
+    try:
+        root = _safe_project_root(project_id)
+    except Exception:
+        return
+    rows = _venue_health_source_rows(results)
+    if not rows:
+        return
+    payload = {
+        "project": project_id,
+        "updated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "source_status": rows,
+        "results": results,
+    }
+    write_json(root / "state" / "venue_health_status.json", payload)
+
+
 def _venue_health_timeout_sec() -> float:
     try:
         value = float(os.environ.get("VENUE_HEALTH_TIMEOUT_SEC", "8") or 8)
@@ -7441,6 +7504,7 @@ def api_venue_health(request: VenueHealthRequest) -> dict:
             results.append(_venue_health_failure(venue_id, year, "Unknown venue id.", adapter="unknown"))
             continue
         results.append(_fetch_venue_sample_with_timeout(venue, venue_id, year, sample_limit))
+    _record_project_venue_health(getattr(request, "project", ""), results)
     return {"results": results}
 
 

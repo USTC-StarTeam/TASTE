@@ -8,7 +8,7 @@ from auto_research.auto_plan.pipeline import run_plan
 from auto_research.auto_plan.pipeline import finish_plan, polish_plan, render_plan_markdown
 from auto_research.emailer import build_run_email_html
 from auto_research.jobs import JobCancelled
-from auto_research.models import AppConfig, EmailJobRequest, FindRequest, PlanPolishRequest, PlanRequest, ReadRequest
+from auto_research.models import AppConfig, EmailJobRequest, FindRequest, PlanPolishRequest, PlanRequest, ReadRequest, VenueHealthRequest
 from auto_research.storage import create_run_dir, delete_run, read_json, write_json, write_text
 from auto_research.web import server
 from auto_research.web.server import JOBS, api_artifacts, start_job
@@ -140,6 +140,47 @@ def test_venue_health_result_keeps_requested_venue_and_year(monkeypatch):
     assert result["sample_count"] == 2
 
 
+def test_venue_health_check_updates_project_source_status(monkeypatch, tmp_path):
+    from auto_research.web import project_bridge
+
+    project = "demo_health"
+    root = tmp_path / project
+    (root / "state").mkdir(parents=True)
+    (root / "project.json").write_text(json.dumps({"name": project, "topic": "demo"}), encoding="utf-8")
+    monkeypatch.setattr(server, "PROJECT_IDS_ROOT", tmp_path)
+    monkeypatch.setattr(project_bridge, "PROJECTS", tmp_path)
+    monkeypatch.setattr(server, "fetch_venue_sample", lambda _venue, _year, _limit: {
+        "venue_id": "",
+        "year": "",
+        "ok": True,
+        "sample_count": "2",
+        "source_adapter": "openreview",
+        "message": "ok",
+        "samples": [{"title": "paper"}],
+    })
+
+    response = server.api_venue_health(VenueHealthRequest(
+        project=project,
+        venue_ids=["openreview_iclr_2026"],
+        years=[2026],
+        venue_years=[{"venue_id": "openreview_iclr_2026", "year": 2026}],
+        sample_limit=2,
+    ))
+
+    assert response["results"][0]["venue_id"] == "openreview_iclr_2026"
+    payload = json.loads((root / "state" / "venue_health_status.json").read_text(encoding="utf-8"))
+    row = payload["source_status"][0]
+    assert row["source_kind"] == "venue_health"
+    assert row["ok"] is True
+    assert row["sample_count"] == 2
+    rows = project_bridge._current_health_check_source_status_rows(
+        project,
+        root,
+        {"venue_ids": ["openreview_iclr_2026"], "years": [2026], "venue_years": [{"venue_id": "openreview_iclr_2026", "year": 2026}]},
+    )
+    assert rows and rows[0]["venue_id"] == "openreview_iclr_2026"
+
+
 def test_hollow_done_find_without_run_id_is_hidden_from_taskbar():
     item = {
         "job_id": "find_empty",
@@ -252,11 +293,48 @@ def test_arxiv_configured_date_window_is_preserved():
     assert source == "configured"
 
 
+def test_run_frontend_reports_half_year_arxiv_window_by_default():
+    source = (Path(__file__).resolve().parents[3] / "scripts" / "run_frontend.py").read_text(encoding="utf-8")
+
+    assert "DEFAULT_ARXIV_WINDOW_DAYS = 180" in source
+    assert "secondary_window_days" not in source[source.index("arxiv_window_days = env_int"):source.index("venue_scan_limit = env_int")]
+
+
 def test_default_find_selection_does_not_enable_arxiv():
     from auto_research.source_selection import default_source_selection, normalize_source_selection
 
     assert default_source_selection()["include_arxiv"] is False
     assert normalize_source_selection({})["include_arxiv"] is False
+
+
+def test_source_selection_uses_workspace_root_env_for_project_config(tmp_path, monkeypatch):
+    from auto_research.source_selection import canonical_source_selection
+
+    project_root = tmp_path / "projects" / "demo_project"
+    project_root.mkdir(parents=True)
+    write_json(project_root / "project.json", {
+        "discovery": {
+            "canonical_source_selection": {
+                "venue_ids": ["openreview_iclr_2026"],
+                "years": [2026, 2025],
+                "include_arxiv": False,
+            }
+        }
+    })
+    empty_config = tmp_path / "runtime" / ".config.json"
+    empty_config.parent.mkdir(parents=True)
+    write_json(empty_config, {})
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("PROJECT_ID", "demo_project")
+
+    selection = canonical_source_selection(config_path=empty_config)
+
+    assert selection["venue_ids"] == ["openreview_iclr_2026"]
+    assert selection["years"] == [2026, 2025]
+    assert selection["venue_years"] == [
+        {"venue_id": "openreview_iclr_2026", "year": 2026},
+        {"venue_id": "openreview_iclr_2026", "year": 2025},
+    ]
 
 
 def test_find_request_uses_project_research_profile_when_api_config_is_partial(tmp_path, monkeypatch):
@@ -5273,10 +5351,10 @@ def test_project_search_queries_use_current_find_artifact_shape(tmp_path, monkey
     queries = env_stage.project_search_queries('taste_smoke_web')
 
     assert queries[:4] == [
-        'FlowBalance-Align execution plan',
-        'FlowBalance-Align: reward distribution matching with game-theoretic preference alignment',
         'FlowRL: Matching Reward Distributions for LLM Reasoning code dataset',
         'COMAL: A Convergent Meta-Algorithm for Aligning LLMs with General Preferences code dataset',
+        'FlowBalance-Align execution plan',
+        'FlowBalance-Align: reward distribution matching with game-theoretic preference alignment',
     ]
     assert all(query != 'taste_smoke_web taste_smoke_web' for query in queries)
     assert all('research goal:' not in query.lower() for query in queries)
@@ -5375,7 +5453,7 @@ def test_project_search_queries_extract_unquoted_stewardship_phrases(tmp_path, m
     ]
 
 
-def test_selected_base_reference_audit_supports_seekbench_analysis_repo(tmp_path):
+def test_selected_base_reference_audit_supports_generic_analysis_data_repo(tmp_path):
     import importlib.util
 
     script_path = Path(__file__).resolve().parents[3] / "scripts" / "run_selected_base_reference_reproduction_audit.py"
@@ -5384,17 +5462,17 @@ def test_selected_base_reference_audit_supports_seekbench_analysis_repo(tmp_path
     assert spec and spec.loader
     spec.loader.exec_module(audit)
 
-    repo = tmp_path / "seekbench"
+    repo = tmp_path / "analysis_repo"
     (repo / "analysis").mkdir(parents=True)
     (repo / "data").mkdir()
-    (repo / "analysis" / "grounded_reason.py").write_text("", encoding="utf-8")
-    (repo / "data" / "seekbench_data.jsonl").write_text("{}\n", encoding="utf-8")
+    (repo / "analysis" / "evaluate.py").write_text("", encoding="utf-8")
+    (repo / "data" / "records.jsonl").write_text("{}\n", encoding="utf-8")
 
-    assert audit.repo_adapter(repo) == "seekbench_analysis_quickstart"
-    cmd = audit.official_command(repo, "taste_smoke_web_benchmark_v1", "bounded", 1)
-    assert cmd[:4] == ["analysis/grounded_reason.py", "--input", "data/seekbench_data.jsonl", "--outdir"]
+    assert audit.repo_adapter(repo) == "analysis_data_quickstart"
+    cmd = audit.official_command(repo, "demo_benchmark", "bounded", 1)
+    assert cmd[:4] == ["analysis/evaluate.py", "--input", "data/records.jsonl", "--outdir"]
     assert "--n_boot" in cmd
-    metrics = audit.parse_metrics("Loaded 40 traces\nTrajectory rows: 40\nAll figures saved to outputs/taste_reference_bounded/\n")
+    metrics = audit.parse_metrics("Loaded 40 traces\nTrajectory rows: 40\nAll figures saved to outputs/reference_bounded/\n")
     assert metrics["trace_count"] == 40
     assert metrics["trajectory_rows"] == 40
     assert metrics["analysis_outputs_saved"] == 1

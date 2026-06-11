@@ -216,7 +216,7 @@ export async function getVenues() {
   return json<Venue[]>(await apiFetch("/api/catalog/venues"));
 }
 
-export async function checkVenueHealth(payload: { venue_ids: string[]; years: number[]; venue_years?: Array<{ venue_id: string; year: number }>; sample_limit: number }) {
+export async function checkVenueHealth(payload: { project?: string; venue_ids: string[]; years: number[]; venue_years?: Array<{ venue_id: string; year: number }>; sample_limit: number }) {
   return json<{ results: Array<{ venue_id: string; year: number; ok: boolean; sample_count: number; source_adapter: string; message: string; samples: Array<{ title: string; url: string; abstract: string }> }> }>(
     await apiFetch("/api/catalog/venue-health", {
       method: "POST",

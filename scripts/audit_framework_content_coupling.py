@@ -82,7 +82,17 @@ GENERIC_ALLOWLIST = {
     "workspace_root", "workspace", "conda", "miniforge", "cuda", "gpu", "home",
     "ready", "decision", "paired", "passed", "authorized", "blocked", "required",
     "system", "systems", "language", "large", "condition", "conditional", "generative", "discrete",
+    "research", "researcher", "researchers", "profile", "profiles", "agent", "agents",
+    "workflow", "workflows", "autonomous", "automation", "benchmark", "benchmarks",
+    "benchmarking", "bench", "web", "api", "available", "skill", "skills",
+    "environment", "environments", "detection", "detect", "assurance",
 }
+
+
+def identifier_contains(haystack: str, token: str) -> bool:
+    if not token:
+        return False
+    return re.search(rf"(?<![a-z0-9]){re.escape(token.lower())}(?![a-z0-9])", haystack.lower()) is not None
 
 
 def now_iso() -> str:
@@ -341,7 +351,7 @@ def scan_file(path: Path, tokens: set[str], short_tokens: set[str], phrases: set
         })
         return findings
     name_l = path.name.lower()
-    name_hits = sorted(token for token in tokens if token and token in name_l)
+    name_hits = sorted(token for token in tokens if identifier_contains(name_l, token))
     if name_hits:
         findings.append({
             "file": rel,
@@ -357,7 +367,7 @@ def scan_file(path: Path, tokens: set[str], short_tokens: set[str], phrases: set
         return findings
     for line_no, line in enumerate(text.splitlines(), start=1):
         hay = line.lower()
-        hits = sorted(token for token in tokens if token and token in hay)
+        hits = sorted(token for token in tokens if identifier_contains(hay, token))
         short_hits = sorted(token for token in short_tokens if token and re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", hay))
         phrase_hits = sorted(phrase for phrase in phrases if phrase and phrase in hay)
         if not hits and not short_hits and not phrase_hits:

@@ -3811,6 +3811,7 @@ function App() {
   const researchReadCandidates = useMemo(() => readableLiteraturePapers(asArray(researchLiteratureSurvey?.read_candidates)), [researchLiteratureSurvey]);
   const researchStrongRecommendations = useMemo(() => asArray(researchLiteratureSurvey?.strong_recommendations).filter((paper: any) => paper && typeof paper === "object" && Boolean(paper.title || paper.id)), [researchLiteratureSurvey]);
   const researchSourceStatus = useMemo(() => asArray(researchLiteratureSurvey?.source_status), [researchLiteratureSurvey]);
+  const researchHealthCheckSourceStatus = useMemo(() => asArray(researchLiteratureSurvey?.health_check_source_status), [researchLiteratureSurvey]);
   const visibleRuns = useMemo(() => {
     const pinnedIds = Array.from(new Set([currentProjectFindRunId, runId].filter(Boolean)));
     const pinned = new Set(pinnedIds);
@@ -5390,6 +5391,7 @@ function App() {
       });
       if (pendingRows.length) setVenueHealthStatusRows(pendingRows);
       const response = await checkVenueHealth({
+        project: researchProject,
         venue_ids: ids,
         years: selectedVenues.length ? yearsFromVenueYearMap(selectedVenues, selectedVenueYears) : addCandidateYears,
         venue_years: pairs,
@@ -5602,6 +5604,7 @@ function App() {
     const literature = researchLiteratureSurvey || {};
     const freshFindActive = freshFindRunning || String(literature.status || "").toLowerCase() === "fresh_find_running";
     if (venueHealthSourceStatus.length) return venueHealthSourceStatus.slice(0, 12);
+    if (researchHealthCheckSourceStatus.length) return researchHealthCheckSourceStatus.slice(0, 12);
     if (sourceStatus.length) return sourceStatus.slice(0, 12);
     return (freshFindActive ? researchSourceStatus : (researchSourceStatus.length ? researchSourceStatus : sourceStatus)).slice(0, 12);
   }

@@ -402,20 +402,8 @@ def _current_find_query_context(paths, project: str) -> list[str]:
                 return row
         return {}
 
-    plans_payload = load_json(paths.planning / 'finding' / 'plans.json', {})
-    if isinstance(plans_payload, dict):
-        selected_plan = selected_row(plans_payload.get('plans'), str(plans_payload.get('selected_plan_id') or '').strip(), ('plan_id', 'id'))
-        if selected_plan:
-            for key in ('title', 'objective', 'summary', 'research_question', 'description'):
-                _append_query(queries, selected_plan.get(key), project)
-
-    ideas_payload = load_json(paths.planning / 'finding' / 'ideas.json', {})
-    if isinstance(ideas_payload, dict):
-        selected_idea = selected_row(ideas_payload.get('ideas'), str(ideas_payload.get('selected_idea_id') or '').strip(), ('id', 'idea_id'))
-        if selected_idea:
-            for key in ('title', 'objective', 'summary', 'hypothesis', 'method'):
-                _append_query(queries, selected_idea.get(key), project)
-
+    # Repository search is usually English-keyword based. Prefer paper titles
+    # and code/dataset anchors before generated plan prose, which may be Chinese.
     find_results = load_json(paths.planning / 'finding' / 'find_results.json', {})
     if isinstance(find_results, dict):
         paper_rows: list[dict] = []
@@ -434,6 +422,21 @@ def _current_find_query_context(paths, project: str) -> list[str]:
                 seen_titles.add(title_key)
                 _append_query(queries, f'{title} code dataset', project)
 
+    plans_payload = load_json(paths.planning / 'finding' / 'plans.json', {})
+    if isinstance(plans_payload, dict):
+        selected_plan = selected_row(plans_payload.get('plans'), str(plans_payload.get('selected_plan_id') or '').strip(), ('plan_id', 'id'))
+        if selected_plan:
+            for key in ('title', 'objective', 'summary', 'research_question', 'description'):
+                _append_query(queries, selected_plan.get(key), project)
+
+    ideas_payload = load_json(paths.planning / 'finding' / 'ideas.json', {})
+    if isinstance(ideas_payload, dict):
+        selected_idea = selected_row(ideas_payload.get('ideas'), str(ideas_payload.get('selected_idea_id') or '').strip(), ('id', 'idea_id'))
+        if selected_idea:
+            for key in ('title', 'objective', 'summary', 'hypothesis', 'method'):
+                _append_query(queries, selected_idea.get(key), project)
+
+    if isinstance(find_results, dict):
         stage0 = find_results.get('stage0_profile') if isinstance(find_results.get('stage0_profile'), dict) else {}
         profile = stage0.get('profile') if isinstance(stage0.get('profile'), dict) else {}
         explicit = profile.get('explicit_profile') if isinstance(profile.get('explicit_profile'), dict) else {}
