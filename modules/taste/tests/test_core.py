@@ -1,6 +1,6 @@
 import json
 
-from auto_research.auto_find.catalog import load_catalog
+from auto_research.auto_find.catalog import catalog_by_id, load_catalog
 from auto_research.auto_find.sources import _acm_metadata_from_doi, _dblp_page_url, _parse_neurips_detail, _parse_neurips_list, fetch_arxiv, fetch_dblp_stream_api, fetch_openreview_venue, fetch_venue_sample, fetch_venue_title_index, normalize_date
 from auto_research.llm import LLMClient, clamp_workers, extract_json, fallback_score, keyword_category
 from auto_research.markdown import paper_markdown
@@ -329,6 +329,24 @@ def test_packaged_ccf_catalog_has_sigkdd_dblp_address():
     catalog = load_catalog()
     kdd = next(item for item in catalog if item["name"] == "SIGKDD")
     assert kdd["address"].endswith("/db/conf/kdd/")
+
+
+def test_catalog_merges_sigkdd_kdd_aliases():
+    full_name = "ACM SIGKDD Conference on Knowledge Discovery and Data Mining"
+    catalog = load_catalog()
+    matches = [item for item in catalog if item.get("full_name") == full_name]
+
+    assert len(matches) == 1
+    kdd = matches[0]
+    assert kdd["name"] == "SIGKDD"
+    assert kdd["rank"] == "A"
+    assert {2026, 2025, 2024, 2023}.issubset(set(kdd["years"]))
+    assert any(alias.get("id") == "dblp_kdd" for alias in kdd.get("aliases", []))
+
+    by_id = catalog_by_id()
+    assert by_id["dblp_kdd"]["canonical_id"] == kdd["id"]
+    assert by_id["dblp_kdd"]["name"] == "SIGKDD"
+    assert {2026, 2025, 2024, 2023}.issubset(set(by_id["dblp_kdd"]["years"]))
 
 
 def test_dblp_page_url_uses_stable_uni_trier_host():

@@ -40,8 +40,125 @@ def _safe_id(*parts: str) -> str:
 
 
 def _venue_name_key(name: str) -> str:
-    normalized = str(name or "").strip().lower()
+    normalized = " ".join(str(name or "").strip().lower().split())
     return _safe_id(NAME_ALIASES.get(normalized, normalized))
+
+
+SOURCE_PRIORITY = {
+    "openreview": 0,
+    "ccf": 1,
+    "default": 2,
+    "dblp": 2,
+    "custom": 3,
+}
+
+
+def _catalog_source_priority(venue: dict[str, Any]) -> int:
+    return SOURCE_PRIORITY.get(str(venue.get("source") or "").strip().lower(), 10)
+
+
+def _venue_identity_key(venue: dict[str, Any]) -> str:
+    full_name = _venue_name_key(str(venue.get("full_name") or ""))
+    if full_name:
+        return f"full:{full_name}"
+    name = _venue_name_key(str(venue.get("name") or venue.get("id") or ""))
+    return f"name:{name}"
+
+
+def _merge_year_values(*values: Any) -> list[int]:
+    years: list[int] = []
+    for value in values:
+        items = value if isinstance(value, list) else [value]
+        for item in items:
+            try:
+                year = int(item)
+            except (TypeError, ValueError):
+                continue
+            if 1900 <= year <= 2100 and year not in years:
+                years.append(year)
+    return sorted(years, reverse=True)
+
+
+def _venue_alias_record(venue: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": venue.get("id", ""),
+        "source": venue.get("source", ""),
+        "name": venue.get("name", ""),
+        "full_name": venue.get("full_name", ""),
+        "type": venue.get("type", ""),
+        "rank": venue.get("rank", ""),
+        "field": venue.get("field", ""),
+        "field_key": venue.get("field_key", ""),
+        "address": venue.get("address", ""),
+        "years": _merge_year_values(venue.get("years", [])),
+        "classification_source": venue.get("classification_source", ""),
+    }
+
+
+def _append_alias(aliases: list[dict[str, Any]], alias: dict[str, Any], canonical_id: str) -> None:
+    alias_id = str(alias.get("id") or "").strip()
+    if not alias_id or alias_id == canonical_id:
+        return
+    if any(str(item.get("id") or "") == alias_id for item in aliases):
+        return
+    aliases.append(alias)
+
+
+def _merge_catalog_entry(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    primary, secondary = left, right
+    if (_catalog_source_priority(right), str(right.get("id") or "")) < (_catalog_source_priority(left), str(left.get("id") or "")):
+        primary, secondary = right, left
+
+    merged = dict(primary)
+    merged["years"] = _merge_year_values(primary.get("years", []), secondary.get("years", []))
+    if not merged.get("address") and str(merged.get("source") or "").lower() != "openreview":
+        merged["address"] = secondary.get("address", "")
+
+    metadata = dict(secondary.get("metadata") or {})
+    metadata.update(dict(primary.get("metadata") or {}))
+    merged_sources = []
+    for venue in (primary, secondary):
+        source = str(venue.get("source") or "").strip()
+        if source and source not in merged_sources:
+            merged_sources.append(source)
+    if merged_sources:
+        metadata["merged_sources"] = merged_sources
+    if metadata:
+        merged["metadata"] = metadata
+
+    aliases: list[dict[str, Any]] = []
+    for venue in (primary, secondary):
+        for alias in venue.get("aliases", []) if isinstance(venue.get("aliases"), list) else []:
+            if isinstance(alias, dict):
+                _append_alias(aliases, alias, str(merged.get("id") or ""))
+        _append_alias(aliases, _venue_alias_record(venue), str(merged.get("id") or ""))
+    if aliases:
+        merged["aliases"] = aliases
+    else:
+        merged.pop("aliases", None)
+    return merged
+
+
+def _merge_catalog_by_identity(venues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_id: dict[str, dict[str, Any]] = {}
+    identity_to_id: dict[str, str] = {}
+    for venue in venues:
+        venue_id = str(venue.get("id") or "").strip()
+        if not venue_id:
+            continue
+        identity = _venue_identity_key(venue)
+        existing_id = identity_to_id.get(identity)
+        if existing_id and existing_id in by_id:
+            merged = _merge_catalog_entry(by_id[existing_id], venue)
+            merged_id = str(merged.get("id") or existing_id)
+            if merged_id != existing_id:
+                by_id.pop(existing_id, None)
+            by_id[merged_id] = merged
+            identity_to_id[identity] = merged_id
+        else:
+            by_id[venue_id] = venue
+            identity_to_id[identity] = venue_id
+    return list(by_id.values())
 
 
 def load_ccf_catalog() -> list[dict[str, Any]]:
@@ -136,7 +253,6 @@ def load_openreview_catalog() -> list[dict[str, Any]]:
 
 
 def load_catalog() -> list[dict[str, Any]]:
-    by_id: dict[str, dict[str, Any]] = {}
     ccf_venues = load_packaged_ccf_catalog() + load_ccf_catalog()
     ccf_names = {_venue_name_key(venue.get("name", "")) for venue in ccf_venues}
     default_venues = [
@@ -144,13 +260,20 @@ def load_catalog() -> list[dict[str, Any]]:
         for venue in load_default_catalog()
         if venue.get("id") == "openreview_iclr" or _venue_name_key(venue.get("name", "")) not in ccf_names
     ]
-    for venue in default_venues + load_openreview_catalog() + ccf_venues + load_custom_catalog():
-        by_id[venue["id"]] = venue
-    return sorted(by_id.values(), key=lambda item: (item["source"], item["field"], item["type"], item["rank"], item["name"]))
+    venues = _merge_catalog_by_identity(default_venues + load_openreview_catalog() + ccf_venues + load_custom_catalog())
+    return sorted(venues, key=lambda item: (item["source"], item["field"], item["type"], item["rank"], item["name"]))
 
 
 def catalog_by_id() -> dict[str, dict[str, Any]]:
     catalog = {venue["id"]: venue for venue in load_catalog()}
+    for venue in list(catalog.values()):
+        canonical_id = str(venue.get("id") or "")
+        for alias in venue.get("aliases", []) if isinstance(venue.get("aliases"), list) else []:
+            if not isinstance(alias, dict):
+                continue
+            alias_id = str(alias.get("id") or "").strip()
+            if alias_id and alias_id not in catalog:
+                catalog[alias_id] = {**venue, "id": alias_id, "canonical_id": canonical_id}
     if "openreview_iclr" in catalog:
         catalog["openreview_iclr_2026"] = {**catalog["openreview_iclr"], "id": "openreview_iclr_2026"}
     custom_fallbacks = {

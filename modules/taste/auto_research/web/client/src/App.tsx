@@ -441,9 +441,10 @@ function normalizeVenueIdentityText(value: any) {
 }
 
 function venueIdentityKey(venue?: Venue, fallbackId = "") {
-  const name = normalizeVenueIdentityText(venue?.name);
   const fullName = normalizeVenueIdentityText(venue?.full_name);
-  if (name || fullName) return `${name}::${fullName || name}`;
+  if (fullName) return `full:${fullName}`;
+  const name = normalizeVenueIdentityText(venue?.name);
+  if (name) return `name:${name === "kdd" ? "sigkdd" : name}`;
   return normalizeVenueIdentityText(fallbackId || venue?.id).replace(/[_-](19|20)\d{2}$/, "");
 }
 
@@ -462,14 +463,28 @@ function selectedVenueIdForVenue(selectedVenueIds: string[], targetVenue: Venue,
   return selectedVenueIds.find((id) => venueIdentityKey(venueById.get(id) || CORE_VENUE_FALLBACKS[id], id) === targetKey) || "";
 }
 
-function dedupeVenueIdsByIdentity(venueIds: string[], venueById: Map<string, Venue>) {
-  const seen = new Set<string>();
-  return venueIds.filter((id) => {
+function dedupeVenueSelectionByIdentity(venueIds: string[], venueYears: Record<string, number[]>, venueById: Map<string, Venue>) {
+  const seen = new Map<string, string>();
+  const nextIds: string[] = [];
+  const nextYears: Record<string, number[]> = {};
+  for (const id of venueIds) {
     const key = venueIdentityKey(venueById.get(id) || CORE_VENUE_FALLBACKS[id], id);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+    const existingId = seen.get(key);
+    if (existingId) {
+      nextYears[existingId] = uniqueYearsDesc([...(nextYears[existingId] || []), ...(venueYears[id] || [])]);
+      continue;
+    }
+    seen.set(key, id);
+    nextIds.push(id);
+    nextYears[id] = uniqueYearsDesc(venueYears[id] || []);
+  }
+  return { venueIds: nextIds, venueYears: nextYears };
+}
+
+function sameVenueYearMap(left: Record<string, number[]>, right: Record<string, number[]>) {
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return sameStringArray(leftKeys, rightKeys) && leftKeys.every((key) => sameStringArray((left[key] || []).map(String), (right[key] || []).map(String)));
 }
 
 function normalizedVenueIdKey(value: any) {
@@ -5323,6 +5338,7 @@ function App() {
     const query = venueQuery.trim().toLowerCase();
     if (!query) return venues;
     return venues.filter((venue) => {
+      const aliasText = (venue.aliases || []).map((alias) => [alias.id, alias.name, alias.full_name, alias.source, alias.rank].filter(Boolean).join(" ")).join(" ");
       const haystack = [
         venue.name,
         venue.full_name,
@@ -5331,6 +5347,7 @@ function App() {
         venue.type,
         venue.source,
         venue.classification_source,
+        aliasText,
       ].join(" ").toLowerCase();
       return haystack.includes(query);
     });
@@ -5353,15 +5370,26 @@ function App() {
     if (findRunTabs.includes(tab)) return true;
     return Boolean(runId && !String(runId).startsWith("find_"));
   }, [renderedRunArtifacts.length, runId, tab]);
-  const venueById = useMemo(() => new Map(venues.map((venue) => [venue.id, venue])), [venues]);
+  const venueById = useMemo(() => {
+    const map = new Map<string, Venue>();
+    for (const venue of venues) {
+      map.set(venue.id, venue);
+      for (const alias of venue.aliases || []) {
+        const aliasId = String(alias?.id || "").trim();
+        if (aliasId && !map.has(aliasId)) map.set(aliasId, { ...venue, id: aliasId, canonical_id: venue.id });
+      }
+    }
+    return map;
+  }, [venues]);
   const selectedVenueItems = useMemo(
     () => selectedVenues.map((id) => venueById.get(id) || CORE_VENUE_FALLBACKS[id]).filter((venue): venue is Venue => Boolean(venue)),
     [selectedVenues, venueById],
   );
   useEffect(() => {
-    const deduped = dedupeVenueIdsByIdentity(selectedVenues, venueById);
-    if (!sameStringArray(deduped, selectedVenues)) setSelectedVenues(deduped);
-  }, [selectedVenues, venueById]);
+    const deduped = dedupeVenueSelectionByIdentity(selectedVenues, selectedVenueYears, venueById);
+    if (!sameStringArray(deduped.venueIds, selectedVenues)) setSelectedVenues(deduped.venueIds);
+    if (!sameVenueYearMap(deduped.venueYears, selectedVenueYears)) setSelectedVenueYears(deduped.venueYears);
+  }, [selectedVenueYears, selectedVenues, venueById]);
   const addCandidateYears = useMemo(() => normalizeSelectedYears(years), [years]);
   const availableVenues = useMemo(() => uniqueVenuesByIdentity(filteredVenues), [filteredVenues]);
   const availableVenueDisplayLimit = venueQuery.trim() || showAllAvailableVenues ? 300 : 24;

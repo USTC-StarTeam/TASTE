@@ -134,6 +134,16 @@ def test_missing_source_method_sync_does_not_rewrite_existing_adapters(monkeypat
     assert paper.read_text(encoding="utf-8") == "existing paper adapter"
 
 
+def test_api_catalog_merges_sigkdd_kdd_aliases():
+    full_name = "ACM SIGKDD Conference on Knowledge Discovery and Data Mining"
+    rows = [row for row in server.api_catalog() if row.get("full_name") == full_name]
+
+    assert len(rows) == 1
+    assert rows[0]["name"] == "SIGKDD"
+    assert rows[0]["rank"] == "A"
+    assert any(alias.get("id") == "dblp_kdd" for alias in rows[0].get("aliases", []))
+
+
 def test_venue_health_result_keeps_requested_venue_and_year(monkeypatch):
     monkeypatch.setattr(server, "fetch_venue_sample", lambda _venue, _year, _limit: {
         "venue_id": "",

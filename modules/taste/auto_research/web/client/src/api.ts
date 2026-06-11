@@ -78,6 +78,7 @@ export type Config = {
 
 export type Venue = {
   id: string;
+  canonical_id?: string;
   source: string;
   name: string;
   full_name: string;
@@ -86,6 +87,7 @@ export type Venue = {
   field: string;
   years: number[];
   classification_source: string;
+  aliases?: Array<Partial<Venue> & { id: string }>;
 };
 
 export type Job = {

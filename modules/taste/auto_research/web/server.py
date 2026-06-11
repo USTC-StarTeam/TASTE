@@ -7553,7 +7553,7 @@ def api_frontend_version() -> dict:
 @app.get("/api/catalog/venues")
 def api_catalog() -> list[dict]:
     return sorted(
-        catalog_by_id().values(),
+        load_catalog(),
         key=lambda item: (item["source"], item["field"], item["type"], item["rank"], item["name"], item["id"]),
     )
 
