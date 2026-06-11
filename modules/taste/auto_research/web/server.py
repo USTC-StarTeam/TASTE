@@ -2370,6 +2370,66 @@ def _project_root_for_find_run(run_id: str) -> Path | None:
     return None
 
 
+def _project_id_for_find_run(run_id: str) -> str:
+    root = _project_root_for_find_run(run_id)
+    return root.name if root else ""
+
+
+def _run_belongs_to_project(run_id: str, project: str) -> bool:
+    project = str(project or "").strip()
+    if not project:
+        return True
+    return _project_id_for_find_run(run_id) == project
+
+
+def _with_run_project(item: dict[str, Any]) -> dict[str, Any]:
+    row = dict(item)
+    run_id = str(row.get("run_id") or "").strip()
+    project = str(row.get("project") or "").strip()
+    if run_id and not project:
+        project = _project_id_for_find_run(run_id)
+        if project:
+            row["project"] = project
+    return row
+
+
+def _api_query_str(value: Any, default: str = "") -> str:
+    return str(value).strip() if isinstance(value, str) else default
+
+
+def _filter_runs_for_project(items: list[dict], project: str) -> list[dict]:
+    project = _api_query_str(project)
+    rows = [_with_run_project(item if isinstance(item, dict) else {}) for item in items]
+    if not project:
+        return rows
+    return [row for row in rows if str(row.get("project") or "") == project]
+
+
+def _job_project_id(item: dict[str, Any]) -> str:
+    result = item.get("result") if isinstance(item.get("result"), dict) else {}
+    paper_stage = result.get("paper_stage") if isinstance(result.get("paper_stage"), dict) else {}
+    project = str(result.get("project") or result.get("project_id") or paper_stage.get("project") or "").strip()
+    if project:
+        return project
+    job_id = str(item.get("job_id") or "")
+    try:
+        return _project_from_job_payload(job_id, item)
+    except Exception:
+        return ""
+
+
+def _job_belongs_to_project(item: dict[str, Any], project: str) -> bool:
+    project = str(project or "").strip()
+    if not project:
+        return True
+    item_project = _job_project_id(item)
+    if item_project:
+        return item_project == project
+    result = item.get("result") if isinstance(item.get("result"), dict) else {}
+    run_id = str(item.get("run_id") or result.get("run_id") or "").strip()
+    return bool(run_id and _run_belongs_to_project(run_id, project))
+
+
 def _current_find_recommendation_projection(project_root: Path, run_id: str = "") -> dict[str, Any]:
     projection = _read_project_json(project_root / "state" / "current_find_recommendation_projection.json", {})
     if not isinstance(projection, dict):
@@ -7173,7 +7233,8 @@ def _created_at_from_find_run_id(run_id: str, fallback: str = "") -> str:
     return fallback or datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _find_run_history_jobs_from_runs(existing_run_ids: set[str], *, limit: int = 300) -> list[dict[str, Any]]:
+def _find_run_history_jobs_from_runs(existing_run_ids: set[str], *, limit: int = 300, project: str = "") -> list[dict[str, Any]]:
+    project = _api_query_str(project)
     jobs: list[dict[str, Any]] = []
     try:
         runs = _cached_list_runs()
@@ -7182,6 +7243,9 @@ def _find_run_history_jobs_from_runs(existing_run_ids: set[str], *, limit: int =
     for row in runs:
         run_id = str((row if isinstance(row, dict) else {}).get("run_id") or "").strip()
         if not run_id.startswith("find_") or run_id in existing_run_ids:
+            continue
+        project_id = _project_id_for_find_run(run_id)
+        if project and project_id != project:
             continue
         try:
             directory = run_dir(run_id)
@@ -7238,6 +7302,7 @@ def _find_run_history_jobs_from_runs(existing_run_ids: set[str], *, limit: int =
         message = str(live.get("message") or phase or "Find run history")
         result = {
             "run_id": run_id,
+            "project": project_id,
             "artifact_dir": str(directory),
             "find_results_path": str(directory / "find_results.json"),
             "artifact_paths": {
@@ -7266,6 +7331,7 @@ def _find_run_history_jobs_from_runs(existing_run_ids: set[str], *, limit: int =
         jobs.append({
             "job_id": f"find-run-{run_id}",
             "stage": "find",
+            "project": project_id,
             "status": status,
             "created_at": _created_at_from_find_run_id(run_id, created_at),
             "logs": [f"Created run {run_id}", message],
@@ -7729,6 +7795,10 @@ def api_find(request: FindRequest) -> dict:
         return result
 
     job = start_job("find", run_find_and_adopt)
+    if current:
+        project, _root = current
+        job.result = {"project": project, "action": "find"}
+        _persist_jobs()
     return job.as_dict()
 
 
@@ -8488,7 +8558,9 @@ def api_jobs(
     compact: bool = Query(True),
     limit: int = Query(300, ge=1, le=1000),
     include_history: bool = Query(True),
+    project: str = Query(""),
 ) -> list[dict]:
+    project = _api_query_str(project)
     _reconcile_detached_launcher_jobs()
     dynamic = _live_jobs_from_projects(compact=True)
     if compact:
@@ -8610,12 +8682,15 @@ def api_jobs(
         return kept
 
     persisted_items = _dedupe_completed_paper_previews(persisted_items)
+    if project:
+        dynamic = [item for item in dynamic if _job_belongs_to_project(item, project)]
+        persisted_items = [item for item in persisted_items if _job_belongs_to_project(item, project)]
     existing_find_run_ids = {
         str(item.get("run_id") or "")
         for item in dynamic + persisted_items
         if str(item.get("stage") or "") == "find" and str(item.get("run_id") or "")
     }
-    run_history = _find_run_history_jobs_from_runs(existing_find_run_ids, limit=max(0, effective_limit - len(dynamic) - len(persisted_items))) if include_history else []
+    run_history = _find_run_history_jobs_from_runs(existing_find_run_ids, limit=max(0, effective_limit - len(dynamic) - len(persisted_items)), project=project) if include_history else []
     items = _dedupe_job_items_for_api(dynamic + persisted_items + run_history)
     if not include_history:
         items = [item for item in items if str(item.get("status") or "").lower() in {"queued", "running", "cancelling"}]
@@ -8797,8 +8872,8 @@ async def ws_job(websocket: WebSocket, job_id: str):
 
 
 @app.get("/api/runs")
-def api_runs() -> list[dict]:
-    return _cached_list_runs()
+def api_runs(project: str = Query("")) -> list[dict]:
+    return _filter_runs_for_project(_cached_list_runs(), _api_query_str(project))
 
 
 @app.get("/api/runs/{run_id}/artifacts")

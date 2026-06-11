@@ -295,8 +295,9 @@ export async function finishPlan(runId: string, planId: string) {
   );
 }
 
-export async function getRuns() {
-  return asArrayResponse<RunInfo>(await json<any>(await apiFetch("/api/runs")), "runs");
+export async function getRuns(project?: string) {
+  const query = project ? `?project=${encodeURIComponent(project)}` : "";
+  return asArrayResponse<RunInfo>(await json<any>(await apiFetch(`/api/runs${query}`)), "runs");
 }
 
 export async function getArtifacts(runId: string, options: { light?: boolean } = {}) {
@@ -304,8 +305,10 @@ export async function getArtifacts(runId: string, options: { light?: boolean } =
   return json<{ run_id: string; artifacts: Artifact[] }>(await apiFetch(`/api/runs/${runId}/artifacts${suffix}`));
 }
 
-export async function getJobs() {
-  return asArrayResponse<Job>(await json<any>(await apiFetch("/api/jobs?compact=1&limit=12&include_history=1")), "jobs");
+export async function getJobs(project?: string) {
+  const params = new URLSearchParams({ compact: "1", limit: "12", include_history: "1" });
+  if (project) params.set("project", project);
+  return asArrayResponse<Job>(await json<any>(await apiFetch(`/api/jobs?${params.toString()}`)), "jobs");
 }
 
 export async function cancelJob(jobId: string) {

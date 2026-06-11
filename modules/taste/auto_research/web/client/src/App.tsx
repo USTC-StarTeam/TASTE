@@ -779,7 +779,7 @@ const TEXT = {
     researcher: "研究者画像",
     researcherHelp: "填写你的背景、已有项目、偏好的实验条件、长期研究方向等。",
     llm: "LLM 配置",
-    llmHelp: "用于论文相关性评分、分类推断、精读、想法和计划生成；Find 必须通过真实 LLM 评分，API key 无效会阻塞补检索/补评分。",
+    llmHelp: "Find 使用这里的 LLM 做题名/摘要评分、分类推断和补检索评分；Read/Idea/Plan 默认交给 Claude Code，只有用户没有配置 Claude Code 或显式需要兼容兜底时才使用 LLM。环境、实验、论文撰写不走这里的 LLM 路线。",
     provider: "服务商",
     providerHelp: "兼容 OpenAI 协议的服务类型，例如 openai、siliconflow；mock 表示不调用远程 LLM。",
     baseUrl: "基础地址",
@@ -791,12 +791,12 @@ const TEXT = {
     temperature: "温度",
     temperatureHelp: "控制生成随机性；精读和筛选建议 0.2-0.6。",
     roleConfig: "角色 LLM 配置",
-    roleConfigHelp: "留空则继承上方全局 LLM。每个阶段可以单独覆盖服务商、基础地址、模型、API key 和温度。",
+    roleConfigHelp: "高级兼容配置：Find 可独立覆盖；Read/Idea/Plan 仅作为 Claude Code 不可用时的兜底。留空则继承上方全局 LLM。",
     validateLLM: "验证 LLM",
     validatingLLM: "验证中...",
     llmProbeHelp: "使用 Find 相同的 JSON 评分探针验证当前保存的 LLM 配置；不会显示 API key。",
     emailSettings: "邮件配置",
-    emailHelp: "用于把当前运行的渲染后 HTML 报告发送到邮箱。SMTP 密码只保存在本地配置文件。",
+    emailHelp: "可选通知/导出配置，只影响底部产物面板的手动发送和任务完成后的自动发送；不参与科研主流程。SMTP 密码只保存在本地配置文件。",
     smtpServer: "SMTP 服务器",
     smtpPort: "SMTP 端口",
     emailSender: "发件邮箱",
@@ -853,8 +853,12 @@ const TEXT = {
     topSurveyCandidates: "推荐文章",
     noLiteratureSurvey: "当前 Find run 尚未产出可展示的调研验收结果；Find 完成后这里会显示抓取、筛选、评分和推荐计数。",
     recommendationShortfall: "推荐不足",
-    limits: "运行数量",
-        llmConcurrency: "LLM 评估并发数",
+    findRunBudget: "Find 运行预算",
+    findBudgetHelp: "这些配置只影响发现阶段的抓取、召回、详情评分和最终推荐展示；默认值来自同一份配置，保存后下次 Find 生效。",
+    ideaRunBudget: "想法生成预算",
+    ideaBudgetHelp: "这些配置只影响想法阶段；Read/Plan/环境/实验/论文不会读取这里的数量上限。",
+    projectRunHistoryHelp: "只显示当前项目的历史运行；run ID 保留用于定位具体产物。",
+    llmConcurrency: "LLM 评估并发数",
     llmConcurrencyHelp: "发现等评估任务使用，范围 1-32，默认 8；慢速兼容 API 建议 4-8。",
     ideaWorkers: "想法生成并发数",
     ideaWorkersHelp: "范围 1-8，默认 2。每个工作器使用不同论文窗口，不重复喂同一批论文。",
@@ -878,7 +882,7 @@ const TEXT = {
     recallCount: "主题候选保留上限",
     recallCountHelp: "全扫标题后，按主题相关性稳定排序，最多保留多少篇进入详情抓取前的候选池。它不是最终推荐数，也不会作为人类监督列表展示。",
     detailFetchCount: "非会议详情评分预算",
-    detailFetchCountHelp: "用于 arXiv/Nature/Science/HuggingFace/GitHub 等非会议来源；会议 Find 默认会把标题预筛后的候选全部抓详情并做 LLM 评分。只有显式设置 FIND_VENUE_DETAIL_FETCH_COUNT 或 FIND_LIMIT_VENUE_DETAILS 才会限制会议详情评分。",
+    detailFetchCountHelp: "用于 arXiv/Nature/Science/HuggingFace/GitHub 等非会议来源；会议 Find 默认全量扫描会议标题池，再由主题召回和详情评分控制进入精读候选。",
     titleFilterTimeout: "标题筛选单批超时秒数",
     titleFilterTimeoutHelp: "LLM 标题筛选每个批次的最长等待时间。",
     abstractWorkers: "摘要评分最大并发",
@@ -1320,7 +1324,7 @@ const TEXT = {
     researcher: "Researcher Profile",
     researcherHelp: "Add your background, existing projects, preferred experimental constraints, and long-term directions.",
     llm: "LLM Settings",
-    llmHelp: "Used for relevance scoring, inferred categories, paper reading, idea generation, and planning; Find requires real LLM scoring, and an invalid API key blocks targeted repair.",
+    llmHelp: "Find uses this LLM for title/abstract scoring, inferred categories, and repair scoring. Read/Idea/Plan use Claude Code by default and only fall back to LLM when Claude Code is unavailable or explicitly configured. Environment, Experiment, and Paper do not use this LLM route.",
     provider: "Provider",
     providerHelp: "OpenAI-compatible service type, such as openai or siliconflow; mock disables remote LLM calls.",
     baseUrl: "Base URL",
@@ -1332,12 +1336,12 @@ const TEXT = {
     temperature: "Temperature",
     temperatureHelp: "Controls generation randomness; 0.2-0.6 is usually better for reading and filtering.",
     roleConfig: "Role LLM Settings",
-    roleConfigHelp: "Leave blank to inherit the global LLM above. Each stage can override provider, base URL, model, API key, and temperature.",
+    roleConfigHelp: "Advanced compatibility settings: Find may override independently; Read/Idea/Plan use these only as a fallback when Claude Code is unavailable. Blank fields inherit the global LLM above.",
     validateLLM: "Validate LLM",
     validatingLLM: "Validating...",
     llmProbeHelp: "Uses the same JSON scoring probe as Find against the saved LLM config; API keys are never shown.",
     emailSettings: "Email Settings",
-    emailHelp: "Send the current run as a rendered HTML report. The SMTP password is stored only in the local config file.",
+    emailHelp: "Optional notification/export settings for the bottom artifact panel and completion emails. They do not participate in the research workflow. The SMTP password is stored only in the local config file.",
     smtpServer: "SMTP Server",
     smtpPort: "SMTP Port",
     emailSender: "Sender email",
@@ -1394,8 +1398,12 @@ const TEXT = {
     topSurveyCandidates: "Recommended papers",
     noLiteratureSurvey: "No current Find audit result is visible yet. Once Find completes, this panel shows retrieval, screening, scoring, and recommended papers.",
     recommendationShortfall: "recommendation shortfall",
-    limits: "Run Limits",
-        llmConcurrency: "LLM evaluation concurrency",
+    findRunBudget: "Find Run Budget",
+    findBudgetHelp: "These settings only affect Find retrieval, recall, detail scoring, and final recommendation display. Defaults come from the single saved config and apply to the next Find run.",
+    ideaRunBudget: "Idea Budget",
+    ideaBudgetHelp: "These settings only affect Idea generation; Read/Plan/Environment/Experiment/Paper do not read these limits.",
+    projectRunHistoryHelp: "Only runs for the current project are shown; run ID is kept for artifact lookup.",
+    llmConcurrency: "LLM evaluation concurrency",
     llmConcurrencyHelp: "Used by Find-style evaluation tasks. Range 1-32, default 8; use 4-8 for slower compatible APIs.",
     ideaWorkers: "Idea generation workers",
     ideaWorkersHelp: "Range 1-8, default 2. Each worker receives a distinct paper window.",
@@ -1419,7 +1427,7 @@ const TEXT = {
     recallCount: "Topic-candidate cap",
     recallCountHelp: "After the full title scan, keep up to this many topic-ranked candidates before detail fetch. It is not a final recommendation count.",
     detailFetchCount: "Non-venue detail budget",
-    detailFetchCountHelp: "Used for arXiv/Nature/Science/HuggingFace/GitHub. Venue Find now fetches details and LLM-scores every title-screened candidate by default; set FIND_VENUE_DETAIL_FETCH_COUNT or FIND_LIMIT_VENUE_DETAILS only for an explicit emergency cap.",
+    detailFetchCountHelp: "Used for arXiv/Nature/Science/HuggingFace/GitHub. Venue Find scans the venue title pool first, then topic recall and detail scoring decide the reading candidates.",
     titleFilterTimeout: "Title filter timeout (sec)",
     titleFilterTimeoutHelp: "Maximum wait per LLM title-filter batch.",
     abstractWorkers: "Abstract scoring max workers",
@@ -2869,6 +2877,32 @@ function visibleJobs(items: any) {
     .filter((item) => !isInternalJob(item) && !isSyntheticProjectJob(item)));
 }
 
+function jobProjectId(job: any) {
+  const result = job?.result && typeof job.result === "object" ? job.result : {};
+  const paperStage = result.paper_stage && typeof result.paper_stage === "object" ? result.paper_stage : {};
+  return String(job?.project || result.project || result.project_id || paperStage.project || "").trim();
+}
+
+function jobMatchesProject(job: any, projectId: string) {
+  if (!projectId) return true;
+  const project = jobProjectId(job);
+  if (project) return project === projectId;
+  const runId = runIdFromJob(job);
+  const jobId = String(job?.job_id || "");
+  return Boolean(runId && jobId.includes(projectId));
+}
+
+function jobsForProject(items: any, projectId: string) {
+  return visibleJobs(items).filter((item) => jobMatchesProject(item, projectId));
+}
+
+function runMatchesProject(run: RunInfo, projectId: string, pinnedRunIds: string[] = []) {
+  if (!projectId) return true;
+  const project = String(run.project || "").trim();
+  if (project) return project === projectId;
+  return pinnedRunIds.includes(run.run_id);
+}
+
 function syntheticJobsForProject(items: any, projectId: string) {
   const liveStatuses = new Set(["queued", "running", "cancelling", "blocked"]);
   return asArray(items)
@@ -3271,9 +3305,10 @@ function App() {
     let cancelled = false;
     const refreshJobs = async () => {
       try {
-        const jobData = await getJobs();
+        const projectId = activeProjectRef.current || researchProject || "";
+        const jobData = await getJobs(projectId || undefined);
         if (cancelled) return;
-        const visibleJobData = visibleJobs(jobData);
+        const visibleJobData = jobsForProject(jobData, projectId);
         setJobs(visibleJobData);
         setJobsLoaded(true);
         visibleJobData.filter(isWatchableWebJob).forEach((item) => watchExistingJob(item.job_id));
@@ -3287,7 +3322,7 @@ function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, []);
+  }, [researchProject]);
 
   function applyProjectDrafts(summary: ProjectSummary, fallbackProject?: Project) {
     const topic = summary.config?.topic || fallbackProject?.topic || "";
@@ -3326,6 +3361,7 @@ function App() {
       setConfig(cfg);
       const [venueData, runData, researchProjectData, jobData] = await Promise.all([getVenues(), getRuns(), getProjects(), getJobs()]);
       const visibleJobData = visibleJobs(jobData);
+      let jobsToWatch = visibleJobData;
       setError("");
       setVenues(venueData);
       setRuns(runData);
@@ -3339,7 +3375,15 @@ function App() {
         activeProjectRef.current = initialProjectId;
         setProjectId(initialProjectId);
         localStorage.setItem("selected_project", initialProjectId);
-        const summary = await getProject(initialProjectId, { compact: true });
+        const [summary, projectRunData, projectJobRaw] = await Promise.all([
+          getProject(initialProjectId, { compact: true }),
+          getRuns(initialProjectId),
+          getJobs(initialProjectId),
+        ]);
+        const projectJobData = jobsForProject(projectJobRaw, initialProjectId);
+        jobsToWatch = projectJobData;
+        setRuns(projectRunData);
+        setJobs(projectJobData);
         setProjectSummary(summary);
         setError("");
         applyProjectDrafts(summary, initialProject);
@@ -3348,12 +3392,12 @@ function App() {
         if (summaryFindRunId) {
           void loadCurrentFindArtifacts(summaryFindRunId);
         }
-        const initialRunId = defaultRunIdForJobs(runData, visibleJobData, summaryFindRunId);
+        const initialRunId = defaultRunIdForJobs(projectRunData, projectJobData, summaryFindRunId);
         if (initialRunId) {
           void loadRun(initialRunId);
         }
       }
-      visibleJobData.filter(isWatchableWebJob).forEach((item) => watchExistingJob(item.job_id));
+      jobsToWatch.filter(isWatchableWebJob).forEach((item) => watchExistingJob(item.job_id));
     } catch (err) {
       setProjectsLoaded(true);
       setError(String(err));
@@ -3425,11 +3469,11 @@ function App() {
       const summaryFindRunId = currentFindRunIdFromSummary(summary);
       if (summaryFindRunId) {
         void loadCurrentFindArtifacts(summaryFindRunId);
-        void refreshRuns(summaryFindRunId).catch(() => {});
+        void refreshRuns(summaryFindRunId, id).catch(() => {});
       }
-      void getJobs().then((jobData) => {
+      void getJobs(id).then((jobData) => {
         if (activeProjectRef.current !== id) return;
-        const visibleJobData = visibleJobs(jobData);
+        const visibleJobData = jobsForProject(jobData, id);
         setJobs(visibleJobData);
         setJobsLoaded(true);
         visibleJobData.filter(isWatchableWebJob).forEach((item) => watchExistingJob(item.job_id));
@@ -3442,8 +3486,8 @@ function App() {
   }
 
 
-  async function refreshRuns(nextRunId?: string) {
-    const runData = await getRuns();
+  async function refreshRuns(nextRunId?: string, projectId = activeProjectRef.current || researchProject) {
+    const runData = await getRuns(projectId || undefined);
     setRuns(runData);
     if (nextRunId) {
       await loadRun(nextRunId);
@@ -3670,7 +3714,7 @@ function App() {
     setJobs((prev) => {
       const exists = prev.some((item) => item.job_id === normalizedJob.job_id);
       const merged = exists ? prev.map((item) => item.job_id === normalizedJob.job_id ? normalizedJob : item) : [normalizedJob, ...prev];
-      return visibleJobs(merged);
+      return jobsForProject(merged, activeProjectRef.current || researchProject || "");
     });
   }
 
@@ -3857,17 +3901,22 @@ function App() {
   const researchStrongRecommendations = useMemo(() => asArray(researchLiteratureSurvey?.strong_recommendations).filter((paper: any) => paper && typeof paper === "object" && Boolean(paper.title || paper.id)), [researchLiteratureSurvey]);
   const researchSourceStatus = useMemo(() => asArray(researchLiteratureSurvey?.source_status), [researchLiteratureSurvey]);
   const researchHealthCheckSourceStatus = useMemo(() => asArray(researchLiteratureSurvey?.health_check_source_status), [researchLiteratureSurvey]);
+  const projectRunPinnedIds = useMemo(() => Array.from(new Set([currentProjectFindRunId, runId].filter(Boolean))), [currentProjectFindRunId, runId]);
+  const projectRuns = useMemo(
+    () => runs.filter((run) => runMatchesProject(run, researchProject, projectRunPinnedIds)),
+    [runs, researchProject, projectRunPinnedIds],
+  );
   const visibleRuns = useMemo(() => {
-    const pinnedIds = Array.from(new Set([currentProjectFindRunId, runId].filter(Boolean)));
-    const pinned = new Set(pinnedIds);
+    const pinned = new Set(projectRunPinnedIds);
     const ordered = [
-      ...pinnedIds.map((id) => runs.find((run) => run.run_id === id)).filter(Boolean) as RunInfo[],
-      ...runs.filter((run) => !pinned.has(run.run_id)),
+      ...projectRunPinnedIds.map((id) => projectRuns.find((run) => run.run_id === id)).filter(Boolean) as RunInfo[],
+      ...projectRuns.filter((run) => !pinned.has(run.run_id)),
     ];
     if (showAllRuns) return ordered;
-    return ordered.slice(0, Math.max(12, pinnedIds.length));
-  }, [currentProjectFindRunId, runId, runs, showAllRuns]);
-  const hiddenRunCount = Math.max(0, runs.length - visibleRuns.length);
+    return ordered.slice(0, Math.max(12, projectRunPinnedIds.length));
+  }, [projectRunPinnedIds, projectRuns, showAllRuns]);
+  const hiddenRunCount = Math.max(0, projectRuns.length - visibleRuns.length);
+  const displayJobs = useMemo(() => jobsForProject(jobs, researchProject), [jobs, researchProject]);
   const researchSourceLimitations = useMemo(() => asArray(researchLiteratureSurvey?.source_limitations), [researchLiteratureSurvey]);
   const researchMissingVenueIndexes = useMemo(() => asArray(researchLiteratureSurvey?.missing_venue_indexes), [researchLiteratureSurvey]);
   const currentFindArtifactsRunId = useMemo(() => {
@@ -5408,7 +5457,7 @@ function App() {
     if (!window.confirm(t.deleteRunConfirm)) return;
     try {
       await deleteRun(id);
-      const nextRuns = await getRuns();
+      const nextRuns = await getRuns(researchProject || undefined);
       setRuns(nextRuns);
       if (id === runId) {
         const next = nextRuns[0];
@@ -5519,15 +5568,14 @@ function App() {
 
   function researchPayload(action: string, options: { freshDiscovery?: boolean; venue?: string } = {}) {
     const freshDiscovery = action === "full-cycle" && Boolean(options.freshDiscovery);
-    const payloadVenue = options.venue || researchVenue;
-    return {
+    const paperAction = action === "paper";
+    const payloadVenue = paperAction ? String(options.venue || researchVenue || "").trim() : "";
+    const payload: Record<string, any> = {
       action,
       project: researchProject,
       prompt: researchPrompt,
       topic: researchTopic,
-      venue: payloadVenue,
-      target_venue: payloadVenue,
-      title: researchTitle,
+      title: paperAction ? researchTitle : "",
       iterations: researchIterations,
       iterations_per_cycle: researchIterations,
       max_cycles: action === "full-cycle" ? Math.max(3, researchIterations) : researchIterations,
@@ -5543,38 +5591,50 @@ function App() {
       real_bootstrap_env: researchRealBootstrapEnv,
       conda_env: researchEnvDraft.conda_env || (researchSummary as any)?.run_preferences?.conda_env || researchSummary?.config?.conda_env || "",
       skip_paper: researchSkipPaper,
-      refresh_current_paper: action === "paper",
-      refresh_current_venue: action === "paper",
+      refresh_current_paper: paperAction,
+      refresh_current_venue: paperAction,
       auto_install_latex: researchAutoInstallLatex,
     };
+    if (paperAction) {
+      payload.venue = payloadVenue;
+      payload.target_venue = payloadVenue;
+    }
+    return payload;
   }
 
-  async function saveProjectConfigDraft(options: { silent?: boolean; propagateError?: boolean } = {}) {
+  async function saveProjectConfigDraft(options: { silent?: boolean; propagateError?: boolean; includePaperSettings?: boolean } = {}) {
     if (!researchProject) return researchSummary;
-    const inferredVenue = selectedVenueItems[0]?.name || selectedVenues[0] || "";
-    const venueDraft = researchVenue.trim() || inferredVenue;
-    if (!venueDraft) {
-      if (!options.silent) setError(lang === "zh" ? "投稿会议/期刊不能为空。" : "Target venue cannot be empty.");
-      return researchSummary;
+    const includePaperSettings = Boolean(options.includePaperSettings);
+    const patch: Record<string, any> = {
+      topic: researchTopic,
+      user_prompt: researchPrompt,
+      research_interest: researchResearchInterest,
+      researcher_profile: researchResearcherProfile,
+      default_find_selection: currentFindSelection(),
+    };
+    if (includePaperSettings) {
+      const venueDraft = researchVenue.trim();
+      if (!venueDraft) {
+        if (!options.silent) setError(lang === "zh" ? "投稿会议/期刊不能为空。" : "Target venue cannot be empty.");
+        return researchSummary;
+      }
+      patch.target_venue = venueDraft;
+      patch.venue = venueDraft;
+      patch.title = researchTitle;
     }
     try {
       setProjectConfigSaving(true);
       setError("");
-      const summary = await saveProjectConfig(researchProject, {
-        target_venue: venueDraft,
-        venue: venueDraft,
-        topic: researchTopic,
-        user_prompt: researchPrompt,
-        title: researchTitle,
-        research_interest: researchResearchInterest,
-        researcher_profile: researchResearcherProfile,
-          default_find_selection: currentFindSelection(),
-      });
+      const summary = await saveProjectConfig(researchProject, patch);
       setProjectSummary(summary);
       const runPreferences = (summary as any).run_preferences || {};
-      const savedVenue = runPreferences.target_venue || runPreferences.venue || summary.human_supervision?.target_venue || venueDraft;
-      setVenue(savedVenue || "");
-      setProjectConfigMessage(options.silent ? "" : (lang === "zh" ? "投稿目标已保存。" : "Target venue saved."));
+      if (includePaperSettings) {
+        const savedVenue = runPreferences.target_venue || runPreferences.venue || summary.human_supervision?.target_venue || researchVenue.trim();
+        setVenue(savedVenue || "");
+        setProjectConfigMessage(options.silent ? "" : (lang === "zh" ? "投稿目标已保存。" : "Target venue saved."));
+      } else if (!options.silent) {
+        setProjectConfigMessage(lang === "zh" ? "项目配置已保存。" : "Project config saved.");
+      }
       return summary;
     } catch (err) {
       setError(String(err));
@@ -5585,8 +5645,8 @@ function App() {
     }
   }
 
-  async function persistProjectConfigForRun() {
-    return await saveProjectConfigDraft({ silent: true, propagateError: true });
+  async function persistProjectConfigForRun(action = "") {
+    return await saveProjectConfigDraft({ silent: true, propagateError: true, includePaperSettings: action === "paper" });
   }
 
   async function runAR(action: string, options: { freshDiscovery?: boolean } = {}) {
@@ -5607,13 +5667,13 @@ function App() {
     }
     try {
       setError("");
-      const savedSummary = await persistProjectConfigForRun();
+      const savedSummary = await persistProjectConfigForRun(action);
       if (action === "environment") {
         await persistEnvConfigForRun();
       }
       const savedRunPreferences = (savedSummary as any)?.run_preferences || {};
-      const savedVenue = savedRunPreferences.target_venue || savedRunPreferences.venue || (savedSummary as any)?.human_supervision?.target_venue || researchVenue;
-      const nextJob = await startProjectJob(researchPayload(action, { ...options, venue: savedVenue || researchVenue }));
+      const savedVenue = action === "paper" ? (savedRunPreferences.target_venue || savedRunPreferences.venue || (savedSummary as any)?.human_supervision?.target_venue || researchVenue) : "";
+      const nextJob = await startProjectJob(researchPayload(action, { ...options, venue: savedVenue }));
       const nextTab: Tab = action === "environment" ? "environment" : action === "experiment" || action === "full-cycle" ? "experiment" : action === "paper" ? "paperWrite" : action === "current-find-selection" ? "plan" : tab;
       attachJob(nextJob, nextTab);
     } catch (err) {
@@ -6285,7 +6345,6 @@ function App() {
               <div className="researchContextBox">
                 <strong>{t.researchTopic}</strong>
                 <span>{displayMaybe(researchSummary?.config?.topic || selectedProject?.topic || researchTopic, t.notCompleted)}</span>
-                {researchVenue && <small>{lang === "zh" ? "当前投稿目标" : "Current venue"}: {displayMaybe(researchVenue)}</small>}
               </div>
             </>
           )}
@@ -6390,48 +6449,12 @@ function App() {
 
         {renderARRuntimePanel()}
 
-        <details className="panel compact sidebarDetails">
-          <summary><span>{t.limits}</span><small>{config.max_recommended_papers} / {config.max_ideas}</small></summary>
-          <label>{t.fetchLimit}</label>
-          <p className="help">{t.fetchLimitHelp}</p>
-          <input value={config.max_fetch_papers} onChange={(e) => updateConfig("max_fetch_papers", Number(e.target.value))} type="number" min="1" />
-          <label>{t.recommendLimit}</label>
-          <p className="help">{t.recommendLimitHelp}</p>
-          <input value={config.max_recommended_papers} onChange={(e) => updateConfig("max_recommended_papers", Number(e.target.value))} type="number" min="1" />
-          <label>{t.ideaLimit}</label>
-          <p className="help">{t.ideaLimitHelp}</p>
-          <input value={config.max_ideas} onChange={(e) => updateConfig("max_ideas", Number(e.target.value))} type="number" min="1" />
-          <label>{t.llmConcurrency}</label>
-          <p className="help">{t.llmConcurrencyHelp}</p>
-          <input value={config.llm_concurrency} onChange={(e) => updateConfig("llm_concurrency", Math.max(1, Math.min(32, Number(e.target.value))))} type="number" min="1" max="32" />
-          <label>{t.ideaWorkers}</label>
-          <p className="help">{t.ideaWorkersHelp}</p>
-          <input value={config.idea_parallel_workers} onChange={(e) => updateConfig("idea_parallel_workers", Math.max(1, Math.min(8, Number(e.target.value))))} type="number" min="1" max="8" />
-          <label>{t.titleScanLimit}</label>
-          <p className="help">{t.titleScanLimitHelp}</p>
-          <input value={config.venue_title_scan_limit} onChange={(e) => updateConfig("venue_title_scan_limit", Math.max(0, Number(e.target.value)))} type="number" min="0" />
-          <label>{t.titleScanFraction}</label>
-          <p className="help">{t.titleScanFractionHelp}</p>
-          <input value={config.venue_title_scan_fraction} onChange={(e) => updateConfig("venue_title_scan_fraction", Number(e.target.value))} type="number" min="0.01" max="1" step="0.05" />
-          <label>{t.recallCount}</label>
-          <p className="help">{t.recallCountHelp}</p>
-          <input value={config.find_recall_count} onChange={(e) => updateConfig("find_recall_count", Number(e.target.value))} type="number" min="1" />
-          <label>{t.detailFetchCount}</label>
-          <p className="help">{t.detailFetchCountHelp}</p>
-          <input value={config.detail_fetch_count} onChange={(e) => updateConfig("detail_fetch_count", Number(e.target.value))} type="number" min="1" />
-          <div className="saveBar">
-            <button className="primary" onClick={handleSaveConfig} disabled={savingConfig}>
-              {savingConfig ? t.saving : t.saveConfig}
-            </button>
-            {saveMessage && <span>{saveMessage}</span>}
-          </div>
-        </details>
-
         <details className="panel runs sidebarDetails">
           <summary><span>{t.runs}</span><small>{runId || (lang === "zh" ? "未选择" : "none")}</small></summary>
           <div className="panelHeaderLine compactHeader">
-            {runs.length > 12 && <button className="smallButton" onClick={() => setShowAllRuns((value) => !value)}>{showAllRuns ? t.showRecentRuns : t.showAllRuns}</button>}
+            {projectRuns.length > 12 && <button className="smallButton" onClick={() => setShowAllRuns((value) => !value)}>{showAllRuns ? t.showRecentRuns : t.showAllRuns}</button>}
           </div>
+          <p className="help">{t.projectRunHistoryHelp}</p>
           {hiddenRunCount > 0 && <p className="help">{lang === "zh" ? `默认只显示当前/最近 ${visibleRuns.length} 条，另有 ${hiddenRunCount} 条历史可展开。` : `Showing current/recent ${visibleRuns.length}; ${hiddenRunCount} older runs hidden.`}</p>}
           {visibleRuns.map((run) => (
             <div className={run.run_id === runId ? "runRow active" : "runRow"} key={run.run_id}>
@@ -6661,6 +6684,18 @@ function App() {
               </div>
               </div>
             </div>
+            <div className="panel findBudgetConfigPanel" data-testid="find-budget-config">
+              <h3>{t.findRunBudget}</h3>
+              <p className="help">{t.findBudgetHelp}</p>
+              <div className="row"><div><label>{t.fetchLimit}</label><p className="help">{t.fetchLimitHelp}</p><input value={config.max_fetch_papers} onChange={(e) => updateConfig("max_fetch_papers", Number(e.target.value))} type="number" min="1" /></div><div><label>{t.recommendLimit}</label><p className="help">{t.recommendLimitHelp}</p><input value={config.max_recommended_papers} onChange={(e) => updateConfig("max_recommended_papers", Number(e.target.value))} type="number" min="1" /></div></div>
+              <div className="row"><div><label>{t.llmConcurrency}</label><p className="help">{t.llmConcurrencyHelp}</p><input value={config.llm_concurrency} onChange={(e) => updateConfig("llm_concurrency", Math.max(1, Math.min(32, Number(e.target.value))))} type="number" min="1" max="32" /></div><div><label>{t.abstractWorkers}</label><p className="help">{t.abstractWorkersHelp}</p><input value={config.abstract_scoring_max_workers} onChange={(e) => updateConfig("abstract_scoring_max_workers", Math.max(1, Number(e.target.value)))} type="number" min="1" /></div></div>
+              <div className="row"><div><label>{t.titleScanLimit}</label><p className="help">{t.titleScanLimitHelp}</p><input value={config.venue_title_scan_limit} onChange={(e) => updateConfig("venue_title_scan_limit", Math.max(0, Number(e.target.value)))} type="number" min="0" /></div><div><label>{t.titleScanFraction}</label><p className="help">{t.titleScanFractionHelp}</p><input value={config.venue_title_scan_fraction} onChange={(e) => updateConfig("venue_title_scan_fraction", Number(e.target.value))} type="number" min="0.01" max="1" step="0.05" /></div></div>
+              <div className="row"><div><label>{t.recallCount}</label><p className="help">{t.recallCountHelp}</p><input value={config.find_recall_count} onChange={(e) => updateConfig("find_recall_count", Number(e.target.value))} type="number" min="1" /></div><div><label>{t.detailFetchCount}</label><p className="help">{t.detailFetchCountHelp}</p><input value={config.detail_fetch_count} onChange={(e) => updateConfig("detail_fetch_count", Number(e.target.value))} type="number" min="1" /></div></div>
+              <div className="row"><div><label>{t.arxivMaxQueries}</label><p className="help">{t.arxivMaxQueriesHelp}</p><input value={config.arxiv_max_queries} onChange={(e) => updateConfig("arxiv_max_queries", Math.max(1, Number(e.target.value)))} type="number" min="1" /></div><div><label>{t.arxivPerQuery}</label><p className="help">{t.arxivPerQueryHelp}</p><input value={config.arxiv_per_query_limit} onChange={(e) => updateConfig("arxiv_per_query_limit", Math.max(1, Number(e.target.value)))} type="number" min="1" /></div></div>
+              <div className="row"><div><label>{t.arxivTimeout}</label><p className="help">{t.arxivTimeoutHelp}</p><input value={config.arxiv_timeout_sec} onChange={(e) => updateConfig("arxiv_timeout_sec", Math.max(1, Number(e.target.value)))} type="number" min="1" /></div><div><label>{t.titleFilterTimeout}</label><p className="help">{t.titleFilterTimeoutHelp}</p><input value={config.title_filter_timeout_sec} onChange={(e) => updateConfig("title_filter_timeout_sec", Math.max(1, Number(e.target.value)))} type="number" min="1" /></div></div>
+              <div className="row"><div><label>{t.abstractTimeout}</label><p className="help">{t.abstractTimeoutHelp}</p><input value={config.abstract_scoring_timeout_sec} onChange={(e) => updateConfig("abstract_scoring_timeout_sec", Math.max(1, Number(e.target.value)))} type="number" min="1" /></div></div>
+              <div className="saveBar"><button className="primary" onClick={handleSaveConfig} disabled={savingConfig}>{savingConfig ? t.saving : t.saveConfig}</button>{saveMessage && <span>{saveMessage}</span>}</div>
+            </div>
             <div className="findLayoutSentinel" data-testid="find-source-configs-complete" aria-hidden="true" />
             <div className="findSurveySlot findSurveyAfterConfig" data-testid="find-survey-slot">{renderFindLiteratureSurveyPanel()}</div>
           </section>
@@ -6691,6 +6726,12 @@ function App() {
             <div className="toolbar">
               <h2>{t.ideas}</h2>
               <button className="primary" onClick={runIdeas} disabled={!runId || stageLaunchDisabledByFullCycle}>{t.runIdeas}</button>
+            </div>
+            <div className="panel ideaRunBudgetPanel">
+              <h3>{t.ideaRunBudget}</h3>
+              <p className="help">{t.ideaBudgetHelp}</p>
+              <div className="row"><div><label>{t.ideaLimit}</label><p className="help">{t.ideaLimitHelp}</p><input value={config.max_ideas} onChange={(e) => updateConfig("max_ideas", Number(e.target.value))} type="number" min="1" /></div><div><label>{t.ideaWorkers}</label><p className="help">{t.ideaWorkersHelp}</p><input value={config.idea_parallel_workers} onChange={(e) => updateConfig("idea_parallel_workers", Math.max(1, Math.min(8, Number(e.target.value))))} type="number" min="1" max="8" /></div></div>
+              <div className="saveBar"><button className="primary" onClick={handleSaveConfig} disabled={savingConfig}>{savingConfig ? t.saving : t.saveConfig}</button>{saveMessage && <span>{saveMessage}</span>}</div>
             </div>
             <div className="ideaGrid">
               {currentFindArtifactLoading || ideasStillSyncing ? (
@@ -7015,8 +7056,11 @@ function App() {
             <details className="panel runSettingsPanel">
               <summary>{t.runSettings}</summary>
               <p className="help">{t.fullResearchCycleHelp}</p>
-              <div className="row"><div><label>{t.researchVenue}</label><input value={researchVenue} onChange={(e) => setVenue(e.target.value)} /></div><div><label>{t.researchIterations}</label><input value={researchIterations} onChange={(e) => setIterations(Math.max(1, Number(e.target.value)))} type="number" min="1" /></div></div>
-              <div className="row"><div><label>{t.maxExperimentsPerRound}</label><input value={researchMaxLaunches} onChange={(e) => setMaxLaunches(Math.max(1, Number(e.target.value)))} type="number" min="1" /></div><div><label>{t.researchCodingBackend}</label><input value="Claude Code" readOnly /></div></div>
+              <div className="row"><div><label>{t.researchIterations}</label><input value={researchIterations} onChange={(e) => setIterations(Math.max(1, Number(e.target.value)))} type="number" min="1" /></div><div><label>{t.maxExperimentsPerRound}</label><input value={researchMaxLaunches} onChange={(e) => setMaxLaunches(Math.max(1, Number(e.target.value)))} type="number" min="1" /></div></div>
+              <div className="row"><div><label>{t.researchCodingBackend}</label><input value="Claude Code" readOnly /></div></div>
+              <label className="switch"><input type="checkbox" checked={researchExecutePlan} onChange={(e) => setExecutePlan(e.target.checked)} /> {t.researchExecutePlan}</label>
+              <label className="switch"><input type="checkbox" checked={researchPrepareEnv} onChange={(e) => setPrepareEnv(e.target.checked)} /> {t.researchPrepareEnv}</label>
+              <label className="switch"><input type="checkbox" checked={researchSkipPaper} onChange={(e) => setSkipPaper(e.target.checked)} /> {t.researchSkipPaper}</label>
               <p className="help">{t.researchCodingBackendHelp} {t.lastActualBackend}: {researchStages?.experiment?.last_backend || "claude"}.</p>
             </details>
             {renderExperimentGatePanel()}
@@ -7060,7 +7104,7 @@ function App() {
               <div className="researchGateNote warning"><strong>{t.evidenceGateNotPassed}:</strong> {displayMaybe(humanSupervision?.blocker?.summary, t.evidenceGateWarning)} {lang === "zh" ? "点击生成会生成目标 venue 论文预览，但不会标记为投稿通过。" : "Generating still creates an paper preview only; it will not be marked submission-ready."}</div>
             )}
             <div className="grid two">
-              <div className="panel"><h3>{t.paperSettingsAndGate}</h3><div className="row"><div><label>{t.researchVenue}</label><div className="inlineInputAction"><input value={researchVenue} onChange={(e) => { setVenue(e.target.value); setProjectConfigMessage(""); }} onBlur={() => { if (researchVenue.trim()) void saveProjectConfigDraft({ silent: true }); }} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void saveProjectConfigDraft(); } }} /><button className="smallButton" onClick={() => void saveProjectConfigDraft()} disabled={!researchProject || !researchVenue.trim() || researchProjectConfigSaving}>{researchProjectConfigSaving ? t.saving : (lang === "zh" ? "保存投稿目标" : "Save venue")}</button></div>{researchProjectConfigMessage && <small className="statusHint">{researchProjectConfigMessage}</small>}</div><div><label>{t.researchTitle}</label><input value={researchTitle} onChange={(e) => { setTitle(e.target.value); setProjectConfigMessage(""); }} onBlur={() => { if (researchVenue.trim()) void saveProjectConfigDraft({ silent: true }); }} /></div></div><p className="help">{t.researchForceTemplate}</p><label className="switch"><input type="checkbox" checked={researchAutoInstallLatex} onChange={(e) => setAutoInstallLatex(e.target.checked)} /> {t.researchAutoInstallLatex}</label><div className="researchGateNote"><strong>{t.currentGate}:</strong> {paperStageSummaryText(researchStages?.paper)}</div></div>
+              <div className="panel"><h3>{t.paperSettingsAndGate}</h3><div className="row"><div><label>{t.researchVenue}</label><div className="inlineInputAction"><input value={researchVenue} onChange={(e) => { setVenue(e.target.value); setProjectConfigMessage(""); }} onBlur={() => { if (researchVenue.trim()) void saveProjectConfigDraft({ silent: true, includePaperSettings: true }); }} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void saveProjectConfigDraft({ includePaperSettings: true }); } }} /><button className="smallButton" onClick={() => void saveProjectConfigDraft({ includePaperSettings: true })} disabled={!researchProject || !researchVenue.trim() || researchProjectConfigSaving}>{researchProjectConfigSaving ? t.saving : (lang === "zh" ? "保存投稿目标" : "Save venue")}</button></div>{researchProjectConfigMessage && <small className="statusHint">{researchProjectConfigMessage}</small>}</div><div><label>{t.researchTitle}</label><input value={researchTitle} onChange={(e) => { setTitle(e.target.value); setProjectConfigMessage(""); }} onBlur={() => { if (researchVenue.trim()) void saveProjectConfigDraft({ silent: true, includePaperSettings: true }); }} /></div></div><p className="help">{t.researchForceTemplate}</p><label className="switch"><input type="checkbox" checked={researchAutoInstallLatex} onChange={(e) => setAutoInstallLatex(e.target.checked)} /> {t.researchAutoInstallLatex}</label><div className="researchGateNote"><strong>{t.currentGate}:</strong> {paperStageSummaryText(researchStages?.paper)}</div></div>
               <div className="panel researchStageCard readableOnly">
                 <div className="researchStageTop"><span className={`stageBadge ${badgeClass(researchStages?.paper?.status)}`}>{paperHumanStatus(researchStages?.paper)}</span></div>
                 <h3>{t.paperStatus}</h3>
@@ -7099,11 +7143,11 @@ function App() {
             <p className="help">{lang === "zh" ? (tab === "find" ? "全局 任务栏：展示当前和历史 run/job 的阶段、进度、日志、命令和产物路径。" : "全局 任务栏：展示当前和历史 run/job；Find 文献计数和文献包只在“发现”页展开，避免混入当前阶段主体。") : (tab === "find" ? "Global taskbar: current and historical run/job stages, progress, logs, commands, and artifact paths." : "Global taskbar: current and historical run/jobs; Find literature counts and packets expand only on the Find page so they do not mix into this stage body.")}</p>
             {!jobsLoaded ? (
               <div className="status">{lang === "zh" ? "正在加载任务状态..." : "Loading jobs..."}</div>
-            ) : jobs.length === 0 ? (
+            ) : displayJobs.length === 0 ? (
               <div className="status">{t.idle}</div>
             ) : (
               <div className="jobList">
-                {jobs.map((item) => (
+                {displayJobs.map((item) => (
                   <article className="jobCard" key={item.job_id}>
                     <div className="jobHeader">
                       <strong>{jobDisplayTitle(item, lang)}</strong>
