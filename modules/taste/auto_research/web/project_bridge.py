@@ -10352,7 +10352,9 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         category_selected_count = int(venue_metadata_counts.get("venue_category_selected_papers") or category_selected_count or 0)
     if not category_selected_count:
         category_selected_count = sum(int((row if isinstance(row, dict) else {}).get("selected_category_papers") or 0) for row in safe_list(find_results.get("category_scan_report")))
-    selection = tick_lit.get("selection") if isinstance(tick_lit.get("selection"), dict) else progress.get("selection") if isinstance(progress.get("selection"), dict) else _current_project_source_selection(project, root)
+    project_selection = _current_project_source_selection(project, root)
+    selection = tick_lit.get("selection") if isinstance(tick_lit.get("selection"), dict) else progress.get("selection") if isinstance(progress.get("selection"), dict) else project_selection
+    selection = normalize_source_selection(selection)
     find_result_recommendation_rows = _human_recommendation_literature_rows(safe_list(find_results.get("strong_recommendations")) or safe_list(find_results.get("articles")))
     strong_rows = projection_recommendation_rows or find_result_recommendation_rows
     find_result_read_rows = _human_readable_literature_rows(safe_list(find_results.get("read_candidates"))) or find_result_recommendation_rows
@@ -10642,7 +10644,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         "summary_en": str(pipeline_state.get("summary_en") or f"Current Find has {strong_count} recommendations, {completed_read_count} full-text readings, {pending_full_text_read_count} pending full-text readings, {idea_count} ideas, and {plan_count} plans."),
     }
     selected_plan_gate = _current_find_selected_plan_gate_public(current_find_pipeline)
-    health_check_source_status = _current_health_check_source_status_rows(project, root, selection)
+    health_check_source_status = _current_health_check_source_status_rows(project, root, project_selection)
     literature_survey = {
         "run_id": run_id,
         "status": literature_status,
@@ -11199,8 +11201,65 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     runtime_public.pop("extra_path", None)
     runtime_compact = dict(runtime) if isinstance(runtime, dict) else {}
     runtime_compact["runtime"] = runtime_public
-    run_preferences = _public_run_preferences(project, root, cfg, runtime_public, selection)
-    result = {"project": project, "topic": topic, "summary": summary, "status": status, "config": _public_project_identity_config(project, cfg, topic), "run_preferences": run_preferences, "path": str(root), "full_research_cycle": full_cycle_compact, "blockers": full_cycle_compact.get("latest_blockers", []), "current_blocker": public_blocker_row, "human_supervision": human, "human_gate_summary": human_gate_summary, "main_route": main_route, "stages": stages, "state": {"stages": stages, "full_research_cycle": full_cycle_compact, "literature_survey": literature_survey, "human_gate_summary": human_gate_summary, "experiment_count": current_experiment_count, "completed_experiment_count": current_completed_count, "experiment_count_label": experiment_count_label, "experiment_count_help": experiment_count_help, "recent_experiments": current_experiments[:8] if current_experiments else [], "legacy_experiment_audit": legacy_experiment_audit, "experiment_record": {**current_experiment_record, "rows": []}, **experiment_display_flags, "reference_reproduction_gate": scalar(display_ref_gate, ["status", "decision", "decision_reason", "human_summary"]), "scientific_progress_gate": _public_gate_status_summary(scientific_progress_gate), "experiment_iteration_audit": _public_gate_status_summary(experiment_iteration_audit), "submission_readiness": scalar(submission_state, ["status", "submission_ready", "promotion_gate"]), "paper_pdf_count": 1 if (pdf_path and not paper_blocked) else 0, "human_supervision": human, "runtime": runtime_compact, "claude_status": claude_status}, "literature_survey": literature_survey, "current_find_pipeline": literature_survey["current_find_pipeline"], "readings": completed_read_count, "read_artifacts": raw_read_count, "full_text_reading_count": full_text_read_count, "pending_full_text_reading_count": pending_full_text_read_count, "ideas": idea_count, "plans": plan_count, "fresh_base": {"title": base_title, "venue": main_route.get("base_venue", ""), "year": main_route.get("base_year", ""), "repo_name": repo_name, "repo_path": repo_path, "dataset": main_route.get("dataset", ""), "ready_datasets": main_route.get("ready_datasets", [])}, "supervision": human["supervision"], "queued_guidance": queued_guidance, "runtime": runtime_compact, "claude_status": claude_status, "artifacts": artifacts, "payload_bytes": 0}
+    run_preferences = _public_run_preferences(project, root, cfg, runtime_public, project_selection)
+    state_compact = {
+        "full_research_cycle": full_cycle_compact,
+        "human_gate_summary": human_gate_summary,
+        "experiment_count": current_experiment_count,
+        "completed_experiment_count": current_completed_count,
+        "experiment_count_label": experiment_count_label,
+        "experiment_count_help": experiment_count_help,
+        "recent_experiments": current_experiments[:4] if current_experiments else [],
+        "legacy_experiment_audit": legacy_experiment_audit,
+        "experiment_record": {**current_experiment_record, "rows": []},
+        **experiment_display_flags,
+        "reference_reproduction_gate": scalar(display_ref_gate, ["status", "decision", "decision_reason", "human_summary"]),
+        "scientific_progress_gate": _public_gate_status_summary(scientific_progress_gate),
+        "experiment_iteration_audit": _public_gate_status_summary(experiment_iteration_audit),
+        "submission_readiness": scalar(submission_state, ["status", "submission_ready", "promotion_gate"]),
+        "paper_pdf_count": 1 if (pdf_path and not paper_blocked) else 0,
+        "current_find_pipeline": literature_survey["current_find_pipeline"],
+    }
+    result = {
+        "project": project,
+        "topic": topic,
+        "summary": summary,
+        "status": status,
+        "config": _public_project_identity_config(project, cfg, topic),
+        "run_preferences": run_preferences,
+        "path": str(root),
+        "full_research_cycle": full_cycle_compact,
+        "blockers": full_cycle_compact.get("latest_blockers", []),
+        "current_blocker": public_blocker_row,
+        "human_supervision": human,
+        "human_gate_summary": human_gate_summary,
+        "main_route": main_route,
+        "stages": stages,
+        "state": state_compact,
+        "literature_survey": literature_survey,
+        "current_find_pipeline": literature_survey["current_find_pipeline"],
+        "readings": completed_read_count,
+        "read_artifacts": raw_read_count,
+        "full_text_reading_count": full_text_read_count,
+        "pending_full_text_reading_count": pending_full_text_read_count,
+        "ideas": idea_count,
+        "plans": plan_count,
+        "fresh_base": {
+            "title": base_title,
+            "venue": main_route.get("base_venue", ""),
+            "year": main_route.get("base_year", ""),
+            "repo_name": repo_name,
+            "repo_path": repo_path,
+            "dataset": main_route.get("dataset", ""),
+            "ready_datasets": main_route.get("ready_datasets", []),
+        },
+        "supervision": human["supervision"],
+        "queued_guidance": queued_guidance,
+        "runtime": runtime_compact,
+        "claude_status": claude_status,
+        "artifacts": artifacts,
+        "payload_bytes": 0,
+    }
     current_config_venue = run_preferences.get("target_venue") or run_preferences.get("venue") or venue
     if current_config_venue:
         result["target_venue"] = current_config_venue

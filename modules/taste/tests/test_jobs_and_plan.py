@@ -209,6 +209,28 @@ def test_venue_health_rows_match_year_specific_and_base_venue_ids(tmp_path):
     assert rows and rows[0]["venue_id"] == "openreview_iclr"
 
 
+def test_venue_health_rows_respect_explicit_venue_year_pairs(tmp_path):
+    from auto_research.web import project_bridge
+
+    project = "demo_health_pair_filter"
+    root = tmp_path / project
+    (root / "state").mkdir(parents=True)
+    write_json(root / "state" / "venue_health_status.json", {
+        "source_status": [
+            {"source": "ICLR 2026", "source_kind": "venue_health", "venue_id": "openreview_iclr", "venue": "ICLR", "year": 2026, "status": "ok", "ok": True, "sample_count": 1},
+            {"source": "ICLR 2025", "source_kind": "venue_health", "venue_id": "openreview_iclr", "venue": "ICLR", "year": 2025, "status": "ok", "ok": True, "sample_count": 1},
+        ]
+    })
+
+    rows = project_bridge._current_health_check_source_status_rows(
+        project,
+        root,
+        {"venue_ids": ["openreview_iclr_2026"], "years": [2026, 2025], "venue_years": [{"venue_id": "openreview_iclr_2026", "year": 2026}]},
+    )
+
+    assert [row["year"] for row in rows] == [2026]
+
+
 def test_hollow_done_find_without_run_id_is_hidden_from_taskbar():
     item = {
         "job_id": "find_empty",
@@ -440,6 +462,42 @@ def test_source_selection_uses_workspace_root_env_for_project_config(tmp_path, m
         {"venue_id": "openreview_iclr_2026", "year": 2026},
         {"venue_id": "openreview_iclr_2026", "year": 2025},
     ]
+
+
+def test_project_summary_run_preferences_keep_project_selection_over_stale_progress(tmp_path, monkeypatch):
+    from auto_research.web import project_bridge
+
+    project = "demo_project_selection"
+    root = tmp_path / project
+    planning = root / "planning" / "finding"
+    planning.mkdir(parents=True)
+    write_json(root / "project.json", {"name": project, "topic": "Demo topic", "target_venue": "ICLR"})
+    write_json(planning / "find_progress.json", {
+        "run_id": "find_current",
+        "phase": "complete",
+        "selection": {"venue_ids": ["openreview_iclr_2026"], "years": [2026, 2025]},
+    })
+    project_selection = {
+        "venue_ids": ["openreview_iclr_2026"],
+        "years": [2026],
+        "venue_years": [{"venue_id": "openreview_iclr_2026", "year": 2026}],
+        "include_arxiv": False,
+        "include_biorxiv": False,
+        "include_huggingface": False,
+        "include_github": False,
+        "include_nature": False,
+        "include_science": False,
+    }
+    monkeypatch.setattr(project_bridge, "project_source_selection", lambda _project: project_selection)
+    monkeypatch.setattr(project_bridge, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(project_bridge, "_remote_process_rows", lambda: [])
+
+    summary = project_bridge._fast_project_summary(project, root, {"name": project, "topic": "Demo topic", "target_venue": "ICLR"})
+
+    prefs_selection = summary["run_preferences"]["default_find_selection"]
+    assert prefs_selection["years"] == [2026]
+    assert prefs_selection["venue_years"] == [{"venue_id": "openreview_iclr_2026", "year": 2026}]
+    assert summary["literature_survey"]["selection"]["years"] == [2026, 2025]
 
 
 def test_find_request_uses_project_research_profile_when_api_config_is_partial(tmp_path, monkeypatch):

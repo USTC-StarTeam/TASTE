@@ -505,8 +505,9 @@ function venueYearMapFromSelection(selection: any, venueIds: string[]) {
     const values = Array.isArray(rawYears) ? rawYears : [rawYears];
     result[id] = uniqueYearsDesc([...(result[id] || []), ...values]);
   };
-  if (Array.isArray(selection?.venue_years) && selection.venue_years.length) {
-    for (const item of selection.venue_years) {
+  const explicitVenueYears = Array.isArray(selection?.venue_years) ? selection.venue_years : [];
+  if (explicitVenueYears.length) {
+    for (const item of explicitVenueYears) {
       if (!item || typeof item !== "object") continue;
       addYears(item.venue_id || item.venue || item.id, Array.isArray(item.years) ? item.years : item.year);
     }
@@ -514,8 +515,9 @@ function venueYearMapFromSelection(selection: any, venueIds: string[]) {
   if (!Object.keys(result).length) {
     const selectedYears = Array.isArray(selection?.years) && selection.years.length
       ? normalizeSelectedYears(selection.years)
-      : [DEFAULT_FIND_YEAR];
-    for (const venueId of venueIds) addYears(venueId, selectedYears);
+      : [];
+    const latestConfiguredYear = selectedYears[0] || DEFAULT_FIND_YEAR;
+    for (const venueId of venueIds) addYears(venueId, [latestConfiguredYear]);
   }
   for (const venueId of venueIds) {
     if (!result[venueId]?.length) result[venueId] = [DEFAULT_FIND_YEAR];
