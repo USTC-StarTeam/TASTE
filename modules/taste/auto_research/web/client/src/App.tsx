@@ -468,17 +468,31 @@ function dedupeVenueSelectionByIdentity(venueIds: string[], venueYears: Record<s
   const nextIds: string[] = [];
   const nextYears: Record<string, number[]> = {};
   for (const id of venueIds) {
-    const key = venueIdentityKey(venueById.get(id) || CORE_VENUE_FALLBACKS[id], id);
+    const venue = venueById.get(id) || CORE_VENUE_FALLBACKS[id];
+    const canonicalId = venue?.canonical_id && venueById.has(venue.canonical_id) ? venue.canonical_id : id;
+    const key = venueIdentityKey(venue, id);
     const existingId = seen.get(key);
     if (existingId) {
-      nextYears[existingId] = uniqueYearsDesc([...(nextYears[existingId] || []), ...(venueYears[id] || [])]);
+      nextYears[existingId] = uniqueYearsDesc([...(nextYears[existingId] || []), ...(venueYears[id] || []), ...(venueYears[canonicalId] || [])]);
       continue;
     }
-    seen.set(key, id);
-    nextIds.push(id);
-    nextYears[id] = uniqueYearsDesc(venueYears[id] || []);
+    seen.set(key, canonicalId);
+    nextIds.push(canonicalId);
+    nextYears[canonicalId] = uniqueYearsDesc([...(venueYears[id] || []), ...(venueYears[canonicalId] || [])]);
   }
   return { venueIds: nextIds, venueYears: nextYears };
+}
+
+function venueMapWithAliases(venues: Venue[]) {
+  const map = new Map<string, Venue>();
+  for (const venue of venues) {
+    map.set(venue.id, venue);
+    for (const alias of venue.aliases || []) {
+      const aliasId = String(alias?.id || "").trim();
+      if (aliasId && !map.has(aliasId)) map.set(aliasId, { ...venue, id: aliasId, canonical_id: venue.id });
+    }
+  }
+  return map;
 }
 
 function sameVenueYearMap(left: Record<string, number[]>, right: Record<string, number[]>) {
@@ -4079,7 +4093,7 @@ function App() {
   const readCandidatesStillSyncing = Boolean(!currentReadings.length && expectedReadCandidateCount > 0 && (!readResultsArtifact || currentFindArtifactLoading || (useCurrentFindPacket && readCandidatePool.length === 0)));
   const hasSurveyCandidates = retrievalPool.length > 0 || readCandidatePool.length > 0 || readCandidatesStillSyncing || expectedReadCandidateCount > 0 || Number(literatureCounts.evaluated || 0) > 0 || Number(literatureCounts.arxivCandidates || 0) > 0 || (!viewingActiveIncompleteFindRun && Number(researchLiteratureCounts.survey_candidates || 0) > 0);
   const venueHealthSourceStatus = useMemo(() => {
-    const byId = new Map(venues.map((venue) => [venue.id, venue]));
+    const byId = venueMapWithAliases(venues);
     const selectedPairs = venueYearPairs(selectedVenues, selectedVenueYears);
     const selectedPairKeys = new Set(selectedPairs.flatMap((pair) => venueYearComparableKeys(pair.venue_id, pair.year, byId)));
     const selectedIdKeys = new Set(selectedVenues.flatMap((id) => Array.from(venueComparableKeys(id, byId))));
@@ -5370,17 +5384,7 @@ function App() {
     if (findRunTabs.includes(tab)) return true;
     return Boolean(runId && !String(runId).startsWith("find_"));
   }, [renderedRunArtifacts.length, runId, tab]);
-  const venueById = useMemo(() => {
-    const map = new Map<string, Venue>();
-    for (const venue of venues) {
-      map.set(venue.id, venue);
-      for (const alias of venue.aliases || []) {
-        const aliasId = String(alias?.id || "").trim();
-        if (aliasId && !map.has(aliasId)) map.set(aliasId, { ...venue, id: aliasId, canonical_id: venue.id });
-      }
-    }
-    return map;
-  }, [venues]);
+  const venueById = useMemo(() => venueMapWithAliases(venues), [venues]);
   const selectedVenueItems = useMemo(
     () => selectedVenues.map((id) => venueById.get(id) || CORE_VENUE_FALLBACKS[id]).filter((venue): venue is Venue => Boolean(venue)),
     [selectedVenues, venueById],
@@ -5532,7 +5536,7 @@ function App() {
       const pairs = selectedVenues.length
         ? venueYearPairs(selectedVenues, selectedVenueYears)
         : ids.flatMap((venueId) => addCandidateYears.map((year) => ({ venue_id: venueId, year })));
-      const byId = new Map(venues.map((venue) => [venue.id, venue]));
+      const byId = venueMapWithAliases(venues);
       const pendingRows = pairs.map((pair) => {
         const venue = byId.get(pair.venue_id) || CORE_VENUE_FALLBACKS[pair.venue_id];
         const venueName = venue?.name || pair.venue_id;
