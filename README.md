@@ -57,7 +57,7 @@ python -m pip install --upgrade pip
 python -m pip install -r modules/taste/requirements.txt
 ```
 
-### 3. 安装 Node.js 并构建前端
+### 3. 安装 Node.js
 
 Node.js、npm 和 nvm/版本管理方式直接按 Node.js 官网下载页操作：<https://nodejs.org/zh-cn/download/>。
 
@@ -68,40 +68,11 @@ node --version
 npm --version
 ```
 
-构建网页：
-
-```bash
-npm --prefix modules/taste/auto_research/web/client install
-npm --prefix modules/taste/auto_research/web/client run build
-```
-
-`tsc` 和 `vite` 来自 `modules/taste/auto_research/web/client/node_modules/.bin/`。`node_modules/` 是本机 npm 依赖目录，不提交 Git。
-
 ### 4. 安装并登录 Claude Code
 
-TASTE 不配置 Claude Code 账号/API，也不会覆盖用户已有 Claude Code 设置。请先在自己的机器或远端服务器上安装并登录 `claude`。
+TASTE 不配置 Claude Code 账号/API，也不会覆盖用户已有 Claude Code 设置。按 Claude Code 官方文档安装并登录即可：<https://docs.anthropic.com/en/docs/claude-code/setup>。
 
-官方文档：
-
-- <https://docs.anthropic.com/en/docs/claude-code/quickstart>
-- <https://docs.anthropic.com/en/docs/claude-code/setup>
-- <https://docs.anthropic.com/en/docs/claude-code/iam>
-
-常用安装方式：
-
-macOS / Linux / WSL：
-
-```bash
-curl -fsSL https://claude.ai/install.sh | bash
-```
-
-Windows PowerShell：
-
-```powershell
-irm https://claude.ai/install.ps1 | iex
-```
-
-npm 方式：
+常用 npm 安装方式：
 
 ```bash
 npm install -g @anthropic-ai/claude-code
@@ -111,12 +82,79 @@ npm install -g @anthropic-ai/claude-code
 
 ```bash
 claude --version
-claude
 ```
 
-第一次运行会提示登录。WSL、SSH 或容器里如果浏览器回调失败，按 Claude Code 提示复制登录 URL 或 code，再粘回终端即可。
+### 5. 构建并启动网页
 
-### 5. 创建项目
+构建前端：
+
+```bash
+npm --prefix modules/taste/auto_research/web/client install
+npm --prefix modules/taste/auto_research/web/client run build
+```
+
+`tsc` 和 `vite` 来自 `modules/taste/auto_research/web/client/node_modules/.bin/`。`node_modules/` 是本机 npm 依赖目录，不提交 Git。
+
+macOS / Linux / Git Bash 启动：
+
+```bash
+export WORKSPACE_ROOT="$PWD"
+export PYTHONPATH="$PWD/modules/taste:$PWD:$PWD/scripts"
+export MANAGEMENT_PYTHON="$(command -v python)"
+export NODE_BIN="$(dirname "$(command -v node)")"
+
+WEB_HOST=127.0.0.1 WEB_PORT=8765 scripts/start_web.sh
+```
+
+第一次启动不需要提前创建项目，也不需要设置 `PROJECT_ID`。打开网页后可以直接创建首个项目。已有项目时，如果想让网页默认选中它，在启动前加：
+
+```bash
+export PROJECT_ID=my_project
+export DEFAULT_PROJECT_ID=my_project
+```
+
+以后启动网页用同一套命令；只要 Node、Python 和 Claude Code 还在 PATH 里，通常执行下面这几行就够了：
+
+```bash
+cd TASTE
+conda activate taste
+WEB_HOST=127.0.0.1 WEB_PORT=8765 scripts/start_web.sh
+```
+
+Windows PowerShell 原生启动也可以不用 bash 脚本，前提是已经完成前端构建：
+
+```powershell
+$env:WORKSPACE_ROOT = (Get-Location).Path
+$env:PYTHONPATH = "$($PWD.Path)\modules\taste;$($PWD.Path);$($PWD.Path)\scripts"
+$env:MANAGEMENT_PYTHON = (Get-Command python).Source
+$env:NODE_BIN = Split-Path (Get-Command node).Source
+python -m uvicorn auto_research.web.server:app --host 127.0.0.1 --port 8765
+```
+
+Windows 已有项目想默认选中时，可额外设置：
+
+```powershell
+$env:PROJECT_ID = "my_project"
+$env:DEFAULT_PROJECT_ID = "my_project"
+```
+
+打开：
+
+```text
+http://127.0.0.1:8765
+```
+
+健康检查：
+
+```bash
+curl http://127.0.0.1:8765/health
+```
+
+### 6. 创建或选择项目
+
+首个项目可以直接在网页上创建：打开网页后进入项目区域，填写项目名、研究主题、研究目标和初始检索词，然后保存。
+
+如果更喜欢命令行，也可以用脚本创建：
 
 ```bash
 python scripts/create_project.py \
@@ -134,61 +172,22 @@ projects/my_project/
 
 每个项目的主题、配置、运行历史和产物都独立保存。
 
-### 6. 启动网页
-
-```bash
-export WORKSPACE_ROOT="$PWD"
-export PROJECT_ID=my_project
-export DEFAULT_PROJECT_ID=my_project
-export PYTHONPATH="$PWD/modules/taste:$PWD:$PWD/scripts"
-export MANAGEMENT_PYTHON="$(command -v python)"
-
-export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-nvm use 22
-export NODE_BIN="$(dirname "$(command -v node)")"
-
-WEB_HOST=127.0.0.1 WEB_PORT=8765 scripts/start_web.sh
-```
-
-打开：
-
-```text
-http://127.0.0.1:8765
-```
-
-健康检查：
-
-```bash
-curl http://127.0.0.1:8765/health
-```
-
-`scripts/start_web.sh` 会自动设置 `WORKSPACE_ROOT`、`PYTHONPATH` 等默认值；上面显式写出来是为了部署时更容易排查环境。
-
-Windows PowerShell 原生启动也可以不用 bash 脚本，前提是已经完成前端构建：
-
-```powershell
-$env:WORKSPACE_ROOT = (Get-Location).Path
-$env:PROJECT_ID = "my_project"
-$env:DEFAULT_PROJECT_ID = "my_project"
-$env:PYTHONPATH = "$($PWD.Path)\modules\taste;$($PWD.Path);$($PWD.Path)\scripts"
-$env:MANAGEMENT_PYTHON = (Get-Command python).Source
-$env:NODE_BIN = Split-Path (Get-Command node).Source
-python -m uvicorn auto_research.web.server:app --host 127.0.0.1 --port 8765
-```
-
-如果 Windows 装了 Git Bash，也可以在 Git Bash 里直接使用上面的 `scripts/start_web.sh` 启动方式。
-
 ## 远端服务器访问网页
 
 推荐远端只监听 `127.0.0.1`，本地浏览器通过 SSH tunnel 访问。
 
-远端启动 TASTE：
+远端启动 TASTE。首次启动可以不设置 `PROJECT_ID`，然后在网页里创建项目；已有项目想默认选中时再加 `PROJECT_ID` / `DEFAULT_PROJECT_ID`：
 
 ```bash
 ssh <user>@<server>
 cd /path/to/TASTE
 conda activate taste
+WEB_HOST=127.0.0.1 WEB_PORT=8765 scripts/start_web.sh
+```
+
+可选默认项目：
+
+```bash
 PROJECT_ID=my_project DEFAULT_PROJECT_ID=my_project WEB_HOST=127.0.0.1 WEB_PORT=8765 scripts/start_web.sh
 ```
 
