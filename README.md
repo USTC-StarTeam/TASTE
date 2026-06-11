@@ -6,11 +6,11 @@
 ![Claude Code](https://img.shields.io/badge/Claude%20Code-project%20agent-6f42c1)
 ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
 
-**TASTE** 是一个本地优先的自动科研系统。它在论文发现、精读、idea、plan 流水线之上，加入项目级自动科研闭环：自动选择研究路线，审计可复现实验环境，调用 Claude Code 项目代理执行代码与实验，记录证据链，并在满足证据门控后生成和修订论文。
+**TASTE** 是一个本地优先的自动科研系统。它把论文发现、精读、idea、plan、环境配置、实验迭代和论文撰写放进同一个可审计工作流：网页负责配置、任务队列、状态展示和人类 guidance；后端负责抓取、评分、产物管理和门控；Claude Code 项目代理负责真实项目代码、实验和论文修复。
 
-本仓库只包含框架代码、模板、网页和测试。真实研究项目目录 `projects/*` 默认被 Git 忽略，因为其中可能包含 API 配置、下载的仓库、数据集、实验日志、生成论文和未公开科研结论。
+本仓库只包含框架代码、模板、网页和测试。真实研究项目目录 `projects/*`、运行配置 `runtime/.config.json`、日志、下载仓库、数据集、实验产物、生成论文和 API key 都是本机运行态内容，默认被 Git 忽略，不应提交到公开仓库。
 
-默认本地地址：
+默认网页地址：
 
 ```text
 http://127.0.0.1:8765
@@ -18,111 +18,207 @@ http://127.0.0.1:8765
 
 ## 目录
 
-- [功能亮点](#功能亮点)
-- [仓库结构](#仓库结构)
-- [快速开始](#快速开始)
-- [配置教程](#配置教程)
-- [使用说明](#使用说明)
-- [科研流水线](#科研流水线)
-- [产物目录](#产物目录)
-- [开发与测试](#开发与测试)
-- [Git 与安全说明](#git-与安全说明)
+- [系统定位](#系统定位)
+- [前置依赖](#前置依赖)
+- [跨平台建议](#跨平台建议)
+- [安装 TASTE](#安装-taste)
+- [Claude Code 安装与使用](#claude-code-安装与使用)
+- [启动网页](#启动网页)
+- [SSH 远端网页显示](#ssh-远端网页显示)
+- [网页配置说明](#网页配置说明)
+- [完整使用流程](#完整使用流程)
+- [产物与目录](#产物与目录)
+- [开发与验证](#开发与验证)
+- [发布前安全检查](#发布前安全检查)
 - [常见问题](#常见问题)
 - [许可证](#许可证)
 
-## 功能亮点
+## 系统定位
 
-- **论文发现与筛选**：支持 CCF/OpenReview/DBLP/arXiv/bioRxiv/Hugging Face/GitHub 等来源，先做标题批筛，再抓摘要和详情二次评分。
-- **项目级自动科研闭环**：Find -> Read -> Ideas -> Plan -> Environment -> Experiment -> Paper，每一步都有状态、产物、日志和阻塞原因。
-- **主控 Claude Code 项目会话**：后三步可以通过网页向项目代理发送 guidance；如果长跑任务正在执行，guidance 会进入队列并在安全检查点消费。
-- **管理环境与实验环境分离**：`management_python` 跑 Web/调度脚本，`experiment_python` 跑训练、评估和实验 guard，避免训练命令误用 Web 管理环境。
-- **证据门控**：环境、数据、参考复现、实验迭代、论文引用、图表和投稿格式都有审计脚本；证据不足时不会假装完成。
-- **本地优先**：默认只监听 `127.0.0.1`，项目状态、日志、下载仓库和生成论文都留在本地。
-- **开源安全默认值**：`runtime/.config.json`、`.claude/settings.json`、`projects/*`、logs、runtime、tmp、third_party 等默认不进入 Git。
+TASTE 的公开代码与具体科研项目解耦。仓库本身不绑定某个论文题目、模型、数据集、API 供应商或本机目录。每个具体研究项目都应该在 `projects/<project>/` 下独立运行，拥有自己的主题、配置、运行历史、产物和状态。
 
-## 仓库结构
+主要模块：
 
-```text
-.
-├── README.md                         # 当前中文说明
-├── START_HERE.md                     # 最短启动说明
-├── config.example.json               # 唯一公开网页配置模板
-├── templates/project.json            # 新建项目的项目配置模板
-├── modules/taste/                    # 论文发现/精读/idea/plan 与 Web 基础层
-│   ├── auto_research/web/server.py   # FastAPI 后端、job 队列、WebSocket、配置 API
-│   ├── auto_research/web/project_bridge.py# Web 与后端脚本之间的桥接层
-│   └── auto_research/web/client/     # React/Vite 前端
-├── scripts/                          # 自动科研、审计、实验、论文、项目代理脚本
-├── .claude/                          # Claude Code agents/commands/skills 模板
-├── prompts/                          # LLM/科研流程提示词
-├── automation/                       # 多代理协议与自动化角色定义
-└── projects/.gitkeep                 # 只保留占位；真实 projects/* 不提交
+| 模块 | 作用 | 默认执行路线 |
+| --- | --- | --- |
+| Find | 会议、期刊、arXiv、bioRxiv、Hugging Face、GitHub 等来源发现与评分 | LLM 用于标题/摘要评分和少量判断 |
+| Read | 对 Find 推荐论文做精读和证据整理 | Claude Code 优先，必要时可回退到 LLM |
+| Ideas | 生成、评审和筛选研究想法 | Claude Code 优先，必要时可回退到 LLM |
+| Plan | 生成和修订研究计划 | Claude Code 优先，必要时可回退到 LLM |
+| Environment | 配置实验环境、数据、loader、参考复现证据 | Claude Code 项目代理和审计脚本 |
+| Experiment | 迭代实验、记录指标、分析失败、导入证据 | Claude Code 项目代理和实验脚本 |
+| Paper | 生成论文、修复引用/图表/格式、执行投稿门控 | Claude Code 项目代理和论文审计脚本 |
+
+运行原则：
+
+- Find 可以独立使用 LLM；后三个重模块 Environment、Experiment、Paper 不走通用 LLM 路线，而是由用户本机已经配置好的 Claude Code CLI 接管项目。
+- Read、Ideas、Plan 默认让 Claude Code 接管当前 Find 结果；如果没有可用 Claude Code，才使用保留的 LLM 回退路线。
+- 网页上简单状态可以是确定性状态映射；项目代理回复区域应显示 Claude Code 的真实输出；黑底日志保留详细运行日志，但不把所有内部审计噪声都放进人类摘要。
+- 会议来源默认广泛抓取所选会议/年份的标题池；`venue_title_scan_limit=0` 表示不设数量上限。测试时才设置正数。
+- arXiv 只有在用户勾选时才抓取；日期留空时默认抓近 180 天。
+
+## 前置依赖
+
+### 必需依赖
+
+| 依赖 | 用途 | 建议 |
+| --- | --- | --- |
+| Git | 克隆仓库、版本管理 | 2.30+ |
+| SSH client | 访问远端服务器、端口转发 | OpenSSH、Git Bash、PowerShell SSH 均可 |
+| Conda/Mamba | 管理 Python 环境 | Miniforge、Mambaforge、Anaconda 均可 |
+| Python | Web、后端脚本、测试 | Python 3.10+，推荐 3.11 |
+| Node.js + npm | 构建 React/Vite 前端 | Node 20+，推荐 Node 22 |
+| ripgrep (`rg`) | 快速搜索和部分检查 | 推荐安装 |
+| Claude Code CLI (`claude`) | 后续项目代理、实验、论文修复 | 用户自行安装和登录 |
+
+### 可选依赖
+
+| 依赖 | 用途 |
+| --- | --- |
+| CUDA/GPU 驱动 | 运行深度学习实验，按具体项目决定 |
+| TeX Live / MacTeX / MiKTeX | 论文 PDF 编译 |
+| GitHub CLI (`gh`) | 可选的 GitHub 操作辅助 |
+| build-essential / Xcode Command Line Tools | 编译部分 Python 或论文项目依赖 |
+
+### 管理环境与实验环境
+
+TASTE 明确区分两套 Python：
+
+| 环境 | 作用 | 配置位置 |
+| --- | --- | --- |
+| 管理 Python | 启动 Web、运行调度、审计、Find/Read/Plan 等框架脚本 | `MANAGEMENT_PYTHON` 或网页“运行环境” |
+| 实验 Python | 运行具体科研项目的训练、评估、仓库脚本 | `EXPERIMENT_PYTHON` 或网页“运行环境/环境配置” |
+
+这两者可以相同，但推荐分离。管理环境要稳定，实验环境可以随具体论文仓库安装 CUDA、PyTorch、旧版依赖或数据处理包。
+
+## 跨平台建议
+
+### Linux
+
+Linux 是最直接的运行环境。推荐使用 Miniforge 或 Mambaforge 创建管理环境，用 `nvm` 安装 Node 22，再安装 Claude Code。
+
+常见系统依赖示例：
+
+```bash
+sudo apt update
+sudo apt install -y git curl openssh-client build-essential ripgrep
 ```
 
-常用核心文件：
+如果系统没有 `rg`，也可以在 Conda 环境中安装：
 
-| 路径 | 作用 |
-| --- | --- |
-| `scripts/create_project.py` | 从模板创建 `projects/<project>/`。 |
-| `scripts/runtime_env.py` | 统一构造 PATH、PYTHONPATH、Node、Claude Code、管理 Python、实验 Python。 |
-| `scripts/start_web.sh` | 启动本地 Web/API 服务。 |
-| `scripts/run_full_research_cycle.py` | 完整科研主循环入口。 |
-| `scripts/ensure_current_find_research_plan.py` | 让主控项目代理接管当前 Find 的 Read/Idea/Plan。 |
-| `scripts/claude_project_session.py` | 持久化 Claude Code 项目会话。 |
-| `scripts/agent_state.py` | agent 状态与网页 guidance 队列。 |
-| `scripts/run_environment_stage.py` | 环境配置与环境证据阶段。 |
-| `scripts/run_coding_agent.py` | 实验代码代理入口。 |
-| `scripts/run_paper_orchestra_bridge.py` | 论文生成、证据门控与投稿格式桥接。 |
-| `modules/taste/tests/` | 后端、Web job、gate、paper contract 等回归测试。 |
+```bash
+conda install -c conda-forge ripgrep -y
+```
 
-## 快速开始
+### macOS
+
+macOS 可直接运行 TASTE。推荐安装 Xcode Command Line Tools、Miniforge、nvm 和 Claude Code。
+
+```bash
+xcode-select --install
+```
+
+如果使用 Homebrew，也可以安装基础工具：
+
+```bash
+brew install git ripgrep nvm
+```
+
+### Windows
+
+推荐使用 **WSL2 + Ubuntu** 运行 TASTE 服务端。Windows 原生浏览器通过 `http://127.0.0.1:8765` 或 SSH tunnel 访问网页。这样能避免 Python、shell、CUDA、LaTeX 和 Claude Code 工具链在原生 Windows 上的差异。
+
+推荐路径：
+
+1. 安装 WSL2 和 Ubuntu。
+2. 在 Ubuntu 里安装 Conda、nvm、Node、Claude Code、TASTE。
+3. 在 Windows 浏览器里打开 TASTE 网页。
+4. 如果 TASTE 跑在另一台远端 Linux 服务器，则在 Windows PowerShell 或 Windows Terminal 里使用 `ssh -L` 做端口转发。
+
+原生 Windows 也可以安装 Claude Code、Node 和 Git for Windows，但 TASTE 的实验仓库、bash 脚本和科研依赖通常更适合 WSL2。
+
+## 安装 TASTE
 
 ### 1. 克隆仓库
 
 ```bash
-git clone <repo-url> TASTE
+git clone https://github.com/USTC-StarTeam/TASTE.git TASTE
 cd TASTE
 ```
 
-### 2. 准备 Python 环境
+如果你使用 fork 或私有仓库，把 URL 换成自己的仓库地址即可。
 
-建议用独立环境运行管理层：
+### 2. 创建管理 Python 环境
+
+Conda/Mamba 示例：
 
 ```bash
-python -m venv .venv
+conda create -n taste python=3.11 -y
+conda activate taste
+python -m pip install --upgrade pip
+python -m pip install -r modules/taste/requirements.txt
+```
+
+venv 示例：
+
+```bash
+python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r modules/taste/requirements.txt
 ```
 
-如果使用 Conda/Mamba，也可以创建自己的管理环境。关键是后续把管理 Python 显式写入 `MANAGEMENT_PYTHON` 或网页 runtime 面板。
-
-### 3. 构建前端
-
-需要 Node.js 20+：
+如果要在同一台机器上跑真实实验，建议额外创建实验环境：
 
 ```bash
-npm --prefix modules/taste/auto_research/web/client ci
+conda create -n taste_exp python=3.11 -y
+```
+
+具体实验依赖由后续 Environment 阶段根据选中的代码仓库、数据和任务安装。
+
+### 3. 安装 Node.js 和前端依赖
+
+推荐用 nvm 安装 Node 22：
+
+```bash
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+nvm install 22
+nvm use 22
+node --version
+npm --version
+```
+
+安装并构建前端：
+
+```bash
+npm --prefix modules/taste/auto_research/web/client install
 npm --prefix modules/taste/auto_research/web/client run build
 ```
 
-### 4. 创建本地配置
+说明：
+
+- `tsc` 和 `vite` 来自 `modules/taste/auto_research/web/client/node_modules/.bin/`。
+- `client/node_modules/` 是 npm 在 TASTE 前端目录下安装的本地依赖目录，不是需要提交到 Git 的源码。
+- `scripts/start_web.sh` 如果发现 `client/dist/` 不存在，会自动尝试 `npm install && npm run build`。公开部署仍建议先手动构建一次，方便提前暴露 Node/npm 问题。
+
+### 4. 创建公开模板之外的本机配置
 
 ```bash
 mkdir -p runtime
 cp config.example.json runtime/.config.json
 ```
 
-`runtime/.config.json` 是唯一的本机网页配置文件，已被 `.gitignore` 忽略。不要提交 API key。也可以不复制模板，直接在网页配置面板保存。
+`config.example.json` 是唯一应该提交的公开配置模板。`runtime/.config.json` 是本机运行配置，默认被 `.gitignore` 忽略。不要把 API key、SMTP 密码、私有 base URL 或本机路径写进公开文件。
 
-### 5. 创建项目
+也可以不手动复制模板，第一次打开网页后在配置面板保存；后端会写入 `runtime/.config.json`。
+
+### 5. 创建或选择项目
+
+新项目示例：
 
 ```bash
-python scripts/create_project.py \
-  --name my_project \
-  --topic "your research topic" \
-  --prompt "your concrete research goal" \
-  --query "initial search query"
+python scripts/create_project.py   --name my_project   --topic "your research topic"   --prompt "your concrete research goal"   --query "initial search query"
 ```
 
 这会创建：
@@ -131,20 +227,106 @@ python scripts/create_project.py \
 projects/my_project/
 ```
 
-该目录是运行态项目工作区，默认不进入 Git。
+每个项目的主题、Find 选择、运行历史、论文产物和实验状态都在自己的项目目录中。不同项目之间不要共享 `projects/<project>/`。
 
-### 6. 启动 Web/API
+## Claude Code 安装与使用
+
+TASTE 不安装、不登录、不改写 Claude Code 账号，也不写入 Claude Code API key。用户必须先在自己的系统里安装并登录 `claude` CLI，TASTE 只检测并调用这个命令。
+
+官方文档入口：
+
+- Claude Code Quickstart: <https://docs.anthropic.com/en/docs/claude-code/quickstart>
+- Claude Code Setup: <https://docs.anthropic.com/en/docs/claude-code/setup>
+- Claude Code Authentication: <https://docs.anthropic.com/en/docs/claude-code/iam>
+
+### 推荐安装方式
+
+macOS、Linux、WSL：
 
 ```bash
+curl -fsSL https://claude.ai/install.sh | bash
+```
+
+Windows PowerShell：
+
+```powershell
+irm https://claude.ai/install.ps1 | iex
+```
+
+Windows CMD：
+
+```cmd
+curl -fsSL https://claude.ai/install.cmd -o install.cmd && install.cmd && del install.cmd
+```
+
+Homebrew：
+
+```bash
+brew install --cask claude-code
+```
+
+WinGet：
+
+```powershell
+winget install Anthropic.ClaudeCode
+```
+
+npm 方式也可用，但需要 Node.js 18+：
+
+```bash
+npm install -g @anthropic-ai/claude-code
+```
+
+不要使用 `sudo npm install -g` 安装 Claude Code，容易造成权限和升级问题。
+
+### 登录和验证
+
+```bash
+claude --version
+claude
+```
+
+第一次运行 `claude` 会提示登录。按照浏览器提示完成登录；如果你在 WSL、SSH 或容器里登录，浏览器可能无法回调到终端，此时按官方提示复制登录 URL 或登录 code，再粘回终端。登录后可以在 Claude Code 会话里输入：
+
+```text
+/login
+/help
+```
+
+Claude Code 需要有 Claude Pro、Max、Team、Enterprise、Console 或受支持云供应商访问权限。免费 Claude.ai 计划通常不包含 Claude Code 权限。
+
+### TASTE 如何使用 Claude Code
+
+- 网页“运行环境”里可以点击自动检测，或手动填写 `claude_path`。
+- 如果 `claude` 已在 PATH 中，通常不需要手动填写。
+- TASTE 会把项目目录、当前阶段、guidance 和审计要求传给 Claude Code 项目代理。
+- Claude Code 的账号、权限、模型、供应商和个人设置仍由用户自己的 Claude Code 安装管理。
+- `.claude/settings.json`、`.claude/projects/`、Claude 本地会话和凭证都不应提交到 Git。
+
+## 启动网页
+
+### 单机启动
+
+在仓库根目录执行：
+
+```bash
+conda activate taste
 export WORKSPACE_ROOT="$PWD"
 export PROJECT_ID=my_project
 export DEFAULT_PROJECT_ID=my_project
-export PYTHONPATH="$PWD/modules/taste:$PWD"
+export PYTHONPATH="$PWD/modules/taste:$PWD:$PWD/scripts"
+export MANAGEMENT_PYTHON="$(command -v python)"
 
-scripts/start_web.sh
+# 如果使用 nvm，把 Node bin 放进 PATH；也可以在网页运行环境里保存 node_bin。
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+nvm use 22
+export NODE_BIN="$(dirname "$(command -v node)")"
+
+WEB_HOST=127.0.0.1 WEB_PORT=8765 scripts/start_web.sh
 ```
 
-打开：
+然后打开：
 
 ```text
 http://127.0.0.1:8765
@@ -154,181 +336,299 @@ http://127.0.0.1:8765
 
 ```bash
 curl http://127.0.0.1:8765/health
+curl http://127.0.0.1:8765/api/frontend/version
 ```
 
-## 配置教程
+### 重要环境变量
 
-### LLM 配置
+| 变量 | 作用 |
+| --- | --- |
+| `WORKSPACE_ROOT` | TASTE 仓库根目录。通常设为 `$PWD`。 |
+| `PROJECT_ID` | 当前默认项目 ID。 |
+| `DEFAULT_PROJECT_ID` | 没有显式项目时使用的项目 ID。 |
+| `PYTHONPATH` | 至少包含 `$PWD/modules/taste:$PWD:$PWD/scripts`。 |
+| `MANAGEMENT_PYTHON` | Web/调度/审计使用的 Python。 |
+| `EXPERIMENT_PYTHON` | 实验运行使用的 Python。可在网页里配置。 |
+| `NODE_BIN` | Node/npm 所在目录。用于前端构建和运行时检测。 |
+| `WEB_HOST` | 默认 `127.0.0.1`。公开部署不建议改成 `0.0.0.0`。 |
+| `WEB_PORT` | 默认 `8765`。 |
 
-网页配置面板和 `runtime/.config.json` 是 LLM/Find/Email 交互配置的权威源；环境变量只在保存配置为空时作为启动兜底；项目配置只保存非密钥摘要和项目运行时信息。
-
-常用环境变量：
+LLM 的 provider/base/model/key 推荐在网页配置面板或 `runtime/.config.json` 保存。环境变量只作为空配置时的启动兜底：
 
 ```bash
 export LLM_PROVIDER=openai_compatible
-export LLM_API_BASE=<provider-base-url>
+export LLM_API_BASE=<chat-completions-compatible-base-url>
 export LLM_MODEL=<model-name>
 export OPENAI_API_KEY=<api-key>
 ```
 
-项目模板里的 LLM 字段：
+## SSH 远端网页显示
+
+推荐远端服务器只监听 `127.0.0.1`，本地浏览器通过 SSH tunnel 访问。
+
+### 1. 在远端启动 TASTE
+
+```bash
+ssh <user>@<server>
+cd /path/to/TASTE
+conda activate taste
+export WORKSPACE_ROOT="$PWD"
+export PROJECT_ID=my_project
+export DEFAULT_PROJECT_ID=my_project
+export PYTHONPATH="$PWD/modules/taste:$PWD:$PWD/scripts"
+export MANAGEMENT_PYTHON="$(command -v python)"
+WEB_HOST=127.0.0.1 WEB_PORT=8765 scripts/start_web.sh
+```
+
+保持这个终端运行，或用 `tmux` / `screen` / systemd 管理。
+
+### 2. 在本机建立端口转发
+
+macOS、Linux、WSL、Git Bash、Windows PowerShell 都可以使用：
+
+```bash
+ssh -N -L 127.0.0.1:8765:127.0.0.1:8765 <user>@<server>
+```
+
+打开本机浏览器：
+
+```text
+http://127.0.0.1:8765
+```
+
+如果本机 8765 已被占用，换成本机端口 18765：
+
+```bash
+ssh -N -L 127.0.0.1:18765:127.0.0.1:8765 <user>@<server>
+```
+
+打开：
+
+```text
+http://127.0.0.1:18765
+```
+
+如果远端 Web 不是 8765，例如远端是 9000，本机仍想用 8765：
+
+```bash
+ssh -N -L 127.0.0.1:8765:127.0.0.1:9000 <user>@<server>
+```
+
+### 3. 常用排查
+
+远端检查服务是否在监听：
+
+```bash
+curl http://127.0.0.1:8765/health
+```
+
+本机检查 tunnel 后是否通：
+
+```bash
+curl http://127.0.0.1:8765/health
+```
+
+如果浏览器打不开，优先检查：
+
+- 远端 TASTE 服务是否还在运行。
+- SSH tunnel 命令是否还在运行。
+- 本机端口是否被其他程序占用。
+- 远端是否错误绑定到了公网地址或其他端口。
+
+## 网页配置说明
+
+网页配置是普通用户的权威编辑入口。不要为了改配置去手写多个脚本或多个 JSON。公开仓库里只有 `config.example.json` 模板；运行时全局配置落在 `runtime/.config.json`；项目独立配置落在 `projects/<project>/project.json`。
+
+### 项目与研究主题
+
+左侧项目区域用于创建、切换和保存项目。研究主题、研究画像、初始检索 query 应属于具体项目，不属于框架代码。
+
+注意：投稿目标只应在 Paper/论文撰写部分配置和展示，不应作为全局侧栏主题的一部分。
+
+### LLM 配置
+
+LLM 配置主要服务 Find：
 
 | 字段 | 说明 |
 | --- | --- |
-| `llm.provider` | 供应商标签，例如 `openai_compatible`、`openai`、`local`。 |
-| `llm.api_base` | Chat Completions 兼容 API base URL。 |
-| `llm.model` | 模型名称。 |
-| `llm.api_key_env` | 从哪个环境变量读取 key，默认 `OPENAI_API_KEY`。 |
-| `llm.timeout_sec` | LLM 请求超时。 |
-| `llm.temperature` | 采样温度。 |
+| Provider | 供应商标签，例如 `openai_compatible`。 |
+| Base URL | Chat Completions 兼容接口地址。 |
+| Model | Find 标题/摘要评分使用的模型。 |
+| API Key | 只保存在运行态配置，不返回给浏览器明文，不提交 Git。 |
+| Temperature | Find 评分采样温度。推荐低温。 |
+| 并发数 | Find 评估并发，默认 8；慢速或限流 API 可设 4 到 8。 |
 
-### Runtime 路径配置
+角色 LLM 配置只用于覆盖早期轻量阶段或 Claude Code 不可用时的回退路线。Environment、Experiment、Paper 不应依赖这里的通用 LLM。
 
-系统特别区分两类 Python：
+### 邮件配置
+
+邮件配置是可选功能，用于手动或自动发送阶段报告。默认 `manual_enabled=true`、`auto_send_enabled=false`。只有在明确需要邮件通知时才填写 SMTP server、sender、receivers 和 password。SMTP 密码是本机运行态秘密，不提交 Git。
+
+### 运行环境
+
+网页“运行环境”用于检测和保存本机工具路径：
 
 | 字段 | 说明 |
 | --- | --- |
-| `management_python` | 运行 Web、审计和调度脚本的 Python。 |
-| `experiment_python` | 运行项目实验、训练、评估命令的 Python。 |
-| `conda_base` | Conda/Mamba 根目录，用于派生或诊断实验环境。 |
-| `nvm_dir` | Node/NVM 根目录。 |
-| `node_bin` | Node.js 可执行目录。 |
-| `claude_path` | Claude Code 可执行文件路径。 |
-| `extra_path` | 额外 PATH。 |
+| `management_python` | 管理 Python。启动 Web 和框架脚本。 |
+| `experiment_python` | 实验 Python。运行训练、评估和具体项目脚本。 |
+| `conda_base` | Conda/Mamba 根目录，用于诊断和推导环境。 |
+| `nvm_dir` | nvm 根目录，例如 `$HOME/.nvm`。 |
+| `node_bin` | Node/npm 可执行目录。 |
+| `claude_path` | Claude Code 可执行文件路径。为空时从 PATH 检测。 |
+| `extra_path` | 额外 PATH 条目。 |
 
-也可以用环境变量覆盖：
+初始化服务时 TASTE 会自动检测常见位置并预填；检测失败时，用户应在网页里手动填写真实路径，再重新测试运行环境。
+
+### Find 配置
+
+标准使用通常只需要配置：
+
+| 配置 | 默认 | 说明 |
+| --- | --- | --- |
+| 推荐文章数量 | 20 | Find 最终推荐给后续 Read 的上限。 |
+| LLM 评估并发 | 8 | Find 标题/摘要评分并发。慢速 API 建议 4 到 8。 |
+| 会议/年份选择 | 最新年份优先 | 搜索栏里的年份只是待添加年份；只有点击会议卡片的添加按钮才会修改已选会议。 |
+| 非会议来源 | 默认不强制开启 | arXiv、bioRxiv、Hugging Face、GitHub、Nature、Science 只有勾选才进入本次 Find。 |
+
+高级预算默认折叠。它们主要用于测试、限流和异常数据源保护：
+
+| 配置 | 默认 | 说明 |
+| --- | --- | --- |
+| 非会议初始抓取上限 `max_fetch_papers` | 120 | arXiv/bioRxiv 等非会议来源初抓数量。会议来源不使用它。 |
+| 会议标题全扫保护上限 `venue_title_scan_limit` | 0 | 0 表示所选会议/年份不设数量上限；正数只用于测试或保护。 |
+| 标题扫描比例 `venue_title_scan_fraction` | 1.0 | 1 表示全扫已抓到的标题池。 |
+| 主题候选保留上限 `find_recall_count` | 1000 | 标题池按主题召回后进入后续详情抓取前的上限。不是最终推荐数。 |
+| 详情评分预算 `detail_fetch_count` | 160 | 进入摘要/详情抓取和评分的候选预算。 |
+| 摘要评分最大并发 | 8 | 最终摘要评分阶段并发。遇到限流可降低。 |
+| arXiv 最大检索词数 | 3 | 每轮最多请求几个 arXiv query。 |
+| arXiv 每个检索词数量 | 50 | 每个 query 请求数量。 |
+| arXiv 日期 | 空 | 起止都为空时默认最近 180 天。 |
+
+### Read、Ideas、Plan 配置
+
+这些模块的运行数量在各自页面设置，不放在全局侧栏里：
+
+- Read 页面选择要精读的论文和数量。`max_papers=0` 表示读取当前 Find 推荐里的全部可读候选。
+- Ideas 页面设置生成 idea 数量、候选倍率和并行 worker。
+- Plan 页面选择 idea 并设置修复轮数。
+
+这些阶段的产物跟随 run ID 和项目走，历史运行不会覆盖其他项目。
+
+### Environment、Experiment、Paper 配置
+
+- Environment 页面负责基底仓库、数据、loader、Conda/Python、参考复现证据和环境审计。
+- Experiment 页面负责实验迭代、指标、失败分析、项目代理 guidance 和完整回复。
+- Paper 页面负责投稿目标、模板、PDF 预览、引用/图表/格式/证据门控。
+
+论文投稿目标只在 Paper 页面配置。不要把具体会议目标写进全局主题栏或框架模板。
+
+## 完整使用流程
+
+### 1. 创建项目并打开网页
 
 ```bash
-export MANAGEMENT_PYTHON=<path-to-management-python>
-export EXPERIMENT_PYTHON=<path-to-project-experiment-python>
-export CONDA_BASE=<path-to-conda-base>
-export NODE_BIN=<path-to-node-bin>
+python scripts/create_project.py --name my_project --topic "..." --prompt "..." --query "..."
+PROJECT_ID=my_project DEFAULT_PROJECT_ID=my_project scripts/start_web.sh
 ```
 
-网页 `运行环境` 面板用于保存 Claude Code/Node/管理 Python；`环境配置` 阶段用于保存实验 Conda/Python。
+### 2. 保存运行环境
 
-### Claude Code
+在网页里：
 
-如果需要项目代理执行代码、实验或论文修复，请先在本机安装并配置 Claude Code CLI：
+1. 打开“运行环境”。
+2. 点击自动检测。
+3. 检查管理 Python、实验 Python、Node、Claude Code、Conda 是否通过。
+4. 不通过就手动填写路径并保存。
 
-```bash
-claude --version
-```
+### 3. 配置 Find 所需 LLM
 
-TASTE 只检测和调用用户已配置好的 `claude` CLI，不写入、不覆盖 Claude Code 的账号、API key、base URL 或默认模型。系统不会把 `.claude/settings.json` 提交到 Git。公开仓库只保留 agents、commands、skills 模板。
+在侧栏填写 Find LLM 的 provider/base/model/key。保存后执行“检查可抓取性”或直接运行 Find。
 
-## 使用说明
+### 4. 选择来源并运行 Find
 
-### 1. Find：发现与筛选
+1. 在会议搜索区选择会议。
+2. 在“选择年份”里保留或添加年份。
+3. 点击会议卡片的添加按钮，把会议/年份加入已选会议。
+4. 需要 arXiv 或 GitHub 等非会议来源时再勾选。
+5. 启动 Find。
 
-在网页中填写研究主题、研究画像、会议/期刊、年份和来源，启动 Find。系统会抓取论文/仓库候选，执行标题筛选、详情抓取和 LLM 二次评分。
+同一个会议可以选择多个年份，并作为同一个会议下的多个年份展示和运行。
 
-常见产物：
+### 5. 运行 Read、Ideas、Plan
+
+Find 完成后进入 Read 页面，选择当前 Find run 的推荐论文并运行精读。之后依次进入 Ideas 和 Plan 页面。默认会尽量使用 Claude Code 接管当前 Find 的后续研究计划；如果 Claude Code 不可用，系统才使用 LLM 回退路线。
+
+### 6. 运行 Environment 和 Experiment
+
+Environment 需要真实基底仓库、数据/loader 证据和可执行环境。TASTE 会记录环境审计、参考复现和阻塞原因。通过后进入 Experiment，由项目代理执行实验、导入指标和修复失败。
+
+### 7. 运行 Paper
+
+Paper 页面设置投稿目标，生成或修订论文预览。系统会检查引用渲染、图表、claim ledger、实验支撑、页数、模板和投稿门控。证据不足时只允许预览，不标记投稿通过。
+
+### 8. 查看任务历史和日志
+
+- 任务历史按项目和 run ID 组织。
+- 黑底日志区域展示详细运行日志，便于调试。
+- 人类摘要区域只展示可读状态和关键阻塞，不应显示内部 hash mismatch、原始栈迹或给代理看的修复清单。
+
+## 产物与目录
+
+仓库核心结构：
 
 ```text
-article.md
-find_results.json
-source_status.md
+.
+├── README.md
+├── START_HERE.md
+├── config.example.json
+├── templates/project.json
+├── modules/taste/
+│   ├── auto_research/web/server.py
+│   ├── auto_research/web/project_bridge.py
+│   └── auto_research/web/client/
+├── scripts/
+├── .claude/
+├── prompts/
+├── automation/
+└── projects/.gitkeep
 ```
 
-### 2. Read：精读
-
-从推荐论文中选择候选，系统会尝试读取公开可访问 PDF 或摘要信息并生成精读产物。系统不绕过付费墙。
-
-```text
-read.md
-read_results.json
-```
-
-### 3. Ideas：生成研究想法
-
-基于论文、精读、仓库和数据线索生成候选 idea，再由 judge LLM 打分。用户可以编辑、通过或删除 idea。
-
-```text
-idea.md
-ideas.json
-```
-
-### 4. Plan：生成研究计划
-
-对通过的 idea 生成 research plan，并通过 evaluate/repair/polish 循环修订。
-
-```text
-plan.md
-plans.json
-```
-
-### 5. Environment：环境配置
-
-系统会检查代码仓库、数据集、Conda/Python、CUDA/GPU、依赖安装和参考复现实验入口。环境创建成功后会记录证据并锁定，避免重复安装或破坏已验证环境。
-
-### 6. Experiment：实验迭代
-
-实验阶段会调用项目代理或实验脚本，记录每次运行、指标、失败原因、修复建议和证据门控状态。网页会展示主控 Claude Code 的完整回复，并支持发送 guidance 到当前项目代理。
-
-### 7. Paper：论文撰写与审计
-
-论文阶段会根据证据链生成论文草稿，检查引用、图表、claim ledger、实验支撑、venue 格式和 PDF 编译。证据不足时会阻塞，而不是生成不可审计的结论。
-
-## 科研流水线
-
-```mermaid
-flowchart LR
-  A["研究主题与画像"] --> B["Find<br/>论文/仓库发现"]
-  B --> C["Read<br/>精读"]
-  C --> D["Ideas<br/>想法生成与评审"]
-  D --> E["Plan<br/>研究计划"]
-  E --> F["Environment<br/>环境与数据证据"]
-  F --> G["Experiment<br/>实验迭代与审计"]
-  G --> H["Paper<br/>论文生成与投稿门控"]
-  H --> I["PDF / TeX / 审计报告"]
-```
-
-### 项目代理 guidance
-
-```mermaid
-sequenceDiagram
-  participant U as User
-  participant W as Web UI
-  participant Q as Guidance Queue
-  participant C as Claude Code Project Session
-  participant S as State
-  U->>W: 在后三步输入 guidance
-  W->>Q: 如果项目代理忙，先入队
-  W->>C: 如果项目代理空闲，可启动一次项目会话
-  C->>Q: 在安全检查点消费 guidance
-  C->>S: 写入状态、报告和证据
-  S->>W: Web 实时展示完整回复与门控状态
-```
-
-## 产物目录
-
-每个项目的运行态数据位于：
+运行态项目目录：
 
 ```text
 projects/<project>/
+├── project.json
+├── state/
+├── reports/
+├── runs/
+├── artifacts/
+├── repos/ 或 third_party/
+└── paper/
 ```
 
-常见子目录和文件：
+常用文件和脚本：
 
-```text
-project.json                 # 项目配置，包含本机 runtime 路径
-state/                       # 状态、agent 状态、门控结果
-reports/                     # Claude/审计/论文报告
-runs/                        # Find/Read/Idea/Plan run 产物
-artifacts/                   # 实验产物
-repos/ 或 third_party/        # 下载或导入的外部代码仓库
-paper/                       # 论文草稿、TeX、PDF 预览
-```
+| 路径 | 作用 |
+| --- | --- |
+| `scripts/create_project.py` | 从模板创建项目。 |
+| `scripts/start_web.sh` | 启动本地 Web/API 服务；必要时自动构建前端。 |
+| `scripts/runtime_env.py` | 统一检测和构造 PATH、PYTHONPATH、Node、Claude、Python 环境。 |
+| `scripts/ensure_current_find_research_plan.py` | 让 Claude Code 接管当前 Find 的 Read/Ideas/Plan。 |
+| `scripts/claude_project_session.py` | Claude Code 项目会话封装和 guidance 队列消费。 |
+| `scripts/run_environment_stage.py` | 环境配置阶段入口。 |
+| `scripts/run_coding_agent.py` | 实验项目代理入口。 |
+| `scripts/run_paper_orchestra_bridge.py` | 论文生成、修复与投稿门控桥接。 |
+| `modules/taste/auto_research/web/server.py` | FastAPI 后端、job 队列、配置 API、WebSocket。 |
+| `modules/taste/auto_research/web/client/src/App.tsx` | React 单页网页。 |
+| `modules/taste/tests/` | 回归测试。 |
 
-这些文件通常包含私人研究上下文、下载代码、数据路径、实验结果或未公开结论，默认不提交到 Git。
-
-## 开发与测试
+## 开发与验证
 
 后端测试：
 
 ```bash
-python -m pytest modules/taste/tests -q
+PYTHONPATH="$PWD/modules/taste:$PWD:$PWD/scripts" python -m pytest modules/taste/tests -q
 ```
 
 前端构建：
@@ -337,68 +637,111 @@ python -m pytest modules/taste/tests -q
 npm --prefix modules/taste/auto_research/web/client run build
 ```
 
-语法检查：
+脚本语法检查：
 
 ```bash
-python -m py_compile \
-  scripts/runtime_env.py \
-  modules/taste/auto_research/web/project_bridge.py \
-  modules/taste/auto_research/web/server.py
+python -m py_compile   scripts/runtime_env.py   modules/taste/auto_research/web/project_bridge.py   modules/taste/auto_research/web/server.py
 
 bash -n scripts/start_web.sh
 ```
 
-启动后 API smoke check：
+启动后 smoke check：
 
 ```bash
 curl http://127.0.0.1:8765/health
 curl http://127.0.0.1:8765/api/frontend/version
+curl http://127.0.0.1:8765/api/config
 ```
 
-## Git 与安全说明
+Git 检查：
 
-提交前请确认只包含框架代码、模板、测试和文档。
+```bash
+git status --short
+git diff --check
+```
+
+## 发布前安全检查
+
+提交前应该只包含框架代码、模板、测试和文档。不要提交任何本机运行态或私有科研内容。
 
 不要提交：
 
 - `runtime/.config.json`
 - `.claude/settings.json`
-- `projects/*` 真实项目工作区
-- `logs/`、`runtime/`、`tmp/`、`third_party/`
-- 下载的论文 PDF、数据集、模型 checkpoint、外部仓库
-- API key、SMTP password、供应商 token
-- 未公开实验结果、论文草稿、私有结论
+- `.claude/projects/`
+- `projects/*` 真实项目目录，除 `projects/.gitkeep`
+- `logs/`、`runtime/`、`tmp/`、`.runtime/`
+- `third_party/`、`modules/writing/vendor/`
+- 下载论文 PDF、数据集、模型 checkpoint、外部仓库
+- API key、SMTP password、Claude Code 凭证、供应商 token
+- 未公开实验结果、论文草稿、审稿回复、私有研究结论
 
-推荐检查：
+推荐扫描：
 
 ```bash
-git status --short
-git ls-files | rg '(^|/)(config\.json|\.claude/settings\.json|projects/|logs/|runtime/|tmp/|third_party/|.*\.log$|.*\.pid$|.*\.png$)'
+git ls-files | rg '(^|/)(config\.json|\.claude/settings\.json|projects/|logs/|runtime/|tmp/|third_party/|.*\.log$|.*\.pid$|.*\.pdf$)'
 ```
 
-除 `projects/.gitkeep` 外，上面的扫描不应命中真实私有文件。
+除 `projects/.gitkeep` 和公开模板外，不应命中真实运行文件。
+
+检查硬编码本机路径：
+
+```bash
+rg -n '/home/[^ ]+/workspace|/Users/[^ ]+|C:\Users|sk-[A-Za-z0-9]|api[_-]?key|smtp_password' README.md START_HERE.md config.example.json templates scripts modules/taste prompts automation .claude
+```
+
+注意：日志里显示绝对路径是正常的；关键是框架代码、脚本和公开文档不能写死某台机器的根路径。
 
 ## 常见问题
 
-### 只上传少数文件能运行吗？
+### 只复制几个文件能跑完整 TASTE 吗？
 
-不能。系统需要整个已跟踪仓库，包括 `scripts/`、`modules/taste/`、`.claude/`、`prompts/`、`templates/` 和测试文件。少数文件通常只是一次 commit 的变更集，不是完整可运行集合。
+不能。TASTE 需要整个已跟踪仓库，包括 `scripts/`、`modules/taste/`、`.claude/`、`prompts/`、`templates/`、前端代码和测试。少数文件通常只是某次修改的变更集，不是完整可运行系统。
 
-### 为什么要分 management Python 和 experiment Python？
+### `tsc` 或 `vite` 找不到怎么办？
 
-Web、审计和调度脚本需要稳定的管理环境；实验代码常常依赖另一套 CUDA、PyTorch、论文仓库依赖或旧版本包。分离后，系统可以用稳定环境管理流程，同时用项目环境运行训练和评估。
+在前端目录安装 npm 依赖：
 
-### 可以把 Web 绑定到公网吗？
+```bash
+npm --prefix modules/taste/auto_research/web/client install
+npm --prefix modules/taste/auto_research/web/client run build
+```
 
-不建议。默认只监听 `127.0.0.1`。如果要远程访问，请优先使用 SSH tunnel，并确认没有暴露 API key、项目路径或未公开科研内容。
+`tsc` 和 `vite` 是前端 npm 依赖，不需要全局安装，也不应把 `node_modules/` 提交到 Git。
 
-### `.claude/` 可以公开吗？
+### `claude` 找不到怎么办？
 
-`.claude/settings.json` 不应公开；本仓库跟踪的是 agents、commands、skills 模板。它们不是密钥，但属于方法资产，公开前请确认团队允许发布。
+先在普通终端确认：
 
-### 论文模块需要额外 reference 吗？
+```bash
+claude --version
+```
 
-论文模块可能需要运行态写作参考或 venue 模板缓存。这些内容默认不进入 Git；需要时可通过脚本重新同步或在项目工作区本地恢复。
+如果终端能找到但网页检测不到，在网页“运行环境”里填写 `claude_path`，或把 Claude Code 所在目录加入 `extra_path` / shell PATH。不要把 Claude Code 账号或 API key 写进 TASTE 仓库。
+
+### 为什么要用 SSH tunnel？
+
+TASTE 网页会展示项目路径、运行日志、模型配置状态和未公开科研内容。默认监听 `127.0.0.1`，远端访问应通过 SSH tunnel，而不是把 Web 服务直接暴露到公网。
+
+### Find 为什么看起来抓很多标题？
+
+会议来源默认尽量全扫所选会议/年份标题池，再由主题召回、详情抓取和 LLM 评分决定精读候选。最终推荐数量由“推荐文章数量”控制。测试时可以设置 `venue_title_scan_limit` 为正数加速，但标准使用应保持 0。
+
+### arXiv 默认抓多久？
+
+如果勾选 arXiv 且开始/结束日期都留空，默认抓最近 180 天。需要指定年份或时间窗时，在 Find 的日期配置里填写 `YYYY-MM-DD` 或 `YYYY/MM/DD`。
+
+### 网页配置保存在哪里？
+
+全局网页配置在 `runtime/.config.json`，项目配置在 `projects/<project>/project.json`。二者都是运行态文件，不提交 Git。公开仓库只保留 `config.example.json` 和 `templates/project.json`。
+
+### 可以把已有项目目录一起上传 GitHub 吗？
+
+不建议。`projects/*` 通常包含私有路径、API 状态、下载仓库、数据、日志、论文草稿和未公开结论。公开发布只提交框架代码、模板、文档和测试。
+
+### 论文 PDF 编译失败怎么办？
+
+先确认系统安装了 LaTeX 发行版。Linux 常用 TeX Live，macOS 常用 MacTeX，Windows/WSL 可用 TeX Live 或 MiKTeX。论文页面会显示可读阻塞；详细编译日志保存在项目目录的 paper 运行产物中。
 
 ## 许可证
 
