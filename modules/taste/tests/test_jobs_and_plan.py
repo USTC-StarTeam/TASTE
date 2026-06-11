@@ -401,7 +401,7 @@ def test_run_loop_topic_ignores_project_id_placeholder(tmp_path):
     })
     paths = SimpleNamespace(planning=planning, state=state)
 
-    topic = run_loop.effective_loop_topic("taste_smoke_web", "taste_smoke_web", "", {"topic": "taste_smoke_web"}, paths)
+    topic = run_loop.effective_loop_topic("demo_project", "demo_project", "", {"topic": "demo_project"}, paths)
 
     assert topic == "Selected current Find experiment plan"
 
@@ -425,10 +425,10 @@ def test_run_project_topic_ignores_project_id_placeholder(tmp_path):
         "plans": [{"plan_id": "plan-1", "title": "Evidence grounded paper agent benchmark"}],
     })
     paths = SimpleNamespace(planning=planning, state=state)
-    cfg = {"topic": "taste_smoke_web", "queries": ["taste_smoke_web"]}
+    cfg = {"topic": "demo_project", "queries": ["demo_project"]}
 
-    topic = run_project.effective_project_topic("taste_smoke_web", "", cfg, paths)
-    queries = run_project.planned_discovery_queries(cfg, paths, topic, project="taste_smoke_web")
+    topic = run_project.effective_project_topic("demo_project", "", cfg, paths)
+    queries = run_project.planned_discovery_queries(cfg, paths, topic, project="demo_project")
 
     assert topic == "Evidence grounded paper agent benchmark"
     assert queries == ["Evidence grounded paper agent benchmark"]
@@ -2618,10 +2618,10 @@ def test_environment_repo_search_ignores_find_source_toggles(monkeypatch):
 def test_environment_stage_explicit_env_name_overrides_strategy_recommendation(monkeypatch):
     monkeypatch.syspath_prepend(str(server.WORKSPACE_ROOT / "scripts"))
     env_stage = importlib.reload(importlib.import_module("run_environment_stage"))
-    strategy = {"env_action": "create_new_project_env", "recommended_env_name": "taste_smoke_web"}
+    strategy = {"env_action": "create_new_project_env", "recommended_env_name": "demo_project"}
 
     assert env_stage.strategy_env_name(strategy, "llm_diff_rec", explicit_env_name="llm_diff_rec") == "llm_diff_rec"
-    assert env_stage.strategy_env_name(strategy, "fallback_env", explicit_env_name="") == "taste_smoke_web"
+    assert env_stage.strategy_env_name(strategy, "fallback_env", explicit_env_name="") == "demo_project"
 
 
 def test_environment_run_optional_timeout_returns_124(monkeypatch, tmp_path, capsys):
@@ -5807,12 +5807,12 @@ def test_project_search_queries_ignore_project_id_and_use_find_context(tmp_path,
         'rationale': "If no repo is good enough, say 'needs-more-search'. Current search found 8 candidates, none data-ready.",
     })
 
-    monkeypatch.setattr(env_stage, 'load_project_config', lambda _project: {'topic': 'taste_smoke_web'})
+    monkeypatch.setattr(env_stage, 'load_project_config', lambda _project: {'topic': 'demo_project'})
     monkeypatch.setattr(env_stage, 'build_paths', lambda _project: SimpleNamespace(planning=tmp_path / 'planning', reports=reports, state=state))
 
-    queries = env_stage.project_search_queries('taste_smoke_web')
+    queries = env_stage.project_search_queries('demo_project')
 
-    assert 'taste_smoke_web' not in queries
+    assert 'demo_project' not in queries
     assert queries[0] == 'scientific agent evaluation'
     assert any('autonomous scientific workflow agents' in query for query in queries)
     assert 'LLM science benchmark' in queries
@@ -5839,8 +5839,8 @@ def test_project_search_queries_use_current_find_artifact_shape(tmp_path, monkey
     state.mkdir(parents=True)
     write_json(planning / 'find_results.json', {
         'stage0_profile': {
-            'profile': {'explicit_profile': {'research_interest_summary': 'taste_smoke_web taste_smoke_web'}},
-            'retrieval_text': 'taste_smoke_web taste_smoke_web Research goal: taste_smoke_web taste_smoke_web The workflow should prioritize papers and ideas that directly help the current research loop.',
+            'profile': {'explicit_profile': {'research_interest_summary': 'demo_project demo_project'}},
+            'retrieval_text': 'demo_project demo_project Research goal: demo_project demo_project The workflow should prioritize papers and ideas that directly help the current research loop.',
         },
         'articles': [
             {'title': 'FlowRL: Matching Reward Distributions for LLM Reasoning'},
@@ -5860,10 +5860,10 @@ def test_project_search_queries_use_current_find_artifact_shape(tmp_path, monkey
         ],
     })
 
-    monkeypatch.setattr(env_stage, 'load_project_config', lambda _project: {'topic': 'taste_smoke_web', 'queries': ['taste_smoke_web']})
+    monkeypatch.setattr(env_stage, 'load_project_config', lambda _project: {'topic': 'demo_project', 'queries': ['demo_project']})
     monkeypatch.setattr(env_stage, 'build_paths', lambda _project: SimpleNamespace(planning=tmp_path / 'planning', reports=reports, state=state))
 
-    queries = env_stage.project_search_queries('taste_smoke_web')
+    queries = env_stage.project_search_queries('demo_project')
 
     assert queries[:4] == [
         'FlowRL: Matching Reward Distributions for LLM Reasoning code dataset',
@@ -5871,7 +5871,7 @@ def test_project_search_queries_use_current_find_artifact_shape(tmp_path, monkey
         'FlowBalance-Align execution plan',
         'FlowBalance-Align: reward distribution matching with game-theoretic preference alignment',
     ]
-    assert all(query != 'taste_smoke_web taste_smoke_web' for query in queries)
+    assert all(query != 'demo_project demo_project' for query in queries)
     assert all('research goal:' not in query.lower() for query in queries)
     assert all('current research loop' not in query.lower() for query in queries)
 
@@ -5961,10 +5961,10 @@ def test_project_search_queries_extract_unquoted_stewardship_phrases(tmp_path, m
     write_json(reports / 'repo_topic_fit_decision.json', {
         'stewardship_memory': 'Search for repositories explicitly related to evaluating autonomous scientific workflow agents, literature discovery, experiment planning, or evidence-grounded paper drafting.'
     })
-    monkeypatch.setattr(env_stage, 'load_project_config', lambda _project: {'topic': 'taste_smoke_web'})
+    monkeypatch.setattr(env_stage, 'load_project_config', lambda _project: {'topic': 'demo_project'})
     monkeypatch.setattr(env_stage, 'build_paths', lambda _project: SimpleNamespace(planning=tmp_path / 'planning', reports=reports, state=state))
 
-    queries = env_stage.project_search_queries('taste_smoke_web')
+    queries = env_stage.project_search_queries('demo_project')
 
     assert queries[:4] == [
         'autonomous scientific workflow agents',

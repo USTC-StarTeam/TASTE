@@ -1651,35 +1651,35 @@ def test_claude_tool_policy_blocks_direct_conda_run_and_mutation():
     spec.loader.exec_module(claude_project_session)
 
     run_reason = claude_project_session.bash_command_tool_policy_issue(
-        "conda run -n taste_smoke_web python3 --version",
-        "taste_smoke_web",
+        "conda run -n sample_project_env python3 --version",
+        "sample_project_env",
         "trajectory",
     )
     assert run_reason == claude_project_session.DIRECT_CONDA_COMMAND_POLICY
     assert "project id" in run_reason
 
     update_reason = claude_project_session.bash_command_tool_policy_issue(
-        "mamba env update -n taste_smoke_web -f environment.yml",
-        "taste_smoke_web",
+        "mamba env update -n sample_project_env -f environment.yml",
+        "sample_project_env",
         "environment",
     )
     assert update_reason == claude_project_session.DIRECT_CONDA_COMMAND_POLICY
 
     pipe_reason = claude_project_session.bash_command_tool_policy_issue(
         "head -1 data.jsonl | python3 -c 'import sys; print(sys.stdin.read())'",
-        "taste_smoke_web",
+        "sample_project_env",
         "experiment-evidence-repair",
     )
     assert pipe_reason == claude_project_session.DIRECT_PYTHON_COMMAND_POLICY
 
     assert not claude_project_session.bash_command_tool_policy_issue(
         "/opt/project/bin/python -m json.tool state/example.json",
-        "taste_smoke_web",
+        "sample_project_env",
         "trajectory",
     )
     assert not claude_project_session.bash_command_tool_policy_issue(
         "python3 -m json.tool state/example.json",
-        "taste_smoke_web",
+        "sample_project_env",
         "trajectory",
     )
 
