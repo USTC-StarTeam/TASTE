@@ -38,20 +38,10 @@ import {
   watchJob,
 } from "./api";
 
-const DEFAULT_CONFIG: Config = {
-  research_interest: "",
-  researcher_profile: "",
-  provider: "openai",
-  base_url: "https://api.openai.com/v1",
-  api_key: "",
-  model: "gpt-4o-mini",
-  temperature: 0.4,
-  llm_roles: {},
+const STANDARD_FIND_DEFAULTS = {
   llm_concurrency: 8,
-  idea_parallel_workers: 2,
   max_fetch_papers: 120,
   max_recommended_papers: 20,
-  max_ideas: 6,
   venue_title_scan_limit: 0,
   venue_title_scan_fraction: 1.0,
   find_recall_count: 1000,
@@ -64,6 +54,20 @@ const DEFAULT_CONFIG: Config = {
   arxiv_max_queries: 3,
   arxiv_per_query_limit: 50,
   arxiv_timeout_sec: 15,
+} as const;
+
+const DEFAULT_CONFIG: Config = {
+  research_interest: "",
+  researcher_profile: "",
+  provider: "openai",
+  base_url: "https://api.openai.com/v1",
+  api_key: "",
+  model: "gpt-4o-mini",
+  temperature: 0.4,
+  llm_roles: {},
+  idea_parallel_workers: 2,
+  max_ideas: 6,
+  ...STANDARD_FIND_DEFAULTS,
   arxiv_categories: ["cs.IR", "cs.LG", "cs.AI"],
   arxiv_queries: [],
   arxiv_start_date: "",
@@ -853,8 +857,12 @@ const TEXT = {
     topSurveyCandidates: "推荐文章",
     noLiteratureSurvey: "当前 Find run 尚未产出可展示的调研验收结果；Find 完成后这里会显示抓取、筛选、评分和推荐计数。",
     recommendationShortfall: "推荐不足",
-    findRunBudget: "Find 运行预算",
-    findBudgetHelp: "这些配置只影响发现阶段的抓取、召回、详情评分和最终推荐展示；默认值来自同一份配置，保存后下次 Find 生效。",
+    findRunBudget: "Find 运行设置",
+    findBudgetHelp: "标准使用只需要设置最终推荐数量和 LLM 并发；会议标题默认全量抓取，召回、详情评分和超时使用标准值。高级预算仅用于测试、限流或异常源保护。",
+    advancedFindSettings: "高级预算",
+    standardFindProfile: "标准配置",
+    restoreStandardFindDefaults: "恢复标准值",
+    findStandardDefaultsApplied: "已填入标准 Find 配置，保存后生效。",
     ideaRunBudget: "想法生成预算",
     ideaBudgetHelp: "这些配置只影响想法阶段；Read/Plan/环境/实验/论文不会读取这里的数量上限。",
     projectRunHistoryHelp: "只显示当前项目的历史运行；run ID 保留用于定位具体产物。",
@@ -869,10 +877,10 @@ const TEXT = {
     finishPlan: "完成",
     planCompleted: "已完成",
     finishPlanConfirm: "完成后页面和 plan.md 将只保留正文，评估/修复过程仍保存在 plans.json 中。确认完成？",
-    fetchLimit: "非会议来源详情预算",
-    fetchLimitHelp: "只用于 arXiv/HuggingFace/GitHub 等非会议来源。会议库默认先全量扫描标题，再由主题筛选和详情评分决定精读候选。",
-    recommendLimit: "推荐文章检查预算",
-    recommendLimitHelp: "发现阶段最终推荐论文的最大数量；召回和详情评分会保留更宽的候选池，最终只展示通过真实摘要和 LLM 评分门控的前 N 篇。",
+    fetchLimit: "非会议来源抓取上限",
+    fetchLimitHelp: "用于 arXiv/bioRxiv 等非会议论文源的初始抓取上限；会议来源不读这个值，会议标题默认按所选会议/年份全量抓取。",
+    recommendLimit: "最终推荐数量",
+    recommendLimitHelp: "Find 最后展示的推荐论文数量；候选召回和详情评分会保留更宽的池子，最终只展示通过真实摘要和 LLM 评分后的前 N 篇。",
     ideaLimit: "想法最大数量",
     ideaLimitHelp: "想法阶段生成的研究想法数量上限。",
     titleScanLimit: "会议标题全扫保护上限",
@@ -881,8 +889,8 @@ const TEXT = {
     titleScanFractionHelp: "对已抓到的会议标题池抽取多少比例，1 表示全扫；只有想省时间时才调低。",
     recallCount: "主题候选保留上限",
     recallCountHelp: "全扫标题后，按主题相关性稳定排序，最多保留多少篇进入详情抓取前的候选池。它不是最终推荐数，也不会作为人类监督列表展示。",
-    detailFetchCount: "非会议详情评分预算",
-    detailFetchCountHelp: "用于 arXiv/Nature/Science/HuggingFace/GitHub 等非会议来源；会议 Find 默认全量扫描会议标题池，再由主题召回和详情评分控制进入精读候选。",
+    detailFetchCount: "详情抓取/评分预算",
+    detailFetchCountHelp: "标题召回后，最多抓取多少候选的摘要/详情并进入最终 LLM 评分；会议标题仍会先全量扫描，这里控制的是昂贵的详情阶段。",
     titleFilterTimeout: "标题筛选单批超时秒数",
     titleFilterTimeoutHelp: "LLM 标题筛选每个批次的最长等待时间。",
     abstractWorkers: "摘要评分最大并发",
@@ -1398,8 +1406,12 @@ const TEXT = {
     topSurveyCandidates: "Recommended papers",
     noLiteratureSurvey: "No current Find audit result is visible yet. Once Find completes, this panel shows retrieval, screening, scoring, and recommended papers.",
     recommendationShortfall: "recommendation shortfall",
-    findRunBudget: "Find Run Budget",
-    findBudgetHelp: "These settings only affect Find retrieval, recall, detail scoring, and final recommendation display. Defaults come from the single saved config and apply to the next Find run.",
+    findRunBudget: "Find Settings",
+    findBudgetHelp: "Standard use only needs the final recommendation count and LLM concurrency. Venue titles are fetched broadly by default; recall, detail scoring, and timeouts use standard values. Advanced budgets are for tests, rate limits, or abnormal sources.",
+    advancedFindSettings: "Advanced budgets",
+    standardFindProfile: "standard profile",
+    restoreStandardFindDefaults: "Restore standards",
+    findStandardDefaultsApplied: "Standard Find settings filled in; save to apply.",
     ideaRunBudget: "Idea Budget",
     ideaBudgetHelp: "These settings only affect Idea generation; Read/Plan/Environment/Experiment/Paper do not read these limits.",
     projectRunHistoryHelp: "Only runs for the current project are shown; run ID is kept for artifact lookup.",
@@ -1414,10 +1426,10 @@ const TEXT = {
     finishPlan: "Finish",
     planCompleted: "Completed",
     finishPlanConfirm: "After finishing, the page and plan.md will keep only the final body. Evaluation/repair history remains in plans.json. Continue?",
-    fetchLimit: "Non-venue detail budget",
-    fetchLimitHelp: "Used for arXiv/HuggingFace/GitHub. Venue libraries scan titles broadly first, then topic filtering and detail scoring choose read candidates.",
-    recommendLimit: "Recommended paper budget",
-    recommendLimitHelp: "Maximum final recommended papers. Find keeps a wider recall/detail pool, then displays only the top N rows that pass real-abstract and LLM scoring gates.",
+    fetchLimit: "Non-venue fetch cap",
+    fetchLimitHelp: "Initial fetch cap for arXiv/bioRxiv-like non-venue paper sources. Venue sources do not use this value; selected venue/year title indexes are fetched broadly by default.",
+    recommendLimit: "Final recommendation count",
+    recommendLimitHelp: "How many papers Find finally displays. Recall and detail scoring keep a wider candidate pool; the page shows only the top N papers after real-abstract LLM scoring.",
     ideaLimit: "Max ideas",
     ideaLimitHelp: "Maximum research ideas generated in the Idea stage.",
     titleScanLimit: "Venue full-scan safety cap",
@@ -1426,8 +1438,8 @@ const TEXT = {
     titleScanFractionHelp: "Fraction of the collected title pool to prefilter. 1 means all, 0.25 means the first 25%.",
     recallCount: "Topic-candidate cap",
     recallCountHelp: "After the full title scan, keep up to this many topic-ranked candidates before detail fetch. It is not a final recommendation count.",
-    detailFetchCount: "Non-venue detail budget",
-    detailFetchCountHelp: "Used for arXiv/Nature/Science/HuggingFace/GitHub. Venue Find scans the venue title pool first, then topic recall and detail scoring decide the reading candidates.",
+    detailFetchCount: "Detail fetch/scoring budget",
+    detailFetchCountHelp: "After title recall, at most this many candidates fetch abstracts/details and enter final LLM scoring. Venue titles are still scanned broadly; this controls the expensive detail stage.",
     titleFilterTimeout: "Title filter timeout (sec)",
     titleFilterTimeoutHelp: "Maximum wait per LLM title-filter batch.",
     abstractWorkers: "Abstract scoring max workers",
@@ -3526,6 +3538,11 @@ function App() {
   function updateConfig<K extends keyof Config>(key: K, value: Config[K]) {
     setConfig((prev) => ({ ...prev, [key]: value }));
     setSaveMessage("");
+  }
+
+  function applyStandardFindDefaults() {
+    setConfig((prev) => ({ ...prev, ...STANDARD_FIND_DEFAULTS }));
+    setSaveMessage(t.findStandardDefaultsApplied);
   }
 
   function toggleNatureJournal(slug: string, checked: boolean) {
@@ -6687,14 +6704,14 @@ function App() {
             <div className="panel findBudgetConfigPanel" data-testid="find-budget-config">
               <h3>{t.findRunBudget}</h3>
               <p className="help">{t.findBudgetHelp}</p>
-              <div className="row"><div><label>{t.fetchLimit}</label><p className="help">{t.fetchLimitHelp}</p><input value={config.max_fetch_papers} onChange={(e) => updateConfig("max_fetch_papers", Number(e.target.value))} type="number" min="1" /></div><div><label>{t.recommendLimit}</label><p className="help">{t.recommendLimitHelp}</p><input value={config.max_recommended_papers} onChange={(e) => updateConfig("max_recommended_papers", Number(e.target.value))} type="number" min="1" /></div></div>
-              <div className="row"><div><label>{t.llmConcurrency}</label><p className="help">{t.llmConcurrencyHelp}</p><input value={config.llm_concurrency} onChange={(e) => updateConfig("llm_concurrency", Math.max(1, Math.min(32, Number(e.target.value))))} type="number" min="1" max="32" /></div><div><label>{t.abstractWorkers}</label><p className="help">{t.abstractWorkersHelp}</p><input value={config.abstract_scoring_max_workers} onChange={(e) => updateConfig("abstract_scoring_max_workers", Math.max(1, Number(e.target.value)))} type="number" min="1" /></div></div>
-              <div className="row"><div><label>{t.titleScanLimit}</label><p className="help">{t.titleScanLimitHelp}</p><input value={config.venue_title_scan_limit} onChange={(e) => updateConfig("venue_title_scan_limit", Math.max(0, Number(e.target.value)))} type="number" min="0" /></div><div><label>{t.titleScanFraction}</label><p className="help">{t.titleScanFractionHelp}</p><input value={config.venue_title_scan_fraction} onChange={(e) => updateConfig("venue_title_scan_fraction", Number(e.target.value))} type="number" min="0.01" max="1" step="0.05" /></div></div>
-              <div className="row"><div><label>{t.recallCount}</label><p className="help">{t.recallCountHelp}</p><input value={config.find_recall_count} onChange={(e) => updateConfig("find_recall_count", Number(e.target.value))} type="number" min="1" /></div><div><label>{t.detailFetchCount}</label><p className="help">{t.detailFetchCountHelp}</p><input value={config.detail_fetch_count} onChange={(e) => updateConfig("detail_fetch_count", Number(e.target.value))} type="number" min="1" /></div></div>
-              <div className="row"><div><label>{t.arxivMaxQueries}</label><p className="help">{t.arxivMaxQueriesHelp}</p><input value={config.arxiv_max_queries} onChange={(e) => updateConfig("arxiv_max_queries", Math.max(1, Number(e.target.value)))} type="number" min="1" /></div><div><label>{t.arxivPerQuery}</label><p className="help">{t.arxivPerQueryHelp}</p><input value={config.arxiv_per_query_limit} onChange={(e) => updateConfig("arxiv_per_query_limit", Math.max(1, Number(e.target.value)))} type="number" min="1" /></div></div>
-              <div className="row"><div><label>{t.arxivTimeout}</label><p className="help">{t.arxivTimeoutHelp}</p><input value={config.arxiv_timeout_sec} onChange={(e) => updateConfig("arxiv_timeout_sec", Math.max(1, Number(e.target.value)))} type="number" min="1" /></div><div><label>{t.titleFilterTimeout}</label><p className="help">{t.titleFilterTimeoutHelp}</p><input value={config.title_filter_timeout_sec} onChange={(e) => updateConfig("title_filter_timeout_sec", Math.max(1, Number(e.target.value)))} type="number" min="1" /></div></div>
-              <div className="row"><div><label>{t.abstractTimeout}</label><p className="help">{t.abstractTimeoutHelp}</p><input value={config.abstract_scoring_timeout_sec} onChange={(e) => updateConfig("abstract_scoring_timeout_sec", Math.max(1, Number(e.target.value)))} type="number" min="1" /></div></div>
-              <div className="saveBar"><button className="primary" onClick={handleSaveConfig} disabled={savingConfig}>{savingConfig ? t.saving : t.saveConfig}</button>{saveMessage && <span>{saveMessage}</span>}</div>
+              <div className="row"><div><label>{t.recommendLimit}</label><p className="help">{t.recommendLimitHelp}</p><input value={config.max_recommended_papers} onChange={(e) => updateConfig("max_recommended_papers", Number(e.target.value))} type="number" min="1" /></div><div><label>{t.llmConcurrency}</label><p className="help">{t.llmConcurrencyHelp}</p><input value={config.llm_concurrency} onChange={(e) => updateConfig("llm_concurrency", Math.max(1, Math.min(32, Number(e.target.value))))} type="number" min="1" max="32" /></div></div>
+              <details className="subPanel collapsiblePanel">
+                <summary><span>{t.advancedFindSettings}</span><small>{t.standardFindProfile}</small></summary>
+                <div className="row"><div><label>{t.fetchLimit}</label><p className="help">{t.fetchLimitHelp}</p><input value={config.max_fetch_papers} onChange={(e) => updateConfig("max_fetch_papers", Number(e.target.value))} type="number" min="1" /></div><div><label>{t.arxivMaxQueries}</label><p className="help">{t.arxivMaxQueriesHelp}</p><input value={config.arxiv_max_queries} onChange={(e) => updateConfig("arxiv_max_queries", Math.max(1, Number(e.target.value)))} type="number" min="1" /></div></div>
+                <div className="row"><div><label>{t.arxivPerQuery}</label><p className="help">{t.arxivPerQueryHelp}</p><input value={config.arxiv_per_query_limit} onChange={(e) => updateConfig("arxiv_per_query_limit", Math.max(1, Number(e.target.value)))} type="number" min="1" /></div><div><label>{t.titleScanLimit}</label><p className="help">{t.titleScanLimitHelp}</p><input value={config.venue_title_scan_limit} onChange={(e) => updateConfig("venue_title_scan_limit", Math.max(0, Number(e.target.value)))} type="number" min="0" /></div></div>
+                <div className="row"><div><label>{t.recallCount}</label><p className="help">{t.recallCountHelp}</p><input value={config.find_recall_count} onChange={(e) => updateConfig("find_recall_count", Number(e.target.value))} type="number" min="1" /></div><div><label>{t.detailFetchCount}</label><p className="help">{t.detailFetchCountHelp}</p><input value={config.detail_fetch_count} onChange={(e) => updateConfig("detail_fetch_count", Number(e.target.value))} type="number" min="1" /></div></div>
+              </details>
+              <div className="saveBar"><button onClick={applyStandardFindDefaults} disabled={savingConfig}>{t.restoreStandardFindDefaults}</button><button className="primary" onClick={handleSaveConfig} disabled={savingConfig}>{savingConfig ? t.saving : t.saveConfig}</button>{saveMessage && <span>{saveMessage}</span>}</div>
             </div>
             <div className="findLayoutSentinel" data-testid="find-source-configs-complete" aria-hidden="true" />
             <div className="findSurveySlot findSurveyAfterConfig" data-testid="find-survey-slot">{renderFindLiteratureSurveyPanel()}</div>
