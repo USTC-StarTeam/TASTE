@@ -23,8 +23,8 @@ http://127.0.0.1:8765
 
 TASTE 区分两类 Python：
 
-- `management_python`：运行 Web、调度、Find、审计等框架脚本。
-- `experiment_python`：运行具体科研项目的训练、评估和仓库脚本。
+- `management_python`：运行 Web、调度、Find、审计等框架脚本；启动网页前就应该可用。
+- `experiment_python`：运行具体科研项目的训练、评估和仓库脚本；不要在首次打开网页时强行配置，等进入 Environment/环境配置阶段后，由项目环境部署流程检测或保存。
 
 两者可以相同，但真实实验建议分离。
 
@@ -97,7 +97,7 @@ scripts/start_web.sh
 脚本会自动构建前端，并使用默认地址 `127.0.0.1:8765`。需要改端口或绑定地址时加环境变量：
 
 ```bash
-WEB_PORT=18765 scripts/start_web.sh
+WEB_PORT=<port> scripts/start_web.sh
 ```
 
 Windows 原生 PowerShell 如果不使用 Git Bash，可用下面的等价启动方式：
@@ -114,24 +114,18 @@ python -m uvicorn auto_research.web.server:app --host 127.0.0.1 --port 8765
 ssh -L 127.0.0.1:8765:127.0.0.1:8765 <user>@<server>
 ```
 
-### 6. 创建或选择项目
-
-首个项目可以直接在网页上创建：打开网页后进入项目区域，填写项目名、研究主题、研究目标和初始检索词，然后保存。
-
-项目会创建在：
+打开网页：
 
 ```text
-projects/my_project/
+127.0.0.1:8765
 ```
 
-每个项目的主题、配置、运行历史和产物都独立保存。
-
-## 网页里需要配置什么
+## 网页配置
 
 第一次打开网页后，按这个顺序配置即可：
 
 1. 项目：选择或创建当前项目，确认研究主题和研究画像。
-2. 运行环境：点击自动检测；检查 `management_python`、`experiment_python`、`node_bin`、`claude_path`。不通过就手动填路径。
+2. 运行环境：点击自动检测；检查 `management_python`、`node_bin`、`claude_path` 等启动工具路径。`experiment_python` 在 Environment/环境配置阶段再根据具体项目环境配置。
 3. LLM：填写 Find 阶段使用的 provider、base URL、model 和 API key。API key 只保存在运行态配置，不提交 Git。
 4. Find 来源：默认全不选；需要会议时先添加会议/年份，需要 arXiv、GitHub、Hugging Face 等非会议来源时再勾选。
 5. Paper：投稿目标只在论文撰写页面配置，不放在全局主题栏。

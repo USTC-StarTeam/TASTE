@@ -12,7 +12,7 @@ cp config.example.json runtime/.config.json
 
 The frontend is built automatically by `scripts/start_web.sh` on first launch.
 
-Set LLM credentials through the web UI or `runtime/.config.json`; environment variables are only startup fallbacks for empty saved fields. Keep credentials out of Git. If your TASTE management environment and experiment/training environment are different, set `MANAGEMENT_PYTHON` and `EXPERIMENT_PYTHON`, or save those paths in the web runtime/environment panels.
+Set LLM credentials through the web UI or `runtime/.config.json`; environment variables are only startup fallbacks for empty saved fields. Keep credentials out of Git. `MANAGEMENT_PYTHON` belongs to the Web/runtime launch environment; configure the experiment/training Python later in the Environment stage for each project.
 
 If you will use the paper-writing module, restore the runtime-only writing references:
 
