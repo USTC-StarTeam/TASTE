@@ -5,6 +5,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -22,6 +23,51 @@ def load_json(path: Path):
 
 def save_json(path: Path, data) -> None:
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _query_placeholder_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _query_looks_like_project_id(value: str, project: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return True
+    return bool(_query_placeholder_key(project) and _query_placeholder_key(text) == _query_placeholder_key(project))
+
+
+def _selected_plan_topic(paths) -> str:
+    plans_path = paths.planning / "finding" / "plans.json"
+    state_path = paths.state / "current_find_research_plan.json"
+    try:
+        plans = json.loads(plans_path.read_text(encoding="utf-8")) if plans_path.exists() else {}
+    except Exception:
+        plans = {}
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+    except Exception:
+        state = {}
+    selected_id = str((plans.get("selected_plan_id") if isinstance(plans, dict) else "") or (state.get("selected_plan_id") if isinstance(state, dict) else "") or "").strip()
+    for row in (plans.get("plans") if isinstance(plans, dict) else []) or []:
+        if not isinstance(row, dict):
+            continue
+        plan_id = str(row.get("plan_id") or row.get("id") or "").strip()
+        if selected_id and plan_id != selected_id:
+            continue
+        for key in ["title", "idea_title", "hypothesis", "experiment_name", "summary"]:
+            value = str(row.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def effective_loop_topic(project: str, args_topic: str | None, prompt: str | None, cfg: dict, paths) -> str:
+    candidates = [prompt, args_topic, cfg.get("topic", ""), cfg.get("title", ""), cfg.get("research_interest", ""), cfg.get("user_prompt", ""), _selected_plan_topic(paths)]
+    for value in candidates:
+        text = str(value or "").strip()
+        if text and not _query_looks_like_project_id(text, project):
+            return text
+    return ""
 
 
 def run(cmd: list[str], log_path: Path, project: str = "", agent_id: str = "main", stage: str = "") -> int:
@@ -103,8 +149,9 @@ def main() -> int:
         guidance_text = "\n".join(f"- {item.get('message', '')}" for item in guidance if item.get("message"))
         args.prompt = ((args.prompt or args.topic or "") + "\n\nQueued web guidance:\n" + guidance_text).strip()
     init_cmd = [sys.executable, str(ROOT / "scripts" / "init_workspace.py"), "--project", args.project, "--conda-env", args.conda_env]
-    if args.topic:
-        init_cmd.extend(["--topic", args.topic])
+    init_topic = args.topic if not _query_looks_like_project_id(args.topic or "", args.project) else ""
+    if init_topic:
+        init_cmd.extend(["--topic", init_topic])
     if args.prompt:
         init_cmd.extend(["--prompt", args.prompt])
     code = run(init_cmd, ROOT / "logs" / f"{args.project}_00_init_workspace.log", args.project, agent_id, "init")
@@ -118,7 +165,7 @@ def main() -> int:
         "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
         "project": args.project,
         "prompt": args.prompt or "",
-        "topic": args.topic or cfg.get("topic", ""),
+        "topic": effective_loop_topic(args.project, args.topic, args.prompt, cfg, paths),
         "iterations": args.iterations,
         "coding_backend": args.coding_backend or cfg.get("coding_agent", {}).get("backend", ""),
     }
@@ -132,9 +179,11 @@ def main() -> int:
         mark_agent(args.project, agent_id, "done", current_step="request recorded; no iterations requested")
         return 0
 
-    topic = args.prompt or args.topic or cfg.get("queries", [cfg.get("topic", "research")])[0]
+    topic = effective_loop_topic(args.project, args.topic, args.prompt, cfg, paths)
     for idx in range(args.iterations):
-        run_cmd = [sys.executable, str(ROOT / "scripts" / "run_project.py"), "--project", args.project, "--topic", topic]
+        run_cmd = [sys.executable, str(ROOT / "scripts" / "run_project.py"), "--project", args.project]
+        if topic:
+            run_cmd.extend(["--topic", topic])
         if args.max_results is not None:
             run_cmd.extend(["--max-results", str(args.max_results)])
         if args.discover_retries is not None:

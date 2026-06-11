@@ -468,6 +468,27 @@ function dedupeVenueIdsByIdentity(venueIds: string[], venueById: Map<string, Ven
   });
 }
 
+function normalizedVenueIdKey(value: any) {
+  return normalizeVenueIdentityText(value).replace(/[_-](19|20)\d{2}$/, "");
+}
+
+function venueComparableKeys(venueId: any, venueById: Map<string, Venue>) {
+  const id = String(venueId || "").trim();
+  const keys = new Set<string>();
+  const idKey = normalizedVenueIdKey(id);
+  if (idKey) keys.add(`id:${idKey}`);
+  const venue = venueById.get(id) || CORE_VENUE_FALLBACKS[id];
+  const identityKey = venueIdentityKey(venue, id);
+  if (identityKey) keys.add(`venue:${identityKey}`);
+  return keys;
+}
+
+function venueYearComparableKeys(venueId: any, year: any, venueById: Map<string, Venue>) {
+  const yearNumber = Number(year);
+  const yearKey = Number.isInteger(yearNumber) ? String(yearNumber) : String(year || "").trim();
+  return Array.from(venueComparableKeys(venueId, venueById)).map((key) => `${key}:${yearKey}`);
+}
+
 function sameStringArray(left: string[], right: string[]) {
   return left.length === right.length && left.every((item, index) => item === right[index]);
 }
@@ -3953,19 +3974,25 @@ function App() {
   const readCandidatesStillSyncing = Boolean(!currentReadings.length && expectedReadCandidateCount > 0 && (!readResultsArtifact || currentFindArtifactLoading || (useCurrentFindPacket && readCandidatePool.length === 0)));
   const hasSurveyCandidates = retrievalPool.length > 0 || readCandidatePool.length > 0 || readCandidatesStillSyncing || expectedReadCandidateCount > 0 || Number(literatureCounts.evaluated || 0) > 0 || Number(literatureCounts.arxivCandidates || 0) > 0 || (!viewingActiveIncompleteFindRun && Number(researchLiteratureCounts.survey_candidates || 0) > 0);
   const venueHealthSourceStatus = useMemo(() => {
+    const byId = new Map(venues.map((venue) => [venue.id, venue]));
     const selectedPairs = venueYearPairs(selectedVenues, selectedVenueYears);
-    const selectedPairKeys = new Set(selectedPairs.map((pair) => `${pair.venue_id}:${pair.year}`));
-    const selectedIds = new Set(selectedVenues);
+    const selectedPairKeys = new Set(selectedPairs.flatMap((pair) => venueYearComparableKeys(pair.venue_id, pair.year, byId)));
+    const selectedIdKeys = new Set(selectedVenues.flatMap((id) => Array.from(venueComparableKeys(id, byId))));
     const explicitRows = venueHealthStatusRows.filter((row: any) => {
-      const rowKey = `${row?.venue_id || ""}:${row?.year || ""}`;
       const rowVenueId = String(row?.venue_id || "");
-      return selectedPairKeys.size ? selectedPairKeys.has(rowKey) : !selectedIds.size || selectedIds.has(rowVenueId);
+      const rowPairKeys = venueYearComparableKeys(rowVenueId, row?.year, byId);
+      if (selectedPairKeys.size) return rowPairKeys.some((key) => selectedPairKeys.has(key));
+      if (!selectedIdKeys.size) return true;
+      return Array.from(venueComparableKeys(rowVenueId, byId)).some((key) => selectedIdKeys.has(key));
     });
     if (explicitRows.length) return explicitRows;
-    const byId = new Map(venues.map((venue) => [venue.id, venue]));
     const ids = selectedVenues.length ? selectedVenues : Object.keys(venueHealth);
     return ids.map((id) => {
-      const health = venueHealth[id];
+      const idKeys = venueComparableKeys(id, byId);
+      const matched = venueHealth[id]
+        ? [id, venueHealth[id]] as const
+        : Object.entries(venueHealth).find(([healthId]) => Array.from(venueComparableKeys(healthId, byId)).some((key) => idKeys.has(key)));
+      const health = matched?.[1];
       if (!health) return null;
       const venue = byId.get(id) || CORE_VENUE_FALLBACKS[id];
       return {
@@ -5421,13 +5448,22 @@ function App() {
         };
       });
       for (const result of response.results) {
-        const current = next[result.venue_id];
-        next[result.venue_id] = {
-          ok: Boolean(current?.ok || result.ok),
-          message: result.message,
-          source_adapter: result.source_adapter,
-          sample_count: (current?.sample_count || 0) + result.sample_count,
-        };
+        const resultKeys = venueComparableKeys(result.venue_id, byId);
+        const matchingSelectedIds = selectedVenues.filter((id) => {
+          const sameVenue = Array.from(venueComparableKeys(id, byId)).some((key) => resultKeys.has(key));
+          const sameYear = !result.year || yearsForVenue(selectedVenueYears, id).includes(Number(result.year));
+          return sameVenue && sameYear;
+        });
+        const targetIds = Array.from(new Set([result.venue_id, ...matchingSelectedIds].filter(Boolean)));
+        for (const targetId of targetIds) {
+          const current = next[targetId];
+          next[targetId] = {
+            ok: Boolean(current?.ok || result.ok),
+            message: result.message,
+            source_adapter: result.source_adapter,
+            sample_count: (current?.sample_count || 0) + result.sample_count,
+          };
+        }
       }
       setVenueHealthStatusRows(statusRows);
       setVenueHealth((prev) => ({ ...prev, ...next }));

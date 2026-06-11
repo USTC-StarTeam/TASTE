@@ -5,6 +5,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import selectors
 import shlex
 import shutil
@@ -126,7 +127,66 @@ def load_literature_plan(paths) -> dict:
         return {}
 
 
-def planned_discovery_queries(cfg: dict, paths, fallback_topic: str, max_queries: int = 6) -> list[str]:
+def _query_placeholder_key(value: str) -> str:
+    return re.sub(r'[^a-z0-9]+', '', str(value or '').lower())
+
+
+def _query_looks_like_project_id(value: str, project: str) -> bool:
+    text = str(value or '').strip()
+    if not text:
+        return True
+    project_key = _query_placeholder_key(project)
+    text_key = _query_placeholder_key(text)
+    return bool(project_key and text_key == project_key)
+
+
+def selected_plan_topic(paths) -> str:
+    plans_path = paths.planning / 'finding' / 'plans.json'
+    state_path = paths.state / 'current_find_research_plan.json'
+    try:
+        plans_payload = json.loads(plans_path.read_text(encoding='utf-8')) if plans_path.exists() else {}
+    except Exception:
+        plans_payload = {}
+    try:
+        state_payload = json.loads(state_path.read_text(encoding='utf-8')) if state_path.exists() else {}
+    except Exception:
+        state_payload = {}
+    selected_id = str(
+        (plans_payload.get('selected_plan_id') if isinstance(plans_payload, dict) else '')
+        or (state_payload.get('selected_plan_id') if isinstance(state_payload, dict) else '')
+        or ''
+    ).strip()
+    for row in (plans_payload.get('plans') if isinstance(plans_payload, dict) else []) or []:
+        if not isinstance(row, dict):
+            continue
+        plan_id = str(row.get('plan_id') or row.get('id') or '').strip()
+        if selected_id and plan_id != selected_id:
+            continue
+        for key in ['title', 'idea_title', 'hypothesis', 'experiment_name', 'summary']:
+            value = str(row.get(key) or '').strip()
+            if value:
+                return value
+    return ''
+
+
+def effective_project_topic(project: str, args_topic: str | None, cfg: dict, paths) -> str:
+    candidates = [
+        args_topic,
+        cfg.get('topic') if isinstance(cfg, dict) else '',
+        cfg.get('title') if isinstance(cfg, dict) else '',
+        cfg.get('research_interest') if isinstance(cfg, dict) else '',
+        cfg.get('user_prompt') if isinstance(cfg, dict) else '',
+        selected_plan_topic(paths),
+        'research',
+    ]
+    for value in candidates:
+        text = str(value or '').strip()
+        if text and not _query_looks_like_project_id(text, project):
+            return text
+    return 'research'
+
+
+def planned_discovery_queries(cfg: dict, paths, fallback_topic: str, max_queries: int = 6, project: str = '') -> list[str]:
     plan = load_literature_plan(paths)
     values = list(plan.get('queries', []) or []) + list(cfg.get('queries', []) or []) + [fallback_topic]
     out = []
@@ -134,12 +194,13 @@ def planned_discovery_queries(cfg: dict, paths, fallback_topic: str, max_queries
     for value in values:
         text = str(value or '').strip()
         key = text.lower()
-        if text and key not in seen:
-            seen.add(key)
-            out.append(text)
+        if not text or key in seen or _query_looks_like_project_id(text, project):
+            continue
+        seen.add(key)
+        out.append(text)
         if len(out) >= max_queries:
             break
-    return out or [fallback_topic]
+    return out or [fallback_topic or 'research']
 
 
 def read_parallel_methods(paths) -> list[dict]:
@@ -852,7 +913,7 @@ def execute_parallel_plan(args: argparse.Namespace, cfg: dict, paths, script_dir
             else:
                 bootstrap_cmd = [
                     sys.executable, str(script_dir / 'bootstrap_repo_env.py'), '--project', args.project,
-                    '--repo-path', repo_path, '--env-name', env_name, '--auto-install-missing',
+                    '--repo-path', repo_path, '--env-name', env_name, '--verify-only',
                 ]
                 if not args.real_bootstrap_env:
                     bootstrap_cmd.append('--prepare-only')
@@ -1054,7 +1115,7 @@ def main() -> int:
     cfg = load_project_config(args.project)
     paths = build_paths(args.project)
 
-    topic = args.topic or cfg.get('queries', [cfg.get('topic', 'research')])[0]
+    topic = effective_project_topic(args.project, args.topic, cfg, paths)
     max_results = args.max_results or cfg.get('discovery', {}).get('arxiv', {}).get('max_results', 5)
     discover_retries = args.discover_retries if args.discover_retries is not None else cfg.get('loop', {}).get('discover_retries', 1)
     script_dir = Path(__file__).resolve().parent
@@ -1077,7 +1138,7 @@ def main() -> int:
         run([sys.executable, str(script_dir / 'plan_literature_review.py'), '--project', args.project], paths.root, paths.logs / '01d_plan_literature_review.log')
         cfg = load_project_config(args.project)
         source_selection = canonical_source_selection()
-        queries = planned_discovery_queries(cfg, paths, topic, max_queries=int(cfg.get('discovery', {}).get('max_planned_queries', 6) or 6))
+        queries = planned_discovery_queries(cfg, paths, topic, max_queries=int(cfg.get('discovery', {}).get('max_planned_queries', 6) or 6), project=args.project)
         arxiv_enabled = bool(source_selection.get('include_arxiv')) and not args.skip_arxiv
         if arxiv_enabled:
             for index, query in enumerate(queries, start=1):
@@ -1179,7 +1240,7 @@ def main() -> int:
     run([sys.executable, str(script_dir / 'audit_paper_evidence.py'), '--project', args.project] + (['--venue', args.venue] if args.venue else []), paths.root, paths.logs / '13e_paper_evidence_gate.log')
     run([sys.executable, str(script_dir / 'build_blocker_action_plan.py'), '--project', args.project] + (['--venue', args.venue] if args.venue else []), paths.root, paths.logs / '13f_blocker_action_plan.log')
     if not args.skip_llm:
-        run([sys.executable, str(script_dir / 'run_llm_research_team.py'), '--project', args.project, '--topic', topic, '--context-limit', '18000'] + (['--venue', args.venue] if args.venue else []), paths.root, paths.logs / '13c_llm_research_team_postreflect.log', timeout=llm_team_timeout(cfg))
+        run([sys.executable, str(script_dir / 'run_llm_research_team.py'), '--project', args.project, '--topic', topic, '--roles', 'planner,researcher,critic', '--context-limit', '18000'] + (['--venue', args.venue] if args.venue else []), paths.root, paths.logs / '13c_llm_research_team_postreflect.log', timeout=llm_team_timeout(cfg))
     run([sys.executable, str(script_dir / 'compile_prompt.py'), '--project', args.project], paths.root, paths.logs / '14_recompile_prompt.log')
     export_code = run([sys.executable, str(script_dir / 'export_obsidian.py'), '--project', args.project], paths.root, paths.logs / '15_export_obsidian.log')
     status_code = run([sys.executable, str(script_dir / 'report_status.py'), '--project', args.project], paths.root, paths.logs / '16_status.log')

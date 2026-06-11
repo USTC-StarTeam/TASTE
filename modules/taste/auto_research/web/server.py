@@ -37,7 +37,7 @@ from auto_research.models import AppConfig, EmailJobRequest, FindRequest, IdeaPa
 from auto_research.source_selection import canonical_source_selection, normalize_source_selection, save_canonical_source_selection, project_config_path
 from auto_research.paths import CONFIG_PATH, RUNS_DIR, STATE_DIR, ensure_directories
 from auto_research.storage import delete_run, list_runs, read_json, redacted_config, run_dir, write_json
-from auto_research.web.project_bridge import action_gate_blocker, job_stage, create_project_config, detect_runtime_config, list_projects as list_projects, project_summary, run_action, runtime_status, update_project_config, update_runtime_config
+from auto_research.web.project_bridge import action_gate_blocker, job_stage, create_project_config, detect_runtime_config, list_projects as list_projects, project_summary, run_action, runtime_status, update_project_config, update_runtime_config, _cleruntime_caches
 from paper_common import get_active_paper_state
 
 
@@ -3012,6 +3012,100 @@ def _write_current_find_markdown(directory: Path, find_results: dict[str, Any]) 
         (directory / "critique_candidates.md").write_text(paper_markdown(critique, "Critique Candidates"), encoding="utf-8")
 
 
+
+def _parse_last_json_object_from_lines(lines: list[str]) -> dict[str, Any]:
+    joined = "\n".join(lines)
+    for start in [idx for idx, char in enumerate(joined) if char == "{"][-16:]:
+        try:
+            candidate = json.loads(joined[start:])
+        except Exception:
+            continue
+        if isinstance(candidate, dict):
+            return candidate
+    return {}
+
+
+def _script_pythonpath_env(env: dict[str, str]) -> None:
+    py_entries = [str(WORKSPACE_ROOT / "modules" / "taste"), str(WORKSPACE_ROOT), str(WORKSPACE_ROOT / "scripts")]
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    if existing_pythonpath:
+        py_entries.extend(item for item in existing_pythonpath.split(os.pathsep) if item)
+    seen_py: set[str] = set()
+    env["PYTHONPATH"] = os.pathsep.join(item for item in py_entries if not (item in seen_py or seen_py.add(item)))
+
+
+def _run_current_find_full_text_evidence_repair(project: str, root: Path, log: Callable[[str], None], should_cancel: Callable[[], bool], progress: Callable[[str, int, int, str], None]) -> dict[str, Any]:
+    progress("full_text_evidence_repair", 0, 1, "正在补抓当前 Find 推荐论文全文证据。")
+    management_python = os.environ.get("MANAGEMENT_PYTHON") or sys.executable
+    script = WORKSPACE_ROOT / "scripts" / "repair_current_find_full_text_evidence.py"
+    cmd = [management_python, str(script), "--project", project, "--force"]
+    env = os.environ.copy()
+    env["WORKSPACE_ROOT"] = str(WORKSPACE_ROOT)
+    env["PROJECT_ID"] = project
+    env["DEFAULT_PROJECT_ID"] = project
+    env.setdefault("MANAGEMENT_PYTHON", management_python)
+    _script_pythonpath_env(env)
+    log("Delegating current Find full-text evidence repair to wrapper: " + " ".join(cmd))
+    proc = subprocess.Popen(cmd, cwd=str(WORKSPACE_ROOT), env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1)
+    output_lines: list[str] = []
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            if line:
+                output_lines.append(line)
+                log(line[:1200])
+            if should_cancel():
+                proc.terminate()
+                raise JobCancelled("Task cancelled by user.")
+        rc = proc.wait(timeout=5)
+    except JobCancelled:
+        raise
+    except Exception:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        raise
+
+    receipt = _parse_last_json_object_from_lines(output_lines)
+    if not receipt:
+        saved_receipt = _read_project_json(root / "state" / "current_find_full_text_evidence_repair.json", {})
+        if isinstance(saved_receipt, dict):
+            receipt = saved_receipt
+    status = str((receipt if isinstance(receipt, dict) else {}).get("status") or "").strip()
+    acquired_count = int((receipt if isinstance(receipt, dict) else {}).get("acquired_count") or 0)
+    unavailable_count = int((receipt if isinstance(receipt, dict) else {}).get("unavailable_count") or 0)
+    pending_after = (receipt if isinstance(receipt, dict) else {}).get("pending_after_repair")
+    if not isinstance(pending_after, list):
+        pending_after = []
+    ok_codes = {0, 2}
+    if rc not in ok_codes:
+        progress("full_text_evidence_repair_failed", 1, 1, status or f"全文证据修复脚本失败，退出码 {rc}")
+        return {
+            "status": status or "full_text_evidence_repair_failed",
+            "returncode": rc,
+            "project": project,
+            "receipt": receipt,
+            "stdout_tail": output_lines[-40:],
+        }
+    if pending_after or unavailable_count:
+        message = f"全文证据修复部分完成：已取得 {acquired_count} 篇，仍缺 {len(pending_after) or unavailable_count} 篇。"
+        progress("full_text_evidence_blocked", 1, 1, message)
+    else:
+        message = f"全文证据修复完成：已取得 {acquired_count} 篇。"
+        progress("full_text_evidence_repair", 1, 1, message)
+    return {
+        "status": status or ("partial_full_text_evidence_repair" if rc == 2 else "done"),
+        "returncode": rc,
+        "project": project,
+        "acquired_count": acquired_count,
+        "unavailable_count": unavailable_count,
+        "pending_after_repair": pending_after,
+        "receipt": receipt,
+        "stdout_tail": output_lines[-40:],
+    }
+
 def _repair_current_find_translations(log: Callable[[str], None], should_cancel: Callable[[], bool], progress: Callable[[str, int, int, str], None]) -> dict[str, Any]:
     current = _current_project_for_find_guard()
     if not current:
@@ -3117,8 +3211,15 @@ def _repair_current_find_translations(log: Callable[[str], None], should_cancel:
         log(f"Current Find downstream artifacts reset after recommendation repair: {downstream_reset}")
     _clerun_caches(run_id)
     progress("abstract_translation_repair", len(missing_before), max(1, len(missing_before)), f"推荐摘要翻译修复完成，剩余 {len(missing_after)} 篇")
+    full_text_repair = _run_current_find_full_text_evidence_repair(project, root, log, should_cancel, progress)
+    full_text_status = str(full_text_repair.get("status") or "").strip()
+    full_text_returncode = int(full_text_repair.get("returncode") or 0)
+    full_text_complete = full_text_returncode == 0 and full_text_status in {"repaired_full_text_evidence", "no_pending_full_text_evidence_gap", "done"}
+    overall_status = "done" if not missing_after and full_text_complete else "partial"
+    if full_text_returncode not in {0, 2}:
+        overall_status = "blocked_full_text_evidence_repair_failed"
     return {
-        "status": "done" if not missing_after else "partial",
+        "status": overall_status,
         "raw_stage": "find-repair-current",
         "project": project,
         "run_id": run_id,
@@ -3130,6 +3231,7 @@ def _repair_current_find_translations(log: Callable[[str], None], should_cancel:
         "projection_missing": len(projection.get("missing_recommendation_abstract_zh") or []),
         "reprojection": reproject_receipt,
         "downstream_reset": downstream_reset,
+        "full_text_repair": full_text_repair,
         "artifact_dir": str(directory),
     }
 
@@ -7239,6 +7341,8 @@ def start_job(stage: str, fn: Callable[[Callable[[str], None], Callable[[], bool
                 job.status = "blocked"
             elif result_status == "running":
                 job.status = "running"
+            elif result_status in {"done", "complete", "completed", "success", "ok"}:
+                job.status = "done"
             else:
                 result_summary = job.result.get("summary", {}) if isinstance(job.result, dict) else {}
                 if isinstance(result_summary, dict):
@@ -7399,6 +7503,7 @@ def _record_project_venue_health(project: str, results: list[dict[str, Any]]) ->
         "results": results,
     }
     write_json(root / "state" / "venue_health_status.json", payload)
+    _cleruntime_caches(project_id)
 
 
 def _venue_health_timeout_sec() -> float:

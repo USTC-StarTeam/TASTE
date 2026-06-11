@@ -128,6 +128,10 @@ def repo_has_editable_package(repo: Path) -> bool:
     return setup_py.exists() and setup_py_declares_package(setup_py)
 
 
+def verification_steps(env_name: str) -> list[list[str]]:
+    return [['run', '-n', env_name, 'python', '-c', 'import torch, scipy, numpy, yaml; print("imports-ok"); print("cuda", torch.cuda.is_available())']]
+
+
 def infer_install_steps(repo: Path, env_name: str, python_version: str, accelerator: dict, conda_exe: str = '') -> list[list[str]]:
     channels = infer_channels(accelerator)
     py_spec = f'python={python_version}' if python_version else 'python=3.10'
@@ -147,7 +151,7 @@ def infer_install_steps(repo: Path, env_name: str, python_version: str, accelera
         if repo_has_editable_package(repo):
             steps.append(['run', '-n', env_name, 'python', '-m', 'pip', 'install', '-e', str(repo)])
     # Verify imports needed by the repo loader. CUDA availability is informative, not a hard gate for dataset probing.
-    steps.append(['run', '-n', env_name, 'python', '-c', 'import torch, scipy, numpy, yaml; print("imports-ok"); print("cuda", torch.cuda.is_available())'])
+    steps.extend(verification_steps(env_name))
     return steps
 
 
@@ -285,6 +289,7 @@ def main() -> None:
     parser.add_argument('--prepare-only', action='store_true')
     parser.add_argument('--update-project-config', action='store_true')
     parser.add_argument('--auto-install-missing', action='store_true')
+    parser.add_argument('--verify-only', action='store_true', help='Only verify an existing environment; never create envs or install packages.')
     args = parser.parse_args()
 
     cfg = load_project_config(args.project)
@@ -308,7 +313,11 @@ def main() -> None:
     if not conda_exe and not choose_downloader(machine):
         missing_runtime_tools.append('curl_or_wget')
 
-    steps = infer_install_steps(repo, env_name, python_version, accelerator, conda_exe) if conda_exe else []
+    env_exists = conda_env_exists(conda_exe, env_name) if conda_exe else False
+    if args.verify_only:
+        steps = verification_steps(env_name) if conda_exe and env_exists else []
+    else:
+        steps = infer_install_steps(repo, env_name, python_version, accelerator, conda_exe) if conda_exe else []
     out_json = paths.state / 'repo_env_bootstrap.json'
     out_md = paths.reports / 'repo_env_bootstrap.md'
     payload = {
@@ -321,11 +330,13 @@ def main() -> None:
         'detected_cuda': accelerator.get('cuda_version', '') if isinstance(accelerator, dict) else '',
         'prepare_only': args.prepare_only,
         'auto_install_missing': args.auto_install_missing,
+        'verify_only': args.verify_only,
+        'env_exists': env_exists,
         'auto_installed_local_conda': auto_installed,
         'missing_runtime_tools': missing_runtime_tools,
         'steps': [' '.join(conda_cmd(conda_exe, step)) for step in steps] if conda_exe else [],
         'executed': [],
-        'status': 'prepared' if conda_exe else 'blocked',
+        'status': 'blocked' if args.verify_only and conda_exe and not env_exists else ('prepared' if conda_exe else 'blocked'),
     }
 
     lines = [
@@ -337,6 +348,8 @@ def main() -> None:
         f"- detected_backend: {payload['detected_backend']}\n",
         f"- detected_cuda: {payload['detected_cuda']}\n",
         f'- auto_install_missing: {args.auto_install_missing}\n',
+        f'- verify_only: {args.verify_only}\n',
+        f'- env_exists: {env_exists}\n',
         '- portability rule: adapt to the detected machine profile rather than assuming a fixed GPU model, CUDA version, package manager, or conda base path.\n',
         '- install strategy: repo-first-adaptive using conda with verification commands after installation.\n\n',
     ]
@@ -344,13 +357,17 @@ def main() -> None:
     if not conda_exe:
         lines.append('## Blockers\n')
         lines.append('- conda runtime is not currently available.\n')
-        lines.append(f'- remediation: `python3 scripts/bootstrap_repo_env.py --project {args.project} --repo-path {repo} --prepare-only --auto-install-missing`\n')
+        lines.append(f'- remediation: install/configure conda externally, then run `python3 scripts/bootstrap_repo_env.py --project {args.project} --repo-path {repo} --verify-only --prepare-only`\n')
+    elif args.verify_only and not env_exists:
+        lines.append('## Blockers\n')
+        lines.append(f'- configured environment `{env_name}` does not exist; TASTE will not create or mutate environments automatically.\n')
+        lines.append('- remediation: create/configure the environment outside TASTE, or run bootstrap explicitly without `--verify-only` if you intentionally want repo dependency installation.\n')
     else:
         lines.append('## Planned Steps\n')
         for step in steps:
             lines.append(f"- `{' '.join(conda_cmd(conda_exe, step))}`\n")
 
-    if not args.prepare_only and conda_exe:
+    if not args.prepare_only and conda_exe and (not args.verify_only or env_exists):
         payload['status'] = 'running'
         python_pip_checked = False
         for step in steps:
@@ -379,7 +396,7 @@ def main() -> None:
             if proc.returncode != 0:
                 combined = (proc.stdout or '') + '\n' + (proc.stderr or '')
                 missing_import = missing_import_from_output(combined)
-                if missing_import:
+                if missing_import and args.auto_install_missing:
                     install_proc = install_missing_import(conda_exe, env_name, missing_import)
                     if install_proc is not None:
                         package = IMPORT_TO_PACKAGE.get(missing_import, missing_import)

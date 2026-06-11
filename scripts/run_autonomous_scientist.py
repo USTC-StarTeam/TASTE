@@ -480,7 +480,7 @@ def main() -> int:
     append_trace(paths, trace, 'repo_data_requirements', return_code=rc)
 
     env_name = f"{slugify(args.project)}_{slugify(repo_path.name)}"
-    bootstrap = ['scripts/bootstrap_repo_env.py', '--project', args.project, '--repo-path', str(repo_path), '--env-name', env_name, '--auto-install-missing']
+    bootstrap = ['scripts/bootstrap_repo_env.py', '--project', args.project, '--repo-path', str(repo_path), '--env-name', env_name, '--verify-only']
     bootstrap.append('--update-project-config' if args.real_bootstrap_env else '--prepare-only')
     rc = run_project_cmd(bootstrap, timeout=900)
     append_trace(paths, trace, 'environment_bootstrap', return_code=rc, mode='real' if args.real_bootstrap_env else 'prepare-only')
@@ -526,7 +526,7 @@ def main() -> int:
     if real_dataset:
         bootstrap_state = load_json(paths.state / 'repo_env_bootstrap.json', {})
         if bootstrap_state.get('status') != 'completed':
-            install_rc = run_project_cmd(['scripts/bootstrap_repo_env.py', '--project', args.project, '--repo-path', str(repo_path), '--env-name', env_name, '--auto-install-missing', '--update-project-config'], timeout=1800)
+            install_rc = run_project_cmd(['scripts/bootstrap_repo_env.py', '--project', args.project, '--repo-path', str(repo_path), '--env-name', env_name, '--verify-only', '--update-project-config'], timeout=1800)
             append_trace(paths, trace, 'environment_bootstrap_before_real_experiment', return_code=install_rc, mode='real-required-for-real-data')
             bootstrap_state = load_json(paths.state / 'repo_env_bootstrap.json', {})
             if bootstrap_state.get('status') != 'completed':

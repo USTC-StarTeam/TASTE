@@ -687,7 +687,7 @@ def main() -> int:
         print(bootstrap_reason, flush=True)
     else:
         print(bootstrap_reason, flush=True)
-        bootstrap = [sys.executable, 'scripts/bootstrap_repo_env.py', '--project', args.project, '--repo-path', repo, '--env-name', env_name, '--auto-install-missing']
+        bootstrap = [sys.executable, 'scripts/bootstrap_repo_env.py', '--project', args.project, '--repo-path', repo, '--env-name', env_name, '--verify-only']
         if args.real_bootstrap_env:
             bootstrap.append('--update-project-config')
         else:

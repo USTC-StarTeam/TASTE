@@ -181,6 +181,34 @@ def test_venue_health_check_updates_project_source_status(monkeypatch, tmp_path)
     assert rows and rows[0]["venue_id"] == "openreview_iclr_2026"
 
 
+def test_venue_health_rows_match_year_specific_and_base_venue_ids(tmp_path):
+    from auto_research.web import project_bridge
+
+    project = "demo_health_alias"
+    root = tmp_path / project
+    (root / "state").mkdir(parents=True)
+    write_json(root / "state" / "venue_health_status.json", {
+        "source_status": [{
+            "source": "ICLR 2026",
+            "source_kind": "venue_health",
+            "venue_id": "openreview_iclr",
+            "venue": "ICLR",
+            "year": 2026,
+            "status": "ok",
+            "ok": True,
+            "sample_count": 1,
+        }]
+    })
+
+    rows = project_bridge._current_health_check_source_status_rows(
+        project,
+        root,
+        {"venue_ids": ["openreview_iclr_2026"], "years": [2026], "venue_years": [{"venue_id": "openreview_iclr_2026", "year": 2026}]},
+    )
+
+    assert rows and rows[0]["venue_id"] == "openreview_iclr"
+
+
 def test_hollow_done_find_without_run_id_is_hidden_from_taskbar():
     item = {
         "job_id": "find_empty",
@@ -298,6 +326,83 @@ def test_run_frontend_reports_half_year_arxiv_window_by_default():
 
     assert "DEFAULT_ARXIV_WINDOW_DAYS = 180" in source
     assert "secondary_window_days" not in source[source.index("arxiv_window_days = env_int"):source.index("venue_scan_limit = env_int")]
+
+
+def test_run_project_bounds_postreflect_llm_research_team_roles():
+    source = (Path(__file__).resolve().parents[3] / "scripts" / "run_project.py").read_text(encoding="utf-8")
+    assert "13c_llm_research_team_postreflect.log" in source
+    postreflect_block = source.split("13c_llm_research_team_postreflect.log", 1)[0][-360:]
+    assert "--roles" in postreflect_block
+    assert "planner,researcher,critic" in postreflect_block
+
+
+def test_run_loop_topic_ignores_project_id_placeholder(tmp_path):
+    import importlib.util
+    from types import SimpleNamespace
+
+    script_path = Path(__file__).resolve().parents[3] / "scripts" / "run_loop.py"
+    spec = importlib.util.spec_from_file_location("run_loop_topic_under_test", script_path)
+    run_loop = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(run_loop)
+
+    planning = tmp_path / "planning"
+    state = tmp_path / "state"
+    (planning / "finding").mkdir(parents=True)
+    state.mkdir()
+    write_json(planning / "finding" / "plans.json", {
+        "selected_plan_id": "plan-1",
+        "plans": [{"plan_id": "plan-1", "title": "Selected current Find experiment plan"}],
+    })
+    paths = SimpleNamespace(planning=planning, state=state)
+
+    topic = run_loop.effective_loop_topic("taste_smoke_web", "taste_smoke_web", "", {"topic": "taste_smoke_web"}, paths)
+
+    assert topic == "Selected current Find experiment plan"
+
+
+def test_run_project_topic_ignores_project_id_placeholder(tmp_path):
+    import importlib.util
+    from types import SimpleNamespace
+
+    script_path = Path(__file__).resolve().parents[3] / "scripts" / "run_project.py"
+    spec = importlib.util.spec_from_file_location("run_project_topic_under_test", script_path)
+    run_project = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(run_project)
+
+    planning = tmp_path / "planning"
+    state = tmp_path / "state"
+    (planning / "finding").mkdir(parents=True)
+    state.mkdir()
+    write_json(planning / "finding" / "plans.json", {
+        "selected_plan_id": "plan-1",
+        "plans": [{"plan_id": "plan-1", "title": "Evidence grounded paper agent benchmark"}],
+    })
+    paths = SimpleNamespace(planning=planning, state=state)
+    cfg = {"topic": "taste_smoke_web", "queries": ["taste_smoke_web"]}
+
+    topic = run_project.effective_project_topic("taste_smoke_web", "", cfg, paths)
+    queries = run_project.planned_discovery_queries(cfg, paths, topic, project="taste_smoke_web")
+
+    assert topic == "Evidence grounded paper agent benchmark"
+    assert queries == ["Evidence grounded paper agent benchmark"]
+
+
+def test_experiment_command_skips_discovery_by_default(tmp_path, monkeypatch):
+    from auto_research.web import project_bridge
+
+    project = "demo_project"
+    (tmp_path / project).mkdir(parents=True)
+    monkeypatch.setattr(project_bridge, "PROJECTS", tmp_path)
+    monkeypatch.setattr(project_bridge, "management_python", lambda: "/py")
+    monkeypatch.setattr(project_bridge, "_literature_recommendation_gate_is_blocked", lambda _project: False)
+    monkeypatch.setattr(project_bridge, "_fresh_base_data_is_blocked", lambda _project: False)
+
+    _, cmd = project_bridge.build_command({"project": project, "action": "experiment", "venue": "ICLR"})
+
+    assert "--skip-discovery" in cmd
+    assert "--topic" not in cmd
 
 
 def test_default_find_selection_does_not_enable_arxiv():
@@ -2110,6 +2215,110 @@ def test_full_text_repair_replaces_stale_packet_before_first_attempt(monkeypatch
     assert packet["run_id"] == "find_new"
     assert packet["previous_packet_run_id"] == "find_old"
     assert packet["papers"][0]["title"] == "Paper One"
+
+
+def test_web_find_repair_runs_full_text_evidence_script(monkeypatch, tmp_path):
+    root = tmp_path / "projects" / "demo_project"
+    (root / "state").mkdir(parents=True)
+    seen: dict[str, object] = {}
+
+    class FakeStdout:
+        def __iter__(self):
+            return iter([
+                '{"status":"blocked_full_text_evidence_unavailable","acquired_count":0,"unavailable_count":1,"pending_after_repair":["Paper One"]}\n'
+            ])
+
+    class FakeProc:
+        stdout = FakeStdout()
+
+        def wait(self, timeout=5):
+            seen["wait_timeout"] = timeout
+            return 2
+
+        def terminate(self):
+            seen["terminated"] = True
+
+    def fake_popen(cmd, cwd, env, text, stdout, stderr, bufsize):
+        seen["cmd"] = cmd
+        seen["cwd"] = cwd
+        seen["env"] = env
+        seen["text"] = text
+        seen["bufsize"] = bufsize
+        return FakeProc()
+
+    logs: list[str] = []
+    progress_calls: list[tuple[str, int, int, str]] = []
+    monkeypatch.setenv("MANAGEMENT_PYTHON", "/opt/taste/python")
+    monkeypatch.setattr(server.subprocess, "Popen", fake_popen)
+
+    result = server._run_current_find_full_text_evidence_repair(
+        "demo_project",
+        root,
+        logs.append,
+        lambda: False,
+        lambda phase, current, total, message: progress_calls.append((phase, current, total, message)),
+    )
+
+    cmd = seen["cmd"]
+    env = seen["env"]
+    assert cmd[:2] == ["/opt/taste/python", str(server.WORKSPACE_ROOT / "scripts" / "repair_current_find_full_text_evidence.py")]
+    assert cmd[-3:] == ["--project", "demo_project", "--force"]
+    assert seen["cwd"] == str(server.WORKSPACE_ROOT)
+    assert env["WORKSPACE_ROOT"] == str(server.WORKSPACE_ROOT)
+    assert env["PROJECT_ID"] == "demo_project"
+    assert env["DEFAULT_PROJECT_ID"] == "demo_project"
+    assert str(server.WORKSPACE_ROOT / "scripts") in env["PYTHONPATH"].split(server.os.pathsep)
+    assert result["returncode"] == 2
+    assert result["status"] == "blocked_full_text_evidence_unavailable"
+    assert result["pending_after_repair"] == ["Paper One"]
+    assert progress_calls[-1][0] == "full_text_evidence_blocked"
+    assert any("full-text evidence repair" in line for line in logs)
+
+
+def test_current_find_selection_command_runs_full_takeover_until_content_ready(monkeypatch, tmp_path):
+    from auto_research.web import project_bridge
+
+    projects = tmp_path / "projects"
+    project = "demo_project"
+    (projects / project).mkdir(parents=True)
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.setattr(project_bridge, "management_python", lambda: "/opt/taste/python")
+    monkeypatch.setattr(project_bridge, "_literature_recommendation_gate_is_blocked", lambda _project: False)
+    monkeypatch.setattr(project_bridge, "_current_find_pipeline_summary", lambda _root: {"content_ready": False, "readings": 0, "ideas": 0, "plans": 0})
+
+    _project, cmd = project_bridge.build_command({"project": project, "action": "current-find-selection"})
+
+    assert cmd[-1] == "--force"
+
+    monkeypatch.setattr(project_bridge, "_current_find_pipeline_summary", lambda _root: {"content_ready": True, "readings": 4, "ideas": 5, "plans": 5})
+
+    _project, cmd = project_bridge.build_command({"project": project, "action": "current-find-selection"})
+
+    assert cmd[-1] == "--force-selection"
+
+
+def test_full_text_preflight_ready_does_not_report_pending_full_text():
+    ensure_plan = importlib.import_module("ensure_current_find_research_plan")
+    validation = ensure_plan._current_find_evidence_preflight_validation(
+        "find_demo",
+        {
+            "expected_recommendation_count": 2,
+            "full_text_evidence_count": 2,
+            "pending_without_evidence_titles": [],
+            "full_text_evidence_titles": ["Paper One", "Paper Two"],
+            "full_text_packet": {"run_id": "find_demo", "papers": [{"title": "Paper One"}, {"title": "Paper Two"}]},
+        },
+        status="current_find_full_text_evidence_ready_pending_claude_deep_read",
+        blockers=["current Find full-text evidence is ready; Claude Code must now synthesize detailed per-paper deep readings"],
+    )
+
+    assert validation["full_text_evidence_count"] == 2
+    assert validation["pending_without_evidence_count"] == 0
+    assert validation["pending_full_text_reading_count"] == 0
+    assert validation["pending_full_text_reading_titles"] == []
+    assert validation["pending_deep_read_synthesis_count"] == 2
+    assert ensure_plan.current_reading_validation_needs_full_text_evidence(validation) is False
+    assert ensure_plan.current_reading_validation_needs_claude_rewrite(validation) is True
 
 
 def test_cancel_worker_job_uses_exact_pid_from_job_id(monkeypatch, tmp_path):
@@ -3966,6 +4175,55 @@ def test_compact_project_summary_prioritizes_selected_plan_gate_over_stale_exper
     assert summary["state"]["experiment_count"] == 0
 
 
+def test_compact_project_summary_prioritizes_current_find_idea_plan_block_over_stale_experiment_snapshot(tmp_path, monkeypatch):
+    from auto_research.web import project_bridge
+
+    project_root = tmp_path / "demo_project"
+    taste_dir = project_root / "planning" / "finding"
+    state_dir = project_root / "state"
+    taste_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    run_id = "find_demo_idea_plan_block"
+    write_json(taste_dir / "find_results.json", {"run_id": run_id, "strong_recommendations": [recommended_paper("paper-1", "Paper 1")]})
+    write_json(taste_dir / "find_progress.json", {"run_id": run_id, "phase": "complete", "strong_recommendation_count": 1, "recommendation_target_count": 1, "recommendation_shortfall": 0, "counts": {}})
+    write_json(taste_dir / "read_results.json", {"run_id": run_id, "source": "claude_code_current_find_takeover", "readings": []})
+    write_json(taste_dir / "ideas.json", {"run_id": run_id, "source": "claude_code_current_find_takeover", "ideas": []})
+    write_json(taste_dir / "plans.json", {"run_id": run_id, "source": "claude_code_current_find_takeover", "plans": []})
+    write_json(state_dir / "current_find_research_plan.json", {"run_id": run_id, "status": "blocked_current_find_idea_plan_incomplete", "next_required_action": "run_or_approve_current_find_idea_plan"})
+    write_json(state_dir / "full_research_cycle.json", {"status": "stale_full_research_cycle_snapshot", "summary_zh": "旧实验门控摘要", "full_cycle_job": {"status": "stale", "process_alive": False}})
+    write_json(state_dir / "reference_reproduction_gate.json", {"status": "pass", "decision": "continue_base"})
+    write_json(state_dir / "selected_base_viability_gate.json", {"status": "blocked", "decision": "continue_experiment_evidence_repair"})
+
+    pipeline_contract = {
+        "run_id": run_id,
+        "status": "blocked_current_find_idea_plan_incomplete",
+        "failure_type": "idea_plan_artifacts_incomplete",
+        "next_required_action": "run_or_approve_current_find_idea_plan",
+        "content_ready": False,
+        "read_idea_plan_ready": False,
+        "execution_ready": False,
+        "takeover_ready": False,
+        "readings": 1,
+        "reading_count": 1,
+        "read_artifact_count": 1,
+        "full_text_reading_count": 1,
+        "pending_full_text_reading_count": 0,
+        "ideas": 0,
+        "plans": 0,
+        "summary_zh": "当前 Find 后处理未通过 Claude 接管 gate：全文精读 1 篇、idea 0 个、plan 0 个。",
+    }
+    monkeypatch.setattr(project_bridge, "_current_find_pipeline_summary", lambda _root: pipeline_contract)
+    monkeypatch.setattr(project_bridge, "_current_project_source_selection", lambda _project, _root: {"venue_ids": ["openreview_iclr_2026"], "years": [2026]})
+    monkeypatch.setattr(project_bridge, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(project_bridge, "_remote_process_rows", lambda: [])
+
+    summary = project_bridge._fast_project_summary("demo_project", project_root, {"name": "demo_project", "topic": "Demo", "target_venue": "ICLR"})
+
+    assert summary["status"] == "blocked_current_find_idea_plan_incomplete"
+    assert "当前 Find 后处理未通过" in summary["summary"]
+    assert summary["main_route"]["base_selection_status"] == "blocked_current_find_idea_plan_incomplete"
+
+
 
 
 
@@ -5526,6 +5784,69 @@ def test_bootstrap_repo_env_skips_editable_for_setup_helper_script(tmp_path, mon
     assert bootstrap.repo_has_editable_package(repo) is False
 
 
+def test_environment_stage_bootstrap_verifies_without_auto_install():
+    script_path = Path(__file__).resolve().parents[3] / "scripts" / "run_environment_stage.py"
+    text = script_path.read_text(encoding="utf-8")
+
+    bootstrap_line = next(line for line in text.splitlines() if "scripts/bootstrap_repo_env.py" in line and "bootstrap =" in line)
+    assert "--verify-only" in bootstrap_line
+    assert "--auto-install-missing" not in bootstrap_line
+
+
+def test_bootstrap_repo_env_verify_only_never_auto_installs_missing_import(tmp_path, monkeypatch):
+    import importlib.util
+    import json
+    import sys
+    from types import SimpleNamespace
+
+    script_path = Path(__file__).resolve().parents[3] / "scripts" / "bootstrap_repo_env.py"
+    spec = importlib.util.spec_from_file_location("bootstrap_repo_env_verify_only_under_test", script_path)
+    bootstrap = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(bootstrap)
+
+    repo = tmp_path / "repo"
+    state = tmp_path / "state"
+    reports = tmp_path / "reports"
+    config = tmp_path / "config.json"
+    repo.mkdir()
+    state.mkdir()
+    reports.mkdir()
+    config.write_text("{}\n", encoding="utf-8")
+
+    class Proc:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    calls = []
+
+    def fake_run(cmd, cwd=None):
+        calls.append(cmd)
+        if cmd[:4] == ["/conda", "run", "-n", "demo_env"]:
+            return Proc(1, "", "No module named 'yaml'")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(bootstrap, "build_paths", lambda _project: SimpleNamespace(state=state, reports=reports, config=config))
+    monkeypatch.setattr(bootstrap, "load_project_config", lambda _project: {})
+    monkeypatch.setattr(bootstrap, "ensure_machine_profile", lambda _project: {"accelerator": {}, "dependencies": {"cli": {}}})
+    monkeypatch.setattr(bootstrap, "discover_conda_executable", lambda _machine: "/conda")
+    monkeypatch.setattr(bootstrap, "conda_env_exists", lambda *_args: True)
+    monkeypatch.setattr(bootstrap, "run", fake_run)
+    monkeypatch.setattr(bootstrap, "install_missing_import", lambda *_args: (_ for _ in ()).throw(AssertionError("must not install")))
+    monkeypatch.setattr(sys, "argv", ["bootstrap_repo_env.py", "--project", "demo", "--repo-path", str(repo), "--env-name", "demo_env", "--verify-only"])
+
+    bootstrap.main()
+
+    payload = json.loads((state / "repo_env_bootstrap.json").read_text(encoding="utf-8"))
+    assert payload["status"] == "failed"
+    assert payload["verify_only"] is True
+    assert payload["auto_install_missing"] is False
+    assert payload["missing_import"] == "yaml"
+    assert not any("install" in cmd for call in calls for cmd in call)
+
+
 
 def test_bootstrap_repo_env_repairs_missing_python_pip(monkeypatch):
     import importlib.util
@@ -5703,3 +6024,118 @@ def test_ensure_claude_plan_state_accepts_selected_web_generated_plan(tmp_path, 
     assert payload["selected_execution_issue"] == ""
     assert payload["idea_schema_ready"] is True
     assert payload["targeted_search_query_count"] == 0
+
+
+
+
+def test_compact_project_summary_environment_waiting_message_overrides_stale_experiment_gate(tmp_path, monkeypatch):
+    from auto_research.web import project_bridge
+
+    project_root = tmp_path / "demo_project"
+    taste_dir = project_root / "planning" / "finding"
+    state_dir = project_root / "state"
+    taste_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    run_id = "find_demo_env_wait"
+    write_json(taste_dir / "find_results.json", {"run_id": run_id, "strong_recommendations": [recommended_paper("paper-1", "Paper 1")]})
+    write_json(taste_dir / "find_progress.json", {"run_id": run_id, "phase": "complete", "strong_recommendation_count": 1, "recommendation_target_count": 1, "recommendation_shortfall": 0, "counts": {}})
+    write_json(taste_dir / "read_results.json", {"run_id": run_id, "source": "claude_code_current_find_takeover", "readings": [{"paper_id": "paper-1", "title": "Paper 1", "full_text_available": True, "full_text_status": "pdf_text_read", "pdf_text_chars": 9000, "source_evidence": {"text_chars": 9000}, "abstract_zh": "足够长的摘要内容", "motivation_zh": "足够长的动机内容", "method_details_zh": "足够长的方法内容", "experiments_zh": "足够长的实验内容", "limitations_zh": "足够长的局限内容", "subagent_deep_read": True, "deep_read_audit": {"status": "completed"}}]})
+    write_json(taste_dir / "ideas.json", {"run_id": run_id, "source": "claude_code_current_find_takeover", "status": "approved", "selected_plan_id": "plan-1", "selected_idea_id": "idea-1", "ideas": [{"id": "idea-1", "title": "Idea 1", "approved_for_planning": True}]})
+    write_json(taste_dir / "plans.json", {"run_id": run_id, "source": "claude_code_current_find_takeover", "status": "plan_selected", "selected_plan_id": "plan-1", "selected_idea_id": "idea-1", "plans": [{"plan_id": "plan-1", "idea_id": "idea-1", "selected_for_execution": True, "execute_next": True, "execution_selection": {"selected": True, "selected_by": "main_claude_code_after_deep_read", "reason": "best"}}]})
+    write_json(state_dir / "current_find_research_plan.json", {"run_id": run_id, "status": "claude_current_find_read_idea_plan_ready_waiting_for_environment_base_selection", "selected_plan_id": "plan-1", "selected_idea_id": "idea-1", "content_ready": True, "read_idea_plan_ready": True, "execution_ready": True, "takeover_ready": True, "claude_current_find_ready": True, "next_required_action": "environment_base_selection_and_repo_data_protocol_audit"})
+    write_json(state_dir / "current_find_claude_reading_validation.json", {"run_id": run_id, "valid": True, "expected_recommendation_count": 1, "actual_reading_count": 1, "full_text_reading_count": 1, "full_text_evidence_count": 1, "pending_full_text_reading_count": 0, "pending_without_evidence_count": 0, "blockers": []})
+    write_json(state_dir / "full_research_cycle.json", {"status": "stale_full_research_cycle_snapshot", "summary_zh": "旧实验门控摘要", "full_cycle_job": {"status": "stale", "process_alive": False}})
+    write_json(state_dir / "selected_base_viability_gate.json", {"status": "blocked", "decision": "continue_experiment_evidence_repair"})
+    monkeypatch.setattr(project_bridge, "_current_project_source_selection", lambda _project, _root: {"venue_ids": ["openreview_iclr_2026"], "years": [2026]})
+    monkeypatch.setattr(project_bridge, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(project_bridge, "_remote_process_rows", lambda: [])
+
+    summary = project_bridge._fast_project_summary("demo_project", project_root, {"name": "demo_project", "topic": "Demo", "target_venue": "ICLR"})
+
+    assert summary["status"] == "blocked_environment_base_selection_required"
+    assert "等待环境阶段" in summary["summary"]
+    assert "旧实验门控摘要" not in summary["summary"]
+
+def test_compact_project_summary_current_find_ready_overrides_stale_summary_without_viability_gate(tmp_path, monkeypatch):
+    from auto_research.web import project_bridge
+
+    project_root = tmp_path / "demo_project"
+    state_dir = project_root / "state"
+    finding_dir = project_root / "planning" / "finding"
+    state_dir.mkdir(parents=True)
+    finding_dir.mkdir(parents=True)
+    run_id = "find_demo_env_wait_no_gate"
+    write_json(finding_dir / "ideas.json", {"run_id": run_id, "status": "approved", "ideas": [{"id": "idea-1"}]})
+    write_json(finding_dir / "plans.json", {"run_id": run_id, "status": "plan_selected", "selected_plan_id": "plan-1", "plans": [{"plan_id": "plan-1", "selected_for_execution": True}]})
+    write_json(state_dir / "current_find_research_plan.json", {"run_id": run_id, "status": "claude_current_find_read_idea_plan_ready_waiting_for_environment_base_selection", "selected_plan_id": "plan-1", "selected_idea_id": "idea-1", "read_idea_plan_ready": True, "execution_ready": True, "claude_current_find_ready": True})
+    write_json(state_dir / "full_research_cycle.json", {"status": "stale_full_research_cycle_snapshot", "summary_zh": "旧实验门控摘要", "full_cycle_job": {"status": "stale", "process_alive": False}})
+    monkeypatch.setattr(project_bridge, "_current_project_source_selection", lambda _project, _root: {"venue_ids": ["openreview_iclr_2026"], "years": [2026]})
+    monkeypatch.setattr(project_bridge, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(project_bridge, "_remote_process_rows", lambda: [])
+
+    summary = project_bridge._fast_project_summary("demo_project", project_root, {"name": "demo_project", "topic": "Demo", "target_venue": "ICLR"})
+
+    assert summary["status"] == "blocked_environment_base_selection_required"
+    assert "等待环境阶段" in summary["summary"]
+    assert "旧实验门控摘要" not in summary["summary"]
+    assert summary["current_blocker"]["category"] == "environment_anchor_selection_required"
+
+
+def test_start_job_done_result_not_overridden_by_stale_blocked_summary(monkeypatch):
+    from auto_research.web import server
+
+    job = server.start_job(
+        "current-find-selection",
+        lambda _log, _cancel, _progress: {
+            "status": "done",
+            "summary": {"full_research_cycle": {"status": "blocked_old_experiment_snapshot"}},
+        },
+        job_id="unit-current-find-done-status",
+    )
+    deadline = time.time() + 5
+    while (job.status in {"queued", "running"} or job.progress.get("phase") != "complete") and time.time() < deadline:
+        time.sleep(0.05)
+
+    try:
+        assert job.status == "done"
+        assert job.progress["phase"] == "complete"
+    finally:
+        server.JOBS.pop(job.job_id, None)
+
+def test_current_find_selection_result_exposes_current_find_blocker(tmp_path, monkeypatch):
+    from auto_research.web import project_bridge
+
+    project = "demo_project"
+    project_root = tmp_path / project
+    state_dir = project_root / "state"
+    state_dir.mkdir(parents=True)
+    write_json(state_dir / "current_find_research_plan.json", {"run_id": "find_demo", "status": "blocked_current_find_idea_plan_incomplete", "next_required_action": "run_or_approve_current_find_idea_plan"})
+    pipeline = {
+        "run_id": "find_demo",
+        "status": "blocked_current_find_idea_plan_incomplete",
+        "next_required_action": "run_or_approve_current_find_idea_plan",
+        "summary_zh": "当前 Find 后处理未通过 Claude 接管 gate：idea 0 个、plan 0 个。",
+        "selected_plan_id": "",
+    }
+    monkeypatch.setattr(project_bridge, "PROJECTS", tmp_path)
+    monkeypatch.setattr(project_bridge, "build_command", lambda payload: (project, ["/bin/sh", "-c", "exit 2"]))
+    monkeypatch.setattr(project_bridge, "interactive_env", lambda project: {})
+    monkeypatch.setattr(project_bridge, "upsert_agent", lambda *args, **kwargs: None)
+    monkeypatch.setattr(project_bridge, "append_agent_log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(project_bridge, "project_summary", lambda project: {"status": "stale_full_research_cycle_snapshot", "summary": "旧实验门控摘要"})
+    monkeypatch.setattr(project_bridge, "_current_find_pipeline_summary", lambda root: pipeline)
+    progress_events = []
+
+    result = project_bridge.run_action(
+        {"project": project, "action": "current-find-selection"},
+        lambda _line: None,
+        lambda: False,
+        lambda phase, current, total, message: progress_events.append((phase, message)),
+    )
+
+    assert result["status"] == "blocked"
+    assert result["current_find_pipeline"]["status"] == "blocked_current_find_idea_plan_incomplete"
+    assert result["blocker"]["next_action"] == "run_or_approve_current_find_idea_plan"
+    assert "当前 Find 后处理未通过" in result["blocker"]["summary"]
+    assert progress_events[-1][0] == "blocked"
+    assert "当前 Find 后处理未通过" in progress_events[-1][1]

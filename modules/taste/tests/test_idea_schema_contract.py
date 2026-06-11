@@ -1642,6 +1642,48 @@ def test_load_claude_outputs_sanitizes_reading_public_text(tmp_path):
     assert "### 详细方法" in markdown
     assert "## 方法差异、优缺点总览" in markdown
 
+def test_claude_tool_policy_blocks_direct_conda_run_and_mutation():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("claude_project_session", SCRIPTS / "claude_project_session.py")
+    claude_project_session = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(claude_project_session)
+
+    run_reason = claude_project_session.bash_command_tool_policy_issue(
+        "conda run -n taste_smoke_web python3 --version",
+        "taste_smoke_web",
+        "trajectory",
+    )
+    assert run_reason == claude_project_session.DIRECT_CONDA_COMMAND_POLICY
+    assert "project id" in run_reason
+
+    update_reason = claude_project_session.bash_command_tool_policy_issue(
+        "mamba env update -n taste_smoke_web -f environment.yml",
+        "taste_smoke_web",
+        "environment",
+    )
+    assert update_reason == claude_project_session.DIRECT_CONDA_COMMAND_POLICY
+
+    pipe_reason = claude_project_session.bash_command_tool_policy_issue(
+        "head -1 data.jsonl | python3 -c 'import sys; print(sys.stdin.read())'",
+        "taste_smoke_web",
+        "experiment-evidence-repair",
+    )
+    assert pipe_reason == claude_project_session.DIRECT_PYTHON_COMMAND_POLICY
+
+    assert not claude_project_session.bash_command_tool_policy_issue(
+        "/opt/project/bin/python -m json.tool state/example.json",
+        "taste_smoke_web",
+        "trajectory",
+    )
+    assert not claude_project_session.bash_command_tool_policy_issue(
+        "python3 -m json.tool state/example.json",
+        "taste_smoke_web",
+        "trajectory",
+    )
+
+
 def test_current_find_tool_policy_allows_heredoc_document_text_but_blocks_training():
     import importlib.util
 
@@ -1779,7 +1821,8 @@ def test_main_blocks_failed_current_find_takeover_without_normalized_artifacts(t
     assert validation.get("valid") is False
     assert validation.get("actual_reading_count") == 0
     assert validation.get("full_text_evidence_count") == 1
-    assert validation.get("pending_full_text_reading_count") == 1
+    assert validation.get("pending_full_text_reading_count") == 0
+    assert validation.get("pending_deep_read_synthesis_count") == 1
     assert "current Find full-text evidence is ready" in "\n".join(validation.get("blockers") or [])
 
 
@@ -1877,7 +1920,17 @@ PYEOF
         edit_content,
         "current-find-claude-read-idea-plan",
     )
-    assert "current-Find JSON artifacts" in edit_content_reason
+    assert "read_results.json is rendered by the wrapper" in edit_content_reason
+    assert claude_project_session.current_find_tool_policy_issue(
+        "Edit",
+        {"file_path": "/workspace/taste/projects/demo/planning/finding/ideas.json"},
+        "current-find-claude-read-idea-plan",
+    ) == ""
+    assert claude_project_session.current_find_tool_policy_issue(
+        "MultiEdit",
+        {"file_path": "/workspace/taste/projects/demo/planning/finding/plans.json"},
+        "current-find-claude-read-idea-plan",
+    ) == ""
 
 
 
@@ -2069,9 +2122,10 @@ def test_claude_takeover_repair_prompt_bans_punctuation_only_json_edit(tmp_path)
         attempt=2,
     )
     text = prompt_path.read_text(encoding="utf-8")
-    assert "禁止任何标点、引号、措辞润色类局部 Edit/MultiEdit" in text
-    assert "这种微调也会导致整个 current-Find 事务回滚" in text
-    assert "要么用 Write 再完整重写对应 JSON 一次" in text
+    assert "read_results.json` 只能由 wrapper 从这些分片重建" in text
+    assert "ideas.json` 和 `plans.json` 可以用 Claude 文件工具 Write/Edit/MultiEdit" in text
+    assert "每次结束时必须保持完整可解析 JSON" in text
+    assert "由 wrapper 在机器校验后统一写入" in text
 
 
 def test_current_find_plan_state_requires_full_text_validation_even_when_counts_are_ready(tmp_path, monkeypatch):
@@ -3236,7 +3290,7 @@ def test_project_level_validation_accepts_audited_subagent_deep_read(tmp_path):
     assert report["subagent_deep_read_audit"]["valid"] is True
 
 
-def test_current_find_json_artifacts_are_write_only():
+def test_current_find_artifacts_keep_read_results_wrapper_owned_but_allow_idea_plan_file_repairs():
     import importlib.util
 
     spec = importlib.util.spec_from_file_location("claude_project_session", SCRIPTS / "claude_project_session.py")
@@ -3275,17 +3329,17 @@ def test_current_find_json_artifacts_are_write_only():
         },
         stage,
     )
-    assert claude_project_session.current_find_tool_policy_issue(
+    assert not claude_project_session.current_find_tool_policy_issue(
         "MultiEdit",
         {"file_path": "/workspace/taste/projects/demo/planning/finding/ideas.json"},
         stage,
     )
-    assert claude_project_session.current_find_tool_policy_issue(
+    assert not claude_project_session.current_find_tool_policy_issue(
         "MultiEdit",
         {"file": "/workspace/taste/projects/demo/planning/finding/plans.json"},
         stage,
     )
-    assert not claude_project_session.current_find_tool_policy_issue(
+    assert claude_project_session.current_find_tool_policy_issue(
         "Write",
         {"file_path": "/workspace/taste/projects/demo/planning/finding/read_results.json"},
         stage,
@@ -3301,6 +3355,50 @@ def test_current_find_json_artifacts_are_write_only():
     )
     assert "Markdown artifacts" in markdown_reason
 
+
+
+def test_current_find_stage_blocks_source_code_file_writes():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("claude_project_session", SCRIPTS / "claude_project_session.py")
+    claude_project_session = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(claude_project_session)
+
+    stage = "current-find-claude-read-idea-plan"
+    assert "only use Claude file tools" in claude_project_session.current_find_tool_policy_issue(
+        "Edit",
+        {"file_path": "/workspace/taste/modules/taste/auto_research/web/project_bridge.py"},
+        stage,
+    )
+    assert not claude_project_session.current_find_tool_policy_issue(
+        "Edit",
+        {"file_path": "/workspace/taste/projects/demo/planning/finding/ideas.json"},
+        stage,
+    )
+    assert not claude_project_session.current_find_tool_policy_issue(
+        "Write",
+        {"file_path": "/workspace/taste/projects/demo/planning/finding/current_find_deep_read_fragments/01_paper.json"},
+        stage,
+    )
+
+
+def test_claude_takeover_prompt_limits_history_scope_and_scoring_loops(tmp_path):
+    paths = type("Paths", (), {"state": tmp_path / "state"})()
+    paths.state.mkdir(parents=True)
+    prompt_path = ensure_current_find_research_plan.write_claude_takeover_prompt(
+        paths,
+        "demo_project",
+        "find-test",
+        read_limit=4,
+        idea_count=2,
+        attempt=1,
+    )
+    text = prompt_path.read_text(encoding="utf-8")
+    assert "禁止读取 `state/current_find_artifact_backups/`" in text
+    assert "paper/`、`obsidian/`、`discover/`" in text
+    assert "Idea 评分最多两轮" in text
+    assert "blocked: idea_score_threshold_not_met" in text
 
 def test_current_find_deep_read_fragments_allow_claude_file_repairs_not_bash_generated():
     import importlib.util
@@ -3525,7 +3623,7 @@ def test_current_find_selection_success_receipt_overwrites_stale_failure(tmp_pat
     assert persisted["status"] == "already_current_valid_claude_selection"
 
 
-def test_current_find_selection_stage_only_allows_complete_plans_write():
+def test_current_find_selection_stage_only_allows_plans_file_tool_repairs():
     import importlib.util
 
     spec = importlib.util.spec_from_file_location("claude_project_session", SCRIPTS / "claude_project_session.py")
@@ -3548,9 +3646,8 @@ def test_current_find_selection_stage_only_allows_complete_plans_write():
     )
     fragment_reason = claude_project_session.current_find_tool_policy_issue("Write", {"file_path": fragment_path}, stage)
     assert "selection-only stage" in fragment_reason
-    assert claude_project_session.is_current_find_artifact_policy_reason(
-        claude_project_session.current_find_tool_policy_issue("MultiEdit", {"file_path": plans_path}, stage)
-    )
+    assert not claude_project_session.current_find_tool_policy_issue("MultiEdit", {"file_path": plans_path}, stage)
+    assert not claude_project_session.current_find_tool_policy_issue("Edit", {"file_path": plans_path}, stage)
 
 
 def test_import_experiment_artifacts_derives_generic_method_slug_from_model_type():

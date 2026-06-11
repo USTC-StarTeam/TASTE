@@ -50,13 +50,12 @@ CURRENT_FIND_ARTIFACT_WRITER_POLICY = (
     "current-Find Read/Idea/Plan JSON artifacts and deep-read fragments must not be generated or patched by Bash/Python/cat/heredoc; "
     "Claude file tools may author or repair individual deep-read fragment JSON files, while read_results.json, ideas.json, and plans.json must be complete Claude Write artifacts"
 )
-CURRENT_FIND_JSON_WRITE_ONLY_POLICY = (
-    "current-Find JSON artifacts must be written with one complete Claude Write call; "
-    "Edit/MultiEdit on read_results.json, ideas.json, or plans.json is blocked because it can leave invalid partial JSON. "
-    "If one field needs repair, rewrite the entire JSON artifact with Claude Write."
+CURRENT_FIND_READ_RESULTS_WRITE_ONLY_POLICY = (
+    "current-Find read_results.json is rendered by the wrapper from validated per-paper deep-read fragments; "
+    "Claude must not patch read_results.json directly. Repair the relevant fragment JSON instead, then let the wrapper rebuild read_results.json."
 )
 CURRENT_FIND_SELECTION_ONLY_POLICY = (
-    "current-Find selection-only stage may only Write planning/finding/plans.json once; "
+    "current-Find selection-only stage may only use Claude file tools on planning/finding/plans.json; "
     "read_results.json, ideas.json, deep-read fragments, Markdown projections, and TASTE-owned state remain read-only"
 )
 CURRENT_FIND_MARKDOWN_OWNED_POLICY = (
@@ -67,6 +66,20 @@ CURRENT_FIND_GATE_STATE_WRITER_POLICY = (
     "TASTE-owned current-Find gate/state files are read-only for Claude in current-Find Read/Idea/Plan; "
     "the wrapper writes state/current_find_research_plan.json, state/idea_candidates.json, and "
     "state/experiment_plan.json only after machine validation passes or blocks"
+)
+CURRENT_FIND_FILE_WRITE_WHITELIST_POLICY = (
+    "current-Find Read/Idea/Plan may only use Claude file tools on planning/finding/current_find_deep_read_fragments/*.json, "
+    "planning/finding/ideas.json, and planning/finding/plans.json; source code, tests, paper drafts, project history, and state files are read-only during this stage"
+)
+DIRECT_CONDA_COMMAND_POLICY = (
+    "Claude Code may not call conda/mamba/micromamba run/create/install/update/remove directly. "
+    "Use the configured project experiment Python for probes and scripts/launch_experiment_run.py for experiments; "
+    "environment creation or mutation is wrapper-owned and must not be inferred from the project id."
+)
+DIRECT_PYTHON_COMMAND_POLICY = (
+    "Claude Code may not call bare python/python3 directly in project experiment stages. "
+    "Use the configured project experiment Python for probes and scripts/launch_experiment_run.py for experiments; "
+    "bare python can silently use the management or system environment."
 )
 CURRENT_FIND_CONTENT_ARTIFACTS = [
     "planning/finding/read_results.json",
@@ -446,13 +459,46 @@ def current_find_tool_policy_issue(name: str, tool_input: Any, stage: str = '') 
             return CURRENT_FIND_SELECTION_ONLY_POLICY
         return ""
     if _current_find_selection_stage(stage):
-        if label == "Write" and _mentions_path(target, ["planning/finding/plans.json"]):
+        if label in {"Write", "Edit", "MultiEdit"} and _mentions_path(target, ["planning/finding/plans.json"]):
             return ""
         if _mentions_path(target, CURRENT_FIND_JSON_ARTIFACTS):
             return CURRENT_FIND_SELECTION_ONLY_POLICY
-    if label in {'Edit', 'MultiEdit'} and _mentions_path(target, CURRENT_FIND_JSON_ARTIFACTS):
-        return CURRENT_FIND_JSON_WRITE_ONLY_POLICY
+        return CURRENT_FIND_FILE_WRITE_WHITELIST_POLICY
+    if label in {'Edit', 'MultiEdit'} and _mentions_path(target, ["planning/finding/read_results.json"]):
+        return CURRENT_FIND_READ_RESULTS_WRITE_ONLY_POLICY
+    if label in {"Write", "Edit", "MultiEdit"}:
+        if _mentions_path(target, ["planning/finding/ideas.json", "planning/finding/plans.json"]):
+            return ""
+        return CURRENT_FIND_FILE_WRITE_WHITELIST_POLICY
     return ''
+
+def direct_conda_command_policy_issue(command: str) -> str:
+    lowered = str(command or '').lower()
+    if re.search(r"(?:^|[;&|]\s*)(?:conda|mamba|micromamba)\s+run\b", lowered):
+        return DIRECT_CONDA_COMMAND_POLICY
+    if re.search(r"(?:^|[;&|]\s*)(?:conda|mamba|micromamba)\s+(?:create|install|update|remove|uninstall)\b", lowered):
+        return DIRECT_CONDA_COMMAND_POLICY
+    if re.search(r"(?:^|[;&|]\s*)(?:conda|mamba|micromamba)\s+env\s+(?:create|update|remove)\b", lowered):
+        return DIRECT_CONDA_COMMAND_POLICY
+    return ''
+
+
+def direct_python_command_policy_issue(command: str, stage: str = '') -> str:
+    stage_l = str(stage or '').lower().replace('_', '-')
+    if _current_find_stage(stage_l):
+        return ''
+    if not any(token in stage_l for token in ['environment', 'experiment', 'trajectory', 'reference', 'reproduction', 'paper']):
+        return ''
+    lowered = str(command or '').lower()
+    bare_python = re.search(r"(?:^|[;&|]\s*)(?:python|python3(?:\.\d+)?)\b", lowered)
+    if not bare_python:
+        return ''
+    if re.search(r"(?:^|[;&|]\s*)(?:python|python3(?:\.\d+)?)\s+-m\s+json\.tool\b", lowered):
+        return ''
+    if 'scripts/launch_experiment_run.py' in lowered:
+        return ''
+    return DIRECT_PYTHON_COMMAND_POLICY
+
 
 def bash_command_tool_policy_issue(command: str, project: str, stage: str = '') -> str:
     current_find_issue = current_find_artifact_generator_policy_issue(command, stage)
@@ -462,6 +508,12 @@ def bash_command_tool_policy_issue(command: str, project: str, stage: str = '') 
     lowered = policy_command.lower()
     if not lowered.strip():
         return ''
+    direct_conda_issue = direct_conda_command_policy_issue(policy_command)
+    if direct_conda_issue:
+        return direct_conda_issue
+    direct_python_issue = direct_python_command_policy_issue(policy_command, stage)
+    if direct_python_issue:
+        return direct_python_issue
     if 'run_research_trajectory_supervisor.py' in lowered:
         return 'trajectory supervisor recursion is blocked: Claude Code workers must complete the assigned queue item instead of spawning nested supervisors'
     launcher_issue = launcher_training_python_issue(policy_command, project)
@@ -1148,16 +1200,23 @@ def run_claude(project: str, instruction: str, stage: str, timeout_sec: int, res
             policy_type = 'current_find_artifact_writer'
             policy_text = (
                 'Current-Find Read/Idea/Plan artifact writing is recoverable but must be authored through '
-                'Claude file tools after reading full-text evidence. Bash/Python generators and JSON Edit/MultiEdit on '
-                'read_results.json, ideas.json, or plans.json are blocked because they can fabricate, bulk-patch, or partially corrupt scientific content; '
-                'single-paper deep-read fragment JSON files may be repaired with Claude file tools.'
+                'Claude file tools after reading full-text evidence. Bash/Python generators and python -c/open(...) probes on current-Find artifacts '
+                'are blocked because they can fabricate or bulk-patch scientific content. read_results.json is wrapper-owned and must be repaired '
+                'through per-paper deep-read fragments; ideas.json and plans.json may be authored or revised with Claude file tools, with final JSON/contract validation by the wrapper. '
+                'JSON syntax checks should use python -m json.tool only.'
             )
         elif 'trajectory supervisor recursion' in reason:
             policy_type = 'trajectory_supervisor_recursion'
             policy_text = 'Trajectory workers must not spawn nested trajectory supervisors.'
+        elif reason in {DIRECT_CONDA_COMMAND_POLICY, DIRECT_PYTHON_COMMAND_POLICY}:
+            policy_type = 'environment_command'
+            policy_text = reason
         else:
-            policy_type = 'experiment_launcher'
-            policy_text = 'Claude Code may not bypass TASTE control wrappers. New experiment launches must use scripts/launch_experiment_run.py with the project experiment Python after `--`.'
+            policy_type = 'current_find_file_write_whitelist' if reason == CURRENT_FIND_FILE_WRITE_WHITELIST_POLICY else 'experiment_launcher'
+            policy_text = (
+                'Current-Find takeover can only write the controlled planning/finding JSON artifacts. '
+                'All source code, tests, paper drafts, project history, and state files remain read-only during this stage.'
+            ) if policy_type == 'current_find_file_write_whitelist' else 'Claude Code may not bypass TASTE control wrappers. New experiment launches must use scripts/launch_experiment_run.py with the project experiment Python after `--`.'
         tool_policy_tripped = True
         tool_policy_report = {
             'status': 'blocked',
@@ -1198,6 +1257,8 @@ def run_claude(project: str, instruction: str, stage: str, timeout_sec: int, res
             remember_message('claude: current-Find gate/state writer policy blocked a direct state-file edit; wrapper will write those state files after machine validation.')
         elif is_current_find_artifact_policy_reason(reason):
             remember_message('claude: current-Find artifact writer policy blocked unsafe artifact writing; The workflow will restart this takeover with a repair prompt. Claude must use Claude file tools for per-paper deep-read fragments and complete Write calls for ideas/plans after reading the full-text files.')
+        elif reason in {DIRECT_CONDA_COMMAND_POLICY, DIRECT_PYTHON_COMMAND_POLICY}:
+            remember_message('claude: environment command policy blocked direct conda/mamba/python usage; use the configured project experiment Python or wrapper-managed launcher instead.')
         else:
             remember_message('claude: Bash tool policy blocked a naked experiment launch; terminating this Claude turn so TASTE can restart with launcher-managed experiment control.')
 
@@ -1661,6 +1722,8 @@ def run_claude(project: str, instruction: str, stage: str, timeout_sec: int, res
             result['stdout'] = (str(result.get('stdout') or '') + '\n\n[tool policy guard] Blocked unsafe current-Find artifact writing. This is recoverable: rerun the current-Find repair prompt and author or repair per-paper deep-read fragments with Claude file tools plus complete ideas.json/plans.json Write artifacts after reading full-text files; The workflow will merge validated fragments.').strip()[-20000:]
         elif is_current_find_gate_state_policy_reason(tool_policy_report.get('reason')):
             result['stdout'] = (str(result.get('stdout') or '') + '\n\n[tool policy guard] Blocked direct current-Find gate/state edits. This Claude turn was terminated; wrapper writes state files only after machine validation passes.').strip()[-20000:]
+        elif tool_policy_report.get('reason') in {DIRECT_CONDA_COMMAND_POLICY, DIRECT_PYTHON_COMMAND_POLICY}:
+            result['stdout'] = (str(result.get('stdout') or '') + '\n\n[tool policy guard] Blocked direct conda/mamba/python usage; use the configured project experiment Python for probes and wrapper-managed launchers for experiments.').strip()[-20000:]
         else:
             result['stdout'] = (str(result.get('stdout') or '') + '\n\n[tool policy guard] Blocked naked experiment launch; relaunch through scripts/launch_experiment_run.py.').strip()[-20000:]
     result_path = keyed_state_path(paths, 'claude_project_session_last_result', session_key)
