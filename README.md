@@ -86,7 +86,7 @@ claude --version
 
 ### 5. 启动网页
 
-初次启动和以后启动使用同一条命令：
+启动命令：
 
 ```bash
 cd TASTE
@@ -94,15 +94,7 @@ conda activate taste
 scripts/start_web.sh
 ```
 
-`scripts/start_web.sh` 只处理 TASTE 自己的启动环境；Python、Node/npm、Claude Code 请先按前面步骤配置好，并保证当前终端能直接运行 `python`、`node`、`npm`、`claude`。脚本会自动处理：
-
-- 设置 `WORKSPACE_ROOT` 为仓库根目录。
-- 设置 `PYTHONPATH` 为 `modules/taste`、仓库根目录和 `scripts`。
-- 选择当前 Conda/venv Python 作为 `MANAGEMENT_PYTHON`。
-- 使用默认地址 `127.0.0.1:8765`。
-- 前端未构建时自动执行 `npm install` 和 `npm run build`。
-
-只有需要改端口或绑定地址时才加环境变量：
+脚本会自动构建前端，并使用默认地址 `127.0.0.1:8765`。需要改端口或绑定地址时加环境变量：
 
 ```bash
 WEB_PORT=18765 scripts/start_web.sh
@@ -116,7 +108,7 @@ $env:PYTHONPATH = "$($PWD.Path)\modules\taste;$($PWD.Path);$($PWD.Path)\scripts"
 python -m uvicorn auto_research.web.server:app --host 127.0.0.1 --port 8765
 ```
 
-打开：
+打开网页：
 
 ```text
 http://127.0.0.1:8765
