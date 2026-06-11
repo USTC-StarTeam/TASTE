@@ -92,8 +92,9 @@ const DEFAULT_CONFIG: Config = {
   hf_include_papers: true,
   hf_include_models: true,
   default_find_selection: {
-    venue_ids: ["openreview_iclr_2026", "openreview_neurips", "dblp_icml", "dblp_kdd"],
+    venue_ids: [],
     years: [2026],
+    venue_years: [],
     include_arxiv: false,
     include_biorxiv: false,
     include_huggingface: false,
@@ -526,7 +527,7 @@ function sameStringArray(left: string[], right: string[]) {
   return left.length === right.length && left.every((item, index) => item === right[index]);
 }
 
-function defaultVenueYearMap(venueIds: string[] = CORE_VENUE_IDS) {
+function defaultVenueYearMap(venueIds: string[] = []) {
   return Object.fromEntries(venueIds.map((venueId) => [venueId, [DEFAULT_FIND_YEAR]])) as Record<string, number[]>;
 }
 
@@ -3229,8 +3230,8 @@ function App() {
   const [currentFindArtifacts, setCurrentFindArtifacts] = useState<Artifact[]>([]);
   const [currentFindArtifactsLoading, setCurrentFindArtifactsLoading] = useState(false);
   const [runArtifactsLoading, setRunArtifactsLoading] = useState(false);
-  const [selectedVenues, setSelectedVenues] = useState<string[]>(CORE_VENUE_IDS);
-  const [selectedVenueYears, setSelectedVenueYears] = useState<Record<string, number[]>>(() => defaultVenueYearMap(CORE_VENUE_IDS));
+  const [selectedVenues, setSelectedVenues] = useState<string[]>([]);
+  const [selectedVenueYears, setSelectedVenueYears] = useState<Record<string, number[]>>(() => defaultVenueYearMap());
   const [years, setYears] = useState(String(DEFAULT_FIND_YEAR));
   const [venueQuery, setVenueQuery] = useState("");
   const [showAllAvailableVenues, setShowAllAvailableVenues] = useState(false);

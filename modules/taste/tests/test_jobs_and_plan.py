@@ -450,11 +450,20 @@ def test_experiment_command_skips_discovery_by_default(tmp_path, monkeypatch):
     assert "--topic" not in cmd
 
 
-def test_default_find_selection_does_not_enable_arxiv():
-    from auto_research.source_selection import default_source_selection, normalize_source_selection
+def test_default_find_selection_starts_with_no_sources():
+    from auto_research.source_selection import default_source_selection, normalize_source_selection, source_enabled
 
-    assert default_source_selection()["include_arxiv"] is False
-    assert normalize_source_selection({})["include_arxiv"] is False
+    default_selection = default_source_selection()
+    normalized_empty = normalize_source_selection({})
+    assert default_selection["venue_ids"] == []
+    assert default_selection["venue_years"] == []
+    assert normalized_empty["venue_ids"] == []
+    assert normalized_empty["venue_years"] == []
+    for key in ["include_arxiv", "include_biorxiv", "include_huggingface", "include_github", "include_nature", "include_science"]:
+        assert default_selection[key] is False
+        assert normalized_empty[key] is False
+    for source in ["venues", "arxiv", "biorxiv", "huggingface", "github", "nature", "science"]:
+        assert source_enabled({}, source) is False
 
 
 def test_project_list_orders_recent_activity_first(tmp_path, monkeypatch):

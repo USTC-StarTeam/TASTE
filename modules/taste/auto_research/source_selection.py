@@ -19,12 +19,7 @@ def _projects_root() -> Path:
 PROJECT_CONFIG_ENV = "PROJECT_CONFIG"
 PROJECT_ENV = "PROJECT_ID"
 
-DEFAULT_VENUE_IDS = [
-    "openreview_iclr_2026",
-    "openreview_neurips",
-    "dblp_icml",
-    "dblp_kdd",
-]
+DEFAULT_VENUE_IDS: list[str] = []
 
 
 def _unique_strings(values: list[Any]) -> list[str]:
