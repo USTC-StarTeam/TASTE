@@ -178,7 +178,6 @@ def git_lines(args: list[str]) -> list[str]:
 def _framework_change_paths(project: str, rows: list[str]) -> list[dict[str, str]]:
     prefixes = (
         ".claude/",
-        ".codex/",
         "automation/",
         "modules/taste/",
         "modules/writing/",
@@ -255,7 +254,6 @@ def check_git_hygiene(project: str, issues: list[dict[str, Any]], notes: list[di
     required_tracked = [
         ".gitignore",
         "AGENTS.md",
-        ".codex/notes/git_policy.md",
         "modules/taste/auto_research/web/project_bridge.py",
         "modules/taste/auto_research/web/client/src/App.tsx",
         "modules/taste/auto_research/web/client/src/styles.css",
@@ -327,7 +325,7 @@ def check_git_hygiene(project: str, issues: list[dict[str, Any]], notes: list[di
 
     untracked_source = [
         path for path in git_lines(["ls-files", "--others", "--exclude-standard"])
-        if path.startswith(("scripts/", "modules/taste/auto_research/", "modules/taste/tests/", "modules/writing/", ".claude/", ".codex/", "automation/", "prompts/", "templates/"))
+        if path.startswith(("scripts/", "modules/taste/auto_research/", "modules/taste/tests/", "modules/writing/", ".claude/", "automation/", "prompts/", "templates/"))
         and not path.endswith((".orig", ".rej"))
     ]
     if untracked_source:

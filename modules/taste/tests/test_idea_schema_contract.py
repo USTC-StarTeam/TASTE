@@ -3531,6 +3531,27 @@ def test_missing_selected_plan_is_selection_only_failure_when_content_ready():
 
 
 
+def test_writing_claude_session_extends_no_event_timeout():
+    spec = importlib.util.spec_from_file_location("claude_project_session", SCRIPTS / "claude_project_session.py")
+    claude_project_session = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(claude_project_session)
+
+    assert claude_project_session.claude_no_event_timeout_seconds("writing:literature", 14400, {}, {}) >= 900
+    assert claude_project_session.claude_no_event_timeout_seconds("paper", 14400, {}, {}) >= 900
+
+
+def test_claude_stream_result_event_is_terminal():
+    spec = importlib.util.spec_from_file_location("claude_project_session", SCRIPTS / "claude_project_session.py")
+    claude_project_session = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(claude_project_session)
+
+    assert claude_project_session.claude_stream_result_is_terminal({"type": "result", "subtype": "success", "result": "done"})
+    assert claude_project_session.claude_stream_result_is_terminal({"type": "result", "subtype": "error", "is_error": True})
+    assert not claude_project_session.claude_stream_result_is_terminal({"type": "assistant", "message": {"content": []}})
+
+
 def test_current_find_claude_session_extends_no_event_timeout():
     spec = importlib.util.spec_from_file_location("claude_project_session", SCRIPTS / "claude_project_session.py")
     claude_project_session = importlib.util.module_from_spec(spec)

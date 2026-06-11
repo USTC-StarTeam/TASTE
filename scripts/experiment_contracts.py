@@ -342,6 +342,62 @@ def _status_token(value) -> str:
     return normalize_role(value)
 
 
+def _json_file_payload(path: Path) -> dict:
+    try:
+        if path.exists() and path.is_file() and path.suffix.lower() == ".json":
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+    return {}
+
+
+def _existing_artifact_file(row: dict, *names: str) -> str:
+    candidates: list[Path] = []
+    for key in ("artifact_path", "artifact_dir", "output_dir"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            root = Path(value)
+            candidates.extend(root / name for name in names)
+    audit_path = str(row.get("audit_path") or "").strip()
+    if audit_path:
+        parent = Path(audit_path).parent
+        candidates.extend(parent / name for name in names)
+        audit_payload = _json_file_payload(Path(audit_path))
+        outputs = audit_payload.get("outputs") if isinstance(audit_payload.get("outputs"), dict) else {}
+        for key in ("bad_case_slices", "bad_cases", "counterexample_outcomes", "counterexamples"):
+            value = str(outputs.get(key) or "").strip()
+            if value:
+                candidates.append(Path(value))
+    for candidate in candidates:
+        try:
+            if candidate.exists() and candidate.is_file() and candidate.stat().st_size > 2:
+                return str(candidate)
+        except Exception:
+            continue
+    return ""
+
+
+def _row_has_bad_case_evidence(row: dict) -> bool:
+    if row.get("bad_case_path") or row.get("bad_case_slices") or row.get("bad_cases"):
+        return True
+    audit_path = str(row.get("audit_path") or "").strip()
+    audit_payload = _json_file_payload(Path(audit_path)) if audit_path else {}
+    if audit_payload.get("has_bad_case_slices") or audit_payload.get("bad_case_slices") or audit_payload.get("bad_cases"):
+        return True
+    return bool(_existing_artifact_file(row, "bad_case_slices.json", "bad_cases.json", "bad_case_analysis.json"))
+
+
+def _row_has_counterexample_evidence(row: dict) -> bool:
+    if row.get("counterexample_outcome") or row.get("counterexample_outcomes") or row.get("counterexamples"):
+        return True
+    audit_path = str(row.get("audit_path") or "").strip()
+    audit_payload = _json_file_payload(Path(audit_path)) if audit_path else {}
+    if audit_payload.get("has_counterexample_outcomes") or audit_payload.get("counterexample_outcome") or audit_payload.get("counterexample_outcomes"):
+        return True
+    return bool(_existing_artifact_file(row, "counterexample_outcomes.json", "counterexamples.json", "counterexample_analysis.json"))
+
+
 def row_promotion_blockers(row: dict) -> list[str]:
     """Return structured reasons why a row cannot support claim/paper promotion."""
     if not isinstance(row, dict):
@@ -373,9 +429,9 @@ def row_promotion_blockers(row: dict) -> list[str]:
         blockers.append("inference_only_or_posthoc_method")
     if _has_any(text, PSEUDO_TEXT_DERIVATION_MARKERS) or _has_any(text, NEGATED_REAL_LLM_EVIDENCE_MARKERS) or _has_unavailable_source_evidence(text):
         blockers.append("pseudo_or_interaction_derived_text_evidence")
-    if not (row.get("bad_case_path") or row.get("bad_case_slices")):
+    if not _row_has_bad_case_evidence(row):
         blockers.append("missing_bad_case_slices")
-    if not row.get("counterexample_outcome"):
+    if not _row_has_counterexample_evidence(row):
         blockers.append("missing_counterexample_outcome")
     if not row.get("claim_verdict"):
         blockers.append("missing_claim_verdict")

@@ -524,6 +524,70 @@ def _strip_public_taste_marker(value: Any) -> Any:
     return value
 
 
+def _public_job_summary_text(value: Any) -> str:
+    """Clean job summary/status fields while leaving bounded log rows detailed."""
+    text = _redact_public_log_text(_public_text(str(value or "")))
+    text = re.sub(
+        r"missing bib entries for cited keys=[^；。\n]+",
+        "引用/参考文献仍需修复；具体修复清单已交由项目代理处理",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"latex_undefined_citations[^；。\n]*",
+        "引用/参考文献仍需修复；具体修复清单已交由项目代理处理",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"(?:Claude Code|项目代理)\s*自审未通过[^；。\n]*",
+        "论文自审未通过，具体修复项已交由项目代理处理",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"项目代理需独立读\s*PDF/TeX/BibTeX/log/venue contract\s*后修复并写\s*receipt",
+        "具体修复项已交由项目代理处理",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"self_review_hash_mismatch[^；。\n]*",
+        "论文自审未通过，具体修复项已交由项目代理处理",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"下一步由\s*project agent\s*继续真实实验迭代",
+        "具体下一步由项目代理读取证据后决定",
+        text,
+        flags=re.I,
+    )
+    return text.strip()
+
+
+def _public_job_log_payload(value: Any) -> Any:
+    if isinstance(value, str):
+        return _redact_public_log_text(_public_text(value)).strip()
+    if isinstance(value, list):
+        return [_public_job_log_payload(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _public_job_log_payload(item) for key, item in value.items()}
+    return value
+
+
+def _public_job_api_payload(value: Any, key: str = "") -> Any:
+    if key == "logs":
+        return _public_job_log_payload(value)
+    if isinstance(value, str):
+        return _public_job_summary_text(value)
+    if isinstance(value, list):
+        return [_public_job_api_payload(item) for item in value]
+    if isinstance(value, dict):
+        return {item_key: _public_job_api_payload(item_value, str(item_key)) for item_key, item_value in value.items()}
+    return value
+
+
 def _public_job_artifact_labels(artifacts: Any) -> list[str]:
     rows = artifacts if isinstance(artifacts, list) else list(artifacts.values()) if isinstance(artifacts, dict) else []
     labels: list[str] = []
@@ -931,6 +995,8 @@ def _public_taste_stage(stage: Any) -> str:
     lowered = raw.lower().replace('_', '-')
     if lowered == 'plan-polish':
         return 'plan'
+    if lowered in {'healthcheck', 'status', 'init'}:
+        return 'environment'
     if lowered == 'email':
         return 'paper'
     if lowered == 'paper' or lowered.startswith('paper-') or lowered.startswith('paper_'):
@@ -1401,6 +1467,8 @@ def _paper_public_blocker_text(value: Any) -> str:
     if not text:
         return ""
     lowered = text.lower()
+    if "missing bib entries" in lowered or "missing bibliography entries" in lowered or "cited keys=" in lowered or "latex_undefined_citations" in lowered or "undefined citations" in lowered:
+        return "引用/参考文献仍需修复；具体修复清单已交由项目代理处理。"
     if "nature_numeric_style_textual_citations" in lowered or "\\citet" in text or "\\citeauthor" in text or "作者型引用命令" in text:
         return "Nature 数字引用模板下检测到作者型引用命令；应改为正常叙述加数字引用，重新编译并确认 PDF 不再出现 `(author?)`。"
     if "pdf_unresolved_citation_markers" in lowered or "未解析引用标记" in text or "[?]" in text or "??" in text:
@@ -1541,7 +1609,7 @@ def _paper_stage_from_project_snapshot(project: str) -> dict[str, Any]:
         else:
             diagnostics.append("预览仍需完善：" + blocker_text)
     if self_review_blockers or str(paper_state.get("paper_self_review_status") or "").strip().lower() == "block":
-        diagnostics.append("Claude Code 独立审稿 receipt 未通过；系统会继续阻塞预览，直到项目代理读 PDF/TeX/BibTeX/log/venue contract 后写入当前产物自审 receipt。")
+        diagnostics.append("论文自审未通过；具体修复项已交由项目代理处理。")
     if self_review_evidence_blockers:
         diagnostics.append(f"Claude Code 独立审稿发现 {len(self_review_evidence_blockers)} 项未解决科研证据问题；PDF 只能作为检查预览，不能标记为投稿通过。")
     row = {
@@ -1564,18 +1632,12 @@ def _paper_stage_from_project_snapshot(project: str) -> dict[str, Any]:
         "paper_reference_official_min": paper_state.get("paper_reference_official_min", ""),
         "paper_citation_render_status": paper_state.get("paper_citation_render_status", ""),
         "paper_citation_render_ready": bool(paper_state.get("paper_citation_render_ready") or paper_state.get("paper_citation_render_status") == "pass"),
-        "paper_citation_render_blockers": [
-            {**item, "detail": _paper_public_blocker_text(str(item.get("id") or "") + ": " + str(item.get("public_detail") or item.get("detail") or "")), "public_detail": _paper_public_blocker_text(str(item.get("id") or "") + ": " + str(item.get("public_detail") or item.get("detail") or ""))}
-            for item in (paper_state.get("paper_citation_render_blockers", []) if isinstance(paper_state.get("paper_citation_render_blockers", []), list) else [])[:8] if isinstance(item, dict)
-        ],
+        "paper_citation_render_blockers": [],
         "paper_self_review_status": paper_state.get("paper_self_review_status", ""),
         "paper_self_review_ready": bool(paper_state.get("paper_self_review_ready")),
         "paper_self_review_receipt": paper_state.get("paper_self_review_receipt", ""),
-        "paper_self_review_blockers": [
-            {**item, "detail": _paper_public_blocker_text(str(item.get("id") or "") + ": " + str(item.get("public_detail") or item.get("detail") or "")), "public_detail": _paper_public_blocker_text(str(item.get("id") or "") + ": " + str(item.get("public_detail") or item.get("detail") or ""))}
-            for item in self_review_blockers[:8] if isinstance(item, dict)
-        ],
-        "paper_self_review_evidence_blockers": [_paper_public_self_review_evidence_blocker(item) for item in self_review_evidence_blockers[:8]],
+        "paper_self_review_blockers": [],
+        "paper_self_review_evidence_blockers": [],
         "paper_self_review_evidence_blocker_count": int(paper_state.get("paper_self_review_evidence_blocker_count") or len(self_review_evidence_blockers) or 0),
         "paper_self_review_preview_only_ready": bool(paper_state.get("paper_self_review_preview_only_ready")),
         "paper_self_review_submission_evidence_ready": bool(paper_state.get("paper_self_review_submission_evidence_ready")),
@@ -1587,10 +1649,7 @@ def _paper_stage_from_project_snapshot(project: str) -> dict[str, Any]:
         "conference_preview_body_page_limit": body_limit,
         "conference_preview_reference_pages": paper_state.get("conference_preview_reference_pages", ""),
         "conference_preview_blocker_summary": blocker_text,
-        "conference_preview_blockers": [
-            {**item, "detail": _paper_public_blocker_text(item.get("public_detail") or item.get("detail") or item.get("id") or ""), "public_detail": _paper_public_blocker_text(item.get("public_detail") or item.get("detail") or item.get("id") or "")}
-            for item in blockers[:8] if isinstance(item, dict)
-        ],
+        "conference_preview_blockers": [],
         "paper_layout_summary": str(warnings[0]) if warnings else "",
         "paper_layout_footprint_warnings": warnings[:8],
         "paper_public_diagnostics": diagnostics,
@@ -1601,6 +1660,8 @@ def _paper_stage_from_project_snapshot(project: str) -> dict[str, Any]:
         "venue_requirements_path": paper_state.get("venue_requirements_path", "") or venue_requirements.get("path", ""),
         "venue_requirements_summary": venue_requirements,
         "venue_requirements_public_summary": venue_requirements.get("summary", ""),
+        "pdf_ready": bool(pdf_path),
+        "pdf_path": str(pdf_path) if pdf_path else "",
         "blocked_preview_available": bool(pdf_path),
         "blocked_pdf_path": str(pdf_path) if pdf_path else "",
         "blocked_tex_path": str(tex_path) if tex_path.exists() else "",
@@ -1672,10 +1733,10 @@ def _paper_stage_job_message(row: dict[str, Any]) -> str:
     self_review_blockers = row.get("paper_self_review_blockers") if isinstance(row.get("paper_self_review_blockers"), list) else []
     self_review_status = str(row.get("paper_self_review_status") or "").strip().lower()
     if self_review_blockers or self_review_status == "block":
-        parts.append("Claude Code 自审未通过，项目代理需独立读 PDF/TeX/BibTeX/log/venue contract 后修复并写 receipt")
+        parts.append("论文自审未通过，具体修复项已交由项目代理处理")
     self_review_evidence_blockers = row.get("paper_self_review_evidence_blockers") if isinstance(row.get("paper_self_review_evidence_blockers"), list) else []
     if self_review_evidence_blockers:
-        parts.append(f"Claude Code 自审发现 {len(self_review_evidence_blockers)} 项未解决科研证据问题，预览不能标记为投稿通过")
+        parts.append(f"论文自审发现 {len(self_review_evidence_blockers)} 项未解决科研证据问题，预览不能标记为投稿通过")
     if not row.get("conference_preview_ready") or str(row.get("status") or "").startswith("blocked") or _paper_preview_artifact_available(row):
         parts.append("投稿/证据门控仍按真实状态保留，不标记为投稿通过")
     return "；".join(parts) + ("。" if parts else "")
@@ -1815,6 +1876,8 @@ def _compact_job_result(result: Any, stage: Any = "", job_id: Any = "", logs: An
              if ("当前格式阻塞" in str(item) and ("reference_count" in str(item) or "reference_quality_target" in str(item) or "references/citation" in str(item))) else item)
             for item in diagnostics
         ]
+        for hidden_key in ("paper_citation_render_blockers", "paper_self_review_blockers", "paper_self_review_evidence_blockers", "conference_preview_blockers"):
+            compact[hidden_key] = []
         compact["paper_summary"] = _paper_stage_job_message(compact)
         compact["paper_stage"] = {key: compact[key] for key in paper_keys if key in compact}
     if counts:
@@ -2191,6 +2254,25 @@ def _public_job_logs(stage: Any, logs: Any, progress: Any = None, result: Any = 
             if "paper pipeline generated" in low or "generated a compile report" in low or "conference preview" in low:
                 mapped = _public_paper_progress_message(line)
                 out.append(mapped or "writing 正在生成当前稿件预览；证据门控保持真实状态。")
+        detail_tail: list[str] = []
+        summary_prefixes = (
+            "当前状态：", "当前阶段：", "写作引用质量目标：", "官方引用要求：", "目标要求：",
+            "正文页数：", "图表版面：", "预览仍需完善：", "写作质量目标未达：",
+            "命令：", "运行环境 PATH 前缀：", "日志：", "产物目录：", "PDF：",
+            "TeX：", "论文预览 PDF：", "最近生成 PDF：", "详细日志：",
+        )
+        for raw_line in raw[-12:]:
+            cleaned = _redact_public_log_text(_public_text(raw_line)).strip()
+            lowered_cleaned = cleaned.lower()
+            if not cleaned or cleaned.startswith(summary_prefixes):
+                continue
+            if "heartbeat" in lowered_cleaned or ("waiting for" in lowered_cleaned and "logs" in lowered_cleaned):
+                continue
+            if len(cleaned) > 800:
+                cleaned = cleaned[:797] + "..."
+            detail_tail.append("详细日志：" + cleaned)
+        if detail_tail:
+            out.extend(detail_tail)
         if not out:
             out = ["论文生成任务已记录；详细文件见产物路径。"]
         dedup: list[str] = []
@@ -2542,8 +2624,8 @@ def _taskbgate_projection(root: Path, cycle_status: Any = "", raw_issue: Any = "
         return {
             "gate": "候选路线仍在取证",
             "issue": "参考复现已通过；候选新路线尚未获得独立授权，当前主线基底保持不变，不能自动切换基底或提升论文结论。",
-            "goal": "让项目 Claude Code/TASTE 补齐候选路线的来源、数据加载、协议、冒烟、完整参考复现和本地产物审计证据。",
-            "next": top_action or "继续补齐候选路线取证，同时保持当前主线基底不变；任何实验结果进入论文前都必须先完成本地审计和下游门控刷新。",
+            "goal": "候选路线仍需补齐可审计证据。",
+            "next": "等待项目代理基于当前候选路线证据给出下一步判断；门控通过前不自动切换基底或提升论文结论。",
         }
     selected_evidence_block = (
         "blocked_selected_base_viability_gate" in hay
@@ -2559,21 +2641,21 @@ def _taskbgate_projection(root: Path, cycle_status: Any = "", raw_issue: Any = "
         return {
             "gate": "缺少主线候选实验证据",
             "issue": "参考复现已通过；当前主线还缺少可审计、可写入论文的候选实验证据。论文稿可以生成检查版，但不能被标记为投稿通过。",
-            "goal": "保持当前基底不变；旧路线只作为历史对照，不作为当前主线证据。",
-            "next": "继续当前主线的真实候选实验；产出本地审计记录和实验登记后，再刷新科学进展、论文证据、投稿准备度与阻塞行动计划门控。",
+            "goal": "当前基底保持不变，继续补齐当前主线候选实验证据。",
+            "next": "等待项目代理读取当前门控证据后给出下一步实验判断；门控通过前不提升论文结论。",
         }
     if issue_text.strip():
         return {
             "gate": "科研门控阻塞",
             "issue": issue_text.strip()[:500],
-            "goal": "等待 project agent 根据项目状态继续处理。",
-            "next": next_text.strip()[:500] or "继续运行 TASTE 安全检查点并刷新门控。",
+            "goal": "当前科研门控未通过，需继续补齐证据。",
+            "next": next_text.strip()[:500] or "等待项目代理读取当前证据后给出下一步判断。",
         }
     return {
         "gate": str(cycle_status or "科研门控").replace("_", " "),
         "issue": "当前科研门控未通过；原始证据保留在 state/report 产物中。",
-        "goal": "等待 project agent 根据项目状态继续处理。",
-        "next": next_text.strip()[:500] or "继续运行 TASTE 安全检查点并刷新门控。",
+        "goal": "当前科研门控未通过，需继续补齐证据。",
+        "next": next_text.strip()[:500] or "等待项目代理读取当前证据后给出下一步判断。",
     }
 
 
@@ -5198,82 +5280,21 @@ def _redact_public_log_text(value: Any) -> str:
 
 
 def _summarize_claude_taskbline(line: Any) -> str:
-    raw_text = _redact_public_log_text(line).strip()
-    raw_lowered = raw_text.lower()
-    if "scientific progress gate" in raw_lowered and "still blocked" in raw_lowered:
-        return "Claude Code：确认科学进展门控仍阻塞，正在整理负结果并刷新后续审计。"
-    if "ndcg improved" in raw_lowered or "loss is flat" in raw_lowered or "wait for more data" in raw_lowered:
-        return "Claude Code：正在监督当前候选实验；指标仍需完整日志和本地审计确认，暂不形成结论。"
-    if "dead end" in raw_lowered:
-        return "Claude Code：正在总结当前候选路线的负结果，并保持科学进展门控阻塞。"
-    if "not real llm" in raw_lowered:
-        return "Claude Code：正在审计候选结果是否满足项目目标证据要求，不能直接提升为论文结论。"
-    if "scientific_progress" in raw_lowered or "progress_gate" in raw_lowered or "build_blocker" in raw_lowered:
-        return "Claude Code：正在检查科学进展门控和 blocker 刷新脚本，准备审计当前候选实验。"
-    if "project_config.py" in raw_lowered:
-        return "Claude Code：正在读取 项目配置，确认当前主线和运行参数。"
-    if "audit_paper_evidence.py" in raw_lowered or "audit_submission_readiness.py" in raw_lowered:
-        return "Claude Code：正在准备刷新论文证据和投稿准备度门控，但不会提升结论。"
-    if "experiment_registry" in raw_lowered or "artifact-local audit" in raw_lowered or "artifact local audit" in raw_lowered:
-        return "Claude Code：正在检查候选实验是否已有本地审计记录和实验登记。"
-    if "reranking evaluation" in raw_lowered:
-        if "tensor dimension" in raw_lowered or "dimension issues" in raw_lowered or "similarity computation" in raw_lowered:
-            return "Claude Code：正在修复当前候选评估里的张量维度/相似度计算问题。"
-        if "ndcg" in raw_lowered and ("numpy array" in raw_lowered or "array" in raw_lowered or "calculate_hit" in raw_lowered):
-            return "Claude Code：正在修复当前候选评估的 NDCG 数组提取问题。"
-        if "missing `/ total`" in raw_lowered or "missing / total" in raw_lowered or "total division" in raw_lowered:
-            return "Claude Code：正在修复当前候选评估的 NDCG 归一化计算。"
-        if "shape mismatch" in raw_lowered or "wrong item_num" in raw_lowered:
-            return "Claude Code：正在修复当前候选评估的数据维度与表示形状不匹配。"
-        return "Claude Code：正在运行当前候选评估，检查是否能形成可审计候选实验。"
-    if "ndcg value is a numpy array" in raw_lowered or "ndcg_purchase" in raw_lowered or "calculate_hit" in raw_lowered:
-        return "Claude Code：正在修复当前候选评估的 NDCG 数组提取问题。"
-    if "missing `/ total` division" in raw_lowered or "missing / total division" in raw_lowered:
-        return "Claude Code：正在修复当前候选评估的 NDCG 归一化计算。"
-    if "tensor dimension bug" in raw_lowered or "dimension issues" in raw_lowered or "simplify the similarity computation" in raw_lowered:
-        return "Claude Code：正在修复当前候选评估里的张量维度/相似度计算问题。"
+    """Return a direct cleaned live-agent/log fragment.
+
+    This function intentionally does not infer a new Claude narrative from
+    keywords. If the text did not come from the live agent/log artifact, the
+    taskbar should show only deterministic job/gate status elsewhere.
+    """
     text = _clean_claude_taskbline(line)
     if not text:
         return ""
     lowered = text.lower()
-    if "sentence_transformers ok" in lowered or "sklearn ok" in lowered or "environment is ready" in lowered:
-        return "Claude Code：实验环境依赖检查通过，正在准备候选实验。"
     if "waiting for claude code output" in lowered:
-        return "Claude Code：正在运行，等待下一段输出。"
-    if "shape mismatch" in lowered or "wrong item_num" in lowered or "item_num" in lowered and "wrong" in lowered:
-        return "Claude Code：发现候选实验维度/数据配置不匹配，正在修正 item 数量与 embedding 形状。"
-    if "no training instability" in lowered:
-        return "Claude Code：已排除训练不稳定，正在尝试更直接的当前主线候选改动。"
-    if "residual" in lowered:
-        return "Claude Code：正在尝试当前主线候选表示改动，并等待本地审计确认。"
-    if "orthogonal to the id embedding space" in lowered or "cross-space" in lowered or "misalignment" in lowered:
-        return "Claude Code：发现候选表示空间不对齐，正在调整当前主线实现。"
-    if "experiment" in lowered and ("embedding" in lowered or "init" in lowered):
-        return "Claude Code：正在运行当前候选实验；该结果需本地审计，不能直接作为论文结论。"
-    if "embedding initialization" in lowered:
-        return "Claude Code：正在尝试当前候选初始化方案，等待真实实验和审计结果。"
-    if "embedding pipeline" in lowered:
-        return "Claude Code：正在检查当前主线的项目目标证据管线。"
-    if "model isn't learning" in lowered or "train loss" in lowered or "0.693" in lowered:
-        return "Claude Code：发现上一轮候选训练未学习，正在排查候选方法实现。"
-    if "duplicate guard" in lowered or "kill it and re-run" in lowered or "re-run" in lowered:
-        return "Claude Code：检测到重复训练守护，正在按 TASTE 控制重新启动候选实验。"
-    if "experiment is running" in lowered or "check on the experiment" in lowered or "hasn't produced output" in lowered or "wait 3 more minutes" in lowered or "monitor progress" in lowered or "while waiting" in lowered:
-        return "Claude Code：候选实验训练已启动，正在等待新的 epoch/指标日志输出。"
-    if "std=" in lowered or "optimization" in lowered or "large-magnitude" in lowered or "magnitude" in lowered:
-        return "Claude Code：正在排查文本 embedding 尺度与优化稳定性问题。"
-    if "embeddings are ready" in lowered:
-        return "Claude Code：候选表示已生成，正在检查是否适合当前训练。"
-    if "run an experiment" in lowered:
-        return "Claude Code：正在准备启动当前主线候选实验。"
+        return "项目代理会话运行中；等待真实输出写入日志。"
     if text.endswith((" for", " and", " or", " to", " with", " while", "—")):
         return ""
-    # The taskbar is a human status surface. Keep full raw Claude text in
-    # claude_project_session_last_result.json and supervision logs, but do not
-    # surface arbitrary English stream fragments as the latest task state.
-    if re.search(r"[A-Za-z]{4,}", text) and not re.search(r"[一-鿿]", text):
-        return "Claude Code：正在执行当前科研动作；原始流式输出保留在项目日志中。"
-    return text
+    return text[:900]
 
 
 def _is_generic_claude_taskbsummary(value: Any) -> bool:
@@ -5281,8 +5302,7 @@ def _is_generic_claude_taskbsummary(value: Any) -> bool:
     if not text:
         return True
     generic = {
-        "Claude Code：正在运行，等待下一段输出。",
-        "Claude Code：正在执行当前科研动作；原始流式输出保留在项目日志中。",
+        "项目代理会话运行中；等待真实输出写入日志。",
     }
     return text in generic or "当前动作=；" in text or text.endswith("当前动作=")
 
@@ -5457,7 +5477,7 @@ def _latest_claude_agent_status_lines(root: Path, *, limit: int = 10, stage_scop
             # the last matching row as latest, shows the true current action.
             lines.extend(list(reversed(live_agent_lines))[: max(0, limit - len(lines))])
         elif prompt_path:
-            lines.append("claude_current=项目 Claude Code 正在读取当前阶段提示并自主处理；完整提示和回复保留在项目产物中。")
+            lines.append("claude_current=项目代理会话运行中；等待真实输出写入日志。")
         if lines:
             # The global taskbar should describe the live Claude worker only.
             # Completed Claude replies are shown in the dedicated recent-reply panel,
@@ -6344,7 +6364,7 @@ def _live_jobs_from_projects(*, compact: bool = True) -> list[dict[str, Any]]:
                 if not _log_tail_is_human_status(raw_stage_line) or _is_low_signal_claude_tool_line(raw_stage_line):
                     continue
                 cleaned_stage_line = _summarize_claude_taskbline(raw_stage_line)
-                if cleaned_stage_line and cleaned_stage_line.startswith("Claude Code：") and cleaned_stage_line not in stage_lines:
+                if cleaned_stage_line and cleaned_stage_line not in stage_lines:
                     stage_lines.append(cleaned_stage_line)
             for line in stage_lines[-6:]:
                 logs.append("stage_output=" + line[:900])
@@ -6404,9 +6424,9 @@ def _live_jobs_from_projects(*, compact: bool = True) -> list[dict[str, Any]]:
                     if not any(marker.lower() in line.lower() for marker in stale_running_markers)
                     and not any(marker.lower() in line.lower() for marker in stale_claim_markers)
                 ]
-            # Always keep a bounded raw tail for auditability.  The compact
-            # Claude status lines say what TASTE thinks is happening; these raw
-            # full-cycle lines show the actual recent command/tool/log context.
+            # Always keep a bounded raw tail for auditability. Compact live-agent
+            # rows are direct cleaned session/log fragments; deterministic gate
+            # summaries stay separately labelled in the projected status lines.
             visible_file_lines = [] if claude_status_lines and process_alive else file_lines[-12 if process_alive else -18:]
             seen_full_cycle_tail: set[str] = set()
             for line in visible_file_lines:
@@ -6592,6 +6612,31 @@ def _humanize_stale_tail(text: Any, process_alive: bool) -> str:
     return value
 
 
+
+
+def _normalize_public_job_status(public_status: Any, progress: Any = None, error: Any = "", result: Any = None) -> str:
+    """Make taskbar status agree with terminal progress/error evidence."""
+    status = str(public_status or "").strip()
+    lowered = status.lower()
+    if lowered not in {"running", "queued", "cancelling", ""}:
+        return status
+    progress_payload = progress if isinstance(progress, dict) else {}
+    phase = str(progress_payload.get("phase") or "").strip().lower()
+    message = str(progress_payload.get("message") or "").strip().lower()
+    error_text = str(error or "").strip().lower()
+    result_status = ""
+    if isinstance(result, dict):
+        result_status = str(result.get("status") or "").strip().lower()
+    combined = " ".join(part for part in [phase, message, error_text, result_status] if part)
+    if phase in {"complete", "completed", "done", "success"}:
+        return "done"
+    if phase in {"cancelled", "interrupted"}:
+        return "cancelled"
+    if phase.startswith("blocked") or result_status.startswith("blocked") or "blocked_tool_policy" in combined or "tool policy" in combined:
+        return "blocked"
+    if error_text or phase in {"error", "failed", "fail"} or "research action failed" in combined or "exit code" in combined:
+        return "error"
+    return status or phase or "queued"
 
 
 
@@ -6942,6 +6987,8 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
             ]
             paper_summary = _paper_stage_job_message(paper_stage) or str(paper_stage.get("summary") or result.get("paper_summary") or "")
             compact_result["paper_summary"] = paper_summary
+            for hidden_key in ("paper_citation_render_blockers", "paper_self_review_blockers", "paper_self_review_evidence_blockers", "conference_preview_blockers"):
+                paper_stage[hidden_key] = []
             compact_result["paper_stage"] = {key: paper_stage.get(key) for key in paper_keys if key in paper_stage}
             for key in paper_keys:
                 if key in paper_stage and key not in {"paper_summary", "paper_stage"}:
@@ -7077,6 +7124,9 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
                 public_progress["current"] = 1
                 public_progress["total"] = 1
                 public_progress["percent"] = 100
+    public_status = _normalize_public_job_status(public_status, public_progress, item.get("error", ""), compact_result or result)
+    if public_status in {"blocked", "error", "cancelled", "done"}:
+        compact_result["status"] = public_status
     public_log_result = compact_result if full_cycle_job else result
     payload = {
         "job_id": item.get("job_id", ""),
@@ -7094,7 +7144,7 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
         "cancelled_at": item.get("cancelled_at", ""),
         "progress": public_progress,
     }
-    return _strip_public_taste_marker(payload)
+    return _public_job_api_payload(payload)
 
 
 def _persist_jobs() -> None:
@@ -8571,7 +8621,7 @@ def api_jobs(
         items = [item for item in items if str(item.get("status") or "").lower() in {"queued", "running", "cancelling"}]
     if compact:
         items = [_compact_job_for_list(item) for item in items]
-    return [_strip_public_taste_marker(item) for item in items[:effective_limit]]
+    return [_public_job_api_payload(item) for item in items[:effective_limit]]
 
 
 @app.get("/api/jobs/{job_id}")
@@ -8583,22 +8633,22 @@ def api_job(job_id: str, compact: bool = Query(False)) -> dict:
             project_id = job_id[len("full_cycle_"):]
             live_job = next((item for item in _live_jobs_from_projects(compact=compact) if str((item.get("result") if isinstance(item.get("result"), dict) else {}).get("project") or "") == project_id), None)
         if live_job:
-            return _strip_public_taste_marker(live_job)
+            return _public_job_api_payload(live_job)
         if job_id.startswith(("full-cycle_", "full-cycle-", "full_cycle_", "full_cycle-")):
             for item in _live_jobs_from_projects(compact=compact):
                 result = item.get("result") if isinstance(item.get("result"), dict) else {}
                 command_text = str(result.get("command") or result.get("cmd") or "")
                 if "run_full_research_cycle.py" in command_text and str(item.get("status") or "").lower() in {"queued", "running", "cancelling", "blocked"}:
-                    return _strip_public_taste_marker({**item, "job_id": job_id})
+                    return _public_job_api_payload({**item, "job_id": job_id})
     job = JOBS.get(job_id)
     if not job:
         if job_id.startswith(("find-run-find_",)):
             run_id = job_id.removeprefix("find-run-")
             history = next((item for item in _find_run_history_jobs_from_runs(set(), limit=300) if str(item.get("run_id") or "") == run_id), None)
             if history:
-                return _strip_public_taste_marker(_compact_job_for_list(history) if compact else history)
+                return _public_job_api_payload(_compact_job_for_list(history) if compact else history)
         return JSONResponse({"error": "job not found"}, status_code=404)
-    return _strip_public_taste_marker(job.as_dict(compact=compact))
+    return _public_job_api_payload(_compact_job_for_list(job.as_dict(compact=True)) if compact else job.as_dict(compact=False))
 
 
 @app.post("/api/jobs/{job_id}/cancel")
@@ -8699,7 +8749,7 @@ async def ws_job(websocket: WebSocket, job_id: str):
                     compact_live_job = _compact_job_for_list(live_job) if live_stage in {"environment", "experiment"} else live_job
                     for line in (compact_live_job.get("logs") or []):
                         await websocket.send_json({"type": "log", "message": str(line)})
-                    await websocket.send_json({"type": "progress", "progress": _strip_public_taste_marker(compact_live_job.get("progress") or {})})
+                    await websocket.send_json({"type": "progress", "progress": _public_job_api_payload(compact_live_job.get("progress") or {})})
                     await websocket.send_json({"type": "complete", "job": compact_live_job})
                     return
                 logs = [str(line) for line in (live_job.get("logs") or [])]
@@ -8709,10 +8759,10 @@ async def ws_job(websocket: WebSocket, job_id: str):
                 for line in new_logs:
                     await websocket.send_json({"type": "log", "message": line})
                 sent = len(logs)
-                live_progress_payload = _strip_public_taste_marker(live_job.get("progress") or {})
+                live_progress_payload = _public_job_api_payload(live_job.get("progress") or {})
                 if live_stage in {"environment", "experiment"}:
                     compact_live_job = _compact_job_for_list(live_job)
-                    live_progress_payload = _strip_public_taste_marker(compact_live_job.get("progress") or live_progress_payload)
+                    live_progress_payload = _public_job_api_payload(compact_live_job.get("progress") or live_progress_payload)
                 await websocket.send_json({"type": "progress", "progress": live_progress_payload})
                 await asyncio.sleep(2.0)
                 continue
@@ -8725,7 +8775,7 @@ async def ws_job(websocket: WebSocket, job_id: str):
                 compact_job = _compact_job_for_list(job.as_dict(compact=True)) if job_stage in {"environment", "experiment"} else job.as_dict(compact=True)
                 for line in (compact_job.get("logs") or []):
                     await websocket.send_json({"type": "log", "message": str(line)})
-                await websocket.send_json({"type": "progress", "progress": _strip_public_taste_marker(compact_job.get("progress") or {})})
+                await websocket.send_json({"type": "progress", "progress": _public_job_api_payload(compact_job.get("progress") or {})})
                 await websocket.send_json({"type": "complete", "job": compact_job})
                 return
             new_logs = _strip_public_taste_marker(job.logs[sent:])
@@ -8735,10 +8785,10 @@ async def ws_job(websocket: WebSocket, job_id: str):
                 await websocket.send_json({"type": "log", "message": line})
             sent = len(job.logs)
             if job.progress_version != sent_progress:
-                job_progress_payload = _strip_public_taste_marker(job.progress)
+                job_progress_payload = _public_job_api_payload(job.progress)
                 if job_stage in {"environment", "experiment"}:
                     compact_job = _compact_job_for_list(job.as_dict(compact=True))
-                    job_progress_payload = _strip_public_taste_marker(compact_job.get("progress") or job_progress_payload)
+                    job_progress_payload = _public_job_api_payload(compact_job.get("progress") or job_progress_payload)
                 await websocket.send_json({"type": "progress", "progress": job_progress_payload})
                 sent_progress = job.progress_version
             await asyncio.sleep(0.5)

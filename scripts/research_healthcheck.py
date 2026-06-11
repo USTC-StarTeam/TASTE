@@ -53,10 +53,6 @@ def find_cli_binary(cfg: dict, name: str) -> str:
     return ""
 
 
-def find_codex(cfg: dict) -> str:
-    return find_cli_binary(cfg, "codex")
-
-
 def find_claude(cfg: dict) -> str:
     return find_cli_binary(cfg, "claude")
 
@@ -121,10 +117,8 @@ def main() -> None:
         notes.append(f"Generic LLM backend is not configured: {llm_disabled_reason(cfg)}")
         notes.append("Run scripts/check_llm_ready.py --project <project> after setting LLM API configuration.")
     claude_path = find_claude(cfg)
-    codex_path = find_codex(cfg)
-    notes.append(f"Configured coding backend: {cfg.get('coding_agent', {}).get('backend', 'llm')}")
+    notes.append("Configured downstream coding backend: claude")
     notes.append(f"Claude backend available: {bool(claude_path)}{f' ({claude_path})' if claude_path else ''}")
-    notes.append(f"Codex backend available: {bool(codex_path)}{f' ({codex_path})' if codex_path else ''}")
 
     takeover_required = [paths.root / "AGENTS.md", paths.work_status]
     for path in takeover_required:

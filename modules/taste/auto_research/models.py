@@ -61,13 +61,13 @@ class AppConfig(BaseModel):
     arxiv_queries: list[str] = Field(default_factory=list)
     arxiv_start_date: str = ""
     arxiv_end_date: str = ""
-    arxiv_llm_candidate_limit: int = 200
-    arxiv_llm_candidates_per_category: int = 100
+    arxiv_llm_candidate_limit: int = 0
+    arxiv_llm_candidates_per_category: int = 0
     biorxiv_categories: list[str] = Field(default_factory=lambda: ["bioinformatics"])
     biorxiv_start_date: str = ""
     biorxiv_end_date: str = ""
-    biorxiv_llm_candidate_limit: int = 200
-    biorxiv_llm_candidates_per_category: int = 100
+    biorxiv_llm_candidate_limit: int = 0
+    biorxiv_llm_candidates_per_category: int = 0
     nature_journals: list[str] = Field(default_factory=lambda: ["nature", "natmachintell", "natcomputsci", "nmeth", "ncomms"])
     nature_article_types: list[str] = Field(default_factory=lambda: ["article"])
     nature_start_date: str = ""

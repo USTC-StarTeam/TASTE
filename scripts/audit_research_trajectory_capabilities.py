@@ -349,7 +349,7 @@ def audit_skill_and_code_bindings(paths) -> dict[str, Any]:
     contracts_path = paths.state / "research_skill_contracts.json"
     contracts = load_json(contracts_path, [])
     required_scripts = {
-        "EvidenceAssurance": ["build_aris_review_board.py", "audit_paper_evidence.py", "apply_research_vetoes.py"],
+        "EvidenceAssurance": ["build_aris_review_board.py", "audit_paper_evidence.py"],
         "TrajectoryOptimization": ["update_evolution_memory.py", "run_evoscientist_style_cycle.py", "run_autoscientist_supervisor.py", "run_research_trajectory_supervisor.py"],
         "PaperProduction": ["run_paper_pipeline.py", "build_paper_md.py", "revise_paper_md.py", "build_paper_orchestra_state.py", "audit_paper_orchestra.py", "audit_submission_readiness.py", "audit_paper_evidence.py"],
     }
@@ -364,7 +364,6 @@ def audit_skill_and_code_bindings(paths) -> dict[str, Any]:
         check("trajectory_builder_maintains_graph_history_and_manifest", source_contains("build_research_trajectory_system.py", ["update_research_graph_history", "research_evidence_manifest", "update_evolutionary_memory_ledger"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
         check("claude_project_session_requires_trajectory_and_skills", source_contains("claude_project_session.py", ["research_trajectory_capability_audit", ".claude/skills", "Optimize the whole trajectory"]), evidence=[str(SCRIPTS / "claude_project_session.py")]),
         check("coding_agent_reads_capability_audit", source_contains("run_coding_agent.py", ["research_trajectory_capability_audit", "trajectory_context"]), evidence=[str(SCRIPTS / "run_coding_agent.py")]),
-        check("llm_research_team_reads_trajectory_state", source_contains("run_llm_research_team.py", ["research_trajectory_system", "research_trajectory_capability_audit", "evolutionary_memory_index"]), evidence=[str(SCRIPTS / "run_llm_research_team.py")]),
     ])
     for family, scripts in required_scripts.items():
         for script in scripts:
@@ -405,14 +404,13 @@ def audit_third_party_research_stack(paths) -> dict[str, Any]:
         check("third_party_commits_recorded", all(row.get("commit") for row in sources if isinstance(row, dict)), evidence=[str(stack_path)]),
         check("third_party_licenses_recorded", all(row.get("license") and row.get("license_path") for row in sources if isinstance(row, dict)), evidence=[str(stack_path)]),
         check("third_party_selected_modules_available", int(summary.get("missing_module_count", 0) or 0) == 0, evidence=[str(stack_path)], detail=f"missing={summary.get('missing_module_count', 0)}"),
-        check("method_provenance_adapters_synced", int(summary.get("synced_skill_count", 0) or 0) >= 25 and all(str(row.get("path", "")).startswith(".claude/method_provenance/") for row in adapters if isinstance(row, dict)), evidence=[str(ROOT / ".claude" / "method_provenance")], detail=f"adapters={len(adapter_names)}"),
-        check("third_party_builder_invokes_sync", source_contains("build_research_trajectory_system.py", ["sync_third_party_research_stack.py", "third_party_research_stack", "MethodProvenanceAudit"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
-        check("claude_prompt_uses_native_method_context", source_contains("claude_project_session.py", ["third_party_research_stack", "native method capability contracts", "Method provenance is retained for audit only"]) and source_omits("claude_project_session.py", ["Use ARIS/EvoScientist/academic-research-skills/PaperOrchestra", "Third-party research stack that you must use as external method contracts"]), evidence=[str(SCRIPTS / "claude_project_session.py")]),
+        check("third_party_builder_invokes_sync", source_contains("build_research_trajectory_system.py", ["sync_third_party_research_stack.py", "third_party_research_stack"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
+        check("claude_prompt_uses_native_method_context", source_contains("claude_project_session.py", ["third_party_research_stack", "native method capability contracts"]) and source_omits("claude_project_session.py", ["Use ARIS/EvoScientist/academic-research-skills/PaperOrchestra", "Third-party research stack that you must use as external method contracts"]), evidence=[str(SCRIPTS / "claude_project_session.py")]),
         check("third_party_web_exposed", source_contains("../modules/taste/auto_research/web/project_bridge.py", ["third_party_research_stack", "third_party_stack_status"]), evidence=[str(ROOT / "modules" / "taste" / "auto_research" / "web" / "project_bridge.py")]),
     ]
     return {
-        "id": "method_provenance_stack",
-        "module": "method_provenance_stack",
+        "id": "native_method_contract_stack",
+        "module": "native_method_contract_stack",
         "status": module_status(checks),
         "checks": checks,
         "metrics": {
@@ -432,7 +430,7 @@ def audit_third_party_research_stack(paths) -> dict[str, Any]:
             "PaperProduction": ["section writing", "literature review", "plotting", "review/rating", "content refinement"],
         },
         "evidence_files": [str(stack_path), str(report_path), str(SCRIPTS / "sync_third_party_research_stack.py")],
-        "note": "This module confirms source methods are retained as versioned provenance while runtime Workflow prompts and UI expose only native capabilities.",
+        "note": "This module confirms optional method references are summarized while runtime prompts and UI expose only native capabilities.",
     }
 
 

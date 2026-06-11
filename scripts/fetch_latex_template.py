@@ -254,7 +254,7 @@ def sync_from_repository(template: dict[str, Any], source_dir: Path) -> dict[str
         raise RuntimeError('template repository_url is empty')
     tmp_root = Path(tempfile.mkdtemp(prefix='venue_template_repo_'))
     try:
-        cache_candidates = [Path('/tmp/iclr_master_template_check_codex')] if use_template_cache() else []
+        cache_candidates = [Path('/tmp/iclr_master_template_check')] if use_template_cache() else []
         repo_dir = None
         for candidate in cache_candidates:
             if not candidate.exists():
@@ -309,6 +309,25 @@ def sync_from_archive(archive_url: str, archive_dir: Path, source_dir: Path, dir
         return {'source_kind': 'archive', 'source_url': archive_url, 'archive_path': str(archive_path), 'source_subdir': directory_hint or (str(selected.relative_to(tmp_root)) if selected != tmp_root else '')}
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+def sync_from_repository_with_archive_fallback(
+    template: dict[str, Any],
+    archive_dir: Path,
+    source_dir: Path,
+    explicit_url: str = '',
+) -> dict[str, Any]:
+    try:
+        return sync_from_repository(template, source_dir)
+    except Exception as repo_exc:
+        archive_url = explicit_url or str(template.get('archive_url') or '').strip()
+        if not archive_url:
+            raise
+        metadata = sync_from_archive(archive_url, archive_dir, source_dir, str(template.get('directory_hint') or ''))
+        metadata['repository_fallback_used'] = True
+        metadata['repository_fetch_error'] = str(repo_exc)
+        metadata['repository_source_url'] = str(template.get('repository_url') or template.get('official_source_url') or '')
+        return metadata
 
 
 def discover_archive(info: dict[str, Any], explicit_url: str = '') -> tuple[str, str]:
@@ -405,7 +424,7 @@ def main() -> None:
             unpack_archive(archive_path, source_dir)
             metadata.update({'source_kind': 'manual_archive', 'archive_path': str(archive_path), 'manual_override_used': True})
         elif template.get('repository_url') or (template.get('official_source_url') and 'github.com/' in str(template.get('official_source_url'))):
-            metadata.update(sync_from_repository(template, source_dir))
+            metadata.update(sync_from_repository_with_archive_fallback(template, archive_dir, source_dir, args.url))
         elif template.get('archive_url') or args.url:
             archive_url = args.url or str(template.get('archive_url') or '')
             metadata.update(sync_from_archive(archive_url, archive_dir, source_dir, str(template.get('directory_hint') or '')))

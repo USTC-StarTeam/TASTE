@@ -29,18 +29,18 @@ def load_json(path: Path, default):
         return default
 
 
-
 def discover_workspace_tool(name: str) -> str:
     candidates = []
-    for base in [ROOT.parent / 'miniforge', ROOT.parent / 'miniforge3', ROOT.parent / 'miniconda', ROOT.parent / 'miniconda3', Path.home() / 'miniforge', Path.home() / 'miniconda3']:
-        candidates.extend([base / 'bin' / name, base / 'condabin' / name])
-    for texroot in [ROOT.parent / 'texlive', Path.home() / 'texlive']:
-        candidates.append(texroot / '2026' / 'bin' / 'x86_64-linux' / name)
-        candidates.append(texroot / '2025' / 'bin' / 'x86_64-linux' / name)
+    for base in [ROOT.parent / "miniforge", ROOT.parent / "miniforge3", ROOT.parent / "miniconda", ROOT.parent / "miniconda3", Path.home() / "miniforge", Path.home() / "miniconda3"]:
+        candidates.extend([base / "bin" / name, base / "condabin" / name])
+    for texroot in [ROOT.parent / "texlive", Path.home() / "texlive"]:
+        candidates.append(texroot / "2026" / "bin" / "x86_64-linux" / name)
+        candidates.append(texroot / "2025" / "bin" / "x86_64-linux" / name)
     for candidate in candidates:
         if candidate.exists() and candidate.is_file():
             return str(candidate)
-    return ''
+    return ""
+
 
 def check_script_compile() -> tuple[bool, str]:
     scripts = sorted(str(path) for path in (ROOT / "scripts").glob("*.py"))
@@ -49,10 +49,10 @@ def check_script_compile() -> tuple[bool, str]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Audit whether the autonomous research pipeline can really run end-to-end without Codex-only assumptions.")
+    parser = argparse.ArgumentParser(description="Audit whether TASTE can run with Find LLM scoring and downstream Claude Code stages.")
     parser.add_argument("--project", required=True)
     parser.add_argument("--venue", default="")
-    parser.add_argument("--run-fallback-team", action="store_true")
+    parser.add_argument("--run-fallback-team", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     cfg = load_project_config(args.project)
@@ -70,26 +70,28 @@ def main() -> None:
     record("all_python_scripts_compile", ok, detail)
 
     required_scripts = [
-        "run_autonomous_research.py", "run_loop.py", "run_project.py", "run_llm_research_team.py",
-        "run_coding_agent.py", "run_llm_engineer.py", "run_llm_repair_loop.py", "plan_experiments.py",
-        "bootstrap_repo_env.py", "research_healthcheck.py", "run_paper_pipeline.py",
-        "build_repo_data_requirements.py", "plan_data_acquisition.py", "attempt_data_acquisition.py",
-        "data_unavailability_policy.py", "attempt_data_acquisition.py", "restart_after_data_blocker.py", "audit_repo_candidate_pool.py", "reconcile_active_and_pool_candidates.py", "build_blocker_resolution_packet.py",
-        "probe_repo_dataset.py", "run_active_repo_smoke.py", "run_autoscientist_supervisor.py", "run_autoscientist_continuous.py", "build_stagnation_report.py", "run_evoscientist_style_cycle.py",
+        "run_frontend.py", "ensure_current_find_research_plan.py", "run_autonomous_research.py", "run_full_research_cycle.py", "run_loop.py", "run_project.py",
+        "claude_project_session.py", "run_coding_agent.py", "run_environment_stage.py", "run_paper_pipeline.py", "plan_experiments.py",
+        "bootstrap_repo_env.py", "research_healthcheck.py", "build_repo_data_requirements.py", "plan_data_acquisition.py", "attempt_data_acquisition.py",
+        "data_unavailability_policy.py", "restart_after_data_blocker.py", "audit_repo_candidate_pool.py", "reconcile_active_and_pool_candidates.py",
+        "build_blocker_resolution_packet.py", "probe_repo_dataset.py", "run_active_repo_smoke.py", "run_autoscientist_supervisor.py",
+        "run_autoscientist_continuous.py", "build_stagnation_report.py", "run_evoscientist_style_cycle.py", "check_llm_ready.py", "llm_client.py",
     ]
     for script in required_scripts:
         record(f"script_exists:{script}", (ROOT / "scripts" / script).exists(), "missing script")
 
+    removed_team_script = "run_" + "llm_" + "research_team.py"
     record("autonomous_runner_accepts_venue", file_contains(ROOT / "scripts/run_autonomous_research.py", "parser.add_argument(\"--venue\""), "missing --venue argument")
     record("autonomous_runner_passes_venue_to_loop", file_contains(ROOT / "scripts/run_autonomous_research.py", "loop_cmd.extend([\"--venue\", args.venue])"), "run_autonomous_research.py does not pass venue into run_loop.py")
     record("run_loop_passes_venue_to_project", file_contains(ROOT / "scripts/run_loop.py", "run_cmd.extend([\"--venue\", args.venue])"), "run_loop.py does not pass venue into run_project.py")
-    record("run_project_passes_venue_to_team", file_contains(ROOT / "scripts/run_project.py", "run_llm_research_team.py") and (file_contains(ROOT / "scripts/run_project.py", "[\"--venue\", args.venue]") or file_contains(ROOT / "scripts/run_project.py", "['--venue', args.venue]")), "run_project.py does not pass venue into LLM team")
+    record("run_project_no_removed_team_route", not file_contains(ROOT / "scripts/run_project.py", removed_team_script), "removed downstream team route is still referenced")
+    record("run_coding_agent_forces_claude", file_contains(ROOT / "scripts/run_coding_agent.py", "effective_backend = \"claude\"") or file_contains(ROOT / "scripts/run_coding_agent.py", "return \"claude\""), "run_coding_agent.py should force Claude Code downstream")
     record("run_project_passes_venue_to_memory", file_contains(ROOT / "scripts/run_project.py", "update_evolution_memory.py") and file_contains(ROOT / "scripts/run_project.py", "'--venue', args.venue"), "run_project.py does not pass venue into evolution memory")
 
-    llm_ready = llm_available(cfg)
-    checks.append({"name": "llm_backend_ready", "ok": llm_ready, "detail": "" if llm_ready else llm_disabled_reason(cfg)})
-    if not llm_ready:
-        warnings.append(f"LLM backend not configured: {llm_disabled_reason(cfg)}; fallback mode should still work.")
+    find_llm_ready = llm_available(cfg)
+    checks.append({"name": "find_llm_backend_ready", "ok": find_llm_ready, "detail": "" if find_llm_ready else llm_disabled_reason(cfg)})
+    if not find_llm_ready:
+        warnings.append(f"Find LLM backend not configured: {llm_disabled_reason(cfg)}; discovery can still show deterministic/source blockers, but LLM scoring and Read/Idea/Plan fallback need configuration.")
 
     machine = load_json(paths.reports / "machine_profile.json", {})
     deps = machine.get("dependencies", {}) if isinstance(machine, dict) else {}
@@ -110,16 +112,13 @@ def main() -> None:
 
     required_state = [
         paths.reports / "machine_profile.md", paths.reports / "healthcheck.md", paths.reports / "workflow_connectivity.md",
-        paths.planning / "llm_research_team.md", paths.planning / "next_actions.md", paths.reports / "iteration_reflection.md",
+        paths.planning / "next_actions.md", paths.reports / "iteration_reflection.md",
     ]
     for path in required_state:
         record(f"artifact_exists:{path.relative_to(paths.root)}", path.exists() and path.stat().st_size > 0, "missing or empty")
 
     if args.run_fallback_team:
-        proc = run([sys.executable, "scripts/run_llm_research_team.py", "--project", args.project, "--prompt", "pipeline runnability audit"] + (["--venue", args.venue] if args.venue else []))
-        record("llm_research_team_runs_or_fallbacks", proc.returncode == 0, (proc.stderr or proc.stdout)[-4000:])
-        state = load_json(paths.state / "llm_research_team_state.json", {})
-        record("llm_research_team_has_roles", len(state.get("roles", [])) >= 7 if isinstance(state, dict) else False, "expected at least 7 staged roles")
+        checks.append({"name": "deprecated_run_fallback_team_option_ignored", "ok": True, "detail": "The downstream project route is Claude Code; this compatibility flag no longer launches a separate team."})
 
     paper_state = load_json(paths.root / "paper" / "metadata" / "paper_pipeline.json", {})
     if paper_state:
@@ -142,7 +141,13 @@ def main() -> None:
     paths.reports.mkdir(parents=True, exist_ok=True)
     (paths.state / "pipeline_runnability.json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
-    lines = ["# Pipeline Runnability Audit\n\n", f"- project: {args.project}\n", f"- venue: {args.venue or 'not specified'}\n", f"- issue_count: {len(issues)}\n", f"- warning_count: {len(warnings)}\n\n"]
+    lines = [
+        "# Pipeline Runnability Audit\n\n",
+        f"- project: {args.project}\n",
+        f"- venue: {args.venue or 'not specified'}\n",
+        f"- issue_count: {len(issues)}\n",
+        f"- warning_count: {len(warnings)}\n\n",
+    ]
     if issues:
         lines.append("## Issues\n")
         for issue in issues:
@@ -153,14 +158,10 @@ def main() -> None:
         lines.append("\n## Warnings\n")
         for warning in warnings:
             lines.append(f"- {warning}\n")
-    lines.append("\n## Checks\n")
-    for check in checks:
-        lines.append(f"- {check['name']}: {check['ok']} | {check.get('detail', '')}\n")
-    out = paths.reports / "pipeline_runnability.md"
-    out.write_text("".join(lines), encoding="utf-8")
-    print(out)
-    print(f"issues={len(issues)} warnings={len(warnings)}")
-    raise SystemExit(0 if not issues else 1)
+    (paths.reports / "pipeline_runnability.md").write_text("".join(lines), encoding="utf-8")
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+    if issues:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

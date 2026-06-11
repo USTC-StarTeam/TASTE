@@ -181,8 +181,8 @@ def fast_supervisor_step(project: str, venue: str, use_llm: bool, total_timeout_
 def supervisor_step(project: str, venue: str, max_launches: int, use_llm: bool, timeout_sec: int) -> dict:
     env = base_env(use_llm)
     record: dict = {'started_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'project': project, 'venue': venue, 'mode': 'full_cycle', 'commands': []}
-    auto_cmd = [sys.executable, 'scripts/run_autonomous_scientist.py', '--project', project, '--venue', venue, '--iterations', '1', '--max-launches', str(max_launches)]
-    record['commands'].append(run(auto_cmd, timeout=timeout_sec, env=env, label='run_autonomous_scientist'))
+    auto_cmd = [sys.executable, 'scripts/run_autonomous_research.py', '--project', project, '--venue', venue, '--iterations', '1', '--execute-plan', '--max-launches', str(max_launches)]
+    record['commands'].append(run(auto_cmd, timeout=timeout_sec, env=env, label='run_autonomous_research'))
     maintenance = [
         ('build_blocker_resolution_packet', [sys.executable, 'scripts/build_blocker_resolution_packet.py', '--project', project, '--venue', venue]),
         ('audit_paper_evidence', [sys.executable, 'scripts/audit_paper_evidence.py', '--project', project, '--venue', venue]),

@@ -6,7 +6,7 @@ allowed-tools: Bash Read Grep Glob Edit Write
 
 # Writing Module
 
-This module is the only public writing capability. It may use local source-method provenance under `.claude/method_provenance` and read-only upstream material under `third_party`, but Workflow prompts, logs, UI text, and generated manuscripts must refer to this as the writing module.
+This module is the public writing capability. It uses TASTE native writing contracts, evidence gates, and read-only project artifacts; prompts, logs, UI text, and generated manuscripts must refer to it as the writing module.
 
 ## Role
 

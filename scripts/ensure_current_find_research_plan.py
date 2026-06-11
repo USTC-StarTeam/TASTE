@@ -17,8 +17,10 @@ from pathlib import Path
 from typing import Any
 
 from literature_policy import build_literature_policy, core_topic_fit_from_text, score_paper
+from llm_client import call_llm, llm_available, llm_disabled_reason
 from project_paths import ROOT, build_paths, configured_max_ideas, load_project_config, management_python
 from project_config import project_target_venue
+from runtime_env import find_binary as runtime_find_binary
 from auto_research.paths import LEGACY_RUNS_DIR, RUNS_DIR
 
 
@@ -264,6 +266,7 @@ CURRENT_FIND_JSON_ARTIFACT_NAMES = ("read_results.json", "ideas.json", "plans.js
 CURRENT_FIND_DEEP_READ_FRAGMENT_DIR_NAME = "current_find_deep_read_fragments"
 CURRENT_FIND_DEEP_READ_FRAGMENT_SOURCE = "claude_subagent_deep_read_fragment"
 CURRENT_FIND_DEEP_READ_FRAGMENT_REPAIR_SOURCE = "claude_subagent_deep_read_fragment_repair"
+LLM_CURRENT_FIND_FALLBACK_SOURCE = "llm_current_find_fallback"
 CURRENT_FIND_DEEP_READ_FRAGMENT_SOURCES = {CURRENT_FIND_DEEP_READ_FRAGMENT_SOURCE, CURRENT_FIND_DEEP_READ_FRAGMENT_REPAIR_SOURCE}
 
 
@@ -992,6 +995,8 @@ def _idea_score_audit_ready(row: dict[str, Any]) -> bool:
         audit = row.get("objective_score_audit") if isinstance(row.get("objective_score_audit"), dict) else {}
     mode = str(audit.get("mode") or audit.get("source") or "").strip().lower()
     status = str(audit.get("status") or "").strip().lower()
+    if mode in {"llm_fallback", LLM_CURRENT_FIND_FALLBACK_SOURCE} and status in {"completed", "complete", "pass", "passed"}:
+        return True
     return bool(
         audit.get("subagent_used") is True
         and mode in {"task_subagent", "subagent", "claude_task_subagent"}
@@ -1768,6 +1773,8 @@ def _reading_subagent_audit_ok(row: dict[str, Any]) -> bool:
     if "subagent" in source or "task" in source:
         delegated = True
     status = str(row.get("subagent_status") or audit.get("status") or "").strip().lower()
+    if (mode in {"llm_fallback", LLM_CURRENT_FIND_FALLBACK_SOURCE} or source == LLM_CURRENT_FIND_FALLBACK_SOURCE) and status in {"completed", "complete", "pass", "passed"}:
+        return True
     if delegated and status not in {"blocked", "failed", "unavailable", "missing"}:
         return True
     return False
@@ -1831,6 +1838,7 @@ def _subagent_reading_audit_report(readings: list[dict[str, Any]], paths: Any, r
     log_ok = _session_log_has_subagent_usage(paths, run_id)
     expected = len(valid_rows)
     fragment_delivery_covers_readings = bool(expected and len(fragment_ok) >= expected)
+    llm_fallback_covers_readings = bool(expected and len([row for row in valid_rows if str((row.get("deep_read_audit") if isinstance(row.get("deep_read_audit"), dict) else {}).get("source") or row.get("deep_read_source") or "").strip() == LLM_CURRENT_FIND_FALLBACK_SOURCE]) >= expected)
     return {
         "policy_version": FULL_TEXT_SUBAGENT_POLICY_VERSION,
         "expected_reading_count": expected,
@@ -1839,9 +1847,10 @@ def _subagent_reading_audit_report(readings: list[dict[str, Any]], paths: Any, r
         "fragment_delivery_audit_count": len(fragment_ok),
         "fragment_delivery_audit_titles": fragment_ok[:20],
         "fragment_delivery_covers_readings": fragment_delivery_covers_readings,
+        "llm_fallback_covers_readings": llm_fallback_covers_readings,
         "session_log_has_task_or_subagent": log_ok,
-        "valid": bool(expected and len(per_row_ok) >= expected and (log_ok or fragment_delivery_covers_readings)),
-        "policy": "Main Claude Code must delegate every recommended paper to an auditable full-text deep-reading subtask and record that delegation in each reading row. Per-paper current_find_deep_read_fragments are accepted as auditable subtask delivery records when they cover every recommended reading. Short main-session summaries are not accepted as deep reading.",
+        "valid": bool(expected and len(per_row_ok) >= expected and (log_ok or fragment_delivery_covers_readings or llm_fallback_covers_readings)),
+        "policy": "Main Claude Code must delegate every recommended paper to an auditable full-text deep-reading subtask. Only when the Claude CLI is unavailable may TASTE accept explicit llm_current_find_fallback rows; that fallback is marked as LLM-authored and is not used for environment/experiment/paper execution.",
     }
 
 
@@ -4373,9 +4382,9 @@ def maybe_repair_current_find_takeover(project: str, paths, taste_dir: Path, run
 CURRENT_FIND_MAX_TAKEOVER_REPAIR_ATTEMPTS = 3
 
 CLAUDE_TAKEOVER_SOURCE = "claude_code_current_find_takeover"
-CURRENT_FIND_READ_ARTIFACT_SOURCES = {CLAUDE_TAKEOVER_SOURCE, "auto_read_recommended_articles", "taste_auto_read", "current_find_bridge", "current_find_bridge_compatibility_only"}
-CURRENT_FIND_IDEA_ARTIFACT_SOURCES = {CLAUDE_TAKEOVER_SOURCE, "taste_auto_idea", "current_find_bridge", "current_find_bridge_compatibility_only"}
-CURRENT_FIND_PLAN_ARTIFACT_SOURCES = {CLAUDE_TAKEOVER_SOURCE, "taste_auto_plan", "current_find_bridge", "current_find_bridge_compatibility_only"}
+CURRENT_FIND_READ_ARTIFACT_SOURCES = {CLAUDE_TAKEOVER_SOURCE, LLM_CURRENT_FIND_FALLBACK_SOURCE, "auto_read_recommended_articles", "taste_auto_read", "current_find_bridge", "current_find_bridge_compatibility_only"}
+CURRENT_FIND_IDEA_ARTIFACT_SOURCES = {CLAUDE_TAKEOVER_SOURCE, LLM_CURRENT_FIND_FALLBACK_SOURCE, "taste_auto_idea", "current_find_bridge", "current_find_bridge_compatibility_only"}
+CURRENT_FIND_PLAN_ARTIFACT_SOURCES = {CLAUDE_TAKEOVER_SOURCE, LLM_CURRENT_FIND_FALLBACK_SOURCE, "taste_auto_plan", "current_find_bridge", "current_find_bridge_compatibility_only"}
 
 
 def _current_find_execution_contract(paths: Any) -> dict[str, Any]:
@@ -4421,6 +4430,8 @@ def _state_source_for_current_artifacts(read_payload: Any, idea_payload: Any, pl
         str((idea_payload if isinstance(idea_payload, dict) else {}).get("source") or "").strip(),
         str((read_payload if isinstance(read_payload, dict) else {}).get("source") or "").strip(),
     ]
+    if any(source == LLM_CURRENT_FIND_FALLBACK_SOURCE for source in sources):
+        return LLM_CURRENT_FIND_FALLBACK_SOURCE
     if any(source and source != CLAUDE_TAKEOVER_SOURCE for source in sources):
         return "current_find_execution_contract"
     return CLAUDE_TAKEOVER_SOURCE
@@ -6846,6 +6857,355 @@ def update_frontend_state(paths, run_id: str, readings: list[dict[str, Any]], id
         save_json(full_cycle_path, full_cycle)
 
 
+
+def _current_find_claude_available(project: str, cfg: dict[str, Any]) -> bool:
+    try:
+        return bool(runtime_find_binary("claude", project=project, cfg=cfg))
+    except Exception:
+        return bool(shutil.which("claude"))
+
+
+def _extract_llm_json_object(content: str) -> dict[str, Any]:
+    text = str(content or "").strip()
+    for match in re.finditer(r"```(?:json)?\s*(.*?)```", text, re.I | re.S):
+        block = match.group(1).strip()
+        if not block:
+            continue
+        try:
+            payload = json.loads(block)
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            continue
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            payload, _end = decoder.raw_decode(text[index:])
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}
+
+
+def _packet_entry_text_excerpt(entry: dict[str, Any], limit: int = 9000) -> str:
+    text_parts: list[str] = []
+    text_path = first_text(entry, "text_path") if isinstance(entry, dict) else ""
+    if text_path:
+        try:
+            path = Path(text_path).expanduser()
+            if path.exists():
+                text_parts.append(path.read_text(encoding="utf-8", errors="replace")[:limit])
+        except Exception:
+            pass
+    for key in ["text", "body_text", "abstract", "summary"]:
+        value = str((entry or {}).get(key) or "").strip()
+        if value:
+            text_parts.append(value[:limit])
+    return "\n".join(part for part in text_parts if part).strip()[:limit]
+
+
+def _build_llm_current_find_prompt(project: str, cfg: dict[str, Any], run_id: str, papers: list[dict[str, Any]], full_text_packet: dict[str, Any], idea_count: int) -> str:
+    packet_index = _full_text_packet_index(full_text_packet)
+    rows: list[dict[str, Any]] = []
+    for idx, row in enumerate(papers, 1):
+        entry = _matching_full_text_packet_entry(row, packet_index)
+        rows.append({
+            "rank": idx,
+            "paper_id": first_text(row, "id", "paper_id", "entry_id") or _paper_key(row),
+            "title": first_text(row, "title"),
+            "venue": first_text(row, "venue", "source"),
+            "year": first_text(row, "year", "published", "updated"),
+            "url": first_text(row, "url", "abs_url"),
+            "pdf_url": first_text(row, "pdf_url"),
+            "abstract": first_text(row, "abstract_zh", "abstract", "summary"),
+            "find_reason": first_text(row, "fit_explanation_zh", "fit_explanation", "reason_zh", "reason", "recommendation_note_zh", "recommendation_note"),
+            "evidence_role": row.get("evidence_role") or "",
+            "evidence_tier": row.get("evidence_tier") or "",
+            "full_text_excerpt": _packet_entry_text_excerpt(entry if isinstance(entry, dict) else {}, 9000),
+        })
+    schema = {
+        "readings": [
+            {
+                "paper_id": "same as input paper_id",
+                "title": "same as input title",
+                "verdict": "core_reading | method_reference | contrast_or_boundary_reading",
+                "support_role": "core_method_reference | transferable_method_reference | contrast_or_boundary_reference",
+                "abstract_zh": "中文原论文摘要，至少260字，可翻译输入摘要但不能写推荐理由",
+                "motivation_zh": "中文动机，至少180字",
+                "method_details_zh": "中文详细方法，至少650字",
+                "experiments_zh": "中文实验设置与结果，至少420字",
+                "limitations_zh": "中文局限，至少220字",
+                "method_advantages_zh": ["至少两条具体中文优点"],
+                "method_disadvantages_zh": ["至少两条具体中文不足"],
+                "full_text_available": True,
+                "full_text_status": "pdf_text_read | html_text_read | full_text_read",
+            }
+        ],
+        "ideas": [
+            {
+                "id": "idea-current-find-001",
+                "title": "中文标题",
+                "status": "approved_for_planning",
+                "new_method": "详细新方法，至少120字",
+                "initial_experiment": "初步实验，至少120字；不得绑定具体 repo_path 或训练命令",
+                "inspired_by": [{"title": "paper title", "paper_id": "paper id", "reason": "如何启发"}],
+                "objective_scores": {"novelty": 8, "evidence_alignment": 8, "feasibility": 8, "experimentability": 8, "risk_control": 8, "overall": 8},
+                "score": 8,
+                "idea_score": 8,
+            }
+        ],
+        "plans": [
+            {
+                "plan_id": "plan-idea-current-find-001",
+                "idea_id": "idea-current-find-001",
+                "title": "中文标题",
+                "steps": ["环境阶段选择基底前不得绑定 repo/data/command", "最小实验与坏例切片"],
+                "selected_for_execution": True,
+                "execute_next": True,
+                "execution_selection": {"selected": True, "selected_by": "llm_fallback_after_deep_read", "reason": "为什么唯一选择"},
+            }
+        ],
+        "targeted_search_queries": ["至少三个后续补检索主题"],
+    }
+    return (
+        f"你是 TASTE 项目 {project} 的 Read/Idea/Plan 兜底 LLM。Claude Code CLI 不可用，因此只允许你完成 Find 后面的精读、idea、plan 结构化产物；"
+        "你不得执行环境配置、实验、代码修改、论文撰写或 claim promotion。\n"
+        f"当前 run_id={run_id}，需要精读所有 {len(rows)} 篇用户可见推荐论文，并生成 {idea_count} 个 idea 与 {idea_count} 个 plan。\n"
+        "必须基于 full_text_excerpt 写中文精读；如果 excerpt 为空，必须在对应 reading 中明确 full_text_available=false 且说明不可访问原因，不能伪装全文已读。\n"
+        "Find/Read/Idea/Plan 阶段严禁写 repo_path、具体数据集训练命令或 ready_to_execute；环境阶段后续由 Claude Code 决定基底。\n"
+        "plans 中必须且只能有一个 selected_for_execution=true / execute_next=true，其余 plan 必须显式 false。\n"
+        "只返回 JSON，不要 Markdown。JSON schema 示例：\n"
+        f"{json.dumps(schema, ensure_ascii=False, indent=2)}\n\n"
+        "输入论文：\n"
+        f"{json.dumps(rows, ensure_ascii=False, indent=2)}\n"
+    )
+
+
+def _llm_row_index(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    index: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for key in _reading_identity_values(row) or _identity_values(row):
+            index.setdefault(key, row)
+        title = norm_title(row.get("title") or row.get("paper_title"))
+        if title:
+            index.setdefault(f"title:{title}", row)
+    return index
+
+
+def _normalize_llm_fallback_readings(raw_rows: list[dict[str, Any]], papers: list[dict[str, Any]], full_text_packet: dict[str, Any], cfg: dict[str, Any], run_id: str, model: str) -> list[dict[str, Any]]:
+    raw_index = _llm_row_index(raw_rows)
+    packet_index = _full_text_packet_index(full_text_packet)
+    readings: list[dict[str, Any]] = []
+    for idx, find_row in enumerate(papers, 1):
+        raw = _best_candidate_for_find_row(raw_index, raw_rows, find_row) or (raw_rows[idx - 1] if idx - 1 < len(raw_rows) and isinstance(raw_rows[idx - 1], dict) else {})
+        base = build_reading(find_row, cfg)
+        clean = _merge_find_metadata_into_reading({**base, **(raw if isinstance(raw, dict) else {})}, find_row)
+        clean.setdefault("paper_id", first_text(find_row, "id", "paper_id", "entry_id") or _paper_key(find_row))
+        clean["title"] = first_text(find_row, "title") or first_text(clean, "title")
+        clean = normalize_reading_full_text_evidence(clean, _matching_full_text_packet_entry(clean or find_row, packet_index))
+        audit = clean.get("deep_read_audit") if isinstance(clean.get("deep_read_audit"), dict) else {}
+        audit = dict(audit)
+        audit.update({
+            "mode": "llm_fallback",
+            "source": LLM_CURRENT_FIND_FALLBACK_SOURCE,
+            "status": "completed",
+            "subagent_used": False,
+            "model": model,
+            "run_id": run_id,
+        })
+        clean["deep_read_audit"] = audit
+        clean["subagent_deep_read"] = False
+        clean["deep_read_source"] = LLM_CURRENT_FIND_FALLBACK_SOURCE
+        clean["source"] = LLM_CURRENT_FIND_FALLBACK_SOURCE
+        readings.append(_sanitize_reading_public_fields(clean))
+    positive_ids, _ = _current_positive_identities({"strong_recommendations": papers})
+    return _enforce_current_find_claim_policy(readings, positive_ids)
+
+
+def _normalize_llm_fallback_ideas(raw_rows: list[dict[str, Any]], idea_count: int, readings: list[dict[str, Any]], model: str) -> list[dict[str, Any]]:
+    strong_refs = [_paper_public_ref(row) for row in readings if row.get("claim_ready_anchor")] or [_paper_public_ref(row) for row in readings[:6]]
+    ideas: list[dict[str, Any]] = []
+    pending_target = {"selection_stage": ENVIRONMENT_SELECTION_STAGE, "status": "waiting_for_environment_base_selection", "repo_path": "", "repo_name": "", "dataset_contract": {"status": "not_selected_until_environment_stage"}}
+    for idx, raw in enumerate([row for row in raw_rows if isinstance(row, dict)][:idea_count], 1):
+        idea = dict(raw)
+        idea_id = str(idea.get("id") or idea.get("idea_id") or f"idea-current-find-{idx:03d}").strip()
+        idea["id"] = idea_id
+        idea["idea_id"] = str(idea.get("idea_id") or idea_id)
+        idea.setdefault("title", f"current Find LLM fallback idea {idx}")
+        idea.setdefault("status", "approved_for_planning")
+        idea["recommendation"] = "wait_for_environment_base_selection"
+        idea["source"] = LLM_CURRENT_FIND_FALLBACK_SOURCE
+        idea["implementation_target"] = pending_target
+        idea["inspired_by"] = _normalize_inspired_refs(idea.get("inspired_by"), as_list(idea.get("supporting_papers")) or strong_refs)
+        idea.setdefault("supporting_papers", strong_refs)
+        scores = _idea_objective_scores(idea)
+        if scores:
+            idea.setdefault("objective_scores", scores)
+            if _numeric_or_none(idea.get("score")) is None and scores.get("overall") is not None:
+                idea["score"] = scores["overall"]
+            if _numeric_or_none(idea.get("idea_score")) is None and scores.get("overall") is not None:
+                idea["idea_score"] = scores["overall"]
+        audit = idea.get("idea_score_audit") if isinstance(idea.get("idea_score_audit"), dict) else {}
+        audit = dict(audit)
+        audit.update({"mode": "llm_fallback", "source": LLM_CURRENT_FIND_FALLBACK_SOURCE, "status": "completed", "subagent_used": False, "model": model})
+        idea["idea_score_audit"] = audit
+        idea["guardrail"] = "This Read/Idea/Plan artifact was generated by LLM fallback only because Claude Code CLI was unavailable; environment, experiment, and paper execution remain Claude Code-only."
+        ideas.append(idea)
+    return ideas
+
+
+def _normalize_llm_fallback_plans(raw_rows: list[dict[str, Any]], ideas: list[dict[str, Any]], model: str) -> list[dict[str, Any]]:
+    plans: list[dict[str, Any]] = []
+    for idx, idea in enumerate(ideas, 1):
+        raw = raw_rows[idx - 1] if idx - 1 < len(raw_rows) and isinstance(raw_rows[idx - 1], dict) else {}
+        plan = dict(raw)
+        idea_id = str(idea.get("id") or idea.get("idea_id") or f"idea-current-find-{idx:03d}")
+        plan.setdefault("plan_id", f"plan-{idea_id}")
+        plan["idea_id"] = str(plan.get("idea_id") or idea_id)
+        plan.setdefault("title", idea.get("title") or f"current Find LLM fallback plan {idx}")
+        plan.setdefault("status", "waiting_for_environment_base_selection")
+        plan["source"] = LLM_CURRENT_FIND_FALLBACK_SOURCE
+        plan.setdefault("new_method", idea.get("new_method") or idea.get("hypothesis") or "")
+        plan.setdefault("initial_experiment", idea.get("initial_experiment") or idea.get("min_experiment") or "")
+        plan.setdefault("steps", ["环境阶段先由 Claude Code 选择并审计基底。", "通过 repo/data/env/protocol gate 后再执行最小实验和坏例切片。"])
+        selection = plan.get("execution_selection") if isinstance(plan.get("execution_selection"), dict) else {}
+        if plan.get("selected_for_execution") is True or plan.get("execute_next") is True or selection.get("selected") is True:
+            plan["selected_for_execution"] = True
+            plan["execute_next"] = True
+            plan["execution_selection"] = {**selection, "selected": True, "selected_by": selection.get("selected_by") or "llm_fallback_after_deep_read", "source": LLM_CURRENT_FIND_FALLBACK_SOURCE}
+        elif plan.get("selected_for_execution") is False or plan.get("execute_next") is False or selection.get("selected") is False:
+            plan["selected_for_execution"] = False
+            plan["execute_next"] = False
+            plan["execution_selection"] = {**selection, "selected": False, "selected_by": selection.get("selected_by") or "not_selected_candidate_backlog", "source": LLM_CURRENT_FIND_FALLBACK_SOURCE}
+        plan["llm_fallback_audit"] = {"mode": "llm_fallback", "source": LLM_CURRENT_FIND_FALLBACK_SOURCE, "status": "completed", "model": model}
+        plan["guardrail"] = "Plan can only feed environment-stage base selection; experiment and paper execution remain Claude Code-only."
+        plans.append(plan)
+    return plans
+
+
+def run_llm_current_find_fallback(project: str, paths, cfg: dict[str, Any], taste_dir: Path, run_id: str, find_results: dict[str, Any], papers: list[dict[str, Any]], effective_read_limit: int, idea_count: int, find_revision: dt.datetime | None) -> int:
+    generated_at = now_iso()
+    result_path = paths.state / "current_find_llm_fallback_result.json"
+    prompt_path = paths.state / "current_find_llm_fallback_prompt.md"
+    if not llm_available(cfg):
+        payload = {
+            "status": "blocked_claude_unavailable_and_llm_unavailable",
+            "source": LLM_CURRENT_FIND_FALLBACK_SOURCE,
+            "run_id": run_id,
+            "generated_at": generated_at,
+            "reason": llm_disabled_reason(cfg),
+            "policy": "Read/Idea/Plan may fall back to LLM only when Claude Code CLI is unavailable and the project LLM is configured. Environment, experiment, and paper stages do not use this fallback.",
+        }
+        save_json(result_path, payload)
+        save_json(paths.state / "current_find_research_plan.json", payload)
+        update_frontend_state(paths, run_id, [], [], [])
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 2
+    full_text_packet = load_full_text_packet_from_taste_dir(taste_dir, run_id)
+    prompt = _build_llm_current_find_prompt(project, cfg, run_id, papers[:effective_read_limit], full_text_packet, idea_count)
+    prompt_path.write_text(prompt, encoding="utf-8")
+    llm_cfg = dict(cfg)
+    llm_section = dict(cfg.get("llm") or {}) if isinstance(cfg.get("llm"), dict) else {}
+    llm_section["response_format"] = "json_object"
+    llm_cfg["llm"] = llm_section
+    try:
+        response = call_llm(prompt, llm_cfg, system_prompt="Return only valid JSON for the requested TASTE Read/Idea/Plan fallback artifacts.")
+        payload = _extract_llm_json_object(str(response.get("content") or ""))
+    except Exception as exc:
+        response = {"error": str(exc)}
+        payload = {}
+    model = str((response if isinstance(response, dict) else {}).get("model") or llm_section.get("model") or "")
+    raw_path = paths.state / "current_find_llm_fallback_raw_response.json"
+    save_json(raw_path, response)
+    if not isinstance(payload, dict) or not payload:
+        blocked = {"status": "blocked_llm_current_find_fallback_parse_failed", "source": LLM_CURRENT_FIND_FALLBACK_SOURCE, "run_id": run_id, "generated_at": generated_at, "raw_response_path": str(raw_path)}
+        save_json(result_path, blocked)
+        save_json(paths.state / "current_find_research_plan.json", blocked)
+        print(json.dumps(blocked, ensure_ascii=False, indent=2))
+        return 2
+    readings = _normalize_llm_fallback_readings([row for row in as_list(payload.get("readings")) if isinstance(row, dict)], papers[:effective_read_limit], full_text_packet, cfg, run_id, model)
+    ideas = _normalize_llm_fallback_ideas([row for row in as_list(payload.get("ideas")) if isinstance(row, dict)], idea_count, readings, model)
+    plans = _normalize_llm_fallback_plans([row for row in as_list(payload.get("plans")) if isinstance(row, dict)], ideas, model)
+    ideas, plans = enrich_public_projections(ideas, plans)
+    targeted_queries = [str(item).strip() for item in as_list(payload.get("targeted_search_queries")) if str(item).strip()]
+    min_required_readings = min(effective_read_limit, max(1, len(_current_recommendation_identities(find_results)[1]) or len(_current_positive_identities(find_results)[1])))
+    validation_ok, validation = validate_claude_readings_against_current_find(readings, find_results, min_required_readings, paths, run_id)
+    idea_issues = _idea_rows_contract_issues(ideas, idea_count)
+    content_ready = bool(validation_ok and len(readings) == min_required_readings and len(ideas) >= idea_count and not idea_issues and len(plans) >= idea_count and len(targeted_queries) >= 3)
+    selection_ready = current_find_selected_execution_ready(ideas, plans) if content_ready else False
+    ready = bool(content_ready and selection_ready)
+    selection_fields = current_find_selection_fields(ideas, plans, source=LLM_CURRENT_FIND_FALLBACK_SOURCE, executable=ready)
+    read_payload = {"run_id": run_id, "source": LLM_CURRENT_FIND_FALLBACK_SOURCE, "generated_at": generated_at, "readings": readings, "reading_validation": validation, "targeted_search_queries": targeted_queries, "full_text_packet": full_text_packet_summary(full_text_packet), **selection_fields}
+    idea_payload = {"run_id": run_id, "source": LLM_CURRENT_FIND_FALLBACK_SOURCE, "generated_at": generated_at, "ideas": ideas, "targeted_search_queries": targeted_queries, **selection_fields}
+    plan_payload = {"run_id": run_id, "source": LLM_CURRENT_FIND_FALLBACK_SOURCE, "generated_at": generated_at, "plans": plans, "targeted_search_queries": targeted_queries, **selection_fields}
+    save_json(taste_dir / "read_results.json", read_payload)
+    save_json(taste_dir / "ideas.json", idea_payload)
+    save_json(taste_dir / "plans.json", plan_payload)
+    write_current_find_artifact_markdowns(paths, taste_dir, run_id, readings, ideas, plans)
+    fresh_plan = load_json(paths.state / "fresh_base_implementation_plan.json", {})
+    execution_plan = build_execution_plan(project, cfg, run_id, readings, ideas, plans, fresh_plan if isinstance(fresh_plan, dict) else {})
+    selection_issue = current_find_selected_execution_issue(ideas, plans) if content_ready else ""
+    observed = current_find_takeover_observed(taste_dir, readings, ideas, plans, targeted_queries, validation, idea_count)
+    if not content_ready:
+        failure_type = current_find_contract_failure_type(validation, observed, idea_count=idea_count)
+        status = "blocked_current_find_idea_contract_failed" if idea_issues else "blocked_llm_current_find_fallback_incomplete"
+        next_required = "rerun_current_find_llm_fallback" if failure_type != "full_text_evidence_missing" else "acquire_current_find_full_text_evidence"
+    elif not selection_ready:
+        failure_type = selection_issue or "missing_selected_plan"
+        status = "blocked_ambiguous_selected_plan" if failure_type == "ambiguous_selected_plan" else "blocked_missing_selected_plan"
+        next_required = "rerun_current_find_llm_fallback_select_single_best_plan"
+    else:
+        failure_type = ""
+        status = "selected_plan_ready"
+        next_required = "environment_stage_claude_code_base_selection"
+    execution_plan.update({
+        "project": project,
+        "source": LLM_CURRENT_FIND_FALLBACK_SOURCE,
+        "run_id": run_id,
+        "status": status,
+        "content_ready": content_ready,
+        "read_idea_plan_ready": content_ready,
+        "execution_ready": ready,
+        "takeover_ready": ready,
+        "claude_current_find_ready": False,
+        "llm_current_find_fallback_ready": content_ready,
+        "failure_type": failure_type,
+        "next_required_action": next_required,
+        "next_required_stage": next_required,
+        "base_selection_status": "waiting_for_environment_claude_code" if ready else "blocked_by_current_find_llm_fallback",
+        "current_find_reading_count": len(readings),
+        "current_find_idea_count": len(ideas),
+        "current_find_plan_count": len(plans),
+        "idea_schema_ready": not idea_issues and len(ideas) >= idea_count,
+        "idea_contract_issues": idea_issues[:20],
+        "reading_validation": validation,
+        "targeted_search_queries": targeted_queries,
+        "targeted_search_query_count": len(targeted_queries),
+        "observed": {**observed, "reading_validation": validation},
+        "llm_fallback": {"status": "completed", "model": model, "prompt_path": str(prompt_path), "raw_response_path": str(raw_path)},
+        "guardrail": "Claude Code CLI was unavailable, so only Read/Idea/Plan used LLM fallback. Environment, experiment, paper, code execution, and claim promotion remain Claude Code-only.",
+        **selection_fields,
+    })
+    execution_plan = _sync_current_find_plan_reading_validation(execution_plan, validation)
+    save_json(paths.state / "current_find_research_plan.json", execution_plan)
+    save_json(paths.state / "experiment_plan.json", execution_plan)
+    save_json(paths.state / "idea_candidates.json", {"generated_at": generated_at, "project": project, "source": LLM_CURRENT_FIND_FALLBACK_SOURCE, "current_find_run_id": run_id, "ideas": ideas, **selection_fields, "summary": {"idea_count": len(ideas), "current_find_run_id": run_id, "selected_idea_id": selection_fields.get("selected_idea_id", ""), "selected_plan_id": selection_fields.get("selected_plan_id", "")}})
+    save_json(paths.state / "taste_plan_bridge.json", {"source": LLM_CURRENT_FIND_FALLBACK_SOURCE, "run_id": run_id, "plans_json": plan_payload, "plan_markdown_path": str(taste_dir / "plan.md"), "plan_markdown_excerpt": (taste_dir / "plan.md").read_text(encoding="utf-8")[:12000], **selection_fields})
+    paper_quality = paper_quality_from_readings(readings, cfg, dt.datetime.now(dt.timezone.utc), run_id)
+    save_json(paths.state / "paper_quality.json", paper_quality)
+    write_text(paths.planning / "paper_quality.md", render_paper_quality_md(paper_quality))
+    update_literature_packet(paths, run_id, readings, ideas, plans)
+    update_frontend_state(paths, run_id, readings, ideas, plans)
+    result = {"status": status, "source": LLM_CURRENT_FIND_FALLBACK_SOURCE, "run_id": run_id, "readings": len(readings), "ideas": len(ideas), "plans": len(plans), "targeted_search_queries": len(targeted_queries), "ready": ready, "failure_type": failure_type, "prompt_path": str(prompt_path), "raw_response_path": str(raw_path)}
+    save_json(result_path, result)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if ready else 2
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Ensure The workflow uses the latest Find for reading, ideas, plans, and Claude Code execution planning without launching raw or duplicate Find jobs.")
     parser.add_argument("--project", required=True)
@@ -6894,6 +7254,19 @@ def main() -> int:
             if not papers:
                 raise SystemExit("current Find has no strong/articles/read candidates to read after full-text repair")
         find_revision = current_find_revision_time(paths, find_results)
+    if not args.skip_claude and not _current_find_claude_available(args.project, cfg):
+        return run_llm_current_find_fallback(
+            args.project,
+            paths,
+            cfg,
+            taste_dir,
+            run_id,
+            find_results,
+            papers,
+            effective_read_limit,
+            args.idea_count,
+            find_revision,
+        )
     if not args.skip_claude:
         existing_readings, existing_ideas, existing_plans = load_claude_outputs(taste_dir, run_id, find_results, effective_read_limit, paths.state, find_revision, paths, write_pending_validation=False)
         read_payload = load_json(taste_dir / "read_results.json", {})

@@ -12,7 +12,6 @@ from typing import Any
 
 from agent_state import append_agent_log, consume_guidance, mark_agent, upsert_agent
 from runtime_env import find_binary as runtime_find_binary, interactive_env as project_interactive_env
-from llm_client import llm_available, llm_disabled_reason
 from project_paths import build_paths, load_project_config, management_python
 from run_project import current_find_execution_contract
 from pipeline_guard import guard_fresh_base_blocker_entry
@@ -35,14 +34,12 @@ def agent_cfg(cfg: dict) -> dict:
 
 
 def backend_from_config(cfg: dict, override: str = "") -> str:
-    if override:
-        return override.strip().lower()
-    backend = str(agent_cfg(cfg).get("backend", "") or "").strip().lower()
-    return backend or "llm"
+    requested = str(override or agent_cfg(cfg).get("backend", "") or "claude").strip().lower()
+    return requested or "claude"
 
 
 def interactive_env(project: str = "", cfg: dict | None = None) -> dict[str, str]:
-    """Capture interactive bash exports such as NVM-installed claude/codex paths."""
+    """Capture interactive bash exports such as NVM-installed Claude Code paths."""
     return project_interactive_env(project or None, cfg)
 
 
@@ -63,50 +60,16 @@ def find_binary_from_runtime(binary: str, project: str, cfg: dict) -> str:
     return runtime_find_binary(binary, project=project or None, cfg=cfg)
 
 
-def find_codex(cfg: dict) -> str:
-    return find_binary("codex", cfg)
-
-
 def find_claude(cfg: dict) -> str:
     return find_binary("claude", cfg)
 
 
 def resolve_backend(cfg: dict, override: str = "") -> tuple[str, str, str]:
     requested = backend_from_config(cfg, override)
-    acfg = agent_cfg(cfg)
-    allow_claude_fallback = bool(acfg.get("allow_claude_fallback", True))
-    allow_codex_fallback = bool(acfg.get("allow_codex_fallback", True))
-    allow_llm_fallback = bool(acfg.get("allow_llm_fallback", True))
-    claude = find_claude(cfg)
-    codex = find_codex(cfg)
-
-    if requested == "claude":
-        if claude:
-            return requested, "claude", ""
-        if allow_codex_fallback and codex:
-            return requested, "codex", "claude-not-found"
-        if allow_llm_fallback and llm_available(cfg):
-            return requested, "llm", "claude-not-found"
-        return requested, "claude", "claude-not-found"
-    if requested == "codex":
-        if codex:
-            return requested, "codex", ""
-        if allow_claude_fallback and claude:
-            return requested, "claude", "codex-not-found"
-        if allow_llm_fallback and llm_available(cfg):
-            return requested, "llm", "codex-not-found"
-        return requested, "codex", "codex-not-found"
-    if requested == "llm":
-        if llm_available(cfg):
-            return requested, "llm", ""
-        if allow_claude_fallback and claude:
-            return requested, "claude", f"llm-unavailable:{llm_disabled_reason(cfg)}"
-        if allow_codex_fallback and codex:
-            return requested, "codex", f"llm-unavailable:{llm_disabled_reason(cfg)}"
-        return requested, "llm", llm_disabled_reason(cfg)
-    if requested in {"off", "none", "disabled"}:
-        return requested, requested, "coding-agent-disabled"
-    return requested, requested, f"unknown-backend:{requested}"
+    if find_claude(cfg):
+        reason = "" if requested == "claude" else f"backend-forced-claude:{requested}"
+        return requested, "claude", reason
+    return requested, "claude", "claude-not-found"
 
 
 def run(cmd: list[str], cwd: Path, env: dict | None = None, timeout: int | None = None, project: str = "", cfg: dict | None = None) -> subprocess.CompletedProcess[str]:
@@ -303,40 +266,6 @@ def build_prompt(agent_name: str, args: argparse.Namespace, repo: Path, trial_co
     )
 
 
-def run_llm_backend(args: argparse.Namespace, cfg: dict, paths, repo: Path) -> dict:
-    if not llm_available(cfg):
-        return {"return_code": 2, "stderr": llm_disabled_reason(cfg), "repair_success": False}
-    proc = run([
-        sys.executable, str(SCRIPTS / "run_llm_repair_loop.py"),
-        "--project", args.project,
-        "--method", args.method,
-        "--repo-path", str(repo),
-        "--command", args.command,
-        "--max-rounds", str(args.max_rounds),
-        "--request", args.request,
-        "--mode", args.mode,
-        "--trial-json", args.trial_json,
-    ] + (["--env-name", args.env_name] if args.env_name else []), ROOT, timeout=coding_timeout(cfg), project=args.project, cfg=cfg)
-    repair_state_path = paths.state / f"llm_repair_loop_{args.method}.json"
-    repair_state = load_json(repair_state_path, {})
-    return {
-        "return_code": proc.returncode,
-        "stdout": proc.stdout[-6000:],
-        "stderr": proc.stderr[-6000:],
-        "repair_success": bool(repair_state.get("success", False)),
-        "repair_state_path": str(repair_state_path),
-    }
-
-
-def run_codex_backend(args: argparse.Namespace, cfg: dict, repo: Path) -> dict:
-    codex = find_codex(cfg)
-    if not codex:
-        return {"return_code": 2, "stderr": "codex-not-found", "repair_success": False}
-    prompt = build_prompt("Codex", args, repo, read_trial_context(args.trial_json))
-    cmd = [codex, "exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "--cd", str(repo), prompt]
-    proc = run(cmd, repo, env=cli_env(codex, args.project, cfg), timeout=coding_timeout(cfg), project=args.project, cfg=cfg)
-    return {"return_code": proc.returncode, "stdout": proc.stdout[-6000:], "stderr": proc.stderr[-6000:], "repair_success": proc.returncode == 0, "binary": codex}
-
 
 def run_claude_backend(args: argparse.Namespace, cfg: dict, repo: Path) -> dict:
     claude = find_claude(cfg)
@@ -419,16 +348,7 @@ def main() -> None:
         "timeout_sec": coding_timeout(cfg),
     }
 
-    if backend in {"off", "none", "disabled"}:
-        out.update({"return_code": 2, "stderr": "coding-agent-disabled", "repair_success": False})
-    elif backend == "llm":
-        out.update(run_llm_backend(args, cfg, paths, repo))
-    elif backend == "codex":
-        out.update(run_codex_backend(args, cfg, repo))
-    elif backend == "claude":
-        out.update(run_claude_backend(args, cfg, repo))
-    else:
-        out.update({"return_code": 2, "stderr": f"unknown-backend:{backend}", "repair_success": False})
+    out.update(run_claude_backend(args, cfg, repo))
 
     out_path = paths.state / f"coding_agent_{args.method}.json"
     out_path.write_text(json.dumps(out, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

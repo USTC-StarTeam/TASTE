@@ -6,7 +6,7 @@
 ![Claude Code](https://img.shields.io/badge/Claude%20Code-project%20agent-6f42c1)
 ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
 
-**TASTE** 是一个本地优先的自动科研系统。它在论文发现、精读、idea、plan 流水线之上，加入项目级自动科研闭环：自动选择研究路线，审计可复现实验环境，调用 Claude Code/Codex 等项目代理执行代码与实验，记录证据链，并在满足证据门控后生成和修订论文。
+**TASTE** 是一个本地优先的自动科研系统。它在论文发现、精读、idea、plan 流水线之上，加入项目级自动科研闭环：自动选择研究路线，审计可复现实验环境，调用 Claude Code 项目代理执行代码与实验，记录证据链，并在满足证据门控后生成和修订论文。
 
 本仓库只包含框架代码、模板、网页和测试。真实研究项目目录 `projects/*` 默认被 Git 忽略，因为其中可能包含 API 配置、下载的仓库、数据集、实验日志、生成论文和未公开科研结论。
 
@@ -64,7 +64,7 @@ http://127.0.0.1:8765
 | 路径 | 作用 |
 | --- | --- |
 | `scripts/create_project.py` | 从模板创建 `projects/<project>/`。 |
-| `scripts/runtime_env.py` | 统一构造 PATH、PYTHONPATH、Node、Claude、Codex、管理 Python、实验 Python。 |
+| `scripts/runtime_env.py` | 统一构造 PATH、PYTHONPATH、Node、Claude Code、管理 Python、实验 Python。 |
 | `scripts/start_web.sh` | 启动本地 Web/API 服务。 |
 | `scripts/run_full_research_cycle.py` | 完整科研主循环入口。 |
 | `scripts/ensure_current_find_research_plan.py` | 让主控项目代理接管当前 Find 的 Read/Idea/Plan。 |
@@ -194,7 +194,6 @@ export OPENAI_API_KEY=<api-key>
 | `nvm_dir` | Node/NVM 根目录。 |
 | `node_bin` | Node.js 可执行目录。 |
 | `claude_path` | Claude Code 可执行文件路径。 |
-| `codex_path` | Codex 可执行文件路径。 |
 | `extra_path` | 额外 PATH。 |
 
 也可以用环境变量覆盖：
@@ -206,18 +205,17 @@ export CONDA_BASE=<path-to-conda-base>
 export NODE_BIN=<path-to-node-bin>
 ```
 
-网页 `运行环境` 面板用于保存 Claude/Codex/Node/管理 Python；`环境配置` 阶段用于保存实验 Conda/Python。
+网页 `运行环境` 面板用于保存 Claude Code/Node/管理 Python；`环境配置` 阶段用于保存实验 Conda/Python。
 
-### Claude Code / Codex
+### Claude Code
 
-如果需要项目代理执行代码、实验或论文修复，请先在本机安装并配置相应 CLI：
+如果需要项目代理执行代码、实验或论文修复，请先在本机安装并配置 Claude Code CLI：
 
 ```bash
 claude --version
-codex --version
 ```
 
-TASTE 只检测和调用用户已配置好的 `claude`/`codex` CLI，不写入、不覆盖 Claude Code 的账号、API key、base URL 或默认模型。系统不会把 `.claude/settings.json` 提交到 Git。公开仓库只保留 agents、commands、skills 模板。
+TASTE 只检测和调用用户已配置好的 `claude` CLI，不写入、不覆盖 Claude Code 的账号、API key、base URL 或默认模型。系统不会把 `.claude/settings.json` 提交到 Git。公开仓库只保留 agents、commands、skills 模板。
 
 ## 使用说明
 

@@ -120,7 +120,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--real-bootstrap-env", action="store_true")
     parser.add_argument("--max-launches", type=int)
     parser.add_argument("--conda-env", default="")
-    parser.add_argument("--coding-backend", default="")
+    parser.add_argument("--coding-backend", default="", help="Deprecated compatibility option; downstream execution uses Claude Code.")
     parser.add_argument("--venue", default="")
     parser.add_argument("--trajectory-rounds", type=int, default=1)
     parser.add_argument("--skip-trajectory-supervisor", action="store_true")
@@ -167,7 +167,7 @@ def main() -> int:
         "prompt": args.prompt or "",
         "topic": effective_loop_topic(args.project, args.topic, args.prompt, cfg, paths),
         "iterations": args.iterations,
-        "coding_backend": args.coding_backend or cfg.get("coding_agent", {}).get("backend", ""),
+        "coding_backend": "claude",
     }
     requests = load_json(paths.state / "natural_language_requests.json")
     if not isinstance(requests, list):
@@ -221,8 +221,6 @@ def main() -> int:
             run_cmd.extend(["--command-template", args.command_template])
         if args.max_launches is not None:
             run_cmd.extend(["--max-launches", str(args.max_launches)])
-        if args.coding_backend:
-            run_cmd.extend(["--coding-backend", args.coding_backend])
         if args.venue:
             run_cmd.extend(["--venue", args.venue])
         for method in args.parallel_method:

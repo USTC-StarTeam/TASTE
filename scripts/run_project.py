@@ -15,7 +15,6 @@ import time
 from pathlib import Path
 
 from experiment_contracts import load_audit_payload
-from llm_client import llm_available, llm_disabled_reason
 from project_paths import ROOT, build_paths, load_project_config
 from pipeline_guard import guard_fresh_base_blocker_entry
 
@@ -111,7 +110,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--prepare-env', action='store_true')
     parser.add_argument('--real-bootstrap-env', action='store_true')
     parser.add_argument('--max-launches', type=int)
-    parser.add_argument('--coding-backend', default='')
+    parser.add_argument('--coding-backend', default='', help='Deprecated compatibility option; experiment code execution always uses Claude Code.')
     parser.add_argument('--venue', default='')
     parser.add_argument('--deep-literature-survey', action='store_true', help='Run TASTE in full survey mode instead of fast initialization mode.')
     return parser.parse_args()
@@ -705,8 +704,7 @@ def load_method_overrides(paths) -> dict:
 
 
 def coding_backend_enabled(args: argparse.Namespace, cfg: dict) -> str:
-    requested = (args.coding_backend or cfg.get('coding_agent', {}).get('backend', 'llm') or 'llm').strip().lower()
-    return '' if requested in {'', 'off', 'none', 'disabled'} else requested
+    return 'claude'
 
 def coding_agent_timeout(cfg: dict) -> int:
     acfg = cfg.get('coding_agent', {}) if isinstance(cfg, dict) else {}
@@ -721,12 +719,12 @@ def coding_agent_timeout(cfg: dict) -> int:
     return parsed if env_value is not None else max(14400, parsed)
 
 
-def llm_team_timeout(cfg: dict) -> int:
+def project_agent_timeout(cfg: dict) -> int:
     acfg = cfg.get('coding_agent', {}) if isinstance(cfg, dict) else {}
     try:
-        return max(60, int(os.environ.get('LLM_TEAM_TIMEOUT_SEC') or acfg.get('llm_team_timeout_sec') or 600))
+        return max(60, int(os.environ.get('PROJECT_AGENT_TIMEOUT_SEC') or acfg.get('timeout_sec') or 1200))
     except Exception:
-        return 600
+        return 1200
 
 
 
@@ -1184,7 +1182,7 @@ def main() -> int:
                 run(taste_cmd, paths.root, paths.logs / '05a_finding_frontend.log', timeout=int(os.environ.get('TIMEOUT_SEC', '3600')) + 120)
             run([sys.executable, str(script_dir / 'sync_outputs.py'), '--project', args.project, '--allow-empty'], paths.root, paths.logs / '05a_taste_sync.log', timeout=120)
             run([sys.executable, str(script_dir / 'build_literature_tool_packet.py'), '--project', args.project] + (['--venue', args.venue] if args.venue else []), paths.root, paths.logs / '05ab_literature_tool_packet.log', timeout=180)
-            run([sys.executable, str(script_dir / 'run_llm_research_team.py'), '--project', args.project, '--topic', topic, '--roles', 'planner,researcher,critic', '--context-limit', '18000'] + (['--venue', args.venue] if args.venue else []), paths.root, paths.logs / '05aa_llm_research_team_preplan.log', timeout=llm_team_timeout(cfg))
+            (paths.logs / '05aa_current_find_read_idea_plan_route.log').write_text('downstream planning is handled by the current-Find Claude Code Read/Idea/Plan route; Find remains the only default LLM-scored module.\n', encoding='utf-8')
         run([sys.executable, str(script_dir / 'prepare_initialization.py'), '--project', args.project], paths.root, paths.logs / '05_prepare_initialization.log')
         run([sys.executable, str(script_dir / 'build_hypothesis_arena.py'), '--project', args.project], paths.root, paths.logs / '05c_hypothesis_arena.log')
         run([sys.executable, str(script_dir / 'assess_idea_candidates.py'), '--project', args.project], paths.root, paths.logs / '05ca_idea_candidates.log')
@@ -1213,14 +1211,8 @@ def main() -> int:
     run([sys.executable, str(script_dir / 'refresh_index_and_log.py'), '--project', args.project, '--log-entry', f'iteration topic={topic} discovery={discovery_mode or ["manual_only"]}'], paths.root, paths.logs / '08_refresh_index.log')
     run([sys.executable, str(script_dir / 'compile_prompt.py'), '--project', args.project], paths.root, paths.logs / '09_compile_prompt.log')
 
-    llm_enabled = cfg.get('loop', {}).get('llm_enabled', True) and not args.skip_llm
-    llm_status = 'skipped'
-    if llm_enabled:
-        if llm_available(cfg):
-            code = run([sys.executable, str(script_dir / 'run_llm_compile.py'), '--project', args.project], paths.root, paths.logs / '10_run_llm_compile.log')
-            llm_status = f'exit_{code}'
-        else:
-            llm_status = f'llm-unavailable-bootstrap-only:{llm_disabled_reason(cfg)}'
+    llm_status = 'find_only; downstream modules use Claude Code'
+    (paths.logs / '10_downstream_compile_route.log').write_text('downstream compile context is handled by Claude Code artifacts and deterministic audits; Find remains the only default LLM-scored module.\n', encoding='utf-8')
 
     if args.execute_plan:
         execute_parallel_plan(args, cfg, paths, script_dir)
@@ -1239,8 +1231,7 @@ def main() -> int:
     run([sys.executable, str(script_dir / 'build_research_trajectory_system.py'), '--project', args.project] + (['--venue', args.venue] if args.venue else []), paths.root, paths.logs / '13d_research_trajectory_system.log')
     run([sys.executable, str(script_dir / 'audit_paper_evidence.py'), '--project', args.project] + (['--venue', args.venue] if args.venue else []), paths.root, paths.logs / '13e_paper_evidence_gate.log')
     run([sys.executable, str(script_dir / 'build_blocker_action_plan.py'), '--project', args.project] + (['--venue', args.venue] if args.venue else []), paths.root, paths.logs / '13f_blocker_action_plan.log')
-    if not args.skip_llm:
-        run([sys.executable, str(script_dir / 'run_llm_research_team.py'), '--project', args.project, '--topic', topic, '--roles', 'planner,researcher,critic', '--context-limit', '18000'] + (['--venue', args.venue] if args.venue else []), paths.root, paths.logs / '13c_llm_research_team_postreflect.log', timeout=llm_team_timeout(cfg))
+    (paths.logs / '13c_project_agent_reflection_route.log').write_text('downstream reflection is handled by Claude Code artifacts and deterministic audits.\n', encoding='utf-8')
     run([sys.executable, str(script_dir / 'compile_prompt.py'), '--project', args.project], paths.root, paths.logs / '14_recompile_prompt.log')
     export_code = run([sys.executable, str(script_dir / 'export_obsidian.py'), '--project', args.project], paths.root, paths.logs / '15_export_obsidian.log')
     status_code = run([sys.executable, str(script_dir / 'report_status.py'), '--project', args.project], paths.root, paths.logs / '16_status.log')
@@ -1256,7 +1247,7 @@ def main() -> int:
         'parallel_methods': args.parallel_method,
         'executed_plan': args.execute_plan,
         'llm_status': llm_status,
-        'coding_backend': args.coding_backend or cfg.get('coding_agent', {}).get('backend', 'llm'),
+        'coding_backend': 'claude',
         'export_exit': export_code,
         'status_exit': status_code,
     })

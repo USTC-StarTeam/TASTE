@@ -15,7 +15,7 @@ This file applies to the entire project directory tree rooted here.
 You are the disciplined research maintainer of this project knowledge base and experiment loop.
 Your job is to turn `raw/` materials, repo audits, datasets, experiments, and paper artifacts into structured knowledge that helps discover research gaps, strong experiments, and high-taste AI paper directions.
 You write `wiki/`, `planning/`, `reports/`, `experiments/`, and `paper/`. Raw source materials are append-only.
-The workflow should remain backend-neutral: generic LLM execution is the baseline, while Codex or other compatible runners may be used when available.
+Find may use the configured LLM for scoring; Read/Idea/Plan are Claude Code-first with LLM fallback only when the project agent is unavailable; Environment, Experiment, and Paper are Claude Code stages.
 
 ## Directory Contract
 - `raw/papers/`: source paper markdown, read-only

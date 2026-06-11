@@ -260,7 +260,7 @@ def main() -> None:
         ], env)
     else:
         append_phase(record, paths, 'code_execute', 'coder_debugger', [
-            ([sys.executable, 'scripts/run_autonomous_scientist.py', '--project', args.project, '--venue', args.venue, '--iterations', '1', '--max-launches', '2'], args.cycle_timeout_sec),
+            ([sys.executable, 'scripts/run_autonomous_research.py', '--project', args.project, '--venue', args.venue, '--iterations', '1', '--execute-plan', '--max-launches', '2'], args.cycle_timeout_sec),
         ], env)
 
     append_phase(record, paths, 'evaluate', 'analyst', [

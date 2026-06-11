@@ -3775,7 +3775,7 @@ def fetch_arxiv(categories: list[str], max_items: int, start_date: str = "", end
     by_key: dict[str, dict] = {}
     start_date, end_date, date_window_source = _arxiv_date_window(start_date, end_date)
     categories = [category.strip() for category in (categories or []) if category.strip()] or ["cs.AI"]
-    full_scan = os.environ.get("ARXIV_FULL_SCAN", "0").lower() in {"1", "true", "yes", "on"}
+    full_scan = os.environ.get("ARXIV_FULL_SCAN", "1").lower() in {"1", "true", "yes", "on"}
     env_per_query = int(os.environ.get("ARXIV_PER_QUERY_LIMIT", "0") or 0)
     env_max_queries = int(os.environ.get("ARXIV_MAX_QUERIES", "0") or 0)
     env_timeout = int(os.environ.get("ARXIV_TIMEOUT_SEC", "0") or 0)
@@ -3783,7 +3783,7 @@ def fetch_arxiv(categories: list[str], max_items: int, start_date: str = "", end
     per_query_limit = max(10, min(100, env_per_query or int(per_query_limit or (100 if full_scan else 50))))
     max_queries = max(1, env_max_queries or int(max_queries or (len(categories) + len(topic_queries or []) if full_scan else 3)))
     arxiv_timeout = max(20, env_timeout or int(timeout_sec or 45))
-    total_limit = max(1, env_total_limit or (max_items if not full_scan else 5000))
+    total_limit = max(0, env_total_limit or (max_items if not full_scan else 0))
     status = {
         "source": "arxiv",
         "ok": False,
@@ -3839,9 +3839,9 @@ def fetch_arxiv(categories: list[str], max_items: int, start_date: str = "", end
             before = len(papers)
             for entry in entries:
                 _append_arxiv_entry(papers, by_key, entry, ns, query_label, query_text, start_date, end_date, fallback_query=fallback_query)
-                if len(papers) >= total_limit:
+                if total_limit and len(papers) >= total_limit:
                     status["limited"] = True
-                    status["message"] = f"Reached configured arXiv total_limit={total_limit}; increase ARXIV_MAX_TOTAL for deeper survey."
+                    status["message"] = f"Reached configured arXiv total_limit={total_limit}; increase ARXIV_MAX_TOTAL or use ARXIV_FULL_SCAN=1 for deeper survey."
                     return
             if log:
                 log(f"arXiv query {query_index}/{total_queries} collected {len(papers) - before} new papers on this page; total {len(papers)}")
@@ -3854,7 +3854,7 @@ def fetch_arxiv(categories: list[str], max_items: int, start_date: str = "", end
 
     for query_index, (query_label, query_text) in enumerate(queries, 1):
         run_query(query_index, len(queries), query_label, query_text)
-        if status.get("message", "").startswith("arXiv rate limited") or len(papers) >= total_limit or (not full_scan and len(papers) >= max_items):
+        if status.get("message", "").startswith("arXiv rate limited") or (total_limit and len(papers) >= total_limit) or (not full_scan and len(papers) >= max_items):
             break
     if not papers and fallback_queries:
         status["limited"] = True
@@ -3875,7 +3875,7 @@ def fetch_arxiv(categories: list[str], max_items: int, start_date: str = "", end
         status["message"] = "arXiv unavailable or query failed: " + " | ".join(status["errors"][:3])
     else:
         status["message"] = f"No arXiv papers found; queries={'; '.join(status['queries'])}"
-    return papers[:total_limit], status
+    return (papers[:total_limit] if total_limit else papers), status
 
 def fetch_huggingface(
     max_papers: int,

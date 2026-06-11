@@ -40,7 +40,9 @@ def _normalized_latex_sections(text: str) -> list[str]:
 
 def _canonical_sections_for_venue(project: str, venue: str) -> list[str]:
     policy = venue_submission_policy(venue, project=project) if venue else {}
-    raw = policy.get("canonical_sections") if isinstance(policy, dict) else []
+    raw = policy.get("canonical_sections", policy.get("paper_shape", {}).get("canonical_sections")) if isinstance(policy, dict) else []
+    if raw is None:
+        raw = []
     sections = [re.sub(r"[^a-z0-9 ]+", " ", str(item).lower()).strip() for item in raw if str(item).strip()]
     return sections or DEFAULT_CANONICAL_MANUSCRIPT_SECTIONS
 

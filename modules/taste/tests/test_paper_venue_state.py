@@ -63,6 +63,24 @@ def _load_repair_paper_preview_loop():
     return repair_paper_preview_loop
 
 
+def _load_resolve_venue_requirements():
+    scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import resolve_venue_requirements
+
+    return resolve_venue_requirements
+
+
+def _load_fetch_latex_template():
+    scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import fetch_latex_template
+
+    return fetch_latex_template
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -70,6 +88,111 @@ def _sha256(path: Path) -> str:
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def test_repository_clone_timeout_does_not_block_complete_official_venue_contract():
+    resolve = _load_resolve_venue_requirements()
+    payload = {
+        "status": "blocked",
+        "venue": "ICLR",
+        "track": "conference",
+        "official_sources": [
+            {
+                "url": "https://github.com/ICLR/Master-Template/blob/master/iclr2026/iclr2026_conference.tex",
+                "label": "official template tex",
+                "evidence": "Official template states the main-text page limit.",
+            }
+        ],
+        "page_policy": {
+            "body_page_max": 9,
+            "reference_page_max": 0,
+            "total_page_max": 0,
+            "source_type": "official_template_instruction",
+        },
+        "citation_policy": {
+            "min_verified_references": 40,
+            "source_type": "quality_target",
+            "estimated_references_per_page": 30,
+        },
+        "template": {
+            "family": "iclr",
+            "repository_url": "https://github.com/ICLR/Master-Template.git",
+            "archive_url": "https://github.com/ICLR/Master-Template/raw/master/iclr2026.zip",
+            "directory_hint": "iclr2026",
+            "main_tex": "iclr2026_conference.tex",
+            "documentclass": "article",
+            "required_files": ["iclr2026_conference.sty", "iclr2026_conference.bst"],
+        },
+        "venue_submission_policy": {
+            "status": "known",
+            "venue": "ICLR",
+            "body_page_max": 9,
+            "template_family": "iclr",
+            "reference_quality_target": 40,
+            "reference_target_source": "quality_target",
+        },
+        "venue_template_profile": {"family": "iclr", "documentclass": "article"},
+        "blockers": [
+            "official repository verification failed: git command timed out after 60s",
+            "official repository refresh failed",
+        ],
+    }
+
+    healed = resolve.heal_verified_venue_payload(payload)
+
+    assert healed["status"] == "ok"
+    assert not healed.get("blockers")
+    assert resolve.validate_payload(healed) == []
+
+
+def test_template_fetch_falls_back_to_official_archive_when_repository_clone_times_out(tmp_path, monkeypatch):
+    fetch = _load_fetch_latex_template()
+
+    def fail_repository(template, source_dir):
+        raise RuntimeError("git command timed out after 60s")
+
+    def fake_archive(archive_url, archive_dir, source_dir, directory_hint=""):
+        source_dir.mkdir(parents=True, exist_ok=True)
+        (source_dir / "iclr2026_conference.tex").write_text("template", encoding="utf-8")
+        return {
+            "source_kind": "archive",
+            "source_url": archive_url,
+            "archive_path": str(archive_dir / "iclr2026.zip"),
+            "source_subdir": directory_hint,
+        }
+
+    monkeypatch.setattr(fetch, "sync_from_repository", fail_repository)
+    monkeypatch.setattr(fetch, "sync_from_archive", fake_archive)
+
+    metadata = fetch.sync_from_repository_with_archive_fallback(
+        {
+            "repository_url": "https://github.com/ICLR/Master-Template.git",
+            "archive_url": "https://github.com/ICLR/Master-Template/raw/master/iclr2026.zip",
+            "directory_hint": "iclr2026",
+        },
+        tmp_path / "downloads",
+        tmp_path / "source",
+    )
+
+    assert metadata["source_kind"] == "archive"
+    assert metadata["repository_fallback_used"] is True
+    assert "timed out" in metadata["repository_fetch_error"]
+    assert (tmp_path / "source" / "iclr2026_conference.tex").exists()
+
+
+def test_template_fetched_requires_actual_template_source_or_format_pass():
+    project_bridge = _load_project_bridge()
+
+    assert not project_bridge._paper_template_fetched({
+        "venue_requirements_status": "ok",
+        "venue_requirements_ready": True,
+        "template_source": {"status": "failed-official-template-fetch"},
+    })
+    assert project_bridge._paper_template_fetched({
+        "venue_requirements_status": "ok",
+        "template_source": {"status": "ok", "official_template": True},
+    })
+    assert project_bridge._paper_template_fetched({"paper_venue_format_status": "pass"})
 
 
 def test_workspace_tool_path_uses_configurable_texlive_root(monkeypatch, tmp_path):

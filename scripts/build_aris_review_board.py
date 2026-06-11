@@ -34,7 +34,8 @@ def method_rows(experiments: list[dict]) -> dict[str, list[dict]]:
 
 def verdict_for(rows: list[dict]) -> dict:
     completed = [r for r in rows if str(r.get('status', '')).lower() in {'completed', 'success'}]
-    excluded = [r for r in completed if row_promotion_blockers(r)]
+    blocker_map = {id(r): row_promotion_blockers(r) for r in completed}
+    excluded = [r for r in completed if blocker_map.get(id(r))]
     audit_ready = [r for r in completed if r.get('audit_ready') and r not in excluded]
     metrics = [numeric(r.get('metric_value')) for r in audit_ready]
     metrics = [m for m in metrics if m is not None]
@@ -45,8 +46,8 @@ def verdict_for(rows: list[dict]) -> dict:
         if val is not None:
             tail_values.append(val)
     claim_support = sum(1 for r in audit_ready if str(r.get('claim_verdict', '')).lower() in {'support', 'supported', 'pass', 'partially_supported'})
-    counterexamples = sum(1 for r in audit_ready if str(r.get('counterexample_outcome', '')).strip())
-    bad_cases = sum(1 for r in audit_ready if r.get('bad_case_path') or r.get('bad_case_slices'))
+    counterexamples = sum(1 for r in audit_ready if 'missing_counterexample_outcome' not in blocker_map.get(id(r), []))
+    bad_cases = sum(1 for r in audit_ready if 'missing_bad_case_slices' not in blocker_map.get(id(r), []))
     synthetic_only = all(str(r.get('dataset', '')).startswith('synthetic') for r in audit_ready) if audit_ready else True
     best = max(metrics) if metrics else None
     weakest_tail = min(tail_values) if tail_values else None
@@ -56,7 +57,7 @@ def verdict_for(rows: list[dict]) -> dict:
     if not audit_ready:
         issues.append('no audit-ready run')
     for row in excluded[:3]:
-        issues.append(f"non-promotable evidence status: {row.get('experiment_id') or row.get('name')} ({', '.join(row_promotion_blockers(row)[:3])})")
+        issues.append(f"non-promotable evidence status: {row.get('experiment_id') or row.get('name')} ({', '.join(blocker_map.get(id(row), [])[:3])})")
     if bad_cases == 0:
         issues.append('no bad-case evidence')
     if counterexamples == 0:

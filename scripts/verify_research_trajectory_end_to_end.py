@@ -263,7 +263,6 @@ def verify_skills_and_prompts(paths) -> dict[str, Any]:
         check("skill_contracts_exported", isinstance(contracts, list) and len(contracts) >= len(required), evidence=[str(paths.state / "research_skill_contracts.json")], detail=f"contracts={len(contracts) if isinstance(contracts, list) else 'n/a'}"),
         check("claude_prompt_reads_long_horizon_assets", source_contains(SCRIPTS / "claude_project_session.py", ["research_graph_history", "research_evidence_manifest", "evolutionary_memory_ledger", "Optimize the whole trajectory", ".claude/skills"]), evidence=[str(SCRIPTS / "claude_project_session.py")]),
         check("coding_agent_reads_trajectory_assets", source_contains(SCRIPTS / "run_coding_agent.py", ["research_evidence_manifest", "research_graph_history", "evolutionary_memory_ledger", "research_trajectory_capability_audit"]), evidence=[str(SCRIPTS / "run_coding_agent.py")]),
-        check("llm_team_reads_trajectory_assets", source_contains(SCRIPTS / "run_llm_research_team.py", ["research_evidence_manifest", "research_graph_history", "evolutionary_memory_ledger", "research_trajectory_capability_audit"]), evidence=[str(SCRIPTS / "run_llm_research_team.py")]),
     ]
     return module_payload("skills_and_prompt_context_e2e", checks, {
         "skill_contract_count": len([path for path in skill_paths if path.exists()]),
@@ -278,7 +277,6 @@ def verify_third_party_stack(paths) -> dict[str, Any]:
     stack = load_json(stack_path, {})
     summary = stack.get("summary", {}) if isinstance(stack.get("summary", {}), dict) else {}
     sources = stack.get("sources", []) if isinstance(stack.get("sources", []), list) else []
-    adapters = stack.get("synced_skill_adapters", []) if isinstance(stack.get("synced_skill_adapters", []), list) else []
     contracts = load_json(paths.state / "research_skill_contracts.json", [])
     contract_names = {str(row.get("name") or "") for row in contracts if isinstance(row, dict)}
     source_names = {str(row.get("name") or "") for row in sources if isinstance(row, dict) and row.get("available")}
@@ -291,9 +289,8 @@ def verify_third_party_stack(paths) -> dict[str, Any]:
         check("third_party_sources_cover_required_repos", {"ARIS", "EvoScientist", "academic-research-skills", "PaperOrchestra"} <= source_names, evidence=[str(stack_path)], detail=f"sources={sorted(source_names)}"),
         check("third_party_modules_selected", int(summary.get("selected_module_count", 0) or 0) >= 40, evidence=[str(stack_path)], detail=f"modules={summary.get('selected_module_count', 0)}"),
         check("third_party_skill_adapters_synced", int(summary.get("synced_skill_count", 0) or 0) >= 25, evidence=[str(stack_path)], detail=f"skills={summary.get('synced_skill_count', 0)}"),
-        check("method_provenance_adapters_synced", int(summary.get("synced_skill_count", 0) or 0) >= 25 and all(str(row.get("path", "")).startswith(".claude/method_provenance/") for row in adapters if isinstance(row, dict)), evidence=[str(stack_path)], detail=f"skills={summary.get('synced_skill_count', 0)}"),
-        check("runtime_prompt_uses_native_method_context", source_contains(SCRIPTS / "claude_project_session.py", ["third_party_research_stack", "native method capability contracts", "Method provenance is retained for audit only"]), evidence=[str(SCRIPTS / "claude_project_session.py")]),
-        check("trajectory_builder_uses_native_method_context", source_contains(SCRIPTS / "build_research_trajectory_system.py", ["sync_third_party_research_stack.py", "third_party_research_stack", "MethodProvenanceAudit", "ResearchDirectionManagement", "EvidenceAssurance", "TrajectoryOptimization", "PaperProduction"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
+        check("runtime_prompt_uses_native_method_context", source_contains(SCRIPTS / "claude_project_session.py", ["third_party_research_stack", "native method capability contracts"]), evidence=[str(SCRIPTS / "claude_project_session.py")]),
+        check("trajectory_builder_uses_native_method_context", source_contains(SCRIPTS / "build_research_trajectory_system.py", ["sync_third_party_research_stack.py", "third_party_research_stack", "ResearchDirectionManagement", "EvidenceAssurance", "TrajectoryOptimization", "PaperProduction"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
         check("third_party_web_api_bound", source_contains(bridge, ["third_party_research_stack", "third_party_stack_status", "third_party_synced_skill_count"]), evidence=[str(bridge)]),
         check("third_party_web_ui_bound", source_contains(app, ["thirdPartyStack", "thirdPartyResearchStack", "thirdPartySources"]), evidence=[str(app)]),
     ]

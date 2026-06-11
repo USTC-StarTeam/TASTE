@@ -302,7 +302,7 @@ def main() -> None:
             lines.append(f'- {item}\n')
         lines.append('\n')
     lines.append('## Usage Note\n')
-    lines.append('- These are screening and prioritization signals for a backend-neutral literature loop. They sharpen search and selection, but they do not replace full-paper reading or direct evidence checks.\n')
+    lines.append('- These are screening and prioritization signals for the literature loop. They sharpen search and selection, but they do not replace full-paper reading or direct evidence checks.\n')
     out = paths.planning / 'paper_quality.md'
     out.write_text(''.join(lines), encoding='utf-8')
     print(out)

@@ -292,7 +292,7 @@ def run(cmd: list[str], required: bool = True, project: str = "", agent_id: str 
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Standalone autonomous research runner that does not depend on Codex CLI.")
+    parser = argparse.ArgumentParser(description="Standalone autonomous research runner that uses Claude Code for downstream project work.")
     parser.add_argument("--project", required=True)
     parser.add_argument("--prompt", default="")
     parser.add_argument("--topic", default="")
@@ -316,7 +316,7 @@ def main() -> None:
     parser.add_argument("--real-bootstrap-env", action="store_true")
     parser.add_argument("--max-launches", type=int)
     parser.add_argument("--conda-env", default="")
-    parser.add_argument("--coding-backend", default="")
+    parser.add_argument("--coding-backend", default="", help="Deprecated compatibility option; downstream execution uses Claude Code.")
     parser.add_argument("--venue", default="")
     parser.add_argument("--title", default="")
     parser.add_argument("--skip-paper", action="store_true")
@@ -469,8 +469,6 @@ def main() -> None:
         loop_cmd.extend(["--max-launches", str(args.max_launches)])
     if args.conda_env:
         loop_cmd.extend(["--conda-env", args.conda_env])
-    if args.coding_backend:
-        loop_cmd.extend(["--coding-backend", args.coding_backend])
     if args.venue:
         loop_cmd.extend(["--venue", args.venue])
     for method in args.parallel_method:

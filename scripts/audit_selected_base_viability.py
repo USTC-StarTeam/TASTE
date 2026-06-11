@@ -400,7 +400,7 @@ def build_gate(project: str, venue: str = "") -> dict[str, Any]:
             issue = (
                 f"selected_base_viability_gate: 参考复现已通过，但当前 selected-base 主线（{repo_name}）还没有可提升、可写入论文的 项目目标候选实验证据。"
                 f"已审计候选尝试数={len(set(candidate_ids))}；该门控不授权切换基底，也不把旧路线提升为当前参考工作。"
-                "project agent 应继续当前主线的实验设计、审计和剪枝记录；只有项目审计明确当前路线耗尽并要求 deterministic base-switch gate 时，才进入切基底门控评估。"
+                "确定性门控只确认当前主线仍缺少可提升候选证据；具体实验设计、审计和剪枝动作由项目代理读取证据后决定。只有项目审计明确当前路线耗尽并要求 deterministic base-switch gate 时，才进入切基底门控评估。"
             )
         else:
             status = "blocked"

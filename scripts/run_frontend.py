@@ -153,8 +153,8 @@ arxiv_window_days = env_int("WINDOW_DAYS", literature_cfg.get("arxiv_window_days
 venue_scan_limit = env_int("VENUE_TITLE_SCAN_LIMIT", 12000 if deep_survey else 3000)
 find_recall_count = env_int("FIND_RECALL_COUNT", 1000 if deep_survey else 200)
 detail_fetch_count = env_int("DETAIL_FETCH_COUNT", 240 if deep_survey else 50)
-arxiv_candidate_limit = env_int("ARXIV_LLM_CANDIDATE_LIMIT", 80 if deep_survey else 40)
-arxiv_per_category = env_int("ARXIV_LLM_CANDIDATES_PER_CATEGORY", 40 if deep_survey else 20)
+arxiv_candidate_limit = env_int("ARXIV_LLM_CANDIDATE_LIMIT", 0)
+arxiv_per_category = env_int("ARXIV_LLM_CANDIDATES_PER_CATEGORY", 0)
 
 app_cfg = AppConfig(
     provider=provider,
@@ -1015,12 +1015,11 @@ def main() -> int:
 
     if args.deep_survey:
         os.environ.setdefault("DEEP_SURVEY", "1")
-        os.environ.setdefault("ARXIV_FULL_SCAN", "0")
-        os.environ.setdefault("ARXIV_MAX_TOTAL", "120")
+        os.environ.setdefault("ARXIV_FULL_SCAN", "1")
         os.environ.setdefault("ARXIV_MAX_QUERIES", "3")
-        os.environ.setdefault("ARXIV_PER_QUERY_LIMIT", "40")
-        os.environ.setdefault("ARXIV_TIMEOUT_SEC", "12")
-        os.environ.setdefault("WINDOW_DAYS", "120")
+        os.environ.setdefault("ARXIV_PER_QUERY_LIMIT", "100")
+        os.environ.setdefault("ARXIV_TIMEOUT_SEC", "45")
+        os.environ.setdefault("WINDOW_DAYS", "180")
         os.environ.setdefault("VENUE_TITLE_SCAN_LIMIT", "12000")
         os.environ.setdefault("FIND_RECALL_COUNT", "3000")
         os.environ.setdefault("DETAIL_FETCH_COUNT", "800")

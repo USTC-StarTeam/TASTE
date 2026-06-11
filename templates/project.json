@@ -11,7 +11,6 @@
     "nvm_dir": "",
     "node_bin": "",
     "claude_path": "",
-    "codex_path": "",
     "extra_path": []
   },
   "queries": [
@@ -32,15 +31,10 @@
   },
   "coding_agent": {
     "backend": "claude",
-    "allow_codex_fallback": true,
     "max_repair_rounds": 2,
-    "allow_llm_fallback": true,
-    "allow_claude_fallback": true,
     "timeout_sec": 1200,
-    "llm_team_timeout_sec": 600,
     "claude_permission_mode": "bypassPermissions",
-    "claude_path_hint": "",
-    "codex_path_hint": ""
+    "claude_path_hint": ""
   },
   "discovery": {
     "enabled_sources": [
@@ -148,10 +142,10 @@
     "discover_retries": 1,
     "ingest_limit": 5,
     "compile_limit": 8,
-    "llm_enabled": true,
+    "find_llm_enabled": true,
     "obsidian_export": true,
     "lint_after_each_run": true,
-    "compile_backend": "llm_or_codex_or_bootstrap"
+    "downstream_agent": "claude_code"
   },
   "repo_selection": {
     "enabled": true,

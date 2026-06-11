@@ -4,6 +4,8 @@ import time
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from auto_research.auto_plan.pipeline import run_plan
 from auto_research.auto_plan.pipeline import finish_plan, polish_plan, render_plan_markdown
 from auto_research.emailer import build_run_email_html
@@ -12,6 +14,17 @@ from auto_research.models import AppConfig, EmailJobRequest, FindRequest, PlanPo
 from auto_research.storage import create_run_dir, delete_run, read_json, write_json, write_text
 from auto_research.web import server
 from auto_research.web.server import JOBS, api_artifacts, start_job
+
+
+@pytest.fixture(autouse=True)
+def isolate_web_job_state(tmp_path, monkeypatch):
+    """Keep tests from writing the real runtime/state/web_jobs.json."""
+    original_jobs = dict(server.JOBS)
+    server.JOBS.clear()
+    monkeypatch.setattr(server, "JOBS_PATH", tmp_path / "web_jobs.json")
+    yield
+    server.JOBS.clear()
+    server.JOBS.update(original_jobs)
 
 
 def test_script_llm_config_reads_runtime_env_overrides(monkeypatch):
@@ -350,12 +363,12 @@ def test_run_frontend_reports_half_year_arxiv_window_by_default():
     assert "secondary_window_days" not in source[source.index("arxiv_window_days = env_int"):source.index("venue_scan_limit = env_int")]
 
 
-def test_run_project_bounds_postreflect_llm_research_team_roles():
+def test_run_project_uses_single_downstream_project_agent_route():
     source = (Path(__file__).resolve().parents[3] / "scripts" / "run_project.py").read_text(encoding="utf-8")
-    assert "13c_llm_research_team_postreflect.log" in source
-    postreflect_block = source.split("13c_llm_research_team_postreflect.log", 1)[0][-360:]
-    assert "--roles" in postreflect_block
-    assert "planner,researcher,critic" in postreflect_block
+    assert "05aa_current_find_read_idea_plan_route.log" in source
+    assert "10_downstream_compile_route.log" in source
+    assert "13c_project_agent_reflection_route.log" in source
+    assert "run_" + "llm_" + "research_team.py" not in source
 
 
 def test_run_loop_topic_ignores_project_id_placeholder(tmp_path):
@@ -1372,6 +1385,26 @@ def test_environment_job_list_uses_compact_public_logs(monkeypatch):
     assert "select_evidence_ready_repo.py" not in log_text
     assert "Noisy historical query" not in log_text
     assert "Traceback" not in log_text
+
+
+def test_jobs_api_normalizes_failed_running_project_agent_job(monkeypatch):
+    JOBS.clear()
+    monkeypatch.setattr(server, "_reconcile_detached_launcher_jobs", lambda: None)
+    monkeypatch.setattr(server, "_live_jobs_from_projects", lambda compact=True: [])
+    job = server.JobState("claude-message_failed", "experiment")
+    job.status = "running"
+    job.error = "research action failed with exit code 3"
+    job.result = {"project": "demo_project", "action": "claude-message", "panel_stage": "experiment", "status": "running"}
+    job.progress = {"phase": "error", "current": 0, "total": 1, "percent": 0, "message": "research action failed with exit code 3"}
+    JOBS[job.job_id] = job
+
+    rows = server.api_jobs(compact=True, limit=20, include_history=True)
+
+    listed = next(row for row in rows if row.get("job_id") == job.job_id)
+    assert listed["stage"] == "experiment"
+    assert listed["status"] == "error"
+    assert listed["result"]["status"] == "error"
+    assert listed["progress"]["phase"] == "error"
 
 
 def test_agent_guidance_receipt_remains_visible_and_fetchable(monkeypatch):
@@ -2800,6 +2833,8 @@ def test_reference_protocol_import_probe_surfaces_dependency_blocker(monkeypatch
     assert "json_repair" in summary["summary"]
     assert "等待参考协议/环境 manifest 探针" not in summary["summary"]
     assert summary["human_gate_summary"]["title"] == "参考协议依赖缺失"
+    assert summary["human_gate_summary"]["source"] == "deterministic_gate_audit"
+    assert summary["human_supervision"]["blocker"]["source"] == "deterministic_gate_audit"
     assert "32/46" in summary["current_blocker"]["summary"]
     assert "json_repair" in summary["current_blocker"]["summary"]
     assert "补齐缺失依赖" in summary["current_blocker"]["next_action"]
@@ -2818,6 +2853,61 @@ def test_reference_protocol_import_probe_surfaces_dependency_blocker(monkeypatch
     assert top_level_probe["decision"] == "dependency_install_required"
     assert "39/46" in top_level_probe["human_summary"]
     assert "json_repair" in top_level_probe["human_summary"]
+
+
+def test_public_job_payload_hides_paper_agent_repair_diagnostics_from_summaries_only():
+    raw = {
+        "stage": "paper",
+        "logs": ["missing bib entries for cited keys=achiam2023gpt; keep this bounded log detail"],
+        "progress": {
+            "message": "预览仍需完善：missing bib entries for cited keys=achiam2023gpt, liang2023holistic；Claude Code 自审未通过，项目代理需独立读 PDF/TeX/BibTeX/log/venue contract 后修复并写 receipt。"
+        },
+        "result": {
+            "paper_summary": "missing bib entries for cited keys=foo；self_review_hash_mismatch_pdf: sha256 mismatch for reviewed artifact: /tmp/paper.pdf"
+        },
+    }
+
+    public = server._public_job_api_payload(raw)
+    summary_rendered = json.dumps({"progress": public["progress"], "result": public["result"]}, ensure_ascii=False)
+    log_rendered = json.dumps(public["logs"], ensure_ascii=False)
+
+    assert "missing bib entries" not in summary_rendered
+    assert "achiam2023gpt" not in summary_rendered
+    assert "Claude Code 自审" not in summary_rendered
+    assert "PDF/TeX/BibTeX/log" not in summary_rendered
+    assert "self_review_hash_mismatch" not in summary_rendered
+    assert "sha256 mismatch" not in summary_rendered
+    assert "引用/参考文献仍需修复" in summary_rendered
+    assert "论文自审未通过" in summary_rendered
+    assert "missing bib entries" in log_rendered
+    assert "achiam2023gpt" in log_rendered
+
+    compact_logs = server._public_job_logs("paper", raw["logs"], raw["progress"], raw["result"], limit=20)
+    rendered_compact_logs = json.dumps(compact_logs, ensure_ascii=False)
+    assert "详细日志" in rendered_compact_logs
+    assert "missing bib entries" in rendered_compact_logs
+    assert "achiam2023gpt" in rendered_compact_logs
+
+    already_public_logs = server._public_job_logs(
+        "paper",
+        ["当前状态：会议格式论文预览已生成", "详细日志：正文页数：9/9"],
+        raw["progress"],
+        raw["result"],
+        limit=20,
+    )
+    assert "详细日志：详细日志" not in json.dumps(already_public_logs, ensure_ascii=False)
+
+
+
+def test_taskbar_does_not_infer_claude_narrative_from_keywords():
+    from auto_research.web import server
+
+    line = "scientific_progress_gate still blocked; build_blocker_action_plan.py wrote deterministic gate output"
+    summarized = server._summarize_claude_taskbline(line)
+
+    assert summarized == line
+    assert "Claude Code：" not in summarized
+
 
 
 def test_select_fresh_base_marks_stale_implementation_plan(monkeypatch, tmp_path):
@@ -4108,15 +4198,64 @@ def test_frontend_paper_self_review_evidence_blockers_are_submission_gate():
     assert "论文预览可看，投稿证据阻塞" in app
     assert "预览 PDF 已生成；投稿证据仍阻塞" in app
     assert "投稿证据阻塞的论文预览" in app
-    assert "论文自审待处理项" in app
+    assert "PDF 仅作预览；底层 LaTeX/BibTeX/自审诊断已保留给项目代理处理，不在这里展开。" in app
     assert "paperSelfReviewEvidenceText" in app
     assert "完整自审原文保留在审计 artifact" in app
-    assert "详细待处理项见上方列表" in app
+    assert "详细待处理项见上方列表" not in app
     assert "const selfReviewIssue = paperSelfReviewSummary(paper);" not in app
     assert "Claude Code 自审阻塞" not in app
     assert "投稿证据门控" in app
     assert "paperSelfReviewDisplayStatus(researchStages?.paper)" in app
     assert "{t.paperSelfReviewStatus}={displayMaybe(researchStages?.paper?.paper_self_review_status)}" not in app
+
+
+def test_stale_paper_placeholder_receipt_has_no_full_response_button():
+    from auto_research.web import project_bridge
+
+    receipt = {
+        "status": "blocked",
+        "stage": "paper",
+        "response_markdown": "当前投稿目标为 ICLR；旧论文写作回执属于其他 venue，已隐藏。",
+        "response_source": "venue_filtered_placeholder",
+        "fallback_reason": "stage_receipt_stale_for_current_venue",
+    }
+
+    public = project_bridge._public_claude_receipt(receipt)
+
+    assert public["full_response_available"] is False
+    assert public["content_compacted"] is False
+    assert public["raw_response_hidden"] is False
+    assert public["response_chcount"] == 0
+
+
+def test_paper_public_projection_hides_agent_repair_blocker_rows():
+    from auto_research.web import project_bridge
+
+    blocker = project_bridge._paper_public_blocker_text(
+        "missing bib entries for cited keys=achiam2023gpt, baheti2024field"
+    )
+    row = {
+        "status": "preview_available",
+        "pdf_path": "/tmp/paper.pdf",
+        "conference_preview_blocker_summary": blocker,
+        "paper_citation_render_blockers": [{"id": "latex_undefined_citations", "detail": "achiam2023gpt"}],
+        "paper_self_review_status": "block",
+        "paper_self_review_blockers": [{"id": "self_review_hash_mismatch_pdf", "detail": "sha256 mismatch"}],
+        "paper_self_review_evidence_blockers": [{"category": "missing_empirical_validation", "detail": "raw internal detail"}],
+        "paper_self_review_evidence_blocker_count": 1,
+    }
+
+    out = project_bridge._paper_stage_public_fields(row)
+
+    assert out["paper_citation_render_blockers"] == []
+    assert out["paper_self_review_blockers"] == []
+    assert out["paper_self_review_evidence_blockers"] == []
+    assert out["conference_preview_blockers"] == []
+    assert out["paper_self_review_evidence_blocker_count"] == 1
+    assert "achiam2023gpt" not in out["paper_summary"]
+    assert "sha256 mismatch" not in out["paper_summary"]
+    assert "具体修复清单已交由项目代理处理" in out["paper_summary"]
+    assert "论文自审未通过，具体修复项已交由项目代理处理" in out["paper_summary"]
 
 
 def test_paper_self_review_evidence_rows_are_public_summaries():
@@ -5687,6 +5826,12 @@ def test_same_phase_descendant_workers_are_folded_into_parent_row():
     kept = server._suppress_same_phase_descendant_workers(rows)
 
     assert [row['pid'] for row in kept] == ['100', '102']
+
+
+def test_environment_page_utility_jobs_map_to_environment_stage():
+    assert server._public_taste_stage("healthcheck") == "environment"
+    assert server._public_taste_stage("status") == "environment"
+    assert server._public_taste_stage("init") == "environment"
 
 
 def test_cancel_running_project_job_without_live_child_marks_cancelled(monkeypatch, tmp_path):

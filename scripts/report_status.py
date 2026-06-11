@@ -53,10 +53,6 @@ def find_cli_binary(cfg: dict, name: str) -> str:
     return ""
 
 
-def find_codex(cfg: dict) -> str:
-    return find_cli_binary(cfg, "codex")
-
-
 def find_claude(cfg: dict) -> str:
     return find_cli_binary(cfg, "claude")
 
@@ -133,7 +129,7 @@ def main() -> None:
     idea_summary = ideas.get("summary", {}) if isinstance(ideas, dict) else {}
     paper_summary = paper_quality.get("summary", {}) if isinstance(paper_quality, dict) else {}
     coding_cfg = cfg.get("coding_agent", {}) if isinstance(cfg, dict) else {}
-    coding_backend = coding_cfg.get("backend", "llm")
+    coding_backend = "claude"
     coding_state_files = sorted(paths.state.glob("coding_agent_*.json"), key=lambda p: p.stat().st_mtime)
     successful_repairs = 0
     last_coding_backend = ""
@@ -149,7 +145,6 @@ def main() -> None:
     llm_ready = llm_available(cfg)
     llm_reason = "" if llm_ready else llm_disabled_reason(cfg)
     claude_available = bool(find_claude(cfg))
-    codex_available = bool(find_codex(cfg))
     active_env = bootstrap.get('env_name', '') if isinstance(bootstrap, dict) else ''
     active_env_status = bootstrap.get('status', '') if isinstance(bootstrap, dict) else ''
     active_env_installed = active_env_status == 'completed'
@@ -204,7 +199,6 @@ def main() -> None:
         f"- llm_backend_ready: {llm_ready}\n",
         f"- llm_backend_reason: {llm_reason or 'ready'}\n",
         f"- claude_backend_available: {claude_available}\n",
-        f"- codex_backend_available: {codex_available}\n",
         f"- coding_agent_runs: {len(coding_state_files)}\n",
         f"- coding_agent_successful_repairs: {successful_repairs}\n",
         f"- coding_agent_last_backend: {last_coding_backend or 'none'}\n",

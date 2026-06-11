@@ -73,7 +73,6 @@ def project_runtime_config(project: str | None = None, cfg: dict[str, Any] | Non
         "nvm_dir": str(runtime.get("nvm_dir") or Path.home() / "workspace" / ".nvm"),
         "node_bin": str(runtime.get("node_bin") or ""),
         "claude_path": str(runtime.get("claude_path") or coding.get("claude_path_hint") or ""),
-        "codex_path": str(runtime.get("codex_path") or coding.get("codex_path_hint") or ""),
         "conda_base": str(runtime.get("conda_base") or env_cfg.get("conda_base_hint") or runtime_conda_base(cfg) or ""),
         "management_python": management_python_path,
         "experiment_python": experiment_python,
@@ -91,7 +90,7 @@ def update_project_runtime(project: str, patch: dict[str, Any]) -> dict[str, Any
     runtime = dict(cfg.get("runtime") or {}) if isinstance(cfg.get("runtime"), dict) else {}
     runtime["source_bashrc"] = False
     runtime["bashrc_path"] = ""
-    for key in ["nvm_dir", "node_bin", "claude_path", "codex_path", "conda_base", "python_executable", "management_python", "experiment_python"]:
+    for key in ["nvm_dir", "node_bin", "claude_path", "conda_base", "python_executable", "management_python", "experiment_python"]:
         if key in patch:
             value = str(patch.get(key) or "").strip()
             if value:
@@ -116,8 +115,6 @@ def update_project_runtime(project: str, patch: dict[str, Any]) -> dict[str, Any
     coding = dict(cfg.get("coding_agent") or {}) if isinstance(cfg.get("coding_agent"), dict) else {}
     if runtime.get("claude_path"):
         coding["claude_path_hint"] = runtime["claude_path"]
-    if runtime.get("codex_path"):
-        coding["codex_path_hint"] = runtime["codex_path"]
     if coding:
         cfg["coding_agent"] = coding
     env_cfg = dict(cfg.get("environment") or {}) if isinstance(cfg.get("environment"), dict) else {}
@@ -166,7 +163,6 @@ def detect_project_runtime(project: str) -> dict[str, Any]:
         "nvm_dir": nvm_dir,
         "node_bin": node_bin,
         "claude_path": find_binary("claude", project, cfg) or shutil.which("claude", path=env.get("PATH", "")) or "",
-        "codex_path": find_binary("codex", project, cfg) or shutil.which("codex", path=env.get("PATH", "")) or "",
         "conda_base": conda_base,
         "management_python": management_python_path,
         "python_executable": management_python_path,
@@ -200,8 +196,6 @@ def _candidate_paths(binary: str, project: str | None = None, cfg: dict[str, Any
     candidates: list[str] = []
     if binary == "claude":
         candidates.append(runtime.get("claude_path", ""))
-    if binary == "codex":
-        candidates.append(runtime.get("codex_path", ""))
     if binary == "python":
         candidates.append(runtime.get("management_python", ""))
         candidates.append(runtime.get("python_executable", ""))
@@ -254,7 +248,7 @@ def _runtime_path_entries(runtime: dict[str, Any]) -> list[str]:
             entries.append(value)
     for bin_path in _nvm_node_bins(str(runtime.get("nvm_dir") or "")):
         entries.append(bin_path)
-    for key in ["claude_path", "codex_path", "management_python", "python_executable", "experiment_python"]:
+    for key in ["claude_path", "management_python", "python_executable", "experiment_python"]:
         value = str(runtime.get(key) or "").strip()
         if value:
             entries.append(str(Path(value).expanduser().parent))
@@ -338,7 +332,7 @@ def runtime_diagnostics(project: str) -> dict[str, Any]:
     runtime = project_runtime_config(project, cfg)
     env = interactive_env(project, cfg)
     checks: dict[str, Any] = {}
-    for name, binary in [("node", "node"), ("npm", "npm"), ("claude", "claude"), ("codex", "codex"), ("conda", "conda")]:
+    for name, binary in [("node", "node"), ("npm", "npm"), ("claude", "claude"), ("conda", "conda")]:
         path = find_binary(binary, project, cfg)
         if not path and binary in {"node", "npm", "conda"}:
             path = shutil.which(binary, path=env.get("PATH", "")) or ""

@@ -357,6 +357,15 @@ def _current_find_selection_stage(stage: str = '') -> bool:
     return 'current-find-claude-select-plan' in stage_l or 'current-find-selection' in stage_l
 
 
+def claude_stream_result_is_terminal(event: Any) -> bool:
+    if not isinstance(event, dict):
+        return False
+    if event.get('type') != 'result' and event.get('result') is None:
+        return False
+    subtype = str(event.get('subtype') or '').strip().lower()
+    return event.get('result') is not None or subtype in {'success', 'error', 'complete', 'completed'} or event.get('is_error') is not None
+
+
 def claude_no_event_timeout_seconds(stage: str, effective_timeout: int, env: dict[str, Any] | None = None, coding_cfg: dict[str, Any] | None = None) -> int:
     env = env if isinstance(env, dict) else {}
     coding_cfg = coding_cfg if isinstance(coding_cfg, dict) else {}
@@ -367,6 +376,12 @@ def claude_no_event_timeout_seconds(stage: str, effective_timeout: int, env: dic
     value = max(60, value)
     if _current_find_stage(stage):
         floor = 1800
+        if effective_timeout and effective_timeout > 0:
+            floor = min(floor, max(60, int(effective_timeout) - 60))
+        value = max(value, floor)
+    stage_text = str(stage or '')
+    if stage_text.startswith('writing:') or stage_text == 'paper' or stage_text.startswith('paper:'):
+        floor = 900
         if effective_timeout and effective_timeout > 0:
             floor = min(floor, max(60, int(effective_timeout) - 60))
         value = max(value, floor)
@@ -949,6 +964,24 @@ def build_context(project: str, instruction: str, stage: str, repo_path: str = '
             'last_run': literature_last_run,
         } if isinstance(literature_packet, dict) and literature_packet else 'not built yet; run scripts/build_literature_tool_packet.py --project ' + project + ' before literature-dependent decisions'
     literature_context_text = json.dumps(literature_context, ensure_ascii=False, indent=2) if isinstance(literature_context, dict) else str(literature_context)
+    experiment_python = project_experiment_python(project)
+    allowed_experiment_python_list = sorted(allowed_experiment_pythons(project))
+    launcher_template = (
+        f"{management_python()} scripts/launch_experiment_run.py --project {project} "
+        f"--artifact-name <unique_slug> --cwd {repo or str(paths.root)} -- "
+        f"{experiment_python or '<resolved-project-experiment-python>'} -u <training_script.py> ..."
+    )
+    runtime_contract_text = json.dumps({
+        'management_python': management_python(),
+        'project_experiment_python': experiment_python,
+        'allowed_experiment_python_executables': allowed_experiment_python_list,
+        'environment_variables_available': {
+            'EXPERIMENT_PYTHON': experiment_python,
+            'PROJECT_PYTHON': experiment_python,
+        },
+        'launcher_template': launcher_template,
+        'policy': 'Use this exact project_experiment_python path for probes and after -- in launcher runs. Do not infer an env path from the project id.',
+    }, ensure_ascii=False, indent=2)
     return f"""
 You are the persistent Claude Code session for research project `{project}`.
 
@@ -962,6 +995,8 @@ Stage: {stage}
 Topic: {topic}
 research project root: {paths.root}
 Selected repo: {repo or 'none'}
+TASTE runtime execution contract:
+{runtime_contract_text}
 Current environment-stage route selection:
 {json.dumps(current_env_route, ensure_ascii=False, indent=2)}
 
@@ -980,7 +1015,7 @@ TASTE recoverable trajectory-cycle memory:
 native method capability contracts:
 {json.dumps({'status': third_party_stack.get('status'), 'summary': third_party_stack.get('summary', {}), 'capability_bindings': native_capability_bindings}, ensure_ascii=False, indent=2) if isinstance(third_party_stack, dict) and third_party_stack else 'not yet synced; run scripts/sync_third_party_research_stack.py before relying on native method contracts'}
 
-Method provenance is retained for audit only in `state/third_party_research_stack.json`. Do not mention source-project names in operational plans, role names, progress summaries, or paper prose; use native module names instead.
+Method references is retained for audit only in `state/third_party_research_stack.json`. Do not mention source-project names in operational plans, role names, progress summaries, or paper prose; use native module names instead.
 
 Local TASTE Claude skills that you must treat as executable contracts when relevant:
 {skills_text}
@@ -1010,7 +1045,7 @@ Hard rules:
 - Do not fabricate metrics, claims, citations, data availability, or paper readiness.
 - Cite exact local files/paths you inspected.
 - Do not recreate or mutate a locked conda environment unless explicitly instructed and justified by local evidence.
-- Reference-protocol/import/env probes are experiment-environment checks: run repo imports and dependency probes with `$EXPERIMENT_PYTHON`/`$PROJECT_PYTHON` or the resolved project experiment Python. Never use the Web management Python, `cfg.python_executable`, `sys.executable`, or bare `python` for selected-repo imports. If the project experiment Python lacks dependencies, record a dependency blocker; do not fall back to the management environment.
+- Reference-protocol/import/env probes are experiment-environment checks: run repo imports and dependency probes only with the exact `project_experiment_python` path in the TASTE runtime execution contract above (the same path is also available as `$EXPERIMENT_PYTHON`/`$PROJECT_PYTHON`). Never guess a project-id env path, never use the Web management Python, `cfg.python_executable`, `sys.executable`, bare `python`, or bare `python3` for selected-repo imports. If that exact project experiment Python lacks dependencies, record a dependency blocker; do not fall back to the management environment.
 - If stewardship memory exists, follow it unless your fresh local inspection contradicts it; if contradicted, explain the evidence and write the needed repo/env/data action for TASTE.
 - You own repo, data, and conda-environment implementation decisions for this project: decide whether to keep/modify the current repo or switch/search, whether to reuse/repair/create a project env, and whether to use/download/place/search data.
 - Never silently delete an existing conda environment; if a rebuild is needed, create or recommend a new project-specific env and preserve old state.
@@ -1020,14 +1055,14 @@ Hard rules:
 - For experiment-loop, evidence-gate, and paper-writing work, explicitly follow the local .claude/skills contracts listed above.
 - Follow `planning/reference_workflow_and_claude_code.md`: choose the correct route/tool for the current stage; do not run experiments or paper repair from fallback literature artifacts.
 - If a training process is already alive, observe it non-invasively only: do not send signals, attach tracing/debuggers, read blocking `/proc/<pid>/fd/*` pipes, kill, restart, or launch a duplicate unless the process has exited or artifact-local evidence proves a hard failure.
-- New training launches must go through the the launcher with two explicit interpreters: `{management_python()} scripts/launch_experiment_run.py --project {project} --artifact-name <unique_slug> --cwd <project_or_repo_dir> -- <project-experiment-python> -u <training_script.py> ...`.
+- New training launches must go through the launcher template shown in the TASTE runtime execution contract: `{launcher_template}`. The command after `--` must begin with the exact `project_experiment_python` path; do not use `<project-experiment-python>` as a literal placeholder.
 - Do not use system `python`, bare `python3`, `conda run`, raw `nohup`, shell backgrounding, or manual stdout redirection for new experiments. The launcher will reject them.
 - The launcher creates `run_contract.json`, `run.lock`, `launcher.pid.json`, and `stdout_stderr.log`, rejects reused/contaminated artifact dirs, records `python_executable`, `environment_contract`, `expected_outputs`, and gives TASTE one PID/log/artifact contract to monitor.
 - If a repo training script cannot accept an artifact path or unbuffered logging, write a small repo-local wrapper once, then launch that wrapper through `scripts/launch_experiment_run.py`; do not create ad-hoc background shell jobs.
 - An empty log while a process is alive is not evidence of failure. Record that the run is still waiting for output and keep monitoring non-invasively.
 - Before stopping a run, write the stop reason, PID, command, artifact path, and evidence to an artifact-local audit or run note.
 - Use TASTE's native research-direction, evolutionary-memory, evidence-assurance, trajectory-optimization, and paper-production contracts. If the method stack is absent or stale, run `scripts/sync_third_party_research_stack.py --project {project}` first.
-- Preserve method provenance in audit state when required, but do not surface external source-project names as active agents or roles.
+- Preserve method references in audit state when required, but do not surface external source-project names as active agents or roles.
 - Read TASTE recoverable-cycle memory files before deciding whether to retry, repair, prune, or switch direction.
 - Before selecting a base paper, generating an idea, modifying code from a paper, or writing literature-related claims, first read `state/current_find_research_plan.json`, `state/experiment_plan.json`, and `state/taste_plan_bridge.json`; then read `planning/literature_tool_packet.md` or `state/literature_tool_packet.json` and at least one raw artifact under `planning/finding/`.
 - If the packet is missing, stale, too generic, or does not cover the current blocker, run `{management_python()} scripts/run_literature_tool.py --project {project} --query "<targeted research query>" --fast-mode` for a narrow refresh, or add `--deep-survey` when the route depends on broad conference/arXiv coverage. Then rerun `{management_python()} scripts/build_literature_tool_packet.py --project {project}`.
@@ -1121,7 +1156,7 @@ def run_claude(project: str, instruction: str, stage: str, timeout_sec: int, res
         parent_id='main' if agent_id != 'main' else '',
         command=cmd,
         current_step='starting Claude Code',
-        extra={'workspace_root': str(paths.root), 'repo_path': repo, 'timeout_sec': effective_timeout, 'fresh_session_reason': reset_reason},
+        extra={'workspace_root': str(paths.root), 'repo_path': repo, 'timeout_sec': effective_timeout, 'fresh_session_reason': reset_reason, 'clear_terminal_state': True},
     )
 
     def emit(message: str) -> None:
@@ -1157,6 +1192,7 @@ def run_claude(project: str, instruction: str, stage: str, timeout_sec: int, res
     startup_silent_timeout = False
     no_event_stream_timeout = False
     partial_output_overflow = False
+    completed_stream_result_seen = False
 
     def remember_message(text: str) -> None:
         text = redact_secrets(text).rstrip()
@@ -1397,7 +1433,7 @@ def run_claude(project: str, instruction: str, stage: str, timeout_sec: int, res
         return ''
 
     def handle_output_line(line: str) -> None:
-        nonlocal parsed
+        nonlocal parsed, completed_stream_result_seen
         text = line.rstrip('\n')
         raw_lines.append(text)
         stripped = text.strip()
@@ -1417,6 +1453,7 @@ def run_claude(project: str, instruction: str, stage: str, timeout_sec: int, res
                             return
                     if event.get('type') == 'result' or event.get('result') is not None:
                         parsed = event
+                        completed_stream_result_seen = completed_stream_result_seen or claude_stream_result_is_terminal(event)
                     message = summarize_event(event)
                     if message:
                         remember_message(message)
@@ -1474,7 +1511,7 @@ def run_claude(project: str, instruction: str, stage: str, timeout_sec: int, res
         if proc.stdout is None:
             raise RuntimeError('Claude Code process did not expose stdout.')
         selector = selectors.DefaultSelector()
-        upsert_agent(project, agent_id, pid=proc.pid, status='running', current_step='Claude Code process started')
+        upsert_agent(project, agent_id, pid=proc.pid, status='running', current_step='Claude Code process started', extra={'clear_terminal_state': True})
         selector.register(proc.stdout, selectors.EVENT_READ)
         stdout_fd = proc.stdout.fileno()
         os.set_blocking(stdout_fd, False)
@@ -1600,11 +1637,22 @@ def run_claude(project: str, instruction: str, stage: str, timeout_sec: int, res
                         break
             if route_guard_tripped or tool_policy_tripped:
                 break
+            if completed_stream_result_seen and proc.poll() is None:
+                remember_message('claude: terminal result event received; closing completed Claude Code stream')
+                stop_process(proc, signal.SIGTERM)
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    stop_process(proc, signal.SIGKILL)
+                break
             if time.monotonic() - last_heartbeat > 60:
                 remember_message("claude: still running; waiting for Claude Code output")
                 upsert_agent(project, agent_id, status='running', current_step='waiting for Claude Code output')
                 last_heartbeat = time.monotonic()
-        return_code = 126 if partial_output_overflow else 125 if startup_silent_timeout or no_event_stream_timeout else 124 if timed_out else int(proc.wait())
+        waited_return_code = int(proc.wait())
+        return_code = 126 if partial_output_overflow else 125 if startup_silent_timeout or no_event_stream_timeout else 124 if timed_out else waited_return_code
+        if completed_stream_result_seen and not (partial_output_overflow or startup_silent_timeout or no_event_stream_timeout or timed_out or route_guard_tripped or tool_policy_tripped):
+            return_code = 1 if (isinstance(parsed, dict) and parsed.get('is_error')) else 0
         if route_guard_tripped:
             return_code = 2
         if tool_policy_tripped:
@@ -1613,7 +1661,7 @@ def run_claude(project: str, instruction: str, stage: str, timeout_sec: int, res
         return_code = 127
         remember_message(
             f"Claude Code executable not found: {claude}. "
-            "Use the Runtime panel to auto-detect or set claude_path/codex_path explicitly."
+            "Use the Runtime panel to auto-detect or set claude_path explicitly."
         )
     except Exception as exc:
         return_code = 1

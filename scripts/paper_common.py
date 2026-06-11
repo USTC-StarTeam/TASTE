@@ -16,7 +16,7 @@ from typing import Any, Iterable
 
 from project_paths import ROOT, build_paths, load_project_config
 
-USER_AGENT = 'Mozilla/5.0 (Codex TASTE Paper Pipeline)'
+USER_AGENT = 'Mozilla/5.0 (TASTE Paper Pipeline)'
 OFFICIAL_VENUE_HINTS = {
     'cikm': {
         'domains': ['cikm2026.org', 'cikm.org', 'acm.org'],

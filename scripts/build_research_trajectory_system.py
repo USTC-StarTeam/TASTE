@@ -1702,7 +1702,7 @@ def main() -> None:
         "submission_readiness_run": submission_readiness_run,
         "third_party_stack_run": third_party_stack_run,
         "source_methods": {
-            "MethodProvenanceAudit": ["scripts/sync_third_party_research_stack.py", "state/third_party_research_stack.json", "reports/third_party_research_stack.md"],
+            "MethodReferenceAudit": ["scripts/sync_third_party_research_stack.py", "state/third_party_research_stack.json", "reports/third_party_research_stack.md"],
             "ResearchDirectionManagement": ["state/research_landscape.json", "state/novelty_map.json", "state/unexplored_niche_graph.json"],
             "EvidenceAssurance": ["state/research_assurance_layer.json", "state/research_evidence_manifest.json", "scripts/audit_paper_evidence.py"],
             "TrajectoryOptimization": ["state/trajectory_optimization_plan.json", "state/evolutionary_memory_index.json", "scripts/run_research_trajectory_supervisor.py"],

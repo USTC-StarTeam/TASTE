@@ -478,10 +478,10 @@ def _apply_project_patch(cfg: dict[str, Any], patch: dict[str, Any]) -> tuple[di
     if "queries" in patch and isinstance(patch.get("queries"), list):
         cfg["queries"] = [str(item).strip() for item in patch.get("queries", []) if str(item).strip()]
     if "coding_backend" in patch:
-        backend = str(patch.get("coding_backend") or "").strip()
+        backend = str(patch.get("coding_backend") or "").strip().lower()
         if backend:
             coding = dict(cfg.get("coding_agent") or {}) if isinstance(cfg.get("coding_agent"), dict) else {}
-            coding["backend"] = backend
+            coding["backend"] = "claude"
             cfg["coding_agent"] = coding
     selection = _source_selection_from_patch(patch)
     if selection is not None:

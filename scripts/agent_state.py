@@ -139,8 +139,12 @@ def upsert_agent(
         found["children"] = children
     if extra:
         clelog_tail = bool(extra.pop("clelog_tail", False))
+        clear_terminal_state = bool(extra.pop("clear_terminal_state", False))
         if clelog_tail:
             found["log_tail"] = []
+        if clear_terminal_state:
+            for stale_key in ("result", "finished_at"):
+                found.pop(stale_key, None)
         found.update(extra)
     found["updated_at"] = now
     _write_state(project, state)

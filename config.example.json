@@ -73,15 +73,15 @@
   "arxiv_queries": [],
   "arxiv_start_date": "",
   "arxiv_end_date": "",
-  "arxiv_llm_candidate_limit": 200,
-  "arxiv_llm_candidates_per_category": 100,
+  "arxiv_llm_candidate_limit": 0,
+  "arxiv_llm_candidates_per_category": 0,
   "biorxiv_categories": [
     "bioinformatics"
   ],
   "biorxiv_start_date": "",
   "biorxiv_end_date": "",
-  "biorxiv_llm_candidate_limit": 200,
-  "biorxiv_llm_candidates_per_category": 100,
+  "biorxiv_llm_candidate_limit": 0,
+  "biorxiv_llm_candidates_per_category": 0,
   "nature_journals": [
     "nature",
     "natmachintell",

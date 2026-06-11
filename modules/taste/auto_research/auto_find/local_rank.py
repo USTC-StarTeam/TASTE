@@ -53,11 +53,14 @@ def rank_papers_tfidf(
     if not papers:
         return [], {"method": "adaptive_profile_similarity", "input_count": 0, "selected_count": 0}
 
+    global_cap = len(papers) if int(global_limit or 0) <= 0 else max(1, min(len(papers), int(global_limit)))
+    per_category_cap = len(papers) if int(per_category_limit or 0) <= 0 else max(1, int(per_category_limit))
+
     profile_signals = _tokens(query)
     profile_phrases = _profile_phrases(query)
     if not profile_signals:
-        selected = [dict(paper, local_score=0.0, local_rank=index + 1, local_filter_reason="No research profile text; kept by source order.") for index, paper in enumerate(papers[:global_limit])]
-        return selected, {"method": "adaptive_profile_similarity", "input_count": len(papers), "selected_count": len(selected), "adaptive_profile_signal_count": 0, "adaptive_profile_phrase_count": 0, "profile_signal_source": "current research_interest/profile"}
+        selected = [dict(paper, local_score=0.0, local_rank=index + 1, local_filter_reason="No research profile text; kept by source order.") for index, paper in enumerate(papers[:global_cap])]
+        return selected, {"method": "adaptive_profile_similarity", "input_count": len(papers), "selected_count": len(selected), "global_limit": global_limit, "effective_global_limit": global_cap, "adaptive_profile_signal_count": 0, "adaptive_profile_phrase_count": 0, "profile_signal_source": "current research_interest/profile"}
 
     paper_texts = [_paper_text(paper) for paper in papers]
     doc_terms = [_tokens(text) for text in paper_texts]
@@ -101,12 +104,12 @@ def rank_papers_tfidf(
     for item in ranked:
         category = str(item.get("category") or item.get("metadata", {}).get("primary_category") or "unknown")
         bucket = by_category.setdefault(category, [])
-        if len(bucket) < max(1, per_category_limit):
+        if len(bucket) < per_category_cap:
             bucket.append(item)
 
     balanced = [item for bucket in by_category.values() for item in bucket]
     balanced.sort(key=lambda item: float(item.get("local_score") or 0), reverse=True)
-    selected = balanced[: max(1, global_limit)]
+    selected = balanced[:global_cap]
 
     # Some venue adapters, such as proceedings-style ICML/DBLP sources, do not
     # expose meaningful fine-grained categories. In that case a small
@@ -114,7 +117,7 @@ def rank_papers_tfidf(
     # only the first ~200 papers even when the Find page asks for a much larger
     # detail-scoring pool. Preserve the balancing behavior, then fill the
     # remaining global budget from the source-ranked list.
-    if len(selected) < min(max(1, global_limit), len(ranked)):
+    if len(selected) < min(global_cap, len(ranked)):
         seen = {str(item.get("id") or item.get("url") or item.get("title") or "") for item in selected}
         for item in ranked:
             key = str(item.get("id") or item.get("url") or item.get("title") or "")
@@ -122,7 +125,7 @@ def rank_papers_tfidf(
                 continue
             selected.append(item)
             seen.add(key)
-            if len(selected) >= max(1, global_limit):
+            if len(selected) >= global_cap:
                 break
 
     for index, item in enumerate(selected, 1):
@@ -133,7 +136,9 @@ def rank_papers_tfidf(
         "input_count": len(papers),
         "selected_count": len(selected),
         "global_limit": global_limit,
+        "effective_global_limit": global_cap,
         "per_category_limit": per_category_limit,
+        "effective_per_category_limit": per_category_cap,
         "balanced_selected_count": len(balanced),
         "category_counts": {category: len(items) for category, items in by_category.items()},
         "adaptive_profile_signal_count": len(profile_signals),

@@ -639,6 +639,28 @@ def reference_quality_floor(payload: dict[str, Any], venue: str) -> int:
     return floor if full_conference else 0
 
 
+def payload_has_self_contained_official_venue_contract(payload: dict[str, Any]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    sources = payload.get('official_sources') if isinstance(payload.get('official_sources'), list) else []
+    if not sources or any(unverified_source(item) for item in sources):
+        return False
+    page_policy = payload.get('page_policy') if isinstance(payload.get('page_policy'), dict) else {}
+    page_source = str(page_policy.get('source_type') or '').lower()
+    if not page_policy:
+        return False
+    if page_policy.get('body_page_max') not in (None, '', 0) and not page_source.startswith('official'):
+        return False
+    template = payload.get('template') if isinstance(payload.get('template'), dict) else {}
+    if not any(template.get(key) for key in ['repository_url', 'archive_url', 'official_source_url']):
+        return False
+    if not (template.get('main_tex') or template.get('required_files')):
+        return False
+    policy = payload.get('venue_submission_policy') if isinstance(payload.get('venue_submission_policy'), dict) else {}
+    profile = payload.get('venue_template_profile') if isinstance(payload.get('venue_template_profile'), dict) else {}
+    return bool(policy and profile)
+
+
 def augment_with_repository_verification(payload: dict[str, Any], *, refresh_official: bool = False) -> dict[str, Any]:
     template = payload.get('template') if isinstance(payload.get('template'), dict) else {}
     repo_url = str(template.get('repository_url') or template.get('official_source_url') or '').strip()
@@ -649,7 +671,7 @@ def augment_with_repository_verification(payload: dict[str, Any], *, refresh_off
         remote_head = remote_repository_head(repo_url)
         cache_candidates = [
             ROOT / 'projects' / str(payload.get('project') or '') / 'paper' / 'venues' / slugify(str(payload.get('venue') or '')) / 'official_repo_cache',
-            Path('/tmp/iclr_master_template_check_codex'),
+            Path('/tmp/iclr_master_template_check'),
         ] if (use_template_cache() and not refresh_official) else []
         repo_dir = verified_local_template_source(payload, repo_url)
         commit = str(payload.get('official_repository_commit') or template.get('verified_repository_commit') or 'local-template-source').strip()
@@ -699,7 +721,7 @@ def augment_with_repository_verification(payload: dict[str, Any], *, refresh_off
             if proc.returncode != 0:
                 message = 'official repository verification failed: ' + (proc.stderr or proc.stdout or '').strip()[:500]
                 payload.setdefault('warnings', []).append(message)
-                if refresh_official:
+                if refresh_official and not payload_has_self_contained_official_venue_contract(payload):
                     payload.setdefault('blockers', []).append(message)
                 return payload
             commit_proc = run_git_checked(['git', '-C', str(repo_dir), 'rev-parse', 'HEAD'], cwd=ROOT, timeout=20)
@@ -925,11 +947,14 @@ def heal_verified_venue_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return payload
     has_verified_contract = bool(
-        payload.get('official_repository_verified')
-        and payload.get('official_sources')
-        and isinstance(payload.get('page_policy'), dict)
-        and isinstance(payload.get('venue_submission_policy'), dict)
-        and isinstance(payload.get('venue_template_profile'), dict)
+        (
+            payload.get('official_repository_verified')
+            and payload.get('official_sources')
+            and isinstance(payload.get('page_policy'), dict)
+            and isinstance(payload.get('venue_submission_policy'), dict)
+            and isinstance(payload.get('venue_template_profile'), dict)
+        )
+        or payload_has_self_contained_official_venue_contract(payload)
     )
     if not has_verified_contract:
         return payload

@@ -599,7 +599,7 @@ def action_template(kind: str, project: str, venue: str, skills: dict[str, str])
             "success_checks": [
                 "state/obsolete_baseline_cleanup_plan.json is reviewed_no_cleanup_required only when the project Claude review fingerprint matches the current candidate set, or cleanup_authorized=true only when exact candidate paths are approved.",
                 "If authorization is present, project Claude Code executes cleanup itself for only approved exact paths, writes state/obsolete_baseline_cleanup_execution.json, and TASTE audits that no current selected route or shared evidence was removed.",
-                "No project files are deleted by name matching or by Codex manual cleanup.",
+                "No project files are deleted by name matching or by unaudited manual cleanup.",
             ],
         }
     if kind == "selected_base_viability_gate":

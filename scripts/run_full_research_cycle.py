@@ -1314,12 +1314,11 @@ class FullCycle:
             if stage == "literature-survey":
                 env.setdefault("YEARS", str(dt.datetime.now(dt.timezone.utc).year))
                 env.setdefault("VENUE_IDS", "openreview_iclr_2026,openreview_neurips,dblp_icml,dblp_kdd")
-                env.setdefault("WINDOW_DAYS", "120")
-                env.setdefault("ARXIV_FULL_SCAN", "0")
-                env.setdefault("ARXIV_MAX_TOTAL", "120")
+                env.setdefault("WINDOW_DAYS", "180")
+                env.setdefault("ARXIV_FULL_SCAN", "1")
                 env.setdefault("ARXIV_MAX_QUERIES", "3")
-                env.setdefault("ARXIV_PER_QUERY_LIMIT", "40")
-                env.setdefault("ARXIV_TIMEOUT_SEC", "12")
+                env.setdefault("ARXIV_PER_QUERY_LIMIT", "100")
+                env.setdefault("ARXIV_TIMEOUT_SEC", "45")
             proc = subprocess.Popen(
                 cmd,
                 cwd=ROOT,
@@ -3844,8 +3843,6 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
             autonomous.extend(["--title", self.args.title])
         if self.args.max_launches:
             autonomous.extend(["--max-launches", str(self.args.max_launches)])
-        if self.args.coding_backend:
-            autonomous.extend(["--coding-backend", self.args.coding_backend])
         if self.args.auto_install_latex:
             autonomous.append("--auto-install-latex")
         if self.args.skip_fetch:
@@ -4682,7 +4679,7 @@ def main() -> int:
     parser.add_argument("--paper-timeout-sec", type=int, default=7200)
     parser.add_argument("--background-experiment-timeout-sec", type=int, default=int(os.environ.get("BACKGROUND_EXPERIMENT_TIMEOUT_SEC", "0")), help="Wait this long for project-owned background experiments; 0 means wait without a deadline.")
     parser.add_argument("--background-experiment-poll-sec", type=int, default=int(os.environ.get("BACKGROUND_EXPERIMENT_POLL_SEC", "60")))
-    parser.add_argument("--coding-backend", default="")
+    parser.add_argument("--coding-backend", default="", help="Deprecated compatibility option; downstream execution uses Claude Code.")
     parser.add_argument("--skip-fetch", action="store_true")
     parser.add_argument("--auto-install-latex", action="store_true")
     parser.add_argument("--no-resume", action="store_true")

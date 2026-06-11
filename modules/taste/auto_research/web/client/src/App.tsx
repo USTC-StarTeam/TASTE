@@ -71,8 +71,8 @@ const DEFAULT_CONFIG: Config = {
   biorxiv_categories: ["bioinformatics"],
   biorxiv_start_date: "",
   biorxiv_end_date: "",
-  biorxiv_llm_candidate_limit: 200,
-  biorxiv_llm_candidates_per_category: 100,
+  biorxiv_llm_candidate_limit: 0,
+  biorxiv_llm_candidates_per_category: 0,
   nature_journals: ["nature", "natmachintell", "natcomputsci", "nmeth", "ncomms"],
   nature_article_types: ["article"],
   nature_start_date: "",
@@ -1007,8 +1007,8 @@ const TEXT = {
     researchTitle: "论文标题",
     researchIterations: "迭代轮数",
     researchOptions: "执行选项",
-    researchCodingBackend: "代码执行后端",
-    researchCodingBackendHelp: "默认值使用项目配置；codex 会优先让 Codex 自主改代码、跑实验、修复，找不到 Codex 时可按项目配置回落到 LLM。",
+    researchCodingBackend: "项目代理",
+    researchCodingBackendHelp: "环境配置、实验迭代和论文撰写统一由用户本机已配置的 Claude Code 项目代理执行；Find 阶段保留 LLM 评分。",
     researchExecutePlan: "执行实验计划",
     researchPrepareEnv: "准备环境计划",
     researchRealBootstrapEnv: "真实创建/安装 Conda 环境",
@@ -1023,7 +1023,7 @@ const TEXT = {
     noData: "暂无",
     unnamed: "未命名",
     runtimeSaved: "运行环境已保存并重新诊断。",
-    runtimeDetected: "已自动检测并保存项目代理、Codex、Node/NVM 路径。",
+    runtimeDetected: "已自动检测并保存项目代理、Node/NVM 路径。",
     envConfigSaved: "实验环境配置已保存；Conda/Python 仅在环境配置步骤使用。",
     runtimeLockedReady: "环境已锁定",
     runtimeLockedReadyDetail: "使用远端已锁定配置；无需重复创建或重新诊断。",
@@ -1037,16 +1037,15 @@ const TEXT = {
     researchProjectCreated: "项目已创建并切换。",
     researchGlobalHelp: "这里仅放全局研究主题；仓库、数据、环境状态和阻塞原因会在调研/计划之后进入“环境配置”阶段展示。",
     researchRuntimeTitle: "运行环境",
-    researchRuntimeHelp: "这里仅配置全局 LLM 工具链：项目代理、Codex、Node/NVM 和额外 PATH。Conda/Python 实验环境只在“环境配置”步骤设置；系统会用这些显式路径同时覆盖交互式与非交互式执行。",
+    researchRuntimeHelp: "这里仅配置项目代理、Node/NVM 和额外 PATH。Conda/Python 实验环境只在“环境配置”步骤设置；系统会用这些显式路径同时覆盖交互式与非交互式执行。",
     remoteToolPaths: "远端工具路径",
     managementPythonExecutable: "管理 Python",
     experimentPythonExecutable: "实验 Python",
     nvmDir: "NVM 文件夹",
     nodeBinDir: "Node 可执行目录",
     claudeExecutable: "项目代理可执行文件",
-    codexExecutable: "Codex 可执行文件",
     extraPath: "额外路径",
-    autoDetectClaudeCodex: "自动检测项目代理/Codex",
+    autoDetectProjectAgent: "自动检测项目代理",
     saveAndDiagnose: "保存并诊断",
     missing: "缺失",
     noDiagnostics: "暂无诊断",
@@ -1156,9 +1155,9 @@ const TEXT = {
     runExperimentLoop: "只跑实验子循环",
     runSettings: "运行设置",
     maxExperimentsPerRound: "每轮最多实验数",
-    currentDefaultBackend: "当前项目默认后端",
+    currentDefaultBackend: "当前执行后端",
     projectDefault: "项目默认",
-    lastActualBackend: "最近一次实际后端",
+    lastActualBackend: "最近一次执行后端",
     currentExperimentSummary: "当前实验摘要",
     noExperimentRun: "尚未运行实验",
     completedExperiments: "审计就绪记录",
@@ -1549,8 +1548,8 @@ const TEXT = {
     researchTitle: "Paper title",
     researchIterations: "Iterations",
     researchOptions: "Execution options",
-    researchCodingBackend: "Coding backend",
-    researchCodingBackendHelp: "default uses project config; codex lets Codex autonomously edit/run/repair, with LLM fallback when configured.",
+    researchCodingBackend: "Project agent",
+    researchCodingBackendHelp: "Environment, experiment, and paper stages are handled by the user-configured Claude Code project agent; Find keeps LLM scoring.",
     researchExecutePlan: "Execute experiment plan",
     researchPrepareEnv: "Prepare env plan",
     researchRealBootstrapEnv: "Create/install conda env for real",
@@ -1565,7 +1564,7 @@ const TEXT = {
     noData: "N/A",
     unnamed: "Unnamed",
     runtimeSaved: "runtime saved and diagnosed again.",
-    runtimeDetected: "Claude/Codex/Node/NVM paths were auto-detected and saved.",
+    runtimeDetected: "Project-agent/Node/NVM paths were auto-detected and saved.",
     envConfigSaved: "Experiment environment config saved; Conda/Python are configured only in the Environment step.",
     runtimeLockedReady: "Environment locked",
     runtimeLockedReadyDetail: "Using the locked remote configuration; no repeated creation or diagnosis is needed.",
@@ -1579,16 +1578,15 @@ const TEXT = {
     researchProjectCreated: "research project created and selected.",
     researchGlobalHelp: "This panel only stores the global research topic. Repo, data, environment status, and blockers appear in the Environment stage after research/planning.",
     researchRuntimeTitle: "Runtime",
-    researchRuntimeHelp: "Configure only the global LLM toolchain here: project agent, Codex, Node/NVM, and extra PATH. Conda/Python experiment environments are configured only in the Environment step; The workflow uses these explicit paths for both interactive and non-interactive execution.",
+    researchRuntimeHelp: "Configure only the project agent, Node/NVM, and extra PATH here. Conda/Python experiment environments are configured only in the Environment step; the workflow uses these explicit paths for both interactive and non-interactive execution.",
     remoteToolPaths: "Remote Tool Paths",
     managementPythonExecutable: "management Python",
     experimentPythonExecutable: "Experiment Python",
     nvmDir: "NVM directory",
     nodeBinDir: "Node bin directory",
     claudeExecutable: "Project-agent executable",
-    codexExecutable: "Codex executable",
     extraPath: "Extra PATH",
-    autoDetectClaudeCodex: "Auto-detect Claude/Codex",
+    autoDetectProjectAgent: "Auto-detect project agent",
     saveAndDiagnose: "Save and diagnose",
     missing: "missing",
     noDiagnostics: "No diagnostics yet",
@@ -1698,9 +1696,9 @@ const TEXT = {
     runExperimentLoop: "Run experiment sub-loop",
     runSettings: "Run settings",
     maxExperimentsPerRound: "Max experiments per round",
-    currentDefaultBackend: "Current project default backend",
+    currentDefaultBackend: "Current execution backend",
     projectDefault: "project default",
-    lastActualBackend: "Last actual backend",
+    lastActualBackend: "Last execution backend",
     currentExperimentSummary: "Current Experiment Summary",
     noExperimentRun: "Experiment has not run yet",
     completedExperiments: "Audit-ready records",
@@ -2057,7 +2055,8 @@ function badgeClass(status: string) {
 
 function jobStatusLabel(status: any, lang: Lang = "zh") {
   const value = String(status || "").trim();
-  if (value.toLowerCase().startsWith("stale")) return lang === "zh" ? "已停止" : "stopped";
+  const normalized = value.toLowerCase().replace(/[\s-]+/g, "_");
+  if (normalized.startsWith("stale")) return lang === "zh" ? "已停止" : "stopped";
   const labels: Record<string, { zh: string; en: string }> = {
     queued: { zh: "排队中", en: "queued" },
     running: { zh: "运行中", en: "running" },
@@ -2067,11 +2066,16 @@ function jobStatusLabel(status: any, lang: Lang = "zh") {
     needs_writing: { zh: "待撰写", en: "needs writing" },
     preview_pdf_blocked: { zh: "预览受门控", en: "preview gated" },
     blocked: { zh: "阻塞", en: "blocked" },
+    blocked_environment_base_selection_required: { zh: "等待环境阶段选择当前基底", en: "waiting for environment-stage base selection" },
+    environment_anchor_selection_required: { zh: "等待环境阶段选择当前基底", en: "waiting for environment-stage base selection" },
     error: { zh: "错误", en: "error" },
     cancelling: { zh: "停止中", en: "cancelling" },
     cancelled: { zh: "已取消", en: "cancelled" },
   };
-  return labels[value]?.[lang === "zh" ? "zh" : "en"] || value.replace(/_/g, " ") || (lang === "zh" ? "未知" : "unknown");
+  if (labels[value]) return labels[value][lang === "zh" ? "zh" : "en"];
+  if (labels[normalized]) return labels[normalized][lang === "zh" ? "zh" : "en"];
+  if (normalized.startsWith("blocked_")) return lang === "zh" ? "阻塞" : "blocked";
+  return value.replace(/_/g, " ") || (lang === "zh" ? "未知" : "unknown");
 }
 
 const PUBLIC_STAGES = ["find", "read", "idea", "plan", "environment", "experiment", "paper"];
@@ -2106,9 +2110,10 @@ function jobStageLabel(job: any, lang: Lang) {
 function jobProgressPhaseLabel(job: any, lang: Lang = "zh") {
   const phase = String(job?.progress?.phase || "").trim();
   if (!phase) return canonicalJobStage(job);
+  const normalized = phase.toLowerCase().replace(/[\s-]+/g, "_");
   if (phase === "literature") return "find";
   if (phase === "complete") return jobStatusLabel("done", lang);
-  if (["cancelled", "blocked", "error", "interrupted", "queued", "running", "cancelling"].includes(phase)) return jobStatusLabel(phase, lang);
+  if (["cancelled", "blocked", "error", "interrupted", "queued", "running", "cancelling"].includes(phase) || normalized.startsWith("blocked_")) return jobStatusLabel(phase, lang);
   if (phase === "started") return lang === "zh" ? "已启动" : "started";
   return phase.replace(/_/g, " ");
 }
@@ -2142,12 +2147,32 @@ function publicLogText(value: any, lang: Lang = "zh"): string {
     .replace(/claim-ready/gi, lang === "zh" ? "审计就绪" : "auditable")
     .replace(/claim ready/gi, lang === "zh" ? "审计就绪" : "auditable")
     .replace(/\[TASTE\]\s*/g, "")
+    .replace(/来源：确定性门控审计（状态和计数由项目 artifact 计算，不是项目代理自由文本）/g, "")
+    .replace(/来源：确定性门控审计/g, "")
+    .replace(/Source: deterministic gate audit \(status and counts are computed from project artifacts, not free-form project-agent text\)/gi, "")
+    .replace(/Source: deterministic gate audit/gi, "")
+    .replace(/summary_source[:=]\s*deterministic_gate_audit/gi, "")
+    .replace(/deterministic_gate_audit/gi, "")
+    .replace(/当前\s+current_selected_plan_id/g, lang === "zh" ? "当前计划" : "selected execution plan")
+    .replace(/当前\s+selected_plan_id/g, lang === "zh" ? "当前计划" : "selected execution plan")
+    .replace(/current_selected_plan_id/g, lang === "zh" ? "当前计划" : "selected execution plan")
+    .replace(/selected_plan_id/g, lang === "zh" ? "当前计划" : "selected execution plan")
+    .replace(/当前\s+当前计划/g, "当前计划")
+    .replace(/repo\/data\/protocol/g, lang === "zh" ? "仓库、数据、协议" : "repo/data/protocol")
+    .replace(/idea-code-run-log\/loss-analysis-reflection-next plan/g, lang === "zh" ? "想法、代码、运行日志、loss 分析、反思和下一步计划" : "idea-code-run-log/loss-analysis-reflection-next plan")
+    .replace(/实验循环：warn/g, lang === "zh" ? "实验循环：需继续检查" : "experiment loop: needs review")
+    .replace(/确定性门控只确认当前状态；具体下一步应由项目代理读取证据后给出。/g, lang === "zh" ? "等待项目代理读取证据并给出具体下一步。" : "Waiting for the project agent to read the evidence and choose the concrete next step.")
+    .replace(/确定性门控只确认当前缺口；具体实验或修复动作由项目代理读取证据后决定。/g, lang === "zh" ? "等待项目代理读取当前缺口证据，并给出下一轮实验或修复动作。" : "Waiting for the project agent to read the current evidence gap and choose the next experiment or repair action.")
+    .replace(/确定性门控只确认当前主线缺少候选实验证据；具体下一步由项目代理读取证据后决定。/g, lang === "zh" ? "等待项目代理读取候选实验证据缺口，并给出下一步实验动作。" : "Waiting for the project agent to read the candidate-evidence gap and choose the next experiment action.")
+    .replace(/Real-data comparison mixes metrics \(([^)]*)\); The workflow must compare on the same metric before paper promotion\./g, lang === "zh" ? "真实数据比较使用了不一致指标（$1）；需要先用同一指标重新比较，才能推进论文结论。" : "Real-data comparison uses inconsistent metrics ($1); compare on the same metric before paper promotion.")
     .replace(/native frontend skipped/g, "finding frontend skipped")
     .replace(/native frontend/g, "finding frontend")
     .replace(/当前阶段/g, "当前阶段")
     .replace(/阶段/g, "阶段")
     .replace(/TASTE\/计划/g, "Find/Plan")
     .replace(/TASTE\/Plan/g, "Find/Plan")
+    .replace(/missing bib entries for cited keys=[^；。\n]+/gi, lang === "zh" ? "引用/参考文献仍需修复，具体修复清单已交由项目代理处理" : "Citation/references still need repair; detailed repair items are reserved for the project agent")
+    .replace(/latex_undefined_citations[^；。\n]*/gi, lang === "zh" ? "引用/参考文献仍需修复，具体修复清单已交由项目代理处理" : "Citation/references still need repair; detailed repair items are reserved for the project agent")
     .replace(/natbib_author_undefined/gi, lang === "zh" ? "natbib 作者型引用未渲染" : "natbib author citation did not render")
     .replace(/pdf_unresolved_citation_markers/gi, lang === "zh" ? "PDF 未解析引用标记" : "PDF unresolved citation markers")
     .replace(/nature_numeric_style_textual_citations/gi, lang === "zh" ? "Nature 数字模板中的作者型引用命令" : "author-style citation commands in a Nature numeric template")
@@ -2570,19 +2595,19 @@ function nonFindTabFindJobSummary(job: any, lang: Lang = "zh") {
     runId ? `run=${runId}` : "",
   ].filter(Boolean).join(" / ");
   return [
-    lang === "zh" ? `Find job 摘要：${parts}` : `Find job summary: ${parts}`,
-    progressMessage ? (lang === "zh" ? `进度：${progressMessage}` : `progress: ${progressMessage}`) : "",
+    lang === "zh" ? `历史 Find job 摘要：${parts}` : `Historical Find job summary: ${parts}`,
+    progressMessage ? (lang === "zh" ? `最后进度：${progressMessage}` : `last progress: ${progressMessage}`) : "",
     lang === "zh"
-      ? "抓取、标题筛选、详情评分、LLM 评分和 Find 产物只在“发现”页展开；当前页不展开这些日志，避免把文献调研误看成实验迭代内容。"
-      : "Retrieval, title screening, detail scoring, LLM scoring, and Find artifacts expand only on the Find page so literature audit details are not mixed into this stage.",
+      ? "该 Find job 已结束；抓取、标题筛选、详情评分、LLM 评分和 Find 产物请在“发现”页展开。正在运行的 Find 会在这里实时显示详细日志。"
+      : "This Find job has finished; expand retrieval, title screening, detail scoring, LLM scoring, and Find artifacts on the Find page. Running Find jobs show detailed live logs here.",
   ].filter(Boolean);
 }
 
 function jobRecentLogs(job: any, lang: Lang = "zh", contextTab?: Tab) {
-  if (contextTab && contextTab !== "find" && isFindRunJob(job)) {
+  if (isHistoricalStoppedResearchCycleJob(job)) return historicalResearchCycleSummary(job, lang);
+  if (contextTab && contextTab !== "find" && isFindRunJob(job) && !isLiveJob(job)) {
     return nonFindTabFindJobSummary(job, lang);
   }
-  if (isHistoricalStoppedResearchCycleJob(job)) return historicalResearchCycleSummary(job, lang);
   const rawLogs = safeJobLogs(job);
   const scoringProgress = rawLogs.map((line) => String(line || "")).find((line) => line.startsWith("find_live_progress=") && /scored batch|scoring batch|abstract_scoring|LLM/i.test(line));
   const scoringBatch = scoringProgress?.match(/进度\s*([^；;]+)/)?.[1] || scoringProgress?.match(/batch\s+(\d+\/\d+)/i)?.[1] || "";
@@ -2787,7 +2812,7 @@ function isConfirmedLiveProcess(row: any) {
   const status = String(row.status || "").toLowerCase();
   const pid = row.pid !== undefined && row.pid !== null ? String(row.pid).trim() : "";
   if (row.process_alive === false || row.alive === false) return false;
-  if (["queued", "cancelling", "blocked"].includes(status)) return true;
+  if (["queued", "cancelling"].includes(status)) return true;
   if (status === "running") return row.process_alive === true || row.alive === true || Boolean(pid && row.kind);
   return row.process_alive === true || row.alive === true;
 }
@@ -2928,7 +2953,6 @@ function runtimeDraftFromSummary(summary: ProjectSummary | null) {
     nvm_dir: runtime.nvm_dir || "",
     node_bin: runtime.node_bin || "",
     claude_path: runtime.claude_path || codingAgent.claude_path_hint || "",
-    codex_path: runtime.codex_path || codingAgent.codex_path_hint || "",
     management_python: runtime.management_python || runtime.python_executable || summary?.config?.python_executable || "",
     extra_path: Array.isArray(runtime.extra_path) ? runtime.extra_path.join(":") : String(runtime.extra_path || ""),
   };
@@ -3095,7 +3119,7 @@ function App() {
   const [showAllRuns, setShowAllRuns] = useState(false);
   const [researchProjects, setProjects] = useState<Project[]>([]);
   const [researchProjectsLoaded, setProjectsLoaded] = useState(false);
-  const [researchProject, setProjectId] = useState("");
+  const [researchProject, setProjectId] = useState(() => localStorage.getItem("selected_project") || "");
   const [researchSummary, setProjectSummary] = useState<ProjectSummary | null>(null);
   const [researchProjectLoading, setProjectLoading] = useState(false);
   const [newProjectId, setNewProjectId] = useState("");
@@ -3109,7 +3133,6 @@ function App() {
   const [researchResearcherProfile, setResearchResearcherProfile] = useState("");
   const [researchIterations, setIterations] = useState(1);
   const [researchMaxLaunches, setMaxLaunches] = useState(1);
-  const [researchCodingBackend, setCodingBackend] = useState("");
   const [researchExecutePlan, setExecutePlan] = useState(false);
   const [researchPrepareEnv, setPrepareEnv] = useState(false);
   const [researchRealBootstrapEnv, setRealBootstrapEnv] = useState(true);
@@ -3277,9 +3300,8 @@ function App() {
     setVenue(runPreferences.target_venue || runPreferences.venue || summary.human_supervision?.target_venue || "");
     setResearchResearchInterest(runPreferences.research_interest || "");
     setResearchResearcherProfile(runPreferences.researcher_profile || "");
-    setCodingBackend(runPreferences.coding_agent?.backend || "");
-    const nextSelectedVenues = Array.isArray(selection.venue_ids) && selection.venue_ids.length
-      ? Array.from(new Set(selection.venue_ids.map((item: any) => String(item || "").trim()).filter(Boolean)))
+    const nextSelectedVenues: string[] = Array.isArray(selection.venue_ids) && selection.venue_ids.length
+      ? Array.from(new Set<string>(selection.venue_ids.map((item: any) => String(item || "").trim()).filter(Boolean)))
       : [];
     setSelectedVenues(nextSelectedVenues);
     setSelectedVenueYears(venueYearMapFromSelection(selection, nextSelectedVenues));
@@ -4079,8 +4101,8 @@ function App() {
   const selectedExecutionText = useMemo(() => {
     if (!contractSelectedPlanId) {
       return lang === "zh"
-        ? "候选计划已生成，但主控 Claude Code 或人类监督尚未选择唯一 selected_plan_id；环境、实验、论文和论文结论提升保持阻断。"
-        : "Plan candidates exist, but the main Claude Code or human supervisor has not selected exactly one selected_plan_id; environment, experiment, paper, and claim execution stay blocked.";
+        ? "候选计划已生成，但主控 Claude Code 或人类监督尚未选择唯一执行计划；环境、实验、论文和论文结论提升保持阻断。"
+        : "Plan candidates exist, but the main Claude Code or human supervisor has not selected exactly one execution plan; environment, experiment, paper, and claim execution stay blocked.";
     }
     const ideaSuffix = contractSelectedIdeaId ? (lang === "zh" ? `；对应想法：${contractSelectedIdeaId}` : `; idea: ${contractSelectedIdeaId}`) : "";
     return lang === "zh" ? `唯一执行计划：${contractSelectedPlanId}${ideaSuffix}` : `selected execution plan: ${contractSelectedPlanId}${ideaSuffix}`;
@@ -4590,7 +4612,8 @@ function App() {
   const liveProjectStageJob = useMemo(() => {
     const exclusiveStages = new Set(["environment", "experiment", "paper"]);
     return jobs.find((job) => {
-      if (!isLiveJob(job)) return false;
+      const status = String(job?.status || "").trim().toLowerCase();
+      if (!isLiveJob(job) || isStoppedWorkflowStatus(status) || jobProcessAliveValue(job) === false) return false;
       const stage = String(job.stage || "").toLowerCase();
       if (!exclusiveStages.has(stage)) return false;
       const result = (job.result && typeof job.result === "object") ? job.result : {};
@@ -4997,8 +5020,22 @@ function App() {
       && paperGatePassed(paper?.paper_figure_quality_status)
     );
   }
+  function paperHasUnclearedQualityGate(paper: any) {
+    if (!paper) return false;
+    const statuses = [
+      paper?.paper_normality_status,
+      paper?.paper_citation_render_status,
+      paper?.paper_self_review_status,
+      paper?.paper_figure_quality_status,
+    ];
+    return statuses.some((value) => {
+      const text = String(value ?? "").trim();
+      return text !== "" && !paperGatePassed(text);
+    }) || Boolean(paper?.blocked_preview_available) || paper?.paper_self_review_submission_evidence_ready === false;
+  }
   function paperHumanStatus(paper: any) {
     if (paperSubmissionEvidenceBlocked(paper) && (paper?.pdf_url || paper?.blocked_pdf_url)) return lang === "zh" ? "论文预览可看，投稿证据阻塞" : "paper preview available; submission evidence blocked";
+    if ((paper?.pdf_url || paper?.blocked_pdf_url) && paperHasUnclearedQualityGate(paper)) return lang === "zh" ? "论文预览需继续迭代" : "paper preview needs iteration";
     if (paper?.pdf_url) return lang === "zh" ? "论文预览已通过格式门控" : "paper preview passed format gates";
     if (paper?.status === "running") return displayValue("running");
     if (paperAcceptedPreviewBlocked(paper)) return lang === "zh" ? "论文预览需继续迭代" : "paper preview needs iteration";
@@ -5007,6 +5044,7 @@ function App() {
   }
   function paperPdfLabel(paper: any) {
     if (paperSubmissionEvidenceBlocked(paper) && (paper?.pdf_url || paper?.blocked_pdf_url)) return lang === "zh" ? "预览 PDF 已生成；投稿证据仍阻塞" : "preview PDF generated; submission evidence remains blocked";
+    if (paper?.pdf_url && paperHasUnclearedQualityGate(paper)) return lang === "zh" ? "已生成论文预览，仍需继续质量/证据迭代" : "paper preview generated; quality/evidence iteration continues";
     if (paper?.pdf_url) return paper.status === "preview_pdf_blocked" ? t.pdfPreviewBlocked : t.pdfReadyBelow;
     if (paper?.blocked_pdf_url) return paper.status === "running" ? t.runningPdfPreviewTitle : (lang === "zh" ? "已有论文预览 PDF，仍需继续质量/证据迭代" : "paper preview PDF exists; quality/evidence iteration continues");
     return t.pdfNotGenerated;
@@ -5075,19 +5113,18 @@ function App() {
     return displayMaybe(paper?.paper_self_review_status, t.noData);
   }
   function paperPreviewHelp(paper: any) {
-    if (paperSelfReviewRows(paper).length) {
-      const evidenceRows = asArray(paper?.paper_self_review_evidence_blockers);
-      const count = evidenceRows.length || paperSelfReviewRows(paper).length;
-      return evidenceRows.length
-        ? (lang === "zh" ? `论文自审发现 ${count} 个未解决科研证据问题；详细待处理项见上方列表，PDF 仅作预览。` : `Paper self-review found ${count} unresolved scientific-evidence issue(s); see the action-item list above, and treat the PDF as preview-only.`)
-        : (lang === "zh" ? `论文自审仍有 ${count} 个待处理项；详细项见上方列表，PDF 仅作预览。` : `Paper self-review still has ${count} action item(s); see the list above, and treat the PDF as preview-only.`);
+    const evidenceRows = asArray(paper?.paper_self_review_evidence_blockers);
+    if (evidenceRows.length) {
+      return lang === "zh"
+        ? "PDF 仅作预览；科研证据与投稿准备度仍需继续迭代，具体修复项已交由项目代理处理。"
+        : "The PDF is preview-only; scientific evidence and submission readiness still need iteration, and detailed repair items are handled by the project agent.";
     }
-    const citationIssue = paperCitationRenderSummary(paper);
-    if (paperCitationRenderRows(paper).length) {
-      const prefix = lang === "zh" ? "引用渲染审计已阻塞：" : "Citation render audit is blocked: ";
-      return `${prefix}${citationIssue}`;
+    if (paperSelfReviewRows(paper).length || paperCitationRenderRows(paper).length) {
+      return lang === "zh"
+        ? "PDF 仅作预览；底层 LaTeX/BibTeX/自审诊断已保留给项目代理处理，不在这里展开。"
+        : "The PDF is preview-only; low-level LaTeX/BibTeX/self-review diagnostics are reserved for the project agent and are not expanded here.";
     }
-    if (paperAcceptedPreviewBlocked(paper)) return lang === "zh" ? "这份 PDF 是当前 论文预览，可用于查看排版和内容；系统仍会根据质量、证据和投稿门控继续审计和修订。" : "This PDF is the current paper preview; The workflow will continue auditing and revising against quality, evidence, and submission gates.";
+    if (paperAcceptedPreviewBlocked(paper)) return lang === "zh" ? "这份 PDF 是当前论文预览，可用于查看排版和内容；系统仍会根据质量、证据和投稿门控继续审计和修订。" : "This PDF is the current paper preview; The workflow will continue auditing and revising against quality, evidence, and submission gates.";
     return paper?.status === "running" ? t.runningPdfPreviewHelp : t.blockedPdfPreviewHelp;
   }
   function paperPdfReason(paper: any) {
@@ -5135,6 +5172,8 @@ function App() {
     blocked_fresh_base_reference_reproduction_required: { zh: "论文级参考复现门控阻塞", en: "paper-level reference reproduction gate blocked" },
     blocked_literature_recommendation_gate: { zh: "Find 推荐门控阻塞", en: "Find recommendation gate blocked" },
     blocked_literature_llm_quota_exhausted: { zh: "LLM API 额度阻塞", en: "LLM API quota blocked" },
+    blocked_environment_base_selection_required: { zh: "等待环境阶段选择当前基底", en: "waiting for environment-stage base selection" },
+    environment_anchor_selection_required: { zh: "等待环境阶段选择当前基底", en: "waiting for environment-stage base selection" },
     blocked_llm_quota_exhausted: { zh: "LLM API 额度阻塞", en: "LLM API quota blocked" },
     literature_llm_quota_exhausted: { zh: "LLM API 额度阻塞", en: "LLM API quota blocked" },
     fresh_find_running: { zh: "Find 正在运行", en: "Find running" },
@@ -5163,6 +5202,8 @@ function App() {
     "current-find-claude-read-idea-plan": { zh: "当前 Find 精读/想法/计划", en: "current Find reading/ideas/plans" },
     queued: { zh: "排队中", en: "queued" },
     stale: { zh: "已停止", en: "stale" },
+    warn: { zh: "需继续检查", en: "needs review" },
+    warning: { zh: "需继续检查", en: "needs review" },
     blocked: { zh: "阻塞", en: "blocked" },
     recommendation_shortfall: { zh: t.recommendationShortfall, en: t.recommendationShortfall },
     failed: { zh: "失败", en: "failed" },
@@ -5505,7 +5546,6 @@ function App() {
       refresh_current_paper: action === "paper",
       refresh_current_venue: action === "paper",
       auto_install_latex: researchAutoInstallLatex,
-      coding_backend: researchCodingBackend,
     };
   }
 
@@ -5528,8 +5568,7 @@ function App() {
         title: researchTitle,
         research_interest: researchResearchInterest,
         researcher_profile: researchResearcherProfile,
-        coding_backend: researchCodingBackend,
-        default_find_selection: currentFindSelection(),
+          default_find_selection: currentFindSelection(),
       });
       setProjectSummary(summary);
       const runPreferences = (summary as any).run_preferences || {};
@@ -5812,7 +5851,7 @@ function App() {
       const refLog = displayMaybe(referenceJob?.log_path || humanSupervision?.blocker?.reference_full_job_log, t.noData);
       return (
         <div className="panel experimentGatePanel compactHumanPanel">
-          <div className="toolbar compactToolbar"><div><h3>{t.experimentGateOverview}</h3><p className="help">{lang === "zh" ? "固定 项目代理正在执行当前主线参考复现；这里显示人类可读的科研状态，原始日志和产物路径在底部 任务栏。" : "The research project agent is running the current reference reproduction; this panel shows a human-readable state, while raw logs/artifacts are in the taskbar."}</p></div></div>
+          <div className="toolbar compactToolbar"><div><h3>{t.experimentGateOverview}</h3><p className="help">{lang === "zh" ? "当前参考复现进程来自真实 PID/日志；这里仅显示确定性运行状态，项目代理原文单独显示在项目代理回复中。" : "The current reproduction process comes from a real PID/log; this panel shows deterministic run status only, while project-agent text is shown separately."}</p></div></div>
           <div className="trajectorySupervisorGrid humanSummaryGrid">
             <article className="supervisorCard"><span>{lang === "zh" ? "主线基底" : "Main base"}</span><strong>{baseTitle}</strong><small>{repoName}</small></article>
             <article className="supervisorCard"><span>{lang === "zh" ? "当前任务" : "Current task"}</span><strong>{lang === "zh" ? "论文级参考复现" : "Full reference reproduction"}</strong><small>{lang === "zh" ? `运行中 / PID=${refPid}` : `running / PID=${refPid}`}</small></article>
@@ -5830,14 +5869,14 @@ function App() {
       const repoName = displayMaybe(humanGateSummary.main_route_repo || humanSupervision?.main_route?.repo_name, t.noData);
       return (
         <div className="panel experimentGatePanel compactHumanPanel">
-          <div className="toolbar compactToolbar"><div><h3>{t.experimentGateOverview}</h3><p className="help">{lang === "zh" ? `当前主线：${baseTitle}；这里只显示 项目代理总结后的科研状态，底层日志和产物路径在底部 任务栏。` : `Current main route: ${baseTitle}. This panel shows the research project-agent summary; raw logs and artifacts are in the taskbar.`}</p></div></div>
+          <div className="toolbar compactToolbar"><div><h3>{t.experimentGateOverview}</h3><p className="help">{lang === "zh" ? `当前主线：${baseTitle}` : `Current main route: ${baseTitle}`}</p></div></div>
           <div className="trajectorySupervisorGrid humanSummaryGrid">
             <article className="supervisorCard"><span>{lang === "zh" ? "主线基底" : "Main base"}</span><strong>{baseTitle}</strong><small>{repoName}</small></article>
             <article className="supervisorCard"><span>{t.referenceReproductionGate}</span><strong className={badgeClass(ref.status || referenceGate.status)}>{displayValue(ref.status || referenceGate.status || "not_started")}</strong><small>{humanReadableMaybe(ref.summary || referenceGate.human_summary, lang === "zh" ? "参考复现状态已由 审计；详见产物文件。" : "Reference reproduction status is audited by TASTE; see artifacts for evidence.")}</small></article>
             <article className="supervisorCard"><span>{t.scientificProgressGate}</span><strong className={badgeClass(science.status || progressGate.status)}>{displayValue(science.status || progressGate.status || "not_started")}</strong><small>{humanReadableMaybe(science.summary || progressGate.human_summary || progressGate.summary, lang === "zh" ? "当前还没有可写入论文的候选方法证据。" : "No promotable candidate-method evidence yet.")}</small></article>
             <article className="supervisorCard"><span>{t.iterationTrajectoryAudit}</span><strong className={badgeClass(loop.status || iterationAudit.status)}>{displayValue(loop.status || iterationAudit.status || "not_started")}</strong><small>{humanReadableMaybe(loop.summary || iterationAudit.human_summary || iterationAudit.summary, lang === "zh" ? "实验迭代状态等待 刷新。" : "Experiment-loop status is waiting for workflow refresh.")}</small></article>
           </div>
-          <div className="researchGateNote warning"><strong>{lang === "zh" ? "当前主阻塞" : "Current blocker"}:</strong> {humanReadableMaybe(humanGateSummary.summary || humanSupervision?.blocker?.summary, lang === "zh" ? "当前科研门控阻塞，系统会继续自主处理。" : "A research gate is blocked; The workflow will continue autonomously.")}</div>
+          <div className="researchGateNote warning"><strong>{lang === "zh" ? "当前阻塞" : "Current blocker"}:</strong> {humanReadableMaybe(humanGateSummary.summary || humanSupervision?.blocker?.summary, lang === "zh" ? "当前科研门控阻塞；完整证据见 state/report 文件。" : "A research gate is blocked; see state/report artifacts for evidence.")}</div>
           <div className="researchGateNote"><strong>{t.nextAction}:</strong> {humanCycleActionText(humanGateSummary.next_action || humanSupervision?.blocker?.next_action, supervisionFallbackNextAction())}</div>
 
         </div>
@@ -5867,7 +5906,7 @@ function App() {
       const mainRouteNoteClass = referenceFullJobIsRunning ? "researchGateNote" : "researchGateNote warning";
       return (
         <div className="panel experimentGatePanel compactHumanPanel">
-          <div className="toolbar compactToolbar"><div><h3>{t.experimentGateOverview}</h3><p className="help">{lang === "zh" ? `当前主线：${displayMaybe(humanSupervision?.main_route?.base_title, t.notSelected)}；历史路线只作为内部对照，不作为当前主线证据。` : `Current main route: ${displayMaybe(humanSupervision?.main_route?.base_title, t.notSelected)}. Legacy routes are internal controls, not current main evidence.`}</p></div></div>
+          <div className="toolbar compactToolbar"><div><h3>{t.experimentGateOverview}</h3><p className="help">{lang === "zh" ? `当前主线：${displayMaybe(humanSupervision?.main_route?.base_title, t.notSelected)}` : `Current main route: ${displayMaybe(humanSupervision?.main_route?.base_title, t.notSelected)}`}</p></div></div>
           <div className="trajectorySupervisorGrid humanSummaryGrid">
             <article className="supervisorCard"><span>{lang === "zh" ? "主线基底" : "Main base"}</span><strong>{displayMaybe(humanSupervision?.main_route?.base_title, t.notSelected)}</strong><small>{displayMaybe(humanSupervision?.main_route?.repo_name, t.noData)}</small></article>
             <article className="supervisorCard"><span>{lang === "zh" ? "当前状态" : "Status"}</span><strong className={badgeClass(humanSupervision?.status)}>{displayValue(humanSupervision?.status || "blocked")}</strong><small>{humanCycleActionText(humanSupervision?.blocker?.summary, localizedField(humanSupervision, "summary", t.noData))}</small></article>
@@ -5881,7 +5920,7 @@ function App() {
       );
     }
     const referenceGateDetail = humanReadableMaybe(referenceGate.human_summary || referenceGate.summary || referenceGate.reason, lang === "zh" ? "参考复现状态等待 审计刷新；详见底部任务栏和产物文件。" : "Reference reproduction status is waiting for TASTE audit refresh; see the taskbar and artifacts.");
-    const progressGateDetail = humanReadableMaybe(progressGate.human_summary || progressGate.summary || progressGate.reason, lang === "zh" ? "当前缺少可写入论文的候选方法证据，项目代理会继续当前主线实验。" : "No promotable candidate-method evidence yet; the research project agent will continue the current-route experiments.");
+    const progressGateDetail = humanReadableMaybe(progressGate.human_summary || progressGate.summary || progressGate.reason, lang === "zh" ? "当前缺少可写入论文的候选方法证据；完整证据见 state/report 文件。" : "No promotable candidate-method evidence yet; see state/report artifacts for evidence.");
     const iterationGateDetail = humanReadableMaybe(iterationAudit.human_summary || iterationAudit.summary || iterationAudit.reason, lang === "zh" ? "实验迭代状态等待 刷新。" : "Experiment-loop status is waiting for workflow refresh.");
     const cards = [
       {
@@ -5935,7 +5974,7 @@ function App() {
         </div>
         {fullCycleBlockers.length > 0 && (
           <div className="researchGateNote warning">
-            <strong>{lang === "zh" ? "当前主阻塞" : "Current blocker"}:</strong> {humanReadableMaybe(fullCycleBlockers[0]?.human_summary || fullCycleBlockers[0]?.summary || fullCycleBlockers[0]?.issue || fullCycleBlockers[0], lang === "zh" ? "当前存在科研门控阻塞；完整证据见 state/report 文件。" : "A research gate is blocked; see state/report artifacts for full evidence.")}
+            <strong>{lang === "zh" ? "当前阻塞" : "Current blocker"}:</strong> {humanReadableMaybe(fullCycleBlockers[0]?.human_summary || fullCycleBlockers[0]?.summary || fullCycleBlockers[0]?.issue || fullCycleBlockers[0], lang === "zh" ? "当前存在科研门控阻塞；完整证据见 state/report 文件。" : "A research gate is blocked; see state/report artifacts for full evidence.")}
           </div>
         )}
         {nextActions.length > 0 && (
@@ -6156,20 +6195,18 @@ function App() {
           <input value={researchRuntimeDraft.node_bin || ""} onChange={(e) => updateRuntimeDraft("node_bin", e.target.value)} placeholder="~/.nvm/versions/node/<version>/bin" />
           <label>{t.claudeExecutable}</label>
           <input value={researchRuntimeDraft.claude_path || ""} onChange={(e) => updateRuntimeDraft("claude_path", e.target.value)} placeholder="claude" />
-          <label>{t.codexExecutable}</label>
-          <input value={researchRuntimeDraft.codex_path || ""} onChange={(e) => updateRuntimeDraft("codex_path", e.target.value)} placeholder="codex" />
           <label>{t.managementPythonExecutable}</label>
           <input value={researchRuntimeDraft.management_python || ""} onChange={(e) => updateRuntimeDraft("management_python", e.target.value)} placeholder="python" />
           <label>{t.extraPath}</label>
           <input value={researchRuntimeDraft.extra_path || ""} onChange={(e) => updateRuntimeDraft("extra_path", e.target.value)} placeholder="/custom/bin:/another/bin" />
           <div className="saveBar">
-            <button onClick={detectRuntimeConfig} disabled={researchRuntimeSaving}>{t.autoDetectClaudeCodex}</button>
+            <button onClick={detectRuntimeConfig} disabled={researchRuntimeSaving}>{t.autoDetectProjectAgent}</button>
             <button className="primary" onClick={saveRuntimeConfig} disabled={researchRuntimeSaving}>{researchRuntimeSaving ? t.saving : t.saveAndDiagnose}</button>
             {researchRuntimeMessage && <span>{researchRuntimeMessage}</span>}
           </div>
         </details>
         <div className="runtimeChecks">
-          {["claude", "codex", "node", "npm", "management_python", "nvm_dir"].map((name) => {
+          {["claude", "node", "npm", "management_python", "nvm_dir"].map((name) => {
             const check = runtimeChecks?.[name] || {};
             const lockedReady = environmentLocked && Object.keys(check).length === 0;
             const waitingForDiagnostics = !hasRuntimeDiagnostics && !lockedReady;
@@ -6825,10 +6862,9 @@ function App() {
                 <button className="primary" onClick={() => runAR("environment")} disabled={!researchProject || environmentLocked || stageLaunchDisabledByFullCycle || environmentStageRunning || stageLaunchDisabledByProjectWorker}>{environmentLocked ? t.envLockedCreated : environmentStageRunning ? t.researchRunningTask : t.firstCreateEnv}</button>
               </div>
             </div>
-            {!researchProjectsLoaded ? <div className="emptyState">{t.researchProjectLoading}</div> : !researchProject ? <div className="emptyState">{t.researchNoProject}</div> : !researchSummary ? (
-              <div className="emptyState">{lang === "zh" ? "正在加载当前 项目状态..." : "Loading current research project state..."}</div>
-            ) : (
+            {!researchProjectsLoaded && !researchProject ? <div className="emptyState">{t.researchProjectLoading}</div> : researchProjectsLoaded && !researchProject ? <div className="emptyState">{t.researchNoProject}</div> : (
               <>
+                {(!researchProjectsLoaded || !researchSummary) && <div className="researchGateNote warning">{lang === "zh" ? "正在刷新当前项目状态；环境配置面板会先保留显示。" : "Refreshing current project state; the Environment panels stay visible."}</div>}
                 <div className="grid two environmentGrid">
                   <div className="panel researchStageCard readableOnly envSummaryPanel">
                     <div className="envSummaryHeader">
@@ -6840,7 +6876,7 @@ function App() {
                     </div>
                     <div className="envSummaryList">
                       <div className="envSummaryItem">
-                        <span>{lang === "zh" ? "已选基底" : "Selected base"}</span>
+                        <span>{envStage?.selection?.valid ? (lang === "zh" ? "已选基底" : "Selected base") : (lang === "zh" ? "已有基底" : "Existing base")}</span>
                         <strong>{displayMaybe(envStage?.selection?.selected_base?.title || activeRepo?.name, t.notSelected)}</strong>
                       </div>
                       <div className="envSummaryItem">
@@ -6974,15 +7010,14 @@ function App() {
             {fullCycleProcessAlive && (
               <div className="researchGateNote warning"><strong>{t.fullCycleAlreadyRunning}:</strong> {t.fullCycleAlreadyRunningHelp}{fullCycleRunningText ? ` ${fullCycleRunningText}` : ""}</div>
             )}
-            {!researchSummary ? (
-              <div className="emptyState">{lang === "zh" ? "正在加载当前 项目状态..." : "Loading current research project state..."}</div>
-            ) : <>
+            {!researchSummary && <div className="researchGateNote warning">{lang === "zh" ? "正在刷新当前项目状态；实验迭代面板会先保留显示。" : "Refreshing current project state; the Experiment panels stay visible."}</div>}
+            <>
             <details className="panel runSettingsPanel">
               <summary>{t.runSettings}</summary>
               <p className="help">{t.fullResearchCycleHelp}</p>
               <div className="row"><div><label>{t.researchVenue}</label><input value={researchVenue} onChange={(e) => setVenue(e.target.value)} /></div><div><label>{t.researchIterations}</label><input value={researchIterations} onChange={(e) => setIterations(Math.max(1, Number(e.target.value)))} type="number" min="1" /></div></div>
-              <div className="row"><div><label>{t.maxExperimentsPerRound}</label><input value={researchMaxLaunches} onChange={(e) => setMaxLaunches(Math.max(1, Number(e.target.value)))} type="number" min="1" /></div><div><label>{t.researchCodingBackend}</label><select value={researchCodingBackend} onChange={(e) => setCodingBackend(e.target.value)}><option value="">{t.defaultOption}</option><option value="claude">claude</option><option value="codex">codex</option><option value="llm">llm</option><option value="off">off</option></select></div></div>
-              <p className="help">{t.currentDefaultBackend}: {(researchSummary as any)?.run_preferences?.coding_agent?.backend || t.projectDefault}; {t.lastActualBackend}: {researchStages?.experiment?.last_backend || t.noData}.</p>
+              <div className="row"><div><label>{t.maxExperimentsPerRound}</label><input value={researchMaxLaunches} onChange={(e) => setMaxLaunches(Math.max(1, Number(e.target.value)))} type="number" min="1" /></div><div><label>{t.researchCodingBackend}</label><input value="Claude Code" readOnly /></div></div>
+              <p className="help">{t.researchCodingBackendHelp} {t.lastActualBackend}: {researchStages?.experiment?.last_backend || "claude"}.</p>
             </details>
             {renderExperimentGatePanel()}
             <div className="panel researchStageCard readableOnly"><div className="researchStageTop"><span className={`stageBadge ${badgeClass(experimentSummaryStatus)}`}>{displayValue(experimentSummaryStatus)}</span></div><h3>{experimentSummaryTitle}</h3><p>{experimentSummaryText}</p>{experimentNextActionText && <p><strong>{t.nextAction}:</strong> {experimentNextActionText}</p>}{showExperimentSummaryCount && <><p><strong>{experimentCountLabel}:</strong> {researchExperimentCompletedCount} / {researchExperimentTotalCount}</p>{experimentCountHelp && <p className="help">{experimentCountHelp}</p>}</>}{showSyntheticSmokeWarning && <p><strong>{t.caution}:</strong> {t.syntheticSmokeWarning}</p>}</div>
@@ -7009,7 +7044,7 @@ function App() {
               </tr>;
             })}</tbody></table></div>)}</div>
             )}
-            </>}
+            </>
           </section>
         )}
 
@@ -7019,9 +7054,8 @@ function App() {
               <div><h2>{t.paperWrite}</h2><p className="help">{t.paperHelp}</p></div>
               <div className="toolbarActions"><button onClick={() => refreshProject()} disabled={!researchProject}>{t.researchRefresh}</button><button className="primary" onClick={() => runAR("paper")} disabled={!researchProject || !researchVenue || stageLaunchDisabledByFullCycle || stageLaunchDisabledByProjectWorker}>{t.runPaperWriting}</button></div>
             </div>
-            {!researchSummary ? (
-              <div className="emptyState">{lang === "zh" ? "正在加载当前 项目状态..." : "Loading current research project state..."}</div>
-            ) : <>
+            {!researchSummary && <div className="researchGateNote warning">{lang === "zh" ? "正在刷新当前项目状态；论文撰写面板会先保留显示。" : "Refreshing current project state; the Paper panels stay visible."}</div>}
+            <>
             {(freshBaseMainBlocked || literatureGateBlocked) && (
               <div className="researchGateNote warning"><strong>{t.evidenceGateNotPassed}:</strong> {displayMaybe(humanSupervision?.blocker?.summary, t.evidenceGateWarning)} {lang === "zh" ? "点击生成会生成目标 venue 论文预览，但不会标记为投稿通过。" : "Generating still creates an paper preview only; it will not be marked submission-ready."}</div>
             )}
@@ -7053,22 +7087,9 @@ function App() {
             </div>
             {researchStages?.paper?.paper_generation_skipped && <div className="researchGateNote warning"><strong>{t.evidenceGateNotPassed}:</strong> {researchStages?.paper?.science_gate_preflight_blockers?.slice?.(0, 3)?.join("；") || researchStages?.paper?.paper_generation_skipped_reason || t.evidenceGateWarning}</div>}
             {researchStages?.paper?.status === "preview_pdf_blocked" && <div className="researchGateNote warning"><strong>{t.evidenceGateNotPassed}:</strong> {t.evidenceGateWarning}</div>}
-            {!researchStages?.paper?.pdf_url && (researchStages?.paper?.blocked_pdf_url || researchStages?.paper?.raw_pdf_path || researchStages?.paper?.paper_orchestra_bridge_status || researchStages?.paper?.paper_generation_skipped) && <div className="researchGateNote warning"><strong>{t.normalPreviewReady}:</strong> {paperPdfReason(researchStages?.paper)}</div>}
-            {paperCitationRenderRows(researchStages?.paper).length > 0 && (
-              <div className="researchGateNote warning citationRenderNotice">
-                <strong>{t.paperCitationRenderBlockers}:</strong>
-                <ul>{paperCitationRenderRows(researchStages?.paper).slice(0, 4).map((item: any, idx: number) => <li key={`citation-render-${idx}`}>{paperCitationRenderIssueText(item)}</li>)}</ul>
-              </div>
-            )}
-            {paperSelfReviewRows(researchStages?.paper).length > 0 && (
-              <div className="researchGateNote warning citationRenderNotice">
-                <strong>{t.paperSelfReviewBlockers}:</strong>
-                <ul>{paperSelfReviewRows(researchStages?.paper).slice(0, 4).map((item: any, idx: number) => <li key={`paper-self-review-${idx}`}>{paperSelfReviewIssueText(item)}</li>)}</ul>
-              </div>
-            )}
             {renderClaudeSessionPanel("paper")}
-            <div className="panel paperPreview"><h3>{paperPreviewTitle(researchStages?.paper)}</h3>{researchStages?.paper?.pdf_url ? (<><p className="artifactPath"><strong>PDF:</strong> {researchStages.paper.pdf_path || researchStages.paper.pdf_url}</p>{researchStages.paper.tex_path && <p className="artifactPath"><strong>TeX:</strong> {researchStages.paper.tex_path}</p>}<div className="paperArtifactActions"><a href={researchStages.paper.pdf_url} target="_blank" rel="noreferrer">{t.openPdf}</a>{researchStages.paper.tex_url && <a href={researchStages.paper.tex_url} target="_blank" rel="noreferrer">{t.openTex}</a>}</div><iframe className="pdfViewer" src={researchStages.paper.pdf_url} title="compiled paper pdf" /></>) : researchStages?.paper?.blocked_pdf_url ? (<><p className="help">{paperPreviewHelp(researchStages?.paper)}</p>{paperCitationRenderRows(researchStages?.paper).length > 0 && <div className="paperCitationBlockers"><strong>{t.paperCitationRenderStatus}:</strong><ul>{paperCitationRenderRows(researchStages?.paper).slice(0, 4).map((item: any, idx: number) => <li key={`paper-citation-${idx}`}>{paperCitationRenderIssueText(item)}</li>)}</ul></div>}<p className="artifactPath"><strong>PDF:</strong> {researchStages.paper.blocked_pdf_path || researchStages.paper.blocked_pdf_url}</p>{researchStages.paper.blocked_tex_path && <p className="artifactPath"><strong>TeX:</strong> {researchStages.paper.blocked_tex_path}</p>}<div className="paperArtifactActions"><a href={researchStages.paper.blocked_pdf_url} target="_blank" rel="noreferrer">{t.openPdf}</a>{researchStages.paper.blocked_tex_url && <a href={researchStages.paper.blocked_tex_url} target="_blank" rel="noreferrer">{t.openTex}</a>}</div><iframe className="pdfViewer blockedPdfViewer" src={researchStages.paper.blocked_pdf_url} title="paper pdf preview" /></>) : (<div className="emptyState"><p>{t.noPdf}</p>{researchStages?.paper?.raw_pdf_path && <p className="artifactPath"><strong>{t.rawPaperOrchestraOutput}:</strong> {researchStages.paper.raw_pdf_path}</p>}{researchStages?.paper?.writing_workspace && <p className="artifactPath"><strong>{t.workspaceLabel}:</strong> {researchStages.paper.writing_workspace}</p>}</div>)}</div>
-            </>}
+            <div className="panel paperPreview"><h3>{paperPreviewTitle(researchStages?.paper)}</h3>{researchStages?.paper?.pdf_url ? (<><p className="artifactPath"><strong>PDF:</strong> {researchStages.paper.pdf_path || researchStages.paper.pdf_url}</p>{researchStages.paper.tex_path && <p className="artifactPath"><strong>TeX:</strong> {researchStages.paper.tex_path}</p>}<div className="paperArtifactActions"><a href={researchStages.paper.pdf_url} target="_blank" rel="noreferrer">{t.openPdf}</a>{researchStages.paper.tex_url && <a href={researchStages.paper.tex_url} target="_blank" rel="noreferrer">{t.openTex}</a>}</div><iframe className="pdfViewer" src={researchStages.paper.pdf_url} title="compiled paper pdf" /></>) : researchStages?.paper?.blocked_pdf_url ? (<><p className="help">{paperPreviewHelp(researchStages?.paper)}</p><p className="artifactPath"><strong>PDF:</strong> {researchStages.paper.blocked_pdf_path || researchStages.paper.blocked_pdf_url}</p>{researchStages.paper.blocked_tex_path && <p className="artifactPath"><strong>TeX:</strong> {researchStages.paper.blocked_tex_path}</p>}<div className="paperArtifactActions"><a href={researchStages.paper.blocked_pdf_url} target="_blank" rel="noreferrer">{t.openPdf}</a>{researchStages.paper.blocked_tex_url && <a href={researchStages.paper.blocked_tex_url} target="_blank" rel="noreferrer">{t.openTex}</a>}</div><iframe className="pdfViewer blockedPdfViewer" src={researchStages.paper.blocked_pdf_url} title="paper pdf preview" /></>) : (<div className="emptyState"><p>{t.noPdf}</p>{researchStages?.paper?.raw_pdf_path && <p className="artifactPath"><strong>{t.rawPaperOrchestraOutput}:</strong> {researchStages.paper.raw_pdf_path}</p>}{researchStages?.paper?.writing_workspace && <p className="artifactPath"><strong>{t.workspaceLabel}:</strong> {researchStages.paper.writing_workspace}</p>}</div>)}</div>
+            </>
           </section>
         )}
 
