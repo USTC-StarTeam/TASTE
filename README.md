@@ -111,13 +111,7 @@ python -m uvicorn auto_research.web.server:app --host 127.0.0.1 --port 8765
 若 TASTE 部署在服务器，远端仍然用 `scripts/start_web.sh` 启动；本地浏览器通过 SSH tunnel 访问：
 
 ```bash
-ssh -N -L 127.0.0.1:8765:127.0.0.1:8765 <user>@<server>
-```
-
-如果本机 8765 被占用，可换成本机端口 18765：
-
-```bash
-ssh -N -L 127.0.0.1:18765:127.0.0.1:8765 <user>@<server>
+ssh -L 127.0.0.1:8765:127.0.0.1:8765 <user>@<server>
 ```
 
 ### 6. 创建或选择项目
