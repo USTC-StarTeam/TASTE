@@ -57,7 +57,7 @@ Configure the Find LLM through environment variables or local runtime config:
 export LLM_PROVIDER=openai_compatible
 export LLM_API_BASE="https://example-compatible-endpoint/v1"
 export LLM_MODEL="model-name"
-export OPENAI_API_KEY="..."
+# Set OPENAI_API_KEY in your local shell or runtime config; do not commit it.
 export LLM_TIMEOUT_SEC=60
 export LLM_MAX_TOKENS=1200
 ```

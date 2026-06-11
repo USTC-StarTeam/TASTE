@@ -295,9 +295,14 @@ def _sync_project_research_preferences_from_config(config: AppConfig) -> None:
 
 
 def save_config(config: AppConfig) -> AppConfig:
-    canonical = save_canonical_source_selection(config.default_find_selection, project_config_path=project_config_path())
+    project_path = project_config_path()
+    canonical = save_canonical_source_selection(config.default_find_selection, project_config_path=project_path)
     config = config.model_copy(update={"default_find_selection": canonical})
     payload = config.model_dump()
+    if project_path is not None:
+        # Source selection is project state. Runtime config keeps only local UI,
+        # secret, and fallback settings for sessions without a current project.
+        payload.pop("default_find_selection", None)
     if read_json(CONFIG_PATH, {}) != payload:
         write_json(CONFIG_PATH, payload)
     _sync_project_llm_from_config(config)

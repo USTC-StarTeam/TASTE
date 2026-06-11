@@ -212,6 +212,8 @@ def save_canonical_source_selection(selection: Any, config_path: Path = CONFIG_P
         project_config["discovery"] = discovery
         project_config["default_find_selection"] = normalized
         _write_json(project_path, project_config)
+        return normalized
+
     config = _read_json(config_path, {}) if config_path.exists() else {}
     if not isinstance(config, dict):
         config = {}

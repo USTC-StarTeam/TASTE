@@ -630,6 +630,26 @@ def test_save_config_syncs_nonempty_research_profile_to_project(tmp_path, monkey
     assert saved_project["researcher_profile"] == "new profile"
 
 
+def test_save_config_keeps_source_selection_in_project_config_only(tmp_path, monkeypatch):
+    project_path = tmp_path / "projects" / "demo_project" / "project.json"
+    project_path.parent.mkdir(parents=True)
+    write_json(project_path, {"name": "demo_project"})
+    config_path = tmp_path / "runtime" / ".config.json"
+    config_path.parent.mkdir(parents=True)
+    write_json(config_path, {"provider": "mock", "model": "mock", "default_find_selection": {"include_arxiv": True}})
+    monkeypatch.setattr(server, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(server, "project_config_path", lambda: project_path)
+
+    selection = {"venue_ids": ["openreview_iclr_2026"], "years": [2026], "include_arxiv": False}
+    server.save_config(AppConfig(provider="mock", model="mock", default_find_selection=selection))
+
+    saved_project = read_json(project_path, {})
+    saved_runtime = read_json(config_path, {})
+    assert saved_project["default_find_selection"]["venue_ids"] == ["openreview_iclr_2026"]
+    assert saved_project["discovery"]["canonical_source_selection"]["venue_ids"] == ["openreview_iclr_2026"]
+    assert "default_find_selection" not in saved_runtime
+
+
 def test_claude_code_launch_does_not_derive_account_from_taste_llm_config():
     from auto_research.web import project_bridge
 
