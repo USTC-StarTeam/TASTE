@@ -28,8 +28,6 @@ TASTE 区分两类 Python：
 
 两者可以相同，但真实实验建议分离。
 
-Windows、macOS、Linux 都可以直接运行 TASTE。Windows 原生环境需要 Conda、Node/npm 和 Claude Code；如果后续具体科研项目强依赖 Linux/CUDA/bash 生态，再考虑用 WSL2/Ubuntu 跑实验环境。
-
 ## 快速开始
 
 ### 1. 克隆仓库
@@ -59,15 +57,31 @@ python -m pip install --upgrade pip
 python -m pip install -r modules/taste/requirements.txt
 ```
 
-如需真实实验，可再准备一个实验环境，并在网页“运行环境”里填为 `experiment_python`。
+### 3. 安装 nvm、Node 并构建前端
 
-### 3. 安装 Node 并构建前端
-
-推荐用 nvm：
+macOS / Linux / WSL 先安装 nvm：
 
 ```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.5/install.sh | bash
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+nvm --version
+```
+
+然后安装 Node 22：
+
+```bash
+nvm install 22
+nvm use 22
+nvm alias default 22
+node --version
+npm --version
+```
+
+Windows 原生不能使用 POSIX 版 nvm。可用 nvm-windows，或直接安装 Node.js 22。nvm-windows 安装方式：打开 <https://github.com/coreybutler/nvm-windows/releases>，下载最新 `nvm-setup.exe`，安装后重开 PowerShell：
+
+```powershell
+nvm version
 nvm install 22
 nvm use 22
 node --version
