@@ -17,7 +17,7 @@ http://127.0.0.1:8765
 | 环境 | 用途 | 建议 |
 | --- | --- | --- |
 | Conda / Mamba + Python | 运行 TASTE 后端、调度脚本和测试 | Python 3.10+，推荐 3.11 |
-| nvm + Node.js + npm | 构建 React/Vite 网页前端 | Node 20+，推荐 Node 22 |
+| Node.js + npm | 构建 React/Vite 网页前端 | 按 Node.js 官网推荐版本安装；需要版本管理时按官网页面选择 nvm 等方式 |
 | Claude Code CLI (`claude`) | Read/Idea/Plan 的 Claude 接管，以及 Environment/Experiment/Paper 项目代理 | 用户自己安装、登录和维护账号 |
 | Find 阶段 LLM API | Find 的标题筛选、摘要评分和推荐排序 | 在网页配置，密钥不要提交 Git |
 
@@ -57,33 +57,13 @@ python -m pip install --upgrade pip
 python -m pip install -r modules/taste/requirements.txt
 ```
 
-### 3. 安装 nvm、Node 并构建前端
+### 3. 安装 Node.js 并构建前端
 
-macOS / Linux / WSL 先安装 nvm：
+Node.js、npm 和 nvm/版本管理方式直接按 Node.js 官网下载页操作：<https://nodejs.org/zh-cn/download/>。
 
-```bash
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.5/install.sh | bash
-export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-nvm --version
-```
-
-然后安装 Node 22：
+安装完成后确认：
 
 ```bash
-nvm install 22
-nvm use 22
-nvm alias default 22
-node --version
-npm --version
-```
-
-Windows 原生不能使用 POSIX 版 nvm。可用 nvm-windows，或直接安装 Node.js 22。nvm-windows 安装方式：打开 <https://github.com/coreybutler/nvm-windows/releases>，下载最新 `nvm-setup.exe`，安装后重开 PowerShell：
-
-```powershell
-nvm version
-nvm install 22
-nvm use 22
 node --version
 npm --version
 ```
