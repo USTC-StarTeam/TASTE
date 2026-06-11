@@ -84,44 +84,35 @@ npm install -g @anthropic-ai/claude-code
 claude --version
 ```
 
-### 5. 构建并启动网页
+### 5. 启动网页
 
-构建前端：
-
-```bash
-npm --prefix modules/taste/auto_research/web/client install
-npm --prefix modules/taste/auto_research/web/client run build
-```
-
-
-macOS / Linux / Git Bash 启动：
-
-```bash
-export WORKSPACE_ROOT="$PWD"
-export PYTHONPATH="$PWD/modules/taste:$PWD:$PWD/scripts"
-export MANAGEMENT_PYTHON="$(command -v python)"
-export NODE_BIN="$(dirname "$(command -v node)")"
-
-WEB_HOST=127.0.0.1 WEB_PORT=8765 scripts/start_web.sh
-```
-
-打开网页后可以直接创建首个项目。以后启动时，网页会自动优先回到当前浏览器上次选择的项目；没有浏览器缓存时，后端项目列表会把最近活动的项目排在最前。
-
-以后启动网页用同一套命令；只要 Node、Python 和 Claude Code 还在 PATH 里，通常执行下面这几行就够了：
+初次启动和以后启动使用同一条命令：
 
 ```bash
 cd TASTE
 conda activate taste
-WEB_HOST=127.0.0.1 WEB_PORT=8765 scripts/start_web.sh
+scripts/start_web.sh
 ```
 
-Windows PowerShell 原生启动也可以不用 bash 脚本，前提是已经完成前端构建：
+`scripts/start_web.sh` 只处理 TASTE 自己的启动环境；Python、Node/npm、Claude Code 请先按前面步骤配置好，并保证当前终端能直接运行 `python`、`node`、`npm`、`claude`。脚本会自动处理：
+
+- 设置 `WORKSPACE_ROOT` 为仓库根目录。
+- 设置 `PYTHONPATH` 为 `modules/taste`、仓库根目录和 `scripts`。
+- 选择当前 Conda/venv Python 作为 `MANAGEMENT_PYTHON`。
+- 使用默认地址 `127.0.0.1:8765`。
+- 前端未构建时自动执行 `npm install` 和 `npm run build`。
+
+只有需要改端口或绑定地址时才加环境变量：
+
+```bash
+WEB_PORT=18765 scripts/start_web.sh
+```
+
+Windows 原生 PowerShell 如果不使用 Git Bash，可用下面的等价启动方式：
 
 ```powershell
 $env:WORKSPACE_ROOT = (Get-Location).Path
 $env:PYTHONPATH = "$($PWD.Path)\modules\taste;$($PWD.Path);$($PWD.Path)\scripts"
-$env:MANAGEMENT_PYTHON = (Get-Command python).Source
-$env:NODE_BIN = Split-Path (Get-Command node).Source
 python -m uvicorn auto_research.web.server:app --host 127.0.0.1 --port 8765
 ```
 
@@ -131,25 +122,11 @@ python -m uvicorn auto_research.web.server:app --host 127.0.0.1 --port 8765
 http://127.0.0.1:8765
 ```
 
-健康检查：
-
-```bash
-curl http://127.0.0.1:8765/health
-```
+打开网页后可以直接创建首个项目。以后启动时，网页会自动优先回到当前浏览器上次选择的项目；没有浏览器缓存时，后端会把最近活动的项目排在最前。
 
 ### 6. 创建或选择项目
 
 首个项目可以直接在网页上创建：打开网页后进入项目区域，填写项目名、研究主题、研究目标和初始检索词，然后保存。
-
-如果更喜欢命令行，也可以用脚本创建：
-
-```bash
-python scripts/create_project.py \
-  --name my_project \
-  --topic "your research topic" \
-  --prompt "your concrete research goal" \
-  --query "initial search query"
-```
 
 项目会创建在：
 
@@ -169,7 +146,7 @@ projects/my_project/
 ssh <user>@<server>
 cd /path/to/TASTE
 conda activate taste
-WEB_HOST=127.0.0.1 WEB_PORT=8765 scripts/start_web.sh
+scripts/start_web.sh
 ```
 
 `PROJECT_ID` / `DEFAULT_PROJECT_ID` 只适合脚本化部署或调试时临时覆盖默认项目，普通使用不需要设置。
