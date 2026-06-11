@@ -362,7 +362,6 @@ def _runtime_diagnostics_light(project: str, cfg: dict[str, Any] | None = None) 
         "experiment_python": experiment_check,
         "python": management_check,
         "conda": check_path(conda_base / "bin" / "conda" if str(conda_base) else "", "conda not found under conda_base"),
-        "nvm_dir": check_path(runtime.get("nvm_dir"), "nvm directory does not exist"),
         "conda_base": check_path(conda_base / "etc" / "profile.d" / "conda.sh" if str(conda_base) else "", "conda.sh not found under conda base"),
     }
     return {"project": project, "runtime": runtime, "checks": checks, "path_head": path_head, "status": "ok" if all(row.get("ok") for row in checks.values()) else "needs_attention", "diagnostic_mode": "compact_cached_paths"}
@@ -4987,11 +4986,11 @@ def _compact_project_summary(summary: dict[str, Any]) -> dict[str, Any]:
         for name, check in checks_src.items():
             if isinstance(check, dict):
                 checks[str(name)] = scalmap(check, ["path", "ok", "version", "reason"])
-        required = ["node", "npm", "claude", "python", "conda", "nvm_dir", "conda_base"]
+        required = ["node", "npm", "claude", "python", "conda", "conda_base"]
         status = str(src.get("status") or "")
         if not status and checks_src:
             status = "ready" if all(bool((checks_src.get(name) or {}).get("ok")) for name in required if name in checks_src) else "needs_attention"
-        runtime_public = scalmap(runtime, ["source_bashrc", "bashrc_path", "nvm_dir", "node_bin", "claude_path", "conda_base", "python_executable"])
+        runtime_public = scalmap(runtime, ["source_bashrc", "bashrc_path", "node_bin", "claude_path", "conda_base", "python_executable"])
         return {
             "project": src.get("project", project_id),
             "status": status,
@@ -10135,7 +10134,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
             runtime_cfg = cfg.get("runtime") if isinstance(cfg.get("runtime"), dict) else {}
             payload = {"project": project, "runtime": runtime_cfg, "checks": {}, "path_head": [], "status": "needs_attention", "error": str(exc)}
         checks = safe_dict(payload.get("checks"))
-        required = ["node", "npm", "claude", "python", "conda", "nvm_dir", "conda_base"]
+        required = ["node", "npm", "claude", "python", "conda", "conda_base"]
         if not payload.get("status"):
             payload["status"] = "ready" if checks and all(bool(safe_dict(checks.get(name)).get("ok")) for name in required if name in checks) else "needs_attention"
         return payload

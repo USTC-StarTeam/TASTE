@@ -1065,7 +1065,7 @@ const TEXT = {
     noData: "暂无",
     unnamed: "未命名",
     runtimeSaved: "运行环境已保存并重新诊断。",
-    runtimeDetected: "已自动检测并保存项目代理、Node/NVM 路径。",
+    runtimeDetected: "已自动检测并保存项目代理和 Node 路径。",
     envConfigSaved: "实验环境配置已保存；Conda/Python 仅在环境配置步骤使用。",
     runtimeLockedReady: "环境已锁定",
     runtimeLockedReadyDetail: "使用远端已锁定配置；无需重复创建或重新诊断。",
@@ -1079,11 +1079,10 @@ const TEXT = {
     researchProjectCreated: "项目已创建并切换。",
     researchGlobalHelp: "这里仅放全局研究主题；仓库、数据、环境状态和阻塞原因会在调研/计划之后进入“环境配置”阶段展示。",
     researchRuntimeTitle: "运行环境",
-    researchRuntimeHelp: "这里仅配置项目代理、Node/NVM 和额外 PATH。Conda/Python 实验环境只在“环境配置”步骤设置；系统会用这些显式路径同时覆盖交互式与非交互式执行。",
+    researchRuntimeHelp: "这里仅配置项目代理、Node 和额外 PATH。Conda/Python 实验环境只在“环境配置”步骤设置；系统会用这些显式路径同时覆盖交互式与非交互式执行。",
     remoteToolPaths: "远端工具路径",
     managementPythonExecutable: "管理 Python",
     experimentPythonExecutable: "实验 Python",
-    nvmDir: "NVM 文件夹",
     nodeBinDir: "Node 可执行目录",
     claudeExecutable: "项目代理可执行文件",
     extraPath: "额外路径",
@@ -1614,7 +1613,7 @@ const TEXT = {
     noData: "N/A",
     unnamed: "Unnamed",
     runtimeSaved: "runtime saved and diagnosed again.",
-    runtimeDetected: "Project-agent/Node/NVM paths were auto-detected and saved.",
+    runtimeDetected: "Project-agent and Node paths were auto-detected and saved.",
     envConfigSaved: "Experiment environment config saved; Conda/Python are configured only in the Environment step.",
     runtimeLockedReady: "Environment locked",
     runtimeLockedReadyDetail: "Using the locked remote configuration; no repeated creation or diagnosis is needed.",
@@ -1628,11 +1627,10 @@ const TEXT = {
     researchProjectCreated: "research project created and selected.",
     researchGlobalHelp: "This panel only stores the global research topic. Repo, data, environment status, and blockers appear in the Environment stage after research/planning.",
     researchRuntimeTitle: "Runtime",
-    researchRuntimeHelp: "Configure only the project agent, Node/NVM, and extra PATH here. Conda/Python experiment environments are configured only in the Environment step; the workflow uses these explicit paths for both interactive and non-interactive execution.",
+    researchRuntimeHelp: "Configure only the project agent, Node, and extra PATH here. Conda/Python experiment environments are configured only in the Environment step; the workflow uses these explicit paths for both interactive and non-interactive execution.",
     remoteToolPaths: "Remote Tool Paths",
     managementPythonExecutable: "management Python",
     experimentPythonExecutable: "Experiment Python",
-    nvmDir: "NVM directory",
     nodeBinDir: "Node bin directory",
     claudeExecutable: "Project-agent executable",
     extraPath: "Extra PATH",
@@ -3026,7 +3024,6 @@ function runtimeDraftFromSummary(summary: ProjectSummary | null) {
   return {
     source_bashrc: false,
     bashrc_path: "",
-    nvm_dir: runtime.nvm_dir || "",
     node_bin: runtime.node_bin || "",
     claude_path: runtime.claude_path || codingAgent.claude_path_hint || "",
     management_python: runtime.management_python || runtime.python_executable || summary?.config?.python_executable || "",
@@ -6299,10 +6296,8 @@ function App() {
         <p className="help">{t.researchRuntimeHelp}</p>
         <details className="roleSettings">
           <summary>{t.remoteToolPaths}</summary>
-          <label>{t.nvmDir}</label>
-          <input value={researchRuntimeDraft.nvm_dir || ""} onChange={(e) => updateRuntimeDraft("nvm_dir", e.target.value)} placeholder="~/.nvm" />
           <label>{t.nodeBinDir}</label>
-          <input value={researchRuntimeDraft.node_bin || ""} onChange={(e) => updateRuntimeDraft("node_bin", e.target.value)} placeholder="~/.nvm/versions/node/<version>/bin" />
+          <input value={researchRuntimeDraft.node_bin || ""} onChange={(e) => updateRuntimeDraft("node_bin", e.target.value)} placeholder="/path/to/node/bin" />
           <label>{t.claudeExecutable}</label>
           <input value={researchRuntimeDraft.claude_path || ""} onChange={(e) => updateRuntimeDraft("claude_path", e.target.value)} placeholder="claude" />
           <label>{t.managementPythonExecutable}</label>
@@ -6316,7 +6311,7 @@ function App() {
           </div>
         </details>
         <div className="runtimeChecks">
-          {["claude", "node", "npm", "management_python", "nvm_dir"].map((name) => {
+          {["claude", "node", "npm", "management_python"].map((name) => {
             const check = runtimeChecks?.[name] || {};
             const lockedReady = environmentLocked && Object.keys(check).length === 0;
             const waitingForDiagnostics = !hasRuntimeDiagnostics && !lockedReady;

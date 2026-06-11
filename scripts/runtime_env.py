@@ -70,7 +70,6 @@ def project_runtime_config(project: str | None = None, cfg: dict[str, Any] | Non
     return {
         "source_bashrc": False,
         "bashrc_path": "",
-        "nvm_dir": str(runtime.get("nvm_dir") or Path.home() / "workspace" / ".nvm"),
         "node_bin": str(runtime.get("node_bin") or ""),
         "claude_path": str(runtime.get("claude_path") or coding.get("claude_path_hint") or ""),
         "conda_base": str(runtime.get("conda_base") or env_cfg.get("conda_base_hint") or runtime_conda_base(cfg) or ""),
@@ -90,7 +89,7 @@ def update_project_runtime(project: str, patch: dict[str, Any]) -> dict[str, Any
     runtime = dict(cfg.get("runtime") or {}) if isinstance(cfg.get("runtime"), dict) else {}
     runtime["source_bashrc"] = False
     runtime["bashrc_path"] = ""
-    for key in ["nvm_dir", "node_bin", "claude_path", "conda_base", "python_executable", "management_python", "experiment_python"]:
+    for key in ["node_bin", "claude_path", "conda_base", "python_executable", "management_python", "experiment_python"]:
         if key in patch:
             value = str(patch.get(key) or "").strip()
             if value:
@@ -136,13 +135,11 @@ def detect_project_runtime(project: str) -> dict[str, Any]:
     cfg = load_project_config(project)
     runtime = project_runtime_config(project, cfg)
     nvm_candidates = [
-        str(runtime.get("nvm_dir") or ""),
         str(ROOT.parent / ".nvm"),
-        str(Path.home() / "workspace" / ".nvm"),
         str(Path.home() / ".nvm"),
     ]
-    nvm_dir = next((item for item in nvm_candidates if item and Path(item).expanduser().exists()), nvm_candidates[0])
-    nvm_bins = _nvm_node_bins(nvm_dir)
+    nvm_root = next((item for item in nvm_candidates if item and Path(item).expanduser().exists()), "")
+    nvm_bins = _nvm_node_bins(nvm_root)
     env = interactive_env(project, cfg)
     node_path = find_binary("node", project, cfg) or shutil.which("node", path=env.get("PATH", "")) or ""
     node_bin = ""
@@ -160,7 +157,6 @@ def detect_project_runtime(project: str) -> dict[str, Any]:
     patch = {
         "source_bashrc": False,
         "bashrc_path": "",
-        "nvm_dir": nvm_dir,
         "node_bin": node_bin,
         "claude_path": find_binary("claude", project, cfg) or shutil.which("claude", path=env.get("PATH", "")) or "",
         "conda_base": conda_base,
@@ -183,8 +179,10 @@ def _path_if_executable(path: str) -> str:
     return str(candidate) if candidate.exists() and os.access(candidate, os.X_OK) else ""
 
 
-def _nvm_node_bins(nvm_dir: str) -> list[str]:
-    root = Path(nvm_dir).expanduser() if nvm_dir else Path.home() / "workspace" / ".nvm"
+def _nvm_node_bins(nvm_root: str) -> list[str]:
+    if not nvm_root:
+        return []
+    root = Path(nvm_root).expanduser()
     versions = root / "versions" / "node"
     if not versions.exists():
         return []
@@ -246,8 +244,6 @@ def _runtime_path_entries(runtime: dict[str, Any]) -> list[str]:
         value = str(runtime.get(key) or "").strip()
         if value:
             entries.append(value)
-    for bin_path in _nvm_node_bins(str(runtime.get("nvm_dir") or "")):
-        entries.append(bin_path)
     for key in ["claude_path", "management_python", "python_executable", "experiment_python"]:
         value = str(runtime.get(key) or "").strip()
         if value:
@@ -293,9 +289,6 @@ def interactive_env(project: str | None = None, cfg: dict[str, Any] | None = Non
     if experiment_python:
         env["EXPERIMENT_PYTHON"] = experiment_python
         env["PROJECT_PYTHON"] = experiment_python
-    nvm_dir = str(runtime.get("nvm_dir") or "").strip()
-    if nvm_dir:
-        env["NVM_DIR"] = nvm_dir
     for key, value in runtime.get("env_overrides", {}).items():
         env[str(key)] = str(value)
     conda_base = str(runtime.get("conda_base") or "").strip()
@@ -347,9 +340,7 @@ def runtime_diagnostics(project: str) -> dict[str, Any]:
     checks["management_python"] = _executable_check("management_python", management_python, env, reason="management Python is not configured")
     checks["experiment_python"] = _executable_check("experiment_python", experiment_python, env, reason="Experiment Python is not configured or cannot be derived from conda_env/conda_base")
     checks["python"] = checks["management_python"]
-    nvm_dir = str(runtime.get("nvm_dir") or "")
     conda_base = str(runtime.get("conda_base") or "")
-    checks["nvm_dir"] = {"path": nvm_dir, "ok": bool(nvm_dir and Path(nvm_dir).exists()), "reason": "ok" if nvm_dir and Path(nvm_dir).exists() else "nvm directory does not exist"}
     checks["conda_base"] = {"path": conda_base, "ok": bool(conda_base and (Path(conda_base) / "etc" / "profile.d" / "conda.sh").exists()), "reason": "ok" if conda_base and (Path(conda_base) / "etc" / "profile.d" / "conda.sh").exists() else "conda.sh not found under conda base"}
     return {
         "project": project,

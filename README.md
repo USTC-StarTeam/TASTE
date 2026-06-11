@@ -122,22 +122,11 @@ ssh -L 127.0.0.1:8765:127.0.0.1:8765 <user>@<server>
 
 ## 网页配置
 
-第一次打开网页后，按这个顺序配置即可：
+第一次打开网页后，先配置左侧栏配置：
 
-1. 项目：选择或创建当前项目，确认研究主题和研究画像。
-2. 运行环境：点击自动检测；检查 `management_python`、`node_bin`、`claude_path` 等启动工具路径。`experiment_python` 在 Environment/环境配置阶段再根据具体项目环境配置。
-3. LLM：填写 Find 阶段使用的 provider、base URL、model 和 API key。API key 只保存在运行态配置，不提交 Git。
-4. Find 来源：默认全不选；需要会议时先添加会议/年份，需要 arXiv、GitHub、Hugging Face 等非会议来源时再勾选。
-5. Paper：投稿目标只在论文撰写页面配置，不放在全局主题栏。
-
-配置保存位置：
-
-| 文件 | 作用 | 是否提交 Git |
-| --- | --- | --- |
-| `config.example.json` | 公开配置模板 | 是 |
-| `runtime/.config.json` | 本机网页配置和密钥 | 否 |
-| `templates/project.json` | 新项目模板 | 是 |
-| `projects/<project>/project.json` | 具体项目配置 | 否 |
+1. 项目：选择或创建当前项目，写好研究主题和研究画像。
+2. LLM：填写 Find 阶段使用的 provider、base URL、model 和 API key。API key 只保存在运行态配置。
+3. 运行环境：点击自动检测；检查 `management_python`、`node_bin`、`claude_path` 等启动工具路径。
 
 ## 工作流
 
@@ -202,7 +191,7 @@ projects/<project>/
 └── paper/
 ```
 
-这些目录通常包含私人路径、下载仓库、数据、日志、论文草稿和未公开结论，不提交 Git。
+这些目录通常包含私人路径、下载仓库、数据、日志、论文草稿和未公开结论。
 
 ## 验证
 
