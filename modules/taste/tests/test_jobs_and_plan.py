@@ -457,6 +457,27 @@ def test_default_find_selection_does_not_enable_arxiv():
     assert normalize_source_selection({})["include_arxiv"] is False
 
 
+def test_project_list_orders_recent_activity_first(tmp_path, monkeypatch):
+    from auto_research.web import project_bridge
+
+    older = tmp_path / "aaa_old_project"
+    newer = tmp_path / "zzz_recent_project"
+    older.mkdir(parents=True)
+    newer.mkdir(parents=True)
+    write_json(older / "project.json", {"name": "aaa_old_project", "topic": "older"})
+    time.sleep(0.05)
+    write_json(newer / "project.json", {"name": "zzz_recent_project", "topic": "newer"})
+    state = newer / "state"
+    state.mkdir()
+    write_json(state / "current_find_progress.json", {"status": "running"})
+    monkeypatch.setattr(project_bridge, "PROJECTS", tmp_path)
+
+    rows = project_bridge.list_projects()
+
+    assert [row["id"] for row in rows[:2]] == ["zzz_recent_project", "aaa_old_project"]
+    assert rows[0]["updated_at"]
+
+
 def test_source_selection_uses_workspace_root_env_for_project_config(tmp_path, monkeypatch):
     from auto_research.source_selection import canonical_source_selection
 

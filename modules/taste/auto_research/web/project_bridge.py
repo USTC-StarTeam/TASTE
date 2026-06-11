@@ -5463,6 +5463,39 @@ def _light_find_survey_from_progress(project_dir: Path) -> dict[str, Any]:
     }
 
 
+def _project_activity_mtime(project_dir: Path) -> float:
+    latest = 0.0
+
+    def track(path: Path) -> None:
+        nonlocal latest
+        try:
+            latest = max(latest, path.stat().st_mtime)
+        except OSError:
+            pass
+
+    for path in [
+        project_dir / "project.json",
+        project_dir / "state" / "current_find_progress.json",
+        project_dir / "state" / "full_research_cycle.json",
+        project_dir / "state" / "claude_project_session_last_result.json",
+        project_dir / "state" / "supervision_tick.json",
+        project_dir / "paper" / "metadata" / "paper_pipeline.json",
+    ]:
+        track(path)
+
+    for directory in [project_dir / "state", project_dir / "runs", project_dir / "reports", project_dir / "artifacts", project_dir / "paper"]:
+        if not directory.exists():
+            continue
+        track(directory)
+        try:
+            children = list(directory.iterdir())
+        except OSError:
+            children = []
+        for child in children:
+            track(child)
+    return latest
+
+
 def list_projects() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     if not PROJECTS.exists():
@@ -5472,14 +5505,20 @@ def list_projects() -> list[dict[str, Any]]:
         if not cfg_path.exists():
             continue
         cfg = _read_json(cfg_path, {})
+        activity_mtime = _project_activity_mtime(project_dir)
         rows.append({
             "name": cfg.get("name", project_dir.name),
             "id": project_dir.name,
             "topic": cfg.get("topic", ""),
             "conda_env": cfg.get("conda_env", ""),
             "path": str(project_dir),
+            "updated_at": dt.datetime.fromtimestamp(activity_mtime, dt.timezone.utc).isoformat() if activity_mtime else "",
             "literature_survey_preview": _light_find_survey_from_progress(project_dir),
+            "_activity_mtime": activity_mtime,
         })
+    rows.sort(key=lambda row: (-float(row.get("_activity_mtime") or 0.0), str(row.get("id") or "").lower()))
+    for row in rows:
+        row.pop("_activity_mtime", None)
     return rows
 
 

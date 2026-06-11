@@ -93,7 +93,6 @@ npm --prefix modules/taste/auto_research/web/client install
 npm --prefix modules/taste/auto_research/web/client run build
 ```
 
-`tsc` 和 `vite` 来自 `modules/taste/auto_research/web/client/node_modules/.bin/`。`node_modules/` 是本机 npm 依赖目录，不提交 Git。
 
 macOS / Linux / Git Bash 启动：
 
@@ -106,12 +105,7 @@ export NODE_BIN="$(dirname "$(command -v node)")"
 WEB_HOST=127.0.0.1 WEB_PORT=8765 scripts/start_web.sh
 ```
 
-第一次启动不需要提前创建项目，也不需要设置 `PROJECT_ID`。打开网页后可以直接创建首个项目。已有项目时，如果想让网页默认选中它，在启动前加：
-
-```bash
-export PROJECT_ID=my_project
-export DEFAULT_PROJECT_ID=my_project
-```
+打开网页后可以直接创建首个项目。以后启动时，网页会自动优先回到当前浏览器上次选择的项目；没有浏览器缓存时，后端项目列表会把最近活动的项目排在最前。
 
 以后启动网页用同一套命令；只要 Node、Python 和 Claude Code 还在 PATH 里，通常执行下面这几行就够了：
 
@@ -129,13 +123,6 @@ $env:PYTHONPATH = "$($PWD.Path)\modules\taste;$($PWD.Path);$($PWD.Path)\scripts"
 $env:MANAGEMENT_PYTHON = (Get-Command python).Source
 $env:NODE_BIN = Split-Path (Get-Command node).Source
 python -m uvicorn auto_research.web.server:app --host 127.0.0.1 --port 8765
-```
-
-Windows 已有项目想默认选中时，可额外设置：
-
-```powershell
-$env:PROJECT_ID = "my_project"
-$env:DEFAULT_PROJECT_ID = "my_project"
 ```
 
 打开：
@@ -176,7 +163,7 @@ projects/my_project/
 
 推荐远端只监听 `127.0.0.1`，本地浏览器通过 SSH tunnel 访问。
 
-远端启动 TASTE。首次启动可以不设置 `PROJECT_ID`，然后在网页里创建项目；已有项目想默认选中时再加 `PROJECT_ID` / `DEFAULT_PROJECT_ID`：
+远端启动 TASTE。首次启动可以不设置 `PROJECT_ID`，然后在网页里创建项目；以后网页会自动回到上次选择或最近活动的项目：
 
 ```bash
 ssh <user>@<server>
@@ -185,11 +172,7 @@ conda activate taste
 WEB_HOST=127.0.0.1 WEB_PORT=8765 scripts/start_web.sh
 ```
 
-可选默认项目：
-
-```bash
-PROJECT_ID=my_project DEFAULT_PROJECT_ID=my_project WEB_HOST=127.0.0.1 WEB_PORT=8765 scripts/start_web.sh
-```
+`PROJECT_ID` / `DEFAULT_PROJECT_ID` 只适合脚本化部署或调试时临时覆盖默认项目，普通使用不需要设置。
 
 本机建立端口转发：
 
