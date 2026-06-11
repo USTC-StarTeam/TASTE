@@ -28,7 +28,7 @@ TASTE 区分两类 Python：
 
 两者可以相同，但真实实验建议分离。
 
-Windows 用户推荐用 WSL2/Ubuntu 运行 TASTE 服务端，Windows 浏览器通过 `127.0.0.1` 或 SSH tunnel 打开网页。macOS 和 Linux 可以直接运行。
+Windows、macOS、Linux 都可以直接运行 TASTE。Windows 原生环境需要 Conda、Node/npm 和 Claude Code；如果后续具体科研项目强依赖 Linux/CUDA/bash 生态，再考虑用 WSL2/Ubuntu 跑实验环境。
 
 ## 快速开始
 
@@ -125,7 +125,11 @@ claude
 ### 5. 创建项目
 
 ```bash
-python scripts/create_project.py   --name my_project   --topic "your research topic"   --prompt "your concrete research goal"   --query "initial search query"
+python scripts/create_project.py \
+  --name my_project \
+  --topic "your research topic" \
+  --prompt "your concrete research goal" \
+  --query "initial search query"
 ```
 
 项目会创建在：
@@ -166,6 +170,20 @@ curl http://127.0.0.1:8765/health
 ```
 
 `scripts/start_web.sh` 会自动设置 `WORKSPACE_ROOT`、`PYTHONPATH` 等默认值；上面显式写出来是为了部署时更容易排查环境。
+
+Windows PowerShell 原生启动也可以不用 bash 脚本，前提是已经完成前端构建：
+
+```powershell
+$env:WORKSPACE_ROOT = (Get-Location).Path
+$env:PROJECT_ID = "my_project"
+$env:DEFAULT_PROJECT_ID = "my_project"
+$env:PYTHONPATH = "$($PWD.Path)\modules\taste;$($PWD.Path);$($PWD.Path)\scripts"
+$env:MANAGEMENT_PYTHON = (Get-Command python).Source
+$env:NODE_BIN = Split-Path (Get-Command node).Source
+python -m uvicorn auto_research.web.server:app --host 127.0.0.1 --port 8765
+```
+
+如果 Windows 装了 Git Bash，也可以在 Git Bash 里直接使用上面的 `scripts/start_web.sh` 启动方式。
 
 ## 远端服务器访问网页
 
