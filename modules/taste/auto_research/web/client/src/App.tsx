@@ -810,8 +810,8 @@ function sourceStatusDetail(item: any, lang: Lang = "zh") {
 function sourceStatusCompactDetail(item: any, lang: Lang = "zh") {
   const zh = lang === "zh";
   const labels = zh
-    ? { status: "状态", ok: "正常", limited: "受限", failed: "失败", checking: "检查中", raw: "标题总数", screen: "分类后", adapter: "来源适配器", years: "有效年份", requested: "请求年份" }
-    : { status: "Status", ok: "ok", limited: "limited", failed: "failed", checking: "checking", raw: "title total", screen: "after category", adapter: "adapter", years: "effective years", requested: "requested years" };
+    ? { status: "状态", ok: "正常", limited: "受限", failed: "失败", checking: "检查中", raw: "标题总数", screen: "分类后", yearUsed: "使用年份", requested: "请求年份" }
+    : { status: "Status", ok: "ok", limited: "limited", failed: "failed", checking: "checking", raw: "title total", screen: "after category", yearUsed: "year used", requested: "requested year" };
   const rawStatus = String(item?.status || item?.phase || "").trim().toLowerCase();
   const state = rawStatus === "checking" || rawStatus === "fetching" ? labels.checking : item?.limited ? labels.limited : item?.ok ? labels.ok : labels.failed;
   const parts: string[] = [];
@@ -819,7 +819,7 @@ function sourceStatusCompactDetail(item: any, lang: Lang = "zh") {
   const pushPart = (value: any) => {
     const line = String(value ?? "").trim();
     if (!line) return;
-    const key = line.toLowerCase().replace(/\s+/g, " " );
+    const key = line.toLowerCase().replace(/\s+/g, " ");
     if (seen.has(key)) return;
     seen.add(key);
     parts.push(line);
@@ -829,20 +829,18 @@ function sourceStatusCompactDetail(item: any, lang: Lang = "zh") {
   if (rawTitleIndex !== undefined && rawTitleIndex !== "") pushPart(`${labels.raw}: ${rawTitleIndex}`);
   const count = item?.count ?? item?.candidate_count ?? item?.sample_count;
   if (count !== undefined && count !== "") pushPart(`${labels.screen}: ${count}`);
-  const categoryText = sourceCategoryAvailabilityText(item, lang);
-  if (categoryText) pushPart(categoryText);
-  if (item?.adapter) pushPart(`${labels.adapter}: ${item.adapter}`);
   const effectiveYears = asArray(item?.effective_years).map(String).filter(Boolean);
   const requestedYears = asArray(item?.requested_years).map(String).filter(Boolean);
   if (effectiveYears.length && requestedYears.length && effectiveYears.join(",") !== requestedYears.join(",")) {
-    pushPart(`${labels.years}: ${effectiveYears.join(", ")}`);
+    pushPart(`${labels.yearUsed}: ${effectiveYears.join(", ")}`);
     pushPart(`${labels.requested}: ${requestedYears.join(", ")}`);
   }
-  if (!item?.ok && item?.message) {
-    const conciseFailure = String(item.message).split(";").map((chunk) => sourceStatusMessageText(chunk, lang)).find(Boolean);
+  const failed = !item?.ok && !item?.limited && rawStatus !== "checking" && rawStatus !== "fetching";
+  if (failed && item?.message) {
+    const conciseFailure = String(item.message).split(";").map((chunk) => sourceStatusMessageText(chunk, lang)).filter((chunk) => !hasInternalFindPublicText(chunk)).find(Boolean);
     if (conciseFailure) pushPart(conciseFailure);
   }
-  return parts.join(" / " );
+  return parts.join(" / ");
 }
 
 function sourceStatusArtifactMarkdown(rows: any[], lang: Lang = "zh") {
@@ -4216,8 +4214,9 @@ function App() {
     return hasCurrentFindResults ? findStrongLiteratureRows : researchStrongRecommendations;
   }, [researchStrongRecommendations, findStrongLiteratureRows, hasCurrentFindResults, useCurrentFindPacket, viewingActiveIncompleteFindRun]);
   const literatureCounts = useMemo(() => {
-    const surveyStats = findResults?.survey_stats || {};
-    const progressCounts = runFindState?.counts || {};
+    const surveyStats = { ...(findResults?.survey_stats || {}), ...(findResults?.diagnostics?.survey_stats || {}) };
+    const rawProgressCounts = runFindState?.counts || {};
+    const progressCounts = viewingActiveIncompleteFindRun ? rawProgressCounts : {};
     const categoryRows = asArray(findResults?.category_scan_report);
     const titleRows = asArray(findResults?.title_filter_report);
     const arxivReport = findResults?.arxiv_prefilter_report || {};
@@ -6064,13 +6063,13 @@ function App() {
     const activeRunCounts = (viewingActiveIncompleteFindRun && runFindState?.counts && typeof runFindState.counts === "object" ? runFindState.counts : {}) as any;
     const counts = viewingActiveIncompleteFindRun
       ? { ...activeRunCounts } as any
-      : { ...(researchLiteratureCounts || {}), ...(literatureCounts || {}), ...stageCounts } as any;
+      : { ...stageCounts, ...(researchLiteratureCounts || {}), ...(literatureCounts || {}) } as any;
     const freshFindActive = freshFindRunning || viewingActiveIncompleteFindRun || Boolean(activeFindJobForRun) || String(literature.status || "").toLowerCase() === "fresh_find_running";
     const currentFindCounts: any = freshFindActive ? {} : literatureCounts || {};
     const sourceLimitations = freshFindActive ? [] : [...researchSourceLimitations, ...researchMissingVenueIndexes].slice(0, 4);
-    const categoryFilteredCount = counts.category_filtered_papers || (freshFindActive ? 0 : ((currentFindCounts as any).categoryFiltered || (currentFindCounts as any).titleInput));
-    const tfidfScreenedCount = counts.tfidf_screened_papers || (freshFindActive ? 0 : ((currentFindCounts as any).tfidfScreened || (currentFindCounts as any).titleInput));
-    const titleScoredCount = counts.llm_title_scored_papers || (freshFindActive ? 0 : ((currentFindCounts as any).llmTitleScored || (currentFindCounts as any).titleCandidates));
+    const categoryFilteredCount = (freshFindActive ? 0 : (currentFindCounts as any).categoryFiltered) || counts.category_filtered_papers || (freshFindActive ? 0 : (currentFindCounts as any).titleInput);
+    const tfidfScreenedCount = (freshFindActive ? 0 : (currentFindCounts as any).tfidfScreened) || counts.tfidf_screened_papers || (freshFindActive ? 0 : (currentFindCounts as any).titleInput);
+    const titleScoredCount = (freshFindActive ? 0 : (currentFindCounts as any).llmTitleScored) || counts.llm_title_scored_papers || (freshFindActive ? 0 : (currentFindCounts as any).titleCandidates);
     const detailFetched = counts.detail_fetched || counts.venue_detail_fetched_candidates || (freshFindActive ? 0 : (currentFindCounts as any).detailFetched);
     const evaluated = firstPresentValue(
       counts.abstract_scored_papers,

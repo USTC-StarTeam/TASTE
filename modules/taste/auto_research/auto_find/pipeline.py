@@ -5398,8 +5398,8 @@ def run_find(
                 pass
         llm_scored = sum(1 for item in deduped_evaluated if isinstance(item, dict) and str(item.get("reason_source") or "") == "llm abstract evaluation")
         category_filtered = max(_title_filter_report_sum("category_filtered_papers"), _title_filter_report_sum("title_filter_input_papers"), source_title_filter_input) or deduped_raw
-        tfidf_screened = max(_title_filter_report_sum("tfidf_screened_papers"), category_filtered)
-        title_score_input = _title_filter_report_sum("title_score_input_papers") or category_filtered
+        tfidf_screened = _title_filter_report_sum("tfidf_screened_papers") or category_filtered
+        title_score_input = _title_filter_report_sum("title_score_input_papers") or tfidf_screened or category_filtered
         llm_title_scored = _title_filter_report_sum("llm_title_scored_papers")
         progress_payload = {
             "run_id": run_id,

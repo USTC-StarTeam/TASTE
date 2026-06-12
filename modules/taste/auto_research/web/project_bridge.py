@@ -599,9 +599,13 @@ def _current_find_results_light(root: Path, project_id: str = "") -> dict[str, A
         if read_rows:
             payload["read_candidates"] = read_rows
         projection_counts = projection.get("counts") if isinstance(projection.get("counts"), dict) else {}
-        if projection_counts:
+        projection_survey_stats = projection.get("survey_stats") if isinstance(projection.get("survey_stats"), dict) else {}
+        if projection_survey_stats:
+            payload["survey_stats"] = projection_survey_stats
+        if projection_counts or projection_survey_stats:
             counts = payload.get("counts") if isinstance(payload.get("counts"), dict) else {}
             counts.update(projection_counts)
+            counts.update(projection_survey_stats)
             if raw_recommendation_rows or raw_read_rows:
                 counts["strong_recommendations"] = len(recommendation_rows)
                 counts["recommended"] = len(recommendation_rows)
@@ -5494,8 +5498,14 @@ def _light_find_survey_from_progress(project_dir: Path) -> dict[str, Any]:
     source_status = _merge_verified_venue_metadata_rows(source_status, verified_rows)
     venue_counts = _venue_metadata_counts(source_status or verified_rows)
     progress_counts = progress.get("counts") if isinstance(progress.get("counts"), dict) else {}
-    counts = {**{key: value for key, value in venue_counts.items() if value not in (None, "")}, **progress_counts}
     projection_counts = projection.get("counts") if isinstance(projection.get("counts"), dict) else {}
+    projection_survey_stats = projection.get("survey_stats") if isinstance(projection.get("survey_stats"), dict) else {}
+    counts = {
+        **{key: value for key, value in venue_counts.items() if value not in (None, "")},
+        **progress_counts,
+        **projection_counts,
+        **projection_survey_stats,
+    }
     run_id = str(projection.get("run_id") or projection.get("source_run_id") or progress.get("run_id") or progress.get("source_run_id") or "").strip()
     projection_rows = _human_recommendation_literature_rows(projection.get("strong_recommendations") or projection.get("recommendations") or projection.get("articles") or [])
     if projection.get("strong_recommendations") or projection.get("recommendations") or projection.get("articles"):
@@ -10153,16 +10163,27 @@ def _taste_literature_summary(root: Path) -> dict[str, Any]:
         "note_i18n": {"zh": note_zh, "en": note_en},
         "note_zh": note_zh,
         "note_en": note_en,
+        "survey_stats": survey_stats,
         "counts": {
             "raw_title_index_papers": survey_stats.get("raw_title_index_papers"),
+            "title_total_papers": survey_stats.get("title_total_papers") or survey_stats.get("raw_title_index_papers"),
             "venue_total_papers_available": survey_stats.get("venue_total_papers_available"),
             "venue_corpus_audited_papers": survey_stats.get("venue_corpus_audited_papers") or survey_stats.get("venue_total_papers_available"),
             "category_corpus_audited_papers": survey_stats.get("category_corpus_audited_papers"),
+            "category_filtered_papers": survey_stats.get("category_filtered_papers"),
             "venue_category_selected_papers": survey_stats.get("venue_category_selected_papers"),
+            "tfidf_screened_papers": survey_stats.get("tfidf_screened_papers"),
             "venue_title_filter_input_papers": survey_stats.get("venue_title_filter_input_papers"),
+            "title_score_input_papers": survey_stats.get("title_score_input_papers"),
+            "llm_title_scored_papers": survey_stats.get("llm_title_scored_papers"),
             "venue_final_title_candidates": survey_stats.get("venue_final_title_candidates") or len(title_candidates),
             "venue_detail_fetched_candidates": survey_stats.get("venue_detail_fetched_candidates") or len(evaluated),
+            "venue_evaluated_candidates": survey_stats.get("venue_evaluated_candidates"),
+            "abstract_scored_papers": survey_stats.get("abstract_scored_papers") or survey_stats.get("llm_scored_candidates"),
             "llm_scored_candidates": survey_stats.get("llm_scored_candidates") or sum(1 for row in evaluated if isinstance(row, dict) and str(row.get("reason_source") or "") == "llm abstract evaluation"),
+            "recommended_papers": survey_stats.get("recommended_papers"),
+            "abstract_fetch_failed_candidates": survey_stats.get("abstract_fetch_failed_candidates"),
+            "final_llm_scoring_skipped_candidates": survey_stats.get("final_llm_scoring_skipped_candidates"),
             "full_venue_corpus_audit": bool(survey_stats.get("full_venue_corpus_audit")),
             "category_scan_reports": survey_stats.get("category_scan_reports"),
             "title_filter_reports": survey_stats.get("title_filter_reports"),
@@ -10313,6 +10334,11 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     find_results = safe_dict(_current_find_results_light(root, project))
     recommendation_projection = safe_dict(_current_find_recommendation_projection(root, str(find_results.get("run_id") or "")))
     projection_counts = safe_dict(recommendation_projection.get("counts"))
+    projection_survey_stats = safe_dict(recommendation_projection.get("survey_stats"))
+    pipeline_stage_count_keys = {
+        "category_filtered_papers", "tfidf_screened_papers", "venue_title_filter_input_papers", "title_score_input_papers",
+        "llm_title_scored_papers", "abstract_scored_papers", "llm_scored_candidates", "recommended_papers",
+    }
     raw_projection_recommendation_rows = safe_list(recommendation_projection.get("strong_recommendations")) or safe_list(recommendation_projection.get("recommendations")) or safe_list(recommendation_projection.get("articles"))
     projection_recommendation_rows = _human_recommendation_literature_rows(raw_projection_recommendation_rows)
     raw_projection_read_rows = safe_list(recommendation_projection.get("read_candidates"))
@@ -10537,8 +10563,10 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     if not title_filter_input_count:
         title_filter_input_count = sum(int((row if isinstance(row, dict) else {}).get("candidate_count") or (row if isinstance(row, dict) else {}).get("count") or 0) for row in source_status)
     find_counts = safe_dict(find_results.get("counts"))
-    find_survey_stats = safe_dict(find_results.get("survey_stats"))
+    find_survey_stats = {**safe_dict(find_results.get("survey_stats")), **projection_survey_stats}
     find_coverage = safe_dict(find_results.get("coverage"))
+    if find_survey_stats.get("venue_title_filter_input_papers"):
+        title_filter_input_count = int(find_survey_stats.get("venue_title_filter_input_papers") or title_filter_input_count or 0)
     venue_final_title_candidate_count = int(
         progress_counts.get("venue_final_title_candidates")
         or find_counts.get("venue_final_title_candidates")
@@ -10895,7 +10923,12 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
             "venue_corpus_audited_papers": raw_title_index_count,
             "venue_category_selected_papers": category_selected_count,
             "category_selected_papers": category_selected_count,
+            "category_filtered_papers": int(find_survey_stats.get("category_filtered_papers") or projection_counts.get("category_filtered_papers") or 0),
+            "tfidf_screened_papers": int(find_survey_stats.get("tfidf_screened_papers") or projection_counts.get("tfidf_screened_papers") or 0),
             "venue_title_filter_input_papers": title_filter_input_count,
+            "title_score_input_papers": int(find_survey_stats.get("title_score_input_papers") or projection_counts.get("title_score_input_papers") or 0),
+            "llm_title_scored_papers": int(find_survey_stats.get("llm_title_scored_papers") or projection_counts.get("llm_title_scored_papers") or 0),
+            "abstract_scored_papers": int(find_survey_stats.get("abstract_scored_papers") or projection_counts.get("abstract_scored_papers") or llm_scored_count or 0),
             "title_candidates": title_candidate_count,
             "venue_final_title_candidates": venue_final_title_candidate_count,
             "traceable_candidates": traceable_count or title_candidate_count or venue_final_title_candidate_count,
@@ -11557,6 +11590,11 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
     find_results = safe_dict(_current_find_results_light(root, project))
     recommendation_projection = safe_dict(_current_find_recommendation_projection(root, str(find_results.get('run_id') or '')))
     projection_counts = safe_dict(recommendation_projection.get('counts'))
+    projection_survey_stats = safe_dict(recommendation_projection.get('survey_stats'))
+    pipeline_stage_count_keys = {
+        'category_filtered_papers', 'tfidf_screened_papers', 'venue_title_filter_input_papers', 'title_score_input_papers',
+        'llm_title_scored_papers', 'abstract_scored_papers', 'llm_scored_candidates', 'recommended_papers',
+    }
     read_results = safe_dict(_read_json(root / 'planning' / 'finding' / 'read_results.json', {}))
     ideas_results = safe_dict(_read_json(root / 'planning' / 'finding' / 'ideas.json', {}))
     plans_results = safe_dict(_read_json(root / 'planning' / 'finding' / 'plans.json', {}))
@@ -11635,6 +11673,12 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
     }
 
     find_summary = _find_summary_from_payload(find_results)
+    for key in pipeline_stage_count_keys:
+        value = projection_survey_stats.get(key)
+        if value in (None, ''):
+            value = projection_counts.get(key)
+        if value not in (None, ''):
+            find_summary[key] = value
     if recommendation_projection:
         raw_recommendation_rows = safe_list(recommendation_projection.get('strong_recommendations')) or safe_list(recommendation_projection.get('recommendations')) or safe_list(recommendation_projection.get('articles'))
         recommendation_rows = _human_recommendation_literature_rows(raw_recommendation_rows)
@@ -11671,6 +11715,8 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
     source_status = _merge_verified_venue_metadata_rows(_expand_source_status_rows(find_results.get('source_status'), find_results.get('venue_health_report')), verified_venue_rows)
     venue_metadata_counts = _venue_metadata_counts(venue_rows or verified_venue_rows)
     for key, value in venue_metadata_counts.items():
+        if key in pipeline_stage_count_keys and find_summary.get(key) not in (None, '', 0):
+            continue
         if value not in (None, '', 0) or key in {'venue_category_selected_papers', 'category_selected_papers'}:
             find_summary[key] = value
     pid = str(full_job.get('pid') or '') if isinstance(full_job, dict) else ''
@@ -11750,7 +11796,12 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
             'traceable_candidates': live_counts.get('title_candidates', live_counts.get('venue_final_title_candidates', 0)) if fresh_find_running else find_summary.get('title_candidates', find_summary.get('venue_final_title_candidates', 0)),
             'venue_category_selected_papers': live_counts.get('venue_category_selected_papers', 0) if fresh_find_running else find_summary.get('venue_category_selected_papers', find_summary.get('category_selected_papers', 0)),
             'category_selected_papers': live_counts.get('venue_category_selected_papers', 0) if fresh_find_running else find_summary.get('category_selected_papers', find_summary.get('venue_category_selected_papers', 0)),
+            'category_filtered_papers': live_counts.get('category_filtered_papers', 0) if fresh_find_running else find_summary.get('category_filtered_papers', 0),
+            'tfidf_screened_papers': live_counts.get('tfidf_screened_papers', 0) if fresh_find_running else find_summary.get('tfidf_screened_papers', 0),
             'venue_title_filter_input_papers': live_counts.get('venue_title_filter_input_papers', 0) if fresh_find_running else find_summary.get('venue_title_filter_input_papers', 0),
+            'title_score_input_papers': live_counts.get('title_score_input_papers', 0) if fresh_find_running else find_summary.get('title_score_input_papers', 0),
+            'llm_title_scored_papers': live_counts.get('llm_title_scored_papers', 0) if fresh_find_running else find_summary.get('llm_title_scored_papers', 0),
+            'abstract_scored_papers': live_counts.get('abstract_scored_papers', live_counts.get('llm_scored_candidates', 0)) if fresh_find_running else find_summary.get('abstract_scored_papers', find_summary.get('llm_scored_candidates', 0)),
             'evaluated_candidates': live_counts.get('evaluated_candidates', 0) if fresh_find_running else find_summary.get('evaluated_candidates', 0),
             'llm_scored_candidates': live_counts.get('llm_scored_candidates', 0) if fresh_find_running else find_summary.get('llm_scored_candidates', find_summary.get('evaluated_candidates', 0)),
             'abstract_fetch_failed_candidates': live_counts.get('abstract_fetch_failed_candidates', 0) if fresh_find_running else find_summary.get('abstract_fetch_failed_candidates', 0),

@@ -3490,6 +3490,15 @@ def test_light_find_survey_preview_preserves_current_find_screening_counts(tmp_p
             "recommendation_target_count": 20,
             "recommendation_shortfall": 0,
             "counts": {"recommended": 20, "strong_recommendations": 20, "llm_scored_candidates": 2649},
+            "survey_stats": {
+                "category_filtered_papers": 11304,
+                "tfidf_screened_papers": 10236,
+                "venue_title_filter_input_papers": 10236,
+                "title_score_input_papers": 10236,
+                "llm_title_scored_papers": 6247,
+                "abstract_scored_papers": 2649,
+                "llm_scored_candidates": 2649,
+            },
         },
     )
     monkeypatch.setattr(project_bridge, "PROJECTS", tmp_path)
@@ -3500,13 +3509,18 @@ def test_light_find_survey_preview_preserves_current_find_screening_counts(tmp_p
     assert preview["run_id"] == "find_current"
     assert preview["status"] == "current_find_packet_ready"
     assert counts["raw_title_index_papers"] == 17332
-    assert counts["venue_title_filter_input_papers"] == 11357
+    assert counts["venue_title_filter_input_papers"] == 10236
     assert counts["venue_category_selected_papers"] == 4662
+    assert counts["category_filtered_papers"] == 11304
+    assert counts["tfidf_screened_papers"] == 10236
+    assert counts["title_score_input_papers"] == 10236
+    assert counts["llm_title_scored_papers"] == 6247
     assert counts["title_candidates"] == 3856
     assert counts["venue_final_title_candidates"] == 3856
     assert counts["detail_fetched"] == 2656
     assert counts["venue_detail_fetched_candidates"] == 2656
     assert counts["evaluated_candidates"] == 2656
+    assert counts["abstract_scored_papers"] == 2649
     assert counts["llm_scored_candidates"] == 2649
     assert counts["abstract_fetch_failed_candidates"] == 7
     assert counts["final_llm_scoring_skipped_candidates"] == 7
@@ -3529,6 +3543,9 @@ def test_current_find_summary_ignores_stale_unversioned_frontend_cache(tmp_path,
             'phase': 'complete',
             'counts': {
                 'raw_title_index': 17332,
+                'category_filtered_papers': 11304,
+                'tfidf_screened_papers': 11304,
+                'title_score_input_papers': 10236,
                 'title_candidates': 3856,
                 'venue_final_title_candidates': 3856,
                 'detail_fetched': 2656,
@@ -3627,6 +3644,67 @@ def test_current_find_summary_ignores_stale_unversioned_frontend_cache(tmp_path,
     assert survey_counts['venue_detail_fetched_candidates'] == 2656
     assert survey_counts['abstract_fetch_failed_candidates'] == 7
     assert survey_counts['final_llm_scoring_skipped_candidates'] == 7
+
+
+def test_compact_large_find_results_artifact_prefers_current_projection_survey_stats(tmp_path, monkeypatch):
+    from auto_research.web import server
+
+    run_id = 'find_current'
+    run_dir = tmp_path / 'runs' / run_id
+    project_root = tmp_path / 'demo_project'
+    state_dir = project_root / 'state'
+    run_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    write_json(
+        run_dir / 'find_progress.json',
+        {
+            'run_id': run_id,
+            'counts': {
+                'category_filtered_papers': 11304,
+                'tfidf_screened_papers': 11304,
+                'title_score_input_papers': 10236,
+                'llm_scored_candidates': 577,
+            },
+        },
+    )
+    write_json(
+        state_dir / 'finding_frontend.json',
+        {
+            'status': 'old_unversioned_cache',
+            'survey_stats': {'tfidf_screened_papers': 999, 'llm_scored_candidates': 275},
+        },
+    )
+    write_json(
+        state_dir / 'current_find_recommendation_projection.json',
+        {
+            'run_id': run_id,
+            'source_run_id': run_id,
+            'counts': {'strong_recommendations': 20, 'recommended': 20},
+            'survey_stats': {
+                'category_filtered_papers': 11304,
+                'tfidf_screened_papers': 10236,
+                'venue_title_filter_input_papers': 10236,
+                'title_score_input_papers': 10236,
+                'llm_title_scored_papers': 6247,
+                'abstract_scored_papers': 580,
+                'llm_scored_candidates': 580,
+                'recommended_papers': 20,
+            },
+        },
+    )
+    monkeypatch.setattr(server, '_project_root_for_find_run', lambda _run_id: project_root)
+
+    payload = server._compact_large_find_results_artifact(run_dir, run_id, 200_000_000)
+
+    assert payload['survey_stats']['tfidf_screened_papers'] == 10236
+    assert payload['counts']['category_filtered_papers'] == 11304
+    assert payload['counts']['tfidf_screened_papers'] == 10236
+    assert payload['counts']['title_score_input_papers'] == 10236
+    assert payload['counts']['llm_title_scored_papers'] == 6247
+    assert payload['counts']['abstract_scored_papers'] == 580
+    assert payload['counts']['llm_scored_candidates'] == 580
+    assert payload['counts']['strong_recommendations'] == 20
+
 
 def test_web_current_find_pipeline_uses_state_contract_when_artifacts_are_stale(tmp_path, monkeypatch):
     from auto_research.web import project_bridge

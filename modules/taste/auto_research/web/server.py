@@ -2550,19 +2550,37 @@ def _compact_large_find_results_artifact(directory: Path, run_id: str, size_byte
         "artifact_size_bytes": size_bytes,
         "truncation_reason": "find_results.json is large; API returns compact sidecar state plus current strong-paper rows so polling cannot block the web worker.",
     }
+    survey_stats: dict[str, Any] = {}
+    survey_count_keys = [
+        "raw_title_index_papers", "title_total_papers", "venue_total_papers_available", "venue_corpus_audited_papers",
+        "category_corpus_audited_papers", "category_filtered_papers", "venue_category_selected_papers",
+        "tfidf_screened_papers", "venue_title_filter_input_papers", "title_score_input_papers", "llm_title_scored_papers",
+        "venue_final_title_candidates", "abstract_scored_papers", "venue_detail_fetched_candidates", "venue_evaluated_candidates",
+        "llm_scored_candidates", "recommended_papers", "abstract_fetch_failed_candidates", "final_llm_scoring_skipped_candidates",
+        "category_scan_reports", "title_filter_reports", "arxiv_raw_count", "arxiv_prefiltered_count", "arxiv_pages_fetched",
+    ]
+
+    def merge_survey_stats(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if item not in (None, ""):
+                    survey_stats[key] = item
+
     if isinstance(progress, dict):
         for key in ["phase", "counts", "strong_recommendation_count", "recommendation_target_count", "recommendation_shortfall", "source_status", "venue_health_report", "selection", "live_progress", "updated_at", "generated_at"]:
             if key in progress:
                 payload[key] = progress.get(key)
+        merge_survey_stats(progress.get("survey_stats"))
     project_root = _project_root_for_find_run(run_id)
     if project_root is not None:
         packet = _read_project_json(project_root / "state" / "literature_tool_packet.json", {})
         frontend_state = _read_project_json(project_root / "state" / "finding_frontend.json", {})
         current_plan = _read_project_json(project_root / "state" / "current_find_research_plan.json", {})
         projection = _current_find_recommendation_projection(project_root, run_id)
-        if isinstance(frontend_state, dict) and isinstance(frontend_state.get("survey_stats"), dict):
-            payload.setdefault("survey_stats", frontend_state.get("survey_stats"))
+        if isinstance(frontend_state, dict) and _payload_run_id(frontend_state) == run_id:
+            merge_survey_stats(frontend_state.get("survey_stats"))
         if isinstance(projection, dict) and projection:
+            merge_survey_stats(projection.get("survey_stats"))
             recommendation_rows = projection.get("strong_recommendations") if isinstance(projection.get("strong_recommendations"), list) else projection.get("recommendations") if isinstance(projection.get("recommendations"), list) else projection.get("articles") if isinstance(projection.get("articles"), list) else []
             read_rows = projection.get("read_candidates") if isinstance(projection.get("read_candidates"), list) else recommendation_rows
             compact_recommendation_limit = max(len(recommendation_rows), len(read_rows), 1)
@@ -2579,7 +2597,11 @@ def _compact_large_find_results_artifact(directory: Path, run_id: str, size_byte
             counts = projection.get("counts") if isinstance(projection.get("counts"), dict) else {}
             if counts:
                 merged_counts = payload.get("counts") if isinstance(payload.get("counts"), dict) else {}
-                merged_counts.update(counts)
+                for key, value in counts.items():
+                    if value in (None, ""):
+                        continue
+                    if key in {"recommended", "strong_recommendations", "read_candidates", "strict_strong_anchor_count", "articles"} or merged_counts.get(key) in (None, "", 0):
+                        merged_counts[key] = value
                 payload["counts"] = merged_counts
             for key in ["recommendation_target_count", "recommendation_shortfall", "strict_strong_anchor_count", "recommendation_quality", "coverage_explanation_i18n", "semantics"]:
                 if projection.get(key) not in (None, "", []):
@@ -2599,6 +2621,14 @@ def _compact_large_find_results_artifact(directory: Path, run_id: str, size_byte
             readings = current_plan.get("readings") if isinstance(current_plan.get("readings"), list) else []
             if readings:
                 payload["read_candidates"] = [_artifact_compact_paper_row(row) for row in readings[:max(len(readings), 1)] if isinstance(row, dict)]
+    if survey_stats:
+        payload["survey_stats"] = survey_stats
+        merged_counts = payload.get("counts") if isinstance(payload.get("counts"), dict) else {}
+        for key in survey_count_keys:
+            value = survey_stats.get(key)
+            if value not in (None, ""):
+                merged_counts[key] = value
+        payload["counts"] = merged_counts
     return _strip_public_taste_marker(payload)
 
 
@@ -3077,6 +3107,17 @@ def _sync_current_find_projection(root: Path, run_id: str, find_results: dict[st
         "abstract_translation_status": translation_status,
         "missing_recommendation_abstract_zh": missing_zh,
     }
+    survey_stats = find_results.get("survey_stats") if isinstance(find_results.get("survey_stats"), dict) else {}
+    if not survey_stats and isinstance(find_results.get("diagnostics"), dict):
+        diagnostics = find_results.get("diagnostics") or {}
+        survey_stats = diagnostics.get("survey_stats") if isinstance(diagnostics.get("survey_stats"), dict) else {}
+    if survey_stats:
+        projection["survey_stats"] = survey_stats
+        counts = projection.get("counts") if isinstance(projection.get("counts"), dict) else {}
+        for key, value in survey_stats.items():
+            if value not in (None, ""):
+                counts[key] = value
+        projection["counts"] = counts
     write_json(state_dir / "current_find_recommendation_projection.json", projection)
     return projection
 
