@@ -687,11 +687,11 @@ def main() -> int:
         print(bootstrap_reason, flush=True)
     else:
         print(bootstrap_reason, flush=True)
-        bootstrap = [sys.executable, 'scripts/bootstrap_repo_env.py', '--project', args.project, '--repo-path', repo, '--env-name', env_name, '--verify-only']
+        bootstrap = [sys.executable, 'scripts/bootstrap_repo_env.py', '--project', args.project, '--repo-path', repo, '--env-name', env_name]
         if args.real_bootstrap_env:
             bootstrap.append('--update-project-config')
         else:
-            bootstrap.append('--prepare-only')
+            bootstrap.extend(['--verify-only', '--prepare-only'])
         run(bootstrap, ROOT)
     run([sys.executable, 'scripts/data_unavailability_policy.py', '--project', args.project], ROOT)
     audit_reference_cmd = [sys.executable, 'scripts/audit_reference_reproduction.py', '--project', args.project]

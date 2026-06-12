@@ -222,13 +222,27 @@ def quick_signals(repo: Path) -> dict[str, Any]:
     for path in top:
         if path.is_file() and path.name.lower().startswith('readme'):
             readme_text += path.read_text(encoding='utf-8', errors='ignore')[:30000]
-    data_mentions = sum(1 for token in ['dataset', 'data', 'download', 'benchmark', 'processed', '.pkl', '.npy', '.txt'] if token in readme_text.lower())
+    readme_lower = readme_text.lower()
+    data_mentions = sum(1 for token in ['dataset', 'data', 'download', 'benchmark', 'processed', '.pkl', '.npy', '.txt'] if token in readme_lower)
+    topic_tokens = ['official code', 'paper', 'recommend', 'recommender', 'sequential', 'llm', 'large language', 'self-improving', 'fidelity', 'dataset']
+    topic_lines: list[str] = []
+    for raw_line in readme_text.splitlines():
+        clean = re.sub(r'\s+', ' ', raw_line).strip()
+        if not clean or clean.startswith('|') or len(clean) < 12:
+            continue
+        low = clean.lower()
+        if any(token in low for token in topic_tokens):
+            topic_lines.append(clean[:260])
+        if len(' '.join(topic_lines)) >= 1200:
+            break
     return {
         'has_readme': bool(readme_text),
         'has_install': any((repo / name).exists() for name in ['requirements.txt', 'environment.yml', 'environment.yaml', 'setup.py', 'pyproject.toml']),
+        'readme_has_install_instructions': any(token in readme_lower for token in ['pip install', 'conda create', 'conda env create', 'environment.yml', 'requirements.txt']),
         'has_entrypoint': file_exists_any(repo, {'main.py', 'train.py', 'run.py', 'eval.py', 'autoscientist_experiment.py'}),
         'has_data_dir': any((repo / name).exists() for name in ['data', 'dataset', 'datasets']),
         'readme_data_mentions': data_mentions,
+        'readme_topic_evidence': ' '.join(topic_lines)[:1200],
     }
 
 
@@ -539,6 +553,12 @@ def compact_review_payload(payload: dict[str, Any]) -> dict[str, Any]:
         audited.append({
             'name': item.get('name', ''),
             'repo_path': item.get('repo_path', ''),
+            'source': item.get('source', ''),
+            'summary': item.get('summary', ''),
+            'topics': item.get('topics', []),
+            'language': item.get('language', ''),
+            'literature_base_title': item.get('literature_base_title', ''),
+            'literature_base_rank': item.get('literature_base_rank', ''),
             'decision': item.get('decision', ''),
             'claim_ready_datasets': item.get('probe_summary', {}).get('claim_ready_datasets', []),
             'signals': item.get('signals', {}),
@@ -555,6 +575,12 @@ def compact_review_payload(payload: dict[str, Any]) -> dict[str, Any]:
         'selected': {
             'name': selected.get('name', ''),
             'repo_path': selected.get('repo_path', ''),
+            'source': selected.get('source', ''),
+            'summary': selected.get('summary', ''),
+            'topics': selected.get('topics', []),
+            'language': selected.get('language', ''),
+            'literature_base_title': selected.get('literature_base_title', ''),
+            'literature_base_rank': selected.get('literature_base_rank', ''),
             'decision': selected.get('decision', ''),
             'claim_ready_dataset': selected.get('claim_ready_dataset', ''),
             'claim_ready_datasets': selected.get('probe_summary', {}).get('claim_ready_datasets', []),

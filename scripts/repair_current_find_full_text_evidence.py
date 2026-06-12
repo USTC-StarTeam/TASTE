@@ -498,6 +498,154 @@ def title_author_match_details(row: dict[str, Any], candidate_title: Any, candid
     return {"title_similarity": similarity, "author_overlap": overlap, "accepted": accepted}
 
 
+_OPENREVIEW_SCAN_CACHE: dict[str, list[dict[str, Any]]] = {}
+
+
+def _content_value(content: dict[str, Any], key: str) -> Any:
+    value = content.get(key)
+    if isinstance(value, dict) and "value" in value:
+        return value.get("value")
+    return value
+
+
+def _openreview_note_title(note: dict[str, Any]) -> str:
+    content = note.get("content") if isinstance(note.get("content"), dict) else {}
+    return str(_content_value(content, "title") or "").strip()
+
+
+def _openreview_note_authors(note: dict[str, Any]) -> list[str]:
+    content = note.get("content") if isinstance(note.get("content"), dict) else {}
+    authors = _content_value(content, "authors")
+    if isinstance(authors, list):
+        return [str(author) for author in authors if str(author or "").strip()]
+    if isinstance(authors, str):
+        return [part.strip() for part in re.split(r",|;| and ", authors) if part.strip()]
+    return []
+
+
+def _openreview_pdf_url_from_note(note: dict[str, Any]) -> str:
+    note_id = str(note.get("id") or note.get("forum") or "").strip()
+    return f"https://openreview.net/pdf?id={note_id}" if note_id else ""
+
+
+def _openreview_scan_specs(row: dict[str, Any]) -> list[tuple[str, dict[str, str]]]:
+    years: list[int] = []
+    try:
+        year = int(row.get("year") or 0)
+        if year > 2000:
+            years.append(year)
+    except Exception:
+        pass
+    current_year = datetime.now(UTC).year
+    for year in [current_year, current_year - 1, current_year + 1]:
+        if year > 2000 and year not in years:
+            years.append(year)
+    specs: list[tuple[str, dict[str, str]]] = []
+    for year in years[:4]:
+        specs.extend([
+            (f"openreview_iclr_{year}_submissions", {"invitations": f"ICLR.cc/{year}/Conference/-/Submission"}),
+            (f"openreview_iclr_{year}_accepted", {"content.venueid": f"ICLR.cc/{year}/Conference"}),
+            (f"openreview_neurips_{year}_accepted", {"content.venueid": f"NeurIPS.cc/{year}/Conference"}),
+        ])
+    return specs
+
+
+def _fetch_openreview_scan(spec_name: str, params: dict[str, str]) -> list[dict[str, Any]]:
+    cache_key = spec_name + ":" + json.dumps(params, sort_keys=True)
+    if cache_key in _OPENREVIEW_SCAN_CACHE:
+        return _OPENREVIEW_SCAN_CACHE[cache_key]
+    try:
+        page_size = max(100, min(1000, int(os.environ.get("OPENREVIEW_REPAIR_PAGE_SIZE", "1000") or 1000)))
+    except Exception:
+        page_size = 1000
+    try:
+        max_notes = max(page_size, int(os.environ.get("OPENREVIEW_REPAIR_SCAN_MAX", "20000") or 20000))
+    except Exception:
+        max_notes = 20000
+    notes: list[dict[str, Any]] = []
+    for offset in range(0, max_notes, page_size):
+        query = {**params, "limit": str(page_size), "offset": str(offset)}
+        try:
+            response = requests.get("https://api2.openreview.net/notes", params=query, timeout=REQUEST_TIMEOUT_SEC, headers={"User-Agent": USER_AGENT})
+        except Exception:
+            break
+        if response.status_code != 200:
+            break
+        payload = response.json()
+        page_notes = payload.get("notes") if isinstance(payload, dict) and isinstance(payload.get("notes"), list) else []
+        notes.extend(note for note in page_notes if isinstance(note, dict))
+        if len(page_notes) < page_size:
+            break
+    _OPENREVIEW_SCAN_CACHE[cache_key] = notes
+    return notes
+
+
+def openreview_title_candidates(row: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    title = str(row.get("title") or row.get("paper_title") or "").strip()
+    attempts: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
+    if not title:
+        return candidates, attempts
+    for spec_name, params in _openreview_scan_specs(row):
+        notes = _fetch_openreview_scan(spec_name, params)
+        attempts.append({"kind": "openreview_title_scan", "scan": spec_name, "params": params, "status_code": 200 if notes else 0, "note_count": len(notes), "accepted": False})
+        for note in notes:
+            note_title = _openreview_note_title(note)
+            if not note_title:
+                continue
+            match = title_author_match_details(row, note_title, _openreview_note_authors(note))
+            pdf_url = _openreview_pdf_url_from_note(note)
+            if not match["accepted"] or not pdf_url:
+                continue
+            candidate = {
+                "kind": "openreview_title_candidate",
+                "scan": spec_name,
+                "note_id": note.get("id") or "",
+                "forum": note.get("forum") or note.get("id") or "",
+                "pdf_url": pdf_url,
+                "url": f"https://openreview.net/forum?id={note.get('forum') or note.get('id')}",
+                "matched_title": note_title,
+                "title_similarity": match["title_similarity"],
+                "author_overlap": match["author_overlap"],
+                "accepted": True,
+            }
+            attempts.append(candidate)
+            candidates.append(candidate)
+        if candidates:
+            break
+    return candidates, attempts
+
+
+def manual_full_text_candidates(paths: Any, row: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    source_path = paths.planning / "finding" / "full_text_reading" / "manual_full_text_sources.json"
+    payload = load_json(source_path, [])
+    records = payload.get("sources") if isinstance(payload, dict) else payload
+    attempts: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
+    for record in as_list(records):
+        if not isinstance(record, dict):
+            continue
+        url = str(record.get("pdf_url") or record.get("url") or "").strip()
+        if not url.startswith("http"):
+            continue
+        candidate_title = record.get("title") or record.get("paper_title") or ""
+        candidate_authors = record.get("authors") or []
+        match = title_author_match_details(row, candidate_title, candidate_authors)
+        attempt = {
+            "kind": "manual_full_text_source_candidate",
+            "url": url,
+            "matched_title": candidate_title,
+            "title_similarity": match["title_similarity"],
+            "author_overlap": match["author_overlap"],
+            "accepted": bool(match["accepted"]),
+            "source_file": str(source_path),
+        }
+        attempts.append(attempt)
+        if match["accepted"]:
+            candidates.append({**attempt, "pdf_url": url, "source_note": record.get("note") or record.get("source_note") or ""})
+    return candidates, attempts
+
+
 def openalex_match_details(row: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
     return title_author_match_details(row, openalex_title(item), sorted(openalex_author_family_tokens(item)))
 
@@ -757,6 +905,49 @@ def try_acquire_for_paper(paths: Any, paper: dict[str, Any], rank: int) -> tuple
         attempts.append(attempt)
         if evidence:
             evidence.update({"source_channel": kind, "source_policy": "Indexed PDF full text can clear reading evidence only after paper-body validation."})
+            return evidence, attempts
+
+    manual_candidates, manual_attempts = manual_full_text_candidates(paths, paper)
+    attempts.extend(manual_attempts)
+    for candidate in manual_candidates:
+        pdf_url = str(candidate.get("pdf_url") or "")
+        if not pdf_url or pdf_url in tried_urls:
+            continue
+        tried_urls.add(pdf_url)
+        evidence, attempt = download_pdf_text(paths, rank, paper, pdf_url, kind="manual_verified_pdf_text_read", suffix="manual_verified")
+        attempt.update({"matched_title": candidate.get("matched_title"), "title_similarity": candidate.get("title_similarity"), "author_overlap": candidate.get("author_overlap"), "source_note": candidate.get("source_note")})
+        attempts.append(attempt)
+        if evidence:
+            evidence.update({
+                "source_channel": "manual_title_author_verified_pdf",
+                "source_policy": "A project-local manually supplied full-text URL can clear deep-reading evidence only after title/author matching and paper-body validation.",
+                "matched_title": candidate.get("matched_title"),
+                "title_similarity": candidate.get("title_similarity"),
+                "author_overlap": candidate.get("author_overlap"),
+                "source_note": candidate.get("source_note"),
+            })
+            return evidence, attempts
+
+    openreview_candidates, openreview_attempts = openreview_title_candidates(paper)
+    attempts.extend(openreview_attempts)
+    for candidate in openreview_candidates:
+        pdf_url = str(candidate.get("pdf_url") or "")
+        if not pdf_url or pdf_url in tried_urls:
+            continue
+        tried_urls.add(pdf_url)
+        evidence, attempt = download_pdf_text(paths, rank, paper, pdf_url, kind="openreview_title_verified_pdf_text_read", suffix="openreview_title_verified")
+        attempt.update({"matched_title": candidate.get("matched_title"), "title_similarity": candidate.get("title_similarity"), "author_overlap": candidate.get("author_overlap"), "openreview_forum": candidate.get("forum"), "openreview_url": candidate.get("url")})
+        attempts.append(attempt)
+        if evidence:
+            evidence.update({
+                "source_channel": "openreview_title_author_verified_pdf",
+                "source_policy": "OpenReview PDF can clear deep-reading evidence after title/author matching and paper-body validation.",
+                "matched_title": candidate.get("matched_title"),
+                "title_similarity": candidate.get("title_similarity"),
+                "author_overlap": candidate.get("author_overlap"),
+                "openreview_forum": candidate.get("forum"),
+                "openreview_url": candidate.get("url"),
+            })
             return evidence, attempts
 
     openalex_candidates, openalex_attempts = openalex_repository_candidates(paper)

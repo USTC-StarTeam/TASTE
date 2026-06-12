@@ -77,10 +77,31 @@ DIRECT_CONDA_COMMAND_POLICY = (
     "environment creation or mutation is wrapper-owned and must not be inferred from the project id."
 )
 DIRECT_PYTHON_COMMAND_POLICY = (
-    "Claude Code may not call bare python/python3 directly in project experiment stages. "
+    "Claude Code may not call bare python/python3 directly in project runtime stages. "
     "Use the configured project experiment Python for probes and scripts/launch_experiment_run.py for experiments; "
     "bare python can silently use the management or system environment."
 )
+PROCESS_SIGNAL_COMMAND_POLICY = (
+    "Claude Code may not stop, kill, or signal experiment/trajectory processes. "
+    "Launcher-managed runs must be observed non-invasively; stopping a run is wrapper/human-owned and requires an artifact-local audit note."
+)
+RUNTIME_ATTACH_PROBE_POLICY = (
+    "Claude Code may not attach tracing/debugging tools to launcher-managed runtime processes or read /proc/<pid>/fd/* in experiment/trajectory/reference/paper stages. "
+    "Use stdout/stderr logs, ps state, nvidia-smi, watchdog state, and artifact contracts for non-invasive observation."
+)
+RUNTIME_ARTIFACT_STATE_WRITE_POLICY = (
+    "Claude Code may not write launcher/artifact runtime state files directly from Bash in experiment/trajectory/reference/paper stages. "
+    "Runtime status, stop reasons, failure markers, metrics, audits, contracts, locks, and import control files are wrapper-owned."
+)
+DIRECT_ARTIFACT_SCRIPT_EXECUTION_POLICY = (
+    "Claude Code may not execute artifact-local Python scripts directly from Bash in experiment/trajectory/reference/paper stages. "
+    "Evidence repair that runs code must use a wrapper-managed script or scripts/launch_experiment_run.py so TASTE owns PID, logs, artifacts, and import policy."
+)
+SECRET_ENV_ACCESS_POLICY = (
+    "Claude Code may not enumerate, print, grep, echo, measure, or pass API key/token/secret environment variables through Bash. "
+    "LLM credentials are wrapper-owned; use TASTE LLM clients/config injection rather than shell-visible secret probes."
+)
+
 CURRENT_FIND_CONTENT_ARTIFACTS = [
     "planning/finding/read_results.json",
     "planning/finding/read.md",
@@ -502,7 +523,7 @@ def direct_python_command_policy_issue(command: str, stage: str = '') -> str:
     stage_l = str(stage or '').lower().replace('_', '-')
     if _current_find_stage(stage_l):
         return ''
-    if not any(token in stage_l for token in ['environment', 'experiment', 'trajectory', 'reference', 'reproduction', 'paper']):
+    if not any(token in stage_l for token in ['environment', 'experiment', 'trajectory', 'reference', 'reproduction', 'paper', 'full-cycle']):
         return ''
     lowered = str(command or '').lower()
     bare_python = re.search(r"(?:^|[;&|]\s*)(?:python|python3(?:\.\d+)?)\b", lowered)
@@ -515,6 +536,129 @@ def direct_python_command_policy_issue(command: str, stage: str = '') -> str:
     return DIRECT_PYTHON_COMMAND_POLICY
 
 
+def _runtime_control_stage(stage: str = "") -> bool:
+    stage_l = str(stage or "").lower().replace("_", "-")
+    if _current_find_stage(stage_l):
+        return False
+    return any(token in stage_l for token in ["environment", "experiment", "trajectory", "reference", "reproduction", "paper", "full-cycle"])
+
+
+def process_signal_command_policy_issue(command: str, stage: str = "") -> str:
+    if not _runtime_control_stage(stage):
+        return ""
+    lowered = str(command or "").lower()
+    if re.search(r"(?:^|[;&|]\s*)(?:kill|pkill|killall)\b", lowered):
+        return PROCESS_SIGNAL_COMMAND_POLICY
+    if re.search(r"(?:^|[;&|]\s*)fuser\b[^\n;&|]*\s-k\b", lowered):
+        return PROCESS_SIGNAL_COMMAND_POLICY
+    return ""
+
+
+def runtime_attach_probe_policy_issue(command: str, stage: str = "") -> str:
+    if not _runtime_control_stage(stage):
+        return ""
+    lowered = str(command or "").replace("\\", "/").lower()
+    if re.search(r"(?:^|[\s;&|])(?:strace|ltrace|gdb|gcore|py-spy)\b", lowered):
+        return RUNTIME_ATTACH_PROBE_POLICY
+    if re.search(r"(?:^|[\s;&|])perf\s+trace\b", lowered):
+        return RUNTIME_ATTACH_PROBE_POLICY
+    if re.search(r"/proc/\d+/fd(?:/|\b)", lowered):
+        return RUNTIME_ATTACH_PROBE_POLICY
+    return ""
+
+
+def secret_env_access_policy_issue(command: str, stage: str = "") -> str:
+    _ = stage
+    lowered = str(command or "").lower()
+    secret_terms = r"(?:api[_-]?key|secret|token|authorization|bearer|openai|deepseek|anthropic)"
+    if re.search(r"(?:^|[\s;&|])(?:env|printenv|set|export)\b", lowered) and re.search(secret_terms, lowered):
+        return SECRET_ENV_ACCESS_POLICY
+    secret_var = r"(?:openai_api_key|deepseek_api_key|anthropic_api_key|[a-z0-9_]*(?:api_?key|token|secret)[a-z0-9_]*)"
+    if re.search(r"\$(?:\{#?|\{)?" + secret_var + r"(?:\})?", lowered):
+        return SECRET_ENV_ACCESS_POLICY
+    if re.search(r"os\.environ(?:\.get)?\s*\(", lowered) and re.search(secret_terms, lowered):
+        return SECRET_ENV_ACCESS_POLICY
+    return ""
+
+
+def _shell_var_assignments(command_lower: str) -> dict[str, str]:
+    assignments: dict[str, str] = {}
+    pattern = re.compile(r"(?:^|[\s;&|('\"])([a-z_][a-z0-9_]*)=(?:\"([^\"]*)\"|'([^']*)'|([^\s;&|]+))")
+    for match in pattern.finditer(command_lower):
+        value = next((group for group in match.groups()[1:] if group is not None), "")
+        assignments[match.group(1)] = value
+    return assignments
+
+
+def runtime_artifact_state_write_policy_issue(command: str, project: str, stage: str = "") -> str:
+    if not _runtime_control_stage(stage):
+        return ""
+    lowered = str(command or "").replace("\\", "/").lower()
+    artifact_state_pattern = r"/projects/[^/\s;&|<>]+/artifacts/[^\s;&|<>]*(?:stop_reason\.json|failed_do_not_import\.txt|contaminated_do_not_import\.txt|failure_audit\.json|run_contract\.json|experiment\.json|metrics\.json|audit\.json|run\.lock|launcher\.pid\.json)\b"
+    direct_redirect = re.search(r"(?:>|>>)\s*['\"]?[^\s;&|<>]*" + artifact_state_pattern, lowered)
+    if direct_redirect:
+        return RUNTIME_ARTIFACT_STATE_WRITE_POLICY
+    direct_tee = re.search(r"(?:^|[\s;&|])tee(?:\s+-a)?\s+['\"]?[^\s;&|<>]*" + artifact_state_pattern, lowered)
+    if direct_tee:
+        return RUNTIME_ARTIFACT_STATE_WRITE_POLICY
+    assignments = _shell_var_assignments(lowered)
+    state_vars = [
+        name for name, value in assignments.items()
+        if re.search(artifact_state_pattern, value)
+    ]
+    for var_name in state_vars:
+        var_ref = r"\$(?:" + re.escape(var_name) + r"\b|\{" + re.escape(var_name) + r"\})"
+        if re.search(r"(?:>|>>)\s*['\"]?" + var_ref, lowered):
+            return RUNTIME_ARTIFACT_STATE_WRITE_POLICY
+        if re.search(r"(?:^|[\s;&|])tee(?:\s+-a)?\s+['\"]?" + var_ref, lowered):
+            return RUNTIME_ARTIFACT_STATE_WRITE_POLICY
+    return ""
+
+
+def _contains_python_invocation(command_lower: str) -> bool:
+    if re.search(r"(?:^|[\s/])python(?:3(?:\.\d+)?)?\b", command_lower):
+        return True
+    return bool(re.search(r"(?:^|[\s;&|])\$\{?[a-z_][a-z0-9_]*python[a-z0-9_]*\}?(?=\s|$|[\"'])", command_lower))
+
+
+def direct_artifact_script_execution_policy_issue(command: str, project: str, stage: str = "") -> str:
+    if not _runtime_control_stage(stage):
+        return ""
+    lowered = str(command or "").replace("\\", "/").lower()
+    if "launch_experiment_run.py" in lowered:
+        return ""
+    artifact_root_pattern = r"/projects/[^/\s;&|<>]+/artifacts(?:/|$)"
+    literal_artifact_script = re.search(r"/projects/[^/\s;&|<>]+/artifacts/[^\s;&|<>]+\.py\b", lowered)
+    if literal_artifact_script and _contains_python_invocation(lowered):
+        return DIRECT_ARTIFACT_SCRIPT_EXECUTION_POLICY
+
+    relative_python_script = re.search(
+        r'''(?:^|[\s;&|])(?:\$\{?[a-z_][a-z0-9_]*python[a-z0-9_]*\}?|[^\s;&|]*/python(?:3(?:\.\d+)?)?)(?:\s+-[^\s;&|]+)*\s+['"]?(?!/)(?!-)[^'"\s;&|<>]+\.py\b''',
+        lowered,
+    )
+    artifact_cd = re.search(r'''(?:^|[\s;&|])cd\s+['"]?[^\s;&|<>]*''' + artifact_root_pattern + r"[^\s;&|<>]*", lowered)
+    if artifact_cd and relative_python_script and _contains_python_invocation(lowered):
+        return DIRECT_ARTIFACT_SCRIPT_EXECUTION_POLICY
+
+    assignments = _shell_var_assignments(lowered)
+    artifact_vars = [
+        name for name, value in assignments.items()
+        if re.search(artifact_root_pattern, value)
+    ]
+    for var_name in artifact_vars:
+        var_ref = r"\$(?:" + re.escape(var_name) + r"\b|\{" + re.escape(var_name) + r"\})"
+        if re.search(var_ref + r"[^\s;&|<>]*\.py\b", lowered) and _contains_python_invocation(lowered):
+            return DIRECT_ARTIFACT_SCRIPT_EXECUTION_POLICY
+        if re.search(r"(?:^|[\s;&|])cd\s+" + var_ref + r"(?:/[^\s;&|<>]*)?", lowered) and relative_python_script and _contains_python_invocation(lowered):
+            return DIRECT_ARTIFACT_SCRIPT_EXECUTION_POLICY
+    tmp_script_invocation = re.search(
+        r'''(?:^|[\s;&|])(?:\$\{?[a-z_][a-z0-9_]*python[a-z0-9_]*\}?|[^\s;&|]*/python(?:3(?:\.\d+)?)?)(?:\s+-[^\s;&|]+)*\s+['"]?(?:/tmp|/var/tmp)/[^'"\s;&|<>]+\.py\b''',
+        lowered,
+    )
+    if artifact_vars and tmp_script_invocation and _contains_python_invocation(lowered):
+        return DIRECT_ARTIFACT_SCRIPT_EXECUTION_POLICY
+    return ""
+
 def bash_command_tool_policy_issue(command: str, project: str, stage: str = '') -> str:
     current_find_issue = current_find_artifact_generator_policy_issue(command, stage)
     if current_find_issue:
@@ -523,6 +667,21 @@ def bash_command_tool_policy_issue(command: str, project: str, stage: str = '') 
     lowered = policy_command.lower()
     if not lowered.strip():
         return ''
+    secret_env_issue = secret_env_access_policy_issue(policy_command, stage)
+    if secret_env_issue:
+        return secret_env_issue
+    signal_issue = process_signal_command_policy_issue(policy_command, stage)
+    if signal_issue:
+        return signal_issue
+    attach_probe_issue = runtime_attach_probe_policy_issue(policy_command, stage)
+    if attach_probe_issue:
+        return attach_probe_issue
+    artifact_state_write_issue = runtime_artifact_state_write_policy_issue(policy_command, project, stage)
+    if artifact_state_write_issue:
+        return artifact_state_write_issue
+    direct_artifact_issue = direct_artifact_script_execution_policy_issue(policy_command, project, stage)
+    if direct_artifact_issue:
+        return direct_artifact_issue
     direct_conda_issue = direct_conda_command_policy_issue(policy_command)
     if direct_conda_issue:
         return direct_conda_issue
@@ -747,7 +906,8 @@ def history_path(paths, session_key: str = 'main') -> Path:
 
 
 FRESH_SESSION_STAGES = {"current-find-claude-read-idea-plan", "current-find-claude-select-plan"}
-FRESH_SESSION_STAGE_PREFIXES = ("full-cycle-blocker-repair",)
+# Runtime-control stages must start from authoritative state, not stale Claude process memory.
+FRESH_SESSION_STAGE_PREFIXES = ("full-cycle-ideation", "full-cycle-blocker-repair", "trajectory")
 
 
 def previous_context_overflow(paths, session_key: str = 'main') -> bool:
@@ -764,7 +924,7 @@ def fresh_session_reason(stage: str, paths, session_key: str = 'main') -> str:
     if stage_key in FRESH_SESSION_STAGES:
         return 'stage_requires_fresh_context'
     if any(stage_key.startswith(prefix) for prefix in FRESH_SESSION_STAGE_PREFIXES):
-        return 'blocker_repair_uses_compact_fresh_context'
+        return 'runtime_stage_uses_authoritative_fresh_context'
     if previous_context_overflow(paths, session_key=session_key):
         return 'previous_claude_context_overflow'
     return ''
@@ -1247,6 +1407,12 @@ def run_claude(project: str, instruction: str, stage: str, timeout_sec: int, res
         elif reason in {DIRECT_CONDA_COMMAND_POLICY, DIRECT_PYTHON_COMMAND_POLICY}:
             policy_type = 'environment_command'
             policy_text = reason
+        elif reason == SECRET_ENV_ACCESS_POLICY:
+            policy_type = 'secret_env_access'
+            policy_text = reason
+        elif reason in {PROCESS_SIGNAL_COMMAND_POLICY, RUNTIME_ATTACH_PROBE_POLICY, RUNTIME_ARTIFACT_STATE_WRITE_POLICY, DIRECT_ARTIFACT_SCRIPT_EXECUTION_POLICY}:
+            policy_type = 'experiment_runtime_control'
+            policy_text = reason
         else:
             policy_type = 'current_find_file_write_whitelist' if reason == CURRENT_FIND_FILE_WRITE_WHITELIST_POLICY else 'experiment_launcher'
             policy_text = (
@@ -1279,6 +1445,11 @@ def run_claude(project: str, instruction: str, stage: str, timeout_sec: int, res
                 tool_policy_report['process_sigkill_requested_at'] = dt.datetime.now(dt.timezone.utc).isoformat()
                 save_json(paths.state / 'claude_tool_policy_last_block.json', tool_policy_report)
                 stop_process(active_proc, signal.SIGKILL)
+        runtime_cleanup = cleanup_blocked_runtime_processes(command, policy_type)
+        if runtime_cleanup.get('matched_pids'):
+            tool_policy_report['blocked_runtime_process_cleanup'] = runtime_cleanup
+            tool_policy_report['blocked_runtime_process_cleanup_at'] = dt.datetime.now(dt.timezone.utc).isoformat()
+            save_json(paths.state / 'claude_tool_policy_last_block.json', tool_policy_report)
         if 'trajectory supervisor recursion' in reason:
             recursion_report = dict(tool_policy_report)
             recursion_report.update({
@@ -1442,24 +1613,24 @@ def run_claude(project: str, instruction: str, stage: str, timeout_sec: int, res
         if stripped.startswith('{'):
             try:
                 event = json.loads(stripped)
-                if isinstance(event, dict):
-                    json_events.append(event)
-                    if event.get('type') == 'stream_event':
-                        inner = event.get('event') if isinstance(event.get('event'), dict) else {}
-                        delta = inner.get('delta') if isinstance(inner.get('delta'), dict) else {}
-                        if inner.get('type') == 'content_block_delta' and delta.get('type') == 'text_delta' and delta.get('text'):
-                            partial_text.append(str(delta.get('text')))
-                            flush_partial()
-                            return
-                    if event.get('type') == 'result' or event.get('result') is not None:
-                        parsed = event
-                        completed_stream_result_seen = completed_stream_result_seen or claude_stream_result_is_terminal(event)
-                    message = summarize_event(event)
-                    if message:
-                        remember_message(message)
-                    return
-            except Exception:
-                pass
+            except json.JSONDecodeError:
+                event = None
+            if isinstance(event, dict):
+                json_events.append(event)
+                if event.get('type') == 'stream_event':
+                    inner = event.get('event') if isinstance(event.get('event'), dict) else {}
+                    delta = inner.get('delta') if isinstance(inner.get('delta'), dict) else {}
+                    if inner.get('type') == 'content_block_delta' and delta.get('type') == 'text_delta' and delta.get('text'):
+                        partial_text.append(str(delta.get('text')))
+                        flush_partial()
+                        return
+                if event.get('type') == 'result' or event.get('result') is not None:
+                    parsed = event
+                    completed_stream_result_seen = completed_stream_result_seen or claude_stream_result_is_terminal(event)
+                message = summarize_event(event)
+                if message:
+                    remember_message(message)
+                return
         remember_message(stripped)
 
     def stop_process(proc: subprocess.Popen[str], sig: int) -> None:
@@ -1473,6 +1644,66 @@ def run_claude(project: str, instruction: str, stage: str, timeout_sec: int, res
                 proc.terminate()
             except Exception:
                 pass
+
+    def blocked_runtime_script_paths(command: str) -> set[str]:
+        artifact_root = re.escape(str(paths.root / "artifacts"))
+        targets = set(re.findall(r"(" + artifact_root + r"/[^\s'\";&|<>]+\.py)\b", command))
+        if targets and re.search(r"/(?:tmp|var/tmp)/", command):
+            targets.update(re.findall(r"((?:/tmp|/var/tmp)/[^\s'\";&|<>]+\.py)\b", command))
+        return targets
+
+    def proc_cmdline_text(pid: int) -> str:
+        try:
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except Exception:
+            return ""
+        return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace")
+
+    def cleanup_blocked_runtime_processes(command: str, policy_type: str) -> dict[str, Any]:
+        if policy_type != "experiment_runtime_control":
+            return {}
+        targets = blocked_runtime_script_paths(command)
+        if not targets:
+            return {}
+        own_pids = {os.getpid()}
+        if proc is not None:
+            own_pids.add(int(proc.pid))
+        matched: list[int] = []
+        pgids: set[int] = set()
+        for proc_dir in Path("/proc").iterdir():
+            if not proc_dir.name.isdigit():
+                continue
+            pid = int(proc_dir.name)
+            if pid in own_pids:
+                continue
+            cmdline = proc_cmdline_text(pid)
+            if not cmdline or not any(target in cmdline for target in targets):
+                continue
+            matched.append(pid)
+            try:
+                pgids.add(os.getpgid(pid))
+            except Exception:
+                pass
+        for pgid in sorted(pgids):
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except Exception:
+                pass
+        if pgids:
+            time.sleep(0.5)
+        killed_pgids: list[int] = []
+        for pgid in sorted(pgids):
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+                killed_pgids.append(pgid)
+            except Exception:
+                pass
+        return {
+            "matched_script_paths": sorted(targets),
+            "matched_pids": sorted(set(matched)),
+            "signaled_pgids": sorted(pgids),
+            "sigkill_pgids": killed_pgids,
+        }
 
     def check_selected_base_route_guard(*, force: bool = False) -> bool:
         nonlocal route_guard_tripped, route_guard_report, last_route_guard_check

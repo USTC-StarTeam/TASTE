@@ -337,16 +337,64 @@ def active_repo_path(paths) -> str:
 
 
 
+
+def load_json_if_small(path: Path, default: Any, *, limit_bytes: int = 2_000_000) -> Any:
+    try:
+        if not path.exists() or path.stat().st_size > limit_bytes:
+            return default
+        return load_json(path, default)
+    except Exception:
+        return default
+
+
+def _collect_title_keys_from_payload(payload: Any) -> set[str]:
+    keys: set[str] = set()
+    if not isinstance(payload, dict):
+        return keys
+    rows: list[Any] = []
+    for key in [
+        "articles",
+        "strong_recommendations",
+        "recommendations",
+        "strong_papers",
+        "read_candidates",
+        "top_base_candidates",
+        "base_work_candidates",
+    ]:
+        value = payload.get(key)
+        if isinstance(value, list):
+            rows.extend(value)
+    for container_key in ["summary", "literature_after_survey", "literature_gate"]:
+        container = payload.get(container_key)
+        if isinstance(container, dict):
+            for key in ["top_base_candidates", "strong_recommendations", "recommendations", "articles"]:
+                value = container.get(key)
+                if isinstance(value, list):
+                    rows.extend(value)
+    for row in rows:
+        if isinstance(row, dict):
+            title = normalize_title_key(row.get("title") or row.get("paper_title") or row.get("name"))
+        else:
+            title = normalize_title_key(row)
+        if title:
+            keys.add(title)
+    return keys
+
 def current_find_run_id(paths) -> str:
     for rel in [
-        paths.planning / "finding" / "find_results.json",
+        paths.planning / "finding" / "find_progress.json",
         paths.state / "current_find_research_plan.json",
+        paths.state / "current_find_recommendation_projection.json",
+        paths.state / "literature_tool_packet.json",
     ]:
         payload = load_json(rel, {})
         if isinstance(payload, dict):
-            run_id = str(payload.get("run_id") or payload.get("find_run_id") or "").strip()
+            run_id = str(payload.get("run_id") or payload.get("find_run_id") or payload.get("source_run_id") or "").strip()
             if run_id:
                 return run_id
+    payload = load_json_if_small(paths.planning / "finding" / "find_results.json", {})
+    if isinstance(payload, dict):
+        return str(payload.get("run_id") or payload.get("find_run_id") or payload.get("source_run_id") or "").strip()
     return ""
 
 
@@ -355,21 +403,18 @@ def normalize_title_key(value: Any) -> str:
 
 
 def current_find_recommendation_title_keys(paths) -> set[str]:
-    payload = load_json(paths.planning / "finding" / "find_results.json", {})
-    if not isinstance(payload, dict):
-        return set()
-    rows: list[Any] = []
-    for key in ["articles", "strong_recommendations"]:
-        value = payload.get(key)
-        if isinstance(value, list):
-            rows.extend(value)
     keys: set[str] = set()
-    for row in rows:
-        if isinstance(row, dict):
-            title = normalize_title_key(row.get("title") or row.get("paper_title"))
-            if title:
-                keys.add(title)
-    return keys
+    for rel in [
+        paths.state / "current_find_research_plan.json",
+        paths.state / "current_find_recommendation_projection.json",
+        paths.state / "literature_tool_packet.json",
+        paths.planning / "finding" / "find_progress.json",
+    ]:
+        keys.update(_collect_title_keys_from_payload(load_json(rel, {})))
+    if keys:
+        return keys
+    payload = load_json_if_small(paths.planning / "finding" / "find_results.json", {})
+    return _collect_title_keys_from_payload(payload)
 
 
 def title_in_current_find_recommendations(paths, title: Any) -> bool:

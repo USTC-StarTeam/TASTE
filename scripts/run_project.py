@@ -273,7 +273,16 @@ def _current_find_payloads(paths) -> list[dict]:
 
 def current_find_execution_contract(paths) -> dict:
     all_payloads = _current_find_payloads(paths)
-    find_results_payload = load_json(paths.planning / "finding" / "find_results.json")
+    find_results_path = paths.planning / "finding" / "find_results.json"
+    find_results_payload = {}
+    try:
+        # The web summary calls this contract often. Current Find outputs can be
+        # hundreds of MB, while the execution contract only needs run_id, ideas,
+        # plans, and selected_plan fields already mirrored into small sidecars.
+        if find_results_path.exists() and find_results_path.stat().st_size <= 2_000_000:
+            find_results_payload = load_json(find_results_path)
+    except Exception:
+        find_results_payload = {}
     find_progress_payload = load_json(paths.planning / "finding" / "find_progress.json")
     planning_plan_payload = load_json(paths.planning / "finding" / "plans.json")
     planning_idea_payload = load_json(paths.planning / "finding" / "ideas.json")

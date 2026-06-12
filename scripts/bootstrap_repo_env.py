@@ -234,6 +234,9 @@ IMPORT_TO_PACKAGE = {
     'sklearn': 'scikit-learn',
     'pandas': 'pandas',
     'matplotlib': 'matplotlib',
+    'wandb': 'wandb',
+    'torchmetrics': 'torchmetrics',
+    'faiss': 'faiss-cpu',
 }
 
 
@@ -269,14 +272,62 @@ def infer_python_imports(repo: Path) -> list[str]:
     return sorted(imports)
 
 
+def _readme_files(repo: Path) -> list[Path]:
+    return [path for path in sorted(repo.glob('README*')) if path.is_file()]
+
+
+def _pip_package_from_token(token: str) -> str:
+    clean = token.strip().strip('`').strip("\"'")
+    if not clean or clean.startswith('-'):
+        return ''
+    if clean in {'pip', 'install', 'python', '-m'}:
+        return ''
+    if clean.startswith(('./', '../', 'http://', 'https://', 'git+', '$')):
+        return ''
+    if clean.endswith(('.txt', '.yml', '.yaml', '.toml', '.sh')):
+        return ''
+    if any(char in clean for char in ['/', '\\']) or clean in {'\\'}:
+        return ''
+    return clean.rstrip('.,;')
+
+
+def infer_readme_pip_packages(repo: Path) -> list[str]:
+    packages: list[str] = []
+    for readme in _readme_files(repo):
+        try:
+            lines = readme.read_text(encoding='utf-8', errors='ignore').splitlines()
+        except Exception:
+            continue
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line or 'pip install' not in line.lower():
+                continue
+            line = re.sub(r'^```.*$', '', line).strip()
+            line = re.sub(r'^[>*$#\s]+', '', line).strip()
+            line = line.replace('python -m pip install', 'pip install')
+            match = re.search(r'\bpip\s+install\s+(.+)$', line, flags=re.IGNORECASE)
+            if not match:
+                continue
+            tail = match.group(1).replace('\\', ' ')
+            for token in re.split(r'\s+', tail):
+                package = _pip_package_from_token(token)
+                if package and package not in packages:
+                    packages.append(package)
+    return packages
+
+
 def infer_pip_packages(repo: Path) -> list[str]:
+    packages: list[str] = []
+    for package in infer_readme_pip_packages(repo):
+        if package not in packages:
+            packages.append(package)
     imports = infer_python_imports(repo)
-    packages = []
     for name in imports:
         pkg = IMPORT_TO_PACKAGE.get(name)
         if pkg and pkg not in packages:
             packages.append(pkg)
-    # The selected repo has no requirements file; inferred imports are verified before installation.
+    # README install commands are authoritative when requirements files are absent;
+    # inferred imports fill small gaps such as yaml -> pyyaml.
     return packages
 
 
@@ -313,7 +364,8 @@ def main() -> None:
     if not conda_exe and not choose_downloader(machine):
         missing_runtime_tools.append('curl_or_wget')
 
-    env_exists = conda_env_exists(conda_exe, env_name) if conda_exe else False
+    env_exists_before = conda_env_exists(conda_exe, env_name) if conda_exe else False
+    env_exists = env_exists_before
     if args.verify_only:
         steps = verification_steps(env_name) if conda_exe and env_exists else []
     else:
@@ -332,6 +384,7 @@ def main() -> None:
         'auto_install_missing': args.auto_install_missing,
         'verify_only': args.verify_only,
         'env_exists': env_exists,
+        'env_exists_before': env_exists_before,
         'auto_installed_local_conda': auto_installed,
         'missing_runtime_tools': missing_runtime_tools,
         'steps': [' '.join(conda_cmd(conda_exe, step)) for step in steps] if conda_exe else [],
@@ -349,7 +402,7 @@ def main() -> None:
         f"- detected_cuda: {payload['detected_cuda']}\n",
         f'- auto_install_missing: {args.auto_install_missing}\n',
         f'- verify_only: {args.verify_only}\n',
-        f'- env_exists: {env_exists}\n',
+        f'- env_exists_before: {env_exists_before}\n',
         '- portability rule: adapt to the detected machine profile rather than assuming a fixed GPU model, CUDA version, package manager, or conda base path.\n',
         '- install strategy: repo-first-adaptive using conda with verification commands after installation.\n\n',
     ]
@@ -433,6 +486,11 @@ def main() -> None:
                     break
         else:
             payload['status'] = 'completed'
+
+    if conda_exe:
+        env_exists_after = conda_env_exists(conda_exe, env_name)
+        payload['env_exists_after'] = env_exists_after
+        payload['env_exists'] = env_exists_after
 
     if payload['status'] == 'completed' and args.update_project_config:
         data = json.loads(paths.config.read_text(encoding='utf-8'))

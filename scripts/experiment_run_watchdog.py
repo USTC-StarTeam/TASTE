@@ -53,6 +53,48 @@ def is_alive(pid: int) -> bool:
     return Path(f"/proc/{pid}").exists()
 
 
+def proc_cmdline(pid: int) -> str:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except Exception:
+        return ""
+    return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+
+
+def proc_ppid(pid: int) -> int:
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("PPid:"):
+                return int(line.split()[1])
+    except Exception:
+        pass
+    return 0
+
+
+def proc_resource_usage(pid: int) -> dict[str, Any]:
+    try:
+        proc = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "etimes=,pcpu=,pmem="],
+            text=True,
+            capture_output=True,
+            timeout=3,
+        )
+    except Exception:
+        return {"elapsed_sec": 0, "pcpu": "", "pmem": ""}
+    if proc.returncode != 0:
+        return {"elapsed_sec": 0, "pcpu": "", "pmem": ""}
+    parts = proc.stdout.strip().split(None, 2)
+    try:
+        elapsed = int(parts[0]) if parts else 0
+    except ValueError:
+        elapsed = 0
+    return {
+        "elapsed_sec": elapsed,
+        "pcpu": parts[1] if len(parts) > 1 else "",
+        "pmem": parts[2] if len(parts) > 2 else "",
+    }
+
+
 def is_python_worker(pid: int, cmd: str) -> bool:
     exe = Path(proc_link(pid, "exe")).name.lower()
     if exe.startswith("python"):
@@ -181,6 +223,71 @@ def artifact_dir_from_fd(path_text: str, project_root: Path) -> Path | None:
         return None
     parent = path.parent
     return parent if str(parent).startswith(str(project_root)) else None
+
+
+def command_matches_contract(cmd: str, command: Any) -> bool:
+    if not isinstance(command, list) or not command:
+        return False
+    lowered = f" {cmd.lower()} "
+    meaningful: list[str] = []
+    for item in command[:4]:
+        value = str(item or "").strip()
+        if not value or value == "-u":
+            continue
+        meaningful.append(Path(value).name.lower() if value.endswith(".py") else value.lower())
+    return bool(meaningful) and all(token in lowered for token in meaningful)
+
+
+def contract_process_rows(project_root: Path) -> list[dict[str, Any]]:
+    artifacts_root = project_root / "artifacts"
+    if not artifacts_root.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for contract_path in artifacts_root.glob("**/run_contract.json"):
+        contract = load_json(contract_path, {})
+        if not isinstance(contract, dict):
+            continue
+        artifact_dir = Path(str(contract.get("artifact_dir") or contract_path.parent)).resolve()
+        if not str(artifact_dir).startswith(str(artifacts_root.resolve())):
+            continue
+        pid_raw = contract.get("pid")
+        if not pid_raw:
+            pid_sidecar = load_json(artifact_dir / "launcher.pid.json", {})
+            pid_raw = pid_sidecar.get("pid") if isinstance(pid_sidecar, dict) else None
+        try:
+            pid = int(pid_raw or 0)
+        except (TypeError, ValueError):
+            continue
+        if pid <= 0 or not is_alive(pid):
+            continue
+        cmd = proc_cmdline(pid)
+        fd1 = fd_target(pid, 1)
+        fd2 = fd_target(pid, 2)
+        expected_stdout = str(contract.get("stdout_path") or nested_value(contract, "expected_outputs.stdout") or artifact_dir / "stdout_stderr.log")
+        fd_artifacts = {path for path in (artifact_dir_from_fd(fd1, project_root), artifact_dir_from_fd(fd2, project_root)) if path is not None}
+        stdout_matches = any(str(path.resolve()) == str(artifact_dir) for path in fd_artifacts)
+        contract_matches = command_matches_contract(cmd, contract.get("command"))
+        if not stdout_matches and not contract_matches:
+            continue
+        usage = proc_resource_usage(pid)
+        rows.append({
+            "pid": pid,
+            "ppid": proc_ppid(pid),
+            "elapsed_sec": usage["elapsed_sec"],
+            "pcpu": usage["pcpu"],
+            "pmem": usage["pmem"],
+            "cwd": proc_link(pid, "cwd"),
+            "exe": proc_link(pid, "exe"),
+            "cmd": cmd,
+            "is_python_worker": is_python_worker(pid, cmd),
+            "stdout_fd": fd1,
+            "stderr_fd": fd2,
+            "artifact_dirs": [str(artifact_dir)],
+            "contract_detected": True,
+            "contract_path": str(contract_path),
+            "contract_stdout_path": expected_stdout,
+        })
+    return rows
 
 
 def log_contains_nul(path: Path) -> bool:
@@ -316,6 +423,13 @@ def main() -> int:
     paths = build_paths(args.project)
     allowed_pythons = allowed_python_executables(args.project)
     rows = process_rows(paths.root)
+    seen_rows = {(int(row.get("pid") or 0), artifact) for row in rows for artifact in (row.get("artifact_dirs") or [])}
+    for row in contract_process_rows(paths.root):
+        artifacts = row.get("artifact_dirs") or []
+        if any((int(row.get("pid") or 0), artifact) not in seen_rows for artifact in artifacts):
+            rows.append(row)
+            for artifact in artifacts:
+                seen_rows.add((int(row.get("pid") or 0), artifact))
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         for artifact in row.get("artifact_dirs") or []:

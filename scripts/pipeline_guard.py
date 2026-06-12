@@ -50,10 +50,20 @@ def _status_text(payload: Any, *keys: str) -> list[str]:
 
 
 def current_find_run_id(paths) -> str:
-    for candidate in [paths.planning / "finding" / "find_progress.json", paths.planning / "finding" / "find_results.json", paths.state / "current_find_research_plan.json"]:
+    for candidate in [
+        paths.planning / "finding" / "find_progress.json",
+        paths.state / "current_find_research_plan.json",
+        paths.state / "current_find_recommendation_projection.json",
+        paths.planning / "finding" / "find_results.json",
+    ]:
+        try:
+            if candidate.name == "find_results.json" and candidate.exists() and candidate.stat().st_size > 2_000_000:
+                continue
+        except Exception:
+            continue
         payload = load_json(candidate, {})
         if isinstance(payload, dict):
-            run_id = str(payload.get("run_id") or payload.get("find_run_id") or "").strip()
+            run_id = str(payload.get("run_id") or payload.get("find_run_id") or payload.get("source_run_id") or payload.get("current_find_run_id") or "").strip()
             if run_id:
                 return run_id
     return ""

@@ -16,7 +16,8 @@ from project_paths import build_paths
 
 METRIC_NAMES = (
     "hr_at_5", "hr_at_10", "hr_at_20", "hr_at_50",
-    "ndcg_at_5", "ndcg_at_10", "ndcg_at_20", "ndcg_at_50",
+    "ndcg_at_1", "ndcg_at_3", "ndcg_at_5", "ndcg_at_10", "ndcg_at_20", "ndcg_at_50",
+    "recall_at_1", "recall_at_3", "recall_at_5", "recall_at_10", "recall_at_20", "recall_at_50",
     "mrr_at_5", "mrr_at_10", "mrr_at_20", "mrr_at_50",
 )
 
@@ -108,8 +109,15 @@ def contract_schema_version(contract: dict[str, Any]) -> int:
 
 
 def parse_epoch(line: str) -> int | None:
-    match = re.search(r"\bepoch\s+(\d+)\b", line, flags=re.IGNORECASE)
-    return int(match.group(1)) if match else None
+    patterns = (
+        r"\bepoch\s+(\d+)\b",
+        r"[\x27\"]epoch[\x27\"]\s*:\s*(\d+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, line, flags=re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    return None
 
 
 def parse_metric_values(line: str) -> list[float]:
@@ -124,7 +132,7 @@ def parse_metric_values(line: str) -> list[float]:
 
 
 def metric_key_from_header(label: str) -> str:
-    match = re.match(r"\s*(HR|NDCG|MRR)@(\d+)\s*$", str(label or ""), flags=re.IGNORECASE)
+    match = re.match(r"\s*(HR|NDCG|MRR|Recall)@(\d+)\s*$", str(label or ""), flags=re.IGNORECASE)
     if not match:
         return ""
     return f"{match.group(1).lower()}_at_{match.group(2)}"
@@ -137,7 +145,7 @@ def parse_metric_table_after(lines: list[str], marker_index: int, current_epoch:
     index = marker_index + 1
     while index < end:
         header = lines[index].strip()
-        labels = re.findall(r"\b(?:HR|NDCG|MRR)@\d+\b", header, flags=re.IGNORECASE)
+        labels = re.findall(r"\b(?:HR|NDCG|MRR|Recall)@\d+\b", header, flags=re.IGNORECASE)
         if not labels:
             index += 1
             continue
@@ -197,6 +205,39 @@ def parse_test_metrics(log_text: str) -> list[dict[str, Any]]:
     return tests
 
 
+def parse_rsir_metric_dict_logs(log_text: str) -> list[dict[str, Any]]:
+    """Parse RSIR logger metric dictionaries from final evaluate() output.
+
+    Training/validation metric dictionaries include loss_ keys, so they are
+    deliberately ignored here. Completed candidate import still requires
+    ndcg_at_10 and ndcg_at_20 plus separate completion evidence.
+    """
+    rows: list[dict[str, Any]] = []
+    current_epoch: int | None = None
+    value_re = re.compile(
+        r"['\"](?:[A-Za-z0-9]+_)?(?P<metric>ndcg|recall)@(?P<cutoff>\d+)['\"]\s*:\s*(?:tensor\()?\s*(?P<value>-?\d+(?:\.\d+)?(?:e[-+]?\d+)?)",
+        flags=re.IGNORECASE,
+    )
+    for index, line in enumerate(log_text.splitlines()):
+        epoch = parse_epoch(line)
+        if epoch is not None:
+            current_epoch = epoch
+        if "ndcg@" not in line.lower() or "loss_" in line:
+            continue
+        row: dict[str, Any] = {}
+        for match in value_re.finditer(line):
+            key = f"{match.group('metric').lower()}_at_{match.group('cutoff')}"
+            try:
+                row[key] = float(match.group("value"))
+            except ValueError:
+                pass
+        if isinstance(row.get("ndcg_at_10"), (int, float)) and isinstance(row.get("ndcg_at_20"), (int, float)):
+            row["epoch"] = current_epoch
+            row["line_index"] = index
+            rows.append(row)
+    return rows
+
+
 def select_best(rows: list[dict[str, Any]], metric: str) -> dict[str, Any]:
     usable = [row for row in rows if isinstance(row.get(metric), (int, float))]
     if not usable:
@@ -227,7 +268,10 @@ def last_epoch_seen(tests: list[dict[str, Any]], log_text: str) -> int | None:
     # Training logs can advance several epochs after the latest TEST block.
     # Completion detection must use the latest observed training epoch, not only
     # the latest evaluation epoch, otherwise finished runs can be missed.
-    epochs.extend(int(value) for value in re.findall(r"\bEpoch\s+(\d+)\b", log_text))
+    for line in log_text.splitlines():
+        epoch = parse_epoch(line)
+        if epoch is not None:
+            epochs.append(epoch)
     return max(epochs) if epochs else None
 
 
@@ -838,6 +882,7 @@ def finalize_artifact_contract(
     bad_cases_path: Path,
     completion: dict[str, Any],
     contract_assessment: dict[str, Any],
+    config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Synchronize launcher contract after deterministic artifact import.
 
@@ -851,6 +896,19 @@ def finalize_artifact_contract(
     if not isinstance(contract, dict) or not contract:
         return {"status": "missing_contract"}
     now = now_iso()
+    metadata = contract.get("experiment_metadata") if isinstance(contract.get("experiment_metadata"), dict) else {}
+    metadata = dict(metadata)
+    if isinstance(config, dict):
+        method = str(config.get("method") or "").strip()
+        dataset = str(config.get("dataset") or "").strip()
+        role = str(config.get("comparison_role") or config.get("role") or "").strip()
+        if method and not str(metadata.get("method") or "").strip():
+            metadata["method"] = method
+        if dataset and not str(metadata.get("dataset") or "").strip():
+            metadata["dataset"] = dataset
+        if role and not str(metadata.get("role") or "").strip():
+            metadata["role"] = role
+    contract["experiment_metadata"] = metadata
     status = "completed" if completed else "running" if running else "incomplete"
     contract.update({
         "status": status,
@@ -984,13 +1042,15 @@ def import_artifact(paths, artifact_dir: Path, *, require_completed: bool = True
         if contract.get("started_at"):
             config.setdefault("started_at", contract.get("started_at"))
     tests = parse_test_metrics(log_text)
+    if not tests:
+        tests = parse_rsir_metric_dict_logs(log_text)
     metrics_json = load_json(artifact_dir / "metrics.json", {})
     if not tests and isinstance(metrics_json, dict) and isinstance(metrics_json.get("all_evals"), list):
         for index, row in enumerate(metrics_json.get("all_evals") or []):
             if not isinstance(row, dict):
                 continue
             parsed = {name: row.get(name) for name in METRIC_NAMES if isinstance(row.get(name), (int, float))}
-            if len(parsed) >= 6:
+            if isinstance(parsed.get("ndcg_at_10"), (int, float)) and isinstance(parsed.get("ndcg_at_20"), (int, float)):
                 parsed["epoch"] = row.get("epoch")
                 parsed["line_index"] = -1 - index
                 tests.append(parsed)
@@ -1053,9 +1113,12 @@ def import_artifact(paths, artifact_dir: Path, *, require_completed: bool = True
     reference_value = reference.get("metric_value")
     selected_metric_value = float(best_by_ndcg20.get("ndcg_at_10") or best_by_ndcg10.get("ndcg_at_10") or final_test.get("ndcg_at_10"))
     try:
-        below_reference = bool(reference_value is not None and selected_metric_value < float(reference_value))
+        reference_numeric = float(reference_value) if reference_value is not None else None
     except (TypeError, ValueError):
-        below_reference = True
+        reference_numeric = None
+    reference_epsilon = 1e-6
+    reference_delta = selected_metric_value - reference_numeric if reference_numeric is not None else None
+    beats_reference = bool(reference_delta is not None and reference_delta > reference_epsilon)
 
     reference_audit = load_json(paths.state / "fresh_base_reference_full_reproduction_audit.json", {})
     repo = current_repo(paths, reference_audit if isinstance(reference_audit, dict) else {})
@@ -1083,11 +1146,11 @@ def import_artifact(paths, artifact_dir: Path, *, require_completed: bool = True
     running_status_path = artifact_dir / "running_status.json"
     metrics_path = artifact_dir / "metrics.json"
     bad_cases_path = artifact_dir / "bad_cases.json"
-    reference_float = float(reference.get("metric_value") or 0.0)
+    reference_float = reference_numeric if reference_numeric is not None else 0.0
     bad_items = [
         {
-            "slice": "aggregate_below_reference",
-            "evidence": f"best_candidate_ndcg_at_10={selected_metric_value:.6f}; selected_base_reference_ndcg_at_10={reference_float:.6f}",
+            "slice": "aggregate_not_above_reference",
+            "evidence": f"best_candidate_ndcg_at_10={selected_metric_value:.6f}; selected_base_reference_ndcg_at_10={reference_float:.6f}; delta={(reference_delta if reference_delta is not None else 0.0):.6f}",
             "action": "Do not promote this candidate; use it as negative evidence for protocol or method redesign.",
         },
         {
@@ -1102,10 +1165,16 @@ def import_artifact(paths, artifact_dir: Path, *, require_completed: bool = True
         "items": bad_items,
         "slices": [item["slice"] for item in bad_items],
     }
-    counterexample_text = (
-        f"候选最好 NDCG@10={selected_metric_value:.6f}，低于当前选中基底参考复现 NDCG@10={reference_float:.6f}；"
-        "该实验只能作为负向/候选观察，不能支撑论文 claim。"
-    )
+    if beats_reference:
+        counterexample_text = (
+            f"候选最好 NDCG@10={selected_metric_value:.6f}，仅以当前解析指标看高于参考复现 NDCG@10={reference_float:.6f}；"
+            "仍需确定性证据门控和多指标复核，不能直接支撑论文 claim。"
+        )
+    else:
+        counterexample_text = (
+            f"候选最好 NDCG@10={selected_metric_value:.6f}，未高于当前选中基底参考复现 NDCG@10={reference_float:.6f}；"
+            "该实验只能作为负向/候选观察，不能支撑论文 claim。"
+        )
     audit = {
         "project": paths.root.name,
         "experiment_id": experiment_id,
@@ -1124,7 +1193,7 @@ def import_artifact(paths, artifact_dir: Path, *, require_completed: bool = True
         "all_test_evaluations": tests,
         "reference_control": reference,
         "completion_evidence": completion,
-        "comparison_status": "below_selected_base_reference" if below_reference else "requires_manual_review",
+        "comparison_status": "above_selected_base_reference_requires_gate_review" if beats_reference else "not_above_selected_base_reference" if reference_numeric is not None else "requires_manual_review",
         "promotion_status": "candidate_observation_only",
         "evidence_status": "candidate_observation_only",
         "claim_verdict": "unsupported",
@@ -1232,6 +1301,7 @@ def import_artifact(paths, artifact_dir: Path, *, require_completed: bool = True
         bad_cases_path=bad_cases_path,
         completion=completion,
         contract_assessment=contract_assessment,
+        config=config if isinstance(config, dict) else {},
     )
     changed = upsert_registry(paths, row)
     return {

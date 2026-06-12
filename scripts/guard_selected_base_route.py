@@ -32,21 +32,49 @@ def key(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
 
 
-def current_find_run_id(paths) -> str:
-    for path in [paths.planning / "finding" / "find_results.json", paths.state / "current_find_research_plan.json"]:
-        payload = load_json(path, {})
-        if isinstance(payload, dict):
-            run_id = str(payload.get("run_id") or payload.get("find_run_id") or "").strip()
-            if run_id:
-                return run_id
+def _load_json_if_small(path: Path, default: Any, *, max_bytes: int = 2_000_000) -> Any:
+    try:
+        if not path.exists() or path.stat().st_size > max_bytes:
+            return default
+        return load_json(path, default)
+    except Exception:
+        return default
+
+
+def _payload_run_id(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key_name in ["run_id", "find_run_id", "source_run_id", "current_find_run_id", "taste_run_id"]:
+        value = str(payload.get(key_name) or "").strip()
+        if value:
+            return value
     return ""
+
+
+def _current_find_payload(paths) -> dict[str, Any]:
+    progress = load_json(paths.planning / "finding" / "find_progress.json", {})
+    current_plan = load_json(paths.state / "current_find_research_plan.json", {})
+    projection = _load_json_if_small(paths.state / "current_find_recommendation_projection.json", {}, max_bytes=5_000_000)
+    full = _load_json_if_small(paths.planning / "finding" / "find_results.json", {})
+    current_run = _payload_run_id(progress) or _payload_run_id(current_plan) or _payload_run_id(projection) or _payload_run_id(full)
+    for payload in [projection, full, progress, current_plan]:
+        run_id = _payload_run_id(payload)
+        if isinstance(payload, dict) and payload and (not current_run or not run_id or run_id == current_run):
+            if current_run and not run_id:
+                payload = {**payload, "run_id": current_run}
+            return payload
+    return {"run_id": current_run} if current_run else {}
+
+
+def current_find_run_id(paths) -> str:
+    return _payload_run_id(_current_find_payload(paths))
 
 
 def title_in_current_find(paths, title: Any) -> bool:
     title_key = key(title)
     if not title_key:
         return False
-    payload = load_json(paths.planning / "finding" / "find_results.json", {})
+    payload = _current_find_payload(paths)
     if not isinstance(payload, dict):
         return False
     for pool in ["articles", "strong_recommendations"]:

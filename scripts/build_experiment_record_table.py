@@ -225,6 +225,11 @@ def reflection(
     metric_hint = f"NDCG@10={format_metric(ndcg)}" if ndcg not in (None, "") else ""
     if best_ndcg not in (None, ""):
         metric_hint = (metric_hint + "，" if metric_hint else "") + f"最好记录={format_metric(best_ndcg)}"
+    comparison_status = str(row.get("comparison_status") or row.get("comparability_status") or "").strip().lower()
+    evidence_status = str(row.get("evidence_status") or "").strip().lower()
+    if status.lower() in {"invalidated", "obsolete"} or comparison_status in {"not_comparable", "incomparable"} or evidence_status in {"invalidated", "not_promotable"}:
+        detail = counter or novelty or str(row.get("notes") or "") or "该记录已失效或不可比，不能作为当前论文证据。"
+        return one_line(detail, 360)
     if "synthetic" in str(row.get("dataset") or "").lower():
         return "这是流程自测，只证明流水线能跑通，不能用于论文结论。"
     role = row_role(row, role_policy).lower()

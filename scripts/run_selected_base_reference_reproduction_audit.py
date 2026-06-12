@@ -157,9 +157,153 @@ def analysis_quickstart_command(repo: Path, mode: str) -> list[str]:
     return [str(scripts[0].relative_to(repo)), "--input", str(datasets[0].relative_to(repo)), "--outdir", outdir, "--n_boot", n_boot]
 
 
+def is_rsir_sasrec_repo(repo: Path) -> bool:
+    return all(
+        (repo / rel).exists()
+        for rel in [
+            "run.py",
+            "configs/basemodel.yaml",
+            "configs/sasrec.yaml",
+            "data/dataset.py",
+            "model/basemodel.py",
+            "model/sasrec.py",
+            "utils/arguments.py",
+            "utils/utils.py",
+        ]
+    )
+
+
+def write_rsir_bounded_runner(artifact_dir: Path, dataset: str, epoch: int) -> Path:
+    runner = artifact_dir / "rsir_bounded_reference_runner.py"
+    runner.write_text(
+        f'''
+from __future__ import annotations
+
+import json
+import os
+import sys
+import traceback
+
+sys.path.insert(0, os.getcwd())
+os.environ.setdefault("WANDB_MODE", "disabled")
+os.environ.setdefault("WANDB_DISABLED", "true")
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+
+try:
+    import torch
+    from utils.arguments import get_default_parser
+    from utils.utils import load_config, prepare_datasets, prepare_model
+
+    parser = get_default_parser()
+    args = vars(parser.parse_args(["-m", "SASRec", "-d", {dataset!r}, "--trainfile", "", "--device", "0", "--mode", "recommendation"]))
+    config = load_config(args)
+    config["train"]["device"] = "cpu"
+    config["train"]["epochs"] = max(1, int({int(max(1, epoch))!r}))
+    config["train"]["batch_size"] = 2
+    config["eval"]["batch_size"] = 2
+    config["model"]["dropout_rate"] = 0.0
+    config["num_layer"] = 1
+    config["neg_num"] = 8
+
+    train_dataset, val_dataset, test_dataset = prepare_datasets(config)
+    original_train_len = len(train_dataset)
+    bounded_examples = min(8, original_train_len)
+    train_dataset.set_data_index(torch.arange(bounded_examples))
+    model = prepare_model(config, [train_dataset, val_dataset, test_dataset])
+    model._init_model(train_dataset)
+    batch = next(iter(train_dataset.get_loader(batch_size=2, shuffle=False)))
+    batch = {{key: value.to(model.device) for key, value in batch.items()}}
+    batch["neg_item"] = model._neg_sampling(batch)
+    model.optimizer.zero_grad()
+    loss = model.training_step(batch, 0)
+    loss.backward()
+    model.optimizer.step()
+
+    payload = {{
+        "status": "ok",
+        "mode": "rsir_bounded_single_batch_reference",
+        "dataset": {dataset!r},
+        "original_train_len": original_train_len,
+        "bounded_examples": bounded_examples,
+        "loss": float(loss.detach().cpu()),
+        "batch_keys": sorted(batch.keys()),
+        "paper_level": False,
+        "note": "One official RSIR SASRec batch with official loader/model/loss; bounded audit only, not paper-level reproduction.",
+    }}
+    print(f"Epoch 0 Train loss: {{payload['loss']:.6f}}")
+    print(json.dumps(payload, ensure_ascii=False))
+except Exception as exc:
+    print(json.dumps({{"status": "failed", "error": str(exc), "traceback": traceback.format_exc()[-4000:]}}, ensure_ascii=False))
+    raise
+'''.lstrip(),
+        encoding="utf-8",
+    )
+    return runner
+
+
+
+def write_rsir_full_runner(artifact_dir: Path, dataset: str, epoch: int) -> Path:
+    runner = artifact_dir / "rsir_full_reference_runner.py"
+    runner.write_text(
+        f'''
+from __future__ import annotations
+
+import json
+import os
+import sys
+import traceback
+
+sys.path.insert(0, os.getcwd())
+os.environ.setdefault("WANDB_MODE", "disabled")
+os.environ.setdefault("WANDB_DISABLED", "true")
+
+try:
+    from utils.arguments import get_default_parser
+    from utils.utils import load_config, setup_environment
+    import quickstart
+
+    parser = get_default_parser()
+    args = vars(parser.parse_args(["-m", "SASRec", "-d", {dataset!r}, "--trainfile", "", "--device", "0", "--mode", "recommendation"]))
+    config = load_config(args)
+    requested_epochs = max(1, int({int(max(1, epoch))!r}))
+    original_epochs = int(config.get("train", {{}}).get("epochs", 0) or 0)
+    config.setdefault("train", {{}})["epochs"] = requested_epochs
+    setup_environment(config["train"])
+    print("[rsir-full-runner] " + json.dumps({{
+        "status": "starting",
+        "mode": "rsir_full_dataset_reference",
+        "dataset": {dataset!r},
+        "model": "SASRec",
+        "official_entrypoint": "quickstart.run_recommender",
+        "original_yaml_epochs": original_epochs,
+        "executed_epochs": requested_epochs,
+        "epoch_override_scope": "artifact-local runner; third-party repo files are not modified",
+        "paper_level_scope": "full dataset/reference command with audited epoch cap",
+    }}, ensure_ascii=False))
+    quickstart.run_recommender(config)
+    print("[rsir-full-runner] " + json.dumps({{
+        "status": "completed",
+        "mode": "rsir_full_dataset_reference",
+        "dataset": {dataset!r},
+        "executed_epochs": requested_epochs,
+    }}, ensure_ascii=False))
+except Exception as exc:
+    print("[rsir-full-runner] " + json.dumps({{
+        "status": "failed",
+        "error": str(exc),
+        "traceback": traceback.format_exc()[-4000:],
+    }}, ensure_ascii=False))
+    raise
+'''.lstrip(),
+        encoding="utf-8",
+    )
+    return runner
+
 def repo_adapter(repo: Path) -> str:
     if (repo / "main.py").exists() and (repo / "finetune.py").exists() and (repo / "run.sh").exists():
         return "selected_base_official_two_stage"
+    if is_rsir_sasrec_repo(repo):
+        return "rsir_sasrec_official"
     if any((repo / name).exists() for name in ["train.py", "single_train.py"]):
         return "official_training_entrypoint"
     if analysis_quickstart_command(repo, "bounded"):
@@ -184,6 +328,8 @@ def official_command(repo: Path, dataset: str, mode: str, epoch: int) -> list[st
     analysis_command = analysis_quickstart_command(repo, mode)
     if analysis_command:
         return analysis_command
+    if is_rsir_sasrec_repo(repo):
+        return ["run.py", "-m", "SASRec", "-d", dataset, "--trainfile", "", "--mode", "recommendation", "--device", "0"]
     run_sh = repo / "run.sh"
     preferred: list[str] = []
     if run_sh.exists():
@@ -238,7 +384,7 @@ def official_command(repo: Path, dataset: str, mode: str, epoch: int) -> list[st
 
 
 def parse_epoch_progress(line: str, total_epoch: int, mode: str) -> dict[str, Any]:
-    match = re.search(r"\bEpoch\s+(\d+)\b", line)
+    match = re.search(r"\bEpoch\s+(\d+)\b", line) or re.search(r"\bTraining\s+(\d+)\s*:", line)
     if not match or total_epoch <= 0:
         return {}
     epoch_index = int(match.group(1))
@@ -303,6 +449,19 @@ def parse_metrics(stdout: str) -> dict[str, Any]:
                     best_key = f"best_seen_{key}"
                     metrics[best_key] = max(float(metrics.get(best_key, value)), value)
                 header = []
+    for line in stdout.splitlines():
+        epoch_match = re.search(r"['\"]epoch['\"]\s*:\s*(\d+)", line)
+        if epoch_match:
+            metrics["last_epoch"] = int(epoch_match.group(1))
+        for raw_key, raw_value in re.findall(r"['\"]([^'\"]+)['\"]\s*:\s*tensor\((-?\d+(?:\.\d+)?)", line):
+            key = raw_key.strip().lower().replace("@", "_at_").replace(" ", "_")
+            value = float(raw_value)
+            metrics[key] = value
+            if key.startswith(("ndcg_at_", "recall_at_", "hr_at_", "beauty_ndcg_at_", "beauty_recall_at_")):
+                best_key = f"best_seen_{key}"
+                metrics[best_key] = max(float(metrics.get(best_key, value)), value)
+            if key.startswith("train_loss"):
+                metrics["last_train_loss"] = value
     losses = [float(x) for x in re.findall(r"Train loss:\s*([0-9.]+)", stdout)]
     if losses:
         metrics["last_train_loss"] = losses[-1]
@@ -397,6 +556,12 @@ def build(project: str, mode: str, epoch: int, timeout_sec: int, execute: bool) 
     exp_id = f"selected_base_reference_{mode}_{dataset or 'dataset'}_{safe_epoch}epoch_{stamp}"
     artifact_dir = paths.artifacts / "fresh_base_reference_reproduction" / exp_id
     artifact_dir.mkdir(parents=True, exist_ok=True)
+    if adapter == "rsir_sasrec_official" and mode == "bounded":
+        args = [str(write_rsir_bounded_runner(artifact_dir, dataset, safe_epoch))]
+        command = [py, "-u", *args]
+    elif adapter == "rsir_sasrec_official" and mode == "full":
+        args = [str(write_rsir_full_runner(artifact_dir, dataset, safe_epoch))]
+        command = [py, "-u", *args]
     stdout_path = artifact_dir / "stdout_stderr.log"
     artifact_audit_path = artifact_dir / "audit.json"
     state_audit_path = audit_state_path(paths, mode)

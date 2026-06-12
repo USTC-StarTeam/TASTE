@@ -839,31 +839,115 @@ def scientific_progress_gate(
     }
 
 
+def _reference_control_row(reference: dict) -> dict:
+    metric_name = str(reference.get("metric_name") or reference.get("metric") or "ndcg_at_10")
+    metric_value = reference.get("metric_value")
+    metrics = reference.get("metrics") if isinstance(reference.get("metrics"), dict) else {}
+    if metric_value is None and metric_name:
+        metric_value = metrics.get(metric_name)
+    row = {
+        "experiment_id": reference.get("experiment_id") or reference.get("name") or "selected_base_reference_full",
+        "name": reference.get("experiment_id") or reference.get("name") or "selected_base_reference_full",
+        "method": reference.get("method") or "selected_base_reference",
+        "method_slug": reference.get("method") or "selected_base_reference",
+        "dataset": reference.get("dataset") or "",
+        "metric_name": metric_name,
+        "metric_value": metric_value,
+        "metrics": {metric_name: metric_value} if metric_name and metric_value is not None else {},
+        "comparison_role": "reference",
+        "status": "completed",
+        "audit_ready": bool(reference.get("audit_ready", True)),
+        "artifact_path": reference.get("artifact_path") or reference.get("artifact_dir") or "",
+        "audit_path": reference.get("audit_path") or reference.get("artifact_audit_path") or "",
+        "artifact_audit_path": reference.get("artifact_audit_path") or reference.get("audit_path") or "",
+        "repo_path": reference.get("repo_path") or "",
+        "repo_name": reference.get("repo_name") or "",
+        "mode": reference.get("mode") or "",
+    }
+    return {key: value for key, value in row.items() if value is not None and value != ""}
+
+
+def _drop_control_missing_blockers(blockers: list) -> list:
+    prefixes = (
+        "No comparable real-data baseline/control metric exists.",
+        "No audit-ready comparable baseline/control run exists.",
+        "Some baseline/control rows are excluded by evidence-contract status:",
+    )
+    return [item for item in blockers if not any(str(item).startswith(prefix) for prefix in prefixes)]
+
+
+def _reference_same_control(control: dict, reference: dict) -> bool:
+    ref_id = str(reference.get("experiment_id") or reference.get("name") or "").strip()
+    ctrl_id = str(control.get("experiment_id") or control.get("name") or "").strip()
+    return bool(ref_id and ctrl_id and ref_id == ctrl_id) or (
+        str(control.get("method") or "") == "selected_base_reference"
+        and str(control.get("dataset") or "") == str(reference.get("dataset") or "")
+        and control.get("metric_value") == reference.get("metric_value")
+    )
+
+
 def align_reference_best_control(progress_gate: dict, reproduction_gate: dict) -> dict:
-    """Use the authoritative reference gate audit paths for selected-base control rows."""
+    """Use the authoritative reference gate reproduction as selected-base control.
+
+    The experiment registry may not contain a separate control row for the
+    wrapper-managed selected-base reproduction. When the reference gate has
+    already passed, scientific-progress reporting should still compare future
+    candidates against that authoritative reproduction instead of claiming that
+    no comparable control exists.
+    """
     if not isinstance(progress_gate, dict) or not isinstance(reproduction_gate, dict):
+        return progress_gate
+    if str(reproduction_gate.get("status") or "").lower() != "pass":
         return progress_gate
     reference = reproduction_gate.get("best_reproduction") if isinstance(reproduction_gate.get("best_reproduction"), dict) else {}
     if not reference:
         return progress_gate
-    ref_id = str(reference.get("experiment_id") or reference.get("name") or "").strip()
+    reference_control = _reference_control_row(reference)
+    if not reference_control.get("metric_value"):
+        return progress_gate
+
+    matched_existing = False
     for key in ["best_control", "best_audit_ready_control"]:
         control = progress_gate.get(key) if isinstance(progress_gate.get(key), dict) else {}
-        if not control:
-            continue
-        ctrl_id = str(control.get("experiment_id") or control.get("name") or "").strip()
-        same_reference = bool(ref_id and ctrl_id and ref_id == ctrl_id) or (
-            str(control.get("method") or "") == "selected_base_reference"
-            and str(control.get("dataset") or "") == str(reference.get("dataset") or "")
-            and control.get("metric_value") == reference.get("metric_value")
-        )
-        if not same_reference:
-            continue
-        for field in ["artifact_path", "audit_path", "artifact_audit_path", "repo_path", "repo_name", "mode"]:
-            value = reference.get(field)
-            if value not in {None, ""}:
-                control[field] = value
-        progress_gate[key] = control
+        if control and _reference_same_control(control, reference):
+            matched_existing = True
+            control.update({field: value for field, value in reference_control.items() if value is not None and value != ""})
+            progress_gate[key] = control
+
+    if not matched_existing:
+        progress_gate["best_control"] = dict(reference_control)
+        progress_gate["best_audit_ready_control"] = dict(reference_control)
+        for count_key in ("control_real_runs", "control_audit_ready_runs"):
+            try:
+                current = int(progress_gate.get(count_key) or 0)
+            except (TypeError, ValueError):
+                current = 0
+            progress_gate[count_key] = max(current, 1)
+        blockers = progress_gate.get("blockers") if isinstance(progress_gate.get("blockers"), list) else []
+        progress_gate["blockers"] = _drop_control_missing_blockers(blockers)
+        progress_gate["excluded_control_reasons"] = {}
+
+    candidate = progress_gate.get("best_candidate") if isinstance(progress_gate.get("best_candidate"), dict) else {}
+    metric_name, candidate_value = row_metric(candidate) if candidate else ("", None)
+    control_metric = str(reference_control.get("metric_name") or metric_name or "")
+    control_value = parse_float(reference_control.get("metric_value"))
+    if candidate and candidate_value is not None and control_value is not None:
+        margin = parse_float(progress_gate.get("margin")) or 0.0
+        comparison_pass = better_metric(candidate_value, control_value, metric_name or control_metric, margin)
+        progress_gate["comparison_pass"] = comparison_pass
+        blockers = progress_gate.get("blockers") if isinstance(progress_gate.get("blockers"), list) else []
+        comparison_blocker_prefix = "Best audit-ready candidate does not beat the best comparable baseline/control"
+        blockers = [item for item in blockers if not str(item).startswith(comparison_blocker_prefix)]
+        if not comparison_pass:
+            blockers.append(
+                "Best audit-ready candidate does not beat the best comparable baseline/control "
+                f"by the required margin {margin:.3g} on {(metric_name or control_metric) or 'metric'} "
+                f"(candidate={candidate_value}, control={control_value})."
+            )
+        progress_gate["blockers"] = blockers
+        progress_gate["status"] = "pass" if not blockers and comparison_pass else "blocked"
+    elif progress_gate.get("status") == "pass":
+        progress_gate["status"] = "blocked"
     return progress_gate
 
 

@@ -88,6 +88,80 @@ def read_json(path: Path, default: Any) -> Any:
         return default
 
 
+def read_json_if_small(path: Path, default: Any, *, max_bytes: int = 2_000_000) -> Any:
+    try:
+        if not path.exists() or path.stat().st_size > max_bytes:
+            return default
+        return read_json(path, default)
+    except Exception:
+        return default
+
+
+def payload_run_id(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in ["run_id", "source_run_id", "taste_run_id", "find_run_id", "current_find_run_id"]:
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def current_find_light_payload(paths) -> dict[str, Any]:
+    """Return current Find summary rows without loading huge find_results.json."""
+    progress = read_json(paths.planning / "finding" / "find_progress.json", {})
+    frontend = read_json(paths.state / "finding_frontend.json", {})
+    current_plan = read_json(paths.state / "current_find_research_plan.json", {})
+    projection = read_json_if_small(paths.state / "current_find_recommendation_projection.json", {}, max_bytes=5_000_000)
+    find_results = read_json_if_small(paths.planning / "finding" / "find_results.json", {})
+    payloads = [progress, frontend, current_plan, projection, find_results]
+    current_run = ""
+    for payload in payloads:
+        current_run = payload_run_id(payload)
+        if current_run:
+            break
+
+    def matches(payload: Any) -> bool:
+        run_id = payload_run_id(payload)
+        return isinstance(payload, dict) and (not current_run or not run_id or run_id == current_run)
+
+    result = projection if matches(projection) and projection else {}
+    if not result and matches(find_results):
+        result = find_results
+    if not isinstance(result, dict):
+        result = {}
+    if current_run and not payload_run_id(result):
+        result = {**result, "run_id": current_run}
+    counts: dict[str, Any] = {}
+    for payload in [progress, frontend, result]:
+        if isinstance(payload, dict):
+            for key in ["counts", "survey_stats"]:
+                value = payload.get(key)
+                if isinstance(value, dict):
+                    counts.update(value)
+    if counts:
+        result_counts = result.get("counts", {}) if isinstance(result.get("counts"), dict) else {}
+        result = {**result, "counts": {**result_counts, **counts}}
+    return result
+
+
+def current_find_light_run_id(paths) -> str:
+    payload = current_find_light_payload(paths)
+    run_id = payload_run_id(payload)
+    if run_id:
+        return run_id
+    for candidate in [
+        paths.planning / "finding" / "find_progress.json",
+        paths.state / "current_find_research_plan.json",
+        paths.state / "literature_tool_packet.json",
+        paths.state / "supervision_tick.json",
+    ]:
+        run_id = payload_run_id(read_json(candidate, {}))
+        if run_id:
+            return run_id
+    return ""
+
+
 def read_text(path: Path, limit: int = 24000) -> str:
     try:
         return path.read_text(encoding="utf-8", errors="replace")[:limit] if path.exists() else ""
@@ -173,10 +247,8 @@ def current_find_validation_ready(validation: Any, run_id: str, expected_count: 
 
 def current_find_full_text_gate_status(paths) -> dict[str, Any]:
     taste_dir = paths.planning / "finding"
-    find_results = read_json(taste_dir / "find_results.json", {})
-    if not isinstance(find_results, dict):
-        find_results = {}
-    run_id = str(find_results.get("run_id") or "").strip()
+    find_results = current_find_light_payload(paths)
+    run_id = payload_run_id(find_results) or current_find_light_run_id(paths)
     expected = count_rows(find_results.get("strong_recommendations")) or count_rows(find_results.get("articles"))
     validation = read_json(paths.state / "current_find_claude_reading_validation.json", {})
     current_plan = read_json(paths.state / "current_find_research_plan.json", {})
@@ -238,10 +310,8 @@ def current_find_plan_bridge_gate_status(paths, bridge_summary: Any | None = Non
     """
     bridge_summary = bridge_summary if isinstance(bridge_summary, dict) else {}
     taste_dir = paths.planning / "finding"
-    find_results = read_json(taste_dir / "find_results.json", {})
-    if not isinstance(find_results, dict):
-        find_results = {}
-    run_id = str(find_results.get("run_id") or "").strip()
+    find_results = current_find_light_payload(paths)
+    run_id = payload_run_id(find_results) or current_find_light_run_id(paths)
     expected_readings = count_rows(find_results.get("strong_recommendations")) or count_rows(find_results.get("articles"))
     read_results = read_json(taste_dir / "read_results.json", {})
     ideas = read_json(taste_dir / "ideas.json", {})
@@ -393,9 +463,9 @@ def recommendation_target_status(paths) -> dict[str, Any]:
     progress = read_json(paths.planning / "finding" / "find_progress.json", {})
     packet = read_json(paths.state / "literature_tool_packet.json", {})
     frontend = read_json(paths.state / "finding_frontend.json", {})
-    find_results = read_json(paths.planning / "finding" / "find_results.json", {})
+    find_results = current_find_light_payload(paths)
     current_plan = read_json(paths.state / "current_find_research_plan.json", {})
-    find_run_id = str(find_results.get("run_id") or "").strip() if isinstance(find_results, dict) else ""
+    find_run_id = payload_run_id(find_results) or current_find_light_run_id(paths)
     plan_run_id = str(current_plan.get("run_id") or current_plan.get("current_find_run_id") or "").strip() if isinstance(current_plan, dict) else ""
     plan_status = str(current_plan.get("status") or "").strip().lower() if isinstance(current_plan, dict) else ""
     current_plan_ready = bool(find_run_id and plan_run_id == find_run_id and not plan_status.startswith("blocked"))
@@ -507,19 +577,7 @@ def recommendation_target_status(paths) -> dict[str, Any]:
 
 def current_find_run_id(paths) -> str:
     """Return the active Find run id from project-owned state only."""
-    for candidate in [
-        paths.planning / "finding" / "find_progress.json",
-        paths.state / "current_find_research_plan.json",
-        paths.state / "literature_tool_packet.json",
-        paths.state / "supervision_tick.json",
-        paths.planning / "finding" / "find_results.json",
-    ]:
-        payload = read_json(candidate, {})
-        if isinstance(payload, dict):
-            run_id = str(payload.get("run_id") or payload.get("find_run_id") or "").strip()
-            if run_id:
-                return run_id
-    return ""
+    return current_find_light_run_id(paths)
 
 
 
@@ -528,7 +586,7 @@ def title_key_for_current_find(value: Any) -> str:
 
 
 def current_find_recommended_title_keys(paths_or_root) -> set[str]:
-    payload = read_json(paths_or_root.planning / "finding" / "find_results.json", {})
+    payload = current_find_light_payload(paths_or_root)
     if not isinstance(payload, dict):
         return set()
     keys: set[str] = set()
@@ -1467,7 +1525,7 @@ class FullCycle:
         current_plan = read_json(self.paths.state / "current_find_research_plan.json", {})
         selected_execution_contract = current_find_execution_contract(self.paths)
         packet = read_json(self.paths.state / "literature_tool_packet.json", {})
-        find_results = read_json(self.paths.planning / "finding" / "find_results.json", {})
+        current_run_id = target_state.get("run_id") or current_find_light_run_id(self.paths)
         project_cfg = read_json(self.paths.config, {})
         llm_cfg = project_cfg.get("llm", {}) if isinstance(project_cfg, dict) and isinstance(project_cfg.get("llm"), dict) else {}
         taste_cfg = read_json(CONFIG_PATH, {})
@@ -1498,7 +1556,7 @@ class FullCycle:
             "active_experiment_processes": active_experiment_processes[:8],
             "current_route": current_route,
             "environment_selection": env_selection,
-            "current_find_run_id": target_state.get("run_id") or (find_results.get("run_id") if isinstance(find_results, dict) else ""),
+            "current_find_run_id": current_run_id,
             "literature_gate": literature_gate,
             "recommendation_target": {
                 "actual": target_state.get("actual"),
@@ -1558,6 +1616,7 @@ class FullCycle:
             "P0 EXPERIMENT WATCHDOG: before declaring a run stopped or launching a replacement, inspect state/experiment_run_manifest.json and state/experiment_run_watchdog.json. If CONTAMINATED_DO_NOT_IMPORT.txt exists or stdout has NUL bytes, do not import that artifact; relaunch only with a new artifact_dir.",
             "P0: Never change LR/epochs or relaunch a partially complete run just because early metrics are weak or the log has not reached the final epoch. Such changes require a new planned experiment record after the current live run exits.",
             "P0 CURRENT-FIND SELECTED EXECUTION: Read/Idea/Plan may contain several candidate ideas/plans, but downstream environment, experiment, writing, and claim work must consume exactly one selected_plan_id chosen by the main Claude Code/human-supervised contract. Non-selected ideas/plans are backlog only.",
+            "P0 SEMANTIC DATA PROVENANCE: do not create text/LLM/semantic evidence by heuristically remapping opaque user/item IDs to external metadata using rating/timestamp joins, popularity order, voting, sample-title plausibility, or similar guesses. Such mappings are evidence only when the source repo/dataset preserved the ID map, or when preprocessing is deterministically rerun from raw data with a saved auditable mapping and regenerated splits/control under the same protocol; otherwise record a truthful blocker or switch to a data route that preserves text-interaction identity.",
             f"P0 CURRENT ROUTE: use environment-stage selected repo only: {current_route.get('title') or 'environment-stage selected anchor'} / {current_route.get('repo_name') or current_route.get('repo_path') or 'environment-stage selected repo'}. Historical active_repo or legacy/control routes must not override this route.",
         ]
         if selected_execution_contract.get("required") and not selected_execution_contract.get("selected_plan_id"):
@@ -1588,7 +1647,7 @@ class FullCycle:
                 f"P0 HARD STOP: Current Find full-text reading gate is blocked: full-text readings {full_text_gate.get('full_text_reading_count')}/{full_text_gate.get('expected_recommendation_count')}, pending={full_text_gate.get('pending_full_text_reading_count')}.",
                 "P0 ALLOWED ACTION ONLY: acquire or prove the missing current-Find full-text/PDF/HTML/page evidence, or repair the Find recommendation acceptance packet so user-visible recommendations are all fully readable. Do not rerun Claude over unchanged missing evidence; do not select bases, launch experiments, write papers, repair citations, or promote claims until this gate passes.",
             ])
-        required_idea_count = configured_max_ideas(self.project, default=5)
+        required_idea_count = configured_max_ideas(self.args.project, default=5)
         if isinstance(current_plan, dict) and (safe_int(current_plan.get("current_find_idea_count"), 0) < required_idea_count or safe_int(current_plan.get("current_find_plan_count"), 0) < required_idea_count):
             hard_lines.append("P0: current Find Read/Idea/Plan downstream artifacts are incomplete; repair the research pipeline/output parsing before environment or paper promotion.")
         hard_lines.append(json.dumps(authoritative, ensure_ascii=False, indent=2, sort_keys=True)[:18000])
@@ -1691,13 +1750,48 @@ Return concise Markdown with: Guidance Consumed, State Verified, Actions Taken, 
         return None
 
     def running_experiment_processes(self) -> list[dict[str, Any]]:
-        """Detect project-owned real experiment processes, including detached jobs started by Claude."""
+        """Detect project-owned real experiment processes, including launcher-contract jobs."""
+        rows: list[dict[str, Any]] = []
+        watchdog_payload = self.run_experiment_watchdog()
+        if isinstance(watchdog_payload, dict) and int(watchdog_payload.get("active_run_count") or 0) > 0:
+            process_by_pid = {
+                int(row.get("pid")): row
+                for row in watchdog_payload.get("processes", [])
+                if isinstance(row, dict) and is_int(row.get("pid"))
+            }
+            seen: set[int] = set()
+            for active in watchdog_payload.get("active_runs", []):
+                if not isinstance(active, dict):
+                    continue
+                pids = active.get("process_pids") or active.get("worker_pids") or []
+                for raw_pid in pids:
+                    if not is_int(raw_pid):
+                        continue
+                    pid = int(raw_pid)
+                    if pid in seen:
+                        continue
+                    seen.add(pid)
+                    proc_row = process_by_pid.get(pid, {})
+                    rows.append({
+                        "pid": pid,
+                        "ppid": proc_row.get("ppid"),
+                        "elapsed_sec": proc_row.get("elapsed_sec"),
+                        "pcpu": proc_row.get("pcpu"),
+                        "pmem": proc_row.get("pmem"),
+                        "command": proc_row.get("cmd") or "",
+                        "cwd": proc_row.get("cwd") or "",
+                        "artifact_dir": active.get("artifact_dir") or "",
+                        "contract_status": active.get("contract_status") or active.get("status") or "",
+                        "source": "experiment_run_watchdog",
+                    })
+            if rows:
+                return rows
+
         project_root = str(self.paths.root)
         repo = self.active_repo_path()
         repo_text = str(repo) if repo else ""
         cmd = ["ps", "-eo", "pid,ppid,etimes,pcpu,pmem,cmd"]
         proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True)
-        rows: list[dict[str, Any]] = []
         if proc.returncode != 0:
             return rows
         own_pid = os.getpid()
@@ -1785,6 +1879,10 @@ Return concise Markdown with: Guidance Consumed, State Verified, Actions Taken, 
         for proc in running:
             pid = proc.get("pid") if isinstance(proc, dict) else None
             artifact = by_pid.get(int(pid)) if is_int(pid) else None
+            if not artifact and isinstance(proc, dict):
+                artifact_text = str(proc.get("artifact_dir") or "").strip()
+                if artifact_text:
+                    artifact = Path(artifact_text).expanduser().resolve()
             if not artifact and isinstance(proc, dict):
                 command = str(proc.get("command") or "")
                 match = re.search(r"--artifact[_-]dir(?:=|\s+)(\S+)", command)
@@ -2172,6 +2270,7 @@ Required behavior:
 - Update or respect research_landscape, novelty_map, failed_hypothesis_graph, unexplored_niche_graph, evolutionary memory, evidence manifest, and trajectory optimization queue.
 - If you make edits, run local validation commands and leave evidence in research state/reports.
 - Do not fabricate metrics, citations, data availability, experiments, or paper claims.
+- Do not infer text/semantic item identity for opaque IDs from rating/timestamp joins, popularity order, voting, or sample-title plausibility; require a preserved ID map or a deterministic auditable preprocessing rerun that regenerates splits/control before launching semantic/LLM experiments.
 - Literature signals can guide idea/base/code choices, but only local repo/data/experiment artifacts can support scientific claims.
 - The main Claude Code session may keep multiple Read/Idea/Plan candidates visible, but it must select one best `selected_plan_id` for downstream execution. Non-selected ideas/plans are backlog only and must not drive environment, experiment, paper, or claim work.
 - If `selected_plan_id` is empty while current Find has idea/plan candidates, stop after recording the selection blocker; do not invent or launch an experiment route.
@@ -2262,8 +2361,7 @@ Return concise Markdown with: Idea/Route Decision, Evidence Inspected, Actions T
         counts = intermediates.get("candidate_pool_counts", {}) if isinstance(intermediates, dict) and isinstance(intermediates.get("candidate_pool_counts", {}), dict) else {}
         survey_stats = intermediates.get("survey_stats", {}) if isinstance(intermediates, dict) and isinstance(intermediates.get("survey_stats", {}), dict) else {}
         progress = read_json(self.paths.planning / "finding" / "find_progress.json", {})
-        find_results = read_json(self.paths.planning / "finding" / "find_results.json", {})
-        current_run_id = str((progress if isinstance(progress, dict) else {}).get("run_id") or (find_results if isinstance(find_results, dict) else {}).get("run_id") or "").strip()
+        current_run_id = payload_run_id(progress) or current_find_light_run_id(self.paths)
         packet_run_id = str(tool_packet.get("run_id") or tool_packet.get("source_run_id") or "").strip() if isinstance(tool_packet, dict) else ""
         packet_matches_current = bool(current_run_id and packet_run_id == current_run_id)
         paper_summary = paper_quality.get("summary", {}) if isinstance(paper_quality, dict) and isinstance(paper_quality.get("summary", {}), dict) else {}
@@ -2345,12 +2443,13 @@ Return concise Markdown with: Idea/Route Decision, Evidence Inspected, Actions T
         rebuilds downstream planning artifacts from the existing find_results.
         """
         taste_dir = self.paths.planning / "finding"
-        find_results = read_json(taste_dir / "find_results.json", {})
-        run_id = str(find_results.get("run_id") or "") if isinstance(find_results, dict) else ""
+        find_results = current_find_light_payload(self.paths)
+        run_id = payload_run_id(find_results) or current_find_light_run_id(self.paths)
         read_results = read_json(taste_dir / "read_results.json", {})
         ideas = read_json(taste_dir / "ideas.json", {})
         plans = read_json(taste_dir / "plans.json", {})
         expected_readings = count_rows(find_results.get("strong_recommendations")) or count_rows(find_results.get("articles"))
+        required_idea_count = configured_max_ideas(self.args.project, default=5)
         validation = read_json(self.paths.state / "current_find_claude_reading_validation.json", {})
         validation_ready = current_find_validation_ready(validation, run_id, expected_readings)
         current = bool(
@@ -2362,10 +2461,10 @@ Return concise Markdown with: Idea/Route Decision, Evidence Inspected, Actions T
             and validation_ready
             and isinstance(ideas, dict) and ideas.get("run_id") == run_id
             and ideas.get("source") == "claude_code_current_find_takeover"
-            and count_rows(ideas.get("ideas")) >= 5
+            and count_rows(ideas.get("ideas")) >= required_idea_count
             and isinstance(plans, dict) and plans.get("run_id") == run_id
             and plans.get("source") == "claude_code_current_find_takeover"
-            and count_rows(plans.get("plans")) >= 5
+            and count_rows(plans.get("plans")) >= required_idea_count
         )
         summary = {
             "run_id": run_id,
@@ -2380,7 +2479,7 @@ Return concise Markdown with: Idea/Route Decision, Evidence Inspected, Actions T
             "idea_source": ideas.get("source") if isinstance(ideas, dict) else "",
             "plan_source": plans.get("source") if isinstance(plans, dict) else "",
             "required_source": "claude_code_current_find_takeover",
-            "required_counts": {"readings": expected_readings, "ideas": 5, "plans": 5},
+            "required_counts": {"readings": expected_readings, "ideas": required_idea_count, "plans": required_idea_count},
             "reading_validation_ready": validation_ready,
             "reading_validation_policy": validation.get("policy_version") if isinstance(validation, dict) else "",
             "full_text_reading_count": safe_int(validation.get("full_text_reading_count"), 0) if isinstance(validation, dict) else 0,
@@ -2428,7 +2527,7 @@ Return concise Markdown with: Idea/Route Decision, Evidence Inspected, Actions T
         """Record whether the freshly refreshed survey is ready to drive route choice."""
         packet = read_json(self.paths.state / "literature_tool_packet.json", {})
         frontend = read_json(self.paths.state / "finding_frontend.json", {})
-        find_results = read_json(self.paths.planning / "finding" / "find_results.json", {})
+        find_results = current_find_light_payload(self.paths)
         gate = self.literature_gate_status()
         counts: dict[str, Any] = {}
         if isinstance(frontend, dict) and isinstance(frontend.get("survey_stats", {}), dict):
@@ -3797,6 +3896,72 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
             self.state["current_goal"] = "selected-base route guard restored trusted route; restart full cycle from current selected-base context"
             self.state["continuation_required"] = True
             self.state["continuation_reason"] = "selected-base route overwrite blocked"
+            self.state["paper_pipeline_skipped"] = True
+            self.state["paper_pipeline_skipped_reason"] = gate["paper_pipeline_skipped_reason"]
+            self.save()
+            return cycle
+
+        idea_tail = str(idea_result.get("stdout_tail") or idea_result.get("stdout") or "")
+        idea_tail_lower = idea_tail.lower()
+        semantic_provenance_blocked = any(
+            marker in idea_tail_lower
+            for marker in [
+                "execution-blocked",
+                "cannot be executed on this data",
+                "data provenance blocker",
+                "data provenance constraint",
+                "p0 semantic data provenance",
+            ]
+        ) and any(
+            marker in idea_tail_lower
+            for marker in [
+                "opaque integer",
+                "no item text",
+                "lacks item text",
+                "zero item text",
+                "without item text",
+                "heuristically mapping",
+            ]
+        )
+        if semantic_provenance_blocked:
+            pdf_after = self.latest_pdf_fingerprint()
+            gate = self.gate_snapshot()
+            gate["pdf_before"] = pdf_before
+            gate["pdf_after"] = pdf_after
+            gate["pdf_changed_this_cycle"] = self.pdf_changed(pdf_before, pdf_after)
+            gate["paper_pipeline_skipped"] = True
+            gate["paper_pipeline_skipped_reason"] = "ideation recorded a semantic data provenance blocker before autonomous experiment execution"
+            blockers = [
+                {
+                    "category": "semantic_data_provenance_blocker",
+                    "severity": "block",
+                    "issue": "Project ideation concluded the current selected route cannot execute the LLM/semantic experiment because the selected data exposes only opaque IDs without a preserved text/metadata mapping.",
+                    "evidence": [
+                        str(self.paths.state / "full_cycle_prompt_full-cycle-ideation.md"),
+                        str(self.paths.state / "claude_project_session_last_result.json"),
+                        str(self.paths.root / "data" / "amazon-beauty" / "README_UNTRUSTED_MAPPING.txt"),
+                    ],
+                    "next_action": "Record the provenance blocker or switch through deterministic base-switch gates; do not launch autonomous research from the stale selected plan until a preserved ID map or auditable preprocessing rerun exists.",
+                }
+            ]
+            cycle.update(
+                {
+                    "finished_at": now_iso(),
+                    "status": "blocked_semantic_data_provenance",
+                    "gate": gate,
+                    "blockers": blockers,
+                    "pdf_after": pdf_after,
+                    "pdf_changed": gate["pdf_changed_this_cycle"],
+                    "paper_pipeline_skipped": True,
+                }
+            )
+            self.state["latest_gate"] = gate
+            self.state["latest_blockers"] = blockers
+            self.state["latest_pdf_info"] = pdf_after
+            self.state["status"] = "blocked_semantic_data_provenance"
+            self.state["current_goal"] = "semantic data provenance blocker recorded; stop before autonomous research and repair route evidence"
+            self.state["continuation_required"] = True
+            self.state["continuation_reason"] = "current selected route lacks auditable text/metadata identity for LLM semantic experiments"
             self.state["paper_pipeline_skipped"] = True
             self.state["paper_pipeline_skipped_reason"] = gate["paper_pipeline_skipped_reason"]
             self.save()
