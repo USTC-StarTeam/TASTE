@@ -4509,6 +4509,9 @@ def test_frontend_markdown_renderer_supports_latex_links_and_math_markup():
     assert "MATH_LATEX_COMMAND_RE" in app
     assert "function looksLikeBareMathExpression" in app
     assert "function renderBareMathInText" in app
+    assert "MATH_INDEX_OFFSET_RE" in app
+    assert "[一-鿿]+" in app
+    assert "Rank|rank" in app
     assert "function displayMathExpressionFromLine" in app
     assert "function renderMathSource" in app
     assert "function decodeBasicHtmlEntities" in app
