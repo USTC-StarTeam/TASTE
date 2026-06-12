@@ -2298,9 +2298,14 @@ def _fresh_find_result_for_job(job: "JobState") -> Any:
     run_id = str(job.result.get("run_id") or "")
     if not run_id:
         return job.result
-    directory = run_dir(run_id)
     result = dict(job.result)
     result["run_id"] = run_id
+    try:
+        directory = run_dir(run_id)
+    except FileNotFoundError:
+        result.setdefault("artifact_missing", True)
+        result.setdefault("artifact_missing_reason", f"Run artifact directory is no longer available: {run_id}")
+        return result
     result.setdefault("artifact_dir", str(directory))
     result.setdefault("artifact_paths", {
         "find_results": str(directory / "find_results.json"),
@@ -2458,18 +2463,24 @@ def _payload_run_id(value: Any) -> str:
     return str(value.get("run_id") or value.get("taste_run_id") or value.get("source_run_id") or value.get("find_run_id") or value.get("current_find_run_id") or "").strip()
 
 
-def _project_current_find_run_id(project_root: Path) -> str:
-    for rel in [
+def _project_current_find_run_id(project_root: Path, *, allow_large_find_results: bool = True) -> str:
+    small_rels = [
         "state/finding_frontend.json",
         "planning/finding/find_progress.json",
-        "planning/finding/find_results.json",
+        "state/current_find_recommendation_projection.json",
         "state/current_find_research_plan.json",
         "state/current_find_claude_reading_validation.json",
         "planning/finding/read_results.json",
         "planning/finding/ideas.json",
         "planning/finding/plans.json",
-    ]:
+    ]
+    for rel in small_rels:
         payload = _read_project_json(project_root / rel, {})
+        run_id = _payload_run_id(payload)
+        if run_id:
+            return run_id
+    if allow_large_find_results:
+        payload = _read_project_json(project_root / "planning" / "finding" / "find_results.json", {})
         run_id = _payload_run_id(payload)
         if run_id:
             return run_id
@@ -2485,15 +2496,18 @@ def _project_taste_artifact_path(project_root: Path | None, run_id: str, name: s
     expected = str(run_id or "").strip()
     if not expected:
         return None
+    if name == "find_results.json":
+        current = _project_current_find_run_id(project_root, allow_large_find_results=False)
+        return candidate if current == expected else None
     if name.endswith(".json"):
         payload = _read_project_json(candidate, {})
         actual = _payload_run_id(payload)
         if actual and actual != expected:
             return None
-        if name in {"read_results.json", "ideas.json", "plans.json", "find_results.json"} and not actual:
+        if name in {"read_results.json", "ideas.json", "plans.json"} and not actual:
             return None
         return candidate
-    current = _project_current_find_run_id(project_root)
+    current = _project_current_find_run_id(project_root, allow_large_find_results=False)
     return candidate if current == expected else None
 
 
@@ -2972,6 +2986,51 @@ def _reproject_find_results_with_current_contract(find_results: dict[str, Any], 
         "source_count": source_count,
     }
 
+def _missing_recommendation_abstract_zh(recommendations: list[Any]) -> list[dict[str, str]]:
+    missing: list[dict[str, str]] = []
+    for index, row in enumerate(recommendations, 1):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("abstract") or row.get("abstract_en") or "").strip() and not str(row.get("abstract_zh") or "").strip():
+            missing.append({"rank": str(index), "id": str(row.get("id") or ""), "title": str(row.get("title") or "")})
+    return missing
+
+
+def _abstract_translation_status_for_recommendations(recommendations: list[Any], stored_status: Any = "") -> str:
+    has_abstract = any(
+        isinstance(row, dict) and str(row.get("abstract") or row.get("abstract_en") or "").strip()
+        for row in recommendations
+    )
+    if _missing_recommendation_abstract_zh(recommendations):
+        return "partial"
+    if has_abstract:
+        return "completed"
+    return str(stored_status or "not_needed")
+
+
+def _sync_find_translation_quality(find_results: dict[str, Any], recommendations: list[Any], translation_status: str, missing_zh: list[dict[str, str]]) -> None:
+    find_results["abstract_translation_status"] = translation_status
+    scoring_runtime = find_results.get("scoring_runtime") if isinstance(find_results.get("scoring_runtime"), dict) else {}
+    if isinstance(scoring_runtime, dict):
+        scoring_runtime["abstract_translation_status"] = translation_status
+    quality = find_results.get("recommendation_quality") if isinstance(find_results.get("recommendation_quality"), dict) else {}
+    if isinstance(quality, dict):
+        quality["missing_chinese_abstract_count"] = len(missing_zh)
+        quality["english_abstract_fallback_count"] = len(missing_zh)
+        quality["missing_chinese_abstract_ids"] = [str(item.get("id") or item.get("title") or "") for item in missing_zh[:50]]
+        if missing_zh and str(quality.get("status") or "").strip() in {"", "ok", "completed"}:
+            quality["status"] = "ok_with_translation_todo"
+        elif not missing_zh and str(quality.get("status") or "").strip() == "ok_with_translation_todo":
+            quality["status"] = "ok"
+        find_results["recommendation_quality"] = quality
+        if isinstance(scoring_runtime, dict):
+            scoring_runtime["recommendation_quality"] = quality
+        diagnostics = find_results.get("diagnostics") if isinstance(find_results.get("diagnostics"), dict) else {}
+        if isinstance(diagnostics, dict):
+            diagnostics["recommendation_quality"] = quality
+            find_results["diagnostics"] = diagnostics
+
+
 def _sync_current_find_projection(root: Path, run_id: str, find_results: dict[str, Any], source: str) -> dict[str, Any]:
     state_dir = root / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -2980,10 +3039,10 @@ def _sync_current_find_projection(root: Path, run_id: str, find_results: dict[st
     progress = read_json(_find_artifact_run_dir_for_project(root, run_id) / "find_progress.json", {})
     if not isinstance(progress, dict):
         progress = {}
-    missing_zh = []
-    for index, row in enumerate(recommendations, 1):
-        if isinstance(row, dict) and str(row.get("abstract") or row.get("abstract_en") or "").strip() and not str(row.get("abstract_zh") or "").strip():
-            missing_zh.append({"rank": index, "id": str(row.get("id") or ""), "title": str(row.get("title") or "")})
+    missing_zh = _missing_recommendation_abstract_zh(recommendations)
+    stored_translation_status = progress.get("abstract_translation_status") or scoring_runtime.get("abstract_translation_status") or find_results.get("abstract_translation_status") or ""
+    translation_status = _abstract_translation_status_for_recommendations(recommendations, stored_translation_status)
+    _sync_find_translation_quality(find_results, recommendations, translation_status, missing_zh)
     target_count = int(progress.get("recommendation_target_count") or scoring_runtime.get("recommendation_target_count") or len(recommendations) or 0)
     shortfall = max(0, target_count - len(recommendations)) if target_count else 0
     projection = {
@@ -2999,7 +3058,7 @@ def _sync_current_find_projection(root: Path, run_id: str, find_results: dict[st
         "recommendation_target_count": target_count,
         "recommendation_shortfall": shortfall,
         "recommendation_quality": find_results.get("recommendation_quality") or scoring_runtime.get("recommendation_quality") or {},
-        "abstract_translation_status": progress.get("abstract_translation_status") or scoring_runtime.get("abstract_translation_status") or "",
+        "abstract_translation_status": translation_status,
         "missing_recommendation_abstract_zh": missing_zh,
     }
     write_json(state_dir / "current_find_recommendation_projection.json", projection)
@@ -3146,11 +3205,14 @@ def _reset_current_find_downstream_artifacts(root: Path, run_id: str, recommenda
 def _write_current_find_markdown(directory: Path, find_results: dict[str, Any]) -> None:
     recommendations = find_results.get("strong_recommendations") if isinstance(find_results.get("strong_recommendations"), list) else find_results.get("articles") if isinstance(find_results.get("articles"), list) else []
     read_candidates = recommendations
+    screened = find_results.get("screened_ranking") if isinstance(find_results.get("screened_ranking"), list) else []
     triage = find_results.get("triage_candidates") if isinstance(find_results.get("triage_candidates"), list) else []
     audit = find_results.get("audit_candidates") if isinstance(find_results.get("audit_candidates"), list) else triage
     critique = find_results.get("critique_candidates") if isinstance(find_results.get("critique_candidates"), list) else []
     (directory / "article.md").write_text(paper_markdown(recommendations, "Recommended Articles"), encoding="utf-8")
     (directory / "read_candidates.md").write_text(paper_markdown(read_candidates, "Read Candidates"), encoding="utf-8")
+    if screened:
+        (directory / "screened_ranking.md").write_text(paper_markdown(screened, "Screened Strong Ranking"), encoding="utf-8")
     if triage:
         (directory / "triage_candidates.md").write_text(paper_markdown(triage, "Triage Candidates"), encoding="utf-8")
     if audit:
@@ -3195,13 +3257,23 @@ def _run_current_find_full_text_evidence_repair(project: str, root: Path, log: C
     log("Delegating current Find full-text evidence repair to wrapper: " + " ".join(cmd))
     proc = subprocess.Popen(cmd, cwd=str(WORKSPACE_ROOT), env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1)
     output_lines: list[str] = []
+    suppressed_structured_lines = 0
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
             line = line.rstrip("\n")
             if line:
                 output_lines.append(line)
-                log(line[:1200])
+                stripped = line.strip()
+                looks_structured = stripped.startswith(("{", "}", "[", "]", "\"")) or '":' in stripped[:120]
+                if looks_structured:
+                    suppressed_structured_lines += 1
+                    if suppressed_structured_lines == 1:
+                        log("Wrapper emitted structured evidence JSON; suppressing verbose taskbar fragments. Full evidence is stored under planning/finding/full_text_reading and state JSON files.")
+                    elif suppressed_structured_lines % 250 == 0:
+                        log(f"Wrapper structured evidence output suppressed: {suppressed_structured_lines} JSON-like lines read.")
+                else:
+                    log(line[:1200])
             if should_cancel():
                 proc.terminate()
                 raise JobCancelled("Task cancelled by user.")
@@ -3318,13 +3390,13 @@ def _repair_current_find_translations(log: Callable[[str], None], should_cancel:
     _write_current_find_markdown(directory, find_results)
     taste_dir = root / "planning" / "finding"
     taste_dir.mkdir(parents=True, exist_ok=True)
-    for name in ["find_results.json", "article.md", "read_candidates.md", "triage_candidates.md", "audit_candidates.md", "critique_candidates.md"]:
+    for name in ["find_results.json", "article.md", "screened_ranking.md", "read_candidates.md", "triage_candidates.md", "audit_candidates.md", "critique_candidates.md"]:
         src = directory / name
         if src.exists():
             shutil.copyfile(src, taste_dir / name)
     latest_dir = RUNS_DIR.parent / "auto_find"
     latest_dir.mkdir(parents=True, exist_ok=True)
-    for name in ["find_results.json", "article.md", "read_candidates.md", "triage_candidates.md", "audit_candidates.md", "critique_candidates.md"]:
+    for name in ["find_results.json", "article.md", "screened_ranking.md", "read_candidates.md", "triage_candidates.md", "audit_candidates.md", "critique_candidates.md"]:
         src = directory / name
         if src.exists():
             shutil.copyfile(src, latest_dir / name)
@@ -3418,13 +3490,16 @@ def _adopt_find_run_for_project(root: Path, project: str, run_id: str, *, source
     find_results["strict_strong_anchor_count"] = len(recommendations)
     find_results["strong_recommendation_count"] = len(recommendations)
     find_results["recommendation_shortfall"] = shortfall
-    find_results["abstract_translation_status"] = find_results.get("abstract_translation_status") or progress.get("abstract_translation_status") or scoring_runtime.get("abstract_translation_status") or ""
+    missing_zh = _missing_recommendation_abstract_zh(recommendations)
+    stored_translation_status = find_results.get("abstract_translation_status") or progress.get("abstract_translation_status") or scoring_runtime.get("abstract_translation_status") or ""
+    translation_status = _abstract_translation_status_for_recommendations(recommendations, stored_translation_status)
+    _sync_find_translation_quality(find_results, recommendations, translation_status, missing_zh)
     if isinstance(scoring_runtime, dict):
         scoring_runtime["recommendation_target_count"] = target_count
         scoring_runtime["recommendation_actual_count"] = len(recommendations)
         scoring_runtime["strict_strong_anchor_count"] = len(recommendations)
         scoring_runtime["recommendation_shortfall"] = shortfall
-        scoring_runtime["abstract_translation_status"] = find_results.get("abstract_translation_status") or scoring_runtime.get("abstract_translation_status") or ""
+        scoring_runtime["abstract_translation_status"] = translation_status
     write_json(find_results_path, find_results)
     now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     taste_dir = root / "planning" / "finding"
@@ -3560,12 +3635,8 @@ def _adopt_find_run_for_project(root: Path, project: str, run_id: str, *, source
         )
         stale_reset.append("full_text_reading/full_text_packet.json")
 
-    missing_zh = []
-    for index, row in enumerate(recommendations, 1):
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("abstract") or row.get("abstract_en") or "").strip() and not str(row.get("abstract_zh") or "").strip():
-            missing_zh.append({"rank": index, "id": str(row.get("id") or ""), "title": str(row.get("title") or "")})
+    missing_zh = _missing_recommendation_abstract_zh(recommendations)
+    translation_status = _abstract_translation_status_for_recommendations(recommendations, find_results.get("abstract_translation_status") or progress.get("abstract_translation_status") or scoring_runtime.get("abstract_translation_status") or "")
     projection = {
         "run_id": run_id,
         "source_run_id": run_id,
@@ -3579,7 +3650,7 @@ def _adopt_find_run_for_project(root: Path, project: str, run_id: str, *, source
         "recommendation_target_count": target_count,
         "recommendation_shortfall": shortfall,
         "recommendation_quality": find_results.get("recommendation_quality") or scoring_runtime.get("recommendation_quality") or {},
-        "abstract_translation_status": progress.get("abstract_translation_status") or scoring_runtime.get("abstract_translation_status") or "",
+        "abstract_translation_status": translation_status,
         "missing_recommendation_abstract_zh": missing_zh,
     }
     write_json(state_dir / "current_find_recommendation_projection.json", projection)
@@ -7808,8 +7879,23 @@ def api_find(request: FindRequest) -> dict:
 
 
 def _current_project_find_run_id(root: Path) -> str:
-    payload = _read_project_json(root / "planning" / "finding" / "find_results.json", {})
-    return str((payload if isinstance(payload, dict) else {}).get("run_id") or "").strip()
+    for rel in [
+        ("planning", "finding", "find_progress.json"),
+        ("state", "current_find_recommendation_projection.json"),
+        ("state", "current_find_research_plan.json"),
+        ("state", "finding_frontend.json"),
+        ("planning", "finding", "read_results.json"),
+        ("planning", "finding", "ideas.json"),
+        ("planning", "finding", "plans.json"),
+        ("planning", "finding", "find_results.json"),
+    ]:
+        payload = _read_project_json(root.joinpath(*rel), {})
+        if not isinstance(payload, dict):
+            continue
+        run_id = str(payload.get("run_id") or payload.get("source_run_id") or payload.get("find_run_id") or payload.get("current_find_run_id") or "").strip()
+        if run_id:
+            return run_id
+    return ""
 
 
 def _request_targets_current_project_find(request: ReadRequest, project: str, root: Path) -> bool:
@@ -7976,13 +8062,23 @@ def _run_current_find_claude_read_job(project: str, root: Path, request: ReadReq
     log(("Delegating current Find Read/Idea/Plan repair to wrapper: " if repair_mode else "Delegating current Find Read/Idea/Plan to wrapper: ") + " ".join(cmd))
     proc = subprocess.Popen(cmd, cwd=str(WORKSPACE_ROOT), env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1)
     output_lines: list[str] = []
+    suppressed_structured_lines = 0
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
             line = line.rstrip("\n")
             if line:
                 output_lines.append(line)
-                log(line[:1200])
+                stripped = line.strip()
+                looks_structured = stripped.startswith(("{", "}", "[", "]", "\"")) or '":' in stripped[:120]
+                if looks_structured:
+                    suppressed_structured_lines += 1
+                    if suppressed_structured_lines == 1:
+                        log("Wrapper emitted structured evidence JSON; suppressing verbose taskbar fragments. Full evidence is stored under planning/finding/full_text_reading and state JSON files.")
+                    elif suppressed_structured_lines % 250 == 0:
+                        log(f"Wrapper structured evidence output suppressed: {suppressed_structured_lines} JSON-like lines read.")
+                else:
+                    log(line[:1200])
             if should_cancel():
                 proc.terminate()
                 raise JobCancelled("Task cancelled by user.")

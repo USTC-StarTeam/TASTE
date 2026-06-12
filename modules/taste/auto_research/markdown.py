@@ -193,9 +193,9 @@ def paper_markdown(papers: list[dict], title: str = "Recommended Articles") -> s
         abstract, abstract_lang = _paper_display_text(paper, ["abstract_zh", "summary_zh", "tldr_zh"], ["abstract_en", "abstract", "summary", "tldr"])
         fit_explanation, fit_lang = _paper_display_text(paper, ["fit_explanation_zh", "match_explanation_zh"], ["fit_explanation", "match_explanation", "reason_en", "reason"], public_text=True)
         recommendation, reason_lang = _paper_display_text(paper, ["reason_zh", "recommendation_reason_zh"], ["reason", "recommendation_reason", "reason_en", "fit_explanation_en"], public_text=True)
-        abstract_note = ["", "_翻译状态：中文摘要待补；当前展示真实英文摘要作为可核查 fallback。_"] if abstract and abstract_lang == "en" else []
-        fit_note = ["", "_翻译状态：中文匹配解释待补；当前展示英文评分解释作为可核查 fallback。_"] if fit_explanation and fit_lang == "en" else []
-        reason_note = ["", "_翻译状态：中文推荐理由待补；当前展示英文推荐理由作为可核查 fallback。_"] if recommendation and reason_lang == "en" else []
+        abstract_note: list[str] = []
+        fit_note: list[str] = []
+        reason_note: list[str] = []
         metadata_lines = _paper_brief_metadata_lines(paper)
         lines.extend([
             f"## {index}. {paper.get('title', 'Untitled')}",

@@ -339,7 +339,7 @@ def test_run_find_persists_real_results_before_chinese_translation_timeout(monke
     assert payload["run_id"] != "taste_recoverable_fallback"
     assert payload["articles"]
     assert payload["strong_recommendations"]
-    assert payload["scoring_runtime"]["abstract_translation_status"] == "pending"
+    assert payload["scoring_runtime"]["abstract_translation_status"] == "partial"
     delete_run(payload["run_id"])
 
 
@@ -564,12 +564,56 @@ def test_venue_yeresolution_accepts_released_latest_dblp_year(monkeypatch):
     assert reason == ""
 
 
-def test_venue_yeresolution_keeps_requested_online_yeuntil_fetch_fallback(monkeypatch):
+def test_venue_yeresolution_keeps_requested_online_year_when_title_index_available(monkeypatch):
     venue = {"id": "dblp_sigir", "name": "SIGIR"}
 
     monkeypatch.setattr("auto_research.auto_find.pipeline.load_local_venue_year", lambda _venue, _year: None)
+    monkeypatch.setattr(
+        "auto_research.auto_find.pipeline._fetch_venue_title_index_for_find",
+        lambda _venue, years, limit: ([{"title": "Released SIGIR Paper"}], "dblp") if years == [2026] and limit == 1 else ([], "none"),
+    )
 
     years, reason = _resolve_venue_years(venue, [2026], as_of=date(2026, 5, 23))
 
     assert years == [2026]
     assert reason == ""
+
+
+def test_venue_yeresolution_backfills_any_venue_to_latest_available_title_index(monkeypatch):
+    venue = {"id": "dblp_sigir", "name": "SIGIR"}
+
+    monkeypatch.setattr("auto_research.auto_find.pipeline.load_local_venue_year", lambda _venue, _year: None)
+
+    def fake_fetch(_venue, years, limit):
+        assert limit == 1
+        if years == [2025]:
+            return [{"title": "Verified SIGIR Paper"}], "dblp"
+        return [], "none"
+
+    monkeypatch.setattr("auto_research.auto_find.pipeline._fetch_venue_title_index_for_find", fake_fetch)
+
+    years, reason = _resolve_venue_years(venue, [2026], as_of=date(2026, 5, 23))
+
+    assert years == [2025]
+    assert "requested years [2026]" in reason
+    assert "latest available SIGIR title index year 2025 via dblp" in reason
+
+
+def test_venue_yeresolution_backfills_neurips_through_generic_title_index_probe(monkeypatch):
+    venue = {"id": "neurips", "name": "NeurIPS", "full_name": "Conference on Neural Information Processing Systems"}
+
+    monkeypatch.setattr("auto_research.auto_find.pipeline.load_local_venue_year", lambda _venue, _year: None)
+
+    def fake_fetch(_venue, years, limit):
+        assert limit == 1
+        if years == [2025]:
+            return [{"title": "Verified NeurIPS Paper"}], "neurips_virtual"
+        return [], "none"
+
+    monkeypatch.setattr("auto_research.auto_find.pipeline._fetch_venue_title_index_for_find", fake_fetch)
+
+    years, reason = _resolve_venue_years(venue, [2026], as_of=date(2026, 6, 11))
+
+    assert years == [2025]
+    assert "requested years [2026]" in reason
+    assert "latest available NeurIPS title index year 2025 via neurips_virtual" in reason

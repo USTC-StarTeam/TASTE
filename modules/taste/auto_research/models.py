@@ -47,7 +47,7 @@ class AppConfig(BaseModel):
     max_ideas: int = 6
     venue_title_scan_limit: int = 0
     venue_title_scan_fraction: float = 1.0
-    find_recall_count: int = 1000
+    find_recall_count: int = 2000
     detail_fetch_count: int = 160
     full_venue_corpus_audit: bool = True
     title_filter_timeout_sec: int = 120

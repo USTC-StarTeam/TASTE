@@ -328,6 +328,73 @@ def test_final_scoring_prompt_preserves_valid_subdirections():
     assert "Do not apply a fixed global keyword table" in llm.prompts[-1]
     assert "route/foundation/claim labels" in llm.prompts[-1]
 
+def test_recommendation_tie_break_uses_final_llm_combined_score_for_boundary_ties():
+    cfg = AppConfig(provider="mock", max_recommended_papers=2)
+    items = [
+        {
+            "id": "alpha",
+            "title": "Alpha Transferable Preference Background",
+            "abstract": "A real abstract with transferable preference modeling background.",
+            "fit_score": 6.0,
+            "llm_fit_score": 6.0,
+            "combined_score": 6.0,
+            "llm_combined_score": 6.0,
+            "diversity_score": 6.0,
+            "llm_diversity_score": 6.0,
+            "title_llm_fit_score": 6.0,
+        },
+        {
+            "id": "zeta",
+            "title": "Zeta Direct LLM Recommendation Reranking",
+            "abstract": "A real abstract with direct LLM reranking signals for recommendation.",
+            "fit_score": 6.0,
+            "llm_fit_score": 6.0,
+            "combined_score": 6.5,
+            "llm_combined_score": 6.5,
+            "diversity_score": 7.0,
+            "llm_diversity_score": 7.0,
+            "title_llm_fit_score": 6.0,
+        },
+    ]
+
+    ranked = find_pipeline._recommendable_ranked(items, cfg)
+
+    assert [item["id"] for item in ranked[:2]] == ["zeta", "alpha"]
+
+
+def test_recommendation_tie_break_preserves_stable_order_for_high_fit_ties():
+    cfg = AppConfig(provider="mock", max_recommended_papers=2)
+    items = [
+        {
+            "id": "alpha",
+            "title": "Alpha Direct High Fit Paper",
+            "abstract": "A real abstract with high-confidence relevance.",
+            "fit_score": 8.0,
+            "llm_fit_score": 8.0,
+            "combined_score": 6.0,
+            "llm_combined_score": 6.0,
+            "diversity_score": 5.0,
+            "llm_diversity_score": 5.0,
+            "title_llm_fit_score": 5.0,
+        },
+        {
+            "id": "zeta",
+            "title": "Zeta Higher Combined High Fit Paper",
+            "abstract": "A real abstract with high-confidence relevance.",
+            "fit_score": 8.0,
+            "llm_fit_score": 8.0,
+            "combined_score": 9.0,
+            "llm_combined_score": 9.0,
+            "diversity_score": 9.0,
+            "llm_diversity_score": 9.0,
+            "title_llm_fit_score": 9.0,
+        },
+    ]
+
+    ranked = find_pipeline._recommendable_ranked(items, cfg)
+
+    assert [item["id"] for item in ranked[:2]] == ["alpha", "zeta"]
+
 
 def test_topic_evidence_uses_source_text_not_llm_explanation():
     llm = BatchLLM()
@@ -432,7 +499,7 @@ def test_category_selection_defaults_to_adaptive_deterministic_fallback(monkeypa
     assert all("adaptive" in row["reason"].lower() for row in selection["selected_categories"])
 
 
-def test_category_selection_is_deterministic_by_default_even_when_llm_available(monkeypatch):
+def test_category_selection_uses_llm_by_default_for_live_provider(monkeypatch):
     monkeypatch.delenv("USE_LLM_CATEGORY_SELECT", raising=False)
 
     class CategoryLLM(BatchLLM):
@@ -465,13 +532,12 @@ def test_category_selection_is_deterministic_by_default_even_when_llm_available(
 
     selection = select_relevant_categories(category_summary, cfg, llm)
 
-    assert selection["fallback_used"] is True
-    assert selection["selection_mode"] == "deterministic_adaptive_profile_recall"
-    assert llm.prompts == []
+    assert selection["fallback_used"] is False
+    assert selection["selection_mode"] == "llm_adaptive_category_select"
+    assert len(llm.prompts) == 1
     assert [row["name"] for row in selection["selected_categories"]] == [
         "foundation or frontier models, including LLMs",
         "generative models",
-        "computer vision",
     ]
 
 
@@ -2914,7 +2980,9 @@ def test_local_title_only_database_skips_category_selection_even_with_pseudo_cat
     title_index, reports, corpus = result
     assert len(title_index) == len(papers)
     assert len(corpus) == len(papers)
-    assert reports[0]["selection"]["selection_mode"] == "complete_title_corpus_no_official_categories"
+    assert reports[0]["selection"]["selected_paper_count"] == len(papers)
+    assert "selection_mode" not in reports[0]["selection"]
+    assert "fallback_used" not in reports[0]["selection"]
     assert reports[0]["metadata_completeness_status"] == "title_index_only"
 
 

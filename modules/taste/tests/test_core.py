@@ -1,6 +1,7 @@
 import json
 
 from auto_research.auto_find.catalog import catalog_by_id, load_catalog
+from auto_research.auto_find.pipeline import _recommendation_translation_status
 from auto_research.auto_find.sources import _acm_metadata_from_doi, _dblp_page_url, _parse_neurips_detail, _parse_neurips_list, fetch_arxiv, fetch_dblp_stream_api, fetch_openreview_venue, fetch_venue_sample, fetch_venue_title_index, normalize_date
 from auto_research.llm import LLMClient, clamp_workers, extract_json, fallback_score, keyword_category
 from auto_research.markdown import paper_markdown
@@ -132,6 +133,42 @@ def test_markdown_hides_internal_recommendation_debug_fields():
     assert "最终分数" not in content
     assert "- **URL**" not in content
     assert "- **PDF**:" not in content
+
+def test_recommendation_translation_status_recomputes_from_actual_rows():
+    missing = {
+        "id": "paper-missing",
+        "title": "Missing Chinese Abstract",
+        "abstract_en": "This is a real English abstract from venue metadata.",
+        "abstract_zh": "",
+    }
+    translated = {**missing, "abstract_zh": "这是一段完整中文摘要。"}
+
+    assert _recommendation_translation_status([missing], "completed") == "partial"
+    assert _recommendation_translation_status([translated], "partial") == "completed"
+    assert _recommendation_translation_status([{"id": "paper-no-abstract"}], "pending") == "pending"
+
+
+def test_markdown_hides_translation_fallback_status_lines():
+    content = paper_markdown([
+        {
+            "id": "p1",
+            "title": "English Fallback Paper",
+            "source": "openreview",
+            "venue": "ICLR",
+            "year": 2026,
+            "abstract": "This English abstract is real venue metadata and may be shown when Chinese text is not present.",
+            "fit_explanation": "English fit explanation from scoring.",
+            "reason": "English recommendation reason from scoring.",
+        }
+    ])
+
+    assert "This English abstract is real venue metadata" in content
+    assert "English fit explanation" in content
+    assert "English recommendation reason" in content
+    assert "翻译状态" not in content
+    assert "中文摘要待补" not in content
+    assert "fallback" not in content
+
 
 def test_markdown_contains_quality_labels_and_score_bonus_details():
     content = paper_markdown([
@@ -636,3 +673,44 @@ def test_icml_downloads_records_metadata_completeness_audit(monkeypatch):
     assert audit["official_title_index_verified"] is True
     assert audit["official_accepted_list_verified"] is True
     assert audit["has_abstracts"] is False
+
+
+def test_openreview_venue_preserves_official_primary_area(monkeypatch):
+    from auto_research.auto_find import sources
+
+    class Response:
+        def json(self):
+            return {
+                "notes": [
+                    {
+                        "id": "abc123",
+                        "forum": "abc123",
+                        "content": {
+                            "title": {"value": "Semantic Recommendation with LLM Preference Signals"},
+                            "authors": {"value": ["Alice Example", "Bob Example"]},
+                            "abstract": {"value": "This paper studies recommendation with language model preference signals."},
+                            "primary_area": {"value": "recommender systems"},
+                            "keywords": {"value": ["recommendation", "large language models"]},
+                            "venue": {"value": "ICLR 2026 Poster"},
+                            "venueid": {"value": "ICLR.cc/2026/Conference"},
+                        },
+                    }
+                ]
+            }
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(sources.requests, "get", lambda *_args, **_kwargs: Response())
+
+    papers = fetch_openreview_venue({"id": "openreview_iclr_2026", "name": "ICLR"}, [2026], 10)
+
+    assert papers[0]["primary_area"] == "recommender systems"
+    assert papers[0]["category"] == "recommender systems"
+    assert papers[0]["track"] == "ICLR 2026 Poster"
+    assert papers[0]["keywords"] == ["recommendation", "large language models"]
+    assert papers[0]["classification_source"] == "official"
+    audit = sources.venue_metadata_audit_from_papers(papers)
+    assert audit["has_official_categories"] is True
+    assert audit["category_status"] == "official_or_cached_categories"
+    assert audit["source_scope"] == "openreview_official_venue_notes"

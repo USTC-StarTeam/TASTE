@@ -2201,7 +2201,7 @@ def _llm_title_filter_scan_budget(config: AppConfig, scanned_count: int) -> int:
             400,
             recall_budget,
             detail_budget * 2,
-            min(default_cap, target * 50),
+            min(default_cap, target * 100),
         )
     return max(1, min(scanned_count, explicit))
 
@@ -2220,7 +2220,7 @@ def _title_detail_candidate_target(config: AppConfig, scanned_count: int) -> int
         target = _recommendation_target_hint(config)
         detail_budget = int(getattr(config, "detail_fetch_count", 0) or 0)
         recall_budget = _target_recall_count(config, scanned_count)
-        explicit = max(160, detail_budget, min(recall_budget, max(800, target * 12)))
+        explicit = max(240, detail_budget, min(recall_budget, max(1500, target * 60)))
     return max(1, min(scanned_count, explicit))
 
 
@@ -2881,6 +2881,10 @@ Rules:
             limit,
             _target_recall_count(config, len(scanned)),
             "llm",
+            category_filtered_count=len(items),
+            tfidf_screened_count=len(scanned),
+            title_score_input_count=len(scanned),
+            llm_title_scored_count=len(scored_rows),
         )
         log(f"{venue_name}: LLM title prefilter scored {len(scored_rows)} titles; retained {len(merged)} title-screened candidates for detail scoring from {len(scanned)} title-screened titles")
         return merged
@@ -2915,6 +2919,11 @@ Rules:
         limit,
         _target_recall_count(config, len(scanned)),
         "local_title_rank",
+        category_filtered_count=len(items),
+        tfidf_screened_count=len(ranked),
+        title_score_input_count=0,
+        llm_title_scored_count=0,
+        local_title_ranked_count=len(ranked),
     )
     log(f"{venue_name}: local title screen retained {len(recall_pool)} / {len(scanned)} candidates for detail scoring")
     return recall_pool
@@ -3019,6 +3028,107 @@ def _title_filter_prompt_context(group: dict) -> str:
 
 
 
+def _category_summary_from_title_index(venue: dict, years: list[int], papers: list[dict]) -> dict:
+    buckets: dict[str, dict[str, Any]] = {}
+    for paper in papers:
+        if not isinstance(paper, dict):
+            continue
+        category = _paper_category(paper)
+        if not category:
+            continue
+        bucket = buckets.setdefault(category, {"name": category, "count": 0, "sample_titles": [], "sample_keywords": []})
+        bucket["count"] += 1
+        title = str(paper.get("title") or "").strip()
+        if title and len(bucket["sample_titles"]) < 5:
+            bucket["sample_titles"].append(title)
+        for keyword in paper.get("keywords") or []:
+            text = str(keyword or "").strip()
+            if text and text not in bucket["sample_keywords"] and len(bucket["sample_keywords"]) < 20:
+                bucket["sample_keywords"].append(text)
+    entries = sorted(buckets.values(), key=lambda row: (-int(row.get("count") or 0), str(row.get("name") or "")))
+    return {
+        "venue_id": venue.get("id", ""),
+        "venue": venue.get("name", ""),
+        "year": years[0] if len(years) == 1 else ",".join(str(year) for year in years),
+        "paper_count": len(papers),
+        "category_summary": entries,
+    }
+
+
+
+def _public_category_selection(selection: dict | None) -> dict:
+    if not isinstance(selection, dict):
+        return {}
+    public: dict[str, Any] = {}
+    for key in (
+        "venue_id",
+        "venue",
+        "year",
+        "paper_count",
+        "category_count",
+        "selected_paper_count",
+        "selected_categories",
+        "rejected_categories",
+        "category_status",
+    ):
+        if key in selection:
+            public[key] = selection.get(key)
+    return public
+
+
+def _select_official_category_title_index(
+    venue: dict,
+    years: list[int],
+    papers: list[dict],
+    metadata_audit: dict,
+    config: AppConfig,
+    llm: LLMClient,
+    log: LogFn,
+) -> tuple[list[dict], list[dict]]:
+    if not papers or not _has_trusted_title_categories(papers, metadata_audit):
+        return papers, []
+    category_summary = _category_summary_from_title_index(venue, years, papers)
+    if not category_summary.get("category_summary"):
+        return papers, []
+    try:
+        max_categories = int(os.environ.get("VENUE_CATEGORY_SELECT_MAX", "0") or 0)
+    except Exception:
+        max_categories = 0
+    if max_categories <= 0:
+        max_categories = 8
+    selection = select_relevant_categories(category_summary, config, llm, max_categories=max_categories)
+    filtered = filter_papers_by_selected_categories(papers, selection)
+    used_all_categories_fallback = False
+    if not filtered and papers:
+        filtered = list(papers)
+        used_all_categories_fallback = True
+        selection = dict(selection)
+        selection["fallback_to_all_categories"] = True
+        selection["fallback_reason"] = "category selector returned 0 papers for a non-empty online venue-year"
+    report = {
+        "venue_id": venue.get("id", ""),
+        "venue": venue.get("name", ""),
+        "year": years[0] if len(years) == 1 else ",".join(str(year) for year in years),
+        "adapter": str(metadata_audit.get("adapter") or "online_venue"),
+        "total_papers": len(papers),
+        "selected_category_papers": len(filtered) if not used_all_categories_fallback else 0,
+        "corpus_audit_papers": len(papers),
+        "full_venue_corpus_audit": True,
+        "used_all_categories_fallback": used_all_categories_fallback,
+        "selection": _public_category_selection(selection),
+        "title_filter_input_papers": len(filtered),
+        "metadata_audit": metadata_audit,
+        **_venue_metadata_status_fields(metadata_audit),
+    }
+    selected_names = [item.get("name", "") for item in selection.get("selected_categories", [])]
+    if used_all_categories_fallback:
+        log(f"{venue.get('name', '')}: online category scan selected 0/{len(papers)} papers; using all {len(filtered)} papers for title screening because category selection returned none")
+    else:
+        log(f"{venue.get('name', '')}: online category scan selected {len(filtered)}/{len(papers)} papers from {len(selected_names)} official categories")
+    return filtered, [report]
+
+
+
 def _dynamic_title_prune(selected: list[dict], groups: list[dict], log: LogFn, venue_name: str) -> list[dict]:
     if not selected or not groups:
         return selected
@@ -3065,6 +3175,12 @@ def _append_title_filter_report(
     result_limit: int | None,
     recall_target: int,
     mode: str,
+    *,
+    category_filtered_count: int | None = None,
+    tfidf_screened_count: int | None = None,
+    title_score_input_count: int | None = None,
+    llm_title_scored_count: int = 0,
+    local_title_ranked_count: int = 0,
 ) -> None:
     if reports is None:
         return
@@ -3092,11 +3208,19 @@ def _append_title_filter_report(
             "llm_selected_scored": group.get("title_selected_scored", 0),
             "after_code_side_dynamic_pruning": group.get("after_dynamic_prune", 0),
         })
+    category_filtered_count = len(scanned) if category_filtered_count is None else int(category_filtered_count)
+    tfidf_screened_count = len(scanned) if tfidf_screened_count is None else int(tfidf_screened_count)
+    title_score_input_count = len(scanned) if title_score_input_count is None else int(title_score_input_count)
     reports.append({
         "venue": venue_name,
         "mode": mode,
-        "title_filter_input_papers": len(scanned),
+        "category_filtered_papers": category_filtered_count,
+        "tfidf_screened_papers": tfidf_screened_count,
+        "title_filter_input_papers": title_score_input_count,
+        "title_score_input_papers": title_score_input_count,
         "title_filter_batches": batch_count,
+        "llm_title_scored_papers": int(llm_title_scored_count or 0),
+        "local_title_ranked_papers": int(local_title_ranked_count or 0),
         "llm_selected_scored": selected_before_prune,
         "after_code_side_dynamic_pruning": selected_after_prune,
         "post_title_candidate_limit": result_limit,
@@ -3145,9 +3269,6 @@ def _load_local_category_guided_index(
                 "selected_paper_count": len(local["papers"]),
                 "selected_categories": [],
                 "rejected_categories": [],
-                "fallback_used": False,
-                "selection_mode": "complete_title_corpus_no_official_categories",
-                "llm_error": "",
                 "category_status": metadata_audit.get("category_status") or "no_official_categories",
             }
             filtered = list(local["papers"])
@@ -3175,7 +3296,7 @@ def _load_local_category_guided_index(
             "corpus_audit_papers": len(local["papers"]) if _full_venue_corpus_audit_enabled(config) else len(filtered),
             "full_venue_corpus_audit": _full_venue_corpus_audit_enabled(config),
             "used_all_categories_fallback": used_all_categories_fallback,
-            "selection": selection,
+            "selection": _public_category_selection(selection),
             "title_filter_input_papers": len(filtered),
             **_venue_metadata_status_fields(metadata_audit),
         })
@@ -3219,6 +3340,56 @@ def _release_block_reason(year: int, release_date: date | None) -> str:
     return f"{year} release date {release_date.isoformat() if release_date else 'unknown'} is after run date"
 
 
+def _resolve_latest_available_venue_years(
+    venue: dict,
+    years: list[int],
+    *,
+    max_backfill_years: int = 2,
+    as_of: date | None = None,
+) -> tuple[list[int], str]:
+    if not years:
+        return [], ""
+    cutoff = as_of or datetime.now(timezone.utc).date()
+    venue_name = str(venue.get("name") or venue.get("id") or "venue")
+    resolved: list[int] = []
+    reasons: list[str] = []
+    probe_cache: dict[int, tuple[bool, str]] = {}
+
+    def probe(candidate: int) -> tuple[bool, str]:
+        if candidate in probe_cache:
+            return probe_cache[candidate]
+        local = load_local_venue_year(venue, candidate)
+        if local and int(local.get("paper_count") or 0) > 0:
+            probe_cache[candidate] = (True, "local_database")
+            return probe_cache[candidate]
+        try:
+            titles, adapter = _fetch_venue_title_index_for_find(venue, [candidate], 1)
+        except Exception:
+            titles, adapter = [], "error"
+        probe_cache[candidate] = (bool(titles), adapter)
+        return probe_cache[candidate]
+
+    for requested in years:
+        future_release_notes: list[str] = []
+        for candidate in _venue_yewindow([requested], max_backfill_years=max_backfill_years):
+            released, release_date = _venue_yeis_released(venue, candidate, as_of=cutoff)
+            if candidate == requested and not released:
+                future_release_notes.append(_release_block_reason(candidate, release_date))
+            available, adapter = probe(candidate)
+            if not available:
+                continue
+            if candidate not in resolved:
+                resolved.append(candidate)
+            if candidate != requested:
+                prefix = f"requested years [{requested}] had no usable {venue_name} title index as of {cutoff.isoformat()}"
+                if future_release_notes:
+                    prefix = f"{prefix} ({'; '.join(future_release_notes)})"
+                suffix = f" via {adapter}" if adapter else ""
+                reasons.append(f"{prefix}; using latest available {venue_name} title index year {candidate}{suffix}.")
+            break
+    return resolved, " ".join(reasons)
+
+
 def _resolve_venue_years(
     venue: dict,
     requested_years: list[int],
@@ -3229,13 +3400,9 @@ def _resolve_venue_years(
     years = list(dict.fromkeys(int(year) for year in requested_years if str(year).isdigit()))
     if not allow_backfill:
         return years, ""
-    local_years: list[int] = []
-    for year in years:
-        local = load_local_venue_year(venue, year)
-        if local and int(local.get("paper_count") or 0) > 0:
-            local_years.append(year)
-    if local_years:
-        return local_years, ""
+    resolved_years, fallback_reason = _resolve_latest_available_venue_years(venue, years, as_of=as_of)
+    if resolved_years:
+        return resolved_years, fallback_reason
     return years, ""
 
 
@@ -3897,8 +4064,27 @@ def _recommendation_quality_audit(items: list[dict]) -> dict:
         "missing_real_abstract_ids": missing_real_abstract[:50],
         "missing_chinese_abstract_ids": missing_zh_abstract[:50],
         "short_or_negative_reason_ids": short_reason[:50],
-        "policy": "User-facing recommendations must come from the final title+abstract LLM score ranking, show a real abstract in Chinese or English fallback, and give a specific multi-sentence recommendation reason covering concrete title/abstract evidence, reusable method/data/protocol/theory/evaluation value, and limits requiring full-text reading. Topic/debug fields cannot create a second recommendation gate.",
+        "policy": "User-facing recommendations must come from the final title+abstract LLM score ranking, show a real abstract, complete Chinese abstracts before marking translation completed, and give a specific multi-sentence recommendation reason covering concrete title/abstract evidence, reusable method/data/protocol/theory/evaluation value, and limits requiring full-text reading. Topic/debug fields cannot create a second recommendation gate.",
     }
+
+
+def _missing_chinese_abstract_ids(items: list[dict]) -> list[str]:
+    rows = [item for item in items if isinstance(item, dict)]
+    return [
+        str(item.get("id") or item.get("title") or "")
+        for item in rows
+        if _clean_abstract_text(item.get("abstract_en") or item.get("abstract"))
+        and not str(item.get("abstract_zh") or "").strip()
+    ]
+
+
+def _recommendation_translation_status(items: list[dict], stored_status: str = "") -> str:
+    rows = [item for item in items if isinstance(item, dict)]
+    if _missing_chinese_abstract_ids(rows):
+        return "partial"
+    if any(_clean_abstract_text(item.get("abstract_en") or item.get("abstract")) for item in rows):
+        return "completed"
+    return str(stored_status or "not_needed")
 
 
 def _has_strong_topic_evidence(item: dict) -> bool:
@@ -3982,11 +4168,13 @@ def _mark_evidence_tier(item: dict) -> dict:
 
 def _recommendation_rank_key(item: dict) -> tuple:
     fit = _as_float(item.get("llm_fit_score"), item.get("fit_score"))
+    combined = _as_float(item.get("llm_combined_score"), item.get("combined_score"))
+    boundary_combined_tie = -round(combined / 0.01) * 0.01 if fit < 7.0 else 0.0
     return (
         -round(fit / 0.01) * 0.01,
+        boundary_combined_tie,
         str(item.get("title") or item.get("id") or item.get("url") or "").lower(),
     )
-
 
 
 def _find_recommendation_invalid_reason(item: dict, config: AppConfig | None) -> str:
@@ -4508,8 +4696,8 @@ Return:
     log(f"articles: translating {len(missing)} abstracts for Chinese UI in {len(prompts)} batches with {workers} workers; timeout={getattr(llm, 'timeout_sec', translation_timeout)}s; retries={getattr(llm, 'retries', 'n/a')}; temperature=0.0")
     progress("abstract_translation", 0, max(1, len(prompts)), f"articles: translating {len(missing)} abstracts for Chinese UI")
     try:
-        # Translation is a UI enhancement, not a science gate. Keep it bounded so a
-        # slow provider cannot block a completed Find run from syncing downstream.
+        # Translation is part of the user-facing Find packet quality. Keep each call bounded,
+        # then mark the packet partial if any final recommendation still lacks Chinese text.
         translation_wall_timeout = max(10, int(os.environ.get("TRANSLATE_ABSTRACT_WALL_TIMEOUT_SEC", str(translation_timeout + 5)) or (translation_timeout + 5)))
         results: list[dict] = []
         for batch_index, prompt in enumerate(prompts, 1):
@@ -4519,7 +4707,7 @@ Return:
         for batch_index, (batch, result) in enumerate(zip(prompt_batches, results, strict=False), 1):
             if not result.get("ok"):
                 log(f"articles: abstract translation batch failed: {str(result.get('error', ''))[:240]}")
-                progress("abstract_translation", batch_index, max(1, len(prompts)), f"articles: translation batch {batch_index}/{len(prompts)} failed; article.md will display the real English abstract fallback with a translation TODO")
+                progress("abstract_translation", batch_index, max(1, len(prompts)), f"articles: translation batch {batch_index}/{len(prompts)} failed; final translation status will remain partial until repaired")
                 continue
             data = result.get("data")
             rows = data.get("translations") if isinstance(data, dict) else []
@@ -4548,7 +4736,7 @@ Return:
             retry_items = remaining[:retry_limit]
             skipped = len(remaining) - len(retry_items)
             if skipped:
-                log(f"articles: skipped {skipped} untranslated abstract single retries; article.md will display the real English abstract fallback with a translation TODO")
+                log(f"articles: skipped {skipped} untranslated abstract single retries for non-visible rows; final recommendation rows stay prioritized")
             if retry_items:
                 log(f"articles: retrying {len(retry_items)}/{len(remaining)} untranslated abstracts singly")
             recovered = 0
@@ -4579,7 +4767,7 @@ or
                     single_prompt,
                     temperature=0.0,
                     max_tokens=int(os.environ.get("TRANSLATE_ABSTRACT_MAX_TOKENS", "7000") or 7000),
-                    timeout_sec=int(os.environ.get("TRANSLATE_ABSTRACT_WALL_TIMEOUT_SEC", "25") or 25),
+                    timeout_sec=max(translation_wall_timeout, int(os.environ.get("TRANSLATE_ABSTRACT_SINGLE_RETRY_TIMEOUT_SEC", "75") or 75)),
                 )
                 if not result.get("ok"):
                     log(f"articles: abstract translation single retry failed for {item.get('id')}: {str(result.get('error', ''))[:180]}")
@@ -4617,7 +4805,7 @@ or
         visible_missing_after = [item for item in missing_after if item.get("_user_visible_recommendation") or item.get("find_recommendation")]
         status = "completed" if not missing_after else "partial"
         if missing_after:
-            log(f"articles: {len(missing_after)}/{len(missing)} Chinese abstract translations still missing; article.md displays the real English abstract fallback with a translation TODO")
+            log(f"articles: {len(missing_after)}/{len(missing)} Chinese abstract translations still missing; final translation status remains partial until repaired")
         if visible_missing_after:
             log(f"articles: {len(visible_missing_after)} user-visible recommendation abstracts still miss Chinese translations after prioritized retries")
         log(f"articles: translated {translated}/{len(missing)} abstracts for Chinese UI; status={status}")
@@ -4672,17 +4860,36 @@ def _run_diagnostics(artifacts: dict) -> dict:
     source_raw_title_index_count = _sum(statuses, "raw_title_index_count")
     full_corpus_count = raw_title_index_count or venue_corpus_count or source_raw_title_index_count or _sum(category_rows, "total_papers")
     category_corpus_count = _sum(category_rows, "corpus_audit_papers") or _sum(category_rows, "total_papers")
+    title_filter_input_count = _sum(title_rows, "title_filter_input_papers") or _sum(category_rows, "title_filter_input_papers")
+    category_filtered_count = (
+        _sum(title_rows, "category_filtered_papers")
+        or _sum(category_rows, "title_filter_input_papers")
+        or _sum(category_rows, "selected_category_papers")
+        or title_filter_input_count
+        or full_corpus_count
+    )
+    tfidf_screened_count = _sum(title_rows, "tfidf_screened_papers") or title_filter_input_count or category_filtered_count
+    title_score_input_count = _sum(title_rows, "title_score_input_papers") or title_filter_input_count
+    llm_title_scored_count = _sum(title_rows, "llm_title_scored_papers")
+    final_title_candidates_count = _sum(title_rows, "final_title_candidates") or len(retrieval_candidates)
 
     survey_stats = {
         "raw_title_index_papers": full_corpus_count,
+        "title_total_papers": full_corpus_count,
         "venue_total_papers_available": full_corpus_count,
         "venue_corpus_audited_papers": full_corpus_count,
         "category_corpus_audited_papers": category_corpus_count,
+        "category_filtered_papers": category_filtered_count,
         "venue_category_selected_papers": _sum(category_rows, "selected_category_papers"),
-        "venue_title_filter_input_papers": _sum(title_rows, "title_filter_input_papers") or _sum(category_rows, "title_filter_input_papers"),
-        "venue_final_title_candidates": _sum(title_rows, "final_title_candidates") or len(retrieval_candidates),
+        "tfidf_screened_papers": tfidf_screened_count,
+        "venue_title_filter_input_papers": title_filter_input_count,
+        "title_score_input_papers": title_score_input_count,
+        "llm_title_scored_papers": llm_title_scored_count,
+        "venue_final_title_candidates": final_title_candidates_count,
+        "abstract_scored_papers": llm_scored_count,
         "venue_detail_fetched_candidates": len(evaluated),
         "llm_scored_candidates": llm_scored_count,
+        "recommended_papers": len(strong),
         "abstract_fetch_failed_candidates": abstract_fetch_failed_count,
         "category_scan_reports": len(category_rows),
         "title_filter_reports": len(title_rows),
@@ -5024,6 +5231,26 @@ def run_find(
     last_progress_write: dict[str, float] = {"time": 0.0}
 
     def _find_progress_payload(phase: str, extra: dict | None = None) -> dict:
+        def _report_sum(key: str) -> int:
+            total = 0
+            for row in title_filter_report:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    total += int(row.get(key) or 0)
+                except (TypeError, ValueError):
+                    pass
+            return total
+
+        deduped_raw = len(_dedupe_items(raw_title_index))
+        deduped_titles = len(_dedupe_items(title_candidates))
+        deduped_venue_papers = len(_dedupe_items(venue_papers))
+        deduped_evaluated = _dedupe_items(evaluated_candidates)
+        llm_scored = sum(1 for item in deduped_evaluated if isinstance(item, dict) and str(item.get("reason_source") or "") == "llm abstract evaluation")
+        category_filtered = _report_sum("category_filtered_papers") or _report_sum("title_filter_input_papers") or deduped_raw
+        tfidf_screened = _report_sum("tfidf_screened_papers") or category_filtered
+        title_score_input = _report_sum("title_score_input_papers")
+        llm_title_scored = _report_sum("llm_title_scored_papers")
         progress_payload = {
             "run_id": run_id,
             "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -5032,13 +5259,21 @@ def run_find(
             "venue_health_report": venue_health_report,
             "source_status": _venue_source_status_rows(),
             "counts": {
-                "raw_title_index": len(_dedupe_items(raw_title_index)),
-                "title_candidates": len(_dedupe_items(title_candidates)),
-                "detail_fetched": len(_dedupe_items(venue_papers)),
-                "evaluated_candidates": len(_dedupe_items(evaluated_candidates)),
-                "llm_scored_candidates": sum(1 for item in _dedupe_items(evaluated_candidates) if isinstance(item, dict) and str(item.get("reason_source") or "") == "llm abstract evaluation"),
-                "abstract_fetch_failed_candidates": sum(1 for item in _dedupe_items(evaluated_candidates) if isinstance(item, dict) and item.get("abstract_fetch_failed")),
-                "final_llm_scoring_skipped_candidates": sum(1 for item in _dedupe_items(evaluated_candidates) if isinstance(item, dict) and item.get("llm_final_scoring_skipped")),
+                "raw_title_index": deduped_raw,
+                "raw_title_index_papers": deduped_raw,
+                "title_total_papers": deduped_raw,
+                "category_filtered_papers": category_filtered,
+                "tfidf_screened_papers": tfidf_screened,
+                "title_score_input_papers": title_score_input,
+                "llm_title_scored_papers": llm_title_scored,
+                "title_candidates": deduped_titles,
+                "venue_final_title_candidates": deduped_titles,
+                "detail_fetched": deduped_venue_papers,
+                "evaluated_candidates": len(deduped_evaluated),
+                "abstract_scored_papers": llm_scored,
+                "llm_scored_candidates": llm_scored,
+                "abstract_fetch_failed_candidates": sum(1 for item in deduped_evaluated if isinstance(item, dict) and item.get("abstract_fetch_failed")),
+                "final_llm_scoring_skipped_candidates": sum(1 for item in deduped_evaluated if isinstance(item, dict) and item.get("llm_final_scoring_skipped")),
             },
         }
         if extra:
@@ -5057,7 +5292,7 @@ def run_find(
     def _progress(phase: str, current: int, total: int, message: str) -> None:
         progress(phase, current, total, message)
         live_phases = {
-            "venue_title_index", "title_prefilter", "detail_fetch", "detail_enrichment",
+            "venue_title_index", "title_prefilter", "llm_title_filter", "detail_fetch", "detail_enrichment",
             "nature_detail_enrichment", "science_detail_enrichment", "arxiv", "biorxiv",
             "nature", "science", "huggingface", "github", "abstract_scoring",
             "abstract_translation", "abstract_translation_retry", "final_ranking_prepare",
@@ -5100,6 +5335,7 @@ def run_find(
                 "error": "Unknown venue id.",
                 "suggested_fix": "Add this venue to catalog/custom_venues.json or choose a supported venue id.",
             })
+            _persist_find_progress("venue_title_index")
             continue
         effective_years, year_fallback_reason = _resolve_venue_years(venue, requested_years)
         if year_fallback_reason:
@@ -5112,6 +5348,11 @@ def run_find(
                 titles = _mock_offline_venue_title_index(venue, effective_years, title_scan_limit or 100000)
                 adapter = "mock_offline"
             metadata_audit = _online_venue_metadata_audit(titles, adapter)
+            title_corpus_index = list(titles)
+            online_category_reports: list[dict] = []
+            if titles:
+                titles, online_category_reports = _select_official_category_title_index(venue, effective_years, title_corpus_index, metadata_audit, effective_config, llm, log)
+                category_scan_report.extend(online_category_reports)
             metadata_fields = _venue_metadata_status_fields(metadata_audit)
             metadata_limited = bool(metadata_fields.get("metadata_completeness_limited"))
             source_error = "" if titles else "No papers fetched."
@@ -5125,18 +5366,21 @@ def run_find(
                 "effective_years": effective_years,
                 "year_fallback_reason": year_fallback_reason,
                 "adapter": adapter,
-                "sample_count": len(titles),
+                "sample_count": len(title_corpus_index),
                 "candidate_count": len(titles),
-                "corpus_count": len(titles),
+                "corpus_count": len(title_corpus_index),
                 "ok": bool(titles),
                 "limited": metadata_limited,
                 "error": source_error,
                 "suggested_fix": "" if titles and not metadata_limited else ("Venue/year metadata source is partial; repair the source adapter or build a verified local database before treating it as a complete Find corpus." if titles else "Check OpenReview/DBLP venue id."),
                 **metadata_fields,
             })
+            _persist_find_progress("venue_title_index")
             if not titles:
                 continue
-            raw_title_index.extend(titles)
+            raw_title_index.extend(title_corpus_index)
+            _persist_find_progress("venue_title_index")
+            trusted_categories = _has_trusted_title_categories(titles, metadata_audit)
             selected_titles = _prefilter_titles(
                 titles,
                 effective_config,
@@ -5145,7 +5389,7 @@ def run_find(
                 log,
                 should_cancel,
                 _progress,
-                dynamic_title_filter=True,
+                dynamic_title_filter=trusted_categories,
                 result_limit=_venue_recall_result_limit(config, len(titles)),
                 scan_all=True,
                 title_filter_reports=title_filter_report,
@@ -5181,8 +5425,12 @@ def run_find(
             if not title_index and str(getattr(config, "provider", "")).lower() == "mock":
                 title_index = _mock_offline_venue_title_index(venue, effective_years, title_scan_limit or 100000)
                 adapter = "mock_offline"
-            title_corpus_index = title_index
+            title_corpus_index = list(title_index)
             venue_metadata_audit = _online_venue_metadata_audit(title_corpus_index, adapter)
+            online_category_reports: list[dict] = []
+            if title_index:
+                title_index, online_category_reports = _select_official_category_title_index(venue, effective_years, title_corpus_index, venue_metadata_audit, effective_config, llm, log)
+                category_scan_report.extend(online_category_reports)
             if not title_index:
                 year_fallback_reason = f"requested years {requested_years} had no usable papers via {adapter}; no fallback year was used"
                 log(f"{venue.get('name')}: {year_fallback_reason}")
@@ -5209,11 +5457,13 @@ def run_find(
             "suggested_fix": "" if title_index and not metadata_limited else ("Venue/year metadata source is partial; repair the source adapter or build a verified local database before treating it as a complete Find corpus." if title_index else "High-priority venue may need a dedicated proceedings adapter, verified selected-year cache, or an explicitly selected different year."),
             **metadata_fields,
         })
+        _persist_find_progress("venue_title_index")
         if not title_index:
             log(f"{venue.get('name')}: no title index found via {adapter}")
             continue
         log(f"{venue.get('name')}: fetched {len(title_corpus_index)} corpus rows via {adapter}; {len(title_index)} rows enter category/title screening")
         raw_title_index.extend(title_corpus_index)
+        _persist_find_progress("venue_title_index")
         trusted_categories = _has_trusted_title_categories(title_index, venue_metadata_audit)
         selected_titles = _prefilter_titles(
             title_index,
@@ -5223,7 +5473,7 @@ def run_find(
             log,
             should_cancel,
             _progress,
-            dynamic_title_filter=adapter == "local_database" and trusted_categories,
+            dynamic_title_filter=trusted_categories,
             result_limit=_venue_recall_result_limit(config, len(title_index)),
             scan_all=adapter == "local_database",
             title_filter_reports=title_filter_report,
@@ -5621,8 +5871,8 @@ def run_find(
         update_manifest(run_dir, "find")
 
     # Persist real Find evidence and human-readable artifacts before Chinese UI
-    # translation. Translation is useful for review, but it must never block the
-    # job from exposing scored recommendations and audit pools.
+    # translation. The final packet below recomputes translation status from the
+    # actual recommendation rows before it can be marked complete.
     preliminary_artifacts = _build_find_artifacts("pending")
     _write_find_outputs(preliminary_artifacts)
     _persist_find_progress("preliminary_artifacts_written", {"abstract_translation_status": "pending", "strong_recommendation_count": len(strong_recommendations), "strict_strong_anchor_count": len(strong_recommendations), "recommendation_target_count": _strong_recommendation_target_count(config, source_count), "recommendation_shortfall": max(0, _strong_recommendation_target_count(config, source_count) - len(strong_recommendations)), "recommendation_policy": FIND_RECOMMENDATION_POLICY})
@@ -5641,7 +5891,12 @@ def run_find(
             translation_status = str(translation_result.get("status") or translation_status)
     except Exception as exc:
         translation_status = "pending"
-        log(f"articles: abstract translation failed/skipped without blocking Find completion; keeping preliminary pending translation status: {str(exc)[:240]}")
+        log(f"articles: abstract translation failed; final translation status will be recomputed from recommendation rows: {str(exc)[:240]}")
+
+    translation_status = _recommendation_translation_status(article_items, translation_status)
+    missing_translation_ids = _missing_chinese_abstract_ids(article_items)
+    if missing_translation_ids:
+        log(f"articles: final Find packet has {len(missing_translation_ids)} recommendation abstracts without Chinese translation; marking abstract_translation_status=partial")
 
     artifacts = _build_find_artifacts(translation_status)
     _write_find_outputs(artifacts)

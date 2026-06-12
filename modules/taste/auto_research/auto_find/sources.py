@@ -908,6 +908,63 @@ def _content_list(content: dict, key: str) -> list[str]:
     return []
 
 
+def _content_first_value(content: dict, keys: list[str]) -> str:
+    for key in keys:
+        value = _content_value(content, key).strip()
+        if value:
+            return value
+    lowered = {str(key).lower().replace(" ", "_"): key for key in content.keys()}
+    for key in keys:
+        actual = lowered.get(str(key).lower().replace(" ", "_"))
+        if actual:
+            value = _content_value(content, actual).strip()
+            if value:
+                return value
+    return ""
+
+
+def _content_first_list(content: dict, keys: list[str]) -> list[str]:
+    for key in keys:
+        values = [item.strip() for item in _content_list(content, key) if item.strip()]
+        if values:
+            return values
+    lowered = {str(key).lower().replace(" ", "_"): key for key in content.keys()}
+    for key in keys:
+        actual = lowered.get(str(key).lower().replace(" ", "_"))
+        if actual:
+            values = [item.strip() for item in _content_list(content, actual) if item.strip()]
+            if values:
+                return values
+    return []
+
+
+def _attach_openreview_metadata_audit(papers: list[dict], venue_ids: list[str], years: list[int]) -> list[dict]:
+    missing_abstracts = sum(1 for paper in papers if not str(paper.get("abstract") or "").strip())
+    has_categories = any(str(paper.get("classification_source") or "").lower() == "official" and (paper.get("primary_area") or paper.get("category")) for paper in papers)
+    audit = _venue_metadata_audit(
+        status="partial",
+        title_index_completeness_status="partial",
+        source_verified=bool(papers),
+        complete=False,
+        title_index_complete=False,
+        official_metadata_complete=bool(papers),
+        adapter="openreview",
+        openreview_venueids=list(dict.fromkeys(venue_ids)),
+        requested_years=list(dict.fromkeys(int(year) for year in years)),
+        paper_count=len(papers),
+        missing_abstract_count=missing_abstracts,
+        has_abstracts=bool(papers) and missing_abstracts == 0,
+        any_abstracts=bool(papers) and missing_abstracts < len(papers),
+        has_official_categories=has_categories,
+        category_status="official_or_cached_categories" if has_categories else "no_official_categories",
+        source_scope="openreview_official_venue_notes",
+        official_title_index_verified=True,
+        official_accepted_list_verified=True,
+        completeness_basis="OpenReview official venue notes were fetched and title/abstract/category metadata was parsed; source remains partial until an adapter-level total-count audit verifies every record.",
+    )
+    return _attach_venue_metadata_audit(papers, audit)
+
+
 def _openreview_notes_paginated(url: str, base_params: dict[str, object], max_items: int) -> list[dict]:
     try:
         requested = int(max_items or 0)
@@ -979,6 +1036,11 @@ def fetch_openreview_venue(venue: dict, years: list[int], max_items: int) -> lis
                 note_id = note.get("id", "")
                 forum = note.get("forum", note_id)
                 url = f"https://openreview.net/forum?id={forum or note_id}"
+                primary_area = _content_first_value(content, ["primary_area", "Primary Area", "area", "Area", "subject_area", "Subject Area"])
+                category = primary_area or _content_first_value(content, ["category", "Category", "subject", "Subject"])
+                track = _content_first_value(content, ["track", "Track", "venue", "Venue"])
+                keywords = _content_first_list(content, ["keywords", "Keywords", "keyword", "Keyword"])
+                classification_source = "official" if category or track or keywords else "llm_inferred"
                 papers.append({
                     "id": stable_id("paper", url),
                     "source": "openreview",
@@ -989,13 +1051,23 @@ def fetch_openreview_venue(venue: dict, years: list[int], max_items: int) -> lis
                     "pdf_url": f"https://openreview.net/pdf?id={note_id}" if note_id else "",
                     "venue": venue.get("name", ""),
                     "year": year,
-                    "category": "",
-                    "classification_source": "llm_inferred",
-                    "metadata": {"venue_id": venue.get("id"), "openreview_venueid": venue_id},
+                    "primary_area": primary_area,
+                    "category": category,
+                    "track": track,
+                    "keywords": keywords,
+                    "classification_source": classification_source,
+                    "metadata": {
+                        "venue_id": venue.get("id"),
+                        "openreview_venueid": venue_id,
+                        "primary_area": primary_area,
+                        "category": category,
+                        "track": track,
+                        "keywords": keywords,
+                    },
                 })
                 if len(papers) >= max_items:
-                    return papers
-    return papers
+                    return _attach_openreview_metadata_audit(papers, list(queried_venue_ids), years)
+    return _attach_openreview_metadata_audit(papers, list(queried_venue_ids), years) if papers else papers
 
 def fetch_cvf_openaccess(venue: dict, years: list[int], max_items: int) -> list[dict]:
     papers: list[dict] = []

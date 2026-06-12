@@ -47,11 +47,15 @@ def _compact_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 CATEGORY_SELECT_TEMPERATURE = 0.0
 
 
-def _use_llm_category_select() -> bool:
-    value = os.environ.get("USE_LLM_CATEGORY_SELECT")
-    if value is None:
+def _use_llm_category_select(config: AppConfig | None = None) -> bool:
+    disabled = os.environ.get("DISABLE_LLM_CATEGORY_SELECT")
+    if disabled is not None and disabled.lower() in {"1", "true", "yes", "on"}:
         return False
-    return value.lower() in {"1", "true", "yes", "on", "force"}
+    value = os.environ.get("USE_LLM_CATEGORY_SELECT")
+    if value is not None:
+        return value.lower() in {"1", "true", "yes", "on", "force"}
+    provider = str(getattr(config, "provider", "") or "").lower()
+    return provider not in {"", "mock"}
 
 
 def _json_or_none(llm: LLMClient, prompt: str, *, temperature: float | None = None) -> Any | None:
@@ -143,7 +147,7 @@ def select_relevant_categories(
     llm_error = ""
     selection_mode = "deterministic_adaptive_profile_recall"
 
-    if _use_llm_category_select() and llm.enabled and interest and entries:
+    if _use_llm_category_select(config) and llm.enabled and interest and entries:
         prompt = f"""
 You select venue categories for a targeted academic paper scan.
 
