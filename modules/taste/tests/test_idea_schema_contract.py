@@ -3520,6 +3520,25 @@ def test_full_cycle_and_autonomous_require_exactly_one_selected_plan_contract():
     assert run_autonomous_research.selected_plan_contract_ready({"required": False})
 
 
+def test_full_cycle_blocks_incomplete_ideation_before_autonomous_research():
+    import importlib.util
+
+    full_spec = importlib.util.spec_from_file_location("run_full_research_cycle", SCRIPTS / "run_full_research_cycle.py")
+    run_full_research_cycle = importlib.util.module_from_spec(full_spec)
+    assert full_spec and full_spec.loader
+    full_spec.loader.exec_module(run_full_research_cycle)
+
+    assert run_full_research_cycle.claude_ideation_block_status({"status": "completed"}) == ""
+    assert run_full_research_cycle.claude_ideation_block_status({"status": "success"}) == ""
+    assert run_full_research_cycle.claude_ideation_block_status({"status": "blocked_tool_policy"}) == "blocked_tool_policy"
+    assert run_full_research_cycle.claude_ideation_block_status({"status": "failed"}) == "failed"
+    assert run_full_research_cycle.claude_ideation_block_status(None) == "failed"
+
+    source = (SCRIPTS / "run_full_research_cycle.py").read_text(encoding="utf-8")
+    assert source.index("ideation_block_status = claude_ideation_block_status") < source.index("run_autonomous_research.py")
+    assert "TASTE must stop before autonomous research" in source
+
+
 
 
 def _ready_three_part_idea(idx: int) -> dict:

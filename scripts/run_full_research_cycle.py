@@ -217,6 +217,18 @@ def safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+CLAUDE_IDEATION_COMPLETED_STATUSES = {"completed", "success", "ok"}
+
+
+def claude_ideation_block_status(result: Any) -> str:
+    if not isinstance(result, dict):
+        return "failed"
+    status = str(result.get("status") or "").strip().lower()
+    if not status or status in CLAUDE_IDEATION_COMPLETED_STATUSES:
+        return ""
+    return status
+
+
 CURRENT_FIND_FULL_TEXT_POLICY_VERSION = "full_text_required_v5_detailed_deep_read"
 
 
@@ -3896,6 +3908,64 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
             self.state["current_goal"] = "selected-base route guard restored trusted route; restart full cycle from current selected-base context"
             self.state["continuation_required"] = True
             self.state["continuation_reason"] = "selected-base route overwrite blocked"
+            self.state["paper_pipeline_skipped"] = True
+            self.state["paper_pipeline_skipped_reason"] = gate["paper_pipeline_skipped_reason"]
+            self.save()
+            return cycle
+
+        ideation_block_status = claude_ideation_block_status(idea_result)
+        if ideation_block_status:
+            pdf_after = self.latest_pdf_fingerprint()
+            gate = self.gate_snapshot()
+            gate["pdf_before"] = pdf_before
+            gate["pdf_after"] = pdf_after
+            gate["pdf_changed_this_cycle"] = self.pdf_changed(pdf_before, pdf_after)
+            gate["paper_pipeline_skipped"] = True
+            gate["paper_pipeline_skipped_reason"] = "full-cycle ideation did not complete cleanly; autonomous experiment execution is blocked"
+            tool_guard = idea_result.get("tool_policy_guard") if isinstance(idea_result.get("tool_policy_guard"), dict) else {}
+            if ideation_block_status == "blocked_tool_policy":
+                issue = "Full-cycle ideation was blocked by the Claude tool policy guard; TASTE must stop before autonomous research instead of continuing from an old selected plan."
+                state_status = "blocked_tool_policy"
+                current_goal = "full-cycle ideation was blocked by tool policy; repair the prompt/tool path before autonomous research"
+                continuation_reason = str(tool_guard.get("reason") or "Claude tool policy blocked the ideation turn")
+            else:
+                issue = f"Full-cycle ideation ended with status={ideation_block_status}; TASTE cannot safely enter autonomous research without a completed ideation decision."
+                state_status = "blocked_full_cycle_ideation"
+                current_goal = "full-cycle ideation did not complete; repair ideation before autonomous research"
+                continuation_reason = issue
+            blockers = [
+                {
+                    "category": "full_cycle_ideation",
+                    "severity": "block",
+                    "issue": issue,
+                    "evidence": [
+                        str(self.paths.state / "full_cycle_prompt_full-cycle-ideation.md"),
+                        str(self.paths.state / "claude_project_session_last_result.json"),
+                        str(self.paths.state / "selected_base_route_guard.json"),
+                    ],
+                    "next_action": "Repair the ideation/tool-policy path and rerun full-cycle from the web UI; do not launch autonomous research until ideation completes or records an explicit scientific blocker.",
+                    "ideation_status": ideation_block_status,
+                    "tool_policy_guard": tool_guard,
+                }
+            ]
+            cycle.update(
+                {
+                    "finished_at": now_iso(),
+                    "status": state_status,
+                    "gate": gate,
+                    "blockers": blockers,
+                    "pdf_after": pdf_after,
+                    "pdf_changed": gate["pdf_changed_this_cycle"],
+                    "paper_pipeline_skipped": True,
+                }
+            )
+            self.state["latest_gate"] = gate
+            self.state["latest_blockers"] = blockers
+            self.state["latest_pdf_info"] = pdf_after
+            self.state["status"] = state_status
+            self.state["current_goal"] = current_goal
+            self.state["continuation_required"] = True
+            self.state["continuation_reason"] = continuation_reason
             self.state["paper_pipeline_skipped"] = True
             self.state["paper_pipeline_skipped_reason"] = gate["paper_pipeline_skipped_reason"]
             self.save()
