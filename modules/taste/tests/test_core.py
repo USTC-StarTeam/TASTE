@@ -125,8 +125,8 @@ def test_markdown_hides_internal_recommendation_debug_fields():
         }
     ])
     assert "- **方法/主题类别**: LLM" in content
-    assert "论文页面" not in content
-    assert "https://example.com" not in content
+    assert "- **链接**:" in content
+    assert "[论文页](https://example.com)" in content
     assert "llm_inferred" not in content
     assert "- **ID**" not in content
     assert "Fit 分数" not in content
@@ -168,6 +168,34 @@ def test_markdown_hides_translation_fallback_status_lines():
     assert "翻译状态" not in content
     assert "中文摘要待补" not in content
     assert "fallback" not in content
+
+
+def test_markdown_renders_paper_links_from_metadata():
+    content = paper_markdown([
+        {
+            "id": "p1",
+            "title": "Linked Paper",
+            "source": "dblp",
+            "venue": "SIGKDD",
+            "year": 2026,
+            "abstract": "This paper has a real abstract with enough detail for recommendation display.",
+            "reason": "Useful recommendation reason.",
+            "metadata": {
+                "doi": "10.1145/3770854.3780297",
+                "acm_abs_url": "https://dl.acm.org/doi/abs/10.1145/3770854.3780297",
+                "acm_pdf_url": "https://dl.acm.org/doi/pdf/10.1145/3770854.3780297",
+                "acm_full_html_url": "https://dl.acm.org/doi/fullHtml/10.1145/3770854.3780297",
+                "dblp_record_url": "https://dblp.org/rec/conf/kdd/LvGTSZY26",
+            },
+        }
+    ])
+
+    assert "- **链接**:" in content
+    assert "[ACM](https://dl.acm.org/doi/abs/10.1145/3770854.3780297)" in content
+    assert "[PDF](https://dl.acm.org/doi/pdf/10.1145/3770854.3780297)" in content
+    assert "[HTML](https://dl.acm.org/doi/fullHtml/10.1145/3770854.3780297)" in content
+    assert "[DBLP](https://dblp.org/rec/conf/kdd/LvGTSZY26)" in content
+    assert "[DOI](https://doi.org/10.1145/3770854.3780297)" in content
 
 
 def test_markdown_contains_quality_labels_and_score_bonus_details():

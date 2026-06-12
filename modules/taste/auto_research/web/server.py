@@ -2349,13 +2349,29 @@ def _artifact_compact_paper_row(row: Any) -> dict[str, Any]:
     if not isinstance(row, dict):
         return {}
     keys = [
-        "id", "title", "venue", "venue_id", "year", "url", "pdf_url",
+        "id", "title", "venue", "venue_id", "year", "doi", "url", "pdf_url",
         "fit_score", "llm_fit_score", "diversity_score", "score", "recommendation_score", "recommendation_score_v2",
         "taste_pool", "taste_pool_role", "hit_directions", "hit_directions_zh", "hit_directions_en",
         "abstract", "abstract_zh", "abstract_en",
         "reason", "reason_zh", "reason_en", "fit_explanation", "fit_explanation_zh", "fit_explanation_en",
     ]
     out = {key: row.get(key) for key in keys if key in row}
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    doi = str(row.get("doi") or metadata.get("doi") or "").strip()
+    if doi:
+        out.setdefault("doi", doi)
+    if not str(out.get("url") or "").strip():
+        for key in ["url", "doi_url", "publisher_url", "acm_abs_url", "dblp_record_url"]:
+            value = str(row.get(key) or metadata.get(key) or "").strip()
+            if value:
+                out["url"] = value
+                break
+    if not str(out.get("pdf_url") or "").strip():
+        for key in ["pdf_url", "acm_pdf_url", "acm_epdf_url", "open_access_pdf_url"]:
+            value = str(row.get(key) or metadata.get(key) or "").strip()
+            if value:
+                out["pdf_url"] = value
+                break
     for key in ["abstract", "abstract_zh", "abstract_en", "reason", "reason_zh", "reason_en", "fit_explanation", "fit_explanation_zh", "fit_explanation_en", "recommendation_note", "recommendation_note_zh", "recommendation_note_en"]:
         if key in out:
             out[key] = _artifact_compact_text(out[key], 650)

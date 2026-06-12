@@ -215,10 +215,28 @@ function isFallbackPaper(paper: any) {
   return source.startsWith("adaptive profile");
 }
 
+function normalizedMetadataText(value: any) {
+  return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function paperTldrText(paper: any) {
+  const metadata = paper?.metadata && typeof paper.metadata === "object" ? paper.metadata : {};
+  const raw = metadata.tldr || paper?.tldr;
+  if (raw && typeof raw === "object") return normalizedMetadataText(raw.text);
+  return normalizedMetadataText(raw);
+}
+
 function hasRealPaperAbstract(paper: any) {
-  const abstract = String(paper?.abstract_en || paper?.abstract || "").trim().toLowerCase();
+  const abstractText = String(paper?.abstract_en || paper?.abstract || "").trim();
+  const abstract = normalizedMetadataText(abstractText);
   const normalized = abstract.replace(/\.$/, "");
-  return Boolean(abstract && !["no abstract available", "abstract not available", "n/a", "none", "null"].includes(normalized));
+  if (!abstract || ["no abstract available", "abstract not available", "n/a", "none", "null"].includes(normalized)) return false;
+  const metadata = paper?.metadata && typeof paper.metadata === "object" ? paper.metadata : {};
+  const abstractSource = String(metadata.abstract_source || paper?.abstract_source || "").toLowerCase();
+  if (abstractSource.includes("tldr")) return false;
+  const tldr = paperTldrText(paper);
+  if (tldr && abstract === tldr) return false;
+  return true;
 }
 
 function isFinalFindRecommendationPaper(paper: any) {

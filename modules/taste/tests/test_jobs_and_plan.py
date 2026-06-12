@@ -3356,6 +3356,21 @@ def test_human_find_recommendation_requires_final_llm_contract():
 
 
 
+def test_web_literature_gate_rejects_semantic_tldr_only_abstract():
+    from auto_research.web import project_bridge
+
+    tldr = "This long Semantic Scholar TLDR summary should remain auxiliary metadata, not a real abstract for recommendations."
+    row = {
+        **recommended_paper("paper-tldr", "TLDR Only Paper"),
+        "abstract": tldr,
+        "abstract_en": tldr,
+        "abstract_zh": "",
+        "metadata": {"abstract_source": "semantic_scholar_doi_tldr", "tldr": tldr},
+    }
+
+    assert project_bridge._human_find_recommendation_literature_row(row) is False
+
+
 def test_new_find_guard_allows_audited_human_web_restart_for_shortfall(tmp_path, monkeypatch):
     project = "demo_project"
     root = tmp_path / "projects" / project

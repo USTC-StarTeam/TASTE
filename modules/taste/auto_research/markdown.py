@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from typing import Iterable
 
 
@@ -187,12 +189,68 @@ def _optional_metadata_lines(paper: dict) -> list[str]:
         lines.append(f"- **质量标签**: {', '.join(labels)}")
     return lines
 
+
+def _metadata_dict(paper: dict) -> dict:
+    return paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}
+
+
+def _clean_link_url(value: object) -> str:
+    text = str(value or "").strip().rstrip(".,);]")
+    if not text.startswith(("http://", "https://")):
+        return ""
+    return text
+
+
+def _paper_doi(paper: dict) -> str:
+    metadata = _metadata_dict(paper)
+    doi = str(paper.get("doi") or metadata.get("doi") or "").strip()
+    if doi:
+        return doi
+    for key in ["url", "pdf_url", "doi_url", "publisher_url", "acm_abs_url"]:
+        value = str(paper.get(key) or metadata.get(key) or "")
+        match = re.search(r'10\.\d{4,9}/[^\s"<>]+', value)
+        if match:
+            return match.group(0).rstrip(".,);]")
+    return ""
+
+
+def _doi_url(doi: str) -> str:
+    return f"https://doi.org/{doi}" if doi else ""
+
+
+def _append_link(parts: list[str], seen: set[str], label: str, url: str) -> None:
+    clean = _clean_link_url(url)
+    if not clean or clean in seen:
+        return
+    seen.add(clean)
+    parts.append(f"[{label}]({clean})")
+
+
+def _paper_link_line(paper: dict) -> str:
+    metadata = _metadata_dict(paper)
+    parts: list[str] = []
+    seen: set[str] = set()
+    doi = _paper_doi(paper)
+    main_url = _clean_link_url(paper.get("url") or metadata.get("url") or metadata.get("publisher_url") or _doi_url(doi))
+    main_label = "DOI" if main_url and "doi.org/" in main_url else "论文页"
+    _append_link(parts, seen, main_label, main_url)
+    _append_link(parts, seen, "ACM", metadata.get("acm_abs_url") or "")
+    _append_link(parts, seen, "PDF", paper.get("pdf_url") or metadata.get("acm_pdf_url") or metadata.get("acm_epdf_url") or "")
+    _append_link(parts, seen, "HTML", metadata.get("acm_full_html_url") or "")
+    _append_link(parts, seen, "DBLP", metadata.get("dblp_record_url") or "")
+    doi_link = _doi_url(doi)
+    if doi_link:
+        _append_link(parts, seen, "DOI", doi_link)
+    return f"- **链接**: {' / '.join(parts)}" if parts else ""
+
+
 def _paper_brief_metadata_lines(paper: dict) -> list[str]:
     lines: list[str] = []
     source = str(paper.get("source") or "").strip()
     venue_year = " ".join(str(paper.get(key) or "").strip() for key in ("venue", "year")).strip()
     category = str(paper.get("category") or "").strip()
     hit_text = _paper_zh_hits(paper)
+    link_line = _paper_link_line(paper)
     if venue_year:
         lines.append(f"- **会议/年份**: {venue_year}")
     if source:
@@ -201,6 +259,8 @@ def _paper_brief_metadata_lines(paper: dict) -> list[str]:
         lines.append(f"- **方法/主题类别**: {category}")
     if hit_text:
         lines.append(f"- **命中方向**: {hit_text}")
+    if link_line:
+        lines.append(link_line)
     lines.extend(_optional_metadata_lines(paper))
     return lines
 

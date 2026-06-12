@@ -1402,6 +1402,50 @@ def test_openalex_title_fallback_rejects_same_title_with_wrong_authors(monkeypat
     assert papers[0]["metadata"] == {}
 
 
+def test_semantic_scholar_tldr_is_not_promoted_to_abstract(monkeypatch, tmp_path):
+    cache_path = tmp_path / "semantic_cache.json"
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "title": "TLDR Only Paper",
+                "abstract": None,
+                "url": "https://semanticscholar.org/paper/tldr-only",
+                "openAccessPdf": {"url": "https://example.test/tldr-only.pdf"},
+                "tldr": {"text": "This is only a Semantic Scholar TLDR summary, not the publisher abstract."},
+            }
+
+    def fake_get(url, headers=None, timeout=12):
+        calls.append(url)
+        return FakeResponse()
+
+    monkeypatch.setattr(sources, "_semantic_scholar_cache_path", lambda: str(cache_path))
+    monkeypatch.setattr(sources.requests, "get", fake_get)
+    papers = [{"title": "TLDR Only Paper", "abstract": "", "doi": "10.1145/example", "metadata": {"doi": "10.1145/example"}}]
+
+    sources.enrich_with_semantic_scholar(papers, limit=1)
+
+    assert calls
+    assert papers[0].get("abstract", "") == ""
+    assert papers[0]["metadata"]["tldr"].startswith("This is only")
+    assert papers[0]["metadata"]["semantic_scholar_tldr_available"] is True
+    assert "abstract_source" not in papers[0]["metadata"]
+    assert papers[0]["pdf_url"] == "https://example.test/tldr-only.pdf"
+    cached = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert any(item.get("miss") is True and item.get("tldr") for item in cached.values() if isinstance(item, dict))
+
+
+def test_pipeline_real_abstract_guard_rejects_semantic_tldr_artifact():
+    tldr = "This long Semantic Scholar TLDR summary should not be treated as the real paper abstract."
+
+    assert find_pipeline._has_real_abstract({"abstract": tldr, "metadata": {"abstract_source": "semantic_scholar_doi_tldr", "tldr": tldr}}) is False
+    assert find_pipeline._has_real_abstract({"abstract": tldr, "metadata": {"abstract_source": "semantic_scholar_doi", "tldr": tldr}}) is False
+    assert find_pipeline._has_real_abstract({"abstract": "This is a real venue abstract with enough concrete method and experiment details.", "metadata": {"abstract_source": "openalex"}}) is True
+
+
 def test_semantic_scholar_enrichment_uses_title_cache(monkeypatch, tmp_path):
     cache_path = tmp_path / "semantic_cache.json"
     calls = []

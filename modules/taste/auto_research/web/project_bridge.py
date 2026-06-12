@@ -3878,7 +3878,7 @@ def _compact_file_artifact(name: str, path: Path, kind: str, content: Any) -> di
 
 def _compact_paper_row(row: dict[str, Any]) -> dict[str, Any]:
     keys = [
-        "id", "title", "venue", "venue_id", "year", "url", "pdf_url",
+        "id", "title", "venue", "venue_id", "year", "doi", "url", "pdf_url",
         "recommendation_score", "recommendation_score_v2", "score", "score_source",
         "fit_score", "llm_fit_score", "diversity_score",
         "abstract", "abstract_zh", "abstract_en",
@@ -3886,6 +3886,22 @@ def _compact_paper_row(row: dict[str, Any]) -> dict[str, Any]:
         "fit_explanation", "fit_explanation_zh", "fit_explanation_en",
     ]
     compact = {key: row.get(key) for key in keys if key in row}
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    doi = str(row.get("doi") or metadata.get("doi") or "").strip()
+    if doi:
+        compact.setdefault("doi", doi)
+    if not str(compact.get("url") or "").strip():
+        for key in ["url", "doi_url", "publisher_url", "acm_abs_url", "dblp_record_url"]:
+            value = str(row.get(key) or metadata.get(key) or "").strip()
+            if value:
+                compact["url"] = value
+                break
+    if not str(compact.get("pdf_url") or "").strip():
+        for key in ["pdf_url", "acm_pdf_url", "acm_epdf_url", "open_access_pdf_url"]:
+            value = str(row.get(key) or metadata.get(key) or "").strip()
+            if value:
+                compact["pdf_url"] = value
+                break
     abstract = _clean_literature_abstract(row)
     if abstract and not str(compact.get("abstract") or "").strip():
         compact["abstract"] = abstract
@@ -8843,6 +8859,15 @@ def _clean_literature_abstract(row: dict[str, Any]) -> str:
     text = str(row.get("abstract") or row.get("abstract_en") or row.get("abstract_excerpt") or row.get("summary") or "").strip()
     lowered = text.lower()
     if lowered in {"", "no abstract available", "no abstract available.", "abstract not available", "abstract not available."}:
+        return ""
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    source = str(metadata.get("abstract_source") or row.get("abstract_source") or "").lower()
+    if "tldr" in source:
+        return ""
+    tldr = metadata.get("tldr") or row.get("tldr")
+    if isinstance(tldr, dict):
+        tldr = tldr.get("text")
+    if tldr and " ".join(text.split()).casefold() == " ".join(str(tldr).split()).casefold():
         return ""
     return text if len(text) >= 80 else ""
 

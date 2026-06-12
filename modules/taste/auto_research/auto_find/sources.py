@@ -208,12 +208,28 @@ def _save_openalex_cache(cache: dict) -> None:
         return
 
 
+def _same_metadata_text(left: object, right: object) -> bool:
+    return " ".join(str(left or "").split()).casefold() == " ".join(str(right or "").split()).casefold()
+
+
+def _semantic_scholar_cache_real_abstract(cached: dict) -> str:
+    abstract = str(cached.get("abstract") or "").strip()
+    if not abstract:
+        return ""
+    tldr = str(cached.get("tldr") or "").strip()
+    source = str(cached.get("source") or cached.get("abstract_source") or "").lower()
+    if "tldr" in source:
+        return ""
+    if tldr and _same_metadata_text(abstract, tldr):
+        return ""
+    return abstract
+
+
 def _apply_semantic_scholar_cache(paper: dict, cached: dict) -> None:
-    if cached.get("abstract"):
-        paper["abstract"] = cached.get("abstract") or ""
-    elif cached.get("tldr"):
-        paper["abstract"] = cached.get("tldr") or ""
-        paper.setdefault("metadata", {})["abstract_source"] = "semantic_scholar_tldr"
+    abstract = _semantic_scholar_cache_real_abstract(cached)
+    if abstract:
+        paper["abstract"] = abstract
+        paper.setdefault("metadata", {})["abstract_source"] = cached.get("source") or "semantic_scholar_cache"
     if cached.get("url"):
         paper["url"] = paper.get("url") or cached.get("url") or ""
     if cached.get("pdf_url"):
@@ -2659,9 +2675,8 @@ def enrich_with_semantic_scholar(papers: list[dict], limit: int = 20, api_key: s
         if abstract:
             paper["abstract"] = abstract
             metadata["abstract_source"] = source
-        elif tldr_text and not paper.get("abstract"):
-            paper["abstract"] = tldr_text
-            metadata["abstract_source"] = f"{source}_tldr"
+        elif tldr_text:
+            metadata["semantic_scholar_tldr_available"] = True
         if item.get("url"):
             paper["url"] = paper.get("url") or item.get("url") or ""
         pdf = item.get("openAccessPdf") if isinstance(item.get("openAccessPdf"), dict) else {}
@@ -2686,7 +2701,7 @@ def enrich_with_semantic_scholar(papers: list[dict], limit: int = 20, api_key: s
             "semantic_scholar_paper_id": item.get("paperId") or "",
             "externalIds": external,
             "source": source,
-            "miss": not bool(paper.get("abstract")),
+            "miss": not bool(abstract or paper.get("abstract")),
             "updated_at": datetime.utcnow().isoformat() + "Z",
         }
 

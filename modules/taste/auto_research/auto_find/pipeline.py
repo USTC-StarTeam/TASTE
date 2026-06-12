@@ -3813,9 +3813,28 @@ def _is_llm_supported(item: dict) -> bool:
     # must never qualify a recommendation by itself.
     return _has_final_title_abstract_llm_scoring(item)
 
+def _metadata_tldr_text(item: dict) -> str:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    value = metadata.get("tldr") or item.get("tldr")
+    if isinstance(value, dict):
+        value = value.get("text")
+    return _clean_abstract_text(value)
+
+
+def _abstract_is_semantic_tldr(item: dict, text: str) -> bool:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    source = str(metadata.get("abstract_source") or item.get("abstract_source") or "").lower()
+    if "tldr" in source:
+        return True
+    tldr = _metadata_tldr_text(item)
+    return bool(tldr and " ".join(text.split()).casefold() == " ".join(tldr.split()).casefold())
+
+
 def _has_real_abstract(item: dict) -> bool:
     text = _clean_abstract_text(item.get("abstract_en") or item.get("abstract"))
     if not text:
+        return False
+    if _abstract_is_semantic_tldr(item, text):
         return False
     if len(text) < 12:
         return False
