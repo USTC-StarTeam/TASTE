@@ -232,6 +232,22 @@ def test_markdown_strips_abstract_ui_controls():
     assert "enough scientific detail" in content
 
 
+def test_markdown_normalizes_latex_url_commands():
+    content = paper_markdown([
+        {
+            "id": "p1",
+            "title": "Paper",
+            "abstract": r"Code is available at \url{https://github.com/example/project}. Demo: \href{https://example.com/demo}{project page}.",
+            "reason": r"Use \url{https://github.com/example/project} for reproduction.",
+        }
+    ])
+
+    assert r"\url{" not in content
+    assert r"\href{" not in content
+    assert "[https://github.com/example/project](https://github.com/example/project)" in content
+    assert "[project page](https://example.com/demo)" in content
+
+
 def test_markdown_contains_quality_labels_and_score_bonus_details():
     content = paper_markdown([
         {

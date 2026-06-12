@@ -95,6 +95,26 @@ def _strip_abstract_ui_controls(value: object) -> str:
     return _ABSTRACT_UI_CONTROL_RE.sub("", " ".join(str(value or "").split())).strip()
 
 
+_LATEX_URL_RE = re.compile(r"\\url\{(https?://[^{}\s]+)\}")
+_LATEX_HREF_RE = re.compile(r"\\href\{(https?://[^{}\s]+)\}\{([^{}]+)\}")
+
+
+def _normalize_public_latex_markup(value: object) -> str:
+    text = str(value or "")
+
+    def href_repl(match: re.Match[str]) -> str:
+        url = match.group(1).strip()
+        label = match.group(2).strip() or url
+        return f"[{label}]({url})"
+
+    def url_repl(match: re.Match[str]) -> str:
+        url = match.group(1).strip()
+        return f"[{url}]({url})"
+
+    text = _LATEX_HREF_RE.sub(href_repl, text)
+    return _LATEX_URL_RE.sub(url_repl, text)
+
+
 def table(headers: list[str], rows: Iterable[list[object]]) -> str:
     lines = [
         "| " + " | ".join(headers) + " |",
@@ -108,7 +128,7 @@ def table(headers: list[str], rows: Iterable[list[object]]) -> str:
 
 def _paper_text(paper: dict, keys: list[str]) -> str:
     for key in keys:
-        value = str(paper.get(key) or "").strip()
+        value = _normalize_public_latex_markup(paper.get(key)).strip()
         if not value:
             continue
         if any(marker.lower() in value.lower() for marker in _PLACEHOLDER_ABSTRACT_MARKERS):
