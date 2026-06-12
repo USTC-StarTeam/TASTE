@@ -642,6 +642,88 @@ def test_dblp_stream_api_paginates_yequery_and_filters_proceedings(monkeypatch):
     assert audit["category_status"] == "no_official_categories"
 
 
+
+def test_dblp_year_links_ignore_share_links(monkeypatch):
+    from auto_research.auto_find import sources
+
+    class Response:
+        text = """
+        <html><body>
+          <a href="kdd2026-1.html">32nd KDD 2026: Jeju Island</a>
+          <a href="https://bsky.app/intent/compose?text=KDD+2026+https%3A%2F%2Fdoi.org%2F10.1145%2F3770854">share</a>
+          <a href="https://www.linkedin.com/shareArticle?title=KDD+2026">share</a>
+          <a href="https://dblp.org/rec/conf/kdd/2026-1">record</a>
+        </body></html>
+        """
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(sources, "_request", lambda _url, **_kwargs: Response())
+
+    links = sources._parse_dblp_yelinks("https://dblp.uni-trier.de/db/conf/kdd/", [2026], max_years=4)
+
+    assert links == [(2026, "https://dblp.uni-trier.de/db/conf/kdd/kdd2026-1.html")]
+
+
+def test_dblp_venue_merges_toc_when_stream_index_is_incomplete(monkeypatch):
+    from auto_research.auto_find import sources
+
+    title_a = "LLM Grounded Recommendation with Diffusion Signals"
+    title_b = "Causal Graph Recommendation with Semantic Feedback"
+    stream_row = {
+        "id": "stream-a",
+        "source": "dblp",
+        "title": title_a,
+        "authors": "Alice",
+        "abstract": "",
+        "url": "https://doi.org/10.1145/a",
+        "pdf_url": "",
+        "doi": "10.1145/a",
+        "venue": "KDD",
+        "year": 2026,
+        "category": "",
+        "classification_source": "llm_inferred",
+        "metadata": {},
+    }
+    stream_audit = sources._venue_metadata_audit(
+        status="partial",
+        source_verified=True,
+        complete=False,
+        title_index_complete=False,
+        dblp_stream_index_complete=False,
+        adapter="dblp_search_api",
+        source_scope="dblp_current_index_not_official_accepted_list",
+        deduped_paper_count=1,
+    )
+    stream_rows = sources._attach_venue_metadata_audit([stream_row], stream_audit)
+
+    class Response:
+        text = f"""
+        <dblp>
+          <inproceedings key="conf/kdd/a26"><author>Alice</author><title>{title_a}.</title><year>2026</year><ee>https://doi.org/10.1145/a</ee></inproceedings>
+          <inproceedings key="conf/kdd/b26"><author>Bob</author><title>{title_b}.</title><year>2026</year><ee>https://doi.org/10.1145/b</ee></inproceedings>
+        </dblp>
+        """
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(sources, "fetch_dblp_stream_api", lambda *_args, **_kwargs: list(stream_rows))
+    monkeypatch.setattr(sources, "_parse_dblp_yelinks", lambda *_args, **_kwargs: [(2026, "https://dblp.uni-trier.de/db/conf/kdd/kdd2026-1.html")])
+    monkeypatch.setattr(sources, "_request", lambda _url, **_kwargs: Response())
+
+    rows = sources.fetch_dblp_venue({"id": "dblp_kdd", "name": "KDD", "address": "https://dblp.uni-trier.de/db/conf/kdd/"}, [2026], None)
+    audit = sources.venue_metadata_audit_from_papers(rows)
+
+    assert [row["title"] for row in rows] == [title_a, title_b]
+    assert audit["adapter"] == "dblp_search_api+dblp_toc"
+    assert audit["stream_paper_count"] == 1
+    assert audit["toc_paper_count"] == 2
+    assert audit["deduped_paper_count"] == 2
+    assert audit["source_scope"] == "dblp_current_index_not_official_accepted_list"
+
+
 def test_icml_downloads_records_metadata_completeness_audit(monkeypatch):
     from auto_research.auto_find import sources
 

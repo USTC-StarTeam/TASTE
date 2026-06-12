@@ -1575,12 +1575,18 @@ def _parse_dblp_yelinks(address: str, years: list[int], max_years: int = 4) -> l
         if not href.startswith("http"):
             href = requests.compat.urljoin(address, href)
         href = _dblp_page_url(href)
-        matched_years = [year for year in re.findall(r"(20\d{2}|19\d{2})", f"{text} {href}") if year in wanted]
-        if not matched_years:
-            continue
         if "#" in href:
             continue
-        if "/rec/conf/" in href:
+        if "/rec/" in href:
+            continue
+        if "/db/conf/" not in href and "/db/journals/" not in href:
+            continue
+        if _dblp_stream_id(address) and _dblp_stream_id(href) != _dblp_stream_id(address):
+            continue
+        if not re.search(r"/(?:conf|journals)/[^/]+/[^/?#]*(?:20\d{2}|19\d{2})[^/?#]*\.html?$", href):
+            continue
+        matched_years = [year for year in re.findall(r"(20\d{2}|19\d{2})", f"{text} {href}") if year in wanted]
+        if not matched_years:
             continue
         year = int(matched_years[0])
         if (year, href) not in links:
@@ -1797,26 +1803,21 @@ def _recent_verified_venue_yecache(venue: dict, years: list[int], max_items: int
     return []
 
 
-def fetch_dblp_venue(venue: dict, years: list[int], max_items: int | None) -> list[dict]:
-    papers = fetch_dblp_stream_api(venue, years, max_items)
-    if papers:
-        return papers
-
-    cached = _recent_verified_venue_yecache(venue, years, max_items)
-    if cached:
-        return cached
+def _dblp_toc_papers(venue: dict, years: list[int], max_items: int | None) -> list[dict]:
+    papers: list[dict] = []
+    links = _parse_dblp_yelinks(venue.get("address", ""), years, max_years=max(4, len(years)))
+    page_audits: list[dict[str, Any]] = []
 
     def reached_limit() -> bool:
         return max_items is not None and len(papers) >= max_items
 
-    papers = []
-    links = _parse_dblp_yelinks(venue.get("address", ""), years, max_years=max(4, len(years)))
-    if not links:
-        return papers
     for year, url in links:
+        if reached_limit():
+            break
         url = _dblp_page_url(url)
-        xml_url = re.sub(r"\.html?$", ".xml", url)
-        count_before_xml = len(papers)
+        page_audit: dict[str, Any] = {"year": year, "url": url, "xml_url": re.sub(r"\.html?$", ".xml", url), "xml_paper_count": 0, "html_paper_count": 0, "status": "started"}
+        count_before_page = len(papers)
+        xml_url = str(page_audit["xml_url"])
         try:
             xml_text = _request(xml_url).text
             for record in re.findall(r"<(?:article|inproceedings)[^>]*>.*?</(?:article|inproceedings)>", xml_text, flags=re.S):
@@ -1857,15 +1858,21 @@ def fetch_dblp_venue(venue: dict, years: list[int], max_items: int | None) -> li
                     "classification_source": "llm_inferred",
                     "metadata": metadata,
                 })
+                page_audit["xml_paper_count"] = int(page_audit.get("xml_paper_count") or 0) + 1
                 if reached_limit():
-                    return papers
-            if len(papers) > count_before_xml:
+                    break
+            if len(papers) > count_before_page:
+                page_audit["status"] = "xml"
+                page_audits.append(page_audit)
                 continue
-        except Exception:
-            pass
+        except Exception as exc:
+            page_audit["xml_error"] = str(exc)[:240]
         try:
             soup = BeautifulSoup(_request(url).text, "html.parser")
-        except Exception:
+        except Exception as exc:
+            page_audit["html_error"] = str(exc)[:240]
+            page_audit["status"] = "failed"
+            page_audits.append(page_audit)
             continue
         entries = soup.select("li.entry.inproceedings, li.entry.article")
         for entry in entries:
@@ -1873,6 +1880,8 @@ def fetch_dblp_venue(venue: dict, years: list[int], max_items: int | None) -> li
             if not title_node:
                 continue
             title = title_node.get_text(" ", strip=True).rstrip(".")
+            if not _looks_like_paper_title(title):
+                continue
             authors = ", ".join(node.get_text(" ", strip=True) for node in entry.select("span[itemprop='name']")[:-1])
             paper_url = ""
             drop = entry.select_one("li.drop-down a[href]")
@@ -1901,10 +1910,99 @@ def fetch_dblp_venue(venue: dict, years: list[int], max_items: int | None) -> li
                 "classification_source": "llm_inferred",
                 "metadata": metadata,
             })
+            page_audit["html_paper_count"] = int(page_audit.get("html_paper_count") or 0) + 1
             if reached_limit():
-                return papers
+                break
+        page_audit["status"] = "html" if len(papers) > count_before_page else "empty"
+        page_audits.append(page_audit)
         time.sleep(0.5)
-    return papers
+    complete = bool(papers) and bool(page_audits) and not any(str(item.get("status")) == "failed" for item in page_audits) and not (max_items is not None and len(papers) >= max_items)
+    audit = _venue_metadata_audit(
+        status="complete" if complete else "partial",
+        title_index_completeness_status="complete" if complete else "partial",
+        source_verified=bool(papers),
+        complete=complete,
+        title_index_complete=complete,
+        dblp_toc_index_complete=complete,
+        official_metadata_complete=False,
+        adapter="dblp_toc",
+        source_url=links[0][1] if links else _dblp_page_url(venue.get("address", "")),
+        source_urls=[url for _year, url in links],
+        requested_years=[int(year) for year in years if str(year).isdigit()],
+        toc_page_audits=page_audits,
+        toc_paper_count=len(papers),
+        deduped_paper_count=len(papers),
+        has_abstracts=False,
+        has_official_categories=False,
+        category_status="no_official_categories",
+        source_scope="dblp_current_index_not_official_accepted_list",
+        official_title_index_verified=False,
+        official_accepted_list_verified=False,
+        completeness_basis="DBLP venue table-of-contents XML/HTML title index. This is a DBLP index, not an official accepted-paper or ACM proceedings completeness certificate, and it exposes no abstracts or official categories.",
+    )
+    return _attach_venue_metadata_audit(papers, audit)
+
+
+def _merge_dblp_paper_sources(venue: dict, stream_papers: list[dict], toc_papers: list[dict], max_items: int | None) -> list[dict]:
+    if not stream_papers:
+        return toc_papers
+    if not toc_papers:
+        return stream_papers
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for paper in [*toc_papers, *stream_papers]:
+        if not isinstance(paper, dict):
+            continue
+        key = _title_key(paper.get("title")) or str((paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}).get("dblp_key") or paper.get("url") or paper.get("id") or "")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append(dict(paper))
+        if max_items is not None and len(merged) >= max_items:
+            break
+    stream_audit = venue_metadata_audit_from_papers(stream_papers)
+    toc_audit = venue_metadata_audit_from_papers(toc_papers)
+    truncated = bool(max_items is not None and len(merged) >= max_items and (len(stream_papers) > len(merged) or len(toc_papers) > len(merged)))
+    complete = bool(toc_audit.get("complete")) and not truncated and len(merged) >= max(len(stream_papers), len(toc_papers))
+    audit = _venue_metadata_audit(
+        status="complete" if complete else "partial",
+        title_index_completeness_status="complete" if complete else "partial",
+        source_verified=True,
+        complete=complete,
+        title_index_complete=complete,
+        dblp_stream_index_complete=bool(stream_audit.get("dblp_stream_index_complete") or stream_audit.get("complete")),
+        dblp_toc_index_complete=bool(toc_audit.get("dblp_toc_index_complete") or toc_audit.get("complete")),
+        official_metadata_complete=False,
+        adapter="dblp_search_api+dblp_toc",
+        source_url=str(toc_audit.get("source_url") or stream_audit.get("source_url") or "https://dblp.org/search/publ/api"),
+        stream_audit=stream_audit,
+        toc_audit=toc_audit,
+        stream_paper_count=len(stream_papers),
+        toc_paper_count=len(toc_papers),
+        deduped_paper_count=len(merged),
+        has_abstracts=False,
+        has_official_categories=False,
+        category_status="no_official_categories",
+        source_scope="dblp_current_index_not_official_accepted_list",
+        official_title_index_verified=False,
+        official_accepted_list_verified=False,
+        truncated=truncated,
+        completeness_basis="Merged DBLP stream search with DBLP venue table-of-contents XML/HTML to avoid missing records when one DBLP index view lags another. This is still a DBLP current title index, not an official accepted-paper or ACM proceedings completeness certificate, and it exposes no abstracts or official categories.",
+    )
+    return _attach_venue_metadata_audit(merged, audit)
+
+
+def fetch_dblp_venue(venue: dict, years: list[int], max_items: int | None) -> list[dict]:
+    stream_papers = fetch_dblp_stream_api(venue, years, max_items)
+    toc_papers = _dblp_toc_papers(venue, years, max_items)
+    papers = _merge_dblp_paper_sources(venue, stream_papers, toc_papers, max_items)
+    if papers:
+        return papers
+
+    cached = _recent_verified_venue_yecache(venue, years, max_items)
+    if cached:
+        return cached
+    return []
 
 
 def _acl_event_urls(venue: dict, year: int) -> list[str]:
