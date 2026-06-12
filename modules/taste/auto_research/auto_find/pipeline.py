@@ -3496,14 +3496,14 @@ Candidate items, batch {batch_index}:
 {item_lines}
 
 Return exactly this schema. The evaluations array is the final LLM evaluation rows; include one row for every candidate ID in the batch and never return an empty object. fit_score is the final recommendation score:
-{{"evaluations":[{{"id":"paper id","category":"short category","fit_score":7.0,"diversity_score":6.0,"recommend_for_deep_reading":true,"hit_directions_zh":["中文命中方向"],"hit_directions_en":["English hit direction"],"fit_explanation_zh":"2-3句中文：说明摘要中的具体证据、为什么与当前调研主题相关、以及可复用价值","fit_explanation_en":"2-3 English sentences with title/abstract evidence, relevance, and reusable value","reason_zh":"2-4句中文：说明为什么值得推荐精读、可借鉴的方法/数据/协议/理论/评测价值，以及摘要层面仍不能确定的限制","reason_en":"2-4 English sentences: why recommended for deep reading, reusable method/data/protocol/theory/evaluation value, and limits that still require full text"}}]}}
+{{"evaluations":[{{"id":"paper id","category":"short category","fit_score":7.0,"diversity_score":6.0,"recommend_for_deep_reading":true,"hit_directions_zh":["中文命中方向"],"hit_directions_en":["English hit direction"],"fit_explanation_zh":"2-3句中文：面向用户说明摘要中的具体证据、为什么与当前调研主题相关、以及可复用价值","fit_explanation_en":"2-3 English sentences for the user with title/abstract evidence, relevance, and reusable value","reason_zh":"2-4句中文：面向用户说明该论文对当前研究画像的具体价值、可借鉴的方法/数据/协议/理论/评测信息，以及摘要层面的风险或不确定性；不要写给 reader 的精读指令","reason_en":"2-4 English sentences for the user: concrete value to the research profile, reusable method/data/protocol/theory/evaluation value, and abstract-level risks or uncertainty; do not write reader instructions"}}]}}
 
 Rules:
 - Score by explicit title/abstract evidence only; venue prestige must not raise fit_score.
 - Use the whole 0-10 range consistently: 9-10 exact center, 7-8 strong match, 5-6 partial/background usefulness, 3-4 weak/generic, <=2 unrelated.
 - Broad background papers are weak unless the abstract itself gives concrete reusable method, data, benchmark, protocol, theory, or evaluation value for the current research interest.
 - recommend_for_deep_reading is an audit field only. the workflow chooses the user-visible list by the single final title+abstract ranking contract, not by this boolean and not by an absolute score cutoff.
-- User-facing recommendation reasons must explain positive reusable value first, then summarize limits that require full-text reading.
+- User-facing recommendation reasons must explain concrete value for the user research project first, then summarize abstract-level uncertainty as a user-facing risk. Do not write reader instructions such as Reading note, full-text reading must verify, or the abstract is not a substitute for full-text reading.
 - Missing abstract, metadata-only evidence, or title-only evidence cannot be recommended.
 {FIND_FINAL_SCORING_ROUTE_RULES}
 """)
@@ -3557,9 +3557,9 @@ Title: {item.get('title')}
 Abstract/Description: {(item.get('abstract') or '')[:900]}
 
 Return strict JSON only:
-{{"evaluations":[{{"id":"{item.get("id")}","category":"short category","fit_score":7.0,"diversity_score":6.0,"recommend_for_deep_reading":true,"hit_directions_zh":["中文命中方向"],"hit_directions_en":["English hit direction"],"fit_explanation":"2-3句中文：说明摘要证据、相关性和可复用价值","fit_explanation_zh":"2-3句中文：说明摘要证据、相关性和可复用价值","fit_explanation_en":"2-3 English sentences with title/abstract evidence, relevance, and reusable value","reason":"2-4句中文：说明为什么值得推荐精读、可借鉴什么、以及哪些限制需要全文精读确认","reason_zh":"2-4句中文：说明为什么值得推荐精读、可借鉴什么、以及哪些限制需要全文精读确认","reason_en":"2-4 English sentences: why recommended for deep reading, what is reusable, and what still needs full-text confirmation"}}]}}
+{{"evaluations":[{{"id":"{item.get("id")}","category":"short category","fit_score":7.0,"diversity_score":6.0,"recommend_for_deep_reading":true,"hit_directions_zh":["中文命中方向"],"hit_directions_en":["English hit direction"],"fit_explanation":"2-3句中文：面向用户说明摘要证据、相关性和可复用价值","fit_explanation_zh":"2-3句中文：面向用户说明摘要证据、相关性和可复用价值","fit_explanation_en":"2-3 English sentences for the user with title/abstract evidence, relevance, and reusable value","reason":"2-4句中文：面向用户说明对当前研究画像的价值、可借鉴什么、以及摘要层面的风险或不确定性","reason_zh":"2-4句中文：面向用户说明对当前研究画像的价值、可借鉴什么、以及摘要层面的风险或不确定性","reason_en":"2-4 English sentences for the user: value to the current research profile, reusable content, and abstract-level risks or uncertainty"}}]}}
 
-Scoring rules: judge this item independently from its real title and abstract. fit_score is the final ranking score used by the workflow: 9-10 exact center, 7-8 strong match, 5-6 partial/background usefulness, 3-4 weak/generic, <=2 unrelated. recommend_for_deep_reading is only an audit field; The workflow uses the final title+abstract ranking as the single recommendation contract and does not apply an absolute score cutoff. Recommendation reasons must explain any reusable value before limitations. Provide both Chinese and English explanation fields, plus hit_directions_zh in Chinese and hit_directions_en in English.
+Scoring rules: judge this item independently from its real title and abstract. fit_score is the final ranking score used by the workflow: 9-10 exact center, 7-8 strong match, 5-6 partial/background usefulness, 3-4 weak/generic, <=2 unrelated. recommend_for_deep_reading is only an audit field; The workflow uses the final title+abstract ranking as the single recommendation contract and does not apply an absolute score cutoff. User-facing recommendation reasons must explain reusable value before limitations, and must not contain reader instructions such as Reading note, full-text reading must verify, or the abstract is not a substitute for full-text reading. Provide both Chinese and English explanation fields, plus hit_directions_zh in Chinese and hit_directions_en in English.
 {FIND_FINAL_SCORING_ROUTE_RULES}
 """
 
@@ -3887,6 +3887,18 @@ _INTERNAL_FIND_PUBLIC_TEXT_MARKERS_ZH = (
     "用户可见推荐",
     "推荐池",
     "检索候选",
+    "值得推荐和精读",
+    "为什么值得推荐精读",
+    "帮助读者",
+    "阅读提示",
+    "摘要仍不足以替代全文精读",
+    "全文精读",
+    "需全文确认",
+    "需在全文中继续确认",
+    "需要全文",
+    "精读阶段",
+    "给 reader",
+    "reader llm",
     "Gate reason",
     "paper-conclusion",
     "claim",
@@ -3918,9 +3930,21 @@ _INTERNAL_FIND_PUBLIC_TEXT_MARKERS_EN = (
     "claim",
     "foundation",
     "fallback-only",
+    "worth recommending and reading",
+    "recommended for deep reading",
+    "reading note",
+    "full-text reading",
+    "full text reading",
+    "full-text confirmation",
+    "full text confirmation",
+    "deep reading",
+    "abstract is still not a substitute",
+    "reader instruction",
 )
-_PUBLIC_FIND_RECOMMENDATION_NOTE_ZH = "题名和摘要提供了明确相关信号；全文精读需要继续确认方法细节、实验协议和局限性。"
-_PUBLIC_FIND_RECOMMENDATION_NOTE_EN = "The title and abstract provide clear relevance signals; full-text reading must still confirm method details, experiment protocol, and limitations."
+_PUBLIC_FIND_RECOMMENDATION_NOTE_ZH = "题名和摘要与当前研究画像有明确交集，并提供可借鉴的方法、数据、评测或问题边界。"
+_PUBLIC_FIND_RECOMMENDATION_NOTE_EN = "The title and abstract connect clearly to the research profile and offer reusable method, data, evaluation, or boundary value."
+_READER_FIND_RECOMMENDATION_INSTRUCTION_ZH = "内部给 Read 阶段：基于论文正文核查 Find 阶段的题名/摘要信号是否成立，重点记录方法细节、数据设置、评测协议、结果边界和局限性。"
+_READER_FIND_RECOMMENDATION_INSTRUCTION_EN = "Internal instruction for the Read stage: use the paper body to verify whether the title/abstract signals from Find hold, and record method details, data settings, evaluation protocol, result boundaries, and limitations."
 
 
 def _has_internal_find_public_text(text: object, *, zh: bool = True) -> bool:
@@ -3940,8 +3964,26 @@ def _public_route_text(item: dict, *, en: bool = False) -> str:
     return ""
 
 
+def _public_interest_context(config: AppConfig | None, *, en: bool = False) -> str:
+    raw = ""
+    if config is not None:
+        try:
+            raw = _topic_interest_text(config)
+        except Exception:
+            raw = ""
+    raw = " ".join(str(raw or "").split())
+    if len(raw) > 150:
+        raw = raw[:150].rstrip() + "..."
+    if en:
+        return f"the current research profile ({raw})" if raw else "the current research profile"
+    has_cjk = any("\u4e00" <= char <= "\u9fff" for char in raw)
+    return f"当前研究画像（{raw}）" if raw and has_cjk else "当前研究画像"
+
+
 def _ensure_recommendation_readability(item: dict, config: AppConfig | None = None) -> dict:
     title = str(item.get("title") or "该论文").strip() or "该论文"
+    interest_zh = _public_interest_context(config, en=False)
+    interest_en = _public_interest_context(config, en=True)
     matched_route = _public_route_text(item, en=False)
     matched_route_en = _public_route_text(item, en=True)
     hit_zh = _list_text(item.get("hit_directions_zh") or item.get("hit_directions"))
@@ -3968,56 +4010,83 @@ def _ensure_recommendation_readability(item: dict, config: AppConfig | None = No
     if item.get("_user_visible_recommendation") or item.get("find_recommendation") or item.get("recommended_by_llm_ranking"):
         boundary = False
 
+    def _sentence_join(parts: list[str]) -> str:
+        return "".join(part if part.endswith(("。", "！", "？")) else part + "。" for part in parts if part)
+
     def zh_reason() -> str:
+        signal = hit_zh or matched_route or "方法、数据、评测或问题边界"
         parts = [
-            f"《{title}》值得推荐和精读，是因为其题名和摘要中有可核查的相关信号" + (f"：{hit_zh}" if hit_zh else "。"),
-            fit_zh or (f"它与当前调研问题的关系是 {matched_route}。" if matched_route else "它可为精读阶段提供方法、数据、协议、理论或评测线索。"),
-            "推荐价值在于帮助读者理解可复用的方法设计、数据设置、评测协议、理论视角或失败边界；摘要仍不足以替代全文精读。",
+            f"对{interest_zh}来说，《{title}》的价值在于它把{signal}落到一个可比较的研究对象上。",
+            fit_zh or (f"它与当前研究目标的连接点是 {matched_route}。" if matched_route else "它提供了可被后续方案选择引用的具体方法线索、数据线索、评测线索或失败边界。"),
+            "可直接借鉴的部分包括方法结构、数据或反馈构造、评价指标、消融设计和风险边界；这些信息能帮助确定当前路线的基线、改造点和风险控制。",
         ]
         if boundary:
-            parts.append("阅读提示：该条目当前只适合用于对照、边界理解或扩展检索，不属于正式推荐精读列表。")
+            parts.append("目前它更适合作为对照或边界案例，避免把局部相关信号误当成核心方法依据。")
         if missing:
-            parts.append(f"需在全文中继续确认的部分：{missing}。")
-        elif note_zh:
-            if any(marker in note_zh for marker in ["最终题名+摘要", "最终相关性评分", "题名筛选线索", "LLM 评分", "Find", "Top-N", "证据门控"]):
-                parts.append("阅读提示：该推荐理由基于题名和摘要；是否能支撑后续研究，需要通过全文精读、代码/数据说明和本地实验继续确认。")
-            else:
-                parts.append(f"阅读提示：{note_zh}")
-        return "".join(part if part.endswith(("。", "！", "？")) else part + "。" for part in parts if part)
+            parts.append(f"摘要层面的未覆盖信息是：{missing}；这会影响它能否作为核心证据。")
+        elif note_zh and note_zh != _PUBLIC_FIND_RECOMMENDATION_NOTE_ZH:
+            parts.append(f"补充判断：{note_zh}")
+        else:
+            parts.append("摘要层面已经给出相关信号，但具体收益、复现实验条件和适用边界仍是后续科研决策中的风险点。")
+        return _sentence_join(parts)
 
     def zh_fit_explanation() -> str:
-        parts = []
+        parts: list[str] = []
         if hit_zh:
-            parts.append(f"题名和摘要显示的相关方向包括：{hit_zh}。")
+            parts.append(f"这篇论文在题名和摘要中呈现的核心相关点是：{hit_zh}。")
         if matched_route:
-            parts.append(f"它与当前调研问题的关系是 {matched_route}。")
-        parts.append("需要在全文精读中继续核查方法细节、数据设置、评测协议和局限性。")
-        return "".join(part if part.endswith(("。", "！", "？")) else part + "。" for part in parts if part)
+            parts.append(f"它与当前研究目标的连接点是 {matched_route}。")
+        else:
+            parts.append(f"它与{interest_zh}的关联体现在可比较的方法结构、数据或反馈构造、评测协议和失败边界上。")
+        parts.append("公开摘要已经足以说明它不是泛泛背景文献；需要记录的风险是摘要尚不能证明其结论可以直接迁移到当前项目。")
+        return _sentence_join(parts)
 
     def en_fit_explanation() -> str:
-        parts = []
+        parts: list[str] = []
         if hit_en:
-            parts.append(f"The title and abstract show these relevance directions: {hit_en}.")
+            parts.append(f"The title and abstract expose these relevant signals: {hit_en}.")
         if matched_route_en:
-            parts.append(f"Its relation to the current survey question is {matched_route_en}.")
-        parts.append("Full-text reading must still verify method details, data settings, evaluation protocol, and limitations.")
+            parts.append(f"Its connection to the current research goal is {matched_route_en}.")
+        else:
+            parts.append(f"Its connection to {interest_en} is through comparable method structure, data or feedback construction, evaluation protocol, and failure boundaries.")
+        parts.append("The abstract-level evidence makes it more than generic background, while the main risk is that transfer to the current project is not yet proven by the abstract alone.")
         return " ".join(part if part.endswith((".", "!", "?")) else part + "." for part in parts if part)
 
     def en_reason() -> str:
+        signal = hit_en or matched_route_en or "method, data, evaluation, or problem-boundary evidence"
         parts = [
-            f"{title} is worth recommending and reading because its title and abstract provide checkable relevance signals" + (f": {hit_en}." if hit_en else "."),
-            fit_en or (f"Its relation to the current survey question is {matched_route_en}." if matched_route_en else "It can provide method, data, protocol, theory, or evaluation clues for deep reading."),
-            "The reading value is to understand reusable method design, data settings, evaluation protocols, theory, or failure boundaries; the abstract is still not a substitute for full-text reading.",
+            f"For {interest_en}, {title} is useful because it turns {signal} into a concrete object for comparison.",
+            fit_en or (f"Its connection to the current research goal is {matched_route_en}." if matched_route_en else "It offers concrete method, data, evaluation, or boundary signals that can inform later research decisions."),
+            "Reusable value includes method structure, data or feedback construction, metrics, ablations, and risk boundaries; these help choose baselines, modification points, and risk controls for the project.",
         ]
         if boundary:
-            parts.append("Reading note: this item is currently useful only for contrast, boundary understanding, or search expansion, not the formal recommended-reading list.")
+            parts.append("At this stage it is better treated as a contrast or boundary case, so a partial signal is not mistaken for core method evidence.")
         if missing:
-            parts.append(f"Still needs full-text confirmation: {missing}.")
-        elif note_en:
-            if any(marker in note_en for marker in ["final title+abstract", "LLM score", "Find", "Top-N", "evidence gate"]):
-                parts.append("Reading note: this recommendation reason is based on the title and abstract; whether it can support later research must be confirmed through full-text reading, code/data documentation, and local experiments.")
-            else:
-                parts.append(f"Reading note: {note_en}")
+            parts.append(f"The abstract-level missing information is: {missing}; this affects whether it can serve as core evidence.")
+        elif note_en and note_en != _PUBLIC_FIND_RECOMMENDATION_NOTE_EN:
+            parts.append(f"Additional judgment: {note_en}")
+        else:
+            parts.append("The abstract provides relevant signals, but concrete gains, reproducibility conditions, and scope remain project risks.")
+        return " ".join(part if part.endswith((".", "!", "?")) else part + "." for part in parts if part)
+
+    def reader_instruction_zh() -> str:
+        parts = [_READER_FIND_RECOMMENDATION_INSTRUCTION_ZH, f"论文：《{title}》。"]
+        if hit_zh:
+            parts.append(f"优先核查 Find 信号：{hit_zh}。")
+        if matched_route:
+            parts.append(f"核查其与当前研究目标的连接点：{matched_route}。")
+        if missing:
+            parts.append(f"特别核查摘要未覆盖的信息：{missing}。")
+        return _sentence_join(parts)
+
+    def reader_instruction_en() -> str:
+        parts = [_READER_FIND_RECOMMENDATION_INSTRUCTION_EN, f"Paper: {title}."]
+        if hit_en:
+            parts.append(f"Prioritize these Find signals: {hit_en}.")
+        if matched_route_en:
+            parts.append(f"Verify its connection to the current research goal: {matched_route_en}.")
+        if missing:
+            parts.append(f"Pay special attention to abstract-level missing information: {missing}.")
         return " ".join(part if part.endswith((".", "!", "?")) else part + "." for part in parts if part)
 
     current_reason_zh = item.get("reason_zh") or item.get("reason")
@@ -4039,12 +4108,24 @@ def _ensure_recommendation_readability(item: dict, config: AppConfig | None = No
     if _reason_is_too_short(current_fit_zh, zh=True) or _has_internal_find_public_text(current_fit_zh, zh=True):
         base = fit_zh or zh_fit_explanation()
         item.setdefault("fit_explanation_zh_original", str(current_fit_zh or "").strip())
-        item["fit_explanation_zh"] = base if _readable_text_len(str(base)) >= 80 else zh_fit_explanation()
+        item["fit_explanation_zh"] = base if _readable_text_len(str(base)) >= 80 and not _has_internal_find_public_text(base, zh=True) else zh_fit_explanation()
     current_fit_en = item.get("fit_explanation_en")
     if _reason_is_too_short(current_fit_en, zh=False) or _has_internal_find_public_text(current_fit_en, zh=False):
         base_en = fit_en or en_fit_explanation()
         item.setdefault("fit_explanation_en_original", str(current_fit_en or "").strip())
-        item["fit_explanation_en"] = base_en if _readable_text_len(str(base_en)) >= 80 else en_fit_explanation()
+        item["fit_explanation_en"] = base_en if _readable_text_len(str(base_en)) >= 80 and not _has_internal_find_public_text(base_en, zh=False) else en_fit_explanation()
+    if not str(item.get("reader_instruction_zh") or "").strip():
+        item["reader_instruction_zh"] = reader_instruction_zh()
+    if not str(item.get("reader_instruction_en") or "").strip():
+        item["reader_instruction_en"] = reader_instruction_en()
+    item["reader_instruction"] = item.get("reader_instruction_zh") or item.get("reader_instruction_en") or ""
+    current_note_zh = item.get("recommendation_note_zh") or item.get("recommendation_note")
+    current_note_en = item.get("recommendation_note_en")
+    if (not str(current_note_zh or "").strip()) or _has_internal_find_public_text(current_note_zh, zh=True):
+        item["recommendation_note_zh"] = _PUBLIC_FIND_RECOMMENDATION_NOTE_ZH
+        item["recommendation_note"] = item["recommendation_note_zh"]
+    if (not str(current_note_en or "").strip()) or _has_internal_find_public_text(current_note_en, zh=False):
+        item["recommendation_note_en"] = _PUBLIC_FIND_RECOMMENDATION_NOTE_EN
     item.setdefault("recommendation_audit_role", "boundary_or_borrowing" if boundary else (role or "direct_or_foundation"))
     return item
 
@@ -4064,7 +4145,7 @@ def _recommendation_quality_audit(items: list[dict]) -> dict:
         "missing_real_abstract_ids": missing_real_abstract[:50],
         "missing_chinese_abstract_ids": missing_zh_abstract[:50],
         "short_or_negative_reason_ids": short_reason[:50],
-        "policy": "User-facing recommendations must come from the final title+abstract LLM score ranking, show a real abstract, complete Chinese abstracts before marking translation completed, and give a specific multi-sentence recommendation reason covering concrete title/abstract evidence, reusable method/data/protocol/theory/evaluation value, and limits requiring full-text reading. Topic/debug fields cannot create a second recommendation gate.",
+        "policy": "User-facing recommendations must come from the final title+abstract LLM score ranking, show a real abstract, complete Chinese abstracts before marking translation completed, and give a specific multi-sentence recommendation reason covering concrete title/abstract evidence, value for the user research profile, reusable method/data/protocol/theory/evaluation value, and abstract-level risks. Reader-only full-text instructions must stay in reader_instruction_* fields. Topic/debug fields cannot create a second recommendation gate.",
     }
 
 

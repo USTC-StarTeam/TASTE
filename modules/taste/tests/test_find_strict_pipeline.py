@@ -2415,12 +2415,19 @@ def test_recommendation_readability_repair_does_not_leak_claim_or_audit_jargon()
         for key in ["reason_zh", "reason_en", "fit_explanation_zh", "fit_explanation_en", "recommendation_note_zh", "recommendation_note_en"]
     )
 
-    forbidden = ["证据边界", "论文结论", "claim", "paper-conclusion", "foundation", "内部候选", "实现"]
+    forbidden = [
+        "证据边界", "论文结论", "claim", "paper-conclusion", "foundation", "内部候选", "实现",
+        "值得推荐和精读", "帮助读者", "阅读提示", "全文精读", "摘要仍不足以替代全文精读",
+        "Reading note", "full-text reading", "deep reading",
+    ]
     assert all(term not in text for term in forbidden)
-    assert "值得推荐和精读" in recommended[0]["reason_zh"]
     assert find_pipeline._readable_text_len(recommended[0]["reason_zh"]) >= 120
+    assert "当前研究画像" in recommended[0]["reason_zh"]
+    assert "可直接借鉴" in recommended[0]["reason_zh"]
     assert "Find" not in recommended[0]["reason_zh"]
     assert "证据门控" not in recommended[0]["reason_zh"]
+    assert recommended[0]["reader_instruction_zh"].startswith("内部给 Read 阶段")
+    assert "核查" in recommended[0]["reader_instruction_zh"]
 
 def test_recommendation_readability_rewrites_stale_internal_find_notes():
     cfg = AppConfig(
@@ -2466,15 +2473,22 @@ def test_recommendation_readability_rewrites_stale_internal_find_notes():
         for key in ["reason_zh", "reason_en", "recommendation_note_zh", "recommendation_note_en"]
     )
 
-    forbidden = ["高召回", "最终 LLM", "LLM 题名", "LLM 评分", "Find", "Top-N", "证据门控", "内部候选"]
+    forbidden = [
+        "高召回", "最终 LLM", "LLM 题名", "LLM 评分", "Find", "Top-N", "证据门控", "内部候选",
+        "值得推荐和精读", "帮助读者", "阅读提示", "全文精读", "摘要仍不足以替代全文精读",
+        "Reading note", "full-text reading", "deep reading",
+    ]
     assert all(term not in text for term in forbidden)
     assert recommended[0]["reason_quality_repaired"] is True
-    assert "值得推荐和精读" in recommended[0]["reason_zh"]
-    assert "摘要仍不足以替代全文精读" in recommended[0]["reason_zh"]
-    assert "全文精读" in recommended[0]["fit_explanation_zh"]
+    assert "当前研究画像" in recommended[0]["reason_zh"]
+    assert "可直接借鉴" in recommended[0]["reason_zh"]
+    assert "全文精读" not in recommended[0]["fit_explanation_zh"]
+    assert find_pipeline._has_internal_find_public_text(stale_zh, zh=True)
+    assert find_pipeline._has_internal_find_public_text(stale_en, zh=False)
     assert not find_pipeline._has_internal_find_public_text(recommended[0]["fit_explanation_zh"], zh=True)
     assert not find_pipeline._has_internal_find_public_text(recommended[0]["fit_explanation_en"], zh=False)
     assert recommended[0]["recommendation_note_zh"] == find_pipeline._PUBLIC_FIND_RECOMMENDATION_NOTE_ZH
+    assert recommended[0]["reader_instruction_zh"].startswith("内部给 Read 阶段")
 
 
 def test_recommendation_quality_flags_generic_short_reasons():
