@@ -1,8 +1,9 @@
 import json
 
+from bs4 import BeautifulSoup
 from auto_research.auto_find.catalog import catalog_by_id, load_catalog
-from auto_research.auto_find.pipeline import _recommendation_translation_status
-from auto_research.auto_find.sources import _acm_metadata_from_doi, _dblp_page_url, _parse_neurips_detail, _parse_neurips_list, fetch_arxiv, fetch_dblp_stream_api, fetch_openreview_venue, fetch_venue_sample, fetch_venue_title_index, normalize_date
+from auto_research.auto_find.pipeline import _apply_quality_bonus, _recommendation_translation_status
+from auto_research.auto_find.sources import _acm_metadata_from_doi, _dblp_page_url, _extract_icml_virtual_abstract, _parse_neurips_detail, _parse_neurips_list, fetch_arxiv, fetch_dblp_stream_api, fetch_openreview_venue, fetch_venue_sample, fetch_venue_title_index, normalize_date
 from auto_research.llm import LLMClient, clamp_workers, extract_json, fallback_score, keyword_category
 from auto_research.markdown import paper_markdown
 from auto_research.models import AppConfig, LLMRoleConfig
@@ -196,6 +197,20 @@ def test_markdown_renders_paper_links_from_metadata():
     assert "[HTML](https://dl.acm.org/doi/fullHtml/10.1145/3770854.3780297)" in content
     assert "[DBLP](https://dblp.org/rec/conf/kdd/LvGTSZY26)" in content
     assert "[DOI](https://doi.org/10.1145/3770854.3780297)" in content
+
+
+def test_markdown_strips_abstract_ui_controls():
+    content = paper_markdown([
+        {
+            "id": "p1",
+            "title": "Paper",
+            "abstract": "This is a full abstract scraped from a virtual conference page. It has enough scientific detail to be displayed. Show more",
+            "reason": "Useful recommendation reason.",
+        }
+    ])
+
+    assert "Show more" not in content
+    assert "enough scientific detail" in content
 
 
 def test_markdown_contains_quality_labels_and_score_bonus_details():
@@ -490,6 +505,113 @@ def test_openreview_known_venues_are_checked_before_dblp(monkeypatch):
     assert calls == ["openreview"]
 
 
+def test_openreview_supported_address_venue_prefers_official_categories(monkeypatch):
+    calls = []
+    paper = {
+        "id": "or1",
+        "title": "Official Area Paper",
+        "url": "https://openreview.net/forum?id=or1",
+        "category": "recommender systems",
+        "classification_source": "official",
+        "metadata": {
+            "venue_metadata_audit": {
+                "status": "partial",
+                "source_verified": True,
+                "complete": False,
+                "adapter": "openreview",
+                "has_official_categories": True,
+                "category_status": "official_or_cached_categories",
+                "official_title_index_verified": True,
+                "official_accepted_list_verified": True,
+            }
+        },
+    }
+
+    def fake_openreview(_venue, _years, _max_items):
+        calls.append("openreview")
+        return [paper]
+
+    def fail_dblp(_venue, _years, _max_items):
+        calls.append("dblp")
+        raise AssertionError("DBLP should not run when a supported official-category source already satisfies the requested sample")
+
+    monkeypatch.setattr("auto_research.auto_find.sources.fetch_openreview_venue", fake_openreview)
+    monkeypatch.setattr("auto_research.auto_find.sources.fetch_dblp_venue", fail_dblp)
+
+    venue = {
+        "id": "ccf_ai_conference_a_aistats_international_conference_on_artificial_intelligence_and_statistics",
+        "name": "AISTATS",
+        "full_name": "International Conference on Artificial Intelligence and Statistics",
+        "address": "https://dblp.org/db/conf/aistats/",
+    }
+    papers, adapter = fetch_venue_title_index(venue, [2026], 1)
+
+    assert adapter == "openreview"
+    assert papers == [paper]
+    assert calls == ["openreview"]
+
+
+def test_tiny_official_category_source_does_not_override_complete_official_title_index(monkeypatch):
+    from auto_research.auto_find import sources
+
+    official_audit = {
+        "status": "partial",
+        "source_verified": True,
+        "complete": False,
+        "adapter": "openreview",
+        "has_official_categories": True,
+        "category_status": "official_or_cached_categories",
+        "official_title_index_verified": True,
+        "official_accepted_list_verified": True,
+    }
+    complete_title_audit = {
+        "status": "complete",
+        "source_verified": True,
+        "complete": True,
+        "adapter": "icml_downloads",
+        "has_official_categories": False,
+        "category_status": "no_official_categories",
+        "official_title_index_verified": True,
+        "official_accepted_list_verified": True,
+    }
+    openreview_rows = [
+        {
+            "id": f"or{i}",
+            "title": f"Tiny Official Category Paper {i}",
+            "category": "Recommender Systems",
+            "classification_source": "official",
+            "metadata": {sources.VENUE_METADATA_AUDIT_KEY: official_audit},
+        }
+        for i in range(2)
+    ]
+    official_title_rows = [
+        {
+            "id": f"icml{i}",
+            "source": "icml_downloads",
+            "title": f"Complete Official Title Paper {i}",
+            "metadata": {sources.VENUE_METADATA_AUDIT_KEY: complete_title_audit},
+        }
+        for i in range(120)
+    ]
+
+    monkeypatch.setattr(sources, "fetch_openreview_venue", lambda *_args: openreview_rows)
+    monkeypatch.setattr(sources, "fetch_icml_downloads", lambda *_args: official_title_rows)
+    monkeypatch.setattr(sources, "_icml_verified_download_cache", lambda *_args: [])
+    monkeypatch.setattr(sources, "fetch_dblp_venue", lambda *_args: (_ for _ in ()).throw(AssertionError("DBLP should not be needed after complete official title index")))
+    monkeypatch.setattr(sources, "fetch_pmlr_index", lambda *_args: (_ for _ in ()).throw(AssertionError("PMLR should not be needed after complete official title index")))
+
+    venue = {
+        "id": "ccf_ai_conference_a_icml_international_conference_on_machine_learning",
+        "name": "ICML",
+        "full_name": "International Conference on Machine Learning",
+        "address": "https://dblp.org/db/conf/icml/",
+    }
+    papers, adapter = sources.fetch_venue_title_index(venue, [2026], 100000)
+
+    assert adapter == "icml_downloads"
+    assert papers == official_title_rows
+
+
 def test_openreview_sample_falls_back_to_dblp_when_empty(monkeypatch):
     calls = []
 
@@ -772,6 +894,9 @@ def test_icml_downloads_records_metadata_completeness_audit(monkeypatch):
         "Diffusion Recommendation with Semantic Signals",
         "LLM Conditioned Sequential Recommendation",
     ]
+    assert papers[0]["track"] == "ICML 2026 Poster"
+    assert papers[0]["presentation_type"] == "poster"
+    assert papers[0]["metadata"]["presentation_source"] == "icml_downloads_url"
     audit = sources.venue_metadata_audit_from_papers(papers)
     assert audit["status"] == "complete"
     assert audit["complete"] is True
@@ -783,6 +908,167 @@ def test_icml_downloads_records_metadata_completeness_audit(monkeypatch):
     assert audit["official_title_index_verified"] is True
     assert audit["official_accepted_list_verified"] is True
     assert audit["has_abstracts"] is False
+
+
+def test_icml_virtual_abstract_strips_show_more_controls():
+    soup = BeautifulSoup(
+        """
+        <html><body>
+          <div class="abstract">Abstract This paper studies recommendation with language model preference signals, user modeling, and robust offline evaluation protocols. Show more</div>
+        </body></html>
+        """,
+        "html.parser",
+    )
+    abstract = _extract_icml_virtual_abstract(soup)
+    assert abstract.endswith("evaluation protocols.")
+    assert "Show more" not in abstract
+
+
+def test_selected_virtual_details_enriches_eccv_like_pages(monkeypatch):
+    from auto_research.auto_find import sources
+
+    detail_url = "https://eccv.ecva.net/virtual/2026/poster/42"
+
+    class Response:
+        text = """
+        <html><head>
+          <meta name="citation_author" content="Alice Example" />
+          <meta name="citation_author" content="Bob Example" />
+        </head><body>
+          <section class="abstract">Abstract This paper studies recommendation with language model preference signals, user modeling, multimodal item representations, controllable personalization, and robust offline evaluation protocols. Show more</section>
+          <a href="/papers/example.pdf">PDF</a>
+        </body></html>
+        """
+
+    def fake_request(url, timeout=30):
+        assert url == detail_url
+        return Response()
+
+    monkeypatch.setattr(sources, "_request", fake_request)
+    papers = [
+        {
+            "id": "paper-eccv",
+            "source": "eccv_virtual",
+            "title": "Recommendation with Multimodal Preference Signals",
+            "authors": "",
+            "abstract": "",
+            "url": detail_url,
+            "pdf_url": "",
+            "venue": "ECCV",
+            "year": 2026,
+            "metadata": {"detail_url": detail_url, "title_index_only": True},
+        }
+    ]
+
+    detailed = sources.fetch_selected_venue_details(papers, wall_timeout_sec=10)
+
+    assert len(detailed) == 1
+    row = detailed[0]
+    assert row["authors"] == "Alice Example, Bob Example"
+    assert row["abstract"].endswith("robust offline evaluation protocols.")
+    assert "Show more" not in row["abstract"]
+    assert row["pdf_url"] == "https://eccv.ecva.net/papers/example.pdf"
+    assert row["track"] == "ECCV 2026 Poster"
+    assert row["presentation_type"] == "poster"
+    assert row["metadata"]["presentation_source"] == "eccv_virtual_detail_url_or_title"
+    assert row["metadata"]["abstract_source"] == "eccv_virtual_detail"
+    assert row["metadata"]["detail_fetch_stats"]["sources"] == {"eccv_virtual_detail": 1}
+
+
+def test_selected_virtual_details_sets_oral_from_url_not_nav_text(monkeypatch):
+    from auto_research.auto_find import sources
+
+    detail_url = "https://icml.cc/virtual/2026/oral/42"
+
+    class Response:
+        text = """
+        <html><head><title>Recommendation with User Preference Signals</title></head><body>
+          <nav>Spotlight sessions</nav>
+          <section class="abstract">Abstract This paper studies recommendation with language model preference signals, adaptive user modeling, offline evaluation, and controllable personalized ranking.</section>
+        </body></html>
+        """
+
+    monkeypatch.setattr(sources, "_request", lambda _url, timeout=30: Response())
+    papers = [{
+        "id": "paper-oral",
+        "source": "icml_downloads",
+        "title": "Recommendation with User Preference Signals",
+        "authors": "",
+        "abstract": "",
+        "url": detail_url,
+        "pdf_url": "",
+        "venue": "ICML",
+        "year": 2026,
+        "metadata": {"detail_url": detail_url, "title_index_only": True},
+    }]
+
+    detailed = sources.fetch_selected_venue_details(papers, wall_timeout_sec=10)
+
+    assert detailed[0]["track"] == "ICML 2026 Oral"
+    assert detailed[0]["presentation_type"] == "oral"
+    assert detailed[0]["metadata"]["presentation_source"] == "icml_virtual_url_or_title"
+
+
+def test_neurips_detail_records_spotlight_presentation():
+    html = """
+    <html><head><meta property="og:title" content="NeurIPS Spotlight: Preference Alignment for Recommendation" /></head><body>
+      <h1>Preference Alignment for Recommendation</h1>
+      <a href="https://openreview.net/forum?id=abc123">OpenReview</a>
+      <h2>Abstract</h2>
+      <p>This paper studies recommendation with language model preference signals, adaptive personalization, offline evaluation, and robust user modeling.</p>
+      <span>Show more</span>
+    </body></html>
+    """
+
+    row = _parse_neurips_detail(html, "https://neurips.cc/virtual/2026/spotlight/123", "Preference Alignment for Recommendation", 2026)
+
+    assert row["track"] == "NeurIPS 2026 Spotlight"
+    assert row["presentation_type"] == "spotlight"
+    assert row["metadata"]["presentation_source"] == "neurips_virtual_url_or_title"
+
+
+def test_oral_presentation_bonus_still_applies_to_supported_recommendation():
+    row = {
+        "title": "Oral Preference Alignment for Recommendation",
+        "abstract": "This paper studies recommendation with language model preference signals, adaptive personalization, offline evaluation, and robust user modeling.",
+        "track": "NeurIPS 2026 Oral",
+        "fit_score": 8.0,
+        "diversity_score": 7.0,
+        "topic_evidence": "passed: direct topic match",
+        "topic_evidence_supported": True,
+        "reason_source": "llm abstract evaluation",
+    }
+
+    _apply_quality_bonus(row)
+
+    assert row["presentation_labels"] == ["oral"]
+    assert row["quality_bonus"] >= 0.45
+    assert "发表类型: oral +0.45" in row["quality_bonus_reason"]
+    assert row["score"] > row["base_score_before_quality_bonus"]
+
+
+def test_compact_paper_rows_preserve_presentation_fields():
+    from auto_research.web.project_bridge import _compact_paper_row
+    from auto_research.web.server import _artifact_compact_paper_row
+
+    row = {
+        "id": "paper-oral",
+        "title": "Oral Preference Recommendation",
+        "venue": "ICML",
+        "year": 2026,
+        "track": "ICML 2026 Oral",
+        "presentation_type": "oral",
+        "presentation_label": "ICML 2026 Oral",
+        "presentation_labels": ["oral"],
+        "quality_labels": ["oral"],
+        "abstract": "This paper studies recommendation with preference signals.",
+    }
+
+    for compact in [_compact_paper_row(row), _artifact_compact_paper_row(row)]:
+        assert compact["track"] == "ICML 2026 Oral"
+        assert compact["presentation_type"] == "oral"
+        assert compact["presentation_labels"] == ["oral"]
+        assert compact["quality_labels"] == ["oral"]
 
 
 def test_openreview_venue_preserves_official_primary_area(monkeypatch):

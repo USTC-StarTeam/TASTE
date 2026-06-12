@@ -150,6 +150,67 @@ def _clean_text(value: str) -> str:
     return " ".join((value or "").split())
 
 
+_ABSTRACT_UI_CONTROL_RE = re.compile(
+    r"(?:\s*(?:show\s+(?:more|less)|read\s+(?:more|less)|显示更多|显示较少|展开|收起)\s*[。.]?\s*)+$",
+    re.IGNORECASE,
+)
+
+
+def _strip_abstract_ui_controls(value: object) -> str:
+    return _ABSTRACT_UI_CONTROL_RE.sub("", _clean_text(str(value or ""))).strip()
+
+
+def _presentation_type_from_url(url: object) -> str:
+    text = str(url or "").lower()
+    if re.search(r"/(?:best[-_]?paper|award)(?:/|$)", text):
+        return "best paper/award"
+    if re.search(r"/oral(?:/|$)", text):
+        return "oral"
+    if re.search(r"/(?:spotlight|highlight)(?:/|$)", text):
+        return "spotlight"
+    if re.search(r"/poster(?:/|$)", text):
+        return "poster"
+    return ""
+
+
+def _presentation_type_from_text(value: object) -> str:
+    text = _clean_text(str(value or "")).lower()
+    if not text:
+        return ""
+    if re.search(r"\b(best|award|outstanding|distinguished)[-\s]+paper\b", text):
+        return "best paper/award"
+    if re.search(r"\boral\b", text):
+        return "oral"
+    if re.search(r"\bspotlight\b|\bhighlight\b", text):
+        return "spotlight"
+    if re.search(r"\bposter\b", text):
+        return "poster"
+    return ""
+
+
+def _presentation_display_label(venue: object, year: object, presentation_type: str) -> str:
+    label = str(presentation_type or "").strip()
+    if not label:
+        return ""
+    display = " ".join(part for part in [str(venue or "").strip(), str(year or "").strip(), label.title()] if part).strip()
+    return display or label
+
+
+def _set_presentation_metadata(paper: dict, presentation_type: str, *, source: str) -> None:
+    label = str(presentation_type or "").strip().lower()
+    if not label:
+        return
+    metadata = paper.setdefault("metadata", {})
+    display = _presentation_display_label(paper.get("venue"), paper.get("year"), label)
+    paper.setdefault("track", display)
+    paper.setdefault("presentation_type", label)
+    paper.setdefault("presentation_label", display)
+    if isinstance(metadata, dict):
+        metadata.setdefault("presentation_type", label)
+        metadata.setdefault("presentation_label", display)
+        metadata.setdefault("presentation_source", source)
+
+
 def _title_key(value: str) -> str:
     text = html.unescape(_clean_text(value)).lower()
     return re.sub(r"[^a-z0-9]+", " ", text).strip()
@@ -1142,7 +1203,7 @@ def fetch_eccv_virtual(years: list[int], max_items: int) -> list[dict]:
             if url in seen:
                 continue
             seen.add(url)
-            papers.append({
+            paper = {
                 "id": stable_id("paper", url),
                 "source": "eccv_virtual",
                 "title": title,
@@ -1154,8 +1215,10 @@ def fetch_eccv_virtual(years: list[int], max_items: int) -> list[dict]:
                 "year": year,
                 "category": "",
                 "classification_source": "llm_inferred",
-                "metadata": {"virtual_url": list_url},
-            })
+                "metadata": {"virtual_url": list_url, "detail_url": url, "title_index_only": True},
+            }
+            _set_presentation_metadata(paper, _presentation_type_from_url(url), source="eccv_virtual_url")
+            papers.append(paper)
             if len(papers) >= max_items:
                 return papers
     return papers
@@ -1201,7 +1264,7 @@ def fetch_icml_downloads(years: list[int], max_items: int) -> list[dict]:
             if key in seen:
                 continue
             seen.add(key)
-            papers.append({
+            paper = {
                 "id": stable_id("paper", f"icml:{year}:{title}"),
                 "source": "icml_downloads",
                 "title": title,
@@ -1213,8 +1276,10 @@ def fetch_icml_downloads(years: list[int], max_items: int) -> list[dict]:
                 "year": year,
                 "category": "",
                 "classification_source": "llm_inferred",
-                "metadata": {"venue_id": "dblp_icml", "icml_downloads_url": url, "title_index_only": True},
-            })
+                "metadata": {"venue_id": "dblp_icml", "icml_downloads_url": url, "detail_url": paper_url, "title_index_only": True},
+            }
+            _set_presentation_metadata(paper, _presentation_type_from_url(paper_url), source="icml_downloads_url")
+            papers.append(paper)
             if len(papers) >= max_items:
                 truncated = True
                 break
@@ -1444,7 +1509,7 @@ def _parse_neurips_detail(html: str, url: str, fallback_title: str, year: int) -
             break
 
     paper_url = openreview_url or url
-    return {
+    paper = {
         "id": stable_id("paper", paper_url or f"neurips:{year}:{title}"),
         "source": "neurips_virtual",
         "title": title or fallback_title,
@@ -1458,6 +1523,14 @@ def _parse_neurips_detail(html: str, url: str, fallback_title: str, year: int) -
         "classification_source": "llm_inferred",
         "metadata": {"venue_url": url, "openreview_url": openreview_url},
     }
+    presentation = _presentation_type_from_url(url)
+    if not presentation:
+        for candidate in title_candidates:
+            presentation = _presentation_type_from_text(candidate)
+            if presentation:
+                break
+    _set_presentation_metadata(paper, presentation, source="neurips_virtual_url_or_title")
+    return paper
 
 
 def _parse_neurips_list(html: str, list_url: str, max_items: int) -> list[tuple[str, str]]:
@@ -1467,7 +1540,9 @@ def _parse_neurips_list(html: str, list_url: str, max_items: int) -> list[tuple[
     for anchor in soup.find_all("a", href=True):
         href = anchor["href"]
         title = _clean_text(anchor.get_text(" ", strip=True))
-        if "/poster/" not in href or not _looks_like_paper_title(title):
+        if not any(part in href for part in ["/poster/", "/oral/", "/spotlight/", "/highlight/", "/paper/"]):
+            continue
+        if not _looks_like_paper_title(title):
             continue
         detail_url = requests.compat.urljoin(list_url, href)
         if detail_url in seen:
@@ -1488,8 +1563,9 @@ def fetch_neurips_title_index(year: int, max_items: int, raise_errors: bool = Fa
             raise
         return []
 
-    return [
-        {
+    papers: list[dict] = []
+    for detail_url, title in candidates:
+        paper = {
             "id": stable_id("paper", detail_url),
             "source": "neurips_virtual",
             "title": title,
@@ -1503,8 +1579,9 @@ def fetch_neurips_title_index(year: int, max_items: int, raise_errors: bool = Fa
             "classification_source": "llm_inferred",
             "metadata": {"venue_url": detail_url, "detail_url": detail_url, "title_index_only": True},
         }
-        for detail_url, title in candidates
-    ]
+        _set_presentation_metadata(paper, _presentation_type_from_url(detail_url), source="neurips_virtual_url")
+        papers.append(paper)
+    return papers
 
 
 def fetch_neurips_details(
@@ -1542,7 +1619,7 @@ def fetch_neurips_details(
             papers.append(_parse_neurips_detail(detail_html, detail_url, title, year))
             time.sleep(0.2)
         except Exception as exc:
-            papers.append({
+            fallback = {
                 "id": stable_id("paper", detail_url),
                 "source": "neurips_virtual",
                 "title": title,
@@ -1557,7 +1634,9 @@ def fetch_neurips_details(
                 "metadata": {"venue_url": detail_url, "detail_parse_error": True, "detail_fetch_error": str(exc)[:240]},
                 "detail_fetch_deferred": True,
                 "detail_fetch_deferred_reason": "detail_request_failed",
-            })
+            }
+            _set_presentation_metadata(fallback, _presentation_type_from_url(detail_url), source="neurips_virtual_url")
+            papers.append(fallback)
     return papers
 
 
@@ -2073,67 +2152,166 @@ def fetch_acl_anthology(venue: dict, years: list[int], max_items: int) -> list[d
     return papers
 
 
+
+def _paper_has_official_category(paper: dict) -> bool:
+    if not isinstance(paper, dict):
+        return False
+    source = str(paper.get("classification_source") or "").lower()
+    if source not in {"official", "official_cached", "venue_official", "openreview", "local_metadata_category"}:
+        return False
+    return bool(str(paper.get("primary_area") or paper.get("category") or paper.get("track") or "").strip())
+
+
+def _venue_source_official_category_count(papers: list[dict]) -> int:
+    return sum(1 for paper in papers if _paper_has_official_category(paper))
+
+
+def _venue_source_audit(papers: list[dict], adapter: str) -> dict[str, Any]:
+    audit = venue_metadata_audit_from_papers(papers)
+    if not audit:
+        missing_abstracts = sum(1 for paper in papers if not str((paper if isinstance(paper, dict) else {}).get("abstract") or "").strip())
+        official_category_count = _venue_source_official_category_count(papers)
+        audit = {
+            "schema_version": 1,
+            "status": "partial",
+            "source_verified": bool(papers),
+            "complete": False,
+            "adapter": adapter,
+            "paper_count": len(papers),
+            "missing_abstract_count": missing_abstracts,
+            "has_abstracts": bool(papers) and missing_abstracts == 0,
+            "any_abstracts": bool(papers) and missing_abstracts < len(papers),
+            "has_official_categories": official_category_count > 0,
+            "category_status": "official_or_cached_categories" if official_category_count else "no_official_categories",
+        }
+    return audit
+
+
+def _venue_source_has_official_categories(papers: list[dict], audit: dict[str, Any]) -> bool:
+    status = str(audit.get("category_status") or "").lower()
+    if status in {"no_official_categories", "missing_categories", "no_or_partial_categories"}:
+        return False
+    return bool(audit.get("has_official_categories")) or _venue_source_official_category_count(papers) > 0
+
+
+def _venue_source_category_priority_eligible(papers: list[dict], audit: dict[str, Any], requested_limit: int | None, max_candidate_count: int | None = None) -> bool:
+    if not papers or not _venue_source_has_official_categories(papers, audit):
+        return False
+    count = len(papers)
+    if requested_limit and requested_limit > 0 and count >= requested_limit:
+        return True
+    if count >= 50:
+        if not max_candidate_count or max_candidate_count <= 0:
+            return True
+        return count >= max(50, int(max_candidate_count * 0.10))
+    if max_candidate_count and max_candidate_count > 0:
+        return max_candidate_count < 50 and count >= max(1, int(max_candidate_count * 0.50))
+    return False
+
+
+def _venue_source_score(papers: list[dict], adapter: str, order: int, requested_limit: int | None, max_candidate_count: int) -> tuple:
+    audit = _venue_source_audit(papers, adapter)
+    category_priority = _venue_source_category_priority_eligible(papers, audit, requested_limit, max_candidate_count)
+    official_title = bool(audit.get("official_title_index_verified") or audit.get("official_accepted_list_verified"))
+    complete = bool(audit.get("complete") or audit.get("title_index_complete"))
+    any_abstracts = bool(audit.get("any_abstracts") or audit.get("has_abstracts"))
+    source_verified = bool(audit.get("source_verified"))
+    return (
+        1 if category_priority else 0,
+        1 if complete else 0,
+        1 if official_title else 0,
+        1 if any_abstracts else 0,
+        1 if source_verified else 0,
+        len(papers),
+        -order,
+    )
+
+
+def _choose_best_venue_source(candidates: list[tuple[str, list[dict]]], requested_limit: int | None) -> tuple[list[dict], str]:
+    nonempty = [(adapter, papers) for adapter, papers in candidates if papers]
+    if not nonempty:
+        return [], "none"
+    max_candidate_count = max(len(papers) for _adapter, papers in nonempty)
+    scored = [
+        (_venue_source_score(papers, adapter, order, requested_limit, max_candidate_count), adapter, papers)
+        for order, (adapter, papers) in enumerate(nonempty)
+    ]
+    scored.sort(key=lambda row: row[0], reverse=True)
+    _score, adapter, papers = scored[0]
+    return papers, adapter
+
+
+def _source_has_confident_official_categories(papers: list[dict], adapter: str, requested_limit: int | None) -> bool:
+    audit = _venue_source_audit(papers, adapter)
+    max_count = requested_limit if requested_limit and requested_limit > 0 else len(papers)
+    return _venue_source_category_priority_eligible(papers, audit, requested_limit, max_count)
+
+
+def _source_is_complete_official_title_index(papers: list[dict], adapter: str) -> bool:
+    audit = _venue_source_audit(papers, adapter)
+    return bool(papers) and bool(audit.get("complete") or audit.get("title_index_complete")) and bool(audit.get("official_title_index_verified") or audit.get("official_accepted_list_verified"))
+
+
 def fetch_venue_title_index(venue: dict, years: list[int], max_items: int) -> tuple[list[dict], str]:
-    if is_iclr_venue(venue):
+    candidates: list[tuple[str, list[dict]]] = []
+
+    if is_openreview_supported_venue(venue):
         papers = fetch_openreview_venue(venue, years, max_items)
         if papers:
-            return papers, "openreview"
-        if 2026 in years:
+            candidates.append(("openreview", papers))
+            if _source_has_confident_official_categories(papers, "openreview", max_items) or (max_items and len(papers) >= max_items):
+                return papers, "openreview"
+        if is_iclr_venue(venue) and 2026 in years:
             papers = fetch_openreview_iclr_2026(max_items)
             if papers:
-                return papers, "openreview_reference"
+                candidates.append(("openreview_reference", papers))
+                if _source_has_confident_official_categories(papers, "openreview_reference", max_items) or (max_items and len(papers) >= max_items):
+                    return papers, "openreview_reference"
 
     if is_neurips_venue(venue):
-        papers = fetch_openreview_venue(venue, years, max_items)
-        if papers:
-            return papers, "openreview"
         papers: list[dict] = []
         for year in years:
             papers.extend(fetch_neurips_title_index(year, max_items))
             if len(papers) >= max_items:
                 break
         if papers:
-            return papers[:max_items], "neurips_virtual"
+            candidates.append(("neurips_virtual", papers[:max_items]))
 
     if is_icml_venue(venue):
         papers = fetch_icml_downloads(years, max_items)
         if papers:
-            return papers, "icml_downloads"
+            candidates.append(("icml_downloads", papers))
+            if _source_is_complete_official_title_index(papers, "icml_downloads"):
+                return _choose_best_venue_source(candidates, max_items)
         cached = _icml_verified_download_cache(venue, years, max_items)
         if cached:
-            return cached, "icml_downloads_cache"
-
-    if venue.get("address"):
-        papers = fetch_dblp_venue(venue, years, max_items)
-        if papers:
-            return papers, "dblp"
+            candidates.append(("icml_downloads_cache", cached))
 
     if is_acl_family_venue(venue):
         papers = fetch_acl_anthology(venue, years, max_items)
         if papers:
-            return papers, "acl_anthology"
+            candidates.append(("acl_anthology", papers))
 
     if is_cvf_venue(venue):
         papers = fetch_cvf_openaccess(venue, years, max_items)
         if papers:
-            return papers, "cvf_openaccess"
+            candidates.append(("cvf_openaccess", papers))
         if (venue.get("name") or "").upper() == "ECCV":
             papers = fetch_eccv_virtual(years, max_items)
             if papers:
-                return papers, "eccv_virtual"
+                candidates.append(("eccv_virtual", papers))
 
     if is_pmlr_venue(venue):
         papers = fetch_pmlr_index(venue, years, max_items)
         if papers:
-            return papers, "pmlr"
+            candidates.append(("pmlr", papers))
 
-    if is_openreview_supported_venue(venue):
-        papers = fetch_openreview_venue(venue, years, max_items)
+    if venue.get("address"):
+        papers = fetch_dblp_venue(venue, years, max_items)
         if papers:
-            return papers, "openreview"
+            candidates.append(("dblp", papers))
 
-    return [], "none"
-
+    return _choose_best_venue_source(candidates, max_items)
 
 def _merge_enrichment(base: dict, enrichment: dict, adapter: str) -> dict:
     merged = dict(base)
@@ -2156,9 +2334,22 @@ def _merge_enrichment(base: dict, enrichment: dict, adapter: str) -> dict:
         metadata.setdefault(f"{adapter}_url", enrichment.get("url"))
     if enrichment.get("category") and not merged.get("category"):
         merged["category"] = enrichment["category"]
-    for key in ["primary_area", "track"]:
+    for key in ["primary_area", "track", "presentation_type", "presentation_label"]:
         if enrichment.get(key) and not merged.get(key):
             merged[key] = enrichment[key]
+    for key in ["presentation_type", "presentation_label", "presentation_source"]:
+        if enrichment_metadata.get(key) and not metadata.get(key):
+            metadata[key] = enrichment_metadata[key]
+    presentation_type = (
+        enrichment.get("presentation_type")
+        or enrichment_metadata.get("presentation_type")
+        or _presentation_type_from_url(enrichment.get("url") or enrichment_metadata.get("detail_url") or enrichment_metadata.get("venue_url"))
+        or _presentation_type_from_text(enrichment.get("track") or enrichment_metadata.get("presentation_label"))
+    )
+    if presentation_type:
+        merged["metadata"] = metadata
+        _set_presentation_metadata(merged, presentation_type, source=f"{adapter}_enrichment")
+        metadata = merged.get("metadata", metadata)
     if isinstance(enrichment.get("keywords"), list):
         keywords = merged.get("keywords") if isinstance(merged.get("keywords"), list) else []
         merged["keywords"] = list(dict.fromkeys([*keywords, *[str(item) for item in enrichment["keywords"] if str(item)]]))
@@ -2226,7 +2417,56 @@ def _fetch_enrichment_sources(venue: dict, years: list[int]) -> list[tuple[str, 
 
 
 def fetch_venue_title_index_all(venue: dict, years: list[int]) -> tuple[list[dict], str]:
-    """Fetch the complete venue/year corpus and enrich DBLP rows with official adapters."""
+    """Fetch the complete venue/year corpus with official-category sources preferred globally."""
+    requested_limit = 100000
+    candidates: list[tuple[str, list[dict]]] = []
+
+    if is_openreview_supported_venue(venue):
+        papers = fetch_openreview_venue(venue, years, requested_limit)
+        if papers:
+            candidates.append(("openreview", papers))
+            if _source_has_confident_official_categories(papers, "openreview", requested_limit):
+                return papers, "openreview"
+        if is_iclr_venue(venue) and 2026 in years:
+            papers = fetch_openreview_iclr_2026(requested_limit)
+            if papers:
+                candidates.append(("openreview_reference", papers))
+                if _source_has_confident_official_categories(papers, "openreview_reference", requested_limit):
+                    return papers, "openreview_reference"
+
+    if is_neurips_venue(venue):
+        papers: list[dict] = []
+        for year in years:
+            papers.extend(fetch_neurips_title_index(year, requested_limit))
+        if papers:
+            candidates.append(("neurips_virtual", papers))
+
+    if is_acl_family_venue(venue):
+        papers = fetch_acl_anthology(venue, years, requested_limit)
+        if papers:
+            candidates.append(("acl_anthology", papers))
+
+    if is_cvf_venue(venue):
+        papers = fetch_cvf_openaccess(venue, years, requested_limit)
+        if papers:
+            candidates.append(("cvf_openaccess", papers))
+        if (venue.get("name") or "").upper() == "ECCV":
+            papers = fetch_eccv_virtual(years, requested_limit)
+            if papers:
+                candidates.append(("eccv_virtual", papers))
+
+    if is_icml_venue(venue):
+        papers = fetch_icml_downloads(years, requested_limit)
+        if papers:
+            candidates.append(("icml_downloads", papers))
+            if _source_is_complete_official_title_index(papers, "icml_downloads"):
+                return _choose_best_venue_source(candidates, requested_limit)
+
+    if is_pmlr_venue(venue):
+        papers = fetch_pmlr_index(venue, years, requested_limit)
+        if papers:
+            candidates.append(("pmlr", papers))
+
     if venue.get("address"):
         base_papers = fetch_dblp_venue(venue, years, None)
         if base_papers:
@@ -2234,61 +2474,20 @@ def fetch_venue_title_index_all(venue: dict, years: list[int]) -> tuple[list[dic
             adapter = "dblp"
             if used_adapters:
                 adapter = f"dblp+{'+'.join(used_adapters)}"
-            return merged, adapter
+            candidates.append((adapter, merged))
 
-    if is_iclr_venue(venue):
-        papers = fetch_openreview_venue(venue, years, 100000)
-        if papers:
-            return papers, "openreview"
-        if 2026 in years:
-            papers = fetch_openreview_iclr_2026(100000)
-            if papers:
-                return papers, "openreview_reference"
+    return _choose_best_venue_source(candidates, requested_limit)
 
-    if is_neurips_venue(venue):
-        papers = fetch_openreview_venue(venue, years, 100000)
-        if papers:
-            return papers, "openreview"
-        papers: list[dict] = []
-        for year in years:
-            papers.extend(fetch_neurips_title_index(year, 100000))
-        if papers:
-            return papers, "neurips_virtual"
-
-    if is_acl_family_venue(venue):
-        papers = fetch_acl_anthology(venue, years, 100000)
-        if papers:
-            return papers, "acl_anthology"
-
-    if is_cvf_venue(venue):
-        papers = fetch_cvf_openaccess(venue, years, 100000)
-        if papers:
-            return papers, "cvf_openaccess"
-        if (venue.get("name") or "").upper() == "ECCV":
-            papers = fetch_eccv_virtual(years, 100000)
-            if papers:
-                return papers, "eccv_virtual"
-
-    if is_icml_venue(venue):
-        papers = fetch_icml_downloads(years, 100000)
-        if papers:
-            return papers, "icml_downloads"
-
-    if is_pmlr_venue(venue):
-        papers = fetch_pmlr_index(venue, years, 100000)
-        if papers:
-            return papers, "pmlr"
-
-    if is_openreview_supported_venue(venue):
-        papers = fetch_openreview_venue(venue, years, 100000)
-        if papers:
-            return papers, "openreview"
-
-    return [], "none"
-
-
-def _extract_icml_virtual_abstract(soup: BeautifulSoup) -> str:
-    for selector in ["div[class*='abstract']", "section[class*='abstract']", "#abstract", "meta[name='citation_abstract']", "meta[property='og:description']"]:
+def _extract_conference_virtual_abstract(soup: BeautifulSoup) -> str:
+    selectors = [
+        "div[class*='abstract']",
+        "section[class*='abstract']",
+        "#abstract",
+        "meta[name='citation_abstract']",
+        "meta[name='description']",
+        "meta[property='og:description']",
+    ]
+    for selector in selectors:
         node = soup.select_one(selector)
         if not node:
             continue
@@ -2296,9 +2495,21 @@ def _extract_icml_virtual_abstract(soup: BeautifulSoup) -> str:
         text = _clean_text(text)
         if text.lower().startswith("abstract "):
             text = text[len("abstract "):].strip()
+        text = _strip_abstract_ui_controls(text)
         if len(text) >= 80:
             return text
-    return ""
+    page_text = soup.get_text("\n", strip=True)
+    text = _extract_between_markers(
+        page_text,
+        "Abstract",
+        ["Show more", "Show less", "Video", "Chat is not available", "Successful Page Load", "BibTeX", "Supplementary"],
+    )
+    text = _strip_abstract_ui_controls(text)
+    return text if len(text) >= 80 else ""
+
+
+def _extract_icml_virtual_abstract(soup: BeautifulSoup) -> str:
+    return _extract_conference_virtual_abstract(soup)
 
 
 def _jsonld_nodes(value: object) -> list[dict]:
@@ -2330,7 +2541,7 @@ def _name_from_jsonld_author(value: object) -> str:
     return ""
 
 
-def _extract_icml_virtual_authors(soup: BeautifulSoup) -> list[str]:
+def _extract_conference_virtual_authors(soup: BeautifulSoup) -> list[str]:
     authors: list[str] = []
     for node in soup.find_all("meta", attrs={"name": "citation_author"}):
         name = _clean_text(str(node.get("content") or ""))
@@ -2356,6 +2567,10 @@ def _extract_icml_virtual_authors(soup: BeautifulSoup) -> list[str]:
     return authors
 
 
+def _extract_icml_virtual_authors(soup: BeautifulSoup) -> list[str]:
+    return _extract_conference_virtual_authors(soup)
+
+
 def _positive_float_env(name: str, default: float = 0.0) -> float:
     try:
         value = float(str(os.environ.get(name, '') or default).strip())
@@ -2372,13 +2587,47 @@ def _mark_detail_fetch_deferred(paper: dict, reason: str) -> None:
     paper['detail_fetch_deferred_reason'] = reason
 
 
+def _conference_virtual_detail_url(paper: dict) -> str:
+    metadata = paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}
+    return str(metadata.get("detail_url") or metadata.get("venue_url") or paper.get("url") or "").strip()
+
+
+def _conference_virtual_detail_source(paper: dict) -> str:
+    source = str(paper.get("source") or "").strip()
+    url = _conference_virtual_detail_url(paper)
+    if not url or "/virtual/" not in url:
+        return ""
+    metadata = paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}
+    if source in {"icml_downloads", "icml_downloads_cache", "eccv_virtual", "neurips_virtual"}:
+        if metadata.get("title_index_only") or not (paper.get("abstract") and paper.get("pdf_url")):
+            return source
+    lowered = url.lower()
+    if any(domain in lowered for domain in ["icml.cc/virtual/", "neurips.cc/virtual/", "eccv.ecva.net/virtual/"]):
+        if metadata.get("title_index_only") or not (paper.get("abstract") and paper.get("pdf_url")):
+            return source or "conference_virtual"
+    return ""
+
+
+def _conference_virtual_detail_target(paper: dict) -> bool:
+    return bool(_conference_virtual_detail_source(paper))
+
+
 def _icml_virtual_detail_target(paper: dict) -> bool:
-    url = str(paper.get("url") or "")
-    return paper.get("source") == "icml_downloads" and "/virtual/" in url
+    return _conference_virtual_detail_source(paper) in {"icml_downloads", "icml_downloads_cache"}
 
 
-def _fetch_one_icml_virtual_detail(paper: dict, request_timeout: int) -> dict:
-    url = str(paper.get("url") or "")
+def _conference_virtual_detail_label(paper: dict) -> str:
+    source = _conference_virtual_detail_source(paper)
+    if source in {"icml_downloads", "icml_downloads_cache"}:
+        return "icml_virtual"
+    if source and source.endswith("_virtual"):
+        return f"{source}_detail"
+    return "conference_virtual_detail"
+
+
+def _fetch_one_conference_virtual_detail(paper: dict, request_timeout: int) -> dict:
+    url = _conference_virtual_detail_url(paper)
+    detail_label = _conference_virtual_detail_label(paper)
     result = {"abstract_filled": False, "authors_filled": False, "pdf_filled": False, "error": ""}
     try:
         soup = BeautifulSoup(_request(url, timeout=request_timeout).text, "html.parser")
@@ -2386,18 +2635,33 @@ def _fetch_one_icml_virtual_detail(paper: dict, request_timeout: int) -> dict:
         result["error"] = str(exc)[:240]
         return result
     metadata = paper.setdefault("metadata", {})
+    presentation = _presentation_type_from_url(url)
+    if not presentation:
+        snippets: list[str] = []
+        for selector in ["meta[property='og:title']", "meta[name='twitter:title']"]:
+            node = soup.select_one(selector)
+            if node and node.get("content"):
+                snippets.append(str(node["content"]))
+        if soup.title:
+            snippets.append(soup.title.get_text(" ", strip=True))
+        snippets.extend(node.get_text(" ", strip=True) for node in soup.find_all(["h1", "h2"], limit=4))
+        for snippet in snippets:
+            presentation = _presentation_type_from_text(snippet)
+            if presentation:
+                break
+    _set_presentation_metadata(paper, presentation, source=f"{detail_label}_url_or_title")
     if not paper.get("authors"):
-        authors = _extract_icml_virtual_authors(soup)
+        authors = _extract_conference_virtual_authors(soup)
         if authors:
             paper["authors"] = ", ".join(authors)
-            metadata["authors_source"] = "icml_virtual_jsonld"
-            metadata["icml_virtual_author_count"] = len(authors)
+            metadata["authors_source"] = f"{detail_label}_jsonld"
+            metadata["virtual_author_count"] = len(authors)
             result["authors_filled"] = True
     if not paper.get("abstract"):
-        abstract = _extract_icml_virtual_abstract(soup)
+        abstract = _extract_conference_virtual_abstract(soup)
         if abstract:
             paper["abstract"] = abstract
-            metadata["abstract_source"] = "icml_virtual"
+            metadata["abstract_source"] = detail_label
             result["abstract_filled"] = True
     if not paper.get("pdf_url"):
         pdf_link = soup.find("a", href=re.compile(r"\.pdf(?:$|\?)", re.I))
@@ -2405,13 +2669,17 @@ def _fetch_one_icml_virtual_detail(paper: dict, request_timeout: int) -> dict:
             paper["pdf_url"] = requests.compat.urljoin(url, pdf_link["href"])
             result["pdf_filled"] = True
     if paper.get("abstract") or paper.get("authors") or paper.get("pdf_url"):
-        metadata["detail_source"] = "icml_virtual"
+        metadata["detail_source"] = detail_label
     if not paper.get("pdf_url"):
-        metadata.setdefault("full_text_locator_status", "official_icml_abstract_page_without_pdf_link")
+        metadata.setdefault("full_text_locator_status", "official_virtual_abstract_page_without_pdf_link")
     return result
 
 
-def enrich_icml_virtual_details(papers: list[dict], limit: int | None = None, *, wall_timeout_sec: float | None = None, should_cancel: Callable[[], bool] | None = None) -> tuple[list[dict], dict]:
+def _fetch_one_icml_virtual_detail(paper: dict, request_timeout: int) -> dict:
+    return _fetch_one_conference_virtual_detail(paper, request_timeout)
+
+
+def enrich_conference_virtual_details(papers: list[dict], limit: int | None = None, *, wall_timeout_sec: float | None = None, should_cancel: Callable[[], bool] | None = None) -> tuple[list[dict], dict]:
     attempted = 0
     abstracts_filled = 0
     authors_filled = 0
@@ -2419,18 +2687,25 @@ def enrich_icml_virtual_details(papers: list[dict], limit: int | None = None, *,
     timed_out = False
     cancelled = False
     candidates = papers if limit is None else papers[:limit]
-    targets = [paper for paper in candidates if _icml_virtual_detail_target(paper)]
+    targets = [paper for paper in candidates if _conference_virtual_detail_target(paper)]
     started = time.monotonic()
-    wall_timeout = wall_timeout_sec if wall_timeout_sec is not None else _positive_float_env("ICML_DETAIL_WALL_TIMEOUT_SEC", _positive_float_env("VENUE_DETAIL_WALL_TIMEOUT_SEC", 180.0))
-    request_timeout = int(_positive_float_env("ICML_DETAIL_REQUEST_TIMEOUT_SEC", _metadata_timeout(6)))
+    wall_timeout = wall_timeout_sec if wall_timeout_sec is not None else _positive_float_env(
+        "CONFERENCE_VIRTUAL_DETAIL_WALL_TIMEOUT_SEC",
+        _positive_float_env("ICML_DETAIL_WALL_TIMEOUT_SEC", _positive_float_env("VENUE_DETAIL_WALL_TIMEOUT_SEC", 180.0)),
+    )
+    request_timeout = int(_positive_float_env(
+        "CONFERENCE_VIRTUAL_DETAIL_REQUEST_TIMEOUT_SEC",
+        _positive_float_env("ICML_DETAIL_REQUEST_TIMEOUT_SEC", _metadata_timeout(6)),
+    ))
     worker_default = min(16, max(1, len(targets))) if targets else 1
-    max_workers = int(_positive_float_env("ICML_DETAIL_WORKERS", worker_default))
+    max_workers = int(_positive_float_env("CONFERENCE_VIRTUAL_DETAIL_WORKERS", _positive_float_env("ICML_DETAIL_WORKERS", worker_default)))
     max_workers = max(1, min(32, max_workers, max(1, len(targets))))
     cancel_check = should_cancel or (lambda: False)
     if not targets:
         return papers, {
             "attempted": 0,
             "abstracts_filled": 0,
+            "authors_filled": 0,
             "pdfs_filled": 0,
             "timed_out": False,
             "cancelled": False,
@@ -2438,7 +2713,13 @@ def enrich_icml_virtual_details(papers: list[dict], limit: int | None = None, *,
             "request_timeout_sec": request_timeout,
             "workers": max_workers,
             "deferred": 0,
+            "sources": {},
         }
+
+    source_counts: dict[str, int] = {}
+    for paper in targets:
+        label = _conference_virtual_detail_label(paper)
+        source_counts[label] = source_counts.get(label, 0) + 1
 
     future_to_paper: dict = {}
     pending_iter = iter(targets)
@@ -2457,7 +2738,7 @@ def enrich_icml_virtual_details(papers: list[dict], limit: int | None = None, *,
         except StopIteration:
             return False
         attempted += 1
-        future_to_paper[executor.submit(_fetch_one_icml_virtual_detail, paper, request_timeout)] = paper
+        future_to_paper[executor.submit(_fetch_one_conference_virtual_detail, paper, request_timeout)] = paper
         return True
 
     executor = ThreadPoolExecutor(max_workers=max_workers)
@@ -2519,11 +2800,12 @@ def enrich_icml_virtual_details(papers: list[dict], limit: int | None = None, *,
             if result.get("pdf_filled"):
                 pdfs_filled += 1
 
-    if timed_out or cancelled:
+    if cancelled or timed_out:
         reason = "cancel_requested" if cancelled else f"wall_timeout_{wall_timeout:.0f}s"
         for paper in targets:
-            if id(paper) not in completed and not paper.get("abstract"):
+            if id(paper) not in completed:
                 _mark_detail_fetch_deferred(paper, reason)
+
     return papers, {
         "attempted": attempted,
         "abstracts_filled": abstracts_filled,
@@ -2535,22 +2817,28 @@ def enrich_icml_virtual_details(papers: list[dict], limit: int | None = None, *,
         "request_timeout_sec": request_timeout,
         "workers": max_workers,
         "deferred": sum(1 for paper in targets if paper.get("detail_fetch_deferred")),
+        "sources": source_counts,
     }
+
+
+def enrich_icml_virtual_details(papers: list[dict], limit: int | None = None, *, wall_timeout_sec: float | None = None, should_cancel: Callable[[], bool] | None = None) -> tuple[list[dict], dict]:
+    return enrich_conference_virtual_details(papers, limit=limit, wall_timeout_sec=wall_timeout_sec, should_cancel=should_cancel)
 
 def fetch_selected_venue_details(papers: list[dict], *, should_cancel: Callable[[], bool] | None = None, wall_timeout_sec: float | None = None) -> list[dict]:
     details: list[dict] = []
     neurips_by_year: dict[int, list[dict]] = {}
-    icml_virtual: list[dict] = []
+    conference_virtual: list[dict] = []
     cancel_check = should_cancel or (lambda: False)
     for candidate in papers:
         if cancel_check():
             _mark_detail_fetch_deferred(candidate, 'cancel_requested')
             details.append(candidate)
             continue
-        if candidate.get('source') == 'neurips_virtual' and candidate.get('metadata', {}).get('title_index_only'):
+        metadata = candidate.get('metadata') if isinstance(candidate.get('metadata'), dict) else {}
+        if candidate.get('source') == 'neurips_virtual' and metadata.get('title_index_only'):
             neurips_by_year.setdefault(int(candidate.get('year') or date.today().year), []).append(candidate)
-        elif candidate.get('source') == 'icml_downloads' and candidate.get('metadata', {}).get('title_index_only'):
-            icml_virtual.append(candidate)
+        elif _conference_virtual_detail_target(candidate):
+            conference_virtual.append(candidate)
         else:
             details.append(candidate)
 
@@ -2561,8 +2849,8 @@ def fetch_selected_venue_details(papers: list[dict], *, should_cancel: Callable[
             details.extend(items)
             continue
         details.extend(fetch_neurips_details(items, year, wall_timeout_sec=wall_timeout_sec, should_cancel=cancel_check))
-    if icml_virtual:
-        enriched, stats = enrich_icml_virtual_details(icml_virtual, wall_timeout_sec=wall_timeout_sec, should_cancel=cancel_check)
+    if conference_virtual:
+        enriched, stats = enrich_conference_virtual_details(conference_virtual, wall_timeout_sec=wall_timeout_sec, should_cancel=cancel_check)
         for item in enriched:
             if isinstance(item.get('metadata'), dict):
                 item['metadata'].setdefault('detail_fetch_stats', stats)

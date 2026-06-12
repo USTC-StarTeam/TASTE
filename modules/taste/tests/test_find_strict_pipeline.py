@@ -222,6 +222,35 @@ def test_final_scoring_forces_temperature_zero():
     assert llm.temperatures[-1] == 0.0
 
 
+def test_final_scoring_prompt_requires_topic_evidence_schema_and_routes():
+    llm = BatchLLM()
+    cfg = AppConfig(
+        provider="mock",
+        research_interest="LLM-enhanced recommender systems; adaptive user preference modeling; controllable recommendation",
+        max_recommended_papers=5,
+        llm_concurrency=1,
+    )
+    items = [
+        {
+            "id": "paper_001",
+            "title": "Request-Aware Masking for Controllable Recommendation",
+            "abstract": "This paper studies controllable recommendation with user preference modeling and language-model request signals.",
+            "classification_source": "llm_inferred",
+        },
+    ]
+
+    _evaluate_items(items, cfg, llm, "articles", log=lambda _msg: None)
+    final_prompt = next(prompt for prompt in llm.prompts if "Candidate items" in prompt)
+
+    assert "generated alternative topic routes for this run" in final_prompt
+    assert "OR semantics" in final_prompt
+    assert "topic_evidence_supported" in final_prompt
+    assert "matched_topic_route" in final_prompt
+    assert "topic_evidence_basis" in final_prompt
+    assert "missing_topic_evidence" in final_prompt
+    assert "Set topic_evidence_supported=true only when" in final_prompt
+
+
 class OmittedRetryLLM(BatchLLM):
     def __init__(self, recover_on_attempt: int | None):
         super().__init__()

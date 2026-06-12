@@ -5217,21 +5217,27 @@ def test_find_adoption_preserves_completed_same_run_downstream(tmp_path, monkeyp
     assert (taste_dir / "full_text_reading" / "texts" / "a.txt").exists()
 
 
-def test_find_adoption_resets_stale_full_text_packet(tmp_path, monkeypatch):
+def test_find_adoption_preserves_existing_downstream_for_new_find(tmp_path, monkeypatch):
     project = 'demo_project'
     root = tmp_path / 'projects' / project
     taste_dir = root / 'planning' / 'finding'
     state_dir = root / 'state'
     run_root = tmp_path / 'runs' / 'find_new'
     stale_text_dir = taste_dir / 'full_text_reading' / 'texts'
+    stale_fragment_dir = taste_dir / 'current_find_deep_read_fragments'
     stale_text_dir.mkdir(parents=True)
+    stale_fragment_dir.mkdir(parents=True)
     state_dir.mkdir(parents=True)
     run_root.mkdir(parents=True)
     write_text(stale_text_dir / 'old.txt', 'old full text')
+    write_json(stale_fragment_dir / 'old_fragment.json', {'run_id': 'find_old', 'reading': {'title': 'Old Paper'}})
     write_json(
         taste_dir / 'full_text_reading' / 'full_text_packet.json',
         {'run_id': 'find_old', 'papers': [{'paper_id': 'old', 'title': 'Old Paper', 'text_path': 'texts/old.txt', 'text_chars': 50000}]},
     )
+    write_json(taste_dir / 'read_results.json', {'run_id': 'find_old', 'source': 'claude_code_current_find_takeover', 'readings': [{'paper_id': 'old'}]})
+    write_json(taste_dir / 'ideas.json', {'run_id': 'find_old', 'source': 'claude_code_current_find_takeover', 'ideas': [{'id': 'old-idea'}]})
+    write_json(taste_dir / 'plans.json', {'run_id': 'find_old', 'source': 'claude_code_current_find_takeover', 'plans': [{'plan_id': 'old-plan'}]})
     recommendations = [recommended_paper('paper-new', 'New Recommended Paper')]
     write_json(
         run_root / 'find_results.json',
@@ -5250,13 +5256,24 @@ def test_find_adoption_resets_stale_full_text_packet(tmp_path, monkeypatch):
     receipt = server._adopt_find_run_for_project(root, project, 'find_new', source='test_adoption')
 
     packet = read_json(taste_dir / 'full_text_reading' / 'full_text_packet.json', {})
+    read_payload = read_json(taste_dir / 'read_results.json', {})
+    ideas_payload = read_json(taste_dir / 'ideas.json', {})
+    plans_payload = read_json(taste_dir / 'plans.json', {})
+    plan_state = read_json(root / 'state' / 'current_find_research_plan.json', {})
     assert receipt['status'] == 'adopted'
-    assert packet['run_id'] == 'find_new'
-    assert packet['papers'] == []
-    assert packet['status'] == 'pending'
-    assert 'full_text_reading/' in receipt['stale_downstream_reset']
-    assert not (taste_dir / 'full_text_reading' / 'texts' / 'old.txt').exists()
-    assert receipt['backup_dir']
+    assert receipt['downstream_status'] == 'existing_downstream_preserved_pending_current_find_read'
+    assert packet['run_id'] == 'find_old'
+    assert packet['papers']
+    assert read_payload['run_id'] == 'find_old'
+    assert ideas_payload['run_id'] == 'find_old'
+    assert plans_payload['run_id'] == 'find_old'
+    assert plan_state['run_id'] == 'find_new'
+    assert plan_state['status'] == 'pending_current_find_read'
+    assert plan_state['downstream_status'] == 'existing_downstream_preserved_pending_current_find_read'
+    assert plan_state['preserved_downstream'] is True
+    assert receipt['stale_downstream_reset'] == []
+    assert (taste_dir / 'full_text_reading' / 'texts' / 'old.txt').exists()
+    assert (stale_fragment_dir / 'old_fragment.json').exists()
     assert (root / 'state' / 'current_find_research_plan.json').exists()
 
 

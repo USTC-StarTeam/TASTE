@@ -611,10 +611,10 @@ function venueMetaLabel(venue: Venue, labels?: Record<string, string>, selectedY
 }
 
 
-function sourceStatusLabel(item: any, venueById?: Map<string, Venue>) {
+function sourceStatusLabel(item: any, venueById?: Map<string, Venue>, lang: Lang = "zh") {
   const source = String(item?.source || item?.venue || item?.venue_id || "source");
   const kind = String(item?.source_kind || "");
-  if (kind === "venue_summary") return "会议渠道汇总";
+  if (kind === "venue_summary") return lang === "zh" ? "会议渠道汇总" : "Venue channels summary";
   if (kind === "venue") {
     const years = asArray(item?.effective_years).length ? ` ${asArray(item.effective_years).join(",")}` : "";
     const venue = venueById?.get(String(item?.venue_id || "")) || venueById?.get(source);
@@ -624,7 +624,7 @@ function sourceStatusLabel(item: any, venueById?: Map<string, Venue>) {
   if (source === "biorxiv") return "bioRxiv";
   if (source === "nature") return "Nature Portfolio";
   if (source === "science") return "Science Family";
-  if (source === "venue_summary") return "会议渠道汇总";
+  if (source === "venue_summary") return lang === "zh" ? "会议渠道汇总" : "Venue channels summary";
   return source;
 }
 
@@ -805,6 +805,58 @@ function sourceStatusDetail(item: any, lang: Lang = "zh") {
   if (item?.date_coverage?.oldest || item?.date_coverage?.newest) pushPart(`${zh ? "日期范围" : "dates"}: ${item.date_coverage.oldest || "?"}..${item.date_coverage.newest || "?"}`);
   if (item?.message) String(item.message).split(";").map((chunk) => sourceStatusMessageText(chunk, lang)).filter((chunk) => !hasInternalFindPublicText(chunk)).forEach((chunk) => pushPart(chunk));
   return parts.join(" / ");
+}
+
+function sourceStatusCompactDetail(item: any, lang: Lang = "zh") {
+  const zh = lang === "zh";
+  const labels = zh
+    ? { status: "状态", ok: "正常", limited: "受限", failed: "失败", checking: "检查中", raw: "标题总数", screen: "分类后", adapter: "来源适配器", years: "有效年份", requested: "请求年份" }
+    : { status: "Status", ok: "ok", limited: "limited", failed: "failed", checking: "checking", raw: "title total", screen: "after category", adapter: "adapter", years: "effective years", requested: "requested years" };
+  const rawStatus = String(item?.status || item?.phase || "").trim().toLowerCase();
+  const state = rawStatus === "checking" || rawStatus === "fetching" ? labels.checking : item?.limited ? labels.limited : item?.ok ? labels.ok : labels.failed;
+  const parts: string[] = [];
+  const seen = new Set<string>();
+  const pushPart = (value: any) => {
+    const line = String(value ?? "").trim();
+    if (!line) return;
+    const key = line.toLowerCase().replace(/\s+/g, " " );
+    if (seen.has(key)) return;
+    seen.add(key);
+    parts.push(line);
+  };
+  pushPart(`${labels.status}: ${state}`);
+  const rawTitleIndex = item?.raw_title_index_count ?? item?.corpus_count;
+  if (rawTitleIndex !== undefined && rawTitleIndex !== "") pushPart(`${labels.raw}: ${rawTitleIndex}`);
+  const count = item?.count ?? item?.candidate_count ?? item?.sample_count;
+  if (count !== undefined && count !== "") pushPart(`${labels.screen}: ${count}`);
+  const categoryText = sourceCategoryAvailabilityText(item, lang);
+  if (categoryText) pushPart(categoryText);
+  if (item?.adapter) pushPart(`${labels.adapter}: ${item.adapter}`);
+  const effectiveYears = asArray(item?.effective_years).map(String).filter(Boolean);
+  const requestedYears = asArray(item?.requested_years).map(String).filter(Boolean);
+  if (effectiveYears.length && requestedYears.length && effectiveYears.join(",") !== requestedYears.join(",")) {
+    pushPart(`${labels.years}: ${effectiveYears.join(", ")}`);
+    pushPart(`${labels.requested}: ${requestedYears.join(", ")}`);
+  }
+  if (!item?.ok && item?.message) {
+    const conciseFailure = String(item.message).split(";").map((chunk) => sourceStatusMessageText(chunk, lang)).find(Boolean);
+    if (conciseFailure) pushPart(conciseFailure);
+  }
+  return parts.join(" / " );
+}
+
+function sourceStatusArtifactMarkdown(rows: any[], lang: Lang = "zh") {
+  const sourceRows = asArray(rows).filter((row: any) => row && typeof row === "object");
+  if (!sourceRows.length) return "";
+  const title = lang === "zh" ? "来源状态" : "Source Status";
+  const intro = lang === "zh"
+    ? "每一行对应一次真实 Find 来源或会议渠道。count/标题总数、分类后、详情抓取等字段用于审计完整流程；页面验收块只显示摘要。"
+    : "Each row is one real Find source or venue. Count/title total, after-category, and detail-fetched fields audit the full pipeline; the review panel shows only a compact summary.";
+  const lines = [`# ${title}`, "", intro, ""];
+  sourceRows.forEach((item: any) => {
+    lines.push(`## ${sourceStatusLabel(item, undefined, lang)}`, "", `- ${sourceStatusDetail(item, lang)}`, "");
+  });
+  return `${lines.join("\n").trim()}\n`;
 }
 
 function paperQualityLabels(paper: any) {
@@ -2497,6 +2549,16 @@ function isTransientFindServiceLine(raw: string) {
     "queued for bounded single-item retry",
     "single-item retry disabled",
     "fallback-only marking",
+    "unresolved-item audit marking",
+    "marking unresolved items for audit",
+    "latest released venue for freshness bonus",
+    "abstract enrichment filled",
+    "final scoring abstract enrichment",
+    "abstract contract excluded",
+    "title-filtered candidates before llm",
+    "wrapper emitted structured evidence json",
+    "wrapper structured evidence output suppressed",
+    "full evidence is stored under",
   ];
   return markers.some((marker) => text.includes(marker));
 }
@@ -2718,7 +2780,7 @@ function jobRecentLogs(job: any, lang: Lang = "zh", contextTab?: Tab) {
   if (contextTab && contextTab !== "find" && isFindRunJob(job) && !isLiveJob(job)) {
     return nonFindTabFindJobSummary(job, lang);
   }
-  const rawLogs = safeJobLogs(job);
+  const rawLogs = safeJobLogs(job).filter((line) => !isTransientFindServiceLine(line));
   const scoringProgress = rawLogs.map((line) => String(line || "")).find((line) => line.startsWith("find_live_progress=") && /scored batch|scoring batch|abstract_scoring|LLM/i.test(line));
   const scoringBatch = scoringProgress?.match(/进度\s*([^；;]+)/)?.[1] || scoringProgress?.match(/batch\s+(\d+\/\d+)/i)?.[1] || "";
   return rawLogs
@@ -3310,6 +3372,7 @@ function App() {
   const [runId, setRunId] = useState("");
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [currentFindArtifacts, setCurrentFindArtifacts] = useState<Artifact[]>([]);
+  const [activeFindArtifacts, setActiveFindArtifacts] = useState<Artifact[]>([]);
   const [currentFindArtifactsLoading, setCurrentFindArtifactsLoading] = useState(false);
   const [runArtifactsLoading, setRunArtifactsLoading] = useState(false);
   const [selectedVenues, setSelectedVenues] = useState<string[]>([]);
@@ -3335,6 +3398,7 @@ function App() {
   const runLoadSeq = useRef(0);
   const userSelectedRunRef = useRef(false);
   const currentFindArtifactsInFlightRef = useRef("");
+  const activeFindArtifactsInFlightRef = useRef("");
   const frontendVersionRef = useRef("");
   const [error, setError] = useState("");
   const [savingConfig, setSavingConfig] = useState(false);
@@ -3568,6 +3632,24 @@ function App() {
     } finally {
       if (currentFindArtifactsInFlightRef.current === id) currentFindArtifactsInFlightRef.current = "";
       if (showLoading) setCurrentFindArtifactsLoading(false);
+    }
+  }
+
+  async function loadActiveFindArtifacts(id: string) {
+    if (!id) {
+      activeFindArtifactsInFlightRef.current = "";
+      setActiveFindArtifacts([]);
+      return;
+    }
+    if (activeFindArtifactsInFlightRef.current === id) return;
+    activeFindArtifactsInFlightRef.current = id;
+    try {
+      const data = await getArtifacts(id, { light: true });
+      setActiveFindArtifacts(data.artifacts);
+    } catch {
+      setActiveFindArtifacts([]);
+    } finally {
+      if (activeFindArtifactsInFlightRef.current === id) activeFindArtifactsInFlightRef.current = "";
     }
   }
   async function loadProject(id: string, options: { resetDrafts?: boolean } = {}) {
@@ -3863,6 +3945,10 @@ function App() {
         updateJob(message.job);
         const resultRunId = message.job?.result?.run_id || runId;
         if (resultRunId) void refreshRuns(resultRunId);
+        if (message.job?.status === "done" && isFindRunJob(message.job) && resultRunId) {
+          void loadRun(resultRunId, { clear: false, loading: false });
+          if (researchProject) void refreshProject({ resetDrafts: false });
+        }
         if (nextTab && message.job?.status === "done") setTab(nextTab);
         if (nextTab && ["environment", "experiment", "paperWrite"].includes(nextTab) && researchProject) void refreshProject({ resetDrafts: false });
         releaseWatcher();
@@ -3925,7 +4011,7 @@ function App() {
     updateJob(nextJob);
     setError("");
     const nextRunId = runIdFromJob(nextJob);
-    if (nextRunId) {
+    if (nextRunId && !isFindRunJob(nextJob)) {
       setRunId(nextRunId);
       void loadRun(nextRunId, { clear: false, loading: false }).catch(() => {});
     }
@@ -4056,6 +4142,15 @@ function App() {
     const payload = artifacts.find((a) => ["find_results.json", "read_results.json", "ideas.json", "plans.json", "find_progress.json"].includes(a.name))?.content;
     return String(payload?.run_id || payload?.source_run_id || payload?.find_run_id || "").trim();
   }, [artifacts]);
+  const activeFindArtifactsRunId = useMemo(() => {
+    const payload = activeFindArtifacts.find((a) => ["find_results.json", "find_progress.json", "selection.json", "venue_health_report.json"].includes(a.name))?.content;
+    return String(payload?.run_id || payload?.source_run_id || payload?.find_run_id || "").trim();
+  }, [activeFindArtifacts]);
+  const activeFindArtifactSource = useMemo(() => {
+    if (!activeFindRunId || !activeFindArtifacts.length) return [];
+    if (activeFindArtifactsRunId && activeFindArtifactsRunId !== activeFindRunId) return [];
+    return activeFindArtifacts;
+  }, [activeFindArtifacts, activeFindArtifactsRunId, activeFindRunId]);
   const currentFindArtifactRunId = currentProjectFindRunId || activeFindRunId;
   const currentFindArtifactsMatch = Boolean(currentFindArtifactRunId && currentFindArtifacts.length && (!currentFindArtifactsRunId || currentFindArtifactsRunId === currentFindArtifactRunId));
   const selectedRunArtifactsMatchCurrentFind = Boolean(currentFindArtifactRunId && runId === currentFindArtifactRunId && artifacts.length && (!selectedRunArtifactsRunId || selectedRunArtifactsRunId === currentFindArtifactRunId));
@@ -4069,8 +4164,10 @@ function App() {
   }, [artifacts, currentFindArtifacts, currentFindArtifactsMatch, selectedRunArtifactsMatchCurrentFind, viewingSelectedHistoricalFindRun]);
   const findResults = useMemo(() => currentFindArtifactSource.find((a) => a.name === "find_results.json")?.content, [currentFindArtifactSource]);
   const findProgress = useMemo(() => currentFindArtifactSource.find((a) => a.name === "find_progress.json")?.content, [currentFindArtifactSource]);
+  const activeFindResults = useMemo(() => activeFindArtifactSource.find((a) => a.name === "find_results.json")?.content, [activeFindArtifactSource]);
+  const activeFindProgress = useMemo(() => activeFindArtifactSource.find((a) => a.name === "find_progress.json")?.content, [activeFindArtifactSource]);
   const hasCurrentFindResults = Boolean(findResults && currentProjectFindRunId && String(findResults.run_id || "") === currentProjectFindRunId);
-  const viewingActiveIncompleteFindRun = Boolean(activeFindRunId && runId === activeFindRunId && !hasCurrentFindResults);
+  const hasActiveFindResults = Boolean(activeFindResults && activeFindRunId && String(activeFindResults.run_id || "") === activeFindRunId);
   const selectedFindJobForRun = useMemo(
     () => jobs.find((job) => isFindRunJob(job) && runIdFromJob(job) === (activeFindRunId || runId)),
     [activeFindRunId, jobs, runId],
@@ -4079,12 +4176,14 @@ function App() {
     () => selectedFindJobForRun && isLiveJob(selectedFindJobForRun) ? selectedFindJobForRun : undefined,
     [selectedFindJobForRun],
   );
+  const viewingActiveIncompleteFindRun = Boolean(activeFindRunId && (!hasActiveFindResults || activeFindJobForRun));
   const hasLiveCurrentFindArtifactJob = useMemo(
     () => Boolean(currentFindArtifactRunId && displayJobs.some((job: any) => isFindRunJob(job) && isLiveJob(job) && runIdFromJob(job) === currentFindArtifactRunId)),
     [currentFindArtifactRunId, displayJobs],
   );
   const useCurrentFindPacket = Boolean(currentProjectFindRunId && !hasCurrentFindResults && !viewingActiveIncompleteFindRun);
-  const runFindState = hasCurrentFindResults ? findResults : findProgress;
+  const activeRunFindState = hasActiveFindResults ? activeFindResults : activeFindProgress;
+  const runFindState = viewingActiveIncompleteFindRun ? (activeRunFindState || {}) : (hasCurrentFindResults ? findResults : findProgress);
   const expectedCurrentFindDownstreamCount = Number(
     researchLiteratureCounts.readings
     || researchLiteratureCounts.read_candidates
@@ -4622,22 +4721,28 @@ function App() {
   }
   const selectedRunArtifacts = useMemo(() => artifacts.filter((a) => a.kind === "markdown" && !HIDDEN_RUN_ARTIFACTS.has(a.name)), [artifacts]);
   const currentFindMarkdownArtifacts = useMemo(() => currentFindArtifactSource.filter((a) => a.kind === "markdown" && !HIDDEN_RUN_ARTIFACTS.has(a.name)), [currentFindArtifactSource]);
+  const currentProjectFindMarkdownArtifacts = useMemo(() => currentFindArtifacts.filter((a) => a.kind === "markdown" && !HIDDEN_RUN_ARTIFACTS.has(a.name)), [currentFindArtifacts]);
   const researchArtifacts = useMemo(() => asArray(researchSummary?.artifacts), [researchSummary]);
   const visibleRunArtifacts = useMemo(() => {
     const findRunTabs: Tab[] = ["find", "read", "ideas", "plan"];
-    const useCurrentFindArtifacts = Boolean(findRunTabs.includes(tab) && !viewingSelectedHistoricalFindRun && viewingCurrentProjectFindRun && currentFindMarkdownArtifacts.length > 0);
-    const sourceArtifacts = useCurrentFindArtifacts ? currentFindMarkdownArtifacts : selectedRunArtifacts;
-    const sourceRunId = useCurrentFindArtifacts ? currentProjectFindRunId : runId;
+    const showStableCurrentFindArtifacts = Boolean(
+      findRunTabs.includes(tab)
+      && currentProjectFindRunId
+      && currentProjectFindMarkdownArtifacts.length > 0
+      && (viewingActiveIncompleteFindRun || (!viewingSelectedHistoricalFindRun && viewingCurrentProjectFindRun))
+    );
+    const sourceArtifacts = showStableCurrentFindArtifacts ? currentProjectFindMarkdownArtifacts : selectedRunArtifacts;
+    const sourceRunId = showStableCurrentFindArtifacts ? currentProjectFindRunId : runId;
     if (!findRunTabs.includes(tab) && String(runId || "").startsWith("find_")) return [];
     return sourceArtifacts
       .filter((artifact) => artifactBelongsToCurrentFindRun(artifact, sourceRunId))
       .filter((artifact) => artifactVisibleForTab(artifact, tab));
-  }, [currentFindMarkdownArtifacts, currentProjectFindRunId, selectedRunArtifacts, runId, tab, viewingCurrentProjectFindRun, viewingSelectedHistoricalFindRun]);
+  }, [currentProjectFindMarkdownArtifacts, currentProjectFindRunId, selectedRunArtifacts, runId, tab, viewingActiveIncompleteFindRun, viewingCurrentProjectFindRun, viewingSelectedHistoricalFindRun]);
   const renderedRunArtifactsRunId = useMemo(() => {
     const findRunTabs: Tab[] = ["find", "read", "ideas", "plan"];
-    if (findRunTabs.includes(tab) && !viewingSelectedHistoricalFindRun && viewingCurrentProjectFindRun && currentFindMarkdownArtifacts.length > 0) return currentProjectFindRunId;
+    if (findRunTabs.includes(tab) && currentProjectFindRunId && currentProjectFindMarkdownArtifacts.length > 0 && (viewingActiveIncompleteFindRun || (!viewingSelectedHistoricalFindRun && viewingCurrentProjectFindRun))) return currentProjectFindRunId;
     return runId;
-  }, [currentFindMarkdownArtifacts.length, currentProjectFindRunId, runId, tab, viewingCurrentProjectFindRun, viewingSelectedHistoricalFindRun]);
+  }, [currentProjectFindMarkdownArtifacts.length, currentProjectFindRunId, runId, tab, viewingActiveIncompleteFindRun, viewingCurrentProjectFindRun, viewingSelectedHistoricalFindRun]);
   const claudeStatus = useMemo(() => researchSummary?.claude_status || researchSummary?.state?.claude_status || {}, [researchSummary]);
   const latestClaudeReceiptsByStage = useMemo(() => {
     const primary = (claudeStatus as any)?.latest_receipt_by_stage;
@@ -5472,8 +5577,8 @@ function App() {
   }).join("|"), [renderedRunArtifacts]);
   const artifactPanelLoading = useMemo(() => {
     const findRunTabs: Tab[] = ["find", "read", "ideas", "plan"];
-    return Boolean(runArtifactsLoading || (findRunTabs.includes(tab) && currentFindArtifactLoading));
-  }, [currentFindArtifactLoading, runArtifactsLoading, tab]);
+    return Boolean(runArtifactsLoading || (findRunTabs.includes(tab) && (currentFindArtifactLoading || !jobsLoaded)));
+  }, [currentFindArtifactLoading, jobsLoaded, runArtifactsLoading, tab]);
   const showRunArtifactPanel = useMemo(() => {
     const findRunTabs: Tab[] = ["find", "read", "ideas", "plan"];
     if (renderedRunArtifacts.length) return true;
@@ -5535,6 +5640,23 @@ function App() {
   }, [currentFindArtifactRunId, hasLiveCurrentFindArtifactJob]);
 
   useEffect(() => {
+    if (!activeFindRunId || !activeFindJobForRun) {
+      if (!activeFindRunId) setActiveFindArtifacts([]);
+      return;
+    }
+    let cancelled = false;
+    const refreshActiveFindArtifacts = () => {
+      if (!cancelled) void loadActiveFindArtifacts(activeFindRunId);
+    };
+    refreshActiveFindArtifacts();
+    const timer = window.setInterval(refreshActiveFindArtifacts, 10000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeFindRunId, activeFindJobForRun]);
+
+  useEffect(() => {
     if (!currentProjectFindRunId || !(["read", "ideas", "plan"] as Tab[]).includes(tab)) return;
     const needsRead = tab === "read" && expectedReadCandidateCount > 0 && !readResultsArtifact;
     const needsIdeas = tab === "ideas" && expectedIdeaCount > 0 && !ideasArtifact;
@@ -5550,27 +5672,6 @@ function App() {
     if (!runExists(runs, currentProjectFindRunId)) return;
     void loadRun(currentProjectFindRunId);
   }, [currentProjectFindRunId, activeFindRunId, runId, runs]);
-
-  useEffect(() => {
-    if (!activeFindRunId || userSelectedRunRef.current || runId === activeFindRunId) return;
-    void loadRun(activeFindRunId);
-  }, [activeFindRunId, runId]);
-
-  useEffect(() => {
-    if (!activeFindRunId || runId !== activeFindRunId) return;
-    const activeFindJob = jobs.find((job) => String(job.stage || "") === "find" && isLiveJob(job) && runIdFromJob(job) === activeFindRunId);
-    if (!activeFindJob) return;
-    let cancelled = false;
-    const refreshActiveRunArtifacts = () => {
-      if (!cancelled) void loadRun(activeFindRunId, { clear: false, loading: false });
-    };
-    refreshActiveRunArtifacts();
-    const timer = window.setInterval(refreshActiveRunArtifacts, 20000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [activeFindRunId, runId, jobs]);
 
   useEffect(() => {
     if (currentProjectArtifact && activeProjectArtifact !== currentProjectArtifact.name) {
@@ -5890,12 +5991,20 @@ function App() {
   }
 
   function artifactPanelContent(artifact: any, options: { raw?: boolean } = {}) {
-    const content = String(artifact?.content ?? "");
-    if (options.raw) return publicMarkdownArtifact(content);
-    if (lang === "en" && containsCJKText(content)) {
+    const rawContent = String(artifact?.content ?? "");
+    const localizedContent = lang === "zh"
+      ? String(artifact?.content_zh ?? artifact?.content ?? "")
+      : String(artifact?.content_en ?? artifact?.content ?? "");
+    if (artifact?.name === "source_status.md") {
+      const structuredRows = expandedSourceStatusRows(findResults || findProgress);
+      const localizedSourceStatus = sourceStatusArtifactMarkdown(structuredRows, lang);
+      if (localizedSourceStatus) return options.raw ? publicMarkdownArtifact(localizedSourceStatus) : localizedSourceStatus;
+    }
+    if (options.raw) return publicMarkdownArtifact(rawContent);
+    if (lang === "en" && containsCJKText(localizedContent)) {
       return "This artifact is authored in Chinese by the project agent. The structured English projection for this step is shown above; use Raw to inspect the original artifact. No scientific status is changed by this display fallback.";
     }
-    return publicLogText(content, lang);
+    return publicLogText(localizedContent, lang);
   }
 
 
@@ -5946,9 +6055,10 @@ function App() {
     };
     const pendingSurveyState = (
       <div className="emptyState compactFindSurveyEmpty" data-testid="find-survey-pending">
-        <p>{lang === "zh" ? "等待当前 Find run 的渠道抓取、候选筛选和评分概览；来源状态会在本验收块内显示。" : "Waiting for the current Find run source fetching, candidate screening, and scoring overview; source status will stay inside this review block."}</p>
+        <p>{lang === "zh" ? "等待当前 Find run 的渠道抓取、候选筛选和评分概览；完整来源状态会写入下方产物。" : "Waiting for the current Find run source fetching, candidate screening, and scoring overview; full source status is written to the artifacts below."}</p>
       </div>
     );
+    if (!jobsLoaded) return renderSurveyShell(pendingSurveyState);
     const literature = researchLiteratureSurvey || {};
     const stageCounts = (publicFindStage?.counts || {}) as any;
     const activeRunCounts = (viewingActiveIncompleteFindRun && runFindState?.counts && typeof runFindState.counts === "object" ? runFindState.counts : {}) as any;
@@ -6017,14 +6127,14 @@ function App() {
             <h4 data-testid="find-source-status-heading">{t.sourceStatus}</h4>
             {sourceRows.map((item: any, index: number) => (
               <div className={String(item.status || "").toLowerCase() === "checking" ? "sourceRow" : item.ok ? "sourceRow ok" : "sourceRow fail"} key={`${item.source || item.venue || "source"}-${index}`}>
-                <span>{sourceStatusLabel(item, venueById)}</span>
-                <small>{sourceStatusDetail(item, lang)}</small>
+                <span>{sourceStatusLabel(item, venueById, lang)}</span>
+                <small>{sourceStatusCompactDetail(item, lang)}</small>
               </div>
             ))}
           </div>
         ) : (
           <div className="emptyState compactFindSurveyEmpty" data-testid="find-source-status-empty">
-            <p>{lang === "zh" ? "当前 Find run 尚未返回来源状态；渠道抓取、候选筛选和评分概览会在本验收块内更新。" : "The current Find run has not returned source status yet; source fetching, candidate screening, and scoring will update inside this review block."}</p>
+            <p>{lang === "zh" ? "当前 Find run 尚未返回来源摘要；渠道抓取、候选筛选和评分概览会在本验收块内更新，完整来源状态写入产物。" : "The current Find run has not returned a source summary yet; source fetching, candidate screening, and scoring update here, while full source status is written to artifacts."}</p>
           </div>
         )}
         <div className="surveyFlowGrid compactSurveyFlow">
@@ -6041,7 +6151,7 @@ function App() {
             <div className="sourceStatus compactSourceStatus">
               {sourceLimitations.map((item: any, index: number) => (
                 <div className={String(item.status || "").includes("ok") ? "sourceRow ok" : "sourceRow fail"} key={`${item.source || item.venue || index}-${index}`}>
-                  <span>{sourceStatusLabel(item, venueById)}</span>
+                  <span>{sourceStatusLabel(item, venueById, lang)}</span>
                   <small>{displayMaybe(item.status)} / {displayMaybe(item.count, "")} / {displayMaybe(item.message || item.reason)}</small>
                 </div>
               ))}

@@ -39,19 +39,31 @@ from .sources import (
     fetch_selected_venue_details,
     fetch_venue_title_index,
     fetch_venue_title_index_all,
+    _strip_abstract_ui_controls,
     venue_metadata_audit_from_papers,
 )
 
 
 LogFn = Callable[[str], None]
 CancelFn = Callable[[], bool]
-ProgressFn = Callable[[str, int, int, str], None]
+ProgressFn = Callable[..., None]
 SCORING_POLICY_VERSION = "direct_llm_title_abstract_ranked_topn_v22_find_read_boundary"
 FIND_RECOMMENDATION_POLICY = "topn_final_llm_title_abstract_rank_no_score_cutoff_real_abstract_v22"
 FIND_FINAL_SCORING_TEMPERATURE = 0.0
 STABLE_RANKING_SCORE_POLICY = "audit_only_source_stable_score_v2"
 SOURCE_CONTEXT_BONUS_POLICY = "context_bonus_v3_big3_latest_released_venue_citations"
 FRESHNESS_BONUS_VENUES = {"ICLR", "ICML", "NEURIPS"}
+def _emit_progress(progress: ProgressFn, phase: str, current: int, total: int, message: str, count_updates: dict | None = None) -> None:
+    if count_updates:
+        try:
+            progress(phase, current, total, message, count_updates=count_updates)
+            return
+        except TypeError as exc:
+            if "count_updates" not in str(exc):
+                raise
+    progress(phase, current, total, message)
+
+
 FIND_FINAL_SCORING_ROUTE_RULES = """
 Final Find recommendation contract:
 - Use the current research interest/profile only as this run relevance definition. Do not apply a fixed global keyword table or project-specific hard-coded topic list.
@@ -1625,7 +1637,7 @@ def _source_context_bonus(item: dict) -> tuple[float, list[str], dict]:
     return total, reasons, detail
 
 
-FALLBACK_REASON_TEXT = "Adaptive profile-based local fallback ranking. Configure an LLM API key for model-based relevance scoring; fallback-only items cannot enter Find recommendations."
+FALLBACK_REASON_TEXT = "Adaptive profile-based local ranking. Configure an LLM API key for model-based relevance scoring; local-only items cannot enter Find recommendations."
 FALLBACK_FIT_EXPLANATION_TEXT = "Local title/abstract fit estimate; final relevance scoring is still required for recommendations."
 
 
@@ -2830,7 +2842,8 @@ Rules:
             # Parallel LLM calls complete out of order and are sorted before processing;
             # keep the progress counter monotonic instead of replaying batch indexes.
             result_progress_current = batch_index if workers == 1 else len(batches)
-            progress(
+            _emit_progress(
+                progress,
                 "llm_title_filter",
                 result_progress_current,
                 len(batches),
@@ -3426,7 +3439,7 @@ def _evaluate_items(
 ) -> list[dict]:
     evaluated: list[dict] = []
     interest = _topic_interest_text(config)
-    topic_routes_block = ""
+    topic_routes_block = _adaptive_topic_routes_block(config, interest)
     scoring_interest = _compact_scoring_interest(config, interest)
     prompts: list[str] = []
     prompt_batches: list[list[dict]] = []
@@ -3505,13 +3518,15 @@ Candidate items, batch {batch_index}:
 {item_lines}
 
 Return exactly this schema. The evaluations array is the final LLM evaluation rows; include one row for every candidate ID in the batch and never return an empty object. fit_score is the final recommendation score:
-{{"evaluations":[{{"id":"paper id","category":"short category","fit_score":7.0,"diversity_score":6.0,"recommend_for_deep_reading":true,"hit_directions_zh":["中文命中方向"],"hit_directions_en":["English hit direction"],"fit_explanation_zh":"2-3句中文：面向用户说明摘要中的具体证据、为什么与当前调研主题相关、以及可复用价值","fit_explanation_en":"2-3 English sentences for the user with title/abstract evidence, relevance, and reusable value","reason_zh":"2-4句中文：面向用户说明该论文对当前研究画像的具体价值、可借鉴的方法/数据/协议/理论/评测信息，以及摘要层面的风险或不确定性；不要写给 reader 的精读指令","reason_en":"2-4 English sentences for the user: concrete value to the research profile, reusable method/data/protocol/theory/evaluation value, and abstract-level risks or uncertainty; do not write reader instructions"}}]}}
+{{"evaluations":[{{"id":"paper id","category":"short category","fit_score":7.0,"diversity_score":6.0,"recommend_for_deep_reading":true,"topic_evidence":"passed: direct title+abstract evidence for a current topic route, or weak: missing adaptive topic evidence","topic_evidence_supported":true,"matched_topic_route":"the specific configured/adaptive route supported by the abstract, or empty","topic_evidence_basis":"short title/abstract evidence used for the route decision","missing_topic_evidence":["missing route component if unsupported"],"hit_directions_zh":["中文命中方向"],"hit_directions_en":["English hit direction"],"fit_explanation_zh":"2-3句中文：面向用户说明摘要中的具体证据、为什么与当前调研主题相关、以及可复用价值","fit_explanation_en":"2-3 English sentences for the user with title/abstract evidence, relevance, and reusable value","reason_zh":"2-4句中文：面向用户说明该论文对当前研究画像的具体价值、可借鉴的方法/数据/协议/理论/评测信息，以及摘要层面的风险或不确定性；不要写给 reader 的精读指令","reason_en":"2-4 English sentences for the user: concrete value to the research profile, reusable method/data/protocol/theory/evaluation value, and abstract-level risks or uncertainty; do not write reader instructions"}}]}}
 
 Rules:
 - Score by explicit title/abstract evidence only; venue prestige must not raise fit_score.
 - Use the whole 0-10 range consistently: 9-10 exact center, 7-8 strong match, 5-6 partial/background usefulness, 3-4 weak/generic, <=2 unrelated.
 - Broad background papers are weak unless the abstract itself gives concrete reusable method, data, benchmark, protocol, theory, or evaluation value for the current research interest.
 - recommend_for_deep_reading is an audit field only. the workflow chooses the user-visible list by the single final title+abstract ranking contract, not by this boolean and not by an absolute score cutoff.
+- Set topic_evidence_supported=true only when the title+abstract directly supports at least one configured/adaptive route or a clearly equivalent route from the research profile. Set topic_evidence to passed:/strong:, name the matched_topic_route, and give a concise topic_evidence_basis.
+- If the abstract is generic, background-only, venue/title-only, or misses a required route component, set topic_evidence_supported=false, topic_evidence="weak: missing adaptive topic evidence", and list concrete missing_topic_evidence.
 - User-facing recommendation reasons must explain concrete value for the user research project first, then summarize abstract-level uncertainty as a user-facing risk. Do not write reader instructions such as Reading note, full-text reading must verify, or the abstract is not a substitute for full-text reading.
 - Missing abstract, metadata-only evidence, or title-only evidence cannot be recommended.
 {FIND_FINAL_SCORING_ROUTE_RULES}
@@ -3549,7 +3564,7 @@ Rules:
                 _apply_topic_evidence_guard(item, interest)
                 _apply_quality_bonus(item)
             if items_to_mark:
-                log(f"{source_name}: batch {batch_index}/{len(prompt_batches)} marked {len(items_to_mark)} items fallback-only after {reason}; fallback-only items remain excluded from Find recommendations")
+                log(f"{source_name}: batch {batch_index}/{len(prompt_batches)} marked {len(items_to_mark)} unresolved items after {reason}; unresolved items remain excluded from Find recommendations")
 
         def single_scoring_prompt(item: dict) -> str:
             return f"""
@@ -3566,9 +3581,9 @@ Title: {item.get('title')}
 Abstract/Description: {(item.get('abstract') or '')[:900]}
 
 Return strict JSON only:
-{{"evaluations":[{{"id":"{item.get("id")}","category":"short category","fit_score":7.0,"diversity_score":6.0,"recommend_for_deep_reading":true,"hit_directions_zh":["中文命中方向"],"hit_directions_en":["English hit direction"],"fit_explanation":"2-3句中文：面向用户说明摘要证据、相关性和可复用价值","fit_explanation_zh":"2-3句中文：面向用户说明摘要证据、相关性和可复用价值","fit_explanation_en":"2-3 English sentences for the user with title/abstract evidence, relevance, and reusable value","reason":"2-4句中文：面向用户说明对当前研究画像的价值、可借鉴什么、以及摘要层面的风险或不确定性","reason_zh":"2-4句中文：面向用户说明对当前研究画像的价值、可借鉴什么、以及摘要层面的风险或不确定性","reason_en":"2-4 English sentences for the user: value to the current research profile, reusable content, and abstract-level risks or uncertainty"}}]}}
+{{"evaluations":[{{"id":"{item.get("id")}","category":"short category","fit_score":7.0,"diversity_score":6.0,"recommend_for_deep_reading":true,"topic_evidence":"passed: direct title+abstract evidence for a current topic route, or weak: missing adaptive topic evidence","topic_evidence_supported":true,"matched_topic_route":"the specific configured/adaptive route supported by the abstract, or empty","topic_evidence_basis":"short title/abstract evidence used for the route decision","missing_topic_evidence":["missing route component if unsupported"],"hit_directions_zh":["中文命中方向"],"hit_directions_en":["English hit direction"],"fit_explanation":"2-3句中文：面向用户说明摘要证据、相关性和可复用价值","fit_explanation_zh":"2-3句中文：面向用户说明摘要证据、相关性和可复用价值","fit_explanation_en":"2-3 English sentences for the user with title/abstract evidence, relevance, and reusable value","reason":"2-4句中文：面向用户说明对当前研究画像的价值、可借鉴什么、以及摘要层面的风险或不确定性","reason_zh":"2-4句中文：面向用户说明对当前研究画像的价值、可借鉴什么、以及摘要层面的风险或不确定性","reason_en":"2-4 English sentences for the user: value to the current research profile, reusable content, and abstract-level risks or uncertainty"}}]}}
 
-Scoring rules: judge this item independently from its real title and abstract. fit_score is the final ranking score used by the workflow: 9-10 exact center, 7-8 strong match, 5-6 partial/background usefulness, 3-4 weak/generic, <=2 unrelated. recommend_for_deep_reading is only an audit field; The workflow uses the final title+abstract ranking as the single recommendation contract and does not apply an absolute score cutoff. User-facing recommendation reasons must explain reusable value before limitations, and must not contain reader instructions such as Reading note, full-text reading must verify, or the abstract is not a substitute for full-text reading. Provide both Chinese and English explanation fields, plus hit_directions_zh in Chinese and hit_directions_en in English.
+Scoring rules: judge this item independently from its real title and abstract. fit_score is the final ranking score used by the workflow: 9-10 exact center, 7-8 strong match, 5-6 partial/background usefulness, 3-4 weak/generic, <=2 unrelated. recommend_for_deep_reading is only an audit field; The workflow uses the final title+abstract ranking as the single recommendation contract and does not apply an absolute score cutoff. Set topic_evidence_supported=true only when the title+abstract directly supports at least one configured/adaptive route or clearly equivalent route from the research profile; otherwise set it false with weak topic_evidence and concrete missing_topic_evidence. User-facing recommendation reasons must explain reusable value before limitations, and must not contain reader instructions such as Reading note, full-text reading must verify, or the abstract is not a substitute for full-text reading. Provide both Chinese and English explanation fields, plus hit_directions_zh in Chinese and hit_directions_en in English.
 {FIND_FINAL_SCORING_ROUTE_RULES}
 """
 
@@ -3636,8 +3651,8 @@ Scoring rules: judge this item independently from its real title and abstract. f
 
         def retry_policy_text() -> str:
             if single_retry_attempts > 0:
-                return "queued for bounded single-item retry before fallback-only marking"
-            return "single-item retry disabled; marking fallback-only"
+                return "queued for bounded single-item retry before unresolved-item audit marking"
+            return "single-item retry disabled; marking unresolved items for audit"
 
         def apply_result(batch_index: int, batch: list[dict], result: dict, allow_missing_retry: bool = True) -> None:
             by_id = {str(item.get("id")): item for item in batch}
@@ -3724,7 +3739,15 @@ Scoring rules: judge this item independently from its real title and abstract. f
                 apply_result(batch_index, batch, result)
                 completed += 1
                 log(f"{source_name}: scoring batch {batch_index}/{len(prompt_batches)} completed; ok={bool(result.get('ok'))}")
-                progress("abstract_scoring", completed, len(prompt_batches), f"{source_name}: scored batch {batch_index}/{len(prompt_batches)} with {workers} workers")
+                scored_count = sum(1 for item in scoring_items if str(item.get("reason_source") or "") == "llm abstract evaluation")
+                _emit_progress(
+                    progress,
+                    "abstract_scoring",
+                    completed,
+                    len(prompt_batches),
+                    f"{source_name}: scored batch {batch_index}/{len(prompt_batches)} with {workers} workers",
+                    count_updates={"evaluated_candidates": len(evaluated), "abstract_scored_papers": scored_count, "llm_scored_candidates": scored_count},
+                )
         else:
             last_parallel_log = 0.0
             executor = ThreadPoolExecutor(max_workers=workers)
@@ -3749,7 +3772,15 @@ Scoring rules: judge this item independently from its real title and abstract. f
                         if completed == 1 or completed == len(prompt_batches) or completed % 25 == 0 or now_progress - last_parallel_log >= 15:
                             log(f"{source_name}: LLM scoring progress {completed}/{len(prompt_batches)} batches complete; latest completed batch {batch_index}; workers={workers}")
                             last_parallel_log = now_progress
-                        progress("abstract_scoring", completed, len(prompt_batches), f"{source_name}: scored batch {batch_index}/{len(prompt_batches)} with {workers} workers")
+                        scored_count = sum(1 for item in scoring_items if str(item.get("reason_source") or "") == "llm abstract evaluation")
+                        _emit_progress(
+                            progress,
+                            "abstract_scoring",
+                            completed,
+                            len(prompt_batches),
+                            f"{source_name}: scored batch {batch_index}/{len(prompt_batches)} with {workers} workers",
+                            count_updates={"evaluated_candidates": len(evaluated), "abstract_scored_papers": scored_count, "llm_scored_candidates": scored_count},
+                        )
             except JobCancelled:
                 for future in pending:
                     future.cancel()
@@ -4631,6 +4662,7 @@ def _clean_abstract_text(value: object) -> str:
         "none",
         "null",
     }
+    text = _strip_abstract_ui_controls(text)
     if text.strip().lower() in placeholders:
         return ""
     return text
@@ -5339,18 +5371,18 @@ def run_find(
 
     last_progress_write: dict[str, float] = {"time": 0.0}
 
-    def _find_progress_payload(phase: str, extra: dict | None = None) -> dict:
-        def _report_sum(key: str) -> int:
-            total = 0
-            for row in title_filter_report:
-                if not isinstance(row, dict):
-                    continue
-                try:
-                    total += int(row.get(key) or 0)
-                except (TypeError, ValueError):
-                    pass
-            return total
+    def _title_filter_report_sum(key: str) -> int:
+        total = 0
+        for row in title_filter_report:
+            if not isinstance(row, dict):
+                continue
+            try:
+                total += int(row.get(key) or 0)
+            except (TypeError, ValueError):
+                pass
+        return total
 
+    def _find_progress_payload(phase: str, extra: dict | None = None) -> dict:
         deduped_raw = len(_dedupe_items(raw_title_index))
         deduped_titles = len(_dedupe_items(title_candidates))
         deduped_venue_papers = len(_dedupe_items(venue_papers))
@@ -5365,10 +5397,10 @@ def run_find(
             except (TypeError, ValueError):
                 pass
         llm_scored = sum(1 for item in deduped_evaluated if isinstance(item, dict) and str(item.get("reason_source") or "") == "llm abstract evaluation")
-        category_filtered = max(_report_sum("category_filtered_papers"), _report_sum("title_filter_input_papers"), source_title_filter_input) or deduped_raw
-        tfidf_screened = max(_report_sum("tfidf_screened_papers"), category_filtered)
-        title_score_input = _report_sum("title_score_input_papers") or category_filtered
-        llm_title_scored = _report_sum("llm_title_scored_papers")
+        category_filtered = max(_title_filter_report_sum("category_filtered_papers"), _title_filter_report_sum("title_filter_input_papers"), source_title_filter_input) or deduped_raw
+        tfidf_screened = max(_title_filter_report_sum("tfidf_screened_papers"), category_filtered)
+        title_score_input = _title_filter_report_sum("title_score_input_papers") or category_filtered
+        llm_title_scored = _title_filter_report_sum("llm_title_scored_papers")
         progress_payload = {
             "run_id": run_id,
             "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -5424,6 +5456,12 @@ def run_find(
             is_done = total > 0 and current >= total
             if is_done or now - last_progress_write.get("time", 0.0) >= 10:
                 last_progress_write["time"] = now
+                live_count_updates = dict(count_updates or {})
+                if "llm_title_scored_papers" in live_count_updates:
+                    try:
+                        live_count_updates["llm_title_scored_papers"] = _title_filter_report_sum("llm_title_scored_papers") + int(live_count_updates.get("llm_title_scored_papers") or 0)
+                    except (TypeError, ValueError):
+                        pass
                 _persist_find_progress(phase, {
                     "live_progress": {
                         "phase": phase,
@@ -5432,7 +5470,7 @@ def run_find(
                         "percent": max(0, min(100, int(round((float(current or 0) / float(total)) * 100)))) if total else 0,
                         "message": str(message or phase),
                     },
-                    "count_updates": count_updates or {},
+                    "count_updates": live_count_updates,
                 })
 
     # Venue sources should be scanned fully by default. max_fetch_papers only
@@ -5532,6 +5570,8 @@ def run_find(
             detailed = _enrich_missing_abstracts_for_adaptive_recall(detailed, effective_config, venue.get("name", venue_id), log, _progress, should_cancel)
             detailed = attach_quality_metadata_many(detailed)
             venue_papers.extend(detailed)
+            ready_detail_count = len(_dedupe_items(venue_papers))
+            _progress("detail_fetch", len(detail_titles), max(1, len(detail_titles)), f"{venue.get('name')}: metadata details ready", count_updates={"detail_fetched": ready_detail_count, "venue_detail_fetched_candidates": ready_detail_count})
             continue
 
         log(f"Fetching title index for {venue.get('name')} years {effective_years}")
@@ -5613,7 +5653,6 @@ def run_find(
         if deferred_count:
             log(f"{venue.get('name')}: detail fetch deferred {deferred_count}/{len(detail_titles)} slow/cancelled candidates; deferred candidates remain internal audit only unless later abstract enrichment succeeds.")
         _raise_if_cancelled(should_cancel)
-        _progress("detail_fetch", len(detail_titles), max(1, len(detail_titles)), f"{venue.get('name')}: detail fetch complete")
         detailed, pmlr_stats = enrich_pmlr_details(detailed)
         if pmlr_stats.get("attempted"):
             log(
@@ -5624,6 +5663,8 @@ def run_find(
         detailed = _enrich_missing_abstracts_for_adaptive_recall(detailed, effective_config, venue.get("name", venue_id), log, _progress, should_cancel)
         detailed = attach_quality_metadata_many(detailed)
         venue_papers.extend(detailed)
+        ready_detail_count = len(_dedupe_items(venue_papers))
+        _progress("detail_fetch", len(detail_titles), max(1, len(detail_titles)), f"{venue.get('name')}: detail fetch complete", count_updates={"detail_fetched": ready_detail_count, "venue_detail_fetched_candidates": ready_detail_count})
     raw_title_index = _dedupe_items(raw_title_index)
     title_candidates = _dedupe_items(title_candidates)
     venue_papers = _dedupe_items(venue_papers)

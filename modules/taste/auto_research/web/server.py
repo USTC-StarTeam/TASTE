@@ -2349,7 +2349,7 @@ def _artifact_compact_paper_row(row: Any) -> dict[str, Any]:
     if not isinstance(row, dict):
         return {}
     keys = [
-        "id", "title", "venue", "venue_id", "year", "doi", "url", "pdf_url",
+        "id", "title", "venue", "venue_id", "year", "track", "presentation_type", "presentation_label", "presentation_labels", "quality_labels", "doi", "url", "pdf_url",
         "fit_score", "llm_fit_score", "diversity_score", "score", "recommendation_score", "recommendation_score_v2",
         "taste_pool", "taste_pool_role", "hit_directions", "hit_directions_zh", "hit_directions_en",
         "abstract", "abstract_zh", "abstract_en",
@@ -3532,17 +3532,6 @@ def _adopt_find_run_for_project(root: Path, project: str, run_id: str, *, source
         "arxiv_raw.json", "arxiv_prefiltered.json", "biorxiv_raw.json", "biorxiv_prefiltered.json", "nature_raw.json", "nature_prefiltered.json", "science_raw.json", "science_prefiltered.json",
         "hf.md", "github.md", "biorxiv.md", "nature.md", "science.md",
     ]
-    downstream_placeholders = {
-        "read_results.json": {"run_id": run_id, "source": "pending_new_find_read", "status": "pending", "readings": []},
-        "ideas.json": {"run_id": run_id, "source": "pending_new_find_idea", "status": "pending", "ideas": []},
-        "plans.json": {"run_id": run_id, "source": "pending_new_find_plan", "status": "pending", "plans": []},
-    }
-    downstream_markdown = {
-        "read.md": f"# 精读等待执行\n\n当前 Find `{run_id}` 已完成；请通过网页 Read 按钮触发 project agent 对当前推荐列表逐篇精读。\n",
-        "idea.md": f"# 想法等待生成\n\n当前 Find `{run_id}` 的精读尚未完成；Idea 必须在 Read 产物通过后生成。\n",
-        "plan.md": f"# 计划等待生成\n\n当前 Find `{run_id}` 的 Idea 尚未完成；Plan 必须在 Idea 通过后生成。\n",
-    }
-
     def backup(path: Path) -> None:
         if not path.exists():
             return
@@ -3629,27 +3618,7 @@ def _adopt_find_run_for_project(root: Path, project: str, run_id: str, *, source
         backup(state_dir / "current_find_claude_reading_validation.json")
         write_json(state_dir / "current_find_claude_reading_validation.json", reading_validation)
     else:
-        for name, payload in downstream_placeholders.items():
-            dst = taste_dir / name
-            backup(dst)
-            write_json(dst, {**payload, "created_at": now, "adopted_find_run_id": run_id})
-            stale_reset.append(name)
-        for name, content in downstream_markdown.items():
-            dst = taste_dir / name
-            backup(dst)
-            dst.write_text(content, encoding="utf-8")
-            stale_reset.append(name)
-        full_text_dir = taste_dir / "full_text_reading"
-        backup_tree(full_text_dir)
-        if full_text_dir.exists():
-            shutil.rmtree(full_text_dir)
-            stale_reset.append("full_text_reading/")
-        full_text_dir.mkdir(parents=True, exist_ok=True)
-        write_json(
-            full_text_dir / "full_text_packet.json",
-            {"run_id": run_id, "source": "pending_new_find_full_text_evidence", "status": "pending", "papers": [], "created_at": now, "adopted_find_run_id": run_id},
-        )
-        stale_reset.append("full_text_reading/full_text_packet.json")
+        downstream_status = "existing_downstream_preserved_pending_current_find_read"
 
     missing_zh = _missing_recommendation_abstract_zh(recommendations)
     translation_status = _abstract_translation_status_for_recommendations(recommendations, find_results.get("abstract_translation_status") or progress.get("abstract_translation_status") or scoring_runtime.get("abstract_translation_status") or "")
@@ -3707,6 +3676,7 @@ def _adopt_find_run_for_project(root: Path, project: str, run_id: str, *, source
             "source_run_id": run_id,
             "source": "claude_code_current_find_takeover",
             "status": "claude_takeover_ready",
+            "downstream_status": downstream_status,
             "created_at": now,
             "synced_from_run_dir": str(directory),
             "current_find_reading_count": len(read_rows),
@@ -3743,6 +3713,8 @@ def _adopt_find_run_for_project(root: Path, project: str, run_id: str, *, source
             "source_run_id": run_id,
             "source": "web_find_adoption",
             "status": "pending_current_find_read",
+            "downstream_status": downstream_status,
+            "preserved_downstream": True,
             "created_at": now,
             "current_find_reading_count": 0,
             "current_find_idea_count": 0,
@@ -5168,6 +5140,16 @@ def _is_transient_taste_service_line(line: Any) -> bool:
         "queued for bounded single-item retry",
         "single-item retry disabled",
         "fallback-only marking",
+        "unresolved-item audit marking",
+        "marking unresolved items for audit",
+        "latest released venue for freshness bonus",
+        "abstract enrichment filled",
+        "final scoring abstract enrichment",
+        "abstract contract excluded",
+        "title-filtered candidates before llm",
+        "wrapper emitted structured evidence json",
+        "wrapper structured evidence output suppressed",
+        "full evidence is stored under",
     ]
     return any(marker in text for marker in transient_markers)
 
@@ -5420,7 +5402,11 @@ def _find_live_progress_message(find_progress: dict[str, Any]) -> str:
 
 
 def _compact_log_lines(lines: Any, *, limit: int = 40) -> list[str]:
-    raw_lines = [str(line) for line in (lines or [])]
+    raw_lines = [
+        str(line)
+        for line in (lines or [])
+        if str(line or "").strip() and not _is_transient_taste_service_line(line)
+    ]
     return _dedupe_recent_lines(raw_lines, limit=limit)
 
 

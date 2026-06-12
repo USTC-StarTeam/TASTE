@@ -85,6 +85,15 @@ def _contains_internal_public_text(value: object) -> bool:
     return bool(lowered) and any(marker.lower() in lowered for marker in _INTERNAL_PUBLIC_TEXT_MARKERS)
 
 
+_ABSTRACT_UI_CONTROL_RE = re.compile(
+    r"(?:\s*(?:show\s+(?:more|less)|read\s+(?:more|less)|显示更多|显示较少|展开|收起)\s*[。.]?\s*)+$",
+    re.IGNORECASE,
+)
+
+
+def _strip_abstract_ui_controls(value: object) -> str:
+    return _ABSTRACT_UI_CONTROL_RE.sub("", " ".join(str(value or "").split())).strip()
+
 
 def table(headers: list[str], rows: Iterable[list[object]]) -> str:
     lines = [
@@ -104,7 +113,7 @@ def _paper_text(paper: dict, keys: list[str]) -> str:
             continue
         if any(marker.lower() in value.lower() for marker in _PLACEHOLDER_ABSTRACT_MARKERS):
             continue
-        return value
+        return _strip_abstract_ui_controls(value) if key in {"abstract_zh", "summary_zh", "tldr_zh", "abstract_en", "abstract", "summary", "tldr"} else value
     return ""
 
 

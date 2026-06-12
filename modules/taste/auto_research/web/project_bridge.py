@@ -3878,7 +3878,7 @@ def _compact_file_artifact(name: str, path: Path, kind: str, content: Any) -> di
 
 def _compact_paper_row(row: dict[str, Any]) -> dict[str, Any]:
     keys = [
-        "id", "title", "venue", "venue_id", "year", "doi", "url", "pdf_url",
+        "id", "title", "venue", "venue_id", "year", "track", "presentation_type", "presentation_label", "presentation_labels", "quality_labels", "doi", "url", "pdf_url",
         "recommendation_score", "recommendation_score_v2", "score", "score_source",
         "fit_score", "llm_fit_score", "diversity_score",
         "abstract", "abstract_zh", "abstract_en",
@@ -8855,8 +8855,18 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+_ABSTRACT_UI_CONTROL_RE = re.compile(
+    r"(?:\s*(?:show\s+(?:more|less)|read\s+(?:more|less)|显示更多|显示较少|展开|收起)\s*[。.]?\s*)+$",
+    re.IGNORECASE,
+)
+
+
+def _strip_abstract_ui_controls(value: object) -> str:
+    return _ABSTRACT_UI_CONTROL_RE.sub("", " ".join(str(value or "").split())).strip()
+
+
 def _clean_literature_abstract(row: dict[str, Any]) -> str:
-    text = str(row.get("abstract") or row.get("abstract_en") or row.get("abstract_excerpt") or row.get("summary") or "").strip()
+    text = _strip_abstract_ui_controls(row.get("abstract") or row.get("abstract_en") or row.get("abstract_excerpt") or row.get("summary") or "")
     lowered = text.lower()
     if lowered in {"", "no abstract available", "no abstract available.", "abstract not available", "abstract not available."}:
         return ""
@@ -12862,6 +12872,13 @@ def _is_transient_progress_line(text: str) -> bool:
         "queued for bounded single-item retry",
         "single-item retry disabled",
         "fallback-only marking",
+        "unresolved-item audit marking",
+        "marking unresolved items for audit",
+        "latest released venue for freshness bonus",
+        "abstract enrichment filled",
+        "final scoring abstract enrichment",
+        "abstract contract excluded",
+        "title-filtered candidates before llm",
     ]
     if any(marker in lowered for marker in transient_markers):
         return True

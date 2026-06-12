@@ -5,6 +5,7 @@ import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
 from .paths import LEGACY_RUNS_DIRS, ROOT, RUNS_DIR, ensure_directories, stage_latest_path
@@ -31,8 +32,20 @@ def run_dir(run_id: str) -> Path:
 
 
 def write_json(path: Path, data: Any) -> None:
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_name = ""
+    try:
+        with NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False) as handle:
+            tmp_name = handle.name
+            handle.write(payload)
+        os.replace(tmp_name, path)
+    finally:
+        if tmp_name:
+            try:
+                Path(tmp_name).unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def read_json(path: Path, default: Any = None) -> Any:

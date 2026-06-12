@@ -125,6 +125,8 @@ export type Artifact = {
   name: string;
   kind: "markdown" | "json";
   content: any;
+  content_zh?: any;
+  content_en?: any;
   path?: string;
 };
 
