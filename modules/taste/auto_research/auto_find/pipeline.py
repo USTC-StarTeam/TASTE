@@ -2827,7 +2827,10 @@ Rules:
                     seen.add(item.get("id", ""))
                     appended += 1
             log(f"{venue_name}: title batch {batch_index}/{len(batches)} scored {appended}; scored_titles={len(scored_rows)}")
-            progress("llm_title_filter", batch_index, len(batches), f"{venue_name}: title batch {batch_index}/{len(batches)}, scored {len(scored_rows)}, workers {workers}")
+            # Parallel LLM calls complete out of order and are sorted before processing;
+            # keep the progress counter monotonic instead of replaying batch indexes.
+            result_progress_current = batch_index if workers == 1 else len(batches)
+            progress("llm_title_filter", result_progress_current, len(batches), f"{venue_name}: title batch {batch_index}/{len(batches)}, scored {len(scored_rows)}, workers {workers}")
         if interest:
             for item in scanned:
                 _apply_topic_evidence_guard(item, interest)
