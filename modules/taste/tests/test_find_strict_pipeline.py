@@ -2376,43 +2376,62 @@ def test_title_filtered_candidate_without_real_abstract_cannot_be_recommended():
     assert items[0]["find_recommendation_reject_reason"] == "missing_real_abstract"
 
 
-def test_find_recommendation_ranking_ignores_stable_source_score():
-    cfg = AppConfig(provider="openai", api_key="test-key", model="test-model", research_interest="dynamic route retrieval systems", max_recommended_papers=2)
+def test_find_recommendation_ranking_uses_gated_presentation_bonus_without_source_score_takeover():
+    cfg = AppConfig(provider="openai", api_key="test-key", model="test-model", research_interest="dynamic route retrieval systems", max_recommended_papers=4)
+    base = {
+        "abstract": "This paper studies dynamic route retrieval systems with benchmark evaluation.",
+        "diversity_score": 5.0,
+        "reason_source": "llm abstract evaluation",
+        "topic_evidence": "passed:dynamic route retrieval systems",
+        "topic_evidence_supported": True,
+        "evidence_role": "direct_target",
+        "topic_evidence_basis": "abstract",
+        "missing_topic_evidence": [],
+    }
     items = [
         {
+            **base,
             "id": "lower_llm_high_stable",
             "title": "Lower LLM score with high source score",
-            "abstract": "This paper studies dynamic route retrieval systems with benchmark evaluation.",
             "fit_score": 7.0,
-            "diversity_score": 5.0,
             "recommendation_score": 7.0,
             "stable_rank_score": 10.0,
-            "reason_source": "llm abstract evaluation",
-            "topic_evidence": "passed:dynamic route retrieval systems",
-            "topic_evidence_supported": True,
-            "evidence_role": "direct_target",
-            "topic_evidence_basis": "abstract",
-            "missing_topic_evidence": [],
         },
         {
+            **base,
+            "id": "plain_boundary",
+            "title": "Plain boundary score",
+            "fit_score": 7.5,
+            "recommendation_score": 7.5,
+            "stable_rank_score": 1.0,
+        },
+        {
+            **base,
+            "id": "oral_near_boundary",
+            "title": "Oral near boundary",
+            "fit_score": 7.0,
+            "recommendation_score": 7.0,
+            "stable_rank_score": 1.0,
+            "track": "ICLR 2026 Oral",
+            "quality_bonus": 0.45,
+            "quality_bonus_reason": "发表类型: oral +0.45",
+        },
+        {
+            **base,
             "id": "higher_llm_low_stable",
             "title": "Higher LLM score with low source score",
-            "abstract": "This paper studies dynamic route retrieval systems with reusable algorithms and evaluation.",
             "fit_score": 8.0,
-            "diversity_score": 5.0,
             "recommendation_score": 8.0,
             "stable_rank_score": 1.0,
-            "reason_source": "llm abstract evaluation",
-            "topic_evidence": "passed:dynamic route retrieval systems",
-            "topic_evidence_supported": True,
-            "evidence_role": "direct_target",
-            "topic_evidence_basis": "abstract",
-            "missing_topic_evidence": [],
         },
     ]
 
-    assert [item["id"] for item in _recommended(items, cfg)] == ["higher_llm_low_stable", "lower_llm_high_stable"]
-
+    assert [item["id"] for item in _recommended(items, cfg)] == [
+        "higher_llm_low_stable",
+        "oral_near_boundary",
+        "plain_boundary",
+        "lower_llm_high_stable",
+    ]
 
 
 def test_final_llm_score_not_hard_filtered_by_project_debug_fields():

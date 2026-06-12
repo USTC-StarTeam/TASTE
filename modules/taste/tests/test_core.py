@@ -237,7 +237,9 @@ def test_markdown_contains_quality_labels_and_score_bonus_details():
             "reason": "Reason",
         }
     ])
-    assert "oral" in content
+    assert "- **Track/类型**: Oral" in content
+    assert "NeurIPS 2026 oral" not in content
+    assert "- **质量标签**: oral" not in content
     assert "Abstract" in content
     assert "Reason" in content
     assert "Freshness/Citation Bonus" not in content

@@ -188,16 +188,72 @@ def _nonempty_list(value: object) -> list[str]:
     return [text] if text else []
 
 
+def _presentation_display_label(value: object) -> str:
+    text = " ".join(str(value or "").strip().split())
+    if not text:
+        return ""
+    lowered = text.lower()
+    if re.search(r"\b(best|award|outstanding|distinguished)[-\s]+paper\b", lowered):
+        return "Best paper/award"
+    if re.search(r"\boral\b", lowered):
+        return "Oral"
+    if re.search(r"\bspotlight\b", lowered):
+        return "Spotlight"
+    if re.search(r"\bhighlight\b", lowered):
+        return "Highlight"
+    if re.search(r"\bnotable\b", lowered):
+        return "Notable"
+    if re.search(r"top[-\s]?5%", lowered):
+        return "Top-5%"
+    if re.search(r"\bposter\b", lowered):
+        return "Poster"
+    return ""
+
+
+def _presentation_display_from_paper(paper: dict) -> str:
+    metadata = _metadata_dict(paper)
+    for key in ["presentation_type", "presentation_label", "track", "acceptance_type", "paper_type"]:
+        label = _presentation_display_label(paper.get(key))
+        if label:
+            return label
+    for key in ["presentation_type", "presentation_label", "track", "acceptance_type", "paper_type"]:
+        label = _presentation_display_label(metadata.get(key))
+        if label:
+            return label
+    for label in _nonempty_list(paper.get("quality_labels")):
+        display = _presentation_display_label(label)
+        if display:
+            return display
+    return ""
+
+
+def _quality_label_display(label: object) -> str:
+    presentation = _presentation_display_label(label)
+    return presentation or " ".join(str(label or "").strip().split())
+
+
 def _optional_metadata_lines(paper: dict) -> list[str]:
     lines: list[str] = []
-    track = str(paper.get("track") or "").strip()
+    track = _presentation_display_from_paper(paper)
     if track:
         lines.append(f"- **Track/类型**: {track}")
-    labels = _nonempty_list(paper.get("quality_labels"))
+    track_key = track.lower()
+    labels: list[str] = []
+    seen: set[str] = set()
+    for raw_label in _nonempty_list(paper.get("quality_labels")):
+        label = _quality_label_display(raw_label)
+        if not label:
+            continue
+        label_key = label.lower()
+        if track_key and label_key == track_key:
+            continue
+        if label_key in seen:
+            continue
+        labels.append(label)
+        seen.add(label_key)
     if labels:
-        lines.append(f"- **质量标签**: {', '.join(labels)}")
+        lines.append("- **质量标签**: " + ", ".join(labels))
     return lines
-
 
 def _metadata_dict(paper: dict) -> dict:
     return paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}

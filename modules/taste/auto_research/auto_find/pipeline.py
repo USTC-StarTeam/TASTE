@@ -456,8 +456,8 @@ def _combined_score(fit_score: object, diversity_score: object) -> float:
 
 
 def _recommendation_display_score(fit_score: object, diversity_score: object = None) -> float:
-    # User-visible Find ranking and score display are the final title+abstract
-    # LLM fit_score only. Diversity/source/citation/freshness remain audit fields.
+    # User-visible score display remains the final title+abstract LLM fit_score.
+    # Ranking may use a small gated official-presentation bonus separately.
     return round(max(0.0, min(10.0, _as_float(fit_score))), 2)
 
 
@@ -1679,9 +1679,9 @@ def _apply_stable_ranking_score(item: dict, interest: str) -> None:
     item["stable_source_score"] = round(min(10.0, base_stable + quality_bonus + bonus), 2)
     item["combined_score"] = _combined_score(item.get("fit_score"), item.get("diversity_score"))
     recommendation_base = _recommendation_display_score(item.get("llm_fit_score") or item.get("fit_score"))
-    # User-visible Find ranking is the final title+abstract LLM score only.
-    # Source/citation/freshness scores stay available as audit fields but cannot
-    # move a paper into or upward in the recommendation list.
+    # User-visible score display remains the final title+abstract LLM score.
+    # Source/citation/freshness scores stay available as audit fields; only the
+    # gated official-presentation bonus can slightly affect the final cut.
     item["recommendation_score"] = recommendation_base
     base_bucket = round(base_stable / 0.05) * 0.05
     bonus_bucket = round((quality_bonus + bonus) / 0.25) * 0.25
@@ -4306,16 +4306,30 @@ def _mark_evidence_tier(item: dict) -> dict:
     return item
 
 
+def _recommendation_presentation_rank_bonus(item: dict) -> float:
+    if not _presentation_bonus_allowed(item):
+        return 0.0
+    presentation_bonus, _reason = _presentation_bonus(item)
+    applied_bonus = _as_float(item.get("quality_bonus"))
+    if presentation_bonus <= 0 or applied_bonus <= 0:
+        return 0.0
+    return round(min(0.65, presentation_bonus, applied_bonus), 2)
+
+
 def _recommendation_rank_key(item: dict) -> tuple:
     fit = _as_float(item.get("llm_fit_score"), item.get("fit_score"))
+    presentation_bonus = _recommendation_presentation_rank_bonus(item)
+    rank_score = fit + presentation_bonus
+    rank_bucket = round(rank_score / 0.25) * 0.25
     combined = _as_float(item.get("llm_combined_score"), item.get("combined_score"))
     boundary_combined_tie = -round(combined / 0.01) * 0.01 if fit < 7.0 else 0.0
     return (
+        -rank_bucket,
+        -presentation_bonus,
         -round(fit / 0.01) * 0.01,
         boundary_combined_tie,
         str(item.get("title") or item.get("id") or item.get("url") or "").lower(),
     )
-
 
 def _find_recommendation_invalid_reason(item: dict, config: AppConfig | None) -> str:
     """Validate the single user-visible Find recommendation contract.
@@ -4323,8 +4337,8 @@ def _find_recommendation_invalid_reason(item: dict, config: AppConfig | None) ->
     Find recommends papers for deep reading by one path only: the title screen
     supplies candidates, detail enrichment supplies a real abstract, the final
     title+abstract LLM judge scores them, and the UI/Read pool takes the top-N
-    ranked rows. Topic-evidence/foundation/route labels are audit metadata; they
-    must not hard-filter, promote, or backfill user-visible recommendations.
+    ranked rows. Topic-evidence/foundation/route labels are audit metadata; only
+    already-applied official presentation bonuses may softly break near ties.
     """
     if _llm_expected(config) and not _is_llm_supported(item):
         return "missing_final_title_abstract_llm_scoring"
@@ -5924,7 +5938,7 @@ def run_find(
             "articles": article_items,
             "artifact_semantics": {
                 "articles": "Backward-compatible alias for strong_recommendations and the source of article.md; contains the top final LLM title+abstract recommendations with real abstracts.",
-                "strong_recommendations": "User-facing recommended papers: real-abstract rows ranked by final title+abstract LLM fit/recommendation score.",
+                "strong_recommendations": "User-facing recommended papers: real-abstract rows ranked by final title+abstract LLM fit plus a small gated official-presentation bonus.",
                 "screened_ranking": "Uncapped final-LLM recommendation ranking for inspection; article.md/read_candidates take the top configured rows from the same list.",
                 "read_candidates": "Deep-reading input and backward-compatible alias for the user-facing recommended-paper pool. Recommendation count must equal read_candidates count.",
                 "triage_candidates": "Machine inspection pool for near-threshold, failed, or contrast rows. It is not shown as recommended reading.",
