@@ -9633,8 +9633,12 @@ def _current_find_pipeline_summary(root: Path, find_results: dict[str, Any] | No
     state_plan_matches = same_current_run_payload(state_plan)
     if not same_current_run_payload(read_results) and state_plan_matches and isinstance(state_plan.get("readings"), list):
         read_results = {"run_id": run_id, "source": state_plan.get("source") or required_source, "readings": state_plan.get("readings")}
+    if not same_current_run_payload(read_results):
+        read_results = {}
     if not same_current_run_payload(ideas_results) and state_plan_matches and isinstance(state_plan.get("ideas"), list):
         ideas_results = {"run_id": run_id, "source": state_plan.get("source") or required_source, "ideas": state_plan.get("ideas")}
+    if not same_current_run_payload(ideas_results):
+        ideas_results = {}
     if not same_current_run_payload(plans_results) and state_plan_matches and isinstance(state_plan.get("plans"), list):
         plans_results = {
             "run_id": run_id,
@@ -9647,6 +9651,8 @@ def _current_find_pipeline_summary(root: Path, find_results: dict[str, Any] | No
             "selected_by": state_plan.get("selected_by") or "",
             "execution_policy": state_plan.get("execution_policy") or {},
         }
+    if not same_current_run_payload(plans_results):
+        plans_results = {}
     readings = _json_rows(read_results.get("readings", [])) if isinstance(read_results, dict) else []
     ideas = _json_rows(ideas_results.get("ideas", [])) if isinstance(ideas_results, dict) else []
     plans = _json_rows(plans_results.get("plans", [])) if isinstance(plans_results, dict) else []
@@ -10815,6 +10821,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     plan_validation = safe_dict(current_plan.get("reading_validation"))
     raw_read_count = read_count
     full_text_read_count = _as_int(pipeline_state.get("full_text_reading_count"), 0)
+    full_text_evidence_count = _as_int(pipeline_state.get("full_text_evidence_count"), 0)
     pending_full_text_read_count = _as_int(pipeline_state.get("pending_full_text_reading_count"), 0)
     completed_read_count = full_text_read_count if (full_text_read_count or pending_full_text_read_count or pipeline_validation) else read_count
     display_read_count = raw_read_count or read_count or completed_read_count
@@ -10859,7 +10866,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         "read_count": completed_read_count,
         "recommended_reading_count": recommended_reading_count,
         "full_text_reading_count": full_text_read_count,
-        "full_text_evidence_count": _as_int(pipeline_state.get("full_text_evidence_count"), 0),
+        "full_text_evidence_count": full_text_evidence_count,
         "pending_full_text_reading_count": pending_full_text_read_count,
         "pending_without_evidence_count": _as_int(pipeline_state.get("pending_without_evidence_count"), 0),
         "ideas": idea_count,
@@ -10887,7 +10894,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         "recommended_reading_count": recommended_reading_count,
         "read_artifact_count": raw_read_count,
         "full_text_reading_count": full_text_read_count,
-        "full_text_evidence_count": _as_int(pipeline_state.get("full_text_evidence_count"), 0),
+        "full_text_evidence_count": full_text_evidence_count,
         "pending_full_text_reading_count": pending_full_text_read_count,
         "pending_without_evidence_count": _as_int(pipeline_state.get("pending_without_evidence_count"), 0),
         "idea_count": idea_count,
@@ -11360,11 +11367,15 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     )
     if recommendation_shortfall and not fresh_find_running:
         find_module_summary = f"当前 Find 推荐 {strong_count}/{recommendation_target_count} 篇，仍需补齐高质量推荐后才能进入下游步骤。"
+    pending_full_text_titles = [str(item).strip() for item in safe_list(pipeline_state.get("pending_full_text_reading_titles") or pipeline_validation.get("pending_full_text_reading_titles")) if str(item).strip()]
+    pending_full_text_title_text = "；缺失：" + "；".join(pending_full_text_titles[:5]) if pending_full_text_titles else ""
     read_module_summary = (
         "新的 Find 正在运行；精读等待推荐列表稳定。"
         if fresh_find_running else
+        f"当前 Find 全文证据覆盖 {full_text_evidence_count}/{strong_count or recommended_reading_count or full_text_evidence_count} 篇，仍缺 {pending_full_text_read_count} 篇{pending_full_text_title_text}。补齐同篇 PDF/HTML 证据后才能生成全文精读。"
+        if pending_full_text_read_count and full_text_evidence_count else
         f"当前精读展示 {display_read_count}/{strong_count or display_read_count} 篇；全文精读合格 {full_text_read_count} 篇，待补 {pending_full_text_read_count} 篇。"
-        if read_count else
+        if read_count or full_text_read_count or pending_full_text_read_count else
         "当前 Find 尚未产出精读结果。"
     )
     idea_module_summary = (
@@ -11415,7 +11426,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
             "recommendation_quality": literature_survey.get("recommendation_quality", {}),
         },
         "read": {
-            "status": "fresh_find_running" if fresh_find_running else "pass" if full_text_read_count >= strong_count and strong_count else "syncing" if strong_count else "not_started",
+            "status": "fresh_find_running" if fresh_find_running else "blocked" if pending_full_text_read_count and str(pipeline_state.get("failure_type") or "") == "full_text_evidence_missing" else "pass" if full_text_read_count >= strong_count and strong_count else "syncing" if strong_count else "not_started",
             "run_id": run_id,
             "summary": read_module_summary,
             "summary_zh": read_module_summary,
@@ -11424,7 +11435,9 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
             "reading_count": display_read_count,
             "read_artifact_count": raw_read_count,
             "full_text_reading_count": full_text_read_count,
+            "full_text_evidence_count": full_text_evidence_count,
             "pending_full_text_reading_count": pending_full_text_read_count,
+            "pending_full_text_reading_titles": pending_full_text_titles[:12],
             "read_matches_recommendations": display_read_count >= strong_count if strong_count else read_matches_recommendations,
         },
         "idea": {

@@ -2064,13 +2064,82 @@ function stripLegacyArtifactPointerLines(markdown: string) {
     .replace(/\(\s*(?:Fit|Score)\s*=\s*[^)]+\)/gi, "");
 }
 
+function normalizePublicLatexLinks(text: string) {
+  return String(text ?? "")
+    .replace(/\\href\{(https?:\/\/[^{}\s]+)\}\{([^{}]+)\}/g, (_match, url, label) => {
+      const href = String(url || "").trim();
+      const textLabel = String(label || "").trim() || href;
+      return `[${textLabel}](${href})`;
+    })
+    .replace(/\\url\{(https?:\/\/[^{}\s]+)\}/g, (_match, url) => {
+      const href = String(url || "").trim();
+      return `[${href}](${href})`;
+    });
+}
+
 function publicMarkdownArtifact(markdown: string) {
-  return stripLegacyArtifactPointerLines(markdown)
+  return normalizePublicLatexLinks(stripLegacyArtifactPointerLines(markdown))
     .replace(/可作为重点精读候选/g, "可作为推荐精读候选")
     .replace(/中文摘要暂不可用/g, "中文摘要待补")
     .replace(/重新翻译/g, "后续补译")
     .replace(/\| # \| 论文 \| 方法类型 \| 主要优点 \| 主要局限 \|/g, "| # | 论文 | 机制类别 | 主要优点 | 主要局限 |")
     .replace(/方法类型：/g, "方法侧重：");
+}
+
+const PLAIN_MATH_FRAGMENT_RE = /(^|[（(：:\s])([A-Za-zΑ-Ωα-ωΩ∇][A-Za-z0-9Α-Ωα-ωΩ∇θτ'_,.<>{}\[\]()|;:+\-*/\s]{0,90}?(?:\s(?:∼|≤|≥|≈|∝|=|→|←|->|<-)\s|\|\|)[A-Za-z0-9Α-Ωα-ωΩ∇θτ'_,.<>{}\[\]()|;:+\-*/\s]{1,180}?)(?=[，。；、;!?]|$)/g;
+
+function renderMathSource(raw: string) {
+  let value = String(raw || "").trim()
+    .replace(/\\left\s*/g, "")
+    .replace(/\\right\s*/g, "")
+    .replace(/\\cdot/g, "·")
+    .replace(/\\times/g, "×")
+    .replace(/\\sim/g, "∼")
+    .replace(/\\leq?/g, "≤")
+    .replace(/\\geq?/g, "≥")
+    .replace(/\\approx/g, "≈")
+    .replace(/\\propto/g, "∝")
+    .replace(/\\rightarrow/g, "→")
+    .replace(/\\leftarrow/g, "←")
+    .replace(/\\theta/g, "θ")
+    .replace(/\\tau/g, "τ")
+    .replace(/\\Omega/g, "Ω")
+    .replace(/\\nabla/g, "∇")
+    .replace(/\\mid/g, "|")
+    .replace(/\\lVert/g, "||")
+    .replace(/\\rVert/g, "||")
+    .replace(/\\mathrm\{([^{}]+)\}/g, "$1")
+    .replace(/\\text\{([^{}]+)\}/g, "$1")
+    .replace(/\\mathcal\{([^{}]+)\}/g, "$1")
+    .replace(/\\mathbf\{([^{}]+)\}/g, "$1");
+  let html = escapeHtml(value);
+  html = html.replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, '<span class="math-frac"><span>$1</span><span>$2</span></span>');
+  html = html
+    .replace(/([A-Za-zΑ-Ωα-ωΩ∇])_\{([^{}]+)\}/g, "$1<sub>$2</sub>")
+    .replace(/([A-Za-zΑ-Ωα-ωΩ∇])_([A-Za-z0-9+\-]+)/g, "$1<sub>$2</sub>")
+    .replace(/([A-Za-z0-9)\]])\^\{([^{}]+)\}/g, "$1<sup>$2</sup>")
+    .replace(/([A-Za-z0-9)\]])\^([A-Za-z0-9+\-]+)/g, "$1<sup>$2</sup>")
+    .replace(/\b([A-Z])([a-z][A-Za-z0-9']{0,4})\b(?!\s*\()/g, "$1<sub>$2</sub>")
+    .replace(/\b([a-z])([a-z])\b/g, "$1<sub>$2</sub>")
+    .replace(/([θτ])([A-Za-z0-9]+)/g, "$1<sub>$2</sub>");
+  return html;
+}
+
+function mathInlineHtml(raw: string) {
+  const label = escapeHtml(String(raw || "").trim());
+  return `<span class="math-inline" aria-label="${label}">${renderMathSource(raw)}</span>`;
+}
+
+function mathDisplayHtml(raw: string) {
+  const label = escapeHtml(String(raw || "").trim());
+  return `<div class="math-display" aria-label="${label}">${renderMathSource(raw)}</div>`;
+}
+
+function isLikelyDelimitedMath(raw: string) {
+  const value = String(raw || "").trim();
+  if (!value || /[一-鿿]/.test(value)) return false;
+  if (/^\d+(?:\.\d+)?\s*(?:USD|RMB|CNY|dollars?)?$/i.test(value)) return false;
+  return /[\_^{}]|[A-Za-zΑ-Ωα-ωΩ∇θτπΣδγ]|[=≤≥∼≈∝+\-*/|]/.test(value);
 }
 
 function markdownToHtml(markdown: string) {
@@ -2093,10 +2162,32 @@ function markdownToHtml(markdown: string) {
       inCode = false;
     }
   };
-  const inline = (text: string) => escapeHtml(text)
-    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-    .replace(/`(.+?)`/g, "<code>$1</code>")
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+  const inline = (text: string) => {
+    const tokens: string[] = [];
+    const protect = (htmlValue: string) => {
+      const token = `@@TASTE_INLINE_${tokens.length}@@`;
+      tokens.push(htmlValue);
+      return token;
+    };
+    let value = normalizePublicLatexLinks(String(text ?? ""));
+    value = value.replace(/`([^`]+)`/g, (_match, code) => protect(`<code>${escapeHtml(String(code || ""))}</code>`));
+    value = value.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, (_match, label, url) => {
+      const href = escapeHtml(String(url || ""));
+      return protect(`<a href="${href}" target="_blank" rel="noreferrer">${escapeHtml(String(label || url || ""))}</a>`);
+    });
+    value = value.replace(/\\\((.{1,240}?)\\\)/g, (_match, expr) => protect(mathInlineHtml(String(expr || ""))));
+    value = value.replace(/(^|[^\\])\$([^$\n]{1,240})\$/g, (_match, prefix, expr) => {
+      const expression = String(expr || "");
+      if (!isLikelyDelimitedMath(expression)) return `${prefix}$${expression}$`;
+      return `${prefix}${protect(mathInlineHtml(expression))}`;
+    });
+    value = value.replace(PLAIN_MATH_FRAGMENT_RE, (_match, prefix, expr) => `${prefix}${protect(mathInlineHtml(String(expr || "")))}`);
+    let escaped = escapeHtml(value).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    tokens.forEach((htmlValue, idx) => {
+      escaped = escaped.replace(new RegExp(`@@TASTE_INLINE_${idx}@@`, "g"), htmlValue);
+    });
+    return escaped;
+  };
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
@@ -2115,6 +2206,12 @@ function markdownToHtml(markdown: string) {
     }
     if (!line.trim()) {
       closeList();
+      continue;
+    }
+    const displayMath = line.trim().match(/^(?:\$\$|\\[)(.+?)(?:\$\$|\\])$/);
+    if (displayMath) {
+      closeList();
+      html.push(mathDisplayHtml(displayMath[1]));
       continue;
     }
     if (line.trim().startsWith("|") && lines[index + 1]?.match(/^\s*\|?[\s:-]+\|[\s|:-]*$/)) {

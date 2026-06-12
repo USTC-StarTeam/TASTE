@@ -4119,6 +4119,61 @@ def test_current_find_pipeline_uses_standalone_preflight_validation_counts(tmp_p
     assert summary["pending_full_text_reading_count"] == 2
     assert summary["pending_full_text_reading_titles"] == ["Missing Evidence Paper One", "Missing Evidence Paper Two"]
 
+def test_current_find_pipeline_ignores_stale_read_artifacts_when_using_preflight_validation(tmp_path, monkeypatch):
+    from auto_research.web import project_bridge
+
+    project_root = tmp_path / "demo_project"
+    taste_dir = project_root / "planning" / "finding"
+    state_dir = project_root / "state"
+    taste_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    recommendations = [recommended_paper(f"paper-{idx}", f"Paper {idx}") for idx in range(1, 5)]
+    write_json(
+        taste_dir / "find_results.json",
+        {
+            "run_id": "find_current",
+            "strong_recommendations": recommendations,
+            "articles": recommendations,
+            "recommendation_target_count": 4,
+            "recommendation_shortfall": 0,
+            "recommendation_quality": {"status": "ok", "missing_real_abstract_count": 0, "missing_chinese_abstract_count": 0, "english_abstract_fallback_count": 0},
+        },
+    )
+    write_json(taste_dir / "read_results.json", {"run_id": "find_old", "source": "claude_code_current_find_takeover", "readings": [{"title": "Old Paper"}]})
+    write_json(taste_dir / "ideas.json", {"run_id": "find_old", "source": "claude_code_current_find_takeover", "ideas": [{"id": "old-idea"}]})
+    write_json(taste_dir / "plans.json", {"run_id": "find_old", "source": "claude_code_current_find_takeover", "plans": [{"plan_id": "old-plan"}]})
+    write_json(state_dir / "current_find_research_plan.json", {"run_id": "find_current", "status": "blocked_current_find_full_text_evidence_pending"})
+    write_json(
+        state_dir / "current_find_claude_reading_validation.json",
+        {
+            "run_id": "find_current",
+            "status": "blocked_current_find_full_text_evidence_pending",
+            "preflight": "before_current_find_claude_takeover",
+            "valid": False,
+            "actual_reading_count": 0,
+            "expected_recommendation_count": 4,
+            "full_text_evidence_count": 2,
+            "pending_without_evidence_count": 2,
+            "pending_full_text_reading_count": 2,
+            "full_text_reading_count": 0,
+            "pending_full_text_reading_titles": ["Paper 3", "Paper 4"],
+            "blockers": ["current Find full-text evidence still misses user-visible recommendations"],
+        },
+    )
+    monkeypatch.setattr(project_bridge, "_current_find_results_light", lambda root, project: read_json(root / "planning" / "finding" / "find_results.json", {}))
+
+    summary = project_bridge._current_find_pipeline_summary(project_root)
+
+    assert summary["status"] == "blocked_current_find_full_text_evidence_pending"
+    assert summary["read_artifact_count"] == 0
+    assert summary["ideas"] == 0
+    assert summary["plans"] == 0
+    assert summary["full_text_evidence_count"] == 2
+    assert summary["pending_without_evidence_count"] == 2
+    assert summary["pending_full_text_reading_count"] == 2
+    assert summary["pending_full_text_reading_titles"] == ["Paper 3", "Paper 4"]
+
+
 def test_web_current_find_pipeline_counts_only_full_text_readings(tmp_path, monkeypatch):
     from auto_research.web import project_bridge
 
@@ -4373,6 +4428,26 @@ def test_frontend_start_read_requests_all_recommendations_by_default():
     assert "const selected = Array.isArray(paperIds) ? paperIds.filter(Boolean) : []" in block
     assert "paper_ids: selected" in block
     assert "max_papers: selected.length ? selected.length : 0" in block
+
+def test_frontend_markdown_renderer_supports_latex_links_and_math_markup():
+    from pathlib import Path
+
+    app_path = Path(__file__).resolve().parents[1] / "auto_research" / "web" / "client" / "src" / "App.tsx"
+    css_path = Path(__file__).resolve().parents[1] / "auto_research" / "web" / "client" / "src" / "styles.css"
+    app = app_path.read_text(encoding="utf-8")
+    css = css_path.read_text(encoding="utf-8")
+
+    assert "function normalizePublicLatexLinks" in app
+    assert "normalizePublicLatexLinks(stripLegacyArtifactPointerLines(markdown))" in app
+    assert "PLAIN_MATH_FRAGMENT_RE" in app
+    assert "function renderMathSource" in app
+    assert "function mathInlineHtml" in app
+    assert 'class="math-inline"' in app
+    assert "\\theta" in app
+    assert "\\url" in app
+    assert ".markdownBody .math-inline" in css
+    assert ".markdownBody .math-display" in css
+
 
 def test_frontend_paper_self_review_evidence_blockers_are_submission_gate():
     from pathlib import Path

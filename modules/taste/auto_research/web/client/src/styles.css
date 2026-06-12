@@ -1087,6 +1087,61 @@ summary {
   padding: 0.08rem 0.28rem;
 }
 
+.markdownBody .math-inline,
+.markdownBody .math-display {
+  font-family: "STIX Two Math", "Cambria Math", "Times New Roman", serif;
+  letter-spacing: 0;
+  color: #1b2b3f;
+}
+
+.markdownBody .math-inline {
+  display: inline;
+  border: 1px solid #d7dee7;
+  border-radius: 5px;
+  background: #f6f8fb;
+  padding: 0.02rem 0.24rem;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.markdownBody .math-display {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid #d7dee7;
+  border-radius: 6px;
+  background: #f6f8fb;
+  padding: 0.58rem 0.68rem;
+  margin: 0.65rem 0;
+}
+
+.markdownBody .math-inline sub,
+.markdownBody .math-inline sup,
+.markdownBody .math-display sub,
+.markdownBody .math-display sup {
+  font-size: 0.72em;
+  line-height: 0;
+}
+
+.markdownBody .math-frac {
+  display: inline-grid;
+  grid-template-rows: auto auto;
+  align-items: center;
+  vertical-align: middle;
+  text-align: center;
+  line-height: 1.05;
+}
+
+.markdownBody .math-frac span:first-child {
+  border-bottom: 1px solid currentColor;
+  padding: 0 0.15rem 0.05rem;
+}
+
+.markdownBody .math-frac span:last-child {
+  padding: 0.05rem 0.15rem 0;
+}
+
 .markdownBody pre {
   max-height: 420px;
 }
