@@ -302,7 +302,7 @@ def test_read_sanitizes_llm_public_output_before_persisting(monkeypatch):
     finally:
         delete_run(run_id)
 
-def test_run_find_persists_real_results_before_chinese_translation_timeout(monkeypatch):
+def test_run_find_completes_user_visible_chinese_abstracts_when_translation_raises(monkeypatch):
     import auto_research.auto_find.pipeline as pipeline
 
     def fail_translation(*_args, **_kwargs):
@@ -317,8 +317,9 @@ def test_run_find_persists_real_results_before_chinese_translation_timeout(monke
         max_ideas=2,
     )
 
+    before = {path.parent.name for path in RUNS_DIR.glob("find_*/find_results.json")}
     try:
-        run_find(
+        artifacts = run_find(
             FindRequest(
                 config=cfg,
                 selection=VenueSelection(
@@ -331,16 +332,27 @@ def test_run_find_persists_real_results_before_chinese_translation_timeout(monke
             ),
             log=lambda _msg: None,
         )
-    except TimeoutError:
-        pass
-
-    latest = sorted(RUNS_DIR.glob("find_*/find_results.json"), key=lambda path: path.stat().st_mtime, reverse=True)[0]
-    payload = read_json(latest, {})
-    assert payload["run_id"] != "taste_recoverable_fallback"
-    assert payload["articles"]
-    assert payload["strong_recommendations"]
-    assert payload["scoring_runtime"]["abstract_translation_status"] == "partial"
-    delete_run(payload["run_id"])
+        latest = sorted(
+            [path for path in RUNS_DIR.glob("find_*/find_results.json") if path.parent.name not in before],
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )[0]
+        payload = read_json(latest, {})
+        assert payload["run_id"] == artifacts["run_id"]
+        assert payload["run_id"] != "taste_recoverable_fallback"
+        assert payload["articles"]
+        assert payload["strong_recommendations"]
+        assert payload["scoring_runtime"]["abstract_translation_status"] == "completed"
+        assert payload["recommendation_quality"]["missing_chinese_abstract_count"] == 0
+        assert all(str(item.get("abstract_zh") or "").strip() for item in payload["strong_recommendations"])
+        article_md = latest.with_name("article.md").read_text(encoding="utf-8")
+        assert "TASTE 已阻止发布含英文摘要" not in article_md
+        assert "This paper studies" not in article_md
+        assert "### 摘要" in article_md
+    finally:
+        for path in RUNS_DIR.glob("find_*/find_results.json"):
+            if path.parent.name not in before:
+                delete_run(path.parent.name)
 
 
 def _quality_item(*, venue: str, track: str, topic_evidence: str = "strong: direct topic match") -> dict:

@@ -2090,60 +2090,294 @@ function publicMarkdownArtifact(markdown: string) {
     .replace(/方法类型：/g, "方法侧重：");
 }
 
-const PLAIN_MATH_FRAGMENT_RE = /(^|[（(：:\s])([A-Za-zΑ-Ωα-ωΩ∇][A-Za-z0-9Α-Ωα-ωΩ∇θτ'_,.<>{}\[\]()|;:+\-*/\s]{0,90}?(?:\s(?:∼|≤|≥|≈|∝|=|→|←|->|<-)\s|\|\|)[A-Za-z0-9Α-Ωα-ωΩ∇θτ'_,.<>{}\[\]()|;:+\-*/\s]{1,180}?)(?=[，。；、;!?]|$)/g;
+const INLINE_PLACEHOLDER_RE = /^@@TASTE_INLINE_\d+@@$/;
+const MATH_LATEX_COMMAND_RE = /\\(?:frac|sqrt|sum|prod|int|oint|lim|log|ln|exp|sin|cos|tan|min|max|argmax|argmin|softmax|sigmoid|Pr|KL|CE|MSE|mathbb|mathcal|mathbf|mathrm|operatorname|text|left|right|cdot|times|div|pm|mp|sim|leq?|geq?|neq|approx|propto|to|rightarrow|leftarrow|leftrightarrow|Rightarrow|Leftarrow|in|notin|subseteq?|supseteq?|cup|cap|mid|lVert|rVert|alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|pi|rho|sigma|tau|upsilon|phi|varphi|chi|psi|omega|Omega|Sigma|Delta|Gamma|Lambda|nabla|partial|infty)\b/;
+const MATH_SYMBOL_RE = /[∑∏∫√∞≈≠≤≥±×÷∈∉∩∪⊂⊆⊃⊇⊕⊗→←↔⇒⇔∂∇∼∝∆δθλμσπΩΣτ]/;
+const MATH_COMPARATOR_RE = /(?:<=|>=|!=|==|->|<-|=>|=|≤|≥|≈|≠|∼|∝|→|←|↔|⇒|⇔)/;
+const MATH_BINARY_OPERATOR_RE = /(?:^(?:[A-Za-zΑ-Ωα-ω]|\d+(?:\.\d+)?)\s*[+*/-]\s*(?:[A-Za-zΑ-Ωα-ω]|\d+(?:\.\d+)?)$|[({\[]\s*[A-Za-z0-9]\s*[-+*/]\s*[A-Za-z0-9]\s*[)}\]])/;
+const MATH_SPACED_OPERATOR_RE = /(?:^|[\s(])(?:[A-Za-zΑ-Ωα-ω]|[A-Z][a-z]|[A-Za-zΑ-Ωα-ω]_\{?[-+A-Za-z0-9Α-Ωα-ω]+\}?|\d+(?:\.\d+)?)\s*[+*/=-]\s*(?:[A-Za-zΑ-Ωα-ω]|[A-Z][a-z]|[A-Za-zΑ-Ωα-ω]_\{?[-+A-Za-z0-9Α-Ωα-ω]+\}?|\d+(?:\.\d+)?)(?:$|[\s,)])/;
+const MATH_SUB_SUP_RE = /\b(?:[A-Z][A-Za-z0-9]{0,3}|[a-zΑ-Ωα-ω][0-9']?)[_^]\{?[-+A-Za-z0-9Α-Ωα-ω]+\}?/;
+const MATH_FUNCTION_RE = /\b(?:p|P|Pr|q|Q|f|g|h|L|D|O|N|E|Var|Cov|log|ln|exp|sin|cos|softmax|sigmoid|argmax|argmin|Sample|sample|KL|CE|MSE|NDCG|AUC)\s*\(/;
+const MATH_WORD_RE = /^(?:argmax|argmin|softmax|sigmoid|log|ln|exp|sin|cos|KL|CE|MSE|NDCG|AUC|BPR|Sample|sample|Pr|Var|Cov)$/;
+const NON_MATH_SLASH_TOKEN_RE = /^(?:w\/?o|w\/|n\/?a|and\/or)$/i;
+const MATH_COMMAND_SYMBOL_REPLACEMENTS: Array<[RegExp, string]> = [
+  [/\\cdot/g, "·"],
+  [/\\times/g, "×"],
+  [/\\div/g, "÷"],
+  [/\\pm/g, "±"],
+  [/\\mp/g, "∓"],
+  [/\\sim/g, "∼"],
+  [/\\leq?/g, "≤"],
+  [/\\geq?/g, "≥"],
+  [/\\neq/g, "≠"],
+  [/\\approx/g, "≈"],
+  [/\\propto/g, "∝"],
+  [/\\rightarrow|\\to/g, "→"],
+  [/\\leftarrow/g, "←"],
+  [/\\leftrightarrow/g, "↔"],
+  [/\\Rightarrow/g, "⇒"],
+  [/\\Leftarrow/g, "⇐"],
+  [/\\infty/g, "∞"],
+  [/\\partial/g, "∂"],
+  [/\\nabla/g, "∇"],
+  [/\\sum/g, "∑"],
+  [/\\prod/g, "∏"],
+  [/\\int/g, "∫"],
+  [/\\in/g, "∈"],
+  [/\\notin/g, "∉"],
+  [/\\subseteq/g, "⊆"],
+  [/\\subset/g, "⊂"],
+  [/\\supseteq/g, "⊇"],
+  [/\\supset/g, "⊃"],
+  [/\\cup/g, "∪"],
+  [/\\cap/g, "∩"],
+  [/\\mid/g, "|"],
+  [/\\lVert/g, "||"],
+  [/\\rVert/g, "||"],
+  [/\\alpha/g, "α"],
+  [/\\beta/g, "β"],
+  [/\\gamma/g, "γ"],
+  [/\\delta/g, "δ"],
+  [/\\epsilon|\\varepsilon/g, "ε"],
+  [/\\zeta/g, "ζ"],
+  [/\\eta/g, "η"],
+  [/\\theta|\\vartheta/g, "θ"],
+  [/\\iota/g, "ι"],
+  [/\\kappa/g, "κ"],
+  [/\\lambda/g, "λ"],
+  [/\\mu/g, "μ"],
+  [/\\nu/g, "ν"],
+  [/\\xi/g, "ξ"],
+  [/\\pi/g, "π"],
+  [/\\rho/g, "ρ"],
+  [/\\sigma/g, "σ"],
+  [/\\tau/g, "τ"],
+  [/\\upsilon/g, "υ"],
+  [/\\phi|\\varphi/g, "φ"],
+  [/\\chi/g, "χ"],
+  [/\\psi/g, "ψ"],
+  [/\\omega/g, "ω"],
+  [/\\Omega/g, "Ω"],
+  [/\\Sigma/g, "Σ"],
+  [/\\Delta/g, "∆"],
+  [/\\Gamma/g, "Γ"],
+  [/\\Lambda/g, "Λ"],
+];
+
+
+function decodeBasicHtmlEntities(raw: string) {
+  let value = String(raw || "");
+  for (let index = 0; index < 5; index += 1) {
+    const next = value
+      .replace(/&lt;|&#60;|&#x3c;/gi, "<")
+      .replace(/&gt;|&#62;|&#x3e;/gi, ">")
+      .replace(/&le;|&#8804;|&#x2264;/gi, "≤")
+      .replace(/&ge;|&#8805;|&#x2265;/gi, "≥")
+      .replace(/&minus;|&#8722;|&#x2212;/gi, "−")
+      .replace(/&times;|&#215;|&#xd7;/gi, "×")
+      .replace(/&amp;|&#38;|&#x26;/gi, "&");
+    if (next === value) break;
+    value = next;
+  }
+  return value;
+}
+
+function stripMathDelimiters(raw: string) {
+  let value = String(raw || "").trim();
+  const pairs: Array<[RegExp, RegExp]> = [
+    [/^\$\$\s*/, /\s*\$\$$/],
+    [/^\$\s*/, /\s*\$$/],
+    [/^\\\(\s*/, /\s*\\\)$/],
+    [/^\\\[\s*/, /\s*\\\]$/],
+  ];
+  pairs.forEach(([left, right]) => {
+    if (left.test(value) && right.test(value)) value = value.replace(left, "").replace(right, "");
+  });
+  return value.trim();
+}
+
+function normalizeMathTokenCore(token: string) {
+  return String(token || "")
+    .replace(/^["'“”‘’]+/, "")
+    .replace(/["'“”‘’]+$/, "")
+    .replace(/^[,.;!?，。；、]+/, "")
+    .replace(/[,.;!?，。；、]+$/, "");
+}
+
+function isStrongMathToken(token: string) {
+  const core = normalizeMathTokenCore(token);
+  if (!core || INLINE_PLACEHOLDER_RE.test(core) || /^https?:\/\//i.test(core) || NON_MATH_SLASH_TOKEN_RE.test(core)) return false;
+  if (MATH_LATEX_COMMAND_RE.test(core) || /^\\[A-Za-z]+/.test(core)) return true;
+  if (MATH_SYMBOL_RE.test(core) || MATH_SUB_SUP_RE.test(core) || MATH_COMPARATOR_RE.test(core)) return true;
+  if (MATH_BINARY_OPERATOR_RE.test(core) || MATH_FUNCTION_RE.test(core)) return true;
+  if (/^[A-Za-zΑ-Ωα-ω]\([^)]{1,80}\)$/.test(core) && /[A-Za-z0-9_^\-+*/=,|]/.test(core)) return true;
+  return false;
+}
+
+function isVariableMathToken(token: string) {
+  const core = normalizeMathTokenCore(token);
+  if (!core || INLINE_PLACEHOLDER_RE.test(core)) return false;
+  if (/^[A-Za-zΑ-Ωα-ω][0-9']?$/.test(core)) return true;
+  if (/^[A-Z][a-z][0-9']*$/.test(core)) return true;
+  if (/^[A-Za-zΑ-Ωα-ω]\)$/.test(core) || /^\([A-Za-zΑ-Ωα-ω]$/.test(core)) return true;
+  return false;
+}
+
+function isMathConnectorToken(token: string) {
+  const core = normalizeMathTokenCore(token);
+  if (!core) return false;
+  return /^(?:[+\-*/=<>≤≥≈≠∼∝→←↔⇒⇔|∣,]|\|\||\\mid)$/.test(core);
+}
+
+function neighboringTokenIndex(pieces: string[], index: number, step: -1 | 1) {
+  for (let cursor = index + step; cursor >= 0 && cursor < pieces.length; cursor += step) {
+    const part = pieces[cursor];
+    if (!part || /^\s+$/.test(part) || INLINE_PLACEHOLDER_RE.test(part)) continue;
+    return cursor;
+  }
+  return -1;
+}
+
+function looksLikeBareMathExpression(raw: string) {
+  const value = decodeBasicHtmlEntities(stripMathDelimiters(raw)).replace(/\s+/g, " ").trim();
+  if (!value || value.length > 320) return false;
+  if (NON_MATH_SLASH_TOKEN_RE.test(value)) return false;
+  if (INLINE_PLACEHOLDER_RE.test(value) || /^https?:\/\//i.test(value) || /@/.test(value)) return false;
+  if (/^[\d.,]+$/.test(value)) return false;
+  if (/[一-鿿]/.test(value)) return false;
+  const hasCommand = MATH_LATEX_COMMAND_RE.test(value) || /\\[A-Za-z]+/.test(value);
+  const hasSymbol = MATH_SYMBOL_RE.test(value);
+  const hasSubSup = MATH_SUB_SUP_RE.test(value);
+  const hasComparator = MATH_COMPARATOR_RE.test(value) && /[A-Za-zΑ-Ωα-ω0-9]/.test(value);
+  const hasOperator = (MATH_BINARY_OPERATOR_RE.test(value) || MATH_SPACED_OPERATOR_RE.test(value)) && /[A-Za-zΑ-Ωα-ω]/.test(value);
+  const hasFunction = MATH_FUNCTION_RE.test(value);
+  const words = value.match(/[A-Za-z]{3,}/g) || [];
+  const proseWords = words.filter((word) => !MATH_WORD_RE.test(word) && !/^[A-Z][a-z]$/.test(word));
+  const signals = [hasCommand, hasSymbol, hasSubSup, hasComparator, hasOperator, hasFunction].filter(Boolean).length;
+  if (proseWords.length >= 4 && signals < 2) return false;
+  return signals > 0;
+}
+
+function renderBareMathInText(text: string, protectMath: (expression: string) => string) {
+  const pieces = String(text || "").match(/@@TASTE_INLINE_\d+@@|\s+|[，。；、！？]+|[^\s，。；、！？]+/g) || [];
+  const strong = pieces.map((part) => Boolean(part && !/^\s+$/.test(part) && !INLINE_PLACEHOLDER_RE.test(part) && isStrongMathToken(part)));
+  const variable = pieces.map((part) => Boolean(part && !/^\s+$/.test(part) && !INLINE_PLACEHOLDER_RE.test(part) && isVariableMathToken(part)));
+  const connector = pieces.map((part) => Boolean(part && !/^\s+$/.test(part) && !INLINE_PLACEHOLDER_RE.test(part) && isMathConnectorToken(part)));
+  const included = pieces.map((_part, index) => {
+    if (strong[index]) return true;
+    const prev = neighboringTokenIndex(pieces, index, -1);
+    const next = neighboringTokenIndex(pieces, index, 1);
+    if (connector[index]) return (prev >= 0 && (strong[prev] || variable[prev])) || (next >= 0 && (strong[next] || variable[next]));
+    if (variable[index]) return (prev >= 0 && (strong[prev] || connector[prev])) || (next >= 0 && (strong[next] || connector[next]));
+    return false;
+  });
+  const output: string[] = [];
+  const group: string[] = [];
+  const flushGroup = () => {
+    if (!group.length) return;
+    const raw = group.join("");
+    const leading = raw.match(/^\s*/)?.[0] || "";
+    const trailingWhitespace = raw.match(/\s*$/)?.[0] || "";
+    let core = raw.slice(leading.length, raw.length - trailingWhitespace.length);
+    const trailingPunctuation = core.match(/[,.;!?，。；、]+$/)?.[0] || "";
+    if (trailingPunctuation) core = core.slice(0, -trailingPunctuation.length);
+    if (looksLikeBareMathExpression(core)) {
+      output.push(`${leading}${protectMath(core)}${trailingPunctuation}${trailingWhitespace}`);
+    } else {
+      output.push(raw);
+    }
+    group.length = 0;
+  };
+  pieces.forEach((part, index) => {
+    if (INLINE_PLACEHOLDER_RE.test(part)) {
+      flushGroup();
+      output.push(part);
+      return;
+    }
+    if (/^\s+$/.test(part)) {
+      if (group.length) group.push(part);
+      else output.push(part);
+      return;
+    }
+    if (included[index]) {
+      group.push(part);
+      return;
+    }
+    flushGroup();
+    output.push(part);
+  });
+  flushGroup();
+  return output.join("");
+}
 
 function renderMathSource(raw: string) {
-  let value = String(raw || "").trim()
+  let value = decodeBasicHtmlEntities(stripMathDelimiters(raw))
+    .replace(/\\begin\{[^{}]+\}/g, "")
+    .replace(/\\end\{[^{}]+\}/g, "")
     .replace(/\\left\s*/g, "")
     .replace(/\\right\s*/g, "")
-    .replace(/\\cdot/g, "·")
-    .replace(/\\times/g, "×")
-    .replace(/\\sim/g, "∼")
-    .replace(/\\leq?/g, "≤")
-    .replace(/\\geq?/g, "≥")
-    .replace(/\\approx/g, "≈")
-    .replace(/\\propto/g, "∝")
-    .replace(/\\rightarrow/g, "→")
-    .replace(/\\leftarrow/g, "←")
-    .replace(/\\theta/g, "θ")
-    .replace(/\\tau/g, "τ")
-    .replace(/\\Omega/g, "Ω")
-    .replace(/\\nabla/g, "∇")
-    .replace(/\\mid/g, "|")
-    .replace(/\\lVert/g, "||")
-    .replace(/\\rVert/g, "||")
+    .replace(/\\operatorname\{([^{}]+)\}/g, "$1")
     .replace(/\\mathrm\{([^{}]+)\}/g, "$1")
     .replace(/\\text\{([^{}]+)\}/g, "$1")
     .replace(/\\mathcal\{([^{}]+)\}/g, "$1")
-    .replace(/\\mathbf\{([^{}]+)\}/g, "$1");
-  let html = escapeHtml(value);
-  html = html.replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, '<span class="math-frac"><span>$1</span><span>$2</span></span>');
+    .replace(/\\mathbf\{([^{}]+)\}/g, "$1")
+    .replace(/\\mathbb\{R\}/g, "ℝ")
+    .replace(/\\mathbb\{N\}/g, "ℕ")
+    .replace(/\\mathbb\{Z\}/g, "ℤ");
+  MATH_COMMAND_SYMBOL_REPLACEMENTS.forEach(([pattern, replacement]) => {
+    value = value.replace(pattern, replacement);
+  });
+  let html = escapeHtml(value)
+    .replace(/&lt;/g, "⟦0⟧")
+    .replace(/&gt;/g, "⟦1⟧")
+    .replace(/&amp;/g, "⟦2⟧");
   html = html
-    .replace(/([A-Za-zΑ-Ωα-ωΩ∇])_\{([^{}]+)\}/g, "$1<sub>$2</sub>")
-    .replace(/([A-Za-zΑ-Ωα-ωΩ∇])_([A-Za-z0-9+\-]+)/g, "$1<sub>$2</sub>")
-    .replace(/([A-Za-z0-9)\]])\^\{([^{}]+)\}/g, "$1<sup>$2</sup>")
-    .replace(/([A-Za-z0-9)\]])\^([A-Za-z0-9+\-]+)/g, "$1<sup>$2</sup>")
+    .replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, '<span class="math-frac"><span>$1</span><span>$2</span></span>')
+    .replace(/\\sqrt\{([^{}]+)\}/g, "√($1)");
+  const atom = "([A-Za-zΑ-Ωα-ωΩ∇∑∏∫√∞])";
+  html = html
+    .replace(new RegExp(`${atom}_\\{([^{}]+)\\}\\^\\{([^{}]+)\\}`, "g"), "$1<sub>$2</sub><sup>$3</sup>")
+    .replace(new RegExp(`${atom}\\^\\{([^{}]+)\\}_\\{([^{}]+)\\}`, "g"), "$1<sup>$2</sup><sub>$3</sub>")
+    .replace(new RegExp(`${atom}_\\{([^{}]+)\\}`, "g"), "$1<sub>$2</sub>")
+    .replace(new RegExp(`${atom}_([A-Za-z0-9+\-=]+)`, "g"), "$1<sub>$2</sub>")
+    .replace(/([A-Za-z0-9Α-Ωα-ωΩ∇∑∏∫√∞)\]])\^\{([^{}]+)\}/g, "$1<sup>$2</sup>")
+    .replace(/([A-Za-z0-9Α-Ωα-ωΩ∇∑∏∫√∞)\]])\^([A-Za-z0-9+\-=]+)/g, "$1<sup>$2</sup>")
     .replace(/\b([A-Z])([a-z][A-Za-z0-9']{0,4})\b(?!\s*\()/g, "$1<sub>$2</sub>")
     .replace(/\b([a-z])([a-z])\b/g, "$1<sub>$2</sub>")
-    .replace(/([θτ])([A-Za-z0-9]+)/g, "$1<sub>$2</sub>");
-  return html;
+    .replace(/([θτλμσπΩΣ∆])([A-Za-z0-9]+)/g, "$1<sub>$2</sub>");
+  return html
+    .replace(/⟦0⟧/g, "&lt;")
+    .replace(/⟦1⟧/g, "&gt;")
+    .replace(/⟦2⟧/g, "&amp;");
 }
 
 function mathInlineHtml(raw: string) {
-  const label = escapeHtml(String(raw || "").trim());
+  const label = escapeHtml(decodeBasicHtmlEntities(stripMathDelimiters(raw)));
   return `<span class="math-inline" aria-label="${label}">${renderMathSource(raw)}</span>`;
 }
 
 function mathDisplayHtml(raw: string) {
-  const label = escapeHtml(String(raw || "").trim());
+  const label = escapeHtml(decodeBasicHtmlEntities(stripMathDelimiters(raw)));
   return `<div class="math-display" aria-label="${label}">${renderMathSource(raw)}</div>`;
 }
 
 function isLikelyDelimitedMath(raw: string) {
-  const value = String(raw || "").trim();
+  const value = stripMathDelimiters(raw);
   if (!value || /[一-鿿]/.test(value)) return false;
   if (/^\d+(?:\.\d+)?\s*(?:USD|RMB|CNY|dollars?)?$/i.test(value)) return false;
-  return /[\_^{}]|[A-Za-zΑ-Ωα-ωΩ∇θτπΣδγ]|[=≤≥∼≈∝+\-*/|]/.test(value);
+  if (/^https?:\/\//i.test(value)) return false;
+  return looksLikeBareMathExpression(value) || /^[A-Za-zΑ-Ωα-ω][A-Za-z0-9_^{},+\-*/=\s().|]{0,80}$/.test(value);
+}
+
+function displayMathExpressionFromLine(line: string) {
+  const value = String(line || "").trim();
+  let match = value.match(/^\$\$\s*([\s\S]+?)\s*\$\$$/);
+  if (match) return match[1];
+  match = value.match(/^\\\[\s*([\s\S]+?)\s*\\\]$/);
+  if (match) return match[1];
+  match = value.match(/^\\begin\{(equation\*?|align\*?|aligned|gather\*?|multline\*?)\}\s*([\s\S]+?)\s*\\end\{\1\}$/);
+  if (match) return match[2];
+  return "";
 }
 
 function markdownToHtml(markdown: string) {
@@ -2179,13 +2413,16 @@ function markdownToHtml(markdown: string) {
       const href = escapeHtml(String(url || ""));
       return protect(`<a href="${href}" target="_blank" rel="noreferrer">${escapeHtml(String(label || url || ""))}</a>`);
     });
-    value = value.replace(/\\\((.{1,240}?)\\\)/g, (_match, expr) => protect(mathInlineHtml(String(expr || ""))));
-    value = value.replace(/(^|[^\\])\$([^$\n]{1,240})\$/g, (_match, prefix, expr) => {
+    value = value.replace(/\\begin\{(equation\*?|align\*?|aligned|gather\*?|multline\*?)\}([\s\S]{1,700}?)\\end\{\1\}/g, (_match, _env, expr) => protect(mathInlineHtml(String(expr || ""))));
+    value = value.replace(/\\\[([\s\S]{1,700}?)\\\]/g, (_match, expr) => protect(mathInlineHtml(String(expr || ""))));
+    value = value.replace(/\\\(([\s\S]{1,360}?)\\\)/g, (_match, expr) => protect(mathInlineHtml(String(expr || ""))));
+    value = value.replace(/(^|[^\\])\$\$([^$\n]{1,700})\$\$/g, (_match, prefix, expr) => `${prefix}${protect(mathInlineHtml(String(expr || "")))}`);
+    value = value.replace(/(^|[^\\])\$([^$\n]{1,360})\$/g, (_match, prefix, expr) => {
       const expression = String(expr || "");
       if (!isLikelyDelimitedMath(expression)) return `${prefix}$${expression}$`;
       return `${prefix}${protect(mathInlineHtml(expression))}`;
     });
-    value = value.replace(PLAIN_MATH_FRAGMENT_RE, (_match, prefix, expr) => `${prefix}${protect(mathInlineHtml(String(expr || "")))}`);
+    value = renderBareMathInText(value, (expression) => protect(mathInlineHtml(expression)));
     let escaped = escapeHtml(value).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
     tokens.forEach((htmlValue, idx) => {
       escaped = escaped.replace(new RegExp(`@@TASTE_INLINE_${idx}@@`, "g"), htmlValue);
@@ -2212,10 +2449,10 @@ function markdownToHtml(markdown: string) {
       closeList();
       continue;
     }
-    const displayMath = line.trim().match(/^(?:\$\$|\\[)(.+?)(?:\$\$|\\])$/);
+    const displayMath = displayMathExpressionFromLine(line);
     if (displayMath) {
       closeList();
-      html.push(mathDisplayHtml(displayMath[1]));
+      html.push(mathDisplayHtml(displayMath));
       continue;
     }
     if (line.trim().startsWith("|") && lines[index + 1]?.match(/^\s*\|?[\s:-]+\|[\s|:-]*$/)) {
@@ -6220,7 +6457,9 @@ function App() {
     const counts = viewingActiveIncompleteFindRun
       ? { ...activeRunCounts } as any
       : { ...stageCounts, ...(researchLiteratureCounts || {}), ...(literatureCounts || {}) } as any;
-    const freshFindActive = freshFindRunning || viewingActiveIncompleteFindRun || Boolean(activeFindJobForRun) || String(literature.status || "").toLowerCase() === "fresh_find_running";
+    const hasCompletedFindResultsForPanel = hasCurrentFindResults && !viewingActiveIncompleteFindRun;
+    const literatureFreshFindRunning = String(literature.status || "").toLowerCase() === "fresh_find_running";
+    const freshFindActive = !hasCompletedFindResultsForPanel && (freshFindRunning || viewingActiveIncompleteFindRun || Boolean(activeFindJobForRun) || literatureFreshFindRunning);
     const currentFindCounts: any = freshFindActive ? {} : literatureCounts || {};
     const sourceLimitations = freshFindActive ? [] : [...researchSourceLimitations, ...researchMissingVenueIndexes].slice(0, 4);
     const categoryFilteredCount = (freshFindActive ? 0 : (currentFindCounts as any).categoryFiltered) || counts.category_filtered_papers || (freshFindActive ? 0 : (currentFindCounts as any).titleInput);

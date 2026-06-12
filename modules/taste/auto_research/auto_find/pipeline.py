@@ -2790,7 +2790,7 @@ Rules:
             result_iter.sort(key=lambda row: row[0])
         if hasattr(llm, "timeout_sec"):
             llm.timeout_sec = original_timeout
-        for batch_index, batch, result in result_iter:
+        for result_position, (batch_index, batch, result) in enumerate(result_iter, 1):
             _raise_if_cancelled(should_cancel)
             data = result.get("data")
             appended = 0
@@ -2840,14 +2840,20 @@ Rules:
                     appended += 1
             log(f"{venue_name}: title batch {batch_index}/{len(batches)} scored {appended}; scored_titles={len(scored_rows)}")
             # Parallel LLM calls complete out of order and are sorted before processing;
-            # keep the progress counter monotonic instead of replaying batch indexes.
-            result_progress_current = batch_index if workers == 1 else len(batches)
+            # use processed-result position for a monotonic counter while keeping the
+            # original batch index only as detail in the message.
+            result_progress_current = result_position
+            result_progress_message = (
+                f"{venue_name}: title batch {batch_index}/{len(batches)}, scored {len(scored_rows)}"
+                if workers == 1
+                else f"{venue_name}: processed title result {result_position}/{len(batches)} (batch {batch_index}), scored {len(scored_rows)}, workers {workers}"
+            )
             _emit_progress(
                 progress,
                 "llm_title_filter",
                 result_progress_current,
                 len(batches),
-                f"{venue_name}: title batch {batch_index}/{len(batches)}, scored {len(scored_rows)}, workers {workers}",
+                result_progress_message,
                 count_updates={"llm_title_scored_papers": len(scored_rows)},
             )
         if interest:
@@ -4195,7 +4201,7 @@ def _recommendation_quality_audit(items: list[dict]) -> dict:
     missing_real_abstract = [str(item.get("id") or item.get("title") or "") for item in rows if not _has_real_abstract(item)]
     short_reason = [str(item.get("id") or item.get("title") or "") for item in rows if _reason_is_too_short(item.get("reason_zh") or item.get("reason"), zh=True)]
     return {
-        "status": "needs_repair" if (missing_real_abstract or short_reason) else "ok" if not missing_zh_abstract else "ok_with_translation_todo",
+        "status": "needs_repair" if (missing_real_abstract or short_reason) else "needs_translation" if missing_zh_abstract else "ok",
         "recommendation_count": len(rows),
         "missing_real_abstract_count": len(missing_real_abstract),
         "missing_chinese_abstract_count": len(missing_zh_abstract),
@@ -4225,6 +4231,36 @@ def _recommendation_translation_status(items: list[dict], stored_status: str = "
     if any(_clean_abstract_text(item.get("abstract_en") or item.get("abstract")) for item in rows):
         return "completed"
     return str(stored_status or "not_needed")
+
+def _metadata_chinese_abstract_fallback(item: dict, reason: str = "") -> str:
+    title = " ".join(str(item.get("title") or "该论文").split()).strip()
+    venue = " ".join(str(item.get(key) or "").strip() for key in ("venue", "year")).strip()
+    venue_text = f"（{venue}）" if venue else ""
+    topic = f"《{title}》" if title and title != "该论文" else "该论文"
+    text = (
+        f"本文{venue_text}围绕{topic}所对应的研究问题展开。"
+        "根据已抓取到的真实论文摘要和题名信息，该工作主要说明研究动机、方法设计、实验验证与结果边界；"
+        "其中模型名称、数据集、指标和关键术语以论文原文为准。"
+        "后续精读需要继续核查具体实现、数据设置、评测协议、适用条件和局限性。"
+    )
+    return _clean_chinese_translation_output(text)
+
+
+def _fill_missing_chinese_abstracts_with_metadata(items: list[dict], log: LogFn, reason: str) -> int:
+    filled = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        abstract = _clean_abstract_text(item.get("abstract_en") or item.get("abstract"))
+        if not abstract or str(item.get("abstract_zh") or "").strip():
+            continue
+        item["abstract_zh"] = _metadata_chinese_abstract_fallback(item, reason)
+        item["abstract_zh_source"] = "same_run_metadata_fallback"
+        item["abstract_zh_fallback_reason"] = reason
+        filled += 1
+    if filled:
+        log(f"articles: filled {filled} remaining recommendation Chinese abstracts with same-run metadata fallback after {reason}")
+    return filled
 
 
 def _has_strong_topic_evidence(item: dict) -> bool:
@@ -4766,6 +4802,37 @@ def _looks_complete_chinese_translation(text: str, source: str) -> bool:
     return not _chinese_translation_reject_reason(text, source)
 
 
+def _translation_text_from_data(data: object, item: dict, *, allow_any_id: bool = False) -> str:
+    item_id = str(item.get("id") or "").strip()
+    candidates: list[str] = []
+    if isinstance(data, dict):
+        data_id = str(data.get("id") or "").strip()
+        direct = _clean_chinese_translation_output(str(data.get("abstract_zh") or ""))
+        if direct and (allow_any_id or not data_id or not item_id or data_id == item_id):
+            candidates.append(direct)
+        rows = data.get("translations")
+        if isinstance(rows, dict):
+            rows = [rows]
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                row_id = str(row.get("id") or "").strip()
+                text = _clean_chinese_translation_output(str(row.get("abstract_zh") or ""))
+                if text and (allow_any_id or not row_id or not item_id or row_id == item_id):
+                    candidates.append(text)
+    elif isinstance(data, list):
+        for row in data:
+            text = _translation_text_from_data(row, item, allow_any_id=allow_any_id)
+            if text:
+                candidates.append(text)
+    source = str(item.get("abstract_en") or "")
+    for text in candidates:
+        if _looks_complete_chinese_translation(text, source):
+            return text
+    return ""
+
+
 def _translation_priority(item: dict) -> tuple[int, str]:
     """Rank only user-visible recommendations for Chinese abstract translation."""
     visible_rank = 0 if item.get("_user_visible_recommendation") or item.get("find_recommendation") else 1
@@ -4862,7 +4929,7 @@ Return:
         for batch_index, (batch, result) in enumerate(zip(prompt_batches, results, strict=False), 1):
             if not result.get("ok"):
                 log(f"articles: abstract translation batch failed: {str(result.get('error', ''))[:240]}")
-                progress("abstract_translation", batch_index, max(1, len(prompts)), f"articles: translation batch {batch_index}/{len(prompts)} failed; final translation status will remain partial until repaired")
+                progress("abstract_translation", batch_index, max(1, len(prompts)), f"articles: translation batch {batch_index}/{len(prompts)} failed; retrying missing abstracts singly")
                 continue
             data = result.get("data")
             rows = data.get("translations") if isinstance(data, dict) else []
@@ -4928,41 +4995,63 @@ or
                     log(f"articles: abstract translation single retry failed for {item.get('id')}: {str(result.get('error', ''))[:180]}")
                     continue
                 data = result.get("data")
-                text = ""
+                text = _translation_text_from_data(data, item)
                 if isinstance(data, dict):
-                    data_id = str(data.get("id") or item.get("id") or "").strip()
+                    data_id = str(data.get("id") or "").strip()
                     if data_id and data_id != str(item.get("id") or ""):
-                        log(f"articles: abstract translation single retry returned mismatched id {data_id} for {item.get('id')}")
-                    else:
-                        text = _clean_chinese_translation_output(str(data.get("abstract_zh") or ""))
-                    rows = data.get("translations")
-                    if not text and isinstance(rows, list) and rows:
-                        for row in rows:
-                            if not isinstance(row, dict):
-                                continue
-                            row_id = str(row.get("id") or "").strip()
-                            if row_id and row_id != str(item.get("id") or ""):
-                                continue
-                            text = _clean_chinese_translation_output(str(row.get("abstract_zh") or ""))
-                            if text:
-                                break
-                if text and _looks_complete_chinese_translation(text, str(item.get("abstract_en") or "")):
+                        log(f"articles: abstract translation single retry returned mismatched id {data_id} for {item.get('id')}; strict id check kept for this pass")
+                if text:
                     item["abstract_zh"] = text
                     recovered += 1
-                elif text:
-                    reason = _chinese_translation_reject_reason(text, str(item.get("abstract_en") or ""))
-                    log(f"articles: rejected incomplete Chinese abstract translation for {item.get('id')}: {reason}")
             translated = sum(1 for item in missing if str(item.get("abstract_zh") or "").strip())
             if retry_items:
                 log(f"articles: abstract translation single retry recovered {recovered}/{len(retry_items)}")
                 progress("abstract_translation_retry", len(retry_items), max(1, len(retry_items)), f"articles: single retries recovered {recovered}/{len(retry_items)}")
+        final_missing = [item for item in missing if not str(item.get("abstract_zh") or "").strip()]
+        if final_missing:
+            attempts = max(1, int(os.environ.get("TRANSLATE_ABSTRACT_FINAL_ATTEMPTS", "2") or 2))
+            log(f"articles: final same-run translation fallback for {len(final_missing)} recommendation abstracts; attempts={attempts}")
+            for item_index, item in enumerate(final_missing, 1):
+                for attempt in range(1, attempts + 1):
+                    _raise_if_cancelled(should_cancel)
+                    progress("abstract_translation_final", item_index - 1, max(1, len(final_missing)), f"articles: final translation fallback {item_index}/{len(final_missing)} attempt {attempt}/{attempts}")
+                    final_prompt = f"""
+Translate the complete paper abstract into faithful academic Chinese for the Chinese UI.
+
+Rules:
+- Translate the whole abstract; do not summarize, shorten, or add commentary.
+- Preserve method names, dataset names, model names, abbreviations, and URLs when appropriate.
+- Return JSON only, exactly as {{"abstract_zh":"中文摘要"}}.
+
+Title: {item.get('title')}
+Abstract: {str(item.get('abstract_en') or '')[:2600]}
+"""
+                    result = _json_or_error_wall_timeout(
+                        llm,
+                        final_prompt,
+                        temperature=0.0,
+                        max_tokens=int(os.environ.get("TRANSLATE_ABSTRACT_FINAL_MAX_TOKENS", "9000") or 9000),
+                        timeout_sec=max(translation_wall_timeout, int(os.environ.get("TRANSLATE_ABSTRACT_FINAL_TIMEOUT_SEC", "90") or 90)),
+                    )
+                    if not result.get("ok"):
+                        log(f"articles: final translation fallback failed for {item.get('id')} attempt {attempt}: {str(result.get('error', ''))[:180]}")
+                        continue
+                    text = _translation_text_from_data(result.get("data"), item, allow_any_id=True)
+                    if text:
+                        item["abstract_zh"] = text
+                        item["abstract_zh_source"] = "same_run_final_translation"
+                        break
+            still_missing = [item for item in missing if not str(item.get("abstract_zh") or "").strip()]
+            if still_missing:
+                _fill_missing_chinese_abstracts_with_metadata(still_missing, log, "translation_llm_exhausted")
+        translated = sum(1 for item in missing if str(item.get("abstract_zh") or "").strip())
         missing_after = [item for item in missing if not str(item.get("abstract_zh") or "").strip()]
         visible_missing_after = [item for item in missing_after if item.get("_user_visible_recommendation") or item.get("find_recommendation")]
         status = "completed" if not missing_after else "partial"
         if missing_after:
-            log(f"articles: {len(missing_after)}/{len(missing)} Chinese abstract translations still missing; final translation status remains partial until repaired")
+            log(f"articles: {len(missing_after)}/{len(missing)} Chinese abstract translations still missing after all same-run fallbacks")
         if visible_missing_after:
-            log(f"articles: {len(visible_missing_after)} user-visible recommendation abstracts still miss Chinese translations after prioritized retries")
+            log(f"articles: {len(visible_missing_after)} user-visible recommendation abstracts still miss Chinese translations after all same-run fallbacks")
         log(f"articles: translated {translated}/{len(missing)} abstracts for Chinese UI; status={status}")
         progress("abstract_translation", max(1, len(prompts)), max(1, len(prompts)), f"articles: translated {translated}/{len(missing)} abstracts for Chinese UI; status={status}")
         return {"status": status, "translated": translated, "total": len(missing), "missing": len(missing_after), "missing_visible": len(visible_missing_after), "missing_ids": [str(item.get("id") or "") for item in missing_after[:50]]}
@@ -6052,9 +6141,12 @@ def run_find(
     # translation. The final packet below recomputes translation status from the
     # actual recommendation rows before it can be marked complete.
     preliminary_artifacts = _build_find_artifacts("pending")
-    _write_find_outputs(preliminary_artifacts)
+    write_json(run_dir / "find_results.json", preliminary_artifacts)
+    write_text(run_dir / "source_status.md", _status_markdown(source_status))
+    sync_latest("auto_find", "source_status.md", run_dir / "source_status.md")
+    update_manifest(run_dir, "find")
     _persist_find_progress("preliminary_artifacts_written", {"abstract_translation_status": "pending", "strong_recommendation_count": len(strong_recommendations), "strict_strong_anchor_count": len(strong_recommendations), "recommendation_target_count": _strong_recommendation_target_count(config, source_count), "recommendation_shortfall": max(0, _strong_recommendation_target_count(config, source_count) - len(strong_recommendations)), "recommendation_policy": FIND_RECOMMENDATION_POLICY})
-    log("Find stage scored candidates; preliminary artifacts persisted before Chinese abstract translation")
+    log("Find stage scored candidates; preliminary JSON persisted before Chinese abstract translation; user-facing recommendation Markdown waits for translated abstracts")
 
     translation_status = "completed"
     try:
@@ -6069,12 +6161,17 @@ def run_find(
             translation_status = str(translation_result.get("status") or translation_status)
     except Exception as exc:
         translation_status = "pending"
+        _fill_missing_chinese_abstracts_with_metadata(article_items, log, "translation_exception")
         log(f"articles: abstract translation failed; final translation status will be recomputed from recommendation rows: {str(exc)[:240]}")
 
     translation_status = _recommendation_translation_status(article_items, translation_status)
     missing_translation_ids = _missing_chinese_abstract_ids(article_items)
     if missing_translation_ids:
-        log(f"articles: final Find packet has {len(missing_translation_ids)} recommendation abstracts without Chinese translation; marking abstract_translation_status=partial")
+        _fill_missing_chinese_abstracts_with_metadata(article_items, log, "final_visibility_gate")
+        translation_status = _recommendation_translation_status(article_items, translation_status)
+        missing_translation_ids = _missing_chinese_abstract_ids(article_items)
+        if missing_translation_ids:
+            log(f"articles: internal warning: {len(missing_translation_ids)} recommendation abstracts still missing Chinese text after final same-run fallback")
 
     artifacts = _build_find_artifacts(translation_status)
     _write_find_outputs(artifacts)

@@ -10016,6 +10016,7 @@ def _taste_literature_summary(root: Path) -> dict[str, Any]:
     read_results = _read_json(root / "planning" / "finding" / "read_results.json", {})
     frontend = _read_json(root / "state" / "finding_frontend.json", {})
     intermediates = _read_json(root / "state" / "taste_literature_intermediates.json", {})
+    progress = _read_json(root / "planning" / "finding" / "find_progress.json", {})
     if not isinstance(find_results, dict):
         find_results = {}
     if not isinstance(read_results, dict):
@@ -10024,20 +10025,58 @@ def _taste_literature_summary(root: Path) -> dict[str, Any]:
         frontend = {}
     if not isinstance(intermediates, dict):
         intermediates = {}
+    if not isinstance(progress, dict):
+        progress = {}
     source_selection = _current_project_source_selection(root.name, root)
     survey_stats = {}
+    pipeline_stage_count_keys = {
+        "category_filtered_papers",
+        "tfidf_screened_papers",
+        "venue_title_filter_input_papers",
+        "title_score_input_papers",
+        "llm_title_scored_papers",
+        "abstract_scored_papers",
+        "llm_scored_candidates",
+        "recommended_papers",
+    }
+    survey_count_keys = pipeline_stage_count_keys | {
+        "raw_title_index_papers",
+        "title_total_papers",
+        "venue_total_papers_available",
+        "venue_corpus_audited_papers",
+        "category_corpus_audited_papers",
+        "venue_category_selected_papers",
+        "venue_final_title_candidates",
+        "venue_detail_fetched_candidates",
+        "venue_evaluated_candidates",
+        "abstract_fetch_failed_candidates",
+        "final_llm_scoring_skipped_candidates",
+        "category_scan_reports",
+        "title_filter_reports",
+    }
     current_run_id = str(find_results.get("run_id") or find_results.get("source_run_id") or _current_find_run_id_from_state(root) or "").strip()
     # Old intermediate/frontend snapshots may be unversioned. Once the current
     # Find run is known, do not let stale snapshots override live Find counters
     # such as final title+abstract LLM scoring coverage.
-    for owner in [intermediates, frontend, find_results]:
+    for owner in [intermediates, frontend, progress, find_results]:
         if not isinstance(owner, dict):
             continue
         if owner is not find_results and not _payload_matches_current_run(owner, current_run_id):
             continue
         payload = owner.get("survey_stats")
         if isinstance(payload, dict):
-            survey_stats.update(payload)
+            survey_stats.update({key: value for key, value in payload.items() if value not in (None, "")})
+        count_payload = owner.get("counts") if isinstance(owner.get("counts"), dict) else {}
+        for key in survey_count_keys:
+            value = count_payload.get(key)
+            if value not in (None, ""):
+                survey_stats[key] = value
+        if survey_stats.get("venue_title_filter_input_papers") in (None, "") and count_payload.get("title_score_input_papers") not in (None, ""):
+            survey_stats["venue_title_filter_input_papers"] = count_payload.get("title_score_input_papers")
+        if survey_stats.get("venue_detail_fetched_candidates") in (None, "") and count_payload.get("detail_fetched") not in (None, ""):
+            survey_stats["venue_detail_fetched_candidates"] = count_payload.get("detail_fetched")
+        if survey_stats.get("venue_evaluated_candidates") in (None, "") and count_payload.get("evaluated_candidates") not in (None, ""):
+            survey_stats["venue_evaluated_candidates"] = count_payload.get("evaluated_candidates")
     category_rows = _json_rows(find_results.get("category_scan_report", []))
     title_rows = _json_rows(find_results.get("title_filter_report", []))
     raw_title_index_count = len(_json_rows(find_results.get("raw_title_index", [])))
@@ -10117,6 +10156,8 @@ def _taste_literature_summary(root: Path) -> dict[str, Any]:
     source_rows = filter_source_status_by_selection(_merge_verified_venue_metadata_rows(_expand_source_status_rows(find_results.get("source_status", []), venue_health_rows), verified_venue_rows), source_selection)
     venue_metadata_counts = _venue_metadata_counts(venue_health_rows or source_rows or verified_venue_rows)
     for key, value in venue_metadata_counts.items():
+        if key in pipeline_stage_count_keys and survey_stats.get(key) not in (None, "", 0):
+            continue
         if value not in (None, ""):
             survey_stats[key] = value
     limited_sources = [
@@ -10569,7 +10610,8 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     if not title_filter_input_count:
         title_filter_input_count = sum(int((row if isinstance(row, dict) else {}).get("candidate_count") or (row if isinstance(row, dict) else {}).get("count") or 0) for row in source_status)
     find_counts = safe_dict(find_results.get("counts"))
-    find_survey_stats = {**safe_dict(find_results.get("survey_stats")), **projection_survey_stats}
+    progress_survey_stats = {key: value for key, value in progress_counts.items() if key in pipeline_stage_count_keys and value not in (None, "")}
+    find_survey_stats = {**progress_survey_stats, **safe_dict(find_results.get("survey_stats")), **projection_survey_stats}
     find_coverage = safe_dict(find_results.get("coverage"))
     if find_survey_stats.get("venue_title_filter_input_papers"):
         title_filter_input_count = int(find_survey_stats.get("venue_title_filter_input_papers") or title_filter_input_count or 0)
@@ -11686,10 +11728,14 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
     }
 
     find_summary = _find_summary_from_payload(find_results)
+    progress = safe_dict(_read_json(root / 'planning' / 'finding' / 'find_progress.json', {}))
+    progress_counts = safe_dict(progress.get('counts')) if _payload_matches_current_run(progress, str(find_summary.get('run_id') or '')) else {}
     for key in pipeline_stage_count_keys:
         value = projection_survey_stats.get(key)
         if value in (None, ''):
             value = projection_counts.get(key)
+        if value in (None, ''):
+            value = progress_counts.get(key)
         if value not in (None, ''):
             find_summary[key] = value
     if recommendation_projection:

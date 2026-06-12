@@ -24,7 +24,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from auto_research.auto_find.catalog import catalog_by_id, load_catalog
-from auto_research.auto_find.pipeline import FIND_RECOMMENDATION_POLICY, SCORING_POLICY_VERSION, _attach_abstract_language_fields, _critique_candidates, _llm_live_gate, _recommendation_quality_audit, _recommended, _screened_ranking, _triage_candidates, run_find
+from auto_research.auto_find.pipeline import FIND_RECOMMENDATION_POLICY, SCORING_POLICY_VERSION, _critique_candidates, _llm_live_gate, _recommendation_quality_audit, _recommended, _screened_ranking, _triage_candidates, run_find
 from auto_research.auto_find.sources import fetch_venue_sample
 from auto_research.auto_idea.pipeline import patch_idea, run_idea
 from auto_research.auto_plan.pipeline import finish_plan, polish_plan, run_plan
@@ -1019,7 +1019,7 @@ def _public_taste_stage(stage: Any) -> str:
     ]
     if any(marker in lowered for marker in environment_literature_markers):
         return 'environment'
-    fresh_find_markers = ['literature-survey', 'run-finding', 'run-driver', 'run-literature-tool', 'find-repair-current']
+    fresh_find_markers = ['literature-survey', 'run-finding', 'run-driver', 'run-literature-tool']
     if any(marker in lowered for marker in fresh_find_markers) or lowered in {'find', 'literature', 'finding'}:
         return 'find'
     if 'read' in lowered:
@@ -1097,7 +1097,7 @@ class JobState:
         job.result = data.get("result")
         job.internal = bool(data.get("internal"))
         job.display = str(data.get("display") or "")
-        if job.stage == "safe-unblock" or job.job_id.startswith("safe-unblock_") or job.stage == "find-repair-current" or job.job_id.startswith("find-repair-current_"):
+        if job.stage == "safe-unblock" or job.job_id.startswith("safe-unblock_"):
             job.internal = True
             job.display = job.display or "hidden"
         job.error = str(data.get("error") or "")
@@ -1211,7 +1211,15 @@ JSON_ARTIFACT_NAMES = [
     "read_results.json", "ideas.json", "plans.json", "config.json", "selection.json", "email_report.json",
 ]
 LIGHT_ARTIFACT_MARKDOWN_NAMES = ["article.md", "source_status.md", "read.md", "idea.md", "plan.md"]
-LIGHT_ARTIFACT_JSON_NAMES = ["find_progress.json", "read_results.json", "ideas.json", "plans.json", "selection.json"]
+LIGHT_ARTIFACT_JSON_NAMES = ["find_progress.json", "find_results.json", "read_results.json", "ideas.json", "plans.json", "selection.json"]
+FIND_SURVEY_COUNT_KEYS = [
+    "raw_title_index_papers", "title_total_papers", "venue_total_papers_available", "venue_corpus_audited_papers",
+    "category_corpus_audited_papers", "category_filtered_papers", "venue_category_selected_papers",
+    "tfidf_screened_papers", "venue_title_filter_input_papers", "title_score_input_papers", "llm_title_scored_papers",
+    "venue_final_title_candidates", "abstract_scored_papers", "venue_detail_fetched_candidates", "venue_evaluated_candidates",
+    "llm_scored_candidates", "recommended_papers", "abstract_fetch_failed_candidates", "final_llm_scoring_skipped_candidates",
+    "category_scan_reports", "title_filter_reports", "arxiv_raw_count", "arxiv_prefiltered_count", "arxiv_pages_fetched",
+]
 
 
 def _runs_fingerprint() -> tuple[int, int, int]:
@@ -2380,6 +2388,47 @@ def _artifact_compact_paper_row(row: Any) -> dict[str, Any]:
     return out
 
 
+
+def _find_survey_stats_from_payloads(*payloads: Any) -> dict[str, Any]:
+    survey_stats: dict[str, Any] = {}
+
+    def merge_dict(value: Any) -> None:
+        if not isinstance(value, dict):
+            return
+        for key, item in value.items():
+            if item not in (None, ""):
+                survey_stats[key] = item
+
+    def merge_counts(value: Any) -> None:
+        if not isinstance(value, dict):
+            return
+        for key in FIND_SURVEY_COUNT_KEYS:
+            item = value.get(key)
+            if item not in (None, ""):
+                survey_stats[key] = item
+        alias_pairs = [
+            ("raw_title_index", "raw_title_index_papers"),
+            ("title_candidates", "venue_final_title_candidates"),
+            ("detail_fetched", "venue_detail_fetched_candidates"),
+            ("evaluated_candidates", "venue_evaluated_candidates"),
+        ]
+        for source_key, target_key in alias_pairs:
+            if survey_stats.get(target_key) in (None, "") and value.get(source_key) not in (None, ""):
+                survey_stats[target_key] = value.get(source_key)
+
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        merge_dict(payload.get("survey_stats"))
+        diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), dict) else {}
+        merge_dict(diagnostics.get("survey_stats"))
+        merge_counts(payload.get("counts"))
+    if survey_stats.get("raw_title_index_papers") not in (None, ""):
+        survey_stats.setdefault("title_total_papers", survey_stats.get("raw_title_index_papers"))
+        survey_stats.setdefault("venue_total_papers_available", survey_stats.get("raw_title_index_papers"))
+        survey_stats.setdefault("venue_corpus_audited_papers", survey_stats.get("raw_title_index_papers"))
+    return survey_stats
+
 def _project_root_for_find_run(run_id: str) -> Path | None:
     run_id = str(run_id or "").strip()
     if not run_id:
@@ -2591,14 +2640,6 @@ def _compact_large_find_results_artifact(directory: Path, run_id: str, size_byte
         "truncation_reason": "find_results.json is large; API returns compact sidecar state plus current strong-paper rows so polling cannot block the web worker.",
     }
     survey_stats: dict[str, Any] = {}
-    survey_count_keys = [
-        "raw_title_index_papers", "title_total_papers", "venue_total_papers_available", "venue_corpus_audited_papers",
-        "category_corpus_audited_papers", "category_filtered_papers", "venue_category_selected_papers",
-        "tfidf_screened_papers", "venue_title_filter_input_papers", "title_score_input_papers", "llm_title_scored_papers",
-        "venue_final_title_candidates", "abstract_scored_papers", "venue_detail_fetched_candidates", "venue_evaluated_candidates",
-        "llm_scored_candidates", "recommended_papers", "abstract_fetch_failed_candidates", "final_llm_scoring_skipped_candidates",
-        "category_scan_reports", "title_filter_reports", "arxiv_raw_count", "arxiv_prefiltered_count", "arxiv_pages_fetched",
-    ]
 
     def merge_survey_stats(value: Any) -> None:
         if isinstance(value, dict):
@@ -2610,7 +2651,7 @@ def _compact_large_find_results_artifact(directory: Path, run_id: str, size_byte
         for key in ["phase", "counts", "strong_recommendation_count", "recommendation_target_count", "recommendation_shortfall", "source_status", "venue_health_report", "selection", "live_progress", "updated_at", "generated_at"]:
             if key in progress:
                 payload[key] = progress.get(key)
-        merge_survey_stats(progress.get("survey_stats"))
+        merge_survey_stats(_find_survey_stats_from_payloads(progress))
     project_root = _project_root_for_find_run(run_id)
     if project_root is not None:
         packet = _read_project_json(project_root / "state" / "literature_tool_packet.json", {})
@@ -2618,9 +2659,9 @@ def _compact_large_find_results_artifact(directory: Path, run_id: str, size_byte
         current_plan = _read_project_json(project_root / "state" / "current_find_research_plan.json", {})
         projection = _current_find_recommendation_projection(project_root, run_id)
         if isinstance(frontend_state, dict) and _payload_run_id(frontend_state) == run_id:
-            merge_survey_stats(frontend_state.get("survey_stats"))
+            merge_survey_stats(_find_survey_stats_from_payloads(frontend_state))
         if isinstance(projection, dict) and projection:
-            merge_survey_stats(projection.get("survey_stats"))
+            merge_survey_stats(_find_survey_stats_from_payloads(projection))
             recommendation_rows = projection.get("strong_recommendations") if isinstance(projection.get("strong_recommendations"), list) else projection.get("recommendations") if isinstance(projection.get("recommendations"), list) else projection.get("articles") if isinstance(projection.get("articles"), list) else []
             read_rows = projection.get("read_candidates") if isinstance(projection.get("read_candidates"), list) else recommendation_rows
             compact_recommendation_limit = max(len(recommendation_rows), len(read_rows), 1)
@@ -2664,7 +2705,7 @@ def _compact_large_find_results_artifact(directory: Path, run_id: str, size_byte
     if survey_stats:
         payload["survey_stats"] = survey_stats
         merged_counts = payload.get("counts") if isinstance(payload.get("counts"), dict) else {}
-        for key in survey_count_keys:
+        for key in FIND_SURVEY_COUNT_KEYS:
             value = survey_stats.get(key)
             if value not in (None, ""):
                 merged_counts[key] = value
@@ -2994,9 +3035,9 @@ def _strict_find_projection_config(config: AppConfig) -> AppConfig:
     if not str(config.provider or "").strip() or str(config.provider or "").lower() == "mock":
         updates["provider"] = "openai"
     if not str(config.api_key or "").strip():
-        updates["api_key"] = "repair-current-local-gate"
+        updates["api_key"] = "find-projection-local-gate"
     if not str(config.model or "").strip():
-        updates["model"] = "repair-current-local-gate"
+        updates["model"] = "find-projection-local-gate"
     return config.model_copy(update=updates) if updates else config
 
 
@@ -3104,9 +3145,9 @@ def _sync_find_translation_quality(find_results: dict[str, Any], recommendations
         quality["missing_chinese_abstract_count"] = len(missing_zh)
         quality["english_abstract_fallback_count"] = len(missing_zh)
         quality["missing_chinese_abstract_ids"] = [str(item.get("id") or item.get("title") or "") for item in missing_zh[:50]]
-        if missing_zh and str(quality.get("status") or "").strip() in {"", "ok", "completed"}:
-            quality["status"] = "ok_with_translation_todo"
-        elif not missing_zh and str(quality.get("status") or "").strip() == "ok_with_translation_todo":
+        if missing_zh:
+            quality["status"] = "needs_translation"
+        elif str(quality.get("status") or "").strip() in {"ok_with_translation_todo", "needs_translation", "completed"}:
             quality["status"] = "ok"
         find_results["recommendation_quality"] = quality
         if isinstance(scoring_runtime, dict):
@@ -3147,10 +3188,7 @@ def _sync_current_find_projection(root: Path, run_id: str, find_results: dict[st
         "abstract_translation_status": translation_status,
         "missing_recommendation_abstract_zh": missing_zh,
     }
-    survey_stats = find_results.get("survey_stats") if isinstance(find_results.get("survey_stats"), dict) else {}
-    if not survey_stats and isinstance(find_results.get("diagnostics"), dict):
-        diagnostics = find_results.get("diagnostics") or {}
-        survey_stats = diagnostics.get("survey_stats") if isinstance(diagnostics.get("survey_stats"), dict) else {}
+    survey_stats = _find_survey_stats_from_payloads(progress, find_results)
     if survey_stats:
         projection["survey_stats"] = survey_stats
         counts = projection.get("counts") if isinstance(projection.get("counts"), dict) else {}
@@ -3422,135 +3460,6 @@ def _run_current_find_full_text_evidence_repair(project: str, root: Path, log: C
         "stdout_tail": output_lines[-40:],
     }
 
-def _repair_current_find_translations(log: Callable[[str], None], should_cancel: Callable[[], bool], progress: Callable[[str, int, int, str], None]) -> dict[str, Any]:
-    current = _current_project_for_find_guard()
-    if not current:
-        return {"status": "blocked_no_current_project", "reason": "No active research project is configured."}
-    project, root = current
-    plan = _read_project_json(root / "state" / "current_find_research_plan.json", {})
-    projection = _read_project_json(root / "state" / "current_find_recommendation_projection.json", {})
-    run_id = str((plan if isinstance(plan, dict) else {}).get("run_id") or (projection if isinstance(projection, dict) else {}).get("run_id") or "").strip()
-    if not run_id:
-        find_payload = _read_project_json(root / "planning" / "finding" / "find_results.json", {})
-        if isinstance(find_payload, dict):
-            run_id = str(find_payload.get("run_id") or "").strip()
-    directory = _find_artifact_run_dir_for_project(root, run_id)
-    find_path = directory / "find_results.json"
-    find_results = read_json(find_path, {})
-    if not isinstance(find_results, dict):
-        return {"status": "blocked_invalid_find_results", "project": project, "run_id": run_id, "path": str(find_path)}
-    run_id = str(find_results.get("run_id") or run_id or directory.name).strip()
-    reproject_receipt = _reproject_find_results_with_current_contract(find_results, load_config(), "api_jobs_find_repair_current")
-    log(f"Current Find recommendation contract reprojection: {reproject_receipt}")
-    recommendations = find_results.get("strong_recommendations") if isinstance(find_results.get("strong_recommendations"), list) else find_results.get("articles") if isinstance(find_results.get("articles"), list) else []
-    for row in recommendations:
-        if isinstance(row, dict):
-            row["_user_visible_recommendation"] = True
-    missing_before = [row for row in recommendations if isinstance(row, dict) and str(row.get("abstract") or row.get("abstract_en") or "").strip() and not str(row.get("abstract_zh") or "").strip()]
-    log(f"Repairing current Find recommendation abstracts for {project}/{run_id}; missing Chinese abstracts before={len(missing_before)}")
-    progress("abstract_translation_repair", 0, max(1, len(missing_before)), f"补推荐摘要翻译 {len(missing_before)} 篇")
-    config = load_config()
-    llm = LLMClient(config, "find")
-    if missing_before and not llm.enabled:
-        return {"status": "blocked_llm_not_configured", "project": project, "run_id": run_id, "missing_chinese_abstract_count": len(missing_before)}
-    translation_result = _attach_abstract_language_fields(recommendations, llm, log, should_cancel, progress)
-    missing_after = [row for row in recommendations if isinstance(row, dict) and str(row.get("abstract") or row.get("abstract_en") or "").strip() and not str(row.get("abstract_zh") or "").strip()]
-    translation_status = "completed" if not missing_after else "partial"
-    if isinstance(translation_result, dict) and str(translation_result.get("status") or "") in {"completed", "not_needed", "skipped"} and not missing_after:
-        translation_status = str(translation_result.get("status") or translation_status)
-    find_results["strong_recommendations"] = recommendations
-    find_results["articles"] = recommendations
-    find_results["read_candidates"] = recommendations
-    scoring_runtime = find_results.setdefault("scoring_runtime", {})
-    if isinstance(scoring_runtime, dict):
-        scoring_runtime["strict_strong_anchor_count"] = len(recommendations)
-        scoring_runtime["recommendation_actual_count"] = len(recommendations)
-        scoring_runtime["abstract_translation_status"] = translation_status
-    target_count = int(find_results.get("recommendation_target_count") or (scoring_runtime.get("recommendation_target_count") if isinstance(scoring_runtime, dict) else 0) or len(recommendations) or 0)
-    shortfall = max(0, target_count - len(recommendations)) if target_count else 0
-    find_results["strict_strong_anchor_count"] = len(recommendations)
-    find_results["recommendation_target_count"] = target_count
-    find_results["recommendation_shortfall"] = shortfall
-    find_results["abstract_translation_status"] = translation_status
-    if isinstance(scoring_runtime, dict):
-        scoring_runtime["recommendation_target_count"] = target_count
-        scoring_runtime["recommendation_shortfall"] = shortfall
-        scoring_runtime["recommendation_policy"] = find_results.get("recommendation_policy") or FIND_RECOMMENDATION_POLICY
-    quality = _recommendation_quality_audit(recommendations)
-    quality["missing_chinese_abstract_count"] = len(missing_after)
-    quality["english_abstract_fallback_count"] = len(missing_after)
-    quality["missing_chinese_abstract_ids"] = [str(row.get("id") or row.get("title") or "") for row in missing_after[:50] if isinstance(row, dict)]
-    if missing_after and quality.get("status") == "ok":
-        quality["status"] = "ok_with_translation_todo"
-    find_results["recommendation_quality"] = quality
-    write_json(find_path, find_results)
-    _write_current_find_markdown(directory, find_results)
-    taste_dir = root / "planning" / "finding"
-    taste_dir.mkdir(parents=True, exist_ok=True)
-    for name in ["find_results.json", "article.md", "screened_ranking.md", "read_candidates.md", "triage_candidates.md", "audit_candidates.md", "critique_candidates.md"]:
-        src = directory / name
-        if src.exists():
-            shutil.copyfile(src, taste_dir / name)
-    latest_dir = RUNS_DIR.parent / "auto_find"
-    latest_dir.mkdir(parents=True, exist_ok=True)
-    for name in ["find_results.json", "article.md", "screened_ranking.md", "read_candidates.md", "triage_candidates.md", "audit_candidates.md", "critique_candidates.md"]:
-        src = directory / name
-        if src.exists():
-            shutil.copyfile(src, latest_dir / name)
-    progress_path = directory / "find_progress.json"
-    progress_payload = read_json(progress_path, {})
-    if isinstance(progress_payload, dict):
-        progress_payload["abstract_translation_status"] = translation_status
-        progress_payload["strict_strong_anchor_count"] = len(recommendations)
-        progress_payload["strong_recommendation_count"] = len(recommendations)
-        progress_payload["recommendation_target_count"] = target_count
-        progress_payload["recommendation_shortfall"] = shortfall
-        progress_payload["recommendation_gate_status"] = "pass" if shortfall == 0 else "recommendation_shortfall"
-        progress_payload["recommendation_policy"] = find_results.get("recommendation_policy") or FIND_RECOMMENDATION_POLICY
-        counts = progress_payload.get("counts") if isinstance(progress_payload.get("counts"), dict) else {}
-        counts.update({
-            "recommended": len(recommendations),
-            "strong_recommendations": len(recommendations),
-            "read_candidates": len(recommendations),
-            "strict_strong_anchor_count": len(recommendations),
-            "recommendation_target_count": target_count,
-            "recommendation_shortfall": shortfall,
-        })
-        progress_payload["counts"] = counts
-        write_json(progress_path, progress_payload)
-        shutil.copyfile(progress_path, taste_dir / "find_progress.json")
-    projection = _sync_current_find_projection(root, run_id, find_results, "api_jobs_find_repair_current")
-    downstream_reason = _current_find_read_reset_reason(root, run_id, recommendations)
-    downstream_reset = {}
-    if downstream_reason:
-        downstream_reset = _reset_current_find_downstream_artifacts(root, run_id, recommendations, "api_jobs_find_repair_current", downstream_reason)
-        log(f"Current Find downstream artifacts reset after recommendation repair: {downstream_reset}")
-    _clerun_caches(run_id)
-    progress("abstract_translation_repair", len(missing_before), max(1, len(missing_before)), f"推荐摘要翻译修复完成，剩余 {len(missing_after)} 篇")
-    full_text_repair = _run_current_find_full_text_evidence_repair(project, root, log, should_cancel, progress)
-    full_text_status = str(full_text_repair.get("status") or "").strip()
-    full_text_returncode = int(full_text_repair.get("returncode") or 0)
-    full_text_complete = full_text_returncode == 0 and full_text_status in {"repaired_full_text_evidence", "no_pending_full_text_evidence_gap", "done"}
-    overall_status = "done" if not missing_after and full_text_complete else "partial"
-    if full_text_returncode not in {0, 2}:
-        overall_status = "blocked_full_text_evidence_repair_failed"
-    return {
-        "status": overall_status,
-        "raw_stage": "find-repair-current",
-        "project": project,
-        "run_id": run_id,
-        "missing_before": len(missing_before),
-        "missing_after": len(missing_after),
-        "translation_status": translation_status,
-        "strict_strong_anchor_count": len(recommendations),
-        "recommended_count": len(recommendations),
-        "projection_missing": len(projection.get("missing_recommendation_abstract_zh") or []),
-        "reprojection": reproject_receipt,
-        "downstream_reset": downstream_reset,
-        "full_text_repair": full_text_repair,
-        "artifact_dir": str(directory),
-    }
-
 def _adopt_find_run_for_project(root: Path, project: str, run_id: str, *, source: str = "web_find_complete") -> dict[str, Any]:
     """Make a completed Web/API Find run the project-level current Find packet.
 
@@ -3719,6 +3628,14 @@ def _adopt_find_run_for_project(root: Path, project: str, run_id: str, *, source
         "abstract_translation_status": translation_status,
         "missing_recommendation_abstract_zh": missing_zh,
     }
+    survey_stats = _find_survey_stats_from_payloads(progress, find_results)
+    if survey_stats:
+        projection["survey_stats"] = survey_stats
+        projection_counts = projection.get("counts") if isinstance(projection.get("counts"), dict) else {}
+        for key, value in survey_stats.items():
+            if value not in (None, ""):
+                projection_counts[key] = value
+        projection["counts"] = projection_counts
     write_json(state_dir / "current_find_recommendation_projection.json", projection)
     def rows_from(payload: Any, key: str) -> list[Any]:
         if isinstance(payload, dict) and isinstance(payload.get(key), list):
@@ -7888,14 +7805,6 @@ def api_venue_health(request: VenueHealthRequest) -> dict:
     return {"results": results}
 
 
-@app.post("/api/jobs/find/repair-current")
-def api_find_repair_current() -> dict:
-    job = start_job("find-repair-current", _repair_current_find_translations)
-    job.internal = True
-    job.display = "hidden"
-    _persist_jobs()
-    return job.as_dict()
-
 
 @app.post("/api/jobs/find")
 def api_find(request: FindRequest) -> dict:
@@ -8767,8 +8676,6 @@ def api_jobs(
         stage = str(item.get("stage") or "")
         raw_stage = str(result.get("raw_stage") or stage)
         job_id = str(item.get("job_id") or "")
-        if str(result.get("raw_stage") or "") == "find-repair-current" or job_id.startswith(("find-repair-current_", "find-repair-current-")):
-            return True
         if stage in hidden_taskbstages or raw_stage in hidden_taskbstages:
             return True
         if raw_stage == "safe-unblock" or job_id.startswith(("safe-unblock_", "safe-unblock-")):

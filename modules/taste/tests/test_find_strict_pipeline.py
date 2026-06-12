@@ -92,6 +92,52 @@ def test_title_prefilter_batches_by_ten_and_appends_candidates():
     assert selected[0]["score"] == 7.75
 
 
+def test_parallel_title_filter_result_processing_progress_uses_processed_count(monkeypatch):
+    monkeypatch.delenv("TITLE_FILTER_SEQUENTIAL", raising=False)
+
+    def fake_json_or_error(_llm, prompt: str, timeout_sec=None):
+        ids = re.findall(r"paper_\d+", prompt)
+        return {
+            "ok": True,
+            "error": "",
+            "data": {
+                "scored": [
+                    {
+                        "id": item_id,
+                        "fit_score": 8,
+                        "diversity_score": 7,
+                        "hit_directions": ["LLM recommendation"],
+                        "category": "LLM recommender systems",
+                        "reason": "标题命中 LLM 推荐方向。",
+                    }
+                    for item_id in ids
+                ]
+            },
+        }
+
+    monkeypatch.setattr(find_pipeline, "_json_or_error_wall_timeout", fake_json_or_error)
+    items = [{"id": f"paper_{index}", "title": f"LLM recommender systems candidate {index}"} for index in range(25)]
+    llm = BatchLLM()
+    cfg = AppConfig(provider="mock", research_interest="LLM recommender systems", max_fetch_papers=40, llm_concurrency=4)
+    progress_calls = []
+
+    _prefilter_titles(
+        items,
+        cfg,
+        llm,
+        "ICLR",
+        log=lambda _msg: None,
+        should_cancel=lambda: False,
+        progress=lambda phase, current, total, message, **_kwargs: progress_calls.append((phase, current, total, message)),
+        scan_all=True,
+    )
+
+    processing = [call for call in progress_calls if "processed title result" in call[3]]
+    assert [(current, total) for _phase, current, total, _message in processing] == [(1, 3), (2, 3), (3, 3)]
+    assert "batch" in processing[0][3]
+    assert "processed title result 1/3" in processing[0][3]
+
+
 def test_title_prefilter_ignores_local_topic_pseudo_categories_for_dynamic_groups(monkeypatch):
     monkeypatch.setenv("TITLE_DETAIL_CANDIDATE_TARGET", "20")
     items = [
@@ -1747,7 +1793,7 @@ def test_attach_abstract_language_fields_single_retry_accepts_id_wrapped_transla
     assert items[0]["abstract_zh"] == "这是一段由单条重试返回的完整中文摘要。"
 
 
-def test_attach_abstract_language_fields_single_retry_rejects_mismatched_id():
+def test_attach_abstract_language_fields_final_fallback_accepts_single_item_mismatched_id():
     class RetryTranslationLLM:
         enabled = True
         timeout_sec = 10
@@ -1759,15 +1805,16 @@ def test_attach_abstract_language_fields_single_retry_rejects_mismatched_id():
             self.calls += 1
             if self.calls == 1:
                 return {"ok": True, "data": {"translations": []}, "error": ""}
-            return {"ok": True, "data": {"id": "other_paper", "abstract_zh": "这是一段不应被写入的中文摘要。"}, "error": ""}
+            return {"ok": True, "data": {"id": "other_paper", "abstract_zh": "这是一段由最终单篇兜底返回的完整中文摘要。"}, "error": ""}
 
     items = [{"id": "paper_001", "title": "Paper", "abstract": "This paper studies discrete retrieval for retrieval systems with benchmark evidence.", "find_recommendation": True}]
+    llm = RetryTranslationLLM()
 
-    result = _attach_abstract_language_fields(items, RetryTranslationLLM(), log=lambda _msg: None, should_cancel=lambda: False)
+    result = _attach_abstract_language_fields(items, llm, log=lambda _msg: None, should_cancel=lambda: False)
 
-    assert result["missing"] == 1
-    assert "abstract_zh" not in items[0]
-
+    assert result["missing"] == 0
+    assert items[0]["abstract_zh"] == "这是一段由最终单篇兜底返回的完整中文摘要。"
+    assert llm.calls == 3
 
 
 def test_attach_abstract_language_fields_cleans_escape_residue_tail():

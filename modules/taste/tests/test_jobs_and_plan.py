@@ -3681,6 +3681,54 @@ def test_current_find_summary_ignores_stale_unversioned_frontend_cache(tmp_path,
     assert survey_counts['final_llm_scoring_skipped_candidates'] == 7
 
 
+
+def test_light_artifacts_include_compact_find_results_for_completed_find_counts():
+    assert "find_results.json" in server.LIGHT_ARTIFACT_JSON_NAMES
+
+
+def test_compact_large_find_results_artifact_promotes_progress_counts_to_survey_stats(tmp_path, monkeypatch):
+    run_id = "find_current"
+    run_dir = tmp_path / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    write_json(
+        run_dir / "find_progress.json",
+        {
+            "run_id": run_id,
+            "phase": "complete",
+            "counts": {
+                "raw_title_index": 17329,
+                "raw_title_index_papers": 17329,
+                "category_filtered_papers": 11611,
+                "tfidf_screened_papers": 10543,
+                "venue_title_filter_input_papers": 10543,
+                "title_score_input_papers": 10543,
+                "llm_title_scored_papers": 6502,
+                "title_candidates": 4756,
+                "venue_final_title_candidates": 4756,
+                "detail_fetched": 640,
+                "venue_detail_fetched_candidates": 640,
+                "evaluated_candidates": 640,
+                "abstract_scored_papers": 587,
+                "llm_scored_candidates": 587,
+                "abstract_fetch_failed_candidates": 53,
+                "final_llm_scoring_skipped_candidates": 53,
+            },
+            "strong_recommendation_count": 20,
+            "recommendation_target_count": 20,
+            "recommendation_shortfall": 0,
+        },
+    )
+    monkeypatch.setattr(server, "_project_root_for_find_run", lambda _run_id: None)
+
+    payload = server._compact_large_find_results_artifact(run_dir, run_id, 200_000_000)
+
+    assert payload["survey_stats"]["raw_title_index_papers"] == 17329
+    assert payload["survey_stats"]["tfidf_screened_papers"] == 10543
+    assert payload["survey_stats"]["title_score_input_papers"] == 10543
+    assert payload["survey_stats"]["llm_title_scored_papers"] == 6502
+    assert payload["counts"]["tfidf_screened_papers"] == 10543
+    assert payload["counts"]["llm_title_scored_papers"] == 6502
+
 def test_compact_large_find_results_artifact_prefers_current_projection_survey_stats(tmp_path, monkeypatch):
     from auto_research.web import server
 
@@ -4429,6 +4477,24 @@ def test_frontend_start_read_requests_all_recommendations_by_default():
     assert "paper_ids: selected" in block
     assert "max_papers: selected.length ? selected.length : 0" in block
 
+
+def test_frontend_find_completed_run_uses_artifact_counts_over_stale_fresh_state():
+    from pathlib import Path
+
+    app_path = Path(__file__).resolve().parents[1] / "auto_research" / "web" / "client" / "src" / "App.tsx"
+    app = app_path.read_text(encoding="utf-8")
+    start = app.index("function renderFindLiteratureSurveyPanel")
+    end = app.index("const sourceRows = findSourceStatusRows()", start)
+    block = app[start:end]
+
+    assert "const hasCompletedFindResultsForPanel = hasCurrentFindResults && !viewingActiveIncompleteFindRun;" in block
+    assert "const literatureFreshFindRunning = String(literature.status || \"\").toLowerCase() === \"fresh_find_running\";" in block
+    assert "const freshFindActive = !hasCompletedFindResultsForPanel &&" in block
+    assert "const currentFindCounts: any = freshFindActive ? {} : literatureCounts || {};" in block
+    assert block.index("hasCompletedFindResultsForPanel") < block.index("const freshFindActive") < block.index("const currentFindCounts")
+    assert "(currentFindCounts as any).tfidfScreened" in block
+    assert "(currentFindCounts as any).llmTitleScored" in block
+
 def test_frontend_markdown_renderer_supports_latex_links_and_math_markup():
     from pathlib import Path
 
@@ -4439,11 +4505,19 @@ def test_frontend_markdown_renderer_supports_latex_links_and_math_markup():
 
     assert "function normalizePublicLatexLinks" in app
     assert "normalizePublicLatexLinks(stripLegacyArtifactPointerLines(markdown))" in app
-    assert "PLAIN_MATH_FRAGMENT_RE" in app
+    assert "PLAIN_MATH_FRAGMENT_RE" not in app
+    assert "MATH_LATEX_COMMAND_RE" in app
+    assert "function looksLikeBareMathExpression" in app
+    assert "function renderBareMathInText" in app
+    assert "function displayMathExpressionFromLine" in app
     assert "function renderMathSource" in app
+    assert "function decodeBasicHtmlEntities" in app
+    assert "decodeBasicHtmlEntities(stripMathDelimiters(raw))" in app
+    assert "⟦0⟧" in app
     assert "function mathInlineHtml" in app
     assert 'class="math-inline"' in app
     assert "\\theta" in app
+    assert "\\frac" in app
     assert "\\url" in app
     assert ".markdownBody .math-inline" in css
     assert ".markdownBody .math-display" in css
@@ -5176,54 +5250,6 @@ def test_jobs_api_hides_current_find_worker_when_top_level_read_job_is_running(m
     assert "find-run-find_demo" in ids
 
 
-def test_repair_current_find_resets_stale_downstream_outputs(tmp_path, monkeypatch):
-    project = "demo_project"
-    root = tmp_path / "projects" / project
-    taste_dir = root / "planning" / "finding"
-    state_dir = root / "state"
-    run_root = tmp_path / "runs" / "find_demo"
-    taste_dir.mkdir(parents=True)
-    state_dir.mkdir(parents=True)
-    run_root.mkdir(parents=True)
-    recommendations = [
-        {**recommended_paper("paper-a", "Current Paper A"), "url": "https://openreview.net/forum?id=a", "pdf_url": "https://openreview.net/pdf?id=a"},
-        {**recommended_paper("paper-b", "Current Paper B"), "url": "https://openreview.net/forum?id=b", "pdf_url": "https://openreview.net/pdf?id=b"},
-    ]
-    evaluated = [dict(row) for row in recommendations]
-    find_results = {
-        "run_id": "find_demo",
-        "selection": {"venue_ids": ["openreview_iclr_2026"]},
-        "evaluated_candidates": evaluated,
-        "strong_recommendations": recommendations,
-        "articles": recommendations,
-        "recommendation_target_count": 2,
-        "scoring_runtime": {"recommendation_target_count": 2},
-    }
-    write_json(run_root / "find_results.json", find_results)
-    write_json(run_root / "find_progress.json", {"recommendation_target_count": 2})
-    write_json(taste_dir / "read_results.json", {"run_id": "find_demo", "source": "claude_code_current_find_takeover", "readings": [{"id": "old", "title": "Old Paper"}]})
-    write_json(taste_dir / "ideas.json", {"run_id": "find_demo", "source": "claude_code_current_find_takeover", "ideas": [{"id": "idea-old"}]})
-    write_json(taste_dir / "plans.json", {"run_id": "find_demo", "source": "claude_code_current_find_takeover", "plans": [{"plan_id": "plan-old"}]})
-    write_text(taste_dir / "read.md", "# old read")
-    monkeypatch.setattr(server, "_current_project_for_find_guard", lambda: (project, root))
-    monkeypatch.setattr(server, "_find_artifact_run_dir_for_project", lambda _root, _run_id: run_root)
-    monkeypatch.setattr(server, "load_config", lambda: AppConfig(provider="openai", api_key="key", model="model", max_recommended_papers=2))
-    monkeypatch.setattr(server, "LLMClient", lambda *_args, **_kwargs: type("NoLLM", (), {"enabled": False})())
-
-    result = server._repair_current_find_translations(lambda _msg: None, lambda: False, lambda *_args: None)
-
-    read_payload = read_json(taste_dir / "read_results.json", {})
-    ideas_payload = read_json(taste_dir / "ideas.json", {})
-    plan_payload = read_json(state_dir / "current_find_research_plan.json", {})
-    assert result["downstream_reset"]["status"] == "reset"
-    assert result["downstream_reset"]["reason"] == "read_results_recommendation_count_mismatch"
-    assert read_payload["source"] == "pending_new_find_read"
-    assert read_payload["readings"] == []
-    assert ideas_payload["source"] == "pending_new_find_idea"
-    assert plan_payload["status"] == "pending_current_find_read"
-    assert "网页 Read" in (taste_dir / "read.md").read_text(encoding="utf-8")
-
-
 def test_abstract_translation_status_for_recommendations_uses_actual_rows():
     translated = recommended_paper("paper-ok", "Translated Paper")
     missing = {**recommended_paper("paper-missing", "Missing Translation Paper"), "abstract_zh": ""}
@@ -5263,7 +5289,7 @@ def test_sync_current_find_projection_recomputes_partial_translation_status(tmp_
     assert quality["missing_chinese_abstract_count"] == 1
     assert quality["english_abstract_fallback_count"] == 1
     assert quality["missing_chinese_abstract_ids"] == ["paper-missing"]
-    assert quality["status"] == "ok_with_translation_todo"
+    assert quality["status"] == "needs_translation"
     assert find_results["scoring_runtime"]["recommendation_quality"] == quality
     assert find_results["diagnostics"]["recommendation_quality"] == quality
 
