@@ -2044,6 +2044,41 @@ def test_artifact_api_returns_paths():
         delete_run(run_id)
 
 
+def test_artifact_api_guards_project_downstream_markdown_by_current_run(tmp_path, monkeypatch):
+    run_id = "find_current"
+    run_root = tmp_path / "runs" / run_id
+    project_root = tmp_path / "project"
+    finding_dir = project_root / "planning" / "finding"
+    state_dir = project_root / "state"
+    run_root.mkdir(parents=True)
+    finding_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    write_json(state_dir / "current_find_research_plan.json", {"run_id": run_id})
+    write_json(finding_dir / "read_results.json", {"run_id": "find_old", "readings": [{"title": "Old"}]})
+    write_text(finding_dir / "read.md", "run_id: find_old\n# Old Read")
+    monkeypatch.setattr(server, "run_dir", lambda _run_id: run_root)
+    monkeypatch.setattr(server, "_project_root_for_find_run", lambda _run_id: project_root)
+    server._RUN_ARTIFACTS_CACHE.clear()
+
+    assert server._project_taste_artifact_path(project_root, run_id, "read.md") is None
+    response = api_artifacts(run_id)
+    assert "read.md" not in {item["name"] for item in response["artifacts"]}
+
+    write_json(finding_dir / "read_results.json", {"run_id": run_id, "readings": [{"title": "Current"}]})
+    write_text(finding_dir / "read.md", "run_id: find_current\n# Current Read")
+    server._RUN_ARTIFACTS_CACHE.clear()
+
+    response = api_artifacts(run_id)
+    read_artifact = next(item for item in response["artifacts"] if item["name"] == "read.md")
+    assert read_artifact["path"] == str(finding_dir / "read.md")
+    assert "# Current Read" in read_artifact["content"]
+
+    write_text(finding_dir / "read.md", "run_id: find_old\n# Old Read")
+    server._RUN_ARTIFACTS_CACHE.clear()
+
+    assert server._project_taste_artifact_path(project_root, run_id, "read.md") is None
+    response = api_artifacts(run_id)
+    assert "read.md" not in {item["name"] for item in response["artifacts"]}
 
 
 def test_full_cycle_gate_blocks_duplicate_live_worker(monkeypatch, tmp_path):

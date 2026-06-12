@@ -2471,6 +2471,11 @@ PROJECT_ARTIFACT_NAMES = {
     "article.md", "read.md", "idea.md", "plan.md", "source_status.md",
     "find_progress.json", "find_results.json", "read_results.json", "ideas.json", "plans.json",
 }
+PROJECT_DOWNSTREAM_MARKDOWN_RUN_GUARDS = {
+    "read.md": "read_results.json",
+    "idea.md": "ideas.json",
+    "plan.md": "plans.json",
+}
 
 
 def _payload_run_id(value: Any) -> str:
@@ -2503,6 +2508,39 @@ def _project_current_find_run_id(project_root: Path, *, allow_large_find_results
     return ""
 
 
+def _project_markdown_declared_run_id(path: Path) -> str:
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for index, line in enumerate(handle):
+                if index >= 120:
+                    break
+                match = re.match(
+                    r"^\s*(?:[-*]\s*)?(?:\*\*)?(?:`)?(?:run_id|taste_run_id|source_run_id|find_run_id|current_find_run_id)(?:`)?(?:\*\*)?\s*[:：]\s*[`'\"]?([^`'\"\s,;]+)",
+                    line,
+                    flags=re.I,
+                )
+                if match:
+                    return match.group(1).strip()
+    except OSError:
+        return ""
+    return ""
+
+
+def _project_downstream_markdown_matches_run(project_root: Path, candidate: Path, name: str, expected: str) -> bool:
+    companion_name = PROJECT_DOWNSTREAM_MARKDOWN_RUN_GUARDS.get(name)
+    if not companion_name:
+        return True
+    companion = project_root / "planning" / "finding" / companion_name
+    payload = _read_project_json(companion, {})
+    actual = _payload_run_id(payload)
+    declared = _project_markdown_declared_run_id(candidate)
+    if actual:
+        return actual == expected and (not declared or declared == expected)
+    if declared:
+        return declared == expected
+    return False
+
+
 def _project_taste_artifact_path(project_root: Path | None, run_id: str, name: str) -> Path | None:
     if project_root is None or name not in PROJECT_ARTIFACT_NAMES:
         return None
@@ -2523,6 +2561,8 @@ def _project_taste_artifact_path(project_root: Path | None, run_id: str, name: s
         if name in {"read_results.json", "ideas.json", "plans.json"} and not actual:
             return None
         return candidate
+    if name in PROJECT_DOWNSTREAM_MARKDOWN_RUN_GUARDS:
+        return candidate if _project_downstream_markdown_matches_run(project_root, candidate, name, expected) else None
     current = _project_current_find_run_id(project_root, allow_large_find_results=False)
     return candidate if current == expected else None
 
