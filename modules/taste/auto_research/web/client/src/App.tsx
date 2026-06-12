@@ -4761,8 +4761,9 @@ function App() {
       researchStages?.paper?.status,
       humanSupervision?.blocker?.category,
     ];
-    return statuses.some((value) => String(value ?? "").trim().toLowerCase() === "fresh_find_running");
-  }, [researchLiteratureSurvey, currentFindPipeline, researchStages, humanSupervision]);
+    const hasLiveStandaloneFindJob = displayJobs.some((job: any) => isFindRunJob(job) && isLiveJob(job));
+    return viewingActiveIncompleteFindRun || hasLiveStandaloneFindJob || statuses.some((value) => String(value ?? "").trim().toLowerCase() === "fresh_find_running");
+  }, [researchLiteratureSurvey, currentFindPipeline, researchStages, humanSupervision, displayJobs, viewingActiveIncompleteFindRun]);
   const currentFindPipelineSummary = useMemo(() => {
     if (freshFindRunning) return lang === "zh" ? "新的 Find 正在运行；等待本轮评分、推荐精读、想法和计划产物落盘。" : "Fresh Find is running; waiting for this run's scoring, recommended reading, ideas, and plans.";
     const findCounts = publicFindStage?.counts || {};
@@ -5950,10 +5951,11 @@ function App() {
     );
     const literature = researchLiteratureSurvey || {};
     const stageCounts = (publicFindStage?.counts || {}) as any;
+    const activeRunCounts = (viewingActiveIncompleteFindRun && runFindState?.counts && typeof runFindState.counts === "object" ? runFindState.counts : {}) as any;
     const counts = viewingActiveIncompleteFindRun
-      ? { ...(literatureCounts || {}), ...stageCounts } as any
+      ? { ...activeRunCounts } as any
       : { ...(researchLiteratureCounts || {}), ...(literatureCounts || {}), ...stageCounts } as any;
-    const freshFindActive = freshFindRunning || String(literature.status || "").toLowerCase() === "fresh_find_running";
+    const freshFindActive = freshFindRunning || viewingActiveIncompleteFindRun || Boolean(activeFindJobForRun) || String(literature.status || "").toLowerCase() === "fresh_find_running";
     const currentFindCounts: any = freshFindActive ? {} : literatureCounts || {};
     const sourceLimitations = freshFindActive ? [] : [...researchSourceLimitations, ...researchMissingVenueIndexes].slice(0, 4);
     const categoryFilteredCount = counts.category_filtered_papers || (freshFindActive ? 0 : ((currentFindCounts as any).categoryFiltered || (currentFindCounts as any).titleInput));
