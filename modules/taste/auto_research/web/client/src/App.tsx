@@ -44,7 +44,7 @@ const STANDARD_FIND_DEFAULTS = {
   max_recommended_papers: 20,
   venue_title_scan_limit: 0,
   venue_title_scan_fraction: 1.0,
-  find_recall_count: 1000,
+  find_recall_count: 2000,
   detail_fetch_count: 160,
   full_venue_corpus_audit: true,
   title_filter_timeout_sec: 120,
@@ -593,13 +593,15 @@ function venueMetaLabel(venue: Venue, labels?: Record<string, string>, selectedY
 }
 
 
-function sourceStatusLabel(item: any) {
+function sourceStatusLabel(item: any, venueById?: Map<string, Venue>) {
   const source = String(item?.source || item?.venue || item?.venue_id || "source");
   const kind = String(item?.source_kind || "");
   if (kind === "venue_summary") return "会议渠道汇总";
   if (kind === "venue") {
     const years = asArray(item?.effective_years).length ? ` ${asArray(item.effective_years).join(",")}` : "";
-    return `${item?.venue || source}${years}`;
+    const venue = venueById?.get(String(item?.venue_id || "")) || venueById?.get(source);
+    const label = String(venue?.name || item?.venue || source || "venue").trim();
+    return `${label}${years}`;
   }
   if (source === "biorxiv") return "bioRxiv";
   if (source === "nature") return "Nature Portfolio";
@@ -674,11 +676,23 @@ function sourceStatusMessageText(value: any, lang: Lang) {
   if (basis.includes("local venue database integrity check") || basis.includes("title corpus was verified") || basis.includes("this source does not expose abstracts") || basis.includes("no trusted official venue categories") || basis.includes("ar skips category pruning")) return "";
   if (lang !== "zh") return text.replace(/_/g, " ");
   const lowered = text.toLowerCase();
-  if (lowered.startsWith("requested years") && lowered.includes("no usable papers")) {
+  if (lowered.startsWith("openreview official venue notes were fetched")) return "OpenReview 官方元数据已抓取，并解析标题、摘要和分类";
+  if (lowered.startsWith("source remains partial until")) return "适配器尚未完成总量审计，完整性仍标记为部分可用";
+  if (lowered.startsWith("requested years") && lowered.includes("had no usable")) {
     return text
       .replace(/^requested years/i, "请求年份")
-      .replace(/had no usable papers/i, "暂无可用论文")
+      .replace(/had no usable/i, "暂无可用")
+      .replace(/title index as of/i, "标题索引，截至")
+      .replace(/release date/i, "发布时间")
+      .replace(/is after run date/i, "晚于运行日期")
       .replace(/ via ([^;]+)/i, "（适配器 $1）");
+  }
+  if (lowered.startsWith("using latest available")) {
+    return text
+      .replace(/^using latest available/i, "使用最新可用")
+      .replace(/title index year/i, "标题索引年份")
+      .replace(/ via /i, "，适配器 ")
+      .replace(/\.$/, "");
   }
   if (lowered === "no fallback year was used") return "未使用年份回退";
   if (lowered === "no title index found.") return "未找到标题索引。";
@@ -734,7 +748,7 @@ function sourceAbstractAvailabilityText(item: any, lang: Lang) {
 function sourceStatusDetail(item: any, lang: Lang = "zh") {
   const zh = lang === "zh";
   const labels = zh
-    ? { status: "状态", ok: "正常", limited: "受限", failed: "失败", checking: "检查中", raw: "标题库总量", screen: "标题筛选输入", detail: "元数据详情", adapter: "来源适配器", years: "有效年份", requested: "请求年份", metadata: "元数据完整性" }
+    ? { status: "状态", ok: "正常", limited: "受限", failed: "失败", checking: "检查中", raw: "标题总数", screen: "分类后数量", detail: "元数据详情", adapter: "来源适配器", years: "有效年份", requested: "请求年份", metadata: "元数据完整性" }
     : { status: "Status", ok: "ok", limited: "limited", failed: "failed", checking: "checking", raw: "title-index total", screen: "title-screen input", detail: "metadata details", adapter: "adapter", years: "effective years", requested: "requested years", metadata: "metadata completeness" };
   const rawStatus = String(item?.status || item?.phase || "").trim().toLowerCase();
   const state = rawStatus === "checking" || rawStatus === "fetching" ? labels.checking : item?.limited ? labels.limited : item?.ok ? labels.ok : labels.failed;
@@ -877,10 +891,13 @@ const TEXT = {
     researchLiteratureSurvey: "Find 文献调研验收",
     researchLiteratureSurveyHelp: "显示当前 Find run 的渠道抓取、候选筛选和评分概览。",
     venuePapersScanned: "会议标题池",
-    rawTitleIndexPapers: "标题库总量",
+    rawTitleIndexPapers: "标题总数",
     titleScreenInputPapers: "标题预筛输入",
-    categoryFilteredPapers: "标题筛选输入",
-    titleCandidatePapers: "详情候选池",
+    categoryFilteredPapers: "分类后",
+    tfidfScreenedPapers: "初筛标题后",
+    titleScoredPapers: "标题打分后",
+    abstractScoredPapers: "摘要打分后",
+    titleCandidatePapers: "标题打分后",
     recentArxivCandidates: "近半年 arXiv 候选",
     notEnabled: "未启用",
     papersRead: "已精读",
@@ -918,7 +935,7 @@ const TEXT = {
     titleScanFraction: "标题扫描比例",
     titleScanFractionHelp: "对已抓到的会议标题池抽取多少比例，1 表示全扫；只有想省时间时才调低。",
     recallCount: "主题候选保留上限",
-    recallCountHelp: "全扫标题后，按主题相关性稳定排序，最多保留多少篇进入详情抓取前的候选池。它不是最终推荐数，也不会作为人类监督列表展示。",
+    recallCountHelp: "标题打分后最多保留多少篇进入详情抓取前的候选池。它不是最终推荐数；调大可提高标题打分后的召回。",
     detailFetchCount: "详情抓取/评分预算",
     detailFetchCountHelp: "标题召回后，最多抓取多少候选的摘要/详情并进入最终 LLM 评分；会议标题仍会先全量扫描，这里控制的是昂贵的详情阶段。",
     titleFilterTimeout: "标题筛选单批超时秒数",
@@ -1425,10 +1442,13 @@ const TEXT = {
     researchLiteratureSurvey: "Find Survey Gate",
     researchLiteratureSurveyHelp: "Shows source fetching, candidate screening, and scoring for the current Find run.",
     venuePapersScanned: "Venue papers",
-    rawTitleIndexPapers: "Title-index total",
+    rawTitleIndexPapers: "Title total",
     titleScreenInputPapers: "Title-screen input",
-    categoryFilteredPapers: "Title-screen input",
-    titleCandidatePapers: "Detail candidate pool",
+    categoryFilteredPapers: "After categories",
+    tfidfScreenedPapers: "After title prefilter",
+    titleScoredPapers: "After title scoring",
+    abstractScoredPapers: "After abstract scoring",
+    titleCandidatePapers: "After title scoring",
     recentArxivCandidates: "Recent arXiv candidates",
     notEnabled: "not enabled",
     papersRead: "Papers read",
@@ -1466,7 +1486,7 @@ const TEXT = {
     titleScanFraction: "Title scan fraction",
     titleScanFractionHelp: "Fraction of the collected title pool to prefilter. 1 means all, 0.25 means the first 25%.",
     recallCount: "Topic-candidate cap",
-    recallCountHelp: "After the full title scan, keep up to this many topic-ranked candidates before detail fetch. It is not a final recommendation count.",
+    recallCountHelp: "After title scoring, keep up to this many candidates before detail fetch. It is not a final recommendation count; increase it for broader title-stage recall.",
     detailFetchCount: "Detail fetch/scoring budget",
     detailFetchCountHelp: "After title recall, at most this many candidates fetch abstracts/details and enter final LLM scoring. Venue titles are still scanned broadly; this controls the expensive detail stage.",
     titleFilterTimeout: "Title filter timeout (sec)",
@@ -2160,6 +2180,7 @@ function jobProgressPhaseLabel(job: any, lang: Lang = "zh") {
   if (!phase) return canonicalJobStage(job);
   const normalized = phase.toLowerCase().replace(/[\s-]+/g, "_");
   if (phase === "literature") return "find";
+  if (normalized.startsWith("stale")) return lang === "zh" ? "已停止" : "stopped";
   if (phase === "complete") return jobStatusLabel("done", lang);
   if (["cancelled", "blocked", "error", "interrupted", "queued", "running", "cancelling"].includes(phase) || normalized.startsWith("blocked_")) return jobStatusLabel(phase, lang);
   if (phase === "started") return lang === "zh" ? "已启动" : "started";
@@ -2180,6 +2201,7 @@ function publicLogText(value: any, lang: Lang = "zh"): string {
     .replace(/当前状态[:：]\s*历史 full-cycle 启动器已停止；当前状态以项目摘要和实验模块为准。/g, lang === "zh" ? "历史 full-cycle 启动器已停止；页面以项目摘要和实验模块为准。" : "Historical full-cycle launcher has stopped; current status comes from the project summary and Experiment module.")
     .replace(/历史 full-cycle 启动器已停止；当前状态以项目摘要和实验模块为准。/g, lang === "zh" ? "历史 full-cycle 启动器已停止；页面以项目摘要和实验模块为准。" : "Historical full-cycle launcher has stopped; current status comes from the project summary and Experiment module.")
     .replace(/当前状态以项目摘要和实验模块为准/g, lang === "zh" ? "页面以项目摘要和实验模块为准" : "current status comes from the project summary and Experiment module")
+    .replace(/stale[_ ]full[_ ]research[_ ]cycle[_ ]snapshot/gi, lang === "zh" ? "已停止" : "stopped")
     .replace(/deterministic\s+base[-_ ]switch\s+gate/gi, "experiment evidence review")
     .replace(/base[-_ ]switch\s+gate/gi, "experiment evidence review")
     .replace(/base_switch_gate/gi, "experiment evidence review")
@@ -2199,6 +2221,10 @@ function publicLogText(value: any, lang: Lang = "zh"): string {
     .replace(/来源：确定性门控审计/g, "")
     .replace(/Source: deterministic gate audit \(status and counts are computed from project artifacts, not free-form project-agent text\)/gi, "")
     .replace(/Source: deterministic gate audit/gi, "")
+    .replace(/项目代理最近一次处理已记录；阶段=[^，。]+，状态=blocked[_ ]tool[_ ]policy。详细审计保留在远端日志\/receipt 中。/g, lang === "zh" ? "项目代理最近一次处理被安全策略拦截；详细审计保留在远端日志中。" : "The latest project-agent turn was safely blocked; detailed audit remains in remote logs.")
+    .replace(/项目代理状态已记录；阶段=[^，。]+，状态=blocked[_ ]tool[_ ]policy。/g, lang === "zh" ? "项目代理处理被安全策略拦截。" : "The project-agent turn was safely blocked.")
+    .replace(/状态=blocked[_ ]tool[_ ]policy/gi, lang === "zh" ? "状态=安全策略拦截" : "status=safely blocked")
+    .replace(/blocked[_ ]tool[_ ]policy/gi, lang === "zh" ? "安全策略拦截" : "safely blocked")
     .replace(/summary_source[:=]\s*deterministic_gate_audit/gi, "")
     .replace(/deterministic_gate_audit/gi, "")
     .replace(/当前\s+current_selected_plan_id/g, lang === "zh" ? "当前计划" : "selected execution plan")
@@ -2347,11 +2373,29 @@ function publicLogText(value: any, lang: Lang = "zh"): string {
   return text;
 }
 
+function publicEnvironmentSelectionStatus(selection: any, lang: Lang = "zh") {
+  const row = selection && typeof selection === "object" ? selection : {};
+  const gate = String(row.selection_gate || row.raw_selection_gate || "").trim().toLowerCase();
+  const stage = String(row.selection_stage || row.selected_by_stage || "").trim().toLowerCase();
+  const zh = lang === "zh";
+  if (gate.startsWith("accepted_by") || stage.includes("environment")) {
+    return zh ? "已选择 / 主题适配已审计通过" : "selected / topic-fit review passed";
+  }
+  if (gate.includes("continued_search") || gate.includes("blocked")) {
+    return zh ? "待继续选择 / 审计未通过" : "continue selection / review not passed";
+  }
+  if (stage || gate) {
+    return publicStatusText(stage || gate, lang);
+  }
+  return zh ? "待选择" : "pending selection";
+}
+
 function publicStatusText(value: any, lang: Lang = "zh") {
   const raw = String(value ?? "").trim();
   const normalized = publicLogText(raw, lang).trim().toLowerCase().replace(/[\s-]+/g, "_");
   const labels: Record<string, { zh: string; en: string }> = {
     blocked_after_max_cycles: { zh: "已暂停，等待下一轮自动处理", en: "paused after configured cycles" },
+    stale_full_research_cycle_snapshot: { zh: "已停止", en: "stopped" },
     experiment_evidence_audit: { zh: "实验证据审计", en: "experiment evidence audit" },
     continue_experiment_evidence_repair: { zh: "继续补齐实验证据", en: "continue experiment evidence repair" },
     wait_for_environment_base_selection: { zh: "环境审查后执行", en: "run after environment review" },
@@ -2936,6 +2980,14 @@ function jobsForProject(items: any, projectId: string) {
   return visibleJobs(items).filter((item) => jobMatchesProject(item, projectId));
 }
 
+function jobsForProjectResponse(items: any, projectId: string) {
+  const scoped = visibleJobs(items).map((item) => {
+    if (!projectId || jobProjectId(item)) return item;
+    return { ...item, project: projectId };
+  });
+  return scoped.filter((item) => jobMatchesProject(item, projectId));
+}
+
 function runMatchesProject(run: RunInfo, projectId: string, pinnedRunIds: string[] = []) {
   if (!projectId) return true;
   const project = String(run.project || "").trim();
@@ -3008,6 +3060,21 @@ function displayMaybe(value: any, fallback = "N/A"): string {
   }
   const text = publicLogText(value);
   return text || fallback;
+}
+
+function firstPresentValue(...values: any[]): any {
+  for (const value of values) {
+    if (value === undefined || value === null || value === "") continue;
+    return value;
+  }
+  return undefined;
+}
+
+function firstNumericValue(...values: any[]): number {
+  const value = firstPresentValue(...values);
+  if (value === undefined) return 0;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : 0;
 }
 
 function normalizeText(value: any) {
@@ -3347,7 +3414,7 @@ function App() {
         const projectId = activeProjectRef.current || researchProject || "";
         const jobData = await getJobs(projectId || undefined);
         if (cancelled) return;
-        const visibleJobData = jobsForProject(jobData, projectId);
+        const visibleJobData = jobsForProjectResponse(jobData, projectId);
         setJobs(visibleJobData);
         setJobsLoaded(true);
         visibleJobData.filter(isWatchableWebJob).forEach((item) => watchExistingJob(item.job_id));
@@ -3367,7 +3434,7 @@ function App() {
     const topic = summary.config?.topic || fallbackProject?.topic || "";
     const runPreferences = (summary as any).run_preferences || {};
     const prompt = runPreferences.user_prompt || "";
-    const selection = runPreferences.default_find_selection || summary.config?.default_find_selection || {};
+    const selection = runPreferences.default_find_selection || (summary as any).default_find_selection || summary.config?.default_find_selection || {};
     setTopic(topic);
     setPrompt(prompt);
     setTitle(runPreferences.title || runPreferences.paper?.title || "");
@@ -3419,7 +3486,7 @@ function App() {
           getRuns(initialProjectId),
           getJobs(initialProjectId),
         ]);
-        const projectJobData = jobsForProject(projectJobRaw, initialProjectId);
+        const projectJobData = jobsForProjectResponse(projectJobRaw, initialProjectId);
         jobsToWatch = projectJobData;
         setRuns(projectRunData);
         setJobs(projectJobData);
@@ -3512,7 +3579,7 @@ function App() {
       }
       void getJobs(id).then((jobData) => {
         if (activeProjectRef.current !== id) return;
-        const visibleJobData = jobsForProject(jobData, id);
+        const visibleJobData = jobsForProjectResponse(jobData, id);
         setJobs(visibleJobData);
         setJobsLoaded(true);
         visibleJobData.filter(isWatchableWebJob).forEach((item) => watchExistingJob(item.job_id));
@@ -3971,9 +4038,10 @@ function App() {
     const payload = artifacts.find((a) => ["find_results.json", "read_results.json", "ideas.json", "plans.json", "find_progress.json"].includes(a.name))?.content;
     return String(payload?.run_id || payload?.source_run_id || payload?.find_run_id || "").trim();
   }, [artifacts]);
-  const currentFindArtifactsMatch = Boolean(currentProjectFindRunId && currentFindArtifacts.length && (!currentFindArtifactsRunId || currentFindArtifactsRunId === currentProjectFindRunId));
-  const selectedRunArtifactsMatchCurrentFind = Boolean(currentProjectFindRunId && runId === currentProjectFindRunId && artifacts.length && (!selectedRunArtifactsRunId || selectedRunArtifactsRunId === currentProjectFindRunId));
-  const viewingCurrentProjectFindRun = Boolean(currentProjectFindRunId && runId === currentProjectFindRunId);
+  const currentFindArtifactRunId = currentProjectFindRunId || activeFindRunId;
+  const currentFindArtifactsMatch = Boolean(currentFindArtifactRunId && currentFindArtifacts.length && (!currentFindArtifactsRunId || currentFindArtifactsRunId === currentFindArtifactRunId));
+  const selectedRunArtifactsMatchCurrentFind = Boolean(currentFindArtifactRunId && runId === currentFindArtifactRunId && artifacts.length && (!selectedRunArtifactsRunId || selectedRunArtifactsRunId === currentFindArtifactRunId));
+  const viewingCurrentProjectFindRun = Boolean(currentFindArtifactRunId && runId === currentFindArtifactRunId);
   const viewingSelectedHistoricalFindRun = Boolean(String(runId || "").startsWith("find_") && !viewingCurrentProjectFindRun);
   const currentFindArtifactSource = useMemo(() => {
     if (viewingSelectedHistoricalFindRun) return artifacts;
@@ -3992,6 +4060,10 @@ function App() {
   const activeFindJobForRun = useMemo(
     () => selectedFindJobForRun && isLiveJob(selectedFindJobForRun) ? selectedFindJobForRun : undefined,
     [selectedFindJobForRun],
+  );
+  const hasLiveCurrentFindArtifactJob = useMemo(
+    () => Boolean(currentFindArtifactRunId && displayJobs.some((job: any) => isFindRunJob(job) && isLiveJob(job) && runIdFromJob(job) === currentFindArtifactRunId)),
+    [currentFindArtifactRunId, displayJobs],
   );
   const useCurrentFindPacket = Boolean(currentProjectFindRunId && !hasCurrentFindResults && !viewingActiveIncompleteFindRun);
   const runFindState = hasCurrentFindResults ? findResults : findProgress;
@@ -4042,10 +4114,22 @@ function App() {
       scanned: rawTitleCount || titleInputCount || progressCounts.raw_title_index || surveyStats.venue_corpus_audited_papers || surveyStats.venue_total_papers_available || sum(categoryRows, "total_papers") || (useArFallback ? (researchLiteratureCounts.venue_corpus_audited_papers || researchLiteratureCounts.venue_total_papers_available) : "") || "",
       corpusAudited: surveyStats.venue_corpus_audited_papers || rawTitleCount || progressCounts.raw_title_index || (useArFallback ? (researchLiteratureCounts.venue_corpus_audited_papers || researchLiteratureCounts.venue_total_papers_available) : "") || "",
       selected: (surveyStats.venue_category_selected_papers ?? sum(categoryRows, "selected_category_papers")) || (useArFallback ? researchLiteratureCounts.venue_category_selected_papers : "") || "",
+      categoryFiltered: surveyStats.category_filtered_papers || progressCounts.category_filtered_papers || titleInputCount || (useArFallback ? Number(researchLiteratureCounts.category_filtered_papers || researchLiteratureCounts.venue_title_filter_input_papers || 0) : 0),
       titleInput: titleInputCount || (useArFallback ? researchLiteratureCounts.venue_title_filter_input_papers : "") || "",
+      tfidfScreened: surveyStats.tfidf_screened_papers || progressCounts.tfidf_screened_papers || titleInputCount || (useArFallback ? Number(researchLiteratureCounts.tfidf_screened_papers || researchLiteratureCounts.venue_title_filter_input_papers || 0) : 0),
+      titleScoreInput: surveyStats.title_score_input_papers || progressCounts.title_score_input_papers || titleInputCount || 0,
+      llmTitleScored: surveyStats.llm_title_scored_papers || progressCounts.llm_title_scored_papers || (useArFallback ? Number(researchLiteratureCounts.llm_title_scored_papers || 0) : 0),
       titleCandidates: (surveyStats.venue_final_title_candidates ?? sum(titleRows, "final_title_candidates")) || progressCounts.title_candidates || asArray(findResults?.title_candidates).length || (useArFallback ? (researchLiteratureCounts.venue_final_title_candidates || researchLiteratureCounts.survey_candidates) : 0) || 0,
       detailFetched: surveyStats.venue_detail_fetched_candidates || progressCounts.detail_fetched || asArray(findResults?.evaluated_candidates).length || (useArFallback ? Number(researchLiteratureCounts.venue_detail_fetched_candidates || researchLiteratureCounts.evaluated_candidates || 0) : 0),
-      llmScored: surveyStats.llm_scored_candidates || findResults?.diagnostics?.llm_scored_count || progressCounts.evaluated_candidates || (useArFallback ? Number(researchLiteratureCounts.llm_scored_candidates || 0) : 0),
+      llmScored: firstNumericValue(
+        surveyStats.abstract_scored_papers,
+        surveyStats.llm_scored_candidates,
+        findResults?.diagnostics?.llm_scored_count,
+        progressCounts.abstract_scored_papers,
+        progressCounts.llm_scored_candidates,
+        useArFallback ? researchLiteratureCounts.abstract_scored_papers : undefined,
+        useArFallback ? researchLiteratureCounts.llm_scored_candidates : undefined,
+      ),
       fullCorpusAudit: Boolean(surveyStats.full_venue_corpus_audit || (useArFallback && researchLiteratureCounts.full_venue_corpus_audit)),
       llmPolicy: surveyStats.llm_scoring_policy || findResults?.diagnostics?.survey_stats?.llm_scoring_policy || "category/title-screened candidates only",
       arxivRaw: arxivEnabled ? (surveyStats.arxiv_raw_count ?? asArray(findResults?.arxiv_raw).length ?? (useArFallback ? researchLiteratureCounts.arxiv_raw_count : 0)) : 0,
@@ -4134,9 +4218,14 @@ function App() {
 
   const sourceStatus = useMemo(() => {
     const runRows = filterBySourceSelection(expandedSourceStatusRows(runFindState), selectedRunSelection);
-    if (venueHealthSourceStatus.length) return venueHealthSourceStatus;
+    const surveyRows = filterBySourceSelection(researchSourceStatus, selectedRunSelection);
+    const hasLiveFindJob = displayJobs.some((job: any) => isFindRunJob(job) && isLiveJob(job));
+    const surveyRowsAreCachePlaceholders = surveyRows.length > 0 && surveyRows.every((row: any) => String(row?.message || row?.reason || "").includes("verified local venue metadata cache missing"));
     if (runRows.length) return runRows;
-    if (viewingActiveIncompleteFindRun) return [];
+    if (hasLiveFindJob && surveyRowsAreCachePlaceholders) return [];
+    if (surveyRows.length) return surveyRows;
+    if (viewingActiveIncompleteFindRun || activeFindJobForRun || hasLiveFindJob) return [];
+    if (venueHealthSourceStatus.length) return venueHealthSourceStatus;
     return [...researchSourceLimitations, ...researchMissingVenueIndexes].map((item: any) => ({
       ...item,
       source: item.source || item.venue || item.venue_id || "TASTE literature source",
@@ -4145,7 +4234,7 @@ function App() {
       count: item.count || 0,
       message: item.message || item.reason || "",
     }));
-  }, [researchMissingVenueIndexes, researchSourceLimitations, runFindState, selectedRunSelection, venueHealthSourceStatus, viewingActiveIncompleteFindRun]);
+  }, [activeFindJobForRun, displayJobs, researchMissingVenueIndexes, researchSourceLimitations, researchSourceStatus, runFindState, selectedRunSelection, venueHealthSourceStatus, viewingActiveIncompleteFindRun]);
   const ideasArtifact = useMemo(() => currentFindArtifactSource.find((a) => a.name === "ideas.json"), [currentFindArtifactSource]);
   const plansArtifact = useMemo(() => currentFindArtifactSource.find((a) => a.name === "plans.json"), [currentFindArtifactSource]);
   const ideas = useMemo(() => ideasArtifact?.content?.ideas ?? [], [ideasArtifact]);
@@ -4548,16 +4637,6 @@ function App() {
     if (!researchProject || !available) return "";
     return `${researchProject || "project"}:${stage}:${receipt?.stage_session_key || receipt?.session_id || receipt?.finished_at || receipt?.stage || "latest"}`;
   }
-  const latestClaudeFullResponseRequests = useMemo(() => {
-    const stages: ("environment" | "experiment" | "paper")[] = ["environment", "experiment", "paper"];
-    return stages
-      .map((stage) => {
-        const receipt = latestClaudeReceiptForStage(stage) as any;
-        const key = claudeFullResponseKeyForStage(stage, receipt);
-        return key ? { key, stage } : null;
-      })
-      .filter((item): item is { key: string; stage: "environment" | "experiment" | "paper" } => Boolean(item));
-  }, [researchProject, latestClaudeReceiptsByStage]);
   const researchExperiments = useMemo(() => firstNonEmptyArray(researchSummary?.state?.recent_experiments, researchStages?.experiment?.recent_experiments, researchSummary?.state?.experiments, researchStages?.experiment?.experiments), [researchSummary, researchStages]);
   const researchExperimentTotalCount = useMemo(() => Number(researchStages?.experiment?.experiment_count ?? researchSummary?.state?.experiment_count ?? researchExperiments.length) || 0, [researchSummary, researchStages, researchExperiments]);
   const researchExperimentCompletedCount = useMemo(() => Number(researchStages?.experiment?.completed_experiment_count ?? researchSummary?.state?.completed_experiment_count ?? researchExperiments.filter((row: any) => String(row.status).toLowerCase() === "completed").length) || 0, [researchSummary, researchStages, researchExperiments]);
@@ -5415,21 +5494,26 @@ function App() {
 
 
   useEffect(() => {
-    for (const item of latestClaudeFullResponseRequests) {
-      const current = claudeFullResponses[item.key] || {};
-      if (current.loading || current.data || current.error) continue;
-      void loadClaudeFullResponse(item.key, item.stage);
-    }
-  }, [latestClaudeFullResponseRequests, claudeFullResponses]);
-
-
-  useEffect(() => {
-    if (!currentProjectFindRunId) {
+    if (!currentFindArtifactRunId) {
       setCurrentFindArtifacts([]);
       return;
     }
-    void loadCurrentFindArtifacts(currentProjectFindRunId, { loading: true });
-  }, [currentProjectFindRunId]);
+    void loadCurrentFindArtifacts(currentFindArtifactRunId, { loading: true });
+  }, [currentFindArtifactRunId]);
+
+  useEffect(() => {
+    if (!currentFindArtifactRunId || !hasLiveCurrentFindArtifactJob) return;
+    let cancelled = false;
+    const refreshCurrentFindArtifacts = () => {
+      if (!cancelled) void loadCurrentFindArtifacts(currentFindArtifactRunId, { loading: false });
+    };
+    refreshCurrentFindArtifacts();
+    const timer = window.setInterval(refreshCurrentFindArtifacts, 20000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [currentFindArtifactRunId, hasLiveCurrentFindArtifactJob]);
 
   useEffect(() => {
     if (!currentProjectFindRunId || !(["read", "ideas", "plan"] as Tab[]).includes(tab)) return;
@@ -5616,7 +5700,16 @@ function App() {
   function researchPayload(action: string, options: { freshDiscovery?: boolean; venue?: string } = {}) {
     const freshDiscovery = action === "full-cycle" && Boolean(options.freshDiscovery);
     const paperAction = action === "paper";
-    const payloadVenue = paperAction ? String(options.venue || researchVenue || "").trim() : "";
+    const venueAction = paperAction || action === "full-cycle" || action === "full_research_cycle" || action === "autonomous";
+    const summaryVenue = String(
+      (researchSummary as any)?.run_preferences?.target_venue
+      || (researchSummary as any)?.run_preferences?.venue
+      || (researchSummary as any)?.human_supervision?.target_venue
+      || researchSummary?.config?.target_venue
+      || researchSummary?.config?.venue
+      || "",
+    ).trim();
+    const payloadVenue = venueAction ? String(options.venue || researchVenue || summaryVenue || "").trim() : "";
     const payload: Record<string, any> = {
       action,
       project: researchProject,
@@ -5642,7 +5735,7 @@ function App() {
       refresh_current_venue: paperAction,
       auto_install_latex: researchAutoInstallLatex,
     };
-    if (paperAction) {
+    if (venueAction) {
       payload.venue = payloadVenue;
       payload.target_venue = payloadVenue;
     }
@@ -5719,7 +5812,10 @@ function App() {
         await persistEnvConfigForRun();
       }
       const savedRunPreferences = (savedSummary as any)?.run_preferences || {};
-      const savedVenue = action === "paper" ? (savedRunPreferences.target_venue || savedRunPreferences.venue || (savedSummary as any)?.human_supervision?.target_venue || researchVenue) : "";
+      const venueAction = action === "paper" || action === "full-cycle" || action === "full_research_cycle" || action === "autonomous";
+      const savedVenue = venueAction
+        ? (savedRunPreferences.target_venue || savedRunPreferences.venue || (savedSummary as any)?.human_supervision?.target_venue || (savedSummary as any)?.config?.target_venue || (savedSummary as any)?.config?.venue || researchVenue)
+        : "";
       const nextJob = await startProjectJob(researchPayload(action, { ...options, venue: savedVenue }));
       const nextTab: Tab = action === "environment" ? "environment" : action === "experiment" || action === "full-cycle" ? "experiment" : action === "paper" ? "paperWrite" : action === "current-find-selection" ? "plan" : tab;
       attachJob(nextJob, nextTab);
@@ -5787,9 +5883,12 @@ function App() {
   function findSourceStatusRows() {
     const literature = researchLiteratureSurvey || {};
     const freshFindActive = freshFindRunning || String(literature.status || "").toLowerCase() === "fresh_find_running";
-    if (venueHealthSourceStatus.length) return venueHealthSourceStatus.slice(0, 12);
-    if (researchHealthCheckSourceStatus.length) return researchHealthCheckSourceStatus.slice(0, 12);
+    const hasLiveFindJob = displayJobs.some((job: any) => isFindRunJob(job) && isLiveJob(job));
     if (sourceStatus.length) return sourceStatus.slice(0, 12);
+    if (freshFindActive || hasLiveFindJob) return [];
+    if (researchSourceStatus.length) return researchSourceStatus.slice(0, 12);
+    if (researchHealthCheckSourceStatus.length) return researchHealthCheckSourceStatus.slice(0, 12);
+    if (venueHealthSourceStatus.length) return venueHealthSourceStatus.slice(0, 12);
     return (freshFindActive ? researchSourceStatus : (researchSourceStatus.length ? researchSourceStatus : sourceStatus)).slice(0, 12);
   }
 
@@ -5839,8 +5938,17 @@ function App() {
     const freshFindActive = freshFindRunning || String(literature.status || "").toLowerCase() === "fresh_find_running";
     const currentFindCounts: any = freshFindActive ? {} : literatureCounts || {};
     const sourceLimitations = freshFindActive ? [] : [...researchSourceLimitations, ...researchMissingVenueIndexes].slice(0, 4);
+    const categoryFilteredCount = counts.category_filtered_papers || (freshFindActive ? 0 : ((currentFindCounts as any).categoryFiltered || (currentFindCounts as any).titleInput));
+    const tfidfScreenedCount = counts.tfidf_screened_papers || (freshFindActive ? 0 : ((currentFindCounts as any).tfidfScreened || (currentFindCounts as any).titleInput));
+    const titleScoredCount = counts.llm_title_scored_papers || (freshFindActive ? 0 : ((currentFindCounts as any).llmTitleScored || (currentFindCounts as any).titleCandidates));
     const detailFetched = counts.detail_fetched || counts.venue_detail_fetched_candidates || (freshFindActive ? 0 : (currentFindCounts as any).detailFetched);
-    const evaluated = counts.llm_scored_candidates || counts.evaluated_candidates || (counts.llm_scoring_batches_total ? `${counts.llm_scoring_batches_current || 0}/${counts.llm_scoring_batches_total} 批` : "") || (freshFindActive ? 0 : ((currentFindCounts as any).llmScored || (currentFindCounts as any).evaluated));
+    const evaluated = firstPresentValue(
+      counts.abstract_scored_papers,
+      counts.llm_scored_candidates,
+      counts.llm_scoring_batches_total ? `${counts.llm_scoring_batches_current || 0}/${counts.llm_scoring_batches_total} 批` : "",
+      freshFindActive ? 0 : (currentFindCounts as any).llmScored,
+      0,
+    );
     const candidatePoolCount = Number(
       counts.title_candidates
       || counts.venue_final_title_candidates
@@ -5889,7 +5997,7 @@ function App() {
             <h4 data-testid="find-source-status-heading">{t.sourceStatus}</h4>
             {sourceRows.map((item: any, index: number) => (
               <div className={String(item.status || "").toLowerCase() === "checking" ? "sourceRow" : item.ok ? "sourceRow ok" : "sourceRow fail"} key={`${item.source || item.venue || "source"}-${index}`}>
-                <span>{sourceStatusLabel(item)}</span>
+                <span>{sourceStatusLabel(item, venueById)}</span>
                 <small>{sourceStatusDetail(item, lang)}</small>
               </div>
             ))}
@@ -5899,13 +6007,12 @@ function App() {
             <p>{lang === "zh" ? "当前 Find run 尚未返回来源状态；渠道抓取、候选筛选和评分概览会在本验收块内更新。" : "The current Find run has not returned source status yet; source fetching, candidate screening, and scoring will update inside this review block."}</p>
           </div>
         )}
-        {liveProgressText && <div className="sourceStatus compactSourceStatus liveFindProgress"><div className="sourceRow ok"><span>{lang === "zh" ? "当前步骤" : "Current step"}</span><small>{liveProgressText}</small></div></div>}
         <div className="surveyFlowGrid compactSurveyFlow">
-          <div><strong>{displayMaybe(counts.raw_title_index_papers || counts.venue_corpus_audited_papers || counts.venue_total_papers_available || currentFindCounts.scanned || currentFindCounts.corpusAudited)}</strong><span>{t.rawTitleIndexPapers}</span></div>
-          <div><strong>{displayMaybe(counts.venue_title_filter_input_papers || currentFindCounts.titleInput || counts.venue_category_selected_papers || counts.category_selected_papers || currentFindCounts.selected)}</strong><span>{t.categoryFilteredPapers}</span></div>
-          <div><strong>{displayMaybe(counts.title_candidates || counts.venue_final_title_candidates || currentFindCounts.titleCandidates || counts.traceable_candidates || counts.survey_candidates)}</strong><span>{t.titleCandidatePapers}</span></div>
-          <div><strong>{displayMaybe(detailFetched)}</strong><span>{lang === "zh" ? "元数据详情" : "Metadata details"}</span></div>
-          <div><strong>{displayMaybe(evaluated)}</strong><span>{lang === "zh" ? "摘要评分完成" : "Abstract scored"}</span></div>
+          <div><strong>{displayMaybe(counts.raw_title_index_papers || counts.title_total_papers || counts.venue_corpus_audited_papers || counts.venue_total_papers_available || currentFindCounts.scanned || currentFindCounts.corpusAudited)}</strong><span>{t.rawTitleIndexPapers}</span></div>
+          <div><strong>{displayMaybe(categoryFilteredCount)}</strong><span>{t.categoryFilteredPapers}</span></div>
+          <div><strong>{displayMaybe(tfidfScreenedCount)}</strong><span>{t.tfidfScreenedPapers}</span></div>
+          <div><strong>{displayMaybe(titleScoredCount)}</strong><span>{t.titleScoredPapers}</span></div>
+          <div><strong>{displayMaybe(evaluated)}</strong><span>{t.abstractScoredPapers}</span></div>
           <div><strong>{displayMaybe(recommendedCount)}</strong><span>{t.strongRecommendations}</span></div>
         </div>
         {sourceLimitations.length > 0 && (
@@ -5914,7 +6021,7 @@ function App() {
             <div className="sourceStatus compactSourceStatus">
               {sourceLimitations.map((item: any, index: number) => (
                 <div className={String(item.status || "").includes("ok") ? "sourceRow ok" : "sourceRow fail"} key={`${item.source || item.venue || index}-${index}`}>
-                  <span>{displayMaybe(item.source || item.venue)}</span>
+                  <span>{sourceStatusLabel(item, venueById)}</span>
                   <small>{displayMaybe(item.status)} / {displayMaybe(item.count, "")} / {displayMaybe(item.message || item.reason)}</small>
                 </div>
               ))}
@@ -6182,15 +6289,16 @@ function App() {
       })
       .filter(Boolean);
     const latestReceipt = latestClaudeReceiptForStage(stage) as any;
+    const receiptStatusRaw = String(latestReceipt?.status || "completed");
+    const receiptStatusKey = receiptStatusRaw.toLowerCase().replace(/[-\s]+/g, "_");
+    const receiptStatusLabel = receiptStatusKey === "blocked_tool_policy"
+      ? (lang === "zh" ? "安全策略已拦截" : "Safely blocked")
+      : displayValue(receiptStatusRaw);
     const receiptRows = latestReceipt?.response_markdown ? [{
       id: latestReceipt?.session_id || `${stage}-claude-latest`,
-      status: displayValue(latestReceipt?.status || "completed"),
+      status: receiptStatusLabel,
       meta: [
         latestReceipt?.finished_at ? `${lang === "zh" ? "完成时间" : "finished"}=${formatDateMinute(latestReceipt.finished_at, lang) || latestReceipt.finished_at}` : "",
-        latestReceipt?.started_at ? `${lang === "zh" ? "开始时间" : "started"}=${formatDateMinute(latestReceipt.started_at, lang) || latestReceipt.started_at}` : "",
-        latestReceipt?.stage ? `${lang === "zh" ? "阶段" : "stage"}=${displayValue(latestReceipt.stage)}` : "",
-        latestReceipt?.return_code !== undefined && latestReceipt?.return_code !== "" ? `rc=${latestReceipt.return_code}` : "",
-        latestReceipt?.session_id ? `session=${latestReceipt.session_id}` : "",
       ].filter(Boolean).join(" / "),
       instruction: String(latestReceipt?.instruction || ""),
       response: publicLogText(String(latestReceipt?.response_markdown || ""), lang),
@@ -6263,13 +6371,13 @@ function App() {
                 ].filter(Boolean).join(" / ");
                 return <div className="guidanceReceipt" key={item.id || `${stage}-guidance-${index}`}>
                   <strong>{item.status}</strong>
-                  <small>{item.meta}</small>
+                  {item.meta ? <small>{item.meta}</small> : null}
                   <strong>{lang === "zh" ? "处理摘要" : "Processing summary"}</strong>
                   {item.response ? <pre>{publicLogText(item.response, lang)}</pre> : <p>{lang === "zh" ? "最近一次项目代理尚无处理摘要。" : "The latest project-agent turn has no processing summary yet."}</p>}
                   {item.fullResponseAvailable && (
                     <div className="receiptActions">
                       <button type="button" onClick={() => loadClaudeFullResponse(item.fullResponseKey, item.fullResponseStage || stage)} disabled={Boolean(fullState.loading)}>{fullState.loading ? (lang === "zh" ? "正在加载完整回复..." : "Loading full response...") : fullText ? (lang === "zh" ? "刷新完整项目代理回复" : "Refresh full project-agent response") : (lang === "zh" ? "查看完整项目代理回复" : "Show full project-agent response")}</button>
-                      {item.responseCharCount ? <small>{lang === "zh" ? `完整回复约 ${item.responseCharCount} 字符；页面会自动加载，按钮用于刷新。` : `Full response is about ${item.responseCharCount} chars; the page loads it automatically and the button refreshes it.`}</small> : null}
+                      {item.responseCharCount ? <small>{lang === "zh" ? `完整回复约 ${item.responseCharCount} 字符；点击按钮可查看或刷新。` : `Full response is about ${item.responseCharCount} chars; use the button to show or refresh it.`}</small> : null}
                     </div>
                   )}
                   {fullState.error && <p className="errorText">{fullState.error}</p>}
@@ -7067,7 +7175,7 @@ function App() {
                   <details className="metricCard">
                     <summary><strong>{lang === "zh" ? "高级" : "Advanced"}</strong><span>{lang === "zh" ? "环境选择证据" : "Environment selection evidence"}</span></summary>
                     <div className="detailList">
-                      <article className="detailItem"><p>{lang === "zh" ? "选择阶段" : "Selection stage"}</p><small>{displayMaybe(envStage?.selection?.selection_stage, t.noData)} / {displayMaybe(envStage?.selection?.selection_gate, t.noData)}</small></article>
+                      <article className="detailItem"><p>{lang === "zh" ? "选择状态" : "Selection status"}</p><small>{publicEnvironmentSelectionStatus(envStage?.selection, lang)}</small></article>
                       <article className="detailItem"><p>{lang === "zh" ? "数据集" : "Dataset"}</p><small>{displayMaybe(envStage?.dataset || envStage?.ready_datasets, t.noData)}</small></article>
                       <article className="detailItem"><p>{t.repoPathLabel}</p><small>{displayMaybe(envStage?.repo_path || activeRepo?.local_path, t.noData)}</small></article>
                       {envReferenceFullJob?.log_path && <article className="detailItem"><p>{lang === "zh" ? "参考复现日志" : "Reference reproduction log"}</p><small>{displayMaybe(envReferenceFullJob.log_path, t.noData)}</small></article>}

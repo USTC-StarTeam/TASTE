@@ -2435,13 +2435,13 @@ def test_current_find_selection_command_runs_full_takeover_until_content_ready(m
     monkeypatch.setattr(project_bridge, "PROJECTS", projects)
     monkeypatch.setattr(project_bridge, "management_python", lambda: "/opt/taste/python")
     monkeypatch.setattr(project_bridge, "_literature_recommendation_gate_is_blocked", lambda _project: False)
-    monkeypatch.setattr(project_bridge, "_current_find_pipeline_summary", lambda _root: {"content_ready": False, "readings": 0, "ideas": 0, "plans": 0})
+    monkeypatch.setattr(project_bridge, "_current_find_pipeline_summary", lambda _root, **_kwargs: {"content_ready": False, "readings": 0, "ideas": 0, "plans": 0})
 
     _project, cmd = project_bridge.build_command({"project": project, "action": "current-find-selection"})
 
     assert cmd[-1] == "--force"
 
-    monkeypatch.setattr(project_bridge, "_current_find_pipeline_summary", lambda _root: {"content_ready": True, "readings": 4, "ideas": 5, "plans": 5})
+    monkeypatch.setattr(project_bridge, "_current_find_pipeline_summary", lambda _root, **_kwargs: {"content_ready": True, "readings": 4, "ideas": 5, "plans": 5})
 
     _project, cmd = project_bridge.build_command({"project": project, "action": "current-find-selection"})
 
@@ -3179,13 +3179,13 @@ def test_find_survey_panel_stays_between_source_config_and_task_artifacts():
     survey_return_idx = app.index("return renderSurveyShell((", render_idx)
     source_heading_idx = app.index('data-testid="find-source-status-heading"', survey_return_idx)
     source_empty_idx = app.index('data-testid="find-source-status-empty"', survey_return_idx)
-    live_progress_idx = app.index("liveFindProgress", survey_return_idx)
     flow_grid_idx = app.index("surveyFlowGrid compactSurveyFlow", survey_return_idx)
     artifact_loading_idx = app.index("正在加载 Find 验收状态", survey_return_idx)
     task_heading_idx = app.index('data-testid="global-task-heading"')
     artifact_heading_idx = app.index('data-testid="global-artifact-heading"')
     survey_block = app[survey_return_idx:task_heading_idx]
-    assert source_heading_idx < source_empty_idx < live_progress_idx < flow_grid_idx < artifact_loading_idx < task_heading_idx < artifact_heading_idx
+    assert source_heading_idx < source_empty_idx < flow_grid_idx < artifact_loading_idx < task_heading_idx < artifact_heading_idx
+    assert "liveFindProgress" not in survey_block
     assert "data-testid=\"find-recommendation-list\"" not in survey_block
     assert "recommendationRows" not in survey_block
     assert "paperRecommendation findRecommendationItem" not in survey_block
@@ -4413,7 +4413,7 @@ def test_compact_project_summary_prioritizes_selected_plan_gate_over_stale_exper
         "ideas": 5,
         "plans": 5,
     }
-    monkeypatch.setattr(project_bridge, "_current_find_pipeline_summary", lambda _root: pipeline_contract)
+    monkeypatch.setattr(project_bridge, "_current_find_pipeline_summary", lambda _root, **_kwargs: pipeline_contract)
     monkeypatch.setattr(project_bridge, "_current_project_source_selection", lambda _project, _root: {"venue_ids": ["openreview_iclr_2026"], "years": [2026]})
     monkeypatch.setattr(project_bridge, "_pid_alive", lambda _pid: False)
     monkeypatch.setattr(project_bridge, "_remote_process_rows", lambda: [])
@@ -4469,7 +4469,7 @@ def test_compact_project_summary_prioritizes_current_find_idea_plan_block_over_s
         "plans": 0,
         "summary_zh": "当前 Find 后处理未通过 Claude 接管 gate：全文精读 1 篇、idea 0 个、plan 0 个。",
     }
-    monkeypatch.setattr(project_bridge, "_current_find_pipeline_summary", lambda _root: pipeline_contract)
+    monkeypatch.setattr(project_bridge, "_current_find_pipeline_summary", lambda _root, **_kwargs: pipeline_contract)
     monkeypatch.setattr(project_bridge, "_current_project_source_selection", lambda _project, _root: {"venue_ids": ["openreview_iclr_2026"], "years": [2026]})
     monkeypatch.setattr(project_bridge, "_pid_alive", lambda _pid: False)
     monkeypatch.setattr(project_bridge, "_remote_process_rows", lambda: [])
@@ -5019,6 +5019,50 @@ def test_repair_current_find_resets_stale_downstream_outputs(tmp_path, monkeypat
     assert ideas_payload["source"] == "pending_new_find_idea"
     assert plan_payload["status"] == "pending_current_find_read"
     assert "网页 Read" in (taste_dir / "read.md").read_text(encoding="utf-8")
+
+
+def test_abstract_translation_status_for_recommendations_uses_actual_rows():
+    translated = recommended_paper("paper-ok", "Translated Paper")
+    missing = {**recommended_paper("paper-missing", "Missing Translation Paper"), "abstract_zh": ""}
+
+    assert server._abstract_translation_status_for_recommendations([translated], "completed") == "completed"
+    assert server._abstract_translation_status_for_recommendations([missing], "completed") == "partial"
+    assert server._abstract_translation_status_for_recommendations([{"id": "paper-no-abstract", "title": "No Abstract"}], "completed") == "completed"
+
+
+def test_sync_current_find_projection_recomputes_partial_translation_status(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    run_root = tmp_path / "run"
+    (project_root / "state").mkdir(parents=True)
+    run_root.mkdir(parents=True)
+    write_json(
+        run_root / "find_progress.json",
+        {"abstract_translation_status": "completed", "recommendation_target_count": 2},
+    )
+    translated = recommended_paper("paper-ok", "Translated Paper")
+    missing = {**recommended_paper("paper-missing", "Missing Translation Paper"), "abstract_zh": ""}
+    find_results = {
+        "run_id": "find_translation",
+        "strong_recommendations": [translated, missing],
+        "scoring_runtime": {"abstract_translation_status": "completed", "recommendation_target_count": 2},
+        "recommendation_quality": {"status": "ok", "english_abstract_fallback_count": 0},
+        "diagnostics": {"recommendation_quality": {"status": "ok", "english_abstract_fallback_count": 0}},
+    }
+    monkeypatch.setattr(server, "_find_artifact_run_dir_for_project", lambda _root, _run_id: run_root)
+
+    projection = server._sync_current_find_projection(project_root, "find_translation", find_results, "test")
+
+    assert projection["abstract_translation_status"] == "partial"
+    assert find_results["abstract_translation_status"] == "partial"
+    assert find_results["scoring_runtime"]["abstract_translation_status"] == "partial"
+    assert projection["missing_recommendation_abstract_zh"] == [{"rank": "2", "id": "paper-missing", "title": "Missing Translation Paper"}]
+    quality = find_results["recommendation_quality"]
+    assert quality["missing_chinese_abstract_count"] == 1
+    assert quality["english_abstract_fallback_count"] == 1
+    assert quality["missing_chinese_abstract_ids"] == ["paper-missing"]
+    assert quality["status"] == "ok_with_translation_todo"
+    assert find_results["scoring_runtime"]["recommendation_quality"] == quality
+    assert find_results["diagnostics"]["recommendation_quality"] == quality
 
 
 def test_find_adoption_gate_reads_progress_when_result_has_only_artifact_counts(tmp_path, monkeypatch):
@@ -6386,7 +6430,7 @@ def test_current_find_selection_result_exposes_current_find_blocker(tmp_path, mo
     monkeypatch.setattr(project_bridge, "upsert_agent", lambda *args, **kwargs: None)
     monkeypatch.setattr(project_bridge, "append_agent_log", lambda *args, **kwargs: None)
     monkeypatch.setattr(project_bridge, "project_summary", lambda project: {"status": "stale_full_research_cycle_snapshot", "summary": "旧实验门控摘要"})
-    monkeypatch.setattr(project_bridge, "_current_find_pipeline_summary", lambda root: pipeline)
+    monkeypatch.setattr(project_bridge, "_current_find_pipeline_summary", lambda root, **_kwargs: pipeline)
     progress_events = []
 
     result = project_bridge.run_action(

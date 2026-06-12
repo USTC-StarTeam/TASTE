@@ -473,12 +473,15 @@ def _latest_find_run_id_from_runs() -> str:
 
 
 def _current_find_run_id_from_state(root: Path) -> str:
+    # Prefer small state/progress files. find_results.json can be multi-MB and
+    # compact project summaries call this helper several times per refresh.
     for rel in [
-        ("planning", "finding", "find_results.json"),
         ("planning", "finding", "find_progress.json"),
         ("state", "current_find_recommendation_projection.json"),
         ("state", "current_find_research_plan.json"),
         ("state", "literature_tool_packet.json"),
+        ("state", "finding_frontend.json"),
+        ("planning", "finding", "find_results.json"),
     ]:
         payload = _read_json(root.joinpath(*rel), {})
         if not isinstance(payload, dict):
@@ -566,8 +569,14 @@ def _current_find_results_light(root: Path, project_id: str = "") -> dict[str, A
                 "venue_corpus_audited_papers",
                 "venue_category_selected_papers",
                 "category_corpus_audited_papers",
+                "category_filtered_papers",
+                "tfidf_screened_papers",
                 "venue_title_filter_input_papers",
+                "title_score_input_papers",
+                "llm_title_scored_papers",
                 "venue_final_title_candidates",
+                "abstract_scored_papers",
+                "recommended_papers",
                 "venue_detail_fetched_candidates",
                 "venue_evaluated_candidates",
                 "llm_scored_candidates",
@@ -1313,6 +1322,22 @@ def _read_local_venue_cache_manifest(venue_id: str, year: int) -> dict[str, Any]
     return {}
 
 
+
+def _venue_display_name_from_catalog(venue_id: Any) -> str:
+    text = str(venue_id or "").strip()
+    if not text:
+        return "venue"
+    try:
+        from auto_research.auto_find.catalog import catalog_by_id
+        venue = catalog_by_id().get(text) or {}
+    except Exception:
+        venue = {}
+    name = str(venue.get("name") or "").strip()
+    if name:
+        return name
+    return text
+
+
 def _current_verified_venue_metadata_rows(project_id: str, root: Path | None = None, selection: Any = None) -> list[dict[str, Any]]:
     root = root or (PROJECTS / project_id)
     source_selection = normalize_source_selection(selection) if isinstance(selection, dict) else _current_project_source_selection(project_id, root)
@@ -1336,12 +1361,13 @@ def _current_verified_venue_metadata_rows(project_id: str, root: Path | None = N
                 break
             if manifest and effective_years:
                 break
+        venue_display_name = _venue_display_name_from_catalog(venue_id)
         if not manifest:
             rows.append({
-                "source": str(venue_id),
+                "source": venue_display_name,
                 "source_kind": "venue",
                 "venue_id": str(venue_id),
-                "venue": str(venue_id),
+                "venue": venue_display_name,
                 "ok": False,
                 "limited": True,
                 "count": 0,
@@ -1379,11 +1405,12 @@ def _current_verified_venue_metadata_rows(project_id: str, root: Path | None = N
             f"metadata={manifest.get('metadata_completeness_status') or 'unknown'}",
             f"category={category_status}",
         ]
+        venue_display_name = str(manifest.get("venue") or "").strip() or _venue_display_name_from_catalog(venue_id)
         rows.append({
-            "source": manifest.get("venue") or str(venue_id),
+            "source": venue_display_name,
             "source_kind": "venue",
             "venue_id": str(venue_id),
-            "venue": manifest.get("venue") or str(venue_id),
+            "venue": venue_display_name,
             "ok": bool(paper_count > 0),
             "limited": bool(manifest.get("metadata_completeness_limited") or not manifest.get("metadata_completeness_ok")),
             "count": title_filter_input,
@@ -1993,6 +2020,31 @@ def _find_summary_from_payload(payload: Any) -> dict[str, Any]:
         or _as_int(survey_stats.get("venue_title_filter_input_papers"))
         or sum(_as_int((row if isinstance(row, dict) else {}).get("title_filter_input_papers")) for row in title_rows)
     )
+    category_filtered_count = (
+        _as_int(counts.get("category_filtered_papers"))
+        or _as_int(survey_stats.get("category_filtered_papers"))
+        or sum(_as_int((row if isinstance(row, dict) else {}).get("category_filtered_papers")) for row in title_rows)
+        or title_filter_input_count
+        or category_selected_count
+        or raw_title_index_count
+    )
+    tfidf_screened_count = (
+        _as_int(counts.get("tfidf_screened_papers"))
+        or _as_int(survey_stats.get("tfidf_screened_papers"))
+        or sum(_as_int((row if isinstance(row, dict) else {}).get("tfidf_screened_papers")) for row in title_rows)
+        or title_filter_input_count
+        or category_filtered_count
+    )
+    title_score_input_count = (
+        _as_int(counts.get("title_score_input_papers"))
+        or _as_int(survey_stats.get("title_score_input_papers"))
+        or sum(_as_int((row if isinstance(row, dict) else {}).get("title_score_input_papers")) for row in title_rows)
+    )
+    llm_title_scored_count = (
+        _as_int(counts.get("llm_title_scored_papers"))
+        or _as_int(survey_stats.get("llm_title_scored_papers"))
+        or sum(_as_int((row if isinstance(row, dict) else {}).get("llm_title_scored_papers")) for row in title_rows)
+    )
     title_candidate_count = (
         _as_int(counts.get("title_candidates"))
         or _as_int(counts.get("venue_final_title_candidates"))
@@ -2014,7 +2066,9 @@ def _find_summary_from_payload(payload: Any) -> dict[str, Any]:
     final_llm_scoring_skipped_count = _as_int(counts.get("final_llm_scoring_skipped_candidates")) or _as_int(survey_stats.get("final_llm_scoring_skipped_candidates"))
     evaluated_count = _as_int(counts.get("evaluated_candidates")) or _count_json_value(data.get("evaluated_candidates"))
     llm_scored_count = (
-        _as_int(counts.get("llm_scored_candidates"))
+        _as_int(counts.get("abstract_scored_papers"))
+        or _as_int(counts.get("llm_scored_candidates"))
+        or _as_int(survey_stats.get("abstract_scored_papers"))
         or _as_int(survey_stats.get("llm_scored_candidates"))
         or sum(1 for row in _rows(data.get("evaluated_candidates")) if isinstance(row, dict) and str(row.get("reason_source") or "") == "llm abstract evaluation")
     )
@@ -2027,13 +2081,18 @@ def _find_summary_from_payload(payload: Any) -> dict[str, Any]:
         "venue_corpus_audited_papers": raw_title_index_count,
         "venue_category_selected_papers": category_selected_count,
         "category_selected_papers": category_selected_count,
+        "category_filtered_papers": category_filtered_count,
+        "tfidf_screened_papers": tfidf_screened_count,
         "venue_title_filter_input_papers": title_filter_input_count,
+        "title_score_input_papers": title_score_input_count,
+        "llm_title_scored_papers": llm_title_scored_count,
         "title_candidates": title_candidate_count,
         "venue_final_title_candidates": venue_final_title_candidate_count,
         "detail_fetched": detail_fetched_count,
         "venue_detail_fetched_candidates": detail_fetched_count,
         "evaluated_candidates": evaluated_count,
-        "llm_scored_candidates": llm_scored_count or evaluated_count,
+        "abstract_scored_papers": llm_scored_count,
+        "llm_scored_candidates": llm_scored_count,
         "abstract_fetch_failed_candidates": abstract_fetch_failed_count,
         "final_llm_scoring_skipped_candidates": final_llm_scoring_skipped_count,
         "screened_ranking": _count_json_value(data.get("screened_ranking")),
@@ -2832,7 +2891,7 @@ def _current_find_plan_summary(root: Path) -> dict[str, Any]:
 
 def _taste_pair_status(project_root: Path) -> dict[str, Any]:
     compare_root = ROOT / "tmp" / "taste_compare"
-    current_find = _read_json(project_root / "planning" / "finding" / "find_results.json", {})
+    current_find = _current_find_results_light(project_root, project_root.name)
     comparison = _read_json(compare_root / "comparison.json", {})
     runs: list[dict[str, Any]] = []
     for index in [1, 2]:
@@ -5442,14 +5501,19 @@ def _light_find_survey_from_progress(project_dir: Path) -> dict[str, Any]:
             "venue_corpus_audited_papers": counts.get("venue_corpus_audited_papers") or counts.get("raw_title_index_papers") or counts.get("raw_title_index") or 0,
             "venue_category_selected_papers": counts.get("venue_category_selected_papers") or counts.get("category_selected_papers") or 0,
             "category_selected_papers": counts.get("category_selected_papers") or counts.get("venue_category_selected_papers") or 0,
+            "category_filtered_papers": counts.get("category_filtered_papers") or counts.get("venue_title_filter_input_papers") or 0,
+            "tfidf_screened_papers": counts.get("tfidf_screened_papers") or counts.get("category_filtered_papers") or counts.get("venue_title_filter_input_papers") or 0,
             "venue_title_filter_input_papers": counts.get("venue_title_filter_input_papers") or 0,
+            "title_score_input_papers": counts.get("title_score_input_papers") or 0,
+            "llm_title_scored_papers": counts.get("llm_title_scored_papers") or 0,
             "title_candidates": counts.get("title_candidates") or counts.get("venue_final_title_candidates") or 0,
             "venue_final_title_candidates": counts.get("venue_final_title_candidates") or counts.get("title_candidates") or 0,
             "traceable_candidates": counts.get("traceable_candidates") or counts.get("title_candidates") or counts.get("venue_final_title_candidates") or 0,
             "detail_fetched": counts.get("detail_fetched") or counts.get("venue_detail_fetched_candidates") or 0,
             "venue_detail_fetched_candidates": counts.get("venue_detail_fetched_candidates") or counts.get("detail_fetched") or 0,
             "evaluated_candidates": counts.get("evaluated_candidates") or 0,
-            "llm_scored_candidates": counts.get("llm_scored_candidates") or counts.get("evaluated_candidates") or 0,
+            "abstract_scored_papers": counts.get("abstract_scored_papers") or counts.get("llm_scored_candidates") or 0,
+            "llm_scored_candidates": counts.get("llm_scored_candidates") or counts.get("abstract_scored_papers") or 0,
             "abstract_fetch_failed_candidates": counts.get("abstract_fetch_failed_candidates") or 0,
             "final_llm_scoring_skipped_candidates": counts.get("final_llm_scoring_skipped_candidates") or 0,
             "strong_recommendations": strong_count,
@@ -9498,9 +9562,9 @@ def _current_find_reading_validation(find_results: dict[str, Any], readings: lis
     }
 
 
-def _current_find_pipeline_summary(root: Path) -> dict[str, Any]:
+def _current_find_pipeline_summary(root: Path, find_results: dict[str, Any] | None = None) -> dict[str, Any]:
     taste_dir = root / "planning" / "finding"
-    find_results = _current_find_results_light(root, root.name)
+    find_results = find_results if isinstance(find_results, dict) else _current_find_results_light(root, root.name)
     read_results = _read_json(taste_dir / "read_results.json", {})
     ideas_results = _read_json(taste_dir / "ideas.json", {})
     plans_results = _read_json(taste_dir / "plans.json", {})
@@ -9592,7 +9656,7 @@ def _current_find_pipeline_summary(root: Path) -> dict[str, Any]:
     ]
     ideas_ready = bool(current_idea_artifact and ideas and (approved_ideas or persisted_selected_plan_id))
     plans_ready = bool(current_plan_artifact and plans and (plans_for_approved_ideas or persisted_selected_plan_id))
-    selected_execution = _current_find_selected_execution_summary(root)
+    selected_execution = _current_find_selected_execution_summary(root) if readings else {}
     selected_plan_id = str(selected_execution.get("selected_plan_id") or "").strip()
     selected_idea_id = str(selected_execution.get("selected_idea_id") or "").strip()
     selected_execution_issue = str(selected_execution.get("selection_issue") or selected_execution.get("failure_type") or "").strip()
@@ -9717,11 +9781,67 @@ def _current_find_pipeline_summary(root: Path) -> dict[str, Any]:
         and recommendation_quality_ok
         and (read_candidate_count in {0, recommendation_count})
     )
+
+    def full_text_packet_coverage(rows: list[dict[str, Any]]) -> tuple[int, list[str], list[str]]:
+        packet = _read_json(taste_dir / "full_text_reading" / "full_text_packet.json", {})
+        if not isinstance(packet, dict) or not _payload_matches_current_run(packet, run_id):
+            return 0, [], [str(row.get("title") or row.get("paper_title") or "Untitled") for row in rows]
+        index: dict[str, dict[str, Any]] = {}
+        for entry in _json_rows(packet.get("papers", [])):
+            if not isinstance(entry, dict):
+                continue
+            for identity in _identity_values(entry):
+                index[identity] = entry
+        covered: list[str] = []
+        missing: list[str] = []
+        for row in rows:
+            title = str(row.get("title") or row.get("paper_title") or "Untitled").strip()
+            entry = next((index[key] for key in _identity_values(row) if key in index), {})
+            if entry and _has_full_text_locator(entry) and _full_text_evidence_chars(entry) >= FULL_TEXT_MIN_CHARS:
+                covered.append(title)
+            else:
+                missing.append(title)
+        return len(covered), covered, missing
+
+    packet_evidence_count, packet_evidence_titles, packet_missing_titles = full_text_packet_coverage(recommendation_rows)
+    full_text_packet_ready = bool(recommendation_count and packet_evidence_count >= recommendation_count and not packet_missing_titles)
+    if full_text_packet_ready and not readings:
+        validation = dict(validation)
+        validation.update({
+            "status": "current_find_full_text_evidence_ready_pending_claude_deep_read",
+            "preflight": "before_current_find_claude_takeover",
+            "full_text_evidence_count": packet_evidence_count,
+            "full_text_evidence_titles": packet_evidence_titles[:12],
+            "pending_without_evidence_count": 0,
+            "pending_without_evidence_titles": [],
+            "pending_full_text_reading_count": 0,
+            "pending_full_text_reading_titles": [],
+            "blockers": [
+                str(item)
+                for item in validation.get("blockers", [])
+                if "full-text evidence" not in str(item).lower() and "全文证据" not in str(item)
+            ],
+        })
+        pending_without_evidence = 0
+        pending_full_text = 0
+        full_text_evidence_count = packet_evidence_count
+    read_gate_ready = bool(
+        run_id
+        and recommendation_count > 0
+        and recommendation_shortfall == 0
+        and (read_candidate_count in {0, recommendation_count})
+    )
     pending_current_find_read = bool(
-        state_plan_matches
-        and not readings
-        and recommendation_gate_ready
-        and (state_status == "pending_current_find_read" or state_next_action == "run_read_for_current_find")
+        not readings
+        and read_gate_ready
+        and (
+            full_text_packet_ready
+            or (
+                state_plan_matches
+                and recommendation_gate_ready
+                and (state_status == "pending_current_find_read" or state_next_action == "run_read_for_current_find")
+            )
+        )
     )
     if pending_current_find_read:
         blockers = ["current Find recommendation gate passed; Read stage has not run yet"]
@@ -10242,7 +10362,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     read_results = raw_read_results if same_current_run_payload(raw_read_results) else {}
     ideas_results = raw_ideas_results if same_current_run_payload(raw_ideas_results) else {}
     plans_results = raw_plans_results if same_current_run_payload(raw_plans_results) else {}
-    pipeline_contract = safe_dict(_current_find_pipeline_summary(root))
+    pipeline_contract = safe_dict(_current_find_pipeline_summary(root, find_results=find_results))
     read_count = int(pipeline_contract.get("readings") or pipeline_contract.get("reading_count") or len(safe_list(read_results.get("readings"))) or (current_plan.get("current_find_reading_count") if same_current_run_payload(current_plan) else 0) or 0)
     idea_count = int(pipeline_contract.get("ideas") or pipeline_contract.get("idea_count") or len(safe_list(ideas_results.get("ideas"))) or (current_plan.get("current_find_idea_count") if same_current_run_payload(current_plan) else 0) or 0)
     plan_count = int(pipeline_contract.get("plans") or pipeline_contract.get("plan_count") or len(safe_list(plans_results.get("plans"))) or (current_plan.get("current_find_plan_count") if same_current_run_payload(current_plan) else 0) or 0)
@@ -10625,7 +10745,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         targeted_queries = []
         targeted_query_count = 0
         targeted_tool_status = {}
-    pipeline_state = safe_dict(_current_find_pipeline_summary(root))
+    pipeline_state = safe_dict(_current_find_pipeline_summary(root, find_results=find_results))
     pipeline_validation = safe_dict(pipeline_state.get("reading_validation"))
     pipeline_content_ready = bool(pipeline_state.get("content_ready") or pipeline_state.get("read_idea_plan_ready"))
     selected_execution = safe_dict(pipeline_state.get("selected_execution")) if pipeline_content_ready else {}
@@ -11435,7 +11555,7 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
 
     venue = _display_venue(cfg.get('target_venue') or cfg.get('venue') or '') if isinstance(cfg, dict) else ''
     topic = str(cfg.get('topic') or cfg.get('title') or project) if isinstance(cfg, dict) else project
-    pipeline_contract = safe_dict(_current_find_pipeline_summary(root))
+    pipeline_contract = safe_dict(_current_find_pipeline_summary(root, find_results=find_results))
     read_count = int((pipeline_contract.get('readings') or pipeline_contract.get('reading_count') or count_payload(read_results, 'readings') or current_plan.get('current_find_reading_count') or 0))
     idea_count = int((pipeline_contract.get('ideas') or pipeline_contract.get('idea_count') or count_payload(ideas_results, 'ideas') or current_plan.get('current_find_idea_count') or 0))
     plan_count = int((pipeline_contract.get('plans') or pipeline_contract.get('plan_count') or count_payload(plans_results, 'plans') or current_plan.get('current_find_plan_count') or 0))
@@ -13048,9 +13168,37 @@ def _full_cycle_llm_readiness_block(project: str, env: dict[str, str], payload: 
         return None
     state_dir = PROJECTS / project / "state"
     started_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    probe_env = dict(env)
+    project_cfg = _read_json(PROJECTS / project / "project.json", {})
+    project_llm = project_cfg.get("llm", {}) if isinstance(project_cfg, dict) and isinstance(project_cfg.get("llm"), dict) else {}
+    taste_cfg = _read_json(CONFIG_PATH, {})
+    if not isinstance(taste_cfg, dict):
+        taste_cfg = {}
+    api_key_env = str(probe_env.get("LLM_API_KEY_ENV") or project_llm.get("api_key_env") or "OPENAI_API_KEY")
+    api_key = (
+        str(probe_env.get(api_key_env) or "")
+        or str(probe_env.get("LLM_API_KEY") or "")
+        or str(project_llm.get("api_key") or "")
+        or str(taste_cfg.get("api_key") or "")
+    )
+    if api_key_env:
+        probe_env["LLM_API_KEY_ENV"] = api_key_env
+    if api_key:
+        probe_env["LLM_API_KEY"] = api_key
+        if api_key_env:
+            probe_env[api_key_env] = api_key
+    env_defaults = {
+        "LLM_API_BASE": project_llm.get("api_base") or taste_cfg.get("api_base") or taste_cfg.get("base_url"),
+        "LLM_MODEL": project_llm.get("model") or taste_cfg.get("model"),
+        "LLM_PROVIDER": project_llm.get("provider") or taste_cfg.get("provider"),
+        "LLM_API_MODE": project_llm.get("api_mode") or taste_cfg.get("api_mode"),
+    }
+    for env_key, value in env_defaults.items():
+        if value and not probe_env.get(env_key):
+            probe_env[env_key] = str(value)
     cmd = [management_python(), str(SCRIPTS / "check_llm_ready.py"), "--project", project, "--live"]
     try:
-        proc = subprocess.run(cmd, cwd=str(ROOT), env=env, text=True, capture_output=True, timeout=90)
+        proc = subprocess.run(cmd, cwd=str(ROOT), env=probe_env, text=True, capture_output=True, timeout=90)
     except subprocess.TimeoutExpired as exc:
         stdout_tail = str(exc.stdout or "")[-2000:]
         stderr_tail = str(exc.stderr or "")[-2000:]
