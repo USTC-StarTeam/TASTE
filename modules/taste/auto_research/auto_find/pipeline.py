@@ -2830,7 +2830,13 @@ Rules:
             # Parallel LLM calls complete out of order and are sorted before processing;
             # keep the progress counter monotonic instead of replaying batch indexes.
             result_progress_current = batch_index if workers == 1 else len(batches)
-            progress("llm_title_filter", result_progress_current, len(batches), f"{venue_name}: title batch {batch_index}/{len(batches)}, scored {len(scored_rows)}, workers {workers}")
+            progress(
+                "llm_title_filter",
+                result_progress_current,
+                len(batches),
+                f"{venue_name}: title batch {batch_index}/{len(batches)}, scored {len(scored_rows)}, workers {workers}",
+                count_updates={"llm_title_scored_papers": len(scored_rows)},
+            )
         if interest:
             for item in scanned:
                 _apply_topic_evidence_guard(item, interest)
@@ -5384,7 +5390,11 @@ def run_find(
         return progress_payload
 
     def _persist_find_progress(phase: str, extra: dict | None = None) -> None:
-        progress_payload = _find_progress_payload(phase, extra)
+        extra_payload = dict(extra or {})
+        count_updates = extra_payload.pop("count_updates", None)
+        progress_payload = _find_progress_payload(phase, extra_payload)
+        if isinstance(count_updates, dict):
+            progress_payload.setdefault("counts", {}).update({key: value for key, value in count_updates.items() if value not in (None, "")})
         write_json(run_dir / "find_progress.json", progress_payload)
         write_json(run_dir / "venue_health_report.json", {"run_id": run_id, "results": venue_health_report})
         write_json(run_dir / "category_scan_report.json", {"run_id": run_id, "results": category_scan_report})
@@ -5392,7 +5402,7 @@ def run_find(
         status_rows = progress_payload["source_status"]
         write_text(run_dir / "source_status.md", _status_markdown(status_rows, title=f"Source Status ({phase})"))
 
-    def _progress(phase: str, current: int, total: int, message: str) -> None:
+    def _progress(phase: str, current: int, total: int, message: str, count_updates: dict | None = None) -> None:
         progress(phase, current, total, message)
         live_phases = {
             "venue_title_index", "title_prefilter", "llm_title_filter", "detail_fetch", "detail_enrichment",
@@ -5412,7 +5422,8 @@ def run_find(
                         "total": max(0, int(total or 0)),
                         "percent": max(0, min(100, int(round((float(current or 0) / float(total)) * 100)))) if total else 0,
                         "message": str(message or phase),
-                    }
+                    },
+                    "count_updates": count_updates or {},
                 })
 
     # Venue sources should be scanned fully by default. max_fetch_papers only
