@@ -209,6 +209,10 @@ const SCIENCE_JOURNAL_NAMES = Object.fromEntries([...SCIENCE_JOURNALS, ...SCIENC
 
 type Tab = "find" | "read" | "ideas" | "plan" | "environment" | "experiment" | "paperWrite";
 type Lang = "zh" | "en";
+type ArtifactPanelSnapshot = { runId: string; artifacts: Artifact[] };
+
+const FIND_RUN_ARTIFACT_TABS: Tab[] = ["find", "read", "ideas", "plan"];
+
 
 function isFallbackPaper(paper: any) {
   const source = String(paper?.reason_source || "").toLowerCase();
@@ -3310,6 +3314,16 @@ function artifactVisibleForTab(artifact: any, tab: Tab) {
   return true;
 }
 
+function artifactListSignature(items: any[]) {
+  return asArray(items).map((artifact: any) => {
+    const content = artifact?.content;
+    const contentSize = typeof content === "string"
+      ? content.length
+      : JSON.stringify(content ?? "").length;
+    return [artifact?.name || "", artifact?.path || "", artifact?.kind || "", contentSize].join(":");
+  }).join("|");
+}
+
 type ClaudePanelStage = "environment" | "experiment" | "paper";
 
 function normalizeClaudePanelStage(value: any): ClaudePanelStage | "" {
@@ -3462,6 +3476,7 @@ function App() {
   const [rawProjectArtifacts, setRawProjectArtifacts] = useState<Record<string, boolean>>({});
   const [runId, setRunId] = useState("");
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [lastVisibleRunArtifactsByTab, setLastVisibleRunArtifactsByTab] = useState<Partial<Record<Tab, ArtifactPanelSnapshot>>>({});
   const [currentFindArtifacts, setCurrentFindArtifacts] = useState<Artifact[]>([]);
   const [activeFindArtifacts, setActiveFindArtifacts] = useState<Artifact[]>([]);
   const [currentFindArtifactsLoading, setCurrentFindArtifactsLoading] = useState(false);
@@ -3490,6 +3505,8 @@ function App() {
   const userSelectedRunRef = useRef(false);
   const currentFindArtifactsInFlightRef = useRef("");
   const activeFindArtifactsInFlightRef = useRef("");
+  const fallbackRunArtifactsInFlightRef = useRef("");
+  const fallbackRunArtifactCacheRef = useRef<Record<string, Artifact[]>>({});
   const frontendVersionRef = useRef("");
   const [error, setError] = useState("");
   const [savingConfig, setSavingConfig] = useState(false);
@@ -3753,6 +3770,9 @@ function App() {
     setSelectedPapers([]);
     setPlanIdeaIds([]);
     setActiveProjectArtifact("");
+    setLastVisibleRunArtifactsByTab({});
+    fallbackRunArtifactsInFlightRef.current = "";
+    fallbackRunArtifactCacheRef.current = {};
     try {
       const summary = await getProject(id, { compact: true });
       if (activeProjectRef.current !== id) return;
@@ -4816,23 +4836,21 @@ function App() {
   const currentProjectFindMarkdownArtifacts = useMemo(() => currentFindArtifacts.filter((a) => a.kind === "markdown" && !HIDDEN_RUN_ARTIFACTS.has(a.name)), [currentFindArtifacts]);
   const researchArtifacts = useMemo(() => asArray(researchSummary?.artifacts), [researchSummary]);
   const visibleRunArtifacts = useMemo(() => {
-    const findRunTabs: Tab[] = ["find", "read", "ideas", "plan"];
     const showStableCurrentFindArtifacts = Boolean(
-      findRunTabs.includes(tab)
+      FIND_RUN_ARTIFACT_TABS.includes(tab)
       && currentProjectFindRunId
       && currentProjectFindMarkdownArtifacts.length > 0
       && (viewingActiveIncompleteFindRun || (!viewingSelectedHistoricalFindRun && viewingCurrentProjectFindRun))
     );
     const sourceArtifacts = showStableCurrentFindArtifacts ? currentProjectFindMarkdownArtifacts : selectedRunArtifacts;
     const sourceRunId = showStableCurrentFindArtifacts ? currentProjectFindRunId : runId;
-    if (!findRunTabs.includes(tab) && String(runId || "").startsWith("find_")) return [];
+    if (!FIND_RUN_ARTIFACT_TABS.includes(tab) && String(runId || "").startsWith("find_")) return [];
     return sourceArtifacts
       .filter((artifact) => artifactBelongsToCurrentFindRun(artifact, sourceRunId))
       .filter((artifact) => artifactVisibleForTab(artifact, tab));
   }, [currentProjectFindMarkdownArtifacts, currentProjectFindRunId, selectedRunArtifacts, runId, tab, viewingActiveIncompleteFindRun, viewingCurrentProjectFindRun, viewingSelectedHistoricalFindRun]);
-  const renderedRunArtifactsRunId = useMemo(() => {
-    const findRunTabs: Tab[] = ["find", "read", "ideas", "plan"];
-    if (findRunTabs.includes(tab) && currentProjectFindRunId && currentProjectFindMarkdownArtifacts.length > 0 && (viewingActiveIncompleteFindRun || (!viewingSelectedHistoricalFindRun && viewingCurrentProjectFindRun))) return currentProjectFindRunId;
+  const visibleRunArtifactsRunId = useMemo(() => {
+    if (FIND_RUN_ARTIFACT_TABS.includes(tab) && currentProjectFindRunId && currentProjectFindMarkdownArtifacts.length > 0 && (viewingActiveIncompleteFindRun || (!viewingSelectedHistoricalFindRun && viewingCurrentProjectFindRun))) return currentProjectFindRunId;
     return runId;
   }, [currentProjectFindMarkdownArtifacts.length, currentProjectFindRunId, runId, tab, viewingActiveIncompleteFindRun, viewingCurrentProjectFindRun, viewingSelectedHistoricalFindRun]);
   const claudeStatus = useMemo(() => researchSummary?.claude_status || researchSummary?.state?.claude_status || {}, [researchSummary]);
@@ -5659,22 +5677,21 @@ function App() {
       return haystack.includes(query);
     });
   }, [venues, venueQuery]);
-  const renderedRunArtifacts = useMemo(() => visibleRunArtifacts, [visibleRunArtifacts]);
-  const renderedRunArtifactsSignature = useMemo(() => renderedRunArtifacts.map((artifact) => {
-    const content = artifact?.content;
-    const contentSize = typeof content === "string"
-      ? content.length
-      : JSON.stringify(content ?? "").length;
-    return [artifact?.name || "", artifact?.path || "", artifact?.kind || "", contentSize].join(":");
-  }).join("|"), [renderedRunArtifacts]);
+  const visibleRunArtifactsSignature = useMemo(() => artifactListSignature(visibleRunArtifacts), [visibleRunArtifacts]);
+  const stableRunArtifactsForTab = lastVisibleRunArtifactsByTab[tab];
+  const renderedRunArtifacts = useMemo(() => (
+    visibleRunArtifacts.length ? visibleRunArtifacts : (stableRunArtifactsForTab?.artifacts || [])
+  ), [stableRunArtifactsForTab, visibleRunArtifacts]);
+  const renderedRunArtifactsRunId = visibleRunArtifacts.length
+    ? visibleRunArtifactsRunId
+    : String(stableRunArtifactsForTab?.runId || visibleRunArtifactsRunId || "");
+  const renderedRunArtifactsSignature = useMemo(() => artifactListSignature(renderedRunArtifacts), [renderedRunArtifacts]);
   const artifactPanelLoading = useMemo(() => {
-    const findRunTabs: Tab[] = ["find", "read", "ideas", "plan"];
-    return Boolean(runArtifactsLoading || (findRunTabs.includes(tab) && (currentFindArtifactLoading || !jobsLoaded)));
+    return Boolean(runArtifactsLoading || (FIND_RUN_ARTIFACT_TABS.includes(tab) && (currentFindArtifactLoading || !jobsLoaded)));
   }, [currentFindArtifactLoading, jobsLoaded, runArtifactsLoading, tab]);
   const showRunArtifactPanel = useMemo(() => {
-    const findRunTabs: Tab[] = ["find", "read", "ideas", "plan"];
     if (renderedRunArtifacts.length) return true;
-    if (findRunTabs.includes(tab)) return true;
+    if (FIND_RUN_ARTIFACT_TABS.includes(tab)) return true;
     return Boolean(runId && !String(runId).startsWith("find_"));
   }, [renderedRunArtifacts.length, runId, tab]);
   const venueById = useMemo(() => venueMapWithAliases(venues), [venues]);
@@ -5694,8 +5711,54 @@ function App() {
   const hiddenAvailableVenueCount = Math.max(0, Math.min(availableVenues.length, 300) - visibleAvailableVenues.length);
   const currentArtifact = useMemo(() => {
     if (!renderedRunArtifacts.length) return undefined;
-    return renderedRunArtifacts.find((artifact) => artifact.name === activeArtifact);
+    return renderedRunArtifacts.find((artifact) => artifact.name === activeArtifact) || renderedRunArtifacts[0];
   }, [renderedRunArtifacts, activeArtifact]);
+
+  useEffect(() => {
+    if (!FIND_RUN_ARTIFACT_TABS.includes(tab)) return;
+    if (!visibleRunArtifacts.length || !visibleRunArtifactsRunId) return;
+    setLastVisibleRunArtifactsByTab((prev) => {
+      const current = prev[tab];
+      if (current?.runId === visibleRunArtifactsRunId && artifactListSignature(current.artifacts) === visibleRunArtifactsSignature) return prev;
+      return { ...prev, [tab]: { runId: visibleRunArtifactsRunId, artifacts: visibleRunArtifacts } };
+    });
+  }, [tab, visibleRunArtifacts, visibleRunArtifactsRunId, visibleRunArtifactsSignature]);
+
+  useEffect(() => {
+    if (!FIND_RUN_ARTIFACT_TABS.includes(tab)) return;
+    if (visibleRunArtifacts.length || lastVisibleRunArtifactsByTab[tab]?.artifacts?.length) return;
+    const candidateRunIds = projectRuns.map((run) => String(run.run_id || "").trim()).filter(Boolean);
+    if (!candidateRunIds.length) return;
+    const requestKey = `${researchProject}:${tab}:${candidateRunIds.join("|")}`;
+    if (fallbackRunArtifactsInFlightRef.current === requestKey) return;
+    let cancelled = false;
+    fallbackRunArtifactsInFlightRef.current = requestKey;
+    const loadFallback = async () => {
+      for (const candidateRunId of candidateRunIds) {
+        let candidateArtifacts = fallbackRunArtifactCacheRef.current[candidateRunId];
+        if (!candidateArtifacts) {
+          const data = await getArtifacts(candidateRunId, { light: true });
+          candidateArtifacts = data.artifacts;
+          fallbackRunArtifactCacheRef.current = { ...fallbackRunArtifactCacheRef.current, [candidateRunId]: candidateArtifacts };
+        }
+        if (cancelled) return;
+        const visible = asArray(candidateArtifacts)
+          .filter((artifact: any) => artifact.kind === "markdown" && !HIDDEN_RUN_ARTIFACTS.has(artifact.name))
+          .filter((artifact: any) => artifactBelongsToCurrentFindRun(artifact, candidateRunId))
+          .filter((artifact: any) => artifactVisibleForTab(artifact, tab));
+        if (visible.length) {
+          setLastVisibleRunArtifactsByTab((prev) => ({ ...prev, [tab]: { runId: candidateRunId, artifacts: visible } }));
+          return;
+        }
+      }
+    };
+    void loadFallback().finally(() => {
+      if (fallbackRunArtifactsInFlightRef.current === requestKey) fallbackRunArtifactsInFlightRef.current = "";
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [lastVisibleRunArtifactsByTab, projectRuns, researchProject, tab, visibleRunArtifacts.length]);
 
   useEffect(() => {
     setActiveArtifact("");
