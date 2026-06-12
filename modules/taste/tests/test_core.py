@@ -164,11 +164,30 @@ def test_markdown_hides_translation_fallback_status_lines():
     ])
 
     assert "This English abstract is real venue metadata" in content
-    assert "English fit explanation" in content
+    assert "### 推荐理由" in content
+    assert "### 匹配解释" not in content
+    assert "### 为什么推荐" not in content
     assert "English recommendation reason" in content
+    assert "English fit explanation" not in content
     assert "翻译状态" not in content
     assert "中文摘要待补" not in content
     assert "fallback" not in content
+
+
+def test_markdown_recommendation_reason_falls_back_to_fit_explanation():
+    content = paper_markdown([
+        {
+            "id": "p1",
+            "title": "Fit Only Paper",
+            "abstract": "This paper has a real abstract.",
+            "fit_explanation": "Fit explanation only.",
+        }
+    ])
+
+    assert "### 推荐理由" in content
+    assert "Fit explanation only." in content
+    assert "### 匹配解释" not in content
+    assert "### 为什么推荐" not in content
 
 
 def test_markdown_renders_paper_links_from_metadata():

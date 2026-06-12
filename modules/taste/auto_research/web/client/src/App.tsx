@@ -2066,10 +2066,6 @@ function stripLegacyArtifactPointerLines(markdown: string) {
 
 function publicMarkdownArtifact(markdown: string) {
   return stripLegacyArtifactPointerLines(markdown)
-    .replace(/^### 推荐理由$/gm, "### 精读用途")
-    .replace(/推荐理由缺失；需要说明该条目可借鉴的具体方法、数据、协议或边界价值。/g, "精读用途缺失；需要说明该条目为什么值得精读、可借鉴的具体方法、数据、协议或边界价值。")
-    .replace(/中文推荐理由待补/g, "中文精读用途待补")
-    .replace(/英文推荐理由/g, "英文精读用途")
     .replace(/可作为重点精读候选/g, "可作为推荐精读候选")
     .replace(/中文摘要暂不可用/g, "中文摘要待补")
     .replace(/重新翻译/g, "后续补译")

@@ -232,6 +232,12 @@ def _quality_label_display(label: object) -> str:
     return presentation or " ".join(str(label or "").strip().split())
 
 
+def _recommendation_reason_text(recommendation: str, fit_explanation: str) -> str:
+    primary = " ".join(str(recommendation or "").split()).strip()
+    fallback = " ".join(str(fit_explanation or "").split()).strip()
+    return primary or fallback
+
+
 def _optional_metadata_lines(paper: dict) -> list[str]:
     lines: list[str] = []
     track = _presentation_display_from_paper(paper)
@@ -341,8 +347,7 @@ def paper_markdown(papers: list[dict], title: str = "Recommended Articles") -> s
         fit_explanation, fit_lang = _paper_display_text(paper, ["fit_explanation_zh", "match_explanation_zh"], ["fit_explanation", "match_explanation", "reason_en", "reason"], public_text=True)
         recommendation, reason_lang = _paper_display_text(paper, ["reason_zh", "recommendation_reason_zh"], ["reason", "recommendation_reason", "reason_en", "fit_explanation_en"], public_text=True)
         abstract_note: list[str] = []
-        fit_note: list[str] = []
-        reason_note: list[str] = []
+        recommendation_reason = _recommendation_reason_text(recommendation, fit_explanation)
         metadata_lines = _paper_brief_metadata_lines(paper)
         lines.extend([
             f"## {index}. {paper.get('title', 'Untitled')}",
@@ -354,15 +359,9 @@ def paper_markdown(papers: list[dict], title: str = "Recommended Articles") -> s
             abstract or "当前条目缺少可展示的真实摘要；需要通过详情抓取、URL/PDF 精读或摘要翻译修复后再作为推荐证据。Abstract not available in the indexed venue metadata.",
             *abstract_note,
             "",
-            "### 匹配解释",
+            "### 推荐理由",
             "",
-            fit_explanation or "匹配解释缺失；需要重新执行标题+摘要评分或理由补全。",
-            *fit_note,
-            "",
-            "### 为什么推荐",
-            "",
-            recommendation or "推荐理由缺失；需要说明该条目为什么值得精读、可借鉴的具体方法、数据、协议或边界价值。",
-            *reason_note,
+            recommendation_reason or "推荐理由缺失；需要重新执行标题+摘要评分或理由补全，并说明该条目可借鉴的具体方法、数据、协议或边界价值。",
             "",
             "",
             "",
