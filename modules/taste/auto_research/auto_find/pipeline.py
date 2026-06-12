@@ -5355,10 +5355,19 @@ def run_find(
         deduped_titles = len(_dedupe_items(title_candidates))
         deduped_venue_papers = len(_dedupe_items(venue_papers))
         deduped_evaluated = _dedupe_items(evaluated_candidates)
+        source_status_rows = _venue_source_status_rows()
+        source_title_filter_input = 0
+        for row in source_status_rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                source_title_filter_input += int(row.get("candidate_count") or row.get("count") or 0)
+            except (TypeError, ValueError):
+                pass
         llm_scored = sum(1 for item in deduped_evaluated if isinstance(item, dict) and str(item.get("reason_source") or "") == "llm abstract evaluation")
-        category_filtered = _report_sum("category_filtered_papers") or _report_sum("title_filter_input_papers") or deduped_raw
-        tfidf_screened = _report_sum("tfidf_screened_papers") or category_filtered
-        title_score_input = _report_sum("title_score_input_papers")
+        category_filtered = max(_report_sum("category_filtered_papers"), _report_sum("title_filter_input_papers"), source_title_filter_input) or deduped_raw
+        tfidf_screened = max(_report_sum("tfidf_screened_papers"), category_filtered)
+        title_score_input = _report_sum("title_score_input_papers") or category_filtered
         llm_title_scored = _report_sum("llm_title_scored_papers")
         progress_payload = {
             "run_id": run_id,
@@ -5366,7 +5375,7 @@ def run_find(
             "phase": phase,
             "selection": request.selection.model_dump(),
             "venue_health_report": venue_health_report,
-            "source_status": _venue_source_status_rows(),
+            "source_status": source_status_rows,
             "counts": {
                 "raw_title_index": deduped_raw,
                 "raw_title_index_papers": deduped_raw,
