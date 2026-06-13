@@ -3016,6 +3016,163 @@ def test_current_find_full_text_preflight_persists_partial_repair_progress(tmp_p
     assert validation['pending_without_evidence_titles'] == ['Missing Paper']
     assert validation['full_text_evidence_titles'] == ['Readable Paper']
 
+
+def test_current_find_full_text_preflight_accepts_verified_read_replacement(tmp_path, monkeypatch):
+    run_id = "find_replacement_packet_preflight"
+    project_root = tmp_path / "demo_project"
+    taste_dir = project_root / "planning" / "finding"
+    state_dir = project_root / "state"
+    text_dir = taste_dir / "full_text_reading" / "texts"
+    text_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    readable_text = text_dir / "readable.txt"
+    replacement_text = text_dir / "replacement.txt"
+    readable_text.write_text("Readable Paper abstract introduction method experiments evaluation results conclusion references " * 500, encoding="utf-8")
+    replacement_text.write_text("Replacement Paper abstract introduction method experiments evaluation results conclusion references " * 500, encoding="utf-8")
+    find_results = {
+        "run_id": run_id,
+        "strong_recommendations": [
+            {"id": "paper-1", "title": "Readable Paper", "url": "https://example.test/readable", "pdf_url": "https://example.test/readable.pdf"},
+            {"id": "paper-2", "title": "Missing Paper", "url": "https://example.test/missing", "pdf_url": ""},
+        ],
+        "triage_candidates": [
+            {"id": "paper-3", "title": "Replacement Paper", "url": "https://example.test/replacement", "pdf_url": "https://example.test/replacement.pdf"},
+        ],
+    }
+    stale_packet = {"run_id": run_id, "papers": []}
+    repaired_packet = {
+        "run_id": run_id,
+        "papers": [
+            {"paper_id": "paper-1", "title": "Readable Paper", "text_path": str(readable_text), "text_chars": 50000, "pdf_url": "https://example.test/readable.pdf"},
+            {"paper_id": "paper-2", "title": "Missing Paper", "text_path": "", "text_chars": 0},
+            {"paper_id": "paper-3", "title": "Replacement Paper", "text_path": str(replacement_text), "text_chars": 50000, "pdf_url": "https://example.test/replacement.pdf", "read_replacement": True, "replacement_for_unavailable_recommendation": "Missing Paper"},
+        ],
+    }
+    ensure_current_find_research_plan.save_json(taste_dir / "find_results.json", find_results)
+    ensure_current_find_research_plan.save_json(taste_dir / "full_text_reading" / "full_text_packet.json", stale_packet)
+    paths = type("Paths", (), {"planning": project_root / "planning", "state": state_dir, "root": project_root})()
+
+    def fake_repair(project, force=False):
+        ensure_current_find_research_plan.save_json(taste_dir / "full_text_reading" / "full_text_packet.json", repaired_packet)
+        return 0, {"status": "repaired_full_text_evidence_with_reading_replacements", "acquired_count": 2, "replacement_acquired_count": 1, "unavailable_count": 0}
+
+    monkeypatch.setattr(ensure_current_find_research_plan, "repair_current_find_full_text_evidence", fake_repair, raising=False)
+    monkeypatch.setitem(sys.modules, "repair_current_find_full_text_evidence", type("RepairModule", (), {"repair_current_find_full_text_evidence": fake_repair}))
+
+    result = ensure_current_find_research_plan.ensure_current_find_full_text_evidence_before_claude("demo_project", paths, taste_dir, run_id, find_results)
+
+    validation = ensure_current_find_research_plan.load_json(state_dir / "current_find_claude_reading_validation.json", {})
+    assert result["status"] == "current_find_full_text_evidence_ready_after_repair"
+    assert result["missing_count"] == 0
+    assert validation["full_text_evidence_count"] == 2
+    assert validation["pending_without_evidence_count"] == 0
+    assert validation["reading_replacement_count"] == 1
+    assert validation["reading_replacement_titles"] == ["Replacement Paper"]
+    assert validation["replaced_unavailable_recommendation_titles"] == ["Missing Paper"]
+
+
+def test_refresh_current_find_claude_outputs_validates_reading_packet_replacements(tmp_path):
+    run_id = "find_refresh_replacement_validation"
+    project_root = tmp_path / "demo_project"
+    taste_dir = project_root / "planning" / "finding"
+    state_dir = project_root / "state"
+    reports_dir = project_root / "reports"
+    text_dir = taste_dir / "full_text_reading" / "texts"
+    text_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    reports_dir.mkdir(parents=True)
+    readable_text = text_dir / "readable.txt"
+    replacement_text = text_dir / "replacement.txt"
+    readable_text.write_text("Readable Paper abstract introduction method experiments evaluation results conclusion references " * 500, encoding="utf-8")
+    replacement_text.write_text("Replacement Paper abstract introduction method experiments evaluation results conclusion references " * 500, encoding="utf-8")
+    find_results = {
+        "run_id": run_id,
+        "strong_recommendations": [
+            {"id": "paper-1", "paper_id": "paper-1", "title": "Readable Paper", "url": "https://example.test/readable", "pdf_url": "https://example.test/readable.pdf", "evidence_tier": "strong_recommendation"},
+            {"id": "paper-2", "paper_id": "paper-2", "title": "Missing Paper", "url": "https://example.test/missing", "pdf_url": "", "evidence_tier": "strong_recommendation"},
+        ],
+        "triage_candidates": [
+            {
+                "id": "paper-3",
+                "paper_id": "paper-3",
+                "title": "Replacement Paper",
+                "url": "https://example.test/replacement",
+                "pdf_url": "https://example.test/replacement.pdf",
+                "not_positive_support": True,
+                "weak_candidate_for_critique": True,
+                "evidence_tier": "retrieval_only",
+                "evidence_role": "critique_or_boundary_case",
+            },
+        ],
+    }
+    packet = {
+        "run_id": run_id,
+        "papers": [
+            {"paper_id": "paper-1", "id": "paper-1", "title": "Readable Paper", "text_path": str(readable_text), "text_chars": 50000, "pdf_url": "https://example.test/readable.pdf"},
+            {"paper_id": "paper-2", "id": "paper-2", "title": "Missing Paper", "text_path": "", "text_chars": 0},
+            {"paper_id": "paper-3", "id": "paper-3", "title": "Replacement Paper", "text_path": str(replacement_text), "text_chars": 50000, "pdf_url": "https://example.test/replacement.pdf", "read_replacement": True, "replacement_for_unavailable_recommendation": "Missing Paper"},
+        ],
+    }
+
+    def reading(paper_id: str, title: str, text_path: Path, positive: bool) -> dict:
+        row = {
+            "paper_id": paper_id,
+            "id": paper_id,
+            "title": title,
+            "url": f"https://example.test/{paper_id}",
+            "pdf_url": f"https://example.test/{paper_id}.pdf",
+            "verdict": "positive_anchor" if positive else "recommended_reading_reference",
+            "support_role": "positive_anchor" if positive else "reading_reference",
+            "evidence_role": "claim_ready_positive_anchor" if positive else "current_find_reading_reference",
+            "critique_reason": "该替换论文用于边界/反例精读，不作为 claim-ready 正向证据。" if not positive else "",
+            "full_text_available": True,
+            "full_text_status": "pdf_text_read",
+            "pdf_text_chars": 50000,
+            "full_text_chars": 50000,
+            "source_evidence": {"text_path": str(text_path), "text_chars": 50000},
+            "subagent_deep_read": True,
+            "deep_read_audit": {"mode": "task_subagent", "subagent_used": True, "status": "completed", "text_path": str(text_path), "evidence_chars": 50000},
+        }
+        row.update(_v4_deep_read_fields(title))
+        return row
+
+    read_payload = {
+        "run_id": run_id,
+        "source": ensure_current_find_research_plan.CLAUDE_TAKEOVER_SOURCE,
+        "readings": [
+            reading("paper-1", "Readable Paper", readable_text, True),
+            reading("paper-3", "Replacement Paper", replacement_text, False),
+        ],
+        "targeted_search_queries": ["query one", "query two", "query three"],
+    }
+    idea_payload = {"run_id": run_id, "source": ensure_current_find_research_plan.CLAUDE_TAKEOVER_SOURCE, "ideas": [_ready_scored_idea(1, "Readable Paper")], "targeted_search_queries": read_payload["targeted_search_queries"]}
+    plan_payload = {"run_id": run_id, "source": ensure_current_find_research_plan.CLAUDE_TAKEOVER_SOURCE, "plans": [{"plan_id": "plan-1", "idea_id": "idea-1", "title": "Plan 1", "steps": ["run controlled experiment"], "selected_for_execution": True, "execute_next": True, "execution_selection": {"selected": True, "selected_by": "main_claude_code_after_deep_read", "source": ensure_current_find_research_plan.CLAUDE_TAKEOVER_SOURCE}}], "targeted_search_queries": read_payload["targeted_search_queries"]}
+    ensure_current_find_research_plan.save_json(taste_dir / "find_results.json", find_results)
+    ensure_current_find_research_plan.save_json(taste_dir / "full_text_reading" / "full_text_packet.json", packet)
+    ensure_current_find_research_plan.save_json(taste_dir / "read_results.json", read_payload)
+    ensure_current_find_research_plan.save_json(taste_dir / "ideas.json", idea_payload)
+    ensure_current_find_research_plan.save_json(taste_dir / "plans.json", plan_payload)
+    reports_dir.joinpath("claude_project_session.md").write_text(f"run {run_id}: Claude 调用工具: Task input={{}}", encoding="utf-8")
+    paths = type("Paths", (), {"planning": project_root / "planning", "state": state_dir, "root": project_root, "reports": reports_dir})()
+
+    readings, ideas, plans, targeted_queries, validation = ensure_current_find_research_plan._refresh_current_find_claude_outputs(paths, taste_dir, run_id, find_results, 0, None)
+
+    persisted = ensure_current_find_research_plan.load_json(state_dir / "current_find_claude_reading_validation.json", {})
+    assert [row["title"] for row in readings] == ["Readable Paper", "Replacement Paper"]
+    assert ideas and plans and targeted_queries == ["query one", "query two", "query three"]
+    assert validation["valid"] is True
+    assert persisted["valid"] is True
+    assert persisted["recommended_reading_count"] == 2
+    assert persisted["actual_reading_count"] == 2
+    assert persisted["full_text_evidence_count"] == 2
+    assert persisted["pending_without_evidence_count"] == 0
+    assert persisted["extra_reading_count"] == 0
+    assert persisted["reading_replacement_count"] == 1
+    assert persisted["reading_replacement_titles"] == ["Replacement Paper"]
+    assert persisted["positive_anchor_count"] == 1
+    assert persisted["critique_or_boundary_count"] == 1
+
+
 def test_current_find_full_text_preflight_accepts_same_run_packet(tmp_path, monkeypatch):
     run_id = "find_same_packet_preflight"
     project_root = tmp_path / "demo_project"

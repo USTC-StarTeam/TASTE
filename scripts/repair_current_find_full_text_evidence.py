@@ -26,6 +26,16 @@ FULL_TEXT_REPAIR_TIMEOUT_SEC = max(60, int(os.environ.get("FULL_TEXT_REPAIR_TIME
 ARXIV_SEARCH_QUERY_VERSION = "v4_latex_unicode_title_variants"
 ARXIV_MAX_SEARCH_QUERIES = 4
 ARXIV_SEARCH_COOLDOWN_SEC = 0.75
+FULL_TEXT_REPLACEMENT_ATTEMPT_LIMIT = max(5, int(os.environ.get("FULL_TEXT_REPLACEMENT_ATTEMPT_LIMIT", "24")))
+REPLACEMENT_CANDIDATE_POOLS = (
+    "read_candidates",
+    "triage_candidates",
+    "audit_candidates",
+    "critique_candidates",
+    "screened_ranking",
+    "evaluated_candidates",
+    "title_candidates",
+)
 
 
 def now_iso() -> str:
@@ -140,6 +150,28 @@ def dedupe_rows(rows: list[Any]) -> list[dict[str, Any]]:
 
 def current_recommendations(find_results: dict[str, Any]) -> list[dict[str, Any]]:
     return dedupe_rows(as_list(find_results.get("strong_recommendations")) + as_list(find_results.get("articles")))
+
+
+def replacement_candidate_rows(find_results: dict[str, Any], excluded_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in excluded_rows:
+        seen.update(identity_values(row))
+    for pool in REPLACEMENT_CANDIDATE_POOLS:
+        for index, raw in enumerate(as_list(find_results.get(pool)), 1):
+            if not isinstance(raw, dict):
+                continue
+            keys = identity_values(raw)
+            title = str(raw.get("title") or raw.get("paper_title") or "").strip()
+            if not title or keys & seen:
+                continue
+            seen.update(keys)
+            row = dict(raw)
+            row["taste_pool"] = pool
+            row["taste_pool_rank"] = index
+            row["taste_pool_role"] = "read_replacement_candidate"
+            out.append(row)
+    return out
 
 
 def pending_titles(validation: dict[str, Any]) -> list[str]:
@@ -1168,18 +1200,68 @@ def repair_current_find_full_text_evidence(project: str, *, force: bool = False)
             unavailable.append({"title": title, "reason": "no accepted PDF/HTML paper text source", "attempt_count": len(attempts)})
         save_repair_progress(packet_path, receipt_path, packet, project=project, run_id=run_id, pending=pending, acquired=acquired, unavailable=unavailable, attempts=all_attempts, current_title=title, status="full_text_evidence_repair_running", validation_generated_at=validation_generated_at)
 
+    original_unavailable = list(unavailable)
+    replacement_acquired: list[dict[str, Any]] = []
+    replacement_attempted: list[dict[str, Any]] = []
+    if original_unavailable:
+        target_count = len(recommendations)
+        readable_count = sum(1 for row in as_list(packet.get("papers")) if isinstance(row, dict) and packet_entry_has_text(row))
+        unavailable_titles = [str(row.get("title") or "").strip() for row in original_unavailable if str(row.get("title") or "").strip()]
+        for candidate in replacement_candidate_rows(find_results if isinstance(find_results, dict) else {}, recommendations):
+            if readable_count >= target_count or len(replacement_attempted) >= FULL_TEXT_REPLACEMENT_ATTEMPT_LIMIT:
+                break
+            title = str(candidate.get("title") or candidate.get("paper_title") or "Untitled").strip()
+            replacement_for = unavailable_titles[min(len(replacement_acquired), len(unavailable_titles) - 1)] if unavailable_titles else ""
+            rank = target_count + len(replacement_attempted) + 1
+            entry = ensure_packet_entry(packet, candidate, rank)
+            if packet_entry_has_text(entry):
+                readable_count += 1
+                continue
+            evidence, attempts = try_acquire_for_paper(paths, candidate, rank)
+            all_attempts.append({"title": title, "replacement_candidate": True, "replacement_for_unavailable_recommendation": replacement_for, "attempts": attempts})
+            replacement_attempted.append({"title": title, "replacement_for_unavailable_recommendation": replacement_for, "attempt_count": len(attempts), "accepted": bool(evidence)})
+            if evidence:
+                text_chars = int(evidence.get("text_chars") or 0)
+                entry.update({
+                    "title": candidate.get("title") or candidate.get("paper_title") or title,
+                    "paper_id": candidate.get("paper_id") or candidate.get("id") or entry.get("paper_id") or safe_slug(title),
+                    "url": candidate.get("url") or candidate.get("abs_url") or entry.get("url") or "",
+                    "pdf_url": evidence.get("pdf_url") or candidate.get("pdf_url") or entry.get("pdf_url") or "",
+                    "text_path": evidence.get("text_path") or entry.get("text_path") or "",
+                    "pdf_path": evidence.get("pdf_path") or entry.get("pdf_path") or "",
+                    "html_url": evidence.get("html_url") or entry.get("html_url") or "",
+                    "text_chars": text_chars,
+                    "pdf_text_chars": text_chars,
+                    "full_text_chars": text_chars,
+                    "page_count": evidence.get("page_count") or 0,
+                    "pdf_status": evidence.get("full_text_status") or evidence.get("kind") or "full_text_read",
+                    "full_text_status": evidence.get("full_text_status") or "full_text_read",
+                    "repair_status": "full_text_evidence_acquired",
+                    "acquired_at": now_iso(),
+                    "acquisition_source": evidence.get("source") or "repair_current_find_full_text_evidence.py",
+                    "read_replacement": True,
+                    "replacement_for_unavailable_recommendation": replacement_for,
+                    "replacement_source_pool": candidate.get("taste_pool") or "candidate_pool",
+                    "replacement_source_rank": candidate.get("taste_pool_rank") or 0,
+                })
+                replacement_acquired.append({"title": title, "replacement_for_unavailable_recommendation": replacement_for, "evidence": evidence})
+                readable_count += 1
+            save_repair_progress(packet_path, receipt_path, packet, project=project, run_id=run_id, pending=pending, acquired=acquired + replacement_acquired, unavailable=unavailable, attempts=all_attempts, current_title=title, status="full_text_evidence_replacement_running", validation_generated_at=validation_generated_at)
+
     packet["updated_at"] = now_iso()
     packet["repair_source"] = "repair_current_find_full_text_evidence.py"
     save_json(packet_path, packet)
 
+    replaced_original_count = min(len(original_unavailable), len(replacement_acquired))
+    unavailable_for_status = original_unavailable[replaced_original_count:]
     read_stage_blocker_receipt: dict[str, Any] = {}
-    if unavailable:
-        read_stage_blocker_receipt = record_unavailable_full_text_evidence_blocker(paths, find_results if isinstance(find_results, dict) else {}, packet, unavailable)
-        pending_after_repair = [row["title"] for row in unavailable if row.get("title")]
-        status = "partial_full_text_evidence_repair" if acquired else "blocked_full_text_evidence_unavailable"
+    if unavailable_for_status:
+        read_stage_blocker_receipt = record_unavailable_full_text_evidence_blocker(paths, find_results if isinstance(find_results, dict) else {}, packet, unavailable_for_status)
+        pending_after_repair = [row["title"] for row in unavailable_for_status if row.get("title")]
+        status = "partial_full_text_evidence_repair" if (acquired or replacement_acquired) else "blocked_full_text_evidence_unavailable"
     else:
         pending_after_repair = []
-        status = "repaired_full_text_evidence" if acquired else "no_pending_full_text_evidence_gap"
+        status = "repaired_full_text_evidence_with_reading_replacements" if replacement_acquired else "repaired_full_text_evidence" if acquired else "no_pending_full_text_evidence_gap"
     receipt = {
         "project": project,
         "run_id": run_id,
@@ -1188,15 +1270,21 @@ def repair_current_find_full_text_evidence(project: str, *, force: bool = False)
         "validation_generated_at": validation_generated_at,
         "pending_titles": pending,
         "pending_after_repair": pending_after_repair,
-        "acquired_count": len(acquired),
-        "unavailable_count": len(unavailable),
+        "acquired_count": len(acquired) + len(replacement_acquired),
+        "original_acquired_count": len(acquired),
+        "replacement_acquired_count": len(replacement_acquired),
+        "unavailable_count": len(unavailable_for_status),
+        "original_unavailable_count": len(original_unavailable),
         "acquired": acquired,
-        "unavailable": unavailable,
+        "replacement_acquired": replacement_acquired,
+        "replacement_attempted": replacement_attempted,
+        "unavailable": unavailable_for_status,
+        "unavailable_original_recommendations": original_unavailable,
         "read_stage_blocker": read_stage_blocker_receipt,
         "attempts": all_attempts,
         "files": {"full_text_packet": str(packet_path), "receipt": str(receipt_path)},
         "next_required_action": "rerun_current_find_claude_takeover_deep_read_synthesis" if not pending_after_repair else "acquire_title_author_verified_full_text_for_read_stage",
-        "policy": "Only accepted PDF/HTML paper-body text can clear current-Find full-text evidence. If a user-visible Find recommendation remains unreadable, TASTE records a Read-stage blocker; it must not replace or re-rank the Find recommendation list.",
+        "policy": "Only accepted PDF/HTML paper-body text can clear current-Find full-text evidence. If a user-visible Find recommendation remains unreadable, TASTE may build a Read-stage replacement packet from same-run candidates with verified full text; it does not rewrite the public Find recommendation list.",
     }
     save_json(receipt_path, receipt)
     print(json.dumps(receipt, ensure_ascii=False, indent=2))

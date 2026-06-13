@@ -5231,6 +5231,26 @@ def _source_status(source: str, ok: bool, count: int, message: str, limited: boo
     return {"source": source, "ok": ok, "limited": limited, "count": count, "message": message}
 
 
+def _venue_source_public_limited(row: dict) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if not row.get("ok"):
+        return bool(row.get("limited") or row.get("metadata_completeness_limited"))
+    adapter = str(row.get("adapter") or row.get("source_adapter") or "").lower()
+    category_status = str(row.get("category_status") or "").lower()
+    has_official_categories = bool(row.get("has_official_categories")) and category_status not in {"no_official_categories", "missing_categories", "no_or_partial_categories"}
+    has_abstracts = bool(row.get("has_abstracts_in_title_index") or row.get("has_abstracts") or row.get("any_abstracts"))
+    official_openreview_ready = (
+        "openreview" in adapter
+        and has_official_categories
+        and has_abstracts
+        and bool(row.get("source_verified") or row.get("official_title_index_verified") or str(row.get("source_scope") or "") == "official_openreview_metadata")
+    )
+    if official_openreview_ready:
+        return False
+    return bool(row.get("limited") or row.get("metadata_completeness_limited"))
+
+
 def _source_status_label(item: dict) -> str:
     kind = str(item.get("source_kind") or "")
     if kind == "venue":
@@ -5252,6 +5272,8 @@ _SOURCE_STATUS_MESSAGE_SKIP_MARKERS = (
     "this source does not expose abstracts",
     "no trusted official venue categories",
     "ar skips category pruning",
+    "source remains partial until",
+    "adapter did not provide an explicit venue metadata completeness audit",
 )
 
 
@@ -5271,42 +5293,145 @@ def _public_source_status_message_parts(message: object) -> list[str]:
 
 
 
+def _source_status_message_text(text: str) -> str:
+    lowered = text.lower()
+    if lowered.startswith("openreview official venue notes were fetched"):
+        return "OpenReview 官方元数据已抓取，并解析标题、摘要和分类"
+    if lowered.startswith("requested years") and "had no usable" in lowered:
+        return (
+            text.replace("requested years", "请求年份")
+            .replace("had no usable", "暂无可用")
+            .replace("title index as of", "标题索引，截至")
+            .replace("release date", "发布时间")
+            .replace("is after run date", "晚于运行日期")
+            .replace(" via ", "，适配器 ")
+        )
+    if lowered.startswith("using latest available"):
+        return text.replace("using latest available", "使用最新可用").replace("title index year", "标题索引年份").replace(" via ", "，适配器 ").rstrip(".")
+    if lowered.startswith("official icml downloads/virtual page is reachable"):
+        return "ICML 官方下载页可访问，已扫描符合条件的论文链接"
+    if lowered.startswith("dblp paginated stream search over the current dblp index"):
+        return "已扫描当前 DBLP 索引；这只验证标题索引"
+    if "the workflow skips category pruning and uses title llm screening" in lowered:
+        return "无官方分类时，直接对标题库做 LLM 标题筛选"
+    if lowered == "ok":
+        return "抓取正常"
+    return text.replace("_", " ")
+
+
+def _source_scope_text(item: dict) -> str:
+    scope = str(item.get("source_scope") or "").strip().lower()
+    adapter = str(item.get("adapter") or item.get("source_adapter") or "").strip().lower()
+    if scope == "official_icml_downloads_title_index" or adapter.startswith("icml_downloads"):
+        return "ICML 官方标题索引已核验"
+    if scope == "official_openreview_metadata" or adapter.startswith("openreview"):
+        return "OpenReview 官方元数据已核验"
+    if scope == "dblp_current_index_not_official_accepted_list" or adapter.startswith("dblp"):
+        return "DBLP 当前索引，非官方录用清单"
+    if item.get("official_title_index_verified") is True:
+        return "官方标题索引已核验"
+    if item.get("official_title_index_verified") is False:
+        return "未核验官方标题索引"
+    return ""
+
+
+def _source_metadata_status_text(item: dict) -> str:
+    key = str(item.get("metadata_completeness_status") or "").strip().lower()
+    if not key or (_venue_source_public_limited(item) is False and key == "partial"):
+        return ""
+    if key == "complete":
+        return "元数据完整"
+    if key == "title_index_only":
+        return "标题索引可用，详情阶段补摘要"
+    if key == "partial":
+        return "元数据部分可用"
+    if key == "missing":
+        return "元数据缺失"
+    return key.replace("_", " ")
+
+
+def _source_category_text(item: dict) -> str:
+    if item.get("has_official_categories"):
+        return "有官方分类"
+    status = str(item.get("category_status") or "").strip().lower()
+    if status in {"no_official_categories", "no_or_partial_categories", "missing_categories"}:
+        return "无官方分类，进入标题筛选"
+    if status and status != "unknown":
+        return status.replace("_", " ")
+    return ""
+
+
+def _source_abstract_text(item: dict) -> str:
+    if item.get("has_abstracts_in_title_index") or item.get("has_abstracts"):
+        return "标题索引含摘要"
+    if item.get("any_abstracts"):
+        return "部分条目已有摘要"
+    try:
+        missing = int(item.get("missing_abstract_count") or 0)
+    except (TypeError, ValueError):
+        missing = 0
+    if missing > 0 or str(item.get("metadata_completeness_status") or "") == "title_index_only":
+        return "标题索引无摘要，详情阶段补摘要"
+    return ""
+
+
 def _source_status_detail_parts(item: dict) -> list[str]:
     parts: list[str] = []
-    state = "limited" if item.get("limited") else ("ok" if item.get("ok") else "failed")
-    parts.append(state)
-    count = item.get("count")
-    if count is not None:
-        parts.append(f"count={count}")
-    if item.get("adapter"):
-        parts.append(f"adapter={item.get('adapter')}")
-    if item.get("raw_title_index_count") is not None:
-        parts.append(f"raw_title_index={item.get('raw_title_index_count')}")
-    if item.get("candidate_count") is not None:
-        parts.append(f"screen_input={item.get('candidate_count')}")
-    if item.get("detail_fetched_count") is not None:
-        parts.append(f"detail_fetched={item.get('detail_fetched_count')}")
+    state = "受限" if _venue_source_public_limited(item) else ("正常" if item.get("ok") else "失败")
+    parts.append(f"状态: {state}")
+    raw_title_index = item.get("raw_title_index_count") if item.get("raw_title_index_count") is not None else item.get("corpus_count")
+    if raw_title_index not in (None, ""):
+        parts.append(f"标题总数: {raw_title_index}")
+    count = item.get("count") if item.get("count") is not None else item.get("candidate_count")
+    if count not in (None, ""):
+        parts.append(f"分类后: {count}")
+    if item.get("detail_fetched_count") not in (None, ""):
+        parts.append(f"元数据详情: {item.get('detail_fetched_count')}")
     if item.get("raw_count") is not None:
-        parts.append(f"raw={item.get('raw_count')}")
+        parts.append(f"原始条目: {item.get('raw_count')}")
     if item.get("prefiltered_count") is not None:
-        parts.append(f"prefiltered={item.get('prefiltered_count')}")
+        parts.append(f"预筛后: {item.get('prefiltered_count')}")
+    for value in [_source_scope_text(item), _source_metadata_status_text(item), _source_category_text(item), _source_abstract_text(item)]:
+        if value:
+            parts.append(value)
+    if item.get("adapter"):
+        parts.append(f"来源适配器: {item.get('adapter')}")
+    effective_years = item.get("effective_years") or []
+    requested_years = item.get("requested_years") or []
+    if effective_years:
+        parts.append("有效年份: " + ", ".join(str(year) for year in effective_years))
+    if requested_years:
+        parts.append("请求年份: " + ", ".join(str(year) for year in requested_years))
     if item.get("journals"):
-        parts.append("journals=" + ",".join(str(v) for v in item.get("journals") or []))
+        parts.append("期刊: " + ", ".join(str(v) for v in item.get("journals") or []))
     if item.get("categories"):
-        parts.append("categories=" + ",".join(str(v) for v in item.get("categories") or []))
+        parts.append("分类: " + ", ".join(str(v) for v in item.get("categories") or []))
     coverage = item.get("date_coverage") if isinstance(item.get("date_coverage"), dict) else {}
     if coverage.get("oldest") or coverage.get("newest"):
-        parts.append(f"dates={coverage.get('oldest') or '?'}..{coverage.get('newest') or '?'}")
-    if item.get("message"):
-        parts.extend(_public_source_status_message_parts(item.get("message")))
-    return parts
+        parts.append(f"日期范围: {coverage.get('oldest') or '?'}..{coverage.get('newest') or '?'}")
+    for message in _public_source_status_message_parts(item.get("message")):
+        message_text = _source_status_message_text(message)
+        if message_text:
+            parts.append(message_text)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        key = part.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(part)
+    return deduped
 
 
 def _status_markdown(statuses: list[dict], title: str = "Source Status") -> str:
+    suffix = ""
+    if "(" in title and title.endswith(")"):
+        suffix = " " + title[title.index("("):]
     lines = [
-        f"# {title}",
+        f"# 来源状态{suffix}",
         "",
-        "Each row is one real Find source or venue. `count` is the row's active retrieval/screening count; `raw_title_index`, `screen_input`, `detail_fetched`, `raw`, and `prefiltered` show the pipeline stages when available.",
+        "每一行对应一次真实 Find 来源或会议渠道。标题总数表示抓到的标题索引规模；分类后表示按官方分类或无分类策略进入标题筛选的数量；元数据详情表示详情阶段抓到摘要或链接的候选数量。",
         "",
     ]
     for item in statuses:
@@ -5440,7 +5565,7 @@ def run_find(
                 message_parts.append(str(row.get("year_fallback_reason")))
             if row.get("error"):
                 message_parts.append(str(row.get("error")))
-            status = _source_status(str(source_name), bool(row.get("ok")), count, "; ".join(message_parts) or ("ok" if row.get("ok") else "No papers fetched."), limited=bool(row.get("limited") or row.get("metadata_completeness_limited")))
+            status = _source_status(str(source_name), bool(row.get("ok")), count, "; ".join(message_parts) or ("ok" if row.get("ok") else "No papers fetched."), limited=_venue_source_public_limited(row))
             status["source_kind"] = "venue"
             status["venue_id"] = row.get("venue_id")
             status["venue"] = row.get("venue") or source_name

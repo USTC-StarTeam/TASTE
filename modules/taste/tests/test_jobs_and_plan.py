@@ -4512,15 +4512,32 @@ def test_frontend_markdown_renderer_supports_latex_links_and_math_markup():
     assert "MATH_INDEX_OFFSET_RE" in app
     assert "[一-鿿]+" in app
     assert "Rank|rank" in app
+    assert "textCommandPatterns" in app
+    assert "textit|emph" in app
+    assert "\\%" in app
+    assert "uparrow|downarrow" in app
+    assert "cdots|ldots|dots" in app
+    assert "×÷·−" in app
+    assert "hasBracketFormula" in app
+    assert "hasMathKeyword" in app
+    assert "RECTOKEN" in app
+    assert "run|job|project|source|stage|task|current|management" in app
+    assert "function isNumericDelimitedMathInContext" in app
+    assert "isNumericDelimitedMathInContext(expression, before, after)" in app
     assert "function displayMathExpressionFromLine" in app
     assert "function renderMathSource" in app
+    assert "import katex from \"katex\"" in app
+    assert "katex.renderToString" in app
+    assert "katex/dist/katex.min.css" in app
+    assert "normalizeInformalMathForKatex" in app
+    assert "$1^{$2}" in app
+    assert "UNICODE_MATH_TO_LATEX" in app
     assert "function decodeBasicHtmlEntities" in app
     assert "decodeBasicHtmlEntities(stripMathDelimiters(raw))" in app
-    assert "⟦0⟧" in app
     assert "function mathInlineHtml" in app
     assert 'class="math-inline"' in app
     assert "\\theta" in app
-    assert "\\frac" in app
+    assert "frac|sqrt|sum" in app
     assert "\\url" in app
     assert ".markdownBody .math-inline" in css
     assert ".markdownBody .math-display" in css
@@ -4932,6 +4949,46 @@ def test_venue_metadata_normalization_trusts_adapter_over_stale_scope():
     assert row["official_title_index_verified"] is True
     assert row["official_accepted_list_verified"] is True
     assert row["metadata_completeness_status"] == "title_index_only"
+    assert row["limited"] is True
+
+
+def test_venue_metadata_normalization_treats_usable_openreview_partial_as_public_ok():
+    from auto_research.web import project_bridge
+
+    row = project_bridge._normalize_venue_metadata_status_row({
+        "source": "ICLR",
+        "source_kind": "venue",
+        "venue_id": "openreview_iclr",
+        "venue": "ICLR",
+        "adapter": "openreview",
+        "ok": True,
+        "limited": True,
+        "raw_title_index_count": 5350,
+        "candidate_count": 1850,
+        "metadata_completeness_status": "partial",
+        "metadata_completeness_limited": True,
+        "category_status": "official_or_cached_categories",
+        "has_official_categories": True,
+        "has_abstracts": True,
+        "has_abstracts_in_title_index": True,
+        "source_verified": True,
+    })
+
+    assert row["source_scope"] == "official_openreview_metadata"
+    assert row["limited"] is False
+    assert row["metadata_completeness_limited"] is True
+
+
+def test_frontend_source_status_distinguishes_public_limited_from_openreview_audit():
+    app = (Path(__file__).resolve().parents[1] / "auto_research" / "web" / "client" / "src" / "App.tsx").read_text(encoding="utf-8")
+
+    assert "function sourceStatusIsLimited" in app
+    assert "sourceStatusHasUsableOpenReviewMetadata(item)" in app
+    assert 'adapter.includes("openreview")' in app
+    assert "has_official_categories" in app
+    assert "has_abstracts_in_title_index" in app
+    assert "source remains partial until" in app
+    assert 'return "适配器尚未完成总量审计' not in app
 
 
 def test_base_switch_candidate_does_not_override_selected_base_main_route(tmp_path, monkeypatch):

@@ -1180,6 +1180,26 @@ def _derive_official_accepted_list_verified(adapter: str, title_index_complete: 
     return None
 
 
+def _venue_source_public_limited(row: dict[str, Any]) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if not row.get("ok"):
+        return bool(row.get("limited") or row.get("metadata_completeness_limited"))
+    adapter = str(row.get("adapter") or row.get("source_adapter") or "").lower()
+    category_status = str(row.get("category_status") or "").lower()
+    has_official_categories = bool(row.get("has_official_categories")) and category_status not in {"no_official_categories", "missing_categories", "no_or_partial_categories"}
+    has_abstracts = bool(row.get("has_abstracts_in_title_index") or row.get("has_abstracts") or row.get("any_abstracts"))
+    official_openreview_ready = (
+        "openreview" in adapter
+        and has_official_categories
+        and has_abstracts
+        and bool(row.get("source_verified") or row.get("official_title_index_verified") or str(row.get("source_scope") or "") == "official_openreview_metadata")
+    )
+    if official_openreview_ready:
+        return False
+    return bool(row.get("limited") or row.get("metadata_completeness_limited"))
+
+
 def _read_local_venue_cache_manifest(venue_id: str, year: int) -> dict[str, Any]:
     venue_id = str(venue_id or "").strip()
     try:
@@ -1483,7 +1503,6 @@ def _normalize_venue_metadata_status_row(row: dict[str, Any]) -> dict[str, Any]:
         normalized["metadata_completeness_status"] = "title_index_only"
         normalized["metadata_completeness_ok"] = False
         normalized["metadata_completeness_limited"] = True
-        normalized["limited"] = True
         if normalized.get("raw_title_index_count") or normalized.get("corpus_count") or normalized.get("sample_count") or normalized.get("count"):
             normalized["ok"] = True
         basis = str(normalized.get("metadata_completeness_basis") or "").strip()
@@ -1496,6 +1515,7 @@ def _normalize_venue_metadata_status_row(row: dict[str, Any]) -> dict[str, Any]:
     else:
         normalized.setdefault("metadata_completeness_ok", metadata_ready)
         normalized.setdefault("metadata_completeness_limited", bool(normalized and not metadata_ready))
+    normalized["limited"] = _venue_source_public_limited(normalized)
     return normalized
 
 
@@ -1625,7 +1645,7 @@ def _venue_source_rows_from_health(rows: Any) -> list[dict[str, Any]]:
             "venue_id": row.get("venue_id") or "",
             "venue": row.get("venue") or source_name,
             "ok": bool(row.get("ok")),
-            "limited": bool(row.get("limited") or row.get("metadata_completeness_limited")),
+            "limited": _venue_source_public_limited(row),
             "count": count,
             "message": "; ".join(parts) or ("ok" if row.get("ok") else "No papers fetched."),
             "adapter": adapter,
@@ -9437,6 +9457,133 @@ def _merge_find_abstract_into_reading(row: dict[str, Any], find_row: dict[str, A
     return clean
 
 
+CURRENT_FIND_READING_REPLACEMENT_POOLS = (
+    "read_candidates",
+    "triage_candidates",
+    "audit_candidates",
+    "critique_candidates",
+    "screened_ranking",
+    "evaluated_candidates",
+    "title_candidates",
+    "retrieval_candidates",
+    "arxiv_prefiltered",
+)
+
+
+def _current_find_validation_row_key(row: dict[str, Any]) -> str:
+    identities = sorted(_identity_values(row))
+    if identities:
+        return identities[0]
+    return _title_identity_key(row.get("title") or row.get("paper_title"))
+
+
+def _current_find_validation_recommendation_rows(find_results: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for pool, role in [("strong_recommendations", "user_visible_recommendation"), ("articles", "user_visible_article")]:
+        for index, raw in enumerate(_json_rows((find_results or {}).get(pool, [])), 1):
+            if not isinstance(raw, dict):
+                continue
+            packet_recommendation = raw.get("recommended_for_deep_reading") is True or str(raw.get("reading_packet_role") or "") == "replacement_for_unavailable_recommendation"
+            if not (_human_find_recommendation_literature_row(raw) or packet_recommendation):
+                continue
+            key = _current_find_validation_row_key(raw)
+            if not key or key in seen:
+                continue
+            row = dict(raw)
+            row.setdefault("taste_pool", pool)
+            row.setdefault("taste_pool_role", role)
+            row.setdefault("taste_pool_rank", index)
+            row["recommended_for_deep_reading"] = True
+            rows.append(row)
+            seen.add(key)
+    return rows
+
+
+def _full_text_packet_index_for_current_find(packet: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    index: dict[str, dict[str, Any]] = {}
+    if not isinstance(packet, dict):
+        return index
+    for entry in _json_rows(packet.get("papers", [])):
+        if not isinstance(entry, dict):
+            continue
+        for identity in _identity_values(entry):
+            index[identity] = entry
+    return index
+
+
+def _current_find_row_has_packet_body(row: dict[str, Any], packet_index: dict[str, dict[str, Any]]) -> bool:
+    entry = next((packet_index[key] for key in _identity_values(row) if key in packet_index), {})
+    return bool(entry and _has_full_text_locator(entry) and _full_text_evidence_chars(entry) >= FULL_TEXT_MIN_CHARS)
+
+
+def _current_find_reading_packet_rows_for_web(find_results: dict[str, Any], full_text_packet: dict[str, Any] | None, read_limit: int = 0) -> list[dict[str, Any]]:
+    recommendations = _current_find_validation_recommendation_rows(find_results if isinstance(find_results, dict) else {})
+    target = read_limit if read_limit and read_limit > 0 else len(recommendations)
+    if not target:
+        return recommendations
+    packet_index = _full_text_packet_index_for_current_find(full_text_packet if isinstance(full_text_packet, dict) else {})
+    if not packet_index:
+        return recommendations[:target]
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    unavailable: list[dict[str, Any]] = []
+    unavailable_titles: list[str] = []
+    for row in recommendations:
+        identities = _identity_values(row)
+        if _current_find_row_has_packet_body(row, packet_index):
+            rows.append(dict(row))
+            seen.update(identities)
+        else:
+            unavailable.append(row)
+            title = str(row.get("title") or row.get("paper_title") or "").strip()
+            if title:
+                unavailable_titles.append(title)
+    replacement_index = 0
+    for pool in CURRENT_FIND_READING_REPLACEMENT_POOLS:
+        for candidate in _json_rows((find_results or {}).get(pool, [])):
+            if len(rows) >= target:
+                break
+            if not isinstance(candidate, dict):
+                continue
+            identities = _identity_values(candidate)
+            if identities & seen or not _current_find_row_has_packet_body(candidate, packet_index):
+                continue
+            replacement_for = unavailable_titles[min(replacement_index, len(unavailable_titles) - 1)] if unavailable_titles else ""
+            row = dict(candidate)
+            row["recommended_for_deep_reading"] = True
+            row["reading_packet_role"] = "replacement_for_unavailable_recommendation"
+            row["replacement_for_unavailable_recommendation"] = replacement_for
+            row["taste_pool_role"] = "read_replacement_for_unavailable_recommendation"
+            rows.append(row)
+            seen.update(identities)
+            replacement_index += 1
+        if len(rows) >= target:
+            break
+    for missing in unavailable:
+        if len(rows) >= target:
+            break
+        rows.append(dict(missing))
+    return rows[:target] if rows else recommendations[:target]
+
+
+def _current_find_reading_validation_view_for_web(find_results: dict[str, Any], full_text_packet: dict[str, Any] | None, read_limit: int = 0) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    source = find_results if isinstance(find_results, dict) else {}
+    original_rows = _current_find_validation_recommendation_rows(source)
+    target = read_limit if read_limit and read_limit > 0 else len(original_rows)
+    reading_rows = _current_find_reading_packet_rows_for_web(source, full_text_packet if isinstance(full_text_packet, dict) else {}, target)
+    validation_find_results = dict(source)
+    validation_find_results["strong_recommendations"] = [dict(row) for row in reading_rows]
+    validation_find_results["articles"] = []
+    validation_find_results["current_reading_packet"] = {
+        "source": "current_find_reading_packet_with_full_text_replacements",
+        "paper_count": len(reading_rows),
+        "replacement_count": len([row for row in reading_rows if row.get("reading_packet_role") == "replacement_for_unavailable_recommendation"]),
+        "replacement_titles": [str(row.get("title") or row.get("paper_title") or "").strip() for row in reading_rows if row.get("reading_packet_role") == "replacement_for_unavailable_recommendation"],
+    }
+    return original_rows, reading_rows, validation_find_results
+
+
 def _current_find_reading_validation(find_results: dict[str, Any], readings: list[dict[str, Any]], read_limit: int = 10) -> dict[str, Any]:
     recommendation_ids: set[str] = set()
     recommendation_index: dict[str, dict[str, Any]] = {}
@@ -9444,7 +9591,8 @@ def _current_find_reading_validation(find_results: dict[str, Any], readings: lis
     seen_recommendation_titles: set[str] = set()
     for pool in ["strong_recommendations", "articles"]:
         for row in _json_rows(find_results.get(pool, [])):
-            if not _human_find_recommendation_literature_row(row):
+            packet_recommendation = row.get("recommended_for_deep_reading") is True or str(row.get("reading_packet_role") or "") == "replacement_for_unavailable_recommendation"
+            if not (_human_find_recommendation_literature_row(row) or packet_recommendation):
                 continue
             identities = _identity_values(row)
             recommendation_ids.update(identities)
@@ -9468,7 +9616,7 @@ def _current_find_reading_validation(find_results: dict[str, Any], readings: lis
                 seen_titles.add(title_key)
                 positive_titles.append(str(row.get("title") or ""))
     known_ids: set[str] = set()
-    for pool in ["strong_recommendations", "articles", "read_candidates", "evaluated_candidates", "critique_candidates", "title_candidates", "retrieval_candidates", "arxiv_prefiltered"]:
+    for pool in ["strong_recommendations", "articles", "read_candidates", "triage_candidates", "audit_candidates", "evaluated_candidates", "critique_candidates", "screened_ranking", "title_candidates", "retrieval_candidates", "arxiv_prefiltered"]:
         for row in _json_rows(find_results.get(pool, [])):
             known_ids.update(_identity_values(row))
     positive_readings: list[str] = []
@@ -9711,7 +9859,15 @@ def _current_find_pipeline_summary(root: Path, find_results: dict[str, Any] | No
     selected_plan_id = str(selected_execution.get("selected_plan_id") or "").strip()
     selected_idea_id = str(selected_execution.get("selected_idea_id") or "").strip()
     selected_execution_issue = str(selected_execution.get("selection_issue") or selected_execution.get("failure_type") or "").strip()
-    computed_validation = _current_find_reading_validation(find_results if isinstance(find_results, dict) else {}, readings, 10)
+    full_text_packet = _read_json(taste_dir / "full_text_reading" / "full_text_packet.json", {})
+    original_recommendation_rows, reading_packet_rows, validation_find_results = _current_find_reading_validation_view_for_web(find_results if isinstance(find_results, dict) else {}, full_text_packet, 0)
+    computed_validation = _current_find_reading_validation(validation_find_results, readings, len(reading_packet_rows))
+    computed_validation.update({
+        "original_recommendation_count": len(original_recommendation_rows),
+        "reading_replacement_count": len([row for row in reading_packet_rows if row.get("reading_packet_role") == "replacement_for_unavailable_recommendation"]),
+        "reading_replacement_titles": [str(row.get("title") or row.get("paper_title") or "").strip() for row in reading_packet_rows if row.get("reading_packet_role") == "replacement_for_unavailable_recommendation"],
+        "enforced_current_recommendation_count": len(reading_packet_rows),
+    })
     stored_validation = state_plan.get("reading_validation") if state_plan_matches and isinstance(state_plan, dict) else {}
     standalone_validation = _read_json(root / "state" / "current_find_claude_reading_validation.json", {})
 
@@ -9746,6 +9902,7 @@ def _current_find_pipeline_summary(root: Path, find_results: dict[str, Any] | No
     # A blocked full-text preflight is intentionally invalid, but it still
     # carries authoritative same-run evidence counts for the web/API summary.
     validation = best_wrapper_validation if wrapper_validation_priority(best_wrapper_validation)[0] else computed_validation
+    validation = {**computed_validation, **validation}
     content_ready = bool(
         run_id
         and current_read_artifact
@@ -9854,8 +10011,9 @@ def _current_find_pipeline_summary(root: Path, find_results: dict[str, Any] | No
                 missing.append(title)
         return len(covered), covered, missing
 
-    packet_evidence_count, packet_evidence_titles, packet_missing_titles = full_text_packet_coverage(recommendation_rows)
-    full_text_packet_ready = bool(recommendation_count and packet_evidence_count >= recommendation_count and not packet_missing_titles)
+    packet_coverage_rows = reading_packet_rows if reading_packet_rows else recommendation_rows
+    packet_evidence_count, packet_evidence_titles, packet_missing_titles = full_text_packet_coverage(packet_coverage_rows)
+    full_text_packet_ready = bool(packet_coverage_rows and packet_evidence_count >= len(packet_coverage_rows) and not packet_missing_titles)
     if full_text_packet_ready and not readings:
         validation = dict(validation)
         validation.update({

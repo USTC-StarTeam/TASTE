@@ -3034,6 +3034,73 @@ def test_official_category_title_index_counts_as_complete_metadata_for_screening
     assert fields["metadata_completeness_limited"] is False
 
 
+def test_public_source_status_does_not_mark_usable_openreview_partial_as_limited():
+    row = {
+        "ok": True,
+        "adapter": "openreview",
+        "limited": True,
+        "metadata_completeness_limited": True,
+        "metadata_completeness_status": "partial",
+        "category_status": "official_or_cached_categories",
+        "has_official_categories": True,
+        "has_abstracts": True,
+        "has_abstracts_in_title_index": True,
+        "source_verified": True,
+    }
+
+    assert find_pipeline._venue_source_public_limited(row) is False
+
+
+def test_public_source_status_keeps_title_only_venue_limited():
+    row = {
+        "ok": True,
+        "adapter": "icml_downloads",
+        "limited": True,
+        "metadata_completeness_limited": True,
+        "metadata_completeness_status": "title_index_only",
+        "category_status": "no_official_categories",
+        "has_official_categories": False,
+        "has_abstracts": False,
+        "has_abstracts_in_title_index": False,
+        "source_verified": True,
+    }
+
+    assert find_pipeline._venue_source_public_limited(row) is True
+
+
+def test_source_status_markdown_hides_openreview_internal_partial_audit():
+    row = {
+        "source": "ICLR",
+        "source_kind": "venue",
+        "venue": "ICLR",
+        "adapter": "openreview",
+        "ok": True,
+        "limited": False,
+        "metadata_completeness_limited": True,
+        "metadata_completeness_status": "partial",
+        "category_status": "official_or_cached_categories",
+        "has_official_categories": True,
+        "has_abstracts": True,
+        "has_abstracts_in_title_index": True,
+        "source_verified": True,
+        "raw_title_index_count": 5350,
+        "count": 2606,
+        "candidate_count": 2606,
+        "detail_fetched_count": 160,
+        "effective_years": [2026],
+        "requested_years": [2026],
+        "message": "adapter=openreview; years=2026; corpus=5350; screen_input=2606; metadata=partial; category=official_or_cached_categories; OpenReview official venue notes were fetched and title/abstract/category metadata was parsed; source remains partial until an adapter-level total-count audit verifies every record.",
+    }
+
+    markdown = find_pipeline._status_markdown([row])
+
+    assert "状态: 正常" in markdown
+    assert "OpenReview 官方元数据已抓取" in markdown
+    assert "source remains partial" not in markdown
+    assert "元数据部分可用" not in markdown
+    assert "adapter-level total-count audit" not in markdown
+
+
 
 def test_combined_title_only_local_audit_is_not_complete_metadata():
     combined = find_pipeline._combined_metadata_audit(

@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import katex from "katex";
+import "katex/dist/katex.min.css";
 import {
   Project,
   ProjectSummary,
@@ -643,7 +645,7 @@ function venueSourceStatusRows(findResults: any) {
     if (row?.sample_count !== undefined) parts.push(`fetched=${row.sample_count}`);
     if (row?.year_fallback_reason) parts.push(String(row.year_fallback_reason));
     if (row?.error) parts.push(String(row.error));
-    return {
+    const normalized = {
       source: row?.venue || row?.venue_id || "venue",
       source_kind: "venue",
       venue_id: row?.venue_id || "",
@@ -674,6 +676,8 @@ function venueSourceStatusRows(findResults: any) {
       any_abstracts: Boolean(row?.any_abstracts || row?.has_abstracts),
       missing_abstract_count: row?.missing_abstract_count || 0,
     };
+    normalized.limited = sourceStatusIsLimited(normalized);
+    return normalized;
   });
 }
 
@@ -691,6 +695,20 @@ function expandedSourceStatusRows(findResults: any) {
   return venueSourceStatusRows(findResults);
 }
 
+function sourceStatusHasUsableOpenReviewMetadata(item: any) {
+  const adapter = String(item?.adapter || item?.source_adapter || "").toLowerCase();
+  const categoryStatus = String(item?.category_status || "").toLowerCase();
+  const hasOfficialCategories = Boolean(item?.has_official_categories) && !["no_official_categories", "missing_categories", "no_or_partial_categories"].includes(categoryStatus);
+  const hasAbstracts = Boolean(item?.has_abstracts_in_title_index || item?.has_abstracts || item?.any_abstracts);
+  const sourceVerified = Boolean(item?.source_verified || item?.official_title_index_verified || String(item?.source_scope || "") === "official_openreview_metadata");
+  return Boolean(item?.ok) && adapter.includes("openreview") && hasOfficialCategories && hasAbstracts && sourceVerified;
+}
+
+function sourceStatusIsLimited(item: any) {
+  if (sourceStatusHasUsableOpenReviewMetadata(item)) return false;
+  return Boolean(item?.limited || item?.metadata_completeness_limited);
+}
+
 function sourceStatusMessageText(value: any, lang: Lang) {
   const text = String(value ?? "").trim();
   if (!text || /^(adapter|years|corpus|screen_input|fetched|metadata|category)=/i.test(text)) return "";
@@ -699,7 +717,7 @@ function sourceStatusMessageText(value: any, lang: Lang) {
   if (lang !== "zh") return text.replace(/_/g, " ");
   const lowered = text.toLowerCase();
   if (lowered.startsWith("openreview official venue notes were fetched")) return "OpenReview 官方元数据已抓取，并解析标题、摘要和分类";
-  if (lowered.startsWith("source remains partial until")) return "适配器尚未完成总量审计，完整性仍标记为部分可用";
+  if (lowered.startsWith("source remains partial until")) return "";
   if (lowered.startsWith("requested years") && lowered.includes("had no usable")) {
     return text
       .replace(/^requested years/i, "请求年份")
@@ -718,7 +736,7 @@ function sourceStatusMessageText(value: any, lang: Lang) {
   }
   if (lowered === "no fallback year was used") return "未使用年份回退";
   if (lowered === "no title index found.") return "未找到标题索引。";
-  if (lowered.startsWith("adapter did not provide an explicit venue metadata completeness audit")) return "适配器尚未提供完整元数据审计";
+  if (lowered.startsWith("adapter did not provide an explicit venue metadata completeness audit")) return "";
   if (lowered.startsWith("official icml downloads/virtual page is reachable")) return "ICML 官方下载页可访问，已扫描符合条件的论文链接";
   if (lowered.startsWith("dblp paginated stream search over the current dblp index")) return "已扫描当前 DBLP 索引；这只验证标题索引";
   if (lowered.includes("the workflow skips category pruning and uses title llm screening")) return "无官方分类时，直接对标题库做 LLM 标题筛选";
@@ -726,13 +744,13 @@ function sourceStatusMessageText(value: any, lang: Lang) {
   return text.replace(/_/g, " ");
 }
 
-function sourceMetadataStatusText(status: any, lang: Lang) {
+function sourceMetadataStatusText(status: any, lang: Lang, item?: any) {
   const zh = lang === "zh";
   const key = String(status || "").trim().toLowerCase();
   if (!key) return "";
   if (key === "complete") return zh ? "元数据完整" : "metadata complete";
   if (key === "title_index_only") return zh ? "标题索引可用，详情阶段补摘要" : "title index available; abstracts are enriched later";
-  if (key === "partial") return zh ? "元数据部分可用" : "metadata partially available";
+  if (key === "partial") return sourceStatusHasUsableOpenReviewMetadata(item) ? "" : zh ? "元数据部分可用" : "metadata partially available";
   if (key === "missing") return zh ? "元数据缺失" : "metadata missing";
   return key.replace(/_/g, " ");
 }
@@ -773,7 +791,8 @@ function sourceStatusDetail(item: any, lang: Lang = "zh") {
     ? { status: "状态", ok: "正常", limited: "受限", failed: "失败", checking: "检查中", raw: "标题总数", screen: "分类后数量", detail: "元数据详情", adapter: "来源适配器", years: "有效年份", requested: "请求年份", metadata: "元数据完整性" }
     : { status: "Status", ok: "ok", limited: "limited", failed: "failed", checking: "checking", raw: "title-index total", screen: "title-screen input", detail: "metadata details", adapter: "adapter", years: "effective years", requested: "requested years", metadata: "metadata completeness" };
   const rawStatus = String(item?.status || item?.phase || "").trim().toLowerCase();
-  const state = rawStatus === "checking" || rawStatus === "fetching" ? labels.checking : item?.limited ? labels.limited : item?.ok ? labels.ok : labels.failed;
+  const limited = sourceStatusIsLimited(item);
+  const state = rawStatus === "checking" || rawStatus === "fetching" ? labels.checking : limited ? labels.limited : item?.ok ? labels.ok : labels.failed;
   const parts: string[] = [];
   const seen = new Set<string>();
   const pushPart = (value: any) => {
@@ -793,7 +812,7 @@ function sourceStatusDetail(item: any, lang: Lang = "zh") {
   if (detailFetched !== undefined && detailFetched !== "") pushPart(`${labels.detail}: ${detailFetched}`);
   const scopeText = sourceScopeText(item, lang);
   if (scopeText) pushPart(scopeText);
-  const metadataText = sourceMetadataStatusText(item?.metadata_completeness_status, lang);
+  const metadataText = sourceMetadataStatusText(item?.metadata_completeness_status, lang, item);
   if (metadataText) pushPart(metadataText);
   const categoryText = sourceCategoryAvailabilityText(item, lang);
   if (categoryText) pushPart(categoryText);
@@ -817,7 +836,8 @@ function sourceStatusCompactDetail(item: any, lang: Lang = "zh") {
     ? { status: "状态", ok: "正常", limited: "受限", failed: "失败", checking: "检查中", raw: "标题总数", screen: "分类后", yearUsed: "使用年份", requested: "请求年份" }
     : { status: "Status", ok: "ok", limited: "limited", failed: "failed", checking: "checking", raw: "title total", screen: "after category", yearUsed: "year used", requested: "requested year" };
   const rawStatus = String(item?.status || item?.phase || "").trim().toLowerCase();
-  const state = rawStatus === "checking" || rawStatus === "fetching" ? labels.checking : item?.limited ? labels.limited : item?.ok ? labels.ok : labels.failed;
+  const limited = sourceStatusIsLimited(item);
+  const state = rawStatus === "checking" || rawStatus === "fetching" ? labels.checking : limited ? labels.limited : item?.ok ? labels.ok : labels.failed;
   const parts: string[] = [];
   const seen = new Set<string>();
   const pushPart = (value: any) => {
@@ -839,7 +859,7 @@ function sourceStatusCompactDetail(item: any, lang: Lang = "zh") {
     pushPart(`${labels.yearUsed}: ${effectiveYears.join(", ")}`);
     pushPart(`${labels.requested}: ${requestedYears.join(", ")}`);
   }
-  const failed = !item?.ok && !item?.limited && rawStatus !== "checking" && rawStatus !== "fetching";
+  const failed = !item?.ok && !limited && rawStatus !== "checking" && rawStatus !== "fetching";
   if (failed && item?.message) {
     const conciseFailure = String(item.message).split(";").map((chunk) => sourceStatusMessageText(chunk, lang)).filter((chunk) => !hasInternalFindPublicText(chunk)).find(Boolean);
     if (conciseFailure) pushPart(conciseFailure);
@@ -852,8 +872,8 @@ function sourceStatusArtifactMarkdown(rows: any[], lang: Lang = "zh") {
   if (!sourceRows.length) return "";
   const title = lang === "zh" ? "来源状态" : "Source Status";
   const intro = lang === "zh"
-    ? "每一行对应一次真实 Find 来源或会议渠道。count/标题总数、分类后、详情抓取等字段用于审计完整流程；页面验收块只显示摘要。"
-    : "Each row is one real Find source or venue. Count/title total, after-category, and detail-fetched fields audit the full pipeline; the review panel shows only a compact summary.";
+    ? "每一行对应一次真实 Find 来源或会议渠道。标题总数表示抓到的标题索引规模；分类后表示按官方分类或无分类策略进入标题筛选的数量；元数据详情表示详情阶段抓到摘要或链接的候选数量。"
+    : "Each row is one real Find source or venue. Title total is the fetched title-index size; after-category is the number entering title screening after official-category selection or the no-category policy; metadata details is the candidate count enriched with abstracts or links.";
   const lines = [`# ${title}`, "", intro, ""];
   sourceRows.forEach((item: any) => {
     lines.push(`## ${sourceStatusLabel(item, undefined, lang)}`, "", `- ${sourceStatusDetail(item, lang)}`, "");
@@ -2069,7 +2089,7 @@ function stripLegacyArtifactPointerLines(markdown: string) {
 }
 
 function normalizePublicLatexLinks(text: string) {
-  return String(text ?? "")
+  let value = String(text ?? "")
     .replace(/\\href\{(https?:\/\/[^{}\s]+)\}\{([^{}]+)\}/g, (_match, url, label) => {
       const href = String(url || "").trim();
       const textLabel = String(label || "").trim() || href;
@@ -2079,6 +2099,26 @@ function normalizePublicLatexLinks(text: string) {
       const href = String(url || "").trim();
       return `[${href}](${href})`;
     });
+  const textCommandPatterns: Array<[RegExp, string]> = [
+    [/\\(?:textit|emph)\{([^{}]+)\}/g, "*$1*"],
+    [/\\textbf\{([^{}]+)\}/g, "**$1**"],
+    [/\\(?:texttt|text)\{([^{}]+)\}/g, "$1"],
+  ];
+  for (let pass = 0; pass < 3; pass += 1) {
+    const before = value;
+    textCommandPatterns.forEach(([pattern, replacement]) => {
+      value = value.replace(pattern, replacement);
+    });
+    if (value === before) break;
+  }
+  return value
+    .replace(/\\%/g, "%")
+    .replace(/\\&/g, "&")
+    .replace(/\\#/g, "#")
+    .replace(/\\_/g, "_")
+    .replace(/\\(?:,|;|:)\s*/g, " ")
+    .replace(/\\!/g, "")
+    .replace(/\\~/g, " ");
 }
 
 function publicMarkdownArtifact(markdown: string) {
@@ -2091,15 +2131,15 @@ function publicMarkdownArtifact(markdown: string) {
 }
 
 const INLINE_PLACEHOLDER_RE = /^@@TASTE_INLINE_\d+@@$/;
-const MATH_LATEX_COMMAND_RE = /\\(?:frac|sqrt|sum|prod|int|oint|lim|log|ln|exp|sin|cos|tan|min|max|argmax|argmin|softmax|sigmoid|Pr|KL|CE|MSE|mathbb|mathcal|mathbf|mathrm|operatorname|text|left|right|cdot|times|div|pm|mp|sim|leq?|geq?|neq|approx|propto|to|rightarrow|leftarrow|leftrightarrow|Rightarrow|Leftarrow|in|notin|subseteq?|supseteq?|cup|cap|mid|lVert|rVert|alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|pi|rho|sigma|tau|upsilon|phi|varphi|chi|psi|omega|Omega|Sigma|Delta|Gamma|Lambda|nabla|partial|infty)\b/;
-const MATH_SYMBOL_RE = /[∑∏∫√∞≈≠≤≥±×÷∈∉∩∪⊂⊆⊃⊇⊕⊗→←↔⇒⇔∂∇∼∝∆δθλμσπΩΣτ]/;
-const MATH_COMPARATOR_RE = /(?:<=|>=|!=|==|->|<-|=>|=|≤|≥|≈|≠|∼|∝|→|←|↔|⇒|⇔)/;
-const MATH_BINARY_OPERATOR_RE = /(?:^(?:[A-Za-zΑ-Ωα-ω]|\d+(?:\.\d+)?)\s*[+*/-]\s*(?:[A-Za-zΑ-Ωα-ω]|\d+(?:\.\d+)?)$|[({\[]\s*[A-Za-z0-9]\s*[-+*/]\s*[A-Za-z0-9]\s*[)}\]])/;
-const MATH_SPACED_OPERATOR_RE = /(?:^|[\s(])(?:[A-Za-zΑ-Ωα-ω]|[A-Z][a-z]|[A-Za-zΑ-Ωα-ω]_\{?[-+A-Za-z0-9Α-Ωα-ω]+\}?|\d+(?:\.\d+)?)\s*[+*/=-]\s*(?:[A-Za-zΑ-Ωα-ω]|[A-Z][a-z]|[A-Za-zΑ-Ωα-ω]_\{?[-+A-Za-z0-9Α-Ωα-ω]+\}?|\d+(?:\.\d+)?)(?:$|[\s,)])/;
-const MATH_INDEX_OFFSET_RE = /\b[A-Za-zΑ-Ωα-ω](?:[a-zΑ-Ωα-ω0-9']{0,4}|_\{?[-+A-Za-z0-9Α-Ωα-ω]+\}?)\s*\+\s*\d+(?:\.\d+)?\b/;
-const MATH_SUB_SUP_RE = /\b(?:[A-Z][A-Za-z0-9]{0,3}|[a-zΑ-Ωα-ω][0-9']?)[_^]\{?[-+A-Za-z0-9Α-Ωα-ω]+\}?/;
-const MATH_FUNCTION_RE = /\b(?:p|P|Pr|q|Q|f|g|h|L|D|O|N|E|Rank|rank|Var|Cov|log|ln|exp|sin|cos|softmax|sigmoid|argmax|argmin|Sample|sample|KL|CE|MSE|NDCG|AUC)\s*\(/;
-const MATH_WORD_RE = /^(?:argmax|argmin|softmax|sigmoid|log|ln|exp|sin|cos|KL|CE|MSE|NDCG|AUC|BPR|Sample|sample|Rank|rank|Pr|Var|Cov)$/;
+const MATH_LATEX_COMMAND_RE = /\\(?:frac|sqrt|sum|prod|int|oint|lim|log|ln|exp|sin|cos|tan|min|max|argmax|argmin|softmax|sigmoid|Pr|KL|CE|MSE|mathbb|mathcal|mathbf|mathrm|operatorname|text|left|right|cdot|times|div|pm|mp|sim|leq?|geq?|neq|approx|propto|to|rightarrow|leftarrow|leftrightarrow|Rightarrow|Leftarrow|uparrow|downarrow|cdots|ldots|dots|ell|in|notin|subseteq?|supseteq?|cup|cap|mid|lVert|rVert|alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|pi|rho|sigma|tau|upsilon|phi|varphi|chi|psi|omega|Omega|Sigma|Delta|Gamma|Lambda|nabla|partial|infty)\b/;
+const MATH_SYMBOL_RE = /[Α-Ωα-ωϕΩ∑∏Π∫√∞≈≠≤≥±×÷·∈∉∩∪⊂⊆⊃⊇⊕⊗⊙→←↔⇒⇔↑↓∂∇∼∝∆δθλμσπΩΣτℓ⌈⌉⌊⌋]/;
+const MATH_COMPARATOR_RE = /(?:<=|>=|!=|==|->|<-|=>|<|>|=|≤|≥|≈|≠|∼|∝|→|←|↔|⇒|⇔)/;
+const MATH_BINARY_OPERATOR_RE = /(?:^(?:[A-Za-zΑ-Ωα-ωϕ]|\d+(?:\.\d+)?)\s*[+*/\-·×÷−⊙]\s*(?:[A-Za-zΑ-Ωα-ωϕ]|\d+(?:\.\d+)?)$|[({\[]\s*[A-Za-z0-9Α-Ωα-ωϕ]\s*[-+*/·×÷−⊙]\s*[A-Za-z0-9Α-Ωα-ωϕ]\s*[)}\]])/;
+const MATH_SPACED_OPERATOR_RE = /(?:^|[\s(])(?:[A-Za-zΑ-Ωα-ωϕ]|[A-Z][a-z]|[A-Za-zΑ-Ωα-ωϕ]_\{?[-+A-Za-z0-9Α-Ωα-ωϕ]+\}?|\d+(?:\.\d+)?)\s*[+*/=\-·×÷−⊙]\s*(?:[A-Za-zΑ-Ωα-ωϕ]|[A-Z][a-z]|[A-Za-zΑ-Ωα-ωϕ]_\{?[-+A-Za-z0-9Α-Ωα-ωϕ]+\}?|\d+(?:\.\d+)?)(?:$|[\s,)])/;
+const MATH_INDEX_OFFSET_RE = /\b[A-Za-zΑ-Ωα-ωϕ](?:[a-zΑ-Ωα-ωϕ0-9']{0,4}|_\{?[-+A-Za-z0-9Α-Ωα-ωϕ]+\}?)\s*\+\s*\d+(?:\.\d+)?\b/;
+const MATH_SUB_SUP_RE = /\b(?:[A-Z][A-Za-z0-9]{0,8}|[a-zΑ-Ωα-ωϕ][A-Za-z0-9Α-Ωα-ωϕ]{0,8})[_^]\{?[-+A-Za-z0-9Α-Ωα-ωϕ]+\}?/;
+const MATH_FUNCTION_RE = /\b(?:p|P|Pr|q|Q|f|g|h|L|D|O|N|E|Rank|rank|Var|Cov|log|ln|exp|sum|Norm|sin|cos|softmax|sigmoid|argmax|argmin|Sample|sample|KL|CE|MSE|NDCG|AUC)\s*\(/;
+const MATH_WORD_RE = /^(?:argmax|argmin|softmax|sigmoid|log|ln|exp|sum|Norm|sin|cos|KL|CE|MSE|NDCG|AUC|BPR|Sample|sample|Rank|rank|Pr|Var|Cov)$/;
 const NON_MATH_SLASH_TOKEN_RE = /^(?:w\/?o|w\/|n\/?a|and\/or)$/i;
 const MATH_COMMAND_SYMBOL_REPLACEMENTS: Array<[RegExp, string]> = [
   [/\\cdot/g, "·"],
@@ -2118,6 +2158,10 @@ const MATH_COMMAND_SYMBOL_REPLACEMENTS: Array<[RegExp, string]> = [
   [/\\leftrightarrow/g, "↔"],
   [/\\Rightarrow/g, "⇒"],
   [/\\Leftarrow/g, "⇐"],
+  [/\\uparrow/g, "↑"],
+  [/\\downarrow/g, "↓"],
+  [/\\cdots|\\ldots|\\dots/g, "…"],
+  [/\\ell/g, "ℓ"],
   [/\\infty/g, "∞"],
   [/\\partial/g, "∂"],
   [/\\nabla/g, "∇"],
@@ -2211,9 +2255,9 @@ function isStrongMathToken(token: string) {
   if (MATH_LATEX_COMMAND_RE.test(core) || /^\\[A-Za-z]+/.test(core)) return true;
   if (MATH_INDEX_OFFSET_RE.test(core)) return true;
   if (MATH_SYMBOL_RE.test(core) || MATH_SUB_SUP_RE.test(core) || MATH_COMPARATOR_RE.test(core)) return true;
-  if (/^[A-Za-zΑ-Ωα-ω][A-Za-z0-9_']{1,24}\([^)]{1,120}\)$/.test(core) && /[|_^=<>≤≥≈≠∼,+*/'\-]|[Α-Ωα-ω]/.test(core)) return true;
+  if (/^[A-Za-zΑ-Ωα-ωϕ][A-Za-z0-9_']{0,32}\([^)]{1,160}\)$/.test(core) && /[|_^=<>≤≥≈≠∼,+*/'\-]|[Α-Ωα-ωϕ]|,/.test(core)) return true;
   if (MATH_BINARY_OPERATOR_RE.test(core) || MATH_FUNCTION_RE.test(core)) return true;
-  if (/^[A-Za-zΑ-Ωα-ω]\([^)]{1,80}\)$/.test(core) && /[A-Za-z0-9_^\-+*/=,|]/.test(core)) return true;
+  if (/^[A-Za-zΑ-Ωα-ωϕ]\([^)]{1,120}\)$/.test(core) && /[A-Za-z0-9Α-Ωα-ωϕ_^\-+*/=,|]/.test(core)) return true;
   return false;
 }
 
@@ -2229,7 +2273,7 @@ function isVariableMathToken(token: string) {
 function isMathConnectorToken(token: string) {
   const core = normalizeMathTokenCore(token);
   if (!core) return false;
-  return /^(?:[+\-*/=<>≤≥≈≠∼∝→←↔⇒⇔|∣,]|\|\||\\mid)$/.test(core);
+  return /^(?:[+\-*/=<>≤≥≈≠∼∝→←↔⇒⇔×÷·−±|∣,]|\|\||\\mid)$/.test(core);
 }
 
 function neighboringTokenIndex(pieces: string[], index: number, step: -1 | 1) {
@@ -2243,26 +2287,38 @@ function neighboringTokenIndex(pieces: string[], index: number, step: -1 | 1) {
 
 function looksLikeBareMathExpression(raw: string) {
   const value = decodeBasicHtmlEntities(stripMathDelimiters(raw)).replace(/\s+/g, " ").trim();
-  if (!value || value.length > 320) return false;
+  if (!value || value.length > 520) return false;
   if (NON_MATH_SLASH_TOKEN_RE.test(value)) return false;
   if (INLINE_PLACEHOLDER_RE.test(value) || /^https?:\/\//i.test(value) || /@/.test(value)) return false;
+  if (/\bRECTOKEN\b/.test(value) || /^<\/?(?:think|ground|answer|feedback|item_list)>$/i.test(value)) return false;
+  if (/^\*+[:：]?\s*[A-Za-z0-9_:-]+$/.test(value)) return false;
+  if (/\b(?:icml_downloads|openreview|dblp|semantic_scholar)\b/i.test(value)) return false;
+  if (/^(?:run|job|project|source|stage|task|current|management)_[A-Za-z0-9_:-]+:?$/.test(value)) return false;
+  if (/^[a-z]{4,}_[a-z]{4,}$/.test(value)) return false;
+  if (/^<\/?[A-Za-z][A-Za-z0-9_:-]*>$/.test(value)) return false;
   if (/^[\d.,]+$/.test(value)) return false;
   if (/[一-鿿]/.test(value)) return false;
   const hasCommand = MATH_LATEX_COMMAND_RE.test(value) || /\\[A-Za-z]+/.test(value);
   const hasSymbol = MATH_SYMBOL_RE.test(value);
   const hasSubSup = MATH_SUB_SUP_RE.test(value);
-  const hasComparator = MATH_COMPARATOR_RE.test(value) && /[A-Za-zΑ-Ωα-ω0-9]/.test(value);
+  const hasComparator = MATH_COMPARATOR_RE.test(value) && /[A-Za-zΑ-Ωα-ωϕ0-9]/.test(value);
   const hasIndexOffset = MATH_INDEX_OFFSET_RE.test(value);
-  const hasOperator = (MATH_BINARY_OPERATOR_RE.test(value) || MATH_SPACED_OPERATOR_RE.test(value)) && /[A-Za-zΑ-Ωα-ω]/.test(value);
-  const hasFunction = MATH_FUNCTION_RE.test(value);
+  const hasOperator = (MATH_BINARY_OPERATOR_RE.test(value) || MATH_SPACED_OPERATOR_RE.test(value)) && /[A-Za-zΑ-Ωα-ωϕ]/.test(value);
+  const hasNamedFunction = MATH_FUNCTION_RE.test(value);
+  const hasCompactFunction = /^[A-Za-zΑ-Ωα-ωϕ][A-Za-z0-9_']{0,32}\([^)]{1,160}\)$/.test(value)
+    && /[A-Za-z0-9Α-Ωα-ωϕ_^\-+*/=,|]/.test(value);
+  const hasBracketFormula = /(?:\|\|[^|]{1,220}\|\||[A-Za-zΑ-Ωα-ωϕ][A-Za-z0-9_']{0,32}\[[^\]]{1,220}\]|\[[^\]]*[=+\-*/^_<>≤≥≈∑Σ][^\]]*\])/.test(value);
+  const hasMathKeyword = /\b(?:max|min|argmax|argmin|Sigma|alpha|beta|gamma|delta|theta|lambda|kappa|pi|sigma)\b/.test(value)
+    && /[()[\]{}_^+\-*/=<>|]/.test(value);
   const words = value.match(/[A-Za-z]{3,}/g) || [];
   const proseWords = words.filter((word) => !MATH_WORD_RE.test(word) && !/^[A-Z][a-z]$/.test(word));
-  const signals = [hasCommand, hasSymbol, hasSubSup, hasComparator, hasIndexOffset, hasOperator, hasFunction].filter(Boolean).length;
+  const signals = [hasCommand, hasSymbol, hasSubSup, hasComparator, hasIndexOffset, hasOperator, hasNamedFunction, hasCompactFunction, hasBracketFormula, hasMathKeyword].filter(Boolean).length;
+  if (hasComparator && signals === 1 && proseWords.length >= 2 && !/[(){}\[\]_^Α-Ωα-ωϕ\d]/.test(value)) return false;
   if (proseWords.length >= 4 && signals < 2) return false;
   return signals > 0;
 }
 
-function renderBareMathInText(text: string, protectMath: (expression: string) => string) {
+function renderBareMathTokenGroups(text: string, protectMath: (expression: string) => string) {
   const pieces = String(text || "").match(/@@TASTE_INLINE_\d+@@|\s+|[，。；、！？：；]+|[一-鿿]+|[^\s一-鿿，。；、！？：；]+/g) || [];
   const strong = pieces.map((part) => Boolean(part && !/^\s+$/.test(part) && !INLINE_PLACEHOLDER_RE.test(part) && isStrongMathToken(part)));
   const variable = pieces.map((part) => Boolean(part && !/^\s+$/.test(part) && !INLINE_PLACEHOLDER_RE.test(part) && isVariableMathToken(part)));
@@ -2314,55 +2370,192 @@ function renderBareMathInText(text: string, protectMath: (expression: string) =>
   return output.join("");
 }
 
-function renderMathSource(raw: string) {
+function renderBareMathChunk(chunk: string, protectMath: (expression: string) => string) {
+  const raw = String(chunk || "");
+  if (!raw.trim()) return raw;
+  const leadingWhitespace = raw.match(/^\s*/)?.[0] || "";
+  const trailingWhitespace = raw.match(/\s*$/)?.[0] || "";
+  let core = raw.slice(leadingWhitespace.length, raw.length - trailingWhitespace.length);
+  const leadingQuote = core.match(/^["'“”‘’]+/)?.[0] || "";
+  if (leadingQuote) core = core.slice(leadingQuote.length);
+  const trailingQuote = core.match(/["'“”‘’]+$/)?.[0] || "";
+  if (trailingQuote) core = core.slice(0, -trailingQuote.length);
+  const trailingPunctuation = core.match(/[,.;!?]+$/)?.[0] || "";
+  if (trailingPunctuation) core = core.slice(0, -trailingPunctuation.length);
+  if (!core) return raw;
+  if (looksLikeBareMathExpression(core)) {
+    return `${leadingWhitespace}${leadingQuote}${protectMath(core)}${trailingPunctuation}${trailingQuote}${trailingWhitespace}`;
+  }
+  return `${leadingWhitespace}${leadingQuote}${renderBareMathTokenGroups(core, protectMath)}${trailingPunctuation}${trailingQuote}${trailingWhitespace}`;
+}
+
+function renderBareMathInText(text: string, protectMath: (expression: string) => string) {
+  const parts = String(text || "").split(/(@@TASTE_INLINE_\d+@@|[一-鿿]+|[，。；、！？：；]|[（）])/g).filter((part) => part !== "");
+  return parts.map((part) => {
+    if (INLINE_PLACEHOLDER_RE.test(part)) return part;
+    if (/^[一-鿿]+$/.test(part) || /^[，。；、！？：；（）]$/.test(part)) return part;
+    return renderBareMathChunk(part, protectMath);
+  }).join("");
+}
+
+const UNICODE_MATH_TO_LATEX: Array<[RegExp, string]> = [
+  [/−/g, "-"],
+  [/·/g, "\\cdot "],
+  [/×/g, "\\times "],
+  [/÷/g, "\\div "],
+  [/∼/g, "\\sim "],
+  [/≈/g, "\\approx "],
+  [/≠/g, "\\ne "],
+  [/≤/g, "\\le "],
+  [/≥/g, "\\ge "],
+  [/→/g, "\\to "],
+  [/←/g, "\\leftarrow "],
+  [/↔/g, "\\leftrightarrow "],
+  [/±/g, "\\pm "],
+  [/∓/g, "\\mp "],
+  [/∝/g, "\\propto "],
+  [/∈/g, "\\in "],
+  [/∉/g, "\\notin "],
+  [/⊆/g, "\\subseteq "],
+  [/⊂/g, "\\subset "],
+  [/⊇/g, "\\supseteq "],
+  [/⊃/g, "\\supset "],
+  [/∪/g, "\\cup "],
+  [/∩/g, "\\cap "],
+  [/∑/g, "\\sum "],
+  [/∏/g, "\\prod "],
+  [/∫/g, "\\int "],
+  [/∇/g, "\\nabla "],
+  [/∂/g, "\\partial "],
+  [/∞/g, "\\infty "],
+  [/ℓ/g, "\\ell "],
+  [/Ω/g, "\\Omega "],
+  [/Ω/g, "\\Omega "],
+  [/Σ/g, "\\Sigma "],
+  [/∆/g, "\\Delta "],
+  [/Δ/g, "\\Delta "],
+  [/Γ/g, "\\Gamma "],
+  [/Λ/g, "\\Lambda "],
+  [/α/g, "\\alpha "],
+  [/β/g, "\\beta "],
+  [/γ/g, "\\gamma "],
+  [/δ/g, "\\delta "],
+  [/ε/g, "\\epsilon "],
+  [/ζ/g, "\\zeta "],
+  [/η/g, "\\eta "],
+  [/θ/g, "\\theta "],
+  [/ι/g, "\\iota "],
+  [/κ/g, "\\kappa "],
+  [/λ/g, "\\lambda "],
+  [/μ/g, "\\mu "],
+  [/ν/g, "\\nu "],
+  [/ξ/g, "\\xi "],
+  [/π/g, "\\pi "],
+  [/ρ/g, "\\rho "],
+  [/σ/g, "\\sigma "],
+  [/τ/g, "\\tau "],
+  [/υ/g, "\\upsilon "],
+  [/φ/g, "\\phi "],
+  [/ϕ/g, "\\phi "],
+  [/χ/g, "\\chi "],
+  [/ψ/g, "\\psi "],
+  [/ω/g, "\\omega "],
+];
+
+const WORD_MATH_TO_LATEX: Array<[RegExp, string]> = [
+  [/(^|[^\\A-Za-z])lambda\b/g, "$1\\lambda "],
+  [/(^|[^\\A-Za-z])kappa\b/g, "$1\\kappa "],
+  [/(^|[^\\A-Za-z])theta\b/g, "$1\\theta "],
+  [/(^|[^\\A-Za-z])rho\b/g, "$1\\rho "],
+  [/(^|[^\\A-Za-z])sigma\b/g, "$1\\sigma "],
+  [/(^|[^\\A-Za-z])tau\b/g, "$1\\tau "],
+  [/(^|[^\\A-Za-z])alpha\b/g, "$1\\alpha "],
+  [/(^|[^\\A-Za-z])beta\b/g, "$1\\beta "],
+  [/(^|[^\\A-Za-z])gamma\b/g, "$1\\gamma "],
+];
+
+const SUPERSCRIPT_DIGIT_MAP: Record<string, string> = {
+  "⁰": "0",
+  "¹": "1",
+  "²": "2",
+  "³": "3",
+  "⁴": "4",
+  "⁵": "5",
+  "⁶": "6",
+  "⁷": "7",
+  "⁸": "8",
+  "⁹": "9",
+};
+
+function normalizeUnicodeSuperscriptRun(raw: string) {
+  const sign = raw.startsWith("⁻") ? "-" : raw.startsWith("⁺") ? "+" : "";
+  const digits = raw.replace(/^[⁺⁻]/, "").split("").map((digit) => SUPERSCRIPT_DIGIT_MAP[digit] || digit).join("");
+  return digits ? `^{${sign}${digits}}` : raw;
+}
+
+function normalizeInformalMathForKatex(raw: string) {
   let value = decodeBasicHtmlEntities(stripMathDelimiters(raw))
+    .replace(/\r?\n/g, " ")
     .replace(/\\begin\{[^{}]+\}/g, "")
     .replace(/\\end\{[^{}]+\}/g, "")
     .replace(/\\left\s*/g, "")
     .replace(/\\right\s*/g, "")
-    .replace(/\\operatorname\{([^{}]+)\}/g, "$1")
-    .replace(/\\mathrm\{([^{}]+)\}/g, "$1")
-    .replace(/\\text\{([^{}]+)\}/g, "$1")
-    .replace(/\\mathcal\{([^{}]+)\}/g, "$1")
-    .replace(/\\mathbf\{([^{}]+)\}/g, "$1")
-    .replace(/\\mathbb\{R\}/g, "ℝ")
-    .replace(/\\mathbb\{N\}/g, "ℕ")
-    .replace(/\\mathbb\{Z\}/g, "ℤ");
-  MATH_COMMAND_SYMBOL_REPLACEMENTS.forEach(([pattern, replacement]) => {
+    .replace(/\\(?:,|;|:)\s*/g, " ")
+    .replace(/\\!/g, "")
+    .replace(/\\~/g, "\\sim ")
+    .replace(/\\_/g, "_")
+    .replace(/(^|[^\\])&/g, "$1\\&")
+    .replace(/[⁺⁻]?[⁰¹²³⁴⁵⁶⁷⁸⁹]+/g, normalizeUnicodeSuperscriptRun);
+  value = value
+    .replace(/([A-Za-zΑ-Ωα-ω0-9)}\]])\^\(([^()]{1,100})\)/g, "$1^{$2}")
+    .replace(/([A-Za-zΑ-Ωα-ω0-9)}\]])_\(([^()]{1,100})\)/g, "$1_{$2}")
+    .replace(/([A-Za-zΑ-Ωα-ω0-9)}\]])\^\[([^\[\]]{1,100})\]/g, "$1^{$2}")
+    .replace(/([A-Za-zΑ-Ωα-ω0-9)}\]])_\[([^\[\]]{1,100})\]/g, "$1_{$2}")
+    .replace(/([A-Za-zΑ-Ωα-ω0-9)}\]])\^([+\-−]?(?:\d+(?:\.\d+)?|[Α-Ωα-ωA-Za-z]))/g, "$1^{$2}")
+    .replace(/([A-Za-zΑ-Ωα-ω0-9)}\]])_([A-Za-zΑ-Ωα-ω0-9]+(?:,[A-Za-zΑ-Ωα-ω0-9]+)+)(?!_)/g, "$1_{$2}")
+    .replace(/([πΠΣθτλμσρφψωαβγδζεηκνξϕΩΩ])([A-Za-z0-9]+(?:,[A-Za-z0-9]+)+)/g, "$1_{$2}")
+    .replace(/\b([A-Za-z])([A-Za-z0-9]+(?:,[A-Za-z0-9]+)+)\b/g, "$1_{$2}")
+    .replace(/\b([PQ])([θτλμσρφψωαβγδζεηκνξϕ])(?=\()/g, "$1_{$2}")
+    .replace(/\b([ypu])([itjkuxv])(?=[,|)<>])/g, "$1_{$2}")
+    .replace(/\b(w)([uvxy]),/g, "$1_{$2},");
+  WORD_MATH_TO_LATEX.forEach(([pattern, replacement]) => {
     value = value.replace(pattern, replacement);
   });
-  let html = escapeHtml(value)
-    .replace(/&lt;/g, "⟦0⟧")
-    .replace(/&gt;/g, "⟦1⟧")
-    .replace(/&amp;/g, "⟦2⟧");
-  html = html
-    .replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, '<span class="math-frac"><span>$1</span><span>$2</span></span>')
-    .replace(/\\sqrt\{([^{}]+)\}/g, "√($1)");
-  const atom = "([A-Za-zΑ-Ωα-ωΩ∇∑∏∫√∞])";
-  html = html
-    .replace(new RegExp(`${atom}_\\{([^{}]+)\\}\\^\\{([^{}]+)\\}`, "g"), "$1<sub>$2</sub><sup>$3</sup>")
-    .replace(new RegExp(`${atom}\\^\\{([^{}]+)\\}_\\{([^{}]+)\\}`, "g"), "$1<sup>$2</sup><sub>$3</sub>")
-    .replace(new RegExp(`${atom}_\\{([^{}]+)\\}`, "g"), "$1<sub>$2</sub>")
-    .replace(new RegExp(`${atom}_([A-Za-z0-9+\-=]+)`, "g"), "$1<sub>$2</sub>")
-    .replace(/([A-Za-z0-9Α-Ωα-ωΩ∇∑∏∫√∞)\]])\^\{([^{}]+)\}/g, "$1<sup>$2</sup>")
-    .replace(/([A-Za-z0-9Α-Ωα-ωΩ∇∑∏∫√∞)\]])\^([A-Za-z0-9+\-=]+)/g, "$1<sup>$2</sup>")
-    .replace(/\b([A-Z])([a-z][A-Za-z0-9']{0,4})\b(?!\s*\()/g, "$1<sub>$2</sub>")
-    .replace(/\b([a-z])([a-z])\b/g, "$1<sub>$2</sub>")
-    .replace(/([θτλμσπΩΣ∆])([A-Za-z0-9]+)/g, "$1<sub>$2</sub>");
-  return html
-    .replace(/⟦0⟧/g, "&lt;")
-    .replace(/⟦1⟧/g, "&gt;")
-    .replace(/⟦2⟧/g, "&amp;");
+  UNICODE_MATH_TO_LATEX.forEach(([pattern, replacement]) => {
+    value = value.replace(pattern, replacement);
+  });
+  value = value.replace(/\\\\(alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|pi|rho|sigma|tau|upsilon|phi|varphi|chi|psi|omega|Omega|Sigma|Delta|Gamma|Lambda|infty|ell|cdot|times|div|sim|approx|ne|leq?|geq?|to|rightarrow|leftarrow|leftrightarrow|pm|mp|propto|in|notin|subseteq|subset|supseteq|supset|cup|cap|sum|prod|int|nabla|partial)\b/g, "\\$1");
+  value = value
+    .replace(/_\\([A-Za-z]+)\s*_([A-Za-z0-9]+)/g, "_{\\$1,$2}")
+    .replace(/_\{([^{}]+)\}_([A-Za-z0-9]+)/g, "_{$1,$2}")
+    .replace(/_([A-Za-z0-9]+)_\{([^{}]+)\}/g, "_{$1,$2}")
+    .replace(/_([A-Za-z0-9]+)_([A-Za-z0-9]+)/g, "_{$1,$2}");
+  return value.replace(/\s+/g, " " ).trim();
+}
+
+function renderMathSource(raw: string, displayMode = false) {
+  const latex = normalizeInformalMathForKatex(raw);
+  try {
+    return katex.renderToString(latex, {
+      displayMode,
+      throwOnError: false,
+      strict: "ignore",
+      output: "html",
+      trust: false,
+    });
+  } catch (_error) {
+    return escapeHtml(decodeBasicHtmlEntities(stripMathDelimiters(raw)));
+  }
 }
 
 function mathInlineHtml(raw: string) {
   const label = escapeHtml(decodeBasicHtmlEntities(stripMathDelimiters(raw)));
-  return `<span class="math-inline" aria-label="${label}">${renderMathSource(raw)}</span>`;
+  return `<span class="math-inline" aria-label="${label}">${renderMathSource(raw, false)}</span>`;
 }
 
 function mathDisplayHtml(raw: string) {
   const label = escapeHtml(decodeBasicHtmlEntities(stripMathDelimiters(raw)));
-  return `<div class="math-display" aria-label="${label}">${renderMathSource(raw)}</div>`;
+  return `<div class="math-display" aria-label="${label}">${renderMathSource(raw, true)}</div>`;
 }
 
 function isLikelyDelimitedMath(raw: string) {
@@ -2370,7 +2563,15 @@ function isLikelyDelimitedMath(raw: string) {
   if (!value || /[一-鿿]/.test(value)) return false;
   if (/^\d+(?:\.\d+)?\s*(?:USD|RMB|CNY|dollars?)?$/i.test(value)) return false;
   if (/^https?:\/\//i.test(value)) return false;
-  return looksLikeBareMathExpression(value) || /^[A-Za-zΑ-Ωα-ω][A-Za-z0-9_^{},+\-*/=\s().|]{0,80}$/.test(value);
+  return looksLikeBareMathExpression(value) || /^[A-Za-zΑ-Ωα-ωℓ][A-Za-z0-9_^{},+\-*/=\s().|·×÷−%\\]{0,120}$/.test(value);
+}
+
+function isNumericDelimitedMathInContext(raw: string, before: string, after: string) {
+  const value = decodeBasicHtmlEntities(stripMathDelimiters(raw)).replace(/\\%/g, "%").trim();
+  if (!/^[+\-−]?\d+(?:\.\d+)?%?$/.test(value)) return false;
+  const left = String(before || "");
+  const right = String(after || "");
+  return /[×·*/^%±]|[A-Za-zΑ-Ωα-ωℓ]/.test(right) || /[×·*/^±]/.test(left);
 }
 
 function displayMathExpressionFromLine(line: string) {
@@ -2421,9 +2622,11 @@ function markdownToHtml(markdown: string) {
     value = value.replace(/\\\[([\s\S]{1,700}?)\\\]/g, (_match, expr) => protect(mathInlineHtml(String(expr || ""))));
     value = value.replace(/\\\(([\s\S]{1,360}?)\\\)/g, (_match, expr) => protect(mathInlineHtml(String(expr || ""))));
     value = value.replace(/(^|[^\\])\$\$([^$\n]{1,700})\$\$/g, (_match, prefix, expr) => `${prefix}${protect(mathInlineHtml(String(expr || "")))}`);
-    value = value.replace(/(^|[^\\])\$([^$\n]{1,360})\$/g, (_match, prefix, expr) => {
+    value = value.replace(/(^|[^\\])\$([^$\n]{1,360})\$/g, (match, prefix, expr, offset, input) => {
       const expression = String(expr || "");
-      if (!isLikelyDelimitedMath(expression)) return `${prefix}$${expression}$`;
+      const after = String(input || "").charAt(Number(offset) + String(match || "").length);
+      const before = String(prefix || "").slice(-1);
+      if (!isLikelyDelimitedMath(expression) && !isNumericDelimitedMathInContext(expression, before, after)) return `${prefix}$${expression}$`;
       return `${prefix}${protect(mathInlineHtml(expression))}`;
     });
     value = renderBareMathInText(value, (expression) => protect(mathInlineHtml(expression)));

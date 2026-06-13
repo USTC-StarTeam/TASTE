@@ -1165,6 +1165,131 @@ def _current_recommendation_rows(find_results: dict[str, Any]) -> list[dict[str,
     return rows
 
 
+READING_REPLACEMENT_POOLS = (
+    "read_candidates",
+    "triage_candidates",
+    "audit_candidates",
+    "critique_candidates",
+    "screened_ranking",
+    "evaluated_candidates",
+    "title_candidates",
+)
+
+
+def _current_reading_replacement_candidate_rows(find_results: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in _current_recommendation_rows(find_results):
+        seen.update(_identity_values(row))
+    for pool in READING_REPLACEMENT_POOLS:
+        for index, raw in enumerate(as_list(find_results.get(pool)), 1):
+            if not isinstance(raw, dict):
+                continue
+            key = _paper_key(raw)
+            title = first_text(raw, "title", "paper_title")
+            identities = _identity_values(raw)
+            if not key or not title or identities & seen:
+                continue
+            seen.update(identities)
+            row = dict(raw)
+            row["taste_pool"] = pool
+            row["taste_pool_role"] = "read_replacement_candidate"
+            row["taste_pool_rank"] = index
+            rows.append(row)
+    return rows
+
+
+def _row_has_packet_body(row: dict[str, Any], packet_index: dict[str, dict[str, Any]], packet_path: str) -> bool:
+    entry = _matching_full_text_packet_entry(row, packet_index)
+    return _packet_entry_has_paper_body(entry, packet_path)
+
+
+def _current_reading_packet_rows(find_results: dict[str, Any], packet: dict[str, Any] | None = None, limit: int = 0) -> list[dict[str, Any]]:
+    recommendations = _current_recommendation_rows(find_results if isinstance(find_results, dict) else {})
+    target = limit if limit and limit > 0 else len(recommendations)
+    if target <= 0:
+        target = len(recommendations)
+    if not isinstance(packet, dict) or not packet.get("papers"):
+        return recommendations[:target]
+    packet_path = str(packet.get("path") or "")
+    packet_index = _full_text_packet_index(packet)
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    unavailable_recommendation_titles: list[str] = []
+    unavailable_recommendations: list[dict[str, Any]] = []
+    for row in recommendations:
+        identities = _identity_values(row)
+        if _row_has_packet_body(row, packet_index, packet_path):
+            clean = dict(row)
+            clean["reading_packet_role"] = "original_recommendation_with_full_text"
+            rows.append(clean)
+            seen.update(identities)
+        else:
+            title = first_text(row, "title", "paper_title")
+            if title:
+                unavailable_recommendation_titles.append(title)
+            missing = dict(row)
+            missing["reading_packet_role"] = "unavailable_original_recommendation"
+            unavailable_recommendations.append(missing)
+            seen.update(identities)
+        if len(rows) >= target:
+            break
+    replacement_index = 0
+    for candidate in _current_reading_replacement_candidate_rows(find_results if isinstance(find_results, dict) else {}):
+        if len(rows) >= target:
+            break
+        identities = _identity_values(candidate)
+        if identities & seen or not _row_has_packet_body(candidate, packet_index, packet_path):
+            continue
+        replacement_for = unavailable_recommendation_titles[min(replacement_index, len(unavailable_recommendation_titles) - 1)] if unavailable_recommendation_titles else ""
+        row = dict(candidate)
+        row["recommended_for_deep_reading"] = True
+        row["reading_packet_role"] = "replacement_for_unavailable_recommendation"
+        row["replacement_for_unavailable_recommendation"] = replacement_for
+        row["taste_pool_role"] = "read_replacement_for_unavailable_recommendation"
+        rows.append(row)
+        seen.update(identities)
+        replacement_index += 1
+    for missing in unavailable_recommendations:
+        if len(rows) >= target:
+            break
+        rows.append(missing)
+    return rows[:target] if rows else recommendations[:target]
+
+
+def _reading_packet_find_results(find_results: dict[str, Any], reading_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    packet = dict(find_results if isinstance(find_results, dict) else {})
+    packet["strong_recommendations"] = [dict(row) for row in reading_rows]
+    packet["articles"] = []
+    packet["current_reading_packet"] = {
+        "source": "current_find_reading_packet_with_full_text_replacements",
+        "paper_count": len(reading_rows),
+        "replacement_count": len([row for row in reading_rows if row.get("reading_packet_role") == "replacement_for_unavailable_recommendation"]),
+        "replacement_titles": [first_text(row, "title", "paper_title") for row in reading_rows if row.get("reading_packet_role") == "replacement_for_unavailable_recommendation"],
+    }
+    return packet
+
+
+def _current_reading_validation_view(find_results: dict[str, Any], full_text_packet: dict[str, Any] | None, read_limit: int = 0) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    original_recommendation_rows = _current_recommendation_rows(find_results if isinstance(find_results, dict) else {})
+    target_read_count = read_limit if read_limit and read_limit > 0 else len(original_recommendation_rows)
+    reading_rows = _current_reading_packet_rows(find_results if isinstance(find_results, dict) else {}, full_text_packet if isinstance(full_text_packet, dict) else {}, target_read_count)
+    return original_recommendation_rows, reading_rows, _reading_packet_find_results(find_results if isinstance(find_results, dict) else {}, reading_rows)
+
+
+def _current_reading_validation_metadata(original_recommendation_rows: list[dict[str, Any]], reading_rows: list[dict[str, Any]], full_text_packet: dict[str, Any] | None, read_limit: int) -> dict[str, Any]:
+    replacement_rows = [row for row in reading_rows if row.get("reading_packet_role") == "replacement_for_unavailable_recommendation"]
+    return {
+        "normalization_source": "current_reading_packet_with_full_text_replacements_guard",
+        "original_recommendation_count": len(original_recommendation_rows),
+        "reading_replacement_count": len(replacement_rows),
+        "reading_replacement_titles": [first_text(row, "title", "paper_title") for row in replacement_rows],
+        "full_text_packet": full_text_packet_summary(full_text_packet if isinstance(full_text_packet, dict) else {}),
+        "read_limit_input": read_limit,
+        "enforced_current_recommendation_count": len(reading_rows),
+    }
+
+
 def _current_recommendation_identities(find_results: dict[str, Any]) -> tuple[set[str], list[str]]:
     identities: set[str] = set()
     titles: list[str] = []
@@ -1905,20 +2030,36 @@ def load_full_text_packet_from_taste_dir(taste_dir: Path, run_id: str) -> dict[s
 
 def current_find_full_text_packet_evidence_report(taste_dir: Path, run_id: str, find_results: dict[str, Any]) -> dict[str, Any]:
     packet = load_full_text_packet_from_taste_dir(taste_dir, run_id)
+    recommendation_rows = _current_recommendation_rows(find_results if isinstance(find_results, dict) else {})
+    target_count = len(recommendation_rows)
+    reading_rows = _current_reading_packet_rows(find_results if isinstance(find_results, dict) else {}, packet, target_count)
     packet_index = _full_text_packet_index(packet)
+    packet_path = str(packet.get("path") or "")
     readable_titles: list[str] = []
     missing_titles: list[str] = []
-    for row in _current_recommendation_rows(find_results if isinstance(find_results, dict) else {}):
+    replacement_titles: list[str] = []
+    replaced_recommendation_titles: list[str] = []
+    for row in reading_rows:
         title = str(row.get("title") or row.get("paper_title") or "Untitled").strip()
         entry = _matching_full_text_packet_entry(row, packet_index)
-        evidence = _packet_full_text_evidence(entry, str(packet.get("path") or ""))
+        evidence = _packet_full_text_evidence(entry, packet_path)
         if _full_text_evidence_chars(evidence) >= FULL_TEXT_MIN_CHARS and str(evidence.get("text_path") or "").strip():
             readable_titles.append(title)
+            if row.get("reading_packet_role") == "replacement_for_unavailable_recommendation":
+                replacement_titles.append(title)
+                replaced = str(row.get("replacement_for_unavailable_recommendation") or "").strip()
+                if replaced:
+                    replaced_recommendation_titles.append(replaced)
         else:
             missing_titles.append(title)
     return {
         "run_id": run_id,
         "expected_recommendation_count": len(readable_titles) + len(missing_titles),
+        "original_recommendation_count": target_count,
+        "reading_packet_count": len(reading_rows),
+        "reading_replacement_count": len(replacement_titles),
+        "reading_replacement_titles": replacement_titles[:20],
+        "replaced_unavailable_recommendation_titles": replaced_recommendation_titles[:20],
         "full_text_evidence_count": len(readable_titles),
         "pending_without_evidence_count": len(missing_titles),
         "full_text_evidence_titles": readable_titles[:20],
@@ -1947,6 +2088,11 @@ def _current_find_evidence_preflight_validation(run_id: str, report: dict[str, A
         "expected_recommendation_count": expected,
         "actual_reading_count": 0,
         "full_text_evidence_count": evidence_count,
+        "reading_packet_count": report.get("reading_packet_count"),
+        "reading_replacement_count": report.get("reading_replacement_count", 0),
+        "reading_replacement_titles": report.get("reading_replacement_titles", []),
+        "replaced_unavailable_recommendation_titles": report.get("replaced_unavailable_recommendation_titles", []),
+        "original_recommendation_count": report.get("original_recommendation_count"),
         "full_text_reading_count": 0,
         "pending_deep_read_synthesis_count": 0 if missing_count else expected,
         "pending_without_evidence_count": missing_count,
@@ -3949,7 +4095,9 @@ def current_find_selection_artifacts_follow_takeover(takeover: Any, taste_dir: P
 
 def _refresh_current_find_claude_outputs(paths, taste_dir: Path, run_id: str, find_results: dict[str, Any], effective_read_limit: int, find_revision: dt.datetime | None) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str], dict[str, Any]]:
     readings, ideas, plans = load_claude_outputs(taste_dir, run_id, find_results, effective_read_limit, paths.state, find_revision, paths, write_pending_validation=False)
-    positive_ids, _positive_titles = _current_positive_identities(find_results)
+    full_text_packet = load_full_text_packet_from_taste_dir(taste_dir, run_id)
+    original_recommendation_rows, reading_rows_for_validation, validation_find_results = _current_reading_validation_view(find_results, full_text_packet, effective_read_limit)
+    positive_ids, _positive_titles = _current_positive_identities(validation_find_results)
     readings = _enforce_current_find_claim_policy(readings, positive_ids)
     read_payload = load_json(taste_dir / "read_results.json", {})
     idea_payload = load_json(taste_dir / "ideas.json", {})
@@ -3962,17 +4110,16 @@ def _refresh_current_find_claude_outputs(paths, taste_dir: Path, run_id: str, fi
         plan_payload if isinstance(plan_payload, dict) else {},
         current_plan if isinstance(current_plan, dict) else {},
     )
-    valid, validation = validate_claude_readings_against_current_find(readings, find_results, effective_read_limit, paths, run_id)
+    valid, validation = validate_claude_readings_against_current_find(readings, validation_find_results, len(reading_rows_for_validation), paths, run_id)
     validation = {
         **validation,
         "run_id": run_id,
         "source": CLAUDE_TAKEOVER_SOURCE,
-        "full_text_packet": full_text_packet_summary(load_full_text_packet_from_taste_dir(taste_dir, run_id)),
         "generated_at": now_iso(),
+        **_current_reading_validation_metadata(original_recommendation_rows, reading_rows_for_validation, full_text_packet, effective_read_limit),
     }
     save_json(paths.state / "current_find_claude_reading_validation.json", validation)
     return readings, ideas, plans, targeted_queries, validation
-
 
 def current_find_selected_execution_summary(ideas: list[dict[str, Any]], plans: list[dict[str, Any]]) -> dict[str, Any]:
     """Summarize the explicit current-Find execution selection without mutating artifacts."""
@@ -5093,7 +5240,7 @@ def _recover_current_find_readings_from_subagents(paths: Any, run_id: str, find_
             _index_better_candidate(candidate_index, f"title:{title}", candidate)
     packet_index = _full_text_packet_index(full_text_packet)
     recovered: list[dict[str, Any]] = []
-    for find_row in _current_recommendation_rows(find_results):
+    for find_row in _current_reading_packet_rows(find_results, full_text_packet, 0):
         match = _best_candidate_for_find_row(candidate_index, candidates, find_row)
         if not match:
             continue
@@ -5158,7 +5305,7 @@ def _maybe_recover_read_results_from_subagent_logs(
     recovered_score = _reading_pass_count(recovered)
     if recovered_score < existing_score:
         return existing_readings
-    expected = len(_current_recommendation_rows(find_results)) if isinstance(find_results, dict) else len(recovered)
+    expected = len(_current_reading_packet_rows(find_results, full_text_packet, 0)) if isinstance(find_results, dict) else len(recovered)
     if expected and len(recovered) < expected:
         return existing_readings
     recovered_at = now_iso()
@@ -5193,7 +5340,7 @@ def _maybe_recover_read_results_from_subagent_logs(
 def _select_current_find_readings_from_candidates(candidates: list[dict[str, Any]], find_results: dict[str, Any], full_text_packet: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(find_results, dict):
         return [row for row in candidates if isinstance(row, dict) and _valid_claude_reading(row)]
-    recommendation_rows = _current_recommendation_rows(find_results)
+    recommendation_rows = _current_reading_packet_rows(find_results, full_text_packet, 0)
     if not recommendation_rows:
         return [row for row in candidates if isinstance(row, dict) and _valid_claude_reading(row)]
     candidate_index: dict[str, dict[str, Any]] = {}
@@ -5299,7 +5446,9 @@ def load_claude_outputs(taste_dir: Path, run_id: str, find_results: dict[str, An
     if _contains_stale_execution_binding({"ideas": ideas, "plans": plans}):
         return [], [], []
     if isinstance(find_results, dict):
-        valid, report = validate_claude_readings_against_current_find(readings, find_results, read_limit, project_paths, run_id)
+        reading_rows_for_validation = _current_reading_packet_rows(find_results, full_text_packet, read_limit)
+        validation_find_results = _reading_packet_find_results(find_results, reading_rows_for_validation)
+        valid, report = validate_claude_readings_against_current_find(readings, validation_find_results, len(reading_rows_for_validation), project_paths, run_id)
         if state_dir is not None and (write_pending_validation or readings):
             validation_payload = {**report, "run_id": run_id, "source": CLAUDE_TAKEOVER_SOURCE, "full_text_packet": full_text_packet_summary(full_text_packet), "generated_at": now_iso()}
             if not idea_current or not plan_current:
@@ -6060,17 +6209,17 @@ def _write_find_changed_blocker(paths, old_run_id: str, new_run_id: str, takeove
 
 
 def normalize_claude_outputs_to_current_find_policy(project: str, paths, run_id: str, find_results: dict[str, Any], takeover: dict[str, Any], read_limit: int, idea_count: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
-    positive_ids, positive_titles = _current_positive_identities(find_results)
-    recommendation_ids, recommendation_titles = _current_recommendation_identities(find_results)
-    recommendation_rows = _current_recommendation_rows(find_results)
-    supplemental_audit_rows: list[dict[str, Any]] = []
     cfg = load_project_config(project)
-    strong_rows = [row for row in recommendation_rows if _identity_values(row) & positive_ids]
-    audit_rows = [row for row in recommendation_rows if not (_identity_values(row) & positive_ids)] + supplemental_audit_rows
     idea_payload = _load_best_claude_payload(paths, run_id, "ideas.json")
     plan_payload = _load_best_claude_payload(paths, run_id, "plans.json")
     read_payload = _load_best_claude_payload(paths, run_id, "read_results.json")
     full_text_packet = load_current_full_text_packet(paths, run_id)
+    original_recommendation_rows, recommendation_rows, validation_find_results = _current_reading_validation_view(find_results, full_text_packet, read_limit)
+    positive_ids, positive_titles = _current_positive_identities(validation_find_results)
+    recommendation_ids, recommendation_titles = _current_recommendation_identities(validation_find_results)
+    supplemental_audit_rows: list[dict[str, Any]] = []
+    strong_rows = [row for row in recommendation_rows if _identity_values(row) & positive_ids]
+    audit_rows = [row for row in recommendation_rows if not (_identity_values(row) & positive_ids)] + supplemental_audit_rows
     packet_index = _full_text_packet_index(full_text_packet)
     current_revision = parse_iso_time(takeover.get("current_find_revision_at") or takeover.get("current_find_revision") or takeover.get("find_results_updated_at"))
     taste_dir = paths.planning / "finding"
@@ -6079,7 +6228,7 @@ def normalize_claude_outputs_to_current_find_policy(project: str, paths, run_id:
     for row in as_list(read_payload.get("readings")):
         if isinstance(row, dict):
             reading_candidates.append(row)
-    selected_readings = _select_current_find_readings_from_candidates(reading_candidates, find_results, full_text_packet) if reading_candidates else []
+    selected_readings = _select_current_find_readings_from_candidates(reading_candidates, validation_find_results, full_text_packet) if reading_candidates else []
     if selected_readings:
         readings = normalize_readings_full_text_evidence(selected_readings, full_text_packet)
         readings = _enforce_current_find_claim_policy(readings, positive_ids)
@@ -6151,7 +6300,7 @@ def normalize_claude_outputs_to_current_find_policy(project: str, paths, run_id:
         "targeted_search_queries": queries,
     }
     taste_dir = paths.planning / "finding"
-    validation_ok, validation = validate_claude_readings_against_current_find(readings, find_results, len(recommendation_rows), paths, run_id)
+    validation_ok, validation = validate_claude_readings_against_current_find(readings, validation_find_results, len(recommendation_rows), paths, run_id)
     execution_selection = apply_current_find_execution_selection(ideas, plans, source=CLAUDE_TAKEOVER_SOURCE, executable=validation_ok)
     selection_fields = {key: execution_selection.get(key) for key in CURRENT_FIND_SELECTION_FIELD_KEYS}
     idea_results.update(selection_fields)
@@ -6163,10 +6312,7 @@ def normalize_claude_outputs_to_current_find_policy(project: str, paths, run_id:
         "source": CLAUDE_TAKEOVER_SOURCE,
         "generated_at": generated_at,
         "normalized": True,
-        "normalization_source": "current_user_visible_recommendations_only_with_full_text_packet_guard",
-        "full_text_packet": full_text_packet_summary(full_text_packet),
-        "read_limit_input": read_limit,
-        "enforced_current_recommendation_count": len(recommendation_rows),
+        **_current_reading_validation_metadata(original_recommendation_rows, recommendation_rows, full_text_packet, read_limit),
     })
     save_json(paths.state / "current_find_claude_reading_validation.json", validation)
     if not validation_ok:
@@ -7134,8 +7280,15 @@ def run_llm_current_find_fallback(project: str, paths, cfg: dict[str, Any], tast
     plans = _normalize_llm_fallback_plans([row for row in as_list(payload.get("plans")) if isinstance(row, dict)], ideas, model)
     ideas, plans = enrich_public_projections(ideas, plans)
     targeted_queries = [str(item).strip() for item in as_list(payload.get("targeted_search_queries")) if str(item).strip()]
-    min_required_readings = min(effective_read_limit, max(1, len(_current_recommendation_identities(find_results)[1]) or len(_current_positive_identities(find_results)[1])))
-    validation_ok, validation = validate_claude_readings_against_current_find(readings, find_results, min_required_readings, paths, run_id)
+    original_recommendation_rows, fallback_recommendation_rows, validation_find_results = _current_reading_validation_view(find_results, full_text_packet, effective_read_limit)
+    min_required_readings = len(fallback_recommendation_rows) or min(effective_read_limit, max(1, len(_current_recommendation_identities(find_results)[1]) or len(_current_positive_identities(find_results)[1])))
+    validation_ok, validation = validate_claude_readings_against_current_find(readings, validation_find_results, min_required_readings, paths, run_id)
+    validation.update({
+        "run_id": run_id,
+        "source": LLM_CURRENT_FIND_FALLBACK_SOURCE,
+        "generated_at": generated_at,
+        **_current_reading_validation_metadata(original_recommendation_rows, fallback_recommendation_rows, full_text_packet, effective_read_limit),
+    })
     idea_issues = _idea_rows_contract_issues(ideas, idea_count)
     content_ready = bool(validation_ok and len(readings) == min_required_readings and len(ideas) >= idea_count and not idea_issues and len(plans) >= idea_count and len(targeted_queries) >= 3)
     selection_ready = current_find_selected_execution_ready(ideas, plans) if content_ready else False
@@ -7251,9 +7404,15 @@ def main() -> int:
             recommendation_count = len(_current_recommendation_identities(find_results)[1])
             positive_count = len(_current_positive_identities(find_results)[1])
             effective_read_limit = args.read_limit if args.read_limit and args.read_limit > 0 else max(1, recommendation_count or positive_count)
-            papers = _current_recommendation_rows(find_results)[:effective_read_limit]
+            full_text_packet = load_current_full_text_packet(paths, run_id)
+            papers = _current_reading_packet_rows(find_results, full_text_packet, effective_read_limit)
             if not papers:
-                raise SystemExit("current Find has no strong/articles/read candidates to read after full-text repair")
+                raise SystemExit("current Find has no full-text reading packet after full-text repair")
+        else:
+            full_text_packet = load_current_full_text_packet(paths, run_id)
+            papers = _current_reading_packet_rows(find_results, full_text_packet, effective_read_limit)
+            if not papers:
+                raise SystemExit("current Find has no full-text reading packet after full-text repair")
         find_revision = current_find_revision_time(paths, find_results)
     if not args.skip_claude and not _current_find_claude_available(args.project, cfg):
         return run_llm_current_find_fallback(
@@ -7275,7 +7434,7 @@ def main() -> int:
         plan_payload = load_json(taste_dir / "plans.json", {})
         current_plan = load_json(paths.state / "current_find_research_plan.json", {})
         targeted_queries = extract_targeted_search_queries(paths, read_payload if isinstance(read_payload, dict) else {}, idea_payload if isinstance(idea_payload, dict) else {}, plan_payload if isinstance(plan_payload, dict) else {}, current_plan if isinstance(current_plan, dict) else {})
-        min_required_readings = min(effective_read_limit, max(1, len(_current_recommendation_identities(find_results)[1]) or len(_current_positive_identities(find_results)[1])))
+        min_required_readings = min(effective_read_limit, max(1, len(papers)))
         validation_payload = load_json(paths.state / "current_find_claude_reading_validation.json", {})
         validation_ok = bool(current_reading_validation_ready(validation_payload, run_id, min_required_readings) and claude_output_payloads_are_current([validation_payload], find_revision))
         validation_requires_fresh_takeover = current_reading_validation_requires_fresh_takeover(validation_payload, run_id)
