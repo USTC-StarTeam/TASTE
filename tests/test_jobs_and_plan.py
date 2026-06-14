@@ -2107,16 +2107,15 @@ def test_full_cycle_blocked_job_uses_current_cycle_summary(monkeypatch):
     from auto_research.web import server
 
     current_summary = "完整科研自循环已停止；当前状态=blocked_no_viable_reference_base；没有正在运行的 full-cycle。"
-    monkeypatch.setattr(
-        server,
-        "project_summary",
-        lambda _project, compact=True: {
-            "status": "blocked_no_viable_reference_base",
-            "summary": current_summary,
-            "full_research_cycle": {"status": "blocked_no_viable_reference_base", "summary": current_summary},
-            "current_blocker": {"category": "submission_readiness", "summary": "venue_policy_known"},
-        },
-    )
+    summary_payload = {
+        "status": "blocked_no_viable_reference_base",
+        "summary": current_summary,
+        "full_research_cycle": {"status": "blocked_no_viable_reference_base", "summary": current_summary},
+        "current_blocker": {"category": "submission_readiness", "summary": "venue_policy_known"},
+    }
+    server._JOB_LIST_PROJECT_SUMMARY_CACHE.clear()
+    monkeypatch.setattr(server, "project_summary", lambda _project, compact=True: summary_payload)
+    monkeypatch.setattr(server, "_job_list_project_summary", lambda _project, compact=True: summary_payload)
 
     row = server._compact_job_for_list({
         "job_id": "full-cycle_stopped",
@@ -3366,8 +3365,10 @@ def test_blocker_action_plan_command_supports_optional_venue(monkeypatch):
     with_venue = blocker.command("demo", "ICLR", "audit_paper_evidence.py")
     without_venue = blocker.command("demo", "audit_paper_evidence.py")
 
-    assert with_venue == "/env/python modules/writing/scripts/audit_paper_evidence.py --project demo --venue ICLR"
-    assert without_venue == "/env/python modules/writing/scripts/audit_paper_evidence.py --project demo"
+    assert with_venue.startswith("PYTHONPATH=")
+    assert " /env/python modules/writing/scripts/audit_paper_evidence.py --project demo --venue ICLR" in with_venue
+    assert without_venue.startswith("PYTHONPATH=")
+    assert " /env/python modules/writing/scripts/audit_paper_evidence.py --project demo" in without_venue
 
 
 def test_blocker_action_plan_ignores_unrelated_finetune_process(monkeypatch, tmp_path):
@@ -3830,6 +3831,108 @@ def test_reference_protocol_import_probe_surfaces_dependency_blocker(monkeypatch
     assert "json_repair" in top_level_probe["human_summary"]
 
 
+def test_compact_project_summary_surfaces_selected_base_semantic_provenance_gate(monkeypatch, tmp_path):
+    from auto_research.web import project_bridge
+
+    project = "demo_project"
+    root = tmp_path / project
+    state = root / "state"
+    finding = root / "planning" / "finding"
+    repo = root / "repos" / "selected" / "generic_seqrec"
+    state.mkdir(parents=True)
+    finding.mkdir(parents=True)
+    repo.mkdir(parents=True)
+    run_id = "find_semantic_gate"
+    dataset = "demo-data"
+
+    write_json(
+        finding / "find_results.json",
+        {
+            "run_id": run_id,
+            "strong_recommendations": [recommended_paper(f"paper-{idx}", f"Paper {idx}") for idx in range(20)],
+            "recommendation_target_count": 20,
+            "recommendation_shortfall": 0,
+        },
+    )
+    write_json(finding / "find_progress.json", {"run_id": run_id, "phase": "complete", "strong_recommendation_count": 20, "recommendation_target_count": 20, "recommendation_shortfall": 0, "counts": {}})
+    write_json(finding / "read_results.json", {"run_id": run_id, "readings": [{"paper_id": f"paper-{idx}", "title": f"Paper {idx}", "full_text_available": True, "pdf_text_chars": 2400} for idx in range(20)]})
+    write_json(finding / "ideas.json", {"run_id": run_id, "ideas": [{"id": "idea_demo"}]})
+    write_json(finding / "plans.json", {"run_id": run_id, "plans": [{"plan_id": "plan_demo", "idea_id": "idea_demo"}]})
+    write_json(state / "current_find_research_plan.json", {"run_id": run_id, "status": "ready", "claude_current_find_ready": True, "execution_ready": True, "selected_plan_id": "plan_demo", "selected_idea_id": "idea_demo"})
+    write_json(
+        state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": run_id,
+            "selection_stage": "environment_claude_code",
+            "selection_gate": "accepted_by_claude_topic_fit",
+            "accepted_by_claude": True,
+            "selected_plan_id": "plan_demo",
+            "selected_idea_id": "idea_demo",
+            "selected": {"name": "org/GenericSeqRec", "title": "Generic Sequential Recommender", "url": "https://example.test/repo", "repo_path": str(repo), "dataset": dataset, "ready_datasets": [dataset], "fresh_find_run_id": run_id},
+        },
+    )
+    write_json(state / "active_repo.json", {"name": "org/GenericSeqRec", "repo_path": str(repo), "selected_base_title": "Generic Sequential Recommender", "dataset": dataset, "ready_datasets": [dataset]})
+    write_json(state / "fresh_base_implementation_plan.json", {"fresh_find_run_id": run_id, "status": "implementation_ready", "repo": {"name": "org/GenericSeqRec", "repo_path": str(repo)}, "ready_datasets": [dataset]})
+    write_json(state / "real_dataset_probe.json", {"status": "passed", "decision": "loader_probe_complete", "ready_datasets": [dataset], "probes": [{"dataset": dataset, "root": str(repo / "dataset" / dataset), "loader_probe_success": True}]})
+    write_json(state / "reference_reproduction_gate.json", {"status": "pass", "decision": "continue_base", "human_summary": "参考工作复现已达到可继续作为基底的门槛。"})
+    write_json(state / "base_switch_gate.json", {"status": "blocked", "decision": "base_switch_not_authorized"})
+    write_json(state / "full_research_cycle.json", {"status": "blocked_after_max_cycles", "summary": "完整科研自循环已停在实验证据审计；参考复现已通过，但当前主线还缺少候选实验结果。", "current_goal": "继续真实候选实验。", "full_cycle_job": {"status": "stale", "process_alive": False}})
+    write_json(
+        state / "selected_base_viability_gate.json",
+        {
+            "status": "blocked",
+            "decision": "base_switch_gate_required",
+            "current_selected_repo": "org/GenericSeqRec",
+            "current_selected_repo_path": str(repo),
+            "selected_base_title": "Generic Sequential Recommender",
+            "fresh_find_run_id": run_id,
+            "selected_plan_id": "plan_demo",
+            "selected_idea_id": "idea_demo",
+            "semantic_data_provenance_review": {
+                "status": "blocked",
+                "deterministic_gate_required": True,
+                "project_requires_llm_semantics": True,
+                "llm_semantic_guard_status": "blocked",
+                "has_real_llm_embedding_evidence": False,
+                "text_metadata_provenance": {"status": "blocked", "has_text_metadata_evidence": False, "dataset": dataset, "repo_path": str(repo)},
+            },
+        },
+    )
+    write_json(state / "scientific_progress_gate.json", {"status": "blocked", "llm_semantic_evidence_guard": "blocked"})
+
+    monkeypatch.setattr(project_bridge, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(project_bridge, "_remote_process_rows", lambda: [])
+    monkeypatch.setattr(project_bridge, "_has_active_experiment_training", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(project_bridge, "_current_project_source_selection", lambda _project, _root: {"venue_ids": ["openreview_iclr_2026"], "years": [2026]})
+    monkeypatch.setattr(
+        project_bridge,
+        "_current_environment_selection",
+        lambda _root: {
+            "valid": True,
+            "current_find_run_id": run_id,
+            "fresh_find_run_id": run_id,
+            "selection_stage": "environment_claude_code",
+            "selection_gate": "selected_base_viability_gate_current_route",
+            "selected_plan_id": "plan_demo",
+            "selected_idea_id": "idea_demo",
+            "selected": {"name": "org/GenericSeqRec", "repo_path": str(repo), "title": "Generic Sequential Recommender", "dataset": dataset, "ready_datasets": [dataset]},
+        },
+    )
+    project_bridge._PROJECT_SUMMARY_CACHE.clear()
+
+    summary = project_bridge._fast_project_summary(project, root, {"name": project, "topic": "Demo topic", "target_venue": "ICLR"})
+
+    assert "semantic-provenance/base-switch" in summary["summary"]
+    blocker = summary["human_supervision"]["blocker"]
+    assert blocker["category"] == "semantic_data_provenance_required"
+    assert blocker["title"] == "缺少 LLM/text-semantic 数据 provenance"
+    assert "纯行为或损失级候选实验无法清除此门控" in blocker["summary"]
+    assert "semantic-provenance gate" in blocker["next_action"]
+    assert summary["human_gate_summary"]["semantic_data_provenance"]["dataset"] == dataset
+    assert summary["human_gate_summary"]["semantic_data_provenance"]["has_text_metadata_evidence"] is False
+    assert "LLM/text-semantic" in summary["current_blocker"]["summary"]
+
+
 def test_public_job_payload_hides_paper_agent_repair_diagnostics_from_summaries_only():
     raw = {
         "stage": "paper",
@@ -3988,6 +4091,159 @@ def test_pipeline_guard_uses_selected_base_viability_current_route(monkeypatch, 
     assert guard._current_impl_repo_path(paths) == reference_repo
     assert guard.fresh_base_hard_gate_blocked("demo_project") is False
 
+
+
+def test_selected_base_viability_escalates_llm_semantic_route_without_text_provenance(monkeypatch, tmp_path):
+    ensure_script_paths()
+    viability = importlib.reload(importlib.import_module("audit_selected_base_viability"))
+    root = tmp_path / "project"
+    state = root / "state"
+    reports = root / "reports"
+    repo = root / "repos" / "selected" / "generic_seqrec"
+    data_root = repo / "dataset" / "demo-data"
+    state.mkdir(parents=True)
+    reports.mkdir(parents=True)
+    data_root.mkdir(parents=True)
+    (data_root / "inter.csv").write_text("user_id,item_id,rating,timestamp,domain\n1,10,5,123,beauty\n", encoding="utf-8")
+    paths = type("Paths", (), {"root": root, "state": state, "reports": reports})()
+    monkeypatch.setattr(viability, "build_paths", lambda _project: paths)
+
+    write_json(state / "active_repo.json", {"name": "org/GenericSeqRec", "repo_path": str(repo), "selected_base_title": "Generic Sequential Recommender"})
+    write_json(state / "reference_reproduction_gate.json", {"status": "pass", "decision": "continue_base", "best_reproduction": {"dataset": "demo-data"}})
+    write_json(state / "fresh_base_reference_full_reproduction_audit.json", {"repo_name": "org/GenericSeqRec", "repo_path": str(repo), "dataset": "demo-data"})
+    rows = []
+    for idx in range(3):
+        exp_id = f"behavior_loss_candidate_{idx}"
+        rows.append(
+            {
+                "experiment_id": exp_id,
+                "repo_path": str(repo),
+                "dataset": "demo-data",
+                "comparison_role": "candidate",
+                "method": "causal_preference_loss" if idx == 2 else "causal_behavior_loss",
+                "method_slug": "causal_preference_loss" if idx == 2 else "causal_behavior_loss",
+                "comparison_status": "not_above_selected_base_reference" if idx == 2 else "not_above_control",
+                "status": "completed",
+                "audit_ready": True,
+                "promotion_status": "candidate_observation_only",
+                "evidence_status": "candidate_observation_only",
+                "claim_verdict": "unsupported",
+            }
+        )
+    write_json(state / "experiment_registry.json", rows)
+    write_json(
+        state / "scientific_progress_gate.json",
+        {
+            "status": "blocked",
+            "promotable_candidate_audit_ready_runs": 0,
+            "non_promotable_candidate_runs": [row["experiment_id"] for row in rows],
+            "llm_semantic_evidence_guard": "blocked",
+        },
+    )
+    write_json(
+        state / "paper_evidence_audit.json",
+        {
+            "llm_semantic_evidence_guard": {
+                "status": "blocked",
+                "project_requires_llm_semantics": True,
+                "has_real_llm_embedding_evidence": False,
+                "real_llm_embedding_evidence": [],
+                "issues": ["No passed artifact-local real LLM/API text-embedding probe was found."],
+            }
+        },
+    )
+    write_json(
+        state / "repo_data_requirements.json",
+        {
+            "local_statuses": [
+                {
+                    "dataset": "demo-data",
+                    "ready_root": str(data_root),
+                    "candidate_roots": [
+                        {"root": str(data_root), "csv_probe": {"success": True, "header": ["user_id", "item_id", "rating", "timestamp", "domain"]}}
+                    ],
+                }
+            ]
+        },
+    )
+    write_json(state / "real_dataset_probe.json", {"probes": [{"dataset": "demo-data", "root": str(data_root), "loader_probe_success": True}]})
+
+    payload = viability.build_gate("demo", "ICLR")
+
+    assert payload["decision"] == "base_switch_gate_required"
+    assert payload["semantic_data_provenance_review"]["deterministic_gate_required"] is True
+    assert payload["semantic_data_provenance_review"]["text_metadata_provenance"]["has_text_metadata_evidence"] is False
+    assert set(payload["current_repo_candidate_runs"]) == {row["experiment_id"] for row in rows}
+    assert "文本/元数据 provenance" in payload["issue"]
+
+
+def test_selected_base_viability_keeps_current_repair_when_text_provenance_exists(monkeypatch, tmp_path):
+    ensure_script_paths()
+    viability = importlib.reload(importlib.import_module("audit_selected_base_viability"))
+    root = tmp_path / "project"
+    state = root / "state"
+    reports = root / "reports"
+    repo = root / "repos" / "selected" / "generic_seqrec"
+    data_root = repo / "dataset" / "demo-data"
+    state.mkdir(parents=True)
+    reports.mkdir(parents=True)
+    data_root.mkdir(parents=True)
+    (data_root / "item_metadata.csv").write_text("item_id,item_title,description\n10,Demo item,Readable text\n", encoding="utf-8")
+    paths = type("Paths", (), {"root": root, "state": state, "reports": reports})()
+    monkeypatch.setattr(viability, "build_paths", lambda _project: paths)
+
+    write_json(state / "active_repo.json", {"name": "org/GenericSeqRec", "repo_path": str(repo), "selected_base_title": "Generic Sequential Recommender"})
+    write_json(state / "reference_reproduction_gate.json", {"status": "pass", "decision": "continue_base", "best_reproduction": {"dataset": "demo-data"}})
+    write_json(state / "fresh_base_reference_full_reproduction_audit.json", {"repo_name": "org/GenericSeqRec", "repo_path": str(repo), "dataset": "demo-data"})
+    write_json(
+        state / "experiment_registry.json",
+        [
+            {
+                "experiment_id": "behavior_loss_candidate",
+                "repo_path": str(repo),
+                "dataset": "demo-data",
+                "comparison_role": "candidate",
+                "method": "causal_behavior_loss",
+                "status": "completed",
+                "audit_ready": True,
+                "promotion_status": "candidate_observation_only",
+                "evidence_status": "candidate_observation_only",
+                "claim_verdict": "unsupported",
+            }
+        ],
+    )
+    write_json(state / "scientific_progress_gate.json", {"status": "blocked", "promotable_candidate_audit_ready_runs": 0, "llm_semantic_evidence_guard": "blocked"})
+    write_json(
+        state / "paper_evidence_audit.json",
+        {
+            "llm_semantic_evidence_guard": {
+                "status": "blocked",
+                "project_requires_llm_semantics": True,
+                "has_real_llm_embedding_evidence": False,
+                "real_llm_embedding_evidence": [],
+            }
+        },
+    )
+    write_json(
+        state / "repo_data_requirements.json",
+        {
+            "local_statuses": [
+                {
+                    "dataset": "demo-data",
+                    "ready_root": str(data_root),
+                    "candidate_roots": [
+                        {"root": str(data_root), "csv_probe": {"success": True, "header": ["item_id", "item_title", "description"]}}
+                    ],
+                }
+            ]
+        },
+    )
+
+    payload = viability.build_gate("demo", "ICLR")
+
+    assert payload["decision"] == "continue_experiment_evidence_repair"
+    assert payload["semantic_data_provenance_review"]["deterministic_gate_required"] is False
+    assert payload["semantic_data_provenance_review"]["text_metadata_provenance"]["has_text_metadata_evidence"] is True
 
 def test_full_cycle_literature_packet_refresh_is_environment_not_find(tmp_path):
     from auto_research.web import project_bridge

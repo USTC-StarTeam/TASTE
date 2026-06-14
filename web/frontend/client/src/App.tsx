@@ -3238,6 +3238,7 @@ function publicStatusText(value: any, lang: Lang = "zh") {
     blocked_after_max_cycles: { zh: "已暂停，等待下一轮自动处理", en: "paused after configured cycles" },
     stale_full_research_cycle_snapshot: { zh: "已停止", en: "stopped" },
     experiment_evidence_audit: { zh: "实验证据审计", en: "experiment evidence audit" },
+    semantic_data_provenance_required: { zh: "语义数据 provenance 门控", en: "semantic data provenance gate" },
     continue_experiment_evidence_repair: { zh: "继续补齐实验证据", en: "continue experiment evidence repair" },
     wait_for_environment_base_selection: { zh: "环境审查后执行", en: "run after environment review" },
     waiting_for_environment_base_selection: { zh: "环境审查后执行", en: "run after environment review" },

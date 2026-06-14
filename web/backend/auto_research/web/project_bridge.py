@@ -4176,6 +4176,90 @@ def _public_gate_status_summary(value: Any) -> dict[str, Any]:
     return out
 
 
+def _selected_base_viability_public_blocker(gate: Any, base_display: str = "") -> dict[str, Any]:
+    row = gate if isinstance(gate, dict) else {}
+    status = str(row.get("status") or "").strip().lower()
+    decision = str(row.get("decision") or "").strip().lower()
+    if status != "blocked" or decision not in {"base_switch_gate_required", "continue_experiment_evidence_repair"}:
+        return {}
+
+    semantic = row.get("semantic_data_provenance_review") if isinstance(row.get("semantic_data_provenance_review"), dict) else {}
+    text_meta = semantic.get("text_metadata_provenance") if isinstance(semantic.get("text_metadata_provenance"), dict) else {}
+    base_label = str(
+        base_display
+        or row.get("selected_base_title")
+        or row.get("current_selected_repo")
+        or row.get("current_repo")
+        or "当前基底"
+    ).strip()
+    dataset = str(text_meta.get("dataset") or row.get("dataset") or row.get("selected_dataset") or "").strip()
+    dataset_clause = f"（数据集：{dataset}）" if dataset else ""
+    semantic_required = bool(
+        semantic.get("deterministic_gate_required")
+        or (
+            str(semantic.get("status") or "").strip().lower() == "blocked"
+            and bool(semantic.get("project_requires_llm_semantics"))
+            and not bool(semantic.get("has_real_llm_embedding_evidence"))
+            and text_meta.get("has_text_metadata_evidence") is False
+        )
+    )
+    semantic_public = {
+        "status": str(semantic.get("status") or ""),
+        "deterministic_gate_required": bool(semantic.get("deterministic_gate_required")),
+        "project_requires_llm_semantics": bool(semantic.get("project_requires_llm_semantics")),
+        "llm_semantic_guard_status": str(semantic.get("llm_semantic_guard_status") or ""),
+        "has_real_llm_embedding_evidence": bool(semantic.get("has_real_llm_embedding_evidence")),
+        "has_text_metadata_evidence": bool(text_meta.get("has_text_metadata_evidence")),
+        "dataset": dataset,
+    }
+    if semantic_required:
+        summary = (
+            f"{base_label} 参考复现已通过，但当前数据路线{dataset_clause}没有可审计的文本/元数据 provenance；"
+            "LLM semantic evidence gate 已阻塞。继续运行纯行为或损失级候选实验无法清除此门控，"
+            "必须先通过 deterministic base-switch / semantic-provenance gate。"
+        )
+        next_action = (
+            "运行 deterministic base-switch / semantic-provenance gate；候选路线保持 proposal-only，或补齐当前路线保存 ID 映射的"
+            "原始文本/元数据 provenance 与 artifact-local LLM/text embedding probe。通过前不继续纯行为级候选实验、不写论文、不提升结论。"
+        )
+        project_summary = (
+            "完整科研自循环已停在 semantic-provenance/base-switch 门控；"
+            f"{base_label} 参考复现已通过，但当前数据路线{dataset_clause}缺少 LLM/text-semantic 实验证据所需的可审计文本/元数据 provenance。"
+        )
+        return {
+            "category": "semantic_data_provenance_required",
+            "title": "缺少 LLM/text-semantic 数据 provenance",
+            "summary": summary,
+            "next_action": next_action,
+            "project_summary": project_summary,
+            "scientific_progress_summary": summary,
+            "semantic_data_provenance": semantic_public,
+        }
+
+    if decision == "base_switch_gate_required":
+        summary = "参考复现已通过；当前主线还缺少可审计、可写入论文的候选实验结果；在独立授权前不能更换当前基底或提升论文结论。"
+        return {
+            "category": "experiment_evidence_audit",
+            "title": "缺少审计就绪候选实验证据",
+            "summary": summary,
+            "next_action": "等待项目代理读取当前缺口证据，并给出下一轮实验或修复动作。",
+            "project_summary": "完整科研自循环已停在实验证据审计；参考复现已通过，但当前主线还缺少可审计、可写入论文的候选实验结果。",
+            "scientific_progress_summary": summary,
+            "semantic_data_provenance": semantic_public,
+        }
+
+    summary = "参考复现已通过；当前主线还缺少可审计、可写入论文的候选实验证据；论文预览可以生成，但不能被标记为投稿通过。"
+    return {
+        "category": "experiment_evidence_audit",
+        "title": "缺少当前主线候选实验证据",
+        "summary": summary,
+        "next_action": "等待项目代理读取候选实验证据缺口，并给出下一步实验动作。",
+        "project_summary": "完整科研自循环已停在实验门控；参考复现已通过，但当前主线还缺少可审计、可写入论文的候选实验证据。",
+        "scientific_progress_summary": summary,
+        "semantic_data_provenance": semantic_public,
+    }
+
+
 def _public_experiment_module_summary(
     *,
     status: Any,
@@ -4702,13 +4786,14 @@ def _human_supervision_summary(root: Path, compact: dict[str, Any], raw_summary:
     reference_smoke_script = "modules/environment/scripts/probe_selected_base_reference.py --mode smoke"
     reference_wrapper_label = f"{base_display} full reference reproduction"
     selected_base_viability_blocked = bool(isinstance(selected_base_viability, dict) and selected_base_viability.get("status") == "blocked" and selected_base_viability.get("decision") in {"base_switch_gate_required", "continue_experiment_evidence_repair"})
+    selected_base_viability_public = _selected_base_viability_public_blocker(selected_base_viability, base_display)
     if selected_base_viability_blocked:
-        blocker_title = "缺少当前主线候选实验证据"
-        blocker_summary = _public_blocker_summary(selected_base_viability, f"{base_display} 参考复现已通过；当前还没有可写入论文的审计就绪候选实验。旧路线只作为历史对照，不是当前参考工作。")
-        next_action = f"保持 {base_display} 为当前基底；由 project agent 在同一数据和评测协议下设计、运行并审计真实候选实验。没有审计就绪的提升证据前，不进入论文或结论提升。"
+        blocker_title = selected_base_viability_public.get("title") or "缺少当前主线候选实验证据"
+        blocker_summary = selected_base_viability_public.get("summary") or _public_blocker_summary(selected_base_viability, f"{base_display} 参考复现已通过；当前还没有可写入论文的审计就绪候选实验。旧路线只作为历史对照，不是当前参考工作。")
+        next_action = selected_base_viability_public.get("next_action") or f"保持 {base_display} 为当前基底；由 project agent 在同一数据和评测协议下设计、运行并审计真实候选实验。没有审计就绪的提升证据前，不进入论文或结论提升。"
         summary_zh = (
             f"主线：{base_display}；投稿目标：{venue}；参考复现已通过。"
-            " 当前阻塞是缺少当前主线下可审计、可推广的候选实验证据；论文和结论提升暂停。"
+            f" 当前阻塞是{blocker_title}；论文和结论提升暂停。"
             f" 当前 Find 已精读 {read_count} 篇、形成 {idea_count} 个 idea 和 {plan_count} 个 plan。"
         )
     elif fresh_reproduction_blocked:
@@ -4796,7 +4881,7 @@ def _human_supervision_summary(root: Path, compact: dict[str, Any], raw_summary:
             "plans": plan_count,
         },
         "blocker": {
-            "category": "experiment_evidence_audit" if selected_base_viability_blocked else "fresh_base_reference_reproduction_required" if fresh_reproduction_blocked else "fresh_base_reference_smoke_required" if fresh_smoke_blocked else "fresh_base_reference_probe_required" if fresh_reference_blocked else "fresh_base_data_required" if fresh_data_blocked else _public_internal_names(blocker_category),
+            "category": selected_base_viability_public.get("category", "experiment_evidence_audit") if selected_base_viability_blocked else "fresh_base_reference_reproduction_required" if fresh_reproduction_blocked else "fresh_base_reference_smoke_required" if fresh_smoke_blocked else "fresh_base_reference_probe_required" if fresh_reference_blocked else "fresh_base_data_required" if fresh_data_blocked else _public_internal_names(blocker_category),
             "title": blocker_title,
             "summary": blocker_summary,
             "data_status": data_probe.get("status") if isinstance(data_probe, dict) else "",
@@ -7742,6 +7827,8 @@ def _public_blocker_summary(blocker: Any, fallback: str = "") -> str:
     reference_passed_context = any(marker in lower for marker in ["reference_reproduction_gate_pass", "reference reproduction passed", "paper_level_reproduction_passed", "completed_reference_reproduction"]) or ("参考复现" in text and "已通过" in text)
     if any(marker in lower for marker in ["hold-markdown-only", "paper_evidence_audit", "submission_readiness", "evidence_gate_allows_template", "paper_evidence", "submission readiness"]):
         add("论文证据/投稿门控未通过，当前只能保留审计材料，不能进入论文或结论提升。")
+    if "semantic_data_provenance" in lower or "semantic-provenance" in lower or ("llm" in lower and "provenance" in lower):
+        add("当前数据路线缺少 LLM/text-semantic 实验所需的可审计文本/元数据 provenance；继续纯行为或损失级候选实验无法清除此门控。")
     if any(marker in lower for marker in ["reference_reproduction_gate", "reference reproduction", "below target", "ndcg_at_10", "reference_reproduction_gate_pass"]):
         if reference_passed_context:
             add("参考复现已通过；当前不是复现问题，而是还缺当前主线下可审计的候选实验。")
@@ -11027,6 +11114,8 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     )
     base_switch_gate_unresolved = bool(base_switch_gate_required and not base_switch_authorized)
     selected_base_viability_blocked = bool(selected_base_viability.get("status") == "blocked" and selected_base_viability.get("decision") in {"base_switch_gate_required", "continue_experiment_evidence_repair"})
+    selected_base_viability_public = _selected_base_viability_public_blocker(selected_base_viability, base_title)
+    selected_base_blocker_category = selected_base_viability_public.get("category", "experiment_evidence_audit") if selected_base_viability_blocked else "experiment_evidence_audit"
     if llm_quota_blocked:
         status = "blocked_literature_llm_quota_exhausted"
     elif reference_full_job_live and not full_job_live:
@@ -11045,9 +11134,9 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         elif base_switch_gate_unresolved:
             summary = _public_run_summary_without_action_plan(summary)
     elif base_switch_gate_unresolved:
-        summary = "完整科研自循环已停在实验证据审计；参考复现已通过，但当前主线还缺少可审计、可写入论文的候选实验结果。"
+        summary = selected_base_viability_public.get("project_summary") or "完整科研自循环已停在实验证据审计；参考复现已通过，但当前主线还缺少可审计、可写入论文的候选实验结果。"
     elif selected_base_viability_blocked and status != "blocked_environment_base_selection_required":
-        summary = "完整科研自循环已停在实验门控；参考复现已通过，但当前主线还缺少可审计、可写入论文的候选实验证据。"
+        summary = selected_base_viability_public.get("project_summary") or "完整科研自循环已停在实验门控；参考复现已通过，但当前主线还缺少可审计、可写入论文的候选实验证据。"
     elif status == "blocked_fresh_base_data_required":
         summary = f"环境阶段已选择当前候选基底：{base_title}；但真实数据/loader 尚未通过，不能进入实验或论文证据。"
     elif status == "blocked_fresh_base_reference_probe_required":
@@ -11346,11 +11435,11 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     submission_blockers = _current_submission_blockers(root)
     running_experiment_summary = "参考复现已通过；当前主线候选实验正在运行。训练完成、写入本地审计记录并刷新门控前，论文写作、结论提升和自动切换基底仍保持阻塞。"
     running_experiment_next_action = "等待当前训练日志和指标落盘；随后由项目代理读取产物并写入审计/刷新门控。"
-    base_switch_gate_summary = "参考复现已通过；当前主线还缺少可审计、可写入论文的候选实验结果；在独立授权前不能更换当前基底或提升论文结论。"
-    base_switch_gate_next_action = "等待项目代理读取当前缺口证据，并给出下一轮实验或修复动作。"
+    base_switch_gate_summary = selected_base_viability_public.get("summary") or "参考复现已通过；当前主线还缺少可审计、可写入论文的候选实验结果；在独立授权前不能更换当前基底或提升论文结论。"
+    base_switch_gate_next_action = selected_base_viability_public.get("next_action") or "等待项目代理读取当前缺口证据，并给出下一轮实验或修复动作。"
     reference_probe_next_action = "使用当前配置的实验环境补齐缺失依赖后重新运行 reference-protocol/import probe；通过前不训练、不写论文、不提升结论。" if _reference_protocol_probe_blocker_summary(protocol_probe, base_title) else "记录当前基底最小环境 manifest，并对 ready 数据集运行有界只读 reference-protocol/import probe；通过前不训练、不写论文、不提升结论。"
     selected_base_label = "当前基底"
-    selected_base_viability_next_action = base_switch_gate_next_action if base_switch_gate_unresolved else running_experiment_next_action if active_experiment_training else "等待项目代理读取候选实验证据缺口，并给出下一步实验动作。"
+    selected_base_viability_next_action = selected_base_viability_public.get("next_action") or (base_switch_gate_next_action if base_switch_gate_unresolved else running_experiment_next_action if active_experiment_training else "等待项目代理读取候选实验证据缺口，并给出下一步实验动作。")
     submission_blocker_next_action = "参考复现和实验门控通过后，继续补齐结论台账、坏例/反例和可靠性证据；在投稿准备度通过前保持只写草稿，禁止论文定稿或结论提升。"
     if selected_plan_gate.get("blocked"):
         blocker_summary = selected_plan_gate["summary"]
@@ -11365,7 +11454,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     elif base_switch_gate_unresolved:
         blocker_summary = base_switch_gate_summary
     elif selected_base_viability_blocked:
-        blocker_summary = "参考复现已通过；当前主线还缺少可审计、可写入论文的候选实验证据；论文预览可以生成，但不能被标记为投稿通过。"
+        blocker_summary = selected_base_viability_public.get("summary") or "参考复现已通过；当前主线还缺少可审计、可写入论文的候选实验证据；论文预览可以生成，但不能被标记为投稿通过。"
     elif reference_full_job_live:
         blocker_summary = "TASTE 正在跑当前参考工作的论文级 full reference reproduction；完成并刷新门控前，不启动候选实验、论文写作或结论提升。"
     elif status == "blocked_fresh_base_reference_probe_required":
@@ -11375,13 +11464,13 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     if not env.get("valid") and not literature_gate_blocked:
         blocker_summary = blocker_summary or "当前 Find/Read/Idea/Plan 已准备；必须由环境阶段 Claude Code 基于当前 run 选择基底，不能使用旧 active_repo。"
     public_blocker_row = _public_blocker_row({
-        "category": selected_plan_gate["category"] if selected_plan_gate.get("blocked") else "literature_llm_quota_exhausted" if llm_quota_blocked else "fresh_find_running" if fresh_find_running else "literature_recommendation_shortfall" if literature_gate_blocked else "environment_anchor_selection_required" if status == "blocked_environment_base_selection_required" else "experiment_evidence_audit" if selected_base_viability_blocked else "fresh_base_reference_reproduction_running" if reference_full_job_live else "fresh_base_reference_probe_required" if status == "blocked_fresh_base_reference_probe_required" else "submission_readiness" if submission_blockers else str(ref_gate.get("decision") or ref_gate.get("status") or ""),
+        "category": selected_plan_gate["category"] if selected_plan_gate.get("blocked") else "literature_llm_quota_exhausted" if llm_quota_blocked else "fresh_find_running" if fresh_find_running else "literature_recommendation_shortfall" if literature_gate_blocked else "environment_anchor_selection_required" if status == "blocked_environment_base_selection_required" else selected_base_blocker_category if selected_base_viability_blocked else "fresh_base_reference_reproduction_running" if reference_full_job_live else "fresh_base_reference_probe_required" if status == "blocked_fresh_base_reference_probe_required" else "submission_readiness" if submission_blockers else str(ref_gate.get("decision") or ref_gate.get("status") or ""),
         "severity": "block",
         "issue": blocker_summary,
         "summary": blocker_summary,
         "human_summary": blocker_summary,
     })
-    public_current_goal = selected_plan_gate["next_action"] if selected_plan_gate.get("blocked") else running_experiment_next_action if active_experiment_training else "环境阶段需要项目代理基于当前推荐文章、Read/Idea/Plan、repo/data/protocol 证据选择当前基底。" if status == "blocked_environment_base_selection_required" else reference_probe_next_action if status == "blocked_fresh_base_reference_probe_required" else _public_text_for_gate(full_cycle.get("current_goal") or "")
+    public_current_goal = selected_plan_gate["next_action"] if selected_plan_gate.get("blocked") else running_experiment_next_action if active_experiment_training else "环境阶段需要项目代理基于当前推荐文章、Read/Idea/Plan、repo/data/protocol 证据选择当前基底。" if status == "blocked_environment_base_selection_required" else selected_base_viability_next_action if selected_base_viability_blocked else reference_probe_next_action if status == "blocked_fresh_base_reference_probe_required" else _public_text_for_gate(full_cycle.get("current_goal") or "")
     public_continuation_required = False if (full_job_live or active_experiment_training) else bool(full_cycle.get("continuation_required"))
     full_cycle_compact = {"status": status, "summary": summary, "summary_zh": summary, "summary_en": _public_status_summary_en(status, base_title=base_title, active_experiment_training=active_experiment_training, reference_full_job_live=reference_full_job_live, fresh_find_running=fresh_find_running, recommendation_shortfall=recommendation_shortfall), "current_goal": _public_internal_names(public_current_goal), "continuation_required": public_continuation_required, "continuation_reason": _public_internal_names(str(full_cycle.get("continuation_reason") or "")), "updated_at": str(full_cycle.get("updated_at") or tick.get("generated_at") or ""), "started_at": str(full_cycle.get("started_at") or full_job.get("started_at") or ""), "latest_step": {**latest_step, "stage": latest_stage or latest_step.get("stage", ""), "phase": latest_phase, "line_count": line_count}, "latest_blockers": [public_blocker_row] if public_blocker_row.get("summary") else [], "experiment_evidence_policy": {"status": str(selected_base_viability.get("status") or base_switch_gate.get("status") or ""), "decision": _public_internal_names(selected_base_viability.get("decision") or base_switch_gate.get("decision") or ""), "authorized": bool(base_switch_authorized), "updated_at": str(selected_base_viability.get("updated_at") or base_switch_gate.get("updated_at") or "")}, "reference_full_job": scalar(reference_full_job, ["status", "decision", "pid", "process_alive", "log_path"]), "full_cycle_job": public_full_job}
     stale_full_job = str(full_job.get("status") or "").lower() == "stale" and not full_job_live
@@ -11402,9 +11491,10 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         public_blocker_row["source_label"] = "来源：确定性门控审计"
     live_reference_job = reference_full_job if reference_full_job else safe_dict(tick.get("full_reference_job"))
     supervision = {**_empty_supervision_payload(), "status": selected_plan_gate["status"] if selected_plan_gate.get("blocked") else "blocked_literature_llm_quota_exhausted" if llm_quota_blocked else "running" if fresh_find_running else "blocked_environment_base_selection_required" if status == "blocked_environment_base_selection_required" else supervision_status, "action": _public_internal_names(tick.get("action", "")), "generated_at": tick.get("generated_at", ""), "next_action": _public_internal_names(blocker_next_action), "full_reference_job": live_reference_job, "full_cycle_job": public_full_job, "environment_base_selection": _public_environment_selection_summary(env), "claude_current_find_state": safe_dict(tick.get("claude_current_find_state"))}
-    blocker_category = selected_plan_gate["category"] if selected_plan_gate.get("blocked") else "literature_llm_quota_exhausted" if llm_quota_blocked else "fresh_find_running" if fresh_find_running else "literature_recommendation_shortfall" if literature_gate_blocked else "environment_anchor_selection_required" if status == "blocked_environment_base_selection_required" else "experiment_evidence_audit" if selected_base_viability_blocked else "fresh_base_reference_reproduction_running" if reference_full_job_live else "fresh_base_reference_probe_required" if status == "blocked_fresh_base_reference_probe_required" else "submission_readiness" if submission_blockers else str(ref_gate.get("decision") or ref_gate.get("status") or "")
+    blocker_category = selected_plan_gate["category"] if selected_plan_gate.get("blocked") else "literature_llm_quota_exhausted" if llm_quota_blocked else "fresh_find_running" if fresh_find_running else "literature_recommendation_shortfall" if literature_gate_blocked else "environment_anchor_selection_required" if status == "blocked_environment_base_selection_required" else selected_base_blocker_category if selected_base_viability_blocked else "fresh_base_reference_reproduction_running" if reference_full_job_live else "fresh_base_reference_probe_required" if status == "blocked_fresh_base_reference_probe_required" else "submission_readiness" if submission_blockers else str(ref_gate.get("decision") or ref_gate.get("status") or "")
     reference_probe_has_dependency_blocker = bool(_reference_protocol_probe_blocker_summary(protocol_probe, base_title))
-    blocker_title = selected_plan_gate["title"] if selected_plan_gate.get("blocked") else "LLM API 额度/配置不可用" if llm_quota_blocked else "Find 正在运行" if fresh_find_running else "Find 推荐门控阻塞" if literature_gate_blocked else "候选实验运行中" if selected_base_viability_blocked and active_experiment_training else "缺少审计就绪候选实验证据" if base_switch_gate_unresolved else "缺少当前主线候选实验证据" if selected_base_viability_blocked else "参考复现正在运行" if reference_full_job_live else "参考协议依赖缺失" if status == "blocked_fresh_base_reference_probe_required" and reference_probe_has_dependency_blocker else "等待参考协议/环境 manifest 探针" if status == "blocked_fresh_base_reference_probe_required" else "论文证据/投稿门控阻塞" if submission_blockers else ("当前项目门控状态" if env.get("valid") else "等待环境阶段 Claude Code 选择当前基底")
+    selected_base_viability_title = selected_base_viability_public.get("title") or ("缺少审计就绪候选实验证据" if base_switch_gate_unresolved else "缺少当前主线候选实验证据")
+    blocker_title = selected_plan_gate["title"] if selected_plan_gate.get("blocked") else "LLM API 额度/配置不可用" if llm_quota_blocked else "Find 正在运行" if fresh_find_running else "Find 推荐门控阻塞" if literature_gate_blocked else "候选实验运行中" if selected_base_viability_blocked and active_experiment_training else selected_base_viability_title if selected_base_viability_blocked else "参考复现正在运行" if reference_full_job_live else "参考协议依赖缺失" if status == "blocked_fresh_base_reference_probe_required" and reference_probe_has_dependency_blocker else "等待参考协议/环境 manifest 探针" if status == "blocked_fresh_base_reference_probe_required" else "论文证据/投稿门控阻塞" if submission_blockers else ("当前项目门控状态" if env.get("valid") else "等待环境阶段 Claude Code 选择当前基底")
     legacy_control = {"policy": "历史仓库、实验和参考复现只保留为审计记录；当前主线以本轮 Find 后的环境审查选择为准。", "details_hidden": True}
     if literature_gate_blocked and env.get("blocked_selection"):
         legacy_control["blocked_environment_selection"] = env.get("blocked_selection")
@@ -11437,6 +11527,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
             "summary": selected_plan_gate["next_action"] if selected_plan_gate.get("blocked") else _public_text_for_gate(experiment_iteration_audit.get("human_summary") or experiment_iteration_audit.get("summary") or experiment_iteration_audit) or "实验迭代轨迹完整。",
         },
         "display_note": "页面展示当前状态摘要；项目代理原文保留在项目代理回复/receipt 中，详细证据文件、日志和产物路径保留在底部任务栏和产物区。",
+        "semantic_data_provenance": selected_base_viability_public.get("semantic_data_provenance", {}),
     }
     human_summary_en = _public_status_summary_en(status, base_title=base_title, active_experiment_training=active_experiment_training, reference_full_job_live=reference_full_job_live, fresh_find_running=fresh_find_running, recommendation_shortfall=recommendation_shortfall)
     blocker_summary_public = _public_internal_names(blocker_summary)
@@ -12214,6 +12305,10 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
     )
     base_switch_gate_unresolved = bool(base_switch_gate_required and not base_switch_authorized)
     selected_base_viability_blocked = bool(selected_base_viability.get('status') == 'blocked' and selected_base_viability.get('decision') in {'base_switch_gate_required', 'continue_experiment_evidence_repair'})
+    selected_base_viability_public = _selected_base_viability_public_blocker(selected_base_viability, base_title)
+    selected_base_blocker_category = selected_base_viability_public.get('category', 'experiment_evidence_audit') if selected_base_viability_blocked else 'experiment_evidence_audit'
+    if base_switch_gate_unresolved or (selected_base_viability_blocked and status != 'blocked_environment_base_selection_required'):
+        summary = selected_base_viability_public.get('project_summary') or summary
     if fresh_find_running:
         blocker_category = 'fresh_find_running'
         blocker_title = 'Find 正在运行'
@@ -12225,15 +12320,15 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
         blocker_summary = f'当前 Find 推荐文章 {find_summary.get("strong_recommendations", 0)}/{recommendation_target_count}，短缺 {recommendation_shortfall}；需要 TASTE 补检索/补评分或目标化调研，不能把弱论文补成推荐，也不能推进论文或结论提升。'
         next_action = f'当前 Find 推荐文章 {find_summary.get("strong_recommendations", 0)}/{recommendation_target_count}，短缺 {recommendation_shortfall}；通过 TASTE 统一 literature tool 补检索/补评分并刷新 packet。短缺未清零前，不启动实验、论文或结论提升。'
     elif base_switch_gate_unresolved:
-        blocker_category = 'experiment_evidence_audit'
-        blocker_title = '缺少审计就绪候选实验证据'
-        blocker_summary = '参考复现已通过；当前主线还缺少可审计、可写入论文的候选实验结果；完成前不会更换当前基底或提升论文结论。'
-        next_action = '等待项目代理读取当前缺口证据，并给出下一轮实验或修复动作。'
+        blocker_category = selected_base_blocker_category
+        blocker_title = selected_base_viability_public.get('title') or '缺少审计就绪候选实验证据'
+        blocker_summary = selected_base_viability_public.get('summary') or '参考复现已通过；当前主线还缺少可审计、可写入论文的候选实验结果；完成前不会更换当前基底或提升论文结论。'
+        next_action = selected_base_viability_public.get('next_action') or '等待项目代理读取当前缺口证据，并给出下一轮实验或修复动作。'
     elif selected_base_viability_blocked:
-        blocker_category = 'experiment_evidence_audit'
-        blocker_title = '缺少当前主线候选实验证据'
-        blocker_summary = '参考复现已通过；当前主线还缺少可审计、可写入论文的候选实验结果；论文预览可以生成，但不能被标记为投稿通过。'
-        next_action = '等待项目代理读取候选实验证据缺口，并给出下一步实验动作。'
+        blocker_category = selected_base_blocker_category
+        blocker_title = selected_base_viability_public.get('title') or '缺少当前主线候选实验证据'
+        blocker_summary = selected_base_viability_public.get('summary') or '参考复现已通过；当前主线还缺少可审计、可写入论文的候选实验结果；论文预览可以生成，但不能被标记为投稿通过。'
+        next_action = selected_base_viability_public.get('next_action') or '等待项目代理读取候选实验证据缺口，并给出下一步实验动作。'
     elif reference_full_job_live:
         blocker_category = 'fresh_base_reference_reproduction_running'
         blocker_title = '参考复现正在运行'
@@ -12289,7 +12384,7 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
         'summary': summary,
         'summary_zh': summary,
         'summary_en': _public_status_summary_en(status, base_title=base_title, fresh_find_running=fresh_find_running, recommendation_shortfall=recommendation_shortfall, reference_full_job_live=reference_full_job_live),
-        'current_goal': _public_text_for_gate(full_cycle_raw.get('current_goal') or next_action),
+        'current_goal': _public_text_for_gate(next_action if selected_base_viability_blocked else full_cycle_raw.get('current_goal') or next_action),
         'updated_at': str(full_cycle_raw.get('updated_at') or ''),
         'started_at': str(full_cycle_raw.get('started_at') or ''),
         'current_cycle': full_cycle_raw.get('current_cycle') or len(safe_list(full_cycle_raw.get('cycles'))),
@@ -12319,6 +12414,7 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
         'reference_full_job_log': str((supervision.get('full_reference_job') or {}).get('log_path') or ''),
         'source': 'deterministic_gate_audit',
         'source_label': '来源：确定性门控审计',
+        'semantic_data_provenance': selected_base_viability_public.get('semantic_data_provenance', {}),
     }
     stale_full_job = isinstance(full_job, dict) and str(full_job.get('status') or '').lower() == 'stale' and not full_job_live
     stale_next_action = next_action if recommendation_shortfall else '上一条完整科研循环已结束，当前未检测到活进程；可以通过统一 TASTE 入口继续下一轮完整科研流程。'

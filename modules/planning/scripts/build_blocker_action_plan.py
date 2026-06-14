@@ -5,11 +5,12 @@ import argparse
 import datetime as dt
 import json
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
 from project_paths import ROOT, build_paths, management_python
-from taste_pythonpath import resolve_script_path
+from taste_pythonpath import resolve_script_path, taste_pythonpath_string
 
 
 def now_iso() -> str:
@@ -70,7 +71,8 @@ def command(project: str, script_or_venue: str, *extra: str) -> str:
         script_display = str(script_path.relative_to(ROOT))
     except ValueError:
         script_display = str(script_path)
-    parts = [management_python(), script_display, "--project", project]
+    env_prefix = f"PYTHONPATH={shlex.quote(taste_pythonpath_string(ROOT))}"
+    parts = [env_prefix, management_python(), script_display, "--project", project]
     parts.extend(str(item) for item in tail if str(item).strip())
     return " ".join(parts)
 
@@ -1190,7 +1192,7 @@ def priority_key(row: dict[str, Any]) -> tuple[int, int, str]:
         "fresh_base_reference_reproduction": 0,
         "fresh_base_implementation": 1,
         "terminal_reference_base_block": 2,
-        "selected_base_viability_gate": 2,
+        "selected_base_viability_gate": 1,
         "base_switch_gate": 2,
         "reference_base_switch": 3,
         "reference_reproduction_repair": 3,

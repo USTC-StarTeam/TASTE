@@ -13,6 +13,41 @@ from experiment_contracts import row_promotion_blockers
 from project_paths import build_paths
 
 
+TEXT_METADATA_FIELD_MARKERS = (
+    "title",
+    "description",
+    "desc",
+    "text",
+    "review",
+    "summary",
+    "name",
+    "brand",
+    "category",
+    "categories",
+    "caption",
+    "metadata",
+    "meta",
+)
+TEXT_METADATA_FILE_MARKERS = (
+    "metadata",
+    "meta",
+    "item_info",
+    "item-info",
+    "item_text",
+    "item-text",
+    "item_title",
+    "item-title",
+    "title",
+    "description",
+    "descriptions",
+    "review_text",
+    "reviews",
+    "category",
+    "categories",
+)
+TEXT_METADATA_FILE_SUFFIXES = {".csv", ".tsv", ".json", ".jsonl", ".parquet", ".pkl", ".pickle"}
+
+
 def now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
@@ -47,10 +82,16 @@ def text_blob(row: dict[str, Any]) -> str:
     values = [
         row_id(row),
         row.get("method"),
+        row.get("method_slug"),
         row.get("method_label"),
+        row.get("method_role"),
+        row.get("comparison_role"),
         row.get("name"),
         row.get("embedding_source"),
+        row.get("semantic_embedding_evidence"),
         row.get("claim_verdict"),
+        row.get("promotion_status"),
+        row.get("evidence_status"),
         row.get("comparison_status"),
         row.get("conclusion"),
     ]
@@ -78,9 +119,27 @@ def current_repo_rows(rows: list[dict[str, Any]], repo_path: str, dataset: str =
 
 def candidate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    candidate_role_tokens = {"candidate", "proposed", "proposal", "method", "treatment", "experiment"}
+    non_candidate_role_tokens = {"baseline", "reference", "control", "pretrain"}
     for row in rows:
         blob = text_blob(row)
-        if any(marker in blob for marker in ["baseline", "reference", "control", "pretrain"]):
+        roles = {
+            str(row.get("comparison_role") or "").strip().lower(),
+            str(row.get("method_role") or "").strip().lower(),
+            str(row.get("role") or "").strip().lower(),
+        }
+        method_blob = " ".join(
+            str(row.get(key) or "").strip().lower()
+            for key in ("method", "method_slug", "method_role", "comparison_role", "name")
+        )
+        is_reference_like = bool(roles & non_candidate_role_tokens) or any(
+            token in method_blob
+            for token in ("selected_base_reference", "reference_reproduction", "baseline_reproduction", "pretrain_reference")
+        )
+        if is_reference_like:
+            continue
+        if roles & candidate_role_tokens:
+            out.append(row)
             continue
         if any(marker in blob for marker in ["llm", "semantic", "text", "embedding", "finetune"]):
             out.append(row)
@@ -169,6 +228,134 @@ def int_or_none(value: Any) -> int | None:
         return int(float(str(value).strip()))
     except Exception:
         return None
+
+
+def iter_dicts(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from iter_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from iter_dicts(child)
+
+
+def _field_has_text_metadata(value: Any) -> bool:
+    field = str(value or "").strip().lower().replace("-", "_")
+    if not field:
+        return False
+    id_only = {"user", "user_id", "userid", "item", "item_id", "itemid", "id", "rating", "timestamp", "time", "domain", "label", "split"}
+    if field in id_only or field.endswith("_id"):
+        return False
+    return any(marker in field for marker in TEXT_METADATA_FIELD_MARKERS)
+
+
+def _dataset_matches(value: Any, dataset: str) -> bool:
+    if not dataset:
+        return True
+    return dataset.lower() in lower_json_blob(value)
+
+
+def text_metadata_provenance_review(paths, repo_path: str, dataset: str = "") -> dict[str, Any]:
+    payloads = [
+        (paths.state / "repo_data_requirements.json", load_json(paths.state / "repo_data_requirements.json", {})),
+        (paths.state / "real_dataset_probe.json", load_json(paths.state / "real_dataset_probe.json", {})),
+        (paths.state / "dataset_registry.json", load_json(paths.state / "dataset_registry.json", [])),
+    ]
+    header_hits: list[str] = []
+    file_hits: list[str] = []
+    dataset_roots: list[Path] = []
+    evidence: list[str] = []
+    for source, payload in payloads:
+        if payload:
+            evidence.append(str(source))
+        for item in iter_dicts(payload):
+            if not _dataset_matches(item, dataset):
+                continue
+            for key in ("header", "columns", "fields", "schema", "required_files", "required_files_per_dataset"):
+                value = item.get(key)
+                if isinstance(value, list):
+                    for field in value:
+                        if _field_has_text_metadata(field):
+                            header_hits.append(str(field))
+                elif isinstance(value, dict):
+                    for field in value.keys():
+                        if _field_has_text_metadata(field):
+                            header_hits.append(str(field))
+            csv_probe = item.get("csv_probe") if isinstance(item.get("csv_probe"), dict) else {}
+            for field in csv_probe.get("header", []) if isinstance(csv_probe.get("header"), list) else []:
+                if _field_has_text_metadata(field):
+                    header_hits.append(str(field))
+            for key in ("root", "ready_root"):
+                root_text = str(item.get(key) or "").strip()
+                if root_text:
+                    dataset_roots.append(Path(root_text))
+    if repo_path:
+        repo = Path(repo_path)
+        if dataset:
+            dataset_token = dataset.split("/")[-1]
+            dataset_roots.extend([repo / "dataset" / dataset, repo / "data" / dataset, repo / dataset_token])
+        dataset_roots.append(repo)
+    seen_roots: set[str] = set()
+    for root in dataset_roots:
+        key = str(root)
+        if key in seen_roots or not root.exists() or not root.is_dir():
+            continue
+        seen_roots.add(key)
+        try:
+            iterator = root.rglob("*") if root != Path(repo_path) else root.glob("*")
+            for child in iterator:
+                if len(file_hits) >= 20:
+                    break
+                if not child.is_file() or child.suffix.lower() not in TEXT_METADATA_FILE_SUFFIXES:
+                    continue
+                name = child.name.lower()
+                if any(marker in name for marker in TEXT_METADATA_FILE_MARKERS):
+                    file_hits.append(str(child))
+        except Exception:
+            continue
+    header_hits = sorted(set(header_hits))
+    file_hits = sorted(set(file_hits))
+    has_evidence = bool(header_hits or file_hits)
+    return {
+        "status": "pass" if has_evidence else "blocked",
+        "has_text_metadata_evidence": has_evidence,
+        "header_hits": header_hits,
+        "file_hits": file_hits[:20],
+        "dataset": dataset,
+        "repo_path": repo_path,
+        "evidence": evidence,
+    }
+
+
+def semantic_data_provenance_review(paths, repo_path: str, dataset: str = "") -> dict[str, Any]:
+    audit = load_json(paths.state / "paper_evidence_audit.json", {})
+    guard = audit.get("llm_semantic_evidence_guard") if isinstance(audit, dict) and isinstance(audit.get("llm_semantic_evidence_guard"), dict) else {}
+    progress = load_json(paths.state / "scientific_progress_gate.json", {})
+    readiness = load_json(paths.state / "submission_readiness.json", {})
+    readiness_blob = lower_json_blob(readiness)
+    project_requires = bool(guard.get("project_requires_llm_semantics"))
+    if not project_requires and "llm_semantic_embedding_evidence_guard" in readiness_blob:
+        project_requires = True
+    guard_status = str(guard.get("status") or "").strip().lower()
+    progress_guard_status = str(progress.get("llm_semantic_evidence_guard") or "").strip().lower() if isinstance(progress, dict) else ""
+    guard_blocked = guard_status == "blocked" or progress_guard_status == "blocked" or "llm semantic evidence guard is blocked" in readiness_blob
+    has_real_embedding = bool(guard.get("has_real_llm_embedding_evidence") or guard.get("real_llm_embedding_evidence"))
+    metadata = text_metadata_provenance_review(paths, repo_path, dataset)
+    deterministic_gate_required = bool(project_requires and guard_blocked and not has_real_embedding and not metadata.get("has_text_metadata_evidence"))
+    issues = guard.get("issues") if isinstance(guard.get("issues"), list) else []
+    if deterministic_gate_required:
+        issues = list(issues) + ["Current selected data route has no auditable text/metadata provenance for LLM semantic experiments."]
+    return {
+        "status": "blocked" if deterministic_gate_required else "pass" if project_requires else "not_applicable",
+        "deterministic_gate_required": deterministic_gate_required,
+        "project_requires_llm_semantics": project_requires,
+        "llm_semantic_guard_status": guard_status or progress_guard_status,
+        "has_real_llm_embedding_evidence": has_real_embedding,
+        "text_metadata_provenance": metadata,
+        "issues": issues[:8],
+        "evidence": [str(paths.state / "paper_evidence_audit.json"), str(paths.state / "scientific_progress_gate.json"), str(paths.state / "submission_readiness.json")] + metadata.get("evidence", []),
+    }
 
 
 def project_terminal_route_review(paths) -> dict[str, Any]:
@@ -356,12 +543,14 @@ def build_gate(project: str, venue: str = "") -> dict[str, Any]:
     progress_status = str(progress_gate.get("status") or "") if isinstance(progress_gate, dict) else ""
     reference_passed = bool(isinstance(reference_gate, dict) and reference_gate.get("status") == "pass" and reference_gate.get("decision") == "continue_base")
     proposal_paths = route_switch_proposals(paths)
+    semantic_review = semantic_data_provenance_review(paths, repo_path, current_dataset)
     terminal_review = project_terminal_route_review(paths)
     project_review_requests_gate = bool(
         terminal_review.get("terminal_current_route")
         and terminal_review.get("deterministic_gate_required")
         and terminal_review.get("no_promotable_project_candidates")
     )
+    semantic_provenance_requests_gate = bool(semantic_review.get("deterministic_gate_required"))
 
     status = "not_applicable"
     decision = "not_applicable"
@@ -383,16 +572,24 @@ def build_gate(project: str, venue: str = "") -> dict[str, Any]:
                 f"selected_base_viability_gate: 当前 selected-base 主线（{repo_name}）仍有候选训练在运行，不能判定路线耗尽或进入自动切基底。"
                 "等待训练完成、写入 artifact-local audit 并刷新 scientific_progress/paper_evidence/submission_readiness 后再判断。"
             )
-        elif no_promotable and project_review_requests_gate:
+        elif no_promotable and (project_review_requests_gate or semantic_provenance_requests_gate):
             status = "blocked"
             decision = "base_switch_gate_required"
             severity = "block"
-            issue = (
-                f"selected_base_viability_gate: 参考复现已通过，且项目内路线审计已确认当前 selected-base 主线（{repo_name}）"
-                "没有可提升、可写入论文的项目目标候选证据，并要求进入专门 deterministic base-switch gate。"
-                f"已审计候选尝试数={len(set(candidate_ids))}；该门控不授权切换基底、不修改 active_repo/evidence_ready_repo_selection、"
-                "不提升论文/claim。下一步只能运行确定性 base-switch gate，把候选路线保持为 proposal，直到候选路线的 provenance、loader/data/protocol/smoke/full reproduction 全部通过。"
-            )
+            if semantic_provenance_requests_gate and not project_review_requests_gate:
+                issue = (
+                    f"selected_base_viability_gate: 参考复现已通过，但当前 selected-base 主线（{repo_name}）缺少 LLM/text-semantic 实验所需的可审计文本/元数据 provenance，"
+                    "且 scientific progress / submission gates 已因 LLM semantic evidence 阻塞。继续运行纯行为或损失级候选实验无法清除此门控。"
+                    f"已审计候选尝试数={len(set(candidate_ids))}；下一步只能进入 deterministic base-switch / semantic-provenance gate："
+                    "候选路线保持 proposal-only，或为当前路线提供保存 ID 映射的确定性原始数据预处理证据；在 gate 通过前不能继续候选主线实验、论文或 claim promotion。"
+                )
+            else:
+                issue = (
+                    f"selected_base_viability_gate: 参考复现已通过，且项目内路线审计已确认当前 selected-base 主线（{repo_name}）"
+                    "没有可提升、可写入论文的项目目标候选证据，并要求进入专门 deterministic base-switch gate。"
+                    f"已审计候选尝试数={len(set(candidate_ids))}；该门控不授权切换基底、不修改 active_repo/evidence_ready_repo_selection、"
+                    "不提升论文/claim。下一步只能运行确定性 base-switch gate，把候选路线保持为 proposal，直到候选路线的 provenance、loader/data/protocol/smoke/full reproduction 全部通过。"
+                )
         elif enough_attempts and no_promotable:
             status = "blocked"
             decision = "continue_experiment_evidence_repair"
@@ -429,6 +626,7 @@ def build_gate(project: str, venue: str = "") -> dict[str, Any]:
         "real_text_candidate_runs": real_text_ids,
         "proxy_or_cluster_candidate_runs": proxy_ids,
         "route_switch_proposals": proposal_paths,
+        "semantic_data_provenance_review": semantic_review,
         "project_terminal_route_review": terminal_review,
         "authorized_current_repo_unchanged": True,
         "switch_authorized": False,
@@ -446,7 +644,7 @@ def build_gate(project: str, venue: str = "") -> dict[str, Any]:
             str(paths.state / "scientific_progress_gate.json"),
             str(paths.state / "experiment_registry.json"),
             str(paths.state / "fresh_base_reference_full_reproduction_audit.json"),
-        ] + terminal_review.get("sources", [])[:5] + proposal_paths[:5],
+        ] + semantic_review.get("evidence", [])[:6] + terminal_review.get("sources", [])[:5] + proposal_paths[:5],
     }
 
 
@@ -459,6 +657,7 @@ def write_report(paths, payload: dict[str, Any]) -> Path:
         f"- selected_repo: {payload.get('current_selected_repo', '')}\n",
         f"- selected_base_title: {payload.get('selected_base_title', '')}\n",
         f"- issue: {payload.get('issue', '')}\n",
+        f"- semantic_data_provenance: {(payload.get('semantic_data_provenance_review') or {}).get('status', '')}\n",
         "\n## Evidence\n",
     ]
     for item in payload.get("evidence", [])[:20]:
