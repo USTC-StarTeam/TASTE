@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ast
 import json
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 
 from path_helpers import ensure_script_paths, script_dirs
@@ -28,6 +30,29 @@ def _migrated_scripts() -> list[Path]:
 
 def test_top_level_scripts_directory_is_removed() -> None:
     assert not (ROOT / "scripts").exists()
+
+
+def test_non_vendor_code_does_not_import_removed_scripts_namespace() -> None:
+    scan_roots = [ROOT / "tests", ROOT / "framework", ROOT / "modules", ROOT / "web" / "backend"]
+    offenders: list[str] = []
+    for scan_root in scan_roots:
+        for path in scan_root.rglob("*.py"):
+            if "modules/writing/vendor" in path.as_posix():
+                continue
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    module = node.module or ""
+                    if module == "scripts" or module.startswith("scripts."):
+                        offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}: from {module} import ...")
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        name = alias.name
+                        if name == "scripts" or name.startswith("scripts."):
+                            offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}: import {name}")
+    assert offenders == []
 
 
 def test_seven_stage_module_directories_have_contracts_and_manifests() -> None:
