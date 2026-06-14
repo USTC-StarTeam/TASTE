@@ -279,6 +279,56 @@ def test_report_status_uses_failed_base_switch_gate_result(tmp_path, monkeypatch
     assert "运行 deterministic base-switch / semantic-provenance gate" not in text
 
 
+
+def test_status_and_healthcheck_keep_current_route_when_pending_candidate_blocked(tmp_path, monkeypatch):
+    report_status = load_script("report_status")
+    healthcheck = load_script("research_healthcheck")
+    paths = _make_paths(tmp_path)
+    _seed_common_project(paths)
+    _seed_selected_base_semantic_provenance_block(paths)
+    _write_json(paths.state / "repo_data_requirements.json", {"ready_datasets": ["demo-data"], "blocked_datasets": []})
+    _write_json(paths.state / "active_repo.json", {"name": "old/repo", "repo_path": "/tmp/new", "claim_ready_dataset": "demo-data"})
+    _write_json(
+        paths.state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": "find_current",
+            "current_action": "complete",
+            "selection_gate": "blocked_pending_data_loader_for_claude_best_candidate",
+            "blocker": "candidate proposal lacks claim-ready loader evidence; active_repo is unchanged.",
+            "selected": {},
+            "pending_environment_candidate": {
+                "name": "owner/pending",
+                "repo_path": "/tmp/pending",
+                "fresh_find_run_id": "find_current",
+                "pending_loader_bootstrap": True,
+                "probe_summary": {"claim_ready_datasets": []},
+            },
+        },
+    )
+    _write_json(paths.state / "repo_selection_blocker.json", {"status": "blocked", "fresh_find_run_id": "find_current", "reason": "old active_repo remains legacy/control only"})
+
+    for module in [report_status, healthcheck]:
+        monkeypatch.setattr(module, "build_paths", lambda _project: paths)
+        monkeypatch.setattr(module, "load_project_config", lambda _project: {"name": "demo_project", "topic": "Demo topic", "coding_agent": {}})
+        monkeypatch.setattr(module, "get_active_paper_state", lambda *_args, **_kwargs: {})
+        monkeypatch.setattr(module, "llm_available", lambda _cfg: True)
+        monkeypatch.setattr(module, "find_claude", lambda _cfg: "/bin/claude")
+
+    monkeypatch.setattr(sys, "argv", ["report_status.py", "--project", "demo_project", "--venue", "ICLR"])
+    report_status.main()
+    status_text = (paths.reports / "status.md").read_text(encoding="utf-8")
+    assert "- environment_base_selection_status: selected_current_route_pending_candidate_blocked" in status_text
+    assert "- repo_selection_status: pending_candidate_blocked" in status_text
+    assert "candidate proposal lacks claim-ready loader evidence" in status_text
+    assert "old active_repo remains legacy/control only" not in status_text
+
+    monkeypatch.setattr(sys, "argv", ["research_healthcheck.py", "--project", "demo_project", "--venue", "ICLR"])
+    healthcheck.main()
+    health_text = (paths.reports / "healthcheck.md").read_text(encoding="utf-8")
+    assert "Environment base selection: selected_current_route_pending_candidate_blocked" in health_text
+    assert "waiting_for_environment_claude_code" not in health_text
+
+
 def test_research_healthcheck_uses_failed_base_switch_gate_result(tmp_path, monkeypatch):
     healthcheck = load_script("research_healthcheck")
     paths = _make_paths(tmp_path)
@@ -355,6 +405,49 @@ def test_deterministic_base_switch_gate_blocks_empty_candidate_route(tmp_path, m
     assert payload["candidate_route"] == {}
     assert checks["candidate_route_proposal_exists"]["status"] == "blocked"
     assert "non-empty candidate route proposal" in checks["candidate_route_proposal_exists"]["detail"]
+
+
+
+def test_deterministic_base_switch_gate_reads_pending_environment_candidate(tmp_path, monkeypatch):
+    gate_script = load_script("audit_deterministic_base_switch_gate")
+    paths = _make_paths(tmp_path)
+    _seed_common_project(paths)
+    _seed_selected_base_semantic_provenance_block(paths)
+    pending_repo = paths.root / "repos" / "selected" / "pending_repo"
+    pending_repo.mkdir(parents=True)
+    _write_json(paths.state / "reference_reproduction_gate.json", {"status": "pass", "decision": "continue_base"})
+    _write_json(paths.state / "active_repo.json", {"name": "old/repo", "repo_path": "/tmp/new", "claim_ready_dataset": "demo-data"})
+    _write_json(
+        paths.state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": "find_current",
+            "selection_gate": "blocked_pending_data_loader_for_claude_best_candidate",
+            "selected": {},
+            "pending_environment_candidate": {
+                "name": "owner/pending",
+                "repo_path": str(pending_repo),
+                "fresh_find_run_id": "find_current",
+                "pending_loader_bootstrap": True,
+                "probe_summary": {"claim_ready_datasets": []},
+            },
+        },
+    )
+
+    monkeypatch.setattr(gate_script, "build_paths", lambda _project: paths)
+
+    payload = gate_script.build_gate("demo_project", "ICLR")
+
+    checks = {row["id"]: row for row in payload["checks"]}
+    assert payload["status"] == "blocked"
+    assert payload["decision"] == "base_switch_not_authorized"
+    assert payload["candidate_route"]["repo"] == "owner/pending"
+    assert payload["candidate_route"]["type"] == "pending_environment_candidate_proposal"
+    assert checks["candidate_route_proposal_exists"]["status"] == "pass"
+    assert checks["candidate_route_is_non_authoritative"]["status"] == "pass"
+    assert checks["candidate_route_distinct_from_selected_base"]["status"] == "pass"
+    assert checks["candidate_find_run_provenance_clear"]["status"] == "pass"
+    assert checks["candidate_loader_import_probe_passed"]["status"] == "blocked"
+    assert checks["candidate_data_contract_passed"]["status"] == "blocked"
 
 
 def test_blocker_action_plan_uses_failed_base_switch_gate_result(tmp_path, monkeypatch):

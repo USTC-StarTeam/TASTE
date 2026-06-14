@@ -241,8 +241,48 @@ def proposal_from_markdown(path: Path) -> dict[str, Any]:
     }
 
 
+def proposal_from_pending_environment_candidate(path: Path, selection: dict[str, Any]) -> dict[str, Any]:
+    pending = safe_dict(selection.get('pending_environment_candidate'))
+    decision = safe_dict(pending.get('claude_topic_decision')) or safe_dict(selection.get('claude_topic_decision'))
+    repo = str(pending.get('name') or pending.get('repo') or decision.get('best_repo') or '').strip()
+    title = str(pending.get('literature_base_title') or pending.get('selected_base_title') or decision.get('literature_base_title') or '').strip()
+    raw_path_values = [pending.get('repo_path'), pending.get('local_path'), pending.get('path'), decision.get('repo_path')]
+    proposed_path_hint = next((path_hint(value) for value in raw_path_values if path_hint(value)), '')
+    repo_path = ''
+    for raw_path in raw_path_values:
+        repo_path = existing_path(raw_path)
+        if repo_path:
+            break
+    probe_summary = safe_dict(pending.get('probe_summary'))
+    datasets = safe_list(probe_summary.get('claim_ready_datasets'))
+    dataset = str(pending.get('claim_ready_dataset') or pending.get('dataset') or (datasets[0] if datasets else '') or '').strip()
+    return {
+        'source': str(path),
+        'status': 'non_authoritative_pending_loader_proposal',
+        'type': 'pending_environment_candidate_proposal',
+        'generated_at': str(selection.get('generated_at') or pending.get('generated_at') or '').strip(),
+        'fresh_find_run_id': str(pending.get('fresh_find_run_id') or selection.get('fresh_find_run_id') or '').strip(),
+        'repo': repo,
+        'title': title,
+        'dataset': dataset,
+        'repo_path': repo_path,
+        'proposed_path_hint': proposed_path_hint,
+        'current_route': {},
+        'raw_keys': ['pending_environment_candidate'],
+        'invalid_execution': False,
+        'authorized_execution': False,
+        'requires_deterministic_base_switch_gate': True,
+    }
+
+
 def collect_proposals(paths) -> list[dict[str, Any]]:
     proposals: list[dict[str, Any]] = []
+    selection_path = paths.state / 'evidence_ready_repo_selection.json'
+    selection = load_json(selection_path, {})
+    if isinstance(selection, dict) and isinstance(selection.get('pending_environment_candidate'), dict):
+        proposal = proposal_from_pending_environment_candidate(selection_path, selection)
+        if proposal.get('repo') or proposal.get('title') or proposal.get('repo_path'):
+            proposals.append(proposal)
     json_paths = []
     for name in ['next_cycle_route_proposal.json', 'ideation_cycle2_plan.json', 'selected_route_switch_proposal.json']:
         path = paths.state / name

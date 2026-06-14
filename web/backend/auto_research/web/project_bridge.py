@@ -2382,10 +2382,37 @@ def _current_environment_selection(root: Path) -> dict[str, Any]:
         public_selection_gate = raw_selection_gate or ("accepted_by_deterministic_base_switch_gate" if authorized_switch else "accepted_by_claude_topic_fit")
     in_current_find = selected_title_in_current_find(root, selected, decision) if selected else True
     valid = bool(selected and (stage == "environment_claude_code" or authorized_switch) and accepted and in_current_find)
+    pending_candidate_blocked = raw_selection_gate == "blocked_pending_data_loader_for_claude_best_candidate"
+    if not valid and not selected and pending_candidate_blocked:
+        active_repo = _read_json(root / "state" / "active_repo.json", {})
+        if isinstance(active_repo, dict):
+            ready_datasets = active_repo.get("claim_ready_datasets") or active_repo.get("ready_datasets") or []
+            if isinstance(ready_datasets, str):
+                ready_datasets = [ready_datasets]
+            claim_ready_dataset = str(active_repo.get("claim_ready_dataset") or active_repo.get("dataset") or "").strip()
+            if claim_ready_dataset and claim_ready_dataset not in ready_datasets:
+                ready_datasets = [claim_ready_dataset, *ready_datasets]
+            ready_datasets = [str(item or "").strip() for item in ready_datasets if str(item or "").strip()]
+            active_repo_path = str(active_repo.get("repo_path") or active_repo.get("local_path") or "").strip()
+            if active_repo_path and ready_datasets:
+                selected = {**active_repo}
+                selected.setdefault("fresh_find_run_id", selected_run or current_run)
+                selected.setdefault("selection_stage", "environment_claude_code")
+                selected.setdefault("selected_by_stage", "environment_claude_code")
+                selected.setdefault("claim_ready_dataset", ready_datasets[0])
+                selected["claim_ready_datasets"] = ready_datasets
+                selected_run = str(selected.get("fresh_find_run_id") or selected_run or current_run).strip()
+                selection_plan_id = selection_plan_id or current_selected_plan_id
+                selection_idea_id = selection_idea_id or current_selected_idea_id
+                stage = "environment_claude_code"
+                public_selection_gate = "current_active_route_pending_candidate_blocked"
+                accepted = bool(active_repo.get("claude_topic_fit_decision") or active_repo.get("selection_stage") == "environment_claude_code")
+                in_current_find = True
+                valid = True
     current_candidate = selection.get("current_candidate") if isinstance(selection.get("current_candidate"), dict) else {}
     selection_status = str(selection.get("status") or "")
     if valid:
-        reason = "current_environment_base_selected"
+        reason = "current_active_route_pending_candidate_blocked" if pending_candidate_blocked else "current_environment_base_selected"
     elif not selected:
         reason = "environment_repo_selection_blocked_current_run" if raw_selection_gate.startswith("continued_search") or selection_status.lower().startswith("blocked") else "environment_base_selection_pending_or_stale"
     elif not in_current_find:
@@ -4260,13 +4287,14 @@ def _selected_base_viability_public_blocker(gate: Any, base_display: str = "", b
             else:
                 failed_text = "、".join(failed_check_ids[:5]) or "候选路线证据"
                 summary = (
-                    f"{base_label} 参考复现已通过，但确定性切换门控已执行且未授权；候选路线仍有未通过检查：{failed_text}。"
+                    f"缺少 LLM/text-semantic 数据 provenance：{base_label} 参考复现已通过，但确定性切换门控已执行且未授权；"
+                    f"候选路线仍有未通过检查：{failed_text}。"
                 )
                 next_action = (
                     "补齐候选路线未通过的 loader/data/protocol/smoke/full-reference/artifact-local audit 检查；"
                     "gate 通过前不切换基底、不写论文、不提升结论。"
                 )
-                project_summary = "完整科研自循环已停在 base-switch gate 证据审计；候选路线存在但尚未获得确定性授权。"
+                project_summary = "完整科研自循环已停在 semantic-provenance/base-switch gate 证据审计；候选路线存在但尚未获得确定性授权。"
         return {
             "category": "semantic_data_provenance_required",
             "title": "缺少 LLM/text-semantic 数据 provenance",

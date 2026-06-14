@@ -84,6 +84,42 @@ def current_selected_plan_id(paths) -> str:
     return selected_plan_id
 
 
+def _claim_ready_dataset_names(row: dict) -> list[str]:
+    if not isinstance(row, dict):
+        return []
+    names: list[str] = []
+    for key in ['claim_ready_dataset', 'dataset']:
+        value = str(row.get(key) or '').strip()
+        if value and value not in names:
+            names.append(value)
+    for key in ['claim_ready_datasets', 'ready_datasets']:
+        values = row.get(key)
+        if isinstance(values, str):
+            values = [values]
+        for item in values if isinstance(values, list) else []:
+            value = str(item or '').strip()
+            if value and value not in names:
+                names.append(value)
+    probe_summary = row.get('probe_summary') if isinstance(row.get('probe_summary'), dict) else {}
+    values = probe_summary.get('claim_ready_datasets')
+    if isinstance(values, str):
+        values = [values]
+    for item in values if isinstance(values, list) else []:
+        value = str(item or '').strip()
+        if value and value not in names:
+            names.append(value)
+    return names
+
+
+def _pending_loader_selection(selection: dict, selected: dict) -> bool:
+    gate = str(selection.get('selection_gate') or selected.get('selection_gate') or '').strip() if isinstance(selection, dict) else ''
+    return bool(
+        gate in {'accepted_by_claude_transformable_pending_loader_bootstrap', 'blocked_pending_data_loader_for_claude_best_candidate'}
+        or selected.get('pending_loader_bootstrap')
+        or (isinstance(selection.get('pending_environment_candidate'), dict) and not _claim_ready_dataset_names(selected))
+    )
+
+
 def current_env_selection_valid(paths) -> bool:
     run_id = current_find_run_id(paths)
     selected_plan_id = current_selected_plan_id(paths)
@@ -96,7 +132,16 @@ def current_env_selection_valid(paths) -> bool:
     selected_run = str(selection.get('fresh_find_run_id') or selected.get('fresh_find_run_id') or '').strip()
     selection_plan_id = str(selection.get('selected_plan_id') or selected.get('selected_plan_id') or '').strip()
     stage = str(selection.get('selection_stage') or selection.get('selected_by_stage') or selected.get('selection_stage') or '').strip()
-    accepted = bool(str(selection.get('selection_gate') or '').startswith(('accepted_by_claude', 'accepted_by_deterministic_base_switch_gate')) or (isinstance(selection.get('claude_topic_decision'), dict) and selection['claude_topic_decision'].get('accept_as_current_best')))
+    pending_loader = _pending_loader_selection(selection, selected)
+    claim_ready = bool(_claim_ready_dataset_names(selected))
+    accepted = bool(
+        not pending_loader
+        and claim_ready
+        and (
+            str(selection.get('selection_gate') or '').startswith(('accepted_by_claude', 'accepted_by_deterministic_base_switch_gate'))
+            or (isinstance(selection.get('claude_topic_decision'), dict) and selection['claude_topic_decision'].get('accept_as_current_best'))
+        )
+    )
     return bool(run_id and selected_plan_id and selection_plan_id == selected_plan_id and selected and selected_run == run_id and stage == 'environment_claude_code' and accepted)
 
 
@@ -240,7 +285,10 @@ def refresh_repo_data(project: str, repo: str, env_name: str) -> None:
 def claude_accepts_current_route(paths) -> bool:
     selection = load_json(paths.state / 'evidence_ready_repo_selection.json', {})
     active = load_json(paths.state / 'active_repo.json', {})
+    selected = selection.get('selected', {}) if isinstance(selection, dict) and isinstance(selection.get('selected'), dict) else {}
     gate = str(selection.get('selection_gate', '')) if isinstance(selection, dict) else ''
+    if isinstance(selection, dict) and _pending_loader_selection(selection, selected):
+        return False
     if gate.startswith(('accepted_by_claude', 'accepted_by_deterministic_base_switch_gate')):
         return True
     decision = {}

@@ -3936,6 +3936,111 @@ def test_compact_project_summary_surfaces_selected_base_semantic_provenance_gate
     assert "LLM/text-semantic" in summary["current_blocker"]["summary"]
 
 
+
+def test_compact_summary_keeps_active_route_when_pending_candidate_blocked(monkeypatch, tmp_path):
+    from auto_research.web import project_bridge
+
+    project = "demo_project"
+    root = tmp_path / project
+    state = root / "state"
+    finding = root / "planning" / "finding"
+    current_repo = root / "repos" / "selected" / "current_repo"
+    pending_repo = root / "repos" / "selected" / "pending_repo"
+    state.mkdir(parents=True)
+    finding.mkdir(parents=True)
+    current_repo.mkdir(parents=True)
+    pending_repo.mkdir(parents=True)
+    run_id = "find_pending_candidate"
+    dataset = "demo-data"
+
+    write_json(finding / "find_progress.json", {"run_id": run_id, "phase": "complete", "strong_recommendation_count": 1, "recommendation_target_count": 1, "recommendation_shortfall": 0})
+    write_json(finding / "find_results.json", {"run_id": run_id, "strong_recommendations": [recommended_paper("paper-1", "Paper One")], "recommendation_target_count": 1, "recommendation_shortfall": 0})
+    write_json(finding / "read_results.json", {"run_id": run_id, "readings": [{"paper_id": "paper-1", "title": "Paper One", "full_text_available": True, "pdf_text_chars": 3000}]})
+    write_json(finding / "ideas.json", {"run_id": run_id, "ideas": [{"id": "idea-current", "title": "Idea"}]})
+    write_json(
+        finding / "plans.json",
+        {
+            "run_id": run_id,
+            "selected_plan_id": "plan-current",
+            "selected_idea_id": "idea-current",
+            "plans": [{"plan_id": "plan-current", "idea_id": "idea-current", "selected_for_execution": True, "execute_next": True}],
+        },
+    )
+    write_json(state / "current_find_research_plan.json", {"run_id": run_id, "status": "ready", "claude_current_find_ready": True, "execution_ready": True, "selected_plan_id": "plan-current", "selected_idea_id": "idea-current"})
+    write_json(
+        state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": run_id,
+            "selected_plan_id": "plan-current",
+            "selected_idea_id": "idea-current",
+            "selection_stage": "environment_claude_code",
+            "selection_gate": "blocked_pending_data_loader_for_claude_best_candidate",
+            "blocker": "pending proposal lacks claim-ready loader evidence; active_repo is unchanged.",
+            "selected": {},
+            "pending_environment_candidate": {
+                "name": "owner/pending",
+                "repo_path": str(pending_repo),
+                "fresh_find_run_id": run_id,
+                "pending_loader_bootstrap": True,
+                "probe_summary": {"claim_ready_datasets": []},
+            },
+        },
+    )
+    write_json(state / "active_repo.json", {"name": "owner/current", "url": "https://example.test/current", "repo_path": str(current_repo), "selected_base_title": "Current Evidence Ready Base", "fresh_find_run_id": run_id, "selection_stage": "environment_claude_code", "claim_ready_dataset": dataset, "claim_ready_datasets": [dataset]})
+    write_json(state / "repo_data_requirements.json", {"repo_path": str(current_repo), "ready_datasets": [dataset], "blocked_datasets": []})
+    write_json(state / "real_dataset_probe.json", {"repo_path": str(current_repo), "status": "passed", "decision": "loader_probe_complete", "ready_datasets": [dataset], "probes": [{"dataset": dataset, "claim_ready": True, "loader_probe_success": True}]})
+    write_json(state / "fresh_base_implementation_plan.json", {"fresh_find_run_id": run_id, "status": "implementation_ready", "repo": {"name": "owner/current", "repo_path": str(current_repo)}, "ready_datasets": [dataset]})
+    write_json(state / "reference_reproduction_gate.json", {"status": "pass", "decision": "continue_base", "human_summary": "reference passed"})
+    write_json(
+        state / "base_switch_gate.json",
+        {
+            "status": "blocked",
+            "decision": "base_switch_not_authorized",
+            "candidate_route_present": True,
+            "failed_checks": ["candidate_loader_import_probe_passed", "candidate_data_contract_passed"],
+        },
+    )
+    write_json(
+        state / "selected_base_viability_gate.json",
+        {
+            "status": "blocked",
+            "decision": "base_switch_gate_required",
+            "current_selected_repo": "owner/current",
+            "current_selected_repo_path": str(current_repo),
+            "selected_base_title": "Current Evidence Ready Base",
+            "fresh_find_run_id": run_id,
+            "selected_plan_id": "plan-current",
+            "selected_idea_id": "idea-current",
+            "semantic_data_provenance_review": {
+                "status": "blocked",
+                "deterministic_gate_required": True,
+                "project_requires_llm_semantics": True,
+                "llm_semantic_guard_status": "blocked",
+                "has_real_llm_embedding_evidence": False,
+                "text_metadata_provenance": {"status": "blocked", "has_text_metadata_evidence": False, "dataset": dataset, "repo_path": str(current_repo)},
+            },
+        },
+    )
+    write_json(state / "full_research_cycle.json", {"status": "blocked_after_max_cycles", "summary": "stale environment summary", "full_cycle_job": {"status": "stale", "process_alive": False}})
+    write_json(state / "scientific_progress_gate.json", {"status": "blocked"})
+
+    monkeypatch.setattr(project_bridge, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(project_bridge, "_remote_process_rows", lambda: [])
+    monkeypatch.setattr(project_bridge, "_has_active_experiment_training", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(project_bridge, "_current_project_source_selection", lambda _project, _root: {"venue_ids": ["openreview_iclr_2026"], "years": [2026]})
+    project_bridge._PROJECT_SUMMARY_CACHE.clear()
+
+    summary = project_bridge._fast_project_summary(project, root, {"name": project, "topic": "Demo topic", "target_venue": "ICLR"})
+
+    assert summary["status"] != "blocked_environment_base_selection_required"
+    assert summary["human_supervision"]["main_route"]["repo_name"] == "owner/current"
+    assert summary["human_supervision"]["main_route"]["base_selection_status"] == "selected"
+    assert summary["human_supervision"]["main_route"]["selection_gate"] == "current_active_route_pending_candidate_blocked"
+    assert summary["human_supervision"]["blocker"]["category"] == "semantic_data_provenance_required"
+    assert "环境阶段正在选择当前基底" not in summary["human_supervision"]["blocker"]["summary"]
+    assert summary["human_gate_summary"]["main_route_repo"] == "owner/current"
+
+
 def test_public_job_payload_hides_paper_agent_repair_diagnostics_from_summaries_only():
     raw = {
         "stage": "paper",
@@ -7905,6 +8010,30 @@ def test_repo_archive_directory_is_reused_without_redownload(tmp_path, monkeypat
 
 
 
+def test_environment_repo_readme_signals_are_not_topic_hard_coded(tmp_path):
+    import importlib.util
+
+    script_path = Path(__file__).resolve().parents[1] / "modules" / "environment" / "scripts" / "select_evidence_ready_repo.py"
+    spec = importlib.util.spec_from_file_location("select_evidence_ready_repo_readme_under_test", script_path)
+    selector = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(selector)
+
+    repo = tmp_path / "candidate_repo"
+    repo.mkdir()
+    (repo / "README.md").write_text(
+        "This repository studies LLM recommender self-improving fidelity signals.\n"
+        "Dataset download, preprocessing, benchmark evaluation, and training commands are documented.\n",
+        encoding="utf-8",
+    )
+
+    signals = selector.quick_signals(repo)
+
+    assert "LLM recommender self-improving fidelity" not in signals["readme_topic_evidence"]
+    assert "Dataset download" in signals["readme_topic_evidence"]
+    assert "benchmark evaluation" in signals["readme_evidence"]
+
+
 def test_environment_selector_blocks_active_repo_as_only_current_candidate(monkeypatch, tmp_path):
     import importlib.util
     import sys
@@ -7976,6 +8105,177 @@ def test_environment_selector_blocks_active_repo_as_only_current_candidate(monke
     assert payload["selected"] == {}
     assert payload["active_repo_reaudit_blocked"] is True
     assert read_json(paths.state / "active_repo.json")["name"] == "owner/active"
+
+
+
+def test_environment_selector_keeps_pending_loader_candidate_out_of_active_repo(monkeypatch, tmp_path):
+    import importlib.util
+    import sys
+
+    script_path = Path(__file__).resolve().parents[1] / "modules" / "environment" / "scripts" / "select_evidence_ready_repo.py"
+    spec = importlib.util.spec_from_file_location("select_evidence_ready_repo_pending_active_under_test", script_path)
+    selector = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(selector)
+
+    current_repo = tmp_path / "current_repo"
+    pending_repo = tmp_path / "pending_repo"
+    current_repo.mkdir()
+    pending_repo.mkdir()
+    paths = type(
+        "Paths",
+        (),
+        {
+            "state": tmp_path / "state",
+            "planning": tmp_path / "planning",
+            "reports": tmp_path / "reports",
+            "repos_selected": tmp_path / "repos" / "selected",
+        },
+    )()
+    paths.state.mkdir(parents=True)
+    (paths.planning / "finding").mkdir(parents=True)
+    paths.reports.mkdir(parents=True)
+    paths.repos_selected.mkdir(parents=True)
+    write_json(
+        paths.planning / "finding" / "plans.json",
+        {
+            "selected_plan_id": "plan-current",
+            "selected_idea_id": "idea-current",
+            "plans": [{"plan_id": "plan-current", "idea_id": "idea-current", "selected_for_execution": True}],
+        },
+    )
+    write_json(
+        paths.state / "active_repo.json",
+        {
+            "name": "owner/pending",
+            "repo_path": str(pending_repo),
+            "selection_bucket": "claude_transformable_pending_loader_bootstrap",
+            "repo_execution_ready": False,
+            "claim_ready_datasets": [],
+            "previous_active_repo": {
+                "name": "owner/current",
+                "url": "https://github.com/owner/current",
+                "repo_path": str(current_repo),
+                "selection_bucket": "evidence_ready",
+                "claim_ready_dataset": "demo-dataset",
+                "claim_ready_datasets": ["demo-dataset"],
+                "selection_stage": "environment_claude_code",
+            },
+        },
+    )
+    write_json(
+        paths.state / "repo_candidates.json",
+        [
+            {
+                "name": "owner/pending",
+                "url": "https://github.com/owner/pending",
+                "local_path": str(pending_repo),
+                "source": "fresh_literature_github_search",
+                "fresh_find_run_id": "find-current",
+                "repo_reuse_score": 20,
+            }
+        ],
+    )
+
+    monkeypatch.setattr(selector, "build_paths", lambda _project: paths)
+    monkeypatch.setattr(selector, "load_project_config", lambda _project: {"conda_env": "demo_env"})
+    monkeypatch.setattr(selector, "clone_or_reuse", lambda _paths, _row: (pending_repo, {"status": "reused_existing_clone", "path": str(pending_repo)}))
+    monkeypatch.setattr(selector, "quick_signals", lambda _repo: {"has_entrypoint": True, "has_data_dir": True, "has_readme": True, "readme_data_mentions": 1})
+    monkeypatch.setattr(selector, "probe_repo", lambda *_args, **_kwargs: {"probe_return_code": 0, "probes": []})
+    monkeypatch.setattr(selector, "run_claude_review", lambda _project, _payload: {"status": "completed"})
+    monkeypatch.setattr(
+        selector,
+        "run_claude_topic_decision",
+        lambda _project, _payload: {
+            "decision": "accept-with-modifications",
+            "accept_as_current_best": True,
+            "best_repo": "owner/pending",
+            "repo_path": str(pending_repo),
+            "confidence": 0.7,
+            "rationale_en": "Best transformable proposal, but loader evidence is absent.",
+        },
+    )
+    monkeypatch.setattr(selector, "write_repo_env_strategy", lambda *args, **kwargs: {})
+    monkeypatch.setattr(selector, "sync_selected_candidate", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("pending candidate must not sync selected candidate")))
+    run_calls = []
+    monkeypatch.setattr(selector, "run", lambda cmd, *_args, **_kwargs: run_calls.append(cmd))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "select_evidence_ready_repo.py",
+            "--project",
+            "demo",
+            "--env-name",
+            "demo_env",
+            "--selection-stage",
+            "environment_claude_code",
+            "--candidate-source",
+            "fresh_literature_github_search",
+            "--fresh-find-run-id",
+            "find-current",
+            "--write-active",
+            "--use-claude-review",
+        ],
+    )
+
+    rc = selector.main()
+
+    payload = read_json(paths.state / "evidence_ready_repo_selection.json")
+    active = read_json(paths.state / "active_repo.json")
+    report = (paths.reports / "evidence_ready_repo_selection.md").read_text(encoding="utf-8")
+    assert rc == 2
+    assert payload["selection_gate"] == "blocked_pending_data_loader_for_claude_best_candidate"
+    assert payload["selected"] == {}
+    assert payload["evidence_ready_count"] == 0
+    assert payload["pending_environment_candidate"]["name"] == "owner/pending"
+    assert payload["pending_environment_candidate"]["pending_loader_bootstrap"] is True
+    assert "active_repo is unchanged" in payload["blocker"]
+    assert active["name"] == "owner/current"
+    assert active["repo_path"] == str(current_repo)
+    assert active["claim_ready_datasets"] == ["demo-dataset"]
+    assert active["recovered_from_invalid_active_repo"]["name"] == "owner/pending"
+    repo_refresh_commands = [cmd for cmd in run_calls if "--repo-path" in cmd]
+    assert repo_refresh_commands
+    assert all(str(current_repo) in cmd for cmd in repo_refresh_commands)
+    assert all(str(pending_repo) not in cmd for cmd in repo_refresh_commands)
+    assert "selected_repo: none" in report
+    assert "pending_environment_candidate: owner/pending" in report
+
+
+def test_environment_stage_rejects_pending_loader_selection_as_current_route(tmp_path, monkeypatch):
+    ensure_script_paths()
+    env_stage = importlib.reload(importlib.import_module("run_environment_stage"))
+    paths = type("Paths", (), {"state": tmp_path / "state", "planning": tmp_path / "planning"})()
+    paths.state.mkdir(parents=True)
+    (paths.planning / "finding").mkdir(parents=True)
+    write_json(paths.planning / "finding" / "find_progress.json", {"run_id": "find-current"})
+    write_json(
+        paths.planning / "finding" / "plans.json",
+        {
+            "selected_plan_id": "plan-current",
+            "plans": [{"plan_id": "plan-current", "idea_id": "idea-current", "selected_for_execution": True}],
+        },
+    )
+    write_json(
+        paths.state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": "find-current",
+            "selected_plan_id": "plan-current",
+            "selection_stage": "environment_claude_code",
+            "selection_gate": "accepted_by_claude_transformable_pending_loader_bootstrap",
+            "selected": {
+                "name": "owner/pending",
+                "repo_path": str(tmp_path / "pending_repo"),
+                "fresh_find_run_id": "find-current",
+                "selection_stage": "environment_claude_code",
+                "pending_loader_bootstrap": True,
+                "probe_summary": {"claim_ready_datasets": []},
+            },
+        },
+    )
+
+    assert env_stage.current_env_selection_valid(paths) is False
 
 
 def test_environment_current_find_reaudits_evidence_ready_active_repo(tmp_path):

@@ -62,6 +62,8 @@ DEFAULT_CLAUDE_TOPIC_DECISION = {
 REPO_ACTIONS = {'keep_and_modify_current_repo', 'switch_to_best_repo', 'continue_search'}
 ENV_ACTIONS = {'reuse_existing_env', 'repair_existing_env', 'create_new_project_env', 'defer_until_repo_selected'}
 DATA_ACTIONS = {'use_claim_ready_dataset', 'download_or_place_required_data', 'continue_data_search'}
+PENDING_LOADER_SELECTION_GATE = 'blocked_pending_data_loader_for_claude_best_candidate'
+PENDING_LOADER_SELECTION_BUCKET = 'claude_transformable_pending_loader_bootstrap'
 
 
 def load_json(path: Path, default: Any):
@@ -216,6 +218,103 @@ def file_exists_any(repo: Path, names: set[str]) -> bool:
         return False
 
 
+README_EVIDENCE_TOKENS = [
+    'official code',
+    'paper',
+    'dataset',
+    'data',
+    'download',
+    'benchmark',
+    'preprocess',
+    'processed',
+    'train',
+    'training',
+    'evaluate',
+    'evaluation',
+    'reproduce',
+    'reproduction',
+    'requirements',
+    'environment',
+    'install',
+    'metric',
+    'result',
+    'checkpoint',
+    'model',
+    '.pkl',
+    '.npy',
+    '.txt',
+]
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, list):
+        values = value
+    else:
+        values = []
+    out: list[str] = []
+    for item in values:
+        text = str(item or '').strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
+def claim_ready_dataset_names(row: dict[str, Any]) -> list[str]:
+    if not isinstance(row, dict):
+        return []
+    names: list[str] = []
+    for key in ['claim_ready_dataset', 'dataset']:
+        value = str(row.get(key) or '').strip()
+        if value and value not in names:
+            names.append(value)
+    for key in ['claim_ready_datasets', 'ready_datasets']:
+        for value in _string_list(row.get(key)):
+            if value not in names:
+                names.append(value)
+    probe_summary = row.get('probe_summary') if isinstance(row.get('probe_summary'), dict) else {}
+    for value in _string_list(probe_summary.get('claim_ready_datasets')):
+        if value not in names:
+            names.append(value)
+    return names
+
+
+def pending_loader_candidate(row: dict[str, Any]) -> bool:
+    if not isinstance(row, dict):
+        return False
+    return bool(
+        row.get('pending_loader_bootstrap')
+        or str(row.get('selection_bucket') or '') == PENDING_LOADER_SELECTION_BUCKET
+        or str(row.get('selection_gate') or '') == 'accepted_by_claude_transformable_pending_loader_bootstrap'
+    )
+
+
+def evidence_ready_for_active(row: dict[str, Any]) -> bool:
+    if not isinstance(row, dict) or pending_loader_candidate(row):
+        return False
+    return bool(str(row.get('repo_path') or row.get('local_path') or '').strip() and claim_ready_dataset_names(row))
+
+
+def recover_pending_loader_active_repo(active: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not isinstance(active, dict) or not pending_loader_candidate(active) or claim_ready_dataset_names(active):
+        return active if isinstance(active, dict) else {}, {}
+    previous = active.get('previous_active_repo') if isinstance(active.get('previous_active_repo'), dict) else {}
+    if not evidence_ready_for_active(previous):
+        return active, {}
+    recovered = dict(previous)
+    recovered['recovered_from_invalid_active_repo'] = {
+        'name': active.get('name', ''),
+        'repo_path': active.get('repo_path', ''),
+        'selection_bucket': active.get('selection_bucket', ''),
+        'selection_gate': active.get('selection_gate', ''),
+        'selected_by': active.get('selected_by', ''),
+        'reason': 'pending-loader candidates cannot replace active_repo until claim-ready loader evidence exists',
+        'recovered_at': dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
+    return recovered, recovered['recovered_from_invalid_active_repo']
+
+
 def quick_signals(repo: Path) -> dict[str, Any]:
     top = list(repo.iterdir()) if repo.exists() else []
     readme_text = ''
@@ -224,17 +323,17 @@ def quick_signals(repo: Path) -> dict[str, Any]:
             readme_text += path.read_text(encoding='utf-8', errors='ignore')[:30000]
     readme_lower = readme_text.lower()
     data_mentions = sum(1 for token in ['dataset', 'data', 'download', 'benchmark', 'processed', '.pkl', '.npy', '.txt'] if token in readme_lower)
-    topic_tokens = ['official code', 'paper', 'recommend', 'recommender', 'sequential', 'llm', 'large language', 'self-improving', 'fidelity', 'dataset']
-    topic_lines: list[str] = []
+    evidence_lines: list[str] = []
     for raw_line in readme_text.splitlines():
         clean = re.sub(r'\s+', ' ', raw_line).strip()
         if not clean or clean.startswith('|') or len(clean) < 12:
             continue
         low = clean.lower()
-        if any(token in low for token in topic_tokens):
-            topic_lines.append(clean[:260])
-        if len(' '.join(topic_lines)) >= 1200:
+        if any(token in low for token in README_EVIDENCE_TOKENS):
+            evidence_lines.append(clean[:260])
+        if len(' '.join(evidence_lines)) >= 1200:
             break
+    readme_evidence = ' '.join(evidence_lines)[:1200]
     return {
         'has_readme': bool(readme_text),
         'has_install': any((repo / name).exists() for name in ['requirements.txt', 'environment.yml', 'environment.yaml', 'setup.py', 'pyproject.toml']),
@@ -242,7 +341,8 @@ def quick_signals(repo: Path) -> dict[str, Any]:
         'has_entrypoint': file_exists_any(repo, {'main.py', 'train.py', 'run.py', 'eval.py', 'autoscientist_experiment.py'}),
         'has_data_dir': any((repo / name).exists() for name in ['data', 'dataset', 'datasets']),
         'readme_data_mentions': data_mentions,
-        'readme_topic_evidence': ' '.join(topic_lines)[:1200],
+        'readme_evidence': readme_evidence,
+        'readme_topic_evidence': readme_evidence,
     }
 
 
@@ -781,6 +881,9 @@ def main() -> int:
     env_name = args.env_name or cfg.get('conda_env', '')
     rows = load_json(paths.state / 'repo_candidates.json', [])
     active = load_json(paths.state / 'active_repo.json', {})
+    active, active_repo_recovery = recover_pending_loader_active_repo(active if isinstance(active, dict) else {})
+    if active_repo_recovery and args.write_active:
+        save_json(paths.state / 'active_repo.json', active)
     active_path = str(active.get('repo_path') or '') if isinstance(active, dict) else ''
     if not isinstance(rows, list):
         rows = []
@@ -999,8 +1102,11 @@ def main() -> int:
             'Topic gaps are not hard-coded keywords; Claude must explain whether they are acceptable modification work or a reason to keep searching.',
             'Synthetic data never satisfies this selector.',
             'A legacy active_repo cannot be accepted as the current Find base when it is the only audited candidate; environment selection must compare current-run candidates first.',
+            'A transformable pending-loader candidate is only a proposal; it cannot overwrite active_repo until real loader evidence is claim-ready.',
         ],
     }
+    if active_repo_recovery:
+        payload['active_repo_recovery'] = active_repo_recovery
     if active_only_current_reaudit:
         payload['selection_gate'] = 'continued_search_required_active_repo_only'
         payload['selected'] = {}
@@ -1048,14 +1154,16 @@ def main() -> int:
                     payload['pending_environment_candidate'] = pending
                     if selection_stage == 'environment_claude_code':
                         pending['pending_loader_bootstrap'] = True
-                        pending['anchor_selection_policy'] = 'Environment-stage Claude Code selected this transformable base for bootstrap; experiment execution remains blocked until data/loader gates pass.'
-                        selected = pending
-                        payload['selected'] = selected
-                        payload['selection_gate'] = 'accepted_by_claude_transformable_pending_loader_bootstrap'
+                        pending['anchor_selection_policy'] = 'Environment-stage Claude Code identified this transformable candidate as a proposal only; active route and experiment execution remain blocked until data/loader gates pass.'
+                        payload['pending_environment_candidate'] = pending
+                        payload['selection_gate'] = PENDING_LOADER_SELECTION_GATE
                         payload['selection_stage'] = selection_stage
-                        payload['selected_by_stage'] = selection_stage
+                        payload['selected_by_stage'] = ''
+                        payload['selected'] = {}
+                        payload['blocker'] = 'Claude identified a transformable environment candidate, but repo/data loader evidence is not claim-ready; active_repo is unchanged.'
+                        selected = {}
                     else:
-                        payload['selection_gate'] = 'blocked_pending_data_loader_for_claude_best_candidate'
+                        payload['selection_gate'] = PENDING_LOADER_SELECTION_GATE
                         payload['selected'] = {}
                         selected = {}
                 else:
@@ -1085,16 +1193,23 @@ def main() -> int:
         payload['selected_by_stage'] = (selection_stage or 'local_repo_data_probe') if selected else ''
     payload['selected_plan_id'] = selected_plan_id
     payload['selected_idea_id'] = selected_idea_id
-    if selected:
+    if selected and evidence_ready_for_active(selected):
         selected['selected_plan_id'] = selected_plan_id
         selected['selected_idea_id'] = selected_idea_id
         payload['selected'] = selected
+    elif selected:
+        payload['rejected_selected'] = selected
+        payload['selected'] = {}
+        payload.setdefault('selection_gate', PENDING_LOADER_SELECTION_GATE if pending_loader_candidate(selected) else 'continued_search_required_no_evidence_ready_repo')
+        payload.setdefault('blocker', 'Selected candidate is not evidence-ready for active_repo promotion.')
+        selected = {}
     save_json(paths.state / 'evidence_ready_repo_selection.json', payload)
 
     lines = ['# Evidence-Ready Repo Selection\n\n']
     lines.append(f"- generated_at: {payload['generated_at']}\n")
     lines.append(f"- audited_count: {payload['audited_count']}\n")
     lines.append(f"- evidence_ready_count: {payload['evidence_ready_count']}\n")
+    lines.append(f"- selection_gate: {payload.get('selection_gate', '')}\n")
     if selected:
         lines.append(f"- selected_repo: {selected.get('name')}\n")
         lines.append(f"- selected_path: {selected.get('repo_path')}\n")
@@ -1130,7 +1245,7 @@ def main() -> int:
         lines.append(f"- {item.get('name')} | decision={item.get('decision')} | claim_ready={', '.join(item.get('probe_summary', {}).get('claim_ready_datasets', []) or []) or 'none'} | score={item.get('selection_score', '')}\n")
     (paths.reports / 'evidence_ready_repo_selection.md').write_text(''.join(lines), encoding='utf-8')
 
-    if selected and args.write_active:
+    if selected and args.write_active and evidence_ready_for_active(selected):
         same_as_active = active_path and selected.get('repo_path') == active_path
         active_payload = dict(active) if same_as_active and isinstance(active, dict) else {
             'previous_active_repo': active,
@@ -1185,10 +1300,15 @@ def main() -> int:
     print(paths.reports / 'evidence_ready_repo_selection.md')
 
     # Restore active snapshots unless caller wrote a new active route; the environment stage will rebuild requirements for the selected active repo next.
-    if selected and args.write_active and selected.get('repo_path'):
+    if selected and args.write_active and evidence_ready_for_active(selected) and selected.get('repo_path'):
         selected_repo_path = str(selected.get('repo_path'))
         run([sys.executable, 'modules/environment/scripts/build_repo_data_requirements.py', '--project', args.project, '--repo-path', selected_repo_path], ROOT, timeout=180)
         run([sys.executable, 'modules/environment/scripts/probe_repo_dataset.py', '--project', args.project, '--repo-path', selected_repo_path, '--env-name', env_name, '--timeout-sec', str(args.timeout_sec)], ROOT, timeout=args.timeout_sec + 90)
+        run([sys.executable, 'modules/environment/scripts/data_unavailability_policy.py', '--project', args.project], ROOT, timeout=120)
+    elif active_repo_recovery and args.write_active and active.get('repo_path'):
+        recovered_repo_path = str(active.get('repo_path'))
+        run([sys.executable, 'modules/environment/scripts/build_repo_data_requirements.py', '--project', args.project, '--repo-path', recovered_repo_path], ROOT, timeout=180)
+        run([sys.executable, 'modules/environment/scripts/probe_repo_dataset.py', '--project', args.project, '--repo-path', recovered_repo_path, '--env-name', env_name, '--timeout-sec', str(args.timeout_sec)], ROOT, timeout=args.timeout_sec + 90)
         run([sys.executable, 'modules/environment/scripts/data_unavailability_policy.py', '--project', args.project], ROOT, timeout=120)
     else:
         if isinstance(original_req, dict) and original_req:
