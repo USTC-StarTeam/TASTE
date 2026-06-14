@@ -8,10 +8,10 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .DS_Store
-modules/taste/.venv/
-modules/taste/auto_research/web/client/node_modules/
-modules/taste/auto_research/web/client/dist/
-modules/taste/auto_research/web/client/tsconfig.tsbuildinfo
+framework/.venv/
+web/frontend/client/node_modules/
+web/frontend/client/dist/
+web/frontend/client/tsconfig.tsbuildinfo
 
 # Runtime logs and temporary files
 *.log
@@ -80,14 +80,14 @@ outputs/
 *.7z
 
 # Legacy package-local generated runtime dirs; canonical runtime is /runtime and ignored above.
-modules/taste/auto_research/runs/
-modules/taste/auto_research/.config.json
-modules/taste/auto_research/local_database/
+framework/auto_research/runs/
+framework/auto_research/.config.json
+framework/auto_research/local_database/
 
 # Per-project generated state and research-object material.
 # Project workspaces are private/runtime by default. They often include local
 # paths, API-key state, downloaded repos, datasets, generated papers, and
 # unpublished scientific conclusions. Use templates/project.json and
-# scripts/create_project.py to create a local project after cloning.
+# framework/scripts/create_project.py to create a local project after cloning.
 projects/*
 !projects/.gitkeep

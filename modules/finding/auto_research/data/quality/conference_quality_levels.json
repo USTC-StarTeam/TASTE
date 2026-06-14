@@ -1,0 +1,292 @@
+{
+  "schema_version": 1,
+  "description": "Deterministic lookup table for conference presentation/quality signals. Runtime scoring should retrieve from this table only; it should not ask the LLM to interpret venue prestige or presentation labels.",
+  "bonus_policy": {
+    "apply_only_if_fit_score_at_least": 6.0,
+    "max_bonus": 0.4,
+    "never_modify_fit_score": true,
+    "never_modify_diversity_score": true,
+    "unknown_bonus": 0.0
+  },
+  "tiers": {
+    "award": {
+      "bonus": 0.4,
+      "description": "Best paper, outstanding paper, test-of-time, or equivalent official award signal."
+    },
+    "oral": {
+      "bonus": 0.3,
+      "description": "Official oral presentation or oral-poster signal."
+    },
+    "spotlight": {
+      "bonus": 0.2,
+      "description": "Official spotlight, highlight, notable poster, or equivalent selective poster signal."
+    },
+    "regular": {
+      "bonus": 0.0,
+      "description": "Accepted poster, regular paper, or accepted/presented paper without a selective presentation signal."
+    },
+    "unknown": {
+      "bonus": 0.0,
+      "description": "No sourced presentation-level mapping is available."
+    }
+  },
+  "conferences": {
+    "iclr": {
+      "names": [
+        "ICLR",
+        "International Conference on Learning Representations"
+      ],
+      "venue_ids": [
+        "openreview_iclr",
+        "openreview_iclr_2026"
+      ],
+      "source_urls": [
+        "https://iclr.cc/virtual/2025/events/spotlight-posters",
+        "https://openreview.net/group?id=ICLR.cc/2025/Conference",
+        "https://openreview.net/group?id=ICLR.cc/2026/Conference"
+      ],
+      "notes": "Local OpenReview cache currently stores track labels like 'ICLR 2025 Oral', 'ICLR 2025 Spotlight', and 'ICLR 2025 Poster'. ICLR 2026 local cache currently has oral and poster labels.",
+      "years": {
+        "2025": {
+          "label_aliases": {
+            "iclr 2025 oral": {
+              "tier": "oral",
+              "bonus": 0.3
+            },
+            "oral": {
+              "tier": "oral",
+              "bonus": 0.3
+            },
+            "iclr 2025 spotlight": {
+              "tier": "spotlight",
+              "bonus": 0.2
+            },
+            "spotlight": {
+              "tier": "spotlight",
+              "bonus": 0.2
+            },
+            "iclr 2025 poster": {
+              "tier": "regular",
+              "bonus": 0.0
+            },
+            "poster": {
+              "tier": "regular",
+              "bonus": 0.0
+            }
+          }
+        },
+        "2026": {
+          "label_aliases": {
+            "iclr 2026 oral": {
+              "tier": "oral",
+              "bonus": 0.3
+            },
+            "oral": {
+              "tier": "oral",
+              "bonus": 0.3
+            },
+            "iclr 2026 poster": {
+              "tier": "regular",
+              "bonus": 0.0
+            },
+            "poster": {
+              "tier": "regular",
+              "bonus": 0.0
+            }
+          }
+        }
+      }
+    },
+    "neurips": {
+      "names": [
+        "NeurIPS",
+        "Conference on Neural Information Processing Systems"
+      ],
+      "venue_ids": [
+        "openreview_neurips"
+      ],
+      "source_urls": [
+        "https://neurips.cc/virtual/2025/index.html",
+        "https://neurips.cc/Conferences/2025/PosterInstructions",
+        "https://openreview.net/group?id=NeurIPS.cc/2025/Conference"
+      ],
+      "notes": "NeurIPS 2025 virtual pages expose labels such as Oral Poster and Spotlight Poster. Local OpenReview cache stores labels like 'NeurIPS 2025 oral', 'NeurIPS 2025 spotlight', and 'NeurIPS 2025 poster'.",
+      "years": {
+        "2025": {
+          "label_aliases": {
+            "neurips 2025 oral": {
+              "tier": "oral",
+              "bonus": 0.3
+            },
+            "oral": {
+              "tier": "oral",
+              "bonus": 0.3
+            },
+            "oral poster": {
+              "tier": "oral",
+              "bonus": 0.3
+            },
+            "neurips 2025 spotlight": {
+              "tier": "spotlight",
+              "bonus": 0.2
+            },
+            "spotlight": {
+              "tier": "spotlight",
+              "bonus": 0.2
+            },
+            "spotlight poster": {
+              "tier": "spotlight",
+              "bonus": 0.2
+            },
+            "san diego spotlight poster": {
+              "tier": "spotlight",
+              "bonus": 0.2
+            },
+            "neurips 2025 poster": {
+              "tier": "regular",
+              "bonus": 0.0
+            },
+            "poster": {
+              "tier": "regular",
+              "bonus": 0.0
+            }
+          }
+        },
+        "2026": {
+          "label_aliases": {}
+        }
+      }
+    },
+    "icml": {
+      "names": [
+        "ICML",
+        "International Conference on Machine Learning"
+      ],
+      "venue_ids": [
+        "dblp_icml",
+        "icml_downloads",
+        "ccf_ai_conference_a_icml_international_conference_on_machine_learning"
+      ],
+      "source_urls": [
+        "https://icml.cc/virtual/2025/events/2025SpotlightPosters",
+        "https://icml.cc/virtual/2026/events/oral",
+        "https://icml.cc/virtual/2026/events/2026SpotlightPosters"
+      ],
+      "notes": "ICML official virtual/download pages can expose presentation labels such as 'ICML 2026 Oral', 'ICML 2026 Spotlight', and 'ICML 2026 Poster'. Map those labels deterministically when the source adapter attaches them; do not infer presentation quality from venue-level crawl summaries.",
+      "years": {
+        "2025": {
+          "label_aliases": {
+            "2025 spotlight poster": {
+              "tier": "spotlight",
+              "bonus": 0.2
+            },
+            "spotlight poster": {
+              "tier": "spotlight",
+              "bonus": 0.2
+            },
+            "spotlight": {
+              "tier": "spotlight",
+              "bonus": 0.2
+            },
+            "poster": {
+              "tier": "regular",
+              "bonus": 0.0
+            },
+            "icml 2025 oral": {
+              "tier": "oral",
+              "bonus": 0.3
+            },
+            "oral": {
+              "tier": "oral",
+              "bonus": 0.3
+            },
+            "oral poster": {
+              "tier": "oral",
+              "bonus": 0.3
+            },
+            "icml 2025 spotlight": {
+              "tier": "spotlight",
+              "bonus": 0.2
+            },
+            "icml 2025 spotlight poster": {
+              "tier": "spotlight",
+              "bonus": 0.2
+            },
+            "highlight": {
+              "tier": "spotlight",
+              "bonus": 0.2
+            },
+            "icml 2025 poster": {
+              "tier": "regular",
+              "bonus": 0.0
+            }
+          }
+        },
+        "2026": {
+          "label_aliases": {
+            "icml 2026 oral": {
+              "tier": "oral",
+              "bonus": 0.3
+            },
+            "oral": {
+              "tier": "oral",
+              "bonus": 0.3
+            },
+            "oral poster": {
+              "tier": "oral",
+              "bonus": 0.3
+            },
+            "icml 2026 spotlight": {
+              "tier": "spotlight",
+              "bonus": 0.2
+            },
+            "icml 2026 spotlight poster": {
+              "tier": "spotlight",
+              "bonus": 0.2
+            },
+            "2026 spotlight poster": {
+              "tier": "spotlight",
+              "bonus": 0.2
+            },
+            "spotlight poster": {
+              "tier": "spotlight",
+              "bonus": 0.2
+            },
+            "spotlight": {
+              "tier": "spotlight",
+              "bonus": 0.2
+            },
+            "highlight": {
+              "tier": "spotlight",
+              "bonus": 0.2
+            },
+            "icml 2026 poster": {
+              "tier": "regular",
+              "bonus": 0.0
+            },
+            "poster": {
+              "tier": "regular",
+              "bonus": 0.0
+            }
+          }
+        }
+      }
+    },
+    "dac": {
+      "names": [
+        "DAC",
+        "Design Automation Conference"
+      ],
+      "venue_ids": [
+        "ccf_arch_dcp_ss_conference_a_dac_design_automation_conference"
+      ],
+      "source_urls": [],
+      "notes": "The local DAC 2025 DBLP cache currently has no presentation track labels. Leave unmapped until official presentation/award labels are added.",
+      "years": {
+        "2025": {
+          "label_aliases": {}
+        }
+      }
+    }
+  }
+}

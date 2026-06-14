@@ -1,0 +1,101 @@
+{
+  "generated_at": "2026-06-14T17:23:54.549790+00:00",
+  "module": "ideation",
+  "contract": {
+    "directory": "modules/ideation",
+    "display_name": "Ideation",
+    "legacy_stage": "Ideas",
+    "responsibility": "Turn reading/finding artifacts into editable research ideas without selecting an execution route.",
+    "external_inputs": [
+      "llm_api_or_claude",
+      "reading_artifacts",
+      "research_profile"
+    ],
+    "artifacts_in": [
+      "find_results.json",
+      "read_results.json",
+      "read.md"
+    ],
+    "artifacts_out": [
+      "ideas.json",
+      "idea.md",
+      "hypothesis_arena.md",
+      "idea candidate audits"
+    ],
+    "legacy_roots": [
+      "modules/ideation/auto_research/auto_idea",
+      "modules/ideation/scripts/assess_idea_candidates.py",
+      "modules/ideation/scripts/build_hypothesis_arena.py"
+    ]
+  },
+  "script_count": 3,
+  "scripts": [
+    {
+      "script": "assess_idea_candidates.py",
+      "path": "modules/ideation/scripts/assess_idea_candidates.py",
+      "owner": "ideation",
+      "owner_reason": "idea/hypothesis candidate generation or curation",
+      "function_count": 6,
+      "functions": [
+        "load_json",
+        "lexical_overlap",
+        "repo_execution_ready",
+        "repo_selection_bucket",
+        "build_idea_rows",
+        "main"
+      ],
+      "classes": [],
+      "imports": [
+        "__future__",
+        "argparse",
+        "json",
+        "literature_policy",
+        "pathlib",
+        "project_paths"
+      ],
+      "parse_error": ""
+    },
+    {
+      "script": "build_hypothesis_arena.py",
+      "path": "modules/ideation/scripts/build_hypothesis_arena.py",
+      "owner": "ideation",
+      "owner_reason": "idea/hypothesis candidate generation or curation",
+      "function_count": 2,
+      "functions": [
+        "load_json",
+        "main"
+      ],
+      "classes": [],
+      "imports": [
+        "__future__",
+        "argparse",
+        "json",
+        "pathlib",
+        "project_paths"
+      ],
+      "parse_error": ""
+    },
+    {
+      "script": "prepare_initialization.py",
+      "path": "modules/ideation/scripts/prepare_initialization.py",
+      "owner": "ideation",
+      "owner_reason": "idea/hypothesis candidate generation or curation",
+      "function_count": 3,
+      "functions": [
+        "load_json",
+        "load_mapping",
+        "main"
+      ],
+      "classes": [],
+      "imports": [
+        "__future__",
+        "argparse",
+        "json",
+        "literature_policy",
+        "pathlib",
+        "project_paths"
+      ],
+      "parse_error": ""
+    }
+  ]
+}

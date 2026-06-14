@@ -7,24 +7,30 @@ This workspace must be operated from the workspace root represented as `<workspa
 Use the project-based workflow under `projects/<project>/`. TASTE has one public runtime route:
 
 - Find uses the configured LLM for title/abstract/detail scoring and recommendation ranking.
-- Read, Idea, and Plan are handled by the project Claude Code session through `scripts/ensure_current_find_research_plan.py`.
+- Read, Idea, and Plan are handled by the project Claude Code session through `modules/reading/scripts/ensure_current_find_research_plan.py`.
 - If the `claude` CLI is unavailable, Read/Idea/Plan may use the configured LLM only as a structured fallback; that fallback must not execute code, choose an environment, run experiments, write papers, or promote claims.
 - Environment, Experiment, and Paper are Claude Code plus deterministic gate stages. They use the single project-agent route and deterministic gates, with no separate text-only engineering, repair, reviewer, or writing route.
 
-## Mandatory Takeover Protocol
+## Takeover Boundaries
 
-Every fresh project-agent session should do these before major work:
+There are two different handoff scopes; do not mix them.
 
-1. Read `<workspace_root>/AGENTS.md`.
-2. Read `<workspace_root>/START_HERE.md`.
-3. Read the target project's `AGENTS.md` and visible status artifacts if they exist.
-4. Run:
-   - `python3 scripts/research_healthcheck.py --project <project> [--venue "<venue>"]`
-   - `python3 scripts/report_status.py --project <project> [--venue "<venue>"]`
-   - `python3 scripts/detect_machine_profile.py --project <project>`
-   - `python3 scripts/audit_pipeline_runnability.py --project <project> [--venue "<venue>"]`
-5. Read the generated `healthcheck.md`, `status.md`, `machine_profile.md`, `planning/next_actions.md`, and `reports/iteration_reflection.md` when present.
-6. Use `state/current_find_research_plan.json`, `state/blocker_action_plan.json`, `state/experiment_registry.json`, `paper/metadata/paper_pipeline.json`, and raw logs/artifacts as the source of truth.
+Framework-maintainer agents that are repairing or refactoring TASTE itself should read root `AGENTS.md`, root `HANDOFF.md` when present, and root `工作状态.txt` on the active machine when present. Root handoff/status files describe framework maintenance, not project scientific evidence.
+
+Project Claude Code sessions must keep their scientific state inside `projects/<project>/`. Their project handoff, if any, belongs under that project directory and must not depend on root `HANDOFF.md` or root `工作状态.txt`.
+TASTE-launched project Claude Code sessions must run with `projects/<project>/` as their working directory. They may call TASTE wrapper scripts by absolute path, but their own notes, handoff, and scientific state stay project-local.
+
+For a project-stage takeover before major work:
+
+1. Read `<workspace_root>/AGENTS.md` for stable framework boundaries.
+2. Read the target project's `AGENTS.md` and visible project status artifacts if they exist.
+3. Run:
+   - `$MANAGEMENT_PYTHON framework/scripts/research_healthcheck.py --project <project> [--venue "<venue>"]`
+   - `$MANAGEMENT_PYTHON framework/scripts/report_status.py --project <project> [--venue "<venue>"]`
+   - `$MANAGEMENT_PYTHON framework/scripts/detect_machine_profile.py --project <project>`
+   - `$MANAGEMENT_PYTHON framework/scripts/audit_pipeline_runnability.py --project <project> [--venue "<venue>"]`
+4. Read project-generated `healthcheck.md`, `status.md`, `machine_profile.md`, `planning/next_actions.md`, and `reports/iteration_reflection.md` when present.
+5. Use project-local `state/current_find_research_plan.json`, `state/blocker_action_plan.json`, `state/experiment_registry.json`, `paper/metadata/paper_pipeline.json`, and raw logs/artifacts as the source of truth.
 
 ## Script Trust Policy
 
@@ -44,7 +50,7 @@ Scripts are decision-support tools, not unquestionable authorities.
 
 ## TASTE Integration
 
-- The web UI runs through `scripts/start_web.sh` and `modules/taste/auto_research/web/server.py`.
+- The web UI runs through `framework/scripts/start_web.sh` and `web/backend/auto_research/web/server.py`.
 - Find outputs are synchronized into `projects/<project>/planning/finding/` and summarized in `planning/finding_frontend.md`.
 - Current-Find Read/Idea/Plan must stay tied to the latest selected Find run. Do not let Environment, Experiment, or Paper consume stale or non-selected ideas.
 - Environment, Experiment, and Paper may consume only the single selected plan/idea contract. Non-selected ideas and plans are backlog only.

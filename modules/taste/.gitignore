@@ -1,8 +1,0 @@
-.venv/
-__pycache__/
-.pytest_cache/
-*.pyc
-*.log
-auto_research/web/client/node_modules/
-auto_research/web/client/dist/
-auto_research/web/client/tsconfig.tsbuildinfo

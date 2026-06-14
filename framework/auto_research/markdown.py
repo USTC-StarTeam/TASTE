@@ -1,0 +1,448 @@
+from __future__ import annotations
+
+import re
+
+from typing import Iterable
+
+
+_PLACEHOLDER_ABSTRACT_MARKERS = (
+    "当前候选缺少真实摘要",
+    "当前索引元数据缺少真实摘要",
+    "lacks a real abstract",
+    "No abstract available in metadata",
+    "Abstract not available in the indexed venue metadata",
+)
+
+_INTERNAL_PUBLIC_TEXT_MARKERS = (
+    "weak:",
+    "passed:",
+    "strong:",
+    "topic_evidence",
+    "matched_topic_route",
+    "adaptive topic evidence",
+    "adaptive_llm_topic_route",
+    "missing adaptive topic evidence",
+    "缺少当前主题",
+    "高召回",
+    "内部候选",
+    "对 实现",
+    "对AR实现",
+    "Guardrail",
+    "最终 LLM",
+    "LLM 题名",
+    "LLM 评分",
+    "题名+摘要评分",
+    "最终题名+摘要",
+    "题名筛选线索",
+    "最终相关性评分",
+    "Find",
+    "Top-N",
+    "证据门控",
+    "用户可见推荐",
+    "推荐池",
+    "检索候选",
+    "Gate reason",
+    "paper-conclusion",
+    "claim",
+    "foundation",
+    "high-recall",
+    "internal candidate",
+    "implementation",
+    "final title+abstract",
+    "LLM score",
+    "evidence gate",
+    "user-visible",
+    "recommendation pool",
+    "retrieval candidate",
+    "fallback-only",
+    "值得推荐和精读",
+    "为什么值得推荐精读",
+    "帮助读者",
+    "阅读提示",
+    "摘要仍不足以替代全文精读",
+    "全文精读",
+    "需全文确认",
+    "需在全文中继续确认",
+    "需要全文",
+    "精读阶段",
+    "给 reader",
+    "reader llm",
+    "worth recommending and reading",
+    "recommended for deep reading",
+    "reading note",
+    "full-text reading",
+    "full text reading",
+    "full-text confirmation",
+    "full text confirmation",
+    "deep reading",
+    "abstract is still not a substitute",
+    "reader instruction",
+)
+
+
+def _contains_internal_public_text(value: object) -> bool:
+    lowered = str(value or "").lower()
+    return bool(lowered) and any(marker.lower() in lowered for marker in _INTERNAL_PUBLIC_TEXT_MARKERS)
+
+
+_ABSTRACT_UI_CONTROL_RE = re.compile(
+    r"(?:\s*(?:show\s+(?:more|less)|read\s+(?:more|less)|显示更多|显示较少|展开|收起)\s*[。.]?\s*)+$",
+    re.IGNORECASE,
+)
+
+
+def _strip_abstract_ui_controls(value: object) -> str:
+    return _ABSTRACT_UI_CONTROL_RE.sub("", " ".join(str(value or "").split())).strip()
+
+
+_LATEX_URL_RE = re.compile(r"\\url\{(https?://[^{}\s]+)\}")
+_LATEX_HREF_RE = re.compile(r"\\href\{(https?://[^{}\s]+)\}\{([^{}]+)\}")
+_LATEX_TEXT_COMMAND_NAMES = (
+    "textit", "emph", "textbf", "texttt", "textsc", "underline",
+    "mathrm", "mathbf", "mathit", "mathtt", "text",
+)
+_MALFORMED_LATEX_TEXT_COMMAND_NAMES = ("extit", "extbf", "exttt", "extsc", "ext")
+_MALFORMED_LATEX_TEXT_COMMAND_MAP = {
+    "extit": "textit",
+    "extbf": "textbf",
+    "exttt": "texttt",
+    "extsc": "textsc",
+    "ext": "text",
+}
+_MALFORMED_LATEX_TEXT_COMMAND_START_RE = re.compile(
+    r"(?<![A-Za-z\\])(" + "|".join(_MALFORMED_LATEX_TEXT_COMMAND_NAMES) + r")\{"
+)
+_LATEX_EMPTY_COMMAND_RE = re.compile(r"\\([A-Za-z][A-Za-z0-9]*)\{\}")
+
+
+def _repair_malformed_latex_text_commands(value: object) -> str:
+    text = str(value or "")
+
+    def repl(match: re.Match[str]) -> str:
+        name = match.group(1)
+        return "\\" + _MALFORMED_LATEX_TEXT_COMMAND_MAP.get(name, "text") + "{"
+
+    return _MALFORMED_LATEX_TEXT_COMMAND_START_RE.sub(repl, text)
+
+
+def _strip_public_latex_text_commands(value: object) -> str:
+    text = _repair_malformed_latex_text_commands(value)
+    text = re.sub(r"\\textemdash(?:\{\})?", " -- ", text)
+    # Unknown empty custom commands such as \justask{} are publisher macros, not
+    # displayable math. Remove only the empty wrapper while preserving valid LaTeX
+    # styling/math commands with their arguments for the frontend KaTeX renderer.
+    return _LATEX_EMPTY_COMMAND_RE.sub(lambda match: match.group(1), text)
+
+
+def _paper_title_text(value: object) -> str:
+    text = _normalize_public_latex_markup(value).strip() or "Untitled"
+    text = re.sub(r"\$([^$\n]{1,80})\$", lambda match: match.group(1).strip(), text)
+    return " ".join(text.split())
+
+
+def _normalize_public_latex_markup(value: object) -> str:
+    text = _strip_public_latex_text_commands(value)
+
+    def href_repl(match: re.Match[str]) -> str:
+        url = match.group(1).strip()
+        label = match.group(2).strip() or url
+        return f"[{label}]({url})"
+
+    def url_repl(match: re.Match[str]) -> str:
+        url = match.group(1).strip()
+        return f"[{url}]({url})"
+
+    text = _LATEX_HREF_RE.sub(href_repl, text)
+    return _LATEX_URL_RE.sub(url_repl, text)
+
+
+def table(headers: list[str], rows: Iterable[list[object]]) -> str:
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |",
+    ]
+    for row in rows:
+        safe = [str(value).replace("\n", " ").replace("|", "\\|") for value in row]
+        lines.append("| " + " | ".join(safe) + " |")
+    return "\n".join(lines)
+
+
+def _paper_text(paper: dict, keys: list[str]) -> str:
+    for key in keys:
+        value = _normalize_public_latex_markup(paper.get(key)).strip()
+        if not value:
+            continue
+        if any(marker.lower() in value.lower() for marker in _PLACEHOLDER_ABSTRACT_MARKERS):
+            continue
+        return _strip_abstract_ui_controls(value) if key in {"abstract_zh", "summary_zh", "tldr_zh", "abstract_en", "abstract", "summary", "tldr"} else value
+    return ""
+
+
+def _contains_cjk(text: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in str(text or ""))
+
+
+def _is_probably_english(text: str) -> bool:
+    value = str(text or "")
+    letters = sum(1 for char in value if ("a" <= char.lower() <= "z"))
+    cjk = sum(1 for char in value if "\u4e00" <= char <= "\u9fff")
+    return letters >= 20 and letters > cjk * 2
+
+
+def _paper_zh_text(paper: dict, zh_keys: list[str], fallback_keys: list[str] | None = None) -> str:
+    value = _paper_text(paper, zh_keys)
+    if value:
+        return value
+    for key in fallback_keys or []:
+        fallback = _paper_text(paper, [key])
+        if fallback and _contains_cjk(fallback):
+            return fallback
+    return ""
+
+
+def _paper_display_text(paper: dict, zh_keys: list[str], fallback_keys: list[str] | None = None, *, public_text: bool = False) -> tuple[str, str]:
+    for key in zh_keys:
+        zh_value = _paper_text(paper, [key])
+        if zh_value and not (public_text and _contains_internal_public_text(zh_value)):
+            return zh_value, "zh"
+    for key in fallback_keys or []:
+        fallback = _paper_text(paper, [key])
+        if fallback and not (public_text and _contains_internal_public_text(fallback)):
+            return fallback, "en" if _is_probably_english(fallback) else "fallback"
+    return "", "missing"
+
+def _paper_zh_hits(paper: dict) -> str:
+    value = paper.get("hit_directions_zh")
+    if isinstance(value, list):
+        return "，".join(str(item) for item in value if str(item).strip())
+    if value:
+        return str(value)
+    value = paper.get("hit_directions")
+    if isinstance(value, list):
+        return "，".join(str(item) for item in value if _contains_cjk(str(item)))
+    if value and _contains_cjk(str(value)):
+        return str(value)
+    return ""
+
+
+_TITLE_ZH = {
+    "Recommended Articles": "推荐文章",
+    "Screened Strong Ranking": "推荐文章排名",
+    "Read Candidates": "精读候选",
+    "Critique Candidates": "边界/审计候选",
+    "bioRxiv Articles": "bioRxiv 文章",
+    "Nature Portfolio Articles": "Nature Portfolio 文章",
+    "Science Family Articles": "Science Family 文章",
+    "HuggingFace Papers and Models": "HuggingFace 论文和模型",
+    "GitHub Trending Repositories": "GitHub 趋势仓库",
+}
+
+
+def _markdown_title(title: str) -> str:
+    return _TITLE_ZH.get(str(title or ""), str(title or "推荐文章"))
+
+
+def _nonempty_list(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value or "").strip()
+    return [text] if text else []
+
+
+def _presentation_display_label(value: object) -> str:
+    text = " ".join(str(value or "").strip().split())
+    if not text:
+        return ""
+    lowered = text.lower()
+    if re.search(r"\b(best|award|outstanding|distinguished)[-\s]+paper\b", lowered):
+        return "Best paper/award"
+    if re.search(r"\boral\b", lowered):
+        return "Oral"
+    if re.search(r"\bspotlight\b", lowered):
+        return "Spotlight"
+    if re.search(r"\bhighlight\b", lowered):
+        return "Highlight"
+    if re.search(r"\bnotable\b", lowered):
+        return "Notable"
+    if re.search(r"top[-\s]?5%", lowered):
+        return "Top-5%"
+    if re.search(r"\bposter\b", lowered):
+        return "Poster"
+    return ""
+
+
+def _presentation_display_from_paper(paper: dict) -> str:
+    metadata = _metadata_dict(paper)
+    for key in ["presentation_type", "presentation_label", "track", "acceptance_type", "paper_type"]:
+        label = _presentation_display_label(paper.get(key))
+        if label:
+            return label
+    for key in ["presentation_type", "presentation_label", "track", "acceptance_type", "paper_type"]:
+        label = _presentation_display_label(metadata.get(key))
+        if label:
+            return label
+    for label in _nonempty_list(paper.get("quality_labels")):
+        display = _presentation_display_label(label)
+        if display:
+            return display
+    return ""
+
+
+def _quality_label_display(label: object) -> str:
+    presentation = _presentation_display_label(label)
+    return presentation or " ".join(str(label or "").strip().split())
+
+
+def _recommendation_reason_text(recommendation: str, fit_explanation: str) -> str:
+    primary = " ".join(str(recommendation or "").split()).strip()
+    fallback = " ".join(str(fit_explanation or "").split()).strip()
+    return primary or fallback
+
+
+def _optional_metadata_lines(paper: dict) -> list[str]:
+    lines: list[str] = []
+    track = _presentation_display_from_paper(paper)
+    track_key = track.lower()
+    labels: list[str] = []
+    seen: set[str] = set()
+    for raw_label in _nonempty_list(paper.get("quality_labels")):
+        label = _quality_label_display(raw_label)
+        if not label:
+            continue
+        label_key = label.lower()
+        if track_key and label_key == track_key:
+            continue
+        if label_key in seen:
+            continue
+        labels.append(label)
+        seen.add(label_key)
+    if labels:
+        lines.append("- **质量标签**: " + ", ".join(labels))
+    return lines
+
+def _metadata_dict(paper: dict) -> dict:
+    return paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}
+
+
+def _clean_link_url(value: object) -> str:
+    text = str(value or "").strip().rstrip(".,);]")
+    if not text.startswith(("http://", "https://")):
+        return ""
+    return text
+
+
+def _paper_doi(paper: dict) -> str:
+    metadata = _metadata_dict(paper)
+    doi = str(paper.get("doi") or metadata.get("doi") or "").strip()
+    if doi:
+        return doi
+    for key in ["url", "pdf_url", "doi_url", "publisher_url", "acm_abs_url"]:
+        value = str(paper.get(key) or metadata.get(key) or "")
+        match = re.search(r'10\.\d{4,9}/[^\s"<>]+', value)
+        if match:
+            return match.group(0).rstrip(".,);]")
+    return ""
+
+
+def _doi_url(doi: str) -> str:
+    return f"https://doi.org/{doi}" if doi else ""
+
+
+def _append_link(parts: list[str], seen: set[str], label: str, url: str) -> None:
+    clean = _clean_link_url(url)
+    if not clean or clean in seen:
+        return
+    seen.add(clean)
+    parts.append(f"[{label}]({clean})")
+
+
+def _paper_link_line(paper: dict) -> str:
+    metadata = _metadata_dict(paper)
+    parts: list[str] = []
+    seen: set[str] = set()
+    doi = _paper_doi(paper)
+    main_url = _clean_link_url(paper.get("url") or metadata.get("url") or metadata.get("publisher_url") or _doi_url(doi))
+    main_label = "DOI" if main_url and "doi.org/" in main_url else "论文页"
+    _append_link(parts, seen, main_label, main_url)
+    _append_link(parts, seen, "ACM", metadata.get("acm_abs_url") or "")
+    _append_link(parts, seen, "PDF", paper.get("pdf_url") or metadata.get("acm_pdf_url") or metadata.get("acm_epdf_url") or "")
+    _append_link(parts, seen, "HTML", metadata.get("acm_full_html_url") or "")
+    _append_link(parts, seen, "DBLP", metadata.get("dblp_record_url") or "")
+    doi_link = _doi_url(doi)
+    if doi_link:
+        _append_link(parts, seen, "DOI", doi_link)
+    return f"- **链接**: {' / '.join(parts)}" if parts else ""
+
+
+def _paper_score_line(paper: dict) -> str:
+    for key in ("recommendation_score", "llm_fit_score", "fit_score", "score"):
+        value = paper.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            continue
+        return f"- **推荐分数**: {score:.2f} / 10"
+    return ""
+
+
+def _paper_brief_metadata_lines(paper: dict) -> list[str]:
+    lines: list[str] = []
+    source = str(paper.get("source") or "").strip()
+    venue_year = " ".join(str(paper.get(key) or "").strip() for key in ("venue", "year")).strip()
+    category = str(paper.get("category") or "").strip()
+    hit_text = _paper_zh_hits(paper)
+    link_line = _paper_link_line(paper)
+    score_line = _paper_score_line(paper)
+    track = _presentation_display_from_paper(paper)
+    if venue_year:
+        venue_display = f"{venue_year} / {track}" if track else venue_year
+        lines.append(f"- **会议/年份**: {venue_display}")
+    elif track:
+        lines.append(f"- **类型**: {track}")
+    if source:
+        lines.append(f"- **来源**: {source}")
+    if score_line:
+        lines.append(score_line)
+    if category:
+        lines.append(f"- **方法/主题类别**: {category}")
+    if hit_text:
+        lines.append(f"- **命中方向**: {hit_text}")
+    if link_line:
+        lines.append(link_line)
+    lines.extend(_optional_metadata_lines(paper))
+    return lines
+
+
+def paper_markdown(papers: list[dict], title: str = "Recommended Articles") -> str:
+    lines = [f"# {_markdown_title(title)}", "", f"- **条目数**: {len(papers)}", ""]
+    if not papers:
+        lines.append("未选择条目。")
+        return "\n".join(lines) + "\n"
+
+    for index, paper in enumerate(papers, 1):
+        abstract, abstract_lang = _paper_display_text(paper, ["abstract_zh", "summary_zh", "tldr_zh"], ["abstract_en", "abstract", "summary", "tldr"])
+        fit_explanation, fit_lang = _paper_display_text(paper, ["fit_explanation_zh", "match_explanation_zh"], ["fit_explanation", "match_explanation", "reason_en", "reason"], public_text=True)
+        recommendation, reason_lang = _paper_display_text(paper, ["reason_zh", "recommendation_reason_zh"], ["reason", "recommendation_reason", "reason_en", "fit_explanation_en"], public_text=True)
+        abstract_note: list[str] = []
+        recommendation_reason = _recommendation_reason_text(recommendation, fit_explanation)
+        metadata_lines = _paper_brief_metadata_lines(paper)
+        lines.extend([
+            f"## {index}. {_paper_title_text(paper.get('title'))}",
+            "",
+            *metadata_lines,
+            "",
+            "### 摘要",
+            "",
+            abstract or "当前条目缺少可展示的真实摘要；需要通过详情抓取、URL/PDF 精读或摘要翻译修复后再作为推荐证据。Abstract not available in the indexed venue metadata.",
+            *abstract_note,
+            "",
+            "### 推荐理由",
+            "",
+            recommendation_reason or "推荐理由缺失；需要重新执行标题+摘要评分或理由补全，并说明该条目可借鉴的具体方法、数据、协议或边界价值。",
+            "",
+            "",
+            "",
+        ])
+    return "\n".join(lines).rstrip() + "\n"
