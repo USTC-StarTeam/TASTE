@@ -5471,6 +5471,20 @@ def test_frontend_paper_self_review_evidence_blockers_are_submission_gate():
     assert "{t.paperSelfReviewStatus}={displayMaybe(researchStages?.paper?.paper_self_review_status)}" not in app
 
 
+def test_frontend_paper_page_surfaces_global_experiment_evidence_gate():
+    from pathlib import Path
+
+    app = Path("web/frontend/client/src/App.tsx").read_text(encoding="utf-8")
+
+    assert "paperGlobalEvidenceGateBlocked" in app
+    assert "paperGlobalEvidenceGateText" in app
+    assert "humanGateSummary?.scientific_progress?.status" in app
+    assert "researchSummary?.current_blocker?.summary" in app
+    assert 'category.includes("experiment_evidence")' in app
+    assert "freshBaseMainBlocked || literatureGateBlocked || paperGlobalEvidenceGateBlocked" in app
+    assert "paperGlobalEvidenceGateText" in app.split("freshBaseMainBlocked || literatureGateBlocked || paperGlobalEvidenceGateBlocked", 1)[1]
+
+
 def test_stale_paper_placeholder_receipt_has_no_full_response_button():
     from auto_research.web import project_bridge
 

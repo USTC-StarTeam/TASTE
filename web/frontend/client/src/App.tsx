@@ -5719,6 +5719,38 @@ function App() {
   const scientificProgressGate = useMemo(() => researchSummary?.state?.scientific_progress_gate || researchStages?.experiment?.scientific_progress_gate || {}, [researchSummary, researchStages]);
   const experimentIterationAudit = useMemo(() => researchSummary?.state?.experiment_iteration_audit || researchStages?.experiment?.experiment_iteration_audit || {}, [researchSummary, researchStages]);
   const humanGateSummary = useMemo(() => researchSummary?.human_gate_summary || researchSummary?.state?.human_gate_summary || researchStages?.experiment?.human_gate_summary || humanSupervision?.gate_summary || {}, [researchSummary, researchStages, humanSupervision]);
+  const paperGlobalEvidenceGateBlocked = useMemo(() => {
+    const blocker = humanSupervision?.blocker || researchSummary?.current_blocker || {};
+    const category = String(blocker?.category || humanGateSummary?.category || "").toLowerCase();
+    const statuses = [
+      humanGateSummary?.status,
+      humanGateSummary?.scientific_progress?.status,
+      scientificProgressGate?.status,
+      (researchSummary as any)?.status,
+    ].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
+    const gateText = [
+      category,
+      blocker?.summary,
+      blocker?.human_summary,
+      blocker?.issue,
+      humanGateSummary?.summary,
+      humanGateSummary?.title,
+      humanGateSummary?.scientific_progress?.summary,
+    ].map((value) => String(value || "").toLowerCase()).join(" ");
+    const evidenceCategory = category.includes("experiment_evidence")
+      || category.includes("scientific_progress")
+      || category.includes("paper_evidence")
+      || category.includes("submission_readiness");
+    const evidenceText = /evidence|scientific progress|experiment|submission|候选实验|科学进展|证据|投稿/.test(gateText);
+    const blockedStatus = statuses.some((value) => value === "blocked" || value.startsWith("blocked"));
+    return Boolean((evidenceCategory || evidenceText) && blockedStatus);
+  }, [humanSupervision, researchSummary, humanGateSummary, scientificProgressGate]);
+  const paperGlobalEvidenceGateText = useMemo(() => (
+    humanReadableMaybe(
+      humanGateSummary?.summary || humanSupervision?.blocker?.summary || researchSummary?.current_blocker?.summary,
+      t.evidenceGateWarning,
+    )
+  ), [humanGateSummary, humanSupervision, researchSummary, t.evidenceGateWarning]);
   const researchRuntime = useMemo(() => researchSummary?.runtime || researchSummary?.state?.runtime || {}, [researchSummary]);
   const currentFindPipeline = useMemo(() => researchSummary?.current_find_pipeline || researchLiteratureSurvey?.current_find_pipeline || {}, [researchSummary, researchLiteratureSurvey]);
   const publicFindStage = useMemo(() => researchStages?.find || researchSummary?.state?.stages?.find || {}, [researchStages, researchSummary]);
@@ -8441,8 +8473,8 @@ function App() {
             </div>
             {!researchSummary && <div className="researchGateNote warning">{lang === "zh" ? "正在刷新当前项目状态；论文撰写面板会先保留显示。" : "Refreshing current project state; the Paper panels stay visible."}</div>}
             <>
-            {(freshBaseMainBlocked || literatureGateBlocked) && (
-              <div className="researchGateNote warning"><strong>{t.evidenceGateNotPassed}:</strong> {displayMaybe(humanSupervision?.blocker?.summary, t.evidenceGateWarning)} {lang === "zh" ? "点击生成会生成目标 venue 论文预览，但不会标记为投稿通过。" : "Generating still creates an paper preview only; it will not be marked submission-ready."}</div>
+            {(freshBaseMainBlocked || literatureGateBlocked || paperGlobalEvidenceGateBlocked) && (
+              <div className="researchGateNote warning"><strong>{t.evidenceGateNotPassed}:</strong> {paperGlobalEvidenceGateText} {lang === "zh" ? "点击生成会生成目标 venue 论文预览，但不会标记为投稿通过。" : "Generating still creates a target-venue paper preview only; it will not be marked submission-ready."}</div>
             )}
             <div className="grid two">
               <div className="panel"><h3>{t.paperSettingsAndGate}</h3><div className="row"><div><label>{t.researchVenue}</label><div className="inlineInputAction"><input value={researchVenue} onChange={(e) => { setVenue(e.target.value); setProjectConfigMessage(""); }} onBlur={() => { if (researchVenue.trim()) void saveProjectConfigDraft({ silent: true, includePaperSettings: true }); }} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void saveProjectConfigDraft({ includePaperSettings: true }); } }} /><button className="smallButton" onClick={() => void saveProjectConfigDraft({ includePaperSettings: true })} disabled={!researchProject || !researchVenue.trim() || researchProjectConfigSaving}>{researchProjectConfigSaving ? t.saving : (lang === "zh" ? "保存投稿目标" : "Save venue")}</button></div>{researchProjectConfigMessage && <small className="statusHint">{researchProjectConfigMessage}</small>}</div><div><label>{t.researchTitle}</label><input value={researchTitle} onChange={(e) => { setTitle(e.target.value); setProjectConfigMessage(""); }} onBlur={() => { if (researchVenue.trim()) void saveProjectConfigDraft({ silent: true, includePaperSettings: true }); }} /></div></div><p className="help">{t.researchForceTemplate}</p><label className="switch"><input type="checkbox" checked={researchAutoInstallLatex} onChange={(e) => setAutoInstallLatex(e.target.checked)} /> {t.researchAutoInstallLatex}</label><div className="researchGateNote"><strong>{t.currentGate}:</strong> {paperStageSummaryText(researchStages?.paper)}</div></div>
