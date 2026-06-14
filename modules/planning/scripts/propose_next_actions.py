@@ -108,6 +108,12 @@ def selected_base_viability_action(gate: dict, base_switch_gate: dict | None = N
         ]
         if base_status == 'blocked' and base_decision == 'base_switch_not_authorized':
             failed_text = ','.join(failed_ids[:8]) or 'unknown'
+            evidence_bits[0] = (
+                'selected_base_viability_gate remains blocked after the deterministic base-switch gate already ran and did not authorize a switch. '
+                'Re-running the same gate cannot clear the blocker without new evidence: provide current-route artifact-local raw '
+                'text/metadata provenance with preserved ID mapping plus a real LLM/text embedding probe, or create a non-authoritative '
+                'candidate base-switch proposal traceable to the current Find/read packet.'
+            )
             evidence_bits.extend([
                 f'base_switch_gate={base_status}/{base_decision}',
                 f'failed_checks={failed_text}',

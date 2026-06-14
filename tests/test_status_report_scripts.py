@@ -419,6 +419,9 @@ def test_propose_next_actions_uses_failed_base_switch_gate_result(tmp_path, monk
     _write_json(paths.state / "repo_data_requirements.json", {"ready_datasets": ["demo-data"], "blocked_datasets": []})
     _write_json(paths.state / "real_dataset_probe.json", {"probes": []})
     _write_json(paths.state / "experiment_registry.json", [])
+    selected_gate = json.loads((paths.state / "selected_base_viability_gate.json").read_text(encoding="utf-8"))
+    selected_gate["issue"] += " 下一步只能进入 deterministic base-switch / semantic-provenance gate。"
+    _write_json(paths.state / "selected_base_viability_gate.json", selected_gate)
 
     monkeypatch.setattr(propose, "build_paths", lambda _project: paths)
     monkeypatch.setattr(propose, "load_project_config", lambda _project: {"name": "demo_project", "topic": "Demo topic"})
@@ -433,6 +436,7 @@ def test_propose_next_actions_uses_failed_base_switch_gate_result(tmp_path, monk
     assert "base_switch_gate=blocked/base_switch_not_authorized" in action["evidence"]
     assert "failed_checks=candidate_route_proposal_exists,candidate_find_run_provenance_clear" in action["evidence"]
     assert "Run deterministic semantic-provenance/base-switch gate" not in titles
+    assert "下一步只能进入 deterministic base-switch / semantic-provenance gate" not in action["evidence"]
     assert "Run repo-first literature backtracking" not in titles
     assert "Probe real repo dataset loaders before real experiments" not in titles
 
@@ -440,3 +444,4 @@ def test_propose_next_actions_uses_failed_base_switch_gate_result(tmp_path, monk
     assert "base_switch_gate_status: blocked" in text
     assert "base_switch_gate_decision: base_switch_not_authorized" in text
     assert "Provide semantic provenance evidence or a candidate base-switch proposal" in text
+    assert "下一步只能进入 deterministic base-switch / semantic-provenance gate" not in text
