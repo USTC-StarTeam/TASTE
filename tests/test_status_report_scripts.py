@@ -147,3 +147,90 @@ def test_research_healthcheck_reports_overall_full_cycle_not_find_only_status(tm
     assert "Full-cycle summary: 实验门控阻塞" in text
     assert "Experiment evidence gate: blocked" in text
     assert "TASTE status: claude_current_find_read_idea_plan_ready_waiting_for_environment_base_selection" not in text
+
+
+
+def _seed_selected_base_semantic_provenance_block(paths: SimpleNamespace) -> None:
+    _seed_current_selected_experiment_block(paths)
+    _write_json(
+        paths.state / "full_research_cycle.json",
+        {
+            "status": "blocked_after_max_cycles",
+            "summary": "stale full-cycle summary says continue behavior experiments",
+            "current_find_run_id": "find_current",
+        },
+    )
+    _write_json(
+        paths.state / "selected_base_viability_gate.json",
+        {
+            "status": "blocked",
+            "decision": "base_switch_gate_required",
+            "issue": (
+                "selected_base_viability_gate: 参考复现已通过，但当前 selected-base 主线缺少 "
+                "LLM/text-semantic 实验所需的可审计文本/元数据 provenance；继续运行纯行为或损失级候选实验无法清除此门控。"
+            ),
+            "semantic_data_provenance_review": {
+                "status": "blocked",
+                "deterministic_gate_required": True,
+                "project_requires_llm_semantics": True,
+                "llm_semantic_guard_status": "blocked",
+                "has_real_llm_embedding_evidence": False,
+                "text_metadata_provenance": {
+                    "status": "blocked",
+                    "has_text_metadata_evidence": False,
+                    "dataset": "demo-data",
+                    "repo_path": "/tmp/new",
+                },
+            },
+        },
+    )
+
+
+def test_report_status_surfaces_selected_base_semantic_provenance_gate(tmp_path, monkeypatch):
+    report_status = load_script("report_status")
+    paths = _make_paths(tmp_path)
+    _seed_common_project(paths)
+    _seed_selected_base_semantic_provenance_block(paths)
+
+    monkeypatch.setattr(report_status, "build_paths", lambda _project: paths)
+    monkeypatch.setattr(report_status, "load_project_config", lambda _project: {"name": "demo_project", "topic": "Demo topic", "coding_agent": {}})
+    monkeypatch.setattr(report_status, "get_active_paper_state", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(report_status, "llm_available", lambda _cfg: True)
+    monkeypatch.setattr(report_status, "find_claude", lambda _cfg: "/bin/claude")
+    monkeypatch.setattr(sys, "argv", ["report_status.py", "--project", "demo_project", "--venue", "ICLR"])
+
+    report_status.main()
+
+    text = (paths.reports / "status.md").read_text(encoding="utf-8")
+    assert "- current_blocker_category: semantic_data_provenance_required" in text
+    assert "- selected_base_viability_gate_status: blocked" in text
+    assert "- selected_base_viability_gate_decision: base_switch_gate_required" in text
+    assert "- semantic_data_provenance_status: blocked" in text
+    assert "- semantic_data_provenance_dataset: demo-data" in text
+    assert "- semantic_data_provenance_has_text_metadata_evidence: False" in text
+    assert "- semantic_data_provenance_has_real_llm_embedding_evidence: False" in text
+    assert "LLM/text-semantic 实验所需的可审计文本/元数据 provenance" in text
+    assert "stale full-cycle summary says continue behavior experiments" not in text
+
+
+def test_research_healthcheck_surfaces_selected_base_semantic_provenance_gate(tmp_path, monkeypatch):
+    healthcheck = load_script("research_healthcheck")
+    paths = _make_paths(tmp_path)
+    _seed_common_project(paths)
+    _seed_selected_base_semantic_provenance_block(paths)
+
+    monkeypatch.setattr(healthcheck, "build_paths", lambda _project: paths)
+    monkeypatch.setattr(healthcheck, "load_project_config", lambda _project: {"name": "demo_project", "topic": "Demo topic", "coding_agent": {}})
+    monkeypatch.setattr(healthcheck, "get_active_paper_state", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(healthcheck, "llm_available", lambda _cfg: True)
+    monkeypatch.setattr(healthcheck, "find_claude", lambda _cfg: "/bin/claude")
+    monkeypatch.setattr(sys, "argv", ["research_healthcheck.py", "--project", "demo_project", "--venue", "ICLR"])
+
+    healthcheck.main()
+
+    text = (paths.reports / "healthcheck.md").read_text(encoding="utf-8")
+    assert "Selected-base viability gate: semantic_data_provenance_required (blocked/base_switch_gate_required)" in text
+    assert "Semantic data provenance: blocked; dataset=demo-data; text_metadata_evidence=False; real_llm_embedding_evidence=False" in text
+    assert "Current blocker summary: selected_base_viability_gate" in text
+    assert "LLM/text-semantic 实验所需的可审计文本/元数据 provenance" in text
+    assert "stale full-cycle summary says continue behavior experiments" not in text

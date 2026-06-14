@@ -99,6 +99,61 @@ def _public_summary(row: dict) -> str:
     row = _as_dict(row)
     return str(row.get("summary_zh") or row.get("summary") or row.get("human_summary") or "").strip()
 
+def _selected_base_viability_public_status(gate: dict) -> dict:
+    gate = _as_dict(gate)
+    status = str(gate.get("status") or "").strip().lower()
+    decision = str(gate.get("decision") or "").strip().lower()
+    if status != "blocked" or decision not in {"base_switch_gate_required", "continue_experiment_evidence_repair"}:
+        return {}
+    semantic = _as_dict(gate.get("semantic_data_provenance_review"))
+    text_meta = _as_dict(semantic.get("text_metadata_provenance"))
+    dataset = str(text_meta.get("dataset") or gate.get("dataset") or gate.get("selected_dataset") or "").strip()
+    text_evidence_value = text_meta.get("has_text_metadata_evidence")
+    semantic_required = bool(
+        semantic.get("deterministic_gate_required")
+        or (
+            str(semantic.get("status") or "").strip().lower() == "blocked"
+            and bool(semantic.get("project_requires_llm_semantics"))
+            and not bool(semantic.get("has_real_llm_embedding_evidence"))
+            and text_evidence_value is False
+        )
+    )
+    issue = str(gate.get("issue") or "").strip()
+    if semantic_required:
+        summary = issue or (
+            "selected_base_viability_gate: 参考复现已通过，但当前 selected-base 数据路线缺少 LLM/text-semantic "
+            "实验所需的可审计文本/元数据 provenance；继续运行纯行为或损失级候选实验无法清除此门控。"
+        )
+        next_action = (
+            "运行 deterministic base-switch / semantic-provenance gate；候选路线保持 proposal-only，或补齐当前路线保存 ID "
+            "映射的原始文本/元数据 provenance 与 artifact-local LLM/text embedding probe。通过前不继续纯行为级候选实验、不写论文、不提升结论。"
+        )
+        return {
+            "category": "semantic_data_provenance_required",
+            "status": status,
+            "decision": decision,
+            "summary": summary,
+            "next_action": next_action,
+            "semantic_status": str(semantic.get("status") or "").strip(),
+            "semantic_dataset": dataset,
+            "semantic_has_text_metadata_evidence": text_evidence_value,
+            "semantic_has_real_llm_embedding_evidence": bool(semantic.get("has_real_llm_embedding_evidence")),
+        }
+    summary = issue or (
+        "selected_base_viability_gate: 参考复现已通过；当前主线还缺少可审计、可写入论文的候选实验结果。"
+    )
+    return {
+        "category": "experiment_evidence_audit",
+        "status": status,
+        "decision": decision,
+        "summary": summary,
+        "next_action": "等待项目代理读取当前缺口证据，并给出下一轮实验或修复动作。",
+        "semantic_status": str(semantic.get("status") or "").strip(),
+        "semantic_dataset": dataset,
+        "semantic_has_text_metadata_evidence": text_evidence_value,
+        "semantic_has_real_llm_embedding_evidence": bool(semantic.get("has_real_llm_embedding_evidence")),
+    }
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -185,6 +240,7 @@ def main() -> None:
     repo_selection = load_json(paths.state / "evidence_ready_repo_selection.json") if (paths.state / "evidence_ready_repo_selection.json").exists() else {}
     full_cycle = load_json(paths.state / "full_research_cycle.json") if (paths.state / "full_research_cycle.json").exists() else {}
     scientific_progress_gate = load_json(paths.state / "scientific_progress_gate.json") if (paths.state / "scientific_progress_gate.json").exists() else {}
+    selected_base_viability_gate = load_json(paths.state / "selected_base_viability_gate.json") if (paths.state / "selected_base_viability_gate.json").exists() else {}
     taste_sync = load_json(paths.state / "taste_sync.json") if (paths.state / "taste_sync.json").exists() else {}
     taste_counts = taste_sync.get("counts", {}) if isinstance(taste_sync, dict) else {}
     if not taste_state and not current_find_plan:
@@ -195,14 +251,30 @@ def main() -> None:
         notes.append(f"Current-Find downstream status: {current_find_status}{f' (run_id={current_find_run_id})' if current_find_run_id else ''}")
         notes.append(f"Environment base selection: {_environment_selection_status(repo_selection, current_find_plan)}")
         full_cycle_status = str(_as_dict(full_cycle).get("status") or "").strip()
+        selected_base_viability_status = _selected_base_viability_public_status(selected_base_viability_gate)
         if full_cycle_status:
             notes.append(f"Full-cycle status: {full_cycle_status}")
-            full_cycle_summary = _public_summary(full_cycle)
+            full_cycle_summary = (selected_base_viability_status.get("summary") if selected_base_viability_status else "") or _public_summary(full_cycle)
             if full_cycle_summary:
                 notes.append(f"Full-cycle summary: {full_cycle_summary}")
         scientific_progress_status = str(_as_dict(scientific_progress_gate).get("status") or "").strip()
         if scientific_progress_status:
             notes.append(f"Experiment evidence gate: {scientific_progress_status}")
+        if selected_base_viability_status:
+            notes.append(
+                "Selected-base viability gate: "
+                f"{selected_base_viability_status.get('category')} "
+                f"({selected_base_viability_status.get('status')}/{selected_base_viability_status.get('decision')})"
+            )
+            if selected_base_viability_status.get("category") == "semantic_data_provenance_required":
+                notes.append(
+                    "Semantic data provenance: "
+                    f"{selected_base_viability_status.get('semantic_status') or 'blocked'}; "
+                    f"dataset={selected_base_viability_status.get('semantic_dataset') or 'unknown'}; "
+                    f"text_metadata_evidence={selected_base_viability_status.get('semantic_has_text_metadata_evidence')}; "
+                    f"real_llm_embedding_evidence={selected_base_viability_status.get('semantic_has_real_llm_embedding_evidence')}"
+                )
+                notes.append(f"Current blocker summary: {selected_base_viability_status.get('summary')}")
         if isinstance(taste_state, dict) and taste_state.get("status") in {"timeout", "failed", "error"}:
             notes.append("The Find workflow is in a recoverable failure state; rerun after API/network/source repair and do not treat fallback as scientific evidence.")
     if not taste_sync:
