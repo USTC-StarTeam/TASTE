@@ -271,13 +271,10 @@ def collect_project_content(project: str) -> tuple[set[str], set[str], set[str],
             sources.append(str(state_path.relative_to(ROOT)))
             visit(payload)
 
-    for repo_dir in [paths.repos_selected, paths.repos_candidates]:
-        if repo_dir.exists():
-            for child in repo_dir.iterdir():
-                if child.is_dir():
-                    add_repo_path_identifier(tokens, child.name)
-                    sources.append(str(child.relative_to(ROOT)))
-
+    # Do not scan every repository directory under projects/<project>/repos.
+    # That directory can contain stale candidates and archives from previous
+    # searches. Only explicit current/selected identities recorded in state are
+    # hard tokens for framework-content coupling checks.
     tokens = {token for token in tokens if len(token) >= 4 and token not in GENERIC_ALLOWLIST and not token.isdigit()}
     short_tokens = {token for token in short_tokens if 2 <= len(token) <= 3 and token not in GENERIC_ALLOWLIST and not token.isdigit()}
     return tokens, short_tokens, phrases, sorted(set(sources))[:120]

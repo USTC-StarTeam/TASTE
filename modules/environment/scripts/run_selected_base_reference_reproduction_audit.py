@@ -157,7 +157,7 @@ def analysis_quickstart_command(repo: Path, mode: str) -> list[str]:
     return [str(scripts[0].relative_to(repo)), "--input", str(datasets[0].relative_to(repo)), "--outdir", outdir, "--n_boot", n_boot]
 
 
-def is_rsir_sasrec_repo(repo: Path) -> bool:
+def is_sasrec_recommendation_repo(repo: Path) -> bool:
     return all(
         (repo / rel).exists()
         for rel in [
@@ -173,8 +173,8 @@ def is_rsir_sasrec_repo(repo: Path) -> bool:
     )
 
 
-def write_rsir_bounded_runner(artifact_dir: Path, dataset: str, epoch: int) -> Path:
-    runner = artifact_dir / "rsir_bounded_reference_runner.py"
+def write_sasrec_bounded_runner(artifact_dir: Path, dataset: str, epoch: int) -> Path:
+    runner = artifact_dir / "sasrec_bounded_reference_runner.py"
     runner.write_text(
         f'''
 from __future__ import annotations
@@ -221,14 +221,14 @@ try:
 
     payload = {{
         "status": "ok",
-        "mode": "rsir_bounded_single_batch_reference",
+        "mode": "sasrec_bounded_single_batch_reference",
         "dataset": {dataset!r},
         "original_train_len": original_train_len,
         "bounded_examples": bounded_examples,
         "loss": float(loss.detach().cpu()),
         "batch_keys": sorted(batch.keys()),
         "paper_level": False,
-        "note": "One official RSIR SASRec batch with official loader/model/loss; bounded audit only, not paper-level reproduction.",
+        "note": "One official SASRec-style batch with the repository loader/model/loss; bounded audit only, not paper-level reproduction.",
     }}
     print(f"Epoch 0 Train loss: {{payload['loss']:.6f}}")
     print(json.dumps(payload, ensure_ascii=False))
@@ -242,8 +242,8 @@ except Exception as exc:
 
 
 
-def write_rsir_full_runner(artifact_dir: Path, dataset: str, epoch: int) -> Path:
-    runner = artifact_dir / "rsir_full_reference_runner.py"
+def write_sasrec_full_runner(artifact_dir: Path, dataset: str, epoch: int) -> Path:
+    runner = artifact_dir / "sasrec_full_reference_runner.py"
     runner.write_text(
         f'''
 from __future__ import annotations
@@ -269,9 +269,9 @@ try:
     original_epochs = int(config.get("train", {{}}).get("epochs", 0) or 0)
     config.setdefault("train", {{}})["epochs"] = requested_epochs
     setup_environment(config["train"])
-    print("[rsir-full-runner] " + json.dumps({{
+    print("[sasrec-reference-runner] " + json.dumps({{
         "status": "starting",
-        "mode": "rsir_full_dataset_reference",
+        "mode": "sasrec_full_dataset_reference",
         "dataset": {dataset!r},
         "model": "SASRec",
         "official_entrypoint": "quickstart.run_recommender",
@@ -281,14 +281,14 @@ try:
         "paper_level_scope": "full dataset/reference command with audited epoch cap",
     }}, ensure_ascii=False))
     quickstart.run_recommender(config)
-    print("[rsir-full-runner] " + json.dumps({{
+    print("[sasrec-reference-runner] " + json.dumps({{
         "status": "completed",
-        "mode": "rsir_full_dataset_reference",
+        "mode": "sasrec_full_dataset_reference",
         "dataset": {dataset!r},
         "executed_epochs": requested_epochs,
     }}, ensure_ascii=False))
 except Exception as exc:
-    print("[rsir-full-runner] " + json.dumps({{
+    print("[sasrec-reference-runner] " + json.dumps({{
         "status": "failed",
         "error": str(exc),
         "traceback": traceback.format_exc()[-4000:],
@@ -302,8 +302,8 @@ except Exception as exc:
 def repo_adapter(repo: Path) -> str:
     if (repo / "main.py").exists() and (repo / "finetune.py").exists() and (repo / "run.sh").exists():
         return "selected_base_official_two_stage"
-    if is_rsir_sasrec_repo(repo):
-        return "rsir_sasrec_official"
+    if is_sasrec_recommendation_repo(repo):
+        return "sasrec_official"
     if any((repo / name).exists() for name in ["train.py", "single_train.py"]):
         return "official_training_entrypoint"
     if analysis_quickstart_command(repo, "bounded"):
@@ -328,7 +328,7 @@ def official_command(repo: Path, dataset: str, mode: str, epoch: int) -> list[st
     analysis_command = analysis_quickstart_command(repo, mode)
     if analysis_command:
         return analysis_command
-    if is_rsir_sasrec_repo(repo):
+    if is_sasrec_recommendation_repo(repo):
         return ["run.py", "-m", "SASRec", "-d", dataset, "--trainfile", "", "--mode", "recommendation", "--device", "0"]
     run_sh = repo / "run.sh"
     preferred: list[str] = []
@@ -457,7 +457,8 @@ def parse_metrics(stdout: str) -> dict[str, Any]:
             key = raw_key.strip().lower().replace("@", "_at_").replace(" ", "_")
             value = float(raw_value)
             metrics[key] = value
-            if key.startswith(("ndcg_at_", "recall_at_", "hr_at_", "beauty_ndcg_at_", "beauty_recall_at_")):
+            ranking_metric = key.startswith(("ndcg_at_", "recall_at_", "hr_at_")) or any(marker in key for marker in ("_ndcg_at_", "_recall_at_", "_hr_at_"))
+            if ranking_metric:
                 best_key = f"best_seen_{key}"
                 metrics[best_key] = max(float(metrics.get(best_key, value)), value)
             if key.startswith("train_loss"):
@@ -556,11 +557,11 @@ def build(project: str, mode: str, epoch: int, timeout_sec: int, execute: bool) 
     exp_id = f"selected_base_reference_{mode}_{dataset or 'dataset'}_{safe_epoch}epoch_{stamp}"
     artifact_dir = paths.artifacts / "fresh_base_reference_reproduction" / exp_id
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    if adapter == "rsir_sasrec_official" and mode == "bounded":
-        args = [str(write_rsir_bounded_runner(artifact_dir, dataset, safe_epoch))]
+    if adapter == "sasrec_official" and mode == "bounded":
+        args = [str(write_sasrec_bounded_runner(artifact_dir, dataset, safe_epoch))]
         command = [py, "-u", *args]
-    elif adapter == "rsir_sasrec_official" and mode == "full":
-        args = [str(write_rsir_full_runner(artifact_dir, dataset, safe_epoch))]
+    elif adapter == "sasrec_official" and mode == "full":
+        args = [str(write_sasrec_full_runner(artifact_dir, dataset, safe_epoch))]
         command = [py, "-u", *args]
     stdout_path = artifact_dir / "stdout_stderr.log"
     artifact_audit_path = artifact_dir / "audit.json"

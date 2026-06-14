@@ -3414,6 +3414,24 @@ def test_blocker_action_plan_detects_workspace_owned_alternative_training(monkey
     assert worker["pid"] == "444"
 
 
+def test_blocker_action_plan_omits_stale_framework_coupling_stage_failure(monkeypatch, tmp_path):
+    ensure_script_paths()
+    blocker = importlib.reload(importlib.import_module("build_blocker_action_plan"))
+    state = tmp_path / "state"
+    reports = tmp_path / "reports"
+    planning = tmp_path / "planning"
+    for directory in [state, reports, planning / "finding"]:
+        directory.mkdir(parents=True)
+    paths = type("Paths", (), {"state": state, "reports": reports, "planning": planning, "root": tmp_path})()
+    write_json(state / "framework_content_coupling_audit.json", {"status": "pass", "finding_count": 0})
+    write_json(state / "full_research_cycle.json", {"stage_failures": [{"stage": "framework-content-coupling-after-autonomous-wait", "return_code": 2, "tail": "state/framework_content_coupling_audit.json"}]})
+    monkeypatch.setattr(blocker, "build_paths", lambda _project: paths)
+
+    payload = blocker.build("demo_project", "ICLR")
+
+    assert not any(row.get("route") == "framework_content_coupling" for row in payload.get("actions", []))
+
+
 def test_discover_arxiv_slug_removes_path_separators(monkeypatch):
     ensure_script_paths()
     discover_arxiv = importlib.reload(importlib.import_module("discover_arxiv"))

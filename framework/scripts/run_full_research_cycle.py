@@ -4003,6 +4003,11 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
             gate["pdf_changed_this_cycle"] = self.pdf_changed(pdf_before, pdf_after)
             gate["paper_pipeline_skipped"] = True
             gate["paper_pipeline_skipped_reason"] = "ideation recorded a semantic data provenance blocker before autonomous experiment execution"
+            selected_dataset = ""
+            env_selection = read_json(self.paths.state / "evidence_ready_repo_selection.json", {})
+            selected_payload = env_selection.get("selected", {}) if isinstance(env_selection, dict) and isinstance(env_selection.get("selected"), dict) else {}
+            selected_dataset = str(selected_payload.get("dataset") or "").strip()
+            data_mapping_evidence = self.paths.root / "data" / selected_dataset / "README_UNTRUSTED_MAPPING.txt" if selected_dataset else self.paths.state / "repo_data_requirements.json"
             blockers = [
                 {
                     "category": "semantic_data_provenance_blocker",
@@ -4011,7 +4016,7 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
                     "evidence": [
                         str(self.paths.state / "full_cycle_prompt_full-cycle-ideation.md"),
                         str(self.paths.state / "claude_project_session_last_result.json"),
-                        str(self.paths.root / "data" / "amazon-beauty" / "README_UNTRUSTED_MAPPING.txt"),
+                        str(data_mapping_evidence),
                     ],
                     "next_action": "Record the provenance blocker or switch through deterministic base-switch gates; do not launch autonomous research from the stale selected plan until a preserved ID map or auditable preprocessing rerun exists.",
                 }

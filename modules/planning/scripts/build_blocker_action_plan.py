@@ -1900,6 +1900,10 @@ def build(project: str, venue: str) -> dict[str, Any]:
                 or "reference reproduction" in issue_text.lower()
             ):
                 continue
+            if "framework-content-coupling" in stage.lower() or "framework_content_coupling" in issue_text.lower():
+                current_coupling = load_json(paths.state / "framework_content_coupling_audit.json", {})
+                if isinstance(current_coupling, dict) and current_coupling.get("status") in {"pass", "warn"}:
+                    continue
             add_action(actions, seen, project=project, venue=venue, skills=skills, source="state/full_research_cycle.json", check_id=stage, issue=issue_text, evidence=["state/full_research_cycle.json"], severity="block")
 
     if live_worker:

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-14T17:23:54.549790+00:00",
+  "generated_at": "2026-06-14T18:27:57.040862+00:00",
   "module": "environment",
   "contract": {
     "directory": "modules/environment",
@@ -891,9 +891,9 @@
         "project_python",
         "selected_repo",
         "analysis_quickstart_command",
-        "is_rsir_sasrec_repo",
-        "write_rsir_bounded_runner",
-        "write_rsir_full_runner",
+        "is_sasrec_recommendation_repo",
+        "write_sasrec_bounded_runner",
+        "write_sasrec_full_runner",
         "repo_adapter",
         "ready_dataset",
         "official_command",

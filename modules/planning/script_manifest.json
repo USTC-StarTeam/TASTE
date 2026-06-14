@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-14T17:23:54.549790+00:00",
+  "generated_at": "2026-06-14T18:27:57.040862+00:00",
   "module": "planning",
   "contract": {
     "directory": "modules/planning",
@@ -61,7 +61,7 @@
       "path": "modules/planning/scripts/build_blocker_action_plan.py",
       "owner": "planning",
       "owner_reason": "plan selection, blocker planning, or execution-contract shaping",
-      "function_count": 44,
+      "function_count": 46,
       "functions": [
         "now_iso",
         "load_json",
@@ -89,6 +89,8 @@
         "classify",
         "_current_route_tokens",
         "_mentions_non_current_route",
+        "_pid_cwd",
+        "_process_belongs_to_project",
         "_cmd_launches_alternative_route",
         "action_template",
         "canonical_issue",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import os
+import re
 from pathlib import Path
 from typing import Callable
 
@@ -697,8 +698,8 @@ def _generic_plan_steps(steps: object) -> bool:
         "run minimal baseline/candidate/ablation experiments",
     ]
     hits = sum(1 for marker in generic_markers if marker in joined)
-    specific_markers = ["prefergrow", "disco", "rl-diffrec", "lsg-diff", "movielens", "amazon-beauty", "ndcg@", "hr@"]
-    return hits >= 2 and not any(marker in joined for marker in specific_markers)
+    metric_pattern = re.search(r"\b(?:ndcg|hr|recall|mrr)@\d+\b", joined)
+    return hits >= 2 and not bool(metric_pattern)
 
 
 def _specific_plan_steps(initial_experiment: str, new_method: str) -> list[str]:

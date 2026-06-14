@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-14T17:23:54.549790+00:00",
+  "generated_at": "2026-06-14T18:27:57.040862+00:00",
   "module": "experimenting",
   "contract": {
     "directory": "modules/experimenting",
@@ -384,7 +384,7 @@
         "metric_key_from_header",
         "parse_metric_table_after",
         "parse_test_metrics",
-        "parse_rsir_metric_dict_logs",
+        "parse_prefixed_metric_dict_logs",
         "select_best",
         "planned_epochs",
         "last_epoch_seen",

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-14T17:23:54.549790+00:00",
+  "generated_at": "2026-06-14T18:27:57.040862+00:00",
   "owner": "taste_framework",
   "script_count": 44,
   "scripts": [
@@ -845,7 +845,7 @@
       "path": "framework/scripts/report_status.py",
       "owner": "taste_framework",
       "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
-      "function_count": 7,
+      "function_count": 14,
       "functions": [
         "find_cli_binary",
         "find_claude",
@@ -853,6 +853,13 @@
         "count_dirs",
         "_repo_identity",
         "_blocker_matches_active_repo",
+        "_as_dict",
+        "_state_run_id",
+        "_accepted_repo_selection",
+        "_repo_selection_blocker_is_current",
+        "_repo_selection_public_status",
+        "_environment_selection_status",
+        "_public_summary",
         "main"
       ],
       "classes": [],
@@ -873,11 +880,16 @@
       "path": "framework/scripts/research_healthcheck.py",
       "owner": "taste_framework",
       "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
-      "function_count": 4,
+      "function_count": 9,
       "functions": [
         "find_cli_binary",
         "find_claude",
         "load_json",
+        "_as_dict",
+        "_state_run_id",
+        "_accepted_repo_selection",
+        "_environment_selection_status",
+        "_public_summary",
         "main"
       ],
       "classes": [],

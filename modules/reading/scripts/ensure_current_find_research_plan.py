@@ -6548,7 +6548,8 @@ def _generic_plan_steps(steps: Any) -> bool:
         "run minimal baseline/candidate/ablation experiments",
     ]
     hits = sum(1 for marker in generic_markers if marker in joined)
-    return hits >= 2 and not any(token in joined for token in ["prefergrow", "disco", "rl-diffrec", "lsg-diff", "movieLens".lower(), "amazon-beauty", "ndcg@", "hr@"])
+    metric_pattern = re.search(r"\b(?:ndcg|hr|recall|mrr)@\d+\b", joined)
+    return hits >= 2 and not bool(metric_pattern)
 
 
 def _plan_specific_steps(initial_experiment: str, new_method: str) -> list[str]:

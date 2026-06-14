@@ -4214,7 +4214,7 @@ def test_import_experiment_artifacts_derives_generic_method_slug_from_model_type
     ) == "explicit_method"
 
 
-def test_import_experiment_artifacts_parses_rsir_metric_dict_epoch():
+def test_import_experiment_artifacts_parses_prefixed_metric_dict_epoch():
     import importlib.util
 
     spec = importlib.util.spec_from_file_location("import_experiment_artifacts", SCRIPTS / "import_experiment_artifacts.py")
@@ -4233,7 +4233,7 @@ def test_import_experiment_artifacts_parses_rsir_metric_dict_epoch():
 
     assert importer.parse_epoch(line) == 9
     assert importer.last_epoch_seen([], line) == 9
-    rows = importer.parse_rsir_metric_dict_logs(line)
+    rows = importer.parse_prefixed_metric_dict_logs(line)
     assert rows[-1]["epoch"] == 9
     assert rows[-1]["ndcg_at_20"] == 0.0082
     assert rows[-1]["ndcg_at_10"] == 0.0059

@@ -205,8 +205,8 @@ def parse_test_metrics(log_text: str) -> list[dict[str, Any]]:
     return tests
 
 
-def parse_rsir_metric_dict_logs(log_text: str) -> list[dict[str, Any]]:
-    """Parse RSIR logger metric dictionaries from final evaluate() output.
+def parse_prefixed_metric_dict_logs(log_text: str) -> list[dict[str, Any]]:
+    """Parse prefixed logger metric dictionaries from final evaluate() output.
 
     Training/validation metric dictionaries include loss_ keys, so they are
     deliberately ignored here. Completed candidate import still requires
@@ -1093,7 +1093,7 @@ def import_artifact(paths, artifact_dir: Path, *, require_completed: bool = True
             config.setdefault("started_at", contract.get("started_at"))
     tests = parse_test_metrics(log_text)
     if not tests:
-        tests = parse_rsir_metric_dict_logs(log_text)
+        tests = parse_prefixed_metric_dict_logs(log_text)
     metrics_json = load_json(artifact_dir / "metrics.json", {})
     if not tests and isinstance(metrics_json, dict) and isinstance(metrics_json.get("all_evals"), list):
         for index, row in enumerate(metrics_json.get("all_evals") or []):
