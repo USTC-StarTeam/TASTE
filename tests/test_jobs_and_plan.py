@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from path_helpers import ensure_script_paths
+from path_helpers import ensure_script_paths, load_script
 
 from auto_research.auto_plan.pipeline import run_plan
 from auto_research.auto_plan.pipeline import finish_plan, polish_plan, render_plan_markdown
@@ -4562,8 +4562,8 @@ def test_selected_base_viability_keeps_current_repair_when_text_provenance_exist
 def test_full_cycle_literature_packet_refresh_is_environment_not_find(tmp_path):
     from auto_research.web import project_bridge
     from auto_research.web import server
-    from scripts.run_full_research_cycle import FullCycle
-    from scripts.run_supervision_tick import _public_phase_from_stage as tick_phase_from_stage
+    FullCycle = load_script("run_full_research_cycle").FullCycle
+    tick_phase_from_stage = load_script("run_supervision_tick")._public_phase_from_stage
 
     environment_stages = [
         "literature-sync-existing",
@@ -4584,8 +4584,8 @@ def test_full_cycle_literature_packet_refresh_is_environment_not_find(tmp_path):
 def test_true_fresh_literature_survey_still_maps_to_find(tmp_path):
     from auto_research.web import project_bridge
     from auto_research.web import server
-    from scripts.run_full_research_cycle import FullCycle
-    from scripts.run_supervision_tick import _public_phase_from_stage as tick_phase_from_stage
+    FullCycle = load_script("run_full_research_cycle").FullCycle
+    tick_phase_from_stage = load_script("run_supervision_tick")._public_phase_from_stage
 
     fresh_find_stages = ["literature-survey", "run-finding", "run-driver"]
     for stage in fresh_find_stages:
@@ -5969,7 +5969,7 @@ def test_web_current_find_pipeline_requires_chinese_deep_read_fields(tmp_path, m
 
 
 def test_full_cycle_current_plan_requires_full_text_validation():
-    from scripts.run_full_research_cycle import current_find_validation_ready
+    current_find_validation_ready = load_script("run_full_research_cycle").current_find_validation_ready
 
     old_validation = {
         "run_id": "find_demo",
