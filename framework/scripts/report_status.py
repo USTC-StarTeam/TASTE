@@ -80,6 +80,67 @@ def _blocker_matches_active_repo(blocker_packet: dict, active_repo: dict) -> boo
     return bool(_repo_identity(blocker_repo) and _repo_identity(blocker_repo) == _repo_identity(active_repo))
 
 
+def _as_dict(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _state_run_id(row: dict) -> str:
+    row = _as_dict(row)
+    for key in ("fresh_find_run_id", "current_find_run_id", "run_id", "taste_run_id"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _accepted_repo_selection(row: dict) -> bool:
+    row = _as_dict(row)
+    selected = _as_dict(row.get("selected"))
+    gate = str(row.get("selection_gate") or "").strip()
+    action = str(row.get("current_action") or row.get("status") or "").strip().lower()
+    return bool(
+        selected
+        and (
+            gate.startswith(("accepted_by_claude", "accepted_by_deterministic_base_switch_gate"))
+            or action in {"complete", "completed", "selected", "done"}
+        )
+    )
+
+
+def _repo_selection_blocker_is_current(blocker: dict, selection: dict) -> bool:
+    blocker = _as_dict(blocker)
+    if not blocker or not str(blocker.get("reason") or blocker.get("summary") or "").strip():
+        return False
+    if not _accepted_repo_selection(selection):
+        return True
+    blocker_run = _state_run_id(blocker)
+    selection_run = _state_run_id(selection)
+    if blocker_run and selection_run and blocker_run != selection_run:
+        return False
+    return False
+
+
+def _repo_selection_public_status(selection: dict) -> str:
+    selection = _as_dict(selection)
+    if _accepted_repo_selection(selection):
+        return "selected"
+    status = str(selection.get("status") or selection.get("current_action") or "").strip()
+    return status or "not-run"
+
+
+def _environment_selection_status(selection: dict, current_find_plan: dict) -> str:
+    if _accepted_repo_selection(selection):
+        return "selected"
+    plan = _as_dict(current_find_plan)
+    status = str(plan.get("base_selection_status") or plan.get("next_required_action") or "").strip()
+    return status or "not-run"
+
+
+def _public_summary(row: dict) -> str:
+    row = _as_dict(row)
+    return str(row.get("summary_zh") or row.get("summary") or row.get("human_summary") or "").strip()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project", required=True)
@@ -102,6 +163,10 @@ def main() -> None:
     blocker_packet = load_json(paths.state / "blocker_resolution_packet.json") if (paths.state / "blocker_resolution_packet.json").exists() else {}
     repo_selection = load_json(paths.state / "evidence_ready_repo_selection.json") if (paths.state / "evidence_ready_repo_selection.json").exists() else {}
     repo_selection_blocker = load_json(paths.state / "repo_selection_blocker.json") if (paths.state / "repo_selection_blocker.json").exists() else {}
+    current_find_plan = load_json(paths.state / "current_find_research_plan.json") if (paths.state / "current_find_research_plan.json").exists() else {}
+    finding_frontend = load_json(paths.state / "finding_frontend.json") if (paths.state / "finding_frontend.json").exists() else {}
+    full_cycle = load_json(paths.state / "full_research_cycle.json") if (paths.state / "full_research_cycle.json").exists() else {}
+    scientific_progress_gate = load_json(paths.state / "scientific_progress_gate.json") if (paths.state / "scientific_progress_gate.json").exists() else {}
     selected_repo = repo_selection.get('selected', {}) if isinstance(repo_selection, dict) else {}
     claude_decision = {}
     if isinstance(repo_selection, dict) and isinstance(repo_selection.get('claude_topic_decision'), dict):
@@ -168,7 +233,17 @@ def main() -> None:
         blocker_evidence_ready_count = blocker_packet.get('evidence_ready_candidate_count', '')
         blocker_completion_condition = str(blocker_packet.get('completion_condition', '') or '')
     repo_selection_gate = repo_selection.get('selection_gate', '') if isinstance(repo_selection, dict) else ''
-    repo_selection_block_reason = repo_selection_blocker.get('reason', '') if isinstance(repo_selection_blocker, dict) else ''
+    repo_selection_status = _repo_selection_public_status(repo_selection)
+    repo_selection_blocker_current = _repo_selection_blocker_is_current(repo_selection_blocker, repo_selection)
+    repo_selection_blocker_stale = bool(isinstance(repo_selection_blocker, dict) and repo_selection_blocker and not repo_selection_blocker_current)
+    repo_selection_block_reason = repo_selection_blocker.get('reason', '') if repo_selection_blocker_current and isinstance(repo_selection_blocker, dict) else ''
+    current_find_run_id = _state_run_id(current_find_plan) or _state_run_id(finding_frontend) or _state_run_id(full_cycle)
+    current_find_status = str(_as_dict(current_find_plan).get('status') or _as_dict(finding_frontend).get('status') or '').strip()
+    environment_selection_status = _environment_selection_status(repo_selection, current_find_plan)
+    full_cycle_status = str(_as_dict(full_cycle).get('status') or '').strip() or 'not-run'
+    full_cycle_summary = _public_summary(full_cycle)
+    scientific_progress_status = str(_as_dict(scientific_progress_gate).get('status') or '').strip() or 'not-run'
+    scientific_progress_summary = _public_summary(scientific_progress_gate)
     lines = [
         "# Workflow Status\n\n",
         f"- project: {cfg.get('name', args.project)}\n",
@@ -186,8 +261,17 @@ def main() -> None:
         f"- claude_repo_decision: {claude_decision.get('decision', '') if isinstance(claude_decision, dict) else ''}\n",
         f"- claude_repo_confidence: {claude_decision.get('confidence', '') if isinstance(claude_decision, dict) else ''}\n",
         f"- claude_repo_rationale: {claude_decision.get('rationale', '') if isinstance(claude_decision, dict) else ''}\n",
+        f"- current_find_run_id: {current_find_run_id}\n",
+        f"- current_find_downstream_status: {current_find_status or 'unknown'}\n",
+        f"- environment_base_selection_status: {environment_selection_status}\n",
+        f"- full_cycle_status: {full_cycle_status}\n",
+        f"- full_cycle_summary: {full_cycle_summary}\n",
+        f"- scientific_progress_gate_status: {scientific_progress_status}\n",
+        f"- scientific_progress_gate_summary: {scientific_progress_summary}\n",
+        f"- repo_selection_status: {repo_selection_status}\n",
         f"- repo_selection_gate: {repo_selection_gate or 'not-run'}\n",
         f"- repo_selection_block_reason: {repo_selection_block_reason or 'none'}\n",
+        f"- repo_selection_blocker_stale_ignored: {repo_selection_blocker_stale}\n",
         f"- data_unavailability_decision: {data_policy.get('decision', '') if isinstance(data_policy, dict) else ''}\n",
         f"- blocker_type: {blocker_type}\n",
         f"- evidence_ready_candidate_count: {blocker_evidence_ready_count}\n",

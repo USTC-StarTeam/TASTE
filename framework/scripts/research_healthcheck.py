@@ -61,6 +61,45 @@ def load_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
 
 
+def _as_dict(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _state_run_id(row: dict) -> str:
+    row = _as_dict(row)
+    for key in ("fresh_find_run_id", "current_find_run_id", "run_id", "taste_run_id"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _accepted_repo_selection(row: dict) -> bool:
+    row = _as_dict(row)
+    selected = _as_dict(row.get("selected"))
+    gate = str(row.get("selection_gate") or "").strip()
+    action = str(row.get("current_action") or row.get("status") or "").strip().lower()
+    return bool(
+        selected
+        and (
+            gate.startswith(("accepted_by_claude", "accepted_by_deterministic_base_switch_gate"))
+            or action in {"complete", "completed", "selected", "done"}
+        )
+    )
+
+
+def _environment_selection_status(selection: dict, current_find_plan: dict) -> str:
+    if _accepted_repo_selection(selection):
+        return "selected"
+    plan = _as_dict(current_find_plan)
+    return str(plan.get("base_selection_status") or plan.get("next_required_action") or "not-run").strip() or "not-run"
+
+
+def _public_summary(row: dict) -> str:
+    row = _as_dict(row)
+    return str(row.get("summary_zh") or row.get("summary") or row.get("human_summary") or "").strip()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project", required=True)
@@ -142,14 +181,30 @@ def main() -> None:
     if not (paths.state / "natural_language_requests.json").exists():
         notes.append("No natural-language run requests logged yet")
     taste_state = load_json(paths.state / "finding_frontend.json") if (paths.state / "finding_frontend.json").exists() else {}
+    current_find_plan = load_json(paths.state / "current_find_research_plan.json") if (paths.state / "current_find_research_plan.json").exists() else {}
+    repo_selection = load_json(paths.state / "evidence_ready_repo_selection.json") if (paths.state / "evidence_ready_repo_selection.json").exists() else {}
+    full_cycle = load_json(paths.state / "full_research_cycle.json") if (paths.state / "full_research_cycle.json").exists() else {}
+    scientific_progress_gate = load_json(paths.state / "scientific_progress_gate.json") if (paths.state / "scientific_progress_gate.json").exists() else {}
     taste_sync = load_json(paths.state / "taste_sync.json") if (paths.state / "taste_sync.json").exists() else {}
     taste_counts = taste_sync.get("counts", {}) if isinstance(taste_sync, dict) else {}
-    if not taste_state:
+    if not taste_state and not current_find_plan:
         issues.append("The workflow has not been run for this project; run framework/scripts/run_frontend.py then sync_outputs.py")
     else:
-        notes.append(f"TASTE status: {taste_state.get('status', 'unknown') if isinstance(taste_state, dict) else 'unknown'}")
+        current_find_status = str(_as_dict(current_find_plan).get("status") or _as_dict(taste_state).get("status") or "unknown").strip()
+        current_find_run_id = _state_run_id(current_find_plan) or _state_run_id(taste_state) or _state_run_id(full_cycle)
+        notes.append(f"Current-Find downstream status: {current_find_status}{f' (run_id={current_find_run_id})' if current_find_run_id else ''}")
+        notes.append(f"Environment base selection: {_environment_selection_status(repo_selection, current_find_plan)}")
+        full_cycle_status = str(_as_dict(full_cycle).get("status") or "").strip()
+        if full_cycle_status:
+            notes.append(f"Full-cycle status: {full_cycle_status}")
+            full_cycle_summary = _public_summary(full_cycle)
+            if full_cycle_summary:
+                notes.append(f"Full-cycle summary: {full_cycle_summary}")
+        scientific_progress_status = str(_as_dict(scientific_progress_gate).get("status") or "").strip()
+        if scientific_progress_status:
+            notes.append(f"Experiment evidence gate: {scientific_progress_status}")
         if isinstance(taste_state, dict) and taste_state.get("status") in {"timeout", "failed", "error"}:
-            notes.append("The workflow is in a recoverable failure state; rerun after API/network/source repair and do not treat fallback as scientific evidence.")
+            notes.append("The Find workflow is in a recoverable failure state; rerun after API/network/source repair and do not treat fallback as scientific evidence.")
     if not taste_sync:
         issues.append("Outputs have not been synchronized into research state")
     elif isinstance(taste_counts, dict):
