@@ -269,3 +269,69 @@ def test_propose_next_actions_prioritizes_semantic_provenance_gate(tmp_path, mon
     assert "Run deterministic semantic-provenance/base-switch gate" in text
     assert "Run repo-first literature backtracking" not in text
     assert "Probe real repo dataset loaders before real experiments" not in text
+
+
+
+def test_deterministic_base_switch_gate_blocks_empty_candidate_route(tmp_path, monkeypatch):
+    gate_script = load_script("audit_deterministic_base_switch_gate")
+    paths = _make_paths(tmp_path)
+    _seed_common_project(paths)
+    _seed_selected_base_semantic_provenance_block(paths)
+    _write_json(paths.state / "reference_reproduction_gate.json", {"status": "pass", "decision": "continue_base"})
+
+    monkeypatch.setattr(gate_script, "build_paths", lambda _project: paths)
+
+    payload = gate_script.build_gate("demo_project", "ICLR")
+
+    checks = {row["id"]: row for row in payload["checks"]}
+    assert payload["status"] == "blocked"
+    assert payload["decision"] == "base_switch_not_authorized"
+    assert payload["candidate_route"] == {}
+    assert checks["candidate_route_proposal_exists"]["status"] == "blocked"
+    assert "non-empty candidate route proposal" in checks["candidate_route_proposal_exists"]["detail"]
+
+
+def test_propose_next_actions_uses_failed_base_switch_gate_result(tmp_path, monkeypatch):
+    propose = load_script("propose_next_actions")
+    paths = _make_paths(tmp_path)
+    _seed_common_project(paths)
+    _seed_selected_base_semantic_provenance_block(paths)
+    _write_json(
+        paths.state / "base_switch_gate.json",
+        {
+            "status": "blocked",
+            "decision": "base_switch_not_authorized",
+            "switch_authorized": False,
+            "candidate_route": {},
+            "failed_checks": [
+                {"id": "candidate_route_proposal_exists", "status": "blocked"},
+                {"id": "candidate_find_run_provenance_clear", "status": "blocked"},
+            ],
+        },
+    )
+    _write_json(paths.state / "ingest_ranking.json", {"no_qualified_papers": True, "no_qualified_reason": "No qualified papers."})
+    _write_json(paths.state / "repo_candidates.json", [{"name": "old/top-repo", "url": "https://example.test/old"}])
+    _write_json(paths.state / "repo_data_requirements.json", {"ready_datasets": ["demo-data"], "blocked_datasets": []})
+    _write_json(paths.state / "real_dataset_probe.json", {"probes": []})
+    _write_json(paths.state / "experiment_registry.json", [])
+
+    monkeypatch.setattr(propose, "build_paths", lambda _project: paths)
+    monkeypatch.setattr(propose, "load_project_config", lambda _project: {"name": "demo_project", "topic": "Demo topic"})
+    monkeypatch.setattr(sys, "argv", ["propose_next_actions.py", "--project", "demo_project"])
+
+    propose.main()
+
+    payload = json.loads((paths.state / "next_actions.json").read_text(encoding="utf-8"))
+    titles = [row["title"] for row in payload["actions"]]
+    assert titles == ["Provide semantic provenance evidence or a candidate base-switch proposal"]
+    action = payload["actions"][0]
+    assert "base_switch_gate=blocked/base_switch_not_authorized" in action["evidence"]
+    assert "failed_checks=candidate_route_proposal_exists,candidate_find_run_provenance_clear" in action["evidence"]
+    assert "Run deterministic semantic-provenance/base-switch gate" not in titles
+    assert "Run repo-first literature backtracking" not in titles
+    assert "Probe real repo dataset loaders before real experiments" not in titles
+
+    text = (paths.planning / "next_actions.md").read_text(encoding="utf-8")
+    assert "base_switch_gate_status: blocked" in text
+    assert "base_switch_gate_decision: base_switch_not_authorized" in text
+    assert "Provide semantic provenance evidence or a candidate base-switch proposal" in text

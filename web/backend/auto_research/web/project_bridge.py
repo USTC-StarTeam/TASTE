@@ -4176,7 +4176,7 @@ def _public_gate_status_summary(value: Any) -> dict[str, Any]:
     return out
 
 
-def _selected_base_viability_public_blocker(gate: Any, base_display: str = "") -> dict[str, Any]:
+def _selected_base_viability_public_blocker(gate: Any, base_display: str = "", base_switch_gate: Any = None) -> dict[str, Any]:
     row = gate if isinstance(gate, dict) else {}
     status = str(row.get("status") or "").strip().lower()
     decision = str(row.get("decision") or "").strip().lower()
@@ -4185,6 +4185,17 @@ def _selected_base_viability_public_blocker(gate: Any, base_display: str = "") -
 
     semantic = row.get("semantic_data_provenance_review") if isinstance(row.get("semantic_data_provenance_review"), dict) else {}
     text_meta = semantic.get("text_metadata_provenance") if isinstance(semantic.get("text_metadata_provenance"), dict) else {}
+    base_switch = base_switch_gate if isinstance(base_switch_gate, dict) else {}
+    failed_rows = base_switch.get("failed_checks") if isinstance(base_switch.get("failed_checks"), list) else []
+    if not failed_rows and isinstance(base_switch.get("checks"), list):
+        failed_rows = [item for item in base_switch.get("checks", []) if isinstance(item, dict) and item.get("status") != "pass"]
+    failed_check_ids = [str(item.get("id") or "").strip() for item in failed_rows if isinstance(item, dict) and str(item.get("id") or "").strip()]
+    candidate_route = base_switch.get("candidate_route") if isinstance(base_switch.get("candidate_route"), dict) else {}
+    candidate_route_present = any(str(candidate_route.get(key) or "").strip() for key in ["repo", "title", "repo_path", "proposed_path_hint"])
+    base_switch_not_authorized = bool(
+        str(base_switch.get("status") or "").strip().lower() == "blocked"
+        and str(base_switch.get("decision") or "").strip().lower() == "base_switch_not_authorized"
+    )
     base_label = str(
         base_display
         or row.get("selected_base_title")
@@ -4211,10 +4222,14 @@ def _selected_base_viability_public_blocker(gate: Any, base_display: str = "") -
         "has_real_llm_embedding_evidence": bool(semantic.get("has_real_llm_embedding_evidence")),
         "has_text_metadata_evidence": bool(text_meta.get("has_text_metadata_evidence")),
         "dataset": dataset,
+        "base_switch_gate_status": str(base_switch.get("status") or ""),
+        "base_switch_gate_decision": str(base_switch.get("decision") or ""),
+        "base_switch_candidate_route_present": candidate_route_present,
+        "base_switch_failed_checks": failed_check_ids[:10],
     }
     if semantic_required:
         summary = (
-            f"{base_label} 参考复现已通过，但当前数据路线{dataset_clause}没有可审计的文本/元数据 provenance；"
+            f"{base_label} 参考复现已通过，但当前数据路线{dataset_clause}没有可审计的 LLM/text-semantic 文本/元数据 provenance；"
             "LLM semantic evidence gate 已阻塞。继续运行纯行为或损失级候选实验无法清除此门控，"
             "必须先通过 deterministic base-switch / semantic-provenance gate。"
         )
@@ -4226,6 +4241,32 @@ def _selected_base_viability_public_blocker(gate: Any, base_display: str = "") -
             "完整科研自循环已停在 semantic-provenance/base-switch 门控；"
             f"{base_label} 参考复现已通过，但当前数据路线{dataset_clause}缺少 LLM/text-semantic 实验证据所需的可审计文本/元数据 provenance。"
         )
+        if base_switch_not_authorized:
+            missing_candidate = "candidate_route_proposal_exists" in failed_check_ids or not candidate_route_present
+            if missing_candidate:
+                summary = (
+                    f"{base_label} 参考复现已通过，但当前数据路线{dataset_clause}没有可审计的 LLM/text-semantic 文本/元数据 provenance；"
+                    "继续运行纯行为或损失级候选实验无法清除此门控。确定性切换门控已执行但未授权，"
+                    "因为还没有独立、可审计、可追溯到当前 Find/read 的候选路线 proposal。"
+                )
+                next_action = (
+                    "补齐当前路线保存 ID 映射的原始文本/元数据 provenance 与 artifact-local LLM/text embedding probe；"
+                    "或生成可追溯到当前 Find/read 的 candidate base-switch proposal，并完成 loader/data/protocol/smoke/full-reference/artifact-local audit 后再刷新 gate。"
+                )
+                project_summary = (
+                    "完整科研自循环已停在 semantic-provenance/base-switch 门控；确定性 gate 已执行但未授权，"
+                    "当前缺少可审计候选路线 proposal 或当前路线文本/元数据 provenance。"
+                )
+            else:
+                failed_text = "、".join(failed_check_ids[:5]) or "候选路线证据"
+                summary = (
+                    f"{base_label} 参考复现已通过，但确定性切换门控已执行且未授权；候选路线仍有未通过检查：{failed_text}。"
+                )
+                next_action = (
+                    "补齐候选路线未通过的 loader/data/protocol/smoke/full-reference/artifact-local audit 检查；"
+                    "gate 通过前不切换基底、不写论文、不提升结论。"
+                )
+                project_summary = "完整科研自循环已停在 base-switch gate 证据审计；候选路线存在但尚未获得确定性授权。"
         return {
             "category": "semantic_data_provenance_required",
             "title": "缺少 LLM/text-semantic 数据 provenance",
@@ -4786,7 +4827,7 @@ def _human_supervision_summary(root: Path, compact: dict[str, Any], raw_summary:
     reference_smoke_script = "modules/environment/scripts/probe_selected_base_reference.py --mode smoke"
     reference_wrapper_label = f"{base_display} full reference reproduction"
     selected_base_viability_blocked = bool(isinstance(selected_base_viability, dict) and selected_base_viability.get("status") == "blocked" and selected_base_viability.get("decision") in {"base_switch_gate_required", "continue_experiment_evidence_repair"})
-    selected_base_viability_public = _selected_base_viability_public_blocker(selected_base_viability, base_display)
+    selected_base_viability_public = _selected_base_viability_public_blocker(selected_base_viability, base_display, base_switch_gate)
     if selected_base_viability_blocked:
         blocker_title = selected_base_viability_public.get("title") or "缺少当前主线候选实验证据"
         blocker_summary = selected_base_viability_public.get("summary") or _public_blocker_summary(selected_base_viability, f"{base_display} 参考复现已通过；当前还没有可写入论文的审计就绪候选实验。旧路线只作为历史对照，不是当前参考工作。")
@@ -11114,7 +11155,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     )
     base_switch_gate_unresolved = bool(base_switch_gate_required and not base_switch_authorized)
     selected_base_viability_blocked = bool(selected_base_viability.get("status") == "blocked" and selected_base_viability.get("decision") in {"base_switch_gate_required", "continue_experiment_evidence_repair"})
-    selected_base_viability_public = _selected_base_viability_public_blocker(selected_base_viability, base_title)
+    selected_base_viability_public = _selected_base_viability_public_blocker(selected_base_viability, base_title, base_switch_gate)
     selected_base_blocker_category = selected_base_viability_public.get("category", "experiment_evidence_audit") if selected_base_viability_blocked else "experiment_evidence_audit"
     if llm_quota_blocked:
         status = "blocked_literature_llm_quota_exhausted"
@@ -12305,7 +12346,7 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
     )
     base_switch_gate_unresolved = bool(base_switch_gate_required and not base_switch_authorized)
     selected_base_viability_blocked = bool(selected_base_viability.get('status') == 'blocked' and selected_base_viability.get('decision') in {'base_switch_gate_required', 'continue_experiment_evidence_repair'})
-    selected_base_viability_public = _selected_base_viability_public_blocker(selected_base_viability, base_title)
+    selected_base_viability_public = _selected_base_viability_public_blocker(selected_base_viability, base_title, base_switch_gate)
     selected_base_blocker_category = selected_base_viability_public.get('category', 'experiment_evidence_audit') if selected_base_viability_blocked else 'experiment_evidence_audit'
     if base_switch_gate_unresolved or (selected_base_viability_blocked and status != 'blocked_environment_base_selection_required'):
         summary = selected_base_viability_public.get('project_summary') or summary

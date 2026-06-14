@@ -61,8 +61,21 @@ def as_dict(value) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def selected_base_viability_action(gate: dict) -> dict:
+def failed_check_ids(gate: dict) -> list[str]:
+    failed = gate.get('failed_checks') if isinstance(gate.get('failed_checks'), list) else []
+    if not failed:
+        failed = [row for row in gate.get('checks', []) if isinstance(row, dict) and row.get('status') != 'pass'] if isinstance(gate.get('checks'), list) else []
+    return [str(row.get('id') or '').strip() for row in failed if isinstance(row, dict) and str(row.get('id') or '').strip()]
+
+
+def route_has_identity(route: dict) -> bool:
+    row = as_dict(route)
+    return any(str(row.get(key) or '').strip() for key in ['repo', 'title', 'repo_path', 'proposed_path_hint'])
+
+
+def selected_base_viability_action(gate: dict, base_switch_gate: dict | None = None) -> dict:
     gate = as_dict(gate)
+    base_switch_gate = as_dict(base_switch_gate)
     status = str(gate.get('status') or '').strip().lower()
     decision = str(gate.get('decision') or '').strip().lower()
     if status != 'blocked' or decision not in {'base_switch_gate_required', 'continue_experiment_evidence_repair'}:
@@ -82,6 +95,10 @@ def selected_base_viability_action(gate: dict) -> dict:
         )
     )
     issue = str(gate.get('issue') or '').strip()
+    base_status = str(base_switch_gate.get('status') or '').strip().lower()
+    base_decision = str(base_switch_gate.get('decision') or '').strip().lower()
+    failed_ids = failed_check_ids(base_switch_gate)
+    candidate_route = as_dict(base_switch_gate.get('candidate_route'))
     if semantic_required:
         evidence_bits = [
             issue or 'selected_base_viability_gate requires semantic provenance evidence before continuing.',
@@ -89,6 +106,38 @@ def selected_base_viability_action(gate: dict) -> dict:
             f'text_metadata_evidence={text_metadata_evidence}',
             f'real_llm_embedding_evidence={has_real_embedding}',
         ]
+        if base_status == 'blocked' and base_decision == 'base_switch_not_authorized':
+            failed_text = ','.join(failed_ids[:8]) or 'unknown'
+            evidence_bits.extend([
+                f'base_switch_gate={base_status}/{base_decision}',
+                f'failed_checks={failed_text}',
+            ])
+            missing_candidate = 'candidate_route_proposal_exists' in failed_ids or not route_has_identity(candidate_route)
+            if missing_candidate:
+                return {
+                    'priority': 'P0',
+                    'title': 'Provide semantic provenance evidence or a candidate base-switch proposal',
+                    'reason': (
+                        'The deterministic base-switch gate has already run and did not authorize a switch because no distinct, auditable '
+                        'candidate route is available. Re-running the same gate cannot clear the blocker; provide artifact-local text/metadata '
+                        'provenance plus a real LLM/text embedding probe for the current route, or generate a current-Find candidate route proposal '
+                        'that can pass loader, data, protocol, smoke, and full-reference audits.'
+                    ),
+                    'evidence': '; '.join(bit for bit in evidence_bits if bit),
+                    'gate_category': 'semantic_data_provenance_required',
+                    'blocks_main_route_actions': True,
+                }
+            return {
+                'priority': 'P0',
+                'title': 'Complete deterministic base-switch gate evidence',
+                'reason': (
+                    'The deterministic base-switch gate has already run but did not authorize the candidate route. Complete the failed loader/data, '
+                    'protocol, smoke, full-reference reproduction, provenance, and artifact-local audit checks before any route switch or paper claim promotion.'
+                ),
+                'evidence': '; '.join(bit for bit in evidence_bits if bit),
+                'gate_category': 'semantic_data_provenance_required',
+                'blocks_main_route_actions': True,
+            }
         return {
             'priority': 'P0',
             'title': 'Run deterministic semantic-provenance/base-switch gate',
@@ -149,6 +198,7 @@ def main() -> None:
     audit_md = (paths.reports / 'paper_evidence_audit.md').read_text(encoding='utf-8') if (paths.reports / 'paper_evidence_audit.md').exists() else ''
     method_overrides = load_json(paths.state / 'method_overrides.json') if (paths.state / 'method_overrides.json').exists() else {'methods': {}, 'repos': {}}
     selected_base_viability_gate = load_json(paths.state / 'selected_base_viability_gate.json') if (paths.state / 'selected_base_viability_gate.json').exists() else {}
+    base_switch_gate = load_json(paths.state / 'base_switch_gate.json') if (paths.state / 'base_switch_gate.json').exists() else {}
     override_methods = method_overrides.get('methods', {}) if isinstance(method_overrides, dict) else {}
     override_repos = method_overrides.get('repos', {}) if isinstance(method_overrides, dict) else {}
 
@@ -241,7 +291,7 @@ def main() -> None:
     completed_real_experiments = [row for row in experiments if str(row.get('status', '')).lower() in {'completed', 'success'} and row.get('dataset') in real_datasets and (not active_repo_path or row.get('repo_path') == active_repo_path)]
 
     actions: list[dict[str, str]] = []
-    selected_gate_action = selected_base_viability_action(selected_base_viability_gate)
+    selected_gate_action = selected_base_viability_action(selected_base_viability_gate, base_switch_gate)
     if selected_gate_action:
         actions.append(selected_gate_action)
     gate_blocks_main_route_actions = bool(selected_gate_action.get('blocks_main_route_actions')) if selected_gate_action else False
@@ -338,6 +388,9 @@ def main() -> None:
         lines.append(f"- current_blocker_category: {selected_gate_action.get('gate_category', '')}\n")
         lines.append(f"- selected_base_viability_gate_status: {as_dict(selected_base_viability_gate).get('status', '')}\n")
         lines.append(f"- selected_base_viability_gate_decision: {as_dict(selected_base_viability_gate).get('decision', '')}\n")
+        if as_dict(base_switch_gate):
+            lines.append(f"- base_switch_gate_status: {as_dict(base_switch_gate).get('status', '')}\n")
+            lines.append(f"- base_switch_gate_decision: {as_dict(base_switch_gate).get('decision', '')}\n")
     if isinstance(data_policy, dict) and data_policy.get('decision'):
         lines.append(f"- data_unavailability_decision: {data_policy.get('decision')}\n")
     lines.append('\n')

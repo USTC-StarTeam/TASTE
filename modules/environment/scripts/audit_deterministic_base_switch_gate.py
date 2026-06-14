@@ -297,6 +297,14 @@ def infer_repo_path(paths, repo_name: str, title: str = '') -> str:
     return ''
 
 
+def candidate_has_identity(candidate: Any) -> bool:
+    row = safe_dict(candidate)
+    for key in ['repo', 'title', 'repo_path', 'proposed_path_hint']:
+        if str(row.get(key) or '').strip():
+            return True
+    return False
+
+
 def choose_candidate(proposals: list[dict[str, Any]], current_repo_path: str) -> dict[str, Any]:
     current_repo_path = norm_path(current_repo_path)
     candidates = [p for p in proposals if norm_path(p.get('repo_path')) != current_repo_path or not p.get('repo_path')]
@@ -375,15 +383,31 @@ def build_gate(project: str, venue: str = '') -> dict[str, Any]:
     base_switch_execution = load_json(paths.state / 'base_switch_execution.json', {})
     proposals = collect_proposals(paths)
     candidate = choose_candidate(proposals, selected_repo_path)
-    candidate_repo = str(candidate.get('repo') or '').strip()
-    candidate_title = str(candidate.get('title') or '').strip()
-    candidate_repo_path = existing_path(candidate.get('repo_path')) or infer_repo_path(paths, candidate_repo, candidate_title)
-    if candidate_repo_path and isinstance(candidate, dict):
-        candidate['repo_path'] = candidate_repo_path
-    elif isinstance(candidate, dict):
-        candidate['repo_path'] = ''
+    candidate_present = candidate_has_identity(candidate)
+    if not candidate_present:
+        candidate = {}
+    candidate_repo = str(candidate.get('repo') or '').strip() if candidate_present else ''
+    candidate_title = str(candidate.get('title') or '').strip() if candidate_present else ''
+    candidate_repo_path = ''
+    if candidate_present:
+        candidate_repo_path = existing_path(candidate.get('repo_path')) or infer_repo_path(paths, candidate_repo, candidate_title)
+        if candidate_repo_path and isinstance(candidate, dict):
+            candidate['repo_path'] = candidate_repo_path
+        elif isinstance(candidate, dict):
+            candidate['repo_path'] = ''
     candidate_name = candidate_repo or candidate_title or candidate_repo_path
-    provenance = candidate_find_provenance(paths, candidate, run_id) if candidate else {'clear': False, 'evidence': []}
+    provenance = candidate_find_provenance(paths, candidate, run_id) if candidate_present else {
+        'current_find_run_id': run_id,
+        'proposal_find_run_id': '',
+        'candidate_in_current_find_results': False,
+        'candidate_in_current_read_results': False,
+        'clear': False,
+        'evidence': [
+            str(paths.planning / 'finding' / 'find_results.json'),
+            str(paths.planning / 'finding' / 'read_results.json'),
+            str(paths.state / 'current_find_research_plan.json'),
+        ],
+    }
 
     selected_gate_required = bool(
         isinstance(selected_base_viability, dict)
@@ -396,7 +420,7 @@ def build_gate(project: str, venue: str = '') -> dict[str, Any]:
         and reference_gate.get('decision') == 'continue_base'
     )
     proposal_non_authoritative = bool(
-        candidate
+        candidate_present
         and (
             'non_authoritative' in str(candidate.get('status') or '').lower()
             or 'proposal' in str(candidate.get('type') or '').lower()
@@ -404,7 +428,7 @@ def build_gate(project: str, venue: str = '') -> dict[str, Any]:
         )
         and not candidate.get('authorized_execution')
     )
-    candidate_distinct = bool(candidate and (not candidate_repo_path or candidate_repo_path != selected_repo_path) and candidate_name)
+    candidate_distinct = bool(candidate_present and (not candidate_repo_path or candidate_repo_path != selected_repo_path) and candidate_name)
     invalid_execution = bool(isinstance(base_switch_execution, dict) and str(base_switch_execution.get('status') or '').startswith('invalid'))
     preexisting_authorized_execution = bool(isinstance(base_switch_execution, dict) and str(base_switch_execution.get('status') or '').startswith('authorized'))
 
@@ -453,9 +477,9 @@ def build_gate(project: str, venue: str = '') -> dict[str, Any]:
     checks = [
         build_check('selected_base_viability_requires_gate', selected_gate_required, 'selected_base_viability_gate must be blocked/base_switch_gate_required before any switch authorization.', [str(paths.state / 'selected_base_viability_gate.json')]),
         build_check('selected_base_reference_reproduction_passed', reference_passed, 'current selected-base reference reproduction must pass first.', [str(paths.state / 'reference_reproduction_gate.json')]),
-        build_check('candidate_route_proposal_exists', bool(candidate), 'a candidate route proposal must exist and remain separate from execution.', [str(p.get('source')) for p in proposals if p.get('source')][:8]),
-        build_check('candidate_route_is_non_authoritative', proposal_non_authoritative, 'candidate route must be a non-authoritative proposal, not an already executed/authorized switch.', [str(candidate.get('source') or '')] if candidate else []),
-        build_check('candidate_route_distinct_from_selected_base', candidate_distinct, 'candidate route must be distinct from current selected-base.', [str(candidate.get('source') or '')] if candidate else []),
+        build_check('candidate_route_proposal_exists', candidate_present, 'a non-empty candidate route proposal must exist and remain separate from execution.', [str(p.get('source')) for p in proposals if p.get('source')][:8]),
+        build_check('candidate_route_is_non_authoritative', proposal_non_authoritative, 'candidate route must be a non-authoritative proposal, not an already executed/authorized switch.', [str(candidate.get('source') or '')] if candidate_present else []),
+        build_check('candidate_route_distinct_from_selected_base', candidate_distinct, 'candidate route must be distinct from current selected-base.', [str(candidate.get('source') or '')] if candidate_present else []),
         build_check('candidate_find_run_provenance_clear', bool(provenance.get('clear')), 'candidate must be traceable to current Find/read evidence or an explicit matching fresh_find_run_id.', safe_list(provenance.get('evidence'))),
         build_check('candidate_loader_import_probe_passed', loader_ok, 'candidate loader/import probe must pass for the candidate repo.', [loader_path] if loader_path else []),
         build_check('candidate_data_contract_passed', data_ok, 'candidate real-data contract must pass for the candidate repo.', [data_path] if data_path else []),

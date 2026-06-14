@@ -3927,9 +3927,12 @@ def test_compact_project_summary_surfaces_selected_base_semantic_provenance_gate
     assert blocker["category"] == "semantic_data_provenance_required"
     assert blocker["title"] == "缺少 LLM/text-semantic 数据 provenance"
     assert "纯行为或损失级候选实验无法清除此门控" in blocker["summary"]
-    assert "semantic-provenance gate" in blocker["next_action"]
+    assert "artifact-local LLM/text embedding probe" in blocker["next_action"]
+    assert "candidate base-switch proposal" in blocker["next_action"]
     assert summary["human_gate_summary"]["semantic_data_provenance"]["dataset"] == dataset
     assert summary["human_gate_summary"]["semantic_data_provenance"]["has_text_metadata_evidence"] is False
+    assert summary["human_gate_summary"]["semantic_data_provenance"]["base_switch_gate_status"] == "blocked"
+    assert summary["human_gate_summary"]["semantic_data_provenance"]["base_switch_gate_decision"] == "base_switch_not_authorized"
     assert "LLM/text-semantic" in summary["current_blocker"]["summary"]
 
 
