@@ -57,6 +57,71 @@ def method_list_label(methods: list[str], cfg: dict, limit: int = 4) -> str:
     return ', '.join(method_label(str(item), cfg) for item in methods[:limit])
 
 
+def as_dict(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def selected_base_viability_action(gate: dict) -> dict:
+    gate = as_dict(gate)
+    status = str(gate.get('status') or '').strip().lower()
+    decision = str(gate.get('decision') or '').strip().lower()
+    if status != 'blocked' or decision not in {'base_switch_gate_required', 'continue_experiment_evidence_repair'}:
+        return {}
+    semantic = as_dict(gate.get('semantic_data_provenance_review'))
+    text_meta = as_dict(semantic.get('text_metadata_provenance'))
+    dataset = str(text_meta.get('dataset') or gate.get('dataset') or gate.get('selected_dataset') or '').strip()
+    text_metadata_evidence = text_meta.get('has_text_metadata_evidence')
+    has_real_embedding = bool(semantic.get('has_real_llm_embedding_evidence'))
+    semantic_required = bool(
+        semantic.get('deterministic_gate_required')
+        or (
+            str(semantic.get('status') or '').strip().lower() == 'blocked'
+            and bool(semantic.get('project_requires_llm_semantics'))
+            and not has_real_embedding
+            and text_metadata_evidence is False
+        )
+    )
+    issue = str(gate.get('issue') or '').strip()
+    if semantic_required:
+        evidence_bits = [
+            issue or 'selected_base_viability_gate requires semantic provenance evidence before continuing.',
+            f"dataset={dataset or 'unknown'}",
+            f'text_metadata_evidence={text_metadata_evidence}',
+            f'real_llm_embedding_evidence={has_real_embedding}',
+        ]
+        return {
+            'priority': 'P0',
+            'title': 'Run deterministic semantic-provenance/base-switch gate',
+            'reason': (
+                'The selected-base reference reproduction has passed, but the current data route lacks auditable text/metadata provenance for '
+                'LLM/text-semantic experiments. Pure behavior or loss-level candidate experiments cannot clear this gate.'
+            ),
+            'evidence': '; '.join(bit for bit in evidence_bits if bit),
+            'gate_category': 'semantic_data_provenance_required',
+            'blocks_main_route_actions': True,
+        }
+    if decision == 'base_switch_gate_required':
+        return {
+            'priority': 'P0',
+            'title': 'Run deterministic selected-base viability/base-switch gate',
+            'reason': (
+                'The selected-base viability gate requires an explicit deterministic gate before any base switch, paper claim promotion, '
+                'or alternative-route main experiment can proceed.'
+            ),
+            'evidence': issue or 'state/selected_base_viability_gate.json is blocked with decision=base_switch_gate_required.',
+            'gate_category': 'selected_base_viability_gate',
+            'blocks_main_route_actions': True,
+        }
+    return {
+        'priority': 'P0',
+        'title': 'Repair selected-base evidence before paper promotion',
+        'reason': 'The selected-base viability gate is still blocked; current-route repair must complete before paper writing or claim promotion.',
+        'evidence': issue or 'state/selected_base_viability_gate.json is blocked.',
+        'gate_category': 'experiment_evidence_audit',
+        'blocks_main_route_actions': False,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument('--project', required=True)
@@ -83,6 +148,7 @@ def main() -> None:
     manifest = load_json(paths.state / 'research_manifest.json') if (paths.state / 'research_manifest.json').exists() else {}
     audit_md = (paths.reports / 'paper_evidence_audit.md').read_text(encoding='utf-8') if (paths.reports / 'paper_evidence_audit.md').exists() else ''
     method_overrides = load_json(paths.state / 'method_overrides.json') if (paths.state / 'method_overrides.json').exists() else {'methods': {}, 'repos': {}}
+    selected_base_viability_gate = load_json(paths.state / 'selected_base_viability_gate.json') if (paths.state / 'selected_base_viability_gate.json').exists() else {}
     override_methods = method_overrides.get('methods', {}) if isinstance(method_overrides, dict) else {}
     override_repos = method_overrides.get('repos', {}) if isinstance(method_overrides, dict) else {}
 
@@ -175,84 +241,89 @@ def main() -> None:
     completed_real_experiments = [row for row in experiments if str(row.get('status', '')).lower() in {'completed', 'success'} and row.get('dataset') in real_datasets and (not active_repo_path or row.get('repo_path') == active_repo_path)]
 
     actions: list[dict[str, str]] = []
-    if no_qualified_papers and not repo_backtracking_done:
+    selected_gate_action = selected_base_viability_action(selected_base_viability_gate)
+    if selected_gate_action:
+        actions.append(selected_gate_action)
+    gate_blocks_main_route_actions = bool(selected_gate_action.get('blocks_main_route_actions')) if selected_gate_action else False
+    if not gate_blocks_main_route_actions and no_qualified_papers and not repo_backtracking_done:
         actions.append({'priority': 'P0', 'title': 'Run repo-first literature backtracking', 'reason': 'The strict literature gate found no qualified papers, so the loop should use discovered repo signals to backtrack to papers, datasets, and baselines without lowering quality thresholds.', 'evidence': str(ingest_ranking.get('no_qualified_reason', 'No qualified papers imported.'))})
-    paused_repos = [repo for repo, info in (override_repos.items() if isinstance(override_repos, dict) else []) if info.get('status') in {'paused_or_abandoned', 'abandoned'}]
-    active_repo_paused = active_repo_path in paused_repos
-    if paused_repos and active_repo_paused:
-        actions.append({'priority': 'P0', 'title': 'Restart repo/literature search after critic veto', 'reason': 'The active selected repo has been paused/abandoned by evidence-based critic/planner veto, so the loop should not keep tuning it.', 'evidence': f"Active paused repo: {active_repo_path}."})
-    elif paused_repos:
-        actions.append({'priority': 'P2', 'title': 'Keep old critic vetoes as historical guardrails', 'reason': 'A previous route was vetoed, but the current active repo is different; do not let stale vetoes dominate the new route.', 'evidence': f"Historical paused repos: {', '.join(paused_repos[:2])}. Active repo: {active_repo_path or 'unknown'}."})
-    if repo_rows:
-        top_repo = repo_rows[0]
-        if no_qualified_papers and not repo_backtracking_done:
-            actions.append({'priority': 'P0', 'title': 'Audit top repo README and linked paper before selecting an idea', 'reason': 'Repo candidates are currently the strongest signal; inspect install commands, data requirements, claimed paper title, and benchmark before planning experiments.', 'evidence': f"Top repo is {top_repo.get('name', '')} ({top_repo.get('url', '')})."})
-        if not (paths.state / 'repo_env_bootstrap.json').exists():
-            actions.append({'priority': 'P0', 'title': 'Bootstrap the selected repo environment', 'reason': 'Real experiment execution should not wait until after hypothesis generation.', 'evidence': f"Top repo is {top_repo.get('name', '')} and no environment bootstrap record exists yet."})
-    else:
-        actions.append({'priority': 'P0', 'title': 'Register at least one runnable repo', 'reason': 'The loop cannot enter execution without a concrete codebase.', 'evidence': 'No repo candidates are registered.'})
+    if not gate_blocks_main_route_actions:
+        paused_repos = [repo for repo, info in (override_repos.items() if isinstance(override_repos, dict) else []) if info.get('status') in {'paused_or_abandoned', 'abandoned'}]
+        active_repo_paused = active_repo_path in paused_repos
+        if paused_repos and active_repo_paused:
+            actions.append({'priority': 'P0', 'title': 'Restart repo/literature search after critic veto', 'reason': 'The active selected repo has been paused/abandoned by evidence-based critic/planner veto, so the loop should not keep tuning it.', 'evidence': f"Active paused repo: {active_repo_path}."})
+        elif paused_repos:
+            actions.append({'priority': 'P2', 'title': 'Keep old critic vetoes as historical guardrails', 'reason': 'A previous route was vetoed, but the current active repo is different; do not let stale vetoes dominate the new route.', 'evidence': f"Historical paused repos: {', '.join(paused_repos[:2])}. Active repo: {active_repo_path or 'unknown'}."})
+        if repo_rows:
+            top_repo = repo_rows[0]
+            if no_qualified_papers and not repo_backtracking_done:
+                actions.append({'priority': 'P0', 'title': 'Audit top repo README and linked paper before selecting an idea', 'reason': 'Repo candidates are currently the strongest signal; inspect install commands, data requirements, claimed paper title, and benchmark before planning experiments.', 'evidence': f"Top repo is {top_repo.get('name', '')} ({top_repo.get('url', '')})."})
+            if not (paths.state / 'repo_env_bootstrap.json').exists():
+                actions.append({'priority': 'P0', 'title': 'Bootstrap the selected repo environment', 'reason': 'Real experiment execution should not wait until after hypothesis generation.', 'evidence': f"Top repo is {top_repo.get('name', '')} and no environment bootstrap record exists yet."})
+        else:
+            actions.append({'priority': 'P0', 'title': 'Register at least one runnable repo', 'reason': 'The loop cannot enter execution without a concrete codebase.', 'evidence': 'No repo candidates are registered.'})
 
-    blocked_data = repo_data_requirements.get('blocked_datasets', []) if isinstance(repo_data_requirements, dict) else []
-    ready_data = repo_data_requirements.get('ready_datasets', []) if isinstance(repo_data_requirements, dict) else []
-    download_sources = repo_data_requirements.get('download_sources', []) if isinstance(repo_data_requirements, dict) else []
-    if blocked_data and isinstance(data_policy, dict) and data_policy.get('decision'):
-        actions.append({'priority': 'P0', 'title': f"Follow data-unavailability policy: {data_policy.get('decision')}", 'reason': data_policy.get('rationale', 'Active repo data is unavailable and requires a bounded policy decision.'), 'evidence': f"Policy file: {paths.reports / 'data_unavailability_policy.md'}"})
-    if blocked_data:
-        source_bits = []
-        for source in download_sources[:2]:
-            code = ','.join(source.get('passwords_or_codes_found', []) or []) or 'none'
-            source_bits.append(f"{source.get('url', '')} (code={code})")
-        contract = dataset_contract_label(repo_data_requirements.get('contract', {}).get('required_files_per_dataset', []))
-        actions.append({'priority': 'P0', 'title': 'Acquire and verify active-repo real datasets', 'reason': 'The selected repo declares additional datasets, but they remain candidate data gaps until the active repo loader passes. Real experiments and paper claims should use loader-ready datasets only.', 'evidence': f"Blocked candidate datasets: {', '.join(blocked_data[:6])}; loader contract: {contract}; sources: {'; '.join(source_bits) or 'none detected'}."})
-    elif ready_data and not probed_real_datasets:
-        actions.append({'priority': 'P0', 'title': 'Probe real repo dataset loaders before real experiments', 'reason': 'Data files are present, but the selected repo loader must instantiate them before claims can rely on them.', 'evidence': f"Ready data directories: {', '.join(ready_data[:6])}."})
-    elif ready_data and not completed_real_experiments:
-        actions.append({'priority': 'P0', 'title': 'Launch a real-dataset repo reproduction smoke run', 'reason': 'At least one real repo dataset loader has passed; the loop should now produce auditable real-dataset experiment artifacts before any paper claim can advance.', 'evidence': f"Probe-passed real datasets: {', '.join(sorted(str(x) for x in probed_real_datasets if x)) or ', '.join(ready_data[:3])}."})
-    elif not dataset_rows:
-        actions.append({'priority': 'P0', 'title': 'Register and audit a dataset', 'reason': 'No dataset-backed benchmark can run yet.', 'evidence': 'No datasets are registered.'})
+        blocked_data = repo_data_requirements.get('blocked_datasets', []) if isinstance(repo_data_requirements, dict) else []
+        ready_data = repo_data_requirements.get('ready_datasets', []) if isinstance(repo_data_requirements, dict) else []
+        download_sources = repo_data_requirements.get('download_sources', []) if isinstance(repo_data_requirements, dict) else []
+        if blocked_data and isinstance(data_policy, dict) and data_policy.get('decision'):
+            actions.append({'priority': 'P0', 'title': f"Follow data-unavailability policy: {data_policy.get('decision')}", 'reason': data_policy.get('rationale', 'Active repo data is unavailable and requires a bounded policy decision.'), 'evidence': f"Policy file: {paths.reports / 'data_unavailability_policy.md'}"})
+        if blocked_data:
+            source_bits = []
+            for source in download_sources[:2]:
+                code = ','.join(source.get('passwords_or_codes_found', []) or []) or 'none'
+                source_bits.append(f"{source.get('url', '')} (code={code})")
+            contract = dataset_contract_label(repo_data_requirements.get('contract', {}).get('required_files_per_dataset', []))
+            actions.append({'priority': 'P0', 'title': 'Acquire and verify active-repo real datasets', 'reason': 'The selected repo declares additional datasets, but they remain candidate data gaps until the active repo loader passes. Real experiments and paper claims should use loader-ready datasets only.', 'evidence': f"Blocked candidate datasets: {', '.join(blocked_data[:6])}; loader contract: {contract}; sources: {'; '.join(source_bits) or 'none detected'}."})
+        elif ready_data and not probed_real_datasets:
+            actions.append({'priority': 'P0', 'title': 'Probe real repo dataset loaders before real experiments', 'reason': 'Data files are present, but the selected repo loader must instantiate them before claims can rely on them.', 'evidence': f"Ready data directories: {', '.join(ready_data[:6])}."})
+        elif ready_data and not completed_real_experiments:
+            actions.append({'priority': 'P0', 'title': 'Launch a real-dataset repo reproduction smoke run', 'reason': 'At least one real repo dataset loader has passed; the loop should now produce auditable real-dataset experiment artifacts before any paper claim can advance.', 'evidence': f"Probe-passed real datasets: {', '.join(sorted(str(x) for x in probed_real_datasets if x)) or ', '.join(ready_data[:3])}."})
+        elif not dataset_rows:
+            actions.append({'priority': 'P0', 'title': 'Register and audit a dataset', 'reason': 'No dataset-backed benchmark can run yet.', 'evidence': 'No datasets are registered.'})
 
-    audit_incomplete = [row for row in ranked_methods if row.get('audit_incomplete_runs', 0) > 0]
-    if audit_incomplete:
-        actions.append({'priority': 'P0', 'title': 'Repair audit-contract failures before more tuning', 'reason': 'Runs without valid metrics/bad-cases/claim audit create false scientific momentum.', 'evidence': f"Audit-incomplete methods: {method_list_label([row['method'] for row in audit_incomplete], cfg)}."})
+        audit_incomplete = [row for row in ranked_methods if row.get('audit_incomplete_runs', 0) > 0]
+        if audit_incomplete:
+            actions.append({'priority': 'P0', 'title': 'Repair audit-contract failures before more tuning', 'reason': 'Runs without valid metrics/bad-cases/claim audit create false scientific momentum.', 'evidence': f"Audit-incomplete methods: {method_list_label([row['method'] for row in audit_incomplete], cfg)}."})
 
-    pending_launch = [row for row in ranked_methods if row.get('launch_ready') and row.get('completed', 0) + row.get('failed', 0) == 0 and row.get('recommendation') not in PRUNE_RECOMMENDATIONS and row.get('repo_path', '') not in paused_repos]
-    if pending_launch:
-        actions.append({'priority': 'P1', 'title': 'Launch the first wave of parallel methods', 'reason': 'Planned methods exist but have not generated any evidence yet.', 'evidence': f"Launch-ready methods without runs: {method_list_label([row['method'] for row in pending_launch], cfg, 3)}."})
+        pending_launch = [row for row in ranked_methods if row.get('launch_ready') and row.get('completed', 0) + row.get('failed', 0) == 0 and row.get('recommendation') not in PRUNE_RECOMMENDATIONS and row.get('repo_path', '') not in paused_repos]
+        if pending_launch:
+            actions.append({'priority': 'P1', 'title': 'Launch the first wave of parallel methods', 'reason': 'Planned methods exist but have not generated any evidence yet.', 'evidence': f"Launch-ready methods without runs: {method_list_label([row['method'] for row in pending_launch], cfg, 3)}."})
 
-    missing_bad_cases = [row for row in ranked_methods if row.get('completed', 0) + row.get('failed', 0) > 0 and row.get('bad_case_slice_count', 0) == 0]
-    if missing_bad_cases:
-        actions.append({'priority': 'P1', 'title': 'Require bad-case export for active methods', 'reason': 'Without bad-case slices, the loop cannot do targeted scientific diagnosis or slice-aware improvement.', 'evidence': f"Methods without bad-case slice evidence: {method_list_label([row['method'] for row in missing_bad_cases], cfg, 3)}."})
+        missing_bad_cases = [row for row in ranked_methods if row.get('completed', 0) + row.get('failed', 0) > 0 and row.get('bad_case_slice_count', 0) == 0]
+        if missing_bad_cases:
+            actions.append({'priority': 'P1', 'title': 'Require bad-case export for active methods', 'reason': 'Without bad-case slices, the loop cannot do targeted scientific diagnosis or slice-aware improvement.', 'evidence': f"Methods without bad-case slice evidence: {method_list_label([row['method'] for row in missing_bad_cases], cfg, 3)}."})
 
-    weak_claim = [row for row in ranked_methods if row.get('claim_strength_score', 0) < 0]
-    if weak_claim:
-        actions.append({'priority': 'P1', 'title': 'Re-evaluate weak claim paths before more tuning', 'reason': 'Methods that weaken their own claim should not silently absorb more budget.', 'evidence': f"Claim-weak methods: {method_list_label([row['method'] for row in weak_claim], cfg, 3)}."})
+        weak_claim = [row for row in ranked_methods if row.get('claim_strength_score', 0) < 0]
+        if weak_claim:
+            actions.append({'priority': 'P1', 'title': 'Re-evaluate weak claim paths before more tuning', 'reason': 'Methods that weaken their own claim should not silently absorb more budget.', 'evidence': f"Claim-weak methods: {method_list_label([row['method'] for row in weak_claim], cfg, 3)}."})
 
-    counterexample_negative = [row for row in ranked_methods if row.get('counterexample_score', 0) < 0]
-    if counterexample_negative:
-        actions.append({'priority': 'P1', 'title': 'Prune or narrow methods broken by counterexamples', 'reason': 'Negative counterexample outcomes mean the current story is unsafe.', 'evidence': f"Methods failing counterexample pressure: {method_list_label([row['method'] for row in counterexample_negative], cfg, 3)}."})
+        counterexample_negative = [row for row in ranked_methods if row.get('counterexample_score', 0) < 0]
+        if counterexample_negative:
+            actions.append({'priority': 'P1', 'title': 'Prune or narrow methods broken by counterexamples', 'reason': 'Negative counterexample outcomes mean the current story is unsafe.', 'evidence': f"Methods failing counterexample pressure: {method_list_label([row['method'] for row in counterexample_negative], cfg, 3)}."})
 
-    prunable = [row for row in ranked_methods if row.get('recommendation') in PRUNE_RECOMMENDATIONS]
-    if prunable:
-        actions.append({'priority': 'P1', 'title': 'Prune or pause the weakest lagging method', 'reason': 'Resource should shift toward methods with stronger evidence or more repairable failure modes.', 'evidence': f"Prune candidates: {method_list_label([row['method'] for row in prunable], cfg, 3)}."})
+        prunable = [row for row in ranked_methods if row.get('recommendation') in PRUNE_RECOMMENDATIONS]
+        if prunable:
+            actions.append({'priority': 'P1', 'title': 'Prune or pause the weakest lagging method', 'reason': 'Resource should shift toward methods with stronger evidence or more repairable failure modes.', 'evidence': f"Prune candidates: {method_list_label([row['method'] for row in prunable], cfg, 3)}."})
 
-    strongest = next((row for row in ranked_methods if row.get('deepen_ready')), None)
-    if strongest:
-        actions.append({'priority': 'P1', 'title': f"Deepen the strongest current path: {method_label(strongest['method'], cfg)}", 'reason': 'This method has supportive claim signal, bad-case evidence, and acceptable novelty/counterexample pressure.', 'evidence': f"decision_score={strongest['decision_score']}, best_{strongest['metric_name']}={strongest['best_metric']}."})
-    elif ranked_methods:
-        actions.append({'priority': 'P1', 'title': 'Do not deepen any method yet', 'reason': 'No active path has passed the evidence gate for deepening.', 'evidence': 'Current methods are missing either supportive claim evidence, bad-case slices, or acceptable novelty/counterexample signals.'})
+        strongest = next((row for row in ranked_methods if row.get('deepen_ready')), None)
+        if strongest:
+            actions.append({'priority': 'P1', 'title': f"Deepen the strongest current path: {method_label(strongest['method'], cfg)}", 'reason': 'This method has supportive claim signal, bad-case evidence, and acceptable novelty/counterexample pressure.', 'evidence': f"decision_score={strongest['decision_score']}, best_{strongest['metric_name']}={strongest['best_metric']}."})
+        elif ranked_methods:
+            actions.append({'priority': 'P1', 'title': 'Do not deepen any method yet', 'reason': 'No active path has passed the evidence gate for deepening.', 'evidence': 'Current methods are missing either supportive claim evidence, bad-case slices, or acceptable novelty/counterexample signals.'})
 
-    if weak_paper_signal:
-        actions.append({'priority': 'P1', 'title': 'Tighten novelty framing before scaling experiments', 'reason': 'If imported papers all look weak or incremental, more compute alone is unlikely to create a top-tier contribution.', 'evidence': 'Paper quality heuristics currently do not show a clearly promising top-tier direction.'})
+        if weak_paper_signal:
+            actions.append({'priority': 'P1', 'title': 'Tighten novelty framing before scaling experiments', 'reason': 'If imported papers all look weak or incremental, more compute alone is unlikely to create a top-tier contribution.', 'evidence': 'Paper quality heuristics currently do not show a clearly promising top-tier direction.'})
 
-    unsupported_claims = [claim.get('claim_type', '') for claim in claim_ledger.get('claims', []) if claim.get('status') in {'unsupported', 'weak'}]
-    if unsupported_claims:
-        actions.append({'priority': 'P1', 'title': 'Repair unsupported paper claims with targeted experiments', 'reason': 'Paper-level claims are not yet evidence-backed enough for top-tier writing.', 'evidence': f"Unsupported or weak claims: {', '.join(unsupported_claims[:3])}."})
+        unsupported_claims = [claim.get('claim_type', '') for claim in claim_ledger.get('claims', []) if claim.get('status') in {'unsupported', 'weak'}]
+        if unsupported_claims:
+            actions.append({'priority': 'P1', 'title': 'Repair unsupported paper claims with targeted experiments', 'reason': 'Paper-level claims are not yet evidence-backed enough for top-tier writing.', 'evidence': f"Unsupported or weak claims: {', '.join(unsupported_claims[:3])}."})
 
-    if audit_md and 'No experiment exported useful bad-case slice evidence.' in audit_md:
-        actions.append({'priority': 'P1', 'title': 'Block paper promotion until experiment evidence is richer', 'reason': 'The paper audit is still flagging missing empirical support.', 'evidence': 'Paper evidence audit still reports absent bad-case or claim-verdict evidence.'})
+        if audit_md and 'No experiment exported useful bad-case slice evidence.' in audit_md:
+            actions.append({'priority': 'P1', 'title': 'Block paper promotion until experiment evidence is richer', 'reason': 'The paper audit is still flagging missing empirical support.', 'evidence': 'Paper evidence audit still reports absent bad-case or claim-verdict evidence.'})
 
-    if manifest and manifest.get('methods_deepen_ready_count', 0) == 0 and ranked_methods:
-        actions.append({'priority': 'P2', 'title': 'Improve evidence density before more paper polishing', 'reason': 'Manifest-level evidence still says no method is ready to deepen.', 'evidence': f"methods_deepen_ready_count={manifest.get('methods_deepen_ready_count', 0)}."})
+        if manifest and manifest.get('methods_deepen_ready_count', 0) == 0 and ranked_methods:
+            actions.append({'priority': 'P2', 'title': 'Improve evidence density before more paper polishing', 'reason': 'Manifest-level evidence still says no method is ready to deepen.', 'evidence': f"methods_deepen_ready_count={manifest.get('methods_deepen_ready_count', 0)}."})
 
     out_json = paths.state / 'next_actions.json'
     out_json.write_text(json.dumps({'actions': actions, 'method_summaries': method_summaries}, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
@@ -263,6 +334,10 @@ def main() -> None:
     lines.append(f"- experiments_logged: {len(experiments)}\n")
     lines.append(f"- real_loader_probe_passed: {bool(probed_real_datasets)}\n")
     lines.append(f"- completed_real_dataset_experiments: {len(completed_real_experiments)}\n")
+    if selected_gate_action:
+        lines.append(f"- current_blocker_category: {selected_gate_action.get('gate_category', '')}\n")
+        lines.append(f"- selected_base_viability_gate_status: {as_dict(selected_base_viability_gate).get('status', '')}\n")
+        lines.append(f"- selected_base_viability_gate_decision: {as_dict(selected_base_viability_gate).get('decision', '')}\n")
     if isinstance(data_policy, dict) and data_policy.get('decision'):
         lines.append(f"- data_unavailability_decision: {data_policy.get('decision')}\n")
     lines.append('\n')
