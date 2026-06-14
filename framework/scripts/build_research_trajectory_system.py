@@ -32,6 +32,11 @@ NATIVE_SKILL_LABELS = {
     "writing": "writing contract",
 }
 PATH_TOKEN_RE = re.compile(r"(?:(?:/|\.?/)?(?:state|reports|scripts|projects|\.claude|raw|artifacts|experiments|datasets|repos|planning|wiki)/[^\s,;|)\]}]+|(?<![A-Za-z0-9_.-])/[^\s,;|)\]}]+|\S+\.(?:json|md|txt|csv|tsv|py|log|yaml|yml|ipynb|png|pdf))")
+FAILED_BASE_SWITCH_OBJECTIVE = "Resolve current-route provenance/embedding evidence or a proposal-only candidate base-switch route before exploring new niches."
+SELECTED_BASE_GATE_OBJECTIVE = "Resolve selected-base semantic provenance before exploring new niches or downstream experiments."
+FAILED_GATE_REPAIR_OBJECTIVE = "Use Claude Code only on gate evidence repair nodes; do not launch behavior-only candidate experiments until the gate clears."
+DEFER_NICHE_OBJECTIVE = "Keep unexplored-niche experiments deferred until current-route provenance/base-switch gate input changes."
+DEFER_ELITE_OBJECTIVE = "Keep method deepening deferred until selected-base provenance/base-switch gates pass."
 
 
 def now_iso() -> str:
@@ -776,26 +781,90 @@ def build_assurance_layer(paths, experiments: Any, datasets: Any, active_repo: d
     return {"updated_at": now_iso(), "status": "blocked" if any(row["severity"] == "block" for row in issues) else "warn" if issues else "pass", "principles": ["Every claim must point to local files or verifiable external records.", "Synthetic smoke proves plumbing only, not scientific conclusions.", "Claude/LLM summaries are routing hints until checked against artifacts.", "Paper promotion requires real-data, audit-ready, bad-case, claim, and counterexample evidence."], "issues": issues[:200], "active_repo": active_repo.get("repo_path", "") if isinstance(active_repo, dict) else "", "route_experiment_count": len(rows), "legacy_excluded_experiment_count": len(legacy_rows), "legacy_excluded_experiments": [row.get("experiment_id") or row.get("name") for row in legacy_rows[:40]], "real_ready_datasets": sorted(real_ready), "real_audit_ready_experiments": [row.get("experiment_id") or row.get("name") for row in real_completed], "weak_claim_count": len(weak_claims), "evidence_files": evidence_refs(paths.state / "experiment_registry.json", paths.state / "dataset_registry.json", paths.state / "repo_data_requirements.json", paths.state / "real_dataset_probe.json", paths.state / "evidence_review_board.json", paths.reports / "paper_evidence_audit.md", paths.state / "claim_ledger.json")}
 
 
-def trajectory_controller(assurance: dict[str, Any], failed: dict[str, Any], niches: dict[str, Any], evolution_memory: dict[str, Any], method_frontier: dict[str, Any], evo_cycle: dict[str, Any], skill_contracts: list[dict[str, Any]]) -> dict[str, Any]:
+def base_switch_candidate_has_identity(candidate: Any) -> bool:
+    if not isinstance(candidate, dict):
+        return False
+    for key in ["repo", "name", "title", "repo_path", "local_path", "path", "proposed_path_hint", "proposal_path"]:
+        if str(candidate.get(key) or "").strip():
+            return True
+    return False
+
+
+def selected_base_semantic_gate_required(gate: Any) -> bool:
+    if not isinstance(gate, dict):
+        return False
+    if str(gate.get("status") or "").lower() not in {"blocked", "fail", "failed"}:
+        return False
+    review = gate.get("semantic_data_provenance_review", {}) if isinstance(gate.get("semantic_data_provenance_review", {}), dict) else {}
+    return bool(
+        str(gate.get("decision") or "").lower() == "base_switch_gate_required"
+        or review.get("deterministic_gate_required")
+        or str(review.get("status") or "").lower() in {"blocked", "fail", "failed"}
+    )
+
+
+def blocked_check_ids(gate: Any) -> list[str]:
+    rows = gate.get("failed_checks", []) if isinstance(gate, dict) and isinstance(gate.get("failed_checks", []), list) else []
+    ids: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        check_id = str(row.get("id") or row.get("name") or "").strip()
+        if check_id and str(row.get("status") or "blocked").lower() in {"blocked", "fail", "failed"}:
+            ids.append(check_id)
+    return sorted(dict.fromkeys(ids))
+
+
+def trajectory_gate_context(paths) -> dict[str, Any]:
+    selected_gate = load_json(paths.state / "selected_base_viability_gate.json", {})
+    base_switch_gate = load_json(paths.state / "base_switch_gate.json", {})
+    selected_gate_required = selected_base_semantic_gate_required(selected_gate)
+    base_status = str(base_switch_gate.get("status") or "").lower() if isinstance(base_switch_gate, dict) else ""
+    base_decision = str(base_switch_gate.get("decision") or "").lower() if isinstance(base_switch_gate, dict) else ""
+    switch_authorized = bool(base_switch_gate.get("switch_authorized")) if isinstance(base_switch_gate, dict) else False
+    candidate_present = base_switch_candidate_has_identity(base_switch_gate.get("candidate_route", {}) if isinstance(base_switch_gate, dict) else {})
+    failed_checks = blocked_check_ids(base_switch_gate)
+    base_switch_failed = bool(
+        base_status == "blocked"
+        and (base_decision == "base_switch_not_authorized" or not switch_authorized)
+        and (failed_checks or not candidate_present)
+    )
+    return {
+        "selected_base_gate_required": selected_gate_required,
+        "base_switch_failed": base_switch_failed,
+        "blocks_downstream": bool(selected_gate_required or base_switch_failed),
+        "base_switch_gate_status": base_status,
+        "base_switch_gate_decision": base_decision,
+        "base_switch_candidate_route_present": candidate_present,
+        "base_switch_failed_checks": failed_checks,
+    }
+
+
+def trajectory_controller(assurance: dict[str, Any], failed: dict[str, Any], niches: dict[str, Any], evolution_memory: dict[str, Any], method_frontier: dict[str, Any], evo_cycle: dict[str, Any], skill_contracts: list[dict[str, Any]], gate_context: dict[str, Any] | None = None) -> dict[str, Any]:
     repair_queue = evolution_memory.get("repair_queue", []) if isinstance(evolution_memory, dict) else []
     elite = evolution_memory.get("elite_pool", []) if isinstance(evolution_memory, dict) else []
+    gate_context = gate_context if isinstance(gate_context, dict) else {}
+    blocks_downstream = bool(gate_context.get("blocks_downstream"))
     objectives = []
     if assurance.get("status") == "blocked":
         objectives.append("Resolve evidence blockers before claiming or promoting paper output.")
     if repair_queue or failed.get("nodes"):
-        objectives.append("Use Claude Code on the highest-priority failed/repair node, then rerun the validation trial in the same trajectory.")
+        objectives.append(FAILED_GATE_REPAIR_OBJECTIVE if blocks_downstream else "Use Claude Code on the highest-priority failed/repair node, then rerun the validation trial in the same trajectory.")
+    if blocks_downstream:
+        objectives.append(FAILED_BASE_SWITCH_OBJECTIVE if gate_context.get("base_switch_failed") else SELECTED_BASE_GATE_OBJECTIVE)
     if niches.get("nodes"):
-        objectives.append("Select one unexplored niche with loader-ready data and runnable repo evidence for the next bounded experiment.")
+        objectives.append(DEFER_NICHE_OBJECTIVE if blocks_downstream else "Select one unexplored niche with loader-ready data and runnable repo evidence for the next bounded experiment.")
     if evo_cycle.get("phase_count"):
         objectives.append("Use TASTE recoverable cycle trace and long-horizon memory before starting the next experiment.")
     if skill_contracts:
         objectives.append("Route Claude Code through local TASTE skills for experiment-loop, evidence-gate, and paper-production work.")
     if elite:
-        objectives.append("Deepen only elite methods that pass TASTE evidence-assurance checks.")
+        objectives.append(DEFER_ELITE_OBJECTIVE if blocks_downstream else "Deepen only elite methods that pass TASTE evidence-assurance checks.")
     if not objectives:
         objectives.append("Refresh literature/repo landscape and generate a new evidence-feasible experiment plan.")
     return {
         "phase": "assurance_blocked" if assurance.get("status") == "blocked" else "repair_or_explore" if repair_queue or failed.get("nodes") else "explore_or_deepen",
+        "gate_context": gate_context,
         "agent_roles": [
             {"role": "landscape_cartographer", "responsibility": "Maintain research landscape, novelty map, failed hypothesis graph, and unexplored niche graph."},
             {"role": "evolutionary_memory_curator", "responsibility": "Persist ideation, experimentation, assurance, and trajectory memory to disk."},
@@ -829,7 +898,6 @@ def trajectory_controller(assurance: dict[str, Any], failed: dict[str, Any], nic
         },
         "skill_contract_count": len(skill_contracts),
     }
-
 
 def build_trajectory_execution_protocol(paths, controller: dict[str, Any], optimization_plan: dict[str, Any] | None = None) -> dict[str, Any]:
     """Persist the durable main-agent loop that optimizes the whole trajectory."""
@@ -1679,12 +1747,14 @@ def main() -> None:
     failed = build_failed_hypothesis_graph(experiments, aris_board, next_actions)
     niches = build_unexplored_niche_graph(novelty, failed, datasets, repos, experiments)
     assurance = build_assurance_layer(paths, experiments, datasets, active_repo, evidence_audit, aris_board, claim_ledger)
-    controller = trajectory_controller(assurance, failed, niches, evolution_memory, method_frontier, evo_cycle, skills)
+    gate_context = trajectory_gate_context(paths)
+    controller = trajectory_controller(assurance, failed, niches, evolution_memory, method_frontier, evo_cycle, skills, gate_context)
     direction_memory = update_research_direction_memory(paths, landscape, novelty, failed, niches, assurance, controller)
     trajectory = {
         "project": args.project,
         "topic": cfg.get("topic", "") if isinstance(cfg, dict) else "",
         "updated_at": now_iso(),
+        "trajectory_gate_context": gate_context,
         "research_landscape": landscape,
         "novelty_map": novelty,
         "failed_hypothesis_graph": failed,

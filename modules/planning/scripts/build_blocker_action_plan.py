@@ -1517,6 +1517,14 @@ def apply_failed_base_switch_gate_guidance(actions: list[dict[str, Any]], paths,
         elif row.get("blocked_by_selected_base_viability_gate") or route in {"experiment_evidence_repair", "experiment_loop_repair", "evidence_assurance_repair", "paper_production_repair", "section_state_repair", "figure_repair", "citation_repair", "paper_artifact_refresh"}:
             row["priority"] = "P2"
             row["blocked_by_selected_base_viability_gate"] = True
+            deferred_issue = (
+                "blocked_by_failed_base_switch_gate: downstream experiment, paper, and claim actions are deferred until current-route "
+                "provenance/embedding evidence or a proposal-only candidate base-switch route changes the deterministic gate input."
+            )
+            if row.get("issue") and not row.get("deferred_original_issue"):
+                row["deferred_original_issue"] = row.get("issue")
+            row["issue"] = deferred_issue
+            row["human_summary"] = deferred_issue
             row["repair_strategy"] = (
                 "Deferred while the failed deterministic base-switch gate lacks new current-route provenance or a proposal-only candidate route. "
                 "Do not rerun the same gate or launch candidate/alternative main-route work until provenance/proposal evidence changes. "

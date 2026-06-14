@@ -394,6 +394,67 @@ def test_blocker_action_plan_uses_failed_base_switch_gate_result(tmp_path, monke
     assert "proposal-only candidate base-switch route" in combined
     assert "run the deterministic base-switch gate" not in combined.lower()
     assert all(row.get("base_switch_gate_status") == "blocked/base_switch_not_authorized" for row in selected_or_switch)
+    downstream_actions = [
+        {
+            "route": "experiment_evidence_repair",
+            "issue": "参考复现已通过；下一步由 project agent 继续真实实验迭代，论文/claim 暂停。",
+            "priority": "P0",
+        }
+    ]
+    blocker_plan.apply_failed_base_switch_gate_guidance(downstream_actions, paths, "demo_project", "ICLR")
+    deferred = downstream_actions[0]
+    deferred_public = " ".join(str(deferred.get(key) or "") for key in ["issue", "human_summary"])
+    assert deferred["priority"] == "P2"
+    assert deferred.get("blocked_by_selected_base_viability_gate") is True
+    assert "blocked_by_failed_base_switch_gate" in deferred_public
+    assert "继续真实实验迭代" not in deferred_public
+    assert "继续真实实验迭代" in deferred.get("deferred_original_issue", "")
+
+
+def test_research_trajectory_gate_context_reads_failed_base_switch_gate(tmp_path):
+    trajectory = load_script("build_research_trajectory_system")
+    paths = _make_paths(tmp_path)
+    _seed_common_project(paths)
+    _seed_selected_base_semantic_provenance_block(paths)
+    _seed_failed_base_switch_gate(paths)
+
+    context = trajectory.trajectory_gate_context(paths)
+
+    assert context["selected_base_gate_required"] is True
+    assert context["base_switch_failed"] is True
+    assert context["blocks_downstream"] is True
+    assert context["base_switch_candidate_route_present"] is False
+    assert context["base_switch_gate_status"] == "blocked"
+    assert context["base_switch_gate_decision"] == "base_switch_not_authorized"
+    assert "candidate_route_proposal_exists" in context["base_switch_failed_checks"]
+
+
+def test_research_trajectory_controller_defers_exploration_after_failed_base_switch_gate():
+    trajectory = load_script("build_research_trajectory_system")
+
+    controller = trajectory.trajectory_controller(
+        {"status": "blocked"},
+        {"nodes": [{"id": "failed_behavior_probe", "method": "behavior-only candidate"}]},
+        {"nodes": [{"id": "ready_repo_data_cross_product", "title": "ready candidate"}]},
+        {"repair_queue": [], "elite_pool": [{"id": "elite_method"}]},
+        {},
+        {"phase_count": 1},
+        [{"name": "experiment-loop", "path": ".claude/skills/experiment-loop/SKILL.md"}],
+        {
+            "blocks_downstream": True,
+            "base_switch_failed": True,
+            "base_switch_gate_status": "blocked",
+            "base_switch_gate_decision": "base_switch_not_authorized",
+        },
+    )
+
+    public_objectives = "\n".join(controller["next_objectives"])
+    assert "Resolve current-route provenance/embedding evidence or a proposal-only candidate base-switch route" in public_objectives
+    assert "Use Claude Code only on gate evidence repair nodes" in public_objectives
+    assert "Keep unexplored-niche experiments deferred" in public_objectives
+    assert "Keep method deepening deferred" in public_objectives
+    assert "Select one unexplored niche" not in public_objectives
+    assert "next bounded experiment" not in public_objectives
 
 
 def test_propose_next_actions_uses_failed_base_switch_gate_result(tmp_path, monkeypatch):
