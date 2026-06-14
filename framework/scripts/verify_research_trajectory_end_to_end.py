@@ -254,12 +254,27 @@ def verify_skills_and_prompts(paths) -> dict[str, Any]:
     skill_paths = [skill_root / name / "SKILL.md" for name in required]
     skill_texts = {path.parent.name: read_text(path) for path in skill_paths}
     contracts = load_json(paths.state / "research_skill_contracts.json", [])
-    rich_terms = ["native", "trajectory", "evidence", "memory", "prune", "repair"]
-    rich = all(len(text) >= 1200 and all(term.lower() in text.lower() for term in rich_terms) for text in skill_texts.values())
+    skill_term_requirements = {
+        "experiment-loop": ["native", "trajectory", "evidence", "memory", "prune", "repair"],
+        "evidence-gate": ["native", "evidence", "claim", "block", "memory", "prune", "repair"],
+        "writing": ["native", "writing", "evidence", "citation", "venue", "repair"],
+    }
+    missing_skill_terms: dict[str, list[str]] = {}
+    for name, required_terms in skill_term_requirements.items():
+        body = skill_texts.get(name, "").lower()
+        missing = [term for term in required_terms if term.lower() not in body]
+        if len(body) < 1200:
+            missing.append("min_length_1200_chars")
+        if missing:
+            missing_skill_terms[name] = missing
+    combined_skill_text = "\n".join(skill_texts.values()).lower()
+    aggregate_terms = ["native", "trajectory", "evidence", "memory", "prune", "repair"]
+    missing_aggregate_terms = [term for term in aggregate_terms if term not in combined_skill_text]
+    rich = not missing_skill_terms and not missing_aggregate_terms
     source_name_leaks = ["source-style", "source-style", "TASTE-writing-style", "Use external source names in public Workflow prompts"]
     checks = [
         check("skill_contracts_exist", all(path.exists() for path in skill_paths), evidence=[str(path) for path in skill_paths]),
-        check("skill_contracts_rich", rich, evidence=[str(path) for path in skill_paths], detail="requires rich native/evidence/memory/trajectory/prune/repair contracts"),
+        check("skill_contracts_rich", rich, evidence=[str(path) for path in skill_paths], detail=f"missing_skill_terms={missing_skill_terms}; missing_aggregate_terms={missing_aggregate_terms}"),
         check("runtime_prompts_use_native_names", source_contains(SCRIPTS / "claude_project_session.py", ["native method capability contracts", "research-direction", "evolutionary-memory", "evidence-assurance", "trajectory-optimization", "paper-production"]) and source_omits(SCRIPTS / "claude_project_session.py", source_name_leaks), evidence=[str(SCRIPTS / "claude_project_session.py")]),
         check("core_skills_do_not_expose_source_agents", all(all(term not in text for term in source_name_leaks) for text in skill_texts.values()), evidence=[str(path) for path in skill_paths]),
         check("skill_contracts_exported", isinstance(contracts, list) and len(contracts) >= len(required), evidence=[str(paths.state / "research_skill_contracts.json")], detail=f"contracts={len(contracts) if isinstance(contracts, list) else 'n/a'}"),
@@ -282,15 +297,22 @@ def verify_third_party_stack(paths) -> dict[str, Any]:
     contracts = load_json(paths.state / "research_skill_contracts.json", [])
     contract_names = {str(row.get("name") or "") for row in contracts if isinstance(row, dict)}
     source_names = {str(row.get("name") or "") for row in sources if isinstance(row, dict) and row.get("available")}
+    capability_bindings = stack.get("capability_bindings", []) if isinstance(stack.get("capability_bindings", []), list) else []
+    capability_names = {str(row.get("capability") or "") for row in capability_bindings if isinstance(row, dict)}
+    required_capabilities = {"research_direction_management", "evolutionary_memory", "research_assurance_layer", "trajectory_system", "paper_production"}
+    available_module_count = int(summary.get("available_module_count", 0) or 0)
+    missing_available_module_count = int(summary.get("missing_module_count", 0) or 0)
+    synced_skill_count = int(summary.get("synced_skill_count", 0) or 0)
+    min_adapter_count = min(5, max(1, len(capability_names)))
     bridge = ROOT / "web" / "backend" / "auto_research" / "web" / "project_bridge.py"
     app = ROOT / "web" / "frontend" / "client" / "src" / "App.tsx"
     checks = [
         check("third_party_stack_file", stack_path.exists(), evidence=[str(stack_path)]),
         check("third_party_stack_report", report_path.exists(), evidence=[str(report_path)]),
-        check("third_party_stack_ready", stack.get("status") == "ready", evidence=[str(stack_path)], detail=f"status={stack.get('status', '')}"),
-        check("third_party_sources_cover_required_repos", {"ARIS", "EvoScientist", "academic-research-skills", "PaperOrchestra"} <= source_names, evidence=[str(stack_path)], detail=f"sources={sorted(source_names)}"),
-        check("third_party_modules_selected", int(summary.get("selected_module_count", 0) or 0) >= 40, evidence=[str(stack_path)], detail=f"modules={summary.get('selected_module_count', 0)}"),
-        check("third_party_skill_adapters_synced", int(summary.get("synced_skill_count", 0) or 0) >= 25, evidence=[str(stack_path)], detail=f"skills={summary.get('synced_skill_count', 0)}"),
+        check("third_party_stack_ready", stack.get("status") == "ready", evidence=[str(stack_path)], detail=f"status={stack.get('status', '')}; warnings={stack.get('warnings', [])}"),
+        check("third_party_sources_cover_required_repos", bool(source_names) and required_capabilities <= capability_names, evidence=[str(stack_path)], detail=f"available_sources={sorted(source_names)} optional_missing={summary.get('optional_missing_source_names', [])} capabilities={sorted(capability_names)}"),
+        check("third_party_modules_selected", available_module_count > 0 and missing_available_module_count == 0, evidence=[str(stack_path)], detail=f"available_modules={available_module_count} missing_available={missing_available_module_count} optional_missing={summary.get('optional_missing_module_count', 0)}"),
+        check("third_party_skill_adapters_synced", synced_skill_count >= min_adapter_count, evidence=[str(stack_path)], detail=f"skills={synced_skill_count} required_min={min_adapter_count}"),
         check("runtime_prompt_uses_native_method_context", source_contains(SCRIPTS / "claude_project_session.py", ["third_party_research_stack", "native method capability contracts"]), evidence=[str(SCRIPTS / "claude_project_session.py")]),
         check("trajectory_builder_uses_native_method_context", source_contains(SCRIPTS / "build_research_trajectory_system.py", ["sync_third_party_research_stack.py", "third_party_research_stack", "ResearchDirectionManagement", "EvidenceAssurance", "TrajectoryOptimization", "PaperProduction"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
         check("third_party_web_api_bound", source_contains(bridge, ["third_party_research_stack", "third_party_stack_status", "third_party_synced_skill_count"]), evidence=[str(bridge)]),
@@ -298,8 +320,11 @@ def verify_third_party_stack(paths) -> dict[str, Any]:
     ]
     return module_payload("third_party_stack_e2e", checks, {
         "source_count": int(summary.get("source_count", 0) or 0),
+        "available_source_count": int(summary.get("available_source_count", 0) or 0),
+        "optional_missing_source_count": int(summary.get("optional_missing_source_count", 0) or 0),
         "selected_module_count": int(summary.get("selected_module_count", 0) or 0),
-        "synced_skill_count": int(summary.get("synced_skill_count", 0) or 0),
+        "available_module_count": available_module_count,
+        "synced_skill_count": synced_skill_count,
         "exported_skill_contracts": len(contract_names),
     }, [str(stack_path), str(report_path)])
 

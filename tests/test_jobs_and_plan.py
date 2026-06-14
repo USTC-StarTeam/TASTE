@@ -3,6 +3,7 @@ import json
 import time
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -95,6 +96,7 @@ def recommended_paper(paper_id: str, title: str) -> dict:
 def test_sync_ars_uses_defined_source_lists(monkeypatch, tmp_path):
     syncer = importlib.import_module("sync_third_party_research_stack")
     monkeypatch.setattr(syncer, "THIRD_PARTY", tmp_path / "third_party")
+    monkeypatch.setattr(syncer, "VENDOR_ROOT", tmp_path / "vendor")
     monkeypatch.setattr(syncer, "PROVENANCE_ROOT", tmp_path / "provenance")
     monkeypatch.setattr(syncer, "SKILL_ROOT", tmp_path / "skills")
     repo = tmp_path / "third_party" / "academic-research-skills"
@@ -105,7 +107,7 @@ def test_sync_ars_uses_defined_source_lists(monkeypatch, tmp_path):
     (repo / "scripts").mkdir()
     (repo / "scripts" / syncer.ARS_SCRIPTS[0]).write_text("print('audit')\n", encoding="utf-8")
 
-    modules, skills = syncer.sync_ars({"name": "academic", "repository": "example", "local_path": "third_party/academic-research-skills"})
+    modules, skills = syncer.sync_ars(syncer.source_record("academic", repo, "example", "license"))
 
     assert any(row["name"] == "academic-pipeline" and row["available"] for row in modules)
     assert skills and skills[0]["path"].endswith("SKILL.md")
@@ -117,6 +119,7 @@ def test_sync_ars_uses_defined_source_lists(monkeypatch, tmp_path):
 def test_missing_source_method_sync_does_not_rewrite_existing_adapters(monkeypatch, tmp_path):
     syncer = importlib.import_module("sync_third_party_research_stack")
     monkeypatch.setattr(syncer, "THIRD_PARTY", tmp_path / "third_party")
+    monkeypatch.setattr(syncer, "VENDOR_ROOT", tmp_path / "vendor")
     monkeypatch.setattr(syncer, "PROVENANCE_ROOT", tmp_path / "provenance")
     trajectory = tmp_path / "provenance" / "method-source-trajectory-system" / "SKILL.md"
     paper = tmp_path / "provenance" / "method-source-paper-production" / "SKILL.md"
@@ -134,6 +137,126 @@ def test_missing_source_method_sync_does_not_rewrite_existing_adapters(monkeypat
     assert paper_skills == []
     assert trajectory.read_text(encoding="utf-8") == "existing trajectory adapter"
     assert paper.read_text(encoding="utf-8") == "existing paper adapter"
+
+
+def test_method_stack_uses_writing_vendor_and_warns_on_optional_missing_sources(monkeypatch, tmp_path):
+    syncer = importlib.import_module("sync_third_party_research_stack")
+    third_party = tmp_path / "third_party"
+    vendor = tmp_path / "modules" / "writing" / "vendor"
+    state = tmp_path / "project" / "state"
+    reports = tmp_path / "project" / "reports"
+    monkeypatch.setattr(syncer, "THIRD_PARTY", third_party)
+    monkeypatch.setattr(syncer, "VENDOR_ROOT", vendor)
+    monkeypatch.setattr(syncer, "PROVENANCE_ROOT", tmp_path / "provenance")
+    monkeypatch.setattr(syncer, "SKILL_ROOT", tmp_path / "skills")
+    monkeypatch.setattr(syncer, "build_paths", lambda _project: SimpleNamespace(root=tmp_path / "project", state=state, reports=reports))
+
+    ars = vendor / "academic-research-skills"
+    (ars / "LICENSE").parent.mkdir(parents=True, exist_ok=True)
+    (ars / "LICENSE").write_text("license", encoding="utf-8")
+    for name in syncer.ARS_SKILLS:
+        skill = ars / name / "SKILL.md"
+        skill.parent.mkdir(parents=True, exist_ok=True)
+        skill.write_text(f"---\ndescription: {name} contract.\n---\n# {name}\n", encoding="utf-8")
+    for name in syncer.ARS_SHARED:
+        shared = ars / "shared" / name
+        shared.parent.mkdir(parents=True, exist_ok=True)
+        shared.write_text("shared protocol", encoding="utf-8")
+    for name in syncer.ARS_SCRIPTS:
+        script = ars / "scripts" / name
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("print('audit')\n", encoding="utf-8")
+
+    paper_repo = vendor / "PaperOrchestra"
+    (paper_repo / "LICENSE").parent.mkdir(parents=True, exist_ok=True)
+    (paper_repo / "LICENSE").write_text("license", encoding="utf-8")
+    for name in syncer.PAPER_ORCHESTRA_SKILLS:
+        skill = paper_repo / "skills" / name / "SKILL.md"
+        skill.parent.mkdir(parents=True, exist_ok=True)
+        skill.write_text(f"---\ndescription: {name} contract.\n---\n# {name}\n", encoding="utf-8")
+
+    payload = syncer.build_stack("demo")
+
+    assert payload["status"] == "ready"
+    assert payload["summary"]["available_source_names"] == ["academic-research-skills", "PaperOrchestra"]
+    assert payload["summary"]["optional_missing_source_names"] == ["ARIS", "EvoScientist"]
+    assert payload["summary"]["missing_module_count"] == 0
+    assert payload["summary"]["optional_missing_module_count"] > 0
+    assert payload["summary"]["synced_skill_count"] == len(syncer.ARS_SKILLS) + 1
+    assert any(source["local_path"].startswith("/tmp") or "modules/writing/vendor" in source["local_path"] for source in payload["sources"] if source["name"] == "PaperOrchestra")
+
+
+def test_research_trajectory_verifier_accepts_optional_missing_method_sources(tmp_path):
+    verifier = importlib.import_module("verify_research_trajectory_end_to_end")
+    state = tmp_path / "state"
+    reports = tmp_path / "reports"
+    state.mkdir()
+    reports.mkdir()
+    stack = {
+        "status": "ready",
+        "warnings": ["optional method reference sources missing: ARIS, EvoScientist"],
+        "sources": [
+            {"name": "ARIS", "available": False, "optional": True},
+            {"name": "EvoScientist", "available": False, "optional": True},
+            {"name": "academic-research-skills", "available": True, "optional": True},
+            {"name": "PaperOrchestra", "available": True, "optional": True},
+        ],
+        "capability_bindings": [
+            {"capability": "research_direction_management"},
+            {"capability": "evolutionary_memory"},
+            {"capability": "research_assurance_layer"},
+            {"capability": "trajectory_system"},
+            {"capability": "paper_production"},
+        ],
+        "summary": {
+            "source_count": 4,
+            "available_source_count": 2,
+            "optional_missing_source_count": 2,
+            "optional_missing_source_names": ["ARIS", "EvoScientist"],
+            "selected_module_count": 61,
+            "available_module_count": 26,
+            "missing_module_count": 0,
+            "optional_missing_module_count": 35,
+            "synced_skill_count": 13,
+        },
+    }
+    write_json(state / "third_party_research_stack.json", stack)
+    write_text(reports / "third_party_research_stack.md", "# stack")
+
+    module = verifier.verify_third_party_stack(SimpleNamespace(state=state, reports=reports))
+
+    assert module["status"] == "pass"
+    assert all(row["status"] == "pass" for row in module["checks"] if row["id"].startswith("third_party_"))
+
+
+def test_environment_stage_exposes_pending_candidate_without_authorizing_route():
+    from auto_research.web import project_bridge
+
+    stage = project_bridge._public_environment_stage(
+        status="selected",
+        env={
+            "valid": True,
+            "selection_gate": "current_active_route_pending_candidate_blocked",
+            "pending_candidate": {
+                "name": "owner/candidate",
+                "literature_base_title": "Candidate Title",
+                "repo_path": "/tmp/candidate",
+            },
+        },
+        selected={"name": "owner/active", "title": "Active Title"},
+        active_repo={},
+        repo_name="owner/active",
+        repo_url="https://example.test/active",
+        repo_path="/tmp/active",
+        ref_gate={},
+        route_ready_datasets=["active-data"],
+    )
+
+    assert stage["active_repo"]["name"] == "owner/active"
+    assert stage["pending_candidate"]["name"] == "owner/candidate"
+    assert stage["pending_candidate"]["title"] == "Candidate Title"
+    assert stage["pending_candidate"]["status"] == "non_authoritative_pending_loader_proposal"
+    assert stage["selection"]["pending_candidate"]["name"] == "owner/candidate"
 
 
 def test_api_catalog_merges_sigkdd_kdd_aliases():
@@ -426,7 +549,6 @@ def test_run_project_uses_single_downstream_project_agent_route():
 
 def test_run_loop_topic_ignores_project_id_placeholder(tmp_path):
     import importlib.util
-    from types import SimpleNamespace
 
     script_path = Path(__file__).resolve().parents[1] / "modules" / "experimenting" / "scripts" / "run_loop.py"
     spec = importlib.util.spec_from_file_location("run_loop_topic_under_test", script_path)
@@ -451,7 +573,6 @@ def test_run_loop_topic_ignores_project_id_placeholder(tmp_path):
 
 def test_run_project_topic_ignores_project_id_placeholder(tmp_path):
     import importlib.util
-    from types import SimpleNamespace
 
     script_path = Path(__file__).resolve().parents[1] / "framework" / "scripts" / "run_project.py"
     spec = importlib.util.spec_from_file_location("run_project_topic_under_test", script_path)
@@ -1027,7 +1148,6 @@ def test_nested_plan_selection_is_lifted_into_current_find_contract():
 
 
 def test_current_find_plan_bridge_gate_blocks_stale_plan(tmp_path):
-    from types import SimpleNamespace
 
     full_cycle = importlib.import_module("run_full_research_cycle")
     paths = SimpleNamespace(state=tmp_path / "state", planning=tmp_path / "planning")
@@ -1050,7 +1170,6 @@ def test_current_find_plan_bridge_gate_blocks_stale_plan(tmp_path):
 
 
 def test_current_find_plan_bridge_gate_passes_current_ready_plan(tmp_path):
-    from types import SimpleNamespace
 
     full_cycle = importlib.import_module("run_full_research_cycle")
     paths = SimpleNamespace(state=tmp_path / "state", planning=tmp_path / "planning")
@@ -1085,7 +1204,6 @@ def test_current_find_plan_bridge_gate_passes_current_ready_plan(tmp_path):
 
 def test_ensure_claude_plan_state_respects_configured_idea_count(tmp_path, monkeypatch):
     import importlib.util
-    from types import SimpleNamespace
 
     module_path = Path(__file__).resolve().parents[1] / "modules" / "reading" / "scripts" / "ensure_current_find_research_plan.py"
     spec = importlib.util.spec_from_file_location("ensure_current_find_research_plan_test_state", module_path)
@@ -1156,7 +1274,6 @@ def test_current_find_payload_currentness_uses_file_mtime_when_generated_at_is_s
 
 def test_structured_artifacts_preserve_same_run_claude_ideas_when_refresh_is_empty(tmp_path, monkeypatch):
     import importlib.util
-    from types import SimpleNamespace
 
     module_path = Path(__file__).resolve().parents[1] / "modules" / "reading" / "scripts" / "ensure_current_find_research_plan.py"
     spec = importlib.util.spec_from_file_location("ensure_current_find_research_plan_test_preserve", module_path)
@@ -1212,7 +1329,6 @@ def test_structured_artifacts_preserve_same_run_claude_ideas_when_refresh_is_emp
 
 def test_repair_accepts_find_current_artifacts_even_when_before_repair_start(tmp_path, monkeypatch):
     import importlib.util
-    from types import SimpleNamespace
 
     module_path = Path(__file__).resolve().parents[1] / "modules" / "reading" / "scripts" / "ensure_current_find_research_plan.py"
     spec = importlib.util.spec_from_file_location("ensure_current_find_research_plan_test_repair_current", module_path)
@@ -1906,7 +2022,6 @@ def test_claude_latest_response_endpoint_returns_full_result(tmp_path, monkeypat
 
 def test_runtime_env_separates_management_and_experiment_python(tmp_path, monkeypatch):
     import stat
-    from types import SimpleNamespace
     import runtime_env
 
     def fake_python(path, version):
@@ -1970,7 +2085,6 @@ def test_runtime_env_separates_management_and_experiment_python(tmp_path, monkey
 def test_create_project_cli_preserves_prompt_and_conda_env(tmp_path, monkeypatch):
     import importlib.util
     import sys
-    from types import SimpleNamespace
 
     script_path = server.WORKSPACE_ROOT / "framework" / "scripts" / "create_project.py"
     spec = importlib.util.spec_from_file_location("create_project_script_test", script_path)
@@ -3639,6 +3753,98 @@ def test_generic_data_plan_without_project_adapter_marks_selected_repo_data_bloc
     assert plan["repo"]["name"] == "example/repo"
     assert plan["ready_datasets"] == []
     assert plan["blocked_datasets"]
+
+
+def test_trajectory_capability_source_path_supports_migrated_layout(monkeypatch, tmp_path):
+    ensure_script_paths()
+    audit = importlib.reload(importlib.import_module("audit_research_trajectory_capabilities"))
+    root = tmp_path / "repo"
+    web_file = root / "web" / "backend" / "auto_research" / "web" / "project_bridge.py"
+    module_script = root / "modules" / "planning" / "scripts" / "build_aris_review_board.py"
+    (root / "framework" / "scripts").mkdir(parents=True)
+    web_file.parent.mkdir(parents=True)
+    module_script.parent.mkdir(parents=True)
+    web_file.write_text("third_party_research_stack\nthird_party_stack_status\n", encoding="utf-8")
+    module_script.write_text("# planning helper\n", encoding="utf-8")
+
+    monkeypatch.setattr(audit, "ROOT", root)
+    monkeypatch.setattr(audit, "SCRIPTS", audit.script_resolver(root))
+
+    assert not (root / "scripts").exists()
+    assert audit.source_path("../web/backend/auto_research/web/project_bridge.py") == web_file
+    assert audit.source_contains("../web/backend/auto_research/web/project_bridge.py", ["third_party_research_stack", "third_party_stack_status"])
+    assert audit.source_path("build_aris_review_board.py") == module_script
+
+
+def test_candidate_scoped_generic_data_contract_preserves_active_route_probe(monkeypatch, tmp_path):
+    ensure_script_paths()
+    build_req = importlib.reload(importlib.import_module("build_repo_data_requirements"))
+    probe = importlib.reload(importlib.import_module("probe_repo_dataset"))
+    gate_script = importlib.reload(importlib.import_module("audit_deterministic_base_switch_gate"))
+    for module in [build_req, probe, probe.candidate_data]:
+        monkeypatch.setattr(module, "ROOT", tmp_path)
+
+    project = "demo_project"
+    root = tmp_path / "projects" / project
+    state = root / "state"
+    reports = root / "reports"
+    planning = root / "planning"
+    finding = planning / "finding"
+    current_repo = root / "repos" / "selected" / "current_repo"
+    candidate_repo = root / "repos" / "selected" / "candidate_repo"
+    data_dir = candidate_repo / "data" / "DemoData"
+    for path in [state, reports, finding, current_repo, data_dir]:
+        path.mkdir(parents=True, exist_ok=True)
+    (data_dir / "train.jsonl").write_text(
+        '{"user_id":"u1","item_id":"i1","prompt":"This user prefers thoughtful long-form examples with detailed natural language evidence.","label":1}\n',
+        encoding="utf-8",
+    )
+
+    write_json(state / "repo_data_requirements.json", {"repo_path": str(current_repo), "ready_datasets": ["active-data"], "blocked_datasets": []})
+    write_json(state / "real_dataset_probe.json", {"repo_path": str(current_repo), "status": "passed", "decision": "loader_probe_complete", "ready_datasets": ["active-data"], "probes": [{"dataset": "active-data", "claim_ready": True, "loader_probe_success": True}]})
+
+    assert build_req.write_candidate_requirement(project, str(candidate_repo), "owner/candidate", "Candidate Paper") == 0
+    assert probe.write_candidate_probe(project, str(candidate_repo), "demo_env", "owner/candidate", "Candidate Paper") == 2
+
+    assert read_json(state / "repo_data_requirements.json")["repo_path"] == str(current_repo)
+    assert read_json(state / "real_dataset_probe.json")["repo_path"] == str(current_repo)
+    data_contract = read_json(state / "candidate_data_contract_owner_candidate.json")
+    loader_probe = read_json(state / "candidate_loader_probe_owner_candidate.json")
+    assert data_contract["status"] == "ready"
+    assert data_contract["decision"] == "ready_for_loader_probe"
+    assert data_contract["ready_datasets"] == ["DemoData"]
+    assert loader_probe["status"] == "blocked_candidate_repo_loader_import_probe_required"
+    assert loader_probe["loader_probe_success"] is False
+    assert loader_probe["generic_data_parse_probe_success"] is True
+
+    run_id = "find_current"
+    write_json(finding / "find_progress.json", {"run_id": run_id})
+    write_json(finding / "find_results.json", {"run_id": run_id, "strong_recommendations": [{"title": "Candidate Paper", "repo": "owner/candidate"}]})
+    write_json(finding / "read_results.json", {"run_id": run_id, "readings": [{"title": "Candidate Paper"}]})
+    write_json(state / "reference_reproduction_gate.json", {"status": "pass", "decision": "continue_base"})
+    write_json(state / "selected_base_viability_gate.json", {"status": "blocked", "decision": "base_switch_gate_required"})
+    write_json(state / "active_repo.json", {"name": "owner/current", "repo_path": str(current_repo), "selected_base_title": "Current Base"})
+    write_json(
+        state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": run_id,
+            "selection_gate": "blocked_pending_data_loader_for_claude_best_candidate",
+            "selected": {},
+            "pending_environment_candidate": {"name": "owner/candidate", "repo_path": str(candidate_repo), "fresh_find_run_id": run_id},
+        },
+    )
+    paths = type("Paths", (), {"root": root, "state": state, "reports": reports, "planning": planning})()
+    monkeypatch.setattr(gate_script, "build_paths", lambda _project: paths)
+
+    payload = gate_script.build_gate(project, "ICLR")
+
+    checks = {row["id"]: row for row in payload["checks"]}
+    assert checks["candidate_data_contract_passed"]["status"] == "pass"
+    assert checks["candidate_loader_import_probe_passed"]["status"] == "blocked"
+    assert any("candidate_data_contract_owner_candidate.json" in item for item in checks["candidate_data_contract_passed"]["evidence"])
+    assert any("candidate_loader_probe_owner_candidate.json" in item for item in checks["candidate_loader_import_probe_passed"]["evidence"])
+    assert payload["status"] == "blocked"
+    assert payload["decision"] == "base_switch_not_authorized"
 
 
 def test_selected_pending_environment_repo_summary_is_data_blocked(tmp_path, monkeypatch):
@@ -6949,7 +7155,6 @@ def test_find_adoption_copies_find_level_full_text_packet_for_new_find(tmp_path,
 
 def test_full_text_unavailable_repair_does_not_rewrite_find_topn(tmp_path):
     import sys
-    from types import SimpleNamespace
 
     ensure_script_paths()
     repair = importlib.import_module("repair_current_find_full_text_evidence")
@@ -7026,7 +7231,6 @@ def test_full_text_unavailable_repair_does_not_rewrite_find_topn(tmp_path):
 
 def test_full_text_repair_uses_same_run_replacement_without_rewriting_find(tmp_path, monkeypatch):
     import sys
-    from types import SimpleNamespace
 
     ensure_script_paths()
     repair = importlib.import_module("repair_current_find_full_text_evidence")
@@ -7617,7 +7821,6 @@ def test_claude_experiment_latest_response_keeps_main_as_fallback_only(tmp_path)
 
 def test_project_search_queries_ignore_project_id_and_use_find_context(tmp_path, monkeypatch):
     import importlib.util
-    from types import SimpleNamespace
 
     module_path = Path(__file__).resolve().parents[1] / 'modules' / 'environment' / 'scripts' / 'run_environment_stage.py'
     spec = importlib.util.spec_from_file_location('run_environment_stage_test', module_path)
@@ -7657,7 +7860,6 @@ def test_project_search_queries_ignore_project_id_and_use_find_context(tmp_path,
 
 def test_project_search_queries_use_current_find_artifact_shape(tmp_path, monkeypatch):
     import importlib.util
-    from types import SimpleNamespace
 
     module_path = Path(__file__).resolve().parents[1] / 'modules' / 'environment' / 'scripts' / 'run_environment_stage.py'
     spec = importlib.util.spec_from_file_location('run_environment_stage_test_current_shape', module_path)
@@ -7777,7 +7979,6 @@ def test_running_stage_job_hides_synthetic_project_worker(monkeypatch, tmp_path)
 
 def test_project_search_queries_extract_unquoted_stewardship_phrases(tmp_path, monkeypatch):
     import importlib.util
-    from types import SimpleNamespace
 
     module_path = Path(__file__).resolve().parents[1] / 'modules' / 'environment' / 'scripts' / 'run_environment_stage.py'
     spec = importlib.util.spec_from_file_location('run_environment_stage_test_unquoted', module_path)
@@ -7894,7 +8095,6 @@ def test_bootstrap_repo_env_verify_only_never_auto_installs_missing_import(tmp_p
     import importlib.util
     import json
     import sys
-    from types import SimpleNamespace
 
     script_path = Path(__file__).resolve().parents[1] / "modules" / "environment" / "scripts" / "bootstrap_repo_env.py"
     spec = importlib.util.spec_from_file_location("bootstrap_repo_env_verify_only_under_test", script_path)
@@ -8367,7 +8567,6 @@ def test_ensure_current_find_loads_web_generated_idea_plan_sources(tmp_path):
 
 def test_ensure_claude_plan_state_accepts_selected_web_generated_plan(tmp_path, monkeypatch):
     import importlib.util
-    from types import SimpleNamespace
 
     module_path = Path(__file__).resolve().parents[1] / "modules" / "reading" / "scripts" / "ensure_current_find_research_plan.py"
     spec = importlib.util.spec_from_file_location("ensure_current_find_research_plan_test_web_selected", module_path)

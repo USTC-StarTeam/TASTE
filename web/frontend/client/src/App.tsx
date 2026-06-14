@@ -6013,6 +6013,7 @@ function App() {
   const pendingDatasetDetails = useMemo(() => asArray(envStage?.pending_dataset_details), [envStage]);
   const blockedDatasetDetails = useMemo(() => asArray(envStage?.blocked_dataset_details), [envStage]);
   const activeRepo = useMemo(() => envStage?.active_repo || repoDetails.find((row: any) => row.active) || {}, [envStage, repoDetails]);
+  const pendingEnvironmentCandidate = useMemo(() => envStage?.pending_candidate || envStage?.selection?.pending_candidate || {}, [envStage]);
   const claudeTopicDecision = useMemo(() => envStage?.claude_topic_decision || {}, [envStage]);
   const selectedProject = useMemo(() => researchProjects.find((project) => project.id === researchProject), [researchProjects, researchProject]);
   const environmentLocked = useMemo(() => Boolean(envStage?.locked || envStage?.status === "ready"), [envStage]);
@@ -8298,6 +8299,13 @@ function App() {
                         <span>{lang === "zh" ? "仓库" : "Repository"}</span>
                         <strong>{displayMaybe(envStage?.active_repo?.name || activeRepo?.name, t.notSelected)}</strong>
                       </div>
+                      {(pendingEnvironmentCandidate?.name || pendingEnvironmentCandidate?.title || pendingEnvironmentCandidate?.repo_path) && (
+                        <div className="envSummaryItem">
+                          <span>{lang === "zh" ? "候选路线（未授权）" : "Candidate route (not authorized)"}</span>
+                          <strong>{displayMaybe(pendingEnvironmentCandidate?.name || pendingEnvironmentCandidate?.title || pendingEnvironmentCandidate?.repo_path, t.notSelected)}</strong>
+                          {pendingEnvironmentCandidate?.title && pendingEnvironmentCandidate.title !== pendingEnvironmentCandidate?.name && <small>{pendingEnvironmentCandidate.title}</small>}
+                        </div>
+                      )}
                       <div className="envSummaryItem">
                         <span>{lang === "zh" ? "真实数据/loader" : "Real data / loader"}</span>
                         <strong>{displayValue(envStage?.data_status || "not_started")}{envStage?.dataset ? ` / ${envStage.dataset}` : ""}</strong>

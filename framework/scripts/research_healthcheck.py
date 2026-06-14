@@ -179,7 +179,7 @@ def _selected_base_viability_public_status(gate: dict, base_switch_gate: dict | 
                     f"候选路线仍有未通过检查：{failed_text}。"
                 )
                 next_action = (
-                    "补齐候选路线未通过的 loader/data/protocol/smoke/full-reference/artifact-local audit 检查。"
+                    "补齐上列候选路线未通过检查。"
                     "gate 通过前不切换基底、不写论文、不提升结论。"
                 )
         return {

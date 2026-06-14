@@ -15,8 +15,14 @@ from project_paths import ROOT, build_paths
 
 
 THIRD_PARTY = ROOT / "third_party"
+VENDOR_ROOT = ROOT / "modules" / "writing" / "vendor"
 SKILL_ROOT = ROOT / ".claude" / "skills"
 PROVENANCE_ROOT = ROOT / "runtime" / "method_references"
+
+# These source repositories are method references, not runtime dependencies.
+# Missing optional snapshots should leave an auditable warning, not disable TASTE
+# native trajectory capabilities when local native contracts are present.
+OPTIONAL_SOURCE_NAMES = {"ARIS", "EvoScientist", "academic-research-skills", "PaperOrchestra"}
 
 ARIS_SKILLS = [
     "research-pipeline",
@@ -148,6 +154,49 @@ def relative(path: Path) -> str:
         return str(path)
 
 
+def as_path(value: Any) -> Path | None:
+    if not value:
+        return None
+    raw = Path(str(value))
+    return raw if raw.is_absolute() else ROOT / raw
+
+
+def first_existing_path(candidates: list[Path]) -> Path:
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+def source_root(source: dict[str, Any], *fallbacks: Path) -> Path:
+    candidates: list[Path] = []
+    for key in ("resolved_path", "local_path"):
+        candidate = as_path(source.get(key))
+        if candidate is not None and candidate not in candidates:
+            candidates.append(candidate)
+    for fallback in fallbacks:
+        if fallback not in candidates:
+            candidates.append(fallback)
+    if not candidates:
+        return ROOT / "missing-source"
+    return first_existing_path(candidates)
+
+
+def module_record(source: dict[str, Any], *, name: str, kind: str, path: Path) -> dict[str, Any]:
+    source_available = bool(source.get("available"))
+    available = source_available and path.exists()
+    return {
+        "name": name,
+        "kind": kind,
+        "path": relative(path),
+        "available": available,
+        "source_available": source_available,
+        "source_family": source.get("name", ""),
+        "optional_source_missing": not source_available and bool(source.get("optional", True)),
+        "sha256": sha256(path),
+    }
+
+
 def write_skill_adapter(
     *,
     slug_name: str,
@@ -224,16 +273,21 @@ def cleanup_legacy_external_skill_dirs() -> list[str]:
     return removed
 
 
-def source_record(name: str, path: Path, repository: str, license_name: str) -> dict[str, Any]:
+def source_record(name: str, paths: Path | list[Path], repository: str, license_name: str, *, optional: bool = True) -> dict[str, Any]:
+    candidates = paths if isinstance(paths, list) else [paths]
+    path = first_existing_path(candidates)
     license_path = path / "LICENSE"
     return {
         "name": name,
         "repository": git_remote(path) or repository,
         "local_path": relative(path),
+        "resolved_path": relative(path),
+        "candidate_paths": [relative(candidate) for candidate in candidates],
         "commit": git_commit(path),
         "license": license_name,
         "license_path": relative(license_path),
         "available": path.exists(),
+        "optional": optional,
         "license_available": license_path.exists(),
     }
 
@@ -247,14 +301,14 @@ def aris_contract(skill_name: str) -> list[str]:
 
 
 def sync_aris(source: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    root = THIRD_PARTY / "ARIS" / "skills"
+    root = source_root(source, THIRD_PARTY / "ARIS") / "skills"
     modules: list[dict[str, Any]] = []
     skills: list[dict[str, Any]] = []
     for name in ARIS_SKILLS:
         path = root / name / "SKILL.md"
         text = read_text(path)
         desc = first_frontmatter_value(text, "description") or f"Source {name} research workflow contract."
-        modules.append({"name": name, "kind": "skill", "path": relative(path), "available": path.exists(), "sha256": sha256(path)})
+        modules.append(module_record(source, name=name, kind="skill", path=path))
         if path.exists():
             skills.append(write_skill_adapter(
                 slug_name=f"method-source-{slug(name)}",
@@ -269,16 +323,10 @@ def sync_aris(source: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[s
 
 
 def sync_evoscientist(source: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    root = THIRD_PARTY / "EvoScientist" / "EvoScientist"
+    root = source_root(source, THIRD_PARTY / "EvoScientist") / "EvoScientist"
     files = [root / "subagents" / item for item in EVO_SUBAGENTS] + [root / "middleware" / item for item in EVO_MIDDLEWARE]
     modules = [
-        {
-            "name": path.name,
-            "kind": "subagent" if "subagents" in path.parts else "middleware",
-            "path": relative(path),
-            "available": path.exists(),
-            "sha256": sha256(path),
-        }
+        module_record(source, name=path.name, kind="subagent" if "subagents" in path.parts else "middleware", path=path)
         for path in files
     ]
     existing_files = [path for path in files if path.exists()]
@@ -302,17 +350,17 @@ def sync_evoscientist(source: dict[str, Any]) -> tuple[list[dict[str, Any]], lis
 
 
 def sync_ars(source: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    repo = THIRD_PARTY / "academic-research-skills"
+    repo = source_root(source, VENDOR_ROOT / "academic-research-skills", THIRD_PARTY / "academic-research-skills")
     skill_files = [repo / name / "SKILL.md" for name in ARS_SKILLS]
     shared_files = [repo / "shared" / name for name in ARS_SHARED]
     script_files = [repo / "scripts" / name for name in ARS_SCRIPTS]
     modules = []
     for path in skill_files:
-        modules.append({"name": path.parent.name, "kind": "skill", "path": relative(path), "available": path.exists(), "sha256": sha256(path)})
+        modules.append(module_record(source, name=path.parent.name, kind="skill", path=path))
     for path in shared_files:
-        modules.append({"name": path.name, "kind": "shared_protocol", "path": relative(path), "available": path.exists(), "sha256": sha256(path)})
+        modules.append(module_record(source, name=path.name, kind="shared_protocol", path=path))
     for path in script_files:
-        modules.append({"name": path.name, "kind": "audit_script", "path": relative(path), "available": path.exists(), "sha256": sha256(path)})
+        modules.append(module_record(source, name=path.name, kind="audit_script", path=path))
     skills: list[dict[str, Any]] = []
     for path in skill_files:
         if not path.exists():
@@ -336,10 +384,10 @@ def sync_ars(source: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[st
 
 
 def sync_paper_orchestra(source: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    repo = THIRD_PARTY / "PaperOrchestra"
+    repo = source_root(source, VENDOR_ROOT / "PaperOrchestra", THIRD_PARTY / "PaperOrchestra")
     source_files = [repo / "skills" / name / "SKILL.md" for name in PAPER_ORCHESTRA_SKILLS]
     modules = [
-        {"name": path.parent.name, "kind": "skill", "path": relative(path), "available": path.exists(), "sha256": sha256(path)}
+        module_record(source, name=path.parent.name, kind="skill", path=path)
         for path in source_files
     ]
     existing_files = [path for path in source_files if path.exists()]
@@ -368,9 +416,17 @@ def write_report(paths, payload: dict[str, Any]) -> Path:
     lines.append(f"- updated_at: {payload.get('updated_at', '')}\n")
     lines.append(f"- status: {payload.get('status', '')}\n")
     lines.append(f"- source_count: {payload.get('summary', {}).get('source_count', 0)}\n")
+    lines.append(f"- available_source_count: {payload.get('summary', {}).get('available_source_count', 0)}\n")
+    lines.append(f"- optional_missing_source_count: {payload.get('summary', {}).get('optional_missing_source_count', 0)}\n")
     lines.append(f"- selected_module_count: {payload.get('summary', {}).get('selected_module_count', 0)}\n")
+    lines.append(f"- available_module_count: {payload.get('summary', {}).get('available_module_count', 0)}\n")
     lines.append(f"- synced_skill_count: {payload.get('summary', {}).get('synced_skill_count', 0)}\n")
-    lines.append(f"- missing_module_count: {payload.get('summary', {}).get('missing_module_count', 0)}\n\n")
+    lines.append(f"- missing_module_count: {payload.get('summary', {}).get('missing_module_count', 0)}\n")
+    lines.append(f"- optional_missing_module_count: {payload.get('summary', {}).get('optional_missing_module_count', 0)}\n\n")
+    for warning in payload.get("warnings", []):
+        lines.append(f"- warning: {warning}\n")
+    if payload.get("warnings"):
+        lines.append("\n")
     lines.append("## Sources\n")
     for source in payload.get("sources", []):
         lines.append(f"- {source.get('name')}: {source.get('repository')} @ `{source.get('commit')}` | license={source.get('license')} | path=`{source.get('local_path')}`\n")
@@ -397,8 +453,8 @@ def build_stack(project: str) -> dict[str, Any]:
     sources = [
         source_record("ARIS", THIRD_PARTY / "ARIS", "https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep.git", "MIT"),
         source_record("EvoScientist", THIRD_PARTY / "EvoScientist", "https://github.com/EvoScientist/EvoScientist.git", "Apache-2.0"),
-        source_record("academic-research-skills", THIRD_PARTY / "academic-research-skills", "https://github.com/Imbad0202/academic-research-skills.git", "CC BY-NC 4.0"),
-        source_record("PaperOrchestra", THIRD_PARTY / "PaperOrchestra", "https://github.com/Ar9av/PaperOrchestra.git", "third-party repository license; see source tree"),
+        source_record("academic-research-skills", [VENDOR_ROOT / "academic-research-skills", THIRD_PARTY / "academic-research-skills"], "https://github.com/Imbad0202/academic-research-skills.git", "CC BY-NC 4.0"),
+        source_record("PaperOrchestra", [VENDOR_ROOT / "PaperOrchestra", THIRD_PARTY / "PaperOrchestra"], "https://github.com/Ar9av/PaperOrchestra.git", "third-party repository license; see source tree"),
     ]
     source_by_name = {source["name"]: source for source in sources}
     families = []
@@ -413,9 +469,17 @@ def build_stack(project: str) -> dict[str, Any]:
         families.append({"name": name, "modules": modules})
         synced_skills.extend(skills)
     modules = [module for family in families for module in family.get("modules", [])]
-    missing = [module for module in modules if not module.get("available")]
+    available_modules = [module for module in modules if module.get("available")]
+    missing_available_modules = [module for module in modules if module.get("source_available") and not module.get("available")]
+    optional_missing_modules = [module for module in modules if not module.get("source_available")]
     missing_sources = [source for source in sources if not source.get("available")]
-    status = "blocked" if missing_sources else "warn" if missing else "ready"
+    available_sources = [source for source in sources if source.get("available")]
+    warnings: list[str] = []
+    if missing_sources:
+        warnings.append("optional method reference sources missing: " + ", ".join(source.get("name", "") for source in missing_sources))
+    if missing_available_modules:
+        warnings.append("available method reference snapshots are incomplete: " + ", ".join(module.get("path", "") for module in missing_available_modules[:10]))
+    status = "ready" if synced_skills and not missing_available_modules else "blocked"
     payload = {
         "project": project,
         "updated_at": now_iso(),
@@ -424,6 +488,7 @@ def build_stack(project: str) -> dict[str, Any]:
         "families": families,
         "synced_skill_adapters": synced_skills,
         "removed_legacy_skill_dirs": removed_legacy_skill_dirs,
+        "warnings": warnings,
         "capability_bindings": [
             {"capability": "research_direction_management", "native_contract": "Maintain landscape, novelty map, failed-hypothesis graph, and unexplored-niche graph with evidence-backed search pressure.", "source_method_refs": ["source:research-pipeline", "source:novelty-check", "source:deep-research"]},
             {"capability": "evolutionary_memory", "native_contract": "Persist ideation, experimentation, retry, prune, repair, and recoverable-exception memory to disk across trajectory turns.", "source_method_refs": ["source:memory", "source:staged-research-roles"]},
@@ -439,11 +504,16 @@ def build_stack(project: str) -> dict[str, Any]:
         ],
         "summary": {
             "source_count": len(sources),
-            "available_source_count": len([source for source in sources if source.get("available")]),
+            "available_source_count": len(available_sources),
+            "optional_missing_source_count": len(missing_sources),
+            "available_source_names": [source.get("name", "") for source in available_sources],
+            "optional_missing_source_names": [source.get("name", "") for source in missing_sources],
             "selected_module_count": len(modules),
-            "missing_module_count": len(missing),
+            "available_module_count": len(available_modules),
+            "missing_module_count": len(missing_available_modules),
+            "optional_missing_module_count": len(optional_missing_modules),
             "synced_skill_count": len(synced_skills),
-            "license_count": len([source for source in sources if source.get("license_available")]),
+            "license_count": len([source for source in available_sources if source.get("license_available")]),
             "removed_legacy_skill_dir_count": len(removed_legacy_skill_dirs),
         },
     }

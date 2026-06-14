@@ -68,6 +68,21 @@ def failed_check_ids(gate: dict) -> list[str]:
     return [str(row.get('id') or '').strip() for row in failed if isinstance(row, dict) and str(row.get('id') or '').strip()]
 
 
+def failed_check_summary(ids: list[str]) -> str:
+    labels = {
+        'candidate_loader_import_probe_passed': 'loader/import',
+        'candidate_data_contract_passed': 'data contract',
+        'candidate_reference_protocol_passed': 'reference protocol/env manifest',
+        'candidate_reference_smoke_passed': 'bounded reference smoke',
+        'candidate_full_reference_reproduction_passed': 'full reference reproduction',
+        'candidate_artifact_local_audit_ready': 'artifact-local audit',
+        'candidate_route_proposal_exists': 'candidate proposal',
+        'candidate_find_run_provenance_clear': 'Find/read provenance',
+    }
+    out = [labels.get(item, item) for item in ids if item]
+    return ', '.join(out) or 'candidate gate evidence'
+
+
 def route_has_identity(route: dict) -> bool:
     row = as_dict(route)
     return any(str(row.get(key) or '').strip() for key in ['repo', 'title', 'repo_path', 'proposed_path_hint'])
@@ -118,6 +133,7 @@ def selected_base_viability_action(gate: dict, base_switch_gate: dict | None = N
                 f'base_switch_gate={base_status}/{base_decision}',
                 f'failed_checks={failed_text}',
             ])
+            missing_summary = failed_check_summary(failed_ids)
             missing_candidate = 'candidate_route_proposal_exists' in failed_ids or not route_has_identity(candidate_route)
             if missing_candidate:
                 return {
@@ -137,8 +153,7 @@ def selected_base_viability_action(gate: dict, base_switch_gate: dict | None = N
                 'priority': 'P0',
                 'title': 'Complete deterministic base-switch gate evidence',
                 'reason': (
-                    'The deterministic base-switch gate has already run but did not authorize the candidate route. Complete the failed loader/data, '
-                    'protocol, smoke, full-reference reproduction, provenance, and artifact-local audit checks before any route switch or paper claim promotion.'
+                    f'The deterministic base-switch gate has already run but did not authorize the candidate route. Complete the failed {missing_summary} checks before any route switch or paper claim promotion.'
                 ),
                 'evidence': '; '.join(bit for bit in evidence_bits if bit),
                 'gate_category': 'semantic_data_provenance_required',

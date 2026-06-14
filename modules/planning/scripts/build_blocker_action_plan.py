@@ -1443,6 +1443,21 @@ def failed_check_ids(gate: dict[str, Any]) -> list[str]:
     return [str(row.get("id") or "").strip() for row in failed if isinstance(row, dict) and str(row.get("id") or "").strip()]
 
 
+def failed_check_summary(ids: list[str]) -> str:
+    labels = {
+        "candidate_loader_import_probe_passed": "loader/import",
+        "candidate_data_contract_passed": "data contract",
+        "candidate_reference_protocol_passed": "reference protocol/env manifest",
+        "candidate_reference_smoke_passed": "bounded reference smoke",
+        "candidate_full_reference_reproduction_passed": "full reference reproduction",
+        "candidate_artifact_local_audit_ready": "artifact-local audit",
+        "candidate_route_proposal_exists": "candidate proposal",
+        "candidate_find_run_provenance_clear": "Find/read provenance",
+    }
+    out = [labels.get(item, item) for item in ids if item]
+    return ", ".join(out) or "candidate gate evidence"
+
+
 def route_has_identity(route: dict[str, Any]) -> bool:
     route = route if isinstance(route, dict) else {}
     return any(str(route.get(key) or "").strip() for key in ["repo", "title", "repo_path", "proposed_path_hint"])
@@ -1458,6 +1473,7 @@ def failed_base_switch_gate_guidance(paths) -> dict[str, Any]:
     ):
         return {}
     failed_ids = failed_check_ids(gate)
+    missing_summary = failed_check_summary(failed_ids)
     candidate = gate.get("candidate_route") if isinstance(gate.get("candidate_route"), dict) else {}
     candidate_present = route_has_identity(candidate)
     missing_candidate = "candidate_route_proposal_exists" in failed_ids or not candidate_present
@@ -1467,13 +1483,13 @@ def failed_base_switch_gate_guidance(paths) -> dict[str, Any]:
         "provenance plus a real LLM/text embedding probe, or generate a proposal-only candidate base-switch route and collect "
         "loader/data/protocol/smoke/full-reference/artifact-local audit evidence before rerunning the gate."
         if missing_candidate else
-        "base_switch_gate: deterministic base-switch gate already ran and did not authorize the candidate route because required "
-        "provenance, loader/data, protocol, smoke, full-reference, or artifact-local audit checks are still blocked."
+        f"base_switch_gate: deterministic base-switch gate already ran and did not authorize the candidate route because required {missing_summary} checks are still blocked."
     )
     return {
         "missing_candidate": missing_candidate,
         "candidate_present": candidate_present,
         "failed_check_ids": failed_ids,
+        "failed_check_summary": missing_summary,
         "issue": issue,
     }
 
@@ -1483,10 +1499,11 @@ def apply_failed_base_switch_gate_guidance(actions: list[dict[str, Any]], paths,
     if not guidance:
         return
     failed_text = ",".join(guidance.get("failed_check_ids", [])[:8]) or "unknown"
+    missing_summary = str(guidance.get("failed_check_summary") or "candidate gate evidence")
     proposal_or_provenance = (
         "The deterministic base-switch gate has already run and is blocked/not_authorized. Re-running it unchanged will not clear the blocker. "
         "First either provide artifact-local current-route raw text/metadata provenance with preserved ID mapping plus a real LLM/text embedding probe, "
-        "or create a non-authoritative candidate base-switch proposal traceable to the current Find/read packet and collect the missing loader/data/protocol/smoke/full-reference/artifact-local evidence. "
+        f"or create a non-authoritative candidate base-switch proposal traceable to the current Find/read packet and collect the missing {missing_summary} evidence. "
         f"Current failed checks: {failed_text}."
     )
     commands = [
@@ -1499,7 +1516,7 @@ def apply_failed_base_switch_gate_guidance(actions: list[dict[str, Any]], paths,
     success_checks = [
         "state/base_switch_gate.json is not rerun to the same failed candidate_route={} state without new provenance or proposal evidence.",
         "Current-route repair evidence includes artifact-local raw text/metadata provenance with preserved ID mapping and a real LLM/text embedding probe, or state/selected_route_switch_proposal.json names a proposal-only candidate traceable to current Find/read.",
-        "Candidate routes remain non-authoritative until loader/data/protocol/smoke/full-reference/artifact-local audits pass and execute_authorized_base_switch.py runs after a passed gate.",
+        f"Candidate routes remain non-authoritative until the failed {missing_summary} checks pass and execute_authorized_base_switch.py runs after a passed gate.",
         "active_repo.json and evidence_ready_repo_selection.json remain unchanged while the gate is blocked/not_authorized.",
     ]
     for row in actions:

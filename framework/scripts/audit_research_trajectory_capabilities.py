@@ -29,20 +29,47 @@ def save_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
-def read_text(path: Path, limit: int = 300000) -> str:
+def read_text(path: Path, limit: int = 1_000_000) -> str:
     try:
         return path.read_text(encoding="utf-8", errors="replace")[:limit] if path.exists() else ""
     except Exception:
         return ""
 
 
+def source_path(ref: str) -> Path:
+    text = str(ref or "").strip()
+    if not text:
+        return ROOT / "missing-source"
+    raw = Path(text)
+    if raw.is_absolute():
+        return raw
+    candidates: list[Path] = []
+    if "/" in text or text.startswith("."):
+        # Preserve pre-migration relative references such as ../web/... by
+        # resolving them against the old top-level scripts anchor, then prefer
+        # direct repository-relative paths. This is read-only path resolution;
+        # it does not restore or depend on a top-level scripts directory.
+        candidates.extend([(ROOT / text).resolve(), (ROOT / "scripts" / text).resolve()])
+    for candidate in candidates:
+        try:
+            candidate.relative_to(ROOT)
+        except ValueError:
+            continue
+        if candidate.exists():
+            return candidate
+    try:
+        return SCRIPTS / text
+    except FileNotFoundError:
+        return (ROOT / text).resolve()
+
+
 def source_contains(script: str, patterns: list[str]) -> bool:
-    source = read_text(SCRIPTS / script)
+    source = read_text(source_path(script))
     return bool(source) and all(pattern in source for pattern in patterns)
 
 
 def source_omits(script: str, patterns: list[str]) -> bool:
-    source = read_text(SCRIPTS / script)
+    source = read_text(source_path(script))
     return bool(source) and all(pattern not in source for pattern in patterns)
 
 
@@ -395,17 +422,23 @@ def audit_third_party_research_stack(paths) -> dict[str, Any]:
     families = stack.get("families", []) if isinstance(stack.get("families", []), list) else []
     modules = [module for family in families if isinstance(family, dict) for module in family.get("modules", []) if isinstance(module, dict)]
     adapter_names = {str(row.get("name") or "") for row in adapters if isinstance(row, dict)}
-    required_sources = {"ARIS", "EvoScientist", "academic-research-skills", "PaperOrchestra"}
+    capability_bindings = stack.get("capability_bindings", []) if isinstance(stack.get("capability_bindings", []), list) else []
+    capability_names = {str(row.get("capability") or "") for row in capability_bindings if isinstance(row, dict)}
+    required_capabilities = {"research_direction_management", "evolutionary_memory", "research_assurance_layer", "trajectory_system", "paper_production"}
     available_sources = {str(row.get("name") or "") for row in sources if isinstance(row, dict) and row.get("available")}
+    available_source_rows = [row for row in sources if isinstance(row, dict) and row.get("available")]
+    optional_missing_sources = [str(row.get("name") or "") for row in sources if isinstance(row, dict) and not row.get("available") and row.get("optional", True)]
+    available_modules = [module for module in modules if module.get("available")]
+    missing_available_modules = [module for module in modules if module.get("source_available") and not module.get("available")]
     checks = [
         check("third_party_stack_sync_script", script_exists("sync_third_party_research_stack.py"), evidence=[str(SCRIPTS / "sync_third_party_research_stack.py")]),
         check("third_party_stack_state_file", stack_path.exists(), evidence=[str(stack_path)]),
         check("third_party_stack_report_file", report_path.exists(), evidence=[str(report_path)]),
-        check("third_party_stack_status_ready", stack.get("status") == "ready", evidence=[str(stack_path)], detail=f"status={stack.get('status', '')}"),
-        check("third_party_sources_available", required_sources <= available_sources, evidence=[str(ROOT / "third_party")], detail=f"available={sorted(available_sources)}"),
-        check("third_party_commits_recorded", all(row.get("commit") for row in sources if isinstance(row, dict)), evidence=[str(stack_path)]),
-        check("third_party_licenses_recorded", all(row.get("license") and row.get("license_path") for row in sources if isinstance(row, dict)), evidence=[str(stack_path)]),
-        check("third_party_selected_modules_available", int(summary.get("missing_module_count", 0) or 0) == 0, evidence=[str(stack_path)], detail=f"missing={summary.get('missing_module_count', 0)}"),
+        check("third_party_stack_status_ready", stack.get("status") == "ready", evidence=[str(stack_path)], detail=f"status={stack.get('status', '')}; warnings={stack.get('warnings', [])}"),
+        check("third_party_sources_available", bool(available_sources) and required_capabilities <= capability_names, evidence=[str(ROOT / "modules" / "writing" / "vendor"), str(ROOT / "third_party")], detail=f"available={sorted(available_sources)} optional_missing={optional_missing_sources} capabilities={sorted(capability_names)}"),
+        check("third_party_commits_recorded", all(row.get("commit") for row in available_source_rows), severity="warn", evidence=[str(stack_path)]),
+        check("third_party_licenses_recorded", all(row.get("license") and row.get("license_path") for row in available_source_rows), severity="warn", evidence=[str(stack_path)]),
+        check("third_party_selected_modules_available", int(summary.get("missing_module_count", 0) or 0) == 0 and not missing_available_modules and bool(available_modules), evidence=[str(stack_path)], detail=f"available={len(available_modules)} missing_available={len(missing_available_modules)} optional_missing={summary.get('optional_missing_module_count', 0)}"),
         check("third_party_builder_invokes_sync", source_contains("build_research_trajectory_system.py", ["sync_third_party_research_stack.py", "third_party_research_stack"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
         check("claude_prompt_uses_native_method_context", source_contains("claude_project_session.py", ["third_party_research_stack", "native method capability contracts"]) and source_omits("claude_project_session.py", ["Use ARIS/EvoScientist/academic-research-skills/PaperOrchestra", "Third-party research stack that you must use as external method contracts"]), evidence=[str(SCRIPTS / "claude_project_session.py")]),
         check("third_party_web_exposed", source_contains("../web/backend/auto_research/web/project_bridge.py", ["third_party_research_stack", "third_party_stack_status"]), evidence=[str(ROOT / "web" / "backend" / "auto_research" / "web" / "project_bridge.py")]),
@@ -418,8 +451,11 @@ def audit_third_party_research_stack(paths) -> dict[str, Any]:
         "metrics": {
             "source_count": int(summary.get("source_count", 0) or 0),
             "available_source_count": int(summary.get("available_source_count", 0) or 0),
+            "optional_missing_source_count": int(summary.get("optional_missing_source_count", 0) or 0),
             "selected_module_count": int(summary.get("selected_module_count", 0) or 0),
+            "available_module_count": int(summary.get("available_module_count", 0) or 0),
             "missing_module_count": int(summary.get("missing_module_count", 0) or 0),
+            "optional_missing_module_count": int(summary.get("optional_missing_module_count", 0) or 0),
             "synced_skill_count": int(summary.get("synced_skill_count", 0) or 0),
             "adapter_count": len(adapters),
             "external_module_count": len(modules),

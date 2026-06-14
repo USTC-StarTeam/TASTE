@@ -19,6 +19,8 @@ def _repo_root_from_script() -> Path:
 
 ROOT = _repo_root_from_script()
 
+import build_repo_data_requirements as candidate_data
+
 
 def _project_from_args(argv: list[str]) -> str:
     parser = argparse.ArgumentParser(add_help=False)
@@ -35,6 +37,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument('--repo-path', default='')
     parser.add_argument('--env-name', default='')
     parser.add_argument('--timeout-sec', default='')
+    parser.add_argument('--candidate-scope', action='store_true', help='Write candidate-scoped loader evidence without touching active-route real_dataset_probe.json.')
+    parser.add_argument('--candidate-name', default='')
+    parser.add_argument('--candidate-title', default='')
     return parser.parse_known_args(argv)[0]
 
 
@@ -67,6 +72,84 @@ def _repo_from_state(project: str, explicit: str = '') -> str:
                 if value:
                     return value
     return ''
+
+
+def write_candidate_probe(project: str, repo_path: str, env_name: str, candidate_name: str = '', candidate_title: str = '') -> int:
+    state = ROOT / 'projects' / project / 'state'
+    reports = ROOT / 'projects' / project / 'reports'
+    slug = candidate_data.candidate_slug(repo_path, candidate_name)
+    contract_path = state / f'candidate_data_contract_{slug}.json'
+    contract = load_json(contract_path, {})
+    if not isinstance(contract, dict) or str(contract.get('repo_path') or '') != str(Path(repo_path).expanduser().resolve() if repo_path and Path(repo_path).expanduser().exists() else repo_path):
+        contract = candidate_data.discover_generic_data_contract(project, repo_path, candidate_name, candidate_title)
+        save_json(contract_path, contract)
+    ready_datasets = [str(item) for item in contract.get('ready_datasets', [])] if isinstance(contract.get('ready_datasets'), list) else []
+    blocked_datasets = [str(item) for item in contract.get('blocked_datasets', [])] if isinstance(contract.get('blocked_datasets'), list) else []
+    generic_parse_ok = bool(contract.get('status') == 'ready' and ready_datasets)
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    reason = (
+        'Candidate structured data parses locally, but generic parsing is not a repo loader/import probe; implement or run a repo-specific candidate loader/import probe before authorizing a base switch.'
+        if generic_parse_ok else
+        'Candidate data contract is not ready; no repo loader/import probe can be credited yet.'
+    )
+    probes = [
+        {
+            'dataset': name,
+            'claim_ready': False,
+            'loader_probe_success': False,
+            'generic_data_parse_probe_success': generic_parse_ok,
+            'loader_probe': {'success': False, 'return_code': 2, 'reason': reason},
+            'required_files_ok': generic_parse_ok,
+            'missing_required_files': [],
+            'reason': reason,
+        }
+        for name in (ready_datasets or blocked_datasets or ['candidate_structured_data_contract'])
+    ]
+    payload = {
+        'generated_at': now,
+        'project': project,
+        'candidate_scope': True,
+        'candidate_repo': candidate_name,
+        'candidate_title': candidate_title,
+        'repo_path': contract.get('repo_path') or repo_path,
+        'env_name': env_name,
+        'status': 'blocked_candidate_repo_loader_import_probe_required' if generic_parse_ok else 'blocked_candidate_data_contract_required',
+        'decision': 'candidate_repo_loader_import_probe_required' if generic_parse_ok else 'candidate_data_contract_required',
+        'loader_probe_success': False,
+        'generic_data_parse_probe_success': generic_parse_ok,
+        'adapter_missing': False,
+        'adapter_path': '',
+        'data_contract_path': str(contract_path),
+        'probes': probes,
+        'ready_datasets': [],
+        'blocked_datasets': [row['dataset'] for row in probes],
+        'blocker_reasons': [reason],
+        'probe_return_code': 2,
+        'guardrails': [
+            'Candidate-scoped loader evidence must not overwrite active-route real_dataset_probe.json.',
+            'Generic structured-data parsing cannot be credited as repo loader/import compatibility.',
+            'Reference protocol, bounded smoke, full reference reproduction, and artifact-local audit gates remain mandatory.',
+        ],
+    }
+    state_path = state / f'candidate_loader_probe_{slug}.json'
+    save_json(state_path, payload)
+    reports.mkdir(parents=True, exist_ok=True)
+    report_path = reports / f'candidate_loader_probe_{slug}.md'
+    lines = ['# Candidate Loader Probe\n\n']
+    lines.append(f"- generated_at: {now}\n")
+    lines.append(f"- status: {payload['status']}\n")
+    lines.append(f"- decision: {payload['decision']}\n")
+    lines.append(f"- candidate_repo: {candidate_name}\n")
+    lines.append(f"- repo_path: {payload.get('repo_path') or 'not selected'}\n")
+    lines.append(f"- generic_data_parse_probe_success: {str(generic_parse_ok).lower()}\n")
+    lines.append(f"- loader_probe_success: false\n")
+    lines.append(f"- data_contract_path: {contract_path}\n")
+    lines.append('\n## Probe Rows\n')
+    for row in probes:
+        lines.append(f"- {row['dataset']}: loader_probe_success=false; generic_data_parse_probe_success={str(row.get('generic_data_parse_probe_success')).lower()}; {row.get('reason', '')}\n")
+    report_path.write_text(''.join(lines), encoding='utf-8')
+    print(json.dumps({'status': payload['status'], 'project': project, 'candidate_scope': True, 'repo_path': payload.get('repo_path') or repo_path, 'generic_data_parse_probe_success': generic_parse_ok, 'state_path': str(state_path)}, ensure_ascii=False))
+    return 2
 
 
 def write_generic_probe(project: str, repo_path: str, env_name: str, adapter: Path) -> int:
@@ -132,6 +215,10 @@ def main() -> int:
         }, ensure_ascii=False), file=sys.stderr)
         return 2
     adapter = ROOT / 'projects' / project / 'scripts' / 'adapters' / Path(__file__).name
+    if args.candidate_scope:
+        repo_path = candidate_data.candidate_repo_from_state(project, args.repo_path)
+        candidate_name, candidate_title = candidate_data.candidate_identity_from_state(project, args.candidate_name, args.candidate_title)
+        return write_candidate_probe(project, repo_path, args.env_name, candidate_name, candidate_title)
     if adapter.exists():
         proc = subprocess.run([sys.executable, str(adapter), *sys.argv[1:]], cwd=ROOT)
         return int(proc.returncode)

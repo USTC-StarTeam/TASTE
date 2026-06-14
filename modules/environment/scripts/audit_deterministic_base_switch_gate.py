@@ -385,6 +385,8 @@ def find_matching_payload(paths, patterns: list[str], repo_path: str, repo_name:
     for pattern in patterns:
         candidates.extend(sorted(paths.state.glob(pattern)))
     seen: set[Path] = set()
+    first_match_path = ''
+    first_match_payload: dict[str, Any] = {}
     for path in candidates:
         if path in seen:
             continue
@@ -394,13 +396,16 @@ def find_matching_payload(paths, patterns: list[str], repo_path: str, repo_name:
             continue
         if not matches_repo(payload, repo_path, repo_name):
             continue
+        if not first_match_path:
+            first_match_path = str(path)
+            first_match_payload = payload
         try:
             passed = bool(predicate(payload))
         except Exception:
             passed = False
         if passed:
             return True, str(path), payload
-    return False, '', {}
+    return False, first_match_path, first_match_payload
 
 
 def build_check(check_id: str, ok: bool, detail: str, evidence: list[str] | None = None, severity: str = 'block') -> dict[str, Any]:

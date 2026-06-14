@@ -2410,6 +2410,7 @@ def _current_environment_selection(root: Path) -> dict[str, Any]:
                 in_current_find = True
                 valid = True
     current_candidate = selection.get("current_candidate") if isinstance(selection.get("current_candidate"), dict) else {}
+    pending_candidate = selection.get("pending_environment_candidate") if isinstance(selection.get("pending_environment_candidate"), dict) else {}
     selection_status = str(selection.get("status") or "")
     if valid:
         reason = "current_active_route_pending_candidate_blocked" if pending_candidate_blocked else "current_environment_base_selected"
@@ -2440,6 +2441,7 @@ def _current_environment_selection(root: Path) -> dict[str, Any]:
         "current_candidate_total": selection.get("current_candidate_total", 0),
         "current_action": str(selection.get("current_action") or ""),
         "current_candidate": current_candidate,
+        "pending_candidate": pending_candidate,
         "progress_summary": str(selection.get("progress_summary") or ""),
         "elapsed_sec": selection.get("elapsed_sec", 0),
         "reason": reason,
@@ -3841,6 +3843,18 @@ def _public_environment_stage(
     else:
         module_summary = "环境配置等待基底选择和真实数据/loader 证据。"
 
+    pending_candidate = env.get("pending_candidate") if isinstance(env.get("pending_candidate"), dict) else {}
+    pending_candidate_public: dict[str, Any] = {}
+    if pending_candidate:
+        pending_candidate_public = {
+            "name": pending_candidate.get("name") or pending_candidate.get("repo") or "",
+            "title": pending_candidate.get("title") or pending_candidate.get("literature_base_title") or "",
+            "url": pending_candidate.get("url") or pending_candidate.get("repo_url") or "",
+            "repo_path": pending_candidate.get("repo_path") or pending_candidate.get("local_path") or "",
+            "status": "non_authoritative_pending_loader_proposal",
+            "selection_gate": env.get("selection_gate", ""),
+        }
+
     selection_public = {
         "valid": bool(env.get("valid")),
         "current_find_run_id": env.get("current_find_run_id", ""),
@@ -3852,6 +3866,7 @@ def _public_environment_stage(
         "evidence_ready_count": env.get("evidence_ready_count", 0),
         "candidate_count": env.get("candidate_count", 0),
         "current_candidate": env.get("current_candidate") if isinstance(env.get("current_candidate"), dict) else {},
+        "pending_candidate": pending_candidate_public,
         "current_action": str(env.get("current_action") or ""),
         "progress_summary": progress_summary,
         "accepted_by_claude": bool(env.get("accepted_by_claude")),
@@ -3887,6 +3902,7 @@ def _public_environment_stage(
         "ready_datasets": ready_datasets[:8],
         "repo_path": repo_path,
         "active_repo": {"name": repo_name, "repo": repo_url, "repo_path": repo_path, "local_path": repo_path},
+        "pending_candidate": pending_candidate_public,
         "selection": selection_public,
         "reference_reproduction_gate": ref_public,
         "reference_full_job": scalar(reference_full_job, ["status", "decision", "pid", "process_alive", "log_path"]),
@@ -4291,7 +4307,7 @@ def _selected_base_viability_public_blocker(gate: Any, base_display: str = "", b
                     f"候选路线仍有未通过检查：{failed_text}。"
                 )
                 next_action = (
-                    "补齐候选路线未通过的 loader/data/protocol/smoke/full-reference/artifact-local audit 检查；"
+                    "补齐上列候选路线未通过检查；"
                     "gate 通过前不切换基底、不写论文、不提升结论。"
                 )
                 project_summary = "完整科研自循环已停在 semantic-provenance/base-switch gate 证据审计；候选路线存在但尚未获得确定性授权。"
@@ -5333,6 +5349,7 @@ def _compact_project_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "environment": {
             **scalmap(env_raw, ["status", "summary", "summary_zh", "summary_en", "locked", "repo_path", "block_reason"]),
             "active_repo": scalmap(env_raw.get("active_repo") if isinstance(env_raw.get("active_repo"), dict) else {}, ["name", "repo", "repo_path", "local_path"]),
+            "pending_candidate": scalmap(env_raw.get("pending_candidate") if isinstance(env_raw.get("pending_candidate"), dict) else {}, ["name", "title", "url", "repo_path", "status", "selection_gate"]),
         },
         "experiment": {
             **scalmap(exp_raw, ["status", "summary", "summary_zh", "summary_en", "last_backend"]),
