@@ -237,6 +237,72 @@ def test_research_healthcheck_surfaces_selected_base_semantic_provenance_gate(tm
 
 
 
+def _seed_failed_base_switch_gate(paths: SimpleNamespace) -> None:
+    _write_json(
+        paths.state / "base_switch_gate.json",
+        {
+            "status": "blocked",
+            "decision": "base_switch_not_authorized",
+            "switch_authorized": False,
+            "candidate_route": {},
+            "failed_checks": [
+                {"id": "candidate_route_proposal_exists", "status": "blocked"},
+                {"id": "candidate_find_run_provenance_clear", "status": "blocked"},
+            ],
+        },
+    )
+
+
+def test_report_status_uses_failed_base_switch_gate_result(tmp_path, monkeypatch):
+    report_status = load_script("report_status")
+    paths = _make_paths(tmp_path)
+    _seed_common_project(paths)
+    _seed_selected_base_semantic_provenance_block(paths)
+    _seed_failed_base_switch_gate(paths)
+
+    monkeypatch.setattr(report_status, "build_paths", lambda _project: paths)
+    monkeypatch.setattr(report_status, "load_project_config", lambda _project: {"name": "demo_project", "topic": "Demo topic", "coding_agent": {}})
+    monkeypatch.setattr(report_status, "get_active_paper_state", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(report_status, "llm_available", lambda _cfg: True)
+    monkeypatch.setattr(report_status, "find_claude", lambda _cfg: "/bin/claude")
+    monkeypatch.setattr(sys, "argv", ["report_status.py", "--project", "demo_project", "--venue", "ICLR"])
+
+    report_status.main()
+
+    text = (paths.reports / "status.md").read_text(encoding="utf-8")
+    assert "- base_switch_gate_status: blocked" in text
+    assert "- base_switch_gate_decision: base_switch_not_authorized" in text
+    assert "- base_switch_candidate_route_present: False" in text
+    assert "candidate_route_proposal_exists" in text
+    assert "确定性 base-switch gate 已执行但未授权" in text
+    assert "candidate base-switch proposal" in text
+    assert "运行 deterministic base-switch / semantic-provenance gate" not in text
+
+
+def test_research_healthcheck_uses_failed_base_switch_gate_result(tmp_path, monkeypatch):
+    healthcheck = load_script("research_healthcheck")
+    paths = _make_paths(tmp_path)
+    _seed_common_project(paths)
+    _seed_selected_base_semantic_provenance_block(paths)
+    _seed_failed_base_switch_gate(paths)
+
+    monkeypatch.setattr(healthcheck, "build_paths", lambda _project: paths)
+    monkeypatch.setattr(healthcheck, "load_project_config", lambda _project: {"name": "demo_project", "topic": "Demo topic", "coding_agent": {}})
+    monkeypatch.setattr(healthcheck, "get_active_paper_state", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(healthcheck, "llm_available", lambda _cfg: True)
+    monkeypatch.setattr(healthcheck, "find_claude", lambda _cfg: "/bin/claude")
+    monkeypatch.setattr(sys, "argv", ["research_healthcheck.py", "--project", "demo_project", "--venue", "ICLR"])
+
+    healthcheck.main()
+
+    text = (paths.reports / "healthcheck.md").read_text(encoding="utf-8")
+    assert "Base-switch gate: blocked/base_switch_not_authorized; candidate_route_present=False" in text
+    assert "failed_checks=candidate_route_proposal_exists,candidate_find_run_provenance_clear" in text
+    assert "确定性 base-switch gate 已执行但未授权" in text
+    assert "运行 deterministic base-switch / semantic-provenance gate" not in text
+
+
+
 def test_propose_next_actions_prioritizes_semantic_provenance_gate(tmp_path, monkeypatch):
     propose = load_script("propose_next_actions")
     paths = _make_paths(tmp_path)

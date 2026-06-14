@@ -140,8 +140,23 @@ def _public_summary(row: dict) -> str:
     row = _as_dict(row)
     return str(row.get("summary_zh") or row.get("summary") or row.get("human_summary") or "").strip()
 
-def _selected_base_viability_public_status(gate: dict) -> dict:
+
+def _failed_check_ids(gate: dict) -> list[str]:
     gate = _as_dict(gate)
+    failed = gate.get("failed_checks") if isinstance(gate.get("failed_checks"), list) else []
+    if not failed and isinstance(gate.get("checks"), list):
+        failed = [row for row in gate.get("checks", []) if isinstance(row, dict) and row.get("status") != "pass"]
+    return [str(row.get("id") or "").strip() for row in failed if isinstance(row, dict) and str(row.get("id") or "").strip()]
+
+
+def _route_has_identity(route: dict) -> bool:
+    route = _as_dict(route)
+    return any(str(route.get(key) or "").strip() for key in ["repo", "title", "repo_path", "proposed_path_hint"])
+
+
+def _selected_base_viability_public_status(gate: dict, base_switch_gate: dict | None = None) -> dict:
+    gate = _as_dict(gate)
+    base_switch = _as_dict(base_switch_gate)
     status = str(gate.get("status") or "").strip().lower()
     decision = str(gate.get("decision") or "").strip().lower()
     if status != "blocked" or decision not in {"base_switch_gate_required", "continue_experiment_evidence_repair"}:
@@ -160,6 +175,17 @@ def _selected_base_viability_public_status(gate: dict) -> dict:
         )
     )
     issue = str(gate.get("issue") or "").strip()
+    base_switch_status = str(base_switch.get("status") or "").strip().lower()
+    base_switch_decision = str(base_switch.get("decision") or "").strip().lower()
+    failed_ids = _failed_check_ids(base_switch)
+    candidate_present = _route_has_identity(_as_dict(base_switch.get("candidate_route")))
+    base_switch_not_authorized = base_switch_status == "blocked" and base_switch_decision == "base_switch_not_authorized"
+    base_switch_fields = {
+        "base_switch_gate_status": base_switch_status,
+        "base_switch_gate_decision": base_switch_decision,
+        "base_switch_candidate_route_present": candidate_present,
+        "base_switch_failed_checks": failed_ids[:10],
+    }
     if semantic_required:
         summary = issue or (
             "selected_base_viability_gate: 参考复现已通过，但当前 selected-base 数据路线缺少 LLM/text-semantic "
@@ -169,6 +195,29 @@ def _selected_base_viability_public_status(gate: dict) -> dict:
             "运行 deterministic base-switch / semantic-provenance gate；候选路线保持 proposal-only，或补齐当前路线保存 ID "
             "映射的原始文本/元数据 provenance 与 artifact-local LLM/text embedding probe。通过前不继续纯行为级候选实验、不写论文、不提升结论。"
         )
+        if base_switch_not_authorized:
+            missing_candidate = "candidate_route_proposal_exists" in failed_ids or not candidate_present
+            if missing_candidate:
+                summary = (
+                    "selected_base_viability_gate: 参考复现已通过，但当前 selected-base 数据路线缺少 LLM/text-semantic "
+                    "文本/元数据 provenance；确定性 base-switch gate 已执行但未授权，因为还没有独立、可审计、可追溯到当前 "
+                    "Find/read 的候选路线 proposal。继续运行纯行为或损失级候选实验无法清除此门控。"
+                )
+                next_action = (
+                    "补齐当前路线保存 ID 映射的原始文本/元数据 provenance 与 artifact-local LLM/text embedding probe，"
+                    "或生成可追溯到当前 Find/read 的 candidate base-switch proposal，并完成 loader/data/protocol/smoke/"
+                    "full-reference/artifact-local audits。通过前不继续纯行为级候选实验、不写论文、不提升结论。"
+                )
+            else:
+                failed_text = "、".join(failed_ids[:5]) or "候选路线证据"
+                summary = (
+                    "selected_base_viability_gate: 参考复现已通过，但确定性 base-switch gate 已执行且未授权；"
+                    f"候选路线仍有未通过检查：{failed_text}。"
+                )
+                next_action = (
+                    "补齐候选路线未通过的 loader/data/protocol/smoke/full-reference/artifact-local audit 检查。"
+                    "gate 通过前不切换基底、不写论文、不提升结论。"
+                )
         return {
             "category": "semantic_data_provenance_required",
             "status": status,
@@ -179,6 +228,7 @@ def _selected_base_viability_public_status(gate: dict) -> dict:
             "semantic_dataset": dataset,
             "semantic_has_text_metadata_evidence": text_evidence_value,
             "semantic_has_real_llm_embedding_evidence": bool(semantic.get("has_real_llm_embedding_evidence")),
+            **base_switch_fields,
         }
     summary = issue or (
         "selected_base_viability_gate: 参考复现已通过；当前主线还缺少可审计、可写入论文的候选实验结果。"
@@ -193,6 +243,7 @@ def _selected_base_viability_public_status(gate: dict) -> dict:
         "semantic_dataset": dataset,
         "semantic_has_text_metadata_evidence": text_evidence_value,
         "semantic_has_real_llm_embedding_evidence": bool(semantic.get("has_real_llm_embedding_evidence")),
+        **base_switch_fields,
     }
 
 
@@ -223,6 +274,7 @@ def main() -> None:
     full_cycle = load_json(paths.state / "full_research_cycle.json") if (paths.state / "full_research_cycle.json").exists() else {}
     scientific_progress_gate = load_json(paths.state / "scientific_progress_gate.json") if (paths.state / "scientific_progress_gate.json").exists() else {}
     selected_base_viability_gate = load_json(paths.state / "selected_base_viability_gate.json") if (paths.state / "selected_base_viability_gate.json").exists() else {}
+    base_switch_gate = load_json(paths.state / "base_switch_gate.json") if (paths.state / "base_switch_gate.json").exists() else {}
     selected_repo = repo_selection.get('selected', {}) if isinstance(repo_selection, dict) else {}
     claude_decision = {}
     if isinstance(repo_selection, dict) and isinstance(repo_selection.get('claude_topic_decision'), dict):
@@ -300,7 +352,7 @@ def main() -> None:
     full_cycle_summary = _public_summary(full_cycle)
     scientific_progress_status = str(_as_dict(scientific_progress_gate).get('status') or '').strip() or 'not-run'
     scientific_progress_summary = _public_summary(scientific_progress_gate)
-    selected_base_viability_status = _selected_base_viability_public_status(selected_base_viability_gate)
+    selected_base_viability_status = _selected_base_viability_public_status(selected_base_viability_gate, base_switch_gate)
     if selected_base_viability_status:
         full_cycle_summary = selected_base_viability_status.get('summary') or full_cycle_summary
         scientific_progress_summary = selected_base_viability_status.get('summary') or scientific_progress_summary
@@ -332,10 +384,15 @@ def main() -> None:
         f"- selected_base_viability_gate_decision: {selected_base_viability_status.get('decision', '') if selected_base_viability_status else str(_as_dict(selected_base_viability_gate).get('decision') or '')}\n",
         f"- current_blocker_category: {selected_base_viability_status.get('category', '') if selected_base_viability_status else ''}\n",
         f"- current_blocker_summary: {selected_base_viability_status.get('summary', '') if selected_base_viability_status else ''}\n",
+        f"- current_blocker_next_action: {selected_base_viability_status.get('next_action', '') if selected_base_viability_status else ''}\n",
         f"- semantic_data_provenance_status: {selected_base_viability_status.get('semantic_status', '') if selected_base_viability_status else ''}\n",
         f"- semantic_data_provenance_dataset: {selected_base_viability_status.get('semantic_dataset', '') if selected_base_viability_status else ''}\n",
         f"- semantic_data_provenance_has_text_metadata_evidence: {selected_base_viability_status.get('semantic_has_text_metadata_evidence', '') if selected_base_viability_status else ''}\n",
         f"- semantic_data_provenance_has_real_llm_embedding_evidence: {selected_base_viability_status.get('semantic_has_real_llm_embedding_evidence', '') if selected_base_viability_status else ''}\n",
+        f"- base_switch_gate_status: {selected_base_viability_status.get('base_switch_gate_status', '') if selected_base_viability_status else str(_as_dict(base_switch_gate).get('status') or '')}\n",
+        f"- base_switch_gate_decision: {selected_base_viability_status.get('base_switch_gate_decision', '') if selected_base_viability_status else str(_as_dict(base_switch_gate).get('decision') or '')}\n",
+        f"- base_switch_candidate_route_present: {selected_base_viability_status.get('base_switch_candidate_route_present', '') if selected_base_viability_status else ''}\n",
+        f"- base_switch_failed_checks: {', '.join(selected_base_viability_status.get('base_switch_failed_checks', [])) if selected_base_viability_status else ''}\n",
         f"- repo_selection_status: {repo_selection_status}\n",
         f"- repo_selection_gate: {repo_selection_gate or 'not-run'}\n",
         f"- repo_selection_block_reason: {repo_selection_block_reason or 'none'}\n",
