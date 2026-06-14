@@ -3370,6 +3370,50 @@ def test_blocker_action_plan_command_supports_optional_venue(monkeypatch):
     assert without_venue == "/env/python modules/writing/scripts/audit_paper_evidence.py --project demo"
 
 
+def test_blocker_action_plan_ignores_unrelated_finetune_process(monkeypatch, tmp_path):
+    ensure_script_paths()
+    blocker = importlib.reload(importlib.import_module("build_blocker_action_plan"))
+    state = tmp_path / "state"
+    state.mkdir()
+    write_json(state / "active_repo.json", {"name": "owner/current_repo", "repo_path": str(tmp_path / "projects" / "demo_project" / "repos" / "selected" / "current_repo")})
+    paths = type("Paths", (), {"state": state, "root": tmp_path / "projects" / "demo_project"})()
+
+    class Proc:
+        returncode = 0
+        stdout = "2635630 1 13263 S 99.0 0.1 bash /mnt/data_server1/database/bioobang/xwj_structure_without_msa/codes/interface/BiooBang/run_finetune_intrachain_contact_mixed_1to1.sh\n"
+
+    monkeypatch.setattr(blocker, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(blocker, "_pid_cwd", lambda _pid: "/mnt/data_server1/database/bioobang/xwj_structure_without_msa/codes/interface/BiooBang")
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: Proc())
+
+    assert blocker.active_full_research_cycle_worker(paths, "demo_project") == {}
+
+
+def test_blocker_action_plan_detects_workspace_owned_alternative_training(monkeypatch, tmp_path):
+    ensure_script_paths()
+    blocker = importlib.reload(importlib.import_module("build_blocker_action_plan"))
+    state = tmp_path / "state"
+    project_root = tmp_path / "projects" / "demo_project"
+    candidate_repo = project_root / "repos" / "candidate" / "other_repo"
+    state.mkdir()
+    candidate_repo.mkdir(parents=True)
+    write_json(state / "active_repo.json", {"name": "owner/current_repo", "repo_path": str(project_root / "repos" / "selected" / "current_repo")})
+    paths = type("Paths", (), {"state": state, "root": project_root})()
+
+    class Proc:
+        returncode = 0
+        stdout = f"444 1 20 S 1.0 0.1 /env/python {candidate_repo}/train.py --data demo\n"
+
+    monkeypatch.setattr(blocker, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(blocker, "_pid_cwd", lambda _pid: str(candidate_repo))
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: Proc())
+
+    worker = blocker.active_full_research_cycle_worker(paths, "demo_project")
+
+    assert worker["kind"] == "active_child_worker"
+    assert worker["pid"] == "444"
+
+
 def test_discover_arxiv_slug_removes_path_separators(monkeypatch):
     ensure_script_paths()
     discover_arxiv = importlib.reload(importlib.import_module("discover_arxiv"))

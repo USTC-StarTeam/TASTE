@@ -543,9 +543,44 @@ def _mentions_non_current_route(paths, text: Any) -> bool:
     return False
 
 
-def _cmd_launches_alternative_route(paths, cmd: Any) -> bool:
+def _pid_cwd(pid: Any) -> str:
+    try:
+        value = int(pid)
+    except Exception:
+        return ""
+    if value <= 0:
+        return ""
+    try:
+        return str(Path(f"/proc/{value}/cwd").resolve())
+    except Exception:
+        return ""
+
+
+def _process_belongs_to_project(paths, project: str, pid: Any, cmd: Any) -> bool:
+    raw = str(cmd or "").lower()
+    cwd = _pid_cwd(pid).lower()
+    root_text = str(ROOT).lower()
+    project_root = str(getattr(paths, "root", "") or "").lower()
+    project_token = str(project or "").strip().lower()
+    project_path_token = f"/projects/{project_token}/" if project_token else ""
+    owned_needles = [root_text, project_root, project_path_token]
+    if project_token:
+        owned_needles.append(f"--project {project_token}")
+        owned_needles.append(f"--project={project_token}")
+    if any(needle and needle in raw for needle in owned_needles):
+        return True
+    if cwd:
+        for base in [project_root, root_text]:
+            if base and (cwd == base or cwd.startswith(base.rstrip("/") + "/")):
+                return True
+    return False
+
+
+def _cmd_launches_alternative_route(paths, project: str, pid: Any, cmd: Any) -> bool:
     raw = str(cmd or "").lower()
     if not raw or not any(marker in raw for marker in ["python", "train", "main.py", "finetune", "--data"]):
+        return False
+    if not _process_belongs_to_project(paths, project, pid, cmd):
         return False
     current_tokens = _current_route_tokens(paths)
     if not current_tokens:
@@ -1219,9 +1254,14 @@ def active_full_research_cycle_worker(paths, project: str) -> dict[str, Any]:
         cmd = parts[6]
         if any(skip in cmd for skip in [" grep ", " rg ", " ps -", "sed -n"]):
             continue
-        if _cmd_launches_alternative_route(paths, cmd):
+        if _cmd_launches_alternative_route(paths, project, parts[0], cmd):
             return {"status": "running", "pid": parts[0], "ppid": parts[1], "elapsed_sec": int(parts[2]), "stat": parts[3], "pcpu": parts[4], "pmem": parts[5], "cmd": cmd, "kind": "active_child_worker", "process_alive": True}
-        if project and project in cmd and ("run_full_research_cycle.py" in cmd or "run_paper_pipeline.py" in cmd or "claude_project_session.py" in cmd):
+        if (
+            project
+            and project in cmd
+            and _process_belongs_to_project(paths, project, parts[0], cmd)
+            and ("run_full_research_cycle.py" in cmd or "run_paper_pipeline.py" in cmd or "claude_project_session.py" in cmd)
+        ):
             return {"status": "running", "pid": parts[0], "ppid": parts[1], "elapsed_sec": int(parts[2]), "stat": parts[3], "pcpu": parts[4], "pmem": parts[5], "cmd": cmd, "kind": "project_worker", "process_alive": True}
     return {}
 
