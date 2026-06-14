@@ -1435,6 +1435,133 @@ def deterministic_base_switch_executed(paths) -> bool:
     )
 
 
+def failed_check_ids(gate: dict[str, Any]) -> list[str]:
+    gate = gate if isinstance(gate, dict) else {}
+    failed = gate.get("failed_checks") if isinstance(gate.get("failed_checks"), list) else []
+    if not failed and isinstance(gate.get("checks"), list):
+        failed = [row for row in gate.get("checks", []) if isinstance(row, dict) and row.get("status") != "pass"]
+    return [str(row.get("id") or "").strip() for row in failed if isinstance(row, dict) and str(row.get("id") or "").strip()]
+
+
+def route_has_identity(route: dict[str, Any]) -> bool:
+    route = route if isinstance(route, dict) else {}
+    return any(str(route.get(key) or "").strip() for key in ["repo", "title", "repo_path", "proposed_path_hint"])
+
+
+def failed_base_switch_gate_guidance(paths) -> dict[str, Any]:
+    gate = load_json(paths.state / "base_switch_gate.json", {})
+    if not (
+        isinstance(gate, dict)
+        and gate.get("status") == "blocked"
+        and gate.get("decision") == "base_switch_not_authorized"
+        and not deterministic_base_switch_executed(paths)
+    ):
+        return {}
+    failed_ids = failed_check_ids(gate)
+    candidate = gate.get("candidate_route") if isinstance(gate.get("candidate_route"), dict) else {}
+    candidate_present = route_has_identity(candidate)
+    missing_candidate = "candidate_route_proposal_exists" in failed_ids or not candidate_present
+    issue = (
+        "base_switch_gate: deterministic base-switch gate already ran and did not authorize a switch because no distinct, "
+        "auditable current-Find/read candidate route proposal exists. Provide artifact-local current-route text/metadata "
+        "provenance plus a real LLM/text embedding probe, or generate a proposal-only candidate base-switch route and collect "
+        "loader/data/protocol/smoke/full-reference/artifact-local audit evidence before rerunning the gate."
+        if missing_candidate else
+        "base_switch_gate: deterministic base-switch gate already ran and did not authorize the candidate route because required "
+        "provenance, loader/data, protocol, smoke, full-reference, or artifact-local audit checks are still blocked."
+    )
+    return {
+        "missing_candidate": missing_candidate,
+        "candidate_present": candidate_present,
+        "failed_check_ids": failed_ids,
+        "issue": issue,
+    }
+
+
+def apply_failed_base_switch_gate_guidance(actions: list[dict[str, Any]], paths, project: str, venue: str) -> None:
+    guidance = failed_base_switch_gate_guidance(paths)
+    if not guidance:
+        return
+    failed_text = ",".join(guidance.get("failed_check_ids", [])[:8]) or "unknown"
+    proposal_or_provenance = (
+        "The deterministic base-switch gate has already run and is blocked/not_authorized. Re-running it unchanged will not clear the blocker. "
+        "First either provide artifact-local current-route raw text/metadata provenance with preserved ID mapping plus a real LLM/text embedding probe, "
+        "or create a non-authoritative candidate base-switch proposal traceable to the current Find/read packet and collect the missing loader/data/protocol/smoke/full-reference/artifact-local evidence. "
+        f"Current failed checks: {failed_text}."
+    )
+    commands = [
+        command(project, venue, "audit_selected_base_viability.py"),
+        "Queue project Claude Code guidance: inspect current Find/read evidence and either write current-route artifact-local text/metadata provenance plus a real LLM/text embedding probe receipt, or write state/selected_route_switch_proposal.json as proposal_only_not_authorized with proposed_route repo/title/repo_path or proposed_path_hint, current_find_run_id, provenance evidence, and required_gate=deterministic_base_switch_gate. Do not edit active_repo/evidence_ready_repo_selection and do not launch candidate main-route experiments.",
+        command(project, venue, "audit_deterministic_base_switch_gate.py"),
+        command(project, "guard_selected_base_route.py"),
+        command(project, venue, "build_blocker_action_plan.py"),
+    ]
+    success_checks = [
+        "state/base_switch_gate.json is not rerun to the same failed candidate_route={} state without new provenance or proposal evidence.",
+        "Current-route repair evidence includes artifact-local raw text/metadata provenance with preserved ID mapping and a real LLM/text embedding probe, or state/selected_route_switch_proposal.json names a proposal-only candidate traceable to current Find/read.",
+        "Candidate routes remain non-authoritative until loader/data/protocol/smoke/full-reference/artifact-local audits pass and execute_authorized_base_switch.py runs after a passed gate.",
+        "active_repo.json and evidence_ready_repo_selection.json remain unchanged while the gate is blocked/not_authorized.",
+    ]
+    for row in actions:
+        route = row.get("route")
+        if route in {"selected_base_viability_gate", "base_switch_gate"}:
+            row["issue"] = guidance["issue"] if route == "base_switch_gate" else one_line("selected_base_viability_gate: semantic provenance remains blocked after a failed deterministic base-switch gate; provide current-route provenance or a candidate base-switch proposal before rerunning the gate.")
+            row["repair_strategy"] = proposal_or_provenance
+            row["recommended_commands"] = list(commands)
+            row["success_checks"] = list(success_checks)
+            row["base_switch_gate_status"] = "blocked/base_switch_not_authorized"
+            row["base_switch_failed_checks"] = guidance.get("failed_check_ids", [])[:10]
+            row["base_switch_candidate_route_present"] = guidance.get("candidate_present")
+            row["priority"] = "P0"
+            row["selected_base_gate_required_mode"] = True
+        elif row.get("blocked_by_selected_base_viability_gate") or route in {"experiment_evidence_repair", "experiment_loop_repair", "evidence_assurance_repair", "paper_production_repair", "section_state_repair", "figure_repair", "citation_repair", "paper_artifact_refresh"}:
+            row["priority"] = "P2"
+            row["blocked_by_selected_base_viability_gate"] = True
+            row["repair_strategy"] = (
+                "Deferred while the failed deterministic base-switch gate lacks new current-route provenance or a proposal-only candidate route. "
+                "Do not rerun the same gate or launch candidate/alternative main-route work until provenance/proposal evidence changes. "
+                "Current-route repair may use launcher route_scope=selected_base_current_route; bounded candidate evidence collection may use route_scope=base_switch_evidence_collection only after a proposal exists."
+            )
+
+
+def merge_unique_values(target: dict[str, Any], key: str, values: Any) -> None:
+    existing = target.get(key)
+    merged = list(existing) if isinstance(existing, list) else ([existing] if existing not in (None, "") else [])
+    incoming = values if isinstance(values, list) else [values]
+    for value in incoming:
+        if value in (None, "") or value in merged:
+            continue
+        merged.append(value)
+    if merged:
+        target[key] = merged
+
+
+def compact_failed_base_switch_gate_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse historical selected/base-switch snapshots after they rewrite to the same live gate action."""
+    compacted: list[dict[str, Any]] = []
+    seen: dict[tuple[str, str, str, tuple[str, ...]], dict[str, Any]] = {}
+    for row in actions:
+        route = str(row.get("route") or "")
+        failed_checks = row.get("base_switch_failed_checks") if isinstance(row.get("base_switch_failed_checks"), list) else []
+        key = (
+            route,
+            str(row.get("issue") or ""),
+            str(row.get("base_switch_gate_status") or ""),
+            tuple(str(item) for item in failed_checks),
+        )
+        if route in {"selected_base_viability_gate", "base_switch_gate"} and row.get("base_switch_gate_status") == "blocked/base_switch_not_authorized":
+            kept = seen.get(key)
+            if kept is not None:
+                merge_unique_values(kept, "merged_action_ids", [kept.get("id"), row.get("id")])
+                merge_unique_values(kept, "merged_source_check_ids", [kept.get("source_check_id"), row.get("source_check_id")])
+                merge_unique_values(kept, "merged_sources", [kept.get("source"), row.get("source")])
+                merge_unique_values(kept, "evidence", row.get("evidence") if isinstance(row.get("evidence"), list) else [row.get("evidence")])
+                continue
+            seen[key] = row
+        compacted.append(row)
+    return compacted
+
+
 def enforce_selected_base_viability_gate(actions: list[dict[str, Any]], seen: set[str], paths, project: str, venue: str, skills: dict[str, str]) -> None:
     if deterministic_base_switch_executed(paths):
         return
@@ -2052,6 +2179,8 @@ def build(project: str, venue: str) -> dict[str, Any]:
                 evidence=["state/reference_reproduction_gate.json", "state/scientific_progress_gate.json", "state/experiment_registry.json"],
                 severity="block",
             )
+    apply_failed_base_switch_gate_guidance(actions, paths, project, venue)
+    actions = compact_failed_base_switch_gate_actions(actions)
     actions.sort(key=priority_key)
     for row in actions:
         cmds = row.get("recommended_commands", []) if isinstance(row.get("recommended_commands", []), list) else []

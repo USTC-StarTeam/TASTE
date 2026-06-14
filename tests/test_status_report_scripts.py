@@ -357,6 +357,45 @@ def test_deterministic_base_switch_gate_blocks_empty_candidate_route(tmp_path, m
     assert "non-empty candidate route proposal" in checks["candidate_route_proposal_exists"]["detail"]
 
 
+def test_blocker_action_plan_uses_failed_base_switch_gate_result(tmp_path, monkeypatch):
+    blocker_plan = load_script("build_blocker_action_plan")
+    paths = _make_paths(tmp_path)
+    _seed_common_project(paths)
+    _seed_selected_base_semantic_provenance_block(paths)
+    _seed_failed_base_switch_gate(paths)
+    full_cycle = json.loads((paths.state / "full_research_cycle.json").read_text(encoding="utf-8"))
+    full_cycle["stage_failures"] = [
+        {"stage": "selected-base-viability-initial", "return_code": 2, "tail": "state/selected_base_viability_gate.json"},
+        {
+            "stage": "selected-base-viability-precheck",
+            "return_code": 2,
+            "tail": "state/selected_base_viability_gate.json still blocked",
+        },
+    ]
+    _write_json(paths.state / "full_research_cycle.json", full_cycle)
+
+    monkeypatch.setattr(blocker_plan, "build_paths", lambda _project: paths)
+
+    payload = blocker_plan.build("demo_project", "ICLR")
+
+    assert payload["status"] == "blocked"
+    assert payload["summary"]["top_route"] == "selected_base_viability_gate"
+    assert "failed deterministic base-switch gate" in payload["summary"]["top_action"]
+    selected_or_switch = [row for row in payload["actions"] if row.get("route") in {"selected_base_viability_gate", "base_switch_gate"}]
+    selected_actions = [row for row in selected_or_switch if row.get("route") == "selected_base_viability_gate"]
+    switch_actions = [row for row in selected_or_switch if row.get("route") == "base_switch_gate"]
+    assert len(selected_actions) == 1
+    assert len(switch_actions) == 1
+    assert payload["summary"]["p0_action_count"] == 2
+    assert {"selected-base-viability-initial", "selected-base-viability-precheck"}.issubset(set(selected_actions[0].get("merged_source_check_ids", [])))
+    assert selected_or_switch
+    combined = "\n".join(" ".join(str(row.get(key) or "") for key in ["issue", "repair_strategy"]) for row in selected_or_switch)
+    assert "Re-running it unchanged will not clear the blocker" in combined
+    assert "proposal-only candidate base-switch route" in combined
+    assert "run the deterministic base-switch gate" not in combined.lower()
+    assert all(row.get("base_switch_gate_status") == "blocked/base_switch_not_authorized" for row in selected_or_switch)
+
+
 def test_propose_next_actions_uses_failed_base_switch_gate_result(tmp_path, monkeypatch):
     propose = load_script("propose_next_actions")
     paths = _make_paths(tmp_path)
