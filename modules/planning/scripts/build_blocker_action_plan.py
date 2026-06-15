@@ -6,11 +6,19 @@ import datetime as dt
 import json
 import re
 import shlex
+import sys
 from pathlib import Path
 from typing import Any
 
-from project_paths import ROOT, build_paths, management_python
-from taste_pythonpath import resolve_script_path, taste_pythonpath_string
+ROOT = Path(__file__).resolve().parents[3]
+FRAMEWORK_SCRIPTS = ROOT / "framework" / "scripts"
+if str(FRAMEWORK_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(FRAMEWORK_SCRIPTS))
+from taste_pythonpath import ensure_taste_pythonpath, resolve_script_path, taste_pythonpath_string
+
+ensure_taste_pythonpath(ROOT)
+
+from project_paths import build_paths, management_python
 
 
 def now_iso() -> str:
@@ -1562,27 +1570,45 @@ def merge_unique_values(target: dict[str, Any], key: str, values: Any) -> None:
 
 
 def compact_failed_base_switch_gate_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Collapse historical selected/base-switch snapshots after they rewrite to the same live gate action."""
+    """Collapse repeated live failed-base-switch actions while preserving audit provenance."""
     compacted: list[dict[str, Any]] = []
     seen: dict[tuple[str, str, str, tuple[str, ...]], dict[str, Any]] = {}
     for row in actions:
         route = str(row.get("route") or "")
+        issue = str(row.get("issue") or "")
         failed_checks = row.get("base_switch_failed_checks") if isinstance(row.get("base_switch_failed_checks"), list) else []
-        key = (
-            route,
-            str(row.get("issue") or ""),
-            str(row.get("base_switch_gate_status") or ""),
-            tuple(str(item) for item in failed_checks),
-        )
         if route in {"selected_base_viability_gate", "base_switch_gate"} and row.get("base_switch_gate_status") == "blocked/base_switch_not_authorized":
-            kept = seen.get(key)
-            if kept is not None:
-                merge_unique_values(kept, "merged_action_ids", [kept.get("id"), row.get("id")])
-                merge_unique_values(kept, "merged_source_check_ids", [kept.get("source_check_id"), row.get("source_check_id")])
-                merge_unique_values(kept, "merged_sources", [kept.get("source"), row.get("source")])
-                merge_unique_values(kept, "evidence", row.get("evidence") if isinstance(row.get("evidence"), list) else [row.get("evidence")])
-                continue
-            seen[key] = row
+            key = (
+                route,
+                issue,
+                str(row.get("base_switch_gate_status") or ""),
+                tuple(str(item) for item in failed_checks),
+            )
+        elif row.get("blocked_by_selected_base_viability_gate") and issue.startswith("blocked_by_failed_base_switch_gate:"):
+            key = (
+                "failed_base_switch_downstream_deferral",
+                issue,
+                str(row.get("base_switch_gate_status") or "blocked/base_switch_not_authorized"),
+                (),
+            )
+        else:
+            compacted.append(row)
+            continue
+
+        kept = seen.get(key)
+        if kept is not None:
+            merge_unique_values(kept, "merged_action_ids", [kept.get("id"), row.get("id")])
+            merge_unique_values(kept, "merged_source_check_ids", [kept.get("source_check_id"), row.get("source_check_id")])
+            merge_unique_values(kept, "merged_sources", [kept.get("source"), row.get("source")])
+            merge_unique_values(kept, "merged_routes", [kept.get("route"), row.get("route")])
+            merge_unique_values(kept, "deferred_original_issues", [kept.get("deferred_original_issue"), row.get("deferred_original_issue")])
+            merge_unique_values(kept, "evidence", row.get("evidence") if isinstance(row.get("evidence"), list) else [row.get("evidence")])
+            continue
+        seen[key] = row
+        if key[0] == "failed_base_switch_downstream_deferral":
+            row.setdefault("base_switch_gate_status", "blocked/base_switch_not_authorized")
+            merge_unique_values(row, "merged_routes", [row.get("route")])
+            merge_unique_values(row, "deferred_original_issues", [row.get("deferred_original_issue")])
         compacted.append(row)
     return compacted
 

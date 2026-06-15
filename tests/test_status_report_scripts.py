@@ -569,6 +569,25 @@ def test_deterministic_base_switch_gate_reads_pending_environment_candidate(tmp_
     assert checks["candidate_data_contract_passed"]["status"] == "blocked"
 
 
+def test_build_blocker_action_plan_bootstraps_pythonpath_for_direct_help():
+    import os
+    import subprocess
+
+    root = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    proc = subprocess.run(
+        [sys.executable, str(root / "modules" / "planning" / "scripts" / "build_blocker_action_plan.py"), "--help"],
+        cwd=str(root),
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert "Build a deterministic blocker-to-action routing plan" in proc.stdout
+
+
 def test_blocker_action_plan_uses_failed_base_switch_gate_result(tmp_path, monkeypatch):
     blocker_plan = load_script("build_blocker_action_plan")
     paths = _make_paths(tmp_path)
@@ -621,6 +640,21 @@ def test_blocker_action_plan_uses_failed_base_switch_gate_result(tmp_path, monke
     assert "blocked_by_failed_base_switch_gate" in deferred_public
     assert "继续真实实验迭代" not in deferred_public
     assert "继续真实实验迭代" in deferred.get("deferred_original_issue", "")
+
+    duplicate_downstream = [
+        {"id": "a1", "route": "experiment_evidence_repair", "issue": "继续真实实验迭代", "source": "state/a.json", "evidence": ["state/a.json"]},
+        {"id": "a2", "route": "paper_production_repair", "issue": "写论文", "source": "state/b.json", "evidence": ["state/b.json"]},
+        {"id": "a3", "route": "section_state_repair", "issue": "修章节", "source": "state/c.json", "evidence": ["state/c.json"]},
+    ]
+    blocker_plan.apply_failed_base_switch_gate_guidance(duplicate_downstream, paths, "demo_project", "ICLR")
+    compacted = blocker_plan.compact_failed_base_switch_gate_actions(duplicate_downstream)
+
+    assert len(compacted) == 1
+    merged = compacted[0]
+    assert merged["issue"].startswith("blocked_by_failed_base_switch_gate:")
+    assert set(merged.get("merged_routes", [])) == {"experiment_evidence_repair", "paper_production_repair", "section_state_repair"}
+    assert set(merged.get("merged_sources", [])) == {"state/a.json", "state/b.json", "state/c.json"}
+    assert set(merged.get("evidence", [])) == {"state/a.json", "state/b.json", "state/c.json"}
 
 
 def test_research_trajectory_gate_context_reads_failed_base_switch_gate(tmp_path):
