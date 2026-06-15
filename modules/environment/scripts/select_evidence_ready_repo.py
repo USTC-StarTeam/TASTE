@@ -392,6 +392,98 @@ def extract_json_object(text: str) -> dict[str, Any]:
         return {}
 
 
+def _decode_jsonish_string(value: str) -> str:
+    try:
+        return str(json.loads('"' + value + '"')).strip()
+    except Exception:
+        return re.sub(r'\s+', ' ', value.replace('\\"', '"')).strip()
+
+
+def _extract_jsonish_string_field(text: str, key: str) -> str:
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*"((?:\\.|[^"\\])*)"', text, re.S)
+    if not match:
+        return ''
+    return _decode_jsonish_string(match.group(1))
+
+
+def _extract_jsonish_array_field(text: str, key: str) -> list[str] | None:
+    null_match = re.search(rf'"{re.escape(key)}"\s*:\s*null\b', text, re.I)
+    if null_match:
+        return []
+    array_match = re.search(rf'"{re.escape(key)}"\s*:\s*(\[[\s\S]*?\])', text)
+    if array_match:
+        raw = array_match.group(1)
+        try:
+            value = json.loads(raw)
+            return _string_list(value)
+        except Exception:
+            values = [_decode_jsonish_string(item) for item in re.findall(r'"((?:\\.|[^"\\])*)"', raw, re.S)]
+            return _string_list(values)
+    text_value = _extract_jsonish_string_field(text, key)
+    if text_value:
+        return [text_value]
+    return None
+
+
+def jsonish_topic_decision(output: str) -> dict[str, Any]:
+    text = str(output or '')
+    if '"decision"' not in text and '"accept_as_current_best"' not in text:
+        return {}
+    decision: dict[str, Any] = {}
+    for key in [
+        'decision',
+        'best_repo',
+        'repo_path',
+        'dataset',
+        'repo_action',
+        'repo_action_reason',
+        'repo_action_reason_en',
+        'repo_action_reason_zh',
+        'env_action',
+        'env_action_reason',
+        'env_action_reason_en',
+        'env_action_reason_zh',
+        'recommended_env_name',
+        'data_action',
+        'data_action_reason',
+        'data_action_reason_en',
+        'data_action_reason_zh',
+        'stewardship_memory',
+        'stewardship_memory_en',
+        'stewardship_memory_zh',
+        'rationale',
+        'rationale_en',
+        'rationale_zh',
+    ]:
+        value = _extract_jsonish_string_field(text, key)
+        if value:
+            decision[key] = value
+    bool_match = re.search(r'"accept_as_current_best"\s*:\s*(true|false)', text, re.I)
+    if bool_match:
+        decision['accept_as_current_best'] = bool_match.group(1).lower() == 'true'
+    confidence_match = re.search(r'"confidence"\s*:\s*(-?\d+(?:\.\d+)?)', text)
+    if confidence_match:
+        try:
+            decision['confidence'] = float(confidence_match.group(1))
+        except Exception:
+            pass
+    for key in [
+        'required_modifications',
+        'required_modifications_en',
+        'required_modifications_zh',
+        'risks',
+        'risks_en',
+        'risks_zh',
+        'evidence',
+        'evidence_en',
+        'evidence_zh',
+    ]:
+        value = _extract_jsonish_array_field(text, key)
+        if value is not None:
+            decision[key] = value
+    return decision
+
+
 def markdown_topic_decision(output: str, audited: list[dict[str, Any]]) -> dict[str, Any]:
     text = str(output or '')
     low = text.lower()
@@ -460,6 +552,18 @@ def markdown_topic_decision(output: str, audited: list[dict[str, Any]]) -> dict[
     }
 
 
+def _string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, (list, tuple, set)):
+        values = list(value)
+    else:
+        values = [value]
+    return [text for item in values if (text := str(item).strip())]
+
+
 def normalize_topic_decision(raw: dict[str, Any], fallback_repo: dict[str, Any] | None = None) -> dict[str, Any]:
     decision = dict(DEFAULT_CLAUDE_TOPIC_DECISION)
     if isinstance(raw, dict):
@@ -511,10 +615,7 @@ def normalize_topic_decision(raw: dict[str, Any], fallback_repo: dict[str, Any] 
         'evidence_en',
         'evidence_zh',
     ]:
-        value = decision.get(key, [])
-        if isinstance(value, str):
-            value = [value]
-        decision[key] = [str(item) for item in value if str(item).strip()]
+        decision[key] = _string_list(decision.get(key, []))
     if not str(decision.get('rationale_en') or '').strip():
         decision['rationale_en'] = str(decision.get('rationale') or '').strip()
     if not str(decision.get('rationale_zh') or '').strip():
@@ -811,6 +912,8 @@ def run_claude_topic_decision(project: str, payload: dict[str, Any], timeout_sec
         proc = subprocess.CompletedProcess(cmd, 124, exc.stdout or '', exc.stderr or '')
     output = proc.stdout or proc.stderr or ''
     raw_json = extract_json_object(output)
+    if not raw_json:
+        raw_json = jsonish_topic_decision(output)
     if not raw_json:
         raw_json = markdown_topic_decision(output, payload.get('audited_candidates', []) if isinstance(payload.get('audited_candidates'), list) else [])
     parsed = normalize_topic_decision(raw_json, payload.get('selected') if isinstance(payload.get('selected'), dict) else None)

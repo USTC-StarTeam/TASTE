@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-15T03:43:34.485621+00:00",
+  "generated_at": "2026-06-15T04:23:57.546157+00:00",
   "module": "environment",
   "contract": {
     "directory": "modules/environment",
@@ -961,7 +961,7 @@
       "path": "modules/environment/scripts/select_evidence_ready_repo.py",
       "owner": "environment",
       "owner_reason": "repo/data/base/environment selection, probing, or runtime locking",
-      "function_count": 28,
+      "function_count": 33,
       "functions": [
         "load_json",
         "save_json",
@@ -980,7 +980,12 @@
         "score_candidate",
         "topic_gaps",
         "extract_json_object",
+        "_decode_jsonish_string",
+        "_extract_jsonish_string_field",
+        "_extract_jsonish_array_field",
+        "jsonish_topic_decision",
         "markdown_topic_decision",
+        "_string_list",
         "normalize_topic_decision",
         "write_repo_env_strategy",
         "probe_repo",

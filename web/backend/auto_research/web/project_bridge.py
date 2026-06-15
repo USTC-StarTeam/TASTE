@@ -2463,6 +2463,12 @@ def _current_environment_selection(root: Path) -> dict[str, Any]:
     current_candidate = selection.get("current_candidate") if isinstance(selection.get("current_candidate"), dict) else {}
     pending_candidate = selection.get("pending_environment_candidate") if isinstance(selection.get("pending_environment_candidate"), dict) else {}
     selection_status = str(selection.get("status") or "")
+    selection_rationale_en = str(decision.get("rationale_en") or decision.get("rationale") or "").strip()
+    selection_rationale_zh = str(decision.get("rationale_zh") or "").strip()
+    repo_action_reason_en = str(decision.get("repo_action_reason_en") or decision.get("repo_action_reason") or "").strip()
+    repo_action_reason_zh = str(decision.get("repo_action_reason_zh") or "").strip()
+    data_action_reason_en = str(decision.get("data_action_reason_en") or decision.get("data_action_reason") or "").strip()
+    data_action_reason_zh = str(decision.get("data_action_reason_zh") or "").strip()
     if valid:
         reason = "current_active_route_pending_candidate_blocked" if pending_candidate_blocked else "current_environment_base_selected"
     elif not selected:
@@ -2485,6 +2491,20 @@ def _current_environment_selection(root: Path) -> dict[str, Any]:
         "selection_gate": public_selection_gate,
         "raw_selection_gate": raw_selection_gate,
         "selection_status": selection_status,
+        "selection_decision": str(decision.get("decision") or ""),
+        "selection_confidence": decision.get("confidence", ""),
+        "selection_rationale": selection_rationale_en,
+        "selection_rationale_en": selection_rationale_en,
+        "selection_rationale_zh": selection_rationale_zh,
+        "repo_action": str(decision.get("repo_action") or ""),
+        "repo_action_reason": repo_action_reason_en,
+        "repo_action_reason_en": repo_action_reason_en,
+        "repo_action_reason_zh": repo_action_reason_zh,
+        "env_action": str(decision.get("env_action") or ""),
+        "data_action": str(decision.get("data_action") or ""),
+        "data_action_reason": data_action_reason_en,
+        "data_action_reason_en": data_action_reason_en,
+        "data_action_reason_zh": data_action_reason_zh,
         "audited_count": selection.get("audited_count", 0),
         "evidence_ready_count": selection.get("evidence_ready_count", 0),
         "candidate_count": selection.get("candidate_count", 0),
@@ -3251,6 +3271,20 @@ def _public_environment_selection_summary(env: Any) -> dict[str, Any]:
         "selection_stage": _public_internal_names(src.get("selection_stage") or selected.get("selection_stage") or ""),
         "selection_gate": _public_internal_names(src.get("selection_gate") or src.get("raw_selection_gate") or ""),
         "selection_status": str(src.get("selection_status") or ""),
+        "selection_decision": _public_internal_names(src.get("selection_decision") or ""),
+        "selection_confidence": src.get("selection_confidence", ""),
+        "selection_rationale": _public_internal_names(src.get("selection_rationale") or src.get("selection_rationale_en") or ""),
+        "selection_rationale_en": _public_internal_names(src.get("selection_rationale_en") or src.get("selection_rationale") or ""),
+        "selection_rationale_zh": _public_internal_names(src.get("selection_rationale_zh") or ""),
+        "repo_action": _public_internal_names(src.get("repo_action") or ""),
+        "repo_action_reason": _public_internal_names(src.get("repo_action_reason") or src.get("repo_action_reason_en") or ""),
+        "repo_action_reason_en": _public_internal_names(src.get("repo_action_reason_en") or src.get("repo_action_reason") or ""),
+        "repo_action_reason_zh": _public_internal_names(src.get("repo_action_reason_zh") or ""),
+        "env_action": _public_internal_names(src.get("env_action") or ""),
+        "data_action": _public_internal_names(src.get("data_action") or ""),
+        "data_action_reason": _public_internal_names(src.get("data_action_reason") or src.get("data_action_reason_en") or ""),
+        "data_action_reason_en": _public_internal_names(src.get("data_action_reason_en") or src.get("data_action_reason") or ""),
+        "data_action_reason_zh": _public_internal_names(src.get("data_action_reason_zh") or ""),
         "audited_count": src.get("audited_count", 0),
         "evidence_ready_count": src.get("evidence_ready_count", 0),
         "candidate_count": src.get("candidate_count", 0),
@@ -3883,8 +3917,12 @@ def _public_environment_stage(
     ref_status = str(ref_public.get("status") or ref_gate.get("status") or "").strip()
     ref_decision = str(ref_public.get("decision") or ref_gate.get("decision") or "").strip()
     progress_summary = str(env.get("progress_summary") or "").strip()
+    selection_rationale = str(env.get("selection_rationale_zh") or env.get("selection_rationale") or "").strip()
+    selection_gate_text = str(env.get("selection_gate") or env.get("raw_selection_gate") or "").strip()
     if env.get("valid"):
         module_summary = "当前基底已由环境阶段选定；本步骤只展示仓库、真实数据/loader、实验环境和参考复现状态。"
+    elif selection_gate_text.startswith("continued_search") and selection_rationale:
+        module_summary = "当前 Find 的新基底选择被 topic-fit 门控阻塞：" + _field_text(selection_rationale, 260)
     elif repo_name or repo_path or dataset or ready_datasets or reference_full_job:
         module_summary = "已有环境证据已保留展示；当前 Find 的新基底选择尚未完成。"
     elif status == "waiting_for_current_find_results":
@@ -3917,6 +3955,21 @@ def _public_environment_stage(
         "selection_stage": _public_internal_names(env.get("selection_stage", "")),
         "selection_gate": _public_internal_names(env.get("selection_gate", "")),
         "selection_status": str(env.get("selection_status") or ""),
+        "raw_selection_gate": _public_internal_names(env.get("raw_selection_gate", "")),
+        "selection_decision": _public_internal_names(env.get("selection_decision", "")),
+        "selection_confidence": env.get("selection_confidence", ""),
+        "selection_rationale": _public_internal_names(env.get("selection_rationale") or env.get("selection_rationale_en") or ""),
+        "selection_rationale_en": _public_internal_names(env.get("selection_rationale_en") or env.get("selection_rationale") or ""),
+        "selection_rationale_zh": _public_internal_names(env.get("selection_rationale_zh") or ""),
+        "repo_action": _public_internal_names(env.get("repo_action") or ""),
+        "repo_action_reason": _public_internal_names(env.get("repo_action_reason") or env.get("repo_action_reason_en") or ""),
+        "repo_action_reason_en": _public_internal_names(env.get("repo_action_reason_en") or env.get("repo_action_reason") or ""),
+        "repo_action_reason_zh": _public_internal_names(env.get("repo_action_reason_zh") or ""),
+        "env_action": _public_internal_names(env.get("env_action") or ""),
+        "data_action": _public_internal_names(env.get("data_action") or ""),
+        "data_action_reason": _public_internal_names(env.get("data_action_reason") or env.get("data_action_reason_en") or ""),
+        "data_action_reason_en": _public_internal_names(env.get("data_action_reason_en") or env.get("data_action_reason") or ""),
+        "data_action_reason_zh": _public_internal_names(env.get("data_action_reason_zh") or ""),
         "audited_count": env.get("audited_count", 0),
         "evidence_ready_count": env.get("evidence_ready_count", 0),
         "candidate_count": env.get("candidate_count", 0),

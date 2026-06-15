@@ -8301,6 +8301,17 @@ function App() {
                         {envStage?.selection?.selected_plan_id && envStage?.selection?.current_selected_plan_id && envStage.selection.selected_plan_id !== envStage.selection.current_selected_plan_id && <small>{lang === "zh" ? `环境记录计划 ${envStage.selection.selected_plan_id}` : `Environment record plan ${envStage.selection.selected_plan_id}`}</small>}
                         {envStage?.selection?.reason && <small>{displayValue(envStage.selection.reason)}</small>}
                       </div>
+                      {(envStage?.selection?.selection_gate || envStage?.selection?.raw_selection_gate || envStage?.selection?.selection_decision || localizedField(envStage?.selection, "selection_rationale", "")) && (
+                        <div className="envSummaryItem">
+                          <span>{lang === "zh" ? "选择门控" : "Selection gate"}</span>
+                          <strong>{[
+                            displayMaybe(envStage?.selection?.selection_gate || envStage?.selection?.raw_selection_gate, ""),
+                            displayMaybe(envStage?.selection?.selection_decision, ""),
+                            envStage?.selection?.selection_confidence !== undefined && envStage?.selection?.selection_confidence !== "" ? `confidence=${envStage.selection.selection_confidence}` : "",
+                          ].filter(Boolean).join(" / ")}</strong>
+                          {localizedField(envStage?.selection, "selection_rationale", "") && <small>{String(localizedField(envStage.selection, "selection_rationale", "")).slice(0, 420)}{String(localizedField(envStage.selection, "selection_rationale", "")).length > 420 ? "..." : ""}</small>}
+                        </div>
+                      )}
                       <div className="envSummaryItem">
                         <span>{lang === "zh" ? "仓库" : "Repository"}</span>
                         <strong>{displayMaybe(envStage?.active_repo?.name || activeRepo?.name, t.notSelected)}</strong>

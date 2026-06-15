@@ -4406,6 +4406,13 @@ def test_pipeline_guard_uses_selected_base_viability_current_route(monkeypatch, 
             "selection_stage": "environment_claude_code",
             "selection_gate": "continued_search_required_by_claude_topic_fit",
             "selected": {},
+            "claude_topic_decision": {
+                "decision": "needs-more-search",
+                "confidence": 0.65,
+                "repo_action": "continue_search",
+                "rationale_en": "Only evidence-ready repo is off topic for the selected plan.",
+                "rationale_zh": "唯一证据就绪仓库与当前执行计划主题不匹配。",
+            },
         },
     )
     write_json(
@@ -5670,6 +5677,13 @@ def test_current_environment_pending_selection_prefers_current_run_over_stale_vi
             "selection_stage": "environment_claude_code",
             "selection_gate": "continued_search_required_by_claude_topic_fit",
             "selected": {},
+            "claude_topic_decision": {
+                "decision": "needs-more-search",
+                "confidence": 0.65,
+                "repo_action": "continue_search",
+                "rationale_en": "Only evidence-ready repo is off topic for the selected plan.",
+                "rationale_zh": "唯一证据就绪仓库与当前执行计划主题不匹配。",
+            },
         },
     )
 
@@ -5682,6 +5696,12 @@ def test_current_environment_pending_selection_prefers_current_run_over_stale_vi
     assert pending["current_selected_plan_id"] == "plan-current"
     assert pending["current_selected_idea_id"] == "idea-current"
     assert pending["reason"] == "environment_repo_selection_blocked_current_run"
+    assert pending["selection_gate"] == "continued_search_required_by_claude_topic_fit"
+    assert pending["selection_decision"] == "needs-more-search"
+    assert pending["selection_confidence"] == 0.65
+    assert pending["repo_action"] == "continue_search"
+    assert pending["selection_rationale_en"] == "Only evidence-ready repo is off topic for the selected plan."
+    assert pending["selection_rationale_zh"] == "唯一证据就绪仓库与当前执行计划主题不匹配。"
 
 
 def test_current_find_pipeline_counts_unread_recommendations_as_pending_full_text(tmp_path, monkeypatch):
@@ -8621,6 +8641,82 @@ def test_environment_selector_keeps_pending_loader_candidate_out_of_active_repo(
     assert all(str(pending_repo) not in cmd for cmd in repo_refresh_commands)
     assert "selected_repo: none" in report
     assert "pending_environment_candidate: owner/pending" in report
+
+
+def test_environment_selector_normalizes_null_claude_list_fields():
+    import importlib.util
+
+    script_path = Path(__file__).resolve().parents[1] / "modules" / "environment" / "scripts" / "select_evidence_ready_repo.py"
+    spec = importlib.util.spec_from_file_location("select_evidence_ready_repo_null_lists_under_test", script_path)
+    selector = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(selector)
+
+    decision = selector.normalize_topic_decision(
+        {
+            "decision": "needs-more-search",
+            "required_modifications": None,
+            "required_modifications_en": None,
+            "required_modifications_zh": None,
+            "risks": None,
+            "risks_en": None,
+            "risks_zh": None,
+            "evidence": None,
+            "evidence_en": None,
+            "evidence_zh": None,
+        }
+    )
+
+    assert decision["repo_action"] == "continue_search"
+    assert decision["required_modifications"] == []
+    assert decision["required_modifications_en"] == []
+    assert decision["required_modifications_zh"] == []
+    assert decision["risks"] == []
+    assert decision["risks_en"] == []
+    assert decision["risks_zh"] == []
+    assert decision["evidence"] == []
+    assert decision["evidence_en"] == []
+    assert decision["evidence_zh"] == []
+
+
+def test_environment_selector_salvages_jsonish_needs_more_search_decision():
+    import importlib.util
+
+    script_path = Path(__file__).resolve().parents[1] / "modules" / "environment" / "scripts" / "select_evidence_ready_repo.py"
+    spec = importlib.util.spec_from_file_location("select_evidence_ready_repo_jsonish_under_test", script_path)
+    selector = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(selector)
+
+    raw = '''Here is the decision:
+{
+  "decision": "needs-more-search",
+  "accept_as_current_best": false,
+  "confidence": 0.31,
+  "rationale": "RSIR is runnable but lacks LLM semantics
+so selecting it would misanchor experiments.",
+  "rationale_en": "RSIR is runnable but lacks LLM semantics.",
+  "rationale_zh": "RSIR 可以运行，但缺少 LLM 语义主线。",
+  "repo_action": "continue_search",
+  "required_modifications": "N/A - no suitable repo selected.",
+  "risks": null,
+  "evidence": ["audited runnable repo"]
+}
+'''
+
+    parsed = selector.jsonish_topic_decision(raw)
+    decision = selector.normalize_topic_decision(
+        parsed,
+        {"name": "USTC-StarTeam/RSIR", "repo_path": "/repo/rsir", "claim_ready_dataset": "amazon-beauty"},
+    )
+
+    assert decision["decision"] == "needs-more-search"
+    assert decision["accept_as_current_best"] is False
+    assert decision["repo_action"] == "continue_search"
+    assert "lacks LLM semantics" in decision["rationale_en"]
+    assert decision["required_modifications"] == ["N/A - no suitable repo selected."]
+    assert decision["risks"] == []
+    assert decision["evidence"] == ["audited runnable repo"]
 
 
 def test_environment_stage_rejects_pending_loader_selection_as_current_route(tmp_path, monkeypatch):
