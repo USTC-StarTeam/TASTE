@@ -20,13 +20,16 @@ def _cmd(script: str, *args: str) -> list[str]:
 def build_steps(project: str, venue: str = "") -> list[tuple[str, list[str]]]:
     health = _cmd("research_healthcheck.py", "--project", project)
     status = _cmd("report_status.py", "--project", project)
+    trajectory = _cmd("build_research_trajectory_system.py", "--project", project, "--skip-helpers")
     if venue:
         health.extend(["--venue", venue])
         status.extend(["--venue", venue])
+        trajectory.extend(["--venue", venue])
     return [
         ("healthcheck", health),
         ("status", status),
         ("next_actions", _cmd("propose_next_actions.py", "--project", project)),
+        ("trajectory", trajectory),
         ("reflection", _cmd("reflect_iteration.py", "--project", project)),
     ]
 

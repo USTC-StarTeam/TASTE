@@ -631,6 +631,7 @@ def test_status_actions_refresh_derived_project_reports(tmp_path, monkeypatch):
         assert cmd[2:] == ["--project", project, "--venue", "ICLR"]
         assert "report_status.py" not in cmd
         assert "research_healthcheck.py" not in cmd
+        assert "build_research_trajectory_system.py" not in cmd
 
 
 def test_default_find_selection_starts_with_no_sources():
