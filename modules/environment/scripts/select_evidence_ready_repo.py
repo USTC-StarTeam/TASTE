@@ -1500,6 +1500,7 @@ def main() -> int:
                     pending['anchor_selection_policy'] = 'Environment-stage Claude Code identified a loader-ready candidate, but deterministic base-switch gates keep it proposal-only until reference/audit evidence authorizes the switch.'
                     payload['pending_environment_candidate'] = pending
                     payload['claude_topic_decision'] = topic_decision
+                    save_json(paths.reports / 'repo_topic_fit_decision.json', topic_decision)
                     payload['repo_env_strategy'] = write_repo_env_strategy(
                         args.project,
                         paths,

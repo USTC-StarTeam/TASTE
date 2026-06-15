@@ -8,10 +8,29 @@ import re
 import signal
 import shutil
 import subprocess
+import sys
 import tempfile
 import urllib.error
 from pathlib import Path
 from typing import Any
+
+
+def _repo_root_from_script() -> Path:
+    current = Path(__file__).resolve()
+    for candidate in current.parents:
+        if (candidate / "framework").is_dir() and (candidate / "modules").is_dir() and (candidate / "web").is_dir():
+            return candidate
+    return current.parents[2]
+
+
+_BOOTSTRAP_ROOT = _repo_root_from_script()
+_FRAMEWORK_SCRIPTS = _BOOTSTRAP_ROOT / "framework" / "scripts"
+if str(_FRAMEWORK_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_FRAMEWORK_SCRIPTS))
+from taste_pythonpath import ensure_taste_pythonpath, taste_pythonpath_string  # noqa: E402
+
+ensure_taste_pythonpath(_BOOTSTRAP_ROOT)
+os.environ["PYTHONPATH"] = taste_pythonpath_string(_BOOTSTRAP_ROOT, os.environ.get("PYTHONPATH", ""))
 
 from project_paths import ROOT
 from paper_common import (
@@ -311,16 +330,43 @@ def sync_from_archive(archive_url: str, archive_dir: Path, source_dir: Path, dir
         shutil.rmtree(tmp_root, ignore_errors=True)
 
 
+def prefer_official_archive(template: dict[str, Any], explicit_url: str = '') -> bool:
+    if str(os.environ.get('VENUE_TEMPLATE_REPOSITORY_FIRST') or '').lower() in {'1', 'true', 'yes', 'on'}:
+        return False
+    archive_url = explicit_url or str(template.get('archive_url') or '').strip()
+    if not archive_url:
+        return False
+    required = [str(item).strip() for item in template.get('required_files', []) if str(item).strip()]
+    return bool(template.get('main_tex') or required)
+
+
 def sync_from_repository_with_archive_fallback(
     template: dict[str, Any],
     archive_dir: Path,
     source_dir: Path,
     explicit_url: str = '',
 ) -> dict[str, Any]:
+    archive_url = explicit_url or str(template.get('archive_url') or '').strip()
+    if prefer_official_archive(template, explicit_url=explicit_url):
+        try:
+            metadata = sync_from_archive(archive_url, archive_dir, source_dir, str(template.get('directory_hint') or ''))
+            metadata['source_kind'] = metadata.get('source_kind') or 'archive'
+            metadata['repository_fallback_used'] = False
+            metadata['repository_source_url'] = str(template.get('repository_url') or template.get('official_source_url') or '')
+            metadata['archive_preferred'] = True
+            return metadata
+        except Exception as archive_exc:
+            archive_error = str(archive_exc)
+        try:
+            metadata = sync_from_repository(template, source_dir)
+            metadata['archive_preferred'] = True
+            metadata['archive_fetch_error'] = archive_error
+            return metadata
+        except Exception as repo_exc:
+            raise RuntimeError(f'official archive fetch failed: {archive_error}; repository fetch failed: {repo_exc}') from repo_exc
     try:
         return sync_from_repository(template, source_dir)
     except Exception as repo_exc:
-        archive_url = explicit_url or str(template.get('archive_url') or '').strip()
         if not archive_url:
             raise
         metadata = sync_from_archive(archive_url, archive_dir, source_dir, str(template.get('directory_hint') or ''))

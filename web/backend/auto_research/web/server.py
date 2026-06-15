@@ -734,6 +734,8 @@ def _dedupe_persisted_paper_preview_jobs(items: list[dict[str, Any]]) -> list[di
 
 def _public_paper_status(raw_status: Any, row: dict[str, Any]) -> str:
     status = str(raw_status or "").strip() or "queued"
+    if _paper_content_policy_blocked(row) and status not in {"running", "queued", "cancelling", "error", "cancelled"}:
+        return "blocked"
     if _paper_preview_artifact_available(row) and status not in {"running", "queued", "cancelling", "error", "cancelled"}:
         return "preview_available"
     return status
@@ -858,6 +860,11 @@ def _is_project_agent_panel_job(stage: Any = "", job_id: Any = "", result: Any =
 def _is_paper_job(stage: Any = "", job_id: Any = "", result: Any = None, logs: Any = None) -> bool:
     if _is_project_agent_panel_job(stage, job_id, result):
         return _panel_stage_from_project_agent_result(result) == "paper"
+    stage_norm = str(stage or "").strip().lower().replace("_", "-")
+    job_norm = str(job_id or "").strip().lower().replace("_", "-")
+    action_norm = str((result or {}).get("action") or "").strip().lower().replace("_", "-") if isinstance(result, dict) else ""
+    if stage_norm in {"paper", "paperwrite", "paper-write", "paper-writing"} or job_norm.startswith("paper-") or action_norm == "paper":
+        return True
     hay_parts = [str(stage or ""), str(job_id or "")]
     if isinstance(result, dict):
         for key in ["cmd", "command", "raw_stage", "paper_summary", "paper_stage_status", "paper_orchestra_bridge_status"]:
@@ -1014,6 +1021,176 @@ def _live_job_with_active_child(job_id: str, live_job: Any, project_id: str, pha
     }
 
 
+_LIVE_TASK_STATUSES = {"queued", "running", "cancelling"}
+
+
+def _job_status_is_live(status: Any) -> bool:
+    return str(status or "").strip().lower() in _LIVE_TASK_STATUSES
+
+
+def _paper_substage_from_cmd(cmd: Any, fallback: str = "") -> str:
+    text = str(cmd or "")
+    match = re.search(r"(?:^|\s)--stage(?:=|\s+)([^\s]+)", text)
+    if match:
+        stage = match.group(1).strip().strip("'\"")
+        if stage:
+            return stage
+    lowered = text.lower()
+    if "run_paper_orchestra_bridge.py" in lowered:
+        return "writing:orchestra"
+    if "run_paper_pipeline.py" in lowered:
+        return "paper:pipeline"
+    if "fetch_latex_template.py" in lowered:
+        return "paper:template"
+    if "resolve_venue_requirements.py" in lowered:
+        return "paper:venue-requirements"
+    if "compile_paper_pdf.py" in lowered or "latexmk" in lowered or "pdflatex" in lowered:
+        return "paper:compile"
+    if "claude" in lowered:
+        return "writing:claude"
+    return str(fallback or "paper").strip() or "paper"
+
+
+def _paper_worker_projection_from_process(row: dict[str, Any], *, controller_pid: str = "") -> dict[str, Any]:
+    if not isinstance(row, dict):
+        return {}
+    cmd = str(row.get("cmd") or row.get("command") or "")
+    if not cmd or _is_inspection_or_wrapper_cmd(cmd):
+        return {}
+    lowered = cmd.lower()
+    kind = ""
+    priority = 99
+    if "claude_project_session.py" in lowered and ("writing" in lowered or "paper" in lowered):
+        kind = "paper_claude_session"
+        priority = 0
+    elif re.search(r"(?:^|/)claude\s+-p\b", cmd) or "bin/claude -p" in lowered:
+        kind = "paper_claude_cli"
+        priority = 1
+    elif "run_paper_orchestra_bridge.py" in lowered:
+        kind = "paper_orchestra_bridge"
+        priority = 2
+    elif "run_paper_pipeline.py" in lowered:
+        kind = "paper_pipeline"
+        priority = 3
+    elif any(marker in lowered for marker in ["repair_paper_preview_loop.py", "repair_paper_figures_loop.py"]):
+        kind = "paper_repair_loop"
+        priority = 4
+    elif any(marker in lowered for marker in ["fetch_latex_template.py", "resolve_venue_requirements.py", "compile_paper_pdf.py", "latexmk", "pdflatex"]):
+        kind = "paper_subprocess"
+        priority = 5
+    if not kind:
+        return {}
+    pid = str(row.get("pid") or "").strip()
+    if not pid:
+        return {}
+    substage = _paper_substage_from_cmd(cmd, fallback="paper")
+    return {
+        "pid": pid,
+        "ppid": str(row.get("ppid") or "").strip(),
+        "elapsed": str(row.get("elapsed") or "").strip(),
+        "pcpu": str(row.get("pcpu") or "").strip(),
+        "pmem": str(row.get("pmem") or "").strip(),
+        "cmd": cmd,
+        "kind": kind,
+        "current_substage": substage,
+        "priority": priority + (1 if controller_pid and pid == controller_pid else 0),
+    }
+
+
+def _paper_live_worker_projection(project: Any, result: dict[str, Any], job_status: Any = "") -> dict[str, Any]:
+    project_id = re.sub(r"[^A-Za-z0-9_.-]+", "", str(project or result.get("project") or ""))
+    if not project_id:
+        return {}
+    root = PROJECT_IDS_ROOT / project_id
+    if not root.exists():
+        return {}
+    controller_pid = str(result.get("pid") or "").strip()
+    controller_cmd = str(result.get("cmd") or result.get("command") or "").strip()
+    live_requested = _job_status_is_live(job_status) or result.get("process_alive") is True
+    candidates: list[dict[str, Any]] = []
+    if controller_pid and _pid_alive_local(controller_pid):
+        for row in _process_tree_rows(controller_pid):
+            worker = _paper_worker_projection_from_process(row, controller_pid=controller_pid)
+            if worker:
+                candidates.append(worker)
+    if not candidates:
+        for row in _active_project_child_processes(project_id, root, phase_hint="paper"):
+            worker = _paper_worker_projection_from_process(row, controller_pid=controller_pid)
+            if worker:
+                candidates.append(worker)
+    if not candidates and live_requested and controller_pid and _pid_alive_local(controller_pid):
+        candidates.append({
+            "pid": controller_pid,
+            "ppid": "",
+            "elapsed": "",
+            "pcpu": "",
+            "pmem": "",
+            "cmd": controller_cmd,
+            "kind": "paper_pipeline",
+            "current_substage": _paper_substage_from_cmd(controller_cmd, fallback="paper"),
+            "priority": 10,
+        })
+    if not candidates:
+        return {}
+    def worker_sort_key(row: dict[str, Any]) -> tuple[int, int]:
+        raw_priority = row.get("priority")
+        try:
+            priority = int(raw_priority) if raw_priority not in (None, "") else 99
+        except Exception:
+            priority = 99
+        try:
+            pid_value = int(str(row.get("pid") or "0"))
+        except Exception:
+            pid_value = 0
+        return priority, pid_value
+
+    candidates.sort(key=worker_sort_key)
+    worker = dict(candidates[0])
+    substage = str(worker.get("current_substage") or "paper").strip() or "paper"
+    projection = {
+        "project": project_id,
+        "status": "running",
+        "process_alive": True,
+        "alive": True,
+        "phase": "paper",
+        "raw_stage": substage,
+        "current_substage": substage,
+        "paper_current_substage": substage,
+        "pid": worker.get("pid"),
+        "cmd": worker.get("cmd") or controller_cmd,
+        "command": worker.get("cmd") or controller_cmd,
+        "kind": worker.get("kind") or "paper_worker",
+        "paper_worker_pid": worker.get("pid"),
+        "paper_worker_kind": worker.get("kind") or "paper_worker",
+    }
+    if controller_pid:
+        projection["paper_controller_pid"] = controller_pid
+    if controller_cmd and controller_cmd != projection.get("cmd"):
+        projection["paper_controller_cmd"] = controller_cmd
+    for key in ("elapsed", "pcpu", "pmem"):
+        if worker.get(key):
+            projection[f"paper_worker_{key}"] = worker.get(key)
+    return projection
+
+
+def _paper_live_status_message(result: dict[str, Any], progress: dict[str, Any] | None = None) -> str:
+    result = result if isinstance(result, dict) else {}
+    progress = progress if isinstance(progress, dict) else {}
+    substage = str(result.get("paper_current_substage") or result.get("current_substage") or progress.get("phase") or "paper").strip()
+    worker_pid = str(result.get("paper_worker_pid") or result.get("pid") or "").strip()
+    controller_pid = str(result.get("paper_controller_pid") or "").strip()
+    bits = [f"paper 正在运行：{substage or 'paper'}"]
+    if worker_pid:
+        bits.append(f"worker PID={worker_pid}")
+    if controller_pid and controller_pid != worker_pid:
+        bits.append(f"controller PID={controller_pid}")
+    kind = str(result.get("paper_worker_kind") or result.get("kind") or "").strip()
+    if kind:
+        bits.append(f"worker={kind}")
+    bits.append("投稿/证据门控保持真实状态")
+    return "；".join(bits) + "。"
+
+
 def _public_taste_stage(stage: Any) -> str:
     """Map internal research job labels to the seven public workflow stages."""
     raw = str(stage or '').strip()
@@ -1154,10 +1331,26 @@ class JobState:
         progress_payload = self.progress
         if compact and paper_job and public_stage == "paper" and isinstance(result_payload, dict):
             progress_payload = dict(self.progress if isinstance(self.progress, dict) else {})
-            paper_summary = str(result_payload.get("paper_summary") or "").strip()
-            if paper_summary:
-                progress_payload["message"] = paper_summary
-                progress_payload["phase"] = str(result_payload.get("status") or progress_payload.get("phase") or "paper")
+            live_paper_job = _job_status_is_live(self.status)
+            if live_paper_job:
+                project_id = _project_from_job_payload(self.job_id, {"result": result_payload}, self)
+                source_result = self.result if isinstance(self.result, dict) else {}
+                live_projection = _paper_live_worker_projection(project_id, {**source_result, **result_payload}, self.status)
+                if live_projection:
+                    result_payload = {**result_payload, **live_projection}
+                    progress_payload["message"] = _paper_live_status_message(result_payload, progress_payload)
+                    progress_payload["phase"] = str(result_payload.get("paper_current_substage") or progress_payload.get("phase") or "paper")
+                    progress_payload["current"] = progress_payload.get("current") or 0
+                    progress_payload["total"] = progress_payload.get("total") or 0
+                    progress_payload["percent"] = progress_payload.get("percent") or 0
+                else:
+                    result_payload = {**result_payload, "status": self.status}
+                    progress_payload["phase"] = str(progress_payload.get("phase") or "paper")
+            else:
+                paper_summary = str(result_payload.get("paper_summary") or "").strip()
+                if paper_summary:
+                    progress_payload["message"] = paper_summary
+                    progress_payload["phase"] = str(result_payload.get("status") or progress_payload.get("phase") or "paper")
         log_stage = panel_stage or ("paper" if paper_job else self.stage)
         logs = _public_job_logs(log_stage, self.logs, progress_payload, result_payload if isinstance(result_payload, dict) else self.result, limit=80) if compact else self.logs
         if public_stage != self.stage and isinstance(self.result, dict):
@@ -1504,6 +1697,12 @@ def _paper_public_blocker_text(value: Any) -> str:
     if not text:
         return ""
     lowered = text.lower()
+    if "legacy_route_story_in_manuscript" in lowered:
+        match = re.search(r"legacy_route_story_in_manuscript:([^;，,\s]+)", text, flags=re.IGNORECASE)
+        term = match.group(1) if match else "历史/未授权路线"
+        return f"候选稿仍包含未授权或历史路线叙事：{term}；writing 必须基于当前 selected-route evidence 重新生成或修正稿件。"
+    if "manuscript_candidate_rejected" in lowered or "manuscript_content_policy_violation" in lowered:
+        return "候选稿内容策略未通过；不能作为当前会议格式预览或投稿稿，需要由 writing 从当前证据重新生成。"
     if "missing bib entries" in lowered or "missing bibliography entries" in lowered or "cited keys=" in lowered or "latex_undefined_citations" in lowered or "undefined citations" in lowered:
         return "引用/参考文献仍需修复；具体修复清单已交由项目代理处理。"
     if "nature_numeric_style_textual_citations" in lowered or "\\citet" in text or "\\citeauthor" in text or "作者型引用命令" in text:
@@ -1529,6 +1728,89 @@ def _paper_public_layout_warning_text(value: Any) -> str:
     if "large single-column figure footprint" in lowered:
         return "图表版面提示：单栏图占地偏大，正文页数紧张时应先调整图表尺寸或重绘。"
     return _public_text(text)
+
+
+def _paper_existing_file(root: Path, value: Any) -> Path | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    candidates = [Path(text)]
+    if not Path(text).is_absolute():
+        candidates.append(root / text)
+    for path in candidates:
+        try:
+            if path.exists() and path.is_file():
+                return path
+        except Exception:
+            continue
+    return None
+
+
+def _first_existing_paper_file(root: Path, values: list[Any]) -> Path | None:
+    for value in values:
+        path = _paper_existing_file(root, value)
+        if path:
+            return path
+    return None
+
+
+def _paper_candidate_audit_projection(root: Path, audit: Any) -> dict[str, Any]:
+    rows = audit if isinstance(audit, list) else []
+    blockers: list[dict[str, Any]] = []
+    first_pdf: Path | None = None
+    first_tex: Path | None = None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        first_pdf = first_pdf or _paper_existing_file(root, row.get("pdf"))
+        first_tex = first_tex or _paper_existing_file(root, row.get("tex"))
+        violations = [str(item) for item in (row.get("violations") or []) if str(item).strip()]
+        if not violations:
+            continue
+        label = str(row.get("label") or "candidate").strip() or "candidate"
+        raw_detail = f"{label}: " + "; ".join(violations[:8])
+        public_detail = _paper_public_blocker_text(raw_detail)
+        blockers.append({
+            "id": "manuscript_candidate_rejected",
+            "status": "block",
+            "detail": public_detail,
+            "public_detail": public_detail,
+            "source": "paper_content_candidate_audit",
+            "preview_blocker": True,
+            "submission_blocker": True,
+        })
+    summary = str(blockers[0].get("public_detail") or blockers[0].get("detail") or "") if blockers else ""
+    return {"pdf": first_pdf, "tex": first_tex, "blockers": blockers, "summary": summary}
+
+
+def _paper_content_blocker_summary(root: Path, paper_state: dict[str, Any]) -> str:
+    content_status = str(paper_state.get("paper_content_policy_status") or "").strip().lower()
+    stage_status = str(paper_state.get("paper_stage_status") or paper_state.get("status") or "").strip().lower()
+    content_blocked = content_status == "blocked" or stage_status in {"blocked_content_policy", "content_policy_blocked"}
+    violations = paper_state.get("paper_content_policy_violations") if isinstance(paper_state.get("paper_content_policy_violations"), list) else []
+    if violations:
+        public = _paper_public_blocker_text("; ".join(str(item) for item in violations[:8]))
+        if public:
+            return public
+    audit = _paper_candidate_audit_projection(root, paper_state.get("paper_content_candidate_audit"))
+    if content_blocked or audit.get("summary"):
+        return str(audit.get("summary") or "")
+    return ""
+
+
+def _paper_content_policy_blocked(row: dict[str, Any]) -> bool:
+    if not isinstance(row, dict):
+        return False
+    nested = row.get("paper_stage") if isinstance(row.get("paper_stage"), dict) else {}
+    for candidate in (row, nested):
+        status = str(candidate.get("status") or candidate.get("paper_stage_status") or "").strip().lower()
+        content_status = str(candidate.get("paper_content_policy_status") or "").strip().lower()
+        if status in {"blocked_content_policy", "content_policy_blocked"} or content_status == "blocked":
+            return True
+        summary = str(candidate.get("paper_content_blocker_summary") or "").strip().lower()
+        if content_status != "pass" and ("legacy_route_story_in_manuscript" in summary or "内容策略" in summary):
+            return True
+    return False
 
 
 def _paper_public_self_review_evidence_projection(category: str, detail: str) -> dict[str, str]:
@@ -1607,9 +1889,39 @@ def _paper_stage_from_project_snapshot(project: str) -> dict[str, Any]:
     venue_raw = str(paper_state.get("venue") or venue_raw or paper_state.get("target_venue") or paper_state.get("active_venue") or "").strip()
     venue = re.sub(r"[^a-z0-9]+", "-", venue_raw.lower()).strip("-") or "venue"
     venue_requirements = _venue_requirements_summary(root, venue_raw, paper_state)
-    pdf_candidates = [root / "paper" / "output" / venue / "paper.pdf"]
-    pdf_path = next((item for item in pdf_candidates if item.exists()), None)
-    tex_path = (root / "paper" / "output" / venue / "paper.tex")
+    output_dir = root / "paper" / "output" / venue
+    workspace_dir = _paper_existing_file(root, paper_state.get("paper_orchestra_workspace"))
+    workspace_final_pdf = (workspace_dir / "final" / "paper.pdf") if workspace_dir else root / "__missing_workspace_final_paper.pdf"
+    workspace_final_tex = (workspace_dir / "final" / "paper.tex") if workspace_dir else root / "__missing_workspace_final_paper.tex"
+    candidate_audit = _paper_candidate_audit_projection(root, paper_state.get("paper_content_candidate_audit"))
+    accepted_pdf_path = _first_existing_paper_file(root, [paper_state.get("conference_preview_pdf"), paper_state.get("pdf_path")])
+    accepted_tex_path = _first_existing_paper_file(root, [paper_state.get("conference_preview_tex"), paper_state.get("rendered_tex")])
+    output_pdf_path = _paper_existing_file(root, output_dir / "paper.pdf")
+    output_tex_path = _paper_existing_file(root, output_dir / "paper.tex")
+    if not accepted_pdf_path and paper_state.get("conference_preview_ready"):
+        accepted_pdf_path = output_pdf_path
+    if not accepted_tex_path and paper_state.get("conference_preview_ready"):
+        accepted_tex_path = output_tex_path
+    blocked_pdf_path = _first_existing_paper_file(root, [paper_state.get("blocked_preview_pdf"), paper_state.get("latest_preview_pdf")])
+    blocked_tex_path = _first_existing_paper_file(root, [paper_state.get("blocked_preview_tex"), paper_state.get("latest_preview_tex")])
+    raw_pdf_path = _first_existing_paper_file(root, [
+        paper_state.get("latest_generated_pdf_path"),
+        paper_state.get("paper_orchestra_final_pdf"),
+        output_dir / "writing_raw.pdf",
+        workspace_final_pdf,
+        candidate_audit.get("pdf"),
+    ])
+    raw_tex_path = _first_existing_paper_file(root, [
+        paper_state.get("latest_generated_tex_path"),
+        paper_state.get("paper_orchestra_final_tex"),
+        output_dir / "writing_raw.tex",
+        workspace_final_tex,
+        candidate_audit.get("tex"),
+    ])
+    pdf_path = accepted_pdf_path
+    tex_path = accepted_tex_path or output_tex_path or blocked_tex_path or raw_tex_path or (output_dir / "paper.tex")
+    latest_pdf_path = accepted_pdf_path or blocked_pdf_path or raw_pdf_path
+    latest_tex_path = accepted_tex_path or blocked_tex_path or raw_tex_path
     policy = paper_state.get("venue_submission_policy") if isinstance(paper_state.get("venue_submission_policy"), dict) else {}
     blockers = paper_state.get("conference_preview_blockers") if isinstance(paper_state.get("conference_preview_blockers"), list) else []
     self_review_blockers = paper_state.get("paper_self_review_blockers") if isinstance(paper_state.get("paper_self_review_blockers"), list) else []
@@ -1619,6 +1931,10 @@ def _paper_stage_from_project_snapshot(project: str) -> dict[str, Any]:
     first = blockers[0] if blockers else ""
     raw_blocker_text = str(first.get("public_detail") or first.get("detail") or first.get("id") or "") if isinstance(first, dict) else str(first or "")
     blocker_text = _paper_public_blocker_text(raw_blocker_text)
+    content_blocker_text = _paper_content_blocker_summary(root, paper_state)
+    if not blocker_text and content_blocker_text:
+        blocker_text = content_blocker_text
+    content_policy_blocked = _paper_content_policy_blocked({**paper_state, "status": paper_state.get("paper_stage_status") or paper_state.get("status")})
     body_pages = _paper_int(paper_state.get("conference_preview_body_pages") or paper_state.get("paper_normality_body_pages"))
     body_limit = _paper_int(policy.get("body_page_max") or venue_requirements.get("body_page_max"))
     citation_count = _paper_int(paper_state.get("paper_normality_citation_count"))
@@ -1649,8 +1965,18 @@ def _paper_stage_from_project_snapshot(project: str) -> dict[str, Any]:
         diagnostics.append("论文自审未通过；具体修复项已交由项目代理处理。")
     if self_review_evidence_blockers:
         diagnostics.append(f"Claude Code 独立审稿发现 {len(self_review_evidence_blockers)} 项未解决科研证据问题；PDF 只能作为检查预览，不能标记为投稿通过。")
+    if pdf_path and paper_state.get("conference_preview_ready"):
+        paper_status = "preview_available"
+    elif content_policy_blocked:
+        paper_status = "blocked_content_policy"
+    elif blocked_pdf_path:
+        paper_status = "preview_available"
+    elif raw_pdf_path:
+        paper_status = "blocked"
+    else:
+        paper_status = "needs_writing" if blockers or not paper_state.get("conference_preview_ready") else str(paper_state.get("status") or "preview_available")
     row = {
-        "status": "preview_available" if pdf_path else ("needs_writing" if blockers or not paper_state.get("conference_preview_ready") else str(paper_state.get("status") or "preview_available")),
+        "status": paper_status,
         "venue": str(paper_state.get("venue") or venue_raw or ""),
         "target_venue": str(paper_state.get("target_venue") or venue_raw or paper_state.get("venue") or ""),
         "venue_slug": venue,
@@ -1687,6 +2013,9 @@ def _paper_stage_from_project_snapshot(project: str) -> dict[str, Any]:
         "conference_preview_reference_pages": paper_state.get("conference_preview_reference_pages", ""),
         "conference_preview_blocker_summary": blocker_text,
         "conference_preview_blockers": [],
+        "paper_content_policy_status": paper_state.get("paper_content_policy_status", ""),
+        "paper_content_blocker_summary": content_blocker_text,
+        "paper_stage_status": paper_state.get("paper_stage_status", ""),
         "paper_layout_summary": str(warnings[0]) if warnings else "",
         "paper_layout_footprint_warnings": warnings[:8],
         "paper_public_diagnostics": diagnostics,
@@ -1699,11 +2028,13 @@ def _paper_stage_from_project_snapshot(project: str) -> dict[str, Any]:
         "venue_requirements_public_summary": venue_requirements.get("summary", ""),
         "pdf_ready": bool(pdf_path),
         "pdf_path": str(pdf_path) if pdf_path else "",
-        "blocked_preview_available": bool(pdf_path),
-        "blocked_pdf_path": str(pdf_path) if pdf_path else "",
-        "blocked_tex_path": str(tex_path) if tex_path.exists() else "",
-        "latest_generated_pdf_path": str(pdf_path) if pdf_path else "",
-        "raw_pdf_path": str(pdf_path) if pdf_path else "",
+        "blocked_preview_available": bool(blocked_pdf_path),
+        "blocked_pdf_path": str(blocked_pdf_path) if blocked_pdf_path else "",
+        "blocked_tex_path": str(blocked_tex_path) if blocked_tex_path else "",
+        "latest_generated_pdf_path": str(latest_pdf_path) if latest_pdf_path else "",
+        "latest_generated_tex_path": str(latest_tex_path) if latest_tex_path else "",
+        "raw_pdf_path": str(raw_pdf_path) if raw_pdf_path else "",
+        "raw_tex_path": str(raw_tex_path) if raw_tex_path else "",
         "venue_submission_policy": policy,
     }
     row["summary"] = _paper_stage_job_message(row)
@@ -1731,8 +2062,14 @@ def _paper_stage_from_job_result(result: dict[str, Any]) -> dict[str, Any]:
 def _paper_stage_job_message(row: dict[str, Any]) -> str:
     policy = row.get("venue_submission_policy") if isinstance(row.get("venue_submission_policy"), dict) else {}
     parts: list[str] = []
-    if row.get("blocked_preview_available") or row.get("raw_pdf_path") or row.get("pdf_path"):
+    content_policy_blocked = _paper_content_policy_blocked(row)
+    content_blocker = str(row.get("paper_content_blocker_summary") or "").strip()
+    if content_policy_blocked and (row.get("latest_generated_pdf_path") or row.get("raw_pdf_path") or row.get("blocked_preview_available")):
+        parts.append("候选稿已生成但内容策略未通过")
+    elif row.get("blocked_preview_available") or row.get("raw_pdf_path") or row.get("pdf_path"):
         parts.append(_paper_venue_labels(row).get("preview_zh", "会议格式论文预览") + "已生成")
+    elif row.get("latest_generated_pdf_path"):
+        parts.append(_paper_venue_labels(row).get("preview_zh", "会议格式论文预览") + "有最近产物")
     citation_count = _paper_int(row.get("paper_normality_citation_count"))
     citation_target = _paper_int(
         row.get("paper_normality_citation_target")
@@ -1760,7 +2097,9 @@ def _paper_stage_job_message(row: dict[str, Any]) -> str:
     if body_pages and body_limit and body_pages <= body_limit and (warnings or (citation_count and citation_target and citation_count < citation_target)):
         parts.append("正文页数已符合" + _paper_venue_labels(row).get("requirement_zh", "会议要求") + "，后续重点是图表占地、真实引用覆盖和模板细节")
     blocker = str(row.get("conference_preview_blocker_summary") or "").strip()
-    if blocker:
+    if content_policy_blocked and content_blocker and content_blocker not in "；".join(parts):
+        parts.append("候选稿内容策略未通过：" + content_blocker)
+    elif blocker:
         if "reference_count" in blocker or "reference_quality_target" in blocker or "references/citation" in blocker:
             parts.append("写作质量目标未达：参考文献覆盖不足")
         elif "参考文献覆盖不足" in blocker:
@@ -1797,7 +2136,7 @@ def _compact_job_result(result: Any, stage: Any = "", job_id: Any = "", logs: An
             "paper_public_diagnostics", "paper_layout_footprint_warnings",
             "conference_preview_blockers", "venue_requirements_status",
             "venue_requirements_path", "venue_requirements_summary", "venue_requirements_public_summary", "blocked_preview_available", "blocked_pdf_path",
-            "blocked_tex_path", "latest_generated_pdf_path", "raw_pdf_path",
+            "blocked_tex_path", "latest_generated_pdf_path", "latest_generated_tex_path", "raw_pdf_path", "raw_tex_path", "paper_content_policy_status", "paper_content_blocker_summary", "paper_stage_status",
             "paper_current_regeneration_requested", "paper_preview_repair_loop_status", "paper_preview_repair_rounds", "pdf_path", "tex_path",
         ]
         for key in paper_keys:
@@ -1866,7 +2205,12 @@ def _compact_job_result(result: Any, stage: Any = "", job_id: Any = "", logs: An
         "blocked_pdf_path",
         "blocked_tex_path",
         "latest_generated_pdf_path",
+        "latest_generated_tex_path",
         "raw_pdf_path",
+        "raw_tex_path",
+        "paper_content_policy_status",
+        "paper_content_blocker_summary",
+        "paper_stage_status",
         "pdf_path",
         "tex_path",
     ]:
@@ -2332,9 +2676,14 @@ def _public_job_logs(stage: Any, logs: Any, progress: Any = None, result: Any = 
         out: list[str] = []
         message_source = result.get("paper_stage") if isinstance(result.get("paper_stage"), dict) else result
         result_summary = _paper_stage_job_message(message_source if isinstance(message_source, dict) else result).strip()
+        live_summary = _paper_live_status_message(result, progress) if result.get("process_alive") is True else ""
         message = _public_paper_progress_message(progress.get("message") or "")
         phase = str(progress.get("phase") or "").strip()
-        if result_summary:
+        if live_summary:
+            out.append("当前状态：" + live_summary)
+            if result_summary:
+                out.append("论文产物状态：" + result_summary)
+        elif result_summary:
             out.append("当前状态：" + result_summary)
         elif message:
             out.append("当前状态：" + message)
@@ -2407,7 +2756,7 @@ def _public_job_logs(stage: Any, logs: Any, progress: Any = None, result: Any = 
             "当前状态：", "当前阶段：", "写作引用质量目标：", "官方引用要求：", "目标要求：",
             "正文页数：", "图表版面：", "预览仍需完善：", "写作质量目标未达：",
             "命令：", "运行环境 PATH 前缀：", "日志：", "产物目录：", "PDF：",
-            "TeX：", "论文预览 PDF：", "最近生成 PDF：", "详细日志：",
+            "TeX：", "论文预览 PDF：", "最近生成 PDF：", "论文产物状态：", "详细日志：",
         )
         for raw_line in raw[-12:]:
             cleaned = _redact_public_log_text(_public_text(raw_line)).strip()
@@ -6567,6 +6916,7 @@ def _active_project_worker_job(project: str, root: Path, worker: dict[str, Any],
     kind = str(worker.get("kind") or "active_project_worker").strip() or "active_project_worker"
     cmd = str(worker.get("cmd") or "")
     elapsed = str(worker.get("elapsed") or "")
+    paper_substage = _paper_substage_from_cmd(cmd, fallback="paper") if phase == "paper" else ""
     current_find_worker = kind.startswith("current_find") or phase == "read"
     run_id = _project_current_find_run_id(root) if current_find_worker else ""
     if not run_id:
@@ -6579,6 +6929,8 @@ def _active_project_worker_job(project: str, root: Path, worker: dict[str, Any],
     controller_note = "由当前完整科研循环管理；不是完整科研循环控制器。" if controller_alive else "不是完整科研循环控制器；控制器未存活或需恢复。"
     if current_find_worker:
         worker_summary = f"当前 Find 精读/想法/计划 worker 正在运行；{controller_note}"
+    elif phase == "paper":
+        worker_summary = f"论文写作 worker 正在运行：{paper_substage or 'paper'}；{controller_note}"
     else:
         worker_summary = f"项目实验 worker 正在运行；{controller_note}" if phase == "experiment" else f"项目后台 worker 正在运行；{controller_note}"
     logs = [
@@ -6589,6 +6941,8 @@ def _active_project_worker_job(project: str, root: Path, worker: dict[str, Any],
         "process_alive=true",
         f"worker_kind={kind}",
     ]
+    if paper_substage:
+        logs.append(f"paper_current_substage={paper_substage}")
     detail_logs: list[str] = []
     detail_artifacts: list[str] = []
     if phase == "experiment":
@@ -6625,18 +6979,27 @@ def _active_project_worker_job(project: str, root: Path, worker: dict[str, Any],
     progress_percent = 0
     if phase == "experiment":
         progress_current, progress_total, progress_percent = _experiment_epoch_progress(logs, command=cmd)
-    message_bits = [f"{phase} worker running", f"PID={pid}"]
-    if elapsed:
-        message_bits.append(f"elapsed={elapsed}")
-    if latest_status:
-        message_bits.append(latest_status[:180])
-    elif cmd:
-        message_bits.append(cmd[:180])
+    if phase == "paper":
+        message_bits = [_paper_live_status_message({
+            "paper_current_substage": paper_substage or "paper",
+            "paper_worker_pid": pid,
+            "paper_worker_kind": kind,
+        })]
+    else:
+        message_bits = [f"{phase} worker running", f"PID={pid}"]
+        if elapsed:
+            message_bits.append(f"elapsed={elapsed}")
+        if latest_status:
+            message_bits.append(latest_status[:180])
+        elif cmd:
+            message_bits.append(cmd[:180])
+    progress_phase = paper_substage if phase == "paper" and paper_substage else phase
+    created_at = datetime.now(UTC).isoformat().replace("+00:00", "Z") if phase == "paper" else str((full_cycle if isinstance(full_cycle, dict) else {}).get("started_at") or datetime.now(UTC).isoformat())
     return {
         "job_id": f"experiment-worker_{project}_{pid}" if phase == "experiment" else (f"current-find-worker_{project}_{pid}" if current_find_worker else f"project-worker_{project}_{pid}"),
         "stage": phase,
         "status": "running",
-        "created_at": str((full_cycle if isinstance(full_cycle, dict) else {}).get("started_at") or datetime.now(UTC).isoformat()),
+        "created_at": created_at,
         "logs": logs[-80:] if compact else logs,
         "log_count": len(logs),
         "run_id": run_id,
@@ -6644,7 +7007,11 @@ def _active_project_worker_job(project: str, root: Path, worker: dict[str, Any],
             "project": project,
             "pid": pid,
             "phase": phase,
-            "raw_stage": kind,
+            "raw_stage": paper_substage or kind,
+            "current_substage": paper_substage,
+            "paper_current_substage": paper_substage,
+            "paper_worker_pid": pid if phase == "paper" else "",
+            "paper_worker_kind": kind if phase == "paper" else "",
             "command": cmd,
             "log_path": log_path,
             "artifacts": artifacts,
@@ -6659,7 +7026,7 @@ def _active_project_worker_job(project: str, root: Path, worker: dict[str, Any],
         "error": "",
         "cancel_requested": False,
         "cancelled_at": "",
-        "progress": {"phase": phase, "current": progress_current, "total": progress_total, "percent": progress_percent, "message": "；".join(message_bits)},
+        "progress": {"phase": progress_phase, "current": progress_current, "total": progress_total, "percent": progress_percent, "message": "；".join(message_bits)},
     }
 
 
@@ -7895,7 +8262,7 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
     full_cycle_job = False if panel_stage else _is_full_cycle_job(raw_stage, item.get("job_id", ""), result, item.get("logs"))
     public_stage = panel_stage or ("paper" if paper_job else (_public_full_cycle_stage(raw_stage, item.get("progress"), result) if full_cycle_job else _public_taste_stage(raw_stage)))
     compact_result: dict[str, Any] = {}
-    result_keys = ["run_id", "project", "topic", "target_venue", "action", "agent_id", "target_agent_id", "requested_stage", "panel_stage", "pid", "cmd", "kind", "log_path", "artifact_dir", "find_results_path", "find_results_size_bytes", "phase", "raw_stage", "summary", "status", "process_alive"]
+    result_keys = ["run_id", "project", "topic", "target_venue", "action", "agent_id", "target_agent_id", "requested_stage", "panel_stage", "pid", "cmd", "kind", "log_path", "artifact_dir", "find_results_path", "find_results_size_bytes", "phase", "raw_stage", "summary", "status", "process_alive", "alive", "current_substage", "paper_current_substage", "paper_worker_pid", "paper_worker_kind", "paper_controller_pid", "paper_worker_elapsed", "paper_worker_pcpu", "paper_worker_pmem"]
     if full_cycle_job:
         result_keys = [key for key in result_keys if key != "cmd"]
     for key in result_keys:
@@ -7905,7 +8272,7 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
         paper_stage = _paper_stage_from_job_result(result)
         if paper_stage:
             paper_keys = [
-                "paper_summary", "paper_stage", "venue", "target_venue", "venue_slug", "template_family", "paper_normality_status",
+                "paper_summary", "paper_stage", "status", "venue", "target_venue", "venue_slug", "template_family", "paper_normality_status",
                 "paper_venue_format_status", "paper_figure_quality_status",
                 "paper_normality_citation_count", "paper_normality_citation_target",
                 "paper_normality_reference_target_source", "paper_normality_pages",
@@ -7918,7 +8285,7 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
                 "venue_requirements_status", "venue_requirements_path",
                 "venue_requirements_summary", "venue_requirements_public_summary",
                 "blocked_preview_available", "blocked_pdf_path", "blocked_tex_path",
-                "latest_generated_pdf_path", "raw_pdf_path", "pdf_path", "tex_path",
+                "latest_generated_pdf_path", "latest_generated_tex_path", "raw_pdf_path", "raw_tex_path", "paper_content_policy_status", "paper_content_blocker_summary", "paper_stage_status", "pdf_path", "tex_path",
             ]
             paper_summary = _paper_stage_job_message(paper_stage) or str(paper_stage.get("summary") or result.get("paper_summary") or "")
             compact_result["paper_summary"] = paper_summary
@@ -7926,7 +8293,7 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
                 paper_stage[hidden_key] = []
             compact_result["paper_stage"] = {key: paper_stage.get(key) for key in paper_keys if key in paper_stage}
             for key in paper_keys:
-                if key in paper_stage and key not in {"paper_summary", "paper_stage"}:
+                if key in paper_stage and key not in {"paper_summary", "paper_stage", "status"}:
                     compact_result[key] = paper_stage.get(key)
             result = {**result, **compact_result}
     artifacts = result.get("artifacts") or result.get("artifact_paths")
@@ -7950,11 +8317,35 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
         progress_payload = item.get("progress") if isinstance(item.get("progress"), dict) else {}
         paper_row = result.get("paper_stage") if isinstance(result.get("paper_stage"), dict) else result
         paper_status = str(paper_row.get("status") or "").strip()
-        if _paper_preview_artifact_available(paper_row) and public_status not in {"running", "queued", "cancelling", "error", "cancelled"}:
+        live_paper_job = _job_status_is_live(public_status) or result.get("process_alive") is True
+        if live_paper_job:
+            if result.get("process_alive") is True and public_status not in {"queued", "cancelling"}:
+                public_status = "running"
+            compact_result["status"] = public_status
+        elif _paper_content_policy_blocked(paper_row) or _paper_content_policy_blocked(compact_result) or paper_status in {"blocked_content_policy", "content_policy_blocked"}:
+            public_status = "blocked"
+        elif _paper_preview_artifact_available(paper_row) and public_status not in {"running", "queued", "cancelling", "error", "cancelled"}:
             public_status = "preview_available"
         elif paper_status:
             public_status = "needs_writing" if paper_status.startswith("blocked") or paper_status in {"normality_blocked", "preview_pdf_blocked"} else paper_status
     public_progress = dict(item.get("progress")) if isinstance(item.get("progress"), dict) else {}
+    if paper_job and public_stage == "paper" and isinstance(result, dict) and not (_job_status_is_live(public_status) or result.get("process_alive") is True):
+        paper_summary = str(compact_result.get("paper_summary") or result.get("paper_summary") or "").strip()
+        paper_stage_row = result.get("paper_stage") if isinstance(result.get("paper_stage"), dict) else result
+        if paper_summary:
+            public_progress["message"] = paper_summary
+            public_progress["phase"] = str(paper_stage_row.get("status") or compact_result.get("status") or public_status or public_progress.get("phase") or "paper")
+            public_progress["current"] = public_progress.get("current") or 1
+            public_progress["total"] = public_progress.get("total") or 1
+            public_progress["percent"] = public_progress.get("percent") or 100
+    if paper_job and public_stage == "paper" and isinstance(result, dict) and (_job_status_is_live(public_status) or result.get("process_alive") is True):
+        live_message = _paper_live_status_message(result, public_progress) if result.get("process_alive") is True else str(public_progress.get("message") or "")
+        if live_message:
+            public_progress["message"] = live_message
+        public_progress["phase"] = str(result.get("paper_current_substage") or result.get("current_substage") or public_progress.get("phase") or "paper")
+        public_progress["current"] = public_progress.get("current") or 0
+        public_progress["total"] = public_progress.get("total") or 0
+        public_progress["percent"] = public_progress.get("percent") or 0
     if public_stage in {"environment", "experiment"}:
         command_message = _public_stage_command_message(public_stage, public_progress.get("message"))
         if command_message:
@@ -9502,6 +9893,45 @@ def api_jobs(
     dynamic = _live_jobs_from_projects(compact=True)
     if project:
         dynamic = [item for item in dynamic if _job_belongs_to_project(item, project)]
+
+    def live_paper_project(item: dict[str, Any]) -> str:
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        if str(item.get("stage") or "").strip().lower() != "paper":
+            return ""
+        if str(item.get("status") or "").strip().lower() not in {"queued", "running", "cancelling"} and result.get("process_alive") is not True:
+            return ""
+        if result.get("process_alive") is not True:
+            return ""
+        return str(result.get("project") or "").strip()
+
+    def live_paper_rank(item: dict[str, Any]) -> tuple[int, str]:
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        kind = str(result.get("paper_worker_kind") or result.get("kind") or "").strip()
+        rank = {
+            "paper_claude_session": 0,
+            "paper_claude_cli": 1,
+            "paper_orchestra_bridge": 2,
+            "paper_subprocess": 3,
+            "paper_repair_loop": 4,
+            "paper_pipeline": 5,
+        }.get(kind, 9)
+        return rank, str(item.get("created_at") or "")
+
+    preferred_live_paper: dict[str, dict[str, Any]] = {}
+    for item in dynamic:
+        item_project = live_paper_project(item)
+        if not item_project:
+            continue
+        current = preferred_live_paper.get(item_project)
+        if current is None or live_paper_rank(item) < live_paper_rank(current):
+            preferred_live_paper[item_project] = item
+    if preferred_live_paper:
+        dynamic = [
+            item for item in dynamic
+            if not live_paper_project(item) or preferred_live_paper.get(live_paper_project(item)) is item
+        ]
+    live_paper_projects = set(preferred_live_paper)
+
     with JOBS_LOCK:
         job_snapshot = list(JOBS.values())
     if project:
@@ -9591,6 +10021,19 @@ def api_jobs(
         ]
     dynamic_ids = {str(item.get("job_id") or "") for item in dynamic}
     persisted_items = [item for item in persisted if str(item.get("job_id") or "") not in dynamic_ids]
+    if live_paper_projects:
+        def superseded_by_live_paper(item: dict[str, Any]) -> bool:
+            result = item.get("result") if isinstance(item.get("result"), dict) else {}
+            status = str(item.get("status") or "").strip().lower()
+            if status not in {"preview_available", "needs_writing", "completed", "done", "blocked"}:
+                return False
+            if _public_taste_stage(item.get("stage")) != "paper" and not _is_paper_job(item.get("stage"), item.get("job_id", ""), result, item.get("logs")):
+                return False
+            paper_stage = result.get("paper_stage") if isinstance(result.get("paper_stage"), dict) else {}
+            item_project = str(result.get("project") or paper_stage.get("project") or "").strip()
+            return item_project in live_paper_projects
+
+        persisted_items = [item for item in persisted_items if not superseded_by_live_paper(item)]
 
     def _dedupe_completed_paper_previews(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         latest_key: dict[tuple[str, str], str] = {}
@@ -9598,7 +10041,7 @@ def api_jobs(
             stage = str(item.get("stage") or "")
             result = item.get("result") if isinstance(item.get("result"), dict) else {}
             status = str(item.get("status") or "").lower()
-            is_paper_preview = _is_paper_job(stage, item.get("job_id", ""), result, item.get("logs")) and status in {"preview_available", "needs_writing", "completed", "done"}
+            is_paper_preview = _is_paper_job(stage, item.get("job_id", ""), result, item.get("logs")) and status in {"preview_available", "needs_writing", "completed", "done", "blocked"}
             if not is_paper_preview:
                 continue
             project = str(result.get("project") or ((result.get("paper_stage") if isinstance(result.get("paper_stage"), dict) else {}) or {}).get("project") or "")
@@ -9613,7 +10056,7 @@ def api_jobs(
             stage = str(item.get("stage") or "")
             result = item.get("result") if isinstance(item.get("result"), dict) else {}
             status = str(item.get("status") or "").lower()
-            is_paper_preview = _is_paper_job(stage, item.get("job_id", ""), result, item.get("logs")) and status in {"preview_available", "needs_writing", "completed", "done"}
+            is_paper_preview = _is_paper_job(stage, item.get("job_id", ""), result, item.get("logs")) and status in {"preview_available", "needs_writing", "completed", "done", "blocked"}
             if not is_paper_preview:
                 kept.append(item)
                 continue

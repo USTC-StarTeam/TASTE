@@ -18,8 +18,13 @@ def _repo_root_from_script() -> Path:
     return current.parents[1]
 
 ROOT = _repo_root_from_script()
-from taste_pythonpath import script_resolver
+FRAMEWORK_SCRIPTS = ROOT / 'framework' / 'scripts'
+if str(FRAMEWORK_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(FRAMEWORK_SCRIPTS))
+from taste_pythonpath import ensure_taste_pythonpath, script_resolver, taste_pythonpath_string
 
+ensure_taste_pythonpath(ROOT)
+os.environ['PYTHONPATH'] = taste_pythonpath_string(ROOT, os.environ.get('PYTHONPATH', ''))
 SCRIPTS = script_resolver(ROOT)
 sys.path.insert(0, str(SCRIPTS))
 

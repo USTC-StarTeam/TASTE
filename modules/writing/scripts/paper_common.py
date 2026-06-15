@@ -6,13 +6,33 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
+import time
 import urllib.parse
 import urllib.request
 import zipfile
 from html import unescape
 from pathlib import Path
 from typing import Any, Iterable
+
+
+def _repo_root_from_script() -> Path:
+    current = Path(__file__).resolve()
+    for candidate in current.parents:
+        if (candidate / "framework").is_dir() and (candidate / "modules").is_dir() and (candidate / "web").is_dir():
+            return candidate
+    return current.parents[2]
+
+
+_BOOTSTRAP_ROOT = _repo_root_from_script()
+_FRAMEWORK_SCRIPTS = _BOOTSTRAP_ROOT / "framework" / "scripts"
+if str(_FRAMEWORK_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_FRAMEWORK_SCRIPTS))
+from taste_pythonpath import ensure_taste_pythonpath, taste_pythonpath_string  # noqa: E402
+
+ensure_taste_pythonpath(_BOOTSTRAP_ROOT)
+os.environ["PYTHONPATH"] = taste_pythonpath_string(_BOOTSTRAP_ROOT, os.environ.get("PYTHONPATH", ""))
 
 from project_paths import ROOT, build_paths, load_project_config
 
@@ -1320,9 +1340,18 @@ def find_download_links(page_url: str, html: str) -> list[str]:
 
 def download_binary(url: str, destination: Path) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
+    timeout = max(10, int(os.environ.get('VENUE_DOWNLOAD_TIMEOUT_SEC', '90') or 90))
+    deadline = time.monotonic() + timeout
     request = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        destination.write_bytes(response.read())
+    with urllib.request.urlopen(request, timeout=min(timeout, 30)) as response:
+        with destination.open('wb') as handle:
+            while True:
+                if time.monotonic() > deadline:
+                    raise TimeoutError(f'download timed out after {timeout}s: {url}')
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
     return destination
 
 
@@ -1466,7 +1495,9 @@ VENUE_SCOPED_PIPELINE_KEYS = {
     'conference_preview_ready', 'conference_preview_pdf', 'conference_preview_tex', 'conference_preview_pages',
     'conference_preview_body_pages', 'conference_preview_body_page_limit', 'conference_preview_reference_pages',
     'conference_preview_blocker_summary', 'conference_preview_blockers', 'blocked_preview_pdf', 'blocked_preview_tex',
-    'blocked_pdf_path', 'blocked_tex_path', 'latest_generated_pdf_path', 'latest_preview_pdf', 'latest_preview_tex',
+    'blocked_pdf_path', 'blocked_tex_path', 'latest_generated_pdf_path', 'latest_generated_tex_path',
+    'latest_preview_pdf', 'latest_preview_tex', 'paper_content_policy_status', 'paper_content_policy_violations',
+    'paper_content_candidate_audit', 'paper_stage_status',
     'rendered_tex', 'pdf_path', 'pdf_ready', 'paper_venue_format_status', 'paper_venue_format_validation',
     'venue_template_format_ready', 'venue_template_validation', 'venue_template_profile', 'venue_submission_policy',
     'venue_submission_policy_status', 'paper_normality_status', 'paper_normality_pages', 'paper_normality_body_pages',

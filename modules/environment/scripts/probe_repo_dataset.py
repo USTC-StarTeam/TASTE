@@ -201,6 +201,34 @@ def _base_switch_pending_topic_decision(existing: Any, pending: dict[str, Any], 
     return decision
 
 
+def _write_topic_decision_report(project: str, decision: dict[str, Any]) -> None:
+    reports = ROOT / 'projects' / project / 'reports'
+    reports.mkdir(parents=True, exist_ok=True)
+    save_json(reports / 'repo_topic_fit_decision.json', decision)
+
+
+def _write_repo_env_strategy_report(project: str, strategy: dict[str, Any]) -> None:
+    reports = ROOT / 'projects' / project / 'reports'
+    reports.mkdir(parents=True, exist_ok=True)
+    lines = [
+        '# Claude Repo/Data/Env Stewardship Strategy\n\n',
+        f"- generated_at: {strategy.get('generated_at', '')}\n",
+        f"- repo_action: {strategy.get('repo_action', '')}\n",
+        f"- repo_action_reason: {strategy.get('repo_action_reason', '')}\n",
+        f"- repo_action_reason_zh: {strategy.get('repo_action_reason_zh', '')}\n",
+        f"- env_action: {strategy.get('env_action', '')}\n",
+        f"- env_action_reason: {strategy.get('env_action_reason', '')}\n",
+        f"- env_action_reason_zh: {strategy.get('env_action_reason_zh', '')}\n",
+        f"- recommended_env_name: {strategy.get('recommended_env_name', '')}\n",
+        f"- data_action: {strategy.get('data_action', '')}\n",
+        f"- data_action_reason: {strategy.get('data_action_reason', '')}\n",
+        f"- data_action_reason_zh: {strategy.get('data_action_reason_zh', '')}\n",
+        f"- stewardship_memory: {strategy.get('stewardship_memory', '')}\n",
+        f"- stewardship_memory_zh: {strategy.get('stewardship_memory_zh', '')}\n",
+    ]
+    (reports / 'repo_env_strategy.md').write_text(''.join(lines), encoding='utf-8')
+
+
 def _sync_pending_environment_candidate(project: str, payload: dict[str, Any], contract: dict[str, Any], state_path: Path, contract_path: Path) -> None:
     state = ROOT / 'projects' / project / 'state'
     selection_path = state / 'evidence_ready_repo_selection.json'
@@ -239,6 +267,7 @@ def _sync_pending_environment_candidate(project: str, payload: dict[str, Any], c
         pending['base_switch_failed_checks'] = failed
         pending['claude_topic_decision'] = topic_decision
         selection['claude_topic_decision'] = topic_decision
+        _write_topic_decision_report(project, topic_decision)
         strategy = load_json(state / 'repo_env_strategy.json', {})
         if not isinstance(strategy, dict):
             strategy = {}
@@ -263,6 +292,7 @@ def _sync_pending_environment_candidate(project: str, payload: dict[str, Any], c
             },
         })
         save_json(state / 'repo_env_strategy.json', strategy)
+        _write_repo_env_strategy_report(project, strategy)
         selection['repo_env_strategy'] = strategy
         if str(selection.get('selection_gate') or '') == PENDING_LOADER_SELECTION_GATE:
             selection['selection_gate'] = BASE_SWITCH_SELECTION_GATE

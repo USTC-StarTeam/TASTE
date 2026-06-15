@@ -24,8 +24,13 @@ def _repo_root_from_script() -> Path:
     return current.parents[1]
 
 ROOT = _repo_root_from_script()
-from taste_pythonpath import script_resolver
+FRAMEWORK_SCRIPTS = ROOT / 'framework' / 'scripts'
+if str(FRAMEWORK_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(FRAMEWORK_SCRIPTS))
+from taste_pythonpath import ensure_taste_pythonpath, script_resolver, taste_pythonpath_string
 
+ensure_taste_pythonpath(ROOT)
+os.environ['PYTHONPATH'] = taste_pythonpath_string(ROOT, os.environ.get('PYTHONPATH', ''))
 SCRIPTS = script_resolver(ROOT)
 sys.path.insert(0, str(SCRIPTS))
 
@@ -215,6 +220,255 @@ def html_to_compact_text(html: str) -> str:
     text = re.sub(r'<style\b[^>]*>.*?</style>', ' ', text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r'<[^>]+>', ' ', text)
     return re.sub(r'\s+', ' ', text).strip()
+
+
+ICLR_TEMPLATE_REPOSITORY_URL = 'https://github.com/ICLR/Master-Template.git'
+ICLR_TEMPLATE_REPOSITORY_PAGE = 'https://github.com/ICLR/Master-Template'
+ICLR_TEMPLATE_REPOSITORY_API = 'https://api.github.com/repos/ICLR/Master-Template/contents'
+ICLR_RAW_TEMPLATE_BASE = 'https://raw.githubusercontent.com/ICLR/Master-Template/master'
+
+
+def is_iclr_venue(venue: str) -> bool:
+    return 'iclr' in slugify(venue)
+
+
+def discover_iclr_template_year(default: str = '2026') -> str:
+    candidates: set[int] = set()
+    for url in [ICLR_TEMPLATE_REPOSITORY_API, ICLR_TEMPLATE_REPOSITORY_PAGE]:
+        text = fetch_official_text(url, timeout=20)
+        for match in re.finditer(r'iclr(20\d{2})', text or '', flags=re.IGNORECASE):
+            candidates.add(int(match.group(1)))
+    return str(max(candidates)) if candidates else default
+
+
+def conference_reference_quality_target(body_page_max: int, *, track: str = 'conference') -> int:
+    if 'conference' not in str(track or '').lower():
+        return 0
+    if body_page_max > 0:
+        return max(35, min(70, body_page_max * 5))
+    return 45
+
+
+def build_iclr_requirements(project: str, venue: str) -> dict[str, Any]:
+    checked = now_iso()
+    year = discover_iclr_template_year()
+    year_dir = f'iclr{year}'
+    style_stem = f'{year_dir}_conference'
+    main_tex = f'{style_stem}.tex'
+    raw_tex_url = f'{ICLR_RAW_TEMPLATE_BASE}/{year_dir}/{main_tex}'
+    raw_style_url = f'{ICLR_RAW_TEMPLATE_BASE}/{year_dir}/{style_stem}.sty'
+    guide_url = f'https://iclr.cc/Conferences/{year}/AuthorGuide'
+    archive_url = f'https://github.com/ICLR/Master-Template/raw/master/{year_dir}.zip'
+    author_html = fetch_official_text(guide_url, timeout=30)
+    author_text = html_to_compact_text(author_html) if author_html else ''
+    template_text = fetch_official_text(raw_tex_url, timeout=30)
+    combined = ' '.join(part for part in [author_text, template_text] if part)
+    body_page_max = parse_body_page_limit(combined)
+    lower = combined.lower()
+    references_outside_limit = bool(
+        'unlimited additional pages' in lower
+        or 'references does not count towards the page limit' in lower
+        or 'bibliography/references' in lower
+    )
+    quality_target = conference_reference_quality_target(body_page_max, track='conference')
+    official_sources: list[dict[str, Any]] = []
+    candidate_sources: list[dict[str, Any]] = []
+    if author_html:
+        official_sources.append({
+            'url': guide_url,
+            'label': f'ICLR {year} Official Author Guide',
+            'evidence': (
+                f'Official ICLR {year} author instructions were reachable during venue-intelligence; '
+                f'TASTE uses them with the official template to resolve anonymous review and page-policy requirements.'
+            ),
+            'access_status': 'ok',
+        })
+    else:
+        candidate_sources.append({
+            'url': guide_url,
+            'label': f'ICLR {year} Official Author Guide',
+            'evidence': 'The official author guide URL was checked but was not reachable from this machine during the bounded resolver run.',
+            'access_status': 'unavailable',
+        })
+    if template_text:
+        official_sources.extend([
+            {
+                'url': ICLR_TEMPLATE_REPOSITORY_PAGE,
+                'label': 'ICLR official Master-Template repository',
+                'evidence': f'TASTE fetched the official {year_dir}/{main_tex} source from the ICLR Master-Template repository before writing.',
+                'access_status': 'ok',
+            },
+            {
+                'url': raw_tex_url,
+                'label': f'ICLR {year} official LaTeX template source',
+                'evidence': (
+                    f'Official template source specifies the ICLR {year} review manuscript format and was parsed for the main-text page policy.'
+                ),
+                'access_status': 'ok',
+            },
+        ])
+    else:
+        candidate_sources.append({
+            'url': raw_tex_url,
+            'label': f'ICLR {year} official LaTeX template source',
+            'evidence': 'The official raw template source was not reachable from this machine during the bounded resolver run.',
+            'access_status': 'unavailable',
+        })
+    template = {
+        'family': 'iclr',
+        'format_label': f'ICLR {year} official LaTeX review template',
+        'official_source_url': ICLR_TEMPLATE_REPOSITORY_PAGE,
+        'repository_url': ICLR_TEMPLATE_REPOSITORY_URL,
+        'archive_url': archive_url,
+        'directory_hint': year_dir,
+        'main_tex': main_tex,
+        'documentclass': 'article',
+        'documentclass_options': [],
+        'recommended_documentclass_options': [],
+        'bibliography_style': style_stem,
+        'required_files': [
+            main_tex,
+            f'{style_stem}.sty',
+            f'{style_stem}.bst',
+            f'{style_stem}.bib',
+            'natbib.sty',
+            'fancyhdr.sty',
+            'math_commands.tex',
+        ],
+        'required_markers': [
+            f'Under review as a conference paper at ICLR {year}',
+            'Anonymous authors',
+            'Paper under double-blind review',
+        ],
+        'forbidden_fallback_markers': ['minimal compile fallback', 'compile-capable fallback', 'generated venue-aware fallback'],
+    }
+    page_policy = {
+        'body_page_min': 0,
+        'body_page_max': body_page_max,
+        'reference_page_max': 0,
+        'total_page_max': 0,
+        'appendix_policy': (
+            f'Official ICLR {year} instructions/template cap the initial-submission main text at {body_page_max} pages; '
+            'references/bibliography are outside that main-text page limit.'
+            if body_page_max else
+            f'ICLR {year} official template and author guide were checked, but TASTE did not parse a nonzero body-page limit.'
+        ),
+        'source_type': 'official_author_guide_and_template' if author_html and template_text else 'official_template_instruction',
+        'source_url': guide_url if author_html else raw_tex_url,
+        'source_evidence': (
+            f'Parsed from official ICLR {year} AuthorGuide and/or {year_dir}/{main_tex} in ICLR/Master-Template.'
+        ),
+    }
+    citation_policy = {
+        'min_verified_references': quality_target,
+        'estimated_references_per_page': 30,
+        'source_type': 'quality_target',
+        'rationale': (
+            f'ICLR does not define an official minimum reference count in the parsed sources; TASTE sets {quality_target} verified references as a dynamic writing-quality target for a {body_page_max or "full"}-page full-conference manuscript. This is not an official venue minimum.'
+        ),
+    }
+    review_policy = {
+        'anonymous_required': True,
+        'self_citation_third_person_required': True,
+        'reproducibility_expected': True,
+        'data_availability_expected': True,
+        'code_availability_expected': True,
+    }
+    paper_shape = {
+        'canonical_sections': ['Introduction', 'Related Work', 'Method', 'Experiments', 'Conclusion'],
+        'max_main_sections': 7,
+    }
+    policy = {
+        'status': 'known',
+        'venue': venue,
+        'slug': slugify(venue),
+        'track': 'conference',
+        'source_url': guide_url if author_html else raw_tex_url,
+        'source_label': f'ICLR {year} official author instructions and Master-Template',
+        'source_checked_date': checked[:10],
+        'format_label': template['format_label'],
+        'template_family': 'iclr',
+        'required_documentclass': 'article',
+        'required_documentclass_options': [],
+        'body_page_min': 0,
+        'body_page_max': body_page_max,
+        'reference_page_max': 0,
+        'total_page_max': 0,
+        'min_references': 0,
+        'official_min_references': 0,
+        'reference_quality_target': quality_target,
+        'reference_target_source': 'quality_target' if quality_target else 'none',
+        'estimated_references_per_page': 30,
+        'canonical_sections': paper_shape['canonical_sections'],
+        'max_main_sections': paper_shape['max_main_sections'],
+        'anonymous_required': True,
+        'self_citation_third_person_required': True,
+        'reviewer_nomination_required': False,
+        'reproducibility_expected': True,
+        'data_availability_expected': True,
+        'code_availability_expected': True,
+        'desk_reject_risks': [
+            {'id': 'wrong_template', 'requirement': f'Use the official ICLR {year} LaTeX review template/style files.', 'automatable': True, 'severity': 'block'},
+            {'id': 'page_limit', 'requirement': f'Keep initial-submission main text within the official {body_page_max or "resolved"}-page ICLR limit.', 'automatable': True, 'severity': 'block'},
+            {'id': 'not_anonymous', 'requirement': 'Double-blind review submissions must not expose author names, affiliations, acknowledgments, or identifying self-citations.', 'automatable': True, 'severity': 'block'},
+        ],
+    }
+    profile = {
+        'venue': venue,
+        'slug': slugify(venue),
+        'family': 'iclr',
+        'format_label': template['format_label'],
+        'documentclass': 'article',
+        'required_options': [],
+        'recommended_options': [],
+        'forbidden_documentclasses': ['acmart', 'llncs', 'IEEEtran'],
+        'required_markers': template['required_markers'],
+        'forbidden_markers': template['forbidden_fallback_markers'],
+        'required_files': template['required_files'],
+        'submission_policy': policy,
+        'submission_notes': [
+            f'Use the official ICLR {year} review template from ICLR/Master-Template.',
+            'Keep review submissions anonymous and do not enable camera-ready author metadata.',
+            'References do not count toward the main-text page limit when the resolved official policy states they are outside the limit.',
+        ],
+    }
+    blockers: list[str] = []
+    if not official_sources:
+        blockers.append('ICLR official author guide/template source was not reachable during this bounded resolver run')
+    if not body_page_max:
+        blockers.append('ICLR official body-page limit was not parsed from official author guide or template source')
+    if not references_outside_limit:
+        blockers.append('ICLR reference/bibliography page policy was not parsed from official author guide or template source')
+    if not quality_target:
+        blockers.append('ICLR writing-quality reference target was not resolved')
+    return {
+        'status': 'ok' if not blockers else 'blocked',
+        'venue': venue,
+        'track': 'conference',
+        'venue_slug': slugify(venue),
+        'project': project,
+        'source_checked_at': checked,
+        'updated_at': checked,
+        'official_sources': official_sources,
+        'candidate_official_sources': candidate_sources,
+        'page_policy': page_policy,
+        'citation_policy': citation_policy,
+        'review_policy': review_policy,
+        'template': template,
+        'paper_shape': paper_shape,
+        'layout_guidance': {
+            'page_fit_priority': ['figure/table footprint', 'reference count and bibliography style', 'prose length'],
+            'figure_policy': 'For ICLR preview, diagnose figure/table footprint and bibliography density before cutting scientific content; do not rewrite evidence claims to fit pages.',
+        },
+        'venue_submission_policy': policy,
+        'venue_template_profile': profile,
+        'official_fetch_diagnostics': {
+            'template_year': year,
+            'author_guide_bytes': len(author_html.encode('utf-8')) if author_html else 0,
+            'raw_template_bytes': len(template_text.encode('utf-8')) if template_text else 0,
+        },
+        'blockers': blockers,
+    }
 
 
 
@@ -1177,15 +1431,25 @@ def main() -> int:
         return 0
 
     claude_result: dict[str, Any] = {"skipped": True}
+    deterministic_contract = False
     if is_nature_family_venue(args.venue):
         payload = build_nature_family_requirements(args.project, args.venue)
+        deterministic_contract = True
+        write_json(out_path, payload)
+    elif is_iclr_venue(args.venue):
+        payload = build_iclr_requirements(args.project, args.venue)
+        deterministic_contract = True
         write_json(out_path, payload)
     elif not args.skip_claude:
         claude_result = run_claude(args.project, args.venue, out_path, args.timeout_sec)
 
     payload = load_json(out_path, {})
     if isinstance(payload, dict) and payload:
-        payload = heal_verified_venue_payload(normalize_requirement_payload(augment_with_repository_verification(payload, refresh_official=args.force_refresh), args.venue, args.project))
+        if deterministic_contract and payload_has_self_contained_official_venue_contract(payload):
+            payload = heal_verified_venue_payload(normalize_requirement_payload(payload, args.venue, args.project))
+            payload.setdefault('warnings', []).append('official repository clone verification is deferred to bounded template fetch because the deterministic venue contract already has official sources, page policy, template source, submission policy, and template profile')
+        else:
+            payload = heal_verified_venue_payload(normalize_requirement_payload(augment_with_repository_verification(payload, refresh_official=args.force_refresh), args.venue, args.project))
     elif args.skip_claude and isinstance(existing, dict) and existing:
         payload = heal_verified_venue_payload(normalize_requirement_payload(augment_with_repository_verification(existing, refresh_official=args.force_refresh), args.venue, args.project))
     else:

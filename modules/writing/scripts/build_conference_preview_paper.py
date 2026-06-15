@@ -62,6 +62,183 @@ def _heading_matches_required(required: str, headings: list[str]) -> bool:
     return any(any(alias in heading for alias in aliases if alias) for heading in headings)
 
 
+ROUTE_STORY_HARD_MARKERS = [
+    "current selected route",
+    "current route",
+    "selected route",
+    "selected base",
+    "current base",
+    "active repository",
+    "active repo",
+    "current repository",
+    "current repo",
+    "base-switch",
+    "base switch",
+    "candidate route",
+    "legacy route",
+    "non-authoritative",
+    "loader",
+    "codebase",
+    "repo-defined",
+]
+
+ROUTE_STORY_ACTION_RE = re.compile(
+    r"\b(?:we|our|this work|this paper|the paper|the manuscript|the framework|the method)\b"
+    r".{0,140}\b(?:use|uses|used|using|adopt|adopts|adopted|base|based|build|builds|built|implement|implements|implemented|"
+    r"run|runs|ran|train|trains|trained|evaluate|evaluates|evaluated|select|selects|selected|switch|switches|switched)\w*\b",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+ROUTE_STORY_TECHNICAL_RE = re.compile(
+    r"\b(?:repository|repo|codebase|implementation|environment|loader|dataset|data pipeline|artifact|experiment|backbone|base)\b",
+    flags=re.IGNORECASE,
+)
+
+PRIOR_WORK_SECTION_WORDS = {"related work", "background", "introduction"}
+PRIOR_WORK_CONTEXT_RE = re.compile(
+    r"(?:\\cite\w*\{|prior work|existing work|existing method|recent method|previous work|"
+    r"proposes|proposed|introduces|introduced|addresses|addressed|constructs|constructed|achieves|achieved|"
+    r"demonstrates|demonstrated|reports|reported|shows|showed|leverages|leveraged|formalizes|formalized)",
+    flags=re.IGNORECASE,
+)
+
+
+def _route_term_candidates(value: object) -> list[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    variants: set[str] = set()
+    is_url = bool(re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", raw))
+    if is_url:
+        raw = raw.rstrip("/").split("/")[-1]
+    repo_slug = bool(re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?$", raw))
+    leaf = re.split(r"[/\\]", raw.rstrip("/\\"))[-1]
+    leaf_suffix = Path(leaf).suffix.lower()
+    source_items = [leaf]
+    if leaf_suffix not in {".json", ".md", ".txt", ".log"}:
+        source_items.append(Path(leaf).stem)
+    if repo_slug or ("/" not in raw and "\\" not in raw):
+        source_items.insert(0, raw)
+    for item in source_items:
+        cleaned = re.sub(r"\.git$", "", str(item).strip(), flags=re.IGNORECASE)
+        cleaned = cleaned.strip(" `[](){}.,;:'\"\n\t")
+        if not cleaned or cleaned.lower().endswith((".json", ".md", ".txt", ".log")):
+            continue
+        # Long paper titles belong in citation/reference metadata, not in the
+        # route-name policy. Route-story checks should focus on repo/base labels.
+        if " " in cleaned and len(cleaned) > 40:
+            continue
+        variants.add(cleaned)
+    return sorted(variants, key=str.lower)
+
+
+
+def _route_string_looks_artifact_path(value: object) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    leaf = re.split(r"[/\\]", raw.rstrip("/\\"))[-1]
+    if Path(leaf).suffix.lower() in {".json", ".md", ".txt", ".log"}:
+        return True
+    parts = {part.lower() for part in re.split(r"[/\\]", raw)}
+    return bool(("reports" in parts or "state" in parts) and "repos" not in parts)
+
+
+def _legacy_route_terms(project: str) -> list[str]:
+    state = ROOT / "projects" / project / "state"
+    terms: list[str] = []
+    for state_name in ["base_switch_execution.json", "base_switch_gate.json", "obsolete_baseline_cleanup_plan.json"]:
+        payload = read_json(state / state_name, {})
+        if not isinstance(payload, dict):
+            continue
+        candidates = [payload.get("candidate_route"), payload.get("new_route"), payload.get("invalidated_previous_new_route")]
+        candidates.extend(payload.get("blocked_candidate_paths", []) if isinstance(payload.get("blocked_candidate_paths"), list) else [])
+        for row in candidates:
+            if isinstance(row, dict):
+                for value in [row.get("repo"), row.get("name"), row.get("repo_name"), row.get("path"), row.get("repo_path"), row.get("local_path")]:
+                    terms.extend(_route_term_candidates(value))
+            else:
+                if _route_string_looks_artifact_path(row):
+                    continue
+                terms.extend(_route_term_candidates(row))
+    return sorted({item for item in terms if len(item) >= 4}, key=str.lower)
+
+
+def _latex_section_ranges(text: str) -> list[tuple[int, str]]:
+    ranges: list[tuple[int, str]] = []
+    for match in re.finditer(r"\\(?:section|subsection|subsubsection|paragraph)\*?\{([^{}]+)\}", text):
+        title = re.sub(r"[^a-z0-9 ]+", " ", match.group(1).lower()).strip()
+        ranges.append((match.start(), title))
+    return ranges
+
+
+def _section_at(section_ranges: list[tuple[int, str]], index: int) -> str:
+    current = ""
+    for start, title in section_ranges:
+        if start > index:
+            break
+        current = title
+    return current
+
+
+def _sentence_window(text: str, start: int, end: int, radius: int = 520) -> str:
+    left_candidates = [text.rfind(". ", 0, start), text.rfind("\n\n", 0, start), text.rfind("\n", 0, start)]
+    left = max(left_candidates)
+    if left < 0 or start - left > radius:
+        left = max(0, start - radius)
+    else:
+        left += 1
+    right_candidates = [pos for pos in [text.find(". ", end), text.find("\n\n", end), text.find("\n", end)] if pos >= 0]
+    right = min(right_candidates) if right_candidates else min(len(text), end + radius)
+    if right - end > radius:
+        right = min(len(text), end + radius)
+    return text[left:right].strip()
+
+
+def _is_prior_work_context(section: str, window: str) -> bool:
+    lowered_section = section.lower()
+    if any(word in lowered_section for word in PRIOR_WORK_SECTION_WORDS) and PRIOR_WORK_CONTEXT_RE.search(window):
+        return True
+    if "\\cite" in window and PRIOR_WORK_CONTEXT_RE.search(window):
+        return True
+    return False
+
+
+def _is_route_story_context(section: str, window: str) -> bool:
+    lowered = window.lower()
+    if any(marker in lowered for marker in ROUTE_STORY_HARD_MARKERS):
+        return True
+    if ROUTE_STORY_ACTION_RE.search(window) and ROUTE_STORY_TECHNICAL_RE.search(window):
+        return True
+    unsafe_section = any(word in section for word in ["method", "experiment", "implementation", "result", "reproduc", "protocol"])
+    if unsafe_section and ROUTE_STORY_ACTION_RE.search(window):
+        return True
+    return False
+
+
+def legacy_route_story_violations(project: str, text: str, active_name: str = "") -> list[str]:
+    section_ranges = _latex_section_ranges(text)
+    violations: list[str] = []
+    active_lower = active_name.lower()
+    for term in _legacy_route_terms(project):
+        term_lower = term.lower()
+        if active_lower and term_lower in active_lower:
+            continue
+        pattern = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(term) + r"(?![A-Za-z0-9_])", flags=re.IGNORECASE)
+        for match in pattern.finditer(text):
+            window = _sentence_window(text, match.start(), match.end())
+            section = _section_at(section_ranges, match.start())
+            if _is_route_story_context(section, window):
+                violations.append(f"legacy_route_story_in_manuscript:{term}")
+                break
+            if _is_prior_work_context(section, window):
+                continue
+            if section and any(word in section for word in ["method", "experiment", "implementation", "result", "reproduc", "protocol"]):
+                violations.append(f"legacy_route_story_in_manuscript:{term}")
+                break
+    return violations
+
+
 def latex_text_with_inputs(path: Path, *, seen: set[Path] | None = None) -> str:
     if not path.exists() or not path.is_file():
         return ""
@@ -122,6 +299,72 @@ def _candidate_manifest(candidates: list[dict[str, object]]) -> list[dict[str, o
     return rows
 
 
+def _first_existing_candidate_path(candidate_manifest: list[dict[str, object]], key: str) -> Path | None:
+    for row in candidate_manifest:
+        path_text = str(row.get(key) or "").strip()
+        if not path_text:
+            continue
+        path = Path(path_text)
+        if path.exists() and path.is_file():
+            return path
+    return None
+
+
+def _candidate_rejection_blockers(candidate_manifest: list[dict[str, object]]) -> list[dict[str, object]]:
+    blockers: list[dict[str, object]] = []
+    for row in candidate_manifest:
+        violations = [str(item) for item in (row.get("violations") or []) if str(item).strip()]
+        if not violations:
+            continue
+        label = str(row.get("label") or "candidate").strip() or "candidate"
+        blockers.append({
+            "id": "manuscript_candidate_rejected",
+            "status": "block",
+            "detail": f"{label}: " + "; ".join(violations[:8]),
+            "source": "paper_content_candidate_audit",
+            "preview_blocker": True,
+            "submission_blocker": True,
+        })
+    return blockers
+
+
+def _public_blocker_detail(item: object) -> tuple[str, str]:
+    if isinstance(item, dict):
+        blocker_id = str(item.get("id") or item.get("category") or "preview_check")
+        detail = str(item.get("public_detail") or item.get("detail") or item.get("issue") or "").strip()
+        if not detail:
+            detail = json.dumps(item, ensure_ascii=False, sort_keys=True)[:500]
+        return blocker_id, detail
+    text = str(item).strip()
+    return text.split(":", 1)[0] if ":" in text else "preview_check", text
+
+
+def _preview_gate_blockers(
+    normality_failures: list[object],
+    figure_status: object,
+    figure_ready: bool,
+    layout_warnings: list[object],
+    self_review_blockers: list[object],
+) -> list[dict[str, object]]:
+    blockers: list[dict[str, object]] = []
+    for item in normality_failures[:20]:
+        blocker_id, detail = _public_blocker_detail(item)
+        blockers.append({"id": blocker_id, "status": "block", "public_detail": detail, "source": "paper_normality_audit"})
+    if figure_status and not figure_ready:
+        warnings = [str(item) for item in layout_warnings[:3] if str(item).strip()]
+        detail = "图表质量审计未通过" + ("：" + "；".join(warnings) if warnings else f"：status={figure_status}")
+        blockers.append({"id": "figure_quality", "status": "block", "public_detail": detail, "source": "paper_figure_quality_audit"})
+    for item in self_review_blockers[:20]:
+        blocker_id, detail = _public_blocker_detail(item)
+        blockers.append({"id": blocker_id, "status": "block", "public_detail": detail, "source": "paper_self_review"})
+    return blockers
+
+
+def _preview_blocker_summary(blockers: list[dict[str, object]]) -> str:
+    details = [str(item.get("public_detail") or item.get("detail") or "").strip() for item in blockers if str(item.get("public_detail") or item.get("detail") or "").strip()]
+    return "；".join(details[:5])
+
+
 def select_manuscript_candidate(project: str, venue: str, candidates: list[tuple[str, Path, Path]]) -> tuple[str, Path, Path, list[dict[str, object]]]:
     checked: list[dict[str, object]] = []
     for label, pdf, tex in candidates:
@@ -161,25 +404,7 @@ def manuscript_policy_violations(project: str, tex_path: Path, venue: str = "") 
     active = read_json(ROOT / "projects" / project / "state" / "active_repo.json", {})
     active_name = str(active.get("name") or active.get("repo_name") or "") if isinstance(active, dict) else ""
     violations: list[str] = []
-    state = ROOT / "projects" / project / "state"
-    legacy_terms: list[str] = []
-    for state_name in ["base_switch_execution.json", "base_switch_gate.json", "obsolete_baseline_cleanup_plan.json"]:
-        payload = read_json(state / state_name, {})
-        if not isinstance(payload, dict):
-            continue
-        candidates = [payload.get("candidate_route"), payload.get("new_route"), payload.get("invalidated_previous_new_route")]
-        candidates.extend(payload.get("blocked_candidate_paths", []) if isinstance(payload.get("blocked_candidate_paths"), list) else [])
-        for row in candidates:
-            if isinstance(row, dict):
-                for value in [row.get("repo"), row.get("name"), row.get("repo_name"), row.get("title"), row.get("path")]:
-                    label = str(value or "").strip()
-                    if label:
-                        legacy_terms.append(label.split("/")[-1])
-            elif isinstance(row, str) and row.strip():
-                legacy_terms.append(Path(row).stem)
-    for term in sorted({item for item in legacy_terms if len(item) >= 4}):
-        if term.lower() in text.lower() and term.lower() not in active_name.lower():
-            violations.append(f"legacy_route_story_in_manuscript:{term}")
+    violations.extend(legacy_route_story_violations(project, text, active_name=active_name))
     if re.search(r"\\(?:section|subsection)\*?\{[^{}]*(Failure|Counterexample|负结果|失败)[^{}]*\}", text, flags=re.IGNORECASE):
         violations.append("failure_or_counterexample_section_in_manuscript")
     if re.search(r"\\(?:section|subsection|paragraph)\*?\{[^{}]*Acknowledg", text, flags=re.IGNORECASE):
@@ -437,6 +662,10 @@ def main() -> int:
     selected_label, orchestra_pdf, orchestra_tex, candidate_manifest = select_manuscript_candidate(args.project, args.venue, candidates)
 
     if not orchestra_pdf.is_file() or not orchestra_tex.is_file():
+        rejected_pdf = _first_existing_candidate_path(candidate_manifest, "pdf")
+        rejected_tex = _first_existing_candidate_path(candidate_manifest, "tex")
+        rejection_blockers = _candidate_rejection_blockers(candidate_manifest)
+        rejection_summary = str(rejection_blockers[0].get("detail") or "") if rejection_blockers else "no acceptable full-manuscript PDF/TeX exists"
         lines = [
             f"# {labels['title']}\n\n",
             "- status: blocked\n",
@@ -463,9 +692,14 @@ def main() -> int:
                 "blocked_preview_pdf": "",
                 "blocked_preview_tex": "",
                 "blocked_preview_available": False,
+                "latest_generated_pdf_path": str(rejected_pdf) if rejected_pdf else "",
+                "latest_generated_tex_path": str(rejected_tex) if rejected_tex else "",
+                "paper_stage_status": "blocked_content_policy" if rejection_blockers else "blocked_no_acceptable_manuscript",
                 "paper_normality_status": "blocked",
                 "paper_content_policy_status": "blocked",
                 "paper_content_candidate_audit": candidate_manifest,
+                "conference_preview_blockers": rejection_blockers,
+                "conference_preview_blocker_summary": rejection_summary,
             },
             venue=args.venue,
             promote_to_top=True,
@@ -475,6 +709,14 @@ def main() -> int:
 
     policy_violations = manuscript_policy_violations(args.project, orchestra_tex, venue=args.venue)
     if policy_violations:
+        rejection_blockers = [{
+            "id": "manuscript_content_policy_violation",
+            "status": "block",
+            "detail": "; ".join(policy_violations[:8]),
+            "source": "paper_content_policy",
+            "preview_blocker": True,
+            "submission_blocker": True,
+        }]
         lines = [
             f"# {labels['title']}\n\n",
             "- status: blocked\n",
@@ -500,9 +742,14 @@ def main() -> int:
                 "blocked_preview_pdf": "",
                 "blocked_preview_tex": "",
                 "blocked_preview_available": False,
+                "latest_generated_pdf_path": str(orchestra_pdf),
+                "latest_generated_tex_path": str(orchestra_tex),
+                "paper_stage_status": "blocked_content_policy",
                 "paper_normality_status": "blocked",
                 "paper_content_policy_status": "blocked",
                 "paper_content_policy_violations": policy_violations,
+                "conference_preview_blockers": rejection_blockers,
+                "conference_preview_blocker_summary": str(rejection_blockers[0].get("detail") or ""),
             },
             venue=args.venue,
             promote_to_top=True,
@@ -604,6 +851,8 @@ def main() -> int:
     if citation_count and reference_target:
         label = "官方引用要求" if reference_target_source == "official" else "写作引用质量目标"
         reference_diagnostic = f"{label}：{citation_count}/{reference_target}。"
+    preview_blockers = _preview_gate_blockers(normality_failures, figure_status, figure_ready, layout_warnings, self_review_blockers)
+    preview_blocker_summary = _preview_blocker_summary(preview_blockers)
     lines = [
         f"# {labels['title']}\n\n",
         f"- status: {'ready' if ready else 'blocked'}\n",
@@ -626,18 +875,10 @@ def main() -> int:
         f"- figure_quality_audit: {audit_state.get('paper_figure_quality_report', '')}\n",
         "- principle: accepted-preview PDF exposure requires a real manuscript shape plus venue-template and figure-quality checks. Internal gate reports must be rejected/reverted, not shown as paper output. Scientific submission readiness is still controlled by evidence/readiness gates.\n",
     ]
-    if normality_failures or self_review_blockers:
+    if preview_blockers:
         lines.extend(["\n## Preview Blockers\n\n"])
-        for item in normality_failures[:8]:
-            if isinstance(item, dict):
-                lines.append(f"- {item.get('id', 'check')}: {item.get('public_detail') or item.get('detail', '')}\n")
-            else:
-                lines.append(f"- {item}\n")
-        for item in self_review_blockers[:8]:
-            if isinstance(item, dict):
-                lines.append(f"- {item.get('id', 'claude_self_review')}: {item.get('detail', '')}\n")
-            else:
-                lines.append(f"- {item}\n")
+        for item in preview_blockers[:12]:
+            lines.append(f"- {item.get('id', 'check')}: {item.get('public_detail') or item.get('detail', '')}\n")
     if self_review_evidence_blockers:
         lines.extend(["\n## Self-review Evidence Blockers\n\n"])
         lines.append("- PDF/TeX preview checks may pass, but project Claude Code found unresolved scientific-evidence issues. Keep this as an inspection preview, not a submission-ready manuscript.\n")
@@ -707,11 +948,14 @@ def main() -> int:
             "paper_figure_blocker_count": audit_state.get("paper_figure_blocker_count", ""),
             "paper_figure_warning_count": audit_state.get("paper_figure_warning_count", ""),
             "paper_figure_failed": audit_state.get("paper_figure_failed", []),
-            "conference_preview_blockers": normality_failures[:20],
+            "conference_preview_blockers": preview_blockers[:20],
+            "conference_preview_blocker_summary": preview_blocker_summary,
             "conference_preview_internal_blockers": raw_normality_failures[:20],
             "paper_layout_footprint_warnings": layout_warnings[:20],
             "normal_preview_ready": normal_ready,
+            "paper_stage_status": "preview_ready" if ready else "blocked_preview_gate",
             "paper_content_policy_status": "pass",
+            "paper_content_policy_violations": [],
             "paper_content_source_label": selected_label,
             "paper_template_sidecars": copied_sidecars,
             "paper_content_candidate_audit": candidate_manifest,

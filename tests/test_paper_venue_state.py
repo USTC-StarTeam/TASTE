@@ -1,5 +1,7 @@
 import hashlib
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -76,6 +78,64 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+
+def test_writing_entrypoints_direct_help_bootstrap_pythonpath():
+    repo_root = Path(__file__).resolve().parents[1]
+    scripts = [
+        repo_root / "modules" / "writing" / "scripts" / "resolve_venue_requirements.py",
+        repo_root / "modules" / "writing" / "scripts" / "fetch_latex_template.py",
+        repo_root / "modules" / "writing" / "scripts" / "run_paper_pipeline.py",
+    ]
+    for script in scripts:
+        env = os.environ.copy()
+        env.pop("PYTHONPATH", None)
+        proc = subprocess.run(
+            [sys.executable, str(script), "--help"],
+            cwd=repo_root,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=20,
+        )
+        assert proc.returncode == 0, f"{script.name}: {proc.stderr}"
+        assert "--venue" in proc.stdout
+
+
+def test_iclr_requirements_resolve_deterministically_without_claude(monkeypatch):
+    resolve = _load_resolve_venue_requirements()
+    raw_template = (
+        "There will be a strict upper limit of 9 pages for the main text of the initial submission, "
+        "with unlimited additional pages for citations. "
+        "Under review as a conference paper at ICLR 2026 Anonymous authors Paper under double-blind review"
+    )
+
+    def fake_fetch(url, timeout=30):
+        if "api.github.com" in url:
+            return '[{"name":"iclr2026"}]'
+        if "AuthorGuide" in url:
+            return "<html>Main text should be 9 pages or fewer. The bibliography/references do not count toward the page limit.</html>"
+        if "iclr2026_conference.tex" in url:
+            return raw_template
+        return ""
+
+    monkeypatch.setattr(resolve, "fetch_official_text", fake_fetch)
+
+    payload = resolve.build_iclr_requirements("demo_project", "ICLR")
+    payload = resolve.normalize_requirement_payload(payload, "ICLR", "demo_project")
+
+    assert resolve.validate_payload(payload) == []
+    assert payload["status"] == "ok"
+    assert payload["official_sources"]
+    assert any("AuthorGuide" in item["url"] for item in payload["official_sources"])
+    assert payload["page_policy"]["body_page_max"] == 9
+    assert payload["page_policy"]["reference_page_max"] == 0
+    assert payload["template"]["family"] == "iclr"
+    assert payload["template"]["archive_url"].endswith("iclr2026.zip")
+    assert "iclr2026_conference.tex" in payload["template"]["required_files"]
+    assert payload["venue_submission_policy"]["reference_target_source"] == "quality_target"
+    assert payload["venue_submission_policy"]["official_min_references"] == 0
+    assert payload["venue_submission_policy"]["reference_quality_target"] > 0
+
 def test_repository_clone_timeout_does_not_block_complete_official_venue_contract():
     resolve = _load_resolve_venue_requirements()
     payload = {
@@ -131,8 +191,46 @@ def test_repository_clone_timeout_does_not_block_complete_official_venue_contrac
     assert resolve.validate_payload(healed) == []
 
 
+def test_template_fetch_prefers_official_archive_when_requirements_record_archive(tmp_path, monkeypatch):
+    fetch = _load_fetch_latex_template()
+
+    def fail_repository(template, source_dir):
+        raise AssertionError("repository clone should not run before an explicit official archive")
+
+    def fake_archive(archive_url, archive_dir, source_dir, directory_hint=""):
+        source_dir.mkdir(parents=True, exist_ok=True)
+        (source_dir / "iclr2026_conference.tex").write_text("template", encoding="utf-8")
+        return {
+            "source_kind": "archive",
+            "source_url": archive_url,
+            "archive_path": str(archive_dir / "iclr2026.zip"),
+            "source_subdir": directory_hint,
+        }
+
+    monkeypatch.setattr(fetch, "sync_from_repository", fail_repository)
+    monkeypatch.setattr(fetch, "sync_from_archive", fake_archive)
+
+    metadata = fetch.sync_from_repository_with_archive_fallback(
+        {
+            "repository_url": "https://github.com/ICLR/Master-Template.git",
+            "archive_url": "https://github.com/ICLR/Master-Template/raw/master/iclr2026.zip",
+            "directory_hint": "iclr2026",
+            "main_tex": "iclr2026_conference.tex",
+            "required_files": ["iclr2026_conference.sty"],
+        },
+        tmp_path / "downloads",
+        tmp_path / "source",
+    )
+
+    assert metadata["source_kind"] == "archive"
+    assert metadata["archive_preferred"] is True
+    assert metadata["repository_fallback_used"] is False
+    assert (tmp_path / "source" / "iclr2026_conference.tex").exists()
+
+
 def test_template_fetch_falls_back_to_official_archive_when_repository_clone_times_out(tmp_path, monkeypatch):
     fetch = _load_fetch_latex_template()
+    monkeypatch.setenv("VENUE_TEMPLATE_REPOSITORY_FIRST", "1")
 
     def fail_repository(template, source_dir):
         raise RuntimeError("git command timed out after 60s")
@@ -1470,3 +1568,124 @@ def test_noncompact_project_summary_keeps_configured_venue_when_public_config_is
     assert summary["run_preferences"]["target_venue"] == "ICLR"
     assert summary["run_preferences"]["venue"] == "ICLR"
     assert summary["stages"]["paper"]["target_venue"] == "ICLR"
+
+
+
+def test_manuscript_route_policy_allows_cited_prior_work_but_blocks_current_route_story(tmp_path, monkeypatch):
+    ensure_script_paths()
+    import build_conference_preview_paper as preview
+
+    project = "demo_project"
+    state = tmp_path / "projects" / project / "state"
+    _write_json(
+        state / "base_switch_gate.json",
+        {
+            "status": "blocked",
+            "candidate_route": {"repo": "owner/CandidateRepo", "repo_path": str(tmp_path / "repos" / "candidate_repo")},
+        },
+    )
+    monkeypatch.setattr(preview, "ROOT", tmp_path)
+
+    prior_work_text = r"""
+\section{Introduction}
+CandidateRepo~\citep{candidate2026} proposes a prior method for the same problem.
+\section{Related Work}
+CandidateRepo~\citep{candidate2026} constructs a useful comparison point.
+\section{Method}
+Our method uses a separate current implementation and does not use that repository.
+"""
+    route_story_text = r"""
+\section{Method}
+We use CandidateRepo as the current repository and implementation backbone for the selected route.
+"""
+
+    assert preview.legacy_route_story_violations(project, prior_work_text, active_name="CurrentBase") == []
+    assert preview.legacy_route_story_violations(project, route_story_text, active_name="CurrentBase") == [
+        "legacy_route_story_in_manuscript:CandidateRepo"
+    ]
+
+
+def test_writer_route_boundary_marks_candidate_routes_as_prior_work_only(tmp_path):
+    ensure_script_paths()
+    import run_paper_orchestra_bridge as bridge
+
+    state = tmp_path / "state"
+    _write_json(
+        state / "base_switch_gate.json",
+        {
+            "status": "blocked",
+            "candidate_route": {"repo": "owner/CandidateRepo", "repo_path": str(tmp_path / "repos" / "candidate_repo")},
+        },
+    )
+    paths = type("Paths", (), {"state": state})()
+
+    boundary = bridge.candidate_route_boundary_for_writer(paths, {"name": "owner/CurrentBase"})
+
+    assert "CandidateRepo" in boundary["non_authoritative_or_legacy_route_terms"]
+    assert "prior work" in boundary["policy"]
+    assert "current selected route" in boundary["forbidden_use"].lower()
+
+
+def test_preview_gate_blockers_summarize_current_preview_failures():
+    ensure_script_paths()
+    import build_conference_preview_paper as preview
+
+    blockers = preview._preview_gate_blockers(
+        [
+            {
+                "id": "reference_quality_target",
+                "public_detail": "参考文献覆盖不足：当前 33/45，需要补充真实且相关的已验证引用。",
+            }
+        ],
+        "blocked",
+        False,
+        ["wide 1.77:1 graphic is squeezed into a single-column figure"],
+        [{"id": "missing_claude_self_review_receipt", "detail": "missing receipt"}],
+    )
+
+    assert [item["id"] for item in blockers] == [
+        "reference_quality_target",
+        "figure_quality",
+        "missing_claude_self_review_receipt",
+    ]
+    summary = preview._preview_blocker_summary(blockers)
+    assert "33/45" in summary
+    assert "图表质量审计未通过" in summary
+    assert "SIREN" not in summary
+
+
+def test_conference_preview_rejection_helpers_preserve_candidate_blocker(tmp_path):
+    ensure_script_paths()
+    import build_conference_preview_paper as preview
+
+    pdf = tmp_path / "paper.pdf"
+    tex = tmp_path / "paper.tex"
+    pdf.write_bytes(b"%PDF-1.4\n% rejected candidate\n")
+    tex.write_text("\\section{Method} SIREN route story", encoding="utf-8")
+    manifest = [
+        {
+            "label": "workspace_final",
+            "pdf": str(pdf),
+            "tex": str(tex),
+            "pdf_exists": True,
+            "tex_exists": True,
+            "pages": 11,
+            "violations": ["legacy_route_story_in_manuscript:SIREN"],
+            "selected": False,
+        }
+    ]
+
+    assert preview._first_existing_candidate_path(manifest, "pdf") == pdf
+    assert preview._first_existing_candidate_path(manifest, "tex") == tex
+    blockers = preview._candidate_rejection_blockers(manifest)
+
+    assert blockers == [
+        {
+            "id": "manuscript_candidate_rejected",
+            "status": "block",
+            "detail": "workspace_final: legacy_route_story_in_manuscript:SIREN",
+            "source": "paper_content_candidate_audit",
+            "preview_blocker": True,
+            "submission_blocker": True,
+        }
+    ]

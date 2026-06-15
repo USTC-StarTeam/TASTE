@@ -8832,6 +8832,22 @@ def _stage_status(root: Path, cfg: dict[str, Any]) -> dict[str, Any]:
             preview_blocker_text = _paper_public_blocker_text(first_blocker.get("public_detail") or first_blocker.get("detail") or first_blocker.get("id") or "")
         else:
             preview_blocker_text = _paper_public_blocker_text(first_blocker)
+    if not preview_blocker_text and isinstance(paper_state, dict) and str(paper_state.get("paper_content_policy_status") or "").strip().lower() == "blocked":
+        content_raw = ""
+        violations = paper_state.get("paper_content_policy_violations") if isinstance(paper_state.get("paper_content_policy_violations"), list) else []
+        if violations:
+            content_raw = "; ".join(str(item) for item in violations[:8])
+        else:
+            audit_rows = paper_state.get("paper_content_candidate_audit") if isinstance(paper_state.get("paper_content_candidate_audit"), list) else []
+            for audit_row in audit_rows:
+                if not isinstance(audit_row, dict):
+                    continue
+                row_violations = [str(item) for item in (audit_row.get("violations") or []) if str(item).strip()]
+                if row_violations:
+                    label = str(audit_row.get("label") or "candidate").strip() or "candidate"
+                    content_raw = f"{label}: " + "; ".join(row_violations[:8])
+                    break
+        preview_blocker_text = _paper_public_blocker_text(content_raw) or "候选稿内容策略未通过；需要重新生成或修正当前稿件。"
     paper_orchestra_bridge_status = str(paper_state.get("paper_orchestra_bridge_status") or "") if isinstance(paper_state, dict) else ""
     if live_submission_ready and isinstance(paper_orchestra_state, dict) and paper_orchestra_state.get("status") in {"pass", "submission_ready"}:
         paper_orchestra_bridge_status = str(paper_orchestra_state.get("status") or paper_orchestra_bridge_status)
@@ -11809,6 +11825,25 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     layout_warnings = [item for item in (_paper_public_layout_warning_text(value) for value in raw_layout_warnings) if item]
     first_preview_blocker = preview_blockers[0] if preview_blockers else ""
     preview_blocker_text = _paper_public_blocker_text(first_preview_blocker.get("public_detail") or first_preview_blocker.get("detail") or first_preview_blocker.get("id") or "") if isinstance(first_preview_blocker, dict) else _paper_public_blocker_text(first_preview_blocker or "")
+    content_policy_blocked = str(paper_state.get("paper_content_policy_status") or "").strip().lower() == "blocked" or str(paper_state.get("paper_stage_status") or "").strip().lower() == "blocked_content_policy"
+    if not preview_blocker_text and content_policy_blocked:
+        content_raw = ""
+        violations = paper_state.get("paper_content_policy_violations") if isinstance(paper_state.get("paper_content_policy_violations"), list) else []
+        if violations:
+            content_raw = "; ".join(str(item) for item in violations[:8])
+        else:
+            audit_rows = paper_state.get("paper_content_candidate_audit") if isinstance(paper_state.get("paper_content_candidate_audit"), list) else []
+            for audit_row in audit_rows:
+                if not isinstance(audit_row, dict):
+                    continue
+                row_violations = [str(item) for item in (audit_row.get("violations") or []) if str(item).strip()]
+                if row_violations:
+                    label = str(audit_row.get("label") or "candidate").strip() or "candidate"
+                    content_raw = f"{label}: " + "; ".join(row_violations[:8])
+                    break
+        preview_blocker_text = _paper_public_blocker_text(content_raw) or "候选稿内容策略未通过；需要重新生成或修正当前稿件。"
+    latest_generated_pdf_path = _paper_state_path(root, paper_state, "latest_generated_pdf_path", "paper_orchestra_final_pdf")
+    latest_generated_tex_path = _paper_state_path(root, paper_state, "latest_generated_tex_path", "paper_orchestra_final_tex")
     layout_text = str(layout_warnings[0]) if layout_warnings else ""
     citation_count = _paper_int(paper_state.get("paper_normality_citation_count"))
     citation_target = _paper_int(
@@ -11893,17 +11928,23 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         "venue_requirements_path": paper_state.get("venue_requirements_path", "") or _venue_requirements_summary(root, venue, paper_state).get("path", ""),
         "venue_requirements_public_summary": _venue_requirements_summary(root, venue, paper_state).get("summary", ""),
         "template_fetched": _paper_template_fetched(paper_state),
+        "paper_content_policy_status": paper_state.get("paper_content_policy_status", ""),
+        "paper_stage_status": paper_state.get("paper_stage_status", ""),
+        "latest_generated_pdf_path": str(latest_generated_pdf_path) if latest_generated_pdf_path else "",
+        "latest_generated_pdf_url": _project_file_url(root, latest_generated_pdf_path) if latest_generated_pdf_path else "",
+        "latest_generated_tex_path": str(latest_generated_tex_path) if latest_generated_tex_path else "",
+        "latest_generated_tex_url": _project_file_url(root, latest_generated_tex_path) if latest_generated_tex_path else "",
     }
     if paper_blocked:
         paper_stage = {
             **common_paper_fields,
             "paper_preview_repair_loop_status": "blocked" if not paper_state.get("conference_preview_ready") else paper_state.get("paper_preview_repair_loop_status", ""),
             "paper_preview_repair_rounds": paper_state.get("paper_preview_repair_rounds", ""),
-            "status": "preview_available" if preview_pdf_path else (selected_plan_gate["status"] if selected_plan_gate.get("blocked") else "fresh_find_running" if fresh_find_running else "blocked_by_literature_gate" if recommendation_shortfall else "needs_writing"),
+            "status": "preview_available" if preview_pdf_path else ("blocked" if content_policy_blocked else selected_plan_gate["status"] if selected_plan_gate.get("blocked") else "fresh_find_running" if fresh_find_running else "blocked_by_literature_gate" if recommendation_shortfall else "needs_writing"),
             "summary": "",
             "summary_zh": "",
             "paper_generation_skipped": False,
-            "paper_generation_skipped_reason": "投稿/证据门控未通过；当前 PDF 作为目标 venue 稿件预览展示，不标记为投稿通过" if preview_pdf_path else "no current preview PDF exists",
+            "paper_generation_skipped_reason": "投稿/证据门控未通过；当前 PDF 作为目标 venue 稿件预览展示，不标记为投稿通过" if preview_pdf_path else ("候选稿已生成但内容策略未通过；不能作为当前预览展示" if content_policy_blocked and latest_generated_pdf_path else "no current preview PDF exists"),
             "pdf_ready": bool(preview_pdf_path),
             "pdf_path": str(preview_pdf_path) if preview_pdf_path else "",
             "pdf_url": preview_pdf_url,
@@ -11914,8 +11955,8 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
             "blocked_tex_url": _project_file_url(root, preview_tex_path) if preview_tex_path.exists() else "",
             "latest_generated_pdf_path": str(preview_pdf_path) if preview_pdf_path else "",
             "latest_generated_pdf_url": preview_pdf_url,
-            "raw_pdf_path": str(preview_pdf_path) if preview_pdf_path else "",
-            "raw_pdf_url": preview_pdf_url,
+            "raw_pdf_path": str(preview_pdf_path or latest_generated_pdf_path) if (preview_pdf_path or latest_generated_pdf_path) else "",
+            "raw_pdf_url": preview_pdf_url or (_project_file_url(root, latest_generated_pdf_path) if latest_generated_pdf_path else ""),
         }
         paper_stage["summary"] = _paper_stage_public_message(paper_stage)
         paper_stage["summary_zh"] = paper_stage["summary"]
@@ -13707,6 +13748,12 @@ def _paper_public_blocker_text(value: Any) -> str:
     if not text:
         return ''
     lowered = text.lower()
+    if 'legacy_route_story_in_manuscript' in lowered:
+        match = re.search(r'legacy_route_story_in_manuscript:([^;，,\s]+)', text, flags=re.IGNORECASE)
+        term = match.group(1) if match else '历史/未授权路线'
+        return f'候选稿仍包含未授权或历史路线叙事：{term}；writing 必须基于当前 selected-route evidence 重新生成或修正稿件。'
+    if 'manuscript_candidate_rejected' in lowered or 'manuscript_content_policy_violation' in lowered:
+        return '候选稿内容策略未通过；不能作为当前会议格式预览或投稿稿，需要由 writing 从当前证据重新生成。'
     if 'missing bib entries' in lowered or 'missing bibliography entries' in lowered or 'cited keys=' in lowered or 'latex_undefined_citations' in lowered or 'undefined citations' in lowered:
         return '引用/参考文献仍需修复；具体修复清单已交由项目代理处理。'
     if 'nature_numeric_style_textual_citations' in lowered or '\\citet' in text or '\\citeauthor' in text or '作者型引用命令' in text:

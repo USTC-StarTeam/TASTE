@@ -14,6 +14,24 @@ from pathlib import Path
 from typing import Any
 from difflib import SequenceMatcher
 
+
+def _repo_root_from_script() -> Path:
+    current = Path(__file__).resolve()
+    for candidate in current.parents:
+        if (candidate / "framework").is_dir() and (candidate / "modules").is_dir() and (candidate / "web").is_dir():
+            return candidate
+    return current.parents[2]
+
+
+_BOOTSTRAP_ROOT = _repo_root_from_script()
+_FRAMEWORK_SCRIPTS = _BOOTSTRAP_ROOT / "framework" / "scripts"
+if str(_FRAMEWORK_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_FRAMEWORK_SCRIPTS))
+from taste_pythonpath import ensure_taste_pythonpath, taste_pythonpath_string  # noqa: E402
+
+ensure_taste_pythonpath(_BOOTSTRAP_ROOT)
+os.environ["PYTHONPATH"] = taste_pythonpath_string(_BOOTSTRAP_ROOT, os.environ.get("PYTHONPATH", ""))
+
 from paper_common import (
     ensure_paper_dirs,
     find_main_tex,
@@ -590,6 +608,102 @@ def compact_json(path: Path, limit: int = 12000) -> str:
         return str(payload)[:limit]
 
 
+def _route_term_candidates(value: Any) -> list[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    variants: set[str] = set()
+    is_url = bool(re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", raw))
+    if is_url:
+        raw = raw.rstrip("/").split("/")[-1]
+    repo_slug = bool(re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?$", raw))
+    leaf = re.split(r"[/\\]", raw.rstrip("/\\"))[-1]
+    leaf_suffix = Path(leaf).suffix.lower()
+    source_items = [leaf]
+    if leaf_suffix not in {".json", ".md", ".txt", ".log"}:
+        source_items.append(Path(leaf).stem)
+    if repo_slug or ("/" not in raw and "\\" not in raw):
+        source_items.insert(0, raw)
+    for item in source_items:
+        cleaned = re.sub(r"\.git$", "", str(item).strip(), flags=re.IGNORECASE)
+        cleaned = cleaned.strip(" `[](){}.,;:'\"\n\t")
+        if not cleaned or cleaned.lower().endswith((".json", ".md", ".txt", ".log")):
+            continue
+        if " " in cleaned and len(cleaned) > 40:
+            continue
+        variants.add(cleaned)
+    return sorted(variants, key=str.lower)
+
+
+
+def _route_string_looks_artifact_path(value: object) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    leaf = re.split(r"[/\\]", raw.rstrip("/\\"))[-1]
+    if Path(leaf).suffix.lower() in {".json", ".md", ".txt", ".log"}:
+        return True
+    parts = {part.lower() for part in re.split(r"[/\\]", raw)}
+    return bool(("reports" in parts or "state" in parts) and "repos" not in parts)
+
+
+def _route_identity(row: dict[str, Any]) -> dict[str, Any]:
+    values = [row.get("repo"), row.get("name"), row.get("repo_name"), row.get("path"), row.get("repo_path"), row.get("local_path")]
+    terms: list[str] = []
+    for value in values:
+        terms.extend(_route_term_candidates(value))
+    return {
+        "repo": row.get("repo") or row.get("name") or row.get("repo_name") or "",
+        "repo_path": row.get("repo_path") or row.get("local_path") or row.get("path") or "",
+        "status": row.get("status") or row.get("decision") or "",
+        "terms": sorted({term for term in terms if len(term) >= 4}, key=str.lower),
+    }
+
+
+def candidate_route_boundary_for_writer(paths: Any, active_repo: dict[str, Any]) -> dict[str, Any]:
+    active_terms: list[str] = []
+    for value in [active_repo.get("name"), active_repo.get("repo_name"), active_repo.get("repo_path"), active_repo.get("local_path")]:
+        active_terms.extend(_route_term_candidates(value))
+    active_term_set = {term.lower() for term in active_terms if term}
+    routes: list[dict[str, Any]] = []
+    for state_name in ["base_switch_execution.json", "base_switch_gate.json", "obsolete_baseline_cleanup_plan.json"]:
+        payload = load_json(paths.state / state_name, {})
+        if not isinstance(payload, dict):
+            continue
+        candidates = [payload.get("candidate_route"), payload.get("new_route"), payload.get("invalidated_previous_new_route")]
+        candidates.extend(payload.get("blocked_candidate_paths", []) if isinstance(payload.get("blocked_candidate_paths"), list) else [])
+        for row in candidates:
+            if isinstance(row, dict):
+                identity = _route_identity(row)
+            else:
+                if _route_string_looks_artifact_path(row):
+                    continue
+                identity = _route_identity({"path": row})
+            terms = [term for term in identity["terms"] if term.lower() not in active_term_set]
+            if not terms:
+                continue
+            identity["terms"] = terms
+            identity["source_state_file"] = state_name
+            routes.append(identity)
+    route_terms = sorted({term for row in routes for term in row.get("terms", [])}, key=str.lower)
+    return {
+        "policy": (
+            "Non-authoritative, blocked, or legacy route terms below may appear only as cited prior work/background. "
+            "They must not be described as the current selected route, selected base, active repository, implementation environment, "
+            "experiment backbone, data loader, completed base switch, or TASTE-run result unless deterministic environment/base-switch gates later authorize them."
+        ),
+        "current_authoritative_route": {
+            "name": active_repo.get("name") or active_repo.get("repo_name") or "",
+            "repo_path": active_repo.get("repo_path") or active_repo.get("local_path") or "",
+            "terms": sorted(active_term_set),
+        },
+        "non_authoritative_or_legacy_route_terms": route_terms,
+        "non_authoritative_or_legacy_routes": routes,
+        "allowed_use": "Related Work / prior-work citation context only, with verified citation keys.",
+        "forbidden_use": "Current selected route, current method route, active repository, implementation path, data loader, environment, experiment backbone, result source, or base-switch provenance.",
+    }
+
+
 def render_idea(project: str, title: str) -> str:
     cfg = load_project_config(project)
     paths = build_paths(project)
@@ -601,6 +715,8 @@ def render_idea(project: str, title: str) -> str:
     novelty_map = compact_json(paths.state / "novelty_map.json", 6000)
     claim_payload = current_claim_ledger_for_writer(paths)
     claim_ledger = json.dumps(claim_payload, ensure_ascii=False, indent=2)[:6000]
+    route_boundary_payload = candidate_route_boundary_for_writer(paths, active_repo)
+    route_boundary = json.dumps(route_boundary_payload, ensure_ascii=False, indent=2)[:6000]
     base_title = str(active_repo.get("selected_base_title") or active_repo.get("literature_base_title") or active_repo.get("paper_title") or "current selected base recorded in research state")
     repo_name = str(active_repo.get("name") or active_repo.get("repo_name") or "current selected repository recorded in research state")
     repo_path = str(active_repo.get("repo_path") or active_repo.get("local_path") or "")
@@ -633,6 +749,14 @@ Use the filtered current-route claim payload below only to decide which result c
 
 ```json
 {claim_ledger}
+```
+
+## Candidate And Legacy Route Boundary
+
+Use this machine-readable boundary before mentioning repositories, bases, loaders, or implementation routes. Route terms listed here may be cited as prior work only; they are not current-route evidence unless the boundary says they are current authoritative route terms.
+
+```json
+{route_boundary}
 ```
 
 ## Novelty And Direction Evidence

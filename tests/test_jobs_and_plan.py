@@ -1796,6 +1796,126 @@ def test_environment_compact_job_refreshes_blocked_progress_from_project_summary
     assert "example/repo" in joined_logs
     assert "审计进展：审计进展" not in joined_logs
 
+def test_running_paper_job_keeps_live_status_over_needs_writing_snapshot(tmp_path, monkeypatch):
+    project_root = tmp_path / "projects"
+    (project_root / "demo_project").mkdir(parents=True)
+    monkeypatch.setattr(server, "PROJECT_IDS_ROOT", project_root)
+    monkeypatch.setattr(server, "_pid_alive_local", lambda pid: str(pid) in {"101", "202"})
+    monkeypatch.setattr(server, "_active_project_child_processes", lambda *args, **kwargs: [])
+    monkeypatch.setattr(server, "_paper_stage_from_project_snapshot", lambda project: {
+        "status": "needs_writing",
+        "venue": "ICLR",
+        "target_venue": "ICLR",
+        "venue_submission_policy": {"body_page_max": 9, "reference_quality_target": 45},
+        "conference_preview_ready": False,
+        "conference_preview_body_page_limit": 9,
+    })
+
+    def fake_process_tree(pid):
+        assert str(pid) == "101"
+        return [
+            {
+                "pid": "101",
+                "ppid": "1",
+                "stat": "S",
+                "elapsed": "00:10",
+                "pcpu": "0.1",
+                "pmem": "0.1",
+                "cmd": "/env/bin/python /repo/modules/writing/scripts/run_paper_pipeline.py --project demo_project --venue ICLR",
+            },
+            {
+                "pid": "202",
+                "ppid": "101",
+                "stat": "S",
+                "elapsed": "00:05",
+                "pcpu": "12.0",
+                "pmem": "1.0",
+                "cmd": "/env/bin/python /repo/framework/scripts/claude_project_session.py --project demo_project --stage writing:plotting --message-file prompt.md",
+            },
+        ]
+
+    monkeypatch.setattr(server, "_process_tree_rows", fake_process_tree)
+    job = server.JobState("paper_live", "paper")
+    job.status = "running"
+    job.progress = {"phase": "paper", "current": 0, "total": 0, "percent": 0, "message": "starting paper"}
+    job.result = {
+        "project": "demo_project",
+        "pid": "101",
+        "cmd": "/env/bin/python /repo/modules/writing/scripts/run_paper_pipeline.py --project demo_project --venue ICLR",
+        "status": "running",
+    }
+
+    row = server._compact_job_for_list(job.as_dict(compact=True))
+
+    assert row["stage"] == "paper"
+    assert row["status"] == "running"
+    assert row["progress"]["phase"] == "writing:plotting"
+    assert "paper 正在运行：writing:plotting" in row["progress"]["message"]
+    assert row["result"]["status"] == "running"
+    assert row["result"]["process_alive"] is True
+    assert row["result"]["paper_worker_pid"] == "202"
+    assert row["result"]["paper_controller_pid"] == "101"
+    assert row["result"]["paper_stage"]["status"] == "needs_writing"
+    log_text = "\n".join(row.get("logs") or [])
+    assert "当前状态：paper 正在运行：writing:plotting" in log_text
+    assert "论文产物状态：" in log_text
+
+
+
+def test_api_jobs_prefers_live_paper_worker_over_persisted_needs_writing(monkeypatch):
+    JOBS.clear()
+    monkeypatch.setattr(server, "_reconcile_detached_launcher_jobs", lambda: None)
+    monkeypatch.setattr(server, "_cached_list_runs", lambda: [])
+    monkeypatch.setattr(server, "_paper_stage_from_project_snapshot", lambda project: {})
+    old = server.JobState("paper_old", "paper")
+    old.status = "needs_writing"
+    old.created_at = "2026-06-15T08:48:35Z"
+    old.progress = {"phase": "needs_writing", "current": 1, "total": 1, "percent": 100, "message": "artifact still needs writing"}
+    old.result = {"project": "demo_project", "paper_stage": {"status": "needs_writing"}, "paper_summary": "artifact still needs writing"}
+    JOBS[old.job_id] = old
+    live_rows = [
+        {
+            "job_id": "project-worker_demo_project_101",
+            "stage": "paper",
+            "status": "running",
+            "created_at": "2026-06-14T10:35:48Z",
+            "logs": [],
+            "result": {"project": "demo_project", "pid": "101", "kind": "paper_pipeline", "process_alive": True, "status": "running"},
+            "progress": {"phase": "paper:pipeline", "current": 0, "total": 0, "percent": 0, "message": "pipeline"},
+        },
+        {
+            "job_id": "project-worker_demo_project_202",
+            "stage": "paper",
+            "status": "running",
+            "created_at": "2026-06-14T10:35:48Z",
+            "logs": [],
+            "result": {
+                "project": "demo_project",
+                "pid": "202",
+                "kind": "paper_claude_session",
+                "paper_worker_kind": "paper_claude_session",
+                "paper_worker_pid": "202",
+                "paper_current_substage": "writing:section-writing",
+                "current_substage": "writing:section-writing",
+                "process_alive": True,
+                "status": "running",
+            },
+            "progress": {"phase": "writing:section-writing", "current": 0, "total": 0, "percent": 0, "message": "section writing"},
+        },
+    ]
+    monkeypatch.setattr(server, "_live_jobs_from_projects", lambda compact=True: list(live_rows))
+
+    rows = server.api_jobs(compact=True, limit=10, include_history=True, project="demo_project")
+
+    assert rows[0]["job_id"] == "project-worker_demo_project_202"
+    assert rows[0]["status"] == "running"
+    assert rows[0]["progress"]["phase"] == "writing:section-writing"
+    assert rows[0]["result"]["process_alive"] is True
+    assert all(row["job_id"] != "paper_old" for row in rows)
+    assert all(row["job_id"] != "project-worker_demo_project_101" for row in rows)
+
+
+
 def test_environment_job_list_uses_compact_public_logs(monkeypatch):
     JOBS.clear()
     monkeypatch.setattr(server, "_reconcile_detached_launcher_jobs", lambda: None)
@@ -3982,6 +4102,13 @@ def load_split_jsonl(path, split):
     selection_report = (reports / "evidence_ready_repo_selection.md").read_text(encoding="utf-8")
     assert "selection_gate: blocked_candidate_base_switch_gate_required" in selection_report
     assert "owner/candidate | decision=candidate_loader_import_probe_passed_reference_checks_required" in selection_report
+    topic_report = read_json(reports / "repo_topic_fit_decision.json")
+    assert topic_report["data_action"] == "use_claim_ready_dataset"
+    assert "requires loader probe verification" not in json.dumps(topic_report, ensure_ascii=False)
+    strategy_report = (reports / "repo_env_strategy.md").read_text(encoding="utf-8")
+    assert "data_action: use_claim_ready_dataset" in strategy_report
+    assert "requires loader probe verification" not in strategy_report
+    assert "another loader probe" in strategy_report
 
     run_id = "find_current"
     write_json(finding / "find_progress.json", {"run_id": run_id})
@@ -9048,6 +9175,10 @@ def test_environment_selector_keeps_loader_ready_candidate_pending_until_base_sw
     )
     monkeypatch.setattr(selector, "write_repo_env_strategy", lambda *args, **kwargs: {})
     monkeypatch.setattr(selector, "sync_selected_candidate", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("base-switch-blocked candidate must not sync selected candidate")))
+    write_json(
+        paths.reports / "repo_topic_fit_decision.json",
+        {"data_action_reason_en": "Run loader probe verification before selecting the repo."},
+    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -9084,6 +9215,9 @@ def test_environment_selector_keeps_loader_ready_candidate_pending_until_base_sw
     assert payload["claude_topic_decision"]["data_action"] == "use_claim_ready_dataset"
     assert "loader/data ready" in payload["claude_topic_decision"]["rationale_en"]
     assert "loader probe verification" not in payload["claude_topic_decision"]["rationale_en"]
+    topic_report = read_json(paths.reports / "repo_topic_fit_decision.json")
+    assert topic_report["data_action"] == "use_claim_ready_dataset"
+    assert "loader probe verification" not in json.dumps(topic_report, ensure_ascii=False)
     assert active["name"] == "owner/current"
     assert active["repo_path"] == str(current_repo)
     assert "pending_environment_candidate: owner/candidate" in report
@@ -9518,3 +9652,169 @@ def test_current_find_selection_result_exposes_current_find_blocker(tmp_path, mo
     assert "当前 Find 后处理未通过" in result["blocker"]["summary"]
     assert progress_events[-1][0] == "blocked"
     assert "当前 Find 后处理未通过" in progress_events[-1][1]
+
+
+
+def test_paper_job_list_reports_content_policy_blocked_generated_candidate(tmp_path, monkeypatch):
+    project = "demo_project"
+    project_root = tmp_path / project
+    output_dir = project_root / "paper" / "output" / "iclr"
+    output_dir.mkdir(parents=True)
+    raw_pdf = output_dir / "writing_raw.pdf"
+    raw_tex = output_dir / "writing_raw.tex"
+    raw_pdf.write_bytes(b"%PDF-1.4\n% rejected candidate\n")
+    raw_tex.write_text("\\section{Method} SIREN route story", encoding="utf-8")
+    write_json(project_root / "project.json", {"target_venue": "ICLR"})
+    paper_state = {
+        "venue": "ICLR",
+        "target_venue": "ICLR",
+        "venue_slug": "iclr",
+        "conference_preview_ready": False,
+        "paper_content_policy_status": "blocked",
+        "paper_stage_status": "blocked_content_policy",
+        "paper_orchestra_final_pdf": str(raw_pdf),
+        "paper_orchestra_final_tex": str(raw_tex),
+        "paper_content_candidate_audit": [
+            {
+                "label": "workspace_final",
+                "pdf": str(raw_pdf),
+                "tex": str(raw_tex),
+                "pdf_exists": True,
+                "tex_exists": True,
+                "pages": 11,
+                "violations": ["legacy_route_story_in_manuscript:SIREN"],
+                "selected": False,
+            }
+        ],
+    }
+    monkeypatch.setattr(server, "PROJECT_IDS_ROOT", tmp_path)
+    monkeypatch.setattr(server, "get_active_paper_state", lambda _project, venue="": dict(paper_state))
+
+    snapshot = server._paper_stage_from_project_snapshot(project)
+
+    assert snapshot["status"] == "blocked_content_policy"
+    assert snapshot["pdf_path"] == ""
+    assert snapshot["latest_generated_pdf_path"] == str(raw_pdf)
+    assert snapshot["paper_content_policy_status"] == "blocked"
+    assert "SIREN" in snapshot["paper_content_blocker_summary"]
+    assert "内容策略未通过" in snapshot["summary"]
+
+    row = server._compact_job_for_list(
+        {
+            "job_id": "paper_old",
+            "stage": "paper",
+            "status": "needs_writing",
+            "created_at": "2026-06-15T08:48:35Z",
+            "logs": [],
+            "run_id": "",
+            "result": {"project": project, "action": "paper"},
+            "internal": False,
+            "display": "",
+            "error": "",
+            "cancel_requested": False,
+            "cancelled_at": "",
+            "progress": {"phase": "needs_writing", "current": 1, "total": 1, "percent": 100, "message": "old needs writing"},
+        }
+    )
+
+    assert row["status"] == "blocked"
+    assert row["progress"]["phase"] == "blocked_content_policy"
+    assert "SIREN" in row["progress"]["message"]
+    assert "old needs writing" not in row["progress"]["message"]
+
+
+
+def test_paper_job_message_preview_gate_does_not_report_content_policy(tmp_path, monkeypatch):
+    project = "demo_project"
+    project_root = tmp_path / project
+    output_dir = project_root / "paper" / "output" / "iclr"
+    output_dir.mkdir(parents=True)
+    preview_pdf = output_dir / "paper.pdf"
+    preview_tex = output_dir / "paper.tex"
+    preview_pdf.write_bytes(b"%PDF-1.4\n% preview candidate\n")
+    preview_tex.write_text("\\section{Introduction} Preview", encoding="utf-8")
+    write_json(project_root / "project.json", {"target_venue": "ICLR"})
+    paper_state = {
+        "venue": "ICLR",
+        "target_venue": "ICLR",
+        "venue_slug": "iclr",
+        "conference_preview_ready": False,
+        "paper_content_policy_status": "pass",
+        "paper_content_policy_violations": [],
+        "paper_stage_status": "blocked_preview_gate",
+        "blocked_preview_pdf": str(preview_pdf),
+        "blocked_preview_tex": str(preview_tex),
+        "latest_preview_pdf": str(preview_pdf),
+        "latest_preview_tex": str(preview_tex),
+        "conference_preview_body_pages": 9,
+        "paper_normality_citation_count": 33,
+        "paper_normality_citation_target": 45,
+        "paper_normality_reference_target_source": "quality_target",
+        "venue_submission_policy": {"body_page_max": 9, "reference_quality_target": 45, "reference_target_source": "quality_target"},
+        "conference_preview_blockers": [
+            {
+                "id": "reference_quality_target",
+                "status": "block",
+                "public_detail": "参考文献覆盖不足：当前 33/45，需要补充真实且相关的已验证引用。",
+            }
+        ],
+        "conference_preview_blocker_summary": "参考文献覆盖不足：当前 33/45，需要补充真实且相关的已验证引用。",
+    }
+    monkeypatch.setattr(server, "PROJECT_IDS_ROOT", tmp_path)
+    monkeypatch.setattr(server, "get_active_paper_state", lambda _project, venue="": dict(paper_state))
+
+    snapshot = server._paper_stage_from_project_snapshot(project)
+
+    assert snapshot["status"] == "preview_available"
+    assert snapshot["paper_content_policy_status"] == "pass"
+    assert snapshot["paper_content_blocker_summary"] == ""
+    assert "参考文献覆盖不足" in snapshot["summary"]
+    assert "内容策略" not in snapshot["summary"]
+
+    row = server._compact_job_for_list(
+        {
+            "job_id": "paper_old",
+            "stage": "paper",
+            "status": "needs_writing",
+            "created_at": "2026-06-15T08:48:35Z",
+            "logs": [],
+            "run_id": "",
+            "result": {"project": project, "action": "paper"},
+            "internal": False,
+            "display": "",
+            "error": "",
+            "cancel_requested": False,
+            "cancelled_at": "",
+            "progress": {"phase": "needs_writing", "current": 1, "total": 1, "percent": 100, "message": "old needs writing"},
+        }
+    )
+
+    assert row["progress"]["phase"] == "preview_available"
+    assert "参考文献覆盖不足" in row["progress"]["message"]
+    assert "内容策略" not in row["progress"]["message"]
+
+
+def test_api_jobs_dedupes_blocked_paper_preview_rows(monkeypatch):
+    JOBS.clear()
+    monkeypatch.setattr(server, "_reconcile_detached_launcher_jobs", lambda: None)
+    monkeypatch.setattr(server, "_live_jobs_from_projects", lambda compact=True: [])
+    monkeypatch.setattr(server, "_cached_list_runs", lambda: [])
+    monkeypatch.setattr(server, "_paper_stage_from_project_snapshot", lambda project: {})
+    for job_id, created in [("paper_old", "2026-06-15T08:16:54Z"), ("paper_new", "2026-06-15T08:48:35Z")]:
+        job = server.JobState(job_id, "paper")
+        job.status = "blocked"
+        job.created_at = created
+        job.progress = {"phase": "blocked_content_policy", "current": 1, "total": 1, "percent": 100, "message": job_id}
+        job.result = {
+            "project": "demo_project",
+            "action": "paper",
+            "paper_stage": {"status": "blocked_content_policy", "paper_content_policy_status": "blocked"},
+            "paper_summary": job_id,
+        }
+        JOBS[job_id] = job
+
+    rows = server.api_jobs(compact=True, limit=10, include_history=True, project="demo_project")
+
+    paper_rows = [row for row in rows if row["stage"] == "paper"]
+    assert [row["job_id"] for row in paper_rows] == ["paper_new"]
+    assert paper_rows[0]["status"] == "blocked"
