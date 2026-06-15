@@ -4247,6 +4247,44 @@ def test_compact_summary_keeps_active_route_when_pending_candidate_blocked(monke
     assert summary["human_gate_summary"]["main_route_repo"] == "owner/current"
 
 
+def test_project_bridge_failed_candidate_gate_keeps_current_route_repair_option():
+    from auto_research.web import project_bridge
+
+    gate = {
+        "status": "blocked",
+        "decision": "base_switch_gate_required",
+        "semantic_data_provenance_review": {
+            "status": "blocked",
+            "deterministic_gate_required": True,
+            "project_requires_llm_semantics": True,
+            "has_real_llm_embedding_evidence": False,
+            "text_metadata_provenance": {
+                "status": "blocked",
+                "has_text_metadata_evidence": False,
+                "dataset": "demo-data",
+            },
+        },
+    }
+    base_switch_gate = {
+        "status": "blocked",
+        "decision": "base_switch_not_authorized",
+        "candidate_route": {"repo": "owner/candidate", "repo_path": "/tmp/candidate"},
+        "failed_checks": [
+            {"id": "candidate_loader_import_probe_passed", "status": "blocked"},
+            {"id": "candidate_reference_protocol_passed", "status": "blocked"},
+        ],
+    }
+
+    public = project_bridge._selected_base_viability_public_blocker(gate, "Current Base", base_switch_gate)
+
+    assert "补齐当前路线保存 ID 映射的原始文本/元数据 provenance" in public["next_action"]
+    assert "artifact-local LLM/text embedding probe" in public["next_action"]
+    assert "补齐上列候选路线未通过检查后刷新 deterministic base-switch gate" in public["next_action"]
+    assert "当前数据路线" in public["summary"]
+    assert "artifact-local LLM/text embedding probe" in public["summary"]
+    assert "candidate_loader_import_probe_passed" in public["summary"]
+
+
 def test_public_job_payload_hides_paper_agent_repair_diagnostics_from_summaries_only():
     raw = {
         "stage": "paper",

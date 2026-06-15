@@ -4303,11 +4303,14 @@ def _selected_base_viability_public_blocker(gate: Any, base_display: str = "", b
             else:
                 failed_text = "、".join(failed_check_ids[:5]) or "候选路线证据"
                 summary = (
-                    f"缺少 LLM/text-semantic 数据 provenance：{base_label} 参考复现已通过，但确定性切换门控已执行且未授权；"
-                    f"候选路线仍有未通过检查：{failed_text}。"
+                    f"缺少 LLM/text-semantic 数据 provenance：{base_label} 参考复现已通过，但当前数据路线{dataset_clause}仍没有可审计的文本/元数据 provenance；"
+                    f"确定性切换门控已执行且未授权，候选路线仍有未通过检查：{failed_text}。"
+                    "下一步只能补齐当前路线保存 ID 映射的原始文本/元数据 provenance 与 artifact-local LLM/text embedding probe，"
+                    "或补齐上列候选路线未通过检查后刷新 deterministic base-switch gate。"
                 )
                 next_action = (
-                    "补齐上列候选路线未通过检查；"
+                    "补齐当前路线保存 ID 映射的原始文本/元数据 provenance 与 artifact-local LLM/text embedding probe；"
+                    "或补齐上列候选路线未通过检查后刷新 deterministic base-switch gate。"
                     "gate 通过前不切换基底、不写论文、不提升结论。"
                 )
                 project_summary = "完整科研自循环已停在 semantic-provenance/base-switch gate 证据审计；候选路线存在但尚未获得确定性授权。"

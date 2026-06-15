@@ -175,11 +175,13 @@ def _selected_base_viability_public_status(gate: dict, base_switch_gate: dict | 
             else:
                 failed_text = "、".join(failed_ids[:5]) or "候选路线证据"
                 summary = (
-                    "selected_base_viability_gate: 参考复现已通过，但确定性 base-switch gate 已执行且未授权；"
+                    "selected_base_viability_gate: 参考复现已通过，但当前 selected-base 数据路线仍缺少 LLM/text-semantic "
+                    "文本/元数据 provenance；确定性 base-switch gate 已执行且未授权；"
                     f"候选路线仍有未通过检查：{failed_text}。"
                 )
                 next_action = (
-                    "补齐上列候选路线未通过检查。"
+                    "补齐当前路线保存 ID 映射的原始文本/元数据 provenance 与 artifact-local LLM/text "
+                    "embedding probe；或补齐上列候选路线未通过检查后刷新 deterministic base-switch gate。"
                     "gate 通过前不切换基底、不写论文、不提升结论。"
                 )
         return {

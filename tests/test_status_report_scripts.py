@@ -279,6 +279,42 @@ def test_report_status_uses_failed_base_switch_gate_result(tmp_path, monkeypatch
     assert "运行 deterministic base-switch / semantic-provenance gate" not in text
 
 
+def test_report_status_keeps_current_route_repair_when_candidate_gate_failed(tmp_path, monkeypatch):
+    report_status = load_script("report_status")
+    paths = _make_paths(tmp_path)
+    _seed_common_project(paths)
+    _seed_selected_base_semantic_provenance_block(paths)
+    _write_json(
+        paths.state / "base_switch_gate.json",
+        {
+            "status": "blocked",
+            "decision": "base_switch_not_authorized",
+            "switch_authorized": False,
+            "candidate_route": {"repo": "owner/candidate", "repo_path": "/tmp/candidate"},
+            "failed_checks": [
+                {"id": "candidate_loader_import_probe_passed", "status": "blocked"},
+                {"id": "candidate_reference_protocol_passed", "status": "blocked"},
+            ],
+        },
+    )
+
+    monkeypatch.setattr(report_status, "build_paths", lambda _project: paths)
+    monkeypatch.setattr(report_status, "load_project_config", lambda _project: {"name": "demo_project", "topic": "Demo topic", "coding_agent": {}})
+    monkeypatch.setattr(report_status, "get_active_paper_state", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(report_status, "llm_available", lambda _cfg: True)
+    monkeypatch.setattr(report_status, "find_claude", lambda _cfg: "/bin/claude")
+    monkeypatch.setattr(sys, "argv", ["report_status.py", "--project", "demo_project", "--venue", "ICLR"])
+
+    report_status.main()
+
+    text = (paths.reports / "status.md").read_text(encoding="utf-8")
+    assert "- base_switch_candidate_route_present: True" in text
+    assert "candidate_loader_import_probe_passed, candidate_reference_protocol_passed" in text
+    assert "补齐当前路线保存 ID 映射的原始文本/元数据 provenance" in text
+    assert "artifact-local LLM/text embedding probe" in text
+    assert "补齐上列候选路线未通过检查后刷新 deterministic base-switch gate" in text
+
+
 
 def test_status_and_healthcheck_keep_current_route_when_pending_candidate_blocked(tmp_path, monkeypatch):
     report_status = load_script("report_status")
@@ -295,6 +331,7 @@ def test_status_and_healthcheck_keep_current_route_when_pending_candidate_blocke
             "current_action": "complete",
             "selection_gate": "blocked_pending_data_loader_for_claude_best_candidate",
             "blocker": "candidate proposal lacks claim-ready loader evidence; active_repo is unchanged.",
+            "claude_topic_decision": {"decision": "accept-with-modifications", "confidence": 0.61, "rationale": "candidate rationale"},
             "selected": {},
             "pending_environment_candidate": {
                 "name": "owner/pending",
@@ -321,6 +358,10 @@ def test_status_and_healthcheck_keep_current_route_when_pending_candidate_blocke
     assert "- repo_selection_status: pending_candidate_blocked" in status_text
     assert "candidate proposal lacks claim-ready loader evidence" in status_text
     assert "old active_repo remains legacy/control only" not in status_text
+    assert "- claude_repo_decision_scope: pending_candidate_not_authoritative" in status_text
+    assert "- claude_repo_decision_subject: owner/pending" in status_text
+    assert "- claude_accepted_transformable_repo: False" in status_text
+    assert "pending candidate only; active_repo unchanged: candidate rationale" in status_text
 
     monkeypatch.setattr(sys, "argv", ["research_healthcheck.py", "--project", "demo_project", "--venue", "ICLR"])
     healthcheck.main()

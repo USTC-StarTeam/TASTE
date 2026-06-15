@@ -125,6 +125,17 @@ def _pending_candidate_blocked(selection: dict) -> bool:
     return str(selection.get("selection_gate") or "").strip() == "blocked_pending_data_loader_for_claude_best_candidate"
 
 
+def _candidate_subject(row: dict) -> str:
+    row = _as_dict(row)
+    return str(
+        row.get("name")
+        or row.get("repo")
+        or row.get("title")
+        or row.get("repo_path")
+        or ""
+    ).strip()
+
+
 def _repo_selection_public_status(selection: dict) -> str:
     selection = _as_dict(selection)
     if _accepted_repo_selection(selection):
@@ -218,11 +229,13 @@ def _selected_base_viability_public_status(gate: dict, base_switch_gate: dict | 
             else:
                 failed_text = "、".join(failed_ids[:5]) or "候选路线证据"
                 summary = (
-                    "selected_base_viability_gate: 参考复现已通过，但确定性 base-switch gate 已执行且未授权；"
+                    "selected_base_viability_gate: 参考复现已通过，但当前 selected-base 数据路线仍缺少 LLM/text-semantic "
+                    "文本/元数据 provenance；确定性 base-switch gate 已执行且未授权；"
                     f"候选路线仍有未通过检查：{failed_text}。"
                 )
                 next_action = (
-                    "补齐上列候选路线未通过检查。"
+                    "补齐当前路线保存 ID 映射的原始文本/元数据 provenance 与 artifact-local LLM/text "
+                    "embedding probe；或补齐上列候选路线未通过检查后刷新 deterministic base-switch gate。"
                     "gate 通过前不切换基底、不写论文、不提升结论。"
                 )
         return {
@@ -284,10 +297,24 @@ def main() -> None:
     base_switch_gate = load_json(paths.state / "base_switch_gate.json") if (paths.state / "base_switch_gate.json").exists() else {}
     selected_repo = repo_selection.get('selected', {}) if isinstance(repo_selection, dict) else {}
     claude_decision = {}
+    claude_decision_scope = "none"
+    claude_decision_subject = ""
+    pending_candidate = _as_dict(repo_selection.get('pending_environment_candidate')) if isinstance(repo_selection, dict) else {}
     if isinstance(repo_selection, dict) and isinstance(repo_selection.get('claude_topic_decision'), dict):
         claude_decision = repo_selection.get('claude_topic_decision', {})
+        if _pending_candidate_blocked(repo_selection):
+            claude_decision_scope = "pending_candidate_not_authoritative"
+            claude_decision_subject = _candidate_subject(pending_candidate) or _candidate_subject(repo_selection)
+        elif _accepted_repo_selection(repo_selection):
+            claude_decision_scope = "accepted_environment_selection"
+            claude_decision_subject = _candidate_subject(selected_repo) or _candidate_subject(repo_selection)
+        else:
+            claude_decision_scope = "repo_selection_candidate"
+            claude_decision_subject = _candidate_subject(pending_candidate) or _candidate_subject(selected_repo) or _candidate_subject(repo_selection)
     elif isinstance(active_repo, dict) and isinstance(active_repo.get('claude_topic_fit_decision'), dict):
         claude_decision = active_repo.get('claude_topic_fit_decision', {})
+        claude_decision_scope = "active_repo"
+        claude_decision_subject = _candidate_subject(active_repo)
     claude_accepted_repo_ready = bool(selected_repo) and (
         str(repo_selection.get('selection_gate', '') if isinstance(repo_selection, dict) else '').startswith(('accepted_by_claude', 'accepted_by_deterministic_base_switch_gate'))
         or bool(claude_decision.get('accept_as_current_best'))
@@ -371,6 +398,9 @@ def main() -> None:
     if selected_base_viability_status:
         full_cycle_summary = selected_base_viability_status.get('summary') or full_cycle_summary
         scientific_progress_summary = selected_base_viability_status.get('summary') or scientific_progress_summary
+    claude_rationale = claude_decision.get('rationale', '') if isinstance(claude_decision, dict) else ''
+    if claude_rationale and claude_decision_scope == "pending_candidate_not_authoritative":
+        claude_rationale = f"pending candidate only; active_repo unchanged: {claude_rationale}"
     lines = [
         "# Workflow Status\n\n",
         f"- project: {cfg.get('name', args.project)}\n",
@@ -385,9 +415,11 @@ def main() -> None:
         f"- active_repo_ready_datasets: {', '.join(ready_datasets) if ready_datasets else 'none'}\n",
         f"- active_repo_blocked_datasets: {', '.join(blocked_datasets) if blocked_datasets else 'none'}\n",
         f"- claude_accepted_transformable_repo: {claude_accepted_repo_ready}\n",
+        f"- claude_repo_decision_scope: {claude_decision_scope}\n",
+        f"- claude_repo_decision_subject: {claude_decision_subject}\n",
         f"- claude_repo_decision: {claude_decision.get('decision', '') if isinstance(claude_decision, dict) else ''}\n",
         f"- claude_repo_confidence: {claude_decision.get('confidence', '') if isinstance(claude_decision, dict) else ''}\n",
-        f"- claude_repo_rationale: {claude_decision.get('rationale', '') if isinstance(claude_decision, dict) else ''}\n",
+        f"- claude_repo_rationale: {claude_rationale}\n",
         f"- current_find_run_id: {current_find_run_id}\n",
         f"- current_find_downstream_status: {current_find_status or 'unknown'}\n",
         f"- environment_base_selection_status: {environment_selection_status}\n",
