@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import html
+import hmac
 import json
 import os
 import shutil
@@ -13,12 +15,13 @@ import time
 import threading
 import traceback
 from concurrent.futures import TimeoutError as FutureTimeoutError, ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlencode
 from uuid import uuid4
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -37,13 +40,25 @@ from auto_research.models import AppConfig, EmailJobRequest, FindRequest, IdeaPa
 from auto_research.source_selection import canonical_source_selection, normalize_source_selection, save_canonical_source_selection, project_config_path
 from auto_research.paths import CONFIG_PATH, RUNS_DIR, STATE_DIR, ensure_directories
 from auto_research.storage import delete_run, list_runs, read_json, redacted_config, run_dir, write_json
+from auto_research.web.mobile_qr import qr_svg, qr_svg_data_url
 from auto_research.web.project_bridge import action_gate_blocker, job_stage, create_project_config, detect_runtime_config, list_projects as list_projects, project_summary, run_action, runtime_status, update_project_config, update_runtime_config, _cleruntime_caches
 from paper_common import get_active_paper_state
 
 
 ensure_directories()
 
+UTC = timezone.utc
+
 app = FastAPI(title="TASTE Local API", version="0.1.0")
+MOBILE_API_VERSION = 1
+MOBILE_CAPABILITIES = [
+    "projects",
+    "jobs",
+    "runtime",
+    "llm_config",
+    "claude_latest_response",
+    "remote_artifacts",
+]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -51,6 +66,35 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _configured_server_access_token() -> str:
+    return (os.environ.get("TASTE_SERVER_ACCESS_TOKEN") or os.environ.get("TASTE_SERVER_TOKEN") or "").strip()
+
+
+def _path_requires_server_access_token(path: str) -> bool:
+    return path == "/health" or path == "/api" or path.startswith("/api/")
+
+
+def _bearer_token_from_authorization(value: str) -> str:
+    parts = str(value or "").strip().split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return ""
+    return parts[1].strip()
+
+
+@app.middleware("http")
+async def _require_server_access_token(request, call_next):
+    expected = _configured_server_access_token()
+    if expected and request.method.upper() != "OPTIONS" and _path_requires_server_access_token(str(request.url.path or "")):
+        actual = _bearer_token_from_authorization(request.headers.get("authorization", ""))
+        if not actual or not hmac.compare_digest(actual, expected):
+            return JSONResponse(
+                {"error": "server_access_token_required"},
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -7547,7 +7591,11 @@ def api_llm_probe() -> dict:
 
 @app.get("/api/config/meta")
 def api_config_meta() -> dict:
-    return {"saved": CONFIG_PATH.exists()}
+    return {
+        "saved": CONFIG_PATH.exists(),
+        "mobile_api_version": MOBILE_API_VERSION,
+        "mobile_capabilities": MOBILE_CAPABILITIES,
+    }
 
 
 @app.get("/api/frontend/version")
@@ -8960,6 +9008,318 @@ def api_patch_idea(run_id: str, idea_id: str, patch: IdeaPatch) -> dict:
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+def _mobile_connection_link_payload(
+    *,
+    server_url: str,
+    profile: str = "",
+    kind: str = "server",
+    project: str = "",
+    token: str = "",
+) -> str:
+    query = {
+        "server_url": str(server_url or "").strip(),
+        "kind": str(kind or "server").strip().lower(),
+    }
+    if str(profile or "").strip():
+        query["profile"] = str(profile or "").strip()
+    if str(project or "").strip():
+        query["project"] = str(project or "").strip()
+    if str(token or "").strip():
+        query["token"] = str(token or "").strip()
+    return f"taste://connect?{urlencode(query)}"
+
+
+@app.post("/mobile/connect/qr")
+def mobile_connect_qr(payload: dict[str, Any]) -> JSONResponse:
+    link = str(payload.get("link") or "").strip()
+    if not link.startswith("taste://connect?"):
+        return JSONResponse({"error": "link must be a taste://connect URL"}, status_code=400, headers={"Cache-Control": "no-store"})
+    try:
+        svg = qr_svg(link)
+        data_url = qr_svg_data_url(link)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400, headers={"Cache-Control": "no-store"})
+    return JSONResponse({"qr_svg": svg, "qr_svg_data_url": data_url}, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/mobile/connect")
+def mobile_connect_page(
+    request: Request,
+    server_url: str = "",
+    profile: str = "TASTE Server",
+    kind: str = "server",
+    project: str = "",
+) -> HTMLResponse:
+    """Serve a no-build helper page for importing an iOS connection profile."""
+    normalized_kind = str(kind or "server").strip().lower()
+    if normalized_kind not in {"computer", "server", "cloud"}:
+        normalized_kind = "server"
+    inferred_server_url = str(server_url or "").strip() or str(request.base_url).rstrip("/")
+    initial = {
+        "server_url": inferred_server_url,
+        "profile": str(profile or "TASTE Server").strip() or "TASTE Server",
+        "kind": normalized_kind,
+        "project": str(project or "").strip(),
+    }
+
+    def esc(value: Any) -> str:
+        return html.escape(str(value or ""), quote=True)
+
+    api_token_note = (
+        "This TASTE server requires a bearer token for API calls. Type it below only on a trusted device; "
+        "the page builds the link locally in your browser and the server does not print it into this HTML."
+        if _configured_server_access_token()
+        else "If your TASTE server is protected by a tunnel, VPN gateway, or bearer token, type that token below before opening the link."
+    )
+    initial_link = _mobile_connection_link_payload(**initial)
+    initial_qr_data_url = qr_svg_data_url(initial_link)
+    payload_json = json.dumps(initial, ensure_ascii=False)
+    body = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TASTE Mobile Connect</title>
+  <style>
+    :root {{
+      color-scheme: light dark;
+      --bg: #f8fafc;
+      --panel: #ffffff;
+      --text: #1e293b;
+      --muted: #64748b;
+      --line: #cbd5e1;
+      --primary: #2563eb;
+      --accent: #0f766e;
+      --warn: #b45309;
+    }}
+    @media (prefers-color-scheme: dark) {{
+      :root {{
+        --bg: #0f172a;
+        --panel: #111827;
+        --text: #e5e7eb;
+        --muted: #9ca3af;
+        --line: #334155;
+        --primary: #60a5fa;
+        --accent: #2dd4bf;
+        --warn: #f59e0b;
+      }}
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.45;
+    }}
+    main {{
+      width: min(720px, 100%);
+      margin: 0 auto;
+      padding: 24px 16px 40px;
+    }}
+    header {{
+      margin-bottom: 18px;
+    }}
+    h1 {{
+      margin: 0 0 8px;
+      font-size: clamp(28px, 7vw, 44px);
+      letter-spacing: 0;
+    }}
+    p {{ margin: 0 0 14px; color: var(--muted); }}
+    .panel {{
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+    }}
+    label {{
+      display: block;
+      margin: 14px 0 6px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text);
+    }}
+    input, select, textarea {{
+      width: 100%;
+      min-height: 44px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 10px 12px;
+      background: transparent;
+      color: var(--text);
+      font: inherit;
+    }}
+    textarea {{
+      min-height: 98px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      resize: vertical;
+    }}
+    .actions {{
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 14px;
+    }}
+    .qr-card {{
+      display: grid;
+      justify-items: center;
+      gap: 8px;
+      margin-top: 14px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: white;
+      color: #1e293b;
+      text-align: center;
+    }}
+    .qr-card img {{
+      width: min(260px, 100%);
+      aspect-ratio: 1;
+      image-rendering: pixelated;
+    }}
+    .qr-card p {{
+      margin: 0;
+      color: #475569;
+      font-size: 13px;
+    }}
+    a.button, button {{
+      min-height: 44px;
+      border: 0;
+      border-radius: 7px;
+      padding: 11px 12px;
+      color: white;
+      background: var(--primary);
+      font: inherit;
+      font-weight: 700;
+      text-align: center;
+      text-decoration: none;
+      cursor: pointer;
+    }}
+    button.secondary {{ background: var(--accent); }}
+    .note {{
+      margin-top: 12px;
+      padding: 10px 12px;
+      border-left: 3px solid var(--warn);
+      color: var(--muted);
+      background: color-mix(in srgb, var(--warn) 12%, transparent);
+      border-radius: 6px;
+      font-size: 13px;
+    }}
+    code {{ overflow-wrap: anywhere; }}
+    @media (max-width: 520px) {{
+      .actions {{ grid-template-columns: 1fr; }}
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>TASTE Mobile Connect</h1>
+      <p>Build a lightweight iOS connection link for the TASTE app. The phone imports the server URL, target type, optional project, and optional token; research data stays on the computer/server.</p>
+    </header>
+    <section class="panel" aria-label="TASTE iOS connection builder">
+      <label for="server-url">TASTE server URL</label>
+      <input id="server-url" inputmode="url" autocomplete="url" value="{esc(initial["server_url"])}">
+      <label for="profile">Connection name</label>
+      <input id="profile" value="{esc(initial["profile"])}">
+      <label for="kind">Target type</label>
+      <select id="kind">
+        <option value="computer" {"selected" if normalized_kind == "computer" else ""}>Computer</option>
+        <option value="server" {"selected" if normalized_kind == "server" else ""}>Server</option>
+        <option value="cloud" {"selected" if normalized_kind == "cloud" else ""}>Cloud</option>
+      </select>
+      <label for="project">Project ID</label>
+      <input id="project" value="{esc(initial["project"])}" placeholder="optional">
+      <label for="token">Server access token</label>
+      <input id="token" type="password" autocomplete="off" placeholder="optional bearer token">
+      <label for="link">Connection link</label>
+      <textarea id="link" readonly spellcheck="false"></textarea>
+      <div class="qr-card" aria-label="TASTE connection QR code">
+        <img id="connection-qr" alt="Scan this QR with the TASTE iOS app" src="{esc(initial_qr_data_url)}">
+        <p id="qr-status">Scan this QR in the TASTE iOS app Settings screen.</p>
+      </div>
+      <div class="actions">
+        <a class="button" id="open-link" href="#">Open in TASTE</a>
+        <button class="secondary" id="copy-link" type="button">Copy Link</button>
+      </div>
+      <p class="note">{esc(api_token_note)}</p>
+    </section>
+  </main>
+  <script type="application/json" id="initial-state">{html.escape(payload_json, quote=False)}</script>
+  <script>
+    const initial = JSON.parse(document.getElementById("initial-state").textContent);
+    const fields = {{
+      serverUrl: document.getElementById("server-url"),
+      profile: document.getElementById("profile"),
+      kind: document.getElementById("kind"),
+      project: document.getElementById("project"),
+      token: document.getElementById("token"),
+      link: document.getElementById("link"),
+      openLink: document.getElementById("open-link"),
+      copyLink: document.getElementById("copy-link"),
+      qr: document.getElementById("connection-qr"),
+      qrStatus: document.getElementById("qr-status")
+    }};
+    let qrRequestID = 0;
+    function buildLink() {{
+      const params = new URLSearchParams();
+      params.set("server_url", fields.serverUrl.value.trim() || initial.server_url);
+      params.set("kind", fields.kind.value);
+      const profile = fields.profile.value.trim();
+      const project = fields.project.value.trim();
+      const token = fields.token.value.trim();
+      if (profile) params.set("profile", profile);
+      if (project) params.set("project", project);
+      if (token) params.set("token", token);
+      const link = "taste://connect?" + params.toString();
+      fields.link.value = link;
+      fields.openLink.href = link;
+      updateQR(link);
+      return link;
+    }}
+    async function updateQR(link) {{
+      const requestID = ++qrRequestID;
+      fields.qrStatus.textContent = "Updating QR...";
+      try {{
+        const response = await fetch("/mobile/connect/qr", {{
+          method: "POST",
+          headers: {{"Content-Type": "application/json"}},
+          body: JSON.stringify({{link}})
+        }});
+        const payload = await response.json();
+        if (requestID !== qrRequestID) return;
+        if (!response.ok) throw new Error(payload.error || "QR update failed");
+        fields.qr.src = payload.qr_svg_data_url;
+        fields.qrStatus.textContent = "Scan this QR in the TASTE iOS app Settings screen.";
+      }} catch (error) {{
+        if (requestID !== qrRequestID) return;
+        fields.qrStatus.textContent = error.message || "QR update failed.";
+      }}
+    }}
+    for (const element of [fields.serverUrl, fields.profile, fields.kind, fields.project, fields.token]) {{
+      element.addEventListener("input", buildLink);
+      element.addEventListener("change", buildLink);
+    }}
+    fields.copyLink.addEventListener("click", async () => {{
+      const link = buildLink();
+      try {{
+        await navigator.clipboard.writeText(link);
+        fields.copyLink.textContent = "Copied";
+        setTimeout(() => fields.copyLink.textContent = "Copy Link", 1600);
+      }} catch (_error) {{
+        fields.link.focus();
+        fields.link.select();
+      }}
+    }});
+    buildLink();
+  </script>
+</body>
+</html>
+"""
+    return HTMLResponse(body, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/{path_name:path}")

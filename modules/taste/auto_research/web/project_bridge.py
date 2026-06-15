@@ -12401,6 +12401,9 @@ FULL_CYCLE_EXCLUSIVE_ACTIONS = {
     "full-cycle",
     "full_research_cycle",
     "autonomous",
+    "read",
+    "idea",
+    "plan",
     "environment",
     "experiment",
     "paper",
@@ -12615,6 +12618,8 @@ def build_command(payload: dict[str, Any]) -> tuple[str, list[str]]:
             cmd.append("--use-existing-literature-packet")
     elif action == "current-find-selection":
         cmd = [py, str(SCRIPTS / "ensure_current_find_research_plan.py"), "--project", project, _current_find_selection_command_mode(project)]
+    elif action in {"read", "idea", "plan"}:
+        cmd = [py, str(SCRIPTS / "ensure_current_find_research_plan.py"), "--project", project, "--force"]
     elif action in {"literature-base-audit", "literature_base_audit"}:
         limit = max(1, min(200, int(payload.get("limit") or 26)))
         repo_search_per_candidate = max(1, min(8, int(payload.get("repo_search_per_candidate") or 2)))
@@ -13439,6 +13444,9 @@ def run_action(payload: dict[str, Any], log: LogFn, should_cancel: CancelFn, pro
         "literature_base_audit": {2},
         "full-cycle": {2},
         "full_research_cycle": {2},
+        "read": {2},
+        "idea": {2},
+        "plan": {2},
         "environment": {2},
         "experiment": {2},
         "paper": {2},

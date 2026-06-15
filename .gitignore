@@ -8,10 +8,14 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .DS_Store
+.venv/
 modules/taste/.venv/
 modules/taste/auto_research/web/client/node_modules/
 modules/taste/auto_research/web/client/dist/
 modules/taste/auto_research/web/client/tsconfig.tsbuildinfo
+apps/ios/TASTEApp/.build/
+apps/ios/TASTEApp/.swiftpm/
+apps/ios/TASTEApp/DerivedData/
 
 # Runtime logs and temporary files
 *.log

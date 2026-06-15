@@ -16,6 +16,7 @@ fi
 ENV_NAME="${CONDA_ENV_NAME:-}"
 PORT="${WEB_PORT:-8765}"
 HOST="${WEB_HOST:-127.0.0.1}"
+API_ONLY="${WEB_API_ONLY:-0}"
 
 activate_conda_env_if_available() {
   if [[ -z "$ENV_NAME" || -z "$CONDA" || ! -f "$CONDA/etc/profile.d/conda.sh" ]]; then
@@ -88,7 +89,9 @@ if [[ ! -d "$MODULE_ROOT" ]]; then
   echo "missing module: $MODULE_ROOT" >&2
   exit 2
 fi
-if [[ ! -d "$MODULE_ROOT/auto_research/web/client/dist" ]]; then
+if [[ ! -d "$MODULE_ROOT/auto_research/web/client/dist" && "$API_ONLY" =~ ^(1|true|yes|on)$ ]]; then
+  echo "TASTE frontend dist missing; WEB_API_ONLY=1 so starting API server without rebuilding the frontend." >&2
+elif [[ ! -d "$MODULE_ROOT/auto_research/web/client/dist" ]]; then
   echo "TASTE frontend dist missing; building it first..." >&2
   cd "$MODULE_ROOT/auto_research/web/client"
   if ! command -v npm >/dev/null 2>&1; then

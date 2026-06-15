@@ -8,7 +8,7 @@ import re
 import sys
 import time
 import xml.etree.ElementTree as ET
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus, urlencode
@@ -16,6 +16,8 @@ from urllib.parse import quote_plus, urlencode
 import requests
 
 from project_paths import build_paths
+
+UTC = timezone.utc
 
 
 FULL_TEXT_MIN_CHARS = 1200

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +11,7 @@ from .local_index import LOCAL_DATABASE_DIR, _venue_id_candidates, venue_cache_k
 
 
 SCHEMA_VERSION = "1.0"
+UTC = timezone.utc
 
 
 def _json_path(path: Path) -> str:

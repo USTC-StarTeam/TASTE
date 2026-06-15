@@ -665,6 +665,24 @@ def test_claude_code_launch_does_not_derive_account_from_taste_llm_config():
     assert "os.environ.get('ANTHROPIC_MODEL')" not in session_source
 
 
+def test_project_job_read_idea_plan_actions_use_current_find_wrapper(tmp_path, monkeypatch):
+    from auto_research.web import project_bridge
+
+    project = "demo_project"
+    root = tmp_path / "projects" / project
+    (root / "planning" / "finding").mkdir(parents=True)
+    monkeypatch.setattr(project_bridge, "PROJECTS", tmp_path / "projects")
+    monkeypatch.setattr(project_bridge, "management_python", lambda: "/tmp/taste-python")
+
+    for action in ["read", "idea", "plan"]:
+        _project, cmd = project_bridge.build_command({"action": action, "project": project})
+
+        assert _project == project
+        assert cmd[0] == "/tmp/taste-python"
+        assert cmd[1].endswith("scripts/ensure_current_find_research_plan.py")
+        assert cmd[2:] == ["--project", project, "--force"]
+
+
 def test_read_request_for_historical_run_uses_current_find_wrapper_when_current_read_is_pending(tmp_path):
     root = tmp_path / "projects" / "demo_project"
     taste_dir = root / "planning" / "finding"

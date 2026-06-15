@@ -6,11 +6,13 @@ import json
 import os
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from project_paths import ROOT, build_paths
+
+UTC = timezone.utc
 
 
 def load_json(path: Path, default: Any) -> Any:

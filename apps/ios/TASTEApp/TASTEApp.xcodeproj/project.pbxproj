@@ -1,0 +1,283 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0A0000010000000000000001 /* TASTEApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A0000110000000000000001 /* TASTEApp.swift */; };
+		0A0000010000000000000002 /* AppViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A0000110000000000000002 /* AppViewModel.swift */; };
+		0A0000010000000000000003 /* Views.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A0000110000000000000003 /* Views.swift */; };
+		0A0000010000000000000004 /* TASTEAppCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A0000110000000000000004 /* TASTEAppCore.swift */; };
+		0A0000010000000000000005 /* TASTEAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A0000110000000000000005 /* TASTEAPIClient.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		0A0000110000000000000001 /* TASTEApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TASTEApp.swift; sourceTree = "<group>"; };
+		0A0000110000000000000002 /* AppViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModel.swift; sourceTree = "<group>"; };
+		0A0000110000000000000003 /* Views.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views.swift; sourceTree = "<group>"; };
+		0A0000110000000000000004 /* TASTEAppCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = TASTEAppCore.swift; path = Sources/TASTEAppCore/TASTEAppCore.swift; sourceTree = "<group>"; };
+		0A0000110000000000000005 /* TASTEAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = TASTEAPIClient.swift; path = Sources/TASTEAppCore/TASTEAPIClient.swift; sourceTree = "<group>"; };
+		0A0000110000000000000006 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		0A0000110000000000000007 /* TASTEApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TASTEApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		0A0000210000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		0A0000310000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				0A0000310000000000000002 /* TASTEApp */,
+				0A0000310000000000000003 /* TASTEAppCore */,
+				0A0000310000000000000004 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		0A0000310000000000000002 /* TASTEApp */ = {
+			isa = PBXGroup;
+			children = (
+				0A0000110000000000000001 /* TASTEApp.swift */,
+				0A0000110000000000000002 /* AppViewModel.swift */,
+				0A0000110000000000000003 /* Views.swift */,
+				0A0000110000000000000006 /* Info.plist */,
+			);
+			path = TASTEApp;
+			sourceTree = "<group>";
+		};
+		0A0000310000000000000003 /* TASTEAppCore */ = {
+			isa = PBXGroup;
+			children = (
+				0A0000110000000000000004 /* TASTEAppCore.swift */,
+				0A0000110000000000000005 /* TASTEAPIClient.swift */,
+			);
+			sourceTree = "<group>";
+		};
+		0A0000310000000000000004 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				0A0000110000000000000007 /* TASTEApp.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		0A0000410000000000000001 /* TASTEApp */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0A0000710000000000000002 /* Build configuration list for PBXNativeTarget "TASTEApp" */;
+			buildPhases = (
+				0A0000610000000000000001 /* Sources */,
+				0A0000210000000000000001 /* Frameworks */,
+				0A0000610000000000000002 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = TASTEApp;
+			productName = TASTEApp;
+			productReference = 0A0000110000000000000007 /* TASTEApp.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		0A0000510000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2605;
+				LastUpgradeCheck = 2605;
+				TargetAttributes = {
+					0A0000410000000000000001 = {
+						CreatedOnToolsVersion = 26.5;
+					};
+				};
+			};
+			buildConfigurationList = 0A0000710000000000000001 /* Build configuration list for PBXProject "TASTEApp" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 0A0000310000000000000001;
+			productRefGroup = 0A0000310000000000000004 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				0A0000410000000000000001 /* TASTEApp */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		0A0000610000000000000002 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		0A0000610000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0A0000010000000000000001 /* TASTEApp.swift in Sources */,
+				0A0000010000000000000002 /* AppViewModel.swift in Sources */,
+				0A0000010000000000000003 /* Views.swift in Sources */,
+				0A0000010000000000000004 /* TASTEAppCore.swift in Sources */,
+				0A0000010000000000000005 /* TASTEAPIClient.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		0A0000810000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		0A0000810000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		0A0000810000000000000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = TASTEApp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = org.ustcstarteam.taste.mobile;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		0A0000810000000000000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = TASTEApp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = org.ustcstarteam.taste.mobile;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		0A0000710000000000000001 /* Build configuration list for PBXProject "TASTEApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0A0000810000000000000001 /* Debug */,
+				0A0000810000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		0A0000710000000000000002 /* Build configuration list for PBXNativeTarget "TASTEApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0A0000810000000000000003 /* Debug */,
+				0A0000810000000000000004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 0A0000510000000000000001 /* Project object */;
+}
