@@ -1206,6 +1206,47 @@ def test_citation_render_diagnostics_blocks_nature_numeric_author_style(tmp_path
 
 
 
+def test_citation_render_diagnostics_ignores_stale_workspace_root_log(tmp_path, monkeypatch):
+    audit = _load_audit_paper_normality()
+    output_dir = tmp_path / "paper" / "output" / "iclr"
+    workspace = tmp_path / "paper" / "writing" / "iclr" / "workspace"
+    final_dir = workspace / "final"
+    output_dir.mkdir(parents=True)
+    final_dir.mkdir(parents=True)
+    tex_path = output_dir / "paper.tex"
+    pdf_path = output_dir / "paper.pdf"
+    tex_path.write_text(r"""
+\documentclass{article}
+\begin{document}
+Prior work is cited with normal numeric syntax~\citep{validkey}.
+\bibliography{refs}
+\end{document}
+""", encoding="utf-8")
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    (workspace / "paper.log").write_text(
+        "Package natbib Warning: Citation `oldmissing' on page 1 undefined on input line 9.\n"
+        "There were undefined citations.\n",
+        encoding="utf-8",
+    )
+    (final_dir / "paper.log").write_text("Output written on paper.pdf (9 pages).\n", encoding="utf-8")
+    monkeypatch.setattr(audit, "read_pdf_text", lambda path, max_chars=240000: "All citations render normally [1].")
+
+    diagnostics = audit.citation_render_diagnostics(
+        tex_path.read_text(encoding="utf-8"),
+        pdf_path=pdf_path,
+        tex_path=tex_path,
+        output_dir=output_dir,
+        state={"paper_orchestra_workspace": str(workspace)},
+        venue_profile={"family": "iclr"},
+    )
+
+    assert diagnostics["status"] == "pass"
+    assert diagnostics["blockers"] == []
+    assert str(final_dir / "paper.log") in diagnostics["log_paths"]
+    assert str(workspace / "paper.log") not in diagnostics["log_paths"]
+
+
+
 def test_missing_paper_self_review_receipt_blocks(tmp_path):
     review = _load_paper_self_review()
 

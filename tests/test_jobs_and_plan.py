@@ -1853,6 +1853,8 @@ def test_running_paper_job_keeps_live_status_over_needs_writing_snapshot(tmp_pat
     assert "paper 正在运行：writing:plotting" in row["progress"]["message"]
     assert row["result"]["status"] == "running"
     assert row["result"]["process_alive"] is True
+    assert row["result"]["paper_execution_alive"] is True
+    assert row["result"]["paper_execution_state"] == "running"
     assert row["result"]["paper_worker_pid"] == "202"
     assert row["result"]["paper_controller_pid"] == "101"
     assert row["result"]["paper_stage"]["status"] == "needs_writing"
@@ -9696,6 +9698,9 @@ def test_paper_job_list_reports_content_policy_blocked_generated_candidate(tmp_p
     assert snapshot["pdf_path"] == ""
     assert snapshot["latest_generated_pdf_path"] == str(raw_pdf)
     assert snapshot["paper_content_policy_status"] == "blocked"
+    assert snapshot["paper_execution_alive"] is False
+    assert snapshot["paper_execution_state"] == "finished_content_policy_blocked"
+    assert "后台写作进程未在运行" in snapshot["paper_execution_message"]
     assert "SIREN" in snapshot["paper_content_blocker_summary"]
     assert "内容策略未通过" in snapshot["summary"]
 
@@ -9719,6 +9724,8 @@ def test_paper_job_list_reports_content_policy_blocked_generated_candidate(tmp_p
 
     assert row["status"] == "blocked"
     assert row["progress"]["phase"] == "blocked_content_policy"
+    assert row["result"]["paper_execution_state"] == "finished_content_policy_blocked"
+    assert "执行状态：后台写作进程未在运行" in "\n".join(row["logs"])
     assert "SIREN" in row["progress"]["message"]
     assert "old needs writing" not in row["progress"]["message"]
 
@@ -9768,6 +9775,9 @@ def test_paper_job_message_preview_gate_does_not_report_content_policy(tmp_path,
     assert snapshot["status"] == "preview_available"
     assert snapshot["paper_content_policy_status"] == "pass"
     assert snapshot["paper_content_blocker_summary"] == ""
+    assert snapshot["paper_execution_alive"] is False
+    assert snapshot["paper_execution_state"] == "finished_preview_gate_blocked"
+    assert "质量/自审门控仍阻塞" in snapshot["paper_execution_message"]
     assert "参考文献覆盖不足" in snapshot["summary"]
     assert "内容策略" not in snapshot["summary"]
 
@@ -9790,6 +9800,8 @@ def test_paper_job_message_preview_gate_does_not_report_content_policy(tmp_path,
     )
 
     assert row["progress"]["phase"] == "preview_available"
+    assert row["result"]["paper_execution_state"] == "finished_preview_gate_blocked"
+    assert "执行状态：后台写作进程未在运行" in "\n".join(row["logs"])
     assert "参考文献覆盖不足" in row["progress"]["message"]
     assert "内容策略" not in row["progress"]["message"]
 

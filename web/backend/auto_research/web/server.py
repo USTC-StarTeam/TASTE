@@ -1156,6 +1156,9 @@ def _paper_live_worker_projection(project: Any, result: dict[str, Any], job_stat
         "raw_stage": substage,
         "current_substage": substage,
         "paper_current_substage": substage,
+        "paper_execution_alive": True,
+        "paper_execution_state": "running",
+        "paper_execution_message": f"后台写作进程正在运行；当前子阶段={substage}。",
         "pid": worker.get("pid"),
         "cmd": worker.get("cmd") or controller_cmd,
         "command": worker.get("cmd") or controller_cmd,
@@ -1189,6 +1192,39 @@ def _paper_live_status_message(result: dict[str, Any], progress: dict[str, Any] 
         bits.append(f"worker={kind}")
     bits.append("投稿/证据门控保持真实状态")
     return "；".join(bits) + "。"
+
+
+def _paper_execution_projection(row: dict[str, Any]) -> dict[str, Any]:
+    row = row if isinstance(row, dict) else {}
+    if row.get("process_alive") is True or row.get("alive") is True:
+        substage = str(row.get("paper_current_substage") or row.get("current_substage") or row.get("phase") or "paper").strip() or "paper"
+        return {
+            "paper_execution_alive": True,
+            "paper_execution_state": "running",
+            "paper_execution_message": f"后台写作进程正在运行；当前子阶段={substage}。",
+        }
+    labels = _paper_venue_labels(row)
+    preview_label = labels.get("preview_zh", "会议格式论文预览")
+    content_policy_blocked = _paper_content_policy_blocked(row)
+    preview_available = _paper_preview_artifact_available(row)
+    conference_ready = bool(row.get("conference_preview_ready") and row.get("pdf_path"))
+    if content_policy_blocked:
+        state = "finished_content_policy_blocked"
+        message = "后台写作进程未在运行；候选稿已生成，但内容策略门控阻塞。" if preview_available else "后台写作进程未在运行；候选稿内容策略门控阻塞，尚无可检查预览产物。"
+    elif conference_ready:
+        state = "finished_preview_ready"
+        message = f"后台写作进程未在运行；{preview_label}已通过预览门控。"
+    elif preview_available:
+        state = "finished_preview_gate_blocked"
+        message = f"后台写作进程未在运行；{preview_label}已生成，但质量/自审门控仍阻塞。"
+    else:
+        state = "needs_writing"
+        message = f"后台写作进程未在运行；尚无{preview_label}产物，等待生成或修订。"
+    return {
+        "paper_execution_alive": False,
+        "paper_execution_state": state,
+        "paper_execution_message": message,
+    }
 
 
 def _public_taste_stage(stage: Any) -> str:
@@ -2037,6 +2073,7 @@ def _paper_stage_from_project_snapshot(project: str) -> dict[str, Any]:
         "raw_tex_path": str(raw_tex_path) if raw_tex_path else "",
         "venue_submission_policy": policy,
     }
+    row.update(_paper_execution_projection(row))
     row["summary"] = _paper_stage_job_message(row)
     return row
 
@@ -2136,7 +2173,7 @@ def _compact_job_result(result: Any, stage: Any = "", job_id: Any = "", logs: An
             "paper_public_diagnostics", "paper_layout_footprint_warnings",
             "conference_preview_blockers", "venue_requirements_status",
             "venue_requirements_path", "venue_requirements_summary", "venue_requirements_public_summary", "blocked_preview_available", "blocked_pdf_path",
-            "blocked_tex_path", "latest_generated_pdf_path", "latest_generated_tex_path", "raw_pdf_path", "raw_tex_path", "paper_content_policy_status", "paper_content_blocker_summary", "paper_stage_status",
+            "blocked_tex_path", "latest_generated_pdf_path", "latest_generated_tex_path", "raw_pdf_path", "raw_tex_path", "paper_content_policy_status", "paper_content_blocker_summary", "paper_stage_status", "paper_execution_alive", "paper_execution_state", "paper_execution_message",
             "paper_current_regeneration_requested", "paper_preview_repair_loop_status", "paper_preview_repair_rounds", "pdf_path", "tex_path",
         ]
         for key in paper_keys:
@@ -2677,12 +2714,17 @@ def _public_job_logs(stage: Any, logs: Any, progress: Any = None, result: Any = 
         message_source = result.get("paper_stage") if isinstance(result.get("paper_stage"), dict) else result
         result_summary = _paper_stage_job_message(message_source if isinstance(message_source, dict) else result).strip()
         live_summary = _paper_live_status_message(result, progress) if result.get("process_alive") is True else ""
+        execution_message = str(result.get("paper_execution_message") or (message_source.get("paper_execution_message") if isinstance(message_source, dict) else "") or "").strip()
         message = _public_paper_progress_message(progress.get("message") or "")
         phase = str(progress.get("phase") or "").strip()
         if live_summary:
             out.append("当前状态：" + live_summary)
             if result_summary:
                 out.append("论文产物状态：" + result_summary)
+        elif execution_message:
+            out.append("执行状态：" + execution_message)
+            if result_summary:
+                out.append("当前状态：" + result_summary)
         elif result_summary:
             out.append("当前状态：" + result_summary)
         elif message:
@@ -2753,7 +2795,7 @@ def _public_job_logs(stage: Any, logs: Any, progress: Any = None, result: Any = 
                 out.append(mapped or "writing 正在生成当前稿件预览；证据门控保持真实状态。")
         detail_tail: list[str] = []
         summary_prefixes = (
-            "当前状态：", "当前阶段：", "写作引用质量目标：", "官方引用要求：", "目标要求：",
+            "当前状态：", "执行状态：", "当前阶段：", "写作引用质量目标：", "官方引用要求：", "目标要求：",
             "正文页数：", "图表版面：", "预览仍需完善：", "写作质量目标未达：",
             "命令：", "运行环境 PATH 前缀：", "日志：", "产物目录：", "PDF：",
             "TeX：", "论文预览 PDF：", "最近生成 PDF：", "论文产物状态：", "详细日志：",
@@ -8262,7 +8304,7 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
     full_cycle_job = False if panel_stage else _is_full_cycle_job(raw_stage, item.get("job_id", ""), result, item.get("logs"))
     public_stage = panel_stage or ("paper" if paper_job else (_public_full_cycle_stage(raw_stage, item.get("progress"), result) if full_cycle_job else _public_taste_stage(raw_stage)))
     compact_result: dict[str, Any] = {}
-    result_keys = ["run_id", "project", "topic", "target_venue", "action", "agent_id", "target_agent_id", "requested_stage", "panel_stage", "pid", "cmd", "kind", "log_path", "artifact_dir", "find_results_path", "find_results_size_bytes", "phase", "raw_stage", "summary", "status", "process_alive", "alive", "current_substage", "paper_current_substage", "paper_worker_pid", "paper_worker_kind", "paper_controller_pid", "paper_worker_elapsed", "paper_worker_pcpu", "paper_worker_pmem"]
+    result_keys = ["run_id", "project", "topic", "target_venue", "action", "agent_id", "target_agent_id", "requested_stage", "panel_stage", "pid", "cmd", "kind", "log_path", "artifact_dir", "find_results_path", "find_results_size_bytes", "phase", "raw_stage", "summary", "status", "process_alive", "alive", "current_substage", "paper_current_substage", "paper_execution_alive", "paper_execution_state", "paper_execution_message", "paper_worker_pid", "paper_worker_kind", "paper_controller_pid", "paper_worker_elapsed", "paper_worker_pcpu", "paper_worker_pmem"]
     if full_cycle_job:
         result_keys = [key for key in result_keys if key != "cmd"]
     for key in result_keys:
@@ -8285,7 +8327,7 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
                 "venue_requirements_status", "venue_requirements_path",
                 "venue_requirements_summary", "venue_requirements_public_summary",
                 "blocked_preview_available", "blocked_pdf_path", "blocked_tex_path",
-                "latest_generated_pdf_path", "latest_generated_tex_path", "raw_pdf_path", "raw_tex_path", "paper_content_policy_status", "paper_content_blocker_summary", "paper_stage_status", "pdf_path", "tex_path",
+                "latest_generated_pdf_path", "latest_generated_tex_path", "raw_pdf_path", "raw_tex_path", "paper_content_policy_status", "paper_content_blocker_summary", "paper_stage_status", "paper_execution_alive", "paper_execution_state", "paper_execution_message", "pdf_path", "tex_path",
             ]
             paper_summary = _paper_stage_job_message(paper_stage) or str(paper_stage.get("summary") or result.get("paper_summary") or "")
             compact_result["paper_summary"] = paper_summary

@@ -390,27 +390,44 @@ def read_pdf_text(path: Path, max_chars: int = 240000) -> str:
 
 
 def _existing_log_paths(output_dir: Path, tex_path: Path | None, state: dict[str, Any]) -> list[Path]:
-    candidates: list[Path] = []
-    if output_dir:
-        candidates.extend([output_dir / "compile.log", output_dir / "paper.log"])
+    """Return logs for the current compile, not stale workspace attempts.
+
+    PaperOrchestra can leave an old `workspace/paper.log` from a failed early
+    compile beside a clean `workspace/final/paper.log`. Citation rendering is a
+    property of the current PDF/TeX pair, so we use the first tier with existing
+    logs and only fall back to older workspace-root logs when no current/final
+    log exists.
+    """
+
+    def existing(candidates: list[Path]) -> list[Path]:
+        seen: set[Path] = set()
+        paths: list[Path] = []
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve()
+            except Exception:
+                resolved = candidate
+            if resolved in seen or not candidate.exists() or not candidate.is_file():
+                continue
+            seen.add(resolved)
+            paths.append(candidate)
+        return paths
+
+    tiers: list[list[Path]] = []
     if tex_path:
-        candidates.extend([tex_path.with_suffix(".log"), tex_path.parent / "compile.log", tex_path.parent / "paper.log"])
+        tiers.append([tex_path.with_suffix(".log"), tex_path.parent / "compile.log", tex_path.parent / "paper.log"])
+    if output_dir:
+        tiers.append([output_dir / "compile.log", output_dir / "paper.log"])
     workspace_value = str(state.get("paper_orchestra_workspace") or "") if isinstance(state, dict) else ""
     if workspace_value:
         workspace = Path(workspace_value)
-        candidates.extend([workspace / "compile.log", workspace / "paper.log", workspace / "final" / "paper.log", workspace / "final" / "compile.log"])
-    seen: set[Path] = set()
-    paths: list[Path] = []
-    for candidate in candidates:
-        try:
-            resolved = candidate.resolve()
-        except Exception:
-            resolved = candidate
-        if resolved in seen or not candidate.exists() or not candidate.is_file():
-            continue
-        seen.add(resolved)
-        paths.append(candidate)
-    return paths
+        tiers.append([workspace / "final" / "paper.log", workspace / "final" / "compile.log"])
+        tiers.append([workspace / "compile.log", workspace / "paper.log"])
+    for tier in tiers:
+        paths = existing(tier)
+        if paths:
+            return paths
+    return []
 
 
 def citation_render_diagnostics(
