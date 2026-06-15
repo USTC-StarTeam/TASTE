@@ -7710,6 +7710,28 @@ def test_project_bridge_public_names_normalizes_stale_sibling_workspace_paths():
     assert str(project_bridge.ROOT / "runtime" / "runs" / "find_demo" / "read.md") in rendered
 
 
+def test_public_log_preserves_base_switch_gate_language():
+    from auto_research.web import project_bridge
+
+    root = Path(__file__).resolve().parents[1]
+    app = (root / "web" / "frontend" / "client" / "src" / "App.tsx").read_text(encoding="utf-8")
+
+    assert "experiment evidence review" not in app
+    assert 'route_authorization_gate: { zh: "路线授权门控", en: "route authorization gate" }' in app
+    assert 'lang === "zh" ? "确定性 base-switch gate" : "deterministic base-switch gate"' in app
+    assert '.replace(/base_switch_gate/gi, "base-switch gate")' in app
+
+    raw = "refresh deterministic base-switch gate; base_switch_gate; base_switch_execution"
+    bridge_rendered = project_bridge._public_internal_names(raw)
+    server_rendered = server._public_text(raw)
+
+    for rendered in (bridge_rendered, server_rendered):
+        assert "experiment evidence review" not in rendered
+        assert "deterministic base-switch gate" in rendered
+        assert "base-switch gate" in rendered
+        assert "base-switch execution receipt" in rendered
+
+
 def test_api_save_config_preserves_saved_secrets_and_never_writes_project_api_key(tmp_path, monkeypatch):
     cfg_path = tmp_path / "config.json"
     project_path = tmp_path / "project.json"

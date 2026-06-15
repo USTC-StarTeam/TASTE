@@ -3043,10 +3043,10 @@ function publicLogText(value: any, lang: Lang = "zh"): string {
     .replace(/历史 full-cycle 启动器已停止；当前状态以项目摘要和实验模块为准。/g, lang === "zh" ? "历史 full-cycle 启动器已停止；页面以项目摘要和实验模块为准。" : "Historical full-cycle launcher has stopped; current status comes from the project summary and Experiment module.")
     .replace(/当前状态以项目摘要和实验模块为准/g, lang === "zh" ? "页面以项目摘要和实验模块为准" : "current status comes from the project summary and Experiment module")
     .replace(/stale[_ ]full[_ ]research[_ ]cycle[_ ]snapshot/gi, lang === "zh" ? "已停止" : "stopped")
-    .replace(/deterministic\s+base[-_ ]switch\s+gate/gi, "experiment evidence review")
-    .replace(/base[-_ ]switch\s+gate/gi, "experiment evidence review")
-    .replace(/base_switch_gate/gi, "experiment evidence review")
-    .replace(/base_switch_execution/gi, "experiment evidence receipt")
+    .replace(/deterministic\s+base[-_ ]switch\s+gate/gi, lang === "zh" ? "确定性 base-switch gate" : "deterministic base-switch gate")
+    .replace(/base[-_ ]switch\s+gate/gi, "base-switch gate")
+    .replace(/base_switch_gate/gi, "base-switch gate")
+    .replace(/base_switch_execution/gi, lang === "zh" ? "base-switch 执行记录" : "base-switch execution receipt")
     .replace(/selected_base_viability_gate/gi, "experiment evidence audit")
     .replace(/selected_base_viability/gi, "experiment evidence audit")
     .replace(/selected[-_ ]base/gi, lang === "zh" ? "当前路线" : "selected repository")
@@ -6442,7 +6442,7 @@ function App() {
     wait_for_environment_base_selection: { zh: "环境审查后执行", en: "run after environment review" },
     waiting_for_environment_base_selection: { zh: "环境审查后执行", en: "run after environment review" },
     waiting_for_environment_review: { zh: "环境审查后执行", en: "run after environment review" },
-    route_authorization_gate: { zh: "实验证据审查", en: "experiment evidence review" },
+    route_authorization_gate: { zh: "路线授权门控", en: "route authorization gate" },
     current_base: { zh: "当前路线", en: "current route" },
     claude_code_current_find_takeover: { zh: "当前 Find 精读产物", en: "current-Find reading output" },
     "current-find-claude-read-idea-plan": { zh: "当前 Find 精读/想法/计划", en: "current Find reading/ideas/plans" },
