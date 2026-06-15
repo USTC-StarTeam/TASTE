@@ -8131,7 +8131,7 @@ function App() {
             <div className="planControlGrid planTopGrid">
               <div className="panel planControlPanel planIdeasPanel">
                 <div className="planPanelHeader">
-                  <h3>{lang === "zh" ? "选择想法" : "Select ideas"}</h3>
+                  <h3>{lang === "zh" ? "计划生成输入" : "Plan generation input"}</h3>
                   <span>{planIdeaIds.length} / {approvedIdeas.length}</span>
                 </div>
                 {currentFindArtifactLoading || ideasStillSyncing ? (

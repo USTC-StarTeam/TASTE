@@ -11813,20 +11813,61 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     )
     read_matches_recommendations = bool(strong_count and display_read_count == strong_count)
     idea_score_values = []
-    for idea_row in safe_list(ideas_results.get("ideas")):
-        if not isinstance(idea_row, dict):
-            continue
+    idea_rows = [row for row in safe_list(ideas_results.get("ideas")) if isinstance(row, dict)]
+    plan_rows = [row for row in safe_list(plans_results.get("plans")) if isinstance(row, dict)]
+    selected_execution_plan_id = str(current_find_pipeline.get("selected_plan_id") or selected_execution.get("selected_plan_id") or "").strip()
+    selected_execution_idea_id = str(current_find_pipeline.get("selected_idea_id") or selected_execution.get("selected_idea_id") or "").strip()
+    selected_execution_status = str(current_find_pipeline.get("selected_execution_status") or selected_execution.get("status") or "").strip()
+    selected_execution_issue = str(current_find_pipeline.get("selected_execution_issue") or selected_execution.get("selection_issue") or "").strip()
+    selected_execution_ready = bool(
+        plan_count
+        and selected_execution_plan_id
+        and not selected_execution_issue
+        and (
+            selected_execution_status == "selected_plan_ready"
+            or current_find_pipeline.get("execution_ready") is True
+            or selected_execution.get("status") == "selected_plan_ready"
+        )
+    )
+    selected_plan_row = next((row for row in plan_rows if str(row.get("plan_id") or row.get("id") or "").strip() == selected_execution_plan_id), {})
+    selected_idea_row = next((row for row in idea_rows if str(row.get("id") or row.get("idea_id") or "").strip() == selected_execution_idea_id), {})
+    selected_plan_title = str(
+        selected_plan_row.get("title")
+        or safe_dict(selected_execution.get("selected_plan")).get("title")
+        or selected_execution_plan_id
+    ).strip()
+    selected_idea_title = str(
+        selected_idea_row.get("title")
+        or safe_dict(selected_execution.get("selected_idea")).get("title")
+        or selected_execution_idea_id
+    ).strip()
+    for idea_row in idea_rows:
         score_value = idea_row.get("score") if idea_row.get("score") not in (None, "") else idea_row.get("idea_score")
         if score_value not in (None, ""):
             idea_score_values.append(score_value)
-    approved_idea_count = len([
-        row for row in safe_list(ideas_results.get("ideas"))
-        if isinstance(row, dict) and str(row.get("status") or "").lower() in {"approved", "pass", "pursue"}
-    ])
-    approved_plan_count = len([
-        row for row in safe_list(plans_results.get("plans"))
-        if isinstance(row, dict) and str(row.get("status") or "").lower() in {"approved", "pass", "ready", "completed", "waiting_for_environment_base_selection"}
-    ])
+    approved_idea_count = 0
+    selected_idea_counted = False
+    for row in idea_rows:
+        row_id = str(row.get("id") or row.get("idea_id") or "").strip()
+        row_passed = str(row.get("status") or "").lower() in {"approved", "pass", "pursue"}
+        row_selected = bool(selected_execution_idea_id and row_id == selected_execution_idea_id)
+        if row_passed or row_selected:
+            approved_idea_count += 1
+            selected_idea_counted = selected_idea_counted or row_selected
+    if selected_execution_ready and selected_execution_idea_id and not selected_idea_counted and selected_idea_row:
+        approved_idea_count += 1
+    approved_plan_count = 0
+    selected_plan_counted = False
+    for row in plan_rows:
+        row_id = str(row.get("plan_id") or row.get("id") or "").strip()
+        row_passed = str(row.get("status") or "").lower() in {"approved", "pass", "ready", "completed", "waiting_for_environment_base_selection"}
+        row_selected = bool(selected_execution_plan_id and row_id == selected_execution_plan_id)
+        if row_passed or row_selected:
+            approved_plan_count += 1
+            selected_plan_counted = selected_plan_counted or row_selected
+    if selected_execution_ready and selected_execution_plan_id and not selected_plan_counted and selected_plan_row:
+        approved_plan_count += 1
+    plan_backlog_count = max(0, plan_count - 1) if selected_execution_ready else max(0, plan_count - approved_plan_count)
     find_module_summary = (
         "新的 Find 正在运行；等待本轮检索、详情抓取、评分和推荐产物落盘。"
         if fresh_find_running else
@@ -11856,10 +11897,14 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     )
     idea_module_summary = (
         f"当前精读后形成 {idea_count} 个想法，其中 {len(idea_score_values)} 个带评分，{approved_idea_count} 个已通过。"
-        if idea_count else
+        if idea_count and not selected_execution_ready else
+        f"当前精读后形成 {idea_count} 个想法；执行想法已选择：{selected_idea_title or selected_execution_idea_id}。其余想法保留候选池。"
+        if idea_count and selected_execution_ready else
         "当前 Find 尚未形成精读后的想法。"
     )
     plan_module_summary = (
+        f"当前已形成 {plan_count} 个计划；唯一执行计划已选择：{selected_plan_title or selected_execution_plan_id}。其余 {plan_backlog_count} 个为候选池，不驱动环境、实验或写作。"
+        if selected_execution_ready else
         f"当前已形成 {plan_count} 个计划，{approved_plan_count} 个可等待环境审查后落到真实仓库、数据和协议。"
         if plan_count else
         "当前 Find 尚未形成实验计划。"
@@ -11917,7 +11962,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
             "read_matches_recommendations": display_read_count >= strong_count if strong_count else read_matches_recommendations,
         },
         "idea": {
-            "status": "fresh_find_running" if fresh_find_running else "pass" if idea_count >= 5 and idea_score_values else "needs_attention" if idea_count else "not_started",
+            "status": "fresh_find_running" if fresh_find_running else "pass" if selected_execution_ready and idea_count else "pass" if idea_count >= 5 and idea_score_values else "needs_attention" if idea_count else "not_started",
             "run_id": run_id,
             "summary": idea_module_summary,
             "summary_zh": idea_module_summary,
@@ -11931,7 +11976,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
             "source": "current_find_reading_output" if idea_count else "",
         },
         "plan": {
-            "status": selected_plan_gate["status"] if selected_plan_gate.get("blocked") else "fresh_find_running" if fresh_find_running else "pass" if plan_count >= 5 else "needs_attention" if plan_count else "not_started",
+            "status": selected_plan_gate["status"] if selected_plan_gate.get("blocked") else "fresh_find_running" if fresh_find_running else "pass" if selected_execution_ready else "pass" if plan_count >= 5 else "needs_attention" if plan_count else "not_started",
             "run_id": run_id,
             "summary": plan_module_summary,
             "summary_zh": plan_module_summary,
@@ -11940,9 +11985,11 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
             "approved_plan_count": approved_plan_count,
             "selected_execution": selected_execution,
             "selected_execution_status": str(selected_execution.get("status") or ""),
-            "selected_plan_id": str(selected_execution.get("selected_plan_id") or ""),
-            "selected_idea_id": str(selected_execution.get("selected_idea_id") or ""),
+            "selected_plan_id": selected_execution_plan_id,
+            "selected_idea_id": selected_execution_idea_id,
             "execution_policy": safe_dict(selected_execution.get("execution_policy")),
+            "selected_execution_ready": selected_execution_ready,
+            "candidate_backlog_plan_count": plan_backlog_count,
             "source": "current_find_reading_output" if plan_count else "",
         },
     }

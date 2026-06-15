@@ -8757,6 +8757,66 @@ def test_compact_project_summary_current_find_ready_overrides_stale_summary_with
     assert summary["current_blocker"]["category"] == "environment_anchor_selection_required"
 
 
+def test_compact_summary_selected_execution_contract_marks_small_plan_set_ready(tmp_path, monkeypatch):
+    from auto_research.web import project_bridge
+
+    project_root = tmp_path / "demo_project"
+    state_dir = project_root / "state"
+    finding_dir = project_root / "planning" / "finding"
+    state_dir.mkdir(parents=True)
+    finding_dir.mkdir(parents=True)
+    run_id = "find_selected_contract"
+    write_json(finding_dir / "find_results.json", {"run_id": run_id, "strong_recommendations": [recommended_paper("paper-1", "Paper 1"), recommended_paper("paper-2", "Paper 2")], "recommendation_target_count": 2, "recommendation_shortfall": 0})
+    write_json(finding_dir / "find_progress.json", {"run_id": run_id, "phase": "complete", "strong_recommendation_count": 2, "recommendation_target_count": 2, "recommendation_shortfall": 0, "counts": {}})
+    write_json(finding_dir / "read_results.json", {"run_id": run_id, "source": "claude_code_current_find_takeover", "readings": [{"paper_id": "paper-1", "title": "Paper 1", "full_text_available": True, "full_text_status": "pdf_text_read", "pdf_text_chars": 9000, "source_evidence": {"text_chars": 9000}, "abstract_zh": "摘要", "method_details_zh": "方法"}, {"paper_id": "paper-2", "title": "Paper 2", "full_text_available": True, "full_text_status": "pdf_text_read", "pdf_text_chars": 9000, "source_evidence": {"text_chars": 9000}, "abstract_zh": "摘要", "method_details_zh": "方法"}]})
+    write_json(finding_dir / "ideas.json", {"run_id": run_id, "source": "claude_code_current_find_takeover", "ideas": [{"id": "idea-selected", "title": "Selected causal idea", "status": "approved", "score": 7}, {"id": "idea-backlog", "title": "Higher score backlog idea", "status": "approved", "score": 8}]})
+    write_json(
+        finding_dir / "plans.json",
+        {
+            "run_id": run_id,
+            "source": "claude_code_current_find_takeover",
+            "selected_plan_id": "plan-selected",
+            "selected_idea_id": "idea-selected",
+            "plans": [
+                {"plan_id": "plan-selected", "idea_id": "idea-selected", "title": "Selected causal plan", "score": 7, "selected_for_execution": True, "execute_next": True, "execution_selection": {"selected": True, "selected_by": "main_claude_code_after_deep_read"}},
+                {"plan_id": "plan-backlog", "idea_id": "idea-backlog", "title": "Higher score backlog plan", "score": 8, "selected_for_execution": False, "execute_next": False, "execution_policy": {"status": "candidate_backlog_only"}},
+            ],
+        },
+    )
+    write_json(
+        state_dir / "current_find_research_plan.json",
+        {
+            "run_id": run_id,
+            "status": "claude_current_find_read_idea_plan_ready_waiting_for_environment_base_selection",
+            "content_ready": True,
+            "read_idea_plan_ready": True,
+            "execution_ready": True,
+            "claude_current_find_ready": True,
+            "selected_plan_id": "plan-selected",
+            "selected_idea_id": "idea-selected",
+            "selected_execution": {"status": "selected_plan_ready", "selected_plan_id": "plan-selected", "selected_idea_id": "idea-selected", "selected_plan": {"title": "Selected causal plan"}, "selected_idea": {"title": "Selected causal idea"}, "execution_policy": {"status": "selected_plan_only"}, "candidate_counts": {"ideas": 2, "plans": 2}},
+            "reading_validation": {"run_id": run_id, "valid": True, "expected_recommendation_count": 2, "actual_reading_count": 2, "full_text_reading_count": 2, "full_text_evidence_count": 2, "pending_full_text_reading_count": 0, "pending_without_evidence_count": 0, "blockers": []},
+        },
+    )
+    write_json(state_dir / "current_find_claude_reading_validation.json", {"run_id": run_id, "valid": True, "expected_recommendation_count": 2, "actual_reading_count": 2, "full_text_reading_count": 2, "full_text_evidence_count": 2, "pending_full_text_reading_count": 0, "pending_without_evidence_count": 0, "blockers": []})
+    monkeypatch.setattr(project_bridge, "_current_project_source_selection", lambda _project, _root: {"venue_ids": ["openreview_iclr_2026"], "years": [2026]})
+    monkeypatch.setattr(project_bridge, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(project_bridge, "_remote_process_rows", lambda: [])
+    project_bridge._PROJECT_SUMMARY_CACHE.clear()
+
+    summary = project_bridge._fast_project_summary("demo_project", project_root, {"name": "demo_project", "topic": "Demo topic", "target_venue": "ICLR"})
+
+    assert summary["stages"]["idea"]["status"] == "pass"
+    assert summary["stages"]["plan"]["status"] == "pass"
+    assert summary["stages"]["plan"]["selected_execution_ready"] is True
+    assert summary["stages"]["plan"]["selected_plan_id"] == "plan-selected"
+    assert summary["stages"]["plan"]["approved_plan_count"] == 1
+    assert summary["stages"]["plan"]["candidate_backlog_plan_count"] == 1
+    assert "唯一执行计划已选择：Selected causal plan" in summary["stages"]["plan"]["summary"]
+    assert "0 个可等待环境审查" not in summary["stages"]["plan"]["summary"]
+    assert summary["current_find_pipeline"]["selected_plan_id"] == "plan-selected"
+
+
 def test_start_job_done_result_not_overridden_by_stale_blocked_summary(monkeypatch):
     from auto_research.web import server
 
