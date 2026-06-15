@@ -446,6 +446,40 @@ def test_propose_next_actions_prioritizes_semantic_provenance_gate(tmp_path, mon
     assert "Probe real repo dataset loaders before real experiments" not in text
 
 
+def test_propose_next_actions_reports_loader_probe_success_field(tmp_path, monkeypatch):
+    propose = load_script("propose_next_actions")
+    paths = _make_paths(tmp_path)
+    _seed_common_project(paths)
+    _write_json(paths.state / "dataset_registry.json", [{"name": "amazon-beauty", "available": True}])
+    _write_json(
+        paths.state / "real_dataset_probe.json",
+        {
+            "status": "passed",
+            "decision": "claim_ready_datasets_available",
+            "ready_datasets": ["amazon-beauty"],
+            "probes": [
+                {
+                    "dataset": "amazon-beauty",
+                    "claim_ready": True,
+                    "loader_probe_success": True,
+                    "loader_probe": {"success": True},
+                }
+            ],
+        },
+    )
+    _write_json(paths.state / "experiment_registry.json", [])
+
+    monkeypatch.setattr(propose, "build_paths", lambda _project: paths)
+    monkeypatch.setattr(propose, "load_project_config", lambda _project: {"name": "demo_project", "topic": "Demo topic"})
+    monkeypatch.setattr(sys, "argv", ["propose_next_actions.py", "--project", "demo_project"])
+
+    propose.main()
+
+    text = (paths.planning / "next_actions.md").read_text(encoding="utf-8")
+    assert "real_loader_probe_passed: True" in text
+    assert "Probe real repo dataset loaders before real experiments" not in text
+    assert "Launch a real-dataset repo reproduction smoke run" in text
+
 
 def test_deterministic_base_switch_gate_blocks_empty_candidate_route(tmp_path, monkeypatch):
     gate_script = load_script("audit_deterministic_base_switch_gate")

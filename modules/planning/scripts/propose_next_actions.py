@@ -96,6 +96,20 @@ def route_has_identity(route: dict) -> bool:
     return any(str(row.get(key) or '').strip() for key in ['repo', 'title', 'repo_path', 'proposed_path_hint'])
 
 
+def claim_ready_probe_datasets(real_probe: dict) -> set[str]:
+    probe = as_dict(real_probe)
+    datasets: set[str] = set()
+    for row in probe.get('probes', []) if isinstance(probe.get('probes'), list) else []:
+        if not isinstance(row, dict) or not row.get('claim_ready'):
+            continue
+        loader = as_dict(row.get('loader_probe'))
+        loader_ok = bool(row.get('probe_success') or row.get('loader_probe_success') or loader.get('success'))
+        dataset = str(row.get('dataset') or row.get('name') or row.get('claim_ready_dataset') or '').strip()
+        if loader_ok and dataset:
+            datasets.add(dataset)
+    return datasets
+
+
 def selected_base_viability_action(gate: dict, base_switch_gate: dict | None = None) -> dict:
     gate = as_dict(gate)
     base_switch_gate = as_dict(base_switch_gate)
@@ -312,8 +326,7 @@ def main() -> None:
     weak_paper_signal = all(row.get('top_tier_readiness') == 'weak' for row in papers) if papers else False
     no_qualified_papers = bool(ingest_ranking.get('no_qualified_papers')) if isinstance(ingest_ranking, dict) else False
     repo_backtracking_done = bool(isinstance(repo_backtracking, dict) and (repo_backtracking.get('paper_title_hint') or repo_backtracking.get('run_commands') or repo_backtracking.get('dataset_audits')))
-    probe_rows = real_probe.get('probes', []) if isinstance(real_probe, dict) else []
-    probed_real_datasets = {row.get('dataset') for row in probe_rows if row.get('probe_success') and row.get('claim_ready')}
+    probed_real_datasets = claim_ready_probe_datasets(real_probe)
     active_repo_path = str(active_repo.get('repo_path', '')) if isinstance(active_repo, dict) else ''
     active_requirement_datasets = set(repo_data_requirements.get('datasets', [])) if isinstance(repo_data_requirements, dict) else set()
     real_datasets = active_requirement_datasets or {row.get('name') for row in dataset_rows if row.get('available') and not str(row.get('name', '')).startswith('synthetic_')}

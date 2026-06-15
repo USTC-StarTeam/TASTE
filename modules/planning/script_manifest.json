@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-15T01:00:55.613084+00:00",
+  "generated_at": "2026-06-15T01:34:06.532051+00:00",
   "module": "planning",
   "contract": {
     "directory": "modules/planning",
@@ -235,7 +235,7 @@
       "path": "modules/planning/scripts/propose_next_actions.py",
       "owner": "planning",
       "owner_reason": "plan selection, blocker planning, or execution-contract shaping",
-      "function_count": 13,
+      "function_count": 14,
       "functions": [
         "load_json",
         "collect_methods",
@@ -248,6 +248,7 @@
         "failed_check_ids",
         "failed_check_summary",
         "route_has_identity",
+        "claim_ready_probe_datasets",
         "selected_base_viability_action",
         "main"
       ],
