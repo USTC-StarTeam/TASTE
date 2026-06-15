@@ -130,7 +130,9 @@ def current_env_selection_valid(paths) -> bool:
         return False
     selected = selection.get('selected') if isinstance(selection.get('selected'), dict) else {}
     selected_run = str(selection.get('fresh_find_run_id') or selected.get('fresh_find_run_id') or '').strip()
+    selected_route_run = str(selected.get('fresh_find_run_id') or '').strip()
     selection_plan_id = str(selection.get('selected_plan_id') or selected.get('selected_plan_id') or '').strip()
+    selected_route_plan_id = str(selected.get('selected_plan_id') or '').strip()
     stage = str(selection.get('selection_stage') or selection.get('selected_by_stage') or selected.get('selection_stage') or '').strip()
     pending_loader = _pending_loader_selection(selection, selected)
     claim_ready = bool(_claim_ready_dataset_names(selected))
@@ -142,7 +144,17 @@ def current_env_selection_valid(paths) -> bool:
             or (isinstance(selection.get('claude_topic_decision'), dict) and selection['claude_topic_decision'].get('accept_as_current_best'))
         )
     )
-    return bool(run_id and selected_plan_id and selection_plan_id == selected_plan_id and selected and selected_run == run_id and stage == 'environment_claude_code' and accepted)
+    return bool(
+        run_id
+        and selected_plan_id
+        and selection_plan_id == selected_plan_id
+        and selected_route_plan_id == selected_plan_id
+        and selected
+        and selected_run == run_id
+        and selected_route_run == run_id
+        and stage == 'environment_claude_code'
+        and accepted
+    )
 
 
 def select_current_run_environment_repo(project: str, paths, env_name: str, max_rounds: int = 3) -> str:

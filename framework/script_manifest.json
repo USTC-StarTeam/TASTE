@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-15T02:07:10.091264+00:00",
+  "generated_at": "2026-06-15T03:43:34.485621+00:00",
   "owner": "taste_framework",
   "script_count": 45,
   "scripts": [
@@ -679,12 +679,13 @@
       "path": "framework/scripts/pipeline_guard.py",
       "owner": "taste_framework",
       "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
-      "function_count": 18,
+      "function_count": 19,
       "functions": [
         "now_iso",
         "load_json",
         "_status_text",
         "current_find_run_id",
+        "current_selected_execution_ids",
         "_repo_path_from_mapping",
         "_selected_base_viability_current_selection",
         "current_environment_selection",
@@ -911,6 +912,7 @@
         "llm_client",
         "paper_common",
         "pathlib",
+        "pipeline_guard",
         "project_paths",
         "shutil"
       ],
@@ -945,6 +947,7 @@
         "llm_client",
         "paper_common",
         "pathlib",
+        "pipeline_guard",
         "project_paths",
         "shutil"
       ],

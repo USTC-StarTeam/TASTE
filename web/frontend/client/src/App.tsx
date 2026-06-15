@@ -8296,6 +8296,12 @@ function App() {
                         <strong>{displayMaybe(envStage?.selection?.selected_base?.title || activeRepo?.name, t.notSelected)}</strong>
                       </div>
                       <div className="envSummaryItem">
+                        <span>{lang === "zh" ? "当前执行计划" : "Current execution plan"}</span>
+                        <strong>{displayMaybe(envStage?.selection?.current_selected_plan_id || envStage?.selection?.selected_plan_id, t.noData)}</strong>
+                        {envStage?.selection?.selected_plan_id && envStage?.selection?.current_selected_plan_id && envStage.selection.selected_plan_id !== envStage.selection.current_selected_plan_id && <small>{lang === "zh" ? `环境记录计划 ${envStage.selection.selected_plan_id}` : `Environment record plan ${envStage.selection.selected_plan_id}`}</small>}
+                        {envStage?.selection?.reason && <small>{displayValue(envStage.selection.reason)}</small>}
+                      </div>
+                      <div className="envSummaryItem">
                         <span>{lang === "zh" ? "仓库" : "Repository"}</span>
                         <strong>{displayMaybe(envStage?.active_repo?.name || activeRepo?.name, t.notSelected)}</strong>
                       </div>

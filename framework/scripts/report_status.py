@@ -8,6 +8,7 @@ from pathlib import Path
 
 from llm_client import llm_available, llm_disabled_reason
 from project_paths import build_paths, load_project_config
+from pipeline_guard import current_environment_selection as guard_current_environment_selection
 from paper_common import get_active_paper_state
 
 
@@ -136,19 +137,29 @@ def _candidate_subject(row: dict) -> str:
     ).strip()
 
 
-def _repo_selection_public_status(selection: dict) -> str:
+def _repo_selection_public_status(selection: dict, current_env: dict | None = None) -> str:
     selection = _as_dict(selection)
-    if _accepted_repo_selection(selection):
-        return "selected"
     if _pending_candidate_blocked(selection):
         return "pending_candidate_blocked"
+    env = _as_dict(current_env)
+    if env and not env.get("valid"):
+        reason = str(env.get("reason") or "").strip()
+        if reason:
+            return reason
+    if _accepted_repo_selection(selection):
+        return "selected"
     status = str(selection.get("status") or selection.get("current_action") or "").strip()
     return status or "not-run"
 
 
-def _environment_selection_status(selection: dict, current_find_plan: dict) -> str:
-    if _accepted_repo_selection(selection):
+def _environment_selection_status(selection: dict, current_find_plan: dict, current_env: dict | None = None) -> str:
+    env = _as_dict(current_env)
+    if env.get("valid"):
         return "selected"
+    if env:
+        reason = str(env.get("reason") or "").strip()
+        if reason:
+            return reason
     plan = _as_dict(current_find_plan)
     status = str(plan.get("base_selection_status") or plan.get("next_required_action") or "").strip()
     return status or "not-run"
@@ -295,6 +306,8 @@ def main() -> None:
     scientific_progress_gate = load_json(paths.state / "scientific_progress_gate.json") if (paths.state / "scientific_progress_gate.json").exists() else {}
     selected_base_viability_gate = load_json(paths.state / "selected_base_viability_gate.json") if (paths.state / "selected_base_viability_gate.json").exists() else {}
     base_switch_gate = load_json(paths.state / "base_switch_gate.json") if (paths.state / "base_switch_gate.json").exists() else {}
+    current_environment = guard_current_environment_selection(paths)
+    current_environment_valid = bool(_as_dict(current_environment).get("valid"))
     selected_repo = repo_selection.get('selected', {}) if isinstance(repo_selection, dict) else {}
     claude_decision = {}
     claude_decision_scope = "none"
@@ -306,7 +319,10 @@ def main() -> None:
             claude_decision_scope = "pending_candidate_not_authoritative"
             claude_decision_subject = _candidate_subject(pending_candidate) or _candidate_subject(repo_selection)
         elif _accepted_repo_selection(repo_selection):
-            claude_decision_scope = "accepted_environment_selection"
+            if current_environment_valid:
+                claude_decision_scope = "accepted_environment_selection"
+            else:
+                claude_decision_scope = "stale_environment_selection"
             claude_decision_subject = _candidate_subject(selected_repo) or _candidate_subject(repo_selection)
         else:
             claude_decision_scope = "repo_selection_candidate"
@@ -315,7 +331,7 @@ def main() -> None:
         claude_decision = active_repo.get('claude_topic_fit_decision', {})
         claude_decision_scope = "active_repo"
         claude_decision_subject = _candidate_subject(active_repo)
-    claude_accepted_repo_ready = bool(selected_repo) and (
+    claude_accepted_repo_ready = current_environment_valid and bool(selected_repo) and (
         str(repo_selection.get('selection_gate', '') if isinstance(repo_selection, dict) else '').startswith(('accepted_by_claude', 'accepted_by_deterministic_base_switch_gate'))
         or bool(claude_decision.get('accept_as_current_best'))
     )
@@ -375,7 +391,7 @@ def main() -> None:
         blocker_evidence_ready_count = blocker_packet.get('evidence_ready_candidate_count', '')
         blocker_completion_condition = str(blocker_packet.get('completion_condition', '') or '')
     repo_selection_gate = repo_selection.get('selection_gate', '') if isinstance(repo_selection, dict) else ''
-    repo_selection_status = _repo_selection_public_status(repo_selection)
+    repo_selection_status = _repo_selection_public_status(repo_selection, current_environment)
     pending_candidate_blocked = _pending_candidate_blocked(repo_selection)
     current_active_route_ready = bool(current_repo_path and ready_datasets)
     repo_selection_blocker_current = _repo_selection_blocker_is_current(repo_selection_blocker, repo_selection)
@@ -387,7 +403,7 @@ def main() -> None:
         repo_selection_block_reason = str(repo_selection.get('blocker') or 'Pending candidate route is blocked until loader/data/protocol audits pass; current active route remains unchanged.')
     current_find_run_id = _state_run_id(current_find_plan) or _state_run_id(finding_frontend) or _state_run_id(full_cycle)
     current_find_status = str(_as_dict(current_find_plan).get('status') or _as_dict(finding_frontend).get('status') or '').strip()
-    environment_selection_status = _environment_selection_status(repo_selection, current_find_plan)
+    environment_selection_status = _environment_selection_status(repo_selection, current_find_plan, current_environment)
     if pending_candidate_blocked and current_active_route_ready:
         environment_selection_status = 'selected_current_route_pending_candidate_blocked'
     full_cycle_status = str(_as_dict(full_cycle).get('status') or '').strip() or 'not-run'

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from llm_client import llm_available, llm_disabled_reason
 from project_paths import build_paths, load_project_config
+from pipeline_guard import current_environment_selection as guard_current_environment_selection
 from paper_common import get_active_paper_state
 
 
@@ -93,9 +94,14 @@ def _pending_candidate_blocked(selection: dict) -> bool:
     return str(selection.get("selection_gate") or "").strip() == "blocked_pending_data_loader_for_claude_best_candidate"
 
 
-def _environment_selection_status(selection: dict, current_find_plan: dict) -> str:
-    if _accepted_repo_selection(selection):
+def _environment_selection_status(selection: dict, current_find_plan: dict, current_env: dict | None = None) -> str:
+    env = _as_dict(current_env)
+    if env.get("valid"):
         return "selected"
+    if env:
+        reason = str(env.get("reason") or "").strip()
+        if reason:
+            return reason
     plan = _as_dict(current_find_plan)
     return str(plan.get("base_selection_status") or plan.get("next_required_action") or "not-run").strip() or "not-run"
 
@@ -300,6 +306,7 @@ def main() -> None:
     scientific_progress_gate = load_json(paths.state / "scientific_progress_gate.json") if (paths.state / "scientific_progress_gate.json").exists() else {}
     selected_base_viability_gate = load_json(paths.state / "selected_base_viability_gate.json") if (paths.state / "selected_base_viability_gate.json").exists() else {}
     base_switch_gate = load_json(paths.state / "base_switch_gate.json") if (paths.state / "base_switch_gate.json").exists() else {}
+    current_environment = guard_current_environment_selection(paths)
     taste_sync = load_json(paths.state / "taste_sync.json") if (paths.state / "taste_sync.json").exists() else {}
     taste_counts = taste_sync.get("counts", {}) if isinstance(taste_sync, dict) else {}
     if not taste_state and not current_find_plan:
@@ -308,7 +315,7 @@ def main() -> None:
         current_find_status = str(_as_dict(current_find_plan).get("status") or _as_dict(taste_state).get("status") or "unknown").strip()
         current_find_run_id = _state_run_id(current_find_plan) or _state_run_id(taste_state) or _state_run_id(full_cycle)
         notes.append(f"Current-Find downstream status: {current_find_status}{f' (run_id={current_find_run_id})' if current_find_run_id else ''}")
-        environment_status = _environment_selection_status(repo_selection, current_find_plan)
+        environment_status = _environment_selection_status(repo_selection, current_find_plan, current_environment)
         if _pending_candidate_blocked(repo_selection) and _as_dict(selected_base_viability_gate):
             environment_status = "selected_current_route_pending_candidate_blocked"
         notes.append(f"Environment base selection: {environment_status}")

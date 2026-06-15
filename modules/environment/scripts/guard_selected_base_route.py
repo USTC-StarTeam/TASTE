@@ -425,7 +425,11 @@ def repair_project(project: str, *, source_stage: str = "", dry_run: bool = Fals
     selected_ok = selection_valid(paths, selected, audit)
     active_ok = str(active.get("repo_path") or active.get("local_path") or "").strip() == str(audit.get("repo_path") or audit.get("active_repo_path") or "").strip()
     selected_anchor_run = selected_base_find_run_id(audit, restored_selected, current_run)
+    selected_anchor_plan_id = str(restored_selected.get("selected_plan_id") or "").strip()
+    selected_anchor_idea_id = str(restored_selected.get("selected_idea_id") or "").strip()
     report["selected_base_find_run_id"] = selected_anchor_run
+    report["selected_base_selected_plan_id"] = selected_anchor_plan_id
+    report["selected_base_selected_idea_id"] = selected_anchor_idea_id
     authoritative_text_repair = False
     if not selected_ok:
         report["violations"].append("evidence_ready_repo_selection.selected does not match the trusted selected-base full reproduction audit.")
@@ -481,6 +485,15 @@ def repair_project(project: str, *, source_stage: str = "", dry_run: bool = Fals
             else:
                 selection["selected"] = selected
             selection["fresh_find_run_id"] = selected_anchor_run or restored_selected.get("fresh_find_run_id") or selection.get("fresh_find_run_id")
+            for key, value in [("selected_plan_id", selected_anchor_plan_id), ("selected_idea_id", selected_anchor_idea_id)]:
+                if value:
+                    selection[key] = value
+                    if isinstance(selection.get("selected"), dict):
+                        selection["selected"][key] = value
+                else:
+                    selection.pop(key, None)
+                    if isinstance(selection.get("selected"), dict):
+                        selection["selected"].pop(key, None)
             selection["selection_stage"] = "environment_claude_code"
             if str(selection.get("selection_gate") or "").startswith("accepted_by_deterministic_base_switch_gate") and not authorized_switch:
                 report["violations"].append("evidence_ready_repo_selection.selection_gate incorrectly implied deterministic base-switch acceptance without an authorized gate.")
@@ -516,6 +529,8 @@ def repair_project(project: str, *, source_stage: str = "", dry_run: bool = Fals
                 "selection_stage": "environment_claude_code",
                 "selected_by": selected_anchor_run,
                 "fresh_find_run_id": selected_anchor_run,
+                "selected_plan_id": selected_anchor_plan_id,
+                "selected_idea_id": selected_anchor_idea_id,
                 "selected_base_title": restored_selected.get("literature_base_title") or restored_selected.get("title") or "",
                 "claim_ready_dataset": restored_selected.get("claim_ready_dataset") or audit.get("dataset") or "",
                 "ready_datasets": restored_selected.get("claim_ready_datasets") or ([audit.get("dataset")] if audit.get("dataset") else []),

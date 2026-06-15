@@ -5531,6 +5531,106 @@ def test_environment_selection_requires_current_selected_plan_id(tmp_path):
     assert current["current_selected_idea_id"] == "idea-current"
 
 
+def test_environment_selection_rejects_top_level_retagged_stale_selected_route(tmp_path):
+    from auto_research.web import project_bridge
+
+    root = tmp_path / "demo_project"
+    finding = root / "planning" / "finding"
+    state = root / "state"
+    repo = root / "repos" / "selected" / "demo_repo"
+    finding.mkdir(parents=True)
+    state.mkdir(parents=True)
+    repo.mkdir(parents=True)
+    current_run = "find_current_route_contract"
+    old_run = "find_old_route_contract"
+    write_json(finding / "find_progress.json", {"run_id": current_run})
+    write_json(
+        finding / "plans.json",
+        {
+            "run_id": current_run,
+            "selected_plan_id": "plan-current",
+            "selected_idea_id": "idea-current",
+            "plans": [{"plan_id": "plan-current", "idea_id": "idea-current", "selected_for_execution": True}],
+        },
+    )
+    write_json(
+        state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": current_run,
+            "selected_plan_id": "plan-current",
+            "selected_idea_id": "idea-current",
+            "selection_stage": "environment_claude_code",
+            "selection_gate": "accepted_by_claude_topic_fit",
+            "accepted_by_claude": True,
+            "selected": {
+                "name": "Demo Repo",
+                "repo_path": str(repo),
+                "fresh_find_run_id": old_run,
+                "selected_plan_id": "plan-old",
+                "selected_idea_id": "idea-old",
+                "selection_stage": "environment_claude_code",
+            },
+        },
+    )
+
+    stale = project_bridge._current_environment_selection(root)
+
+    assert stale["valid"] is False
+    assert stale["reason"] in {"environment_selection_find_run_missing_or_stale", "environment_selection_selected_plan_missing_or_stale"}
+    assert stale["current_find_run_id"] == current_run
+    assert stale["current_selected_plan_id"] == "plan-current"
+    assert stale["selected_plan_id"] == "plan-current"
+
+
+
+def test_environment_selection_rejects_missing_nested_route_run(tmp_path):
+    from auto_research.web import project_bridge
+
+    root = tmp_path / "demo_project"
+    finding = root / "planning" / "finding"
+    state = root / "state"
+    repo = root / "repos" / "selected" / "demo_repo"
+    finding.mkdir(parents=True)
+    state.mkdir(parents=True)
+    repo.mkdir(parents=True)
+    current_run = "find_current_route_contract"
+    write_json(finding / "find_progress.json", {"run_id": current_run})
+    write_json(
+        finding / "plans.json",
+        {
+            "run_id": current_run,
+            "selected_plan_id": "plan-current",
+            "selected_idea_id": "idea-current",
+            "plans": [{"plan_id": "plan-current", "idea_id": "idea-current", "selected_for_execution": True}],
+        },
+    )
+    write_json(
+        state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": current_run,
+            "selected_plan_id": "plan-current",
+            "selected_idea_id": "idea-current",
+            "selection_stage": "environment_claude_code",
+            "selection_gate": "accepted_by_claude_topic_fit",
+            "accepted_by_claude": True,
+            "selected": {
+                "name": "Demo Repo",
+                "repo_path": str(repo),
+                "selected_plan_id": "plan-current",
+                "selected_idea_id": "idea-current",
+                "selection_stage": "environment_claude_code",
+            },
+        },
+    )
+
+    stale = project_bridge._current_environment_selection(root)
+
+    assert stale["valid"] is False
+    assert stale["reason"] == "environment_selection_find_run_missing_or_stale"
+    assert stale["current_find_run_id"] == current_run
+    assert stale["current_selected_plan_id"] == "plan-current"
+    assert stale["selected_plan_id"] == "plan-current"
+
 def test_current_environment_pending_selection_prefers_current_run_over_stale_viability(tmp_path):
     from auto_research.web import project_bridge
 

@@ -92,7 +92,22 @@ def _seed_current_selected_experiment_block(paths: SimpleNamespace) -> None:
     run_id = "find_current"
     _write_json(paths.state / "finding_frontend.json", {"status": "claude_current_find_read_idea_plan_ready_waiting_for_environment_base_selection", "taste_run_id": run_id})
     _write_json(paths.state / "current_find_research_plan.json", {"status": "claude_current_find_read_idea_plan_ready_waiting_for_environment_base_selection", "run_id": run_id, "base_selection_status": "waiting_for_environment_claude_code"})
-    _write_json(paths.state / "evidence_ready_repo_selection.json", {"fresh_find_run_id": run_id, "selection_gate": "accepted_by_claude_topic_fit", "current_action": "complete", "selected": {"name": "new/repo", "repo_path": "/tmp/new", "dataset": "amazon-beauty"}})
+    _write_json(
+        paths.state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": run_id,
+            "selection_gate": "accepted_by_claude_topic_fit",
+            "selection_stage": "environment_claude_code",
+            "current_action": "complete",
+            "selected": {
+                "name": "new/repo",
+                "repo_path": "/tmp/new",
+                "dataset": "amazon-beauty",
+                "fresh_find_run_id": run_id,
+                "selection_stage": "environment_claude_code",
+            },
+        },
+    )
     _write_json(paths.state / "repo_selection_blocker.json", {"status": "blocked", "fresh_find_run_id": "find_old", "reason": "old environment-stage blocker"})
     _write_json(paths.state / "full_research_cycle.json", {"status": "blocked_after_max_cycles", "summary_zh": "实验门控阻塞", "current_find_run_id": run_id})
     _write_json(paths.state / "scientific_progress_gate.json", {"status": "blocked", "summary": "candidate evidence missing"})
@@ -148,6 +163,64 @@ def test_research_healthcheck_reports_overall_full_cycle_not_find_only_status(tm
     assert "Experiment evidence gate: blocked" in text
     assert "TASTE status: claude_current_find_read_idea_plan_ready_waiting_for_environment_base_selection" not in text
 
+
+def test_status_and_healthcheck_mark_stale_environment_selection(tmp_path, monkeypatch):
+    report_status = load_script("report_status")
+    healthcheck = load_script("research_healthcheck")
+    paths = _make_paths(tmp_path)
+    _seed_common_project(paths)
+    _seed_current_selected_experiment_block(paths)
+    run_id = "find_current"
+    _write_json(
+        paths.state / "current_find_research_plan.json",
+        {
+            "status": "claude_current_find_read_idea_plan_ready_waiting_for_environment_base_selection",
+            "run_id": run_id,
+            "selected_plan_id": "plan-current",
+            "selected_idea_id": "idea-current",
+        },
+    )
+    _write_json(
+        paths.state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": run_id,
+            "selected_plan_id": "plan-current",
+            "selected_idea_id": "idea-current",
+            "selection_gate": "accepted_by_claude_topic_fit",
+            "current_action": "complete",
+            "claude_topic_decision": {"decision": "accept", "rationale": "stale selected route"},
+            "selected": {
+                "name": "new/repo",
+                "repo_path": "/tmp/new",
+                "dataset": "amazon-beauty",
+                "fresh_find_run_id": "find_old",
+                "selected_plan_id": "plan-old",
+                "selected_idea_id": "idea-old",
+            },
+        },
+    )
+
+    for module in [report_status, healthcheck]:
+        monkeypatch.setattr(module, "build_paths", lambda _project: paths)
+        monkeypatch.setattr(module, "load_project_config", lambda _project: {"name": "demo_project", "topic": "Demo topic", "coding_agent": {}})
+        monkeypatch.setattr(module, "get_active_paper_state", lambda *_args, **_kwargs: {})
+        monkeypatch.setattr(module, "llm_available", lambda _cfg: True)
+        monkeypatch.setattr(module, "find_claude", lambda _cfg: "/bin/claude")
+
+    monkeypatch.setattr(sys, "argv", ["report_status.py", "--project", "demo_project", "--venue", "ICLR"])
+    report_status.main()
+    status_text = (paths.reports / "status.md").read_text(encoding="utf-8")
+    assert "- environment_base_selection_status: environment_selection_find_run_missing_or_stale" in status_text
+    assert "- repo_selection_status: environment_selection_find_run_missing_or_stale" in status_text
+    assert "- claude_repo_decision_scope: stale_environment_selection" in status_text
+    assert "- claude_accepted_transformable_repo: False" in status_text
+    assert "- claude_repo_decision_scope: accepted_environment_selection" not in status_text
+
+    monkeypatch.setattr(sys, "argv", ["research_healthcheck.py", "--project", "demo_project", "--venue", "ICLR"])
+    healthcheck.main()
+    health_text = (paths.reports / "healthcheck.md").read_text(encoding="utf-8")
+    assert "Environment base selection: environment_selection_find_run_missing_or_stale" in health_text
+    assert "Environment base selection: selected" not in health_text
 
 
 def _seed_selected_base_semantic_provenance_block(paths: SimpleNamespace) -> None:

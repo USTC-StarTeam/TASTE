@@ -52,6 +52,18 @@ def _current_find_run_id(project: str) -> str:
     return ''
 
 
+def _current_selected_execution_ids(project: str) -> tuple[str, str]:
+    root = ROOT / 'projects' / project
+    for path in [root / 'state' / 'current_find_research_plan.json', root / 'planning' / 'finding' / 'plans.json']:
+        payload = load_json(path, {})
+        if isinstance(payload, dict):
+            plan_id = str(payload.get('selected_plan_id') or '').strip()
+            idea_id = str(payload.get('selected_idea_id') or '').strip()
+            if plan_id or idea_id:
+                return plan_id, idea_id
+    return '', ''
+
+
 def _repo_path(row: Any) -> str:
     if not isinstance(row, dict):
         return ''
@@ -149,9 +161,40 @@ def write_generic_plan(project: str, adapter: Path) -> int:
     req = load_json(state / 'repo_data_requirements.json', {})
     probe = load_json(state / 'real_dataset_probe.json', {})
     selected = _selected_repo(selection if isinstance(selection, dict) else {}, active if isinstance(active, dict) else {})
-    run_id = str((selection.get('fresh_find_run_id') if isinstance(selection, dict) else '') or _current_find_run_id(project)).strip()
-    selected_plan_id = str((selection.get('selected_plan_id') if isinstance(selection, dict) else '') or selected.get('selected_plan_id') or '').strip()
-    selected_idea_id = str((selection.get('selected_idea_id') if isinstance(selection, dict) else '') or selected.get('selected_idea_id') or '').strip()
+    current_run_id = _current_find_run_id(project)
+    current_plan_id, current_idea_id = _current_selected_execution_ids(project)
+    selection_run_id = str((selection.get('fresh_find_run_id') if isinstance(selection, dict) else '') or '').strip()
+    selected_run_id = str(selected.get('fresh_find_run_id') or '').strip()
+    selection_plan_id = str((selection.get('selected_plan_id') if isinstance(selection, dict) else '') or '').strip()
+    selection_idea_id = str((selection.get('selected_idea_id') if isinstance(selection, dict) else '') or '').strip()
+    selected_route_plan_id = str(selected.get('selected_plan_id') or '').strip()
+    selected_plan_id = selection_plan_id or selected_route_plan_id
+    selected_idea_id = selection_idea_id or str(selected.get('selected_idea_id') or '').strip()
+    stale_for_current_find = bool(
+        selected
+        and current_run_id
+        and (
+            not selection_run_id
+            or selection_run_id != current_run_id
+            or not selected_run_id
+            or selected_run_id != current_run_id
+        )
+    )
+    stale_for_current_plan = bool(
+        selected
+        and current_plan_id
+        and (
+            not selection_plan_id
+            or selection_plan_id != current_plan_id
+            or not selected_route_plan_id
+            or selected_route_plan_id != current_plan_id
+        )
+    )
+    if stale_for_current_find or stale_for_current_plan:
+        selected = {}
+        selected_plan_id = current_plan_id or selected_plan_id
+        selected_idea_id = current_idea_id or selected_idea_id
+    run_id = str((selection_run_id if selected else '') or current_run_id or selection_run_id).strip()
     now = dt.datetime.now(dt.timezone.utc).isoformat()
     if not selected or not _repo_path(selected):
         reason = 'No current environment-stage repo has been selected for this Find run.'

@@ -668,13 +668,24 @@ def current_route_repo_context(paths, active_repo: dict[str, Any]) -> dict[str, 
     impl_repo = impl.get("repo", {}) if isinstance(impl, dict) and isinstance(impl.get("repo"), dict) else {}
     impl_selected = impl.get("selected_base", {}) if isinstance(impl, dict) and isinstance(impl.get("selected_base"), dict) else {}
     current_run = current_find_run_id(paths)
+    current_plan = load_json(paths.state / "current_find_research_plan.json", {})
+    if not isinstance(current_plan, dict) or not str(current_plan.get("selected_plan_id") or "").strip():
+        current_plan = load_json(paths.planning / "finding" / "plans.json", {})
+    current_selected_plan_id = str(current_plan.get("selected_plan_id") or "").strip() if isinstance(current_plan, dict) else ""
     selected_run = str((selection.get("fresh_find_run_id") if isinstance(selection, dict) else "") or selected.get("fresh_find_run_id") or "").strip()
-    stage = str((selection.get("selection_stage") if isinstance(selection, dict) else "") or (selection.get("selected_by_stage") if isinstance(selection, dict) else "") or "").strip()
-    selected_is_current = bool(selected and stage == "environment_claude_code" and (not current_run or not selected_run or selected_run == current_run))
+    selected_route_run = str(selected.get("fresh_find_run_id") or "").strip()
+    selection_plan_id = str((selection.get("selected_plan_id") if isinstance(selection, dict) else "") or selected.get("selected_plan_id") or "").strip()
+    selected_route_plan_id = str(selected.get("selected_plan_id") or "").strip()
+    stage = str((selection.get("selection_stage") if isinstance(selection, dict) else "") or (selection.get("selected_by_stage") if isinstance(selection, dict) else "") or selected.get("selection_stage") or "").strip()
+    run_current = bool(not current_run or (selected_run == current_run and selected_route_run == current_run))
+    plan_current = bool(not current_selected_plan_id or (selection_plan_id == current_selected_plan_id and selected_route_plan_id == current_selected_plan_id))
+    selected_is_current = bool(selected and stage == "environment_claude_code" and run_current and plan_current)
     if not selected_is_current:
         payload = dict(active_repo)
         payload.setdefault("current_route_source", "active_repo_fallback")
         payload.setdefault("current_find_run_id", current_run)
+        payload.setdefault("current_selected_plan_id", current_selected_plan_id)
+        payload.setdefault("environment_selection_current", False)
         return payload
 
     payload = {
