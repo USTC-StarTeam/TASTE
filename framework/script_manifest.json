@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-06-14T18:27:57.040862+00:00",
+  "generated_at": "2026-06-15T01:00:55.613084+00:00",
   "owner": "taste_framework",
-  "script_count": 44,
+  "script_count": 45,
   "scripts": [
     {
       "script": "agent_state.py",
@@ -120,12 +120,13 @@
       "path": "framework/scripts/audit_research_trajectory_capabilities.py",
       "owner": "taste_framework",
       "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
-      "function_count": 23,
+      "function_count": 24,
       "functions": [
         "now_iso",
         "load_json",
         "save_json",
         "read_text",
+        "source_path",
         "source_contains",
         "source_omits",
         "count_landscape_nodes",
@@ -209,7 +210,7 @@
       "path": "framework/scripts/build_research_trajectory_system.py",
       "owner": "taste_framework",
       "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
-      "function_count": 56,
+      "function_count": 60,
       "functions": [
         "_repo_root_from_script",
         "now_iso",
@@ -255,6 +256,10 @@
         "path_matches_selected_repo",
         "current_route_experiment_rows",
         "build_assurance_layer",
+        "base_switch_candidate_has_identity",
+        "selected_base_semantic_gate_required",
+        "blocked_check_ids",
+        "trajectory_gate_context",
         "trajectory_controller",
         "build_trajectory_execution_protocol",
         "update_research_memory",
@@ -841,11 +846,39 @@
       "parse_error": ""
     },
     {
+      "script": "refresh_project_reports.py",
+      "path": "framework/scripts/refresh_project_reports.py",
+      "owner": "taste_framework",
+      "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
+      "function_count": 5,
+      "functions": [
+        "_cmd",
+        "build_steps",
+        "_refresh_env",
+        "run_steps",
+        "main"
+      ],
+      "classes": [],
+      "imports": [
+        "__future__",
+        "argparse",
+        "json",
+        "os",
+        "pathlib",
+        "project_paths",
+        "subprocess",
+        "sys",
+        "taste_pythonpath",
+        "typing"
+      ],
+      "parse_error": ""
+    },
+    {
       "script": "report_status.py",
       "path": "framework/scripts/report_status.py",
       "owner": "taste_framework",
       "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
-      "function_count": 14,
+      "function_count": 19,
       "functions": [
         "find_cli_binary",
         "find_claude",
@@ -857,9 +890,14 @@
         "_state_run_id",
         "_accepted_repo_selection",
         "_repo_selection_blocker_is_current",
+        "_pending_candidate_blocked",
+        "_candidate_subject",
         "_repo_selection_public_status",
         "_environment_selection_status",
         "_public_summary",
+        "_failed_check_ids",
+        "_route_has_identity",
+        "_selected_base_viability_public_status",
         "main"
       ],
       "classes": [],
@@ -880,7 +918,7 @@
       "path": "framework/scripts/research_healthcheck.py",
       "owner": "taste_framework",
       "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
-      "function_count": 9,
+      "function_count": 13,
       "functions": [
         "find_cli_binary",
         "find_claude",
@@ -888,8 +926,12 @@
         "_as_dict",
         "_state_run_id",
         "_accepted_repo_selection",
+        "_pending_candidate_blocked",
         "_environment_selection_status",
         "_public_summary",
+        "_failed_check_ids",
+        "_route_has_identity",
+        "_selected_base_viability_public_status",
         "main"
       ],
       "classes": [],

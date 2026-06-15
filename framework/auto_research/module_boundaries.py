@@ -132,6 +132,7 @@ SCRIPT_OWNER_OVERRIDES: dict[str, str] = {
     "project_paths.py": TASTE_FRAMEWORK_OWNER,
     "reconcile_state.py": TASTE_FRAMEWORK_OWNER,
     "refresh_index_and_log.py": TASTE_FRAMEWORK_OWNER,
+    "refresh_project_reports.py": TASTE_FRAMEWORK_OWNER,
     "report_status.py": TASTE_FRAMEWORK_OWNER,
     "research_healthcheck.py": TASTE_FRAMEWORK_OWNER,
     "research_manifest.py": TASTE_FRAMEWORK_OWNER,

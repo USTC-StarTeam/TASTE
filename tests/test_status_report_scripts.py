@@ -394,6 +394,22 @@ def test_research_healthcheck_uses_failed_base_switch_gate_result(tmp_path, monk
 
 
 
+def test_refresh_project_reports_runs_reflection_after_status_inputs():
+    refresh_reports = load_script("refresh_project_reports")
+
+    steps = refresh_reports.build_steps("demo_project", "ICLR")
+    names = [name for name, _cmd in steps]
+    rendered = [" ".join(cmd) for _name, cmd in steps]
+
+    assert names == ["healthcheck", "status", "next_actions", "reflection"]
+    assert rendered[0].endswith("research_healthcheck.py --project demo_project --venue ICLR")
+    assert rendered[1].endswith("report_status.py --project demo_project --venue ICLR")
+    assert rendered[2].endswith("propose_next_actions.py --project demo_project")
+    assert rendered[3].endswith("reflect_iteration.py --project demo_project")
+    assert rendered.index(rendered[3]) > rendered.index(rendered[0])
+    assert rendered.index(rendered[3]) > rendered.index(rendered[2])
+
+
 def test_propose_next_actions_prioritizes_semantic_provenance_gate(tmp_path, monkeypatch):
     propose = load_script("propose_next_actions")
     paths = _make_paths(tmp_path)

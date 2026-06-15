@@ -614,6 +614,25 @@ def test_experiment_command_skips_discovery_by_default(tmp_path, monkeypatch):
     assert "--topic" not in cmd
 
 
+def test_status_actions_refresh_derived_project_reports(tmp_path, monkeypatch):
+    from auto_research.web import project_bridge
+
+    project = "demo_project"
+    (tmp_path / project).mkdir(parents=True)
+    monkeypatch.setattr(project_bridge, "PROJECTS", tmp_path)
+    monkeypatch.setattr(project_bridge, "management_python", lambda: "/py")
+
+    _, status_cmd = project_bridge.build_command({"project": project, "action": "status", "venue": "ICLR"})
+    _, health_cmd = project_bridge.build_command({"project": project, "action": "healthcheck", "venue": "ICLR"})
+
+    for cmd in (status_cmd, health_cmd):
+        assert cmd[0] == "/py"
+        assert cmd[1].endswith("framework/scripts/refresh_project_reports.py")
+        assert cmd[2:] == ["--project", project, "--venue", "ICLR"]
+        assert "report_status.py" not in cmd
+        assert "research_healthcheck.py" not in cmd
+
+
 def test_default_find_selection_starts_with_no_sources():
     from auto_research.source_selection import default_source_selection, normalize_source_selection, source_enabled
 

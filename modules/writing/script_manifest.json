@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-14T18:27:57.040862+00:00",
+  "generated_at": "2026-06-15T01:00:55.613084+00:00",
   "module": "writing",
   "contract": {
     "directory": "modules/writing",
@@ -1068,7 +1068,7 @@
       "path": "modules/writing/scripts/sync_third_party_research_stack.py",
       "owner": "writing",
       "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
-      "function_count": 20,
+      "function_count": 24,
       "functions": [
         "now_iso",
         "read_text",
@@ -1079,6 +1079,10 @@
         "first_frontmatter_value",
         "slug",
         "relative",
+        "as_path",
+        "first_existing_path",
+        "source_root",
+        "module_record",
         "write_skill_adapter",
         "cleanup_legacy_external_skill_dirs",
         "source_record",

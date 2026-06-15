@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-14T18:27:57.040862+00:00",
+  "generated_at": "2026-06-15T01:00:55.613084+00:00",
   "module": "planning",
   "contract": {
     "directory": "modules/planning",
@@ -61,7 +61,7 @@
       "path": "modules/planning/scripts/build_blocker_action_plan.py",
       "owner": "planning",
       "owner_reason": "plan selection, blocker planning, or execution-contract shaping",
-      "function_count": 46,
+      "function_count": 53,
       "functions": [
         "now_iso",
         "load_json",
@@ -104,6 +104,13 @@
         "stale_full_cycle_blocker",
         "enforce_experiment_first",
         "deterministic_base_switch_executed",
+        "failed_check_ids",
+        "failed_check_summary",
+        "route_has_identity",
+        "failed_base_switch_gate_guidance",
+        "apply_failed_base_switch_gate_guidance",
+        "merge_unique_values",
+        "compact_failed_base_switch_gate_actions",
         "enforce_selected_base_viability_gate",
         "enforce_literature_recommendation_gate",
         "build",
@@ -119,6 +126,7 @@
         "pathlib",
         "project_paths",
         "re",
+        "shlex",
         "taste_pythonpath",
         "typing"
       ],
@@ -227,7 +235,7 @@
       "path": "modules/planning/scripts/propose_next_actions.py",
       "owner": "planning",
       "owner_reason": "plan selection, blocker planning, or execution-contract shaping",
-      "function_count": 8,
+      "function_count": 13,
       "functions": [
         "load_json",
         "collect_methods",
@@ -236,6 +244,11 @@
         "display_labels",
         "method_label",
         "method_list_label",
+        "as_dict",
+        "failed_check_ids",
+        "failed_check_summary",
+        "route_has_identity",
+        "selected_base_viability_action",
         "main"
       ],
       "classes": [],
@@ -245,7 +258,9 @@
         "experiment_contracts",
         "json",
         "pathlib",
-        "project_paths"
+        "project_paths",
+        "sys",
+        "taste_pythonpath"
       ],
       "parse_error": ""
     },

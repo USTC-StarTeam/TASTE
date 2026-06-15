@@ -76,7 +76,7 @@ def main() -> None:
         "bootstrap_repo_env.py", "research_healthcheck.py", "build_repo_data_requirements.py", "plan_data_acquisition.py", "attempt_data_acquisition.py",
         "data_unavailability_policy.py", "restart_after_data_blocker.py", "audit_repo_candidate_pool.py", "reconcile_active_and_pool_candidates.py",
         "build_blocker_resolution_packet.py", "probe_repo_dataset.py", "run_active_repo_smoke.py", "run_autoscientist_supervisor.py",
-        "run_autoscientist_continuous.py", "build_stagnation_report.py", "run_evoscientist_style_cycle.py", "check_llm_ready.py", "llm_client.py",
+        "run_autoscientist_continuous.py", "build_stagnation_report.py", "run_evoscientist_style_cycle.py", "refresh_project_reports.py", "check_llm_ready.py", "llm_client.py",
     ]
     for script in required_scripts:
         record(f"script_exists:{script}", resolve_script_path(script, ROOT).exists(), "missing script")

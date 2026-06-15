@@ -13236,11 +13236,9 @@ def build_command(payload: dict[str, Any]) -> tuple[str, list[str]]:
     if _requests_fresh_full_cycle_find(action, payload):
         _record_fresh_full_cycle_find_approval(project, payload, source="build_command")
     if action == "healthcheck":
-        cmd = [py, str(SCRIPTS / "research_healthcheck.py"), "--project", project]
-        _append(cmd, "--venue", payload.get("venue"))
+        cmd = [py, str(SCRIPTS / "refresh_project_reports.py"), "--project", project]
     elif action == "status":
-        cmd = [py, str(SCRIPTS / "report_status.py"), "--project", project]
-        _append(cmd, "--venue", payload.get("venue"))
+        cmd = [py, str(SCRIPTS / "refresh_project_reports.py"), "--project", project]
     elif action == "handoff":
         cmd = [py, str(SCRIPTS / "generate_handoff.py"), "--project", project]
     elif action == "init":
@@ -13416,6 +13414,8 @@ def build_command(payload: dict[str, Any]) -> tuple[str, list[str]]:
         return project, [py, "-c", f"print({json.dumps('queued project guidance: ' + item['id'])})"]
     else:
         raise ValueError(f"Unknown research action: {action}")
+    if action in {"healthcheck", "status"}:
+        _append(cmd, "--venue", payload.get("venue"))
     return project, cmd
 
 
