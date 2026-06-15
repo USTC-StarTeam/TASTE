@@ -492,7 +492,15 @@ def current_environment_selection(paths) -> dict[str, Any]:
     selected_run = str(selection.get("fresh_find_run_id") or selected.get("fresh_find_run_id") or "").strip()
     stage = str(selection.get("selection_stage") or selection.get("selected_by_stage") or selected.get("selection_stage") or "").strip()
     decision = selection.get("claude_topic_decision") if isinstance(selection.get("claude_topic_decision"), dict) else {}
-    accepted = bool(selection.get("accepted_by_claude") or str(selection.get("selection_gate") or "").startswith(("accepted_by_claude", "accepted_by_deterministic_base_switch_gate")) or decision.get("accept_as_current_best"))
+    raw_selection_gate = str(selection.get("selection_gate") or selected.get("selection_gate") or "").strip()
+    pending_loader_selection = bool(
+        raw_selection_gate in {"accepted_by_claude_transformable_pending_loader_bootstrap", "blocked_pending_data_loader_for_claude_best_candidate"}
+        or selected.get("pending_loader_bootstrap")
+    )
+    accepted = bool(
+        not pending_loader_selection
+        and (selection.get("accepted_by_claude") or raw_selection_gate.startswith(("accepted_by_claude", "accepted_by_deterministic_base_switch_gate")) or decision.get("accept_as_current_best"))
+    )
     selected_title = str(
         selected.get("title")
         or selected.get("literature_base_title")
@@ -518,10 +526,14 @@ def current_environment_selection(paths) -> dict[str, Any]:
     )
     in_current_find = in_current_find or deterministic_switch_valid or trusted_full_anchor
     accepted = accepted or deterministic_switch_valid or trusted_full_anchor
+    if pending_loader_selection and not deterministic_switch_valid and not trusted_full_anchor:
+        accepted = False
     same_run_or_trusted = bool((run_id and selected_run == run_id) or trusted_full_anchor)
     valid = bool(selected and same_run_or_trusted and stage == "environment_claude_code" and accepted and in_current_find)
     reason = ""
-    if not in_current_find:
+    if raw_selection_gate == "blocked_pending_data_loader_for_claude_best_candidate":
+        reason = "environment_repo_selection_blocked_pending_loader_candidate"
+    elif not in_current_find:
         reason = "environment-selected paper is not present in the current Find recommended-paper pool"
     elif not same_run_or_trusted:
         reason = "environment-stage repo selection is stale for the current Find run"

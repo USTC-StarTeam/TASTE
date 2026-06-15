@@ -296,6 +296,16 @@ def evidence_ready_for_active(row: dict[str, Any]) -> bool:
     return bool(str(row.get('repo_path') or row.get('local_path') or '').strip() and claim_ready_dataset_names(row))
 
 
+def loader_success(payload: dict[str, Any]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return bool(
+        payload.get('loader_probe_success') is True
+        or payload.get('decision') == 'loader_contract_passed'
+        or any(isinstance(row, dict) and row.get('loader_probe_success') for row in (payload.get('probes') or []) if isinstance(row, dict))
+    )
+
+
 def recover_pending_loader_active_repo(active: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     if not isinstance(active, dict) or not pending_loader_candidate(active) or claim_ready_dataset_names(active):
         return active if isinstance(active, dict) else {}, {}
@@ -363,6 +373,12 @@ def score_candidate(row: dict[str, Any], repo: Path, signals: dict[str, Any], pr
         # dynamic topic/transformability decision for the current project.
         score -= min(2.0, 0.5 * len(gaps))
     if str(repo) == active_repo_path:
+        score += 1
+    contract = probe.get('candidate_data_contract') if isinstance(probe.get('candidate_data_contract'), dict) else {}
+    generic_ready = contract.get('ready_datasets') if isinstance(contract.get('ready_datasets'), list) else []
+    if generic_ready:
+        score += 3
+    if probe.get('generic_data_parse_probe_success'):
         score += 1
     return score
 
@@ -703,7 +719,65 @@ def probe_repo(project: str, repo: Path, env_name: str, timeout_sec: int) -> dic
     return payload
 
 
+def candidate_identity(row: dict[str, Any], repo: Path) -> tuple[str, str]:
+    name = str(row.get('name') or row.get('repo') or row.get('full_name') or '').strip()
+    title = str(row.get('literature_base_title') or row.get('selected_base_title') or row.get('title') or '').strip()
+    if not name:
+        name = repo.name
+    return name, title
 
+
+def candidate_state_path(paths, prefix: str, repo: Path, row: dict[str, Any]) -> Path:
+    name, _ = candidate_identity(row, repo)
+    return paths.state / f'{prefix}_{slugify(name or repo.name)}.json'
+
+
+def probe_candidate_repo(project: str, repo: Path, row: dict[str, Any], env_name: str, timeout_sec: int) -> dict[str, Any]:
+    paths = build_paths(project)
+    name, title = candidate_identity(row, repo)
+    contract_path = candidate_state_path(paths, 'candidate_data_contract', repo, row)
+    loader_path = candidate_state_path(paths, 'candidate_loader_probe', repo, row)
+    contract_proc = run([
+        sys.executable,
+        'modules/environment/scripts/build_repo_data_requirements.py',
+        '--project', project,
+        '--repo-path', str(repo),
+        '--candidate-scope',
+        '--candidate-name', name,
+        '--candidate-title', title,
+    ], ROOT, timeout=min(max(60, timeout_sec), 180))
+    contract = load_json(contract_path, {})
+    existing_loader = load_json(loader_path, {})
+    if loader_success(existing_loader):
+        loader_proc = subprocess.CompletedProcess([], int(existing_loader.get('probe_return_code') or 0), '', '')
+        loader = existing_loader
+    else:
+        loader_proc = run([
+            sys.executable,
+            'modules/environment/scripts/probe_repo_dataset.py',
+            '--project', project,
+            '--repo-path', str(repo),
+            '--env-name', env_name,
+            '--timeout-sec', str(timeout_sec),
+            '--candidate-scope',
+            '--candidate-name', name,
+            '--candidate-title', title,
+        ], ROOT, timeout=timeout_sec + 90)
+        loader = load_json(loader_path, {})
+    if not isinstance(contract, dict) or str(contract.get('repo_path') or '') != str(repo):
+        contract = {}
+    if not isinstance(loader, dict) or str(loader.get('repo_path') or '') != str(repo):
+        loader = {'repo_path': str(repo), 'probes': []}
+    ready_datasets = contract.get('ready_datasets', []) if isinstance(contract.get('ready_datasets'), list) else []
+    loader['candidate_data_contract'] = contract
+    loader['candidate_data_contract_path'] = str(contract_path)
+    loader['candidate_loader_probe_path'] = str(loader_path)
+    loader['generic_data_parse_probe_success'] = bool(contract.get('status') == 'ready' and ready_datasets)
+    loader['probe_return_code'] = loader_proc.returncode
+    loader['data_contract_return_code'] = contract_proc.returncode
+    loader['probe_stdout_tail'] = (loader_proc.stdout or '')[-1500:]
+    loader['probe_stderr_tail'] = ((contract_proc.stderr or '') + '\n' + (loader_proc.stderr or ''))[-1500:]
+    return loader
 
 
 def sync_selected_candidate(paths, selected: dict[str, Any]) -> None:
@@ -751,6 +825,7 @@ def compact_review_payload(payload: dict[str, Any]) -> dict[str, Any]:
     for item in payload.get('audited_candidates', [])[:8]:
         if not isinstance(item, dict):
             continue
+        probe_summary = item.get('probe_summary') if isinstance(item.get('probe_summary'), dict) else {}
         audited.append({
             'name': item.get('name', ''),
             'repo_path': item.get('repo_path', ''),
@@ -761,7 +836,14 @@ def compact_review_payload(payload: dict[str, Any]) -> dict[str, Any]:
             'literature_base_title': item.get('literature_base_title', ''),
             'literature_base_rank': item.get('literature_base_rank', ''),
             'decision': item.get('decision', ''),
-            'claim_ready_datasets': item.get('probe_summary', {}).get('claim_ready_datasets', []),
+            'claim_ready_datasets': probe_summary.get('claim_ready_datasets', []),
+            'candidate_data_contract_status': probe_summary.get('candidate_data_contract_status', ''),
+            'candidate_data_ready_datasets': probe_summary.get('candidate_data_ready_datasets', []),
+            'candidate_data_contract_path': probe_summary.get('candidate_data_contract_path', ''),
+            'generic_data_parse_probe_success': probe_summary.get('generic_data_parse_probe_success', False),
+            'candidate_loader_probe_status': probe_summary.get('candidate_loader_probe_status', ''),
+            'candidate_loader_probe_decision': probe_summary.get('candidate_loader_probe_decision', ''),
+            'candidate_loader_probe_path': probe_summary.get('candidate_loader_probe_path', ''),
             'signals': item.get('signals', {}),
             'missing_topic_groups': item.get('missing_topic_groups', []),
             'selection_score': item.get('selection_score', ''),
@@ -884,6 +966,7 @@ def run_claude_topic_decision(project: str, payload: dict[str, Any], timeout_sec
         'You must also decide repo/env/data stewardship for future autonomous work: whether The workflow should keep and modify the currently installed repo, switch to the best audited repo, or continue searching; whether the conda environment should be reused, repaired, newly created under a project-specific name, or deferred; and whether data is already claim-ready, must be downloaded/placed, or still requires search.\n'
         'Do not recommend deleting an existing conda environment. If rebuilding is needed, choose create_new_project_env and explain the new env name.\n'
         'Remember that future experiment iterations will rely on this decision as persistent memory, so include concrete instructions Claude Code can follow later.\n'
+        'If the best topic-aligned repo has candidate_data_contract_status=ready or generic_data_parse_probe_success=true but no claim_ready_datasets, you may choose it only as an accept-with-modifications pending-loader proposal. TASTE will keep experiments blocked until repo loader/import, reference protocol, bounded smoke, full reference reproduction, and artifact-local audit all pass. Do not describe generic parsing as claim-ready loader evidence.\n'
         'If no repo is good enough, say needs-more-search. Prefer an imperfect but highly transformable repo over no repo only when the rationale is evidence-backed.\n'
         'Return ONLY valid JSON with keys: decision, accept_as_current_best, confidence, best_repo, repo_path, dataset, repo_action, repo_action_reason, repo_action_reason_en, repo_action_reason_zh, env_action, env_action_reason, env_action_reason_en, env_action_reason_zh, recommended_env_name, data_action, data_action_reason, data_action_reason_en, data_action_reason_zh, stewardship_memory, stewardship_memory_en, stewardship_memory_zh, rationale, rationale_en, rationale_zh, required_modifications, required_modifications_en, required_modifications_zh, risks, risks_en, risks_zh, evidence, evidence_en, evidence_zh.\n'
         'repo_action must be one of: keep_and_modify_current_repo, switch_to_best_repo, continue_search.\n'
@@ -1136,7 +1219,8 @@ def main() -> int:
             continue
         signals = quick_signals(repo)
         save_selection_progress('probing_repo_dataset', audited, ready, row=row, index=candidate_index, action='probe')
-        probe = probe_repo(args.project, repo, env_name, args.timeout_sec)
+        candidate_scope = bool(str(repo) != active_path)
+        probe = probe_candidate_repo(args.project, repo, row, env_name, args.timeout_sec) if candidate_scope else probe_repo(args.project, repo, env_name, args.timeout_sec)
         claim_ready = [p for p in probe.get('probes', []) if p.get('claim_ready')]
         # Candidate probing updates global probe/registry state; restore after each non-active audit so
         # a failed side candidate cannot erase the evidence for the current active route.
@@ -1147,6 +1231,9 @@ def main() -> int:
                 save_json(paths.state / 'real_dataset_probe.json', original_probe)
             if isinstance(original_registry, list):
                 save_json(paths.state / 'dataset_registry.json', original_registry)
+        candidate_contract = probe.get('candidate_data_contract') if isinstance(probe.get('candidate_data_contract'), dict) else {}
+        candidate_ready = candidate_contract.get('ready_datasets') if isinstance(candidate_contract.get('ready_datasets'), list) else []
+        candidate_loader_probe_status = str(probe.get('status') or '')
         item.update({
             'repo_path': str(repo),
             'signals': signals,
@@ -1154,6 +1241,13 @@ def main() -> int:
                 'probe_return_code': probe.get('probe_return_code'),
                 'claim_ready_datasets': [p.get('dataset') for p in claim_ready],
                 'probe_count': len(probe.get('probes', [])),
+                'candidate_data_contract_status': candidate_contract.get('status', ''),
+                'candidate_data_ready_datasets': candidate_ready,
+                'candidate_data_contract_path': probe.get('candidate_data_contract_path', ''),
+                'generic_data_parse_probe_success': bool(probe.get('generic_data_parse_probe_success')),
+                'candidate_loader_probe_status': candidate_loader_probe_status,
+                'candidate_loader_probe_decision': str(probe.get('decision') or ''),
+                'candidate_loader_probe_path': probe.get('candidate_loader_probe_path', ''),
             },
             'selection_score': score_candidate(row, repo, signals, probe, active_path),
         })
@@ -1164,6 +1258,8 @@ def main() -> int:
             ready.append(item)
         elif claim_ready:
             item['decision'] = 'data_ready_but_code_entrypoint_unclear'
+        elif candidate_ready:
+            item['decision'] = 'candidate_data_contract_ready_loader_probe_required'
         else:
             item['decision'] = 'not_evidence_ready'
         audited.append(item)
@@ -1345,7 +1441,12 @@ def main() -> int:
                 lines.append(f"- claude_rationale_zh: {topic_decision.get('rationale_zh', '')}\n")
     lines.append('\n## Audited Candidates\n')
     for item in audited:
-        lines.append(f"- {item.get('name')} | decision={item.get('decision')} | claim_ready={', '.join(item.get('probe_summary', {}).get('claim_ready_datasets', []) or []) or 'none'} | score={item.get('selection_score', '')}\n")
+        summary = item.get('probe_summary', {}) if isinstance(item.get('probe_summary'), dict) else {}
+        claim_ready_text = ', '.join(summary.get('claim_ready_datasets', []) or []) or 'none'
+        generic_ready_text = ', '.join(summary.get('candidate_data_ready_datasets', []) or []) or 'none'
+        loader_status = summary.get('candidate_loader_probe_status', '') or 'n/a'
+        contract_status = summary.get('candidate_data_contract_status', '') or 'n/a'
+        lines.append(f"- {item.get('name')} | decision={item.get('decision')} | claim_ready={claim_ready_text} | candidate_data={contract_status}:{generic_ready_text} | loader_probe={loader_status} | score={item.get('selection_score', '')}\n")
     (paths.reports / 'evidence_ready_repo_selection.md').write_text(''.join(lines), encoding='utf-8')
 
     if selected and args.write_active and evidence_ready_for_active(selected):

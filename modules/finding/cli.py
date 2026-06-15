@@ -12,16 +12,15 @@ except ImportError:
     from contracts import STAGE_NAME, contract
 
 ROOT = Path(__file__).resolve().parents[2]
-FRAMEWORK_SCRIPTS = ROOT / "framework" / "scripts"
-if str(FRAMEWORK_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(FRAMEWORK_SCRIPTS))
-from taste_pythonpath import ensure_taste_pythonpath, script_resolver
-ensure_taste_pythonpath(ROOT)
-SCRIPTS = script_resolver(ROOT)
 
-from auto_research.models import AppConfig, FindRequest, VenueSelection  # noqa: E402
-from auto_research.source_selection import default_source_selection, normalize_source_selection  # noqa: E402
-from auto_research.auto_find.pipeline import run_find  # noqa: E402
+
+def _ensure_runtime_imports() -> None:
+    framework_scripts = ROOT / "framework" / "scripts"
+    if str(framework_scripts) not in sys.path:
+        sys.path.insert(0, str(framework_scripts))
+    from taste_pythonpath import ensure_taste_pythonpath
+
+    ensure_taste_pythonpath(ROOT)
 
 
 def _load_json(path: str, default):
@@ -51,6 +50,11 @@ def main() -> None:
     if args.contract:
         print(json.dumps(contract(), ensure_ascii=False, indent=2))
         return
+    _ensure_runtime_imports()
+    from auto_research.models import AppConfig, FindRequest, VenueSelection
+    from auto_research.source_selection import default_source_selection, normalize_source_selection
+    from auto_research.auto_find.pipeline import run_find
+
     config = AppConfig(**_load_json(args.config_json, {}))
     selection_payload = _load_json(args.selection_json, default_source_selection())
     selection = VenueSelection(**normalize_source_selection(selection_payload))

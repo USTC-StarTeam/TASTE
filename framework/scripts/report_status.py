@@ -397,15 +397,13 @@ def main() -> None:
     repo_selection_blocker_current = _repo_selection_blocker_is_current(repo_selection_blocker, repo_selection)
     repo_selection_blocker_stale = bool(isinstance(repo_selection_blocker, dict) and repo_selection_blocker and not repo_selection_blocker_current)
     repo_selection_block_reason = repo_selection_blocker.get('reason', '') if repo_selection_blocker_current and isinstance(repo_selection_blocker, dict) else ''
-    if pending_candidate_blocked and current_active_route_ready:
+    if pending_candidate_blocked:
         repo_selection_blocker_stale = bool(repo_selection_blocker)
         repo_selection_blocker_current = False
-        repo_selection_block_reason = str(repo_selection.get('blocker') or 'Pending candidate route is blocked until loader/data/protocol audits pass; current active route remains unchanged.')
+        repo_selection_block_reason = str(repo_selection.get('blocker') or 'Pending candidate route is blocked until loader/data/protocol audits pass; active_repo remains non-authoritative for the current selected plan.')
     current_find_run_id = _state_run_id(current_find_plan) or _state_run_id(finding_frontend) or _state_run_id(full_cycle)
     current_find_status = str(_as_dict(current_find_plan).get('status') or _as_dict(finding_frontend).get('status') or '').strip()
     environment_selection_status = _environment_selection_status(repo_selection, current_find_plan, current_environment)
-    if pending_candidate_blocked and current_active_route_ready:
-        environment_selection_status = 'selected_current_route_pending_candidate_blocked'
     full_cycle_status = str(_as_dict(full_cycle).get('status') or '').strip() or 'not-run'
     full_cycle_summary = _public_summary(full_cycle)
     scientific_progress_status = str(_as_dict(scientific_progress_gate).get('status') or '').strip() or 'not-run'

@@ -12,15 +12,15 @@ except ImportError:
     from contracts import STAGE_NAME, contract
 
 ROOT = Path(__file__).resolve().parents[2]
-FRAMEWORK_SCRIPTS = ROOT / "framework" / "scripts"
-if str(FRAMEWORK_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(FRAMEWORK_SCRIPTS))
-from taste_pythonpath import ensure_taste_pythonpath, script_resolver
-ensure_taste_pythonpath(ROOT)
-SCRIPTS = script_resolver(ROOT)
 
-from auto_research.models import AppConfig, ReadRequest  # noqa: E402
-from auto_research.auto_read.pipeline import run_read  # noqa: E402
+
+def _ensure_runtime_imports() -> None:
+    framework_scripts = ROOT / "framework" / "scripts"
+    if str(framework_scripts) not in sys.path:
+        sys.path.insert(0, str(framework_scripts))
+    from taste_pythonpath import ensure_taste_pythonpath
+
+    ensure_taste_pythonpath(ROOT)
 
 
 def _load_json(path: str, default):
@@ -48,6 +48,10 @@ def main() -> None:
         raise SystemExit(proc.returncode)
     if not args.run_id:
         raise SystemExit("--run-id is required unless --repair-full-text is used")
+    _ensure_runtime_imports()
+    from auto_research.models import AppConfig, ReadRequest
+    from auto_research.auto_read.pipeline import run_read
+
     config = AppConfig(**_load_json(args.config_json, {}))
     result = run_read(ReadRequest(run_id=args.run_id, paper_ids=args.paper_id, max_papers=args.max_papers), config)
     print(json.dumps({"stage": STAGE_NAME, "run_id": args.run_id, "result": result}, ensure_ascii=False, indent=2))

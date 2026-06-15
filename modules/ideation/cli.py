@@ -11,15 +11,15 @@ except ImportError:
     from contracts import STAGE_NAME, contract
 
 ROOT = Path(__file__).resolve().parents[2]
-FRAMEWORK_SCRIPTS = ROOT / "framework" / "scripts"
-if str(FRAMEWORK_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(FRAMEWORK_SCRIPTS))
-from taste_pythonpath import ensure_taste_pythonpath, script_resolver
-ensure_taste_pythonpath(ROOT)
-SCRIPTS = script_resolver(ROOT)
 
-from auto_research.models import AppConfig, IdeaRequest  # noqa: E402
-from auto_research.auto_idea.pipeline import run_idea  # noqa: E402
+
+def _ensure_runtime_imports() -> None:
+    framework_scripts = ROOT / "framework" / "scripts"
+    if str(framework_scripts) not in sys.path:
+        sys.path.insert(0, str(framework_scripts))
+    from taste_pythonpath import ensure_taste_pythonpath
+
+    ensure_taste_pythonpath(ROOT)
 
 
 def _load_json(path: str, default):
@@ -39,6 +39,10 @@ def main() -> None:
         return
     if not args.run_id:
         raise SystemExit("--run-id is required")
+    _ensure_runtime_imports()
+    from auto_research.models import AppConfig, IdeaRequest
+    from auto_research.auto_idea.pipeline import run_idea
+
     config = AppConfig(**_load_json(args.config_json, {}))
     result = run_idea(IdeaRequest(run_id=args.run_id, max_ideas=args.max_ideas or None, parallel_workers=args.parallel_workers or None), config)
     print(json.dumps({"stage": STAGE_NAME, "run_id": args.run_id, "result": result}, ensure_ascii=False, indent=2))

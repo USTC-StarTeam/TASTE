@@ -865,10 +865,19 @@ def current_environment_selection(paths) -> dict[str, Any]:
     selected_run = str(selected.get('fresh_find_run_id') or selection.get('fresh_find_run_id') or '').strip()
     stage = str(selection.get('selection_stage') or selection.get('selected_by_stage') or '').strip()
     decision = selection.get('claude_topic_decision') if isinstance(selection.get('claude_topic_decision'), dict) else {}
-    accepted = bool(selection.get('accepted_by_claude') or str(selection.get('selection_gate') or '').startswith(('accepted_by_claude', 'accepted_by_deterministic_base_switch_gate')) or decision.get('accept_as_current_best'))
+    raw_selection_gate = str(selection.get('selection_gate') or selected.get('selection_gate') or '').strip()
+    pending_loader_selection = bool(
+        raw_selection_gate in {'accepted_by_claude_transformable_pending_loader_bootstrap', 'blocked_pending_data_loader_for_claude_best_candidate'}
+        or selected.get('pending_loader_bootstrap')
+    )
+    accepted = bool(
+        not pending_loader_selection
+        and (selection.get('accepted_by_claude') or raw_selection_gate.startswith(('accepted_by_claude', 'accepted_by_deterministic_base_switch_gate')) or decision.get('accept_as_current_best'))
+    )
     in_current_find = selected_title_in_current_find(paths, selected, decision)
     valid = bool(selected and stage == 'environment_claude_code' and accepted and in_current_find)
-    return {'valid': valid, 'current_find_run_id': run_id, 'fresh_find_run_id': selected_run, 'selection_stage': stage, 'accepted_by_claude': accepted, 'selected': selected, 'in_current_find_recommendations': in_current_find, 'reason': 'current_environment_base_selected' if valid else ('selected_base_not_in_current_find_recommendations' if not in_current_find else 'environment_base_selection_pending_or_stale')}
+    reason = 'current_environment_base_selected' if valid else 'environment_repo_selection_blocked_pending_loader_candidate' if raw_selection_gate == 'blocked_pending_data_loader_for_claude_best_candidate' else 'selected_base_not_in_current_find_recommendations' if not in_current_find else 'environment_base_selection_pending_or_stale'
+    return {'valid': valid, 'current_find_run_id': run_id, 'fresh_find_run_id': selected_run, 'selection_stage': stage, 'accepted_by_claude': accepted, 'selected': selected, 'in_current_find_recommendations': in_current_find, 'reason': reason}
 
 
 def stage_allows_selected_repo(stage: str = '') -> bool:

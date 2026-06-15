@@ -316,8 +316,6 @@ def main() -> None:
         current_find_run_id = _state_run_id(current_find_plan) or _state_run_id(taste_state) or _state_run_id(full_cycle)
         notes.append(f"Current-Find downstream status: {current_find_status}{f' (run_id={current_find_run_id})' if current_find_run_id else ''}")
         environment_status = _environment_selection_status(repo_selection, current_find_plan, current_environment)
-        if _pending_candidate_blocked(repo_selection) and _as_dict(selected_base_viability_gate):
-            environment_status = "selected_current_route_pending_candidate_blocked"
         notes.append(f"Environment base selection: {environment_status}")
         full_cycle_status = str(_as_dict(full_cycle).get("status") or "").strip()
         selected_base_viability_status = _selected_base_viability_public_status(selected_base_viability_gate, base_switch_gate)

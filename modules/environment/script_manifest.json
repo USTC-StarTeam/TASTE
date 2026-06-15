@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-15T04:23:57.546157+00:00",
+  "generated_at": "2026-06-15T06:11:36.371933+00:00",
   "module": "environment",
   "contract": {
     "directory": "modules/environment",
@@ -225,7 +225,7 @@
       "path": "modules/environment/scripts/audit_repo_candidate_pool.py",
       "owner": "environment",
       "owner_reason": "repo/data/base/environment selection, probing, or runtime locking",
-      "function_count": 10,
+      "function_count": 14,
       "functions": [
         "load_json",
         "save_json",
@@ -235,7 +235,11 @@
         "has_any_file",
         "quick_repo_signals",
         "audit_local",
+        "candidate_identity",
+        "candidate_state_path",
         "extract_data_requirements",
+        "loader_success",
+        "extract_candidate_loader_probe",
         "main"
       ],
       "classes": [],
@@ -961,7 +965,7 @@
       "path": "modules/environment/scripts/select_evidence_ready_repo.py",
       "owner": "environment",
       "owner_reason": "repo/data/base/environment selection, probing, or runtime locking",
-      "function_count": 33,
+      "function_count": 37,
       "functions": [
         "load_json",
         "save_json",
@@ -975,6 +979,7 @@
         "claim_ready_dataset_names",
         "pending_loader_candidate",
         "evidence_ready_for_active",
+        "loader_success",
         "recover_pending_loader_active_repo",
         "quick_signals",
         "score_candidate",
@@ -989,6 +994,9 @@
         "normalize_topic_decision",
         "write_repo_env_strategy",
         "probe_repo",
+        "candidate_identity",
+        "candidate_state_path",
+        "probe_candidate_repo",
         "sync_selected_candidate",
         "compact_review_payload",
         "run_claude_review",

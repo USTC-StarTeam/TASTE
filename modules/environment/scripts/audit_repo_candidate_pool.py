@@ -103,11 +103,65 @@ def audit_local(project: str, repo: Path, row: dict) -> dict:
     return {'return_code': 0, 'side_effect_free': True, 'support_score': score, 'support_signals': support, 'has_tests': has_tests}
 
 
-def extract_data_requirements(project: str, repo: Path) -> dict:
-    proc = run([sys.executable, 'modules/environment/scripts/build_repo_data_requirements.py', '--project', project, '--repo-path', str(repo)], ROOT, timeout=120)
+def candidate_identity(row: dict, repo: Path) -> tuple[str, str]:
+    name = str(row.get('name') or row.get('repo') or row.get('full_name') or '').strip()
+    title = str(row.get('literature_base_title') or row.get('selected_base_title') or row.get('title') or '').strip()
+    if not name:
+        name = repo.name
+    return name, title
+
+
+def candidate_state_path(paths, prefix: str, repo: Path, row: dict) -> Path:
+    name, _ = candidate_identity(row, repo)
+    return paths.state / f'{prefix}_{slugify(name or repo.name)}.json'
+
+
+def extract_data_requirements(project: str, repo: Path, row: dict | None = None, *, candidate_scope: bool = False) -> dict:
+    cmd = [sys.executable, 'modules/environment/scripts/build_repo_data_requirements.py', '--project', project, '--repo-path', str(repo)]
     paths = build_paths(project)
-    req = load_json(paths.state / 'repo_data_requirements.json', {})
-    return {'return_code': proc.returncode, 'requirements': req if isinstance(req, dict) and req.get('repo_path') == str(repo) else {}, 'stderr_tail': (proc.stderr or '')[-1000:]}
+    state_path = paths.state / 'repo_data_requirements.json'
+    if candidate_scope:
+        row = row or {}
+        name, title = candidate_identity(row, repo)
+        cmd.extend(['--candidate-scope', '--candidate-name', name, '--candidate-title', title])
+        state_path = candidate_state_path(paths, 'candidate_data_contract', repo, row)
+    proc = run(cmd, ROOT, timeout=120)
+    req = load_json(state_path, {})
+    expected_repo = str(repo.resolve())
+    req_repo = str(req.get('repo_path') or '') if isinstance(req, dict) else ''
+    if not isinstance(req, dict) or req_repo != expected_repo:
+        req = {}
+    return {'return_code': proc.returncode, 'requirements': req, 'state_path': str(state_path), 'stderr_tail': (proc.stderr or '')[-1000:]}
+
+
+def loader_success(payload: dict) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return bool(
+        payload.get('loader_probe_success') is True
+        or payload.get('decision') == 'loader_contract_passed'
+        or any(isinstance(row, dict) and row.get('loader_probe_success') for row in payload.get('probes', []) or [])
+    )
+
+
+def extract_candidate_loader_probe(project: str, repo: Path, row: dict) -> dict:
+    paths = build_paths(project)
+    name, title = candidate_identity(row, repo)
+    state_path = candidate_state_path(paths, 'candidate_loader_probe', repo, row)
+    existing = load_json(state_path, {})
+    if loader_success(existing):
+        return {'return_code': int(existing.get('probe_return_code') or 0), 'probe': existing, 'state_path': str(state_path), 'reused_existing_loader_success': True}
+    proc = run([
+        sys.executable,
+        'modules/environment/scripts/probe_repo_dataset.py',
+        '--project', project,
+        '--repo-path', str(repo),
+        '--candidate-scope',
+        '--candidate-name', name,
+        '--candidate-title', title,
+    ], ROOT, timeout=120)
+    probe = load_json(state_path, {})
+    return {'return_code': proc.returncode, 'probe': probe if isinstance(probe, dict) else {}, 'state_path': str(state_path), 'stderr_tail': (proc.stderr or '')[-1000:]}
 
 
 def main() -> None:
@@ -171,21 +225,34 @@ def main() -> None:
             continue
         item['repo_path'] = str(repo)
         item['signals'] = quick_repo_signals(repo)
+        candidate_scope = str(repo) != active_path
         item['local_audit'] = audit_local(args.project, repo, row)
-        data_req = extract_data_requirements(args.project, repo)
+        data_req = extract_data_requirements(args.project, repo, row, candidate_scope=candidate_scope)
         item['data_requirements'] = data_req.get('requirements', {})
+        item['data_requirements_scope'] = 'candidate' if candidate_scope else 'active'
+        item['data_requirements_path'] = data_req.get('state_path', '')
         req = item['data_requirements'] if isinstance(item.get('data_requirements'), dict) else {}
         ready = req.get('ready_datasets', []) if isinstance(req, dict) else []
         blocked = req.get('blocked_datasets', []) if isinstance(req, dict) else []
+        candidate_contract_ready = bool(candidate_scope and req.get('status') == 'ready' and ready)
+        if candidate_contract_ready:
+            loader_req = extract_candidate_loader_probe(args.project, repo, row)
+            item['candidate_loader_probe'] = loader_req.get('probe', {})
+            item['candidate_loader_probe_path'] = loader_req.get('state_path', '')
+            item['candidate_loader_probe_return_code'] = loader_req.get('return_code')
+            item['candidate_loader_import_probe_passed'] = loader_success(item['candidate_loader_probe'])
         execution_ready = item['local_audit'].get('return_code') == 0 and bool(item['signals'].get('has_entrypoint')) and bool(item['signals'].get('has_install') or item['signals'].get('has_readme'))
         has_data_contract = bool(req.get('datasets') or req.get('contract') or item['signals'].get('has_data_dir') or item['signals'].get('readme_data_mentions'))
         item['execution_ready_after_audit'] = execution_ready
         item['has_data_contract_after_audit'] = has_data_contract
+        item['candidate_data_contract_ready_after_audit'] = candidate_contract_ready
         item['ready_datasets_after_audit'] = ready
         item['blocked_datasets_after_audit'] = blocked
-        if execution_ready and ready:
+        if execution_ready and ready and not candidate_scope:
             item['decision'] = 'candidate_evidence_ready_requires_loader_probe'
             evidence_ready.append(item)
+        elif execution_ready and candidate_contract_ready:
+            item['decision'] = 'candidate_data_contract_ready_loader_probe_required'
         elif execution_ready and has_data_contract:
             item['decision'] = 'candidate_promising_but_data_blocked'
         else:
@@ -222,6 +289,8 @@ def main() -> None:
     lines.append('## Candidates\n')
     for item in audited:
         lines.append(f"- {item.get('name')} | score={item.get('score')} | decision={item.get('decision')} | repo={item.get('repo_path','')}\n")
+        if item.get('candidate_data_contract_ready_after_audit'):
+            lines.append(f"  candidate_data_contract: ready; loader_import_probe={str(item.get('candidate_loader_import_probe_passed', False)).lower()}; ready_data={', '.join(item.get('ready_datasets_after_audit', [])[:5])}\n")
         if item.get('blocked_datasets_after_audit'):
             lines.append(f"  blocked_data: {', '.join(item.get('blocked_datasets_after_audit', [])[:5])}\n")
     out = paths.reports / 'repo_candidate_pool_audit.md'

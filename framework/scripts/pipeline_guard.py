@@ -189,14 +189,30 @@ def current_environment_selection(paths) -> dict[str, Any]:
     stage = str(selection.get("selection_stage") or selection.get("selected_by_stage") or selected.get("selection_stage") or "").strip()
     decision = selection.get("claude_topic_decision") if isinstance(selection.get("claude_topic_decision"), dict) else {}
     raw_selection_gate = str(selection.get("selection_gate") or selected.get("selection_gate") or "").strip()
-    accepted = bool(selection.get("accepted_by_claude") or raw_selection_gate.startswith(("accepted_by_claude", "accepted_by_deterministic_base_switch_gate")) or decision.get("accept_as_current_best"))
+    pending_loader_selection = bool(
+        raw_selection_gate in {"accepted_by_claude_transformable_pending_loader_bootstrap", "blocked_pending_data_loader_for_claude_best_candidate"}
+        or selected.get("pending_loader_bootstrap")
+    )
+    accepted = bool(
+        not pending_loader_selection
+        and (selection.get("accepted_by_claude") or raw_selection_gate.startswith(("accepted_by_claude", "accepted_by_deterministic_base_switch_gate")) or decision.get("accept_as_current_best"))
+    )
     public_selection_gate = raw_selection_gate
     if accepted and not raw_selection_gate.startswith(("accepted_by_claude", "accepted_by_deterministic_base_switch_gate")):
         public_selection_gate = "accepted_by_claude_topic_fit"
     run_current = bool(current_run and selected_run == current_run and (not selected or selected_route_run == current_run))
     plan_current = bool(not current_plan_id or (selection_plan_id == current_plan_id and (not selected or selected_route_plan_id == current_plan_id)))
     valid = bool(current_run and selected and run_current and plan_current and stage == "environment_claude_code" and accepted)
-    reason = "current_environment_base_selected" if valid else "environment_selection_find_run_missing_or_stale" if current_run and not run_current else "environment_selection_selected_plan_missing_or_stale" if current_plan_id and not plan_current else "environment_base_selection_pending_or_stale"
+    if valid:
+        reason = "current_environment_base_selected"
+    elif raw_selection_gate == "blocked_pending_data_loader_for_claude_best_candidate":
+        reason = "environment_repo_selection_blocked_pending_loader_candidate"
+    elif current_run and not run_current:
+        reason = "environment_selection_find_run_missing_or_stale"
+    elif current_plan_id and not plan_current:
+        reason = "environment_selection_selected_plan_missing_or_stale"
+    else:
+        reason = "environment_base_selection_pending_or_stale"
     return {"valid": valid, "current_find_run_id": current_run, "fresh_find_run_id": selected_run, "selected_plan_id": selection_plan_id, "selected_idea_id": str(selection.get("selected_idea_id") or selected.get("selected_idea_id") or current_idea_id or "").strip(), "current_selected_plan_id": current_plan_id, "current_selected_idea_id": current_idea_id, "selection_stage": stage, "accepted_by_claude": accepted, "selected": selected, "selection_gate": public_selection_gate, "raw_selection_gate": raw_selection_gate, "reason": reason}
 
 

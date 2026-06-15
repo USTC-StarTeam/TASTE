@@ -389,7 +389,7 @@ def test_report_status_keeps_current_route_repair_when_candidate_gate_failed(tmp
 
 
 
-def test_status_and_healthcheck_keep_current_route_when_pending_candidate_blocked(tmp_path, monkeypatch):
+def test_status_and_healthcheck_block_environment_when_pending_candidate_lacks_loader(tmp_path, monkeypatch):
     report_status = load_script("report_status")
     healthcheck = load_script("research_healthcheck")
     paths = _make_paths(tmp_path)
@@ -427,7 +427,7 @@ def test_status_and_healthcheck_keep_current_route_when_pending_candidate_blocke
     monkeypatch.setattr(sys, "argv", ["report_status.py", "--project", "demo_project", "--venue", "ICLR"])
     report_status.main()
     status_text = (paths.reports / "status.md").read_text(encoding="utf-8")
-    assert "- environment_base_selection_status: selected_current_route_pending_candidate_blocked" in status_text
+    assert "- environment_base_selection_status: environment_repo_selection_blocked_pending_loader_candidate" in status_text
     assert "- repo_selection_status: pending_candidate_blocked" in status_text
     assert "candidate proposal lacks claim-ready loader evidence" in status_text
     assert "old active_repo remains legacy/control only" not in status_text
@@ -439,8 +439,8 @@ def test_status_and_healthcheck_keep_current_route_when_pending_candidate_blocke
     monkeypatch.setattr(sys, "argv", ["research_healthcheck.py", "--project", "demo_project", "--venue", "ICLR"])
     healthcheck.main()
     health_text = (paths.reports / "healthcheck.md").read_text(encoding="utf-8")
-    assert "Environment base selection: selected_current_route_pending_candidate_blocked" in health_text
-    assert "waiting_for_environment_claude_code" not in health_text
+    assert "Environment base selection: environment_repo_selection_blocked_pending_loader_candidate" in health_text
+    assert "selected_current_route_pending_candidate_blocked" not in health_text
 
 
 def test_research_healthcheck_uses_failed_base_switch_gate_result(tmp_path, monkeypatch):

@@ -3867,7 +3867,107 @@ def test_candidate_scoped_generic_data_contract_preserves_active_route_probe(mon
     assert payload["decision"] == "base_switch_not_authorized"
 
 
-def test_selected_pending_environment_repo_summary_is_data_blocked(tmp_path, monkeypatch):
+
+
+def test_repo_candidate_pool_uses_candidate_scoped_contract_for_non_active_repo(monkeypatch, tmp_path):
+    import subprocess
+    import sys
+
+    ensure_script_paths()
+    audit_pool = importlib.reload(importlib.import_module("audit_repo_candidate_pool"))
+    build_req = importlib.reload(importlib.import_module("build_repo_data_requirements"))
+    probe = importlib.reload(importlib.import_module("probe_repo_dataset"))
+    for module in [audit_pool, build_req, probe, probe.candidate_data]:
+        monkeypatch.setattr(module, "ROOT", tmp_path)
+
+    project = "demo_project"
+    root = tmp_path / "projects" / project
+    state = root / "state"
+    reports = root / "reports"
+    repos_selected = root / "repos" / "selected"
+    active_repo = repos_selected / "active_repo"
+    candidate_repo = repos_selected / "candidate_repo"
+    data_dir = candidate_repo / "data" / "DemoData"
+    for folder in [state, reports, active_repo, data_dir]:
+        folder.mkdir(parents=True, exist_ok=True)
+    (candidate_repo / "README.md").write_text("Official code with dataset, data, train and evaluation instructions.", encoding="utf-8")
+    (candidate_repo / "requirements.txt").write_text("numpy\n", encoding="utf-8")
+    (candidate_repo / "train.py").write_text("print('train entrypoint')\n", encoding="utf-8")
+    (data_dir / "train.jsonl").write_text(
+        '{"user_id":"u1","item_id":"i1","prompt":"This user likes detailed natural language explanations for recommendations.","label":1}\n',
+        encoding="utf-8",
+    )
+    write_json(state / "active_repo.json", {"name": "owner/active", "repo_path": str(active_repo)})
+    write_json(state / "repo_data_requirements.json", {"repo_path": str(active_repo), "ready_datasets": ["active-data"], "blocked_datasets": []})
+    write_json(
+        state / "repo_candidates.json",
+        [{"name": "owner/candidate", "url": "https://example.test/candidate", "local_path": str(candidate_repo), "repo_reuse_score": 9.2}],
+    )
+    paths = type("Paths", (), {"state": state, "reports": reports, "repos_selected": repos_selected})()
+    monkeypatch.setattr(audit_pool, "build_paths", lambda _project: paths)
+    monkeypatch.setattr(audit_pool, "load_project_config", lambda _project: {"literature": {"repo_candidate_floor": 0}})
+
+    def fake_run(cmd, cwd=audit_pool.ROOT, timeout=300):
+        def value_after(flag: str) -> str:
+            return cmd[cmd.index(flag) + 1] if flag in cmd else ""
+
+        if "modules/environment/scripts/build_repo_data_requirements.py" in cmd:
+            rc = build_req.write_candidate_requirement(project, value_after("--repo-path"), value_after("--candidate-name"), value_after("--candidate-title"))
+            return subprocess.CompletedProcess(cmd, rc, "", "")
+        if "modules/environment/scripts/probe_repo_dataset.py" in cmd:
+            rc = probe.write_candidate_probe(project, value_after("--repo-path"), "demo_env", value_after("--candidate-name"), value_after("--candidate-title"))
+            return subprocess.CompletedProcess(cmd, rc, "", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(audit_pool, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["audit_repo_candidate_pool.py", "--project", project, "--limit", "1", "--min-score", "0"])
+
+    audit_pool.main()
+
+    pool = read_json(state / "repo_candidate_pool_audit.json")
+    item = pool["audited_candidates"][0]
+    assert pool["evidence_ready_count"] == 0
+    assert item["decision"] == "candidate_data_contract_ready_loader_probe_required"
+    assert item["data_requirements_scope"] == "candidate"
+    assert item["data_requirements"]["ready_datasets"] == ["DemoData"]
+    assert item["candidate_data_contract_ready_after_audit"] is True
+    assert item["candidate_loader_import_probe_passed"] is False
+    assert read_json(state / "repo_data_requirements.json")["repo_path"] == str(active_repo)
+    report = (reports / "repo_candidate_pool_audit.md").read_text(encoding="utf-8")
+    assert "candidate_data_contract: ready" in report
+    assert "loader_import_probe=false" in report
+
+
+def test_selector_compact_review_includes_candidate_scoped_data_evidence():
+    ensure_script_paths()
+    selector = importlib.reload(importlib.import_module("select_evidence_ready_repo"))
+
+    compact = selector.compact_review_payload({
+        "audited_candidates": [{
+            "name": "owner/candidate",
+            "repo_path": "/tmp/candidate",
+            "decision": "candidate_data_contract_ready_loader_probe_required",
+            "probe_summary": {
+                "claim_ready_datasets": [],
+                "candidate_data_contract_status": "ready",
+                "candidate_data_ready_datasets": ["DemoData"],
+                "candidate_data_contract_path": "/tmp/state/candidate_data_contract_owner_candidate.json",
+                "generic_data_parse_probe_success": True,
+                "candidate_loader_probe_status": "blocked_candidate_repo_loader_import_probe_required",
+                "candidate_loader_probe_decision": "candidate_repo_loader_import_probe_required",
+                "candidate_loader_probe_path": "/tmp/state/candidate_loader_probe_owner_candidate.json",
+            },
+        }]
+    })
+
+    row = compact["audited_candidates"][0]
+    assert row["claim_ready_datasets"] == []
+    assert row["candidate_data_contract_status"] == "ready"
+    assert row["candidate_data_ready_datasets"] == ["DemoData"]
+    assert row["generic_data_parse_probe_success"] is True
+    assert row["candidate_loader_probe_decision"] == "candidate_repo_loader_import_probe_required"
+
+def test_pending_loader_environment_repo_summary_blocks_base_selection(tmp_path, monkeypatch):
     from auto_research.web import project_bridge
 
     project = "demo_project"
@@ -3908,11 +4008,13 @@ def test_selected_pending_environment_repo_summary_is_data_blocked(tmp_path, mon
 
     summary = project_bridge._fast_project_summary(project, root, {"name": project, "topic": "Demo topic", "target_venue": "ICLR"})
 
-    assert summary["status"] == "blocked_fresh_base_data_required"
+    assert summary["status"] == "blocked_environment_base_selection_required"
     assert "not_started" not in summary["summary"]
-    assert "example/repo" in summary["summary"]
-    assert summary["main_route"]["repo_name"] == "example/repo"
-    assert summary["stages"]["environment"]["status"] == "selected"
+    assert summary["main_route"]["repo_name"] == ""
+    assert summary["main_route"]["base_selection_status"] == "waiting_for_environment_claude_code"
+    assert summary["supervision"]["environment_base_selection"]["valid"] is False
+    assert summary["supervision"]["environment_base_selection"]["selection_gate"] == "accepted_by_claude_transformable_pending_loader_bootstrap"
+    assert summary["stages"]["environment"]["status"] == "waiting_for_environment_base_selection"
     assert summary["stages"]["environment"]["data_status"] == "waiting_for_real_data_loader_evidence"
 
 def test_loader_ready_evidence_advances_selected_base_to_reference_probe(monkeypatch, tmp_path):
@@ -3936,7 +4038,7 @@ def test_loader_ready_evidence_advances_selected_base_to_reference_probe(monkeyp
         {
             "fresh_find_run_id": run_id,
             "selection_stage": "environment_claude_code",
-            "selection_gate": "accepted_by_claude_transformable_pending_loader_bootstrap",
+            "selection_gate": "accepted_by_claude_topic_fit",
             "accepted_by_claude": True,
             "selected": {
                 "name": "example/repo",
@@ -4012,7 +4114,7 @@ def test_reference_protocol_import_probe_surfaces_dependency_blocker(monkeypatch
         {
             "fresh_find_run_id": run_id,
             "selection_stage": "environment_claude_code",
-            "selection_gate": "accepted_by_claude_transformable_pending_loader_bootstrap",
+            "selection_gate": "accepted_by_claude_topic_fit",
             "accepted_by_claude": True,
             "selected": {"name": "example/repo", "repo_path": str(repo), "fresh_find_run_id": run_id},
         },
@@ -4163,7 +4265,7 @@ def test_compact_project_summary_surfaces_selected_base_semantic_provenance_gate
 
 
 
-def test_compact_summary_keeps_active_route_when_pending_candidate_blocked(monkeypatch, tmp_path):
+def test_compact_summary_blocks_environment_when_pending_candidate_lacks_loader(monkeypatch, tmp_path):
     from auto_research.web import project_bridge
 
     project = "demo_project"
@@ -4258,13 +4360,18 @@ def test_compact_summary_keeps_active_route_when_pending_candidate_blocked(monke
 
     summary = project_bridge._fast_project_summary(project, root, {"name": project, "topic": "Demo topic", "target_venue": "ICLR"})
 
-    assert summary["status"] != "blocked_environment_base_selection_required"
-    assert summary["human_supervision"]["main_route"]["repo_name"] == "owner/current"
-    assert summary["human_supervision"]["main_route"]["base_selection_status"] == "selected"
-    assert summary["human_supervision"]["main_route"]["selection_gate"] == "current_active_route_pending_candidate_blocked"
-    assert summary["human_supervision"]["blocker"]["category"] == "semantic_data_provenance_required"
-    assert "环境阶段正在选择当前基底" not in summary["human_supervision"]["blocker"]["summary"]
-    assert summary["human_gate_summary"]["main_route_repo"] == "owner/current"
+    assert summary["status"] == "blocked_environment_base_selection_required"
+    env_selection = summary["supervision"]["environment_base_selection"]
+    assert env_selection["valid"] is False
+    assert env_selection["selection_gate"] == "blocked_pending_data_loader_for_claude_best_candidate"
+    assert env_selection["reason"] == "environment_repo_selection_blocked_pending_loader_candidate"
+    assert env_selection["pending_candidate"]["name"] == "owner/pending"
+    assert env_selection["pending_candidate"]["status"] == "non_authoritative_pending_loader_proposal"
+    assert summary["human_supervision"]["main_route"]["base_selection_status"] == "waiting_for_environment_claude_code"
+    assert summary["human_supervision"]["main_route"]["selection_gate"] == "blocked_pending_data_loader_for_claude_best_candidate"
+    assert summary["stages"]["environment"]["repo_status"] == "historical_evidence_retained"
+    assert summary["human_supervision"]["blocker"]["category"] == "environment_anchor_selection_required"
+    assert summary["human_gate_summary"]["main_route_repo"] == ""
 
 
 def test_project_bridge_failed_candidate_gate_keeps_current_route_repair_option():
@@ -8510,6 +8617,7 @@ def test_environment_selector_blocks_active_repo_as_only_current_candidate(monke
 
 def test_environment_selector_keeps_pending_loader_candidate_out_of_active_repo(monkeypatch, tmp_path):
     import importlib.util
+    import subprocess
     import sys
 
     script_path = Path(__file__).resolve().parents[1] / "modules" / "environment" / "scripts" / "select_evidence_ready_repo.py"
@@ -8598,7 +8706,12 @@ def test_environment_selector_keeps_pending_loader_candidate_out_of_active_repo(
     monkeypatch.setattr(selector, "write_repo_env_strategy", lambda *args, **kwargs: {})
     monkeypatch.setattr(selector, "sync_selected_candidate", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("pending candidate must not sync selected candidate")))
     run_calls = []
-    monkeypatch.setattr(selector, "run", lambda cmd, *_args, **_kwargs: run_calls.append(cmd))
+
+    def fake_run(cmd, *_args, **_kwargs):
+        run_calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(selector, "run", fake_run)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -8635,10 +8748,11 @@ def test_environment_selector_keeps_pending_loader_candidate_out_of_active_repo(
     assert active["repo_path"] == str(current_repo)
     assert active["claim_ready_datasets"] == ["demo-dataset"]
     assert active["recovered_from_invalid_active_repo"]["name"] == "owner/pending"
-    repo_refresh_commands = [cmd for cmd in run_calls if "--repo-path" in cmd]
-    assert repo_refresh_commands
-    assert all(str(current_repo) in cmd for cmd in repo_refresh_commands)
-    assert all(str(pending_repo) not in cmd for cmd in repo_refresh_commands)
+    candidate_probe_commands = [cmd for cmd in run_calls if "--candidate-scope" in cmd and "--repo-path" in cmd]
+    assert candidate_probe_commands
+    assert any(str(pending_repo) in cmd for cmd in candidate_probe_commands)
+    active_refresh_commands = [cmd for cmd in run_calls if "--candidate-scope" not in cmd and "--repo-path" in cmd]
+    assert all(str(pending_repo) not in cmd for cmd in active_refresh_commands)
     assert "selected_repo: none" in report
     assert "pending_environment_candidate: owner/pending" in report
 
