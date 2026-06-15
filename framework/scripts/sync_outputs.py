@@ -82,7 +82,7 @@ def adopt_taste_find_run(paths: Any, state: Any, run_id: str) -> dict[str, Any]:
         })
     state_payload.update({
         "project": paths.root.name,
-        "taste_root": str(WORKSPACE_ROOT),
+        "taste_root": str(ROOT),
         "taste_run_id": run_id,
         "taste_run_dir": str(run_dir),
         "output_dir": str(taste_dir),
@@ -154,6 +154,15 @@ def load_json(path: Path, default: Any):
 def save_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def normalize_taste_state(state: Any) -> dict[str, Any]:
+    if not isinstance(state, dict):
+        return {}
+    normalized = dict(state)
+    if normalized and normalized.get("taste_root") != str(ROOT):
+        normalized["taste_root"] = str(ROOT)
+    return normalized
 
 
 def slug(text: str, fallback: str = "taste") -> str:
@@ -392,7 +401,9 @@ def main() -> None:
     cfg = load_project_config(args.project)
     paths = build_paths(args.project)
     source_selection = canonical_source_selection(project_config_path=paths.config)
-    state = load_json(paths.state / "finding_frontend.json", {})
+    state = normalize_taste_state(load_json(paths.state / "finding_frontend.json", {}))
+    if state:
+        save_json(paths.state / "finding_frontend.json", state)
     if args.run_id:
         state = adopt_taste_find_run(paths, state, args.run_id)
     taste_dir = Path(state.get("output_dir") or paths.planning / "finding")

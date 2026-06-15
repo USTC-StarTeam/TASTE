@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from path_helpers import load_script
 
@@ -98,6 +99,36 @@ def test_taste_sync_drops_recoverable_fallback_ideas_and_plans(tmp_path):
     assert plans["plans_json"] == {}
     assert plans["plan_markdown_excerpt"] == ""
     assert "not synced" in plans["guardrail"]
+
+
+def test_taste_sync_adopts_find_run_with_canonical_workspace_root(tmp_path):
+    sync = load_script("sync_outputs")
+    run_dir = tmp_path / "runtime" / "runs" / "find_demo"
+    run_dir.mkdir(parents=True)
+    (run_dir / "find_results.json").write_text(json.dumps({"articles": [{"title": "Demo"}]}), encoding="utf-8")
+    (run_dir / "find_progress.json").write_text(json.dumps({"run_id": "find_demo", "phase": "done"}), encoding="utf-8")
+    project_root = tmp_path / "projects" / "demo_project"
+    paths = SimpleNamespace(
+        root=project_root,
+        state=project_root / "state",
+        planning=project_root / "planning",
+    )
+    paths.state.mkdir(parents=True)
+    paths.planning.mkdir(parents=True)
+
+    payload = sync.adopt_taste_find_run(
+        paths,
+        {
+            "taste_root": "/home/fmh/workspace/TASTE/modules/taste",
+            "taste_run_id": "find_demo",
+            "taste_run_dir": str(run_dir),
+        },
+        "find_demo",
+    )
+
+    assert payload["taste_root"] == str(sync.ROOT)
+    assert "modules/taste" not in (paths.state / "finding_frontend.json").read_text(encoding="utf-8")
+
 
 def test_taste_sync_report_uses_usage_boundary_not_guardrail():
     sync = load_script("sync_outputs")

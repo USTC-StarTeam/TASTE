@@ -401,15 +401,41 @@ def test_refresh_project_reports_runs_reflection_after_status_inputs():
     names = [name for name, _cmd in steps]
     rendered = [" ".join(cmd) for _name, cmd in steps]
 
-    assert names == ["healthcheck", "status", "next_actions", "trajectory", "reflection"]
+    assert names == ["healthcheck", "status", "next_actions", "trajectory", "reflection", "shared_research"]
     assert rendered[0].endswith("research_healthcheck.py --project demo_project --venue ICLR")
     assert rendered[1].endswith("report_status.py --project demo_project --venue ICLR")
     assert rendered[2].endswith("propose_next_actions.py --project demo_project")
     assert rendered[3].endswith("build_research_trajectory_system.py --project demo_project --skip-helpers --venue ICLR")
     assert rendered[4].endswith("reflect_iteration.py --project demo_project")
+    assert rendered[5].endswith("compile_prompt.py --project demo_project")
     assert rendered.index(rendered[3]) > rendered.index(rendered[2])
     assert rendered.index(rendered[4]) > rendered.index(rendered[0])
     assert rendered.index(rendered[4]) > rendered.index(rendered[3])
+    assert rendered.index(rendered[5]) > rendered.index(rendered[4])
+
+
+def test_refresh_project_reports_normalizes_legacy_taste_root_metadata(tmp_path):
+    refresh_reports = load_script("refresh_project_reports")
+    paths = _make_paths(tmp_path)
+    _write_json(
+        paths.state / "finding_frontend.json",
+        {"taste_root": "/home/fmh/workspace/TASTE/modules/taste", "taste_run_id": "find_demo"},
+    )
+    _write_json(
+        paths.state / "taste_sync.json",
+        {
+            "taste_state": {"taste_root": "/home/fmh/workspace/TASTE/modules/taste"},
+            "nested": [{"taste_root": "/home/fmh/workspace/TASTE/modules/taste"}],
+        },
+    )
+
+    result = refresh_reports.normalize_project_metadata(paths, canonical_root=Path("/workspace/TASTE"))
+
+    assert len(result["changed_files"]) == 2
+    assert json.loads((paths.state / "finding_frontend.json").read_text(encoding="utf-8"))["taste_root"] == "/workspace/TASTE"
+    sync_payload = json.loads((paths.state / "taste_sync.json").read_text(encoding="utf-8"))
+    assert sync_payload["taste_state"]["taste_root"] == "/workspace/TASTE"
+    assert sync_payload["nested"][0]["taste_root"] == "/workspace/TASTE"
 
 
 def test_propose_next_actions_prioritizes_semantic_provenance_gate(tmp_path, monkeypatch):

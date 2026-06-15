@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-15T01:34:06.532051+00:00",
+  "generated_at": "2026-06-15T01:51:59.408389+00:00",
   "owner": "taste_framework",
   "script_count": 45,
   "scripts": [
@@ -850,11 +850,14 @@
       "path": "framework/scripts/refresh_project_reports.py",
       "owner": "taste_framework",
       "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
-      "function_count": 5,
+      "function_count": 8,
       "functions": [
         "_cmd",
         "build_steps",
         "_refresh_env",
+        "_load_json",
+        "_normalize_taste_root_keys",
+        "normalize_project_metadata",
         "run_steps",
         "main"
       ],
@@ -1466,13 +1469,14 @@
       "path": "framework/scripts/sync_outputs.py",
       "owner": "taste_framework",
       "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
-      "function_count": 15,
+      "function_count": 16,
       "functions": [
         "resolve_taste_run_dir",
         "adopt_taste_find_run",
         "sync_current_find_progress",
         "load_json",
         "save_json",
+        "normalize_taste_state",
         "slug",
         "normalize_article",
         "is_positive_taste_row",

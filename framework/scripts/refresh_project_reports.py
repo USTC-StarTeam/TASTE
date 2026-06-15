@@ -31,6 +31,7 @@ def build_steps(project: str, venue: str = "") -> list[tuple[str, list[str]]]:
         ("next_actions", _cmd("propose_next_actions.py", "--project", project)),
         ("trajectory", trajectory),
         ("reflection", _cmd("reflect_iteration.py", "--project", project)),
+        ("shared_research", _cmd("compile_prompt.py", "--project", project)),
     ]
 
 
@@ -39,6 +40,52 @@ def _refresh_env() -> dict[str, str]:
     env["PYTHONPATH"] = taste_pythonpath_string(ROOT, env.get("PYTHONPATH", ""))
     env.setdefault("PYTHONUNBUFFERED", "1")
     return env
+
+
+def _load_json(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _normalize_taste_root_keys(value: Any, canonical_root: str) -> tuple[Any, bool]:
+    if isinstance(value, dict):
+        changed = False
+        normalized: dict[str, Any] = {}
+        for key, item in value.items():
+            if key == "taste_root" and isinstance(item, str) and item != canonical_root:
+                normalized[key] = canonical_root
+                changed = True
+                continue
+            new_item, item_changed = _normalize_taste_root_keys(item, canonical_root)
+            normalized[key] = new_item
+            changed = changed or item_changed
+        return normalized, changed
+    if isinstance(value, list):
+        changed = False
+        normalized_items: list[Any] = []
+        for item in value:
+            new_item, item_changed = _normalize_taste_root_keys(item, canonical_root)
+            normalized_items.append(new_item)
+            changed = changed or item_changed
+        return normalized_items, changed
+    return value, False
+
+
+def normalize_project_metadata(paths: Any, *, canonical_root: Path = ROOT) -> dict[str, Any]:
+    canonical = str(canonical_root)
+    changed_files: list[str] = []
+    for name in ["finding_frontend.json", "taste_sync.json"]:
+        path = paths.state / name
+        if not path.exists():
+            continue
+        payload = _load_json(path)
+        normalized, changed = _normalize_taste_root_keys(payload, canonical)
+        if changed:
+            path.write_text(json.dumps(normalized, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            changed_files.append(str(path))
+    return {"canonical_taste_root": canonical, "changed_files": changed_files}
 
 
 def run_steps(steps: list[tuple[str, list[str]]], *, cwd: Path = ROOT) -> list[dict[str, Any]]:
@@ -77,8 +124,11 @@ def main() -> None:
     paths.state.mkdir(parents=True, exist_ok=True)
     paths.reports.mkdir(parents=True, exist_ok=True)
 
+    metadata_normalization = normalize_project_metadata(paths)
+    if metadata_normalization["changed_files"]:
+        print("[metadata] normalized taste_root in " + ", ".join(metadata_normalization["changed_files"]), flush=True)
     results = run_steps(build_steps(project, venue))
-    payload = {"project": project, "venue": venue, "steps": results}
+    payload = {"project": project, "venue": venue, "metadata_normalization": metadata_normalization, "steps": results}
     (paths.state / "project_report_refresh.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
     failed = next((row for row in results if row.get("returncode") != 0), None)
