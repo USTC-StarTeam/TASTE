@@ -2421,8 +2421,9 @@ def _current_environment_selection(root: Path) -> dict[str, Any]:
     decision = selection.get("claude_topic_decision") if isinstance(selection.get("claude_topic_decision"), dict) else {}
     raw_selection_gate = str(selection.get("selection_gate") or selected.get("selection_gate") or "").strip()
     pending_candidate_blocked = raw_selection_gate == "blocked_pending_data_loader_for_claude_best_candidate"
+    candidate_base_switch_blocked = raw_selection_gate == "blocked_candidate_base_switch_gate_required"
     pending_loader_selection = bool(
-        raw_selection_gate in {"accepted_by_claude_transformable_pending_loader_bootstrap", "blocked_pending_data_loader_for_claude_best_candidate"}
+        raw_selection_gate in {"accepted_by_claude_transformable_pending_loader_bootstrap", "blocked_pending_data_loader_for_claude_best_candidate", "blocked_candidate_base_switch_gate_required"}
         or selected.get("pending_loader_bootstrap")
     )
     accepted = bool(
@@ -2450,10 +2451,33 @@ def _current_environment_selection(root: Path) -> dict[str, Any]:
     repo_action_reason_zh = str(decision.get("repo_action_reason_zh") or "").strip()
     data_action_reason_en = str(decision.get("data_action_reason_en") or decision.get("data_action_reason") or "").strip()
     data_action_reason_zh = str(decision.get("data_action_reason_zh") or "").strip()
+    if candidate_base_switch_blocked:
+        pending_summary = pending_candidate.get("probe_summary") if isinstance(pending_candidate.get("probe_summary"), dict) else {}
+        claim_ready = pending_summary.get("claim_ready_datasets") if isinstance(pending_summary.get("claim_ready_datasets"), list) else []
+        claim_ready_text = ", ".join(str(item).strip() for item in claim_ready if str(item).strip()) or "candidate data"
+        failed_checks = selection.get("base_switch_failed_checks") if isinstance(selection.get("base_switch_failed_checks"), list) else []
+        if not failed_checks and isinstance(pending_candidate.get("base_switch_failed_checks"), list):
+            failed_checks = pending_candidate.get("base_switch_failed_checks", [])
+        failed_text = ", ".join(str(item).strip() for item in failed_checks if str(item).strip()) or "reference protocol, bounded smoke, full reproduction, artifact-local audit"
+        candidate_name = str(pending_candidate.get("name") or pending_candidate.get("repo") or "Candidate repo").strip() or "Candidate repo"
+        selection_rationale_en = (
+            f"{candidate_name} has passed candidate loader/data evidence for {claim_ready_text}, but deterministic base-switch gates are still blocked: {failed_text}. "
+            "It remains proposal-only until reference protocol, bounded smoke, full reproduction, and artifact-local audit pass."
+        )
+        selection_rationale_zh = (
+            f"{candidate_name} 已通过 {claim_ready_text} 的候选 loader/data 证据，但确定性 base-switch 门控仍阻塞：{failed_text}。"
+            "参考协议、有界 smoke、完整复现和 artifact-local audit 通过前，它只能作为候选 proposal。"
+        )
+        data_action_reason_en = f"Candidate loader/data evidence is ready for {claim_ready_text}; the remaining blockers are deterministic reference/audit gates, not loader verification."
+        data_action_reason_zh = f"{claim_ready_text} 的候选 loader/data 证据已就绪；剩余阻塞是确定性参考复现/audit 门控，不是 loader 验证。"
+        repo_action_reason_en = selection_rationale_en
+        repo_action_reason_zh = selection_rationale_zh
     if valid:
         reason = "current_environment_base_selected"
     elif pending_candidate_blocked:
         reason = "environment_repo_selection_blocked_pending_loader_candidate"
+    elif candidate_base_switch_blocked:
+        reason = "environment_repo_selection_blocked_candidate_base_switch_gate"
     elif not selected:
         reason = "environment_repo_selection_blocked_current_run" if raw_selection_gate.startswith("continued_search") or selection_status.lower().startswith("blocked") else "environment_base_selection_pending_or_stale"
     elif not in_current_find:
@@ -3243,6 +3267,8 @@ def _public_environment_selection_summary(env: Any) -> dict[str, Any]:
     src = env if isinstance(env, dict) else {}
     selected = src.get("selected") if isinstance(src.get("selected"), dict) else {}
     pending_candidate = src.get("pending_candidate") if isinstance(src.get("pending_candidate"), dict) else {}
+    selection_gate_text = str(src.get("selection_gate") or src.get("raw_selection_gate") or "").strip()
+    pending_status = "non_authoritative_base_switch_candidate" if selection_gate_text == "blocked_candidate_base_switch_gate_required" else "non_authoritative_pending_loader_proposal"
     return {
         "valid": bool(src.get("valid")),
         "current_find_run_id": str(src.get("current_find_run_id") or ""),
@@ -3289,7 +3315,7 @@ def _public_environment_selection_summary(env: Any) -> dict[str, Any]:
             "title": pending_candidate.get("title") or pending_candidate.get("literature_base_title") or "",
             "url": pending_candidate.get("url") or pending_candidate.get("repo_url") or "",
             "repo_path": pending_candidate.get("repo_path") or pending_candidate.get("local_path") or "",
-            "status": "non_authoritative_pending_loader_proposal",
+            "status": pending_status,
         } if pending_candidate else {},
         "details_hidden": True,
     }
@@ -3912,6 +3938,8 @@ def _public_environment_stage(
     selection_gate_text = str(env.get("selection_gate") or env.get("raw_selection_gate") or "").strip()
     if env.get("valid"):
         module_summary = "当前基底已由环境阶段选定；本步骤只展示仓库、真实数据/loader、实验环境和参考复现状态。"
+    elif selection_gate_text == "blocked_candidate_base_switch_gate_required" and selection_rationale:
+        module_summary = "候选基底已通过真实数据/loader 探测，但确定性 base-switch 门控仍阻塞：" + _field_text(selection_rationale, 260)
     elif selection_gate_text.startswith("continued_search") and selection_rationale:
         module_summary = "当前 Find 的新基底选择被 topic-fit 门控阻塞：" + _field_text(selection_rationale, 260)
     elif repo_name or repo_path or dataset or ready_datasets or reference_full_job:
@@ -3926,12 +3954,13 @@ def _public_environment_stage(
     pending_candidate = env.get("pending_candidate") if isinstance(env.get("pending_candidate"), dict) else {}
     pending_candidate_public: dict[str, Any] = {}
     if pending_candidate:
+        pending_status = "non_authoritative_base_switch_candidate" if selection_gate_text == "blocked_candidate_base_switch_gate_required" else "non_authoritative_pending_loader_proposal"
         pending_candidate_public = {
             "name": pending_candidate.get("name") or pending_candidate.get("repo") or "",
             "title": pending_candidate.get("title") or pending_candidate.get("literature_base_title") or "",
             "url": pending_candidate.get("url") or pending_candidate.get("repo_url") or "",
             "repo_path": pending_candidate.get("repo_path") or pending_candidate.get("local_path") or "",
-            "status": "non_authoritative_pending_loader_proposal",
+            "status": pending_status,
             "selection_gate": env.get("selection_gate", ""),
         }
 
@@ -7310,7 +7339,7 @@ def _active_repo_path(root: Path) -> str:
             and str(base_switch_execution.get("status") or "").startswith("authorized_by_deterministic_base_switch_gate")
         )
         gate = str(selection.get("selection_gate") or "")
-        pending_loader_selection = gate in {"accepted_by_claude_transformable_pending_loader_bootstrap", "blocked_pending_data_loader_for_claude_best_candidate"}
+        pending_loader_selection = gate in {"accepted_by_claude_transformable_pending_loader_bootstrap", "blocked_pending_data_loader_for_claude_best_candidate", "blocked_candidate_base_switch_gate_required"}
         accepted = bool(
             not pending_loader_selection
             and (gate.startswith(("accepted_by_claude", "accepted_by_deterministic_base_switch_gate")) or deterministic_switch_accepted or decision.get("accept_as_current_best"))
@@ -8657,7 +8686,7 @@ def _stage_status(root: Path, cfg: dict[str, Any]) -> dict[str, Any]:
         claude_decision = dict(claude_decision) if isinstance(claude_decision, dict) else {}
         claude_decision.update({key: value for key, value in repo_env_strategy.items() if key not in {"active_repo_before", "selected_repo", "guardrails"}})
     repo_selection_gate = str(repo_selection.get("selection_gate") or "") if isinstance(repo_selection, dict) else ""
-    pending_loader_selection = repo_selection_gate in {"accepted_by_claude_transformable_pending_loader_bootstrap", "blocked_pending_data_loader_for_claude_best_candidate"}
+    pending_loader_selection = repo_selection_gate in {"accepted_by_claude_transformable_pending_loader_bootstrap", "blocked_pending_data_loader_for_claude_best_candidate", "blocked_candidate_base_switch_gate_required"}
     claude_accepted_repo_ready = bool(isinstance(repo_selection, dict) and repo_selection.get("selected") and not pending_loader_selection) and (
         bool(claude_decision.get("accept_as_current_best"))
         or str(repo_selection.get("selection_gate") or "").startswith(("accepted_by_claude", "accepted_by_deterministic_base_switch_gate"))
@@ -11329,7 +11358,13 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     pending_env_candidate = safe_dict(env.get("pending_candidate"))
     pending_env_label = str(pending_env_candidate.get("name") or pending_env_candidate.get("title") or "").strip()
     environment_selection_blocker_summary = "当前 Find/Read/Idea/Plan 已准备；等待环境阶段授权当前 selected_plan_id 的基底。"
-    if pending_env_label:
+    env_gate_text = str(env.get("selection_gate") or env.get("raw_selection_gate") or "").strip()
+    if pending_env_label and env_gate_text == "blocked_candidate_base_switch_gate_required":
+        environment_selection_blocker_summary += (
+            f" 候选 {pending_env_label} 已通过候选 loader/data 证据，但 deterministic base-switch gate 尚未授权；"
+            "必须补齐 reference protocol、smoke/full reproduction 和 artifact-local audit。"
+        )
+    elif pending_env_label:
         environment_selection_blocker_summary += f" 候选 {pending_env_label} 只是 pending-loader proposal，必须先通过 loader/import、reference protocol、smoke/full reproduction 和 artifact-local audit。"
     environment_selection_blocker_summary += " 旧 active_repo/旧参考复现只保留为历史审计，不作为当前主线结果。"
     if status == "running" and pid and full_job_live:

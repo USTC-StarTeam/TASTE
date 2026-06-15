@@ -63,6 +63,7 @@ REPO_ACTIONS = {'keep_and_modify_current_repo', 'switch_to_best_repo', 'continue
 ENV_ACTIONS = {'reuse_existing_env', 'repair_existing_env', 'create_new_project_env', 'defer_until_repo_selected'}
 DATA_ACTIONS = {'use_claim_ready_dataset', 'download_or_place_required_data', 'continue_data_search'}
 PENDING_LOADER_SELECTION_GATE = 'blocked_pending_data_loader_for_claude_best_candidate'
+BASE_SWITCH_SELECTION_GATE = 'blocked_candidate_base_switch_gate_required'
 PENDING_LOADER_SELECTION_BUCKET = 'claude_transformable_pending_loader_bootstrap'
 
 
@@ -78,6 +79,155 @@ def load_json(path: Path, default: Any):
 def save_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+
+
+def _failed_check_ids(payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    failed = payload.get('failed_checks') if isinstance(payload.get('failed_checks'), list) else []
+    if not failed and isinstance(payload.get('checks'), list):
+        failed = [row for row in payload.get('checks', []) if isinstance(row, dict) and row.get('status') != 'pass']
+    out: list[str] = []
+    for row in failed:
+        if isinstance(row, dict):
+            check_id = str(row.get('id') or '').strip()
+        else:
+            check_id = str(row or '').strip()
+        if check_id and check_id not in out:
+            out.append(check_id)
+    return out
+
+
+def _default_base_switch_failed_checks() -> list[str]:
+    return [
+        'candidate_reference_protocol_passed',
+        'candidate_reference_smoke_passed',
+        'candidate_full_reference_reproduction_passed',
+        'candidate_artifact_local_audit_ready',
+    ]
+
+
+def _base_switch_pending_topic_decision(existing: Any, candidate: dict[str, Any], claim_ready: list[str], failed: list[str]) -> dict[str, Any]:
+    decision = dict(existing) if isinstance(existing, dict) else {}
+    repo_name = str(candidate.get('name') or candidate.get('repo') or candidate.get('full_name') or 'candidate repo').strip()
+    repo_path = str(candidate.get('repo_path') or candidate.get('local_path') or candidate.get('path') or '').strip()
+    dataset_text = ', '.join(claim_ready) if claim_ready else 'candidate data'
+    failed_text = ', '.join(failed or _default_base_switch_failed_checks())
+    rationale_en = (
+        f'{repo_name} is loader/data ready for {dataset_text}, but it is still non-authoritative for the current plan because '
+        f'deterministic base-switch gates are blocked: {failed_text}. The remaining work is reference protocol, bounded smoke, '
+        'full reference reproduction, and artifact-local audit evidence, not another loader probe.'
+    )
+    rationale_zh = (
+        f'{repo_name} 对 {dataset_text} 的 loader/data 已就绪，但对当前计划仍不是权威主线，因为确定性 base-switch 门控仍阻塞：{failed_text}。'
+        '剩余工作是参考协议、有界 smoke、完整参考复现和 artifact-local audit 证据，不是再次 loader probe。'
+    )
+    data_reason_en = (
+        f'Candidate repo-defined loader/import probing has already made {dataset_text} claim-ready. '
+        'Keep the route blocked until reference/audit gates authorize the base switch.'
+    )
+    data_reason_zh = f'候选仓库定义的 loader/import 探测已使 {dataset_text} 可声明；在参考复现/audit 门控授权 base switch 前继续阻塞。'
+    required_en = [
+        f'Pass deterministic base-switch checks before selecting this candidate: {failed_text}.',
+        'Record the candidate reference protocol, bounded smoke, full reference reproduction, and artifact-local audit.',
+    ]
+    required_zh = [
+        f'选中该候选前必须通过确定性 base-switch checks：{failed_text}。',
+        '记录候选参考协议、有界 smoke、完整参考复现和 artifact-local audit。',
+    ]
+    evidence_en = [
+        f'claim_ready_datasets={dataset_text}',
+        f'blocked_base_switch_checks={failed_text}',
+    ]
+    evidence_zh = [
+        f'可声明数据集={dataset_text}',
+        f'仍阻塞的 base-switch checks={failed_text}',
+    ]
+    risks_en = ['Reference protocol, bounded smoke, full reproduction, or artifact-local audit may still fail; do not claim this route until those gates pass.']
+    risks_zh = ['参考协议、有界 smoke、完整复现或 artifact-local audit 仍可能失败；这些门控通过前不能使用该路线生成论文结论。']
+    stewardship_en = (
+        f'{repo_name} has cleared candidate loader/data evidence for {dataset_text}. Next work must target deterministic base-switch checks: {failed_text}. '
+        'Do not run ordinary main-route experiments or write claims until those reference/audit gates pass.'
+    )
+    stewardship_zh = f'{repo_name} 已通过 {dataset_text} 的候选 loader/data 证据。下一步必须处理确定性 base-switch checks：{failed_text}。参考复现/audit 门控通过前，不得启动普通主线实验或写 claim。'
+    for stale_key in ['raw_output_tail']:
+        decision.pop(stale_key, None)
+    decision.update({
+        'decision': str(decision.get('decision') or 'accept-with-modifications'),
+        'rationale': rationale_en,
+        'rationale_en': rationale_en,
+        'rationale_zh': rationale_zh,
+        'repo_action': str(decision.get('repo_action') or 'switch_to_best_repo'),
+        'repo_action_reason': rationale_en,
+        'repo_action_reason_en': rationale_en,
+        'repo_action_reason_zh': rationale_zh,
+        'data_action': 'use_claim_ready_dataset',
+        'data_action_reason': data_reason_en,
+        'data_action_reason_en': data_reason_en,
+        'data_action_reason_zh': data_reason_zh,
+        'best_repo': str(decision.get('best_repo') or repo_name),
+        'repo_path': str(decision.get('repo_path') or repo_path),
+        'dataset': str(decision.get('dataset') or (claim_ready[0] if claim_ready else '')),
+        'required_modifications': required_en,
+        'required_modifications_en': required_en,
+        'required_modifications_zh': required_zh,
+        'risks': risks_en,
+        'risks_en': risks_en,
+        'risks_zh': risks_zh,
+        'evidence': evidence_en,
+        'evidence_en': evidence_en,
+        'evidence_zh': evidence_zh,
+        'repo_action_reason_i18n': {'zh': rationale_zh, 'en': rationale_en},
+        'data_action_reason_i18n': {'zh': data_reason_zh, 'en': data_reason_en},
+        'stewardship_memory': stewardship_en,
+        'stewardship_memory_en': stewardship_en,
+        'stewardship_memory_zh': stewardship_zh,
+        'stewardship_memory_i18n': {'zh': stewardship_zh, 'en': stewardship_en},
+    })
+    return decision
+
+
+def _route_matches_candidate(route: Any, candidate: dict[str, Any]) -> bool:
+    if not isinstance(route, dict) or not isinstance(candidate, dict):
+        return False
+    candidate_path = str(candidate.get('repo_path') or candidate.get('local_path') or candidate.get('path') or '').strip()
+    route_paths = [str(route.get(key) or '').strip() for key in ['repo_path', 'local_path', 'path', 'proposed_path_hint']]
+    if candidate_path and any(value == candidate_path for value in route_paths):
+        return True
+    candidate_names = {str(candidate.get(key) or '').strip() for key in ['name', 'repo', 'full_name'] if str(candidate.get(key) or '').strip()}
+    route_names = {str(route.get(key) or '').strip() for key in ['name', 'repo', 'repo_name'] if str(route.get(key) or '').strip()}
+    return bool(candidate_names and route_names and candidate_names.intersection(route_names))
+
+
+def candidate_base_switch_block(paths, active_path: str, candidate: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(candidate, dict) or not candidate:
+        return {}
+    candidate_path = str(candidate.get('repo_path') or candidate.get('local_path') or candidate.get('path') or '').strip()
+    if not candidate_path or (active_path and candidate_path == active_path):
+        return {}
+    viability = load_json(paths.state / 'selected_base_viability_gate.json', {})
+    if not (isinstance(viability, dict) and viability.get('status') == 'blocked' and viability.get('decision') == 'base_switch_gate_required'):
+        return {}
+    gate = load_json(paths.state / 'base_switch_gate.json', {})
+    route = gate.get('candidate_route') if isinstance(gate, dict) and isinstance(gate.get('candidate_route'), dict) else {}
+    authorized = bool(
+        isinstance(gate, dict)
+        and gate.get('status') == 'pass'
+        and gate.get('switch_authorized') is True
+        and str(gate.get('decision') or '') in {'authorize_base_switch', 'base_switch_authorized'}
+        and _route_matches_candidate(route, candidate)
+    )
+    if authorized:
+        return {}
+    failed = _failed_check_ids(gate) or _default_base_switch_failed_checks()
+    return {
+        'selection_gate': BASE_SWITCH_SELECTION_GATE,
+        'failed_checks': failed,
+        'blocker': (
+            'Candidate repo/data loader evidence is ready, but deterministic base-switch gate has not authorized this route; '
+            'reference protocol, bounded smoke, full reproduction, and artifact-local audit evidence remain mandatory.'
+        ),
+    }
 
 
 def run(cmd: list[str], cwd: Path = ROOT, timeout: int = 300) -> subprocess.CompletedProcess[str]:
@@ -1331,16 +1481,51 @@ def main() -> int:
             decided_name = str(topic_decision.get('best_repo') or '')
             decided = next((item for item in ready if str(item.get('repo_path')) == decided_path or str(item.get('name')) == decided_name), {})
             if decided:
-                selected = decided
-                selected['claude_topic_decision'] = topic_decision
-                selected['fresh_find_run_id'] = args.fresh_find_run_id or selected.get('fresh_find_run_id', '')
-                selected['selection_stage'] = selection_stage
-                selected['selected_by_stage'] = selection_stage
-                selected['anchor_selection_policy'] = 'Environment-stage Claude Code selected this base after repo/data evidence review; Find only supplied candidate papers.' if selection_stage == 'environment_claude_code' else 'Claude repo/data audit selected this candidate, but it is not yet an environment-stage anchor decision.'
-                payload['selected'] = selected
-                payload['selection_gate'] = 'accepted_by_claude_topic_fit'
-                payload['selection_stage'] = selection_stage
-                payload['selected_by_stage'] = selection_stage
+                base_switch_block = candidate_base_switch_block(paths, active_path, decided) if selection_stage == 'environment_claude_code' else {}
+                if base_switch_block:
+                    pending = dict(decided)
+                    topic_decision = _base_switch_pending_topic_decision(
+                        topic_decision,
+                        pending,
+                        claim_ready_dataset_names(pending),
+                        base_switch_block.get('failed_checks', []),
+                    )
+                    pending['claude_topic_decision'] = topic_decision
+                    pending['fresh_find_run_id'] = args.fresh_find_run_id or pending.get('fresh_find_run_id', '')
+                    pending['selection_stage'] = selection_stage
+                    pending['selected_by_stage'] = ''
+                    pending['pending_loader_bootstrap'] = False
+                    pending['pending_reason'] = base_switch_block['blocker']
+                    pending['base_switch_failed_checks'] = base_switch_block.get('failed_checks', [])
+                    pending['anchor_selection_policy'] = 'Environment-stage Claude Code identified a loader-ready candidate, but deterministic base-switch gates keep it proposal-only until reference/audit evidence authorizes the switch.'
+                    payload['pending_environment_candidate'] = pending
+                    payload['claude_topic_decision'] = topic_decision
+                    payload['repo_env_strategy'] = write_repo_env_strategy(
+                        args.project,
+                        paths,
+                        topic_decision,
+                        {},
+                        active if isinstance(active, dict) else {},
+                        env_name,
+                    )
+                    payload['selection_gate'] = base_switch_block['selection_gate']
+                    payload['selection_stage'] = selection_stage
+                    payload['selected_by_stage'] = ''
+                    payload['selected'] = {}
+                    payload['blocker'] = base_switch_block['blocker']
+                    payload['base_switch_failed_checks'] = base_switch_block.get('failed_checks', [])
+                    selected = {}
+                else:
+                    selected = decided
+                    selected['claude_topic_decision'] = topic_decision
+                    selected['fresh_find_run_id'] = args.fresh_find_run_id or selected.get('fresh_find_run_id', '')
+                    selected['selection_stage'] = selection_stage
+                    selected['selected_by_stage'] = selection_stage
+                    selected['anchor_selection_policy'] = 'Environment-stage Claude Code selected this base after repo/data evidence review; Find only supplied candidate papers.' if selection_stage == 'environment_claude_code' else 'Claude repo/data audit selected this candidate, but it is not yet an environment-stage anchor decision.'
+                    payload['selected'] = selected
+                    payload['selection_gate'] = 'accepted_by_claude_topic_fit'
+                    payload['selection_stage'] = selection_stage
+                    payload['selected_by_stage'] = selection_stage
             else:
                 pending = next((item for item in audited if str(item.get('repo_path')) == decided_path or str(item.get('name')) == decided_name), {})
                 if pending:

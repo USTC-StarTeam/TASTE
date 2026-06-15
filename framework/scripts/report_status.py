@@ -126,6 +126,11 @@ def _pending_candidate_blocked(selection: dict) -> bool:
     return str(selection.get("selection_gate") or "").strip() == "blocked_pending_data_loader_for_claude_best_candidate"
 
 
+def _candidate_base_switch_blocked(selection: dict) -> bool:
+    selection = _as_dict(selection)
+    return str(selection.get("selection_gate") or "").strip() == "blocked_candidate_base_switch_gate_required"
+
+
 def _candidate_subject(row: dict) -> str:
     row = _as_dict(row)
     return str(
@@ -141,6 +146,8 @@ def _repo_selection_public_status(selection: dict, current_env: dict | None = No
     selection = _as_dict(selection)
     if _pending_candidate_blocked(selection):
         return "pending_candidate_blocked"
+    if _candidate_base_switch_blocked(selection):
+        return "pending_candidate_base_switch_gate_blocked"
     env = _as_dict(current_env)
     if env and not env.get("valid"):
         reason = str(env.get("reason") or "").strip()
@@ -315,7 +322,7 @@ def main() -> None:
     pending_candidate = _as_dict(repo_selection.get('pending_environment_candidate')) if isinstance(repo_selection, dict) else {}
     if isinstance(repo_selection, dict) and isinstance(repo_selection.get('claude_topic_decision'), dict):
         claude_decision = repo_selection.get('claude_topic_decision', {})
-        if _pending_candidate_blocked(repo_selection):
+        if _pending_candidate_blocked(repo_selection) or _candidate_base_switch_blocked(repo_selection):
             claude_decision_scope = "pending_candidate_not_authoritative"
             claude_decision_subject = _candidate_subject(pending_candidate) or _candidate_subject(repo_selection)
         elif _accepted_repo_selection(repo_selection):
@@ -393,14 +400,18 @@ def main() -> None:
     repo_selection_gate = repo_selection.get('selection_gate', '') if isinstance(repo_selection, dict) else ''
     repo_selection_status = _repo_selection_public_status(repo_selection, current_environment)
     pending_candidate_blocked = _pending_candidate_blocked(repo_selection)
+    candidate_base_switch_blocked = _candidate_base_switch_blocked(repo_selection)
     current_active_route_ready = bool(current_repo_path and ready_datasets)
     repo_selection_blocker_current = _repo_selection_blocker_is_current(repo_selection_blocker, repo_selection)
     repo_selection_blocker_stale = bool(isinstance(repo_selection_blocker, dict) and repo_selection_blocker and not repo_selection_blocker_current)
     repo_selection_block_reason = repo_selection_blocker.get('reason', '') if repo_selection_blocker_current and isinstance(repo_selection_blocker, dict) else ''
-    if pending_candidate_blocked:
+    if pending_candidate_blocked or candidate_base_switch_blocked:
         repo_selection_blocker_stale = bool(repo_selection_blocker)
         repo_selection_blocker_current = False
-        repo_selection_block_reason = str(repo_selection.get('blocker') or 'Pending candidate route is blocked until loader/data/protocol audits pass; active_repo remains non-authoritative for the current selected plan.')
+        default_reason = 'Pending candidate route is blocked until loader/data/protocol audits pass; active_repo remains non-authoritative for the current selected plan.'
+        if candidate_base_switch_blocked:
+            default_reason = 'Candidate loader/data evidence passed, but deterministic base-switch reference protocol/smoke/full reproduction/artifact-local audit gates remain blocked; active_repo is unchanged.'
+        repo_selection_block_reason = str(repo_selection.get('blocker') or default_reason)
     current_find_run_id = _state_run_id(current_find_plan) or _state_run_id(finding_frontend) or _state_run_id(full_cycle)
     current_find_status = str(_as_dict(current_find_plan).get('status') or _as_dict(finding_frontend).get('status') or '').strip()
     environment_selection_status = _environment_selection_status(repo_selection, current_find_plan, current_environment)

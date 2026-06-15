@@ -3822,6 +3822,16 @@ def test_candidate_scoped_generic_data_contract_preserves_active_route_probe(mon
 
     write_json(state / "repo_data_requirements.json", {"repo_path": str(current_repo), "ready_datasets": ["active-data"], "blocked_datasets": []})
     write_json(state / "real_dataset_probe.json", {"repo_path": str(current_repo), "status": "passed", "decision": "loader_probe_complete", "ready_datasets": ["active-data"], "probes": [{"dataset": "active-data", "claim_ready": True, "loader_probe_success": True}]})
+    write_json(
+        state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": "find_current",
+            "selection_gate": "blocked_pending_data_loader_for_claude_best_candidate",
+            "selected": {},
+            "pending_environment_candidate": {"name": "owner/candidate", "repo_path": str(candidate_repo), "fresh_find_run_id": "find_current", "probe_summary": {"claim_ready_datasets": []}},
+            "audited_candidates": [{"name": "owner/candidate", "repo_path": str(candidate_repo), "probe_summary": {"claim_ready_datasets": [], "candidate_loader_probe_status": "blocked_candidate_repo_loader_import_probe_required"}, "decision": "candidate_data_contract_ready_loader_probe_required"}],
+        },
+    )
 
     assert build_req.write_candidate_requirement(project, str(candidate_repo), "owner/candidate", "Candidate Paper") == 0
     assert probe.write_candidate_probe(project, str(candidate_repo), "demo_env", "owner/candidate", "Candidate Paper") == 2
@@ -3866,6 +3876,140 @@ def test_candidate_scoped_generic_data_contract_preserves_active_route_probe(mon
     assert payload["status"] == "blocked"
     assert payload["decision"] == "base_switch_not_authorized"
 
+
+
+
+def test_candidate_scoped_repo_loader_import_probe_passes_without_touching_active_route(monkeypatch, tmp_path):
+    ensure_script_paths()
+    build_req = importlib.reload(importlib.import_module("build_repo_data_requirements"))
+    probe = importlib.reload(importlib.import_module("probe_repo_dataset"))
+    gate_script = importlib.reload(importlib.import_module("audit_deterministic_base_switch_gate"))
+    for module in [build_req, probe, probe.candidate_data]:
+        monkeypatch.setattr(module, "ROOT", tmp_path)
+
+    project = "demo_project"
+    root = tmp_path / "projects" / project
+    state = root / "state"
+    reports = root / "reports"
+    planning = root / "planning"
+    finding = planning / "finding"
+    current_repo = root / "repos" / "selected" / "current_repo"
+    candidate_repo = root / "repos" / "selected" / "candidate_repo"
+    data_dir = candidate_repo / "data" / "DemoData"
+    for folder in [state, reports, finding, current_repo, data_dir]:
+        folder.mkdir(parents=True, exist_ok=True)
+    (data_dir / "train.jsonl").write_text(
+        '{"user_id":"u1","item_id":"i1","prompt":"This user prefers detailed evidence-aware recommendations with natural language context.","label":1}\n',
+        encoding="utf-8",
+    )
+    (data_dir / "user_feature.jsonl").write_text(
+        '{"user_id":"u1","profile":"Auxiliary user profile text should not be probed before train split files."}\n',
+        encoding="utf-8",
+    )
+    (candidate_repo / "preprocess_data.py").write_text(
+        """
+import json
+
+
+def load_split_jsonl(path, split):
+    rows = []
+    with open(path, encoding='utf-8') as handle:
+        for line in handle:
+            if line.strip():
+                rows.append(json.loads(line))
+    return rows
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    write_json(state / "repo_data_requirements.json", {"repo_path": str(current_repo), "ready_datasets": ["active-data"], "blocked_datasets": []})
+    write_json(state / "real_dataset_probe.json", {"repo_path": str(current_repo), "status": "passed", "decision": "loader_probe_complete", "ready_datasets": ["active-data"], "probes": [{"dataset": "active-data", "claim_ready": True, "loader_probe_success": True}]})
+    write_json(
+        state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": "find_current",
+            "selection_gate": "blocked_pending_data_loader_for_claude_best_candidate",
+            "selected": {},
+            "claude_topic_decision": {
+                "decision": "accept-with-modifications",
+                "accept_as_current_best": True,
+                "best_repo": "owner/candidate",
+                "repo_path": str(candidate_repo),
+                "rationale_en": "Candidate still requires loader probe verification before experiments.",
+                "data_action_reason_en": "Run loader probe verification before selecting the repo.",
+            },
+            "pending_environment_candidate": {"name": "owner/candidate", "repo_path": str(candidate_repo), "fresh_find_run_id": "find_current", "probe_summary": {"claim_ready_datasets": []}},
+            "audited_candidates": [{"name": "owner/candidate", "repo_path": str(candidate_repo), "probe_summary": {"claim_ready_datasets": [], "candidate_loader_probe_status": "blocked_candidate_repo_loader_import_probe_required"}, "decision": "candidate_data_contract_ready_loader_probe_required"}],
+        },
+    )
+
+    assert build_req.write_candidate_requirement(project, str(candidate_repo), "owner/candidate", "Candidate Paper") == 0
+    assert probe.write_candidate_probe(project, str(candidate_repo), "demo_env", "owner/candidate", "Candidate Paper") == 0
+
+    assert read_json(state / "repo_data_requirements.json")["repo_path"] == str(current_repo)
+    assert read_json(state / "real_dataset_probe.json")["repo_path"] == str(current_repo)
+    loader_probe = read_json(state / "candidate_loader_probe_owner_candidate.json")
+    assert loader_probe["status"] == "passed"
+    assert loader_probe["decision"] == "candidate_loader_import_probe_passed"
+    assert loader_probe["loader_probe_success"] is True
+    assert loader_probe["generic_data_parse_probe_success"] is True
+    assert loader_probe["ready_datasets"] == ["DemoData"]
+    repo_import_probe = loader_probe["repo_import_probe"]
+    assert repo_import_probe["script_import_success"] is True
+    assert repo_import_probe["loader_function_success"] is True
+    assert any(row.get("function") == "load_split_jsonl" and row.get("success") for row in repo_import_probe["loader_calls"])
+    assert repo_import_probe["loader_calls"][0]["sample_file"] == "data/DemoData/train.jsonl"
+    synced_selection = read_json(state / "evidence_ready_repo_selection.json")
+    assert synced_selection["selection_gate"] == "blocked_candidate_base_switch_gate_required"
+    synced_decision = synced_selection["claude_topic_decision"]
+    assert "data/loader evidence" in synced_decision["data_action_reason_en"]
+    assert "another loader probe" in synced_decision["data_action_reason_en"]
+    assert "requires loader probe verification" not in synced_decision["rationale_en"]
+    assert synced_decision["data_action"] == "use_claim_ready_dataset"
+    synced_strategy = read_json(state / "repo_env_strategy.json")
+    assert synced_strategy["data_action"] == "use_claim_ready_dataset"
+    assert "requires loader probe verification" not in synced_strategy["data_action_reason_en"]
+    assert synced_strategy["pending_environment_candidate"]["selection_gate"] == "blocked_candidate_base_switch_gate_required"
+    synced_summary = synced_selection["pending_environment_candidate"]["probe_summary"]
+    assert synced_summary["candidate_loader_probe_status"] == "passed"
+    assert synced_summary["candidate_loader_probe_decision"] == "candidate_loader_import_probe_passed"
+    assert synced_summary["claim_ready_datasets"] == ["DemoData"]
+    synced_candidate = synced_selection["audited_candidates"][0]
+    assert synced_candidate["decision"] == "candidate_loader_import_probe_passed_reference_checks_required"
+    assert synced_candidate["probe_summary"]["candidate_loader_probe_status"] == "passed"
+    assert synced_candidate["claude_topic_decision"]["data_action"] == "use_claim_ready_dataset"
+    selection_report = (reports / "evidence_ready_repo_selection.md").read_text(encoding="utf-8")
+    assert "selection_gate: blocked_candidate_base_switch_gate_required" in selection_report
+    assert "owner/candidate | decision=candidate_loader_import_probe_passed_reference_checks_required" in selection_report
+
+    run_id = "find_current"
+    write_json(finding / "find_progress.json", {"run_id": run_id})
+    write_json(finding / "find_results.json", {"run_id": run_id, "strong_recommendations": [{"title": "Candidate Paper", "repo": "owner/candidate"}]})
+    write_json(finding / "read_results.json", {"run_id": run_id, "readings": [{"title": "Candidate Paper"}]})
+    write_json(state / "reference_reproduction_gate.json", {"status": "pass", "decision": "continue_base"})
+    write_json(state / "selected_base_viability_gate.json", {"status": "blocked", "decision": "base_switch_gate_required"})
+    write_json(state / "active_repo.json", {"name": "owner/current", "repo_path": str(current_repo), "selected_base_title": "Current Base"})
+    write_json(
+        state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": run_id,
+            "selection_gate": "blocked_pending_data_loader_for_claude_best_candidate",
+            "selected": {},
+            "pending_environment_candidate": {"name": "owner/candidate", "repo_path": str(candidate_repo), "fresh_find_run_id": run_id},
+        },
+    )
+    paths = type("Paths", (), {"root": root, "state": state, "reports": reports, "planning": planning})()
+    monkeypatch.setattr(gate_script, "build_paths", lambda _project: paths)
+
+    payload = gate_script.build_gate(project, "ICLR")
+
+    checks = {row["id"]: row for row in payload["checks"]}
+    assert checks["candidate_data_contract_passed"]["status"] == "pass"
+    assert checks["candidate_loader_import_probe_passed"]["status"] == "pass"
+    assert checks["candidate_reference_protocol_passed"]["status"] == "blocked"
+    assert payload["status"] == "blocked"
+    assert payload["decision"] == "base_switch_not_authorized"
 
 
 
@@ -5809,6 +5953,64 @@ def test_current_environment_pending_selection_prefers_current_run_over_stale_vi
     assert pending["repo_action"] == "continue_search"
     assert pending["selection_rationale_en"] == "Only evidence-ready repo is off topic for the selected plan."
     assert pending["selection_rationale_zh"] == "唯一证据就绪仓库与当前执行计划主题不匹配。"
+
+
+def test_current_environment_selection_rewrites_loader_ready_base_switch_public_state(tmp_path):
+    from auto_research.web import project_bridge
+
+    root = tmp_path / "demo_project"
+    state = root / "state"
+    finding = root / "planning" / "finding"
+    candidate_repo = root / "repos" / "selected" / "candidate"
+    state.mkdir(parents=True)
+    finding.mkdir(parents=True)
+    candidate_repo.mkdir(parents=True)
+    run_id = "find-current"
+    write_json(finding / "find_progress.json", {"run_id": run_id})
+    write_json(
+        finding / "plans.json",
+        {
+            "run_id": run_id,
+            "selected_plan_id": "plan-current",
+            "selected_idea_id": "idea-current",
+            "plans": [{"plan_id": "plan-current", "idea_id": "idea-current", "selected_for_execution": True}],
+        },
+    )
+    write_json(state / "current_find_research_plan.json", {"run_id": run_id, "selected_plan_id": "plan-current", "selected_idea_id": "idea-current"})
+    write_json(
+        state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": run_id,
+            "selected_plan_id": "plan-current",
+            "selected_idea_id": "idea-current",
+            "selection_stage": "environment_claude_code",
+            "selection_gate": "blocked_candidate_base_switch_gate_required",
+            "selected": {},
+            "base_switch_failed_checks": ["candidate_reference_protocol_passed", "candidate_reference_smoke_passed"],
+            "claude_topic_decision": {
+                "decision": "accept-with-modifications",
+                "confidence": 0.5,
+                "rationale_en": "This candidate still requires loader probe verification before experiments.",
+                "data_action_reason_en": "Run loader probe verification before selecting the route.",
+            },
+            "pending_environment_candidate": {
+                "name": "owner/candidate",
+                "repo_path": str(candidate_repo),
+                "probe_summary": {"claim_ready_datasets": ["Movies"], "candidate_loader_probe_status": "passed"},
+                "base_switch_failed_checks": ["candidate_reference_protocol_passed", "candidate_reference_smoke_passed"],
+            },
+        },
+    )
+
+    pending = project_bridge._current_environment_selection(root)
+    public = project_bridge._public_environment_selection_summary(pending)
+
+    assert pending["valid"] is False
+    assert pending["reason"] == "environment_repo_selection_blocked_candidate_base_switch_gate"
+    assert "passed candidate loader/data evidence" in pending["selection_rationale_en"]
+    assert "loader probe verification" not in pending["selection_rationale_en"]
+    assert "remaining blockers are deterministic reference/audit gates" in pending["data_action_reason_en"]
+    assert public["pending_candidate"]["status"] == "non_authoritative_base_switch_candidate"
 
 
 def test_current_find_pipeline_counts_unread_recommendations_as_pending_full_text(tmp_path, monkeypatch):
@@ -8755,6 +8957,137 @@ def test_environment_selector_keeps_pending_loader_candidate_out_of_active_repo(
     assert all(str(pending_repo) not in cmd for cmd in active_refresh_commands)
     assert "selected_repo: none" in report
     assert "pending_environment_candidate: owner/pending" in report
+
+
+def test_environment_selector_keeps_loader_ready_candidate_pending_until_base_switch_authorized(monkeypatch, tmp_path):
+    import importlib.util
+    import sys
+
+    script_path = Path(__file__).resolve().parents[1] / "modules" / "environment" / "scripts" / "select_evidence_ready_repo.py"
+    spec = importlib.util.spec_from_file_location("select_evidence_ready_repo_base_switch_gate_under_test", script_path)
+    selector = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(selector)
+
+    current_repo = tmp_path / "current_repo"
+    candidate_repo = tmp_path / "candidate_repo"
+    current_repo.mkdir()
+    candidate_repo.mkdir()
+    paths = type(
+        "Paths",
+        (),
+        {
+            "state": tmp_path / "state",
+            "planning": tmp_path / "planning",
+            "reports": tmp_path / "reports",
+            "repos_selected": tmp_path / "repos" / "selected",
+        },
+    )()
+    paths.state.mkdir(parents=True)
+    (paths.planning / "finding").mkdir(parents=True)
+    paths.reports.mkdir(parents=True)
+    paths.repos_selected.mkdir(parents=True)
+    write_json(
+        paths.planning / "finding" / "plans.json",
+        {
+            "selected_plan_id": "plan-current",
+            "selected_idea_id": "idea-current",
+            "plans": [{"plan_id": "plan-current", "idea_id": "idea-current", "selected_for_execution": True}],
+        },
+    )
+    write_json(paths.state / "active_repo.json", {"name": "owner/current", "repo_path": str(current_repo), "claim_ready_datasets": ["active-data"]})
+    write_json(
+        paths.state / "repo_candidates.json",
+        [{"name": "owner/candidate", "url": "https://github.com/owner/candidate", "local_path": str(candidate_repo), "source": "fresh_literature_github_search", "fresh_find_run_id": "find-current", "repo_reuse_score": 20}],
+    )
+    write_json(paths.state / "selected_base_viability_gate.json", {"status": "blocked", "decision": "base_switch_gate_required"})
+    write_json(
+        paths.state / "base_switch_gate.json",
+        {
+            "status": "blocked",
+            "decision": "base_switch_not_authorized",
+            "candidate_route": {"repo": "owner/candidate", "repo_path": str(candidate_repo)},
+            "failed_checks": [
+                {"id": "candidate_reference_protocol_passed", "status": "blocked"},
+                {"id": "candidate_reference_smoke_passed", "status": "blocked"},
+            ],
+        },
+    )
+
+    monkeypatch.setattr(selector, "build_paths", lambda _project: paths)
+    monkeypatch.setattr(selector, "load_project_config", lambda _project: {"conda_env": "demo_env"})
+    monkeypatch.setattr(selector, "clone_or_reuse", lambda _paths, _row: (candidate_repo, {"status": "reused_existing_clone", "path": str(candidate_repo)}))
+    monkeypatch.setattr(selector, "quick_signals", lambda _repo: {"has_entrypoint": True, "has_data_dir": True, "has_readme": True, "readme_data_mentions": 1})
+    monkeypatch.setattr(
+        selector,
+        "probe_candidate_repo",
+        lambda *_args, **_kwargs: {
+            "status": "passed",
+            "decision": "candidate_loader_import_probe_passed",
+            "probe_return_code": 0,
+            "probes": [{"dataset": "Movies", "claim_ready": True, "loader_probe_success": True}],
+            "candidate_data_contract": {"status": "ready", "ready_datasets": ["Movies"]},
+            "candidate_data_contract_path": str(paths.state / "candidate_data_contract_owner_candidate.json"),
+            "candidate_loader_probe_path": str(paths.state / "candidate_loader_probe_owner_candidate.json"),
+            "generic_data_parse_probe_success": True,
+        },
+    )
+    monkeypatch.setattr(selector, "run_claude_review", lambda _project, _payload: {"status": "completed"})
+    monkeypatch.setattr(
+        selector,
+        "run_claude_topic_decision",
+        lambda _project, _payload: {
+            "decision": "accept-with-modifications",
+            "accept_as_current_best": True,
+            "best_repo": "owner/candidate",
+            "repo_path": str(candidate_repo),
+            "confidence": 0.8,
+            "rationale_en": "Best topic fit but requires loader probe verification before experiments.",
+            "data_action_reason_en": "Run loader probe verification before selecting the repo.",
+        },
+    )
+    monkeypatch.setattr(selector, "write_repo_env_strategy", lambda *args, **kwargs: {})
+    monkeypatch.setattr(selector, "sync_selected_candidate", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("base-switch-blocked candidate must not sync selected candidate")))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "select_evidence_ready_repo.py",
+            "--project",
+            "demo",
+            "--env-name",
+            "demo_env",
+            "--selection-stage",
+            "environment_claude_code",
+            "--candidate-source",
+            "fresh_literature_github_search",
+            "--fresh-find-run-id",
+            "find-current",
+            "--write-active",
+            "--use-claude-review",
+        ],
+    )
+
+    rc = selector.main()
+
+    payload = read_json(paths.state / "evidence_ready_repo_selection.json")
+    active = read_json(paths.state / "active_repo.json")
+    report = (paths.reports / "evidence_ready_repo_selection.md").read_text(encoding="utf-8")
+    assert rc == 2
+    assert payload["selection_gate"] == "blocked_candidate_base_switch_gate_required"
+    assert payload["selected"] == {}
+    assert payload["evidence_ready_count"] == 1
+    pending = payload["pending_environment_candidate"]
+    assert pending["name"] == "owner/candidate"
+    assert pending["probe_summary"]["claim_ready_datasets"] == ["Movies"]
+    assert pending["base_switch_failed_checks"] == ["candidate_reference_protocol_passed", "candidate_reference_smoke_passed"]
+    assert payload["claude_topic_decision"]["data_action"] == "use_claim_ready_dataset"
+    assert "loader/data ready" in payload["claude_topic_decision"]["rationale_en"]
+    assert "loader probe verification" not in payload["claude_topic_decision"]["rationale_en"]
+    assert active["name"] == "owner/current"
+    assert active["repo_path"] == str(current_repo)
+    assert "pending_environment_candidate: owner/candidate" in report
+    assert "pending_claim_ready: Movies" in report
 
 
 def test_environment_selector_normalizes_null_claude_list_fields():

@@ -494,7 +494,7 @@ def current_environment_selection(paths) -> dict[str, Any]:
     decision = selection.get("claude_topic_decision") if isinstance(selection.get("claude_topic_decision"), dict) else {}
     raw_selection_gate = str(selection.get("selection_gate") or selected.get("selection_gate") or "").strip()
     pending_loader_selection = bool(
-        raw_selection_gate in {"accepted_by_claude_transformable_pending_loader_bootstrap", "blocked_pending_data_loader_for_claude_best_candidate"}
+        raw_selection_gate in {"accepted_by_claude_transformable_pending_loader_bootstrap", "blocked_pending_data_loader_for_claude_best_candidate", "blocked_candidate_base_switch_gate_required"}
         or selected.get("pending_loader_bootstrap")
     )
     accepted = bool(
@@ -533,6 +533,8 @@ def current_environment_selection(paths) -> dict[str, Any]:
     reason = ""
     if raw_selection_gate == "blocked_pending_data_loader_for_claude_best_candidate":
         reason = "environment_repo_selection_blocked_pending_loader_candidate"
+    elif raw_selection_gate == "blocked_candidate_base_switch_gate_required":
+        reason = "environment_repo_selection_blocked_candidate_base_switch_gate"
     elif not in_current_find:
         reason = "environment-selected paper is not present in the current Find recommended-paper pool"
     elif not same_run_or_trusted:

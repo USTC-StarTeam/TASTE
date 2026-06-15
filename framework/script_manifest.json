@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-15T03:43:34.485621+00:00",
+  "generated_at": "2026-06-15T08:00:01.343649+00:00",
   "owner": "taste_framework",
   "script_count": 45,
   "scripts": [
@@ -882,7 +882,7 @@
       "path": "framework/scripts/report_status.py",
       "owner": "taste_framework",
       "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
-      "function_count": 19,
+      "function_count": 20,
       "functions": [
         "find_cli_binary",
         "find_claude",
@@ -895,6 +895,7 @@
         "_accepted_repo_selection",
         "_repo_selection_blocker_is_current",
         "_pending_candidate_blocked",
+        "_candidate_base_switch_blocked",
         "_candidate_subject",
         "_repo_selection_public_status",
         "_environment_selection_status",

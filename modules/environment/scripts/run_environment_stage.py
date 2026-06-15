@@ -114,7 +114,7 @@ def _claim_ready_dataset_names(row: dict) -> list[str]:
 def _pending_loader_selection(selection: dict, selected: dict) -> bool:
     gate = str(selection.get('selection_gate') or selected.get('selection_gate') or '').strip() if isinstance(selection, dict) else ''
     return bool(
-        gate in {'accepted_by_claude_transformable_pending_loader_bootstrap', 'blocked_pending_data_loader_for_claude_best_candidate'}
+        gate in {'accepted_by_claude_transformable_pending_loader_bootstrap', 'blocked_pending_data_loader_for_claude_best_candidate', 'blocked_candidate_base_switch_gate_required'}
         or selected.get('pending_loader_bootstrap')
         or (isinstance(selection.get('pending_environment_candidate'), dict) and not _claim_ready_dataset_names(selected))
     )
