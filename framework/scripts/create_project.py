@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from project_paths import validate_project_name
+from project_paths import PROJECT_TEMPLATE, validate_project_name
 
 def _repo_root_from_script() -> Path:
     current = Path(__file__).resolve()
@@ -17,7 +17,7 @@ def _repo_root_from_script() -> Path:
     return current.parents[1]
 
 ROOT = _repo_root_from_script()
-TEMPLATE = ROOT / 'templates' / 'project.json'
+TEMPLATE = PROJECT_TEMPLATE
 
 
 def save_json(path: Path, data) -> None:

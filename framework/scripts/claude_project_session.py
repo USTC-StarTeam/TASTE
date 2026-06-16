@@ -18,7 +18,7 @@ from typing import Any
 
 from agent_state import append_agent_log, consume_guidance, mark_agent, upsert_agent
 from runtime_env import find_binary, interactive_env
-from project_paths import ROOT, build_paths, load_project_config, management_python, project_experiment_python_from_config
+from project_paths import CLAUDE_SKILL_ROOT, ROOT, build_paths, load_project_config, management_python, project_experiment_python_from_config
 from guard_selected_base_route import repair_project as guard_selected_base_route
 from run_project import current_find_execution_contract
 
@@ -231,7 +231,7 @@ def load_recoverable_cycle(paths) -> Any:
 
 
 def local_skill_files() -> list[Path]:
-    skill_root = ROOT / ".claude" / "skills"
+    skill_root = CLAUDE_SKILL_ROOT
     if not skill_root.exists():
         return []
     return sorted(path for path in skill_root.glob("*/SKILL.md") if path.parent.name in NATIVE_SKILL_NAMES)
@@ -1392,7 +1392,7 @@ Hard rules:
 - Use only loader-ready real datasets for experiment/paper evidence; synthetic smoke is not paper evidence.
 - Use the research trajectory files as persistent memory: update or respect research_landscape, novelty_map, failed_hypothesis_graph, unexplored_niche_graph, research_memory, research_direction_memory, research_graph_history, research_landscape_assessment, research_evidence_integrity, research_evidence_manifest, trajectory_optimization_plan, trajectory_checkpoints, evolutionary_memory_index, evolutionary_memory_ledger, research_trajectory_capability_audit, and research_assurance_layer before changing direction.
 - If research_trajectory_capability_audit reports a blocked capability, repair the capability infrastructure before treating any experiment/paper output as reliable.
-- For experiment-loop, evidence-gate, and paper-writing work, explicitly follow the local .claude/skills contracts listed above.
+- For experiment-loop, evidence-gate, and paper-writing work, explicitly follow the local framework/resources/claude/skills contracts listed above.
 - Follow `planning/reference_workflow_and_claude_code.md`: choose the correct route/tool for the current stage; do not run experiments or paper repair from fallback literature artifacts.
 - If a training process is already alive, observe it non-invasively only: do not send signals, attach tracing/debuggers, read blocking `/proc/<pid>/fd/*` pipes, kill, restart, or launch a duplicate unless the process has exited or artifact-local evidence proves a hard failure.
 - New training launches must go through the launcher template shown in the TASTE runtime execution contract: `{launcher_template}`. The command after `--` must begin with the exact `project_experiment_python` path; do not use `<project-experiment-python>` as a literal placeholder.

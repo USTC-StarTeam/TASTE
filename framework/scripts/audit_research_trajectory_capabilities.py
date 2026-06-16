@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from project_paths import ROOT, build_paths
+from project_paths import CLAUDE_SKILL_ROOT, ROOT, build_paths
 
 from taste_pythonpath import script_resolver
 
@@ -95,7 +95,7 @@ def script_exists(name: str) -> bool:
 
 
 def skill_files() -> list[Path]:
-    root = ROOT / ".claude" / "skills"
+    root = CLAUDE_SKILL_ROOT
     return sorted(root.glob("*/SKILL.md")) if root.exists() else []
 
 
@@ -310,7 +310,7 @@ def audit_paper_orchestra_capability(paths) -> dict[str, Any]:
         check("submission_readiness_has_checks", isinstance(readiness.get("checks", []), list) and bool(readiness.get("checks", [])), severity="warn", evidence=[str(readiness_path)], detail=f"checks={len(readiness.get('checks', [])) if isinstance(readiness.get('checks', []), list) else 0}"),
         check("paper_pipeline_runs_orchestra_and_readiness", source_contains("run_paper_pipeline.py", ["run_paper_orchestra_bridge.py", "build_paper_orchestra_state.py", "audit_submission_readiness.py", "submission_ready"]), evidence=[str(SCRIPTS / "run_paper_pipeline.py")]),
         check("trajectory_builder_reads_paper_production", source_contains("build_research_trajectory_system.py", ["paper_orchestra_state", "submission_readiness", "TASTE Paper Production System"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
-        check("writing_skill_contract_mentions_submission", "submission" in read_text(ROOT / ".claude" / "skills" / "writing" / "SKILL.md").lower(), severity="warn", evidence=[str(ROOT / ".claude" / "skills" / "writing" / "SKILL.md")]),
+        check("writing_skill_contract_mentions_submission", "submission" in read_text(CLAUDE_SKILL_ROOT / "writing" / "SKILL.md").lower(), severity="warn", evidence=[str(CLAUDE_SKILL_ROOT / "writing" / "SKILL.md")]),
     ]
     return {
         "id": "paper_production_system",
@@ -383,7 +383,7 @@ def audit_skill_and_code_bindings(paths) -> dict[str, Any]:
         "PaperProduction": ["run_paper_pipeline.py", "build_paper_md.py", "revise_paper_md.py", "build_paper_orchestra_state.py", "audit_paper_orchestra.py", "audit_submission_readiness.py", "audit_paper_evidence.py"],
     }
     checks = [
-        check(f"skill_{name}", name in skill_names, evidence=[str(ROOT / ".claude" / "skills" / name / "SKILL.md")])
+        check(f"skill_{name}", name in skill_names, evidence=[str(CLAUDE_SKILL_ROOT / name / "SKILL.md")])
         for name in sorted(required_skills)
     ]
     checks.append(check("skill_contracts_exported", contracts_path.exists() and isinstance(contracts, list) and len(contracts) >= len(required_skills), severity="warn", evidence=[str(contracts_path)], detail=f"contracts={len(contracts) if isinstance(contracts, list) else 'n/a'}"))
@@ -391,7 +391,7 @@ def audit_skill_and_code_bindings(paths) -> dict[str, Any]:
         check("trajectory_builder_invokes_assurance_and_memory_helpers", source_contains("build_research_trajectory_system.py", ["build_aris_review_board.py", "audit_paper_evidence.py", "update_evolution_memory.py"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
         check("trajectory_builder_exports_local_skill_contracts", source_contains("build_research_trajectory_system.py", ["load_skill_contracts", "research_skill_contracts"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
         check("trajectory_builder_maintains_graph_history_and_manifest", source_contains("build_research_trajectory_system.py", ["update_research_graph_history", "research_evidence_manifest", "update_evolutionary_memory_ledger"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
-        check("claude_project_session_requires_trajectory_and_skills", source_contains("claude_project_session.py", ["research_trajectory_capability_audit", ".claude/skills", "Optimize the whole trajectory"]), evidence=[str(SCRIPTS / "claude_project_session.py")]),
+        check("claude_project_session_requires_trajectory_and_skills", source_contains("claude_project_session.py", ["research_trajectory_capability_audit", "framework/resources/claude/skills", "Optimize the whole trajectory"]), evidence=[str(SCRIPTS / "claude_project_session.py")]),
         check("coding_agent_reads_capability_audit", source_contains("run_coding_agent.py", ["research_trajectory_capability_audit", "trajectory_context"]), evidence=[str(SCRIPTS / "run_coding_agent.py")]),
     ])
     for family, scripts in required_scripts.items():

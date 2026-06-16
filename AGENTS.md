@@ -15,9 +15,9 @@ Use the project-based workflow under `projects/<project>/`. TASTE has one public
 
 There are two different handoff scopes; do not mix them.
 
-Framework-maintainer agents that are repairing or refactoring TASTE itself should read root `AGENTS.md`, root `HANDOFF.md` when present, and root `工作状态.txt` on the active machine when present. Root handoff/status files describe framework maintenance, not project scientific evidence.
+Framework-maintainer agents that are repairing or refactoring TASTE itself should read root `AGENTS.md`, root `README.md`, and root `工作状态.txt` on the active machine when present. Historical maintainer handoff/audit material, if preserved, belongs under ignored `runtime/maintenance/`; it describes framework maintenance, not project scientific evidence.
 
-Project Claude Code sessions must keep their scientific state inside `projects/<project>/`. Their project handoff, if any, belongs under that project directory and must not depend on root `HANDOFF.md` or root `工作状态.txt`.
+Project Claude Code sessions must keep their scientific state inside `projects/<project>/`. Their project handoff, if any, belongs under that project directory and must not depend on root `工作状态.txt` or ignored `runtime/maintenance/` maintainer notes.
 TASTE-launched project Claude Code sessions must run with `projects/<project>/` as their working directory. They may call TASTE wrapper scripts by absolute path, but their own notes, handoff, and scientific state stay project-local.
 
 For a project-stage takeover before major work:
@@ -45,7 +45,7 @@ Scripts are decision-support tools, not unquestionable authorities.
 
 - Do not assume a fixed GPU model, GPU count, CUDA version, Conda base path, package manager, or local absolute workspace path.
 - Do not write API keys, user account settings, downloaded repos, datasets, logs, generated papers, or private project artifacts into tracked files.
-- Project-agent work should use `CLAUDE.md`, `.claude/agents`, `.claude/commands`, and `.claude/skills` as local templates only. User-specific `.claude/settings.json` is never tracked.
+- Project-agent work should use root `CLAUDE.md` plus `framework/resources/claude/agents`, `framework/resources/claude/commands`, and `framework/resources/claude/skills` as local framework templates only. User-specific `.claude/settings.json` is never tracked.
 - Find LLM configuration belongs in local config or environment variables. Downstream Claude Code account/API configuration belongs to the user's own Claude Code setup and must not be overwritten by TASTE.
 
 ## TASTE Integration

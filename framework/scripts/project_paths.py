@@ -28,6 +28,14 @@ STAGE_MODULE_DIRS = (
     "writing",
 )
 
+RESOURCE_ROOT = ROOT / "framework" / "resources"
+TEMPLATE_DIR = RESOURCE_ROOT / "templates"
+PROJECT_TEMPLATE = TEMPLATE_DIR / "project.json"
+CLAUDE_RESOURCE_ROOT = RESOURCE_ROOT / "claude"
+CLAUDE_SKILL_ROOT = CLAUDE_RESOURCE_ROOT / "skills"
+PROMPT_RESOURCE_ROOT = RESOURCE_ROOT / "prompts"
+AUTOMATION_RESOURCE_ROOT = RESOURCE_ROOT / "automation"
+
 
 def _dedupe_path_strings(values: list[str]) -> list[str]:
     seen: set[str] = set()

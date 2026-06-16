@@ -18,7 +18,7 @@ from taste_pythonpath import ensure_taste_pythonpath, resolve_script_path, taste
 
 ensure_taste_pythonpath(ROOT)
 
-from project_paths import build_paths, management_python
+from project_paths import CLAUDE_SKILL_ROOT, build_paths, management_python
 
 
 def now_iso() -> str:
@@ -57,11 +57,11 @@ def safe_int(value: Any, default: int = 0) -> int:
 
 
 def skill_path(name: str, skills: dict[str, str]) -> str:
-    return skills.get(name) or str(ROOT / ".claude" / "skills" / name / "SKILL.md")
+    return skills.get(name) or str(CLAUDE_SKILL_ROOT / name / "SKILL.md")
 
 
 def load_skills() -> dict[str, str]:
-    base = ROOT / ".claude" / "skills"
+    base = CLAUDE_SKILL_ROOT
     return {path.parent.name: str(path) for path in base.glob("*/SKILL.md")} if base.exists() else {}
 
 

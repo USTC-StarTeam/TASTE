@@ -161,7 +161,7 @@ def main() -> int:
         init_cmd.extend(["--topic", init_topic])
     if args.prompt:
         init_cmd.extend(["--prompt", args.prompt])
-    code = run(init_cmd, ROOT / "logs" / f"{args.project}_00_init_workspace.log", args.project, agent_id, "init")
+    code = run(init_cmd, ROOT / "runtime" / "logs" / f"{args.project}_00_init_workspace.log", args.project, agent_id, "init")
     if code != 0:
         mark_agent(args.project, agent_id, "error", current_step=f"init_workspace failed with exit code {code}")
         return code

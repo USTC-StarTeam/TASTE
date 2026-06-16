@@ -11,12 +11,12 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from project_paths import ROOT, build_paths
+from project_paths import CLAUDE_SKILL_ROOT, ROOT, build_paths
 
 
 THIRD_PARTY = ROOT / "third_party"
 VENDOR_ROOT = ROOT / "modules" / "writing" / "vendor"
-SKILL_ROOT = ROOT / ".claude" / "skills"
+SKILL_ROOT = CLAUDE_SKILL_ROOT
 PROVENANCE_ROOT = ROOT / "runtime" / "method_references"
 
 # These source repositories are method references, not runtime dependencies.

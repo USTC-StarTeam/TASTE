@@ -25,8 +25,8 @@ runtime/
 taste_web*.log
 backups/
 
-# Local workspace config and takeover notes. Keep examples/templates in Git,
-# but never publish a machine-specific default project, API-key state, or handoff.
+# Local workspace config and maintainer notes. Keep framework/resources templates in Git,
+# but never publish a machine-specific default project, API-key state, or maintainer handoff.
 /config.json
 /工作状态.txt
 /handoff/
@@ -37,6 +37,7 @@ local_imports_from_mac/
 .claude/settings.json
 .claude/scheduled_tasks.json
 .claude/projects/
+framework/resources/claude/projects/
 ._*
 **/._*
 *.orig
@@ -87,7 +88,7 @@ framework/auto_research/local_database/
 # Per-project generated state and research-object material.
 # Project workspaces are private/runtime by default. They often include local
 # paths, API-key state, downloaded repos, datasets, generated papers, and
-# unpublished scientific conclusions. Use templates/project.json and
+# unpublished scientific conclusions. Use framework/resources/templates/project.json and
 # framework/scripts/create_project.py to create a local project after cloning.
 projects/*
 !projects/.gitkeep

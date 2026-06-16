@@ -2349,11 +2349,11 @@ def test_create_project_cli_preserves_prompt_and_conda_env(tmp_path, monkeypatch
     spec.loader.exec_module(create_project)
 
     root = tmp_path / "root"
-    (root / "templates").mkdir(parents=True)
-    template = json.loads((server.WORKSPACE_ROOT / "templates" / "project.json").read_text(encoding="utf-8"))
-    write_json(root / "templates" / "project.json", template)
+    (root / "framework" / "resources" / "templates").mkdir(parents=True)
+    template = json.loads((server.WORKSPACE_ROOT / "framework" / "resources" / "templates" / "project.json").read_text(encoding="utf-8"))
+    write_json(root / "framework" / "resources" / "templates" / "project.json", template)
     monkeypatch.setattr(create_project, "ROOT", root)
-    monkeypatch.setattr(create_project, "TEMPLATE", root / "templates" / "project.json")
+    monkeypatch.setattr(create_project, "TEMPLATE", root / "framework" / "resources" / "templates" / "project.json")
     monkeypatch.setattr(create_project.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""))
     monkeypatch.setattr(
         sys,

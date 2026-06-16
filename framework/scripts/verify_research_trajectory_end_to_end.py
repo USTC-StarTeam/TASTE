@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from project_paths import ROOT, build_paths
+from project_paths import CLAUDE_SKILL_ROOT, ROOT, build_paths
 
 from taste_pythonpath import script_resolver
 
@@ -249,7 +249,7 @@ def verify_trajectory(paths) -> dict[str, Any]:
 
 
 def verify_skills_and_prompts(paths) -> dict[str, Any]:
-    skill_root = ROOT / ".claude" / "skills"
+    skill_root = CLAUDE_SKILL_ROOT
     required = ["experiment-loop", "evidence-gate", "writing"]
     skill_paths = [skill_root / name / "SKILL.md" for name in required]
     skill_texts = {path.parent.name: read_text(path) for path in skill_paths}
@@ -278,7 +278,7 @@ def verify_skills_and_prompts(paths) -> dict[str, Any]:
         check("runtime_prompts_use_native_names", source_contains(SCRIPTS / "claude_project_session.py", ["native method capability contracts", "research-direction", "evolutionary-memory", "evidence-assurance", "trajectory-optimization", "paper-production"]) and source_omits(SCRIPTS / "claude_project_session.py", source_name_leaks), evidence=[str(SCRIPTS / "claude_project_session.py")]),
         check("core_skills_do_not_expose_source_agents", all(all(term not in text for term in source_name_leaks) for text in skill_texts.values()), evidence=[str(path) for path in skill_paths]),
         check("skill_contracts_exported", isinstance(contracts, list) and len(contracts) >= len(required), evidence=[str(paths.state / "research_skill_contracts.json")], detail=f"contracts={len(contracts) if isinstance(contracts, list) else 'n/a'}"),
-        check("claude_prompt_reads_long_horizon_assets", source_contains(SCRIPTS / "claude_project_session.py", ["research_graph_history", "research_evidence_manifest", "evolutionary_memory_ledger", "Optimize the whole trajectory", ".claude/skills"]), evidence=[str(SCRIPTS / "claude_project_session.py")]),
+        check("claude_prompt_reads_long_horizon_assets", source_contains(SCRIPTS / "claude_project_session.py", ["research_graph_history", "research_evidence_manifest", "evolutionary_memory_ledger", "Optimize the whole trajectory", "framework/resources/claude/skills"]), evidence=[str(SCRIPTS / "claude_project_session.py")]),
         check("coding_agent_reads_trajectory_assets", source_contains(SCRIPTS / "run_coding_agent.py", ["research_evidence_manifest", "research_graph_history", "evolutionary_memory_ledger", "research_trajectory_capability_audit"]), evidence=[str(SCRIPTS / "run_coding_agent.py")]),
     ]
     return module_payload("skills_and_prompt_context_e2e", checks, {

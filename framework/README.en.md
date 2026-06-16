@@ -2,7 +2,7 @@
 
 This directory contains only the cross-module TASTE Python framework package and package-level dependency metadata. The FastAPI backend lives in `../web/backend/`, the React/Vite frontend lives in `../web/frontend/client/`, and the seven research stages live under `../modules/`. For user-facing installation, configuration, startup, module usage, acknowledgements, and license notes, use the repository root [README.md](../README.md) as the single source of truth.
 
-Do not copy only `framework/` to run TASTE. The framework needs the full tracked repository, including `modules/`, `web/`, `framework/scripts/`, `modules/*/scripts/`, `templates/`, `prompts/`, `.claude/`, and project templates. Concrete research projects, run logs, downloaded repositories, datasets, paper drafts, and local credentials belong to local runtime directories and should not be committed.
+Do not copy only `framework/` to run TASTE. The framework needs the full tracked repository, including `modules/`, `web/`, `framework/scripts/`, `modules/*/scripts/`, `framework/resources/templates/`, `framework/resources/prompts/`, `framework/resources/claude/`, and project templates. Concrete research projects, run logs, downloaded repositories, datasets, paper drafts, and local credentials belong to local runtime directories and should not be committed.
 
 ## Directory Map
 

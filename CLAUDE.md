@@ -2,6 +2,8 @@
 
 You are operating TASTE from this repository root.
 
+This file is a repository-maintainer guide for operating and repairing TASTE. It is not a project-scientist handoff. A TASTE-launched project Claude Code session must keep its own notes, memory, handoff, and scientific evidence under `projects/<project>/`.
+
 ## Hard Rules
 
 - Work only inside this repository root and the selected repo under `projects/<project>/repos/`.

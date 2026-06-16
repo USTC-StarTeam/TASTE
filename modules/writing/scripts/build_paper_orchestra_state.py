@@ -353,7 +353,7 @@ def build_state(project: str, venue: str) -> dict[str, Any]:
                 "submission readiness gate separated from prose polish",
             ],
             "writing_method_reference": "writing module method provenance retained internally; do not expose source-method names in UI or manuscript prose.",
-            "local_contract": ".claude/skills/writing/SKILL.md",
+            "local_contract": "framework/resources/claude/skills/writing/SKILL.md",
         },
         "structured_inputs": {
             "research_trajectory": evidence_item("research trajectory system", paths.state / "research_trajectory_system.json"),

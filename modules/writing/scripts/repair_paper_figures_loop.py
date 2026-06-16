@@ -45,7 +45,7 @@ Title: {title}
 Goal: keep iterating until the generated PDF can be shown as an accepted conference preview. The current PDF must remain viewable as a blocked preview, but your job is to repair it so `modules/writing/scripts/audit_paper_figures.py` passes.
 
 Read and follow these local contracts:
-- `.claude/skills/writing/SKILL.md`
+- `framework/resources/claude/skills/writing/SKILL.md`
 - `state/paper_figure_quality_audit.json`
 - `reports/paper_figure_quality_audit.md`
 - `paper/orchestra/{slugify(venue)}/workspace/final/paper.tex`

@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from project_paths import build_paths, load_project_config
+from project_paths import CLAUDE_SKILL_ROOT, build_paths, load_project_config
 from experiment_contracts import row_promotion_blockers
 
 def _repo_root_from_script() -> Path:
@@ -236,7 +236,7 @@ def evidence_statuses(paths, evidence: Any) -> list[dict[str, Any]]:
 
 
 def load_skill_contracts() -> list[dict[str, Any]]:
-    skill_root = ROOT / ".claude" / "skills"
+    skill_root = CLAUDE_SKILL_ROOT
     contracts: list[dict[str, Any]] = []
     if not skill_root.exists():
         return contracts

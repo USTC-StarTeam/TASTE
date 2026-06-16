@@ -758,7 +758,7 @@ def test_research_trajectory_controller_defers_exploration_after_failed_base_swi
         {"repair_queue": [], "elite_pool": [{"id": "elite_method"}]},
         {},
         {"phase_count": 1},
-        [{"name": "experiment-loop", "path": ".claude/skills/experiment-loop/SKILL.md"}],
+        [{"name": "experiment-loop", "path": "framework/resources/claude/skills/experiment-loop/SKILL.md"}],
         {
             "blocks_downstream": True,
             "base_switch_failed": True,

@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from project_paths import ROOT, build_paths, load_project_config, validate_project_name
+from project_paths import PROJECT_TEMPLATE, ROOT, build_paths, load_project_config, validate_project_name
 
 from taste_pythonpath import ensure_taste_pythonpath
 ensure_taste_pythonpath(ROOT)
@@ -497,7 +497,7 @@ def create_project_settings(payload: dict[str, Any]) -> dict[str, Any]:
     paths = build_paths(name)
     if paths.config.exists():
         raise ValueError(f"project already exists: {name}")
-    template_path = ROOT / "templates" / "project.json"
+    template_path = PROJECT_TEMPLATE
     cfg = json.loads(template_path.read_text(encoding="utf-8")) if template_path.exists() else {}
     topic = _first_text(payload, "topic") or name
     cfg["name"] = name
