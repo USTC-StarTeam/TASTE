@@ -11,7 +11,7 @@ RESPONSIBILITY = "Select and repair executable research plans from approved idea
 REQUIRED_EXTERNAL_INPUTS = ('llm_api_or_claude', 'idea_artifacts', 'project_constraints')
 ARTIFACTS_IN = ('ideas.json', 'idea.md', 'user selection/approval')
 ARTIFACTS_OUT = ('plans.json', 'plan.md', 'experiment_plan.json', 'taste_plan_bridge.json', 'blocker action plans')
-LEGACY_ROOTS = ('modules/planning/auto_research/auto_plan', 'modules/planning/scripts/plan_experiments.py', 'modules/planning/scripts/build_workflow_blueprint.py')
+LEGACY_ROOTS = ('modules/planning/scripts/plan_pipeline.py', 'modules/planning/scripts/plan_experiments.py', 'modules/planning/scripts/build_workflow_blueprint.py')
 
 
 @dataclass(slots=True)

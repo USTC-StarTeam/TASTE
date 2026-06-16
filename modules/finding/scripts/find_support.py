@@ -1,5 +1,1909 @@
 from __future__ import annotations
 
+
+# ---- catalog.py ----
+
+import json
+from datetime import date
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
+from auto_research.paths import DATA_DIR, REFERENCE_ROOT
+
+
+FIELD_LABELS = {
+    "ARCH_DCP_SS": "Architecture / Distributed / Storage",
+    "CN": "Computer Networks",
+    "NIS": "Network and Information Security",
+    "TCSE_SS_PDL": "Software Engineering / Systems / PL",
+    "DM_CS": "Database / Data Mining / IR",
+    "TCS": "Theory",
+    "CGAndMT": "Graphics and Multimedia",
+    "AI": "Artificial Intelligence",
+    "HCIAndPC": "HCI and Pervasive Computing",
+    "Cross_Compre_Emerging": "Interdisciplinary / Emerging",
+}
+
+ADDRESS_OVERRIDES = {
+    ("HPCA", "IEEE International Symposium on High Performance Computer Architecture"): "https://dblp.uni-trier.de/db/conf/hpca/",
+}
+NAME_ALIASES = {
+    "kdd": "sigkdd",
+}
+
+
+def _safe_id(*parts: str) -> str:
+    joined = "_".join(str(part or "").strip().lower() for part in parts)
+    allowed = []
+    for ch in joined:
+        allowed.append(ch if ch.isalnum() else "_")
+    return "_".join(filter(None, "".join(allowed).split("_")))
+
+
+
+
+def _venue_name_key(name: str) -> str:
+    normalized = " ".join(str(name or "").strip().lower().split())
+    return _safe_id(NAME_ALIASES.get(normalized, normalized))
+
+
+SOURCE_PRIORITY = {
+    "openreview": 0,
+    "ccf": 1,
+    "default": 2,
+    "dblp": 2,
+    "custom": 3,
+}
+
+
+def _catalog_source_priority(venue: dict[str, Any]) -> int:
+    return SOURCE_PRIORITY.get(str(venue.get("source") or "").strip().lower(), 10)
+
+
+def _venue_identity_key(venue: dict[str, Any]) -> str:
+    full_name = _venue_name_key(str(venue.get("full_name") or ""))
+    if full_name:
+        return f"full:{full_name}"
+    name = _venue_name_key(str(venue.get("name") or venue.get("id") or ""))
+    return f"name:{name}"
+
+
+def _merge_year_values(*values: Any) -> list[int]:
+    years: list[int] = []
+    for value in values:
+        items = value if isinstance(value, list) else [value]
+        for item in items:
+            try:
+                year = int(item)
+            except (TypeError, ValueError):
+                continue
+            if 1900 <= year <= 2100 and year not in years:
+                years.append(year)
+    return sorted(years, reverse=True)
+
+
+def _venue_alias_record(venue: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": venue.get("id", ""),
+        "source": venue.get("source", ""),
+        "name": venue.get("name", ""),
+        "full_name": venue.get("full_name", ""),
+        "type": venue.get("type", ""),
+        "rank": venue.get("rank", ""),
+        "field": venue.get("field", ""),
+        "field_key": venue.get("field_key", ""),
+        "address": venue.get("address", ""),
+        "years": _merge_year_values(venue.get("years", [])),
+        "classification_source": venue.get("classification_source", ""),
+    }
+
+
+def _append_alias(aliases: list[dict[str, Any]], alias: dict[str, Any], canonical_id: str) -> None:
+    alias_id = str(alias.get("id") or "").strip()
+    if not alias_id or alias_id == canonical_id:
+        return
+    if any(str(item.get("id") or "") == alias_id for item in aliases):
+        return
+    aliases.append(alias)
+
+
+def _merge_catalog_entry(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    primary, secondary = left, right
+    if (_catalog_source_priority(right), str(right.get("id") or "")) < (_catalog_source_priority(left), str(left.get("id") or "")):
+        primary, secondary = right, left
+
+    merged = dict(primary)
+    merged["years"] = _merge_year_values(primary.get("years", []), secondary.get("years", []))
+    if not merged.get("address") and str(merged.get("source") or "").lower() != "openreview":
+        merged["address"] = secondary.get("address", "")
+
+    metadata = dict(secondary.get("metadata") or {})
+    metadata.update(dict(primary.get("metadata") or {}))
+    merged_sources = []
+    for venue in (primary, secondary):
+        source = str(venue.get("source") or "").strip()
+        if source and source not in merged_sources:
+            merged_sources.append(source)
+    if merged_sources:
+        metadata["merged_sources"] = merged_sources
+    if metadata:
+        merged["metadata"] = metadata
+
+    aliases: list[dict[str, Any]] = []
+    for venue in (primary, secondary):
+        for alias in venue.get("aliases", []) if isinstance(venue.get("aliases"), list) else []:
+            if isinstance(alias, dict):
+                _append_alias(aliases, alias, str(merged.get("id") or ""))
+        _append_alias(aliases, _venue_alias_record(venue), str(merged.get("id") or ""))
+    if aliases:
+        merged["aliases"] = aliases
+    else:
+        merged.pop("aliases", None)
+    return merged
+
+
+def _merge_catalog_by_identity(venues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_id: dict[str, dict[str, Any]] = {}
+    identity_to_id: dict[str, str] = {}
+    for venue in venues:
+        venue_id = str(venue.get("id") or "").strip()
+        if not venue_id:
+            continue
+        identity = _venue_identity_key(venue)
+        existing_id = identity_to_id.get(identity)
+        if existing_id and existing_id in by_id:
+            merged = _merge_catalog_entry(by_id[existing_id], venue)
+            merged_id = str(merged.get("id") or existing_id)
+            if merged_id != existing_id:
+                by_id.pop(existing_id, None)
+            by_id[merged_id] = merged
+            identity_to_id[identity] = merged_id
+        else:
+            by_id[venue_id] = venue
+            identity_to_id[identity] = venue_id
+    return list(by_id.values())
+
+
+def load_ccf_catalog() -> list[dict[str, Any]]:
+    ccf_path = REFERENCE_ROOT / "openccf" / "data" / "ccf.json"
+    if not ccf_path.exists():
+        return []
+
+    raw = json.loads(ccf_path.read_text(encoding="utf-8"))
+    venues: list[dict[str, Any]] = []
+    current_year = date.today().year
+    default_years = list(range(current_year, current_year - 8, -1))
+
+    for field_key, field_data in raw.items():
+        field_label = FIELD_LABELS.get(field_key, field_key)
+        for venue_type_key, venue_type in (("conf", "conference"), ("journals", "journal")):
+            for rank, items in field_data.get(venue_type_key, {}).items():
+                for item in items:
+                    name = item.get("name") or item.get("full_name") or "unknown"
+                    full_name = item.get("full_name", name)
+                    address = ADDRESS_OVERRIDES.get((name, full_name), item.get("address", ""))
+                    venue_id = _safe_id("ccf", field_key, venue_type, rank, name, item.get("full_name", ""))
+                    venues.append({
+                        "id": venue_id,
+                        "source": "ccf",
+                        "name": name,
+                        "full_name": full_name,
+                        "type": venue_type,
+                        "rank": rank,
+                        "field": field_label,
+                        "field_key": field_key,
+                        "address": address,
+                        "years": default_years,
+                        "classification_source": "llm_inferred",
+                    })
+    return venues
+
+
+def _load_json_catalog(path: Path, source_label: str = "") -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        return []
+    venues: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict) or not item.get("id") or not item.get("name"):
+            continue
+        venue = dict(item)
+        venue.setdefault("source", source_label or "custom")
+        venue.setdefault("full_name", venue["name"])
+        venue.setdefault("type", "conference")
+        venue.setdefault("rank", "high-level")
+        venue.setdefault("field", "Artificial Intelligence")
+        venue.setdefault("field_key", "AI")
+        venue.setdefault("address", "")
+        venue.setdefault("years", list(range(date.today().year, date.today().year - 5, -1)))
+        venue.setdefault("classification_source", "llm_inferred")
+        venues.append(venue)
+    return venues
+
+
+def load_default_catalog() -> list[dict[str, Any]]:
+    return _load_json_catalog(DATA_DIR / "default_venues.json", "default")
+
+
+def load_packaged_ccf_catalog() -> list[dict[str, Any]]:
+    return _load_json_catalog(DATA_DIR / "ccf_venues.json", "ccf")
+
+
+def load_custom_catalog() -> list[dict[str, Any]]:
+    return _load_json_catalog(DATA_DIR / "custom_venues.json", "custom")
+
+
+def load_openreview_catalog() -> list[dict[str, Any]]:
+    venues: list[dict[str, Any]] = []
+    iclr_json = REFERENCE_ROOT / "ICLR2026-Guide-CN" / "ICLR2026_all_papers.json"
+    if iclr_json.exists():
+        venues.append({
+            "id": "openreview_iclr",
+            "source": "openreview",
+            "name": "ICLR",
+            "full_name": "International Conference on Learning Representations",
+            "type": "conference",
+            "rank": "high-level",
+            "field": "Artificial Intelligence",
+            "field_key": "AI",
+            "address": "",
+            "years": [2026, 2025, 2024, 2023],
+            "classification_source": "llm_inferred",
+        })
+    return venues
+
+
+def _copy_catalog_row(row: dict[str, Any]) -> dict[str, Any]:
+    copied = dict(row)
+    aliases = copied.get("aliases")
+    if isinstance(aliases, list):
+        copied["aliases"] = [dict(alias) if isinstance(alias, dict) else alias for alias in aliases]
+    return copied
+
+
+@lru_cache(maxsize=1)
+def _load_catalog_cached() -> tuple[dict[str, Any], ...]:
+    ccf_venues = load_packaged_ccf_catalog() + load_ccf_catalog()
+    ccf_names = {_venue_name_key(venue.get("name", "")) for venue in ccf_venues}
+    default_venues = [
+        venue
+        for venue in load_default_catalog()
+        if venue.get("id") == "openreview_iclr" or _venue_name_key(venue.get("name", "")) not in ccf_names
+    ]
+    venues = _merge_catalog_by_identity(default_venues + load_openreview_catalog() + ccf_venues + load_custom_catalog())
+    return tuple(sorted(venues, key=lambda item: (item["source"], item["field"], item["type"], item["rank"], item["name"])))
+
+
+def load_catalog() -> list[dict[str, Any]]:
+    return [_copy_catalog_row(venue) for venue in _load_catalog_cached()]
+
+
+@lru_cache(maxsize=1)
+def _catalog_by_id_cached() -> dict[str, dict[str, Any]]:
+    catalog = {venue["id"]: _copy_catalog_row(venue) for venue in _load_catalog_cached()}
+    for venue in list(catalog.values()):
+        canonical_id = str(venue.get("id") or "")
+        for alias in venue.get("aliases", []) if isinstance(venue.get("aliases"), list) else []:
+            if not isinstance(alias, dict):
+                continue
+            alias_id = str(alias.get("id") or "").strip()
+            if alias_id and alias_id not in catalog:
+                catalog[alias_id] = {**venue, "id": alias_id, "canonical_id": canonical_id}
+    if "openreview_iclr" in catalog:
+        catalog["openreview_iclr_2026"] = {**catalog["openreview_iclr"], "id": "openreview_iclr_2026"}
+    custom_fallbacks = {
+        "dblp_icml": {
+            "id": "dblp_icml",
+            "source": "dblp",
+            "name": "ICML",
+            "full_name": "International Conference on Machine Learning",
+            "type": "conference",
+            "rank": "high-level",
+            "field": "Artificial Intelligence / Machine Learning",
+            "field_key": "AI",
+            "address": "https://dblp.uni-trier.de/db/conf/icml/",
+            "classification_source": "topic_policy",
+        },
+        "dblp_kdd": {
+            "id": "dblp_kdd",
+            "source": "dblp",
+            "name": "KDD",
+            "full_name": "ACM SIGKDD Conference on Knowledge Discovery and Data Mining",
+            "type": "conference",
+            "rank": "high-level",
+            "field": "Data Mining / Recommendation",
+            "field_key": "DM_CS",
+            "address": "https://dblp.uni-trier.de/db/conf/kdd/",
+            "classification_source": "topic_policy",
+        },
+    }
+    for venue_id, venue in custom_fallbacks.items():
+        catalog.setdefault(venue_id, {**venue, "years": list(range(date.today().year, date.today().year - 5, -1))})
+    if "openreview_neurips" not in catalog:
+        for venue in catalog.values():
+            text = f"{venue.get('name', '')} {venue.get('full_name', '')}".lower()
+            if "neurips" in text or "neural information processing systems" in text:
+                catalog["openreview_neurips"] = {**venue, "id": "openreview_neurips", "source": "openreview"}
+                break
+    return catalog
+
+
+def catalog_by_id() -> dict[str, dict[str, Any]]:
+    return {venue_id: _copy_catalog_row(venue) for venue_id, venue in _catalog_by_id_cached().items()}
+
+
+# ---- local_index.py ----
+
+import json
+from pathlib import Path
+from typing import Any
+
+from auto_research.paths import LOCAL_DATABASE_DIR
+
+
+def venue_cache_key(venue: dict[str, Any]) -> str:
+    name = str(venue.get("name") or "").strip().lower()
+    if name:
+        key = "".join(char for char in name if char.isalnum())
+        if key:
+            return key
+    full_name = str(venue.get("full_name") or "").strip().lower()
+    words = [word for word in full_name.split() if word[:1].isalnum()]
+    if words:
+        return "".join(char for char in words[0] if char.isalnum()) or "unknown"
+    venue_id = str(venue.get("id") or "unknown").strip().lower()
+    return "".join(char if char.isalnum() else "_" for char in venue_id).strip("_") or "unknown"
+
+
+def _venue_id_candidates(venue: dict[str, Any]) -> list[str]:
+    venue_id = str(venue.get("id") or "").strip()
+    candidates = []
+    cache_key = venue_cache_key(venue)
+    if cache_key:
+        candidates.append(cache_key)
+    if venue_id:
+        candidates.append(venue_id)
+        for suffix in ("_2026", "_2025", "_2024", "_2023", "_2022"):
+            if venue_id.endswith(suffix):
+                candidates.append(venue_id[: -len(suffix)])
+    name = f"{venue.get('name', '')} {venue.get('full_name', '')}".lower()
+    if "iclr" in name or "learning representations" in name:
+        candidates.append("openreview_iclr")
+    if "neurips" in name or "neural information processing systems" in name:
+        candidates.append("openreview_neurips")
+    return list(dict.fromkeys(item for item in candidates if item))
+
+
+def load_local_venue_year(venue: dict[str, Any], year: int, root: Path = LOCAL_DATABASE_DIR) -> dict[str, Any] | None:
+    for venue_id in _venue_id_candidates(venue):
+        directory = root / venue_id / str(year)
+        papers_path = directory / "papers.json"
+        summary_path = directory / "category_summary.json"
+        if not papers_path.exists() or not summary_path.exists():
+            continue
+        papers_data = json.loads(papers_path.read_text(encoding="utf-8"))
+        summary_data = json.loads(summary_path.read_text(encoding="utf-8"))
+        manifest_path = directory / "manifest.json"
+        try:
+            manifest_data = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+        except Exception:
+            manifest_data = {}
+        papers = papers_data.get("papers", [])
+        if not isinstance(papers, list):
+            continue
+        metadata_audit = (
+            manifest_data.get("audit")
+            or manifest_data.get("metadata_completeness_audit")
+            or papers_data.get("metadata_completeness_audit")
+            or summary_data.get("metadata_completeness_audit")
+            or {}
+        )
+        return {
+            "venue_id": venue_id,
+            "year": year,
+            "directory": str(directory),
+            "papers_path": str(papers_path),
+            "category_summary_path": str(summary_path),
+            "manifest_path": str(manifest_path) if manifest_path.exists() else "",
+            "manifest": manifest_data,
+            "metadata_completeness_audit": metadata_audit,
+            "source_adapter": papers_data.get("source_adapter") or summary_data.get("source_adapter") or manifest_data.get("adapter") or "local_database",
+            "papers": papers,
+            "category_summary": summary_data,
+            "paper_count": len(papers),
+        }
+    return None
+
+
+# ---- local_cache.py ----
+
+from collections import Counter
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from auto_research.storage import read_json, write_json
+
+
+
+SCHEMA_VERSION = "1.0"
+
+
+def _json_path(path: Path) -> str:
+    return path.as_posix()
+
+
+def cache_directory(venue: dict[str, Any], year: int, root: Path = LOCAL_DATABASE_DIR) -> Path:
+    return root / venue_cache_key(venue) / str(year)
+
+
+def _first_existing_directory(venue: dict[str, Any], year: int, root: Path = LOCAL_DATABASE_DIR) -> Path:
+    for venue_id in _venue_id_candidates(venue):
+        directory = root / venue_id / str(year)
+        if (directory / "papers.json").exists():
+            return directory
+    return cache_directory(venue, year, root)
+
+
+def normalize_cached_paper(paper: dict[str, Any], venue: dict[str, Any], year: int, adapter: str = "") -> dict[str, Any]:
+    metadata = dict(paper.get("metadata") or {})
+    metadata.setdefault("venue_id", venue.get("id", ""))
+    if adapter:
+        metadata.setdefault("source_adapter", adapter)
+    categories = paper.get("categories")
+    if not isinstance(categories, list):
+        categories = []
+    category = str(paper.get("primary_area") or paper.get("category") or paper.get("track") or "")
+    if category and category not in categories:
+        categories = [category, *categories]
+    return {
+        "id": str(paper.get("id") or ""),
+        "source": str(paper.get("source") or adapter or ""),
+        "title": str(paper.get("title") or "Untitled"),
+        "authors": paper.get("authors") if isinstance(paper.get("authors"), str) else ", ".join(str(item) for item in paper.get("authors", []) if item),
+        "abstract": str(paper.get("abstract") or ""),
+        "url": str(paper.get("url") or ""),
+        "pdf_url": str(paper.get("pdf_url") or ""),
+        "venue": str(paper.get("venue") or venue.get("name") or ""),
+        "venue_id": str(paper.get("venue_id") or venue.get("id") or ""),
+        "year": int(paper.get("year") or year),
+        "category": str(paper.get("category") or ""),
+        "categories": categories,
+        "primary_area": str(paper.get("primary_area") or ""),
+        "track": str(paper.get("track") or ""),
+        "keywords": paper.get("keywords") if isinstance(paper.get("keywords"), list) else [],
+        "classification_source": str(paper.get("classification_source") or "llm_inferred"),
+        "metadata": metadata,
+    }
+
+
+def _category_key(paper: dict[str, Any]) -> str:
+    return str(paper.get("primary_area") or paper.get("category") or paper.get("track") or "").strip()
+
+
+def build_category_summary(venue: dict[str, Any], year: int, papers: list[dict[str, Any]], adapter: str) -> dict[str, Any]:
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    for paper in papers:
+        category = _category_key(paper)
+        if category:
+            buckets.setdefault(category, []).append(paper)
+    counts = Counter({name: len(items) for name, items in buckets.items()})
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "venue_id": venue.get("id", ""),
+        "venue": venue.get("name", ""),
+        "full_name": venue.get("full_name", venue.get("name", "")),
+        "year": year,
+        "source": venue.get("source", ""),
+        "source_adapter": adapter,
+        "paper_count": len(papers),
+        "category_count": len(buckets),
+        "category_counts": dict(counts),
+        "category_summary": [
+            {
+                "name": name,
+                "count": len(items),
+                "sample_titles": [str(item.get("title") or "") for item in items[:5]],
+                "sample_keywords": [
+                    str(keyword)
+                    for item in items[:20]
+                    for keyword in (item.get("keywords") if isinstance(item.get("keywords"), list) else [])
+                ][:20],
+            }
+            for name, items in sorted(buckets.items(), key=lambda row: (-len(row[1]), row[0].lower()))
+        ],
+        "built_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "source_file": "papers.json",
+    }
+
+
+def load_cached_venue_year(venue: dict[str, Any], year: int, root: Path = LOCAL_DATABASE_DIR) -> dict[str, Any] | None:
+    directory = _first_existing_directory(venue, year, root)
+    papers_path = directory / "papers.json"
+    if not papers_path.exists():
+        return None
+    papers_data = read_json(papers_path, {})
+    papers = papers_data.get("papers", [])
+    if not isinstance(papers, list):
+        return None
+    summary_path = directory / "category_summary.json"
+    report_path = directory / "source_report.json"
+    summary = read_json(summary_path, {}) if summary_path.exists() else {}
+    report = read_json(report_path, {}) if report_path.exists() else {}
+    return {
+        "venue_id": papers_data.get("venue_id") or venue.get("id", ""),
+        "year": year,
+        "directory": _json_path(directory),
+        "papers_path": _json_path(papers_path),
+        "category_summary_path": _json_path(summary_path) if summary_path.exists() else "",
+        "source_report_path": _json_path(report_path) if report_path.exists() else "",
+        "papers": papers,
+        "category_summary": summary,
+        "source_report": report,
+        "paper_count": len(papers),
+        "source_adapter": papers_data.get("source_adapter") or report.get("source_adapter") or "local_database",
+    }
+
+
+def write_venue_year_cache(
+    venue: dict[str, Any],
+    year: int,
+    papers: list[dict[str, Any]],
+    adapter: str,
+    root: Path = LOCAL_DATABASE_DIR,
+) -> dict[str, Any]:
+    directory = cache_directory(venue, year, root)
+    normalized = [normalize_cached_paper(paper, venue, year, adapter) for paper in papers]
+    normalized = [paper for paper in normalized if paper.get("title")]
+    fetched_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    paper_payload = {
+        "schema_version": SCHEMA_VERSION,
+        "venue_id": venue.get("id", ""),
+        "venue": venue.get("name", ""),
+        "full_name": venue.get("full_name", venue.get("name", "")),
+        "year": year,
+        "source": venue.get("source", ""),
+        "source_adapter": adapter,
+        "fetched_at": fetched_at,
+        "paper_count": len(normalized),
+        "papers": normalized,
+    }
+    source_report = {
+        "schema_version": SCHEMA_VERSION,
+        "venue_id": venue.get("id", ""),
+        "venue": venue.get("name", ""),
+        "year": year,
+        "source_adapter": adapter,
+        "paper_count": len(normalized),
+        "fetched_at": fetched_at,
+        "cache_directory": _json_path(directory),
+    }
+    category_summary = build_category_summary(venue, year, normalized, adapter)
+    write_json(directory / "papers.json", paper_payload)
+    write_json(directory / "source_report.json", source_report)
+    write_json(directory / "category_summary.json", category_summary)
+    return {
+        "venue_id": venue.get("id", ""),
+        "year": year,
+        "directory": _json_path(directory),
+        "papers_path": _json_path(directory / "papers.json"),
+        "category_summary_path": _json_path(directory / "category_summary.json"),
+        "source_report_path": _json_path(directory / "source_report.json"),
+        "papers": normalized,
+        "category_summary": category_summary,
+        "source_report": source_report,
+        "paper_count": len(normalized),
+        "source_adapter": adapter,
+    }
+
+
+# ---- local_rank.py ----
+
+import math
+import re
+from collections import Counter
+from typing import Any, Callable
+
+
+GENERIC_TERMS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "into", "is", "it", "of", "on", "or", "that", "the", "their", "to", "with",
+    "ai", "research", "paper", "papers", "tool", "tools", "system", "systems", "model", "models", "method", "methods", "benchmark", "benchmarks",
+    "using", "use", "used", "based", "including", "include", "improve", "interested", "prefer", "practical", "generic", "directly",
+}
+
+
+def _tokens(text: str) -> list[str]:
+    raw = re.findall(r"[\u4e00-\u9fff]{2,}|[a-zA-Z0-9][a-zA-Z0-9_.-]{1,}", (text or "").lower())
+    return [term.strip(".,;:!?()[]{}\"'") for term in raw if term.strip(".,;:!?()[]{}\"'") not in GENERIC_TERMS]
+
+
+def _paper_text(paper: dict[str, Any]) -> str:
+    title = str(paper.get("title") or "")
+    abstract = str(paper.get("abstract") or "")
+    category = str(paper.get("category") or "")
+    categories = paper.get("categories") or paper.get("metadata", {}).get("all_categories") or []
+    if isinstance(categories, list):
+        category_text = " ".join(str(item) for item in categories)
+    else:
+        category_text = str(categories or "")
+    return " ".join([title, title, title, abstract, category, category_text])
+
+
+def _profile_phrases(profile_text: str) -> list[str]:
+    phrases: list[str] = []
+    for part in re.split(r"[\n,;，；。.!?、/]+", profile_text or ""):
+        text = " ".join(str(part).lower().split())
+        if len(text) >= 4:
+            phrases.append(text)
+    terms = [term for term in _tokens(profile_text) if re.fullmatch(r"[a-zA-Z0-9_.-]+", term)]
+    for size in range(2, min(5, len(terms)) + 1):
+        for index in range(0, len(terms) - size + 1):
+            phrases.append(" ".join(terms[index:index + size]))
+    return list(dict.fromkeys(phrase for phrase in phrases if len(phrase) >= 4))
+
+
+def rank_papers_tfidf(
+    papers: list[dict[str, Any]],
+    query: str,
+    *,
+    per_category_limit: int = 100,
+    global_limit: int = 200,
+    ranking_bonus: Callable[[dict[str, Any]], float] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if not papers:
+        return [], {"method": "adaptive_profile_similarity", "input_count": 0, "selected_count": 0}
+
+    global_cap = len(papers) if int(global_limit or 0) <= 0 else max(1, min(len(papers), int(global_limit)))
+    per_category_cap = len(papers) if int(per_category_limit or 0) <= 0 else max(1, int(per_category_limit))
+
+    profile_signals = _tokens(query)
+    profile_phrases = _profile_phrases(query)
+    if not profile_signals:
+        selected = []
+        for index, paper in enumerate(papers[:global_cap]):
+            row = dict(
+                paper,
+                local_score=0.0,
+                local_tfidf_score=0.0,
+                local_phrase_adjustment=0.0,
+                local_profile_phrase_match_count=0,
+                local_rank=index + 1,
+                local_filter_reason="No research profile text; kept by source order.",
+            )
+            bonus = max(0.0, float(ranking_bonus(row))) if ranking_bonus else 0.0
+            row["local_quality_bonus"] = round(bonus, 6)
+            row["local_rank_score"] = round(bonus, 6)
+            selected.append(row)
+        selected.sort(key=lambda item: float(item.get("local_rank_score") or 0), reverse=True)
+        for index, item in enumerate(selected, 1):
+            item["local_rank"] = index
+        return selected, {"method": "adaptive_profile_similarity", "input_count": len(papers), "selected_count": len(selected), "global_limit": global_limit, "effective_global_limit": global_cap, "adaptive_profile_signal_count": 0, "adaptive_profile_phrase_count": 0, "profile_signal_source": "current research_interest/profile", "ranking_bonus_applied": bool(ranking_bonus)}
+
+    paper_texts = [_paper_text(paper) for paper in papers]
+    doc_terms = [_tokens(text) for text in paper_texts]
+    doc_freq: Counter[str] = Counter()
+    for terms in doc_terms:
+        doc_freq.update(set(terms))
+
+    total_docs = len(papers)
+    query_counts = Counter(profile_signals)
+    query_weights = {
+        term: (1.0 + math.log(count)) * (math.log((total_docs + 1) / (doc_freq.get(term, 0) + 1)) + 1.0)
+        for term, count in query_counts.items()
+    }
+    query_norm = math.sqrt(sum(weight * weight for weight in query_weights.values())) or 1.0
+
+    ranked: list[dict[str, Any]] = []
+    for paper, text, terms in zip(papers, paper_texts, doc_terms, strict=False):
+        counts = Counter(terms)
+        dot = 0.0
+        doc_norm_sq = 0.0
+        for term, count in counts.items():
+            idf = math.log((total_docs + 1) / (doc_freq.get(term, 0) + 1)) + 1.0
+            weight = (1.0 + math.log(count)) * idf
+            doc_norm_sq += weight * weight
+            dot += weight * query_weights.get(term, 0.0)
+        tfidf_score = dot / ((math.sqrt(doc_norm_sq) or 1.0) * query_norm)
+        lowered = (text or "").lower()
+        phrase_matches = [phrase for phrase in profile_phrases if phrase in lowered]
+        adjustment = min(0.35, 0.06 * len(phrase_matches))
+        score = max(0.0, tfidf_score + adjustment)
+        row = dict(paper)
+        row["local_score"] = round(score, 6)
+        row["local_tfidf_score"] = round(tfidf_score, 6)
+        row["local_phrase_adjustment"] = round(adjustment, 6)
+        row["local_profile_phrase_match_count"] = len(phrase_matches)
+        row["local_filter_reason"] = "Adaptive recall similarity from the current research interest/profile; used only for candidate retrieval, not as strong evidence."
+        bonus = max(0.0, float(ranking_bonus(row))) if ranking_bonus else 0.0
+        row["local_quality_bonus"] = round(bonus, 6)
+        row["local_rank_score"] = round(score + bonus, 6)
+        ranked.append(row)
+
+    ranked.sort(key=lambda item: (float(item.get("local_rank_score") or item.get("local_score") or 0), float(item.get("local_score") or 0)), reverse=True)
+    by_category: dict[str, list[dict[str, Any]]] = {}
+    for item in ranked:
+        category = str(item.get("category") or item.get("metadata", {}).get("primary_category") or "unknown")
+        bucket = by_category.setdefault(category, [])
+        if len(bucket) < per_category_cap:
+            bucket.append(item)
+
+    balanced = [item for bucket in by_category.values() for item in bucket]
+    balanced.sort(key=lambda item: (float(item.get("local_rank_score") or item.get("local_score") or 0), float(item.get("local_score") or 0)), reverse=True)
+    selected = balanced[:global_cap]
+
+    # Some venue adapters, such as proceedings-style ICML/DBLP sources, do not
+    # expose meaningful fine-grained categories. In that case a small
+    # per-category cap can silently dominate the global recall target and keep
+    # only the first ~200 papers even when the Find page asks for a much larger
+    # detail-scoring pool. Preserve the balancing behavior, then fill the
+    # remaining global budget from the source-ranked list.
+    if len(selected) < min(global_cap, len(ranked)):
+        seen = {str(item.get("id") or item.get("url") or item.get("title") or "") for item in selected}
+        for item in ranked:
+            key = str(item.get("id") or item.get("url") or item.get("title") or "")
+            if key in seen:
+                continue
+            selected.append(item)
+            seen.add(key)
+            if len(selected) >= global_cap:
+                break
+
+    for index, item in enumerate(selected, 1):
+        item["local_rank"] = index
+
+    return selected, {
+        "method": "adaptive_profile_similarity",
+        "input_count": len(papers),
+        "selected_count": len(selected),
+        "global_limit": global_limit,
+        "effective_global_limit": global_cap,
+        "per_category_limit": per_category_limit,
+        "effective_per_category_limit": per_category_cap,
+        "balanced_selected_count": len(balanced),
+        "category_counts": {category: len(items) for category, items in by_category.items()},
+        "adaptive_profile_signal_count": len(profile_signals),
+        "adaptive_profile_phrase_count": len(profile_phrases),
+        "profile_signal_source": "current research_interest/profile",
+        "ranking_bonus_applied": bool(ranking_bonus),
+    }
+
+
+# ---- quality.py ----
+
+import json
+import os
+import re
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
+from auto_research.paths import DATA_DIR, LEGACY_LOCAL_DATABASE_DIR, LOCAL_DATABASE_DIR
+
+
+QUALITY_DATA_DIR = Path(os.environ.get("TASTE_QUALITY_DATA_DIR") or DATA_DIR / "quality").expanduser()
+CONFERENCE_QUALITY_TABLE = QUALITY_DATA_DIR / "conference_quality_levels.json"
+JOURNAL_QUALITY_TABLE = QUALITY_DATA_DIR / "journal_quality_levels.json"
+
+
+def _candidate_tables(path: Path) -> list[Path]:
+    return [
+        path,
+        LOCAL_DATABASE_DIR / path.name,
+        LEGACY_LOCAL_DATABASE_DIR / path.name,
+    ]
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    for candidate in _candidate_tables(path):
+        if not candidate.exists():
+            continue
+        data = json.loads(candidate.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    return {}
+
+
+@lru_cache(maxsize=1)
+def _conference_table() -> dict[str, Any]:
+    return _load_json(CONFERENCE_QUALITY_TABLE)
+
+
+@lru_cache(maxsize=1)
+def _journal_table() -> dict[str, Any]:
+    return _load_json(JOURNAL_QUALITY_TABLE)
+
+
+def _norm(value: object) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[_/|:;,\-]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _metadata(item: dict) -> dict:
+    metadata = item.get("metadata")
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _venue_ids(item: dict) -> set[str]:
+    metadata = _metadata(item)
+    ids = {
+        str(item.get("venue_id") or ""),
+        str(metadata.get("venue_id") or ""),
+    }
+    return {value for value in ids if value}
+
+
+def _venue_names(item: dict) -> set[str]:
+    return {
+        _norm(item.get("venue")),
+        _norm(item.get("source")),
+    } - {""}
+
+
+def _label_candidates(item: dict) -> set[str]:
+    metadata = _metadata(item)
+    values = [
+        item.get("track"),
+        item.get("category"),
+        item.get("primary_area"),
+        metadata.get("track"),
+        metadata.get("category"),
+        metadata.get("primary_area"),
+        metadata.get("presentation_type"),
+        metadata.get("presentation_label"),
+    ]
+    source_records = metadata.get("source_records")
+    if isinstance(source_records, dict):
+        for record in source_records.values():
+            if isinstance(record, dict):
+                values.extend([
+                    record.get("track"),
+                    record.get("category"),
+                    record.get("primary_area"),
+                    record.get("presentation_type"),
+                    record.get("presentation_label"),
+                ])
+    return {_norm(value) for value in values if _norm(value)}
+
+
+def _quality_payload(kind: str, source_file: str, tier: str, bonus: object, reason: str) -> dict[str, Any]:
+    try:
+        numeric_bonus = float(bonus)
+    except (TypeError, ValueError):
+        numeric_bonus = 0.0
+    return {
+        "quality_kind": kind,
+        "quality_tier": tier or "unknown",
+        "quality_bonus_available": round(max(0.0, numeric_bonus), 2),
+        "quality_bonus": 0.0,
+        "quality_source": source_file,
+        "quality_reason": reason,
+    }
+
+
+def _lookup_conference_quality(item: dict) -> dict[str, Any] | None:
+    table = _conference_table()
+    conferences = table.get("conferences")
+    if not isinstance(conferences, dict):
+        return None
+    venue_ids = _venue_ids(item)
+    venue_names = _venue_names(item)
+    labels = _label_candidates(item)
+    year = str(item.get("year") or "")
+    for key, conference in conferences.items():
+        if not isinstance(conference, dict):
+            continue
+        table_ids = {str(value) for value in conference.get("venue_ids", []) if value}
+        table_names = {_norm(value) for value in conference.get("names", []) if _norm(value)}
+        if not (venue_ids & table_ids or venue_names & table_names or _norm(key) in venue_names):
+            continue
+        years = conference.get("years") if isinstance(conference.get("years"), dict) else {}
+        aliases = years.get(year, {}).get("label_aliases", {}) if isinstance(years.get(year), dict) else {}
+        if isinstance(aliases, dict):
+            for label in labels:
+                mapping = aliases.get(label)
+                if isinstance(mapping, dict):
+                    return _quality_payload(
+                        "conference",
+                        "conference_quality_levels.json",
+                        str(mapping.get("tier") or "unknown"),
+                        mapping.get("bonus", 0.0),
+                        f"Matched conference label '{label}' for {key} {year}.",
+                    )
+        return _quality_payload(
+            "conference",
+            "conference_quality_levels.json",
+            "unknown",
+            0.0,
+            f"Conference quality table has {key} {year}, but no item label matched.",
+        )
+    return None
+
+
+def _lookup_journal_quality(item: dict) -> dict[str, Any] | None:
+    table = _journal_table()
+    journals = table.get("journals")
+    if not isinstance(journals, dict):
+        return None
+    metadata = _metadata(item)
+    source = str(item.get("source") or "")
+    slug = str(metadata.get("journal_slug") or "").strip()
+    candidates = set(_venue_ids(item))
+    if source == "nature" and slug:
+        candidates.add(f"nature_family_{slug}")
+    if source == "science" and slug:
+        candidates.add(f"science_family_{slug}")
+    for journal_id in candidates:
+        journal = journals.get(journal_id)
+        if isinstance(journal, dict):
+            return _quality_payload(
+                "journal",
+                "journal_quality_levels.json",
+                str(journal.get("tier") or "unknown"),
+                journal.get("bonus", 0.0),
+                str(journal.get("notes") or f"Matched journal quality table entry {journal_id}."),
+            )
+    venue_name = _norm(item.get("venue"))
+    if venue_name:
+        for journal_id, journal in journals.items():
+            if not isinstance(journal, dict):
+                continue
+            names = {_norm(value) for value in journal.get("names", []) if _norm(value)}
+            if venue_name in names:
+                return _quality_payload(
+                    "journal",
+                    "journal_quality_levels.json",
+                    str(journal.get("tier") or "unknown"),
+                    journal.get("bonus", 0.0),
+                    str(journal.get("notes") or f"Matched journal quality table entry {journal_id}."),
+                )
+    return None
+
+
+def attach_quality_metadata(item: dict) -> dict:
+    quality = _lookup_journal_quality(item) or _lookup_conference_quality(item)
+    if not quality:
+        return item
+    item.update(quality)
+    metadata = item.setdefault("metadata", {})
+    if isinstance(metadata, dict):
+        metadata["quality"] = dict(quality)
+    return item
+
+
+def attach_quality_metadata_many(items: list[dict]) -> list[dict]:
+    return [attach_quality_metadata(item) for item in items]
+
+
+# ---- category_select.py ----
+
+import hashlib
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+from auto_research.llm import LLMClient, fallback_score
+from auto_research.models import AppConfig
+from auto_research.paths import ROOT, WORKFLOW_RUNTIME_DIR
+from auto_research.storage import read_json, write_json
+
+
+def _interest_text(config: AppConfig) -> str:
+    return "\n".join(part for part in [config.research_interest, config.researcher_profile] if part).strip()
+
+
+def _category_entries(category_summary: dict[str, Any]) -> list[dict[str, Any]]:
+    entries = category_summary.get("category_summary", [])
+    if not isinstance(entries, list):
+        return []
+    result = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        result.append({
+            "name": name,
+            "count": int(entry.get("count") or 0),
+            "sample_titles": [str(item) for item in (entry.get("sample_titles") or [])[:5]],
+            "sample_keywords": [str(item) for item in (entry.get("sample_keywords") or [])[:20]],
+        })
+    return result
+
+
+def _compact_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": entry["name"],
+            "count": entry["count"],
+            "sample_titles": entry["sample_titles"],
+            "sample_keywords": entry["sample_keywords"],
+        }
+        for entry in entries
+    ]
+
+
+CATEGORY_SELECT_TEMPERATURE = 0.0
+CATEGORY_SELECT_CACHE_SCHEMA_VERSION = "find_category_select_cache_v2"
+CATEGORY_SELECT_CACHE_MAX_ENTRIES = 2000
+
+
+def _use_llm_category_select(config: AppConfig | None = None) -> bool:
+    disabled = os.environ.get("DISABLE_LLM_CATEGORY_SELECT")
+    if disabled is not None and disabled.lower() in {"1", "true", "yes", "on"}:
+        return False
+    value = os.environ.get("USE_LLM_CATEGORY_SELECT")
+    if value is not None:
+        return value.lower() in {"1", "true", "yes", "on", "force"}
+    provider = str(getattr(config, "provider", "") or "").lower()
+    return provider not in {"", "mock"}
+
+
+def _json_or_none(llm: LLMClient, prompt: str, *, temperature: float | None = None) -> Any | None:
+    if not hasattr(llm, "json_or_none"):
+        return None
+    try:
+        return llm.json_or_none(prompt, temperature=temperature)
+    except TypeError:
+        return llm.json_or_none(prompt)
+
+
+def _project_cache_dir() -> Any | None:
+    project = (os.environ.get("PROJECT_ID") or os.environ.get("DEFAULT_PROJECT_ID") or "").strip()
+    if not project:
+        return None
+    root = Path(os.environ.get("WORKSPACE_ROOT") or ROOT).expanduser()
+    return root / "projects" / project / "planning" / "finding" / "cache"
+
+
+def _category_select_cache_enabled(config: AppConfig | None = None) -> bool:
+    disabled = os.environ.get("DISABLE_FIND_CATEGORY_SELECT_CACHE")
+    if disabled is not None and disabled.lower() in {"1", "true", "yes", "on"}:
+        return False
+    explicit = os.environ.get("USE_FIND_CATEGORY_SELECT_CACHE")
+    if explicit is not None:
+        return explicit.lower() in {"1", "true", "yes", "on", "force"}
+    return _project_cache_dir() is not None
+
+
+def _category_select_cache_path(config: AppConfig | None = None) -> Any | None:
+    if not _category_select_cache_enabled(config):
+        return None
+    project_dir = _project_cache_dir()
+    if project_dir is not None:
+        return project_dir / "category_selection.json"
+    return WORKFLOW_RUNTIME_DIR / "state" / "find_category_selection_cache.json"
+
+
+def _normalized_text(value: object) -> str:
+    return " ".join(str(value or "").split()).strip()
+
+
+def _llm_identity(llm: LLMClient) -> dict[str, Any]:
+    summary = llm.summary() if hasattr(llm, "summary") else {}
+    if not isinstance(summary, dict):
+        summary = {}
+    return {
+        "role": str(summary.get("role") or getattr(llm, "role", "") or ""),
+        "provider": str(summary.get("provider") or getattr(llm, "provider", "") or ""),
+        "base_url": str(summary.get("base_url") or getattr(llm, "base_url", "") or ""),
+        "model": str(summary.get("model") or getattr(llm, "model", "") or ""),
+        "api_mode": str(summary.get("api_mode") or getattr(llm, "api_mode", "") or ""),
+    }
+
+
+def _cache_entries_fingerprint(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    compacted = []
+    for entry in entries:
+        compacted.append({
+            "name": _normalized_text(entry.get("name")),
+            "count": int(entry.get("count") or 0),
+            "sample_titles": [_normalized_text(item) for item in (entry.get("sample_titles") or [])[:5]],
+            "sample_keywords": [_normalized_text(item) for item in (entry.get("sample_keywords") or [])[:20]],
+        })
+    return compacted
+
+
+def _category_select_cache_key(
+    category_summary: dict[str, Any],
+    config: AppConfig,
+    llm: LLMClient,
+    entries: list[dict[str, Any]],
+    max_categories: int,
+) -> str:
+    payload = {
+        "schema": CATEGORY_SELECT_CACHE_SCHEMA_VERSION,
+        "temperature": CATEGORY_SELECT_TEMPERATURE,
+        "max_categories": int(max_categories),
+        "interest": _normalized_text(_interest_text(config)),
+        "venue_id": _normalized_text(category_summary.get("venue_id")),
+        "venue": _normalized_text(category_summary.get("venue")),
+        "year": _normalized_text(category_summary.get("year")),
+        "paper_count": int(category_summary.get("paper_count") or 0),
+        "llm": _llm_identity(llm),
+        "entries": _cache_entries_fingerprint(entries),
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _load_category_select_cache(config: AppConfig | None = None) -> dict[str, Any]:
+    path = _category_select_cache_path(config)
+    if path is None:
+        return {}
+    try:
+        payload = read_json(path, {})
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _valid_cached_selection(cached: Any, entries: list[dict[str, Any]], max_categories: int) -> dict[str, Any] | None:
+    if not isinstance(cached, dict):
+        return None
+    if cached.get("schema") != CATEGORY_SELECT_CACHE_SCHEMA_VERSION:
+        return None
+    valid_names = {entry["name"].lower(): entry["name"] for entry in entries}
+    selected = _normalize_selected_rows(cached.get("selected_categories"), valid_names)
+    if not selected:
+        return None
+    selected = selected[:max_categories]
+    rejected = _build_rejected(entries, selected, cached.get("rejected_categories"))
+    selected_names = {item["name"] for item in selected}
+    selected_count = sum(int(entry.get("count") or 0) for entry in entries if entry.get("name") in selected_names)
+    return {
+        "selected_categories": selected,
+        "rejected_categories": rejected,
+        "selected_paper_count": selected_count,
+    }
+
+
+def _store_category_select_cache_entry(config: AppConfig, cache_key: str, selection: dict[str, Any]) -> None:
+    path = _category_select_cache_path(config)
+    if path is None or not cache_key:
+        return
+    payload = _load_category_select_cache(config)
+    entries = payload.get("entries") if isinstance(payload.get("entries"), dict) else {}
+    entries[cache_key] = {
+        "schema": CATEGORY_SELECT_CACHE_SCHEMA_VERSION,
+        "selected_categories": selection.get("selected_categories") or [],
+        "rejected_categories": selection.get("rejected_categories") or [],
+    }
+    if len(entries) > CATEGORY_SELECT_CACHE_MAX_ENTRIES:
+        keys = list(entries.keys())[-CATEGORY_SELECT_CACHE_MAX_ENTRIES:]
+        entries = {key: entries[key] for key in keys}
+    payload = {
+        "schema": CATEGORY_SELECT_CACHE_SCHEMA_VERSION,
+        "entries": entries,
+    }
+    try:
+        write_json(path, payload)
+    except Exception:
+        return
+
+
+def _normalize_selected_rows(rows: Any, valid_names: dict[str, str]) -> list[dict[str, str]]:
+    if not isinstance(rows, list):
+        return []
+    selected: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in rows:
+        if isinstance(row, str):
+            name = row
+            reason = ""
+        elif isinstance(row, dict):
+            name = str(row.get("name") or row.get("category") or "").strip()
+            reason = str(row.get("reason") or "").strip()
+        else:
+            continue
+        canonical = valid_names.get(name.lower())
+        if not canonical or canonical in seen:
+            continue
+        seen.add(canonical)
+        selected.append({"name": canonical, "reason": reason})
+    return selected
+
+
+
+def _min_llm_category_recall(entries: list[dict[str, Any]], max_categories: int) -> int:
+    if len(entries) < 6:
+        return 0
+    try:
+        configured = int(os.environ.get("VENUE_CATEGORY_SELECT_MIN_CATEGORIES", "6") or 6)
+    except Exception:
+        configured = 6
+    return max(0, min(max_categories, len(entries), configured))
+
+
+def _supplement_selected_for_recall(
+    selected: list[dict[str, str]],
+    entries: list[dict[str, Any]],
+    config: AppConfig,
+    max_categories: int,
+) -> list[dict[str, str]]:
+    target = _min_llm_category_recall(entries, max_categories)
+    if target <= 0 or len(selected) >= target:
+        return selected[:max_categories]
+    supplemented = [dict(item) for item in selected[:max_categories]]
+    seen = {item["name"] for item in supplemented}
+    fallback_rows = _fallback_select(entries, config, max_categories)
+    for row in fallback_rows:
+        name = row.get("name", "")
+        if not name or name in seen:
+            continue
+        reason = row.get("reason") or "Deterministic high-recall category supplement."
+        supplemented.append({"name": name, "reason": f"High-recall deterministic supplement after LLM category selection; {reason}"})
+        seen.add(name)
+        if len(supplemented) >= target or len(supplemented) >= max_categories:
+            return supplemented
+    for entry in sorted(entries, key=lambda row: (-int(row.get("count") or 0), str(row.get("name") or ""))):
+        name = entry["name"]
+        if name in seen:
+            continue
+        supplemented.append({"name": name, "reason": "High-recall deterministic supplement after LLM category selection."})
+        seen.add(name)
+        if len(supplemented) >= target or len(supplemented) >= max_categories:
+            break
+    return supplemented[:max_categories]
+
+
+def _fallback_select(entries: list[dict[str, Any]], config: AppConfig, max_categories: int) -> list[dict[str, str]]:
+    interest = _interest_text(config)
+    if not entries:
+        return []
+    if not interest:
+        return [{"name": entry["name"], "reason": "No research profile configured; keeping category for recall."} for entry in entries[:max_categories]]
+
+    scored = []
+    for entry in entries:
+        text = " ".join([
+            entry["name"],
+            " ".join(entry.get("sample_titles") or []),
+            " ".join(entry.get("sample_keywords") or []),
+        ])
+        score = fallback_score(interest, text, "")
+        scored.append((score, entry))
+    scored.sort(key=lambda item: (item[0], item[1].get("count", 0)), reverse=True)
+    def row(score: float, entry: dict[str, Any], prefix: str) -> dict[str, str]:
+        return {
+            "name": entry["name"],
+            "reason": f"{prefix}; adaptive_score={round(score, 3)}.",
+        }
+
+    return [
+        row(score, entry, "High-recall adaptive profile/category fallback")
+        for score, entry in scored[:max_categories]
+    ]
+
+
+def _build_rejected(entries: list[dict[str, Any]], selected: list[dict[str, str]], explicit_rejected: Any = None) -> list[dict[str, str]]:
+    selected_names = {item["name"] for item in selected}
+    valid_names = {entry["name"].lower(): entry["name"] for entry in entries}
+    rejected = _normalize_selected_rows(explicit_rejected, valid_names)
+    rejected_names = {item["name"] for item in rejected}
+    for entry in entries:
+        name = entry["name"]
+        if name not in selected_names and name not in rejected_names:
+            rejected.append({"name": name, "reason": "Not selected for the current research profile."})
+    return rejected
+
+
+def select_relevant_categories(
+    category_summary: dict[str, Any],
+    config: AppConfig,
+    llm: LLMClient,
+    max_categories: int = 6,
+) -> dict[str, Any]:
+    entries = _category_entries(category_summary)
+    valid_names = {entry["name"].lower(): entry["name"] for entry in entries}
+    max_categories = max(1, min(max_categories, len(entries) or 1))
+    interest = _interest_text(config)
+
+    fallback_used = True
+    selected = _fallback_select(entries, config, max_categories)
+    rejected: list[dict[str, str]] = []
+    llm_error = ""
+    selection_mode = "deterministic_adaptive_profile_recall"
+    cache_key = ""
+    use_llm_selection = _use_llm_category_select(config) and llm.enabled and interest and entries
+
+    if use_llm_selection:
+        cache_key = _category_select_cache_key(category_summary, config, llm, entries, max_categories)
+        cache_payload = _load_category_select_cache(config)
+        cache_entries = cache_payload.get("entries") if isinstance(cache_payload.get("entries"), dict) else {}
+        cached_selection = _valid_cached_selection(cache_entries.get(cache_key), entries, max_categories)
+        if cached_selection:
+            selected = cached_selection["selected_categories"]
+            rejected = cached_selection["rejected_categories"]
+            fallback_used = False
+            selection_mode = "llm_adaptive_category_select"
+
+    if fallback_used and use_llm_selection:
+        prompt = f"""
+You select venue categories for a targeted academic paper scan.
+
+Research interest/profile:
+{interest}
+
+Venue: {category_summary.get("venue", "")} {category_summary.get("year", "")}
+Total papers: {category_summary.get("paper_count", "")}
+
+Available categories as JSON:
+{json.dumps(_compact_entries(entries), ensure_ascii=False)}
+
+Return strict JSON:
+{{
+  "selected_categories": [
+    {{"name": "exact category name", "reason": "concise reason"}}
+  ],
+  "rejected_categories": [
+    {{"name": "exact category name", "reason": "concise reason"}}
+  ]
+}}
+
+Rules:
+- Select categories that are likely to contain papers directly useful for the research profile.
+- Use exact category names from the available categories list.
+- Derive relevance from the current research interest/profile only; do not use a fixed global topic list.
+- Prefer recall over precision at this category stage. The final paper-level LLM evidence gate will decide strong recommendations.
+- Do not select a category only because it contains generic words like model, benchmark, AI, data, or theory; explain the concrete profile route it may contain.
+- Include adjacent categories when the samples suggest they may hide relevant papers whose titles are not obvious.
+- Usually select 2-{max_categories} categories unless the profile is very broad.
+- Reasons should be brief and specific.
+"""
+        data = _json_or_none(llm, prompt, temperature=CATEGORY_SELECT_TEMPERATURE)
+        if isinstance(data, dict):
+            llm_selected = _normalize_selected_rows(data.get("selected_categories"), valid_names)
+            if llm_selected:
+                selected = _supplement_selected_for_recall(llm_selected[:max_categories], entries, config, max_categories)
+                rejected = _build_rejected(entries, selected, data.get("rejected_categories"))
+                fallback_used = False
+                selection_mode = "llm_adaptive_category_select"
+                if cache_key:
+                    _store_category_select_cache_entry(config, cache_key, {
+                        "selected_categories": selected,
+                        "rejected_categories": rejected,
+                    })
+            else:
+                llm_error = "LLM returned no valid selected_categories."
+        else:
+            llm_error = "LLM did not return valid JSON."
+
+    if not rejected:
+        rejected = _build_rejected(entries, selected)
+
+    selected_names = {item["name"] for item in selected}
+    selected_count = sum(entry["count"] for entry in entries if entry["name"] in selected_names)
+    return {
+        "venue_id": category_summary.get("venue_id", ""),
+        "venue": category_summary.get("venue", ""),
+        "year": category_summary.get("year", ""),
+        "paper_count": category_summary.get("paper_count", 0),
+        "category_count": len(entries),
+        "selected_paper_count": selected_count,
+        "selected_categories": selected,
+        "rejected_categories": rejected,
+        "fallback_used": fallback_used,
+        "selection_mode": selection_mode,
+        "llm_error": llm_error,
+    }
+
+
+def filter_papers_by_selected_categories(papers: list[dict[str, Any]], selection: dict[str, Any]) -> list[dict[str, Any]]:
+    selected_names = {str(item.get("name") or "") for item in selection.get("selected_categories", []) if isinstance(item, dict)}
+    if not selected_names:
+        return []
+    return [
+        paper
+        for paper in papers
+        if str(paper.get("primary_area") or paper.get("category") or paper.get("track") or "") in selected_names
+    ]
+
+
+# ---- profile_normalize.py ----
+
+import json
+import re
+from typing import Any
+
+from auto_research.llm import LLMClient
+from auto_research.models import AppConfig
+
+
+PROFILE_SCHEMA: dict[str, Any] = {
+    "explicit_profile": {
+        "research_interest_summary": "",
+        "researcher_background": None,
+    },
+    "explicit_retrieval_signals": {
+        "core_concepts": [],
+        "method_terms": [],
+        "application_terms": [],
+        "domain_terms": [],
+        "excluded_terms": [],
+    },
+    "safe_expansions": {
+        "synonyms_or_abbreviations": [
+            {
+                "term": "",
+                "source_term": "",
+                "expansion_type": "synonym",
+                "reason": "",
+            }
+        ],
+    },
+    "filtering_hints": {
+        "hard_exclusions": [],
+        "conditional_exclusions": [
+            {
+                "terms": [],
+                "condition": "",
+            }
+        ],
+        "soft_penalties": [],
+        "must_keep_if_present": [],
+        "preference_hints": [],
+    },
+    "uncertainty": {
+        "ambiguous_terms": [],
+        "needs_clarification": False,
+    },
+}
+
+
+def _as_string(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _as_optional_string(value: Any) -> str | None:
+    text = _as_string(value)
+    return text or None
+
+
+def _as_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = _as_string(item)
+        if text and text not in seen:
+            result.append(text)
+            seen.add(text)
+    return result
+
+
+def _normalize_expansions(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        term = _as_string(item.get("term"))
+        source_term = _as_string(item.get("source_term"))
+        if not term or not source_term:
+            continue
+        expansion_type = _as_string(item.get("expansion_type")) or "synonym"
+        if expansion_type not in {"synonym", "abbreviation", "closely_related"}:
+            expansion_type = "closely_related"
+        reason = _as_string(item.get("reason")) or f"Expansion provided for explicit source term: {source_term}."
+        key = (term.lower(), source_term.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({
+            "term": term,
+            "source_term": source_term,
+            "expansion_type": expansion_type,
+            "reason": reason,
+        })
+    return result
+
+
+def _normalize_conditional_exclusions(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[tuple[str, ...], str]] = set()
+    for item in value:
+        if isinstance(item, str):
+            terms = [item]
+            condition = item
+        elif isinstance(item, dict):
+            terms = _as_string_list(item.get("terms"))
+            condition = _as_string(item.get("condition"))
+        else:
+            continue
+        if not terms or not condition:
+            continue
+        key = (tuple(term.lower() for term in terms), condition.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({"terms": terms, "condition": condition})
+    return result
+
+
+def _canonical_condition(value: str) -> str:
+    text = _as_string(value).lower()
+    text = re.sub(r"^unless\s+(?:they\s+)?directly support\s+", "exclude only if they do not directly support ", text)
+    text = re.sub(r"^unless\s+(?:it\s+)?directly supports\s+", "exclude only if they do not directly support ", text)
+    text = re.sub(r"^unless\s+", "exclude only if the exception is not met: ", text)
+    text = text.replace("do not directly supports", "do not directly support")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip(" .")
+
+
+def _dedupe_conditional_exclusions(value: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[tuple[str, ...], str]] = set()
+    for item in value:
+        terms = _as_string_list(item.get("terms"))
+        condition = _as_string(item.get("condition"))
+        if not terms or not condition:
+            continue
+        canonical_terms = tuple(sorted(term.lower() for term in terms))
+        canonical_condition = _canonical_condition(condition)
+        key = (canonical_terms, canonical_condition)
+        if key in seen:
+            continue
+        seen.add(key)
+        if condition.lower().startswith("unless "):
+            condition = canonical_condition
+        result.append({"terms": terms, "condition": condition})
+    return result
+
+
+def normalize_profile_shape(data: Any) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        data = {}
+    explicit_profile = data.get("explicit_profile") if isinstance(data.get("explicit_profile"), dict) else {}
+    explicit_signals = data.get("explicit_retrieval_signals") if isinstance(data.get("explicit_retrieval_signals"), dict) else {}
+    safe_expansions = data.get("safe_expansions") if isinstance(data.get("safe_expansions"), dict) else {}
+    filtering_hints = data.get("filtering_hints") if isinstance(data.get("filtering_hints"), dict) else {}
+    uncertainty = data.get("uncertainty") if isinstance(data.get("uncertainty"), dict) else {}
+
+    return {
+        "explicit_profile": {
+            "research_interest_summary": _as_string(explicit_profile.get("research_interest_summary")),
+            "researcher_background": _as_optional_string(explicit_profile.get("researcher_background")),
+        },
+        "explicit_retrieval_signals": {
+            "core_concepts": _as_string_list(explicit_signals.get("core_concepts")),
+            "method_terms": _as_string_list(explicit_signals.get("method_terms")),
+            "application_terms": _as_string_list(explicit_signals.get("application_terms")),
+            "domain_terms": _as_string_list(explicit_signals.get("domain_terms")),
+            "excluded_terms": _as_string_list(explicit_signals.get("excluded_terms")),
+        },
+        "safe_expansions": {
+            "synonyms_or_abbreviations": _normalize_expansions(safe_expansions.get("synonyms_or_abbreviations")),
+        },
+        "filtering_hints": {
+            "hard_exclusions": _as_string_list(filtering_hints.get("hard_exclusions")),
+            "conditional_exclusions": _normalize_conditional_exclusions(filtering_hints.get("conditional_exclusions")),
+            "soft_penalties": _as_string_list(filtering_hints.get("soft_penalties")),
+            "must_keep_if_present": _as_string_list(filtering_hints.get("must_keep_if_present")),
+            "preference_hints": _as_string_list(filtering_hints.get("preference_hints")),
+        },
+        "uncertainty": {
+            "ambiguous_terms": _as_string_list(uncertainty.get("ambiguous_terms")),
+            "needs_clarification": bool(uncertainty.get("needs_clarification")),
+        },
+    }
+
+
+def _keyword_terms(text: str) -> list[str]:
+    terms = re.findall(r"[\u4e00-\u9fff]{2,}|[a-zA-Z0-9][a-zA-Z0-9_.-]{2,}", text or "")
+    result: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        cleaned = term.strip(".,;:!?()[]{}\"'")
+        if cleaned and cleaned.lower() not in seen:
+            result.append(cleaned)
+            seen.add(cleaned.lower())
+    return result
+
+
+def _split_terms(text: str) -> list[str]:
+    cleaned = re.sub(r"\b(or|and)\b", ",", text, flags=re.IGNORECASE)
+    return [
+        term.strip(" .;:")
+        for term in cleaned.split(",")
+        if term.strip(" .;:")
+    ]
+
+
+def _append_unique(items: list[str], value: str) -> None:
+    text = _as_string(value)
+    if text and text not in items:
+        items.append(text)
+
+
+def _append_expansion(expansions: list[dict[str, str]], term: str, source_term: str, expansion_type: str, reason: str) -> None:
+    if not term or not source_term:
+        return
+    key = (term.lower(), source_term.lower())
+    if any((item["term"].lower(), item["source_term"].lower()) == key for item in expansions):
+        return
+    expansions.append({
+        "term": term,
+        "source_term": source_term,
+        "expansion_type": expansion_type,
+        "reason": reason,
+    })
+
+
+def _extract_conditional_exclusions(raw_text: str) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for match in re.finditer(r"\b(?:avoid|exclude|skip|filter out)\s+(.+?)\s+unless\s+(.+?)(?:[.;\n]|$)", raw_text, flags=re.IGNORECASE):
+        terms = _split_terms(match.group(1))
+        unless_clause = _as_string(match.group(2))
+        lowered = unless_clause.lower()
+        if lowered.startswith(("it directly supports ", "they directly support ", "directly supports ", "directly support ")):
+            target = re.sub(r"^(it\s+|they\s+)?directly supports?\s+", "", unless_clause, flags=re.IGNORECASE)
+            condition = f"exclude only if they do not directly support {target}"
+        elif lowered.startswith(("it is directly related to ", "they are directly related to ", "directly related to ")):
+            target = re.sub(r"^(it is\s+|they are\s+)?directly related to\s+", "", unless_clause, flags=re.IGNORECASE)
+            condition = f"exclude only if they are not directly related to {target}"
+        else:
+            condition = f"exclude only if the exception is not met: {unless_clause}"
+        if terms and condition:
+            results.append({"terms": terms, "condition": condition})
+    return results
+
+
+def _extract_preference_hints(raw_text: str) -> list[str]:
+    hints: list[str] = []
+    for match in re.finditer(r"\bprefer\s+(.+?)(?:[.;\n]|$)", raw_text, flags=re.IGNORECASE):
+        for term in _split_terms(match.group(1)):
+            _append_unique(hints, f"prefer {term}")
+    return hints
+
+
+def _augment_safe_expansions(profile: dict[str, Any], raw_text: str) -> None:
+    explicit_profile = profile["explicit_profile"]
+    explicit_signals = profile["explicit_retrieval_signals"]
+    source_text = " ".join([
+        raw_text,
+        explicit_profile.get("research_interest_summary") or "",
+        " ".join(explicit_signals.get("core_concepts") or []),
+        " ".join(explicit_signals.get("method_terms") or []),
+        " ".join(explicit_signals.get("application_terms") or []),
+        " ".join(explicit_signals.get("domain_terms") or []),
+    ]).lower()
+    expansions = profile["safe_expansions"]["synonyms_or_abbreviations"]
+    rules = [
+        (
+            "paper discovery",
+            "paper recommendation",
+            "closely_related",
+            "Common retrieval wording for systems that surface relevant papers.",
+        ),
+        (
+            "literature review automation",
+            "automated literature review",
+            "synonym",
+            "Equivalent wording often used in paper titles and abstracts.",
+        ),
+        (
+            "academic research automation",
+            "research assistant agent",
+            "closely_related",
+            "Common term for agent systems that assist research workflows.",
+        ),
+        (
+            "academic research automation",
+            "AI scientist",
+            "closely_related",
+            "Common term for systems that automate parts of scientific research.",
+        ),
+        (
+            "retrieval augmented generation",
+            "RAG",
+            "abbreviation",
+            "Standard abbreviation for retrieval augmented generation.",
+        ),
+        (
+            "large language model",
+            "LLM",
+            "abbreviation",
+            "Standard abbreviation for large language model.",
+        ),
+    ]
+    for source_term, term, expansion_type, reason in rules:
+        if source_term in source_text:
+            _append_expansion(expansions, term, source_term, expansion_type, reason)
+
+
+def _postprocess_profile(profile: dict[str, Any], config: AppConfig) -> dict[str, Any]:
+    raw_text = "\n".join(part for part in [config.research_interest, config.researcher_profile] if part)
+    filtering_hints = profile["filtering_hints"]
+    conditional_exclusions = filtering_hints["conditional_exclusions"]
+
+    for exclusion in _extract_conditional_exclusions(raw_text):
+        if exclusion not in conditional_exclusions:
+            conditional_exclusions.append(exclusion)
+    filtering_hints["conditional_exclusions"] = _dedupe_conditional_exclusions(conditional_exclusions)
+
+    conditional_terms = {term.lower() for item in filtering_hints["conditional_exclusions"] for term in item.get("terms", [])}
+    filtering_hints["hard_exclusions"] = [
+        term for term in filtering_hints["hard_exclusions"]
+        if " unless " not in term.lower() and term.lower() not in conditional_terms
+    ]
+    profile["explicit_retrieval_signals"]["excluded_terms"] = [
+        term for term in profile["explicit_retrieval_signals"]["excluded_terms"]
+        if " unless " not in term.lower() and term.lower() not in conditional_terms
+    ]
+
+    for hint in _extract_preference_hints(raw_text):
+        _append_unique(filtering_hints["preference_hints"], hint)
+
+    preference_terms = {
+        term.removeprefix("prefer ").lower()
+        for term in filtering_hints["preference_hints"]
+    }
+    profile["uncertainty"]["ambiguous_terms"] = [
+        term for term in profile["uncertainty"]["ambiguous_terms"]
+        if term.lower() not in preference_terms
+    ]
+
+    if profile_retrieval_text(profile):
+        profile["uncertainty"]["needs_clarification"] = False
+
+    _augment_safe_expansions(profile, raw_text)
+    return profile
+
+
+def fallback_profile(config: AppConfig) -> dict[str, Any]:
+    interest = _as_string(config.research_interest)
+    background = _as_optional_string(config.researcher_profile)
+    terms = _keyword_terms(f"{interest}\n{background or ''}")[:24]
+    profile = normalize_profile_shape({
+        "explicit_profile": {
+            "research_interest_summary": interest,
+            "researcher_background": background,
+        },
+        "explicit_retrieval_signals": {
+            "core_concepts": terms,
+            "method_terms": [],
+            "application_terms": [],
+            "domain_terms": [],
+            "excluded_terms": [],
+        },
+        "safe_expansions": {"synonyms_or_abbreviations": []},
+        "filtering_hints": {
+            "hard_exclusions": [],
+            "conditional_exclusions": [],
+            "soft_penalties": [],
+            "must_keep_if_present": [],
+            "preference_hints": [],
+        },
+        "uncertainty": {
+            "ambiguous_terms": [],
+            "needs_clarification": not bool(interest or background),
+        },
+    })
+    return _postprocess_profile(profile, config)
+
+
+def build_stage0_prompt(config: AppConfig) -> str:
+    schema = json.dumps(PROFILE_SCHEMA, ensure_ascii=False, indent=2)
+    return f"""
+Your task is to convert the user's free-text research interest and researcher profile into a structured JSON profile for downstream paper retrieval and filtering.
+
+Important rules:
+- Extract only research-relevant information.
+- Do not invent research interests.
+- Do not recommend papers.
+- Do not choose conferences, tracks, fields, or arXiv categories.
+- Do not invent ranking or filtering preferences.
+- Do not polish or rewrite the user's intent beyond concise normalization.
+- Preserve uncertainty explicitly.
+- Separate explicit user statements from safe retrieval expansions.
+- Safe expansions must be conservative: direct synonyms, standard abbreviations, or clearly adjacent retrieval terms only.
+- Every safe expansion must include term, source_term, expansion_type, and reason. The source_term must come from explicit user input.
+- Preserve conditional exclusions. For "avoid X unless Y", do not put X in hard_exclusions; put it in conditional_exclusions with the condition.
+- Use soft_penalties for disliked topics that may still be useful if strongly relevant.
+- Use preference_hints for ranking/filtering preferences such as practical systems, reproducible pipelines, or lightweight experiments.
+- Do not put preferences in ambiguous_terms unless the system genuinely cannot interpret them for retrieval or ranking.
+- Set needs_clarification=true only when missing or ambiguous information would block retrieval.
+- If a field is missing, use an empty list or null.
+- Output valid JSON only.
+
+User input:
+
+[INTEREST]
+{config.research_interest}
+[/INTEREST]
+
+[RESEARCHER_PROFILE]
+{config.researcher_profile}
+[/RESEARCHER_PROFILE]
+
+Return JSON with exactly this schema:
+{schema}
+""".strip()
+
+
+def _profile_signal_count(profile: dict[str, Any]) -> int:
+    signals = profile.get("explicit_retrieval_signals", {}) if isinstance(profile, dict) else {}
+    expansions = profile.get("safe_expansions", {}) if isinstance(profile, dict) else {}
+    count = 0
+    for key in ["core_concepts", "method_terms", "application_terms", "domain_terms"]:
+        count += len(_as_string_list(signals.get(key)))
+    count += len(_normalize_expansions(expansions.get("synonyms_or_abbreviations")))
+    return count
+
+
+def normalize_user_profile(config: AppConfig, llm: LLMClient) -> tuple[dict[str, Any], bool, str]:
+    if not (config.research_interest or config.researcher_profile):
+        return fallback_profile(config), True, ""
+    if not llm.enabled:
+        return fallback_profile(config), True, "LLM is not configured; used deterministic fallback."
+    data = llm.json_or_none(build_stage0_prompt(config))
+    if data is None:
+        return fallback_profile(config), True, "LLM did not return valid JSON; used deterministic fallback."
+    profile = _postprocess_profile(normalize_profile_shape(data), config)
+    retrieval_text = profile_retrieval_text(profile)
+    if not retrieval_text:
+        return fallback_profile(config), True, "LLM returned an empty profile; used deterministic fallback."
+    raw_text = "\n".join(part for part in [config.research_interest, config.researcher_profile] if part)
+    raw_terms = _keyword_terms(raw_text)
+    if len(raw_terms) >= 8 and _profile_signal_count(profile) < 4:
+        return fallback_profile(config), True, "LLM profile was too sparse for the provided research interest; used deterministic fallback."
+    return profile, False, ""
+
+
+def profile_retrieval_text(profile: dict[str, Any]) -> str:
+    explicit_profile = profile.get("explicit_profile", {})
+    explicit_signals = profile.get("explicit_retrieval_signals", {})
+    safe_expansions = profile.get("safe_expansions", {})
+    filtering_hints = profile.get("filtering_hints", {})
+    parts: list[str] = []
+    for value in [
+        explicit_profile.get("research_interest_summary"),
+        explicit_profile.get("researcher_background"),
+    ]:
+        text = _as_string(value)
+        if text:
+            parts.append(text)
+    for key in ["core_concepts", "method_terms", "application_terms", "domain_terms"]:
+        parts.extend(_as_string_list(explicit_signals.get(key)))
+    parts.extend(item["term"] for item in _normalize_expansions(safe_expansions.get("synonyms_or_abbreviations")))
+    hard_exclusions = _as_string_list(filtering_hints.get("hard_exclusions"))
+    conditional_terms = {
+        term.lower()
+        for item in _normalize_conditional_exclusions(filtering_hints.get("conditional_exclusions"))
+        for term in item.get("terms", [])
+    }
+    excluded_terms = [
+        term for term in _as_string_list(explicit_signals.get("excluded_terms"))
+        if term.lower() not in conditional_terms
+    ]
+    if hard_exclusions or excluded_terms:
+        exclusions = list(dict.fromkeys([*excluded_terms, *hard_exclusions]))
+        parts.append("Excluded topics: " + ", ".join(exclusions))
+    for item in _normalize_conditional_exclusions(filtering_hints.get("conditional_exclusions")):
+        parts.append(f"Conditional exclusion: reject {', '.join(item['terms'])} {item['condition']}.")
+    soft_penalties = _as_string_list(filtering_hints.get("soft_penalties"))
+    if soft_penalties:
+        parts.append("Soft penalties: " + ", ".join(soft_penalties))
+    preference_hints = _as_string_list(filtering_hints.get("preference_hints"))
+    if preference_hints:
+        parts.append("Preference hints: " + ", ".join(preference_hints))
+    return "\n".join(dict.fromkeys(part for part in parts if part))
+
+
+# ---- sources.py ----
+
 import hashlib
 import html
 import json
@@ -1781,7 +3685,7 @@ def _parse_dblp_yelinks(address: str, years: list[int], max_years: int = 4) -> l
 
 def _venue_cache_candidate_paths() -> list[Path]:
     root = ROOT
-    roots = [WORKFLOW_RUNTIME_DIR / "auto_find" / "find_results.json"]
+    roots = [WORKFLOW_RUNTIME_DIR / "finding" / "find_results.json"]
     project_ids = [
         value.strip()
         for value in [os.environ.get("PROJECT_ID"), os.environ.get("PROJECT_ID"), os.environ.get("DEFAULT_PROJECT_ID")]

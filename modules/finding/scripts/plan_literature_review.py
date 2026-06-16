@@ -132,10 +132,10 @@ def update_project_config(paths, cfg: dict[str, Any], preferred: list[str], seco
 
 
 def write_taste_custom_venues(years: list[int]) -> None:
-    root = Path(__file__).resolve().parents[1]
+    repo_root = Path(__file__).resolve().parents[2]
     candidate_paths = [
-        root / "modules" / "finding" / "auto_research" / "data" / "custom_venues.json",
-        root / "external" / "TASTE" / "auto_research" / "data" / "custom_venues.json",
+        repo_root / "modules" / "finding" / "data" / "custom_venues.json",
+        repo_root / "external" / "TASTE" / "auto_research" / "data" / "custom_venues.json",
     ]
     rows = []
     for row in CUSTOM_VENUES:

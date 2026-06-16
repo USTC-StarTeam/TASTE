@@ -50,7 +50,7 @@ def main() -> None:
         raise SystemExit("--run-id is required unless --repair-full-text is used")
     _ensure_runtime_imports()
     from auto_research.models import AppConfig, ReadRequest
-    from auto_research.auto_read.pipeline import run_read
+    from read_pipeline import run_read
 
     config = AppConfig(**_load_json(args.config_json, {}))
     result = run_read(ReadRequest(run_id=args.run_id, paper_ids=args.paper_id, max_papers=args.max_papers), config)

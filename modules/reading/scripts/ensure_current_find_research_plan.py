@@ -402,6 +402,157 @@ def quarantine_corrupt_current_find_json_artifacts(paths, run_id: str, failures:
     return receipt
 
 
+def current_find_deep_read_fragment_failures(paths, run_id: str) -> list[dict[str, Any]]:
+    fragment_dir = paths.planning / "finding" / CURRENT_FIND_DEEP_READ_FRAGMENT_DIR_NAME
+    expected = str(run_id or "").strip()
+    failures: list[dict[str, Any]] = []
+    if not fragment_dir.exists():
+        return failures
+    for fragment_path in sorted(fragment_dir.glob("*.json")):
+        artifact = f"{CURRENT_FIND_DEEP_READ_FRAGMENT_DIR_NAME}/{fragment_path.name}"
+        payload, error = load_json_with_error(fragment_path, {})
+        if isinstance(error, dict):
+            failures.append({**error, "artifact": artifact, "fragment_name": fragment_path.name})
+            continue
+        payload_run = str((payload if isinstance(payload, dict) else {}).get("run_id") or (payload if isinstance(payload, dict) else {}).get("current_find_run_id") or "").strip()
+        if payload_run and expected and payload_run != expected:
+            failures.append({
+                "path": str(fragment_path),
+                "artifact": artifact,
+                "fragment_name": fragment_path.name,
+                "error_type": "run_id_mismatch",
+                "message": f"fragment run_id {payload_run} does not match current run_id {expected}",
+            })
+    return failures
+
+
+def _deep_read_fragment_repair_key(name: Any) -> str:
+    stem = Path(str(name or "")).stem
+    for marker in ("_repair_attempt", "_repair"):
+        if marker in stem:
+            stem = stem.split(marker, 1)[0]
+            break
+    return stem.strip()
+
+
+def _deep_read_fragment_rows_from_payload(payload: Any, path: Path, run_id: str) -> list[dict[str, Any]]:
+    if not _fragment_payload_is_current(payload, path, run_id, None):
+        return []
+    rows: list[dict[str, Any]] = []
+    if isinstance(payload, dict) and isinstance(payload.get("reading"), dict):
+        rows.append(_merge_fragment_top_level_reading_fields(payload, payload["reading"]))
+    rows.extend(_reading_rows_from_subagent_payload(payload))
+    return [row for row in rows if isinstance(row, dict) and _valid_claude_reading(row)]
+
+
+def _deep_read_fragment_identity_keys(rows: list[dict[str, Any]]) -> set[str]:
+    keys: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for identity in _identity_values(row):
+            keys.add(f"identity:{identity}")
+    return keys
+
+
+def _current_find_valid_fragment_replacements(fragment_dir: Path, run_id: str, excluded_paths: set[Path]) -> dict[str, list[dict[str, Any]]]:
+    replacements: dict[str, list[dict[str, Any]]] = {}
+    if not fragment_dir.exists():
+        return replacements
+    for path in sorted(fragment_dir.glob("*.json")):
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path
+        if resolved in excluded_paths:
+            continue
+        payload, error = load_json_with_error(path, {})
+        if isinstance(error, dict):
+            continue
+        rows = _deep_read_fragment_rows_from_payload(payload, path, run_id)
+        if not rows:
+            continue
+        record = {
+            "name": path.name,
+            "path": str(path),
+            "reading_count": len(rows),
+            "paper_ids": [str(row.get("paper_id") or row.get("id") or "").strip() for row in rows if str(row.get("paper_id") or row.get("id") or "").strip()],
+            "titles": [str(row.get("title") or "").strip() for row in rows if str(row.get("title") or "").strip()],
+        }
+        keys = {_deep_read_fragment_repair_key(path.name)} | _deep_read_fragment_identity_keys(rows)
+        for key in keys:
+            if key:
+                replacements.setdefault(key, []).append(record)
+    return replacements
+
+
+def _fragment_failure_replacement_keys(failure: dict[str, Any]) -> set[str]:
+    path = Path(str((failure if isinstance(failure, dict) else {}).get("path") or ""))
+    keys = {_deep_read_fragment_repair_key((failure if isinstance(failure, dict) else {}).get("fragment_name") or path.name)}
+    payload, error = load_json_with_error(path, {}) if str(path) else ({}, {"error_type": "missing_path"})
+    if not isinstance(error, dict) and isinstance(payload, dict):
+        rows: list[dict[str, Any]] = []
+        if isinstance(payload.get("reading"), dict):
+            rows.append(_merge_fragment_top_level_reading_fields(payload, payload["reading"]))
+        rows.extend(_reading_rows_from_subagent_payload(payload))
+        keys |= _deep_read_fragment_identity_keys([row for row in rows if isinstance(row, dict)])
+    return {key for key in keys if key}
+
+
+def quarantine_corrupt_current_find_deep_read_fragments(paths, run_id: str, failures: list[dict[str, Any]] | None = None, reason: str = "validated_current_find_fragment_repair") -> dict[str, Any]:
+    fragment_dir = paths.planning / "finding" / CURRENT_FIND_DEEP_READ_FRAGMENT_DIR_NAME
+    failures = failures if failures is not None else current_find_deep_read_fragment_failures(paths, run_id)
+    if not failures:
+        return {"status": "not_needed", "run_id": run_id, "reason": reason, "files": []}
+    created_at = now_iso()
+    backup_dir = paths.state / "current_find_artifact_backups" / f"corrupt_{_safe_timestamp_for_path(created_at)}" / CURRENT_FIND_DEEP_READ_FRAGMENT_DIR_NAME
+    excluded: set[Path] = set()
+    for failure in failures:
+        path = Path(str((failure if isinstance(failure, dict) else {}).get("path") or ""))
+        if str(path):
+            try:
+                excluded.add(path.resolve())
+            except OSError:
+                excluded.add(path)
+    replacements = _current_find_valid_fragment_replacements(fragment_dir, run_id, excluded)
+    files: list[dict[str, Any]] = []
+    for failure in failures:
+        target = Path(str((failure if isinstance(failure, dict) else {}).get("path") or ""))
+        name = str((failure if isinstance(failure, dict) else {}).get("fragment_name") or target.name or "").strip()
+        record = {"name": name, "target": str(target), "reason": reason, "parse_failure": failure}
+        try:
+            target.relative_to(fragment_dir)
+        except ValueError:
+            record["action"] = "skipped_outside_current_find_fragment_dir"
+            files.append(record)
+            continue
+        matches = [item for key in _fragment_failure_replacement_keys(failure) for item in replacements.get(key, [])]
+        unique_matches = list({item["path"]: item for item in matches}.values())
+        if not target.exists():
+            record["action"] = "skipped_missing"
+        elif not unique_matches:
+            record["action"] = "skipped_no_valid_same_run_replacement"
+        else:
+            backup = backup_dir / name
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(target), str(backup))
+            record.update({"action": "quarantined_with_valid_same_run_replacement", "backup": str(backup), "replacement_fragments": unique_matches, "size": backup.stat().st_size})
+        files.append(record)
+    moved = [row for row in files if row.get("action") == "quarantined_with_valid_same_run_replacement"]
+    receipt = {
+        "status": "quarantined_corrupt_deep_read_fragments" if moved else "no_fragments_quarantined",
+        "run_id": run_id,
+        "created_at": created_at,
+        "reason": reason,
+        "parse_failures": failures,
+        "backup_dir": str(backup_dir),
+        "files": files,
+        "policy": "Invalid current-Find deep-read fragments may be removed from the active directory only when a parseable same-run fragment with valid deep-read fields already replaces the same fragment/identity. Scientific content is not generated or edited by this quarantine step.",
+    }
+    save_json(paths.state / "current_find_corrupt_deep_read_fragment_quarantine.json", receipt)
+    return receipt
+
+
 def compact(value: Any, limit: int = 900) -> str:
     text = " ".join(str(value or "").replace("\r", "\n").split())
     return text if len(text) <= limit else text[: max(0, limit - 3)].rstrip() + "..."
@@ -531,13 +682,13 @@ def _trusted_public_en(row: dict[str, Any], key: str, *, min_words: int = 4) -> 
 
 def _generic_public_gate_list_en(values: Any) -> list[str]:
     mapped = {
-        "environment-stage base selected": "environment review completed",
+        "Environment validates candidate base proposal": "environment review completed",
         "environment review completed": "environment review completed",
         "repo/data/env/protocol gate passed": "repo/data/environment/protocol checks passed",
         "repo/data/protocol evidence ready": "repo/data/protocol evidence ready",
         "metrics and bad cases written": "metrics and bad cases written",
         "evidence gates refreshed": "evidence gates refreshed",
-        "local evidence gates pass": "local evidence gates pass",
+        "local evidence gates pass after Environment validation": "local evidence gates pass after Environment validation",
         "audit JSON exists": "local audit JSON exists",
         "metrics parsed": "metrics parsed",
         "bad-case slice written": "bad-case slices written",
@@ -591,7 +742,7 @@ def first_nonempty_success_gate_en(plan: dict[str, Any]) -> list[str]:
             gates = _generic_public_gate_list_en(implementation.get("success_gate")) if isinstance(implementation, dict) else []
             if gates:
                 return gates
-    return ["environment review completed", "local evidence gates pass"]
+    return ["environment review completed", "local evidence gates pass after Environment validation"]
 
 
 def enrich_public_plan_projection(plan: dict[str, Any], idx: int, idea_by_id: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -1195,27 +1346,34 @@ STALE_EXECUTION_BINDING_PATTERNS = (
 )
 
 PRE_ENV_BASE_BINDING_LITERAL_MARKERS = (
-    "base_repo",
-    "repo_url",
+    "repo_path",
+    "local_path",
+    "active_repo",
+    "current_active_repo",
+    "selected_base_repo",
+    "current_selected_repo",
     "training_script",
+    "ready_to_execute",
     "当前选定基底",
     "当前选定基库",
-    "实验基底",
-    "实验基库",
-    "提供实验基底",
-    "基底兼容",
-    "基推荐器",
-    "基库",
+    "当前基底",
+    "已选定基底",
+    "已选择基底",
+    "环境阶段选出的当前基底",
+    "环境阶段已选择当前基底",
+    "已通过参考复现",
+    "已通过 repo/data/env",
     "现有训练脚本",
 )
 
 PRE_ENV_BASE_BINDING_REGEXES = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
-        r"基于[^\n。；;]{1,80}(?:基库|仓库|repo|训练脚本|现有训练)",
-        r"当前基底\s*[A-Za-z0-9_/.-]+",
-        r"(?:base repo|selected base|current base|active repo|existing repo)\s*[:=]",
-        r"github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
+        r"(?:repo_path|local_path|selected_repo_path|active_repo_path)\s*[\"']?\s*[:=]\s*[\"']?(?:/|~|\$HOME|[A-Za-z]:)",
+        r"(?:训练命令|运行命令|training_script|command)\s*[\"']?\s*[:=]",
+        r"(?:当前|已选|已选择|已选定|已通过)[^\n。；;]{0,70}(?:基底|基库|仓库|repo|训练脚本)",
+        r"(?:环境阶段|environment)[^\n。；;]{0,50}(?:已|已经|选出|选定|选择了)[^\n。；;]{0,70}(?:基底|仓库|repo|base)",
+        r"(?:selected base|current base|active repo|existing repo)\s*[:=]",
     )
 )
 
@@ -1240,6 +1398,10 @@ PRE_ENV_IDEA_BINDING_KEYS = (
     "implementation_plan",
     "execution_selection",
     "ready_to_execute",
+    "repo_path",
+    "local_path",
+    "selected_repo_path",
+    "active_repo_path",
     "base_repo",
     "repo",
     "repo_url",
@@ -1267,6 +1429,10 @@ PRE_ENV_PLAN_BINDING_KEYS = (
     "implementation_plan",
     "execution_selection",
     "versions",
+    "repo_path",
+    "local_path",
+    "selected_repo_path",
+    "active_repo_path",
     "base_repo",
     "repo",
     "repo_url",
@@ -3410,13 +3576,12 @@ def build_ideas(readings: list[dict[str, Any]], repo: dict[str, Any], fresh_plan
     method_refs = [row for row in readings if row.get("claim_ready_anchor")][:6] or readings[:6]
     topic_axis_refs = select_support(readings, require_topic_match=True, limit=8)
     pending_target = {
-        "selection_stage": ENVIRONMENT_SELECTION_STAGE,
-        "status": "waiting_for_environment_base_selection",
-        "repo_path": "",
-        "repo_name": "",
+        "selection_stage": "read_idea_plan_candidate_proposal",
+        "status": "candidate_pending_environment_validation",
+        "candidate_repo_hint": "to be proposed from current Find/Read evidence",
         "dataset_contract": {
-            "status": "not_selected_until_environment_stage",
-            "policy": "Find/Read/Idea/Plan must not bind a paper to a repository, dataset, or command. Environment-stage Claude Code selects the base only after reading current strong recommendations and validating repo/data/protocol evidence.",
+            "status": "candidate_pending_environment_validation",
+            "policy": "Find/Read/Idea/Plan must propose candidate base papers/repos and concrete modification targets when evidence supports them, but must not claim a repo is environment-selected, write local repo_path, or emit runnable training commands. Environment-stage Claude Code validates and locks repo/data/protocol evidence.",
         },
     }
     strong_refs = [_paper_ref(row) for row in method_refs[:6]]
@@ -3426,45 +3591,45 @@ def build_ideas(readings: list[dict[str, Any]], repo: dict[str, Any], fresh_plan
             "idea_id": "idea-current-find-001",
             "title": "当前 Find 强推荐候选池的基础路线选择与复现审计",
             "status": "approved_for_planning",
-            "recommendation": "wait_for_environment_base_selection",
+            "recommendation": "candidate_repo_base_proposal_ready_for_environment_validation",
             "score": 9.0,
             "idea_score": 9.0,
-            "hypothesis": f"围绕“{topic}”的后续科研必须先由环境阶段 Claude Code 比较当前强推荐论文、代码、数据和协议，选出真正可复现的基底；Find 排名或历史 active_repo 不能直接决定主线。",
-            "mechanism": "把当前强推荐论文拆成候选基底池，逐一审计 repo 可获得性、数据合同、入口命令、指标解析、复现协议和失败风险。",
+            "hypothesis": f"围绕“{topic}”的后续科研应由 Idea/Plan 先提出候选基底论文或候选 repo、说明要修改的模块和验证目标；Environment 阶段再基于当前强推荐、代码、数据和协议证据验证并锁定可复现基底。Find 排名或历史 active_repo 不能直接决定主线。",
+            "mechanism": "把当前强推荐论文拆成候选基底池；每个候选必须写清候选 repo/官方代码线索、可插入模块、预期最小改动、数据和指标要求，再交给 Environment 阶段审计 repo 可获得性、数据合同、入口命令、指标解析、复现协议和失败风险。",
             "implementation_target": pending_target,
-            "initial_experiment": "",
-            "initial_experiment_required": True,
+            "initial_experiment": "先为当前强推荐论文池建立候选基底表：每个候选至少包含论文标题、官方或作者 repo 线索（若无 repo 则写明需搜索的官方代码位置）、拟修改模块、预期数据/指标协议和最小验证目标；Environment 阶段只负责验证并锁定其中一个候选，不得使用历史 active_repo 代替当前候选。",
+            "initial_experiment_required": False,
             "bad_case_slice": ["代码不可得", "数据不可得", "协议不完整", "指标不可解析", "复现失败"],
-            "success_gate": ["selection_stage=environment_claude_code", "fresh_find_run_id 与当前 Find 一致", "repo_path/data/protocol/metrics 均有证据", "没有使用历史 active_repo 作为默认主线"],
+            "success_gate": ["idea/plan 明确列出候选基底或候选 repo 线索", "Environment 阶段验证 fresh_find_run_id 与当前 Find 一致", "repo_path/data/protocol/metrics 均由 Environment 审计后写入", "没有使用历史 active_repo 作为默认主线"],
             "supporting_papers": strong_refs,
             "claude_code_tasks": ["读取当前 Find 强推荐、精读、ideas、plans 和补充检索主题。", "为每个候选基底审计代码、数据、协议、可运行入口和复现风险。", "只在证据充分时写入 evidence_ready_repo_selection.json；否则保持 blocked。"],
-            "guardrail": "这是文献到环境选择的规划 idea，不是基底选择结论。",
+            "guardrail": "这是文献到候选基底 proposal 的规划 idea，不是 Environment 已选基底结论。",
         },
         {
             "id": "idea-current-find-002",
             "idea_id": "idea-current-find-002",
             "title": f"{topic} 的机制增强与消融路线",
             "status": "approved_for_planning",
-            "recommendation": "wait_for_environment_base_selection",
+            "recommendation": "candidate_repo_base_proposal_ready_for_environment_validation",
             "score": 8.2,
             "idea_score": 8.2,
-            "hypothesis": "在基底复现通过后，把当前强推荐中多篇论文共同支持的机制拆成一个最小增强模块，只有同协议 ablation 稳定提升才继续推进。",
-            "mechanism": "从强推荐文献中提取可实现机制，作为条件信息、表示学习、生成/去噪、排序或约束模块接入环境阶段选出的基底。",
+            "hypothesis": "先在 idea/plan 中提出最适合承载该机制的候选基底论文或候选 repo，并说明最小增强模块；Environment 验证锁定该候选后，只有同协议 ablation 稳定提升才继续推进。",
+            "mechanism": "从强推荐文献中提取可实现机制，作为条件信息、表示学习、生成/去噪、排序或约束模块，明确建议接入的候选基底及其待改模块；未通过 Environment 审计前不得写成已选主线。",
             "implementation_target": pending_target,
-            "initial_experiment": "",
-            "initial_experiment_required": True,
+            "initial_experiment": "选择 1-2 个由强推荐论文支持的候选基底或官方 repo 线索，写清最小模块替换位置、同协议 baseline/control/ablation、主指标和坏例切片；Environment 阶段验证 repo/data/protocol 后才把候选变成本地主线。",
+            "initial_experiment_required": False,
             "bad_case_slice": ["主线方法失败样本", "短序列/稀疏样本", "长尾样本", "机制预期受益样本"],
-            "success_gate": ["环境阶段基底已选择", "基础复现已通过", "新增模块有 ablation", "整体指标和坏例切片同时报告"],
+            "success_gate": ["候选基底 proposal 可追溯到当前 Find/Read 证据", "Environment 阶段基底验证通过", "基础复现已通过", "新增模块有 ablation", "整体指标和坏例切片同时报告"],
             "supporting_papers": strong_refs[:4] + topic_axis_refs,
             "claude_code_tasks": ["在选定 repo 中定位最小可插拔模块位置。", "实现单一增强模块和开关参数。", "输出 ablation metrics 与坏例切片，不允许只报告平均值。"],
-            "guardrail": "二阶段 idea，不能越过环境基底选择和复现 gate。",
+            "guardrail": "二阶段 idea，必须先提出候选基底和修改点，再等待 Environment 验证；不能越过复现 gate。",
         },
         {
             "id": "idea-current-find-003",
             "idea_id": "idea-current-find-003",
             "title": f"{topic} 的坏例切片与反例压力测试",
             "status": "approved_for_planning",
-            "recommendation": "wait_for_environment_base_selection",
+            "recommendation": "candidate_repo_base_proposal_ready_for_environment_validation",
             "score": 7.8,
             "idea_score": 7.8,
             "hypothesis": "如果候选方法只提升平均指标却在声明相关的困难切片上失败，论文主张必须收窄或停止。",
@@ -3483,7 +3648,7 @@ def build_ideas(readings: list[dict[str, Any]], repo: dict[str, Any], fresh_plan
             "idea_id": "idea-current-find-004",
             "title": f"{topic} 的跨数据与稳健性验证",
             "status": "approved_for_planning",
-            "recommendation": "wait_for_environment_base_selection",
+            "recommendation": "candidate_repo_base_proposal_ready_for_environment_validation",
             "score": 7.4,
             "idea_score": 7.4,
             "hypothesis": "一个可投稿主张必须在至少一个主数据集和必要对照上站得住；如果只依赖单次偶然结果，应保持 blocked。",
@@ -3523,9 +3688,9 @@ def build_plans(ideas: list[dict[str, Any]], fresh_plan: dict[str, Any]) -> list
     plans: list[dict[str, Any]] = []
     common = [
         "确认当前 Find run_id、read_results、ideas、plans 全部一致，旧 fallback 或旧候选不得驱动后续流程。",
-        "环境阶段 Claude Code 必须阅读所有当前强推荐、精读、idea、plan 和补充检索主题，再审计候选 repo/data/protocol。",
-        "基底选择只能写入 state/evidence_ready_repo_selection.json，且 selection_stage 必须等于 environment_claude_code、fresh_find_run_id 必须等于当前 run_id。",
-        "在环境阶段选择基底之前，不得写 repo_path、不得写具体数据集训练命令、不得标记 ready_to_execute、不得把历史 active_repo 当作当前主线。",
+        "Idea/Plan 必须给出候选基底论文或候选 repo 线索、最小改动位置、数据/指标协议和失败停止条件；Environment 阶段负责验证并锁定这些候选。",
+        "Environment 阶段验证通过后才能写入 state/evidence_ready_repo_selection.json，且 selection_stage 必须等于 environment_claude_code、fresh_find_run_id 必须等于当前 run_id。",
+        "在 Environment 锁定前，候选 repo 只能作为 proposal；不得写本地 repo_path、不得写具体数据集训练命令、不得标记 ready_to_execute、不得把历史 active_repo 当作当前主线。",
         "每个实验必须记录 command、env、repo commit/hash、dataset contract、stdout/loss、metrics、bad-case/counterexample。",
         "实验完成后刷新 reference/scientific/evidence/submission gates，未过 gate 不得 promotion。",
     ]
@@ -3555,7 +3720,7 @@ def build_plans(ideas: list[dict[str, Any]], fresh_plan: dict[str, Any]) -> list
                 },
                 "evaluation_rounds": [{
                     "round": 1,
-                    "evaluation": "计划已绑定当前 Find 推荐文章，但必须等待环境阶段选择基底并验证 repo/data/env/protocol。",
+                    "evaluation": "计划已绑定当前 Find 推荐文章和候选基底 proposal，但必须等待 Environment 阶段验证并锁定 repo/data/env/protocol。",
                     "weaknesses": ["仍需本地数据、代码和实验审计确认", "摘要级文献不能直接支撑论文 claim"],
                     "repair_summary": ["加入环境阶段基底选择、gate、bad-case、命令/日志/metrics 落盘要求。"],
                 }],
@@ -3926,7 +4091,9 @@ def _run_claude_session_streaming(
                     if len(output_lines) > 2000:
                         output_lines = output_lines[-1000:]
                     stdout_chars += len(line) + 1
-                    last_activity = now
+                    compact_line = " ".join(line.split()).strip().lower()
+                    if compact_line != "claude: still running; waiting for claude code output":
+                        last_activity = now
                 elif proc.poll() is not None:
                     break
             artifact_mtime = _current_find_artifact_latest_mtime(paths)
@@ -4038,13 +4205,152 @@ def _compact_validation_for_prompt(validation: Any) -> dict[str, Any]:
     return compacted
 
 
+
+
+def stale_deep_read_fragment_summary(paths, run_id: str, limit: int = 12) -> dict[str, Any]:
+    """Report same-directory deep-read fragments that cannot belong to the current Find run."""
+    planning_root = getattr(paths, "planning", None)
+    if planning_root is None:
+        return {"run_id": run_id, "stale_fragment_count": 0, "stale_fragments": []}
+    fragment_dir = Path(planning_root) / "finding" / CURRENT_FIND_DEEP_READ_FRAGMENT_DIR_NAME
+    expected = str(run_id or "").strip()
+    stale: list[dict[str, Any]] = []
+    run_counts: dict[str, int] = {}
+    if not fragment_dir.exists():
+        return {"current_run_id": expected, "stale_fragment_count": 0, "stale_run_ids": [], "stale_fragments": []}
+    for path in sorted(fragment_dir.glob("*.json")):
+        payload, error = load_json_with_error(path, {})
+        if error or not isinstance(payload, dict):
+            continue
+        payload_run = str(payload.get("run_id") or payload.get("current_find_run_id") or "").strip()
+        if not payload_run or payload_run == expected:
+            continue
+        reading = payload.get("reading") if isinstance(payload.get("reading"), dict) else {}
+        title = str(reading.get("title") or payload.get("title") or "").strip()
+        run_counts[payload_run] = run_counts.get(payload_run, 0) + 1
+        if len(stale) < limit:
+            stale.append({"name": path.name, "run_id": payload_run, "title": title})
+    return {
+        "current_run_id": expected,
+        "stale_fragment_count": sum(run_counts.values()),
+        "stale_run_ids": sorted(run_counts),
+        "stale_run_id_counts": run_counts,
+        "stale_fragments": stale,
+        "policy": "Fragments whose top-level run_id differs from the current Find run are audit-only. They must not be reused as current Read evidence; write a new fragment with the current run_id after reading the current full_text_packet text_path.",
+    }
+
 def write_claude_takeover_prompt(paths, project: str, run_id: str, read_limit: int, idea_count: int, repair_validation: dict[str, Any] | None = None, attempt: int = 1) -> Path:
     prompt_path = paths.state / ("current_find_claude_takeover_prompt.md" if attempt <= 1 else f"current_find_claude_takeover_repair_prompt_attempt{attempt}.md")
     target_venue = project_target_venue(project) or "ICLR"
     repair_block = ""
+    stale_fragment_report = stale_deep_read_fragment_summary(paths, run_id)
+    stale_fragment_block = ""
+    if int(stale_fragment_report.get("stale_fragment_count") or 0) > 0:
+        stale_fragment_block = f"""
+
+旧 run_id deep-read 分片审计（只读，不是当前 Read 证据）：
+```json
+{json.dumps(stale_fragment_report, ensure_ascii=False, indent=2)}
+```
+这些分片的顶层 run_id 与当前 run_id `{run_id}` 不一致，wrapper 会拒绝它们。你不得把这些旧分片当成当前 Read 已完成，也不得复制旧顶层 run_id；如果同题论文仍在当前 reading packet 中，必须重新打开当前 `full_text_reading/full_text_packet.json` 的对应 `text_path`，用 Claude Code 文件工具写入新的唯一分片文件，且新分片顶层 `run_id` 必须严格等于 `{run_id}`。
+"""
     idea_plan_count = max(1, _positive_int(idea_count) or 5)
     not_selected_count = max(0, idea_plan_count - 1)
     read_item_count = max(0, _positive_int(read_limit) or 0)
+    canonical_reading_packet_block = ""
+    try:
+        full_text_packet_for_prompt = load_current_full_text_packet(paths, run_id)
+    except Exception:
+        full_text_packet_for_prompt = {}
+    if isinstance(full_text_packet_for_prompt, dict) and str(full_text_packet_for_prompt.get("run_id") or "").strip() == str(run_id or "").strip():
+        readable_packet_rows: list[dict[str, Any]] = []
+        audit_only_rows: list[dict[str, Any]] = []
+        for packet_index, entry in enumerate(as_list(full_text_packet_for_prompt.get("papers")), 1):
+            if not isinstance(entry, dict):
+                continue
+            text_chars = _positive_int(entry.get("text_chars") or entry.get("pdf_text_chars") or entry.get("full_text_chars") or entry.get("source_text_chars"))
+            row = {
+                "packet_index": packet_index,
+                "paper_id": first_text(entry, "paper_id", "id", "entry_id"),
+                "title": first_text(entry, "title", "paper_title"),
+                "text_path": first_text(entry, "text_path"),
+                "text_chars": text_chars,
+                "read_replacement": bool(entry.get("read_replacement")),
+                "replacement_for_unavailable_recommendation": first_text(entry, "replacement_for_unavailable_recommendation", "replacement_for"),
+            }
+            if row["text_path"] and text_chars >= FULL_TEXT_MIN_CHARS:
+                readable_packet_rows.append(row)
+            else:
+                audit_only_rows.append({k: v for k, v in row.items() if v not in ("", None, False)})
+        required_rows = readable_packet_rows[: read_item_count or len(readable_packet_rows)]
+        packet_prompt_payload = {
+            "run_id": run_id,
+            "canonical_source": "planning/finding/full_text_reading/full_text_packet.json",
+            "required_readable_paper_count": len(required_rows),
+            "required_readable_papers": required_rows,
+            "audit_only_unavailable_count": len(audit_only_rows),
+            "audit_only_unavailable_rows": audit_only_rows,
+            "policy": "Read fragments must cover required_readable_papers exactly. Audit-only unavailable rows and originals replaced by read_replacement rows must not receive deep-read fragments.",
+        }
+        canonical_reading_packet_block = f"""
+
+当前 Read canonical reading packet（机器生成，必须优先于原始 Find Top-N 解读）：
+```json
+{json.dumps(packet_prompt_payload, ensure_ascii=False, indent=2)}
+```
+`full_text_packet.papers` 是当前 Read 阶段唯一 canonical reading packet。你必须只为 `required_readable_papers` 中列出的有 `text_path` 且正文长度足够的论文写 deep-read 分片；其中 `read_replacement=true` 的论文是同一 run 的合法 Read 输入。`audit_only_unavailable_rows` 仅用于审计不可读原推荐或被替换对象，不能为这些行写精读分片，不能把它们计入 Read 完成数。
+"""
+    if isinstance(repair_validation, dict) and repair_validation:
+        repair_payload = _compact_validation_for_prompt(repair_validation)
+        failure_type = str(repair_validation.get("failure_type") or repair_payload.get("failure_type") or "").strip()
+        validation_payload = repair_validation.get("validation") if isinstance(repair_validation.get("validation"), dict) else repair_payload.get("validation") if isinstance(repair_payload.get("validation"), dict) else repair_payload
+        observed_payload = repair_validation.get("observed") if isinstance(repair_validation.get("observed"), dict) else repair_payload.get("observed") if isinstance(repair_payload.get("observed"), dict) else {}
+        reading_contract_valid = bool(
+            validation_payload.get("valid") is True
+            and _positive_int(validation_payload.get("actual_reading_count")) >= max(1, read_item_count)
+            and _positive_int(validation_payload.get("pending_deep_read_synthesis_count")) == 0
+            and _positive_int(validation_payload.get("pending_full_text_reading_count")) == 0
+            and not validation_payload.get("deep_read_content_gap_details")
+        )
+        idea_only_repair = failure_type == "idea_contract_failed" and reading_contract_valid
+        if idea_only_repair:
+            prompt = f"""
+你是项目 `{project}` 的持久 Claude Code 科研会话。TASTE 已经完成当前 Find 的 Read 机器校验；本轮只允许做 Idea/Plan 窄返修，不允许重做精读。
+
+当前 run_id: `{run_id}`
+目标 idea/plan 数: {idea_plan_count}
+
+上一轮失败合同（必须逐项修复）：
+```json
+{json.dumps(repair_payload, ensure_ascii=False, indent=2)}
+```
+
+只读输入：
+- `planning/finding/read_results.json`：已经由 wrapper 从 current-run deep-read fragments 重建，Read contract 已通过，只读参考。
+- `planning/finding/ideas.json`：本轮需要用 Claude 文件工具修订。
+- `planning/finding/plans.json`：如 selected plan 与修复后的 idea 不匹配，本轮需要用 Claude 文件工具同步修订。
+- `planning/finding/find_results.json` 与 `planning/finding/full_text_reading/full_text_packet.json`：只用于核对 paper_id/title，不要重写。
+
+硬性禁止：
+- 不要启动 Task/subagent 重新精读 20 篇论文；Read 已通过，重做精读是低效且会污染当前返修边界。
+- 不要 Write/Edit/MultiEdit `planning/finding/current_find_deep_read_fragments/`、`read_results.json`、`read.md`、`idea.md`、`plan.md`。
+- 不要写入 `state/current_find_research_plan.json`、`state/idea_candidates.json`、`state/experiment_plan.json` 或任何 gate/state 文件。
+- 不要用 Bash/Python/cat/heredoc 读取、生成或修补 `ideas.json`、`plans.json`、`read_results.json` 或 deep-read fragments。内容查看必须用 Claude Read；写入必须用 Claude Write/Edit/MultiEdit。Bash 只允许 `{management_python()} -m json.tool planning/finding/ideas.json >/dev/null` 和同类 JSON 语法检查。
+- 不要启动 Find、训练、实验、paper、full-cycle 或后台进程。
+
+必须完成：
+1. 修复 `planning/finding/ideas.json` 顶层 `run_id`，必须严格等于 `{run_id}`，`source` 保持 `claude_code_current_find_takeover`。
+2. 恰好保留 {idea_plan_count} 个 ideas。每个 idea 必须有非空 `id`, `title`, `new_method`, `initial_experiment`, `inspired_by`, `supporting_papers`。
+3. `inspired_by` 必须是非空数组；每项至少包含可核对的 `paper_id` 或 `title`，以及具体 `insight`/`role`，说明该论文如何启发新方法。不能只写论文名列表。
+4. 每个 idea 必须有 `objective_scores={{"novelty":...,"evidence_alignment":...,"feasibility":...,"experimentability":...,"risk_control":...,"overall":...}}`，同时写 `score` 和 `idea_score`，且 `idea_score_audit={{"mode":"task_subagent","subagent_used":true,"status":"completed","criteria":"TASTE-like objective idea scoring"}}`。若当前 Claude 工具面板没有 Task/subagent，仍必须诚实写 `status:"blocked_task_subagent_unavailable"` 并说明，不能伪造已调用。
+5. 如果修复 idea id/title 后导致 `plans.json` 的 `idea_id` 或 `selected_idea_id` 不匹配，必须同步修复 `plans.json`。`plans.json` 必须仍然恰好 {idea_plan_count} 个 plans，且只能有一个 `selected_for_execution=true` 和 `execute_next=true`，其 `idea_id` 必须匹配一个修复后的 idea。
+6. Plan/Idea 阶段必须提出候选基底论文/候选 repo 线索、为什么适合、怎么改、Environment 需要验证哪些 repo/data/protocol 证据；但不得写本地 `repo_path`、具体数据集训练命令、`ready_to_execute`，也不得声称环境/实验已通过；保持 `candidate_base_proposal_waiting_for_environment_validation` / `ready_for_gate` 语义。
+
+最后只输出简短中文摘要：修复了哪些 idea 字段、selected plan 是否仍唯一、是否需要环境阶段继续授权基底。
+""".strip() + "\n"
+            prompt_path.parent.mkdir(parents=True, exist_ok=True)
+            prompt_path.write_text(prompt, encoding="utf-8")
+            return prompt_path
     if isinstance(repair_validation, dict) and repair_validation:
         repair_payload = _compact_validation_for_prompt(repair_validation)
         repair_block = f"""
@@ -4066,31 +4372,31 @@ def write_claude_takeover_prompt(paths, project: str, run_id: str, read_limit: i
 - deep_read_content_gap_details 是逐篇字段合同失败清单；必须按其中列出的字段写入 `abstract_zh`、`motivation_zh`、`method_details_zh` 或中文 `method`、`experiments_zh` 或中文 `experiments`、`limitations_zh` 或中文 `limitations`，并写入 `method_advantages_zh`、`method_disadvantages_zh` 各至少两条。`abstract_from_find` 可以作为论文原摘要溯源来生成/迁移 `abstract_zh`，但不能替代 `motivation_zh`、`method_details_zh`、`experiments_zh`、`limitations_zh`、优点和不足；英文-only method/experiments/limitations、`relevance=direct_target|foundation_borrowing|boundary_audit` 枚举值也不能替代这些字段。
 - 如果 deep_read_content_gap_details 指出字段过短、摘要冒充、方法/实验关键词不足或优缺点缺失，必须重新打开对应 `text_path` 全文逐篇重写；禁止在旧短句上补几个形容词冒充精读。
 - idea_contract_issues 表示上一轮 idea 不是合格科研 idea：缺 `objective_scores`、`score/idea_score` 为 None、没有独立评分子任务、初步实验仍绑定历史基底/旧 base switch gate，或 `new_method`/`initial_experiment`/`inspired_by` 三段缺失。必须重新基于精读结果生成 {idea_plan_count} 个 idea；每个 idea 都要先由主控 Claude 写出详细 `new_method`、`initial_experiment`、`inspired_by`，再调用独立 Task/subagent 客观评分，写入 `objective_scores={{novelty,evidence_alignment,feasibility,experimentability,risk_control,overall}}`、`score`、`idea_score` 和 `idea_score_audit={{mode:"task_subagent",subagent_used:true,status:"completed"}}`。`overall < 7.0` 的 idea 必须由主控 Claude 深思修改后重新评分；不得把 None/空分数或旧路线记忆当成通过。
-- 如果 idea_contract_issues 含 `stale_or_preselected_base_binding_detected`，说明 idea/实验仍继承了历史基底或旧执行 gate，例如旧候选 repo、base switch gate、已通过参考复现等。必须新开主控 Claude Code，在项目目录内重新阅读 `state/current_find_research_plan.json`、`planning/finding/` 下当前 Find 精读产物、`state/taste_plan_bridge.json` 和当前 main route 状态，生成不继承旧会话记忆的 idea。不得读取或依赖仓库根 `工作状态.txt` 作为项目科研记忆。Find/Read/Idea/Plan 阶段仍不得直接选择或绑定 repo/data/训练命令；若必须提及实验基底，只能写“环境阶段选出的当前基底”，并说明后续由 environment gate 决定。
+- 如果 idea_contract_issues 含 `stale_or_preselected_base_binding_detected`，说明 idea/实验仍继承了历史已选基底、旧执行 gate、本地 `repo_path`、具体训练命令、base switch gate、已通过参考复现等权威状态。必须新开主控 Claude Code，在项目目录内重新阅读 `state/current_find_research_plan.json`、`planning/finding/` 下当前 Find 精读产物、`state/taste_plan_bridge.json` 和当前 main route 状态，生成不继承旧会话记忆的 idea。不得读取或依赖仓库根 `工作状态.txt` 作为项目科研记忆。Find/Read/Idea/Plan 阶段应明确提出候选基底论文/候选 repo 线索、修改位置和验证要求，但只能写成 proposal；禁止写成环境已选、禁止写本地 `repo_path`、禁止写具体训练命令或 `ready_to_execute`。
 - unlabeled_non_positive_titles 表示当前推荐论文在 Find 里是 boundary/critique/weak/borrowed/foundation 价值，但 reading 没有明确非 claim 角色；必须补 `support_role`/`verdict`，说明为什么值得精读、能借鉴什么、不能证明什么。若 Find 行本身已有 `evidence_role=foundation_borrowing`、`evidence_tier=critique_or_boundary_case`、`not_positive_support=true` 或 `weak_candidate_for_critique=true`，优先沿用该边界角色，不要把它改成 claim-ready。
 - pending_without_evidence_titles 表示还缺正文证据；必须读取可用 PDF/OpenReview/网页/代码说明，若确实无法访问，要记录具体不可访问原因，不能写“待补”冒充精读。
 - subagent_deep_read_audit 表示主控 Claude Code 没有把每篇推荐论文交给可审计的 Task/subagent 做全文精读，或没有把交付记录写入每个 reading；这会被视为未精读。必须对每篇推荐论文调用 Task/subagent（若工具名为 Task，直接使用 Task；若当前 Claude 工具面板没有 Task/subagent，立即停止并报告 `blocked: task_subagent_unavailable_for_deep_reading`，不要由主控自己短写替代）。每个 reading 必须写 `subagent_deep_read=true`，并写 `deep_read_audit={{"mode":"task_subagent","subagent_used":true,"status":"completed","text_path":"...","evidence_chars":...}}`。
 - 如果上一轮 takeover.tool_policy_guard.policy_type 是 current_find_artifact_writer，说明你尝试用 Bash/Python/cat/heredoc 批量写科研 artifact，或直接修补 wrapper-owned `read_results.json`，已被 TASTE 拦截；本轮精读只能使用 Claude Code 文件工具写逐篇分片，路径为 `planning/finding/current_find_deep_read_fragments/<rank>_<paper_id>.json` 或唯一返修分片。`read_results.json` 只能由 wrapper 从这些分片重建；不要直接 Write/Edit/MultiEdit 它。`ideas.json` 和 `plans.json` 可以用 Claude 文件工具 Write/Edit/MultiEdit，但每次结束时必须保持完整可解析 JSON，且需要满足 idea/plan 合同。单篇 deep-read fragment JSON 可以用 Claude 文件工具自审修正，但不得用 Bash/Python/cat/heredoc/json.dump/open(..., "w") 生成或补丁式改写；禁止写 `read.md`/`idea.md`/`plan.md`，这些 Markdown 由 wrapper 在 JSON 校验后自动生成。禁止在 Bash 中出现 `open(...read_results.json`、`Path(...current_find_deep_read_fragments`、`json.dump`、`python <<`、`cat > planning/finding`、heredoc 或任何会写入 Read/Idea/Plan artifact/分片的命令。Bash 只允许只读检查，例如 `{management_python()} -m json.tool planning/finding/ideas.json >/dev/null`、`rg`、`sed -n`、`head`、`tail`、`wc`。禁止在 Bash 中使用 `python -c`、`python <<`、`open(...)`、`Path(...).read_text()` 或任何自写解析脚本触碰 `planning/finding/current_find_deep_read_fragments/`、`read_results.json`、`ideas.json`、`plans.json`，即使你认为只是只读；内容查看必须用 Claude Read 工具，JSON 语法检查只能用 `{management_python()} -m json.tool <path> >/dev/null`。如果分片 JSON 校验失败，必须用 Claude 文件工具重新写该论文完整分片；绝不能用 Bash/Python 修补。若当前 Claude Code 会话没有文件写入工具，必须停止并在最终输出中报告 `blocked: write_tool_unavailable_for_current_find_artifacts`。若上一轮 policy_type 是 current_find_gate_state_writer，说明你直接改写了 TASTE-owned gate/state 文件；本轮只能写 planning/finding 的逐篇精读分片、ideas.json、plans.json，state/current_find_research_plan.json、state/idea_candidates.json、state/experiment_plan.json 必须保持只读，由 wrapper 在机器校验后统一写入。
 - 返修时不得覆盖已有 `current_find_deep_read_fragments/*.json`。如果某篇已有分片但 validation 指出字段缺口，必须写一个新的 `planning/finding/current_find_deep_read_fragments/<rank>_<paper_id>_repair_attempt{attempt}.json` 或带时间戳的新分片；wrapper 会按全文证据、字段完整度和质量分选择最佳分片。禁止用较短、字段更少或 evidence 更弱的新分片覆盖旧分片。
-- 返修后 {read_item_count} 个精读分片、ideas.json、plans.json 必须同一 run_id、同一推荐列表、同一 {idea_plan_count} 个 idea/plan，并且 plans.json 必须显式且只能显式选择一个执行计划；read_results.json/read.md/idea.md/plan.md 由 wrapper 生成或刷新。
+- 返修后 {read_item_count} 个精读分片、ideas.json、plans.json 必须同一 run_id 且必须等于当前 `{run_id}`、同一推荐列表、同一 {idea_plan_count} 个 idea/plan，并且 plans.json 必须显式且只能显式选择一个执行计划；read_results.json/read.md/idea.md/plan.md 由 wrapper 生成或刷新。
 - failure_type=missing_selected_plan/ambiguous_selected_plan/selected_plan_id_missing/selected_plan_missing_matching_idea 表示精读、idea、plan 内容可能已经合格，但主控 Claude Code 没有在 {idea_plan_count} 个计划中作出唯一最佳执行选择，或多个计划被同时标记选择。必须基于全文精读结果重新比较 {idea_plan_count} 个 plan，写出 exactly one `selected_for_execution=true` 且 `execute_next=true` 的 plan，其余 plan 必须显式 `selected_for_execution=false`、`execute_next=false`、`execution_selection.selected=false` 并作为 backlog。
 """
     prompt = f"""
 你是 项目 `{project}` 的持久 Claude Code 科研会话。现在由 TASTE 控制你接管当前 Find 后面的 Read/Idea/Plan，不允许用确定性模板伪造科研判断。
-{repair_block}
+{repair_block}{stale_fragment_block}{canonical_reading_packet_block}
 
 必须读取的真实输入：
 - `planning/finding/find_results.json`
 - `planning/finding/article.md`
 - `planning/finding/source_status.md`
-- `planning/finding/full_text_reading/full_text_packet.json`；如果该文件存在且 run_id 匹配，必须优先读取其中 {read_item_count} 篇的 `text_path` 全文抽取文本，不要重新下载同一 PDF，也不要只引用题录/摘要。
-- `planning/finding/full_text_reading/texts/*.txt` 中与推荐论文对应的正文抽取文件；写逐篇精读分片时必须把这些正文证据归一化为 `source_evidence`/`full_text_evidence`/`pdf_text_chars`。
+- `planning/finding/full_text_reading/full_text_packet.json`；如果该文件存在且 run_id 匹配，它就是当前 Read 的 canonical reading packet。必须优先读取其中有 `text_path` 且正文长度足够的 {read_item_count} 篇 `papers`，包括 same-run `read_replacement=true` replacement；不要重新下载同一 PDF，也不要只引用题录/摘要。
+- `planning/finding/full_text_reading/texts/*.txt` 中与 canonical reading packet 可读行对应的正文抽取文件；写逐篇精读分片时必须把这些正文证据归一化为 `source_evidence`/`full_text_evidence`/`pdf_text_chars`。没有正文的原始 Find 推荐或已被 replacement 替换的原推荐只作审计，不得写 deep-read 分片。
 - `planning/finding/current_find_deep_read_fragments/`：这是本轮精读唯一允许的逐篇内容写入目录。每篇论文一个 JSON 文件，文件由 Claude Code 文件工具写入或修正，禁止 Bash/Python/cat/heredoc 生成。wrapper 会合并这些分片为 read_results.json/read.md。
 - `state/literature_tool_packet.json` 或 `planning/literature_tool_packet.md`
 - 当前环境选择证据（只读审计）：`state/fresh_research_base.json`、`state/evidence_ready_repo_selection.json`、`planning/reference_workflow_and_claude_code.md`。`state/active_repo.json` 和 `state/fresh_base_implementation_plan.json` 只能作为历史/候选证据读取；只有 `selection_stage=environment_claude_code` 且 `fresh_find_run_id={run_id}` 的 `evidence_ready_repo_selection.json` 才能把某个 repo/base 当作当前基底。
 
 硬性要求：
-1. 只围绕当前 run_id `{run_id}`。必须精读 Read 阶段 reading packet 里的全部 {read_limit} 篇论文；这个 packet 默认来自当前 Find 推荐，但当某篇原推荐尚无题名/作者核验的公开全文时，可以包含同一 run 排名池里的可读 replacement。不得重写 Find 的用户可见推荐。若 `full_text_reading/full_text_packet.json` 已提供正文抽取文本，必须打开对应 `text_path` 并基于正文写原论文摘要（中文）、论文动机、详细方法、实验设置与结果、局限性、方法优缺点；不得把“全文包已就绪”当成精读内容。主控 Claude Code 必须把每篇论文拆成独立精读任务，并且必须调用 Task/subagent 逐篇审读全文；禁止主控自己用几句 synthesis 替代子任务。若当前会话没有 Task/subagent 工具，必须停止并报告 `blocked: task_subagent_unavailable_for_deep_reading`，不能降级为主控直接写。每篇 reading 必须记录 `subagent_deep_read=true` 和 `deep_read_audit`，包括 `mode=task_subagent`、`subagent_used=true`、`status=completed`、对应 `text_path` 和正文长度。对每篇都要优先使用可用 `pdf_url`/OpenReview 页面/项目页/代码链接和已有正文文本；如果 PDF 或网页无法访问，必须在该条 `full_text_status` 中说明不可访问原因，不能用流程话术代替论文内容。KDD/ACM 论文必须先按正确来源协议探索：从 DOI/ACM DL 页面、OpenAlex/Crossref/DBLP 元数据和作者主页确认论文身份，再查找同题 arXiv 或机构 repository PDF；只有确认同题同作者/年份后才能使用 arXiv/repository PDF，不得一上来堆 fallback，也不得把 ACM 页面抓取失败写成全文不可读。每篇成功精读的 reading 必须写 `full_text_available=true`，`full_text_status` 为 `pdf_text_read`/`html_text_read`/`full_text_read` 之一，并记录 `pdf_text_chars`、`full_text_chars`、`source_text_chars` 或 `source_evidence` 中的正文长度/来源；同时必须写中文合同字段 `abstract_zh`、`motivation_zh`、`method_details_zh` 或中文 `method`、`experiments_zh` 或中文 `experiments`、`limitations_zh` 或中文 `limitations`，以及 `method_advantages_zh`、`method_disadvantages_zh`。`abstract_zh` 可以直接使用或翻译 Find 阶段捕获的论文原摘要；但只有题录、推荐理由、主题命中、流程话术、“全文包已就绪但未写精读 synthesis”、`abstract_from_find` 单独存在且其余精读字段缺失、英文-only 精读字段或“待补全文”都会被 TASTE 门控拒绝。
+1. 只围绕当前 run_id `{run_id}`。所有新写入的 `current_find_deep_read_fragments/*.json`、`ideas.json`、`plans.json` 顶层 `run_id` 都必须严格等于 `{run_id}`；任何旧 run_id 分片只能作为审计反例，不能作为当前产物。必须精读 Read canonical reading packet 里的全部 {read_limit} 篇可读论文；当 `full_text_reading/full_text_packet.json` run_id 匹配且 `papers` 非空时，canonical packet 就是其中有 `text_path` 且正文长度足够的 rows，包括同一 run 的 `read_replacement=true` replacement。原始 Find Top-N 是用户可见 Find 输出，不是 Read 完成数的唯一来源；无正文的原推荐、已由 replacement 替掉的原推荐和 packet 中 0 字符 rows 只作审计，禁止写 deep-read 分片或计入完成。不得重写 Find 的用户可见推荐。若 `full_text_reading/full_text_packet.json` 已提供正文抽取文本，必须打开对应 `text_path` 并基于正文写原论文摘要（中文）、论文动机、详细方法、实验设置与结果、局限性、方法优缺点；不得把“全文包已就绪”当成精读内容。主控 Claude Code 必须把每篇论文拆成独立精读任务，并且必须调用 Task/subagent 逐篇审读全文；禁止主控自己用几句 synthesis 替代子任务。若当前会话没有 Task/subagent 工具，必须停止并报告 `blocked: task_subagent_unavailable_for_deep_reading`，不能降级为主控直接写。每篇 reading 必须记录 `subagent_deep_read=true` 和 `deep_read_audit`，包括 `mode=task_subagent`、`subagent_used=true`、`status=completed`、对应 `text_path` 和正文长度。对每篇都要优先使用可用 `pdf_url`/OpenReview 页面/项目页/代码链接和已有正文文本；如果 PDF 或网页无法访问，必须在该条 `full_text_status` 中说明不可访问原因，不能用流程话术代替论文内容。KDD/ACM 论文必须先按正确来源协议探索：从 DOI/ACM DL 页面、OpenAlex/Crossref/DBLP 元数据和作者主页确认论文身份，再查找同题 arXiv 或机构 repository PDF；只有确认同题同作者/年份后才能使用 arXiv/repository PDF，不得一上来堆 fallback，也不得把 ACM 页面抓取失败写成全文不可读。每篇成功精读的 reading 必须写 `full_text_available=true`，`full_text_status` 为 `pdf_text_read`/`html_text_read`/`full_text_read` 之一，并记录 `pdf_text_chars`、`full_text_chars`、`source_text_chars` 或 `source_evidence` 中的正文长度/来源；同时必须写中文合同字段 `abstract_zh`、`motivation_zh`、`method_details_zh` 或中文 `method`、`experiments_zh` 或中文 `experiments`、`limitations_zh` 或中文 `limitations`，以及 `method_advantages_zh`、`method_disadvantages_zh`。`abstract_zh` 可以直接使用或翻译 Find 阶段捕获的论文原摘要；但只有题录、推荐理由、主题命中、流程话术、“全文包已就绪但未写精读 synthesis”、`abstract_from_find` 单独存在且其余精读字段缺失、英文-only 精读字段或“待补全文”都会被 TASTE 门控拒绝。
    字段质量下限：
    - `abstract_zh` 至少 260 个非空白中文字符，必须呈现论文原摘要的中文内容；可以直接使用/翻译 Find 捕获的论文原摘要，但不能用推荐理由、主题命中、`critique_reason` 或流程说明冒充摘要。
    - `motivation_zh` 至少 180 个非空白中文字符，说明论文要解决的具体矛盾、已有方法不足和任务背景。
@@ -4103,12 +4409,12 @@ def write_claude_takeover_prompt(paths, project: str, run_id: str, read_limit: i
 2. 推荐列表里的论文可以是 strict positive、foundation/borrowing 或 boundary/critique 价值，但都必须写入 `read_results.json.readings`。未达到 strict positive 条件的推荐论文必须标为 `support_role=boundary_audit|search_expansion`、`verdict=recommended_reading_boundary|critique_only|boundary_only`，说明为什么值得读、能借鉴什么、不能证明什么。
 3. 严禁把 `triage_candidates/audit_candidates/evaluated_candidates/title_candidates/retrieval_candidates` 中未进入推荐列表或 strict positive 白名单的论文写成 `claim_ready_anchor`、`positive_anchor_for_planning`、`supporting_evidence` 或 `component_reference`。TASTE 守卫会直接拒绝这种输出。
 4. 检查每篇候选是否真与当前科研主题相关；把无关、泛主题、泛 agent、泛 memory、仅新闻/论文选择/平台选择的文章降为 critique，不得作为 strong evidence。
-5. Idea 必须生成 {idea_plan_count} 个，并且每个 idea 都要综合多篇强锚点、边界审计结论和当前 repo/data/env 约束，不能照抄单篇论文。每个 idea 必须包含三段：`new_method`（详细的新方法，原 hypothesis 的升级版，说明核心机制/模块/训练或推理作用点）、`initial_experiment`（初步详细实验，说明基于哪篇工作或哪个可审计基底、做什么最小改动、对比哪些 baseline/control/ablation、指标和坏例切片）、`inspired_by`（启发该方法的论文/工作及启发点）。严禁继承旧会话记忆里的历史基底、旧 base switch gate、已通过参考复现基底或已经废弃的路线；Find/Read/Idea/Plan 阶段不能把任何仓库写成已选基底。
+5. Idea 必须生成 {idea_plan_count} 个，并且每个 idea 都要综合多篇强锚点、边界审计结论和当前 repo/data/env 约束，不能照抄单篇论文。每个 idea 必须包含三段：`new_method`（详细的新方法，原 hypothesis 的升级版，说明核心机制/模块/训练或推理作用点）、`initial_experiment`（初步详细实验，必须说明候选基底论文或候选 repo 线索、为什么适合、做什么最小改动、对比哪些 baseline/control/ablation、指标和坏例切片、Environment 阶段需验证什么）、`inspired_by`（启发该方法的论文/工作及启发点）。严禁继承旧会话记忆里的历史已选基底、旧 base switch gate、已通过参考复现基底或已经废弃的路线；Find/Read/Idea/Plan 阶段可以且应该提出候选仓库/候选基底 proposal，但不能把任何仓库写成已选基底或可直接执行路径。
 6. 主控 Claude Code 必须为每个 idea 调用独立 Task/subagent 做客观评分，不得由主控直接填 None 或空分数。评分项必须写入 `objective_scores`，字段为 `novelty`、`evidence_alignment`、`feasibility`、`experimentability`、`risk_control`、`overall`，每项 0-10 分；同时写入 `score` 和 `idea_score`，且 `idea_score_audit={{"mode":"task_subagent","subagent_used":true,"status":"completed","criteria":"TASTE-like objective idea scoring"}}`。若 `overall < 7.0` 或任一项为 0，主控必须先修改 idea 再重新评分；不能把低分 idea 交给 plan。
-7. 你要自行决定至少 3 个补充检索主题，并写入 `targeted_search_queries`。当当前推荐门控短缺且本轮 run 尚未刚完成受控补检索时，优先调用一次 TASTE 统一 literature tool 做受控补检索并刷新 packet：`{management_python()} modules/finding/scripts/run_literature_tool.py --project {project} --venue {target_venue} --query "<topic 1>" --query "<topic 2>" --query "<topic 3>" --fast-mode`。如果 `state/literature_tool_last_run.json` 已显示刚完成的 `current_find_run_id` 等于当前 run_id，或当前任务就是为了把刚产生的新 Find run 同步成 Read/Idea/Plan，则不要再启动下一轮 Find；只记录/复用 `targeted_search_queries`，先为当前 run 写出一致的 Read/Idea/Plan。严禁绕过 wrapper 直接调用会失去审计的原始 TASTE 命令。
+7. 你要自行决定至少 3 个补充检索主题，并写入 `targeted_search_queries`。当当前推荐门控短缺且本轮 run 尚未刚完成受控补检索时，优先调用一次 TASTE 统一 literature tool 做受控补检索并刷新 packet：`{management_python()} modules/finding/scripts/run_literature_tool.py --project {project} --venue {target_venue} --query "<topic 1>" --query "<topic 2>" --query "<topic 3>" --fast-mode --publish-current-find`。如果 `state/literature_tool_last_run.json` 已显示刚完成的 `current_find_run_id` 等于当前 run_id，或当前任务就是为了把刚产生的新 Find run 同步成 Read/Idea/Plan，则不要再启动下一轮 Find；只记录/复用 `targeted_search_queries`，先为当前 run 写出一致的 Read/Idea/Plan。严禁绕过 wrapper 直接调用会失去审计的原始 TASTE 命令。
 7. 为 {idea_plan_count} 个 idea 分别生成 plan：环境阶段如何比较强推荐论文、如何审计 repo/data/protocol、最小实验、baseline/ablation、bad-case slice、success gate、失败时的停止条件。主控 Claude Code 必须在 {idea_plan_count} 个 plan 中选择唯一最佳执行计划；唯一选中的 plan 必须写 `selected_for_execution=true`、`execute_next=true`、`execution_selection={{"selected": true, "reason": "...", "selected_by": "main_claude_code_after_deep_read"}}`，并具有非空 `plan_id` 与匹配 `idea_id`；其他 {not_selected_count} 个 plan 必须显式写 `selected_for_execution=false`、`execute_next=false`、`execution_selection={{"selected": false, "selected_by": "not_selected_candidate_backlog", "reason": "..."}}`。禁止按第一个、分数、排序或模板代选；必须用精读证据说明为什么被选中的 plan 最值得进入环境阶段。
-8. Find/Read/Idea/Plan 阶段严禁选择当前基底、严禁写入 `repo_path`、严禁写具体数据集训练命令、严禁标记 `ready_to_execute`。基底选择必须留给后续环境阶段 Claude Code，并写入 `state/evidence_ready_repo_selection.json`。
-9. 不启动论文 claim promotion；没有环境阶段基底选择和 repo/data/env/experiment gate 证据时，计划必须保持 `waiting_for_environment_base_selection` / `ready_for_gate`，而不是声称已经有结论。
+8. Find/Read/Idea/Plan 阶段必须给出候选基底 proposal（候选论文/候选 repo 名称或 URL、拟修改模块、数据/指标协议、验证风险），但严禁声称它已经是“当前基底”、严禁写入本地 `repo_path`、严禁写具体数据集训练命令、严禁标记 `ready_to_execute`。Environment 阶段负责验证并锁定基底，只有它才能写入 `state/evidence_ready_repo_selection.json`。
+9. 不启动论文 claim promotion；没有 Environment 阶段基底验证和 repo/data/env/experiment gate 证据时，计划必须保持候选 proposal / `ready_for_gate`，而不是声称已经有结论或已选本地主线。
 10. 写内容产物必须使用 Claude Code 文件工具；这是强制要求，不是偏好。精读内容必须写成逐篇 JSON 分片，避免一次性写 {read_item_count} 篇大 JSON 把语法或内容写坏。`read_results.json` 由 wrapper 从分片重建，不要直接 Write/Edit/MultiEdit；`ideas.json` 和 `plans.json` 可以用 Claude 文件工具 Write/Edit/MultiEdit 生成或修订，但结束时必须保持完整可解析 JSON。如果某个分片 JSON 校验失败，用 Claude 文件工具重新写该论文完整分片。Bash 只允许用于只读检查、JSON 语法校验或必要的官方 wrapper；JSON 语法校验只能使用 `python -m json.tool <path> >/dev/null`。不要用 Bash/Python/cat here-doc 代替文件工具来批量写 `read_results.json`、`current_find_deep_read_fragments/*.json`、`ideas.json`、`plans.json`，也不要写 `read.md`、`idea.md`、`plan.md`；也不要用 `python -c`、`python <<`、`open(...)`、`Path(...).read_text()` 在 Bash 中读取或解析这些 artifact，内容查看必须用 Claude Read。严禁写入或修改 `state/current_find_research_plan.json`、`state/idea_candidates.json`、`state/experiment_plan.json`；这些 TASTE-owned gate/state 文件由 wrapper 在机器校验后统一写入。如果必须用临时脚本校验 JSON，只能写到 `/tmp`，不得启动实验、训练、Find、full-cycle 或后台进程。如果你无法用文件写入工具写这些 artifact，必须报告 blocked，不能尝试脚本 fallback。
 11. 本阶段只允许读取当前 Find 相关输入：`planning/finding/find_results.json`、`planning/finding/full_text_reading/`、`planning/finding/source_status.md`、已有有效 deep-read 分片，以及为 plan 可执行性所需的当前 selected repo 少量 README/数据说明。禁止读取 `state/current_find_artifact_backups/`、`paper/`、`obsidian/`、`discover/`、旧草稿、旧 idea/plan 备份来拼接当前科研判断；这些只保留审计历史，不是当前 Find 证据。
 12. Idea 评分最多两轮：初评 + 一次有实质变化的重评。若重评后仍没有达到阈值的 idea，不要继续扩散检索或无限改写；用 Claude 文件工具写入当前候选及评分/失败原因，让 wrapper 以 `idea_plan_artifacts_incomplete` 或相应合同失败阻塞，并在最终回复里说明 `blocked: idea_score_threshold_not_met`。
@@ -4130,17 +4436,25 @@ def write_claude_takeover_prompt(paths, project: str, run_id: str, read_limit: i
 def run_claude_current_find_takeover(project: str, paths, run_id: str, read_limit: int, idea_count: int, repair_validation: dict[str, Any] | None = None, attempt: int = 1) -> dict[str, Any]:
     fragment_dir = paths.planning / "finding" / CURRENT_FIND_DEEP_READ_FRAGMENT_DIR_NAME
     fragment_dir.mkdir(parents=True, exist_ok=True)
+    fragment_parse_failures = current_find_deep_read_fragment_failures(paths, run_id)
+    fragment_quarantine = quarantine_corrupt_current_find_deep_read_fragments(paths, run_id, fragment_parse_failures, "pre_takeover_parse_failure") if fragment_parse_failures else {}
+    if isinstance(fragment_quarantine, dict) and any((row if isinstance(row, dict) else {}).get("action") == "quarantined_with_valid_same_run_replacement" for row in as_list(fragment_quarantine.get("files"))):
+        fragment_parse_failures = current_find_deep_read_fragment_failures(paths, run_id)
     preexisting_parse_failures = current_find_json_artifact_failures(paths)
-    if preexisting_parse_failures:
-        quarantine = quarantine_corrupt_current_find_json_artifacts(paths, run_id, preexisting_parse_failures, "pre_takeover_parse_failure")
+    if preexisting_parse_failures or fragment_parse_failures:
+        quarantine = quarantine_corrupt_current_find_json_artifacts(paths, run_id, preexisting_parse_failures, "pre_takeover_parse_failure") if preexisting_parse_failures else {}
+        if fragment_quarantine:
+            quarantine = {**(quarantine if isinstance(quarantine, dict) else {}), "deep_read_fragment_quarantine": fragment_quarantine}
+        all_parse_failures = preexisting_parse_failures + fragment_parse_failures
         repair_validation = {
             **(repair_validation if isinstance(repair_validation, dict) else {}),
             "status": "artifact_parse_failed",
-            "artifact_parse_failures": preexisting_parse_failures,
+            "artifact_parse_failures": all_parse_failures,
+            "fragment_parse_failures": fragment_parse_failures,
             "corrupt_artifact_quarantine": quarantine,
             "next_required_action": "rerun_current_find_claude_takeover_repair_rewrite_parseable_artifacts",
         }
-        record_current_find_artifact_parse_failure(paths.state, run_id, preexisting_parse_failures)
+        record_current_find_artifact_parse_failure(paths.state, run_id, all_parse_failures)
     prompt_path = write_claude_takeover_prompt(paths, project, run_id, read_limit, idea_count, repair_validation=repair_validation, attempt=attempt)
     snapshot = snapshot_current_find_artifacts(paths, run_id, attempt)
     session_key = "current_find_read_idea_plan"
@@ -4161,11 +4475,12 @@ def run_claude_current_find_takeover(project: str, paths, run_id: str, read_limi
     ]
     started = now_iso()
     env = os.environ.copy()
-    env.setdefault("USE_EXISTING_LITERATURE_PACKET", "1")
-    env.setdefault("CLAUDE_FIRST_OUTPUT_TIMEOUT_SEC", "180")
-    env.setdefault("CLAUDE_NO_EVENT_TIMEOUT_SEC", "300")
-    env.setdefault("CLAUDE_MAX_PARTIAL_OUTPUT_BYTES", "8000000")
-    env.setdefault("CLAUDE_MAX_STDOUT_CHUNKS_PER_TICK", "64")
+    env["USE_EXISTING_LITERATURE_PACKET"] = env.get("USE_EXISTING_LITERATURE_PACKET", "1")
+    env["CLAUDE_FIRST_OUTPUT_TIMEOUT_SEC"] = os.environ.get("CURRENT_FIND_CLAUDE_FIRST_OUTPUT_TIMEOUT_SEC", "180")
+    env["CLAUDE_NO_EVENT_TIMEOUT_SEC"] = os.environ.get("CURRENT_FIND_CLAUDE_NO_EVENT_TIMEOUT_SEC", "300")
+    env["CLAUDE_CURRENT_FIND_NO_EVENT_FLOOR_SEC"] = os.environ.get("CURRENT_FIND_CLAUDE_NO_EVENT_FLOOR_SEC", "300")
+    env["CLAUDE_MAX_PARTIAL_OUTPUT_BYTES"] = os.environ.get("CURRENT_FIND_CLAUDE_MAX_PARTIAL_OUTPUT_BYTES", "8000000")
+    env["CLAUDE_MAX_STDOUT_CHUNKS_PER_TICK"] = os.environ.get("CURRENT_FIND_CLAUDE_MAX_STDOUT_CHUNKS_PER_TICK", "64")
     result_path = paths.state / "current_find_claude_takeover_result.json"
     stdout_path = paths.state / f"current_find_claude_takeover_attempt{attempt}_stdout.log"
     stream = _run_claude_session_streaming(
@@ -4305,11 +4620,12 @@ def run_claude_current_find_selection(project: str, paths, run_id: str, observed
     ]
     started = now_iso()
     env = __import__("os").environ.copy()
-    env.setdefault("USE_EXISTING_LITERATURE_PACKET", "1")
-    env.setdefault("CLAUDE_FIRST_OUTPUT_TIMEOUT_SEC", "180")
-    env.setdefault("CLAUDE_NO_EVENT_TIMEOUT_SEC", "300")
-    env.setdefault("CLAUDE_MAX_PARTIAL_OUTPUT_BYTES", "4000000")
-    env.setdefault("CLAUDE_MAX_STDOUT_CHUNKS_PER_TICK", "64")
+    env["USE_EXISTING_LITERATURE_PACKET"] = env.get("USE_EXISTING_LITERATURE_PACKET", "1")
+    env["CLAUDE_FIRST_OUTPUT_TIMEOUT_SEC"] = os.environ.get("CURRENT_FIND_CLAUDE_FIRST_OUTPUT_TIMEOUT_SEC", "180")
+    env["CLAUDE_NO_EVENT_TIMEOUT_SEC"] = os.environ.get("CURRENT_FIND_CLAUDE_NO_EVENT_TIMEOUT_SEC", "300")
+    env["CLAUDE_CURRENT_FIND_NO_EVENT_FLOOR_SEC"] = os.environ.get("CURRENT_FIND_CLAUDE_NO_EVENT_FLOOR_SEC", "300")
+    env["CLAUDE_MAX_PARTIAL_OUTPUT_BYTES"] = os.environ.get("CURRENT_FIND_CLAUDE_MAX_PARTIAL_OUTPUT_BYTES", "4000000")
+    env["CLAUDE_MAX_STDOUT_CHUNKS_PER_TICK"] = os.environ.get("CURRENT_FIND_CLAUDE_MAX_STDOUT_CHUNKS_PER_TICK", "64")
     proc = subprocess.run(cmd, cwd=ROOT, env=env, text=True, capture_output=True, timeout=_claude_takeover_timeout() + 180)
     session_result_path = paths.state / f"claude_project_session_last_result_{session_key}.json"
     session_result = load_json(session_result_path, {})
@@ -4863,9 +5179,9 @@ def maybe_repair_current_find_takeover(project: str, paths, taste_dir: Path, run
 CURRENT_FIND_MAX_TAKEOVER_REPAIR_ATTEMPTS = 3
 
 CLAUDE_TAKEOVER_SOURCE = "claude_code_current_find_takeover"
-CURRENT_FIND_READ_ARTIFACT_SOURCES = {CLAUDE_TAKEOVER_SOURCE, LLM_CURRENT_FIND_FALLBACK_SOURCE, "auto_read_recommended_articles", "taste_auto_read", "current_find_bridge", "current_find_bridge_compatibility_only"}
-CURRENT_FIND_IDEA_ARTIFACT_SOURCES = {CLAUDE_TAKEOVER_SOURCE, LLM_CURRENT_FIND_FALLBACK_SOURCE, "taste_auto_idea", "current_find_bridge", "current_find_bridge_compatibility_only"}
-CURRENT_FIND_PLAN_ARTIFACT_SOURCES = {CLAUDE_TAKEOVER_SOURCE, LLM_CURRENT_FIND_FALLBACK_SOURCE, "taste_auto_plan", "current_find_bridge", "current_find_bridge_compatibility_only"}
+CURRENT_FIND_READ_ARTIFACT_SOURCES = {CLAUDE_TAKEOVER_SOURCE, LLM_CURRENT_FIND_FALLBACK_SOURCE, "reading_recommended_articles", "taste_reading", "current_find_bridge", "current_find_bridge_compatibility_only"}
+CURRENT_FIND_IDEA_ARTIFACT_SOURCES = {CLAUDE_TAKEOVER_SOURCE, LLM_CURRENT_FIND_FALLBACK_SOURCE, "taste_ideation", "current_find_bridge", "current_find_bridge_compatibility_only"}
+CURRENT_FIND_PLAN_ARTIFACT_SOURCES = {CLAUDE_TAKEOVER_SOURCE, LLM_CURRENT_FIND_FALLBACK_SOURCE, "taste_planning", "current_find_bridge", "current_find_bridge_compatibility_only"}
 
 
 def _current_find_execution_contract(paths: Any) -> dict[str, Any]:
@@ -6100,7 +6416,7 @@ def ensure_claude_plan_state(project: str, paths, run_id: str, readings: list[di
     }
     literature_repair_commands = [
         f"{management_python()} modules/finding/scripts/build_literature_tool_packet.py --project {project} --venue {venue}",
-        f"{management_python()} modules/finding/scripts/run_literature_tool.py --project {project} --venue {venue} --query \"<targeted literature gap query>\" --fast-mode",
+        f"{management_python()} modules/finding/scripts/run_literature_tool.py --project {project} --venue {venue} --query \"<targeted literature gap query>\" --fast-mode --publish-current-find",
         f"{management_python()} modules/writing/scripts/audit_submission_readiness.py --project {project} --venue {venue}",
         f"{management_python()} modules/planning/scripts/build_blocker_action_plan.py --project {project} --venue {venue}",
     ]
@@ -6183,12 +6499,12 @@ def ensure_claude_plan_state(project: str, paths, run_id: str, readings: list[di
         next_required_stage = "environment_base_selection_and_repo_data_protocol_audit"
     blocked_until = [
         "当前 Find 强推荐门控达到目标",
-        "环境阶段 Claude Code 选择当前基底",
+        "Environment 阶段验证并锁定候选基底",
         "主线 repo/data/env 合同通过",
         "baseline 与候选方法复现审计通过",
         "reference/scientific/evidence gates 通过",
     ] if literature_gate_blocked else [
-        "环境阶段 Claude Code 选择当前基底",
+        "Environment 阶段验证并锁定候选基底",
         "主线 repo/data/env 合同通过",
         "baseline 与候选方法复现审计通过",
         "reference/scientific/evidence gates 通过",
@@ -6448,14 +6764,26 @@ def _binding_view(row: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
     return {key: row.get(key) for key in keys if key in row and row.get(key) not in (None, "", [], {})}
 
 
+def _strip_pre_environment_prohibition_phrases(raw_text: str) -> str:
+    if not raw_text:
+        return raw_text
+    return re.sub(
+        r"(?:不写|不得写|禁止写入|严禁写入|不能写入|不要写|must\s+not\s+write|do\s+not\s+write|without\s+writing)[^\n。；;]{0,90}(?:repo_path|local_path|selected_repo_path|active_repo_path|training_script|ready_to_execute|训练命令|运行命令)(?!\s*[:=])",
+        "",
+        raw_text,
+        flags=re.IGNORECASE,
+    )
+
+
 def _contains_pre_environment_base_binding(value: Any) -> bool:
     raw_text = _contract_text(value)
-    text = raw_text.lower()
+    detection_text = _strip_pre_environment_prohibition_phrases(raw_text)
+    text = detection_text.lower()
     if _contains_stale_execution_binding(value):
         return True
     if any(marker in text for marker in PRE_ENV_BASE_BINDING_LITERAL_MARKERS):
         return True
-    return any(pattern.search(raw_text) for pattern in PRE_ENV_BASE_BINDING_REGEXES)
+    return any(pattern.search(detection_text) for pattern in PRE_ENV_BASE_BINDING_REGEXES)
 
 
 def _safe_plan_text(value: Any, fallback: str, limit: int = 900) -> str:
@@ -6477,7 +6805,7 @@ def _safe_list(values: Any, fallback: list[str]) -> list[str]:
 
 def _sanitize_idea(row: dict[str, Any], idx: int, strong_refs: list[dict[str, Any]], audit_refs: list[dict[str, Any]], queries: list[str]) -> dict[str, Any]:
     raw_title = first_text(row, "title")
-    fallback_title = f"current Find guarded idea {idx}: environment-stage base selection pending"
+    fallback_title = f"current Find guarded idea {idx}: candidate repo/base proposal ready for Environment validation"
     title = _safe_plan_text(raw_title, fallback_title, 220)
     raw_status = str(row.get("status") or row.get("recommendation") or "approved_for_planning").strip() or "approved_for_planning"
     if raw_status.lower() in {"pursue", "watch", "ready", "ready_to_execute"} or _contains_stale_execution_binding(raw_status):
@@ -6496,7 +6824,7 @@ def _sanitize_idea(row: dict[str, Any], idx: int, strong_refs: list[dict[str, An
         "idea_id": row.get("idea_id") or row.get("id") or f"idea-current-find-guarded-{idx:03d}",
         "title": title,
         "status": raw_status,
-        "recommendation": "wait_for_environment_base_selection",
+        "recommendation": "candidate_repo_base_proposal_ready_for_environment_validation",
         "source": CLAUDE_TAKEOVER_SOURCE,
         "score": row.get("score") or row.get("idea_score") or 0,
         "idea_score": row.get("idea_score") or row.get("score") or 0,
@@ -6512,14 +6840,13 @@ def _sanitize_idea(row: dict[str, Any], idx: int, strong_refs: list[dict[str, An
         "inspired_by": inspired_by,
         "inspired_by_text": _inspired_refs_text(inspired_by),
         "implementation_target": {
-            "selection_stage": ENVIRONMENT_SELECTION_STAGE,
-            "status": "waiting_for_environment_base_selection",
-            "repo_path": "",
-            "repo_name": "",
-            "dataset_contract": {"status": "not_selected_until_environment_stage"},
+            "selection_stage": "read_idea_plan_candidate_proposal",
+            "status": "candidate_pending_environment_validation",
+            "candidate_repo_hint": first_text(row, "candidate_repo", "repo", "repo_url", "base_repo") or "to be proposed from current Find/Read evidence",
+            "dataset_contract": {"status": "candidate_pending_environment_validation"},
         },
         "bad_case_slice": _safe_list(row.get("bad_case_slice"), ["cold-start/sparse cases", "long-tail cases", "high-confidence errors", "semantic-behavior conflict cases"]),
-        "success_gate": _safe_list(row.get("success_gate"), ["environment-stage base selected", "repo/data/env/protocol gate passed", "metrics and bad cases written", "evidence gates refreshed"]),
+        "success_gate": _safe_list(row.get("success_gate"), ["Environment validates the proposed repo/base, data, and protocol", "repo/data/env/protocol gate passed", "metrics and bad cases written", "evidence gates refreshed"]),
         "supporting_papers": strong_refs,
         "positive_anchor_papers": strong_refs,
         "audit_context_papers": audit_refs[:5],
@@ -6527,10 +6854,10 @@ def _sanitize_idea(row: dict[str, Any], idx: int, strong_refs: list[dict[str, An
         "evidence_policy": "Positive support is restricted to current strong_recommendations/articles. Audit/boundary papers can inspire stress tests or search expansion but cannot be claim evidence.",
         "claude_code_tasks": _safe_list(row.get("claude_code_tasks"), [
             "Read current Find strong recommendations, readings, ideas, plans, and targeted search notes.",
-            "Audit candidate repos, data, protocols, and reproducibility evidence in the environment stage.",
-            "Write evidence_ready_repo_selection.json only when the current-run base is actually selected and evidence-ready.",
+            "Validate the candidate repos/base works proposed by Idea/Plan, including data, protocol, and reproducibility evidence.",
+            "Lock the candidate repo/base only after Environment validation proves repo/data/protocol evidence is ready.",
         ]),
-        "guardrail": "Idea came from Claude Code under TASTE control and was normalized by the current-Find evidence guard; it cannot bind a repo, dataset, command, or selected base before environment-stage selection.",
+        "guardrail": "Idea came from Claude Code under TASTE control and was normalized by the current-Find evidence guard; it proposes candidate repos/base works for Environment validation before any experiment execution.",
     }
 
 
@@ -6612,7 +6939,7 @@ def _normalized_plan_selection_fields(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 def _sanitize_plan(row: dict[str, Any], idea: dict[str, Any], idx: int, strong_refs: list[dict[str, Any]], audit_refs: list[dict[str, Any]], queries: list[str]) -> dict[str, Any]:
-    title = _safe_plan_text(first_text(row, "title") or first_text(idea, "title"), f"current Find guarded plan {idx}: wait for environment-stage base selection", 240)
+    title = _safe_plan_text(first_text(row, "title") or first_text(idea, "title"), f"current Find guarded plan {idx}: candidate repo/base proposal ready for Environment validation", 240)
     plan_id = row.get("plan_id") or f"plan-{idea.get('id') or idx}"
     plan_initial_experiment = _safe_plan_text(row.get("initial_experiment") or row.get("min_experiment") or row.get("minimum_experiment") or idea.get("initial_experiment") or idea.get("min_experiment"), "", 1800)
     if _generic_idea_experiment(plan_initial_experiment):
@@ -6624,8 +6951,8 @@ def _sanitize_plan(row: dict[str, Any], idea: dict[str, Any], idx: int, strong_r
         base_steps = []
     generic_gate_steps = [
         "核对当前 Find run_id 与受门控保护的 read/idea/plan 产物。",
-        "环境阶段由项目代理读取当前强推荐、精读和 idea，审计候选 repo/data/protocol。",
-        "只有当前 run 的 evidence_ready_repo_selection.json 写明环境阶段基底且门控通过后，才执行仓库/数据/命令。",
+        "Environment 验证 Idea/Plan 已提出的候选 repo/base、数据协议和复现风险；未通过则保持 blocked。",
+        "只有 Environment 对上述候选 repo/base 的 repo/data/protocol 证据审核通过后，才进入仓库、数据和实验执行。",
     ]
     steps = base_steps or _plan_specific_steps(plan_initial_experiment, new_method)
     steps = (steps + generic_gate_steps)[:12]
@@ -6645,9 +6972,9 @@ def _sanitize_plan(row: dict[str, Any], idea: dict[str, Any], idx: int, strong_r
         "positive_anchor_papers": strong_refs,
         "audit_context_papers": audit_refs[:5],
         "targeted_search_queries": queries[:8],
-        "evidence_policy": "Do not promote claims from literature alone; do not bind repo/data/commands until the environment-stage base-selection gate passes.",
+        "evidence_policy": "Do not promote claims from literature alone; candidate repo/base proposals must wait for Environment validation before repo/data/command execution.",
         "steps": steps,
-        "success_gate": _safe_list(row.get("success_gate") or idea.get("success_gate"), ["environment-stage base selected", "repo/data/protocol evidence ready", "metrics parsed", "bad-case slice written", "audit JSON exists", "scientific gate refreshed"]),
+        "success_gate": _safe_list(row.get("success_gate") or idea.get("success_gate"), ["Environment validates the proposed repo/base, data, and protocol", "repo/data/protocol evidence ready", "metrics parsed", "bad-case slice written", "audit JSON exists", "scientific gate refreshed"]),
         "versions": [{
             "version": 1,
             "status": "waiting_for_environment_base_selection",
@@ -6656,14 +6983,14 @@ def _sanitize_plan(row: dict[str, Any], idea: dict[str, Any], idx: int, strong_r
                 "target": idea.get("implementation_target", {}),
                 "minimum_experiment": plan_initial_experiment,
                 "bad_case_slice": _safe_list(row.get("bad_case_slice") or idea.get("bad_case_slice"), ["cold-start/sparse cases", "long-tail cases", "high-confidence errors"]),
-                "success_gate": _safe_list(row.get("success_gate") or idea.get("success_gate"), ["environment-stage base selected", "local evidence gates pass"]),
+                "success_gate": _safe_list(row.get("success_gate") or idea.get("success_gate"), ["Environment validates the proposed repo/base, data, and protocol", "local evidence gates pass after Environment validation"]),
                 "metrics": ["primary task metric", "ranking/retrieval metrics", "bad-case slice metrics", "runtime/budget", "counterexample count"],
                 "claude_code_tasks": idea.get("claude_code_tasks", []),
             },
             "final_plan": {
                 "experimental_design": plan_initial_experiment,
                 "steps": steps,
-                "go_no_go": "No repo/data/command execution until evidence_ready_repo_selection.json names a current-run environment-stage base and gates pass.",
+                "go_no_go": "No repo/data/experiment execution until Environment validates and locks the proposed repo/base with passing gates.",
                 "paper_claim_policy": "Only environment/reference/scientific/evidence gates can unlock claim promotion.",
             },
             "llm": {"generator": "claude_code_current_find_takeover_guarded", "evaluator": "current_find_environment_selection_gate"},
@@ -7109,7 +7436,7 @@ def build_execution_plan(project: str, cfg: dict[str, Any], run_id: str, reading
     ]
     literature_repair_commands = [
         f"{management_python()} modules/finding/scripts/build_literature_tool_packet.py --project {project} --venue {venue}",
-        f"{management_python()} modules/finding/scripts/run_literature_tool.py --project {project} --venue {venue} --query \"<targeted literature gap query>\" --fast-mode",
+        f"{management_python()} modules/finding/scripts/run_literature_tool.py --project {project} --venue {venue} --query \"<targeted literature gap query>\" --fast-mode --publish-current-find",
         f"{management_python()} modules/writing/scripts/audit_submission_readiness.py --project {project} --venue {venue}",
         f"{management_python()} modules/planning/scripts/build_blocker_action_plan.py --project {project} --venue {venue}",
     ]
@@ -7126,7 +7453,7 @@ def build_execution_plan(project: str, cfg: dict[str, Any], run_id: str, reading
         next_required_stage = "repair_current_find_literature_scoring_packet"
         blocked_until = [
             "当前 Find 推荐论文数达到目标，且均有真实摘要与 LLM 标题+摘要评分",
-            "环境阶段 Claude Code 选择当前基底",
+            "Environment 阶段验证并锁定候选基底",
             "主线 repo/data/env 合同通过",
             "baseline 与候选方法复现审计通过",
             "reference/scientific/evidence gates 通过",
@@ -7139,7 +7466,7 @@ def build_execution_plan(project: str, cfg: dict[str, Any], run_id: str, reading
         blockers = [] if status != "blocked_missing_ideas_or_plans" else ["missing current Find ideas or plans"]
         base_selection_status = "selected" if selected_base else "waiting_for_environment_claude_code"
         next_required_stage = "environment_base_selection_and_repo_data_protocol_audit" if not failure_type else "repair_current_find_claude_read_idea_plan"
-        blocked_until = ["环境阶段 Claude Code 选择当前基底", "主线 repo/data/env 合同通过", "baseline 与候选方法复现审计通过", "reference/scientific/evidence gates 通过"]
+        blocked_until = ["Environment 阶段验证并锁定候选基底", "主线 repo/data/env 合同通过", "baseline 与候选方法复现审计通过", "reference/scientific/evidence gates 通过"]
     execution_selection = apply_current_find_execution_selection(
         ideas,
         plans,
@@ -7332,6 +7659,9 @@ def write_current_find_structured_artifacts(
     save_json(taste_dir / "ideas.json", strip_verbose_claude_takeover(idea_payload))
     save_json(taste_dir / "plans.json", strip_verbose_claude_takeover(plan_payload))
     write_current_find_artifact_markdowns(paths, taste_dir, run_id, readings, ideas, plans)
+    quarantine_corrupt_current_find_deep_read_fragments(
+        paths, run_id, reason="validated_current_find_structured_artifacts"
+    )
 
 
 def write_current_find_artifact_markdowns(paths, taste_dir: Path, run_id: str, readings: list[dict[str, Any]], ideas: list[dict[str, Any]] | None = None, plans: list[dict[str, Any]] | None = None) -> None:
@@ -7606,7 +7936,7 @@ def _build_llm_current_find_prompt(project: str, cfg: dict[str, Any], run_id: st
                 "title": "中文标题",
                 "status": "approved_for_planning",
                 "new_method": "详细新方法，至少120字",
-                "initial_experiment": "初步实验，至少120字；不得绑定具体 repo_path 或训练命令",
+                "initial_experiment": "初步实验，至少120字；写明候选基底论文或候选 repo 名称/URL、为什么适合、拟修改模块、baseline/control/ablation、指标、坏例切片和 Environment 需要核查的 repo/data/protocol 证据",
                 "inspired_by": [{"title": "paper title", "paper_id": "paper id", "reason": "如何启发"}],
                 "objective_scores": {"novelty": 8, "evidence_alignment": 8, "feasibility": 8, "experimentability": 8, "risk_control": 8, "overall": 8},
                 "score": 8,
@@ -7618,7 +7948,7 @@ def _build_llm_current_find_prompt(project: str, cfg: dict[str, Any], run_id: st
                 "plan_id": "plan-idea-current-find-001",
                 "idea_id": "idea-current-find-001",
                 "title": "中文标题",
-                "steps": ["环境阶段选择基底前不得绑定 repo/data/command", "最小实验与坏例切片"],
+                "steps": ["列出 Idea/Plan 提出的候选 repo/base、拟修改模块、数据与指标协议，并说明 Environment 验证项", "细化最小实验、baseline/control/ablation、指标与坏例切片"],
                 "selected_for_execution": True,
                 "execute_next": True,
                 "execution_selection": {"selected": True, "selected_by": "llm_fallback_after_deep_read", "reason": "为什么唯一选择"},
@@ -7631,7 +7961,7 @@ def _build_llm_current_find_prompt(project: str, cfg: dict[str, Any], run_id: st
         "你不得执行环境配置、实验、代码修改、论文撰写或 claim promotion。\n"
         f"当前 run_id={run_id}，需要精读 Read-stage reading packet 中的全部 {len(rows)} 篇论文，并生成 {idea_count} 个 idea 与 {idea_count} 个 plan。\n"
         "必须基于 full_text_excerpt 写中文精读；如果 excerpt 为空，必须在对应 reading 中明确 full_text_available=false 且说明不可访问原因，不能伪装全文已读。\n"
-        "Find/Read/Idea/Plan 阶段严禁写 repo_path、具体数据集训练命令或 ready_to_execute；环境阶段后续由 Claude Code 决定基底。\n"
+        "Find/Read/Idea/Plan 阶段必须提出候选基底论文/候选 repo 线索、拟修改模块和 Environment 验证要求；但严禁写本地 repo_path、具体数据集训练命令或 ready_to_execute，也不得声称环境已选基底。\n"
         "plans 中必须且只能有一个 selected_for_execution=true / execute_next=true，其余 plan 必须显式 false。\n"
         "只返回 JSON，不要 Markdown。JSON schema 示例：\n"
         f"{json.dumps(schema, ensure_ascii=False, indent=2)}\n\n"
@@ -7686,7 +8016,7 @@ def _normalize_llm_fallback_readings(raw_rows: list[dict[str, Any]], papers: lis
 def _normalize_llm_fallback_ideas(raw_rows: list[dict[str, Any]], idea_count: int, readings: list[dict[str, Any]], model: str) -> list[dict[str, Any]]:
     strong_refs = [_paper_public_ref(row) for row in readings if row.get("claim_ready_anchor")] or [_paper_public_ref(row) for row in readings[:6]]
     ideas: list[dict[str, Any]] = []
-    pending_target = {"selection_stage": ENVIRONMENT_SELECTION_STAGE, "status": "waiting_for_environment_base_selection", "repo_path": "", "repo_name": "", "dataset_contract": {"status": "not_selected_until_environment_stage"}}
+    pending_target = {"selection_stage": "read_idea_plan_candidate_proposal", "status": "candidate_pending_environment_validation", "candidate_repo_hint": "to be proposed from current Find/Read evidence", "dataset_contract": {"status": "candidate_pending_environment_validation"}}
     for idx, raw in enumerate([row for row in raw_rows if isinstance(row, dict)][:idea_count], 1):
         idea = dict(raw)
         idea_id = str(idea.get("id") or idea.get("idea_id") or f"idea-current-find-{idx:03d}").strip()
@@ -7694,7 +8024,7 @@ def _normalize_llm_fallback_ideas(raw_rows: list[dict[str, Any]], idea_count: in
         idea["idea_id"] = str(idea.get("idea_id") or idea_id)
         idea.setdefault("title", f"current Find LLM fallback idea {idx}")
         idea.setdefault("status", "approved_for_planning")
-        idea["recommendation"] = "wait_for_environment_base_selection"
+        idea["recommendation"] = "candidate_repo_base_proposal_ready_for_environment_validation"
         idea["source"] = LLM_CURRENT_FIND_FALLBACK_SOURCE
         idea["implementation_target"] = pending_target
         idea["inspired_by"] = _normalize_inspired_refs(idea.get("inspired_by"), as_list(idea.get("supporting_papers")) or strong_refs)
@@ -7739,7 +8069,7 @@ def _normalize_llm_fallback_plans(raw_rows: list[dict[str, Any]], ideas: list[di
             plan["execute_next"] = False
             plan["execution_selection"] = {**selection, "selected": False, "selected_by": selection.get("selected_by") or "not_selected_candidate_backlog", "source": LLM_CURRENT_FIND_FALLBACK_SOURCE}
         plan["llm_fallback_audit"] = {"mode": "llm_fallback", "source": LLM_CURRENT_FIND_FALLBACK_SOURCE, "status": "completed", "model": model}
-        plan["guardrail"] = "Plan can only feed environment-stage base selection; experiment and paper execution remain Claude Code-only."
+        plan["guardrail"] = "Plan can feed Environment-stage validation with candidate base/repo proposals; experiment and paper execution remain Claude Code-only after gates pass."
         plans.append(plan)
     return plans
 
@@ -8065,10 +8395,19 @@ def main() -> int:
                 print(json.dumps({"status": payload.get("status"), "source": payload.get("source"), "run_id": run_id, "readings": len(existing_readings), "ideas": len(existing_ideas), "plans": len(existing_plans), "claude_takeover": takeover, "claude_selection": selection_receipt, "validated_against_current_find": True, "public_projection": "refreshed"}, ensure_ascii=False, indent=2))
                 return 0
             force_contract_failure = load_json(paths.state / "current_find_claude_takeover_contract_failure.json", {})
+            force_failure_type = str(force_contract_failure.get("failure_type") or "").strip() if isinstance(force_contract_failure, dict) else ""
             force_repair_from_contract = bool(
                 isinstance(force_contract_failure, dict)
                 and force_contract_failure.get("run_id") == run_id
-                and force_contract_failure.get("failure_type") == "recoverable_current_find_tool_policy_blocked"
+                and force_failure_type in {
+                    "recoverable_current_find_tool_policy_blocked",
+                    "idea_contract_failed",
+                    "plan_contract_failed",
+                    "missing_selected_plan",
+                    "ambiguous_selected_plan",
+                    "selected_plan_id_missing",
+                    "selected_plan_missing_matching_idea",
+                }
             )
             force_repair_attempt = max(
                 1,

@@ -53,7 +53,7 @@ def main() -> None:
     _ensure_runtime_imports()
     from auto_research.models import AppConfig, FindRequest, VenueSelection
     from auto_research.source_selection import default_source_selection, normalize_source_selection
-    from auto_research.auto_find.pipeline import run_find
+    from find_pipeline import run_find
 
     config = AppConfig(**_load_json(args.config_json, {}))
     selection_payload = _load_json(args.selection_json, default_source_selection())

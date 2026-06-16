@@ -12,7 +12,7 @@
 | `../web/backend/` | FastAPI 后端、网页任务桥和项目状态 API。 |
 | `../web/frontend/client/` | React/Vite 前端源码。构建产物 `dist/` 不提交。 |
 | `../modules/` | finding、reading、ideation、planning、environment、experimenting、writing 七个可独立运行的科研阶段。 |
-| `auto_research/data/quality/` | 包内静态会议/期刊质量表，只提供确定性元数据和小幅排序信号。 |
+| `modules/finding/data/quality/` | 包内静态会议/期刊质量表，只提供确定性元数据和小幅排序信号。 |
 | `tests/` | 后端和流程回归测试。 |
 | `requirements.txt` | TASTE 管理环境所需 Python 依赖。 |
 | `LICENSE` | 包内许可证副本。根目录 README 中也有许可证说明。 |

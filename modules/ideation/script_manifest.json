@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-15T02:07:10.091264+00:00",
+  "generated_at": "2026-06-15T22:40:11.956990+00:00",
   "module": "ideation",
   "contract": {
     "directory": "modules/ideation",
@@ -23,12 +23,12 @@
       "idea candidate audits"
     ],
     "legacy_roots": [
-      "modules/ideation/auto_research/auto_idea",
+      "modules/ideation/scripts/idea_pipeline.py",
       "modules/ideation/scripts/assess_idea_candidates.py",
       "modules/ideation/scripts/build_hypothesis_arena.py"
     ]
   },
-  "script_count": 3,
+  "script_count": 4,
   "scripts": [
     {
       "script": "assess_idea_candidates.py",
@@ -72,6 +72,67 @@
         "json",
         "pathlib",
         "project_paths"
+      ],
+      "parse_error": ""
+    },
+    {
+      "script": "idea_pipeline.py",
+      "path": "modules/ideation/scripts/idea_pipeline.py",
+      "owner": "ideation",
+      "owner_reason": "idea/hypothesis candidate generation or curation",
+      "function_count": 38,
+      "functions": [
+        "_raise_if_cancelled",
+        "_source_items",
+        "_item_text",
+        "_config_topic_text",
+        "_topic_terms",
+        "_topic_rank",
+        "_select_relevant_seeds",
+        "_is_generic_experiment_placeholder",
+        "_normalize_inspired_by",
+        "_inspired_by_text",
+        "_parse_inspired_by_text",
+        "_normalize_idea_schema",
+        "_fallback_ideas",
+        "_quality_flags",
+        "_usable_idea",
+        "_fill_with_fallback",
+        "_dedupe_ideas",
+        "_score_value",
+        "_display_score_value",
+        "_idea_markdown_score",
+        "_item_windows",
+        "run_idea",
+        "_markdown_value",
+        "_idea_public_new_method_text",
+        "_idea_public_initial_experiment_text",
+        "render_ideas_markdown",
+        "_project_name",
+        "_project_root",
+        "_project_taste_dir",
+        "_payload_run_id",
+        "_project_current_find_run_id",
+        "_project_sync_allowed_for_run",
+        "_idea_key_for_merge",
+        "_merge_idea_rows",
+        "_load_patch_ideas_data",
+        "_idea_three_part_ready_for_state",
+        "_sync_project_ideas",
+        "patch_idea"
+      ],
+      "classes": [],
+      "imports": [
+        "__future__",
+        "auto_research.jobs",
+        "auto_research.llm",
+        "auto_research.models",
+        "auto_research.paths",
+        "auto_research.storage",
+        "datetime",
+        "os",
+        "pathlib",
+        "typing"
       ],
       "parse_error": ""
     },

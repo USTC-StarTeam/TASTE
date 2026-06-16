@@ -12,7 +12,7 @@ def _repo_root(start: Path) -> Path:
     if current.is_file():
         current = current.parent
     for candidate in (current, *current.parents):
-        if (candidate / "scripts").is_dir() and (candidate / "modules").is_dir() and (candidate / "framework").is_dir():
+        if (candidate / "modules").is_dir() and (candidate / "framework").is_dir() and (candidate / "web").is_dir():
             return candidate
     return Path(__file__).resolve().parents[2]
 
@@ -24,7 +24,7 @@ REFERENCE_ROOT = ROOT / "third_party" / "reference_TASTE_latest"
 PACKAGE_RUNTIME_DIR = PROJECT_ROOT / "auto_research"
 WORKFLOW_RUNTIME_DIR = Path(os.environ.get("WORKFLOW_RUNTIME_DIR") or ROOT / "runtime").expanduser()
 LEGACY_WORKFLOW_RUNTIME_DIR = WORKFLOW_RUNTIME_DIR
-DATA_DIR = ROOT / "modules" / "finding" / "auto_research" / "data"
+DATA_DIR = ROOT / "modules" / "finding" / "data"
 RUNS_DIR = WORKFLOW_RUNTIME_DIR / "runs"
 STATE_DIR = WORKFLOW_RUNTIME_DIR / "state"
 LOCAL_DATABASE_DIR = WORKFLOW_RUNTIME_DIR / "local_database"
@@ -40,10 +40,10 @@ def ensure_directories() -> None:
     for path in (
         RUNS_DIR,
         STATE_DIR,
-        WORKFLOW_RUNTIME_DIR / "auto_find",
-        WORKFLOW_RUNTIME_DIR / "auto_read",
-        WORKFLOW_RUNTIME_DIR / "auto_idea",
-        WORKFLOW_RUNTIME_DIR / "auto_plan",
+        WORKFLOW_RUNTIME_DIR / "finding",
+        WORKFLOW_RUNTIME_DIR / "reading",
+        WORKFLOW_RUNTIME_DIR / "ideation",
+        WORKFLOW_RUNTIME_DIR / "planning",
         LOCAL_DATABASE_DIR,
     ):
         path.mkdir(parents=True, exist_ok=True)

@@ -3902,7 +3902,7 @@ function publicArtifactPath(value: any, fallback = "", lang: Lang = "zh"): strin
     const label = artifactDisplayName(runMatch[2], lang);
     return lang === "zh" ? `Find 产物：${runMatch[1]} / ${label}` : `Find artifact: ${runMatch[1]} / ${label}`;
   }
-  if (text.includes("/web/backend/auto_research/") || text.includes("/framework/auto_research/") || text.includes("/modules/finding/auto_research/") || text.includes("/modules/reading/auto_research/")) return text.split("/").slice(-2).join("/") || fallback;
+  if (text.includes("/web/backend/auto_research/") || text.includes("/framework/auto_research/") || text.includes("/modules/finding/") || text.includes("/modules/reading/")) return text.split("/").slice(-2).join("/") || fallback;
   return publicLogText(text, lang);
 }
 
@@ -6013,7 +6013,8 @@ function App() {
   const readyDatasetDetails = useMemo(() => asArray(envStage?.ready_dataset_details), [envStage]);
   const pendingDatasetDetails = useMemo(() => asArray(envStage?.pending_dataset_details), [envStage]);
   const blockedDatasetDetails = useMemo(() => asArray(envStage?.blocked_dataset_details), [envStage]);
-  const activeRepo = useMemo(() => envStage?.active_repo || repoDetails.find((row: any) => row.active) || {}, [envStage, repoDetails]);
+  const environmentSelectionValid = Boolean(envStage?.selection?.valid);
+  const activeRepo = useMemo(() => environmentSelectionValid ? (envStage?.active_repo || repoDetails.find((row: any) => row.active) || {}) : {}, [envStage, repoDetails, environmentSelectionValid]);
   const pendingEnvironmentCandidate = useMemo(() => envStage?.pending_candidate || envStage?.selection?.pending_candidate || {}, [envStage]);
   const claudeTopicDecision = useMemo(() => envStage?.claude_topic_decision || {}, [envStage]);
   const selectedProject = useMemo(() => researchProjects.find((project) => project.id === researchProject), [researchProjects, researchProject]);
@@ -8292,53 +8293,25 @@ function App() {
                       </div>
                       <span className={`stageBadge ${badgeClass(envStage?.status)}`}>{displayValue(envStage?.status || "not_started")}</span>
                     </div>
-                    <div className="envSummaryList">
+                    <div className="envSummaryList compactEnvSummaryList">
                       <div className="envSummaryItem">
-                        <span>{envStage?.selection?.valid ? (lang === "zh" ? "已选基底" : "Selected base") : (lang === "zh" ? "已有基底" : "Existing base")}</span>
-                        <strong>{displayMaybe(envStage?.selection?.selected_base?.title || activeRepo?.name, t.notSelected)}</strong>
-                      </div>
-                      <div className="envSummaryItem">
-                        <span>{lang === "zh" ? "当前执行计划" : "Current execution plan"}</span>
-                        <strong>{displayMaybe(envStage?.selection?.current_selected_plan_id || envStage?.selection?.selected_plan_id, t.noData)}</strong>
-                        {envStage?.selection?.selected_plan_id && envStage?.selection?.current_selected_plan_id && envStage.selection.selected_plan_id !== envStage.selection.current_selected_plan_id && <small>{lang === "zh" ? `环境记录计划 ${envStage.selection.selected_plan_id}` : `Environment record plan ${envStage.selection.selected_plan_id}`}</small>}
-                        {envStage?.selection?.reason && <small>{displayValue(envStage.selection.reason)}</small>}
-                      </div>
-                      {(envStage?.selection?.selection_gate || envStage?.selection?.raw_selection_gate || envStage?.selection?.selection_decision || localizedField(envStage?.selection, "selection_rationale", "")) && (
-                        <div className="envSummaryItem">
-                          <span>{lang === "zh" ? "选择门控" : "Selection gate"}</span>
-                          <strong>{[
-                            displayMaybe(envStage?.selection?.selection_gate || envStage?.selection?.raw_selection_gate, ""),
-                            displayMaybe(envStage?.selection?.selection_decision, ""),
-                            envStage?.selection?.selection_confidence !== undefined && envStage?.selection?.selection_confidence !== "" ? `confidence=${envStage.selection.selection_confidence}` : "",
-                          ].filter(Boolean).join(" / ")}</strong>
-                          {localizedField(envStage?.selection, "selection_rationale", "") && <small>{String(localizedField(envStage.selection, "selection_rationale", "")).slice(0, 420)}{String(localizedField(envStage.selection, "selection_rationale", "")).length > 420 ? "..." : ""}</small>}
-                        </div>
-                      )}
-                      <div className="envSummaryItem">
-                        <span>{lang === "zh" ? "仓库" : "Repository"}</span>
-                        <strong>{displayMaybe(envStage?.active_repo?.name || activeRepo?.name, t.notSelected)}</strong>
+                        <span>{lang === "zh" ? "当前基底" : "Current base"}</span>
+                        <strong>{environmentSelectionValid ? displayMaybe(envStage?.selection?.selected_base?.title || activeRepo?.name, t.notSelected) : (lang === "zh" ? "未选择" : "not selected")}</strong>
                       </div>
                       {(pendingEnvironmentCandidate?.name || pendingEnvironmentCandidate?.title || pendingEnvironmentCandidate?.repo_path) && (
                         <div className="envSummaryItem">
-                          <span>{lang === "zh" ? "候选路线（未授权）" : "Candidate route (not authorized)"}</span>
+                          <span>{lang === "zh" ? "候选" : "Candidate"}</span>
                           <strong>{displayMaybe(pendingEnvironmentCandidate?.name || pendingEnvironmentCandidate?.title || pendingEnvironmentCandidate?.repo_path, t.notSelected)}</strong>
-                          {pendingEnvironmentCandidate?.title && pendingEnvironmentCandidate.title !== pendingEnvironmentCandidate?.name && <small>{pendingEnvironmentCandidate.title}</small>}
                         </div>
                       )}
                       <div className="envSummaryItem">
-                        <span>{lang === "zh" ? "真实数据/loader" : "Real data / loader"}</span>
-                        <strong>{displayValue(envStage?.data_status || "not_started")}{envStage?.dataset ? ` / ${envStage.dataset}` : ""}</strong>
+                        <span>{lang === "zh" ? "门控" : "Gate"}</span>
+                        <strong>{displayMaybe(envStage?.selection?.selection_gate || envStage?.selection?.raw_selection_gate || envStage?.status, t.noData)}</strong>
                       </div>
                       <div className="envSummaryItem">
-                        <span>{lang === "zh" ? "参考复现" : "Reference reproduction"}</span>
-                        <strong>{displayValue(envReferenceGate?.status || "not_started")} / {gateStatusDetail(envReferenceGate)}</strong>
+                        <span>{lang === "zh" ? "参考复现" : "Reference"}</span>
+                        <strong>{displayValue(envReferenceGate?.status || "not_started")}</strong>
                       </div>
-                      {envReferenceFullJob?.status && (
-                        <div className="envSummaryItem">
-                          <span>{lang === "zh" ? "参考复现任务" : "Reference job"}</span>
-                          <strong>{displayValue(envReferenceFullJob.status)}</strong>
-                        </div>
-                      )}
                     </div>
                     <div className={`envSummaryStatus ${String(envStage?.status || "").includes("blocked") ? "warning" : ""}`}>
                       <span>{lang === "zh" ? "环境状态" : "Environment status"}</span>
@@ -8426,6 +8399,7 @@ function App() {
                       <article className="detailItem"><p>{lang === "zh" ? "选择状态" : "Selection status"}</p><small>{publicEnvironmentSelectionStatus(envStage?.selection, lang)}</small></article>
                       <article className="detailItem"><p>{lang === "zh" ? "数据集" : "Dataset"}</p><small>{displayMaybe(envStage?.dataset || envStage?.ready_datasets, t.noData)}</small></article>
                       <article className="detailItem"><p>{t.repoPathLabel}</p><small>{displayMaybe(envStage?.repo_path || activeRepo?.local_path, t.noData)}</small></article>
+                      {envStage?.historical_active_repo?.name && <article className="detailItem"><p>{lang === "zh" ? "历史仓库" : "Historical repo"}</p><small>{displayMaybe(envStage.historical_active_repo.name, t.noData)}</small></article>}
                       {envReferenceFullJob?.log_path && <article className="detailItem"><p>{lang === "zh" ? "参考复现日志" : "Reference reproduction log"}</p><small>{displayMaybe(envReferenceFullJob.log_path, t.noData)}</small></article>}
                     </div>
                   </details>

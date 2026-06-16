@@ -845,7 +845,7 @@ def render_experimental_log(project: str) -> str:
 ## 3. Manuscript-Safe Qualitative Guidance
 
 * If the table contains only `reference_calibration` rows, the paper may report that the selected base/protocol is available for calibration, but it must not claim that the proposed method improves over it.
-* If no claim-supporting result exists, do not write a proposal or planned-study section. Write Experiments around verified reference calibration, dataset/protocol facts, implementation details, and completed protocol comparisons without future-tense or TODO language.
+* If no claim-supporting result exists, do not write a proposal or planned-study section and do not imply the proposed method has already been evaluated. Write Experiments around verified reference calibration, dataset/protocol facts, and implementation details using neutral evidence-scope wording. Avoid phrases such as "we evaluate the proposed method", "all experiments use", "results averaged over", hardware/runtime claims, or superiority claims unless a listed artifact backs the exact statement.
 * Do not mention failed hypotheses, negative outcomes, internal blocker names, gate names, or legacy-route narratives in the manuscript body.
 * The draft should still be written as a high-quality conference paper: strong motivation, precise method, equations, algorithmic description, and reproducibility details.
 """
@@ -1490,8 +1490,8 @@ def claude_prompt(project: str, venue: str, title: str, workspace: Path, repo_di
         "outline": "Execute only writing Step 1: produce and validate workspace/outline.json.",
         "plotting": "Execute only writing Step 2: produce necessary figure PNGs and workspace/figures/captions.json. Use only figures backed by manuscript-safe evidence; do not create blocker, failed-run, or future-work visuals as main paper figures.",
         "literature": "Execute only writing Step 3: produce citation_pool.json, refs.bib, and drafts/intro_relwork.tex from verified citations only.",
-        "section-writing": "Execute only writing Step 4: use existing intro_relwork.tex, refs.bib, citation_pool.json, figures, captions, and manuscript-safe metrics to produce a full target-venue-style drafts/paper.tex, not a short method memo. Follow the resolved venue-specific manuscript shape, including Nature-family article shape when applicable, while avoiding fabricated superiority claims and avoiding planned/future/status language.",
-        "refinement": "Execute only writing Step 5: refine drafts/paper.tex into a polished final/paper.tex that reads like a serious venue submission preview. Strengthen narrative, math, algorithm box if useful, venue-appropriate results/protocol prose, tables, captions, and citation coverage while preserving the target venue template. Do not replace the manuscript with a revision-status, future-work, limitations, success-criteria, or gate report.",
+        "section-writing": "Execute only writing Step 4: use existing intro_relwork.tex, refs.bib, citation_pool.json, figures, captions, and manuscript-safe metrics to produce a full target-venue-style drafts/paper.tex, not a short method memo. Follow the resolved venue-specific manuscript shape, including Nature-family article shape when applicable, while avoiding fabricated superiority claims and avoiding internal status language.",
+        "refinement": "Execute only writing Step 5: refine drafts/paper.tex into a polished final/paper.tex that reads like a serious venue submission preview. Strengthen narrative, math, algorithm box if useful, venue-appropriate results/protocol prose, tables, captions, and citation coverage while preserving the target venue template. Do not replace the manuscript with a revision-status, success-criteria, or gate report; concise manuscript-native evidence-scope or limitations wording is allowed when it prevents overclaiming.",
         "compile": "Compile final/paper.tex into final/paper.pdf and write provenance.json.",
         "all": "Run the missing writing steps until final/paper.tex and final/paper.pdf exist.",
     }.get(phase, "Run the missing writing steps until final/paper.tex and final/paper.pdf exist.")
@@ -1509,6 +1509,12 @@ Title hint: {title}
 TASTE-controlled writing phase for this call: {phase}
 Focused objective: {phase_instruction}
 Current paper-preview regeneration requested by TASTE user/UI (this means rebuild the venue-formatted manuscript preview from current TASTE evidence; it is not a claim-change directive and not an instruction to intervene in the underlying research project): {force_refresh}
+
+Secret and external-literature boundary:
+- Do not inspect, echo, grep, print, measure, or pass any environment variable whose name or value contains API key, token, secret, credential, OPENAI, ANTHROPIC, LLM, or SEMANTIC_SCHOLAR. Do not run `env`, `set`, `printenv`, shell parameter-length probes, or `curl -H Authorization: ...` to test credentials.
+- Literature search credentials and live Semantic Scholar/OpenAlex access are wrapper-owned. This writing phase must consume the TASTE-prepared `citation_pool.json`, `raw_pool.json`, `deduped_candidates.json`, `refs.bib`, and `project_bridge_phases/literature_verification.json` artifacts instead of probing secrets or calling external APIs directly.
+- If the prepared citation pool is insufficient, write a blocker in the phase output/provenance outside `paper.tex`; do not attempt to discover or print secret availability from the shell.
+- For local manuscript artifact probes, prefer `{sys.executable} -c ...` or ordinary read-only shell tools over bare environment inspection. These probes may inspect TeX/BibTeX/PDF/log JSON files only; they must not launch training or mutate experiment artifacts.
 
 writing module contract:
 ```markdown
@@ -1562,13 +1568,13 @@ Hard requirements:
 - If the resolved venue policy requires a specific `\\documentclass` or options, final TeX must preserve them exactly; do not replace the official template with a generic local template.
 - Treat venue requirements as dynamic: rely on `venue_requirements.json` produced by venue-intelligence from current official sources, not on hard-coded assumptions about any single conference. Re-read that file before writing if the target venue changes.
 - Figure quality is a hard preview gate. Every main-text figure must have a reproducible script, legible typography, concise caption, and claim-ready evidence. Do not disguise weak synthetic/probe outputs as polished results.
-- If evidence is insufficient for positive empirical claims, still produce the best possible venue-formatted manuscript preview. Foreground the project-specific innovation thesis, mathematical formulation, algorithm, reproducibility details, verified reference calibration, and scientific plausibility derived from the prepared writing inputs.
+- If evidence is insufficient for positive empirical claims, still produce the best possible venue-formatted manuscript preview. Foreground the project-specific innovation thesis, mathematical formulation, algorithm, reproducibility details, verified reference calibration, and scientific plausibility derived from the prepared writing inputs, while making the evidence scope clear in normal manuscript prose rather than internal status terms.
 - The manuscript should be complete in resolved venue-specific paper shape even when evidence is still incomplete: {manuscript_shape_requirement(venue, project=project)} Include references, at least one dataset/protocol table when supported, a reference-calibration table, and method/protocol figures when available. When figure footprint is the measured layout issue, repair floats/graphics before shortening manuscript substance.
-- Venue-appropriate Results/Experiments prose may report verified reference calibration and describe current implementation/protocol details, but must not invent completed proposed-method numbers or superiority claims. Do not include negative/failed runs as the main result story, and do not label any section as planned work, study design, or ablation design.
+- Venue-appropriate Results/Experiments prose may report verified reference calibration and describe current implementation/protocol details, but must not invent completed proposed-method numbers, repeated-run summaries, hardware/runtime claims, dataset statistics, or superiority claims. Do not include negative/failed runs as the main result story, and do not label any section as planned work, study design, or ablation design.
 - Keep unsupported, negative, failed, and legacy routes out of the manuscript body; record them only in provenance/audit files and do not pretend the paper is submission-ready.
 - `workspace/final/paper.tex` must be manuscript content only. It must not contain headings such as Revision Status, Submission Blockers, Paper Blockers, Required Revision Actions, Evidence Snapshot, Section Ledger, Writing Blockers, or Next Actions.
 - `workspace/final/paper.tex` must not contain visible sections or paragraphs titled Limitations, Future Work, Planned Study, Planned Ablation Study, Success Criteria, Inspection Draft, Failure, or Counterexample.
-- Do not write internal state vocabulary into the manuscript, including inspection draft, candidate_observation_only, blocked, hold-markdown-only, claim promotion, audit-ready, unsupported claims, no empirical superiority claims, future empirical validation, or planned ablation.
+- Do not write internal state vocabulary into the manuscript, including inspection draft, candidate_observation_only, blocked, hold-markdown-only, claim promotion, audit-ready, unsupported claims, or gate diagnostics.
 - Do not include acknowledgments or any sentence that mentions TASTE, writing, automated research, project agents, source-method modules, anonymous reviewers, or manuscript-generation tooling.
 - For anonymous Nature-family/Springer Nature previews, use a single anonymous author block only; do not add corresponding-author stars, numeric affiliation labels, emails, or placeholder affiliation text such as Department/Institution/City/Country.
 - If a caveat is necessary, phrase it neutrally inside method/protocol prose rather than as a weakness list.
@@ -1692,13 +1698,23 @@ def run_phase_with_claude(
     ready_after, missing_after = phase_ready(workspace, phase, min_references=min_references, venue=venue, project=project)
     stdout = str(claude.get("stdout_tail") or claude.get("stdout") or "")
     stale_success = bool(re.search(r"\b(still running|in progress|queued|waiting for|will proceed)\b", stdout, flags=re.IGNORECASE))
-    status = "pass" if ready_after and not stale_success else "blocked"
+    claude_rc = int(claude.get("return_code") if claude.get("return_code") is not None else 0)
+    claude_status = str(claude.get("status") or "").strip().lower()
+    tool_policy_blocked = claude_rc == 3 or "blocked_tool_policy" in claude_status or "blocked_tool_policy" in stdout
+    if claude_rc != 0:
+        missing_after = [*missing_after, f"claude_return_code_{claude_rc}"]
+    if tool_policy_blocked:
+        missing_after = [*missing_after, "claude_tool_policy_blocked"]
+    status = "pass" if ready_after and not stale_success and claude_rc == 0 and not tool_policy_blocked else "blocked"
     payload.update({
         "claude": claude,
         "after": after,
         "ready_after": ready_after,
         "missing_after": missing_after,
         "stale_success_text_detected": stale_success,
+        "claude_return_code": claude_rc,
+        "claude_status": claude_status,
+        "tool_policy_blocked": tool_policy_blocked,
         "status": status,
         "finished_at": now_iso(),
     })
@@ -1939,34 +1955,62 @@ def run_phase_machine(
     force_refresh: bool = False,
 ) -> dict[str, Any]:
     phases: list[dict[str, Any]] = []
+
+    def blocked_result(blocked_phase: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "status": "blocked",
+            "blocked_phase": blocked_phase.get("phase", ""),
+            "phases": phases,
+            "workspace_status": workspace_status(workspace),
+            "current_paper_regeneration_requested": force_refresh,
+            "workspace_final_artifacts": workspace_final_artifacts(workspace),
+        }
+
+    def append_or_stop(phase_payload: dict[str, Any]) -> bool:
+        phases.append(phase_payload)
+        return str(phase_payload.get("status") or "").strip().lower() not in {"pass", "skipped-ready"}
+
     scripts = paper_orchestra_scripts(repo_dir)
     if scripts["validate_outline"].exists() and (workspace / "outline.json").exists():
         outline_result = run([sys.executable, str(scripts["validate_outline"]), str(workspace / "outline.json")], cwd=ROOT, required=False)
         outline_ok, outline_missing = phase_ready(workspace, "outline", min_references=min_references, venue=venue, project=project)
         outline_status = "pass" if outline_ok and outline_result["return_code"] in {0, 2} else "blocked"
-        phases.append({
+        outline_phase = {
             "phase": "outline",
             "status": outline_status,
             "commands": [outline_result],
             "warnings": ["validate_outline.py could not run because jsonschema is missing; outline file existence was used as fallback."] if outline_result["return_code"] == 2 else [],
             "missing": outline_missing,
             "workspace_status": workspace_status(workspace),
-        })
+        }
+        if append_or_stop(outline_phase):
+            return blocked_result(outline_phase)
     else:
-        phases.append(run_phase_with_claude(project, venue, title, workspace, repo_dir, "outline", timeout_sec=timeout_sec, resume=resume, min_references=min_references, force_refresh=force_refresh))
+        outline_phase = run_phase_with_claude(project, venue, title, workspace, repo_dir, "outline", timeout_sec=timeout_sec, resume=resume, min_references=min_references, force_refresh=force_refresh)
+        if append_or_stop(outline_phase):
+            return blocked_result(outline_phase)
 
-    phases.append(run_phase_with_claude(project, venue, title, workspace, repo_dir, "plotting", timeout_sec=timeout_sec, resume=resume, min_references=min_references, force_refresh=force_refresh))
+    plotting_phase = run_phase_with_claude(project, venue, title, workspace, repo_dir, "plotting", timeout_sec=timeout_sec, resume=resume, min_references=min_references, force_refresh=force_refresh)
+    if append_or_stop(plotting_phase):
+        return blocked_result(plotting_phase)
 
     lit_ready, lit_missing = phase_ready(workspace, "literature", min_references=min_references, venue=venue, project=project)
     if not lit_ready:
         lit_verify = build_verified_literature_pool(workspace, repo_dir, min_references=min_references, max_s2_queries=max_s2_queries)
-        phases.append(lit_verify)
+        if append_or_stop(lit_verify):
+            return blocked_result(lit_verify)
     lit_ready, lit_missing = phase_ready(workspace, "literature", min_references=min_references, venue=venue, project=project)
     if not lit_ready:
-        phases.append(run_phase_with_claude(project, venue, title, workspace, repo_dir, "literature", timeout_sec=timeout_sec, resume=False, min_references=min_references, force_refresh=force_refresh))
+        literature_phase = run_phase_with_claude(project, venue, title, workspace, repo_dir, "literature", timeout_sec=timeout_sec, resume=False, min_references=min_references, force_refresh=force_refresh)
+        if append_or_stop(literature_phase):
+            return blocked_result(literature_phase)
 
-    phases.append(run_phase_with_claude(project, venue, title, workspace, repo_dir, "section-writing", timeout_sec=timeout_sec, resume=False, min_references=min_references, force_refresh=force_refresh))
-    phases.append(run_phase_with_claude(project, venue, title, workspace, repo_dir, "refinement", timeout_sec=timeout_sec, resume=False, min_references=min_references, force_refresh=force_refresh))
+    section_phase = run_phase_with_claude(project, venue, title, workspace, repo_dir, "section-writing", timeout_sec=timeout_sec, resume=False, min_references=min_references, force_refresh=force_refresh)
+    if append_or_stop(section_phase):
+        return blocked_result(section_phase)
+    refinement_phase = run_phase_with_claude(project, venue, title, workspace, repo_dir, "refinement", timeout_sec=timeout_sec, resume=False, min_references=min_references, force_refresh=force_refresh)
+    if append_or_stop(refinement_phase):
+        return blocked_result(refinement_phase)
     compile_phase = compile_final_pdf(project, workspace, repo_dir, venue=venue)
     phases.append(compile_phase)
     audit_phase = run_deterministic_gates(project, venue, workspace, repo_dir, min_references=min_references)

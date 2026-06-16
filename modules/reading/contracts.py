@@ -11,7 +11,7 @@ RESPONSIBILITY = "Acquire verified paper-body text for the selected Find packet 
 REQUIRED_EXTERNAL_INPUTS = ('llm_api_or_claude', 'finding_artifact_packet', 'artifact_root')
 ARTIFACTS_IN = ('find_results.json', 'article.md', 'full_text_reading/manual_full_text_sources.json')
 ARTIFACTS_OUT = ('read_results.json', 'read.md', 'full_text_reading/full_text_packet.json', 'current_find_full_text_evidence_repair.json')
-LEGACY_ROOTS = ('modules/reading/auto_research/auto_read', 'modules/reading/scripts/repair_current_find_full_text_evidence.py', 'modules/reading/scripts/ensure_current_find_research_plan.py')
+LEGACY_ROOTS = ('modules/reading/scripts/read_pipeline.py', 'modules/reading/scripts/repair_current_find_full_text_evidence.py', 'modules/reading/scripts/ensure_current_find_research_plan.py')
 
 
 @dataclass(slots=True)

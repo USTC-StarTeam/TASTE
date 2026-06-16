@@ -11,7 +11,7 @@ RESPONSIBILITY = "Collect, filter, score, and rank literature/tool candidates fr
 REQUIRED_EXTERNAL_INPUTS = ('llm_api', 'research_topic', 'research_interest', 'researcher_profile', 'source_selection')
 ARTIFACTS_IN = ('config/profile JSON', 'venue/source selection JSON')
 ARTIFACTS_OUT = ('find_results.json', 'article.md', 'source_status.md', 'category/title/detail/scoring reports')
-LEGACY_ROOTS = ('modules/finding/auto_research/auto_find', 'modules/finding/scripts/discover_*.py', 'modules/finding/scripts/build_literature_tool_packet.py')
+LEGACY_ROOTS = ('modules/finding/scripts/find_pipeline.py', 'modules/finding/scripts/discover_*.py', 'modules/finding/scripts/build_literature_tool_packet.py')
 
 
 @dataclass(slots=True)

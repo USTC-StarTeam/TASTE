@@ -3,26 +3,63 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+ROOT = Path(__file__).resolve().parents[3]
+FRAMEWORK_SCRIPTS = ROOT / "framework" / "scripts"
+if str(FRAMEWORK_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(FRAMEWORK_SCRIPTS))
+from taste_pythonpath import ensure_taste_pythonpath
+ensure_taste_pythonpath(ROOT)
+
 import requests
 
-from auto_research.auto_find.sources import HEADERS, stable_id
 from auto_research.paths import LOCAL_DATABASE_DIR
+from find_support import HEADERS, stable_id
 
 
-VENUE_ID = "openreview_iclr"
-VENUE_NAME = "ICLR"
-VENUE_FULL_NAME = "International Conference on Learning Representations"
-DEFAULT_YEARS = [2026, 2025]
 DEFAULT_OUTPUT_ROOT = LOCAL_DATABASE_DIR
+OPENREVIEW_VENUES: dict[str, dict[str, Any]] = {
+    "iclr": {
+        "aliases": ["iclr", "openreview_iclr"],
+        "venue_id": "openreview_iclr",
+        "venue": "ICLR",
+        "full_name": "International Conference on Learning Representations",
+        "openreview_prefix": "ICLR.cc",
+        "default_years": [2026, 2025],
+        "blocked_title_terms": [],
+    },
+    "neurips": {
+        "aliases": ["neurips", "nips", "openreview_neurips"],
+        "venue_id": "openreview_neurips",
+        "venue": "NeurIPS",
+        "full_name": "Conference on Neural Information Processing Systems",
+        "openreview_prefix": "NeurIPS.cc",
+        "default_years": [2026, 2025],
+        "blocked_title_terms": ["neurips"],
+    },
+}
+VENUE_ALIASES = {
+    alias: key
+    for key, spec in OPENREVIEW_VENUES.items()
+    for alias in spec["aliases"]
+}
 
 
-def _clean_text(value: str) -> str:
-    return " ".join((value or "").split())
+def venue_spec(venue: str) -> dict[str, Any]:
+    key = VENUE_ALIASES.get(str(venue or "").strip().lower())
+    if not key:
+        supported = ", ".join(sorted(VENUE_ALIASES))
+        raise ValueError(f"unsupported OpenReview venue {venue!r}; supported: {supported}")
+    return OPENREVIEW_VENUES[key]
+
+
+def _clean_text(value: object) -> str:
+    return " ".join(str(value or "").split())
 
 
 def _content_raw(content: dict[str, Any], key: str) -> Any:
@@ -59,29 +96,25 @@ def _first_content_text(content: dict[str, Any], keys: list[str]) -> str:
 
 
 def _collect_keywords(content: dict[str, Any]) -> list[str]:
-    keywords: list[str] = []
-    for key in ["keywords", "keyword", "TL;DR", "tldr"]:
-        if key in content:
-            if key.lower() in {"tl;dr", "tldr"}:
-                continue
-            keywords.extend(_content_list(content, key))
     seen: set[str] = set()
-    result: list[str] = []
-    for keyword in keywords:
-        normalized = _clean_text(keyword)
-        lowered = normalized.lower()
-        if normalized and lowered not in seen:
-            seen.add(lowered)
-            result.append(normalized)
-    return result
+    keywords: list[str] = []
+    for key in ["keywords", "keyword"]:
+        for keyword in _content_list(content, key):
+            normalized = _clean_text(keyword)
+            lowered = normalized.lower()
+            if normalized and lowered not in seen:
+                seen.add(lowered)
+                keywords.append(normalized)
+    return keywords
 
 
-def _looks_like_paper_title(value: str) -> bool:
+def _looks_like_paper_title(value: object, spec: dict[str, Any]) -> bool:
     text = _clean_text(value)
     if len(text) < 8:
         return False
     lowered = text.lower()
     blocked = ["main navigation", "skip to", "successful page load", "openreview", "papers"]
+    blocked.extend(str(item).lower() for item in spec.get("blocked_title_terms", []))
     return not any(item == lowered or lowered.startswith(item) for item in blocked)
 
 
@@ -93,12 +126,12 @@ def _note_url(note: dict[str, Any]) -> tuple[str, str]:
     return url, pdf_url
 
 
-def _normalize_note(note: dict[str, Any], year: int, openreview_venueid: str) -> dict[str, Any] | None:
+def _normalize_note(note: dict[str, Any], year: int, spec: dict[str, Any], openreview_venueid: str) -> dict[str, Any] | None:
     content = note.get("content", {}) or {}
     if not isinstance(content, dict):
         return None
     title = _clean_text(_content_text(content, "title"))
-    if not _looks_like_paper_title(title):
+    if not _looks_like_paper_title(title, spec):
         return None
 
     url, pdf_url = _note_url(note)
@@ -120,7 +153,7 @@ def _normalize_note(note: dict[str, Any], year: int, openreview_venueid: str) ->
     keywords = _collect_keywords(content)
 
     metadata = {
-        "venue_id": VENUE_ID,
+        "venue_id": spec["venue_id"],
         "openreview_venueid": openreview_venueid,
         "note_id": str(note.get("id") or ""),
         "forum": str(note.get("forum") or ""),
@@ -131,7 +164,6 @@ def _normalize_note(note: dict[str, Any], year: int, openreview_venueid: str) ->
         "invitation": note.get("invitation"),
         "content_keys": sorted(str(key) for key in content.keys()),
     }
-
     return {
         "id": stable_id("paper", url),
         "source": "openreview",
@@ -140,7 +172,7 @@ def _normalize_note(note: dict[str, Any], year: int, openreview_venueid: str) ->
         "abstract": _clean_text(_content_text(content, "abstract")),
         "url": url,
         "pdf_url": pdf_url,
-        "venue": VENUE_NAME,
+        "venue": spec["venue"],
         "year": year,
         "category": category,
         "primary_area": primary_area,
@@ -165,53 +197,35 @@ def _request_json(url: str, params: dict[str, Any], timeout: int, retries: int) 
     raise RuntimeError(f"OpenReview request failed: {last_error}") from last_error
 
 
-def _fetch_api2_notes(year: int, page_size: int, timeout: int, retries: int, max_pages: int) -> tuple[list[dict[str, Any]], str]:
-    openreview_venueid = f"ICLR.cc/{year}/Conference"
+def _fetch_notes(
+    year: int,
+    spec: dict[str, Any],
+    *,
+    api_version: int,
+    page_size: int,
+    timeout: int,
+    retries: int,
+    max_pages: int,
+) -> tuple[list[dict[str, Any]], str]:
+    openreview_venueid = f"{spec['openreview_prefix']}/{year}/Conference"
     notes: list[dict[str, Any]] = []
     seen: set[str] = set()
-    offset = 0
-    for _page in range(max_pages):
-        data = _request_json(
-            "https://api2.openreview.net/notes",
-            {
-                "content.venueid": openreview_venueid,
-                "details": "replyCount,invitation,original",
-                "limit": page_size,
-                "offset": offset,
-            },
-            timeout,
-            retries,
-        )
-        page_notes = data.get("notes", [])
-        if not isinstance(page_notes, list) or not page_notes:
-            break
-        added = 0
-        for note in page_notes:
-            note_id = str(note.get("id") or note.get("forum") or "")
-            if not note_id or note_id in seen:
-                continue
-            seen.add(note_id)
-            notes.append(note)
-            added += 1
-        if added == 0 or len(page_notes) < page_size:
-            break
-        offset += page_size
-    return notes, openreview_venueid
-
-
-def _fetch_api1_notes(year: int, page_size: int, timeout: int, retries: int, max_pages: int) -> tuple[list[dict[str, Any]], str]:
-    openreview_venueid = f"ICLR.cc/{year}/Conference"
-    notes: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for invitation in [f"{openreview_venueid}/-/Blind_Submission", f"{openreview_venueid}/-/Submission"]:
+    invitations = [None] if api_version == 2 else [f"{openreview_venueid}/-/Blind_Submission", f"{openreview_venueid}/-/Submission"]
+    for invitation in invitations:
         offset = 0
         for _page in range(max_pages):
-            data = _request_json(
-                "https://api.openreview.net/notes",
-                {"invitation": invitation, "limit": page_size, "offset": offset},
-                timeout,
-                retries,
-            )
+            if api_version == 2:
+                url = "https://api2.openreview.net/notes"
+                params = {
+                    "content.venueid": openreview_venueid,
+                    "details": "replyCount,invitation,original",
+                    "limit": page_size,
+                    "offset": offset,
+                }
+            else:
+                url = "https://api.openreview.net/notes"
+                params = {"invitation": invitation, "limit": page_size, "offset": offset}
+            data = _request_json(url, params, timeout, retries)
             page_notes = data.get("notes", [])
             if not isinstance(page_notes, list) or not page_notes:
                 break
@@ -226,12 +240,13 @@ def _fetch_api1_notes(year: int, page_size: int, timeout: int, retries: int, max
             if added == 0 or len(page_notes) < page_size:
                 break
             offset += page_size
-        if notes:
+        if notes and api_version == 1:
             break
     return notes, openreview_venueid
 
 
-def build_iclr_year(
+def build_openreview_year(
+    venue: str,
     year: int,
     output_root: Path = DEFAULT_OUTPUT_ROOT,
     page_size: int = 1000,
@@ -239,17 +254,18 @@ def build_iclr_year(
     retries: int = 2,
     max_pages: int = 20,
 ) -> Path:
+    spec = venue_spec(venue)
     try:
-        notes, openreview_venueid = _fetch_api2_notes(year, page_size, timeout, retries, max_pages)
+        notes, openreview_venueid = _fetch_notes(year, spec, api_version=2, page_size=page_size, timeout=timeout, retries=retries, max_pages=max_pages)
         source_adapter = "openreview_api2"
     except Exception:
-        notes, openreview_venueid = _fetch_api1_notes(year, page_size, timeout, retries, max_pages)
+        notes, openreview_venueid = _fetch_notes(year, spec, api_version=1, page_size=page_size, timeout=timeout, retries=retries, max_pages=max_pages)
         source_adapter = "openreview_api1"
 
     papers: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
     for note in notes:
-        paper = _normalize_note(note, year, openreview_venueid)
+        paper = _normalize_note(note, year, spec, openreview_venueid)
         if not paper or paper["url"] in seen_urls:
             continue
         seen_urls.add(paper["url"])
@@ -262,9 +278,9 @@ def build_iclr_year(
 
     payload = {
         "schema_version": 1,
-        "venue_id": VENUE_ID,
-        "venue": VENUE_NAME,
-        "full_name": VENUE_FULL_NAME,
+        "venue_id": spec["venue_id"],
+        "venue": spec["venue"],
+        "full_name": spec["full_name"],
         "year": year,
         "source": "openreview",
         "source_adapter": source_adapter,
@@ -275,23 +291,20 @@ def build_iclr_year(
         "papers": papers,
     }
 
-    target = output_root / VENUE_ID / str(year) / "papers.json"
+    target = output_root / spec["venue_id"] / str(year) / "papers.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return target
 
 
 def parse_years(value: str) -> list[int]:
-    years = []
-    for part in re.split(r"[,\s]+", value.strip()):
-        if part:
-            years.append(int(part))
-    return years
+    return [int(part) for part in re.split(r"[,\s]+", value.strip()) if part]
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build local ICLR OpenReview paper index JSON files.")
-    parser.add_argument("--years", default=",".join(str(year) for year in DEFAULT_YEARS), help="Comma/space separated years, default: 2026,2025.")
+    parser = argparse.ArgumentParser(description="Build local OpenReview paper index JSON files.")
+    parser.add_argument("--venue", default="iclr", help="Venue alias, e.g. iclr/openreview_iclr/neurips/openreview_neurips.")
+    parser.add_argument("--years", default="", help="Comma/space separated years; defaults to the venue defaults.")
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT), help="Output root, default: runtime/local_database.")
     parser.add_argument("--page-size", type=int, default=1000)
     parser.add_argument("--timeout", type=int, default=30)
@@ -299,8 +312,11 @@ def main() -> None:
     parser.add_argument("--max-pages", type=int, default=20)
     args = parser.parse_args()
 
-    for year in parse_years(args.years):
-        target = build_iclr_year(
+    spec = venue_spec(args.venue)
+    years = parse_years(args.years) if args.years.strip() else list(spec["default_years"])
+    for year in years:
+        target = build_openreview_year(
+            venue=args.venue,
             year=year,
             output_root=Path(args.output_root),
             page_size=max(1, args.page_size),

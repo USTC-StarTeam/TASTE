@@ -1,5 +1,5 @@
-from auto_research.auto_find.pipeline import _apply_quality_bonus
-from auto_research.auto_find.quality import attach_quality_metadata
+from find_pipeline import _apply_quality_bonus
+from find_support import attach_quality_metadata
 
 
 def _strong_item(**updates):

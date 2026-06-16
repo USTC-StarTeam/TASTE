@@ -159,7 +159,9 @@ def _selected_base_viability_current_selection(paths, run_id: str = "") -> dict[
     if repo_path and aligned_paths and repo_path not in aligned_paths:
         return {}
 
-    selected_run = str(gate.get("fresh_find_run_id") or (guard.get("selected_base_find_run_id") if isinstance(guard, dict) else "") or run_id or "").strip()
+    selected_run = str(gate.get("fresh_find_run_id") or (guard.get("selected_base_find_run_id") if isinstance(guard, dict) else "") or "").strip()
+    selected_plan_id = str(gate.get("selected_plan_id") or (guard.get("selected_base_selected_plan_id") if isinstance(guard, dict) else "") or "").strip()
+    selected_idea_id = str(gate.get("selected_idea_id") or (guard.get("selected_base_selected_idea_id") if isinstance(guard, dict) else "") or "").strip()
     ready_datasets = impl.get("ready_datasets", []) if isinstance(impl, dict) and isinstance(impl.get("ready_datasets"), list) else []
     selected = {
         "name": repo_name,
@@ -180,10 +182,16 @@ def _selected_base_viability_current_selection(paths, run_id: str = "") -> dict[
     }
     if ready_datasets:
         selected["claim_ready_dataset"] = str(ready_datasets[0])
+    if selected_plan_id:
+        selected["selected_plan_id"] = selected_plan_id
+    if selected_idea_id:
+        selected["selected_idea_id"] = selected_idea_id
     return {
         "valid": True,
         "current_find_run_id": run_id,
         "fresh_find_run_id": selected_run,
+        "selected_plan_id": selected_plan_id,
+        "selected_idea_id": selected_idea_id,
         "selected": selected,
         "selected_title": title,
         "selection_stage": "environment_claude_code",
@@ -195,29 +203,47 @@ def _selected_base_viability_current_selection(paths, run_id: str = "") -> dict[
     }
 
 
+def _route_matches_current_contract(paths, row: Any, *, top_level: Any = None) -> bool:
+    current_run = current_find_run_id(paths)
+    current_plan_id, _ = current_selected_execution_ids(paths)
+    route_run = route_run_id(row)
+    top_run = route_run_id(top_level) if isinstance(top_level, dict) else route_run
+    route_plan = route_plan_id(row)
+    top_plan = route_plan_id(top_level) if isinstance(top_level, dict) else route_plan
+    run_ok = bool(not current_run or (top_run == current_run and route_run == current_run))
+    plan_ok = bool(not current_plan_id or (top_plan == current_plan_id and route_plan == current_plan_id))
+    return run_ok and plan_ok
+
+
 def _current_impl_repo_path(paths) -> str:
     viability = _selected_base_viability_current_selection(paths, current_find_run_id(paths))
     selected = viability.get("selected") if isinstance(viability.get("selected"), dict) else {}
     repo_path = _repo_path_from_mapping(selected)
-    if repo_path:
+    if repo_path and _route_matches_current_contract(paths, selected, top_level=viability):
         return repo_path
 
     selection = load_json(paths.state / "evidence_ready_repo_selection.json", {})
     if isinstance(selection, dict):
         selected = selection.get("selected") if isinstance(selection.get("selected"), dict) else {}
         gate = str(selection.get("selection_gate") or selected.get("selection_gate") or "")
-        if gate.startswith(("accepted_by_claude", "accepted_by_deterministic_base_switch_gate")):
+        if gate.startswith(("accepted_by_claude", "accepted_by_deterministic_base_switch_gate")) and _route_matches_current_contract(paths, selected, top_level=selection):
             repo_path = _repo_path_from_mapping(selected)
             if repo_path:
                 return repo_path
     active = load_json(paths.state / "active_repo.json", {})
     if isinstance(active, dict):
         gate = str(active.get("selection_gate") or "")
-        if gate.startswith(("accepted_by_claude", "accepted_by_deterministic_base_switch_gate")):
+        if gate.startswith(("accepted_by_claude", "accepted_by_deterministic_base_switch_gate")) and _route_matches_current_contract(paths, active, top_level=active):
             repo_path = _repo_path_from_mapping(active)
             if repo_path:
                 return repo_path
     impl = load_json(paths.state / "fresh_base_implementation_plan.json", {})
+    impl_run = str(impl.get("fresh_find_run_id") or impl.get("current_find_run_id") or "").strip() if isinstance(impl, dict) else ""
+    impl_plan = str(impl.get("selected_plan_id") or "").strip() if isinstance(impl, dict) else ""
+    current_run = current_find_run_id(paths)
+    current_plan_id, _ = current_selected_execution_ids(paths)
+    if (current_run and impl_run and impl_run != current_run) or (current_plan_id and impl_plan and impl_plan != current_plan_id):
+        return ""
     repo = impl.get("repo", {}) if isinstance(impl, dict) and isinstance(impl.get("repo"), dict) else {}
     return _repo_path_from_mapping(repo)
 
@@ -398,6 +424,30 @@ def current_find_run_id(paths) -> str:
     return ""
 
 
+def current_selected_execution_ids(paths) -> tuple[str, str]:
+    for rel in [paths.state / "current_find_research_plan.json", paths.planning / "finding" / "plans.json"]:
+        payload = load_json(rel, {})
+        if not isinstance(payload, dict):
+            continue
+        plan_id = str(payload.get("selected_plan_id") or "").strip()
+        idea_id = str(payload.get("selected_idea_id") or "").strip()
+        if plan_id or idea_id:
+            return plan_id, idea_id
+    return "", ""
+
+
+def route_plan_id(row: Any) -> str:
+    return str(row.get("selected_plan_id") or row.get("current_find_plan_id") or row.get("source_plan_id") or "").strip() if isinstance(row, dict) else ""
+
+
+def route_idea_id(row: Any) -> str:
+    return str(row.get("selected_idea_id") or row.get("current_find_idea_id") or row.get("source_idea_id") or "").strip() if isinstance(row, dict) else ""
+
+
+def route_run_id(row: Any) -> str:
+    return str(row.get("fresh_find_run_id") or row.get("current_find_run_id") or row.get("find_run_id") or row.get("run_id") or "").strip() if isinstance(row, dict) else ""
+
+
 def normalize_title_key(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
 
@@ -481,15 +531,50 @@ def selected_full_reference_anchor_valid(paths, selected: dict[str, Any] | None 
 
 def current_environment_selection(paths) -> dict[str, Any]:
     run_id = current_find_run_id(paths)
+    current_plan_id, current_idea_id = current_selected_execution_ids(paths)
+
+    def invalid(reason: str, *, selected_run: str = "", selection_plan_id: str = "", selected: dict[str, Any] | None = None, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "valid": False,
+            "current_find_run_id": run_id,
+            "fresh_find_run_id": selected_run,
+            "selected_plan_id": selection_plan_id,
+            "current_selected_plan_id": current_plan_id,
+            "current_selected_idea_id": current_idea_id,
+            "selected": {},
+            "reason": reason,
+        }
+        if selected:
+            payload["blocked_selection"] = selected
+        if extra:
+            payload.update(extra)
+        return payload
+
     viability = _selected_base_viability_current_selection(paths, run_id)
     if viability:
-        return viability
+        viability_selected = viability.get("selected") if isinstance(viability.get("selected"), dict) else {}
+        viability_run = str(viability.get("fresh_find_run_id") or route_run_id(viability_selected) or "").strip()
+        viability_plan = str(viability.get("selected_plan_id") or route_plan_id(viability_selected) or "").strip()
+        run_ok = bool(not run_id or (viability_run == run_id and route_run_id(viability_selected) == run_id))
+        plan_ok = bool(not current_plan_id or (viability_plan == current_plan_id and route_plan_id(viability_selected) == current_plan_id))
+        if run_ok and plan_ok:
+            return {
+                **viability,
+                "selected_plan_id": viability_plan,
+                "selected_idea_id": str(viability.get("selected_idea_id") or route_idea_id(viability_selected) or "").strip(),
+                "current_selected_plan_id": current_plan_id,
+                "current_selected_idea_id": current_idea_id,
+            }
 
     selection = load_json(paths.state / "evidence_ready_repo_selection.json", {})
     if not isinstance(selection, dict):
-        return {"valid": False, "current_find_run_id": run_id, "selected": {}, "reason": "missing_repo_selection"}
+        return invalid("missing_repo_selection")
     selected = selection.get("selected", {}) if isinstance(selection.get("selected"), dict) else {}
-    selected_run = str(selection.get("fresh_find_run_id") or selected.get("fresh_find_run_id") or "").strip()
+    selected_run = str(selection.get("fresh_find_run_id") or "").strip()
+    selected_route_run = route_run_id(selected)
+    selection_plan_id = str(selection.get("selected_plan_id") or "").strip()
+    selected_route_plan_id = route_plan_id(selected)
+    selection_idea_id = str(selection.get("selected_idea_id") or route_idea_id(selected) or current_idea_id or "").strip()
     stage = str(selection.get("selection_stage") or selection.get("selected_by_stage") or selected.get("selection_stage") or "").strip()
     decision = selection.get("claude_topic_decision") if isinstance(selection.get("claude_topic_decision"), dict) else {}
     raw_selection_gate = str(selection.get("selection_gate") or selected.get("selection_gate") or "").strip()
@@ -524,25 +609,46 @@ def current_environment_selection(paths) -> dict[str, Any]:
         and isinstance(base_switch_execution, dict)
         and str(base_switch_execution.get("status") or "").startswith("authorized_by_deterministic_base_switch_gate")
     )
-    in_current_find = in_current_find or deterministic_switch_valid or trusted_full_anchor
-    accepted = accepted or deterministic_switch_valid or trusted_full_anchor
-    if pending_loader_selection and not deterministic_switch_valid and not trusted_full_anchor:
+    run_ok = bool(run_id and selected_run == run_id and selected_route_run == run_id)
+    plan_ok = bool(not current_plan_id or (selection_plan_id == current_plan_id and selected_route_plan_id == current_plan_id))
+    trusted_anchor_allowed = bool(trusted_full_anchor and not current_plan_id)
+    in_current_find = in_current_find or deterministic_switch_valid or trusted_anchor_allowed
+    accepted = accepted or deterministic_switch_valid or trusted_anchor_allowed
+    if pending_loader_selection and not deterministic_switch_valid and not trusted_anchor_allowed:
         accepted = False
-    same_run_or_trusted = bool((run_id and selected_run == run_id) or trusted_full_anchor)
-    valid = bool(selected and same_run_or_trusted and stage == "environment_claude_code" and accepted and in_current_find)
-    reason = ""
+    valid = bool(selected and (run_ok or deterministic_switch_valid or trusted_anchor_allowed) and plan_ok and stage == "environment_claude_code" and accepted and in_current_find)
     if raw_selection_gate == "blocked_pending_data_loader_for_claude_best_candidate":
         reason = "environment_repo_selection_blocked_pending_loader_candidate"
     elif raw_selection_gate == "blocked_candidate_base_switch_gate_required":
         reason = "environment_repo_selection_blocked_candidate_base_switch_gate"
+    elif selected and not run_ok and not deterministic_switch_valid and not trusted_anchor_allowed:
+        reason = "environment_selection_find_run_missing_or_stale"
+    elif selected and not plan_ok:
+        reason = "environment_selection_selected_plan_missing_or_stale"
     elif not in_current_find:
         reason = "environment-selected paper is not present in the current Find recommended-paper pool"
-    elif not same_run_or_trusted:
-        reason = "environment-stage repo selection is stale for the current Find run"
     elif stage != "environment_claude_code" or not accepted:
         reason = "environment-stage Claude Code selection evidence is missing"
-    return {"valid": valid, "current_find_run_id": run_id, "fresh_find_run_id": selected_run, "selected": selected, "selected_title": selected_title, "in_current_find_recommendations": in_current_find, "trusted_full_reference_anchor": trusted_full_anchor, "reason": reason}
-
+    else:
+        reason = "current_environment_base_selected" if valid else "environment_base_selection_pending_or_stale"
+    result = {
+        "valid": valid,
+        "current_find_run_id": run_id,
+        "fresh_find_run_id": selected_run,
+        "selected_plan_id": selection_plan_id,
+        "selected_idea_id": selection_idea_id,
+        "current_selected_plan_id": current_plan_id,
+        "current_selected_idea_id": current_idea_id,
+        "selected": selected if valid else {},
+        "selected_title": selected_title if valid else "",
+        "in_current_find_recommendations": in_current_find,
+        "trusted_full_reference_anchor": trusted_full_anchor and trusted_anchor_allowed,
+        "selection_gate": raw_selection_gate,
+        "reason": reason,
+    }
+    if selected and not valid:
+        result["blocked_selection"] = selected
+    return result
 
 def selected_base_label(paths) -> str:
     env = current_environment_selection(paths)

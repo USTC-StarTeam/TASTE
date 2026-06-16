@@ -435,9 +435,16 @@ def claude_no_event_timeout_seconds(stage: str, effective_timeout: int, env: dic
         value = 300
     value = max(60, value)
     if _current_find_stage(stage):
-        floor = 1800
-        if effective_timeout and effective_timeout > 0:
-            floor = min(floor, max(60, int(effective_timeout) - 60))
+        floor_override = env.get("CLAUDE_CURRENT_FIND_NO_EVENT_FLOOR_SEC") or env.get("CURRENT_FIND_CLAUDE_NO_EVENT_FLOOR_SEC")
+        if floor_override not in (None, ""):
+            try:
+                floor = max(60, int(floor_override))
+            except Exception:
+                floor = 300
+        else:
+            floor = 1800
+            if effective_timeout and effective_timeout > 0:
+                floor = min(floor, max(60, int(effective_timeout) - 60))
         value = max(value, floor)
     stage_text = str(stage or '')
     if stage_text.startswith('writing:') or stage_text == 'paper' or stage_text.startswith('paper:'):
@@ -558,11 +565,28 @@ def direct_conda_command_policy_issue(command: str) -> str:
     return ''
 
 
+def paper_inline_python_probe_allowed(command_lower: str, stage_l: str) -> bool:
+    if 'paper' not in stage_l and 'writing' not in stage_l:
+        return False
+    inline_python_probe = bool(
+        re.search(r"(?:^|[;&|]\s*)(?:python|python3(?:\.\d+)?)\b(?=[^;&|]*\s-c\b)", command_lower)
+        or re.search(r"(?:^|[;&|]\s*)(?:python|python3(?:\.\d+)?)\b(?=[^;&|]*<<)", command_lower)
+    )
+    if not inline_python_probe:
+        return False
+    training_markers = [
+        'loss.backward', '.backward(', 'optimizer.step', 'model.train(',
+        'for epoch', 'range(args.epoch', 'range(epoch', ' train(', '.fit(',
+        'save_pretrained', '--artifact_dir', 'launch_experiment_run.py',
+    ]
+    return not any(marker in command_lower for marker in training_markers)
+
+
 def direct_python_command_policy_issue(command: str, stage: str = '') -> str:
     stage_l = str(stage or '').lower().replace('_', '-')
     if _current_find_stage(stage_l):
         return ''
-    if not any(token in stage_l for token in ['environment', 'experiment', 'trajectory', 'reference', 'reproduction', 'paper', 'full-cycle']):
+    if not any(token in stage_l for token in ['environment', 'experiment', 'trajectory', 'reference', 'reproduction', 'paper', 'writing', 'full-cycle']):
         return ''
     lowered = str(command or '').lower()
     bare_python = re.search(r"(?:^|[;&|]\s*)(?:python|python3(?:\.\d+)?)\b", lowered)
@@ -571,6 +595,8 @@ def direct_python_command_policy_issue(command: str, stage: str = '') -> str:
     if re.search(r"(?:^|[;&|]\s*)(?:python|python3(?:\.\d+)?)\s+-m\s+json\.tool\b", lowered):
         return ''
     if 'modules/experimenting/scripts/launch_experiment_run.py' in lowered:
+        return ''
+    if paper_inline_python_probe_allowed(lowered, stage_l):
         return ''
     return DIRECT_PYTHON_COMMAND_POLICY
 
@@ -856,14 +882,60 @@ def selected_title_in_current_find(paths_or_root, selected: dict[str, Any], deci
         and str(execution.get("status") or "").startswith("authorized_by_deterministic_base_switch_gate")
     )
 
+
+def current_selected_execution_ids(paths) -> tuple[str, str]:
+    try:
+        contract = current_find_execution_contract(paths)
+    except Exception:
+        contract = {}
+    if isinstance(contract, dict):
+        plan_id = str(contract.get('selected_plan_id') or '').strip()
+        idea_id = str(contract.get('selected_idea_id') or '').strip()
+        if plan_id or idea_id:
+            return plan_id, idea_id
+    for rel in [paths.state / 'current_find_research_plan.json', paths.planning / 'finding' / 'plans.json']:
+        payload = load_json(rel, {})
+        if not isinstance(payload, dict):
+            continue
+        plan_id = str(payload.get('selected_plan_id') or '').strip()
+        idea_id = str(payload.get('selected_idea_id') or '').strip()
+        if plan_id or idea_id:
+            return plan_id, idea_id
+    return '', ''
+
+
+def route_run_id(row: Any) -> str:
+    return str(row.get('fresh_find_run_id') or row.get('current_find_run_id') or row.get('find_run_id') or row.get('run_id') or '').strip() if isinstance(row, dict) else ''
+
+
+def route_plan_id(row: Any) -> str:
+    return str(row.get('selected_plan_id') or row.get('current_find_plan_id') or row.get('source_plan_id') or '').strip() if isinstance(row, dict) else ''
+
+
+def route_idea_id(row: Any) -> str:
+    return str(row.get('selected_idea_id') or row.get('current_find_idea_id') or row.get('source_idea_id') or '').strip() if isinstance(row, dict) else ''
+
+
 def current_environment_selection(paths) -> dict[str, Any]:
     run_id = current_find_run_id(paths)
+    current_plan_id, current_idea_id = current_selected_execution_ids(paths)
     selection = load_json(paths.state / 'evidence_ready_repo_selection.json', {})
     if not isinstance(selection, dict):
-        return {'valid': False, 'current_find_run_id': run_id, 'reason': 'missing_evidence_ready_repo_selection'}
+        return {
+            'valid': False,
+            'current_find_run_id': run_id,
+            'current_selected_plan_id': current_plan_id,
+            'current_selected_idea_id': current_idea_id,
+            'selected': {},
+            'reason': 'missing_evidence_ready_repo_selection',
+        }
     selected = selection.get('selected', {}) if isinstance(selection.get('selected'), dict) else {}
-    selected_run = str(selected.get('fresh_find_run_id') or selection.get('fresh_find_run_id') or '').strip()
-    stage = str(selection.get('selection_stage') or selection.get('selected_by_stage') or '').strip()
+    selected_run = str(selection.get('fresh_find_run_id') or '').strip()
+    selected_route_run = route_run_id(selected)
+    selection_plan_id = str(selection.get('selected_plan_id') or '').strip()
+    selected_route_plan_id = route_plan_id(selected)
+    selection_idea_id = str(selection.get('selected_idea_id') or route_idea_id(selected) or current_idea_id or '').strip()
+    stage = str(selection.get('selection_stage') or selection.get('selected_by_stage') or selected.get('selection_stage') or selected.get('selected_by_stage') or '').strip()
     decision = selection.get('claude_topic_decision') if isinstance(selection.get('claude_topic_decision'), dict) else {}
     raw_selection_gate = str(selection.get('selection_gate') or selected.get('selection_gate') or '').strip()
     pending_loader_selection = bool(
@@ -874,10 +946,46 @@ def current_environment_selection(paths) -> dict[str, Any]:
         not pending_loader_selection
         and (selection.get('accepted_by_claude') or raw_selection_gate.startswith(('accepted_by_claude', 'accepted_by_deterministic_base_switch_gate')) or decision.get('accept_as_current_best'))
     )
-    in_current_find = selected_title_in_current_find(paths, selected, decision)
-    valid = bool(selected and stage == 'environment_claude_code' and accepted and in_current_find)
-    reason = 'current_environment_base_selected' if valid else 'environment_repo_selection_blocked_pending_loader_candidate' if raw_selection_gate == 'blocked_pending_data_loader_for_claude_best_candidate' else 'environment_repo_selection_blocked_candidate_base_switch_gate' if raw_selection_gate == 'blocked_candidate_base_switch_gate_required' else 'selected_base_not_in_current_find_recommendations' if not in_current_find else 'environment_base_selection_pending_or_stale'
-    return {'valid': valid, 'current_find_run_id': run_id, 'fresh_find_run_id': selected_run, 'selection_stage': stage, 'accepted_by_claude': accepted, 'selected': selected, 'in_current_find_recommendations': in_current_find, 'reason': reason}
+    in_current_find = selected_title_in_current_find(paths, selected, decision) if selected else False
+    run_current = bool(run_id and selected_run == run_id and (not selected or selected_route_run == run_id))
+    plan_current = bool(not current_plan_id or (selection_plan_id == current_plan_id and (not selected or selected_route_plan_id == current_plan_id)))
+    valid = bool(run_id and selected and run_current and plan_current and stage == 'environment_claude_code' and accepted and in_current_find)
+    if valid:
+        reason = 'current_environment_base_selected'
+    elif raw_selection_gate == 'blocked_pending_data_loader_for_claude_best_candidate':
+        reason = 'environment_repo_selection_blocked_pending_loader_candidate'
+    elif raw_selection_gate == 'blocked_candidate_base_switch_gate_required':
+        reason = 'environment_repo_selection_blocked_candidate_base_switch_gate'
+    elif selected and run_id and not run_current:
+        reason = 'environment_selection_find_run_missing_or_stale'
+    elif selected and current_plan_id and not plan_current:
+        reason = 'environment_selection_selected_plan_missing_or_stale'
+    elif selected and not in_current_find:
+        reason = 'selected_base_not_in_current_find_recommendations'
+    else:
+        reason = 'environment_base_selection_pending_or_stale'
+    public_selection_gate = raw_selection_gate
+    if accepted and not raw_selection_gate.startswith(('accepted_by_claude', 'accepted_by_deterministic_base_switch_gate')):
+        public_selection_gate = 'accepted_by_claude_topic_fit'
+    result = {
+        'valid': valid,
+        'current_find_run_id': run_id,
+        'fresh_find_run_id': selected_run,
+        'selected_plan_id': selection_plan_id,
+        'selected_idea_id': selection_idea_id,
+        'current_selected_plan_id': current_plan_id,
+        'current_selected_idea_id': current_idea_id,
+        'selection_stage': stage,
+        'accepted_by_claude': accepted if valid else False,
+        'selected': selected if valid else {},
+        'selection_gate': public_selection_gate,
+        'raw_selection_gate': raw_selection_gate,
+        'in_current_find_recommendations': in_current_find,
+        'reason': reason,
+    }
+    if selected and not valid:
+        result['blocked_selection'] = selected
+    return result
 
 
 def stage_allows_selected_repo(stage: str = '') -> bool:
@@ -1299,14 +1407,14 @@ Hard rules:
 - Preserve method references in audit state when required, but do not surface external source-project names as active agents or roles.
 - Read TASTE recoverable-cycle memory files before deciding whether to retry, repair, prune, or switch direction.
 - Before selecting a base paper, generating an idea, modifying code from a paper, or writing literature-related claims, first read `state/current_find_research_plan.json`, `state/experiment_plan.json`, and `state/taste_plan_bridge.json`; then read `planning/literature_tool_packet.md` or `state/literature_tool_packet.json` and at least one raw artifact under `planning/finding/`.
-- If the packet is missing, stale, too generic, or does not cover the current blocker, run `{management_python()} {ROOT / 'modules/finding/scripts/run_literature_tool.py'} --project {project} --query "<targeted research query>" --fast-mode` for a narrow refresh, or add `--deep-survey` when the route depends on broad conference/arXiv coverage. Then rerun `{management_python()} {ROOT / 'modules/finding/scripts/build_literature_tool_packet.py'} --project {project}`.
+- If the packet is missing, stale, too generic, or does not cover the current blocker, run `{management_python()} {ROOT / 'modules/finding/scripts/run_literature_tool.py'} --project {project} --query "<targeted research query>" --fast-mode` for an internal project-agent survey, or add `--deep-survey` when the route depends on broad conference/arXiv coverage. The default output is `state/internal_literature_runs/...` and must not replace web-facing Find artifacts; use `--publish-current-find` only when the TASTE wrapper/user explicitly asks for a visible current-Find refresh. Then read the internal packet path printed by the command, or rerun `{management_python()} {ROOT / 'modules/finding/scripts/build_literature_tool_packet.py'} --project {project}` only for the web-facing packet.
 - Use the literature tool only as TASTE's internal survey capability. Do not describe it as a separate agent or outsource decisions to it.
 - Reuse survey intermediate files (`find_results.json`, `read_results.json`, `ideas.json`, `plans.json`, category/title/arXiv reports) for idea generation, base-work switching, repo selection, and experiment planning instead of redoing blind search.
 - Current-Find Read/Idea/Plan stage (`current-find-claude-read-idea-plan`) is responsible for reading every recommended paper through auditable Task/subagent delegation, generating exactly 5 three-part ideas, generating exactly 5 plans, and choosing exactly one best plan by writing one non-empty `selected_plan_id` with `selected_for_execution=true` and `execute_next=true`; the other plans are backlog only.
 - Downstream stages after Current-Find may consume only `selected_plan_id` from the selected execution contract above. Non-selected ideas/plans are supervision backlog only and must not drive environment, experiment, writing, or claim work.
 - In downstream stages, if current-Find candidates exist and `selected_plan_id` is empty or ambiguous, stop downstream work and ask the wrapper/current-Find Claude selection stage to rebuild `state/current_find_research_plan.json`, `state/taste_plan_bridge.json`, and `state/experiment_plan.json`; do not choose an execution route ad hoc.
 - Treat literature signals as planning evidence only. Paper claims still require local repo/data/env audits, experiment logs, metrics, bad-case/counterexample artifacts, and citation metadata.
-- Do not treat `active_repo.json` as current unless `evidence_ready_repo_selection.json` has selection_stage=environment_claude_code and fresh_find_run_id equals the current Find run. Current-Find Read/Idea/Plan stages must not bind to any repo.
+- Do not treat `active_repo.json` as current unless `evidence_ready_repo_selection.json` has selection_stage=environment_claude_code and fresh_find_run_id equals the current Find run. Current-Find Read/Idea/Plan stages should propose candidate base papers/repos and modification targets, but must not claim an environment-selected repo, write local repo_path, or emit runnable training commands before Environment validation.
 - Optimize the whole trajectory, not a single response: propose repair/search/experiment actions that preserve evidence, memory, and stop conditions.
 - Keep git hygiene: never add research-object repos, datasets, generated PDFs, checkpoints, logs, or runtime state to git.
 - If a selected base lacks one of the configured topic components, remember it is only evidence-ready for the covered components until you independently add and validate the missing components.

@@ -1,4 +1,4 @@
-from auto_research.auto_find.category_select import filter_papers_by_selected_categories, select_relevant_categories
+from find_support import filter_papers_by_selected_categories, select_relevant_categories
 from auto_research.models import AppConfig
 
 

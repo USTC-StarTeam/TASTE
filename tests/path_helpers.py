@@ -16,12 +16,20 @@ STAGE_MODULES = (
 )
 
 
+def module_import_dirs() -> list[Path]:
+    return [
+        ROOT / "framework",
+        ROOT / "web" / "backend",
+        *(ROOT / "modules" / name for name in STAGE_MODULES),
+    ]
+
+
 def script_dirs() -> list[Path]:
     return [ROOT / "framework" / "scripts", *(ROOT / "modules" / name / "scripts" for name in STAGE_MODULES)]
 
 
 def ensure_script_paths() -> None:
-    for path in reversed(script_dirs()):
+    for path in reversed([*module_import_dirs(), *script_dirs()]):
         value = str(path)
         if value not in sys.path:
             sys.path.insert(0, value)

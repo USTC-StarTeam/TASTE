@@ -145,22 +145,95 @@ def current_find_run_id(paths) -> str:
     return ''
 
 
-def selected_route(paths) -> dict[str, Any]:
+def current_selected_plan_context(paths) -> dict[str, str]:
+    payload = load_json(paths.state / 'current_find_research_plan.json', {})
+    if not isinstance(payload, dict):
+        return {'selected_plan_id': '', 'selected_idea_id': ''}
+    return {
+        'selected_plan_id': str(payload.get('selected_plan_id') or '').strip(),
+        'selected_idea_id': str(payload.get('selected_idea_id') or '').strip(),
+    }
+
+
+def route_run_id(row: Any) -> str:
+    data = safe_dict(row)
+    return str(data.get('fresh_find_run_id') or data.get('current_find_run_id') or data.get('find_run_id') or data.get('run_id') or data.get('selected_by') or '').strip()
+
+
+def route_plan_id(row: Any) -> str:
+    data = safe_dict(row)
+    return str(data.get('selected_plan_id') or data.get('current_find_plan_id') or data.get('source_plan_id') or '').strip()
+
+
+def route_is_current_authoritative(row: Any, current_run_id: str, current_plan_id: str) -> bool:
+    data = safe_dict(row)
+    if not data:
+        return False
+    stage = str(data.get('selection_stage') or data.get('selected_by_stage') or '').strip()
+    if stage and stage != 'environment_claude_code':
+        return False
+    row_run = route_run_id(data)
+    row_plan = route_plan_id(data)
+    if current_run_id and row_run and row_run != current_run_id:
+        return False
+    if current_run_id and not row_run:
+        return False
+    if current_plan_id and row_plan and row_plan != current_plan_id:
+        return False
+    if current_plan_id and not row_plan:
+        return False
+    return True
+
+
+def selected_route(paths, current_run_id: str = '', current_plan_id: str = '') -> dict[str, Any]:
     selection = load_json(paths.state / 'evidence_ready_repo_selection.json', {})
     selected = safe_dict(selection.get('selected')) if isinstance(selection, dict) else {}
     active = load_json(paths.state / 'active_repo.json', {})
     reference_gate = load_json(paths.state / 'reference_reproduction_gate.json', {})
     audit = load_json(paths.state / 'fresh_base_reference_reproduction_audit.json', {})
-    repo_path = norm_path(
-        selected.get('repo_path')
-        or safe_dict(active).get('repo_path')
-        or safe_dict(reference_gate).get('active_repo_path')
-        or safe_dict(audit).get('repo_path')
+    selection_gate = str(safe_dict(selection).get('selection_gate') or '').strip()
+    accepted_selection = bool(
+        selected
+        and selection_gate.startswith(('accepted_by_claude', 'accepted_by_deterministic_base_switch_gate'))
+        and route_is_current_authoritative({**safe_dict(selection), **selected}, current_run_id, current_plan_id)
     )
-    name = str(selected.get('name') or safe_dict(active).get('name') or safe_dict(audit).get('repo_name') or '').strip()
-    title = str(selected.get('literature_base_title') or safe_dict(active).get('selected_base_title') or safe_dict(audit).get('paper_title') or safe_dict(audit).get('base_title') or '').strip()
-    dataset = str(selected.get('claim_ready_dataset') or safe_dict(audit).get('dataset') or '').strip()
-    return {'name': name, 'title': title, 'dataset': dataset, 'repo_path': repo_path}
+    if accepted_selection:
+        repo_path = norm_path(selected.get('repo_path'))
+        name = str(selected.get('name') or selected.get('repo') or '').strip()
+        title = str(selected.get('literature_base_title') or selected.get('selected_base_title') or '').strip()
+        dataset = str(selected.get('claim_ready_dataset') or selected.get('dataset') or '').strip()
+        return {'name': name, 'title': title, 'dataset': dataset, 'repo_path': repo_path, 'authoritative': True, 'source': 'evidence_ready_repo_selection.selected'}
+    if route_is_current_authoritative(active, current_run_id, current_plan_id):
+        repo_path = norm_path(safe_dict(active).get('repo_path'))
+        name = str(safe_dict(active).get('name') or '').strip()
+        title = str(safe_dict(active).get('selected_base_title') or '').strip()
+        dataset = str(safe_dict(active).get('claim_ready_dataset') or '').strip()
+        return {'name': name, 'title': title, 'dataset': dataset, 'repo_path': repo_path, 'authoritative': True, 'source': 'active_repo'}
+    stale_route = {}
+    if isinstance(active, dict) and active.get('repo_path'):
+        stale_route = {
+            'name': str(active.get('name') or '').strip(),
+            'repo_path': norm_path(active.get('repo_path')),
+            'fresh_find_run_id': route_run_id(active),
+            'selected_plan_id': route_plan_id(active),
+            'source': 'active_repo',
+        }
+    elif isinstance(reference_gate, dict) and reference_gate.get('active_repo_path'):
+        stale_route = {
+            'repo_path': norm_path(reference_gate.get('active_repo_path')),
+            'fresh_find_run_id': route_run_id(reference_gate),
+            'selected_plan_id': route_plan_id(reference_gate),
+            'source': 'reference_reproduction_gate',
+        }
+    elif isinstance(audit, dict) and audit.get('repo_path'):
+        stale_route = {
+            'name': str(audit.get('repo_name') or '').strip(),
+            'repo_path': norm_path(audit.get('repo_path')),
+            'fresh_find_run_id': route_run_id(audit),
+            'selected_plan_id': route_plan_id(audit),
+            'source': 'fresh_base_reference_reproduction_audit',
+        }
+    return {'name': '', 'title': '', 'dataset': '', 'repo_path': '', 'authoritative': False, 'source': '', 'stale_route': stale_route}
 
 
 def proposal_from_json(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
@@ -421,11 +494,15 @@ def build_check(check_id: str, ok: bool, detail: str, evidence: list[str] | None
 def build_gate(project: str, venue: str = '') -> dict[str, Any]:
     paths = build_paths(project)
     run_id = current_find_run_id(paths)
-    selected = selected_route(paths)
+    plan_context = current_selected_plan_context(paths)
+    current_plan_id = plan_context.get('selected_plan_id', '')
+    selected = selected_route(paths, run_id, current_plan_id)
     selected_repo_path = norm_path(selected.get('repo_path'))
+    selected_base_reference_required = bool(selected.get('authoritative'))
     selected_base_viability = load_json(paths.state / 'selected_base_viability_gate.json', {})
     reference_gate = load_json(paths.state / 'reference_reproduction_gate.json', {})
     base_switch_execution = load_json(paths.state / 'base_switch_execution.json', {})
+    environment_selection = load_json(paths.state / 'evidence_ready_repo_selection.json', {})
     proposals = collect_proposals(paths)
     candidate = choose_candidate(proposals, selected_repo_path)
     candidate_present = candidate_has_identity(candidate)
@@ -454,15 +531,25 @@ def build_gate(project: str, venue: str = '') -> dict[str, Any]:
         ],
     }
 
+    environment_selection_requires_gate = bool(
+        isinstance(environment_selection, dict)
+        and str(environment_selection.get('selection_gate') or '') == 'blocked_candidate_base_switch_gate_required'
+    )
     selected_gate_required = bool(
-        isinstance(selected_base_viability, dict)
-        and selected_base_viability.get('status') == 'blocked'
-        and selected_base_viability.get('decision') == 'base_switch_gate_required'
+        (
+            isinstance(selected_base_viability, dict)
+            and selected_base_viability.get('status') == 'blocked'
+            and selected_base_viability.get('decision') == 'base_switch_gate_required'
+        )
+        or environment_selection_requires_gate
     )
     reference_passed = bool(
-        isinstance(reference_gate, dict)
-        and reference_gate.get('status') == 'pass'
-        and reference_gate.get('decision') == 'continue_base'
+        not selected_base_reference_required
+        or (
+            isinstance(reference_gate, dict)
+            and reference_gate.get('status') == 'pass'
+            and reference_gate.get('decision') == 'continue_base'
+        )
     )
     proposal_non_authoritative = bool(
         candidate_present
@@ -520,8 +607,8 @@ def build_gate(project: str, venue: str = '') -> dict[str, Any]:
     artifact_local_ok = bool(full_ok and (full_payload.get('artifact_dir') or full_payload.get('stdout_path')) and full_payload.get('hashes') is not None)
 
     checks = [
-        build_check('selected_base_viability_requires_gate', selected_gate_required, 'selected_base_viability_gate must be blocked/base_switch_gate_required before any switch authorization.', [str(paths.state / 'selected_base_viability_gate.json')]),
-        build_check('selected_base_reference_reproduction_passed', reference_passed, 'current selected-base reference reproduction must pass first.', [str(paths.state / 'reference_reproduction_gate.json')]),
+        build_check('selected_base_viability_requires_gate', selected_gate_required, 'selected-base viability or environment selection gate must request deterministic base-switch authorization before any switch.', [str(paths.state / 'selected_base_viability_gate.json'), str(paths.state / 'evidence_ready_repo_selection.json')]),
+        build_check('selected_base_reference_reproduction_passed', reference_passed, 'current selected-base reference reproduction must pass first when this Find/Plan already has an authoritative selected base; stale historical active_repo evidence is not a prerequisite for a fresh environment candidate.', [str(paths.state / 'reference_reproduction_gate.json')]),
         build_check('candidate_route_proposal_exists', candidate_present, 'a non-empty candidate route proposal must exist and remain separate from execution.', [str(p.get('source')) for p in proposals if p.get('source')][:8]),
         build_check('candidate_route_is_non_authoritative', proposal_non_authoritative, 'candidate route must be a non-authoritative proposal, not an already executed/authorized switch.', [str(candidate.get('source') or '')] if candidate_present else []),
         build_check('candidate_route_distinct_from_selected_base', candidate_distinct, 'candidate route must be distinct from current selected-base.', [str(candidate.get('source') or '')] if candidate_present else []),
@@ -541,9 +628,9 @@ def build_gate(project: str, venue: str = '') -> dict[str, Any]:
         decision = 'not_required'
         switch_authorized = False
         if preexisting_authorized_execution:
-            summary = 'selected-base viability gate does not request base-switch authorization; existing base_switch_execution authorization is stale/non-authoritative and must be invalidated by the route guard.'
+            summary = 'neither selected-base viability nor environment selection requests base-switch authorization; existing base_switch_execution authorization is stale/non-authoritative and must be invalidated by the route guard.'
         else:
-            summary = 'selected-base viability gate does not currently request base-switch authorization.'
+            summary = 'neither selected-base viability nor environment selection currently requests base-switch authorization.'
     else:
         failed = [row for row in checks if row.get('status') != 'pass']
         if failed:
@@ -568,6 +655,9 @@ def build_gate(project: str, venue: str = '') -> dict[str, Any]:
         'summary': summary,
         'summary_zh': '候选路线证据已通过确定性门控，可进入受控切换执行；执行前当前 selected-base 仍保持不变，且不能自动提升论文结论。' if switch_authorized else '候选路线证据只记录为 proposal；当前权威 selected-base 必须保持不变，不能自动切换到任何历史或候选路线。',
         'current_selected_route': selected,
+        'selected_base_reference_required': selected_base_reference_required,
+        'current_selected_plan_id': current_plan_id,
+        'current_selected_idea_id': plan_context.get('selected_idea_id', ''),
         'candidate_route': {
             'repo': candidate_repo,
             'title': candidate_title,

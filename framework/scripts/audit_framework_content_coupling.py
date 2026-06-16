@@ -42,7 +42,7 @@ GENERATED_FRAMEWORK_CACHE_NAMES = {
     "title_filter_report.json",
     "venue_health_report.json",
 }
-GENERATED_FRAMEWORK_STAGE_DIRS = {"auto_find", "auto_read", "auto_idea", "auto_plan"}
+GENERATED_FRAMEWORK_STAGE_DIRS = {"finding", "reading", "ideation", "planning"}
 GENERIC_ALLOWLIST = {
     "ar", "taste", "paperorchestra", "paper", "orchestra", "llm",
     "recommendation", "baseline", "control", "candidate", "experiment",

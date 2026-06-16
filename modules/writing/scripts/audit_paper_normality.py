@@ -365,6 +365,29 @@ def bibtex_error_findings(log_text: str) -> dict[str, Any]:
         "error_count": max(explicit_error_count, len(empty_literal_stack_entries), len(fatal_lines)),
     }
 
+
+def latex_compile_error_findings(log_text: str) -> dict[str, Any]:
+    text = log_text or ""
+    fatal_lines: list[str] = []
+    fatal_patterns = [
+        r"^!\s+Missing \$ inserted\.",
+        r"^!\s+Missing \} inserted\.",
+        r"^!\s+Extra \}, or forgotten \\endgroup\.",
+        r"^!\s+Undefined control sequence\.",
+        r"^!\s+LaTeX Error:[^\n]+",
+        r"^!\s+Package [^\n]+ Error:[^\n]+",
+        r"^!\s+Emergency stop\.",
+        r"^!\s+Fatal error occurred[^\n]*",
+    ]
+    for pattern in fatal_patterns:
+        fatal_lines.extend(re.findall(pattern, text, flags=re.IGNORECASE | re.MULTILINE))
+    fatal_lines = sorted(set(line.strip() for line in fatal_lines if line.strip()))
+    return {
+        "fatal_lines": fatal_lines[:30],
+        "error_count": len(fatal_lines),
+    }
+
+
 def pdf_unresolved_citation_markers(pdf_text: str) -> list[str]:
     markers: list[str] = []
     for line in (pdf_text or "").splitlines():
@@ -443,6 +466,7 @@ def citation_render_diagnostics(
     log_text = "\n".join(read_text(log_path)[-120000:] for log_path in log_paths)
     warning_findings = latex_citation_warning_findings(log_text)
     bibtex_findings = bibtex_error_findings(log_text)
+    latex_error_findings = latex_compile_error_findings(log_text)
     pdf_text = read_pdf_text(pdf_path)
     pdf_markers = pdf_unresolved_citation_markers(pdf_text)
     textual_commands = textual_citation_commands(source)
@@ -499,6 +523,13 @@ def citation_render_diagnostics(
             "detail": "; ".join(detail_parts) or "BibTeX compile errors were found in paper logs",
             "public_detail": "BibTeX/参考文献样式编译仍有错误（例如 Springer Nature sn-nature.bst 的 empty literal stack），即使 PDF 文件存在也不能作为正常论文预览；需要修复 refs.bib 字段、引用命令或模板兼容性后重新编译。",
         })
+    if latex_error_findings.get("error_count"):
+        fatal = latex_error_findings.get("fatal_lines") or []
+        blockers.append({
+            "id": "latex_compile_errors",
+            "detail": "LaTeX fatal/error lines: " + " | ".join(str(item) for item in fatal[:8]),
+            "public_detail": "LaTeX 编译日志仍含 fatal/error（例如 Missing $ inserted / Undefined control sequence）。即使 PDF 文件存在，也必须修复 TeX 或 BibTeX 字段后重新编译。",
+        })
     if pdf_markers:
         blockers.append({
             "id": "pdf_unresolved_citation_markers",
@@ -518,6 +549,7 @@ def citation_render_diagnostics(
         "log_paths": [str(path) for path in log_paths],
         "latex_warnings": warning_findings,
         "bibtex_errors": bibtex_findings,
+        "latex_compile_errors": latex_error_findings,
         "pdf_unresolved_markers": pdf_markers,
         "textual_citation_commands": textual_commands[:40],
         "numeric_nature_style": numeric_nature_style,

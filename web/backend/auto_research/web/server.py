@@ -23,12 +23,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from auto_research.auto_find.catalog import catalog_by_id, load_catalog
-from auto_research.auto_find.pipeline import FIND_RECOMMENDATION_POLICY, SCORING_POLICY_VERSION, _critique_candidates, _llm_live_gate, _recommendation_quality_audit, _recommended, _screened_ranking, _triage_candidates, run_find
-from auto_research.auto_find.sources import fetch_venue_sample
-from auto_research.auto_idea.pipeline import patch_idea, run_idea
-from auto_research.auto_plan.pipeline import finish_plan, polish_plan, run_plan
-from auto_research.auto_read.pipeline import run_read
+from find_support import catalog_by_id, load_catalog
+from find_pipeline import FIND_RECOMMENDATION_POLICY, SCORING_POLICY_VERSION, _critique_candidates, _llm_live_gate, _recommendation_quality_audit, _recommended, _screened_ranking, _triage_candidates, run_find
+from find_support import fetch_venue_sample
+from idea_pipeline import patch_idea, run_idea
+from plan_pipeline import finish_plan, polish_plan, run_plan
+from read_pipeline import run_read
 from auto_research.emailer import send_run_email
 from auto_research.jobs import JobCancelled
 from auto_research.llm import LLMClient
@@ -658,6 +658,18 @@ def _paper_preview_artifact_available(row: dict[str, Any]) -> bool:
     )
 
 
+_PAPER_PREVIEW_GATE_BLOCKED_STATUSES = {"blocked_preview_gate", "normality_blocked", "preview_pdf_blocked"}
+
+
+def _paper_preview_gate_blocked_status(row: dict[str, Any]) -> bool:
+    if not isinstance(row, dict):
+        return False
+    values = [row.get("paper_stage_status"), row.get("status"), row.get("paper_status")]
+    nested = row.get("paper_stage") if isinstance(row.get("paper_stage"), dict) else {}
+    values.extend([nested.get("paper_stage_status"), nested.get("status"), nested.get("paper_status")])
+    return any(str(value or "").strip().lower() in _PAPER_PREVIEW_GATE_BLOCKED_STATUSES for value in values)
+
+
 def _paper_preview_project_key(item: dict[str, Any]) -> str:
     if not isinstance(item, dict):
         return ""
@@ -738,6 +750,8 @@ def _public_paper_status(raw_status: Any, row: dict[str, Any]) -> str:
         return "blocked"
     if _paper_preview_artifact_available(row) and status not in {"running", "queued", "cancelling", "error", "cancelled"}:
         return "preview_available"
+    if _paper_preview_gate_blocked_status(row) and status not in {"running", "queued", "cancelling", "error", "cancelled"}:
+        return "preview_pdf_blocked"
     return status
 
 
@@ -1030,12 +1044,16 @@ def _job_status_is_live(status: Any) -> bool:
 
 def _paper_substage_from_cmd(cmd: Any, fallback: str = "") -> str:
     text = str(cmd or "")
+    lowered = text.lower()
+    if "repair_paper_preview_loop.py" in lowered or "writing_revision_prompt" in lowered or "--agent-id writing_revision" in lowered:
+        return "paper:preview-repair"
+    if "repair_paper_figures_loop.py" in lowered:
+        return "paper:figure-repair"
     match = re.search(r"(?:^|\s)--stage(?:=|\s+)([^\s]+)", text)
     if match:
         stage = match.group(1).strip().strip("'\"")
         if stage:
             return stage
-    lowered = text.lower()
     if "run_paper_orchestra_bridge.py" in lowered:
         return "writing:orchestra"
     if "run_paper_pipeline.py" in lowered:
@@ -1066,14 +1084,14 @@ def _paper_worker_projection_from_process(row: dict[str, Any], *, controller_pid
     elif re.search(r"(?:^|/)claude\s+-p\b", cmd) or "bin/claude -p" in lowered:
         kind = "paper_claude_cli"
         priority = 1
-    elif "run_paper_orchestra_bridge.py" in lowered:
-        kind = "paper_orchestra_bridge"
-        priority = 2
-    elif "run_paper_pipeline.py" in lowered:
-        kind = "paper_pipeline"
-        priority = 3
     elif any(marker in lowered for marker in ["repair_paper_preview_loop.py", "repair_paper_figures_loop.py"]):
         kind = "paper_repair_loop"
+        priority = 2
+    elif "run_paper_orchestra_bridge.py" in lowered:
+        kind = "paper_orchestra_bridge"
+        priority = 3
+    elif "run_paper_pipeline.py" in lowered:
+        kind = "paper_pipeline"
         priority = 4
     elif any(marker in lowered for marker in ["fetch_latex_template.py", "resolve_venue_requirements.py", "compile_paper_pdf.py", "latexmk", "pdflatex"]):
         kind = "paper_subprocess"
@@ -1227,6 +1245,29 @@ def _paper_execution_projection(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_PAPER_EXECUTION_KEYS = ("paper_execution_alive", "paper_execution_state", "paper_execution_message")
+
+
+def _paper_result_has_live_execution(result: Any, status: Any = "") -> bool:
+    if not isinstance(result, dict):
+        return False
+    if result.get("process_alive") is True or result.get("alive") is True:
+        return True
+    return bool(_job_status_is_live(status or result.get("status")) and result.get("paper_execution_alive") is True)
+
+
+def _merge_paper_live_execution_projection(result: dict[str, Any], live_projection: dict[str, Any]) -> dict[str, Any]:
+    merged = {**result, **live_projection}
+    paper_stage = merged.get("paper_stage") if isinstance(merged.get("paper_stage"), dict) else None
+    if paper_stage is not None:
+        nested = dict(paper_stage)
+        for key in _PAPER_EXECUTION_KEYS:
+            if key in live_projection:
+                nested[key] = live_projection[key]
+        merged["paper_stage"] = nested
+    return merged
+
+
 def _public_taste_stage(stage: Any) -> str:
     """Map internal research job labels to the seven public workflow stages."""
     raw = str(stage or '').strip()
@@ -1373,7 +1414,7 @@ class JobState:
                 source_result = self.result if isinstance(self.result, dict) else {}
                 live_projection = _paper_live_worker_projection(project_id, {**source_result, **result_payload}, self.status)
                 if live_projection:
-                    result_payload = {**result_payload, **live_projection}
+                    result_payload = _merge_paper_live_execution_projection(result_payload, live_projection)
                     progress_payload["message"] = _paper_live_status_message(result_payload, progress_payload)
                     progress_payload["phase"] = str(result_payload.get("paper_current_substage") or progress_payload.get("phase") or "paper")
                     progress_payload["current"] = progress_payload.get("current") or 0
@@ -1930,6 +1971,8 @@ def _paper_stage_from_project_snapshot(project: str) -> dict[str, Any]:
     workspace_final_pdf = (workspace_dir / "final" / "paper.pdf") if workspace_dir else root / "__missing_workspace_final_paper.pdf"
     workspace_final_tex = (workspace_dir / "final" / "paper.tex") if workspace_dir else root / "__missing_workspace_final_paper.tex"
     candidate_audit = _paper_candidate_audit_projection(root, paper_state.get("paper_content_candidate_audit"))
+    paper_stage_status = str(paper_state.get("paper_stage_status") or paper_state.get("status") or "").strip().lower()
+    preview_gate_blocked = paper_stage_status in _PAPER_PREVIEW_GATE_BLOCKED_STATUSES
     accepted_pdf_path = _first_existing_paper_file(root, [paper_state.get("conference_preview_pdf"), paper_state.get("pdf_path")])
     accepted_tex_path = _first_existing_paper_file(root, [paper_state.get("conference_preview_tex"), paper_state.get("rendered_tex")])
     output_pdf_path = _paper_existing_file(root, output_dir / "paper.pdf")
@@ -1940,6 +1983,10 @@ def _paper_stage_from_project_snapshot(project: str) -> dict[str, Any]:
         accepted_tex_path = output_tex_path
     blocked_pdf_path = _first_existing_paper_file(root, [paper_state.get("blocked_preview_pdf"), paper_state.get("latest_preview_pdf")])
     blocked_tex_path = _first_existing_paper_file(root, [paper_state.get("blocked_preview_tex"), paper_state.get("latest_preview_tex")])
+    if preview_gate_blocked and not blocked_pdf_path:
+        blocked_pdf_path = output_pdf_path
+    if preview_gate_blocked and not blocked_tex_path:
+        blocked_tex_path = output_tex_path
     raw_pdf_path = _first_existing_paper_file(root, [
         paper_state.get("latest_generated_pdf_path"),
         paper_state.get("paper_orchestra_final_pdf"),
@@ -2007,6 +2054,10 @@ def _paper_stage_from_project_snapshot(project: str) -> dict[str, Any]:
         paper_status = "blocked_content_policy"
     elif blocked_pdf_path:
         paper_status = "preview_available"
+    elif preview_gate_blocked and (latest_pdf_path or output_pdf_path):
+        paper_status = "preview_available"
+    elif preview_gate_blocked:
+        paper_status = "preview_pdf_blocked"
     elif raw_pdf_path:
         paper_status = "blocked"
     else:
@@ -2085,8 +2136,16 @@ def _paper_stage_from_job_result(result: dict[str, Any]) -> dict[str, Any]:
     if snapshot:
         merged = dict(direct)
         merged.update(snapshot)
+        if _paper_result_has_live_execution(result):
+            for key, value in _paper_execution_projection(result).items():
+                if key in _PAPER_EXECUTION_KEYS:
+                    merged[key] = value
         return merged
     if direct:
+        if _paper_result_has_live_execution(result):
+            merged = dict(direct)
+            merged.update(_paper_execution_projection(result))
+            return merged
         return direct
     summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
     stages = summary.get("stages") if isinstance(summary.get("stages"), dict) else {}
@@ -2107,6 +2166,8 @@ def _paper_stage_job_message(row: dict[str, Any]) -> str:
         parts.append(_paper_venue_labels(row).get("preview_zh", "会议格式论文预览") + "已生成")
     elif row.get("latest_generated_pdf_path"):
         parts.append(_paper_venue_labels(row).get("preview_zh", "会议格式论文预览") + "有最近产物")
+    elif _paper_preview_gate_blocked_status(row):
+        parts.append(_paper_venue_labels(row).get("preview_zh", "会议格式论文预览") + "预览门控未通过")
     citation_count = _paper_int(row.get("paper_normality_citation_count"))
     citation_target = _paper_int(
         row.get("paper_normality_citation_target")
@@ -3944,6 +4005,13 @@ def _reset_current_find_downstream_artifacts(root: Path, run_id: str, recommenda
         {"run_id": run_id, "source": "pending_new_find_full_text_evidence", "status": "pending", "papers": [], "created_at": now, "reset_source": source, "reset_reason": reason},
     )
     reset_files.append("full_text_reading/full_text_packet.json")
+    fragment_dir = taste_dir / "current_find_deep_read_fragments"
+    backup_tree(fragment_dir)
+    if fragment_dir.exists():
+        shutil.rmtree(fragment_dir)
+        reset_files.append("current_find_deep_read_fragments/")
+    fragment_dir.mkdir(parents=True, exist_ok=True)
+
     validation = {
         "run_id": run_id,
         "valid": False,
@@ -4236,6 +4304,7 @@ def _adopt_find_run_for_project(root: Path, project: str, run_id: str, *, source
         return count
 
     adopted_find_full_text_evidence_count = 0
+    downstream_reset_receipt: dict[str, Any] = {}
     if completed_downstream_ready:
         downstream_status = "completed_downstream_adopted"
         for name in ["read_results.json", "ideas.json", "plans.json", "read.md", "idea.md", "plan.md"]:
@@ -4263,7 +4332,9 @@ def _adopt_find_run_for_project(root: Path, project: str, run_id: str, *, source
         backup(state_dir / "current_find_claude_reading_validation.json")
         write_json(state_dir / "current_find_claude_reading_validation.json", reading_validation)
     else:
-        downstream_status = "existing_downstream_preserved_pending_current_find_read"
+        downstream_reset_receipt = _reset_current_find_downstream_artifacts(root, run_id, recommendations, source, "new_find_adopted_without_completed_same_run_downstream")
+        stale_reset = list(downstream_reset_receipt.get("reset_files") or [])
+        downstream_status = "pending_downstream_reset"
         existing_full_text_dir = taste_dir / "full_text_reading"
         run_full_text_dir = directory / "full_text_reading"
         if run_full_text_dir.exists():
@@ -4276,6 +4347,29 @@ def _adopt_find_run_for_project(root: Path, project: str, run_id: str, *, source
             adopted_find_full_text_evidence_count = packet_text_evidence_count(adopted_packet)
             if adopted_find_full_text_evidence_count >= len(recommendations):
                 downstream_status = "find_full_text_evidence_ready_pending_current_find_read"
+
+    fragment_dir = taste_dir / "current_find_deep_read_fragments"
+    run_fragment_dir = directory / "current_find_deep_read_fragments"
+    had_fragment_dir = fragment_dir.exists()
+    had_run_fragment_dir = run_fragment_dir.exists()
+    backup_tree(fragment_dir)
+    if fragment_dir.exists():
+        shutil.rmtree(fragment_dir)
+    fragment_dir.mkdir(parents=True, exist_ok=True)
+    copied_fragment_count = 0
+    if run_fragment_dir.exists():
+        for src in sorted(run_fragment_dir.glob("*.json")):
+            payload = read_json(src, {})
+            payload_run = str((payload if isinstance(payload, dict) else {}).get("run_id") or (payload if isinstance(payload, dict) else {}).get("current_find_run_id") or "").strip()
+            if payload_run != run_id:
+                continue
+            shutil.copyfile(src, fragment_dir / src.name)
+            copied_fragment_count += 1
+    if copied_fragment_count:
+        copied.append("current_find_deep_read_fragments/")
+    elif had_fragment_dir or had_run_fragment_dir:
+        if "current_find_deep_read_fragments/" not in stale_reset:
+            stale_reset.append("current_find_deep_read_fragments/")
 
     missing_zh = _missing_recommendation_abstract_zh(recommendations)
     translation_status = _abstract_translation_status_for_recommendations(recommendations, find_results.get("abstract_translation_status") or progress.get("abstract_translation_status") or scoring_runtime.get("abstract_translation_status") or "")
@@ -4396,7 +4490,8 @@ def _adopt_find_run_for_project(root: Path, project: str, run_id: str, *, source
             "source": "web_find_adoption",
             "status": "pending_current_find_read",
             "downstream_status": downstream_status,
-            "preserved_downstream": True,
+            "preserved_downstream": False,
+            "stale_downstream_reset": stale_reset,
             "created_at": now,
             "current_find_reading_count": 0,
             "current_find_idea_count": 0,
@@ -4427,6 +4522,7 @@ def _adopt_find_run_for_project(root: Path, project: str, run_id: str, *, source
         "downstream_status": downstream_status,
         "completed_downstream_copied": completed_downstream_copied,
         "stale_downstream_reset": stale_reset,
+        "downstream_reset": downstream_reset_receipt,
         "recommended_count": len(recommendations),
         "reprojection": reproject_receipt,
         "missing_recommendation_abstract_zh_count": len(missing_zh),
@@ -8338,6 +8434,12 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
                 if key in paper_stage and key not in {"paper_summary", "paper_stage", "status"}:
                     compact_result[key] = paper_stage.get(key)
             result = {**result, **compact_result}
+            if _paper_result_has_live_execution(result, item.get("status")):
+                live_execution = _paper_execution_projection(result)
+                compact_result.update(live_execution)
+                if isinstance(compact_result.get("paper_stage"), dict):
+                    compact_result["paper_stage"] = {**compact_result["paper_stage"], **live_execution}
+                result = {**result, **compact_result}
     artifacts = result.get("artifacts") or result.get("artifact_paths")
     if isinstance(artifacts, (list, dict)):
         compact_result["artifact_count"] = len(artifacts)
@@ -8368,8 +8470,10 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
             public_status = "blocked"
         elif _paper_preview_artifact_available(paper_row) and public_status not in {"running", "queued", "cancelling", "error", "cancelled"}:
             public_status = "preview_available"
+        elif paper_status in _PAPER_PREVIEW_GATE_BLOCKED_STATUSES:
+            public_status = "preview_available" if (_paper_preview_artifact_available(paper_row) or _paper_preview_artifact_available(compact_result)) else "preview_pdf_blocked"
         elif paper_status:
-            public_status = "needs_writing" if paper_status.startswith("blocked") or paper_status in {"normality_blocked", "preview_pdf_blocked"} else paper_status
+            public_status = "blocked" if paper_status.startswith("blocked") else paper_status
     public_progress = dict(item.get("progress")) if isinstance(item.get("progress"), dict) else {}
     if paper_job and public_stage == "paper" and isinstance(result, dict) and not (_job_status_is_live(public_status) or result.get("process_alive") is True):
         paper_summary = str(compact_result.get("paper_summary") or result.get("paper_summary") or "").strip()
@@ -8517,13 +8621,25 @@ def _persist_jobs() -> None:
     if not globals().get("JOBS_PATH"):
         return
     with JOBS_LOCK:
-        items = sorted(
-            [item for item in (job.as_dict(compact=True) for job in JOBS.values()) if not _job_is_hollow_route(item)],
-            key=lambda item: item["created_at"],
-            reverse=True,
-        )
-        items = _dedupe_persisted_paper_preview_jobs(items)
-        write_json(JOBS_PATH, {"jobs": items[:300]})
+        jobs_snapshot = list(JOBS.values())
+    items = sorted(
+        [item for item in (job.as_dict(compact=True) for job in jobs_snapshot) if not _job_is_hollow_route(item)],
+        key=lambda item: item["created_at"],
+        reverse=True,
+    )
+    normalized_items: list[dict[str, Any]] = []
+    for item in items:
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        if _is_paper_job(item.get("stage"), item.get("job_id", ""), result, item.get("logs")):
+            try:
+                normalized_items.append(_compact_job_for_list(item))
+                continue
+            except Exception:
+                pass
+        normalized_items.append(item)
+    items = normalized_items
+    items = _dedupe_persisted_paper_preview_jobs(items)
+    write_json(JOBS_PATH, {"jobs": items[:300]})
 
 
 

@@ -170,14 +170,16 @@ def write_generic_plan(project: str, adapter: Path) -> int:
     selected_route_plan_id = str(selected.get('selected_plan_id') or '').strip()
     selected_plan_id = selection_plan_id or selected_route_plan_id
     selected_idea_id = selection_idea_id or str(selected.get('selected_idea_id') or '').strip()
+    selected_contract_run_id = selected_run_id or selection_run_id
+    selected_contract_plan_id = selected_route_plan_id or selection_plan_id
     stale_for_current_find = bool(
         selected
         and current_run_id
         and (
             not selection_run_id
             or selection_run_id != current_run_id
-            or not selected_run_id
-            or selected_run_id != current_run_id
+            or not selected_contract_run_id
+            or selected_contract_run_id != current_run_id
         )
     )
     stale_for_current_plan = bool(
@@ -186,8 +188,8 @@ def write_generic_plan(project: str, adapter: Path) -> int:
         and (
             not selection_plan_id
             or selection_plan_id != current_plan_id
-            or not selected_route_plan_id
-            or selected_route_plan_id != current_plan_id
+            or not selected_contract_plan_id
+            or selected_contract_plan_id != current_plan_id
         )
     )
     if stale_for_current_find or stale_for_current_plan:
@@ -220,7 +222,26 @@ def write_generic_plan(project: str, adapter: Path) -> int:
     blocked = _blocked_datasets(req if isinstance(req, dict) else {}, probe if isinstance(probe, dict) else {}, selected, ready)
     repo = _repo_payload(selected)
     no_adapter = not adapter.exists()
-    if ready:
+    selection_gate = str(selection.get('selection_gate') or '') if isinstance(selection, dict) else ''
+    base_switch_failed = []
+    if isinstance(selection, dict):
+        raw_failed = selection.get('base_switch_failed_checks') or selected.get('base_switch_failed_checks')
+        if isinstance(raw_failed, str):
+            raw_failed = [raw_failed]
+        for item in raw_failed if isinstance(raw_failed, list) else []:
+            if isinstance(item, dict):
+                item = item.get('id') or item.get('check') or item.get('name')
+            text = str(item or '').strip()
+            if text and text not in base_switch_failed:
+                base_switch_failed.append(text)
+    if selection_gate == 'blocked_candidate_base_switch_gate_required':
+        status = 'blocked_candidate_base_switch_gate_required'
+        failed_text = ', '.join(base_switch_failed) if base_switch_failed else 'candidate reference protocol, smoke, full reproduction, and artifact-local audit gates'
+        reason = (
+            'Environment-stage Claude Code identified a loader/data-ready candidate, but it remains non-authoritative until '
+            f'deterministic base-switch evidence passes: {failed_text}.'
+        )
+    elif ready:
         status = 'implementation_ready_for_reference_probe'
         reason = 'Environment-stage repo has at least one claim-ready real dataset with loader evidence.'
     else:
@@ -239,7 +260,8 @@ def write_generic_plan(project: str, adapter: Path) -> int:
         'repo': repo,
         'ready_datasets': ready,
         'blocked_datasets': blocked,
-        'blocker_reasons': [] if ready else [reason],
+        'blocker_reasons': [reason, *base_switch_failed] if status == 'blocked_candidate_base_switch_gate_required' else [] if ready else [reason],
+        'base_switch_failed_checks': base_switch_failed,
         'selection_gate': selection.get('selection_gate', '') if isinstance(selection, dict) else '',
         'selection_stage': selection.get('selection_stage', '') if isinstance(selection, dict) else '',
         'evidence_ready_count': selection.get('evidence_ready_count', 0) if isinstance(selection, dict) else 0,

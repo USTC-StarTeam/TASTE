@@ -46,6 +46,19 @@ POLISH_RISK_TERMS = [
 ]
 
 
+def has_evidence_limit_term(text: str, term: str) -> bool:
+    term = str(term or "").strip().lower()
+    if not term:
+        return False
+    pattern = r"(?<![a-z0-9])" + re.escape(term).replace(r"\ ", r"\s+") + r"(?![a-z0-9])"
+    return bool(re.search(pattern, str(text or "").lower()))
+
+
+def evidence_limit_terms_in(*texts: str) -> list[str]:
+    joined = "\n".join(str(item or "") for item in texts)
+    return [term for term in EVIDENCE_LIMIT_TERMS if has_evidence_limit_term(joined, term)]
+
+
 def braced_content(text: str, open_brace_index: int) -> str:
     depth = 0
     out: list[str] = []
@@ -240,7 +253,7 @@ def table_rows(tex: str) -> list[dict[str, Any]]:
             warnings.append(f"single-column table has {column_count} columns without resizebox/adjustbox/tabularx/smaller font; inspect compiled PDF for overflow")
         if env == "table" and column_count >= 3 and long_tokens and not uses_scaling:
             issues.append("single-column table contains long cells without scaling or wrapping; likely exceeds column width")
-        evidence_terms = [term for term in EVIDENCE_LIMIT_TERMS if term in lower_caption or term in lower_body]
+        evidence_terms = evidence_limit_terms_in(lower_caption, lower_body)
         if evidence_terms:
             issues.append("main-text table is evidence-limited or probe-only: " + ", ".join(evidence_terms[:6]))
         if "---" in body or "near zero" in lower_caption or "not audit-verified" in lower_body:
@@ -332,7 +345,7 @@ def figure_rows(tex: str, tex_path: Path, output_dir: Path, workspace: Path | No
             if len(caption) > 430:
                 warnings.append("caption is too long and likely hurts readability")
 
-            evidence_terms = [term for term in EVIDENCE_LIMIT_TERMS if term in lower_caption or term in lower_id]
+            evidence_terms = evidence_limit_terms_in(lower_caption, lower_id)
             if evidence_terms:
                 issues.append("main-text figure is evidence-limited or proposal/probe-only: " + ", ".join(evidence_terms[:6]))
             polish_terms = [term for term in POLISH_RISK_TERMS if term in lower_caption]

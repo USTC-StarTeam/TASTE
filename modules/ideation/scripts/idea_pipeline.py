@@ -219,7 +219,7 @@ def _fallback_ideas(items: list[dict], max_ideas: int, config: AppConfig | None 
             "title": "当前主题的最小可复现实验闭环",
             "hypothesis": f"围绕“{topic[:80]}”的下一步科研应先建立一个最小、可复现、可审计的实验闭环；只有真实数据、固定协议、完整日志和反例切片同时落盘后，结果才允许进入论文证据。",
             "mechanism": "从当前高证据文献和可运行代码中抽取一个最小机制改动，保持数据、训练预算、评测指标和对照协议一致，并把所有配置、日志、指标、坏例和反例写入本地产物。",
-            "repo_or_data_path": "由项目 Claude Code 在当前项目 workspace 内选择已通过 repo/data/protocol 审计的路径；缺失任一证据时保持 blocked，不用占位路径。",
+            "repo_or_data_path": "写候选基底论文或候选 repo 名称/URL、需要修改的模块、Environment 需验证的数据和协议证据。",
             "initial_experiment": "",
             "initial_experiment_required": True,
             "bad_case_slice": "至少覆盖整体失败、关键用户/样本切片、对照退化、数据缺失或协议不一致四类反例。",
@@ -232,7 +232,7 @@ def _fallback_ideas(items: list[dict], max_ideas: int, config: AppConfig | None 
             "title": "失败切片驱动的机制修复实验",
             "hypothesis": "如果上一轮候选实验在某些切片上系统性失败，针对这些切片提出最小机制修复并做同协议反例压力测试，比继续扩大训练预算更能判断路线是否值得保留。",
             "mechanism": "先读取最近实验日志、审计记录和坏例文件，定位失败切片；再只修改一个机制因素，比较修复前后整体指标、切片指标和反例退化。",
-            "repo_or_data_path": "复用当前已审计路线的代码、数据和日志；若缺少坏例文件，先补写 bad_cases/counterexamples 后再设计训练。",
+            "repo_or_data_path": "提出候选基底/候选 repo 线索，并说明如何补齐坏例文件和 counterexamples；Environment 验证锁定前不得写成本地主线。",
             "initial_experiment": "",
             "initial_experiment_required": True,
             "bad_case_slice": "上一轮最差切片、对照退化切片、数据稀疏切片、机制假设不适用切片。",
@@ -245,7 +245,7 @@ def _fallback_ideas(items: list[dict], max_ideas: int, config: AppConfig | None 
             "title": "证据对齐的可审计增强模块",
             "hypothesis": "只有当增强模块的输入证据、机制作用点和目标指标三者一致时，候选方法才可能支撑当前论文主张；否则应降级为负结果或路线剪枝记录。",
             "mechanism": "把文献机制、项目数据字段、模型接口和评测指标逐项对齐，缺失项由项目 Claude Code 写明不可推广原因；通过后再实现最小增强模块。",
-            "repo_or_data_path": "选择当前项目中可追溯的 repo/data/artifact；所有新增字段必须写入 experiment.json、metrics.json、audit.json 和 bad_cases.json。",
+            "repo_or_data_path": "给出可追溯的候选 repo/data/artifact 线索和字段需求；Environment 验证锁定后，新增字段才写入 experiment.json、metrics.json、audit.json 和 bad_cases.json。",
             "initial_experiment": "",
             "initial_experiment_required": True,
             "bad_case_slice": "关键输入缺失、机制输入与目标指标不一致、增强模块关闭后仍提升、替换切片后退化。",
@@ -407,7 +407,7 @@ Research interest:
 Evidence:
 {prompt_items}
 Return only JSON, no reasoning, no markdown. The idea must be aligned to the research interest and the evidence, and must not invent a project-specific method or dataset that is absent from the evidence. Each idea must contain: (1) new_method: a detailed proposed method, (2) initial_experiment: which prior work/base it starts from, what exact change is tested, baseline/control/ablation, metrics, and bad-case slice, (3) inspired_by: the papers/items that inspired the method and why.
-[{{"id":"idea-001","title":"中文标题","new_method":"详细的新方法；说明核心假设、机制、模块和为什么可能有效","method_details":"方法机制细节；说明输入、模型改动、训练/推理作用点","initial_experiment":"初步详细实验；说明基于哪篇工作或哪个可审计基底，做什么最小改动，对比哪些 baseline/control/ablation，使用哪些指标和坏例切片","hypothesis":"可选旧字段，等同 new_method 的短摘要","mechanism":"可选旧字段，等同 method_details","repo_or_data_path":"只写证据状态或缺口；不得臆造路径","bad_case_slice":"坏例切片","novelty":"HIGH/MEDIUM/LOW","feasibility":"HIGH/MEDIUM/LOW","evidence_strength":"HIGH/MEDIUM/LOW","score":8.5,"inspired_by":[{{"title":"来源标题","source":"articles/read/github","url":"url","reason":"启发了哪个机制或实验对照"}}]}}]
+[{{"id":"idea-001","title":"中文标题","new_method":"详细的新方法；说明核心假设、机制、模块和为什么可能有效","method_details":"方法机制细节；说明输入、模型改动、训练/推理作用点","initial_experiment":"初步详细实验；说明候选基底论文或候选 repo 线索、为什么适合、做什么最小改动、对比哪些 baseline/control/ablation，使用哪些指标和坏例切片，以及 Environment 要验证什么","hypothesis":"可选旧字段，等同 new_method 的短摘要","mechanism":"可选旧字段，等同 method_details","repo_or_data_path":"写候选 repo/base 线索、证据缺口和 Environment 验证项","bad_case_slice":"坏例切片","novelty":"HIGH/MEDIUM/LOW","feasibility":"HIGH/MEDIUM/LOW","evidence_strength":"HIGH/MEDIUM/LOW","score":8.5,"inspired_by":[{{"title":"来源标题","source":"articles/read/github","url":"url","reason":"启发了哪个机制或实验对照"}}]}}]
 """
 )
         generator_results = parallel_json(generator, prompts, workers)
@@ -540,7 +540,7 @@ Return strict JSON:
     ideas = [_normalize_idea_schema(idea) for idea in ideas]
     idea_payload = {
         "run_id": request.run_id,
-        "source": "taste_auto_idea",
+        "source": "taste_ideation",
         "ideas": ideas,
         "candidate_pool": candidate_pool,
         "judge_scores": judge_scores,
@@ -549,8 +549,8 @@ Return strict JSON:
     idea_markdown = render_ideas_markdown(ideas)
     write_json(directory / "ideas.json", idea_payload)
     write_text(directory / "idea.md", idea_markdown)
-    sync_latest("auto_idea", "ideas.json", directory / "ideas.json")
-    sync_latest("auto_idea", "idea.md", directory / "idea.md")
+    sync_latest("ideation", "ideas.json", directory / "ideas.json")
+    sync_latest("ideation", "idea.md", directory / "idea.md")
     _sync_project_ideas(request.run_id, idea_payload, idea_markdown)
     update_manifest(directory, "idea")
     return {"run_id": request.run_id, "ideas": ideas}
@@ -794,8 +794,8 @@ def patch_idea(run_id: str, idea_id: str, patch: IdeaPatch) -> dict:
     markdown = render_ideas_markdown(data.get("ideas", []))
     write_json(directory / "ideas.json", data)
     write_text(directory / "idea.md", markdown)
-    sync_latest("auto_idea", "ideas.json", directory / "ideas.json")
-    sync_latest("auto_idea", "idea.md", directory / "idea.md")
+    sync_latest("ideation", "ideas.json", directory / "ideas.json")
+    sync_latest("ideation", "idea.md", directory / "idea.md")
     _sync_project_ideas(run_id, data, markdown)
     if not matched:
         data.setdefault("warnings", []).append({"type": "idea_not_found", "idea_id": idea_id})

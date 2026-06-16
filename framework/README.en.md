@@ -12,7 +12,7 @@ Do not copy only `framework/` to run TASTE. The framework needs the full tracked
 | `../web/backend/` | FastAPI backend, web job bridge, and project state API. |
 | `../web/frontend/client/` | React/Vite frontend source. Generated `dist/` files are not committed. |
 | `../modules/` | Seven independently runnable research stages: finding, reading, ideation, planning, environment, experimenting, and writing. |
-| `auto_research/data/quality/` | Static conference/journal quality tables used only for deterministic metadata and small ranking signals. |
+| `modules/finding/data/quality/` | Static conference/journal quality tables used only for deterministic metadata and small ranking signals. |
 | `tests/` | Backend and workflow regression tests. |
 | `requirements.txt` | Python dependencies for the TASTE management environment. |
 | `LICENSE` | Package-level license copy. The root README also links the license. |

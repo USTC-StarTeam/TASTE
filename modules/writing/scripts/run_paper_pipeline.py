@@ -129,6 +129,46 @@ def existing_file(value: Any) -> Path | None:
     return path if path.exists() and path.is_file() else None
 
 
+def record_missing_preview_repair_artifact(project: str, venue: str, repair_rc: int) -> bool:
+    project_root = ROOT / 'projects' / project
+    state_path = project_root / 'paper' / 'metadata' / 'paper_pipeline.json'
+    pipeline_state = read_json(state_path, {})
+    if isinstance(pipeline_state, dict) and pipeline_state.get('conference_preview_ready'):
+        return False
+    loop_path = project_root / 'state' / 'paper_preview_repair_loop.json'
+    if loop_path.exists():
+        return False
+    report_path = project_root / 'reports' / 'paper_preview_repair_loop.md'
+    reason = f'repair_paper_preview_loop exited rc={repair_rc} without writing {loop_path}'
+    payload = {
+        'project': project,
+        'venue': venue,
+        'updated_at': now_iso(),
+        'status': 'framework_error_missing_repair_artifact',
+        'repair_return_code': repair_rc,
+        'reason': reason,
+    }
+    loop_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    loop_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    report_path.write_text(
+        '# Writing Preview Revision\n\n'
+        '- status: framework_error_missing_repair_artifact\n'
+        f'- repair_return_code: {repair_rc}\n'
+        f'- reason: {reason}\n',
+        encoding='utf-8',
+    )
+    update_pipeline_state(project, {
+        'paper_preview_repair_loop_status': 'framework_error_missing_repair_artifact',
+        'paper_preview_repair_loop_report': str(report_path),
+        'paper_preview_repair_loop_json': str(loop_path),
+        'paper_preview_repair_rounds': 0,
+        'paper_preview_repair_blocker': reason,
+        'paper_self_review_ready': False,
+    }, venue=venue, promote_to_top=True)
+    return True
+
+
 def run(cmd: list[str], required: bool = True) -> int:
     proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True)
     if proc.stdout:
@@ -273,7 +313,8 @@ def main() -> None:
     preview_repair_cmd = [sys.executable, str(SCRIPTS / 'repair_paper_preview_loop.py'), '--project', args.project, '--venue', args.venue, '--title', args.title or '', '--max-rounds', '5']
     if regenerate_current_preview:
         preview_repair_cmd.append('--refresh-current-paper')
-    run(preview_repair_cmd, required=False)
+    preview_repair_rc = run(preview_repair_cmd, required=False)
+    record_missing_preview_repair_artifact(args.project, args.venue, preview_repair_rc)
     run([sys.executable, str(SCRIPTS / 'audit_submission_readiness.py'), '--project', args.project, '--venue', args.venue], required=False)
     run([sys.executable, str(SCRIPTS / 'build_blocker_action_plan.py'), '--project', args.project, '--venue', args.venue], required=False)
 

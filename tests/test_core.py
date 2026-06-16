@@ -2,9 +2,9 @@ import json
 import re
 
 from bs4 import BeautifulSoup
-from auto_research.auto_find.catalog import catalog_by_id, load_catalog
-from auto_research.auto_find.pipeline import _apply_quality_bonus, _recommendation_translation_status
-from auto_research.auto_find.sources import _acm_metadata_from_doi, _dblp_page_url, _extract_icml_virtual_abstract, _parse_neurips_detail, _parse_neurips_list, fetch_arxiv, fetch_dblp_stream_api, fetch_openreview_venue, fetch_venue_sample, fetch_venue_title_index, normalize_date
+from find_support import catalog_by_id, load_catalog
+from find_pipeline import _apply_quality_bonus, _recommendation_translation_status
+from find_support import _acm_metadata_from_doi, _dblp_page_url, _extract_icml_virtual_abstract, _parse_neurips_detail, _parse_neurips_list, fetch_arxiv, fetch_dblp_stream_api, fetch_openreview_venue, fetch_venue_sample, fetch_venue_title_index, normalize_date
 from auto_research.llm import LLMClient, clamp_workers, extract_json, fallback_score, keyword_category
 from auto_research.markdown import paper_markdown
 from auto_research.models import AppConfig, LLMRoleConfig
@@ -32,11 +32,11 @@ def test_sync_latest_does_not_overwrite_project_when_run_id_mismatches(monkeypat
     monkeypatch.setenv("PROJECT_ID", "demo_project")
     monkeypatch.setattr(storage, "stage_latest_path", lambda stage, filename: runtime_latest / stage / filename)
 
-    storage.sync_latest("auto_read", "read_results.json", stale_source)
+    storage.sync_latest("reading", "read_results.json", stale_source)
     assert storage.read_json(project_taste / "read_results.json", {})["marker"] == "keep"
-    assert storage.read_json(runtime_latest / "auto_read" / "read_results.json", {})["marker"] == "stale"
+    assert storage.read_json(runtime_latest / "reading" / "read_results.json", {})["marker"] == "stale"
 
-    storage.sync_latest("auto_read", "read_results.json", current_source)
+    storage.sync_latest("reading", "read_results.json", current_source)
     assert storage.read_json(project_taste / "read_results.json", {})["marker"] == "current"
 
 
@@ -65,11 +65,11 @@ def test_sync_latest_copies_find_markdown_derivatives_for_current_run(monkeypatc
     monkeypatch.setenv("PROJECT_ID", "demo_project")
     monkeypatch.setattr(storage, "stage_latest_path", lambda stage, filename: runtime_latest / stage / filename)
 
-    storage.sync_latest("auto_find", "read_candidates.md", stale_dir / "read_candidates.md")
+    storage.sync_latest("finding", "read_candidates.md", stale_dir / "read_candidates.md")
     assert not (project_taste / "read_candidates.md").exists()
-    assert (runtime_latest / "auto_find" / "read_candidates.md").read_text(encoding="utf-8") == "stale"
+    assert (runtime_latest / "finding" / "read_candidates.md").read_text(encoding="utf-8") == "stale"
 
-    storage.sync_latest("auto_find", "read_candidates.md", current_dir / "read_candidates.md")
+    storage.sync_latest("finding", "read_candidates.md", current_dir / "read_candidates.md")
     assert (project_taste / "read_candidates.md").read_text(encoding="utf-8") == "current"
 
 def test_extract_json_from_fenced_response():
@@ -443,7 +443,7 @@ def test_openreview_fetch_caps_large_page_size(monkeypatch):
         ]
         return Response(notes)
 
-    monkeypatch.setattr("auto_research.auto_find.sources.requests.get", fake_get)
+    monkeypatch.setattr("find_support.requests.get", fake_get)
 
     papers = fetch_openreview_venue({"name": "ICLR", "full_name": "International Conference on Learning Representations"}, [2026], 100000)
 
@@ -466,7 +466,7 @@ def test_openreview_dynamic_iclr_years(monkeypatch):
         captured.append(params["content.venueid"])
         return Response()
 
-    monkeypatch.setattr("auto_research.auto_find.sources.requests.get", fake_get)
+    monkeypatch.setattr("find_support.requests.get", fake_get)
     fetch_openreview_venue({"name": "ICLR", "full_name": "International Conference on Learning Representations"}, [2023, 2024, 2025], 2)
     assert captured == ["ICLR.cc/2023/Conference", "ICLR.cc/2024/Conference", "ICLR.cc/2025/Conference"]
 
@@ -531,7 +531,7 @@ def test_dblp_stream_api_parses_json_hits(monkeypatch):
                 }
             }
 
-    monkeypatch.setattr("auto_research.auto_find.sources.requests.get", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr("find_support.requests.get", lambda *_args, **_kwargs: Response())
     papers = fetch_dblp_stream_api({"id": "v1", "name": "Demo", "address": "https://dblp.org/db/conf/demo/"}, [2025], 1)
     assert papers[0]["title"] == "Generative Systems Paper"
     assert papers[0]["authors"] == "Alice, Bob"
@@ -561,8 +561,8 @@ def test_openreview_known_venues_are_checked_before_dblp(monkeypatch):
         calls.append("dblp")
         raise AssertionError("DBLP should not run before successful OpenReview for known OpenReview venues")
 
-    monkeypatch.setattr("auto_research.auto_find.sources.fetch_openreview_venue", fake_openreview)
-    monkeypatch.setattr("auto_research.auto_find.sources.fetch_dblp_venue", fail_dblp)
+    monkeypatch.setattr("find_support.fetch_openreview_venue", fake_openreview)
+    monkeypatch.setattr("find_support.fetch_dblp_venue", fail_dblp)
 
     venue = {
         "id": "ccf_ai_conference_a_neurips_conference_on_neural_information_processing_systems",
@@ -607,8 +607,8 @@ def test_openreview_supported_address_venue_prefers_official_categories(monkeypa
         calls.append("dblp")
         raise AssertionError("DBLP should not run when a supported official-category source already satisfies the requested sample")
 
-    monkeypatch.setattr("auto_research.auto_find.sources.fetch_openreview_venue", fake_openreview)
-    monkeypatch.setattr("auto_research.auto_find.sources.fetch_dblp_venue", fail_dblp)
+    monkeypatch.setattr("find_support.fetch_openreview_venue", fake_openreview)
+    monkeypatch.setattr("find_support.fetch_dblp_venue", fail_dblp)
 
     venue = {
         "id": "ccf_ai_conference_a_aistats_international_conference_on_artificial_intelligence_and_statistics",
@@ -624,7 +624,7 @@ def test_openreview_supported_address_venue_prefers_official_categories(monkeypa
 
 
 def test_tiny_official_category_source_does_not_override_complete_official_title_index(monkeypatch):
-    from auto_research.auto_find import sources
+    import find_support as sources
 
     official_audit = {
         "status": "partial",
@@ -687,10 +687,10 @@ def test_tiny_official_category_source_does_not_override_complete_official_title
 def test_openreview_sample_falls_back_to_dblp_when_empty(monkeypatch):
     calls = []
 
-    monkeypatch.setattr("auto_research.auto_find.sources.fetch_openreview_venue", lambda *_args: (calls.append("openreview") or []))
-    monkeypatch.setattr("auto_research.auto_find.sources.fetch_neurips_virtual", lambda *_args: (calls.append("neurips_virtual") or []))
+    monkeypatch.setattr("find_support.fetch_openreview_venue", lambda *_args: (calls.append("openreview") or []))
+    monkeypatch.setattr("find_support.fetch_neurips_virtual", lambda *_args: (calls.append("neurips_virtual") or []))
     monkeypatch.setattr(
-        "auto_research.auto_find.sources.fetch_dblp_venue",
+        "find_support.fetch_dblp_venue",
         lambda *_args: (calls.append("dblp") or [{"title": "DBLP fallback paper", "url": "https://example.com", "abstract": ""}]),
     )
     venue = {
@@ -720,7 +720,7 @@ def test_arxiv_returns_status_for_success(monkeypatch):
           </entry>
         </feed>"""
 
-    monkeypatch.setattr("auto_research.auto_find.sources._request", lambda _url: Response())
+    monkeypatch.setattr("find_support._request", lambda _url: Response())
     items, status = fetch_arxiv(["cs.AI"], 3, "", "")
     assert len(items) == 1
     assert status["ok"] is True
@@ -737,7 +737,7 @@ def test_arxiv_returns_status_for_failure(monkeypatch):
     def fail(_url):
         raise RuntimeError("network down")
 
-    monkeypatch.setattr("auto_research.auto_find.sources._request", fail)
+    monkeypatch.setattr("find_support._request", fail)
     items, status = fetch_arxiv(["cs.AI"], 3, "", "")
     assert items == []
     assert status["ok"] is False
@@ -799,7 +799,7 @@ def test_clamp_workers_bounds_values():
 
 
 def test_dblp_stream_api_paginates_yequery_and_filters_proceedings(monkeypatch):
-    from auto_research.auto_find import sources
+    import find_support as sources
 
     calls = []
 
@@ -866,7 +866,7 @@ def test_dblp_stream_api_paginates_yequery_and_filters_proceedings(monkeypatch):
 
 
 def test_dblp_year_links_ignore_share_links(monkeypatch):
-    from auto_research.auto_find import sources
+    import find_support as sources
 
     class Response:
         text = """
@@ -889,7 +889,7 @@ def test_dblp_year_links_ignore_share_links(monkeypatch):
 
 
 def test_dblp_venue_merges_toc_when_stream_index_is_incomplete(monkeypatch):
-    from auto_research.auto_find import sources
+    import find_support as sources
 
     title_a = "LLM Grounded Recommendation with Diffusion Signals"
     title_b = "Causal Graph Recommendation with Semantic Feedback"
@@ -947,7 +947,7 @@ def test_dblp_venue_merges_toc_when_stream_index_is_incomplete(monkeypatch):
 
 
 def test_icml_downloads_records_metadata_completeness_audit(monkeypatch):
-    from auto_research.auto_find import sources
+    import find_support as sources
 
     class Response:
         text = """
@@ -988,7 +988,7 @@ def test_icml_downloads_records_metadata_completeness_audit(monkeypatch):
 
 
 def test_icml_downloads_enriches_presentation_from_official_event_pages(monkeypatch):
-    from auto_research.auto_find import sources
+    import find_support as sources
 
     class Response:
         def __init__(self, text: str):
@@ -1061,7 +1061,7 @@ def test_icml_virtual_abstract_strips_show_more_controls():
 
 
 def test_selected_virtual_details_enriches_eccv_like_pages(monkeypatch):
-    from auto_research.auto_find import sources
+    import find_support as sources
 
     detail_url = "https://eccv.ecva.net/virtual/2026/poster/42"
 
@@ -1112,7 +1112,7 @@ def test_selected_virtual_details_enriches_eccv_like_pages(monkeypatch):
 
 
 def test_selected_virtual_details_sets_oral_from_url_not_nav_text(monkeypatch):
-    from auto_research.auto_find import sources
+    import find_support as sources
 
     detail_url = "https://icml.cc/virtual/2026/oral/42"
 
@@ -1229,7 +1229,7 @@ def test_quality_bonus_ignores_venue_level_presentation_audit_text():
 
 
 def test_final_llm_score_cache_reuses_valid_profile_bound_scores():
-    from auto_research.auto_find import pipeline
+    import find_pipeline as pipeline
 
     cfg = AppConfig(provider="openai_compatible", base_url="https://llm.example/v1", api_key="key", model="judge-model")
     interest = "LLM recommender systems with user feedback"
@@ -1271,7 +1271,7 @@ def test_final_llm_score_cache_reuses_valid_profile_bound_scores():
 
 
 def test_final_llm_score_cache_accepts_concise_valid_reason_but_rejects_internal_text():
-    from auto_research.auto_find import pipeline
+    import find_pipeline as pipeline
 
     cfg = AppConfig(provider="openai_compatible", base_url="https://llm.example/v1", api_key="key", model="judge-model")
     base = {
@@ -1293,7 +1293,7 @@ def test_final_llm_score_cache_accepts_concise_valid_reason_but_rejects_internal
 
 
 def test_title_filter_uses_zero_temperature_for_stable_candidate_recall(monkeypatch):
-    from auto_research.auto_find import pipeline
+    import find_pipeline as pipeline
 
     calls = []
 
@@ -1339,7 +1339,7 @@ def test_title_filter_uses_zero_temperature_for_stable_candidate_recall(monkeypa
 
 
 def test_title_filter_reuses_project_bound_cache_without_llm_call(monkeypatch, tmp_path):
-    from auto_research.auto_find import pipeline
+    import find_pipeline as pipeline
 
     monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
     monkeypatch.setenv("PROJECT_ID", "demo_project")
@@ -1387,7 +1387,7 @@ def test_title_filter_reuses_project_bound_cache_without_llm_call(monkeypatch, t
 
 
 def test_title_filter_cache_policy_separates_abstract_snippet_prompts(monkeypatch, tmp_path):
-    from auto_research.auto_find import pipeline
+    import find_pipeline as pipeline
 
     monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
     monkeypatch.setenv("PROJECT_ID", "demo_project")
@@ -1462,7 +1462,7 @@ def test_compact_paper_rows_preserve_presentation_fields():
 
 
 def test_openreview_venue_preserves_official_primary_area(monkeypatch):
-    from auto_research.auto_find import sources
+    import find_support as sources
 
     class Response:
         def json(self):
@@ -1506,7 +1506,7 @@ def test_openreview_venue_preserves_official_primary_area(monkeypatch):
 
 
 def test_openreview_venue_normalizes_oral_presentation_from_track(monkeypatch):
-    from auto_research.auto_find import sources
+    import find_support as sources
 
     class Response:
         def json(self):

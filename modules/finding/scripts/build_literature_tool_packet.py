@@ -626,14 +626,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Build a compact Claude-callable packet from TASTE's literature survey artifacts.")
     parser.add_argument("--project", required=True)
     parser.add_argument("--venue", default="")
+    parser.add_argument("--artifact-dir", default="", help="Read literature artifacts from this directory instead of the web-facing planning/finding directory.")
+    parser.add_argument("--output-json", default="", help="Optional packet JSON output path. Defaults to state/literature_tool_packet.json or artifact-dir/literature_tool_packet.json.")
+    parser.add_argument("--output-md", default="", help="Optional packet Markdown output path. Defaults to planning/literature_tool_packet.md or artifact-dir/literature_tool_packet.md.")
     args = parser.parse_args()
 
     paths = build_paths(args.project)
     cfg = load_project_config(args.project)
-    taste_state = load_json(paths.state / "finding_frontend.json", {})
-    taste_sync = load_json(paths.state / "taste_sync.json", {})
-    intermediates = load_json(paths.state / "taste_literature_intermediates.json", {})
-    taste_dir = Path(taste_state.get("output_dir") or paths.planning / "finding") if isinstance(taste_state, dict) else paths.planning / "finding"
+    artifact_dir = Path(args.artifact_dir).expanduser() if str(args.artifact_dir or "").strip() else None
+    taste_state = load_json(paths.state / "finding_frontend.json", {}) if artifact_dir is None else load_json(artifact_dir / "finding_frontend.json", {})
+    taste_sync = load_json(paths.state / "taste_sync.json", {}) if artifact_dir is None else {}
+    intermediates = load_json(paths.state / "taste_literature_intermediates.json", {}) if artifact_dir is None else {}
+    taste_dir = artifact_dir or (Path(taste_state.get("output_dir") or paths.planning / "finding") if isinstance(taste_state, dict) else paths.planning / "finding")
     find_progress = load_json(taste_dir / "find_progress.json", {})
     find_results = load_json(taste_dir / "find_results.json", {})
     if not isinstance(find_results, dict):
@@ -685,6 +689,9 @@ def main() -> int:
         "run_id": run_id,
         "source_run_id": run_id,
         "status": status,
+        "web_visible": artifact_dir is None,
+        "internal_literature_survey": artifact_dir is not None,
+        "artifact_dir": str(taste_dir),
         "summary": {
             "strong_paper_anchors": len(strong),
             "recommendation_target_count": target_gate.get("target", 0),
@@ -723,8 +730,8 @@ def main() -> int:
         ],
         "commands": [
             f"{management_python()} modules/finding/scripts/build_literature_tool_packet.py --project {args.project}" + (f" --venue {args.venue}" if args.venue else ""),
-            f"{management_python()} modules/finding/scripts/run_literature_tool.py --project {args.project} --query \"<targeted paper/work query>\" --fast-mode" + (f" --venue {args.venue}" if args.venue else ""),
-            f"{management_python()} modules/finding/scripts/run_literature_tool.py --project {args.project} --query \"<conference or arXiv focus>\" --deep-survey" + (f" --venue {args.venue}" if args.venue else ""),
+            f"{management_python()} modules/finding/scripts/run_literature_tool.py --project {args.project} --query \"<targeted paper/work query>\" --fast-mode" + (f" --venue {args.venue}" if args.venue else "") + "  # internal by default; add --publish-current-find only for visible current-Find repair",
+            f"{management_python()} modules/finding/scripts/run_literature_tool.py --project {args.project} --query \"<conference or arXiv focus>\" --deep-survey" + (f" --venue {args.venue}" if args.venue else "") + "  # internal by default; add --publish-current-find only for visible current-Find repair",
         ],
         "intermediate_files": load_artifact_file_map(paths, taste_dir),
         "strong_papers": strong[:20],
@@ -748,10 +755,12 @@ def main() -> int:
             "Do not expose the survey tool as a separate agent; it is an internal TASTE literature capability used by Claude Code and the trajectory system.",
         ],
     }
-    save_json(paths.state / "literature_tool_packet.json", packet)
-    paths.planning.mkdir(parents=True, exist_ok=True)
-    (paths.planning / "literature_tool_packet.md").write_text(render_markdown(packet), encoding="utf-8")
-    print(paths.planning / "literature_tool_packet.md")
+    output_json = Path(args.output_json).expanduser() if str(args.output_json or "").strip() else ((taste_dir / "literature_tool_packet.json") if artifact_dir is not None else (paths.state / "literature_tool_packet.json"))
+    output_md = Path(args.output_md).expanduser() if str(args.output_md or "").strip() else ((taste_dir / "literature_tool_packet.md") if artifact_dir is not None else (paths.planning / "literature_tool_packet.md"))
+    save_json(output_json, packet)
+    output_md.parent.mkdir(parents=True, exist_ok=True)
+    output_md.write_text(render_markdown(packet), encoding="utf-8")
+    print(output_md)
     return 0
 
 

@@ -41,10 +41,10 @@ if str(framework_scripts) not in sys.path:
 from taste_pythonpath import ensure_taste_pythonpath
 ensure_taste_pythonpath(root)
 
-from auto_research.auto_find.pipeline import run_find
-from auto_research.auto_read.pipeline import run_read
-from auto_research.auto_idea.pipeline import patch_idea, run_idea
-from auto_research.auto_plan.pipeline import run_plan
+from find_pipeline import run_find
+from read_pipeline import run_read
+from idea_pipeline import patch_idea, run_idea
+from plan_pipeline import run_plan
 from auto_research.models import AppConfig, FindRequest, IdeaPatch, IdeaRequest, PlanRequest, ReadRequest, VenueSelection
 from auto_research.storage import run_dir
 from auto_research.markdown import paper_markdown
@@ -62,6 +62,9 @@ use_venues = {use_venues}
 source_selection = {source_selection_json}
 api_mode = {api_mode_json}
 paths = build_paths(project)
+internal_output_dir_raw = os.environ.get("TASTE_INTERNAL_FIND_OUTPUT_DIR", "").strip()
+internal_output_dir = Path(internal_output_dir_raw).expanduser() if internal_output_dir_raw else None
+publish_outputs = internal_output_dir is None
 cfg = load_project_config(project)
 llm = cfg.get("llm", {{}})
 api_key_env = os.environ.get("LLM_API_KEY_ENV") or llm.get("api_key_env", "OPENAI_API_KEY")
@@ -214,7 +217,7 @@ result = run_find(
 run_id = result["run_id"]
 
 directory = run_dir(run_id)
-out_dir = paths.planning / "finding"
+out_dir = internal_output_dir if internal_output_dir is not None else paths.planning / "finding"
 out_dir.mkdir(parents=True, exist_ok=True)
 for name in ["article.md", "source_status.md", "hf.md", "github.md"]:
     source = directory / name
@@ -280,6 +283,8 @@ def _write_frontend_state(stage, find_result, read_result=None, idea_result=None
         "taste_run_id": run_id,
         "taste_run_dir": str(directory),
         "output_dir": str(out_dir),
+        "internal_literature_survey": not publish_outputs,
+        "web_visible": publish_outputs,
         "provider": provider,
         "base_url": api_base,
         "model": model,
@@ -322,7 +327,9 @@ def _write_frontend_state(stage, find_result, read_result=None, idea_result=None
             "plans": len((plan_result or {{}}).get("plans", [])),
         }},
     }}
-    (paths.state / "finding_frontend.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    state_path = paths.state / "finding_frontend.json" if publish_outputs else out_dir / "finding_frontend.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     summary = ["# native Frontend\n\n"]
     for key in ["taste_run_id", "stage", "provider", "api_mode", "model", "output_dir"]:
         summary.append("- " + key + ": " + str(payload.get(key, "")) + "\n")
@@ -342,7 +349,9 @@ def _write_frontend_state(stage, find_result, read_result=None, idea_result=None
     summary.append("\n## Usage In TASTE\n")
     summary.append("- Find-stage artifacts are written immediately after Find so Claude/experiments can use them while Read/Idea/Plan continues.\n")
     summary.append("- Treat candidates not promoted by evidence gates as literature signals only, not paper-claim evidence.\n")
-    (paths.planning / "finding_frontend.md").write_text("".join(summary), encoding="utf-8")
+    frontend_md_path = paths.planning / "finding_frontend.md" if publish_outputs else out_dir / "finding_frontend.md"
+    frontend_md_path.parent.mkdir(parents=True, exist_ok=True)
+    frontend_md_path.write_text("".join(summary), encoding="utf-8")
     return payload
 
 _write_frontend_state("find_completed", result)
@@ -982,6 +991,7 @@ def main() -> int:
     parser.add_argument("--wide-survey", action="store_true", help="Allow broader venue/year scope. Default follows the project canonical source selection.")
     parser.add_argument("--query", action="append", default=[], help="Targeted query supplied by project agent; appended to project literature queries.")
     parser.add_argument("--focus-file", default="", help="Optional JSON/Markdown/TXT file with targeted queries or paper titles.")
+    parser.add_argument("--internal-output-dir", default="", help="Run Find->Read->Idea->Plan into this internal directory without publishing to the web-facing project artifacts.")
     args = parser.parse_args()
     if os.environ.get("DISABLE_NEW_FIND", "0").lower() in {"1", "true", "yes", "on"}:
         paths = build_paths(args.project)
@@ -1011,6 +1021,10 @@ def main() -> int:
         print(json.dumps(payload, ensure_ascii=False), flush=True)
         return 0
     extra_queries = merge_extra_queries(args)
+    internal_output_dir = Path(args.internal_output_dir).expanduser() if str(args.internal_output_dir or "").strip() else None
+    if internal_output_dir is not None:
+        internal_output_dir.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("FORCE_REFRESH", "1")
     if args.wide_survey:
         os.environ.setdefault("WIDE_SURVEY", "1")
 
@@ -1086,7 +1100,7 @@ def main() -> int:
         print(f"missing framework root: {ROOT / 'framework' / 'auto_research'}", file=sys.stderr)
         return 2
     source_selection = _effective_source_selection(args)
-    reuse_payload = maybe_reuse_taste_run(args, extra_queries)
+    reuse_payload = None if internal_output_dir is not None else maybe_reuse_taste_run(args, extra_queries)
     if reuse_payload:
         return 0
     paths = build_paths(args.project)
@@ -1096,7 +1110,7 @@ def main() -> int:
     driver = tmp_dir / "run_driver.py"
     write_driver(driver, args.project, args.max_papers, args.max_ideas, args.repair_rounds, bool(source_selection.get("include_arxiv")), bool(source_selection.get("include_huggingface")), bool(source_selection.get("include_github")), bool(source_selection.get("venue_ids")), source_selection)
     if extra_queries:
-        targeted_path = paths.state / "taste_targeted_queries.json"
+        targeted_path = (internal_output_dir / "taste_targeted_queries.json") if internal_output_dir is not None else paths.state / "taste_targeted_queries.json"
         try:
             existing_targeted = json.loads(targeted_path.read_text(encoding="utf-8")) if targeted_path.exists() else {}
         except Exception:
@@ -1105,9 +1119,11 @@ def main() -> int:
             existing_targeted = {}
         existing_targeted.update({"project": args.project, "queries": extra_queries, "updated_by": "run_frontend"})
         targeted_path.write_text(json.dumps(existing_targeted, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    log_path = paths.logs / "finding_frontend.log"
+    log_path = (internal_output_dir / "finding_frontend.log") if internal_output_dir is not None else paths.logs / "finding_frontend.log"
     start = time.time()
     run_env = os.environ.copy()
+    if internal_output_dir is not None:
+        run_env["TASTE_INTERNAL_FIND_OUTPUT_DIR"] = str(internal_output_dir)
     llm = cfg.get("llm", {}) if isinstance(cfg.get("llm"), dict) else {}
     api_key_env = run_env.get("LLM_API_KEY_ENV") or llm.get("api_key_env") or "OPENAI_API_KEY"
     api_key = (run_env.get(api_key_env, "") if api_key_env else "") or run_env.get("LLM_API_KEY", "") or llm.get("api_key", "")
@@ -1138,6 +1154,23 @@ def main() -> int:
         except FileNotFoundError:
             pass
         fallback_reason = f"TASTE timed out after {args.timeout_sec}s before complete Find->Read->Idea->Plan."
+        if internal_output_dir is not None:
+            timeout_payload = {
+                "project": args.project,
+                "status": "internal_find_timeout",
+                "stage": "internal_find_timeout",
+                "timeout_sec": args.timeout_sec,
+                "elapsed_sec": round(elapsed, 3),
+                "output_dir": str(internal_output_dir),
+                "reason": fallback_reason,
+                "web_visible": False,
+                "internal_literature_survey": True,
+                "log_path": str(log_path),
+            }
+            (internal_output_dir / "finding_frontend.json").write_text(json.dumps(timeout_payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            (internal_output_dir / "finding_frontend.md").write_text("# Internal literature survey\n\n- status: internal_find_timeout\n- web_visible: False\n", encoding="utf-8")
+            print(json.dumps(timeout_payload, ensure_ascii=False))
+            return 124
         run_hint = latest_taste_run_hint()
         latest_dir = Path(run_hint.get("latest_run_dir", "")) if run_hint else Path("")
         if latest_dir.exists() and (latest_dir / "find_results.json").exists():
@@ -1189,7 +1222,7 @@ def main() -> int:
     try:
         hint = latest_taste_run_hint()
         run_dir = Path(str(hint.get("latest_run_dir") or ""))
-        if proc.returncode == 0 and run_dir.exists() and (run_dir / "find_results.json").exists():
+        if internal_output_dir is None and proc.returncode == 0 and run_dir.exists() and (run_dir / "find_results.json").exists():
             run_id = run_dir.name
             save_taste_reuse_signature(args.project, run_id, run_dir, args, extra_queries)
     except Exception as exc:

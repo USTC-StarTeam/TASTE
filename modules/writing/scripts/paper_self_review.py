@@ -60,9 +60,18 @@ def _artifact_sha(row: Any) -> str:
 
 
 def _artifact_has_text(row: Any) -> bool:
-    if isinstance(row, dict):
-        return bool(str(row.get("excerpt") or row.get("text_excerpt") or row.get("summary") or "").strip())
-    return False
+    if not isinstance(row, dict):
+        return False
+    for key in ["excerpt", "text_excerpt", "summary", "note", "notes", "observation", "observations", "evidence", "pdf_text_excerpt"]:
+        value = row.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            return True
+        if str(value or "").strip():
+            return True
+    try:
+        return int(row.get("length_chars") or 0) > 0
+    except Exception:
+        return False
 
 
 def _resolve_project_path(project_root: Path, raw: str) -> Path:
@@ -379,6 +388,73 @@ def self_review_evidence_blockers(payload: dict[str, Any]) -> list[dict[str, Any
     return blockers
 
 
+def _remaining_blocker_issue_text(row: Any) -> str:
+    return _row_field_text(row, ["issue", "problem", "detail", "summary", "finding", "observation", "description", "mitigation"])
+
+
+def _remaining_blocker_is_submission_evidence(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if row.get("requires_experiment") is True or row.get("submission_blocker") is True:
+        return True
+    if row.get("preview_blocker") is False and row.get("submission_blocker") is not False:
+        return True
+    if _finding_matches_evidence_blocker(row):
+        return True
+    text = _remaining_blocker_issue_text(row).lower()
+    evidence_terms = [
+        "evidence gate", "evidence-limited", "evidence limited", "paper evidence audit",
+        "no experimental results", "proposed method", "requires experiment", "requires running experiments",
+        "completion requires running", "submission", "claim evidence", "not submission-ready",
+    ]
+    return any(term in text for term in evidence_terms)
+
+
+def _remaining_blocker_is_nonblocking_note(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    status_text = _normalized_marker_text(_row_field_text(row, ["status", "severity", "resolution_status", "blocker_status"]))
+    if any(marker in status_text for marker in ["info", "warn", "warning", "non_blocking", "non_blocker", "resolved", "fixed", "mitigated"]):
+        return True
+    text = _remaining_blocker_issue_text(row).lower()
+    mitigation = _compact_text(row.get("mitigation")).lower()
+    return bool(mitigation and any(term in mitigation for term in ["resolved", "fixed", "reduced", "mitigated", "valid", "verified"])) and not any(
+        term in text for term in ["undefined citation", "compile error", "fatal", "missing pdf", "missing tex"]
+    )
+
+
+def remaining_blocker_evidence_blockers(remaining: list[Any]) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    for index, row in enumerate(remaining, start=1):
+        if not _remaining_blocker_is_submission_evidence(row):
+            continue
+        issue = _remaining_blocker_issue_text(row) or _compact_text(row)
+        category = _finding_category_text(row) if isinstance(row, dict) else "remaining_submission_evidence"
+        blockers.append(
+            {
+                "id": f"self_review_remaining_evidence_{_normalized_marker_text(category) or index}",
+                "category": str(category or "remaining_submission_evidence"),
+                "issue": issue,
+                "detail": issue,
+                "source": "paper_self_review_remaining_blocker",
+                "evidence": row,
+                "finding_index": index,
+                "preview_blocker": False,
+                "submission_blocker": True,
+            }
+        )
+    return blockers
+
+
+def remaining_preview_blockers(remaining: list[Any]) -> list[Any]:
+    out: list[Any] = []
+    for row in remaining:
+        if _remaining_blocker_is_submission_evidence(row) or _remaining_blocker_is_nonblocking_note(row):
+            continue
+        out.append(row)
+    return out
+
+
 def _review_protocol(payload: dict[str, Any]) -> dict[str, Any]:
     protocol = payload.get("review_protocol")
     if not isinstance(protocol, dict):
@@ -474,7 +550,7 @@ def _reading_entry_matches(entry: Any, key: str) -> bool:
         "pdf_text": ["pdf_text", "pdf text", "pdftotext", "paper.txt"],
         "tex": ["tex", "latex", "paper.tex"],
         "refs_bib": ["refs_bib", "refs.bib", "bibliography", "bibtex"],
-        "compile_log": ["compile_log", "compile.log", "latexmk", "compile log"],
+        "compile_log": ["compile_log", "compile.log", "latexmk", "compile log", "paper.log", "latex log"],
         "paper_log": ["paper_log", "paper.log", "latex log"],
         "venue_requirements": ["venue_requirements", "venue requirements", "venue contract", "template contract"],
     }
@@ -490,7 +566,7 @@ def _reading_entry_has_method(entry: Any) -> bool:
 def _reading_entry_has_evidence(entry: Any) -> bool:
     if not isinstance(entry, dict):
         return False
-    return _row_has_any(entry, ["excerpt", "text_excerpt", "finding_summary", "observations", "evidence", "location", "line", "page", "hash", "sha256"] )
+    return _row_has_any(entry, ["excerpt", "text_excerpt", "finding_summary", "observation", "observations", "note", "notes", "evidence", "location", "line", "page", "hash", "sha256"] )
 
 
 def _repair_has_file(row: Any) -> bool:
@@ -544,7 +620,7 @@ def validate_paper_self_review_receipt(
     if "claude" not in reviewer or "project" not in reviewer:
         blockers.append({"id": "self_review_reviewer_not_project_claude", "detail": "receipt must identify project Claude Code as the reviewer"})
     status = str(payload.get("status") or payload.get("conclusion_status") or "").strip().lower()
-    if status not in {"pass", "passed", "fixed", "completed", "ready"}:
+    if status not in {"pass", "passed", "fixed", "completed", "ready", "reviewed"}:
         blockers.append({"id": "self_review_not_passed", "detail": f"receipt status={status or 'missing'}"})
     artifacts = _artifact_rows(payload)
     required_artifacts = ["pdf", "pdf_text", "tex", "refs_bib", "compile_log", "paper_log", "venue_requirements"]
@@ -625,8 +701,9 @@ def validate_paper_self_review_receipt(
             blockers.append({"id": "self_review_repair_missing_action", "detail": f"repairs_applied[{index}] must describe the repair action"})
         if not _repair_has_verification(repair):
             blockers.append({"id": "self_review_repair_missing_verification", "detail": f"repairs_applied[{index}] must include post-repair verification command/result or evidence"})
-    if remaining:
-        blockers.append({"id": "self_review_remaining_blockers", "detail": f"Claude self-review reports remaining blockers: {remaining[:5]}"})
+    remaining_preview = remaining_preview_blockers(remaining)
+    if remaining_preview:
+        blockers.append({"id": "self_review_remaining_blockers", "detail": f"Claude self-review reports remaining preview blockers: {remaining_preview[:5]}"})
     for key in ["compiled", "pdf_text_rechecked", "venue_shape_rechecked", "citation_render_rechecked", "bibliography_rechecked"]:
         if final_checks.get(key) is not True:
             blockers.append({"id": f"self_review_final_check_missing_{key}", "detail": f"final_checks.{key}=true is required"})
@@ -637,7 +714,7 @@ def validate_paper_self_review_receipt(
         "self_review_refs_not_current",
     }
     current_scope_invalid = any(str(row.get("id") or "") in scope_blocker_ids for row in blockers if isinstance(row, dict))
-    evidence_blockers = [] if current_scope_invalid else self_review_evidence_blockers(payload)
+    evidence_blockers = [] if current_scope_invalid else [*self_review_evidence_blockers(payload), *remaining_blocker_evidence_blockers(remaining)]
     ready = not blockers
     return {
         "status": "pass" if ready else "block",

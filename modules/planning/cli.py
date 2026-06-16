@@ -41,7 +41,7 @@ def main() -> None:
         raise SystemExit("--run-id is required")
     _ensure_runtime_imports()
     from auto_research.models import AppConfig, PlanRequest
-    from auto_research.auto_plan.pipeline import run_plan
+    from plan_pipeline import run_plan
 
     config = AppConfig(**_load_json(args.config_json, {}))
     result = run_plan(PlanRequest(run_id=args.run_id, idea_ids=args.idea_id, repair_rounds=args.repair_rounds), config)

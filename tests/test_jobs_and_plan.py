@@ -1,5 +1,6 @@
 import importlib
 import json
+import sys
 import time
 from datetime import date
 from pathlib import Path
@@ -9,8 +10,8 @@ import pytest
 
 from path_helpers import ensure_script_paths, load_script
 
-from auto_research.auto_plan.pipeline import run_plan
-from auto_research.auto_plan.pipeline import finish_plan, polish_plan, render_plan_markdown
+from plan_pipeline import run_plan
+from plan_pipeline import finish_plan, polish_plan, render_plan_markdown
 from auto_research.emailer import build_run_email_html
 from auto_research.jobs import JobCancelled
 from auto_research.models import AppConfig, EmailJobRequest, FindRequest, PlanPolishRequest, PlanRequest, ReadRequest, VenueHealthRequest
@@ -259,6 +260,33 @@ def test_environment_stage_exposes_pending_candidate_without_authorizing_route()
     assert stage["selection"]["pending_candidate"]["name"] == "owner/candidate"
 
 
+def test_environment_stage_invalid_selection_hides_legacy_repo_from_current_fields():
+    from auto_research.web import project_bridge
+
+    stage = project_bridge._public_environment_stage(
+        status="waiting_for_environment_base_selection",
+        env={"valid": False, "selection_gate": "continued_search_required_candidate_reference_reproduction_blocked"},
+        selected={"name": "owner/legacy", "repo_path": "/tmp/legacy", "dataset": "legacy-data"},
+        active_repo={"name": "owner/legacy", "repo_path": "/tmp/legacy", "claim_ready_datasets": ["legacy-data"]},
+        repo_name="owner/legacy",
+        repo_url="https://example.test/legacy",
+        repo_path="/tmp/legacy",
+        ref_gate={"status": "pass", "decision": "continue_base"},
+        reference_full_job={"status": "completed", "decision": "ready_for_full_research_cycle"},
+        route_dataset="legacy-data",
+        route_ready_datasets=["legacy-data"],
+    )
+
+    assert stage["repo_status"] == "waiting_for_repo_selection"
+    assert stage["data_status"] == "waiting_for_real_data_loader_evidence"
+    assert stage["active_repo"] == {}
+    assert stage["repo_path"] == ""
+    assert stage["dataset"] == ""
+    assert stage["ready_datasets"] == []
+    assert stage["historical_active_repo"]["name"] == "owner/legacy"
+    assert stage["checks"][0]["summary"] == "未选择"
+
+
 def test_api_catalog_merges_sigkdd_kdd_aliases():
     full_name = "ACM SIGKDD Conference on Knowledge Discovery and Data Mining"
     rows = [row for row in server.api_catalog() if row.get("full_name") == full_name]
@@ -464,7 +492,7 @@ def test_persisted_running_find_is_cancelled_after_server_restart(tmp_path, monk
 
 
 def test_venue_title_scan_limit_zero_means_full_fetch(monkeypatch):
-    from auto_research.auto_find import pipeline as find_pipeline
+    import find_pipeline as find_pipeline
 
     monkeypatch.delenv("VENUE_TITLE_SCAN_LIMIT", raising=False)
     monkeypatch.delenv("FIND_VENUE_TITLE_SCAN_LIMIT", raising=False)
@@ -480,7 +508,7 @@ def test_venue_title_scan_limit_zero_means_full_fetch(monkeypatch):
 
 
 def test_default_full_venue_fetch_does_not_cap_recall_to_max_fetch_papers():
-    from auto_research.auto_find import pipeline as find_pipeline
+    import find_pipeline as find_pipeline
 
     config = AppConfig(
         venue_title_scan_limit=0,
@@ -494,7 +522,7 @@ def test_default_full_venue_fetch_does_not_cap_recall_to_max_fetch_papers():
 
 
 def test_final_recommendation_target_respects_configured_top_n():
-    from auto_research.auto_find import pipeline as find_pipeline
+    import find_pipeline as find_pipeline
 
     config = AppConfig(max_recommended_papers=4)
 
@@ -503,7 +531,7 @@ def test_final_recommendation_target_respects_configured_top_n():
 
 
 def test_final_recommendation_max_count_never_expands_visible_target(monkeypatch):
-    from auto_research.auto_find import pipeline as find_pipeline
+    import find_pipeline as find_pipeline
 
     monkeypatch.setenv("STRONG_RECOMMENDATION_MAX_COUNT", "50")
     config = AppConfig(max_recommended_papers=20)
@@ -513,7 +541,7 @@ def test_final_recommendation_max_count_never_expands_visible_target(monkeypatch
 
 
 def test_arxiv_empty_date_window_defaults_to_recent_half_year():
-    from auto_research.auto_find import sources
+    import find_support as sources
 
     start_date, end_date, source = sources._arxiv_date_window("", "", today=date(2026, 6, 10))
 
@@ -523,7 +551,7 @@ def test_arxiv_empty_date_window_defaults_to_recent_half_year():
 
 
 def test_arxiv_configured_date_window_is_preserved():
-    from auto_research.auto_find import sources
+    import find_support as sources
 
     start_date, end_date, source = sources._arxiv_date_window("2026/01/02", "", today=date(2026, 6, 10))
 
@@ -1809,6 +1837,9 @@ def test_running_paper_job_keeps_live_status_over_needs_writing_snapshot(tmp_pat
         "venue_submission_policy": {"body_page_max": 9, "reference_quality_target": 45},
         "conference_preview_ready": False,
         "conference_preview_body_page_limit": 9,
+        "paper_execution_alive": False,
+        "paper_execution_state": "needs_writing",
+        "paper_execution_message": "artifact snapshot says no worker",
     })
 
     def fake_process_tree(pid):
@@ -1858,6 +1889,8 @@ def test_running_paper_job_keeps_live_status_over_needs_writing_snapshot(tmp_pat
     assert row["result"]["paper_worker_pid"] == "202"
     assert row["result"]["paper_controller_pid"] == "101"
     assert row["result"]["paper_stage"]["status"] == "needs_writing"
+    assert row["result"]["paper_stage"]["paper_execution_alive"] is True
+    assert row["result"]["paper_stage"]["paper_execution_state"] == "running"
     log_text = "\n".join(row.get("logs") or [])
     assert "当前状态：paper 正在运行：writing:plotting" in log_text
     assert "论文产物状态：" in log_text
@@ -1868,7 +1901,13 @@ def test_api_jobs_prefers_live_paper_worker_over_persisted_needs_writing(monkeyp
     JOBS.clear()
     monkeypatch.setattr(server, "_reconcile_detached_launcher_jobs", lambda: None)
     monkeypatch.setattr(server, "_cached_list_runs", lambda: [])
-    monkeypatch.setattr(server, "_paper_stage_from_project_snapshot", lambda project: {})
+    monkeypatch.setattr(server, "_paper_stage_from_project_snapshot", lambda project: {
+        "status": "needs_writing",
+        "conference_preview_ready": False,
+        "paper_execution_alive": False,
+        "paper_execution_state": "needs_writing",
+        "paper_execution_message": "artifact snapshot says no worker",
+    })
     old = server.JobState("paper_old", "paper")
     old.status = "needs_writing"
     old.created_at = "2026-06-15T08:48:35Z"
@@ -1913,9 +1952,58 @@ def test_api_jobs_prefers_live_paper_worker_over_persisted_needs_writing(monkeyp
     assert rows[0]["status"] == "running"
     assert rows[0]["progress"]["phase"] == "writing:section-writing"
     assert rows[0]["result"]["process_alive"] is True
+    assert rows[0]["result"]["paper_execution_alive"] is True
+    assert rows[0]["result"]["paper_execution_state"] == "running"
+    assert rows[0]["result"]["paper_stage"]["paper_execution_alive"] is True
     assert all(row["job_id"] != "paper_old" for row in rows)
     assert all(row["job_id"] != "project-worker_demo_project_101" for row in rows)
 
+
+
+def test_paper_live_worker_projection_prefers_preview_repair_over_pipeline(tmp_path, monkeypatch):
+    project_root = tmp_path / "projects"
+    (project_root / "demo_project").mkdir(parents=True)
+    monkeypatch.setattr(server, "PROJECT_IDS_ROOT", project_root)
+    monkeypatch.setattr(server, "_pid_alive_local", lambda pid: True)
+    monkeypatch.setattr(server, "_active_project_child_processes", lambda *args, **kwargs: [])
+
+    def fake_process_tree(pid):
+        return [
+            {
+                "pid": "100",
+                "ppid": "1",
+                "elapsed": "01:00",
+                "pcpu": "0.1",
+                "pmem": "0.1",
+                "cmd": "/env/bin/python modules/writing/scripts/run_paper_pipeline.py --project demo_project --venue ICLR",
+            },
+            {
+                "pid": "200",
+                "ppid": "100",
+                "elapsed": "00:30",
+                "pcpu": "0.1",
+                "pmem": "0.1",
+                "cmd": "/env/bin/python modules/writing/scripts/repair_paper_preview_loop.py --project demo_project --venue ICLR --max-rounds 5",
+            },
+        ]
+
+    monkeypatch.setattr(server, "_process_tree_rows", fake_process_tree)
+
+    projection = server._paper_live_worker_projection(
+        "demo_project",
+        {"project": "demo_project", "pid": "100", "cmd": "run_paper_pipeline.py", "status": "running"},
+        "running",
+    )
+
+    assert projection["paper_worker_pid"] == "200"
+    assert projection["paper_worker_kind"] == "paper_repair_loop"
+    assert projection["paper_current_substage"] == "paper:preview-repair"
+
+
+def test_paper_substage_detects_writing_revision_claude_session():
+    cmd = "/env/bin/python framework/scripts/claude_project_session.py --project demo --stage paper --message-file paper/metadata/writing_revision_prompt_round_3.md --agent-id writing_revision"
+
+    assert server._paper_substage_from_cmd(cmd) == "paper:preview-repair"
 
 
 def test_environment_job_list_uses_compact_public_logs(monkeypatch):
@@ -1982,6 +2070,32 @@ def test_api_jobs_snapshots_jobs_before_compacting(monkeypatch):
 
     assert any(row["job_id"] == "find_existing" for row in rows)
     assert "find_inserted" in JOBS
+
+
+def test_persist_jobs_snapshots_before_compacting(monkeypatch, tmp_path):
+    JOBS.clear()
+    monkeypatch.setattr(server, "JOBS_PATH", tmp_path / "jobs.json")
+    first = server.JobState("persist_existing", "find")
+    first.status = "done"
+    first.run_id = "find_20260614_000000_000000"
+    JOBS[first.job_id] = first
+    original_as_dict = server.JobState.as_dict
+
+    def mutating_as_dict(self, *args, **kwargs):
+        if self.job_id == "persist_existing" and "persist_inserted" not in JOBS:
+            inserted = server.JobState("persist_inserted", "find")
+            inserted.status = "done"
+            inserted.run_id = "find_20260614_000001_000001"
+            JOBS[inserted.job_id] = inserted
+        return original_as_dict(self, *args, **kwargs)
+
+    monkeypatch.setattr(server.JobState, "as_dict", mutating_as_dict)
+
+    server._persist_jobs()
+
+    data = json.loads((tmp_path / "jobs.json").read_text(encoding="utf-8"))
+    assert [row["job_id"] for row in data["jobs"]] == ["persist_existing"]
+    assert "persist_inserted" in JOBS
 
 
 def test_api_jobs_hides_superseded_cancelled_jobs_without_artifacts(monkeypatch):
@@ -3897,6 +4011,210 @@ def test_generic_data_plan_without_project_adapter_marks_selected_repo_data_bloc
     assert plan["blocked_datasets"]
 
 
+
+def test_selector_blocks_loader_ready_candidate_without_authorized_base_switch(tmp_path):
+    import importlib.util
+
+    script_path = Path(__file__).resolve().parents[1] / "modules" / "environment" / "scripts" / "select_evidence_ready_repo.py"
+    spec = importlib.util.spec_from_file_location("select_evidence_ready_repo_base_switch_direct_under_test", script_path)
+    selector = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(selector)
+
+    state = tmp_path / "state"
+    current = tmp_path / "current"
+    candidate = tmp_path / "candidate"
+    state.mkdir()
+    current.mkdir()
+    candidate.mkdir()
+    paths = type("Paths", (), {"state": state})()
+    write_json(
+        state / "selected_base_viability_gate.json",
+        {"status": "not_applicable", "decision": "not_required"},
+    )
+    write_json(
+        state / "base_switch_gate.json",
+        {
+            "status": "not_applicable",
+            "decision": "not_required",
+            "switch_authorized": False,
+            "candidate_route": {"repo": "owner/candidate", "repo_path": str(candidate)},
+            "failed_checks": [{"id": "candidate_reference_protocol_passed", "status": "blocked"}],
+        },
+    )
+
+    block = selector.candidate_base_switch_block(paths, str(current), {"name": "owner/candidate", "repo_path": str(candidate)})
+
+    assert block["selection_gate"] == "blocked_candidate_base_switch_gate_required"
+    assert block["failed_checks"] == ["candidate_reference_protocol_passed"]
+
+
+def test_selector_recovers_unauthorized_base_switch_active_repo(tmp_path):
+    import importlib.util
+
+    script_path = Path(__file__).resolve().parents[1] / "modules" / "environment" / "scripts" / "select_evidence_ready_repo.py"
+    spec = importlib.util.spec_from_file_location("select_evidence_ready_repo_recover_switch_under_test", script_path)
+    selector = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(selector)
+
+    state = tmp_path / "state"
+    current = tmp_path / "current"
+    candidate = tmp_path / "candidate"
+    state.mkdir()
+    current.mkdir()
+    candidate.mkdir()
+    paths = type("Paths", (), {"state": state})()
+    write_json(
+        state / "base_switch_gate.json",
+        {
+            "status": "blocked",
+            "decision": "base_switch_not_authorized",
+            "switch_authorized": False,
+            "candidate_route": {"repo": "owner/candidate", "repo_path": str(candidate)},
+        },
+    )
+    active = {
+        "name": "owner/candidate",
+        "repo_path": str(candidate),
+        "claim_ready_datasets": ["Movies"],
+        "previous_active_repo": {
+            "name": "owner/current",
+            "repo_path": str(current),
+            "claim_ready_dataset": "demo-data",
+            "claim_ready_datasets": ["demo-data"],
+        },
+    }
+
+    recovered, audit = selector.recover_unauthorized_base_switch_active_repo(paths, active)
+
+    assert recovered["name"] == "owner/current"
+    assert recovered["repo_path"] == str(current)
+    assert audit["name"] == "owner/candidate"
+    assert "base-switch candidates cannot replace active_repo" in audit["reason"]
+
+
+
+def test_selector_blocks_contaminated_active_candidate_from_gate_current_route(tmp_path):
+    import importlib.util
+
+    script_path = Path(__file__).resolve().parents[1] / "modules" / "environment" / "scripts" / "select_evidence_ready_repo.py"
+    spec = importlib.util.spec_from_file_location("select_evidence_ready_repo_contaminated_active_under_test", script_path)
+    selector = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(selector)
+
+    state = tmp_path / "state"
+    current = tmp_path / "current"
+    candidate = tmp_path / "candidate"
+    state.mkdir()
+    current.mkdir()
+    candidate.mkdir()
+    paths = type("Paths", (), {"state": state})()
+    write_json(
+        state / "base_switch_gate.json",
+        {
+            "status": "not_applicable",
+            "decision": "not_required",
+            "switch_authorized": False,
+            "current_selected_route": {"name": "owner/current", "repo_path": str(current), "dataset": "active-data"},
+            "candidate_route": {"repo": "owner/candidate", "repo_path": str(candidate)},
+            "failed_checks": [{"id": "candidate_reference_protocol_passed", "status": "blocked"}],
+        },
+    )
+
+    block = selector.candidate_base_switch_block(paths, str(candidate), {"name": "owner/candidate", "repo_path": str(candidate), "claim_ready_datasets": ["Movies"]})
+
+    assert block["selection_gate"] == "blocked_candidate_base_switch_gate_required"
+    assert block["failed_checks"] == ["candidate_reference_protocol_passed"]
+
+
+def test_selector_recovers_unauthorized_base_switch_active_repo_without_previous_from_gate(tmp_path):
+    import importlib.util
+
+    script_path = Path(__file__).resolve().parents[1] / "modules" / "environment" / "scripts" / "select_evidence_ready_repo.py"
+    spec = importlib.util.spec_from_file_location("select_evidence_ready_repo_recover_no_previous_under_test", script_path)
+    selector = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(selector)
+
+    state = tmp_path / "state"
+    current = tmp_path / "current"
+    candidate = tmp_path / "candidate"
+    state.mkdir()
+    current.mkdir()
+    candidate.mkdir()
+    paths = type("Paths", (), {"state": state})()
+    write_json(
+        state / "base_switch_gate.json",
+        {
+            "status": "not_applicable",
+            "decision": "not_required",
+            "switch_authorized": False,
+            "current_selected_route": {"name": "owner/current", "repo_path": str(current), "dataset": "active-data"},
+            "candidate_route": {"repo": "owner/candidate", "repo_path": str(candidate)},
+        },
+    )
+    active = {"name": "owner/candidate", "repo_path": str(candidate), "claim_ready_datasets": ["Movies"]}
+
+    recovered, audit = selector.recover_unauthorized_base_switch_active_repo(paths, active)
+
+    assert recovered["name"] == "owner/current"
+    assert recovered["repo_path"] == str(current)
+    assert recovered["claim_ready_dataset"] == "active-data"
+    assert audit["name"] == "owner/candidate"
+
+
+def test_fresh_base_implementation_plan_reports_base_switch_block_for_loader_ready_pending_candidate(tmp_path, monkeypatch):
+    ensure_script_paths()
+    build_plan = importlib.reload(importlib.import_module("build_fresh_base_implementation_plan"))
+    monkeypatch.setattr(build_plan, "ROOT", tmp_path)
+
+    project = "demo_project"
+    root = tmp_path / "projects" / project
+    state = root / "state"
+    planning = root / "planning" / "finding"
+    current = root / "repos" / "selected" / "current"
+    candidate = root / "repos" / "selected" / "candidate"
+    state.mkdir(parents=True)
+    planning.mkdir(parents=True)
+    current.mkdir(parents=True)
+    candidate.mkdir(parents=True)
+    write_json(planning / "find_progress.json", {"run_id": "find_current"})
+    write_json(planning / "plans.json", {"selected_plan_id": "plan-current", "selected_idea_id": "idea-current", "plans": [{"plan_id": "plan-current", "idea_id": "idea-current", "selected_for_execution": True}]})
+    write_json(
+        state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": "find_current",
+            "selected_plan_id": "plan-current",
+            "selected_idea_id": "idea-current",
+            "selection_stage": "environment_claude_code",
+            "selection_gate": "blocked_candidate_base_switch_gate_required",
+            "selected": {},
+            "base_switch_failed_checks": ["candidate_reference_protocol_passed"],
+            "pending_environment_candidate": {
+                "name": "owner/candidate",
+                "repo_path": str(candidate),
+                "fresh_find_run_id": "find_current",
+                "probe_summary": {"claim_ready_datasets": ["Movies"]},
+                "claim_ready_dataset": "Movies",
+                "claim_ready_datasets": ["Movies"],
+                "base_switch_failed_checks": ["candidate_reference_protocol_passed"],
+            },
+        },
+    )
+    write_json(state / "active_repo.json", {"name": "owner/current", "repo_path": str(current), "claim_ready_datasets": ["demo-data"]})
+    adapter = root / "scripts" / "adapters" / "build_fresh_base_implementation_plan.py"
+
+    assert build_plan.write_generic_plan(project, adapter) == 0
+
+    plan = read_json(state / "fresh_base_implementation_plan.json")
+    assert plan["status"] == "blocked_candidate_base_switch_gate_required"
+    assert plan["repo"]["name"] == "owner/candidate"
+    assert plan["ready_datasets"] == ["Movies"]
+    assert plan["base_switch_failed_checks"] == ["candidate_reference_protocol_passed"]
+    assert "deterministic base-switch evidence" in plan["reason"]
+
 def test_trajectory_capability_source_path_supports_migrated_layout(monkeypatch, tmp_path):
     ensure_script_paths()
     audit = importlib.reload(importlib.import_module("audit_research_trajectory_capabilities"))
@@ -3999,6 +4317,157 @@ def test_candidate_scoped_generic_data_contract_preserves_active_route_probe(mon
     assert payload["decision"] == "base_switch_not_authorized"
 
 
+
+
+
+
+def test_base_switch_gate_applies_when_environment_selection_requires_gate(monkeypatch, tmp_path):
+    ensure_script_paths()
+    gate_script = importlib.reload(importlib.import_module("audit_deterministic_base_switch_gate"))
+    project = "demo_project"
+    root = tmp_path / "projects" / project
+    state = root / "state"
+    reports = root / "reports"
+    planning = root / "planning"
+    finding = planning / "finding"
+    current_repo = root / "repos" / "selected" / "current"
+    candidate_repo = root / "repos" / "selected" / "candidate"
+    for path_obj in [state, reports, finding, current_repo, candidate_repo]:
+        path_obj.mkdir(parents=True)
+    run_id = "find-current"
+    write_json(finding / "find_results.json", {"run_id": run_id, "strong_recommendations": [{"title": "Candidate Paper", "repo": "owner/candidate"}]})
+    write_json(finding / "read_results.json", {"run_id": run_id, "readings": [{"title": "Candidate Paper"}]})
+    write_json(state / "selected_base_viability_gate.json", {"status": "not_applicable", "decision": "not_applicable"})
+    write_json(state / "reference_reproduction_gate.json", {"status": "pass", "decision": "continue_base"})
+    write_json(
+        state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": run_id,
+            "selection_gate": "blocked_candidate_base_switch_gate_required",
+            "selected": {},
+            "pending_environment_candidate": {
+                "name": "owner/candidate",
+                "repo_path": str(candidate_repo),
+                "fresh_find_run_id": run_id,
+                "literature_base_title": "Candidate Paper",
+                "claim_ready_dataset": "Movies",
+                "status": "non_authoritative_pending_loader_proposal",
+                "type": "pending_environment_candidate_proposal",
+            },
+        },
+    )
+    write_json(state / "active_repo.json", {"name": "owner/current", "repo_path": str(current_repo), "selected_base_title": "Current Base", "claim_ready_dataset": "amazon-beauty"})
+    write_json(state / "candidate_data_contract_owner_candidate.json", {"candidate_repo": "owner/candidate", "repo_path": str(candidate_repo), "status": "ready", "decision": "ready_for_loader_probe", "ready_datasets": ["Movies"]})
+    write_json(state / "candidate_loader_probe_owner_candidate.json", {"candidate_repo": "owner/candidate", "repo_path": str(candidate_repo), "status": "passed", "decision": "candidate_loader_import_probe_passed", "loader_probe_success": True})
+    write_json(state / "candidate_owner_candidate_reference_protocol_probe.json", {"repo_name": "owner/candidate", "repo_path": str(candidate_repo), "status": "reference_protocol_probe_passed", "decision": "ready_for_bounded_reference_smoke"})
+    write_json(state / "candidate_owner_candidate_reference_smoke.json", {"repo_name": "owner/candidate", "repo_path": str(candidate_repo), "status": "reference_smoke_passed", "decision": "ready_for_reference_reproduction_audit"})
+    write_json(state / "candidate_owner_candidate_reference_reproduction_audit.json", {"repo_name": "owner/candidate", "repo_path": str(candidate_repo), "status": "blocked_reference_reproduction_audit", "decision": "candidate_full_reference_reproduction_requires_official_training_or_model_artifacts", "return_code": 2, "audit_ready": False, "paper_level_reproduction_passed": False})
+    paths = type("Paths", (), {"root": root, "state": state, "reports": reports, "planning": planning})()
+    monkeypatch.setattr(gate_script, "build_paths", lambda _project: paths)
+
+    payload = gate_script.build_gate(project, "ICLR")
+
+    checks = {row["id"]: row for row in payload["checks"]}
+    assert payload["status"] == "blocked"
+    assert payload["decision"] == "base_switch_not_authorized"
+    assert checks["selected_base_viability_requires_gate"]["status"] == "pass"
+    assert checks["candidate_reference_protocol_passed"]["status"] == "pass"
+    assert checks["candidate_reference_smoke_passed"]["status"] == "pass"
+    assert checks["candidate_full_reference_reproduction_passed"]["status"] == "blocked"
+
+
+
+
+def test_base_switch_gate_does_not_require_stale_active_reference_for_new_find(monkeypatch, tmp_path):
+    ensure_script_paths()
+    gate_script = importlib.reload(importlib.import_module("audit_deterministic_base_switch_gate"))
+    project = "demo_project"
+    root = tmp_path / "projects" / project
+    state = root / "state"
+    reports = root / "reports"
+    planning = root / "planning"
+    finding = planning / "finding"
+    stale_repo = root / "repos" / "selected" / "stale"
+    candidate_repo = root / "repos" / "selected" / "candidate"
+    for path_obj in [state, reports, finding, stale_repo, candidate_repo]:
+        path_obj.mkdir(parents=True)
+    run_id = "find-current"
+    write_json(finding / "find_progress.json", {"run_id": run_id})
+    write_json(finding / "find_results.json", {"run_id": run_id, "strong_recommendations": [{"title": "Candidate Paper", "repo": "owner/candidate"}]})
+    write_json(finding / "read_results.json", {"run_id": run_id, "readings": [{"title": "Candidate Paper", "repo": "owner/candidate"}]})
+    write_json(state / "current_find_research_plan.json", {"run_id": run_id, "selected_plan_id": "plan-current", "selected_idea_id": "idea-current"})
+    write_json(
+        state / "active_repo.json",
+        {
+            "name": "owner/stale",
+            "repo_path": str(stale_repo),
+            "fresh_find_run_id": "find-old",
+            "selected_by": "find-old",
+            "selected_plan_id": "plan-old",
+            "selection_stage": "environment_claude_code",
+        },
+    )
+    write_json(state / "selected_base_viability_gate.json", {"status": "not_applicable", "decision": "not_applicable"})
+    write_json(state / "reference_reproduction_gate.json", {"status": "blocked", "decision": "environment_anchor_selection_required"})
+    write_json(
+        state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": run_id,
+            "selected_plan_id": "plan-current",
+            "selected_idea_id": "idea-current",
+            "selection_gate": "blocked_candidate_base_switch_gate_required",
+            "selected": {},
+            "pending_environment_candidate": {
+                "name": "owner/candidate",
+                "repo_path": str(candidate_repo),
+                "fresh_find_run_id": run_id,
+                "selected_plan_id": "plan-current",
+                "literature_base_title": "Candidate Paper",
+                "claim_ready_dataset": "Movies",
+                "status": "non_authoritative_base_switch_candidate",
+                "type": "pending_environment_candidate_proposal",
+            },
+        },
+    )
+    write_json(state / "candidate_data_contract_owner_candidate.json", {"candidate_repo": "owner/candidate", "repo_path": str(candidate_repo), "status": "ready", "decision": "ready_for_loader_probe", "ready_datasets": ["Movies"]})
+    write_json(state / "candidate_loader_probe_owner_candidate.json", {"candidate_repo": "owner/candidate", "repo_path": str(candidate_repo), "status": "passed", "decision": "candidate_loader_import_probe_passed", "loader_probe_success": True})
+    write_json(state / "candidate_owner_candidate_reference_protocol_probe.json", {"repo_name": "owner/candidate", "repo_path": str(candidate_repo), "status": "reference_protocol_probe_passed", "decision": "ready_for_bounded_reference_smoke"})
+    write_json(state / "candidate_owner_candidate_reference_smoke.json", {"repo_name": "owner/candidate", "repo_path": str(candidate_repo), "status": "reference_smoke_passed", "decision": "ready_for_reference_reproduction_audit"})
+    write_json(state / "candidate_owner_candidate_reference_reproduction_audit.json", {"repo_name": "owner/candidate", "repo_path": str(candidate_repo), "status": "blocked_reference_reproduction_audit", "return_code": 2, "audit_ready": False, "paper_level_reproduction_passed": False})
+    paths = type("Paths", (), {"root": root, "state": state, "reports": reports, "planning": planning})()
+    monkeypatch.setattr(gate_script, "build_paths", lambda _project: paths)
+
+    payload = gate_script.build_gate(project, "ICLR")
+
+    checks = {row["id"]: row for row in payload["checks"]}
+    assert payload["status"] == "blocked"
+    assert payload["decision"] == "base_switch_not_authorized"
+    assert payload["selected_base_reference_required"] is False
+    assert payload["current_selected_route"]["authoritative"] is False
+    assert payload["current_selected_route"]["stale_route"]["fresh_find_run_id"] == "find-old"
+    assert checks["selected_base_reference_reproduction_passed"]["status"] == "pass"
+    assert checks["candidate_full_reference_reproduction_passed"]["status"] == "blocked"
+
+
+def test_experiment_launch_gate_honors_environment_base_switch_blocker(tmp_path):
+    ensure_script_paths()
+    launcher = importlib.reload(importlib.import_module("launch_experiment_run"))
+    state = tmp_path / "state"
+    state.mkdir(parents=True)
+    paths = type("Paths", (), {"state": state})()
+    write_json(state / "selected_base_viability_gate.json", {"status": "not_applicable", "decision": "not_applicable"})
+    write_json(state / "evidence_ready_repo_selection.json", {"selection_gate": "blocked_candidate_base_switch_gate_required", "fresh_find_run_id": "find-current", "selected_plan_id": "plan-current", "selected": {}, "pending_environment_candidate": {"name": "owner/candidate"}})
+    write_json(state / "base_switch_gate.json", {"status": "blocked", "decision": "base_switch_not_authorized", "switch_authorized": False, "selected_base_reference_required": False})
+
+    candidate = launcher.experiment_launch_gate(paths, "demo_project", route_scope="candidate_route", save=False)
+    evidence = launcher.experiment_launch_gate(paths, "demo_project", route_scope="base_switch_evidence_collection", save=False)
+    current = launcher.experiment_launch_gate(paths, "demo_project", route_scope="selected_base_current_route", save=False)
+
+    assert candidate["status"] == "blocked"
+    assert candidate["environment_requires_gate"] is True
+    assert evidence["status"] == "pass"
+    assert current["status"] == "blocked"
+    assert "no authoritative selected Environment" in current["reason"]
 
 
 def test_candidate_scoped_repo_loader_import_probe_passes_without_touching_active_route(monkeypatch, tmp_path):
@@ -4642,7 +5111,13 @@ def test_compact_summary_blocks_environment_when_pending_candidate_lacks_loader(
     assert env_selection["pending_candidate"]["status"] == "non_authoritative_pending_loader_proposal"
     assert summary["human_supervision"]["main_route"]["base_selection_status"] == "waiting_for_environment_claude_code"
     assert summary["human_supervision"]["main_route"]["selection_gate"] == "blocked_pending_data_loader_for_claude_best_candidate"
-    assert summary["stages"]["environment"]["repo_status"] == "historical_evidence_retained"
+    env_stage = summary["stages"]["environment"]
+    assert env_stage["repo_status"] == "waiting_for_repo_selection"
+    assert env_stage["active_repo"] == {}
+    assert env_stage["repo_path"] == ""
+    assert env_stage["dataset"] == ""
+    assert env_stage["ready_datasets"] == []
+    assert env_stage["historical_active_repo"]["name"] == "owner/current"
     assert summary["human_supervision"]["blocker"]["category"] == "environment_anchor_selection_required"
     assert summary["human_gate_summary"]["main_route_repo"] == ""
 
@@ -5765,7 +6240,7 @@ def test_current_find_pipeline_accepts_web_generated_idea_plan_as_current_run_co
         taste_dir / "ideas.json",
         {
             "run_id": run_id,
-            "source": "taste_auto_idea",
+            "source": "taste_ideation",
             "ideas": [
                 {"id": "idea-001", "title": "Approved idea", "status": "approved"},
                 {"id": "idea-002", "title": "Backlog idea", "status": "pending"},
@@ -5776,7 +6251,7 @@ def test_current_find_pipeline_accepts_web_generated_idea_plan_as_current_run_co
         taste_dir / "plans.json",
         {
             "run_id": run_id,
-            "source": "taste_auto_plan",
+            "source": "taste_planning",
             "plans": [{"plan_id": "plan-idea-001", "idea_id": "idea-001", "title": "Approved idea plan"}],
             "selection_issue": "missing_selected_plan",
         },
@@ -5812,7 +6287,7 @@ def test_current_find_pipeline_accepts_web_generated_idea_plan_as_current_run_co
 
 
 def test_finish_plan_marks_completed_plan_as_selected_execution(monkeypatch, tmp_path):
-    from auto_research.auto_plan import pipeline as plan_pipeline
+    import plan_pipeline as plan_pipeline
 
     run_id = "find_finish"
     run_root = tmp_path / run_id
@@ -5917,6 +6392,75 @@ def test_environment_selection_requires_current_selected_plan_id(tmp_path):
     assert current["current_selected_plan_id"] == "plan-current"
     assert current["current_selected_idea_id"] == "idea-current"
 
+
+
+
+def test_claude_project_session_environment_selection_requires_current_selected_plan_id(tmp_path, monkeypatch):
+    import importlib.util
+
+    script_path = Path(__file__).resolve().parents[1] / "framework" / "scripts" / "claude_project_session.py"
+    spec = importlib.util.spec_from_file_location("claude_project_session_under_test", script_path)
+    session = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(session)
+
+    root = tmp_path / "demo_project"
+    finding = root / "planning" / "finding"
+    state = root / "state"
+    repo = root / "repos" / "selected" / "demo_repo"
+    finding.mkdir(parents=True)
+    state.mkdir(parents=True)
+    repo.mkdir(parents=True)
+    paths = SimpleNamespace(root=root, planning=root / "planning", state=state)
+    run_id = "find_current_plan"
+    write_json(finding / "find_results.json", {"run_id": run_id, "articles": [{"title": "Selected Base Paper"}]})
+    write_json(state / "current_find_research_plan.json", {"run_id": run_id, "selected_plan_id": "plan-current", "selected_idea_id": "idea-current"})
+    write_json(
+        state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": run_id,
+            "selection_stage": "environment_claude_code",
+            "selection_gate": "accepted_by_claude_topic_fit",
+            "accepted_by_claude": True,
+            "selected": {
+                "name": "Demo Repo",
+                "title": "Selected Base Paper",
+                "repo_path": str(repo),
+                "fresh_find_run_id": run_id,
+                "selection_stage": "environment_claude_code",
+            },
+        },
+    )
+    monkeypatch.setattr(session, "current_find_execution_contract", lambda _paths: {"selected_plan_id": "plan-current", "selected_idea_id": "idea-current"})
+
+    stale = session.current_environment_selection(paths)
+
+    assert stale["valid"] is False
+    assert stale["selected"] == {}
+    assert stale["blocked_selection"]["repo_path"] == str(repo)
+    assert stale["reason"] == "environment_selection_selected_plan_missing_or_stale"
+    assert session.active_repo_path(paths) == ""
+
+    selected = stale["blocked_selection"]
+    selected["selected_plan_id"] = "plan-current"
+    write_json(
+        state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": run_id,
+            "selected_plan_id": "plan-current",
+            "selected_idea_id": "idea-current",
+            "selection_stage": "environment_claude_code",
+            "selection_gate": "accepted_by_claude_topic_fit",
+            "accepted_by_claude": True,
+            "selected": selected,
+        },
+    )
+
+    current = session.current_environment_selection(paths)
+
+    assert current["valid"] is True
+    assert current["selected"]["repo_path"] == str(repo)
+    assert session.active_repo_path(paths) == str(repo.resolve())
 
 def test_environment_selection_rejects_top_level_retagged_stale_selected_route(tmp_path):
     from auto_research.web import project_bridge
@@ -6253,6 +6797,59 @@ def test_current_find_pipeline_does_not_let_stored_valid_state_override_current_
     assert summary["pending_deep_read_synthesis_count"] == 1
     assert summary["pending_full_text_reading_count"] == 1
     assert any("科学数字" in gap for gap in summary["deep_read_content_gap_details"][0]["missing_or_invalid_fields"])
+
+
+def test_current_find_pipeline_trusts_same_run_standalone_wrapper_validation_without_content_gaps(tmp_path, monkeypatch):
+    from auto_research.web import project_bridge
+
+    project_root = tmp_path / "demo_project"
+    taste_dir = project_root / "planning" / "finding"
+    state_dir = project_root / "state"
+    taste_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    run_id = "find_valid_standalone_wrapper"
+    recommendations = [recommended_paper(f"paper-{idx}", f"Paper {idx}") for idx in range(1, 21)]
+    readings = [
+        {
+            "paper_id": f"paper-{idx}",
+            "title": f"Paper {idx}",
+            "full_text_available": True,
+            "full_text_status": "pdf_text_read",
+            "pdf_text_chars": 30000,
+        }
+        for idx in range(1, 21)
+    ]
+    write_json(taste_dir / "find_results.json", {"run_id": run_id, "strong_recommendations": recommendations, "articles": recommendations, "recommendation_target_count": 20, "recommendation_shortfall": 0, "recommendation_quality": {"status": "ok"}})
+    write_json(taste_dir / "read_results.json", {"run_id": run_id, "source": "claude_code_current_find_takeover", "readings": readings})
+    write_json(taste_dir / "ideas.json", {"run_id": run_id, "source": "claude_code_current_find_takeover", "selected_idea_id": "idea-1", "ideas": [{"id": "idea-1", "status": "approved", "title": "Idea"}]})
+    write_json(taste_dir / "plans.json", {"run_id": run_id, "source": "claude_code_current_find_takeover", "selected_plan_id": "plan-1", "selected_idea_id": "idea-1", "plans": [{"plan_id": "plan-1", "idea_id": "idea-1", "selected_for_execution": True, "execute_next": True, "execution_selection": {"selected": True}}]})
+    write_json(state_dir / "current_find_research_plan.json", {"run_id": run_id, "read_idea_plan_ready": True, "selected_plan_id": "plan-1", "selected_idea_id": "idea-1", "current_find_reading_count": 20, "current_find_idea_count": 1, "current_find_plan_count": 1})
+    write_json(state_dir / "current_find_claude_reading_validation.json", {"run_id": run_id, "source": "claude_code_current_find_takeover", "valid": True, "expected_recommendation_count": 20, "actual_reading_count": 20, "full_text_reading_count": 20, "full_text_evidence_count": 20, "pending_deep_read_synthesis_count": 0, "pending_full_text_reading_count": 0, "blockers": [], "generated_at": "2999-01-01T00:00:00+00:00"})
+    monkeypatch.setattr(project_bridge, "_current_find_results_light", lambda root, project: read_json(root / "planning" / "finding" / "find_results.json", {}))
+    monkeypatch.setattr(
+        project_bridge,
+        "_current_find_reading_validation",
+        lambda _find_results, _readings, _required: {
+            "valid": False,
+            "expected_recommendation_count": 20,
+            "actual_reading_count": 20,
+            "full_text_reading_count": 2,
+            "full_text_evidence_count": 2,
+            "pending_deep_read_synthesis_count": 0,
+            "pending_full_text_reading_count": 16,
+            "deep_read_content_gap_details": [],
+            "blockers": ["lightweight web packet view is stale"],
+        },
+    )
+
+    summary = project_bridge._current_find_pipeline_summary(project_root)
+
+    assert summary["status"] == "claude_takeover_ready"
+    assert summary["content_ready"] is True
+    assert summary["readings"] == 20
+    assert summary["full_text_reading_count"] == 20
+    assert summary["pending_full_text_reading_count"] == 0
+
 
 def test_current_find_pipeline_uses_standalone_preflight_validation_counts(tmp_path, monkeypatch):
     from auto_research.web import project_bridge
@@ -7658,7 +8255,7 @@ def test_find_adoption_preserves_completed_same_run_downstream(tmp_path, monkeyp
     assert (taste_dir / "full_text_reading" / "texts" / "a.txt").exists()
 
 
-def test_find_adoption_preserves_existing_downstream_for_new_find(tmp_path, monkeypatch):
+def test_find_adoption_resets_existing_downstream_for_new_find(tmp_path, monkeypatch):
     project = 'demo_project'
     root = tmp_path / 'projects' / project
     taste_dir = root / 'planning' / 'finding'
@@ -7702,19 +8299,26 @@ def test_find_adoption_preserves_existing_downstream_for_new_find(tmp_path, monk
     plans_payload = read_json(taste_dir / 'plans.json', {})
     plan_state = read_json(root / 'state' / 'current_find_research_plan.json', {})
     assert receipt['status'] == 'adopted'
-    assert receipt['downstream_status'] == 'existing_downstream_preserved_pending_current_find_read'
-    assert packet['run_id'] == 'find_old'
-    assert packet['papers']
-    assert read_payload['run_id'] == 'find_old'
-    assert ideas_payload['run_id'] == 'find_old'
-    assert plans_payload['run_id'] == 'find_old'
+    assert receipt['downstream_status'] == 'pending_downstream_reset'
+    assert packet['run_id'] == 'find_new'
+    assert packet['status'] == 'pending'
+    assert packet['papers'] == []
+    assert read_payload['run_id'] == 'find_new'
+    assert read_payload['status'] == 'pending'
+    assert ideas_payload['run_id'] == 'find_new'
+    assert ideas_payload['status'] == 'pending'
+    assert plans_payload['run_id'] == 'find_new'
+    assert plans_payload['status'] == 'pending'
     assert plan_state['run_id'] == 'find_new'
     assert plan_state['status'] == 'pending_current_find_read'
-    assert plan_state['downstream_status'] == 'existing_downstream_preserved_pending_current_find_read'
-    assert plan_state['preserved_downstream'] is True
-    assert receipt['stale_downstream_reset'] == []
-    assert (taste_dir / 'full_text_reading' / 'texts' / 'old.txt').exists()
-    assert (stale_fragment_dir / 'old_fragment.json').exists()
+    assert plan_state['downstream_status'] == 'pending_downstream_reset'
+    assert plan_state['preserved_downstream'] is False
+    assert 'read_results.json' in receipt['stale_downstream_reset']
+    assert 'current_find_deep_read_fragments/' in receipt['stale_downstream_reset']
+    assert not (taste_dir / 'full_text_reading' / 'texts' / 'old.txt').exists()
+    assert not (stale_fragment_dir / 'old_fragment.json').exists()
+    reset_backup = Path(receipt['downstream_reset']['backup_dir'])
+    assert (reset_backup / 'planning' / 'finding' / 'current_find_deep_read_fragments' / 'old_fragment.json').exists()
     assert (root / 'state' / 'current_find_research_plan.json').exists()
 
 
@@ -8672,6 +9276,59 @@ def test_selected_base_reference_audit_supports_generic_analysis_data_repo(tmp_p
     assert metrics["analysis_outputs_saved"] == 1
 
 
+
+def test_candidate_base_reference_probe_passes_protocol_smoke_but_blocks_generic_full(tmp_path, monkeypatch):
+    import importlib.util
+
+    script_path = Path(__file__).resolve().parents[1] / "modules" / "environment" / "scripts" / "probe_candidate_base_reference.py"
+    spec = importlib.util.spec_from_file_location("probe_candidate_base_reference_under_test", script_path)
+    probe = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(probe)
+
+    project = "demo_project"
+    root = tmp_path / "projects" / project
+    state = root / "state"
+    reports = root / "reports"
+    artifacts = root / "artifacts"
+    repo = root / "repos" / "selected" / "candidate"
+    data_dir = repo / "data" / "Movies"
+    data_dir.mkdir(parents=True)
+    state.mkdir(parents=True)
+    reports.mkdir(parents=True)
+    artifacts.mkdir(parents=True)
+    (repo / "README.md").write_text("python preprocess_grpo.py --category Movies\naccelerate launch train_hidden_mask.py --model ckpt/demo\n", encoding="utf-8")
+    (data_dir / "train.jsonl").write_text('{"user_id":"u1","target":"movie","label":5}\n', encoding="utf-8")
+    write_json(
+        state / "candidate_loader_probe_owner_candidate.json",
+        {"candidate_repo": "owner/candidate", "repo_path": str(repo), "status": "passed", "decision": "candidate_loader_import_probe_passed", "loader_probe_success": True, "probes": [{"dataset": "Movies", "claim_ready": True, "loader_probe_success": True}]},
+    )
+    write_json(
+        state / "candidate_data_contract_owner_candidate.json",
+        {"candidate_repo": "owner/candidate", "repo_path": str(repo), "status": "ready", "decision": "ready_for_loader_probe", "ready_datasets": ["Movies"], "local_statuses": [{"dataset": "Movies", "split_files": ["data/Movies/train.jsonl"]}]},
+    )
+    paths = SimpleNamespace(root=root, state=state, reports=reports, artifacts=artifacts)
+    monkeypatch.setattr(probe, "build_paths", lambda _project: paths)
+    monkeypatch.setattr(probe, "load_project_config", lambda _project: {})
+    monkeypatch.setattr(probe, "project_experiment_python_from_config", lambda *_args, **_kwargs: sys.executable)
+
+    base = {"project": project, "repo_path": str(repo), "candidate_name": "owner/candidate", "candidate_title": "", "dataset": "Movies", "env_name": "demo_env", "timeout_sec": 30}
+    rc_protocol, protocol_payload, slug, _ = probe.build_payload(SimpleNamespace(**base, mode="protocol"))
+    rc_smoke, smoke_payload, _, _ = probe.build_payload(SimpleNamespace(**base, mode="smoke"))
+    rc_full, full_payload, _, _ = probe.build_payload(SimpleNamespace(**base, mode="full", execute=True))
+
+    assert slug == "owner_candidate"
+    assert rc_protocol == 0
+    assert protocol_payload["status"] == "reference_protocol_probe_passed"
+    assert rc_smoke == 0
+    assert smoke_payload["status"] == "reference_smoke_passed"
+    assert smoke_payload["sample_parse_results"][0]["success"] is True
+    assert rc_full == 2
+    assert full_payload["status"] == "blocked_reference_reproduction_audit"
+    assert full_payload["paper_level_reproduction_passed"] is False
+    assert "not auto-executed" in full_payload["blockers"][-1]
+
+
 def test_bootstrap_repo_env_uses_target_python_module_pip(tmp_path, monkeypatch):
     import importlib.util
 
@@ -9337,6 +9994,120 @@ def test_environment_stage_rejects_pending_loader_selection_as_current_route(tmp
     assert env_stage.current_env_selection_valid(paths) is False
 
 
+
+
+def test_environment_stage_rejects_unresolved_base_switch_candidate_as_current_route(tmp_path):
+    ensure_script_paths()
+    env_stage = importlib.reload(importlib.import_module("run_environment_stage"))
+    paths = type("Paths", (), {"state": tmp_path / "state", "planning": tmp_path / "planning"})()
+    paths.state.mkdir(parents=True)
+    (paths.planning / "finding").mkdir(parents=True)
+    current_repo = tmp_path / "rsir"
+    candidate_repo = tmp_path / "siren"
+    current_repo.mkdir()
+    candidate_repo.mkdir()
+    write_json(paths.planning / "finding" / "find_progress.json", {"run_id": "find-current"})
+    write_json(
+        paths.planning / "finding" / "plans.json",
+        {
+            "selected_plan_id": "plan-current",
+            "selected_idea_id": "idea-current",
+            "plans": [{"plan_id": "plan-current", "idea_id": "idea-current", "selected_for_execution": True}],
+        },
+    )
+    selected = {
+        "name": "TommyDzh/SIREN",
+        "repo_path": str(candidate_repo),
+        "fresh_find_run_id": "find-current",
+        "selected_plan_id": "plan-current",
+        "selected_idea_id": "idea-current",
+        "selection_stage": "environment_claude_code",
+        "claim_ready_dataset": "Movies",
+        "claim_ready_datasets": ["Movies"],
+    }
+    write_json(
+        paths.state / "evidence_ready_repo_selection.json",
+        {
+            "fresh_find_run_id": "find-current",
+            "selected_plan_id": "plan-current",
+            "selected_idea_id": "idea-current",
+            "selection_stage": "environment_claude_code",
+            "selection_gate": "accepted_by_claude_topic_fit",
+            "accepted_by_claude": True,
+            "claude_topic_decision": {"accept_as_current_best": True},
+            "selected": selected,
+        },
+    )
+    write_json(paths.state / "active_repo.json", selected)
+    write_json(
+        paths.state / "base_switch_gate.json",
+        {
+            "status": "not_applicable",
+            "decision": "not_required",
+            "switch_authorized": False,
+            "current_selected_route": {"name": "USTC-StarTeam/RSIR", "repo_path": str(current_repo), "dataset": "amazon-beauty"},
+            "candidate_route": {"repo": "TommyDzh/SIREN", "repo_path": str(candidate_repo), "dataset": "Movies"},
+        },
+    )
+
+    assert env_stage.current_env_selection_valid(paths) is False
+    assert env_stage.claude_accepts_current_route(paths) is False
+
+    gate = read_json(paths.state / "base_switch_gate.json")
+    gate["status"] = "pass"
+    gate["decision"] = "authorize_base_switch"
+    gate["switch_authorized"] = True
+    write_json(paths.state / "base_switch_gate.json", gate)
+    write_json(paths.state / "base_switch_execution.json", {"status": "authorized_by_deterministic_base_switch_gate", "decision": "route_switch_executed"})
+
+    assert env_stage.current_env_selection_valid(paths) is True
+    assert env_stage.claude_accepts_current_route(paths) is True
+
+
+
+def test_environment_selection_stops_after_base_switch_evidence_collection(tmp_path, monkeypatch):
+    ensure_script_paths()
+    env_stage = importlib.reload(importlib.import_module("run_environment_stage"))
+    paths = type("Paths", (), {"state": tmp_path / "state", "planning": tmp_path / "planning", "reports": tmp_path / "reports"})()
+    paths.state.mkdir(parents=True)
+    paths.reports.mkdir(parents=True)
+    (paths.planning / "finding").mkdir(parents=True)
+    write_json(paths.planning / "finding" / "find_progress.json", {"run_id": "find-current"})
+    write_json(paths.state / "current_find_research_plan.json", {"selected_plan_id": "plan-current", "selected_idea_id": "idea-current"})
+    candidate_repo = tmp_path / "siren"
+    candidate_repo.mkdir()
+    selection = {
+        "fresh_find_run_id": "find-current",
+        "selected_plan_id": "plan-current",
+        "selected_idea_id": "idea-current",
+        "selection_stage": "environment_claude_code",
+        "selection_gate": "blocked_candidate_base_switch_gate_required",
+        "selected": {},
+        "pending_environment_candidate": {"name": "TommyDzh/SIREN", "repo_path": str(candidate_repo), "claim_ready_dataset": "Movies"},
+    }
+    calls = []
+
+    def fake_run_optional(cmd, *_args, **_kwargs):
+        calls.append(cmd)
+        if any("select_evidence_ready_repo.py" in str(part) for part in cmd):
+            write_json(paths.state / "evidence_ready_repo_selection.json", selection)
+            return 2
+        return 0
+
+    monkeypatch.setattr(env_stage, "run_optional", fake_run_optional)
+    monkeypatch.setattr(env_stage, "collect_candidate_base_switch_evidence", lambda *args, **kwargs: [{"step": "candidate_reference_protocol", "return_code": 0}])
+    monkeypatch.setattr(env_stage, "current_env_selection_valid", lambda _paths: False)
+    monkeypatch.setattr(env_stage, "expand_repo_search", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not continue repo search after base-switch blocker")))
+
+    with pytest.raises(SystemExit) as exc:
+        env_stage.select_current_run_environment_repo("demo", paths, "demo_env", max_rounds=3, venue="ICLR")
+
+    assert exc.value.code == 2
+    blocker = read_json(paths.state / "repo_selection_blocker.json")
+    assert blocker["selection_gate"] == "blocked_candidate_base_switch_gate_required"
+    assert "deterministic base-switch evidence remains incomplete" in blocker["reason"]
+    assert any(any("build_fresh_base_implementation_plan.py" in str(part) for part in cmd) for cmd in calls)
+
 def test_environment_current_find_reaudits_evidence_ready_active_repo(tmp_path):
     import importlib.util
 
@@ -9396,7 +10167,7 @@ def test_ensure_current_find_loads_web_generated_idea_plan_sources(tmp_path):
         finding / "read_results.json",
         {
             "run_id": run_id,
-            "source": "auto_read_recommended_articles",
+            "source": "reading_recommended_articles",
             "readings": [{"paper_id": "p1", "title": "Paper One", "abstract_zh": "中文摘要", "method_details_zh": "具体方法细节"}],
         },
     )
@@ -9404,7 +10175,7 @@ def test_ensure_current_find_loads_web_generated_idea_plan_sources(tmp_path):
         finding / "ideas.json",
         {
             "run_id": run_id,
-            "source": "taste_auto_idea",
+            "source": "taste_ideation",
             "ideas": [{"id": "idea-001", "title": "Web idea", "new_method": "具体新方法", "mechanism": "机制说明"}],
         },
     )
@@ -9412,7 +10183,7 @@ def test_ensure_current_find_loads_web_generated_idea_plan_sources(tmp_path):
         finding / "plans.json",
         {
             "run_id": run_id,
-            "source": "taste_auto_plan",
+            "source": "taste_planning",
             "plans": [{"plan_id": "plan-001", "idea_id": "idea-001", "title": "Web plan", "steps": ["step"]}],
         },
     )
@@ -9452,9 +10223,9 @@ def test_ensure_claude_plan_state_accepts_selected_web_generated_plan(tmp_path, 
         {"plan_id": "plan-002", "idea_id": "idea-002", "title": "Backlog plan", "steps": ["step"], "selected_for_execution": False, "execute_next": False},
     ]
     write_json(finding / "find_results.json", {"run_id": run_id, "strong_recommendations": [recommended_paper("p1", "Paper One"), recommended_paper("p2", "Paper Two")]})
-    write_json(finding / "read_results.json", {"run_id": run_id, "source": "auto_read_recommended_articles", "readings": readings})
-    write_json(finding / "ideas.json", {"run_id": run_id, "source": "taste_auto_idea", "ideas": ideas})
-    write_json(finding / "plans.json", {"run_id": run_id, "source": "taste_auto_plan", "plans": plans})
+    write_json(finding / "read_results.json", {"run_id": run_id, "source": "reading_recommended_articles", "readings": readings})
+    write_json(finding / "ideas.json", {"run_id": run_id, "source": "taste_ideation", "ideas": ideas})
+    write_json(finding / "plans.json", {"run_id": run_id, "source": "taste_planning", "plans": plans})
     write_json(
         paths.state / "current_find_claude_reading_validation.json",
         {
@@ -9804,6 +10575,76 @@ def test_paper_job_message_preview_gate_does_not_report_content_policy(tmp_path,
     assert "执行状态：后台写作进程未在运行" in "\n".join(row["logs"])
     assert "参考文献覆盖不足" in row["progress"]["message"]
     assert "内容策略" not in row["progress"]["message"]
+
+
+def test_paper_preview_gate_status_does_not_collapse_to_needs_writing(monkeypatch):
+    monkeypatch.setattr(server, "_paper_stage_from_project_snapshot", lambda project: {})
+    row = server._compact_job_for_list(
+        {
+            "job_id": "paper_preview_gate",
+            "stage": "paper",
+            "status": "needs_writing",
+            "created_at": "2026-06-15T08:48:35Z",
+            "logs": [],
+            "run_id": "",
+            "result": {
+                "project": "demo_project",
+                "action": "paper",
+                "paper_stage": {
+                    "status": "blocked_preview_gate",
+                    "paper_stage_status": "blocked_preview_gate",
+                    "conference_preview_ready": False,
+                    "conference_preview_blocker_summary": "body_pages=10; expected main/body pages <= 9",
+                    "paper_execution_alive": False,
+                    "paper_execution_state": "finished_preview_gate_blocked",
+                    "paper_execution_message": "后台写作进程未在运行；会议格式论文预览已生成，但质量/自审门控仍阻塞。",
+                },
+            },
+            "internal": False,
+            "display": "",
+            "error": "",
+            "cancel_requested": False,
+            "cancelled_at": "",
+            "progress": {"phase": "needs_writing", "current": 1, "total": 1, "percent": 100, "message": "old needs writing"},
+        }
+    )
+
+    assert row["status"] == "preview_pdf_blocked"
+    assert row["status"] != "needs_writing"
+    assert row["progress"]["phase"] == "blocked_preview_gate"
+    assert "预览门控未通过" in row["progress"]["message"]
+    assert "old needs writing" not in row["progress"]["message"]
+
+
+def test_paper_preview_gate_output_pdf_counts_as_blocked_preview(tmp_path, monkeypatch):
+    project = "demo_project"
+    project_root = tmp_path / project
+    output_dir = project_root / "paper" / "output" / "iclr"
+    output_dir.mkdir(parents=True)
+    output_pdf = output_dir / "paper.pdf"
+    output_tex = output_dir / "paper.tex"
+    output_pdf.write_bytes(b"%PDF-1.4\n% blocked preview\n")
+    output_tex.write_text("\\section{Preview}", encoding="utf-8")
+    write_json(project_root / "project.json", {"target_venue": "ICLR"})
+    paper_state = {
+        "venue": "ICLR",
+        "target_venue": "ICLR",
+        "venue_slug": "iclr",
+        "conference_preview_ready": False,
+        "paper_stage_status": "blocked_preview_gate",
+        "paper_content_policy_status": "pass",
+        "conference_preview_blocker_summary": "missing self review",
+        "venue_submission_policy": {"body_page_max": 9, "reference_quality_target": 45},
+    }
+    monkeypatch.setattr(server, "PROJECT_IDS_ROOT", tmp_path)
+    monkeypatch.setattr(server, "get_active_paper_state", lambda _project, venue="": dict(paper_state))
+
+    snapshot = server._paper_stage_from_project_snapshot(project)
+
+    assert snapshot["status"] == "preview_available"
+    assert snapshot["blocked_preview_available"] is True
+    assert snapshot["blocked_pdf_path"] == str(output_pdf)
+    assert snapshot["paper_execution_state"] == "finished_preview_gate_blocked"
 
 
 def test_api_jobs_dedupes_blocked_paper_preview_rows(monkeypatch):

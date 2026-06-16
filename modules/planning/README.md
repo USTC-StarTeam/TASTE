@@ -26,7 +26,7 @@ Artifacts produced:
 - `blocker action plans`
 
 Module roots currently owned by this module:
-- `modules/planning/auto_research/auto_plan`
+- `modules/planning/scripts/plan_pipeline.py`
 - `modules/planning/scripts/plan_experiments.py`
 - `modules/planning/scripts/build_workflow_blueprint.py`
 

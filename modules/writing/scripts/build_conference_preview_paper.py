@@ -216,6 +216,197 @@ def _is_route_story_context(section: str, window: str) -> bool:
     return False
 
 
+UNSUPPORTED_COMPLETED_EXPERIMENT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    (
+        "unsupported_completed_evaluation_claim",
+        re.compile(
+            r"\bwe\s+(?:evaluate|evaluated|benchmark|benchmarked|compare|compared|conduct|conducted|run|ran|report|reported)\b",
+            flags=re.IGNORECASE,
+        ),
+    ),
+    (
+        "unsupported_experiment_protocol_claim",
+        re.compile(r"\ball\s+experiments\s+(?:use|used|are|were|run|ran|report|reported)\b", flags=re.IGNORECASE),
+    ),
+    (
+        "unsupported_repeated_results_claim",
+        re.compile(
+            r"\b(?:results?|metrics?)\s+(?:are\s+|were\s+)?(?:averaged|reported|shown|show|shows|computed)"
+            r".{0,140}\b(?:mean\s*(?:±|\+/-|and)\s*(?:standard\s+deviation|std)|standard\s+deviation|std|random\s+seeds?|seeds?)\b"
+            r"|\b(?:mean\s*(?:±|\+/-|and)\s*(?:standard\s+deviation|std)|standard\s+deviation|std)\s+(?:across|over)\s+\d+\s+(?:random\s+)?seeds?\b"
+            r"|\brepeated\s+(?:\w+\s+){0,6}(?:three|3|multiple)\s+times\b",
+            flags=re.IGNORECASE | re.DOTALL,
+        ),
+    ),
+    (
+        "unsupported_seed_configuration_claim",
+        re.compile(
+            r"\brandom\s+seeds?\b.{0,100}\b(?:documented|available|recorded|reported|fixed|used)\b"
+            r"|\b(?:documented|available|recorded|reported|fixed|used)\b.{0,100}\brandom\s+seeds?\b",
+            flags=re.IGNORECASE | re.DOTALL,
+        ),
+    ),
+    (
+        "unsupported_metric_uncertainty_claim",
+        re.compile(
+            r"\b(?:ndcg|recall|hit|hr|auc|map|mrr|precision|rmse|mae)\s*@?\s*\d*\b.{0,80}(?:±|\\pm|\$\\pm\$|\+/-)\s*\d",
+            flags=re.IGNORECASE | re.DOTALL,
+        ),
+    ),
+    (
+        "unsupported_proposed_method_result_claim",
+        re.compile(
+            r"\b(?:our|the proposed|this)\s+(?:method|framework|approach|model)\b.{0,160}\b(?:achieves|achieve|outperforms|outperform|improves|improve|beats|beat|surpasses|surpass)\b",
+            flags=re.IGNORECASE | re.DOTALL,
+        ),
+    ),
+    (
+        "unsupported_hardware_runtime_claim",
+        re.compile(
+            r"\b(?:experiments?|runs?|training|reference\s+baseline|baseline)\s+(?:use|uses|used|run|runs|ran|is\s+trained|was\s+trained)"
+            r".{0,140}\b(?:single\s+)?(?:nvidia\s+)?(?:a100|h100|a800|b200|rtx\s*\d{4}|gpu|tpu)\b"
+            r"|\b(?:single\s+)?(?:nvidia\s+)?(?:a100|h100|a800|b200|rtx\s*\d{4})\b"
+            r"|\bapproximately\s+\d+(?:\.\d+)?\s+hours?\s+per\b",
+            flags=re.IGNORECASE | re.DOTALL,
+        ),
+    ),
+]
+
+REFERENCE_CALIBRATION_CONTEXT_RE = re.compile(
+    r"\b(?:reference calibration|reference reproduction|reference baseline|baseline calibration|selected-base reference)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _scientific_progress_allows_completed_experiment_claims(project: str) -> bool:
+    progress = read_json(ROOT / "projects" / project / "state" / "scientific_progress_gate.json", {})
+    if not isinstance(progress, dict) or str(progress.get("status") or "").lower() != "pass":
+        return False
+    candidate = progress.get("best_candidate")
+    return isinstance(candidate, dict) and bool(candidate)
+
+
+def _project_claim_support_payloads(project: str) -> list[object]:
+    project_state = ROOT / "projects" / project / "state"
+    payloads: list[object] = []
+    for name in [
+        "scientific_progress_gate.json",
+        "reference_reproduction_gate.json",
+        "fresh_base_reference_full_reproduction_audit.json",
+    ]:
+        payload = read_json(project_state / name, {})
+        if isinstance(payload, (dict, list)):
+            payloads.append(payload)
+    return payloads
+
+
+def _walk_json_values(value: object):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            yield str(key), child
+            yield from _walk_json_values(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield "", child
+            yield from _walk_json_values(child)
+
+
+def _explicit_repeated_run_evidence(project: str) -> bool:
+    for payload in _project_claim_support_payloads(project):
+        for key, value in _walk_json_values(payload):
+            normalized_key = re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
+            if normalized_key in {"seed_count", "num_seeds", "n_seeds", "repeat_count", "num_repeats", "replicate_count", "num_replicates"}:
+                try:
+                    if int(value) >= 2:
+                        return True
+                except Exception:
+                    pass
+            if "seed" in normalized_key and isinstance(value, list) and len({str(item) for item in value}) >= 2:
+                return True
+            if normalized_key in {"seeds", "random_seeds", "seed_values"} and isinstance(value, str):
+                numbers = re.findall(r"\d+", value)
+                if len(set(numbers)) >= 2:
+                    return True
+    return False
+
+
+def _hardware_tokens(text: str) -> set[str]:
+    compact = re.sub(r"\s+", "", text.lower())
+    tokens: set[str] = set()
+    for token in ["a100", "h100", "a800", "b200", "tpu"]:
+        if token in compact:
+            tokens.add(token)
+    for match in re.finditer(r"rtx\s*([0-9]{4})", text, flags=re.IGNORECASE):
+        tokens.add(f"rtx{match.group(1)}")
+    return tokens
+
+
+def _explicit_hardware_evidence(project: str, claim_window: str) -> bool:
+    tokens = _hardware_tokens(claim_window)
+    if not tokens:
+        return False
+    evidence = json.dumps(_project_claim_support_payloads(project), ensure_ascii=False).lower()
+    evidence_compact = re.sub(r"\s+", "", evidence)
+    return all(token in evidence_compact for token in tokens)
+
+
+def _reference_calibration_available(project: str) -> bool:
+    gate = read_json(ROOT / "projects" / project / "state" / "reference_reproduction_gate.json", {})
+    if isinstance(gate, dict) and str(gate.get("status") or "").lower() == "pass":
+        return True
+    audit = read_json(ROOT / "projects" / project / "state" / "fresh_base_reference_full_reproduction_audit.json", {})
+    return isinstance(audit, dict) and str(audit.get("status") or audit.get("decision") or "").lower() in {"pass", "passed", "continue_base"}
+
+
+def _compact_manuscript_window(window: str) -> str:
+    text = re.sub(r"\\(?:cite\w*|ref|label)\{[^{}]*\}", "", window)
+    text = re.sub(r"\\[a-zA-Z]+\*?(?:\[[^\]]*\])?", "", text)
+    text = re.sub(r"[{}]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:220]
+
+
+def unsupported_completed_experiment_claim_violations(project: str, text: str) -> list[str]:
+    """Reject completed-experiment prose when no current proposed-method result can support it.
+
+    Preview PDFs may be generated before submission evidence is complete, but the
+    manuscript must not describe unrun proposed-method evaluations as finished.
+    Reference calibration and cited prior work are handled separately.
+    """
+    allow_completed_result_claims = _scientific_progress_allows_completed_experiment_claims(project)
+    reference_ok = _reference_calibration_available(project)
+    section_ranges = _latex_section_ranges(text)
+    violations: list[str] = []
+    seen: set[str] = set()
+    for blocker_id, pattern in UNSUPPORTED_COMPLETED_EXPERIMENT_PATTERNS:
+        for match in pattern.finditer(text):
+            window = _sentence_window(text, match.start(), match.end(), radius=620)
+            section = _section_at(section_ranges, match.start())
+            unsafe_experiment_section = any(word in section.lower() for word in ["method", "experiment", "implementation", "result", "reproduc", "protocol"])
+            if not unsafe_experiment_section and _is_prior_work_context(section, window):
+                continue
+            if blocker_id in {"unsupported_repeated_results_claim", "unsupported_seed_configuration_claim", "unsupported_metric_uncertainty_claim"} and _explicit_repeated_run_evidence(project):
+                continue
+            if blocker_id == "unsupported_hardware_runtime_claim" and _explicit_hardware_evidence(project, window):
+                continue
+            if blocker_id not in {"unsupported_repeated_results_claim", "unsupported_seed_configuration_claim", "unsupported_metric_uncertainty_claim", "unsupported_hardware_runtime_claim"}:
+                if allow_completed_result_claims:
+                    continue
+                if blocker_id == "unsupported_completed_evaluation_claim" and reference_ok and REFERENCE_CALIBRATION_CONTEXT_RE.search(window):
+                    continue
+            detail = _compact_manuscript_window(window)
+            if not detail:
+                continue
+            key = f"{blocker_id}:{detail}"
+            if key in seen:
+                continue
+            seen.add(key)
+            violations.append(key)
+            if len(violations) >= 8:
+                return violations
+    return violations
+
+
 def legacy_route_story_violations(project: str, text: str, active_name: str = "") -> list[str]:
     section_ranges = _latex_section_ranges(text)
     violations: list[str] = []
@@ -405,6 +596,7 @@ def manuscript_policy_violations(project: str, tex_path: Path, venue: str = "") 
     active_name = str(active.get("name") or active.get("repo_name") or "") if isinstance(active, dict) else ""
     violations: list[str] = []
     violations.extend(legacy_route_story_violations(project, text, active_name=active_name))
+    violations.extend(unsupported_completed_experiment_claim_violations(project, text))
     if re.search(r"\\(?:section|subsection)\*?\{[^{}]*(Failure|Counterexample|负结果|失败)[^{}]*\}", text, flags=re.IGNORECASE):
         violations.append("failure_or_counterexample_section_in_manuscript")
     if re.search(r"\\(?:section|subsection|paragraph)\*?\{[^{}]*Acknowledg", text, flags=re.IGNORECASE):
@@ -456,23 +648,12 @@ def manuscript_policy_violations(project: str, tex_path: Path, venue: str = "") 
         "empirical superiority claims are deferred",
         "claims are deferred",
         "audit-ready results emerge",
-        "planned empirical study",
-        "planned study",
-        "future iteration",
-        "future empirical validation",
-        "limitations and future work",
-        "planned ablation study",
-        "planned ablation",
         "success criteria",
-        "without empirical superiority claims",
-        "no empirical superiority claims",
         "candidate_observation_only",
         "reference calibration only",
         "audit-ready artifacts",
         "promotable result",
-        "requires empirical verification",
         "requires audit",
-        "will be evaluated",
         "this draft presents",
         "expected evidence needed",
         "inspection draft",
@@ -493,8 +674,6 @@ def manuscript_policy_violations(project: str, tex_path: Path, venue: str = "") 
         "comprehensive ablation study design",
         "we further design a comprehensive ablation",
         "evaluation matrix enables",
-        "expected evidence contract",
-        "proposal-style evaluation",
         "email@example.com",
         "city, country",
         "affiliation",
@@ -503,7 +682,7 @@ def manuscript_policy_violations(project: str, tex_path: Path, venue: str = "") 
     for phrase in manuscript_only_forbidden:
         if phrase.lower() in lowered:
             violations.append(f"non_manuscript_status_phrase:{phrase}")
-    if re.search(r"\\(?:section|subsection|paragraph)\*?\{[^{}]*(Planned|Future Work|Limitations|Success Criteria|Inspection Draft)[^{}]*\}", text, flags=re.IGNORECASE):
+    if re.search(r"\\(?:section|subsection|paragraph)\*?\{[^{}]*(Planned|Future Work|Success Criteria|Inspection Draft)[^{}]*\}", text, flags=re.IGNORECASE):
         violations.append("non_manuscript_section_heading")
     if re.search(r"\\(?:section|subsection|paragraph)\*?\{[^{}]*(Ablation Study Design|Experimental Plan|Evaluation Plan|Study Design|Submission Status|Evidence and Experiment Snapshot|Revised Writing Plan|Original Draft Snapshot)[^{}]*\}", text, flags=re.IGNORECASE):
         violations.append("proposal_or_internal_status_section_heading")

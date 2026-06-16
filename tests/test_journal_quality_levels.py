@@ -1,6 +1,6 @@
 import json
 
-from auto_research.auto_find.quality import JOURNAL_QUALITY_TABLE
+from find_support import JOURNAL_QUALITY_TABLE
 
 
 def test_journal_quality_levels_table_is_valid():
@@ -8,7 +8,7 @@ def test_journal_quality_levels_table_is_valid():
     max_bonus = data["bonus_policy"]["max_bonus"]
     tier_bonuses = {name: tier["bonus"] for name, tier in data["tiers"].items()}
 
-    assert JOURNAL_QUALITY_TABLE.as_posix().endswith("auto_research/data/quality/journal_quality_levels.json")
+    assert JOURNAL_QUALITY_TABLE.as_posix().endswith("modules/finding/data/quality/journal_quality_levels.json")
     assert data["coverage"]["journal_count"] == 334
     assert data["coverage"]["ccf_journal_count"] == 285
     assert data["coverage"]["nature_family_count"] == 27

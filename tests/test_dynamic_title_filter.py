@@ -1,4 +1,4 @@
-from auto_research.auto_find.pipeline import _dynamic_title_prune, _title_filter_groups
+from find_pipeline import _dynamic_title_prune, _title_filter_groups
 
 
 def _paper(pid: str, category: str, fit: float = 8.0) -> dict:

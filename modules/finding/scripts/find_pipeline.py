@@ -21,13 +21,13 @@ from auto_research.jobs import JobCancelled
 from auto_research.paths import ROOT, WORKFLOW_RUNTIME_DIR
 from auto_research.storage import create_run_dir, read_json, redacted_config, sync_latest, update_manifest, write_json, write_text
 
-from .catalog import catalog_by_id
-from .category_select import filter_papers_by_selected_categories, select_relevant_categories
-from .local_index import load_local_venue_year
-from .local_rank import rank_papers_tfidf
-from .profile_normalize import normalize_user_profile, profile_retrieval_text
-from .quality import attach_quality_metadata_many
-from .sources import (
+from find_support import catalog_by_id
+from find_support import filter_papers_by_selected_categories, select_relevant_categories
+from find_support import load_local_venue_year
+from find_support import rank_papers_tfidf
+from find_support import normalize_user_profile, profile_retrieval_text
+from find_support import attach_quality_metadata_many
+from find_support import (
     enrich_nature_details,
     enrich_pmlr_details,
     enrich_science_details,
@@ -7880,18 +7880,18 @@ def run_find(
         write_text(run_dir / "hf.md", hf_md)
         write_text(run_dir / "github.md", github_md)
         write_text(run_dir / "source_status.md", status_md)
-        sync_latest("auto_find", "article.md", run_dir / "article.md")
-        sync_latest("auto_find", "screened_ranking.md", run_dir / "screened_ranking.md")
-        sync_latest("auto_find", "read_candidates.md", run_dir / "read_candidates.md")
-        sync_latest("auto_find", "triage_candidates.md", run_dir / "triage_candidates.md")
-        sync_latest("auto_find", "audit_candidates.md", run_dir / "audit_candidates.md")
-        sync_latest("auto_find", "critique_candidates.md", run_dir / "critique_candidates.md")
-        sync_latest("auto_find", "biorxiv.md", run_dir / "biorxiv.md")
-        sync_latest("auto_find", "nature.md", run_dir / "nature.md")
-        sync_latest("auto_find", "science.md", run_dir / "science.md")
-        sync_latest("auto_find", "hf.md", run_dir / "hf.md")
-        sync_latest("auto_find", "github.md", run_dir / "github.md")
-        sync_latest("auto_find", "source_status.md", run_dir / "source_status.md")
+        sync_latest("finding", "article.md", run_dir / "article.md")
+        sync_latest("finding", "screened_ranking.md", run_dir / "screened_ranking.md")
+        sync_latest("finding", "read_candidates.md", run_dir / "read_candidates.md")
+        sync_latest("finding", "triage_candidates.md", run_dir / "triage_candidates.md")
+        sync_latest("finding", "audit_candidates.md", run_dir / "audit_candidates.md")
+        sync_latest("finding", "critique_candidates.md", run_dir / "critique_candidates.md")
+        sync_latest("finding", "biorxiv.md", run_dir / "biorxiv.md")
+        sync_latest("finding", "nature.md", run_dir / "nature.md")
+        sync_latest("finding", "science.md", run_dir / "science.md")
+        sync_latest("finding", "hf.md", run_dir / "hf.md")
+        sync_latest("finding", "github.md", run_dir / "github.md")
+        sync_latest("finding", "source_status.md", run_dir / "source_status.md")
         update_manifest(run_dir, "find")
 
     # Persist real Find evidence and human-readable artifacts before Chinese UI
@@ -7900,7 +7900,7 @@ def run_find(
     preliminary_artifacts = _build_find_artifacts("pending")
     write_json(run_dir / "find_results.json", preliminary_artifacts)
     write_text(run_dir / "source_status.md", _status_markdown(source_status))
-    sync_latest("auto_find", "source_status.md", run_dir / "source_status.md")
+    sync_latest("finding", "source_status.md", run_dir / "source_status.md")
     update_manifest(run_dir, "find")
     _persist_find_progress("preliminary_artifacts_written", {"abstract_translation_status": "pending", "strong_recommendation_count": len(strong_recommendations), "strict_strong_anchor_count": len(strong_recommendations), "recommendation_target_count": _strong_recommendation_target_count(config, source_count), "recommendation_shortfall": max(0, _strong_recommendation_target_count(config, source_count) - len(strong_recommendations)), "recommendation_policy": FIND_RECOMMENDATION_POLICY})
     log("Find stage scored candidates; preliminary JSON persisted before Chinese abstract translation; user-facing recommendation Markdown waits for translated abstracts")

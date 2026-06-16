@@ -1,6 +1,6 @@
 from unittest.mock import patch
 
-from auto_research.auto_find.sources import enrich_pmlr_details, fetch_venue_title_index_all
+from find_support import enrich_pmlr_details, fetch_venue_title_index_all
 
 
 def test_full_title_index_uses_dblp_as_base_and_enriches_from_openreview():
@@ -60,7 +60,7 @@ def test_full_title_index_uses_dblp_as_base_and_enriches_from_openreview():
         }
     ]
 
-    with patch("auto_research.auto_find.sources.fetch_dblp_venue", return_value=dblp_papers) as fetch_dblp, patch("auto_research.auto_find.sources.fetch_openreview_venue", return_value=openreview_papers), patch("auto_research.auto_find.sources.fetch_pmlr_index", return_value=[]), patch("auto_research.auto_find.sources.fetch_icml_downloads", return_value=[]):
+    with patch("find_support.fetch_dblp_venue", return_value=dblp_papers) as fetch_dblp, patch("find_support.fetch_openreview_venue", return_value=openreview_papers), patch("find_support.fetch_pmlr_index", return_value=[]), patch("find_support.fetch_icml_downloads", return_value=[]):
         papers, adapter = fetch_venue_title_index_all(venue, [2025])
 
     fetch_dblp.assert_called_once_with(venue, [2025], None)
@@ -89,7 +89,7 @@ def test_full_title_index_falls_back_when_dblp_base_empty():
     }
     pmlr_papers = [{"id": "pmlr_1", "source": "pmlr", "title": "PMLR Paper", "year": 2025}]
 
-    with patch("auto_research.auto_find.sources.fetch_dblp_venue", return_value=[]), patch("auto_research.auto_find.sources.fetch_pmlr_index", return_value=pmlr_papers), patch("auto_research.auto_find.sources.fetch_openreview_venue", return_value=[]), patch("auto_research.auto_find.sources.fetch_icml_downloads", return_value=[]):
+    with patch("find_support.fetch_dblp_venue", return_value=[]), patch("find_support.fetch_pmlr_index", return_value=pmlr_papers), patch("find_support.fetch_openreview_venue", return_value=[]), patch("find_support.fetch_icml_downloads", return_value=[]):
         papers, adapter = fetch_venue_title_index_all(venue, [2025])
 
     assert adapter == "pmlr"
@@ -136,7 +136,7 @@ def test_full_title_index_prefers_direct_pmlr_when_available():
         }
     ]
 
-    with patch("auto_research.auto_find.sources.fetch_dblp_venue", return_value=dblp_papers), patch("auto_research.auto_find.sources.fetch_openreview_venue", return_value=[]), patch("auto_research.auto_find.sources.fetch_pmlr_index", return_value=pmlr_papers), patch("auto_research.auto_find.sources.fetch_icml_downloads", return_value=[]):
+    with patch("find_support.fetch_dblp_venue", return_value=dblp_papers), patch("find_support.fetch_openreview_venue", return_value=[]), patch("find_support.fetch_pmlr_index", return_value=pmlr_papers), patch("find_support.fetch_icml_downloads", return_value=[]):
         papers, adapter = fetch_venue_title_index_all(venue, [2025])
 
     assert adapter == "pmlr"
@@ -177,7 +177,7 @@ def test_pmlr_detail_enrichment_extracts_abstract_from_landing_page():
         }
     ]
 
-    with patch("auto_research.auto_find.sources._request", return_value=Response()):
+    with patch("find_support._request", return_value=Response()):
         enriched, stats = enrich_pmlr_details(papers)
 
     assert stats == {"attempted": 1, "abstracts_filled": 1, "urls_filled": 1, "pdfs_filled": 1}

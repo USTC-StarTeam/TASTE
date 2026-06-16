@@ -611,7 +611,7 @@ Text excerpt:
     incomplete_readings = [item for item in readings if item.get("deep_read_contract_gaps")]
     read_payload = {
         "run_id": request.run_id,
-        "source": "auto_read_recommended_articles",
+        "source": "reading_recommended_articles",
         "status": "blocked_incomplete_deep_read" if incomplete_readings else "complete",
         "recommendation_count": len(papers),
         "readings": readings,
@@ -624,8 +624,8 @@ Text excerpt:
     }
     write_json(directory / "read_results.json", read_payload)
     write_text(directory / "read.md", "\n".join(lines).rstrip() + "\n")
-    sync_latest("auto_read", "read_results.json", directory / "read_results.json")
-    sync_latest("auto_read", "read.md", directory / "read.md")
+    sync_latest("reading", "read_results.json", directory / "read_results.json")
+    sync_latest("reading", "read.md", directory / "read.md")
     update_manifest(directory, "read")
     log("Read stage complete")
     return {"run_id": request.run_id, "recommendation_count": len(papers), "readings": readings}

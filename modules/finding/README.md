@@ -26,7 +26,7 @@ Artifacts produced:
 - `category/title/detail/scoring reports`
 
 Module roots currently owned by this module:
-- `modules/finding/auto_research/auto_find`
+- `modules/finding/scripts/find_pipeline.py`
 - `modules/finding/scripts/discover_*.py`
 - `modules/finding/scripts/build_literature_tool_packet.py`
 

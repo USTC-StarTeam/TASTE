@@ -215,7 +215,11 @@ def current_environment_selection(paths) -> dict[str, Any]:
         reason = "environment_selection_selected_plan_missing_or_stale"
     else:
         reason = "environment_base_selection_pending_or_stale"
-    return {"valid": valid, "current_find_run_id": current_run, "fresh_find_run_id": selected_run, "selected_plan_id": selection_plan_id, "selected_idea_id": str(selection.get("selected_idea_id") or selected.get("selected_idea_id") or current_idea_id or "").strip(), "current_selected_plan_id": current_plan_id, "current_selected_idea_id": current_idea_id, "selection_stage": stage, "accepted_by_claude": accepted, "selected": selected, "selection_gate": public_selection_gate, "raw_selection_gate": raw_selection_gate, "reason": reason}
+    selected_out = selected if valid else {}
+    result = {"valid": valid, "current_find_run_id": current_run, "fresh_find_run_id": selected_run, "selected_plan_id": selection_plan_id, "selected_idea_id": str(selection.get("selected_idea_id") or selected.get("selected_idea_id") or current_idea_id or "").strip(), "current_selected_plan_id": current_plan_id, "current_selected_idea_id": current_idea_id, "selection_stage": stage, "accepted_by_claude": accepted if valid else False, "selected": selected_out, "selection_gate": public_selection_gate, "raw_selection_gate": raw_selection_gate, "reason": reason}
+    if not valid and selected:
+        result["blocked_selection"] = selected
+    return result
 
 
 def selected_base_label(paths) -> str:

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-15T02:07:10.091264+00:00",
+  "generated_at": "2026-06-15T22:40:11.956990+00:00",
   "module": "experimenting",
   "contract": {
     "directory": "modules/experimenting",
@@ -122,7 +122,7 @@
       "path": "modules/experimenting/scripts/audit_reference_reproduction.py",
       "owner": "experimenting",
       "owner_reason": "experiment execution, logging, repair, metric parsing, or empirical gates",
-      "function_count": 41,
+      "function_count": 46,
       "functions": [
         "now_iso",
         "load_json",
@@ -135,6 +135,7 @@
         "current_payload",
         "_repo_path_from_mapping",
         "_selected_base_viability_current_selection",
+        "_route_matches_current_contract",
         "_current_impl_repo_path",
         "_artifact_matches_current_repo",
         "fresh_base_reference_protocol_passed",
@@ -147,6 +148,10 @@
         "load_json_if_small",
         "_collect_title_keys_from_payload",
         "current_find_run_id",
+        "current_selected_execution_ids",
+        "route_plan_id",
+        "route_idea_id",
+        "route_run_id",
         "normalize_title_key",
         "current_find_recommendation_title_keys",
         "title_in_current_find_recommendations",

@@ -22,6 +22,8 @@ from auto_research.module_boundaries import (
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_SUFFIXES = {".py", ".sh"}
+FLATTENED_STAGE_MODULES = ("finding", "reading", "ideation", "planning")
+FORBIDDEN_STAGE_AUTO_DIRS = {"auto_research", "auto_find", "auto_read", "auto_idea", "auto_plan"}
 
 
 def _migrated_scripts() -> list[Path]:
@@ -52,6 +54,31 @@ def test_non_vendor_code_does_not_import_removed_scripts_namespace() -> None:
                         name = alias.name
                         if name == "scripts" or name.startswith("scripts."):
                             offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}: import {name}")
+    assert offenders == []
+
+
+def test_find_to_plan_stage_modules_stay_flattened() -> None:
+    offenders: list[str] = []
+    for stage in FLATTENED_STAGE_MODULES:
+        module_dir = ROOT / "modules" / stage
+        assert module_dir.is_dir(), stage
+        for path in module_dir.rglob("*"):
+            if path.is_dir() and path.name in FORBIDDEN_STAGE_AUTO_DIRS:
+                offenders.append(str(path.relative_to(ROOT)))
+    assert offenders == []
+
+
+def test_find_to_plan_latest_outputs_use_stage_names() -> None:
+    scan_roots = [ROOT / "modules", ROOT / "framework", ROOT / "web" / "backend"]
+    forbidden = ("auto_find", "auto_read", "auto_idea", "auto_plan")
+    offenders: list[str] = []
+    for scan_root in scan_roots:
+        for path in scan_root.rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            text = path.read_text(encoding="utf-8")
+            if any(term in text for term in forbidden):
+                offenders.append(str(path.relative_to(ROOT)))
     assert offenders == []
 
 
@@ -109,7 +136,7 @@ def test_generated_manifests_match_current_script_dirs() -> None:
 
 
 def test_finding_reading_full_text_responsibility_boundary() -> None:
-    pipeline_text = (ROOT / "modules/finding/auto_research/auto_find/pipeline.py").read_text(encoding="utf-8")
+    pipeline_text = (ROOT / "modules/finding/scripts/find_pipeline.py").read_text(encoding="utf-8")
     forbidden_find_terms = [
         "full_text_readability_gate",
         "_ensure_full_text_readable_recommendations",

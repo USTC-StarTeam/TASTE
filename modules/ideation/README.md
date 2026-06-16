@@ -25,7 +25,7 @@ Artifacts produced:
 - `idea candidate audits`
 
 Module roots currently owned by this module:
-- `modules/ideation/auto_research/auto_idea`
+- `modules/ideation/scripts/idea_pipeline.py`
 - `modules/ideation/scripts/assess_idea_candidates.py`
 - `modules/ideation/scripts/build_hypothesis_arena.py`
 

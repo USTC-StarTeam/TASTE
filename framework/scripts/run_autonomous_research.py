@@ -166,7 +166,7 @@ Live experiment safety and observability rules:
 - If the log is temporarily empty while the process is alive, record `running_waiting_for_output` and keep waiting; do not probe the process in a way that changes its state.
 - If a run must be stopped, first write the reason, PID, command, artifact path, and evidence to an artifact-local audit or run note.
 
-Before selecting a new method, base-work switch, or code route, read `planning/literature_tool_packet.md` or `state/literature_tool_packet.json` plus at least one raw artifact under `planning/finding/`. If the packet is stale, empty, or unrelated to the current blocker, run `{management_python()} modules/finding/scripts/run_literature_tool.py --project {project} --query "<targeted research query>" --fast-mode --venue {venue}` and rebuild the packet. Use these survey outputs as planning signals only; local experiment artifacts are still required for claims.
+Before selecting a new method, base-work switch, or code route, read `planning/literature_tool_packet.md` or `state/literature_tool_packet.json` plus at least one raw artifact under `planning/finding/`. If the packet is stale, empty, or unrelated to the current blocker, run `{management_python()} modules/finding/scripts/run_literature_tool.py --project {project} --query "<targeted research query>" --fast-mode --venue {venue}` as an internal project-agent survey and read the packet path printed under `state/internal_literature_runs/...`; do not publish it to the web-facing current Find unless the TASTE wrapper/user explicitly requests `--publish-current-find`. Use these survey outputs as planning signals only; local experiment artifacts are still required for claims.
 
 Current-Find selected execution contract:
 ```json

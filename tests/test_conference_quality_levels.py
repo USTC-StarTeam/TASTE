@@ -1,6 +1,6 @@
 import json
 
-from auto_research.auto_find.quality import CONFERENCE_QUALITY_TABLE
+from find_support import CONFERENCE_QUALITY_TABLE
 
 
 def test_conference_quality_levels_table_is_valid():
@@ -8,7 +8,7 @@ def test_conference_quality_levels_table_is_valid():
     max_bonus = data["bonus_policy"]["max_bonus"]
     tier_bonuses = {name: tier["bonus"] for name, tier in data["tiers"].items()}
 
-    assert CONFERENCE_QUALITY_TABLE.as_posix().endswith("auto_research/data/quality/conference_quality_levels.json")
+    assert CONFERENCE_QUALITY_TABLE.as_posix().endswith("modules/finding/data/quality/conference_quality_levels.json")
     assert data["bonus_policy"]["apply_only_if_fit_score_at_least"] == 6.0
     assert tier_bonuses["oral"] > tier_bonuses["spotlight"] > tier_bonuses["regular"]
     assert tier_bonuses["award"] == max_bonus

@@ -25,7 +25,7 @@ Artifacts produced:
 - `current_find_full_text_evidence_repair.json`
 
 Module roots currently owned by this module:
-- `modules/reading/auto_research/auto_read`
+- `modules/reading/scripts/read_pipeline.py`
 - `modules/reading/scripts/repair_current_find_full_text_evidence.py`
 - `modules/reading/scripts/ensure_current_find_research_plan.py`
 

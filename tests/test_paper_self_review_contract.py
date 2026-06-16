@@ -19,9 +19,18 @@ def test_paper_pipeline_always_runs_preview_repair_loop_after_preview_build():
 
     assert preview_idx < repair_idx < readiness_idx < legacy_render_idx
     repair_block = source[repair_idx:legacy_render_idx]
-    assert "run(preview_repair_cmd, required=False)" in repair_block
+    assert "preview_repair_rc = run(preview_repair_cmd, required=False)" in repair_block
+    assert "record_missing_preview_repair_artifact(args.project, args.venue, preview_repair_rc)" in repair_block
     assert "--refresh-current-paper" in repair_block
     assert "regenerate_current_preview" in repair_block
+
+
+def test_paper_pipeline_records_missing_preview_repair_artifact():
+    source = script_path("run_paper_pipeline.py").read_text(encoding="utf-8")
+
+    assert "framework_error_missing_repair_artifact" in source
+    assert "paper_preview_repair_loop.json" in source
+    assert "paper_preview_repair_blocker" in source
 
 
 def test_repair_prompt_requires_open_ended_independent_claude_review():
@@ -37,6 +46,8 @@ def test_repair_prompt_requires_open_ended_independent_claude_review():
     assert "open-ended manuscript review" in prompt
     assert "before using TASTE deterministic gate details as a checklist" in prompt
     assert "Phase 1: independently read the compiled PDF text" in prompt
+    assert "Do not invoke bare `python`, `python3`, or `python3.x`" in prompt
+    assert "paper artifact inspection/receipt task" in prompt
     assert "discovery_order" in prompt
     assert "independent_artifact_review" in prompt
     assert "gate_crosscheck" in prompt
@@ -44,6 +55,23 @@ def test_repair_prompt_requires_open_ended_independent_claude_review():
     assert "artifact_reading_log" in prompt
     assert "Do not merely copy TASTE-listed deterministic blockers" in prompt
     assert "Findings discovered only from TASTE gate names do not count" in prompt
+
+
+def test_writing_prompt_forbids_secret_literature_probe():
+    source = (ROOT / "modules" / "writing" / "scripts" / "run_paper_orchestra_bridge.py").read_text(encoding="utf-8")
+    assert "Secret and external-literature boundary" in source
+    assert "SEMANTIC_SCHOLAR" in source
+    assert "citation_pool.json" in source and "literature_verification.json" in source
+    assert "Do not inspect, echo, grep, print, measure" in source
+
+
+def test_writing_bridge_stops_after_blocked_claude_phase():
+    source = (ROOT / "modules" / "writing" / "scripts" / "run_paper_orchestra_bridge.py").read_text(encoding="utf-8")
+    assert "claude_return_code" in source
+    assert "claude_tool_policy_blocked" in source
+    assert "blocked_result" in source
+    assert "append_or_stop" in source
+    assert "return blocked_result(section_phase)" in source
 
 
 def _write(path: Path, text: str = "content") -> None:
@@ -187,10 +215,71 @@ def test_self_review_receipt_rejects_gate_only_checklist_and_accepts_independent
         current_tex=tex,
         current_refs=refs,
     )
-    assert accepted["ready"] is True
-    assert accepted["open_review_protocol_ready"] is True
-    assert accepted["artifact_reading_log_count"] == 7
-    assert accepted["independent_findings_count"] == 1
+    receipt_with_inline_pdf_text = __import__("copy").deepcopy(independent)
+    receipt_with_inline_pdf_text["artifact_fingerprints"]["pdf_text"] = {
+        "path": "/tmp/non_persistent_paper_text.txt",
+        "sha256": "not-rechecked-for-inline-pdf-text",
+        "length_chars": 128,
+        "note": "pdftotext output was read; no unresolved citation markers were present.",
+    }
+    receipt_with_inline_pdf_text["artifact_fingerprints"]["compile_log"] = artifact(paper_log)
+    receipt_with_inline_pdf_text["review_protocol"]["artifact_reading_log"] = [
+        {"artifact": "pdf", "path": str(pdf), "method": "sha256sum and pdfinfo", "evidence": paper_self_review.sha256_file(pdf)},
+        {"artifact": "paper.pdf via pdftotext", "path": "/tmp/non_persistent_paper_text.txt", "method": "pdftotext output read", "note": "No unresolved citations; text length 128"},
+        {"artifact": "tex", "path": str(tex), "method": "direct TeX read", "evidence": "\\citep{key}"},
+        {"artifact": "refs_bib", "path": str(refs), "method": "direct BibTeX read", "evidence": "@article{key"},
+        {"artifact": "paper.log compile log", "path": str(paper_log), "method": "paper.log read as compile_log and paper_log", "observation": "No Author undefined warnings"},
+        {"artifact": "venue_requirements", "path": str(venue_req), "method": "venue contract read", "evidence": "springer-nature"},
+    ]
+    receipt.write_text(__import__("json").dumps(receipt_with_inline_pdf_text), encoding="utf-8")
+    inline_pdf_text_ok = paper_self_review.validate_paper_self_review_receipt(
+        project_root,
+        "Nature",
+        current_pdf=pdf,
+        current_tex=tex,
+        current_refs=refs,
+    )
+    assert inline_pdf_text_ok["ready"] is True
+
+    evidence_only = {
+        **independent,
+        "status": "reviewed",
+        "remaining_blockers": [
+            {
+                "issue": "No experimental results for the proposed method",
+                "severity": "info",
+                "requires_experiment": True,
+                "mitigation": "Submission evidence gate remains blocked until experiments run.",
+            }
+        ],
+    }
+    receipt.write_text(__import__("json").dumps(evidence_only), encoding="utf-8")
+    preview_ready = paper_self_review.validate_paper_self_review_receipt(
+        project_root,
+        "Nature",
+        current_pdf=pdf,
+        current_tex=tex,
+        current_refs=refs,
+    )
+    assert preview_ready["ready"] is True
+    assert preview_ready["preview_only_ready"] is True
+    assert preview_ready["submission_evidence_ready"] is False
+    assert preview_ready["evidence_blocker_count"] == 1
+
+    manuscript_blocked = {
+        **independent,
+        "remaining_blockers": [{"issue": "undefined citation remains in compiled PDF", "severity": "block"}],
+    }
+    receipt.write_text(__import__("json").dumps(manuscript_blocked), encoding="utf-8")
+    still_blocked = paper_self_review.validate_paper_self_review_receipt(
+        project_root,
+        "Nature",
+        current_pdf=pdf,
+        current_tex=tex,
+        current_refs=refs,
+    )
+    assert still_blocked["ready"] is False
+    assert "self_review_remaining_blockers" in {row["id"] for row in still_blocked["blockers"]}
 
 
 

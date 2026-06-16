@@ -1,13 +1,13 @@
-import auto_research.auto_read.pipeline as read_pipeline
+import read_pipeline as read_pipeline
 
 from datetime import date
 
-from auto_research.auto_find.pipeline import SCORING_POLICY_VERSION, _apply_quality_bonus, _apply_stable_ranking_score, _attach_latest_released_venue_context, _latest_released_venue_context, _min_title_candidates, _resolve_venue_years, _score_title_pool, _selection_source_count, _selection_venue_year_groups, run_find
+from find_pipeline import SCORING_POLICY_VERSION, _apply_quality_bonus, _apply_stable_ranking_score, _attach_latest_released_venue_context, _latest_released_venue_context, _min_title_candidates, _resolve_venue_years, _score_title_pool, _selection_source_count, _selection_venue_year_groups, run_find
 from auto_research.paths import RUNS_DIR
 from auto_research.storage import read_json
-from auto_research.auto_idea.pipeline import patch_idea, run_idea
-from auto_research.auto_plan.pipeline import run_plan
-from auto_research.auto_read.pipeline import run_read
+from idea_pipeline import patch_idea, run_idea
+from plan_pipeline import run_plan
+from read_pipeline import run_read
 from auto_research.models import AppConfig, FindRequest, IdeaPatch, IdeaRequest, PlanRequest, ReadRequest, VenueSelection
 from auto_research.storage import delete_run, run_dir
 
@@ -303,7 +303,7 @@ def test_read_sanitizes_llm_public_output_before_persisting(monkeypatch):
         delete_run(run_id)
 
 def test_run_find_completes_user_visible_chinese_abstracts_when_translation_raises(monkeypatch):
-    import auto_research.auto_find.pipeline as pipeline
+    import find_pipeline as pipeline
 
     def fail_translation(*_args, **_kwargs):
         raise TimeoutError("translation budget exhausted")
@@ -550,7 +550,7 @@ def test_venue_yeresolution_keeps_requested_kdd_yeeven_before_conference_date(mo
             return {"paper_count": 257}
         return None
 
-    monkeypatch.setattr("auto_research.auto_find.pipeline.load_local_venue_year", fake_local)
+    monkeypatch.setattr("find_pipeline.load_local_venue_year", fake_local)
 
     years, reason = _resolve_venue_years(venue, [2026], as_of=date(2026, 5, 23))
 
@@ -568,7 +568,7 @@ def test_venue_yeresolution_accepts_released_latest_dblp_year(monkeypatch):
             return {"paper_count": 3148}
         return None
 
-    monkeypatch.setattr("auto_research.auto_find.pipeline.load_local_venue_year", fake_local)
+    monkeypatch.setattr("find_pipeline.load_local_venue_year", fake_local)
 
     years, reason = _resolve_venue_years(venue, [2026], as_of=date(2026, 5, 23))
 
@@ -579,9 +579,9 @@ def test_venue_yeresolution_accepts_released_latest_dblp_year(monkeypatch):
 def test_venue_yeresolution_keeps_requested_online_year_when_title_index_available(monkeypatch):
     venue = {"id": "dblp_sigir", "name": "SIGIR"}
 
-    monkeypatch.setattr("auto_research.auto_find.pipeline.load_local_venue_year", lambda _venue, _year: None)
+    monkeypatch.setattr("find_pipeline.load_local_venue_year", lambda _venue, _year: None)
     monkeypatch.setattr(
-        "auto_research.auto_find.pipeline._fetch_venue_title_index_for_find",
+        "find_pipeline._fetch_venue_title_index_for_find",
         lambda _venue, years, limit, **_kwargs: ([{"title": "Released SIGIR Paper"}], "dblp") if years == [2026] and limit == 1 else ([], "none"),
     )
 
@@ -594,7 +594,7 @@ def test_venue_yeresolution_keeps_requested_online_year_when_title_index_availab
 def test_venue_yeresolution_backfills_any_venue_to_latest_available_title_index(monkeypatch):
     venue = {"id": "dblp_sigir", "name": "SIGIR"}
 
-    monkeypatch.setattr("auto_research.auto_find.pipeline.load_local_venue_year", lambda _venue, _year: None)
+    monkeypatch.setattr("find_pipeline.load_local_venue_year", lambda _venue, _year: None)
 
     def fake_fetch(_venue, years, limit, **_kwargs):
         assert limit == 1
@@ -602,7 +602,7 @@ def test_venue_yeresolution_backfills_any_venue_to_latest_available_title_index(
             return [{"title": "Verified SIGIR Paper"}], "dblp"
         return [], "none"
 
-    monkeypatch.setattr("auto_research.auto_find.pipeline._fetch_venue_title_index_for_find", fake_fetch)
+    monkeypatch.setattr("find_pipeline._fetch_venue_title_index_for_find", fake_fetch)
 
     years, reason = _resolve_venue_years(venue, [2026], as_of=date(2026, 5, 23))
 
@@ -614,7 +614,7 @@ def test_venue_yeresolution_backfills_any_venue_to_latest_available_title_index(
 def test_venue_yeresolution_backfills_neurips_through_generic_title_index_probe(monkeypatch):
     venue = {"id": "neurips", "name": "NeurIPS", "full_name": "Conference on Neural Information Processing Systems"}
 
-    monkeypatch.setattr("auto_research.auto_find.pipeline.load_local_venue_year", lambda _venue, _year: None)
+    monkeypatch.setattr("find_pipeline.load_local_venue_year", lambda _venue, _year: None)
 
     def fake_fetch(_venue, years, limit, **_kwargs):
         assert limit == 1
@@ -622,7 +622,7 @@ def test_venue_yeresolution_backfills_neurips_through_generic_title_index_probe(
             return [{"title": "Verified NeurIPS Paper"}], "neurips_virtual"
         return [], "none"
 
-    monkeypatch.setattr("auto_research.auto_find.pipeline._fetch_venue_title_index_for_find", fake_fetch)
+    monkeypatch.setattr("find_pipeline._fetch_venue_title_index_for_find", fake_fetch)
 
     years, reason = _resolve_venue_years(venue, [2026], as_of=date(2026, 6, 11))
 

@@ -3,9 +3,9 @@
   "description": "Deterministic lookup table for non-Nature/Science journal quality signals. Runtime scoring should retrieve from this table only; it should not ask the LLM to interpret journal prestige or CCF rank.",
   "coverage": {
     "source_catalogs": [
-      "auto_research/data/ccf_venues.json",
-      "auto_research/auto_find/sources.py:NATURE_JOURNALS",
-      "auto_research/auto_find/sources.py:SCIENCE_JOURNALS"
+      "modules/finding/data/ccf_venues.json",
+      "modules/finding/scripts/find_support.py:NATURE_JOURNALS",
+      "modules/finding/scripts/find_support.py:SCIENCE_JOURNALS"
     ],
     "included_types": [
       "ccf_journal",
@@ -5494,7 +5494,7 @@
       "tier": "flagship",
       "bonus": 0.2,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_natmachintell": {
       "names": [
@@ -5512,7 +5512,7 @@
       "tier": "family_tier_1",
       "bonus": 0.15,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_natcomputsci": {
       "names": [
@@ -5530,7 +5530,7 @@
       "tier": "family_tier_1",
       "bonus": 0.15,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_nmeth": {
       "names": [
@@ -5548,7 +5548,7 @@
       "tier": "family_tier_1",
       "bonus": 0.15,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_nbt": {
       "names": [
@@ -5566,7 +5566,7 @@
       "tier": "family_tier_1",
       "bonus": 0.15,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_natbiomedeng": {
       "names": [
@@ -5584,7 +5584,7 @@
       "tier": "family_tier_1",
       "bonus": 0.15,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_ncomms": {
       "names": [
@@ -5602,7 +5602,7 @@
       "tier": "family_tier_1",
       "bonus": 0.15,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_nmat": {
       "names": [
@@ -5620,7 +5620,7 @@
       "tier": "family_tier_2",
       "bonus": 0.1,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_nchem": {
       "names": [
@@ -5638,7 +5638,7 @@
       "tier": "family_tier_2",
       "bonus": 0.1,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_natchemeng": {
       "names": [
@@ -5656,7 +5656,7 @@
       "tier": "family_tier_2",
       "bonus": 0.1,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_natcatal": {
       "names": [
@@ -5674,7 +5674,7 @@
       "tier": "family_tier_2",
       "bonus": 0.1,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_natsynth": {
       "names": [
@@ -5692,7 +5692,7 @@
       "tier": "family_tier_2",
       "bonus": 0.1,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_nphys": {
       "names": [
@@ -5710,7 +5710,7 @@
       "tier": "family_tier_2",
       "bonus": 0.1,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_natelectron": {
       "names": [
@@ -5728,7 +5728,7 @@
       "tier": "family_tier_2",
       "bonus": 0.1,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_nnano": {
       "names": [
@@ -5746,7 +5746,7 @@
       "tier": "family_tier_2",
       "bonus": 0.1,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_nphoton": {
       "names": [
@@ -5764,7 +5764,7 @@
       "tier": "family_tier_2",
       "bonus": 0.1,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_nenergy": {
       "names": [
@@ -5782,7 +5782,7 @@
       "tier": "family_tier_2",
       "bonus": 0.1,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_nm": {
       "names": [
@@ -5800,7 +5800,7 @@
       "tier": "family_tier_3",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_ng": {
       "names": [
@@ -5818,7 +5818,7 @@
       "tier": "family_tier_3",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_neuro": {
       "names": [
@@ -5836,7 +5836,7 @@
       "tier": "family_tier_3",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_nathumbehav": {
       "names": [
@@ -5854,7 +5854,7 @@
       "tier": "family_tier_3",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_nclimate": {
       "names": [
@@ -5872,7 +5872,7 @@
       "tier": "family_tier_3",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_sustainability": {
       "names": [
@@ -5890,7 +5890,7 @@
       "tier": "family_tier_3",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_ngeo": {
       "names": [
@@ -5908,7 +5908,7 @@
       "tier": "family_tier_3",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_natecolevol": {
       "names": [
@@ -5926,7 +5926,7 @@
       "tier": "family_tier_3",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_s41545": {
       "names": [
@@ -5944,7 +5944,7 @@
       "tier": "family_tier_3",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "nature_family_s43016": {
       "names": [
@@ -5962,7 +5962,7 @@
       "tier": "family_tier_3",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Nature Portfolio source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Nature Portfolio source list in modules/finding/scripts/find_support.py."
     },
     "science_family_science": {
       "names": [
@@ -5980,7 +5980,7 @@
       "tier": "flagship",
       "bonus": 0.2,
       "source_urls": [],
-      "notes": "Derived from the dedicated Science family source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Science family source list in modules/finding/scripts/find_support.py."
     },
     "science_family_sciadv": {
       "names": [
@@ -5998,7 +5998,7 @@
       "tier": "family_tier_1",
       "bonus": 0.15,
       "source_urls": [],
-      "notes": "Derived from the dedicated Science family source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Science family source list in modules/finding/scripts/find_support.py."
     },
     "science_family_scirobotics": {
       "names": [
@@ -6016,7 +6016,7 @@
       "tier": "family_tier_1",
       "bonus": 0.15,
       "source_urls": [],
-      "notes": "Derived from the dedicated Science family source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Science family source list in modules/finding/scripts/find_support.py."
     },
     "science_family_stm": {
       "names": [
@@ -6034,7 +6034,7 @@
       "tier": "family_tier_2",
       "bonus": 0.1,
       "source_urls": [],
-      "notes": "Derived from the dedicated Science family source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Science family source list in modules/finding/scripts/find_support.py."
     },
     "science_family_sciimmunol": {
       "names": [
@@ -6052,7 +6052,7 @@
       "tier": "family_tier_2",
       "bonus": 0.1,
       "source_urls": [],
-      "notes": "Derived from the dedicated Science family source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Science family source list in modules/finding/scripts/find_support.py."
     },
     "science_family_stke": {
       "names": [
@@ -6070,7 +6070,7 @@
       "tier": "family_tier_2",
       "bonus": 0.1,
       "source_urls": [],
-      "notes": "Derived from the dedicated Science family source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Science family source list in modules/finding/scripts/find_support.py."
     },
     "science_family_adi": {
       "names": [
@@ -6088,7 +6088,7 @@
       "tier": "science_partner",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Science family source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Science family source list in modules/finding/scripts/find_support.py."
     },
     "science_family_bmr": {
       "names": [
@@ -6106,7 +6106,7 @@
       "tier": "science_partner",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Science family source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Science family source list in modules/finding/scripts/find_support.py."
     },
     "science_family_bmef": {
       "names": [
@@ -6124,7 +6124,7 @@
       "tier": "science_partner",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Science family source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Science family source list in modules/finding/scripts/find_support.py."
     },
     "science_family_csbj": {
       "names": [
@@ -6142,7 +6142,7 @@
       "tier": "science_partner",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Science family source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Science family source list in modules/finding/scripts/find_support.py."
     },
     "science_family_csbr": {
       "names": [
@@ -6160,7 +6160,7 @@
       "tier": "science_partner",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Science family source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Science family source list in modules/finding/scripts/find_support.py."
     },
     "science_family_ehs": {
       "names": [
@@ -6178,7 +6178,7 @@
       "tier": "science_partner",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Science family source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Science family source list in modules/finding/scripts/find_support.py."
     },
     "science_family_energymatadv": {
       "names": [
@@ -6196,7 +6196,7 @@
       "tier": "science_partner",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Science family source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Science family source list in modules/finding/scripts/find_support.py."
     },
     "science_family_hds": {
       "names": [
@@ -6214,7 +6214,7 @@
       "tier": "science_partner",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Science family source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Science family source list in modules/finding/scripts/find_support.py."
     },
     "science_family_icomputing": {
       "names": [
@@ -6232,7 +6232,7 @@
       "tier": "science_partner",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Science family source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Science family source list in modules/finding/scripts/find_support.py."
     },
     "science_family_jemdr": {
       "names": [
@@ -6250,7 +6250,7 @@
       "tier": "science_partner",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Science family source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Science family source list in modules/finding/scripts/find_support.py."
     },
     "science_family_remotesensing": {
       "names": [
@@ -6268,7 +6268,7 @@
       "tier": "science_partner",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Science family source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Science family source list in modules/finding/scripts/find_support.py."
     },
     "science_family_olar": {
       "names": [
@@ -6286,7 +6286,7 @@
       "tier": "science_partner",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Science family source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Science family source list in modules/finding/scripts/find_support.py."
     },
     "science_family_research": {
       "names": [
@@ -6304,7 +6304,7 @@
       "tier": "science_partner",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Science family source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Science family source list in modules/finding/scripts/find_support.py."
     },
     "science_family_space": {
       "names": [
@@ -6322,7 +6322,7 @@
       "tier": "science_partner",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Science family source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Science family source list in modules/finding/scripts/find_support.py."
     },
     "science_family_ultrafastscience": {
       "names": [
@@ -6340,7 +6340,7 @@
       "tier": "science_partner",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Science family source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Science family source list in modules/finding/scripts/find_support.py."
     },
     "science_family_plantphenomics": {
       "names": [
@@ -6358,7 +6358,7 @@
       "tier": "science_partner",
       "bonus": 0.05,
       "source_urls": [],
-      "notes": "Derived from the dedicated Science family source list in auto_research/auto_find/sources.py."
+      "notes": "Derived from the dedicated Science family source list in modules/finding/scripts/find_support.py."
     }
   }
 }

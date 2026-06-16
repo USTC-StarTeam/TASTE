@@ -101,6 +101,62 @@ def preview_repair_status(
     return {"status": status, "refresh_pdf_note": refresh_pdf_note}
 
 
+def _sync_workspace_refs_to_final(workspace: Path, final_dir: Path, result: dict[str, Any]) -> None:
+    refs = workspace / "refs.bib"
+    if not refs.exists() or not refs.is_file():
+        return
+    refs_dst = final_dir / "refs.bib"
+    if refs.resolve() == refs_dst.resolve():
+        result["refs_sync"] = "source_is_final_refs_bib"
+        return
+    if refs_dst.exists() and refs_dst.is_file():
+        try:
+            src_mtime = refs.stat().st_mtime
+            dst_mtime = refs_dst.stat().st_mtime
+        except OSError:
+            src_mtime = 0.0
+            dst_mtime = 0.0
+        if dst_mtime + 1e-6 >= src_mtime:
+            result["refs_sync"] = "kept_existing_final_refs_bib"
+            return
+    shutil.copy2(refs, refs_dst)
+    result["refs_sync"] = "copied_workspace_refs_bib"
+
+
+def _compile_input_files(final_dir: Path) -> list[Path]:
+    if not final_dir.exists():
+        return []
+    input_suffixes = {".tex", ".bib", ".sty", ".bst", ".cls", ".bbx", ".cbx", ".png", ".jpg", ".jpeg"}
+    input_names = {"math_commands.tex"}
+    generated_names = {
+        "paper.pdf",
+        "paper.log",
+        "paper.aux",
+        "paper.bbl",
+        "paper.blg",
+        "paper.out",
+        "paper.fls",
+        "paper.fdb_latexmk",
+        "paper.synctex.gz",
+    }
+    files: list[Path] = []
+    for path in final_dir.rglob("*"):
+        if not path.is_file() or path.name in generated_names:
+            continue
+        if path.name in input_names or path.suffix.lower() in input_suffixes:
+            files.append(path)
+    return files
+
+
+def _existing_pdf_is_fresh(final_pdf: Path, final_dir: Path) -> bool:
+    if not final_pdf.exists() or not final_pdf.is_file():
+        return False
+    input_mtimes = [path.stat().st_mtime for path in _compile_input_files(final_dir) if path.exists()]
+    if not input_mtimes:
+        return False
+    return final_pdf.stat().st_mtime + 1e-6 >= max(input_mtimes)
+
+
 def prompt_only_pipeline_update(report_path: Path, loop_path: Path, prompt_path: Path) -> dict[str, Any]:
     return {
         "paper_preview_repair_loop_status": "prompt_ready",
@@ -126,15 +182,18 @@ def compile_workspace_pdf(workspace: Path, *, timeout_sec: int = 600) -> dict[st
     if not final_tex.exists():
         result["stderr_tail"] = "missing final/paper.tex"
         return result
-    refs = workspace / "refs.bib"
-    if refs.exists():
-        refs_dst = final_dir / "refs.bib"
-        if refs.resolve() != refs_dst.resolve():
-            shutil.copy2(refs, refs_dst)
+    _sync_workspace_refs_to_final(workspace, final_dir, result)
     figures_src = workspace / "figures"
     figures_dst = final_dir / "figures"
     if figures_src.exists() and not figures_dst.exists():
         shutil.copytree(figures_src, figures_dst)
+    pdf = final_dir / "paper.pdf"
+    if _existing_pdf_is_fresh(pdf, final_dir):
+        result["pdf_exists"] = True
+        result["return_code"] = 0
+        result["skipped_compile"] = True
+        result["skip_reason"] = "existing_final_pdf_is_fresh_for_current_inputs"
+        return result
     latexmk = shutil.which("latexmk") or workspace_tool_path("latexmk")
     pdflatex = shutil.which("pdflatex") or workspace_tool_path("pdflatex")
     if latexmk and Path(latexmk).exists():
@@ -144,7 +203,6 @@ def compile_workspace_pdf(workspace: Path, *, timeout_sec: int = 600) -> dict[st
             result["commands"].append(run([pdflatex, "-interaction=nonstopmode", "paper.tex"], cwd=final_dir, timeout=timeout_sec))
     else:
         result["stderr_tail"] = "latexmk/pdflatex not found"
-    pdf = final_dir / "paper.pdf"
     result["pdf_exists"] = pdf.exists()
     result["return_code"] = 0 if pdf.exists() else 2
     return result
@@ -298,6 +356,7 @@ Independent-first workflow requirement:
 - Phase 1: independently read the compiled PDF text using `pdftotext`, the TeX source, refs.bib, paper.log/compile.log, and venue_requirements.json. Build your own issue inventory from those artifacts.
 - Phase 2: repair manuscript/citation/template issues inside the paper writing workspace only.
 - Phase 3: after Phase 1 and Phase 2, use the TASTE preview/normality/figure reports and gate snapshot below only as a cross-check to make sure no TASTE gate was missed.
+- Do not invoke bare `python`, `python3`, or `python3.x` in Bash. For local manuscript artifact probes use `{management_python()} -c ...` or `{management_python()} -m ...`; this is a paper artifact inspection/receipt task, not an experiment launch.
 - In `review_protocol`, record this order explicitly with `discovery_order` or `phase_order` showing `independent_artifact_review` before `gate_crosscheck`, and set `gate_crosscheck_after_independent_review=true`.
 - Each `independent_findings` item must include `discovery_phase="independent_artifact_review"` or `found_before_gate_crosscheck=true`, plus raw PDF/TeX/BibTeX/log/venue evidence. Findings discovered only from TASTE gate names do not count.
 
@@ -320,7 +379,7 @@ Independent manuscript review requirement:
 - `review_protocol` must prove this was not a fixed TASTE checklist: set `open_ended_review=true`, describe the open-ended manuscript issue-discovery scope, record the independent-first discovery order described above, and include `artifact_reading_log` entries for current `pdf`, `pdf_text`, `tex`, `refs_bib`, `compile_log`, `paper_log`, and `venue_requirements`. Each reading-log entry must include the artifact/path, the command or method used to read it, and evidence such as a sha256, excerpt, location, or observation.
 - Clean checks belong in `review_protocol.artifact_reading_log`; `independent_findings` must list the actual manuscript issues Claude Code found from the current artifacts before/during repair. Each `independent_findings` item must be a structured object with `category`, `issue`, `review_source`/`discovery_method`, and artifact evidence such as `source_artifacts`, `location`, `pdf_text_excerpt`, `tex_location`, `bibtex_entry`, or `log_excerpt`. Do not write a generic "checked by Claude" sentence; The workflow will reject findings that only restate TASTE gate names without raw PDF/TeX/BibTeX/log/venue evidence.
 - Each `repairs_applied` item must name the changed or checked file, describe the action, and include a post-repair verification command/result or evidence. If no file edit was needed for a finding, record the checked artifact and verification evidence rather than leaving the repair unstructured.
-- For file artifacts, each entry must include `path` and `sha256`. For `pdf_text`, include either a text-file path plus `sha256`, or an excerpt/summary showing the PDF text was actually read.
+- For file artifacts, each entry must include `path` and `sha256`. For `pdf_text`, include either a project-local text-file path plus `sha256`, or an excerpt/summary/note showing the PDF text was actually read; do not use `/tmp` paths for receipt artifacts unless the receipt also includes persistent text evidence. If `compile_log` and `paper_log` are the same `paper.log`, record that explicitly in `artifact_reading_log` so both log checks are traceable.
 
 TASTE deterministic gate cross-check, to use after the independent issue inventory:
 {repair_focus_diagnosis(state)}
@@ -352,6 +411,7 @@ Repair requirements:
 - If body pages are within the official venue limit, treat the repair as figure/table footprint, citation coverage, bibliography density, venue-template compliance, and manuscript-shape quality.
 - If body pages are within the official venue limit, do not enter a prose-shortening workflow just because total PDF pages include references. Keep the paper substantive and repair figure footprint, real citation coverage, bibliography density, and template details first.
 - If the blocker is word count/substance, add normal venue-appropriate manuscript prose only where it is justified by existing evidence, verified citations, implemented methods, or neutral method/protocol scope. Do not create new empirical claims or a weakness/negative-result narrative.
+- If no current selected-route proposed-method result is supported by experiment artifacts, the manuscript may still be a polished preview, but it must be honest: report verified reference calibration and protocol facts only, and do not write completed-experiment language such as "we evaluate the proposed method", "all experiments use", "results averaged over", hardware/runtime claims, superiority claims, or fabricated dataset statistics. Use manuscript-native evidence-scope wording instead of internal TASTE status language.
 - If the blocker is venue page policy, read the normality audit page_breakdown and overflow_source first. Repair the real cause: figure/table footprint, bibliography/reference-page footprint, or prose length only when prose is actually the source. Do not apply one venue's page/template rule to another venue.
 - If the blocker is venue format, preserve the resolved official target venue template, class, sidecar files, fonts, margins, and bibliography style from venue_requirements.json and workspace/inputs/template.tex.
 - If the blocker is figures, redraw, resize, remove, or move weak/oversized figures according to the figure audit; do not hide weak evidence with cosmetic charts and do not cut scientific content before diagnosing float footprint.
@@ -360,7 +420,7 @@ Repair requirements:
 - Keep at least the reference count required by the current venue normality audit. If the venue has no official minimum, satisfy TASTE's recorded quality target from venue_requirements.json; do not invent an official citation rule. When the current count is below target, add only real, relevant, verified references and synchronized BibTeX entries; do not introduce anonymous/missing entries.
 - If `citation_keys_resolved` is blocked, repair citations before declaring success: add real BibTeX entries for already cited works, replace unsupported keys with verified references already in `refs.bib`, or remove unsupported citation keys. The compiled PDF must not contain `?`, `??`, or undefined-citation warnings.
 - If `citation_render_clean` is blocked or `paper_citation_render_status` is `block`, repair citation rendering before any page/prose repair. For Springer Nature numeric styles (`sn-nature`, `sn-basic`, `sn-mathphys-num`), do not use `\citet`, `\citeauthor`, `\citeyear`, `\citealp`, or `\citealt` in the manuscript. Rewrite author-led prose as normal narrative text followed by `\citep{{...}}` or the template-supported numeric citation command. Recompile and confirm `paper.log`/`compile.log` contain no `Author undefined`, no BibTeX/BST errors such as `can't pop an empty literal stack`, and the PDF text contains no `(author?)`, `[?]`, or `??`.
-- Improve the paper shape while repairing: the Method should include the mathematical model and algorithmic design; The venue-appropriate Results/Experiments prose should include dataset/protocol/reference calibration plus a clean evaluation matrix for the proposed variants. It must not read like a to-do list.
+- Improve the paper shape while repairing: the Method should include the mathematical model and algorithmic design; The venue-appropriate Results/Experiments prose should include only evidence-backed dataset/protocol/reference calibration plus a clean evaluation matrix for proposed variants when it is written as protocol scope rather than completed results. It must not read like a to-do list, but it also must not pretend unrun proposed-method experiments have finished.
 - Compile `paper/writing/{venue_slug}/workspace/final/paper.pdf` after TeX edits if possible.
 - Before returning, write/update `state/paper_preview_self_review.json` for the current PDF/TeX/refs/logs. The workflow will validate this receipt and keep the preview blocked if it is missing, stale, or not tied to the current artifacts.
 

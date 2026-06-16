@@ -4,11 +4,11 @@ import time
 
 import pytest
 
-from auto_research.auto_find.category_select import select_relevant_categories
-from auto_research.auto_find.local_rank import rank_papers_tfidf
-from auto_research.auto_find import sources
-from auto_research.auto_find import pipeline as find_pipeline
-from auto_research.auto_find.pipeline import _abstract_enrichment_limits, _attach_abstract_language_fields, _enrich_missing_abstracts_for_adaptive_recall, _evaluate_items, _has_strong_topic_evidence, _is_transient_llm_service_error, _prefilter_titles, _read_candidates, _recommended, _repair_llm_alternative_route_false_negative, _run_diagnostics, _screened_ranking, _strict_strong_anchor_count, _triage_candidates, _venue_metadata_status_fields
+from find_support import select_relevant_categories
+from find_support import rank_papers_tfidf
+import find_support as sources
+import find_pipeline as find_pipeline
+from find_pipeline import _abstract_enrichment_limits, _attach_abstract_language_fields, _enrich_missing_abstracts_for_adaptive_recall, _evaluate_items, _has_strong_topic_evidence, _is_transient_llm_service_error, _prefilter_titles, _read_candidates, _recommended, _repair_llm_alternative_route_false_negative, _run_diagnostics, _screened_ranking, _strict_strong_anchor_count, _triage_candidates, _venue_metadata_status_fields
 from auto_research.models import AppConfig
 from auto_research.jobs import JobCancelled
 
@@ -2753,9 +2753,9 @@ def test_abstract_enrichment_prioritizes_adaptive_recall_candidates(monkeypatch)
             paper["abstract"] = "filled abstract"
         return papers
 
-    monkeypatch.setattr("auto_research.auto_find.pipeline.enrich_with_openalex", fake_openalex)
-    monkeypatch.setattr("auto_research.auto_find.pipeline.enrich_with_semantic_scholar", fake_enrich)
-    monkeypatch.setattr("auto_research.auto_find.pipeline.enrich_with_arxiv_title_match", lambda papers, limit=40: papers)
+    monkeypatch.setattr("find_pipeline.enrich_with_openalex", fake_openalex)
+    monkeypatch.setattr("find_pipeline.enrich_with_semantic_scholar", fake_enrich)
+    monkeypatch.setattr("find_pipeline.enrich_with_arxiv_title_match", lambda papers, limit=40: papers)
     cfg = AppConfig(research_interest="LLM semantic condition retrieval benchmark; discrete retrieval benchmark")
     generic = [
         {"id": f"generic_{index}", "title": f"Generic Machine Learning Paper {index}", "abstract": ""}
@@ -4859,9 +4859,9 @@ def test_abstract_enrichment_tries_semantic_scholar_before_openalex_and_arxiv(mo
         calls.append("arxiv")
         return papers
 
-    monkeypatch.setattr("auto_research.auto_find.pipeline.enrich_with_semantic_scholar", fake_semantic)
-    monkeypatch.setattr("auto_research.auto_find.pipeline.enrich_with_openalex", fake_openalex)
-    monkeypatch.setattr("auto_research.auto_find.pipeline.enrich_with_arxiv_title_match", fake_arxiv)
+    monkeypatch.setattr("find_pipeline.enrich_with_semantic_scholar", fake_semantic)
+    monkeypatch.setattr("find_pipeline.enrich_with_openalex", fake_openalex)
+    monkeypatch.setattr("find_pipeline.enrich_with_arxiv_title_match", fake_arxiv)
     cfg = AppConfig(research_interest="LLM-assisted retrieval benchmark", default_find_selection={"include_arxiv": True})
     items = [{"id": "kdd_doi", "title": "Retrieval Benchmark", "abstract": "", "doi": "10.1145/example", "metadata": {"doi": "10.1145/example"}}]
 
@@ -4889,9 +4889,9 @@ def test_abstract_enrichment_falls_through_when_semantic_scholar_has_no_abstract
         calls.append("arxiv")
         return papers
 
-    monkeypatch.setattr("auto_research.auto_find.pipeline.enrich_with_semantic_scholar", fake_semantic)
-    monkeypatch.setattr("auto_research.auto_find.pipeline.enrich_with_openalex", fake_openalex)
-    monkeypatch.setattr("auto_research.auto_find.pipeline.enrich_with_arxiv_title_match", fake_arxiv)
+    monkeypatch.setattr("find_pipeline.enrich_with_semantic_scholar", fake_semantic)
+    monkeypatch.setattr("find_pipeline.enrich_with_openalex", fake_openalex)
+    monkeypatch.setattr("find_pipeline.enrich_with_arxiv_title_match", fake_arxiv)
     cfg = AppConfig(research_interest="LLM-assisted retrieval benchmark", default_find_selection={"include_arxiv": True})
     items = [{"id": "kdd_doi", "title": "Retrieval Benchmark", "abstract": "", "doi": "10.1145/example", "metadata": {"doi": "10.1145/example"}}]
 
@@ -4903,7 +4903,7 @@ def test_abstract_enrichment_falls_through_when_semantic_scholar_has_no_abstract
 
 
 def test_venue_metadata_cache_manifest_keeps_title_only_source_limited(tmp_path):
-    from auto_research.auto_update.json_builder import build_venue_metadata_cache as builder
+    import build_venue_metadata_cache as builder
 
     cache_dir = tmp_path / "dblp_kdd" / "2026"
     cache_dir.mkdir(parents=True)
@@ -4957,7 +4957,7 @@ def test_venue_metadata_cache_manifest_keeps_title_only_source_limited(tmp_path)
 
 
 def test_venue_metadata_cache_manifest_uses_adapter_not_dblp_prefix_for_icml(tmp_path):
-    from auto_research.auto_update.json_builder import build_venue_metadata_cache as builder
+    import build_venue_metadata_cache as builder
 
     cache_dir = tmp_path / "dblp_icml" / "2026"
     cache_dir.mkdir(parents=True)
@@ -5008,7 +5008,7 @@ def test_venue_metadata_cache_manifest_uses_adapter_not_dblp_prefix_for_icml(tmp
 
 
 def test_venue_metadata_cache_manifest_treats_official_categories_as_find_ready(tmp_path):
-    from auto_research.auto_update.json_builder import build_venue_metadata_cache as builder
+    import build_venue_metadata_cache as builder
 
     cache_dir = tmp_path / "openreview_iclr_2026" / "2026"
     cache_dir.mkdir(parents=True)

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-15T08:00:01.343649+00:00",
+  "generated_at": "2026-06-15T22:40:11.956990+00:00",
   "owner": "taste_framework",
   "script_count": 45,
   "scripts": [
@@ -339,7 +339,7 @@
       "path": "framework/scripts/claude_project_session.py",
       "owner": "taste_framework",
       "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
-      "function_count": 65,
+      "function_count": 70,
       "functions": [
         "redact_secrets",
         "runtime_artifact_state_path_pattern",
@@ -373,6 +373,7 @@
         "current_find_artifact_generator_policy_issue",
         "current_find_tool_policy_issue",
         "direct_conda_command_policy_issue",
+        "paper_inline_python_probe_allowed",
         "direct_python_command_policy_issue",
         "_runtime_control_stage",
         "process_signal_command_policy_issue",
@@ -388,6 +389,10 @@
         "title_key_for_current_find",
         "current_find_recommended_title_keys",
         "selected_title_in_current_find",
+        "current_selected_execution_ids",
+        "route_run_id",
+        "route_plan_id",
+        "route_idea_id",
         "current_environment_selection",
         "stage_allows_selected_repo",
         "active_repo_path",

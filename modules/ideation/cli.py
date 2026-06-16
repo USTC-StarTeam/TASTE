@@ -41,7 +41,7 @@ def main() -> None:
         raise SystemExit("--run-id is required")
     _ensure_runtime_imports()
     from auto_research.models import AppConfig, IdeaRequest
-    from auto_research.auto_idea.pipeline import run_idea
+    from idea_pipeline import run_idea
 
     config = AppConfig(**_load_json(args.config_json, {}))
     result = run_idea(IdeaRequest(run_id=args.run_id, max_ideas=args.max_ideas or None, parallel_workers=args.parallel_workers or None), config)

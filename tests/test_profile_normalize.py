@@ -1,4 +1,4 @@
-from auto_research.auto_find.profile_normalize import PROFILE_SCHEMA, normalize_profile_shape, normalize_user_profile, profile_retrieval_text
+from find_support import PROFILE_SCHEMA, normalize_profile_shape, normalize_user_profile, profile_retrieval_text
 from auto_research.models import AppConfig
 
 

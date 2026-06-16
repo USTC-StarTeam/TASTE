@@ -41,9 +41,39 @@ def current_find_progress(paths) -> tuple[str, dict[str, Any], dict[str, Any]]:
 def write_running_state(paths, args, queries: list[str], cmd: list[str], env: dict[str, str]) -> None:
     current_run_id, current_progress, current_results = current_find_progress(paths)
     progress_counts = current_progress.get("counts", {}) if isinstance(current_progress.get("counts"), dict) else {}
-    log_path = paths.logs / "literature_tool.log"
+    internal_dir = Path(str(getattr(args, "internal_output_dir", "") or "")).expanduser() if str(getattr(args, "internal_output_dir", "") or "").strip() else None
+    log_path = (internal_dir / "literature_tool.log") if internal_dir is not None else paths.logs / "literature_tool.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text("受控 Find 补检索已启动；实时 TASTE 渠道、标题筛选、摘要抓取和 LLM 打分日志会追加在这里。\n", encoding="utf-8")
+    if internal_dir is not None:
+        state = {
+            "project": args.project,
+            "venue": args.venue,
+            "queries": queries,
+            "mode": "deep_survey" if args.deep_survey else "fast_mode" if args.fast_mode else "standard",
+            "commands": {"taste": cmd},
+            "return_codes": {},
+            "status": "internal_running",
+            "pid": os.getpid(),
+            "started_at": datetime.now(UTC).isoformat(),
+            "previous_current_find_run_id": current_run_id,
+            "current_strong_recommendations": int(current_progress.get("strong_recommendation_count") or len(current_results.get("strong_recommendations", [])) or 0),
+            "current_recommendation_target_count": int(current_progress.get("recommendation_target_count") or 0),
+            "current_recommendation_shortfall": int(current_progress.get("recommendation_shortfall") or 0),
+            "current_counts": progress_counts,
+            "artifact_dir": str(internal_dir),
+            "packet_path": str(internal_dir / "literature_tool_packet.md"),
+            "packet_json": str(internal_dir / "literature_tool_packet.json"),
+            "log_path": str(log_path),
+            "guardrail": "Internal project-agent literature survey: outputs must not replace web-facing planning/finding artifacts unless --publish-current-find is explicitly used.",
+            "record_only_requested": False,
+            "new_find_allowed": True,
+            "web_visible": False,
+            "internal_literature_survey": True,
+        }
+        save_json(internal_dir / "run_state.json", state)
+        save_json(paths.state / "internal_literature_tool_last_run.json", state)
+        return
     full_path = paths.state / "full_research_cycle.json"
     full = load_json(full_path, {})
     if not isinstance(full, dict):
@@ -428,7 +458,7 @@ def sync_current_find_plan_queries(paths, state: dict[str, Any]) -> str:
         "last_literature_tool_mode": "record_only" if state.get("record_only_requested") else "controlled_targeted_find",
         "allowed_actions": [
             "{py} modules/finding/scripts/build_literature_tool_packet.py --project {project}".format(py=management_python(), project=state.get("project") or "<project>"),
-            "{py} modules/finding/scripts/run_literature_tool.py --project {project} --query \"<targeted literature gap query>\" --fast-mode".format(py=management_python(), project=state.get("project") or "<project>"),
+            "{py} modules/finding/scripts/run_literature_tool.py --project {project} --query \"<targeted literature gap query>\" --fast-mode --publish-current-find".format(py=management_python(), project=state.get("project") or "<project>"),
             "{py} modules/writing/scripts/audit_submission_readiness.py --project {project}".format(py=management_python(), project=state.get("project") or "<project>"),
             "{py} modules/planning/scripts/build_blocker_action_plan.py --project {project}".format(py=management_python(), project=state.get("project") or "<project>"),
         ],
@@ -462,6 +492,11 @@ def main() -> int:
         "--record-only",
         action="store_true",
         help="Record targeted literature queries and rebuild the packet without launching a new Find.",
+    )
+    parser.add_argument(
+        "--publish-current-find",
+        action="store_true",
+        help="Publish this targeted survey into the web-facing current Find artifacts. Default is internal project-agent survey only.",
     )
     args = parser.parse_args()
 
@@ -500,6 +535,15 @@ def main() -> int:
         env.setdefault("ABSTRACT_SCORING_MAX_WORKERS", "6")
         env.setdefault("ABSTRACT_SCORING_BATCH_SIZE", "10")
     record_only = bool(args.record_only) or env.get("DISABLE_NEW_FIND", "0").lower() in {"1", "true", "yes", "on"}
+    publish_current_find = bool(args.publish_current_find or env.get("TASTE_LITERATURE_TOOL_PUBLISH", "0").lower() in {"1", "true", "yes", "on"})
+    internal_output_dir = None
+    if not publish_current_find and not record_only:
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S_%fZ")
+        internal_output_dir = paths.state / "internal_literature_runs" / stamp
+        internal_output_dir.mkdir(parents=True, exist_ok=True)
+        args.internal_output_dir = str(internal_output_dir)
+    else:
+        args.internal_output_dir = ""
     if record_only:
         env["DISABLE_NEW_FIND"] = "1"
     if record_only:
@@ -550,7 +594,7 @@ def main() -> int:
         packet_cmd = [sys.executable, str(ROOT / "modules" / "finding" / "scripts" / "build_literature_tool_packet.py"), "--project", args.project]
         if args.venue:
             packet_cmd.extend(["--venue", args.venue])
-        packet = run(packet_cmd, env=env, timeout=180, live_log_path=paths.logs / "literature_tool.log")
+        packet = run(packet_cmd, env=env, timeout=180, live_log_path=live_log_path)
         state["packet_return_code"] = packet.returncode
         state["packet_stdout_tail"] = packet.stdout[-3000:]
         state["packet_stderr_tail"] = packet.stderr[-3000:]
@@ -578,6 +622,8 @@ def main() -> int:
         # full-cycle contract. The wrapper's fast flag now only means targeted
         # repair queries with bounded but gate-complete budgets.
         pass
+    if internal_output_dir is not None:
+        cmd.extend(["--internal-output-dir", str(internal_output_dir)])
     if args.deep_survey:
         cmd.append("--deep-survey")
     if args.skip_arxiv:
@@ -588,18 +634,25 @@ def main() -> int:
         cmd.append("--skip-github")
     if args.skip_venues:
         cmd.append("--skip-venues")
+    live_log_path = (internal_output_dir / "literature_tool.log") if internal_output_dir is not None else paths.logs / "literature_tool.log"
     write_running_state(paths, args, queries, cmd, env)
     logs: list[dict[str, Any]] = []
-    proc = run(cmd, env=env, timeout=args.timeout_sec + 180 if args.timeout_sec > 0 else None, live_log_path=paths.logs / "literature_tool.log")
+    proc = run(cmd, env=env, timeout=args.timeout_sec + 180 if args.timeout_sec > 0 else None, live_log_path=live_log_path)
     logs.append({"stage": "taste", "command": cmd, "return_code": proc.returncode, "stdout_tail": proc.stdout[-6000:], "stderr_tail": proc.stderr[-6000:]})
     sync_cmd = [sys.executable, str(ROOT / "framework" / "scripts" / "sync_outputs.py"), "--project", args.project, "--allow-empty"]
     packet_cmd = [sys.executable, str(ROOT / "modules" / "finding" / "scripts" / "build_literature_tool_packet.py"), "--project", args.project]
     if args.venue:
         packet_cmd.extend(["--venue", args.venue])
+    if internal_output_dir is not None:
+        packet_cmd.extend(["--artifact-dir", str(internal_output_dir), "--output-json", str(internal_output_dir / "literature_tool_packet.json"), "--output-md", str(internal_output_dir / "literature_tool_packet.md")])
     if proc.returncode in {0, 124}:
-        sync = run(sync_cmd, env=env, timeout=300, live_log_path=paths.logs / "literature_tool.log")
-        logs.append({"stage": "sync", "command": sync_cmd, "return_code": sync.returncode, "stdout_tail": sync.stdout[-3000:], "stderr_tail": sync.stderr[-3000:]})
-        packet = run(packet_cmd, env=env, timeout=180, live_log_path=paths.logs / "literature_tool.log")
+        if internal_output_dir is None:
+            sync = run(sync_cmd, env=env, timeout=300, live_log_path=live_log_path)
+            logs.append({"stage": "sync", "command": sync_cmd, "return_code": sync.returncode, "stdout_tail": sync.stdout[-3000:], "stderr_tail": sync.stderr[-3000:]})
+        else:
+            sync = subprocess.CompletedProcess(sync_cmd, 0, "skipped for internal literature survey; web-facing artifacts preserved", "")
+            logs.append({"stage": "sync", "command": sync_cmd, "return_code": "skipped_internal", "stdout_tail": sync.stdout, "stderr_tail": ""})
+        packet = run(packet_cmd, env=env, timeout=180, live_log_path=live_log_path)
         logs.append({"stage": "packet", "command": packet_cmd, "return_code": packet.returncode, "stdout_tail": packet.stdout[-3000:], "stderr_tail": packet.stderr[-3000:]})
     else:
         sync = subprocess.CompletedProcess(sync_cmd, 0, "skipped because TASTE failed before producing a valid current Find output", "")
@@ -614,7 +667,8 @@ def main() -> int:
         tool_status = "failed_taste_preserved_previous_find"
     else:
         tool_status = "completed_with_warnings"
-    current_progress = load_json(paths.planning / "finding" / "find_progress.json", {})
+    progress_dir = internal_output_dir if internal_output_dir is not None else paths.planning / "finding"
+    current_progress = load_json(progress_dir / "find_progress.json", {})
     progress_counts = current_progress.get("counts", {}) if isinstance(current_progress, dict) and isinstance(current_progress.get("counts"), dict) else {}
     state = {
         "project": args.project,
@@ -637,20 +691,30 @@ def main() -> int:
         "current_recommendation_target_count": int(current_progress.get("recommendation_target_count") or 0) if isinstance(current_progress, dict) else 0,
         "current_recommendation_shortfall": int(current_progress.get("recommendation_shortfall") or 0) if isinstance(current_progress, dict) else 0,
         "current_counts": progress_counts,
-        "packet_path": str(paths.planning / "literature_tool_packet.md"),
-        "packet_json": str(paths.state / "literature_tool_packet.json"),
-        "log_path": str(paths.logs / "literature_tool.log"),
+        "packet_path": str((internal_output_dir / "literature_tool_packet.md") if internal_output_dir is not None else paths.planning / "literature_tool_packet.md"),
+        "packet_json": str((internal_output_dir / "literature_tool_packet.json") if internal_output_dir is not None else paths.state / "literature_tool_packet.json"),
+        "log_path": str((internal_output_dir / "literature_tool.log") if internal_output_dir is not None else paths.logs / "literature_tool.log"),
+        "artifact_dir": str(internal_output_dir) if internal_output_dir is not None else "",
+        "web_visible": internal_output_dir is None,
+        "internal_literature_survey": internal_output_dir is not None,
         "failure_summary": _failure_summary_from_logs(logs) if tool_status != "completed" else "",
         "guardrail": "This wrapper ran a controlled TASTE literature survey for targeted literature repair. Outputs are literature signals only until TASTE verifies repo/data/experiment evidence; weak papers must not be promoted to satisfy gates.",
         "record_only_requested": False,
         "new_find_allowed": True,
     }
-    state["current_find_plan_sync"] = sync_current_find_plan_queries(paths, state)
-    save_json(paths.state / "literature_tool_last_run.json", state)
-    save_json(paths.state / "taste_targeted_queries.json", state)
-    write_completed_full_cycle_state(paths, args, state)
-    paths.logs.mkdir(parents=True, exist_ok=True)
-    with (paths.logs / "literature_tool.log").open("a", encoding="utf-8") as handle:
+    if internal_output_dir is None:
+        state["current_find_plan_sync"] = sync_current_find_plan_queries(paths, state)
+        save_json(paths.state / "literature_tool_last_run.json", state)
+        save_json(paths.state / "taste_targeted_queries.json", state)
+        write_completed_full_cycle_state(paths, args, state)
+        final_log_path = paths.logs / "literature_tool.log"
+    else:
+        state["current_find_plan_sync"] = "internal_survey_not_synced_to_web_current_find"
+        save_json(internal_output_dir / "run_state.json", state)
+        save_json(paths.state / "internal_literature_tool_last_run.json", state)
+        final_log_path = internal_output_dir / "literature_tool.log"
+    final_log_path.parent.mkdir(parents=True, exist_ok=True)
+    with final_log_path.open("a", encoding="utf-8") as handle:
         handle.write("\n[literature_tool] final_state\n")
         handle.write(json.dumps({"state": state, "stages": logs}, indent=2, ensure_ascii=False) + "\n")
     print(json.dumps(state, ensure_ascii=False, indent=2))

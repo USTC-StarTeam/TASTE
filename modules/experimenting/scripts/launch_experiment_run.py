@@ -279,25 +279,41 @@ def run_watchdog(project: str) -> dict[str, Any]:
 def experiment_launch_gate(paths, project: str, *, route_scope: str = "unspecified", save: bool = True) -> dict[str, Any]:
     viability = load_json(paths.state / "selected_base_viability_gate.json", {})
     switch_gate = load_json(paths.state / "base_switch_gate.json", {})
-    required = bool(
+    environment_selection = load_json(paths.state / "evidence_ready_repo_selection.json", {})
+    viability_requires_gate = bool(
         isinstance(viability, dict)
         and viability.get("status") == "blocked"
         and viability.get("decision") == "base_switch_gate_required"
     )
+    environment_requires_gate = bool(
+        isinstance(environment_selection, dict)
+        and environment_selection.get("selection_gate") == "blocked_candidate_base_switch_gate_required"
+    )
+    switch_gate_blocked = bool(
+        isinstance(switch_gate, dict)
+        and switch_gate.get("status") == "blocked"
+        and switch_gate.get("decision") == "base_switch_not_authorized"
+    )
+    required = bool(viability_requires_gate or environment_requires_gate or switch_gate_blocked)
     authorized = bool(
         isinstance(switch_gate, dict)
         and switch_gate.get("status") == "pass"
         and switch_gate.get("decision") == "authorize_base_switch"
         and switch_gate.get("switch_authorized") is True
     )
+    selected_base_reference_required = bool(isinstance(switch_gate, dict) and switch_gate.get("selected_base_reference_required") is True)
     normalized_scope = str(route_scope or "unspecified").strip().lower().replace("-", "_")
     current_route_scopes = {"selected_base_current_route", "current_route", "current_route_evidence_repair", "selected_base_evidence_repair", "selected_base_prune_diagnostic"}
     base_switch_evidence_scopes = {"base_switch_evidence_collection", "candidate_base_evaluation", "candidate_route_evidence_collection", "candidate_loader_probe", "candidate_reference_protocol", "candidate_reference_smoke", "candidate_reference_reproduction"}
     candidate_route_scopes = {"candidate_route", "alternative_route", "base_switch_candidate", "new_base", "route_switch_candidate"}
     if required and not authorized:
         if normalized_scope in current_route_scopes:
-            status = "pass"
-            reason = "selected-base current-route evidence repair remains allowed under launcher/audit contract; candidate-route switching and claim promotion remain blocked"
+            if viability_requires_gate or selected_base_reference_required:
+                status = "pass"
+                reason = "selected-base current-route evidence repair remains allowed under launcher/audit contract; candidate-route switching and claim promotion remain blocked"
+            else:
+                status = "blocked"
+                reason = "current-route experiment launch is blocked because the current Find/Plan has no authoritative selected Environment; old active_repo evidence is historical only"
         elif normalized_scope in base_switch_evidence_scopes:
             status = "pass"
             reason = "candidate base-switch evidence collection is allowed only to satisfy deterministic gate checks; it cannot switch the active route or support paper/claim promotion"
@@ -306,7 +322,7 @@ def experiment_launch_gate(paths, project: str, *, route_scope: str = "unspecifi
             reason = "candidate/alternative-route main-route launch requires an authorized deterministic base-switch gate; use --route-scope base_switch_evidence_collection only for bounded gate evidence collection"
         else:
             status = "blocked"
-            reason = "route_scope is unspecified while selected_base_viability_gate requires deterministic base-switch gating; pass --route-scope selected_base_current_route for current-route repair or base_switch_evidence_collection for bounded candidate-gate evidence collection"
+            reason = "route_scope is unspecified while deterministic base-switch gating is required by selected-base viability or Environment selection; pass --route-scope base_switch_evidence_collection only for bounded candidate-gate evidence collection"
     else:
         status = "pass"
         reason = "base-switch gate does not block this launch"
@@ -324,11 +340,22 @@ def experiment_launch_gate(paths, project: str, *, route_scope: str = "unspecifi
             "status": switch_gate.get("status", "") if isinstance(switch_gate, dict) else "",
             "decision": switch_gate.get("decision", "") if isinstance(switch_gate, dict) else "",
             "switch_authorized": switch_gate.get("switch_authorized", False) if isinstance(switch_gate, dict) else False,
+            "selected_base_reference_required": selected_base_reference_required,
         },
-        "policy": "When selected_base_viability_gate requires deterministic base-switch gating and base_switch_gate is not authorized, candidate/alternative-route main-route launches and claim promotion are blocked. Explicit current selected-base evidence-repair launches may continue with route_scope=selected_base_current_route. Bounded candidate evidence collection may continue with route_scope=base_switch_evidence_collection only to satisfy deterministic gate checks; it must not edit active_repo/evidence_ready_repo_selection or support paper/claim promotion.",
+        "environment_selection": {
+            "selection_gate": environment_selection.get("selection_gate", "") if isinstance(environment_selection, dict) else "",
+            "fresh_find_run_id": environment_selection.get("fresh_find_run_id", "") if isinstance(environment_selection, dict) else "",
+            "selected_plan_id": environment_selection.get("selected_plan_id", "") if isinstance(environment_selection, dict) else "",
+        },
+        "base_switch_gate_required": required,
+        "viability_requires_gate": viability_requires_gate,
+        "environment_requires_gate": environment_requires_gate,
+        "switch_gate_blocked": switch_gate_blocked,
+        "policy": "When selected_base_viability_gate or Environment selection requires deterministic base-switch gating and base_switch_gate is not authorized, candidate/alternative-route main-route launches and claim promotion are blocked. Explicit current selected-base evidence repair may continue only when a current authoritative selected base exists. Bounded candidate evidence collection may continue with route_scope=base_switch_evidence_collection only to satisfy deterministic gate checks; it must not edit active_repo/evidence_ready_repo_selection or support paper/claim promotion.",
         "evidence": [
             str(paths.state / "selected_base_viability_gate.json"),
             str(paths.state / "base_switch_gate.json"),
+            str(paths.state / "evidence_ready_repo_selection.json"),
             str(paths.state / "blocker_action_plan.json"),
         ],
     }

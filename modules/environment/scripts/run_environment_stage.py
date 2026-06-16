@@ -120,6 +120,62 @@ def _pending_loader_selection(selection: dict, selected: dict) -> bool:
     )
 
 
+def _route_path(row: dict) -> str:
+    if not isinstance(row, dict):
+        return ''
+    for key in ['repo_path', 'local_path', 'path', 'proposed_path_hint']:
+        value = str(row.get(key) or '').strip()
+        if value:
+            return value
+    return ''
+
+
+def _route_names(row: dict) -> set[str]:
+    if not isinstance(row, dict):
+        return set()
+    return {str(row.get(key) or '').strip() for key in ['name', 'repo', 'repo_name', 'full_name'] if str(row.get(key) or '').strip()}
+
+
+def _route_matches(row: dict, other: dict) -> bool:
+    row_path = _route_path(row)
+    other_path = _route_path(other)
+    if row_path and other_path and row_path == other_path:
+        return True
+    names = _route_names(row)
+    other_names = _route_names(other)
+    return bool(names and other_names and names.intersection(other_names))
+
+
+def _base_switch_authorized_for(paths, selected: dict) -> bool:
+    gate = load_json(paths.state / 'base_switch_gate.json', {})
+    execution = load_json(paths.state / 'base_switch_execution.json', {})
+    candidate = gate.get('candidate_route') if isinstance(gate, dict) and isinstance(gate.get('candidate_route'), dict) else {}
+    return bool(
+        isinstance(gate, dict)
+        and gate.get('status') == 'pass'
+        and gate.get('decision') in {'authorize_base_switch', 'base_switch_authorized'}
+        and gate.get('switch_authorized') is True
+        and _route_matches(selected, candidate)
+        and isinstance(execution, dict)
+        and str(execution.get('status') or '').startswith('authorized_by_deterministic_base_switch_gate')
+    )
+
+
+def _unresolved_base_switch_candidate(paths, selected: dict) -> bool:
+    if not isinstance(selected, dict) or not selected:
+        return False
+    gate = load_json(paths.state / 'base_switch_gate.json', {})
+    candidate = gate.get('candidate_route') if isinstance(gate, dict) and isinstance(gate.get('candidate_route'), dict) else {}
+    if not _route_matches(selected, candidate):
+        return False
+    if _base_switch_authorized_for(paths, selected):
+        return False
+    current = gate.get('current_selected_route') if isinstance(gate, dict) and isinstance(gate.get('current_selected_route'), dict) else {}
+    current_path = _route_path(current)
+    selected_path = _route_path(selected)
+    return bool(current_path and selected_path and current_path != selected_path)
+
+
 def current_env_selection_valid(paths) -> bool:
     run_id = current_find_run_id(paths)
     selected_plan_id = current_selected_plan_id(paths)
@@ -135,9 +191,11 @@ def current_env_selection_valid(paths) -> bool:
     selected_route_plan_id = str(selected.get('selected_plan_id') or '').strip()
     stage = str(selection.get('selection_stage') or selection.get('selected_by_stage') or selected.get('selection_stage') or '').strip()
     pending_loader = _pending_loader_selection(selection, selected)
+    unresolved_base_switch = _unresolved_base_switch_candidate(paths, selected)
     claim_ready = bool(_claim_ready_dataset_names(selected))
     accepted = bool(
         not pending_loader
+        and not unresolved_base_switch
         and claim_ready
         and (
             str(selection.get('selection_gate') or '').startswith(('accepted_by_claude', 'accepted_by_deterministic_base_switch_gate'))
@@ -157,13 +215,99 @@ def current_env_selection_valid(paths) -> bool:
     )
 
 
-def select_current_run_environment_repo(project: str, paths, env_name: str, max_rounds: int = 3) -> str:
+BASE_SWITCH_SELECTION_GATE = 'blocked_candidate_base_switch_gate_required'
+
+
+def _candidate_from_base_switch_selection(paths, selection: dict) -> dict:
+    pending = selection.get('pending_environment_candidate') if isinstance(selection.get('pending_environment_candidate'), dict) else {}
+    if pending:
+        return pending
+    gate = load_json(paths.state / 'base_switch_gate.json', {})
+    candidate = gate.get('candidate_route') if isinstance(gate, dict) and isinstance(gate.get('candidate_route'), dict) else {}
+    return candidate if isinstance(candidate, dict) else {}
+
+
+def _candidate_arg_values(candidate: dict) -> tuple[str, str, str, str]:
+    repo = str(candidate.get('repo_path') or candidate.get('local_path') or candidate.get('path') or candidate.get('proposed_path_hint') or '').strip()
+    name = str(candidate.get('name') or candidate.get('repo') or candidate.get('repo_name') or '').strip()
+    title = str(candidate.get('literature_base_title') or candidate.get('selected_base_title') or candidate.get('title') or '').strip()
+    dataset = str(candidate.get('claim_ready_dataset') or candidate.get('dataset') or '').strip()
+    if not dataset:
+        summary = candidate.get('probe_summary') if isinstance(candidate.get('probe_summary'), dict) else {}
+        ready = summary.get('claim_ready_datasets') if isinstance(summary.get('claim_ready_datasets'), list) else []
+        dataset = str(ready[0]) if ready else ''
+    return repo, name, title, dataset
+
+
+def collect_candidate_base_switch_evidence(project: str, paths, env_name: str, venue: str = '') -> list[dict]:
+    selection = load_json(paths.state / 'evidence_ready_repo_selection.json', {})
+    if not isinstance(selection, dict) or str(selection.get('selection_gate') or '') != BASE_SWITCH_SELECTION_GATE:
+        return []
+    candidate = _candidate_from_base_switch_selection(paths, selection)
+    repo, name, title, dataset = _candidate_arg_values(candidate)
+    if not repo:
+        print('TASTE candidate base-switch evidence collection skipped: candidate repo_path is missing.', flush=True)
+        return []
+    base_cmd = [
+        sys.executable,
+        'modules/environment/scripts/probe_candidate_base_reference.py',
+        '--project', project,
+        '--repo-path', repo,
+        '--env-name', env_name,
+        '--timeout-sec', '300',
+    ]
+    if name:
+        base_cmd.extend(['--candidate-name', name])
+    if title:
+        base_cmd.extend(['--candidate-title', title])
+    if dataset:
+        base_cmd.extend(['--dataset', dataset])
+    print(f'TASTE candidate base-switch evidence collection: repo={name or repo} dataset={dataset or "unknown"}', flush=True)
+    results: list[dict] = []
+    run_optional([sys.executable, 'modules/environment/scripts/build_fresh_base_implementation_plan.py', '--project', project], ROOT, timeout=180)
+    protocol_rc = run_optional([*base_cmd, '--mode', 'protocol'], ROOT, timeout=360)
+    results.append({'step': 'candidate_reference_protocol', 'return_code': protocol_rc})
+    smoke_rc = 2
+    if protocol_rc == 0:
+        smoke_rc = run_optional([*base_cmd, '--mode', 'smoke'], ROOT, timeout=360)
+        results.append({'step': 'candidate_reference_smoke', 'return_code': smoke_rc})
+    else:
+        results.append({'step': 'candidate_reference_smoke', 'return_code': 2, 'skipped': 'protocol_blocked'})
+    if smoke_rc == 0:
+        full_rc = run_optional([*base_cmd, '--mode', 'full', '--execute'], ROOT, timeout=360)
+        results.append({'step': 'candidate_reference_full_reproduction_audit', 'return_code': full_rc})
+    else:
+        results.append({'step': 'candidate_reference_full_reproduction_audit', 'return_code': 2, 'skipped': 'smoke_blocked'})
+    gate_cmd = [sys.executable, 'modules/environment/scripts/audit_deterministic_base_switch_gate.py', '--project', project]
+    if venue:
+        gate_cmd.extend(['--venue', venue])
+    gate_rc = run_optional(gate_cmd, ROOT, timeout=180)
+    results.append({'step': 'deterministic_base_switch_gate', 'return_code': gate_rc})
+    gate = load_json(paths.state / 'base_switch_gate.json', {})
+    if isinstance(gate, dict) and gate.get('status') == 'pass' and gate.get('decision') == 'authorize_base_switch' and gate.get('switch_authorized') is True:
+        exec_cmd = [sys.executable, 'modules/environment/scripts/execute_authorized_base_switch.py', '--project', project]
+        if venue:
+            exec_cmd.extend(['--venue', venue])
+        exec_rc = run_optional(exec_cmd, ROOT, timeout=180)
+        results.append({'step': 'execute_authorized_base_switch', 'return_code': exec_rc})
+    audit_cmd = [sys.executable, 'modules/experimenting/scripts/audit_reference_reproduction.py', '--project', project]
+    if venue:
+        audit_cmd.extend(['--venue', venue])
+    results.append({'step': 'reference_reproduction_gate', 'return_code': run_optional(audit_cmd, ROOT, timeout=180)})
+    blocker_cmd = [sys.executable, 'modules/planning/scripts/build_blocker_action_plan.py', '--project', project]
+    if venue:
+        blocker_cmd.extend(['--venue', venue])
+    results.append({'step': 'blocker_action_plan', 'return_code': run_optional(blocker_cmd, ROOT, timeout=180)})
+    return results
+
+
+def select_current_run_environment_repo(project: str, paths, env_name: str, max_rounds: int = 3, venue: str = '') -> str:
     run_id = current_find_run_id(paths)
     if not run_id:
         raise SystemExit('Current Find run_id is missing; cannot perform environment-stage base selection.')
     # Build/refresh current-run candidate pool first; audit must consume the same Find run that the UI shows.
     run_optional([sys.executable, 'modules/environment/scripts/select_fresh_research_base.py', '--project', project], ROOT)
-    run_optional([sys.executable, 'modules/finding/scripts/run_literature_base_audit.py', '--project', project, '--limit', '9', '--repo-search-per-candidate', '2', '--repo-limit', '5', '--probe-timeout-sec', '120', '--fresh-find-run-id', run_id], ROOT)
+    run_optional([sys.executable, 'modules/finding/scripts/run_literature_base_audit.py', '--project', project, '--limit', '12', '--repo-search-per-candidate', '2', '--repo-limit', '5', '--probe-timeout-sec', '120', '--fresh-find-run-id', run_id], ROOT)
     selector = [
         sys.executable, 'modules/environment/scripts/select_evidence_ready_repo.py', '--project', project,
         '--env-name', env_name, '--limit', '12', '--timeout-sec', '180',
@@ -183,12 +327,28 @@ def select_current_run_environment_repo(project: str, paths, env_name: str, max_
         selection = load_json(paths.state / 'evidence_ready_repo_selection.json', {})
         selected = selection.get('selected') if isinstance(selection, dict) and isinstance(selection.get('selected'), dict) else {}
         repo = str(selected.get('repo_path') or selected.get('local_path') or '').strip()
+        if isinstance(selection, dict) and str(selection.get('selection_gate') or '') == BASE_SWITCH_SELECTION_GATE:
+            collect_candidate_base_switch_evidence(project, paths, env_name, venue=venue)
+            selection = load_json(paths.state / 'evidence_ready_repo_selection.json', {})
+            selected = selection.get('selected') if isinstance(selection, dict) and isinstance(selection.get('selected'), dict) else {}
+            repo = str(selected.get('repo_path') or selected.get('local_path') or '').strip()
+            if str(selection.get('selection_gate') or '') == BASE_SWITCH_SELECTION_GATE and not current_env_selection_valid(paths):
+                blocker_reason = 'Current Find environment-stage selection found a loader/data-ready candidate, but deterministic base-switch evidence remains incomplete; candidate stays proposal-only while TASTE records the exact reference/audit blockers.'
+                write_repo_selection_blocker(paths, blocker_reason, selection=selection)
+                run_optional([sys.executable, 'modules/environment/scripts/build_fresh_base_implementation_plan.py', '--project', project], ROOT, timeout=180)
+                raise SystemExit(2)
         if rc == 0 and repo and Path(repo).exists() and current_env_selection_valid(paths):
             return repo
         expand_repo_search(project, round_index, fresh_find_run_id=run_id)
-    blocker_reason = 'Current Find environment-stage selection did not find an evidence-ready repo; old active_repo remains legacy/control only.'
-    write_repo_selection_blocker(paths, blocker_reason, selection=load_json(paths.state / 'evidence_ready_repo_selection.json', {}))
-    write_fresh_base_implementation_blocker(paths, run_id, blocker_reason)
+    latest_selection = load_json(paths.state / 'evidence_ready_repo_selection.json', {})
+    if isinstance(latest_selection, dict) and str(latest_selection.get('selection_gate') or '') == BASE_SWITCH_SELECTION_GATE:
+        blocker_reason = 'Current Find environment-stage selection found a loader/data-ready candidate, but deterministic base-switch evidence remains incomplete; candidate stays proposal-only while TASTE continues evidence collection/search.'
+        write_repo_selection_blocker(paths, blocker_reason, selection=latest_selection)
+        run_optional([sys.executable, 'modules/environment/scripts/build_fresh_base_implementation_plan.py', '--project', project], ROOT, timeout=180)
+    else:
+        blocker_reason = 'Current Find environment-stage selection did not find an evidence-ready repo; old active_repo remains legacy/control only.'
+        write_repo_selection_blocker(paths, blocker_reason, selection=latest_selection if isinstance(latest_selection, dict) else {})
+        write_fresh_base_implementation_blocker(paths, run_id, blocker_reason)
     raise SystemExit(2)
 
 def run(cmd: list[str], cwd: Path, timeout: int | None = None) -> int:
@@ -301,7 +461,11 @@ def claude_accepts_current_route(paths) -> bool:
     gate = str(selection.get('selection_gate', '')) if isinstance(selection, dict) else ''
     if isinstance(selection, dict) and _pending_loader_selection(selection, selected):
         return False
-    if gate.startswith(('accepted_by_claude', 'accepted_by_deterministic_base_switch_gate')):
+    if _unresolved_base_switch_candidate(paths, selected):
+        return False
+    if gate.startswith('accepted_by_deterministic_base_switch_gate'):
+        return _base_switch_authorized_for(paths, selected)
+    if gate.startswith('accepted_by_claude'):
         return True
     decision = {}
     if isinstance(selection, dict) and isinstance(selection.get('claude_topic_decision'), dict):
@@ -682,6 +846,12 @@ def maybe_switch_to_evidence_ready_repo(project: str, paths, env_name: str, curr
             'evidence_ready_count': selection.get('evidence_ready_count', 0),
             'repo_env_strategy': load_repo_env_strategy(paths),
         })
+        if isinstance(selection, dict) and str(selection.get('selection_gate') or '') == BASE_SWITCH_SELECTION_GATE:
+            collect_candidate_base_switch_evidence(project, paths, env_name)
+            selection = load_json(paths.state / 'evidence_ready_repo_selection.json', {})
+            if str(selection.get('selection_gate') or '') == BASE_SWITCH_SELECTION_GATE and not current_env_selection_valid(paths):
+                write_repo_selection_blocker(paths, 'Loader/data-ready base-switch candidate remains proposal-only because deterministic reference/audit gates are incomplete.', selection=selection)
+                return current_repo
         if rc == 0 and next_repo and Path(next_repo).exists() and claude_accepts_current_route(paths):
             if next_repo != current_repo:
                 print(f'TASTE switched active repo to Claude-accepted evidence-ready/transformable route: {next_repo}', flush=True)
@@ -716,7 +886,7 @@ def main() -> int:
     elif current_env_selection_valid(paths):
         repo = infer_repo(paths, '')
     else:
-        repo = select_current_run_environment_repo(args.project, paths, env_name, max_rounds=args.repo_search_rounds)
+        repo = select_current_run_environment_repo(args.project, paths, env_name, max_rounds=args.repo_search_rounds, venue=args.venue)
     env_name = explicit_env_name or f"{args.project}_{Path(repo).name}".replace('-', '_')
     print(f'TASTE environment stage: project={args.project}', flush=True)
     print(f'selected repo={repo}', flush=True)

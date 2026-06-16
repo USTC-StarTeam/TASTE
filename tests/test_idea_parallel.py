@@ -1,6 +1,6 @@
 import re
 
-from auto_research.auto_idea.pipeline import run_idea
+from idea_pipeline import run_idea
 from auto_research.models import AppConfig, IdeaRequest
 from auto_research.storage import create_run_dir, delete_run, write_json
 
@@ -40,7 +40,7 @@ class FakeIdeaLLM:
 
 
 def test_parallel_idea_generation_uses_candidate_pool_and_judge(monkeypatch):
-    monkeypatch.setattr("auto_research.auto_idea.pipeline.LLMClient", FakeIdeaLLM)
+    monkeypatch.setattr("idea_pipeline.LLMClient", FakeIdeaLLM)
     run_id, directory = create_run_dir("idea_parallel_test")
     try:
         write_json(

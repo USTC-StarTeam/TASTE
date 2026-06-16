@@ -1,7 +1,9 @@
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from auto_research.auto_find.local_cache import cache_directory, load_cached_venue_year, write_venue_year_cache
+from build_openreview_cache import build_openreview_year, venue_spec
+from find_support import cache_directory, load_cached_venue_year, write_venue_year_cache
 
 
 def _venue():
@@ -55,3 +57,40 @@ def test_cache_directory_uses_short_conference_name_under_runtime_root():
     root = Path("/tmp/taste-local-cache-test")
 
     assert cache_directory(venue, 2025, root=root) == root / "icml" / "2025"
+
+
+def test_openreview_builder_uses_shared_venue_specs(monkeypatch):
+    def fake_fetch_notes(year, spec, *, api_version, page_size, timeout, retries, max_pages):
+        assert api_version == 2
+        return [
+            {
+                "id": f"note_{spec['venue']}_{year}",
+                "forum": f"forum_{spec['venue']}_{year}",
+                "number": 1,
+                "content": {
+                    "title": {"value": f"Reliable {spec['venue']} Research Automation"},
+                    "authors": {"value": ["A. Researcher", "B. Builder"]},
+                    "abstract": {"value": "A paper about reliable research automation."},
+                    "primary_area": {"value": "Research automation"},
+                    "keywords": {"value": ["automation", "evaluation"]},
+                },
+            }
+        ], f"{spec['openreview_prefix']}/{year}/Conference"
+
+    monkeypatch.setattr("build_openreview_cache._fetch_notes", fake_fetch_notes)
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        neurips_path = build_openreview_year("openreview_neurips", 2025, output_root=root)
+        iclr_path = build_openreview_year("iclr", 2025, output_root=root)
+        neurips = json.loads(neurips_path.read_text(encoding="utf-8"))
+        iclr = json.loads(iclr_path.read_text(encoding="utf-8"))
+
+    assert venue_spec("nips")["venue_id"] == "openreview_neurips"
+    assert neurips_path == root / "openreview_neurips" / "2025" / "papers.json"
+    assert iclr_path == root / "openreview_iclr" / "2025" / "papers.json"
+    assert neurips["venue"] == "NeurIPS"
+    assert neurips["openreview_venueid"] == "NeurIPS.cc/2025/Conference"
+    assert iclr["venue"] == "ICLR"
+    assert iclr["openreview_venueid"] == "ICLR.cc/2025/Conference"
+    assert neurips["papers"][0]["category"] == "Research automation"
+    assert iclr["papers"][0]["keywords"] == ["automation", "evaluation"]

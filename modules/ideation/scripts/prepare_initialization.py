@@ -86,7 +86,7 @@ def main() -> None:
         f"- literature_packet_summary: {json.dumps(literature_packet.get('summary', {}) if isinstance(literature_packet, dict) else {}, ensure_ascii=False)}\n",
         '- Required use: treat finding outputs as the first literature-discovery layer for idea generation, base-work selection, repo search, and experiment planning; do not cite them as result evidence until TASTE verifies repo/data/experiment artifacts.\n',
         '- Key files for Claude Code: planning/literature_tool_packet.md, state/literature_tool_packet.json, planning/finding/find_results.json, category_scan_report.json, title_filter_report.json, arxiv_raw.json, arxiv_prefiltered.json, read.md, idea.md, plan.md.\n',
-        '- If the packet is stale or too generic for the current blocker, Claude Code may run modules/finding/scripts/run_literature_tool.py with a targeted --query, then rebuild the packet.\n\n',
+        '- If the packet is stale or too generic for the current blocker, Claude Code may run modules/finding/scripts/run_literature_tool.py with a targeted --query as an internal project-agent survey, read the packet under state/internal_literature_runs/..., and must not publish to web-facing current Find unless TASTE/user explicitly asks for --publish-current-find.\n\n',
         '## Best Repo Candidate\n',
     ]
     if best_repo:

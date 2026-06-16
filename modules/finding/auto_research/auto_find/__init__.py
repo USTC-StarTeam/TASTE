@@ -1,2 +1,0 @@
-"""Discovery and recommendation stage."""
-

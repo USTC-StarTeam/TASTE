@@ -456,12 +456,12 @@ def _sync_project_plans(run_id: str, data: dict, markdown: str) -> None:
 def _write_plan_outputs(directory: Path, data: dict, ideas: list[dict] | None = None) -> None:
     plans = [row for row in data.get("plans", []) if isinstance(row, dict)]
     data["plans"] = plans
-    data.update(_apply_execution_selection(ideas or [], plans, source="taste_auto_plan"))
+    data.update(_apply_execution_selection(ideas or [], plans, source="taste_planning"))
     write_json(directory / "plans.json", data)
     markdown = render_plan_markdown(data.get("plans", []))
     write_text(directory / "plan.md", markdown)
-    sync_latest("auto_plan", "plans.json", directory / "plans.json")
-    sync_latest("auto_plan", "plan.md", directory / "plan.md")
+    sync_latest("planning", "plans.json", directory / "plans.json")
+    sync_latest("planning", "plan.md", directory / "plan.md")
     _sync_project_plans(str(data.get("run_id") or ""), data, markdown)
 
 
@@ -614,7 +614,7 @@ def run_plan(request: PlanRequest, config: AppConfig, log: LogFn = print, should
         plans.append(plan)
 
     _raise_if_cancelled(should_cancel)
-    data = {"run_id": request.run_id, "source": "taste_auto_plan", "plans": plans}
+    data = {"run_id": request.run_id, "source": "taste_planning", "plans": plans}
     _write_plan_outputs(directory, data, ideas=ideas)
     update_manifest(directory, "plan")
     log("Plan stage complete")
@@ -668,7 +668,7 @@ def finish_plan(run_id: str, plan_id: str) -> dict:
             plan["completed_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     if not found:
         raise ValueError(f"Plan not found: {plan_id}")
-    data.setdefault("source", "taste_auto_plan")
+    data.setdefault("source", "taste_planning")
     _write_plan_outputs(directory, data, ideas=ideas_data.get("ideas", []))
     update_manifest(directory, "plan")
     return data

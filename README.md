@@ -306,7 +306,7 @@ TASTE 的科研能力按七个阶段拆成 `modules/finding/`、`modules/reading
 本项目在设计和实现过程中参考了若干项目的思路与部分实现方式。相关第三方项目各自遵循其原始许可证，TASTE 在本仓库中保留可审计的来源说明。
 
 - **iDeer**：研究助手流程、信息源聚合、报告生成和邮件报告设计。
-- **openccf**：CCF 目录结构、会议/期刊元数据组织和 DBLP 抓取策略；本仓库内置的 `modules/finding/auto_research/data/ccf_venues.json` 是基于 openccf 公开 CCF 数据整理出的归一化 venue catalog。
+- **openccf**：CCF 目录结构、会议/期刊元数据组织和 DBLP 抓取策略；本仓库内置的 `modules/finding/data/ccf_venues.json` 是基于 openccf 公开 CCF 数据整理出的归一化 venue catalog。
 - **[ICLR2026-Guide-CN](https://github.com/JenniferZhao0531/ICLR2026-Guide-CN)**：OpenReview/ICLR 论文收集、组织和展示方式。
 - **[ccf-deadlines](https://github.com/ccfddl/ccf-deadlines)**：会议信息组织、截止日期元数据和用户侧 venue 工作流设计。
 - **[academic-research-skills](https://github.com/Imbad0202/academic-research-skills)**：Claude Code 学术研究技能组织方式，以及 research -> write -> review -> revise -> finalize 的阶段化写作/审稿思路。

@@ -722,7 +722,7 @@ def action_template(kind: str, project: str, venue: str, skills: dict[str, str])
             ),
             "recommended_commands": [
                 command(project, venue, "build_literature_tool_packet.py"),
-                command(project, "run_literature_tool.py", *((["--venue", venue] if venue else []) + ["--query", "\"<targeted literature gap query>\"", "--fast-mode"])),
+                command(project, "run_literature_tool.py", *((["--venue", venue] if venue else []) + ["--query", "\"<targeted literature gap query>\"", "--fast-mode", "--publish-current-find"])),
                 command(project, venue, "audit_submission_readiness.py"),
                 command(project, venue, "build_blocker_action_plan.py"),
             ],
@@ -1736,7 +1736,7 @@ def enforce_literature_recommendation_gate(
             else:
                 row["recommended_commands"] = [
                     command(project, venue, "build_literature_tool_packet.py"),
-                    command(project, "run_literature_tool.py", *((["--venue", venue] if venue else []) + ["--query", "\"<targeted literature gap query>\"", "--fast-mode"])),
+                    command(project, "run_literature_tool.py", *((["--venue", venue] if venue else []) + ["--query", "\"<targeted literature gap query>\"", "--fast-mode", "--publish-current-find"])),
                     command(project, venue, "audit_submission_readiness.py"),
                     command(project, venue, "build_blocker_action_plan.py"),
                 ]

@@ -21,8 +21,8 @@ if str(FRAMEWORK_SCRIPTS) not in sys.path:
 from taste_pythonpath import ensure_taste_pythonpath
 ensure_taste_pythonpath(WORKSPACE_ROOT)
 
-from auto_research.auto_find.catalog import catalog_by_id
-from auto_research.auto_find.sources import fetch_venue_title_index, venue_metadata_audit_from_papers
+from find_support import catalog_by_id
+from find_support import fetch_venue_title_index, venue_metadata_audit_from_papers
 from auto_research.llm import keyword_category
 from auto_research.paths import LOCAL_DATABASE_DIR
 

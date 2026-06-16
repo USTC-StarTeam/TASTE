@@ -1,4 +1,5 @@
 import hashlib
+import importlib.util
 import json
 import os
 import subprocess
@@ -41,6 +42,13 @@ def _load_audit_paper_normality():
     return audit_paper_normality
 
 
+def _load_audit_paper_figures():
+    ensure_script_paths()
+    import audit_paper_figures
+
+    return audit_paper_figures
+
+
 def _load_paper_self_review():
     ensure_script_paths()
     import paper_self_review
@@ -53,6 +61,16 @@ def _load_repair_paper_preview_loop():
     import repair_paper_preview_loop
 
     return repair_paper_preview_loop
+
+
+def _load_vendor_bibtex_format():
+    repo_root = Path(__file__).resolve().parents[1]
+    path = repo_root / "modules" / "writing" / "vendor" / "PaperOrchestra" / "skills" / "literature-review-agent" / "scripts" / "bibtex_format.py"
+    spec = importlib.util.spec_from_file_location("paper_orchestra_bibtex_format", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+    return module
 
 
 def _load_resolve_venue_requirements():
@@ -1117,6 +1135,43 @@ def test_springer_nature_article_shape_accepts_article_sections_and_back_matter(
 
 
 
+def test_figure_audit_toy_term_uses_word_boundary_for_dataset_names():
+    audit = _load_audit_paper_figures()
+
+    real_dataset_table = r"""
+\begin{table}[t]
+\caption{Statistics for verified Amazon Toys and Yelp benchmark datasets.}
+\label{tab:dataset_stats}
+\centering
+\small
+\begin{tabular}{lrrr}
+Dataset & Users & Items & Interactions \\
+Amazon Toys & 19412 & 11924 & 167597 \\
+Yelp & 30431 & 20033 & 316354 \\
+\end{tabular}
+\end{table}
+"""
+    toy_probe_table = r"""
+\begin{table}[t]
+\caption{Toy smoke test statistics.}
+\label{tab:toy}
+\centering
+\begin{tabular}{lr}
+Dataset & Value \\
+Toy & 1 \\
+\end{tabular}
+\end{table}
+"""
+
+    real_rows = audit.table_rows(real_dataset_table)
+    toy_rows = audit.table_rows(toy_probe_table)
+
+    assert real_rows[0]["status"] in {"pass", "warn"}
+    assert not any("toy" in issue.lower() for issue in real_rows[0]["issues"])
+    assert toy_rows[0]["status"] == "block"
+    assert any("toy" in issue.lower() for issue in toy_rows[0]["issues"])
+
+
 def test_citation_render_helpers_detect_author_style_failures():
     audit = _load_audit_paper_normality()
     log = """
@@ -1132,6 +1187,11 @@ while executing---line 3431 of file sn-nature.bst
 (There were 1 error messages)
 Bibtex errors: See file 'paper.blg'
 """)
+    latex_errors = audit.latex_compile_error_findings(
+        "! Missing $ inserted.\n"
+        "! Missing } inserted.\n"
+        "! Extra }, or forgotten \\endgroup.\n"
+    )
     markers = audit.pdf_unresolved_citation_markers("DiffRec renders as (author?) [10].\nGood numeric citation [3].\nAnother unresolved ?? marker.")
     commands = audit.textual_citation_commands(r"Prior work \citet{refmodel,diffrec} contrasts with \citeauthor{p5}.")
 
@@ -1141,6 +1201,8 @@ Bibtex errors: See file 'paper.blg'
     assert bibtex["empty_literal_stack_entries"] == ["refmodel"]
     assert bibtex["error_count"] >= 1
     assert any("Bibtex errors" in line for line in bibtex["fatal_lines"])
+    assert latex_errors["error_count"] == 3
+    assert any("Missing $ inserted" in line for line in latex_errors["fatal_lines"])
     assert any("author?" in item for item in markers)
     assert any("??" in item for item in markers)
     assert commands[0]["command"] == "citet"
@@ -1169,7 +1231,9 @@ def test_citation_render_diagnostics_blocks_nature_numeric_author_style(tmp_path
         "You can't pop an empty literal stack for entry refmodel\n"
         "while executing---line 3431 of file sn-nature.bst\n"
         "(There were 1 error messages)\n"
-        "Bibtex errors: See file 'paper.blg'\n",
+        "Bibtex errors: See file 'paper.blg'\n"
+        "! Missing $ inserted.\n"
+        "! Undefined control sequence.\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(audit, "read_pdf_text", lambda path, max_chars=240000: "ReferenceRec appears as (author?) [10] in the compiled PDF.")
@@ -1189,8 +1253,10 @@ def test_citation_render_diagnostics_blocks_nature_numeric_author_style(tmp_path
     assert "pdf_unresolved_citation_markers" in blocker_ids
     assert "nature_numeric_style_textual_citations" in blocker_ids
     assert "bibtex_compile_errors" in blocker_ids
+    assert "latex_compile_errors" in blocker_ids
     assert diagnostics["latex_warnings"]["author_undefined_keys"] == ["refmodel"]
     assert diagnostics["bibtex_errors"]["empty_literal_stack_entries"] == ["refmodel"]
+    assert diagnostics["latex_compile_errors"]["error_count"] == 2
     assert diagnostics["numeric_nature_style"] is True
 
     profile_with_required_options = audit.citation_render_diagnostics(
@@ -1203,6 +1269,18 @@ def test_citation_render_diagnostics_blocks_nature_numeric_author_style(tmp_path
     )
     assert profile_with_required_options["numeric_nature_style"] is True
     assert any(item["id"] == "nature_numeric_style_textual_citations" for item in profile_with_required_options["blockers"])
+
+
+def test_vendor_bibtex_format_escapes_latex_special_title_chars():
+    formatter = _load_vendor_bibtex_format()
+
+    escaped = formatter.escape_bibtex("R^2ec: 100% LLM_rec & C# recommender")
+    math_preserved = formatter.escape_bibtex("R$^2$ec: math-safe title")
+    unbalanced_dollar = formatter.escape_bibtex("Cost $5 baseline")
+
+    assert escaped == r"R\^{}2ec: 100\% LLM\_rec \& C\# recommender"
+    assert math_preserved == r"R$^2$ec: math-safe title"
+    assert unbalanced_dollar == r"Cost \$5 baseline"
 
 
 
@@ -1554,6 +1632,40 @@ def test_refresh_request_without_pdf_hash_change_does_not_block_ready_preview():
     assert decision["refresh_pdf_note"] == "refresh_requested_but_pdf_content_unchanged"
 
 
+def test_repair_compile_preserves_newer_final_refs_and_fresh_pdf(tmp_path, monkeypatch):
+    repair = _load_repair_paper_preview_loop()
+    workspace = tmp_path / "workspace"
+    final_dir = workspace / "final"
+    final_dir.mkdir(parents=True)
+    final_tex = final_dir / "paper.tex"
+    workspace_refs = workspace / "refs.bib"
+    final_refs = final_dir / "refs.bib"
+    final_pdf = final_dir / "paper.pdf"
+    final_tex.write_text(
+        "\\documentclass{article}\n"
+        "\\begin{document}x\\end{document}\n",
+        encoding="utf-8",
+    )
+    workspace_refs.write_text("@article{old,title={Old}}\n", encoding="utf-8")
+    final_refs.write_text("@article{new,title={New}}\n", encoding="utf-8")
+    final_pdf.write_bytes(b"%PDF-1.4\ncurrent pdf\n")
+    base = 1_700_000_000
+    os.utime(workspace_refs, (base, base))
+    os.utime(final_tex, (base + 10, base + 10))
+    os.utime(final_refs, (base + 20, base + 20))
+    os.utime(final_pdf, (base + 30, base + 30))
+    monkeypatch.setattr(repair.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(repair, "workspace_tool_path", lambda _name: "")
+
+    result = repair.compile_workspace_pdf(workspace)
+
+    assert result["return_code"] == 0
+    assert result["skipped_compile"] is True
+    assert result["refs_sync"] == "kept_existing_final_refs_bib"
+    assert final_refs.read_text(encoding="utf-8") == "@article{new,title={New}}\n"
+    assert result["commands"] == []
+
+
 def test_backend_off_prompt_update_does_not_overwrite_self_review_gate(tmp_path):
     repair = _load_repair_paper_preview_loop()
 
@@ -1644,6 +1756,142 @@ We use CandidateRepo as the current repository and implementation backbone for t
     assert preview.legacy_route_story_violations(project, route_story_text, active_name="CurrentBase") == [
         "legacy_route_story_in_manuscript:CandidateRepo"
     ]
+
+
+
+
+def test_manuscript_integrity_blocks_completed_experiment_claims_without_supported_result(tmp_path, monkeypatch):
+    ensure_script_paths()
+    import build_conference_preview_paper as preview
+
+    project = "demo_project"
+    state = tmp_path / "projects" / project / "state"
+    _write_json(state / "scientific_progress_gate.json", {"status": "blocked", "best_candidate": {}})
+    _write_json(state / "reference_reproduction_gate.json", {"status": "pass", "decision": "continue_base"})
+    monkeypatch.setattr(preview, "ROOT", tmp_path)
+
+    manuscript = (
+        "\\section{Introduction}\n"
+        "PriorMethod~\\citep{prior2026} demonstrates strong results in prior work.\n"
+        "\\section{Experiments}\n"
+        "We report reference calibration for the selected baseline after reproducing the official protocol.\n"
+        "We evaluate the proposed method on four benchmark datasets with loaders from RSIR~\\citep{rsir2026}.\n"
+        "All experiments use fixed random seeds and are repeated three times with mean and standard deviation reported.\n"
+        "Metrics are reported with mean and standard deviation across three runs.\n"
+        "Results averaged over 3 random seeds are shown in Table~\\ref{tab:main}.\n"
+        "The reference baseline is trained on a single NVIDIA A100 GPU for approximately 2 hours per run.\n"
+        "Full training configuration, random seeds, and implementation details are documented.\n"
+        "NDCG@10 & 0.0508 $\\pm$ 0.0021.\n"
+        "NDCG@10 & 0.0508 $\\pm$ 0.0021 \\\\ Recall@10 & 0.0862 $\\pm$ 0.0035.\n"
+    )
+
+    violations = preview.unsupported_completed_experiment_claim_violations(project, manuscript)
+
+    assert not any("reference calibration" in item for item in violations)
+    assert any(item.startswith("unsupported_completed_evaluation_claim:") for item in violations)
+    assert any(item.startswith("unsupported_experiment_protocol_claim:") for item in violations)
+    assert any(item.startswith("unsupported_repeated_results_claim:") for item in violations)
+
+    tex_path = tmp_path / "projects" / project / "paper" / "paper.tex"
+    tex_path.parent.mkdir(parents=True, exist_ok=True)
+    tex_path.write_text(manuscript, encoding="utf-8")
+    policy_violations = preview.manuscript_policy_violations(project, tex_path, venue="ICLR")
+    assert any(item.startswith("unsupported_completed_evaluation_claim:") for item in policy_violations)
+
+
+def test_manuscript_integrity_blocks_hardware_claim_without_explicit_evidence(tmp_path, monkeypatch):
+    ensure_script_paths()
+    import build_conference_preview_paper as preview
+
+    project = "demo_project"
+    state = tmp_path / "projects" / project / "state"
+    _write_json(state / "scientific_progress_gate.json", {"status": "blocked", "best_candidate": {}})
+    monkeypatch.setattr(preview, "ROOT", tmp_path)
+
+    manuscript = (
+        "\\section{Experiments}\n"
+        "The reference baseline is trained on a single NVIDIA A100 GPU for approximately 2 hours per run.\n"
+    )
+
+    violations = preview.unsupported_completed_experiment_claim_violations(project, manuscript)
+
+    assert any(item.startswith("unsupported_hardware_runtime_claim:") for item in violations)
+
+
+def test_manuscript_integrity_blocks_seed_configuration_claim_without_explicit_evidence(tmp_path, monkeypatch):
+    ensure_script_paths()
+    import build_conference_preview_paper as preview
+
+    project = "demo_project"
+    state = tmp_path / "projects" / project / "state"
+    _write_json(state / "scientific_progress_gate.json", {"status": "blocked", "best_candidate": {}})
+    monkeypatch.setattr(preview, "ROOT", tmp_path)
+
+    manuscript = (
+        "\\section{Experiments}\n"
+        "Full training configuration, random seeds, and implementation details are documented.\n"
+        "NDCG@10 & $0.0508 \\pm 0.0021$ \\\\ Recall@10 & $0.0862 \\pm 0.0035$.\n"
+    )
+
+    violations = preview.unsupported_completed_experiment_claim_violations(project, manuscript)
+
+    assert any(item.startswith("unsupported_seed_configuration_claim:") for item in violations)
+    assert any(item.startswith("unsupported_metric_uncertainty_claim:") for item in violations)
+
+
+def test_manuscript_integrity_still_blocks_repeated_claims_without_explicit_evidence(tmp_path, monkeypatch):
+    ensure_script_paths()
+    import build_conference_preview_paper as preview
+
+    project = "demo_project"
+    state = tmp_path / "projects" / project / "state"
+    _write_json(
+        state / "scientific_progress_gate.json",
+        {"status": "pass", "best_candidate": {"experiment_id": "run_1", "metric_name": "ndcg_at_10", "metric_value": 0.12}},
+    )
+    monkeypatch.setattr(preview, "ROOT", tmp_path)
+
+    manuscript = (
+        "\\section{Experiments}\n"
+        "We evaluate the proposed method on four benchmark datasets and report audited metrics.\n"
+        "All experiments use fixed random seeds and are repeated three times with mean and standard deviation reported.\n"
+    )
+
+    violations = preview.unsupported_completed_experiment_claim_violations(project, manuscript)
+    assert not any(item.startswith("unsupported_completed_evaluation_claim:") for item in violations)
+    assert any(item.startswith("unsupported_repeated_results_claim:") for item in violations)
+
+
+def test_manuscript_integrity_allows_repeated_and_hardware_claims_with_explicit_evidence(tmp_path, monkeypatch):
+    ensure_script_paths()
+    import build_conference_preview_paper as preview
+
+    project = "demo_project"
+    state = tmp_path / "projects" / project / "state"
+    _write_json(
+        state / "scientific_progress_gate.json",
+        {
+            "status": "pass",
+            "best_candidate": {
+                "experiment_id": "run_1",
+                "metric_name": "ndcg_at_10",
+                "metric_value": 0.12,
+                "seed_count": 3,
+                "hardware": "NVIDIA A100",
+            },
+        },
+    )
+    monkeypatch.setattr(preview, "ROOT", tmp_path)
+
+    manuscript = (
+        "\\section{Experiments}\n"
+        "We evaluate the proposed method on four benchmark datasets and report audited metrics.\n"
+        "All experiments use fixed random seeds and are repeated three times with mean and standard deviation reported.\n"
+        "The reference baseline is trained on a single NVIDIA A100 GPU.\n"
+        "Full training configuration, random seeds, and implementation details are documented.\n"
+    )
+
+    assert preview.unsupported_completed_experiment_claim_violations(project, manuscript) == []
 
 
 def test_writer_route_boundary_marks_candidate_routes_as_prior_work_only(tmp_path):

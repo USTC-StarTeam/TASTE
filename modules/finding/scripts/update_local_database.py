@@ -35,9 +35,8 @@ if str(framework_scripts) not in sys.path:
 from taste_pythonpath import ensure_taste_pythonpath
 ensure_taste_pythonpath(root)
 
-from auto_research.auto_update.json_builder.build_category_summary import write_summary_file
-from auto_research.auto_update.json_builder.build_iclr_openreview_cache import build_iclr_year
-from auto_research.auto_update.json_builder.build_neurips_openreview_cache import build_neurips_year
+from build_category_summary import write_summary_file
+from build_openreview_cache import build_openreview_year
 
 output_root = Path({output_root_json})
 years = {years_json}
@@ -49,15 +48,15 @@ max_pages = {max_pages}
 allow_empty = {allow_empty}
 
 builders = {{
-    "iclr": build_iclr_year,
-    "openreview_iclr": build_iclr_year,
-    "neurips": build_neurips_year,
-    "openreview_neurips": build_neurips_year,
+    "iclr": "iclr",
+    "openreview_iclr": "iclr",
+    "neurips": "neurips",
+    "openreview_neurips": "neurips",
 }}
 results = []
 for venue in venues:
-    builder = builders.get(str(venue).lower())
-    if not builder:
+    builder_venue = builders.get(str(venue).lower())
+    if not builder_venue:
         results.append({{"venue": venue, "status": "skipped", "reason": "unsupported venue builder"}})
         continue
     for year in years:
@@ -67,7 +66,7 @@ for venue in venues:
             shutil.rmtree(tmp_root)
         tmp_output = tmp_root / "local_database"
         try:
-            target = builder(year=year, output_root=tmp_output, page_size=page_size, timeout=timeout, retries=retries, max_pages=max_pages)
+            target = build_openreview_year(venue=builder_venue, year=year, output_root=tmp_output, page_size=page_size, timeout=timeout, retries=retries, max_pages=max_pages)
             data = json.loads(target.read_text(encoding="utf-8"))
             count = int(data.get("paper_count") or len(data.get("papers", []) if isinstance(data.get("papers"), list) else []))
             if count <= 0 and not allow_empty:

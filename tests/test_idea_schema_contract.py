@@ -2,10 +2,11 @@ import importlib.util
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from path_helpers import ensure_script_paths, load_script
 
-from auto_research.auto_idea.pipeline import _normalize_idea_schema, render_ideas_markdown
+from idea_pipeline import _normalize_idea_schema, render_ideas_markdown
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -107,7 +108,7 @@ def _ready_scored_idea(idx: int, source_title: str = "Full-text reading anchor")
             "id": f"idea-{idx}",
             "title": f"Idea {idx}",
             "new_method": "提出一个基于完整精读证据的新方法，包含清晰模块、训练作用点、推理路径和可拆分消融边界，并说明语义信号和协同信号如何在扩散时间步内互补。",
-            "initial_experiment": "基于环境阶段选出的当前可审计基底执行最小同协议实验，对比 baseline、candidate、control 和 ablation，并记录 Recall、NDCG、长尾切片、语义冲突坏例和失败停止条件。",
+            "initial_experiment": "提出候选基底论文或候选 repo 线索，说明 Environment 需要验证 repo、数据、协议和指标后再锁定；最小实验对比 baseline、candidate、control 和 ablation，并记录 Recall、NDCG、长尾切片、语义冲突坏例和失败停止条件。",
             "inspired_by": [{"title": source_title, "reason": "方法模块和实验协议启发"}],
         },
         idx,
@@ -186,6 +187,20 @@ def test_current_find_contract_rejects_pre_environment_base_binding():
     generic = _ready_scored_idea(1)
     assert ensure_current_find_research_plan._idea_contract_issues(generic) == []
 
+    candidate_repo_proposal = _with_scored_idea_contract(
+        {
+            "id": "idea-candidate-repo",
+            "title": "Candidate repo proposal",
+            "new_method": "提出一个基于当前精读证据的新方法，说明候选代码库只作为 Environment 待验证 proposal，方法模块、训练目标和消融边界均来自当前文献证据。",
+            "initial_experiment": "候选基底 proposal：优先评估 https://github.com/example/repo 对应论文的官方代码，Environment 需验证 repo、数据、协议和指标后再锁定；不写本地 repo_path 或训练命令，对比 baseline、candidate、control 和 ablation。",
+            "repo_url": "https://github.com/example/repo",
+            "base_repo": "example/repo",
+            "inspired_by": [{"title": "Current paper", "reason": "方法启发"}],
+        },
+        8,
+    )
+    assert ensure_current_find_research_plan._idea_contract_issues(candidate_repo_proposal) == []
+
     contaminated = _with_scored_idea_contract(
         {
             "id": "idea-rsir-bound",
@@ -251,7 +266,7 @@ def test_current_find_idea_ready_requires_three_research_fields_and_inspiration(
 
 
 def test_run_idea_syncs_generated_ideas_to_project_state(monkeypatch, tmp_path):
-    from auto_research.auto_idea.pipeline import run_idea
+    from idea_pipeline import run_idea
     from auto_research.models import AppConfig, IdeaRequest
     from auto_research.storage import create_run_dir, delete_run, read_json, write_json
 
@@ -312,7 +327,7 @@ def test_run_idea_syncs_generated_ideas_to_project_state(monkeypatch, tmp_path):
 
 
 def test_patch_idea_syncs_project_current_find_state(monkeypatch, tmp_path):
-    from auto_research.auto_idea.pipeline import patch_idea
+    from idea_pipeline import patch_idea
     from auto_research.models import IdeaPatch
     from auto_research.storage import create_run_dir, delete_run, read_json, write_json
 
@@ -741,6 +756,101 @@ def test_same_run_deep_read_fragment_survives_later_full_text_revision(tmp_path)
 
 
 
+
+
+def test_claude_takeover_prompt_flags_stale_run_fragments(tmp_path, monkeypatch):
+    paths = SimpleNamespace(
+        planning=tmp_path / "planning",
+        state=tmp_path / "state",
+    )
+    fragment_dir = paths.planning / "finding" / "current_find_deep_read_fragments"
+    fragment_dir.mkdir(parents=True)
+    paths.state.mkdir(parents=True)
+    ensure_current_find_research_plan.save_json(
+        fragment_dir / "01_paper-old_repair_attempt3.json",
+        {
+            "run_id": "find_old",
+            "source": "claude_subagent_deep_read_fragment",
+            "reading": {"paper_id": "paper-old", "title": "Old Run Fragment Paper"},
+        },
+    )
+    monkeypatch.setattr(ensure_current_find_research_plan, "project_target_venue", lambda _project: "ICLR")
+
+    prompt_path = ensure_current_find_research_plan.write_claude_takeover_prompt(
+        paths,
+        "demo_project",
+        "find_current",
+        read_limit=1,
+        idea_count=2,
+        repair_validation=None,
+        attempt=1,
+    )
+
+    prompt = prompt_path.read_text(encoding="utf-8")
+    assert "旧 run_id deep-read 分片审计" in prompt
+    assert "find_old" in prompt
+    assert "find_current" in prompt
+    assert "顶层 `run_id` 必须严格等于 `find_current`" in prompt
+    assert "不能作为当前产物" in prompt
+
+def test_claude_takeover_prompt_uses_full_text_packet_as_canonical_read_packet(tmp_path, monkeypatch):
+    run_id = "find_prompt_packet_replacement"
+    project_root = tmp_path / "demo_project"
+    paths = SimpleNamespace(
+        root=project_root,
+        planning=project_root / "planning",
+        state=project_root / "state",
+    )
+    packet_dir = paths.planning / "finding" / "full_text_reading"
+    packet_dir.mkdir(parents=True)
+    paths.state.mkdir(parents=True)
+    text_dir = packet_dir / "texts"
+    text_dir.mkdir()
+    original_text = text_dir / "original.txt"
+    replacement_text = text_dir / "replacement.txt"
+    original_text.write_text("original full text " * 500, encoding="utf-8")
+    replacement_text.write_text("replacement full text " * 500, encoding="utf-8")
+    ensure_current_find_research_plan.save_json(
+        packet_dir / "full_text_packet.json",
+        {
+            "run_id": run_id,
+            "papers": [
+                {"paper_id": "paper-1", "title": "Readable Original", "text_path": str(original_text), "text_chars": 20000},
+                {"paper_id": "paper-2", "title": "Unavailable Original", "text_path": "", "text_chars": 0},
+                {
+                    "paper_id": "paper-3",
+                    "title": "Readable Replacement",
+                    "text_path": str(replacement_text),
+                    "text_chars": 22000,
+                    "read_replacement": True,
+                    "replacement_for_unavailable_recommendation": "Unavailable Original",
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(ensure_current_find_research_plan, "project_target_venue", lambda _project: "ICLR")
+
+    prompt_path = ensure_current_find_research_plan.write_claude_takeover_prompt(
+        paths,
+        "demo_project",
+        run_id,
+        read_limit=2,
+        idea_count=2,
+        repair_validation=None,
+        attempt=1,
+    )
+
+    text = prompt_path.read_text(encoding="utf-8")
+    assert "当前 Read canonical reading packet" in text
+    assert "full_text_packet.papers` 是当前 Read 阶段唯一 canonical reading packet" in text
+    assert "Readable Original" in text
+    assert "Readable Replacement" in text
+    assert "Unavailable Original" in text
+    assert "read_replacement=true` 的论文是同一 run 的合法 Read 输入" in text
+    assert "audit_only_unavailable_rows` 仅用于审计" in text
+    assert "没有正文的原始 Find 推荐或已被 replacement 替换的原推荐只作审计，不得写 deep-read 分片" in text
+
+
 def test_deep_read_fragment_merges_top_level_contract_fields(tmp_path):
     run_id = "find_top_level_fragment"
     title = "Top Level Contract Paper"
@@ -778,6 +888,57 @@ def test_deep_read_fragment_merges_top_level_contract_fields(tmp_path):
     valid, report = ensure_current_find_research_plan.validate_claude_readings_against_current_find(selected, {"run_id": run_id, "strong_recommendations": [{"id": "paper-1", "title": title}]}, 1)
     assert valid is True
     assert report["actual_reading_count"] == 1
+
+
+def test_corrupt_deep_read_fragment_quarantine_requires_valid_same_run_repair(tmp_path):
+    run_id = "find_fragment_quarantine"
+    paths = SimpleNamespace(planning=tmp_path / "planning", state=tmp_path / "state")
+    fragment_dir = paths.planning / "finding" / "current_find_deep_read_fragments"
+    fragment_dir.mkdir(parents=True)
+    paths.state.mkdir(parents=True)
+    replaced_bad = fragment_dir / "13_paper-a.json"
+    unreplaced_bad = fragment_dir / "14_paper-b.json"
+    replaced_bad.write_text('{"run_id": "find_fragment_quarantine",', encoding="utf-8")
+    unreplaced_bad.write_text('{"run_id": "find_fragment_quarantine",', encoding="utf-8")
+    title = "Repair Fragment Paper"
+    ensure_current_find_research_plan.save_json(
+        fragment_dir / "13_paper-a_repair_attempt3.json",
+        {
+            "run_id": run_id,
+            "source": "claude_subagent_deep_read_fragment_repair",
+            "reading": {
+                "paper_id": "paper-a",
+                "title": title,
+                **_v4_deep_read_fields(title),
+                "full_text_available": True,
+                "full_text_status": "pdf_text_read",
+                "pdf_text_chars": 50000,
+                "source_text_chars": 50000,
+                "subagent_deep_read": True,
+                "deep_read_audit": {"mode": "task_subagent", "subagent_used": True, "status": "completed"},
+            },
+        },
+    )
+
+    failures = ensure_current_find_research_plan.current_find_deep_read_fragment_failures(paths, run_id)
+    receipt = ensure_current_find_research_plan.quarantine_corrupt_current_find_deep_read_fragments(
+        paths,
+        run_id,
+        failures,
+        "validated_current_find_structured_artifacts",
+    )
+
+    actions = {row["name"]: row["action"] for row in receipt["files"]}
+    moved = next(row for row in receipt["files"] if row["name"] == "13_paper-a.json")
+    assert receipt["status"] == "quarantined_corrupt_deep_read_fragments"
+    assert actions["13_paper-a.json"] == "quarantined_with_valid_same_run_replacement"
+    assert actions["14_paper-b.json"] == "skipped_no_valid_same_run_replacement"
+    assert not replaced_bad.exists()
+    assert unreplaced_bad.exists()
+    assert (fragment_dir / "13_paper-a_repair_attempt3.json").exists()
+    assert Path(moved["backup"]).exists()
+    remaining_failures = ensure_current_find_research_plan.current_find_deep_read_fragment_failures(paths, run_id)
+    assert [row["fragment_name"] for row in remaining_failures] == ["14_paper-b.json"]
 
 
 def test_pending_deep_read_synthesis_is_not_full_text_unavailable_conflict():
@@ -868,7 +1029,7 @@ def test_normalize_clears_stale_packet_conflict_when_row_no_longer_claims_unavai
     assert "当前 reading 仍声明全文不可访问" not in str(clean.get("reading_status_note_zh") or "")
 
 def test_run_plan_empty_selection_still_syncs_project_plan_state(monkeypatch, tmp_path):
-    from auto_research.auto_plan.pipeline import run_plan
+    from plan_pipeline import run_plan
     from auto_research.models import AppConfig, PlanRequest
     from auto_research.storage import create_run_dir, delete_run, read_json, write_json
 
@@ -910,7 +1071,7 @@ def test_run_plan_empty_selection_still_syncs_project_plan_state(monkeypatch, tm
 
 
 def test_run_plan_reads_project_same_run_ideas_and_syncs_project_plans(monkeypatch, tmp_path):
-    from auto_research.auto_plan.pipeline import run_plan
+    from plan_pipeline import run_plan
     from auto_research.models import AppConfig, PlanRequest
     from auto_research.storage import create_run_dir, delete_run, read_json, write_json
 
@@ -1635,7 +1796,7 @@ def test_load_claude_outputs_uses_file_mtime_when_generated_at_missing(tmp_path)
             "title": f"Idea {idx}",
             "status": "approved",
             "new_method": "设计一个结合扩散去噪和语义条件的推荐模块，明确输入、门控、训练目标、反向重建位置和为什么能改善推荐排序。",
-            "initial_experiment": "基于环境阶段选出的可审计基底做最小模块替换，说明替换的文件和模块，对比 baseline、control、ablation，记录 Recall、NDCG 和坏例切片。",
+            "initial_experiment": "提出候选基底论文或候选 repo 线索，说明拟替换的模块边界和 Environment 需要验证的 repo/data/protocol；对比 baseline、control、ablation，记录 Recall、NDCG 和坏例切片。",
             "inspired_by": [{"title": "Mtime Paper", "reason": "条件检索基准机制"}],
         }
         for idx in range(5)
@@ -1696,7 +1857,7 @@ def test_full_text_packet_update_makes_claude_outputs_stale(tmp_path):
             "title": f"Idea {idx}",
             "status": "approved",
             "new_method": "设计一个结合扩散去噪和语义条件的推荐模块，明确输入、门控、训练目标、反向重建位置和为什么能改善推荐排序。",
-            "initial_experiment": "基于环境阶段选出的可审计基底做最小模块替换，说明替换的文件和模块，对比 baseline、control、ablation，记录 Recall、NDCG 和坏例切片。",
+            "initial_experiment": "提出候选基底论文或候选 repo 线索，说明拟替换的模块边界和 Environment 需要验证的 repo/data/protocol；对比 baseline、control、ablation，记录 Recall、NDCG 和坏例切片。",
             "inspired_by": [{"title": "Packet Paper", "reason": "条件检索基准机制"}],
         }
         for idx in range(5)
@@ -1759,7 +1920,7 @@ def test_load_claude_outputs_accepts_chinese_deep_read_schema_without_legacy_fie
             "title": f"Idea {idx}",
             "status": "approved",
             "new_method": "设计一个语义门控的离散检索基准模块，明确协同专家、语义专家和扩散时间步门控的输入输出，并说明该模块如何改善推荐排序。",
-            "initial_experiment": "基于环境阶段选出的可审计检索基准基底做最小模块替换，对比 baseline、仅语义重排、语义门控扩散和去门控消融，记录 Recall、NDCG 与语义冲突坏例。",
+            "initial_experiment": "提出候选检索基准论文或候选 repo 线索，说明 Environment 需要验证 repo/data/protocol 后再锁定；对比 baseline、仅语义重排、语义门控扩散和去门控消融，记录 Recall、NDCG 与语义冲突坏例。",
             "inspired_by": [{"title": "Chinese Schema Paper", "reason": "语义条件检索基准机制"}],
         }
         for idx in range(5)
@@ -1844,7 +2005,7 @@ def test_load_claude_outputs_sanitizes_reading_public_text(tmp_path):
             "title": f"Idea {idx}",
             "status": "approved",
             "new_method": "设计一个结合扩散去噪和语义条件的推荐模块，明确输入、门控、训练目标、反向重建位置和为什么能改善可信推荐排序。",
-            "initial_experiment": "基于环境阶段选出的可审计基底做最小模块替换，说明替换的文件和模块，对比 baseline/control/ablation，记录 HR、NDCG、运行日志和坏例切片。",
+            "initial_experiment": "提出候选基底论文或候选 repo 线索，说明拟替换的模块边界和 Environment 需要验证的 repo/data/protocol；对比 baseline/control/ablation，记录 HR、NDCG、运行日志和坏例切片。",
             "inspired_by": [{"title": "Full Paper", "reason": "可信检索基准机制"}],
         }
         for idx in range(5)
@@ -1904,6 +2065,34 @@ def test_claude_tool_policy_blocks_direct_conda_run_and_mutation():
     )
     assert full_cycle_reason == claude_project_session.DIRECT_PYTHON_COMMAND_POLICY
 
+    paper_probe_reason = claude_project_session.bash_command_tool_policy_issue(
+        "python3 -c 'import hashlib; print(hashlib.sha256(b\"x\").hexdigest())'",
+        "sample_project_env",
+        "paper",
+    )
+    assert paper_probe_reason == ""
+
+    paper_training_reason = claude_project_session.bash_command_tool_policy_issue(
+        "python3 -c 'loss.backward(); optimizer.step()'",
+        "sample_project_env",
+        "paper",
+    )
+    assert paper_training_reason == claude_project_session.DIRECT_PYTHON_COMMAND_POLICY
+
+    writing_probe_reason = claude_project_session.bash_command_tool_policy_issue(
+        "cd paper/writing/iclr/workspace && python3 -c 'import json; print(json.load(open(\"citation_pool.json\")).keys())'",
+        "sample_project_env",
+        "writing:literature",
+    )
+    assert writing_probe_reason == ""
+
+    writing_training_reason = claude_project_session.bash_command_tool_policy_issue(
+        "python3 -c 'loss.backward(); optimizer.step()'",
+        "sample_project_env",
+        "writing:section-writing",
+    )
+    assert writing_training_reason == claude_project_session.DIRECT_PYTHON_COMMAND_POLICY
+
     assert not claude_project_session.bash_command_tool_policy_issue(
         "/opt/project/bin/python -c 'print(1)'",
         "sample_project_env",
@@ -1937,6 +2126,7 @@ def test_claude_tool_policy_blocks_secret_env_probes():
         "echo length=${#OPENAI_API_KEY}",
         "curl -H \"Authorization: Bearer $OPENAI_API_KEY\" https://api.deepseek.com/v1/models",
         "python -c \"import os; print(os.environ.get(OPENAI_API_KEY))\"",
+        "echo \"S2 key set: $([ -n \\\"$SEMANTIC_SCHOLAR_API_KEY\\\" ] && echo YES || echo NO)\"",
     ]
     for command in blocked_commands:
         assert claude_project_session.bash_command_tool_policy_issue(
@@ -2453,6 +2643,39 @@ def test_claude_takeover_repair_prompt_bans_punctuation_only_json_edit(tmp_path)
     assert "ideas.json` 和 `plans.json` 可以用 Claude 文件工具 Write/Edit/MultiEdit" in text
     assert "每次结束时必须保持完整可解析 JSON" in text
     assert "由 wrapper 在机器校验后统一写入" in text
+
+
+def test_claude_takeover_idea_only_repair_prompt_does_not_redo_deep_read(tmp_path):
+    paths = type("Paths", (), {"state": tmp_path / "state"})()
+    paths.state.mkdir(parents=True)
+    prompt_path = ensure_current_find_research_plan.write_claude_takeover_prompt(
+        paths,
+        "demo_project",
+        "find-test",
+        read_limit=20,
+        idea_count=2,
+        repair_validation={
+            "failure_type": "idea_contract_failed",
+            "validation": {
+                "valid": True,
+                "actual_reading_count": 20,
+                "pending_deep_read_synthesis_count": 0,
+                "pending_full_text_reading_count": 0,
+                "deep_read_content_gap_details": [],
+            },
+            "observed": {
+                "raw_artifact_idea_count": 2,
+                "raw_idea_contract_issues": [{"id": "idea_a", "issues": ["inspired_by_missing"]}],
+            },
+        },
+        attempt=4,
+    )
+    text = prompt_path.read_text(encoding="utf-8")
+    assert "只允许做 Idea/Plan 窄返修" in text
+    assert "不要启动 Task/subagent 重新精读 20 篇论文" in text
+    assert "每篇论文一个 JSON 文件" not in text
+    assert "逐篇重写" not in text
+    assert "`planning/finding/ideas.json`：本轮需要用 Claude 文件工具修订" in text
 
 
 def test_current_find_plan_state_requires_full_text_validation_even_when_counts_are_ready(tmp_path, monkeypatch):

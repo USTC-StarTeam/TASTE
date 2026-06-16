@@ -199,25 +199,86 @@ def _route_matches_candidate(route: Any, candidate: dict[str, Any]) -> bool:
     return bool(candidate_names and route_names and candidate_names.intersection(route_names))
 
 
-def candidate_base_switch_block(paths, active_path: str, candidate: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(candidate, dict) or not candidate:
+
+def _repo_path_from_mapping(row: Any) -> str:
+    if not isinstance(row, dict):
+        return ''
+    for key in ['repo_path', 'local_path', 'path', 'current_selected_repo_path']:
+        value = str(row.get(key) or '').strip()
+        if value:
+            return value
+    return ''
+
+
+def _normalize_authoritative_route(row: Any) -> dict[str, Any]:
+    if not isinstance(row, dict) or not _repo_path_from_mapping(row):
         return {}
-    candidate_path = str(candidate.get('repo_path') or candidate.get('local_path') or candidate.get('path') or '').strip()
-    if not candidate_path or (active_path and candidate_path == active_path):
-        return {}
-    viability = load_json(paths.state / 'selected_base_viability_gate.json', {})
-    if not (isinstance(viability, dict) and viability.get('status') == 'blocked' and viability.get('decision') == 'base_switch_gate_required'):
-        return {}
+    route = dict(row)
+    if route.get('repo') and not route.get('name'):
+        route['name'] = route.get('repo')
+    if route.get('repo_name') and not route.get('name'):
+        route['name'] = route.get('repo_name')
+    if route.get('dataset') and not route.get('claim_ready_dataset'):
+        route['claim_ready_dataset'] = route.get('dataset')
+    if route.get('claim_ready_dataset') and not route.get('claim_ready_datasets'):
+        route['claim_ready_datasets'] = [route.get('claim_ready_dataset')]
+    return route
+
+
+def authoritative_current_route(paths) -> dict[str, Any]:
     gate = load_json(paths.state / 'base_switch_gate.json', {})
+    if isinstance(gate, dict):
+        current = _normalize_authoritative_route(gate.get('current_selected_route'))
+        if evidence_ready_for_active(current):
+            return current
+    viability = load_json(paths.state / 'selected_base_viability_gate.json', {})
+    if isinstance(viability, dict):
+        current = _normalize_authoritative_route({
+            'name': viability.get('current_selected_repo'),
+            'repo_path': viability.get('current_selected_repo_path'),
+            'selected_base_title': viability.get('selected_base_title'),
+            'dataset': viability.get('current_dataset'),
+        })
+        if evidence_ready_for_active(current):
+            return current
+    guard = load_json(paths.state / 'selected_base_route_guard.json', {})
+    trusted = guard.get('trusted_audit') if isinstance(guard, dict) and isinstance(guard.get('trusted_audit'), dict) else {}
+    current = _normalize_authoritative_route(trusted)
+    if evidence_ready_for_active(current):
+        return current
+    return {}
+
+
+def _base_switch_gate_authorized(gate: Any, candidate: dict[str, Any]) -> bool:
     route = gate.get('candidate_route') if isinstance(gate, dict) and isinstance(gate.get('candidate_route'), dict) else {}
-    authorized = bool(
+    return bool(
         isinstance(gate, dict)
         and gate.get('status') == 'pass'
         and gate.get('switch_authorized') is True
         and str(gate.get('decision') or '') in {'authorize_base_switch', 'base_switch_authorized'}
         and _route_matches_candidate(route, candidate)
     )
-    if authorized:
+
+
+def candidate_base_switch_block(paths, active_path: str, candidate: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(candidate, dict) or not candidate:
+        return {}
+    candidate_path = str(candidate.get('repo_path') or candidate.get('local_path') or candidate.get('path') or '').strip()
+    # A loader-ready candidate is still only a base-switch proposal when an
+    # existing active route is present. The deterministic base-switch gate is
+    # the only authority that can promote it to active_repo; a not_applicable
+    # or stale viability gate must not silently authorize the switch.
+    gate = load_json(paths.state / 'base_switch_gate.json', {})
+    route = gate.get('candidate_route') if isinstance(gate, dict) and isinstance(gate.get('candidate_route'), dict) else {}
+    if _base_switch_gate_authorized(gate, candidate):
+        return {}
+    current_route = authoritative_current_route(paths)
+    current_path = _repo_path_from_mapping(current_route)
+    candidate_is_gate_route = _route_matches_candidate(route, candidate)
+    contaminated_active_candidate = bool(candidate_is_gate_route and current_path and candidate_path and current_path != candidate_path)
+    if not candidate_path or ((active_path and candidate_path == active_path) and not contaminated_active_candidate):
+        return {}
+    if not active_path and not current_path:
         return {}
     failed = _failed_check_ids(gate) or _default_base_switch_failed_checks()
     return {
@@ -470,6 +531,40 @@ def recover_pending_loader_active_repo(active: dict[str, Any]) -> tuple[dict[str
         'selection_gate': active.get('selection_gate', ''),
         'selected_by': active.get('selected_by', ''),
         'reason': 'pending-loader candidates cannot replace active_repo until claim-ready loader evidence exists',
+        'recovered_at': dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
+    return recovered, recovered['recovered_from_invalid_active_repo']
+
+
+
+def recover_unauthorized_base_switch_active_repo(paths, active: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not isinstance(active, dict) or not active:
+        return {}, {}
+    gate = load_json(paths.state / 'base_switch_gate.json', {})
+    route = gate.get('candidate_route') if isinstance(gate, dict) and isinstance(gate.get('candidate_route'), dict) else {}
+    if not _route_matches_candidate(route, active):
+        return active, {}
+    authorized = bool(
+        isinstance(gate, dict)
+        and gate.get('status') == 'pass'
+        and gate.get('switch_authorized') is True
+        and str(gate.get('decision') or '') in {'authorize_base_switch', 'base_switch_authorized'}
+    )
+    if authorized:
+        return active, {}
+    previous = active.get('previous_active_repo') if isinstance(active.get('previous_active_repo'), dict) else {}
+    if not evidence_ready_for_active(previous):
+        previous = authoritative_current_route(paths)
+    if not evidence_ready_for_active(previous):
+        return active, {}
+    recovered = dict(previous)
+    recovered['recovered_from_invalid_active_repo'] = {
+        'name': active.get('name', ''),
+        'repo_path': active.get('repo_path', ''),
+        'selection_bucket': active.get('selection_bucket', ''),
+        'selection_gate': active.get('selection_gate', ''),
+        'selected_by': active.get('selected_by', ''),
+        'reason': 'base-switch candidates cannot replace active_repo until state/base_switch_gate.json authorizes the switch',
         'recovered_at': dt.datetime.now(dt.timezone.utc).isoformat(),
     }
     return recovered, recovered['recovered_from_invalid_active_repo']
@@ -882,6 +977,40 @@ def candidate_state_path(paths, prefix: str, repo: Path, row: dict[str, Any]) ->
     return paths.state / f'{prefix}_{slugify(name or repo.name)}.json'
 
 
+def candidate_reference_reproduction_audit_path(paths, repo: Path, row: dict[str, Any]) -> Path:
+    name, _ = candidate_identity(row, repo)
+    return paths.state / f'candidate_{slugify(name or repo.name)}_reference_reproduction_audit.json'
+
+
+def candidate_reference_reproduction_resource_block(paths, repo: Path, row: dict[str, Any]) -> dict[str, Any]:
+    path = candidate_reference_reproduction_audit_path(paths, repo, row)
+    payload = load_json(path, {})
+    if not isinstance(payload, dict) or not payload:
+        return {}
+    decision = str(payload.get('decision') or '').strip()
+    status = str(payload.get('status') or '').strip()
+    blockers = payload.get('blockers') if isinstance(payload.get('blockers'), list) else []
+    blocker_text = ' '.join(str(item or '') for item in blockers).lower()
+    resource_blocked = bool(
+        status.startswith('blocked')
+        and (
+            decision == 'candidate_full_reference_reproduction_requires_official_training_or_model_artifacts'
+            or 'official training' in blocker_text
+            or 'model/checkpoint' in blocker_text
+            or 'checkpoint/training resources' in blocker_text
+        )
+    )
+    if not resource_blocked:
+        return {}
+    return {
+        'status': status,
+        'decision': decision,
+        'path': str(path),
+        'blockers': blockers,
+        'artifact_dir': payload.get('artifact_dir', ''),
+    }
+
+
 def probe_candidate_repo(project: str, repo: Path, row: dict[str, Any], env_name: str, timeout_sec: int) -> dict[str, Any]:
     paths = build_paths(project)
     name, title = candidate_identity(row, repo)
@@ -1218,6 +1347,8 @@ def main() -> int:
     rows = load_json(paths.state / 'repo_candidates.json', [])
     active = load_json(paths.state / 'active_repo.json', {})
     active, active_repo_recovery = recover_pending_loader_active_repo(active if isinstance(active, dict) else {})
+    if not active_repo_recovery:
+        active, active_repo_recovery = recover_unauthorized_base_switch_active_repo(paths, active if isinstance(active, dict) else {})
     if active_repo_recovery and args.write_active:
         save_json(paths.state / 'active_repo.json', active)
     active_path = str(active.get('repo_path') or '') if isinstance(active, dict) else ''
@@ -1384,6 +1515,7 @@ def main() -> int:
         candidate_contract = probe.get('candidate_data_contract') if isinstance(probe.get('candidate_data_contract'), dict) else {}
         candidate_ready = candidate_contract.get('ready_datasets') if isinstance(candidate_contract.get('ready_datasets'), list) else []
         candidate_loader_probe_status = str(probe.get('status') or '')
+        reference_resource_block = candidate_reference_reproduction_resource_block(paths, repo, row) if candidate_scope else {}
         item.update({
             'repo_path': str(repo),
             'signals': signals,
@@ -1398,10 +1530,19 @@ def main() -> int:
                 'candidate_loader_probe_status': candidate_loader_probe_status,
                 'candidate_loader_probe_decision': str(probe.get('decision') or ''),
                 'candidate_loader_probe_path': probe.get('candidate_loader_probe_path', ''),
+                'candidate_reference_reproduction_status': reference_resource_block.get('status', ''),
+                'candidate_reference_reproduction_decision': reference_resource_block.get('decision', ''),
+                'candidate_reference_reproduction_path': reference_resource_block.get('path', ''),
             },
             'selection_score': score_candidate(row, repo, signals, probe, active_path),
         })
-        if claim_ready and signals.get('has_entrypoint'):
+        if reference_resource_block:
+            item['decision'] = 'candidate_reference_reproduction_resource_blocked_continue_search'
+            item['reference_reproduction_blocker'] = reference_resource_block
+            if claim_ready:
+                item['claim_ready_dataset'] = claim_ready[0].get('dataset')
+                item['claim_ready_probe'] = claim_ready[0]
+        elif claim_ready and signals.get('has_entrypoint'):
             item['decision'] = 'evidence_ready_repo_and_data_paired'
             item['claim_ready_dataset'] = claim_ready[0].get('dataset')
             item['claim_ready_probe'] = claim_ready[0]
@@ -1445,6 +1586,10 @@ def main() -> int:
         'elapsed_sec': round(time.monotonic() - audit_started_at, 1),
         'selected': selected,
         'audited_candidates': audited,
+        'blocked_reference_reproduction_candidates': [
+            item for item in audited
+            if isinstance(item, dict) and item.get('decision') == 'candidate_reference_reproduction_resource_blocked_continue_search'
+        ],
         'guardrails': [
             'Do not select a repo from paper/topic fit alone if its data cannot be loaded.',
             'A vetoed repo can only be used as an evidence-first fallback when loader-ready real data exists and Claude judges it to be the best transformable route for the current dynamic topic.',
@@ -1535,9 +1680,21 @@ def main() -> int:
                     pending['fresh_find_run_id'] = args.fresh_find_run_id or pending.get('fresh_find_run_id', '')
                     pending['selection_stage'] = selection_stage
                     pending['selected_by_stage'] = selection_stage
-                    pending['pending_reason'] = 'Claude accepted this as the best transformable candidate, but repo/data loader evidence is not claim-ready yet.'
-                    payload['pending_environment_candidate'] = pending
-                    if selection_stage == 'environment_claude_code':
+                    reference_blocker = pending.get('reference_reproduction_blocker') if isinstance(pending.get('reference_reproduction_blocker'), dict) else {}
+                    if reference_blocker:
+                        pending['selected_by_stage'] = ''
+                        pending['pending_reason'] = 'Claude selected this loader/data-ready candidate, but its full reference reproduction is resource-blocked; continue search for a candidate that can pass deterministic reference/audit gates or provide audited official resources.'
+                        pending['anchor_selection_policy'] = 'Resource-blocked candidates remain non-authoritative and cannot become active Environment routes, main-route experiments, or paper claim evidence.'
+                        payload['pending_environment_candidate'] = pending
+                        payload['selection_gate'] = 'continued_search_required_candidate_reference_reproduction_blocked'
+                        payload['selection_stage'] = selection_stage
+                        payload['selected_by_stage'] = ''
+                        payload['selected'] = {}
+                        payload['blocker'] = pending['pending_reason']
+                        payload['reference_reproduction_blocker'] = reference_blocker
+                        selected = {}
+                    elif selection_stage == 'environment_claude_code':
+                        pending['pending_reason'] = 'Claude accepted this as the best transformable candidate, but repo/data loader evidence is not claim-ready yet.'
                         pending['pending_loader_bootstrap'] = True
                         pending['anchor_selection_policy'] = 'Environment-stage Claude Code identified this transformable candidate as a proposal only; active route and experiment execution remain blocked until data/loader gates pass.'
                         payload['pending_environment_candidate'] = pending
@@ -1548,6 +1705,8 @@ def main() -> int:
                         payload['blocker'] = 'Claude identified a transformable environment candidate, but repo/data loader evidence is not claim-ready; active_repo is unchanged.'
                         selected = {}
                     else:
+                        pending['pending_reason'] = 'Claude accepted this as the best transformable candidate, but repo/data loader evidence is not claim-ready yet.'
+                        payload['pending_environment_candidate'] = pending
                         payload['selection_gate'] = PENDING_LOADER_SELECTION_GATE
                         payload['selected'] = {}
                         selected = {}
