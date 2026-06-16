@@ -28,12 +28,20 @@
 3. 网页允许人工编辑和状态切换；只有通过的想法进入 Planning。
 4. 中后期项目 Claude 调用 Ideas 时，结果只回传给 Claude，不覆盖用户初次流程的网页产物。
 
+## 统一入口
+
+- 公开入口：`/home/fmh/workspace/TASTE/modules/ideation/main.py`。
+- 框架调用格式：`python framework/scripts/run_module.py ideation --action <action> ...`，或等价地直接调用 `python modules/ideation/main.py --action <action> ...`。
+- `scripts/` 下文件是模块私有后端实现，不应由网页前端直接拼路径调用；需要暴露时先在 `main.py` 注册 action。
+- `cli.py` 仅为旧调用兼容层，必须保持薄转发。
+
 ## 文件结构
 
 | 路径 | 作用 |
 | --- | --- |
+| `main.py` | 本模块唯一公开后端入口；框架和网页只能通过它指定 action 并传入显式输入。 |
+| `cli.py` | 兼容入口，只转发到 `main.py`，不能承载业务逻辑。 |
 | `contracts.py` | 声明模块外部输入、输入产物、输出产物和职责边界；供框架审计和独立运行说明使用。 |
-| `cli.py` | 独立模块适配入口，用于绕开网页直接以显式参数调用该模块；不能承载隐藏的 TASTE 全局状态逻辑。 |
 | `script_manifest.json` | 当前脚本清单、函数、import 和归属原因；README 的脚本列表应和它保持一致。 |
 | `scripts/` | 该模块真正的后端实现。新增脚本前应优先合并到下面列出的现有大块中。 |
 

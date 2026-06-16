@@ -404,7 +404,7 @@ def current_find_plan_bridge_gate_status(paths, bridge_summary: Any | None = Non
             str(paths.state / "current_find_research_plan.json"),
             str(paths.state / "taste_plan_bridge.json"),
         ],
-        "next_action": "Repair the Read-stage full-text packet and rerun modules/reading/scripts/ensure_current_find_research_plan.py --project <project>; do not continue environment, experiment, paper, or Claude repair stages with stale or blocked plan artifacts.",
+        "next_action": "Repair the Read-stage full-text packet and rerun modules/reading/main.py --action current_find_research_plan --project <project>; do not continue environment, experiment, paper, or Claude repair stages with stale or blocked plan artifacts.",
     }
 
 
@@ -1373,7 +1373,7 @@ class FullCycle:
             if "--skip-discovery" in {str(part) for part in cmd}:
                 # Reuse the validated current Find packet for normal discovery, but do
                 # not create a global Find lock. Literature shortfall repair must
-                # still be able to launch modules/finding/scripts/run_literature_tool.py unless a
+                # still be able to launch modules/finding/main.py --action run_literature_tool unless a
                 # caller explicitly sets DISABLE_NEW_FIND=1 or --record-only.
                 env.setdefault("USE_EXISTING_LITERATURE_PACKET", "1")
             if stage == "autonomous-research":
@@ -1621,7 +1621,7 @@ class FullCycle:
             "AUTHORITATIVE TASTE HARD-GATE CONTEXT. This block overrides stale Claude session memory and prior summaries.",
             "If these facts contradict earlier session text, the JSON below is correct.",
             "P0: LLM API availability must be judged from web-saved TASTE config or injected runtime env, not from a bare non-interactive shell env. project.json intentionally does not store raw API keys; do not ask to put secrets in bashrc.",
-            "P0: Claude may repair a literature shortfall only through modules/finding/scripts/run_literature_tool.py. That wrapper runs internal surveys by default; user-visible current-Find repair must pass --publish-current-find, while DISABLE_NEW_FIND=1/--record-only only records queries; do not call raw finding-module commands or run duplicate concurrent Finds.",
+            "P0: Claude may repair a literature shortfall only through modules/finding/main.py --action run_literature_tool. That wrapper runs internal surveys by default; user-visible current-Find repair must pass --publish-current-find, while DISABLE_NEW_FIND=1/--record-only only records queries; do not call raw finding-module commands or run duplicate concurrent Finds.",
             "P0: Before declaring any experiment interrupted, stopped, failed, or restarting it, inspect active_experiment_processes plus ps/proc status and the actual log mtime/tail. A live PID is authoritative over an incomplete epoch log.",
             "P0: If active_experiment_processes contains a matching finetune/main.py/exp_text_init/python-c training run, do not start another run with the same dataset, descriptor, semantic embedding path, objective, or artifact_dir. Wait for the live process to finish, then audit its final artifacts.",
             "P0 EXPERIMENT ARTIFACT CONTRACT: every new experiment must use one fresh unique artifact_dir under projects/<project>/artifacts, one stdout_stderr.log, and exactly one python worker. Never reuse an artifact_dir after a failed/contaminated launch.",
@@ -2276,7 +2276,7 @@ Title: {self.args.title or '(TASTE may refine the working title in state)'}
 
 Required behavior:
 - Before choosing a route, read `planning/reference_workflow_and_claude_code.md`, `planning/literature_tool_packet.md` or `state/literature_tool_packet.json`, and at least one raw artifact in `planning/finding/` so the survey work is not wasted.
-- If the current packet is stale, empty, or not specific enough for the current blocker, run `{management_python()} modules/finding/scripts/run_literature_tool.py --project {self.args.project} --query "<targeted query>" --fast-mode --venue {self.args.venue}` as an internal project-agent survey and read the packet path printed under `state/internal_literature_runs/...`; use `--deep-survey` only when broad venue/arXiv coverage is necessary, and add `--publish-current-find` only when a human/TASTE wrapper explicitly asks for visible current-Find refresh.
+- If the current packet is stale, empty, or not specific enough for the current blocker, run `{management_python()} modules/finding/main.py --action run_literature_tool --project {self.args.project} --query "<targeted query>" --fast-mode --venue {self.args.venue}` as an internal project-agent survey and read the packet path printed under `state/internal_literature_runs/...`; use `--deep-survey` only when broad venue/arXiv coverage is necessary, and add `--publish-current-find` only when a human/TASTE wrapper explicitly asks for visible current-Find refresh.
 - Perform additional network-backed literature/repository search when Claude Code tools allow it; otherwise record the exact network/tool blocker.
 - Use TASTE's native research-direction, evolutionary-memory, evidence-assurance, trajectory-optimization, and paper-production modules. Do not address those capabilities by external source-project names.
 - Decide whether the current repo remains the best transformable route or whether The workflow should search/switch, based on evidence, not hard-coded topic gates.
@@ -2678,7 +2678,7 @@ Required autonomous work:
 3. Produce machine-readable fresh-base audit artifacts under `state/` and human report(s) under `reports/`: exact dataset contract, expected paths, embedding pickle schema, import/package requirements, minimal smoke commands, and blocked data acquisition steps.
 4. If safe and useful, add small wrapper/probe scripts that only inspect imports, argparse, files, schemas, and loader readiness. Do not run long training or fabricate data.
 5. Do not run raw `gdown`, `curl`, or `wget` yourself. Data acquisition must go through `{management_python()} modules/environment/scripts/probe_fresh_base_data_acquisition.py --project {self.args.project} --attempt-download --timeout-sec 45`; if it fails or times out, record the exact blocker and stop before training.
-6. Re-run `{management_python()} modules/environment/scripts/build_fresh_base_implementation_plan.py --project {self.args.project}`, `{management_python()} modules/experimenting/scripts/audit_reference_reproduction.py --project {self.args.project} --venue {self.args.venue}`, and `{management_python()} modules/planning/scripts/build_blocker_action_plan.py --project {self.args.project} --venue {self.args.venue}` after changes.
+6. Re-run `{management_python()} modules/environment/main.py --action build_fresh_base_implementation_plan --project {self.args.project}`, `{management_python()} modules/experimenting/main.py --action audit_reference_reproduction --project {self.args.project} --venue {self.args.venue}`, and `{management_python()} modules/planning/main.py --action build_blocker_action_plan --project {self.args.project} --venue {self.args.venue}` after changes.
 7. Leave gates blocked unless at least one real dataset contract for the environment-stage selected anchor is complete and loader/import probes pass.
 
 Return concise Markdown with: Files Inspected, Artifacts Written, Commands Run, Data/Env Contract, Still Blocked or Cleared, Next TASTE Command.
@@ -2977,7 +2977,7 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
                 "plan_run_id": plan_gate.get("plan_run_id", ""),
                 "selected_plan_id": plan_gate.get("selected_plan_id", ""),
                 "evidence": plan_gate.get("evidence", []),
-                "next_action": plan_gate.get("next_action") or "Repair the current-Find bridge and rerun modules/reading/scripts/ensure_current_find_research_plan.py --project <project>.",
+                "next_action": plan_gate.get("next_action") or "Repair the current-Find bridge and rerun modules/reading/main.py --action current_find_research_plan --project <project>.",
             }
         ]
         blocker_action_plan = read_json(self.paths.state / "blocker_action_plan.json", {})
@@ -3070,7 +3070,7 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
                     str(self.paths.state / "experiment_plan.json"),
                     str(self.paths.state / "taste_plan_bridge.json"),
                 ],
-                "next_action": "Rerun modules/reading/scripts/ensure_current_find_research_plan.py --project <project> so the main Claude Code compares the five plans from full readings and writes exactly one selected_for_execution/execute_next plan; all other plans must remain backlog.",
+                "next_action": "Rerun modules/reading/main.py --action current_find_research_plan --project <project> so the main Claude Code compares the five plans from full readings and writes exactly one selected_for_execution/execute_next plan; all other plans must remain backlog.",
             }
         ]
         blocker_action_plan = read_json(self.paths.state / "blocker_action_plan.json", {})

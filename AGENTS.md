@@ -7,7 +7,7 @@ This workspace must be operated from the workspace root represented as `<workspa
 Use the project-based workflow under `projects/<project>/`. TASTE has one public runtime route:
 
 - Find uses the configured LLM for title/abstract/detail scoring and recommendation ranking.
-- Read, Idea, and Plan are handled by the project Claude Code session through `modules/reading/scripts/ensure_current_find_research_plan.py`.
+- Read, Idea, and Plan are handled by the project Claude Code session through `modules/reading/main.py --action current_find_research_plan`.
 - If the `claude` CLI is unavailable, Read/Idea/Plan may use the configured LLM only as a structured fallback; that fallback must not execute code, choose an environment, run experiments, write papers, or promote claims.
 - Environment, Experiment, and Paper are Claude Code plus deterministic gate stages. They use the single project-agent route and deterministic gates, with no separate text-only engineering, repair, reviewer, or writing route.
 

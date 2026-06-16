@@ -3678,7 +3678,7 @@ def build_ideas(readings: list[dict[str, Any]], repo: dict[str, Any], fresh_plan
             "bad_case_slice": ["泛主题论文误推荐", "只命中单一弱主题轴", "任务或评测协议不匹配", "只有 foundation-only 支撑", "摘要缺失或证据不足"],
             "success_gate": ["推荐论文数量达到配置目标", "误推荐进入边界审计而非正锚点", "targeted_search_queries 已记录", "source_status 可审计", "补检索仅通过 TASTE 统一 literature tool 受控执行"],
             "supporting_papers": [_paper_ref(row) for row in readings[:8]],
-            "claude_code_tasks": ["读取当前 Find 的推荐论文、边界审计和来源状态。", "围绕缺口生成补充检索主题；如推荐数量短缺，通过 modules/finding/scripts/run_literature_tool.py 受控补检索并刷新 packet。", "复核评分/降级原因并刷新 literature gate，禁止用未评分/无摘要论文凑推荐数量。"],
+            "claude_code_tasks": ["读取当前 Find 的推荐论文、边界审计和来源状态。", "围绕缺口生成补充检索主题；如推荐数量短缺，通过 modules/finding/main.py --action run_literature_tool 受控补检索并刷新 packet。", "复核评分/降级原因并刷新 literature gate，禁止用未评分/无摘要论文凑推荐数量。"],
             "guardrail": "这是 current Find 质量修复路线；它不能替代环境阶段基底选择，也不能作为论文 claim 证据。",
         },
     ]
@@ -4411,7 +4411,7 @@ def write_claude_takeover_prompt(paths, project: str, run_id: str, read_limit: i
 4. 检查每篇候选是否真与当前科研主题相关；把无关、泛主题、泛 agent、泛 memory、仅新闻/论文选择/平台选择的文章降为 critique，不得作为 strong evidence。
 5. Idea 必须生成 {idea_plan_count} 个，并且每个 idea 都要综合多篇强锚点、边界审计结论和当前 repo/data/env 约束，不能照抄单篇论文。每个 idea 必须包含三段：`new_method`（详细的新方法，原 hypothesis 的升级版，说明核心机制/模块/训练或推理作用点）、`initial_experiment`（初步详细实验，必须说明候选基底论文或候选 repo 线索、为什么适合、做什么最小改动、对比哪些 baseline/control/ablation、指标和坏例切片、Environment 阶段需验证什么）、`inspired_by`（启发该方法的论文/工作及启发点）。严禁继承旧会话记忆里的历史已选基底、旧 base switch gate、已通过参考复现基底或已经废弃的路线；Find/Read/Idea/Plan 阶段可以且应该提出候选仓库/候选基底 proposal，但不能把任何仓库写成已选基底或可直接执行路径。
 6. 主控 Claude Code 必须为每个 idea 调用独立 Task/subagent 做客观评分，不得由主控直接填 None 或空分数。评分项必须写入 `objective_scores`，字段为 `novelty`、`evidence_alignment`、`feasibility`、`experimentability`、`risk_control`、`overall`，每项 0-10 分；同时写入 `score` 和 `idea_score`，且 `idea_score_audit={{"mode":"task_subagent","subagent_used":true,"status":"completed","criteria":"TASTE-like objective idea scoring"}}`。若 `overall < 7.0` 或任一项为 0，主控必须先修改 idea 再重新评分；不能把低分 idea 交给 plan。
-7. 你要自行决定至少 3 个补充检索主题，并写入 `targeted_search_queries`。当当前推荐门控短缺且本轮 run 尚未刚完成受控补检索时，优先调用一次 TASTE 统一 literature tool 做受控补检索并刷新 packet：`{management_python()} modules/finding/scripts/run_literature_tool.py --project {project} --venue {target_venue} --query "<topic 1>" --query "<topic 2>" --query "<topic 3>" --fast-mode --publish-current-find`。如果 `state/literature_tool_last_run.json` 已显示刚完成的 `current_find_run_id` 等于当前 run_id，或当前任务就是为了把刚产生的新 Find run 同步成 Read/Idea/Plan，则不要再启动下一轮 Find；只记录/复用 `targeted_search_queries`，先为当前 run 写出一致的 Read/Idea/Plan。严禁绕过 wrapper 直接调用会失去审计的原始 TASTE 命令。
+7. 你要自行决定至少 3 个补充检索主题，并写入 `targeted_search_queries`。当当前推荐门控短缺且本轮 run 尚未刚完成受控补检索时，优先调用一次 TASTE 统一 literature tool 做受控补检索并刷新 packet：`{management_python()} modules/finding/main.py --action run_literature_tool --project {project} --venue {target_venue} --query "<topic 1>" --query "<topic 2>" --query "<topic 3>" --fast-mode --publish-current-find`。如果 `state/literature_tool_last_run.json` 已显示刚完成的 `current_find_run_id` 等于当前 run_id，或当前任务就是为了把刚产生的新 Find run 同步成 Read/Idea/Plan，则不要再启动下一轮 Find；只记录/复用 `targeted_search_queries`，先为当前 run 写出一致的 Read/Idea/Plan。严禁绕过 wrapper 直接调用会失去审计的原始 TASTE 命令。
 7. 为 {idea_plan_count} 个 idea 分别生成 plan：环境阶段如何比较强推荐论文、如何审计 repo/data/protocol、最小实验、baseline/ablation、bad-case slice、success gate、失败时的停止条件。主控 Claude Code 必须在 {idea_plan_count} 个 plan 中选择唯一最佳执行计划；唯一选中的 plan 必须写 `selected_for_execution=true`、`execute_next=true`、`execution_selection={{"selected": true, "reason": "...", "selected_by": "main_claude_code_after_deep_read"}}`，并具有非空 `plan_id` 与匹配 `idea_id`；其他 {not_selected_count} 个 plan 必须显式写 `selected_for_execution=false`、`execute_next=false`、`execution_selection={{"selected": false, "selected_by": "not_selected_candidate_backlog", "reason": "..."}}`。禁止按第一个、分数、排序或模板代选；必须用精读证据说明为什么被选中的 plan 最值得进入环境阶段。
 8. Find/Read/Idea/Plan 阶段必须给出候选基底 proposal（候选论文/候选 repo 名称或 URL、拟修改模块、数据/指标协议、验证风险），但严禁声称它已经是“当前基底”、严禁写入本地 `repo_path`、严禁写具体数据集训练命令、严禁标记 `ready_to_execute`。Environment 阶段负责验证并锁定基底，只有它才能写入 `state/evidence_ready_repo_selection.json`。
 9. 不启动论文 claim promotion；没有 Environment 阶段基底验证和 repo/data/env/experiment gate 证据时，计划必须保持候选 proposal / `ready_for_gate`，而不是声称已经有结论或已选本地主线。
@@ -6415,10 +6415,10 @@ def ensure_claude_plan_state(project: str, paths, run_id: str, readings: list[di
         "source": "planning/finding/find_progress.json",
     }
     literature_repair_commands = [
-        f"{management_python()} modules/finding/scripts/build_literature_tool_packet.py --project {project} --venue {venue}",
-        f"{management_python()} modules/finding/scripts/run_literature_tool.py --project {project} --venue {venue} --query \"<targeted literature gap query>\" --fast-mode --publish-current-find",
-        f"{management_python()} modules/writing/scripts/audit_submission_readiness.py --project {project} --venue {venue}",
-        f"{management_python()} modules/planning/scripts/build_blocker_action_plan.py --project {project} --venue {venue}",
+        f"{management_python()} modules/finding/main.py --action build_literature_tool_packet --project {project} --venue {venue}",
+        f"{management_python()} modules/finding/main.py --action run_literature_tool --project {project} --venue {venue} --query \"<targeted literature gap query>\" --fast-mode --publish-current-find",
+        f"{management_python()} modules/writing/main.py --action audit_submission_readiness --project {project} --venue {venue}",
+        f"{management_python()} modules/planning/main.py --action build_blocker_action_plan --project {project} --venue {venue}",
     ]
     literature_gate_blocked = shortfall > 0
     literature_blockers = []
@@ -7429,18 +7429,18 @@ def build_execution_plan(project: str, cfg: dict[str, Any], run_id: str, reading
     fallback_route_title = "current Find literature gate blocked" if literature_gate["blocked"] else "environment-stage Claude Code base selection pending"
     route_title = str(selected_base.get("title") or selected_base.get("name") or selected_base.get("repo") or fallback_route_title).strip()
     gate_refresh_commands = [
-        f"{management_python()} modules/experimenting/scripts/audit_reference_reproduction.py --project {project} --venue {venue}",
+        f"{management_python()} modules/experimenting/main.py --action audit_reference_reproduction --project {project} --venue {venue}",
         f"{management_python()} modules/experimenting/scripts/audit_experiment_iteration.py --project {project}",
         f"{management_python()} framework/scripts/build_research_trajectory_system.py --project {project} --venue {venue}",
-        f"{management_python()} modules/planning/scripts/build_blocker_action_plan.py --project {project} --venue {venue}",
+        f"{management_python()} modules/planning/main.py --action build_blocker_action_plan --project {project} --venue {venue}",
     ]
     literature_repair_commands = [
-        f"{management_python()} modules/finding/scripts/build_literature_tool_packet.py --project {project} --venue {venue}",
-        f"{management_python()} modules/finding/scripts/run_literature_tool.py --project {project} --venue {venue} --query \"<targeted literature gap query>\" --fast-mode --publish-current-find",
-        f"{management_python()} modules/writing/scripts/audit_submission_readiness.py --project {project} --venue {venue}",
-        f"{management_python()} modules/planning/scripts/build_blocker_action_plan.py --project {project} --venue {venue}",
+        f"{management_python()} modules/finding/main.py --action build_literature_tool_packet --project {project} --venue {venue}",
+        f"{management_python()} modules/finding/main.py --action run_literature_tool --project {project} --venue {venue} --query \"<targeted literature gap query>\" --fast-mode --publish-current-find",
+        f"{management_python()} modules/writing/main.py --action audit_submission_readiness --project {project} --venue {venue}",
+        f"{management_python()} modules/planning/main.py --action build_blocker_action_plan --project {project} --venue {venue}",
     ]
-    data_command = f"{management_python()} modules/environment/scripts/build_fresh_base_implementation_plan.py --project {project}"
+    data_command = f"{management_python()} modules/environment/main.py --action build_fresh_base_implementation_plan --project {project}"
     failure_type = ""
     next_required_action = "environment_base_selection_and_repo_data_protocol_audit"
     if literature_gate["blocked"]:
@@ -7518,7 +7518,7 @@ def build_execution_plan(project: str, cfg: dict[str, Any], run_id: str, reading
         "plans": plans,
         **selection_fields,
         "guardrails": [
-            "Do not launch raw or duplicate Find jobs from this script; use modules/finding/scripts/run_literature_tool.py for controlled targeted literature repair.",
+            "Do not launch raw or duplicate Find jobs from this script; use modules/finding/main.py --action run_literature_tool for controlled targeted literature repair.",
             "Do not use stale read/idea/plan from another run_id or from candidates removed by current gates.",
             "Do not use screened_ranking as positive evidence.",
             "Do not select or promote a base while the current Find recommendation count gate has a shortfall.",
@@ -7794,7 +7794,7 @@ def update_frontend_state(paths, run_id: str, readings: list[dict[str, Any]], id
         "output_dir": str(taste_dir),
         "survey_stats": survey_stats,
         "counts": counts,
-        "current_find_bridge": {"generated_at": now_iso(), "readings": len(readings), "ideas": len(ideas), "plans": len(plans), **selection_fields, "guardrail": "Downstream artifacts were rebuilt from the current Find result; downstream environment/experiment/paper/claim stages must consume only selected_plan_id. Targeted literature repair must use modules/finding/scripts/run_literature_tool.py."},
+        "current_find_bridge": {"generated_at": now_iso(), "readings": len(readings), "ideas": len(ideas), "plans": len(plans), **selection_fields, "guardrail": "Downstream artifacts were rebuilt from the current Find result; downstream environment/experiment/paper/claim stages must consume only selected_plan_id. Targeted literature repair must use modules/finding/main.py --action run_literature_tool."},
         **selection_fields,
     })
     save_json(state_path, state)

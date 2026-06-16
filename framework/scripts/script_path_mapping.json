@@ -85,7 +85,6 @@
   "project_config.py": "framework/scripts/project_config.py",
   "project_paths.py": "framework/scripts/project_paths.py",
   "propose_next_actions.py": "modules/planning/scripts/propose_next_actions.py",
-  "re_review_paper.py": "modules/writing/scripts/re_review_paper.py",
   "reconcile_active_and_pool_candidates.py": "modules/environment/scripts/reconcile_active_and_pool_candidates.py",
   "reconcile_state.py": "framework/scripts/reconcile_state.py",
   "record_safe_unblock_web_job.py": "framework/scripts/record_safe_unblock_web_job.py",
@@ -104,9 +103,9 @@
   "research_healthcheck.py": "framework/scripts/research_healthcheck.py",
   "research_manifest.py": "framework/scripts/research_manifest.py",
   "resolve_venue_requirements.py": "modules/writing/scripts/resolve_venue_requirements.py",
-  "respond_to_paper_reviews.py": "modules/writing/scripts/respond_to_paper_reviews.py",
   "restart_after_data_blocker.py": "modules/environment/scripts/restart_after_data_blocker.py",
   "review_paper_md.py": "modules/writing/scripts/review_paper_md.py",
+  "review_response_tools.py": "modules/writing/scripts/review_response_tools.py",
   "revise_paper_citation_coverage.py": "modules/writing/scripts/revise_paper_citation_coverage.py",
   "revise_paper_md.py": "modules/writing/scripts/revise_paper_md.py",
   "run_active_repo_smoke.py": "modules/experimenting/scripts/run_active_repo_smoke.py",
@@ -143,6 +142,5 @@
   "update_evolution_memory.py": "framework/scripts/update_evolution_memory.py",
   "update_local_database.py": "modules/finding/scripts/update_local_database.py",
   "verify_research_trajectory_end_to_end.py": "framework/scripts/verify_research_trajectory_end_to_end.py",
-  "work_status.py": "framework/scripts/work_status.py",
-  "write_comparison.py": "modules/writing/scripts/write_comparison.py"
+  "work_status.py": "framework/scripts/work_status.py"
 }

@@ -32,6 +32,18 @@ from paper_common import get_active_paper_state
 PROJECTS = ROOT / "projects"
 SCRIPTS = script_resolver(ROOT)
 
+
+def _module_entry(stage: str) -> Path:
+    return ROOT / "modules" / stage / "main.py"
+
+
+def _module_cmd(py: str, stage: str, action: str = "", *args: str) -> list[str]:
+    cmd = [py, str(_module_entry(stage))]
+    if action:
+        cmd.extend(["--action", action])
+    cmd.extend(str(item) for item in args if str(item).strip())
+    return cmd
+
 LogFn = Callable[[str], None]
 CancelFn = Callable[[], bool]
 ProgressFn = Callable[[str, int, int, str], None]
@@ -764,6 +776,7 @@ def _is_current_find_read_worker_cmd(cmd: str) -> bool:
     lowered = str(cmd or "").lower()
     return (
         "ensure_current_find_research_plan.py" in lowered
+        or ("modules/reading/main.py" in lowered and "current_find_research_plan" in lowered)
         or ("claude_project_session.py" in lowered and "current-find" in lowered)
     )
 
@@ -13414,10 +13427,10 @@ def action_gate_blocker(payload: dict[str, Any]) -> dict[str, Any] | None:
         "action": action,
         "blocked_actions": sorted(guarded_actions),
         "allowed_actions": [
-            f"{management_python()} modules/finding/scripts/build_literature_tool_packet.py --project {project}",
-            f"{management_python()} modules/finding/scripts/run_literature_tool.py --project {project} --query \"<targeted literature gap query>\" --fast-mode --publish-current-find",
-            f"{management_python()} modules/writing/scripts/audit_submission_readiness.py --project {project}",
-            f"{management_python()} modules/planning/scripts/build_blocker_action_plan.py --project {project}",
+            f"{management_python()} modules/finding/main.py --action build_literature_tool_packet --project {project}",
+            f"{management_python()} modules/finding/main.py --action run_literature_tool --project {project} --query \"<targeted literature gap query>\" --fast-mode --publish-current-find",
+            f"{management_python()} modules/writing/main.py --action audit_submission_readiness --project {project}",
+            f"{management_python()} modules/planning/main.py --action build_blocker_action_plan --project {project}",
         ],
         "message": "Current Find strong-recommendation gate is short; downstream research actions are blocked until the current title+abstract scoring packet passes. Full-cycle is allowed only when the request explicitly approves a fresh Find restart.",
         "message_zh": "当前 Find 推荐门控未过；下游动作被锁定，只允许修复当前 Find 文献/评分包。完整重启只有在请求明确批准 fresh Find 时才允许。",
@@ -13499,7 +13512,7 @@ def build_command(payload: dict[str, Any]) -> tuple[str, list[str]]:
     elif action == "handoff":
         cmd = [py, str(SCRIPTS / "generate_handoff.py"), "--project", project]
     elif action == "init":
-        cmd = [py, str(SCRIPTS / "run_loop.py"), "--project", project, "--iterations", "0"]
+        cmd = _module_cmd(py, "experimenting", "run", "--project", project, "--iterations", "0")
         _append(cmd, "--prompt", payload.get("prompt"))
         _append(cmd, "--topic", payload.get("topic"))
         _append(cmd, "--conda-env", payload.get("conda_env"))
@@ -13584,15 +13597,16 @@ def build_command(payload: dict[str, Any]) -> tuple[str, list[str]]:
         ):
             cmd.append("--use-existing-literature-packet")
     elif action == "current-find-selection":
-        cmd = [py, str(SCRIPTS / "ensure_current_find_research_plan.py"), "--project", project, _current_find_selection_command_mode(project)]
+        cmd = _module_cmd(py, "reading", "current_find_research_plan", "--project", project, _current_find_selection_command_mode(project))
     elif action in {"literature-base-audit", "literature_base_audit"}:
         limit = max(1, min(200, int(payload.get("limit") or 26)))
         repo_search_per_candidate = max(1, min(8, int(payload.get("repo_search_per_candidate") or 2)))
         repo_limit = max(1, min(10, int(payload.get("repo_limit") or 4)))
         probe_timeout_sec = max(30, min(900, int(payload.get("probe_timeout_sec") or 90)))
-        cmd = [
+        cmd = _module_cmd(
             py,
-            str(SCRIPTS / "run_literature_base_audit.py"),
+            "finding",
+            "run_literature_base_audit",
             "--project",
             project,
             "--limit",
@@ -13603,9 +13617,9 @@ def build_command(payload: dict[str, Any]) -> tuple[str, list[str]]:
             str(repo_limit),
             "--probe-timeout-sec",
             str(probe_timeout_sec),
-        ]
+        )
     elif action == "environment":
-        cmd = [py, str(SCRIPTS / "run_environment_stage.py"), "--project", project]
+        cmd = _module_cmd(py, "environment", "run_stage", "--project", project)
         _append(cmd, "--repo-path", payload.get("repo_path"))
         _append(cmd, "--env-name", payload.get("conda_env"))
         _append(cmd, "--venue", payload.get("venue"))
@@ -13629,7 +13643,7 @@ def build_command(payload: dict[str, Any]) -> tuple[str, list[str]]:
         venue = str(payload.get("venue") or "").strip()
         if not venue:
             raise ValueError("Paper pipeline requires a venue.")
-        cmd = [py, str(SCRIPTS / "run_paper_pipeline.py"), "--project", project, "--venue", venue]
+        cmd = _module_cmd(py, "writing", "run", "--project", project, "--venue", venue)
         _append(cmd, "--title", payload.get("title"))
         _append(cmd, "--template-url", payload.get("template_url"))
         _append(cmd, "--template-archive-path", payload.get("template_archive_path"))
@@ -14254,9 +14268,9 @@ def _post_action_refresh_research_gates(project: str, venue: str, env: dict[str,
     """
     venue = str(venue or "").strip()
     commands: list[list[str]] = [
-        [management_python(), str(SCRIPTS / "audit_paper_evidence.py"), "--project", project],
-        [management_python(), str(SCRIPTS / "audit_submission_readiness.py"), "--project", project],
-        [management_python(), str(SCRIPTS / "build_aris_review_board.py"), "--project", project],
+        _module_cmd(management_python(), "writing", "audit_evidence", "--project", project),
+        _module_cmd(management_python(), "writing", "submission_readiness", "--project", project),
+        _module_cmd(management_python(), "planning", "review_board", "--project", project),
         [management_python(), str(SCRIPTS / "build_research_trajectory_system.py"), "--project", project, "--skip-helpers"],
     ]
     if venue:

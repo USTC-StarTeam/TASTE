@@ -1,7 +1,7 @@
 {
   "generated_at": "2026-06-15T22:40:11.956990+00:00",
   "owner": "taste_framework",
-  "script_count": 45,
+  "script_count": 46,
   "scripts": [
     {
       "script": "agent_state.py",
@@ -1210,6 +1210,30 @@
       "functions": [],
       "classes": [],
       "imports": [],
+      "parse_error": ""
+    },
+    {
+      "script": "run_module.py",
+      "path": "framework/scripts/run_module.py",
+      "owner": "taste_framework",
+      "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
+      "function_count": 4,
+      "functions": [
+        "_python_env",
+        "module_entry",
+        "command_for",
+        "main"
+      ],
+      "classes": [],
+      "imports": [
+        "__future__",
+        "argparse",
+        "os",
+        "pathlib",
+        "subprocess",
+        "sys",
+        "typing"
+      ],
       "parse_error": ""
     },
     {

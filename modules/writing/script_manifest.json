@@ -29,7 +29,7 @@
       "modules/writing/scripts/paper_common.py"
     ]
   },
-  "script_count": 29,
+  "script_count": 27,
   "scripts": [
     {
       "script": "aggregate_paper_reviews.py",
@@ -644,26 +644,6 @@
       "parse_error": ""
     },
     {
-      "script": "re_review_paper.py",
-      "path": "modules/writing/scripts/re_review_paper.py",
-      "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
-      "function_count": 1,
-      "functions": [
-        "main"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "paper_common",
-        "pathlib",
-        "pipeline_guard",
-        "project_paths"
-      ],
-      "parse_error": ""
-    },
-    {
       "script": "render_paper_tex.py",
       "path": "modules/writing/scripts/render_paper_tex.py",
       "owner": "writing",
@@ -888,25 +868,6 @@
       "parse_error": ""
     },
     {
-      "script": "respond_to_paper_reviews.py",
-      "path": "modules/writing/scripts/respond_to_paper_reviews.py",
-      "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
-      "function_count": 1,
-      "functions": [
-        "main"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "paper_common",
-        "pathlib",
-        "pipeline_guard"
-      ],
-      "parse_error": ""
-    },
-    {
       "script": "review_paper_md.py",
       "path": "modules/writing/scripts/review_paper_md.py",
       "owner": "writing",
@@ -923,6 +884,29 @@
         "__future__",
         "argparse",
         "paper_common",
+        "project_paths"
+      ],
+      "parse_error": ""
+    },
+    {
+      "script": "review_response_tools.py",
+      "path": "modules/writing/scripts/review_response_tools.py",
+      "owner": "writing",
+      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
+      "function_count": 4,
+      "functions": [
+        "respond_to_reviews",
+        "re_review_paper",
+        "write_comparison",
+        "main"
+      ],
+      "classes": [],
+      "imports": [
+        "__future__",
+        "argparse",
+        "paper_common",
+        "pathlib",
+        "pipeline_guard",
         "project_paths"
       ],
       "parse_error": ""
@@ -1198,24 +1182,6 @@
         "shutil",
         "subprocess",
         "typing"
-      ],
-      "parse_error": ""
-    },
-    {
-      "script": "write_comparison.py",
-      "path": "modules/writing/scripts/write_comparison.py",
-      "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
-      "function_count": 1,
-      "functions": [
-        "main"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "pathlib",
-        "project_paths"
       ],
       "parse_error": ""
     }

@@ -3317,7 +3317,7 @@ def test_web_find_repair_runs_full_text_evidence_script(monkeypatch, tmp_path):
 
     cmd = seen["cmd"]
     env = seen["env"]
-    assert cmd[:2] == ["/opt/taste/python", str(server.WORKSPACE_ROOT / "modules" / "reading" / "scripts" / "repair_current_find_full_text_evidence.py")]
+    assert cmd[:4] == ["/opt/taste/python", str(server.WORKSPACE_ROOT / "modules" / "reading" / "main.py"), "--action", "repair_full_text"]
     assert cmd[-3:] == ["--project", "demo_project", "--force"]
     assert seen["cwd"] == str(server.WORKSPACE_ROOT)
     assert env["WORKSPACE_ROOT"] == str(server.WORKSPACE_ROOT)
@@ -3736,9 +3736,9 @@ def test_blocker_action_plan_command_supports_optional_venue(monkeypatch):
     without_venue = blocker.command("demo", "audit_paper_evidence.py")
 
     assert with_venue.startswith("PYTHONPATH=")
-    assert " /env/python modules/writing/scripts/audit_paper_evidence.py --project demo --venue ICLR" in with_venue
+    assert " /env/python modules/writing/main.py --action audit_paper_evidence --project demo --venue ICLR" in with_venue
     assert without_venue.startswith("PYTHONPATH=")
-    assert " /env/python modules/writing/scripts/audit_paper_evidence.py --project demo" in without_venue
+    assert " /env/python modules/writing/main.py --action audit_paper_evidence --project demo" in without_venue
 
 
 def test_blocker_action_plan_ignores_unrelated_finetune_process(monkeypatch, tmp_path):

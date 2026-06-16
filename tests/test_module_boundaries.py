@@ -88,8 +88,10 @@ def test_seven_stage_module_directories_have_contracts_and_manifests() -> None:
     for module in STAGE_MODULES:
         directory = ROOT / module.directory
         assert directory.is_dir(), module.key
-        for filename in ["README.md", "__init__.py", "contracts.py", "cli.py", "script_manifest.json"]:
+        for filename in ["README.md", "__init__.py", "contracts.py", "main.py", "cli.py", "script_manifest.json"]:
             assert (directory / filename).is_file(), f"{module.key} missing {filename}"
+        cli_text = (directory / "cli.py").read_text(encoding="utf-8")
+        assert "from .main import main" in cli_text or "from main import main" in cli_text
         contract_text = (directory / "contracts.py").read_text(encoding="utf-8")
         assert f'STAGE_NAME = "{module.key}"' in contract_text
         assert module.responsibility.split(".", 1)[0] in (directory / "README.md").read_text(encoding="utf-8")
@@ -151,15 +153,22 @@ def test_finding_reading_full_text_responsibility_boundary() -> None:
     assert "ensure_current_find_research_plan.py" in reading_scripts
 
 
-def test_stage_cli_contracts_are_callable() -> None:
+def test_stage_main_contracts_are_callable_and_cli_is_compatibility_shim() -> None:
     for stage in STAGE_MODULE_KEYS:
-        cli = ROOT / "modules" / stage / "cli.py"
-        proc = subprocess.run([sys.executable, str(cli), "--contract"], cwd=ROOT, text=True, capture_output=True, timeout=20)
+        main = ROOT / "modules" / stage / "main.py"
+        proc = subprocess.run([sys.executable, str(main), "--contract"], cwd=ROOT, text=True, capture_output=True, timeout=20)
         assert proc.returncode == 0, (stage, proc.stderr)
         payload = json.loads(proc.stdout)
         assert payload["stage"] == stage
+        assert payload["entrypoint"] == f"modules/{stage}/main.py"
+        assert payload["scripts_are_private_backend"] is True
         assert payload["required_external_inputs"]
         assert payload["artifacts_out"]
+
+        cli = ROOT / "modules" / stage / "cli.py"
+        compat = subprocess.run([sys.executable, str(cli), "--contract"], cwd=ROOT, text=True, capture_output=True, timeout=20)
+        assert compat.returncode == 0, (stage, compat.stderr)
+        assert json.loads(compat.stdout)["entrypoint"] == payload["entrypoint"]
 
 
 def test_web_reading_packet_view_uses_read_stage_replacements() -> None:

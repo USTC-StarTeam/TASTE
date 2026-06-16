@@ -32,12 +32,20 @@
 4. 反复审计引用、图表、公式、PDF、normality 和 submission readiness。
 5. 只有证据门控通过才把内容作为可投稿稿件；预览稿必须标明未通过项。
 
+## 统一入口
+
+- 公开入口：`/home/fmh/workspace/TASTE/modules/writing/main.py`。
+- 框架调用格式：`python framework/scripts/run_module.py writing --action <action> ...`，或等价地直接调用 `python modules/writing/main.py --action <action> ...`。
+- `scripts/` 下文件是模块私有后端实现，不应由网页前端直接拼路径调用；需要暴露时先在 `main.py` 注册 action。
+- `cli.py` 仅为旧调用兼容层，必须保持薄转发。
+
 ## 文件结构
 
 | 路径 | 作用 |
 | --- | --- |
+| `main.py` | 本模块唯一公开后端入口；框架和网页只能通过它指定 action 并传入显式输入。 |
+| `cli.py` | 兼容入口，只转发到 `main.py`，不能承载业务逻辑。 |
 | `contracts.py` | 声明模块外部输入、输入产物、输出产物和职责边界；供框架审计和独立运行说明使用。 |
-| `cli.py` | 独立模块适配入口，用于绕开网页直接以显式参数调用该模块；不能承载隐藏的 TASTE 全局状态逻辑。 |
 | `script_manifest.json` | 当前脚本清单、函数、import 和归属原因；README 的脚本列表应和它保持一致。 |
 | `scripts/` | 该模块真正的后端实现。新增脚本前应优先合并到下面列出的现有大块中。 |
 
@@ -87,10 +95,7 @@
 | --- | --- |
 | `scripts/paper_self_review.py` | 自审当前稿件。 |
 | `scripts/review_paper_md.py` | 评审 Markdown 稿。 |
-| `scripts/re_review_paper.py` | 复审修订后稿件。 |
 | `scripts/aggregate_paper_reviews.py` | 聚合多轮评审意见。 |
-| `scripts/respond_to_paper_reviews.py` | 生成审稿意见回复。 |
-| `scripts/write_comparison.py` | 撰写方法/实验对比内容。 |
 
 ## 冗余控制原则
 

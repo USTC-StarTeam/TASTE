@@ -75,12 +75,18 @@ def command(project: str, script_or_venue: str, *extra: str) -> str:
         script = str(extra[0] or "").strip()
         tail = (["--venue", venue] if venue else []) + [str(item) for item in extra[1:]]
     script_path = resolve_script_path(script, ROOT)
-    try:
-        script_display = str(script_path.relative_to(ROOT))
-    except ValueError:
-        script_display = str(script_path)
     env_prefix = f"PYTHONPATH={shlex.quote(taste_pythonpath_string(ROOT))}"
-    parts = [env_prefix, management_python(), script_display, "--project", project]
+    try:
+        rel = script_path.relative_to(ROOT)
+    except ValueError:
+        rel = script_path
+    rel_parts = rel.parts if isinstance(rel, Path) else ()
+    if len(rel_parts) >= 4 and rel_parts[0] == "modules" and rel_parts[2] == "scripts" and str(rel_parts[-1]).endswith(".py"):
+        stage = rel_parts[1]
+        action = Path(rel_parts[-1]).stem
+        parts = [env_prefix, management_python(), f"modules/{stage}/main.py", "--action", action, "--project", project]
+    else:
+        parts = [env_prefix, management_python(), str(rel), "--project", project]
     parts.extend(str(item) for item in tail if str(item).strip())
     return " ".join(parts)
 

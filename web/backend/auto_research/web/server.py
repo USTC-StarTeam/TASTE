@@ -764,7 +764,8 @@ def _is_full_cycle_job(stage: Any = "", job_id: Any = "", result: Any = None, lo
     if isinstance(result, dict):
         kind_text = str(result.get("kind") or result.get("raw_stage") or "").lower().replace("_", "-")
         cmd_text = str(result.get("cmd") or result.get("command") or "").lower().replace("_", "-")
-        if kind_text.startswith("current-find") or "ensure-current-find-research-plan.py" in cmd_text or ("claude-project-session.py" in cmd_text and "current-find" in cmd_text):
+        current_find_module_cmd = "modules/reading/main.py" in cmd_text and "current-find-research-plan" in cmd_text
+        if kind_text.startswith("current-find") or "ensure-current-find-research-plan.py" in cmd_text or current_find_module_cmd or ("claude-project-session.py" in cmd_text and "current-find" in cmd_text):
             return False
     hay_parts = [str(stage or ""), str(job_id or "")]
     if isinstance(result, dict):
@@ -784,7 +785,7 @@ def _is_full_cycle_job(stage: Any = "", job_id: Any = "", result: Any = None, lo
 
 def _current_find_worker_phase_and_kind(cmd: str) -> tuple[str, str, int]:
     lowered = str(cmd or "").lower()
-    if "ensure_current_find_research_plan.py" in lowered:
+    if "ensure_current_find_research_plan.py" in lowered or ("modules/reading/main.py" in lowered and "current_find_research_plan" in lowered):
         return "read", "current_find_read_idea_plan_wrapper", 2
     if "claude_project_session.py" in lowered and "current-find-claude-read-idea-plan" in lowered:
         return "read", "current_find_claude_read_idea_plan", 2
@@ -1056,7 +1057,7 @@ def _paper_substage_from_cmd(cmd: Any, fallback: str = "") -> str:
             return stage
     if "run_paper_orchestra_bridge.py" in lowered:
         return "writing:orchestra"
-    if "run_paper_pipeline.py" in lowered:
+    if "run_paper_pipeline.py" in lowered or ("modules/writing/main.py" in lowered and ("--action run" in lowered or "--action paper_pipeline" in lowered)):
         return "paper:pipeline"
     if "fetch_latex_template.py" in lowered:
         return "paper:template"
@@ -1090,7 +1091,7 @@ def _paper_worker_projection_from_process(row: dict[str, Any], *, controller_pid
     elif "run_paper_orchestra_bridge.py" in lowered:
         kind = "paper_orchestra_bridge"
         priority = 3
-    elif "run_paper_pipeline.py" in lowered:
+    elif "run_paper_pipeline.py" in lowered or ("modules/writing/main.py" in lowered and ("--action run" in lowered or "--action paper_pipeline" in lowered)):
         kind = "paper_pipeline"
         priority = 4
     elif any(marker in lowered for marker in ["fetch_latex_template.py", "resolve_venue_requirements.py", "compile_paper_pdf.py", "latexmk", "pdflatex"]):
@@ -4088,8 +4089,8 @@ def _script_pythonpath_env(env: dict[str, str]) -> None:
 def _run_current_find_full_text_evidence_repair(project: str, root: Path, log: Callable[[str], None], should_cancel: Callable[[], bool], progress: Callable[[str, int, int, str], None]) -> dict[str, Any]:
     progress("full_text_evidence_repair", 0, 1, "正在补抓当前 Find 推荐论文全文证据。")
     management_python = os.environ.get("MANAGEMENT_PYTHON") or sys.executable
-    script = WORKSPACE_ROOT / "modules" / "reading" / "scripts" / "repair_current_find_full_text_evidence.py"
-    cmd = [management_python, str(script), "--project", project, "--force"]
+    module_entry = WORKSPACE_ROOT / "modules" / "reading" / "main.py"
+    cmd = [management_python, str(module_entry), "--action", "repair_full_text", "--project", project, "--force"]
     env = os.environ.copy()
     env["WORKSPACE_ROOT"] = str(WORKSPACE_ROOT)
     env["PROJECT_ID"] = project
@@ -4606,8 +4607,8 @@ def _new_find_guard_blocker(request: FindRequest | None = None) -> dict[str, Any
         "recommendation_target_count": target,
         "recommendation_shortfall": shortfall,
         "approval_path": str(approval_path),
-        "message": "Current Find recommendation gate is short; use force_new_find/restart_full_cycle for an explicit fresh Find, or modules/finding/scripts/run_literature_tool.py for controlled targeted repair.",
-        "message_zh": "当前 Find 推荐门控未过；显式重新 Find 请使用 force_new_find/restart_full_cycle，受控补检索请走 modules/finding/scripts/run_literature_tool.py。",
+        "message": "Current Find recommendation gate is short; use force_new_find/restart_full_cycle for an explicit fresh Find, or modules/finding/main.py --action literature_tool for controlled targeted repair.",
+        "message_zh": "当前 Find 推荐门控未过；显式重新 Find 请使用 force_new_find/restart_full_cycle，受控补检索请走 modules/finding/main.py --action literature_tool。",
     }
 
 
@@ -4886,7 +4887,7 @@ def _active_project_child_processes(project: str, root: Path, phase_hint: str = 
             kind = "frontend_recovery"
             phase = "literature"
             priority = 1
-        elif any(marker in lowered for marker in ["run_environment_stage.py", "run_literature_base_audit.py", "select_evidence_ready_repo.py", "repo_env_bootstrap", "run_selected_base_reference"]):
+        elif any(marker in lowered for marker in ["run_environment_stage.py", "run_literature_base_audit.py", "select_evidence_ready_repo.py", "repo_env_bootstrap", "run_selected_base_reference"]) or ("modules/environment/main.py" in lowered) or ("modules/finding/main.py" in lowered and "run_literature_base_audit" in lowered):
             kind = "environment_stage"
             phase = "environment"
             priority = 2
@@ -4894,7 +4895,7 @@ def _active_project_child_processes(project: str, root: Path, phase_hint: str = 
             kind = "experiment_training"
             phase = "experiment"
             priority = 3
-        elif "run_paper_pipeline.py" in lowered:
+        elif "run_paper_pipeline.py" in lowered or ("modules/writing/main.py" in lowered and ("--action run" in lowered or "--action paper_pipeline" in lowered)):
             kind = "paper_pipeline"
             phase = "paper"
             priority = 4
@@ -7297,7 +7298,7 @@ def _live_jobs_from_projects(*, compact: bool = True) -> list[dict[str, Any]]:
             if child_phase == "paper" or str(full_job.get("kind") or "") in {"paper_pipeline", "paper_repair_loop", "paper_claude_session", "experiment_training"}:
                 phase = child_phase
                 raw_stage = child_kind or raw_stage or child_phase
-        # A Claude child can invoke modules/finding/scripts/run_literature_tool.py while the
+        # A Claude child can invoke modules/finding/main.py --action run_literature_tool while the
         # full-cycle remains in read/idea/experiment repair, and that wrapper may
         # spawn run_frontend/run_driver. Treat it as an auxiliary
         # literature subtask unless the public full-cycle phase is Find.
@@ -9409,7 +9410,9 @@ def _run_current_find_claude_read_job(project: str, root: Path, request: ReadReq
     repair_mode = _current_find_read_validation_requires_repair(root, run_id) or _current_find_read_is_incomplete(root, run_id, idea_count=idea_count)
     cmd = [
         management_python,
-        str(WORKSPACE_ROOT / "modules" / "reading" / "scripts" / "ensure_current_find_research_plan.py"),
+        str(WORKSPACE_ROOT / "modules" / "reading" / "main.py"),
+        "--action",
+        "current_find_research_plan",
         "--project",
         project,
         "--read-limit",

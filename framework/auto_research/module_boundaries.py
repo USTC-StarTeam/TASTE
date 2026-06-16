@@ -246,21 +246,19 @@ SCRIPT_OWNER_OVERRIDES: dict[str, str] = {
     "fetch_latex_template.py": "writing",
     "paper_common.py": "writing",
     "paper_self_review.py": "writing",
-    "re_review_paper.py": "writing",
     "render_paper_tex.py": "writing",
     "repair_paper_figures_loop.py": "writing",
     "repair_paper_orchestra_citations.py": "writing",
     "repair_paper_preview_loop.py": "writing",
     "resolve_venue_requirements.py": "writing",
-    "respond_to_paper_reviews.py": "writing",
     "review_paper_md.py": "writing",
+    "review_response_tools.py": "writing",
     "revise_paper_citation_coverage.py": "writing",
     "revise_paper_md.py": "writing",
     "run_paper_orchestra_bridge.py": "writing",
     "run_paper_pipeline.py": "writing",
     "sync_third_party_research_stack.py": "writing",
     "sync_writing_vendor.py": "writing",
-    "write_comparison.py": "writing",
 }
 
 SCRIPT_OWNER_REASONS: dict[str, str] = {
