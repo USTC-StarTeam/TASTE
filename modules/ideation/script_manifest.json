@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-15T22:40:11.956990+00:00",
+  "generated_at": "2026-06-17T09:35:03.113893+00:00",
   "module": "ideation",
   "contract": {
     "directory": "modules/ideation",
@@ -24,62 +24,16 @@
     ],
     "private_backend_roots": [
       "modules/ideation/scripts/idea_pipeline.py",
-      "modules/ideation/scripts/assess_idea_candidates.py",
-      "modules/ideation/scripts/build_hypothesis_arena.py"
+      "modules/ideation/scripts/ideation_tools.py"
     ]
   },
-  "script_count": 4,
+  "script_count": 2,
   "scripts": [
-    {
-      "script": "assess_idea_candidates.py",
-      "path": "modules/ideation/scripts/assess_idea_candidates.py",
-      "owner": "ideation",
-      "owner_reason": "idea/hypothesis candidate generation or curation",
-      "function_count": 6,
-      "functions": [
-        "load_json",
-        "lexical_overlap",
-        "repo_execution_ready",
-        "repo_selection_bucket",
-        "build_idea_rows",
-        "main"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "json",
-        "literature_policy",
-        "pathlib",
-        "project_paths"
-      ],
-      "parse_error": ""
-    },
-    {
-      "script": "build_hypothesis_arena.py",
-      "path": "modules/ideation/scripts/build_hypothesis_arena.py",
-      "owner": "ideation",
-      "owner_reason": "idea/hypothesis candidate generation or curation",
-      "function_count": 2,
-      "functions": [
-        "load_json",
-        "main"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "json",
-        "pathlib",
-        "project_paths"
-      ],
-      "parse_error": ""
-    },
     {
       "script": "idea_pipeline.py",
       "path": "modules/ideation/scripts/idea_pipeline.py",
       "owner": "ideation",
-      "owner_reason": "idea/hypothesis candidate generation or curation",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 38,
       "functions": [
         "_raise_if_cancelled",
@@ -137,14 +91,22 @@
       "parse_error": ""
     },
     {
-      "script": "prepare_initialization.py",
-      "path": "modules/ideation/scripts/prepare_initialization.py",
+      "script": "ideation_tools.py",
+      "path": "modules/ideation/scripts/ideation_tools.py",
       "owner": "ideation",
-      "owner_reason": "idea/hypothesis candidate generation or curation",
-      "function_count": 3,
+      "owner_reason": "classified by module boundary registry",
+      "function_count": 11,
       "functions": [
-        "load_json",
+        "load_json_default",
+        "lexical_overlap",
+        "repo_execution_ready",
+        "repo_selection_bucket",
+        "build_idea_rows",
+        "run_assess_idea_candidates",
+        "run_build_hypothesis_arena",
+        "load_json_list",
         "load_mapping",
+        "run_prepare_initialization",
         "main"
       ],
       "classes": [],

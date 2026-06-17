@@ -62,8 +62,24 @@ def read_text(path: Path, max_chars: int = 12000) -> str:
         return ""
 
 
+HELPER_MODULE_ACTIONS = {
+    "ideation:arena": ("ideation", "arena"),
+    "build_aris_review_board.py": ("planning", "review_board"),
+    "audit_paper_evidence.py": ("writing", "audit_evidence"),
+    "build_method_frontier.py": ("planning", "method_frontier"),
+}
+
+
+def module_cmd(stage: str, action: str, project: str, extra: list[str]) -> list[str]:
+    return [sys.executable, str(ROOT / "framework/scripts/run_module.py"), stage, "--action", action, "--project", project, *extra]
+
+
 def run_helper(project: str, script: str, extra: list[str], required: bool = False) -> dict[str, Any]:
-    cmd = [sys.executable, str(SCRIPTS / script), "--project", project, *extra]
+    if script in HELPER_MODULE_ACTIONS:
+        stage, action = HELPER_MODULE_ACTIONS[script]
+        cmd = module_cmd(stage, action, project, extra)
+    else:
+        cmd = [sys.executable, str(SCRIPTS / script), "--project", project, *extra]
     proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True)
     if required and proc.returncode != 0:
         raise RuntimeError(f"{script} failed: {proc.stderr[-2000:] or proc.stdout[-2000:]}")
@@ -1719,7 +1735,7 @@ def main() -> None:
     helper_runs = []
     if not args.skip_helpers:
         venue_extra = ["--venue", args.venue] if args.venue else []
-        helper_runs.extend([run_helper(args.project, "build_hypothesis_arena.py", []), run_helper(args.project, "build_aris_review_board.py", []), run_helper(args.project, "audit_paper_evidence.py", venue_extra), run_helper(args.project, "build_method_frontier.py", []), run_helper(args.project, "update_evolution_memory.py", venue_extra)])
+        helper_runs.extend([run_helper(args.project, "ideation:arena", []), run_helper(args.project, "build_aris_review_board.py", []), run_helper(args.project, "audit_paper_evidence.py", venue_extra), run_helper(args.project, "build_method_frontier.py", []), run_helper(args.project, "update_evolution_memory.py", venue_extra)])
     paper_quality = load_json(paths.state / "paper_quality.json", {})
     ideas = load_json(paths.state / "idea_candidates.json", {})
     repos = load_json(paths.state / "repo_candidates.json", [])

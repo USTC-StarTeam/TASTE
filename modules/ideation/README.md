@@ -50,17 +50,15 @@
 | 脚本 | 真实作用 |
 | --- | --- |
 | `scripts/idea_pipeline.py` | 独立 idea 生成/更新主流程。 |
-| `scripts/prepare_initialization.py` | 为初次项目初始化准备研究主题和基础上下文。 |
 
 ### 评估与展示
 
 | 脚本 | 真实作用 |
 | --- | --- |
-| `scripts/assess_idea_candidates.py` | 审计 idea 候选的 novelty、evidence、feasibility、experimentability、risk_control 等评分。 |
-| `scripts/build_hypothesis_arena.py` | 生成可比较的假设面板，帮助选择进入 Plan 的想法。 |
+| `scripts/ideation_tools.py` | 私有工具集合：初始化简报、idea 候选评分、假设面板生成；由 `main.py --action initialization/assess/arena` 调用。 |
 
 ## 冗余控制原则
 
-- Ideation 脚本数量已经少，重点不是继续拆文件，而是保持网页卡片编辑、状态同步和结构化产物一致。
+- Ideation 工具脚本已经合并，后续新增小工具应优先扩展 `ideation_tools.py` 的 tool action，而不是新增单文件入口。
 - 修改本模块时必须先读相关脚本和 manifest，找到根因后再改；禁止为某个论文、某个项目、某个本机路径写特异规则。
 - 用户可见产物必须一遍生成正确；fallback 只能作为最后兼容路线，不能替代主流程质量。

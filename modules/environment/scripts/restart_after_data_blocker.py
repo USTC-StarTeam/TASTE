@@ -210,14 +210,17 @@ def main() -> None:
             payload['generated_at'] = dt.datetime.now(dt.timezone.utc).isoformat()
             write_report(paths, payload)
 
+    def module_cmd(stage: str, action: str, *extra: str) -> list[str]:
+        return [sys.executable, 'framework/scripts/run_module.py', stage, '--action', action, *extra]
+
     followups = [
-        ([sys.executable, 'modules/finding/scripts/ingest_discovery.py', '--project', args.project, '--limit', str(args.limit)], min(120, args.command_timeout_sec)),
-        ([sys.executable, 'modules/environment/scripts/assess_repo_candidates.py', '--project', args.project], min(120, args.command_timeout_sec)),
-        ([sys.executable, 'modules/finding/scripts/assess_paper_quality.py', '--project', args.project], min(120, args.command_timeout_sec)),
-        ([sys.executable, 'modules/ideation/scripts/assess_idea_candidates.py', '--project', args.project], min(120, args.command_timeout_sec)),
-        ([sys.executable, 'modules/environment/scripts/audit_repo_candidate_pool.py', '--project', args.project, '--limit', str(max(1, min(3, args.limit)))], max(120, min(360, args.command_timeout_sec * 3))),
-        ([sys.executable, 'modules/environment/scripts/reconcile_active_and_pool_candidates.py', '--project', args.project], min(120, args.command_timeout_sec)),
-        ([sys.executable, 'modules/environment/scripts/data_unavailability_policy.py', '--project', args.project], min(120, args.command_timeout_sec)),
+        (module_cmd('finding', 'ingest_discovery', '--project', args.project, '--limit', str(args.limit)), min(120, args.command_timeout_sec)),
+        (module_cmd('environment', 'assess_repo', '--project', args.project), min(120, args.command_timeout_sec)),
+        (module_cmd('finding', 'paper_quality', '--project', args.project), min(120, args.command_timeout_sec)),
+        (module_cmd('ideation', 'assess', '--project', args.project), min(120, args.command_timeout_sec)),
+        (module_cmd('environment', 'candidate_pool', '--project', args.project, '--limit', str(max(1, min(3, args.limit)))), max(120, min(360, args.command_timeout_sec * 3))),
+        (module_cmd('environment', 'reconcile_candidates', '--project', args.project), min(120, args.command_timeout_sec)),
+        (module_cmd('environment', 'data_policy', '--project', args.project), min(120, args.command_timeout_sec)),
     ]
     for cmd, timeout in followups:
         payload['commands'].append(run(cmd, timeout=timeout))

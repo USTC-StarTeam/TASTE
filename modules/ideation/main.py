@@ -16,7 +16,7 @@ RESPONSIBILITY = 'Turn reading/finding artifacts into editable research ideas wi
 REQUIRED_EXTERNAL_INPUTS = ('llm_api_or_claude', 'reading_artifacts', 'research_profile')
 ARTIFACTS_IN = ('find_results.json', 'read_results.json', 'read.md')
 ARTIFACTS_OUT = ('ideas.json', 'idea.md', 'hypothesis_arena.md', 'idea candidate audits')
-PRIVATE_BACKEND_ROOTS = ('modules/ideation/scripts/idea_pipeline.py', 'modules/ideation/scripts/assess_idea_candidates.py', 'modules/ideation/scripts/build_hypothesis_arena.py')
+PRIVATE_BACKEND_ROOTS = ('modules/ideation/scripts/idea_pipeline.py', 'modules/ideation/scripts/ideation_tools.py')
 
 
 @dataclass(slots=True)
@@ -122,10 +122,10 @@ def _run_script(script_stem: str, args: Sequence[str]) -> int:
 
 
 DIRECT_ACTIONS = {"", "idea", "ideation", "pipeline", "idea_pipeline"}
-ACTION_ALIASES = {
-    "assess": "assess_idea_candidates",
-    "arena": "build_hypothesis_arena",
-    "initialization": "prepare_initialization",
+IDEATION_TOOL_ACTIONS = {
+    "assess": "assess",
+    "arena": "arena",
+    "initialization": "initialization",
 }
 
 
@@ -162,7 +162,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     action = _normalize_action(ns.action)
     if action in DIRECT_ACTIONS:
         return _run_idea(rest)
-    return _run_script(ACTION_ALIASES.get(action, action), rest)
+    if action in IDEATION_TOOL_ACTIONS:
+        return _run_script("ideation_tools", ["--tool-action", IDEATION_TOOL_ACTIONS[action], *rest])
+    raise SystemExit(f"Unknown {STAGE_NAME} module action: {ns.action}")
 
 
 if __name__ == "__main__":
