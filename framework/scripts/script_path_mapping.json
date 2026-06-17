@@ -57,7 +57,6 @@
   "guard_selected_base_route.py": "modules/environment/scripts/guard_selected_base_route.py",
   "ideation_tools.py": "modules/ideation/scripts/ideation_tools.py",
   "import_experiment_artifacts.py": "modules/experimenting/scripts/import_experiment_artifacts.py",
-  "import_paper.py": "modules/reading/scripts/import_paper.py",
   "ingest_discovery.py": "modules/finding/scripts/ingest_discovery.py",
   "init_project.py": "framework/scripts/init_project.py",
   "init_workspace.py": "framework/scripts/init_workspace.py",

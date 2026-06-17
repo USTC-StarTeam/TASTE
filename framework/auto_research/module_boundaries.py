@@ -173,7 +173,6 @@ SCRIPT_OWNER_OVERRIDES: dict[str, str] = {
     "update_local_database.py": "finding",
     "read_pipeline.py": "reading",
     "ensure_current_find_research_plan.py": "reading",
-    "import_paper.py": "reading",
     "repair_current_find_full_text_evidence.py": "reading",
     "idea_pipeline.py": "ideation",
     "ideation_tools.py": "ideation",

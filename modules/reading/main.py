@@ -16,7 +16,11 @@ RESPONSIBILITY = 'Acquire verified paper-body text for the selected Find packet 
 REQUIRED_EXTERNAL_INPUTS = ('llm_api_or_claude', 'finding_artifact_packet', 'artifact_root')
 ARTIFACTS_IN = ('find_results.json', 'article.md', 'full_text_reading/manual_full_text_sources.json')
 ARTIFACTS_OUT = ('read_results.json', 'read.md', 'full_text_reading/full_text_packet.json', 'current_find_full_text_evidence_repair.json')
-PRIVATE_BACKEND_ROOTS = ('modules/reading/scripts/read_pipeline.py', 'modules/reading/scripts/repair_current_find_full_text_evidence.py', 'modules/reading/scripts/ensure_current_find_research_plan.py')
+PRIVATE_BACKEND_ROOTS = (
+    'modules/reading/scripts/read_pipeline.py',
+    'modules/reading/scripts/repair_current_find_full_text_evidence.py',
+    'modules/reading/scripts/ensure_current_find_research_plan.py',
+)
 
 
 @dataclass(slots=True)
@@ -126,10 +130,99 @@ ACTION_ALIASES = {
     "repair_full_text": "repair_current_find_full_text_evidence",
     "current_find_research_plan": "ensure_current_find_research_plan",
     "ensure_current_find_research_plan": "ensure_current_find_research_plan",
-    "import": "import_paper",
-    "import_paper": "import_paper",
 }
 
+
+def _load_json_list(path: Path) -> list[Any]:
+    if not path.exists():
+        return []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return data if isinstance(data, list) else []
+
+
+def _save_json(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _run_import_paper(args: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(description="Import one external paper into the Reading module input store.")
+    parser.add_argument("--project", required=True)
+    parser.add_argument("--paper-id", required=True)
+    parser.add_argument("--title", required=True)
+    parser.add_argument("--authors", default="")
+    parser.add_argument("--published", default="")
+    parser.add_argument("--categories", default="")
+    parser.add_argument("--abs-url", default="")
+    parser.add_argument("--pdf-url", default="")
+    parser.add_argument("--summary", default="")
+    parser.add_argument("--source", default="manual")
+    parser.add_argument("--venue", default="")
+    parser.add_argument("--journal", default="")
+    parser.add_argument("--citations", default="")
+    parser.add_argument("--influential-citations", default="")
+    ns = parser.parse_args(list(args))
+
+    _ensure_runtime_imports()
+    from auto_research.source_selection import canonical_source_selection, paper_source_allowed
+    from literature_policy import now_utc, score_paper
+    from project_paths import build_paths, load_project_config
+
+    cfg = load_project_config(ns.project)
+    paths = build_paths(ns.project)
+    item: dict[str, Any] = {
+        "source": ns.source,
+        "paper_id": ns.paper_id,
+        "entry_id": ns.abs_url or ns.paper_id,
+        "title": ns.title,
+        "summary": ns.summary,
+        "published": ns.published,
+        "updated": ns.published,
+        "authors": [part.strip() for part in ns.authors.split(",") if part.strip()],
+        "categories": [part.strip() for part in ns.categories.split(",") if part.strip()],
+        "pdf_url": ns.pdf_url,
+        "abs_url": ns.abs_url,
+        "citations": ns.citations or None,
+        "influential_citations": ns.influential_citations or None,
+        "tldr": None,
+        "venue": ns.venue,
+        "journal": ns.journal,
+    }
+    selection = canonical_source_selection(project_config_path=paths.config)
+    if not paper_source_allowed(item, selection):
+        print("source disabled by canonical source selection; import skipped")
+        return 0
+
+    item.update(score_paper(item, cfg, reference_time=now_utc()))
+    paper_dir = paths.raw_papers / ns.paper_id
+    paper_dir.mkdir(parents=True, exist_ok=True)
+    _save_json(paper_dir / "metadata.json", item)
+    (paper_dir / "source.md").write_text(
+        f"# {ns.title}\n\n"
+        f"- source: {ns.source}\n"
+        f"- paper_id: `{ns.paper_id}`\n"
+        f"- authors: {ns.authors}\n"
+        f"- published: {ns.published}\n"
+        f"- venue: {ns.venue}\n"
+        f"- journal: {ns.journal}\n"
+        f"- categories: {ns.categories}\n"
+        f"- abs: {ns.abs_url}\n"
+        f"- pdf: {ns.pdf_url}\n"
+        f"- citations: {ns.citations}\n"
+        f"- selection_bucket: {item.get('selection_bucket', '')}\n"
+        f"- discovery_priority_score: {item.get('discovery_priority_score', '')}\n\n"
+        "## Abstract\n\n"
+        f"{ns.summary}\n",
+        encoding="utf-8",
+    )
+
+    ingested_path = paths.state / "ingested_ids.json"
+    ingested = _load_json_list(ingested_path)
+    if ns.paper_id not in ingested:
+        ingested.append(ns.paper_id)
+        _save_json(ingested_path, ingested)
+    print(paper_dir)
+    return 0
 
 def _run_read(args: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(description="Run the Reading module backend.")
@@ -168,6 +261,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     action = _normalize_action(ns.action)
     if action in DIRECT_ACTIONS:
         return _run_read(rest)
+    if action in {"import", "import_paper"}:
+        return _run_import_paper(rest)
     return _run_script(ACTION_ALIASES.get(action, action), rest)
 
 

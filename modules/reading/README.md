@@ -57,8 +57,9 @@
 
 | 脚本 | 真实作用 |
 | --- | --- |
-| `scripts/import_paper.py` | 导入单篇论文或外部论文元数据到 Reading 输入。 |
 | `scripts/repair_current_find_full_text_evidence.py` | 在 Read 阶段修复当前 Find 的全文证据包；不允许把全文检查移回 Find。 |
+
+单篇外部论文导入由 `main.py --action import` 直接处理，不再保留单独私有脚本。
 
 ## 冗余控制原则
 

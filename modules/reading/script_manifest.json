@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-15T22:40:11.956990+00:00",
+  "generated_at": "2026-06-17T10:15:19.989664+00:00",
   "module": "reading",
   "contract": {
     "directory": "modules/reading",
@@ -28,14 +28,14 @@
       "modules/reading/scripts/ensure_current_find_research_plan.py"
     ]
   },
-  "script_count": 4,
+  "script_count": 3,
   "scripts": [
     {
       "script": "ensure_current_find_research_plan.py",
       "path": "modules/reading/scripts/ensure_current_find_research_plan.py",
       "owner": "reading",
-      "owner_reason": "full-text/read packet acquisition or current-Find reading bridge",
-      "function_count": 333,
+      "owner_reason": "classified by module boundary registry",
+      "function_count": 334,
       "functions": [
         "now_iso",
         "parse_iso_time",
@@ -330,6 +330,7 @@
         "_contract_text",
         "_contains_stale_execution_binding",
         "_binding_view",
+        "_strip_pre_environment_prohibition_phrases",
         "_contains_pre_environment_base_binding",
         "_safe_plan_text",
         "_safe_list",
@@ -375,7 +376,7 @@
       "imports": [
         "__future__",
         "argparse",
-        "auto_research.paths",
+        "auto_research",
         "datetime",
         "difflib",
         "json",
@@ -398,35 +399,10 @@
       "parse_error": ""
     },
     {
-      "script": "import_paper.py",
-      "path": "modules/reading/scripts/import_paper.py",
-      "owner": "reading",
-      "owner_reason": "full-text/read packet acquisition or current-Find reading bridge",
-      "function_count": 3,
-      "functions": [
-        "load_json",
-        "save_json",
-        "main"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "auto_research.source_selection",
-        "json",
-        "literature_policy",
-        "pathlib",
-        "project_paths",
-        "sys",
-        "taste_pythonpath"
-      ],
-      "parse_error": ""
-    },
-    {
       "script": "read_pipeline.py",
       "path": "modules/reading/scripts/read_pipeline.py",
       "owner": "reading",
-      "owner_reason": "full-text/read packet acquisition or current-Find reading bridge",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 31,
       "functions": [
         "_raise_if_cancelled",
@@ -464,18 +440,15 @@
       "classes": [],
       "imports": [
         "__future__",
-        "auto_research.jobs",
-        "auto_research.llm",
-        "auto_research.models",
-        "auto_research.storage",
+        "auto_research",
         "os",
         "pathlib",
         "re",
         "requests",
         "time",
         "typing",
-        "urllib.parse",
-        "xml.etree.ElementTree"
+        "urllib",
+        "xml"
       ],
       "parse_error": ""
     },
@@ -483,7 +456,7 @@
       "script": "repair_current_find_full_text_evidence.py",
       "path": "modules/reading/scripts/repair_current_find_full_text_evidence.py",
       "owner": "reading",
-      "owner_reason": "full-text/read packet acquisition or current-Find reading bridge",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 66,
       "functions": [
         "now_iso",
@@ -567,8 +540,8 @@
         "sys",
         "time",
         "typing",
-        "urllib.parse",
-        "xml.etree.ElementTree"
+        "urllib",
+        "xml"
       ],
       "parse_error": ""
     }
