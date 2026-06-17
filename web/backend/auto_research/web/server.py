@@ -4610,8 +4610,8 @@ def _new_find_guard_blocker(request: FindRequest | None = None) -> dict[str, Any
         "recommendation_target_count": target,
         "recommendation_shortfall": shortfall,
         "approval_path": str(approval_path),
-        "message": "Current Find recommendation gate is short; use force_new_find/restart_full_cycle for an explicit fresh Find, or modules/finding/main.py --action literature_tool for controlled targeted repair.",
-        "message_zh": "当前 Find 推荐门控未过；显式重新 Find 请使用 force_new_find/restart_full_cycle，受控补检索请走 modules/finding/main.py --action literature_tool。",
+        "message": "Current Find recommendation gate is short; use force_new_find/restart_full_cycle for an explicit fresh Find, or framework/scripts/run_module.py finding --action literature_tool for controlled targeted repair.",
+        "message_zh": "当前 Find 推荐门控未过；显式重新 Find 请使用 force_new_find/restart_full_cycle，受控补检索请走 framework/scripts/run_module.py finding --action literature_tool。",
     }
 
 
@@ -7301,7 +7301,7 @@ def _live_jobs_from_projects(*, compact: bool = True) -> list[dict[str, Any]]:
             if child_phase == "paper" or str(full_job.get("kind") or "") in {"paper_pipeline", "paper_repair_loop", "paper_claude_session", "experiment_training"}:
                 phase = child_phase
                 raw_stage = child_kind or raw_stage or child_phase
-        # A Claude child can invoke modules/finding/main.py --action run_literature_tool while the
+        # A Claude child can invoke framework/scripts/run_module.py finding --action literature_tool while the
         # full-cycle remains in read/idea/experiment repair, and that wrapper may
         # spawn run_frontend/run_driver. Treat it as an auxiliary
         # literature subtask unless the public full-cycle phase is Find.

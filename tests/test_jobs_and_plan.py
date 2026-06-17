@@ -3735,10 +3735,10 @@ def test_blocker_action_plan_command_supports_optional_venue(monkeypatch):
     with_venue = blocker.command("demo", "ICLR", "audit_paper_evidence.py")
     without_venue = blocker.command("demo", "audit_paper_evidence.py")
 
-    assert with_venue.startswith("PYTHONPATH=")
-    assert " /env/python modules/writing/main.py --action audit_paper_evidence --project demo --venue ICLR" in with_venue
-    assert without_venue.startswith("PYTHONPATH=")
-    assert " /env/python modules/writing/main.py --action audit_paper_evidence --project demo" in without_venue
+    assert not with_venue.startswith("PYTHONPATH=")
+    assert "/env/python framework/scripts/run_module.py writing --action audit_evidence --project demo --venue ICLR" in with_venue
+    assert not without_venue.startswith("PYTHONPATH=")
+    assert "/env/python framework/scripts/run_module.py writing --action audit_evidence --project demo" in without_venue
 
 
 def test_blocker_action_plan_ignores_unrelated_finetune_process(monkeypatch, tmp_path):

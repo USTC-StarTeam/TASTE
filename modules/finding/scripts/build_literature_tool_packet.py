@@ -729,9 +729,9 @@ def main() -> int:
             "Feed selected paper/repo signals into TASTE base-work selection, environment reproduction, and experiment planning; do not use them as experiment-result evidence.",
         ],
         "commands": [
-            f"{management_python()} modules/finding/main.py --action build_literature_tool_packet --project {args.project}" + (f" --venue {args.venue}" if args.venue else ""),
-            f"{management_python()} modules/finding/main.py --action run_literature_tool --project {args.project} --query \"<targeted paper/work query>\" --fast-mode" + (f" --venue {args.venue}" if args.venue else "") + "  # internal by default; add --publish-current-find only for visible current-Find repair",
-            f"{management_python()} modules/finding/main.py --action run_literature_tool --project {args.project} --query \"<conference or arXiv focus>\" --deep-survey" + (f" --venue {args.venue}" if args.venue else "") + "  # internal by default; add --publish-current-find only for visible current-Find repair",
+            f"{management_python()} framework/scripts/run_module.py finding --action tool_packet --project {args.project}" + (f" --venue {args.venue}" if args.venue else ""),
+            f"{management_python()} framework/scripts/run_module.py finding --action literature_tool --project {args.project} --query \"<targeted paper/work query>\" --fast-mode" + (f" --venue {args.venue}" if args.venue else "") + "  # internal by default; add --publish-current-find only for visible current-Find repair",
+            f"{management_python()} framework/scripts/run_module.py finding --action literature_tool --project {args.project} --query \"<conference or arXiv focus>\" --deep-survey" + (f" --venue {args.venue}" if args.venue else "") + "  # internal by default; add --publish-current-find only for visible current-Find repair",
         ],
         "intermediate_files": load_artifact_file_map(paths, taste_dir),
         "strong_papers": strong[:20],

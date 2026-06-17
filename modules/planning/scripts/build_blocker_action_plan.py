@@ -66,9 +66,7 @@ def load_skills() -> dict[str, str]:
 
 
 def module_command(project: str, stage: str, action: str, *extra: str) -> str:
-    env_prefix = f"PYTHONPATH={shlex.quote(taste_pythonpath_string(ROOT))}"
     parts = [
-        env_prefix,
         management_python(),
         "framework/scripts/run_module.py",
         stage,
@@ -81,6 +79,26 @@ def module_command(project: str, stage: str, action: str, *extra: str) -> str:
     return " ".join(shlex.quote(str(part)) for part in parts)
 
 
+PUBLIC_SCRIPT_ACTIONS: dict[tuple[str, str], str] = {
+    ("finding", "build_literature_tool_packet.py"): "tool_packet",
+    ("finding", "run_literature_tool.py"): "literature_tool",
+    ("finding", "run_literature_base_audit.py"): "literature_base_audit",
+    ("finding", "select_fresh_research_base.py"): "fresh_base_selection",
+    ("environment", "build_fresh_base_implementation_plan.py"): "fresh_base_plan",
+    ("environment", "probe_fresh_base_data_acquisition.py"): "fresh_base_data_probe",
+    ("environment", "run_safe_unblock.py"): "safe_unblock",
+    ("experimenting", "audit_reference_reproduction.py"): "reference_reproduction",
+    ("writing", "audit_paper_evidence.py"): "audit_evidence",
+    ("writing", "audit_submission_readiness.py"): "submission_readiness",
+    ("writing", "audit_paper_normality.py"): "audit_normality",
+    ("writing", "audit_paper_figures.py"): "audit_figures",
+    ("writing", "repair_paper_figures_loop.py"): "repair_figures",
+    ("writing", "repair_paper_preview_loop.py"): "repair_preview",
+    ("writing", "run_paper_pipeline.py"): "run",
+    ("planning", "build_blocker_action_plan.py"): "blocker_action",
+}
+
+
 def command(project: str, script_or_venue: str, *extra: str) -> str:
     script_or_venue = str(script_or_venue or "").strip()
     if script_or_venue.endswith(".py") or not extra:
@@ -91,7 +109,6 @@ def command(project: str, script_or_venue: str, *extra: str) -> str:
         script = str(extra[0] or "").strip()
         tail = (["--venue", venue] if venue else []) + [str(item) for item in extra[1:]]
     script_path = resolve_script_path(script, ROOT)
-    env_prefix = f"PYTHONPATH={shlex.quote(taste_pythonpath_string(ROOT))}"
     try:
         rel = script_path.relative_to(ROOT)
     except ValueError:
@@ -99,10 +116,10 @@ def command(project: str, script_or_venue: str, *extra: str) -> str:
     rel_parts = rel.parts if isinstance(rel, Path) else ()
     if len(rel_parts) >= 4 and rel_parts[0] == "modules" and rel_parts[2] == "scripts" and str(rel_parts[-1]).endswith(".py"):
         stage = rel_parts[1]
-        action = Path(rel_parts[-1]).stem
-        parts = [env_prefix, management_python(), f"modules/{stage}/main.py", "--action", action, "--project", project]
+        action = PUBLIC_SCRIPT_ACTIONS.get((stage, str(rel_parts[-1])), Path(rel_parts[-1]).stem)
+        parts = [management_python(), "framework/scripts/run_module.py", stage, "--action", action, "--project", project]
     else:
-        parts = [env_prefix, management_python(), str(rel), "--project", project]
+        parts = [management_python(), str(rel), "--project", project]
     parts.extend(str(item) for item in tail if str(item).strip())
     return " ".join(parts)
 

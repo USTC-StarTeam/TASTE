@@ -457,10 +457,10 @@ def sync_current_find_plan_queries(paths, state: dict[str, Any]) -> str:
         "literature_repair_policy": "targeted_find_allowed",
         "last_literature_tool_mode": "record_only" if state.get("record_only_requested") else "controlled_targeted_find",
         "allowed_actions": [
-            "{py} modules/finding/main.py --action build_literature_tool_packet --project {project}".format(py=management_python(), project=state.get("project") or "<project>"),
-            "{py} modules/finding/main.py --action run_literature_tool --project {project} --query \"<targeted literature gap query>\" --fast-mode --publish-current-find".format(py=management_python(), project=state.get("project") or "<project>"),
-            "{py} modules/writing/main.py --action audit_submission_readiness --project {project}".format(py=management_python(), project=state.get("project") or "<project>"),
-            "{py} modules/planning/main.py --action build_blocker_action_plan --project {project}".format(py=management_python(), project=state.get("project") or "<project>"),
+            "{py} framework/scripts/run_module.py finding --action tool_packet --project {project}".format(py=management_python(), project=state.get("project") or "<project>"),
+            "{py} framework/scripts/run_module.py finding --action literature_tool --project {project} --query \"<targeted literature gap query>\" --fast-mode --publish-current-find".format(py=management_python(), project=state.get("project") or "<project>"),
+            "{py} framework/scripts/run_module.py writing --action submission_readiness --project {project}".format(py=management_python(), project=state.get("project") or "<project>"),
+            "{py} framework/scripts/run_module.py planning --action blocker_action --project {project}".format(py=management_python(), project=state.get("project") or "<project>"),
         ],
         "updated_at": datetime.now(UTC).isoformat(),
     })
