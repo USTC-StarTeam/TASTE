@@ -22,6 +22,19 @@ def module_cmd(stage: str, action: str, *extra: str) -> list[str]:
     return [sys.executable, 'framework/scripts/run_module.py', stage, '--action', action, *extra]
 
 
+def replace_arg_value(cmd: list[str], key: str, value: str) -> list[str]:
+    out = list(cmd)
+    if key in out:
+        idx = out.index(key)
+        if idx + 1 < len(out):
+            out[idx + 1] = value
+        else:
+            out.append(value)
+    else:
+        out.extend([key, value])
+    return out
+
+
 def load_json(path: Path, default):
     if not path.exists():
         return default
@@ -243,6 +256,107 @@ def _candidate_arg_values(candidate: dict) -> tuple[str, str, str, str]:
     return repo, name, title, dataset
 
 
+
+def pending_environment_candidate(selection: dict) -> dict:
+    if not isinstance(selection, dict):
+        return {}
+    pending = selection.get('pending_environment_candidate') if isinstance(selection.get('pending_environment_candidate'), dict) else {}
+    if pending and str(pending.get('repo_path') or pending.get('local_path') or '').strip():
+        return pending
+    selected = selection.get('selected') if isinstance(selection.get('selected'), dict) else {}
+    if _pending_loader_selection(selection, selected) and str(selected.get('repo_path') or selected.get('local_path') or '').strip():
+        return selected
+    return {}
+
+
+def run_pending_loader_bootstrap(project: str, paths, env_name: str, selection: dict, venue: str = '', allow_env_bootstrap: bool = False) -> list[dict[str, Any]]:
+    pending = pending_environment_candidate(selection)
+    if not pending:
+        return []
+    repo = str(pending.get('repo_path') or pending.get('local_path') or '').strip()
+    if not repo or not Path(repo).exists():
+        return []
+    results: list[dict[str, Any]] = []
+    print(f'TASTE pending-loader bootstrap: preparing data/env adapter work for {pending.get("name") or repo}', flush=True)
+    fresh_rc = run_optional(module_cmd('environment', 'fresh_base_plan', '--project', project), ROOT, timeout=180)
+    results.append({'step': 'fresh_base_plan_for_pending_loader', 'return_code': fresh_rc})
+    prompt_path = paths.state / 'environment_pending_loader_bootstrap_prompt.md'
+    prompt = f"""
+TASTE Environment pending-loader bootstrap for project `{project}`.
+
+You are Claude Code working inside the project workspace. The environment-stage repo selector has chosen a current-Find candidate as the best transformable pending-loader base, but TASTE cannot promote it until real data contracts and loader/import probes pass.
+
+Hard rules:
+- Work only on the current environment-stage pending candidate repo below. Do not switch to another paper/repo and do not run another Find.
+- Add project-local adapter/probe files only under `projects/{project}/scripts/adapters/` or project state/report artifacts. Do not edit TASTE framework/module source.
+- Do not fabricate datasets or mark synthetic/toy data as paper evidence. If you create a tiny smoke fixture, label it as smoke-only and keep claim gates blocked.
+- Do not enumerate, decompress, or scan large archives/datasets. Use TASTE data contracts/probe JSON and lightweight local metadata only, such as `ls -lh`, `du -sh`, or bounded `find -maxdepth`; if deeper validation is needed, request or call the TASTE data probe wrapper instead of manually walking `.tar.gz` contents.
+- Do not run raw curl/wget/gdown or any mutating conda/pip command yourself. Data acquisition must go through `framework/scripts/run_module.py environment --action fresh_base_data_probe --project {project} --attempt-download --timeout-sec <N>`. Environment creation is wrapper-owned.
+- You may use quick local read-only environment probes such as `conda info`, `conda env list`, and `conda list -n <env>` when needed to understand this machine. Do not run `conda search`, `conda create`, `conda install`, `conda update`, `conda env update`, `conda remove`, `conda run`, `pip install`, environment Python probes, or downloads. Do not combine an allowed probe with a forbidden command in the same shell line via `&&`, `;`, `|`, subshells, or command substitution.
+- Use the configured management Python command shown by TASTE for TASTE wrapper commands; do not use bare python or a candidate experiment-env Python directly.
+
+Pending candidate:
+```json
+{json.dumps(pending, ensure_ascii=False, indent=2)[:18000]}
+```
+
+Current repo/env strategy:
+```json
+{json.dumps(load_repo_env_strategy(paths), ensure_ascii=False, indent=2)[:12000]}
+```
+
+Required work:
+1. Inspect the selected repo README, examples, environment file, dataset loaders, and entrypoints.
+2. Write or repair project-local adapters for `build_fresh_base_implementation_plan.py`, `build_repo_data_requirements.py`, `probe_repo_dataset.py`, and reference probes only when needed.
+3. The adapters must expose exact dataset contract, expected roots/files, public download sources, import/package requirements, minimal smoke commands, and honest blockers.
+4. Run TASTE module commands only to regenerate `fresh_base_implementation_plan.json` and bounded repo data/loader probes. Do not run large data downloads or conda creation yourself; the Environment wrapper runs data acquisition and env bootstrap after you return.
+5. Leave gates blocked unless a real dataset contract and repo loader/import probe pass.
+
+Return concise Markdown with Files Inspected, Adapters/Artifacts Written, TASTE Commands Run, Data/Loader Status, Still Blocked or Cleared.
+""".strip() + "\n"
+    prompt_path.write_text(prompt, encoding='utf-8')
+    claude_timeout = int(os.environ.get('ENV_PENDING_LOADER_CLAUDE_TIMEOUT_SEC', '3600') or '3600')
+    claude_rc = run_optional([
+        sys.executable,
+        'framework/scripts/claude_project_session.py',
+        '--project', project,
+        '--stage', 'environment-pending-loader-bootstrap',
+        '--message-file', str(prompt_path),
+        '--timeout-sec', str(claude_timeout),
+        '--agent-id', 'main',
+        '--no-resume',
+    ], ROOT, timeout=claude_timeout + 300)
+    results.append({'step': 'project_claude_pending_loader_bootstrap', 'return_code': claude_rc})
+    fresh_rc = run_optional(module_cmd('environment', 'fresh_base_plan', '--project', project), ROOT, timeout=180)
+    results.append({'step': 'fresh_base_plan_after_pending_loader_claude', 'return_code': fresh_rc})
+    data_timeout = int(os.environ.get('ENV_PENDING_LOADER_DATA_TIMEOUT_SEC', '7200') or '7200')
+    data_rc = run_optional(module_cmd('environment', 'fresh_base_data_probe', '--project', project, '--attempt-download', '--timeout-sec', str(data_timeout)), ROOT, timeout=data_timeout + 120)
+    results.append({'step': 'fresh_base_data_probe_pending_loader', 'return_code': data_rc})
+    bootstrap_timeout = int(os.environ.get('ENV_PENDING_LOADER_BOOTSTRAP_TIMEOUT_SEC', '7200') or '7200')
+    bootstrap_env_name = env_name
+    if allow_env_bootstrap:
+        bootstrap_env_name, plan_path, bootstrap_rc = run_machine_aware_env_bootstrap(
+            project,
+            paths,
+            repo,
+            env_name,
+            load_project_config(project),
+            reason='Pending-loader candidate has real data; decide a local-machine-aware environment bootstrap plan before any conda mutation.',
+        )
+        results.append({'step': 'machine_aware_env_bootstrap_pending_loader', 'return_code': bootstrap_rc, 'env_name': bootstrap_env_name, 'plan_path': str(plan_path), 'repo_path': repo})
+        if bootstrap_rc != 0:
+            reason = 'Machine-aware environment bootstrap for the pending-loader candidate failed; TASTE must replan from the local machine profile and wrapper receipt before this candidate can be promoted.'
+            run_optional(module_cmd('environment', 'fresh_base_plan', '--project', project), ROOT, timeout=180)
+            write_repo_selection_blocker(paths, reason, selection=selection)
+            write_fresh_base_implementation_blocker(paths, current_find_run_id(paths), reason)
+            raise SystemExit(2)
+    else:
+        bootstrap_cmd = module_cmd('environment', 'bootstrap', '--project', project, '--repo-path', repo, '--env-name', bootstrap_env_name, '--verify-only', '--prepare-only')
+        bootstrap_rc = run_optional(bootstrap_cmd, ROOT, timeout=bootstrap_timeout)
+        results.append({'step': 'repo_env_bootstrap_pending_loader', 'return_code': bootstrap_rc, 'env_name': bootstrap_env_name, 'repo_path': repo})
+    return results
+
+
 def collect_candidate_base_switch_evidence(project: str, paths, env_name: str, venue: str = '') -> list[dict]:
     selection = load_json(paths.state / 'evidence_ready_repo_selection.json', {})
     if not isinstance(selection, dict) or str(selection.get('selection_gate') or '') != BASE_SWITCH_SELECTION_GATE:
@@ -304,7 +418,7 @@ def collect_candidate_base_switch_evidence(project: str, paths, env_name: str, v
     return results
 
 
-def select_current_run_environment_repo(project: str, paths, env_name: str, max_rounds: int = 3, venue: str = '') -> str:
+def select_current_run_environment_repo(project: str, paths, env_name: str, max_rounds: int = 3, venue: str = '', allow_env_bootstrap: bool = False) -> str:
     run_id = current_find_run_id(paths)
     if not run_id:
         raise SystemExit('Current Find run_id is missing; cannot perform environment-stage base selection.')
@@ -319,6 +433,7 @@ def select_current_run_environment_repo(project: str, paths, env_name: str, max_
         '--candidate-source', 'fresh_literature_github_search',
         '--fresh-find-run-id', run_id,
     ]
+    pending_bootstrap_attempted = False
     for round_index in range(1, max(1, max_rounds) + 1):
         print(f'TASTE current-run environment repo-selection iteration {round_index}/{max_rounds}', flush=True)
         round_selector = list(selector)
@@ -330,6 +445,22 @@ def select_current_run_environment_repo(project: str, paths, env_name: str, max_
         selection = load_json(paths.state / 'evidence_ready_repo_selection.json', {})
         selected = selection.get('selected') if isinstance(selection, dict) and isinstance(selection.get('selected'), dict) else {}
         repo = str(selected.get('repo_path') or selected.get('local_path') or '').strip()
+        pending = pending_environment_candidate(selection if isinstance(selection, dict) else {})
+        if pending and not pending_bootstrap_attempted:
+            pending_bootstrap_attempted = True
+            bootstrap_results = run_pending_loader_bootstrap(project, paths, env_name, selection, venue=venue, allow_env_bootstrap=allow_env_bootstrap)
+            for result in reversed(bootstrap_results):
+                planned_env = str(result.get('env_name') or '').strip() if isinstance(result, dict) else ''
+                if planned_env:
+                    env_name = planned_env
+                    selector = replace_arg_value(selector, '--env-name', env_name)
+                    round_selector = replace_arg_value(round_selector, '--env-name', env_name)
+                    break
+            append_search_memory(paths, {'timestamp': dt.datetime.now(dt.timezone.utc).isoformat(), 'round': round_index, 'pending_loader_bootstrap_results': bootstrap_results, 'pending_candidate': {'name': pending.get('name', ''), 'repo_path': pending.get('repo_path', '')}})
+            rc = run_optional(list(round_selector), ROOT, timeout=selector_timeout)
+            selection = load_json(paths.state / 'evidence_ready_repo_selection.json', {})
+            selected = selection.get('selected') if isinstance(selection, dict) and isinstance(selection.get('selected'), dict) else {}
+            repo = str(selected.get('repo_path') or selected.get('local_path') or '').strip()
         if isinstance(selection, dict) and str(selection.get('selection_gate') or '') == BASE_SWITCH_SELECTION_GATE:
             collect_candidate_base_switch_evidence(project, paths, env_name, venue=venue)
             selection = load_json(paths.state / 'evidence_ready_repo_selection.json', {})
@@ -342,6 +473,12 @@ def select_current_run_environment_repo(project: str, paths, env_name: str, max_
                 raise SystemExit(2)
         if rc == 0 and repo and Path(repo).exists() and current_env_selection_valid(paths):
             return repo
+        latest_pending = pending_environment_candidate(selection if isinstance(selection, dict) else {})
+        if latest_pending and pending_bootstrap_attempted and round_index >= max(1, max_rounds):
+            blocker_reason = 'Current Find environment-stage selection identified a transformable pending-loader candidate and TASTE attempted data/adapter bootstrap, but loader/import evidence is still not claim-ready; experiments remain blocked with exact artifacts.'
+            write_repo_selection_blocker(paths, blocker_reason, selection=selection if isinstance(selection, dict) else {})
+            run_optional(module_cmd('environment', 'fresh_base_plan', '--project', project), ROOT, timeout=180)
+            raise SystemExit(2)
         expand_repo_search(project, round_index, fresh_find_run_id=run_id)
     latest_selection = load_json(paths.state / 'evidence_ready_repo_selection.json', {})
     if isinstance(latest_selection, dict) and str(latest_selection.get('selection_gate') or '') == BASE_SWITCH_SELECTION_GATE:
@@ -487,6 +624,322 @@ def load_repo_env_strategy(paths) -> dict:
         return active.get('claude_repo_env_strategy', {})
     return {}
 
+
+
+def _read_text_limited(path: Path, limit: int = 12000) -> str:
+    try:
+        if path.exists() and path.is_file():
+            return path.read_text(encoding='utf-8', errors='replace')[:limit]
+    except Exception:
+        return ''
+    return ''
+
+
+def _ensure_machine_profile(project: str, paths) -> dict:
+    profile_path = paths.reports / 'machine_profile.json'
+    if not profile_path.exists():
+        run_optional([sys.executable, 'framework/scripts/detect_machine_profile.py', '--project', project], ROOT, timeout=180)
+    return load_json(profile_path, {})
+
+
+def _conda_package_cache_inventory(conda_exe: str) -> dict:
+    out: dict = {'package_cache_dirs': [], 'relevant_cached_packages': []}
+    if not conda_exe:
+        return out
+    candidates: list[Path] = []
+    try:
+        conda_base = Path(conda_exe).resolve().parents[1]
+        candidates.append(conda_base / 'pkgs')
+    except Exception:
+        pass
+    for base in [ROOT.parent / 'miniforge', ROOT.parent / 'miniforge3', Path.home() / 'miniforge3', Path.home() / 'miniconda3', Path.home() / 'anaconda3']:
+        candidates.append(base / 'pkgs')
+    seen: set[str] = set()
+    package_prefixes = (
+        'pytorch-', 'pytorch-cuda-', 'cuda-version-', 'cuda-toolkit-', 'torchvision-', 'torchaudio-',
+        'pyg-', 'pytorch-scatter-', 'pytorch-sparse-', 'pytorch-cluster-', 'torch-scatter-', 'torch-sparse-', 'torch-cluster-',
+        'numpy-', 'scipy-', 'scikit-learn-', 'pandas-', 'h5py-', 'pyyaml-', 'tqdm-',
+    )
+    for cache_dir in candidates:
+        text = str(cache_dir)
+        if text in seen or not cache_dir.exists():
+            continue
+        seen.add(text)
+        out['package_cache_dirs'].append(text)
+        try:
+            for item in sorted(cache_dir.iterdir()):
+                name = item.name
+                if name.endswith('.conda'):
+                    stem = name[:-6]
+                elif name.endswith('.tar.bz2'):
+                    stem = name[:-8]
+                else:
+                    stem = name
+                if stem.startswith(package_prefixes):
+                    out['relevant_cached_packages'].append({'cache_dir': text, 'name': name})
+        except Exception as exc:
+            out.setdefault('cache_scan_errors', []).append({'cache_dir': text, 'error': str(exc)})
+    out['relevant_cached_packages'] = out['relevant_cached_packages'][:240]
+    return out
+
+
+def _conda_env_inventory(machine: dict, env_name: str) -> dict:
+    cli = machine.get('dependencies', {}).get('cli', {}) if isinstance(machine, dict) else {}
+    conda_exe = str((cli.get('conda') or {}).get('path') or '').strip() if isinstance(cli.get('conda'), dict) else ''
+    out: dict = {'conda_executable': conda_exe, 'envs': [], 'selected_env_packages': [], 'package_cache': {}}
+    if not conda_exe or not Path(conda_exe).exists():
+        return out
+    out['package_cache'] = _conda_package_cache_inventory(conda_exe)
+    try:
+        proc = subprocess.run([conda_exe, 'env', 'list', '--json'], cwd=ROOT, text=True, capture_output=True, timeout=30)
+        if proc.returncode == 0:
+            data = json.loads(proc.stdout)
+            for item in data.get('envs', []) if isinstance(data, dict) else []:
+                p = Path(str(item))
+                out['envs'].append({'name': p.name, 'path': str(p), 'matches_requested': p.name == env_name})
+    except Exception as exc:
+        out['env_list_error'] = str(exc)
+    if env_name:
+        try:
+            proc = subprocess.run([conda_exe, 'list', '-n', env_name, '--json'], cwd=ROOT, text=True, capture_output=True, timeout=45)
+            if proc.returncode == 0:
+                packages = json.loads(proc.stdout)
+                if isinstance(packages, list):
+                    out['selected_env_packages'] = [{k: row.get(k) for k in ['name', 'version', 'channel']} for row in packages[:160] if isinstance(row, dict)]
+            else:
+                out['selected_env_list_error'] = (proc.stderr or proc.stdout)[-1200:]
+        except Exception as exc:
+            out['selected_env_list_error'] = str(exc)
+    return out
+
+
+def _bootstrap_receipt_summary(paths) -> dict:
+    receipt = load_json(paths.state / 'repo_env_bootstrap.json', {})
+    if not isinstance(receipt, dict) or not receipt:
+        return {}
+    keys = [
+        'timestamp', 'status', 'repo_path', 'env_name', 'python_version', 'detected_backend',
+        'detected_cuda', 'env_exists_before', 'env_exists_after', 'failed_step', 'missing_import',
+        'machine_aware_plan_path',
+    ]
+    summary = {key: receipt.get(key) for key in keys if key in receipt}
+    executed = receipt.get('executed') if isinstance(receipt.get('executed'), list) else []
+    summary['executed_tail'] = [
+        {k: row.get(k) for k in ['command', 'return_code', 'stdout', 'stderr', 'reason'] if k in row}
+        for row in executed[-4:]
+        if isinstance(row, dict)
+    ]
+    return summary
+
+
+def _load_state_glob(paths, pattern: str, limit: int = 8) -> dict:
+    rows = {}
+    try:
+        files = sorted(paths.state.glob(pattern), key=lambda item: item.stat().st_mtime, reverse=True)[:limit]
+    except Exception:
+        files = []
+    for file in files:
+        rows[file.name] = load_json(file, {})
+    return rows
+
+
+def _repo_environment_inputs(repo: Path) -> dict:
+    return {
+        'environment_yml': _read_text_limited(repo / 'environment.yml', 16000),
+        'requirements_txt': _read_text_limited(repo / 'requirements.txt', 16000),
+        'pyproject_toml': _read_text_limited(repo / 'pyproject.toml', 12000),
+        'setup_py': _read_text_limited(repo / 'setup.py', 12000),
+        'readme_excerpt': '\n\n'.join(_read_text_limited(path, 6000) for path in sorted(repo.glob('README*'))[:2]),
+    }
+
+
+def current_machine_aware_env_name(paths, repo: str = '') -> str:
+    plan_path = paths.state / 'machine_aware_env_plan.json'
+    plan = load_json(plan_path, {})
+    if not isinstance(plan, dict):
+        return ''
+    if str(plan.get('status') or '').strip().lower() not in {'ready', 'approved', 'execute', 'pass'}:
+        return ''
+    planned_env = str(plan.get('env_name') or plan.get('selected_env_name') or '').strip()
+    if repo:
+        planned_repo = str(plan.get('repo_path') or '').strip()
+        try:
+            if planned_repo and Path(planned_repo).resolve() != Path(repo).resolve():
+                return ''
+        except Exception:
+            if planned_repo and planned_repo != repo:
+                return ''
+    bootstrap = load_json(paths.state / 'repo_env_bootstrap.json', {})
+    if isinstance(bootstrap, dict) and str(bootstrap.get('status') or '').strip().lower() in {'failed', 'blocked'}:
+        same_plan = str(bootstrap.get('machine_aware_plan_path') or '').strip() == str(plan_path.resolve())
+        same_repo = not repo or str(bootstrap.get('repo_path') or '').strip() == str(Path(repo).resolve())
+        same_env = not planned_env or str(bootstrap.get('env_name') or '').strip() == planned_env
+        if same_plan and same_repo and same_env:
+            return ''
+    return planned_env
+
+
+def prepare_machine_aware_env_plan(project: str, paths, repo: str, env_name: str, cfg: dict, reason: str = '', previous_bootstrap: dict | None = None, attempt: int = 1) -> tuple[str, Path, int]:
+    repo_path = Path(repo).resolve()
+    plan_path = paths.state / 'machine_aware_env_plan.json'
+    prompt_path = paths.state / 'machine_aware_env_plan_prompt.md'
+    machine = _ensure_machine_profile(project, paths)
+    conda_inventory = _conda_env_inventory(machine, env_name)
+    initial_plan = {
+        'status': 'planning',
+        'project': project,
+        'repo_path': str(repo_path),
+        'requested_env_name': env_name,
+        'generated_at': dt.datetime.now(dt.timezone.utc).isoformat(),
+        'attempt': attempt,
+        'blocker': 'Claude Code machine-aware environment plan has not completed yet.',
+    }
+    plan_path.write_text(json.dumps(initial_plan, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    prompt = f"""
+TASTE machine-aware environment planning for project `{project}`.
+
+You are Claude Code inside the project workspace. Your task is to decide the environment bootstrap plan for the selected repo on THIS machine. Prefer the machine profile, conda inventory, local conda package cache, repo files, loader evidence, and previous bootstrap receipt supplied below; you may run only quick local read-only probes such as `conda info`, `conda env list`, `conda list -n <env>`, `nvidia-smi`, and file inspections when needed. Do not run remote package-index searches such as `conda search`, and do not execute any command that creates, installs, updates, removes, downloads, solves a full environment, runs inside a conda env, executes repo training, or otherwise mutates environments/data; no `conda create`, `conda install`, `conda update`, `conda env update`, `conda remove`, `conda run`, `pip install`, environment Python probes, or downloads during planning. Do not hide a forbidden operation inside a mixed shell command: a line that combines an allowed probe with `&&`, `;`, `|`, command substitution, or redirection to a forbidden `conda run`/env-python/pip/download action is still forbidden. You may write wrapper-executable argv arrays such as `["install", ...]` or `["run", "-n", env, ...]` into the JSON plan; the TASTE wrapper, not Claude Code, executes them. Use the supplied cache/channel/receipt evidence to avoid speculative pins; if a previous wrapper step failed, revise the plan instead of repeating the same failing command. The TASTE wrapper will execute the approved plan after you write it.
+
+Hard rules:
+- Consider the local machine profile, GPU/driver/CUDA evidence, existing conda environments, repo environment files, repo loader/import requirements, and current project runtime config.
+- Repo `environment.yml` / `requirements.txt` are evidence, not commands to copy blindly. If old pins are incompatible with the local machine, adapt or block with a clear reason.
+- If a partial env already exists, do not include a `conda create -n <same env>` step. Choose `repair_existing_env` with install/update/run verification steps, or choose a clearly different new env name.
+- If the local package cache shows a CUDA-enabled PyTorch build directly, you may target that direct package/build evidence instead of inventing a separate `pytorch-cuda=<version>` pin. Never repeat a package spec that the previous receipt shows as unavailable.
+- If the previous receipt shows Python package build isolation or import-order failure, encode a different wrapper-executable approach such as compatible conda packages, no-build-isolation, prebuilt wheel index, or a clear blocked decision. Do not repeat the same failing pip/conda step.
+- If the previous receipt shows compiler/CUDA header/toolkit errors such as missing runtime headers or an unusable local compiler, adapt the wrapper plan from machine evidence: add the compatible toolkit/headers, set verification steps that expose CUDA_HOME/include paths, choose prebuilt wheels, or block clearly. Do not guess a toolkit version unsupported by the local driver/cache evidence.
+- Never delete or remove an environment. If a partial env exists, decide whether to repair it or create a new project-specific env.
+- Write exactly one JSON object to `{plan_path}`. Do not leave Markdown in that file.
+- Conda steps must be argv arrays WITHOUT the conda executable prefix, for example `["create", "-y", "-n", "env", "python=3.10", "pip", "-c", "conda-forge"]`.
+- If no safe machine-aware plan exists, set `status="blocked"` and explain the blocker.
+
+Required JSON schema:
+```json
+{{
+  "status": "ready | blocked",
+  "project": "{project}",
+  "repo_path": "{repo_path}",
+  "env_name": "chosen env name",
+  "python_version": "chosen Python version",
+  "decision": "create_new_project_env | repair_existing_env | reuse_existing_env | blocked",
+  "repo_env_file_policy": "use_as_is | adapt | avoid | blocked",
+  "conda_steps": [["create", "-y", "-n", "...", "python=...", "pip"]],
+  "verification_steps": [["run", "-n", "...", "python", "-c", "import torch; print(torch.__version__)"]],
+  "machine_reasoning": "why this plan fits the local machine and repo",
+  "compatibility_risks": [],
+  "blocker": "only when blocked",
+  "guardrails": ["no env deletion", "wrapper executes the plan"]
+}}
+```
+
+Current request/reason:
+{reason or 'Create or repair the project experiment environment for the environment stage.'}
+
+Machine-aware planning attempt: {attempt}
+
+Current project config (secrets omitted by TASTE):
+```json
+{json.dumps({k: v for k, v in cfg.items() if k not in {'llm', 'api_key', 'smtp'}}, ensure_ascii=False, indent=2)[:16000]}
+```
+
+Machine profile:
+```json
+{json.dumps(machine, ensure_ascii=False, indent=2)[:24000]}
+```
+
+Conda inventory:
+```json
+{json.dumps(conda_inventory, ensure_ascii=False, indent=2)[:22000]}
+```
+
+Previous wrapper bootstrap receipt, if any:
+```json
+{json.dumps(previous_bootstrap or {}, ensure_ascii=False, indent=2)[:18000]}
+```
+
+Repo environment inputs:
+```json
+{json.dumps(_repo_environment_inputs(repo_path), ensure_ascii=False, indent=2)[:30000]}
+```
+
+Current repo/data strategy:
+```json
+{json.dumps(load_repo_env_strategy(paths), ensure_ascii=False, indent=2)[:16000]}
+```
+
+Data and loader evidence:
+```json
+{json.dumps({
+    'fresh_base_data_acquisition': load_json(paths.state / 'fresh_base_data_acquisition.json', {}),
+    'repo_data_requirements': load_json(paths.state / 'repo_data_requirements.json', {}),
+    'real_dataset_probe': load_json(paths.state / 'real_dataset_probe.json', {}),
+    'candidate_loader_probes': _load_state_glob(paths, 'candidate_loader_probe_*.json'),
+}, ensure_ascii=False, indent=2)[:26000]}
+```
+""".strip() + "\n"
+    prompt_path.write_text(prompt, encoding='utf-8')
+    timeout = int(os.environ.get('ENV_MACHINE_AWARE_PLAN_TIMEOUT_SEC', '1800') or '1800')
+    rc = run_optional([
+        sys.executable,
+        'framework/scripts/claude_project_session.py',
+        '--project', project,
+        '--stage', 'environment-machine-aware-bootstrap-plan',
+        '--message-file', str(prompt_path),
+        '--timeout-sec', str(timeout),
+        '--agent-id', 'main',
+        '--no-resume',
+    ], ROOT, timeout=timeout + 180)
+    plan = load_json(plan_path, {})
+    chosen_env = str(plan.get('env_name') or plan.get('selected_env_name') or env_name).strip() if isinstance(plan, dict) else env_name
+    return chosen_env or env_name, plan_path, rc
+
+
+def run_machine_aware_env_bootstrap(project: str, paths, repo: str, env_name: str, cfg: dict, reason: str = '', max_attempts: int | None = None) -> tuple[str, Path, int]:
+    attempts = max(1, max_attempts or int(os.environ.get('ENV_MACHINE_AWARE_BOOTSTRAP_ATTEMPTS', '3') or '3'))
+    current_env = env_name
+    plan_path = paths.state / 'machine_aware_env_plan.json'
+    previous = _bootstrap_receipt_summary(paths)
+    last_rc = 2
+    for attempt in range(1, attempts + 1):
+        attempt_reason = reason or 'Create or repair the project experiment environment for the environment stage.'
+        if previous:
+            attempt_reason += '\n\nPrevious wrapper execution did not complete successfully. Revise the machine-aware plan using the receipt below; do not repeat the same failed command/spec.'
+        current_env, plan_path, plan_rc = prepare_machine_aware_env_plan(
+            project,
+            paths,
+            repo,
+            current_env,
+            cfg,
+            reason=attempt_reason,
+            previous_bootstrap=previous,
+            attempt=attempt,
+        )
+        last_rc = plan_rc
+        if plan_rc != 0:
+            previous = {'status': 'plan_failed', 'return_code': plan_rc, 'attempt': attempt, 'plan_path': str(plan_path)}
+            plan = load_json(plan_path, {})
+            if not isinstance(plan, dict) or str(plan.get('status') or '').strip().lower() == 'planning':
+                blocked = {
+                    'status': 'blocked',
+                    'project': project,
+                    'repo_path': str(Path(repo).resolve()),
+                    'env_name': current_env,
+                    'decision': 'blocked',
+                    'attempt': attempt,
+                    'blocker': 'Claude Code did not produce a machine-aware environment plan within policy; wrapper execution was not started.',
+                    'last_plan_return_code': plan_rc,
+                    'guardrails': ['Claude plans from local machine evidence', 'wrapper executes environment mutation'],
+                    'updated_at': dt.datetime.now(dt.timezone.utc).isoformat(),
+                }
+                plan_path.write_text(json.dumps(blocked, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+            continue
+        bootstrap_timeout = int(os.environ.get('ENV_MACHINE_AWARE_BOOTSTRAP_TIMEOUT_SEC', '7200') or '7200')
+        bootstrap_cmd = module_cmd('environment', 'bootstrap', '--project', project, '--repo-path', repo, '--env-name', current_env, '--machine-aware-plan', str(plan_path), '--require-machine-aware-plan', '--update-project-config')
+        last_rc = run_optional(bootstrap_cmd, ROOT, timeout=bootstrap_timeout)
+        receipt = _bootstrap_receipt_summary(paths)
+        if last_rc == 0 and receipt.get('status') == 'completed':
+            return current_env, plan_path, 0
+        previous = receipt or {'status': 'bootstrap_failed', 'return_code': last_rc, 'attempt': attempt, 'plan_path': str(plan_path)}
+    return current_env, plan_path, last_rc or 2
 
 def strategy_env_name(strategy: dict, fallback: str, *, explicit_env_name: str = '') -> str:
     if explicit_env_name:
@@ -889,8 +1342,8 @@ def main() -> int:
     elif current_env_selection_valid(paths):
         repo = infer_repo(paths, '')
     else:
-        repo = select_current_run_environment_repo(args.project, paths, env_name, max_rounds=args.repo_search_rounds, venue=args.venue)
-    env_name = explicit_env_name or f"{args.project}_{Path(repo).name}".replace('-', '_')
+        repo = select_current_run_environment_repo(args.project, paths, env_name, max_rounds=args.repo_search_rounds, venue=args.venue, allow_env_bootstrap=args.real_bootstrap_env)
+    env_name = current_machine_aware_env_name(paths, repo) or explicit_env_name or f"{args.project}_{Path(repo).name}".replace('-', '_')
     print(f'TASTE environment stage: project={args.project}', flush=True)
     print(f'selected repo={repo}', flush=True)
     print(f'conda env={env_name}', flush=True)
@@ -900,7 +1353,7 @@ def main() -> int:
         repo = maybe_switch_to_evidence_ready_repo(args.project, paths, env_name, repo, max_rounds=args.repo_search_rounds)
     strategy = load_repo_env_strategy(paths)
     recommended_env_name = str(strategy.get('recommended_env_name') or '').strip() if isinstance(strategy, dict) else ''
-    env_name = strategy_env_name(strategy, env_name, explicit_env_name=explicit_env_name)
+    env_name = current_machine_aware_env_name(paths, repo) or strategy_env_name(strategy, env_name, explicit_env_name=explicit_env_name)
     if strategy:
         if explicit_env_name and recommended_env_name and recommended_env_name != explicit_env_name:
             print(
@@ -922,11 +1375,23 @@ def main() -> int:
         print(bootstrap_reason, flush=True)
     else:
         print(bootstrap_reason, flush=True)
-        bootstrap = module_cmd('environment', 'bootstrap', '--project', args.project, '--repo-path', repo, '--env-name', env_name, '--verify-only', '--prepare-only')
         if args.real_bootstrap_env:
-            bootstrap = [item for item in bootstrap if item not in {'--verify-only', '--prepare-only'}]
-            bootstrap.append('--update-project-config')
-        run(bootstrap, ROOT)
+            env_name, plan_path, bootstrap_rc = run_machine_aware_env_bootstrap(
+                args.project,
+                paths,
+                repo,
+                env_name,
+                cfg,
+                reason='Environment stage is about to create or repair the selected repo environment; decide a local-machine-aware plan before conda mutation.',
+            )
+            if bootstrap_rc != 0:
+                reason = 'Machine-aware environment bootstrap failed after Claude Code planning/replanning; experiments remain blocked until project Claude produces an executable local-machine-aware plan.'
+                write_repo_selection_blocker(paths, reason, selection=load_json(paths.state / 'evidence_ready_repo_selection.json', {}))
+                write_fresh_base_implementation_blocker(paths, current_find_run_id(paths), reason)
+                raise SystemExit(2)
+        else:
+            bootstrap = module_cmd('environment', 'bootstrap', '--project', args.project, '--repo-path', repo, '--env-name', env_name, '--verify-only', '--prepare-only')
+            run(bootstrap, ROOT)
     run(module_cmd('environment', 'data_policy', '--project', args.project), ROOT)
     audit_reference_cmd = module_cmd('experimenting', 'reference_reproduction', '--project', args.project)
     if args.venue:

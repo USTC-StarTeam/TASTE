@@ -1046,6 +1046,58 @@ def _job_status_is_live(status: Any) -> bool:
     return str(status or "").strip().lower() in _LIVE_TASK_STATUSES
 
 
+
+
+def _parse_job_timestamp(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _reconcile_stale_cancelling_jobs(grace_seconds: float = 8.0) -> None:
+    # Release web jobs that were cancelled after their child process already exited.
+    now = datetime.now(UTC)
+    changed = False
+    with JOBS_LOCK:
+        jobs_snapshot = list(JOBS.values())
+    for job in jobs_snapshot:
+        status = str(getattr(job, "status", "") or "").strip().lower()
+        if status != "cancelling" or not bool(getattr(job, "cancel_requested", False)):
+            continue
+        cancelled_at = _parse_job_timestamp(getattr(job, "cancelled_at", "")) or _parse_job_timestamp(getattr(job, "created_at", "")) or now
+        age = max(0.0, (now - cancelled_at).total_seconds())
+        if not getattr(job, "done", threading.Event()).is_set() and age < grace_seconds:
+            continue
+        project_id = _project_from_job_payload(getattr(job, "job_id", ""), None, job)
+        phase_hint = _phase_hint_from_job(getattr(job, "job_id", ""), None, job)
+        active_child = None
+        if project_id:
+            root = PROJECT_IDS_ROOT / project_id
+            if root.exists():
+                active_child = _active_project_child_process(project_id, root, phase_hint=phase_hint) or _active_project_child_process(project_id, root)
+        child_pid = str((active_child or {}).get("pid") or "").strip()
+        if child_pid and _pid_alive_local(child_pid):
+            continue
+        with JOBS_LOCK:
+            if str(getattr(job, "status", "") or "").strip().lower() != "cancelling":
+                continue
+            job.status = "cancelled"
+            job.error = job.error or "research action cancelled by user."
+            job.cancelled_at = job.cancelled_at or now.isoformat().replace("+00:00", "Z")
+            job.progress = {"phase": "cancelled", "current": 0, "total": 1, "percent": 0, "message": "research action cancelled by user."}
+            job.progress_version += 1
+            job.logs.append("Reconciled stale cancelling job: no active child process remains, so the web stage lock was released.")
+            job.done.set()
+            changed = True
+    if changed:
+        _LIVE_JOBS_CACHE.clear()
+        _persist_jobs()
+
+
 def _paper_substage_from_cmd(cmd: Any, fallback: str = "") -> str:
     text = str(cmd or "")
     lowered = text.lower()
@@ -3659,6 +3711,16 @@ def _current_project_for_find_guard() -> tuple[str, Path] | None:
     return None
 
 
+def _project_context_for_find_run(run_id: str) -> tuple[str, Path] | None:
+    project = _project_id_for_find_run(run_id)
+    if not project:
+        return None
+    root = (PROJECT_IDS_ROOT / project).resolve()
+    if project and (root / "state").exists():
+        return project, root
+    return None
+
+
 def _truthy(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -4621,6 +4683,7 @@ def _active_web_stage_job_blocker(project: str, stage: str) -> dict[str, Any] | 
     stage_key = str(stage or "").strip().lower()
     if not stage_key:
         return None
+    _reconcile_stale_cancelling_jobs()
     try:
         with JOBS_LOCK:
             active_jobs = list(JOBS.values())
@@ -5113,7 +5176,9 @@ def _is_inspection_or_wrapper_cmd(command: Any) -> bool:
     lowered = text.lower()
     if not text:
         return False
-    if "python - <<" in lowered or "python3 - <<" in lowered or "python -c" in lowered or "python3 -c" in lowered:
+    if any(marker in lowered for marker in ["api/jobs", "api/projects", "urllib.request.urlopen", "http://127.0.0.1:8765/api/", "curl -s http://127.0.0.1:8765/api/"]):
+        return True
+    if "python - <<" in lowered or "python3 - <<" in lowered or "python3.11 - <<" in lowered or "python -c" in lowered or "python3 -c" in lowered or "python3.11 -c" in lowered:
         inspection_terms = [
             "curl -ss",
             "api/jobs",
@@ -8517,7 +8582,11 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
                 live_message = _human_progress_message(full_cycle or live_summary, fallback=str(environment.get("summary") or ""))
                 has_specific_environment_gate = bool(
                     live_status.startswith("blocked_fresh_base")
+                    or live_status.startswith("blocked_environment_bootstrap")
                     or "真实数据/loader" in live_message
+                    or "环境 bootstrap" in live_message
+                    or "environment bootstrap" in live_message.lower()
+                    or "repo_env_bootstrap" in live_message
                     or "环境阶段已选择" in live_message
                     or "current candidate base" in live_message.lower()
                 )
@@ -8541,7 +8610,12 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
             compact_result["summary"] = fallback
         progress_phase = str(public_progress.get("phase") or "").strip()
         progress_message = str(public_progress.get("message") or "")
-        if "真实数据/loader 已通过" in progress_message or "等待参考协议" in progress_message or "reference-protocol" in progress_message.lower():
+        if "环境 bootstrap" in progress_message or "environment bootstrap" in progress_message.lower() or "repo_env_bootstrap" in progress_message:
+            public_status = "blocked_environment_bootstrap_failed"
+            if progress_phase in {"", "blocked"}:
+                public_progress["phase"] = public_status
+            compact_result["status"] = public_status
+        elif "真实数据/loader 已通过" in progress_message or "等待参考协议" in progress_message or "reference-protocol" in progress_message.lower():
             public_status = "blocked_fresh_base_reference_probe_required"
             if progress_phase in {"", "blocked", "blocked_fresh_base_data_required"}:
                 public_progress["phase"] = public_status
@@ -8557,7 +8631,12 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
     if public_stage == "environment":
         progress_phase = str(public_progress.get("phase") or "").strip()
         progress_message = str(public_progress.get("message") or "")
-        if "真实数据/loader 已通过" in progress_message or "等待参考协议" in progress_message or "reference-protocol" in progress_message.lower():
+        if "环境 bootstrap" in progress_message or "environment bootstrap" in progress_message.lower() or "repo_env_bootstrap" in progress_message:
+            public_status = "blocked_environment_bootstrap_failed"
+            if progress_phase in {"", "blocked"}:
+                public_progress["phase"] = public_status
+            compact_result["status"] = public_status
+        elif "真实数据/loader 已通过" in progress_message or "等待参考协议" in progress_message or "reference-protocol" in progress_message.lower():
             public_status = "blocked_fresh_base_reference_probe_required"
             if progress_phase in {"", "blocked", "blocked_fresh_base_data_required"}:
                 public_progress["phase"] = public_status
@@ -9211,14 +9290,15 @@ def api_find(request: FindRequest) -> dict:
         shortfall = int(gate_metrics["shortfall"])
         strong_count = int(gate_metrics["strong_count"])
         result_status = str(gate_metrics.get("status") or "").lower()
+        # Publish any completed, non-blocked current-Find packet that has real
+        # recommendations. A recommendation shortfall is a downstream-visible
+        # gate status; hiding the whole packet makes the project look missing.
         adoption_allowed = bool(
             run_id
             and target
             and not should_cancel()
             and not result_status.startswith("blocked")
-            and target_count > 0
-            and strong_count >= target_count
-            and shortfall == 0
+            and strong_count > 0
         )
         if adoption_allowed:
             project, root = target
@@ -9320,8 +9400,10 @@ def _read_request_should_use_current_find_wrapper(request: ReadRequest, project:
     return _current_find_read_is_incomplete(root, current_run_id)
 
 
-def _current_find_downstream_gate_blocker(stage: str) -> dict[str, Any] | None:
-    current = _current_project_for_find_guard()
+def _current_find_downstream_gate_blocker(stage: str, run_id: str = "") -> dict[str, Any] | None:
+    current = _project_context_for_find_run(run_id) if run_id else None
+    if not current:
+        current = _current_project_for_find_guard()
     if not current:
         return None
     project, root = current
@@ -9526,7 +9608,7 @@ def api_read(request: ReadRequest) -> dict:
     blocker = _taste_stage_live_full_cycle_blocker("read")
     if blocker:
         return JSONResponse(status_code=409, content=blocker)
-    current = _current_project_for_find_guard()
+    current = _project_context_for_find_run(request.run_id) or _current_project_for_find_guard()
     if current:
         project, root = current
         if _read_request_should_use_current_find_wrapper(request, project, root):
@@ -9551,7 +9633,7 @@ def api_idea(request: IdeaRequest) -> dict:
     blocker = _taste_stage_live_full_cycle_blocker("idea")
     if blocker:
         return JSONResponse(status_code=409, content=blocker)
-    downstream_blocker = _current_find_downstream_gate_blocker("idea")
+    downstream_blocker = _current_find_downstream_gate_blocker("idea", request.run_id)
     if downstream_blocker:
         return _current_find_downstream_blocked_job("idea", downstream_blocker).as_dict()
     config = load_config()
@@ -9564,7 +9646,7 @@ def api_plan(request: PlanRequest) -> dict:
     blocker = _taste_stage_live_full_cycle_blocker("plan")
     if blocker:
         return JSONResponse(status_code=409, content=blocker)
-    downstream_blocker = _current_find_downstream_gate_blocker("plan")
+    downstream_blocker = _current_find_downstream_gate_blocker("plan", request.run_id)
     if downstream_blocker:
         return _current_find_downstream_blocked_job("plan", downstream_blocker).as_dict()
     config = load_config()
@@ -10054,6 +10136,7 @@ def api_jobs(
 ) -> list[dict]:
     project = _api_query_str(project)
     _reconcile_detached_launcher_jobs()
+    _reconcile_stale_cancelling_jobs()
     dynamic = _live_jobs_from_projects(compact=True)
     if project:
         dynamic = [item for item in dynamic if _job_belongs_to_project(item, project)]

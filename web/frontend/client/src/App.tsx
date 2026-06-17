@@ -2765,6 +2765,7 @@ function mathDisplayHtml(raw: string) {
 function isLikelyDelimitedMath(raw: string) {
   const value = stripMathDelimiters(raw);
   if (!value || /[一-鿿]/.test(value)) return false;
+  if (/^\\(?:textit|emph|textbf|texttt|textsc|underline|mathrm|mathbf|mathit|mathtt|text)\s*\{[\s\S]{1,320}\}$/.test(value)) return true;
   if (/^\d+(?:\.\d+)?\s*(?:USD|RMB|CNY|dollars?)?$/i.test(value)) return false;
   if (/^https?:\/\//i.test(value)) return false;
   if (/^[+\-−]?\d+(?:\.\d+)?\s*(?:\\%|%|％)$/.test(value)) return true;
@@ -2862,7 +2863,10 @@ function markdownToHtml(markdown: string) {
     });
     value = renderBareLatexCommandsInText(value, (expression) => protect(mathInlineHtml(expression)), protectLatexTextCommandHtml);
     value = renderBareMathInText(value, (expression) => protect(mathInlineHtml(expression)));
-    let escaped = escapeHtml(value).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    value = value.replace(/\\%/g, "%");
+    let escaped = escapeHtml(value)
+      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[^*])\*([^*\n]+?)\*(?!\*)/g, "$1<em>$2</em>");
     tokens.forEach((htmlValue, idx) => {
       escaped = escaped.replace(new RegExp(`@@TASTE_INLINE_${idx}@@`, "g"), htmlValue);
     });
@@ -2976,6 +2980,8 @@ function jobStatusLabel(status: any, lang: Lang = "zh") {
     preview_pdf_blocked: { zh: "预览受门控", en: "preview gated" },
     blocked: { zh: "阻塞", en: "blocked" },
     blocked_environment_base_selection_required: { zh: "等待环境阶段选择当前基底", en: "waiting for environment-stage base selection" },
+    blocked_environment_bootstrap_failed: { zh: "环境 bootstrap 未通过", en: "environment bootstrap failed" },
+    blocked_environment_bootstrap_required: { zh: "等待环境 bootstrap", en: "environment bootstrap required" },
     environment_anchor_selection_required: { zh: "等待环境阶段选择当前基底", en: "waiting for environment-stage base selection" },
     error: { zh: "错误", en: "error" },
     cancelling: { zh: "停止中", en: "cancelling" },
@@ -3111,6 +3117,9 @@ function publicLogText(value: any, lang: Lang = "zh"): string {
     .replace(/原始回复/g, "处理摘要")
     .replace(/paper_orchestra/g, "paper writing")
     .replace(/paper-orchestra/g, "paper writing")
+    .replace(/blocked[_ ]environment[_ ]bootstrap[_ ]failed/gi, lang === "zh" ? "环境 bootstrap 未通过" : "environment bootstrap failed")
+    .replace(/blocked[_ ]environment[_ ]bootstrap[_ ]required/gi, lang === "zh" ? "等待环境 bootstrap" : "environment bootstrap required")
+    .replace(/environment[_ ]bootstrap[_ ]failed/gi, lang === "zh" ? "环境 bootstrap 未通过" : "environment bootstrap failed")
     .replace(/environment_claude_code/g, "environment review")
     .replace(/environment-stage base selection/gi, "environment review")
     .replace(/environment-stage base selected/gi, "environment selected")
@@ -4800,6 +4809,7 @@ function App() {
       setConfig(savedConfig);
       setLLMProbeResult(null);
       if (researchProject) {
+        await saveProjectConfigDraft({ silent: true, propagateError: true });
         void loadProject(researchProject, { resetDrafts: false }).catch(() => {});
       }
       setSaveMessage(t.saved);
@@ -4860,6 +4870,7 @@ function App() {
       const savedConfig = await saveConfig(nextConfig);
       setConfig(savedConfig);
       if (researchProject) {
+        await saveProjectConfigDraft({ silent: true, propagateError: true });
         void loadProject(researchProject, { resetDrafts: false }).catch(() => {});
       }
       const nextJob = await startFind(savedConfig, savedConfig.default_find_selection, {
@@ -6923,6 +6934,15 @@ function App() {
       research_interest: researchResearchInterest,
       researcher_profile: researchResearcherProfile,
       default_find_selection: currentFindSelection(),
+      llm: {
+        enabled: Boolean((config.api_key || config.api_key_saved) && config.model && config.provider && config.provider.toLowerCase() !== "mock"),
+        provider: config.provider || "openai_compatible",
+        api_base: config.base_url || "",
+        model: config.model || "",
+        api_key_env: "OPENAI_API_KEY",
+        temperature: config.temperature,
+        api_mode: "chat_completions",
+      },
     };
     if (includePaperSettings) {
       const venueDraft = researchVenue.trim();
@@ -7703,10 +7723,10 @@ function App() {
           <summary><span>{t.profile}</span></summary>
           <p className="help">{t.interestHelp}</p>
           <label>{t.interest}</label>
-          <textarea value={researchResearchInterest} onChange={(e) => setResearchResearchInterest(e.target.value)} autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false} />
+          <textarea value={researchResearchInterest} onChange={(e) => { setResearchResearchInterest(e.target.value); setProjectConfigMessage(""); }} onBlur={() => { if (researchProject) void saveProjectConfigDraft({ silent: true }); }} autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false} />
           <label>{t.researcher}</label>
           <p className="help">{t.researcherHelp}</p>
-          <textarea value={researchResearcherProfile} onChange={(e) => setResearchResearcherProfile(e.target.value)} autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false} />
+          <textarea value={researchResearcherProfile} onChange={(e) => { setResearchResearcherProfile(e.target.value); setProjectConfigMessage(""); }} onBlur={() => { if (researchProject) void saveProjectConfigDraft({ silent: true }); }} autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false} />
         </details>
 
         <details className="panel compact sidebarDetails">
