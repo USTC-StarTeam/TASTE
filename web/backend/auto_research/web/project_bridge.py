@@ -7608,9 +7608,7 @@ def _sync_running_experiment_artifacts(root: Path, *, force: bool = False) -> di
     if importer.exists():
         for artifact in artifact_dirs:
             commands.append([sys.executable, str(importer), "--project", root.name, "--artifact-dir", str(artifact), "--allow-incomplete"])
-    builder = SCRIPTS / "build_experiment_record_table.py"
-    if builder.exists():
-        commands.append([sys.executable, str(builder), "--project", root.name])
+    commands.append([sys.executable, str(ROOT / "framework/scripts/run_module.py"), "experimenting", "--action", "record_table", "--project", root.name])
     audit = SCRIPTS / "audit_experiment_iteration.py"
     if audit.exists():
         commands.append([sys.executable, str(audit), "--project", root.name])
@@ -7656,7 +7654,7 @@ def _refresh_experiment_record_table(root: Path, *, sync_running: bool = True) -
             needs_refresh = True
     if needs_refresh:
         proc = subprocess.run(
-            [sys.executable, str(SCRIPTS / "build_experiment_record_table.py"), "--project", root.name],
+            [sys.executable, str(ROOT / "framework/scripts/run_module.py"), "experimenting", "--action", "record_table", "--project", root.name],
             cwd=ROOT,
             text=True,
             capture_output=True,

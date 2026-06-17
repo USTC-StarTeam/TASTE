@@ -16,7 +16,12 @@ RESPONSIBILITY = 'Modify or execute selected project code, run auditable experim
 REQUIRED_EXTERNAL_INPUTS = ('selected_plan_contract', 'locked_environment', 'repo_path', 'experiment_python')
 ARTIFACTS_IN = ('evidence_ready_repo_selection.json', 'repo_env_bootstrap.json', 'experiment_plan.json')
 ARTIFACTS_OUT = ('experiment_registry.json', 'experiment artifacts/logs', 'runtime integrity audit', 'reference/scientific progress gates')
-PRIVATE_BACKEND_ROOTS = ('modules/experimenting/scripts/run_coding_agent.py', 'modules/experimenting/scripts/launch_experiment_run.py', 'modules/experimenting/scripts/experiment_contracts.py')
+PRIVATE_BACKEND_ROOTS = (
+    'modules/experimenting/scripts/run_coding_agent.py',
+    'modules/experimenting/scripts/launch_experiment_run.py',
+    'modules/experimenting/scripts/experiment_contracts.py',
+    'modules/experimenting/scripts/experiment_record_tools.py',
+)
 
 
 @dataclass(slots=True)
@@ -134,13 +139,11 @@ ACTION_ALIASES = {
     "real_repo_smoke": "run_real_repo_smoke",
     "watchdog": "experiment_run_watchdog",
     "contracts": "experiment_contracts",
-    "log": "log_experiment",
     "analyze_failures": "analyze_experiment_failures",
     "reference_reproduction": "audit_reference_reproduction",
     "audit_iteration": "audit_experiment_iteration",
     "runtime_integrity": "audit_experiment_runtime_integrity",
     "import_artifacts": "import_experiment_artifacts",
-    "record_table": "build_experiment_record_table",
     "reference_audit": "audit_reference_reproduction",
 }
 
@@ -154,6 +157,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(_contract_payload(), ensure_ascii=False, indent=2))
         return 0
     action = _normalize_action(ns.action)
+    if action in {"log", "record_table"}:
+        return _run_script("experiment_record_tools", ["--tool-action", action, *rest])
     return _run_script(ACTION_ALIASES.get(action, action), rest)
 
 

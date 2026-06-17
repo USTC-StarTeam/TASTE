@@ -3,7 +3,7 @@ from pathlib import Path
 from path_helpers import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
-build_experiment_record_table = load_script("build_experiment_record_table")
+build_experiment_record_table = load_script("experiment_record_tools")
 
 
 def test_invalidated_reference_reflection_does_not_call_it_current_baseline():

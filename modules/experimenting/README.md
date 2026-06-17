@@ -54,7 +54,6 @@
 | `scripts/run_loop.py` | 自动科研主循环入口，调用 init、run_project、trajectory supervisor；根日志写入 runtime/logs。 |
 | `scripts/run_coding_agent.py` | 实验 Claude Code 项目代理入口。 |
 | `scripts/launch_experiment_run.py` | 启动单个实验命令并建立 artifact/PID/log 合同。 |
-| `scripts/log_experiment.py` | 登记实验结果、指标和 artifact。 |
 
 ### 运行与导入
 
@@ -75,7 +74,7 @@
 | `scripts/audit_reference_reproduction.py` | 审计参考工作是否已复现。 |
 | `scripts/reference_reproduction_state.py` | 读取/归一化参考复现状态。 |
 | `scripts/analyze_experiment_failures.py` | 分析实验失败原因和方法级失败模式。 |
-| `scripts/build_experiment_record_table.py` | 生成用户可读实验记录表。 |
+| `scripts/experiment_record_tools.py` | 记录实验结果并生成用户可读实验记录表；由 `main.py --action log/record_table` 调用。 |
 
 ## 冗余控制原则
 
