@@ -42,7 +42,7 @@ Project: {project}
 Venue: {venue}
 Title: {title}
 
-Goal: keep iterating until the generated PDF can be shown as an accepted conference preview. The current PDF must remain viewable as a blocked preview, but your job is to repair it so `modules/writing/scripts/audit_paper_figures.py` passes.
+Goal: keep iterating until the generated PDF can be shown as an accepted conference preview. The current PDF must remain viewable as a blocked preview, but your job is to repair it so `framework/scripts/run_module.py writing --action audit_figures` passes.
 
 Read and follow these local contracts:
 - `framework/resources/claude/skills/writing/SKILL.md`
@@ -81,8 +81,8 @@ Repair requirements:
 - Return only after files are updated, or after writing an exact blocker explaining why no valid figure can be kept.
 
 Required local commands after edits:
-- `{management_python()} modules/writing/scripts/audit_paper_figures.py --project {project} --venue {venue}`
-- `{management_python()} modules/writing/scripts/build_conference_preview_paper.py --project {project} --venue {venue} --title "{title}"`
+- `{management_python()} framework/scripts/run_module.py writing --action audit_figures --project {project} --venue {venue}`
+- `{management_python()} framework/scripts/run_module.py writing --action preview --project {project} --venue {venue} --title "{title}"`
 """.strip()
 
 

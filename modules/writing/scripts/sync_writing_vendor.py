@@ -233,7 +233,7 @@ def provenance_from_status(status: dict[str, Any]) -> dict[str, Any]:
         }
     return {
         "generated_at": now_iso(),
-        "policy": "writing vendor references are runtime-only, ignored by Git, and restored by modules/writing/scripts/sync_writing_vendor.py.",
+        "policy": "writing vendor references are runtime-only, ignored by Git, and restored by the writing module sync_vendor action.",
         "sources": sources,
     }
 

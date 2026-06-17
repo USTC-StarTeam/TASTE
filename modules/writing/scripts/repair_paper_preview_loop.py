@@ -347,7 +347,7 @@ Title: {title}
 
 Role: TASTE provides official venue requirements and deterministic diagnostics; project Claude Code owns manuscript revision decisions inside the prepared paper workspace. This loop must not edit experiment code, launch experiments, or change scientific state.
 
-Objective: revise the current venue-formatted manuscript preview so `modules/writing/scripts/build_conference_preview_paper.py --project {project} --venue {venue} --title "{title}"` can pass its preview gates. Diagnose the actual blocker first: venue page accounting, figure/table footprint, citation correctness, template compliance, or manuscript-shape quality. Treat this as paper preview repair only, not a direct intervention in the underlying research project.
+Objective: revise the current venue-formatted manuscript preview so `framework/scripts/run_module.py writing --action preview --project {project} --venue {venue} --title "{title}"` can pass its preview gates. Diagnose the actual blocker first: venue page accounting, figure/table footprint, citation correctness, template compliance, or manuscript-shape quality. Treat this as paper preview repair only, not a direct intervention in the underlying research project.
 
 This is a manuscript repair task, not a scientific-result invention task. The output must read like a real venue-formatted research paper, while the deterministic preview gates remain honest about evidence and submission readiness. If the measured body pages are already within the official limit, do not frame the job as prose shortening; repair figure footprint, real citation coverage, bibliography density, and venue-template details.
 
@@ -425,8 +425,8 @@ Repair requirements:
 - Before returning, write/update `state/paper_preview_self_review.json` for the current PDF/TeX/refs/logs. The workflow will validate this receipt and keep the preview blocked if it is missing, stale, or not tied to the current artifacts.
 
 Required local commands after edits:
-- `{management_python()} modules/writing/scripts/audit_paper_figures.py --project {project} --venue {venue}`
-- `{management_python()} modules/writing/scripts/build_conference_preview_paper.py --project {project} --venue {venue} --title "{title}"`
+- `{management_python()} framework/scripts/run_module.py writing --action audit_figures --project {project} --venue {venue}`
+- `{management_python()} framework/scripts/run_module.py writing --action preview --project {project} --venue {venue} --title "{title}"`
 
 Return concise Markdown with: Conclusion, Files Changed, Gates Fixed, Remaining Blockers, and Next Actions.
 """.strip()

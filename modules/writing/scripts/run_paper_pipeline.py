@@ -266,7 +266,7 @@ def main() -> None:
         if not template_ok:
             return
 
-    run([sys.executable, str(SCRIPTS / 'sync_third_party_research_stack.py'), '--project', args.project], required=False)
+    run(module_cmd('writing', 'sync_stack', '--project', args.project), required=False)
     run([sys.executable, str(SCRIPTS / 'audit_reference_reproduction.py'), '--project', args.project, '--venue', args.venue], required=False)
     run([sys.executable, str(SCRIPTS / 'audit_experiment_iteration.py'), '--project', args.project], required=False)
     run([sys.executable, str(SCRIPTS / 'audit_paper_evidence.py'), '--project', args.project, '--venue', args.venue], required=False)

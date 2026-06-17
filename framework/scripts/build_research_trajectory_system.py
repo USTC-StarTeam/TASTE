@@ -65,7 +65,7 @@ def read_text(path: Path, max_chars: int = 12000) -> str:
 HELPER_MODULE_ACTIONS = {
     "ideation:arena": ("ideation", "arena"),
     "planning:review_board": ("planning", "review_board"),
-    "audit_paper_evidence.py": ("writing", "audit_evidence"),
+    "writing:audit_evidence": ("writing", "audit_evidence"),
     "planning:method_frontier": ("planning", "method_frontier"),
 }
 
@@ -98,38 +98,31 @@ def run_end_to_end_verification(project: str) -> dict[str, Any]:
     return {"script": "verify_research_trajectory_end_to_end.py", "returncode": proc.returncode, "stdout_tail": proc.stdout[-1000:], "stderr_tail": proc.stderr[-1000:]}
 
 
-def run_paper_orchestra_state(project: str, venue: str = "") -> dict[str, Any]:
+def _run_module_action(stage: str, action: str, project: str, venue: str = "") -> dict[str, Any]:
     extra = ["--venue", venue] if venue else []
-    cmd = [sys.executable, str(SCRIPTS / "build_paper_orchestra_state.py"), "--project", project, *extra]
+    cmd = module_cmd(stage, action, project, extra)
     proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True)
-    return {"script": "build_paper_orchestra_state.py", "returncode": proc.returncode, "stdout_tail": proc.stdout[-1000:], "stderr_tail": proc.stderr[-1000:]}
+    return {"script": f"{stage}:{action}", "returncode": proc.returncode, "stdout_tail": proc.stdout[-1000:], "stderr_tail": proc.stderr[-1000:]}
+
+
+def run_paper_orchestra_state(project: str, venue: str = "") -> dict[str, Any]:
+    return _run_module_action("writing", "build_paper_orchestra_state", project, venue)
 
 
 def run_paper_normality_audit(project: str, venue: str = "") -> dict[str, Any]:
-    extra = ["--venue", venue] if venue else []
-    cmd = [sys.executable, str(SCRIPTS / "audit_paper_normality.py"), "--project", project, *extra]
-    proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True)
-    return {"script": "audit_paper_normality.py", "returncode": proc.returncode, "stdout_tail": proc.stdout[-1000:], "stderr_tail": proc.stderr[-1000:]}
+    return _run_module_action("writing", "audit_normality", project, venue)
 
 
 def run_third_party_stack_sync(project: str) -> dict[str, Any]:
-    cmd = [sys.executable, str(SCRIPTS / "sync_third_party_research_stack.py"), "--project", project]
-    proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True)
-    return {"script": "sync_third_party_research_stack.py", "returncode": proc.returncode, "stdout_tail": proc.stdout[-1000:], "stderr_tail": proc.stderr[-1000:]}
+    return _run_module_action("writing", "sync_stack", project)
 
 
 def run_submission_readiness(project: str, venue: str = "") -> dict[str, Any]:
-    extra = ["--venue", venue] if venue else []
-    cmd = [sys.executable, str(SCRIPTS / "audit_submission_readiness.py"), "--project", project, *extra]
-    proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True)
-    return {"script": "audit_submission_readiness.py", "returncode": proc.returncode, "stdout_tail": proc.stdout[-1000:], "stderr_tail": proc.stderr[-1000:]}
+    return _run_module_action("writing", "submission_readiness", project, venue)
 
 
 def run_blocker_action_plan(project: str, venue: str = "") -> dict[str, Any]:
-    extra = ["--venue", venue] if venue else []
-    cmd = [sys.executable, str(SCRIPTS / "build_blocker_action_plan.py"), "--project", project, *extra]
-    proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True)
-    return {"script": "build_blocker_action_plan.py", "returncode": proc.returncode, "stdout_tail": proc.stdout[-1000:], "stderr_tail": proc.stderr[-1000:]}
+    return _run_module_action("planning", "blocker_action", project, venue)
 
 
 def one_line(value: Any, limit: int = 180) -> str:
@@ -1735,7 +1728,7 @@ def main() -> None:
     helper_runs = []
     if not args.skip_helpers:
         venue_extra = ["--venue", args.venue] if args.venue else []
-        helper_runs.extend([run_helper(args.project, "ideation:arena", []), run_helper(args.project, "planning:review_board", []), run_helper(args.project, "audit_paper_evidence.py", venue_extra), run_helper(args.project, "planning:method_frontier", []), run_helper(args.project, "update_evolution_memory.py", venue_extra)])
+        helper_runs.extend([run_helper(args.project, "ideation:arena", []), run_helper(args.project, "planning:review_board", []), run_helper(args.project, "writing:audit_evidence", venue_extra), run_helper(args.project, "planning:method_frontier", []), run_helper(args.project, "update_evolution_memory.py", venue_extra)])
     paper_quality = load_json(paths.state / "paper_quality.json", {})
     ideas = load_json(paths.state / "idea_candidates.json", {})
     repos = load_json(paths.state / "repo_candidates.json", [])

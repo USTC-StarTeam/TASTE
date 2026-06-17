@@ -459,10 +459,10 @@ def main() -> int:
             "optional_audit": str(artifact_dir / "audit.json"),
         },
         "audit_refresh_required": [
-            "modules/experimenting/scripts/experiment_run_watchdog.py",
-            "modules/writing/scripts/audit_paper_evidence.py",
-            "modules/writing/scripts/audit_submission_readiness.py",
-            "modules/planning/scripts/build_blocker_action_plan.py",
+            "framework/scripts/run_module.py experimenting --action watchdog",
+            "framework/scripts/run_module.py writing --action audit_evidence",
+            "framework/scripts/run_module.py writing --action submission_readiness",
+            "framework/scripts/run_module.py planning --action blocker_action",
         ],
         "artifact_contract_required_fields": [
             "contract_schema_version",

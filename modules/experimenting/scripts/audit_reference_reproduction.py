@@ -1183,7 +1183,7 @@ def build_reference_reproduction_gate(project: str) -> dict[str, Any]:
             job_note = (
                 f" Full reproduction job status={full_job.get('status')} pid={full_job.get('pid')} log={full_job.get('log_path')}."
                 if full_job else
-                " Next deterministic action is modules/environment/scripts/run_safe_unblock.py, which starts a wrapper-managed full reproduction job instead of repeating bounded smoke."
+                " Next deterministic action is framework/scripts/run_module.py environment --action safe_unblock, which starts a wrapper-managed full reproduction job instead of repeating bounded smoke."
             )
             blockers = [
                 (
@@ -1262,7 +1262,7 @@ def build_reference_reproduction_gate(project: str) -> dict[str, Any]:
             ] if decision == "literature_base_audit_required" else
             [
                 "Run framework/scripts/run_module.py finding --action literature_base_audit for the current Find candidates without writing active_repo.",
-                "Run modules/environment/scripts/run_environment_stage.py so Claude Code selects the anchor/base only after current strong recommendations, Read/Idea/Plan, repo/data/protocol evidence, and reproducibility feasibility are inspected.",
+                "Run framework/scripts/run_module.py environment --action run so Claude Code selects the anchor/base only after current strong recommendations, Read/Idea/Plan, repo/data/protocol evidence, and reproducibility feasibility are inspected.",
                 "Do not use stale active_repo/reference_reproduction_gate state from an older Find run.",
             ] if decision == "environment_anchor_selection_required" else
             [

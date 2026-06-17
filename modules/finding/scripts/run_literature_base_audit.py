@@ -382,7 +382,10 @@ def build(project: str, limit: int, repo_search_per_candidate: int, repo_limit: 
     print("[literature-base-audit] running evidence-ready repo selector", flush=True)
     select = run_cmd([
         sys.executable,
-        "modules/environment/scripts/select_evidence_ready_repo.py",
+        "framework/scripts/run_module.py",
+        "environment",
+        "--action",
+        "select_evidence_ready",
         "--project",
         project,
         "--limit",

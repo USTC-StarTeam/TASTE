@@ -388,7 +388,7 @@ def audit_skill_and_code_bindings(paths) -> dict[str, Any]:
     ]
     checks.append(check("skill_contracts_exported", contracts_path.exists() and isinstance(contracts, list) and len(contracts) >= len(required_skills), severity="warn", evidence=[str(contracts_path)], detail=f"contracts={len(contracts) if isinstance(contracts, list) else 'n/a'}"))
     checks.extend([
-        check("trajectory_builder_invokes_assurance_and_memory_helpers", source_contains("build_research_trajectory_system.py", ["planning:review_board", "audit_paper_evidence.py", "update_evolution_memory.py"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
+        check("trajectory_builder_invokes_assurance_and_memory_helpers", source_contains("build_research_trajectory_system.py", ["planning:review_board", "writing:audit_evidence", "update_evolution_memory.py"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
         check("trajectory_builder_exports_local_skill_contracts", source_contains("build_research_trajectory_system.py", ["load_skill_contracts", "research_skill_contracts"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
         check("trajectory_builder_maintains_graph_history_and_manifest", source_contains("build_research_trajectory_system.py", ["update_research_graph_history", "research_evidence_manifest", "update_evolutionary_memory_ledger"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
         check("claude_project_session_requires_trajectory_and_skills", source_contains("claude_project_session.py", ["research_trajectory_capability_audit", "framework/resources/claude/skills", "Optimize the whole trajectory"]), evidence=[str(SCRIPTS / "claude_project_session.py")]),
@@ -431,7 +431,7 @@ def audit_third_party_research_stack(paths) -> dict[str, Any]:
     available_modules = [module for module in modules if module.get("available")]
     missing_available_modules = [module for module in modules if module.get("source_available") and not module.get("available")]
     checks = [
-        check("third_party_stack_sync_script", script_exists("sync_third_party_research_stack.py"), evidence=[str(SCRIPTS / "sync_third_party_research_stack.py")]),
+        check("third_party_stack_sync_action", source_contains("build_research_trajectory_system.py", ["writing", "sync_stack"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
         check("third_party_stack_state_file", stack_path.exists(), evidence=[str(stack_path)]),
         check("third_party_stack_report_file", report_path.exists(), evidence=[str(report_path)]),
         check("third_party_stack_status_ready", stack.get("status") == "ready", evidence=[str(stack_path)], detail=f"status={stack.get('status', '')}; warnings={stack.get('warnings', [])}"),
@@ -439,7 +439,7 @@ def audit_third_party_research_stack(paths) -> dict[str, Any]:
         check("third_party_commits_recorded", all(row.get("commit") for row in available_source_rows), severity="warn", evidence=[str(stack_path)]),
         check("third_party_licenses_recorded", all(row.get("license") and row.get("license_path") for row in available_source_rows), severity="warn", evidence=[str(stack_path)]),
         check("third_party_selected_modules_available", int(summary.get("missing_module_count", 0) or 0) == 0 and not missing_available_modules and bool(available_modules), evidence=[str(stack_path)], detail=f"available={len(available_modules)} missing_available={len(missing_available_modules)} optional_missing={summary.get('optional_missing_module_count', 0)}"),
-        check("third_party_builder_invokes_sync", source_contains("build_research_trajectory_system.py", ["sync_third_party_research_stack.py", "third_party_research_stack"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
+        check("third_party_builder_invokes_sync", source_contains("build_research_trajectory_system.py", ["writing", "sync_stack", "third_party_research_stack"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
         check("claude_prompt_uses_native_method_context", source_contains("claude_project_session.py", ["third_party_research_stack", "native method capability contracts"]) and source_omits("claude_project_session.py", ["Use ARIS/EvoScientist/academic-research-skills/PaperOrchestra", "Third-party research stack that you must use as external method contracts"]), evidence=[str(SCRIPTS / "claude_project_session.py")]),
         check("third_party_web_exposed", source_contains("../web/backend/auto_research/web/project_bridge.py", ["third_party_research_stack", "third_party_stack_status"]), evidence=[str(ROOT / "web" / "backend" / "auto_research" / "web" / "project_bridge.py")]),
     ]
@@ -467,7 +467,7 @@ def audit_third_party_research_stack(paths) -> dict[str, Any]:
             "TrajectoryOptimization": ["tool-error handling", "context-overflow handling", "async watching", "experiment queue"],
             "PaperProduction": ["section writing", "literature review", "plotting", "review/rating", "content refinement"],
         },
-        "evidence_files": [str(stack_path), str(report_path), str(SCRIPTS / "sync_third_party_research_stack.py")],
+        "evidence_files": [str(stack_path), str(report_path), str(ROOT / "framework" / "scripts" / "run_module.py")],
         "note": "This module confirms optional method references are summarized while runtime prompts and UI expose only native capabilities.",
     }
 

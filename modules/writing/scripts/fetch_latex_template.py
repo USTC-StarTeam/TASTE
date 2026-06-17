@@ -480,7 +480,7 @@ def main() -> None:
             metadata['selected_page_url'] = page_url
     except Exception as exc:
         fail(args.project, args.venue, venue_root, report, metadata, 'failed-official-template-fetch', exc, [
-            'Run modules/writing/scripts/resolve_venue_requirements.py so venue-intelligence records the latest official template source first.',
+            'Run framework/scripts/run_module.py writing --action venue_requirements so venue-intelligence records the latest official template source first.',
             'Provide a user-approved official archive via --archive-path only if automatic official-source discovery is unavailable.',
             'The workflow must not emit a local minimal fallback as a venue-compliant template.',
         ])

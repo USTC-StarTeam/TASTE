@@ -53,6 +53,6 @@ Stop only when a queue objective is satisfied, evidence proves a missing resourc
 ## Experiment Launch Contract
 
 - Management scripts run from the repository root with the configured management Python recorded by the wrapper or environment, not a bare system interpreter.
-- Training scripts run only through `scripts/launch_experiment_run.py`, and the command after `--` must start with the project experiment Python resolved from project config or runtime environment.
+- Training scripts run only through `framework/scripts/run_module.py experimenting --action launch`, and the command after `--` must start with the project experiment Python resolved from project config or runtime environment.
 - Do not use system `python`, bare `python3`, `conda run`, shell redirection, `nohup`, background `&`, `tmux`, or `screen` for experiments. The launcher owns PID, stdout/stderr, lock, artifact dir, manifest, and audit-refresh contract.
 - A contaminated, wrong-interpreter, reused-artifact, or failed launch is not registry evidence and must not be imported as a candidate result.

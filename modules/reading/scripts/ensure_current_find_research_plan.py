@@ -6415,10 +6415,10 @@ def ensure_claude_plan_state(project: str, paths, run_id: str, readings: list[di
         "source": "planning/finding/find_progress.json",
     }
     literature_repair_commands = [
-        f"{management_python()} modules/finding/main.py --action build_literature_tool_packet --project {project} --venue {venue}",
-        f"{management_python()} modules/finding/main.py --action run_literature_tool --project {project} --venue {venue} --query \"<targeted literature gap query>\" --fast-mode --publish-current-find",
-        f"{management_python()} modules/writing/main.py --action audit_submission_readiness --project {project} --venue {venue}",
-        f"{management_python()} modules/planning/main.py --action build_blocker_action_plan --project {project} --venue {venue}",
+        f"{management_python()} framework/scripts/run_module.py finding --action tool_packet --project {project} --venue {venue}",
+        f"{management_python()} framework/scripts/run_module.py finding --action literature_tool --project {project} --venue {venue} --query \"<targeted literature gap query>\" --fast-mode --publish-current-find",
+        f"{management_python()} framework/scripts/run_module.py writing --action submission_readiness --project {project} --venue {venue}",
+        f"{management_python()} framework/scripts/run_module.py planning --action blocker_action --project {project} --venue {venue}",
     ]
     literature_gate_blocked = shortfall > 0
     literature_blockers = []
@@ -7429,18 +7429,18 @@ def build_execution_plan(project: str, cfg: dict[str, Any], run_id: str, reading
     fallback_route_title = "current Find literature gate blocked" if literature_gate["blocked"] else "environment-stage Claude Code base selection pending"
     route_title = str(selected_base.get("title") or selected_base.get("name") or selected_base.get("repo") or fallback_route_title).strip()
     gate_refresh_commands = [
-        f"{management_python()} modules/experimenting/main.py --action audit_reference_reproduction --project {project} --venue {venue}",
-        f"{management_python()} modules/experimenting/scripts/audit_experiment_iteration.py --project {project}",
+        f"{management_python()} framework/scripts/run_module.py experimenting --action reference_reproduction --project {project} --venue {venue}",
+        f"{management_python()} framework/scripts/run_module.py experimenting --action audit_iteration --project {project}",
         f"{management_python()} framework/scripts/build_research_trajectory_system.py --project {project} --venue {venue}",
-        f"{management_python()} modules/planning/main.py --action build_blocker_action_plan --project {project} --venue {venue}",
+        f"{management_python()} framework/scripts/run_module.py planning --action blocker_action --project {project} --venue {venue}",
     ]
     literature_repair_commands = [
-        f"{management_python()} modules/finding/main.py --action build_literature_tool_packet --project {project} --venue {venue}",
-        f"{management_python()} modules/finding/main.py --action run_literature_tool --project {project} --venue {venue} --query \"<targeted literature gap query>\" --fast-mode --publish-current-find",
-        f"{management_python()} modules/writing/main.py --action audit_submission_readiness --project {project} --venue {venue}",
-        f"{management_python()} modules/planning/main.py --action build_blocker_action_plan --project {project} --venue {venue}",
+        f"{management_python()} framework/scripts/run_module.py finding --action tool_packet --project {project} --venue {venue}",
+        f"{management_python()} framework/scripts/run_module.py finding --action literature_tool --project {project} --venue {venue} --query \"<targeted literature gap query>\" --fast-mode --publish-current-find",
+        f"{management_python()} framework/scripts/run_module.py writing --action submission_readiness --project {project} --venue {venue}",
+        f"{management_python()} framework/scripts/run_module.py planning --action blocker_action --project {project} --venue {venue}",
     ]
-    data_command = f"{management_python()} modules/environment/main.py --action build_fresh_base_implementation_plan --project {project}"
+    data_command = f"{management_python()} framework/scripts/run_module.py environment --action fresh_base_plan --project {project}"
     failure_type = ""
     next_required_action = "environment_base_selection_and_repo_data_protocol_audit"
     if literature_gate["blocked"]:

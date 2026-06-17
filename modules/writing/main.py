@@ -135,6 +135,8 @@ ACTION_ALIASES = {
     "re_review": "re_review_paper",
     "comparison": "write_comparison",
     "sync_stack": "sync_third_party_research_stack",
+    "sync_vendor": "sync_writing_vendor",
+    "venue_requirements": "resolve_venue_requirements",
     "repair_figures": "repair_paper_figures_loop",
     "repair_preview": "repair_paper_preview_loop",
     "audit_normality": "audit_paper_normality",

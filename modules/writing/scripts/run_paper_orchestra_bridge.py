@@ -436,7 +436,7 @@ def ensure_writing_vendor(venue: str, repo_dir: Path, *, skip_clone: bool = Fals
     script = ROOT / "modules" / "writing" / "scripts" / "sync_writing_vendor.py"
     payload: dict[str, Any] = {"status": "missing_script", "required_ready": False, "warnings": []}
     if not script.exists():
-        payload["warnings"].append("modules/writing/scripts/sync_writing_vendor.py is missing; writing vendor references cannot be checked.")
+        payload["warnings"].append("writing sync vendor module action is unavailable; writing vendor references cannot be checked.")
         return payload
     cmd = [sys.executable, str(script), "--venue", venue, "--paper-orchestra-dir", str(repo_dir), "--compact"]
     if skip_clone:
@@ -453,7 +453,7 @@ def ensure_writing_vendor(venue: str, repo_dir: Path, *, skip_clone: bool = Fals
     if result.get("return_code") != 0 and not payload.get("required_ready"):
         payload.setdefault("warnings", [])
         payload["warnings"].append(
-            "writing vendor dependencies are missing. Run `python modules/writing/scripts/sync_writing_vendor.py --venue "
+            "writing vendor dependencies are missing. Run `framework/scripts/run_module.py writing --action sync_vendor --venue "
             + str(venue or "<venue>")
             + "` before paper generation, or allow the paper bridge to run without --skip-clone."
         )
@@ -2129,7 +2129,7 @@ def main() -> int:
         payload["writing_vendor"] = vendor_status
         payload["warnings"].extend(vendor_status.get("warnings", []))
         if not vendor_status.get("required_ready"):
-            raise RuntimeError("writing vendor references are not ready for the requested venue; run modules/writing/scripts/sync_writing_vendor.py for this workspace.")
+            raise RuntimeError("writing vendor references are not ready for the requested venue; run framework/scripts/run_module.py writing --action sync_vendor for this workspace.")
         repo_info, warnings = clone_or_update(repo_dir, skip_clone=args.skip_clone)
         payload["repo"] = repo_info
         payload["warnings"].extend(warnings)
