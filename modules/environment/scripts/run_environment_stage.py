@@ -806,8 +806,9 @@ Hard rules:
 - If a partial env already exists, do not include a `conda create -n <same env>` step. Choose `repair_existing_env` with install/update/run verification steps, or choose a clearly different new env name.
 - If the local package cache shows a CUDA-enabled PyTorch build directly, you may target that direct package/build evidence instead of inventing a separate `pytorch-cuda=<version>` pin. Never repeat a package spec that the previous receipt shows as unavailable.
 - If the previous receipt shows Python package build isolation or import-order failure, encode a different wrapper-executable approach such as compatible conda packages, no-build-isolation, prebuilt wheel index, or a clear blocked decision. Do not repeat the same failing pip/conda step.
+- If the previous receipt shows package-channel/network failures such as HTTP 429, timeout, or unavailable repodata, treat this as a local-machine/network fact, not an env-name-specific failure. After any conda.anaconda.org HTTP 429, do not include any mutating remote conda channel step at all (`conda create/install/update/env update` with `-c pytorch`, `-c nvidia`, `-c pyg`, `-c conda-forge`, defaults, or another remote channel), even as a later fallback in the same plan. The wrapper will reject such plans before execution. A conda mutation is acceptable only when it is explicitly offline/local-cache based (`--offline` and/or `--use-local` where appropriate) and justified by supplied cache evidence. Otherwise prefer already-installed compatible packages, pip/prebuilt wheels from a non-rate-limited source, an alternate configured mirror, or set `status="blocked"` with a clear local-machine blocker.
 - If the previous receipt shows compiler/CUDA header/toolkit errors such as missing runtime headers or an unusable local compiler, adapt the wrapper plan from machine evidence: add the compatible toolkit/headers, set verification steps that expose CUDA_HOME/include paths, choose prebuilt wheels, or block clearly. Do not guess a toolkit version unsupported by the local driver/cache evidence.
-- Never delete or remove an environment. If a partial env exists, decide whether to repair it or create a new project-specific env.
+- Never delete or remove an environment. If a partial env exists, decide whether to repair it or create a new project-specific env. Package-level removal is allowed only when it is explicitly scoped to the selected project env with `-n <env>`, does not use `--all`/`--force`, and does not remove protected runtime packages such as python, pip, conda, setuptools, or wheel.
 - Write exactly one JSON object to `{plan_path}`. Do not leave Markdown in that file.
 - Conda steps must be argv arrays WITHOUT the conda executable prefix, for example `["create", "-y", "-n", "env", "python=3.10", "pip", "-c", "conda-forge"]`.
 - If no safe machine-aware plan exists, set `status="blocked"` and explain the blocker.
@@ -827,7 +828,7 @@ Required JSON schema:
   "machine_reasoning": "why this plan fits the local machine and repo",
   "compatibility_risks": [],
   "blocker": "only when blocked",
-  "guardrails": ["no env deletion", "wrapper executes the plan"]
+  "guardrails": ["no env deletion", "wrapper executes the plan", "package removals must be project-env scoped"]
 }}
 ```
 

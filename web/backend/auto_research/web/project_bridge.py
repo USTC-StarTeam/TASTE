@@ -4083,6 +4083,28 @@ def _public_environment_stage(
     }
 
 
+def _environment_bootstrap_reason_zh(reason: str, bootstrap: dict[str, Any]) -> str:
+    text = str(reason or "").strip()
+    lowered = text.lower()
+    if "http 429" in lowered and "conda channel" in lowered:
+        channels = bootstrap.get("failure_channels") if isinstance(bootstrap.get("failure_channels"), list) else []
+        channel_text = "、".join(str(channel) for channel in channels if str(channel).strip())
+        if not channel_text:
+            match = re.search(r"channel\(s\):\s*([^;。]+)", text)
+            channel_text = match.group(1).strip().replace(",", "、").replace("、 ", "、") if match else "相关 conda 渠道"
+        repeated = ""
+        match = re.search(r"repeats remote conda channel\(s\)\s*([^.;。]+)", text)
+        if match:
+            repeated = re.split(r"\s+without\s+", match.group(1).strip(), maxsplit=1)[0].strip().replace(",", "、").replace("、 ", "、")
+        repeated_part = f"；新计划仍重复使用远程渠道 {repeated}" if repeated else "；新计划仍重复使用远程 conda 渠道"
+        return (
+            f"上一轮环境回执显示 Conda 渠道 {channel_text} 出现 HTTP 429 / Too Many Requests 限流"
+            f"{repeated_part}，且没有使用 --offline/--use-local。"
+            "项目 Claude 需要基于本机缓存/已安装兼容包、非限流来源或预编译 wheel 重新规划；如果本机无法满足依赖，应明确阻塞"
+        )
+    return _public_internal_names(text)
+
+
 def _environment_bootstrap_blocker(root: Path) -> dict[str, Any]:
     """Surface machine-aware environment bootstrap receipts as the live Environment blocker.
 
@@ -4102,8 +4124,23 @@ def _environment_bootstrap_blocker(root: Path) -> dict[str, Any]:
 
     bootstrap_status = str(bootstrap.get("status") or "").strip().lower()
     impl_status = str(fresh_impl.get("status") or "").strip().lower()
-    blocker_reason = str(selection_blocker.get("reason") or "").strip()
+    selection_reason = str(selection_blocker.get("reason") or "").strip()
     impl_reason = str(fresh_impl.get("reason") or "").strip()
+    embedded_plan = safe_dict(bootstrap.get("machine_aware_plan"))
+    bootstrap_reason = str(
+        bootstrap.get("blocker_reason")
+        or bootstrap.get("error")
+        or bootstrap.get("failure_summary")
+        or bootstrap.get("reason")
+        or ""
+    ).strip()
+    plan_reason = str(
+        plan.get("blocker")
+        or plan.get("reason")
+        or embedded_plan.get("blocker")
+        or embedded_plan.get("reason")
+        or ""
+    ).strip()
     failed_step = str(bootstrap.get("failed_step") or bootstrap.get("failed_command") or "").strip()
     if not failed_step and isinstance(bootstrap.get("executed"), list):
         for row in reversed(bootstrap.get("executed") or []):
@@ -4116,14 +4153,16 @@ def _environment_bootstrap_blocker(root: Path) -> dict[str, Any]:
     policy_reason = str(policy_block.get("reason") or "").strip() if str(policy_block.get("status") or "").lower() == "blocked" else ""
 
     reason = ""
-    if str(selection_blocker.get("status") or "").lower() == "blocked" and blocker_reason:
-        reason = blocker_reason
-    if not reason and impl_status.startswith("blocked_environment") and impl_reason:
-        reason = impl_reason
-    if not reason and bootstrap_status in {"failed", "error", "blocked"}:
-        reason = str(bootstrap.get("error") or bootstrap.get("failure_summary") or "environment bootstrap failed").strip()
+    if bootstrap_status in {"failed", "error", "blocked"}:
+        reason = bootstrap_reason or plan_reason
     if not reason and policy_reason and str(policy_block.get("stage") or "").startswith("environment"):
         reason = policy_reason
+    if not reason and impl_status.startswith("blocked_environment") and impl_reason:
+        reason = impl_reason
+    if not reason and str(selection_blocker.get("status") or "").lower() == "blocked" and selection_reason:
+        reason = selection_reason
+    if not reason and bootstrap_status in {"failed", "error", "blocked"}:
+        reason = "machine-aware environment bootstrap did not produce an executable completed receipt"
     if not reason:
         return {}
 
@@ -4132,7 +4171,7 @@ def _environment_bootstrap_blocker(root: Path) -> dict[str, Any]:
     detected_cuda = str(bootstrap.get("detected_cuda") or "").strip()
     detected_backend = str(bootstrap.get("detected_backend") or "").strip()
     status = "blocked_environment_bootstrap_failed" if (failed_step or bootstrap_status in {"failed", "error"}) else "blocked_environment_bootstrap_required"
-    public_reason = _public_internal_names(reason)
+    public_reason = _environment_bootstrap_reason_zh(reason, bootstrap)
     summary_parts = [
         "环境 bootstrap 尚未通过：项目 Claude 已根据本机 Conda/CUDA/包缓存和候选仓库依赖生成环境计划，TASTE wrapper 执行该计划时未成功。",
         "下一步应让项目 Claude 读取机器回执重新规划环境方案；不能跳回旧环境或把候选仓库当成已锁定基底。",

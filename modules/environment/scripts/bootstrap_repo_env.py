@@ -6,6 +6,7 @@ import datetime as dt
 import json
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -35,7 +36,7 @@ def ensure_machine_profile(project: str) -> dict:
     paths = build_paths(project)
     profile_path = paths.reports / 'machine_profile.json'
     if not profile_path.exists():
-        script = Path(__file__).resolve().parent / 'detect_machine_profile.py'
+        script = ROOT / 'framework' / 'scripts' / 'detect_machine_profile.py'
         proc = run([management_python(), str(script), '--project', project], cwd=WORKSPACE_ROOT)
         if proc.returncode != 0:
             raise SystemExit(proc.stderr or proc.stdout or 'failed to detect machine profile')
@@ -140,6 +141,109 @@ def verification_steps(env_name: str) -> list[list[str]]:
     return [['run', '-n', env_name, 'python', '-c', 'import torch, scipy, numpy, yaml; print("imports-ok"); print("cuda", torch.cuda.is_available())']]
 
 
+
+def _normalize_plan_step(step) -> list[str]:
+    if isinstance(step, str):
+        try:
+            tokens = shlex.split(step)
+        except Exception:
+            tokens = step.split()
+    elif isinstance(step, list):
+        tokens = [str(item) for item in step if str(item).strip()]
+    else:
+        return []
+    if tokens and (Path(tokens[0]).name in {'conda', 'mamba', 'micromamba'} or str(tokens[0]).endswith('/conda')):
+        tokens = tokens[1:]
+    return tokens
+
+
+def _step_targets_env(step: list[str], env_name: str) -> bool:
+    if not env_name:
+        return False
+    for flag in ('-n', '--name'):
+        if flag in step:
+            idx = step.index(flag)
+            return idx + 1 < len(step) and step[idx + 1] == env_name
+    return False
+
+
+def _validate_plan_step(step: list[str], env_name: str = '') -> str:
+    if not step:
+        return 'empty conda step'
+    head = step[0]
+    if head in {'remove', 'uninstall'}:
+        if '--all' in step or '--force' in step:
+            return f'unsafe conda command is not allowed in machine-aware plan: {" ".join(step)}'
+        if not _step_targets_env(step, env_name):
+            return f'conda package removal must be explicitly scoped to the selected project env `{env_name}`: {" ".join(step)}'
+        protected = {'python', 'pip', 'conda', 'setuptools', 'wheel'}
+        packages = [
+            token for token in step[1:]
+            if token not in {'-y', '--yes', '-n', '--name', env_name}
+            and not token.startswith('-')
+        ]
+        if any(pkg.split('=')[0].lower() in protected for pkg in packages):
+            return f'unsafe removal of protected runtime package is not allowed: {" ".join(step)}'
+        if not packages:
+            return f'conda package removal did not specify packages: {" ".join(step)}'
+        return ''
+    if head == 'env' and len(step) > 1 and step[1] in {'remove'}:
+        return f'unsafe conda env command is not allowed in machine-aware plan: {" ".join(step)}'
+    allowed = {'create', 'install', 'update', 'env', 'run'}
+    if head not in allowed:
+        return f'unsupported conda command in machine-aware plan: {" ".join(step)}'
+    return ''
+
+
+def _load_machine_aware_plan(plan_file: str, fallback_env_name: str, fallback_python_version: str) -> dict:
+    if not plan_file:
+        return {}
+    plan_path = Path(plan_file).expanduser().resolve()
+    if not plan_path.exists():
+        return {'blocked': True, 'reason': f'machine-aware environment plan is missing: {plan_path}', 'plan_path': str(plan_path)}
+    try:
+        plan = json.loads(plan_path.read_text(encoding='utf-8'))
+    except Exception as exc:
+        return {'blocked': True, 'reason': f'machine-aware environment plan is invalid JSON: {exc}', 'plan_path': str(plan_path)}
+    if not isinstance(plan, dict):
+        return {'blocked': True, 'reason': 'machine-aware environment plan must be a JSON object', 'plan_path': str(plan_path)}
+    status = str(plan.get('status') or '').strip().lower()
+    if status not in {'ready', 'approved', 'execute', 'pass'}:
+        return {'blocked': True, 'reason': str(plan.get('blocker') or plan.get('reason') or f'machine-aware plan status is not ready: {status or "missing"}'), 'plan_path': str(plan_path), 'plan': plan}
+    env_name = str(plan.get('env_name') or plan.get('selected_env_name') or fallback_env_name or '').strip()
+    python_version = str(plan.get('python_version') or fallback_python_version or '').strip()
+    raw_steps = plan.get('conda_steps') or plan.get('install_steps') or plan.get('steps') or []
+    steps = [_normalize_plan_step(step) for step in raw_steps]
+    steps = [step for step in steps if step]
+    if not env_name:
+        return {'blocked': True, 'reason': 'machine-aware plan did not specify an env_name', 'plan_path': str(plan_path), 'plan': plan}
+    if not steps:
+        return {'blocked': True, 'reason': 'machine-aware plan did not provide conda_steps/install_steps', 'plan_path': str(plan_path), 'plan': plan}
+    for step in steps:
+        issue = _validate_plan_step(step, env_name)
+        if issue:
+            return {'blocked': True, 'reason': issue, 'plan_path': str(plan_path), 'plan': plan}
+    raw_verification = plan.get('verification_steps') or []
+    verification = [_normalize_plan_step(step) for step in raw_verification]
+    verification = [step for step in verification if step]
+    for step in verification:
+        issue = _validate_plan_step(step, env_name)
+        if issue:
+            return {'blocked': True, 'reason': issue, 'plan_path': str(plan_path), 'plan': plan}
+    if not verification:
+        verification = verification_steps(env_name)
+    return {
+        'blocked': False,
+        'plan_path': str(plan_path),
+        'plan': plan,
+        'env_name': env_name,
+        'python_version': python_version,
+        'install_steps': steps,
+        'verification_steps': verification,
+        'steps': [*steps, *verification],
+        'reason': str(plan.get('machine_reasoning') or plan.get('reason') or ''),
+    }
+
 def infer_install_steps(repo: Path, env_name: str, python_version: str, accelerator: dict, conda_exe: str = '') -> list[list[str]]:
     channels = infer_channels(accelerator)
     py_spec = f'python={python_version}' if python_version else 'python=3.10'
@@ -163,8 +267,23 @@ def infer_install_steps(repo: Path, env_name: str, python_version: str, accelera
     return steps
 
 
+def _has_yes_flag(step: list[str]) -> bool:
+    return any(token in {'-y', '--yes'} for token in step)
+
+
+def _with_noninteractive_yes(step: list[str]) -> list[str]:
+    if not step:
+        return step
+    head = step[0]
+    if head in {'create', 'install', 'update'} and not _has_yes_flag(step):
+        return [head, '-y', *step[1:]]
+    if head == 'env' and len(step) > 1 and step[1] == 'update' and not _has_yes_flag(step):
+        return [step[0], step[1], '-y', *step[2:]]
+    return step
+
+
 def conda_cmd(conda_exe: str, step: list[str]) -> list[str]:
-    return [conda_exe, *step]
+    return [conda_exe, *_with_noninteractive_yes(step)]
 
 
 def command_record(cmd: list[str], proc: subprocess.CompletedProcess[str], reason: str = '') -> dict:
@@ -177,6 +296,120 @@ def command_record(cmd: list[str], proc: subprocess.CompletedProcess[str], reaso
     if reason:
         record['reason'] = reason
     return record
+
+
+def _receipt_text(receipt: dict) -> str:
+    chunks: list[str] = []
+    if not isinstance(receipt, dict):
+        return ''
+    for key in ['failed_step', 'failure_summary', 'blocker_reason', 'error', 'reason']:
+        value = receipt.get(key)
+        if value:
+            chunks.append(str(value))
+    for row in receipt.get('executed') or []:
+        if not isinstance(row, dict):
+            continue
+        for key in ['command', 'stdout', 'stderr', 'reason']:
+            value = row.get(key)
+            if value:
+                chunks.append(str(value))
+    return '\n'.join(chunks)
+
+
+def _conda_channels_from_urls(text: str) -> list[str]:
+    channels: list[str] = []
+    for match in re.finditer(r'https?://conda\.anaconda\.org/([^/\s]+)/', text or ''):
+        channel = match.group(1).strip()
+        if channel and channel not in channels:
+            channels.append(channel)
+    return channels
+
+
+def _failure_metadata_from_text(text: str) -> dict:
+    lowered = (text or '').lower()
+    if 'http 429' in lowered or 'too many requests' in lowered:
+        channels = _conda_channels_from_urls(text)
+        summary = 'Conda channel HTTP 429 / Too Many Requests encountered during environment bootstrap.'
+        if channels:
+            summary += ' Rate-limited channels: ' + ', '.join(channels) + '.'
+        summary += ' Do not repeat remote conda downloads from these channels; use local cache/offline, already-installed compatible packages, an alternate non-rate-limited source, prebuilt wheels, or block clearly.'
+        return {
+            'failure_kind': 'conda_channel_http_429',
+            'failure_channels': channels,
+            'failure_summary': summary,
+        }
+    if 'timeout' in lowered and 'conda' in lowered:
+        return {
+            'failure_kind': 'conda_channel_timeout',
+            'failure_channels': _conda_channels_from_urls(text),
+            'failure_summary': 'Conda channel/network timeout encountered during environment bootstrap; revise the machine-aware plan instead of retrying the same remote channel command.',
+        }
+    return {}
+
+
+def _channels_from_blocker_text(text: str) -> list[str]:
+    channels: list[str] = []
+    for pattern in [r'channel\(s\):\s*([^;。]+)', r'channels?:\s*([^;。]+)']:
+        match = re.search(pattern, text or '', flags=re.IGNORECASE)
+        if not match:
+            continue
+        raw = re.split(r'\s+the\s+new\s+|\s+new\s+machine|\s+without\s+', match.group(1).strip(), maxsplit=1, flags=re.IGNORECASE)[0]
+        for token in re.split(r'[,、/\s]+', raw):
+            clean = token.strip().strip('`').strip('.;。')
+            if clean and clean not in channels:
+                channels.append(clean)
+    return channels
+
+
+def _rate_limited_channels(receipt: dict) -> set[str]:
+    text = _receipt_text(receipt)
+    meta = _failure_metadata_from_text(text)
+    channels = meta.get('failure_channels') if isinstance(meta, dict) else []
+    if not channels:
+        channels = _channels_from_blocker_text(text)
+    return {str(channel).strip() for channel in channels or [] if str(channel).strip()}
+
+
+def _step_channels(step: list[str]) -> set[str]:
+    channels: set[str] = set()
+    for idx, token in enumerate(step):
+        if token in {'-c', '--channel'} and idx + 1 < len(step):
+            channels.add(step[idx + 1])
+        elif token.startswith('--channel='):
+            channels.add(token.split('=', 1)[1])
+    return {channel for channel in channels if channel}
+
+
+def _step_uses_local_or_offline(step: list[str]) -> bool:
+    return any(token in {'--offline', '--use-local'} or token.startswith('--repodata-fn=') for token in step)
+
+
+def _rate_limited_plan_reason(previous_receipt: dict, steps: list[list[str]]) -> str:
+    prior_channels = _rate_limited_channels(previous_receipt)
+    if not prior_channels:
+        return ''
+    remote_steps: set[str] = set()
+    for step in steps:
+        if not step:
+            continue
+        head = step[0]
+        mutating_conda = head in {'create', 'install', 'update'} or (head == 'env' and len(step) > 1 and step[1] == 'update')
+        if not mutating_conda or _step_uses_local_or_offline(step):
+            continue
+        channels = _step_channels(step)
+        if channels:
+            remote_steps.update(channels)
+        else:
+            remote_steps.add('configured/default channels')
+    if not remote_steps:
+        return ''
+    return (
+        'previous wrapper receipt shows HTTP 429 from conda channel(s): '
+        + ', '.join(sorted(prior_channels))
+        + '; the new machine-aware plan still contains mutating remote conda channel step(s): '
+        + ', '.join(sorted(remote_steps))
+        + ' without --offline/--use-local. Project Claude must choose a local-cache/offline plan, already-installed compatible packages, pip/prebuilt wheels, an alternate non-rate-limited source, or block clearly.'
+    )
 
 
 def is_python_pip_step(step: list[str], env_name: str) -> bool:
@@ -349,6 +582,8 @@ def main() -> None:
     parser.add_argument('--update-project-config', action='store_true')
     parser.add_argument('--auto-install-missing', action='store_true')
     parser.add_argument('--verify-only', action='store_true', help='Only verify an existing environment; never create envs or install packages.')
+    parser.add_argument('--machine-aware-plan', default='', help='JSON plan written by project Claude Code for machine-aware environment bootstrap.')
+    parser.add_argument('--require-machine-aware-plan', action='store_true', help='Block mutating bootstrap unless a ready machine-aware Claude plan is available.')
     args = parser.parse_args()
 
     cfg = load_project_config(args.project)
@@ -372,10 +607,27 @@ def main() -> None:
     if not conda_exe and not choose_downloader(machine):
         missing_runtime_tools.append('curl_or_wget')
 
+    previous_receipt = load_json(paths.state / 'repo_env_bootstrap.json')
+    plan_info: dict = {}
+    if args.machine_aware_plan:
+        plan_info = _load_machine_aware_plan(args.machine_aware_plan, env_name, python_version)
+    elif args.require_machine_aware_plan and not (args.verify_only or args.prepare_only):
+        plan_info = {'blocked': True, 'reason': 'mutating environment bootstrap requires a ready machine-aware Claude Code plan'}
+    if plan_info and not plan_info.get('blocked'):
+        env_name = str(plan_info.get('env_name') or env_name)
+        python_version = str(plan_info.get('python_version') or python_version)
+        repeat_reason = _rate_limited_plan_reason(previous_receipt, plan_info.get('install_steps') or [])
+        if repeat_reason:
+            plan_info = {**plan_info, 'blocked': True, 'reason': repeat_reason}
+
     env_exists_before = conda_env_exists(conda_exe, env_name) if conda_exe else False
     env_exists = env_exists_before
-    if args.verify_only:
+    if plan_info.get('blocked'):
+        steps = []
+    elif args.verify_only:
         steps = verification_steps(env_name) if conda_exe and env_exists else []
+    elif plan_info.get('steps'):
+        steps = plan_info['steps']
     else:
         steps = infer_install_steps(repo, env_name, python_version, accelerator, conda_exe) if conda_exe else []
     out_json = paths.state / 'repo_env_bootstrap.json'
@@ -397,7 +649,11 @@ def main() -> None:
         'missing_runtime_tools': missing_runtime_tools,
         'steps': [' '.join(conda_cmd(conda_exe, step)) for step in steps] if conda_exe else [],
         'executed': [],
-        'status': 'blocked' if args.verify_only and conda_exe and not env_exists else ('prepared' if conda_exe else 'blocked'),
+        'machine_aware_plan_path': plan_info.get('plan_path', '') if isinstance(plan_info, dict) else '',
+        'machine_aware_plan': plan_info.get('plan', {}) if isinstance(plan_info, dict) else {},
+        'blocker_reason': plan_info.get('reason', '') if plan_info.get('blocked') else '',
+        'machine_aware_plan_required': bool(args.require_machine_aware_plan),
+        'status': 'blocked' if plan_info.get('blocked') or (args.verify_only and conda_exe and not env_exists) else ('prepared' if conda_exe else 'blocked'),
     }
 
     lines = [
@@ -415,7 +671,12 @@ def main() -> None:
         '- install strategy: repo-first-adaptive using conda with verification commands after installation.\n\n',
     ]
 
-    if not conda_exe:
+    if plan_info.get('blocked'):
+        lines.append('## Blockers\n')
+        lines.append(f"- machine-aware Claude Code environment plan is not executable: {plan_info.get('reason', 'unknown')}\n")
+        if plan_info.get('plan_path'):
+            lines.append(f"- plan_path: {plan_info.get('plan_path')}\n")
+    elif not conda_exe:
         lines.append('## Blockers\n')
         lines.append('- conda runtime is not currently available.\n')
         lines.append(f'- remediation: install/configure conda externally, then run `{management_python()} framework/scripts/run_module.py environment --action bootstrap --project {args.project} --repo-path {repo} --verify-only --prepare-only`\n')
@@ -428,7 +689,7 @@ def main() -> None:
         for step in steps:
             lines.append(f"- `{' '.join(conda_cmd(conda_exe, step))}`\n")
 
-    if not args.prepare_only and conda_exe and (not args.verify_only or env_exists):
+    if not plan_info.get('blocked') and not args.prepare_only and conda_exe and (not args.verify_only or env_exists):
         payload['status'] = 'running'
         python_pip_checked = False
         for step in steps:
@@ -491,6 +752,7 @@ def main() -> None:
                     payload['status'] = 'failed'
                     payload['failed_step'] = ' '.join(conda_cmd(conda_exe, step))
                     payload['missing_import'] = missing_import
+                    payload.update(_failure_metadata_from_text(combined))
                     break
         else:
             payload['status'] = 'completed'
@@ -502,13 +764,26 @@ def main() -> None:
 
     if payload['status'] == 'completed' and args.update_project_config:
         data = json.loads(paths.config.read_text(encoding='utf-8'))
+        conda_base = str(Path(conda_exe).resolve().parents[1])
+        experiment_python = str(Path(conda_base) / 'envs' / env_name / 'bin' / 'python')
         data['conda_env'] = env_name
-        data.setdefault('environment', {})['conda_base_hint'] = str(Path(conda_exe).resolve().parents[1])
+        runtime = data.setdefault('runtime', {})
+        if isinstance(runtime, dict):
+            runtime['conda_base'] = conda_base
+            runtime['experiment_python'] = experiment_python
+        env_cfg = data.setdefault('environment', {})
+        if isinstance(env_cfg, dict):
+            env_cfg['conda_base_hint'] = conda_base
+            env_cfg['experiment_python'] = experiment_python
         paths.config.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 
     out_json.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
     out_md.write_text(''.join(lines), encoding='utf-8')
     print(out_md)
+    if payload.get('status') == 'failed':
+        raise SystemExit(1)
+    if payload.get('status') == 'blocked':
+        raise SystemExit(2)
 
 
 if __name__ == '__main__':
