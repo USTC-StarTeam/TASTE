@@ -82,18 +82,21 @@ def test_find_to_plan_latest_outputs_use_stage_names() -> None:
     assert offenders == []
 
 
-def test_seven_stage_module_directories_have_contracts_and_manifests() -> None:
+def test_seven_stage_module_directories_have_single_main_entrypoint_and_manifests() -> None:
     assert STAGE_MODULE_KEYS == ("finding", "reading", "ideation", "planning", "environment", "experimenting", "writing")
     assert len(STAGE_MODULES) == 7
     for module in STAGE_MODULES:
         directory = ROOT / module.directory
         assert directory.is_dir(), module.key
-        for filename in ["README.md", "__init__.py", "contracts.py", "main.py", "cli.py", "script_manifest.json"]:
+        for filename in ["README.md", "__init__.py", "main.py", "script_manifest.json"]:
             assert (directory / filename).is_file(), f"{module.key} missing {filename}"
-        cli_text = (directory / "cli.py").read_text(encoding="utf-8")
-        assert "from .main import main" in cli_text or "from main import main" in cli_text
-        contract_text = (directory / "contracts.py").read_text(encoding="utf-8")
-        assert f'STAGE_NAME = "{module.key}"' in contract_text
+        assert not (directory / "cli.py").exists(), f"{module.key} should expose only main.py, not cli.py"
+        assert not (directory / "contracts.py").exists(), f"{module.key} contract must live in main.py"
+        main_text = (directory / "main.py").read_text(encoding="utf-8")
+        assert f"STAGE_NAME = '{module.key}'" in main_text or f'STAGE_NAME = "{module.key}"' in main_text
+        assert "def contract()" in main_text
+        init_text = (directory / "__init__.py").read_text(encoding="utf-8")
+        assert "from .main import contract, main" in init_text
         assert module.responsibility.split(".", 1)[0] in (directory / "README.md").read_text(encoding="utf-8")
 
 
@@ -153,7 +156,7 @@ def test_finding_reading_full_text_responsibility_boundary() -> None:
     assert "ensure_current_find_research_plan.py" in reading_scripts
 
 
-def test_stage_main_contracts_are_callable_and_cli_is_compatibility_shim() -> None:
+def test_stage_main_contracts_are_callable_without_cli_or_contracts_file() -> None:
     for stage in STAGE_MODULE_KEYS:
         main = ROOT / "modules" / stage / "main.py"
         proc = subprocess.run([sys.executable, str(main), "--contract"], cwd=ROOT, text=True, capture_output=True, timeout=20)
@@ -162,13 +165,9 @@ def test_stage_main_contracts_are_callable_and_cli_is_compatibility_shim() -> No
         assert payload["stage"] == stage
         assert payload["entrypoint"] == f"modules/{stage}/main.py"
         assert payload["scripts_are_private_backend"] is True
+        assert "compat_cli" not in payload
         assert payload["required_external_inputs"]
         assert payload["artifacts_out"]
-
-        cli = ROOT / "modules" / stage / "cli.py"
-        compat = subprocess.run([sys.executable, str(cli), "--contract"], cwd=ROOT, text=True, capture_output=True, timeout=20)
-        assert compat.returncode == 0, (stage, compat.stderr)
-        assert json.loads(compat.stdout)["entrypoint"] == payload["entrypoint"]
 
 
 def test_web_reading_packet_view_uses_read_stage_replacements() -> None:

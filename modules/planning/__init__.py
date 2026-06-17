@@ -1,5 +1,5 @@
-"""Standalone Planning module boundary for TASTE."""
+from __future__ import annotations
 
-from .contracts import contract
+from .main import contract, main
 
-__all__ = ["contract"]
+__all__ = ["contract", "main"]

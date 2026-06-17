@@ -314,8 +314,7 @@ projects/<project>/
 TASTE 的科研能力按七个阶段拆成 `modules/finding/`、`modules/reading/`、`modules/ideation/`、`modules/planning/`、`modules/environment/`、`modules/experimenting/`、`modules/writing/`。每个阶段目录都包含：
 
 - `README.md`：中文说明模块输入、输出、运行逻辑、脚本清单和冗余控制原则。
-- `contracts.py`：该阶段的外部输入、输入产物、输出产物和职责边界。
-- `cli.py`：该阶段的独立后端入口或兼容适配入口。
+- `main.py`：该阶段唯一公开后端入口，负责 action 路由，并通过 `--contract` 输出外部输入、输入产物、输出产物和职责边界。
 - `script_manifest.json`：当前 `scripts/` 顶层脚本归属、函数、imports 和归属理由。
 
 `modules/` 只放七个科研阶段模块。`framework/` 负责运行时、任务队列、项目状态、共享模型、公共资源和跨阶段编排；`web/` 负责 FastAPI bridge 与 React/Vite 前端，只做人类交互、配置修改、任务触发和产物展示。Find 不负责全文抓取；全文证据、阅读包和同轮可读 replacement 属于 Read-stage packet。Ideas/Plan 不应提前依赖 Environment 的确认结果；Environment/Experiment/Writing 只能消费显式产物和选择合同，不能隐式读取历史阶段状态来替代当前模块输入。

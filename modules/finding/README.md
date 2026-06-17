@@ -35,15 +35,13 @@
 - 公开入口：`/home/fmh/workspace/TASTE/modules/finding/main.py`。
 - 框架调用格式：`python framework/scripts/run_module.py finding --action <action> ...`，或等价地直接调用 `python modules/finding/main.py --action <action> ...`。
 - `scripts/` 下文件是模块私有后端实现，不应由网页前端直接拼路径调用；需要暴露时先在 `main.py` 注册 action。
-- `cli.py` 仅为旧调用兼容层，必须保持薄转发。
+- 模块契约由 `main.py --contract` 输出，不再维护单独的 `contracts.py`。
 
 ## 文件结构
 
 | 路径 | 作用 |
 | --- | --- |
-| `main.py` | 本模块唯一公开后端入口；框架和网页只能通过它指定 action 并传入显式输入。 |
-| `cli.py` | 兼容入口，只转发到 `main.py`，不能承载业务逻辑。 |
-| `contracts.py` | 声明模块外部输入、输入产物、输出产物和职责边界；供框架审计和独立运行说明使用。 |
+| `main.py` | 本模块唯一公开后端入口；负责 action 路由，并通过 `--contract` 输出模块输入、产物和职责边界。 |
 | `script_manifest.json` | 当前脚本清单、函数、import 和归属原因；README 的脚本列表应和它保持一致。 |
 | `scripts/` | 该模块真正的后端实现。新增脚本前应优先合并到下面列出的现有大块中。 |
 
