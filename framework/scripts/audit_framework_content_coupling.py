@@ -425,7 +425,7 @@ def build(project: str) -> dict[str, Any]:
         "blocking_finding_count": len(block_findings),
         "warning_finding_count": len(warn_findings),
         "findings": findings[:500],
-        "next_action": "Keep framework code content-agnostic. Remaining warnings are runtime/cache directories under the framework root; keep those runtime stores out of framework/auto_research when doing the next state-boundary cleanup.",
+        "next_action": "Keep framework code content-agnostic. Remaining warnings are runtime/cache directories under the framework root; keep those runtime stores out of framework/scripts/auto_research when doing the next state-boundary cleanup.",
     }
     save_json(paths.state / "framework_content_coupling_audit.json", payload)
     report = write_report(paths, payload)

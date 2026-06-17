@@ -19,8 +19,8 @@
 
 | 路径 | 作用 |
 | --- | --- |
-| `auto_research/` | 跨模块共享 Python 包：配置、任务、Markdown、LLM、存储、路径和来源选择等基础能力。 |
-| `scripts/` | 框架级入口脚本，只做项目创建、编排、运行环境、状态报告、Claude 会话和跨模块调用，不放阶段私有逻辑。 |
+| `scripts/auto_research/` | 跨模块共享 Python 包：配置、任务、Markdown、LLM、存储、路径和来源选择等基础能力；保留包名 `auto_research`，但物理位置归入框架 scripts。 |
+| `scripts/` | 框架级入口脚本和共享后端包，只做项目创建、编排、运行环境、状态报告、Claude 会话和跨模块调用，不放阶段私有逻辑。 |
 | `resources/templates/` | 项目和论文模板。旧根目录 `templates/` 已迁入这里。 |
 | `resources/prompts/` | 框架级 prompt 模板和 subagent 启动提示。旧根目录 `prompts/` 已迁入这里。 |
 | `resources/automation/` | subagent 协议、角色配置等自动化资源。旧根目录 `automation/` 已迁入这里。 |

@@ -21,10 +21,10 @@ dependencies = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = [".", "..", "../web/backend", "scripts", "../modules/finding", "../modules/reading", "../modules/ideation", "../modules/planning", "../modules/environment", "../modules/experimenting", "../modules/writing", "../modules/finding/scripts", "../modules/reading/scripts", "../modules/ideation/scripts", "../modules/planning/scripts", "../modules/environment/scripts", "../modules/experimenting/scripts", "../modules/writing/scripts"]
+pythonpath = ["scripts", ".", "..", "../web/backend", "../modules/finding", "../modules/reading", "../modules/ideation", "../modules/planning", "../modules/environment", "../modules/experimenting", "../modules/writing", "../modules/finding/scripts", "../modules/reading/scripts", "../modules/ideation/scripts", "../modules/planning/scripts", "../modules/environment/scripts", "../modules/experimenting/scripts", "../modules/writing/scripts"]
 
 [tool.setuptools.packages.find]
-where = ["."]
+where = ["scripts"]
 include = ["auto_research*"]
 
 [tool.setuptools.package-data]

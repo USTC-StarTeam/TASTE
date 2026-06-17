@@ -80,6 +80,7 @@ def script_resolver(root: Path | str | None = None) -> ScriptPathResolver:
 def taste_pythonpath_entries(root: Path | str | None = None) -> list[Path]:
     repo = resolve_repo_root(root)
     entries: list[Path] = [
+        repo / "framework" / "scripts",
         repo / "framework",
         repo / "web" / "backend",
     ]

@@ -1,6 +1,6 @@
 # TASTE Python Package Directory
 
-This directory contains only the cross-module TASTE Python framework package and package-level dependency metadata. The FastAPI backend lives in `../web/backend/`, the React/Vite frontend lives in `../web/frontend/client/`, and the seven research stages live under `../modules/`. For user-facing installation, configuration, startup, module usage, acknowledgements, and license notes, use the repository root [README.md](../README.md) as the single source of truth.
+This directory contains TASTE framework entrypoints, the cross-module Python package, and package-level dependency metadata. The FastAPI backend lives in `../web/backend/`, the React/Vite frontend lives in `../web/frontend/client/`, and the seven research stages live under `../modules/`. For user-facing installation, configuration, startup, module usage, acknowledgements, and license notes, use the repository root [README.md](../README.md) as the single source of truth.
 
 Do not copy only `framework/` to run TASTE. The framework needs the full tracked repository, including `modules/`, `web/`, `framework/scripts/`, `modules/*/scripts/`, `framework/resources/templates/`, `framework/resources/prompts/`, `framework/resources/claude/`, and project templates. Concrete research projects, run logs, downloaded repositories, datasets, paper drafts, and local credentials belong to local runtime directories and should not be committed.
 
@@ -8,7 +8,7 @@ Do not copy only `framework/` to run TASTE. The framework needs the full tracked
 
 | Path | Purpose |
 | --- | --- |
-| `auto_research/` | Shared framework code for configuration, storage, Markdown, task boundaries, and common models. |
+| `scripts/auto_research/` | Shared Python package for configuration, storage, Markdown, task boundaries, LLM helpers, and common models. The import name remains `auto_research`. |
 | `../web/backend/` | FastAPI backend, web job bridge, and project state API. |
 | `../web/frontend/client/` | React/Vite frontend source. Generated `dist/` files are not committed. |
 | `../modules/` | Seven independently runnable research stages: finding, reading, ideation, planning, environment, experimenting, and writing. |
@@ -22,7 +22,7 @@ Do not copy only `framework/` to run TASTE. The framework needs the full tracked
 Run from the repository root:
 
 ```bash
-PYTHONPATH="$PWD/framework:$PWD/web/backend:$PWD/framework/scripts:$PWD/modules/finding:$PWD/modules/reading:$PWD/modules/ideation:$PWD/modules/planning:$PWD/modules/environment:$PWD/modules/experimenting:$PWD/modules/writing:$PWD/modules/finding/scripts:$PWD/modules/reading/scripts:$PWD/modules/ideation/scripts:$PWD/modules/planning/scripts:$PWD/modules/environment/scripts:$PWD/modules/experimenting/scripts:$PWD/modules/writing/scripts:$PWD" python -m pytest tests -q
+PYTHONPATH="$PWD/framework/scripts:$PWD/framework:$PWD/web/backend:$PWD/modules/finding:$PWD/modules/reading:$PWD/modules/ideation:$PWD/modules/planning:$PWD/modules/environment:$PWD/modules/experimenting:$PWD/modules/writing:$PWD/modules/finding/scripts:$PWD/modules/reading/scripts:$PWD/modules/ideation/scripts:$PWD/modules/planning/scripts:$PWD/modules/environment/scripts:$PWD/modules/experimenting/scripts:$PWD/modules/writing/scripts:$PWD" python -m pytest tests -q
 npm --prefix web/frontend/client run build
 framework/scripts/start_web.sh
 ```
