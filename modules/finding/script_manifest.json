@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-15T22:40:11.956990+00:00",
+  "generated_at": "2026-06-17T10:51:13.827062+00:00",
   "module": "finding",
   "contract": {
     "directory": "modules/finding",
@@ -25,78 +25,13 @@
     ],
     "private_backend_roots": [
       "modules/finding/scripts/find_pipeline.py",
-      "modules/finding/scripts/discover_*.py",
+      "modules/finding/scripts/find_support.py",
+      "modules/finding/scripts/finding_quality_tools.py",
       "modules/finding/scripts/build_literature_tool_packet.py"
     ]
   },
-  "script_count": 17,
+  "script_count": 15,
   "scripts": [
-    {
-      "script": "assess_literature_base_candidates.py",
-      "path": "modules/finding/scripts/assess_literature_base_candidates.py",
-      "owner": "finding",
-      "owner_reason": "literature/source discovery, source scoring, or Find artifact preparation",
-      "function_count": 14,
-      "functions": [
-        "now_iso",
-        "load_json",
-        "save_json",
-        "as_list",
-        "normalize_title",
-        "has_any",
-        "has_positive_signal",
-        "code_signals",
-        "candidate_url",
-        "merge_rows",
-        "assess_candidate",
-        "build",
-        "write_report",
-        "main"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "datetime",
-        "json",
-        "literature_policy",
-        "pathlib",
-        "project_paths",
-        "re",
-        "typing"
-      ],
-      "parse_error": ""
-    },
-    {
-      "script": "assess_paper_quality.py",
-      "path": "modules/finding/scripts/assess_paper_quality.py",
-      "owner": "finding",
-      "owner_reason": "literature/source discovery, source scoring, or Find artifact preparation",
-      "function_count": 10,
-      "functions": [
-        "load_json",
-        "save_json",
-        "tokenize",
-        "bucket",
-        "capped_count",
-        "heuristic_signals",
-        "venue_short_label",
-        "quality_row",
-        "append_group",
-        "main"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "json",
-        "literature_policy",
-        "pathlib",
-        "project_paths",
-        "re"
-      ],
-      "parse_error": ""
-    },
     {
       "script": "build_category_summary.py",
       "path": "modules/finding/scripts/build_category_summary.py",
@@ -112,6 +47,7 @@
         "iter_json_files",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -122,8 +58,7 @@
         "json",
         "pathlib",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "build_literature_tool_packet.py",
@@ -164,6 +99,7 @@
         "render_markdown",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -179,8 +115,7 @@
         "sys",
         "taste_pythonpath",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "build_openreview_cache.py",
@@ -205,6 +140,7 @@
         "parse_years",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -220,8 +156,7 @@
         "taste_pythonpath",
         "time",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "build_venue_metadata_cache.py",
@@ -250,6 +185,7 @@
         "build_cache",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -264,8 +200,7 @@
         "sys",
         "taste_pythonpath",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "discover_arxiv.py",
@@ -281,6 +216,7 @@
         "parse_feed",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -301,8 +237,7 @@
         "urllib.parse",
         "urllib.request",
         "xml.etree.ElementTree"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "discover_github_repos.py",
@@ -317,6 +252,7 @@
         "update_repo_registry",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -332,8 +268,7 @@
         "urllib.error",
         "urllib.parse",
         "urllib.request"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "discover_semantic_scholar.py",
@@ -345,6 +280,7 @@
         "parse_args",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -359,15 +295,14 @@
         "urllib.error",
         "urllib.parse",
         "urllib.request"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "find_pipeline.py",
       "path": "modules/finding/scripts/find_pipeline.py",
       "owner": "finding",
       "owner_reason": "literature/source discovery, source scoring, or Find artifact preparation",
-      "function_count": 311,
+      "function_count": 337,
       "functions": [
         "_emit_progress",
         "_raise_if_cancelled",
@@ -679,8 +614,35 @@
         "_source_status_detail_parts",
         "_status_markdown",
         "_adaptive_arxiv_queries",
-        "run_find"
+        "run_find",
+        "dedupe",
+        "_handle_timeout",
+        "probe",
+        "_sentence_join",
+        "zh_reason",
+        "zh_fit_explanation",
+        "en_fit_explanation",
+        "en_reason",
+        "reader_instruction_zh",
+        "reader_instruction_en",
+        "repl",
+        "_sum",
+        "_venue_source_status_rows",
+        "_title_filter_report_sum",
+        "_find_progress_payload",
+        "_persist_find_progress",
+        "_progress",
+        "_build_find_artifacts",
+        "_write_find_outputs",
+        "_target",
+        "mark_items_unscored",
+        "single_scoring_prompt",
+        "retry_items_singly",
+        "queue_single_retry",
+        "retry_policy_text",
+        "apply_result"
       ],
+      "class_count": 1,
       "classes": [
         "FatalLLMConfigurationError"
       ],
@@ -706,15 +668,14 @@
         "threading",
         "time",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "find_support.py",
       "path": "modules/finding/scripts/find_support.py",
       "owner": "finding",
       "owner_reason": "literature/source discovery, source scoring, or Find artifact preparation",
-      "function_count": 266,
+      "function_count": 278,
       "functions": [
         "_safe_id",
         "_venue_name_key",
@@ -981,8 +942,21 @@
         "_arxiv_date_window",
         "fetch_arxiv",
         "fetch_huggingface",
-        "fetch_github_trending"
+        "fetch_github_trending",
+        "row",
+        "direct_links",
+        "reached_limit",
+        "submit_next",
+        "_cache_keys",
+        "_apply_item",
+        "reached_limit",
+        "add_papers",
+        "older_than_start",
+        "reached_limit",
+        "add_papers",
+        "run_query"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -1007,8 +981,65 @@
         "typing",
         "urllib.parse",
         "xml.etree.ElementTree"
+      ]
+    },
+    {
+      "script": "finding_quality_tools.py",
+      "path": "modules/finding/scripts/finding_quality_tools.py",
+      "owner": "finding",
+      "owner_reason": "literature/source discovery, source scoring, or Find artifact preparation",
+      "function_count": 34,
+      "functions": [
+        "_paper_quality_load_json",
+        "_paper_quality_save_json",
+        "_paper_quality_tokenize",
+        "_paper_quality_bucket",
+        "_paper_quality_capped_count",
+        "_paper_quality_heuristic_signals",
+        "_paper_quality_venue_short_label",
+        "_paper_quality_quality_row",
+        "_paper_quality_append_group",
+        "run_paper_quality",
+        "_base_candidates_now_iso",
+        "_base_candidates_load_json",
+        "_base_candidates_save_json",
+        "_base_candidates_as_list",
+        "_base_candidates_normalize_title",
+        "_base_candidates_has_any",
+        "_base_candidates_has_positive_signal",
+        "_base_candidates_code_signals",
+        "_base_candidates_candidate_url",
+        "_base_candidates_merge_rows",
+        "_base_candidates_assess_candidate",
+        "_base_candidates_build",
+        "_base_candidates_write_report",
+        "run_literature_base_candidates",
+        "_literature_plan_save_json",
+        "_literature_plan_tokens",
+        "_literature_plan_has_any",
+        "_literature_plan_infer_direction",
+        "_literature_plan_build_queries",
+        "_literature_plan_plan_venues",
+        "_literature_plan_update_project_config",
+        "_literature_plan_write_taste_custom_venues",
+        "run_plan_literature",
+        "main"
       ],
-      "parse_error": ""
+      "class_count": 0,
+      "classes": [],
+      "imports": [
+        "__future__",
+        "argparse",
+        "auto_research.source_selection",
+        "datetime",
+        "json",
+        "literature_policy",
+        "pathlib",
+        "project_paths",
+        "re",
+        "taste_pythonpath",
+        "typing"
+      ]
     },
     {
       "script": "ingest_discovery.py",
@@ -1027,6 +1058,7 @@
         "ranked_candidates",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -1036,10 +1068,10 @@
         "literature_policy",
         "pathlib",
         "project_paths",
+        "shutil",
         "sys",
         "taste_pythonpath"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "literature_policy.py",
@@ -1092,48 +1124,14 @@
         "repo_sort_key",
         "selection_rank"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "datetime",
         "re",
         "typing"
-      ],
-      "parse_error": ""
-    },
-    {
-      "script": "plan_literature_review.py",
-      "path": "modules/finding/scripts/plan_literature_review.py",
-      "owner": "finding",
-      "owner_reason": "literature/source discovery, source scoring, or Find artifact preparation",
-      "function_count": 9,
-      "functions": [
-        "save_json",
-        "tokens",
-        "has_any",
-        "infer_direction",
-        "build_queries",
-        "plan_venues",
-        "update_project_config",
-        "write_taste_custom_venues",
-        "main"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "auto_research.source_selection",
-        "datetime",
-        "json",
-        "literature_policy",
-        "pathlib",
-        "project_paths",
-        "re",
-        "sys",
-        "taste_pythonpath",
-        "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "run_literature_base_audit.py",
@@ -1162,6 +1160,7 @@
         "build",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -1172,14 +1171,14 @@
         "pathlib",
         "project_paths",
         "re",
+        "select_fresh_research_base",
         "subprocess",
         "sys",
         "typing",
         "urllib.error",
         "urllib.parse",
         "urllib.request"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "run_literature_tool.py",
@@ -1202,6 +1201,7 @@
         "sync_current_find_plan_queries",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -1214,8 +1214,7 @@
         "subprocess",
         "sys",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "update_local_database.py",
@@ -1232,6 +1231,7 @@
         "write_state",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -1247,8 +1247,7 @@
         "sys",
         "taste_pythonpath",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     }
   ]
 }

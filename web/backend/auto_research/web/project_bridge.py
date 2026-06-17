@@ -14425,7 +14425,7 @@ def run_action(payload: dict[str, Any], log: LogFn, should_cancel: CancelFn, pro
                 elif action in {'full-cycle', 'full_research_cycle'}:
                     environment_literature_markers = [
                         'sync_outputs', 'sync-outputs', 'literature-sync', 'literature-tool-packet', 'build_literature_tool_packet',
-                        'fresh-research-base-selection', 'select_fresh_research_base', 'assess_literature_base_candidates',
+                        'fresh-research-base-selection', 'select_fresh_research_base', 'literature_base_candidates',
                         'literature-base-candidate', 'literature-base-audit', 'method-stack-sync',
                     ]
                     fresh_find_markers = ['literature-survey', 'run_frontend', 'run-finding', 'run_driver', 'run-literature-tool']

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-17T09:58:59.594852+00:00",
+  "generated_at": "2026-06-17T10:51:14.417190+00:00",
   "module": "planning",
   "contract": {
     "directory": "modules/planning",
@@ -36,8 +36,8 @@
       "script": "build_blocker_action_plan.py",
       "path": "modules/planning/scripts/build_blocker_action_plan.py",
       "owner": "planning",
-      "owner_reason": "classified by module boundary registry",
-      "function_count": 53,
+      "owner_reason": "plan selection, blocker planning, or execution-contract shaping",
+      "function_count": 56,
       "functions": [
         "now_iso",
         "load_json",
@@ -47,6 +47,7 @@
         "safe_int",
         "skill_path",
         "load_skills",
+        "module_command",
         "command",
         "enabled_literature_source_count",
         "looks_like_llm_quota_blocker",
@@ -91,29 +92,33 @@
         "enforce_literature_recommendation_gate",
         "build",
         "write_report",
-        "main"
+        "main",
+        "payload_run_id",
+        "same_current"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "argparse",
         "datetime",
         "json",
+        "os",
         "pathlib",
         "project_paths",
         "re",
         "shlex",
+        "subprocess",
         "sys",
         "taste_pythonpath",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "plan_pipeline.py",
       "path": "modules/planning/scripts/plan_pipeline.py",
       "owner": "planning",
-      "owner_reason": "classified by module boundary registry",
+      "owner_reason": "plan selection, blocker planning, or execution-contract shaping",
       "function_count": 49,
       "functions": [
         "_raise_if_cancelled",
@@ -166,23 +171,27 @@
         "_plan_refs_text",
         "render_plan_markdown"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
-        "auto_research",
+        "auto_research.jobs",
+        "auto_research.llm",
+        "auto_research.models",
+        "auto_research.paths",
+        "auto_research.storage",
         "datetime",
         "os",
         "pathlib",
         "re",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "planning_tools.py",
       "path": "modules/planning/scripts/planning_tools.py",
       "owner": "planning",
-      "owner_reason": "classified by module boundary registry",
+      "owner_reason": "plan selection, blocker planning, or execution-contract shaping",
       "function_count": 32,
       "functions": [
         "_aris_load_json",
@@ -218,6 +227,7 @@
         "run_reflect",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -230,15 +240,14 @@
         "project_paths",
         "re",
         "shlex"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "propose_next_actions.py",
       "path": "modules/planning/scripts/propose_next_actions.py",
       "owner": "planning",
-      "owner_reason": "classified by module boundary registry",
-      "function_count": 14,
+      "owner_reason": "plan selection, blocker planning, or execution-contract shaping",
+      "function_count": 15,
       "functions": [
         "load_json",
         "collect_methods",
@@ -253,8 +262,10 @@
         "route_has_identity",
         "claim_ready_probe_datasets",
         "selected_base_viability_action",
-        "main"
+        "main",
+        "summary_sort_key"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -265,8 +276,7 @@
         "project_paths",
         "sys",
         "taste_pythonpath"
-      ],
-      "parse_error": ""
+      ]
     }
   ]
 }

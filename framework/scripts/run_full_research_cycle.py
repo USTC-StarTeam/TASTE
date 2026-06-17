@@ -1688,7 +1688,7 @@ class FullCycle:
         if target_state.get("blocking"):
             hard_lines.extend([
                 f"P0: Current Find recommended papers are {target_state.get('actual')}/{target_state.get('target')} with shortfall={target_state.get('shortfall')}. These recommendations must come from real abstracts scored by the LLM; do not treat the stricter claim-anchor count as a recommendation shortfall, and do not promote weak/unscored papers.",
-                "P0 HARD STOP: While this recommendation shortfall remains, the only allowed actions are Find title+abstract scoring/packet repair actions: build_literature_tool_packet.py, run_literature_tool.py, assess_literature_base_candidates.py, audit_submission_readiness.py, and build_blocker_action_plan.py.",
+                "P0 HARD STOP: While this recommendation shortfall remains, the only allowed actions are Find title+abstract scoring/packet repair actions: finding --action tool_packet, finding --action literature_tool, finding --action literature_base_candidates, writing --action submission_readiness, and planning --action blocker_action_plan.",
                 "P0 FORBIDDEN until the literature gate clears: repair_paper_orchestra_citations.py, revise_paper_citation_coverage.py, run_paper_pipeline.py, repair_paper_preview_loop.py, repair_paper_figures_loop.py, build_conference_preview_paper.py, figure repair, citation repair, paper writing, paper polishing, base promotion, experiment launch, and claim promotion.",
             ])
         if isinstance(submission, dict) and not bool(submission.get("submission_ready")):

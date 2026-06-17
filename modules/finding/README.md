@@ -72,7 +72,7 @@
 
 | 脚本 | 真实作用 |
 | --- | --- |
-| `scripts/plan_literature_review.py` | 根据项目主题生成自适应文献检索计划和查询。 |
+| `scripts/finding_quality_tools.py` | 合并后的文献计划、论文质量审计和文献基底候选审计工具；通过 `--tool-action plan_literature/paper_quality/literature_base_candidates` 选择子功能。 |
 | `scripts/build_literature_tool_packet.py` | 把 Find 结果压缩成 Claude Code 可调用的 literature packet。 |
 | `scripts/run_literature_tool.py` | 给项目代理使用的 literature tool 包装入口，内部调用 Find 并刷新 packet。 |
 
@@ -80,8 +80,7 @@
 
 | 脚本 | 真实作用 |
 | --- | --- |
-| `scripts/assess_paper_quality.py` | 对候选论文元数据和来源质量做确定性审计。 |
-| `scripts/assess_literature_base_candidates.py` | 评估候选文献基底是否有代码、数据、正向信号和可继续跟进价值。 |
+| `scripts/finding_quality_tools.py` | 提供 `paper_quality` 与 `literature_base_candidates` 两个质量审计子功能；入口仍由 `main.py --action` 统一暴露。 |
 | `scripts/run_literature_base_audit.py` | 把 Find 候选送入 repo/data/env 前置审计，防止不可执行基底进入后续。 |
 
 ## 冗余控制原则

@@ -65,6 +65,22 @@ def load_skills() -> dict[str, str]:
     return {path.parent.name: str(path) for path in base.glob("*/SKILL.md")} if base.exists() else {}
 
 
+def module_command(project: str, stage: str, action: str, *extra: str) -> str:
+    env_prefix = f"PYTHONPATH={shlex.quote(taste_pythonpath_string(ROOT))}"
+    parts = [
+        env_prefix,
+        management_python(),
+        "framework/scripts/run_module.py",
+        stage,
+        "--action",
+        action,
+        "--project",
+        project,
+    ]
+    parts.extend(str(item) for item in extra if str(item).strip())
+    return " ".join(shlex.quote(str(part)) for part in parts)
+
+
 def command(project: str, script_or_venue: str, *extra: str) -> str:
     script_or_venue = str(script_or_venue or "").strip()
     if script_or_venue.endswith(".py") or not extra:
@@ -753,7 +769,7 @@ def action_template(kind: str, project: str, venue: str, skills: dict[str, str])
             ),
             "recommended_commands": [
                 command(project, venue, "build_literature_tool_packet.py"),
-                command(project, "assess_literature_base_candidates.py"),
+                module_command(project, "finding", "literature_base_candidates"),
                 command(project, "run_literature_base_audit.py", "--limit", "8", "--repo-search-per-candidate", "3"),
                 command(project, venue, "audit_reference_reproduction.py"),
                 command(project, venue, "build_blocker_action_plan.py"),
