@@ -16,7 +16,7 @@ RESPONSIBILITY = 'Acquire verified paper-body text for the selected Find packet 
 REQUIRED_EXTERNAL_INPUTS = ('llm_api_or_claude', 'finding_artifact_packet', 'artifact_root')
 ARTIFACTS_IN = ('find_results.json', 'article.md', 'full_text_reading/manual_full_text_sources.json')
 ARTIFACTS_OUT = ('read_results.json', 'read.md', 'full_text_reading/full_text_packet.json', 'current_find_full_text_evidence_repair.json')
-LEGACY_ROOTS = ('modules/reading/scripts/read_pipeline.py', 'modules/reading/scripts/repair_current_find_full_text_evidence.py', 'modules/reading/scripts/ensure_current_find_research_plan.py')
+PRIVATE_BACKEND_ROOTS = ('modules/reading/scripts/read_pipeline.py', 'modules/reading/scripts/repair_current_find_full_text_evidence.py', 'modules/reading/scripts/ensure_current_find_research_plan.py')
 
 
 @dataclass(slots=True)
@@ -58,7 +58,7 @@ def contract() -> dict[str, Any]:
         "required_external_inputs": list(REQUIRED_EXTERNAL_INPUTS),
         "artifacts_in": list(ARTIFACTS_IN),
         "artifacts_out": list(ARTIFACTS_OUT),
-        "legacy_roots": list(LEGACY_ROOTS),
+        "private_backend_roots": list(PRIVATE_BACKEND_ROOTS),
     }
 
 

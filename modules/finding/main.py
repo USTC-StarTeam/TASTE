@@ -16,7 +16,7 @@ RESPONSIBILITY = 'Collect, filter, score, and rank literature/tool candidates fr
 REQUIRED_EXTERNAL_INPUTS = ('llm_api', 'research_topic', 'research_interest', 'researcher_profile', 'source_selection')
 ARTIFACTS_IN = ('config/profile JSON', 'venue/source selection JSON')
 ARTIFACTS_OUT = ('find_results.json', 'article.md', 'source_status.md', 'category/title/detail/scoring reports')
-LEGACY_ROOTS = ('modules/finding/scripts/find_pipeline.py', 'modules/finding/scripts/discover_*.py', 'modules/finding/scripts/build_literature_tool_packet.py')
+PRIVATE_BACKEND_ROOTS = ('modules/finding/scripts/find_pipeline.py', 'modules/finding/scripts/discover_*.py', 'modules/finding/scripts/build_literature_tool_packet.py')
 
 
 @dataclass(slots=True)
@@ -58,7 +58,7 @@ def contract() -> dict[str, Any]:
         "required_external_inputs": list(REQUIRED_EXTERNAL_INPUTS),
         "artifacts_in": list(ARTIFACTS_IN),
         "artifacts_out": list(ARTIFACTS_OUT),
-        "legacy_roots": list(LEGACY_ROOTS),
+        "private_backend_roots": list(PRIVATE_BACKEND_ROOTS),
     }
 
 
@@ -127,6 +127,15 @@ ACTION_ALIASES = {
     "tool_packet": "build_literature_tool_packet",
     "venue_metadata_cache": "build_venue_metadata_cache",
     "openreview_cache": "build_openreview_cache",
+    "plan_literature": "plan_literature_review",
+    "discover_arxiv": "discover_arxiv",
+    "discover_semantic_scholar": "discover_semantic_scholar",
+    "discover_github": "discover_github_repos",
+    "ingest_discovery": "ingest_discovery",
+    "paper_quality": "assess_paper_quality",
+    "literature_base_candidates": "assess_literature_base_candidates",
+    "local_database": "update_local_database",
+    "fresh_base_selection": "select_fresh_research_base",
 }
 
 

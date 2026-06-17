@@ -22,7 +22,7 @@
       "hypothesis_arena.md",
       "idea candidate audits"
     ],
-    "legacy_roots": [
+    "private_backend_roots": [
       "modules/ideation/scripts/idea_pipeline.py",
       "modules/ideation/scripts/assess_idea_candidates.py",
       "modules/ideation/scripts/build_hypothesis_arena.py"

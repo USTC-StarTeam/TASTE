@@ -16,7 +16,7 @@ RESPONSIBILITY = 'Select audited code/data bases, probe loaders, and lock the ex
 REQUIRED_EXTERNAL_INPUTS = ('selected_plan_contract', 'candidate_repo_data_artifacts', 'runtime_config')
 ARTIFACTS_IN = ('plans.json', 'literature_tool_packet.json', 'repo/data candidates')
 ARTIFACTS_OUT = ('evidence_ready_repo_selection.json', 'repo_env_bootstrap.json', 'dataset registry', 'reference/data gates')
-LEGACY_ROOTS = ('modules/environment/scripts/run_environment_stage.py', 'modules/environment/scripts/select_evidence_ready_repo.py', 'modules/environment/scripts/bootstrap_repo_env.py')
+PRIVATE_BACKEND_ROOTS = ('modules/environment/scripts/run_environment_stage.py', 'modules/environment/scripts/select_evidence_ready_repo.py', 'modules/environment/scripts/bootstrap_repo_env.py')
 
 
 @dataclass(slots=True)
@@ -58,7 +58,7 @@ def contract() -> dict[str, Any]:
         "required_external_inputs": list(REQUIRED_EXTERNAL_INPUTS),
         "artifacts_in": list(ARTIFACTS_IN),
         "artifacts_out": list(ARTIFACTS_OUT),
-        "legacy_roots": list(LEGACY_ROOTS),
+        "private_backend_roots": list(PRIVATE_BACKEND_ROOTS),
     }
 
 
@@ -133,6 +133,22 @@ ACTION_ALIASES = {
     "probe_selected_base_reference": "probe_selected_base_reference",
     "bootstrap": "bootstrap_repo_env",
     "bootstrap_repo": "bootstrap_repo_env",
+    "data_requirements": "build_repo_data_requirements",
+    "probe_repo": "probe_repo_dataset",
+    "plan_data": "plan_data_acquisition",
+    "attempt_data": "attempt_data_acquisition",
+    "data_policy": "data_unavailability_policy",
+    "restart_discovery": "restart_after_data_blocker",
+    "candidate_pool": "audit_repo_candidate_pool",
+    "reconcile_candidates": "reconcile_active_and_pool_candidates",
+    "fresh_base_data_probe": "probe_fresh_base_data_acquisition",
+    "base_switch_gate": "audit_deterministic_base_switch_gate",
+    "execute_base_switch": "execute_authorized_base_switch",
+    "assess_repo": "assess_repo_candidates",
+    "obsolete_cleanup": "audit_obsolete_baseline_cleanup",
+    "fresh_base_plan": "build_fresh_base_implementation_plan",
+    "selected_base_viability": "audit_selected_base_viability",
+    "safe_unblock": "run_safe_unblock",
 }
 
 

@@ -16,7 +16,7 @@ RESPONSIBILITY = 'Turn reading/finding artifacts into editable research ideas wi
 REQUIRED_EXTERNAL_INPUTS = ('llm_api_or_claude', 'reading_artifacts', 'research_profile')
 ARTIFACTS_IN = ('find_results.json', 'read_results.json', 'read.md')
 ARTIFACTS_OUT = ('ideas.json', 'idea.md', 'hypothesis_arena.md', 'idea candidate audits')
-LEGACY_ROOTS = ('modules/ideation/scripts/idea_pipeline.py', 'modules/ideation/scripts/assess_idea_candidates.py', 'modules/ideation/scripts/build_hypothesis_arena.py')
+PRIVATE_BACKEND_ROOTS = ('modules/ideation/scripts/idea_pipeline.py', 'modules/ideation/scripts/assess_idea_candidates.py', 'modules/ideation/scripts/build_hypothesis_arena.py')
 
 
 @dataclass(slots=True)
@@ -58,7 +58,7 @@ def contract() -> dict[str, Any]:
         "required_external_inputs": list(REQUIRED_EXTERNAL_INPUTS),
         "artifacts_in": list(ARTIFACTS_IN),
         "artifacts_out": list(ARTIFACTS_OUT),
-        "legacy_roots": list(LEGACY_ROOTS),
+        "private_backend_roots": list(PRIVATE_BACKEND_ROOTS),
     }
 
 

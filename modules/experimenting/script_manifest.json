@@ -23,7 +23,7 @@
       "runtime integrity audit",
       "reference/scientific progress gates"
     ],
-    "legacy_roots": [
+    "private_backend_roots": [
       "modules/experimenting/scripts/run_coding_agent.py",
       "modules/experimenting/scripts/launch_experiment_run.py",
       "modules/experimenting/scripts/experiment_contracts.py"

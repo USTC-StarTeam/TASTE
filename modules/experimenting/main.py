@@ -16,7 +16,7 @@ RESPONSIBILITY = 'Modify or execute selected project code, run auditable experim
 REQUIRED_EXTERNAL_INPUTS = ('selected_plan_contract', 'locked_environment', 'repo_path', 'experiment_python')
 ARTIFACTS_IN = ('evidence_ready_repo_selection.json', 'repo_env_bootstrap.json', 'experiment_plan.json')
 ARTIFACTS_OUT = ('experiment_registry.json', 'experiment artifacts/logs', 'runtime integrity audit', 'reference/scientific progress gates')
-LEGACY_ROOTS = ('modules/experimenting/scripts/run_coding_agent.py', 'modules/experimenting/scripts/launch_experiment_run.py', 'modules/experimenting/scripts/experiment_contracts.py')
+PRIVATE_BACKEND_ROOTS = ('modules/experimenting/scripts/run_coding_agent.py', 'modules/experimenting/scripts/launch_experiment_run.py', 'modules/experimenting/scripts/experiment_contracts.py')
 
 
 @dataclass(slots=True)
@@ -58,7 +58,7 @@ def contract() -> dict[str, Any]:
         "required_external_inputs": list(REQUIRED_EXTERNAL_INPUTS),
         "artifacts_in": list(ARTIFACTS_IN),
         "artifacts_out": list(ARTIFACTS_OUT),
-        "legacy_roots": list(LEGACY_ROOTS),
+        "private_backend_roots": list(PRIVATE_BACKEND_ROOTS),
     }
 
 
@@ -134,6 +134,14 @@ ACTION_ALIASES = {
     "real_repo_smoke": "run_real_repo_smoke",
     "watchdog": "experiment_run_watchdog",
     "contracts": "experiment_contracts",
+    "log": "log_experiment",
+    "analyze_failures": "analyze_experiment_failures",
+    "reference_reproduction": "audit_reference_reproduction",
+    "audit_iteration": "audit_experiment_iteration",
+    "runtime_integrity": "audit_experiment_runtime_integrity",
+    "import_artifacts": "import_experiment_artifacts",
+    "record_table": "build_experiment_record_table",
+    "reference_audit": "audit_reference_reproduction",
 }
 
 

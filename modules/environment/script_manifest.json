@@ -22,7 +22,7 @@
       "dataset registry",
       "reference/data gates"
     ],
-    "legacy_roots": [
+    "private_backend_roots": [
       "modules/environment/scripts/run_environment_stage.py",
       "modules/environment/scripts/select_evidence_ready_repo.py",
       "modules/environment/scripts/bootstrap_repo_env.py"

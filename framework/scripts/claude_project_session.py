@@ -73,12 +73,12 @@ CURRENT_FIND_FILE_WRITE_WHITELIST_POLICY = (
 )
 DIRECT_CONDA_COMMAND_POLICY = (
     "Claude Code may not call conda/mamba/micromamba run/create/install/update/remove directly. "
-    "Use the configured project experiment Python for probes and modules/experimenting/scripts/launch_experiment_run.py for experiments; "
+    "Use the configured project experiment Python for probes and `framework/scripts/run_module.py experimenting --action launch` for experiments; "
     "environment creation or mutation is wrapper-owned and must not be inferred from the project id."
 )
 DIRECT_PYTHON_COMMAND_POLICY = (
     "Claude Code may not call bare python/python3 directly in project runtime stages. "
-    "Use the configured project experiment Python for probes and modules/experimenting/scripts/launch_experiment_run.py for experiments; "
+    "Use the configured project experiment Python for probes and `framework/scripts/run_module.py experimenting --action launch` for experiments; "
     "bare python can silently use the management or system environment."
 )
 PROCESS_SIGNAL_COMMAND_POLICY = (
@@ -134,7 +134,7 @@ def runtime_artifact_state_path_is_owned(path: Any) -> bool:
 
 DIRECT_ARTIFACT_SCRIPT_EXECUTION_POLICY = (
     "Claude Code may not execute artifact-local Python scripts directly from Bash in experiment/trajectory/reference/paper stages. "
-    "Evidence repair that runs code must use a wrapper-managed script or modules/experimenting/scripts/launch_experiment_run.py so TASTE owns PID, logs, artifacts, and import policy."
+    "Evidence repair that runs code must use a wrapper-managed module action (`framework/scripts/run_module.py experimenting --action launch`) so TASTE owns PID, logs, artifacts, and import policy."
 )
 SECRET_ENV_ACCESS_POLICY = (
     "Claude Code may not enumerate, print, grep, echo, measure, or pass API key/token/secret environment variables through Bash. "
@@ -314,9 +314,24 @@ def launcher_training_argv(tokens: list[str]) -> list[str]:
     return []
 
 
+def command_uses_experiment_launcher(tokens: list[str]) -> bool:
+    lowered = [str(token or '').replace('\\', '/').lower() for token in tokens]
+    if any('launch_experiment_run.py' in token for token in lowered):
+        return True
+    if not any(token.endswith('framework/scripts/run_module.py') or token.endswith('/framework/scripts/run_module.py') or token == 'framework/scripts/run_module.py' for token in lowered):
+        return False
+    if 'experimenting' not in lowered:
+        return False
+    return any(token == 'launch' for token in lowered) and '--action' in lowered
+
+
+def command_text_uses_experiment_launcher(command_lower: str) -> bool:
+    return command_uses_experiment_launcher(command_tokens(command_lower))
+
+
 def launcher_training_python_issue(command: str, project: str) -> str:
     tokens = command_tokens(command)
-    if not any('launch_experiment_run.py' in token for token in tokens):
+    if not command_uses_experiment_launcher(tokens):
         return ''
     if '--allow-nonproject-python' in tokens:
         return 'launcher command uses forbidden --allow-nonproject-python escape hatch for autonomous experiment launch'
@@ -594,7 +609,7 @@ def direct_python_command_policy_issue(command: str, stage: str = '') -> str:
         return ''
     if re.search(r"(?:^|[;&|]\s*)(?:python|python3(?:\.\d+)?)\s+-m\s+json\.tool\b", lowered):
         return ''
-    if 'modules/experimenting/scripts/launch_experiment_run.py' in lowered:
+    if command_text_uses_experiment_launcher(lowered):
         return ''
     if paper_inline_python_probe_allowed(lowered, stage_l):
         return ''
@@ -710,7 +725,7 @@ def direct_artifact_script_execution_policy_issue(command: str, project: str, st
     if not _runtime_control_stage(stage):
         return ""
     lowered = str(command or "").replace("\\", "/").lower()
-    if "launch_experiment_run.py" in lowered:
+    if command_text_uses_experiment_launcher(lowered):
         return ""
     artifact_root_pattern = r"/projects/[^/\s;&|<>]+/artifacts(?:/|$)"
     literal_artifact_script = re.search(r"/projects/[^/\s;&|<>]+/artifacts/[^\s;&|<>]+\.py\b", lowered)
@@ -783,7 +798,7 @@ def bash_command_tool_policy_issue(command: str, project: str, stage: str = '') 
     management_script = re.search(r"(?:^|[;&|]\s*)(?:python|python3|python3\.\d+)\s+scripts/(?!launch_experiment_run\.py)[a-zA-Z0-9_./-]+\.py\b", lowered)
     if management_script:
         return f'Management scripts must use the configured management Python ({management_python()}), not bare python/python3'
-    if 'modules/experimenting/scripts/launch_experiment_run.py' in lowered or 'launch_experiment_run.py' in lowered:
+    if command_text_uses_experiment_launcher(lowered):
         return ''
     if is_read_only_log_monitor_command(policy_command, lowered):
         return ''
@@ -809,11 +824,11 @@ def bash_command_tool_policy_issue(command: str, project: str, stage: str = '') 
     )
     invokes_training = bool(training_script_pattern.search(lowered))
     if invokes_training:
-        return 'new experiment launch bypasses modules/experimenting/scripts/launch_experiment_run.py launcher contract'
+        return 'new experiment launch bypasses TASTE experimenting launcher contract'
     if background_launch and any(marker in lowered for marker in ['finetune', 'exp_standalone', 'exp_text_init', '/artifacts/', '--artifact_dir']):
-        return 'new experiment launch bypasses modules/experimenting/scripts/launch_experiment_run.py launcher contract'
+        return 'new experiment launch bypasses TASTE experimenting launcher contract'
     if explicit_artifact_log and any(marker in lowered for marker in ['finetune', 'exp_standalone', 'exp_text_init', '--artifact_dir']):
-        return 'new experiment launch bypasses modules/experimenting/scripts/launch_experiment_run.py launcher contract'
+        return 'new experiment launch bypasses TASTE experimenting launcher contract'
     return ''
 
 def current_find_run_id(paths) -> str:
@@ -1302,12 +1317,12 @@ def build_context(project: str, instruction: str, stage: str, repo_path: str = '
             'base_work_candidates': literature_packet.get('base_work_candidates', [])[:6],
             'suggested_followup_queries': literature_packet.get('suggested_followup_queries', [])[:10],
             'last_run': literature_last_run,
-        } if isinstance(literature_packet, dict) and literature_packet else 'not built yet; run ' + str(ROOT / 'modules/finding/scripts/build_literature_tool_packet.py') + ' --project ' + project + ' before literature-dependent decisions'
+        } if isinstance(literature_packet, dict) and literature_packet else 'not built yet; run ' + str(ROOT / 'framework/scripts/run_module.py') + ' finding --action tool_packet --project ' + project + ' before literature-dependent decisions'
     literature_context_text = json.dumps(literature_context, ensure_ascii=False, indent=2) if isinstance(literature_context, dict) else str(literature_context)
     experiment_python = project_experiment_python(project)
     allowed_experiment_python_list = sorted(allowed_experiment_pythons(project))
     launcher_template = (
-        f"{management_python()} {ROOT / 'modules/experimenting/scripts/launch_experiment_run.py'} --project {project} "
+        f"{management_python()} {ROOT / 'framework/scripts/run_module.py'} experimenting --action launch --project {project} "
         f"--artifact-name <unique_slug> --cwd {repo or str(paths.root)} -- "
         f"{experiment_python or '<resolved-project-experiment-python>'} -u <training_script.py> ..."
     )
@@ -1353,7 +1368,7 @@ TASTE recoverable trajectory-cycle memory:
 {json.dumps({'status': evo_cycle.get('status') or evo_cycle.get('final_status'), 'phase_count': evo_cycle.get('phase_count') or len(evo_cycle.get('phases', [])) if isinstance(evo_cycle, dict) else 0, 'recoverable_exception_count': evo_cycle.get('recoverable_exception_count', 0) if isinstance(evo_cycle, dict) else 0}, ensure_ascii=False, indent=2) if isinstance(evo_cycle, dict) else 'none yet'}
 
 native method capability contracts:
-{json.dumps({'status': third_party_stack.get('status'), 'summary': third_party_stack.get('summary', {}), 'capability_bindings': native_capability_bindings}, ensure_ascii=False, indent=2) if isinstance(third_party_stack, dict) and third_party_stack else 'not yet synced; run ' + str(ROOT / 'modules/writing/scripts/sync_third_party_research_stack.py') + ' before relying on native method contracts'}
+{json.dumps({'status': third_party_stack.get('status'), 'summary': third_party_stack.get('summary', {}), 'capability_bindings': native_capability_bindings}, ensure_ascii=False, indent=2) if isinstance(third_party_stack, dict) and third_party_stack else 'not yet synced; run ' + str(ROOT / 'framework/scripts/run_module.py') + ' writing --action sync_stack' + ' before relying on native method contracts'}
 
 Method references is retained for audit only in `state/third_party_research_stack.json`. Do not mention source-project names in operational plans, role names, progress summaries, or paper prose; use native module names instead.
 
@@ -1397,17 +1412,17 @@ Hard rules:
 - If a training process is already alive, observe it non-invasively only: do not send signals, attach tracing/debuggers, read blocking `/proc/<pid>/fd/*` pipes, kill, restart, or launch a duplicate unless the process has exited or artifact-local evidence proves a hard failure.
 - New training launches must go through the launcher template shown in the TASTE runtime execution contract: `{launcher_template}`. The command after `--` must begin with the exact `project_experiment_python` path; do not use `<project-experiment-python>` as a literal placeholder.
 - Do not use system `python`, bare `python3`, `conda run`, raw `nohup`, shell backgrounding, or manual stdout redirection for new experiments. The launcher will reject them.
-- Do not use bare or inline Python to parse experiment logs, registry rows, or metrics in experiment/trajectory/reference/paper/full-cycle stages. Use `{management_python()} {ROOT / 'modules/experimenting/scripts/import_experiment_artifacts.py'} --project {project} --scan-completed` plus the audit/report scripts, and use `python -m json.tool` only for JSON syntax checks allowed by the tool policy.
+- Do not use bare or inline Python to parse experiment logs, registry rows, or metrics in experiment/trajectory/reference/paper/full-cycle stages. Use `{management_python()} {ROOT / 'framework/scripts/run_module.py'} experimenting --action import_artifacts --project {project} --scan-completed` plus the audit/report scripts, and use `python -m json.tool` only for JSON syntax checks allowed by the tool policy.
 - Never write experiment registries, record tables, launcher contracts, metrics, audits, bad-case files, running status, locks, or import-control markers directly with shell redirection or Claude file tools; TASTE launch/import/audit scripts own those files.
 - The launcher creates `run_contract.json`, `run.lock`, `launcher.pid.json`, and `stdout_stderr.log`, rejects reused/contaminated artifact dirs, records `python_executable`, `environment_contract`, `expected_outputs`, and gives TASTE one PID/log/artifact contract to monitor.
-- If a repo training script cannot accept an artifact path or unbuffered logging, write a small repo-local wrapper once, then launch that wrapper through `{ROOT / 'modules/experimenting/scripts/launch_experiment_run.py'}`; do not create ad-hoc background shell jobs.
+- If a repo training script cannot accept an artifact path or unbuffered logging, write a small repo-local wrapper once, then launch that wrapper through `{ROOT / 'framework/scripts/run_module.py'} experimenting --action launch`; do not create ad-hoc background shell jobs.
 - An empty log while a process is alive is not evidence of failure. Record that the run is still waiting for output and keep monitoring non-invasively.
 - Before stopping a run, write the stop reason, PID, command, artifact path, and evidence to an artifact-local audit or run note.
-- Use TASTE's native research-direction, evolutionary-memory, evidence-assurance, trajectory-optimization, and paper-production contracts. If the method stack is absent or stale, run `{ROOT / 'modules/writing/scripts/sync_third_party_research_stack.py'} --project {project}` first.
+- Use TASTE's native research-direction, evolutionary-memory, evidence-assurance, trajectory-optimization, and paper-production contracts. If the method stack is absent or stale, run `{ROOT / 'framework/scripts/run_module.py'} writing --action sync_stack --project {project}` first.
 - Preserve method references in audit state when required, but do not surface external source-project names as active agents or roles.
 - Read TASTE recoverable-cycle memory files before deciding whether to retry, repair, prune, or switch direction.
 - Before selecting a base paper, generating an idea, modifying code from a paper, or writing literature-related claims, first read `state/current_find_research_plan.json`, `state/experiment_plan.json`, and `state/taste_plan_bridge.json`; then read `planning/literature_tool_packet.md` or `state/literature_tool_packet.json` and at least one raw artifact under `planning/finding/`.
-- If the packet is missing, stale, too generic, or does not cover the current blocker, run `{management_python()} {ROOT / 'modules/finding/scripts/run_literature_tool.py'} --project {project} --query "<targeted research query>" --fast-mode` for an internal project-agent survey, or add `--deep-survey` when the route depends on broad conference/arXiv coverage. The default output is `state/internal_literature_runs/...` and must not replace web-facing Find artifacts; use `--publish-current-find` only when the TASTE wrapper/user explicitly asks for a visible current-Find refresh. Then read the internal packet path printed by the command, or rerun `{management_python()} {ROOT / 'modules/finding/scripts/build_literature_tool_packet.py'} --project {project}` only for the web-facing packet.
+- If the packet is missing, stale, too generic, or does not cover the current blocker, run `{management_python()} {ROOT / 'framework/scripts/run_module.py'} finding --action literature_tool --project {project} --query "<targeted research query>" --fast-mode` for an internal project-agent survey, or add `--deep-survey` when the route depends on broad conference/arXiv coverage. The default output is `state/internal_literature_runs/...` and must not replace web-facing Find artifacts; use `--publish-current-find` only when the TASTE wrapper/user explicitly asks for a visible current-Find refresh. Then read the internal packet path printed by the command, or rerun `{management_python()} {ROOT / 'framework/scripts/run_module.py'} finding --action tool_packet --project {project}` only for the web-facing packet.
 - Use the literature tool only as TASTE's internal survey capability. Do not describe it as a separate agent or outsource decisions to it.
 - Reuse survey intermediate files (`find_results.json`, `read_results.json`, `ideas.json`, `plans.json`, category/title/arXiv reports) for idea generation, base-work switching, repo selection, and experiment planning instead of redoing blind search.
 - Current-Find Read/Idea/Plan stage (`current-find-claude-read-idea-plan`) is responsible for reading every recommended paper through auditable Task/subagent delegation, generating exactly 5 three-part ideas, generating exactly 5 plans, and choosing exactly one best plan by writing one non-empty `selected_plan_id` with `selected_for_execution=true` and `execute_next=true`; the other plans are backlog only.
@@ -1600,7 +1615,7 @@ def run_claude(project: str, instruction: str, stage: str, timeout_sec: int, res
             policy_text = (
                 'Current-Find takeover can only write the controlled planning/finding JSON artifacts. '
                 'All source code, tests, paper drafts, project history, and state files remain read-only during this stage.'
-            ) if policy_type == 'current_find_file_write_whitelist' else 'Claude Code may not bypass TASTE control wrappers. New experiment launches must use modules/experimenting/scripts/launch_experiment_run.py with the project experiment Python after `--`.'
+            ) if policy_type == 'current_find_file_write_whitelist' else 'Claude Code may not bypass TASTE control wrappers. New experiment launches must use `framework/scripts/run_module.py experimenting --action launch` with the project experiment Python after `--`.'
         tool_policy_tripped = True
         tool_policy_report = {
             'status': 'blocked',
@@ -2186,7 +2201,7 @@ def run_claude(project: str, instruction: str, stage: str, timeout_sec: int, res
         elif tool_policy_report.get('reason') in {DIRECT_CONDA_COMMAND_POLICY, DIRECT_PYTHON_COMMAND_POLICY}:
             result['stdout'] = (str(result.get('stdout') or '') + '\n\n[tool policy guard] Blocked direct conda/mamba/python usage; use the configured project experiment Python for probes and wrapper-managed launchers for experiments.').strip()[-20000:]
         else:
-            result['stdout'] = (str(result.get('stdout') or '') + '\n\n[tool policy guard] Blocked naked experiment launch; relaunch through modules/experimenting/scripts/launch_experiment_run.py.').strip()[-20000:]
+            result['stdout'] = (str(result.get('stdout') or '') + '\n\n[tool policy guard] Blocked naked experiment launch; relaunch through framework/scripts/run_module.py experimenting --action launch.').strip()[-20000:]
     result_path = keyed_state_path(paths, 'claude_project_session_last_result', session_key)
     save_json(session_path(paths, session_key), session)
     save_json(result_path, result)

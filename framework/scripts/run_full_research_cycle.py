@@ -29,6 +29,47 @@ from taste_pythonpath import script_resolver
 
 SCRIPTS = script_resolver(ROOT)
 
+
+def module_cmd(stage: str, action: str, *args: str) -> list[str]:
+    return [sys.executable, str(ROOT / 'framework/scripts/run_module.py'), stage, '--action', action, *args]
+
+
+SCRIPT_MODULE_ACTIONS: dict[str, tuple[str, str]] = {
+    'audit_reference_reproduction.py': ('experimenting', 'reference_reproduction'),
+    'audit_experiment_iteration.py': ('experimenting', 'audit_iteration'),
+    'audit_experiment_runtime_integrity.py': ('experimenting', 'runtime_integrity'),
+    'audit_paper_evidence.py': ('writing', 'audit_evidence'),
+    'audit_submission_readiness.py': ('writing', 'submission_readiness'),
+    'audit_paper_normality.py': ('writing', 'audit_normality'),
+    'audit_paper_figures.py': ('writing', 'audit_figures'),
+    'build_conference_preview_paper.py': ('writing', 'preview'),
+    'audit_selected_base_viability.py': ('environment', 'selected_base_viability'),
+    'audit_deterministic_base_switch_gate.py': ('environment', 'base_switch_gate'),
+    'audit_obsolete_baseline_cleanup.py': ('environment', 'obsolete_cleanup'),
+    'build_blocker_action_plan.py': ('planning', 'blocker_action'),
+}
+VENUE_AGNOSTIC_SCRIPTS = {
+    'audit_experiment_iteration.py',
+    'audit_experiment_runtime_integrity.py',
+    'audit_obsolete_baseline_cleanup.py',
+    'verify_research_trajectory_end_to_end.py',
+}
+TITLE_OPTION_SCRIPTS = {'build_conference_preview_paper.py'}
+
+
+def orchestration_cmd(script: str, project: str, venue: str = '', title: str = '') -> list[str]:
+    if script in SCRIPT_MODULE_ACTIONS:
+        stage, action = SCRIPT_MODULE_ACTIONS[script]
+        cmd = module_cmd(stage, action, '--project', project)
+    else:
+        cmd = [sys.executable, str(SCRIPTS / script), '--project', project]
+    if venue and script not in VENUE_AGNOSTIC_SCRIPTS:
+        cmd.extend(['--venue', venue])
+    if title and script in TITLE_OPTION_SCRIPTS:
+        cmd.extend(['--title', title])
+    return cmd
+
+
 SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_-]{8,}"),
     re.compile(r"(?i)(Authorization:\s*Bearer\s+)[A-Za-z0-9._\-]+"),
@@ -1022,12 +1063,9 @@ class FullCycle:
         return "experiment"
 
     def run_experiment_watchdog(self) -> dict[str, Any]:
-        watchdog = SCRIPTS / "experiment_run_watchdog.py"
-        if not watchdog.exists():
-            return {}
         try:
             proc = subprocess.run(
-                [sys.executable, str(watchdog), "--project", self.args.project],
+                module_cmd('experimenting', 'watchdog', '--project', self.args.project),
                 cwd=ROOT,
                 text=True,
                 capture_output=True,
@@ -1918,16 +1956,10 @@ Return concise Markdown with: Guidance Consumed, State Verified, Actions Taken, 
             result["status"] = "no_artifact_contract"
             return result
         commands: list[list[str]] = []
-        importer = SCRIPTS / "import_experiment_artifacts.py"
-        if importer.exists():
-            for artifact in artifact_dirs:
-                commands.append([sys.executable, str(importer), "--project", self.args.project, "--artifact-dir", str(artifact), "--allow-incomplete"])
-        record_table = SCRIPTS / "build_experiment_record_table.py"
-        if record_table.exists():
-            commands.append([sys.executable, str(record_table), "--project", self.args.project])
-        iteration_audit = SCRIPTS / "audit_experiment_iteration.py"
-        if iteration_audit.exists():
-            commands.append([sys.executable, str(iteration_audit), "--project", self.args.project])
+        for artifact in artifact_dirs:
+            commands.append(module_cmd('experimenting', 'import_artifacts', '--project', self.args.project, '--artifact-dir', str(artifact), '--allow-incomplete'))
+        commands.append(module_cmd('experimenting', 'record_table', '--project', self.args.project))
+        commands.append(module_cmd('experimenting', 'audit_iteration', '--project', self.args.project))
         command_results: list[dict[str, Any]] = []
         for command in commands:
             try:
@@ -2029,19 +2061,10 @@ Return concise Markdown with: Guidance Consumed, State Verified, Actions Taken, 
     def project_postprocess_commands(self) -> list[list[str]]:
         """Return project-local postprocess commands that can safely ingest completed artifacts."""
         commands: list[list[str]] = []
-        project_scripts = self.paths.root / "scripts"
-        watchdog = SCRIPTS / "experiment_run_watchdog.py"
-        if watchdog.exists():
-            commands.append([sys.executable, str(watchdog), "--project", self.args.project])
-        runtime_integrity = SCRIPTS / "audit_experiment_runtime_integrity.py"
-        if runtime_integrity.exists():
-            commands.append([sys.executable, str(runtime_integrity), "--project", self.args.project])
-        importer = SCRIPTS / "import_experiment_artifacts.py"
-        if importer.exists():
-            commands.append([sys.executable, str(importer), "--project", self.args.project, "--scan-completed"])
-        record_table = SCRIPTS / "build_experiment_record_table.py"
-        if record_table.exists():
-            commands.append([sys.executable, str(record_table), "--project", self.args.project])
+        commands.append(module_cmd('experimenting', 'watchdog', '--project', self.args.project))
+        commands.append(module_cmd('experimenting', 'runtime_integrity', '--project', self.args.project))
+        commands.append(module_cmd('experimenting', 'import_artifacts', '--project', self.args.project, '--scan-completed'))
+        commands.append(module_cmd('experimenting', 'record_table', '--project', self.args.project))
         return commands
 
     def postprocess_and_refresh_experiment_gates(self, step_fn: Any, *, suffix: str = "") -> None:
@@ -2059,12 +2082,7 @@ Return concise Markdown with: Guidance Consumed, State Verified, Actions Taken, 
             (f"trajectory-refresh{suffix}", "build_research_trajectory_system.py"),
             (f"blocker-action-plan{suffix}", "build_blocker_action_plan.py"),
         ]:
-            cmd = [sys.executable, str(SCRIPTS / script), "--project", self.args.project]
-            venue_agnostic_scripts = {"audit_experiment_iteration.py", "audit_experiment_runtime_integrity.py", "audit_obsolete_baseline_cleanup.py"}
-            if script == "build_research_trajectory_system.py" and self.args.venue:
-                cmd.extend(["--venue", self.args.venue])
-            elif script not in venue_agnostic_scripts:
-                cmd.extend(["--venue", self.args.venue])
+            cmd = orchestration_cmd(script, self.args.project, self.args.venue)
             step_fn(self.run(cmd, stage=stage_name, required=False, timeout=1800))
             if script == "audit_obsolete_baseline_cleanup.py":
                 self.delegate_obsolete_baseline_cleanup_review_if_needed(step_fn, suffix=suffix)
@@ -2163,7 +2181,7 @@ Return concise Markdown with: Files Reviewed, Decision, State File Written, Prot
         self.save()
         step_fn(result)
         step_fn(self.run(
-            [sys.executable, str(SCRIPTS / "audit_obsolete_baseline_cleanup.py"), "--project", self.args.project],
+            module_cmd('environment', 'obsolete_cleanup', '--project', self.args.project),
             stage=f"obsolete-baseline-cleanup-after-project-review{suffix}",
             required=False,
             timeout=180,
@@ -2256,7 +2274,7 @@ Return concise Markdown with: Files Rechecked, Cleanup Actions, State File Writt
         self.save()
         step_fn(result)
         step_fn(self.run(
-            [sys.executable, str(SCRIPTS / "audit_obsolete_baseline_cleanup.py"), "--project", self.args.project],
+            module_cmd('environment', 'obsolete_cleanup', '--project', self.args.project),
             stage=f"obsolete-baseline-cleanup-after-project-execution{suffix}",
             required=False,
             timeout=180,
@@ -2288,7 +2306,7 @@ Required behavior:
 - Literature signals can guide idea/base/code choices, but only local repo/data/experiment artifacts can support scientific claims.
 - The main Claude Code session may keep multiple Read/Idea/Plan candidates visible, but it must select one best `selected_plan_id` for downstream execution. Non-selected ideas/plans are backlog only and must not drive environment, experiment, paper, or claim work.
 - If `selected_plan_id` is empty while current Find has idea/plan candidates, stop after recording the selection blocker; do not invent or launch an experiment route.
-- If `selected_base_viability_gate.decision` is `base_switch_gate_required`, treat candidate/alternative main-route launches, paper/claim promotion, and route execution as blocked until deterministic base-switch evidence passes. Current selected-base evidence repair may use `modules/experimenting/scripts/launch_experiment_run.py --route-scope selected_base_current_route`; bounded candidate gate evidence collection may use `--route-scope base_switch_evidence_collection`. Keep alternatives as proposals until the dedicated gate passes, then execute the switch only through `modules/environment/scripts/execute_authorized_base_switch.py`.
+- If `selected_base_viability_gate.decision` is `base_switch_gate_required`, treat candidate/alternative main-route launches, paper/claim promotion, and route execution as blocked until deterministic base-switch evidence passes. Current selected-base evidence repair may use `framework/scripts/run_module.py experimenting --action launch --route-scope selected_base_current_route`; bounded candidate gate evidence collection may use `--route-scope base_switch_evidence_collection`. Keep alternatives as proposals until the dedicated gate passes, then execute the switch only through `framework/scripts/run_module.py environment --action execute_base_switch`.
 
 Current-Find selected execution contract:
 ```json
@@ -2338,12 +2356,7 @@ Return concise Markdown with: Idea/Route Decision, Evidence Inspected, Actions T
 
     def refresh_fresh_base_implementation_plan(self, *, reason: str = "") -> dict[str, Any]:
         result = self.run(
-            [
-                sys.executable,
-                str(SCRIPTS / "build_fresh_base_implementation_plan.py"),
-                "--project",
-                self.args.project,
-            ],
+            module_cmd('environment', 'fresh_base_plan', '--project', self.args.project),
             stage="fresh-base-implementation-plan",
             required=False,
             timeout=180,
@@ -2505,12 +2518,7 @@ Return concise Markdown with: Idea/Route Decision, Evidence Inspected, Actions T
         if current:
             return summary
         result = self.run(
-            [
-                sys.executable,
-                str(SCRIPTS / "ensure_current_find_research_plan.py"),
-                "--project",
-                self.args.project,
-            ],
+            module_cmd('reading', 'current_find_research_plan', '--project', self.args.project),
             stage="current-find-read-idea-plan" + stage_suffix,
             required=False,
             timeout=max(900, self.args.claude_timeout_sec + 300 if self.args.claude_timeout_sec > 0 else 0),
@@ -2677,7 +2685,7 @@ Required autonomous work:
 2. Inspect the environment-stage selected repository from `fresh_base_implementation_plan.json`: README, entrypoints, model/data loaders, dataset paths, imports, metrics, and CLI arguments.
 3. Produce machine-readable fresh-base audit artifacts under `state/` and human report(s) under `reports/`: exact dataset contract, expected paths, embedding pickle schema, import/package requirements, minimal smoke commands, and blocked data acquisition steps.
 4. If safe and useful, add small wrapper/probe scripts that only inspect imports, argparse, files, schemas, and loader readiness. Do not run long training or fabricate data.
-5. Do not run raw `gdown`, `curl`, or `wget` yourself. Data acquisition must go through `{management_python()} modules/environment/scripts/probe_fresh_base_data_acquisition.py --project {self.args.project} --attempt-download --timeout-sec 45`; if it fails or times out, record the exact blocker and stop before training.
+5. Do not run raw `gdown`, `curl`, or `wget` yourself. Data acquisition must go through `{management_python()} framework/scripts/run_module.py environment --action fresh_base_data_probe --project {self.args.project} --attempt-download --timeout-sec 45`; if it fails or times out, record the exact blocker and stop before training.
 6. Re-run `{management_python()} modules/environment/main.py --action build_fresh_base_implementation_plan --project {self.args.project}`, `{management_python()} modules/experimenting/main.py --action audit_reference_reproduction --project {self.args.project} --venue {self.args.venue}`, and `{management_python()} modules/planning/main.py --action build_blocker_action_plan --project {self.args.project} --venue {self.args.venue}` after changes.
 7. Leave gates blocked unless at least one real dataset contract for the environment-stage selected anchor is complete and loader/import probes pass.
 
@@ -2874,11 +2882,11 @@ Repair requirements:
 - First read `planning/reference_workflow_and_claude_code.md`, then follow `state/blocker_action_plan.json`: use each action's route, skill_contract, recommended_commands, and success_checks. If you deviate, record the evidence-backed reason.
 - If the top route is `reference_reproduction_repair`, first reproduce the reference work to its paper/table target, record target evidence and runtime feasibility, or switch base with evidence. Do not tune novel ideas or write the paper before this clears.
 - If the top route is `experiment_evidence_repair`, do not run paper writing or PDF repair. First debug/run/repair real-data experiments, baseline reproduction, metric/evaluation code, bad-case evidence, claim verdicts, or repo/data switches.
-- If `selected_base_viability_gate.decision=base_switch_gate_required`, stop candidate/alternative main-route training and paper/claim promotion until deterministic gate evidence passes. Current selected-base evidence repair may continue via `modules/experimenting/scripts/launch_experiment_run.py --route-scope selected_base_current_route`; bounded candidate gate evidence collection may use `--route-scope base_switch_evidence_collection`. If the dedicated gate passes, execute route identity changes only through `modules/environment/scripts/execute_authorized_base_switch.py`; evidence still remains non-promotable until downstream audits pass.
+- If `selected_base_viability_gate.decision=base_switch_gate_required`, stop candidate/alternative main-route training and paper/claim promotion until deterministic gate evidence passes. Current selected-base evidence repair may continue via `framework/scripts/run_module.py experimenting --action launch --route-scope selected_base_current_route`; bounded candidate gate evidence collection may use `--route-scope base_switch_evidence_collection`. If the dedicated gate passes, execute route identity changes only through `framework/scripts/run_module.py environment --action execute_base_switch`; evidence still remains non-promotable until downstream audits pass.
 - Failed, weak, or negative experiment findings may update audits, failed-hypothesis memory, and prune decisions, but they must not become paper contributions or an automatic topic re-scope. If evidence shows the selected route cannot support the user target topic, keep paper/claim gates blocked and write a deterministic route proposal instead of rewriting the research target.
 - If the active experiment process list is non-empty, do not declare the run interrupted/stopped from a partial log, and do not start a duplicate or hyperparameter-changing replacement. Wait for the live PID to exit, then audit the final stdout, metrics, artifact-local audit, and gates.
 - Observe live training non-invasively only. Do not send signals, attach strace/gdb/py-spy, read blocking `/proc/<pid>/fd/*` pipes, kill, restart, or launch a duplicate while a live PID exists unless artifact-local evidence proves a hard failure.
-- For every new training launch, use `{management_python()} modules/experimenting/scripts/launch_experiment_run.py --project {self.args.project} --artifact-name <unique_slug> --cwd <project_or_repo_dir> -- <project-experiment-python> -u <training_script.py> ...` so TASTE owns the PID, lock, artifact contract, project experiment Python, and stdout/stderr log.
+- For every new training launch, use `{management_python()} framework/scripts/run_module.py experimenting --action launch --project {self.args.project} --artifact-name <unique_slug> --cwd <project_or_repo_dir> -- <project-experiment-python> -u <training_script.py> ...` so TASTE owns the PID, lock, artifact contract, project experiment Python, and stdout/stderr log.
 - Do not use system `python`, bare `python3`, `conda run`, raw `nohup`, shell backgrounding, or manual stdout redirection for new experiments. If a repo script needs adaptation, write a repo-local wrapper and launch that wrapper through the the launcher with the project experiment Python.
 - The launcher must produce `run_contract.json`, `run.lock`, `launcher.pid.json`, `stdout_stderr.log`, `python_executable`, `environment_contract`, `expected_outputs`, and `audit_refresh_required`; import/audit scripts must treat contaminated, wrong-interpreter, or failed artifacts as non-evidence.
 - If a log is empty while the process is alive, record that the run is waiting for output and keep monitoring; do not treat the empty log as failure.
@@ -3249,7 +3257,7 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
                 "next_action": (
                     "Keep active_repo/evidence_ready_repo_selection on the trusted selected base. "
                     "Do not call open-ended Claude ideation or blocker repair for an alternative main route. "
-                    "Run modules/environment/scripts/audit_deterministic_base_switch_gate.py and require state/base_switch_gate.json to pass before any switch."
+                    "Run framework/scripts/run_module.py environment --action base_switch_gate and require state/base_switch_gate.json to pass before any switch."
                 ),
                 "human_summary": (
                     "selected-base 参考复现已通过，但当前选中仓库没有可提升的 项目目标候选证据；"
@@ -3277,7 +3285,7 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
                     "severity": "block",
                     "issue": "base_switch_gate has not been generated; selected_base_viability_gate is not switch authorization.",
                     "evidence": [str(self.paths.state / "base_switch_gate.json")],
-                    "next_action": "Run modules/environment/scripts/audit_deterministic_base_switch_gate.py before any route switch.",
+                    "next_action": "Run framework/scripts/run_module.py environment --action base_switch_gate before any route switch.",
                 }
             )
         if isinstance(base_switch_execution, dict) and base_switch_execution:
@@ -3359,33 +3367,33 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
             cycle["current_find_research_plan_status"] = self.ensure_current_find_research_plan(step, stage_suffix="-preflight")
             plan_bridge_gate_preflight = current_find_plan_bridge_gate_status(self.paths, cycle["current_find_research_plan_status"])
             if plan_bridge_gate_preflight.get("blocking"):
-                step(self.run([sys.executable, str(SCRIPTS / "build_blocker_action_plan.py"), "--project", self.args.project, "--venue", self.args.venue], stage="blocker-action-plan-current-find-plan-gate-preflight", required=False, timeout=180))
+                step(self.run(module_cmd('planning', 'blocker_action', '--project', self.args.project, '--venue', self.args.venue), stage="blocker-action-plan-current-find-plan-gate-preflight", required=False, timeout=180))
                 return self.finish_current_find_plan_bridge_gate_block(cycle, pdf_before, plan_bridge_gate_preflight)
             full_text_gate_preflight = current_find_full_text_gate_status(self.paths)
             if full_text_gate_preflight.get("blocking"):
-                step(self.run([sys.executable, str(SCRIPTS / "build_blocker_action_plan.py"), "--project", self.args.project, "--venue", self.args.venue], stage="blocker-action-plan-current-find-read-gate-preflight", required=False, timeout=180))
+                step(self.run(module_cmd('planning', 'blocker_action', '--project', self.args.project, '--venue', self.args.venue), stage="blocker-action-plan-current-find-read-gate-preflight", required=False, timeout=180))
                 return self.finish_current_find_full_text_gate_block(cycle, pdf_before, full_text_gate_preflight)
 
-        step(self.run([sys.executable, str(SCRIPTS / "sync_third_party_research_stack.py"), "--project", self.args.project], stage="method-stack-sync"))
+        step(self.run(module_cmd('writing', 'sync_stack', '--project', self.args.project), stage="method-stack-sync"))
         if discovery_first:
             self.state["summary"] = "Fresh Find/literature survey is running; waiting for current LLM title and abstract scoring evidence."
             self.state["summary_zh"] = "新的 Find/文献调研正在运行；等待本轮标题筛选、摘要抓取和 LLM 摘要评分产物。"
             self.state["current_goal"] = "run fresh Find/literature survey and replace stale literature outputs"
             self.save()
-            step(self.run([sys.executable, str(SCRIPTS / "plan_literature_review.py"), "--project", self.args.project], stage="literature-plan"))
+            step(self.run(module_cmd('finding', 'plan_literature', '--project', self.args.project), stage="literature-plan"))
             taste_timeout = max(1800, min(self.args.autonomous_timeout_sec, int(os.environ.get("TIMEOUT_SEC", "14400"))))
             if os.environ.get("FULL_CYCLE_REFRESH_LOCAL_DB", "1").lower() in {"1", "true", "yes", "on"}:
                 db_timeout = int(os.environ.get("DB_UPDATE_TIMEOUT_SEC", "1800"))
                 step(self.run(
-                    [
-                        sys.executable,
-                        str(SCRIPTS / "update_local_database.py"),
-                        "--project",
+                    module_cmd(
+                        'finding',
+                        'local_database',
+                        '--project',
                         self.args.project,
-                        "--if-missing",
-                        "--timeout-sec",
+                        '--if-missing',
+                        '--timeout-sec',
                         str(db_timeout),
-                    ],
+                    ),
                     stage="taste-local-database-update",
                     timeout=db_timeout + 120,
                 ))
@@ -3437,26 +3445,26 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
                 self.save()
                 return cycle
             step(self.run([sys.executable, str(SCRIPTS / "sync_outputs.py"), "--project", self.args.project, "--allow-empty"], stage="literature-sync", timeout=180))
-            step(self.run([sys.executable, str(SCRIPTS / "build_literature_tool_packet.py"), "--project", self.args.project, "--venue", self.args.venue], stage="literature-tool-packet", timeout=180))
+            step(self.run(module_cmd('finding', 'tool_packet', '--project', self.args.project, '--venue', self.args.venue), stage="literature-tool-packet", timeout=180))
             cycle["current_find_research_plan_status"] = self.ensure_current_find_research_plan(step)
             plan_bridge_gate_after_read = current_find_plan_bridge_gate_status(self.paths, cycle["current_find_research_plan_status"])
             if plan_bridge_gate_after_read.get("blocking"):
-                step(self.run([sys.executable, str(SCRIPTS / "build_blocker_action_plan.py"), "--project", self.args.project, "--venue", self.args.venue], stage="blocker-action-plan-current-find-plan-gate", required=False, timeout=180))
+                step(self.run(module_cmd('planning', 'blocker_action', '--project', self.args.project, '--venue', self.args.venue), stage="blocker-action-plan-current-find-plan-gate", required=False, timeout=180))
                 return self.finish_current_find_plan_bridge_gate_block(cycle, pdf_before, plan_bridge_gate_after_read)
             full_text_gate_after_read = current_find_full_text_gate_status(self.paths)
             if full_text_gate_after_read.get("blocking"):
-                step(self.run([sys.executable, str(SCRIPTS / "build_blocker_action_plan.py"), "--project", self.args.project, "--venue", self.args.venue], stage="blocker-action-plan-current-find-read-gate", required=False, timeout=180))
+                step(self.run(module_cmd('planning', 'blocker_action', '--project', self.args.project, '--venue', self.args.venue), stage="blocker-action-plan-current-find-read-gate", required=False, timeout=180))
                 return self.finish_current_find_full_text_gate_block(cycle, pdf_before, full_text_gate_after_read)
             target_state_after_literature = recommendation_target_status(self.paths)
             if target_state_after_literature.get("blocking"):
-                step(self.run([sys.executable, str(SCRIPTS / "build_blocker_action_plan.py"), "--project", self.args.project, "--venue", self.args.venue], stage="blocker-action-plan-literature-gate", required=False, timeout=180))
+                step(self.run(module_cmd('planning', 'blocker_action', '--project', self.args.project, '--venue', self.args.venue), stage="blocker-action-plan-literature-gate", required=False, timeout=180))
                 return self.finish_literature_recommendation_gate_block(cycle, pdf_before, target_state_after_literature)
             selected_contract_after_read = current_find_execution_contract(self.paths)
             if self.current_find_selected_plan_gate_blocking(selected_contract_after_read):
-                step(self.run([sys.executable, str(SCRIPTS / "build_blocker_action_plan.py"), "--project", self.args.project, "--venue", self.args.venue], stage="blocker-action-plan-current-find-selected-plan-gate", required=False, timeout=180))
+                step(self.run(module_cmd('planning', 'blocker_action', '--project', self.args.project, '--venue', self.args.venue), stage="blocker-action-plan-current-find-selected-plan-gate", required=False, timeout=180))
                 return self.finish_current_find_selected_plan_gate_block(cycle, pdf_before, selected_contract_after_read)
-            step(self.run([sys.executable, str(SCRIPTS / "select_fresh_research_base.py"), "--project", self.args.project], stage="fresh-research-base-selection", timeout=180))
-            step(self.run([sys.executable, str(SCRIPTS / "prepare_initialization.py"), "--project", self.args.project], stage="initialization-brief"))
+            step(self.run(module_cmd('finding', 'fresh_base_selection', '--project', self.args.project), stage="fresh-research-base-selection", timeout=180))
+            step(self.run(module_cmd('ideation', 'initialization', '--project', self.args.project), stage="initialization-brief"))
             survey_summary = self.literature_after_survey_summary()
             cycle["literature_after_survey"] = survey_summary
             self.state["literature_after_survey"] = survey_summary
@@ -3464,39 +3472,39 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
             self.save()
         else:
             step(self.run([sys.executable, str(SCRIPTS / "sync_outputs.py"), "--project", self.args.project, "--allow-empty"], stage="literature-sync-existing", required=False, timeout=180))
-            step(self.run([sys.executable, str(SCRIPTS / "build_literature_tool_packet.py"), "--project", self.args.project, "--venue", self.args.venue], stage="literature-tool-packet-refresh", required=False, timeout=180))
+            step(self.run(module_cmd('finding', 'tool_packet', '--project', self.args.project, '--venue', self.args.venue), stage="literature-tool-packet-refresh", required=False, timeout=180))
             cycle["current_find_research_plan_status"] = self.ensure_current_find_research_plan(step, stage_suffix="-refresh")
             plan_bridge_gate_after_read = current_find_plan_bridge_gate_status(self.paths, cycle["current_find_research_plan_status"])
             if plan_bridge_gate_after_read.get("blocking"):
-                step(self.run([sys.executable, str(SCRIPTS / "build_blocker_action_plan.py"), "--project", self.args.project, "--venue", self.args.venue], stage="blocker-action-plan-current-find-plan-gate-refresh", required=False, timeout=180))
+                step(self.run(module_cmd('planning', 'blocker_action', '--project', self.args.project, '--venue', self.args.venue), stage="blocker-action-plan-current-find-plan-gate-refresh", required=False, timeout=180))
                 return self.finish_current_find_plan_bridge_gate_block(cycle, pdf_before, plan_bridge_gate_after_read)
             full_text_gate_after_read = current_find_full_text_gate_status(self.paths)
             if full_text_gate_after_read.get("blocking"):
-                step(self.run([sys.executable, str(SCRIPTS / "build_blocker_action_plan.py"), "--project", self.args.project, "--venue", self.args.venue], stage="blocker-action-plan-current-find-read-gate-refresh", required=False, timeout=180))
+                step(self.run(module_cmd('planning', 'blocker_action', '--project', self.args.project, '--venue', self.args.venue), stage="blocker-action-plan-current-find-read-gate-refresh", required=False, timeout=180))
                 return self.finish_current_find_full_text_gate_block(cycle, pdf_before, full_text_gate_after_read)
             target_state_after_literature = recommendation_target_status(self.paths)
             if target_state_after_literature.get("blocking"):
-                step(self.run([sys.executable, str(SCRIPTS / "build_blocker_action_plan.py"), "--project", self.args.project, "--venue", self.args.venue], stage="blocker-action-plan-literature-gate-refresh", required=False, timeout=180))
+                step(self.run(module_cmd('planning', 'blocker_action', '--project', self.args.project, '--venue', self.args.venue), stage="blocker-action-plan-literature-gate-refresh", required=False, timeout=180))
                 return self.finish_literature_recommendation_gate_block(cycle, pdf_before, target_state_after_literature)
             selected_contract_after_read = current_find_execution_contract(self.paths)
             if self.current_find_selected_plan_gate_blocking(selected_contract_after_read):
-                step(self.run([sys.executable, str(SCRIPTS / "build_blocker_action_plan.py"), "--project", self.args.project, "--venue", self.args.venue], stage="blocker-action-plan-current-find-selected-plan-gate-refresh", required=False, timeout=180))
+                step(self.run(module_cmd('planning', 'blocker_action', '--project', self.args.project, '--venue', self.args.venue), stage="blocker-action-plan-current-find-selected-plan-gate-refresh", required=False, timeout=180))
                 return self.finish_current_find_selected_plan_gate_block(cycle, pdf_before, selected_contract_after_read)
-            step(self.run([sys.executable, str(SCRIPTS / "select_fresh_research_base.py"), "--project", self.args.project], stage="fresh-research-base-selection-refresh", required=False, timeout=180))
+            step(self.run(module_cmd('finding', 'fresh_base_selection', '--project', self.args.project), stage="fresh-research-base-selection-refresh", required=False, timeout=180))
             survey_summary = self.literature_after_survey_summary()
             cycle["literature_after_survey"] = survey_summary
             self.state["literature_after_survey"] = survey_summary
             self.save()
-        step(self.run([sys.executable, str(SCRIPTS / "assess_literature_base_candidates.py"), "--project", self.args.project], stage="literature-base-candidate-assessment", required=False, timeout=180))
-        step(self.run([sys.executable, str(SCRIPTS / "audit_reference_reproduction.py"), "--project", self.args.project, "--venue", self.args.venue], stage="reference-reproduction-gate-initial"))
+        step(self.run(module_cmd('finding', 'literature_base_candidates', '--project', self.args.project), stage="literature-base-candidate-assessment", required=False, timeout=180))
+        step(self.run(module_cmd('experimenting', 'reference_reproduction', '--project', self.args.project, '--venue', self.args.venue), stage="reference-reproduction-gate-initial"))
         step(self.run([sys.executable, str(SCRIPTS / "build_research_trajectory_system.py"), "--project", self.args.project, "--venue", self.args.venue], stage="trajectory-refresh"))
-        step(self.run([sys.executable, str(SCRIPTS / "audit_selected_base_viability.py"), "--project", self.args.project, "--venue", self.args.venue], stage="selected-base-viability-initial"))
+        step(self.run(module_cmd('environment', 'selected_base_viability', '--project', self.args.project, '--venue', self.args.venue), stage="selected-base-viability-initial"))
         selected_base_preblocked, _selected_base_pregate = self.selected_base_viability_gate_blocked()
         if selected_base_preblocked:
-            step(self.run([sys.executable, str(SCRIPTS / "audit_deterministic_base_switch_gate.py"), "--project", self.args.project, "--venue", self.args.venue], stage="base-switch-gate-initial", required=False, timeout=180))
+            step(self.run(module_cmd('environment', 'base_switch_gate', '--project', self.args.project, '--venue', self.args.venue), stage="base-switch-gate-initial", required=False, timeout=180))
             if self.base_switch_gate_authorized() and not self.base_switch_execution_authorized():
-                step(self.run([sys.executable, str(SCRIPTS / "execute_authorized_base_switch.py"), "--project", self.args.project, "--venue", self.args.venue], stage="base-switch-execution-initial", required=False, timeout=180))
-        step(self.run([sys.executable, str(SCRIPTS / "build_blocker_action_plan.py"), "--project", self.args.project, "--venue", self.args.venue], stage="blocker-action-plan-initial"))
+                step(self.run(module_cmd('environment', 'execute_base_switch', '--project', self.args.project, '--venue', self.args.venue), stage="base-switch-execution-initial", required=False, timeout=180))
+        step(self.run(module_cmd('planning', 'blocker_action', '--project', self.args.project, '--venue', self.args.venue), stage="blocker-action-plan-initial"))
         selected_base_blocked, selected_base_gate = self.selected_base_viability_gate_blocked()
         if selected_base_blocked:
             cycle["selected_base_viability_gate"] = selected_base_gate
@@ -3569,7 +3577,7 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
 
         selected_contract_after_plan = current_find_execution_contract(self.paths)
         if self.current_find_selected_plan_gate_blocking(selected_contract_after_plan):
-            step(self.run([sys.executable, str(SCRIPTS / "build_blocker_action_plan.py"), "--project", self.args.project, "--venue", self.args.venue], stage="blocker-action-plan-current-find-selected-plan-gate-after-plan", required=False, timeout=180))
+            step(self.run(module_cmd('planning', 'blocker_action', '--project', self.args.project, '--venue', self.args.venue), stage="blocker-action-plan-current-find-selected-plan-gate-after-plan", required=False, timeout=180))
             return self.finish_current_find_selected_plan_gate_block(cycle, pdf_before, selected_contract_after_plan)
 
         reference_blocked, reference_reasons, reference_gate = self.reference_reproduction_gate_blocked()
@@ -3598,7 +3606,7 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
                 self.state["continuation_required"] = True
                 self.state["continuation_reason"] = "run bounded selected-base evidence probes; do not run any legacy/control route as the main route"
                 self.save()
-                step(self.run([sys.executable, str(SCRIPTS / "run_safe_unblock.py"), "--project", self.args.project, "--venue", self.args.venue], stage="selected-base-safe-unblock", required=False, timeout=1200))
+                step(self.run(module_cmd('environment', 'safe_unblock', '--project', self.args.project, '--venue', self.args.venue), stage="selected-base-safe-unblock", required=False, timeout=1200))
                 fresh_after_probe = read_json(self.paths.state / "fresh_base_implementation_plan.json", {})
                 if isinstance(fresh_after_probe, dict) and fresh_after_probe.get("status") != "implementation_ready_for_reference_probe":
                     block_category = fresh_base_block_category(fresh_after_probe)
@@ -3625,8 +3633,8 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
                         "data_acquisition": fresh_after_probe.get("fresh_base_data_acquisition", {}),
                     }
                 self.save()
-                step(self.run([sys.executable, str(SCRIPTS / "audit_reference_reproduction.py"), "--project", self.args.project, "--venue", self.args.venue], stage="reference-reproduction-gate-after-fresh-base-unblock", required=False, timeout=180))
-                step(self.run([sys.executable, str(SCRIPTS / "build_blocker_action_plan.py"), "--project", self.args.project, "--venue", self.args.venue], stage="blocker-action-plan-after-fresh-base-unblock", required=False, timeout=180))
+                step(self.run(module_cmd('experimenting', 'reference_reproduction', '--project', self.args.project, '--venue', self.args.venue), stage="reference-reproduction-gate-after-fresh-base-unblock", required=False, timeout=180))
+                step(self.run(module_cmd('planning', 'blocker_action', '--project', self.args.project, '--venue', self.args.venue), stage="blocker-action-plan-after-fresh-base-unblock", required=False, timeout=180))
                 reference_repair_skipped = True
             elif self.reference_base_switch_exhausted(reference_gate):
                 self.state["current_goal"] = "reference reproduction blocked and base-switch exhausted; paper/claim promotion remains blocked"
@@ -3695,11 +3703,11 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
                 return cycle
             if not reference_repair_skipped:
                 self.postprocess_and_refresh_experiment_gates(step, suffix="-after-reference-wait")
-                step(self.run([sys.executable, str(SCRIPTS / "audit_reference_reproduction.py"), "--project", self.args.project, "--venue", self.args.venue], stage="reference-reproduction-gate-after-repair"))
-                step(self.run([sys.executable, str(SCRIPTS / "audit_paper_evidence.py"), "--project", self.args.project, "--venue", self.args.venue], stage="paper-evidence-audit-reference-gate"))
-                step(self.run([sys.executable, str(SCRIPTS / "audit_submission_readiness.py"), "--project", self.args.project, "--venue", self.args.venue], stage="submission-readiness-reference-gate"))
+                step(self.run(module_cmd('experimenting', 'reference_reproduction', '--project', self.args.project, '--venue', self.args.venue), stage="reference-reproduction-gate-after-repair"))
+                step(self.run(module_cmd('writing', 'audit_evidence', '--project', self.args.project, '--venue', self.args.venue), stage="paper-evidence-audit-reference-gate"))
+                step(self.run(module_cmd('writing', 'submission_readiness', '--project', self.args.project, '--venue', self.args.venue), stage="submission-readiness-reference-gate"))
                 step(self.run([sys.executable, str(SCRIPTS / "build_research_trajectory_system.py"), "--project", self.args.project, "--venue", self.args.venue], stage="trajectory-reference-gate-refresh"))
-                step(self.run([sys.executable, str(SCRIPTS / "build_blocker_action_plan.py"), "--project", self.args.project, "--venue", self.args.venue], stage="blocker-action-plan-reference-gate"))
+                step(self.run(module_cmd('planning', 'blocker_action', '--project', self.args.project, '--venue', self.args.venue), stage="blocker-action-plan-reference-gate"))
             reference_blocked, reference_reasons, reference_gate = self.reference_reproduction_gate_blocked()
             if reference_blocked:
                 pdf_after = self.latest_pdf_fingerprint()
@@ -4156,13 +4164,11 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
             ("trajectory-evidence-refresh", "build_research_trajectory_system.py"),
             ("blocker-action-plan-precheck", "build_blocker_action_plan.py"),
         ]:
-            cmd = [sys.executable, str(SCRIPTS / script), "--project", self.args.project]
-            if script != "build_research_trajectory_system.py" or self.args.venue:
-                cmd.extend(["--venue", self.args.venue])
+            cmd = orchestration_cmd(script, self.args.project, self.args.venue)
             step(self.run(cmd, stage=stage_name))
 
         if self.base_switch_gate_authorized() and not self.base_switch_execution_authorized():
-            step(self.run([sys.executable, str(SCRIPTS / "execute_authorized_base_switch.py"), "--project", self.args.project, "--venue", self.args.venue], stage="base-switch-execution-precheck", required=False, timeout=180))
+            step(self.run(module_cmd('environment', 'execute_base_switch', '--project', self.args.project, '--venue', self.args.venue), stage="base-switch-execution-precheck", required=False, timeout=180))
         selected_base_blocked, selected_base_gate = self.selected_base_viability_gate_blocked()
         if selected_base_blocked:
             cycle["selected_base_viability_gate"] = selected_base_gate
@@ -4236,14 +4242,14 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
             self.save()
             return cycle
 
-        paper = [
-            sys.executable,
-            str(SCRIPTS / "run_paper_pipeline.py"),
-            "--project",
+        paper = module_cmd(
+            'writing',
+            'run',
+            '--project',
             self.args.project,
-            "--venue",
+            '--venue',
             self.args.venue,
-        ]
+        )
         if self.args.title:
             paper.extend(["--title", self.args.title])
         previous_gate = self.state.get("latest_gate", {}) if isinstance(self.state.get("latest_gate", {}), dict) else {}
@@ -4268,36 +4274,36 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
         self.save()
         step(self.run(paper, stage="paper-pipeline", timeout=self.args.paper_timeout_sec))
 
-        figure_loop = [
-            sys.executable,
-            str(SCRIPTS / "repair_paper_figures_loop.py"),
-            "--project",
+        figure_loop = module_cmd(
+            'writing',
+            'repair_figures',
+            '--project',
             self.args.project,
-            "--venue",
+            '--venue',
             self.args.venue,
-            "--title",
+            '--title',
             self.args.title or "",
-            "--max-rounds",
+            '--max-rounds',
             str(self.args.figure_repair_rounds),
-            "--timeout-sec",
+            '--timeout-sec',
             str(self.args.claude_timeout_sec),
-        ]
+        )
         step(self.run(figure_loop, stage="paper-figure-repair"))
 
-        preview_loop = [
-            sys.executable,
-            str(SCRIPTS / "repair_paper_preview_loop.py"),
-            "--project",
+        preview_loop = module_cmd(
+            'writing',
+            'repair_preview',
+            '--project',
             self.args.project,
-            "--venue",
+            '--venue',
             self.args.venue,
-            "--title",
+            '--title',
             self.args.title or "",
             "--max-rounds",
             str(self.args.paper_repair_rounds),
             "--timeout-sec",
             str(self.args.claude_timeout_sec),
-        ]
+        )
         # Preview repair always re-checks the current venue contract. The
         # loop prompt decides from audits whether the real blocker is figure
         # footprint, references, template compliance, or prose length.
@@ -4316,11 +4322,7 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
             ("trajectory-final-refresh", "build_research_trajectory_system.py"),
             ("trajectory-e2e-verify", "verify_research_trajectory_end_to_end.py"),
         ]:
-            cmd = [sys.executable, str(SCRIPTS / script), "--project", self.args.project]
-            if script not in {"verify_research_trajectory_end_to_end.py"}:
-                cmd.extend(["--venue", self.args.venue])
-            if script == "build_conference_preview_paper.py":
-                cmd.extend(["--title", self.args.title or ""])
+            cmd = orchestration_cmd(script, self.args.project, self.args.venue, self.args.title or "")
             step(self.run(cmd, stage=stage_name))
 
         pdf_after = self.latest_pdf_fingerprint()

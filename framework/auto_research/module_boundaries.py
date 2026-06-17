@@ -15,7 +15,7 @@ class ModuleBoundary:
     external_inputs: tuple[str, ...]
     artifacts_in: tuple[str, ...]
     artifacts_out: tuple[str, ...]
-    legacy_roots: tuple[str, ...]
+    private_backend_roots: tuple[str, ...]
 
 
 STAGE_MODULES: tuple[ModuleBoundary, ...] = (
@@ -28,7 +28,7 @@ STAGE_MODULES: tuple[ModuleBoundary, ...] = (
         external_inputs=("llm_api", "research_topic", "research_interest", "researcher_profile", "source_selection"),
         artifacts_in=("config/profile JSON", "venue/source selection JSON"),
         artifacts_out=("find_results.json", "article.md", "source_status.md", "category/title/detail/scoring reports"),
-        legacy_roots=("modules/finding/scripts/find_pipeline.py", "modules/finding/scripts/discover_*.py", "modules/finding/scripts/build_literature_tool_packet.py"),
+        private_backend_roots=("modules/finding/scripts/find_pipeline.py", "modules/finding/scripts/discover_*.py", "modules/finding/scripts/build_literature_tool_packet.py"),
     ),
     ModuleBoundary(
         key="reading",
@@ -39,7 +39,7 @@ STAGE_MODULES: tuple[ModuleBoundary, ...] = (
         external_inputs=("llm_api_or_claude", "finding_artifact_packet", "artifact_root"),
         artifacts_in=("find_results.json", "article.md", "full_text_reading/manual_full_text_sources.json"),
         artifacts_out=("read_results.json", "read.md", "full_text_reading/full_text_packet.json", "current_find_full_text_evidence_repair.json"),
-        legacy_roots=("modules/reading/scripts/read_pipeline.py", "modules/reading/scripts/repair_current_find_full_text_evidence.py", "modules/reading/scripts/ensure_current_find_research_plan.py"),
+        private_backend_roots=("modules/reading/scripts/read_pipeline.py", "modules/reading/scripts/repair_current_find_full_text_evidence.py", "modules/reading/scripts/ensure_current_find_research_plan.py"),
     ),
     ModuleBoundary(
         key="ideation",
@@ -50,7 +50,7 @@ STAGE_MODULES: tuple[ModuleBoundary, ...] = (
         external_inputs=("llm_api_or_claude", "reading_artifacts", "research_profile"),
         artifacts_in=("find_results.json", "read_results.json", "read.md"),
         artifacts_out=("ideas.json", "idea.md", "hypothesis_arena.md", "idea candidate audits"),
-        legacy_roots=("modules/ideation/scripts/idea_pipeline.py", "modules/ideation/scripts/assess_idea_candidates.py", "modules/ideation/scripts/build_hypothesis_arena.py"),
+        private_backend_roots=("modules/ideation/scripts/idea_pipeline.py", "modules/ideation/scripts/assess_idea_candidates.py", "modules/ideation/scripts/build_hypothesis_arena.py"),
     ),
     ModuleBoundary(
         key="planning",
@@ -61,7 +61,7 @@ STAGE_MODULES: tuple[ModuleBoundary, ...] = (
         external_inputs=("llm_api_or_claude", "idea_artifacts", "project_constraints"),
         artifacts_in=("ideas.json", "idea.md", "user selection/approval"),
         artifacts_out=("plans.json", "plan.md", "experiment_plan.json", "taste_plan_bridge.json", "blocker action plans"),
-        legacy_roots=("modules/planning/scripts/plan_pipeline.py", "modules/planning/scripts/plan_experiments.py", "modules/planning/scripts/build_workflow_blueprint.py"),
+        private_backend_roots=("modules/planning/scripts/plan_pipeline.py", "modules/planning/scripts/plan_experiments.py", "modules/planning/scripts/build_workflow_blueprint.py"),
     ),
     ModuleBoundary(
         key="environment",
@@ -72,7 +72,7 @@ STAGE_MODULES: tuple[ModuleBoundary, ...] = (
         external_inputs=("selected_plan_contract", "candidate_repo_data_artifacts", "runtime_config"),
         artifacts_in=("plans.json", "literature_tool_packet.json", "repo/data candidates"),
         artifacts_out=("evidence_ready_repo_selection.json", "repo_env_bootstrap.json", "dataset registry", "reference/data gates"),
-        legacy_roots=("modules/environment/scripts/run_environment_stage.py", "modules/environment/scripts/select_evidence_ready_repo.py", "modules/environment/scripts/bootstrap_repo_env.py"),
+        private_backend_roots=("modules/environment/scripts/run_environment_stage.py", "modules/environment/scripts/select_evidence_ready_repo.py", "modules/environment/scripts/bootstrap_repo_env.py"),
     ),
     ModuleBoundary(
         key="experimenting",
@@ -83,7 +83,7 @@ STAGE_MODULES: tuple[ModuleBoundary, ...] = (
         external_inputs=("selected_plan_contract", "locked_environment", "repo_path", "experiment_python"),
         artifacts_in=("evidence_ready_repo_selection.json", "repo_env_bootstrap.json", "experiment_plan.json"),
         artifacts_out=("experiment_registry.json", "experiment artifacts/logs", "runtime integrity audit", "reference/scientific progress gates"),
-        legacy_roots=("modules/experimenting/scripts/run_coding_agent.py", "modules/experimenting/scripts/launch_experiment_run.py", "modules/experimenting/scripts/experiment_contracts.py"),
+        private_backend_roots=("modules/experimenting/scripts/run_coding_agent.py", "modules/experimenting/scripts/launch_experiment_run.py", "modules/experimenting/scripts/experiment_contracts.py"),
     ),
     ModuleBoundary(
         key="writing",
@@ -94,7 +94,7 @@ STAGE_MODULES: tuple[ModuleBoundary, ...] = (
         external_inputs=("venue", "selected_plan_contract", "experiment_evidence", "paper_config"),
         artifacts_in=("experiment_registry.json", "claim ledger", "venue template/requirements"),
         artifacts_out=("paper draft/revision", "compiled PDF", "paper_pipeline.json", "submission_readiness.json"),
-        legacy_roots=("modules/writing", "modules/writing/scripts/run_paper_pipeline.py", "modules/writing/scripts/paper_common.py"),
+        private_backend_roots=("modules/writing", "modules/writing/scripts/run_paper_pipeline.py", "modules/writing/scripts/paper_common.py"),
     ),
 )
 
@@ -317,7 +317,7 @@ def module_contracts_payload() -> dict[str, Any]:
             "external_inputs": list(module.external_inputs),
             "artifacts_in": list(module.artifacts_in),
             "artifacts_out": list(module.artifacts_out),
-            "legacy_roots": list(module.legacy_roots),
+            "private_backend_roots": list(module.private_backend_roots),
         }
         for module in STAGE_MODULES
     }

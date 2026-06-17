@@ -1792,12 +1792,12 @@ def main() -> None:
         "submission_readiness_run": submission_readiness_run,
         "third_party_stack_run": third_party_stack_run,
         "source_methods": {
-            "MethodReferenceAudit": ["modules/writing/scripts/sync_third_party_research_stack.py", "state/third_party_research_stack.json", "reports/third_party_research_stack.md"],
+            "MethodReferenceAudit": ["framework/scripts/run_module.py writing --action sync_stack", "state/third_party_research_stack.json", "reports/third_party_research_stack.md"],
             "ResearchDirectionManagement": ["state/research_landscape.json", "state/novelty_map.json", "state/unexplored_niche_graph.json"],
-            "EvidenceAssurance": ["state/research_assurance_layer.json", "state/research_evidence_manifest.json", "modules/writing/scripts/audit_paper_evidence.py"],
+            "EvidenceAssurance": ["state/research_assurance_layer.json", "state/research_evidence_manifest.json", "framework/scripts/run_module.py writing --action audit_evidence"],
             "TrajectoryOptimization": ["state/trajectory_optimization_plan.json", "state/evolutionary_memory_index.json", "framework/scripts/run_research_trajectory_supervisor.py"],
-            "PaperProduction": ["state/paper_orchestra_state.json", "modules/writing/scripts/run_paper_pipeline.py", "modules/writing/scripts/audit_submission_readiness.py", "modules/writing/scripts/audit_paper_normality.py", "modules/writing/scripts/audit_paper_evidence.py"],
-            "BlockerActionRouting": ["state/blocker_action_plan.json", "reports/blocker_action_plan.md", "modules/planning/scripts/build_blocker_action_plan.py"],
+            "PaperProduction": ["state/paper_orchestra_state.json", "framework/scripts/run_module.py writing --action run", "framework/scripts/run_module.py writing --action submission_readiness", "framework/scripts/run_module.py writing --action audit_normality", "framework/scripts/run_module.py writing --action audit_evidence"],
+            "BlockerActionRouting": ["state/blocker_action_plan.json", "reports/blocker_action_plan.md", "framework/scripts/run_module.py planning --action blocker_action"],
             "LocalClaudeSkills": [row.get("path", "") for row in skills],
         },
     }

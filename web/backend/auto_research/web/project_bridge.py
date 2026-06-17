@@ -5038,7 +5038,7 @@ def _human_supervision_summary(root: Path, compact: dict[str, Any], raw_summary:
     legacy_path = str(active_repo.get("repo_path") or active_repo.get("local_path") or "") if isinstance(active_repo, dict) else ""
     legacy_name = str(active_repo.get("name") or active_repo.get("repo") or "legacy/control") if isinstance(active_repo, dict) else "legacy/control"
     base_display = title or repo.get("name") or selected_current.get("name") or selected_current.get("repo") or "待环境阶段验证的候选基底"
-    reference_smoke_script = "modules/environment/scripts/probe_selected_base_reference.py --mode smoke"
+    reference_smoke_script = "framework/scripts/run_module.py environment --action probe_selected_base_reference --mode smoke"
     reference_wrapper_label = f"{base_display} full reference reproduction"
     selected_base_viability_blocked = bool(isinstance(selected_base_viability, dict) and selected_base_viability.get("status") == "blocked" and selected_base_viability.get("decision") in {"base_switch_gate_required", "continue_experiment_evidence_repair"})
     selected_base_viability_public = _selected_base_viability_public_blocker(selected_base_viability, base_display, base_switch_gate)

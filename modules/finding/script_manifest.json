@@ -23,7 +23,7 @@
       "source_status.md",
       "category/title/detail/scoring reports"
     ],
-    "legacy_roots": [
+    "private_backend_roots": [
       "modules/finding/scripts/find_pipeline.py",
       "modules/finding/scripts/discover_*.py",
       "modules/finding/scripts/build_literature_tool_packet.py"

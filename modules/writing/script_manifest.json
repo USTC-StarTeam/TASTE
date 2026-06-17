@@ -23,7 +23,7 @@
       "paper_pipeline.json",
       "submission_readiness.json"
     ],
-    "legacy_roots": [
+    "private_backend_roots": [
       "modules/writing",
       "modules/writing/scripts/run_paper_pipeline.py",
       "modules/writing/scripts/paper_common.py"

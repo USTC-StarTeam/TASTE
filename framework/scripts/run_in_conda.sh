@@ -81,7 +81,7 @@ locate_conda_exe() {
 CONDA_EXE_PATH="$(locate_conda_exe || true)"
 if [[ -z "$CONDA_EXE_PATH" ]]; then
   echo "unable to locate a conda executable for project $PROJECT_NAME" >&2
-  echo "remediation: $MANAGEMENT_PYTHON_BIN $ROOT/modules/environment/scripts/bootstrap_repo_env.py --project $PROJECT_NAME --repo-path <repo-path> --prepare-only" >&2
+  echo "remediation: $MANAGEMENT_PYTHON_BIN $ROOT/framework/scripts/run_module.py environment --action bootstrap --project $PROJECT_NAME --repo-path <repo-path> --prepare-only" >&2
   exit 1
 fi
 
@@ -112,7 +112,7 @@ PY3
 )"
   if [[ "$ENV_EXISTS" != "yes" ]]; then
     echo "conda environment '$CONDA_ENV' does not exist for project $PROJECT_NAME" >&2
-    echo "remediation: $MANAGEMENT_PYTHON_BIN $ROOT/modules/environment/scripts/bootstrap_repo_env.py --project $PROJECT_NAME --repo-path <repo-path> --env-name $CONDA_ENV --prepare-only" >&2
+    echo "remediation: $MANAGEMENT_PYTHON_BIN $ROOT/framework/scripts/run_module.py environment --action bootstrap --project $PROJECT_NAME --repo-path <repo-path> --env-name $CONDA_ENV --prepare-only" >&2
     exit 1
   fi
 fi

@@ -23,7 +23,7 @@
       "taste_plan_bridge.json",
       "blocker action plans"
     ],
-    "legacy_roots": [
+    "private_backend_roots": [
       "modules/planning/scripts/plan_pipeline.py",
       "modules/planning/scripts/plan_experiments.py",
       "modules/planning/scripts/build_workflow_blueprint.py"

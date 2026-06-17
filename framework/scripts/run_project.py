@@ -38,6 +38,10 @@ def runtime_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+def module_cmd(stage: str, action: str, *args: str) -> list[str]:
+    return [sys.executable, 'framework/scripts/run_module.py', stage, '--action', action, *args]
+
+
 def run(cmd: list[str], cwd: Path, log_path: Path, timeout: int | None = None) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     chunks: list[str] = []
@@ -832,7 +836,7 @@ def run_coding_backend(args: argparse.Namespace, cfg: dict, paths, script_dir: P
     context_path = write_trial_context(paths, method, trial, artifact_dir, mode)
     request = build_coding_request(method, trial, mode, prior_summary)
     cmd = [
-        sys.executable, str(script_dir / 'run_coding_agent.py'),
+        *module_cmd('experimenting', 'coding_agent'),
         '--project', args.project,
         '--method', method.get('method', ''),
         '--repo-path', repo_path,
@@ -918,7 +922,7 @@ def execute_parallel_plan(args: argparse.Namespace, cfg: dict, paths, script_dir
                 print(skip_log, flush=True)
             else:
                 bootstrap_cmd = [
-                    sys.executable, str(script_dir / 'bootstrap_repo_env.py'), '--project', args.project,
+                    *module_cmd('environment', 'bootstrap'), '--project', args.project,
                     '--repo-path', repo_path, '--env-name', env_name, '--verify-only',
                 ]
                 if not args.real_bootstrap_env:
@@ -997,7 +1001,7 @@ def execute_parallel_plan(args: argparse.Namespace, cfg: dict, paths, script_dir
             notes = f"focus={trial.get('focus', '')}; command_source={trial.get('command_source', '')}; execution_mode={execution_mode}"
 
             log_cmd = [
-                sys.executable, str(script_dir / 'log_experiment.py'), '--project', args.project,
+                *module_cmd('experimenting', 'log'), '--project', args.project,
                 '--name', trial.get('experiment_id', method.get('method', 'experiment')),
                 '--experiment-id', trial.get('experiment_id', method.get('method', 'experiment')),
                 '--repo', method.get('repo_name', ''), '--repo-path', repo_path,
@@ -1027,7 +1031,7 @@ def execute_parallel_plan(args: argparse.Namespace, cfg: dict, paths, script_dir
             failure_data = {}
             if status != 'completed':
                 fail_cmd = [
-                    sys.executable, str(script_dir / 'analyze_experiment_failures.py'), '--project', args.project,
+                    *module_cmd('experimenting', 'analyze_failures'), '--project', args.project,
                     '--method', method.get('method', ''), '--experiment-id', trial.get('experiment_id', method.get('method', 'experiment')),
                     '--result-summary', result_summary,
                 ]
@@ -1079,7 +1083,7 @@ def execute_parallel_plan(args: argparse.Namespace, cfg: dict, paths, script_dir
                         result_summary = f"{result_summary}; repair=validated; backend={backend_used}; rerun_after_repair={status}"
                         notes = f"focus={trial.get('focus', '')}; command_source={trial.get('command_source', '')}; execution_mode={retry_execution_mode}; rerun_after_repair=true"
                         retry_log_cmd = [
-                            sys.executable, str(script_dir / 'log_experiment.py'), '--project', args.project,
+                            *module_cmd('experimenting', 'log'), '--project', args.project,
                             '--name', trial.get('experiment_id', method.get('method', 'experiment')),
                             '--experiment-id', trial.get('experiment_id', method.get('method', 'experiment')),
                             '--repo', method.get('repo_name', ''), '--repo-path', repo_path,
@@ -1141,14 +1145,14 @@ def main() -> int:
 
     discovery_mode = []
     if not args.skip_discovery:
-        run([sys.executable, str(script_dir / 'plan_literature_review.py'), '--project', args.project], paths.root, paths.logs / '01d_plan_literature_review.log')
+        run(module_cmd('finding', 'plan_literature', '--project', args.project), paths.root, paths.logs / '01d_plan_literature_review.log')
         cfg = load_project_config(args.project)
         source_selection = canonical_source_selection()
         queries = planned_discovery_queries(cfg, paths, topic, max_queries=int(cfg.get('discovery', {}).get('max_planned_queries', 6) or 6), project=args.project)
         arxiv_enabled = bool(source_selection.get('include_arxiv')) and not args.skip_arxiv
         if arxiv_enabled:
             for index, query in enumerate(queries, start=1):
-                code = run([sys.executable, str(script_dir / 'discover_arxiv.py'), '--project', args.project, '--query', query, '--max-results', str(max_results), '--retries', str(discover_retries)], paths.root, paths.logs / f'02_discover_arxiv_{index}.log', timeout=int(os.environ.get('DISCOVER_ARXIV_TIMEOUT_SEC', '45')))
+                code = run(module_cmd('finding', 'discover_arxiv', '--project', args.project, '--query', query, '--max-results', str(max_results), '--retries', str(discover_retries)), paths.root, paths.logs / f'02_discover_arxiv_{index}.log', timeout=int(os.environ.get('DISCOVER_ARXIV_TIMEOUT_SEC', '45')))
                 if code == 0 and 'arxiv' not in discovery_mode:
                     discovery_mode.append('arxiv')
                 elif code != 0:
@@ -1158,7 +1162,7 @@ def main() -> int:
         if ss_enabled:
             ss_budget = int(cfg.get('discovery', {}).get('semantic_scholar', {}).get('query_budget', 3) or 3)
             for index, query in enumerate(queries[:ss_budget], start=1):
-                ss_code = run([sys.executable, str(script_dir / 'discover_semantic_scholar.py'), '--project', args.project, '--query', query], paths.root, paths.logs / f'03_discover_semantic_schol{index}.log')
+                ss_code = run(module_cmd('finding', 'discover_semantic_scholar', '--project', args.project, '--query', query), paths.root, paths.logs / f'03_discover_semantic_schol{index}.log')
                 if ss_code == 0 and 'semantic_scholar' not in discovery_mode:
                     discovery_mode.append('semantic_scholar')
 
@@ -1166,11 +1170,11 @@ def main() -> int:
         if github_enabled:
             github_queries = [query for query in queries if any(token in query.lower() for token in ['code', 'github', 'repository', 'repo', 'implementation', 'open-source', 'opensource'])][:3] or queries[:2]
             for index, query in enumerate(github_queries, start=1):
-                gh_code = run([sys.executable, str(script_dir / 'discover_github_repos.py'), '--project', args.project, '--query', query], paths.root, paths.logs / f'03b_discover_github_{index}.log', timeout=int(os.environ.get('DISCOVER_GITHUB_TIMEOUT_SEC', '45')))
+                gh_code = run(module_cmd('finding', 'discover_github', '--project', args.project, '--query', query), paths.root, paths.logs / f'03b_discover_github_{index}.log', timeout=int(os.environ.get('DISCOVER_GITHUB_TIMEOUT_SEC', '45')))
                 if gh_code == 0 and 'github' not in discovery_mode:
                     discovery_mode.append('github')
 
-        run([sys.executable, str(script_dir / 'ingest_discovery.py'), '--project', args.project, '--limit', str(cfg.get('loop', {}).get('ingest_limit', 5))], paths.root, paths.logs / '04_ingest.log')
+        run(module_cmd('finding', 'ingest_discovery', '--project', args.project, '--limit', str(cfg.get('loop', {}).get('ingest_limit', 5))), paths.root, paths.logs / '04_ingest.log')
     else:
         discovery_mode.append('skipped')
 
@@ -1178,7 +1182,7 @@ def main() -> int:
         if not args.skip_llm:
             if args.skip_discovery:
                 os.environ.setdefault('USE_EXISTING_LITERATURE_PACKET', '1')
-                skip_msg = 'finding frontend skipped because --skip-discovery is active; reusing existing canonical Find/literature packet. Controlled targeted literature repair remains available through modules/finding/scripts/run_literature_tool.py.'
+                skip_msg = 'finding frontend skipped because --skip-discovery is active; reusing existing canonical Find/literature packet. Controlled targeted literature repair remains available through `framework/scripts/run_module.py finding --action literature_tool`.'
                 print(skip_msg, flush=True)
                 (paths.logs / '05a_finding_frontend.log').write_text(skip_msg + '\n', encoding='utf-8')
             else:
@@ -1189,16 +1193,16 @@ def main() -> int:
                     taste_cmd.append('--fast-mode')
                 run(taste_cmd, paths.root, paths.logs / '05a_finding_frontend.log', timeout=int(os.environ.get('TIMEOUT_SEC', '3600')) + 120)
             run([sys.executable, str(script_dir / 'sync_outputs.py'), '--project', args.project, '--allow-empty'], paths.root, paths.logs / '05a_taste_sync.log', timeout=120)
-            run([sys.executable, str(script_dir / 'build_literature_tool_packet.py'), '--project', args.project] + (['--venue', args.venue] if args.venue else []), paths.root, paths.logs / '05ab_literature_tool_packet.log', timeout=180)
+            run(module_cmd('finding', 'tool_packet', '--project', args.project, *(['--venue', args.venue] if args.venue else [])), paths.root, paths.logs / '05ab_literature_tool_packet.log', timeout=180)
             (paths.logs / '05aa_current_find_read_idea_plan_route.log').write_text('downstream planning is handled by the current-Find Claude Code Read/Idea/Plan route; Find remains the only default LLM-scored module.\n', encoding='utf-8')
-        run([sys.executable, str(script_dir / 'prepare_initialization.py'), '--project', args.project], paths.root, paths.logs / '05_prepare_initialization.log')
-        run([sys.executable, str(script_dir / 'build_hypothesis_arena.py'), '--project', args.project], paths.root, paths.logs / '05c_hypothesis_arena.log')
-        run([sys.executable, str(script_dir / 'assess_idea_candidates.py'), '--project', args.project], paths.root, paths.logs / '05ca_idea_candidates.log')
-        run([sys.executable, str(script_dir / 'build_workflow_blueprint.py'), '--project', args.project], paths.root, paths.logs / '05d_workflow_blueprint.log')
+        run(module_cmd('ideation', 'initialization', '--project', args.project), paths.root, paths.logs / '05_prepare_initialization.log')
+        run(module_cmd('ideation', 'arena', '--project', args.project), paths.root, paths.logs / '05c_hypothesis_arena.log')
+        run(module_cmd('ideation', 'assess', '--project', args.project), paths.root, paths.logs / '05ca_idea_candidates.log')
+        run(module_cmd('planning', 'workflow', '--project', args.project), paths.root, paths.logs / '05d_workflow_blueprint.log')
 
     if args.parallel_method and args.dataset and args.benchmark and args.metric:
         plan_cmd = [
-            sys.executable, str(script_dir / 'plan_experiments.py'), '--project', args.project,
+            *module_cmd('planning', 'experiments', '--project', args.project),
             '--dataset', args.dataset, '--benchmark', args.benchmark, '--metric', args.metric,
             '--methods', *args.parallel_method,
         ]
@@ -1211,11 +1215,11 @@ def main() -> int:
         run(plan_cmd, paths.root, paths.logs / '05b_parallel_plan.log')
 
     run([sys.executable, str(script_dir / 'bootstrap_wiki.py'), '--project', args.project], paths.root, paths.logs / '06_bootstrap_wiki.log')
-    run([sys.executable, str(script_dir / 'assess_paper_quality.py'), '--project', args.project], paths.root, paths.logs / '07_assess_paper_quality.log')
-    run([sys.executable, str(script_dir / 'build_literature_tool_packet.py'), '--project', args.project] + (['--venue', args.venue] if args.venue else []), paths.root, paths.logs / '07aa_literature_tool_packet_refresh.log', timeout=180)
-    run([sys.executable, str(script_dir / 'assess_repo_candidates.py'), '--project', args.project], paths.root, paths.logs / '07a_assess_repo_candidates.log')
-    run([sys.executable, str(script_dir / 'assess_idea_candidates.py'), '--project', args.project], paths.root, paths.logs / '07b_assess_idea_candidates.log')
-    run([sys.executable, str(script_dir / 'audit_reference_reproduction.py'), '--project', args.project] + (['--venue', args.venue] if args.venue else []), paths.root, paths.logs / '07c_reference_reproduction_gate.log')
+    run(module_cmd('finding', 'paper_quality', '--project', args.project), paths.root, paths.logs / '07_assess_paper_quality.log')
+    run(module_cmd('finding', 'tool_packet', '--project', args.project, *(['--venue', args.venue] if args.venue else [])), paths.root, paths.logs / '07aa_literature_tool_packet_refresh.log', timeout=180)
+    run(module_cmd('environment', 'assess_repo', '--project', args.project), paths.root, paths.logs / '07a_assess_repo_candidates.log')
+    run(module_cmd('ideation', 'assess', '--project', args.project), paths.root, paths.logs / '07b_assess_idea_candidates.log')
+    run(module_cmd('experimenting', 'reference_reproduction', '--project', args.project, *(['--venue', args.venue] if args.venue else [])), paths.root, paths.logs / '07c_reference_reproduction_gate.log')
     run([sys.executable, str(script_dir / 'refresh_index_and_log.py'), '--project', args.project, '--log-entry', f'iteration topic={topic} discovery={discovery_mode or ["manual_only"]}'], paths.root, paths.logs / '08_refresh_index.log')
     run([sys.executable, str(script_dir / 'compile_prompt.py'), '--project', args.project], paths.root, paths.logs / '09_compile_prompt.log')
 
@@ -1224,21 +1228,21 @@ def main() -> int:
 
     if args.execute_plan:
         execute_parallel_plan(args, cfg, paths, script_dir)
-        run([sys.executable, str(script_dir / 'propose_next_actions.py'), '--project', args.project], paths.root, paths.logs / '12b_next_actions.log')
-        run([sys.executable, str(script_dir / 'build_method_frontier.py'), '--project', args.project], paths.root, paths.logs / '12c_method_frontier.log')
-        run([sys.executable, str(script_dir / 'build_aris_review_board.py'), '--project', args.project], paths.root, paths.logs / '12e_aris_review_board.log')
-        run([sys.executable, str(script_dir / 'build_hypothesis_arena.py'), '--project', args.project], paths.root, paths.logs / '12d_refresh_hypothesis_arena.log')
-        run([sys.executable, str(script_dir / 'audit_reference_reproduction.py'), '--project', args.project] + (['--venue', args.venue] if args.venue else []), paths.root, paths.logs / '12f_reference_reproduction_gate.log')
+        run(module_cmd('planning', 'next_actions', '--project', args.project), paths.root, paths.logs / '12b_next_actions.log')
+        run(module_cmd('planning', 'method_frontier', '--project', args.project), paths.root, paths.logs / '12c_method_frontier.log')
+        run(module_cmd('planning', 'review_board', '--project', args.project), paths.root, paths.logs / '12e_aris_review_board.log')
+        run(module_cmd('ideation', 'arena', '--project', args.project), paths.root, paths.logs / '12d_refresh_hypothesis_arena.log')
+        run(module_cmd('experimenting', 'reference_reproduction', '--project', args.project, *(['--venue', args.venue] if args.venue else [])), paths.root, paths.logs / '12f_reference_reproduction_gate.log')
 
     run([sys.executable, str(script_dir / 'lint_wiki.py'), '--project', args.project], paths.root, paths.logs / '11_lint.log')
     run([sys.executable, str(script_dir / 'research_healthcheck.py'), '--project', args.project], paths.root, paths.logs / '12_healthcheck.log')
     run([sys.executable, str(script_dir / 'audit_workflow_connectivity.py'), '--project', args.project], paths.root, paths.logs / '12c_workflow_connectivity.log')
-    run([sys.executable, str(script_dir / 'reflect_iteration.py'), '--project', args.project], paths.root, paths.logs / '13_reflect_iteration.log')
-    run([sys.executable, str(script_dir / 'audit_experiment_iteration.py'), '--project', args.project], paths.root, paths.logs / '13a_experiment_iteration_audit.log')
+    run(module_cmd('planning', 'reflect', '--project', args.project), paths.root, paths.logs / '13_reflect_iteration.log')
+    run(module_cmd('experimenting', 'audit_iteration', '--project', args.project), paths.root, paths.logs / '13a_experiment_iteration_audit.log')
     run([sys.executable, str(script_dir / 'update_evolution_memory.py'), '--project', args.project] + (['--venue', args.venue] if args.venue else []), paths.root, paths.logs / '13b_evolution_memory.log')
     run([sys.executable, str(script_dir / 'build_research_trajectory_system.py'), '--project', args.project] + (['--venue', args.venue] if args.venue else []), paths.root, paths.logs / '13d_research_trajectory_system.log')
-    run([sys.executable, str(script_dir / 'audit_paper_evidence.py'), '--project', args.project] + (['--venue', args.venue] if args.venue else []), paths.root, paths.logs / '13e_paper_evidence_gate.log')
-    run([sys.executable, str(script_dir / 'build_blocker_action_plan.py'), '--project', args.project] + (['--venue', args.venue] if args.venue else []), paths.root, paths.logs / '13f_blocker_action_plan.log')
+    run(module_cmd('writing', 'audit_evidence', '--project', args.project, *(['--venue', args.venue] if args.venue else [])), paths.root, paths.logs / '13e_paper_evidence_gate.log')
+    run(module_cmd('planning', 'blocker_action', '--project', args.project, *(['--venue', args.venue] if args.venue else [])), paths.root, paths.logs / '13f_blocker_action_plan.log')
     (paths.logs / '13c_project_agent_reflection_route.log').write_text('downstream reflection is handled by Claude Code artifacts and deterministic audits.\n', encoding='utf-8')
     run([sys.executable, str(script_dir / 'compile_prompt.py'), '--project', args.project], paths.root, paths.logs / '14_recompile_prompt.log')
     export_code = run([sys.executable, str(script_dir / 'export_obsidian.py'), '--project', args.project], paths.root, paths.logs / '15_export_obsidian.log')

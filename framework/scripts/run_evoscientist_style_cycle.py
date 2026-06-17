@@ -38,6 +38,10 @@ def save_json(path: Path, payload) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 
 
+def module_cmd(stage: str, action: str, *args: str) -> list[str]:
+    return [sys.executable, 'framework/scripts/run_module.py', stage, '--action', action, *args]
+
+
 def run(cmd: list[str], timeout: int, env: dict[str, str], cwd: Path = ROOT) -> dict:
     started = dt.datetime.now(dt.timezone.utc)
     try:
@@ -227,7 +231,7 @@ def main() -> None:
         ([sys.executable, 'framework/scripts/check_llm_ready.py', '--project', args.project] + (['--live'] if args.use_llm else []), min(90, args.command_timeout_sec)),
     ], env)
     append_phase(record, paths, 'plan', 'planner', [
-        ([sys.executable, 'modules/planning/scripts/propose_next_actions.py', '--project', args.project], args.command_timeout_sec),
+        (module_cmd('planning', 'next_actions', '--project', args.project), args.command_timeout_sec),
         ([sys.executable, 'framework/scripts/build_stagnation_report.py', '--project', args.project, '--venue', args.venue], args.command_timeout_sec),
     ], env)
     research_commands: list[tuple[list[str], int]] = []
@@ -264,12 +268,12 @@ def main() -> None:
         ], env)
 
     append_phase(record, paths, 'evaluate', 'analyst', [
-        ([sys.executable, 'modules/writing/scripts/audit_paper_evidence.py', '--project', args.project, '--venue', args.venue], args.command_timeout_sec),
-        ([sys.executable, 'modules/planning/scripts/build_blocker_resolution_packet.py', '--project', args.project, '--venue', args.venue], args.command_timeout_sec),
+        (module_cmd('writing', 'audit_evidence', '--project', args.project, '--venue', args.venue), args.command_timeout_sec),
+        (module_cmd('planning', 'blocker_resolution', '--project', args.project, '--venue', args.venue), args.command_timeout_sec),
         ([sys.executable, 'framework/scripts/build_stagnation_report.py', '--project', args.project, '--venue', args.venue], args.command_timeout_sec),
     ], env)
     append_phase(record, paths, 'write', 'writer', [
-        ([sys.executable, 'modules/writing/scripts/run_paper_pipeline.py', '--project', args.project, '--venue', args.venue, '--title', str(cfg.get('title') or cfg.get('topic') or args.project)], min(180, args.cycle_timeout_sec)),
+        (module_cmd('writing', 'run', '--project', args.project, '--venue', args.venue, '--title', str(cfg.get('title') or cfg.get('topic') or args.project)), min(180, args.cycle_timeout_sec)),
     ], env)
     append_phase(record, paths, 'verify', 'debugger_analyst', [
         ([sys.executable, 'framework/scripts/audit_pipeline_runnability.py', '--project', args.project, '--venue', args.venue], min(120, args.cycle_timeout_sec)),

@@ -16,7 +16,7 @@ RESPONSIBILITY = 'Resolve venue requirements, draft/revise/compile the manuscrip
 REQUIRED_EXTERNAL_INPUTS = ('venue', 'selected_plan_contract', 'experiment_evidence', 'paper_config')
 ARTIFACTS_IN = ('experiment_registry.json', 'claim ledger', 'venue template/requirements')
 ARTIFACTS_OUT = ('paper draft/revision', 'compiled PDF', 'paper_pipeline.json', 'submission_readiness.json')
-LEGACY_ROOTS = ('modules/writing', 'modules/writing/scripts/run_paper_pipeline.py', 'modules/writing/scripts/paper_common.py')
+PRIVATE_BACKEND_ROOTS = ('modules/writing', 'modules/writing/scripts/run_paper_pipeline.py', 'modules/writing/scripts/paper_common.py')
 
 
 @dataclass(slots=True)
@@ -58,7 +58,7 @@ def contract() -> dict[str, Any]:
         "required_external_inputs": list(REQUIRED_EXTERNAL_INPUTS),
         "artifacts_in": list(ARTIFACTS_IN),
         "artifacts_out": list(ARTIFACTS_OUT),
-        "legacy_roots": list(LEGACY_ROOTS),
+        "private_backend_roots": list(PRIVATE_BACKEND_ROOTS),
     }
 
 
@@ -135,6 +135,12 @@ ACTION_ALIASES = {
     "respond_to_reviews": "respond_to_paper_reviews",
     "re_review": "re_review_paper",
     "comparison": "write_comparison",
+    "sync_stack": "sync_third_party_research_stack",
+    "submission_readiness": "audit_submission_readiness",
+    "repair_figures": "repair_paper_figures_loop",
+    "repair_preview": "repair_paper_preview_loop",
+    "audit_normality": "audit_paper_normality",
+    "audit_figures": "audit_paper_figures",
 }
 REVIEW_TOOL_ACTIONS = {
     "respond_to_paper_reviews": "respond",
