@@ -1,7 +1,8 @@
 {
-  "generated_at": "2026-06-15T22:40:11.956990+00:00",
+  "generated_at": "2026-06-17T11:39:20.181764+00:00",
   "module": "writing",
   "contract": {
+    "key": "writing",
     "directory": "modules/writing",
     "display_name": "Writing",
     "legacy_stage": "Paper",
@@ -29,34 +30,13 @@
       "modules/writing/scripts/paper_common.py"
     ]
   },
-  "script_count": 27,
+  "script_count": 25,
   "scripts": [
-    {
-      "script": "aggregate_paper_reviews.py",
-      "path": "modules/writing/scripts/aggregate_paper_reviews.py",
-      "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
-      "function_count": 3,
-      "functions": [
-        "verdict_from_scores",
-        "build_evidence_issues",
-        "main"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "collections",
-        "paper_common",
-        "project_paths"
-      ],
-      "parse_error": ""
-    },
     {
       "script": "audit_paper_evidence.py",
       "path": "modules/writing/scripts/audit_paper_evidence.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 9,
       "functions": [
         "_norm_path",
@@ -69,6 +49,7 @@
         "load_json",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -82,14 +63,13 @@
         "pathlib",
         "project_paths",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "audit_paper_figures.py",
       "path": "modules/writing/scripts/audit_paper_figures.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 17,
       "functions": [
         "has_evidence_limit_term",
@@ -110,6 +90,7 @@
         "figure_rows",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -120,14 +101,13 @@
         "re",
         "struct",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "audit_paper_normality.py",
       "path": "modules/writing/scripts/audit_paper_normality.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 29,
       "functions": [
         "pdf_pages",
@@ -160,6 +140,7 @@
         "_venue_zh_label",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -172,14 +153,13 @@
         "re",
         "subprocess",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "audit_paper_orchestra.py",
       "path": "modules/writing/scripts/audit_paper_orchestra.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 4,
       "functions": [
         "latest_markdown",
@@ -187,6 +167,7 @@
         "count_citation_like",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -196,14 +177,13 @@
         "pathlib",
         "project_paths",
         "re"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "audit_submission_readiness.py",
       "path": "modules/writing/scripts/audit_submission_readiness.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 12,
       "functions": [
         "now_iso",
@@ -219,6 +199,7 @@
         "_current_claim_guard",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -234,14 +215,13 @@
         "pathlib",
         "project_paths",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "build_claim_ledger.py",
       "path": "modules/writing/scripts/build_claim_ledger.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 10,
       "functions": [
         "load_json",
@@ -255,6 +235,7 @@
         "claim_weak_evidence_run",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -265,14 +246,13 @@
         "pipeline_guard",
         "project_paths",
         "re"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "build_conference_preview_paper.py",
       "path": "modules/writing/scripts/build_conference_preview_paper.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 40,
       "functions": [
         "read_json",
@@ -316,6 +296,7 @@
         "preview_labels",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -330,14 +311,13 @@
         "shutil",
         "subprocess",
         "sys"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "build_paper_md.py",
       "path": "modules/writing/scripts/build_paper_md.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 11,
       "functions": [
         "clean_block",
@@ -352,6 +332,7 @@
         "render_claims_from_orchestra",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -362,14 +343,13 @@
         "pipeline_guard",
         "project_paths",
         "re"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "build_paper_orchestra_state.py",
       "path": "modules/writing/scripts/build_paper_orchestra_state.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 14,
       "functions": [
         "now_iso",
@@ -387,6 +367,7 @@
         "write_report",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -399,14 +380,13 @@
         "project_paths",
         "re",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "compile_paper_pdf.py",
       "path": "modules/writing/scripts/compile_paper_pdf.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 6,
       "functions": [
         "decode_output",
@@ -416,6 +396,7 @@
         "command_log",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -425,14 +406,13 @@
         "pipeline_guard",
         "re",
         "subprocess"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "fetch_latex_template.py",
       "path": "modules/writing/scripts/fetch_latex_template.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 18,
       "functions": [
         "_repo_root_from_script",
@@ -454,6 +434,7 @@
         "fail",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -471,15 +452,14 @@
         "taste_pythonpath",
         "tempfile",
         "typing",
-        "urllib.error"
-      ],
-      "parse_error": ""
+        "urllib"
+      ]
     },
     {
       "script": "paper_common.py",
       "path": "modules/writing/scripts/paper_common.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 71,
       "functions": [
         "_repo_root_from_script",
@@ -554,6 +534,7 @@
         "make_failure_report",
         "try_install_latex_toolchain"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -570,17 +551,15 @@
         "taste_pythonpath",
         "time",
         "typing",
-        "urllib.parse",
-        "urllib.request",
+        "urllib",
         "zipfile"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "paper_self_review.py",
       "path": "modules/writing/scripts/paper_self_review.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 47,
       "functions": [
         "read_json",
@@ -631,6 +610,7 @@
         "_repair_has_verification",
         "validate_paper_self_review_receipt"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -640,14 +620,13 @@
         "pathlib",
         "re",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "render_paper_tex.py",
       "path": "modules/writing/scripts/render_paper_tex.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 4,
       "functions": [
         "latest_markdown",
@@ -655,6 +634,7 @@
         "find_venue_template_source",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -664,14 +644,13 @@
         "pathlib",
         "pipeline_guard",
         "re"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "repair_paper_figures_loop.py",
       "path": "modules/writing/scripts/repair_paper_figures_loop.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 5,
       "functions": [
         "now_iso",
@@ -680,6 +659,7 @@
         "claude_repair_prompt",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -693,14 +673,13 @@
         "subprocess",
         "sys",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "repair_paper_orchestra_citations.py",
       "path": "modules/writing/scripts/repair_paper_orchestra_citations.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 24,
       "functions": [
         "normalize",
@@ -728,6 +707,7 @@
         "is_good_bib_entry",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -744,17 +724,15 @@
         "sys",
         "time",
         "typing",
-        "urllib.parse",
-        "urllib.request",
-        "xml.etree.ElementTree"
-      ],
-      "parse_error": ""
+        "urllib",
+        "xml"
+      ]
     },
     {
       "script": "repair_paper_preview_loop.py",
       "path": "modules/writing/scripts/repair_paper_preview_loop.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 20,
       "functions": [
         "now_iso",
@@ -778,6 +756,7 @@
         "claude_repair_prompt",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -794,14 +773,13 @@
         "subprocess",
         "sys",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "resolve_venue_requirements.py",
       "path": "modules/writing/scripts/resolve_venue_requirements.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 39,
       "functions": [
         "_repo_root_from_script",
@@ -844,6 +822,7 @@
         "run_claude",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -863,59 +842,45 @@
         "taste_pythonpath",
         "tempfile",
         "typing",
-        "urllib.request"
-      ],
-      "parse_error": ""
-    },
-    {
-      "script": "review_paper_md.py",
-      "path": "modules/writing/scripts/review_paper_md.py",
-      "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
-      "function_count": 4,
-      "functions": [
-        "verdict_from_score",
-        "build_review",
-        "render_markdown",
-        "main"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "paper_common",
-        "project_paths"
-      ],
-      "parse_error": ""
+        "urllib"
+      ]
     },
     {
       "script": "review_response_tools.py",
       "path": "modules/writing/scripts/review_response_tools.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
-      "function_count": 4,
+      "owner_reason": "classified by module boundary registry",
+      "function_count": 11,
       "functions": [
         "respond_to_reviews",
         "re_review_paper",
         "write_comparison",
+        "verdict_from_score",
+        "build_review",
+        "render_markdown",
+        "run_review_paper",
+        "verdict_from_scores",
+        "build_evidence_issues",
+        "run_aggregate_reviews",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "argparse",
+        "collections",
         "paper_common",
         "pathlib",
         "pipeline_guard",
         "project_paths"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "revise_paper_citation_coverage.py",
       "path": "modules/writing/scripts/revise_paper_citation_coverage.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 5,
       "functions": [
         "parse_bib_titles",
@@ -924,6 +889,7 @@
         "run",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -937,14 +903,13 @@
         "subprocess",
         "sys",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "revise_paper_md.py",
       "path": "modules/writing/scripts/revise_paper_md.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 5,
       "functions": [
         "bullet_block",
@@ -953,6 +918,7 @@
         "paper_safe_items",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -961,14 +927,13 @@
         "pathlib",
         "pipeline_guard",
         "project_paths"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "run_paper_orchestra_bridge.py",
       "path": "modules/writing/scripts/run_paper_orchestra_bridge.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 68,
       "functions": [
         "_repo_root_from_script",
@@ -1040,6 +1005,7 @@
         "write_report",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -1060,17 +1026,17 @@
         "sys",
         "taste_pythonpath",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "run_paper_pipeline.py",
       "path": "modules/writing/scripts/run_paper_pipeline.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
-      "function_count": 12,
+      "owner_reason": "classified by module boundary registry",
+      "function_count": 13,
       "functions": [
         "_repo_root_from_script",
+        "module_cmd",
         "read_json",
         "now_iso",
         "gate_passed",
@@ -1083,6 +1049,7 @@
         "fetch_venue_template",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -1097,14 +1064,13 @@
         "sys",
         "taste_pythonpath",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "sync_third_party_research_stack.py",
       "path": "modules/writing/scripts/sync_third_party_research_stack.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 24,
       "functions": [
         "now_iso",
@@ -1132,6 +1098,7 @@
         "build_stack",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -1145,14 +1112,13 @@
         "shutil",
         "subprocess",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "sync_writing_vendor.py",
       "path": "modules/writing/scripts/sync_writing_vendor.py",
       "owner": "writing",
-      "owner_reason": "paper drafting, venue/template/citation/figure/submission readiness",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 15,
       "functions": [
         "now_iso",
@@ -1171,6 +1137,7 @@
         "sync_vendor",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -1182,8 +1149,7 @@
         "shutil",
         "subprocess",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     }
   ]
 }

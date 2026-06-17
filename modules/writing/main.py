@@ -128,7 +128,6 @@ ACTION_ALIASES = {
     "paper_pipeline": "run_paper_pipeline",
     "pipeline": "run_paper_pipeline",
     "preview": "build_conference_preview_paper",
-    "repair_preview": "repair_paper_preview_loop",
     "audit_evidence": "audit_paper_evidence",
     "submission_readiness": "audit_submission_readiness",
     "respond_reviews": "respond_to_paper_reviews",
@@ -136,7 +135,6 @@ ACTION_ALIASES = {
     "re_review": "re_review_paper",
     "comparison": "write_comparison",
     "sync_stack": "sync_third_party_research_stack",
-    "submission_readiness": "audit_submission_readiness",
     "repair_figures": "repair_paper_figures_loop",
     "repair_preview": "repair_paper_preview_loop",
     "audit_normality": "audit_paper_normality",
@@ -144,6 +142,8 @@ ACTION_ALIASES = {
 }
 REVIEW_TOOL_ACTIONS = {
     "respond_to_paper_reviews": "respond",
+    "review_paper": "review_paper",
+    "aggregate_reviews": "aggregate_reviews",
     "respond_reviews": "respond",
     "respond_to_reviews": "respond",
     "re_review_paper": "re_review",

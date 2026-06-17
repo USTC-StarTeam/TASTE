@@ -1,6 +1,5 @@
 {
   "agent_state.py": "framework/scripts/agent_state.py",
-  "aggregate_paper_reviews.py": "modules/writing/scripts/aggregate_paper_reviews.py",
   "analyze_experiment_failures.py": "modules/experimenting/scripts/analyze_experiment_failures.py",
   "audit_dataset_path.py": "modules/environment/scripts/audit_dataset_path.py",
   "audit_deterministic_base_switch_gate.py": "modules/environment/scripts/audit_deterministic_base_switch_gate.py",
@@ -87,7 +86,6 @@
   "research_manifest.py": "framework/scripts/research_manifest.py",
   "resolve_venue_requirements.py": "modules/writing/scripts/resolve_venue_requirements.py",
   "restart_after_data_blocker.py": "modules/environment/scripts/restart_after_data_blocker.py",
-  "review_paper_md.py": "modules/writing/scripts/review_paper_md.py",
   "review_response_tools.py": "modules/writing/scripts/review_response_tools.py",
   "revise_paper_citation_coverage.py": "modules/writing/scripts/revise_paper_citation_coverage.py",
   "revise_paper_md.py": "modules/writing/scripts/revise_paper_md.py",

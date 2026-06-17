@@ -92,11 +92,10 @@
 | 脚本 | 真实作用 |
 | --- | --- |
 | `scripts/paper_self_review.py` | 自审当前稿件。 |
-| `scripts/review_paper_md.py` | 评审 Markdown 稿。 |
-| `scripts/aggregate_paper_reviews.py` | 聚合多轮评审意见。 |
+| `scripts/review_response_tools.py` | 统一执行内部评审、评审聚合、作者回应、再评审和比较文本写入；由 `modules/writing/main.py` 通过 `--action review_paper`、`aggregate_reviews`、`respond_reviews`、`re_review`、`comparison` 调用。 |
 
 ## 冗余控制原则
 
-- Writing 目前脚本多但边界清楚：pipeline/orchestra、venue/template、claim/evidence audits、review/response 四块。后续可以合并 review 类脚本和 repair 类脚本；不要把 evidence gate 合进纯文本生成函数。
+- Writing 目前脚本多但边界清楚：pipeline/orchestra、venue/template、claim/evidence audits、review/response 四块。review 类脚本已合并到 `review_response_tools.py`；repair 类脚本仍按图表、引用、预览三类保留边界，不要把 evidence gate 合进纯文本生成函数。
 - 修改本模块时必须先读相关脚本和 manifest，找到根因后再改；禁止为某个论文、某个项目、某个本机路径写特异规则。
 - 用户可见产物必须一遍生成正确；fallback 只能作为最后兼容路线，不能替代主流程质量。

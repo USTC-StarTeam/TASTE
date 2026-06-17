@@ -32,6 +32,10 @@ from paper_common import update_pipeline_state
 from pipeline_guard import guard_fresh_base_blocker_entry
 
 
+def module_cmd(stage: str, action: str, *extra: str) -> list[str]:
+    return [sys.executable, str(FRAMEWORK_SCRIPTS / 'run_module.py'), stage, '--action', action, *extra]
+
+
 def read_json(path: Path, default):
     try:
         return json.loads(path.read_text(encoding='utf-8')) if path.exists() else default
@@ -291,10 +295,10 @@ def main() -> None:
         bridge_cmd.append('--refresh-current-paper')
     run(bridge_cmd, required=False)
     run(build_cmd)
-    run([sys.executable, str(SCRIPTS / 'review_paper_md.py'), '--project', args.project, '--venue', args.venue])
+    run(module_cmd('writing', 'review_paper', '--project', args.project, '--venue', args.venue))
     run([sys.executable, str(SCRIPTS / 'build_claim_ledger.py'), '--project', args.project], required=False)
     run([sys.executable, str(SCRIPTS / 'build_paper_orchestra_state.py'), '--project', args.project, '--venue', args.venue], required=False)
-    run([sys.executable, str(SCRIPTS / 'aggregate_paper_reviews.py'), '--project', args.project, '--venue', args.venue])
+    run(module_cmd('writing', 'aggregate_reviews', '--project', args.project, '--venue', args.venue))
     run([sys.executable, str(SCRIPTS / 'revise_paper_md.py'), '--project', args.project, '--venue', args.venue])
     run([sys.executable, str(SCRIPTS / 'build_paper_orchestra_state.py'), '--project', args.project, '--venue', args.venue], required=False)
     run([sys.executable, str(SCRIPTS / 'review_response_tools.py'), '--tool-action', 'respond', '--project', args.project, '--venue', args.venue])
