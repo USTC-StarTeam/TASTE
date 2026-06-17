@@ -159,7 +159,7 @@ def fast_supervisor_step(project: str, venue: str, use_llm: bool, total_timeout_
     append_command(record, module_cmd('environment', 'candidate_pool', '--project', project, '--limit', str(max(1, audit_limit)), '--include-watch', '--use-cursor'), max(180, min(command_timeout_sec, 600)), env, 'audit_repo_candidate_pool', deadline)
     maintenance = [
         ('reconcile_active_and_pool_candidates', module_cmd('environment', 'reconcile_candidates', '--project', project)),
-        ('build_blocker_resolution_packet', module_cmd('planning', 'blocker_resolution', '--project', project, '--venue', venue)),
+        ('planning_blocker_resolution', module_cmd('planning', 'blocker_resolution', '--project', project, '--venue', venue)),
         ('audit_paper_evidence', module_cmd('writing', 'audit_evidence', '--project', project, '--venue', venue)),
         ('research_manifest', [sys.executable, 'framework/scripts/research_manifest.py', '--project', project, '--venue', venue]),
         ('report_status', [sys.executable, 'framework/scripts/report_status.py', '--project', project, '--venue', venue]),
@@ -188,7 +188,7 @@ def supervisor_step(project: str, venue: str, max_launches: int, use_llm: bool, 
     auto_cmd = [sys.executable, 'framework/scripts/run_autonomous_research.py', '--project', project, '--venue', venue, '--iterations', '1', '--execute-plan', '--max-launches', str(max_launches)]
     record['commands'].append(run(auto_cmd, timeout=timeout_sec, env=env, label='run_autonomous_research'))
     maintenance = [
-        ('build_blocker_resolution_packet', module_cmd('planning', 'blocker_resolution', '--project', project, '--venue', venue)),
+        ('planning_blocker_resolution', module_cmd('planning', 'blocker_resolution', '--project', project, '--venue', venue)),
         ('audit_paper_evidence', module_cmd('writing', 'audit_evidence', '--project', project, '--venue', venue)),
         ('research_manifest', [sys.executable, 'framework/scripts/research_manifest.py', '--project', project, '--venue', venue]),
         ('report_status', [sys.executable, 'framework/scripts/report_status.py', '--project', project, '--venue', venue]),

@@ -4220,12 +4220,12 @@ def test_trajectory_capability_source_path_supports_migrated_layout(monkeypatch,
     audit = importlib.reload(importlib.import_module("audit_research_trajectory_capabilities"))
     root = tmp_path / "repo"
     web_file = root / "web" / "backend" / "auto_research" / "web" / "project_bridge.py"
-    module_script = root / "modules" / "planning" / "scripts" / "build_aris_review_board.py"
+    module_script = root / "modules" / "planning" / "scripts" / "planning_tools.py"
     (root / "framework" / "scripts").mkdir(parents=True)
     web_file.parent.mkdir(parents=True)
     module_script.parent.mkdir(parents=True)
     web_file.write_text("third_party_research_stack\nthird_party_stack_status\n", encoding="utf-8")
-    module_script.write_text("# planning helper\n", encoding="utf-8")
+    module_script.write_text("# planning helper tools\n", encoding="utf-8")
 
     monkeypatch.setattr(audit, "ROOT", root)
     monkeypatch.setattr(audit, "SCRIPTS", audit.script_resolver(root))
@@ -4233,7 +4233,7 @@ def test_trajectory_capability_source_path_supports_migrated_layout(monkeypatch,
     assert not (root / "scripts").exists()
     assert audit.source_path("../web/backend/auto_research/web/project_bridge.py") == web_file
     assert audit.source_contains("../web/backend/auto_research/web/project_bridge.py", ["third_party_research_stack", "third_party_stack_status"])
-    assert audit.source_path("build_aris_review_board.py") == module_script
+    assert audit.source_path("planning_tools.py") == module_script
 
 
 def test_candidate_scoped_generic_data_contract_preserves_active_route_probe(monkeypatch, tmp_path):

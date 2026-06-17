@@ -378,7 +378,7 @@ def audit_skill_and_code_bindings(paths) -> dict[str, Any]:
     contracts_path = paths.state / "research_skill_contracts.json"
     contracts = load_json(contracts_path, [])
     required_scripts = {
-        "EvidenceAssurance": ["build_aris_review_board.py", "audit_paper_evidence.py"],
+        "EvidenceAssurance": ["planning_tools.py", "audit_paper_evidence.py"],
         "TrajectoryOptimization": ["update_evolution_memory.py", "run_evoscientist_style_cycle.py", "run_autoscientist_supervisor.py", "run_research_trajectory_supervisor.py"],
         "PaperProduction": ["run_paper_pipeline.py", "build_paper_md.py", "revise_paper_md.py", "build_paper_orchestra_state.py", "audit_paper_orchestra.py", "audit_submission_readiness.py", "audit_paper_evidence.py"],
     }
@@ -388,7 +388,7 @@ def audit_skill_and_code_bindings(paths) -> dict[str, Any]:
     ]
     checks.append(check("skill_contracts_exported", contracts_path.exists() and isinstance(contracts, list) and len(contracts) >= len(required_skills), severity="warn", evidence=[str(contracts_path)], detail=f"contracts={len(contracts) if isinstance(contracts, list) else 'n/a'}"))
     checks.extend([
-        check("trajectory_builder_invokes_assurance_and_memory_helpers", source_contains("build_research_trajectory_system.py", ["build_aris_review_board.py", "audit_paper_evidence.py", "update_evolution_memory.py"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
+        check("trajectory_builder_invokes_assurance_and_memory_helpers", source_contains("build_research_trajectory_system.py", ["planning:review_board", "audit_paper_evidence.py", "update_evolution_memory.py"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
         check("trajectory_builder_exports_local_skill_contracts", source_contains("build_research_trajectory_system.py", ["load_skill_contracts", "research_skill_contracts"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
         check("trajectory_builder_maintains_graph_history_and_manifest", source_contains("build_research_trajectory_system.py", ["update_research_graph_history", "research_evidence_manifest", "update_evolutionary_memory_ledger"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
         check("claude_project_session_requires_trajectory_and_skills", source_contains("claude_project_session.py", ["research_trajectory_capability_audit", "framework/resources/claude/skills", "Optimize the whole trajectory"]), evidence=[str(SCRIPTS / "claude_project_session.py")]),

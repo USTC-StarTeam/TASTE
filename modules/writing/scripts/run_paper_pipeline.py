@@ -300,7 +300,7 @@ def main() -> None:
     run([sys.executable, str(SCRIPTS / 'review_response_tools.py'), '--tool-action', 'respond', '--project', args.project, '--venue', args.venue])
     run([sys.executable, str(SCRIPTS / 'audit_paper_evidence.py'), '--project', args.project, '--venue', args.venue], required=False)
     run([sys.executable, str(SCRIPTS / 'review_response_tools.py'), '--tool-action', 're_review', '--project', args.project, '--venue', args.venue])
-    run([sys.executable, str(SCRIPTS / 'build_aris_review_board.py'), '--project', args.project], required=False)
+    run([sys.executable, str(FRAMEWORK_SCRIPTS / 'run_module.py'), 'planning', '--action', 'review_board', '--project', args.project], required=False)
     run([sys.executable, str(SCRIPTS / 'build_paper_orchestra_state.py'), '--project', args.project, '--venue', args.venue], required=False)
     run([sys.executable, str(SCRIPTS / 'audit_paper_orchestra.py'), '--project', args.project, '--venue', args.venue], required=False)
     run([sys.executable, str(SCRIPTS / 'audit_submission_readiness.py'), '--project', args.project, '--venue', args.venue], required=False)

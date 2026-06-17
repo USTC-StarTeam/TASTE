@@ -477,9 +477,9 @@ def test_refresh_project_reports_runs_reflection_after_status_inputs():
     assert names == ["healthcheck", "status", "next_actions", "trajectory", "reflection", "shared_research"]
     assert rendered[0].endswith("research_healthcheck.py --project demo_project --venue ICLR")
     assert rendered[1].endswith("report_status.py --project demo_project --venue ICLR")
-    assert rendered[2].endswith("propose_next_actions.py --project demo_project")
+    assert rendered[2].endswith("run_module.py planning --action next_actions --project demo_project")
     assert rendered[3].endswith("build_research_trajectory_system.py --project demo_project --skip-helpers --venue ICLR")
-    assert rendered[4].endswith("reflect_iteration.py --project demo_project")
+    assert rendered[4].endswith("run_module.py planning --action reflect --project demo_project")
     assert rendered[5].endswith("compile_prompt.py --project demo_project")
     assert rendered.index(rendered[3]) > rendered.index(rendered[2])
     assert rendered.index(rendered[4]) > rendered.index(rendered[0])

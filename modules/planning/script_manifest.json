@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-15T22:40:11.956990+00:00",
+  "generated_at": "2026-06-17T09:58:59.594852+00:00",
   "module": "planning",
   "contract": {
     "directory": "modules/planning",
@@ -25,42 +25,18 @@
     ],
     "private_backend_roots": [
       "modules/planning/scripts/plan_pipeline.py",
-      "modules/planning/scripts/plan_experiments.py",
-      "modules/planning/scripts/build_workflow_blueprint.py"
+      "modules/planning/scripts/planning_tools.py",
+      "modules/planning/scripts/build_blocker_action_plan.py",
+      "modules/planning/scripts/propose_next_actions.py"
     ]
   },
-  "script_count": 9,
+  "script_count": 4,
   "scripts": [
-    {
-      "script": "build_aris_review_board.py",
-      "path": "modules/planning/scripts/build_aris_review_board.py",
-      "owner": "planning",
-      "owner_reason": "plan selection, blocker planning, or execution-contract shaping",
-      "function_count": 5,
-      "functions": [
-        "load_json",
-        "numeric",
-        "method_rows",
-        "verdict_for",
-        "main"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "collections",
-        "experiment_contracts",
-        "json",
-        "pathlib",
-        "project_paths"
-      ],
-      "parse_error": ""
-    },
     {
       "script": "build_blocker_action_plan.py",
       "path": "modules/planning/scripts/build_blocker_action_plan.py",
       "owner": "planning",
-      "owner_reason": "plan selection, blocker planning, or execution-contract shaping",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 53,
       "functions": [
         "now_iso",
@@ -134,108 +110,10 @@
       "parse_error": ""
     },
     {
-      "script": "build_blocker_resolution_packet.py",
-      "path": "modules/planning/scripts/build_blocker_resolution_packet.py",
-      "owner": "planning",
-      "owner_reason": "plan selection, blocker planning, or execution-contract shaping",
-      "function_count": 3,
-      "functions": [
-        "load_json",
-        "save_json",
-        "main"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "datetime",
-        "json",
-        "pathlib",
-        "project_paths"
-      ],
-      "parse_error": ""
-    },
-    {
-      "script": "build_method_frontier.py",
-      "path": "modules/planning/scripts/build_method_frontier.py",
-      "owner": "planning",
-      "owner_reason": "plan selection, blocker planning, or execution-contract shaping",
-      "function_count": 2,
-      "functions": [
-        "load_json",
-        "main"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "json",
-        "pathlib",
-        "project_paths"
-      ],
-      "parse_error": ""
-    },
-    {
-      "script": "build_workflow_blueprint.py",
-      "path": "modules/planning/scripts/build_workflow_blueprint.py",
-      "owner": "planning",
-      "owner_reason": "plan selection, blocker planning, or execution-contract shaping",
-      "function_count": 2,
-      "functions": [
-        "load_json",
-        "main"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "json",
-        "pathlib",
-        "project_paths"
-      ],
-      "parse_error": ""
-    },
-    {
-      "script": "plan_experiments.py",
-      "path": "modules/planning/scripts/plan_experiments.py",
-      "owner": "planning",
-      "owner_reason": "plan selection, blocker planning, or execution-contract shaping",
-      "function_count": 15,
-      "functions": [
-        "load_json",
-        "load_mapping",
-        "slugify",
-        "discover_repo",
-        "discover_dataset",
-        "load_machine_summary",
-        "command_needs_shell",
-        "infer_command_spec",
-        "infer_env_name",
-        "build_trial_focuses",
-        "render_template",
-        "load_quality_focus",
-        "infer_method_role",
-        "build_method_contract",
-        "main"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "datetime",
-        "json",
-        "pathlib",
-        "project_paths",
-        "re",
-        "shlex"
-      ],
-      "parse_error": ""
-    },
-    {
       "script": "plan_pipeline.py",
       "path": "modules/planning/scripts/plan_pipeline.py",
       "owner": "planning",
-      "owner_reason": "plan selection, blocker planning, or execution-contract shaping",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 49,
       "functions": [
         "_raise_if_cancelled",
@@ -291,11 +169,7 @@
       "classes": [],
       "imports": [
         "__future__",
-        "auto_research.jobs",
-        "auto_research.llm",
-        "auto_research.models",
-        "auto_research.paths",
-        "auto_research.storage",
+        "auto_research",
         "datetime",
         "os",
         "pathlib",
@@ -305,10 +179,65 @@
       "parse_error": ""
     },
     {
+      "script": "planning_tools.py",
+      "path": "modules/planning/scripts/planning_tools.py",
+      "owner": "planning",
+      "owner_reason": "classified by module boundary registry",
+      "function_count": 32,
+      "functions": [
+        "_aris_load_json",
+        "_aris_numeric",
+        "_aris_method_rows",
+        "_aris_verdict_for",
+        "run_review_board",
+        "_blocker_resolution_load_json",
+        "_blocker_resolution_save_json",
+        "run_blocker_resolution",
+        "_method_frontier_load_json",
+        "run_method_frontier",
+        "_workflow_load_json",
+        "run_workflow",
+        "_experiments_load_json",
+        "_experiments_load_mapping",
+        "_experiments_slugify",
+        "_experiments_discover_repo",
+        "_experiments_discover_dataset",
+        "_experiments_load_machine_summary",
+        "_experiments_command_needs_shell",
+        "_experiments_infer_command_spec",
+        "_experiments_infer_env_name",
+        "_experiments_build_trial_focuses",
+        "_experiments_render_template",
+        "_experiments_load_quality_focus",
+        "_experiments_infer_method_role",
+        "_experiments_build_method_contract",
+        "run_experiments",
+        "_reflect_read",
+        "_reflect_load_json",
+        "_reflect_ratio",
+        "run_reflect",
+        "main"
+      ],
+      "classes": [],
+      "imports": [
+        "__future__",
+        "argparse",
+        "collections",
+        "datetime",
+        "experiment_contracts",
+        "json",
+        "pathlib",
+        "project_paths",
+        "re",
+        "shlex"
+      ],
+      "parse_error": ""
+    },
+    {
       "script": "propose_next_actions.py",
       "path": "modules/planning/scripts/propose_next_actions.py",
       "owner": "planning",
-      "owner_reason": "plan selection, blocker planning, or execution-contract shaping",
+      "owner_reason": "classified by module boundary registry",
       "function_count": 14,
       "functions": [
         "load_json",
@@ -336,29 +265,6 @@
         "project_paths",
         "sys",
         "taste_pythonpath"
-      ],
-      "parse_error": ""
-    },
-    {
-      "script": "reflect_iteration.py",
-      "path": "modules/planning/scripts/reflect_iteration.py",
-      "owner": "planning",
-      "owner_reason": "plan selection, blocker planning, or execution-contract shaping",
-      "function_count": 4,
-      "functions": [
-        "read",
-        "load_json",
-        "ratio",
-        "main"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "experiment_contracts",
-        "json",
-        "pathlib",
-        "project_paths"
       ],
       "parse_error": ""
     }

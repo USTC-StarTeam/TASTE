@@ -1237,7 +1237,7 @@ def main() -> int:
     run([sys.executable, str(script_dir / 'lint_wiki.py'), '--project', args.project], paths.root, paths.logs / '11_lint.log')
     run([sys.executable, str(script_dir / 'research_healthcheck.py'), '--project', args.project], paths.root, paths.logs / '12_healthcheck.log')
     run([sys.executable, str(script_dir / 'audit_workflow_connectivity.py'), '--project', args.project], paths.root, paths.logs / '12c_workflow_connectivity.log')
-    run(module_cmd('planning', 'reflect', '--project', args.project), paths.root, paths.logs / '13_reflect_iteration.log')
+    run(module_cmd('planning', 'reflect', '--project', args.project), paths.root, paths.logs / '13_planning_reflection.log')
     run(module_cmd('experimenting', 'audit_iteration', '--project', args.project), paths.root, paths.logs / '13a_experiment_iteration_audit.log')
     run([sys.executable, str(script_dir / 'update_evolution_memory.py'), '--project', args.project] + (['--venue', args.venue] if args.venue else []), paths.root, paths.logs / '13b_evolution_memory.log')
     run([sys.executable, str(script_dir / 'build_research_trajectory_system.py'), '--project', args.project] + (['--venue', args.venue] if args.venue else []), paths.root, paths.logs / '13d_research_trajectory_system.log')

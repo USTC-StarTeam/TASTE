@@ -17,6 +17,10 @@ def _cmd(script: str, *args: str) -> list[str]:
     return [sys.executable, str(resolve_script_path(script, ROOT)), *args]
 
 
+def _module_cmd(stage: str, action: str, *args: str) -> list[str]:
+    return [sys.executable, str(ROOT / "framework/scripts/run_module.py"), stage, "--action", action, *args]
+
+
 def build_steps(project: str, venue: str = "") -> list[tuple[str, list[str]]]:
     health = _cmd("research_healthcheck.py", "--project", project)
     status = _cmd("report_status.py", "--project", project)
@@ -28,9 +32,9 @@ def build_steps(project: str, venue: str = "") -> list[tuple[str, list[str]]]:
     return [
         ("healthcheck", health),
         ("status", status),
-        ("next_actions", _cmd("propose_next_actions.py", "--project", project)),
+        ("next_actions", _module_cmd("planning", "next_actions", "--project", project)),
         ("trajectory", trajectory),
-        ("reflection", _cmd("reflect_iteration.py", "--project", project)),
+        ("reflection", _module_cmd("planning", "reflect", "--project", project)),
         ("shared_research", _cmd("compile_prompt.py", "--project", project)),
     ]
 

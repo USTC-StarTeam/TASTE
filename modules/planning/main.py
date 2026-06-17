@@ -16,7 +16,12 @@ RESPONSIBILITY = 'Select and repair executable research plans from approved idea
 REQUIRED_EXTERNAL_INPUTS = ('llm_api_or_claude', 'idea_artifacts', 'project_constraints')
 ARTIFACTS_IN = ('ideas.json', 'idea.md', 'user selection/approval')
 ARTIFACTS_OUT = ('plans.json', 'plan.md', 'experiment_plan.json', 'taste_plan_bridge.json', 'blocker action plans')
-PRIVATE_BACKEND_ROOTS = ('modules/planning/scripts/plan_pipeline.py', 'modules/planning/scripts/plan_experiments.py', 'modules/planning/scripts/build_workflow_blueprint.py')
+PRIVATE_BACKEND_ROOTS = (
+    'modules/planning/scripts/plan_pipeline.py',
+    'modules/planning/scripts/planning_tools.py',
+    'modules/planning/scripts/build_blocker_action_plan.py',
+    'modules/planning/scripts/propose_next_actions.py',
+)
 
 
 @dataclass(slots=True)
@@ -122,15 +127,19 @@ def _run_script(script_stem: str, args: Sequence[str]) -> int:
 
 
 DIRECT_ACTIONS = {"", "plan", "planning", "pipeline", "plan_pipeline"}
+PLANNING_TOOL_ACTIONS = {
+    "experiments": "experiments",
+    "workflow": "workflow",
+    "blocker_resolution": "blocker_resolution",
+    "review_board": "review_board",
+    "method_frontier": "method_frontier",
+    "reflect": "reflect",
+}
 ACTION_ALIASES = {
-    "experiments": "plan_experiments",
-    "workflow": "build_workflow_blueprint",
     "blocker_action": "build_blocker_action_plan",
-    "blocker_resolution": "build_blocker_resolution_packet",
-    "review_board": "build_aris_review_board",
-    "method_frontier": "build_method_frontier",
+    "build_blocker_action_plan": "build_blocker_action_plan",
     "next_actions": "propose_next_actions",
-    "reflect": "reflect_iteration",
+    "propose_next_actions": "propose_next_actions",
 }
 
 
@@ -164,6 +173,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     action = _normalize_action(ns.action)
     if action in DIRECT_ACTIONS:
         return _run_plan(rest)
+    if action in PLANNING_TOOL_ACTIONS:
+        return _run_script("planning_tools", ["--tool-action", PLANNING_TOOL_ACTIONS[action], *rest])
     return _run_script(ACTION_ALIASES.get(action, action), rest)
 
 

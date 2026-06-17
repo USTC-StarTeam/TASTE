@@ -49,29 +49,19 @@
 
 | 脚本 | 真实作用 |
 | --- | --- |
-| `scripts/plan_pipeline.py` | 独立计划生成主流程。 |
-| `scripts/plan_experiments.py` | 把 plan 转成实验计划和可执行步骤。 |
-| `scripts/build_workflow_blueprint.py` | 生成从 idea 到实验的工作流蓝图。 |
+| `scripts/plan_pipeline.py` | 独立计划生成主流程，对外由 `main.py --action plan/pipeline` 调用。 |
 
-### 决策与面板
+### 私有工具集合
 
 | 脚本 | 真实作用 |
 | --- | --- |
-| `scripts/propose_next_actions.py` | 根据当前状态提出下一步行动。 |
-| `scripts/reflect_iteration.py` | 记录迭代反思。 |
-| `scripts/build_method_frontier.py` | 构建方法前沿/候选方向视图。 |
-| `scripts/build_aris_review_board.py` | 生成 ARIS 审查面板。 |
-
-### 阻塞处理
-
-| 脚本 | 真实作用 |
-| --- | --- |
-| `scripts/build_blocker_action_plan.py` | 根据阻塞状态生成结构化行动计划，并引用 Claude skill 资源。 |
-| `scripts/build_blocker_resolution_packet.py` | 构建阻塞修复所需的证据包。 |
+| `scripts/planning_tools.py` | Planning 私有工具集合；承载 `experiments`、`workflow`、`blocker_resolution`、`review_board`、`method_frontier`、`reflect` 等 tool action。 |
+| `scripts/propose_next_actions.py` | 根据当前状态提出下一步行动；测试会直接 import 其评分逻辑，因此暂保留为独立私有实现，对外仍走 `main.py --action next_actions`。 |
+| `scripts/build_blocker_action_plan.py` | 根据阻塞状态生成结构化行动计划，并引用 Claude skill 资源；对外走 `main.py --action blocker_action`。 |
 
 ## 冗余控制原则
 
-- Plan 的主线应收敛到 plan_pipeline.py/plan_experiments.py；各种 board/frontier/report 脚本后续可以合并成一个 planning_reports.py。
+- Plan 的公开动作必须收敛到 `main.py`；同类小工具已经合并到 `planning_tools.py`，后续新增小工具优先扩展 tool action，而不是新增单文件入口。
 - 禁止把 Environment 的结果提前写进 Plan；Plan 只能提出需求和建议，由 Environment 验证。
 - 修改本模块时必须先读相关脚本和 manifest，找到根因后再改；禁止为某个论文、某个项目、某个本机路径写特异规则。
 - 用户可见产物必须一遍生成正确；fallback 只能作为最后兼容路线，不能替代主流程质量。
