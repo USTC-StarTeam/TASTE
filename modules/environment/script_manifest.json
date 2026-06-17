@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-17T11:19:25.119674+00:00",
+  "generated_at": "2026-06-17T12:40:09.098934+00:00",
   "module": "environment",
   "contract": {
     "directory": "modules/environment",
@@ -26,10 +26,11 @@
       "modules/environment/scripts/run_environment_stage.py",
       "modules/environment/scripts/select_evidence_ready_repo.py",
       "modules/environment/scripts/bootstrap_repo_env.py",
-      "modules/environment/scripts/environment_data_tools.py"
+      "modules/environment/scripts/environment_data_tools.py",
+      "modules/environment/scripts/repo_data_tools.py"
     ]
   },
-  "script_count": 23,
+  "script_count": 21,
   "scripts": [
     {
       "script": "audit_dataset_path.py",
@@ -99,10 +100,10 @@
         "argparse",
         "datetime",
         "json",
-        "pathlib",
-        "project_paths",
         "re",
-        "typing"
+        "pathlib",
+        "typing",
+        "project_paths"
       ]
     },
     {
@@ -121,8 +122,8 @@
         "__future__",
         "argparse",
         "json",
-        "literature_policy",
         "pathlib",
+        "literature_policy",
         "project_paths"
       ]
     },
@@ -169,8 +170,8 @@
         "json",
         "os",
         "pathlib",
-        "project_paths",
-        "typing"
+        "typing",
+        "project_paths"
       ]
     },
     {
@@ -203,12 +204,12 @@
         "argparse",
         "datetime",
         "json",
-        "pathlib",
-        "project_paths",
         "re",
         "shutil",
         "subprocess",
-        "sys"
+        "sys",
+        "pathlib",
+        "project_paths"
       ]
     },
     {
@@ -254,13 +255,13 @@
         "__future__",
         "argparse",
         "datetime",
-        "experiment_contracts",
         "json",
         "os",
-        "pathlib",
-        "project_paths",
         "subprocess",
-        "typing"
+        "pathlib",
+        "typing",
+        "experiment_contracts",
+        "project_paths"
       ]
     },
     {
@@ -305,98 +306,12 @@
         "argparse",
         "datetime",
         "json",
-        "pathlib",
         "platform",
-        "project_paths",
         "re",
         "shutil",
-        "subprocess"
-      ]
-    },
-    {
-      "script": "build_fresh_base_implementation_plan.py",
-      "path": "modules/environment/scripts/build_fresh_base_implementation_plan.py",
-      "owner": "environment",
-      "owner_reason": "repo/data/base/environment selection, probing, or runtime locking",
-      "function_count": 13,
-      "functions": [
-        "_repo_root_from_script",
-        "project_from_args",
-        "load_json",
-        "save_json",
-        "_current_find_run_id",
-        "_current_selected_execution_ids",
-        "_repo_path",
-        "_selected_repo",
-        "_ready_datasets",
-        "_blocked_datasets",
-        "_repo_payload",
-        "write_generic_plan",
-        "main"
-      ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "datetime",
-        "json",
-        "os",
-        "pathlib",
         "subprocess",
-        "sys",
-        "typing"
-      ]
-    },
-    {
-      "script": "build_repo_data_requirements.py",
-      "path": "modules/environment/scripts/build_repo_data_requirements.py",
-      "owner": "environment",
-      "owner_reason": "repo/data/base/environment selection, probing, or runtime locking",
-      "function_count": 26,
-      "functions": [
-        "_repo_root_from_script",
-        "project_from_args",
-        "parse_args",
-        "load_json",
-        "save_json",
-        "_repo_from_state",
-        "_dataset_names_from_repo",
-        "slugify",
-        "_resolved_path",
-        "candidate_identity_from_state",
-        "candidate_repo_from_state",
-        "candidate_slug",
-        "_data_roots",
-        "_iter_structured_data_files",
-        "_open_text",
-        "_looks_like_text",
-        "_summarize_rows",
-        "_sample_jsonl",
-        "_sample_csv",
-        "_sample_json",
-        "_sample_data_file",
-        "_dataset_name_for",
-        "discover_generic_data_contract",
-        "write_candidate_requirement",
-        "write_generic_requirement",
-        "main"
-      ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "csv",
-        "datetime",
-        "gzip",
-        "json",
-        "os",
         "pathlib",
-        "re",
-        "subprocess",
-        "sys",
-        "typing"
+        "project_paths"
       ]
     },
     {
@@ -447,14 +362,14 @@
         "argparse",
         "datetime",
         "json",
-        "literature_policy",
         "mimetypes",
         "os",
-        "pathlib",
-        "project_paths",
         "shutil",
         "subprocess",
-        "urllib.parse"
+        "pathlib",
+        "urllib.parse",
+        "literature_policy",
+        "project_paths"
       ]
     },
     {
@@ -484,10 +399,10 @@
         "argparse",
         "datetime",
         "json",
-        "pathlib",
-        "project_paths",
         "shutil",
-        "typing"
+        "pathlib",
+        "typing",
+        "project_paths"
       ]
     },
     {
@@ -529,11 +444,11 @@
         "argparse",
         "datetime",
         "json",
-        "pathlib",
-        "project_paths",
         "re",
         "shutil",
-        "typing"
+        "pathlib",
+        "typing",
+        "project_paths"
       ]
     },
     {
@@ -580,13 +495,12 @@
         "hashlib",
         "json",
         "os",
-        "pandas",
-        "pathlib",
-        "project_paths",
         "re",
         "subprocess",
         "sys",
-        "typing"
+        "pathlib",
+        "typing",
+        "project_paths"
       ]
     },
     {
@@ -620,64 +534,12 @@
         "datetime",
         "json",
         "os",
-        "pathlib",
-        "project_paths",
         "shutil",
         "subprocess",
-        "typing",
-        "zipfile"
-      ]
-    },
-    {
-      "script": "probe_repo_dataset.py",
-      "path": "modules/environment/scripts/probe_repo_dataset.py",
-      "owner": "environment",
-      "owner_reason": "repo/data/base/environment selection, probing, or runtime locking",
-      "function_count": 28,
-      "functions": [
-        "_repo_root_from_script",
-        "_project_from_args",
-        "parse_args",
-        "load_json",
-        "save_json",
-        "_same_text",
-        "_candidate_matches_pending",
-        "_claim_ready_datasets",
-        "_failed_check_ids",
-        "_default_base_switch_failed_checks",
-        "_base_switch_pending_topic_decision",
-        "_write_topic_decision_report",
-        "_write_repo_env_strategy_report",
-        "_sync_pending_environment_candidate",
-        "_write_selection_report",
-        "_project_config",
-        "_existing_file",
-        "_candidate_probe_python",
-        "_pyproject_package_names",
-        "_candidate_package_names",
-        "_candidate_script_paths",
-        "_split_file_priority",
-        "_contract_sample_files",
-        "_bounded_candidate_repo_probe",
-        "_repo_from_state",
-        "write_candidate_probe",
-        "write_generic_probe",
-        "main"
-      ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "build_repo_data_requirements",
-        "datetime",
-        "json",
-        "os",
+        "zipfile",
         "pathlib",
-        "subprocess",
-        "sys",
-        "tomllib",
-        "typing"
+        "typing",
+        "project_paths"
       ]
     },
     {
@@ -697,10 +559,124 @@
         "__future__",
         "argparse",
         "json",
-        "os",
-        "pathlib",
         "subprocess",
         "sys",
+        "pathlib",
+        "typing"
+      ]
+    },
+    {
+      "script": "repo_data_tools.py",
+      "path": "modules/environment/scripts/repo_data_tools.py",
+      "owner": "environment",
+      "owner_reason": "repo/data/base/environment selection, probing, or runtime locking",
+      "function_count": 72,
+      "functions": [
+        "dr__repo_root_from_script",
+        "dr_project_from_args",
+        "dr_parse_args",
+        "dr_load_json",
+        "dr_save_json",
+        "dr__repo_from_state",
+        "dr__dataset_names_from_repo",
+        "dr_slugify",
+        "dr__resolved_path",
+        "dr_candidate_identity_from_state",
+        "dr_candidate_repo_from_state",
+        "dr_candidate_slug",
+        "dr__data_roots",
+        "dr__iter_structured_data_files",
+        "dr__open_text",
+        "dr__looks_like_text",
+        "dr__summarize_rows",
+        "dr__sample_jsonl",
+        "dr__sample_csv",
+        "dr__sample_json",
+        "dr__sample_data_file",
+        "dr__dataset_name_for",
+        "dr_discover_generic_data_contract",
+        "dr_write_candidate_requirement",
+        "dr_write_generic_requirement",
+        "dr_main",
+        "probe__repo_root_from_script",
+        "probe__project_from_args",
+        "probe_parse_args",
+        "probe_load_json",
+        "probe_save_json",
+        "probe__same_text",
+        "probe__candidate_matches_pending",
+        "probe__claim_ready_datasets",
+        "probe__failed_check_ids",
+        "probe__default_base_switch_failed_checks",
+        "probe__base_switch_pending_topic_decision",
+        "probe__write_topic_decision_report",
+        "probe__write_repo_env_strategy_report",
+        "probe__sync_pending_environment_candidate",
+        "probe__write_selection_report",
+        "probe__project_config",
+        "probe__existing_file",
+        "probe__candidate_probe_python",
+        "probe__pyproject_package_names",
+        "probe__candidate_package_names",
+        "probe__candidate_script_paths",
+        "probe__split_file_priority",
+        "probe__contract_sample_files",
+        "probe__bounded_candidate_repo_probe",
+        "probe__repo_from_state",
+        "probe_write_candidate_probe",
+        "probe_write_generic_probe",
+        "probe_main",
+        "plan__repo_root_from_script",
+        "plan_project_from_args",
+        "plan_load_json",
+        "plan_save_json",
+        "plan__current_find_run_id",
+        "plan__current_selected_execution_ids",
+        "plan__repo_path",
+        "plan__selected_repo",
+        "plan__ready_datasets",
+        "plan__blocked_datasets",
+        "plan__repo_payload",
+        "plan_write_generic_plan",
+        "plan_main",
+        "_legacy_project_adapter",
+        "run_data_requirements",
+        "run_dataset_probe",
+        "run_fresh_base_plan",
+        "main"
+      ],
+      "class_count": 0,
+      "classes": [],
+      "imports": [
+        "__future__",
+        "argparse",
+        "csv",
+        "datetime",
+        "gzip",
+        "json",
+        "os",
+        "re",
+        "subprocess",
+        "sys",
+        "pathlib",
+        "typing",
+        "types",
+        "argparse",
+        "datetime",
+        "json",
+        "os",
+        "subprocess",
+        "sys",
+        "tomllib",
+        "pathlib",
+        "typing",
+        "argparse",
+        "datetime",
+        "json",
+        "os",
+        "subprocess",
+        "sys",
+        "pathlib",
         "typing"
       ]
     },
@@ -729,9 +705,9 @@
         "argparse",
         "datetime",
         "json",
+        "re",
         "pathlib",
-        "project_paths",
-        "re"
+        "project_paths"
       ]
     },
     {
@@ -755,14 +731,14 @@
       "imports": [
         "__future__",
         "argparse",
-        "auto_research.source_selection",
         "datetime",
         "json",
-        "pathlib",
-        "project_paths",
         "subprocess",
         "sys",
-        "taste_pythonpath"
+        "pathlib",
+        "project_paths",
+        "taste_pythonpath",
+        "auto_research.source_selection"
       ]
     },
     {
@@ -770,7 +746,7 @@
       "path": "modules/environment/scripts/run_environment_stage.py",
       "owner": "environment",
       "owner_reason": "repo/data/base/environment selection, probing, or runtime locking",
-      "function_count": 48,
+      "function_count": 47,
       "functions": [
         "module_cmd",
         "load_json",
@@ -818,25 +794,24 @@
         "clerepo_selection_blocker",
         "write_iteration_strategy",
         "maybe_switch_to_evidence_ready_repo",
-        "main",
-        "selected_row"
+        "main"
       ],
       "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "argparse",
-        "auto_research.source_selection",
         "datetime",
         "json",
         "os",
-        "pathlib",
-        "project_paths",
         "re",
-        "run_project",
         "subprocess",
         "sys",
-        "taste_pythonpath"
+        "pathlib",
+        "project_paths",
+        "run_project",
+        "taste_pythonpath",
+        "auto_research.source_selection"
       ]
     },
     {
@@ -882,14 +857,14 @@
         "datetime",
         "json",
         "os",
-        "pathlib",
-        "project_config",
-        "project_paths",
-        "reference_reproduction_state",
         "subprocess",
         "sys",
+        "pathlib",
         "typing",
-        "work_status"
+        "project_paths",
+        "work_status",
+        "project_config",
+        "reference_reproduction_state"
       ]
     },
     {
@@ -932,14 +907,14 @@
         "hashlib",
         "json",
         "os",
-        "pathlib",
-        "project_paths",
         "re",
-        "reference_reproduction_state",
         "subprocess",
         "sys",
         "time",
-        "typing"
+        "pathlib",
+        "typing",
+        "project_paths",
+        "reference_reproduction_state"
       ]
     },
     {
@@ -947,7 +922,7 @@
       "path": "modules/environment/scripts/select_evidence_ready_repo.py",
       "owner": "environment",
       "owner_reason": "repo/data/base/environment selection, probing, or runtime locking",
-      "function_count": 52,
+      "function_count": 50,
       "functions": [
         "module_cmd",
         "load_json",
@@ -998,9 +973,7 @@
         "run_claude_topic_decision",
         "current_selected_plan_context",
         "active_repo_candidate",
-        "main",
-        "fresh_candidate_sort_key",
-        "save_selection_progress"
+        "main"
       ],
       "class_count": 0,
       "classes": [],
@@ -1010,20 +983,20 @@
         "datetime",
         "json",
         "os",
-        "pathlib",
-        "project_paths",
         "re",
-        "runtime_env",
-        "shlex",
         "shutil",
         "signal",
-        "subprocess",
-        "sys",
         "tarfile",
         "tempfile",
         "time",
+        "urllib.request",
+        "shlex",
+        "subprocess",
+        "sys",
+        "pathlib",
         "typing",
-        "urllib.request"
+        "runtime_env",
+        "project_paths"
       ]
     },
     {
@@ -1062,11 +1035,11 @@
         "argparse",
         "datetime",
         "json",
-        "literature_policy",
         "math",
         "pathlib",
-        "project_paths",
-        "typing"
+        "typing",
+        "literature_policy",
+        "project_paths"
       ]
     }
   ]

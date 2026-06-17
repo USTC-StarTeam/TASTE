@@ -3962,9 +3962,9 @@ def test_environment_blocker_replaces_stale_implementation_plan(monkeypatch, tmp
 
 def test_generic_data_plan_without_project_adapter_marks_selected_repo_data_blocked(tmp_path, monkeypatch):
     ensure_script_paths()
-    build_req = importlib.reload(importlib.import_module("build_repo_data_requirements"))
-    probe = importlib.reload(importlib.import_module("probe_repo_dataset"))
-    build_plan = importlib.reload(importlib.import_module("build_fresh_base_implementation_plan"))
+    build_req = importlib.reload(importlib.import_module("repo_data_tools"))
+    probe = importlib.reload(importlib.import_module("repo_data_tools"))
+    build_plan = importlib.reload(importlib.import_module("repo_data_tools"))
     for module in [build_req, probe, build_plan]:
         monkeypatch.setattr(module, "ROOT", tmp_path)
 
@@ -4167,7 +4167,7 @@ def test_selector_recovers_unauthorized_base_switch_active_repo_without_previous
 
 def test_fresh_base_implementation_plan_reports_base_switch_block_for_loader_ready_pending_candidate(tmp_path, monkeypatch):
     ensure_script_paths()
-    build_plan = importlib.reload(importlib.import_module("build_fresh_base_implementation_plan"))
+    build_plan = importlib.reload(importlib.import_module("repo_data_tools"))
     monkeypatch.setattr(build_plan, "ROOT", tmp_path)
 
     project = "demo_project"
@@ -4238,8 +4238,8 @@ def test_trajectory_capability_source_path_supports_migrated_layout(monkeypatch,
 
 def test_candidate_scoped_generic_data_contract_preserves_active_route_probe(monkeypatch, tmp_path):
     ensure_script_paths()
-    build_req = importlib.reload(importlib.import_module("build_repo_data_requirements"))
-    probe = importlib.reload(importlib.import_module("probe_repo_dataset"))
+    build_req = importlib.reload(importlib.import_module("repo_data_tools"))
+    probe = importlib.reload(importlib.import_module("repo_data_tools"))
     gate_script = importlib.reload(importlib.import_module("audit_deterministic_base_switch_gate"))
     for module in [build_req, probe, probe.candidate_data]:
         monkeypatch.setattr(module, "ROOT", tmp_path)
@@ -4472,8 +4472,8 @@ def test_experiment_launch_gate_honors_environment_base_switch_blocker(tmp_path)
 
 def test_candidate_scoped_repo_loader_import_probe_passes_without_touching_active_route(monkeypatch, tmp_path):
     ensure_script_paths()
-    build_req = importlib.reload(importlib.import_module("build_repo_data_requirements"))
-    probe = importlib.reload(importlib.import_module("probe_repo_dataset"))
+    build_req = importlib.reload(importlib.import_module("repo_data_tools"))
+    probe = importlib.reload(importlib.import_module("repo_data_tools"))
     gate_script = importlib.reload(importlib.import_module("audit_deterministic_base_switch_gate"))
     for module in [build_req, probe, probe.candidate_data]:
         monkeypatch.setattr(module, "ROOT", tmp_path)
@@ -4617,8 +4617,8 @@ def test_repo_candidate_pool_uses_candidate_scoped_contract_for_non_active_repo(
 
     ensure_script_paths()
     audit_pool = importlib.reload(importlib.import_module("audit_repo_candidate_pool"))
-    build_req = importlib.reload(importlib.import_module("build_repo_data_requirements"))
-    probe = importlib.reload(importlib.import_module("probe_repo_dataset"))
+    build_req = importlib.reload(importlib.import_module("repo_data_tools"))
+    probe = importlib.reload(importlib.import_module("repo_data_tools"))
     for module in [audit_pool, build_req, probe, probe.candidate_data]:
         monkeypatch.setattr(module, "ROOT", tmp_path)
 

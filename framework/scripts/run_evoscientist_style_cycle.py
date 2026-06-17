@@ -278,7 +278,7 @@ def main() -> None:
     append_phase(record, paths, 'verify', 'debugger_analyst', [
         ([sys.executable, 'framework/scripts/audit_pipeline_runnability.py', '--project', args.project, '--venue', args.venue], min(120, args.cycle_timeout_sec)),
         ([sys.executable, 'framework/scripts/research_healthcheck.py', '--project', args.project, '--venue', args.venue], args.command_timeout_sec),
-        ([sys.executable, 'framework/scripts/lint_wiki.py', '--project', args.project], args.command_timeout_sec),
+        ([sys.executable, 'framework/scripts/wiki_tools.py', '--tool-action', 'lint', '--project', args.project], args.command_timeout_sec),
         ([sys.executable, 'framework/scripts/report_status.py', '--project', args.project, '--venue', args.venue], args.command_timeout_sec),
     ], env)
 

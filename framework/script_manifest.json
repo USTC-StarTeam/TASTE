@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-06-15T22:40:11.956990+00:00",
-  "owner": "taste_framework",
-  "script_count": 46,
+  "generated_at": "2026-06-17T12:51:47.652208+00:00",
+  "module": "framework",
+  "script_count": 43,
   "scripts": [
     {
       "script": "agent_state.py",
@@ -30,19 +30,19 @@
         "process_alive",
         "refresh_process_flags"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
-        "dataclasses",
         "datetime",
         "json",
+        "dataclasses",
         "os",
         "pathlib",
-        "project_paths",
         "typing",
-        "uuid"
-      ],
-      "parse_error": ""
+        "uuid",
+        "project_paths"
+      ]
     },
     {
       "script": "audit_framework_content_coupling.py",
@@ -72,6 +72,7 @@
         "build",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -79,12 +80,11 @@
         "datetime",
         "json",
         "os",
-        "pathlib",
-        "project_paths",
         "re",
-        "typing"
-      ],
-      "parse_error": ""
+        "pathlib",
+        "typing",
+        "project_paths"
+      ]
     },
     {
       "script": "audit_pipeline_runnability.py",
@@ -100,20 +100,20 @@
         "check_script_compile",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "argparse",
         "json",
-        "llm_client",
-        "pathlib",
-        "project_paths",
         "shutil",
         "subprocess",
         "sys",
+        "pathlib",
+        "llm_client",
+        "project_paths",
         "taste_pythonpath"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "audit_research_trajectory_capabilities.py",
@@ -147,6 +147,7 @@
         "write_report",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -154,11 +155,10 @@
         "datetime",
         "json",
         "pathlib",
+        "typing",
         "project_paths",
-        "taste_pythonpath",
-        "typing"
-      ],
-      "parse_error": ""
+        "taste_pythonpath"
+      ]
     },
     {
       "script": "audit_workflow_connectivity.py",
@@ -171,6 +171,7 @@
         "load_json",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -178,48 +179,25 @@
         "json",
         "pathlib",
         "project_paths"
-      ],
-      "parse_error": ""
-    },
-    {
-      "script": "bootstrap_wiki.py",
-      "path": "framework/scripts/bootstrap_wiki.py",
-      "owner": "taste_framework",
-      "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
-      "function_count": 5,
-      "functions": [
-        "load_json",
-        "save_json",
-        "guess_entities",
-        "update_markdown_list",
-        "main"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "collections",
-        "json",
-        "pathlib",
-        "project_paths"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "build_research_trajectory_system.py",
       "path": "framework/scripts/build_research_trajectory_system.py",
       "owner": "taste_framework",
       "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
-      "function_count": 60,
+      "function_count": 62,
       "functions": [
         "_repo_root_from_script",
         "now_iso",
         "load_json",
         "save_json",
         "read_text",
+        "module_cmd",
         "run_helper",
         "run_capability_audit",
         "run_end_to_end_verification",
+        "_run_module_action",
         "run_paper_orchestra_state",
         "run_paper_normality_audit",
         "run_third_party_stack_sync",
@@ -273,23 +251,23 @@
         "write_markdown",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "argparse",
         "datetime",
-        "experiment_contracts",
         "hashlib",
         "json",
-        "pathlib",
-        "project_paths",
         "re",
         "subprocess",
         "sys",
-        "taste_pythonpath",
-        "typing"
-      ],
-      "parse_error": ""
+        "pathlib",
+        "typing",
+        "project_paths",
+        "experiment_contracts",
+        "taste_pythonpath"
+      ]
     },
     {
       "script": "build_stagnation_report.py",
@@ -302,6 +280,7 @@
         "save_json",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -310,8 +289,7 @@
         "json",
         "pathlib",
         "project_paths"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "check_llm_ready.py",
@@ -323,23 +301,23 @@
         "readiness_response_ok",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "argparse",
         "json",
-        "llm_client",
         "pathlib",
+        "llm_client",
         "project_paths"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "claude_project_session.py",
       "path": "framework/scripts/claude_project_session.py",
       "owner": "taste_framework",
       "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
-      "function_count": 70,
+      "function_count": 72,
       "functions": [
         "redact_secrets",
         "runtime_artifact_state_path_pattern",
@@ -360,6 +338,8 @@
         "command_tokens",
         "resolve_executable_token",
         "launcher_training_argv",
+        "command_uses_experiment_launcher",
+        "command_text_uses_experiment_launcher",
         "launcher_training_python_issue",
         "strip_shell_heredoc_payload",
         "is_read_only_log_monitor_command",
@@ -412,30 +392,30 @@
         "status",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
-        "agent_state",
         "argparse",
         "codecs",
         "datetime",
-        "guard_selected_base_route",
         "json",
         "os",
-        "pathlib",
-        "project_paths",
         "re",
-        "run_project",
-        "runtime_env",
         "selectors",
-        "shlex",
         "signal",
+        "shlex",
         "subprocess",
         "sys",
         "time",
-        "typing"
-      ],
-      "parse_error": ""
+        "pathlib",
+        "typing",
+        "agent_state",
+        "runtime_env",
+        "project_paths",
+        "guard_selected_base_route",
+        "run_project"
+      ]
     },
     {
       "script": "compile_prompt.py",
@@ -449,16 +429,16 @@
         "text_excerpt",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "argparse",
         "json",
-        "literature_policy",
         "pathlib",
-        "project_paths"
-      ],
-      "parse_error": ""
+        "project_paths",
+        "literature_policy"
+      ]
     },
     {
       "script": "create_project.py",
@@ -471,17 +451,17 @@
         "save_json",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "argparse",
         "json",
-        "pathlib",
-        "project_paths",
         "subprocess",
-        "sys"
-      ],
-      "parse_error": ""
+        "sys",
+        "pathlib",
+        "project_paths"
+      ]
     },
     {
       "script": "detect_machine_profile.py",
@@ -504,40 +484,20 @@
         "build_install_hints",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "argparse",
         "json",
         "os",
-        "paper_common",
-        "pathlib",
         "platform",
-        "project_paths",
         "shutil",
-        "subprocess"
-      ],
-      "parse_error": ""
-    },
-    {
-      "script": "export_obsidian.py",
-      "path": "framework/scripts/export_obsidian.py",
-      "owner": "taste_framework",
-      "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
-      "function_count": 2,
-      "functions": [
-        "mirror_markdown",
-        "main"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
+        "subprocess",
         "pathlib",
         "project_paths",
-        "shutil"
-      ],
-      "parse_error": ""
+        "paper_common"
+      ]
     },
     {
       "script": "generate_handoff.py",
@@ -551,6 +511,7 @@
         "compact",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -558,11 +519,10 @@
         "datetime",
         "json",
         "pathlib",
-        "project_paths",
         "typing",
+        "project_paths",
         "work_status"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "init_project.py",
@@ -575,6 +535,7 @@
         "ensure_text",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -582,8 +543,7 @@
         "json",
         "pathlib",
         "project_paths"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "init_workspace.py",
@@ -596,39 +556,16 @@
         "run",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "argparse",
-        "pathlib",
-        "project_paths",
         "subprocess",
-        "sys"
-      ],
-      "parse_error": ""
-    },
-    {
-      "script": "lint_wiki.py",
-      "path": "framework/scripts/lint_wiki.py",
-      "owner": "taste_framework",
-      "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
-      "function_count": 3,
-      "functions": [
-        "looks_meaningful",
-        "save_json",
-        "main"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "collections",
-        "json",
+        "sys",
         "pathlib",
-        "project_paths",
-        "re"
-      ],
-      "parse_error": ""
+        "project_paths"
+      ]
     },
     {
       "script": "list_projects.py",
@@ -640,13 +577,13 @@
         "_repo_root_from_script",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "json",
         "pathlib"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "llm_client.py",
@@ -667,17 +604,17 @@
         "_build_chat_payload",
         "call_llm"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "json",
         "os",
         "time",
-        "typing",
         "urllib.error",
-        "urllib.request"
-      ],
-      "parse_error": ""
+        "urllib.request",
+        "typing"
+      ]
     },
     {
       "script": "pipeline_guard.py",
@@ -706,20 +643,20 @@
         "run_safe_unblock",
         "guard_fresh_base_blocker_entry"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "datetime",
         "json",
-        "pathlib",
-        "project_config",
-        "project_paths",
         "subprocess",
         "sys",
+        "pathlib",
         "typing",
+        "project_paths",
+        "project_config",
         "work_status"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "project_config.py",
@@ -752,21 +689,21 @@
         "project_target_venue",
         "update_project_settings"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
-        "auto_research.source_selection",
-        "datetime",
         "json",
-        "pathlib",
-        "project_paths",
         "re",
+        "datetime",
         "subprocess",
         "sys",
+        "pathlib",
+        "typing",
+        "project_paths",
         "taste_pythonpath",
-        "typing"
-      ],
-      "parse_error": ""
+        "auto_research.source_selection"
+      ]
     },
     {
       "script": "project_paths.py",
@@ -794,21 +731,21 @@
         "project_experiment_python_from_config",
         "build_paths"
       ],
+      "class_count": 1,
       "classes": [
         "ProjectPaths"
       ],
       "imports": [
         "__future__",
-        "dataclasses",
         "json",
         "os",
-        "pathlib",
         "re",
         "shutil",
         "sys",
+        "dataclasses",
+        "pathlib",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "reconcile_state.py",
@@ -820,6 +757,7 @@
         "save_json",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -827,38 +765,17 @@
         "json",
         "pathlib",
         "project_paths"
-      ],
-      "parse_error": ""
-    },
-    {
-      "script": "refresh_index_and_log.py",
-      "path": "framework/scripts/refresh_index_and_log.py",
-      "owner": "taste_framework",
-      "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
-      "function_count": 3,
-      "functions": [
-        "one_line_summary",
-        "gather_markdown",
-        "main"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "datetime",
-        "pathlib",
-        "project_paths"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "refresh_project_reports.py",
       "path": "framework/scripts/refresh_project_reports.py",
       "owner": "taste_framework",
       "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
-      "function_count": 8,
+      "function_count": 9,
       "functions": [
         "_cmd",
+        "_module_cmd",
         "build_steps",
         "_refresh_env",
         "_load_json",
@@ -867,20 +784,20 @@
         "run_steps",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "argparse",
         "json",
         "os",
-        "pathlib",
-        "project_paths",
         "subprocess",
         "sys",
-        "taste_pythonpath",
-        "typing"
-      ],
-      "parse_error": ""
+        "pathlib",
+        "typing",
+        "project_paths",
+        "taste_pythonpath"
+      ]
     },
     {
       "script": "report_status.py",
@@ -910,19 +827,19 @@
         "_selected_base_viability_public_status",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "argparse",
         "json",
-        "llm_client",
-        "paper_common",
+        "shutil",
         "pathlib",
-        "pipeline_guard",
+        "llm_client",
         "project_paths",
-        "shutil"
-      ],
-      "parse_error": ""
+        "pipeline_guard",
+        "paper_common"
+      ]
     },
     {
       "script": "research_healthcheck.py",
@@ -945,19 +862,19 @@
         "_selected_base_viability_public_status",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "argparse",
         "json",
-        "llm_client",
-        "paper_common",
+        "shutil",
         "pathlib",
-        "pipeline_guard",
+        "llm_client",
         "project_paths",
-        "shutil"
-      ],
-      "parse_error": ""
+        "pipeline_guard",
+        "paper_common"
+      ]
     },
     {
       "script": "research_manifest.py",
@@ -969,16 +886,16 @@
         "load_json",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "argparse",
         "json",
-        "paper_common",
         "pathlib",
-        "project_paths"
-      ],
-      "parse_error": ""
+        "project_paths",
+        "paper_common"
+      ]
     },
     {
       "script": "run_autonomous_research.py",
@@ -1002,23 +919,23 @@
         "run",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
-        "agent_state",
         "argparse",
         "json",
         "os",
-        "pathlib",
-        "pipeline_guard",
-        "project_paths",
-        "run_full_research_cycle",
-        "run_project",
         "subprocess",
         "sys",
+        "pathlib",
+        "agent_state",
+        "project_paths",
+        "pipeline_guard",
+        "run_full_research_cycle",
+        "run_project",
         "taste_pythonpath"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "run_autoscientist_continuous.py",
@@ -1035,6 +952,7 @@
         "write_report",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -1042,24 +960,24 @@
         "datetime",
         "json",
         "os",
-        "pathlib",
-        "pipeline_guard",
-        "project_paths",
         "subprocess",
         "sys",
-        "time"
-      ],
-      "parse_error": ""
+        "time",
+        "pathlib",
+        "project_paths",
+        "pipeline_guard"
+      ]
     },
     {
       "script": "run_autoscientist_supervisor.py",
       "path": "framework/scripts/run_autoscientist_supervisor.py",
       "owner": "taste_framework",
       "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
-      "function_count": 12,
+      "function_count": 13,
       "functions": [
         "load_json",
         "save_json",
+        "module_cmd",
         "run",
         "real_evidence_ready",
         "latest_decision",
@@ -1071,6 +989,7 @@
         "supervisor_step",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -1078,23 +997,23 @@
         "datetime",
         "json",
         "os",
-        "pathlib",
-        "pipeline_guard",
-        "project_paths",
         "subprocess",
-        "sys"
-      ],
-      "parse_error": ""
+        "sys",
+        "pathlib",
+        "project_paths",
+        "pipeline_guard"
+      ]
     },
     {
       "script": "run_evoscientist_style_cycle.py",
       "path": "framework/scripts/run_evoscientist_style_cycle.py",
       "owner": "taste_framework",
       "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
-      "function_count": 10,
+      "function_count": 11,
       "functions": [
         "load_json",
         "save_json",
+        "module_cmd",
         "run",
         "base_env",
         "append_phase",
@@ -1104,6 +1023,7 @@
         "write_report",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -1111,22 +1031,23 @@
         "datetime",
         "json",
         "os",
-        "pathlib",
-        "pipeline_guard",
-        "project_paths",
         "subprocess",
         "sys",
-        "time"
-      ],
-      "parse_error": ""
+        "time",
+        "pathlib",
+        "project_paths",
+        "pipeline_guard"
+      ]
     },
     {
       "script": "run_full_research_cycle.py",
       "path": "framework/scripts/run_full_research_cycle.py",
       "owner": "taste_framework",
       "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
-      "function_count": 42,
+      "function_count": 44,
       "functions": [
+        "module_cmd",
+        "orchestration_cmd",
         "redact_secrets",
         "_secret_like_key",
         "redact_payload",
@@ -1170,36 +1091,36 @@
         "project_probe_python",
         "main"
       ],
+      "class_count": 1,
       "classes": [
         "FullCycle"
       ],
       "imports": [
         "__future__",
-        "agent_state",
         "argparse",
-        "auto_research.paths",
-        "dataclasses",
         "datetime",
-        "guard_selected_base_route",
         "hashlib",
         "json",
         "os",
-        "paper_common",
-        "pathlib",
-        "pipeline_guard",
-        "project_config",
-        "project_paths",
         "re",
-        "run_project",
         "select",
         "signal",
         "subprocess",
         "sys",
-        "taste_pythonpath",
         "time",
-        "typing"
-      ],
-      "parse_error": ""
+        "dataclasses",
+        "pathlib",
+        "typing",
+        "project_paths",
+        "agent_state",
+        "auto_research.paths",
+        "paper_common",
+        "project_config",
+        "pipeline_guard",
+        "guard_selected_base_route",
+        "run_project",
+        "taste_pythonpath"
+      ]
     },
     {
       "script": "run_in_conda.sh",
@@ -1208,9 +1129,9 @@
       "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
       "function_count": 0,
       "functions": [],
+      "class_count": 0,
       "classes": [],
-      "imports": [],
-      "parse_error": ""
+      "imports": []
     },
     {
       "script": "run_module.py",
@@ -1224,28 +1145,29 @@
         "command_for",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "argparse",
         "os",
-        "pathlib",
         "subprocess",
         "sys",
+        "pathlib",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "run_project.py",
       "path": "framework/scripts/run_project.py",
       "owner": "taste_framework",
       "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
-      "function_count": 47,
+      "function_count": 48,
       "functions": [
         "load_json",
         "save_json",
         "runtime_env",
+        "module_cmd",
         "run",
         "parse_args",
         "load_literature_plan",
@@ -1291,28 +1213,28 @@
         "execute_parallel_plan",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "argparse",
-        "auto_research.source_selection",
         "datetime",
-        "experiment_contracts",
         "json",
         "os",
-        "pathlib",
-        "pipeline_guard",
-        "project_paths",
         "re",
         "selectors",
         "shlex",
         "shutil",
         "subprocess",
         "sys",
+        "time",
+        "pathlib",
+        "project_paths",
+        "experiment_contracts",
+        "pipeline_guard",
         "taste_pythonpath",
-        "time"
-      ],
-      "parse_error": ""
+        "auto_research.source_selection"
+      ]
     },
     {
       "script": "run_research_trajectory_supervisor.py",
@@ -1341,24 +1263,24 @@
         "load_supervisor_state",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
-        "agent_state",
         "argparse",
         "atexit",
         "datetime",
         "json",
         "os",
-        "pathlib",
-        "pipeline_guard",
-        "project_paths",
         "subprocess",
         "sys",
-        "taste_pythonpath",
-        "typing"
-      ],
-      "parse_error": ""
+        "pathlib",
+        "typing",
+        "agent_state",
+        "project_paths",
+        "pipeline_guard",
+        "taste_pythonpath"
+      ]
     },
     {
       "script": "run_supervision_tick.py",
@@ -1417,26 +1339,26 @@
         "generic_supervision_tick",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
-        "agent_state",
         "argparse",
         "datetime",
         "json",
         "os",
-        "pathlib",
-        "project_config",
-        "project_paths",
         "re",
         "subprocess",
         "sys",
-        "typing",
         "urllib.error",
         "urllib.request",
+        "pathlib",
+        "typing",
+        "agent_state",
+        "project_config",
+        "project_paths",
         "work_status"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "runtime_env.py",
@@ -1460,21 +1382,21 @@
         "_executable_check",
         "runtime_diagnostics"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "glob",
         "json",
         "os",
-        "pathlib",
-        "project_paths",
         "shutil",
         "subprocess",
         "sys",
+        "pathlib",
+        "typing",
         "taste_pythonpath",
-        "typing"
-      ],
-      "parse_error": ""
+        "project_paths"
+      ]
     },
     {
       "script": "setup_git_guardrails.py",
@@ -1487,15 +1409,15 @@
         "merge_gitignore",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "argparse",
+        "subprocess",
         "pathlib",
-        "project_paths",
-        "subprocess"
-      ],
-      "parse_error": ""
+        "project_paths"
+      ]
     },
     {
       "script": "sync_outputs.py",
@@ -1521,24 +1443,24 @@
         "render_report",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "argparse",
-        "auto_research.paths",
-        "auto_research.source_selection",
         "datetime",
         "json",
-        "literature_policy",
-        "pathlib",
-        "project_paths",
         "re",
         "shutil",
         "sys",
+        "pathlib",
+        "typing",
+        "project_paths",
+        "literature_policy",
         "taste_pythonpath",
-        "typing"
-      ],
-      "parse_error": ""
+        "auto_research.source_selection",
+        "auto_research.paths"
+      ]
     },
     {
       "script": "taste_pythonpath.py",
@@ -1556,17 +1478,17 @@
         "taste_pythonpath_string",
         "ensure_taste_pythonpath"
       ],
+      "class_count": 1,
       "classes": [
         "ScriptPathResolver"
       ],
       "imports": [
         "__future__",
         "os",
-        "pathlib",
         "sys",
+        "pathlib",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "update_evolution_memory.py",
@@ -1579,16 +1501,16 @@
         "summarize_method",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "argparse",
         "json",
-        "paper_common",
         "pathlib",
-        "project_paths"
-      ],
-      "parse_error": ""
+        "project_paths",
+        "paper_common"
+      ]
     },
     {
       "script": "verify_research_trajectory_end_to_end.py",
@@ -1622,6 +1544,7 @@
         "write_report",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -1629,11 +1552,59 @@
         "datetime",
         "json",
         "pathlib",
+        "typing",
         "project_paths",
-        "taste_pythonpath",
-        "typing"
+        "taste_pythonpath"
+      ]
+    },
+    {
+      "script": "wiki_tools.py",
+      "path": "framework/scripts/wiki_tools.py",
+      "owner": "taste_framework",
+      "owner_reason": "TASTE orchestration, project state, runtime, supervision, or compatibility framework",
+      "function_count": 15,
+      "functions": [
+        "boot_load_json",
+        "boot_save_json",
+        "boot_guess_entities",
+        "boot_update_markdown_list",
+        "boot_main",
+        "export_mirror_markdown",
+        "export_main",
+        "lint_looks_meaningful",
+        "lint_save_json",
+        "lint_main",
+        "index_one_line_summary",
+        "index_gather_markdown",
+        "index_main",
+        "_run_legacy_main",
+        "main"
       ],
-      "parse_error": ""
+      "class_count": 0,
+      "classes": [],
+      "imports": [
+        "__future__",
+        "argparse",
+        "sys",
+        "json",
+        "collections",
+        "pathlib",
+        "project_paths",
+        "argparse",
+        "shutil",
+        "pathlib",
+        "project_paths",
+        "argparse",
+        "json",
+        "re",
+        "collections",
+        "pathlib",
+        "project_paths",
+        "argparse",
+        "datetime",
+        "pathlib",
+        "project_paths"
+      ]
     },
     {
       "script": "work_status.py",
@@ -1665,15 +1636,15 @@
         "append_session_snapshot_status",
         "append_guard_status"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "datetime",
         "json",
-        "project_paths",
-        "typing"
-      ],
-      "parse_error": ""
+        "typing",
+        "project_paths"
+      ]
     }
   ]
 }

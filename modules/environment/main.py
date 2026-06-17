@@ -16,7 +16,7 @@ RESPONSIBILITY = 'Select audited code/data bases, probe loaders, and lock the ex
 REQUIRED_EXTERNAL_INPUTS = ('selected_plan_contract', 'candidate_repo_data_artifacts', 'runtime_config')
 ARTIFACTS_IN = ('plans.json', 'literature_tool_packet.json', 'repo/data candidates')
 ARTIFACTS_OUT = ('evidence_ready_repo_selection.json', 'repo_env_bootstrap.json', 'dataset registry', 'reference/data gates')
-PRIVATE_BACKEND_ROOTS = ('modules/environment/scripts/run_environment_stage.py', 'modules/environment/scripts/select_evidence_ready_repo.py', 'modules/environment/scripts/bootstrap_repo_env.py', 'modules/environment/scripts/environment_data_tools.py')
+PRIVATE_BACKEND_ROOTS = ('modules/environment/scripts/run_environment_stage.py', 'modules/environment/scripts/select_evidence_ready_repo.py', 'modules/environment/scripts/bootstrap_repo_env.py', 'modules/environment/scripts/environment_data_tools.py', 'modules/environment/scripts/repo_data_tools.py')
 
 
 @dataclass(slots=True)
@@ -137,6 +137,18 @@ ENVIRONMENT_DATA_TOOL_ACTIONS = {
     "data_unavailability_policy": "data_policy",
 }
 
+
+ENVIRONMENT_REPO_DATA_TOOL_ACTIONS = {
+    "data_requirements": "data_requirements",
+    "build_repo_data_requirements": "data_requirements",
+    "repo_data_requirements": "data_requirements",
+    "probe_repo": "dataset_probe",
+    "probe_repo_dataset": "dataset_probe",
+    "dataset_probe": "dataset_probe",
+    "fresh_base_plan": "fresh_base_plan",
+    "build_fresh_base_implementation_plan": "fresh_base_plan",
+}
+
 ACTION_ALIASES = {
     "": "run_environment_stage",
     "run": "run_environment_stage",
@@ -149,17 +161,13 @@ ACTION_ALIASES = {
     "probe_selected_base_reference": "probe_selected_base_reference",
     "bootstrap": "bootstrap_repo_env",
     "bootstrap_repo": "bootstrap_repo_env",
-    "data_requirements": "build_repo_data_requirements",
-    "probe_repo": "probe_repo_dataset",
     "restart_discovery": "restart_after_data_blocker",
     "candidate_pool": "audit_repo_candidate_pool",
     "fresh_base_data_probe": "probe_fresh_base_data_acquisition",
     "probe_candidate_base_reference": "probe_candidate_base_reference",
     "base_switch_gate": "audit_deterministic_base_switch_gate",
     "execute_base_switch": "execute_authorized_base_switch",
-    "repo_data_requirements": "build_repo_data_requirements",
     "obsolete_cleanup": "audit_obsolete_baseline_cleanup",
-    "fresh_base_plan": "build_fresh_base_implementation_plan",
     "selected_base_viability": "audit_selected_base_viability",
     "safe_unblock": "run_safe_unblock",
 }
@@ -174,6 +182,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(_contract_payload(), ensure_ascii=False, indent=2))
         return 0
     action = _normalize_action(ns.action)
+    if action in ENVIRONMENT_REPO_DATA_TOOL_ACTIONS:
+        return _run_script("repo_data_tools", ["--tool-action", ENVIRONMENT_REPO_DATA_TOOL_ACTIONS[action], *rest])
     if action in ENVIRONMENT_DATA_TOOL_ACTIONS:
         return _run_script("environment_data_tools", ["--tool-action", ENVIRONMENT_DATA_TOOL_ACTIONS[action], *rest])
     return _run_script(ACTION_ALIASES.get(action, action), rest)

@@ -61,8 +61,7 @@
 | 脚本 | 真实作用 |
 | --- | --- |
 | `scripts/bootstrap_repo_env.py` | 创建/检查 Conda 环境、pip 安装、导入验证和运行命令记录。 |
-| `scripts/build_repo_data_requirements.py` | 从仓库和计划中构建数据需求合同。 |
-| `scripts/probe_repo_dataset.py` | 探测 repo 数据集和 loader；没有通用适配时给出安全 blocker。 |
+| `scripts/repo_data_tools.py` | 合并后的 repo 数据合同、repo dataset/loader probe 和 fresh-base implementation plan 工具；通过 `--tool-action data_requirements/dataset_probe/fresh_base_plan` 选择子功能，公开 action 由 `main.py` 暴露。 |
 | `scripts/probe_fresh_base_data_acquisition.py` | 对当前 Find 新基底做有界数据获取探针。 |
 | `scripts/repo_first_backtrack.py` | 从 repo 反向推断数据需求和缺口。 |
 | `scripts/restart_after_data_blocker.py` | 数据阻塞后扩大候选发现，而不是硬塞当前不可用基底。 |
@@ -88,11 +87,10 @@
 | `scripts/probe_selected_base_reference.py` | 对当前选中基底触发参考证据探测。 |
 | `scripts/run_selected_base_reference_reproduction_audit.py` | 包装参考复现命令、解析指标并写入审计。 |
 | `scripts/run_safe_unblock.py` | 针对当前新基底的安全解阻循环。 |
-| `scripts/build_fresh_base_implementation_plan.py` | 在新基底已获证据后生成实现计划。 |
 
 ## 冗余控制原则
 
-- Environment 仍是脚本最多的模块。后续应优先合并为 repo_selection.py、data_contracts.py、base_switch_gates.py、environment_bootstrap.py、reference_reproduction.py 五个大块；保留当前入口名时可用薄 wrapper 兼容。
+- Environment 仍是脚本较多的模块。后续应继续向 repo_selection.py、base_switch_gates.py、environment_bootstrap.py、reference_reproduction.py 等大块收敛；保留项目 adapter 约定时必须通过统一工具分发，不再新增薄 wrapper。
 - 任何合并都必须保持 base-switch gate、数据证据和当前路线保护，不允许为了文件数减少破坏安全边界。
 - 修改本模块时必须先读相关脚本和 manifest，找到根因后再改；禁止为某个论文、某个项目、某个本机路径写特异规则。
 - 用户可见产物必须一遍生成正确；fallback 只能作为最后兼容路线，不能替代主流程质量。

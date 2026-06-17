@@ -84,7 +84,6 @@ PUBLIC_SCRIPT_ACTIONS: dict[tuple[str, str], str] = {
     ("finding", "run_literature_tool.py"): "literature_tool",
     ("finding", "run_literature_base_audit.py"): "literature_base_audit",
     ("finding", "select_fresh_research_base.py"): "fresh_base_selection",
-    ("environment", "build_fresh_base_implementation_plan.py"): "fresh_base_plan",
     ("environment", "probe_fresh_base_data_acquisition.py"): "fresh_base_data_probe",
     ("environment", "run_safe_unblock.py"): "safe_unblock",
     ("experimenting", "audit_reference_reproduction.py"): "reference_reproduction",
@@ -810,7 +809,7 @@ def action_template(kind: str, project: str, venue: str, skills: dict[str, str])
             ),
             "recommended_commands": [
                 command(project, "probe_fresh_base_data_acquisition.py", "--attempt-download", "--timeout-sec", "45"),
-                command(project, "build_fresh_base_implementation_plan.py"),
+                module_command(project, "environment", "fresh_base_plan"),
                 command(project, venue, "audit_reference_reproduction.py"),
                 command(project, venue, "build_blocker_action_plan.py"),
             ],
@@ -832,7 +831,7 @@ def action_template(kind: str, project: str, venue: str, skills: dict[str, str])
                 "Create/record the minimal environment manifest and run bounded read-only reference-protocol probes for the ready selected-base datasets."
             ),
             "recommended_commands": [
-                command(project, "build_fresh_base_implementation_plan.py"),
+                module_command(project, "environment", "fresh_base_plan"),
                 command(project, "probe_selected_base_reference.py", "--mode", "protocol", "--timeout-sec", "240"),
                 command(project, venue, "audit_reference_reproduction.py"),
                 command(project, venue, "build_blocker_action_plan.py"),
@@ -902,7 +901,7 @@ def action_template(kind: str, project: str, venue: str, skills: dict[str, str])
             "recommended_commands": [
                 command(project, venue, "build_literature_tool_packet.py"),
                 command(project, "select_fresh_research_base.py"),
-                command(project, "build_fresh_base_implementation_plan.py"),
+                module_command(project, "environment", "fresh_base_plan"),
                 command(project, "run_literature_base_audit.py", "--limit", "12", "--repo-search-per-candidate", "4"),
                 command(project, venue, "audit_reference_reproduction.py"),
                 command(project, venue, "build_blocker_action_plan.py"),

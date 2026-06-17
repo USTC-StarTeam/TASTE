@@ -1214,13 +1214,13 @@ def main() -> int:
             plan_cmd.extend(['--command-template', args.command_template])
         run(plan_cmd, paths.root, paths.logs / '05b_parallel_plan.log')
 
-    run([sys.executable, str(script_dir / 'bootstrap_wiki.py'), '--project', args.project], paths.root, paths.logs / '06_bootstrap_wiki.log')
+    run([sys.executable, str(script_dir / 'wiki_tools.py'), '--tool-action', 'bootstrap', '--project', args.project], paths.root, paths.logs / '06_bootstrap_wiki.log')
     run(module_cmd('finding', 'paper_quality', '--project', args.project), paths.root, paths.logs / '07_assess_paper_quality.log')
     run(module_cmd('finding', 'tool_packet', '--project', args.project, *(['--venue', args.venue] if args.venue else [])), paths.root, paths.logs / '07aa_literature_tool_packet_refresh.log', timeout=180)
     run(module_cmd('environment', 'assess_repo', '--project', args.project), paths.root, paths.logs / '07a_assess_repo_candidates.log')
     run(module_cmd('ideation', 'assess', '--project', args.project), paths.root, paths.logs / '07b_idea_assessment.log')
     run(module_cmd('experimenting', 'reference_reproduction', '--project', args.project, *(['--venue', args.venue] if args.venue else [])), paths.root, paths.logs / '07c_reference_reproduction_gate.log')
-    run([sys.executable, str(script_dir / 'refresh_index_and_log.py'), '--project', args.project, '--log-entry', f'iteration topic={topic} discovery={discovery_mode or ["manual_only"]}'], paths.root, paths.logs / '08_refresh_index.log')
+    run([sys.executable, str(script_dir / 'wiki_tools.py'), '--tool-action', 'refresh_index', '--project', args.project, '--log-entry', f'iteration topic={topic} discovery={discovery_mode or ["manual_only"]}'], paths.root, paths.logs / '08_refresh_index.log')
     run([sys.executable, str(script_dir / 'compile_prompt.py'), '--project', args.project], paths.root, paths.logs / '09_compile_prompt.log')
 
     llm_status = 'find_only; downstream modules use Claude Code'
@@ -1234,7 +1234,7 @@ def main() -> int:
         run(module_cmd('ideation', 'arena', '--project', args.project), paths.root, paths.logs / '12d_refresh_hypothesis_arena.log')
         run(module_cmd('experimenting', 'reference_reproduction', '--project', args.project, *(['--venue', args.venue] if args.venue else [])), paths.root, paths.logs / '12f_reference_reproduction_gate.log')
 
-    run([sys.executable, str(script_dir / 'lint_wiki.py'), '--project', args.project], paths.root, paths.logs / '11_lint.log')
+    run([sys.executable, str(script_dir / 'wiki_tools.py'), '--tool-action', 'lint', '--project', args.project], paths.root, paths.logs / '11_lint.log')
     run([sys.executable, str(script_dir / 'research_healthcheck.py'), '--project', args.project], paths.root, paths.logs / '12_healthcheck.log')
     run([sys.executable, str(script_dir / 'audit_workflow_connectivity.py'), '--project', args.project], paths.root, paths.logs / '12c_workflow_connectivity.log')
     run(module_cmd('planning', 'reflect', '--project', args.project), paths.root, paths.logs / '13_planning_reflection.log')
@@ -1245,7 +1245,7 @@ def main() -> int:
     run(module_cmd('planning', 'blocker_action', '--project', args.project, *(['--venue', args.venue] if args.venue else [])), paths.root, paths.logs / '13f_blocker_action_plan.log')
     (paths.logs / '13c_project_agent_reflection_route.log').write_text('downstream reflection is handled by Claude Code artifacts and deterministic audits.\n', encoding='utf-8')
     run([sys.executable, str(script_dir / 'compile_prompt.py'), '--project', args.project], paths.root, paths.logs / '14_recompile_prompt.log')
-    export_code = run([sys.executable, str(script_dir / 'export_obsidian.py'), '--project', args.project], paths.root, paths.logs / '15_export_obsidian.log')
+    export_code = run([sys.executable, str(script_dir / 'wiki_tools.py'), '--tool-action', 'export_obsidian', '--project', args.project], paths.root, paths.logs / '15_export_obsidian.log')
     status_code = run([sys.executable, str(script_dir / 'report_status.py'), '--project', args.project], paths.root, paths.logs / '16_status.log')
 
     history = load_json(paths.state / 'loop_history.json')

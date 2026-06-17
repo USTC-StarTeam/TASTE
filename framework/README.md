@@ -44,7 +44,7 @@
 | --- | --- | --- |
 | 项目与路径 | `project_paths.py`, `project_config.py`, `create_project.py`, `init_project.py`, `init_workspace.py`, `list_projects.py` | 项目创建、路径解析、配置 patch、初始化目录。 |
 | 运行环境 | `runtime_env.py`, `detect_machine_profile.py`, `check_llm_ready.py`, `run_in_conda.sh`, `start_web.sh` | 检测 Python/Node/Claude/Conda/LLM 可用性并启动网页。 |
-| 网页/Find 编排 | `run_frontend.py`, `sync_outputs.py`, `refresh_index_and_log.py`, `compile_prompt.py`, `export_obsidian.py`, `bootstrap_wiki.py`, `lint_wiki.py` | 网页任务桥、Find 产物同步、wiki/报告兼容输出。 |
+| 网页/Find 编排 | `run_frontend.py`, `sync_outputs.py`, `wiki_tools.py`, `compile_prompt.py` | 网页任务桥、Find 产物同步、wiki/报告兼容输出。 |
 | Claude 项目会话 | `claude_project_session.py`, `agent_state.py`, `record_safe_unblock_web_job.py`, `generate_handoff.py`, `work_status.py` | 项目代理队列、会话状态、handoff/status 记录。 |
 | 全流程编排 | `run_project.py`, `run_autonomous_research.py`, `run_full_research_cycle.py`, `run_research_trajectory_supervisor.py`, `run_supervision_tick.py` | 从网页或自动科研入口串联七阶段；只负责编排和 gate。 |
 | 历史/兼容 supervisor | `run_autoscientist_continuous.py`, `run_autoscientist_supervisor.py`, `run_evoscientist_style_cycle.py` | 早期自动科研循环兼容入口；后续应收敛到统一 full-cycle/supervision 入口。 |

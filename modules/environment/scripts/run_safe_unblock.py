@@ -412,7 +412,7 @@ def main() -> int:
     env_selection = current_environment_selection(paths)
     base_label = selected_base_label(env_selection)
     results = []
-    results.append(run_step('fresh_base_implementation_plan', [py, str(ROOT / 'modules' / 'environment' / 'scripts' / 'build_fresh_base_implementation_plan.py'), '--project', args.project], timeout=180))
+    results.append(run_step('fresh_base_implementation_plan', [py, str(ROOT / 'framework' / 'scripts' / 'run_module.py'), 'environment', '--action', 'fresh_base_plan', '--project', args.project], timeout=180))
     fresh_plan = load_json(paths.state / 'fresh_base_implementation_plan.json', {})
     if isinstance(fresh_plan, dict) and fresh_plan.get('status') == 'implementation_ready_for_reference_probe':
         if not reference_protocol_passed(paths):
