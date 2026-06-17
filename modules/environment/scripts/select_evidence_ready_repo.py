@@ -22,6 +22,10 @@ from runtime_env import find_binary, interactive_env
 from project_paths import ROOT, build_paths, load_project_config
 
 
+def module_cmd(stage: str, action: str, *extra: str) -> list[str]:
+    return [sys.executable, 'framework/scripts/run_module.py', stage, '--action', action, *extra]
+
+
 DEFAULT_CLAUDE_TOPIC_DECISION = {
     'decision': 'needs-more-search',
     'confidence': 0.0,
@@ -953,7 +957,7 @@ def write_repo_env_strategy(project: str, paths, decision: dict[str, Any], selec
 
 
 def probe_repo(project: str, repo: Path, env_name: str, timeout_sec: int) -> dict[str, Any]:
-    proc = run([sys.executable, 'modules/environment/scripts/probe_repo_dataset.py', '--project', project, '--repo-path', str(repo), '--env-name', env_name, '--timeout-sec', str(timeout_sec)], ROOT, timeout=timeout_sec + 90)
+    proc = run(module_cmd('environment', 'probe_repo', '--project', project, '--repo-path', str(repo), '--env-name', env_name, '--timeout-sec', str(timeout_sec)), ROOT, timeout=timeout_sec + 90)
     paths = build_paths(project)
     payload = load_json(paths.state / 'real_dataset_probe.json', {})
     if not isinstance(payload, dict) or str(payload.get('repo_path')) != str(repo):
@@ -1016,24 +1020,22 @@ def probe_candidate_repo(project: str, repo: Path, row: dict[str, Any], env_name
     name, title = candidate_identity(row, repo)
     contract_path = candidate_state_path(paths, 'candidate_data_contract', repo, row)
     loader_path = candidate_state_path(paths, 'candidate_loader_probe', repo, row)
-    contract_proc = run([
-        sys.executable,
-        'modules/environment/scripts/build_repo_data_requirements.py',
+    contract_proc = run(module_cmd(
+        'environment', 'data_requirements',
         '--project', project,
         '--repo-path', str(repo),
         '--candidate-scope',
         '--candidate-name', name,
         '--candidate-title', title,
-    ], ROOT, timeout=min(max(60, timeout_sec), 180))
+    ), ROOT, timeout=min(max(60, timeout_sec), 180))
     contract = load_json(contract_path, {})
     existing_loader = load_json(loader_path, {})
     if loader_success(existing_loader):
         loader_proc = subprocess.CompletedProcess([], int(existing_loader.get('probe_return_code') or 0), '', '')
         loader = existing_loader
     else:
-        loader_proc = run([
-            sys.executable,
-            'modules/environment/scripts/probe_repo_dataset.py',
+        loader_proc = run(module_cmd(
+            'environment', 'probe_repo',
             '--project', project,
             '--repo-path', str(repo),
             '--env-name', env_name,
@@ -1041,7 +1043,7 @@ def probe_candidate_repo(project: str, repo: Path, row: dict[str, Any], env_name
             '--candidate-scope',
             '--candidate-name', name,
             '--candidate-title', title,
-        ], ROOT, timeout=timeout_sec + 90)
+        ), ROOT, timeout=timeout_sec + 90)
         loader = load_json(loader_path, {})
     if not isinstance(contract, dict) or str(contract.get('repo_path') or '') != str(repo):
         contract = {}
@@ -1851,14 +1853,14 @@ def main() -> int:
     # Restore active snapshots unless caller wrote a new active route; the environment stage will rebuild requirements for the selected active repo next.
     if selected and args.write_active and evidence_ready_for_active(selected) and selected.get('repo_path'):
         selected_repo_path = str(selected.get('repo_path'))
-        run([sys.executable, 'modules/environment/scripts/build_repo_data_requirements.py', '--project', args.project, '--repo-path', selected_repo_path], ROOT, timeout=180)
-        run([sys.executable, 'modules/environment/scripts/probe_repo_dataset.py', '--project', args.project, '--repo-path', selected_repo_path, '--env-name', env_name, '--timeout-sec', str(args.timeout_sec)], ROOT, timeout=args.timeout_sec + 90)
-        run([sys.executable, 'modules/environment/scripts/data_unavailability_policy.py', '--project', args.project], ROOT, timeout=120)
+        run(module_cmd('environment', 'data_requirements', '--project', args.project, '--repo-path', selected_repo_path), ROOT, timeout=180)
+        run(module_cmd('environment', 'probe_repo', '--project', args.project, '--repo-path', selected_repo_path, '--env-name', env_name, '--timeout-sec', str(args.timeout_sec)), ROOT, timeout=args.timeout_sec + 90)
+        run(module_cmd('environment', 'data_policy', '--project', args.project), ROOT, timeout=120)
     elif active_repo_recovery and args.write_active and active.get('repo_path'):
         recovered_repo_path = str(active.get('repo_path'))
-        run([sys.executable, 'modules/environment/scripts/build_repo_data_requirements.py', '--project', args.project, '--repo-path', recovered_repo_path], ROOT, timeout=180)
-        run([sys.executable, 'modules/environment/scripts/probe_repo_dataset.py', '--project', args.project, '--repo-path', recovered_repo_path, '--env-name', env_name, '--timeout-sec', str(args.timeout_sec)], ROOT, timeout=args.timeout_sec + 90)
-        run([sys.executable, 'modules/environment/scripts/data_unavailability_policy.py', '--project', args.project], ROOT, timeout=120)
+        run(module_cmd('environment', 'data_requirements', '--project', args.project, '--repo-path', recovered_repo_path), ROOT, timeout=180)
+        run(module_cmd('environment', 'probe_repo', '--project', args.project, '--repo-path', recovered_repo_path, '--env-name', env_name, '--timeout-sec', str(args.timeout_sec)), ROOT, timeout=args.timeout_sec + 90)
+        run(module_cmd('environment', 'data_policy', '--project', args.project), ROOT, timeout=120)
     else:
         if isinstance(original_req, dict) and original_req:
             save_json(paths.state / 'repo_data_requirements.json', original_req)

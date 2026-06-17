@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-17T10:32:47.600073+00:00",
+  "generated_at": "2026-06-17T11:09:48.695641+00:00",
   "module": "experimenting",
   "contract": {
     "directory": "modules/experimenting",
@@ -26,8 +26,7 @@
     "private_backend_roots": [
       "modules/experimenting/scripts/run_coding_agent.py",
       "modules/experimenting/scripts/launch_experiment_run.py",
-      "modules/experimenting/scripts/experiment_contracts.py",
-      "modules/experimenting/scripts/experiment_record_tools.py"
+      "modules/experimenting/scripts/experiment_contracts.py"
     ]
   },
   "script_count": 14,
@@ -36,7 +35,7 @@
       "script": "analyze_experiment_failures.py",
       "path": "modules/experimenting/scripts/analyze_experiment_failures.py",
       "owner": "experimenting",
-      "owner_reason": "classified by module boundary registry",
+      "owner_reason": "experiment execution, logging, repair, metric parsing, or empirical gates",
       "function_count": 5,
       "functions": [
         "load_json",
@@ -45,6 +44,7 @@
         "analyze_method",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -53,15 +53,14 @@
         "json",
         "pathlib",
         "project_paths"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "audit_experiment_iteration.py",
       "path": "modules/experimenting/scripts/audit_experiment_iteration.py",
       "owner": "experimenting",
-      "owner_reason": "classified by module boundary registry",
-      "function_count": 9,
+      "owner_reason": "experiment execution, logging, repair, metric parsing, or empirical gates",
+      "function_count": 10,
       "functions": [
         "now_iso",
         "load_json",
@@ -71,8 +70,10 @@
         "scalmetrics",
         "latest_rows",
         "build_experiment_iteration_audit",
-        "main"
+        "main",
+        "key"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -83,14 +84,13 @@
         "pathlib",
         "project_paths",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "audit_experiment_runtime_integrity.py",
       "path": "modules/experimenting/scripts/audit_experiment_runtime_integrity.py",
       "owner": "experimenting",
-      "owner_reason": "classified by module boundary registry",
+      "owner_reason": "experiment execution, logging, repair, metric parsing, or empirical gates",
       "function_count": 9,
       "functions": [
         "now_iso",
@@ -103,6 +103,7 @@
         "build_runtime_integrity_audit",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -115,15 +116,14 @@
         "subprocess",
         "sys",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "audit_reference_reproduction.py",
       "path": "modules/experimenting/scripts/audit_reference_reproduction.py",
       "owner": "experimenting",
-      "owner_reason": "classified by module boundary registry",
-      "function_count": 46,
+      "owner_reason": "experiment execution, logging, repair, metric parsing, or empirical gates",
+      "function_count": 47,
       "functions": [
         "now_iso",
         "load_json",
@@ -170,8 +170,10 @@
         "base_switch_exhaustion_summary",
         "build_reference_reproduction_gate",
         "sync_full_cycle_reference_gate_state",
-        "main"
+        "main",
+        "invalid"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -185,14 +187,13 @@
         "re",
         "reference_reproduction_state",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "experiment_contracts.py",
       "path": "modules/experimenting/scripts/experiment_contracts.py",
       "owner": "experimenting",
-      "owner_reason": "classified by module boundary registry",
+      "owner_reason": "experiment execution, logging, repair, metric parsing, or empirical gates",
       "function_count": 58,
       "functions": [
         "load_json",
@@ -254,6 +255,7 @@
         "supportive_claim_count",
         "evidence_gate"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -262,15 +264,14 @@
         "pathlib",
         "re",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "experiment_record_tools.py",
       "path": "modules/experimenting/scripts/experiment_record_tools.py",
       "owner": "experimenting",
-      "owner_reason": "classified by module boundary registry",
-      "function_count": 39,
+      "owner_reason": "experiment execution, logging, repair, metric parsing, or empirical gates",
+      "function_count": 40,
       "functions": [
         "now_iso",
         "load_json",
@@ -310,8 +311,10 @@
         "_log_upsert",
         "_log_rewrite_markdown",
         "run_log",
-        "main"
+        "main",
+        "run"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -325,14 +328,13 @@
         "re",
         "subprocess",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "experiment_run_watchdog.py",
       "path": "modules/experimenting/scripts/experiment_run_watchdog.py",
       "owner": "experimenting",
-      "owner_reason": "classified by module boundary registry",
+      "owner_reason": "experiment execution, logging, repair, metric parsing, or empirical gates",
       "function_count": 25,
       "functions": [
         "now_iso",
@@ -361,6 +363,7 @@
         "process_rows",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -376,15 +379,14 @@
         "subprocess",
         "time",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "import_experiment_artifacts.py",
       "path": "modules/experimenting/scripts/import_experiment_artifacts.py",
       "owner": "experimenting",
-      "owner_reason": "classified by module boundary registry",
-      "function_count": 47,
+      "owner_reason": "experiment execution, logging, repair, metric parsing, or empirical gates",
+      "function_count": 48,
       "functions": [
         "now_iso",
         "load_json",
@@ -432,8 +434,10 @@
         "import_failed_artifact",
         "finalize_artifact_contract",
         "import_artifact",
-        "main"
+        "main",
+        "add"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -447,14 +451,13 @@
         "re",
         "subprocess",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "launch_experiment_run.py",
       "path": "modules/experimenting/scripts/launch_experiment_run.py",
       "owner": "experimenting",
-      "owner_reason": "classified by module boundary registry",
+      "owner_reason": "experiment execution, logging, repair, metric parsing, or empirical gates",
       "function_count": 23,
       "functions": [
         "project_experiment_python",
@@ -481,6 +484,7 @@
         "experiment_launch_gate",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -495,14 +499,13 @@
         "subprocess",
         "sys",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "reference_reproduction_state.py",
       "path": "modules/experimenting/scripts/reference_reproduction_state.py",
       "owner": "experimenting",
-      "owner_reason": "classified by module boundary registry",
+      "owner_reason": "experiment execution, logging, repair, metric parsing, or empirical gates",
       "function_count": 26,
       "functions": [
         "now_iso",
@@ -532,6 +535,7 @@
         "bounded_reference_audit_recorded",
         "reference_full_job_state"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -540,37 +544,37 @@
         "os",
         "pathlib",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "run_active_repo_smoke.py",
       "path": "modules/experimenting/scripts/run_active_repo_smoke.py",
       "owner": "experimenting",
-      "owner_reason": "classified by module boundary registry",
+      "owner_reason": "experiment execution, logging, repair, metric parsing, or empirical gates",
       "function_count": 3,
       "functions": [
         "_repo_root_from_script",
         "_project_from_args",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "argparse",
         "json",
+        "os",
         "pathlib",
         "subprocess",
         "sys",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "run_coding_agent.py",
       "path": "modules/experimenting/scripts/run_coding_agent.py",
       "owner": "experimenting",
-      "owner_reason": "classified by module boundary registry",
+      "owner_reason": "experiment execution, logging, repair, metric parsing, or empirical gates",
       "function_count": 21,
       "functions": [
         "_repo_root_from_script",
@@ -595,6 +599,7 @@
         "run_claude_backend",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -612,14 +617,13 @@
         "sys",
         "taste_pythonpath",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "run_loop.py",
       "path": "modules/experimenting/scripts/run_loop.py",
       "owner": "experimenting",
-      "owner_reason": "classified by module boundary registry",
+      "owner_reason": "experiment execution, logging, repair, metric parsing, or empirical gates",
       "function_count": 10,
       "functions": [
         "_repo_root_from_script",
@@ -633,6 +637,7 @@
         "parse_args",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -647,14 +652,13 @@
         "re",
         "subprocess",
         "sys"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "run_real_repo_smoke.py",
       "path": "modules/experimenting/scripts/run_real_repo_smoke.py",
       "owner": "experimenting",
-      "owner_reason": "classified by module boundary registry",
+      "owner_reason": "experiment execution, logging, repair, metric parsing, or empirical gates",
       "function_count": 10,
       "functions": [
         "save_json",
@@ -668,6 +672,7 @@
         "parse_metrics",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -680,9 +685,9 @@
         "shlex",
         "subprocess",
         "sys",
-        "time"
-      ],
-      "parse_error": ""
+        "time",
+        "yaml"
+      ]
     }
   ]
 }

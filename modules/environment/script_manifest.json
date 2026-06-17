@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-15T22:40:11.956990+00:00",
+  "generated_at": "2026-06-17T11:09:47.484364+00:00",
   "module": "environment",
   "contract": {
     "directory": "modules/environment",
@@ -40,6 +40,7 @@
         "load_json",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -48,8 +49,7 @@
         "literature_policy",
         "pathlib",
         "project_paths"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "attempt_data_acquisition.py",
@@ -66,6 +66,7 @@
         "attempt_public_download",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -79,8 +80,7 @@
         "shutil",
         "subprocess",
         "urllib.parse"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "audit_dataset_path.py",
@@ -91,6 +91,7 @@
       "functions": [
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -98,8 +99,7 @@
         "json",
         "pathlib",
         "project_paths"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "audit_deterministic_base_switch_gate.py",
@@ -143,6 +143,7 @@
         "write_report",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -153,8 +154,7 @@
         "project_paths",
         "re",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "audit_local_repo.py",
@@ -166,6 +166,7 @@
         "contains_any",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -174,8 +175,7 @@
         "literature_policy",
         "pathlib",
         "project_paths"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "audit_obsolete_baseline_cleanup.py",
@@ -211,6 +211,7 @@
         "build",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -221,19 +222,19 @@
         "pathlib",
         "project_paths",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "audit_repo_candidate_pool.py",
       "path": "modules/environment/scripts/audit_repo_candidate_pool.py",
       "owner": "environment",
       "owner_reason": "repo/data/base/environment selection, probing, or runtime locking",
-      "function_count": 14,
+      "function_count": 15,
       "functions": [
         "load_json",
         "save_json",
         "slugify",
+        "module_cmd",
         "run",
         "clone_or_reuse",
         "has_any_file",
@@ -246,6 +247,7 @@
         "extract_candidate_loader_probe",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -258,8 +260,7 @@
         "shutil",
         "subprocess",
         "sys"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "audit_selected_base_viability.py",
@@ -298,6 +299,7 @@
         "write_report",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -310,8 +312,7 @@
         "project_paths",
         "subprocess",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "bootstrap_repo_env.py",
@@ -348,6 +349,7 @@
         "infer_pip_packages",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -360,8 +362,7 @@
         "re",
         "shutil",
         "subprocess"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "build_fresh_base_implementation_plan.py",
@@ -384,6 +385,7 @@
         "write_generic_plan",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -395,8 +397,7 @@
         "subprocess",
         "sys",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "build_repo_data_requirements.py",
@@ -432,6 +433,7 @@
         "write_generic_requirement",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -446,8 +448,7 @@
         "subprocess",
         "sys",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "data_unavailability_policy.py",
@@ -465,6 +466,7 @@
         "normalize_repo_candidates",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -473,8 +475,7 @@
         "json",
         "pathlib",
         "project_paths"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "execute_authorized_base_switch.py",
@@ -496,6 +497,7 @@
         "execute",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -506,8 +508,7 @@
         "project_paths",
         "shutil",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "guard_selected_base_route.py",
@@ -541,6 +542,7 @@
         "repair_project",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -552,8 +554,7 @@
         "re",
         "shutil",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "plan_data_acquisition.py",
@@ -566,6 +567,7 @@
         "save_json",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -574,8 +576,7 @@
         "pathlib",
         "project_paths",
         "shutil"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "probe_candidate_base_reference.py",
@@ -610,6 +611,7 @@
         "build_payload",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -620,14 +622,14 @@
         "hashlib",
         "json",
         "os",
+        "pandas",
         "pathlib",
         "project_paths",
         "re",
         "subprocess",
         "sys",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "probe_fresh_base_data_acquisition.py",
@@ -652,6 +654,7 @@
         "write_report",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -665,8 +668,7 @@
         "subprocess",
         "typing",
         "zipfile"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "probe_repo_dataset.py",
@@ -704,6 +706,7 @@
         "write_generic_probe",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -717,8 +720,7 @@
         "sys",
         "tomllib",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "probe_selected_base_reference.py",
@@ -731,17 +733,18 @@
         "_project_from_args",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
         "argparse",
         "json",
+        "os",
         "pathlib",
         "subprocess",
         "sys",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "reconcile_active_and_pool_candidates.py",
@@ -754,6 +757,7 @@
         "save_json",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -762,8 +766,7 @@
         "literature_policy",
         "pathlib",
         "project_paths"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "register_dataset.py",
@@ -777,6 +780,7 @@
         "readiness_score",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -784,8 +788,7 @@
         "json",
         "pathlib",
         "project_paths"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "register_repo_candidate.py",
@@ -798,6 +801,7 @@
         "save_json",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -806,8 +810,7 @@
         "literature_policy",
         "pathlib",
         "project_paths"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "repo_first_backtrack.py",
@@ -827,6 +830,7 @@
         "write_report",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -836,16 +840,16 @@
         "pathlib",
         "project_paths",
         "re"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "restart_after_data_blocker.py",
       "path": "modules/environment/scripts/restart_after_data_blocker.py",
       "owner": "environment",
       "owner_reason": "repo/data/base/environment selection, probing, or runtime locking",
-      "function_count": 7,
+      "function_count": 8,
       "functions": [
+        "module_cmd",
         "run",
         "load_json",
         "save_json",
@@ -854,6 +858,7 @@
         "write_report",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -866,16 +871,16 @@
         "subprocess",
         "sys",
         "taste_pythonpath"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "run_environment_stage.py",
       "path": "modules/environment/scripts/run_environment_stage.py",
       "owner": "environment",
       "owner_reason": "repo/data/base/environment selection, probing, or runtime locking",
-      "function_count": 46,
+      "function_count": 48,
       "functions": [
+        "module_cmd",
         "load_json",
         "infer_repo",
         "current_find_run_id",
@@ -921,8 +926,10 @@
         "clerepo_selection_blocker",
         "write_iteration_strategy",
         "maybe_switch_to_evidence_ready_repo",
-        "main"
+        "main",
+        "selected_row"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -938,8 +945,7 @@
         "subprocess",
         "sys",
         "taste_pythonpath"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "run_safe_unblock.py",
@@ -976,6 +982,7 @@
         "append_work_status",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -991,8 +998,7 @@
         "sys",
         "typing",
         "work_status"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "run_selected_base_reference_reproduction_audit.py",
@@ -1025,6 +1031,7 @@
         "build",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -1041,16 +1048,16 @@
         "sys",
         "time",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "select_evidence_ready_repo.py",
       "path": "modules/environment/scripts/select_evidence_ready_repo.py",
       "owner": "environment",
       "owner_reason": "repo/data/base/environment selection, probing, or runtime locking",
-      "function_count": 49,
+      "function_count": 52,
       "functions": [
+        "module_cmd",
         "load_json",
         "save_json",
         "_failed_check_ids",
@@ -1099,8 +1106,11 @@
         "run_claude_topic_decision",
         "current_selected_plan_context",
         "active_repo_candidate",
-        "main"
+        "main",
+        "fresh_candidate_sort_key",
+        "save_selection_progress"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -1122,8 +1132,7 @@
         "time",
         "typing",
         "urllib.request"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "select_fresh_research_base.py",
@@ -1154,6 +1163,7 @@
         "write_report",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -1165,8 +1175,7 @@
         "pathlib",
         "project_paths",
         "typing"
-      ],
-      "parse_error": ""
+      ]
     },
     {
       "script": "select_repo_candidate.py",
@@ -1178,6 +1187,7 @@
         "load_json",
         "main"
       ],
+      "class_count": 0,
       "classes": [],
       "imports": [
         "__future__",
@@ -1185,8 +1195,7 @@
         "json",
         "pathlib",
         "project_paths"
-      ],
-      "parse_error": ""
+      ]
     }
   ]
 }

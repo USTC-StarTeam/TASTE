@@ -1261,7 +1261,7 @@ def build_reference_reproduction_gate(project: str) -> dict[str, Any]:
                 "Update evidence_ready_repo_selection.json or repo_selection_blocker.json with fresh_find_run_id after the audit.",
             ] if decision == "literature_base_audit_required" else
             [
-                "Run modules/finding/scripts/run_literature_base_audit.py for the current Find candidates without writing active_repo.",
+                "Run framework/scripts/run_module.py finding --action literature_base_audit for the current Find candidates without writing active_repo.",
                 "Run modules/environment/scripts/run_environment_stage.py so Claude Code selects the anchor/base only after current strong recommendations, Read/Idea/Plan, repo/data/protocol evidence, and reproducibility feasibility are inspected.",
                 "Do not use stale active_repo/reference_reproduction_gate state from an older Find run.",
             ] if decision == "environment_anchor_selection_required" else
@@ -1356,7 +1356,7 @@ def sync_full_cycle_reference_gate_state(paths, payload: dict[str, Any]) -> None
                 str(paths.state / "literature_tool_packet.json"),
                 str(paths.planning / "finding" / "find_results.json"),
             ],
-            "next_action": "Continue modules/finding/scripts/run_literature_base_audit.py until all fresh Find base candidates are audited or an evidence-ready base is selected.",
+            "next_action": "Continue framework/scripts/run_module.py finding --action literature_base_audit until all fresh Find base candidates are audited or an evidence-ready base is selected.",
             "human_summary": "Find 已融入 TASTE；当前阻塞是候选基底代码/数据/环境审计尚未完成，不能继续 历史主线或论文写作。",
         }
         full.update({

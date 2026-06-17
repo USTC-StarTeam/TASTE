@@ -83,7 +83,7 @@ def main() -> None:
     else:
         lines.append('- no source detected; choose another repo or use literature/backtracking to locate official data.\n')
     lines.append('\n## Verification Contract\n')
-    lines.append('- After data is placed, run `{management_python()} modules/environment/scripts/build_repo_data_requirements.py --project <project>` and `{management_python()} modules/environment/scripts/probe_repo_dataset.py --project <project> --repo-path <active_repo>` again.\n')
+    lines.append('- After data is placed, run `{management_python()} framework/scripts/run_module.py environment --action data_requirements --project <project>` and `{management_python()} framework/scripts/run_module.py environment --action probe_repo --project <project> --repo-path <active_repo>` again.\n')
     lines.append('- Do not log a real experiment until `claim_ready=True` appears for at least one active-repo dataset.\n')
     (paths.reports / 'data_acquisition_plan.md').write_text(''.join(lines), encoding='utf-8')
     print(paths.reports / 'data_acquisition_plan.md')

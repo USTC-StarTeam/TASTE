@@ -125,6 +125,7 @@ DIRECT_ACTIONS = {"", "find", "pipeline", "find_pipeline"}
 FINDING_QUALITY_TOOL_ACTIONS = {"plan_literature", "paper_quality", "literature_base_candidates"}
 ACTION_ALIASES = {
     "literature_tool": "run_literature_tool",
+    "literature_base_audit": "run_literature_base_audit",
     "tool_packet": "build_literature_tool_packet",
     "venue_metadata_cache": "build_venue_metadata_cache",
     "openreview_cache": "build_openreview_cache",

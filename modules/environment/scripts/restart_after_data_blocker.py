@@ -14,6 +14,10 @@ from taste_pythonpath import ensure_taste_pythonpath
 ensure_taste_pythonpath(ROOT)
 from auto_research.source_selection import canonical_source_selection
 
+
+def module_cmd(stage: str, action: str, *extra: str) -> list[str]:
+    return [sys.executable, 'framework/scripts/run_module.py', stage, '--action', action, *extra]
+
 GENERIC_DATA_BLOCKER_QUERIES = [
     'reproducible public dataset benchmark code',
     'open source implementation public benchmark dataset',
@@ -191,9 +195,9 @@ def main() -> None:
     for query in queries:
         commands = []
         if selection.get('include_github'):
-            commands.append([sys.executable, 'modules/finding/scripts/discover_github_repos.py', '--project', args.project, '--query', query, '--limit', str(args.limit)])
+            commands.append(module_cmd('finding', 'discover_github', '--project', args.project, '--query', query, '--limit', str(args.limit)))
         if selection.get('include_arxiv'):
-            commands.append([sys.executable, 'modules/finding/scripts/discover_arxiv.py', '--project', args.project, '--query', query, '--max-results', '5'])
+            commands.append(module_cmd('finding', 'discover_arxiv', '--project', args.project, '--query', query, '--max-results', '5'))
         if not commands:
             payload['commands'].append({
                 'command': 'external discovery skipped by canonical source selection',
@@ -209,9 +213,6 @@ def main() -> None:
             payload['commands'].append(run(cmd, timeout=args.command_timeout_sec))
             payload['generated_at'] = dt.datetime.now(dt.timezone.utc).isoformat()
             write_report(paths, payload)
-
-    def module_cmd(stage: str, action: str, *extra: str) -> list[str]:
-        return [sys.executable, 'framework/scripts/run_module.py', stage, '--action', action, *extra]
 
     followups = [
         (module_cmd('finding', 'ingest_discovery', '--project', args.project, '--limit', str(args.limit)), min(120, args.command_timeout_sec)),

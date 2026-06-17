@@ -18,6 +18,10 @@ ensure_taste_pythonpath(ROOT)
 from auto_research.source_selection import canonical_source_selection
 
 
+def module_cmd(stage: str, action: str, *extra: str) -> list[str]:
+    return [sys.executable, 'framework/scripts/run_module.py', stage, '--action', action, *extra]
+
+
 def load_json(path: Path, default):
     if not path.exists():
         return default
@@ -248,14 +252,13 @@ def collect_candidate_base_switch_evidence(project: str, paths, env_name: str, v
     if not repo:
         print('TASTE candidate base-switch evidence collection skipped: candidate repo_path is missing.', flush=True)
         return []
-    base_cmd = [
-        sys.executable,
-        'modules/environment/scripts/probe_candidate_base_reference.py',
+    base_cmd = module_cmd(
+        'environment', 'probe_candidate_base_reference',
         '--project', project,
         '--repo-path', repo,
         '--env-name', env_name,
         '--timeout-sec', '300',
-    ]
+    )
     if name:
         base_cmd.extend(['--candidate-name', name])
     if title:
@@ -264,7 +267,7 @@ def collect_candidate_base_switch_evidence(project: str, paths, env_name: str, v
         base_cmd.extend(['--dataset', dataset])
     print(f'TASTE candidate base-switch evidence collection: repo={name or repo} dataset={dataset or "unknown"}', flush=True)
     results: list[dict] = []
-    run_optional([sys.executable, 'modules/environment/scripts/build_fresh_base_implementation_plan.py', '--project', project], ROOT, timeout=180)
+    run_optional(module_cmd('environment', 'fresh_base_plan', '--project', project), ROOT, timeout=180)
     protocol_rc = run_optional([*base_cmd, '--mode', 'protocol'], ROOT, timeout=360)
     results.append({'step': 'candidate_reference_protocol', 'return_code': protocol_rc})
     smoke_rc = 2
@@ -278,23 +281,23 @@ def collect_candidate_base_switch_evidence(project: str, paths, env_name: str, v
         results.append({'step': 'candidate_reference_full_reproduction_audit', 'return_code': full_rc})
     else:
         results.append({'step': 'candidate_reference_full_reproduction_audit', 'return_code': 2, 'skipped': 'smoke_blocked'})
-    gate_cmd = [sys.executable, 'modules/environment/scripts/audit_deterministic_base_switch_gate.py', '--project', project]
+    gate_cmd = module_cmd('environment', 'base_switch_gate', '--project', project)
     if venue:
         gate_cmd.extend(['--venue', venue])
     gate_rc = run_optional(gate_cmd, ROOT, timeout=180)
     results.append({'step': 'deterministic_base_switch_gate', 'return_code': gate_rc})
     gate = load_json(paths.state / 'base_switch_gate.json', {})
     if isinstance(gate, dict) and gate.get('status') == 'pass' and gate.get('decision') == 'authorize_base_switch' and gate.get('switch_authorized') is True:
-        exec_cmd = [sys.executable, 'modules/environment/scripts/execute_authorized_base_switch.py', '--project', project]
+        exec_cmd = module_cmd('environment', 'execute_base_switch', '--project', project)
         if venue:
             exec_cmd.extend(['--venue', venue])
         exec_rc = run_optional(exec_cmd, ROOT, timeout=180)
         results.append({'step': 'execute_authorized_base_switch', 'return_code': exec_rc})
-    audit_cmd = [sys.executable, 'modules/experimenting/scripts/audit_reference_reproduction.py', '--project', project]
+    audit_cmd = module_cmd('experimenting', 'reference_reproduction', '--project', project)
     if venue:
         audit_cmd.extend(['--venue', venue])
     results.append({'step': 'reference_reproduction_gate', 'return_code': run_optional(audit_cmd, ROOT, timeout=180)})
-    blocker_cmd = [sys.executable, 'modules/planning/scripts/build_blocker_action_plan.py', '--project', project]
+    blocker_cmd = module_cmd('planning', 'blocker_action', '--project', project)
     if venue:
         blocker_cmd.extend(['--venue', venue])
     results.append({'step': 'blocker_action_plan', 'return_code': run_optional(blocker_cmd, ROOT, timeout=180)})
@@ -306,10 +309,10 @@ def select_current_run_environment_repo(project: str, paths, env_name: str, max_
     if not run_id:
         raise SystemExit('Current Find run_id is missing; cannot perform environment-stage base selection.')
     # Build/refresh current-run candidate pool first; audit must consume the same Find run that the UI shows.
-    run_optional([sys.executable, 'modules/environment/scripts/select_fresh_research_base.py', '--project', project], ROOT)
-    run_optional([sys.executable, 'modules/finding/scripts/run_literature_base_audit.py', '--project', project, '--limit', '12', '--repo-search-per-candidate', '2', '--repo-limit', '5', '--probe-timeout-sec', '120', '--fresh-find-run-id', run_id], ROOT)
+    run_optional(module_cmd('environment', 'fresh_base_selection', '--project', project), ROOT)
+    run_optional(module_cmd('finding', 'literature_base_audit', '--project', project, '--limit', '12', '--repo-search-per-candidate', '2', '--repo-limit', '5', '--probe-timeout-sec', '120', '--fresh-find-run-id', run_id), ROOT)
     selector = [
-        sys.executable, 'modules/environment/scripts/select_evidence_ready_repo.py', '--project', project,
+        *module_cmd('environment', 'select_evidence_ready', '--project', project),
         '--env-name', env_name, '--limit', '12', '--timeout-sec', '180',
         '--allow-veto-fallback', '--write-active', '--use-claude-review',
         '--selection-stage', 'environment_claude_code',
@@ -335,7 +338,7 @@ def select_current_run_environment_repo(project: str, paths, env_name: str, max_
             if str(selection.get('selection_gate') or '') == BASE_SWITCH_SELECTION_GATE and not current_env_selection_valid(paths):
                 blocker_reason = 'Current Find environment-stage selection found a loader/data-ready candidate, but deterministic base-switch evidence remains incomplete; candidate stays proposal-only while TASTE records the exact reference/audit blockers.'
                 write_repo_selection_blocker(paths, blocker_reason, selection=selection)
-                run_optional([sys.executable, 'modules/environment/scripts/build_fresh_base_implementation_plan.py', '--project', project], ROOT, timeout=180)
+                run_optional(module_cmd('environment', 'fresh_base_plan', '--project', project), ROOT, timeout=180)
                 raise SystemExit(2)
         if rc == 0 and repo and Path(repo).exists() and current_env_selection_valid(paths):
             return repo
@@ -344,7 +347,7 @@ def select_current_run_environment_repo(project: str, paths, env_name: str, max_
     if isinstance(latest_selection, dict) and str(latest_selection.get('selection_gate') or '') == BASE_SWITCH_SELECTION_GATE:
         blocker_reason = 'Current Find environment-stage selection found a loader/data-ready candidate, but deterministic base-switch evidence remains incomplete; candidate stays proposal-only while TASTE continues evidence collection/search.'
         write_repo_selection_blocker(paths, blocker_reason, selection=latest_selection)
-        run_optional([sys.executable, 'modules/environment/scripts/build_fresh_base_implementation_plan.py', '--project', project], ROOT, timeout=180)
+        run_optional(module_cmd('environment', 'fresh_base_plan', '--project', project), ROOT, timeout=180)
     else:
         blocker_reason = 'Current Find environment-stage selection did not find an evidence-ready repo; old active_repo remains legacy/control only.'
         write_repo_selection_blocker(paths, blocker_reason, selection=latest_selection if isinstance(latest_selection, dict) else {})
@@ -447,11 +450,11 @@ def has_claim_ready_probe(paths, repo: str) -> bool:
 
 def refresh_repo_data(project: str, repo: str, env_name: str) -> None:
     paths = build_paths(project)
-    run([sys.executable, 'modules/environment/scripts/build_repo_data_requirements.py', '--project', project, '--repo-path', repo], ROOT)
+    run(module_cmd('environment', 'data_requirements', '--project', project, '--repo-path', repo), ROOT)
     if has_claim_ready_probe(paths, repo):
         print(f'TASTE repo/data refresh: reusing existing claim-ready loader probe for {repo}', flush=True)
         return
-    run([sys.executable, 'modules/environment/scripts/probe_repo_dataset.py', '--project', project, '--repo-path', repo, '--env-name', env_name, '--timeout-sec', '180'], ROOT)
+    run(module_cmd('environment', 'probe_repo', '--project', project, '--repo-path', repo, '--env-name', env_name, '--timeout-sec', '180'), ROOT)
 
 
 def claude_accepts_current_route(paths) -> bool:
@@ -734,14 +737,14 @@ def expand_repo_search(project: str, round_index: int, limit: int = 6, fresh_fin
     query = queries[(round_index - 1) % len(queries)]
     print(f"TASTE autonomous repo-search round {round_index}: {query}", flush=True)
     print("Environment repo search ignores Find-only source toggles; repo/data audit needs code evidence.", flush=True)
-    github_cmd = [sys.executable, "modules/finding/scripts/discover_github_repos.py", "--project", project, "--query", query, "--limit", str(limit), "--sort", "stars", "--order", "desc", "--ignore-source-selection", "--candidate-source", "environment_expanded_github_search"]
+    github_cmd = module_cmd('finding', 'discover_github', '--project', project, '--query', query, '--limit', str(limit), '--sort', 'stars', '--order', 'desc', '--ignore-source-selection', '--candidate-source', 'environment_expanded_github_search')
     if fresh_find_run_id:
         github_cmd.extend(["--fresh-find-run-id", fresh_find_run_id])
     run_optional(github_cmd, ROOT)
-    run_optional([sys.executable, "modules/finding/scripts/discover_arxiv.py", "--project", project, "--query", query, "--max-results", "5", "--ignore-source-selection"], ROOT)
-    run_optional([sys.executable, "modules/finding/scripts/ingest_discovery.py", "--project", project, "--limit", "12"], ROOT)
-    run_optional([sys.executable, "modules/environment/scripts/assess_repo_candidates.py", "--project", project], ROOT)
-    run_optional([sys.executable, "modules/environment/scripts/audit_repo_candidate_pool.py", "--project", project, "--limit", str(limit), "--include-watch", "--use-cursor"], ROOT)
+    run_optional(module_cmd('finding', 'discover_arxiv', '--project', project, '--query', query, '--max-results', '5', '--ignore-source-selection'), ROOT)
+    run_optional(module_cmd('finding', 'ingest_discovery', '--project', project, '--limit', '12'), ROOT)
+    run_optional(module_cmd('environment', 'assess_repo', '--project', project), ROOT)
+    run_optional(module_cmd('environment', 'candidate_pool', '--project', project, '--limit', str(limit), '--include-watch', '--use-cursor'), ROOT)
 
 def append_search_memory(paths, payload: dict) -> None:
     history_path = paths.state / 'repo_search_iteration_memory.json'
@@ -823,7 +826,7 @@ def maybe_switch_to_evidence_ready_repo(project: str, paths, env_name: str, curr
         return current_repo
     print('Active repo lacks either claim-ready data evidence or Claude acceptance as the best transformable route; The workflow will iterate repo discovery/audit until a paired route is found or explicitly rejected.', flush=True)
     selector = [
-        sys.executable, 'modules/environment/scripts/select_evidence_ready_repo.py', '--project', project,
+        *module_cmd('environment', 'select_evidence_ready', '--project', project),
         '--env-name', env_name, '--limit', '12', '--timeout-sec', '180',
         '--allow-veto-fallback', '--write-active', '--use-claude-review',
         '--selection-stage', 'environment_claude_code',
@@ -913,29 +916,29 @@ def main() -> int:
         )
     run([sys.executable, 'framework/scripts/setup_git_guardrails.py', '--project', args.project, '--repo-path', repo], ROOT)
     refresh_repo_data(args.project, repo, env_name)
-    run([sys.executable, 'modules/environment/scripts/build_fresh_base_implementation_plan.py', '--project', args.project], ROOT)
+    run(module_cmd('environment', 'fresh_base_plan', '--project', args.project), ROOT)
     should_bootstrap, bootstrap_reason = env_bootstrap_should_run(paths, cfg, env_name, repo, strategy)
     if not should_bootstrap:
         print(bootstrap_reason, flush=True)
     else:
         print(bootstrap_reason, flush=True)
-        bootstrap = [sys.executable, 'modules/environment/scripts/bootstrap_repo_env.py', '--project', args.project, '--repo-path', repo, '--env-name', env_name, '--verify-only', '--prepare-only']
+        bootstrap = module_cmd('environment', 'bootstrap', '--project', args.project, '--repo-path', repo, '--env-name', env_name, '--verify-only', '--prepare-only')
         if args.real_bootstrap_env:
             bootstrap = [item for item in bootstrap if item not in {'--verify-only', '--prepare-only'}]
             bootstrap.append('--update-project-config')
         run(bootstrap, ROOT)
-    run([sys.executable, 'modules/environment/scripts/data_unavailability_policy.py', '--project', args.project], ROOT)
-    audit_reference_cmd = [sys.executable, 'modules/experimenting/scripts/audit_reference_reproduction.py', '--project', args.project]
+    run(module_cmd('environment', 'data_policy', '--project', args.project), ROOT)
+    audit_reference_cmd = module_cmd('experimenting', 'reference_reproduction', '--project', args.project)
     if args.venue:
         audit_reference_cmd.extend(['--venue', args.venue])
     run_optional(audit_reference_cmd, ROOT)
     if not args.skip_reference_repair:
         repair_reference_reproduction_if_needed(args.project, paths, venue=args.venue)
         run_optional(audit_reference_cmd, ROOT)
-    run_optional([sys.executable, 'modules/experimenting/scripts/audit_experiment_iteration.py', '--project', args.project], ROOT)
-    run_optional([sys.executable, 'modules/writing/scripts/audit_paper_evidence.py', '--project', args.project], ROOT)
+    run_optional(module_cmd('experimenting', 'audit_iteration', '--project', args.project), ROOT)
+    run_optional(module_cmd('writing', 'audit_evidence', '--project', args.project), ROOT)
     run_optional([sys.executable, 'framework/scripts/build_research_trajectory_system.py', '--project', args.project], ROOT)
-    run_optional([sys.executable, 'modules/planning/scripts/build_blocker_action_plan.py', '--project', args.project], ROOT)
+    run_optional(module_cmd('planning', 'blocker_action', '--project', args.project), ROOT)
     run([sys.executable, 'framework/scripts/report_status.py', '--project', args.project], ROOT)
     print('TASTE environment stage complete. Environment creation is one-time; reruns only refresh read-only repo/data/status checks once locked. Formal experiment claims still require reference_reproduction_gate=pass and scientific_progress_gate=pass.', flush=True)
     return 0

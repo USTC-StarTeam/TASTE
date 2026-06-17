@@ -3715,11 +3715,11 @@ def test_environment_repo_search_ignores_find_source_toggles(monkeypatch):
 
     env_stage.expand_repo_search("demo_project", 1, limit=4)
 
-    github = next(cmd for cmd in calls if "modules/finding/scripts/discover_github_repos.py" in cmd)
-    arxiv = next(cmd for cmd in calls if "modules/finding/scripts/discover_arxiv.py" in cmd)
+    github = next(cmd for cmd in calls if "finding" in cmd and "discover_github" in cmd)
+    arxiv = next(cmd for cmd in calls if "finding" in cmd and "discover_arxiv" in cmd)
     assert "--ignore-source-selection" in github
     assert "--ignore-source-selection" in arxiv
-    assert any("modules/finding/scripts/ingest_discovery.py" in cmd for cmd in calls)
+    assert any("finding" in cmd and "ingest_discovery" in cmd for cmd in calls)
 
 
 
@@ -3856,8 +3856,8 @@ def test_environment_refresh_reuses_existing_claim_ready_probe(monkeypatch, tmp_
 
     env_stage.refresh_repo_data("demo", str(repo), "demo_env")
 
-    assert any("modules/environment/scripts/build_repo_data_requirements.py" in cmd for cmd in calls)
-    assert not any("modules/environment/scripts/probe_repo_dataset.py" in cmd for cmd in calls)
+    assert any("environment" in cmd and "data_requirements" in cmd for cmd in calls)
+    assert not any("environment" in cmd and "probe_repo" in cmd for cmd in calls)
 
 
 
@@ -3912,7 +3912,7 @@ def test_current_run_environment_selector_allows_active_repo_reaudit(monkeypatch
 
     def fake_run_optional(cmd, cwd, timeout=None):
         calls.append(cmd)
-        if "modules/environment/scripts/select_evidence_ready_repo.py" in cmd:
+        if "environment" in cmd and "select_evidence_ready" in cmd:
             write_json(paths.state / "evidence_ready_repo_selection.json", {"selected": {"repo_path": str(repo)}})
         return 0
 
@@ -3920,7 +3920,7 @@ def test_current_run_environment_selector_allows_active_repo_reaudit(monkeypatch
 
     selected = env_stage.select_current_run_environment_repo("demo", paths, "demo_env", max_rounds=1)
 
-    selector_cmd = next(cmd for cmd in calls if "modules/environment/scripts/select_evidence_ready_repo.py" in cmd)
+    selector_cmd = next(cmd for cmd in calls if "environment" in cmd and "select_evidence_ready" in cmd)
     assert selected == str(repo)
     assert "--fresh-find-run-id" in selector_cmd
     assert "--exclude-active-repo" not in selector_cmd
@@ -4653,10 +4653,10 @@ def test_repo_candidate_pool_uses_candidate_scoped_contract_for_non_active_repo(
         def value_after(flag: str) -> str:
             return cmd[cmd.index(flag) + 1] if flag in cmd else ""
 
-        if "modules/environment/scripts/build_repo_data_requirements.py" in cmd:
+        if "environment" in cmd and "data_requirements" in cmd:
             rc = build_req.write_candidate_requirement(project, value_after("--repo-path"), value_after("--candidate-name"), value_after("--candidate-title"))
             return subprocess.CompletedProcess(cmd, rc, "", "")
-        if "modules/environment/scripts/probe_repo_dataset.py" in cmd:
+        if "environment" in cmd and "probe_repo" in cmd:
             rc = probe.write_candidate_probe(project, value_after("--repo-path"), "demo_env", value_after("--candidate-name"), value_after("--candidate-title"))
             return subprocess.CompletedProcess(cmd, rc, "", "")
         return subprocess.CompletedProcess(cmd, 0, "", "")
@@ -9381,7 +9381,7 @@ def test_environment_stage_bootstrap_verifies_without_auto_install():
     script_path = Path(__file__).resolve().parents[1] / "modules" / "environment" / "scripts" / "run_environment_stage.py"
     text = script_path.read_text(encoding="utf-8")
 
-    bootstrap_line = next(line for line in text.splitlines() if "modules/environment/scripts/bootstrap_repo_env.py" in line and "bootstrap =" in line)
+    bootstrap_line = next(line for line in text.splitlines() if "module_cmd('environment', 'bootstrap'" in line and "bootstrap =" in line)
     assert "--verify-only" in bootstrap_line
     assert "--auto-install-missing" not in bootstrap_line
 
@@ -10089,7 +10089,7 @@ def test_environment_selection_stops_after_base_switch_evidence_collection(tmp_p
 
     def fake_run_optional(cmd, *_args, **_kwargs):
         calls.append(cmd)
-        if any("select_evidence_ready_repo.py" in str(part) for part in cmd):
+        if "environment" in cmd and "select_evidence_ready" in cmd:
             write_json(paths.state / "evidence_ready_repo_selection.json", selection)
             return 2
         return 0
@@ -10106,7 +10106,7 @@ def test_environment_selection_stops_after_base_switch_evidence_collection(tmp_p
     blocker = read_json(paths.state / "repo_selection_blocker.json")
     assert blocker["selection_gate"] == "blocked_candidate_base_switch_gate_required"
     assert "deterministic base-switch evidence remains incomplete" in blocker["reason"]
-    assert any(any("build_fresh_base_implementation_plan.py" in str(part) for part in cmd) for cmd in calls)
+    assert any("environment" in cmd and "fresh_base_plan" in cmd for cmd in calls)
 
 def test_environment_current_find_reaudits_evidence_ready_active_repo(tmp_path):
     import importlib.util

@@ -31,6 +31,10 @@ def slugify(value: str) -> str:
     return re.sub(r'[^a-zA-Z0-9]+', '_', value.strip().lower()).strip('_') or 'repo'
 
 
+
+def module_cmd(stage: str, action: str, *extra: str) -> list[str]:
+    return [sys.executable, 'framework/scripts/run_module.py', stage, '--action', action, *extra]
+
 def run(cmd: list[str], cwd: Path = ROOT, timeout: int = 300) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, timeout=timeout)
@@ -117,7 +121,7 @@ def candidate_state_path(paths, prefix: str, repo: Path, row: dict) -> Path:
 
 
 def extract_data_requirements(project: str, repo: Path, row: dict | None = None, *, candidate_scope: bool = False) -> dict:
-    cmd = [sys.executable, 'modules/environment/scripts/build_repo_data_requirements.py', '--project', project, '--repo-path', str(repo)]
+    cmd = module_cmd('environment', 'data_requirements', '--project', project, '--repo-path', str(repo))
     paths = build_paths(project)
     state_path = paths.state / 'repo_data_requirements.json'
     if candidate_scope:
@@ -151,15 +155,14 @@ def extract_candidate_loader_probe(project: str, repo: Path, row: dict) -> dict:
     existing = load_json(state_path, {})
     if loader_success(existing):
         return {'return_code': int(existing.get('probe_return_code') or 0), 'probe': existing, 'state_path': str(state_path), 'reused_existing_loader_success': True}
-    proc = run([
-        sys.executable,
-        'modules/environment/scripts/probe_repo_dataset.py',
+    proc = run(module_cmd(
+        'environment', 'probe_repo',
         '--project', project,
         '--repo-path', str(repo),
         '--candidate-scope',
         '--candidate-name', name,
         '--candidate-title', title,
-    ], ROOT, timeout=120)
+    ), ROOT, timeout=120)
     probe = load_json(state_path, {})
     return {'return_code': proc.returncode, 'probe': probe if isinstance(probe, dict) else {}, 'state_path': str(state_path), 'stderr_tail': (proc.stderr or '')[-1000:]}
 

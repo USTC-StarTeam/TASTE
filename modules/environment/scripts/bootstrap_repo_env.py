@@ -418,7 +418,7 @@ def main() -> None:
     if not conda_exe:
         lines.append('## Blockers\n')
         lines.append('- conda runtime is not currently available.\n')
-        lines.append(f'- remediation: install/configure conda externally, then run `{management_python()} modules/environment/scripts/bootstrap_repo_env.py --project {args.project} --repo-path {repo} --verify-only --prepare-only`\n')
+        lines.append(f'- remediation: install/configure conda externally, then run `{management_python()} framework/scripts/run_module.py environment --action bootstrap --project {args.project} --repo-path {repo} --verify-only --prepare-only`\n')
     elif args.verify_only and not env_exists:
         lines.append('## Blockers\n')
         lines.append(f'- configured environment `{env_name}` does not exist; TASTE will not create or mutate environments automatically.\n')
