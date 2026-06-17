@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-17T11:09:47.484364+00:00",
+  "generated_at": "2026-06-17T11:19:25.119674+00:00",
   "module": "environment",
   "contract": {
     "directory": "modules/environment",
@@ -25,63 +25,12 @@
     "private_backend_roots": [
       "modules/environment/scripts/run_environment_stage.py",
       "modules/environment/scripts/select_evidence_ready_repo.py",
-      "modules/environment/scripts/bootstrap_repo_env.py"
+      "modules/environment/scripts/bootstrap_repo_env.py",
+      "modules/environment/scripts/environment_data_tools.py"
     ]
   },
-  "script_count": 30,
+  "script_count": 23,
   "scripts": [
-    {
-      "script": "assess_repo_candidates.py",
-      "path": "modules/environment/scripts/assess_repo_candidates.py",
-      "owner": "environment",
-      "owner_reason": "repo/data/base/environment selection, probing, or runtime locking",
-      "function_count": 2,
-      "functions": [
-        "load_json",
-        "main"
-      ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "json",
-        "literature_policy",
-        "pathlib",
-        "project_paths"
-      ]
-    },
-    {
-      "script": "attempt_data_acquisition.py",
-      "path": "modules/environment/scripts/attempt_data_acquisition.py",
-      "owner": "environment",
-      "owner_reason": "repo/data/base/environment selection, probing, or runtime locking",
-      "function_count": 7,
-      "functions": [
-        "load_json",
-        "save_json",
-        "run",
-        "choose_downloader",
-        "public_url_downloadable",
-        "attempt_public_download",
-        "main"
-      ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "datetime",
-        "json",
-        "mimetypes",
-        "os",
-        "pathlib",
-        "project_paths",
-        "shutil",
-        "subprocess",
-        "urllib.parse"
-      ]
-    },
     {
       "script": "audit_dataset_path.py",
       "path": "modules/environment/scripts/audit_dataset_path.py",
@@ -451,19 +400,44 @@
       ]
     },
     {
-      "script": "data_unavailability_policy.py",
-      "path": "modules/environment/scripts/data_unavailability_policy.py",
+      "script": "environment_data_tools.py",
+      "path": "modules/environment/scripts/environment_data_tools.py",
       "owner": "environment",
       "owner_reason": "repo/data/base/environment selection, probing, or runtime locking",
-      "function_count": 8,
+      "function_count": 33,
       "functions": [
-        "load_json",
-        "save_json",
-        "source_confidence",
-        "count_attempts",
-        "candidate_alternatives",
-        "normalize_repo_candidate",
-        "normalize_repo_candidates",
+        "_assess_repo_load_json",
+        "run_assess_repo",
+        "_select_repo_candidate_load_json",
+        "run_select_repo_candidate",
+        "_register_repo_candidate_load_json",
+        "_register_repo_candidate_save_json",
+        "run_register_repo_candidate",
+        "_register_dataset_load_json",
+        "_register_dataset_save_json",
+        "_register_dataset_readiness_score",
+        "run_register_dataset",
+        "_reconcile_candidates_load_json",
+        "_reconcile_candidates_save_json",
+        "run_reconcile_candidates",
+        "_plan_data_load_json",
+        "_plan_data_save_json",
+        "run_plan_data",
+        "_attempt_data_load_json",
+        "_attempt_data_save_json",
+        "_attempt_data_run",
+        "_attempt_data_choose_downloader",
+        "_attempt_data_public_url_downloadable",
+        "_attempt_data_attempt_public_download",
+        "run_attempt_data",
+        "_data_policy_load_json",
+        "_data_policy_save_json",
+        "_data_policy_source_confidence",
+        "_data_policy_count_attempts",
+        "_data_policy_candidate_alternatives",
+        "_data_policy_normalize_repo_candidate",
+        "_data_policy_normalize_repo_candidates",
+        "run_data_policy",
         "main"
       ],
       "class_count": 0,
@@ -473,8 +447,14 @@
         "argparse",
         "datetime",
         "json",
+        "literature_policy",
+        "mimetypes",
+        "os",
         "pathlib",
-        "project_paths"
+        "project_paths",
+        "shutil",
+        "subprocess",
+        "urllib.parse"
       ]
     },
     {
@@ -554,28 +534,6 @@
         "re",
         "shutil",
         "typing"
-      ]
-    },
-    {
-      "script": "plan_data_acquisition.py",
-      "path": "modules/environment/scripts/plan_data_acquisition.py",
-      "owner": "environment",
-      "owner_reason": "repo/data/base/environment selection, probing, or runtime locking",
-      "function_count": 3,
-      "functions": [
-        "load_json",
-        "save_json",
-        "main"
-      ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "json",
-        "pathlib",
-        "project_paths",
-        "shutil"
       ]
     },
     {
@@ -744,72 +702,6 @@
         "subprocess",
         "sys",
         "typing"
-      ]
-    },
-    {
-      "script": "reconcile_active_and_pool_candidates.py",
-      "path": "modules/environment/scripts/reconcile_active_and_pool_candidates.py",
-      "owner": "environment",
-      "owner_reason": "repo/data/base/environment selection, probing, or runtime locking",
-      "function_count": 3,
-      "functions": [
-        "load_json",
-        "save_json",
-        "main"
-      ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "json",
-        "literature_policy",
-        "pathlib",
-        "project_paths"
-      ]
-    },
-    {
-      "script": "register_dataset.py",
-      "path": "modules/environment/scripts/register_dataset.py",
-      "owner": "environment",
-      "owner_reason": "repo/data/base/environment selection, probing, or runtime locking",
-      "function_count": 4,
-      "functions": [
-        "load_json",
-        "save_json",
-        "readiness_score",
-        "main"
-      ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "json",
-        "pathlib",
-        "project_paths"
-      ]
-    },
-    {
-      "script": "register_repo_candidate.py",
-      "path": "modules/environment/scripts/register_repo_candidate.py",
-      "owner": "environment",
-      "owner_reason": "repo/data/base/environment selection, probing, or runtime locking",
-      "function_count": 3,
-      "functions": [
-        "load_json",
-        "save_json",
-        "main"
-      ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "json",
-        "literature_policy",
-        "pathlib",
-        "project_paths"
       ]
     },
     {
@@ -1175,26 +1067,6 @@
         "pathlib",
         "project_paths",
         "typing"
-      ]
-    },
-    {
-      "script": "select_repo_candidate.py",
-      "path": "modules/environment/scripts/select_repo_candidate.py",
-      "owner": "environment",
-      "owner_reason": "repo/data/base/environment selection, probing, or runtime locking",
-      "function_count": 2,
-      "functions": [
-        "load_json",
-        "main"
-      ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "json",
-        "pathlib",
-        "project_paths"
       ]
     }
   ]

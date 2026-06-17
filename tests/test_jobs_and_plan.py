@@ -3866,7 +3866,7 @@ def test_data_policy_normalizes_pool_ready_candidates_without_execution_ready(mo
     import sys
 
     ensure_script_paths()
-    data_policy = importlib.reload(importlib.import_module("data_unavailability_policy"))
+    data_policy = importlib.reload(importlib.import_module("environment_data_tools"))
     paths = type("Paths", (), {"state": tmp_path / "state", "reports": tmp_path / "reports"})()
     paths.state.mkdir(parents=True)
     paths.reports.mkdir(parents=True)
@@ -3885,7 +3885,7 @@ def test_data_policy_normalizes_pool_ready_candidates_without_execution_ready(mo
 
     monkeypatch.setattr(data_policy, "build_paths", lambda _project: paths)
     monkeypatch.setattr(data_policy, "load_project_config", lambda _project: {"literature": {"repo_candidate_floor": 0}})
-    monkeypatch.setattr(sys, "argv", ["data_unavailability_policy.py", "--project", "demo"])
+    monkeypatch.setattr(sys, "argv", ["environment_data_tools.py", "--tool-action", "data_policy", "--project", "demo"])
 
     data_policy.main()
 

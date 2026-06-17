@@ -3209,6 +3209,11 @@ PUBLIC_INTERNAL_NAME_REPLACEMENTS = [
     ("selected-base", "current route"),
     ("current base", "current route"),
     ("environment_claude_code", "environment review"),
+    ("waiting_for_environment_review", "等待环境审查"),
+    ("waiting_for_environment_base_selection", "等待环境选择基底"),
+    ("wait_for_environment_base_selection", "等待环境选择基底"),
+    ("waiting_for_repo_selection", "等待仓库选择"),
+    ("waiting for repo selection", "等待仓库选择"),
     ("legacy/control", "historical comparison"),
 ]
 

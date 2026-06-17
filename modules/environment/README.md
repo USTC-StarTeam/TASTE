@@ -53,8 +53,8 @@
 | --- | --- |
 | `scripts/run_environment_stage.py` | 网页 Environment 主入口，串联 repo/data/env 检查和诚实 gate。 |
 | `scripts/select_evidence_ready_repo.py` | 选择同时有代码和真实数据证据的 repo。 |
+| `scripts/environment_data_tools.py` | 合并后的 repo/data 注册、候选评估、数据获取计划/尝试、数据不可用策略与 active/pool reconcile 工具；通过 `--tool-action` 选择子功能，公开 action 由 `main.py` 暴露。 |
 | `scripts/select_fresh_research_base.py` | 准备当前 Find 的新基底候选池，不直接越权替换执行基底。 |
-| `scripts/select_repo_candidate.py` | 轻量候选选择入口。 |
 
 ### 环境与数据准备
 
@@ -62,12 +62,8 @@
 | --- | --- |
 | `scripts/bootstrap_repo_env.py` | 创建/检查 Conda 环境、pip 安装、导入验证和运行命令记录。 |
 | `scripts/build_repo_data_requirements.py` | 从仓库和计划中构建数据需求合同。 |
-| `scripts/plan_data_acquisition.py` | 生成数据获取计划。 |
-| `scripts/attempt_data_acquisition.py` | 按公开来源尝试下载/获取数据并记录证据。 |
 | `scripts/probe_repo_dataset.py` | 探测 repo 数据集和 loader；没有通用适配时给出安全 blocker。 |
 | `scripts/probe_fresh_base_data_acquisition.py` | 对当前 Find 新基底做有界数据获取探针。 |
-| `scripts/register_dataset.py` | 登记数据集可用性和 readiness。 |
-| `scripts/register_repo_candidate.py` | 登记 repo 候选。 |
 | `scripts/repo_first_backtrack.py` | 从 repo 反向推断数据需求和缺口。 |
 | `scripts/restart_after_data_blocker.py` | 数据阻塞后扩大候选发现，而不是硬塞当前不可用基底。 |
 
@@ -75,7 +71,6 @@
 
 | 脚本 | 真实作用 |
 | --- | --- |
-| `scripts/assess_repo_candidates.py` | 评估候选 repo。 |
 | `scripts/audit_local_repo.py` | 本地 repo 结构和信号审计。 |
 | `scripts/audit_dataset_path.py` | 检查数据路径是否真实存在且可读。 |
 | `scripts/audit_repo_candidate_pool.py` | 深度审计候选池，防止错误切换。 |
@@ -84,7 +79,6 @@
 | `scripts/execute_authorized_base_switch.py` | 只有 gate 通过后才执行基底切换。 |
 | `scripts/guard_selected_base_route.py` | 保护当前基底路线不被历史/控制路线覆盖。 |
 | `scripts/audit_obsolete_baseline_cleanup.py` | 生成旧基底清理计划，不直接删除文件。 |
-| `scripts/reconcile_active_and_pool_candidates.py` | 区分 active repo 证据和探索候选池证据。 |
 
 ### 参考复现
 
@@ -94,7 +88,6 @@
 | `scripts/probe_selected_base_reference.py` | 对当前选中基底触发参考证据探测。 |
 | `scripts/run_selected_base_reference_reproduction_audit.py` | 包装参考复现命令、解析指标并写入审计。 |
 | `scripts/run_safe_unblock.py` | 针对当前新基底的安全解阻循环。 |
-| `scripts/data_unavailability_policy.py` | 数据不可用时的诚实策略和替代候选判断。 |
 | `scripts/build_fresh_base_implementation_plan.py` | 在新基底已获证据后生成实现计划。 |
 
 ## 冗余控制原则

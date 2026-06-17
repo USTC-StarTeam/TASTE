@@ -121,6 +121,22 @@ def _run_script(script_stem: str, args: Sequence[str]) -> int:
     return int(proc.returncode)
 
 
+ENVIRONMENT_DATA_TOOL_ACTIONS = {
+    "assess_repo": "assess_repo",
+    "assess_repo_candidates": "assess_repo",
+    "select_repo_candidate": "select_repo_candidate",
+    "register_repo_candidate": "register_repo_candidate",
+    "register_dataset": "register_dataset",
+    "reconcile_candidates": "reconcile_candidates",
+    "reconcile_active_and_pool_candidates": "reconcile_candidates",
+    "plan_data": "plan_data",
+    "plan_data_acquisition": "plan_data",
+    "attempt_data": "attempt_data",
+    "attempt_data_acquisition": "attempt_data",
+    "data_policy": "data_policy",
+    "data_unavailability_policy": "data_policy",
+}
+
 ACTION_ALIASES = {
     "": "run_environment_stage",
     "run": "run_environment_stage",
@@ -135,17 +151,12 @@ ACTION_ALIASES = {
     "bootstrap_repo": "bootstrap_repo_env",
     "data_requirements": "build_repo_data_requirements",
     "probe_repo": "probe_repo_dataset",
-    "plan_data": "plan_data_acquisition",
-    "attempt_data": "attempt_data_acquisition",
-    "data_policy": "data_unavailability_policy",
     "restart_discovery": "restart_after_data_blocker",
     "candidate_pool": "audit_repo_candidate_pool",
-    "reconcile_candidates": "reconcile_active_and_pool_candidates",
     "fresh_base_data_probe": "probe_fresh_base_data_acquisition",
     "probe_candidate_base_reference": "probe_candidate_base_reference",
     "base_switch_gate": "audit_deterministic_base_switch_gate",
     "execute_base_switch": "execute_authorized_base_switch",
-    "assess_repo": "assess_repo_candidates",
     "repo_data_requirements": "build_repo_data_requirements",
     "obsolete_cleanup": "audit_obsolete_baseline_cleanup",
     "fresh_base_plan": "build_fresh_base_implementation_plan",
@@ -163,6 +174,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(_contract_payload(), ensure_ascii=False, indent=2))
         return 0
     action = _normalize_action(ns.action)
+    if action in ENVIRONMENT_DATA_TOOL_ACTIONS:
+        return _run_script("environment_data_tools", ["--tool-action", ENVIRONMENT_DATA_TOOL_ACTIONS[action], *rest])
     return _run_script(ACTION_ALIASES.get(action, action), rest)
 
 
