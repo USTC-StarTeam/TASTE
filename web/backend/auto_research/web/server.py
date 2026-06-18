@@ -8270,6 +8270,21 @@ def _live_reference_reproduction_job(project: str, root: Path, current_plan: dic
         return {}
 
     ps_row = _ps_row_for_pid(pid) if process_alive else {}
+    descendant_rows = _process_tree_rows(pid) if process_alive and pid else []
+    active_child_rows = []
+    for row in descendant_rows:
+        child_pid = str(row.get("pid") or "").strip()
+        if not child_pid or child_pid == pid:
+            continue
+        child_cmd = str(row.get("cmd") or "").lower()
+        if any(marker in child_cmd for marker in ["python", "torchrun", "accelerate", "train", "finetune", "example"]):
+            active_child_rows.append(row)
+    def _row_cpu(row: dict[str, Any]) -> float:
+        try:
+            return float(str(row.get("pcpu") or "0"))
+        except Exception:
+            return 0.0
+    active_child = max(active_child_rows, key=_row_cpu) if active_child_rows else {}
     audit = _read_project_json(root / "state" / "fresh_base_reference_full_reproduction_audit.json", {})
     if not (isinstance(audit, dict) and str(audit.get("mode") or "") == "full"):
         legacy_audit = _read_project_json(root / "state" / "fresh_base_reference_reproduction_audit.json", {})
@@ -8353,12 +8368,18 @@ def _live_reference_reproduction_job(project: str, root: Path, current_plan: dic
             progress_total = _as_int(match.group(1), 0)
     progress_current = 0
     latest_training_log = ""
+    latest_training_log_age_sec = 0
+    latest_training_log_updated_at = ""
     if artifact_dir:
         try:
             candidates = sorted((Path(artifact_dir) / "models").glob("training_log*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
             if candidates:
-                latest_training_log = str(candidates[0])
-                tail = candidates[0].read_text(encoding="utf-8", errors="replace")[-20000:]
+                latest = candidates[0]
+                latest_training_log = str(latest)
+                stat = latest.stat()
+                latest_training_log_age_sec = max(0, int(time.time() - stat.st_mtime))
+                latest_training_log_updated_at = datetime.fromtimestamp(stat.st_mtime, UTC).isoformat()
+                tail = latest.read_text(encoding="utf-8", errors="replace")[-20000:]
                 epochs = [int(item) for item in re.findall(r"Epoch:\s*(\d+)", tail)]
                 if epochs:
                     progress_current = max(epochs)
@@ -8366,6 +8387,15 @@ def _live_reference_reproduction_job(project: str, root: Path, current_plan: dic
             progress_current = 0
     if latest_training_log:
         logs.append(f"training_log={latest_training_log}")
+        if latest_training_log_updated_at:
+            logs.append(f"training_log_updated_at={latest_training_log_updated_at}")
+        if process_alive and latest_training_log_age_sec > 300:
+            logs.append(f"training_log_sparse=true; age_sec={latest_training_log_age_sec}; process tree remains the authoritative liveness signal")
+    if active_child:
+        logs.append(
+            "active_training_child="
+            + f"pid={active_child.get('pid')}; elapsed={active_child.get('elapsed')}; cpu={active_child.get('pcpu')}; mem={active_child.get('pmem')}"
+        )
 
     message_bits = [
         f"selected-base full reproduction {'running' if process_alive else job_status}",
@@ -8373,6 +8403,11 @@ def _live_reference_reproduction_job(project: str, root: Path, current_plan: dic
     ]
     if elapsed:
         message_bits.append(f"elapsed={elapsed}")
+    if active_child:
+        child_pid = str(active_child.get("pid") or "").strip()
+        child_cpu = str(active_child.get("pcpu") or "").strip()
+        if child_pid:
+            message_bits.append(f"training_pid={child_pid}" + (f" cpu={child_cpu}%" if child_cpu else ""))
     if progress_total and progress_current:
         message_bits.append(f"epoch={min(progress_current, progress_total)}/{progress_total}")
     if paper_title:
