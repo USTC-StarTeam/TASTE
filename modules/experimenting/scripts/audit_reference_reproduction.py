@@ -655,6 +655,69 @@ def selected_base_label(paths) -> str:
     selected = env.get("selected", {}) if isinstance(env.get("selected"), dict) else {}
     return str(selected.get("title") or selected.get("literature_base_title") or selected.get("selected_base_title") or selected.get("name") or selected.get("repo") or selected.get("repo_path") or "环境阶段选出的基底")
 
+
+def selected_base_title(paths, paper: dict[str, Any] | None = None) -> str:
+    candidates: list[Any] = []
+    if isinstance(paper, dict):
+        candidates.extend([
+            paper.get("title"),
+            paper.get("literature_base_title"),
+            paper.get("selected_base_title"),
+            paper.get("paper_title"),
+            paper.get("name"),
+        ])
+    env = current_environment_selection(paths)
+    selected = env.get("selected", {}) if isinstance(env.get("selected"), dict) else {}
+    if isinstance(selected, dict):
+        candidates.extend([
+            selected.get("title"),
+            selected.get("literature_base_title"),
+            selected.get("selected_base_title"),
+            selected.get("paper_title"),
+            selected.get("name"),
+        ])
+    for state_name in [
+        "fresh_base_implementation_plan.json",
+        "fresh_base_reference_bounded_reproduction_audit.json",
+        "fresh_base_reference_full_reproduction_audit.json",
+        "fresh_base_reference_reproduction_audit.json",
+        "evidence_ready_repo_selection.json",
+        "active_repo.json",
+    ]:
+        payload = load_json(paths.state / state_name, {})
+        if not isinstance(payload, dict):
+            continue
+        candidates.extend([
+            payload.get("title"),
+            payload.get("literature_base_title"),
+            payload.get("selected_base_title"),
+            payload.get("paper_title"),
+            payload.get("name"),
+        ])
+        for nested_key in ["repo", "selected_base", "selected", "fresh_paper_base"]:
+            nested = payload.get(nested_key)
+            if isinstance(nested, dict):
+                candidates.extend([
+                    nested.get("title"),
+                    nested.get("literature_base_title"),
+                    nested.get("selected_base_title"),
+                    nested.get("paper_title"),
+                    nested.get("name"),
+                ])
+    for value in candidates:
+        title = one_line(value)
+        if title:
+            return title
+    return selected_base_label(paths)
+
+
+def venue_year_suffix(paper: dict[str, Any] | None) -> str:
+    if not isinstance(paper, dict):
+        return ""
+    text = " ".join(part for part in [str(paper.get("venue") or "").strip(), str(paper.get("year") or "").strip()] if part)
+    return f" ({text})" if text else ""
+
+
 def reference_config(cfg: dict[str, Any]) -> dict[str, Any]:
     exp_cfg = cfg.get("experiment", {}) if isinstance(cfg.get("experiment", {}), dict) else {}
     repro = exp_cfg.get("reference_reproduction", {}) if isinstance(exp_cfg.get("reference_reproduction", {}), dict) else {}
@@ -1159,14 +1222,14 @@ def build_reference_reproduction_gate(project: str) -> dict[str, Any]:
     if decision in {"fresh_base_implementation_required", "fresh_base_reference_probe_required", "fresh_base_reference_smoke_required", "fresh_base_reference_reproduction_required"}:
         legacy_reference_blockers = list(blockers)
         paper = base_switch.get("fresh_paper_base", {}) if isinstance(base_switch.get("fresh_paper_base"), dict) else {}
-        title = str(paper.get("title") or "environment-stage selected anchor")
+        title = selected_base_title(paths, paper)
         if decision == "fresh_base_reference_smoke_required":
             protocol = current_payload(paths, fresh_base_state_names(paths, "reference_protocol_probe"))
             ready = protocol.get("ready_datasets", []) if isinstance(protocol, dict) and isinstance(protocol.get("ready_datasets"), list) else []
             blockers = [
                 (
                     f"{base_label} reference protocol/env manifest probe passed, but the bounded reference smoke/audit has not passed yet: "
-                    f"{title} ({paper.get('venue') or ''} {paper.get('year') or ''}). "
+                    f"{title}{venue_year_suffix(paper)}. "
                     f"Ready datasets={ready}. Run the selected-base bounded reference smoke through TASTE safe-unblock before any full training, paper writing, or claim promotion; Historical routes are legacy/control only."
                 )
             ]
@@ -1188,7 +1251,7 @@ def build_reference_reproduction_gate(project: str) -> dict[str, Any]:
             blockers = [
                 (
                     f"{base_label} bounded reference smoke/audit passed, but paper-level full reference reproduction is still required: "
-                    f"{title} ({paper.get('venue') or ''} {paper.get('year') or ''}). "
+                    f"{title}{venue_year_suffix(paper)}. "
                     f"Smoke dataset={smoke.get('selected_dataset') if isinstance(smoke, dict) else ''.strip()}." + audit_note + job_note + " Historical routes are legacy/control only."
                 )
             ]
@@ -1197,7 +1260,7 @@ def build_reference_reproduction_gate(project: str) -> dict[str, Any]:
             blockers = [
                 (
                     f"{base_label} data and loader/import probes are ready, but the fresh-base reference protocol is not audited yet: "
-                    f"{title} ({paper.get('venue') or ''} {paper.get('year') or ''}). "
+                    f"{title}{venue_year_suffix(paper)}. "
                     f"Ready datasets={ready}. Create/record the selected-base environment manifest and run bounded read-only reference-protocol probes before training, paper writing, or claim promotion; Historical routes are legacy/control only."
                 )
             ]
@@ -1206,7 +1269,7 @@ def build_reference_reproduction_gate(project: str) -> dict[str, Any]:
             blockers = [
                 (
                     f"Environment-stage Claude Code selected {base_label} as the current paper/method anchor, but data/loader files are not evidence-ready locally: "
-                    f"{title} ({paper.get('venue') or ''} {paper.get('year') or ''}). "
+                    f"{title}{venue_year_suffix(paper)}. "
                     "Resolve the repo-specific real dataset files declared in dataset_contract.required_files_per_dataset and pass loader/import probes before Claude implementation, experiments, or paper writing; historical routes are legacy/control only."
                     + (f" blockers={'; '.join(str(item) for item in data_blockers[:4])}." if data_blockers else "")
                 )
@@ -1215,7 +1278,7 @@ def build_reference_reproduction_gate(project: str) -> dict[str, Any]:
             blockers = [
                 (
                     "Environment-stage Claude Code selected a paper/method anchor but the implementation route is not evidence-ready yet: "
-                    f"{title} ({paper.get('venue') or ''} {paper.get('year') or ''}). "
+                    f"{title}{venue_year_suffix(paper)}. "
                     "The workflow must continue code/artifact search or implement the fresh base under audit; Historical routes are legacy/control only, not the main route."
                 )
             ]
@@ -1397,7 +1460,7 @@ def sync_full_cycle_reference_gate_state(paths, payload: dict[str, Any]) -> None
     elif decision in {"fresh_base_implementation_required", "fresh_base_reference_probe_required", "fresh_base_reference_smoke_required", "fresh_base_reference_reproduction_required"}:
         base_switch = payload.get("base_switch", {}) if isinstance(payload.get("base_switch"), dict) else {}
         paper = base_switch.get("fresh_paper_base", {}) if isinstance(base_switch.get("fresh_paper_base"), dict) else {}
-        title = str(paper.get("title") or "environment-stage selected anchor")
+        title = selected_base_title(paths, paper)
         fresh_impl = load_json(paths.state / "fresh_base_implementation_plan.json", {})
         if not isinstance(fresh_impl, dict):
             fresh_impl = {}
