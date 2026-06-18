@@ -9275,6 +9275,10 @@ def test_selected_base_reference_audit_supports_generic_analysis_data_repo(tmp_p
     assert metrics["trajectory_rows"] == 40
     assert metrics["analysis_outputs_saved"] == 1
 
+    progress = audit.parse_epoch_progress("Epoch: 1", 30, "full")
+    assert progress["current"] == 1
+    assert progress["total"] == 30
+    assert progress["current_epoch"] == 0
 
 
 def test_candidate_base_reference_probe_passes_protocol_smoke_but_blocks_generic_full(tmp_path, monkeypatch):
