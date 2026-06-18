@@ -528,9 +528,14 @@ def current_find_artifact_generator_policy_issue(command: str, stage: str = '') 
     fragment_target = CURRENT_FIND_DEEP_READ_FRAGMENT_DIR.lower() in lowered
     fragment_python_writer = fragment_target and any(marker in lowered for marker in writer_markers)
     fragment_script_execution = bool(re.search(r"(?:python3?|/[^\s;&|]*/python)\s+[^\s;&|]*current_find_deep_read_fragments/[^\s;&|]+\.(?:py|sh)\b", lowered))
+    current_find_python_probe = bool(
+        content_target
+        and re.search(r"(?:^|[;&|]\s*)(?:python|python3(?:\.\d+)?|/[^\s;&|]*/python(?:3(?:\.\d+)?)?)\s+-c\b", lowered)
+        and any(marker in lowered for marker in ["open(", "path(", ".read_text(", "json.load(", "os.listdir("])
+    )
     if gate_state_target and (writes_target or open_write_target or redirect_target):
         return CURRENT_FIND_GATE_STATE_WRITER_POLICY
-    if content_target and (content_open_write_target or redirect_target or tmp_generator or fragment_python_writer or fragment_script_execution) and shell_writer:
+    if content_target and (content_open_write_target or redirect_target or tmp_generator or fragment_python_writer or fragment_script_execution or current_find_python_probe) and shell_writer:
         return CURRENT_FIND_ARTIFACT_WRITER_POLICY
     return ''
 
@@ -597,13 +602,18 @@ def paper_inline_python_probe_allowed(command_lower: str, stage_l: str) -> bool:
     return not any(marker in command_lower for marker in training_markers)
 
 
+def _strip_shell_quoted_strings_for_policy(command: str) -> str:
+    # Avoid treating grep/rg patterns such as "python " as executable invocations.
+    return re.sub(r'''(["']).*?\1''', ' ', str(command or ''))
+
+
 def direct_python_command_policy_issue(command: str, stage: str = '') -> str:
     stage_l = str(stage or '').lower().replace('_', '-')
     if _current_find_stage(stage_l):
         return ''
     if not any(token in stage_l for token in ['environment', 'experiment', 'trajectory', 'reference', 'reproduction', 'paper', 'writing', 'full-cycle']):
         return ''
-    lowered = str(command or '').lower()
+    lowered = _strip_shell_quoted_strings_for_policy(str(command or '')).lower()
     bare_python = re.search(r"(?:^|[;&|]\s*)(?:python|python3(?:\.\d+)?)\b", lowered)
     if not bare_python:
         return ''
@@ -784,6 +794,13 @@ def bash_command_tool_policy_issue(command: str, project: str, stage: str = '') 
     direct_artifact_issue = direct_artifact_script_execution_policy_issue(policy_command, project, stage)
     if direct_artifact_issue:
         return direct_artifact_issue
+    nested_environment_stage = (
+        re.search(r"framework/scripts/run_module\.py\s+environment\b(?=[^;&|]*--action\s+(?:run_environment_stage|run_stage))", lowered)
+        or re.search(r"modules/environment/main\.py\b(?=[^;&|]*--action\s+(?:run_environment_stage|run_stage))", lowered)
+        or 'modules/environment/scripts/run_environment_stage.py' in lowered
+    )
+    if nested_environment_stage:
+        return 'project agent may not recursively run the parent environment stage; use specific TASTE environment probe actions only'
     direct_conda_issue = direct_conda_command_policy_issue(policy_command)
     if direct_conda_issue:
         return direct_conda_issue

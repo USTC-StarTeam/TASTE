@@ -83,7 +83,7 @@ PUBLIC_SCRIPT_ACTIONS: dict[tuple[str, str], str] = {
     ("finding", "build_literature_tool_packet.py"): "tool_packet",
     ("finding", "run_literature_tool.py"): "literature_tool",
     ("finding", "run_literature_base_audit.py"): "literature_base_audit",
-    ("finding", "select_fresh_research_base.py"): "fresh_base_selection",
+    ("environment", "select_fresh_research_base.py"): "fresh_base_selection",
     ("environment", "probe_fresh_base_data_acquisition.py"): "fresh_base_data_probe",
     ("environment", "run_safe_unblock.py"): "safe_unblock",
     ("experimenting", "audit_reference_reproduction.py"): "reference_reproduction",

@@ -1153,6 +1153,7 @@ def _resolve_public_ref_from_source(source: Any, paper_index: dict[str, dict[str
 
 def _normalize_inspired_refs(value: Any, fallback: list[dict[str, Any]], paper_index: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    free_text_reason = compact(value, 700) if isinstance(value, str) else ""
     for item in as_list(value):
         ref = _resolve_public_ref_from_source(item, paper_index)
         if ref:
@@ -1161,6 +1162,8 @@ def _normalize_inspired_refs(value: Any, fallback: list[dict[str, Any]], paper_i
         for item in fallback:
             ref = _resolve_public_ref_from_source(item, paper_index)
             if ref:
+                if free_text_reason and not ref.get("reason"):
+                    ref = {**ref, "reason": free_text_reason}
                 rows.append(ref)
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
@@ -1375,6 +1378,11 @@ PRE_ENV_BASE_BINDING_REGEXES = tuple(
         r"(?:环境阶段|environment)[^\n。；;]{0,50}(?:已|已经|选出|选定|选择了)[^\n。；;]{0,70}(?:基底|仓库|repo|base)",
         r"(?:selected base|current base|active repo|existing repo)\s*[:=]",
     )
+)
+
+PRE_ENV_CANDIDATE_PROPOSAL_RE = re.compile(
+    r"(?:候选|proposal|proposed|待验证|等待\s*Environment|waiting\s+for\s+environment)[^\n。；;]{0,100}(?:基底|仓库|repo|base)",
+    re.IGNORECASE,
 )
 
 PRE_ENV_IDEA_BINDING_KEYS = (
@@ -5311,7 +5319,7 @@ def _idea_contract_issues(row: dict[str, Any]) -> list[str]:
         issues.append("initial_experiment_missing_or_too_short")
     if _generic_idea_experiment(initial_experiment):
         issues.append("initial_experiment_is_generic_environment_placeholder")
-    if not inspired_by:
+    if not _has_inspired_by_contract_evidence(row, inspired_by):
         issues.append("inspired_by_missing")
     if _contains_pre_environment_base_binding(_binding_view(row, PRE_ENV_IDEA_BINDING_KEYS)):
         issues.append("stale_or_preselected_base_binding_detected")
@@ -5433,7 +5441,8 @@ def _idea_parseable_for_audit(row: dict[str, Any]) -> bool:
         2200,
     )
     inspired_by = _normalize_inspired_refs(row.get("inspired_by"), as_list(row.get("supporting_papers") or row.get("positive_anchor_papers")))
-    return bool(len(new_method) >= 20 and len(initial_experiment) >= 20 and inspired_by)
+    has_inspired_evidence = _has_inspired_by_contract_evidence(row, inspired_by)
+    return bool(len(new_method) >= 20 and len(initial_experiment) >= 20 and has_inspired_evidence)
 
 
 def _valid_claude_idea(row: dict[str, Any]) -> bool:
@@ -6753,8 +6762,23 @@ def _contract_text(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True) if isinstance(value, (dict, list)) else str(value or "")
 
 
+def _strip_inactive_execution_flags(raw_text: str) -> str:
+    if not raw_text:
+        return raw_text
+    return re.sub(
+        r"[\"']?(?:ready_to_execute)[\"']?\s*[:=]\s*(?:false|0|null|none|\"\"|''|否|不|未)",
+        "",
+        raw_text,
+        flags=re.IGNORECASE,
+    )
+
+
 def _contains_stale_execution_binding(value: Any) -> bool:
-    text = _contract_text(value).lower()
+    raw_text = _contract_text(value)
+    detection_text = _strip_pre_environment_prohibition_phrases(raw_text)
+    detection_text = _strip_pre_environment_candidate_phrases(detection_text)
+    detection_text = _strip_inactive_execution_flags(detection_text)
+    text = detection_text.lower()
     return any(pattern in text for pattern in STALE_EXECUTION_BINDING_PATTERNS)
 
 
@@ -6768,22 +6792,41 @@ def _strip_pre_environment_prohibition_phrases(raw_text: str) -> str:
     if not raw_text:
         return raw_text
     return re.sub(
-        r"(?:不写|不得写|禁止写入|严禁写入|不能写入|不要写|must\s+not\s+write|do\s+not\s+write|without\s+writing)[^\n。；;]{0,90}(?:repo_path|local_path|selected_repo_path|active_repo_path|training_script|ready_to_execute|训练命令|运行命令)(?!\s*[:=])",
+        r"(?:不写|不得写|禁止写入|严禁写入|不能写入|不要写|不标记|不得标记|禁止标记|严禁标记|不能标记|不要标记|不标注|不得标注|must\s+not\s+(?:write|mark)|do\s+not\s+(?:write|mark)|without\s+(?:writing|marking))[^\n。；;]{0,90}(?:repo_path|local_path|selected_repo_path|active_repo_path|training_script|ready_to_execute|训练命令|运行命令)(?!\s*[:=])",
         "",
         raw_text,
         flags=re.IGNORECASE,
     )
 
 
+def _strip_pre_environment_candidate_phrases(raw_text: str) -> str:
+    if not raw_text:
+        return raw_text
+    return PRE_ENV_CANDIDATE_PROPOSAL_RE.sub("", raw_text)
+
+
 def _contains_pre_environment_base_binding(value: Any) -> bool:
     raw_text = _contract_text(value)
     detection_text = _strip_pre_environment_prohibition_phrases(raw_text)
+    detection_text = _strip_pre_environment_candidate_phrases(detection_text)
     text = detection_text.lower()
-    if _contains_stale_execution_binding(value):
+    if _contains_stale_execution_binding(detection_text):
         return True
     if any(marker in text for marker in PRE_ENV_BASE_BINDING_LITERAL_MARKERS):
         return True
     return any(pattern.search(detection_text) for pattern in PRE_ENV_BASE_BINDING_REGEXES)
+
+
+def _has_inspired_by_contract_evidence(row: dict[str, Any], normalized_refs: list[dict[str, Any]]) -> bool:
+    if normalized_refs:
+        return True
+    inspired_text = compact(row.get("inspired_by"), 1200)
+    if inspired_text and len(inspired_text) >= 20 and not _looks_like_internal_paper_ref(inspired_text):
+        return True
+    for item in as_list(row.get("supporting_papers") or row.get("positive_anchor_papers")):
+        if str(item or "").strip():
+            return True
+    return False
 
 
 def _safe_plan_text(value: Any, fallback: str, limit: int = 900) -> str:

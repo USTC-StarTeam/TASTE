@@ -157,6 +157,7 @@ ACTION_ALIASES = {
     "environment": "run_environment_stage",
     "select_repo": "select_evidence_ready_repo",
     "select_evidence_ready": "select_evidence_ready_repo",
+    "fresh_base_selection": "select_fresh_research_base",
     "probe_selected_base": "probe_selected_base_reference",
     "probe_selected_base_reference": "probe_selected_base_reference",
     "bootstrap": "bootstrap_repo_env",

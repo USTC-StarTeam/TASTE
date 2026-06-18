@@ -3463,7 +3463,7 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
             if self.current_find_selected_plan_gate_blocking(selected_contract_after_read):
                 step(self.run(module_cmd('planning', 'blocker_action', '--project', self.args.project, '--venue', self.args.venue), stage="blocker-action-plan-current-find-selected-plan-gate", required=False, timeout=180))
                 return self.finish_current_find_selected_plan_gate_block(cycle, pdf_before, selected_contract_after_read)
-            step(self.run(module_cmd('finding', 'fresh_base_selection', '--project', self.args.project), stage="fresh-research-base-selection", timeout=180))
+            step(self.run(module_cmd('environment', 'fresh_base_selection', '--project', self.args.project), stage="fresh-research-base-selection", timeout=180))
             step(self.run(module_cmd('ideation', 'initialization', '--project', self.args.project), stage="initialization-brief"))
             survey_summary = self.literature_after_survey_summary()
             cycle["literature_after_survey"] = survey_summary
@@ -3490,7 +3490,7 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
             if self.current_find_selected_plan_gate_blocking(selected_contract_after_read):
                 step(self.run(module_cmd('planning', 'blocker_action', '--project', self.args.project, '--venue', self.args.venue), stage="blocker-action-plan-current-find-selected-plan-gate-refresh", required=False, timeout=180))
                 return self.finish_current_find_selected_plan_gate_block(cycle, pdf_before, selected_contract_after_read)
-            step(self.run(module_cmd('finding', 'fresh_base_selection', '--project', self.args.project), stage="fresh-research-base-selection-refresh", required=False, timeout=180))
+            step(self.run(module_cmd('environment', 'fresh_base_selection', '--project', self.args.project), stage="fresh-research-base-selection-refresh", required=False, timeout=180))
             survey_summary = self.literature_after_survey_summary()
             cycle["literature_after_survey"] = survey_summary
             self.state["literature_after_survey"] = survey_summary

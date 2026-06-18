@@ -13,8 +13,22 @@ import time
 from pathlib import Path
 from typing import Any
 
-from project_paths import build_paths, project_experiment_python_from_config
-from reference_reproduction_state import audit_state_path, write_mode_audit
+
+def _taste_root() -> Path:
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        if (parent / "framework").is_dir() and (parent / "modules").is_dir() and (parent / "web").is_dir():
+            return parent
+    return current.parents[3]
+
+
+_TASTE_ROOT = _taste_root()
+for _entry in [_TASTE_ROOT / "framework" / "scripts", _TASTE_ROOT / "modules" / "experimenting" / "scripts"]:
+    if str(_entry) not in sys.path:
+        sys.path.insert(0, str(_entry))
+
+from project_paths import ROOT, build_paths, project_experiment_python_from_config
+from reference_reproduction_state import audit_state_path, post_reference_reproduction_refresh, write_mode_audit
 
 
 def now_iso() -> str:
@@ -42,6 +56,18 @@ def update_json(path: Path, updates: dict[str, Any]) -> None:
         payload = {}
     payload.update(updates)
     save_json(path, payload)
+
+
+def project_local_adapter(project: str) -> Path:
+    return ROOT / "projects" / project / "scripts" / "adapters" / Path(__file__).name
+
+
+def dispatch_project_local_adapter(project: str, argv: list[str]) -> int | None:
+    adapter = project_local_adapter(project)
+    if not adapter.exists():
+        return None
+    proc = subprocess.run([sys.executable, str(adapter), *argv], cwd=ROOT)
+    return int(proc.returncode)
 
 
 def sha256_file(path: Path) -> str:
@@ -530,7 +556,23 @@ def write_report(paths, payload: dict[str, Any]) -> None:
         (paths.reports / "fresh_base_reference_reproduction_audit.md").write_text("".join(lines), encoding="utf-8")
 
 
-def build(project: str, mode: str, epoch: int, timeout_sec: int, execute: bool) -> dict[str, Any]:
+def project_target_venue(project: str, explicit: str = "") -> str:
+    venue = str(explicit or "").strip()
+    if venue:
+        return venue
+    cfg = load_json(build_paths(project).config, {})
+    if isinstance(cfg, dict):
+        for row in [cfg, cfg.get("writing") if isinstance(cfg.get("writing"), dict) else {}, cfg.get("paper") if isinstance(cfg.get("paper"), dict) else {}]:
+            if not isinstance(row, dict):
+                continue
+            for key in ["target_venue", "venue", "venue_slug"]:
+                value = str(row.get(key) or "").strip()
+                if value:
+                    return value.upper() if value.lower() in {"iclr", "icml", "neurips", "nips", "kdd", "sigkdd"} else value
+    return ""
+
+
+def build(project: str, mode: str, epoch: int, timeout_sec: int, execute: bool, venue: str = "") -> dict[str, Any]:
     paths = build_paths(project)
     repo, impl, env = selected_repo(project)
     selected = env.get("selected", {}) if isinstance(env, dict) and isinstance(env.get("selected"), dict) else {}
@@ -720,6 +762,7 @@ def build(project: str, mode: str, epoch: int, timeout_sec: int, execute: bool) 
         "audit_ready": bool(rc == 0 and not timed_out and execute),
         "paper_level_reproduction_passed": bool(mode == "full" and rc == 0 and not timed_out),
         "notes": "Bounded selected-base reference reproduction audit. This is not paper-level evidence unless mode=full and downstream gates pass." if mode == "bounded" else "Full selected-base reference reproduction run; downstream gates must audit metrics before experiments proceed.",
+        "venue": project_target_venue(project, venue),
         "guardrail": "Wrapper-managed selected-base command only; no paper writing, claim promotion, second Find, pair_compare, or legacy main-route fallback.",
     }
     write_mode_audit(paths, payload, artifact_audit_path)
@@ -742,6 +785,10 @@ def build(project: str, mode: str, epoch: int, timeout_sec: int, execute: bool) 
                 "progress": final_progress,
             },
         )
+        post_refresh = post_reference_reproduction_refresh(paths, project, project_target_venue(project, venue), trigger="environment_selected_base_reference_wrapper")
+        payload["post_reference_refresh"] = post_refresh
+        write_mode_audit(paths, payload, artifact_audit_path)
+        update_json(paths.state / "fresh_base_reference_full_reproduction_job.json", {"updated_at": now_iso(), "post_reference_refresh": post_refresh})
     write_report(paths, payload)
     append_registry(paths, payload)
     return payload
@@ -754,8 +801,12 @@ def main() -> int:
     parser.add_argument("--epoch", type=int, default=1)
     parser.add_argument("--timeout-sec", type=int, default=900)
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--venue", default="")
     args = parser.parse_args()
-    payload = build(args.project, args.mode, args.epoch, max(30, args.timeout_sec), args.execute)
+    project_rc = dispatch_project_local_adapter(args.project, sys.argv[1:])
+    if project_rc is not None:
+        return project_rc
+    payload = build(args.project, args.mode, args.epoch, max(30, args.timeout_sec), args.execute, args.venue)
     print(json.dumps({"status": payload.get("status"), "decision": payload.get("decision"), "experiment_id": payload.get("experiment_id"), "return_code": payload.get("return_code"), "metrics": payload.get("metrics"), "failures": payload.get("failures")}, ensure_ascii=False))
     return 0 if payload.get("return_code") == 0 else 2
 

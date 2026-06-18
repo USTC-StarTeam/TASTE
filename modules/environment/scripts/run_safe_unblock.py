@@ -17,6 +17,7 @@ from reference_reproduction_state import (
     bounded_reference_audit_recorded,
     full_reference_audit_passed,
     latest_reference_audit,
+    post_reference_reproduction_refresh,
     reference_full_job_state as indexed_reference_full_job_state,
 )
 
@@ -107,6 +108,13 @@ def selected_base_label(env: dict[str, Any]) -> str:
 def selected_base_has_current_adapter(paths) -> bool:
     repo_path = current_impl_repo_path(paths)
     repo = Path(repo_path) if repo_path else Path("")
+    adapter_dir = ROOT / "projects" / paths.name / "scripts" / "adapters"
+    project_adapters = [
+        adapter_dir / "probe_selected_base_reference.py",
+        adapter_dir / "run_selected_base_reference_reproduction_audit.py",
+    ]
+    if repo_path and repo.exists() and any(path.exists() for path in project_adapters):
+        return True
     return bool(repo_path and repo.exists() and any((repo / name).exists() for name in ["main.py", "finetune.py", "run.sh", "train.py", "single_train.py"]))
 
 
@@ -312,6 +320,8 @@ def ensure_reference_full_job(paths, project: str, venue: str, py: str) -> dict[
             "stdout_path": audit.get("stdout_path", ""),
             "paper_level_reproduction_passed": bool(audit.get("paper_level_reproduction_passed")),
         }
+        refresh = post_reference_reproduction_refresh(paths, project, venue, trigger="safe_unblock_existing_full_audit")
+        finished["post_reference_refresh"] = refresh
         save_json(state_path, finished)
         return finished
     log_dir = paths.logs / "safe_unblock"
@@ -329,6 +339,7 @@ def ensure_reference_full_job(paths, project: str, venue: str, py: str) -> dict[
         "--epoch", "30",
         "--timeout-sec", str(26 * 3600),
         "--execute",
+        "--venue", venue,
     ]
     env = dict(os.environ)
     env["SELECTED_BASE_REFERENCE_STAMP"] = stamp
@@ -420,7 +431,7 @@ def main() -> int:
         if reference_protocol_passed(paths) and not reference_smoke_passed(paths):
             results.append(run_step('selected_base_reference_smoke', [probe_py, str(ROOT / 'modules' / 'environment' / 'scripts' / 'probe_selected_base_reference.py'), '--project', args.project, '--mode', 'smoke', '--timeout-sec', '240'], timeout=300))
         if reference_smoke_passed(paths) and not reference_reproduction_audit_recorded(paths):
-            results.append(run_step('selected_base_reference_reproduction_audit_bounded', [py, str(ROOT / 'modules' / 'environment' / 'scripts' / 'run_selected_base_reference_reproduction_audit.py'), '--project', args.project, '--mode', 'bounded', '--epoch', '1', '--timeout-sec', '900', '--execute'], timeout=960))
+            results.append(run_step('selected_base_reference_reproduction_audit_bounded', [py, str(ROOT / 'modules' / 'environment' / 'scripts' / 'run_selected_base_reference_reproduction_audit.py'), '--project', args.project, '--mode', 'bounded', '--epoch', '1', '--timeout-sec', '900', '--execute', '--venue', venue], timeout=960))
         if reference_smoke_passed(paths) and reference_reproduction_audit_recorded(paths) and not paper_level_reference_reproduction_passed(paths):
             full_job = ensure_reference_full_job(paths, args.project, venue, py)
             results.append({'name': 'selected_base_reference_reproduction_full_job', 'started_at': full_job.get('generated_at', now_iso()), 'finished_at': now_iso(), 'return_code': 0 if full_job.get('status') in {'running', 'completed'} else 2, 'timed_out': False, 'job': full_job})

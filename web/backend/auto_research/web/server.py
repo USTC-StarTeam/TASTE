@@ -7268,12 +7268,15 @@ def _live_jobs_from_projects(*, compact: bool = True) -> list[dict[str, Any]]:
         literature_packet = _read_project_json(root / "state" / "literature_tool_packet.json", {})
         current_plan = _read_project_json(root / "state" / "current_find_research_plan.json", {})
         reference_live_job = _live_reference_reproduction_job(project, root, current_plan if isinstance(current_plan, dict) else {}, compact=compact)
+        reference_live_pid = ""
         if reference_live_job and str(reference_live_job.get("status") or "").lower() in {"queued", "running", "cancelling"}:
             # A wrapper-managed selected-base full reproduction is a real research job
             # launched by the cycle. Surface it in the taskbar while it is alive;
             # do not synthesize completed history after it exits.
             reference_live_job["stage"] = "experiment"
             reference_live_job["job_id"] = str(reference_live_job.get("job_id") or f"reference-reproduction_{project}")
+            result = reference_live_job.get("result") if isinstance(reference_live_job.get("result"), dict) else {}
+            reference_live_pid = str(result.get("pid") or reference_live_job.get("pid") or "").strip()
             jobs.append(reference_live_job)
 
         persisted_full_job = _read_project_json(root / "state" / "full_cycle_job.json", {})
@@ -7292,6 +7295,8 @@ def _live_jobs_from_projects(*, compact: bool = True) -> list[dict[str, Any]]:
         process_alive = _pid_alive_local(pid)
         cycle_status = str(full_cycle.get("status") or "").strip().lower() if isinstance(full_cycle, dict) else ""
         active_project_workers = _active_project_child_processes(project, root)
+        if reference_live_pid:
+            active_project_workers = [row for row in active_project_workers if str(row.get("pid") or "").strip() != reference_live_pid]
         active_project_worker = active_project_workers[0] if active_project_workers else {}
         if not process_alive and cycle_status == "running" and isinstance(full_cycle, dict):
             running_stage = full_cycle.get("current_running_stage") if isinstance(full_cycle.get("current_running_stage"), dict) else {}
@@ -7784,6 +7789,9 @@ def _live_jobs_from_projects(*, compact: bool = True) -> list[dict[str, Any]]:
         # taskbar stages are top-level user workflow steps. Keep TASTE
         # internals such as autonomous-research in result.raw_stage/logs only.
         jobs.extend(worker_jobs_for_live_controller)
+        suppress_dead_full_cycle = bool(reference_live_pid and not process_alive and str(full_job.get("kind") or "") == "full_cycle")
+        if suppress_dead_full_cycle:
+            continue
         jobs.append({
             "job_id": str(full_job.get("web_job_id") or f"full_cycle_{project}"),
             "stage": display_stage,
@@ -7873,6 +7881,53 @@ def _job_has_public_artifact(item: dict[str, Any]) -> bool:
     return False
 
 
+def _parse_job_time(value: Any) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _environment_history_superseded_at(project: str) -> float:
+    project_id = str(project or "").strip()
+    if not project_id:
+        return 0.0
+    root = PROJECT_IDS_ROOT / project_id
+    if not root.exists():
+        return 0.0
+    state = root / "state"
+    bootstrap = _read_project_json(state / "repo_env_bootstrap.json", {})
+    if not isinstance(bootstrap, dict):
+        bootstrap = {}
+    bootstrap_status = str(bootstrap.get("status") or "").strip().lower()
+    runtime_ok = bool(
+        bootstrap_status in {"completed", "prepared", "ok", "pass"}
+        and (bootstrap.get("env_exists_after") is not False)
+        and (bootstrap.get("env_name") or bootstrap.get("python_executable") or bootstrap.get("executed"))
+    )
+    if runtime_ok:
+        ts = _parse_job_time(bootstrap.get("timestamp") or bootstrap.get("generated_at") or bootstrap.get("updated_at"))
+        if ts > 0:
+            return ts
+    full_job = _read_project_json(state / "fresh_base_reference_full_reproduction_job.json", {})
+    if isinstance(full_job, dict):
+        status = str(full_job.get("status") or "").strip().lower()
+        pid = str(full_job.get("pid") or "").strip()
+        if status in {"running", "completed", "done", "pass"} and (status != "running" or _pid_alive_local(pid)):
+            ts = _parse_job_time(full_job.get("generated_at") or full_job.get("updated_at"))
+            if ts > 0:
+                return ts
+    audit = _read_project_json(state / "fresh_base_reference_full_reproduction_audit.json", {})
+    if isinstance(audit, dict) and audit.get("mode") == "full" and audit.get("return_code") == 0 and audit.get("audit_ready"):
+        ts = _parse_job_time(audit.get("generated_at") or audit.get("finished_at"))
+        if ts > 0:
+            return ts
+    return 0.0
+
+
 def _hide_superseded_stopped_jobs(rows: list[dict[str, Any]], project_hint: str = "") -> list[dict[str, Any]]:
     """Hide old stopped rows once a newer usable job represents the same stage.
 
@@ -7896,6 +7951,13 @@ def _hide_superseded_stopped_jobs(rows: list[dict[str, Any]], project_hint: str 
         if created > latest_active_created.get(key, ""):
             latest_active_created[key] = created
 
+    env_history_superseded_cache: dict[str, float] = {}
+    env_history_statuses = {
+        "blocked",
+        "blocked_environment_base_selection_required",
+        "blocked_environment_bootstrap_failed",
+        "blocked_environment_bootstrap_required",
+    }
     kept: list[dict[str, Any]] = []
     for item in rows:
         status = str(item.get("status") or "").strip().lower()
@@ -7903,6 +7965,12 @@ def _hide_superseded_stopped_jobs(rows: list[dict[str, Any]], project_hint: str 
         stage = _job_public_stage(item)
         created = str(item.get("created_at") or "")
         superseded_at = latest_active_created.get((project, stage), "")
+        if project and stage == "environment" and status in env_history_statuses and not _job_has_public_artifact(item):
+            if project not in env_history_superseded_cache:
+                env_history_superseded_cache[project] = _environment_history_superseded_at(project)
+            env_superseded_at = env_history_superseded_cache.get(project, 0.0)
+            if env_superseded_at and _parse_job_time(created) and _parse_job_time(created) < env_superseded_at:
+                continue
         if (
             project
             and stage
@@ -8210,16 +8278,50 @@ def _live_reference_reproduction_job(project: str, root: Path, current_plan: dic
     if cmd:
         logs.append(f"cmd={cmd}")
 
+    progress_total = _as_int(reference_job.get("epoch") or reference_job.get("epochs"), 0)
+    if not progress_total and cmd:
+        match = re.search(r"--epochs\s+(\d+)", cmd)
+        if match:
+            progress_total = _as_int(match.group(1), 0)
+    progress_current = 0
+    latest_training_log = ""
+    if artifact_dir:
+        try:
+            candidates = sorted((Path(artifact_dir) / "models").glob("training_log*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if candidates:
+                latest_training_log = str(candidates[0])
+                tail = candidates[0].read_text(encoding="utf-8", errors="replace")[-20000:]
+                epochs = [int(item) for item in re.findall(r"Epoch:\s*(\d+)", tail)]
+                if epochs:
+                    progress_current = max(epochs)
+        except Exception:
+            progress_current = 0
+    if latest_training_log:
+        logs.append(f"training_log={latest_training_log}")
+
     message_bits = [
         f"selected-base full reproduction {'running' if process_alive else job_status}",
         f"PID={pid or '-'}",
     ]
     if elapsed:
         message_bits.append(f"elapsed={elapsed}")
+    if progress_total and progress_current:
+        message_bits.append(f"epoch={min(progress_current, progress_total)}/{progress_total}")
     if paper_title:
         message_bits.append(paper_title[:96])
     if not process_alive and job_status == "blocked":
         message_bits.append("请以 reference reproduction audit/gate 为准")
+
+    if process_alive and progress_total and progress_current:
+        progress_current_display = min(progress_current, progress_total)
+        progress_total_display = progress_total
+        progress_percent = min(99, int(progress_current_display * 100 / max(progress_total_display, 1)))
+        progress_phase = "reference_reproduction_epoch"
+    else:
+        progress_current_display = 0 if process_alive else 1
+        progress_total_display = 1
+        progress_percent = 0 if process_alive else 100
+        progress_phase = "running" if process_alive else job_status
 
     return {
         "job_id": str(reference_job.get("web_job_id") or f"reference-reproduction_{project}"),
@@ -8245,10 +8347,10 @@ def _live_reference_reproduction_job(project: str, root: Path, current_plan: dic
         "cancel_requested": False,
         "cancelled_at": "",
         "progress": {
-            "phase": "running" if process_alive else job_status,
-            "current": 0 if process_alive else 1,
-            "total": 1,
-            "percent": 0 if process_alive else 100,
+            "phase": progress_phase,
+            "current": progress_current_display,
+            "total": progress_total_display,
+            "percent": progress_percent,
             "message": "；".join(message_bits),
         },
     }

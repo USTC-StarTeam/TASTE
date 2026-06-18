@@ -44,6 +44,81 @@ def load_json(path: Path, default):
         return default
 
 
+
+
+def adapter_contract_diagnostics(paths) -> dict:
+    """Summarize structural adapter/probe problems for project Claude repair.
+
+    This does not promote a repo or mark data ready. It only explains why a
+    project-local adapter's own output is internally inconsistent, so the next
+    pending-loader repair pass can fix the adapter instead of guessing from a
+    vague blocker such as "Unknown import blockers".
+    """
+    diagnostics: list[dict] = []
+
+    def inspect_payload(label: str, payload: dict, path: Path) -> None:
+        if not isinstance(payload, dict) or not payload:
+            return
+        status = str(payload.get('status') or '').strip()
+        decision = str(payload.get('decision') or '').strip()
+        blocker_reasons = payload.get('blocker_reasons') if isinstance(payload.get('blocker_reasons'), list) else []
+        summary = payload.get('import_probe_summary') if isinstance(payload.get('import_probe_summary'), dict) else {}
+        if not summary:
+            summary = payload.get('repo_import_probe') if isinstance(payload.get('repo_import_probe'), dict) else {}
+        data_probe = summary.get('data_probe') if isinstance(summary.get('data_probe'), dict) else {}
+        imports = summary.get('imports') if isinstance(summary.get('imports'), dict) else {}
+        repo_keys = [
+            'repo_dataset_imports',
+            'repo_model_import',
+            'repo_utils_import',
+            'repo_lerp_fm_import',
+            'repo_slerp_fm_import',
+            'repo_iso3_import',
+            'repo_allatom_import',
+        ]
+        observed_repo_keys = [key for key in repo_keys if key in summary]
+        repo_imports_ok = bool(observed_repo_keys) and all(str(summary.get(key) or '') == 'ok' for key in observed_repo_keys)
+        data_loaded_ok = bool(data_probe.get('perturb_data_pt_loaded') or data_probe.get('md_data_pt_loaded') or data_probe.get('loader_probe_success'))
+        success = payload.get('loader_probe_success') is True or summary.get('success') is True or any(
+            isinstance(row, dict) and (row.get('claim_ready') or row.get('loader_probe_success') or (isinstance(row.get('loader_probe'), dict) and row.get('loader_probe', {}).get('success')))
+            for row in (payload.get('probes') if isinstance(payload.get('probes'), list) else [])
+        )
+        issues: list[str] = []
+        if repo_imports_ok and data_loaded_ok and not success:
+            issues.append('repo_imports_and_data_load_pass_but_adapter_reports_failure')
+        if (repo_imports_ok or data_loaded_ok) and not imports:
+            issues.append('adapter_import_probe_summary_missing_imports_map')
+        if any('Unknown import blockers' in str(item) for item in blocker_reasons):
+            issues.append('adapter_reports_unknown_import_blockers')
+        if issues:
+            diagnostics.append({
+                'label': label,
+                'path': str(path),
+                'status': status,
+                'decision': decision,
+                'issues': issues,
+                'repo_imports_ok': repo_imports_ok,
+                'data_loaded_ok': data_loaded_ok,
+                'success': bool(success),
+                'observed_repo_import_keys': observed_repo_keys,
+                'import_keys_present': sorted(imports.keys())[:40],
+                'blocker_reasons': blocker_reasons[:8],
+                'required_adapter_repair': [
+                    'Make the adapter output self-explaining: include an imports/package_checks mapping used by its success logic.',
+                    'Do not leave success=false with Unknown import blockers when repo imports and real data loading pass; either set success/claim_ready true or report the exact failing module/field.',
+                    'After editing, rerun the TASTE module command that dispatches the adapter and inspect the resulting real_dataset_probe/candidate_loader_probe JSON.',
+                ],
+            })
+
+    real_path = paths.state / 'real_dataset_probe.json'
+    inspect_payload('real_dataset_probe', load_json(real_path, {}), real_path)
+    for candidate_path in sorted(paths.state.glob('candidate_loader_probe_*.json')):
+        inspect_payload(candidate_path.stem, load_json(candidate_path, {}), candidate_path)
+    return {
+        'has_blocking_adapter_contract_issues': bool(diagnostics),
+        'diagnostics': diagnostics[:8],
+    }
+
 def infer_repo(paths, explicit: str = '') -> str:
     if explicit:
         return explicit
@@ -281,6 +356,7 @@ def run_pending_loader_bootstrap(project: str, paths, env_name: str, selection: 
     fresh_rc = run_optional(module_cmd('environment', 'fresh_base_plan', '--project', project), ROOT, timeout=180)
     results.append({'step': 'fresh_base_plan_for_pending_loader', 'return_code': fresh_rc})
     prompt_path = paths.state / 'environment_pending_loader_bootstrap_prompt.md'
+    adapter_diagnostics = adapter_contract_diagnostics(paths)
     prompt = f"""
 TASTE Environment pending-loader bootstrap for project `{project}`.
 
@@ -289,11 +365,13 @@ You are Claude Code working inside the project workspace. The environment-stage 
 Hard rules:
 - Work only on the current environment-stage pending candidate repo below. Do not switch to another paper/repo and do not run another Find.
 - Add project-local adapter/probe files only under `projects/{project}/scripts/adapters/` or project state/report artifacts. Do not edit TASTE framework/module source.
+- Project-local adapters are active-route adapters by default. If an adapter is intended for this pending candidate before promotion, also write `projects/{project}/scripts/adapters/adapter_scope.json` with explicit `candidate_adapters` entries binding each adapter filename to this candidate's repo_path, candidate_repo/name, and candidate_title. Without that sidecar, TASTE candidate-scope probes will ignore the adapter and use generic evidence to prevent cross-candidate data contamination.
 - Do not fabricate datasets or mark synthetic/toy data as paper evidence. If you create a tiny smoke fixture, label it as smoke-only and keep claim gates blocked.
 - Do not enumerate, decompress, or scan large archives/datasets. Use TASTE data contracts/probe JSON and lightweight local metadata only, such as `ls -lh`, `du -sh`, or bounded `find -maxdepth`; if deeper validation is needed, request or call the TASTE data probe wrapper instead of manually walking `.tar.gz` contents.
 - Do not run raw curl/wget/gdown or any mutating conda/pip command yourself. Data acquisition must go through `framework/scripts/run_module.py environment --action fresh_base_data_probe --project {project} --attempt-download --timeout-sec <N>`. Environment creation is wrapper-owned.
 - You may use quick local read-only environment probes such as `conda info`, `conda env list`, and `conda list -n <env>` when needed to understand this machine. Do not run `conda search`, `conda create`, `conda install`, `conda update`, `conda env update`, `conda remove`, `conda run`, `pip install`, environment Python probes, or downloads. Do not combine an allowed probe with a forbidden command in the same shell line via `&&`, `;`, `|`, subshells, or command substitution.
 - Use the configured management Python command shown by TASTE for TASTE wrapper commands; do not use bare python or a candidate experiment-env Python directly.
+- Never call the parent environment stage from inside this worker: do not run `framework/scripts/run_module.py environment --action run_environment_stage`, `modules/environment/main.py --action run_environment_stage`, or `modules/environment/scripts/run_environment_stage.py`. Only run specific bounded sub-actions such as `fresh_base_plan`, `build_repo_data_requirements`, `probe_repo_dataset`, or `fresh_base_data_probe`.
 
 Pending candidate:
 ```json
@@ -305,12 +383,24 @@ Current repo/env strategy:
 {json.dumps(load_repo_env_strategy(paths), ensure_ascii=False, indent=2)[:12000]}
 ```
 
+Current adapter/probe contract diagnostics from the latest TASTE probes:
+```json
+{json.dumps(adapter_diagnostics, ensure_ascii=False, indent=2)[:12000]}
+```
+
+Adapter contract requirements:
+- Every project-local loader adapter must emit self-explaining structured evidence: package/import checks used by the success logic, repo loader/import checks, real data loading checks, exact blocker reasons, and ready/blocked dataset lists.
+- If repo imports and real data loading pass, the adapter must not leave `success=false`, empty `ready_datasets`, or `Unknown import blockers` without naming the exact remaining failing check.
+- If the adapter uses an inline subprocess probe, it must return the import/package check map in the JSON it parses; do not keep checks only in a local variable.
+- After each adapter edit, rerun the TASTE module command that dispatches that adapter and inspect `real_dataset_probe.json` and candidate loader probe JSON.
+
 Required work:
 1. Inspect the selected repo README, examples, environment file, dataset loaders, and entrypoints.
 2. Write or repair project-local adapters for `build_fresh_base_implementation_plan.py`, `build_repo_data_requirements.py`, `probe_repo_dataset.py`, and reference probes only when needed.
-3. The adapters must expose exact dataset contract, expected roots/files, public download sources, import/package requirements, minimal smoke commands, and honest blockers.
-4. Run TASTE module commands only to regenerate `fresh_base_implementation_plan.json` and bounded repo data/loader probes. Do not run large data downloads or conda creation yourself; the Environment wrapper runs data acquisition and env bootstrap after you return.
-5. Leave gates blocked unless a real dataset contract and repo loader/import probe pass.
+3. The adapters must expose exact dataset contract, expected roots/files, public download sources, import/package requirements, minimal smoke commands, honest blockers, and explicit candidate scope metadata when they are candidate-specific.
+4. Repair adapter contract issues reported above before doing new repo search or new environment planning. A vague blocker is not enough when the latest TASTE probe already shows which subchecks passed.
+5. Run TASTE module commands only to regenerate `fresh_base_implementation_plan.json` and bounded repo data/loader probes. Do not run large data downloads or conda creation yourself; the Environment wrapper runs data acquisition and env bootstrap after you return.
+6. Leave gates blocked unless a real dataset contract and repo loader/import probe pass.
 
 Return concise Markdown with Files Inspected, Adapters/Artifacts Written, TASTE Commands Run, Data/Loader Status, Still Blocked or Cleared.
 """.strip() + "\n"
@@ -345,11 +435,13 @@ Return concise Markdown with Files Inspected, Adapters/Artifacts Written, TASTE 
         )
         results.append({'step': 'machine_aware_env_bootstrap_pending_loader', 'return_code': bootstrap_rc, 'env_name': bootstrap_env_name, 'plan_path': str(plan_path), 'repo_path': repo})
         if bootstrap_rc != 0:
-            reason = 'Machine-aware environment bootstrap for the pending-loader candidate failed; TASTE must replan from the local machine profile and wrapper receipt before this candidate can be promoted.'
+            reason = 'Machine-aware environment bootstrap for the pending-loader candidate failed; this candidate remains non-executable on the current machine and TASTE must continue repo search/audit instead of promoting it.'
             run_optional(module_cmd('environment', 'fresh_base_plan', '--project', project), ROOT, timeout=180)
+            mark_pending_candidate_non_executable(paths, pending, repo, reason, bootstrap_rc or 2)
             write_repo_selection_blocker(paths, reason, selection=selection)
             write_fresh_base_implementation_blocker(paths, current_find_run_id(paths), reason)
-            raise SystemExit(2)
+            results.append({'step': 'pending_loader_candidate_marked_non_executable', 'return_code': bootstrap_rc or 2, 'reason': reason, 'repo_path': repo})
+            return results
     else:
         bootstrap_cmd = module_cmd('environment', 'bootstrap', '--project', project, '--repo-path', repo, '--env-name', bootstrap_env_name, '--verify-only', '--prepare-only')
         bootstrap_rc = run_optional(bootstrap_cmd, ROOT, timeout=bootstrap_timeout)
@@ -433,7 +525,7 @@ def select_current_run_environment_repo(project: str, paths, env_name: str, max_
         '--candidate-source', 'fresh_literature_github_search',
         '--fresh-find-run-id', run_id,
     ]
-    pending_bootstrap_attempted = False
+    pending_bootstrap_attempted: set[str] = set()
     for round_index in range(1, max(1, max_rounds) + 1):
         print(f'TASTE current-run environment repo-selection iteration {round_index}/{max_rounds}', flush=True)
         round_selector = list(selector)
@@ -446,8 +538,15 @@ def select_current_run_environment_repo(project: str, paths, env_name: str, max_
         selected = selection.get('selected') if isinstance(selection, dict) and isinstance(selection.get('selected'), dict) else {}
         repo = str(selected.get('repo_path') or selected.get('local_path') or '').strip()
         pending = pending_environment_candidate(selection if isinstance(selection, dict) else {})
-        if pending and not pending_bootstrap_attempted:
-            pending_bootstrap_attempted = True
+        pending_repo_key = ''
+        if pending:
+            raw_pending_repo = str(pending.get('repo_path') or pending.get('local_path') or '').strip()
+            try:
+                pending_repo_key = str(Path(raw_pending_repo).expanduser().resolve()) if raw_pending_repo else ''
+            except Exception:
+                pending_repo_key = raw_pending_repo
+        if pending and pending_repo_key and pending_repo_key not in pending_bootstrap_attempted:
+            pending_bootstrap_attempted.add(pending_repo_key)
             bootstrap_results = run_pending_loader_bootstrap(project, paths, env_name, selection, venue=venue, allow_env_bootstrap=allow_env_bootstrap)
             for result in reversed(bootstrap_results):
                 planned_env = str(result.get('env_name') or '').strip() if isinstance(result, dict) else ''
@@ -474,8 +573,13 @@ def select_current_run_environment_repo(project: str, paths, env_name: str, max_
         if rc == 0 and repo and Path(repo).exists() and current_env_selection_valid(paths):
             return repo
         latest_pending = pending_environment_candidate(selection if isinstance(selection, dict) else {})
-        if latest_pending and pending_bootstrap_attempted and round_index >= max(1, max_rounds):
-            blocker_reason = 'Current Find environment-stage selection identified a transformable pending-loader candidate and TASTE attempted data/adapter bootstrap, but loader/import evidence is still not claim-ready; experiments remain blocked with exact artifacts.'
+        latest_pending_repo = str(latest_pending.get('repo_path') or latest_pending.get('local_path') or '').strip() if latest_pending else ''
+        try:
+            latest_pending_key = str(Path(latest_pending_repo).expanduser().resolve()) if latest_pending_repo else ''
+        except Exception:
+            latest_pending_key = latest_pending_repo
+        if latest_pending and latest_pending_key in pending_bootstrap_attempted and round_index >= max(1, max_rounds):
+            blocker_reason = 'Current Find environment-stage selection identified a transformable pending-loader candidate and TASTE attempted data/adapter/env bootstrap, but loader/import evidence is still not claim-ready on this machine; experiments remain blocked with exact artifacts.'
             write_repo_selection_blocker(paths, blocker_reason, selection=selection if isinstance(selection, dict) else {})
             run_optional(module_cmd('environment', 'fresh_base_plan', '--project', project), ROOT, timeout=180)
             raise SystemExit(2)
@@ -571,8 +675,14 @@ def environment_is_locked(paths, cfg: dict, env_name: str, repo: str) -> bool:
     same_env = isinstance(bootstrap, dict) and str(bootstrap.get('env_name', '')) == env_name
     same_repo = isinstance(bootstrap, dict) and str(bootstrap.get('repo_path', '')) == str(repo)
     completed = same_env and same_repo and bootstrap.get('status') == 'completed'
-    # A later prepare-only run must not unlock or downgrade a previously created env.
-    return completed or conda_env_exists(cfg, env_name)
+    if stale_runtime_failure_for_env(paths, env_name):
+        return False
+    if completed:
+        return bootstrap_runtime_validation_passed(bootstrap)
+    # Existing env directories alone are not enough: compiled runtimes can import
+    # successfully while failing on the local GPU architecture. The bootstrap
+    # receipt must include the wrapper runtime validation before TASTE locks it.
+    return False
 
 
 def has_claim_ready_probe(paths, repo: str) -> bool:
@@ -656,8 +766,8 @@ def _conda_package_cache_inventory(conda_exe: str) -> dict:
         candidates.append(base / 'pkgs')
     seen: set[str] = set()
     package_prefixes = (
-        'pytorch-', 'pytorch-cuda-', 'cuda-version-', 'cuda-toolkit-', 'torchvision-', 'torchaudio-',
-        'pyg-', 'pytorch-scatter-', 'pytorch-sparse-', 'pytorch-cluster-', 'torch-scatter-', 'torch-sparse-', 'torch-cluster-',
+        'pytorch-', 'pytorch-cuda-', 'pytorch-mutex-', 'cuda-version-', 'cuda-toolkit-', 'torchvision-', 'torchaudio-',
+        'pyg-', 'torch-geometric-', 'pytorch-geometric-', 'pytorch-scatter-', 'pytorch-sparse-', 'pytorch-cluster-', 'torch-scatter-', 'torch-sparse-', 'torch-cluster-',
         'numpy-', 'scipy-', 'scikit-learn-', 'pandas-', 'h5py-', 'pyyaml-', 'tqdm-',
     )
     for cache_dir in candidates:
@@ -676,11 +786,52 @@ def _conda_package_cache_inventory(conda_exe: str) -> dict:
                 else:
                     stem = name
                 if stem.startswith(package_prefixes):
-                    out['relevant_cached_packages'].append({'cache_dir': text, 'name': name})
+                    row = {'cache_dir': text, 'name': name}
+                    info_path = item / 'info' / 'index.json' if item.is_dir() else None
+                    if info_path and info_path.exists():
+                        try:
+                            info = json.loads(info_path.read_text(encoding='utf-8', errors='replace'))
+                            row['depends'] = info.get('depends', [])[:40] if isinstance(info.get('depends'), list) else []
+                            row['version'] = info.get('version', '')
+                            row['build'] = info.get('build', '')
+                        except Exception as exc:
+                            row['index_error'] = str(exc)
+                    out['relevant_cached_packages'].append(row)
         except Exception as exc:
             out.setdefault('cache_scan_errors', []).append({'cache_dir': text, 'error': str(exc)})
     out['relevant_cached_packages'] = out['relevant_cached_packages'][:240]
     return out
+
+
+def _conda_env_import_probe(conda_exe: str, env_name: str) -> dict:
+    if not conda_exe or not env_name:
+        return {}
+    probe_code = "import importlib.util, json\nmods = [\n    \"torch\", \"torch_geometric\", \"torch_scatter\", \"torch_sparse\", \"torch_cluster\",\n    \"atom3d\", \"Bio\", \"mdtraj\", \"ml_collections\", \"tree\", \"einops\",\n    \"numpy\", \"scipy\", \"sklearn\", \"pandas\", \"h5py\", \"yaml\", \"tqdm\",\n]\nout = {\"imports\": {name: bool(importlib.util.find_spec(name)) for name in mods}}\nif out[\"imports\"].get(\"torch\"):\n    try:\n        import torch\n        version_obj = getattr(torch, \"version\", None)\n        torch_version = str(getattr(torch, \"__version__\", \"\") or \"\")\n        torch_info = {\n            \"version\": torch_version,\n            \"file\": str(getattr(torch, \"__file__\", \"\") or \"\"),\n            \"cuda_version\": str(getattr(version_obj, \"cuda\", \"\") or \"\"),\n            \"cuda_available\": bool(hasattr(torch, \"cuda\") and torch.cuda.is_available()),\n            \"device_count\": int(torch.cuda.device_count()) if hasattr(torch, \"cuda\") else 0,\n            \"usable\": bool(torch_version and hasattr(torch, \"cuda\")),\n        }\n        if torch_info[\"cuda_available\"]:\n            torch_info[\"device_name\"] = torch.cuda.get_device_name(0)\n            torch_info[\"device_capability\"] = list(torch.cuda.get_device_capability(0))\n            try:\n                x = torch.randn(32, device=\"cuda\")\n                y = (x * x).sum()\n                torch.cuda.synchronize()\n                torch_info[\"cuda_kernel_test\"] = \"passed\"\n                torch_info[\"cuda_kernel_value\"] = float(y.detach().cpu())\n            except Exception as exc:\n                torch_info[\"cuda_kernel_test\"] = \"failed\"\n                torch_info[\"cuda_kernel_error\"] = f\"{type(exc).__name__}: {exc}\"\n                torch_info[\"usable\"] = False\n        out[\"torch\"] = torch_info\n    except Exception as exc:\n        out[\"torch_error\"] = str(exc)\nprint(json.dumps(out, ensure_ascii=False))"
+    try:
+        proc = subprocess.run(
+            [conda_exe, 'run', '-n', env_name, 'python', '-c', probe_code],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return {'status': 'timeout', 'timeout_sec': 60}
+    except Exception as exc:
+        return {'status': 'error', 'error': str(exc)}
+    payload: dict = {'status': 'passed' if proc.returncode == 0 else 'failed', 'return_code': proc.returncode}
+    if proc.returncode == 0:
+        try:
+            parsed = json.loads((proc.stdout or '').strip().splitlines()[-1])
+            if isinstance(parsed, dict):
+                payload.update(parsed)
+        except Exception as exc:
+            payload['parse_error'] = str(exc)
+            payload['stdout_tail'] = (proc.stdout or '')[-1200:]
+    else:
+        payload['stdout_tail'] = (proc.stdout or '')[-1200:]
+        payload['stderr_tail'] = (proc.stderr or '')[-1200:]
+    return payload
 
 
 def _conda_env_inventory(machine: dict, env_name: str) -> dict:
@@ -706,11 +857,110 @@ def _conda_env_inventory(machine: dict, env_name: str) -> dict:
                 packages = json.loads(proc.stdout)
                 if isinstance(packages, list):
                     out['selected_env_packages'] = [{k: row.get(k) for k in ['name', 'version', 'channel']} for row in packages[:160] if isinstance(row, dict)]
+                    out['selected_env_import_probe'] = _conda_env_import_probe(conda_exe, env_name)
             else:
                 out['selected_env_list_error'] = (proc.stderr or proc.stdout)[-1200:]
         except Exception as exc:
             out['selected_env_list_error'] = str(exc)
+    tokens = {token for token in re.split(r'[^a-zA-Z0-9]+', env_name.lower()) if len(token) >= 4}
+    nearby: list[dict[str, Any]] = []
+    for row in out.get('envs', []):
+        name = str(row.get('name') or '')
+        if not name or name == env_name:
+            continue
+        lowered = name.lower()
+        if not tokens or not any(token in lowered for token in tokens):
+            continue
+        try:
+            proc = subprocess.run([conda_exe, 'list', '-n', name, '--json'], cwd=ROOT, text=True, capture_output=True, timeout=30)
+            if proc.returncode != 0:
+                continue
+            packages = json.loads(proc.stdout)
+        except Exception:
+            continue
+        if not isinstance(packages, list):
+            continue
+        important = []
+        for pkg in packages:
+            if not isinstance(pkg, dict):
+                continue
+            pkg_name = str(pkg.get('name') or '')
+            if pkg_name.startswith(('torch', 'pytorch', 'cuda', 'pyg')) or pkg_name in {'numpy', 'scipy', 'pandas', 'scikit-learn', 'biopython', 'mdtraj', 'h5py', 'einops', 'atom3d'}:
+                important.append({k: pkg.get(k) for k in ['name', 'version', 'channel']})
+        if important:
+            nearby.append({'name': name, 'path': row.get('path', ''), 'important_packages': important[:80], 'import_probe': _conda_env_import_probe(conda_exe, name)})
+        if len(nearby) >= 6:
+            break
+    out['nearby_project_env_packages'] = nearby
     return out
+
+
+CUDA_RUNTIME_FAILURE_MARKERS = (
+    'no kernel image is available for execution on the device',
+    'not compatible with the current pytorch installation',
+    'device kernel image is invalid',
+    'cuda error: no kernel image',
+    'sm_120',
+)
+
+
+def _json_from_stdout_tail(text: str) -> dict:
+    for line in reversed(str(text or '').splitlines()):
+        line = line.strip()
+        if not line.startswith('{'):
+            continue
+        try:
+            payload = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}
+
+
+def bootstrap_runtime_validation_passed(bootstrap: dict) -> bool:
+    if not isinstance(bootstrap, dict):
+        return False
+    executed = bootstrap.get('executed') if isinstance(bootstrap.get('executed'), list) else []
+    for row in reversed(executed):
+        if not isinstance(row, dict):
+            continue
+        stdout = str(row.get('stdout') or '')
+        if 'taste_runtime_validation' not in stdout and 'runtime_validation_passed' not in stdout:
+            continue
+        payload = _json_from_stdout_tail(stdout)
+        return bool(row.get('return_code') == 0 and payload.get('runtime_validation_passed') is True)
+    return False
+
+
+def stale_runtime_failure_for_env(paths, env_name: str) -> bool:
+    if not env_name:
+        return False
+    candidates = [
+        paths.state / 'fresh_base_reference_full_reproduction_job.json',
+        paths.state / 'fresh_base_reference_full_reproduction_audit.json',
+        paths.state / 'fresh_base_reference_reproduction_audit.json',
+    ]
+    for state_path in candidates:
+        payload = load_json(state_path, {})
+        if not isinstance(payload, dict) or not payload:
+            continue
+        if str(payload.get('status') or '').strip().lower() not in {'blocked', 'failed', 'error', 'blocked_reference_reproduction_audit'}:
+            continue
+        if int(payload.get('return_code') or 0) == 0:
+            continue
+        refs = json.dumps({k: payload.get(k) for k in ['python_executable', 'command', 'env_name']}, ensure_ascii=False)
+        stdout_path = Path(str(payload.get('stdout_path') or ''))
+        text = refs
+        if stdout_path.exists():
+            try:
+                text += '\n' + stdout_path.read_text(encoding='utf-8', errors='ignore')[-12000:]
+            except Exception:
+                pass
+        lowered = text.lower()
+        if env_name.lower() in lowered and any(marker in lowered for marker in CUDA_RUNTIME_FAILURE_MARKERS):
+            return True
+    return False
 
 
 def _bootstrap_receipt_summary(paths) -> dict:
@@ -754,6 +1004,19 @@ def _repo_environment_inputs(repo: Path) -> dict:
 
 
 def current_machine_aware_env_name(paths, repo: str = '') -> str:
+    bootstrap = load_json(paths.state / 'repo_env_bootstrap.json', {})
+    if isinstance(bootstrap, dict) and str(bootstrap.get('status') or '').strip().lower() == 'completed':
+        boot_env = str(bootstrap.get('env_name') or '').strip()
+        boot_repo = str(bootstrap.get('repo_path') or '').strip()
+        same_repo = True
+        if repo:
+            try:
+                same_repo = bool(boot_repo and Path(boot_repo).resolve() == Path(repo).resolve())
+            except Exception:
+                same_repo = bool(boot_repo and boot_repo == repo)
+        if boot_env and same_repo and bootstrap_runtime_validation_passed(bootstrap) and not stale_runtime_failure_for_env(paths, boot_env):
+            return boot_env
+
     plan_path = paths.state / 'machine_aware_env_plan.json'
     plan = load_json(plan_path, {})
     if not isinstance(plan, dict):
@@ -770,6 +1033,8 @@ def current_machine_aware_env_name(paths, repo: str = '') -> str:
             if planned_repo and planned_repo != repo:
                 return ''
     bootstrap = load_json(paths.state / 'repo_env_bootstrap.json', {})
+    if stale_runtime_failure_for_env(paths, planned_env):
+        return ''
     if isinstance(bootstrap, dict) and str(bootstrap.get('status') or '').strip().lower() in {'failed', 'blocked'}:
         same_plan = str(bootstrap.get('machine_aware_plan_path') or '').strip() == str(plan_path.resolve())
         same_repo = not repo or str(bootstrap.get('repo_path') or '').strip() == str(Path(repo).resolve())
@@ -802,11 +1067,15 @@ You are Claude Code inside the project workspace. Your task is to decide the env
 
 Hard rules:
 - Consider the local machine profile, GPU/driver/CUDA evidence, existing conda environments, repo environment files, repo loader/import requirements, and current project runtime config.
+- Treat TASTE-supplied env import probes as authoritative execution evidence. A package name in `conda list` or a bare `import` is not enough: for core runtime packages such as PyTorch, use explicit fields such as `torch.usable`, `torch.version`, CUDA availability, `torch.cuda_kernel_test`, and required import booleans before deciding an env is reusable.
 - Repo `environment.yml` / `requirements.txt` are evidence, not commands to copy blindly. If old pins are incompatible with the local machine, adapt or block with a clear reason.
 - If a partial env already exists, do not include a `conda create -n <same env>` step. Choose `repair_existing_env` with install/update/run verification steps, or choose a clearly different new env name.
 - If the local package cache shows a CUDA-enabled PyTorch build directly, you may target that direct package/build evidence instead of inventing a separate `pytorch-cuda=<version>` pin. Never repeat a package spec that the previous receipt shows as unavailable.
+- If the cache/inventory does not show required compiled extension packages for the selected Python/CUDA/PyTorch combination, do not invent a conda solution. Prefer a wrapper-executed pip/prebuilt-wheel route from a non-rate-limited source, an already installed compatible env that passes import probes, or set `status="blocked"` so TASTE can continue route selection.
+- A previous `repo_env_bootstrap.status=completed` proves only the wrapper plan verification steps listed in that receipt. If the Data and loader evidence below still reports repo import, package compatibility, or real-data load failures, treat the environment as needing another scoped repair plan; do not declare success merely because the env exists.
+- If TASTE-supplied conda import probes and real data/loader evidence below already pass for the requested env, choose `decision="reuse_existing_env"`, leave `conda_steps` empty, and provide verification_steps only. Do not repeat pip/conda installs just to have install steps.
 - If the previous receipt shows Python package build isolation or import-order failure, encode a different wrapper-executable approach such as compatible conda packages, no-build-isolation, prebuilt wheel index, or a clear blocked decision. Do not repeat the same failing pip/conda step.
-- If the previous receipt shows package-channel/network failures such as HTTP 429, timeout, or unavailable repodata, treat this as a local-machine/network fact, not an env-name-specific failure. After any conda.anaconda.org HTTP 429, do not include any mutating remote conda channel step at all (`conda create/install/update/env update` with `-c pytorch`, `-c nvidia`, `-c pyg`, `-c conda-forge`, defaults, or another remote channel), even as a later fallback in the same plan. The wrapper will reject such plans before execution. A conda mutation is acceptable only when it is explicitly offline/local-cache based (`--offline` and/or `--use-local` where appropriate) and justified by supplied cache evidence. Otherwise prefer already-installed compatible packages, pip/prebuilt wheels from a non-rate-limited source, an alternate configured mirror, or set `status="blocked"` with a clear local-machine blocker.
+- If the previous receipt shows package-channel/network failures such as HTTP 429, timeout, or unavailable repodata, treat this as a local-machine/network fact, not an env-name-specific failure. The receipt `blocker_reason` is authoritative even if an older plan text claims no 429. After any conda.anaconda.org HTTP 429, do not include any mutating remote conda channel step at all (`conda create/install/update/env update` with `-c pytorch`, `-c nvidia`, `-c pyg`, `-c conda-forge`, defaults, or another remote channel), even as a later fallback in the same plan. The wrapper will reject such plans before execution. A conda mutation is acceptable only when it is explicitly offline/local-cache based (`--offline` and/or `--use-local` where appropriate) and justified by supplied cache evidence. Otherwise prefer already-installed compatible packages, pip/prebuilt wheels from a non-rate-limited source, an alternate configured mirror, or set `status="blocked"` with a clear local-machine blocker.
 - If the previous receipt shows compiler/CUDA header/toolkit errors such as missing runtime headers or an unusable local compiler, adapt the wrapper plan from machine evidence: add the compatible toolkit/headers, set verification steps that expose CUDA_HOME/include paths, choose prebuilt wheels, or block clearly. Do not guess a toolkit version unsupported by the local driver/cache evidence.
 - Never delete or remove an environment. If a partial env exists, decide whether to repair it or create a new project-specific env. Package-level removal is allowed only when it is explicitly scoped to the selected project env with `-n <env>`, does not use `--all`/`--force`, and does not remove protected runtime packages such as python, pip, conda, setuptools, or wheel.
 - Write exactly one JSON object to `{plan_path}`. Do not leave Markdown in that file.
@@ -824,7 +1093,7 @@ Required JSON schema:
   "decision": "create_new_project_env | repair_existing_env | reuse_existing_env | blocked",
   "repo_env_file_policy": "use_as_is | adapt | avoid | blocked",
   "conda_steps": [["create", "-y", "-n", "...", "python=...", "pip"]],
-  "verification_steps": [["run", "-n", "...", "python", "-c", "import torch; print(torch.__version__)"]],
+  "verification_steps": [["run", "-n", "...", "python", "-c", "import torch; x=torch.randn(32, device='cuda') if torch.cuda.is_available() else None; print(torch.__version__)"]],
   "machine_reasoning": "why this plan fits the local machine and repo",
   "compatibility_risks": [],
   "blocker": "only when blocked",
@@ -1209,6 +1478,43 @@ def append_search_memory(paths, payload: dict) -> None:
     history_path.write_text(json.dumps(history[-30:], indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 
 
+def mark_pending_candidate_non_executable(paths, pending: dict, repo: str, reason: str, return_code: int = 2) -> None:
+    rows = load_json(paths.state / 'repo_candidates.json', [])
+    if not isinstance(rows, list):
+        return
+    pending_name = str(pending.get('name') or pending.get('repo') or '').strip()
+    pending_url = str(pending.get('url') or '').strip()
+    try:
+        repo_resolved = str(Path(repo).expanduser().resolve()) if repo else ''
+    except Exception:
+        repo_resolved = str(repo or '')
+    updated = False
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_path = str(row.get('local_path') or row.get('repo_path') or '').strip()
+        try:
+            row_path_resolved = str(Path(row_path).expanduser().resolve()) if row_path else ''
+        except Exception:
+            row_path_resolved = row_path
+        same = bool(
+            (repo_resolved and row_path_resolved and repo_resolved == row_path_resolved)
+            or (pending_name and str(row.get('name') or '').strip() == pending_name)
+            or (pending_url and str(row.get('url') or '').strip() == pending_url)
+        )
+        if not same:
+            continue
+        row['repo_execution_ready'] = False
+        row['repo_selection_bucket'] = 'environment_non_executable'
+        row['environment_bootstrap_blocked'] = True
+        row['environment_bootstrap_blocker'] = reason
+        row['environment_bootstrap_return_code'] = return_code
+        row['environment_bootstrap_blocked_at'] = dt.datetime.now(dt.timezone.utc).isoformat()
+        updated = True
+    if updated:
+        (paths.state / 'repo_candidates.json').write_text(json.dumps(rows, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+
+
 def write_repo_selection_blocker(paths, reason: str, *, selection: dict | None = None) -> None:
     selection = selection or {}
     selected = selection.get('selected', {}) if isinstance(selection.get('selected'), dict) else {}
@@ -1336,15 +1642,16 @@ def main() -> int:
     args = parser.parse_args()
     paths = build_paths(args.project)
     cfg = load_project_config(args.project)
-    explicit_env_name = str(args.env_name or cfg.get('conda_env', '') or '').strip()
-    env_name = explicit_env_name or f"{args.project}_env".replace('-', '_')
+    cli_env_name = str(args.env_name or '').strip()
+    configured_env_name = str(cfg.get('conda_env', '') or '').strip()
+    env_name = cli_env_name or configured_env_name or f"{args.project}_env".replace('-', '_')
     if args.repo_path:
         repo = infer_repo(paths, args.repo_path)
     elif current_env_selection_valid(paths):
         repo = infer_repo(paths, '')
     else:
         repo = select_current_run_environment_repo(args.project, paths, env_name, max_rounds=args.repo_search_rounds, venue=args.venue, allow_env_bootstrap=args.real_bootstrap_env)
-    env_name = current_machine_aware_env_name(paths, repo) or explicit_env_name or f"{args.project}_{Path(repo).name}".replace('-', '_')
+    env_name = current_machine_aware_env_name(paths, repo) or cli_env_name or configured_env_name or f"{args.project}_{Path(repo).name}".replace('-', '_')
     print(f'TASTE environment stage: project={args.project}', flush=True)
     print(f'selected repo={repo}', flush=True)
     print(f'conda env={env_name}', flush=True)
@@ -1354,11 +1661,17 @@ def main() -> int:
         repo = maybe_switch_to_evidence_ready_repo(args.project, paths, env_name, repo, max_rounds=args.repo_search_rounds)
     strategy = load_repo_env_strategy(paths)
     recommended_env_name = str(strategy.get('recommended_env_name') or '').strip() if isinstance(strategy, dict) else ''
-    env_name = current_machine_aware_env_name(paths, repo) or strategy_env_name(strategy, env_name, explicit_env_name=explicit_env_name)
+    env_from_plan = current_machine_aware_env_name(paths, repo)
+    if env_from_plan:
+        env_name = env_from_plan
+    elif configured_env_name and environment_is_locked(paths, cfg, configured_env_name, repo):
+        env_name = configured_env_name
+    else:
+        env_name = strategy_env_name(strategy, env_name, explicit_env_name=cli_env_name)
     if strategy:
-        if explicit_env_name and recommended_env_name and recommended_env_name != explicit_env_name:
+        if cli_env_name and recommended_env_name and recommended_env_name != cli_env_name:
             print(
-                f"Explicit environment name {explicit_env_name} overrides Claude recommended_env_name={recommended_env_name}; "
+                f"Explicit environment name {cli_env_name} overrides Claude recommended_env_name={recommended_env_name}; "
                 "environment stage will repair/reuse the configured environment instead of switching names.",
                 flush=True,
             )

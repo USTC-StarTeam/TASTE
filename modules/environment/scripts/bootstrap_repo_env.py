@@ -32,6 +32,31 @@ def load_json(path: Path):
     return json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
 
 
+def real_loader_probe_passed(paths, repo: Path, env_name: str) -> bool:
+    probe = load_json(paths.state / 'real_dataset_probe.json')
+    if not isinstance(probe, dict):
+        return False
+    repo_path = str(probe.get('repo_path') or '').strip()
+    try:
+        if repo_path and Path(repo_path).resolve() != repo.resolve():
+            return False
+    except Exception:
+        if repo_path and repo_path != str(repo):
+            return False
+    if str(probe.get('status') or '').strip().lower() not in {'passed', 'pass', 'completed'}:
+        return False
+    rows = probe.get('probes') if isinstance(probe.get('probes'), list) else []
+    return any(
+        isinstance(row, dict)
+        and row.get('claim_ready') is True
+        and (
+            row.get('loader_probe_success') is True
+            or (isinstance(row.get('loader_probe'), dict) and row['loader_probe'].get('success') is True)
+        )
+        for row in rows
+    )
+
+
 def ensure_machine_profile(project: str) -> dict:
     paths = build_paths(project)
     profile_path = paths.reports / 'machine_profile.json'
@@ -137,9 +162,16 @@ def repo_has_editable_package(repo: Path) -> bool:
     return setup_py.exists() and setup_py_declares_package(setup_py)
 
 
-def verification_steps(env_name: str) -> list[list[str]]:
-    return [['run', '-n', env_name, 'python', '-c', 'import torch, scipy, numpy, yaml; print("imports-ok"); print("cuda", torch.cuda.is_available())']]
+def runtime_validation_code() -> str:
+    return "import importlib.util\nimport json\nout = {\"taste_runtime_validation\": True, \"imports\": {}}\nfor name in [\"torch\", \"scipy\", \"numpy\", \"yaml\"]:\n    out[\"imports\"][name] = bool(importlib.util.find_spec(name))\ntry:\n    import torch\n    version_obj = getattr(torch, \"version\", None)\n    torch_info = {\n        \"version\": str(getattr(torch, \"__version__\", \"\") or \"\"),\n        \"cuda_version\": str(getattr(version_obj, \"cuda\", \"\") or \"\"),\n        \"cuda_available\": bool(hasattr(torch, \"cuda\") and torch.cuda.is_available()),\n        \"device_count\": int(torch.cuda.device_count()) if hasattr(torch, \"cuda\") else 0,\n    }\n    if torch_info[\"cuda_available\"]:\n        torch_info[\"device_name\"] = torch.cuda.get_device_name(0)\n        torch_info[\"device_capability\"] = list(torch.cuda.get_device_capability(0))\n        x = torch.randn(32, device=\"cuda\")\n        y = (x * x).sum()\n        torch.cuda.synchronize()\n        torch_info[\"cuda_kernel_test\"] = \"passed\"\n        torch_info[\"cuda_kernel_value\"] = float(y.detach().cpu())\n    out[\"torch\"] = torch_info\n    out[\"runtime_validation_passed\"] = True\n    print(json.dumps(out, ensure_ascii=False))\nexcept Exception as exc:\n    out[\"runtime_validation_passed\"] = False\n    out[\"runtime_validation_error\"] = f\"{type(exc).__name__}: {exc}\"\n    print(json.dumps(out, ensure_ascii=False))\n    raise"
 
+
+def verification_steps(env_name: str) -> list[list[str]]:
+    return [['run', '-n', env_name, 'python', '-c', runtime_validation_code()]]
+
+
+def is_runtime_validation_step(step: list[str]) -> bool:
+    return any('taste_runtime_validation' in str(token) or 'runtime_validation_passed' in str(token) for token in step)
 
 
 def _normalize_plan_step(step) -> list[str]:
@@ -212,26 +244,35 @@ def _load_machine_aware_plan(plan_file: str, fallback_env_name: str, fallback_py
         return {'blocked': True, 'reason': str(plan.get('blocker') or plan.get('reason') or f'machine-aware plan status is not ready: {status or "missing"}'), 'plan_path': str(plan_path), 'plan': plan}
     env_name = str(plan.get('env_name') or plan.get('selected_env_name') or fallback_env_name or '').strip()
     python_version = str(plan.get('python_version') or fallback_python_version or '').strip()
+    decision = str(plan.get('decision') or plan.get('action') or '').strip().lower()
     raw_steps = plan.get('conda_steps') or plan.get('install_steps') or plan.get('steps') or []
     steps = [_normalize_plan_step(step) for step in raw_steps]
     steps = [step for step in steps if step]
+    raw_verification = plan.get('verification_steps') or []
+    verification = [_normalize_plan_step(step) for step in raw_verification]
+    verification = [step for step in verification if step]
     if not env_name:
         return {'blocked': True, 'reason': 'machine-aware plan did not specify an env_name', 'plan_path': str(plan_path), 'plan': plan}
-    if not steps:
-        return {'blocked': True, 'reason': 'machine-aware plan did not provide conda_steps/install_steps', 'plan_path': str(plan_path), 'plan': plan}
+    no_install_decisions = {'reuse_existing_env', 'use_existing_env', 'verify_existing_env', 'no_install_needed'}
+    # Claude sometimes says "repair_existing_env" after finding no missing packages and only
+    # supplies verification steps. Treat that as a verify/reuse plan instead of failing a valid
+    # no-mutation path; actual repairs still require explicit scoped conda_steps/install_steps.
+    if decision == 'repair_existing_env' and verification:
+        no_install_decisions.add('repair_existing_env')
+    if not steps and decision not in no_install_decisions:
+        return {'blocked': True, 'reason': 'machine-aware plan did not provide conda_steps/install_steps; use decision=reuse_existing_env with verification_steps when no mutation is needed', 'plan_path': str(plan_path), 'plan': plan}
     for step in steps:
         issue = _validate_plan_step(step, env_name)
         if issue:
             return {'blocked': True, 'reason': issue, 'plan_path': str(plan_path), 'plan': plan}
-    raw_verification = plan.get('verification_steps') or []
-    verification = [_normalize_plan_step(step) for step in raw_verification]
-    verification = [step for step in verification if step]
     for step in verification:
         issue = _validate_plan_step(step, env_name)
         if issue:
             return {'blocked': True, 'reason': issue, 'plan_path': str(plan_path), 'plan': plan}
-    if not verification:
-        verification = verification_steps(env_name)
+    wrapper_verification = verification_steps(env_name)
+    for step in wrapper_verification:
+        if step not in verification:
+            verification.append(step)
     return {
         'blocked': False,
         'plan_path': str(plan_path),
@@ -622,6 +663,12 @@ def main() -> None:
 
     env_exists_before = conda_env_exists(conda_exe, env_name) if conda_exe else False
     env_exists = env_exists_before
+    verification_only_machine_plan = bool(
+        plan_info
+        and not plan_info.get('blocked')
+        and not plan_info.get('install_steps')
+        and plan_info.get('verification_steps')
+    )
     if plan_info.get('blocked'):
         steps = []
     elif args.verify_only:
@@ -692,6 +739,7 @@ def main() -> None:
     if not plan_info.get('blocked') and not args.prepare_only and conda_exe and (not args.verify_only or env_exists):
         payload['status'] = 'running'
         python_pip_checked = False
+        verification_failures: list[dict] = []
         for step in steps:
             if is_python_pip_step(step, env_name) and not python_pip_checked:
                 python_pip_checked = True
@@ -749,13 +797,35 @@ def main() -> None:
                                 '```\n', proc.stdout, '\n--- STDERR ---\n', proc.stderr, '\n```\n',
                             ])
                 if proc.returncode != 0:
+                    failure_record = {
+                        'command': ' '.join(conda_cmd(conda_exe, step)),
+                        'return_code': proc.returncode,
+                        'stdout': proc.stdout[-4000:],
+                        'stderr': proc.stderr[-4000:],
+                        'missing_import': missing_import,
+                    }
+                    if verification_only_machine_plan and not is_runtime_validation_step(step):
+                        verification_failures.append(failure_record)
+                        continue
                     payload['status'] = 'failed'
                     payload['failed_step'] = ' '.join(conda_cmd(conda_exe, step))
                     payload['missing_import'] = missing_import
                     payload.update(_failure_metadata_from_text(combined))
                     break
         else:
-            payload['status'] = 'completed'
+            if verification_failures:
+                payload['verification_warnings'] = verification_failures
+                if real_loader_probe_passed(paths, repo, env_name):
+                    payload['status'] = 'completed'
+                    payload['verification_warning_policy'] = 'No-mutation machine-aware verification had isolated failures, but TASTE repo loader/data probes are claim-ready for the selected repo and environment; downstream reference gates remain mandatory.'
+                else:
+                    first = verification_failures[0]
+                    payload['status'] = 'failed'
+                    payload['failed_step'] = first.get('command', '')
+                    payload['missing_import'] = first.get('missing_import', '')
+                    payload['blocker_reason'] = 'Machine-aware verification failed and no current TASTE real loader/data probe is claim-ready for this repo.'
+            else:
+                payload['status'] = 'completed'
 
     if conda_exe:
         env_exists_after = conda_env_exists(conda_exe, env_name)

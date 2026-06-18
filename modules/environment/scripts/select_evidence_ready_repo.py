@@ -574,6 +574,46 @@ def recover_unauthorized_base_switch_active_repo(paths, active: dict[str, Any]) 
     return recovered, recovered['recovered_from_invalid_active_repo']
 
 
+def _entrypoint_candidates(repo: Path, readme_text: str) -> list[str]:
+    candidates: list[str] = []
+    preferred_names = {'main.py', 'train.py', 'run.py', 'eval.py', 'test.py', 'demo.py', 'inference.py', 'experiment.py', 'autoscientist_experiment.py'}
+    top_files = [path for path in repo.iterdir()] if repo.exists() else []
+    for path in top_files:
+        if path.is_file() and path.name in preferred_names and path.name not in candidates:
+            candidates.append(path.name)
+    for match in re.finditer(r'(?:python|python3)\s+([^\s`;&|]+\.py)\b', readme_text, flags=re.IGNORECASE):
+        rel = match.group(1).strip().lstrip('./')
+        if not rel or '..' in Path(rel).parts:
+            continue
+        matches: list[Path] = []
+        direct = repo / rel
+        if direct.exists():
+            matches.append(direct)
+        else:
+            # Many research repos document `cd examples` before running `python script.py`.
+            # Resolve such README commands against shallow subdirectories without assuming names.
+            name = Path(rel).name
+            matches.extend(path for path in repo.glob(f'*/{name}') if path.is_file())
+        for path in matches[:4]:
+            display = str(path.relative_to(repo))
+            if display not in candidates:
+                candidates.append(display)
+    script_paths = list(repo.glob('*.py')) + list(repo.glob('*/*.py')) if repo.exists() else []
+    for path in sorted(script_paths)[:80]:
+        if path.name == 'setup.py' or path.name.startswith('_'):
+            continue
+        display = str(path.relative_to(repo))
+        if display in candidates:
+            continue
+        try:
+            text = path.read_text(encoding='utf-8', errors='ignore')[:50000]
+        except Exception:
+            continue
+        if '__main__' in text or 'argparse' in text or 'click.command' in text or 'typer.' in text:
+            candidates.append(display)
+    return candidates[:12]
+
+
 def quick_signals(repo: Path) -> dict[str, Any]:
     top = list(repo.iterdir()) if repo.exists() else []
     readme_text = ''
@@ -581,7 +621,7 @@ def quick_signals(repo: Path) -> dict[str, Any]:
         if path.is_file() and path.name.lower().startswith('readme'):
             readme_text += path.read_text(encoding='utf-8', errors='ignore')[:30000]
     readme_lower = readme_text.lower()
-    data_mentions = sum(1 for token in ['dataset', 'data', 'download', 'benchmark', 'processed', '.pkl', '.npy', '.txt'] if token in readme_lower)
+    data_mentions = sum(1 for token in ['dataset', 'data', 'download', 'benchmark', 'processed', '.pkl', '.npy', '.pt', '.txt'] if token in readme_lower)
     evidence_lines: list[str] = []
     for raw_line in readme_text.splitlines():
         clean = re.sub(r'\s+', ' ', raw_line).strip()
@@ -593,11 +633,13 @@ def quick_signals(repo: Path) -> dict[str, Any]:
         if len(' '.join(evidence_lines)) >= 1200:
             break
     readme_evidence = ' '.join(evidence_lines)[:1200]
+    entrypoints = _entrypoint_candidates(repo, readme_text)
     return {
         'has_readme': bool(readme_text),
         'has_install': any((repo / name).exists() for name in ['requirements.txt', 'environment.yml', 'environment.yaml', 'setup.py', 'pyproject.toml']),
         'readme_has_install_instructions': any(token in readme_lower for token in ['pip install', 'conda create', 'conda env create', 'environment.yml', 'requirements.txt']),
-        'has_entrypoint': file_exists_any(repo, {'main.py', 'train.py', 'run.py', 'eval.py', 'autoscientist_experiment.py'}),
+        'has_entrypoint': bool(entrypoints),
+        'entrypoint_candidates': entrypoints,
         'has_data_dir': any((repo / name).exists() for name in ['data', 'dataset', 'datasets']),
         'readme_data_mentions': data_mentions,
         'readme_evidence': readme_evidence,
@@ -1327,6 +1369,67 @@ def active_repo_candidate(active: dict[str, Any], fresh_find_run_id: str = '') -
         'reaudit_policy': 'Existing evidence-ready active repo may be reconsidered for the current Find only as an audited candidate; it is not automatically selected.',
     }
 
+
+def _candidate_source(row: dict[str, Any]) -> str:
+    return str(row.get('_source') or row.get('source') or '').strip()
+
+
+def _candidate_has_literature_anchor(row: dict[str, Any]) -> bool:
+    anchor_keys = [
+        'literature_base_title',
+        'selected_base_title',
+        'literature_base_id',
+        'paper_id',
+        'paper_hash',
+        'fresh_research_base_id',
+    ]
+    return any(str(row.get(key) or '').strip() for key in anchor_keys)
+
+
+def _candidate_task_fit_false(row: dict[str, Any]) -> bool:
+    value = row.get('task_fit')
+    if value is False:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {'false', 'no', '0', 'irrelevant', 'mismatch', 'not_fit', 'not-fit'}
+    return False
+
+
+def _candidate_task_fit_true(row: dict[str, Any]) -> bool:
+    value = row.get('task_fit')
+    if value is True:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {'true', 'yes', '1', 'fit', 'relevant', 'matched', 'topic_fit', 'topic-fit'}
+    return False
+
+
+def _candidate_is_unanchored_github_discovery(row: dict[str, Any]) -> bool:
+    source = _candidate_source(row).lower()
+    if source == 'fresh_literature_github_search':
+        return False
+    return source in {'github_search', 'environment_expanded_github_search'} or source.endswith('_github_search')
+
+
+def candidate_allowed_for_repo_audit(row: dict[str, Any], *, allow_veto_fallback: bool = False) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if _candidate_task_fit_false(row):
+        return False
+    if row.get('environment_bootstrap_blocked') is True or row.get('repo_selection_bucket') == 'environment_non_executable':
+        return False
+    if row.get('repo_selection_bucket') == 'paused_by_veto' and not allow_veto_fallback:
+        return False
+    source = _candidate_source(row)
+    has_anchor = _candidate_has_literature_anchor(row)
+    if row.get('hard_topic_mismatch') and not (source == 'fresh_literature_github_search' and has_anchor):
+        return False
+    if source == 'fresh_literature_github_search':
+        return has_anchor or _candidate_task_fit_true(row)
+    if _candidate_is_unanchored_github_discovery(row):
+        return has_anchor or _candidate_task_fit_true(row)
+    return True
+
 def main() -> int:
     parser = argparse.ArgumentParser(description='Select a repo whose code and real dataset are both verified before TASTE experiments proceed.')
     parser.add_argument('--project', required=True)
@@ -1372,13 +1475,7 @@ def main() -> int:
             continue
         if args.fresh_find_run_id and str(row.get('fresh_find_run_id') or '') != args.fresh_find_run_id:
             continue
-        fresh_literature_candidate = bool(
-            str(row.get('source') or '') == 'fresh_literature_github_search'
-            and (not args.fresh_find_run_id or str(row.get('fresh_find_run_id') or '') == args.fresh_find_run_id)
-        )
-        if row.get('hard_topic_mismatch') and not fresh_literature_candidate:
-            continue
-        if row.get('repo_selection_bucket') == 'paused_by_veto' and not args.allow_veto_fallback:
+        if not candidate_allowed_for_repo_audit(row, allow_veto_fallback=args.allow_veto_fallback):
             continue
         local = str(row.get('local_path') or '')
         if local and local in seen_paths:
@@ -1490,7 +1587,7 @@ def main() -> int:
             'fresh_find_run_id': row.get('fresh_find_run_id', ''),
             'literature_base_title': row.get('literature_base_title', ''),
             'literature_base_rank': row.get('literature_base_rank', ''),
-            'metadata_topic_mismatch_allowed': bool(row.get('hard_topic_mismatch') and str(row.get('source') or '') == 'fresh_literature_github_search'),
+            'metadata_topic_mismatch_allowed': bool(row.get('hard_topic_mismatch') and _candidate_source(row) == 'fresh_literature_github_search' and _candidate_has_literature_anchor(row)),
         }
         save_selection_progress('cloning_repo_candidate', audited, ready, row=row, index=candidate_index, action='clone')
         repo, clone_info = clone_or_reuse(paths, row)
@@ -1544,13 +1641,16 @@ def main() -> int:
             if claim_ready:
                 item['claim_ready_dataset'] = claim_ready[0].get('dataset')
                 item['claim_ready_probe'] = claim_ready[0]
-        elif claim_ready and signals.get('has_entrypoint'):
-            item['decision'] = 'evidence_ready_repo_and_data_paired'
+        elif claim_ready:
             item['claim_ready_dataset'] = claim_ready[0].get('dataset')
             item['claim_ready_probe'] = claim_ready[0]
+            item['claim_ready_datasets'] = [p.get('dataset') for p in claim_ready if p.get('dataset')]
+            if signals.get('has_entrypoint'):
+                item['decision'] = 'evidence_ready_repo_and_data_paired'
+            else:
+                item['decision'] = 'evidence_ready_repo_and_data_paired_entrypoint_probe_pending'
+                item['entrypoint_gate_note'] = 'Real data and repo loader probes passed; entrypoint/reference execution is a downstream environment/reference gate, not a reason to rerun loader bootstrap.'
             ready.append(item)
-        elif claim_ready:
-            item['decision'] = 'data_ready_but_code_entrypoint_unclear'
         elif candidate_ready:
             item['decision'] = 'candidate_data_contract_ready_loader_probe_required'
         else:
@@ -1695,6 +1795,21 @@ def main() -> int:
                         payload['blocker'] = pending['pending_reason']
                         payload['reference_reproduction_blocker'] = reference_blocker
                         selected = {}
+                    elif selection_stage == 'environment_claude_code' and claim_ready_dataset_names(pending):
+                        pending.pop('pending_loader_bootstrap', None)
+                        pending.pop('pending_reason', None)
+                        pending['decision'] = pending.get('decision') or 'evidence_ready_repo_and_data_paired'
+                        pending['fresh_find_run_id'] = args.fresh_find_run_id or pending.get('fresh_find_run_id', '')
+                        pending['selection_stage'] = selection_stage
+                        pending['selected_by_stage'] = selection_stage
+                        pending['anchor_selection_policy'] = 'Environment-stage Claude Code selected this base after repo/data loader evidence review; entrypoint/reference execution remains a downstream gate.'
+                        selected = pending
+                        payload['selected'] = selected
+                        payload['selection_gate'] = 'accepted_by_claude_topic_fit'
+                        payload['selection_stage'] = selection_stage
+                        payload['selected_by_stage'] = selection_stage
+                        payload.pop('pending_environment_candidate', None)
+                        payload.pop('blocker', None)
                     elif selection_stage == 'environment_claude_code':
                         pending['pending_reason'] = 'Claude accepted this as the best transformable candidate, but repo/data loader evidence is not claim-ready yet.'
                         pending['pending_loader_bootstrap'] = True

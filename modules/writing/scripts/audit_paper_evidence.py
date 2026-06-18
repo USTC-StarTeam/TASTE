@@ -136,7 +136,7 @@ def load_json(path: Path, default):
     return json.loads(path.read_text(encoding='utf-8')) if path.exists() else default
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument('--project', required=True)
     parser.add_argument('--venue', default='')
@@ -389,7 +389,8 @@ def main() -> None:
         'paper_self_review_submission_evidence_ready': bool(self_review.get('submission_evidence_ready')),
     }, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
     print(out_md)
+    return 0 if not issues else 2
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

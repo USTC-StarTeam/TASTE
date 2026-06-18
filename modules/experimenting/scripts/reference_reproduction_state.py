@@ -4,6 +4,8 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -386,6 +388,116 @@ def bounded_reference_audit_recorded(paths) -> bool:
     _, payload = latest_reference_audit(paths, "bounded")
     return is_bounded_pass_audit(payload)
 
+
+
+def _taste_root_from_paths(paths) -> Path:
+    project_root = Path(getattr(paths, "root", "") or "").resolve()
+    for parent in [project_root, *project_root.parents]:
+        if (parent / "framework").is_dir() and (parent / "modules").is_dir() and (parent / "web").is_dir():
+            return parent
+    return Path(__file__).resolve().parents[3]
+
+
+def _framework_env(root: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    entries = [root / "framework", root / "framework" / "scripts", root / "web" / "backend", root]
+    for stage in ["finding", "reading", "ideation", "planning", "environment", "experimenting", "writing"]:
+        entries.append(root / "modules" / stage)
+        entries.append(root / "modules" / stage / "scripts")
+    existing = [part for part in env.get("PYTHONPATH", "").split(os.pathsep) if part]
+    seen: set[str] = set()
+    merged: list[str] = []
+    for item in [*(str(p) for p in entries if p.exists()), *existing]:
+        if item and item not in seen:
+            seen.add(item)
+            merged.append(item)
+    env["WORKSPACE_ROOT"] = str(root)
+    env["PYTHONPATH"] = os.pathsep.join(merged)
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    return env
+
+
+def project_target_venue_from_paths(paths, explicit: str = "") -> str:
+    venue = str(explicit or "").strip()
+    if venue:
+        return venue
+    cfg = load_json(Path(getattr(paths, "config", "")), {})
+    if not isinstance(cfg, dict):
+        return ""
+    nested = []
+    for key in ["writing", "paper", "submission", "venue_config"]:
+        value = cfg.get(key)
+        if isinstance(value, dict):
+            nested.append(value)
+    for row in [cfg, *nested]:
+        for key in ["target_venue", "venue", "venue_slug"]:
+            value = str(row.get(key) or "").strip()
+            if value:
+                return value.upper() if value.lower() in {"iclr", "icml", "neurips", "nips", "kdd", "sigkdd"} else value
+    return ""
+
+
+def post_reference_reproduction_refresh(paths, project: str, venue: str = "", *, trigger: str = "reference_reproduction_wrapper", timeout_sec: int = 180) -> dict[str, Any]:
+    # Refresh only deterministic gates after full reference reproduction exits.
+    root = _taste_root_from_paths(paths)
+    py = str(Path(sys.executable).resolve())
+    venue = project_target_venue_from_paths(paths, venue)
+    run_module = root / "framework" / "scripts" / "run_module.py"
+    commands: list[dict[str, Any]] = [
+        {"name": "reference_reproduction_gate", "cmd": [py, str(run_module), "experimenting", "--action", "reference_reproduction", "--project", project], "venue": True},
+        {"name": "experiment_iteration_audit", "cmd": [py, str(run_module), "experimenting", "--action", "audit_iteration", "--project", project], "venue": False},
+        {"name": "paper_evidence_audit", "cmd": [py, str(run_module), "writing", "--action", "audit_evidence", "--project", project], "venue": True},
+        {"name": "submission_readiness_audit", "cmd": [py, str(run_module), "writing", "--action", "submission_readiness", "--project", project], "venue": True},
+        {"name": "planning_review_board", "cmd": [py, str(run_module), "planning", "--action", "review_board", "--project", project], "venue": False},
+        {"name": "blocker_action_plan", "cmd": [py, str(run_module), "planning", "--action", "blocker_action", "--project", project], "venue": True},
+        {"name": "research_trajectory_system", "cmd": [py, str(root / "framework" / "scripts" / "build_research_trajectory_system.py"), "--project", project, "--skip-helpers"], "venue": True},
+    ]
+    env = _framework_env(root)
+    results: list[dict[str, Any]] = []
+    started = now_iso()
+    for item in commands:
+        cmd = list(item["cmd"])
+        if venue and item.get("venue"):
+            cmd.extend(["--venue", venue])
+        entry: dict[str, Any] = {"name": item["name"], "command": cmd, "started_at": now_iso()}
+        try:
+            proc = subprocess.run(cmd, cwd=root, env=env, text=True, capture_output=True, timeout=max(30, int(timeout_sec)))
+            entry.update({
+                "finished_at": now_iso(),
+                "return_code": int(proc.returncode or 0),
+                "stdout_tail": str(proc.stdout or "")[-2000:],
+                "stderr_tail": str(proc.stderr or "")[-2000:],
+            })
+        except subprocess.TimeoutExpired as exc:
+            entry.update({
+                "finished_at": now_iso(),
+                "return_code": 124,
+                "timed_out": True,
+                "stdout_tail": str(exc.stdout or "")[-2000:],
+                "stderr_tail": str(exc.stderr or "")[-2000:],
+            })
+        except Exception as exc:
+            entry.update({
+                "finished_at": now_iso(),
+                "return_code": 125,
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+        results.append(entry)
+    hard_failures = [row for row in results if row.get("return_code") not in {0, 2}]
+    blocked = [row for row in results if row.get("return_code") == 2]
+    payload = {
+        "project": project,
+        "venue": venue,
+        "trigger": trigger,
+        "started_at": started,
+        "finished_at": now_iso(),
+        "status": "refresh_incomplete" if hard_failures else "refreshed_with_blockers" if blocked else "refreshed",
+        "allowed_blocked_return_code": 2,
+        "principle": "post-reference refresh rebuilds deterministic gates only; it does not generate papers, launch candidate experiments, rerun Find, or promote claims.",
+        "results": results,
+    }
+    save_json(Path(getattr(paths, "state")) / "reference_post_refresh.json", payload)
+    return payload
 
 def reference_full_job_state(paths) -> dict[str, Any]:
     for path in sorted(paths.state.glob("*_reference_full_reproduction_job.json")):

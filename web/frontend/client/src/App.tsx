@@ -1537,7 +1537,7 @@ const TEXT = {
     resultDetail: "运行结果",
     noCurve: "暂无曲线",
     noExperimentRecords: "还没有实验记录。",
-    paperHelp: "点击后 系统会按目标 venue 官方模板生成/修订可检查论文预览；科研证据和投稿门控仍按真实状态显示，预览稿不等于投稿通过。",
+    paperHelp: "论文撰写只在参考复现、实验和投稿证据门控满足后启动；当前页展示真实门控和已有预览状态。",
     runPaperWriting: "生成与修订论文",
     paperSettingsAndGate: "论文设置与门控",
     currentGate: "当前门控",
@@ -1567,13 +1567,13 @@ const TEXT = {
     rawPaperOrchestraOutput: "论文写作原始产物",
     hiddenPdfReason: "当前 PDF 是论文预览；质量、证据或投稿门控未通过时，不能视为最终投稿稿。",
     runningPdfReason: "论文刷新正在运行；下方 PDF/TeX 是当前可检查产物，系统仍会继续编译、审计和替换它。",
-    skippedPdfReason: "证据门控未通过；系统仍会尽力生成目标 venue 论文预览，但不能标记为投稿通过。",
+    skippedPdfReason: "证据门控未通过；论文撰写保持等待，直到参考复现、实验和投稿证据刷新通过。",
     blockedPdfReason: "当前 PDF 是论文预览稿；正常论文形态、模板、图表或投稿证据门控仍需继续迭代。",
     unrestrictedLimit: "不限/未限制",
     evidenceGateNotPassed: "证据门控未通过",
     evidenceGateWarning: "下方 PDF 仅用于查看排版和草稿结构；当前评审、结论和证据仍要求继续实验或修订，不能作为最终投稿版本。",
     pdfPreviewTitle: "PDF 论文预览",
-    noPdf: "还没有可展示的 PDF。点击生成后 系统会尽力生成目标 venue 论文预览；如果没有 PDF，说明当前写作产物尚未生成或未通过展示候选筛选。",
+    noPdf: "还没有可展示的 PDF。论文撰写会在参考复现、实验和投稿证据门控通过后生成当前 venue 预览。",
     time: "时间",
     method: "方法",
     status: "状态",
@@ -2088,7 +2088,7 @@ const TEXT = {
     resultDetail: "Run result",
     noCurve: "No curve",
     noExperimentRecords: "No experiment records yet.",
-    paperHelp: "The workflow generates or revises a paper preview with the target venue official template. Evidence and submission gates remain truthful; a preview is not a passed submission artifact.",
+    paperHelp: "Paper writing starts only after reference reproduction, experiment, and submission-evidence gates are ready. This page shows the truthful gates and any existing preview state.",
     runPaperWriting: "Generate and revise paper",
     paperSettingsAndGate: "Paper Settings and Gate",
     currentGate: "Current gate",
@@ -2118,13 +2118,13 @@ const TEXT = {
     rawPaperOrchestraOutput: "paper writing artifact",
     hiddenPdfReason: "The current PDF is shown only as an paper preview. If quality, evidence, or submission gates have not cleared, it is not a submission artifact.",
     runningPdfReason: "Paper refresh is running; the PDF/TeX below is the currently inspectable artifact and The workflow will continue compiling, auditing, and replacing it.",
-    skippedPdfReason: "Science or evidence gates have not cleared. TASTE still generates an paper preview when requested, but it must not mark it submission-ready.",
+    skippedPdfReason: "Science or evidence gates have not cleared. Paper writing waits until reference reproduction, experiment, and submission-evidence gates refresh and pass.",
     blockedPdfReason: "The current PDF is a paper preview; paper normality, template, figure, or submission-evidence gates still need iteration.",
     unrestrictedLimit: "unrestricted / not enforced",
     evidenceGateNotPassed: "Evidence gate not passed",
     evidenceGateWarning: "The PDF below is for paper preview and layout checking. Review/claim/evidence gates still require more experiments or revision before final submission.",
     pdfPreviewTitle: "PDF Paper Preview",
-    noPdf: "No PDF to display yet. When requested, The workflow generates the best current venue-formatted paper preview; if no PDF appears, the writing artifact has not been produced or passed preview selection yet.",
+    noPdf: "No PDF to display yet. Paper writing will generate the current venue preview after reference reproduction, experiment, and submission-evidence gates pass.",
     time: "Time",
     method: "Method",
     status: "Status",
@@ -3282,12 +3282,18 @@ function publicLogLineText(line: string, lang: Lang, contextTab?: Tab) {
   const text = String(line || "").trim();
   if (!text) return "";
   const lowered = text.toLowerCase();
+  const referenceReproductionLine = lowered.includes("selected-base full reference reproduction") || lowered.includes("selected-base full reproduction");
+  if (referenceReproductionLine) {
+    if (lowered.includes("running") || lowered.includes("process_alive=true")) {
+      return lang === "zh" ? "参考复现正在运行；等待日志、指标和审计文件落盘。" : "Reference reproduction is running; waiting for logs, metrics, and audit artifacts.";
+    }
+    return lang === "zh" ? "参考复现状态已记录；完整证据保留在后端审计。" : "Reference reproduction status is recorded; full evidence remains in backend audit.";
+  }
   const internalGate = lowered.includes("base_switch_gate")
     || lowered.includes("selected_base_viability")
     || lowered.includes("deterministic base-switch")
     || lowered.includes("candidate_route")
-    || lowered.includes("blocker_action_plan")
-    || lowered.includes("selected-base full");
+    || lowered.includes("blocker_action_plan");
   if (internalGate) {
     if (contextTab === "experiment") return lang === "zh" ? "实验门控：当前主线缺少审计就绪候选实验证据。" : "Experiment gate: current route lacks audit-ready candidate evidence.";
     if (contextTab === "environment") return lang === "zh" ? "环境门控：仓库、真实数据和参考复现状态见环境页主体。" : "Environment gate: repo, real data, and reference reproduction are shown above.";
@@ -3903,6 +3909,12 @@ function artifactDisplayName(name: any, lang: Lang = "zh") {
   return mapped ? mapped[lang] : raw;
 }
 
+function isPathLikeText(value: any): boolean {
+  const text = String(value ?? "").trim();
+  if (!text) return false;
+  return /^\/[^\s]+/.test(text) || /^~\/[^\s]+/.test(text) || /^[A-Za-z]:[\\/][^\s]+/.test(text);
+}
+
 function publicArtifactPath(value: any, fallback = "", lang: Lang = "zh"): string {
   const text = String(value ?? "").trim();
   if (!text) return fallback;
@@ -3912,6 +3924,7 @@ function publicArtifactPath(value: any, fallback = "", lang: Lang = "zh"): strin
     return lang === "zh" ? `Find 产物：${runMatch[1]} / ${label}` : `Find artifact: ${runMatch[1]} / ${label}`;
   }
   if (text.includes("/web/backend/auto_research/") || text.includes("/framework/auto_research/") || text.includes("/modules/finding/") || text.includes("/modules/reading/")) return text.split("/").slice(-2).join("/") || fallback;
+  if (isPathLikeText(text)) return text;
   return publicLogText(text, lang);
 }
 
@@ -3921,6 +3934,7 @@ function displayMaybe(value: any, fallback = "N/A"): string {
     const readable = value.label ?? value.name ?? value.title ?? value.status ?? value.issue ?? value.summary ?? value.path ?? value.url;
     return readable !== undefined ? displayMaybe(readable, fallback) : fallback;
   }
+  if (typeof value === "string" && isPathLikeText(value)) return value.trim() || fallback;
   const text = publicLogText(value);
   return text || fallback;
 }
@@ -4051,13 +4065,20 @@ function jobMatchesClaudePanelStage(job: any, stage: ClaudePanelStage) {
 }
 
 function preferredProjectId(projects: Project[], jobs: any[]) {
-  const queryProject = new URLSearchParams(window.location.search).get("project") || "";
-  if (queryProject && projects.some((project) => project.id === queryProject)) return queryProject;
   const liveProject = projects.find((project) => syntheticJobsForProject(jobs, project.id).length > 0);
   if (liveProject) return liveProject.id;
   const storedProject = localStorage.getItem("selected_project") || "";
   if (storedProject && projects.some((project) => project.id === storedProject)) return storedProject;
   return projects[0]?.id || "";
+}
+
+function replaceUrlWithoutProject(params: URLSearchParams) {
+  params.delete("project");
+  const nextSearch = params.toString();
+  const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}${window.location.hash || ""}`;
+  if (nextUrl !== `${window.location.pathname}${window.location.search}${window.location.hash || ""}`) {
+    window.history.replaceState(null, "", nextUrl);
+  }
 }
 
 function runHasReadableStages(run: RunInfo) {
@@ -4229,9 +4250,7 @@ function App() {
     localStorage.setItem("active_tab", nextTab);
     const params = new URLSearchParams(window.location.search);
     params.set("tab", tabUrlValue(nextTab));
-    const nextSearch = params.toString();
-    const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}${window.location.hash || ""}`;
-    window.history.replaceState(null, "", nextUrl);
+    replaceUrlWithoutProject(params);
   }
 
   async function refreshJobsForProject(projectId: string, options: { force?: boolean; isCurrent?: () => boolean } = {}) {
@@ -4291,6 +4310,13 @@ function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
+  }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.has("project")) {
+      replaceUrlWithoutProject(params);
+    }
   }, []);
 
   useEffect(() => {
@@ -5037,7 +5063,7 @@ function App() {
     || 0,
   );
   const currentFindArtifactsPending = Boolean(currentProjectFindRunId && currentFindArtifactSource.length === 0 && !viewingActiveIncompleteFindRun && expectedCurrentFindDownstreamCount > 0);
-  const findStageBootstrapping = Boolean(!researchSummary && new URLSearchParams(window.location.search).get("project"));
+  const findStageBootstrapping = Boolean(!researchSummary && researchProject);
   const currentFindArtifactLoading = Boolean(findStageBootstrapping || currentFindArtifactsPending || (currentFindArtifactSource.length === 0 && ((currentFindArtifactsLoading && !hasCurrentFindResults) || (runArtifactsLoading && currentProjectFindRunId && (!runId || runId === currentProjectFindRunId) && !hasCurrentFindResults))));
   const selectedRunSelection = useMemo(() => {
     const resultSelection = runFindState?.selection;
@@ -6036,6 +6062,7 @@ function App() {
   const freshBaseSmokeBlocked = useMemo(() => freshBaseBlockerCategory === "fresh_base_reference_smoke_required", [freshBaseBlockerCategory]);
   const freshBaseReproductionBlocked = useMemo(() => freshBaseBlockerCategory === "fresh_base_reference_reproduction_required", [freshBaseBlockerCategory]);
   const freshBaseMainBlocked = useMemo(() => freshBaseDataBlocked || freshBaseReferenceBlocked || freshBaseSmokeBlocked || freshBaseReproductionBlocked || String(humanSupervision?.status || "").startsWith("blocked_fresh_base_"), [freshBaseDataBlocked, freshBaseReferenceBlocked, freshBaseSmokeBlocked, freshBaseReproductionBlocked, humanSupervision]);
+  const paperLaunchGateBlocked = Boolean(freshBaseMainBlocked || literatureGateBlocked || paperGlobalEvidenceGateBlocked);
   const referenceFullJobRunning = useMemo(() => {
     const blockerJob = String(humanSupervision?.blocker?.reference_full_job_status || "");
     const tickJob = supervisionTick?.full_reference_job || {};
@@ -6182,8 +6209,10 @@ function App() {
     if (value && typeof value === "object") {
       if (Array.isArray(value)) return value.map((item) => displayMaybe(item, "")).filter(Boolean).join(", ") || fallback;
       const readable = value.label_i18n || value.summary_i18n || value.name_i18n || value.title_i18n || value.label || value.summary || value.name || value.title || value.status || value.issue || value.path || value.url;
+      if (typeof readable === "string" && isPathLikeText(readable)) return readable.trim() || fallback;
       return readable !== undefined ? publicLogText(localizedText(readable, fallback), lang) : fallback;
     }
+    if (typeof value === "string" && isPathLikeText(value)) return value.trim() || fallback;
     return publicLogText(localizedText(value, fallback), lang);
   }
   function containsCJK(value: any) {
@@ -8330,7 +8359,7 @@ function App() {
                       </div>
                       <div className="envSummaryItem">
                         <span>{lang === "zh" ? "参考复现" : "Reference"}</span>
-                        <strong>{displayValue(envReferenceGate?.status || "not_started")}</strong>
+                        <strong>{displayValue(envReferenceFullJob?.status === "running" ? envReferenceFullJob.status : (envReferenceGate?.status || "not_started"))}</strong>
                       </div>
                     </div>
                     <div className={`envSummaryStatus ${String(envStage?.status || "").includes("blocked") ? "warning" : ""}`}>
@@ -8491,12 +8520,12 @@ function App() {
           <section className="stage researchStage">
             <div className="toolbar">
               <div><h2>{t.paperWrite}</h2><p className="help">{t.paperHelp}</p></div>
-              <div className="toolbarActions"><button onClick={() => refreshProject()} disabled={!researchProject}>{t.researchRefresh}</button><button className="primary" onClick={() => runAR("paper")} disabled={!researchProject || !researchVenue || stageLaunchDisabledByFullCycle || stageLaunchDisabledByProjectWorker}>{t.runPaperWriting}</button></div>
+              <div className="toolbarActions"><button onClick={() => refreshProject()} disabled={!researchProject}>{t.researchRefresh}</button><button className="primary" onClick={() => runAR("paper")} disabled={!researchProject || !researchVenue || stageLaunchDisabledByFullCycle || stageLaunchDisabledByProjectWorker || paperLaunchGateBlocked}>{t.runPaperWriting}</button></div>
             </div>
             {!researchSummary && <div className="researchGateNote warning">{lang === "zh" ? "正在刷新当前项目状态；论文撰写面板会先保留显示。" : "Refreshing current project state; the Paper panels stay visible."}</div>}
             <>
             {(freshBaseMainBlocked || literatureGateBlocked || paperGlobalEvidenceGateBlocked) && (
-              <div className="researchGateNote warning"><strong>{t.evidenceGateNotPassed}:</strong> {paperGlobalEvidenceGateText} {lang === "zh" ? "点击生成会生成目标 venue 论文预览，但不会标记为投稿通过。" : "Generating still creates a target-venue paper preview only; it will not be marked submission-ready."}</div>
+              <div className="researchGateNote warning"><strong>{t.evidenceGateNotPassed}:</strong> {paperGlobalEvidenceGateText} {lang === "zh" ? "论文撰写保持等待；参考复现、实验和投稿证据刷新通过后再启动。" : "Paper writing stays paused until reference reproduction, experiment, and submission-evidence gates refresh and pass."}</div>
             )}
             <div className="grid two">
               <div className="panel"><h3>{t.paperSettingsAndGate}</h3><div className="row"><div><label>{t.researchVenue}</label><div className="inlineInputAction"><input value={researchVenue} onChange={(e) => { setVenue(e.target.value); setProjectConfigMessage(""); }} onBlur={() => { if (researchVenue.trim()) void saveProjectConfigDraft({ silent: true, includePaperSettings: true }); }} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void saveProjectConfigDraft({ includePaperSettings: true }); } }} /><button className="smallButton" onClick={() => void saveProjectConfigDraft({ includePaperSettings: true })} disabled={!researchProject || !researchVenue.trim() || researchProjectConfigSaving}>{researchProjectConfigSaving ? t.saving : (lang === "zh" ? "保存投稿目标" : "Save venue")}</button></div>{researchProjectConfigMessage && <small className="statusHint">{researchProjectConfigMessage}</small>}</div><div><label>{t.researchTitle}</label><input value={researchTitle} onChange={(e) => { setTitle(e.target.value); setProjectConfigMessage(""); }} onBlur={() => { if (researchVenue.trim()) void saveProjectConfigDraft({ silent: true, includePaperSettings: true }); }} /></div></div><p className="help">{t.researchForceTemplate}</p><label className="switch"><input type="checkbox" checked={researchAutoInstallLatex} onChange={(e) => setAutoInstallLatex(e.target.checked)} /> {t.researchAutoInstallLatex}</label><div className="researchGateNote"><strong>{t.currentGate}:</strong> {paperStageSummaryText(researchStages?.paper)}</div></div>

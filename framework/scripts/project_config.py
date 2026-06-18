@@ -482,6 +482,14 @@ def _apply_project_patch(cfg: dict[str, Any], patch: dict[str, Any]) -> tuple[di
             coding = dict(cfg.get("coding_agent") or {}) if isinstance(cfg.get("coding_agent"), dict) else {}
             coding["backend"] = "claude"
             cfg["coding_agent"] = coding
+    if isinstance(patch.get("llm"), dict):
+        incoming_llm = patch.get("llm") or {}
+        llm = dict(cfg.get("llm") or {}) if isinstance(cfg.get("llm"), dict) else {}
+        for key in ["enabled", "provider", "api_base", "model", "api_key_env", "timeout_sec", "max_tokens", "temperature", "api_mode"]:
+            if key in incoming_llm:
+                llm[key] = incoming_llm.get(key)
+        llm.pop("api_key", None)
+        cfg["llm"] = llm
     selection = _source_selection_from_patch(patch)
     if selection is not None:
         discovery = dict(cfg.get("discovery") or {}) if isinstance(cfg.get("discovery"), dict) else {}

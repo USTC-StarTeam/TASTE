@@ -32,6 +32,65 @@ def slugify(value: str) -> str:
 
 
 
+def _candidate_source(row: dict) -> str:
+    return str(row.get('_source') or row.get('source') or '').strip()
+
+
+def _candidate_has_literature_anchor(row: dict) -> bool:
+    return any(str(row.get(key) or '').strip() for key in [
+        'literature_base_title',
+        'selected_base_title',
+        'literature_base_id',
+        'paper_id',
+        'paper_hash',
+        'fresh_research_base_id',
+    ])
+
+
+def _candidate_task_fit_false(row: dict) -> bool:
+    value = row.get('task_fit')
+    if value is False:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {'false', 'no', '0', 'irrelevant', 'mismatch', 'not_fit', 'not-fit'}
+    return False
+
+
+def _candidate_task_fit_true(row: dict) -> bool:
+    value = row.get('task_fit')
+    if value is True:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {'true', 'yes', '1', 'fit', 'relevant', 'matched', 'topic_fit', 'topic-fit'}
+    return False
+
+
+def _candidate_is_unanchored_github_discovery(row: dict) -> bool:
+    source = _candidate_source(row).lower()
+    if source == 'fresh_literature_github_search':
+        return False
+    return source in {'github_search', 'environment_expanded_github_search'} or source.endswith('_github_search')
+
+
+def candidate_allowed_for_pool_audit(row: dict) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if _candidate_task_fit_false(row):
+        return False
+    if row.get('repo_selection_bucket') == 'paused_by_veto':
+        return False
+    source = _candidate_source(row)
+    has_anchor = _candidate_has_literature_anchor(row)
+    if row.get('hard_topic_mismatch') and not (source == 'fresh_literature_github_search' and has_anchor):
+        return False
+    if source == 'fresh_literature_github_search':
+        return has_anchor or _candidate_task_fit_true(row)
+    if _candidate_is_unanchored_github_discovery(row):
+        return has_anchor or _candidate_task_fit_true(row)
+    return True
+
+
+
 def module_cmd(stage: str, action: str, *extra: str) -> list[str]:
     return [sys.executable, 'framework/scripts/run_module.py', stage, '--action', action, *extra]
 
@@ -186,7 +245,7 @@ def main() -> None:
     for row in rows if isinstance(rows, list) else []:
         if str(row.get('local_path', '')) == active_path:
             continue
-        if row.get('hard_topic_mismatch') or row.get('repo_selection_bucket') == 'paused_by_veto':
+        if not candidate_allowed_for_pool_audit(row):
             continue
         score = float(row.get('repo_reuse_score', row.get('score', 0)) or 0)
         if score >= floor:

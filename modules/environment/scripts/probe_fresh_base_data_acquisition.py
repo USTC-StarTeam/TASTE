@@ -5,8 +5,10 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import shutil
 import subprocess
+import tarfile
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -87,6 +89,92 @@ def dataset_roots(repo: Path, dataset: str, root_hints: list[str] | None = None)
 
 
 
+
+def safe_extract_tar_archive(archive: Path, dest: Path) -> dict[str, Any]:
+    started = now_iso()
+    result: dict[str, Any] = {
+        'kind': 'extract_tar_archive',
+        'command': ['python_tarfile_extract', str(archive), str(dest)],
+        'started_at': started,
+        'finished_at': '',
+        'return_code': 1,
+        'timed_out': False,
+        'stdout_tail': '',
+        'stderr_tail': '',
+        'archive_path': str(archive),
+        'archive_exists': archive.exists(),
+        'extracted_members': 0,
+    }
+    if not archive.exists():
+        result['finished_at'] = now_iso()
+        result['stderr_tail'] = 'archive not found'
+        return result
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        dest_resolved = dest.resolve()
+        extracted = 0
+        with tarfile.open(archive) as tf:
+            members = tf.getmembers()
+            unsafe = []
+            for member in members:
+                target = (dest_resolved / member.name).resolve()
+                if target != dest_resolved and dest_resolved not in target.parents:
+                    unsafe.append(member.name)
+            if unsafe:
+                result['finished_at'] = now_iso()
+                result['stderr_tail'] = 'unsafe tar paths: ' + ', '.join(unsafe[:8])
+                return result
+            tf.extractall(dest_resolved)
+            extracted = sum(1 for member in members if member.isfile())
+        result.update({'finished_at': now_iso(), 'return_code': 0, 'extracted_members': extracted, 'stdout_tail': f'extracted {extracted} files from {archive} into {dest_resolved}'})
+        return result
+    except Exception as exc:
+        result['finished_at'] = now_iso()
+        result['stderr_tail'] = f'{type(exc).__name__}: {exc}'
+        return result
+
+
+def huggingface_dataset_repo_id(url: str) -> str:
+    match = re.search(r'huggingface\.co/datasets/([^\s/?#]+/[^\s/?#]+)', str(url or ''))
+    return match.group(1).strip().strip('.,;') if match else ''
+
+
+def hf_dataset_download_attempt(source: dict[str, Any], data_dir: Path, timeout_sec: int) -> list[dict[str, Any]]:
+    attempts: list[dict[str, Any]] = []
+    repo_id = str(source.get('repo_id') or '').strip() or huggingface_dataset_repo_id(str(source.get('url') or ''))
+    if not repo_id:
+        return [{'kind': 'huggingface_dataset_download', 'return_code': 2, 'timed_out': False, 'command': ['huggingface_hub', 'missing_repo_id'], 'stderr_tail': 'missing HuggingFace dataset repo_id'}]
+    try:
+        from huggingface_hub import HfApi, hf_hub_download
+    except Exception as exc:
+        return [{'kind': 'huggingface_dataset_download', 'return_code': 127, 'timed_out': False, 'command': ['import', 'huggingface_hub'], 'stderr_tail': f'huggingface_hub unavailable: {type(exc).__name__}: {exc}'}]
+    started = now_iso()
+    files = [str(item) for item in source.get('files', []) if str(item).strip()] if isinstance(source.get('files'), list) else []
+    try:
+        info = HfApi().repo_info(repo_id, repo_type='dataset', files_metadata=True)
+        siblings = [row for row in getattr(info, 'siblings', []) if getattr(row, 'rfilename', '')]
+        if not files:
+            files = [row.rfilename for row in siblings if row.rfilename.lower().endswith(('.tar.gz', '.tar.xz', '.tar.bz2', '.tgz', '.zip'))]
+        sizes = {row.rfilename: int(getattr(row, 'size', 0) or 0) for row in siblings}
+        total_size = sum(sizes.get(name, 0) for name in files)
+        max_bytes = int(os.environ.get('TASTE_MAX_AUTO_HF_DOWNLOAD_BYTES', str(60 * 1024**3)) or str(60 * 1024**3))
+        if total_size > max_bytes:
+            return [{'kind': 'huggingface_dataset_download', 'return_code': 2, 'timed_out': False, 'command': ['huggingface_hub', 'download', repo_id, *files], 'content_length': total_size, 'max_auto_download_bytes': max_bytes, 'stderr_tail': f'HuggingFace dataset files total {total_size} bytes exceed TASTE_MAX_AUTO_HF_DOWNLOAD_BYTES={max_bytes}'}]
+        data_dir.mkdir(parents=True, exist_ok=True)
+        for name in files:
+            row_started = now_iso()
+            local = hf_hub_download(repo_id=repo_id, filename=name, repo_type='dataset', local_dir=str(data_dir))
+            local_path = Path(local)
+            attempts.append({'kind': 'huggingface_dataset_download', 'command': ['huggingface_hub', 'download', repo_id, name], 'started_at': row_started, 'finished_at': now_iso(), 'return_code': 0 if local_path.exists() else 1, 'timed_out': False, 'path': str(local_path), 'bytes': local_path.stat().st_size if local_path.exists() else 0, 'stdout_tail': f'downloaded {name} from {repo_id}', 'stderr_tail': ''})
+            if local_path.exists() and name.lower().endswith(('.tar.gz', '.tar.xz', '.tar.bz2', '.tgz')):
+                attempts.append(safe_extract_tar_archive(local_path, data_dir))
+            elif local_path.exists() and name.lower().endswith('.zip'):
+                attempts.append(safe_extract_official_zip(local_path, data_dir))
+    except Exception as exc:
+        attempts.append({'kind': 'huggingface_dataset_download', 'command': ['huggingface_hub', 'download', repo_id, *files], 'started_at': started, 'finished_at': now_iso(), 'return_code': 1, 'timed_out': False, 'stderr_tail': f'{type(exc).__name__}: {exc}'})
+    return attempts
+
+
 def safe_extract_official_zip(archive: Path, repo: Path) -> dict[str, Any]:
     started = now_iso()
     result: dict[str, Any] = {
@@ -140,8 +228,22 @@ def safe_extract_official_zip(archive: Path, repo: Path) -> dict[str, Any]:
         result["stderr_tail"] = f"{type(exc).__name__}: {exc}"
         return result
 
+def required_file_present(root: Path, name: str) -> bool:
+    token = str(name or '').strip()
+    if not token:
+        return False
+    if token in {'.', '<root_exists>', '<nonempty_root>'}:
+        return root.exists() and any(root.iterdir())
+    if '<' in token:
+        return bool(list(root.glob('*_emb.pickle')))
+    if any(ch in token for ch in '*?['):
+        return bool(list(root.glob(token)))
+    return (root / token).exists()
+
+
 def inspect_datasets(repo: Path, datasets: list[str], required: list[str], root_hints: list[str] | None = None) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    effective_required = required or ['<nonempty_root>']
     for ds in datasets:
         roots = []
         seen: set[str] = set()
@@ -152,17 +254,14 @@ def inspect_datasets(repo: Path, datasets: list[str], required: list[str], root_
             seen.add(key)
             present = []
             if root.exists():
-                for name in required:
-                    if '<' in name:
-                        if list(root.glob('*_emb.pickle')):
-                            present.append(name)
-                    elif (root / name).exists():
+                for name in effective_required:
+                    if required_file_present(root, name):
                         present.append(name)
             roots.append({
                 'root': str(root),
                 'exists': root.exists(),
                 'present_required_files': present,
-                'missing_required_files': [name for name in required if name not in present],
+                'missing_required_files': [name for name in effective_required if name not in present],
             })
         ready = next((row for row in roots if row['exists'] and not row['missing_required_files']), None)
         rows.append({'dataset': ds, 'status': 'ready' if ready else 'missing', 'ready_root': ready['root'] if ready else '', 'candidate_roots': roots})
@@ -210,15 +309,19 @@ def root_hints(plan: dict[str, Any]) -> list[str]:
     return out
 
 
-def download_sources(plan: dict[str, Any]) -> list[dict[str, str]]:
+def download_sources(plan: dict[str, Any]) -> list[dict[str, Any]]:
     impl = plan.get('implementation_evidence', {}) if isinstance(plan.get('implementation_evidence'), dict) else {}
     rows = impl.get('download_sources') if isinstance(impl.get('download_sources'), list) else []
-    out: list[dict[str, str]] = []
+    if not rows and isinstance(plan.get('download_sources'), list):
+        rows = plan.get('download_sources')
+    out: list[dict[str, Any]] = []
     for row in rows:
         if isinstance(row, dict):
             url = str(row.get('url') or '').strip()
-            if url:
-                out.append({'url': url, 'kind': str(row.get('kind') or 'public_data_url')})
+            if url or row.get('repo_id'):
+                item = dict(row)
+                item['kind'] = str(item.get('kind') or 'public_data_url')
+                out.append(item)
         elif str(row).strip():
             out.append({'url': str(row).strip(), 'kind': 'public_data_url'})
     return out
@@ -279,19 +382,24 @@ def main() -> int:
         attempts.append(safe_extract_official_zip(archive, repo))
     mid = inspect_datasets(repo, datasets, required, roots) if repo.exists() and required else before
 
-    if args.attempt_download and repo.exists() and required and not any(row.get("status") == "ready" for row in mid):
+    if args.attempt_download and repo.exists() and not any(row.get("status") == "ready" for row in mid):
         gdown = shutil.which("gdown") or ""
         data_dir = repo / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
-        source = next((row for row in sources if google_drive_file_id(row.get('url', ''))), {})
-        file_id = google_drive_file_id(source.get('url', ''))
-        if file_id and gdown:
-            attempts.append({"kind": "gdown_fresh_base_data", **run([gdown, file_id, "-O", str(data_dir / ARCHIVE_NAME)], repo, max(5, args.timeout_sec))})
-            attempts.append(safe_extract_official_zip(data_dir / ARCHIVE_NAME, repo))
-        elif file_id:
-            attempts.append({"kind": "gdown_fresh_base_data", "return_code": 127, "timed_out": False, "command": ["gdown", file_id], "stderr_tail": "gdown not found"})
+        hf_sources = [row for row in sources if str(row.get('kind') or '').lower() == 'huggingface_dataset' or huggingface_dataset_repo_id(str(row.get('url') or ''))]
+        if hf_sources:
+            for source in hf_sources:
+                attempts.extend(hf_dataset_download_attempt(source, data_dir, max(5, args.timeout_sec)))
         else:
-            attempts.append({"kind": "fresh_base_data_download", "return_code": 2, "timed_out": False, "command": ["download_sources_from_fresh_base_implementation_plan"], "stderr_tail": "no supported non-interactive download source found in current fresh-base plan"})
+            source = next((row for row in sources if google_drive_file_id(row.get('url', ''))), {})
+            file_id = google_drive_file_id(source.get('url', ''))
+            if file_id and gdown:
+                attempts.append({"kind": "gdown_fresh_base_data", **run([gdown, file_id, "-O", str(data_dir / ARCHIVE_NAME)], repo, max(5, args.timeout_sec))})
+                attempts.append(safe_extract_official_zip(data_dir / ARCHIVE_NAME, repo))
+            elif file_id:
+                attempts.append({"kind": "gdown_fresh_base_data", "return_code": 127, "timed_out": False, "command": ["gdown", file_id], "stderr_tail": "gdown not found"})
+            else:
+                attempts.append({"kind": "fresh_base_data_download", "return_code": 2, "timed_out": False, "command": ["download_sources_from_fresh_base_implementation_plan"], "stderr_tail": "no supported non-interactive download source found in current fresh-base plan"})
     after = inspect_datasets(repo, datasets, required, roots) if repo.exists() and required else []
     ready = [row['dataset'] for row in after if row.get('status') == 'ready']
     status = 'ready' if ready else 'blocked_missing_dataset_contract' if contract_missing else 'blocked_data_acquisition'
@@ -311,7 +419,7 @@ def main() -> int:
         'blocked_datasets': [row['dataset'] for row in after if row.get('status') != 'ready'],
         'attempts': attempts,
         'blocker_reasons': [] if ready else ([
-            'current fresh-base plan has no repo-specific dataset_contract.required_files_per_dataset; project Claude Code must infer and record the real loader contract before TASTE probes data roots',
+            'current fresh-base plan has no repo-specific dataset_contract.required_files_per_dataset; TASTE will use a nonempty extracted dataset root only for acquisition readiness, while loader/import probes remain mandatory before claims',
         ] if contract_missing else [
             'current fresh-base download sources have not yielded any loader-ready dataset roots yet',
             'repo-specific required dataset files are still missing after bounded download/extract probe',

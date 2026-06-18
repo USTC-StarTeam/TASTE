@@ -85,8 +85,8 @@ else
 fi
 export TITLE_FILTER_SEQUENTIAL="${TITLE_FILTER_SEQUENTIAL:-0}"
 
-if [[ ! -d "$FRAMEWORK_ROOT/auto_research" ]]; then
-  echo "missing framework: $FRAMEWORK_ROOT" >&2
+if [[ ! -d "$FRAMEWORK_ROOT/scripts/auto_research" ]]; then
+  echo "missing framework package: $FRAMEWORK_ROOT/scripts/auto_research" >&2
   exit 2
 fi
 if [[ ! -d "$CLIENT_ROOT/dist" ]]; then

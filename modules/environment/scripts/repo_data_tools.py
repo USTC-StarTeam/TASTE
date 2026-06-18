@@ -338,10 +338,120 @@ def dr_discover_generic_data_contract(project: str, repo_path: str, candidate_na
     status = 'ready' if ready else 'blocked_no_parseable_structured_candidate_data'
     return {'generated_at': now, 'project': project, 'candidate_scope': True, 'candidate_repo': candidate_name, 'candidate_title': candidate_title, 'repo_path': str(repo), 'status': status, 'decision': 'ready_for_loader_probe' if ready else 'candidate_data_contract_blocked', 'adapter_missing': False, 'adapter_path': '', 'datasets': [row['dataset'] for row in local_statuses] or blocked, 'ready_datasets': ready, 'blocked_datasets': blocked, 'download_sources': [{'dataset': name, 'source': 'candidate_repo_local_files', 'path': str(repo)} for name in ready], 'contract': {'status': 'candidate_data_contract_ready' if ready else 'blocked', 'scope': 'candidate_base_switch_proposal', 'required_files_per_dataset': [], 'loader_probe_required': True, 'claim_rule': 'Generic parsing proves only local structured data presence; repo loader/import, reference protocol, smoke, full reproduction, and artifact-local audit gates remain separate.'}, 'local_statuses': local_statuses, 'sampled_files': samples[:40], 'blocker_reasons': [] if ready else ['No parseable structured local data files were found under data/datasets/benchmark roots.'], 'guardrails': ['Candidate-scoped evidence must not overwrite active-route repo_data_requirements.json or real_dataset_probe.json.', 'Generic structured-data parsing is not a repo loader/import probe and does not authorize route switching.', 'Reference protocol, bounded smoke, full reference reproduction, and artifact-local audit gates remain mandatory.']}
 
-def dr_write_candidate_requirement(project: str, repo_path: str, candidate_name: str='', candidate_title: str='') -> int:
+
+def dr__paths_equal(left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    try:
+        return str(Path(left).expanduser().resolve()) == str(Path(right).expanduser().resolve())
+    except Exception:
+        return str(left).strip() == str(right).strip()
+
+
+def dr__list_text(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item or '').strip()]
+    return []
+
+
+def dr__normalize_candidate_contract_payload(project: str, repo_path: str, candidate_name: str, candidate_title: str, source: dict[str, Any], source_path: Path, source_kind: str) -> dict[str, Any]:
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    local_statuses = source.get('local_statuses') if isinstance(source.get('local_statuses'), list) else []
+    if not local_statuses and isinstance(source.get('dataset_statuses'), list):
+        local_statuses = source.get('dataset_statuses') or []
+    ready = dr__list_text(source.get('ready_datasets'))
+    if not ready:
+        for row in local_statuses:
+            if isinstance(row, dict) and str(row.get('status') or '').lower() == 'ready':
+                dataset = str(row.get('dataset') or row.get('id') or '').strip()
+                if dataset and dataset not in ready:
+                    ready.append(dataset)
+    blocked = dr__list_text(source.get('blocked_datasets'))
+    if not blocked:
+        for row in local_statuses:
+            if isinstance(row, dict) and str(row.get('status') or '').lower() != 'ready':
+                dataset = str(row.get('dataset') or row.get('id') or '').strip()
+                if dataset and dataset not in ready and dataset not in blocked:
+                    blocked.append(dataset)
+    datasets = dr__list_text(source.get('datasets')) or ready + [item for item in blocked if item not in ready]
+    if not datasets and local_statuses:
+        for row in local_statuses:
+            if isinstance(row, dict):
+                dataset = str(row.get('dataset') or row.get('id') or '').strip()
+                if dataset and dataset not in datasets:
+                    datasets.append(dataset)
+    contract = source.get('contract') if isinstance(source.get('contract'), dict) else source.get('dataset_contract') if isinstance(source.get('dataset_contract'), dict) else {}
+    contract = dict(contract) if isinstance(contract, dict) else {}
+    if ready:
+        contract.setdefault('scope', 'candidate_base_switch_proposal')
+        contract['status'] = 'candidate_data_contract_ready'
+        status = 'ready'
+        decision = 'ready_for_loader_probe'
+    else:
+        contract.setdefault('status', 'blocked')
+        contract.setdefault('scope', 'candidate_base_switch_proposal')
+        status = str(source.get('status') or 'blocked_candidate_data_contract_required')
+        if status in {'ready', 'passed'}:
+            status = 'ready'
+            decision = 'ready_for_loader_probe'
+        else:
+            decision = str(source.get('decision') or 'candidate_data_contract_blocked')
+    blocker_reasons = dr__list_text(source.get('blocker_reasons'))
+    if not ready and not blocker_reasons:
+        blocker_reasons = [str(source.get('reason') or 'Candidate data contract is not ready.').strip()]
+    download_sources = source.get('download_sources') if isinstance(source.get('download_sources'), list) else []
+    payload = {
+        'generated_at': now,
+        'project': project,
+        'candidate_scope': True,
+        'candidate_repo': candidate_name,
+        'candidate_title': candidate_title,
+        'repo_path': str(Path(repo_path).expanduser().resolve() if repo_path and Path(repo_path).expanduser().exists() else repo_path),
+        'status': status,
+        'decision': decision,
+        'adapter_missing': False,
+        'adapter_path': str(source_path),
+        'datasets': datasets or ['candidate_structured_data_contract'],
+        'ready_datasets': ready,
+        'blocked_datasets': [item for item in blocked if item not in ready] if ready else blocked or ['candidate_structured_data_contract'],
+        'download_sources': download_sources,
+        'contract': contract,
+        'local_statuses': local_statuses,
+        'sampled_files': source.get('sampled_files', []) if isinstance(source.get('sampled_files'), list) else [],
+        'blocker_reasons': [] if ready else blocker_reasons,
+        'source_kind': source_kind,
+        'source_path': str(source_path),
+        'guardrails': [
+            'Candidate-scoped evidence must not overwrite active-route repo_data_requirements.json or real_dataset_probe.json.',
+            'A ready candidate data contract only authorizes loader/import probing; it does not authorize route switching by itself.',
+            'Reference protocol, bounded smoke, full reproduction, and artifact-local audit gates remain mandatory.',
+        ],
+    }
+    if isinstance(source.get('dataset_statuses'), list):
+        payload['dataset_statuses'] = source.get('dataset_statuses')
+    return payload
+
+
+def dr__candidate_contract_from_fresh_acquisition(project: str, repo_path: str, candidate_name: str, candidate_title: str) -> dict[str, Any]:
+    state = ROOT / 'projects' / project / 'state'
+    path = state / 'fresh_base_data_acquisition.json'
+    source = dr_load_json(path, {})
+    if not isinstance(source, dict) or not source:
+        return {}
+    source_repo = str(source.get('repo_path') or '').strip()
+    if source_repo and not dr__paths_equal(source_repo, repo_path):
+        return {}
+    if str(source.get('status') or '').lower() != 'ready' and str(source.get('decision') or '') != 'ready_for_loader_probe':
+        return {}
+    payload = dr__normalize_candidate_contract_payload(project, repo_path, candidate_name, candidate_title, source, path, 'fresh_base_data_acquisition')
+    return payload if payload.get('ready_datasets') else {}
+
+
+def dr__write_candidate_requirement_payload(project: str, payload: dict[str, Any], repo_path: str, candidate_name: str='') -> int:
     state = ROOT / 'projects' / project / 'state'
     reports = ROOT / 'projects' / project / 'reports'
-    payload = dr_discover_generic_data_contract(project, repo_path, candidate_name, candidate_title)
     slug = dr_candidate_slug(payload.get('repo_path') or repo_path, candidate_name)
     state_path = state / f'candidate_data_contract_{slug}.json'
     dr_save_json(state_path, payload)
@@ -351,18 +461,49 @@ def dr_write_candidate_requirement(project: str, repo_path: str, candidate_name:
     lines.append(f"- generated_at: {payload.get('generated_at', '')}\n")
     lines.append(f"- status: {payload.get('status', '')}\n")
     lines.append(f"- decision: {payload.get('decision', '')}\n")
+    lines.append(f"- source_kind: {payload.get('source_kind', 'generic')}\n")
     lines.append(f"- candidate_repo: {candidate_name or payload.get('candidate_repo', '')}\n")
     lines.append(f"- repo_path: {payload.get('repo_path') or repo_path or 'not selected'}\n")
     lines.append(f"- ready_datasets: {', '.join(payload.get('ready_datasets') or []) or 'none'}\n")
     lines.append(f"- blocked_datasets: {', '.join(payload.get('blocked_datasets') or []) or 'none'}\n")
-    lines.append('\n## Dataset Samples\n')
-    for row in payload.get('local_statuses') or []:
-        lines.append(f"- {row.get('dataset')}: {row.get('status')}; files={row.get('sampled_file_count', 0)}; rows={row.get('sample_rows', 0)}; text_fields={', '.join(row.get('natural_language_text_fields') or []) or 'none'}\n")
+    lines.append('\n## Dataset Evidence\n')
+    for row in payload.get('local_statuses') or payload.get('dataset_statuses') or []:
+        if not isinstance(row, dict):
+            continue
+        dataset = row.get('dataset') or row.get('id') or 'dataset'
+        status = row.get('status') or ('ready' if dataset in (payload.get('ready_datasets') or []) else 'blocked')
+        root = row.get('ready_root') or row.get('root') or ''
+        present = row.get('present_required_files') if isinstance(row.get('present_required_files'), list) else []
+        lines.append(f"- {dataset}: {status}; root={root or 'n/a'}; present={', '.join(str(x) for x in present) or 'n/a'}\n")
     for reason in payload.get('blocker_reasons') or []:
         lines.append(f'- blocker: {reason}\n')
     report_path.write_text(''.join(lines), encoding='utf-8')
-    print(json.dumps({'status': payload['status'], 'project': project, 'candidate_scope': True, 'repo_path': payload.get('repo_path') or repo_path, 'ready_datasets': payload.get('ready_datasets', []), 'state_path': str(state_path)}, ensure_ascii=False))
-    return 0 if payload.get('status') == 'ready' else 2
+    print(json.dumps({'status': payload.get('status'), 'project': project, 'candidate_scope': True, 'repo_path': payload.get('repo_path') or repo_path, 'ready_datasets': payload.get('ready_datasets', []), 'state_path': str(state_path)}, ensure_ascii=False))
+    return 0 if payload.get('status') == 'ready' and payload.get('ready_datasets') else 2
+
+
+def dr_write_candidate_requirement_from_adapter(project: str, repo_path: str, candidate_name: str, candidate_title: str, adapter: Path, argv: list[str]) -> int:
+    state = ROOT / 'projects' / project / 'state'
+    proc = subprocess.run([sys.executable, str(adapter), *argv], cwd=ROOT, text=True)
+    source = dr_load_json(state / 'repo_data_requirements.json', {})
+    payload: dict[str, Any] = {}
+    if isinstance(source, dict) and source:
+        source_repo = str(source.get('repo_path') or repo_path).strip()
+        if not source_repo or dr__paths_equal(source_repo, repo_path):
+            payload = dr__normalize_candidate_contract_payload(project, repo_path, candidate_name, candidate_title, source, adapter, 'project_adapter')
+    fresh_payload = dr__candidate_contract_from_fresh_acquisition(project, repo_path, candidate_name, candidate_title)
+    if fresh_payload and (not payload or payload.get('status') != 'ready'):
+        payload = fresh_payload
+    if not payload:
+        payload = dr_discover_generic_data_contract(project, repo_path, candidate_name, candidate_title)
+    rc = dr__write_candidate_requirement_payload(project, payload, repo_path, candidate_name)
+    return 0 if rc == 0 else int(proc.returncode or rc or 2)
+
+def dr_write_candidate_requirement(project: str, repo_path: str, candidate_name: str='', candidate_title: str='') -> int:
+    payload = dr__candidate_contract_from_fresh_acquisition(project, repo_path, candidate_name, candidate_title)
+    if not payload:
+        payload = dr_discover_generic_data_contract(project, repo_path, candidate_name, candidate_title)
+    return dr__write_candidate_requirement_payload(project, payload, repo_path, candidate_name)
 
 def dr_write_generic_requirement(project: str, repo_path: str, adapter: Path) -> int:
     state = ROOT / 'projects' / project / 'state'
@@ -396,6 +537,8 @@ def dr_main() -> int:
     if args.candidate_scope:
         repo_path = dr_candidate_repo_from_state(project, args.repo_path)
         candidate_name, candidate_title = dr_candidate_identity_from_state(project, args.candidate_name, args.candidate_title)
+        if adapter.exists() and _adapter_supports_candidate(adapter, repo_path, candidate_name, candidate_title):
+            return dr_write_candidate_requirement_from_adapter(project, repo_path, candidate_name, candidate_title, adapter, argv)
         return dr_write_candidate_requirement(project, repo_path, candidate_name, candidate_title)
     if adapter.exists():
         proc = subprocess.run([sys.executable, str(adapter), *sys.argv[1:]], cwd=ROOT)
@@ -797,6 +940,86 @@ def probe__repo_from_state(project: str, explicit: str='') -> str:
                     return value
     return ''
 
+
+def probe_write_candidate_probe_from_adapter(project: str, repo_path: str, env_name: str, candidate_name: str, candidate_title: str, timeout_sec: int, adapter: Path, argv: list[str]) -> int:
+    state = ROOT / 'projects' / project / 'state'
+    reports = ROOT / 'projects' / project / 'reports'
+    slug = candidate_data.candidate_slug(repo_path, candidate_name)
+    contract_path = state / f'candidate_data_contract_{slug}.json'
+    contract = probe_load_json(contract_path, {})
+    proc = subprocess.run([sys.executable, str(adapter), *argv], cwd=ROOT, text=True, timeout=max(30, int(timeout_sec or 120) + 60))
+    source = probe_load_json(state / 'real_dataset_probe.json', {})
+    if not isinstance(source, dict) or not source:
+        source = {}
+    if not isinstance(contract, dict) or str(contract.get('repo_path') or '') != str(Path(repo_path).expanduser().resolve() if repo_path and Path(repo_path).expanduser().exists() else repo_path):
+        fresh_contract = candidate_data.dr__candidate_contract_from_fresh_acquisition(project, repo_path, candidate_name, candidate_title)
+        contract = fresh_contract or candidate_data.discover_generic_data_contract(project, repo_path, candidate_name, candidate_title)
+        probe_save_json(contract_path, contract)
+    ready_contract = [str(item) for item in contract.get('ready_datasets', [])] if isinstance(contract.get('ready_datasets'), list) else []
+    raw_probes = source.get('probes') if isinstance(source.get('probes'), list) else []
+    loader_ok = bool(str(source.get('status') or '') in {'passed', 'ready'} or source.get('loader_probe_success') or any(isinstance(row, dict) and row.get('claim_ready') and row.get('loader_probe_success') for row in raw_probes))
+    generic_parse_ok = bool(ready_contract or source.get('generic_data_parse_probe_success') or any(isinstance(row, dict) and row.get('generic_data_parse_probe_success') for row in raw_probes))
+    ready = [str(item) for item in source.get('ready_datasets', [])] if isinstance(source.get('ready_datasets'), list) else []
+    if not ready and loader_ok:
+        ready = [str(row.get('dataset')) for row in raw_probes if isinstance(row, dict) and row.get('claim_ready') and str(row.get('dataset') or '').strip()]
+    blocked = [str(item) for item in source.get('blocked_datasets', [])] if isinstance(source.get('blocked_datasets'), list) else []
+    if not blocked:
+        blocked = [name for name in ready_contract if name not in ready] or ([] if loader_ok else ready_contract or ['candidate_structured_data_contract'])
+    reason = 'Project adapter repo loader/import probe passed on real candidate data; reference protocol, smoke, full reproduction, and artifact-local audit remain mandatory before switch authorization.' if loader_ok else str((source.get('blocker_reasons') or [''])[0] if isinstance(source.get('blocker_reasons'), list) and source.get('blocker_reasons') else source.get('reason') or 'Candidate data is present, but repo loader/import probe has not passed yet.')
+    probes = raw_probes if raw_probes else [{'dataset': name, 'claim_ready': loader_ok, 'loader_probe_success': loader_ok, 'generic_data_parse_probe_success': generic_parse_ok, 'loader_probe': {'success': loader_ok, 'return_code': 0 if loader_ok else 2, 'reason': reason}, 'required_files_ok': generic_parse_ok, 'missing_required_files': [], 'reason': reason} for name in ready or blocked or ready_contract or ['candidate_structured_data_contract']]
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    payload = {
+        'generated_at': now,
+        'project': project,
+        'candidate_scope': True,
+        'candidate_repo': candidate_name,
+        'candidate_title': candidate_title,
+        'repo_path': contract.get('repo_path') or repo_path,
+        'env_name': env_name,
+        'status': 'passed' if loader_ok else 'blocked_candidate_repo_loader_import_probe_required' if generic_parse_ok else 'blocked_candidate_data_contract_required',
+        'decision': 'candidate_loader_import_probe_passed' if loader_ok else 'candidate_repo_loader_import_probe_required' if generic_parse_ok else 'candidate_data_contract_required',
+        'loader_probe_success': loader_ok,
+        'generic_data_parse_probe_success': generic_parse_ok,
+        'adapter_missing': False,
+        'adapter_path': str(adapter),
+        'data_contract_path': str(contract_path),
+        'candidate_data_contract': contract,
+        'repo_import_probe': source.get('import_probe_summary', {}) if isinstance(source.get('import_probe_summary'), dict) else {},
+        'probes': probes,
+        'ready_datasets': ready if loader_ok else [],
+        'blocked_datasets': [] if loader_ok else blocked,
+        'blocker_reasons': [] if loader_ok else [reason],
+        'probe_return_code': 0 if loader_ok else int(source.get('probe_return_code') or proc.returncode or 2),
+        'source_kind': 'project_adapter',
+        'source_path': str(state / 'real_dataset_probe.json'),
+        'guardrails': [
+            'Candidate-scoped loader evidence must not overwrite active-route real_dataset_probe.json.',
+            'Project adapters may define repo-specific loader probes, but promotion still requires reference/smoke/reproduction/audit gates.',
+            'Reference protocol, bounded smoke, full reproduction, and artifact-local audit gates remain mandatory.',
+        ],
+    }
+    state_path = state / f'candidate_loader_probe_{slug}.json'
+    probe_save_json(state_path, payload)
+    probe__sync_pending_environment_candidate(project, payload, contract, state_path, contract_path)
+    reports.mkdir(parents=True, exist_ok=True)
+    report_path = reports / f'candidate_loader_probe_{slug}.md'
+    lines = ['# Candidate Loader Probe\n\n']
+    lines.append(f'- generated_at: {now}\n')
+    lines.append(f"- status: {payload['status']}\n")
+    lines.append(f"- decision: {payload['decision']}\n")
+    lines.append('- source_kind: project_adapter\n')
+    lines.append(f'- candidate_repo: {candidate_name}\n')
+    lines.append(f"- repo_path: {payload.get('repo_path') or 'not selected'}\n")
+    lines.append(f'- generic_data_parse_probe_success: {str(generic_parse_ok).lower()}\n')
+    lines.append(f'- loader_probe_success: {str(loader_ok).lower()}\n')
+    lines.append(f'- data_contract_path: {contract_path}\n')
+    for row in probes:
+        if isinstance(row, dict):
+            lines.append(f"- {row.get('dataset', 'dataset')}: claim_ready={str(row.get('claim_ready')).lower()}; loader_probe_success={str(row.get('loader_probe_success')).lower()}; {row.get('reason') or reason}\n")
+    report_path.write_text(''.join(lines), encoding='utf-8')
+    print(json.dumps({'status': payload['status'], 'project': project, 'candidate_scope': True, 'repo_path': payload.get('repo_path'), 'loader_probe_success': loader_ok, 'ready_datasets': payload.get('ready_datasets', []), 'state_path': str(state_path)}, ensure_ascii=False))
+    return 0 if loader_ok else int(payload['probe_return_code'] or 2)
+
 def probe_write_candidate_probe(project: str, repo_path: str, env_name: str, candidate_name: str='', candidate_title: str='', timeout_sec: int=120) -> int:
     state = ROOT / 'projects' / project / 'state'
     reports = ROOT / 'projects' / project / 'reports'
@@ -1019,6 +1242,101 @@ def plan__repo_payload(selected: dict[str, Any]) -> dict[str, Any]:
         repo['claude_topic_decision'] = {key: decision.get(key) for key in ['decision', 'confidence', 'repo_action', 'env_action', 'data_action', 'data_action_reason', 'data_action_reason_zh', 'recommended_env_name'] if decision.get(key) not in (None, '', [])}
     return repo
 
+
+def plan__strip_archive_suffix(name: str) -> str:
+    text = str(name or '').strip()
+    for suffix in ['.tar.gz', '.tar.bz2', '.tar.xz', '.tgz', '.zip']:
+        if text.lower().endswith(suffix):
+            return text[:-len(suffix)]
+    return Path(text).stem
+
+
+def plan__read_repo_text(repo_path: str, selected: dict[str, Any]) -> str:
+    parts: list[str] = []
+    signals = selected.get('signals') if isinstance(selected.get('signals'), dict) else {}
+    for key in ['readme_evidence', 'readme_topic_evidence']:
+        value = str(signals.get(key) or '').strip()
+        if value:
+            parts.append(value)
+    repo = Path(repo_path) if repo_path else Path('')
+    if repo.exists():
+        for readme in list(repo.glob('README*'))[:3]:
+            try:
+                parts.append(readme.read_text(encoding='utf-8', errors='ignore')[:50000])
+            except Exception:
+                pass
+        for script in list(repo.glob('**/*.py'))[:80]:
+            if '.git' in script.parts:
+                continue
+            try:
+                chunk = script.read_text(encoding='utf-8', errors='ignore')[:12000]
+            except Exception:
+                continue
+            if any(token in chunk for token in ['processed_file_names', 'raw_file_names', 'InMemoryDataset', 'Dataset']):
+                parts.append(chunk)
+    return '\n'.join(parts)
+
+
+def plan__infer_public_data_evidence(selected: dict[str, Any], repo: dict[str, Any]) -> dict[str, Any]:
+    repo_path = str(repo.get('repo_path') or repo.get('local_path') or repo.get('path') or '').strip()
+    text = plan__read_repo_text(repo_path, selected)
+    if not text:
+        return {}
+    hf_ids: list[str] = []
+    for match in re.finditer(r'https?://huggingface\.co/datasets/([^\s)\]"\']+/[^\s)\]"\']+)', text):
+        repo_id = match.group(1).split('/tree/', 1)[0].split('/blob/', 1)[0].strip().strip('.,;')
+        if repo_id and repo_id not in hf_ids:
+            hf_ids.append(repo_id)
+    archives: list[str] = []
+    for match in re.finditer(r'\b([A-Za-z0-9][A-Za-z0-9_.-]*\.(?:tar\.gz|tar\.bz2|tar\.xz|tgz|zip))\b', text):
+        name = match.group(1).strip()
+        if name and name not in archives:
+            archives.append(name)
+    env_roots: list[str] = []
+    for match in re.finditer(r'export\s+[A-Za-z0-9_]*DATA[A-Za-z0-9_]*\s*=\s*["\']([^"\']+)["\']', text):
+        value = match.group(1).strip()
+        if value and not value.startswith('/path/to/') and value not in env_roots:
+            env_roots.append(value)
+    processed_names: list[str] = []
+    for match in re.finditer(r'processed_file_names[^\n]{0,200}?return\s+["\']([^"\']+)["\']', text, flags=re.S):
+        name = match.group(1).strip()
+        if name and name not in processed_names:
+            processed_names.append(name)
+    if not processed_names and any(token in text for token in ['torch.load', 'torch.save', 'InMemoryDataset']):
+        processed_names.append('**/data.pt')
+    datasets = []
+    roots: list[str] = ['data']
+    for archive in archives:
+        ds = plan__strip_archive_suffix(archive)
+        if ds and ds not in [row['id'] for row in datasets]:
+            datasets.append({'id': ds, 'source_archive': archive})
+        root = f'data/{ds}' if ds else ''
+        if root and root not in roots:
+            roots.append(root)
+    for root in env_roots:
+        if root not in roots:
+            roots.append(root)
+    sources = []
+    for repo_id in hf_ids:
+        row = {'kind': 'huggingface_dataset', 'url': f'https://huggingface.co/datasets/{repo_id}', 'repo_id': repo_id}
+        if archives:
+            row['files'] = list(archives)
+        sources.append(row)
+    if not datasets and sources:
+        datasets = [{'id': Path(item).stem if item else 'huggingface_dataset'} for item in archives] or [{'id': hf_ids[0].split('/')[-1]}]
+    if not sources and not datasets:
+        return {}
+    contract = {
+        'status': 'inferred_from_repo_readme',
+        'datasets': datasets,
+        'expected_roots': roots,
+        'expected_primary_root': 'data',
+        'required_files_per_dataset': processed_names,
+        'loader_probe_required': True,
+        'claim_rule': 'README/download-source inference is only a data acquisition contract; claims require repo loader/import probes and reference reproduction gates.',
+    }
+    return {'dataset_contract': contract, 'download_sources': sources, 'inference_source': 'repo_readme_and_loader_code'}
+
 def plan_write_generic_plan(project: str, adapter: Path) -> int:
     root = ROOT / 'projects' / project
     state = root / 'state'
@@ -1056,6 +1374,7 @@ def plan_write_generic_plan(project: str, adapter: Path) -> int:
     ready = plan__ready_datasets(selected, req if isinstance(req, dict) else {}, probe if isinstance(probe, dict) else {})
     blocked = plan__blocked_datasets(req if isinstance(req, dict) else {}, probe if isinstance(probe, dict) else {}, selected, ready)
     repo = plan__repo_payload(selected)
+    inferred_public_data = plan__infer_public_data_evidence(selected, repo)
     no_adapter = not adapter.exists()
     selection_gate = str(selection.get('selection_gate') or '') if isinstance(selection, dict) else ''
     base_switch_failed = []
@@ -1082,6 +1401,10 @@ def plan_write_generic_plan(project: str, adapter: Path) -> int:
         if no_adapter:
             reason += ' A project-local data adapter is still required to define and probe the dataset contract.'
     payload = {'updated_at': now, 'project': project, 'fresh_find_run_id': run_id, 'selected_plan_id': selected_plan_id, 'selected_idea_id': selected_idea_id, 'status': status, 'reason': reason, 'repo': repo, 'ready_datasets': ready, 'blocked_datasets': blocked, 'blocker_reasons': [reason, *base_switch_failed] if status == 'blocked_candidate_base_switch_gate_required' else [] if ready else [reason], 'base_switch_failed_checks': base_switch_failed, 'selection_gate': selection.get('selection_gate', '') if isinstance(selection, dict) else '', 'selection_stage': selection.get('selection_stage', '') if isinstance(selection, dict) else '', 'evidence_ready_count': selection.get('evidence_ready_count', 0) if isinstance(selection, dict) else 0, 'adapter_missing': no_adapter, 'adapter_path': str(adapter), 'policy': 'Experiments and paper claims remain blocked until ready_datasets is non-empty and repo loader evidence passes.'}
+    if inferred_public_data:
+        payload['implementation_evidence'] = inferred_public_data
+        payload['dataset_contract'] = inferred_public_data.get('dataset_contract', {})
+        payload['download_sources'] = inferred_public_data.get('download_sources', [])
     plan_save_json(state / 'fresh_base_implementation_plan.json', payload)
     reports.mkdir(parents=True, exist_ok=True)
     lines = ['# Fresh Base Implementation Plan\n\n']
@@ -1090,6 +1413,11 @@ def plan_write_generic_plan(project: str, adapter: Path) -> int:
     lines.append(f"- repo: {repo.get('name') or repo.get('repo_path') or 'none'}\n")
     lines.append(f"- ready_datasets: {', '.join(ready) or 'none'}\n")
     lines.append(f"- blocked_datasets: {', '.join(blocked) or 'none'}\n")
+    if inferred_public_data.get('download_sources'):
+        lines.append(f"- inferred_download_sources: {len(inferred_public_data.get('download_sources') or [])}\n")
+    if inferred_public_data.get('dataset_contract'):
+        ds_rows = inferred_public_data['dataset_contract'].get('datasets') or []
+        lines.append(f"- inferred_dataset_contract: {', '.join(str(row.get('id') if isinstance(row, dict) else row) for row in ds_rows) or 'none'}\n")
     lines.append(f'- reason: {reason}\n')
     (reports / 'fresh_base_implementation_plan.md').write_text(''.join(lines), encoding='utf-8')
     print(json.dumps({'status': status, 'project': project, 'repo': repo.get('name') or repo.get('repo_path'), 'ready_datasets': ready, 'blocked_datasets': blocked}, ensure_ascii=False))
@@ -1124,6 +1452,68 @@ def _legacy_project_adapter(project: str, legacy_filename: str) -> Path:
     return ROOT / 'projects' / project / 'scripts' / 'adapters' / legacy_filename
 
 
+def _norm_scope_text(value: Any) -> str:
+    return str(value or '').strip().lower()
+
+
+def _adapter_scope_entries(adapter: Path) -> list[dict[str, Any]]:
+    """Return explicit candidate-scope declarations for project adapters.
+
+    Project adapters are active-route code by default. Candidate probing may use one
+    only when a project Claude-written sidecar explicitly binds that adapter to the
+    candidate repo/name/title; otherwise a repo-specific adapter can silently poison
+    unrelated candidates.
+    """
+    candidates = [
+        adapter.with_name(f'{adapter.stem}.scope.json'),
+        adapter.with_name(f'{adapter.name}.scope.json'),
+        adapter.parent / 'adapter_scope.json',
+    ]
+    entries: list[dict[str, Any]] = []
+    for meta_path in candidates:
+        payload = dr_load_json(meta_path, {})
+        if not isinstance(payload, dict) or not payload:
+            continue
+        raw = payload.get('candidate_adapters') or payload.get('adapters') or payload.get('entries')
+        if isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, dict):
+                    item = dict(item)
+                    item.setdefault('_scope_path', str(meta_path))
+                    entries.append(item)
+        else:
+            item = dict(payload)
+            item.setdefault('_scope_path', str(meta_path))
+            entries.append(item)
+    return entries
+
+
+def _adapter_supports_candidate(adapter: Path, repo_path: str, candidate_name: str = '', candidate_title: str = '') -> bool:
+    repo_resolved = ''
+    if repo_path:
+        try:
+            repo_resolved = str(Path(repo_path).expanduser().resolve())
+        except Exception:
+            repo_resolved = str(repo_path)
+    name = _norm_scope_text(candidate_name)
+    title = _norm_scope_text(candidate_title)
+    adapter_name = adapter.name
+    for entry in _adapter_scope_entries(adapter):
+        declared_adapter = str(entry.get('adapter') or entry.get('adapter_file') or entry.get('filename') or '').strip()
+        if declared_adapter and declared_adapter != adapter_name:
+            continue
+        paths = dr__list_text(entry.get('repo_path')) + dr__list_text(entry.get('repo_paths')) + dr__list_text(entry.get('local_path'))
+        names = dr__list_text(entry.get('candidate_repo')) + dr__list_text(entry.get('repo_name')) + dr__list_text(entry.get('repo_names')) + dr__list_text(entry.get('name'))
+        titles = dr__list_text(entry.get('candidate_title')) + dr__list_text(entry.get('paper_title')) + dr__list_text(entry.get('title'))
+        if repo_resolved and any(dr__paths_equal(path, repo_resolved) for path in paths):
+            return True
+        if name and any(_norm_scope_text(item) == name for item in names):
+            return True
+        if title and any(_norm_scope_text(item) == title for item in titles):
+            return True
+    return False
+
+
 def run_data_requirements(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else list(argv)
     args = dr_parse_args(argv)
@@ -1135,6 +1525,8 @@ def run_data_requirements(argv: list[str] | None = None) -> int:
     if args.candidate_scope:
         repo_path = dr_candidate_repo_from_state(project, args.repo_path)
         candidate_name, candidate_title = dr_candidate_identity_from_state(project, args.candidate_name, args.candidate_title)
+        if adapter.exists() and _adapter_supports_candidate(adapter, repo_path, candidate_name, candidate_title):
+            return dr_write_candidate_requirement_from_adapter(project, repo_path, candidate_name, candidate_title, adapter, argv)
         return dr_write_candidate_requirement(project, repo_path, candidate_name, candidate_title)
     if adapter.exists():
         proc = subprocess.run([sys.executable, str(adapter), *argv], cwd=ROOT)
@@ -1159,7 +1551,9 @@ def run_dataset_probe(argv: list[str] | None = None) -> int:
         repo_path = dr_candidate_repo_from_state(project, args.repo_path)
         candidate_name, candidate_title = dr_candidate_identity_from_state(project, args.candidate_name, args.candidate_title)
         timeout_sec = int(args.timeout_sec or 120)
-        return probe_write_candidate_probe(project, repo_path, args.env_name, candidate_name, candidate_title, timeout_sec=timeout_sec)
+        if adapter.exists() and _adapter_supports_candidate(adapter, repo_path, candidate_name, candidate_title):
+            return probe_write_candidate_probe_from_adapter(project, repo_path, args.env_name, candidate_name, candidate_title, timeout_sec, adapter, argv)
+        return probe_write_candidate_probe(project, repo_path, args.env_name, candidate_name=candidate_name, candidate_title=candidate_title, timeout_sec=timeout_sec)
     if adapter.exists():
         proc = subprocess.run([sys.executable, str(adapter), *argv], cwd=ROOT)
         return int(proc.returncode)

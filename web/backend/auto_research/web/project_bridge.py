@@ -3969,6 +3969,18 @@ def _public_environment_stage(
             "human_summary": "已有基底的参考复现已完成；当前 Find 的新基底选择尚未完成。",
             "summary": "已有基底的参考复现已完成；当前 Find 的新基底选择尚未完成。",
         }
+    reference_job_running = bool(str(reference_full_job.get("status") or "").lower() == "running" and not existing_reference_completed)
+    if reference_job_running:
+        pid = str(reference_full_job.get("pid") or "").strip()
+        running_message = "参考复现正在运行；完成并刷新审计前，不启动候选实验、论文写作或结论提升。" + (f" PID={pid}。" if pid else "")
+        ref_public = {
+            **ref_public,
+            "status": "running",
+            "decision": "fresh_base_reference_reproduction_running",
+            "human_summary": running_message,
+            "summary": running_message,
+            "reason": running_message,
+        }
     ref_status = str(ref_public.get("status") or ref_gate.get("status") or "").strip()
     ref_decision = str(ref_public.get("decision") or ref_gate.get("decision") or "").strip()
     progress_summary = str(env.get("progress_summary") or "").strip()
@@ -4123,6 +4135,8 @@ def _environment_bootstrap_blocker(root: Path) -> dict[str, Any]:
     policy_block = safe_dict(_read_json(root / "state" / "claude_tool_policy_last_block.json", {}))
 
     bootstrap_status = str(bootstrap.get("status") or "").strip().lower()
+    if bootstrap_status in {"completed", "prepared", "ok", "pass"}:
+        return {}
     impl_status = str(fresh_impl.get("status") or "").strip().lower()
     selection_reason = str(selection_blocker.get("reason") or "").strip()
     impl_reason = str(fresh_impl.get("reason") or "").strip()
@@ -11962,6 +11976,13 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     if literature_gate_blocked and env.get("blocked_selection"):
         legacy_control["blocked_environment_selection"] = env.get("blocked_selection")
     display_ref_gate = _reference_gate_for_current_route_display(current_route_ref_gate, status, route_ready_datasets, protocol_probe, base_title or "当前基底")
+    if reference_full_job_live:
+        display_ref_gate = {
+            **display_ref_gate,
+            "status": "running",
+            "decision": "fresh_base_reference_reproduction_running",
+            "human_summary": "参考复现正在运行；完成并刷新审计前，不启动候选实验、论文写作或结论提升。",
+        }
     human_gate_summary = {
         "source": "deterministic_gate_audit",
         "source_label": "来源：确定性门控审计（状态和计数由项目 artifact 计算，不是项目代理自由文本）",
@@ -12945,6 +12966,13 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
         full_cycle_compact.pop('completed_at', None)
 
     display_ref_gate = _reference_gate_for_current_route_display(current_route_ref_gate, status, route_ready_datasets, protocol_probe, base_title or "当前基底")
+    if reference_full_job_live:
+        display_ref_gate = {
+            **display_ref_gate,
+            'status': 'running',
+            'decision': 'fresh_base_reference_reproduction_running',
+            'human_summary': '参考复现正在运行；完成并刷新审计前，不启动候选实验、论文写作或结论提升。',
+        }
     blocker = {
         'category': _public_internal_names(blocker_category),
         'title': blocker_title,
