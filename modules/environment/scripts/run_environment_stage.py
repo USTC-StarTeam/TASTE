@@ -392,7 +392,8 @@ Adapter contract requirements:
 - Every project-local loader adapter must emit self-explaining structured evidence: package/import checks used by the success logic, repo loader/import checks, real data loading checks, exact blocker reasons, and ready/blocked dataset lists.
 - If repo imports and real data loading pass, the adapter must not leave `success=false`, empty `ready_datasets`, or `Unknown import blockers` without naming the exact remaining failing check.
 - If the adapter uses an inline subprocess probe, it must return the import/package check map in the JSON it parses; do not keep checks only in a local variable.
-- After each adapter edit, rerun the TASTE module command that dispatches that adapter and inspect `real_dataset_probe.json` and candidate loader probe JSON.
+- Long-running reference-reproduction adapters must stream stdout/stderr to their declared `stdout_path` while the subprocess runs; do not use `capture_output=True` for training or full reproduction commands. They must update `state/fresh_base_reference_full_reproduction_job.json` with `status=running`, `adapter_pid`, `child_pid`, `artifact_dir`, `stdout_path`, `progress/current_epoch` when parseable, and the final `return_code`/metrics.
+- After each adapter edit, rerun the TASTE module command that dispatches that adapter and inspect `real_dataset_probe.json`, candidate loader probe JSON, or the reference reproduction job JSON/stdout file for the adapter type you changed.
 
 Required work:
 1. Inspect the selected repo README, examples, environment file, dataset loaders, and entrypoints.

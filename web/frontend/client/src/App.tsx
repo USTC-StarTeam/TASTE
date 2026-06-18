@@ -6068,6 +6068,22 @@ function App() {
     const tickJob = supervisionTick?.full_reference_job || {};
     return blockerJob === "running" || (String(tickJob.status || "") === "running" && tickJob.alive !== false);
   }, [humanSupervision, supervisionTick]);
+  const projectStatusLoadingForLaunch = Boolean(researchProject && (!researchSummary || researchProjectLoading || !jobsLoaded));
+  const projectStageLaunchLockedText = useMemo(() => (
+    lang === "zh"
+      ? "当前项目已有环境/实验/论文阶段任务正在运行或状态仍在刷新；网页已阻止新的全流程/实验/论文启动，避免并发重复任务。需要人工介入时，请在对应阶段的项目代理指令框提交。"
+      : "A project environment/experiment/paper stage job is running or the project state is still refreshing; new workflow, experiment, and paper launches are locked to avoid duplicate concurrent tasks. Use the stage guidance box for intervention."
+  ), [lang]);
+  const workflowLaunchDisabled = Boolean(fullCycleLaunchDisabled || stageLaunchDisabledByProjectWorker || projectStatusLoadingForLaunch);
+  const experimentLoopLaunchDisabled = Boolean(
+    !researchProject
+    || projectStatusLoadingForLaunch
+    || freshBaseMainBlocked
+    || referenceFullJobRunning
+    || literatureGateBlocked
+    || stageLaunchDisabledByFullCycle
+    || stageLaunchDisabledByProjectWorker
+  );
   const referenceFullJobStatus = String(humanSupervision?.blocker?.reference_full_job_status || "").trim();
   const referenceFullJobIsRunning = referenceFullJobStatus === "running" && referenceFullJobRunning;
   const referenceFullJobPidText = humanSupervision?.blocker?.reference_full_job_pid
@@ -7018,7 +7034,11 @@ function App() {
       setError(stageLaunchLockedText);
       return;
     }
-    if ((action === "environment" && environmentStageRunning) || (action === "experiment" && (environmentStageRunning || experimentStageRunning)) || (action === "paper" && paperStageRunning)) {
+    if ((projectStatusLoadingForLaunch || stageLaunchDisabledByProjectWorker) && exclusiveAction) {
+      setError(projectStageLaunchLockedText);
+      return;
+    }
+    if ((action === "environment" && environmentStageRunning) || (action === "experiment" && (environmentStageRunning || experimentStageRunning || referenceFullJobRunning)) || (action === "paper" && paperStageRunning)) {
       setError(lang === "zh" ? "当前项目已有环境/实验/论文阶段任务正在运行；已阻止重复启动。" : "A project environment/experiment/paper stage job is already running; duplicate launch is blocked.");
       return;
     }
@@ -8467,13 +8487,16 @@ function App() {
               </div>
               <div className="toolbarActions experimentMainActions">
                 <button onClick={() => refreshProject()} disabled={!researchProject}>{t.researchRefresh}</button>
-                <button className="primary" onClick={() => runAR("full-cycle")} disabled={fullCycleLaunchDisabled}>{freshBaseMainBlocked ? (lang === "zh" ? "继续全流程" : "Continue workflow") : t.runFullResearchCycle}</button>
-                <button className="primary" onClick={() => runAR("full-cycle", { freshDiscovery: true })} disabled={fullCycleLaunchDisabled}>{lang === "zh" ? "重新启动完整流程" : "Restart full workflow"}</button>
-                <button onClick={() => runAR("experiment")} disabled={!researchProject || freshBaseMainBlocked || literatureGateBlocked || stageLaunchDisabledByFullCycle || stageLaunchDisabledByProjectWorker}>{t.runExperimentLoop}</button>
+                <button className="primary" onClick={() => runAR("full-cycle")} disabled={workflowLaunchDisabled}>{freshBaseMainBlocked ? (lang === "zh" ? "继续全流程" : "Continue workflow") : t.runFullResearchCycle}</button>
+                <button className="primary" onClick={() => runAR("full-cycle", { freshDiscovery: true })} disabled={workflowLaunchDisabled}>{lang === "zh" ? "重新启动完整流程" : "Restart full workflow"}</button>
+                <button onClick={() => runAR("experiment")} disabled={experimentLoopLaunchDisabled}>{t.runExperimentLoop}</button>
               </div>
             </div>
             {fullCycleProcessAlive && (
               <div className="researchGateNote warning"><strong>{t.fullCycleAlreadyRunning}:</strong> {t.fullCycleAlreadyRunningHelp}{fullCycleRunningText ? ` ${fullCycleRunningText}` : ""}</div>
+            )}
+            {stageLaunchDisabledByProjectWorker && !fullCycleProcessAlive && (
+              <div className="researchGateNote warning"><strong>{lang === "zh" ? "当前任务" : "Current task"}:</strong> {projectStageLaunchLockedText}</div>
             )}
             {!researchSummary && <div className="researchGateNote warning">{lang === "zh" ? "正在刷新当前项目状态；实验迭代面板会先保留显示。" : "Refreshing current project state; the Experiment panels stay visible."}</div>}
             <>

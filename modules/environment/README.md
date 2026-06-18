@@ -88,6 +88,10 @@
 | `scripts/run_selected_base_reference_reproduction_audit.py` | 包装参考复现命令、解析指标并写入审计。 |
 | `scripts/run_safe_unblock.py` | 针对当前新基底的安全解阻循环。 |
 
+### 项目 Adapter 状态契约
+
+项目工作区可以在 `projects/<project>/scripts/adapters/` 放置仓库特定 adapter，但 adapter 仍必须遵守 Environment 模块的状态协议：长时间训练/论文级参考复现必须流式写入声明的 `stdout_path`，不能用 `capture_output=True` 等结束后才落盘；启动后要更新 `state/fresh_base_reference_full_reproduction_job.json` 的 `status=running`、`adapter_pid`、`child_pid`、`artifact_dir`、`stdout_path`、可解析进度/epoch，结束后再写最终 `return_code`、metrics、audit 路径。这样 Web、Experiment、Writing 模块才能在同一个事实源上判断是否允许继续。
+
 ## 冗余控制原则
 
 - Environment 仍是脚本较多的模块。后续应继续向 repo_selection.py、base_switch_gates.py、environment_bootstrap.py、reference_reproduction.py 等大块收敛；保留项目 adapter 约定时必须通过统一工具分发，不再新增薄 wrapper。

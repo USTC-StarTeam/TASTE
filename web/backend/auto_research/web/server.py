@@ -903,27 +903,88 @@ def _is_paper_job(stage: Any = "", job_id: Any = "", result: Any = None, logs: A
     ])
 
 
+def _known_project_ids() -> list[str]:
+    now = time.monotonic()
+    cached = _KNOWN_PROJECT_IDS_CACHE.get("ids")
+    if isinstance(cached, list) and now < float(_KNOWN_PROJECT_IDS_CACHE.get("expires_at") or 0.0):
+        return [str(item) for item in cached if str(item)]
+    ids: list[str] = []
+    try:
+        if PROJECT_IDS_ROOT.exists():
+            ids = sorted(root.name for root in PROJECT_IDS_ROOT.iterdir() if root.is_dir())
+    except Exception:
+        ids = []
+    _KNOWN_PROJECT_IDS_CACHE["ids"] = ids
+    _KNOWN_PROJECT_IDS_CACHE["expires_at"] = time.monotonic() + KNOWN_PROJECT_IDS_TTL_SEC
+    return ids
+
+
+def _project_from_job_id_fast(job_id: Any) -> str:
+    text = str(job_id or "").strip()
+    if not text:
+        return ""
+    patterns = [
+        r"^(?:reference-reproduction|full_cycle|full-cycle|safe-unblock|safe_unblock)_([A-Za-z0-9_.-]+)$",
+        r"^(?:experiment|project)-worker_([A-Za-z0-9_.-]+)_\d+$",
+        r"^current-find-(?:read|idea|plan)_([A-Za-z0-9_.-]+)_find_",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1)
+    known = _known_project_ids()
+    for project_id in known:
+        if text == project_id or text.startswith(f"{project_id}_") or text.endswith(f"_{project_id}") or f"_{project_id}_" in text or f"-{project_id}-" in text:
+            return project_id
+    return ""
+
+
+def _web_job_project_map() -> dict[str, str]:
+    now = time.monotonic()
+    cached = _WEB_JOB_PROJECT_MAP_CACHE.get("map")
+    if isinstance(cached, dict) and now < float(_WEB_JOB_PROJECT_MAP_CACHE.get("expires_at") or 0.0):
+        return {str(key): str(value) for key, value in cached.items() if str(key)}
+    mapping: dict[str, str] = {}
+    if PROJECT_IDS_ROOT.exists():
+        state_files = [
+            Path("state/full_cycle_job.json"),
+            Path("state/full_research_cycle.json"),
+            Path("paper/metadata/paper_pipeline.json"),
+        ]
+        try:
+            project_roots = sorted(root for root in PROJECT_IDS_ROOT.iterdir() if root.is_dir())
+        except Exception:
+            project_roots = []
+        for root in project_roots:
+            for rel_path in state_files:
+                payload = _read_project_json(root / rel_path, {})
+                if not isinstance(payload, dict):
+                    continue
+                nested = payload.get("full_cycle_job") if isinstance(payload.get("full_cycle_job"), dict) else {}
+                for value in [payload.get("web_job_id"), payload.get("job_id"), payload.get("id"), nested.get("web_job_id"), nested.get("job_id")]:
+                    key = str(value or "").strip()
+                    if key:
+                        mapping[key] = root.name
+    _WEB_JOB_PROJECT_MAP_CACHE["map"] = dict(mapping)
+    _WEB_JOB_PROJECT_MAP_CACHE["expires_at"] = time.monotonic() + WEB_JOB_PROJECT_CACHE_TTL_SEC
+    return dict(mapping)
+
+
 def _project_for_web_job_id(job_id: Any) -> str:
     target = str(job_id or "").strip()
-    if not target or not PROJECT_IDS_ROOT.exists():
+    if not target:
         return ""
-    state_files = [
-        Path("state/full_cycle_job.json"),
-        Path("state/full_research_cycle.json"),
-        Path("paper/metadata/paper_pipeline.json"),
-    ]
-    for root in sorted(PROJECT_IDS_ROOT.iterdir()):
-        if not root.is_dir():
-            continue
-        for rel_path in state_files:
-            payload = _read_project_json(root / rel_path, {})
-            if not isinstance(payload, dict):
-                continue
-            nested = payload.get("full_cycle_job") if isinstance(payload.get("full_cycle_job"), dict) else {}
-            ids = [payload.get("web_job_id"), payload.get("job_id"), payload.get("id"), nested.get("web_job_id"), nested.get("job_id")]
-            if any(str(value or "").strip() == target for value in ids):
-                return root.name
-    return ""
+    fast = _project_from_job_id_fast(target)
+    if fast:
+        return fast
+    cache_key = target
+    now = time.monotonic()
+    cached = _WEB_JOB_PROJECT_CACHE.get(cache_key)
+    if isinstance(cached, dict) and now < float(cached.get("expires_at") or 0.0):
+        return str(cached.get("project") or "")
+    found = _web_job_project_map().get(target, "")
+    _WEB_JOB_PROJECT_CACHE[cache_key] = {"expires_at": time.monotonic() + WEB_JOB_PROJECT_CACHE_TTL_SEC, "project": found}
+    return found
 
 
 def _pid_from_project_worker_job_id(job_id: Any) -> str:
@@ -1535,8 +1596,17 @@ class JobState:
 JOBS: dict[str, JobState] = {}
 JOBS_PATH = STATE_DIR / "web_jobs.json"
 JOBS_LOCK = threading.RLock()
-LIVE_JOBS_TTL_SEC = float(os.environ.get("LIVE_JOBS_TTL_SEC", "2.0") or 2.0)
+LIVE_JOBS_TTL_SEC = float(os.environ.get("LIVE_JOBS_TTL_SEC", "5.0") or 5.0)
 _LIVE_JOBS_CACHE: dict[str, Any] = {"expires_at": 0.0, "items": []}
+PROCESS_ROWS_TTL_SEC = float(os.environ.get("PROCESS_ROWS_TTL_SEC", "1.5") or 1.5)
+_PROCESS_ROWS_CACHE: dict[str, Any] = {"expires_at": 0.0, "rows": []}
+ACTIVE_LAUNCHER_ROWS_TTL_SEC = float(os.environ.get("ACTIVE_LAUNCHER_ROWS_TTL_SEC", "3.0") or 3.0)
+_ACTIVE_LAUNCHER_ROWS_CACHE: dict[tuple[str, int], dict[str, Any]] = {}
+KNOWN_PROJECT_IDS_TTL_SEC = float(os.environ.get("KNOWN_PROJECT_IDS_TTL_SEC", "10.0") or 10.0)
+_KNOWN_PROJECT_IDS_CACHE: dict[str, Any] = {"expires_at": 0.0, "ids": []}
+WEB_JOB_PROJECT_CACHE_TTL_SEC = float(os.environ.get("WEB_JOB_PROJECT_CACHE_TTL_SEC", "30.0") or 30.0)
+_WEB_JOB_PROJECT_CACHE: dict[str, dict[str, Any]] = {}
+_WEB_JOB_PROJECT_MAP_CACHE: dict[str, Any] = {"expires_at": 0.0, "map": {}}
 JOB_LIST_PROJECT_SUMMARY_TTL_SEC = float(os.environ.get("JOB_LIST_PROJECT_SUMMARY_TTL_SEC", "2.0") or 2.0)
 _JOB_LIST_PROJECT_SUMMARY_CACHE: dict[tuple[str, bool, int], dict[str, Any]] = {}
 RUN_PROJECT_CACHE_TTL_SEC = float(os.environ.get("RUN_PROJECT_CACHE_TTL_SEC", "30.0") or 30.0)
@@ -3144,6 +3214,9 @@ def _job_project_id(item: dict[str, Any]) -> str:
         if project:
             return project
     job_id = str(item.get("job_id") or "")
+    fast_project = _project_from_job_id_fast(job_id)
+    if fast_project:
+        return fast_project
     try:
         return _project_from_job_payload(job_id, item)
     except Exception:
@@ -4906,23 +4979,7 @@ def _suppress_same_phase_descendant_workers(rows: list[dict[str, Any]]) -> list[
 
 def _active_project_child_processes(project: str, root: Path, phase_hint: str = "") -> list[dict[str, Any]]:
     markers = [str(project), str(root), str(root / "tmp" / "finding")]
-    try:
-        proc = subprocess.run(
-            ["ps", "-eo", "pid=,ppid=,stat=,etime=,%cpu=,%mem=,cmd="],
-            text=True,
-            capture_output=True,
-            timeout=2,
-        )
-    except Exception:
-        return []
-    process_rows: list[dict[str, Any]] = []
-    for line in proc.stdout.splitlines():
-        parts = line.strip().split(None, 6)
-        if len(parts) < 7:
-            continue
-        if "Z" in str(parts[2]).upper():
-            continue
-        process_rows.append({"pid": parts[0], "ppid": parts[1], "stat": parts[2], "elapsed": parts[3], "pcpu": parts[4], "pmem": parts[5], "cmd": parts[6], "cwd": _proc_cwd(parts[0])})
+    process_rows = _all_process_rows()
     rows: list[dict[str, Any]] = []
     for proc_row in process_rows:
         cmd = str(proc_row.get("cmd") or "")
@@ -5006,56 +5063,11 @@ def _active_project_child_process(project: str, root: Path, phase_hint: str = ""
     return rows[0] if rows else {}
 
 
-def _process_tree_rows(pid: Any) -> list[dict[str, Any]]:
-    try:
-        root_pid = str(int(pid))
-    except Exception:
-        return []
-    try:
-        proc = subprocess.run(
-            ["ps", "-eo", "pid=,ppid=,stat=,etime=,%cpu=,%mem=,cmd="],
-            text=True,
-            capture_output=True,
-            timeout=2,
-        )
-    except Exception:
-        return []
-    rows_by_pid: dict[str, dict[str, Any]] = {}
-    children: dict[str, list[str]] = {}
-    for line in proc.stdout.splitlines():
-        parts = line.strip().split(None, 6)
-        if len(parts) < 7:
-            continue
-        if "Z" in str(parts[2]).upper():
-            continue
-        row = {"pid": parts[0], "ppid": parts[1], "stat": parts[2], "elapsed": parts[3], "pcpu": parts[4], "pmem": parts[5], "cmd": parts[6], "cwd": _proc_cwd(parts[0])}
-        rows_by_pid[parts[0]] = row
-        children.setdefault(parts[1], []).append(parts[0])
-    if root_pid not in rows_by_pid:
-        return []
-    result: list[dict[str, Any]] = []
-    stack = [root_pid]
-    seen: set[str] = set()
-    while stack:
-        current = stack.pop(0)
-        if current in seen:
-            continue
-        seen.add(current)
-        row = rows_by_pid.get(current)
-        if row:
-            result.append(row)
-        stack.extend(children.get(current, []))
-    return result
-
-
-def _proc_cwd(pid: Any) -> str:
-    try:
-        return os.path.realpath(os.readlink(f"/proc/{int(pid)}/cwd"))
-    except Exception:
-        return ""
-
-
-def _all_process_rows() -> list[dict[str, Any]]:
+def _process_rows_snapshot() -> list[dict[str, Any]]:
+    now = time.monotonic()
+    cached_rows = _PROCESS_ROWS_CACHE.get("rows")
+    if isinstance(cached_rows, list) and now < float(_PROCESS_ROWS_CACHE.get("expires_at") or 0.0):
+        return [dict(row) for row in cached_rows if isinstance(row, dict)]
     try:
         proc = subprocess.run(
             ["ps", "-eo", "pid=,ppid=,stat=,etime=,%cpu=,%mem=,cmd="],
@@ -5072,15 +5084,67 @@ def _all_process_rows() -> list[dict[str, Any]]:
             continue
         if "Z" in str(parts[2]).upper():
             continue
-        if _is_inspection_or_wrapper_cmd(parts[6]):
-            continue
         rows.append({"pid": parts[0], "ppid": parts[1], "stat": parts[2], "elapsed": parts[3], "pcpu": parts[4], "pmem": parts[5], "cmd": parts[6], "cwd": _proc_cwd(parts[0])})
-    return rows
+    _PROCESS_ROWS_CACHE["rows"] = [dict(row) for row in rows]
+    _PROCESS_ROWS_CACHE["expires_at"] = time.monotonic() + PROCESS_ROWS_TTL_SEC
+    return [dict(row) for row in rows]
+
+
+def _process_tree_rows(pid: Any) -> list[dict[str, Any]]:
+    try:
+        root_pid = str(int(pid))
+    except Exception:
+        return []
+    rows_by_pid: dict[str, dict[str, Any]] = {}
+    children: dict[str, list[str]] = {}
+    for row in _process_rows_snapshot():
+        pid_text = str(row.get("pid") or "")
+        ppid_text = str(row.get("ppid") or "")
+        if not pid_text:
+            continue
+        rows_by_pid[pid_text] = row
+        children.setdefault(ppid_text, []).append(pid_text)
+    if root_pid not in rows_by_pid:
+        return []
+    result: list[dict[str, Any]] = []
+    stack = [root_pid]
+    seen: set[str] = set()
+    while stack:
+        current = stack.pop(0)
+        if current in seen:
+            continue
+        seen.add(current)
+        row = rows_by_pid.get(current)
+        if row:
+            result.append(dict(row))
+        stack.extend(children.get(current, []))
+    return result
+
+def _proc_cwd(pid: Any) -> str:
+    try:
+        return os.path.realpath(os.readlink(f"/proc/{int(pid)}/cwd"))
+    except Exception:
+        return ""
+
+
+def _all_process_rows() -> list[dict[str, Any]]:
+    return [
+        dict(row)
+        for row in _process_rows_snapshot()
+        if not _is_inspection_or_wrapper_cmd(row.get("cmd"))
+    ]
 
 
 def _active_launcher_experiment_runs(root: Path, *, limit: int = 16) -> list[dict[str, Any]]:
+    cache_key = (str(root.resolve() if root.exists() else root), int(limit))
+    now = time.monotonic()
+    cached = _ACTIVE_LAUNCHER_ROWS_CACHE.get(cache_key)
+    if isinstance(cached, dict) and now < float(cached.get("expires_at") or 0.0):
+        rows = cached.get("rows")
+        return [dict(row) for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
     artifact_root = root / "artifacts"
     if not artifact_root.exists():
+        _ACTIVE_LAUNCHER_ROWS_CACHE[cache_key] = {"expires_at": now + ACTIVE_LAUNCHER_ROWS_TTL_SEC, "rows": []}
         return []
     artifact_dirs: set[Path] = set()
     for pattern in ("**/launcher.pid.json", "**/run_contract.json"):
@@ -5155,6 +5219,10 @@ def _active_launcher_experiment_runs(root: Path, *, limit: int = 16) -> list[dic
         rows.append(row)
         if len(rows) >= limit:
             break
+    _ACTIVE_LAUNCHER_ROWS_CACHE[cache_key] = {
+        "expires_at": time.monotonic() + ACTIVE_LAUNCHER_ROWS_TTL_SEC,
+        "rows": [dict(row) for row in rows],
+    }
     return rows
 
 
@@ -8453,7 +8521,7 @@ def _terminate_process_tree(root_pid: Any) -> dict[str, Any]:
     return {"requested_pid": str(root_pid or ""), "terminated_pids": pids, "terminated_pgids": sorted(pgids)}
 
 
-def _reconcile_detached_launcher_jobs() -> None:
+def _reconcile_detached_launcher_jobs(dynamic_items: list[dict[str, Any]] | None = None) -> None:
     """Keep web-created detached research jobs aligned with project state.
 
     /api/jobs/project starts full-cycle as a detached worker so the web server can
@@ -8463,10 +8531,11 @@ def _reconcile_detached_launcher_jobs() -> None:
     synthetic row.
     """
     changed = False
-    try:
-        dynamic_items = _live_jobs_from_projects(compact=True)
-    except Exception:
-        dynamic_items = []
+    if dynamic_items is None:
+        try:
+            dynamic_items = _live_jobs_from_projects(compact=True)
+        except Exception:
+            dynamic_items = []
     dynamic_by_id = {str(item.get("job_id") or ""): item for item in dynamic_items if isinstance(item, dict)}
     dynamic_by_project: dict[str, dict[str, Any]] = {}
     for item in dynamic_items:
@@ -10237,9 +10306,9 @@ def api_jobs(
     project: str = Query(""),
 ) -> list[dict]:
     project = _api_query_str(project)
-    _reconcile_detached_launcher_jobs()
-    _reconcile_stale_cancelling_jobs()
     dynamic = _live_jobs_from_projects(compact=True)
+    _reconcile_detached_launcher_jobs(dynamic)
+    _reconcile_stale_cancelling_jobs()
     if project:
         dynamic = [item for item in dynamic if _job_belongs_to_project(item, project)]
 

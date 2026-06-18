@@ -410,11 +410,19 @@ def official_command(repo: Path, dataset: str, mode: str, epoch: int) -> list[st
 
 
 def parse_epoch_progress(line: str, total_epoch: int, mode: str) -> dict[str, Any]:
-    match = re.search(r"\bEpoch\s+(\d+)\b", line) or re.search(r"\bTraining\s+(\d+)\s*:", line)
-    if not match or total_epoch <= 0:
+    if total_epoch <= 0:
         return {}
-    epoch_index = int(match.group(1))
-    current = min(epoch_index + 1, total_epoch)
+    colon_match = re.search(r"\bEpoch\s*:\s*(\d+)\b", line)
+    if colon_match:
+        epoch_label = int(colon_match.group(1))
+        current = max(1, min(epoch_label, total_epoch))
+        epoch_index = current - 1
+    else:
+        match = re.search(r"\bEpoch\s+(\d+)\b", line) or re.search(r"\bTraining\s+(\d+)\s*:", line)
+        if not match:
+            return {}
+        epoch_index = max(0, int(match.group(1)))
+        current = min(epoch_index + 1, total_epoch)
     progress: dict[str, Any] = {
         "phase": "reference-reproduction",
         "mode": mode,
@@ -424,7 +432,7 @@ def parse_epoch_progress(line: str, total_epoch: int, mode: str) -> dict[str, An
         "current_epoch": epoch_index,
         "message": f"{mode} reference reproduction epoch {current}/{total_epoch}",
     }
-    loss_match = re.search(r"Train loss:\s*([0-9.]+)", line)
+    loss_match = re.search(r"(?:Train loss|Current epoch loss|SSL Loss|MD Loss):\s*([0-9.]+)", line)
     if loss_match:
         progress["last_train_loss"] = float(loss_match.group(1))
     return progress
