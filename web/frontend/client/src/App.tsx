@@ -6084,6 +6084,35 @@ function App() {
     || stageLaunchDisabledByFullCycle
     || stageLaunchDisabledByProjectWorker
   );
+  const environmentLaunchDisabled = Boolean(
+    !researchProject
+    || environmentLocked
+    || projectStatusLoadingForLaunch
+    || environmentStageRunning
+    || referenceFullJobRunning
+    || stageLaunchDisabledByFullCycle
+    || stageLaunchDisabledByProjectWorker
+  );
+  const environmentConfigDisabled = Boolean(
+    environmentLocked
+    || projectStatusLoadingForLaunch
+    || environmentStageRunning
+    || experimentStageRunning
+    || paperStageRunning
+    || referenceFullJobRunning
+    || stageLaunchDisabledByFullCycle
+    || stageLaunchDisabledByProjectWorker
+  );
+  const environmentAgentActionDisabled = Boolean(
+    !researchProject
+    || projectStatusLoadingForLaunch
+    || environmentStageRunning
+    || experimentStageRunning
+    || paperStageRunning
+    || referenceFullJobRunning
+    || stageLaunchDisabledByFullCycle
+    || stageLaunchDisabledByProjectWorker
+  );
   const referenceFullJobStatus = String(humanSupervision?.blocker?.reference_full_job_status || "").trim();
   const referenceFullJobIsRunning = referenceFullJobStatus === "running" && referenceFullJobRunning;
   const referenceFullJobPidText = humanSupervision?.blocker?.reference_full_job_pid
@@ -8347,7 +8376,7 @@ function App() {
               <div className="toolbarActions">
                 <button onClick={() => refreshProject()} disabled={!researchProject}>{t.researchRefresh}</button>
                 <button onClick={() => runAR("healthcheck")} disabled={!researchProject}>{t.researchHealth}</button>
-                <button className="primary" onClick={() => runAR("environment")} disabled={!researchProject || environmentLocked || stageLaunchDisabledByFullCycle || environmentStageRunning || stageLaunchDisabledByProjectWorker}>{environmentLocked ? t.envLockedCreated : environmentStageRunning ? t.researchRunningTask : t.firstCreateEnv}</button>
+                <button className="primary" onClick={() => runAR("environment")} disabled={environmentLaunchDisabled}>{environmentLocked ? t.envLockedCreated : (projectStatusLoadingForLaunch || environmentStageRunning || referenceFullJobRunning || stageLaunchDisabledByProjectWorker) ? t.researchRunningTask : t.firstCreateEnv}</button>
               </div>
             </div>
             {!researchProjectsLoaded && !researchProject ? <div className="emptyState">{t.researchProjectLoading}</div> : researchProjectsLoaded && !researchProject ? <div className="emptyState">{t.researchNoProject}</div> : (
@@ -8375,7 +8404,7 @@ function App() {
                       )}
                       <div className="envSummaryItem">
                         <span>{lang === "zh" ? "门控" : "Gate"}</span>
-                        <strong>{displayMaybe(envStage?.selection?.selection_gate || envStage?.selection?.raw_selection_gate || envStage?.status, t.noData)}</strong>
+                        <strong>{displayValue(envStage?.selection?.selection_gate || envStage?.selection?.raw_selection_gate || envStage?.status, t.noData)}</strong>
                       </div>
                       <div className="envSummaryItem">
                         <span>{lang === "zh" ? "参考复现" : "Reference"}</span>
@@ -8391,14 +8420,14 @@ function App() {
                     <h3>{t.experimentCondaPythonConfig}</h3>
                     <p className="help">{t.experimentCondaPythonHelp}</p>
                     <label>{t.condaEnvName}</label>
-                    <input value={researchEnvDraft.conda_env || ""} onChange={(e) => updateEnvDraft("conda_env", e.target.value)} placeholder={researchProject || "project_env"} disabled={environmentLocked} />
+                    <input value={researchEnvDraft.conda_env || ""} onChange={(e) => updateEnvDraft("conda_env", e.target.value)} placeholder={researchProject || "project_env"} disabled={environmentConfigDisabled} />
                     <label>{t.condaBase}</label>
-                    <input value={researchEnvDraft.conda_base || ""} onChange={(e) => updateEnvDraft("conda_base", e.target.value)} placeholder="~/miniforge3" disabled={environmentLocked} />
+                    <input value={researchEnvDraft.conda_base || ""} onChange={(e) => updateEnvDraft("conda_base", e.target.value)} placeholder="~/miniforge3" disabled={environmentConfigDisabled} />
                     <label>{t.experimentPythonExecutable}</label>
-                    <input value={researchEnvDraft.experiment_python || ""} onChange={(e) => updateEnvDraft("experiment_python", e.target.value)} placeholder={derivedCondaPython(researchEnvDraft.conda_base, researchEnvDraft.conda_env) || "python"} disabled={environmentLocked} />
+                    <input value={researchEnvDraft.experiment_python || ""} onChange={(e) => updateEnvDraft("experiment_python", e.target.value)} placeholder={derivedCondaPython(researchEnvDraft.conda_base, researchEnvDraft.conda_env) || "python"} disabled={environmentConfigDisabled} />
                     <p className="help">{lang === "zh" ? `当前训练/实验 Python: ${researchEnvDraft.experiment_python || derivedCondaPython(researchEnvDraft.conda_base, researchEnvDraft.conda_env) || "由 Conda 环境名称派生"}` : `Current training/experiment Python: ${researchEnvDraft.experiment_python || derivedCondaPython(researchEnvDraft.conda_base, researchEnvDraft.conda_env) || "derived from the Conda environment name"}`}</p>
                     <div className="saveBar">
-                      <button onClick={saveEnvConfig} disabled={!researchProject || researchEnvSaving || environmentLocked}>{researchEnvSaving ? t.saving : environmentLocked ? t.envLockedCreated : t.saveExperimentEnv}</button>
+                      <button onClick={saveEnvConfig} disabled={!researchProject || researchEnvSaving || environmentConfigDisabled}>{researchEnvSaving ? t.saving : environmentLocked ? t.envLockedCreated : t.saveExperimentEnv}</button>
                       {researchEnvMessage && <span>{researchEnvMessage}</span>}
                     </div>
                     <div className="runtimeChecks envRuntimeChecks">
@@ -8433,7 +8462,7 @@ function App() {
                       <input value={researchTopic} onChange={(e) => setTopic(e.target.value)} />
                       <label className="switch"><input type="checkbox" checked={researchRealBootstrapEnv} onChange={(e) => setRealBootstrapEnv(e.target.checked)} /> {t.realBootstrapConda}</label>
                     </>}
-                    <div className="actions">{!environmentLocked && <button onClick={() => runAR("init")} disabled={!researchProject}>{t.researchInit}</button>}<button onClick={() => runAR("status")} disabled={!researchProject}>{t.researchStatus}</button></div>
+                    <div className="actions">{!environmentLocked && <button onClick={() => runAR("init")} disabled={environmentAgentActionDisabled}>{t.researchInit}</button>}<button onClick={() => runAR("status")} disabled={!researchProject}>{t.researchStatus}</button></div>
                   </div>
                 </div>
 
