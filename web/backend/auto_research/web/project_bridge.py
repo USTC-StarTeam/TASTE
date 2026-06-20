@@ -5,6 +5,7 @@ import difflib
 import datetime as dt
 import os
 import re
+import shlex
 import time
 import signal
 import subprocess
@@ -203,6 +204,219 @@ def _project_configured_venue_slug(root: Path) -> str:
     venue = cfg.get("target_venue") or cfg.get("venue") or paper.get("target_venue") or paper.get("venue") or paper.get("venue_slug") or ""
     return _paper_receipt_venue_slug(venue)
 
+
+
+def _framework_workspace_root() -> Path:
+    return ROOT / "framework" / "workspace"
+
+
+def _parse_iso_timestamp(value: Any) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        return dt.datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _framework_run_has_live_process(run_id: str) -> bool:
+    needle = str(run_id or "").strip()
+    if not needle:
+        return False
+    try:
+        proc = subprocess.run(
+            ["ps", "-eo", "pid=,stat=,cmd="],
+            text=True,
+            capture_output=True,
+            timeout=3,
+        )
+    except Exception:
+        return False
+    if proc.returncode != 0:
+        return False
+    for line in str(proc.stdout or "").splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid, stat, cmd = parts
+        if "Z" in stat.upper() or not _pid_alive(pid):
+            continue
+        if needle in cmd and ("run_taste_framework.py" in cmd or "/modules/" in cmd or "claude -p" in cmd):
+            return True
+    return False
+
+
+def _normalize_framework_public_status(payload: dict[str, Any], status_path: Path) -> dict[str, Any]:
+    out = dict(payload)
+    status = str(out.get("status") or "").strip().lower()
+    if status not in {"running", "queued", "cancelling"}:
+        return out
+    run_id = str(out.get("run_id") or status_path.parents[1].name).strip()
+    updated_ts = _parse_iso_timestamp(out.get("updated_at"))
+    try:
+        mtime = status_path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    fresh_ts = max(updated_ts, mtime)
+    stale_after = float(os.environ.get("FRAMEWORK_PUBLIC_STALE_SEC", "60") or 60)
+    if fresh_ts and time.time() - fresh_ts <= stale_after:
+        return out
+    if _framework_run_has_live_process(run_id):
+        return out
+    out["status"] = "interrupted"
+    out["latest_message"] = "上一次 framework 运行已停止；没有检测到仍在运行的框架或模块进程，可重新从网页启动该阶段。"
+    progress = out.get("progress") if isinstance(out.get("progress"), dict) else {}
+    out["progress"] = {**progress, "percent": progress.get("percent", 0)}
+    next_action = out.get("next_action") if isinstance(out.get("next_action"), dict) else {}
+    out["next_action"] = {**next_action, "stop": True, "stop_status": "interrupted", "reason": out["latest_message"]}
+    modules = out.get("modules") if isinstance(out.get("modules"), list) else []
+    out["modules"] = [
+        {**row, "status": "interrupted"} if isinstance(row, dict) and str(row.get("status") or "").lower() in {"running", "queued", "cancelling"} else row
+        for row in modules
+    ]
+    return out
+
+
+def _framework_public_status_for_project(project: str) -> dict[str, Any]:
+    """Return the newest framework frontend status linked to this project."""
+    runs_root = _framework_workspace_root() / "runs"
+    if not runs_root.exists():
+        return {}
+    matches: list[tuple[float, Path, dict[str, Any]]] = []
+    try:
+        candidates = list(runs_root.glob("*/public/frontend_status.json"))
+    except Exception:
+        return {}
+    for status_path in candidates:
+        payload = _read_json(status_path, {})
+        if not isinstance(payload, dict):
+            continue
+        state = payload.get("state") if isinstance(payload.get("state"), dict) else {}
+        payload_project = str(payload.get("project") or state.get("project") or "").strip()
+        run_id = str(payload.get("run_id") or state.get("run_id") or status_path.parents[1].name).strip()
+        if project and payload_project and payload_project != project:
+            continue
+        if project and not payload_project and project not in run_id:
+            continue
+        try:
+            mtime = status_path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        matches.append((mtime, status_path, payload))
+    if not matches:
+        return {}
+    _mtime, status_path, payload = sorted(matches, key=lambda item: item[0])[-1]
+    payload = _normalize_framework_public_status(payload, status_path)
+    public_path = status_path.parent
+    return {
+        "status": str(payload.get("status") or ""),
+        "run_id": str(payload.get("run_id") or status_path.parents[1].name),
+        "project": str(payload.get("project") or project),
+        "mode": str(payload.get("mode") or ""),
+        "current_stage": str(payload.get("current_stage") or ""),
+        "progress": payload.get("progress") if isinstance(payload.get("progress"), dict) else {},
+        "next_action": payload.get("next_action") if isinstance(payload.get("next_action"), dict) else {},
+        "blockers": payload.get("blockers") if isinstance(payload.get("blockers"), list) else [],
+        "recent_records": payload.get("recent_records") if isinstance(payload.get("recent_records"), list) else [],
+        "artifacts": {
+            "frontend_status": str(status_path),
+            "workflow_status_md": str(public_path / "workflow_status.md"),
+            "module_contracts": str(public_path / "module_contracts_payload.json"),
+        },
+        "updated_at": str(payload.get("updated_at") or ""),
+        "source": "framework/workspace",
+    }
+
+
+def _project_plan_candidates(root: Path) -> list[Path]:
+    return [
+        root / "state" / "experiment_plan.json",
+        root / "state" / "taste_plan_bridge.json",
+        root / "planning" / "finding" / "experiment_plan.json",
+        root / "planning" / "finding" / "taste_plan_bridge.json",
+    ]
+
+
+def _project_experiment_plan_path(project: str) -> Path:
+    root = PROJECTS / project
+    for path in _project_plan_candidates(root):
+        payload = _read_json(path, {})
+        if isinstance(payload, dict) and payload:
+            return path
+    raise ValueError(
+        "当前项目缺少可执行实验计划：需要先完成 Finding/Reading/Ideation/Planning，"
+        "生成 state/experiment_plan.json 或 state/taste_plan_bridge.json 后再运行环境或实验阶段。"
+    )
+
+
+def _project_selected_repo_path(root: Path) -> str:
+    selected = _current_selected_repo_path(root)
+    if selected:
+        return str(selected)
+    for rel in ["state/active_repo.json", "state/evidence_ready_repo_selection.json", "state/fresh_base_implementation_plan.json"]:
+        payload = _read_json(root / rel, {})
+        candidates: list[Any] = []
+        if isinstance(payload, dict):
+            candidates.append(payload)
+            for key in ["selected", "active_repo", "repo"]:
+                if isinstance(payload.get(key), dict):
+                    candidates.append(payload[key])
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            for key in ["repo_path", "local_path", "path", "selected_repo_path", "active_repo_path"]:
+                value = str(item.get(key) or "").strip()
+                if value:
+                    return value
+    return ""
+
+
+def _project_conda_env(project: str, root: Path, cfg: dict[str, Any], payload: dict[str, Any]) -> str:
+    env_name = str(payload.get("conda_env") or "").strip()
+    if env_name:
+        return env_name
+    active = _active_env_name(root, cfg)
+    if active:
+        return active
+    runtime = project_runtime_config(project, cfg)
+    if isinstance(runtime, dict):
+        runtime_env = str(runtime.get("conda_env") or runtime.get("experiment_conda_env") or "").strip()
+        if runtime_env:
+            return runtime_env
+    return str(cfg.get("conda_env") or "").strip()
+
+
+def _blocked_missing_input_command(py: str, message: str) -> list[str]:
+    return [py, "-c", f"print({json.dumps(message, ensure_ascii=False)}); raise SystemExit(2)"]
+
+
+def _framework_run_command(py: str, *, project: str, venue: str, run_id: str, plan_path: Path, mode: str, module_args: dict[str, str], max_steps: int = 7, only_stage: str = "") -> list[str]:
+    cmd = [
+        py,
+        str(FRAMEWORK_SCRIPTS / "orchestration" / "run_taste_framework.py"),
+        "run",
+        "--run-id",
+        run_id,
+        "--project",
+        project,
+        "--mode",
+        mode,
+        "--max-steps",
+        str(max_steps),
+        "--python",
+        py,
+        "--plan-json",
+        str(plan_path),
+    ]
+    if only_stage:
+        cmd.extend(["--only-stage", only_stage])
+    if venue:
+        cmd.extend(["--venue", venue])
+    for stage, arg_text in module_args.items():
+        if str(arg_text).strip():
+            cmd.extend(["--module-arg", f"{stage}={arg_text}"])
+    return cmd
 
 def _paper_receipt_stale_for_current_venue(root: Path, receipt: Any) -> bool:
     current_slug = _project_configured_venue_slug(root)
@@ -12409,8 +12623,18 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
             "source": "current_find_reading_output" if plan_count else "",
         },
     }
-    stages = {**planning_stages, "environment": environment_stage, "experiment": {"status": experiment_stage_status, **experiment_module_summary, "human_gate_summary": human_gate_summary, "experiment_count": current_experiment_count, "completed_experiment_count": current_completed_count, "experiment_count_label": experiment_count_label, "experiment_count_help": experiment_count_help, "recent_experiments": current_experiments, "experiments": current_experiments, "experiment_record": current_experiment_record, **experiment_display_flags, "legacy_experiment_audit": legacy_experiment_audit, "reference_reproduction_gate": scalar(display_ref_gate, ["status", "decision", "decision_reason", "human_summary"]), "scientific_progress_gate": _public_gate_status_summary(scientific_progress_gate), "experiment_iteration_audit": _public_gate_status_summary(experiment_iteration_audit), "full_research_cycle": full_cycle_compact}, "paper": paper_stage}
-    artifacts = [item for item in [artifact("find_progress.json", root / "planning" / "finding" / "find_progress.json"), current_run_artifact("find_results.json", root / "planning" / "finding" / "find_results.json"), artifact("article.md", root / "planning" / "finding" / "article.md", "markdown") if run_id else None, current_run_artifact("read_results.json", root / "planning" / "finding" / "read_results.json"), current_run_artifact("ideas.json", root / "planning" / "finding" / "ideas.json"), current_run_artifact("plans.json", root / "planning" / "finding" / "plans.json"), current_run_artifact("current_find_research_plan.json", root / "state" / "current_find_research_plan.json"), artifact("evidence_ready_repo_selection.json", root / "state" / "evidence_ready_repo_selection.json") if not downstream_waiting_on_find else None, artifact("blocker_action_plan.json", root / "state" / "blocker_action_plan.json") if not downstream_waiting_on_find else None, artifact("reference_reproduction_gate.json", root / "state" / "reference_reproduction_gate.json"), artifact("scientific_progress_gate.json", root / "state" / "scientific_progress_gate.json") if not downstream_waiting_on_find else None, artifact("experiment_iteration_audit.json", root / "state" / "experiment_iteration_audit.json") if not downstream_waiting_on_find else None, artifact("full_research_cycle.json", root / "state" / "full_research_cycle.json"), artifact("experiment_records.csv", root / "experiments" / "experiment_records.csv", "text") if not downstream_waiting_on_find else None, artifact("experiment_record_table.json", root / "state" / "experiment_record_table.json") if not downstream_waiting_on_find else None, artifact("supervision_tick.json", root / "state" / "supervision_tick.json"), artifact("paper.pdf", pdf_path, "pdf") if (pdf_path and not paper_blocked) else None] if item]
+    framework_status = _framework_public_status_for_project(project)
+    if framework_status:
+        full_cycle_compact = {**full_cycle_compact, "framework": framework_status}
+    experiment_stage = {"status": experiment_stage_status, **experiment_module_summary, "human_gate_summary": human_gate_summary, "experiment_count": current_experiment_count, "completed_experiment_count": current_completed_count, "experiment_count_label": experiment_count_label, "experiment_count_help": experiment_count_help, "recent_experiments": current_experiments, "experiments": current_experiments, "experiment_record": current_experiment_record, **experiment_display_flags, "legacy_experiment_audit": legacy_experiment_audit, "reference_reproduction_gate": scalar(display_ref_gate, ["status", "decision", "decision_reason", "human_summary"]), "scientific_progress_gate": _public_gate_status_summary(scientific_progress_gate), "experiment_iteration_audit": _public_gate_status_summary(experiment_iteration_audit), "full_research_cycle": full_cycle_compact}
+    if framework_status:
+        experiment_stage["framework"] = framework_status
+    stages = {**planning_stages, "environment": environment_stage, "experiment": experiment_stage, "paper": paper_stage}
+    framework_artifact = None
+    if framework_status and isinstance(framework_status.get("artifacts"), dict):
+        framework_artifact_path = Path(str(framework_status["artifacts"].get("frontend_status") or ""))
+        framework_artifact = artifact("framework_frontend_status.json", framework_artifact_path) if str(framework_artifact_path) else None
+    artifacts = [item for item in [artifact("find_progress.json", root / "planning" / "finding" / "find_progress.json"), current_run_artifact("find_results.json", root / "planning" / "finding" / "find_results.json"), artifact("article.md", root / "planning" / "finding" / "article.md", "markdown") if run_id else None, current_run_artifact("read_results.json", root / "planning" / "finding" / "read_results.json"), current_run_artifact("ideas.json", root / "planning" / "finding" / "ideas.json"), current_run_artifact("plans.json", root / "planning" / "finding" / "plans.json"), current_run_artifact("current_find_research_plan.json", root / "state" / "current_find_research_plan.json"), artifact("evidence_ready_repo_selection.json", root / "state" / "evidence_ready_repo_selection.json") if not downstream_waiting_on_find else None, artifact("blocker_action_plan.json", root / "state" / "blocker_action_plan.json") if not downstream_waiting_on_find else None, artifact("reference_reproduction_gate.json", root / "state" / "reference_reproduction_gate.json"), artifact("scientific_progress_gate.json", root / "state" / "scientific_progress_gate.json") if not downstream_waiting_on_find else None, artifact("experiment_iteration_audit.json", root / "state" / "experiment_iteration_audit.json") if not downstream_waiting_on_find else None, artifact("full_research_cycle.json", root / "state" / "full_research_cycle.json"), framework_artifact, artifact("experiment_records.csv", root / "experiments" / "experiment_records.csv", "text") if not downstream_waiting_on_find else None, artifact("experiment_record_table.json", root / "state" / "experiment_record_table.json") if not downstream_waiting_on_find else None, artifact("supervision_tick.json", root / "state" / "supervision_tick.json"), artifact("paper.pdf", pdf_path, "pdf") if (pdf_path and not paper_blocked) else None] if item]
     runtime = runtime_payload()
     claude_status = _claude_status_payload(root)
     guidance_queue = safe_list(_read_json(root / "state" / "guidance_queue.json", []))
@@ -12442,6 +12666,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         "submission_readiness": scalar(submission_state, ["status", "submission_ready", "promotion_gate"]),
         "paper_pdf_count": 1 if (pdf_path and not paper_blocked) else 0,
         "current_find_pipeline": literature_survey["current_find_pipeline"],
+        "framework": framework_status,
     }
     result = {
         "project": project,
@@ -12480,6 +12705,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         "queued_guidance": queued_guidance,
         "runtime": runtime_compact,
         "claude_status": claude_status,
+        "framework_status": framework_status,
         "artifacts": artifacts,
         "payload_bytes": 0,
     }
@@ -13159,6 +13385,11 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
     }
 
     claude_status = _claude_status_payload(root)
+    framework_status = _framework_public_status_for_project(project)
+    if framework_status:
+        full_cycle_compact = {**full_cycle_compact, "framework": framework_status}
+        stages.setdefault("experiment", {})["framework"] = framework_status
+
     result = {
         'project': project,
         'topic': topic,
@@ -13173,7 +13404,8 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
         'blocker': blocker,
         'main_route': main_route,
         'stages': stages,
-        'state': {'full_research_cycle': full_cycle_compact, 'literature_survey': literature_survey, 'experiment_count': experiment_count, 'completed_experiment_count': completed_count, 'experiment_count_label': '实验/复现记录', 'experiment_count_help': '这是当前主线下实验与参考复现记录的审计统计，不是完整科研流程完成进度；论文结论仍以科学进展、证据和投稿审计为准。', **experiment_display_flags, 'recent_experiments': _public_experiment_rows(current_route_experiments_all, 8), 'legacy_experiment_audit': {'experiment_count': legacy_experiment_count, 'completed_experiment_count': legacy_completed_count, 'csv_path': experiment_record_compact.get('csv_path', ''), 'note': '旧实验记录保留为 CSV/registry 审计；当前摘要只统计当前主线记录。'} if legacy_experiment_count > experiment_count else {}, 'experiment_record': {**experiment_record_compact, 'rows': []}, 'paper_pdf_count': 1 if (pdf_path and not paper_blocked) else 0, 'human_supervision': human, 'submission_readiness': scalar(submission_state, ['status', 'submission_ready', 'promotion_gate']), 'claude_status': claude_status},
+        'state': {'full_research_cycle': full_cycle_compact, 'literature_survey': literature_survey, 'experiment_count': experiment_count, 'completed_experiment_count': completed_count, 'experiment_count_label': '实验/复现记录', 'experiment_count_help': '这是当前主线下实验与参考复现记录的审计统计，不是完整科研流程完成进度；论文结论仍以科学进展、证据和投稿审计为准。', **experiment_display_flags, 'recent_experiments': _public_experiment_rows(current_route_experiments_all, 8), 'legacy_experiment_audit': {'experiment_count': legacy_experiment_count, 'completed_experiment_count': legacy_completed_count, 'csv_path': experiment_record_compact.get('csv_path', ''), 'note': '旧实验记录保留为 CSV/registry 审计；当前摘要只统计当前主线记录。'} if legacy_experiment_count > experiment_count else {}, 'experiment_record': {**experiment_record_compact, 'rows': []}, 'paper_pdf_count': 1 if (pdf_path and not paper_blocked) else 0, 'human_supervision': human, 'submission_readiness': scalar(submission_state, ['status', 'submission_ready', 'promotion_gate']), 'claude_status': claude_status, 'framework': framework_status},
+        'framework_status': framework_status,
         'literature_survey': literature_survey,
         'current_find_pipeline': literature_survey['current_find_pipeline'],
         'readings': read_count,
@@ -13832,26 +14064,82 @@ def build_command(payload: dict[str, Any]) -> tuple[str, list[str]]:
             str(probe_timeout_sec),
         )
     elif action == "environment":
-        cmd = _module_cmd(py, "environment", "run_stage", "--project", project)
-        _append(cmd, "--repo-path", payload.get("repo_path"))
-        _append(cmd, "--env-name", payload.get("conda_env"))
-        _append(cmd, "--venue", payload.get("venue"))
-        if payload.get("real_bootstrap_env", True):
-            cmd.append("--real-bootstrap-env")
-        if payload.get("skip_reference_repair"):
-            cmd.append("--skip-reference-repair")
+        root = PROJECTS / project
+        cfg = _read_json(root / "project.json", {})
+        cfg = cfg if isinstance(cfg, dict) else {}
+        try:
+            plan_path = _project_experiment_plan_path(project)
+        except ValueError as exc:
+            cmd = _blocked_missing_input_command(py, str(exc))
+        else:
+            run_id = "web_environment_" + project + "_" + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            module_args = {
+                "environment": shlex.join([
+                    "--plan", str(plan_path),
+                    "--run-id", run_id,
+                    "--skip-full-reproduction",
+                    "--max-repair-rounds", "1",
+                    "--claude-timeout-sec", "900",
+                    "--command-timeout-sec", "900",
+                ]),
+            }
+            cmd = _framework_run_command(
+                py,
+                project=project,
+                venue=str(payload.get("venue") or cfg.get("target_venue") or cfg.get("venue") or ""),
+                run_id=run_id,
+                plan_path=plan_path,
+                mode="execute",
+                module_args=module_args,
+                max_steps=1,
+                only_stage="environment",
+            )
     elif action == "experiment":
         if _literature_recommendation_gate_is_blocked(project):
             cmd = _blocked_literature_gate_command(py, action)
         elif _fresh_base_data_is_blocked(project):
             cmd = [py, "-c", "print('blocked_fresh_base_gate_required: current project fresh-base gates must pass before experiments.') ; raise SystemExit(2)"]
         else:
-            iterations = max(1, min(50, int(payload.get("iterations") or 1)))
-            cmd = [py, str(SCRIPTS / "run_autonomous_research.py"), "--project", project, "--iterations", str(iterations), "--execute-plan", "--prepare-env", "--real-bootstrap-env", "--skip-paper", "--skip-discovery"]
-            for flag, key in [("--topic", "topic"), ("--venue", "venue")]:
-                _append(cmd, flag, payload.get(key))
-            if payload.get("max_launches"):
-                cmd.extend(["--max-launches", str(max(1, int(payload["max_launches"])))])
+            root = PROJECTS / project
+            cfg = _read_json(root / "project.json", {})
+            cfg = cfg if isinstance(cfg, dict) else {}
+            try:
+                plan_path = _project_experiment_plan_path(project)
+                repo_path = str(payload.get("repo_path") or _project_selected_repo_path(root)).strip()
+                conda_env = _project_conda_env(project, root, cfg, payload)
+                if not repo_path:
+                    raise ValueError("当前项目缺少 environment 锁定后的 repo_path；请先运行环境阶段并通过 repo/data/protocol 审计。")
+                if not conda_env:
+                    raise ValueError("当前项目缺少实验 Conda 环境名；请在项目设置中保存 conda_env 或先运行环境阶段。")
+            except ValueError as exc:
+                cmd = _blocked_missing_input_command(py, str(exc))
+            else:
+                iterations = max(1, min(50, int(payload.get("iterations") or 1)))
+                run_id = "web_experiment_" + project + "_" + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                output_root = ROOT / "modules" / "experimenting" / "runtime" / "web" / project
+                exp_args = [
+                    "--plan", str(plan_path),
+                    "--repo-path", repo_path,
+                    "--conda-env", conda_env,
+                    "--output-root", str(output_root),
+                    "--max-iterations", str(iterations),
+                ]
+                if payload.get("dry_run"):
+                    exp_args.append("--dry-run")
+                if payload.get("skip_claude"):
+                    exp_args.append("--skip-claude")
+                module_args = {"experimenting": shlex.join(exp_args)}
+                cmd = _framework_run_command(
+                    py,
+                    project=project,
+                    venue=str(payload.get("venue") or cfg.get("target_venue") or cfg.get("venue") or ""),
+                    run_id=run_id,
+                    plan_path=plan_path,
+                    mode="execute",
+                    module_args=module_args,
+                    max_steps=1,
+                    only_stage="experimenting",
+                )
     elif action == "paper":
         venue = str(payload.get("venue") or "").strip()
         if not venue:
@@ -14520,6 +14808,39 @@ def _post_action_refresh_research_gates(project: str, venue: str, env: dict[str,
     return results
 
 
+def _research_action_label(action: str) -> str:
+    labels = {
+        "environment": "环境配置",
+        "experiment": "实验迭代",
+        "paper": "论文撰写",
+        "full-cycle": "完整科研循环",
+        "full_research_cycle": "完整科研循环",
+        "literature-base-audit": "文献基底审计",
+        "literature_base_audit": "文献基底审计",
+        "current-find-selection": "当前 Find 计划选择",
+        "agent-guidance": "项目代理指令",
+        "claude-message": "项目代理指令",
+    }
+    normalized = str(action or "").strip()
+    return labels.get(normalized, normalized or "科研任务")
+
+
+def _research_action_message(action: str, project: str, status: str, code: int | None = None) -> str:
+    label = _research_action_label(action)
+    if status == "prepare":
+        return f"正在准备{label}任务：项目 {project}"
+    if status == "running":
+        return f"正在运行{label}任务：项目 {project}"
+    if status == "complete":
+        return f"{label}任务已完成"
+    if status == "blocked":
+        return f"{label}任务已结束，但仍有证据门控未通过"
+    if status == "error":
+        suffix = f"，退出码 {code}" if code is not None else ""
+        return f"{label}任务失败{suffix}"
+    return f"{label}任务状态：{status}"
+
+
 def _requested_panel_stage(payload: dict[str, Any], action: str) -> tuple[str, str]:
     requested = str(payload.get("stage") or "").strip()
     raw = requested.lower().replace("_", "-")
@@ -14562,10 +14883,10 @@ def run_action(payload: dict[str, Any], log: LogFn, should_cancel: CancelFn, pro
         status="running",
         goal=goal[:500],
         command=cmd,
-        current_step=f"preparing {action}",
+        current_step=_research_action_message(action, project, "prepare"),
         parent_id=target_agent_id if action == "agent-guidance" else "",
     )
-    progress("prepare", 0, 1, f"Preparing research action for {project}")
+    progress("prepare", 0, 1, _research_action_message(action, project, "prepare"))
     log("Workflow command: " + " ".join(cmd))
     append_agent_log(project, agent_id, "Workflow command: " + " ".join(cmd))
     env = interactive_env(project)
@@ -14599,9 +14920,9 @@ def run_action(payload: dict[str, Any], log: LogFn, should_cancel: CancelFn, pro
         bufsize=1,
         preexec_fn=os.setsid if hasattr(os, "setsid") else None,
     )
-    upsert_agent(project, agent_id, pid=proc.pid, status="running", current_step=f"running {action}")
+    upsert_agent(project, agent_id, pid=proc.pid, status="running", current_step=_research_action_message(action, project, "running"))
     lines = 0
-    progress("running", 0, 0, f"Running {payload.get('action')} for {project}")
+    progress("running", 0, 0, _research_action_message(action, project, "running"))
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -14679,25 +15000,25 @@ def run_action(payload: dict[str, Any], log: LogFn, should_cancel: CancelFn, pro
         "literature_base_audit": {2},
         "full-cycle": {2},
         "full_research_cycle": {2},
-        "environment": {2},
+        "environment": {2, 30},
         "experiment": {2},
         "paper": {2},
         "current-find-selection": {2},
     }
     if code != 0 and code not in allowed_blocked_codes.get(action, set()):
-        upsert_agent(project, agent_id, status="error", current_step=f"research action failed with exit code {code}")
+        upsert_agent(project, agent_id, status="error", current_step=_research_action_message(action, project, "error", code))
         raise RuntimeError(f"research action failed with exit code {code}")
     if code in allowed_blocked_codes.get(action, set()):
-        progress("blocked", 1, 1, f"TASTE {payload.get('action')} completed with unresolved evidence gate")
+        progress("blocked", 1, 1, _research_action_message(action, project, "blocked"))
     else:
-        progress("complete", 1, 1, f"TASTE {payload.get('action')} complete")
+        progress("complete", 1, 1, _research_action_message(action, project, "complete"))
     post_refresh_results: list[dict[str, Any]] = []
     if action in {"experiment", "paper"} or (action == "claude-message" and panel_stage in {"experiment", "paper"}):
         progress(panel_stage or action, 1, 1, "刷新实验/论文派生审计状态")
         post_refresh_results = _post_action_refresh_research_gates(project, str(payload.get("venue") or project_target_venue(project) or ""), env, log)
     summary = project_summary(project)
     final_status = "done"
-    final_step = f"TASTE {payload.get('action')} complete"
+    final_step = _research_action_message(action, project, "complete")
     project_state_root = PROJECTS / project
     paper_stage: dict[str, Any] = {}
     paper_result_fields: dict[str, Any] = {}
@@ -14737,9 +15058,23 @@ def run_action(payload: dict[str, Any], log: LogFn, should_cancel: CancelFn, pro
     elif code in allowed_blocked_codes.get(action, set()):
         full_cycle = _read_json(PROJECTS / project / "state" / "full_research_cycle.json", {})
         reference_gate = _read_json(PROJECTS / project / "state" / "reference_reproduction_gate.json", {})
+        framework_status = _framework_public_status_for_project(project) if action in {"environment", "experiment"} else {}
+        framework_message = ""
+        if isinstance(framework_status, dict):
+            latest_record = framework_status.get("latest_record") if isinstance(framework_status.get("latest_record"), dict) else {}
+            blockers = framework_status.get("blockers") if isinstance(framework_status.get("blockers"), list) else []
+            first_blocker = blockers[0] if blockers and isinstance(blockers[0], dict) else {}
+            framework_message = str(
+                first_blocker.get("public_reason")
+                or first_blocker.get("summary")
+                or latest_record.get("message")
+                or framework_status.get("latest_message")
+                or ""
+            ).strip()
         final_status = "blocked"
         final_step = str(
-            (full_cycle.get("current_goal") if isinstance(full_cycle, dict) else "")
+            framework_message
+            or (full_cycle.get("current_goal") if isinstance(full_cycle, dict) else "")
             or (reference_gate.get("human_summary") if isinstance(reference_gate, dict) else "")
             or "TASTE stopped at an evidence gate"
         )[:240]
@@ -14759,7 +15094,7 @@ def run_action(payload: dict[str, Any], log: LogFn, should_cancel: CancelFn, pro
                 or final_step
             )[:240]
             if final_status == "blocked":
-                progress("blocked", 1, 1, final_step or f"TASTE {payload.get('action')} stopped at an evidence gate")
+                progress("blocked", 1, 1, final_step or _research_action_message(action, project, "blocked"))
     upsert_agent(project, agent_id, status=final_status, current_step=final_step, extra={"finished_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()})
     result_payload = {"project": project, "action": payload.get("action"), "agent_id": agent_id, "requested_stage": requested_stage, "panel_stage": panel_stage, "returncode": code, "status": final_status, "summary": summary, "post_refresh": post_refresh_results}
     if action == "current-find-selection":

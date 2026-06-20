@@ -4,8 +4,8 @@
   "coverage": {
     "source_catalogs": [
       "modules/finding/data/ccf_venues.json",
-      "modules/finding/scripts/find_support.py:NATURE_JOURNALS",
-      "modules/finding/scripts/find_support.py:SCIENCE_JOURNALS"
+      "modules/finding/scripts/sources/journals.py:NATURE_JOURNALS",
+      "modules/finding/scripts/sources/journals.py:SCIENCE_JOURNALS"
     ],
     "included_types": [
       "ccf_journal",

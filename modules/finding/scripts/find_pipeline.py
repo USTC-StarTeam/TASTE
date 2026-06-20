@@ -172,6 +172,69 @@ def _clamp_int(value: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, int(value)))
 
 
+def _source_fetch_wall_timeout(source: str, default: int = 0) -> int:
+    source_key = str(source or "").upper().replace("-", "_")
+    specific = _positive_int_env(f"{source_key}_FETCH_WALL_TIMEOUT_SEC", 0) if source_key else 0
+    return specific or _positive_int_env("SOURCE_FETCH_WALL_TIMEOUT_SEC", default)
+
+
+def _run_with_wall_timeout(label: str, call: Callable[[], Any], timeout_sec: int | float, log: LogFn | None = None) -> tuple[bool, Any, BaseException | None]:
+    timeout = float(timeout_sec or 0)
+    if timeout <= 0:
+        try:
+            return True, call(), None
+        except BaseException as exc:
+            return True, None, exc
+    result: dict[str, Any] = {}
+    done = threading.Event()
+
+    def _target() -> None:
+        try:
+            result["value"] = call()
+        except BaseException as exc:
+            result["error"] = exc
+        finally:
+            done.set()
+
+    worker = threading.Thread(target=_target, name=f"finding-{label.lower().replace(' ', '-')}", daemon=True)
+    worker.start()
+    if done.wait(timeout):
+        return True, result.get("value"), result.get("error")
+    if log:
+        log(f"{label}: wall timeout after {timeout:g}s; marking this source limited and continuing")
+    return False, None, None
+
+
+def _source_fetch_timeout_status(source: str, display_name: str, timeout_sec: int | float) -> dict:
+    timeout = float(timeout_sec or 0)
+    message = f"{display_name} fetch exceeded wall timeout ({timeout:g}s); source marked limited and skipped so the Find run can complete."
+    return {
+        "source": source,
+        "ok": False,
+        "limited": True,
+        "count": 0,
+        "message": message,
+        "errors": ["wall_timeout"],
+        "stopped_reason": "wall_timeout",
+        "wall_timeout_sec": timeout,
+    }
+
+
+def _detail_fetch_timeout_stats(display_name: str, timeout_sec: int | float) -> dict:
+    timeout = float(timeout_sec or 0)
+    return {
+        "attempted": 0,
+        "abstracts_filled": 0,
+        "authors_filled": 0,
+        "pdfs_filled": 0,
+        "dois_filled": 0,
+        "skipped": True,
+        "timeout": True,
+        "message": f"{display_name} detail enrichment exceeded wall timeout ({timeout:g}s); retained metadata already fetched.",
+        "wall_timeout_sec": timeout,
+    }
+
+
 def _compact_scoring_interest(config: AppConfig, interest: str) -> str:
     max_chars = _positive_int_env("ABSTRACT_SCORING_PROFILE_MAX_CHARS", 6000)
     text = "\n".join(_topic_interest_chunks(config)).strip() or str(interest or "").strip()
@@ -3312,6 +3375,20 @@ def _final_llm_scoring_limit(config: AppConfig, candidate_count: int) -> int:
     return max(1, min(candidate_count, default_limit))
 
 
+def _source_final_llm_scoring_limit(config: AppConfig, source_name: str, candidate_count: int) -> int:
+    limit = _final_llm_scoring_limit(config, candidate_count)
+    source_key = str(source_name or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if source_key:
+        specific = _positive_int_env(f"{source_key.upper()}_FINAL_LLM_SCORING_LIMIT", 0)
+        if specific:
+            limit = min(limit, specific)
+    if source_key in {"nature", "science", "arxiv", "biorxiv", "huggingface", "github"}:
+        nonvenue_limit = _positive_int_env("NONVENUE_FINAL_LLM_SCORING_LIMIT", 0)
+        if nonvenue_limit:
+            limit = min(limit, nonvenue_limit)
+    return max(1, min(candidate_count, limit))
+
+
 def _abstract_enrichment_limits(config: AppConfig, missing_count: int) -> tuple[int, int]:
     # Every candidate that reaches final LLM scoring needs a real abstract
     # attempt, but metadata services can be slow or rate-limited. Bound the
@@ -3723,13 +3800,22 @@ def _prefilter_titles(
     trusted_title_categories = _has_trusted_title_categories(scanned)
     if original_scanned_count >= _large_pool_threshold():
         shortlist_budget = _llm_title_filter_scan_budget(config, original_scanned_count)
-        should_local_shortlist = shortlist_budget < original_scanned_count and (not llm.enabled or trusted_title_categories)
+        pre_shortlist_untrusted = os.environ.get("LLM_TITLE_FILTER_PRE_SHORTLIST_UNTRUSTED", "0").lower() in {"1", "true", "yes", "on"}
+        should_local_shortlist = shortlist_budget < original_scanned_count and (
+            not llm.enabled or trusted_title_categories or pre_shortlist_untrusted
+        )
         if should_local_shortlist:
             scanned = _score_title_pool(scanned, config, interest, global_limit=shortlist_budget)
-            log(
-                f"{venue_name}: large title pool ({original_scanned_count} titles); "
-                f"locally shortlisted {len(scanned)} titles before title LLM/detail scoring"
-            )
+            if llm.enabled and not trusted_title_categories:
+                log(
+                    f"{venue_name}: large title pool ({original_scanned_count} titles) exceeds the title-LLM budget; "
+                    f"locally shortlisted {len(scanned)} titles before title LLM/detail scoring while keeping the full corpus in the source audit"
+                )
+            else:
+                log(
+                    f"{venue_name}: large title pool ({original_scanned_count} titles); "
+                    f"locally shortlisted {len(scanned)} titles before title LLM/detail scoring"
+                )
         elif llm.enabled and shortlist_budget < original_scanned_count:
             log(
                 f"{venue_name}: large title pool ({original_scanned_count} titles) has no trusted official categories; "
@@ -4856,8 +4942,14 @@ def _evaluate_items(
         _apply_quality_bonus(item)
         evaluated.append(item)
     if llm.enabled and interest:
-        scoring_limit = _final_llm_scoring_limit(config, len(evaluated))
         scoring_items = _final_llm_scoring_pool(evaluated, config)
+        source_scoring_limit = _source_final_llm_scoring_limit(config, source_name, len(scoring_items))
+        if source_scoring_limit < len(scoring_items):
+            log(
+                f"{source_name}: capped final LLM scoring pool to {source_scoring_limit}/{len(scoring_items)} "
+                "items for this source; remaining candidates stay in retrieval-only audit"
+            )
+            scoring_items = scoring_items[:source_scoring_limit]
         scoring_items = _enrich_missing_abstracts_for_final_scoring(scoring_items, config, source_name, log, progress, should_cancel)
         abstract_missing_scoring_items = [item for item in scoring_items if not _has_real_abstract(item)]
         if abstract_missing_scoring_items:
@@ -5022,7 +5114,7 @@ Scoring rules: judge this item independently from its real title and abstract. f
                             single_scoring_prompt(item),
                             temperature=scoring_temperature,
                             max_tokens=single_scoring_max_tokens,
-                            timeout_sec=scoring_wall_timeout,
+                            timeout_sec=scoring_wall_timeout or single_scoring_timeout,
                         )
                         if single_result.get("ok"):
                             apply_result(batch_index, [item], single_result, allow_missing_retry=False)
@@ -6477,8 +6569,16 @@ def _attach_abstract_language_fields(items: list[dict], llm: LLMClient, log: Log
     default_limit = len(visible_missing)
     missing.sort(key=_translation_priority)
     visible_missing_count = len(visible_missing)
-    configured_limit = int(os.environ.get("TRANSLATE_ABSTRACT_LIMIT", "0") or 0)
-    limit = max(configured_limit or default_limit, visible_missing_count)
+    raw_translation_limit = os.environ.get("TRANSLATE_ABSTRACT_LIMIT")
+    if raw_translation_limit is not None and str(raw_translation_limit).strip():
+        configured_limit = int(raw_translation_limit or 0)
+        if configured_limit <= 0:
+            log("articles: skipped Chinese abstract translation because TRANSLATE_ABSTRACT_LIMIT<=0")
+            _clear_translation_latex_state(unique_items)
+            return {"status": "skipped_by_limit", "translated": 0, "total": 0, "missing": len(missing), "missing_visible": visible_missing_count, "missing_ids": [item.get("id") for item in missing[:20]]}
+        limit = max(configured_limit, visible_missing_count)
+    else:
+        limit = default_limit
     missing = missing[: max(0, limit)]
     batch_size = max(1, int(os.environ.get("TRANSLATE_ABSTRACT_BATCH_SIZE", "0") or 0) or 8)
     prompts: list[str] = []
@@ -7228,7 +7328,20 @@ def run_find(
         deduped_titles = len(_dedupe_items(title_candidates))
         deduped_venue_papers = len(_dedupe_items(venue_papers))
         deduped_evaluated = _dedupe_items(evaluated_candidates)
-        source_status_rows = _venue_source_status_rows()
+        source_status_rows: list[dict] = []
+        seen_source_rows: set[tuple] = set()
+        for row in list(_venue_source_status_rows()) + list(source_status):
+            if not isinstance(row, dict):
+                continue
+            key = (
+                str(row.get("source_kind") or ""),
+                str(row.get("venue") or row.get("source") or row.get("adapter") or ""),
+                tuple(row.get("effective_years") or row.get("requested_years") or []),
+            )
+            if key in seen_source_rows:
+                continue
+            seen_source_rows.add(key)
+            source_status_rows.append(row)
         source_title_filter_input = 0
         for row in source_status_rows:
             if not isinstance(row, dict):
@@ -7288,15 +7401,17 @@ def run_find(
         progress(phase, current, total, message)
         live_phases = {
             "venue_title_index", "title_prefilter", "llm_title_filter", "detail_fetch", "detail_enrichment",
-            "nature_detail_enrichment", "science_detail_enrichment", "arxiv", "biorxiv",
-            "nature", "science", "huggingface", "github", "abstract_scoring",
+            "abstract_enrichment", "nature_detail_enrichment", "science_detail_enrichment", "arxiv", "biorxiv",
+            "nature", "science", "huggingface", "github", "abstract_scoring", "abstract_scoring_retry",
             "abstract_translation", "abstract_translation_retry", "final_ranking_prepare",
         }
         if phase in live_phases:
             now = datetime.now(timezone.utc).timestamp()
             is_done = total > 0 and current >= total
-            if is_done or now - last_progress_write.get("time", 0.0) >= 10:
+            phase_changed = phase != last_progress_write.get("phase")
+            if is_done or phase_changed or now - last_progress_write.get("time", 0.0) >= 10:
                 last_progress_write["time"] = now
+                last_progress_write["phase"] = phase
                 live_count_updates = dict(count_updates or {})
                 if "llm_title_scored_papers" in live_count_updates:
                     try:
@@ -7549,15 +7664,28 @@ def run_find(
     if request.selection.include_nature:
         _raise_if_cancelled(should_cancel)
         log("Fetching Nature Portfolio journals: " + ", ".join(config.nature_journals))
-        progress("nature", 0, 1, "Fetching Nature Portfolio")
-        nature_raw_items, nature_status = fetch_nature_portfolio(
-            config.nature_journals,
-            config.nature_article_types,
-            max_items=config.nature_candidate_limit,
-            start_date=config.nature_start_date,
-            end_date=config.nature_end_date,
-            enrich_details=False,
+        _progress("nature", 0, 1, "Fetching Nature Portfolio")
+        nature_fetch_timeout = _source_fetch_wall_timeout("nature", default=0)
+        nature_fetch_done, nature_fetch_value, nature_fetch_error = _run_with_wall_timeout(
+            "Nature Portfolio fetch",
+            lambda: fetch_nature_portfolio(
+                config.nature_journals,
+                config.nature_article_types,
+                max_items=config.nature_candidate_limit,
+                start_date=config.nature_start_date,
+                end_date=config.nature_end_date,
+                enrich_details=False,
+            ),
+            nature_fetch_timeout,
+            log,
         )
+        if nature_fetch_error:
+            raise nature_fetch_error
+        if nature_fetch_done:
+            nature_raw_items, nature_status = nature_fetch_value
+        else:
+            nature_raw_items = []
+            nature_status = _source_fetch_timeout_status("nature", "Nature Portfolio", nature_fetch_timeout)
         source_status.append(nature_status)
         nature_prefiltered_items = _prefilter_titles(
             nature_raw_items,
@@ -7566,33 +7694,59 @@ def run_find(
             "Nature Portfolio",
             log,
             should_cancel,
-            progress,
+            _progress,
             dynamic_title_filter=False,
             result_limit=config.nature_candidate_limit,
             scan_all=True,
             title_filter_reports=title_filter_report,
         )
         title_candidates.extend(nature_prefiltered_items)
-        progress("nature_detail_enrichment", 0, max(1, len(nature_prefiltered_items)), "Nature Portfolio: enriching selected article details")
-        nature_detailed_items, nature_detail_stats = enrich_nature_details(nature_prefiltered_items, limit=len(nature_prefiltered_items))
+        _progress("nature_detail_enrichment", 0, max(1, len(nature_prefiltered_items)), "Nature Portfolio: enriching selected article details")
+        nature_detail_timeout = _source_fetch_wall_timeout("nature_detail", default=0)
+        nature_detail_done, nature_detail_value, nature_detail_error = _run_with_wall_timeout(
+            "Nature Portfolio detail enrichment",
+            lambda: enrich_nature_details(nature_prefiltered_items, limit=len(nature_prefiltered_items)),
+            nature_detail_timeout,
+            log,
+        )
+        if nature_detail_error:
+            raise nature_detail_error
+        if nature_detail_done:
+            nature_detailed_items, nature_detail_stats = nature_detail_value
+        else:
+            nature_detailed_items = nature_prefiltered_items
+            nature_detail_stats = _detail_fetch_timeout_stats("Nature Portfolio", nature_detail_timeout)
         nature_status["prefiltered_count"] = len(nature_prefiltered_items)
         nature_status["detail_enrichment"] = nature_detail_stats
-        progress("nature_detail_enrichment", len(nature_prefiltered_items), max(1, len(nature_prefiltered_items)), "Nature Portfolio: detail enrichment complete")
+        _progress("nature_detail_enrichment", len(nature_prefiltered_items), max(1, len(nature_prefiltered_items)), "Nature Portfolio: detail enrichment complete")
         nature_detailed_items = attach_quality_metadata_many(nature_detailed_items)
-        evaluated_candidates.extend(_evaluate_items(nature_detailed_items, effective_config, llm, "nature", log, should_cancel, progress))
-        progress("nature", 1, 1, "Nature Portfolio complete")
+        evaluated_candidates.extend(_evaluate_items(nature_detailed_items, effective_config, llm, "nature", log, should_cancel, _progress))
+        _progress("nature", 1, 1, "Nature Portfolio complete")
 
     if request.selection.include_science:
         _raise_if_cancelled(should_cancel)
         log("Fetching Science Family journals: " + ", ".join(config.science_journals))
-        progress("science", 0, 1, "Fetching Science Family")
-        science_raw_items, science_status = fetch_science_family(
-            config.science_journals,
-            config.science_article_types,
-            max_items=config.science_candidate_limit,
-            start_date=config.science_start_date,
-            end_date=config.science_end_date,
+        _progress("science", 0, 1, "Fetching Science Family")
+        science_fetch_timeout = _source_fetch_wall_timeout("science", default=0)
+        science_fetch_done, science_fetch_value, science_fetch_error = _run_with_wall_timeout(
+            "Science Family fetch",
+            lambda: fetch_science_family(
+                config.science_journals,
+                config.science_article_types,
+                max_items=config.science_candidate_limit,
+                start_date=config.science_start_date,
+                end_date=config.science_end_date,
+            ),
+            science_fetch_timeout,
+            log,
         )
+        if science_fetch_error:
+            raise science_fetch_error
+        if science_fetch_done:
+            science_raw_items, science_status = science_fetch_value
+        else:
+            science_raw_items = []
+            science_status = _source_fetch_timeout_status("science", "Science Family", science_fetch_timeout)
         source_status.append(science_status)
         science_prefiltered_items = _prefilter_titles(
             science_raw_items,
@@ -7601,28 +7755,41 @@ def run_find(
             "Science Family",
             log,
             should_cancel,
-            progress,
+            _progress,
             dynamic_title_filter=False,
             result_limit=config.science_candidate_limit,
             scan_all=True,
             title_filter_reports=title_filter_report,
         )
         title_candidates.extend(science_prefiltered_items)
-        progress("science_detail_enrichment", 0, max(1, len(science_prefiltered_items)), "Science Family: enriching selected article details")
-        science_detailed_items, science_detail_stats = enrich_science_details(science_prefiltered_items, limit=len(science_prefiltered_items))
+        _progress("science_detail_enrichment", 0, max(1, len(science_prefiltered_items)), "Science Family: enriching selected article details")
+        science_detail_timeout = _source_fetch_wall_timeout("science_detail", default=0)
+        science_detail_done, science_detail_value, science_detail_error = _run_with_wall_timeout(
+            "Science Family detail enrichment",
+            lambda: enrich_science_details(science_prefiltered_items, limit=len(science_prefiltered_items)),
+            science_detail_timeout,
+            log,
+        )
+        if science_detail_error:
+            raise science_detail_error
+        if science_detail_done:
+            science_detailed_items, science_detail_stats = science_detail_value
+        else:
+            science_detailed_items = science_prefiltered_items
+            science_detail_stats = _detail_fetch_timeout_stats("Science Family", science_detail_timeout)
         science_status["prefiltered_count"] = len(science_prefiltered_items)
         science_status["detail_enrichment"] = science_detail_stats
-        progress("science_detail_enrichment", len(science_prefiltered_items), max(1, len(science_prefiltered_items)), "Science Family: detail enrichment complete")
+        _progress("science_detail_enrichment", len(science_prefiltered_items), max(1, len(science_prefiltered_items)), "Science Family: detail enrichment complete")
         science_detailed_items = attach_quality_metadata_many(science_detailed_items)
-        evaluated_candidates.extend(_evaluate_items(science_detailed_items, effective_config, llm, "science", log, should_cancel, progress))
-        progress("science", 1, 1, "Science Family complete")
+        evaluated_candidates.extend(_evaluate_items(science_detailed_items, effective_config, llm, "science", log, should_cancel, _progress))
+        _progress("science", 1, 1, "Science Family complete")
 
     if request.selection.include_arxiv:
         _raise_if_cancelled(should_cancel)
         arxiv_queries = _adaptive_arxiv_queries(config)
         arxiv_fetch_count = max(1, config.max_fetch_papers)
         log(f"Fetching arXiv categories: {', '.join(config.arxiv_categories)}; topic queries: {', '.join(arxiv_queries) if arxiv_queries else 'none'}; max={arxiv_fetch_count}")
-        progress("arxiv", 0, 1, "Fetching arXiv")
+        _progress("arxiv", 0, 1, "Fetching arXiv")
         arxiv_items, arxiv_status = fetch_arxiv(
             config.arxiv_categories,
             arxiv_fetch_count,
@@ -7630,7 +7797,7 @@ def run_find(
             config.arxiv_end_date,
             arxiv_queries,
             log=log,
-            progress=progress,
+            progress=_progress,
             should_cancel=should_cancel,
             max_queries=config.arxiv_max_queries,
             per_query_limit=config.arxiv_per_query_limit,
@@ -7652,20 +7819,33 @@ def run_find(
         source_status.append(arxiv_status)
         raw_title_index.extend(arxiv_raw_items)
         title_candidates.extend(arxiv_prefiltered_items)
-        arxiv_evaluated = _evaluate_items(arxiv_prefiltered_items, effective_config, llm, "arxiv", log, should_cancel, progress)
+        arxiv_evaluated = _evaluate_items(arxiv_prefiltered_items, effective_config, llm, "arxiv", log, should_cancel, _progress)
         evaluated_candidates.extend(arxiv_evaluated)
-        progress("arxiv", 1, 1, "arXiv complete")
+        _progress("arxiv", 1, 1, "arXiv complete")
 
     if request.selection.include_biorxiv:
         _raise_if_cancelled(should_cancel)
         log("Fetching bioRxiv categories: " + ", ".join(config.biorxiv_categories))
-        progress("biorxiv", 0, 1, "Fetching bioRxiv")
-        biorxiv_items, biorxiv_status = fetch_biorxiv(
-            config.biorxiv_categories,
-            max(1, config.max_fetch_papers),
-            config.biorxiv_start_date,
-            config.biorxiv_end_date,
+        _progress("biorxiv", 0, 1, "Fetching bioRxiv")
+        biorxiv_fetch_timeout = _source_fetch_wall_timeout("biorxiv", default=0)
+        biorxiv_fetch_done, biorxiv_fetch_value, biorxiv_fetch_error = _run_with_wall_timeout(
+            "bioRxiv fetch",
+            lambda: fetch_biorxiv(
+                config.biorxiv_categories,
+                max(1, config.max_fetch_papers),
+                config.biorxiv_start_date,
+                config.biorxiv_end_date,
+            ),
+            biorxiv_fetch_timeout,
+            log,
         )
+        if biorxiv_fetch_error:
+            raise biorxiv_fetch_error
+        if biorxiv_fetch_done:
+            biorxiv_items, biorxiv_status = biorxiv_fetch_value
+        else:
+            biorxiv_items = []
+            biorxiv_status = _source_fetch_timeout_status("biorxiv", "bioRxiv", biorxiv_fetch_timeout)
         biorxiv_raw_items = biorxiv_items
         query_text = _topic_interest_text(effective_config)
         biorxiv_prefiltered_items, biorxiv_prefilter_report = rank_papers_tfidf(
@@ -7682,39 +7862,65 @@ def run_find(
         source_status.append(biorxiv_status)
         raw_title_index.extend(biorxiv_raw_items)
         title_candidates.extend(biorxiv_prefiltered_items)
-        evaluated_candidates.extend(_evaluate_items(biorxiv_prefiltered_items, effective_config, llm, "biorxiv", log, should_cancel, progress))
-        progress("biorxiv", 1, 1, "bioRxiv complete")
+        evaluated_candidates.extend(_evaluate_items(biorxiv_prefiltered_items, effective_config, llm, "biorxiv", log, should_cancel, _progress))
+        _progress("biorxiv", 1, 1, "bioRxiv complete")
 
     hf_items: list[dict] = []
     if request.selection.include_huggingface:
         _raise_if_cancelled(should_cancel)
         log("Fetching HuggingFace papers/models")
-        progress("huggingface", 0, 1, "Fetching HuggingFace")
-        hf_papers, hf_models, hf_status = fetch_huggingface(
-            max_papers=max(1, config.max_recommended_papers),
-            max_models=10,
-            include_papers=config.hf_include_papers,
-            include_models=config.hf_include_models,
-            start_date=config.arxiv_start_date,
-            end_date=config.arxiv_end_date,
+        _progress("huggingface", 0, 1, "Fetching HuggingFace")
+        hf_fetch_timeout = _source_fetch_wall_timeout("huggingface", default=0)
+        hf_fetch_done, hf_fetch_value, hf_fetch_error = _run_with_wall_timeout(
+            "HuggingFace fetch",
+            lambda: fetch_huggingface(
+                max_papers=max(1, config.max_recommended_papers),
+                max_models=10,
+                include_papers=config.hf_include_papers,
+                include_models=config.hf_include_models,
+                start_date=config.arxiv_start_date,
+                end_date=config.arxiv_end_date,
+            ),
+            hf_fetch_timeout,
+            log,
         )
+        if hf_fetch_error:
+            raise hf_fetch_error
+        if hf_fetch_done:
+            hf_papers, hf_models, hf_status = hf_fetch_value
+        else:
+            hf_papers, hf_models = [], []
+            hf_status = _source_fetch_timeout_status("huggingface", "HuggingFace", hf_fetch_timeout)
         source_status.append(hf_status)
-        hf_items = _evaluate_items(hf_papers + hf_models, effective_config, llm, "huggingface", log, should_cancel, progress)[: config.max_recommended_papers]
+        hf_items = _evaluate_items(hf_papers + hf_models, effective_config, llm, "huggingface", log, should_cancel, _progress)[: config.max_recommended_papers]
         evaluated_candidates.extend(hf_items)
-        progress("huggingface", 1, 1, "HuggingFace complete")
+        _progress("huggingface", 1, 1, "HuggingFace complete")
 
     github_items: list[dict] = []
     if request.selection.include_github:
         _raise_if_cancelled(should_cancel)
         log("Fetching GitHub trending repositories")
-        progress("github", 0, 1, "Fetching GitHub")
-        github_raw, github_status = fetch_github_trending(
-            config.github_languages,
-            config.github_since,
-            config.max_recommended_papers,
-            config.arxiv_start_date,
-            config.arxiv_end_date,
+        _progress("github", 0, 1, "Fetching GitHub")
+        github_fetch_timeout = _source_fetch_wall_timeout("github", default=0)
+        github_fetch_done, github_fetch_value, github_fetch_error = _run_with_wall_timeout(
+            "GitHub fetch",
+            lambda: fetch_github_trending(
+                config.github_languages,
+                config.github_since,
+                config.max_recommended_papers,
+                config.arxiv_start_date,
+                config.arxiv_end_date,
+            ),
+            github_fetch_timeout,
+            log,
         )
+        if github_fetch_error:
+            raise github_fetch_error
+        if github_fetch_done:
+            github_raw, github_status = github_fetch_value
+        else:
+            github_raw = []
+            github_status = _source_fetch_timeout_status("github", "GitHub", github_fetch_timeout)
         source_status.append(github_status)
         github_items = _evaluate_items(
             github_raw,
@@ -7723,10 +7929,10 @@ def run_find(
             "github",
             log,
             should_cancel,
-            progress,
+            _progress,
         )[: config.max_recommended_papers]
         evaluated_candidates.extend(github_items)
-        progress("github", 1, 1, "GitHub complete")
+        _progress("github", 1, 1, "GitHub complete")
 
     _raise_if_cancelled(should_cancel)
     raw_title_index = _dedupe_items(raw_title_index)

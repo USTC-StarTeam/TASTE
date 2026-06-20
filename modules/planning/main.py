@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
@@ -17,6 +19,12 @@ REQUIRED_EXTERNAL_INPUTS = ('llm_api_or_claude', 'idea_artifacts', 'project_cons
 ARTIFACTS_IN = ('ideas.json', 'idea.md', 'user selection/approval')
 ARTIFACTS_OUT = ('plans.json', 'plan.md', 'experiment_plan.json', 'taste_plan_bridge.json', 'blocker action plans')
 PRIVATE_BACKEND_ROOTS = (
+    'modules/planning/scripts/core/plan_pipeline.py',
+    'modules/planning/scripts/tools/planning_tools.py',
+    'modules/planning/scripts/blockers/build_blocker_action_plan.py',
+    'modules/planning/scripts/actions/propose_next_actions.py',
+)
+COMPATIBILITY_SCRIPT_ROOTS = (
     'modules/planning/scripts/plan_pipeline.py',
     'modules/planning/scripts/planning_tools.py',
     'modules/planning/scripts/build_blocker_action_plan.py',
@@ -68,7 +76,8 @@ def contract() -> dict[str, Any]:
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPTS = Path(__file__).resolve().parent / "scripts"
+PLANNING_ROOT = Path(__file__).resolve().parent
+SCRIPTS = PLANNING_ROOT / "scripts"
 
 
 def _python_env() -> dict[str, str]:
@@ -76,7 +85,6 @@ def _python_env() -> dict[str, str]:
     entries: list[str] = [
         str(ROOT / "framework"),
         str(ROOT / "framework" / "scripts"),
-        str(ROOT / "web" / "backend"),
         str(ROOT),
     ]
     modules_root = ROOT / "modules"
@@ -111,6 +119,7 @@ def _contract_payload() -> dict:
     payload = contract()
     payload["entrypoint"] = f"modules/{STAGE_NAME}/main.py"
     payload["scripts_are_private_backend"] = True
+    payload["compatibility_script_roots"] = list(COMPATIBILITY_SCRIPT_ROOTS)
     return payload
 
 
@@ -143,21 +152,121 @@ ACTION_ALIASES = {
 }
 
 
+def _safe_slug(value: str, default: str = "idea") -> str:
+    text = re.sub(r"[^0-9A-Za-z_.-]+", "-", str(value or "").strip()).strip("-").lower()
+    return (text or default)[:80]
+
+
+def _standalone_run_id(seed: str = "") -> str:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    suffix = _safe_slug(seed, "idea")
+    return f"planning-{stamp}-{suffix}"[:120]
+
+
+def _read_idea_text(path: str = "", text: str = "") -> str:
+    if path:
+        return Path(path).expanduser().read_text(encoding="utf-8")
+    return str(text or "")
+
+
+def _idea_from_markdown(markdown: str, run_id: str) -> dict[str, Any]:
+    lines = [line.strip() for line in str(markdown or "").splitlines() if line.strip()]
+    title = ""
+    for line in lines:
+        if line.startswith("#"):
+            title = line.lstrip("#").strip()
+            break
+    if not title and lines:
+        title = lines[0][:120]
+    return {
+        "id": _safe_slug(title or run_id),
+        "title": title or run_id,
+        "new_method": markdown.strip(),
+        "method_details": markdown.strip(),
+        "initial_experiment": "Planning standalone input did not provide a separate initial_experiment; Claude/LLM must derive the minimum executable experiment from the idea text.",
+        "approved_for_planning": True,
+        "source": "planning_standalone_markdown",
+    }
+
+
+def _standalone_ideas_payload(ns: argparse.Namespace, run_id: str) -> dict[str, Any]:
+    if ns.idea_json:
+        idea_path = Path(ns.idea_json).expanduser()
+        try:
+            raw = json.loads(idea_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise SystemExit(f"failed to load --idea-json {idea_path}: {exc}") from exc
+        if isinstance(raw, dict) and isinstance(raw.get("ideas"), list):
+            ideas = [dict(item) for item in raw["ideas"] if isinstance(item, dict)]
+        elif isinstance(raw, dict):
+            ideas = [dict(raw)]
+        elif isinstance(raw, list):
+            ideas = [dict(item) for item in raw if isinstance(item, dict)]
+        else:
+            raise SystemExit("--idea-json must contain an object, an ideas object, or a list of objects")
+    else:
+        idea_text = _read_idea_text(ns.idea_md, ns.idea_text)
+        if not idea_text.strip():
+            raise SystemExit("standalone planning requires --idea-json, --idea-md, or --idea-text")
+        ideas = [_idea_from_markdown(idea_text, run_id)]
+    for index, idea in enumerate(ideas, 1):
+        idea.setdefault("id", _safe_slug(idea.get("idea_id") or idea.get("title") or f"idea-{index}"))
+        idea.setdefault("title", idea.get("id") or f"idea-{index}")
+        idea.setdefault("approved_for_planning", True)
+        idea.setdefault("status", "approved")
+    return {"run_id": run_id, "source": "planning_standalone", "ideas": ideas}
+
+
+def _standalone_output_dir(value: str, run_id: str) -> Path:
+    root = PLANNING_ROOT.resolve()
+    path = Path(value).expanduser().resolve() if value else (root / "runs" / run_id).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise SystemExit(f"standalone --output-dir must stay under {root}") from exc
+    return path
+
+
+def _write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def _run_plan(args: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(description="Run the Planning module backend.")
     parser.add_argument("--run-id", default="")
     parser.add_argument("--config-json", default="")
     parser.add_argument("--idea-id", action="append", default=[])
     parser.add_argument("--repair-rounds", type=int, default=3)
+    parser.add_argument("--idea-json", default="", help="Standalone mode: JSON file containing one idea, a list of ideas, or {'ideas': [...]}.")
+    parser.add_argument("--idea-md", default="", help="Standalone mode: Markdown file describing one idea.")
+    parser.add_argument("--idea-text", default="", help="Standalone mode: literal idea text.")
+    parser.add_argument("--output-dir", default="", help="Standalone output directory. Defaults to modules/planning/runs/<run-id>.")
+    parser.add_argument("--backend", choices=["", "llm", "claude_code", "off"], default="", help="Optional backend hint; off sets PLAN_USE_LLM=0.")
     ns = parser.parse_args(list(args))
+    standalone = bool(ns.idea_json or ns.idea_md or ns.idea_text)
     if not ns.run_id:
-        raise SystemExit("--run-id is required")
+        if not standalone:
+            raise SystemExit("--run-id is required unless --idea-json/--idea-md/--idea-text is provided")
+        ns.run_id = _standalone_run_id(ns.idea_json or ns.idea_md or ns.idea_text[:80])
+    if ns.backend == "off":
+        os.environ["PLAN_USE_LLM"] = "0"
+    elif ns.backend:
+        os.environ["PLAN_BACKEND"] = ns.backend
     _ensure_runtime_imports()
     from auto_research.models import AppConfig, PlanRequest
-    from plan_pipeline import run_plan
+    from plan_pipeline import run_plan, run_plan_at_directory
 
     config = AppConfig(**_load_json(ns.config_json, {}))
-    result = run_plan(PlanRequest(run_id=ns.run_id, idea_ids=ns.idea_id, repair_rounds=ns.repair_rounds), config)
+    request = PlanRequest(run_id=ns.run_id, idea_ids=ns.idea_id, repair_rounds=ns.repair_rounds)
+    if standalone:
+        output_dir = _standalone_output_dir(ns.output_dir, ns.run_id)
+        payload = _standalone_ideas_payload(ns, ns.run_id)
+        _write_json(output_dir / "ideas.json", payload)
+        result = run_plan_at_directory(output_dir, request, config, sync_latest_outputs=False, sync_project=False)
+        print(json.dumps({"stage": STAGE_NAME, "run_id": ns.run_id, "output_dir": str(output_dir), "result": result}, ensure_ascii=False, indent=2))
+        return 0
+    result = run_plan(request, config)
     print(json.dumps({"stage": STAGE_NAME, "run_id": ns.run_id, "result": result}, ensure_ascii=False, indent=2))
     return 0
 

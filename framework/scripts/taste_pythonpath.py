@@ -40,11 +40,21 @@ def taste_script_dirs(root: Path | str | None = None) -> list[Path]:
     return [repo / "framework" / "scripts", *(repo / "modules" / name / "scripts" for name in STAGE_MODULE_DIRS)]
 
 
+def taste_script_import_dirs(root: Path | str | None = None) -> list[Path]:
+    repo = resolve_repo_root(root)
+    dirs: list[Path] = []
+    for directory in taste_script_dirs(repo):
+        dirs.append(directory)
+        if directory.is_dir():
+            dirs.extend(path for path in sorted(directory.rglob("*")) if path.is_dir() and path.name != "__pycache__")
+    return dirs
+
+
 def resolve_script_path(name: str, root: Path | str | None = None) -> Path:
     script_name = str(name or "").strip()
     if not script_name:
         raise ValueError("script name is required")
-    for directory in taste_script_dirs(root):
+    for directory in taste_script_import_dirs(root):
         candidate = directory / script_name
         if candidate.exists():
             return candidate
@@ -60,7 +70,7 @@ class ScriptPathResolver:
         return resolve_script_path(os.fspath(name), self.root)
 
     def glob(self, pattern: str):
-        for directory in taste_script_dirs(self.root):
+        for directory in taste_script_import_dirs(self.root):
             yield from directory.glob(pattern)
 
     def exists(self) -> bool:
@@ -86,7 +96,7 @@ def taste_pythonpath_entries(root: Path | str | None = None) -> list[Path]:
     ]
     entries.extend(repo / "modules" / name for name in STAGE_MODULE_DIRS)
     entries.append(repo)
-    entries.extend(taste_script_dirs(repo))
+    entries.extend(taste_script_import_dirs(repo))
     return entries
 
 

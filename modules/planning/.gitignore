@@ -1,0 +1,10 @@
+# Planning standalone/runtime artifacts; source files and docs stay tracked.
+/runs/
+/.runs/
+/tmp/
+/.tmp/
+*.tmp
+*.log
+__pycache__/
+**/__pycache__/
+*.py[cod]

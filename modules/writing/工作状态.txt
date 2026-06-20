@@ -1,0 +1,15 @@
+# Writing 工作状态
+
+## 2026-06-20 接管整理
+
+- `modules/writing_dev` 已替换为正式 `modules/writing`，dev 目录已删除。
+- `modules/writing/vendor` 已删除；有用规约已内化到 `modules/writing/skills`。
+- 公开入口为 `modules/writing/main.py`，`STAGE_NAME=writing`。
+- 独立写作产物写 `modules/writing/runs/<run_id>`；项目态 pipeline 仍按项目写 `projects/<project>/paper` 和 `state`，供 Web 展示。
+- Web paper 按钮保留项目态写作逻辑，因为它本来就是把项目证据转成网页可展示论文预览的正式路径。
+
+## 验证
+
+- `python modules/writing/main.py --contract` 通过。
+- `python -m compileall -q modules/writing` 通过。
+- `vendor/` 不再存在。

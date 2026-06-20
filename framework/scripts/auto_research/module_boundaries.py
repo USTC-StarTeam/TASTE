@@ -157,6 +157,7 @@ SCRIPT_OWNER_OVERRIDES: dict[str, str] = {
     "build_venue_metadata_cache.py": "finding",
     "find_pipeline.py": "finding",
     "find_support.py": "finding",
+    "find_local_rank.py": "finding",
     "finding_quality_tools.py": "finding",
     "discover_arxiv.py": "finding",
     "discover_github_repos.py": "finding",

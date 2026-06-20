@@ -541,8 +541,17 @@ def _public_job_summary_text(value: Any) -> str:
         return "Find 已完成。"
     if lowered_initial in {"read complete", "read completed"}:
         return "精读阶段已完成。"
-    if lowered_initial in {"task cancelled by user", "task cancelled by user."}:
+    if lowered_initial in {"task cancelled by user", "task cancelled by user.", "research action cancelled by user", "research action cancelled by user."}:
         return "任务已取消。"
+    failed_match = re.fullmatch(r"(?:research action|subprocess|task)?\s*failed with exit code\s+(-?\d+)\.?", lowered_initial)
+    if failed_match:
+        return f"任务执行失败：后端流程返回错误码 {failed_match.group(1)}；详细原因见保留日志和对应模块产物。"
+    running_match = re.fullmatch(r"running\s+(environment|experiment|paper|find|read|idea|plan)\s+for\s+(.+)", lowered_initial)
+    if running_match:
+        return _job_status_message(running_match.group(1), "running")
+    complete_match = re.fullmatch(r"(environment|experiment|paper|find|read|idea|plan) complete\.?", lowered_initial)
+    if complete_match:
+        return _job_status_message(complete_match.group(1), "complete")
     if re.search(r"\b(?:read|idea|plan)\b.*stopped at an evidence gate", lowered_initial):
         return "当前 Find 的精读/想法/计划仍有机器校验未通过；请查看本阶段状态并继续运行对应步骤。"
     if "stopped at an evidence gate" in lowered_initial:
@@ -1119,6 +1128,38 @@ def _parse_job_timestamp(value: Any) -> datetime | None:
         return None
 
 
+STAGE_LABELS_ZH = {
+    "find": "发现",
+    "read": "精读",
+    "idea": "想法",
+    "plan": "计划",
+    "environment": "环境配置",
+    "experiment": "实验迭代",
+    "paper": "论文撰写",
+    "full-cycle": "完整科研循环",
+    "full_research_cycle": "完整科研循环",
+}
+
+
+def _stage_label_zh(stage: str) -> str:
+    return STAGE_LABELS_ZH.get(str(stage or "").strip(), str(stage or "任务"))
+
+
+def _job_status_message(stage: str, status: str) -> str:
+    label = _stage_label_zh(stage)
+    if status == "started":
+        return f"{label}任务已启动"
+    if status == "cancelled":
+        return f"{label}任务已取消"
+    if status == "complete":
+        return f"{label}任务已完成"
+    if status == "running":
+        return f"{label}任务仍在后台运行"
+    if status == "blocked":
+        return f"{label}任务在证据门控处停止"
+    return f"{label}任务状态：{status}"
+
+
 def _reconcile_stale_cancelling_jobs(grace_seconds: float = 8.0) -> None:
     # Release web jobs that were cancelled after their child process already exited.
     now = datetime.now(UTC)
@@ -1545,18 +1586,48 @@ class JobState:
                 if paper_summary:
                     progress_payload["message"] = paper_summary
                     progress_payload["phase"] = str(result_payload.get("status") or progress_payload.get("phase") or "paper")
+        if compact and public_stage == "environment":
+            decision_projection = _environment_decision_public_projection(self.job_id, self.run_id, result_payload if isinstance(result_payload, dict) else self.result, self.created_at)
+            if decision_projection:
+                progress_payload = dict(progress_payload if isinstance(progress_payload, dict) else {})
+                progress_payload.update({
+                    "phase": decision_projection.get("status") or "blocked",
+                    "current": 1,
+                    "total": 1,
+                    "percent": 100,
+                    "message": str(decision_projection.get("summary") or ""),
+                })
+                base_result = result_payload if isinstance(result_payload, dict) else {}
+                result_payload = {
+                    **base_result,
+                    "status": decision_projection.get("status") or base_result.get("status") or self.status,
+                    "summary": decision_projection.get("summary") or base_result.get("summary") or "",
+                    "environment_decision": decision_projection,
+                    "run_id": decision_projection.get("run_id") or base_result.get("run_id"),
+                }
         log_stage = panel_stage or ("paper" if paper_job else self.stage)
         logs = _public_job_logs(log_stage, self.logs, progress_payload, result_payload if isinstance(result_payload, dict) else self.result, limit=80) if compact else self.logs
         if public_stage != self.stage and isinstance(self.result, dict):
             self.result.setdefault("raw_stage", self.stage)
+        public_status = _public_paper_status(self.status, result_payload if isinstance(result_payload, dict) else {}) if paper_job and public_stage == "paper" else self.status
+        public_status = _normalize_public_job_status(public_status, progress_payload, self.error, result_payload if isinstance(result_payload, dict) else self.result, public_stage)
+        if public_stage == "environment" and public_status == "blocked" and isinstance(progress_payload, dict):
+            message = str(progress_payload.get("message") or "")
+            if re.search(r"(?:exit code|错误码|返回错误码)\s*30\b", message, flags=re.I):
+                progress_payload = dict(progress_payload)
+                progress_payload["phase"] = "blocked"
+                progress_payload["current"] = 1
+                progress_payload["total"] = 1
+                progress_payload["percent"] = 100
+                progress_payload["message"] = "环境配置停在真实证据门控；详细原因见保留日志和对应模块产物。"
         payload = {
             "job_id": self.job_id,
             "stage": public_stage,
-            "status": _public_paper_status(self.status, result_payload if isinstance(result_payload, dict) else {}) if paper_job and public_stage == "paper" else self.status,
+            "status": public_status,
             "created_at": self.created_at,
             "logs": logs,
             "log_count": len(self.logs),
-            "run_id": self.run_id,
+            "run_id": self.run_id or (str(result_payload.get("run_id") or "") if isinstance(result_payload, dict) else ""),
             "result": result_payload,
             "internal": self.internal,
             "display": self.display,
@@ -7903,8 +7974,191 @@ def _humanize_stale_tail(text: Any, process_alive: bool) -> str:
 
 
 
-def _normalize_public_job_status(public_status: Any, progress: Any = None, error: Any = "", result: Any = None) -> str:
+def _job_result_return_code(result: Any) -> int | None:
+    if not isinstance(result, dict):
+        return None
+    candidates: list[Any] = [
+        result.get("returncode"),
+        result.get("return_code"),
+        result.get("exit_code"),
+    ]
+    latest_record = result.get("latest_record") if isinstance(result.get("latest_record"), dict) else {}
+    candidates.extend([latest_record.get("returncode"), latest_record.get("return_code"), latest_record.get("exit_code")])
+    framework = result.get("framework") or result.get("framework_status")
+    if isinstance(framework, dict):
+        fw_record = framework.get("latest_record") if isinstance(framework.get("latest_record"), dict) else {}
+        candidates.extend([fw_record.get("returncode"), fw_record.get("return_code"), fw_record.get("exit_code")])
+    for value in candidates:
+        try:
+            if value in (None, ""):
+                continue
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _environment_job_rc30_blocked(stage: Any, progress: Any = None, error: Any = "", result: Any = None) -> bool:
+    if str(stage or "").strip().lower() != "environment":
+        return False
+    if _job_result_return_code(result) == 30:
+        return True
+    progress_payload = progress if isinstance(progress, dict) else {}
+    combined = " ".join(
+        str(part or "")
+        for part in [
+            progress_payload.get("phase"),
+            progress_payload.get("message"),
+            error,
+            result.get("summary") if isinstance(result, dict) else "",
+        ]
+    ).lower()
+    return bool(re.search(r"(?:exit code|错误码|返回错误码)\s*30\b", combined))
+
+
+def _parse_web_environment_run_timestamp(run_id: Any) -> float:
+    match = re.search(r"web_environment_[^_]+_(\d{8})t(\d{6})z", str(run_id or "").strip().lower())
+    if not match:
+        return 0.0
+    try:
+        return datetime.strptime("".join(match.groups()), "%Y%m%d%H%M%S").replace(tzinfo=UTC).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _parse_public_job_timestamp(value: Any) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _load_json_file(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _environment_decision_for_job(run_id: Any, result: Any, created_at: Any) -> dict[str, Any]:
+    result_payload = result if isinstance(result, dict) else {}
+    project = str(result_payload.get("project") or "").strip()
+    runs_root = WORKSPACE_ROOT / "modules" / "environment" / "runs"
+    candidates: list[tuple[float, Path]] = []
+
+    explicit_run = str(run_id or result_payload.get("run_id") or "").strip()
+    if explicit_run:
+        explicit_path = runs_root / explicit_run / "environment_deployment_decision.json"
+        if explicit_path.exists():
+            candidates.append((0.0, explicit_path))
+
+    created_ts = _parse_public_job_timestamp(created_at)
+    pattern = f"web_environment_{project}_*/environment_deployment_decision.json" if project else "web_environment_*/environment_deployment_decision.json"
+    try:
+        paths = list(runs_root.glob(pattern))
+    except Exception:
+        paths = []
+    for path in paths:
+        candidate_run = path.parent.name
+        if project and f"web_environment_{project}_" not in candidate_run:
+            continue
+        run_ts = _parse_web_environment_run_timestamp(candidate_run)
+        if created_ts and run_ts:
+            diff = abs(run_ts - created_ts)
+            if diff > 20 * 60:
+                continue
+            score = diff
+        else:
+            try:
+                score = abs(path.stat().st_mtime - created_ts) if created_ts else -path.stat().st_mtime
+            except OSError:
+                score = 999999999.0
+        candidates.append((score, path))
+
+    if not candidates:
+        latest_path = WORKSPACE_ROOT / "modules" / "environment" / "latest_decision.json"
+        latest = _load_json_file(latest_path)
+        latest_run = str(latest.get("run_id") or "").strip()
+        latest_ts = _parse_web_environment_run_timestamp(latest_run)
+        if latest and (not project or f"web_environment_{project}_" in latest_run) and (not created_ts or not latest_ts or abs(latest_ts - created_ts) <= 20 * 60):
+            return latest
+        return {}
+
+    _score, path = sorted(candidates, key=lambda item: item[0])[0]
+    return _load_json_file(path)
+
+
+def _environment_failure_taxonomy_summary(decision: dict[str, Any]) -> str:
+    verdict = decision.get("verdict") if isinstance(decision.get("verdict"), dict) else {}
+    taxonomy = verdict.get("failure_taxonomy") if isinstance(verdict.get("failure_taxonomy"), list) else []
+    if not taxonomy:
+        reason = str(verdict.get("reject_reason") or decision.get("reject_reason") or "").strip()
+        return _public_text(reason)[:260] if reason else "真实环境证据仍未通过。"
+    first = taxonomy[0] if isinstance(taxonomy[0], dict) else {}
+    category = str(first.get("category") or "").strip()
+    label_map = {
+        "conda_environment": "Conda 环境依赖",
+        "repository": "仓库证据",
+        "data": "数据/loader",
+        "reproduction": "参考复现",
+        "command": "验证命令",
+        "workspace_audit": "工作区写入审计",
+    }
+    label = label_map.get(category, category.replace("_", " ") or "环境门控")
+    evidence = first.get("evidence") if isinstance(first.get("evidence"), list) else []
+    joined = " ".join(str(item or "") for item in evidence[:3]).lower()
+    if "pyg" in joined and ("pytorch" in joined or "torch" in joined):
+        detail = "PyG/PyTorch/CUDA/Python 版本组合未解算成功。"
+    elif "libmambaunsatisfiableerror" in joined or "unsatisfiable" in joined:
+        detail = "Conda 依赖解算失败，需要调整包源或版本约束。"
+    elif evidence:
+        detail = _public_text(str(evidence[0] or "")).strip()
+        detail = re.sub(r"/[^\s;,]+", "[local-path]", detail)
+        detail = detail[:220]
+    else:
+        detail = "真实验证证据仍未通过。"
+    return f"{label}未通过：{detail}"
+
+
+def _environment_decision_public_projection(job_id: Any, run_id: Any, result: Any, created_at: Any) -> dict[str, Any]:
+    decision = _environment_decision_for_job(run_id, result, created_at)
+    if not decision:
+        return {}
+    decision_value = str(decision.get("decision") or "").strip()
+    exit_code = decision.get("exit_code")
+    if decision_value not in {"continue_repair", "reject", "approve"}:
+        return {}
+    if decision_value == "approve":
+        status = "done"
+        summary = "环境配置已通过真实复现和工作区审计，可以进入实验迭代。"
+    elif decision_value == "reject":
+        status = "blocked"
+        summary = "环境配置已拒绝当前路线：" + _environment_failure_taxonomy_summary(decision)
+    else:
+        status = "blocked"
+        summary = "环境配置停在可修复真实门控：" + _environment_failure_taxonomy_summary(decision)
+    audit = decision.get("workspace_write_audit") if isinstance(decision.get("workspace_write_audit"), dict) else {}
+    if audit.get("status") == "passed" and "工作区写入审计" not in summary:
+        summary += " 工作区写入审计已通过。"
+    return {
+        "run_id": str(decision.get("run_id") or run_id or ""),
+        "status": status,
+        "summary": summary,
+        "decision": decision_value,
+        "exit_code": exit_code,
+        "allow_next_module": bool(decision.get("allow_next_module")),
+        "source": "modules/environment/environment_deployment_decision.json",
+    }
+
+
+def _normalize_public_job_status(public_status: Any, progress: Any = None, error: Any = "", result: Any = None, stage: Any = "") -> str:
     """Make taskbar status agree with terminal progress/error evidence."""
+    if _environment_job_rc30_blocked(stage, progress, error, result):
+        return "blocked"
     status = str(public_status or "").strip()
     lowered = status.lower()
     if lowered not in {"running", "queued", "cancelling", ""}:
@@ -8883,7 +9137,27 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
                 public_progress["current"] = 1
                 public_progress["total"] = 1
                 public_progress["percent"] = 100
-    public_status = _normalize_public_job_status(public_status, public_progress, item.get("error", ""), compact_result or result)
+    if public_stage == "environment":
+        decision_projection = _environment_decision_public_projection(
+            item.get("job_id", ""),
+            item.get("run_id") or compact_result.get("run_id") or result.get("run_id"),
+            compact_result or result,
+            item.get("created_at", ""),
+        )
+        if decision_projection:
+            public_status = str(decision_projection.get("status") or public_status or "blocked")
+            public_progress.update({
+                "phase": public_status,
+                "current": 1,
+                "total": 1,
+                "percent": 100,
+                "message": str(decision_projection.get("summary") or ""),
+            })
+            compact_result["status"] = public_status
+            compact_result["summary"] = str(decision_projection.get("summary") or compact_result.get("summary") or "")
+            compact_result["run_id"] = str(decision_projection.get("run_id") or compact_result.get("run_id") or "")
+            compact_result["environment_decision"] = decision_projection
+    public_status = _normalize_public_job_status(public_status, public_progress, item.get("error", ""), compact_result or result, public_stage)
     if public_status in {"blocked", "error", "cancelled", "done"}:
         compact_result["status"] = public_status
     public_log_result = compact_result if full_cycle_job else result
@@ -8894,7 +9168,7 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
         "created_at": item.get("created_at", ""),
         "logs": _public_job_logs(panel_stage or ("paper" if paper_job else ("full-cycle" if full_cycle_job else raw_stage)), item.get("logs"), public_progress, public_log_result, limit=40),
         "log_count": item.get("log_count", 0),
-        "run_id": item.get("run_id", ""),
+        "run_id": item.get("run_id", "") or compact_result.get("run_id", ""),
         "result": compact_result,
         "internal": bool(item.get("internal")),
         "display": item.get("display", ""),
@@ -9158,8 +9432,8 @@ def start_job(stage: str, fn: Callable[[Callable[[str], None], Callable[[], bool
     def runner() -> None:
         job.status = "running"
         _persist_jobs()
-        job.log(f"{stage} started")
-        job.set_progress("started", 0, 1, f"{stage} started")
+        job.log(_job_status_message(stage, "started"))
+        job.set_progress("started", 0, 1, _job_status_message(stage, "started"))
         try:
             job.result = fn(job.log, job.should_cancel, job.set_progress)
             result_status = str(job.result.get("status") or "").lower() if isinstance(job.result, dict) else ""
@@ -9184,19 +9458,19 @@ def start_job(stage: str, fn: Callable[[Callable[[str], None], Callable[[], bool
             _persist_jobs()
             if job.status == "cancelled":
                 job.cancelled_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-                job.set_progress("cancelled", 0, 1, f"{stage} cancelled")
+                job.set_progress("cancelled", 0, 1, _job_status_message(stage, "cancelled"))
             elif job.status == "blocked":
                 blocked_message = ""
                 if isinstance(job.result, dict):
                     blocker = job.result.get("blocker") if isinstance(job.result.get("blocker"), dict) else {}
-                    blocked_message = _human_progress_message(blocker.get("summary") or job.result.get("summary") or blocker, fallback=f"{stage} stopped at an evidence gate")
-                job.set_progress("blocked", 1, 1, blocked_message or f"{stage} stopped at an evidence gate")
+                    blocked_message = _human_progress_message(blocker.get("summary") or job.result.get("summary") or blocker, fallback=_job_status_message(stage, "blocked"))
+                job.set_progress("blocked", 1, 1, blocked_message or _job_status_message(stage, "blocked"))
             elif job.status == "running":
                 current = job.progress if isinstance(job.progress, dict) else {}
-                job.set_progress(str(current.get("phase") or "running"), int(current.get("current") or 0), int(current.get("total") or 0), str(current.get("message") or f"{stage} detached background worker running"))
+                job.set_progress(str(current.get("phase") or "running"), int(current.get("current") or 0), int(current.get("total") or 0), str(current.get("message") or _job_status_message(stage, "running")))
             else:
-                job.set_progress("complete", 1, 1, f"{stage} complete")
-            job.log(f"{stage} {'cancelled' if job.status == 'cancelled' else 'blocked' if job.status == 'blocked' else 'running' if job.status == 'running' else 'complete'}")
+                job.set_progress("complete", 1, 1, _job_status_message(stage, "complete"))
+            job.log(_job_status_message(stage, "cancelled" if job.status == "cancelled" else "blocked" if job.status == "blocked" else "running" if job.status == "running" else "complete"))
             if job.status == "done":
                 _auto_email_after_success(stage, job.result)
         except JobCancelled as exc:

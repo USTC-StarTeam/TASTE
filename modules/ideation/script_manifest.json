@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-17T09:35:03.113893+00:00",
+  "generated_at": "2026-06-18T10:50:49.515203+00:00",
   "module": "ideation",
   "contract": {
     "directory": "modules/ideation",
@@ -24,16 +24,226 @@
     ],
     "private_backend_roots": [
       "modules/ideation/scripts/idea_pipeline.py",
-      "modules/ideation/scripts/ideation_tools.py"
+      "modules/ideation/scripts/ideation_tools.py",
+      "modules/ideation/scripts/core",
+      "modules/ideation/scripts/artifact_io",
+      "modules/ideation/scripts/claude",
+      "modules/ideation/scripts/ideation_quality"
     ]
   },
-  "script_count": 2,
+  "script_count": 14,
   "scripts": [
+    {
+      "script": "__init__.py",
+      "path": "modules/ideation/scripts/__init__.py",
+      "category": "legacy_entrypoint",
+      "owner": "ideation",
+      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
+      "function_count": 0,
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "parse_error": ""
+    },
+    {
+      "script": "__init__.py",
+      "path": "modules/ideation/scripts/artifact_io/__init__.py",
+      "category": "artifact_io",
+      "owner": "ideation",
+      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
+      "function_count": 0,
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "parse_error": ""
+    },
+    {
+      "script": "artifacts.py",
+      "path": "modules/ideation/scripts/artifact_io/artifacts.py",
+      "category": "artifact_io",
+      "owner": "ideation",
+      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
+      "function_count": 14,
+      "functions": [
+        "_first_text",
+        "_as_detail_mapping",
+        "_row_has_signal",
+        "_normalize_row",
+        "_flatten_json_rows",
+        "_markdown_title",
+        "_load_json_file",
+        "_load_markdown_file",
+        "_markdown_sections",
+        "_input_files_from_dir",
+        "discover_input_files",
+        "load_reading_evidence",
+        "_dedupe_evidence",
+        "to_prompt_dict"
+      ],
+      "classes": [
+        "ReadingEvidence"
+      ],
+      "imports": [
+        "__future__",
+        "artifact_io",
+        "dataclasses",
+        "json",
+        "pathlib",
+        "re",
+        "typing"
+      ],
+      "parse_error": ""
+    },
+    {
+      "script": "workspace.py",
+      "path": "modules/ideation/scripts/artifact_io/workspace.py",
+      "category": "artifact_io",
+      "owner": "ideation",
+      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
+      "function_count": 10,
+      "functions": [
+        "utc_now_iso",
+        "safe_run_id",
+        "ensure_inside_ideation",
+        "ensure_parent",
+        "write_json",
+        "write_text",
+        "read_json",
+        "make_run_dir",
+        "public_path",
+        "compact_text"
+      ],
+      "classes": [],
+      "imports": [
+        "__future__",
+        "datetime",
+        "json",
+        "pathlib",
+        "re",
+        "typing"
+      ],
+      "parse_error": ""
+    },
+    {
+      "script": "__init__.py",
+      "path": "modules/ideation/scripts/claude/__init__.py",
+      "category": "claude",
+      "owner": "ideation",
+      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
+      "function_count": 0,
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "parse_error": ""
+    },
+    {
+      "script": "runner.py",
+      "path": "modules/ideation/scripts/claude/runner.py",
+      "category": "claude",
+      "owner": "ideation",
+      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
+      "function_count": 9,
+      "functions": [
+        "_candidate_claude_paths",
+        "find_claude_executable",
+        "_json_span",
+        "parse_json_from_text",
+        "_outer_result_text",
+        "_extract_payload",
+        "extract_payload_from_stdout",
+        "_safe_env",
+        "run_claude_json"
+      ],
+      "classes": [
+        "ClaudeRunConfig"
+      ],
+      "imports": [
+        "__future__",
+        "artifact_io",
+        "dataclasses",
+        "glob",
+        "json",
+        "os",
+        "pathlib",
+        "re",
+        "shutil",
+        "subprocess",
+        "typing"
+      ],
+      "parse_error": ""
+    },
+    {
+      "script": "__init__.py",
+      "path": "modules/ideation/scripts/core/__init__.py",
+      "category": "core",
+      "owner": "ideation",
+      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
+      "function_count": 0,
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "parse_error": ""
+    },
+    {
+      "script": "prompting.py",
+      "path": "modules/ideation/scripts/core/prompting.py",
+      "category": "core",
+      "owner": "ideation",
+      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
+      "function_count": 2,
+      "functions": [
+        "build_evidence_packet",
+        "build_generation_prompt"
+      ],
+      "classes": [],
+      "imports": [
+        "__future__",
+        "artifact_io",
+        "json",
+        "typing"
+      ],
+      "parse_error": ""
+    },
+    {
+      "script": "standalone_pipeline.py",
+      "path": "modules/ideation/scripts/core/standalone_pipeline.py",
+      "category": "core",
+      "owner": "ideation",
+      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
+      "function_count": 9,
+      "functions": [
+        "load_generation_config",
+        "_topic_text",
+        "_mock_payload",
+        "_render_arena_markdown",
+        "_persist_generation_outputs",
+        "run_standalone_ideation",
+        "finalize_standalone_run",
+        "from_mapping",
+        "public_dict"
+      ],
+      "classes": [
+        "StandaloneIdeationConfig"
+      ],
+      "imports": [
+        "__future__",
+        "artifact_io",
+        "claude",
+        "core",
+        "dataclasses",
+        "ideation_quality",
+        "json",
+        "pathlib",
+        "typing"
+      ],
+      "parse_error": ""
+    },
     {
       "script": "idea_pipeline.py",
       "path": "modules/ideation/scripts/idea_pipeline.py",
+      "category": "legacy_entrypoint",
       "owner": "ideation",
-      "owner_reason": "classified by module boundary registry",
+      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
       "function_count": 38,
       "functions": [
         "_raise_if_cancelled",
@@ -78,14 +288,72 @@
       "classes": [],
       "imports": [
         "__future__",
-        "auto_research.jobs",
-        "auto_research.llm",
-        "auto_research.models",
-        "auto_research.paths",
-        "auto_research.storage",
+        "auto_research",
         "datetime",
         "os",
         "pathlib",
+        "re",
+        "typing"
+      ],
+      "parse_error": ""
+    },
+    {
+      "script": "__init__.py",
+      "path": "modules/ideation/scripts/ideation_quality/__init__.py",
+      "category": "ideation_quality",
+      "owner": "ideation",
+      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
+      "function_count": 0,
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "parse_error": ""
+    },
+    {
+      "script": "render.py",
+      "path": "modules/ideation/scripts/ideation_quality/render.py",
+      "category": "ideation_quality",
+      "owner": "ideation",
+      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
+      "function_count": 3,
+      "functions": [
+        "_score_text",
+        "render_ideas_markdown",
+        "build_hypothesis_arena"
+      ],
+      "classes": [],
+      "imports": [
+        "__future__",
+        "artifact_io",
+        "typing"
+      ],
+      "parse_error": ""
+    },
+    {
+      "script": "schema.py",
+      "path": "modules/ideation/scripts/ideation_quality/schema.py",
+      "category": "ideation_quality",
+      "owner": "ideation",
+      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
+      "function_count": 11,
+      "functions": [
+        "idea_output_schema",
+        "_score_number",
+        "_objective_scores",
+        "_dedupe_source_rows",
+        "normalize_inspired_by",
+        "normalize_idea",
+        "normalize_ideas",
+        "_topic_terms",
+        "_contains_experiment_protocol",
+        "idea_quality_issues",
+        "build_quality_audit"
+      ],
+      "classes": [],
+      "imports": [
+        "__future__",
+        "artifact_io",
+        "re",
         "typing"
       ],
       "parse_error": ""
@@ -93,8 +361,9 @@
     {
       "script": "ideation_tools.py",
       "path": "modules/ideation/scripts/ideation_tools.py",
+      "category": "legacy_entrypoint",
       "owner": "ideation",
-      "owner_reason": "classified by module boundary registry",
+      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
       "function_count": 11,
       "functions": [
         "load_json_default",

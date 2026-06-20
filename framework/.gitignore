@@ -1,0 +1,11 @@
+# framework_dev 本地开发副本忽略项
+workspace/
+runs/
+logs/
+.runtime/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+.DS_Store

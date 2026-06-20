@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -16,7 +18,19 @@ RESPONSIBILITY = 'Collect, filter, score, and rank literature/tool candidates fr
 REQUIRED_EXTERNAL_INPUTS = ('llm_api', 'research_topic', 'research_interest', 'researcher_profile', 'source_selection')
 ARTIFACTS_IN = ('config/profile JSON', 'venue/source selection JSON')
 ARTIFACTS_OUT = ('find_results.json', 'article.md', 'source_status.md', 'category/title/detail/scoring reports')
-PRIVATE_BACKEND_ROOTS = ('modules/finding/scripts/find_pipeline.py', 'modules/finding/scripts/find_support.py', 'modules/finding/scripts/finding_quality_tools.py', 'modules/finding/scripts/build_literature_tool_packet.py')
+PRIVATE_BACKEND_ROOTS = (
+    'modules/finding/scripts/find_pipeline.py',
+    'modules/finding/scripts/find_support.py',
+    'modules/finding/scripts/catalog',
+    'modules/finding/scripts/local_store',
+    'modules/finding/scripts/quality',
+    'modules/finding/scripts/selection',
+    'modules/finding/scripts/research_profile',
+    'modules/finding/scripts/ranking',
+    'modules/finding/scripts/sources',
+    'modules/finding/scripts/finding_quality_tools.py',
+    'modules/finding/scripts/build_literature_tool_packet.py',
+)
 
 
 @dataclass(slots=True)
@@ -62,13 +76,28 @@ def contract() -> dict[str, Any]:
     }
 
 
+MODULE_ROOT = Path(__file__).resolve().parent
+MODULE_RUNTIME_DIR = MODULE_ROOT / ".runtime"
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPTS = Path(__file__).resolve().parent / "scripts"
+SCRIPTS = MODULE_ROOT / "scripts"
+
+
+def _default_runtime_dir() -> str:
+    return str(MODULE_RUNTIME_DIR)
+
+
+def _configure_private_runtime_env(env: dict[str, str] | None = None) -> None:
+    target = env if env is not None else os.environ
+    if not str(target.get("WORKFLOW_RUNTIME_DIR") or "").strip():
+        target["WORKFLOW_RUNTIME_DIR"] = _default_runtime_dir()
 
 
 def _python_env() -> dict[str, str]:
     env = os.environ.copy()
+    _configure_private_runtime_env(env)
     entries: list[str] = [
+        str(MODULE_ROOT),
+        str(SCRIPTS),
         str(ROOT / "framework"),
         str(ROOT / "framework" / "scripts"),
         str(ROOT / "web" / "backend"),
@@ -93,6 +122,7 @@ def _python_env() -> dict[str, str]:
 
 
 def _ensure_runtime_imports() -> None:
+    _configure_private_runtime_env()
     for entry in reversed(_python_env()["PYTHONPATH"].split(os.pathsep)):
         if entry and entry not in sys.path:
             sys.path.insert(0, entry)
@@ -174,10 +204,20 @@ def _run_find(args: Sequence[str]) -> int:
     config = AppConfig(**_load_json(ns.config_json, {}))
     selection_payload = _load_json(ns.selection_json, default_source_selection())
     selection = VenueSelection(**normalize_source_selection(selection_payload))
-    result = run_find(FindRequest(config=config, selection=selection))
+    log_stream = io.StringIO()
+    with contextlib.redirect_stdout(log_stream):
+        result = run_find(FindRequest(config=config, selection=selection))
+    logs = log_stream.getvalue()
+    if logs:
+        print(logs, end="", file=sys.stderr)
     run_id = str(result.get("run_id") or "") if isinstance(result, dict) else ""
     _copy_outputs(run_id, ns.output_dir)
-    print(json.dumps({"stage": STAGE_NAME, "run_id": run_id, "result": result}, ensure_ascii=False, indent=2))
+    artifact_dir = ""
+    if run_id:
+        from auto_research.storage import run_dir
+
+        artifact_dir = str(run_dir(run_id))
+    print(json.dumps({"stage": STAGE_NAME, "run_id": run_id, "artifact_dir": artifact_dir, "result": result}, ensure_ascii=False, indent=2))
     return 0
 
 

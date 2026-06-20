@@ -48,7 +48,7 @@ The writing agent must generate a real venue-formatted research manuscript, not 
 
 When the configured target venue resolves to a Nature-family journal, writing must switch to Nature-family article mode from the dynamic venue contract, not from a hard-coded project topic or old conference setting.
 
-- Use the writing vendor reference under `modules/writing/vendor/nature_family_writing_reference` only as read-only method guidance. Public Workflow prompts, logs, UI text, and manuscripts must still call this the writing module.
+- Use the writing vendor reference under `modules/writing_dev/skills/nature-family-writing` only as read-only method guidance. Public Workflow prompts, logs, UI text, and manuscripts must still call this the writing module.
 - Apply a routing-style writing loop: detect article type, section, language, and Nature-family journal from `venue_requirements.json`; load only the relevant local vendor reference fragments; then draft from the TASTE evidence packet.
 - Nature-family manuscripts need broad-reader significance, a compact unstructured summary-style abstract when the resolved journal allows it, a clear `Here we show` contribution sentence only when evidence supports it, calibrated evidence verbs, reproducible Methods, Data availability, Code availability when applicable, and main-text figures/tables whose claims are supported.
 - If the resolved Nature-family contract says first submission accepts flexible format or a single Word/PDF, record that as venue policy. Do not invent a LaTeX-only hard rule. If The workflow generates LaTeX/PDF for preview, label it as a workflow venue-formatted manuscript preview and keep submission/readiness gates truthful.

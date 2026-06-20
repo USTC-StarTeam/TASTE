@@ -3,20 +3,24 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
-STAGE_NAME = 'writing'
-DISPLAY_NAME = 'Writing'
-RESPONSIBILITY = 'Resolve venue requirements, draft/revise/compile the manuscript, and audit citations/figures/submission readiness from experiment evidence.'
-REQUIRED_EXTERNAL_INPUTS = ('venue', 'selected_plan_contract', 'experiment_evidence', 'paper_config')
-ARTIFACTS_IN = ('experiment_registry.json', 'claim ledger', 'venue template/requirements')
-ARTIFACTS_OUT = ('paper draft/revision', 'compiled PDF', 'paper_pipeline.json', 'submission_readiness.json')
-PRIVATE_BACKEND_ROOTS = ('modules/writing', 'modules/writing/scripts/run_paper_pipeline.py', 'modules/writing/scripts/paper_common.py')
+STAGE_NAME = "writing"
+DISPLAY_NAME = "Writing"
+RESPONSIBILITY = "独立后端论文生成模块：根据实验 idea、plan、实验记录和目标会议/期刊，调研官方要求、下载官方模板，并让 Claude Code 生成证据受控的 venue-formatted 论文。"
+REQUIRED_EXTERNAL_INPUTS = ("venue", "idea", "plan", "experimental_log", "experiment_records")
+ARTIFACTS_IN = ("idea.md", "plan.md", "experimental_log.md", "records/", "venue official requirements/template")
+ARTIFACTS_OUT = ("paper.tex", "paper.pdf", "refs.bib", "venue_requirements.json", "template_source.json", "audits", "provenance.json")
+PRIVATE_BACKEND_ROOTS = ("modules/writing", "modules/writing/scripts", "modules/writing/skills")
+
+ROOT = Path(__file__).resolve().parents[2]
+MODULE_ROOT = Path(__file__).resolve().parent
+SCRIPTS_ROOT = MODULE_ROOT / "scripts"
+SCRIPT_CATEGORIES = ("core", "pipeline", "venue", "rendering", "audit", "repair", "review", "maintenance")
 
 
 @dataclass(slots=True)
@@ -50,32 +54,18 @@ class StageResult:
     message: str = ""
 
 
-def contract() -> dict[str, Any]:
-    return {
-        "stage": STAGE_NAME,
-        "display_name": DISPLAY_NAME,
-        "responsibility": RESPONSIBILITY,
-        "required_external_inputs": list(REQUIRED_EXTERNAL_INPUTS),
-        "artifacts_in": list(ARTIFACTS_IN),
-        "artifacts_out": list(ARTIFACTS_OUT),
-        "private_backend_roots": list(PRIVATE_BACKEND_ROOTS),
-    }
-
-
-ROOT = Path(__file__).resolve().parents[2]
-SCRIPTS = Path(__file__).resolve().parent / "scripts"
+def _script_dirs() -> list[Path]:
+    dirs = [SCRIPTS_ROOT]
+    dirs.extend(SCRIPTS_ROOT / name for name in SCRIPT_CATEGORIES if (SCRIPTS_ROOT / name).is_dir())
+    return dirs
 
 
 def _python_env() -> dict[str, str]:
     env = os.environ.copy()
-    entries: list[str] = [
-        str(ROOT / "framework"),
-        str(ROOT / "framework" / "scripts"),
-        str(ROOT / "web" / "backend"),
-        str(ROOT),
-    ]
+    entries: list[str] = [str(MODULE_ROOT), str(ROOT), str(ROOT / "framework"), str(ROOT / "framework" / "scripts"), str(ROOT / "web" / "backend")]
+    entries.extend(str(path) for path in _script_dirs())
     modules_root = ROOT / "modules"
-    for stage_dir in sorted(path for path in modules_root.iterdir() if path.is_dir()):
+    for stage_dir in sorted(path for path in modules_root.iterdir() if path.is_dir() and path.name != "writing"):
         entries.append(str(stage_dir))
         scripts = stage_dir / "scripts"
         if scripts.is_dir():
@@ -92,35 +82,59 @@ def _python_env() -> dict[str, str]:
     return env
 
 
-def _ensure_runtime_imports() -> None:
-    for entry in reversed(_python_env()["PYTHONPATH"].split(os.pathsep)):
-        if entry and entry not in sys.path:
-            sys.path.insert(0, entry)
-
-
-def _load_json(path: str, default):
-    return json.loads(Path(path).read_text(encoding="utf-8")) if path else default
-
-
-def _contract_payload() -> dict:
-    payload = contract()
-    payload["entrypoint"] = f"modules/{STAGE_NAME}/main.py"
-    payload["scripts_are_private_backend"] = True
-    return payload
+def _contract_payload() -> dict[str, Any]:
+    return {
+        "stage": STAGE_NAME,
+        "display_name": DISPLAY_NAME,
+        "responsibility": RESPONSIBILITY,
+        "required_external_inputs": list(REQUIRED_EXTERNAL_INPUTS),
+        "artifacts_in": list(ARTIFACTS_IN),
+        "artifacts_out": list(ARTIFACTS_OUT),
+        "private_backend_roots": list(PRIVATE_BACKEND_ROOTS),
+        "entrypoint": "modules/writing/main.py",
+        "scripts_are_private_backend": True,
+        "frontend_dependency": False,
+        "intermediate_root": "modules/writing/runs",
+    }
 
 
 def _normalize_action(action: str) -> str:
     return str(action or "").strip().replace("-", "_")
 
 
-def _run_script(script_stem: str, args: Sequence[str]) -> int:
-    script = SCRIPTS / f"{_normalize_action(script_stem)}.py"
-    if not script.exists():
-        raise SystemExit(f"Unknown {STAGE_NAME} module action: {script_stem}")
-    proc = subprocess.run([sys.executable, str(script), *args], cwd=ROOT, env=_python_env(), text=True)
-    return int(proc.returncode)
-
-
+SCRIPT_ACTIONS = {
+    "run_paper_pipeline": "pipeline/run_paper_pipeline.py",
+    "run_paper_orchestra_bridge": "pipeline/run_paper_orchestra_bridge.py",
+    "run_standalone_paper": "pipeline/run_standalone_paper.py",
+    "build_project_input_pack": "pipeline/build_project_input_pack.py",
+    "project_input_pack": "pipeline/build_project_input_pack.py",
+    "standalone": "pipeline/run_standalone_paper.py",
+    "build_paper_orchestra_state": "pipeline/build_paper_orchestra_state.py",
+    "build_paper_md": "pipeline/build_paper_md.py",
+    "build_conference_preview_paper": "pipeline/build_conference_preview_paper.py",
+    "resolve_venue_requirements": "venue/resolve_venue_requirements.py",
+    "venue_requirements": "venue/resolve_venue_requirements.py",
+    "fetch_latex_template": "venue/fetch_latex_template.py",
+    "render_paper_tex": "rendering/render_paper_tex.py",
+    "compile_paper_pdf": "rendering/compile_paper_pdf.py",
+    "audit_paper_evidence": "audit/audit_paper_evidence.py",
+    "audit_paper_figures": "audit/audit_paper_figures.py",
+    "audit_paper_normality": "audit/audit_paper_normality.py",
+    "audit_paper_orchestra": "audit/audit_paper_orchestra.py",
+    "audit_submission_readiness": "audit/audit_submission_readiness.py",
+    "audit_standalone_paper": "audit/audit_standalone_paper.py",
+    "build_claim_ledger": "audit/build_claim_ledger.py",
+    "repair_paper_figures_loop": "repair/repair_paper_figures_loop.py",
+    "repair_paper_orchestra_citations": "repair/repair_paper_orchestra_citations.py",
+    "repair_paper_preview_loop": "repair/repair_paper_preview_loop.py",
+    "revise_paper_citation_coverage": "repair/revise_paper_citation_coverage.py",
+    "revise_paper_md": "repair/revise_paper_md.py",
+    "review_response_tools": "review/review_response_tools.py",
+    "check_internal_assets": "maintenance/check_internal_assets.py",
+    "check_assets": "maintenance/check_internal_assets.py",
+    "sync_vendor": "maintenance/check_internal_assets.py",
+    "sync_stack": "maintenance/check_internal_assets.py",
+}
 ACTION_ALIASES = {
     "": "run_paper_pipeline",
     "run": "run_paper_pipeline",
@@ -130,13 +144,6 @@ ACTION_ALIASES = {
     "preview": "build_conference_preview_paper",
     "audit_evidence": "audit_paper_evidence",
     "submission_readiness": "audit_submission_readiness",
-    "respond_reviews": "respond_to_paper_reviews",
-    "respond_to_reviews": "respond_to_paper_reviews",
-    "re_review": "re_review_paper",
-    "comparison": "write_comparison",
-    "sync_stack": "sync_third_party_research_stack",
-    "sync_vendor": "sync_writing_vendor",
-    "venue_requirements": "resolve_venue_requirements",
     "repair_figures": "repair_paper_figures_loop",
     "repair_preview": "repair_paper_preview_loop",
     "audit_normality": "audit_paper_normality",
@@ -155,8 +162,25 @@ REVIEW_TOOL_ACTIONS = {
 }
 
 
+def _script_path(script_stem: str) -> Path:
+    key = _normalize_action(script_stem)
+    mapped = SCRIPT_ACTIONS.get(key)
+    candidates = [SCRIPTS_ROOT / mapped] if mapped else []
+    candidates.extend(directory / f"{key}.py" for directory in _script_dirs())
+    for candidate in candidates:
+        if candidate and candidate.exists():
+            return candidate
+    raise SystemExit(f"Unknown {STAGE_NAME} module action: {script_stem}")
+
+
+def _run_script(script_stem: str, args: Sequence[str]) -> int:
+    script = _script_path(script_stem)
+    proc = subprocess.run([sys.executable, str(script), *args], cwd=ROOT, env=_python_env(), text=True)
+    return int(proc.returncode)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Writing module public backend entrypoint.", add_help=True)
+    parser = argparse.ArgumentParser(description="writing 独立后端入口。", add_help=True)
     parser.add_argument("--action", default="run", help="Backend action. Default: run.")
     parser.add_argument("--contract", action="store_true")
     ns, rest = parser.parse_known_args(argv)

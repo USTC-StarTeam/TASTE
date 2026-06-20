@@ -1,101 +1,140 @@
-# Writing / Paper 模块
+# Writing / 论文写作模块
 
-本目录是 TASTE 七阶段中的 `Paper/Writing` 独立模块边界。TASTE 框架可以通过网页和任务队列调用它，但模块自身必须只依赖显式输入和外部维护的产物，不能隐式读取其它阶段的历史状态来替代输入。
+`modules/writing` 是 TASTE 七阶段中的正式论文写作后端模块。它基于 idea、plan、实验记录、证据审计和目标会议/期刊要求，调研官方投稿规则、下载/验证官方模板，并让 Claude Code 生成证据受控的 venue-formatted 论文。
 
-## 职责边界
+本模块不负责做实验，也不负责伪造证据。实验产物来自 `experimenting` 或项目目录中已审计的记录；证据不足时只能生成预览/诊断稿，不能标记为投稿通过。
 
-契约原文：Resolve venue requirements, draft/revise/compile the manuscript, and audit citations/figures/submission readiness from experiment evidence.
+## 运行环境
 
-根据选中计划和实验真证据解析投稿 venue 要求，生成、修订、编译论文，并审计引用、图表、自审、声明和投稿准备度。它不能把缺失实验包装成结论。
+```bash
+ssh hidimension_5090_1
+cd /home/fmh/workspace/TASTE
+source /home/fmh/workspace/miniforge/etc/profile.d/conda.sh
+conda activate ar_taste
+source /home/fmh/workspace/.nvm/nvm.sh
+```
 
-## 输入
+需要 `python`、`rg`、Claude Code；PDF 编译可用 `latexmk` 或 `pdflatex`，不可用时模块会留下编译阻塞报告。
 
-- venue / paper_config
-- selected_plan_contract
-- experiment_registry / claim ledger / metrics / bad cases
-- 模板和参考文献资源
-- Claude Code 写作会话或 LLM 兼容配置
+## 两种使用方式
 
-## 输出
+### 1. 独立输入包写作
 
-- paper.md / paper.tex / compiled PDF
-- paper_pipeline.json / paper_orchestra_state.json
-- claim_ledger.md/json
-- figure/citation/evidence/submission audits
-- review response 和修订记录
+先从项目复制写作输入：
 
-## 运行逻辑
+```bash
+python modules/writing/main.py \
+  --action project_input_pack \
+  --project <project_id> \
+  --pack-id <pack_id>
+```
 
-1. 解析 venue 要求和模板。
-2. 构建 claim ledger，确认每个论文声明有实验或文献证据。
-3. 分阶段生成 markdown/TeX/PDF。
-4. 反复审计引用、图表、公式、PDF、normality 和 submission readiness。
-5. 只有证据门控通过才把内容作为可投稿稿件；预览稿必须标明未通过项。
+该动作只读项目目录，只写：
 
-## 统一入口
+```text
+modules/writing/runs/source_packs/<pack_id>/
+```
 
-- 公开入口：`/home/fmh/workspace/TASTE/modules/writing/main.py`。
-- 框架调用格式：`python framework/scripts/run_module.py writing --action <action> ...`，或等价地直接调用 `python modules/writing/main.py --action <action> ...`。
-- `scripts/` 下文件是模块私有后端实现，不应由网页前端直接拼路径调用；需要暴露时先在 `main.py` 注册 action。
-- 模块契约由 `main.py --contract` 输出，不再维护单独的 `contracts.py`。
+再独立运行写作：
 
-## 文件结构
+```bash
+python modules/writing/main.py \
+  --action standalone \
+  --venue "ICLR 2026" \
+  --idea modules/writing/runs/source_packs/<pack_id>/idea.md \
+  --plan modules/writing/runs/source_packs/<pack_id>/plan.md \
+  --experimental-log modules/writing/runs/source_packs/<pack_id>/experimental_log.md \
+  --records modules/writing/runs/source_packs/<pack_id>/records \
+  --title "可选标题"
+```
 
-| 路径 | 作用 |
+如果只准备 prompt 和目录，不调用 Claude：
+
+```bash
+python modules/writing/main.py --action standalone --venue "ICLR 2026" --idea ... --plan ... --experimental-log ... --records ... --prepare-only
+```
+
+### 2. TASTE 项目态论文预览
+
+```bash
+python modules/writing/main.py \
+  --action pipeline \
+  --project <project_id> \
+  --venue "ICLR" \
+  --generate-paper-preview \
+  --refresh-current-venue
+```
+
+项目态入口会读取 `projects/<project>` 里的当前 Find/Read/Idea/Plan/Experiment/Paper 状态，并把项目论文预览写回项目目录。Web 的 paper 按钮使用这条兼容路径。
+
+## 输入口径
+
+独立写作需要：
+
+- idea：研究问题、核心假设、贡献和方法直觉。
+- plan：实验路线、数据、指标、基线、对照和成功/失败判据。
+- experimental-log：真实实验、环境、命令、指标、失败和坏例记录。
+- records：CSV/JSON/Markdown/图片/PDF/日志等证据目录。
+- venue：目标会议/期刊，例如 `ICLR 2026`、`Nature Machine Intelligence`、`ACL 2026`。
+
+项目态写作需要：
+
+- `--project`：已有 TASTE 项目。
+- `--venue`：目标会议/期刊。
+- 当前项目中已有足够实验/引用/投稿审计证据；不足时生成预览但保持门控阻塞。
+
+## 输出口径
+
+独立写作输出：
+
+```text
+modules/writing/runs/<run_id>/
+```
+
+常见文件：
+
+| 文件 | 作用 |
 | --- | --- |
-| `main.py` | 本模块唯一公开后端入口；负责 action 路由，并通过 `--contract` 输出模块输入、产物和职责边界。 |
-| `script_manifest.json` | 当前脚本清单、函数、import 和归属原因；README 的脚本列表应和它保持一致。 |
-| `scripts/` | 该模块真正的后端实现。新增脚本前应优先合并到下面列出的现有大块中。 |
+| `venue/venue_requirements.json` | 官方投稿要求解析。 |
+| `venue/template_source/` | 官方模板或官方允许模板来源。 |
+| `workspace/inputs/` | idea、plan、实验日志和 records 快照。 |
+| `workspace/final/paper.tex` / `paper.pdf` | 最终 TeX/PDF。 |
+| `workspace/refs.bib` | 引用库。 |
+| `workspace/audits/*.json|md` | 引用、claim、页数、normality、submission readiness 审计。 |
+| `workspace/provenance.json` | 证据和生成来源。 |
 
-## 脚本清单
+项目态写作输出在 `projects/<project>/paper/...` 和 `projects/<project>/state/...`，供 Web 展示。
 
-### 主入口和生成
+## 运行流程
 
-| 脚本 | 真实作用 |
+1. 解析目标 venue，抓取/核对官方 author guidelines、模板、页数、匿名、引用和 AI disclosure 要求。
+2. 准备写作工作区和输入证据快照。
+3. 让 Claude Code 生成或修订论文，但所有 claim 必须绑定输入证据。
+4. 渲染 TeX、尝试编译 PDF。
+5. 执行 citation、claim ledger、figure、normality、page/submission readiness 等审计。
+6. 证据不足或格式不合规时保持 blocked，并输出可读阻塞原因。
+
+## 脚本结构
+
+| 目录 | 作用 |
 | --- | --- |
-| `scripts/run_paper_pipeline.py` | 论文阶段主流水线。 |
-| `scripts/run_paper_orchestra_bridge.py` | Claude Code/PaperOrchestra 风格写作桥，调度章节、修复和门控。 |
-| `scripts/build_paper_orchestra_state.py` | 构建写作代理状态和 section 任务。 |
-| `scripts/build_paper_md.py` | 生成或整理论文 Markdown。 |
-| `scripts/build_conference_preview_paper.py` | 生成目标会议预览稿。 |
-| `scripts/render_paper_tex.py` | 把 Markdown/结构化稿件渲染为 TeX。 |
-| `scripts/compile_paper_pdf.py` | 编译 PDF 并记录 LaTeX 日志。 |
+| `scripts/core/` | 路径、JSON/text、venue policy、LaTeX 和审计公共函数。 |
+| `scripts/pipeline/` | 主流水线、独立运行、项目输入包、Claude 写作桥。 |
+| `scripts/venue/` | 官方 venue 要求解析和模板下载。 |
+| `scripts/rendering/` | Markdown/结构化稿转 TeX、PDF 编译。 |
+| `scripts/audit/` | 证据、引用、图表、normality、submission readiness、claim ledger 审计。 |
+| `scripts/repair/` | 图表、引用、预览稿、Markdown 修复循环。 |
+| `scripts/review/` | 内部评审、作者回应、再评审。 |
+| `scripts/maintenance/` | 内部 skill/helper 完整性检查。 |
 
-### 模板和 venue
+## 内部 skills
 
-| 脚本 | 真实作用 |
-| --- | --- |
-| `scripts/resolve_venue_requirements.py` | 解析投稿 venue 的格式、页数和模板要求。 |
-| `scripts/fetch_latex_template.py` | 获取/同步 LaTeX 模板。 |
-| `scripts/sync_writing_vendor.py` | 同步写作 vendor 资源。 |
-| `scripts/sync_third_party_research_stack.py` | 同步第三方研究/写作技能资源到 TASTE 资源结构。 |
-| `scripts/paper_common.py` | 写作阶段共享路径、JSON、文本和证据工具。 |
+`skills/` 中保存写作规约，如 `taste-paper-writing`、`venue-intelligence`、`citation-integrity`、`nature-family-writing`、`writing-quality` 和内化的 PaperOrchestra 工作流。运行时不再依赖 `vendor/`。
 
-### 审计与修复
+## 维护原则
 
-| 脚本 | 真实作用 |
-| --- | --- |
-| `scripts/build_claim_ledger.py` | 生成论文 claim ledger。 |
-| `scripts/audit_paper_evidence.py` | 审计每个声明是否有真实证据支撑。 |
-| `scripts/audit_paper_figures.py` | 检查图表文件、引用和渲染质量。 |
-| `scripts/audit_paper_normality.py` | 检查稿件是否有异常结构、占位符或明显不自然内容。 |
-| `scripts/audit_paper_orchestra.py` | 审计写作代理状态和章节完成度。 |
-| `scripts/audit_submission_readiness.py` | 综合判断投稿准备度。 |
-| `scripts/repair_paper_figures_loop.py` | 图表问题修复循环。 |
-| `scripts/repair_paper_orchestra_citations.py` | 修复写作代理中的引用覆盖问题。 |
-| `scripts/repair_paper_preview_loop.py` | 预览稿修复循环。 |
-| `scripts/revise_paper_citation_coverage.py` | 提高引用覆盖度并修正缺失引用。 |
-| `scripts/revise_paper_md.py` | 修订论文 Markdown。 |
-
-### 评审与回应
-
-| 脚本 | 真实作用 |
-| --- | --- |
-| `scripts/paper_self_review.py` | 自审当前稿件。 |
-| `scripts/review_response_tools.py` | 统一执行内部评审、评审聚合、作者回应、再评审和比较文本写入；由 `modules/writing/main.py` 通过 `--action review_paper`、`aggregate_reviews`、`respond_reviews`、`re_review`、`comparison` 调用。 |
-
-## 冗余控制原则
-
-- Writing 目前脚本多但边界清楚：pipeline/orchestra、venue/template、claim/evidence audits、review/response 四块。review 类脚本已合并到 `review_response_tools.py`；repair 类脚本仍按图表、引用、预览三类保留边界，不要把 evidence gate 合进纯文本生成函数。
-- 修改本模块时必须先读相关脚本和 manifest，找到根因后再改；禁止为某个论文、某个项目、某个本机路径写特异规则。
-- 用户可见产物必须一遍生成正确；fallback 只能作为最后兼容路线，不能替代主流程质量。
+- 不恢复 `vendor/`。需要的外部知识必须整理进 `skills/` 或干净脚本。
+- 不把运行产物、PDF、LaTeX 临时文件、缓存提交进 git。
+- 不把 web 前端逻辑写进本模块。
+- 新增脚本放入对应功能子目录，优先复用 `core/`。
+- 没有真实证据就保持门控阻塞，不能把预览稿当作投稿通过。

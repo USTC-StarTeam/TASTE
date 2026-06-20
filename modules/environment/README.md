@@ -1,100 +1,97 @@
-# Environment / 环境模块
+# Environment / 环境部署模块
 
-本目录是 TASTE 七阶段中的 `Environment` 独立模块边界。TASTE 框架可以通过网页和任务队列调用它，但模块自身必须只依赖显式输入和外部维护的产物，不能隐式读取其它阶段的历史状态来替代输入。
+`modules/environment` 是 TASTE 七阶段中的正式环境阶段后端模块。它给定实验 plan，在模块私有运行目录里让 Claude Code 审计候选 GitHub 仓库、部署 Conda 环境、准备真实数据/loader、运行参考复现，并给出 `approve`、`reject` 或 `continue_repair` 裁决。
 
-## 职责边界
+本模块不依赖 Web 前端，不直接写项目产物，也不修改其它模块。Web 或 framework 调用时，只能通过 `modules/environment/main.py` 公开入口传入 plan 和运行参数。
 
-契约原文：Select audited code/data bases, probe loaders, and lock the experiment runtime. It does not run novel experiments or write paper claims.
+## 运行环境
 
-根据计划合同选择和验证代码/数据基底，检查 loader、真实数据、参考复现和 Conda/Python 运行环境，锁定实验运行条件。它不生成 idea，不运行创新实验，不写论文结论。
+```bash
+ssh hidimension_5090_1
+cd /home/fmh/workspace/TASTE
+source /home/fmh/workspace/miniforge/etc/profile.d/conda.sh
+conda activate ar_taste
+source /home/fmh/workspace/.nvm/nvm.sh
+```
 
-## 输入
+`python` 与 `rg` 必须来自 `ar_taste`。Claude Code 使用远程 nvm。
 
-- selected_plan_contract / experiment_plan.json
-- Find/Plan 里提到的 repo/data 候选
-- runtime 配置：conda base、实验 python、下载工具等
-- 项目已有 repos/datasets/artifacts
+## 输入口径
 
-## 输出
+最小输入是一个 JSON 实验 plan：
 
-- evidence_ready_repo_selection.json：可执行基底选择
-- repo_env_bootstrap.json：环境部署记录
-- dataset registry / data requirements / acquisition plan
-- reference reproduction / base switch gate / viability audit
+```bash
+python modules/environment/main.py \
+  --action deploy_from_plan \
+  --plan /abs/path/to/experiment_plan.json \
+  --run-id demo_environment
+```
 
-## 运行逻辑
+plan 可以包含：
 
-1. 读取计划合同和候选 repo/data。
-2. 审计当前候选是否有真实代码、真实数据和 loader。
-3. 必要时尝试官方/公开数据下载，但必须记录证据和失败原因。
-4. 只有确定性 base-switch gate 通过时，才允许替换当前基底。
-5. 环境锁定后 Experiment 复用，不反复创建或随意切换。
+- `title/topic/objective`：研究任务。
+- `repo_url/github_url/repositories/repo_candidates`：候选 GitHub 仓库。
+- `dataset/datasets/data`：真实数据集或数据要求。
+- `target_metrics/metrics`：论文或 plan 要复现的指标。
+- `training/reproduction`：训练、评估、checkpoint、硬件等要求。
 
-## 统一入口
+公开 action：
 
-- 公开入口：`/home/fmh/workspace/TASTE/modules/environment/main.py`。
-- 框架调用格式：`python framework/scripts/run_module.py environment --action <action> ...`，或等价地直接调用 `python modules/environment/main.py --action <action> ...`。
-- `scripts/` 下文件是模块私有后端实现，不应由网页前端直接拼路径调用；需要暴露时先在 `main.py` 注册 action。
-- 模块契约由 `main.py --contract` 输出，不再维护单独的 `contracts.py`。
-
-## 文件结构
-
-| 路径 | 作用 |
+| action | 作用 |
 | --- | --- |
-| `main.py` | 本模块唯一公开后端入口；负责 action 路由，并通过 `--contract` 输出模块输入、产物和职责边界。 |
-| `script_manifest.json` | 当前脚本清单、函数、import 和归属原因；README 的脚本列表应和它保持一致。 |
-| `scripts/` | 该模块真正的后端实现。新增脚本前应优先合并到下面列出的现有大块中。 |
+| `deploy_from_plan` / `run` / `deploy` | 主流程：仓库候选、环境计划、命令执行、参考复现、最终裁决。 |
+| `status` | 读取模块最近裁决和状态。 |
+| `--contract` | 输出模块契约。 |
 
-## 脚本清单
+## 输出口径
 
-### 主入口和选择
+所有运行产物限制在：
 
-| 脚本 | 真实作用 |
+```text
+modules/environment/runs/<run_id>/
+```
+
+关键文件：
+
+| 文件 | 作用 |
 | --- | --- |
-| `scripts/run_environment_stage.py` | 网页 Environment 主入口，串联 repo/data/env 检查和诚实 gate。 |
-| `scripts/select_evidence_ready_repo.py` | 选择同时有代码和真实数据证据的 repo。 |
-| `scripts/environment_data_tools.py` | 合并后的 repo/data 注册、候选评估、数据获取计划/尝试、数据不可用策略与 active/pool reconcile 工具；通过 `--tool-action` 选择子功能，公开 action 由 `main.py` 暴露。 |
-| `scripts/select_fresh_research_base.py` | 准备当前 Find 的新基底候选池，不直接越权替换执行基底。 |
+| `environment_deployment_decision.json` | 最终裁决；包含 `decision`、`allow_next_module`、approval gate、workspace audit。 |
+| `claude_environment_plan_round_*.json` | Claude 生成的环境部署计划。 |
+| `command_receipts_round_*.json` | 每轮命令执行回执。 |
+| `.runtime/`、`conda_envs/`、repo/data/log 子目录 | 本 run 的隔离运行环境、中间文件和日志。 |
+| `modules/environment/latest_decision.json` | 最近一次裁决索引，供调试查看。 |
 
-### 环境与数据准备
+批准进入实验必须通过仓库来源、仓库文档、Conda 环境、本机资源、真实数据、必要命令、论文 claim、指标证据、完整复现和工作区审计等 gate。没有真实完整复现时，正确结果是 `continue_repair`，不能伪造 approve。
 
-| 脚本 | 真实作用 |
+## 运行流程
+
+1. 读取并规范化实验 plan，抽取标题、主题、仓库候选、数据和指标。
+2. 如果 plan 给出候选仓库，Claude 只在候选内排序；如果没有候选，Claude 可尝试发现可信官方 GitHub，不能编造。
+3. 克隆或复用仓库到本 run 目录，收集 README、配置、入口、数据和论文证据。
+4. 探测本机 GPU/CUDA/Conda 画像，生成本机适配的环境部署计划。
+5. 受控执行 Conda、安装、数据、verify、smoke、`reproduce_full` 等命令。
+6. 解析指标和回执，重算 approval gate。
+7. 写出 `approve/reject/continue_repair` 裁决；运行期间若写出模块外路径，会被 workspace audit 阻断。
+
+## 与 framework/web 的关系
+
+- 单独调用本模块时，产物只在 `modules/environment` 内，不会覆盖 `projects/<project>` 的网页产物。
+- Web 环境按钮由 `web -> framework -> environment` 调用：web 只传项目 plan/venue/config，framework 记录状态，environment 做模块内裁决。
+- 项目 Claude Code 可直接调用本模块辅助科研，但这类 standalone 产物不会自动变成网页显示的项目产物。
+
+## 脚本结构
+
+| 目录 | 作用 |
 | --- | --- |
-| `scripts/bootstrap_repo_env.py` | 创建/检查 Conda 环境、pip 安装、导入验证和运行命令记录。 |
-| `scripts/repo_data_tools.py` | 合并后的 repo 数据合同、repo dataset/loader probe 和 fresh-base implementation plan 工具；通过 `--tool-action data_requirements/dataset_probe/fresh_base_plan` 选择子功能，公开 action 由 `main.py` 暴露。 |
-| `scripts/probe_fresh_base_data_acquisition.py` | 对当前 Find 新基底做有界数据获取探针。 |
-| `scripts/repo_first_backtrack.py` | 从 repo 反向推断数据需求和缺口。 |
-| `scripts/restart_after_data_blocker.py` | 数据阻塞后扩大候选发现，而不是硬塞当前不可用基底。 |
+| `scripts/orchestration/` | 主编排入口，包含 `autonomous_deploy.py` 和状态读取。 |
+| `scripts/common/` | JSON、路径、shell、安全命令、Claude runner、plan schema 等公共工具。 |
+| `scripts/repository/` | 仓库克隆、复用、证据收集。 |
+| `scripts/environment/` | 本机画像、Conda/runtime 探测。 |
+| `scripts/reproduction/` | 论文证据、指标比较、裁决和 gate 重算。 |
 
-### 审计与 gate
+## 维护原则
 
-| 脚本 | 真实作用 |
-| --- | --- |
-| `scripts/audit_local_repo.py` | 本地 repo 结构和信号审计。 |
-| `scripts/audit_dataset_path.py` | 检查数据路径是否真实存在且可读。 |
-| `scripts/audit_repo_candidate_pool.py` | 深度审计候选池，防止错误切换。 |
-| `scripts/audit_selected_base_viability.py` | 判断当前选中基底是否仍可继续修复或应进入切换 gate。 |
-| `scripts/audit_deterministic_base_switch_gate.py` | 确定性审计 base switch 是否被授权。 |
-| `scripts/execute_authorized_base_switch.py` | 只有 gate 通过后才执行基底切换。 |
-| `scripts/guard_selected_base_route.py` | 保护当前基底路线不被历史/控制路线覆盖。 |
-| `scripts/audit_obsolete_baseline_cleanup.py` | 生成旧基底清理计划，不直接删除文件。 |
-
-### 参考复现
-
-| 脚本 | 真实作用 |
-| --- | --- |
-| `scripts/probe_candidate_base_reference.py` | 采集候选基底参考复现证据。 |
-| `scripts/probe_selected_base_reference.py` | 对当前选中基底触发参考证据探测。 |
-| `scripts/run_selected_base_reference_reproduction_audit.py` | 包装参考复现命令、解析指标并写入审计。 |
-| `scripts/run_safe_unblock.py` | 针对当前新基底的安全解阻循环。 |
-
-### 项目 Adapter 状态契约
-
-项目工作区可以在 `projects/<project>/scripts/adapters/` 放置仓库特定 adapter，但 adapter 仍必须遵守 Environment 模块的状态协议：长时间训练/论文级参考复现必须流式写入声明的 `stdout_path`，不能用 `capture_output=True` 等结束后才落盘；启动后要更新 `state/fresh_base_reference_full_reproduction_job.json` 的 `status=running`、`adapter_pid`、`child_pid`、`artifact_dir`、`stdout_path`、可解析进度/epoch，结束后再写最终 `return_code`、metrics、audit 路径。这样 Web、Experiment、Writing 模块才能在同一个事实源上判断是否允许继续。
-
-## 冗余控制原则
-
-- Environment 仍是脚本较多的模块。后续应继续向 repo_selection.py、base_switch_gates.py、environment_bootstrap.py、reference_reproduction.py 等大块收敛；保留项目 adapter 约定时必须通过统一工具分发，不再新增薄 wrapper。
-- 任何合并都必须保持 base-switch gate、数据证据和当前路线保护，不允许为了文件数减少破坏安全边界。
-- 修改本模块时必须先读相关脚本和 manifest，找到根因后再改；禁止为某个论文、某个项目、某个本机路径写特异规则。
-- 用户可见产物必须一遍生成正确；fallback 只能作为最后兼容路线，不能替代主流程质量。
+- 不新增绕过 `main.py` 的公开入口。
+- 不把旧项目状态、旧 active_repo 或弱 fallback 当作当前主线证据。
+- 可修复问题优先继续修复；只有不可修且证据充分时才 reject。
+- 所有人类可读说明使用中文，运行产物不进入 git。

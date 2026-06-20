@@ -1,0 +1,47 @@
+# modules/finding/.gitignore
+# 本模块的所有"中间产物"都不得进入 git。源代码与文档（README.md、*.py、
+# data/**、script_manifest.json、工作状态.txt）是被跟踪的，不要在这里忽略它们。
+#
+# 背景：根 .gitignore 已经忽略了共享的 runtime/ 与 projects/*，但
+#   - 根 /工作状态.txt、/config.json 用了前导斜杠，只忽略仓库根目录那一份，
+#     不会忽略 modules/finding/ 下的同名文件；
+#   - JSON 不是全局忽略的；
+# 所以本文件作为模块级兜底，确保未来"单机独立模式"或任何脚本若把临时产物
+# 写到 modules/finding 下，也绝不会被误提交。
+
+# Python 字节码
+__pycache__/
+*.py[cod]
+
+# 模块本地的运行/缓存/输出/临时目录（单机独立模式与迁移后的 Find 产物落点）
+.runtime/
+runtime/
+runs/
+run/
+state/
+cache/
+caches/
+local_database/
+discover/
+ingest/
+reports/
+logs/
+artifacts/
+output/
+outputs/
+out/
+scratch/
+tmp/
+.tmp/
+
+# 日志与本机配置（含 LLM key 的本地配置绝不能进 git）
+*.log
+/config.json
+/.config.json
+/config.local.json
+
+# macOS / 编辑器杂物
+.DS_Store
+._*
+*.orig
+*.rej

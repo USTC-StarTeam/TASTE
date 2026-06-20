@@ -1,83 +1,108 @@
-# Experimenting / Experiment 模块
+# Experimenting / 实验执行模块
 
-本目录是 TASTE 七阶段中的 `Experiment` 独立模块边界。TASTE 框架可以通过网页和任务队列调用它，但模块自身必须只依赖显式输入和外部维护的产物，不能隐式读取其它阶段的历史状态来替代输入。
+`modules/experimenting` 是 TASTE 七阶段中的正式实验阶段后端模块。它在给定实验 plan、已锁定代码仓库和 Conda 环境后，让 Claude Code 在目标 repo 内做最小、可审计的实验迭代，并维护实验记录、指标和日志。
 
-## 职责边界
+本模块不负责选择仓库或搭环境；这些属于 `environment`。本模块也不写论文；论文属于 `writing`。
 
-契约原文：Modify or execute selected project code, run auditable experiments, parse metrics/logs, and produce evidence gates for claims.
+## 运行环境
 
-在已锁定的 repo/data/env 上执行真实代码修改、实验启动、日志解析、指标登记、坏例分析和证据门控。它只消费当前执行合同和环境证据，不替代 Find/Plan 做选题。
+```bash
+ssh hidimension_5090_1
+cd /home/fmh/workspace/TASTE
+source /home/fmh/workspace/miniforge/etc/profile.d/conda.sh
+conda activate ar_taste
+source /home/fmh/workspace/.nvm/nvm.sh
+```
 
-## 输入
+`python` 和 `rg` 来自 `ar_taste`；实验命令通过指定的 `--conda-env` 运行。
 
-- selected_plan_contract / experiment_plan.json
-- evidence_ready_repo_selection.json
-- locked experiment_python / repo_path / dataset registry
-- Claude Code 项目会话或明确命令模板
+## 输入口径
 
-## 输出
+最小输入：
 
-- experiment_registry.json：实验记录和指标
-- runs/artifacts/logs：命令、stdout、stderr、metrics、bad cases
-- runtime integrity / reference reproduction audit
-- 下一轮行动建议或 blocker
+```bash
+python modules/experimenting/main.py \
+  --action autonomous_experiment \
+  --plan /abs/path/to/experiment_plan.json \
+  --repo-path /abs/path/to/selected/repo \
+  --conda-env experiment_env \
+  --output-root modules/experimenting/runtime/autonomous \
+  --max-iterations 3
+```
 
-## 运行逻辑
+参数说明：
 
-1. 读取唯一执行计划和环境锁。
-2. 由 Claude Code 或命令模板修改/运行实验。
-3. 记录命令、PID、日志、指标和异常。
-4. 用 watchdog/runtime audit 检查实验是否真的跑完、是否有证据。
-5. 把可论文使用的结论交给 Writing 之前，必须通过复现/证据/坏例审计。
-
-## 统一入口
-
-- 公开入口：`/home/fmh/workspace/TASTE/modules/experimenting/main.py`。
-- 框架调用格式：`python framework/scripts/run_module.py experimenting --action <action> ...`，或等价地直接调用 `python modules/experimenting/main.py --action <action> ...`。
-- `scripts/` 下文件是模块私有后端实现，不应由网页前端直接拼路径调用；需要暴露时先在 `main.py` 注册 action。
-- 模块契约由 `main.py --contract` 输出，不再维护单独的 `contracts.py`。
-
-## 文件结构
-
-| 路径 | 作用 |
+| 参数 | 作用 |
 | --- | --- |
-| `main.py` | 本模块唯一公开后端入口；负责 action 路由，并通过 `--contract` 输出模块输入、产物和职责边界。 |
-| `script_manifest.json` | 当前脚本清单、函数、import 和归属原因；README 的脚本列表应和它保持一致。 |
-| `scripts/` | 该模块真正的后端实现。新增脚本前应优先合并到下面列出的现有大块中。 |
+| `--plan` | JSON/YAML/文本实验计划。 |
+| `--repo-path` | environment 已锁定的基础代码仓库；Claude 默认只能修改这个 repo。 |
+| `--conda-env` | 实验运行 Conda 环境名。 |
+| `--output-root` | 模块状态、记录、日志输出根；默认在 `modules/experimenting/runtime/autonomous`。 |
+| `--max-iterations` | 最大实验迭代轮数。 |
+| `--skip-claude` | 只做环境/记录流程自测，不调用 Claude。 |
+| `--dry-run` | 只写计划和环境锁，不运行 Claude 或验证命令。 |
 
-## 脚本清单
+公开 action：
 
-### 主入口
-
-| 脚本 | 真实作用 |
+| action | 作用 |
 | --- | --- |
-| `scripts/run_loop.py` | 自动科研主循环入口，调用 init、run_project、trajectory supervisor；根日志写入 runtime/logs。 |
-| `scripts/run_coding_agent.py` | 实验 Claude Code 项目代理入口。 |
-| `scripts/launch_experiment_run.py` | 启动单个实验命令并建立 artifact/PID/log 合同。 |
+| `autonomous_experiment` / `run` | 主实验迭代流程。 |
+| `runtime_env` | 运行环境检查/锁定辅助。 |
+| `coding_agent` | 直接调用实验 Claude agent。 |
+| `launch` | 执行一次验证/训练命令。 |
+| `reference_reproduction`、`audit_iteration`、`runtime_integrity` | 质量门控/审计动作。 |
+| `--contract` | 输出模块契约。 |
 
-### 运行与导入
+## 输出口径
 
-| 脚本 | 真实作用 |
+默认输出在：
+
+```text
+modules/experimenting/runtime/autonomous/
+```
+
+Web/framework 单阶段调用会把 `--output-root` 指到：
+
+```text
+modules/experimenting/runtime/web/<project>/
+```
+
+关键产物：
+
+| 文件/目录 | 作用 |
 | --- | --- |
-| `scripts/experiment_contracts.py` | 实验 artifact 合同和结构化字段工具。 |
-| `scripts/experiment_run_watchdog.py` | 监控实验进程、日志和超时。 |
-| `scripts/import_experiment_artifacts.py` | 把外部/历史实验产物导入统一 registry。 |
-| `scripts/run_active_repo_smoke.py` | 对当前 active repo 做快速 smoke。 |
-| `scripts/run_real_repo_smoke.py` | 对真实数据 repo 做诚实短跑复现。 |
+| `environment_lock.json` | Conda/NVM/Claude/runtime 锁定信息。 |
+| `state/experiment_registry.json` | 结构化实验记录。 |
+| `experiment_records.csv` | 表格化实验记录。 |
+| `实验记录.md` | 人类可读实验记录。 |
+| `runs/<run_id>/iteration_*/` | 每轮 Claude prompt、stdout、validation stdout、metrics、bad cases、summary。 |
 
-### 审计与分析
+模块独立运行时，这些产物不会自动覆盖 `projects/<project>` 里的网页产物。framework/web 只读取或投影必要状态；项目 Claude Code 可使用这些产物辅助项目内工作。
 
-| 脚本 | 真实作用 |
+## 运行流程
+
+1. 解析实验 plan，归一化 experiment_id、标题、方法、数据、指标、运行命令和 Conda 环境。
+2. 检查 `repo-path` 和 Conda/NVM/Claude runtime，写出环境锁。
+3. 每轮构建 Claude Code prompt，要求它只修改基础 repo，只把本轮日志/指标写入 iteration artifact dir。
+4. 可选执行 plan 或 `--run-command` 中的验证命令。
+5. 收集 `metrics.json`、`bad_cases.json`、`experiment_iteration_summary.json`，更新 registry/CSV/Markdown。
+6. 成功时可提前停止；失败时保留失败原因和下一步建议。
+
+## 脚本结构
+
+| 目录 | 作用 |
 | --- | --- |
-| `scripts/audit_experiment_iteration.py` | 检查 idea-code-run-log-analysis-reflection-next-plan 是否完整。 |
-| `scripts/audit_experiment_runtime_integrity.py` | 根据 watchdog 和 artifact 合同重建运行完整性审计。 |
-| `scripts/audit_reference_reproduction.py` | 审计参考工作是否已复现。 |
-| `scripts/reference_reproduction_state.py` | 读取/归一化参考复现状态。 |
-| `scripts/analyze_experiment_failures.py` | 分析实验失败原因和方法级失败模式。 |
-| `scripts/experiment_record_tools.py` | 记录实验结果并生成用户可读实验记录表；由 `main.py --action log/record_table` 调用。 |
+| `scripts/orchestration/` | 主实验循环与框架循环。 |
+| `scripts/common/` | plan schema、runtime lock、记录表、文件工具。 |
+| `scripts/agent/` | Claude Code 实验代理。 |
+| `scripts/execution/` | 启动命令、smoke、watchdog。 |
+| `scripts/audits/` | 参考复现、迭代审计、runtime 完整性审计。 |
+| `scripts/analysis/` | 失败分析。 |
+| `scripts/records/` | 实验记录导入和表格工具。 |
 
-## 冗余控制原则
+## 维护原则
 
-- Experiment 脚本可以向 experiment_runner.py、experiment_audits.py、experiment_records.py 三块收敛；但 launch/watchdog/log 三件事必须继续保持结构化合同。
-- 修改本模块时必须先读相关脚本和 manifest，找到根因后再改；禁止为某个论文、某个项目、某个本机路径写特异规则。
-- 用户可见产物必须一遍生成正确；fallback 只能作为最后兼容路线，不能替代主流程质量。
+- 实验代码修改只发生在 `--repo-path` 指向的基础 repo。
+- 模块状态和中间产物只写 `modules/experimenting/runtime` 或调用方显式传入的模块内输出根。
+- 不把失败实验包装成成功指标；没有真实日志和指标就保持 blocked/failed。
+- 不把论文写作、仓库选择、环境部署逻辑塞进本模块。

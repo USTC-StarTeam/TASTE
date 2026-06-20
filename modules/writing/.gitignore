@@ -1,0 +1,19 @@
+# writing_dev 运行中间产物，只能本地保留，不进入 git
+runs/
+workspaces/
+outputs/
+cache/
+.cache/
+*.aux
+*.bbl
+*.blg
+*.fls
+*.fdb_latexmk
+*.log
+*.out
+*.synctex.gz
+*.toc
+*.pdf
+
+# 禁止恢复外部 vendor 外壳
+vendor/

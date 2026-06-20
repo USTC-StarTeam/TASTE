@@ -1,0 +1,41 @@
+# environment_dev 本地运行产物，严禁进入 git
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Claude/环境部署闭环运行目录
+runs/
+workspaces/
+artifacts/
+logs/
+tmp/
+.runtime/
+*.log
+*.pid
+*.sqlite
+
+# 外部仓库、数据集、模型与大产物
+repos/
+datasets/
+checkpoints/
+outputs/
+wandb/
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+*.npz
+*.npy
+*.parquet
+*.csv
+*.tsv
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+latest_decision.json
+input_plan.*.json

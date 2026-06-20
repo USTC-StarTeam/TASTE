@@ -1,60 +1,109 @@
-# Framework / TASTE 框架层
+# TASTE framework 后端框架
 
-`framework/` 是 TASTE 的框架层，不属于七个科研模块中的任何一个。它负责项目创建、运行环境探测、任务队列、Claude Code 会话、跨模块编排、共享模型、公共资源和审计入口。具体科研能力必须放在 `modules/finding` 到 `modules/writing` 七个模块里；网页展示和 API 桥接必须放在 `web/`。
+`framework/` 是 TASTE 的正式后端编排层。它不实现七个科研模块的内部算法，只负责读取七模块公开契约、决定调用顺序、执行模块公开入口、记录命令回执，并把框架状态整理成 Web 可读的 JSON/Markdown。
 
-## 输入
+七个模块是：`finding`、`reading`、`ideation`、`planning`、`environment`、`experimenting`、`writing`。框架只通过 `modules/<stage>/main.py --contract` 和 `modules/<stage>/main.py --action ...` 调用它们。
 
-- `config.example.json` 和 `runtime/.config.json`：本机 LLM、Node、Claude、Python 等运行配置。
-- `framework/resources/templates/project.json`：新项目模板。
-- `projects/<project>/project.json`：项目配置和研究画像。
-- 七个模块产出的结构化产物：Find packet、Read packet、ideas、plans、environment gate、experiment registry、paper pipeline。
+## 运行环境
 
-## 输出
+必须在远程工作区运行：
 
-- `projects/<project>/`：项目级状态、日志、报告、产物和运行记录。
-- `runtime/`：TASTE 本机运行态、缓存、网页 pid/log、维护归档和大文件缓存。
-- 网页 job 状态：由 `agent_state.py`、`server.py` 和 `project_bridge.py` 共同展示。
+```bash
+ssh hidimension_5090_1
+cd /home/fmh/workspace/TASTE
+source /home/fmh/workspace/miniforge/etc/profile.d/conda.sh
+conda activate ar_taste
+source /home/fmh/workspace/.nvm/nvm.sh
+```
 
-## 目录规划
+`python`、`rg` 来自 `ar_taste`；Claude/Node 使用远程 nvm。不要使用系统 Python 或本地机器路径。
 
-| 路径 | 作用 |
+## 输入口径
+
+框架输入是“科研目标 + 项目信息 + 模块公开参数”，不是前端页面对象，也不是模块私有中间文件。常用参数：
+
+- `--research-goal`：自然语言研究目标。
+- `--project`：项目 ID，仅作为框架状态字段；是否传给模块由 `--module-arg` 决定。
+- `--venue`：目标会议/期刊。
+- `--mode dry-run|execute`：`dry-run` 只写命令计划，`execute` 才实际运行模块。
+- `--strategy deterministic|hybrid|claude`：确定性七阶段推进，或交给 Claude Code 决策。
+- `--plan-json`：可选 JSON，支持 `research_goal/project/venue/module_args`。
+- `--module-arg stage=...`：给指定模块追加公开 CLI 参数。
+- `--only-stage stage`：只运行一个或几个阶段，供 Web 的单阶段按钮走 `web -> framework -> module` 链路。
+
+## 输出口径
+
+框架自身状态只写入：
+
+```text
+framework/workspace/runs/<run_id>/
+```
+
+关键文件：
+
+| 文件 | 作用 |
 | --- | --- |
-| `scripts/auto_research/` | 跨模块共享 Python 包：配置、任务、Markdown、LLM、存储、路径和来源选择等基础能力；保留包名 `auto_research`，但物理位置归入框架 scripts。 |
-| `scripts/` | 框架级入口脚本和共享后端包，只做项目创建、编排、运行环境、状态报告、Claude 会话和跨模块调用，不放阶段私有逻辑。 |
-| `resources/templates/` | 项目和论文模板。旧根目录 `templates/` 已迁入这里。 |
-| `resources/prompts/` | 框架级 prompt 模板和 subagent 启动提示。旧根目录 `prompts/` 已迁入这里。 |
-| `resources/automation/` | subagent 协议、角色配置等自动化资源。旧根目录 `automation/` 已迁入这里。 |
-| `resources/claude/` | TASTE 提供给项目 Claude Code 的 agent/command/skill 模板。它不是项目 Claude 的工作目录；项目 Claude 的科学状态必须在 `projects/<project>/`。 |
-| `requirements.txt` / `pyproject.toml` | TASTE 管理环境依赖和包元信息。 |
-| `script_manifest.json` | 框架脚本清单，供维护者判断归属和冗余。 |
+| `state/workflow_state.json` | 框架完整状态、记录、阻塞和下一步。 |
+| `public/frontend_status.json` | Web 可读状态，包含进度、当前阶段、阻塞、最近回执。 |
+| `public/workflow_status.md` | 人类可读状态页。 |
+| `public/module_contracts*.json` | 本次使用的七模块契约。 |
+| `logs/*.stdout.log` / `logs/*.stderr.log` / `logs/*.receipt.json` | 每条模块/门控命令的日志和回执。 |
 
-## 运行逻辑
+模块科学产物仍由各模块写在自己的目录；框架状态不会直接覆盖项目产物。Web 需要展示时，由 Web 后端读取框架 public 状态和项目目录里的正式产物做投影。
 
-1. `create_project.py` 根据 `resources/templates/project.json` 创建 `projects/<project>/`。
-2. `start_web.sh` 使用管理 Python 启动 FastAPI/前端服务，默认监听 `127.0.0.1:8765`。
-3. `web/backend` 接收网页配置和命令，调用框架脚本或七个模块脚本。
-4. `project_paths.py` 统一解析项目路径、资源路径、PythonPath 和运行配置。
-5. `run_frontend.py` 是 Find 旧兼容入口；当前真正的 Find 逻辑在 `modules/finding`。
-6. `claude_project_session.py` 管理项目级 Claude Code 会话。会话工作目录应是 `projects/<project>/`，不能把科学交接写到仓库根部。
-7. `run_project.py`、`run_full_research_cycle.py`、`run_supervision_tick.py` 等只负责跨模块编排和 gate，不应塞入某一阶段的具体算法。
+## 七阶段默认动作
 
-## 框架脚本分组
-
-| 分组 | 脚本 | 作用 |
+| 阶段 | 默认动作 | 职责 |
 | --- | --- | --- |
-| 项目与路径 | `project_paths.py`, `project_config.py`, `create_project.py`, `init_project.py`, `init_workspace.py`, `list_projects.py` | 项目创建、路径解析、配置 patch、初始化目录。 |
-| 运行环境 | `runtime_env.py`, `detect_machine_profile.py`, `check_llm_ready.py`, `run_in_conda.sh`, `start_web.sh` | 检测 Python/Node/Claude/Conda/LLM 可用性并启动网页。 |
-| 网页/Find 编排 | `run_frontend.py`, `sync_outputs.py`, `wiki_tools.py`, `compile_prompt.py` | 网页任务桥、Find 产物同步、wiki/报告兼容输出。 |
-| Claude 项目会话 | `claude_project_session.py`, `agent_state.py`, `record_safe_unblock_web_job.py`, `generate_handoff.py`, `work_status.py` | 项目代理队列、会话状态、handoff/status 记录。 |
-| 全流程编排 | `run_project.py`, `run_autonomous_research.py`, `run_full_research_cycle.py`, `run_research_trajectory_supervisor.py`, `run_supervision_tick.py` | 从网页或自动科研入口串联七阶段；只负责编排和 gate。 |
-| 历史/兼容 supervisor | `run_autoscientist_continuous.py`, `run_autoscientist_supervisor.py`, `run_evoscientist_style_cycle.py` | 早期自动科研循环兼容入口；后续应收敛到统一 full-cycle/supervision 入口。 |
-| 审计与报告 | `research_healthcheck.py`, `report_status.py`, `audit_pipeline_runnability.py`, `audit_workflow_connectivity.py`, `audit_framework_content_coupling.py`, `audit_research_trajectory_capabilities.py`, `verify_research_trajectory_end_to_end.py`, `build_stagnation_report.py`, `research_manifest.py` | 检查当前项目、框架耦合、流程可运行性和长期轨迹能力。 |
-| 共享工具 | `llm_client.py`, `pipeline_guard.py`, `taste_pythonpath.py`, `reconcile_state.py`, `refresh_project_reports.py`, `setup_git_guardrails.py`, `build_research_trajectory_system.py`, `update_evolution_memory.py` | LLM 调用、gate、防陈旧状态、PythonPath、git guard、trajectory memory。 |
+| finding | `find` | 召回、过滤、评分、排序候选文献/工具。 |
+| reading | `read` | 获取全文证据并生成精读材料。 |
+| ideation | `run` | 从文献证据生成候选研究想法。 |
+| planning | `plan` | 形成可执行实验计划和唯一执行合同。 |
+| environment | `deploy_from_plan` | 根据实验 plan 选择/部署仓库、数据、环境并裁决能否进入实验。 |
+| experimenting | `run` | 在锁定 repo/env 中执行实验并维护实验记录。 |
+| writing | `run` | 基于证据生成、修订、编译和审计论文。 |
 
-## 冗余控制原则
+## 单独使用
 
-- 新功能优先进入七个模块或 `web/`，不要把阶段逻辑继续塞进 `framework/scripts`。
-- 框架脚本允许保留兼容 wrapper，但新主逻辑应按“大块能力”合并，不再新增一次性修补脚本。
-- `runtime/` 是本机中间态、日志、缓存和维护归档的唯一根目录；不要恢复根 `logs/`、`reports/`、`state/`、`raw/` 等目录。
-- `framework/resources/claude` 只是 TASTE 自带模板；项目 Claude Code 的工作记忆、handoff 和科学证据必须留在 `projects/<project>/`。
-- 对 TASTE 逻辑修复要追根因，不能通过用户可见 fallback、硬编码研究主题或特定论文补丁来遮盖主流程问题。
+查看契约：
+
+```bash
+python framework/scripts/orchestration/run_taste_framework.py contracts --python "$(which python)"
+```
+
+完整七阶段 dry-run：
+
+```bash
+python framework/scripts/orchestration/run_taste_framework.py run \
+  --mode dry-run \
+  --strategy deterministic \
+  --research-goal "验证七模块编排" \
+  --run-id demo_dry_run \
+  --python "$(which python)"
+```
+
+Web 单阶段链路示例：
+
+```bash
+python framework/scripts/orchestration/run_taste_framework.py run \
+  --mode execute \
+  --only-stage environment \
+  --project protein \
+  --venue ICLR \
+  --plan-json projects/protein/state/experiment_plan.json \
+  --module-arg "environment=--plan projects/protein/state/experiment_plan.json --run-id web_environment_protein"
+```
+
+查看状态：
+
+```bash
+python framework/scripts/orchestration/run_taste_framework.py status --run-id demo_dry_run
+```
+
+## 维护原则
+
+- 框架只做编排、传参、状态记录和门控串联，不把模块实现搬进框架。
+- 单模块产物留在模块目录；项目产物由框架/Web/项目代理按规则同步或投影。
+- Web 单阶段按钮必须走 `web -> framework -> module`，不能绕开新契约调用旧脚本。
+- 新增兼容逻辑应进统一路径解析/PYTHONPATH/契约层，不在业务分支硬塞路径。
+- `tests/` 只保留能守住七模块契约和 Web 桥接的核心测试。

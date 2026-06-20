@@ -1,0 +1,15 @@
+# Reading 模块运行中间产物
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# 独立论文精读运行区：PDF、正文抽取、Claude 输出、临时结果都必须留在这里且不入 git
+workspace/
+
+# 临时文件与日志
+*.tmp
+*.temp
+*.log
+.DS_Store

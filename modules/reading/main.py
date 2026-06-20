@@ -18,8 +18,17 @@ ARTIFACTS_IN = ('find_results.json', 'article.md', 'full_text_reading/manual_ful
 ARTIFACTS_OUT = ('read_results.json', 'read.md', 'full_text_reading/full_text_packet.json', 'current_find_full_text_evidence_repair.json')
 PRIVATE_BACKEND_ROOTS = (
     'modules/reading/scripts/read_pipeline.py',
-    'modules/reading/scripts/repair_current_find_full_text_evidence.py',
     'modules/reading/scripts/ensure_current_find_research_plan.py',
+    'modules/reading/scripts/repair_current_find_full_text_evidence.py',
+    'modules/reading/scripts/pipeline/read_pipeline.py',
+    'modules/reading/scripts/pipeline/standalone_deep_read.py',
+    'modules/reading/scripts/pipeline/channel_batch_test.py',
+    'modules/reading/scripts/pipeline/audit_channel_batch.py',
+    'modules/reading/scripts/acquisition/paper_sources.py',
+    'modules/reading/scripts/acquisition/semantic_scholar.py',
+    'modules/reading/scripts/orchestration/claude_subagent.py',
+    'modules/reading/scripts/orchestration/ensure_current_find_research_plan.py',
+    'modules/reading/scripts/repair/repair_current_find_full_text_evidence.py',
 )
 
 
@@ -72,7 +81,18 @@ SCRIPTS = Path(__file__).resolve().parent / "scripts"
 
 def _python_env() -> dict[str, str]:
     env = os.environ.copy()
+    reading_entries: list[str] = [
+        str(ROOT / "modules" / STAGE_NAME),
+        str(SCRIPTS),
+    ]
+    if SCRIPTS.is_dir():
+        reading_entries.extend(
+            str(path)
+            for path in sorted(SCRIPTS.iterdir())
+            if path.is_dir() and not path.name.startswith("__")
+        )
     entries: list[str] = [
+        *reading_entries,
         str(ROOT / "framework"),
         str(ROOT / "framework" / "scripts"),
         str(ROOT / "web" / "backend"),
@@ -97,9 +117,13 @@ def _python_env() -> dict[str, str]:
 
 
 def _ensure_runtime_imports() -> None:
+    # Reading 内部包名（如 pipeline/common）必须优先于其它 TASTE 模块的同名包。
     for entry in reversed(_python_env()["PYTHONPATH"].split(os.pathsep)):
-        if entry and entry not in sys.path:
-            sys.path.insert(0, entry)
+        if not entry:
+            continue
+        while entry in sys.path:
+            sys.path.remove(entry)
+        sys.path.insert(0, entry)
 
 
 def _load_json(path: str, default):
@@ -126,6 +150,9 @@ def _run_script(script_stem: str, args: Sequence[str]) -> int:
 
 
 DIRECT_ACTIONS = {"", "read", "pipeline", "read_pipeline"}
+STANDALONE_DEEP_READ_ACTIONS = {"deep_read", "deep_read_paper", "standalone", "standalone_deep_read"}
+CHANNEL_BATCH_TEST_ACTIONS = {"channel_batch_test", "batch_channel_test", "test_channels", "channel_test"}
+AUDIT_CHANNEL_BATCH_ACTIONS = {"audit_channel_batch", "channel_batch_audit", "audit_batch", "audit_channel_test"}
 ACTION_ALIASES = {
     "repair_full_text": "repair_current_find_full_text_evidence",
     "current_find_research_plan": "ensure_current_find_research_plan",
@@ -224,6 +251,27 @@ def _run_import_paper(args: Sequence[str]) -> int:
     print(paper_dir)
     return 0
 
+def _run_standalone_deep_read(args: Sequence[str]) -> int:
+    _ensure_runtime_imports()
+    from pipeline.standalone_deep_read import main as standalone_main
+
+    return standalone_main(list(args))
+
+
+def _run_channel_batch_test(args: Sequence[str]) -> int:
+    _ensure_runtime_imports()
+    from pipeline.channel_batch_test import main as batch_main
+
+    return batch_main(list(args))
+
+
+def _run_channel_batch_audit(args: Sequence[str]) -> int:
+    _ensure_runtime_imports()
+    from pipeline.audit_channel_batch import main as audit_main
+
+    return audit_main(list(args))
+
+
 def _run_read(args: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(description="Run the Reading module backend.")
     parser.add_argument("--run-id", default="", help="Finding run id to read.")
@@ -252,15 +300,22 @@ def _run_read(args: Sequence[str]) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Reading module public backend entrypoint.", add_help=True)
+    parser.add_argument("action_arg", nargs="?", default="", help="可选位置式 action；等价于 --action。")
     parser.add_argument("--action", default="read", help="Backend action. Default: read.")
     parser.add_argument("--contract", action="store_true")
     ns, rest = parser.parse_known_args(argv)
     if ns.contract:
         print(json.dumps(_contract_payload(), ensure_ascii=False, indent=2))
         return 0
-    action = _normalize_action(ns.action)
+    action = _normalize_action(ns.action_arg or ns.action)
     if action in DIRECT_ACTIONS:
         return _run_read(rest)
+    if action in STANDALONE_DEEP_READ_ACTIONS:
+        return _run_standalone_deep_read(rest)
+    if action in CHANNEL_BATCH_TEST_ACTIONS:
+        return _run_channel_batch_test(rest)
+    if action in AUDIT_CHANNEL_BATCH_ACTIONS:
+        return _run_channel_batch_audit(rest)
     if action in {"import", "import_paper"}:
         return _run_import_paper(rest)
     return _run_script(ACTION_ALIASES.get(action, action), rest)

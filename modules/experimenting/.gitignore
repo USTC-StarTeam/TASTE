@@ -1,0 +1,11 @@
+# 本开发模块的运行中间产物，不纳入 git。
+__pycache__/
+*.py[cod]
+.pytest_cache/
+runtime/
+tmp/
+*.log
+*.pid
+*.pid.json
+*.tmp
+.DS_Store
