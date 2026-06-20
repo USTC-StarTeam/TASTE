@@ -167,6 +167,37 @@ def test_environment_rewrites_python_entrypoints_to_run_local_prefix():
     assert autonomous_deploy._conda_prefix_tokens_have_verify_action(run_command)
 
 
+def test_environment_repo_review_falls_back_to_plan_github_candidates():
+    environment_module_root = ROOT / "modules" / "environment"
+    for name in list(sys.modules):
+        if name == "scripts" or name.startswith("scripts."):
+            sys.modules.pop(name, None)
+    if str(environment_module_root) not in sys.path:
+        sys.path.insert(0, str(environment_module_root))
+    else:
+        sys.path.insert(0, sys.path.pop(sys.path.index(str(environment_module_root))))
+    spec = importlib.util.spec_from_file_location(
+        "environment_autonomous_deploy_repo_review",
+        environment_module_root / "scripts" / "orchestration" / "autonomous_deploy.py",
+    )
+    assert spec and spec.loader
+    autonomous_deploy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(autonomous_deploy)
+
+    candidates = ["https://github.com/ZhanghanNi/RigidSSL", "https://github.com/Long-Kai/Steering-PLMs"]
+    selected, issues, fallback = autonomous_deploy.repo_candidates_after_review(candidates, {"return_code": 0, "json": {}, "stdout_tail": "ready"})
+    assert selected == candidates
+    assert fallback is True
+    assert "repo candidate review did not produce valid JSON" in issues
+
+    selected, issues, fallback = autonomous_deploy.repo_candidates_after_review(
+        candidates,
+        {"return_code": 0, "json": {"status": "ready", "ordered_repo_urls": [candidates[1], candidates[0]]}},
+    )
+    assert selected == [candidates[1], candidates[0]]
+    assert fallback is False
+
+
 def test_environment_rewrites_huggingface_cli_to_current_hf_cli(tmp_path):
     environment_module_root = ROOT / "modules" / "environment"
     for name in list(sys.modules):

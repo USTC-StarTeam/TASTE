@@ -112,6 +112,21 @@ def validate_repo_candidate_review(original_candidates: list[str], reviewed: dic
     return clean, issues
 
 
+def repo_candidates_after_review(original_candidates: list[str], review_result: dict[str, Any]) -> tuple[list[str], list[str], bool]:
+    reviewed = review_result.get("json") if isinstance(review_result.get("json"), dict) else {}
+    github_original = [str(item).strip() for item in original_candidates if is_github_repo_url(str(item))]
+    if isinstance(reviewed, dict) and str(reviewed.get("status") or "").strip().lower() == "reject":
+        return [], [str(reviewed.get("reject_reason") or "Claude Code 判定 plan 中的 GitHub 仓库候选不可信")], False
+    clean_ordered, review_issues = validate_repo_candidate_review([str(item) for item in original_candidates], reviewed if isinstance(reviewed, dict) else {})
+    if review_result.get("return_code") != 0 or not reviewed:
+        review_issues.append("repo candidate review did not produce valid JSON")
+    if clean_ordered:
+        return clean_ordered, review_issues, False
+    if github_original:
+        return github_original, review_issues, True
+    return [], review_issues, False
+
+
 def validate_discovered_repo(discovered: dict[str, Any]) -> tuple[str, list[str]]:
     issues: list[str] = []
     status = str(discovered.get("status") or "").strip().lower()
@@ -4079,20 +4094,26 @@ def main() -> int:
             decision = final_decision_payload(run_id, run_dir, normalized, {"repo_candidates": repo_candidates, "repo_selection_review": repo_selection_review}, machine, [], verdict)
             write_json(run_dir / "repo_info.json", decision["repo"])
             return finalize_and_write_decision(decision, run_dir, paper_evidence, baseline_outside_paths)
-        clean_ordered, review_issues = validate_repo_candidate_review([str(item) for item in repo_candidates], reviewed)
-        if review_result.get("return_code") != 0 or not reviewed:
-            review_issues.append("repo candidate review did not produce valid JSON")
-        if review_issues:
+        selected_candidates, review_issues, used_deterministic_fallback = repo_candidates_after_review([str(item) for item in repo_candidates], review_result)
+        if not selected_candidates:
             verdict = {
                 "decision": "continue_repair",
                 "allow_next_module": False,
-                "reject_reason": "Claude Code 仓库候选审阅结果未通过后端硬校验；需要继续修复仓库选择提示或 plan。",
-                "failure_taxonomy": [{"category": "repository_code", "evidence": review_issues, "repairable": True}],
+                "reject_reason": "Claude Code 仓库候选审阅结果未通过后端硬校验，且 plan 中没有可直接克隆的 GitHub 候选。",
+                "failure_taxonomy": [{"category": "repository_code", "evidence": review_issues or ["没有可克隆 GitHub 候选"], "repairable": True}],
             }
             decision = final_decision_payload(run_id, run_dir, normalized, {"repo_candidates": repo_candidates, "repo_selection_review": repo_selection_review, "repo_selection_validation_issues": review_issues}, machine, [], verdict)
             write_json(run_dir / "repo_info.json", decision["repo"])
             return finalize_and_write_decision(decision, run_dir, paper_evidence, baseline_outside_paths)
-        repo_candidates = clean_ordered
+        repo_candidates = selected_candidates
+        if review_issues:
+            repo_selection_review["validation_issues"] = review_issues
+        if used_deterministic_fallback:
+            repo_selection_review["deterministic_fallback"] = {
+                "used": True,
+                "reason": "Claude repo review did not yield validated JSON, but the normalized plan already contains explicit GitHub candidates; continuing with original GitHub order.",
+                "ordered_repo_urls": repo_candidates,
+            }
     if not repo_candidates:
         discovery_path = run_dir / "claude_repo_discovery.json"
         repo_discovery_result = run_claude_json(
