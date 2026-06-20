@@ -602,11 +602,12 @@ def _venue_requirements_summary(root: Path, venue: str, paper_state: dict[str, A
 
 def _runtime_diagnostics_light(project: str, cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg = cfg if isinstance(cfg, dict) else {}
-    runtime = project_runtime_config(project, cfg)
+    runtime = _runtime_with_environment_handoff(PROJECTS / project, project_runtime_config(project, cfg))
     try:
         path_head = interactive_env(project, cfg).get("PATH", "").split(os.pathsep)[:12]
     except Exception:
         path_head = []
+    path_head = _runtime_path_head_with_environment_handoff(PROJECTS / project, runtime, path_head)
 
     def check_path(path_value: Any, missing_reason: str) -> dict[str, Any]:
         path = str(path_value or "").strip()
@@ -660,11 +661,44 @@ def _handoff_experiment_python(handoff: dict[str, Any]) -> str:
     return str(Path(prefix) / "bin" / "python") if prefix else ""
 
 
-def _public_run_preferences(project: str, root: Path, cfg: dict[str, Any] | None = None, runtime_public: dict[str, Any] | None = None, selection: dict[str, Any] | None = None) -> dict[str, Any]:
-    cfg = cfg if isinstance(cfg, dict) else {}
+def _runtime_with_environment_handoff(root: Path, runtime_public: dict[str, Any] | None) -> dict[str, Any]:
+    runtime = dict(runtime_public or {}) if isinstance(runtime_public, dict) else {}
     handoff = _project_environment_handoff(root)
     handoff_env = _handoff_conda_env(handoff)
     handoff_python = _handoff_experiment_python(handoff)
+    if handoff_env:
+        runtime["conda_env"] = handoff_env
+        runtime["conda_env_prefix"] = handoff_env
+    if handoff_python:
+        runtime["experiment_python"] = handoff_python
+    return runtime
+
+
+def _runtime_path_head_with_environment_handoff(root: Path, runtime_public: dict[str, Any] | None, path_head: list[Any]) -> list[str]:
+    items = [str(item) for item in path_head if str(item or "").strip()]
+    runtime = runtime_public if isinstance(runtime_public, dict) else {}
+    handoff_env = str(
+        runtime.get("conda_env_prefix")
+        or runtime.get("conda_env")
+        or _handoff_conda_env(_project_environment_handoff(root))
+        or ""
+    ).strip()
+    if not handoff_env:
+        return items[:12]
+    handoff_bin = str(Path(handoff_env) / "bin")
+    public_items = [handoff_bin]
+    for item in items:
+        if item == handoff_bin:
+            continue
+        if "/envs/" in item and item.endswith("/bin") and not item.startswith(handoff_env):
+            continue
+        public_items.append(item)
+    return public_items[:12]
+
+
+def _public_run_preferences(project: str, root: Path, cfg: dict[str, Any] | None = None, runtime_public: dict[str, Any] | None = None, selection: dict[str, Any] | None = None) -> dict[str, Any]:
+    cfg = cfg if isinstance(cfg, dict) else {}
+    handoff_env = _handoff_conda_env(_project_environment_handoff(root))
     paper = cfg.get("paper") if isinstance(cfg.get("paper"), dict) else {}
     venue = _display_venue(cfg.get("target_venue") or cfg.get("venue") or paper.get("target_venue") or "")
     paper = _paper_preferences_for_venue(paper, venue)
@@ -680,12 +714,7 @@ def _public_run_preferences(project: str, root: Path, cfg: dict[str, Any] | None
         "paper": paper,
         "default_find_selection": selection if isinstance(selection, dict) else (_current_project_source_selection(project, root) if project else canonical_source_selection()),
     }
-    runtime = dict(runtime_public or {}) if isinstance(runtime_public, dict) else {}
-    if handoff_env:
-        runtime["conda_env"] = handoff_env
-        runtime["conda_env_prefix"] = handoff_env
-    if handoff_python:
-        runtime["experiment_python"] = handoff_python
+    runtime = _runtime_with_environment_handoff(root, runtime_public)
     if runtime:
         out["runtime"] = runtime
     return out
@@ -5974,21 +6003,21 @@ def _compact_project_summary(summary: dict[str, Any]) -> dict[str, Any]:
         status = str(src.get("status") or "")
         if not status and checks_src:
             status = "ready" if all(bool((checks_src.get(name) or {}).get("ok")) for name in required if name in checks_src) else "needs_attention"
-        runtime_public = scalmap(runtime, ["source_bashrc", "bashrc_path", "node_bin", "claude_path", "conda_base", "python_executable", "experiment_python"])
-        handoff = _project_environment_handoff(project_root)
-        handoff_env = _handoff_conda_env(handoff)
-        handoff_python = _handoff_experiment_python(handoff)
-        if handoff_env:
-            runtime_public["conda_env"] = handoff_env
-            runtime_public["conda_env_prefix"] = handoff_env
-        if handoff_python:
-            runtime_public["experiment_python"] = handoff_python
+        runtime_public = _runtime_with_environment_handoff(
+            project_root,
+            scalmap(runtime, ["source_bashrc", "bashrc_path", "node_bin", "claude_path", "conda_base", "python_executable", "experiment_python"]),
+        )
+        handoff_env = str(runtime_public.get("conda_env") or runtime_public.get("conda_env_prefix") or "").strip()
         return {
             "project": src.get("project", project_id),
             "status": status,
             "runtime": runtime_public,
             "checks": checks,
-            "path_head": [str(item) for item in (src.get("path_head") if isinstance(src.get("path_head"), list) else [])[:12]],
+            "path_head": _runtime_path_head_with_environment_handoff(
+                project_root,
+                runtime_public,
+                src.get("path_head") if isinstance(src.get("path_head"), list) else [],
+            ),
             "python_executable": str(runtime.get("python_executable") or src.get("python_executable") or ""),
             "conda_env": handoff_env or str(cfg.get("conda_env") or src.get("conda_env") or ""),
         }
@@ -12808,10 +12837,16 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         if isinstance(row, dict) and str(row.get("status") or "queued") == "queued"
     ][-5:]
     runtime_public = dict(runtime.get("runtime", {}) if isinstance(runtime.get("runtime"), dict) else {})
+    runtime_public = _runtime_with_environment_handoff(root, runtime_public)
     runtime_public.pop("env_overrides", None)
     runtime_public.pop("extra_path", None)
     runtime_compact = dict(runtime) if isinstance(runtime, dict) else {}
     runtime_compact["runtime"] = runtime_public
+    runtime_compact["path_head"] = _runtime_path_head_with_environment_handoff(
+        root,
+        runtime_public,
+        runtime_compact.get("path_head") if isinstance(runtime_compact.get("path_head"), list) else [],
+    )
     run_preferences = _public_run_preferences(project, root, cfg, runtime_public, project_selection)
     state_compact = {
         "full_research_cycle": full_cycle_compact,

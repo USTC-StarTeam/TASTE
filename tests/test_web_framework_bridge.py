@@ -143,10 +143,26 @@ def test_web_public_state_prefers_environment_handoff_runtime(monkeypatch, tmp_p
     monkeypatch.setattr(project_bridge, "PROJECTS", projects)
 
     prefs = project_bridge._public_run_preferences("demo", root, {"conda_env": "old_env", "target_venue": "ICLR"}, selection={})
+    merged_runtime = project_bridge._runtime_with_environment_handoff(root, {"conda_env": "old_env", "experiment_python": "/old/bin/python"})
+    old_env_bin = "/home/fmh/workspace/miniforge/envs/protein_rigidssl_sm120/bin"
+    monkeypatch.setattr(project_bridge, "project_runtime_config", lambda project, cfg: {"conda_env": "old_env", "experiment_python": "/old/bin/python"})
+    monkeypatch.setattr(
+        project_bridge,
+        "interactive_env",
+        lambda project, cfg: {"PATH": f"{old_env_bin}:{handoff_env / 'bin'}:/usr/bin"},
+    )
+    diagnostics = project_bridge._runtime_diagnostics_light("demo", {})
     env = project_bridge._current_environment_selection(root)
 
     assert prefs["conda_env"] == str(handoff_env)
     assert prefs["runtime"]["experiment_python"] == str(handoff_env / "bin" / "python")
+    assert merged_runtime["conda_env"] == str(handoff_env)
+    assert merged_runtime["experiment_python"] == str(handoff_env / "bin" / "python")
+    assert diagnostics["runtime"]["conda_env"] == str(handoff_env)
+    assert diagnostics["runtime"]["experiment_python"] == str(handoff_env / "bin" / "python")
+    assert diagnostics["checks"]["experiment_python"]["path"] == str(handoff_env / "bin" / "python")
+    assert diagnostics["path_head"][0] == str(handoff_env / "bin")
+    assert old_env_bin not in diagnostics["path_head"]
     environment_stage = project_bridge._public_environment_stage(
         status="selected",
         env=env,
