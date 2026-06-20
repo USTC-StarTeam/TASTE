@@ -647,3 +647,66 @@ def test_environment_normalizes_selected_plan_metrics_and_paper_source():
     assert metrics["designability_tolerance"]["operator"] == "<="
     assert metrics["designability_tolerance"]["value"] in {"3%", "5%"}
     assert "AF2 Structure Database" in normalized["dataset"]["training_data"]
+
+
+def test_environment_handoff_ready_without_promoting_paper_metrics(tmp_path):
+    environment_module_root = ROOT / "modules" / "environment"
+    for name in list(sys.modules):
+        if name == "scripts" or name.startswith("scripts."):
+            sys.modules.pop(name, None)
+    if str(environment_module_root) not in sys.path:
+        sys.path.insert(0, str(environment_module_root))
+    else:
+        sys.path.insert(0, sys.path.pop(sys.path.index(str(environment_module_root))))
+    spec = importlib.util.spec_from_file_location(
+        "environment_autonomous_deploy_handoff",
+        environment_module_root / "scripts" / "orchestration" / "autonomous_deploy.py",
+    )
+    assert spec and spec.loader
+    autonomous_deploy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(autonomous_deploy)
+
+    run_dir = tmp_path / "run"
+    repo = run_dir / "repos" / "repo"
+    env_prefix = run_dir / "conda_envs" / "rigid"
+    (repo / "examples").mkdir(parents=True)
+    (env_prefix / "bin").mkdir(parents=True)
+    (env_prefix / "bin" / "python").write_text("", encoding="utf-8")
+    env_plan = {
+        "env_name": "rigid",
+        "commands": [{"phase": "reproduce_full", "command": ["python", "train.py"], "required": True}],
+        "success_criteria": [{"name": "designability", "operator": ">=", "value": 0.758, "source": "paper Table 1"}],
+    }
+    receipts = [
+        {"phase": "conda_create", "required": True, "return_code": 0, "status": "passed", "conda_env_prefix": str(env_prefix), "command": f"{env_prefix}/bin/python -m pip install torch"},
+        {"phase": "verify", "required": True, "return_code": 0, "status": "passed", "conda_env_prefix": str(env_prefix), "command": f"{env_prefix}/bin/python -c 'import torch'"},
+        {"phase": "dataset", "required": True, "return_code": 0, "status": "passed", "conda_env_prefix": str(env_prefix), "command": "hf download AF2 Structure Database", "stdout_tail": "AF2 Structure Database ready"},
+        {"phase": "reproduce_smoke", "required": True, "return_code": 0, "status": "passed", "conda_env_prefix": str(env_prefix), "command": f"{env_prefix}/bin/python -c 'loader smoke'", "stdout_tail": "loader smoke passed"},
+    ]
+    approval_gate = {"checks": [
+        {"name": "repository_source", "passed": True, "reason": "repo ok"},
+        {"name": "repository_documentation", "passed": True, "reason": "docs ok"},
+        {"name": "conda_environment", "passed": True, "reason": "env ok"},
+        {"name": "machine_fit", "passed": True, "reason": "machine ok"},
+        {"name": "dataset_evidence", "passed": True, "reason": "data ok"},
+        {"name": "required_commands", "passed": True, "reason": "commands ok"},
+        {"name": "paper_config_alignment", "passed": True, "reason": "alignment ok"},
+        {"name": "workspace_write_audit", "passed": True, "reason": "audit ok"},
+        {"name": "metric_evidence", "passed": False, "reason": "metrics pending"},
+        {"name": "reproduce_full", "passed": False, "reason": "full pending"},
+    ]}
+    handoff = autonomous_deploy.build_environment_handoff(
+        "pytest_run",
+        run_dir,
+        {"title": "RigidSSL", "paper_url": "https://openreview.net/forum?id=YAWpZcXHnP", "selected_plan_id": "plan"},
+        {"repo_url": "https://github.com/example/repo", "repo_path": str(repo), "head_commit": "abc"},
+        env_plan,
+        receipts,
+        approval_gate,
+        [{"metric": "designability", "passed": False}],
+    )
+    assert handoff["ready_for_experimenting"] is True
+    assert handoff["handoff_gate"]["passed"] is True
+    assert handoff["pending_downstream_metrics"][0]["metric"] == "designability"
+    assert handoff["pending_downstream_metrics"][0]["status"] == "pending_experimenting_evaluation"
+    assert not any(row["name"] == "metric_evidence" for row in handoff["handoff_gate"]["checks"])

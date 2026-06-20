@@ -1,6 +1,6 @@
 # Environment / 环境部署模块
 
-`modules/environment` 是 TASTE 七阶段中的正式环境阶段后端模块。它给定实验 plan，在模块私有运行目录里让 Claude Code 审计候选 GitHub 仓库、部署 Conda 环境、准备真实数据/loader、运行参考复现，并给出 `approve`、`reject` 或 `continue_repair` 裁决。
+`modules/environment` 是 TASTE 七阶段中的正式环境阶段后端模块。它给定实验 plan，在模块私有运行目录里让 Claude Code 审计候选 GitHub 仓库、部署 Conda 环境、准备真实数据/loader、运行参考复现，并给出 `approve`、`reject`、`continue_repair` 或 `environment_ready` 裁决。
 
 本模块不依赖 Web 前端，不直接写项目产物，也不修改其它模块。Web 或 framework 调用时，只能通过 `modules/environment/main.py` 公开入口传入 plan 和运行参数。
 
@@ -57,11 +57,17 @@ modules/environment/runs/<run_id>/
 | --- | --- |
 | `environment_deployment_decision.json` | 最终裁决；包含 `decision`、`allow_next_module`、approval gate、workspace audit。 |
 | `claude_environment_plan_round_*.json` | Claude 生成的环境部署计划。 |
-| `command_receipts_round_*.json` | 每轮命令执行回执。 |
+| `round_*/command_receipts.json` | 每轮命令执行回执。 |
+| `environment_handoff` | 写在最终裁决中；当 `ready_for_experimenting=true` 时，记录 repo、run-local Conda prefix、数据目录、smoke 回执和待下游验证指标。 |
 | `.runtime/`、`conda_envs/`、repo/data/log 子目录 | 本 run 的隔离运行环境、中间文件和日志。 |
 | `modules/environment/latest_decision.json` | 最近一次裁决索引，供调试查看。 |
 
-批准进入实验必须通过仓库来源、仓库文档、Conda 环境、本机资源、真实数据、必要命令、论文 claim、指标证据、完整复现和工作区审计等 gate。没有真实完整复现时，正确结果是 `continue_repair`，不能伪造 approve。
+本模块现在有两个不同合同，不能混用：
+
+- `environment_handoff.ready_for_experimenting=true`：表示真实 GitHub 仓库、run-local Conda、数据准备、必要命令、loader/model smoke、本机适配和工作区审计已经通过，可交给 `experimenting` 继续跑实验。这个状态不表示论文指标已经达标。
+- `allow_next_module=true` / `decision=approve`：表示参考复现和论文级指标证据也已经通过，必须有真实 `reproduce_full`、评估日志和指标绑定后才能成立。
+
+因此，没有完整论文指标证据时，environment 可以输出 `environment_ready` 让 experimenting 接手；但不能伪造 `approve`，也不能把 install/verify/smoke 日志当成论文指标证据。
 
 ### PyTorch / PyG / CUDA 依赖策略
 
@@ -81,12 +87,12 @@ modules/environment/runs/<run_id>/
 4. 探测本机 GPU/CUDA/Conda 画像，生成本机适配的环境部署计划。
 5. 受控执行 Conda、安装、数据、verify、smoke、`reproduce_full` 等命令。
 6. 解析指标和回执，重算 approval gate。
-7. 写出 `approve/reject/continue_repair` 裁决；运行期间若写出模块外路径，会被 workspace audit 阻断。
+7. 写出 `environment_ready`、`approve`、`reject` 或 `continue_repair` 裁决；运行期间若写出模块外路径，会被 workspace audit 阻断。
 
 ## 与 framework/web 的关系
 
 - 单独调用本模块时，产物只在 `modules/environment` 内，不会覆盖 `projects/<project>` 的网页产物。
-- Web 环境按钮由 `web -> framework -> environment` 调用：web 只传项目 plan/venue/config，framework 记录状态，environment 做模块内裁决。
+- Web 环境按钮由 `web -> framework -> environment` 调用：web 只传项目 plan/venue/config，framework 记录状态，environment 做模块内裁决。若 framework 收到 `ready_for_experimenting=true`，会投影到 `projects/<project>/state/environment_handoff.json`、`evidence_ready_repo_selection.json` 和 `active_repo.json`，供网页和 experimenting 使用。
 - 项目 Claude Code 可直接调用本模块辅助科研，但这类 standalone 产物不会自动变成网页显示的项目产物。
 
 ## 脚本结构

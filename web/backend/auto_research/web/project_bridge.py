@@ -350,7 +350,40 @@ def _project_experiment_plan_path(project: str) -> Path:
     )
 
 
+def _project_environment_handoff(root: Path) -> dict[str, Any]:
+    payload = _read_json(root / "state" / "environment_handoff.json", {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def _handoff_repo_path(handoff: dict[str, Any]) -> str:
+    env_handoff = handoff.get("environment_handoff") if isinstance(handoff.get("environment_handoff"), dict) else {}
+    repo = env_handoff.get("repo") if isinstance(env_handoff.get("repo"), dict) else {}
+    for source in [handoff, repo, handoff.get("selected") if isinstance(handoff.get("selected"), dict) else {}]:
+        if not isinstance(source, dict):
+            continue
+        for key in ["repo_path", "local_path", "path"]:
+            value = str(source.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def _handoff_conda_env(handoff: dict[str, Any]) -> str:
+    for key in ["conda_env_prefix", "conda_env"]:
+        value = str(handoff.get(key) or "").strip()
+        if value:
+            return value
+    env_handoff = handoff.get("environment_handoff") if isinstance(handoff.get("environment_handoff"), dict) else {}
+    conda = env_handoff.get("conda") if isinstance(env_handoff.get("conda"), dict) else {}
+    return str(conda.get("prefix") or conda.get("env_name") or "").strip()
+
+
 def _project_selected_repo_path(root: Path) -> str:
+    handoff = _project_environment_handoff(root)
+    if handoff.get("status") == "ready_for_experimenting" or handoff.get("valid") is True:
+        repo_path = _handoff_repo_path(handoff)
+        if repo_path:
+            return repo_path
     selected = _current_selected_repo_path(root)
     if selected:
         return str(selected)
@@ -376,6 +409,9 @@ def _project_conda_env(project: str, root: Path, cfg: dict[str, Any], payload: d
     env_name = str(payload.get("conda_env") or "").strip()
     if env_name:
         return env_name
+    handoff_env = _handoff_conda_env(_project_environment_handoff(root))
+    if handoff_env:
+        return handoff_env
     active = _active_env_name(root, cfg)
     if active:
         return active
@@ -2076,6 +2112,7 @@ def _path_is_within(path_value: Any, parent_value: Any) -> bool:
 
 def _current_selected_repo_path(root: Path) -> Path | None:
     for rel in [
+        "state/environment_handoff.json",
         "state/evidence_ready_repo_selection.json",
         "state/active_repo.json",
         "state/fresh_research_base.json",
@@ -7770,6 +7807,9 @@ def _active_repo_path(root: Path) -> str:
 
 
 def _active_env_name(root: Path, cfg: dict[str, Any]) -> str:
+    handoff_env = _handoff_conda_env(_project_environment_handoff(root))
+    if handoff_env:
+        return handoff_env
     bootstrap = _read_json(root / "state" / "repo_env_bootstrap.json", {})
     if isinstance(bootstrap, dict) and bootstrap.get("env_name"):
         return str(bootstrap.get("env_name"))

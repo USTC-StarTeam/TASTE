@@ -150,6 +150,126 @@ def _record_blocker(state: WorkflowState, decision: Decision, result) -> None:
     })
 
 
+def _current_find_run_id(project_root: Path) -> str:
+    for rel in [
+        "planning/finding/find_progress.json",
+        "state/current_find_research_plan.json",
+        "state/current_find_recommendation_projection.json",
+        "planning/finding/find_results.json",
+    ]:
+        payload = read_json(project_root / rel, {})
+        if isinstance(payload, dict):
+            value = str(payload.get("run_id") or payload.get("find_run_id") or payload.get("source_run_id") or payload.get("current_find_run_id") or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def _current_selected_execution_ids(project_root: Path) -> tuple[str, str]:
+    for rel in ["state/current_find_research_plan.json", "planning/finding/plans.json"]:
+        payload = read_json(project_root / rel, {})
+        if isinstance(payload, dict):
+            plan_id = str(payload.get("selected_plan_id") or "").strip()
+            idea_id = str(payload.get("selected_idea_id") or "").strip()
+            if plan_id or idea_id:
+                return plan_id, idea_id
+    return "", ""
+
+
+def _sync_environment_handoff_to_project(ctx: FrameworkContext, state: WorkflowState, result) -> None:
+    if result.stage != "environment" or result.return_code != 0 or not state.project:
+        return
+    run_dir = _module_run_dir(result)
+    if run_dir is None:
+        return
+    decision = read_json(run_dir / "environment_deployment_decision.json", {})
+    if not isinstance(decision, dict):
+        return
+    handoff = decision.get("environment_handoff") if isinstance(decision.get("environment_handoff"), dict) else {}
+    if handoff.get("ready_for_experimenting") is not True:
+        return
+    repo = handoff.get("repo") if isinstance(handoff.get("repo"), dict) else {}
+    conda = handoff.get("conda") if isinstance(handoff.get("conda"), dict) else {}
+    paper = handoff.get("paper") if isinstance(handoff.get("paper"), dict) else {}
+    repo_path = str(repo.get("repo_path") or "").strip()
+    if not repo_path or not Path(repo_path).exists():
+        return
+    project_root = ctx.workspace_root / "projects" / state.project
+    project_state = project_root / "state"
+    project_state.mkdir(parents=True, exist_ok=True)
+    current_run = _current_find_run_id(project_root)
+    current_plan_id, current_idea_id = _current_selected_execution_ids(project_root)
+    selected_plan_id = str(paper.get("selected_plan_id") or current_plan_id).strip()
+    selected_idea_id = str(paper.get("selected_idea_id") or current_idea_id).strip()
+    selected = {
+        "name": str(repo.get("repo_url") or repo_path),
+        "repo": str(repo.get("repo_url") or ""),
+        "repo_url": str(repo.get("repo_url") or ""),
+        "repo_path": repo_path,
+        "local_path": repo_path,
+        "head_commit": str(repo.get("head_commit") or ""),
+        "fresh_find_run_id": current_run,
+        "current_find_run_id": current_run,
+        "selected_plan_id": selected_plan_id,
+        "selected_idea_id": selected_idea_id,
+        "selection_stage": "environment_claude_code",
+        "selected_by_stage": "environment_claude_code",
+        "selection_gate": "environment_handoff_ready_for_experimenting",
+        "environment_run_id": str(handoff.get("run_id") or decision.get("run_id") or ""),
+    }
+    env_record = {
+        "schema_version": "project.environment_handoff_projection.v1",
+        "updated_at": str(decision.get("created_at") or ""),
+        "status": "ready_for_experimenting",
+        "valid": True,
+        "source": str(run_dir / "environment_deployment_decision.json"),
+        "environment_handoff": handoff,
+        "repo_path": repo_path,
+        "local_path": repo_path,
+        "repo_url": str(repo.get("repo_url") or ""),
+        "conda_env": str(conda.get("prefix") or conda.get("env_name") or ""),
+        "conda_env_prefix": str(conda.get("prefix") or ""),
+        "experiment_python": str(conda.get("python") or ""),
+        "pending_downstream_metrics": handoff.get("pending_downstream_metrics") if isinstance(handoff.get("pending_downstream_metrics"), list) else [],
+        "selected": selected,
+    }
+    selection_record = {
+        "schema_version": "project.evidence_ready_repo_selection.v2",
+        "status": "ready_for_experimenting",
+        "decision": "environment_handoff_ready_for_experimenting",
+        "valid": True,
+        "accepted_by_claude": True,
+        "selection_stage": "environment_claude_code",
+        "selected_by_stage": "environment_claude_code",
+        "selection_gate": "environment_handoff_ready_for_experimenting",
+        "fresh_find_run_id": current_run,
+        "current_find_run_id": current_run,
+        "selected_plan_id": selected_plan_id,
+        "selected_idea_id": selected_idea_id,
+        "selected": selected,
+        "environment_handoff_path": str(project_state / "environment_handoff.json"),
+    }
+    active_repo = {
+        "name": selected["name"],
+        "repo": selected["repo"],
+        "repo_url": selected["repo_url"],
+        "repo_path": repo_path,
+        "local_path": repo_path,
+        "head_commit": selected["head_commit"],
+        "conda_env": env_record["conda_env"],
+        "conda_env_prefix": env_record["conda_env_prefix"],
+        "experiment_python": env_record["experiment_python"],
+        "environment_run_id": selected["environment_run_id"],
+        "selection_stage": "environment_claude_code",
+        "selected_plan_id": selected_plan_id,
+        "selected_idea_id": selected_idea_id,
+    }
+    write_json(project_state / "environment_handoff.json", env_record)
+    write_json(project_state / "evidence_ready_repo_selection.json", selection_record)
+    write_json(project_state / "active_repo.json", active_repo)
+    state.notes.append(f"environment handoff 已同步到项目 {state.project}: {repo_path}")
+
+
 def run_workflow(args: argparse.Namespace) -> int:
     plan = load_plan_json(args.plan_json)
     research_goal = args.research_goal or str(plan.get("research_goal") or plan.get("goal") or "")
@@ -205,6 +325,7 @@ def run_workflow(args: argparse.Namespace) -> int:
         command_index += 1
         state.records.append(record_from_result(result, message=decision.reason))
         if result.return_code == 0:
+            _sync_environment_handoff_to_project(ctx, state, result)
             if decision.stage not in state.completed_stages:
                 state.completed_stages.append(decision.stage)
             if args.run_gates:

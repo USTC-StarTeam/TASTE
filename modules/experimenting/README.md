@@ -25,7 +25,7 @@ python modules/experimenting/main.py \
   --action autonomous_experiment \
   --plan /abs/path/to/experiment_plan.json \
   --repo-path /abs/path/to/selected/repo \
-  --conda-env experiment_env \
+  --conda-env /abs/path/to/environment/run/conda_envs/experiment_env \
   --output-root modules/experimenting/runtime/autonomous \
   --max-iterations 3
 ```
@@ -36,11 +36,13 @@ python modules/experimenting/main.py \
 | --- | --- |
 | `--plan` | JSON/YAML/文本实验计划。 |
 | `--repo-path` | environment 已锁定的基础代码仓库；Claude 默认只能修改这个 repo。 |
-| `--conda-env` | 实验运行 Conda 环境名。 |
+| `--conda-env` | 实验运行 Conda 环境名或绝对 Conda prefix；framework/web 通常传 `projects/<project>/state/environment_handoff.json` 中的 `conda_env_prefix`。 |
 | `--output-root` | 模块状态、记录、日志输出根；默认在 `modules/experimenting/runtime/autonomous`。 |
 | `--max-iterations` | 最大实验迭代轮数。 |
 | `--skip-claude` | 只做环境/记录流程自测，不调用 Claude。 |
 | `--dry-run` | 只写计划和环境锁，不运行 Claude 或验证命令。 |
+
+从 Web 正常进入实验阶段时，输入由 `web -> framework -> environment_handoff -> experimenting` 传递：`repo_path` 指向 environment run 内的真实仓库，`conda_env_prefix` 指向同一 run 内已验证的 Conda 环境，`pending_downstream_metrics` 是本阶段需要通过真实实验/评估日志绑定的论文指标。
 
 公开 action：
 
@@ -82,7 +84,7 @@ modules/experimenting/runtime/web/<project>/
 ## 运行流程
 
 1. 解析实验 plan，归一化 experiment_id、标题、方法、数据、指标、运行命令和 Conda 环境。
-2. 检查 `repo-path` 和 Conda/NVM/Claude runtime，写出环境锁。
+2. 检查 `repo-path` 和 Conda/NVM/Claude runtime，支持 Conda 环境名或绝对 prefix，并写出环境锁。
 3. 每轮构建 Claude Code prompt，要求它只修改基础 repo，只把本轮日志/指标写入 iteration artifact dir。
 4. 可选执行 plan 或 `--run-command` 中的验证命令。
 5. 收集 `metrics.json`、`bad_cases.json`、`experiment_iteration_summary.json`，更新 registry/CSV/Markdown。

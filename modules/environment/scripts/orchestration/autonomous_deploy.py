@@ -16,7 +16,7 @@ from typing import Any
 MODULE_ROOT = Path(__file__).resolve().parents[2]
 REPO_ROOT = MODULE_ROOT.parents[1]
 RUNS_ROOT = MODULE_ROOT / "runs"
-DECISION_POLICY_VERSION = "environment.deployment_decision.v77"
+DECISION_POLICY_VERSION = "environment.deployment_decision.v78"
 APPROVAL_GATE_REQUIRED_CHECKS = (
     "repository_source",
     "repository_documentation",
@@ -32,6 +32,26 @@ APPROVAL_GATE_REQUIRED_CHECKS = (
     "reproduce_full",
     "paper_config_alignment",
     "workspace_write_audit",
+)
+ENVIRONMENT_HANDOFF_REQUIRED_CHECKS = (
+    "repository_source",
+    "conda_environment",
+    "machine_fit",
+    "dataset_runtime",
+    "required_commands",
+    "runtime_smoke",
+    "paper_config_alignment",
+    "workspace_write_audit",
+)
+ENVIRONMENT_HANDOFF_ALLOWED_PENDING_CHECKS = (
+    "repository_documentation",
+    "dataset_evidence",
+    "paper_claims_verified",
+    "success_criteria_schema",
+    "success_criteria_paper_binding",
+    "metric_evidence",
+    "paper_context",
+    "reproduce_full",
 )
 for candidate in [MODULE_ROOT, MODULE_ROOT / "scripts"]:
     if str(candidate) not in sys.path:
@@ -482,6 +502,7 @@ def finalize_and_write_decision(decision: dict[str, Any], run_dir: Path, paper_e
     decision = attach_runtime_isolation_summary(decision, run_dir)
     decision = _ensure_approval_gate_for_early_decision(decision, paper_evidence)
     decision = _apply_workspace_write_audit(decision, baseline_outside_state)
+    decision = _refresh_environment_handoff_workspace_audit(decision)
     write_json(run_dir / "environment_deployment_decision.json", decision)
     write_json(MODULE_ROOT / "latest_decision.json", decision)
     print(json.dumps(decision, ensure_ascii=False, indent=2))
@@ -3088,6 +3109,269 @@ def _ensure_approval_gate_for_early_decision(decision: dict[str, Any], paper_evi
     return decision
 
 
+def _dataset_runtime_gate(receipts: list[dict[str, Any]]) -> tuple[bool, dict[str, Any]]:
+    dataset_receipts = _successful_dataset_receipts(receipts)
+    return bool(dataset_receipts), {
+        "successful_dataset_phases": [str(row.get("phase") or "") for row in dataset_receipts[:8]],
+        "sample_dataset_receipts": [_compact_receipt(row) for row in dataset_receipts[:5]],
+    }
+
+
+def _runtime_smoke_gate(receipts: list[dict[str, Any]]) -> tuple[bool, dict[str, Any]]:
+    successful = _required_successful_receipts(receipts)
+    smoke_phases = []
+    verify_phases = []
+    model_phases = []
+    for row in successful:
+        phase = str(row.get("phase") or "").strip().lower()
+        if not phase:
+            continue
+        if "smoke" in phase or phase in {"reproduce_smoke", "loader_probe", "load_dataset", "loader"}:
+            smoke_phases.append(row)
+        if _receipt_matches_conda_verify(row):
+            verify_phases.append(row)
+        if "model" in phase or "loader" in phase:
+            model_phases.append(row)
+    return bool(smoke_phases and verify_phases), {
+        "successful_smoke_phases": [str(row.get("phase") or "") for row in smoke_phases[:8]],
+        "successful_verify_phases": [str(row.get("phase") or "") for row in verify_phases[:8]],
+        "successful_model_or_loader_phases": [str(row.get("phase") or "") for row in model_phases[:8]],
+        "sample_smoke_receipts": [_compact_receipt(row) for row in smoke_phases[:3]],
+    }
+
+
+def _latest_round_with_receipts(rounds: list[dict[str, Any]]) -> dict[str, Any]:
+    for row in reversed(rounds):
+        if isinstance(row, dict) and str(row.get("receipts_path") or "").strip():
+            return row
+    return {}
+
+
+def _latest_env_plan(rounds: list[dict[str, Any]]) -> dict[str, Any]:
+    round_record = _latest_round_with_receipts(rounds)
+    path = Path(str(round_record.get("env_plan_path") or "")) if round_record else Path("")
+    payload = read_json(path, {}) if str(path) else {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _latest_receipts(rounds: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    round_record = _latest_round_with_receipts(rounds)
+    path = Path(str(round_record.get("receipts_path") or "")) if round_record else Path("")
+    payload = read_json(path, []) if str(path) else []
+    return [row for row in payload if isinstance(row, dict)] if isinstance(payload, list) else []
+
+
+def build_environment_handoff_gate(
+    approval_gate: dict[str, Any],
+    receipts: list[dict[str, Any]],
+    repo_info: dict[str, Any],
+) -> dict[str, Any]:
+    approval_checks = {
+        str(row.get("name") or ""): row
+        for row in approval_gate.get("checks", [])
+        if isinstance(row, dict)
+    }
+    runtime_ok, runtime_evidence = _runtime_smoke_gate(receipts)
+    checks: list[dict[str, Any]] = []
+    dataset_runtime_ok, dataset_runtime_evidence = _dataset_runtime_gate(receipts)
+    for name in ENVIRONMENT_HANDOFF_REQUIRED_CHECKS:
+        if name == "runtime_smoke":
+            checks.append(_approval_check(
+                "runtime_smoke",
+                runtime_ok,
+                "loader/model smoke 已在 run-local Conda 环境中通过" if runtime_ok else "缺少 run-local loader/model smoke 通过证据",
+                runtime_evidence,
+            ))
+            continue
+        if name == "dataset_runtime":
+            checks.append(_approval_check(
+                "dataset_runtime",
+                dataset_runtime_ok,
+                "真实数据准备阶段已成功" if dataset_runtime_ok else "缺少成功且必需的数据准备回执",
+                dataset_runtime_evidence,
+            ))
+            continue
+        source = approval_checks.get(name)
+        if isinstance(source, dict):
+            checks.append({**source, "name": name})
+        else:
+            checks.append(_approval_check(name, False, f"缺少 approval gate 检查项：{name}"))
+    missing = [row["reason"] for row in checks if not row.get("passed")]
+    repo_path = str(repo_info.get("repo_path") or "").strip()
+    if not repo_path or not Path(repo_path).exists():
+        missing.append("repo_path 不存在，不能交给实验阶段")
+        checks.append(_approval_check("repo_path_exists", False, "repo_path 不存在，不能交给实验阶段", {"repo_path": repo_path}))
+    return {
+        "schema_version": "environment.handoff_gate.v1",
+        "policy_version": DECISION_POLICY_VERSION,
+        "passed": not missing,
+        "missing": missing,
+        "required_checks": list(ENVIRONMENT_HANDOFF_REQUIRED_CHECKS),
+        "pending_downstream_checks": list(ENVIRONMENT_HANDOFF_ALLOWED_PENDING_CHECKS),
+        "checks": checks,
+    }
+
+
+def _pending_downstream_metrics(env_plan: dict[str, Any], metric_evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    evidence_by_metric = {
+        str(row.get("metric") or row.get("name") or "").strip().lower(): row
+        for row in metric_evidence
+        if isinstance(row, dict)
+    }
+    pending: list[dict[str, Any]] = []
+    for item in env_plan.get("success_criteria") if isinstance(env_plan.get("success_criteria"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        metric = str(item.get("metric") or item.get("name") or "").strip()
+        if not metric:
+            continue
+        evidence = evidence_by_metric.get(metric.lower(), {})
+        if evidence.get("passed") is True:
+            continue
+        pending.append({
+            "metric": metric,
+            "operator": item.get("operator") or item.get("op"),
+            "target": item.get("value") if "value" in item else item.get("target"),
+            "source": item.get("source") or item.get("evidence_source") or "",
+            "status": "pending_experimenting_evaluation",
+            "reason": "论文级指标必须由 experimenting/evaluation 阶段基于真实实验日志验证；environment 只交付可运行环境、数据和参考入口。",
+        })
+    return pending
+
+
+def build_environment_handoff(
+    run_id: str,
+    run_dir: Path,
+    normalized_plan: dict[str, Any],
+    repo_info: dict[str, Any],
+    env_plan: dict[str, Any],
+    receipts: list[dict[str, Any]],
+    approval_gate: dict[str, Any],
+    metric_evidence: list[dict[str, Any]],
+) -> dict[str, Any]:
+    handoff_gate = build_environment_handoff_gate(approval_gate, receipts, repo_info)
+    env_name = str(env_plan.get("env_name") or "").strip()
+    conda_prefix = str(env_prefix_for(run_dir, env_name)) if env_name else ""
+    full_commands = [row for row in env_plan.get("commands", []) if isinstance(row, dict) and str(row.get("phase") or "").strip().lower() == "reproduce_full"] if isinstance(env_plan.get("commands"), list) else []
+    smoke_receipts = [row for row in _required_successful_receipts(receipts) if "smoke" in str(row.get("phase") or "").lower() or "loader" in str(row.get("phase") or "").lower()]
+    dataset_receipts = _successful_dataset_receipts(receipts)
+    return {
+        "schema_version": "environment.handoff.v1",
+        "policy_version": DECISION_POLICY_VERSION,
+        "run_id": run_id,
+        "run_dir": str(run_dir),
+        "ready_for_experimenting": bool(handoff_gate.get("passed")),
+        "status": "ready_for_experimenting" if handoff_gate.get("passed") else "blocked_environment_handoff",
+        "repo": {
+            "repo_url": repo_info.get("repo_url", ""),
+            "repo_path": repo_info.get("repo_path", ""),
+            "head_commit": repo_info.get("head_commit", ""),
+        },
+        "conda": {
+            "env_name": env_name,
+            "prefix": conda_prefix,
+            "python": str(Path(conda_prefix) / "bin" / "python") if conda_prefix else "",
+        },
+        "paper": {
+            "title": normalized_plan.get("title", ""),
+            "paper_url": normalized_plan.get("paper_url", ""),
+            "selected_plan_id": normalized_plan.get("selected_plan_id", ""),
+            "selected_idea_id": normalized_plan.get("selected_idea_id", ""),
+        },
+        "data": {
+            "run_data_dir": str(run_dir / "data"),
+            "successful_dataset_receipts": [_compact_receipt(row) for row in dataset_receipts[:8]],
+        },
+        "runtime_smoke": {
+            "successful_smoke_receipts": [_compact_receipt(row) for row in smoke_receipts[:8]],
+        },
+        "reference_command_templates": full_commands[:3],
+        "pending_downstream_metrics": _pending_downstream_metrics(env_plan, metric_evidence),
+        "handoff_gate": handoff_gate,
+        "note": "environment 已验证真实仓库、run-local Conda、数据准备和 loader/model smoke；论文级指标仍需 experimenting/evaluation 读取本 handoff 后运行并记录。",
+    }
+
+
+def _set_environment_handoff_readiness(decision: dict[str, Any]) -> dict[str, Any]:
+    handoff = decision.get("environment_handoff") if isinstance(decision.get("environment_handoff"), dict) else {}
+    gate = handoff.get("handoff_gate") if isinstance(handoff.get("handoff_gate"), dict) else {}
+    if not gate:
+        return decision
+    checks = gate.get("checks") if isinstance(gate.get("checks"), list) else []
+    missing = [str(row.get("reason") or "") for row in checks if isinstance(row, dict) and not row.get("passed")]
+    missing = [item for item in missing if item]
+    gate["missing"] = missing
+    gate["passed"] = not missing
+    handoff["ready_for_experimenting"] = bool(gate.get("passed"))
+    handoff["status"] = "ready_for_experimenting" if gate.get("passed") else "blocked_environment_handoff"
+    decision["ready_for_experimenting"] = bool(gate.get("passed"))
+    contract = decision.setdefault("environment_handoff_contract", {})
+    if isinstance(contract, dict):
+        contract["ready_for_experimenting"] = bool(gate.get("passed"))
+    if gate.get("passed") and decision.get("decision") == "continue_repair":
+        decision["decision"] = "environment_ready"
+        decision["exit_code"] = 0
+        verdict = decision.setdefault("verdict", {})
+        if isinstance(verdict, dict):
+            verdict["decision"] = "environment_ready"
+            verdict["allow_next_module"] = False
+            verdict["ready_for_experimenting"] = True
+            verdict.setdefault("repair_plan", []).append("论文级指标移交 experimenting/evaluation 阶段验证；environment 阶段已生成可运行 handoff。")
+    return decision
+
+
+def _refresh_environment_handoff_workspace_audit(decision: dict[str, Any]) -> dict[str, Any]:
+    handoff = decision.get("environment_handoff") if isinstance(decision.get("environment_handoff"), dict) else {}
+    gate = handoff.get("handoff_gate") if isinstance(handoff.get("handoff_gate"), dict) else {}
+    checks = gate.get("checks") if isinstance(gate.get("checks"), list) else []
+    if not checks:
+        return decision
+    audit = decision.get("workspace_write_audit") if isinstance(decision.get("workspace_write_audit"), dict) else {}
+    audit_passed = audit.get("status") == "passed"
+    refreshed = _approval_check(
+        "workspace_write_audit",
+        audit_passed,
+        "工作区写入审计已通过" if audit_passed else "工作区写入审计未通过或尚未生成",
+        audit,
+    )
+    replaced = False
+    new_checks: list[dict[str, Any]] = []
+    for row in checks:
+        if isinstance(row, dict) and str(row.get("name") or "") == "workspace_write_audit":
+            new_checks.append(refreshed)
+            replaced = True
+        else:
+            new_checks.append(row)
+    if not replaced:
+        new_checks.append(refreshed)
+    gate["checks"] = new_checks
+    return _set_environment_handoff_readiness(decision)
+
+
+def attach_environment_handoff(
+    decision: dict[str, Any],
+    run_dir: Path,
+    normalized_plan: dict[str, Any],
+    repo_info: dict[str, Any],
+) -> dict[str, Any]:
+    rounds = decision.get("rounds") if isinstance(decision.get("rounds"), list) else []
+    env_plan = _latest_env_plan(rounds)
+    receipts = _latest_receipts(rounds)
+    latest_round = _latest_round_with_receipts(rounds)
+    metric_evidence = latest_round.get("metric_evidence") if isinstance(latest_round.get("metric_evidence"), list) else []
+    approval_gate = decision.get("approval_gate") if isinstance(decision.get("approval_gate"), dict) else {}
+    handoff = build_environment_handoff(run_id=str(decision.get("run_id") or ""), run_dir=run_dir, normalized_plan=normalized_plan, repo_info=repo_info, env_plan=env_plan, receipts=receipts, approval_gate=approval_gate, metric_evidence=metric_evidence)
+    decision["environment_handoff"] = handoff
+    decision["ready_for_experimenting"] = bool(handoff.get("ready_for_experimenting"))
+    contract = decision.setdefault("environment_handoff_contract", {})
+    contract.update({
+        "ready_for_experimenting": bool(handoff.get("ready_for_experimenting")),
+        "meaning": "ready_for_experimenting=true 表示 environment 已交付真实 repo/data/run-local Conda/loader smoke，可进入 experimenting；不表示论文指标已达标。",
+        "pending_downstream_metrics": handoff.get("pending_downstream_metrics", []),
+    })
+    return _set_environment_handoff_readiness(decision)
+
+
 def build_approval_gate(
     verdict: dict[str, Any],
     receipts: list[dict[str, Any]],
@@ -4275,7 +4559,7 @@ def final_decision_payload(run_id: str, run_dir: Path, normalized_plan: dict[str
         "approval_contract": {
             "approved": allow_next,
             "policy_version": DECISION_POLICY_VERSION,
-            "meaning": "allow_next_module=true 表示本模块确认参考复现达到论文声明，可进入下一个模块。",
+            "meaning": "allow_next_module=true 表示本模块确认参考复现达到论文声明；environment_handoff.ready_for_experimenting=true 表示 environment 已交付可运行 repo/data/Conda，可进入 experimenting。",
             "hard_requirements": [
                 "真实 GitHub 仓库、仓库 README/文档/配置/入口证据和论文/训练配置证据",
                 "Conda 环境 prefix 位于本次 run 目录，且依赖安装和导入/运行验证成功",
@@ -4654,10 +4938,11 @@ def main() -> int:
             break
 
     decision = final_decision_payload(run_id, run_dir, normalized, repo_info, machine, rounds, final_verdict)
-    terminal_reached = decision.get("decision") in {"approve", "reject"}
+    decision = attach_environment_handoff(decision, run_dir, normalized, repo_info)
+    terminal_reached = decision.get("decision") in {"approve", "reject", "environment_ready"}
     rounds_this_invocation = max(0, len(rounds) - rounds_before_invocation)
     if terminal_reached:
-        stop_reason = "terminal_decision"
+        stop_reason = "environment_handoff_ready" if decision.get("decision") == "environment_ready" else "terminal_decision"
     elif effective_until_terminal and args.max_total_rounds > 0 and len(rounds) >= args.max_total_rounds:
         stop_reason = "max_total_rounds_reached"
     elif effective_until_terminal:

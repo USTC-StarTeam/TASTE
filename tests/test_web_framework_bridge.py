@@ -77,3 +77,33 @@ def test_missing_plan_returns_human_readable_blocker(monkeypatch, tmp_path):
 
     assert cmd[:2] == ["/env/bin/python", "-c"]
     assert "缺少可执行实验计划" in cmd[2]
+
+
+def test_web_experiment_action_prefers_environment_handoff(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    root = _make_project(projects, "demo")
+    handoff_repo = tmp_path / "environment" / "repo"
+    handoff_env = tmp_path / "environment" / "conda_envs" / "rigid"
+    handoff_repo.mkdir(parents=True)
+    (handoff_env / "bin").mkdir(parents=True)
+    (handoff_env / "bin" / "python").write_text("", encoding="utf-8")
+    (root / "state" / "environment_handoff.json").write_text(json.dumps({
+        "status": "ready_for_experimenting",
+        "valid": True,
+        "repo_path": str(handoff_repo),
+        "conda_env_prefix": str(handoff_env),
+        "environment_handoff": {
+            "repo": {"repo_path": str(handoff_repo), "repo_url": "https://github.com/example/repo"},
+            "conda": {"prefix": str(handoff_env), "env_name": "rigid"},
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.setattr(project_bridge, "project_target_venue", lambda project, default="": default or "ICLR")
+    monkeypatch.setattr(project_bridge, "management_python", lambda: "/env/bin/python")
+    monkeypatch.setattr(project_bridge, "_literature_recommendation_gate_is_blocked", lambda project: False)
+    monkeypatch.setattr(project_bridge, "_fresh_base_data_is_blocked", lambda project: False)
+
+    _project, cmd = project_bridge.build_command({"project": "demo", "action": "experiment", "venue": "ICLR", "iterations": 1, "skip_claude": True})
+    module_arg = cmd[cmd.index("--module-arg") + 1]
+    assert f"--repo-path {handoff_repo}" in module_arg
+    assert f"--conda-env {handoff_env}" in module_arg
