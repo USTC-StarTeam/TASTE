@@ -552,6 +552,50 @@ def test_environment_dependency_policy_rewrites_incoherent_torch_pip_versions():
     assert any(row.get("phase") == "verify_pyg_cuda_import" for row in normalized["commands"] if isinstance(row, dict))
 
 
+
+def test_environment_binds_rigidssl_designability_target_alias_and_local_full_text_source(tmp_path):
+    environment_module_root = ROOT / "modules" / "environment"
+    for name in list(sys.modules):
+        if name == "scripts" or name.startswith("scripts."):
+            sys.modules.pop(name, None)
+    if str(environment_module_root) not in sys.path:
+        sys.path.insert(0, str(environment_module_root))
+    else:
+        sys.path.insert(0, sys.path.pop(sys.path.index(str(environment_module_root))))
+    spec = importlib.util.spec_from_file_location(
+        "environment_autonomous_deploy_binding",
+        environment_module_root / "scripts" / "orchestration" / "autonomous_deploy.py",
+    )
+    assert spec and spec.loader
+    autonomous_deploy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(autonomous_deploy)
+
+    env_plan = {
+        "status": "ready_to_execute",
+        "env_name": "rigidssl_protein",
+        "success_criteria": [
+            {"name": "designability", "metric": "designability", "operator": ">=", "value": 0.758, "source": "paper Table 1"},
+            {"name": "scRMSD", "metric": "scRMSD", "operator": "<", "value": 2.0, "source": "paper Table 1"},
+        ],
+    }
+    paper_evidence = {
+        "target_metrics": [
+            {"name": "designability_target", "operator": ">=", "value": 0.758, "source": "RigidSSL paper Table 1"},
+            {"name": "scrmsd", "operator": "<", "value": 2.0, "source": "selected_plan.stages[1].tasks[0]"},
+        ],
+        "paper_claims_or_training_signals": [{"source": "paper", "text": "RigidSSL reports designability."}],
+        "text_blocks": [{"source": "local_full_text:/tmp/rigidssl.txt", "text": "RigidSSL full paper text"}],
+        "has_paper_context": True,
+    }
+
+    ok, evidence = autonomous_deploy._success_criteria_paper_binding_gate(env_plan, paper_evidence)
+    assert ok, evidence
+    assert evidence["matched_count"] == 2
+    assert evidence["matches"][0]["paper_target_source"] == "RigidSSL paper Table 1"
+    paper_ok, paper_context = autonomous_deploy._paper_context_gate(paper_evidence)
+    assert paper_ok, paper_context
+    assert paper_context["substantive_source_count"] == 1
+
 def test_environment_normalizes_selected_plan_metrics_and_paper_source():
     environment_module_root = ROOT / "modules" / "environment"
     for name in list(sys.modules):

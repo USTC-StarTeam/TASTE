@@ -1644,10 +1644,34 @@ PAPER_TARGET_NUMBER_RE = re.compile(r"[+-]?(?:(?:\d+(?:,\d{3})+|\d+)(?:\.\d*)?|\
 PAPER_TARGET_VALUE_KEYS = ("value", "target", "paper_value", "expected", "score", "result")
 PAPER_TARGET_NAME_KEYS = ("name", "metric", "metric_name", "criterion")
 PAPER_TARGET_SOURCE_KEYS = ("source", "paper_source", "evidence_source", "table", "section")
+METRIC_NAME_TRAILING_QUALIFIERS = (
+    "target",
+    "metric",
+    "score",
+    "value",
+    "fraction",
+    "rate",
+)
 
 
 def _metric_binding_compact(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _metric_name_suffix_aliases(compact: str) -> set[str]:
+    aliases: set[str] = set()
+    current = str(compact or "")
+    while current:
+        stripped = False
+        for suffix in METRIC_NAME_TRAILING_QUALIFIERS:
+            if current.endswith(suffix) and len(current) > len(suffix) + 2:
+                current = current[: -len(suffix)]
+                aliases.add(current)
+                stripped = True
+                break
+        if not stripped:
+            break
+    return aliases
 
 
 def _success_metric_name_variants(name: str) -> set[str]:
@@ -1655,6 +1679,7 @@ def _success_metric_name_variants(name: str) -> set[str]:
     compact = _metric_binding_compact(raw)
     variants = {raw, compact}
     variants.update(SUCCESS_CRITERIA_METRIC_ALIASES.get(compact, set()))
+    variants.update(_metric_name_suffix_aliases(compact))
     return {item for item in variants if item}
 
 
@@ -2880,6 +2905,7 @@ def _dataset_gate(env_plan: dict[str, Any], paper_evidence: dict[str, Any], rece
 
 PAPER_CONTEXT_SOURCE_HINTS = (
     "local_file:",
+    "local_full_text:",
     "url:",
     "plan.paper",
     "plan.paper_text",
