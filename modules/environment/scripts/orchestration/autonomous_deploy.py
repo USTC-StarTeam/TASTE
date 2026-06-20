@@ -533,6 +533,7 @@ def prompt_environment_plan(normalized_plan: dict[str, Any], machine: dict[str, 
 - 所有克隆仓库、数据、日志、临时脚本、输出都必须留在本次 run 目录或 repo 子目录内。
 - `cwd` 只能是 `repo`、`run` 或本次 run 目录内路径；命令参数里的路径值和本地脚本/文件参数必须落在本次 run 目录内。已知输出/数据/配置/依赖文件参数即使写成 `outputs/run1` 这类裸相对值，也会按命令实际 `cwd` 解析；`bash scripts/run.sh`、`python train.py`、`python scripts/train.py` 也会解析真实路径，不能指向 run 外或 run 内 symlink 到外部的文件；`outputs/../../outside`、`--output=.../../..`、`-r.../../..` 这类穿越写法会被拒绝。如果命令本身是 `./script.sh` 或绝对脚本路径，脚本也必须位于本次 run/repo 内，外部系统工具请使用命令名而不是外部临时脚本路径。
 - 不要为了通过检查而使用 toy/synthetic/dummy/mock/sample 数据或替代数据集冒充论文数据；数据准备命令或日志必须能看到真实论文数据集名称或来源，不能出现 not using / instead of / replacement / 替代 / 改用 这类说明论文数据集未被使用的上下文，`paper_config_alignment` 也要说明该映射。论文数据准备/下载/预处理阶段必须是必需命令，不能标记为 `required=false` 后再拿它支撑批准。
+- HuggingFace Hub 下载必须使用当前可用的 `hf download`；不要使用已废弃不可工作的 `huggingface-cli`，也不要输出 `--resume-download` 参数。数据集仓库用 `hf download <repo_id> --repo-type dataset --local-dir <run内目录>`，模型/checkpoint 仓库用 `hf download <repo_id> --local-dir <run内目录>`。
 - Conda/Pip/下载/训练命令必须写成 JSON 数组，后端会受控执行；不要在回答里只写自然语言。不要输出 `rm -rf /`、`rm -rf -- /`、`rm -Rf /*`、`rm -rf ../outside`、`dd if=`、`chmod -R 777 /` 等高危命令片段；危险片段会大小写归一化后检查，`rm` 目标也会结构化解析。
 - 不要输出 `conda activate`、`source activate`、`source ...` 或 `.` 这类只对交互 shell 生效的命令；每条命令应直接可执行，Python/训练入口由后端用 run 内 Conda prefix 重写，复杂初始化请写入本次 run 目录脚本后用 `bash <script>` 执行。
 - 每条命令必须包含非空字符串 `phase`；`required` 若出现必须是 JSON boolean `true/false`，不能写成字符串或数字；`cwd` 若出现必须是字符串。
@@ -815,6 +816,7 @@ RUN_SCOPED_ENV_KEY_MARKERS = (
 )
 INLINE_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 PYTHON_ENV_ENTRYPOINTS = {"python", "python3", "pip", "pip3", "pytest", "torchrun", "accelerate", "deepspeed"}
+RUN_ENV_ENTRYPOINTS = {*PYTHON_ENV_ENTRYPOINTS, "hf"}
 CONDA_PREFIX_OPTIONS = {"-p", "--prefix"}
 SYSTEM_EXECUTABLE_PATH_HEADS = {
     "bash", "sh", "zsh", "git", "curl", "wget", "tar", "unzip", "rsync",
@@ -3202,7 +3204,7 @@ def _command_uses_direct_env_executable(tokens: list[str], env_prefix: Path) -> 
     if not tokens:
         return False
     head = Path(str(tokens[0] or "")).name
-    if head not in PYTHON_ENV_ENTRYPOINTS:
+    if head not in RUN_ENV_ENTRYPOINTS:
         return False
     candidate = Path(str(tokens[0] or "")).expanduser()
     if not candidate.is_absolute():
@@ -3225,13 +3227,20 @@ def command_uses_conda_prefix(tokens: list[str], env_prefix: Path) -> bool:
     return _command_uses_direct_env_executable(tokens, env_prefix)
 
 
+def _drop_deprecated_hf_download_flags(tokens: list[str]) -> list[str]:
+    return [str(token) for token in tokens if str(token) != "--resume-download"]
+
+
 def _direct_env_entrypoint_command(tokens: list[str], env_prefix: Path) -> list[str]:
     if not tokens:
         return []
+    tokens = _drop_deprecated_hf_download_flags(tokens)
     head = Path(str(tokens[0] or "")).name
     if head in {"pip", "pip3"}:
         return [str(env_prefix / "bin" / "python"), "-m", "pip", *tokens[1:]]
-    if head in PYTHON_ENV_ENTRYPOINTS:
+    if head == "huggingface-cli" and len(tokens) > 1 and str(tokens[1]) == "download":
+        return [str(env_prefix / "bin" / "hf"), *tokens[1:]]
+    if head in RUN_ENV_ENTRYPOINTS:
         executable = "python" if head in {"python", "python3"} else head
         return [str(env_prefix / "bin" / executable), *tokens[1:]]
     return []
@@ -3257,6 +3266,61 @@ def rewrite_command(command: Any, conda_exe: str, env_name: str, env_prefix: Pat
         if direct:
             return direct
     return tokens
+
+
+def _migrate_deprecated_huggingface_cli_script(text: str) -> str:
+    updated = re.sub(r"\bhuggingface-cli\s+download\b", "hf download", text)
+    updated = re.sub(r"(?m)^[ \t]*--resume-download[ \t]*\\?[ \t]*(?:#.*)?\n", "", updated)
+    updated = re.sub(r"[ \t]+--resume-download(?=[ \t\n]|$)", "", updated)
+    return updated
+
+
+def _command_shell_script_tokens(tokens: list[str]) -> list[str]:
+    inner = _conda_run_inner_tokens(tokens)
+    effective = inner if inner else tokens
+    if not effective or Path(str(effective[0] or "")).name not in {"bash", "sh", "zsh"}:
+        return []
+    candidates: list[str] = []
+    saw_separator = False
+    for raw in effective[1:]:
+        token = str(raw or "")
+        if not token:
+            continue
+        if token == "--" and not saw_separator:
+            saw_separator = True
+            continue
+        if not saw_separator and token.startswith("-"):
+            continue
+        candidates.append(token)
+        break
+    return candidates
+
+
+def normalize_generated_script_commands_for_command(tokens: list[str], cwd: Path, run_dir: Path) -> list[dict[str, str]]:
+    migrations: list[dict[str, str]] = []
+    for token in _command_shell_script_tokens(tokens):
+        script_path = Path(token).expanduser()
+        if not script_path.is_absolute():
+            script_path = cwd.expanduser().resolve() / script_path
+        try:
+            script_path = ensure_within(script_path, run_dir.expanduser().resolve())
+        except ValueError:
+            continue
+        if not script_path.is_file():
+            continue
+        try:
+            before = script_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        after = _migrate_deprecated_huggingface_cli_script(before)
+        if after == before:
+            continue
+        script_path.write_text(after, encoding="utf-8")
+        migrations.append({
+            "path": str(script_path),
+            "migration": "huggingface-cli download -> hf download; removed --resume-download",
+        })
+    return migrations
 
 
 
@@ -3429,8 +3493,10 @@ def execute_plan_commands(plan: dict[str, Any], repo_path: Path, run_dir: Path, 
             issue = "；".join(str(item) for item in row.get("inline_env_issues", []) if str(item).strip())
         phase = slugify(row.get("phase") or "phase")
         log_path = round_dir / "logs" / f"{row['index']:02d}_{phase}.log"
+        script_migrations: list[dict[str, str]] = []
         try:
             cwd = resolve_command_cwd(row, repo_path, run_dir)
+            script_migrations = normalize_generated_script_commands_for_command(command, cwd, run_dir)
             boundary_issues = command_boundary_issues(command, cwd, run_dir)
             env_boundary_issues = command_env_boundary_issues(row.get("env"), run_dir, cwd=cwd)
         except Exception as exc:
@@ -3452,6 +3518,7 @@ def execute_plan_commands(plan: dict[str, Any], repo_path: Path, run_dir: Path, 
                 "inline_env_keys": row.get("inline_env_keys", []),
                 "conda_env_prefix": str(env_prefix),
                 "uses_conda_prefix": uses_conda_prefix,
+                "script_migrations": script_migrations,
             }
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.write_text(f"$ {command_text(command)}\n[命令边界守卫阻止] {issue}\n", encoding="utf-8")
@@ -3463,6 +3530,7 @@ def execute_plan_commands(plan: dict[str, Any], repo_path: Path, run_dir: Path, 
             receipt["phase"] = row.get("phase")
             receipt["conda_env_prefix"] = str(env_prefix)
             receipt["uses_conda_prefix"] = uses_conda_prefix
+            receipt["script_migrations"] = script_migrations
             receipt["env_keys"] = sorted(row_env.keys())
             receipt["inline_env_keys"] = row.get("inline_env_keys", [])
         receipts.append(receipt)

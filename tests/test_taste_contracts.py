@@ -167,6 +167,56 @@ def test_environment_rewrites_python_entrypoints_to_run_local_prefix():
     assert autonomous_deploy._conda_prefix_tokens_have_verify_action(run_command)
 
 
+def test_environment_rewrites_huggingface_cli_to_current_hf_cli(tmp_path):
+    environment_module_root = ROOT / "modules" / "environment"
+    for name in list(sys.modules):
+        if name == "scripts" or name.startswith("scripts."):
+            sys.modules.pop(name, None)
+    if str(environment_module_root) not in sys.path:
+        sys.path.insert(0, str(environment_module_root))
+    else:
+        sys.path.insert(0, sys.path.pop(sys.path.index(str(environment_module_root))))
+    spec = importlib.util.spec_from_file_location(
+        "environment_autonomous_deploy_hf",
+        environment_module_root / "scripts" / "orchestration" / "autonomous_deploy.py",
+    )
+    assert spec and spec.loader
+    autonomous_deploy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(autonomous_deploy)
+
+    env_prefix = tmp_path / "run" / "conda_envs" / "rigid"
+    command = autonomous_deploy.rewrite_command(
+        ["huggingface-cli", "download", "tonynzh/RigidSSL", "--repo-type", "dataset", "--resume-download", "--local-dir", "data/raw"],
+        "/home/fmh/workspace/miniforge/bin/conda",
+        "rigid",
+        env_prefix,
+    )
+    assert command == [str(env_prefix / "bin" / "hf"), "download", "tonynzh/RigidSSL", "--repo-type", "dataset", "--local-dir", "data/raw"]
+
+    run_dir = tmp_path / "run"
+    script = run_dir / "scripts" / "download_setup.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        """#!/usr/bin/env bash
+huggingface-cli download tonynzh/RigidSSL \
+  --repo-type dataset \
+  --resume-download \
+  --local-dir data/raw
+""",
+        encoding="utf-8",
+    )
+    migrations = autonomous_deploy.normalize_generated_script_commands_for_command(
+        ["conda", "run", "-p", str(env_prefix), "--no-capture-output", "bash", "scripts/download_setup.sh"],
+        run_dir,
+        run_dir,
+    )
+    updated = script.read_text(encoding="utf-8")
+    assert migrations and migrations[0]["path"] == str(script)
+    assert "hf download tonynzh/RigidSSL" in updated
+    assert "huggingface-cli" not in updated
+    assert "--resume-download" not in updated
+
+
 def test_environment_isolated_runtime_scrubs_inconsistent_conda_activation_state(tmp_path):
     environment_module_root = ROOT / "modules" / "environment"
     for name in list(sys.modules):
