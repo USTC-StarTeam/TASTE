@@ -444,6 +444,9 @@ def test_environment_rewrites_rigidssl_model_and_smoke_probes(tmp_path):
     assert smoke[1] == "-c"
     assert "load_dataset" in smoke[2]
     assert "next(iter(loader))" in smoke[2]
+    assert "_single_worker_dataloader" in smoke[2]
+    assert "loader_kwargs['num_workers'] = 0" in smoke[2]
+    assert "loader_kwargs['pin_memory'] = False" in smoke[2]
     assert "RigidSSL_Perturb.py" not in smoke[0:2]
     assert smoke_migrations
 

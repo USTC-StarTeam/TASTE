@@ -3604,21 +3604,29 @@ def _rigidssl_loader_probe_code(repo_path: Path, run_dir: Path) -> str:
     repo = str(repo_path.expanduser().resolve())
     examples = str((repo_path / "examples").expanduser().resolve())
     data_dir = str((run_dir / "data" / "RigidSSL_Perturb_data").expanduser().resolve())
-    return (
-        "import os, sys; "
-        f"sys.path[:0] = [{examples!r}, {repo!r}]; "
-        "os.environ.setdefault('TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD', '1'); "
-        "from config import args; "
-        "args.batch_size = 1; args.train_number = 1; args.dataset_portion = 'full'; "
-        "import RigidSSL_Perturb as rigidssl_perturb; "
-        "from torch_geometric.loader import DataLoader; "
-        "rigidssl_perturb.DataLoaderClass = DataLoader; "
-        "rigidssl_perturb.dataloader_kwargs = {}; "
-        f"loader = rigidssl_perturb.load_dataset({data_dir!r}, '1', args); "
-        "batch = next(iter(loader)); "
-        "model = rigidssl_perturb.model_setup(); "
-        "print('RigidSSL loader probe batch_graphs', getattr(batch, 'num_graphs', 'unknown'), 'model_params', sum(p.numel() for p in model.parameters()))"
-    )
+    lines = [
+        "import os, sys",
+        f"sys.path[:0] = [{examples!r}, {repo!r}]",
+        "os.environ.setdefault('TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD', '1')",
+        "from config import args",
+        "args.batch_size = 1",
+        "args.train_number = 1",
+        "args.dataset_portion = 'full'",
+        "import RigidSSL_Perturb as rigidssl_perturb",
+        "from torch_geometric.loader import DataLoader",
+        "def _single_worker_dataloader(*loader_args, **loader_kwargs):",
+        "    loader_kwargs['num_workers'] = 0",
+        "    loader_kwargs['pin_memory'] = False",
+        "    loader_kwargs.pop('persistent_workers', None)",
+        "    return DataLoader(*loader_args, **loader_kwargs)",
+        "rigidssl_perturb.DataLoaderClass = _single_worker_dataloader",
+        "rigidssl_perturb.dataloader_kwargs = {}",
+        f"loader = rigidssl_perturb.load_dataset({data_dir!r}, '1', args)",
+        "batch = next(iter(loader))",
+        "model = rigidssl_perturb.model_setup()",
+        "print('RigidSSL loader probe batch_graphs', getattr(batch, 'num_graphs', 'unknown'), 'model_params', sum(p.numel() for p in model.parameters()))",
+    ]
+    return "\n".join(lines)
 
 
 def _is_rigidssl_repo(repo_path: Path) -> bool:
