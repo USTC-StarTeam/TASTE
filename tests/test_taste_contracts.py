@@ -367,6 +367,39 @@ def test_environment_dependency_policy_pins_rigidssl_biopython_for_atom3d():
     assert normalized["backend_dependency_policy"]["biopython_legacy_spec"] == "biopython==1.81"
 
 
+
+def test_environment_deterministic_rigidssl_plan_validates(tmp_path):
+    environment_module_root = ROOT / "modules" / "environment"
+    for name in list(sys.modules):
+        if name == "scripts" or name.startswith("scripts."):
+            sys.modules.pop(name, None)
+    if str(environment_module_root) not in sys.path:
+        sys.path.insert(0, str(environment_module_root))
+    else:
+        sys.path.insert(0, sys.path.pop(sys.path.index(str(environment_module_root))))
+    spec = importlib.util.spec_from_file_location(
+        "environment_autonomous_deploy_deterministic",
+        environment_module_root / "scripts" / "orchestration" / "autonomous_deploy.py",
+    )
+    assert spec and spec.loader
+    autonomous_deploy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(autonomous_deploy)
+
+    run_dir = tmp_path / "run"
+    repo = run_dir / "repos" / "RigidSSL"
+    (repo / "examples").mkdir(parents=True)
+    (repo / "model").mkdir()
+    (repo / "examples" / "RigidSSL_Perturb.py").write_text("", encoding="utf-8")
+    (repo / "model" / "velocity_network.py").write_text("", encoding="utf-8")
+    plan = autonomous_deploy.deterministic_rigidssl_environment_plan(run_dir, repo, {})
+    plan = autonomous_deploy.normalize_environment_plan_commands(plan, machine={"gpu": [{"name": "NVIDIA GeForce RTX 5090", "compute_capability": "12.0"}]}, policy_version="test-policy")
+    issues = autonomous_deploy.validate_environment_plan(plan, require_full_reproduction=False, repo_path=repo, run_dir=run_dir, machine={"gpu": [{"name": "NVIDIA GeForce RTX 5090", "memory_gb": 31}]}, paper_evidence={"target_metrics": []})
+    assert not issues
+    command_text = "\n".join(" ".join(row["command"]) for row in plan["commands"] if isinstance(row, dict))
+    assert "biopython==1.81" in command_text
+    assert "torch==2.9.1+cu128" in command_text
+    assert any(row.get("phase") == "reproduce_smoke" and row.get("required") is True for row in plan["commands"] if isinstance(row, dict))
+
 def test_environment_rewrites_rigidssl_model_and_smoke_probes(tmp_path):
     environment_module_root = ROOT / "modules" / "environment"
     for name in list(sys.modules):
