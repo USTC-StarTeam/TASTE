@@ -163,8 +163,13 @@ def test_environment_rewrites_python_entrypoints_to_run_local_prefix():
     assert autonomous_deploy.command_uses_conda_prefix(pip_command, env_prefix)
     assert autonomous_deploy._conda_prefix_tokens_have_setup_action(pip_command)
 
-    run_command = autonomous_deploy.rewrite_command(["conda", "run", "-n", "rigid", "python", "-c", "import torch"], conda_exe, "rigid", env_prefix)
-    assert run_command == [str(env_prefix / "bin" / "python"), "-c", "import torch"]
+    run_command = autonomous_deploy.rewrite_command(
+        ["conda", "run", "-n", "rigid", "python", "-c", "import torch; import dm_tree; from dm_tree import map_structure"],
+        conda_exe,
+        "rigid",
+        env_prefix,
+    )
+    assert run_command == [str(env_prefix / "bin" / "python"), "-c", "import torch; import tree as dm_tree; from tree import map_structure"]
     assert autonomous_deploy.command_uses_conda_prefix(run_command, env_prefix)
     assert autonomous_deploy._conda_prefix_tokens_have_verify_action(run_command)
 

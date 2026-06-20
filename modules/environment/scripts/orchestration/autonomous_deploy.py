@@ -549,6 +549,7 @@ def prompt_environment_plan(normalized_plan: dict[str, Any], machine: dict[str, 
 - `cwd` 只能是 `repo`、`run` 或本次 run 目录内路径；命令参数里的路径值和本地脚本/文件参数必须落在本次 run 目录内。已知输出/数据/配置/依赖文件参数即使写成 `outputs/run1` 这类裸相对值，也会按命令实际 `cwd` 解析；`bash scripts/run.sh`、`python train.py`、`python scripts/train.py` 也会解析真实路径，不能指向 run 外或 run 内 symlink 到外部的文件；`outputs/../../outside`、`--output=.../../..`、`-r.../../..` 这类穿越写法会被拒绝。如果命令本身是 `./script.sh` 或绝对脚本路径，脚本也必须位于本次 run/repo 内，外部系统工具请使用命令名而不是外部临时脚本路径。
 - 不要为了通过检查而使用 toy/synthetic/dummy/mock/sample 数据或替代数据集冒充论文数据；数据准备命令或日志必须能看到真实论文数据集名称或来源，不能出现 not using / instead of / replacement / 替代 / 改用 这类说明论文数据集未被使用的上下文，`paper_config_alignment` 也要说明该映射。论文数据准备/下载/预处理阶段必须是必需命令，不能标记为 `required=false` 后再拿它支撑批准。
 - HuggingFace Hub 下载必须使用当前可用的 `hf download`；不要使用已废弃不可工作的 `huggingface-cli`，也不要输出 `--resume-download` 参数。数据集仓库用 `hf download <repo_id> --repo-type dataset --local-dir <run内目录>`，模型/checkpoint 仓库用 `hf download <repo_id> --local-dir <run内目录>`。
+- `dm-tree` 包的 Python 导入名是 `tree`；验证命令应使用 `import tree as dm_tree` 或 `import tree`，不要写 `import dm_tree`。
 - Conda/Pip/下载/训练命令必须写成 JSON 数组，后端会受控执行；不要在回答里只写自然语言。不要输出 `rm -rf /`、`rm -rf -- /`、`rm -Rf /*`、`rm -rf ../outside`、`dd if=`、`chmod -R 777 /` 等高危命令片段；危险片段会大小写归一化后检查，`rm` 目标也会结构化解析。
 - 不要输出 `conda activate`、`source activate`、`source ...` 或 `.` 这类只对交互 shell 生效的命令；每条命令应直接可执行，Python/训练入口由后端用 run 内 Conda prefix 重写，复杂初始化请写入本次 run 目录脚本后用 `bash <script>` 执行。
 - 每条命令必须包含非空字符串 `phase`；`required` 若出现必须是 JSON boolean `true/false`，不能写成字符串或数字；`cwd` 若出现必须是字符串。
@@ -3246,6 +3247,27 @@ def _drop_deprecated_hf_download_flags(tokens: list[str]) -> list[str]:
     return [str(token) for token in tokens if str(token) != "--resume-download"]
 
 
+def _normalize_python_inline_code_imports(code: str) -> str:
+    updated = re.sub(r"\bfrom\s+dm_tree\b", "from tree", str(code))
+    updated = re.sub(r"\bimport\s+dm_tree\s+as\s+([A-Za-z_][A-Za-z0-9_]*)", r"import tree as \1", updated)
+    updated = re.sub(r"\bimport\s+dm_tree\b(?!\s+as\b)", "import tree as dm_tree", updated)
+    return updated
+
+
+def normalize_python_inline_imports(tokens: list[str]) -> list[str]:
+    if not tokens:
+        return tokens
+    normalized = [str(token) for token in tokens]
+    if Path(str(normalized[0] or "")).name not in {"python", "python3"}:
+        return normalized
+    for index, token in enumerate(normalized[:-1]):
+        if token != "-c":
+            continue
+        normalized[index + 1] = _normalize_python_inline_code_imports(normalized[index + 1])
+        break
+    return normalized
+
+
 def _direct_env_entrypoint_command(tokens: list[str], env_prefix: Path) -> list[str]:
     if not tokens:
         return []
@@ -3257,7 +3279,7 @@ def _direct_env_entrypoint_command(tokens: list[str], env_prefix: Path) -> list[
         return [str(env_prefix / "bin" / "hf"), *tokens[1:]]
     if head in RUN_ENV_ENTRYPOINTS:
         executable = "python" if head in {"python", "python3"} else head
-        return [str(env_prefix / "bin" / executable), *tokens[1:]]
+        return normalize_python_inline_imports([str(env_prefix / "bin" / executable), *tokens[1:]])
     return []
 
 
@@ -3274,13 +3296,13 @@ def rewrite_command(command: Any, conda_exe: str, env_name: str, env_prefix: Pat
         if inner_index is not None and env_name:
             direct = _direct_env_entrypoint_command(tokens[inner_index:], env_prefix)
             if direct:
-                return direct
-        return tokens
+                return normalize_python_inline_imports(direct)
+        return normalize_python_inline_imports(tokens)
     if env_name:
         direct = _direct_env_entrypoint_command(tokens, env_prefix)
         if direct:
-            return direct
-    return tokens
+            return normalize_python_inline_imports(direct)
+    return normalize_python_inline_imports(tokens)
 
 
 def _migrate_deprecated_huggingface_cli_script(text: str) -> str:
