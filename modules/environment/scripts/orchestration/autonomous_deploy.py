@@ -550,6 +550,7 @@ def prompt_environment_plan(normalized_plan: dict[str, Any], machine: dict[str, 
 - 不要为了通过检查而使用 toy/synthetic/dummy/mock/sample 数据或替代数据集冒充论文数据；数据准备命令或日志必须能看到真实论文数据集名称或来源，不能出现 not using / instead of / replacement / 替代 / 改用 这类说明论文数据集未被使用的上下文，`paper_config_alignment` 也要说明该映射。论文数据准备/下载/预处理阶段必须是必需命令，不能标记为 `required=false` 后再拿它支撑批准。
 - HuggingFace Hub 下载必须使用当前可用的 `hf download`；不要使用已废弃不可工作的 `huggingface-cli`，也不要输出 `--resume-download` 参数。数据集仓库用 `hf download <repo_id> --repo-type dataset --local-dir <run内目录>`，模型/checkpoint 仓库用 `hf download <repo_id> --local-dir <run内目录>`。
 - `dm-tree` 包的 Python 导入名是 `tree`；验证命令应使用 `import tree as dm_tree` 或 `import tree`，不要写 `import dm_tree`。
+- RigidSSL 仓库的 `VelocityNetwork` 不能无参构造；模型验证必须使用 `examples/RigidSSL_Perturb.py` 中的 `model_setup()` 或 `create_model_config()`。skip-full-reproduction/烟测模式下不要运行完整训练 epoch；优先使用 loader/model/单 batch 探针证明数据、模型、CUDA 和旧 PyG pickle 可用。
 - Conda/Pip/下载/训练命令必须写成 JSON 数组，后端会受控执行；不要在回答里只写自然语言。不要输出 `rm -rf /`、`rm -rf -- /`、`rm -Rf /*`、`rm -rf ../outside`、`dd if=`、`chmod -R 777 /` 等高危命令片段；危险片段会大小写归一化后检查，`rm` 目标也会结构化解析。
 - 不要输出 `conda activate`、`source activate`、`source ...` 或 `.` 这类只对交互 shell 生效的命令；每条命令应直接可执行，Python/训练入口由后端用 run 内 Conda prefix 重写，复杂初始化请写入本次 run 目录脚本后用 `bash <script>` 执行。
 - 每条命令必须包含非空字符串 `phase`；`required` 若出现必须是 JSON boolean `true/false`，不能写成字符串或数字；`cwd` 若出现必须是字符串。
@@ -3531,6 +3532,67 @@ def command_rows(plan: dict[str, Any], include_full: bool, default_timeout: int 
     return normalized
 
 
+def _rigidssl_model_probe_code(repo_path: Path) -> str:
+    repo = str(repo_path.expanduser().resolve())
+    examples = str((repo_path / "examples").expanduser().resolve())
+    return (
+        "import sys; "
+        f"sys.path[:0] = [{examples!r}, {repo!r}]; "
+        "from RigidSSL_Perturb import model_setup; "
+        "model = model_setup(); "
+        "print('RigidSSL VelocityNetwork parameters', sum(p.numel() for p in model.parameters()))"
+    )
+
+
+def _rigidssl_loader_probe_code(repo_path: Path, run_dir: Path) -> str:
+    repo = str(repo_path.expanduser().resolve())
+    examples = str((repo_path / "examples").expanduser().resolve())
+    data_dir = str((run_dir / "data" / "RigidSSL_Perturb_data").expanduser().resolve())
+    return (
+        "import os, sys; "
+        f"sys.path[:0] = [{examples!r}, {repo!r}]; "
+        "os.environ.setdefault('TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD', '1'); "
+        "from config import args; "
+        "args.batch_size = 1; args.train_number = 1; args.dataset_portion = 'full'; "
+        "import RigidSSL_Perturb as rigidssl_perturb; "
+        "from torch_geometric.loader import DataLoader; "
+        "rigidssl_perturb.DataLoaderClass = DataLoader; "
+        "rigidssl_perturb.dataloader_kwargs = {}; "
+        f"loader = rigidssl_perturb.load_dataset({data_dir!r}, '1', args); "
+        "batch = next(iter(loader)); "
+        "model = rigidssl_perturb.model_setup(); "
+        "print('RigidSSL loader probe batch_graphs', getattr(batch, 'num_graphs', 'unknown'), 'model_params', sum(p.numel() for p in model.parameters()))"
+    )
+
+
+def _is_rigidssl_repo(repo_path: Path) -> bool:
+    return (repo_path / "examples" / "RigidSSL_Perturb.py").is_file() and (repo_path / "model" / "velocity_network.py").is_file()
+
+
+def normalize_repository_command_for_execution(row: dict[str, Any], command: list[str], repo_path: Path, run_dir: Path) -> tuple[list[str], list[dict[str, str]]]:
+    if not _is_rigidssl_repo(repo_path):
+        return command, []
+    phase = str(row.get("phase") or "").strip().lower()
+    text = command_text(command)
+    if phase == "verify_model" and "VelocityNetwork()" in text:
+        return [command[0], "-c", _rigidssl_model_probe_code(repo_path)], [{"migration": "RigidSSL VelocityNetwork requires model_conf; replaced no-arg constructor with examples.RigidSSL_Perturb.model_setup probe"}]
+    if phase == "reproduce_smoke" and any(Path(str(token)).name == "RigidSSL_Perturb.py" for token in command):
+        return [command[0], "-c", _rigidssl_loader_probe_code(repo_path, run_dir)], [{"migration": "RigidSSL smoke uses a bounded loader/model probe instead of a full training epoch in skip-full-reproduction mode"}]
+    return command, []
+
+
+def command_environment(command_env: dict[str, str], repo_path: Path, row_env: dict[str, Any]) -> dict[str, str]:
+    effective_env = dict(command_env)
+    if repo_path.exists():
+        repo = str(repo_path.expanduser().resolve())
+        existing = str(effective_env.get("PYTHONPATH") or "")
+        effective_env["PYTHONPATH"] = repo if not existing else repo + os.pathsep + existing
+    if _is_rigidssl_repo(repo_path):
+        effective_env.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
+    effective_env.update({str(key): str(value) for key, value in row_env.items()})
+    return effective_env
+
+
 def execute_plan_commands(plan: dict[str, Any], repo_path: Path, run_dir: Path, round_dir: Path, include_full: bool, default_timeout: int, command_env: dict[str, str]) -> list[dict[str, Any]]:
     conda_exe = find_conda_executable()
     env_name = str(plan.get("env_name") or "").strip()
@@ -3539,16 +3601,17 @@ def execute_plan_commands(plan: dict[str, Any], repo_path: Path, run_dir: Path, 
     receipts: list[dict[str, Any]] = []
     for row in command_rows(plan, include_full, default_timeout=default_timeout):
         command = rewrite_command(row.get("command"), conda_exe, env_name, env_prefix)
+        command, repository_migrations = normalize_repository_command_for_execution(row, command, repo_path, run_dir)
         uses_conda_prefix = command_uses_conda_prefix(command, env_prefix)
         issue = command_is_dangerous(command)
         if row.get("inline_env_issues") and not issue:
             issue = "；".join(str(item) for item in row.get("inline_env_issues", []) if str(item).strip())
         phase = slugify(row.get("phase") or "phase")
         log_path = round_dir / "logs" / f"{row['index']:02d}_{phase}.log"
-        script_migrations: list[dict[str, str]] = []
+        script_migrations: list[dict[str, str]] = list(repository_migrations)
         try:
             cwd = resolve_command_cwd(row, repo_path, run_dir)
-            script_migrations = normalize_generated_script_commands_for_command(command, cwd, run_dir)
+            script_migrations.extend(normalize_generated_script_commands_for_command(command, cwd, run_dir))
             missing_script_issue = missing_shell_script_issue(command, cwd, run_dir)
             boundary_issues = command_boundary_issues(command, cwd, run_dir)
             if missing_script_issue:
@@ -3579,8 +3642,7 @@ def execute_plan_commands(plan: dict[str, Any], repo_path: Path, run_dir: Path, 
             log_path.write_text(f"$ {command_text(command)}\n[命令边界守卫阻止] {issue}\n", encoding="utf-8")
         else:
             row_env = row.get("env") if isinstance(row.get("env"), dict) else {}
-            effective_env = dict(command_env)
-            effective_env.update({str(key): str(value) for key, value in row_env.items()})
+            effective_env = command_environment(command_env, repo_path, row_env)
             receipt = run_logged(command, cwd=cwd, log_path=log_path, timeout_sec=row.get("timeout_sec"), env=effective_env, required=bool(row.get("required")))
             receipt["phase"] = row.get("phase")
             receipt["conda_env_prefix"] = str(env_prefix)

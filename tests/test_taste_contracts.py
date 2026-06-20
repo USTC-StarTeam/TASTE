@@ -305,6 +305,89 @@ echo ok
     assert autonomous_deploy.missing_shell_script_issue(["bash", "scripts/download.sh"], run_dir, run_dir) == ""
 
 
+def test_environment_dependency_policy_pins_rigidssl_biopython_for_atom3d():
+    environment_module_root = ROOT / "modules" / "environment"
+    for name in list(sys.modules):
+        if name == "scripts" or name.startswith("scripts."):
+            sys.modules.pop(name, None)
+    if str(environment_module_root) not in sys.path:
+        sys.path.insert(0, str(environment_module_root))
+    else:
+        sys.path.insert(0, sys.path.pop(sys.path.index(str(environment_module_root))))
+    spec = importlib.util.spec_from_file_location(
+        "environment_dependency_policy_biopython",
+        environment_module_root / "scripts" / "orchestration" / "dependency_policy.py",
+    )
+    assert spec and spec.loader
+    dependency_policy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dependency_policy)
+
+    plan = {
+        "title": "RigidSSL reproduction",
+        "env_name": "rigidssl_protein",
+        "commands": [
+            {"phase": "pip_install", "command": ["python", "-m", "pip", "install", "atom3d", "biopython", "mdtraj"], "required": True},
+            {"phase": "pip_install_indirect", "command": ["python", "-m", "pip", "install", "atom3d", "mdtraj"], "required": True},
+        ],
+    }
+    normalized = dependency_policy.normalize_environment_plan_commands(plan, machine={}, policy_version="test-policy")
+    commands = [row["command"] for row in normalized["commands"]]
+    assert commands[0] == ["python", "-m", "pip", "install", "atom3d", "biopython==1.81", "mdtraj"]
+    assert commands[1] == ["python", "-m", "pip", "install", "biopython==1.81", "atom3d", "mdtraj"]
+    assert normalized["backend_dependency_policy"]["biopython_legacy_spec"] == "biopython==1.81"
+
+
+def test_environment_rewrites_rigidssl_model_and_smoke_probes(tmp_path):
+    environment_module_root = ROOT / "modules" / "environment"
+    for name in list(sys.modules):
+        if name == "scripts" or name.startswith("scripts."):
+            sys.modules.pop(name, None)
+    if str(environment_module_root) not in sys.path:
+        sys.path.insert(0, str(environment_module_root))
+    else:
+        sys.path.insert(0, sys.path.pop(sys.path.index(str(environment_module_root))))
+    spec = importlib.util.spec_from_file_location(
+        "environment_autonomous_deploy_rigidssl",
+        environment_module_root / "scripts" / "orchestration" / "autonomous_deploy.py",
+    )
+    assert spec and spec.loader
+    autonomous_deploy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(autonomous_deploy)
+
+    run_dir = tmp_path / "run"
+    repo = run_dir / "repos" / "RigidSSL"
+    (repo / "examples").mkdir(parents=True)
+    (repo / "model").mkdir()
+    (repo / "examples" / "RigidSSL_Perturb.py").write_text("", encoding="utf-8")
+    (repo / "model" / "velocity_network.py").write_text("", encoding="utf-8")
+
+    command, migrations = autonomous_deploy.normalize_repository_command_for_execution(
+        {"phase": "verify_model"},
+        [str(run_dir / "conda_envs" / "rigid" / "bin" / "python"), "-c", "from model.velocity_network import VelocityNetwork; m = VelocityNetwork()"],
+        repo,
+        run_dir,
+    )
+    assert command[1] == "-c"
+    assert "model_setup" in command[2]
+    assert "VelocityNetwork()" not in command[2]
+    assert migrations
+
+    smoke, smoke_migrations = autonomous_deploy.normalize_repository_command_for_execution(
+        {"phase": "reproduce_smoke"},
+        [str(run_dir / "conda_envs" / "rigid" / "bin" / "python"), "RigidSSL_Perturb.py", "--epochs", "1"],
+        repo,
+        run_dir,
+    )
+    assert smoke[1] == "-c"
+    assert "load_dataset" in smoke[2]
+    assert "next(iter(loader))" in smoke[2]
+    assert "RigidSSL_Perturb.py" not in smoke[0:2]
+    assert smoke_migrations
+
+    env = autonomous_deploy.command_environment({"PYTHONPATH": str(run_dir / "extra")}, repo, {})
+    assert env["PYTHONPATH"].split(":", 1)[0] == str(repo.resolve())
+    assert env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] == "1"
+
 def test_environment_dependency_policy_rewrites_incoherent_torch_pip_versions():
     environment_module_root = ROOT / "modules" / "environment"
     for name in list(sys.modules):

@@ -22,6 +22,9 @@ PYG_VERIFY_SNIPPET = (
     "import torch_geometric, torch_scatter, torch_sparse, torch_cluster; "
     "print('pyg', torch_geometric.__version__)"
 )
+BIOPYTHON_PACKAGE_NAME = "biopython"
+ATOM3D_PACKAGE_NAME = "atom3d"
+BIOPYTHON_LEGACY_SPEC = "biopython==1.81"
 INLINE_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 CONDA_RUN_OPTIONS_WITH_VALUE = {"-n", "--name", "-p", "--prefix", "--cwd"}
 CONDA_RUN_ASSIGNMENT_OPTIONS_WITH_VALUE = ("--name=", "--prefix=", "--cwd=")
@@ -162,6 +165,56 @@ def _row_verifies_cuda(row: dict[str, Any]) -> bool:
     return "torch.cuda.is_available" in text or "cuda is not available" in text
 
 
+def _row_requires_legacy_biopython(row: dict[str, Any]) -> bool:
+    tokens = _row_command_tokens(row)
+    packages = _pip_install_packages(tokens) | _conda_install_packages(tokens)
+    return bool(packages & {BIOPYTHON_PACKAGE_NAME, ATOM3D_PACKAGE_NAME})
+
+
+def _plan_or_commands_mention_rigidssl(plan: dict[str, Any], rows: list[Any]) -> bool:
+    parts = [
+        str(plan.get("env_name") or ""),
+        str(plan.get("paper_url") or ""),
+        str(plan.get("title") or ""),
+        str(plan.get("topic") or ""),
+    ]
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        parts.append(str(row.get("phase") or ""))
+        try:
+            parts.append(command_text(_row_command_tokens(row)))
+        except Exception:
+            parts.append(str(row.get("command") or ""))
+    return "rigidssl" in "\n".join(parts).lower()
+
+
+def _pin_legacy_biopython(row: dict[str, Any]) -> dict[str, Any]:
+    updated = dict(row)
+    tokens = list(command_tokens(row.get("command")))
+    changed = False
+    packages = _pip_install_packages(tokens) | _conda_install_packages(tokens)
+    for index, token in enumerate(tokens):
+        if _token_package_name(str(token)) == BIOPYTHON_PACKAGE_NAME and str(token) != BIOPYTHON_LEGACY_SPEC:
+            tokens[index] = BIOPYTHON_LEGACY_SPEC
+            changed = True
+    if BIOPYTHON_PACKAGE_NAME not in packages and ATOM3D_PACKAGE_NAME in packages:
+        insert_at = None
+        pip_tokens = _conda_run_inner_tokens(tokens) or tokens
+        if pip_tokens:
+            head = Path(str(pip_tokens[0])).name
+            if head.startswith("python") and len(pip_tokens) >= 4 and pip_tokens[1:4] == ["-m", "pip", "install"]:
+                insert_at = len(tokens) - len(pip_tokens) + 4
+            elif head in {"pip", "pip3"} and len(pip_tokens) >= 2 and pip_tokens[1] == "install":
+                insert_at = len(tokens) - len(pip_tokens) + 2
+        if insert_at is not None:
+            tokens.insert(insert_at, BIOPYTHON_LEGACY_SPEC)
+            changed = True
+    if changed:
+        updated["command"] = tokens
+    return updated
+
+
 def _normalize_create_command_python(row: dict[str, Any], python_version: str) -> dict[str, Any]:
     row = dict(row)
     tokens = list(command_tokens(row.get("command")))
@@ -266,7 +319,8 @@ def normalize_environment_plan_commands(plan: dict[str, Any], machine: dict[str,
         return plan
     needs_pyg = any(isinstance(row, dict) and (_row_installs_pyg_with_conda(row) or _row_installs_pyg_with_pip(row) or _row_verifies_pyg_import(row)) for row in rows)
     conda_installs_torch = any(isinstance(row, dict) and _row_installs_pytorch_with_conda(row) for row in rows)
-    if not (needs_pyg or (_machine_needs_modern_cuda_stack(machine) and conda_installs_torch)):
+    needs_biopython_legacy = any(isinstance(row, dict) and _row_requires_legacy_biopython(row) for row in rows) and _plan_or_commands_mention_rigidssl(plan, rows)
+    if not (needs_pyg or (_machine_needs_modern_cuda_stack(machine) and conda_installs_torch) or needs_biopython_legacy):
         return plan
 
     normalized = dict(plan)
@@ -286,6 +340,11 @@ def normalize_environment_plan_commands(plan: dict[str, Any], machine: dict[str,
             conda_create_present = True
             if updated.get("command") != row.get("command"):
                 rewrites.append({"index": index, "phase": row.get("phase"), "reason": "RTX 5090/modern CUDA stack requires Python 3.11 for current PyTorch/PyG binary wheels", "before": row.get("command"), "after": updated.get("command")})
+            row = updated
+        if needs_biopython_legacy and _row_requires_legacy_biopython(row):
+            updated = _pin_legacy_biopython(row)
+            if updated.get("command") != row.get("command"):
+                rewrites.append({"index": index, "phase": row.get("phase"), "reason": "RigidSSL dataset code imports Bio.PDB.Polypeptide.three_to_one, which is absent from latest Biopython; pin the Python 3.11 compatible legacy wheel", "before": row.get("command"), "after": updated.get("command")})
             row = updated
         if _row_installs_pytorch_with_conda(row):
             replacement = _torch_cuda_install_row(str(row.get("phase") or "install_torch_cuda"))
@@ -354,6 +413,7 @@ def normalize_environment_plan_commands(plan: dict[str, Any], machine: dict[str,
             "torchaudio_spec": TORCHAUDIO_CUDA_SPEC,
             "torch_cuda_index_url": PYTORCH_CUDA_INDEX_URL,
             "pyg_wheel_url": PYG_CUDA_WHEEL_URL,
+            "biopython_legacy_spec": BIOPYTHON_LEGACY_SPEC if needs_biopython_legacy else "",
             "reason": "RTX 5090/compute 12.0 requires a modern CUDA-enabled PyTorch stack; conda pyg packages did not solve for the generated Python/PyTorch/CUDA matrix.",
         }
     return normalized
