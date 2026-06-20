@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -98,6 +99,7 @@ def test_web_experiment_action_prefers_environment_handoff(monkeypatch, tmp_path
             "conda": {"prefix": str(handoff_env), "env_name": "rigid"},
         },
     }), encoding="utf-8")
+    (root / "state" / "full_research_cycle.json").write_text(json.dumps({"status": "blocked_fresh_base_data_required"}), encoding="utf-8")
     monkeypatch.setattr(project_bridge, "PROJECTS", projects)
     monkeypatch.setattr(project_bridge, "project_target_venue", lambda project, default="": default or "ICLR")
     monkeypatch.setattr(project_bridge, "management_python", lambda: "/env/bin/python")
@@ -106,6 +108,7 @@ def test_web_experiment_action_prefers_environment_handoff(monkeypatch, tmp_path
 
     _project, cmd = project_bridge.build_command({"project": "demo", "action": "experiment", "venue": "ICLR", "iterations": 1, "skip_claude": True})
     module_arg = cmd[cmd.index("--module-arg") + 1]
+    assert "blocked_fresh_base_gate_required" not in " ".join(cmd)
     assert f"--repo-path {handoff_repo}" in module_arg
     assert f"--conda-env {handoff_env}" in module_arg
 
@@ -192,3 +195,22 @@ def test_web_pid_alive_does_not_spawn_ps(monkeypatch):
     monkeypatch.setattr(project_bridge.subprocess, "run", fail_subprocess_run)
     assert project_bridge._pid_alive(os.getpid()) is True
     assert project_bridge._pid_alive(-1) is False
+
+def test_web_full_cycle_job_logs_hide_stale_reference_goal():
+    reading_scripts = ROOT / "modules" / "reading" / "scripts"
+    sys.path.insert(0, str(reading_scripts))
+    sys.modules.pop("pipeline", None)
+    from auto_research.web import server as web_server
+
+    rows = web_server._public_full_cycle_job_logs(
+        [
+            "当前目标：当前科研门控未通过，需继续补齐证据。",
+            "下一步：Run audited Rigidity-Aware reference reproduction before paper writing.",
+        ],
+        {"phase": "ready_for_experimenting", "message": "环境已交付：真实仓库、run-local Conda、数据准备和 loader/model smoke 已通过；论文指标仍由实验阶段验证。"},
+        {"project": "demo", "status": "ready_for_experimenting", "summary": "环境已交付：真实仓库、run-local Conda、数据准备和 loader/model smoke 已通过；论文指标仍由实验阶段验证。", "process_alive": False},
+    )
+
+    text = "\n".join(rows)
+    assert "Run audited Rigidity-Aware" not in text
+    assert "使用 handoff repo/env 进入 experimenting" in text

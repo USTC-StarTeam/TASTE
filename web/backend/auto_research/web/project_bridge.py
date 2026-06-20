@@ -355,6 +355,30 @@ def _project_environment_handoff(root: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+FRESH_BASE_BLOCK_STATUSES = {
+    "blocked_fresh_base_data_required",
+    "blocked_fresh_base_reference_probe_required",
+    "blocked_fresh_base_reference_smoke_required",
+    "blocked_fresh_base_reference_reproduction_required",
+    "blocked_fresh_base_implementation_required",
+    "blocked_no_viable_base_switch_route",
+}
+
+
+def _fresh_base_block_status(value: Any) -> bool:
+    return str(value or "").strip() in FRESH_BASE_BLOCK_STATUSES
+
+
+def _environment_handoff_ready_for_experimenting(root: Path) -> bool:
+    handoff = _project_environment_handoff(root)
+    env_handoff = handoff.get("environment_handoff") if isinstance(handoff.get("environment_handoff"), dict) else {}
+    return bool(
+        handoff.get("status") == "ready_for_experimenting"
+        or handoff.get("valid") is True
+        or env_handoff.get("ready_for_experimenting") is True
+    )
+
+
 def _handoff_repo_path(handoff: dict[str, Any]) -> str:
     env_handoff = handoff.get("environment_handoff") if isinstance(handoff.get("environment_handoff"), dict) else {}
     repo = env_handoff.get("repo") if isinstance(env_handoff.get("repo"), dict) else {}
@@ -5561,7 +5585,8 @@ def _human_supervision_summary(root: Path, compact: dict[str, Any], raw_summary:
     ready_datasets = loader_probe.get("ready_datasets") if isinstance(loader_probe, dict) else []
     if not isinstance(ready_datasets, list):
         ready_datasets = []
-    loader_contract_passed = _fresh_base_loader_contract_passed(root)
+    handoff_ready = _environment_handoff_ready_for_experimenting(root)
+    loader_contract_passed = _fresh_base_loader_contract_passed(root) or handoff_ready
     if loader_contract_passed and not ready_datasets and isinstance(fresh_impl, dict) and isinstance(fresh_impl.get("ready_datasets"), list):
         ready_datasets = fresh_impl.get("ready_datasets") or []
     read_results = _read_json(root / "planning" / "finding" / "read_results.json", {})
@@ -5613,7 +5638,18 @@ def _human_supervision_summary(root: Path, compact: dict[str, Any], raw_summary:
     reference_wrapper_label = f"{base_display} full reference reproduction"
     selected_base_viability_blocked = bool(isinstance(selected_base_viability, dict) and selected_base_viability.get("status") == "blocked" and selected_base_viability.get("decision") in {"base_switch_gate_required", "continue_experiment_evidence_repair"})
     selected_base_viability_public = _selected_base_viability_public_blocker(selected_base_viability, base_display, base_switch_gate)
-    if selected_base_viability_blocked:
+    if handoff_ready:
+        if _fresh_base_block_status(status):
+            status = "ready_for_experimenting"
+        fresh_reproduction_blocked = False
+        fresh_smoke_blocked = False
+        fresh_reference_blocked = False
+        fresh_data_blocked = False
+        blocker_title = "环境已交付，可进入实验迭代"
+        blocker_summary = "真实仓库、run-local Conda、数据准备和 loader/model smoke 已通过；论文指标仍由实验阶段验证。"
+        next_action = "使用 handoff repo/env 进入 experimenting，运行真实评估并绑定 designability、scRMSD、pLDDT、TM-score 等论文指标；未完成前不提升论文结论。"
+        summary_zh = blocker_summary
+    elif selected_base_viability_blocked:
         blocker_title = selected_base_viability_public.get("title") or "缺少当前主线候选实验证据"
         blocker_summary = selected_base_viability_public.get("summary") or _public_blocker_summary(selected_base_viability, f"{base_display} 参考复现已通过；当前还没有可写入论文的审计就绪候选实验。旧路线只作为历史对照，不是当前参考工作。")
         next_action = selected_base_viability_public.get("next_action") or f"保持 {base_display} 为当前基底；由 project agent 在同一数据和评测协议下设计、运行并审计真实候选实验。没有审计就绪的提升证据前，不进入论文或结论提升。"
@@ -11581,6 +11617,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     submission_state = safe_dict(_read_json(root / "state" / "submission_readiness.json", {}))
     experiment_record = safe_dict(_experiment_record_table(root, sync_running=False))
     env = _current_environment_selection(root)
+    handoff_ready = _environment_handoff_ready_for_experimenting(root)
     existing_env_selection = safe_dict(_read_json(root / "state" / "evidence_ready_repo_selection.json", {}))
     existing_selected = safe_dict(existing_env_selection.get("selected"))
     existing_active_repo = safe_dict(_read_json(root / "state" / "active_repo.json", {}))
@@ -11986,10 +12023,12 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         status = "running"
     elif not full_job_live and not env.get("valid") and not literature_gate_blocked and run_id:
         status = "blocked_environment_base_selection_required"
-    elif not full_job_live and env.get("valid") and not route_ready_datasets and not literature_gate_blocked:
+    elif not full_job_live and env.get("valid") and not route_ready_datasets and not literature_gate_blocked and not handoff_ready:
         status = "blocked_fresh_base_data_required"
-    elif not full_job_live and env.get("valid") and route_loader_contract_passed and status in {"blocked_fresh_base_data_required", "blocked_fresh_base_implementation_required", "blocked_no_viable_base_switch_route"}:
+    elif not full_job_live and env.get("valid") and route_loader_contract_passed and not handoff_ready and status in {"blocked_fresh_base_data_required", "blocked_fresh_base_implementation_required", "blocked_no_viable_base_switch_route"}:
         status = "blocked_fresh_base_reference_probe_required"
+    elif handoff_ready and _fresh_base_block_status(status):
+        status = "ready_for_experimenting"
     if env_bootstrap_blocker and not (full_job_live or reference_full_job_live or fresh_find_running or literature_gate_blocked):
         status = str(env_bootstrap_blocker.get("status") or "blocked_environment_bootstrap_failed")
     pending_env_candidate = safe_dict(env.get("pending_candidate"))
@@ -12024,6 +12063,8 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     elif status == "blocked_fresh_base_reference_probe_required":
         protocol_blocker_summary = _reference_protocol_probe_blocker_summary(protocol_probe, base_title)
         summary = f"环境阶段已选择当前候选基底：{base_title}；" + (protocol_blocker_summary or "真实数据/loader 已通过，等待参考协议/环境 manifest 探针。")
+    elif status == "ready_for_experimenting":
+        summary = "环境已交付：真实仓库、run-local Conda、数据准备和 loader/model smoke 已通过；论文指标仍由实验阶段验证。"
     elif reference_full_job_live:
         ref_pid = str(reference_full_job.get("pid") or "")
         ref_title = base_title or "当前基底"
@@ -12354,9 +12395,11 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         "summary": blocker_summary,
         "human_summary": blocker_summary,
     })
-    public_current_goal = selected_plan_gate["next_action"] if selected_plan_gate.get("blocked") else str(env_bootstrap_blocker.get("next_action") or "重新运行环境阶段，让项目 Claude 基于本机回执重新规划环境。") if env_bootstrap_blocker else running_experiment_next_action if active_experiment_training else "环境阶段需要项目代理验证并锁定 Read/Idea/Plan 提出的候选 repo/base，核查 repo/data/protocol 证据。" if status == "blocked_environment_base_selection_required" else selected_base_viability_next_action if selected_base_viability_blocked else reference_probe_next_action if status == "blocked_fresh_base_reference_probe_required" else _public_text_for_gate(full_cycle.get("current_goal") or "")
-    public_continuation_required = False if (full_job_live or active_experiment_training) else bool(full_cycle.get("continuation_required"))
-    full_cycle_compact = {"status": status, "summary": summary, "summary_zh": summary, "summary_en": _public_status_summary_en(status, base_title=base_title, active_experiment_training=active_experiment_training, reference_full_job_live=reference_full_job_live, fresh_find_running=fresh_find_running, recommendation_shortfall=recommendation_shortfall), "current_goal": _public_internal_names(public_current_goal), "continuation_required": public_continuation_required, "continuation_reason": _public_internal_names(str(full_cycle.get("continuation_reason") or "")), "updated_at": str(full_cycle.get("updated_at") or tick.get("generated_at") or ""), "started_at": str(full_cycle.get("started_at") or full_job.get("started_at") or ""), "latest_step": {**latest_step, "stage": latest_stage or latest_step.get("stage", ""), "phase": latest_phase, "line_count": line_count}, "latest_blockers": [public_blocker_row] if public_blocker_row.get("summary") else [], "experiment_evidence_policy": {"status": str(selected_base_viability.get("status") or base_switch_gate.get("status") or ""), "decision": _public_internal_names(selected_base_viability.get("decision") or base_switch_gate.get("decision") or ""), "authorized": bool(base_switch_authorized), "updated_at": str(selected_base_viability.get("updated_at") or base_switch_gate.get("updated_at") or "")}, "reference_full_job": scalar(reference_full_job, ["status", "decision", "pid", "process_alive", "log_path"]), "full_cycle_job": public_full_job}
+    handoff_experiment_next_action = "使用 handoff repo/env 进入 experimenting，运行真实评估并绑定 designability、scRMSD、pLDDT、TM-score 等论文指标；未完成前不提升论文结论。"
+    public_current_goal = handoff_experiment_next_action if status == "ready_for_experimenting" else selected_plan_gate["next_action"] if selected_plan_gate.get("blocked") else str(env_bootstrap_blocker.get("next_action") or "重新运行环境阶段，让项目 Claude 基于本机回执重新规划环境。") if env_bootstrap_blocker else running_experiment_next_action if active_experiment_training else "环境阶段需要项目代理验证并锁定 Read/Idea/Plan 提出的候选 repo/base，核查 repo/data/protocol 证据。" if status == "blocked_environment_base_selection_required" else selected_base_viability_next_action if selected_base_viability_blocked else reference_probe_next_action if status == "blocked_fresh_base_reference_probe_required" else _public_text_for_gate(full_cycle.get("current_goal") or "")
+    public_continuation_required = True if status == "ready_for_experimenting" else False if (full_job_live or active_experiment_training) else bool(full_cycle.get("continuation_required"))
+    public_continuation_reason = "environment handoff ready; experimenting/evaluation must verify paper metrics" if status == "ready_for_experimenting" else str(full_cycle.get("continuation_reason") or "")
+    full_cycle_compact = {"status": status, "summary": summary, "summary_zh": summary, "summary_en": _public_status_summary_en(status, base_title=base_title, active_experiment_training=active_experiment_training, reference_full_job_live=reference_full_job_live, fresh_find_running=fresh_find_running, recommendation_shortfall=recommendation_shortfall), "current_goal": _public_internal_names(public_current_goal), "continuation_required": public_continuation_required, "continuation_reason": _public_internal_names(public_continuation_reason), "updated_at": str(full_cycle.get("updated_at") or tick.get("generated_at") or ""), "started_at": str(full_cycle.get("started_at") or full_job.get("started_at") or ""), "latest_step": {**latest_step, "stage": latest_stage or latest_step.get("stage", ""), "phase": latest_phase, "line_count": line_count}, "latest_blockers": [public_blocker_row] if public_blocker_row.get("summary") else [], "experiment_evidence_policy": {"status": str(selected_base_viability.get("status") or base_switch_gate.get("status") or ""), "decision": _public_internal_names(selected_base_viability.get("decision") or base_switch_gate.get("decision") or ""), "authorized": bool(base_switch_authorized), "updated_at": str(selected_base_viability.get("updated_at") or base_switch_gate.get("updated_at") or "")}, "reference_full_job": scalar(reference_full_job, ["status", "decision", "pid", "process_alive", "log_path"]), "full_cycle_job": public_full_job}
     stale_full_job = str(full_job.get("status") or "").lower() == "stale" and not full_job_live
     literature_gate_next_action = "LLM API 额度/配置不可用；请在网页保存可用 API key/base/model 并验证通过后，重新启动完整 Find/科研循环。恢复前不启动实验、论文或结论提升。" if llm_quota_blocked else "新的 Find/文献调研正在运行；等待本轮推荐文章、精读、想法和计划产物落盘。" if fresh_find_running else f"当前 Find 推荐文章 {strong_count}/{recommendation_target_count}，短缺 {recommendation_shortfall}；修复标题+摘要评分或 packet 生成，不允许用未评分/无摘要论文凑数。短缺未清零前，不启动实验、论文或结论提升。" if recommendation_shortfall else "当前 Find 推荐已完成；环境阶段需要项目代理验证并锁定 Read/Idea/Plan 提出的候选 repo/base，核查 repo/data/protocol 证据。"
     stale_next_action = literature_gate_next_action
@@ -12368,7 +12411,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     if literature_gate_blocked and not fresh_find_running:
         supervision_status = "blocked_literature_recommendation_gate"
     reference_running_next_action = "等待 full reference reproduction 完成；随后自动刷新参考复现、科学进展、论文证据、投稿准备度和阻塞行动计划门控。"
-    blocker_next_action = selected_plan_gate["next_action"] if selected_plan_gate.get("blocked") else literature_gate_next_action if (fresh_find_running or literature_gate_blocked) else str(env_bootstrap_blocker.get("next_action") or "重新运行环境阶段，让项目 Claude 基于本机回执重新规划环境。") if env_bootstrap_blocker else "环境阶段需要项目代理验证并锁定 Read/Idea/Plan 提出的候选 repo/base，核查 repo/data/protocol 证据。" if status == "blocked_environment_base_selection_required" else selected_base_viability_next_action if selected_base_viability_blocked else reference_running_next_action if reference_full_job_live else reference_probe_next_action if status == "blocked_fresh_base_reference_probe_required" else submission_blocker_next_action if submission_blockers else _clean_stale_active_worker_text(tick.get("next_action", "") if isinstance(tick, dict) else "", stale_next_action) if stale_full_job else str(tick.get("next_action") or full_cycle.get("current_goal") or "")
+    blocker_next_action = selected_plan_gate["next_action"] if selected_plan_gate.get("blocked") else literature_gate_next_action if (fresh_find_running or literature_gate_blocked) else str(env_bootstrap_blocker.get("next_action") or "重新运行环境阶段，让项目 Claude 基于本机回执重新规划环境。") if env_bootstrap_blocker else "环境阶段需要项目代理验证并锁定 Read/Idea/Plan 提出的候选 repo/base，核查 repo/data/protocol 证据。" if status == "blocked_environment_base_selection_required" else selected_base_viability_next_action if selected_base_viability_blocked else reference_running_next_action if reference_full_job_live else reference_probe_next_action if status == "blocked_fresh_base_reference_probe_required" else handoff_experiment_next_action if status == "ready_for_experimenting" else submission_blocker_next_action if submission_blockers else _clean_stale_active_worker_text(tick.get("next_action", "") if isinstance(tick, dict) else "", stale_next_action) if stale_full_job else str(tick.get("next_action") or full_cycle.get("current_goal") or "")
     if public_blocker_row.get("summary"):
         public_blocker_row["next_action"] = _public_internal_names(blocker_next_action)
         public_blocker_row["source"] = "deterministic_gate_audit"
@@ -13112,6 +13155,7 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
         and _pid_alive(pid)
     )
     reference_full_job_live = bool(reference_full_job.get('process_alive') is True and reference_full_job.get('pid') and _pid_alive(reference_full_job.get('pid')))
+    handoff_ready = _environment_handoff_ready_for_experimenting(root)
     raw_cycle_status = str(full_cycle_raw.get('status') or 'not_started')
     current_plan_status = str(current_plan.get('status') or '')
     current_find_ready_for_environment = bool(
@@ -13129,10 +13173,12 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
     status = 'running' if (full_job_live or reference_full_job_live) else ('stale_full_research_cycle_snapshot' if raw_cycle_status == 'running' else raw_cycle_status)
     if waiting_environment_base_selection:
         status = 'blocked_environment_base_selection_required'
-    if not (full_job_live or reference_full_job_live) and env.get('valid') and not route_ready_datasets:
+    if not (full_job_live or reference_full_job_live) and env.get('valid') and not route_ready_datasets and not handoff_ready:
         status = 'blocked_fresh_base_data_required'
-    elif not (full_job_live or reference_full_job_live) and env.get('valid') and route_loader_contract_passed and status in {'blocked_fresh_base_data_required', 'blocked_fresh_base_implementation_required', 'blocked_no_viable_base_switch_route'}:
+    elif not (full_job_live or reference_full_job_live) and env.get('valid') and route_loader_contract_passed and not handoff_ready and status in {'blocked_fresh_base_data_required', 'blocked_fresh_base_implementation_required', 'blocked_no_viable_base_switch_route'}:
         status = 'blocked_fresh_base_reference_probe_required'
+    elif handoff_ready and _fresh_base_block_status(status):
+        status = 'ready_for_experimenting'
     if env_bootstrap_blocker and not (full_job_live or reference_full_job_live):
         status = str(env_bootstrap_blocker.get('status') or 'blocked_environment_bootstrap_failed')
     elapsed = str(full_job.get('elapsed') or full_job.get('elapsed_sec') or '') if isinstance(full_job, dict) else ''
@@ -13266,6 +13312,8 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
     elif status == 'blocked_fresh_base_reference_probe_required':
         protocol_blocker_summary = _reference_protocol_probe_blocker_summary(protocol_probe, base_title)
         summary = f'环境阶段已选择当前候选基底：{base_title}；' + (protocol_blocker_summary or '真实数据/loader 已通过，等待参考协议/环境 manifest 探针。')
+    elif status == 'ready_for_experimenting':
+        summary = '环境已交付：真实仓库、run-local Conda、数据准备和 loader/model smoke 已通过；论文指标仍由实验阶段验证。'
     elif waiting_environment_base_selection:
         summary = '当前 Find/Read/Idea/Plan 已准备；等待环境阶段验证并锁定当前 selected_plan_id 提出的候选基底，核查 repo/data/protocol；旧环境和旧参考复现不作为当前结果。'
     else:
@@ -13800,6 +13848,8 @@ def _append(cmd: list[str], flag: str, value: Any) -> None:
 def _fresh_base_data_is_blocked(project: str) -> bool:
     """Return True when current fresh-base hard gates block unsafe experiment/paper routes."""
     root = PROJECTS / project
+    if _environment_handoff_ready_for_experimenting(root):
+        return False
     full = _read_json(root / "state" / "full_research_cycle.json", {})
     gate = _read_json(root / "state" / "reference_reproduction_gate.json", {})
     blocker_plan = _read_json(root / "state" / "blocker_action_plan.json", {})

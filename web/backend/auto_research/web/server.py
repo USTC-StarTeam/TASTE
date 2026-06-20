@@ -2595,6 +2595,9 @@ def _public_paper_progress_message(value: Any) -> str:
     return _public_paper_command(text)[:180]
 
 
+HANDOFF_EXPERIMENT_NEXT_ACTION = "使用 handoff repo/env 进入 experimenting，运行真实评估并绑定 designability、scRMSD、pLDDT、TM-score 等论文指标；未完成前不提升论文结论。"
+
+
 def _public_full_cycle_job_logs(logs: Any, progress: Any = None, result: Any = None, *, limit: int = 40) -> list[str]:
     raw = [str(line or "").strip() for line in (logs if isinstance(logs, list) else []) if str(line or "").strip()]
     progress = progress if isinstance(progress, dict) else {}
@@ -2604,6 +2607,7 @@ def _public_full_cycle_job_logs(logs: Any, progress: Any = None, result: Any = N
     if project:
         out.append("project=" + project)
     status = str(result.get("status") or progress.get("phase") or "").strip()
+    handoff_ready = status == "ready_for_experimenting" or "环境已交付" in str(result.get("summary") or progress.get("message") or "")
     process_alive = result.get("process_alive")
     if process_alive is not None:
         out.append("process_alive=" + str(bool(process_alive)).lower())
@@ -2627,6 +2631,9 @@ def _public_full_cycle_job_logs(logs: Any, progress: Any = None, result: Any = N
             out.append("Claude 最近动作：" + text[:650])
     if status:
         out.append("阶段状态：" + status)
+    if handoff_ready:
+        out.append("当前目标：" + HANDOFF_EXPERIMENT_NEXT_ACTION)
+        out.append("下一步：" + HANDOFF_EXPERIMENT_NEXT_ACTION)
     current_summary = str(result.get("summary") or "").strip()
     for line in raw:
         low = line.lower()
@@ -2660,6 +2667,8 @@ def _public_full_cycle_job_logs(logs: Any, progress: Any = None, result: Any = N
             out.append(line[:900])
             continue
         if line.startswith("门控阻塞：") or line.startswith("下一步：") or line.startswith("当前目标：") or line.startswith("当前阶段："):
+            if handoff_ready and (line.startswith("下一步：") or line.startswith("当前目标：")):
+                continue
             if result.get("process_alive") is not True and any(marker in line.lower() for marker in ["候选路线", "独立授权", "base_switch", "selected_base", "deterministic"]):
                 continue
             cleaned_line = _public_text(line)
