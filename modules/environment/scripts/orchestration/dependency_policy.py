@@ -11,6 +11,8 @@ PYG_PIP_PACKAGE_NAMES = {"torch-geometric", "torch-cluster", "torch-scatter", "t
 PYTORCH_PACKAGE_NAMES = {"torch", "torchvision", "torchaudio", "pytorch", "pytorch-cuda"}
 PYTORCH_CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu128"
 PYTORCH_CUDA_VERSION = "2.9.1"
+TORCHVISION_CUDA_SPEC = "torchvision==0.24.1+cu128"
+TORCHAUDIO_CUDA_SPEC = f"torchaudio=={PYTORCH_CUDA_VERSION}+cu128"
 PYG_CUDA_WHEEL_URL = f"https://data.pyg.org/whl/torch-{PYTORCH_CUDA_VERSION}+cu128.html"
 PYG_REQUIRED_PACKAGES = ["torch-geometric", "torch-scatter", "torch-sparse", "torch-cluster"]
 PYG_VERIFY_SNIPPET = (
@@ -203,7 +205,7 @@ def _torch_cuda_install_row(source_phase: str) -> dict[str, Any]:
         "phase": source_phase or "install_torch_cuda",
         "command": [
             "python", "-m", "pip", "install", "--upgrade", "--no-cache-dir",
-            f"torch=={PYTORCH_CUDA_VERSION}+cu128", "torchvision", "torchaudio",
+            f"torch=={PYTORCH_CUDA_VERSION}+cu128", TORCHVISION_CUDA_SPEC, TORCHAUDIO_CUDA_SPEC,
             "--index-url", PYTORCH_CUDA_INDEX_URL,
         ],
         "cwd": "repo",
@@ -306,6 +308,18 @@ def normalize_environment_plan_commands(plan: dict[str, Any], machine: dict[str,
                 pyg_row_present = True
                 continue
         if _pip_install_packages(_row_command_tokens(row)) & {"torch", "torchvision", "torchaudio"}:
+            text_command = command_text(_row_command_tokens(row))
+            replacement = _torch_cuda_install_row(str(row.get("phase") or "install_torch_cuda"))
+            if (
+                f"torch=={PYTORCH_CUDA_VERSION}+cu128" not in text_command
+                or TORCHVISION_CUDA_SPEC not in text_command
+                or TORCHAUDIO_CUDA_SPEC not in text_command
+                or PYTORCH_CUDA_INDEX_URL not in text_command
+            ):
+                rewrites.append({"index": index, "phase": row.get("phase"), "reason": "PyTorch pip install must use a coherent CUDA 12.8 wheel set verified on RTX 5090/Blackwell", "before": row.get("command"), "after": replacement.get("command")})
+                new_rows.append(replacement)
+                torch_row_present = True
+                continue
             torch_row_present = True
         if _row_installs_pyg_with_pip(row):
             pyg_row_present = True
@@ -336,6 +350,8 @@ def normalize_environment_plan_commands(plan: dict[str, Any], machine: dict[str,
             "policy_version": policy_version,
             "python_version": "3.11",
             "torch_version": PYTORCH_CUDA_VERSION,
+            "torchvision_spec": TORCHVISION_CUDA_SPEC,
+            "torchaudio_spec": TORCHAUDIO_CUDA_SPEC,
             "torch_cuda_index_url": PYTORCH_CUDA_INDEX_URL,
             "pyg_wheel_url": PYG_CUDA_WHEEL_URL,
             "reason": "RTX 5090/compute 12.0 requires a modern CUDA-enabled PyTorch stack; conda pyg packages did not solve for the generated Python/PyTorch/CUDA matrix.",

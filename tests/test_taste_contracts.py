@@ -128,6 +128,8 @@ def test_environment_dependency_policy_rewrites_pyg_conda_plan():
     assert normalized["python_version"] == "3.11"
     assert normalized["commands"][0]["command"] == ["conda", "create", "-n", "rigid", "python=3.11", "pip", "-y"]
     assert "torch==2.9.1+cu128" in command_text
+    assert "torchvision==0.24.1+cu128" in command_text
+    assert "torchaudio==2.9.1+cu128" in command_text
     assert "https://download.pytorch.org/whl/cu128" in command_text
     assert "https://data.pyg.org/whl/torch-2.9.1+cu128.html" in command_text
     assert "conda install -n rigid -c pyg pyg" not in command_text
@@ -264,6 +266,45 @@ def test_environment_isolated_runtime_scrubs_inconsistent_conda_activation_state
     assert "CONDA_SHLVL" not in env
     assert "CONDA_EXE" not in env
     assert "CONDA_PREFIX" not in env
+
+
+def test_environment_dependency_policy_rewrites_incoherent_torch_pip_versions():
+    environment_module_root = ROOT / "modules" / "environment"
+    for name in list(sys.modules):
+        if name == "scripts" or name.startswith("scripts."):
+            sys.modules.pop(name, None)
+    if str(environment_module_root) not in sys.path:
+        sys.path.insert(0, str(environment_module_root))
+    else:
+        sys.path.insert(0, sys.path.pop(sys.path.index(str(environment_module_root))))
+    spec = importlib.util.spec_from_file_location(
+        "environment_dependency_policy_torch_pip",
+        environment_module_root / "scripts" / "orchestration" / "dependency_policy.py",
+    )
+    assert spec and spec.loader
+    dependency_policy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dependency_policy)
+
+    plan = {
+        "env_name": "rigid",
+        "commands": [
+            {"phase": "install_core", "command": ["python", "-m", "pip", "install", "torch==2.10.0", "torchvision==0.21.0", "torchaudio==2.10.0", "--index-url", "https://download.pytorch.org/whl/cu128"], "required": True},
+            {"phase": "install_pyg", "command": ["python", "-m", "pip", "install", "torch_geometric", "torch_scatter", "torch_sparse", "torch_cluster", "-f", "https://data.pyg.org/whl/torch-2.10.0+cu128.html"], "required": True},
+        ],
+    }
+    machine = {"gpu": [{"name": "NVIDIA GeForce RTX 5090", "compute_capability": "12.0"}]}
+
+    normalized = dependency_policy.normalize_environment_plan_commands(plan, machine=machine, policy_version="test-policy")
+    command_text = "\n".join(" ".join(row["command"]) for row in normalized["commands"] if isinstance(row, dict))
+
+    assert normalized["commands"][0]["phase"] == "conda_create"
+    assert "torch==2.10.0" not in command_text
+    assert "torchvision==0.21.0" not in command_text
+    assert "torch==2.9.1+cu128" in command_text
+    assert "torchvision==0.24.1+cu128" in command_text
+    assert "torchaudio==2.9.1+cu128" in command_text
+    assert "https://data.pyg.org/whl/torch-2.9.1+cu128.html" in command_text
+    assert any(row.get("phase") == "verify_pyg_cuda_import" for row in normalized["commands"] if isinstance(row, dict))
 
 
 def test_environment_normalizes_selected_plan_metrics_and_paper_source():
