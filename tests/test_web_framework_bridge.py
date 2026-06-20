@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -146,7 +147,32 @@ def test_web_public_state_prefers_environment_handoff_runtime(monkeypatch, tmp_p
 
     assert prefs["conda_env"] == str(handoff_env)
     assert prefs["runtime"]["experiment_python"] == str(handoff_env / "bin" / "python")
+    environment_stage = project_bridge._public_environment_stage(
+        status="selected",
+        env=env,
+        selected=env.get("selected", {}),
+        active_repo={},
+        repo_name="example/repo",
+        repo_url="https://github.com/example/repo",
+        repo_path=str(handoff_repo),
+        ref_gate={},
+    )
+
     assert env["valid"] is True
     assert env["reason"] == "environment_handoff_ready_for_experimenting"
     assert env["selected"]["repo_path"] == str(handoff_repo)
     assert env["conda_env"] == str(handoff_env)
+    assert environment_stage["status"] == "ready_for_experimenting"
+    assert environment_stage["repo_status"] == "ready_for_experimenting"
+    assert environment_stage["loader_status"] == "passed"
+    assert "论文指标仍由实验阶段验证" in environment_stage["summary_zh"]
+
+
+
+def test_web_pid_alive_does_not_spawn_ps(monkeypatch):
+    def fail_subprocess_run(*_args, **_kwargs):
+        raise AssertionError("_pid_alive must not spawn ps for each process")
+
+    monkeypatch.setattr(project_bridge.subprocess, "run", fail_subprocess_run)
+    assert project_bridge._pid_alive(os.getpid()) is True
+    assert project_bridge._pid_alive(-1) is False

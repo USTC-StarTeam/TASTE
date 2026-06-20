@@ -962,21 +962,21 @@ def _pid_alive(pid: Any) -> bool:
         return False
     if value <= 0:
         return False
+    proc_stat = Path("/proc") / str(value) / "stat"
     try:
-        proc = subprocess.run(
-            ["ps", "-p", str(value), "-o", "stat="],
-            text=True,
-            capture_output=True,
-            timeout=1,
-        )
+        stat_text = proc_stat.read_text(encoding="utf-8", errors="ignore")
+    except FileNotFoundError:
+        return False
     except Exception:
-        proc = None
-    if proc is not None:
-        stat = str(proc.stdout or "").strip()
-        if proc.returncode != 0 or not stat:
+        stat_text = ""
+    if stat_text:
+        try:
+            state = stat_text.rsplit(")", 1)[1].strip().split()[0].upper()
+        except Exception:
+            state = ""
+        if state == "Z":
             return False
-        if "Z" in stat.upper():
-            return False
+        return True
     try:
         os.kill(value, 0)
         return True
@@ -4257,6 +4257,10 @@ def _public_environment_stage(
     historical_active_repo = historical_active_repo if isinstance(historical_active_repo, dict) else {}
     reference_full_job = reference_full_job if isinstance(reference_full_job, dict) else {}
     current_selection_valid = bool(env.get("valid"))
+    handoff_ready = bool(
+        current_selection_valid
+        and str(env.get("reason") or env.get("selection_gate") or env.get("raw_selection_gate") or "").strip() == "environment_handoff_ready_for_experimenting"
+    )
     if not current_selection_valid:
         if not historical_active_repo and (selected or active_repo or repo_name or repo_path):
             historical_active_repo = {
@@ -4305,8 +4309,15 @@ def _public_environment_stage(
     required_files_ok = claim_ready_probe.get("required_files_ok")
     loader_probe = claim_ready_probe.get("loader_probe") if isinstance(claim_ready_probe.get("loader_probe"), dict) else {}
     loader_status = "passed" if (route_ready or required_files_ok is True or loader_probe.get("return_code") == 0 or probe_summary.get("probe_return_code") == 0) else "pending"
+    if handoff_ready:
+        dataset = dataset or str(env.get("data_action_reason_zh") or env.get("data_action_reason") or "").strip()
+        if dataset and not ready_datasets:
+            ready_datasets = [dataset]
+        loader_status = "passed"
     data_status = "real_data_loader_ready" if (dataset or ready_datasets) and loader_status == "passed" else "waiting_for_real_data_loader_evidence"
-    repo_status = "historical_evidence_retained" if repo_path and not env.get("valid") else "selected" if repo_path else "waiting_for_repo_selection"
+    repo_status = "ready_for_experimenting" if handoff_ready and repo_path else "historical_evidence_retained" if repo_path and not env.get("valid") else "selected" if repo_path else "waiting_for_repo_selection"
+    if handoff_ready:
+        status = "ready_for_experimenting"
     ref_public = _reference_gate_for_current_route_display(ref_gate, status, ready_datasets, protocol_probe, repo_name or "当前基底")
     existing_reference_completed = bool((repo_name or repo_path) and str(reference_full_job.get("status") or "").lower() in {"completed", "done", "pass"})
     if not env.get("valid") and existing_reference_completed:
@@ -4334,7 +4345,9 @@ def _public_environment_stage(
     progress_summary = str(env.get("progress_summary") or "").strip()
     selection_rationale = str(env.get("selection_rationale_zh") or env.get("selection_rationale") or "").strip()
     selection_gate_text = str(env.get("selection_gate") or env.get("raw_selection_gate") or "").strip()
-    if current_selection_valid:
+    if handoff_ready:
+        module_summary = "环境已交付：真实仓库、run-local Conda、数据准备和 loader/model smoke 已通过；论文指标仍由实验阶段验证。"
+    elif current_selection_valid:
         module_summary = "当前基底已选定。"
     elif selection_gate_text == "blocked_candidate_base_switch_gate_required":
         module_summary = "未选定当前基底；候选基底仍未通过 base-switch 门控。"
