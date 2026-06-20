@@ -3657,7 +3657,98 @@ def command_environment(command_env: dict[str, str], repo_path: Path, row_env: d
     return effective_env
 
 
-def execute_plan_commands(plan: dict[str, Any], repo_path: Path, run_dir: Path, round_dir: Path, include_full: bool, default_timeout: int, command_env: dict[str, str]) -> list[dict[str, Any]]:
+def _receipt_return_code(receipt: dict[str, Any]) -> int | None:
+    try:
+        return int(receipt.get("return_code"))
+    except Exception:
+        return None
+
+
+def _receipt_phase(receipt: dict[str, Any]) -> str:
+    return str(receipt.get("phase") or "").strip().lower()
+
+
+def _reusable_command_receipt_key(phase: str, command: list[str]) -> tuple[str, str] | None:
+    normalized_phase = str(phase or "").strip().lower()
+    if not normalized_phase or normalized_phase == "reproduce_full":
+        return None
+    try:
+        normalized_command = command_text(command)
+    except Exception:
+        return None
+    if not normalized_command.strip():
+        return None
+    return normalized_phase, normalized_command
+
+
+def build_reusable_command_receipt_index(previous_rounds: list[dict[str, Any]], run_dir: Path) -> dict[tuple[str, str], dict[str, Any]]:
+    index: dict[tuple[str, str], dict[str, Any]] = {}
+    for round_record in previous_rounds:
+        if not isinstance(round_record, dict):
+            continue
+        receipts_path_text = str(round_record.get("receipts_path") or "").strip()
+        if not receipts_path_text:
+            continue
+        try:
+            receipts_path = ensure_within(Path(receipts_path_text), run_dir)
+        except ValueError:
+            continue
+        receipts = read_json(receipts_path, [])
+        if not isinstance(receipts, list):
+            continue
+        for receipt in receipts:
+            if not isinstance(receipt, dict):
+                continue
+            if receipt.get("reused_receipt") is True:
+                continue
+            if receipt.get("required") is False:
+                continue
+            if str(receipt.get("status") or "").strip().lower() != "passed":
+                continue
+            if _receipt_return_code(receipt) != 0:
+                continue
+            phase = _receipt_phase(receipt)
+            if phase == "reproduce_full":
+                continue
+            command = str(receipt.get("command") or "").strip()
+            if not phase or not command:
+                continue
+            key = (phase, command)
+            cached = dict(receipt)
+            cached["reusable_source_receipts_path"] = str(receipts_path)
+            cached["reusable_source_round"] = round_record.get("round")
+            index[key] = cached
+    return index
+
+
+def reusable_command_receipt(source_receipt: dict[str, Any], log_path: Path) -> dict[str, Any]:
+    receipt = dict(source_receipt)
+    original_log_path = str(source_receipt.get("log_path") or "")
+    receipt.update({
+        "status": "passed",
+        "return_code": 0,
+        "log_path": str(log_path),
+        "reused_receipt": True,
+        "reused_from_round": source_receipt.get("reusable_source_round"),
+        "reused_from_receipts_path": source_receipt.get("reusable_source_receipts_path"),
+        "reused_from_log_path": original_log_path,
+        "started_at": utc_now(),
+        "finished_at": utc_now(),
+    })
+    receipt.pop("reusable_source_round", None)
+    receipt.pop("reusable_source_receipts_path", None)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(
+        f"$ {receipt.get('command', '')}\n"
+        "[复用同一 run 既有成功回执] 本命令已在前序 round 真实成功执行。\n"
+        f"source_receipts_path={receipt.get('reused_from_receipts_path', '')}\n"
+        f"source_log_path={original_log_path}\n",
+        encoding="utf-8",
+    )
+    return receipt
+
+
+def execute_plan_commands(plan: dict[str, Any], repo_path: Path, run_dir: Path, round_dir: Path, include_full: bool, default_timeout: int, command_env: dict[str, str], reusable_receipts: dict[tuple[str, str], dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     conda_exe = find_conda_executable()
     env_name = str(plan.get("env_name") or "").strip()
     env_prefix = env_prefix_for(run_dir, env_name)
@@ -3705,15 +3796,25 @@ def execute_plan_commands(plan: dict[str, Any], repo_path: Path, run_dir: Path, 
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.write_text(f"$ {command_text(command)}\n[命令边界守卫阻止] {issue}\n", encoding="utf-8")
         else:
-            row_env = row.get("env") if isinstance(row.get("env"), dict) else {}
-            effective_env = command_environment(command_env, repo_path, row_env)
-            receipt = run_logged(command, cwd=cwd, log_path=log_path, timeout_sec=row.get("timeout_sec"), env=effective_env, required=bool(row.get("required")))
-            receipt["phase"] = row.get("phase")
-            receipt["conda_env_prefix"] = str(env_prefix)
-            receipt["uses_conda_prefix"] = uses_conda_prefix
-            receipt["script_migrations"] = script_migrations
-            receipt["env_keys"] = sorted(row_env.keys())
-            receipt["inline_env_keys"] = row.get("inline_env_keys", [])
+            reuse_key = _reusable_command_receipt_key(str(row.get("phase") or ""), command)
+            if reuse_key and reusable_receipts and reuse_key in reusable_receipts:
+                receipt = reusable_command_receipt(reusable_receipts[reuse_key], log_path)
+                receipt["phase"] = row.get("phase")
+                receipt["conda_env_prefix"] = str(env_prefix)
+                receipt["uses_conda_prefix"] = uses_conda_prefix
+                receipt["script_migrations"] = script_migrations
+                receipt["env_keys"] = sorted((row.get("env") if isinstance(row.get("env"), dict) else {}).keys())
+                receipt["inline_env_keys"] = row.get("inline_env_keys", [])
+            else:
+                row_env = row.get("env") if isinstance(row.get("env"), dict) else {}
+                effective_env = command_environment(command_env, repo_path, row_env)
+                receipt = run_logged(command, cwd=cwd, log_path=log_path, timeout_sec=row.get("timeout_sec"), env=effective_env, required=bool(row.get("required")))
+                receipt["phase"] = row.get("phase")
+                receipt["conda_env_prefix"] = str(env_prefix)
+                receipt["uses_conda_prefix"] = uses_conda_prefix
+                receipt["script_migrations"] = script_migrations
+                receipt["env_keys"] = sorted(row_env.keys())
+                receipt["inline_env_keys"] = row.get("inline_env_keys", [])
         receipts.append(receipt)
         if receipt.get("return_code") != 0 and row.get("required"):
             break
@@ -4426,7 +4527,8 @@ def main() -> int:
                 log_path.parent.mkdir(parents=True, exist_ok=True)
                 log_path.write_text(receipt["stderr_tail"] + "\n", encoding="utf-8")
             else:
-                receipts = execute_plan_commands(env_plan, repo_path=repo_path, run_dir=run_dir, round_dir=round_dir, include_full=include_full_reproduction, default_timeout=args.command_timeout_sec, command_env=command_env)
+                reusable_receipts = build_reusable_command_receipt_index(previous_rounds, run_dir)
+                receipts = execute_plan_commands(env_plan, repo_path=repo_path, run_dir=run_dir, round_dir=round_dir, include_full=include_full_reproduction, default_timeout=args.command_timeout_sec, command_env=command_env, reusable_receipts=reusable_receipts)
         write_json(round_dir / "command_receipts.json", receipts)
         criteria_passed, metric_evidence = metric_criteria_passed(env_plan.get("success_criteria") if isinstance(env_plan.get("success_criteria"), list) else [], receipts, allowed_phases=APPROVAL_METRIC_PHASES)
         paper_alignment_ok, paper_alignment_issues = paper_config_alignment_passed(env_plan)

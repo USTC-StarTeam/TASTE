@@ -454,6 +454,65 @@ def test_environment_rewrites_rigidssl_model_and_smoke_probes(tmp_path):
     assert env["PYTHONPATH"].split(":", 1)[0] == str(repo.resolve())
     assert env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] == "1"
 
+
+def test_environment_reuses_previous_success_receipts_but_never_reproduce_full(tmp_path):
+    environment_module_root = ROOT / "modules" / "environment"
+    for name in list(sys.modules):
+        if name == "scripts" or name.startswith("scripts."):
+            sys.modules.pop(name, None)
+    if str(environment_module_root) not in sys.path:
+        sys.path.insert(0, str(environment_module_root))
+    else:
+        sys.path.insert(0, sys.path.pop(sys.path.index(str(environment_module_root))))
+    spec = importlib.util.spec_from_file_location(
+        "environment_autonomous_deploy_reuse",
+        environment_module_root / "scripts" / "orchestration" / "autonomous_deploy.py",
+    )
+    assert spec and spec.loader
+    autonomous_deploy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(autonomous_deploy)
+
+    run_dir = tmp_path / "run"
+    repo = run_dir / "repos" / "repo"
+    repo.mkdir(parents=True)
+    round_01 = run_dir / "round_01"
+    round_02 = run_dir / "round_02"
+    receipts_path = round_01 / "command_receipts.json"
+    previous_install_log = round_01 / "logs" / "00_conda_create.log"
+    previous_full_log = round_01 / "logs" / "01_reproduce_full.log"
+    previous_install_log.parent.mkdir(parents=True)
+    previous_install_log.write_text("install already ran\n", encoding="utf-8")
+    previous_full_log.write_text("full already ran but must not be reused\n", encoding="utf-8")
+
+    install_command = ["python", "-c", "from pathlib import Path; Path('install_ran.txt').write_text('ran', encoding='utf-8')"]
+    full_command = ["python", "-c", "from pathlib import Path; Path('full_ran.txt').write_text('ran', encoding='utf-8')"]
+    receipts_path.write_text(json.dumps([
+        {"phase": "conda_create", "command": autonomous_deploy.command_text(install_command), "required": True, "status": "passed", "return_code": 0, "log_path": str(previous_install_log)},
+        {"phase": "verify", "command": "python -c 'raise SystemExit(1)'", "required": True, "status": "failed", "return_code": 1, "log_path": str(round_01 / "logs" / "failed.log")},
+        {"phase": "dataset", "command": "python -c 'print(1)'", "required": False, "status": "passed", "return_code": 0, "log_path": str(round_01 / "logs" / "optional.log")},
+        {"phase": "reproduce_full", "command": autonomous_deploy.command_text(full_command), "required": True, "status": "passed", "return_code": 0, "log_path": str(previous_full_log)},
+    ]), encoding="utf-8")
+
+    reusable = autonomous_deploy.build_reusable_command_receipt_index([{"round": 1, "receipts_path": str(receipts_path)}], run_dir)
+    assert ("conda_create", autonomous_deploy.command_text(install_command)) in reusable
+    assert ("verify", "python -c 'raise SystemExit(1)'") not in reusable
+    assert ("dataset", "python -c 'print(1)'") not in reusable
+    assert ("reproduce_full", autonomous_deploy.command_text(full_command)) not in reusable
+
+    plan = {"env_name": "", "commands": [
+        {"phase": "conda_create", "command": install_command, "cwd": "run", "required": True},
+        {"phase": "reproduce_full", "command": full_command, "cwd": "run", "required": True},
+    ]}
+    receipts = autonomous_deploy.execute_plan_commands(plan, repo, run_dir, round_02, True, 30, autonomous_deploy.runtime_env(), reusable_receipts=reusable)
+
+    assert len(receipts) == 2
+    assert receipts[0]["reused_receipt"] is True
+    assert receipts[0]["reused_from_log_path"] == str(previous_install_log)
+    assert not (run_dir / "install_ran.txt").exists()
+    assert receipts[1].get("reused_receipt") is not True
+    assert (run_dir / "full_ran.txt").read_text(encoding="utf-8") == "ran"
+    assert "既有成功回执" in (round_02 / "logs" / "00_conda_create.log").read_text(encoding="utf-8")
+
 def test_environment_dependency_policy_rewrites_incoherent_torch_pip_versions():
     environment_module_root = ROOT / "modules" / "environment"
     for name in list(sys.modules):
