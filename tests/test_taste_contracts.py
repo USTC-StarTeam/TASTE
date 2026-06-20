@@ -305,6 +305,36 @@ echo ok
     assert autonomous_deploy.missing_shell_script_issue(["bash", "scripts/download.sh"], run_dir, run_dir) == ""
 
 
+
+def test_environment_prompt_forbids_dependency_matrix_search(tmp_path):
+    environment_module_root = ROOT / "modules" / "environment"
+    for name in list(sys.modules):
+        if name == "scripts" or name.startswith("scripts."):
+            sys.modules.pop(name, None)
+    if str(environment_module_root) not in sys.path:
+        sys.path.insert(0, str(environment_module_root))
+    else:
+        sys.path.insert(0, sys.path.pop(sys.path.index(str(environment_module_root))))
+    spec = importlib.util.spec_from_file_location(
+        "environment_autonomous_deploy_prompt",
+        environment_module_root / "scripts" / "orchestration" / "autonomous_deploy.py",
+    )
+    assert spec and spec.loader
+    autonomous_deploy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(autonomous_deploy)
+
+    prompt = autonomous_deploy.prompt_environment_plan(
+        {"title": "RigidSSL", "target_metrics": []},
+        {"gpu": [{"name": "NVIDIA GeForce RTX 5090", "memory_gb": 31}]},
+        {"readmes": []},
+        {"target_metrics": []},
+        [],
+        tmp_path / "plan.json",
+        1,
+    )
+    assert "不要在计划生成阶段运行 `conda search`" in prompt
+    assert "由后端 policy 在执行前统一规范化" in prompt
+
 def test_environment_dependency_policy_pins_rigidssl_biopython_for_atom3d():
     environment_module_root = ROOT / "modules" / "environment"
     for name in list(sys.modules):
