@@ -647,8 +647,24 @@ def _public_project_identity_config(project: str, cfg: dict[str, Any] | None = N
     }
 
 
+def _handoff_experiment_python(handoff: dict[str, Any]) -> str:
+    value = str(handoff.get("experiment_python") or "").strip()
+    if value:
+        return value
+    env_handoff = handoff.get("environment_handoff") if isinstance(handoff.get("environment_handoff"), dict) else {}
+    conda = env_handoff.get("conda") if isinstance(env_handoff.get("conda"), dict) else {}
+    value = str(conda.get("python") or "").strip()
+    if value:
+        return value
+    prefix = str(conda.get("prefix") or handoff.get("conda_env_prefix") or "").strip()
+    return str(Path(prefix) / "bin" / "python") if prefix else ""
+
+
 def _public_run_preferences(project: str, root: Path, cfg: dict[str, Any] | None = None, runtime_public: dict[str, Any] | None = None, selection: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg = cfg if isinstance(cfg, dict) else {}
+    handoff = _project_environment_handoff(root)
+    handoff_env = _handoff_conda_env(handoff)
+    handoff_python = _handoff_experiment_python(handoff)
     paper = cfg.get("paper") if isinstance(cfg.get("paper"), dict) else {}
     venue = _display_venue(cfg.get("target_venue") or cfg.get("venue") or paper.get("target_venue") or "")
     paper = _paper_preferences_for_venue(paper, venue)
@@ -659,13 +675,19 @@ def _public_run_preferences(project: str, root: Path, cfg: dict[str, Any] | None
         "venue": venue,
         "research_interest": cfg.get("research_interest", ""),
         "researcher_profile": cfg.get("researcher_profile", ""),
-        "conda_env": cfg.get("conda_env", ""),
+        "conda_env": handoff_env or cfg.get("conda_env", ""),
         "coding_agent": {"backend": ((cfg.get("coding_agent") or {}) if isinstance(cfg.get("coding_agent"), dict) else {}).get("backend", "")},
         "paper": paper,
         "default_find_selection": selection if isinstance(selection, dict) else (_current_project_source_selection(project, root) if project else canonical_source_selection()),
     }
-    if isinstance(runtime_public, dict):
-        out["runtime"] = runtime_public
+    runtime = dict(runtime_public or {}) if isinstance(runtime_public, dict) else {}
+    if handoff_env:
+        runtime["conda_env"] = handoff_env
+        runtime["conda_env_prefix"] = handoff_env
+    if handoff_python:
+        runtime["experiment_python"] = handoff_python
+    if runtime:
+        out["runtime"] = runtime
     return out
 
 
@@ -2638,6 +2660,81 @@ def _current_environment_selection(root: Path) -> dict[str, Any]:
 
     if selected_plan_required and not current_selected_plan_id:
         return invalid_selection("missing_current_find_selected_plan_id")
+
+    handoff = _project_environment_handoff(root)
+    handoff_payload = handoff.get("environment_handoff") if isinstance(handoff.get("environment_handoff"), dict) else {}
+    handoff_ready = bool(
+        handoff.get("status") == "ready_for_experimenting"
+        or handoff.get("valid") is True
+        or handoff_payload.get("ready_for_experimenting") is True
+    )
+    if handoff_ready:
+        selected = dict(handoff.get("selected") if isinstance(handoff.get("selected"), dict) else {})
+        repo_path = _handoff_repo_path(handoff)
+        repo = handoff_payload.get("repo") if isinstance(handoff_payload.get("repo"), dict) else {}
+        conda_env = _handoff_conda_env(handoff)
+        if repo_path:
+            selected.setdefault("repo_path", repo_path)
+            selected.setdefault("local_path", repo_path)
+        selected.setdefault("repo", str(repo.get("repo_url") or handoff.get("repo_url") or ""))
+        selected.setdefault("repo_url", str(repo.get("repo_url") or handoff.get("repo_url") or ""))
+        selected.setdefault("head_commit", str(repo.get("head_commit") or ""))
+        selected.setdefault("selection_stage", "environment_claude_code")
+        selected.setdefault("selected_by_stage", "environment_claude_code")
+        selected.setdefault("selection_gate", "environment_handoff_ready_for_experimenting")
+        selected_run = str(handoff.get("fresh_find_run_id") or selected.get("fresh_find_run_id") or selected.get("current_find_run_id") or current_run).strip()
+        selection_plan_id = str(handoff.get("selected_plan_id") or selected.get("selected_plan_id") or current_selected_plan_id).strip()
+        selection_idea_id = str(handoff.get("selected_idea_id") or selected.get("selected_idea_id") or current_selected_idea_id).strip()
+        if selected_run:
+            selected["fresh_find_run_id"] = selected_run
+            selected["current_find_run_id"] = selected_run
+        if selection_plan_id:
+            selected["selected_plan_id"] = selection_plan_id
+        if selection_idea_id:
+            selected["selected_idea_id"] = selection_idea_id
+        selected_route_run = route_run_id(selected)
+        selected_route_plan_id = route_plan_id(selected)
+        mismatch = route_mismatch_reason(
+            selected_run=selected_run,
+            selected_route_run=selected_route_run,
+            selection_plan_id=selection_plan_id,
+            selected_route_plan_id=selected_route_plan_id,
+        ) if selected else ""
+        if mismatch:
+            return invalid_selection(mismatch, selected_run=selected_run, selection_plan_id=selection_plan_id or selected_route_plan_id, selection_idea_id=selection_idea_id)
+        if repo_path:
+            return {
+                "valid": True,
+                "current_find_run_id": current_run,
+                "fresh_find_run_id": selected_run,
+                "selected_plan_id": selection_plan_id,
+                "selected_idea_id": selection_idea_id,
+                "current_selected_plan_id": current_selected_plan_id,
+                "current_selected_idea_id": current_selected_idea_id,
+                "selection_stage": "environment_claude_code",
+                "accepted_by_claude": True,
+                "selected": selected,
+                "selection_gate": "environment_handoff_ready_for_experimenting",
+                "raw_selection_gate": "environment_handoff_ready_for_experimenting",
+                "selection_status": "ready_for_experimenting",
+                "selection_decision": "environment_handoff_ready_for_experimenting",
+                "selection_rationale": "environment handoff 已验证 repo、run-local Conda、数据准备和 loader/model smoke，可进入 experimenting。",
+                "selection_rationale_en": "Environment handoff has verified the repo, run-local Conda, data preparation, and loader/model smoke; it is ready for experimenting.",
+                "selection_rationale_zh": "environment handoff 已验证 repo、run-local Conda、数据准备和 loader/model smoke，可进入 experimenting。",
+                "repo_action": "use_environment_handoff_repo",
+                "repo_action_reason": repo_path,
+                "repo_action_reason_en": repo_path,
+                "repo_action_reason_zh": repo_path,
+                "env_action": "use_environment_handoff_conda",
+                "data_action": "use_environment_handoff_data",
+                "data_action_reason": str(handoff_payload.get("data", {}).get("run_data_dir") if isinstance(handoff_payload.get("data"), dict) else ""),
+                "data_action_reason_en": str(handoff_payload.get("data", {}).get("run_data_dir") if isinstance(handoff_payload.get("data"), dict) else ""),
+                "data_action_reason_zh": str(handoff_payload.get("data", {}).get("run_data_dir") if isinstance(handoff_payload.get("data"), dict) else ""),
+                "conda_env": conda_env,
+                "environment_run_id": str(handoff_payload.get("run_id") or selected.get("environment_run_id") or ""),
+                "pending_downstream_metrics": handoff_payload.get("pending_downstream_metrics") if isinstance(handoff_payload.get("pending_downstream_metrics"), list) else [],
+                "reason": "environment_handoff_ready_for_experimenting",
+            }
     viability_mismatch: dict[str, Any] = {}
     viability_current = _selected_base_viability_current_selection(root, current_run)
     if viability_current:
@@ -5864,7 +5961,15 @@ def _compact_project_summary(summary: dict[str, Any]) -> dict[str, Any]:
         status = str(src.get("status") or "")
         if not status and checks_src:
             status = "ready" if all(bool((checks_src.get(name) or {}).get("ok")) for name in required if name in checks_src) else "needs_attention"
-        runtime_public = scalmap(runtime, ["source_bashrc", "bashrc_path", "node_bin", "claude_path", "conda_base", "python_executable"])
+        runtime_public = scalmap(runtime, ["source_bashrc", "bashrc_path", "node_bin", "claude_path", "conda_base", "python_executable", "experiment_python"])
+        handoff = _project_environment_handoff(project_root)
+        handoff_env = _handoff_conda_env(handoff)
+        handoff_python = _handoff_experiment_python(handoff)
+        if handoff_env:
+            runtime_public["conda_env"] = handoff_env
+            runtime_public["conda_env_prefix"] = handoff_env
+        if handoff_python:
+            runtime_public["experiment_python"] = handoff_python
         return {
             "project": src.get("project", project_id),
             "status": status,
@@ -5872,7 +5977,7 @@ def _compact_project_summary(summary: dict[str, Any]) -> dict[str, Any]:
             "checks": checks,
             "path_head": [str(item) for item in (src.get("path_head") if isinstance(src.get("path_head"), list) else [])[:12]],
             "python_executable": str(runtime.get("python_executable") or src.get("python_executable") or ""),
-            "conda_env": str(cfg.get("conda_env") or src.get("conda_env") or ""),
+            "conda_env": handoff_env or str(cfg.get("conda_env") or src.get("conda_env") or ""),
         }
 
     def claude_summary(value: Any) -> dict[str, Any]:
@@ -5909,13 +6014,19 @@ def _compact_project_summary(summary: dict[str, Any]) -> dict[str, Any]:
     raw_full = summary.get("full_research_cycle", {}) if isinstance(summary.get("full_research_cycle"), dict) else {}
     active_repo_state = _read_json(project_root / "state" / "active_repo.json", {})
     env_selection_for_stage = _current_environment_selection(project_root)
-    if env_selection_for_stage.get("valid") and isinstance(active_repo_state, dict) and str(active_repo_state.get("role") or "") == "main_fresh_base":
+    if env_selection_for_stage.get("valid"):
         env_raw = dict(env_raw)
-        repo_path = str(active_repo_state.get("repo_path") or active_repo_state.get("local_path") or "")
+        selected_env_repo = env_selection_for_stage.get("selected") if isinstance(env_selection_for_stage.get("selected"), dict) else {}
+        repo_path = str(selected_env_repo.get("repo_path") or selected_env_repo.get("local_path") or active_repo_state.get("repo_path") or active_repo_state.get("local_path") or "") if isinstance(active_repo_state, dict) else str(selected_env_repo.get("repo_path") or selected_env_repo.get("local_path") or "")
+        env_raw["status"] = env_raw.get("status") or "ready_for_experimenting"
+        if env_selection_for_stage.get("reason") == "environment_handoff_ready_for_experimenting":
+            env_raw["status"] = "ready_for_experimenting"
+            env_raw["summary_zh"] = "环境已交付：真实仓库、run-local Conda、数据准备和 loader/model smoke 已通过；论文指标仍由实验阶段验证。"
+            env_raw["summary_en"] = "Environment handoff is ready: real repo, run-local Conda, data preparation, and loader/model smoke passed; paper metrics remain for experimenting."
         env_raw["repo_path"] = repo_path
         env_raw["active_repo"] = {
-            "name": active_repo_state.get("name") or active_repo_state.get("repo") or "",
-            "repo": active_repo_state.get("url") or active_repo_state.get("repo_url") or active_repo_state.get("repo") or "",
+            "name": selected_env_repo.get("name") or selected_env_repo.get("repo") or (active_repo_state.get("name") if isinstance(active_repo_state, dict) else "") or "",
+            "repo": selected_env_repo.get("repo_url") or selected_env_repo.get("repo") or (active_repo_state.get("repo_url") if isinstance(active_repo_state, dict) else "") or (active_repo_state.get("repo") if isinstance(active_repo_state, dict) else "") or "",
             "repo_path": repo_path,
             "local_path": repo_path,
         }

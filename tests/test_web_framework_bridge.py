@@ -107,3 +107,46 @@ def test_web_experiment_action_prefers_environment_handoff(monkeypatch, tmp_path
     module_arg = cmd[cmd.index("--module-arg") + 1]
     assert f"--repo-path {handoff_repo}" in module_arg
     assert f"--conda-env {handoff_env}" in module_arg
+
+
+def test_web_public_state_prefers_environment_handoff_runtime(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    root = _make_project(projects, "demo")
+    handoff_repo = tmp_path / "environment" / "repo"
+    handoff_env = tmp_path / "environment" / "conda_envs" / "rigid"
+    handoff_repo.mkdir(parents=True)
+    (handoff_env / "bin").mkdir(parents=True)
+    (handoff_env / "bin" / "python").write_text("", encoding="utf-8")
+    (root / "state" / "environment_handoff.json").write_text(json.dumps({
+        "status": "ready_for_experimenting",
+        "valid": True,
+        "repo_path": str(handoff_repo),
+        "conda_env_prefix": str(handoff_env),
+        "experiment_python": str(handoff_env / "bin" / "python"),
+        "selected": {
+            "repo_path": str(handoff_repo),
+            "local_path": str(handoff_repo),
+            "fresh_find_run_id": "find_current",
+            "selected_plan_id": "plan_current",
+            "selection_stage": "environment_claude_code",
+        },
+        "environment_handoff": {
+            "ready_for_experimenting": True,
+            "run_id": "env_run",
+            "repo": {"repo_path": str(handoff_repo), "repo_url": "https://github.com/example/repo", "head_commit": "abc"},
+            "conda": {"prefix": str(handoff_env), "env_name": "rigid", "python": str(handoff_env / "bin" / "python")},
+            "data": {"run_data_dir": str(tmp_path / "environment" / "data")},
+            "pending_downstream_metrics": [{"metric": "designability", "status": "pending_experimenting_evaluation"}],
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+
+    prefs = project_bridge._public_run_preferences("demo", root, {"conda_env": "old_env", "target_venue": "ICLR"}, selection={})
+    env = project_bridge._current_environment_selection(root)
+
+    assert prefs["conda_env"] == str(handoff_env)
+    assert prefs["runtime"]["experiment_python"] == str(handoff_env / "bin" / "python")
+    assert env["valid"] is True
+    assert env["reason"] == "environment_handoff_ready_for_experimenting"
+    assert env["selected"]["repo_path"] == str(handoff_repo)
+    assert env["conda_env"] == str(handoff_env)

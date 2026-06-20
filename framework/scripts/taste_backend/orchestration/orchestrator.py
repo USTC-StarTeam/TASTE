@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import shlex
+import sys
 from pathlib import Path
 from typing import Any
 
-from taste_backend.common.io import append_text, read_json, write_json
+from taste_backend.common.io import append_text, read_json, utc_now, write_json
 from taste_backend.contracts.module_catalog import STAGE_ORDER, contracts_payload, load_all_contracts
 from taste_backend.orchestration.decision import Decision, choose_decision
 from taste_backend.orchestration.state import WorkflowState, record_from_result, save_state
@@ -176,25 +178,64 @@ def _current_selected_execution_ids(project_root: Path) -> tuple[str, str]:
     return "", ""
 
 
-def _sync_environment_handoff_to_project(ctx: FrameworkContext, state: WorkflowState, result) -> None:
-    if result.stage != "environment" or result.return_code != 0 or not state.project:
-        return
-    run_dir = _module_run_dir(result)
-    if run_dir is None:
-        return
-    decision = read_json(run_dir / "environment_deployment_decision.json", {})
-    if not isinstance(decision, dict):
-        return
+def _environment_autonomous_deploy_module(ctx: FrameworkContext):
+    module_root = ctx.workspace_root / "modules" / "environment"
+    script = module_root / "scripts" / "orchestration" / "autonomous_deploy.py"
+    if not script.exists():
+        raise FileNotFoundError(f"缺少 environment handoff 刷新脚本：{script}")
+    for entry in [str(module_root), str(module_root / "scripts")]:
+        if entry not in sys.path:
+            sys.path.insert(0, entry)
+    spec = importlib.util.spec_from_file_location("taste_environment_autonomous_deploy_sync", script)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"无法加载 environment handoff 刷新脚本：{script}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _refresh_environment_handoff_for_run(ctx: FrameworkContext, run_dir: Path, decision: dict[str, Any]) -> dict[str, Any]:
+    normalized = read_json(run_dir / "input_plan.normalized.json", {})
+    repo_info = read_json(run_dir / "repo_info.json", {})
+    if not isinstance(decision, dict) or not isinstance(normalized, dict) or not isinstance(repo_info, dict):
+        return decision if isinstance(decision, dict) else {}
+    if not normalized or not repo_info:
+        return decision
+    module = _environment_autonomous_deploy_module(ctx)
+    refreshed = module.attach_environment_handoff(dict(decision), run_dir, normalized, repo_info)
+    write_json(run_dir / "environment_deployment_decision.json", refreshed)
+    latest_path = ctx.workspace_root / "modules" / "environment" / "latest_decision.json"
+    latest = read_json(latest_path, {})
+    if not isinstance(latest, dict) or not latest or str(latest.get("run_id") or "") == str(refreshed.get("run_id") or ""):
+        write_json(latest_path, refreshed)
+    return refreshed
+
+
+def _environment_run_dir_from_arg(ctx: FrameworkContext, value: str) -> Path:
+    raw = Path(str(value or "")).expanduser()
+    run_dir = raw if raw.is_absolute() else ctx.workspace_root / raw
+    run_dir = run_dir.resolve()
+    runs_root = (ctx.workspace_root / "modules" / "environment" / "runs").resolve()
+    try:
+        run_dir.relative_to(runs_root)
+    except ValueError as exc:
+        raise SystemExit(f"environment run_dir 必须位于 {runs_root} 内：{run_dir}") from exc
+    return run_dir
+
+
+def _sync_environment_decision_to_project(ctx: FrameworkContext, project: str, run_dir: Path, decision: dict[str, Any]) -> str:
+    if not project or not isinstance(decision, dict):
+        return ""
     handoff = decision.get("environment_handoff") if isinstance(decision.get("environment_handoff"), dict) else {}
     if handoff.get("ready_for_experimenting") is not True:
-        return
+        return ""
     repo = handoff.get("repo") if isinstance(handoff.get("repo"), dict) else {}
     conda = handoff.get("conda") if isinstance(handoff.get("conda"), dict) else {}
     paper = handoff.get("paper") if isinstance(handoff.get("paper"), dict) else {}
     repo_path = str(repo.get("repo_path") or "").strip()
     if not repo_path or not Path(repo_path).exists():
-        return
-    project_root = ctx.workspace_root / "projects" / state.project
+        return ""
+    project_root = ctx.workspace_root / "projects" / project
     project_state = project_root / "state"
     project_state.mkdir(parents=True, exist_ok=True)
     current_run = _current_find_run_id(project_root)
@@ -215,11 +256,13 @@ def _sync_environment_handoff_to_project(ctx: FrameworkContext, state: WorkflowS
         "selection_stage": "environment_claude_code",
         "selected_by_stage": "environment_claude_code",
         "selection_gate": "environment_handoff_ready_for_experimenting",
-        "environment_run_id": str(handoff.get("run_id") or decision.get("run_id") or ""),
+        "environment_run_id": str(handoff.get("run_id") or decision.get("run_id") or run_dir.name),
     }
+    conda_prefix = str(conda.get("prefix") or "")
+    experiment_python = str(conda.get("python") or (str(Path(conda_prefix) / "bin" / "python") if conda_prefix else ""))
     env_record = {
         "schema_version": "project.environment_handoff_projection.v1",
-        "updated_at": str(decision.get("created_at") or ""),
+        "updated_at": utc_now(),
         "status": "ready_for_experimenting",
         "valid": True,
         "source": str(run_dir / "environment_deployment_decision.json"),
@@ -227,9 +270,9 @@ def _sync_environment_handoff_to_project(ctx: FrameworkContext, state: WorkflowS
         "repo_path": repo_path,
         "local_path": repo_path,
         "repo_url": str(repo.get("repo_url") or ""),
-        "conda_env": str(conda.get("prefix") or conda.get("env_name") or ""),
-        "conda_env_prefix": str(conda.get("prefix") or ""),
-        "experiment_python": str(conda.get("python") or ""),
+        "conda_env": conda_prefix or str(conda.get("env_name") or ""),
+        "conda_env_prefix": conda_prefix,
+        "experiment_python": experiment_python,
         "pending_downstream_metrics": handoff.get("pending_downstream_metrics") if isinstance(handoff.get("pending_downstream_metrics"), list) else [],
         "selected": selected,
     }
@@ -260,15 +303,59 @@ def _sync_environment_handoff_to_project(ctx: FrameworkContext, state: WorkflowS
         "conda_env_prefix": env_record["conda_env_prefix"],
         "experiment_python": env_record["experiment_python"],
         "environment_run_id": selected["environment_run_id"],
+        "role": "main_fresh_base",
         "selection_stage": "environment_claude_code",
+        "selection_gate": "environment_handoff_ready_for_experimenting",
         "selected_plan_id": selected_plan_id,
         "selected_idea_id": selected_idea_id,
     }
     write_json(project_state / "environment_handoff.json", env_record)
     write_json(project_state / "evidence_ready_repo_selection.json", selection_record)
     write_json(project_state / "active_repo.json", active_repo)
-    state.notes.append(f"environment handoff 已同步到项目 {state.project}: {repo_path}")
+    return repo_path
 
+
+def _sync_environment_handoff_to_project(ctx: FrameworkContext, state: WorkflowState, result) -> None:
+    if result.stage != "environment" or not state.project:
+        return
+    run_dir = _module_run_dir(result)
+    if run_dir is None:
+        return
+    decision = read_json(run_dir / "environment_deployment_decision.json", {})
+    if not isinstance(decision, dict):
+        return
+    repo_path = _sync_environment_decision_to_project(ctx, state.project, run_dir, decision)
+    if repo_path:
+        state.notes.append(f"environment handoff 已同步到项目 {state.project}: {repo_path}")
+
+
+def sync_environment_handoff(args: argparse.Namespace) -> int:
+    ctx = FrameworkContext.create(
+        run_id=args.run_id or "sync_environment_handoff",
+        state_root=Path(args.state_root) if args.state_root else None,
+        python=args.python,
+        mode="dry-run",
+    )
+    run_dir = _environment_run_dir_from_arg(ctx, args.environment_run_dir)
+    decision = read_json(run_dir / "environment_deployment_decision.json", {})
+    if not isinstance(decision, dict) or not decision:
+        print(json.dumps({"status": "missing_decision", "run_dir": str(run_dir)}, ensure_ascii=False, indent=2))
+        return 2
+    if not args.no_refresh:
+        decision = _refresh_environment_handoff_for_run(ctx, run_dir, decision)
+    repo_path = _sync_environment_decision_to_project(ctx, str(args.project or "").strip(), run_dir, decision)
+    payload = {
+        "status": "synced" if repo_path else "not_ready_for_experimenting",
+        "project": str(args.project or ""),
+        "run_dir": str(run_dir),
+        "repo_path": repo_path,
+        "ready_for_experimenting": bool((decision.get("environment_handoff") if isinstance(decision.get("environment_handoff"), dict) else {}).get("ready_for_experimenting")),
+        "decision": decision.get("decision"),
+        "exit_code": decision.get("exit_code"),
+        "environment_handoff_path": str(ctx.workspace_root / "projects" / str(args.project or "") / "state" / "environment_handoff.json") if repo_path else "",
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if repo_path else 2
 
 def run_workflow(args: argparse.Namespace) -> int:
     plan = load_plan_json(args.plan_json)
@@ -324,8 +411,8 @@ def run_workflow(args: argparse.Namespace) -> int:
         )
         command_index += 1
         state.records.append(record_from_result(result, message=decision.reason))
+        _sync_environment_handoff_to_project(ctx, state, result)
         if result.return_code == 0:
-            _sync_environment_handoff_to_project(ctx, state, result)
             if decision.stage not in state.completed_stages:
                 state.completed_stages.append(decision.stage)
             if args.run_gates:
@@ -430,6 +517,15 @@ def build_parser() -> argparse.ArgumentParser:
     contracts.add_argument("--python", default="")
     contracts.add_argument("--no-contract-probe", action="store_true")
     contracts.set_defaults(func=print_contracts)
+
+    sync = sub.add_parser("sync-environment-handoff", help="从已有 environment run 刷新 handoff 并同步到项目 state。")
+    sync.add_argument("--project", required=True, help="项目 ID。")
+    sync.add_argument("--environment-run-dir", required=True, help="modules/environment/runs/<run_id> 目录。")
+    sync.add_argument("--run-id", default="sync_environment_handoff", help="framework 同步命令自身的 run_id。")
+    sync.add_argument("--state-root", default="")
+    sync.add_argument("--python", default="")
+    sync.add_argument("--no-refresh", action="store_true", help="只投影已有 decision，不重新计算 handoff。")
+    sync.set_defaults(func=sync_environment_handoff)
     return parser
 
 

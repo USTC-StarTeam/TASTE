@@ -100,6 +100,16 @@ python framework/scripts/orchestration/run_taste_framework.py run \
 python framework/scripts/orchestration/run_taste_framework.py status --run-id demo_dry_run
 ```
 
+从已有 environment run 刷新并同步 handoff 到项目状态（不会启动新环境部署或实验，只读取 `modules/environment/runs/<run_id>` 里的真实回执重新计算 `environment_handoff.ready_for_experimenting`）：
+
+```bash
+python framework/scripts/orchestration/run_taste_framework.py sync-environment-handoff \
+  --project protein \
+  --environment-run-dir modules/environment/runs/<run_id>
+```
+
+该命令写入 `projects/<project>/state/environment_handoff.json`、`evidence_ready_repo_selection.json` 和 `active_repo.json`。`ready_for_experimenting=true` 只表示 repo、run-local Conda、数据准备和 loader/model smoke 可交给 experimenting；`allow_next_module=true` 仍必须等待真实 full reproduction 和论文指标证据。
+
 ## 维护原则
 
 - 框架只做编排、传参、状态记录和门控串联，不把模块实现搬进框架。

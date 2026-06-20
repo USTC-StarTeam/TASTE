@@ -657,7 +657,7 @@ def test_environment_handoff_ready_without_promoting_paper_metrics(tmp_path):
     if str(environment_module_root) not in sys.path:
         sys.path.insert(0, str(environment_module_root))
     else:
-        sys.path.insert(0, sys.path.pop(sys.path.index(str(environment_module_root))))
+        sys.path.insert(0, str(sys.path.pop(sys.path.index(str(environment_module_root)))))
     spec = importlib.util.spec_from_file_location(
         "environment_autonomous_deploy_handoff",
         environment_module_root / "scripts" / "orchestration" / "autonomous_deploy.py",
@@ -674,22 +674,44 @@ def test_environment_handoff_ready_without_promoting_paper_metrics(tmp_path):
     (env_prefix / "bin" / "python").write_text("", encoding="utf-8")
     env_plan = {
         "env_name": "rigid",
-        "commands": [{"phase": "reproduce_full", "command": ["python", "train.py"], "required": True}],
+        "commands": [
+            {"phase": "conda_create", "command": ["conda", "run", "-p", str(env_prefix), "python", "-m", "pip", "install", "torch"], "required": True},
+            {"phase": "verify", "command": ["conda", "run", "-p", str(env_prefix), "python", "-c", "import torch"], "required": True},
+            {"phase": "dataset", "command": ["hf", "download", "AF2"], "required": True},
+            {"phase": "reproduce_smoke", "command": ["conda", "run", "-p", str(env_prefix), "python", "-c", "print('loader smoke')"], "required": True},
+            {"phase": "reproduce_full", "command": ["python", "train.py"], "required": True},
+        ],
         "success_criteria": [{"name": "designability", "operator": ">=", "value": 0.758, "source": "paper Table 1"}],
+        "machine_assessment": {
+            "status": "suitable",
+            "fit_for_local_machine": True,
+            "paper_hardware_or_runtime_requirement": "single GPU CUDA training",
+            "local_machine_summary": "local CUDA GPU runtime is available for the smoke and reproduction commands",
+            "adaptation_actions": ["use CUDA wheel and bounded smoke before full reproduction"],
+            "evidence": ["runtime_probe", "nvidia-smi", "machine_profile.json"],
+        },
+        "paper_config_alignment": [
+            {"paper_item": "designability metric", "paper_value": "0.758", "implementation_choice": "success_criteria designability >= 0.758", "command_phase": "reproduce_full", "evidence_source": "paper Table 1", "match_status": "matched", "critical": True},
+            {"paper_item": "epochs", "paper_value": "10 epochs", "implementation_choice": "reproduce_full trains 10 epochs", "command_phase": "reproduce_full", "evidence_source": "repo config", "match_status": "matched", "critical": True},
+            {"paper_item": "batch_size", "paper_value": "batch_size 64", "implementation_choice": "reproduce_full uses batch_size 64", "command_phase": "reproduce_full", "evidence_source": "repo config", "match_status": "matched", "critical": True},
+            {"paper_item": "learning_rate", "paper_value": "lr=1e-4", "implementation_choice": "reproduce_full uses learning rate 1e-4", "command_phase": "reproduce_full", "evidence_source": "repo config", "match_status": "matched", "critical": True},
+            {"paper_item": "hardware/precision", "paper_value": "CUDA GPU", "implementation_choice": "verify uses local CUDA GPU with CUDA wheels", "command_phase": "verify", "evidence_source": "runtime_probe nvidia-smi", "match_status": "adapted_for_machine", "critical": True},
+        ],
     }
     receipts = [
-        {"phase": "conda_create", "required": True, "return_code": 0, "status": "passed", "conda_env_prefix": str(env_prefix), "command": f"{env_prefix}/bin/python -m pip install torch"},
-        {"phase": "verify", "required": True, "return_code": 0, "status": "passed", "conda_env_prefix": str(env_prefix), "command": f"{env_prefix}/bin/python -c 'import torch'"},
+        {"phase": "conda_create", "required": True, "return_code": 0, "status": "passed", "conda_env_prefix": str(env_prefix), "command": f"conda run -p {env_prefix} python -m pip install torch"},
+        {"phase": "verify", "required": True, "return_code": 0, "status": "passed", "conda_env_prefix": str(env_prefix), "command": f"conda run -p {env_prefix} python -c 'import torch'"},
         {"phase": "dataset", "required": True, "return_code": 0, "status": "passed", "conda_env_prefix": str(env_prefix), "command": "hf download AF2 Structure Database", "stdout_tail": "AF2 Structure Database ready"},
-        {"phase": "reproduce_smoke", "required": True, "return_code": 0, "status": "passed", "conda_env_prefix": str(env_prefix), "command": f"{env_prefix}/bin/python -c 'loader smoke'", "stdout_tail": "loader smoke passed"},
+        {"phase": "reproduce_smoke", "required": True, "return_code": 0, "status": "passed", "conda_env_prefix": str(env_prefix), "command": f"conda run -p {env_prefix} python -c 'loader smoke'", "stdout_tail": "loader smoke passed"},
+        {"phase": "reproduce_full", "required": True, "return_code": 30, "status": "blocked", "conda_env_prefix": str(env_prefix), "command": "python train.py", "stdout_tail": "full metrics pending"},
     ]
     approval_gate = {"checks": [
         {"name": "repository_source", "passed": True, "reason": "repo ok"},
-        {"name": "repository_documentation", "passed": True, "reason": "docs ok"},
+        {"name": "repository_documentation", "passed": False, "reason": "paper-level docs pending"},
         {"name": "conda_environment", "passed": True, "reason": "env ok"},
         {"name": "machine_fit", "passed": True, "reason": "machine ok"},
-        {"name": "dataset_evidence", "passed": True, "reason": "data ok"},
-        {"name": "required_commands", "passed": True, "reason": "commands ok"},
+        {"name": "dataset_evidence", "passed": False, "reason": "paper-level dataset evidence pending"},
+        {"name": "required_commands", "passed": False, "reason": "full reproduction pending"},
         {"name": "paper_config_alignment", "passed": True, "reason": "alignment ok"},
         {"name": "workspace_write_audit", "passed": True, "reason": "audit ok"},
         {"name": "metric_evidence", "passed": False, "reason": "metrics pending"},
@@ -699,14 +721,28 @@ def test_environment_handoff_ready_without_promoting_paper_metrics(tmp_path):
         "pytest_run",
         run_dir,
         {"title": "RigidSSL", "paper_url": "https://openreview.net/forum?id=YAWpZcXHnP", "selected_plan_id": "plan"},
-        {"repo_url": "https://github.com/example/repo", "repo_path": str(repo), "head_commit": "abc"},
+        {
+            "repo_url": "https://github.com/example/repo",
+            "repo_path": str(repo),
+            "exists": True,
+            "head_commit": "abc",
+            "clone_receipt": {"return_code": 0, "status": "passed"},
+        },
         env_plan,
         receipts,
         approval_gate,
         [{"metric": "designability", "passed": False}],
+        machine={},
+        workspace_audit={"status": "passed", "outside_workspace_writes": []},
     )
     assert handoff["ready_for_experimenting"] is True
     assert handoff["handoff_gate"]["passed"] is True
     assert handoff["pending_downstream_metrics"][0]["metric"] == "designability"
     assert handoff["pending_downstream_metrics"][0]["status"] == "pending_experimenting_evaluation"
-    assert not any(row["name"] == "metric_evidence" for row in handoff["handoff_gate"]["checks"])
+    handoff_checks = {row["name"]: row for row in handoff["handoff_gate"]["checks"]}
+    assert "metric_evidence" not in handoff_checks
+    assert "reproduce_full" not in handoff_checks
+    assert "repository_documentation" not in handoff_checks
+    assert "dataset_evidence" not in handoff_checks
+    assert handoff_checks["required_commands"]["passed"] is True
+    assert handoff_checks["required_commands"]["evidence"]["ignored_reproduce_full_count"] == 1

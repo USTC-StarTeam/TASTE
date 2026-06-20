@@ -7,6 +7,7 @@
 - 浏览器中的用户操作：项目选择、配置编辑、模块按钮、产物展开、人工编辑 idea/plan。
 - `runtime/.config.json`：本机网页配置和密钥运行态。
 - `projects/<project>/project.json` 与各阶段产物：网页只读取和 patch 明确字段。
+- `projects/<project>/state/environment_handoff.json`：environment 已完成交接时的当前 repo、run-local Conda prefix、实验 Python、待实验指标和数据入口；网页状态和实验按钮必须优先使用它，避免回退到旧 `conda_env` 或旧 `active_repo`。
 - FastAPI 后端返回的 job、artifact、status 和 Markdown/JSON 片段。
 
 ## 输出
@@ -33,9 +34,10 @@
 
 1. 前端只维护 UI 状态、表单状态和用户操作，不在浏览器里计算科研推荐或实验结论。
 2. 后端 web bridge 只做 API、任务派发、状态整形和安全过滤；核心逻辑必须调用 `framework/scripts` 或 `modules/*/scripts`。
-3. 用户可见 Markdown/HTML 要经过统一渲染和清洗，避免把内部 marker、paper id、JSON 字段、Claude scratchpad 或 reader 指令直接展示出来。
-4. 产物默认展示上一个已完成结果；新任务未完成前不能用半成品替换当前用户可见产物。
-5. 测试网页时必须实际打开 `http://127.0.0.1:8765`，在相应 tab 视觉检查所有关键文本、按钮、计数和产物，不只看命令行输出。
+3. environment 页面和实验配置展示以 `environment_handoff.json` 为当前真值；它可以显示 `ready_for_experimenting`，但不能把它解释为论文级 full reproduction 或指标已通过。
+4. 用户可见 Markdown/HTML 要经过统一渲染和清洗，避免把内部 marker、paper id、JSON 字段、Claude scratchpad 或 reader 指令直接展示出来。
+5. 产物默认展示上一个已完成结果；新任务未完成前不能用半成品替换当前用户可见产物。
+6. 测试网页时必须实际打开 `http://127.0.0.1:8765`，在相应 tab 视觉检查所有关键文本、按钮、计数和产物，不只看命令行输出。
 
 ## 运行与测试
 

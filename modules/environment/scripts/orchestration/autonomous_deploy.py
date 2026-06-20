@@ -3161,27 +3161,93 @@ def _latest_receipts(rounds: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [row for row in payload if isinstance(row, dict)] if isinstance(payload, list) else []
 
 
+def _required_environment_commands_gate(receipts: list[dict[str, Any]]) -> tuple[bool, dict[str, Any]]:
+    required = [row for row in receipts if isinstance(row, dict) and row.get("required") is not False]
+    reproduce_full_rows = [row for row in required if str(row.get("phase") or "").strip().lower() == "reproduce_full"]
+    failures = [
+        row for row in required
+        if str(row.get("phase") or "").strip().lower() != "reproduce_full" and not _receipt_succeeded(row)
+    ]
+    return bool(required and not failures), {
+        "required_receipt_count": len(required),
+        "ignored_reproduce_full_count": len(reproduce_full_rows),
+        "non_full_required_failures": [_compact_receipt(row) for row in failures[:5]],
+        "successful_non_full_required_phases": [
+            str(row.get("phase") or "")
+            for row in required
+            if _receipt_succeeded(row) and str(row.get("phase") or "").strip().lower() != "reproduce_full"
+        ][:12],
+    }
+
+
+def _handoff_workspace_audit_gate(workspace_audit: dict[str, Any] | None, approval_checks: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    if isinstance(workspace_audit, dict) and workspace_audit:
+        passed = workspace_audit.get("status") == "passed"
+        return _approval_check(
+            "workspace_write_audit",
+            passed,
+            "工作区写入审计已通过" if passed else "工作区写入审计未通过或尚未生成",
+            workspace_audit,
+        )
+    source = approval_checks.get("workspace_write_audit")
+    if isinstance(source, dict):
+        return {**source, "name": "workspace_write_audit"}
+    return _approval_check("workspace_write_audit", False, "工作区写入审计未通过或尚未生成")
+
+
 def build_environment_handoff_gate(
     approval_gate: dict[str, Any],
     receipts: list[dict[str, Any]],
     repo_info: dict[str, Any],
+    env_plan: dict[str, Any] | None = None,
+    run_dir: Path | None = None,
+    machine: dict[str, Any] | None = None,
+    workspace_audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     approval_checks = {
         str(row.get("name") or ""): row
         for row in approval_gate.get("checks", [])
         if isinstance(row, dict)
     }
+    env_plan = env_plan if isinstance(env_plan, dict) else {}
     runtime_ok, runtime_evidence = _runtime_smoke_gate(receipts)
-    checks: list[dict[str, Any]] = []
     dataset_runtime_ok, dataset_runtime_evidence = _dataset_runtime_gate(receipts)
+    checks: list[dict[str, Any]] = []
     for name in ENVIRONMENT_HANDOFF_REQUIRED_CHECKS:
-        if name == "runtime_smoke":
+        if name == "repository_source":
+            repo_ok, repo_evidence = _repo_source_gate(repo_info)
             checks.append(_approval_check(
-                "runtime_smoke",
-                runtime_ok,
-                "loader/model smoke 已在 run-local Conda 环境中通过" if runtime_ok else "缺少 run-local loader/model smoke 通过证据",
-                runtime_evidence,
+                "repository_source",
+                repo_ok,
+                "GitHub 仓库已克隆、版本已固定并记录 head_commit" if repo_ok else "缺少可信 GitHub 仓库克隆证据，或指定 commit 未成功 checkout/匹配 HEAD",
+                repo_evidence,
             ))
+            continue
+        if name == "conda_environment":
+            if env_plan and run_dir is not None:
+                conda_ok, conda_evidence = _conda_environment_gate(env_plan, receipts, run_dir)
+                checks.append(_approval_check(
+                    "conda_environment",
+                    conda_ok,
+                    "Conda 环境 prefix、依赖安装和导入/运行验证通过" if conda_ok else "缺少可审计的 Conda 环境部署或导入/运行验证证据",
+                    conda_evidence,
+                ))
+            else:
+                source = approval_checks.get(name)
+                checks.append({**source, "name": name} if isinstance(source, dict) else _approval_check(name, False, f"缺少 approval gate 检查项：{name}"))
+            continue
+        if name == "machine_fit":
+            if env_plan and isinstance(machine, dict):
+                machine_ok, machine_evidence = _machine_fit_gate(env_plan, machine)
+                checks.append(_approval_check(
+                    "machine_fit",
+                    machine_ok,
+                    "已证明论文运行要求适合本机或已有合理本机适配" if machine_ok else "缺少本机资源适配评估或硬件/算力对齐证据",
+                    machine_evidence,
+                ))
+            else:
+                source = approval_checks.get(name)
+                checks.append({**source, "name": name} if isinstance(source, dict) else _approval_check(name, False, f"缺少 approval gate 检查项：{name}"))
             continue
         if name == "dataset_runtime":
             checks.append(_approval_check(
@@ -3191,11 +3257,35 @@ def build_environment_handoff_gate(
                 dataset_runtime_evidence,
             ))
             continue
-        source = approval_checks.get(name)
-        if isinstance(source, dict):
-            checks.append({**source, "name": name})
-        else:
-            checks.append(_approval_check(name, False, f"缺少 approval gate 检查项：{name}"))
+        if name == "required_commands":
+            commands_ok, commands_evidence = _required_environment_commands_gate(receipts)
+            checks.append(_approval_check(
+                "required_commands",
+                commands_ok,
+                "environment 交接所需命令已成功；论文级 reproduce_full 可由下游继续验证" if commands_ok else "存在必需 environment 命令失败或缺少命令回执",
+                commands_evidence,
+            ))
+            continue
+        if name == "runtime_smoke":
+            checks.append(_approval_check(
+                "runtime_smoke",
+                runtime_ok,
+                "loader/model smoke 已在 run-local Conda 环境中通过" if runtime_ok else "缺少 run-local loader/model smoke 通过证据",
+                runtime_evidence,
+            ))
+            continue
+        if name == "paper_config_alignment":
+            alignment_ok, alignment_issues = paper_config_alignment_passed(env_plan) if env_plan else (False, ["缺少 environment plan，无法检查 paper_config_alignment"])
+            checks.append(_approval_check(
+                "paper_config_alignment",
+                alignment_ok,
+                "论文配置对齐表通过" if alignment_ok else "论文配置对齐表缺失或存在关键问题",
+                alignment_issues[:10],
+            ))
+            continue
+        if name == "workspace_write_audit":
+            checks.append(_handoff_workspace_audit_gate(workspace_audit, approval_checks))
+            continue
     missing = [row["reason"] for row in checks if not row.get("passed")]
     repo_path = str(repo_info.get("repo_path") or "").strip()
     if not repo_path or not Path(repo_path).exists():
@@ -3248,9 +3338,14 @@ def build_environment_handoff(
     receipts: list[dict[str, Any]],
     approval_gate: dict[str, Any],
     metric_evidence: list[dict[str, Any]],
+    machine: dict[str, Any] | None = None,
+    workspace_audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    handoff_gate = build_environment_handoff_gate(approval_gate, receipts, repo_info)
     env_name = str(env_plan.get("env_name") or "").strip()
+    handoff_gate = build_environment_handoff_gate(
+        approval_gate, receipts, repo_info,
+        env_plan=env_plan, run_dir=run_dir, machine=machine, workspace_audit=workspace_audit,
+    )
     conda_prefix = str(env_prefix_for(run_dir, env_name)) if env_name else ""
     full_commands = [row for row in env_plan.get("commands", []) if isinstance(row, dict) and str(row.get("phase") or "").strip().lower() == "reproduce_full"] if isinstance(env_plan.get("commands"), list) else []
     smoke_receipts = [row for row in _required_successful_receipts(receipts) if "smoke" in str(row.get("phase") or "").lower() or "loader" in str(row.get("phase") or "").lower()]
@@ -3360,7 +3455,13 @@ def attach_environment_handoff(
     latest_round = _latest_round_with_receipts(rounds)
     metric_evidence = latest_round.get("metric_evidence") if isinstance(latest_round.get("metric_evidence"), list) else []
     approval_gate = decision.get("approval_gate") if isinstance(decision.get("approval_gate"), dict) else {}
-    handoff = build_environment_handoff(run_id=str(decision.get("run_id") or ""), run_dir=run_dir, normalized_plan=normalized_plan, repo_info=repo_info, env_plan=env_plan, receipts=receipts, approval_gate=approval_gate, metric_evidence=metric_evidence)
+    handoff = build_environment_handoff(
+        run_id=str(decision.get("run_id") or ""), run_dir=run_dir,
+        normalized_plan=normalized_plan, repo_info=repo_info, env_plan=env_plan,
+        receipts=receipts, approval_gate=approval_gate, metric_evidence=metric_evidence,
+        machine=decision.get("machine_summary") if isinstance(decision.get("machine_summary"), dict) else {},
+        workspace_audit=decision.get("workspace_write_audit") if isinstance(decision.get("workspace_write_audit"), dict) else None,
+    )
     decision["environment_handoff"] = handoff
     decision["ready_for_experimenting"] = bool(handoff.get("ready_for_experimenting"))
     contract = decision.setdefault("environment_handoff_contract", {})
