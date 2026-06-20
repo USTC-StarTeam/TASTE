@@ -17,8 +17,12 @@ SHELL_OPTIONS_WITH_VALUE = {"-o", "--rcfile", "--init-file"}
 DANGEROUS_FRAGMENTS = ("rm -rf /", "rm -fr /", ":(){", "> /dev/sd", "dd if=", "chmod -R 777 /")
 EXTERNAL_RUNTIME_ENV_KEYS = {
     "CONDA_DEFAULT_ENV",
+    "CONDA_EXE",
     "CONDA_PREFIX",
     "CONDA_PROMPT_MODIFIER",
+    "CONDA_PYTHON_EXE",
+    "CONDA_ROOT",
+    "CONDA_SHLVL",
     "LD_LIBRARY_PATH",
     "LD_PRELOAD",
     "LIBRARY_PATH",

@@ -2479,9 +2479,20 @@ def _inner_command_installs_dependencies(inner: list[str]) -> bool:
     )
 
 
+def _direct_entrypoint_tokens_have_verify_action(tokens: list[str]) -> bool:
+    if not tokens or _inner_command_installs_dependencies(tokens):
+        return False
+    head = Path(str(tokens[0] or "")).name.lower()
+    if head in CONDA_VERIFY_INNER_HEADS or head in PYTHON_ENV_ENTRYPOINTS:
+        return True
+    return False
+
+
 def _conda_prefix_tokens_have_setup_action(tokens: list[str]) -> bool:
     if not tokens:
         return False
+    if _inner_command_installs_dependencies(tokens):
+        return True
     if Path(str(tokens[0] or "")).name not in {"conda", "mamba", "micromamba"}:
         return False
     if len(tokens) >= 3 and str(tokens[1] or "") == "env":
@@ -2494,6 +2505,8 @@ def _conda_prefix_tokens_have_setup_action(tokens: list[str]) -> bool:
 def _conda_prefix_tokens_have_verify_action(tokens: list[str]) -> bool:
     if not tokens:
         return False
+    if _direct_entrypoint_tokens_have_verify_action(tokens):
+        return True
     if Path(str(tokens[0] or "")).name not in {"conda", "mamba", "micromamba"}:
         return False
     inner = _conda_run_inner_tokens(tokens)
@@ -3185,13 +3198,43 @@ def command_declares_conda_prefix(tokens: list[str], expected_prefix: Path) -> b
     return False
 
 
+def _command_uses_direct_env_executable(tokens: list[str], env_prefix: Path) -> bool:
+    if not tokens:
+        return False
+    head = Path(str(tokens[0] or "")).name
+    if head not in PYTHON_ENV_ENTRYPOINTS:
+        return False
+    candidate = Path(str(tokens[0] or "")).expanduser()
+    if not candidate.is_absolute():
+        return False
+    try:
+        candidate = candidate.resolve()
+        bin_dir = env_prefix.expanduser().resolve() / "bin"
+        candidate.relative_to(bin_dir)
+        return True
+    except Exception:
+        return False
+
+
 def command_uses_conda_prefix(tokens: list[str], env_prefix: Path) -> bool:
     if not tokens:
         return False
     head = Path(tokens[0]).name
-    if head not in {"conda", "mamba", "micromamba"}:
-        return False
-    return command_declares_conda_prefix(tokens, env_prefix)
+    if head in {"conda", "mamba", "micromamba"}:
+        return command_declares_conda_prefix(tokens, env_prefix)
+    return _command_uses_direct_env_executable(tokens, env_prefix)
+
+
+def _direct_env_entrypoint_command(tokens: list[str], env_prefix: Path) -> list[str]:
+    if not tokens:
+        return []
+    head = Path(str(tokens[0] or "")).name
+    if head in {"pip", "pip3"}:
+        return [str(env_prefix / "bin" / "python"), "-m", "pip", *tokens[1:]]
+    if head in PYTHON_ENV_ENTRYPOINTS:
+        executable = "python" if head in {"python", "python3"} else head
+        return [str(env_prefix / "bin" / executable), *tokens[1:]]
+    return []
 
 
 def rewrite_command(command: Any, conda_exe: str, env_name: str, env_prefix: Path) -> list[str]:
@@ -3202,12 +3245,17 @@ def rewrite_command(command: Any, conda_exe: str, env_name: str, env_prefix: Pat
     if head in {"conda", "mamba", "micromamba"}:
         if conda_exe:
             tokens[0] = conda_exe
-        return _replace_or_add_conda_prefix(tokens, env_prefix)
-    if head in {"pip", "pip3"} and env_name:
-        return [conda_exe or "conda", "run", "-p", str(env_prefix), "python", "-m", "pip", *tokens[1:]]
-    if head in PYTHON_ENV_ENTRYPOINTS and env_name:
-        executable = "python" if head in {"python", "python3"} else head
-        return [conda_exe or "conda", "run", "-p", str(env_prefix), executable, *tokens[1:]]
+        tokens = _replace_or_add_conda_prefix(tokens, env_prefix)
+        inner_index = _conda_run_inner_command_index(tokens)
+        if inner_index is not None and env_name:
+            direct = _direct_env_entrypoint_command(tokens[inner_index:], env_prefix)
+            if direct:
+                return direct
+        return tokens
+    if env_name:
+        direct = _direct_env_entrypoint_command(tokens, env_prefix)
+        if direct:
+            return direct
     return tokens
 
 

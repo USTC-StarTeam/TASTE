@@ -136,6 +136,55 @@ def test_environment_dependency_policy_rewrites_pyg_conda_plan():
     assert len(normalized["plan_policy_rewrites"]) >= 4
 
 
+def test_environment_rewrites_python_entrypoints_to_run_local_prefix():
+    environment_module_root = ROOT / "modules" / "environment"
+    for name in list(sys.modules):
+        if name == "scripts" or name.startswith("scripts."):
+            sys.modules.pop(name, None)
+    if str(environment_module_root) not in sys.path:
+        sys.path.insert(0, str(environment_module_root))
+    else:
+        sys.path.insert(0, sys.path.pop(sys.path.index(str(environment_module_root))))
+    spec = importlib.util.spec_from_file_location(
+        "environment_autonomous_deploy",
+        environment_module_root / "scripts" / "orchestration" / "autonomous_deploy.py",
+    )
+    assert spec and spec.loader
+    autonomous_deploy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(autonomous_deploy)
+
+    env_prefix = ROOT / "modules" / "environment" / "runs" / "pytest_run" / "conda_envs" / "rigid"
+    conda_exe = "/home/fmh/workspace/miniforge/bin/conda"
+
+    pip_command = autonomous_deploy.rewrite_command(["pip", "install", "torch"], conda_exe, "rigid", env_prefix)
+    assert pip_command == [str(env_prefix / "bin" / "python"), "-m", "pip", "install", "torch"]
+    assert autonomous_deploy.command_uses_conda_prefix(pip_command, env_prefix)
+    assert autonomous_deploy._conda_prefix_tokens_have_setup_action(pip_command)
+
+    run_command = autonomous_deploy.rewrite_command(["conda", "run", "-n", "rigid", "python", "-c", "import torch"], conda_exe, "rigid", env_prefix)
+    assert run_command == [str(env_prefix / "bin" / "python"), "-c", "import torch"]
+    assert autonomous_deploy.command_uses_conda_prefix(run_command, env_prefix)
+    assert autonomous_deploy._conda_prefix_tokens_have_verify_action(run_command)
+
+
+def test_environment_isolated_runtime_scrubs_inconsistent_conda_activation_state(tmp_path):
+    environment_module_root = ROOT / "modules" / "environment"
+    for name in list(sys.modules):
+        if name == "scripts" or name.startswith("scripts."):
+            sys.modules.pop(name, None)
+    if str(environment_module_root) not in sys.path:
+        sys.path.insert(0, str(environment_module_root))
+    else:
+        sys.path.insert(0, sys.path.pop(sys.path.index(str(environment_module_root))))
+
+    from scripts.common.shell import isolated_runtime_env
+
+    env = isolated_runtime_env(tmp_path, extra={"CONDA_SHLVL": "1", "CONDA_EXE": "/bad/conda", "CONDA_PREFIX": "/bad/env"})
+    assert "CONDA_SHLVL" not in env
+    assert "CONDA_EXE" not in env
+    assert "CONDA_PREFIX" not in env
+
+
 def test_environment_normalizes_selected_plan_metrics_and_paper_source():
     environment_module_root = ROOT / "modules" / "environment"
     for name in list(sys.modules):
