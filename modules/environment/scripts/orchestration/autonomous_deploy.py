@@ -16,7 +16,7 @@ from typing import Any
 MODULE_ROOT = Path(__file__).resolve().parents[2]
 REPO_ROOT = MODULE_ROOT.parents[1]
 RUNS_ROOT = MODULE_ROOT / "runs"
-DECISION_POLICY_VERSION = "environment.deployment_decision.v76"
+DECISION_POLICY_VERSION = "environment.deployment_decision.v77"
 APPROVAL_GATE_REQUIRED_CHECKS = (
     "repository_source",
     "repository_documentation",
@@ -41,6 +41,7 @@ from scripts.common.claude_runner import run_claude_json
 from scripts.common.io_utils import ensure_within, read_json, slugify, utc_now, write_json
 from scripts.common.plan_schema import load_experiment_plan, normalize_plan
 from scripts.common.shell import EXTERNAL_RUNTIME_ENV_KEYS, command_is_dangerous, command_text, command_tokens, isolated_runtime_env, run_logged, runtime_env
+from scripts.orchestration.dependency_policy import normalize_environment_plan_commands
 from scripts.environment.runtime_probe import detect_machine_profile, find_conda_executable
 from scripts.repository.repo_manager import clone_or_reuse, collect_repo_evidence
 from scripts.reproduction.decision import classify_failures, compare_metric_values, metric_criteria_passed, normalize_verdict, success_criteria_issues
@@ -3210,6 +3211,7 @@ def rewrite_command(command: Any, conda_exe: str, env_name: str, env_prefix: Pat
 
 
 
+
 def command_required(row: dict[str, Any]) -> bool:
     return row.get("required") is not False
 
@@ -4102,6 +4104,8 @@ def main() -> int:
         plan_validation_issues: list[str] = []
         if not args.dry_run:
             include_full_reproduction = bool(args.run_full_reproduction or not args.skip_full_reproduction)
+            env_plan = normalize_environment_plan_commands(env_plan, machine=machine, policy_version=DECISION_POLICY_VERSION)
+            write_json(env_plan_path, env_plan)
             plan_validation_issues = validate_environment_plan(env_plan, require_full_reproduction=include_full_reproduction, repo_path=repo_path, run_dir=run_dir, machine=machine, paper_evidence=paper_evidence)
             if plan_validation_issues:
                 receipt = validation_receipt(plan_validation_issues, round_dir)

@@ -63,6 +63,16 @@ modules/environment/runs/<run_id>/
 
 批准进入实验必须通过仓库来源、仓库文档、Conda 环境、本机资源、真实数据、必要命令、论文 claim、指标证据、完整复现和工作区审计等 gate。没有真实完整复现时，正确结果是 `continue_repair`，不能伪造 approve。
 
+### PyTorch / PyG / CUDA 依赖策略
+
+在 RTX 5090、compute capability 12.x 或 Claude 计划使用 PyG 的场景下，后端会在执行前规范化明显不可解算的依赖计划：
+
+- 不接受 `conda -c pyg pyg pytorch-scatter pytorch-sparse pytorch-cluster` 作为 PyTorch >= 2.5 / CUDA 12.x 的安装路线。该组合在当前 conda channel 上容易被求解到 CPU PyTorch 或互斥的 Python/PyTorch/CUDA 矩阵。
+- 对 PyG 工作负载，后端使用 Python 3.11、PyTorch CUDA 12.8 pip wheel，以及与 torch 版本匹配的 `https://data.pyg.org/whl/torch-<version>+cu128.html` 官方 PyG wheel index。
+- 后端会补充 `verify_pyg_cuda_import` 必需验证，要求 `torch.cuda.is_available()` 为真，并能导入 `torch_geometric`、`torch_scatter`、`torch_sparse`、`torch_cluster`。
+- 所有策略改写会写入环境计划的 `plan_policy_rewrites` 与 `backend_dependency_policy`，保留原始 Claude 计划和后端改写原因，便于审计。
+
+
 ## 运行流程
 
 1. 读取并规范化实验 plan，抽取标题、主题、仓库候选、数据和指标。

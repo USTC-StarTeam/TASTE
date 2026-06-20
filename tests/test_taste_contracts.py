@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import subprocess
 import sys
@@ -89,3 +90,47 @@ def test_framework_only_stage_reports_single_stage_scope():
     assert status["stage_scope"] == ["environment"]
     assert status["progress"] == {"completed": 1, "total": 1, "percent": 100.0}
     assert status["status"] == "stage_scope_finished"
+
+
+def test_environment_dependency_policy_rewrites_pyg_conda_plan():
+    environment_module_root = ROOT / "modules" / "environment"
+    for name in list(sys.modules):
+        if name == "scripts" or name.startswith("scripts."):
+            sys.modules.pop(name, None)
+    if str(environment_module_root) not in sys.path:
+        sys.path.insert(0, str(environment_module_root))
+    else:
+        sys.path.insert(0, sys.path.pop(sys.path.index(str(environment_module_root))))
+    spec = importlib.util.spec_from_file_location(
+        "environment_dependency_policy",
+        environment_module_root / "scripts" / "orchestration" / "dependency_policy.py",
+    )
+    assert spec and spec.loader
+    dependency_policy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dependency_policy)
+    normalize_environment_plan_commands = dependency_policy.normalize_environment_plan_commands
+
+    plan = {
+        "python_version": "3.9",
+        "commands": [
+            {"phase": "conda_create", "command": ["conda", "create", "-n", "rigid", "python=3.9", "pip", "-y"], "required": True},
+            {"phase": "conda_install_pytorch", "command": ["conda", "install", "-n", "rigid", "pytorch>=2.5.1", "pytorch-cuda>=12.4", "-y"], "required": True},
+            {"phase": "conda_install_pyg", "command": ["conda", "install", "-n", "rigid", "-c", "pyg", "pyg", "pytorch-scatter", "pytorch-sparse", "pytorch-cluster", "-y"], "required": True},
+            {"phase": "verify_import", "command": ["conda", "run", "-n", "rigid", "python", "-c", "import torch_geometric"], "required": True},
+        ],
+    }
+    machine = {"gpu": [{"name": "NVIDIA GeForce RTX 5090", "compute_capability": "12.0"}]}
+
+    normalized = normalize_environment_plan_commands(plan, machine=machine, policy_version="test-policy")
+    commands = [row["command"] for row in normalized["commands"]]
+    command_text = "\n".join(" ".join(command) for command in commands)
+
+    assert normalized["python_version"] == "3.11"
+    assert normalized["commands"][0]["command"] == ["conda", "create", "-n", "rigid", "python=3.11", "pip", "-y"]
+    assert "torch==2.9.1+cu128" in command_text
+    assert "https://download.pytorch.org/whl/cu128" in command_text
+    assert "https://data.pyg.org/whl/torch-2.9.1+cu128.html" in command_text
+    assert "conda install -n rigid -c pyg pyg" not in command_text
+    assert any(row["phase"] == "verify_pyg_cuda_import" for row in normalized["commands"])
+    assert normalized["backend_dependency_policy"]["policy_version"] == "test-policy"
+    assert len(normalized["plan_policy_rewrites"]) >= 4
