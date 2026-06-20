@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from typing import Any
 
-from scripts.common.io_utils import coerce_list, read_text_limited, utc_now, write_json
+from scripts.common.io_utils import coerce_list, read_json, read_text_limited, utc_now, write_json
 from scripts.common.shell import isolated_runtime_env, runtime_env
 
 TEXT_KEYS = (
@@ -163,6 +163,97 @@ def _local_paper_path(raw_plan: dict[str, Any]) -> str:
     return ""
 
 
+def _project_root_from_source_path(normalized_plan: dict[str, Any]) -> Path | None:
+    source = Path(str(normalized_plan.get("source_path") or "")).expanduser()
+    if not source.is_absolute():
+        return None
+    parts = source.parts
+    try:
+        projects_index = parts.index("projects")
+    except ValueError:
+        return None
+    if projects_index + 1 >= len(parts):
+        return None
+    return Path(*parts[:projects_index + 2])
+
+
+def _paper_identity_strings(normalized_plan: dict[str, Any], include_repo_fallback: bool = False) -> list[str]:
+    identities: list[str] = []
+    paper_source = normalized_plan.get("paper_source") if isinstance(normalized_plan.get("paper_source"), dict) else {}
+    for key in ["title", "url", "pdf_url"]:
+        value = str(paper_source.get(key) or "").strip()
+        if value:
+            identities.append(value.lower())
+    if not identities:
+        title = str(normalized_plan.get("title") or "").strip()
+        if title:
+            identities.append(title.lower())
+    if include_repo_fallback:
+        for spec in coerce_list(normalized_plan.get("repo_candidate_specs")):
+            if isinstance(spec, dict):
+                value = str(spec.get("url") or "").strip().lower()
+                if value:
+                    identities.append(value)
+    return identities
+
+
+def _identity_matches_paper(row: dict[str, Any], identities: list[str]) -> bool:
+    if not identities:
+        return False
+    haystack = "\n".join(str(row.get(key) or "") for key in ["title", "url", "pdf_url", "abstract", "abstract_en", "reason", "reason_zh"]).lower()
+    aliases = {
+        "zhanghanni/rigidssl": ["rigidssl", "rigidity-aware geometric pretraining"],
+        "openreview.net/forum?id=yawpzcxhnp": ["yawpzcxhnp", "rigidssl"],
+        "openreview.net/pdf?id=yawpzcxhnp": ["yawpzcxhnp", "rigidssl"],
+    }
+    for identity in identities:
+        if identity and identity in haystack:
+            return True
+        for needle, alias_values in aliases.items():
+            if needle in identity and any(alias in haystack for alias in alias_values):
+                return True
+    return False
+
+
+def _local_full_text_evidence(normalized_plan: dict[str, Any]) -> dict[str, Any]:
+    project_root = _project_root_from_source_path(normalized_plan)
+    if not project_root:
+        return {"status": "not_applicable", "reason": "normalized source_path is not under projects/<project>"}
+    packet_path = project_root / "planning" / "finding" / "full_text_reading" / "full_text_packet.json"
+    if not packet_path.exists():
+        return {"status": "missing", "packet_path": str(packet_path)}
+    packet = read_json(packet_path, {})
+    papers = packet.get("papers") if isinstance(packet, dict) and isinstance(packet.get("papers"), list) else []
+    identity_sets = [
+        _paper_identity_strings(normalized_plan, include_repo_fallback=False),
+        _paper_identity_strings(normalized_plan, include_repo_fallback=True),
+    ]
+    for identities in identity_sets:
+        for row in papers:
+            if not isinstance(row, dict) or not _identity_matches_paper(row, identities):
+                continue
+            text_path = Path(str(row.get("text_path") or "")).expanduser()
+            if not text_path.is_absolute():
+                text_path = project_root / text_path
+            text_excerpt = read_text_limited(text_path, 50000) if text_path.exists() else ""
+            return {
+                "status": "passed" if text_excerpt else "text_missing",
+                "packet_path": str(packet_path),
+                "paper_title": row.get("title", ""),
+                "paper_id": row.get("paper_id", ""),
+                "url": row.get("url", ""),
+                "pdf_url": row.get("pdf_url", ""),
+                "text_path": str(text_path),
+                "text_excerpt": text_excerpt,
+                "abstract": row.get("abstract", ""),
+                "venue": row.get("venue", ""),
+                "year": row.get("year", ""),
+                "identity_match_mode": "paper_source" if identities == identity_sets[0] else "repo_fallback",
+            }
+    identities = identity_sets[-1]
+    return {"status": "not_found", "packet_path": str(packet_path), "identity_count": len(identities), "sample_identities": identities[:8]}
+
+
 def collect_paper_evidence(normalized_plan: dict[str, Any], run_dir: Path, allow_network: bool = False, timeout_sec: int = 60) -> dict[str, Any]:
     raw = normalized_plan.get("raw") if isinstance(normalized_plan.get("raw"), dict) else {}
     evidence_env = isolated_runtime_env(run_dir, isolate_home=True)
@@ -193,9 +284,15 @@ def collect_paper_evidence(normalized_plan: dict[str, Any], run_dir: Path, allow
         else:
             local_evidence = {"status": "missing", "path": str(path)}
 
+    full_text_evidence = _local_full_text_evidence(normalized_plan)
+    excerpt = str(full_text_evidence.get("text_excerpt") or full_text_evidence.get("abstract") or "").strip()
+    if excerpt:
+        source = full_text_evidence.get("text_path") or full_text_evidence.get("packet_path") or "local_full_text_packet"
+        text_blocks.append({"source": f"local_full_text:{source}", "text": excerpt})
+
     url = str(normalized_plan.get("paper_url") or "").strip()
     url_evidence: dict[str, Any] = {"url": url, "status": "not_requested" if url else "missing"}
-    if url and allow_network:
+    if url and allow_network and full_text_evidence.get("status") != "passed":
         url_evidence = _safe_fetch_url(url, run_dir / "paper", timeout_sec=timeout_sec, env=evidence_env)
         excerpt = str(url_evidence.get("text_excerpt") or "").strip()
         if excerpt:
@@ -225,6 +322,7 @@ def collect_paper_evidence(normalized_plan: dict[str, Any], run_dir: Path, allow
         "paper_url": url,
         "local_paper": local_evidence,
         "url_fetch": url_evidence,
+        "local_full_text": full_text_evidence,
         "text_blocks": text_blocks[:40],
         "paper_claims_or_training_signals": claims,
         "target_metrics": normalized_plan.get("target_metrics") or [],

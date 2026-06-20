@@ -134,3 +134,29 @@ def test_environment_dependency_policy_rewrites_pyg_conda_plan():
     assert any(row["phase"] == "verify_pyg_cuda_import" for row in normalized["commands"])
     assert normalized["backend_dependency_policy"]["policy_version"] == "test-policy"
     assert len(normalized["plan_policy_rewrites"]) >= 4
+
+
+def test_environment_normalizes_selected_plan_metrics_and_paper_source():
+    environment_module_root = ROOT / "modules" / "environment"
+    for name in list(sys.modules):
+        if name == "scripts" or name.startswith("scripts."):
+            sys.modules.pop(name, None)
+    if str(environment_module_root) not in sys.path:
+        sys.path.insert(0, str(environment_module_root))
+    else:
+        sys.path.insert(0, sys.path.pop(sys.path.index(str(environment_module_root))))
+
+    from scripts.common.plan_schema import load_experiment_plan, normalize_plan
+
+    normalized = normalize_plan(load_experiment_plan(ROOT / "projects" / "protein" / "state" / "experiment_plan.json"), ROOT / "projects" / "protein" / "state" / "experiment_plan.json")
+    metrics = {row["name"]: row for row in normalized["target_metrics"]}
+
+    assert normalized["schema_version"] == "environment.normalized_plan.v2"
+    assert normalized["selected_plan_id"] == "plan_rigidssl_controlled"
+    assert normalized["paper_url"] == "https://openreview.net/forum?id=YAWpZcXHnP"
+    assert normalized["paper_source"]["title"].startswith("Rigidity-Aware Geometric Pretraining")
+    assert metrics["designability_improvement"]["operator"] == ">="
+    assert metrics["designability_improvement"]["value"] == "43%"
+    assert metrics["designability_tolerance"]["operator"] == "<="
+    assert metrics["designability_tolerance"]["value"] in {"3%", "5%"}
+    assert "AF2 Structure Database" in normalized["dataset"]["training_data"]
