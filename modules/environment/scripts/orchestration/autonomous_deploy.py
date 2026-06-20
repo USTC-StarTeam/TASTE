@@ -42,6 +42,7 @@ from scripts.common.io_utils import ensure_within, read_json, slugify, utc_now, 
 from scripts.common.plan_schema import load_experiment_plan, normalize_plan
 from scripts.common.shell import EXTERNAL_RUNTIME_ENV_KEYS, command_is_dangerous, command_text, command_tokens, isolated_runtime_env, run_logged, runtime_env
 from scripts.orchestration.dependency_policy import normalize_environment_plan_commands
+from scripts.orchestration.criteria_policy import normalize_success_criteria
 from scripts.environment.runtime_probe import detect_machine_profile, find_conda_executable
 from scripts.repository.repo_manager import clone_or_reuse, collect_repo_evidence
 from scripts.reproduction.decision import classify_failures, compare_metric_values, metric_criteria_passed, normalize_verdict, success_criteria_issues
@@ -4105,6 +4106,7 @@ def main() -> int:
         if not args.dry_run:
             include_full_reproduction = bool(args.run_full_reproduction or not args.skip_full_reproduction)
             env_plan = normalize_environment_plan_commands(env_plan, machine=machine, policy_version=DECISION_POLICY_VERSION)
+            env_plan = normalize_success_criteria(env_plan, paper_evidence=paper_evidence, policy_version=DECISION_POLICY_VERSION)
             write_json(env_plan_path, env_plan)
             plan_validation_issues = validate_environment_plan(env_plan, require_full_reproduction=include_full_reproduction, repo_path=repo_path, run_dir=run_dir, machine=machine, paper_evidence=paper_evidence)
             if plan_validation_issues:

@@ -215,6 +215,81 @@ def _identity_matches_paper(row: dict[str, Any], identities: list[str]) -> bool:
     return False
 
 
+def _append_target_metric(out: list[dict[str, Any]], seen: set[tuple[str, str]], name: str, operator: str, value: Any, source: str, description: str) -> None:
+    key = (str(name).lower(), str(value))
+    if key in seen:
+        return
+    seen.add(key)
+    out.append({"name": name, "operator": operator, "value": value, "source": source, "description": description})
+
+
+def _local_full_text_target_metrics(full_text_evidence: dict[str, Any]) -> list[dict[str, Any]]:
+    text = "\n".join(str(full_text_evidence.get(key) or "") for key in ["paper_title", "abstract", "text_excerpt"])
+    lowered = text.lower()
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    if "rigidssl" not in lowered:
+        return out
+    if "0.758" in text and "foldflow-2" in lowered:
+        _append_target_metric(
+            out,
+            seen,
+            "designability_target",
+            ">=",
+            0.758,
+            "RigidSSL paper Table 1, FoldFlow-2 + RigidSSL-Perturb designability fraction",
+            "FoldFlow-2 with RigidSSL-Perturb reports designability fraction 0.758 +/- 0.016 in Table 1.",
+        )
+    if "42.9" in text:
+        _append_target_metric(
+            out,
+            seen,
+            "designability_improvement",
+            ">=",
+            "42.9%",
+            "RigidSSL paper Section 4.1, FoldFlow-2 RigidSSL-Perturb relative designability gain",
+            "RigidSSL-Perturb improves FoldFlow-2 mean designability by 42.9% relative to the unpretrained model.",
+        )
+    elif "43%" in text:
+        _append_target_metric(
+            out,
+            seen,
+            "designability_improvement",
+            ">=",
+            "43%",
+            "RigidSSL paper abstract",
+            "RigidSSL variants improve designability by up to 43% in unconditional generation.",
+        )
+    if "5.8%" in text:
+        _append_target_metric(
+            out,
+            seen,
+            "motif_scaffolding_success_improvement",
+            ">=",
+            "5.8%",
+            "RigidSSL paper abstract",
+            "RigidSSL-Perturb improves the success rate by 5.8% in zero-shot motif scaffolding.",
+        )
+    return out
+
+
+def _merge_target_metrics(*groups: Any) -> list[Any]:
+    out: list[Any] = []
+    seen: set[tuple[str, str]] = set()
+    for group in groups:
+        rows = group if isinstance(group, list) else []
+        for row in rows:
+            if isinstance(row, dict):
+                key = (str(row.get("name") or row.get("metric") or row.get("metric_name") or "").lower(), str(row.get("value") or row.get("target") or row.get("paper_value") or ""))
+            else:
+                key = (str(row).lower(), "")
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(row)
+    return out
+
+
 def _local_full_text_evidence(normalized_plan: dict[str, Any]) -> dict[str, Any]:
     project_root = _project_root_from_source_path(normalized_plan)
     if not project_root:
@@ -298,6 +373,9 @@ def collect_paper_evidence(normalized_plan: dict[str, Any], run_dir: Path, allow
         if excerpt:
             text_blocks.append({"source": f"url:{url}", "text": excerpt})
 
+    local_full_text_metrics = _local_full_text_target_metrics(full_text_evidence)
+    target_metrics = _merge_target_metrics(normalized_plan.get("target_metrics") or [], local_full_text_metrics)
+
     claims: list[str] = []
     for row in text_blocks:
         text = row.get("text", "")
@@ -325,7 +403,8 @@ def collect_paper_evidence(normalized_plan: dict[str, Any], run_dir: Path, allow
         "local_full_text": full_text_evidence,
         "text_blocks": text_blocks[:40],
         "paper_claims_or_training_signals": claims,
-        "target_metrics": normalized_plan.get("target_metrics") or [],
+        "target_metrics": target_metrics,
+        "local_full_text_target_metrics": local_full_text_metrics,
         "dataset": normalized_plan.get("dataset") or [],
         "training": normalized_plan.get("training") or {},
         "limits": {"max_source_bytes": MAX_PAPER_SOURCE_BYTES, "local_text_suffixes": sorted(LOCAL_PAPER_TEXT_SUFFIXES), "local_pdf_allowed": True, "fetch_env_isolated": True},
