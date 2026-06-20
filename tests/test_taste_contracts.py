@@ -450,6 +450,33 @@ def test_environment_rewrites_rigidssl_model_and_smoke_probes(tmp_path):
     assert "RigidSSL_Perturb.py" not in smoke[0:2]
     assert smoke_migrations
 
+    full, full_migrations = autonomous_deploy.normalize_repository_command_for_execution(
+        {"phase": "reproduce_full"},
+        [
+            str(run_dir / "conda_envs" / "rigid" / "bin" / "python"),
+            "RigidSSL_Perturb.py",
+            "--dataset_portion",
+            "full",
+            "--epochs",
+            "10",
+            "--input_data_dir",
+            str(run_dir / "data" / "RigidSSL_Perturb_data"),
+            "--output_model_dir",
+            str(run_dir / "output" / "perturb"),
+            "--seed",
+            "42",
+        ],
+        repo,
+        run_dir,
+    )
+    assert full[1] == "-c"
+    assert "runpy.run_path" in full[2]
+    assert "_pyg_loader.DataLoader = _single_worker_dataloader" in full[2]
+    assert "loader_kwargs['num_workers'] = 0" in full[2]
+    assert "--epochs" in full[2] and "10" in full[2]
+    assert "RigidSSL_Perturb.py" not in full[0:2]
+    assert full_migrations
+
     env = autonomous_deploy.command_environment({"PYTHONPATH": str(run_dir / "extra")}, repo, {})
     assert env["PYTHONPATH"].split(":", 1)[0] == str(repo.resolve())
     assert env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] == "1"

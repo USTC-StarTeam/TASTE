@@ -3626,6 +3626,33 @@ def _rigidssl_model_probe_code(repo_path: Path) -> str:
     )
 
 
+def _rigidssl_full_reproduction_code(repo_path: Path, run_dir: Path, command: list[str]) -> str:
+    repo = str(repo_path.expanduser().resolve())
+    examples = str((repo_path / "examples").expanduser().resolve())
+    script = str((repo_path / "examples" / "RigidSSL_Perturb.py").expanduser().resolve())
+    try:
+        script_index = next(index for index, token in enumerate(command) if Path(str(token)).name == "RigidSSL_Perturb.py")
+    except StopIteration:
+        script_index = 0
+    script_args = [str(token) for token in command[script_index + 1:]]
+    lines = [
+        "import os, runpy, sys",
+        f"sys.path[:0] = [{examples!r}, {repo!r}]",
+        "os.environ.setdefault('TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD', '1')",
+        "import torch_geometric.loader as _pyg_loader",
+        "_OriginalDataLoader = _pyg_loader.DataLoader",
+        "def _single_worker_dataloader(*loader_args, **loader_kwargs):",
+        "    loader_kwargs['num_workers'] = 0",
+        "    loader_kwargs['pin_memory'] = False",
+        "    loader_kwargs.pop('persistent_workers', None)",
+        "    return _OriginalDataLoader(*loader_args, **loader_kwargs)",
+        "_pyg_loader.DataLoader = _single_worker_dataloader",
+        f"sys.argv = [{script!r}] + {script_args!r}",
+        f"runpy.run_path({script!r}, run_name='__main__')",
+    ]
+    return "\n".join(lines)
+
+
 def _rigidssl_loader_probe_code(repo_path: Path, run_dir: Path) -> str:
     repo = str(repo_path.expanduser().resolve())
     examples = str((repo_path / "examples").expanduser().resolve())
@@ -3668,6 +3695,8 @@ def normalize_repository_command_for_execution(row: dict[str, Any], command: lis
         return [command[0], "-c", _rigidssl_model_probe_code(repo_path)], [{"migration": "RigidSSL VelocityNetwork requires model_conf; replaced no-arg constructor with examples.RigidSSL_Perturb.model_setup probe"}]
     if phase == "reproduce_smoke" and any(Path(str(token)).name == "RigidSSL_Perturb.py" for token in command):
         return [command[0], "-c", _rigidssl_loader_probe_code(repo_path, run_dir)], [{"migration": "RigidSSL smoke uses a bounded loader/model probe instead of a full training epoch in skip-full-reproduction mode"}]
+    if phase == "reproduce_full" and any(Path(str(token)).name == "RigidSSL_Perturb.py" for token in command):
+        return [command[0], "-c", _rigidssl_full_reproduction_code(repo_path, run_dir, command)], [{"migration": "RigidSSL full reproduction preserves official training script and arguments but forces DataLoader num_workers=0/pin_memory=False to avoid AF_UNIX socket path limits in long run directories"}]
     return command, []
 
 
