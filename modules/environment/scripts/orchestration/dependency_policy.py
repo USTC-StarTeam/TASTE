@@ -181,6 +181,23 @@ def _normalize_create_command_python(row: dict[str, Any], python_version: str) -
     return row
 
 
+def _conda_create_row(env_name: str) -> dict[str, Any]:
+    return {
+        "phase": "conda_create",
+        "command": ["conda", "create", "-y", "-n", env_name or "environment_env", "python=3.11", "pip"],
+        "cwd": "repo",
+        "timeout_sec": 900,
+        "required": True,
+        "policy_managed": True,
+    }
+
+
+def _row_creates_conda_env(row: dict[str, Any]) -> bool:
+    tokens = _row_command_tokens(row)
+    action = _conda_action(tokens)
+    return action == "create" or (len(tokens) >= 3 and Path(str(tokens[0])).name in {"conda", "mamba", "micromamba"} and str(tokens[1]) == "env" and str(tokens[2]) == "create")
+
+
 def _torch_cuda_install_row(source_phase: str) -> dict[str, Any]:
     return {
         "phase": source_phase or "install_torch_cuda",
@@ -256,13 +273,15 @@ def normalize_environment_plan_commands(plan: dict[str, Any], machine: dict[str,
     new_rows: list[dict[str, Any]] = []
     torch_row_present = False
     pyg_row_present = False
+    conda_create_present = any(isinstance(row, dict) and _row_creates_conda_env(row) for row in rows)
     for index, raw_row in enumerate(rows):
         if not isinstance(raw_row, dict):
             new_rows.append(raw_row)
             continue
         row = dict(raw_row)
-        if _conda_action(_row_command_tokens(row)) == "create":
+        if _row_creates_conda_env(row):
             updated = _normalize_create_command_python(row, "3.11")
+            conda_create_present = True
             if updated.get("command") != row.get("command"):
                 rewrites.append({"index": index, "phase": row.get("phase"), "reason": "RTX 5090/modern CUDA stack requires Python 3.11 for current PyTorch/PyG binary wheels", "before": row.get("command"), "after": updated.get("command")})
             row = updated
@@ -292,6 +311,11 @@ def normalize_environment_plan_commands(plan: dict[str, Any], machine: dict[str,
             pyg_row_present = True
         new_rows.append(row)
 
+    if (needs_pyg or torch_row_present or conda_installs_torch) and not conda_create_present:
+        row = _conda_create_row(str(normalized.get("env_name") or ""))
+        new_rows.insert(0, row)
+        conda_create_present = True
+        rewrites.append({"index": None, "phase": "conda_create", "reason": "Policy-managed pip/torch/PyG installs require a run-local Conda prefix before conda run can execute", "after": row["command"]})
     if needs_pyg and not torch_row_present:
         row = _torch_cuda_install_row("install_torch_cuda")
         new_rows.insert(1 if new_rows else 0, row)
