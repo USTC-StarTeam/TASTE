@@ -554,7 +554,7 @@ def prompt_environment_plan(normalized_plan: dict[str, Any], machine: dict[str, 
 - 每条命令必须包含非空字符串 `phase`；`required` 若出现必须是 JSON boolean `true/false`，不能写成字符串或数字；`cwd` 若出现必须是字符串。
 - 必须包含成功创建/安装 Conda 环境的阶段，以及 verify/import/smoke/reproduce_full 等导入或运行验证阶段；批准需要独立的 Conda 环境证据，Conda setup 和 verify/import/smoke/运行验证阶段都必须是必需命令，不能标记为 `required=false` 后再拿它支撑批准。setup 阶段命令动作应是 `conda create/install/update -p <prefix>`、`conda env create/update -p <prefix>`、`conda run -p <prefix> python -m pip install ...` 或安装脚本；verify 阶段必须是 `conda run -p <prefix>` 下的 python/pytest/torchrun/训练评估脚本等真实导入或运行验证，不能用第二条 `conda create` 或 `conda install` 冒充 verify。
 - 必须输出 `machine_assessment`，说明论文/README 的硬件或运行要求、本机 GPU/CPU/CUDA/显存条件、是否适合本机、以及 batch/precision/device 等本机适配动作；本机资源摘要必须引用后端机器画像里的具体 GPU 型号和显存数值，evidence 应指向 runtime_probe/nvidia-smi/GPU/CUDA 等探测来源，不能只写“GPU ok”；如果本机无法满足且没有合理降级路径，应输出 reject 并给 `machine_compute_unavailable` 证据。
-- 不要使用 `bash -c`、`sh -c`、`zsh -c`，也不要使用 `bash --noprofile --norc -c`、`bash -o pipefail -c`、`bash -lc` 等任何内联 shell 变体；如果确实需要管道/多行命令，请先把脚本写在本次 run 目录下，再用 `["bash", "脚本路径"]` 执行。
+- 不要使用 `bash -c`、`sh -c`、`zsh -c`，也不要使用 `bash --noprofile --norc -c`、`bash -o pipefail -c`、`bash -lc` 等任何内联 shell 变体。你只能写 JSON，不能在输出 JSON 的同时创建辅助脚本；因此不要引用“本计划稍后才生成”的 `setup_scripts`、`write_*.sh`、`download_*.sh`。`["bash", "脚本路径"]` 只能指向仓库里已经存在的脚本，或本次 run 目录里在计划生成前已经存在的脚本；否则后端会拒绝。下载/解压等步骤优先写成直接 JSON 命令，例如 `hf download ...`、`tar -xzf ...`、`python -c ...`。
 - `python -c` 仅用于短小导入/打印/探测；其中出现的绝对路径、`~/`、`../` 或包含 `../` 的字符串路径也会按命令 cwd 解析并限制在本次 run 目录内。带解释器选项的 `python -X faulthandler -c ...`、`python -W ignore -c ...` 和 `conda run ... python -X ... -c ...` 也会被检查；需要复杂文件写入时，请把辅助脚本和输出都放在 run/repo 内。下载/解压、依赖安装和构建工具的贴值短路径选项也必须留在 run/repo 内，例如 `curl -oFILE`、`wget -OFILE`、`wget -Pdir`、`tar -Cdir`、`unzip -ddir`、`git -Cdir`、`make -Cdir`、`ninja -Cdir`、`cmake -Bdir`、`pip -tdir`、`7z -odir`、`rsync -Tdir`；即使命令包在 `conda run` / `mamba run` / `micromamba run` 后面，内层命令头和 `python -m pip` 也会被检查。
 - 必须输出 `paper_config_alignment`，逐项说明论文里的数据集、指标、训练超参、checkpoint、硬件或本机适配如何映射到实际命令；关键项缺失时不要冒充 ready。
 - `success_criteria` 每项必须包含指标名、比较符、可解析的论文目标值和来源：`name/metric`、`operator/op`、`value/target/paper_value`、`source/paper_source/evidence_source`；目标值必须是数字或百分比，且必须能逐项绑定到 `paper_evidence.target_metrics` 中的论文/plan 目标指标，不能是 Claude 为了过 gate 自行编造的数字。
@@ -3311,17 +3311,32 @@ def _command_shell_script_tokens(tokens: list[str]) -> list[str]:
     return candidates
 
 
+def _resolve_run_script_path(token: str, cwd: Path, run_dir: Path) -> Path | None:
+    script_path = Path(str(token or "")).expanduser()
+    if not script_path.is_absolute():
+        script_path = cwd.expanduser().resolve() / script_path
+    try:
+        return ensure_within(script_path, run_dir.expanduser().resolve())
+    except ValueError:
+        return None
+
+
+def missing_shell_script_issue(tokens: list[str], cwd: Path, run_dir: Path) -> str:
+    for token in _command_shell_script_tokens(tokens):
+        script_path = _resolve_run_script_path(token, cwd, run_dir)
+        if script_path is None:
+            continue
+        if script_path.is_file():
+            continue
+        return f"shell 脚本不存在：{script_path}；环境计划不能引用未实际生成的辅助脚本，请直接使用 JSON 命令或仓库中已存在的脚本"
+    return ""
+
+
 def normalize_generated_script_commands_for_command(tokens: list[str], cwd: Path, run_dir: Path) -> list[dict[str, str]]:
     migrations: list[dict[str, str]] = []
     for token in _command_shell_script_tokens(tokens):
-        script_path = Path(token).expanduser()
-        if not script_path.is_absolute():
-            script_path = cwd.expanduser().resolve() / script_path
-        try:
-            script_path = ensure_within(script_path, run_dir.expanduser().resolve())
-        except ValueError:
-            continue
-        if not script_path.is_file():
+        script_path = _resolve_run_script_path(token, cwd, run_dir)
+        if script_path is None or not script_path.is_file():
             continue
         try:
             before = script_path.read_text(encoding="utf-8")
@@ -3512,7 +3527,10 @@ def execute_plan_commands(plan: dict[str, Any], repo_path: Path, run_dir: Path, 
         try:
             cwd = resolve_command_cwd(row, repo_path, run_dir)
             script_migrations = normalize_generated_script_commands_for_command(command, cwd, run_dir)
+            missing_script_issue = missing_shell_script_issue(command, cwd, run_dir)
             boundary_issues = command_boundary_issues(command, cwd, run_dir)
+            if missing_script_issue:
+                boundary_issues.append(missing_script_issue)
             env_boundary_issues = command_env_boundary_issues(row.get("env"), run_dir, cwd=cwd)
         except Exception as exc:
             cwd = run_dir

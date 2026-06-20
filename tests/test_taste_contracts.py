@@ -268,6 +268,38 @@ def test_environment_isolated_runtime_scrubs_inconsistent_conda_activation_state
     assert "CONDA_PREFIX" not in env
 
 
+def test_environment_blocks_missing_generated_shell_scripts(tmp_path):
+    environment_module_root = ROOT / "modules" / "environment"
+    for name in list(sys.modules):
+        if name == "scripts" or name.startswith("scripts."):
+            sys.modules.pop(name, None)
+    if str(environment_module_root) not in sys.path:
+        sys.path.insert(0, str(environment_module_root))
+    else:
+        sys.path.insert(0, sys.path.pop(sys.path.index(str(environment_module_root))))
+    spec = importlib.util.spec_from_file_location(
+        "environment_autonomous_deploy_missing_script",
+        environment_module_root / "scripts" / "orchestration" / "autonomous_deploy.py",
+    )
+    assert spec and spec.loader
+    autonomous_deploy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(autonomous_deploy)
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    command = ["bash", str(run_dir / "round_01" / "write_setup_script.sh")]
+    issue = autonomous_deploy.missing_shell_script_issue(command, run_dir, run_dir)
+    assert "shell 脚本不存在" in issue
+    assert "write_setup_script.sh" in issue
+
+    existing = run_dir / "scripts" / "download.sh"
+    existing.parent.mkdir()
+    existing.write_text("""#!/usr/bin/env bash
+echo ok
+""", encoding="utf-8")
+    assert autonomous_deploy.missing_shell_script_issue(["bash", "scripts/download.sh"], run_dir, run_dir) == ""
+
+
 def test_environment_dependency_policy_rewrites_incoherent_torch_pip_versions():
     environment_module_root = ROOT / "modules" / "environment"
     for name in list(sys.modules):
