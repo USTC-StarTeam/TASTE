@@ -13555,6 +13555,12 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
             "summary_en": "Current Find status is shown with recommendation, reading, idea, and plan counts.",
             "module_summary": find_module_summary,
             "module_summary_zh": find_module_summary,
+            "source_status": source_status[:20],
+            "venue_sources": venue_health[:20],
+            "venue_health_report": venue_health[:20],
+            "health_check_source_status": health_check_source_status[:20],
+            "source_integrity_gate": pipeline_source_integrity_gate,
+            "selection": selection,
             "counts": {
                 "raw_title_index_papers": raw_title_index_count,
                 "venue_total_papers_available": raw_title_index_count,
