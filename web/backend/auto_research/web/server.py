@@ -37,7 +37,7 @@ from auto_research.models import AppConfig, EmailJobRequest, FindRequest, IdeaPa
 from auto_research.source_selection import canonical_source_selection, normalize_source_selection, save_canonical_source_selection, project_config_path
 from auto_research.paths import CONFIG_PATH, RUNS_DIR, STATE_DIR, ensure_directories
 from auto_research.storage import delete_run, list_runs, read_json, redacted_config, run_dir, write_json
-from auto_research.web.project_bridge import action_gate_blocker, job_stage, create_project_config, detect_runtime_config, list_projects as list_projects, project_summary, run_action, runtime_status, update_project_config, update_runtime_config, _cleruntime_caches, _current_find_pipeline_summary
+from auto_research.web.project_bridge import action_gate_blocker, job_stage, create_project_config, detect_runtime_config, list_projects as list_projects, project_summary, run_action, runtime_status, update_project_config, update_runtime_config, _cleruntime_caches, _current_find_pipeline_summary, _current_find_source_status_rows, _venue_metadata_counts
 from paper_common import get_active_paper_state
 from taste_pythonpath import taste_pythonpath_string
 
@@ -3611,6 +3611,75 @@ def _compact_artifact_json_value(
     return _artifact_compact_text(value, max_text_chars)
 
 
+
+def _compact_find_source_row_count(row: Any) -> int:
+    if not isinstance(row, dict):
+        return 0
+    for key in ["raw_title_index_count", "corpus_count", "candidate_count", "selected_category_count", "count", "sample_count"]:
+        try:
+            value = int(row.get(key) or 0)
+        except Exception:
+            value = 0
+        if value > 0:
+            return value
+    return 0
+
+
+def _hydrate_compact_find_source_state(payload: dict[str, Any], project_root: Path | None) -> dict[str, Any]:
+    if project_root is None or not isinstance(payload, dict):
+        return payload
+    payload_rows = [row for row in _as_list(payload.get("source_status")) if isinstance(row, dict)]
+    rows = payload_rows if sum(_compact_find_source_row_count(row) for row in payload_rows) > 0 else []
+    if not rows:
+        try:
+            rows = _current_find_source_status_rows(project_root)
+        except Exception:
+            rows = []
+    if not rows:
+        return payload
+    rows = [row for row in rows if isinstance(row, dict)]
+    if not rows:
+        return payload
+    compact_rows = _compact_artifact_json_value(rows[:20])
+    payload["source_status"] = compact_rows
+    venue_rows = [row for row in _as_list(payload.get("venue_health_report")) if isinstance(row, dict)]
+    if not venue_rows or sum(_compact_find_source_row_count(row) for row in venue_rows) <= 0:
+        payload["venue_health_report"] = compact_rows
+    try:
+        venue_counts = _venue_metadata_counts(rows)
+    except Exception:
+        venue_counts = {}
+    if isinstance(venue_counts, dict) and venue_counts:
+        counts = payload.get("counts") if isinstance(payload.get("counts"), dict) else {}
+        counts = dict(counts)
+        survey_stats = payload.get("survey_stats") if isinstance(payload.get("survey_stats"), dict) else {}
+        survey_stats = dict(survey_stats)
+        force_keys = {
+            "raw_title_index_papers",
+            "venue_total_papers_available",
+            "venue_corpus_audited_papers",
+            "category_selected_papers",
+            "venue_category_selected_papers",
+            "metadata_complete_venue_count",
+            "metadata_venue_count",
+            "venues_without_official_categories",
+        }
+        for key, value in venue_counts.items():
+            if value in (None, ""):
+                continue
+            try:
+                numeric = int(value)
+            except Exception:
+                numeric = value
+            if key in force_keys or counts.get(key) in (None, "", 0):
+                counts[key] = numeric
+            if key in force_keys or survey_stats.get(key) in (None, "", 0):
+                survey_stats[key] = numeric
+        payload["counts"] = counts
+        if survey_stats:
+            payload["survey_stats"] = survey_stats
+    return payload
+
 def _compact_large_find_progress_artifact(
     path: Path, run_id: str, size_bytes: int, project_root: Path | None = None
 ) -> dict[str, Any]:
@@ -3675,6 +3744,7 @@ def _compact_large_find_progress_artifact(
             omitted_keys = [key for key in progress.keys() if key not in keep_key_set | {"diagnostics"}]
             if omitted_keys:
                 payload["omitted_keys"] = omitted_keys
+    _hydrate_compact_find_source_state(payload, project_root)
     return _strip_public_taste_marker(payload)
 
 
@@ -3767,6 +3837,7 @@ def _compact_large_find_results_artifact(directory: Path, run_id: str, size_byte
             if value not in (None, ""):
                 merged_counts[key] = value
         payload["counts"] = merged_counts
+    _hydrate_compact_find_source_state(payload, project_root)
     return _strip_public_taste_marker(payload)
 
 

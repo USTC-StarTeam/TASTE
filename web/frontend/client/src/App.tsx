@@ -4011,9 +4011,15 @@ function environmentDraftHasAnyValue(draft: Record<string, any>) {
 }
 
 function fillEmptyEnvironmentDraftFromSummary(current: Record<string, any>, summary: ProjectSummary | null) {
-  if (environmentDraftHasAnyValue(current)) return current;
   const next = environmentDraftFromSummary(summary);
-  return environmentDraftHasAnyValue(next) ? next : current;
+  if (!environmentDraftHasAnyValue(next)) return current;
+  return {
+    ...current,
+    conda_env: String(current?.conda_env || "").trim() ? current.conda_env : next.conda_env,
+    conda_base: String(current?.conda_base || "").trim() ? current.conda_base : next.conda_base,
+    experiment_python: String(current?.experiment_python || "").trim() ? current.experiment_python : next.experiment_python,
+    python_executable: String(current?.python_executable || "").trim() ? current.python_executable : next.python_executable,
+  };
 }
 
 function derivedCondaPython(condaBase: any, condaEnv: any) {
@@ -4379,6 +4385,29 @@ function App() {
       window.clearInterval(timer);
     };
   }, [researchProject]);
+
+  useEffect(() => {
+    if (tab !== "environment" || !researchProject) return;
+    const projectId = researchProject;
+    let cancelled = false;
+    activeProjectRef.current = projectId;
+    const refreshEnvironmentSummary = async () => {
+      try {
+        const summary = await getProject(projectId, { compact: true });
+        if (cancelled || activeProjectRef.current !== projectId) return;
+        projectSummaryLoadedAtRef.current[projectId] = Date.now();
+        setProjectSummary(summary);
+        setResearchRuntimeDraft((prev) => ({ ...runtimeDraftFromSummary(summary), ...prev }));
+        setResearchEnvDraft((prev) => fillEmptyEnvironmentDraftFromSummary(prev, summary));
+      } catch {
+        // Keep the last visible state; the normal project poller will retry.
+      }
+    };
+    void refreshEnvironmentSummary();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, researchProject]);
 
   useEffect(() => {
     let cancelled = false;
@@ -4770,9 +4799,9 @@ function App() {
   function envConfigPatchFromDraft() {
     const fallback = environmentDraftFromSummary(researchSummary);
     return {
-      conda_env: researchEnvDraft.conda_env || fallback.conda_env || "",
-      conda_base: researchEnvDraft.conda_base || fallback.conda_base || "",
-      experiment_python: researchEnvDraft.experiment_python || fallback.experiment_python || "",
+      conda_env: researchEnvDraft.conda_env || effectiveResearchEnvDraft.conda_env || fallback.conda_env || "",
+      conda_base: researchEnvDraft.conda_base || effectiveResearchEnvDraft.conda_base || fallback.conda_base || "",
+      experiment_python: researchEnvDraft.experiment_python || effectiveResearchEnvDraft.experiment_python || fallback.experiment_python || "",
     };
   }
 
@@ -5112,6 +5141,11 @@ function App() {
     const surveyStats = { ...(findResults?.survey_stats || {}), ...(findResults?.diagnostics?.survey_stats || {}) };
     const rawProgressCounts = runFindState?.counts || {};
     const progressCounts = viewingActiveIncompleteFindRun ? rawProgressCounts : {};
+    const artifactSourceRowsForCounts = expandedSourceStatusRows(runFindState);
+    const summarySourceRowsForCounts = filterBySourceSelection(researchSourceStatus, selectedRunSelection);
+    const sourceRowsForCounts = artifactSourceRowsForCounts.length ? artifactSourceRowsForCounts : summarySourceRowsForCounts;
+    const sourceRowTotal = sourceRowsForCounts.reduce((total: number, row: any) => total + Number(row?.raw_title_index_count || row?.corpus_count || row?.count || row?.sample_count || 0), 0);
+    const sourceRowCategoryTotal = sourceRowsForCounts.reduce((total: number, row: any) => total + Number(row?.selected_category_count || row?.candidate_count || row?.count || row?.sample_count || 0), 0);
     const categoryRows = asArray(findResults?.category_scan_report);
     const titleRows = asArray(findResults?.title_filter_report);
     const arxivReport = findResults?.arxiv_prefilter_report || {};
@@ -5121,11 +5155,18 @@ function App() {
     const titleInputCount = surveyStats.venue_title_filter_input_papers ?? sum(titleRows, "title_filter_input_papers");
     const arxivEnabled = Boolean(selectedRunSelection.include_arxiv);
     const useArFallback = useCurrentFindPacket || !viewingActiveIncompleteFindRun;
+    const scannedTotal = sourceRowTotal || surveyStats.raw_title_index_papers || surveyStats.venue_corpus_audited_papers || surveyStats.venue_total_papers_available || rawTitleCount || progressCounts.raw_title_index || titleInputCount || sum(categoryRows, "total_papers") || (useArFallback ? (researchLiteratureCounts.raw_title_index_papers || researchLiteratureCounts.venue_corpus_audited_papers || researchLiteratureCounts.venue_total_papers_available) : "") || "";
+    const selectedTotal = sourceRowCategoryTotal || (surveyStats.venue_category_selected_papers ?? sum(categoryRows, "selected_category_papers")) || (useArFallback ? researchLiteratureCounts.venue_category_selected_papers : "") || "";
     return {
-      scanned: rawTitleCount || titleInputCount || progressCounts.raw_title_index || surveyStats.venue_corpus_audited_papers || surveyStats.venue_total_papers_available || sum(categoryRows, "total_papers") || (useArFallback ? (researchLiteratureCounts.venue_corpus_audited_papers || researchLiteratureCounts.venue_total_papers_available) : "") || "",
-      corpusAudited: surveyStats.venue_corpus_audited_papers || rawTitleCount || progressCounts.raw_title_index || (useArFallback ? (researchLiteratureCounts.venue_corpus_audited_papers || researchLiteratureCounts.venue_total_papers_available) : "") || "",
-      selected: (surveyStats.venue_category_selected_papers ?? sum(categoryRows, "selected_category_papers")) || (useArFallback ? researchLiteratureCounts.venue_category_selected_papers : "") || "",
-      categoryFiltered: surveyStats.category_filtered_papers || progressCounts.category_filtered_papers || titleInputCount || (useArFallback ? Number(researchLiteratureCounts.category_filtered_papers || researchLiteratureCounts.venue_title_filter_input_papers || 0) : 0),
+      raw_title_index_papers: scannedTotal,
+      venue_total_papers_available: scannedTotal,
+      venue_corpus_audited_papers: scannedTotal,
+      category_selected_papers: selectedTotal,
+      venue_category_selected_papers: selectedTotal,
+      scanned: scannedTotal,
+      corpusAudited: scannedTotal,
+      selected: selectedTotal,
+      categoryFiltered: selectedTotal || surveyStats.category_filtered_papers || progressCounts.category_filtered_papers || titleInputCount || (useArFallback ? Number(researchLiteratureCounts.category_filtered_papers || researchLiteratureCounts.venue_title_filter_input_papers || 0) : 0),
       titleInput: titleInputCount || (useArFallback ? researchLiteratureCounts.venue_title_filter_input_papers : "") || "",
       tfidfScreened: surveyStats.tfidf_screened_papers || progressCounts.tfidf_screened_papers || titleInputCount || (useArFallback ? Number(researchLiteratureCounts.tfidf_screened_papers || researchLiteratureCounts.venue_title_filter_input_papers || 0) : 0),
       titleScoreInput: surveyStats.title_score_input_papers || progressCounts.title_score_input_papers || titleInputCount || 0,
@@ -5155,7 +5196,7 @@ function App() {
       auditPool: screened.length || (useArFallback ? Number(researchLiteratureCounts.screened_ranking || 0) : 0),
       evaluated: asArray(findResults?.evaluated_candidates).length || progressCounts.evaluated_candidates || (useArFallback ? Number(researchLiteratureCounts.evaluated_candidates || 0) : 0),
     };
-  }, [activeStrongLiteratureRows, researchLiteratureCounts, findResults, runFindState, selectedRunSelection, useCurrentFindPacket, viewingActiveIncompleteFindRun]);
+  }, [activeStrongLiteratureRows, researchLiteratureCounts, researchSourceStatus, findResults, runFindState, selectedRunSelection, useCurrentFindPacket, viewingActiveIncompleteFindRun]);
   const retrievalPool = useMemo(() => {
     const source = firstNonEmptyArray(
       findResults?.retrieval_candidates,
@@ -5252,6 +5293,7 @@ function App() {
     if (surveyRows.length) return surveyRows;
     if (viewingActiveIncompleteFindRun || activeFindJobForRun || hasLiveFindJob) return [];
     if (!hasCurrentFindSourceContext && venueHealthSourceStatus.length) return venueHealthSourceStatus;
+    if (hasCurrentFindSourceContext) return [];
     return [...researchSourceLimitations, ...researchMissingVenueIndexes].map((item: any) => ({
       ...item,
       source: item.source || item.venue || item.venue_id || "TASTE literature source",
@@ -6041,6 +6083,7 @@ function App() {
   }, [researchSummary, researchFullCycle, lang]);
   const researchNextActions = useMemo(() => firstNonEmptyArray(researchSummary?.next_actions, researchFullCycle?.blocker_action_plan?.actions), [researchSummary, researchFullCycle]);
   const runtimeChecks = useMemo(() => researchRuntime?.checks || {}, [researchRuntime]);
+  const effectiveResearchEnvDraft = useMemo(() => fillEmptyEnvironmentDraftFromSummary(researchEnvDraft, researchSummary), [researchEnvDraft, researchSummary]);
   const supervisionTick = useMemo(() => researchSummary?.supervision || humanSupervision?.supervision || {}, [researchSummary, humanSupervision]);
   const claudeCurrentFindState = useMemo(() => supervisionTick?.claude_current_find_state || humanSupervision?.supervision?.claude_current_find_state || {}, [supervisionTick, humanSupervision]);
   const claudeCurrentFindStale = Boolean(claudeCurrentFindState?.takeover_stale || claudeCurrentFindState?.reading_validation_stale);
@@ -6133,7 +6176,6 @@ function App() {
   );
   const environmentConfigDisabled = Boolean(
     environmentLocked
-    || projectSummaryLoadingForDisplay
     || environmentStageRunning
     || experimentStageRunning
     || paperStageRunning
@@ -8464,12 +8506,12 @@ function App() {
                     <h3>{t.experimentCondaPythonConfig}</h3>
                     <p className="help">{t.experimentCondaPythonHelp}</p>
                     <label>{t.condaEnvName}</label>
-                    <input value={researchEnvDraft.conda_env || ""} onChange={(e) => updateEnvDraft("conda_env", e.target.value)} placeholder={researchProject || "project_env"} disabled={environmentConfigDisabled} />
+                    <input value={effectiveResearchEnvDraft.conda_env || ""} onChange={(e) => updateEnvDraft("conda_env", e.target.value)} placeholder={researchProject || "project_env"} disabled={environmentConfigDisabled} />
                     <label>{t.condaBase}</label>
-                    <input value={researchEnvDraft.conda_base || ""} onChange={(e) => updateEnvDraft("conda_base", e.target.value)} placeholder="~/miniforge3" disabled={environmentConfigDisabled} />
+                    <input value={effectiveResearchEnvDraft.conda_base || ""} onChange={(e) => updateEnvDraft("conda_base", e.target.value)} placeholder="~/miniforge3" disabled={environmentConfigDisabled} />
                     <label>{t.experimentPythonExecutable}</label>
-                    <input value={researchEnvDraft.experiment_python || ""} onChange={(e) => updateEnvDraft("experiment_python", e.target.value)} placeholder={derivedCondaPython(researchEnvDraft.conda_base, researchEnvDraft.conda_env) || "python"} disabled={environmentConfigDisabled} />
-                    <p className="help">{lang === "zh" ? `当前训练/实验 Python: ${researchEnvDraft.experiment_python || derivedCondaPython(researchEnvDraft.conda_base, researchEnvDraft.conda_env) || "由 Conda 环境名称派生"}` : `Current training/experiment Python: ${researchEnvDraft.experiment_python || derivedCondaPython(researchEnvDraft.conda_base, researchEnvDraft.conda_env) || "derived from the Conda environment name"}`}</p>
+                    <input value={effectiveResearchEnvDraft.experiment_python || ""} onChange={(e) => updateEnvDraft("experiment_python", e.target.value)} placeholder={derivedCondaPython(effectiveResearchEnvDraft.conda_base, effectiveResearchEnvDraft.conda_env) || "python"} disabled={environmentConfigDisabled} />
+                    <p className="help">{lang === "zh" ? `当前训练/实验 Python: ${effectiveResearchEnvDraft.experiment_python || derivedCondaPython(effectiveResearchEnvDraft.conda_base, effectiveResearchEnvDraft.conda_env) || "由 Conda 环境名称派生"}` : `Current training/experiment Python: ${effectiveResearchEnvDraft.experiment_python || derivedCondaPython(effectiveResearchEnvDraft.conda_base, effectiveResearchEnvDraft.conda_env) || "derived from the Conda environment name"}`}</p>
                     <div className="saveBar">
                       <button onClick={saveEnvConfig} disabled={!researchProject || researchEnvSaving || environmentConfigDisabled}>{researchEnvSaving ? t.saving : environmentLocked ? t.envLockedCreated : t.saveExperimentEnv}</button>
                       {researchEnvMessage && <span>{researchEnvMessage}</span>}

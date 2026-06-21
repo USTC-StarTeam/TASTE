@@ -1093,9 +1093,59 @@ def test_api_artifacts_light_compacts_large_current_find_progress(monkeypatch, t
     assert progress_artifact["size_bytes"] > 1024
     content = progress_artifact["content"]
     assert content["counts"]["raw_title_index"] == 240
+    assert content["source_status"] == [{"source": "NeurIPS", "count": 240, "status": "normal"}]
     assert "raw_title_index" in content["omitted_keys"]
     assert "raw_title_index" not in content
     assert len(json.dumps(payload, ensure_ascii=False)) < 20000
+
+
+def test_api_artifacts_light_recovers_current_find_source_status_from_markdown(monkeypatch, tmp_path):
+    reading_scripts = ROOT / "modules" / "reading" / "scripts"
+    sys.path.insert(0, str(reading_scripts))
+    sys.modules.pop("pipeline", None)
+    from auto_research.web import server as web_server
+
+    projects = tmp_path / "projects"
+    root = _make_project(projects, "demo")
+    finding = root / "planning" / "finding"
+    finding.mkdir(parents=True, exist_ok=True)
+    run_id = "find_large_progress_demo"
+    (root / "state" / "finding_frontend.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    (root / "state" / "current_find_recommendation_projection.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "counts": {"recommended": 20, "venue_title_filter_input_papers": 6434},
+                "strong_recommendations": [{"title": "paper", "id": "p1"}],
+                "read_candidates": [{"title": "paper", "id": "p1"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (finding / "find_progress.json").write_text('{"padding":"' + ('x' * (6 * 1024 * 1024)) + '"}', encoding="utf-8")
+    (finding / "find_results.json").write_text('{"padding":"' + ('x' * (6 * 1024 * 1024)) + '"}', encoding="utf-8")
+    (finding / "source_status.md").write_text(
+        (ROOT / "projects" / "protein" / "planning" / "finding" / "source_status.md").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    run_directory = tmp_path / "runs" / run_id
+    run_directory.mkdir(parents=True)
+    monkeypatch.setattr(web_server, "run_dir", lambda _run_id: run_directory)
+    monkeypatch.setattr(web_server, "PROJECT_IDS_ROOT", projects)
+    monkeypatch.setattr(web_server, "LARGE_JSON_ARTIFACT_LIMIT_BYTES", 1024)
+    web_server._RUN_ARTIFACTS_CACHE.clear()
+
+    payload = web_server.api_artifacts(run_id, light=True)
+
+    by_name = {item["name"]: item for item in payload["artifacts"]}
+    for name in ["find_progress.json", "find_results.json"]:
+        content = by_name[name]["content"]
+        rows = content["source_status"]
+        assert [row["source"] for row in rows] == ["ICML", "ICLR", "NeurIPS", "SIGKDD"]
+        assert [row["count"] for row in rows] == [6431, 5352, 5823, 256]
+        assert content["counts"]["raw_title_index_papers"] == 17862
+        assert content["counts"]["venue_total_papers_available"] == 17862
+        assert content["survey_stats"]["raw_title_index_papers"] == 17862
 
 
 def test_project_summary_recovers_source_status_from_markdown_when_progress_is_large(monkeypatch, tmp_path):
