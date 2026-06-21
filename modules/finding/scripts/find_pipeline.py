@@ -2388,6 +2388,22 @@ def _latest_project_find_results_title_index(venue: dict, years: list[int], limi
     return (rows, "project_find_results") if rows else ([], "none")
 
 
+def _venue_title_index_cache_rows_usable(venue: dict, years: list[int], rows: list[dict], adapter: str) -> bool:
+    if not rows:
+        return False
+    audit = _online_venue_metadata_audit(rows, adapter)
+    fields = _venue_metadata_status_fields(audit)
+    probe = {
+        "venue_id": venue.get("id") or "",
+        "venue": venue.get("name") or "",
+        "adapter": adapter,
+        "raw_title_index_count": len(rows),
+        "corpus_count": len(rows),
+        **fields,
+    }
+    return not _venue_source_integrity_blocker(probe)
+
+
 def _load_venue_title_index_cache(venue: dict, years: list[int], limit: int | None) -> tuple[list[dict], str]:
     key = _venue_title_index_cache_key(venue, years)
     for path in _venue_title_index_cache_paths():
@@ -2403,11 +2419,13 @@ def _load_venue_title_index_cache(venue: dict, years: list[int], limit: int | No
         if limit and limit > 0:
             rows = rows[:limit]
         adapter = str(entry.get("adapter") or "cached_title_index")
+        if not _venue_title_index_cache_rows_usable(venue, years, rows, adapter):
+            continue
         if path != _venue_title_index_cache_path():
             _store_venue_title_index_cache(venue, years, rows, adapter)
         return rows, f"{adapter}_cache"
     rows, adapter = _latest_project_find_results_title_index(venue, years, limit)
-    if rows:
+    if rows and _venue_title_index_cache_rows_usable(venue, years, rows, adapter):
         _store_venue_title_index_cache(venue, years, rows, adapter)
         return rows, f"{adapter}_cache"
     return [], "none"
@@ -2416,6 +2434,8 @@ def _load_venue_title_index_cache(venue: dict, years: list[int], limit: int | No
 def _store_venue_title_index_cache(venue: dict, years: list[int], papers: list[dict], adapter: str) -> None:
     rows = [dict(row) for row in papers if isinstance(row, dict)]
     if not rows or not str(adapter or "").strip() or str(adapter).strip() == "none":
+        return
+    if not _venue_title_index_cache_rows_usable(venue, years, rows, adapter):
         return
     path = _venue_title_index_cache_path()
     cache = read_json(path, {}) if path.exists() else {}
@@ -3053,11 +3073,9 @@ def _venue_metadata_status_fields(audit: dict) -> dict:
     if source_scope == "dblp_current_index_not_official_accepted_list":
         official_title_index_verified = False
         official_accepted_list_verified = False
-    elif source_scope in {"official_icml_downloads_title_index", "official_openreview_metadata"}:
-        if official_title_index_verified in (None, ""):
-            official_title_index_verified = title_complete
-        if official_accepted_list_verified in (None, ""):
-            official_accepted_list_verified = title_complete
+    elif source_scope in {"official_icml_downloads_title_index", "official_openreview_metadata", "openreview_official_venue_notes"}:
+        official_title_index_verified = bool(title_complete and official_title_index_verified is not False)
+        official_accepted_list_verified = bool(title_complete and official_accepted_list_verified is not False)
     metadata_ready = title_complete and (has_abstracts or has_official_categories)
     if not audit:
         metadata_status = "unknown"
@@ -3074,12 +3092,28 @@ def _venue_metadata_status_fields(audit: dict) -> dict:
         basis_parts.append("Title corpus was verified, but this source does not expose abstracts in the title index; The workflow must enrich selected papers before final LLM scoring.")
     if no_official_categories:
         basis_parts.append("No trusted official venue categories were available from this adapter; the workflow skips category pruning and uses title LLM screening over the title corpus.")
+    integrity_probe = {
+        "adapter": audit.get("adapter") or audit.get("source_adapter") or "",
+        "source_adapter": audit.get("source_adapter") or audit.get("adapter") or "",
+        "source_scope": source_scope,
+        "venue": audit.get("venue") or "",
+        "venue_id": audit.get("venue_id") or "",
+        "raw_title_index_count": audit.get("paper_count") or audit.get("source_total_count") or 0,
+        "title_index_completeness_status": title_status,
+        "metadata_completeness_status": metadata_status,
+        "title_index_completeness_ok": title_complete,
+        "title_index_complete": title_complete,
+        "official_title_index_verified": official_title_index_verified,
+    }
+    integrity_blocker = _venue_source_integrity_blocker(integrity_probe)
     return {
         "title_index_completeness_status": title_status,
         "title_index_completeness_ok": title_complete,
         "metadata_completeness_status": metadata_status,
-        "metadata_completeness_ok": metadata_ready,
-        "metadata_completeness_limited": bool(audit) and not metadata_ready,
+        "metadata_completeness_ok": bool(metadata_ready and not integrity_blocker),
+        "metadata_completeness_limited": bool((bool(audit) and not metadata_ready) or integrity_blocker),
+        "source_integrity_status": "blocked" if integrity_blocker else "passed",
+        "source_integrity_blocker": integrity_blocker,
         "metadata_completeness_basis": " ".join(part.strip() for part in basis_parts if part).strip(),
         "metadata_audit": audit,
         "has_official_categories": has_official_categories,
@@ -6825,6 +6859,11 @@ def _run_diagnostics(artifacts: dict) -> dict:
     scoring_runtime = artifacts.get("scoring_runtime") if isinstance(artifacts.get("scoring_runtime"), dict) else {}
     failed_sources = [item for item in statuses if not item.get("ok") and not item.get("limited")]
     limited_sources = [item for item in statuses if item.get("limited")]
+    source_integrity_blockers = [
+        item
+        for item in list(statuses) + list(venue_rows)
+        if isinstance(item, dict) and (item.get("source_integrity_status") == "blocked" or _venue_source_integrity_blocker(item))
+    ]
 
     def _sum(rows: list[dict], key: str) -> int:
         total = 0
@@ -6923,6 +6962,15 @@ def _run_diagnostics(artifacts: dict) -> dict:
             "severity": "warning",
             "message": f"{item.get('source', 'source')} was rate-limited/partial with count={item.get('count', 0)}: {item.get('message', '')}",
         })
+    for item in source_integrity_blockers:
+        venue_name = item.get("venue") or item.get("source") or item.get("venue_id") or "venue"
+        count = _venue_row_count(item)
+        blocker = item.get("source_integrity_blocker") or _venue_source_integrity_blocker(item)
+        warnings.append({
+            "code": f"source_integrity_{venue_name}_blocked",
+            "severity": "error",
+            "message": f"{venue_name} source integrity gate failed ({blocker}); title corpus count={count}. Repair the adapter or verified cache before downstream research.",
+        })
     if evaluated and not strong:
         warnings.append({
             "code": "no_strong_recommendations",
@@ -6959,6 +7007,19 @@ def _run_diagnostics(artifacts: dict) -> dict:
         "fallback_ratio": fallback_ratio,
         "failed_source_count": len(failed_sources),
         "limited_source_count": len(limited_sources),
+        "source_integrity_blocker_count": len(source_integrity_blockers),
+        "source_integrity_gate": {
+            "status": "blocked" if source_integrity_blockers else "passed",
+            "blocked_count": len(source_integrity_blockers),
+            "blockers": [
+                {
+                    "venue": item.get("venue") or item.get("source") or item.get("venue_id") or "venue",
+                    "blocker": item.get("source_integrity_blocker") or _venue_source_integrity_blocker(item),
+                    "count": _venue_row_count(item),
+                }
+                for item in source_integrity_blockers
+            ],
+        },
         "survey_stats": survey_stats,
         "warnings": warnings,
     }
@@ -6968,9 +7029,82 @@ def _source_status(source: str, ok: bool, count: int, message: str, limited: boo
     return {"source": source, "ok": ok, "limited": limited, "count": count, "message": message}
 
 
+CORE_VENUE_MIN_COMPLETE_TITLE_INDEX_COUNT = 50
+
+
+def _venue_identity_text(row: dict) -> str:
+    return " ".join(str(row.get(key) or "") for key in ("venue_id", "venue", "source", "adapter", "source_adapter")).lower()
+
+
+def _is_core_venue_source(row: dict) -> bool:
+    text = _venue_identity_text(row)
+    return any(token in text for token in ("iclr", "icml", "neurips", "nips", "kdd", "sigkdd"))
+
+
+def _venue_row_count(row: dict) -> int:
+    for key in ("raw_title_index_count", "corpus_count", "sample_count", "candidate_count", "count"):
+        try:
+            value = int(row.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    return 0
+
+
+def _venue_source_integrity_blocker(row: dict) -> str:
+    if not isinstance(row, dict):
+        return ""
+    source_scope = str(row.get("source_scope") or "").strip().lower()
+    adapter = str(row.get("adapter") or row.get("source_adapter") or "").strip().lower()
+    official_like = source_scope in {"official_openreview_metadata", "openreview_official_venue_notes", "official_icml_downloads_title_index"} or adapter.startswith(("openreview", "icml_downloads", "dblp"))
+    venue_like = bool(row.get("source_kind") == "venue" or row.get("venue_id") or row.get("effective_years") or official_like or _is_core_venue_source(row))
+    if not venue_like:
+        return ""
+    count = _venue_row_count(row)
+    title_status = str(row.get("title_index_completeness_status") or "").strip().lower()
+    metadata_status = str(row.get("metadata_completeness_status") or "").strip().lower()
+    title_complete = bool(row.get("title_index_completeness_ok") or row.get("title_index_complete"))
+    if count > 0 and (title_status == "partial" or metadata_status == "partial" or (title_status and not title_complete)):
+        return "title_index_partial"
+    if _is_core_venue_source(row) and count > 0 and count < CORE_VENUE_MIN_COMPLETE_TITLE_INDEX_COUNT:
+        return "core_venue_suspiciously_tiny_corpus"
+    if official_like and row.get("official_title_index_verified") is False:
+        return "official_title_index_not_verified"
+    return ""
+
+
+def _apply_venue_source_integrity(row: dict) -> dict:
+    if not isinstance(row, dict):
+        return row
+    reason = _venue_source_integrity_blocker(row)
+    if not reason:
+        return row
+    row["limited"] = True
+    row["source_integrity_status"] = "blocked"
+    row["source_integrity_blocker"] = reason
+    row["metadata_completeness_limited"] = True
+    row["metadata_completeness_ok"] = False
+    row.setdefault("title_index_completeness_ok", False)
+    row.setdefault("title_index_complete", False)
+    message = {
+        "title_index_partial": "Venue title index is partial and cannot be used as a complete Find corpus.",
+        "core_venue_suspiciously_tiny_corpus": "Core venue corpus is suspiciously tiny; repair the source adapter or verified cache before downstream research.",
+        "official_title_index_not_verified": "Official title index completeness was not verified.",
+    }.get(reason, "Venue source integrity gate failed.")
+    existing = str(row.get("source_integrity_message") or row.get("error") or "").strip()
+    row["source_integrity_message"] = message
+    row["error"] = "; ".join(part for part in [existing, message] if part)
+    basis = str(row.get("metadata_completeness_basis") or "").strip()
+    row["metadata_completeness_basis"] = " ".join(part for part in [basis, message] if part).strip()
+    return row
+
+
 def _venue_source_public_limited(row: dict) -> bool:
     if not isinstance(row, dict):
         return False
+    if _venue_source_integrity_blocker(row):
+        return True
     if not row.get("ok"):
         return bool(row.get("limited") or row.get("metadata_completeness_limited"))
     if row.get("limited") or row.get("metadata_completeness_limited"):
@@ -7321,6 +7455,8 @@ def run_find(
                 message_parts.append(str(row.get("year_fallback_reason")))
             if row.get("error"):
                 message_parts.append(str(row.get("error")))
+            if row.get("source_integrity_message"):
+                message_parts.append(str(row.get("source_integrity_message")))
             status = _source_status(str(source_name), bool(row.get("ok")), count, "; ".join(message_parts) or ("ok" if row.get("ok") else "No papers fetched."), limited=_venue_source_public_limited(row))
             status["source_kind"] = "venue"
             status["venue_id"] = row.get("venue_id")
@@ -7349,6 +7485,9 @@ def run_find(
             status["has_abstracts_in_title_index"] = bool(row.get("has_abstracts_in_title_index") or row.get("has_abstracts"))
             status["any_abstracts"] = bool(row.get("any_abstracts") or row.get("has_abstracts"))
             status["missing_abstract_count"] = int(row.get("missing_abstract_count") or 0)
+            status["source_integrity_status"] = row.get("source_integrity_status") or "passed"
+            status["source_integrity_blocker"] = row.get("source_integrity_blocker") or ""
+            status["source_integrity_message"] = row.get("source_integrity_message") or ""
             status["detail_fetched_count"] = sum(1 for paper in venue_papers if str(paper.get("venue") or "").lower() == str(status.get("venue") or "").lower()) or None
             rows.append(status)
         return rows
@@ -7484,7 +7623,7 @@ def run_find(
         venue = catalog.get(venue_id)
         if not venue:
             log(f"Skipping unknown venue id: {venue_id}")
-            venue_health_report.append({
+            venue_health_report.append(_apply_venue_source_integrity({
                 "venue_id": venue_id,
                 "venue": venue_id,
                 "requested_years": requested_years,
@@ -7494,7 +7633,7 @@ def run_find(
                 "ok": False,
                 "error": "Unknown venue id.",
                 "suggested_fix": "Add this venue to catalog/custom_venues.json or choose a supported venue id.",
-            })
+            }))
             _persist_find_progress("venue_title_index")
             continue
         _progress("venue_title_index", venue_index - 1, len(venue_year_groups), f"Checking year availability: {venue.get('name', venue_id)}")
@@ -7524,7 +7663,7 @@ def run_find(
             if titles and metadata_limited:
                 source_error = str(metadata_fields.get("metadata_completeness_basis") or "Venue metadata completeness audit is partial.")
             log(f"{venue.get('name')}: fetched {len(titles)} papers via {adapter}")
-            venue_health_report.append({
+            venue_health_report.append(_apply_venue_source_integrity({
                 "venue_id": venue_id,
                 "venue": venue.get("name"),
                 "requested_years": requested_years,
@@ -7540,7 +7679,7 @@ def run_find(
                 "error": source_error,
                 "suggested_fix": "" if titles and not metadata_limited else ("Venue/year metadata source is partial; repair the source adapter or build a verified local database before treating it as a complete Find corpus." if titles else "Check OpenReview/DBLP venue id."),
                 **metadata_fields,
-            })
+            }))
             _progress("venue_title_index", venue_index, len(venue_year_groups), f"{venue.get('name')}: title index {'ready' if titles else 'unavailable'} via {adapter}")
             if not titles:
                 continue
@@ -7611,7 +7750,7 @@ def run_find(
         source_error = "" if title_index else ("Venue title index fetch timed out." if adapter == "timeout" else "No title index found.")
         if title_index and metadata_limited:
             source_error = str(metadata_fields.get("metadata_completeness_basis") or "Venue metadata completeness audit is partial.")
-        venue_health_report.append({
+        venue_health_report.append(_apply_venue_source_integrity({
             "venue_id": venue_id,
             "venue": venue.get("name"),
             "requested_years": requested_years,
@@ -7629,7 +7768,7 @@ def run_find(
             "error": source_error,
             "suggested_fix": "" if title_index and not metadata_limited else ("Venue/year metadata source is partial; repair the source adapter or build a verified local database before treating it as a complete Find corpus." if title_index else "High-priority venue may need a dedicated proceedings adapter, verified selected-year cache, or an explicitly selected different year."),
             **metadata_fields,
-        })
+        }))
         _progress("venue_title_index", venue_index, len(venue_year_groups), f"{venue.get('name')}: title index {'ready' if title_index else 'unavailable'} via {adapter}")
         if not title_index:
             log(f"{venue.get('name')}: no title index found via {adapter}")
@@ -8080,6 +8219,15 @@ def run_find(
         artifacts["diagnostics"] = _run_diagnostics(artifacts)
         artifacts["recommendation_quality"] = recommendation_quality
         artifacts["diagnostics"]["recommendation_quality"] = recommendation_quality
+        source_integrity_gate = artifacts["diagnostics"].get("source_integrity_gate") if isinstance(artifacts.get("diagnostics"), dict) else {}
+        if isinstance(source_integrity_gate, dict) and source_integrity_gate.get("status") == "blocked":
+            artifacts["status"] = "blocked"
+            artifacts["blocked_reason"] = "Find source integrity gate failed; at least one selected venue returned a partial or suspiciously tiny title corpus."
+            artifacts["recommendation_shortfall"] = max(1, int(artifacts.get("recommendation_shortfall") or 0))
+            scoring_runtime = artifacts.get("scoring_runtime") if isinstance(artifacts.get("scoring_runtime"), dict) else {}
+            scoring_runtime["recommendation_shortfall"] = artifacts["recommendation_shortfall"]
+            scoring_runtime["source_integrity_gate"] = source_integrity_gate
+            artifacts["scoring_runtime"] = scoring_runtime
         if llm.enabled and not llm_live.get("ok"):
             artifacts["status"] = "blocked"
             artifacts["blocked_reason"] = "LLM live gate failed; retrieval audit completed but final LLM scoring/recommendations are invalid."

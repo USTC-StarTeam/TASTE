@@ -15,6 +15,8 @@ TORCHVISION_CUDA_SPEC = "torchvision==0.24.1+cu128"
 TORCHAUDIO_CUDA_SPEC = f"torchaudio=={PYTORCH_CUDA_VERSION}+cu128"
 PYG_CUDA_WHEEL_URL = f"https://data.pyg.org/whl/torch-{PYTORCH_CUDA_VERSION}+cu128.html"
 PYG_REQUIRED_PACKAGES = ["torch-geometric", "torch-scatter", "torch-sparse", "torch-cluster"]
+ESM_PIP_SPEC = "esm==3.2.1.post1"
+PIP_PACKAGE_SPEC_OVERRIDES = {"esm": ESM_PIP_SPEC}
 PYG_VERIFY_SNIPPET = (
     "import torch; "
     "print('torch', torch.__version__, 'cuda', torch.version.cuda, 'available', torch.cuda.is_available()); "
@@ -128,6 +130,94 @@ def _pip_install_packages(tokens: list[str]) -> set[str]:
         if package:
             packages.add(package)
     return packages
+
+
+def _pip_install_start_index(tokens: list[str]) -> tuple[list[str], int, int] | None:
+    pip_tokens = _conda_run_inner_tokens(tokens) or tokens
+    if not pip_tokens:
+        return None
+    head = Path(str(pip_tokens[0])).name
+    if head.startswith("python") and len(pip_tokens) >= 4 and pip_tokens[1] == "-m" and str(pip_tokens[2]) in {"pip", "pip3"} and str(pip_tokens[3]) == "install":
+        return pip_tokens, 4, len(tokens) - len(pip_tokens)
+    if head in {"pip", "pip3"} and len(pip_tokens) >= 2 and str(pip_tokens[1]) == "install":
+        return pip_tokens, 2, len(tokens) - len(pip_tokens)
+    return None
+
+
+def _normalize_pip_package_spec(token: str) -> str:
+    package = _token_package_name(token)
+    return PIP_PACKAGE_SPEC_OVERRIDES.get(package, str(token))
+
+
+def _pip_install_package_specs(tokens: list[str]) -> list[str]:
+    parsed = _pip_install_start_index(tokens)
+    if not parsed:
+        return []
+    pip_tokens, start, _offset = parsed
+    specs: list[str] = []
+    skip_next = False
+    options_with_values = {
+        "-r", "--requirement", "-c", "--constraint", "-f", "--find-links", "-i", "--index-url",
+        "--extra-index-url", "--trusted-host", "--platform", "--python-version", "--implementation",
+        "--abi", "--target", "--prefix", "--root", "--src", "--cache-dir",
+    }
+    for token in pip_tokens[start:]:
+        value = str(token or "")
+        if skip_next:
+            skip_next = False
+            continue
+        if value in options_with_values:
+            skip_next = True
+            continue
+        if value.startswith("-"):
+            continue
+        package = _token_package_name(value)
+        if package:
+            specs.append(_normalize_pip_package_spec(value))
+    return specs
+
+
+def _non_policy_pip_package_specs(row: dict[str, Any], excluded_names: set[str]) -> list[str]:
+    specs: list[str] = []
+    seen: set[str] = set()
+    for spec in _pip_install_package_specs(_row_command_tokens(row)):
+        package = _token_package_name(spec)
+        if not package or package in excluded_names:
+            continue
+        normalized = _normalize_pip_package_spec(spec)
+        key = _token_package_name(normalized)
+        if key and key not in seen:
+            seen.add(key)
+            specs.append(normalized)
+    return specs
+
+
+def _extra_pip_install_row(source_phase: str, packages: list[str]) -> dict[str, Any]:
+    return {
+        "phase": f"{source_phase or 'install'}_non_pyg_deps",
+        "command": ["python", "-m", "pip", "install", "--upgrade", "--no-cache-dir", *packages],
+        "cwd": "repo",
+        "timeout_sec": 1800,
+        "required": True,
+        "policy_managed": True,
+    }
+
+
+def _row_installs_package(row: dict[str, Any], package_name: str) -> bool:
+    package = _token_package_name(package_name)
+    return package in (_pip_install_packages(_row_command_tokens(row)) | _conda_install_packages(_row_command_tokens(row)))
+
+
+def _row_imports_module(row: dict[str, Any], module_name: str) -> bool:
+    module = re.escape(str(module_name or "").strip())
+    if not module:
+        return False
+    text = command_text(_row_command_tokens(row))
+    return bool(re.search(rf"\bimport\s+{module}\b|\bfrom\s+{module}\b", text))
+
+
+def _esm_install_row() -> dict[str, Any]:
+    return _extra_pip_install_row("install_esm_sdk", [ESM_PIP_SPEC]) | {"phase": "install_esm_sdk"}
 
 
 def _conda_install_packages(tokens: list[str]) -> set[str]:
@@ -403,8 +493,13 @@ def normalize_environment_plan_commands(plan: dict[str, Any], machine: dict[str,
             packages = _pip_install_packages(_row_command_tokens(row))
             if not set(PYG_REQUIRED_PACKAGES).issubset(packages) or PYG_CUDA_WHEEL_URL not in command_text(_row_command_tokens(row)):
                 replacement = _pyg_install_row(str(row.get("phase") or "install_pyg_wheels"))
-                rewrites.append({"index": index, "phase": row.get("phase"), "reason": "PyG pip install must use the torch/CUDA matched wheel index and all required extension packages", "before": row.get("command"), "after": replacement.get("command")})
+                rewrites.append({"index": index, "phase": row.get("phase"), "reason": "PyG pip install must use the torch/CUDA matched wheel index and all required extension packages; non-PyG package specs from the original install are preserved in a separate pip row", "before": row.get("command"), "after": replacement.get("command")})
                 new_rows.append(replacement)
+                preserved = _non_policy_pip_package_specs(row, PYG_PIP_PACKAGE_NAMES | PYTORCH_PACKAGE_NAMES)
+                if preserved:
+                    extra = _extra_pip_install_row(str(row.get("phase") or "install"), preserved)
+                    new_rows.append(extra)
+                    rewrites.append({"index": index, "phase": extra.get("phase"), "reason": "Preserve non-PyG dependencies from a policy-rewritten PyG install row", "after": extra.get("command")})
                 pyg_row_present = True
                 continue
         if _pip_install_packages(_row_command_tokens(row)) & {"torch", "torchvision", "torchaudio"}:
@@ -446,6 +541,11 @@ def normalize_environment_plan_commands(plan: dict[str, Any], machine: dict[str,
         row = _pyg_verify_row()
         new_rows.append(row)
         rewrites.append({"index": None, "phase": "verify_pyg_cuda_import", "reason": "PyG/CUDA import gate must prove CUDA-enabled torch and compiled PyG extensions are usable", "after": row["command"]})
+    if any(isinstance(row, dict) and _row_imports_module(row, "esm") for row in new_rows) and not any(isinstance(row, dict) and _row_installs_package(row, "esm") for row in new_rows):
+        row = _esm_install_row()
+        insert_at = next((i for i, item in enumerate(new_rows) if isinstance(item, dict) and _row_imports_module(item, "esm")), len(new_rows))
+        new_rows.insert(insert_at, row)
+        rewrites.append({"index": None, "phase": "install_esm_sdk", "reason": "Verify/import commands require the esm Python module; install the ESM SDK before import gates", "after": row["command"]})
 
     normalized["commands"] = new_rows
     if rewrites:

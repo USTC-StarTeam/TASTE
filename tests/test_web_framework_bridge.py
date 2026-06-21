@@ -198,6 +198,38 @@ def test_web_rejects_stale_environment_handoff_policy(monkeypatch, tmp_path):
 
 
 
+def test_web_run_preferences_show_current_environment_plan_runtime_without_handoff(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    root = _make_project(projects, "demo")
+    run_dir = tmp_path / "modules" / "environment" / "runs" / "web_environment_demo_20260621T000000Z"
+    round_dir = run_dir / "round_01"
+    env_prefix = run_dir / "conda_envs" / "protdis_env"
+    (env_prefix / "bin").mkdir(parents=True)
+    (env_prefix / "bin" / "python").write_text("", encoding="utf-8")
+    round_dir.mkdir(parents=True)
+    (round_dir / "claude_environment_plan_round_01.json").write_text(json.dumps({
+        "status": "ready_to_execute",
+        "env_name": "protdis_env",
+        "python_version": "3.11",
+        "commands": [],
+    }), encoding="utf-8")
+    (run_dir / "environment_deployment_decision.json").write_text(json.dumps({
+        "run_id": run_dir.name,
+        "decision": "continue_repair",
+        "ready_for_experimenting": False,
+    }), encoding="utf-8")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.setattr(project_bridge, "ROOT", tmp_path)
+
+    prefs = project_bridge._public_run_preferences("demo", root, {"conda_env": "", "target_venue": "ICLR"}, selection={})
+
+    assert prefs["conda_env"] == "protdis_env"
+    assert prefs["runtime"]["conda_env"] == "protdis_env"
+    assert prefs["runtime"]["conda_env_prefix"] == str(env_prefix)
+    assert prefs["runtime"]["experiment_python"] == str(env_prefix / "bin" / "python")
+    assert prefs["runtime"]["environment_decision"] == "continue_repair"
+
+
 def test_web_summary_filters_cached_experiment_runtime_without_current_handoff(monkeypatch, tmp_path):
     projects = tmp_path / "projects"
     root = _make_project(projects, "demo")
@@ -813,6 +845,52 @@ def test_web_source_status_marks_partial_openreview_as_limited():
     }
 
     assert project_bridge._venue_source_public_limited(row) is True
+
+
+def test_web_find_pipeline_summary_blocks_suspicious_one_paper_core_venue(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    root = _make_project(projects, "demo")
+    finding = root / "planning" / "finding"
+    finding.mkdir(parents=True)
+    progress = {
+        "run_id": "find_demo",
+        "source_status": [
+            {
+                "source_kind": "venue",
+                "source": "ICLR",
+                "venue": "ICLR",
+                "venue_id": "openreview_iclr_2026",
+                "ok": True,
+                "adapter": "openreview_cache",
+                "requested_years": [2026],
+                "effective_years": [2026],
+                "raw_title_index_count": 1,
+                "candidate_count": 1,
+                "count": 1,
+                "metadata_completeness_status": "partial",
+                "metadata_completeness_ok": False,
+                "metadata_completeness_limited": True,
+                "title_index_completeness_status": "partial",
+                "title_index_completeness_ok": False,
+                "title_index_complete": False,
+                "has_official_categories": True,
+                "has_abstracts": True,
+                "source_scope": "official_openreview_metadata",
+            }
+        ],
+        "counts": {"strong_recommendations": 5, "recommendation_target_count": 5, "recommendation_shortfall": 0},
+    }
+    (finding / "find_progress.json").write_text(json.dumps(progress), encoding="utf-8")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.setattr(project_bridge, "_current_verified_venue_metadata_rows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(project_bridge, "_current_health_check_source_status_rows", lambda *args, **kwargs: [])
+
+    summary = project_bridge._current_find_pipeline_summary(root)
+
+    assert summary["status"] == "source_integrity_blocked"
+    assert summary["recommendation_shortfall"] == 1
+    assert summary["source_integrity_gate"]["blocked_count"] == 1
+    assert project_bridge._venue_source_public_limited(progress["source_status"][0]) is True
 
 
 def test_web_jobs_keeps_only_latest_persisted_environment_history(monkeypatch):

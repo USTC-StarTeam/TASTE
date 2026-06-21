@@ -419,6 +419,63 @@ def _environment_handoff_ready_for_experimenting(root: Path) -> bool:
     return _environment_handoff_gate_passed(handoff)
 
 
+def _parse_web_environment_run_timestamp_for_project_bridge(run_id: Any) -> float:
+    match = re.search(r"web_environment_[^_]+_(\d{8})t(\d{6})z", str(run_id or "").strip().lower())
+    if not match:
+        return 0.0
+    try:
+        return dt.datetime.strptime("".join(match.groups()), "%Y%m%d%H%M%S").replace(tzinfo=dt.timezone.utc).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _latest_environment_plan_runtime(project: str, root: Path) -> dict[str, Any]:
+    project_name = str(project or root.name or "").strip()
+    if not project_name:
+        return {}
+    runs_root = ROOT / "modules" / "environment" / "runs"
+    if not runs_root.exists():
+        return {}
+
+    candidates: list[tuple[float, Path]] = []
+    for run_dir in runs_root.glob(f"web_environment_{project_name}_*"):
+        if not run_dir.is_dir():
+            continue
+        timestamps = [_parse_web_environment_run_timestamp_for_project_bridge(run_dir.name)]
+        for rel in ["environment_deployment_decision.json", "round_01/command_receipts.json"]:
+            path = run_dir / rel
+            if path.exists():
+                try:
+                    timestamps.append(path.stat().st_mtime)
+                except OSError:
+                    pass
+        candidates.append((max(timestamps), run_dir))
+
+    for _timestamp, run_dir in sorted(candidates, key=lambda item: item[0], reverse=True):
+        plan_paths = sorted(run_dir.glob("round_*/claude_environment_plan_round_*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+        for plan_path in plan_paths:
+            plan = _read_json(plan_path, {})
+            if not isinstance(plan, dict):
+                continue
+            env_name = str(plan.get("env_name") or "").strip()
+            if not env_name:
+                continue
+            prefix = run_dir / "conda_envs" / env_name
+            python_path = prefix / "bin" / "python"
+            decision = _read_json(run_dir / "environment_deployment_decision.json", {})
+            return {
+                "conda_env": env_name,
+                "conda_env_prefix": str(prefix),
+                "experiment_python": str(python_path),
+                "environment_run_id": run_dir.name,
+                "environment_plan_path": str(plan_path),
+                "environment_plan_status": str(plan.get("status") or ""),
+                "environment_decision": str(decision.get("decision") or decision.get("status") or ""),
+                "environment_runtime_source": "latest_environment_plan",
+            }
+    return {}
+
+
 def _handoff_repo_path(handoff: dict[str, Any]) -> str:
     env_handoff = handoff.get("environment_handoff") if isinstance(handoff.get("environment_handoff"), dict) else {}
     repo = env_handoff.get("repo") if isinstance(env_handoff.get("repo"), dict) else {}
@@ -815,6 +872,8 @@ def _public_run_preferences(project: str, root: Path, cfg: dict[str, Any] | None
     handoff = _project_environment_handoff(root)
     handoff_ready = _environment_handoff_gate_passed(handoff)
     handoff_env = _handoff_conda_env(handoff) if handoff_ready else ""
+    environment_runtime = {} if handoff_ready else _latest_environment_plan_runtime(project, root)
+    public_conda_env = handoff_env or environment_runtime.get("conda_env") or cfg.get("conda_env", "")
     paper = cfg.get("paper") if isinstance(cfg.get("paper"), dict) else {}
     venue = _display_venue(cfg.get("target_venue") or cfg.get("venue") or paper.get("target_venue") or "")
     paper = _paper_preferences_for_venue(paper, venue)
@@ -825,12 +884,14 @@ def _public_run_preferences(project: str, root: Path, cfg: dict[str, Any] | None
         "venue": venue,
         "research_interest": cfg.get("research_interest", ""),
         "researcher_profile": cfg.get("researcher_profile", ""),
-        "conda_env": handoff_env or cfg.get("conda_env", ""),
+        "conda_env": public_conda_env,
         "coding_agent": {"backend": ((cfg.get("coding_agent") or {}) if isinstance(cfg.get("coding_agent"), dict) else {}).get("backend", "")},
         "paper": paper,
         "default_find_selection": selection if isinstance(selection, dict) else (_current_project_source_selection(project, root) if project else canonical_source_selection()),
     }
     runtime = _public_runtime_with_valid_handoff(root, runtime_public)
+    if environment_runtime:
+        runtime = {**runtime, **environment_runtime}
     if runtime:
         out["runtime"] = runtime
     return out
@@ -1571,6 +1632,78 @@ def _venue_source_key(row: dict[str, Any]) -> str:
     return str(row.get("venue_id") or row.get("venue") or row.get("source") or "").strip().lower()
 
 
+CORE_VENUE_MIN_COMPLETE_TITLE_INDEX_COUNT = 50
+
+
+def _venue_identity_text(row: dict[str, Any]) -> str:
+    return " ".join(str(row.get(key) or "") for key in ("venue_id", "venue", "source", "adapter", "source_adapter")).lower()
+
+
+def _is_core_venue_source(row: dict[str, Any]) -> bool:
+    text = _venue_identity_text(row)
+    return any(token in text for token in ("iclr", "icml", "neurips", "nips", "kdd", "sigkdd"))
+
+
+def _venue_row_count(row: dict[str, Any]) -> int:
+    for key in ("raw_title_index_count", "corpus_count", "sample_count", "candidate_count", "count"):
+        value = _as_int(row.get(key), 0)
+        if value > 0:
+            return value
+    return 0
+
+
+def _venue_source_integrity_blocker(row: dict[str, Any]) -> str:
+    if not isinstance(row, dict):
+        return ""
+    source_scope = str(row.get("source_scope") or "").strip().lower()
+    adapter = str(row.get("adapter") or row.get("source_adapter") or "").strip().lower()
+    official_like = source_scope in {"official_openreview_metadata", "openreview_official_venue_notes", "official_icml_downloads_title_index"} or adapter.startswith(("openreview", "icml_downloads", "dblp"))
+    venue_like = bool(row.get("source_kind") == "venue" or row.get("venue_id") or row.get("effective_years") or official_like or _is_core_venue_source(row))
+    if not venue_like:
+        return ""
+    count = _venue_row_count(row)
+    title_status = str(row.get("title_index_completeness_status") or "").strip().lower()
+    metadata_status = str(row.get("metadata_completeness_status") or "").strip().lower()
+    title_complete = bool(row.get("title_index_completeness_ok") or row.get("title_index_complete"))
+    if count > 0 and (title_status == "partial" or metadata_status == "partial" or (title_status and not title_complete)):
+        return "title_index_partial"
+    if _is_core_venue_source(row) and count > 0 and count < CORE_VENUE_MIN_COMPLETE_TITLE_INDEX_COUNT:
+        return "core_venue_suspiciously_tiny_corpus"
+    if official_like and row.get("official_title_index_verified") is False:
+        return "official_title_index_not_verified"
+    return ""
+
+
+def _source_integrity_blocked_rows(rows: Any) -> list[dict[str, Any]]:
+    blocked: list[dict[str, Any]] = []
+    for row in _json_rows(rows):
+        reason = str(row.get("source_integrity_blocker") or _venue_source_integrity_blocker(row) or "")
+        if reason:
+            copy = dict(row)
+            copy["source_integrity_status"] = "blocked"
+            copy["source_integrity_blocker"] = reason
+            blocked.append(copy)
+    return blocked
+
+
+def _dedupe_source_integrity_blockers(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, int]] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        key = (
+            str(row.get("venue") or row.get("source") or row.get("venue_id") or "venue").strip().lower(),
+            str(row.get("source_integrity_blocker") or _venue_source_integrity_blocker(row) or ""),
+            _venue_row_count(row),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    return deduped
+
+
 def _manifest_first(*values: Any) -> Any:
     for value in values:
         if value not in (None, ""):
@@ -1616,6 +1749,8 @@ def _derive_official_accepted_list_verified(adapter: str, title_index_complete: 
 def _venue_source_public_limited(row: dict[str, Any]) -> bool:
     if not isinstance(row, dict):
         return False
+    if _venue_source_integrity_blocker(row):
+        return True
     if not row.get("ok"):
         return bool(row.get("limited") or row.get("metadata_completeness_limited"))
     if row.get("limited") or row.get("metadata_completeness_limited"):
@@ -2484,6 +2619,7 @@ def _find_summary_from_payload(payload: Any) -> dict[str, Any]:
     category_rows = _rows(data.get("category_scan_report"))
     title_rows = _rows(data.get("title_filter_report"))
     venue_health = _rows(data.get("venue_health_report"))
+    source_integrity_blockers = _dedupe_source_integrity_blockers(_source_integrity_blocked_rows(data.get("source_status")) + _source_integrity_blocked_rows(venue_health))
     raw_title_index_count = (
         _as_int(counts.get("raw_title_index_papers"))
         or _as_int(counts.get("raw_title_index"))
@@ -2582,8 +2718,20 @@ def _find_summary_from_payload(payload: Any) -> dict[str, Any]:
         "articles": _count_json_value(data.get("articles")) or strong,
         "read_candidates": _count_json_value(data.get("read_candidates")) or strong,
         "recommendation_target_count": target,
-        "recommendation_shortfall": shortfall,
-        "recommendation_gate_status": "shortfall" if shortfall > 0 else "pass" if target else "unknown",
+        "recommendation_shortfall": max(shortfall, 1) if source_integrity_blockers else shortfall,
+        "recommendation_gate_status": "source_integrity_blocked" if source_integrity_blockers else "shortfall" if shortfall > 0 else "pass" if target else "unknown",
+        "source_integrity_gate": {
+            "status": "blocked" if source_integrity_blockers else "passed",
+            "blocked_count": len(source_integrity_blockers),
+            "blockers": [
+                {
+                    "venue": row.get("venue") or row.get("source") or row.get("venue_id") or "venue",
+                    "blocker": row.get("source_integrity_blocker") or _venue_source_integrity_blocker(row),
+                    "count": _venue_row_count(row),
+                }
+                for row in source_integrity_blockers
+            ],
+        },
     }
 
 
@@ -6443,12 +6591,16 @@ def _compact_project_summary(summary: dict[str, Any]) -> dict[str, Any]:
         projected_count = len(_human_recommendation_literature_rows(raw_projection_rows)) if raw_projection_rows else _as_int(projection.get("strict_strong_anchor_count"), 0) or _as_int(projection_counts.get("recommended"), 0)
         projected_target = _as_int(projection.get("recommendation_target_count"), 0) or _as_int(projection_counts.get("recommendation_target_count"), 0)
         projected_shortfall = max(0, projected_target - projected_count) if raw_projection_rows and projected_target else _as_int(projection.get("recommendation_shortfall"), 0) if projection.get("recommendation_shortfall") not in (None, "") else max(0, projected_target - projected_count) if projected_target else 0
+        source_integrity_gate = current_find_pipeline.get("source_integrity_gate") if isinstance(current_find_pipeline.get("source_integrity_gate"), dict) else {}
+        if source_integrity_gate.get("status") == "blocked":
+            projected_shortfall = max(projected_shortfall, 1)
         literature_survey.update({
             "run_id": projection.get("run_id") or literature_survey.get("run_id"),
             "strict_strong_anchor_count": projected_count,
             "recommendation_target_count": projected_target,
             "recommendation_shortfall": projected_shortfall,
-            "status": "recommendation_shortfall" if projected_shortfall else "current_find_packet_ready",
+            "source_integrity_gate": source_integrity_gate,
+            "status": "source_integrity_blocked" if source_integrity_gate.get("status") == "blocked" else "recommendation_shortfall" if projected_shortfall else "current_find_packet_ready",
         })
         counts = {**counts, **projection_counts, "strong_recommendations": projected_count, "recommended": projected_count, "strict_strong_anchor_count": projected_count, "recommendation_target_count": projected_target, "recommendation_shortfall": projected_shortfall}
     counts = {
@@ -6601,6 +6753,7 @@ def _light_find_survey_from_progress(project_dir: Path) -> dict[str, Any]:
     verified_rows = _current_verified_venue_metadata_rows(project_dir.name, project_dir, selection)
     health_check_source_status = _current_health_check_source_status_rows(project_dir.name, project_dir, selection)
     source_status = _merge_verified_venue_metadata_rows(source_status, verified_rows)
+    source_integrity_blockers = _source_integrity_blocked_rows(source_status)
     venue_counts = _venue_metadata_counts(source_status or verified_rows)
     progress_counts = progress.get("counts") if isinstance(progress.get("counts"), dict) else {}
     projection_counts = projection.get("counts") if isinstance(projection.get("counts"), dict) else {}
@@ -6619,9 +6772,23 @@ def _light_find_survey_from_progress(project_dir: Path) -> dict[str, Any]:
         strong_count = int(projection.get("strict_strong_anchor_count") or projection_counts.get("recommended") or progress.get("strong_recommendation_count") or counts.get("strong_recommendations") or 0)
     target_count = int(projection.get("recommendation_target_count") or projection_counts.get("recommendation_target_count") or progress.get("recommendation_target_count") or counts.get("recommendation_target_count") or 0)
     shortfall = int(projection.get("recommendation_shortfall") if projection.get("recommendation_shortfall") not in (None, "") else progress.get("recommendation_shortfall") if progress.get("recommendation_shortfall") not in (None, "") and not projection else (max(0, target_count - strong_count) if target_count else 0))
+    if source_integrity_blockers:
+        shortfall = max(shortfall, 1)
     return {
         "run_id": run_id,
-        "status": "recommendation_shortfall" if shortfall else "current_find_packet_ready" if run_id else "missing_find_packet",
+        "status": "source_integrity_blocked" if source_integrity_blockers else "recommendation_shortfall" if shortfall else "current_find_packet_ready" if run_id else "missing_find_packet",
+        "source_integrity_gate": {
+            "status": "blocked" if source_integrity_blockers else "passed",
+            "blocked_count": len(source_integrity_blockers),
+            "blockers": [
+                {
+                    "venue": row.get("venue") or row.get("source") or row.get("venue_id") or "venue",
+                    "blocker": row.get("source_integrity_blocker") or _venue_source_integrity_blocker(row),
+                    "count": _venue_row_count(row),
+                }
+                for row in source_integrity_blockers
+            ],
+        },
         "source_status": source_status[:20],
         "health_check_source_status": health_check_source_status[:20],
         "selection": selection,
@@ -11180,6 +11347,9 @@ def _current_find_pipeline_summary(root: Path, find_results: dict[str, Any] | No
     else:
         recommendation_count = _as_int(find_counts.get("strong_recommendations") or find_counts.get("recommended"), 0)
         read_candidate_count = _as_int(find_counts.get("read_candidates"), 0)
+    source_status_rows = _json_rows(find_results.get("source_status", [])) if isinstance(find_results, dict) else []
+    venue_health_rows = _json_rows(find_results.get("venue_health_report", [])) if isinstance(find_results, dict) else []
+    source_integrity_blockers = _dedupe_source_integrity_blockers(_source_integrity_blocked_rows(source_status_rows) + _source_integrity_blocked_rows(venue_health_rows))
     recommendation_shortfall = _as_int(find_results.get("recommendation_shortfall"), -1) if isinstance(find_results, dict) else -1
     if recommendation_shortfall < 0:
         recommendation_shortfall = _as_int(find_counts.get("recommendation_shortfall"), -1)
@@ -11198,10 +11368,13 @@ def _current_find_pipeline_summary(root: Path, find_results: dict[str, Any] | No
             and _as_int(quality.get("english_abstract_fallback_count"), 0) == 0
         )
     )
+    if source_integrity_blockers:
+        recommendation_shortfall = max(recommendation_shortfall, 1)
     recommendation_gate_ready = bool(
         run_id
         and recommendation_count > 0
         and recommendation_shortfall == 0
+        and not source_integrity_blockers
         and recommendation_quality_ok
         and (read_candidate_count in {0, recommendation_count})
     )
@@ -11270,7 +11443,15 @@ def _current_find_pipeline_summary(root: Path, find_results: dict[str, Any] | No
     )
     if pending_current_find_read:
         blockers = ["current Find recommendation gate passed; Read stage has not run yet"]
-    if pending_current_find_read:
+    if source_integrity_blockers:
+        failure_type = "source_integrity_blocked"
+        next_required_action = "repair_find_source_adapter_or_verified_cache_and_rerun_find"
+        status = "source_integrity_blocked"
+        blockers = [
+            f"{row.get('venue') or row.get('source') or row.get('venue_id') or 'venue'} source integrity failed: {row.get('source_integrity_blocker') or _venue_source_integrity_blocker(row)}; count={_venue_row_count(row)}"
+            for row in source_integrity_blockers
+        ]
+    elif pending_current_find_read:
         failure_type = ""
         next_required_action = "run_read_for_current_find"
         status = "pending_current_find_read"
@@ -11327,6 +11508,19 @@ def _current_find_pipeline_summary(root: Path, find_results: dict[str, Any] | No
         "status": status,
         "failure_type": failure_type,
         "next_required_action": next_required_action,
+        "source_integrity_gate": {
+            "status": "blocked" if source_integrity_blockers else "passed",
+            "blocked_count": len(source_integrity_blockers),
+            "blockers": [
+                {
+                    "venue": row.get("venue") or row.get("source") or row.get("venue_id") or "venue",
+                    "blocker": row.get("source_integrity_blocker") or _venue_source_integrity_blocker(row),
+                    "count": _venue_row_count(row),
+                }
+                for row in source_integrity_blockers
+            ],
+        },
+        "recommendation_shortfall": recommendation_shortfall,
         "content_ready": content_ready,
         "read_idea_plan_ready": content_ready,
         "execution_ready": execution_ready,

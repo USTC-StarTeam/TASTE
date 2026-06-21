@@ -838,7 +838,7 @@ def test_environment_rewrites_inline_python_import_aliases_and_compound_statemen
             "demo_env",
             "python",
             "-c",
-            "import biopython; import dm_tree; x = 0; for i in range(2): x += i; print(x)",
+            "import torch, biopython, dm_tree; from biopython import SeqIO; x = 0; for i in range(2): x += i; print(x)",
         ],
         "conda",
         "demo_env",
@@ -847,9 +847,10 @@ def test_environment_rewrites_inline_python_import_aliases_and_compound_statemen
 
     assert command[0] == str(tmp_path / "conda_envs" / "demo_env" / "bin" / "python")
     assert command[1] == "-c"
-    assert "import Bio" in command[2]
-    assert "import biopython" not in command[2]
-    assert "import tree as dm_tree" in command[2]
+    assert "import torch, Bio, tree as dm_tree" in command[2]
+    assert "from Bio import SeqIO" in command[2]
+    assert "biopython" not in command[2]
+    assert "dm_tree" not in command[2].replace("tree as dm_tree", "")
     assert "\nfor i in range(2):" in command[2]
     compile(command[2], "<environment-inline>", "exec")
 
@@ -1011,6 +1012,49 @@ def test_environment_dependency_policy_rewrites_incoherent_torch_pip_versions():
     assert "torchaudio==2.9.1+cu128" in command_text
     assert "https://data.pyg.org/whl/torch-2.9.1+cu128.html" in command_text
     assert any(row.get("phase") == "verify_pyg_cuda_import" for row in normalized["commands"] if isinstance(row, dict))
+
+
+def test_environment_dependency_policy_preserves_non_pyg_protdis_deps_and_installs_esm():
+    dependency_policy = _load_environment_module(
+        "environment_dependency_policy_protdis_non_pyg",
+        "scripts/orchestration/dependency_policy.py",
+    )
+    plan = {
+        "env_name": "protdis_env",
+        "commands": [
+            {
+                "phase": "install_protdis_deps",
+                "command": [
+                    "python", "-m", "pip", "install",
+                    "torch_geometric", "torch_scatter", "torch_sparse", "torch_cluster",
+                    "esm", "gpytorch", "pytorch-lightning", "biopython", "pandas",
+                    "scikit-learn", "pyyaml", "tqdm", "matplotlib", "seaborn",
+                ],
+                "required": True,
+            },
+            {
+                "phase": "verify_imports",
+                "command": ["python", "-c", "from esm.models.esmc import ESMC; import matplotlib, seaborn; print('ok')"],
+                "required": True,
+            },
+        ],
+    }
+
+    normalized = dependency_policy.normalize_environment_plan_commands(
+        plan,
+        machine={"gpu": [{"name": "NVIDIA GeForce RTX 5090", "compute_capability": "12.0"}]},
+        policy_version="test-policy",
+    )
+    command_text = "\n".join(dependency_policy.command_text(row["command"]) for row in normalized["commands"] if isinstance(row, dict))
+    phases = [row["phase"] for row in normalized["commands"] if isinstance(row, dict)]
+
+    assert "esm==3.2.1.post1" in command_text
+    assert "matplotlib" in command_text
+    assert "seaborn" in command_text
+    assert "gpytorch" in command_text
+    assert "pytorch-lightning" in command_text
+    assert phases.index("install_protdis_deps_non_pyg_deps") < phases.index("verify_imports")
+    assert command_text.count("torch-geometric") == 1
 
 
 

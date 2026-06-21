@@ -4002,13 +4002,36 @@ def _normalize_inline_python_compound_statements(code: str) -> str:
     return candidate
 
 
+def _normalize_python_import_item(item: str) -> str:
+    text = str(item or "").strip()
+    match = re.match(r"^([A-Za-z_][A-Za-z0-9_\.]*)(\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?$", text)
+    if not match:
+        return text
+    module_name = match.group(1)
+    alias = match.group(3) or ""
+    if module_name == "dm_tree":
+        return f"tree as {alias or 'dm_tree'}"
+    if module_name == "biopython":
+        return f"Bio as {alias}" if alias else "Bio"
+    return text
+
+
+def _normalize_python_import_statement_aliases(code: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        prefix = match.group(1) or ""
+        spacing = match.group(2) or ""
+        imports = match.group(3) or ""
+        normalized = ", ".join(_normalize_python_import_item(part) for part in imports.split(","))
+        return f"{prefix}{spacing}import {normalized}"
+
+    return re.sub(r"(^|[;\n])(\s*)import\s+([^;\n]+)", repl, str(code))
+
+
 def _normalize_python_inline_code_imports(code: str) -> str:
     updated = str(code)
     updated = re.sub(r"\bfrom\s+dm_tree\b", "from tree", updated)
-    updated = re.sub(r"\bimport\s+dm_tree\s+as\s+([A-Za-z_][A-Za-z0-9_]*)", r"import tree as \1", updated)
-    updated = re.sub(r"\bimport\s+dm_tree\b(?!\s+as\b)", "import tree as dm_tree", updated)
-    updated = re.sub(r"\bimport\s+biopython\s+as\s+([A-Za-z_][A-Za-z0-9_]*)", r"import Bio as \1", updated)
-    updated = re.sub(r"\bimport\s+biopython\b", "import Bio", updated)
+    updated = re.sub(r"\bfrom\s+biopython\b", "from Bio", updated)
+    updated = _normalize_python_import_statement_aliases(updated)
     updated = _normalize_inline_python_compound_statements(updated)
     return updated
 
