@@ -112,6 +112,18 @@ modules/reading/workspace/runs/<run-id>/
 
 `modules/reading/workspace/latest_run.json` 会指向最近一次独立精读运行。
 
+## 网页公开精读格式
+
+Current-Find 的完整精读 JSON 同时保留两层口径：
+
+| 字段/文件 | 用途 |
+| --- | --- |
+| `read_results.json.readings` | 完整审计版。保留 Claude/subagent 的长字段、全文证据、评分、边界角色和后续 Idea/Plan 所需上下文。不要为了网页短展示删减它。 |
+| `read_results.json.public_readings` | 网页公开版。由后端从 `readings` 投影生成，字段更短，方法/实验/局限以 2-4 条短要点呈现，供 Read 页卡片优先展示。 |
+| `read.md` | 人类可读 Markdown 公开产物。结构固定为“速览、动机、机制、数学/形式化、实验与证据、可借鉴点、风险边界”。 |
+
+数学公式必须写成 Markdown+KaTeX 能渲染的形式：行内 `$...$` 或块级 `$$...$$`。不要输出半截 `$`，不要把中文句子塞进公式，不要用裸 `\textit{}`、`\textbf{}` 这类 LaTeX 样式命令包装普通文字。网页会优先展示 `public_readings`，但后端合同、Idea/Plan 和项目 Claude Code 仍以完整 `readings` 审计内容为准。
+
 ## 运行流程逻辑
 
 1. `main.py` 解析 action，只把公开 action 分发到模块内部脚本。

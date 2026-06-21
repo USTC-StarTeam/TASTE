@@ -5179,11 +5179,14 @@ function App() {
   const currentFindPipelineCounts = researchSummary?.current_find_pipeline || researchLiteratureSurvey?.current_find_pipeline || {};
   const readResultsArtifact = useMemo(() => currentFindArtifactSource.find((a) => a.name === "read_results.json"), [currentFindArtifactSource]);
   const readResults = useMemo(() => readResultsArtifact?.content || {}, [readResultsArtifact]);
-  const currentReadings = useMemo(() => asArray(readResults?.readings).filter((row: any) => row && typeof row === "object" && Boolean(row.title || row.paper_id || row.id)), [readResults]);
+  const auditReadings = useMemo(() => asArray(readResults?.readings).filter((row: any) => row && typeof row === "object" && Boolean(row.title || row.paper_id || row.id)), [readResults]);
+  const publicReadings = useMemo(() => asArray(readResults?.public_readings).filter((row: any) => row && typeof row === "object" && Boolean(row.title || row.paper_id || row.id)), [readResults]);
+  const currentReadings = useMemo(() => publicReadings.length ? publicReadings : auditReadings, [publicReadings, auditReadings]);
+  const auditReadingCount = auditReadings.length || currentReadings.length;
   const readDisplayRows = useMemo(() => currentReadings.length ? currentReadings : readCandidatePool, [currentReadings, readCandidatePool]);
   const publishedReadCount = maxNumericValue(researchLiteratureCounts.readings, currentFindPipelineCounts?.reading_count, currentFindPipelineCounts?.readings, currentFindPipelineCounts?.read_count, currentFindPipelineCounts?.full_text_reading_count);
-  const expectedReadCandidateCount = maxNumericValue(currentReadings.length, publishedReadCount, researchLiteratureCounts.read_candidates, researchLiteratureCounts.strong_recommendations, researchLiteratureSurvey?.read_candidates_count, researchLiteratureSurvey?.strong_recommendations_count);
-  const readArtifactStale = Boolean(readResultsArtifact && publishedReadCount > currentReadings.length);
+  const expectedReadCandidateCount = maxNumericValue(auditReadingCount, publishedReadCount, researchLiteratureCounts.read_candidates, researchLiteratureCounts.strong_recommendations, researchLiteratureSurvey?.read_candidates_count, researchLiteratureSurvey?.strong_recommendations_count);
+  const readArtifactStale = Boolean(readResultsArtifact && publishedReadCount > auditReadingCount);
   const readCandidatesStillSyncing = Boolean((!currentReadings.length || readArtifactStale) && expectedReadCandidateCount > 0 && (!readResultsArtifact || currentFindArtifactLoading || (useCurrentFindPacket && readCandidatePool.length === 0)));
   const hasSurveyCandidates = retrievalPool.length > 0 || readCandidatePool.length > 0 || readCandidatesStillSyncing || expectedReadCandidateCount > 0 || Number(literatureCounts.evaluated || 0) > 0 || Number(literatureCounts.arxivCandidates || 0) > 0 || (!viewingActiveIncompleteFindRun && Number(researchLiteratureCounts.survey_candidates || 0) > 0);
   const venueHealthSourceStatus = useMemo(() => {

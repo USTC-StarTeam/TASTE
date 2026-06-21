@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -77,6 +78,63 @@ def _load_environment_module(module_name: str, relative_path: str):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_current_find_read_public_projection_is_compact_and_katex_ready():
+    spec = importlib.util.spec_from_file_location(
+        "reading_current_find_contract",
+        ROOT / "modules" / "reading" / "scripts" / "orchestration" / "ensure_current_find_research_plan.py",
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    long_method = (
+        "该方法定义生成目标 $L_{gen}=\\sum_i \\log p_\\theta(y_i|x)$，并用候选集合重排。"
+        "它先编码输入，再通过噪声条件模块生成候选，最后按偏好分数筛选。"
+        * 30
+    )
+    reading = {
+        "paper_id": "p1",
+        "title": "Readable Formula Paper",
+        "venue": "ICLR",
+        "year": 2026,
+        "full_text_available": True,
+        "full_text_status": "pdf_text_read",
+        "abstract_zh": "本文研究生成式推荐中的偏好建模问题，并给出可复现实验。" * 8,
+        "motivation_zh": "现有方法难以同时处理生成质量和偏好约束，因此需要显式目标。" * 6,
+        "method_details_zh": long_method,
+        "experiments_zh": "实验覆盖两个数据集、多个 baseline、NDCG@10 与 Recall@20，并报告消融。" * 10,
+        "limitations_zh": "主要风险是候选生成成本和长尾样本迁移，需要额外审计。" * 8,
+        "method_advantages_zh": ["目标函数清晰，容易映射到现有训练循环。" * 3],
+        "method_disadvantages_zh": ["生成候选较多时推理成本上升。" * 4],
+    }
+
+    public = module.build_public_reading_views([reading])
+    assert len(public) == 1
+    assert public[0]["public_formulas"]
+    assert public[0]["public_formulas"][0].startswith("$")
+    assert "\\textit" not in json.dumps(public, ensure_ascii=False)
+    assert len(public[0]["method_details_zh"]) < len(long_method)
+
+    par_method = (
+        "PAR的形式化建模框架如下：给定Cα结构x∈R^{L×3}，"
+        "定义分解分布将x分解为集合X={x1,...,xn}（其中xn=x），"
+        "然后通过尺度级自回归p_θ(x)=∏_{i=1}^n p_θ(x_i|X_{<i})生成结构。"
+    )
+    par_public = module.build_public_reading_views([{**reading, "paper_id": "par", "method_details_zh": par_method}])[0]
+    par_payload = json.dumps(par_public, ensure_ascii=False)
+    assert not re.search(r"X=\{x1,\.(?:\s|$)", par_payload)
+    assert any("X=" in formula and "\\ldots" in formula for formula in par_public["public_formulas"])
+
+    rendered = module.render_read_md([reading, {**reading, "paper_id": "par", "title": "PAR", "method_details_zh": par_method}], "find_test_run")
+    assert "### 数学/形式化" in rendered
+    assert "L_{gen}" in rendered
+    assert not re.search(r"X=\{x1,\.(?:\s|$)", rendered)
+    assert "\\ldots" in rendered
+    paragraphs = [chunk.strip() for chunk in rendered.split("\n\n") if chunk.strip()]
+    assert max(len(chunk) for chunk in paragraphs) < 1800
 
 
 def test_find_neurips_official_papers_parser_reads_papers_nips_hash_links():

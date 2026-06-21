@@ -1688,7 +1688,7 @@ _KNOWN_PROJECT_IDS_CACHE: dict[str, Any] = {"expires_at": 0.0, "ids": []}
 WEB_JOB_PROJECT_CACHE_TTL_SEC = float(os.environ.get("WEB_JOB_PROJECT_CACHE_TTL_SEC", "30.0") or 30.0)
 _WEB_JOB_PROJECT_CACHE: dict[str, dict[str, Any]] = {}
 _WEB_JOB_PROJECT_MAP_CACHE: dict[str, Any] = {"expires_at": 0.0, "map": {}}
-JOB_LIST_PROJECT_SUMMARY_TTL_SEC = float(os.environ.get("JOB_LIST_PROJECT_SUMMARY_TTL_SEC", "2.0") or 2.0)
+JOB_LIST_PROJECT_SUMMARY_TTL_SEC = float(os.environ.get("JOB_LIST_PROJECT_SUMMARY_TTL_SEC", "30.0") or 30.0)
 _JOB_LIST_PROJECT_SUMMARY_CACHE: dict[tuple[str, bool, int], dict[str, Any]] = {}
 RUN_PROJECT_CACHE_TTL_SEC = float(os.environ.get("RUN_PROJECT_CACHE_TTL_SEC", "30.0") or 30.0)
 _RUN_PROJECT_CACHE: dict[str, dict[str, Any]] = {}
@@ -3356,6 +3356,7 @@ def _current_find_recommendation_projection(project_root: Path, run_id: str = ""
 PROJECT_ARTIFACT_NAMES = {
     "article.md", "read.md", "idea.md", "plan.md", "source_status.md",
     "find_progress.json", "find_results.json", "read_results.json", "ideas.json", "plans.json",
+    "selection.json",
 }
 PROJECT_DOWNSTREAM_MARKDOWN_RUN_GUARDS = {
     "read.md": "read_results.json",
@@ -3382,7 +3383,13 @@ def _project_current_find_run_id(project_root: Path, *, allow_large_find_results
         "planning/finding/plans.json",
     ]
     for rel in small_rels:
-        payload = _read_project_json(project_root / rel, {})
+        path = project_root / rel
+        try:
+            if path.exists() and path.stat().st_size > LARGE_JSON_ARTIFACT_LIMIT_BYTES:
+                continue
+        except OSError:
+            pass
+        payload = _read_project_json(path, {})
         run_id = _payload_run_id(payload)
         if run_id:
             return run_id
@@ -3451,7 +3458,7 @@ def _project_taste_artifact_path(project_root: Path | None, run_id: str, name: s
     expected = str(run_id or "").strip()
     if not expected:
         return None
-    if name == "find_results.json":
+    if name in {"find_progress.json", "find_results.json"}:
         current = _project_current_find_run_id(project_root, allow_large_find_results=False)
         return candidate if current == expected else None
     if name.endswith(".json"):
@@ -3466,6 +3473,22 @@ def _project_taste_artifact_path(project_root: Path | None, run_id: str, name: s
         return candidate if _project_downstream_markdown_matches_run(project_root, candidate, name, expected) else None
     current = _project_current_find_run_id(project_root, allow_large_find_results=False)
     return candidate if current == expected else None
+
+
+def _project_current_find_light_artifact_names(project_root: Path | None, run_id: str) -> tuple[list[str], list[str]]:
+    if project_root is None or not str(run_id or "").startswith("find_"):
+        return [], []
+    markdown_names = [
+        name
+        for name in LIGHT_ARTIFACT_MARKDOWN_NAMES
+        if _project_taste_artifact_path(project_root, run_id, name) is not None
+    ]
+    json_names = [
+        name
+        for name in LIGHT_ARTIFACT_JSON_NAMES
+        if _project_taste_artifact_path(project_root, run_id, name) is not None
+    ]
+    return markdown_names, json_names
 
 
 def _compact_large_markdown_artifact(path: Path, size_bytes: int) -> dict[str, Any]:
@@ -3555,8 +3578,119 @@ def _hydrate_current_find_markdown_paper_refs(content: str, project_root: Path |
     return CURRENT_FIND_PUBLIC_MARKDOWN_PAPER_REF_RE.sub(replace_ref, content)
 
 
+def _compact_artifact_json_value(
+    value: Any, *, max_items: int = 50, max_text_chars: int = 1200, depth: int = 0
+) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value if len(value) <= max_text_chars else value[:max_text_chars].rstrip() + "..."
+    if depth >= 4:
+        return _artifact_compact_text(value, max_text_chars)
+    if isinstance(value, list):
+        items = [
+            _compact_artifact_json_value(
+                item, max_items=max_items, max_text_chars=max_text_chars, depth=depth + 1
+            )
+            for item in value[:max_items]
+        ]
+        if len(value) > max_items:
+            items.append({"content_truncated": True, "omitted_items": len(value) - max_items})
+        return items
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= max_items:
+                out["content_truncated"] = True
+                out["omitted_items"] = len(value) - max_items
+                break
+            out[str(key)] = _compact_artifact_json_value(
+                item, max_items=max_items, max_text_chars=max_text_chars, depth=depth + 1
+            )
+        return out
+    return _artifact_compact_text(value, max_text_chars)
+
+
+def _compact_large_find_progress_artifact(
+    path: Path, run_id: str, size_bytes: int, project_root: Path | None = None
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "run_id": run_id,
+        "content_truncated": True,
+        "artifact_size_bytes": size_bytes,
+        "truncation_reason": "find_progress.json is large; API returns compact progress/source health state so artifact polling remains responsive.",
+    }
+    keep_keys = [
+        "updated_at",
+        "generated_at",
+        "phase",
+        "status",
+        "selection",
+        "source_status",
+        "venue_health_report",
+        "counts",
+        "abstract_translation_status",
+        "strong_recommendation_count",
+        "strict_strong_anchor_count",
+        "recommendation_target_count",
+        "recommendation_shortfall",
+        "recommendation_policy",
+        "source_health_refreshed_at",
+        "source_health_refresh_policy",
+        "live_progress",
+    ]
+    keep_key_set = set(keep_keys)
+
+    def absorb_progress(source: Any) -> bool:
+        if not isinstance(source, dict):
+            return False
+        actual = _payload_run_id(source)
+        if actual and actual != str(run_id or ""):
+            return False
+        copied = False
+        for key in keep_keys:
+            if source.get(key) not in (None, "", [], {}):
+                payload[key] = _compact_artifact_json_value(source.get(key))
+                copied = True
+        diagnostics = source.get("diagnostics") if isinstance(source.get("diagnostics"), dict) else {}
+        if diagnostics:
+            payload["diagnostics"] = _compact_artifact_json_value(diagnostics)
+            copied = True
+        survey_stats = _find_survey_stats_from_payloads(source)
+        if survey_stats:
+            merged = payload.get("survey_stats") if isinstance(payload.get("survey_stats"), dict) else {}
+            merged.update(survey_stats)
+            payload["survey_stats"] = merged
+            copied = True
+        return copied
+
+    copied_any = False
+    if project_root is not None:
+        copied_any |= absorb_progress(_read_project_json(project_root / "state" / "finding_frontend.json", {}))
+        copied_any |= absorb_progress(_current_find_recommendation_projection(project_root, run_id))
+    if not copied_any:
+        progress = read_json(path, {})
+        if isinstance(progress, dict):
+            copied_any |= absorb_progress(progress)
+            omitted_keys = [key for key in progress.keys() if key not in keep_key_set | {"diagnostics"}]
+            if omitted_keys:
+                payload["omitted_keys"] = omitted_keys
+    return _strip_public_taste_marker(payload)
+
+
 def _compact_large_find_results_artifact(directory: Path, run_id: str, size_bytes: int) -> dict[str, Any]:
-    progress = read_json(directory / "find_progress.json", {})
+    project_root = _project_root_for_find_run(run_id)
+    progress: dict[str, Any] = {}
+    if project_root is not None:
+        projection = _current_find_recommendation_projection(project_root, run_id)
+        frontend_state = _read_project_json(project_root / "state" / "finding_frontend.json", {})
+        if isinstance(projection, dict) and projection:
+            progress = projection
+        elif isinstance(frontend_state, dict) and _payload_run_id(frontend_state) == run_id:
+            progress = frontend_state
+    if not progress:
+        fallback = _read_project_json_if_small(directory / "find_progress.json", {})
+        progress = fallback if isinstance(fallback, dict) else {}
     payload: dict[str, Any] = {
         "run_id": run_id,
         "content_truncated": True,
@@ -3576,7 +3710,6 @@ def _compact_large_find_results_artifact(directory: Path, run_id: str, size_byte
             if key in progress:
                 payload[key] = progress.get(key)
         merge_survey_stats(_find_survey_stats_from_payloads(progress))
-    project_root = _project_root_for_find_run(run_id)
     if project_root is not None:
         packet = _read_project_json(project_root / "state" / "literature_tool_packet.json", {})
         frontend_state = _read_project_json(project_root / "state" / "finding_frontend.json", {})
@@ -3671,6 +3804,15 @@ def _job_is_hollow_route(item: dict[str, Any]) -> bool:
 
 def _read_project_json(path: Path, default: Any) -> Any:
     try:
+        return read_json(path, default)
+    except Exception:
+        return default
+
+
+def _read_project_json_if_small(path: Path, default: Any, *, max_bytes: int = LARGE_JSON_ARTIFACT_LIMIT_BYTES) -> Any:
+    try:
+        if not path.exists() or path.stat().st_size > max_bytes:
+            return default
         return read_json(path, default)
     except Exception:
         return default
@@ -7441,7 +7583,7 @@ def _live_jobs_from_projects(*, compact: bool = True) -> list[dict[str, Any]]:
         cfg = _read_project_json(root / "project.json", {})
         tick = _read_project_json(root / "state" / "supervision_tick.json", {})
         full_cycle = _read_project_json(root / "state" / "full_research_cycle.json", {})
-        find_progress = _read_project_json(root / "planning" / "finding" / "find_progress.json", {})
+        find_progress = _read_project_json_if_small(root / "planning" / "finding" / "find_progress.json", {})
         literature_packet = _read_project_json(root / "state" / "literature_tool_packet.json", {})
         current_plan = _read_project_json(root / "state" / "current_find_research_plan.json", {})
         reference_live_job = _live_reference_reproduction_job(project, root, current_plan if isinstance(current_plan, dict) else {}, compact=compact)
@@ -9153,7 +9295,7 @@ def _job_list_project_summary(project_id: str, *, compact: bool = True) -> dict[
         payload = {}
     if isinstance(payload, dict):
         _JOB_LIST_PROJECT_SUMMARY_CACHE[key] = {
-            "expires_at": now + JOB_LIST_PROJECT_SUMMARY_TTL_SEC,
+            "expires_at": time.monotonic() + JOB_LIST_PROJECT_SUMMARY_TTL_SEC,
             "payload": dict(payload),
         }
         return dict(payload)
@@ -11416,9 +11558,20 @@ def api_artifacts(run_id: str, light: bool = Query(False)) -> dict:
     def artifact_path(name: str) -> Path:
         return _project_taste_artifact_path(project_root, run_id, name) or (directory / name)
 
-    blocked_markdown_names = _blocked_current_find_downstream_markdown_names(project_root, run_id)
-    markdown_names = [name for name in (LIGHT_ARTIFACT_MARKDOWN_NAMES if light_mode else MARKDOWN_ARTIFACT_NAMES) if name not in blocked_markdown_names]
-    json_names = LIGHT_ARTIFACT_JSON_NAMES if light_mode else JSON_ARTIFACT_NAMES
+    markdown_names: list[str]
+    json_names: list[str]
+    if light_mode:
+        markdown_names, json_names = _project_current_find_light_artifact_names(project_root, run_id)
+    else:
+        markdown_names, json_names = [], []
+    if not markdown_names and not json_names:
+        blocked_markdown_names = _blocked_current_find_downstream_markdown_names(project_root, run_id)
+        markdown_names = [
+            name
+            for name in (LIGHT_ARTIFACT_MARKDOWN_NAMES if light_mode else MARKDOWN_ARTIFACT_NAMES)
+            if name not in blocked_markdown_names
+        ]
+        json_names = LIGHT_ARTIFACT_JSON_NAMES if light_mode else JSON_ARTIFACT_NAMES
     file_names = markdown_names + json_names
     mtimes: list[tuple[str, int, int]] = []
     for name in file_names:
@@ -11467,6 +11620,10 @@ def api_artifacts(run_id: str, light: bool = Query(False)) -> dict:
                 stat = path.stat()
             except OSError:
                 stat = None
+            if name == "find_progress.json" and stat is not None and stat.st_size > LARGE_JSON_ARTIFACT_LIMIT_BYTES:
+                content = _compact_large_find_progress_artifact(path, run_id, stat.st_size, project_root)
+                artifacts.append({"name": name, "kind": "json", "content": content, "path": str(path), "content_truncated": True, "size_bytes": stat.st_size})
+                continue
             if name == "find_results.json" and stat is not None and stat.st_size > LARGE_JSON_ARTIFACT_LIMIT_BYTES:
                 content = _compact_large_find_results_artifact(directory, run_id, stat.st_size)
                 artifacts.append({"name": name, "kind": "json", "content": content, "path": str(path), "content_truncated": True, "size_bytes": stat.st_size})

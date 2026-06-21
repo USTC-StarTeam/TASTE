@@ -88,6 +88,15 @@ def _read_json(path: Path, default: Any) -> Any:
         return default
 
 
+def _read_json_if_small(path: Path, default: Any, *, max_bytes: int = 5_000_000) -> Any:
+    try:
+        if not path.exists() or path.stat().st_size > max_bytes:
+            return default
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
 def _current_find_selected_execution_summary(root: Path) -> dict[str, Any]:
     paths = type("CurrentFindExecutionPaths", (), {"state": root / "state", "planning": root / "planning"})()
     try:
@@ -969,14 +978,14 @@ def _current_find_run_id_from_state(root: Path) -> str:
     # Prefer small state/progress files. find_results.json can be multi-MB and
     # compact project summaries call this helper several times per refresh.
     for rel in [
-        ("planning", "finding", "find_progress.json"),
         ("state", "current_find_recommendation_projection.json"),
         ("state", "current_find_research_plan.json"),
         ("state", "literature_tool_packet.json"),
         ("state", "finding_frontend.json"),
+        ("planning", "finding", "find_progress.json"),
         ("planning", "finding", "find_results.json"),
     ]:
-        payload = _read_json(root.joinpath(*rel), {})
+        payload = _read_json_if_small(root.joinpath(*rel), {})
         if not isinstance(payload, dict):
             continue
         run_id = str(payload.get("run_id") or payload.get("source_run_id") or payload.get("find_run_id") or "").strip()
@@ -1017,7 +1026,7 @@ def _current_find_recommendation_projection(root: Path, run_id: str = "") -> dic
 
 def _current_find_results_light(root: Path, project_id: str = "") -> dict[str, Any]:
     """Return compact current Find metadata without hydrating large find_results.json."""
-    progress = _read_json(root / "planning" / "finding" / "find_progress.json", {})
+    progress = _read_json_if_small(root / "planning" / "finding" / "find_progress.json", {})
     plan = _read_json(root / "state" / "current_find_research_plan.json", {})
     packet = _read_json(root / "state" / "literature_tool_packet.json", {})
     frontend = _read_json(root / "state" / "finding_frontend.json", {})
@@ -2768,12 +2777,13 @@ def _fresh_base_data_required(plan: Any) -> bool:
 
 def _current_find_run_id_for_project(root: Path) -> str:
     for rel in [
-        root / "planning" / "finding" / "find_progress.json",
         root / "state" / "current_find_research_plan.json",
         root / "state" / "literature_tool_packet.json",
+        root / "state" / "finding_frontend.json",
         root / "state" / "supervision_tick.json",
+        root / "planning" / "finding" / "find_progress.json",
     ]:
-        payload = _read_json(rel, {})
+        payload = _read_json_if_small(rel, {})
         if isinstance(payload, dict):
             run_id = str(payload.get("run_id") or payload.get("source_run_id") or payload.get("find_run_id") or "").strip()
             if run_id:
@@ -6761,7 +6771,7 @@ def _compact_project_summary(summary: dict[str, Any]) -> dict[str, Any]:
 
 
 def _light_find_survey_from_progress(project_dir: Path) -> dict[str, Any]:
-    progress = _read_json(project_dir / "planning" / "finding" / "find_progress.json", {})
+    progress = _read_json_if_small(project_dir / "planning" / "finding" / "find_progress.json", {})
     projection = _read_json(project_dir / "state" / "current_find_recommendation_projection.json", {})
     if not isinstance(progress, dict):
         progress = {}
@@ -11244,6 +11254,7 @@ def _current_find_pipeline_summary(root: Path, find_results: dict[str, Any] | No
     })
     stored_validation = state_plan.get("reading_validation") if state_plan_matches and isinstance(state_plan, dict) else {}
     standalone_validation = _read_json(root / "state" / "current_find_claude_reading_validation.json", {})
+    embedded_read_validation = read_results.get("reading_validation") if isinstance(read_results.get("reading_validation"), dict) else {}
 
     def wrapper_validation_matches_current_run(candidate: Any, *, inherited_state_match: bool = False) -> bool:
         if not isinstance(candidate, dict):
@@ -11271,7 +11282,7 @@ def _current_find_pipeline_summary(root: Path, find_results: dict[str, Any] | No
                 return (2, generated_at)
         return (0, "")
 
-    wrapper_candidates = [stored_validation, standalone_validation]
+    wrapper_candidates = [embedded_read_validation, stored_validation, standalone_validation]
     best_wrapper_validation = max(wrapper_candidates, key=wrapper_validation_priority, default={})
     best_wrapper_priority = wrapper_validation_priority(best_wrapper_validation)
     # Current read_results content must be judged by the current validator. A
@@ -11284,10 +11295,14 @@ def _current_find_pipeline_summary(root: Path, find_results: dict[str, Any] | No
     except OSError:
         read_results_mtime = None
     wrapper_generated_at = _parse_utc_datetime(best_wrapper_validation.get("generated_at") or best_wrapper_validation.get("updated_at")) if isinstance(best_wrapper_validation, dict) else None
+    embedded_read_validation_selected = best_wrapper_validation is embedded_read_validation and isinstance(embedded_read_validation, dict)
     wrapper_validation_fresh_for_read = bool(
-        wrapper_generated_at is not None
-        and read_results_mtime is not None
-        and wrapper_generated_at + dt.timedelta(seconds=2) >= read_results_mtime
+        embedded_read_validation_selected
+        or (
+            wrapper_generated_at is not None
+            and read_results_mtime is not None
+            and wrapper_generated_at + dt.timedelta(seconds=2) >= read_results_mtime
+        )
     )
     trusted_source_wrapper_validation = bool(
         isinstance(best_wrapper_validation, dict)
@@ -11720,7 +11735,7 @@ def _taste_literature_summary(root: Path) -> dict[str, Any]:
     read_results = _read_json(root / "planning" / "finding" / "read_results.json", {})
     frontend = _read_json(root / "state" / "finding_frontend.json", {})
     intermediates = _read_json(root / "state" / "taste_literature_intermediates.json", {})
-    progress = _read_json(root / "planning" / "finding" / "find_progress.json", {})
+    progress = _read_json_if_small(root / "planning" / "finding" / "find_progress.json", {})
     if not isinstance(find_results, dict):
         find_results = {}
     if not isinstance(read_results, dict):
@@ -12210,7 +12225,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     if lit_packet and not same_current_run_payload(lit_packet):
         lit_packet = {}
         lit_summary = {}
-    progress = safe_dict(_read_json(root / "planning" / "finding" / "find_progress.json", {}))
+    progress = safe_dict(_read_json_if_small(root / "planning" / "finding" / "find_progress.json", {}))
     plan_gate = safe_dict(current_plan.get("literature_gate")) if same_current_run_payload(current_plan) else {}
     progress_status = str(progress.get("status") or progress.get("phase") or "").lower()
     progress_blocked_llm = "blocked_llm" in progress_status or "quota" in progress_status
@@ -13711,7 +13726,7 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
     }
 
     find_summary = _find_summary_from_payload(find_results)
-    progress = safe_dict(_read_json(root / 'planning' / 'finding' / 'find_progress.json', {}))
+    progress = safe_dict(_read_json_if_small(root / 'planning' / 'finding' / 'find_progress.json', {}))
     progress_counts = safe_dict(progress.get('counts')) if _payload_matches_current_run(progress, str(find_summary.get('run_id') or '')) else {}
     for key in pipeline_stage_count_keys:
         value = projection_survey_stats.get(key)
@@ -14559,7 +14574,7 @@ def _literature_recommendation_gate_is_blocked(project: str) -> bool:
     full = _read_json(root / "state" / "full_research_cycle.json", {})
     blocker_plan = _read_json(root / "state" / "blocker_action_plan.json", {})
     packet = _read_json(root / "state" / "literature_tool_packet.json", {})
-    find_progress = _read_json(root / "planning" / "finding" / "find_progress.json", {})
+    find_progress = _read_json_if_small(root / "planning" / "finding" / "find_progress.json", {})
     packet_summary = packet.get("summary", {}) if isinstance(packet, dict) and isinstance(packet.get("summary"), dict) else {}
     blocker_summary = blocker_plan.get("summary", {}) if isinstance(blocker_plan, dict) and isinstance(blocker_plan.get("summary"), dict) else {}
 

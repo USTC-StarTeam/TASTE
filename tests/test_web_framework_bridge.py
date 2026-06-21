@@ -1001,6 +1001,45 @@ def test_web_project_summary_projects_source_integrity_blocker(monkeypatch, tmp_
     assert "不能作为真实会议语料" in summary["current_blocker"]["summary"]
 
 
+def test_api_artifacts_light_compacts_large_current_find_progress(monkeypatch, tmp_path):
+    reading_scripts = ROOT / "modules" / "reading" / "scripts"
+    sys.path.insert(0, str(reading_scripts))
+    sys.modules.pop("pipeline", None)
+    from auto_research.web import server as web_server
+
+    projects = tmp_path / "projects"
+    root = _make_project(projects, "demo")
+    finding = root / "planning" / "finding"
+    finding.mkdir(parents=True, exist_ok=True)
+    run_id = "find_large_progress_demo"
+    (root / "state" / "finding_frontend.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    progress = {
+        "run_id": run_id,
+        "phase": "complete",
+        "counts": {"raw_title_index": 240, "strong_recommendations": 20},
+        "source_status": [{"source": "NeurIPS", "count": 240, "status": "normal"}],
+        "raw_title_index": [{"title": f"paper {index}", "abstract": "x" * 200} for index in range(240)],
+    }
+    (finding / "find_progress.json").write_text(json.dumps(progress), encoding="utf-8")
+    run_directory = tmp_path / "runs" / run_id
+    run_directory.mkdir(parents=True)
+    monkeypatch.setattr(web_server, "run_dir", lambda _run_id: run_directory)
+    monkeypatch.setattr(web_server, "PROJECT_IDS_ROOT", projects)
+    monkeypatch.setattr(web_server, "LARGE_JSON_ARTIFACT_LIMIT_BYTES", 1024)
+    web_server._RUN_ARTIFACTS_CACHE.clear()
+
+    payload = web_server.api_artifacts(run_id, light=True)
+
+    progress_artifact = next(item for item in payload["artifacts"] if item["name"] == "find_progress.json")
+    assert progress_artifact["content_truncated"] is True
+    assert progress_artifact["size_bytes"] > 1024
+    content = progress_artifact["content"]
+    assert content["counts"]["raw_title_index"] == 240
+    assert "raw_title_index" in content["omitted_keys"]
+    assert "raw_title_index" not in content
+    assert len(json.dumps(payload, ensure_ascii=False)) < 20000
+
+
 def test_web_jobs_keeps_only_latest_persisted_environment_history(monkeypatch):
     reading_scripts = ROOT / "modules" / "reading" / "scripts"
     sys.path.insert(0, str(reading_scripts))

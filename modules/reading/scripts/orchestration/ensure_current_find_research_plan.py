@@ -3361,7 +3361,7 @@ def _split_sentences(text: Any, limit: int = 3, max_chars: int = 900) -> str:
     clean = _sanitize_read_text(text, max_chars * 2)
     if not clean:
         return ""
-    parts = [part.strip() for part in re.split(r"(?<=[。！？.!?])\s+|(?<=[。！？])", clean) if part.strip()]
+    parts = [part.strip() for part in re.split(r"(?<=[。！？])\s*|(?<=[.!?])\s+", clean) if part.strip()]
     if not parts:
         parts = [clean]
     return compact("".join(parts[:limit]), max_chars)
@@ -3369,6 +3369,10 @@ def _split_sentences(text: Any, limit: int = 3, max_chars: int = 900) -> str:
 
 INLINE_MATH_FRAGMENT_RE = re.compile(
     r"(?<![`$])([A-Za-z0-9α-ωΑ-ΩθΘλΛϕφΦ̃ˆ_{}^|·⊤∈∉≤≥≈≠+*/=<>()[\],-]{2,}(?:[=^_⊤θΘλΛϕφΦ̃ˆ∈∉≤≥≈≠·|][A-Za-z0-9α-ωΑ-ΩθΘλΛϕφΦ̃ˆ_{}^|·⊤∈∉≤≥≈≠+*/=<>()[\],-]*)+)(?![`$])"
+)
+PUBLIC_INLINE_FORMULA_RE = re.compile(
+    r"([A-Za-zΑ-Ωα-ωθΘλΛϕφΦ_][A-Za-z0-9Α-Ωα-ωθΘλΛϕφΦ_{}^()|<>]*"
+    r"\s*(?:∈|∉|=|≤|≥|≈|≠|<|>)\s*[^\s，。；;、（）()：:\u4e00-\u9fff]{1,120})"
 )
 
 
@@ -3385,13 +3389,193 @@ def _ensure_zh_sentence_end(text: str) -> str:
 
 def _protect_inline_math(text: str) -> str:
     clean = str(text or "")
-    # The web preview does not run a TeX renderer. Regex-guessing math spans
-    # made Chinese deep reads visibly worse, for example `$θ$−$y`. Keep
-    # formulas readable as plain text, and only repair historical split spans.
-    clean = re.sub(r"\$([^$\n]{1,80})\$([−-])\$([^$\n]{1,80})\$", r"\1\2\3", clean)
-    clean = re.sub(r"\$([^$\n]{1,80})\$([−-])", r"\1\2", clean)
-    clean = re.sub(r"([−-])\$([^$\n]{1,80})\$", r"\1\2", clean)
+    # Preserve valid Markdown math for the web KaTeX renderer. Historical
+    # outputs sometimes split one expression into `$a$-$b$`; repair only that
+    # malformed shape without stripping good `$...$` spans.
+    clean = re.sub(r"\$([^$\n]{1,80})\$([−-])\$([^$\n]{1,80})\$", r"$\1\2\3$", clean)
+    clean = re.sub(r"\$([^$\n]{1,80})\$([−-])(?=\$)", r"$\1\2", clean)
+    clean = re.sub(r"(?<=\$)([−-])\$([^$\n]{1,80})\$", r"\1\2$", clean)
     return clean
+
+
+def _repair_public_unbalanced_math_tail(text: str) -> str:
+    clean = str(text or "").strip()
+    if not clean or clean.count("{") <= clean.count("}"):
+        return clean
+    prefix = clean[: clean.rfind("{")]
+    prefix = re.sub(r"[A-Za-zΑ-Ωα-ωθΘλΛϕφΦ_][A-Za-z0-9Α-Ωα-ωθΘλΛϕφΦ_()^]*\s*=\s*$", "", prefix)
+    prefix = prefix.rstrip(" ，,;；:：")
+    return _ensure_zh_sentence_end(prefix) if prefix else ""
+
+
+def _normalize_public_latex_text_commands(text: Any) -> str:
+    value = str(text or "")
+    for command in ["textit", "emph", "textbf", "texttt", "textsc", "underline", "text"]:
+        value = re.sub(r"\\" + command + r"\{([^{}]{1,220})\}", r"\1", value)
+    return value
+
+
+def _read_public_markdown_text(value: Any, limit: int = 900) -> str:
+    clean = _sanitize_read_text(_normalize_public_latex_text_commands(value), limit * 2)
+    if not clean:
+        return ""
+    clean = re.sub(r"\n{3,}", "\n\n", clean)
+    return _protect_inline_math(compact(clean, limit))
+
+
+def _public_sentence_chunks(value: Any, *, max_items: int = 3, max_chars: int = 260) -> list[str]:
+    clean = _read_public_markdown_text(value, max_chars * max(max_items, 1) * 2)
+    if not clean:
+        return []
+    parts = [part.strip() for part in re.split(r"(?<=[。！？])\s*|(?<=[.!?])\s+|[；;]\s*", clean) if part.strip()]
+    if not parts:
+        parts = [clean]
+    out: list[str] = []
+    for part in parts:
+        item = _repair_public_unbalanced_math_tail(compact(_ensure_zh_sentence_end(part), max_chars))
+        if item and item not in out:
+            out.append(item)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _public_list_items(value: Any, *, max_items: int = 3, max_chars: int = 220) -> list[str]:
+    values = value if isinstance(value, list) else [value]
+    out: list[str] = []
+    for raw in values:
+        if isinstance(raw, dict):
+            raw = first_text(raw, "text", "summary", "insight", "reason") or json.dumps(json_safe(raw), ensure_ascii=False)
+        for item in _public_sentence_chunks(raw, max_items=max_items, max_chars=max_chars):
+            if item and item not in out:
+                out.append(item)
+            if len(out) >= max_items:
+                return out
+    return out
+
+
+def _normalize_formula_for_katex(expr: Any) -> str:
+    value = str(expr or "").strip()
+    if not value:
+        return ""
+    value = value.replace("\\(", "").replace("\\)", "").strip()
+    if value.startswith("$$") and value.endswith("$$"):
+        inner = value[2:-2].strip()
+    elif value.startswith("$") and value.endswith("$"):
+        inner = value[1:-1].strip()
+    else:
+        inner = value
+    inner = _normalize_public_latex_text_commands(inner)
+    inner = re.sub(r"\s+", " ", inner).strip().replace("−", "-")
+    replacements = {
+        "∈": r"\in ",
+        "∉": r"\notin ",
+        "≤": r"\le ",
+        "≥": r"\ge ",
+        "≈": r"\approx ",
+        "≠": r"\ne ",
+        "×": r"\times ",
+        "∏": r"\prod ",
+        "∑": r"\sum ",
+        "θ": r"\theta",
+        "Θ": r"\Theta",
+    }
+    for source, target in replacements.items():
+        inner = inner.replace(source, target)
+    inner = inner.replace("...", r"\ldots")
+    inner = re.sub(r"=\{([^{}]{1,120})\}", r"=\{\1\}", inner)
+    if not inner or re.search(r"[\u4e00-\u9fff]", inner):
+        return ""
+    if re.search(r"[\^_]\s*$", inner):
+        return ""
+    if len(inner) > 180 or inner.count("{") != inner.count("}"):
+        return ""
+    if re.search(r"\\(?:textit|emph|textbf|texttt|textsc|underline)\s*\{", inner):
+        return ""
+    if not re.search(r"(\\[A-Za-z]+|[=<>≤≥≈≠+*/_^{}]|[Α-Ωα-ω∑∏∫√∞]|\b(?:argmax|argmin|softmax|KL|CE|MSE|NDCG|AUC|log|exp)\b)", inner):
+        return ""
+    return f"${inner}$"
+
+
+def _formula_candidate_ok(expr: str) -> bool:
+    inner = str(expr or "").strip().strip("$").strip()
+    if not inner or re.search(r"[\u4e00-\u9fff]", inner):
+        return False
+    if re.search(r"[\^_]\s*$", inner):
+        return False
+    if re.search(r"\\(?:textit|emph|textbf|texttt|textsc|underline)\s*\{", inner):
+        return False
+    return bool(re.search(r"[=<>≤≥≈≠+*/_^{}]|\\[A-Za-z]+|[Α-Ωα-ω∑∏∫√∞]", inner))
+
+
+def _extract_public_formulas(row: dict[str, Any], limit: int = 3) -> list[str]:
+    formulas: list[str] = []
+    explicit_values: list[Any] = []
+    for key in ["formulas", "formulae", "math_formulas", "key_formulas", "objective", "loss"]:
+        value = row.get(key) if isinstance(row, dict) else None
+        if isinstance(value, list):
+            explicit_values.extend(value)
+        elif value not in (None, "", []):
+            explicit_values.append(value)
+    text_fields = "\n".join(str(row.get(key) or "") for key in ["method_details_zh", "method", "experiments_zh", "experiments", "limitations_zh", "limitations"] if isinstance(row, dict))
+    explicit_values.extend(re.findall(r"\$\$([^$\n]{1,220})\$\$", text_fields))
+    explicit_values.extend(re.findall(r"(?<!\\)\$([^$\n]{1,180})(?<!\\)\$", text_fields))
+    explicit_values.extend(re.findall(r"\\\(([^\n]{1,180})\\\)", text_fields))
+    explicit_values.extend(re.findall(r"\\\[([^\n]{1,220})\\\]", text_fields))
+    explicit_values.extend(PUBLIC_INLINE_FORMULA_RE.findall(text_fields))
+    for raw in explicit_values:
+        expr = _normalize_formula_for_katex(raw)
+        if expr and _formula_candidate_ok(expr) and expr not in formulas:
+            formulas.append(expr)
+        if len(formulas) >= limit:
+            break
+    return formulas
+
+
+def public_reading_view(row: dict[str, Any], index: int = 0) -> dict[str, Any]:
+    clean = _sanitize_reading_public_fields(dict(row)) if isinstance(row, dict) else {}
+    title = _sanitize_read_text(clean.get("title") or clean.get("paper_title") or f"Paper {index}", 220)
+    method_items = _public_list_items(_read_field(clean, "method_details_zh", "method"), max_items=3, max_chars=260)
+    experiment_items = _public_list_items(_read_field(clean, "experiments_zh", "experiments"), max_items=3, max_chars=240)
+    limitation_items = _public_list_items(_read_field(clean, "limitations_zh", "limitations", "critique_reason"), max_items=2, max_chars=220)
+    motivation_items = _public_list_items(_read_field(clean, "motivation_zh", "problem", "relevance"), max_items=2, max_chars=240)
+    advantages = _public_list_items(clean.get("method_advantages_zh"), max_items=3, max_chars=220)
+    disadvantages = _public_list_items(clean.get("method_disadvantages_zh") or clean.get("limitations_zh"), max_items=3, max_chars=220)
+    digest_parts = []
+    for bucket in [motivation_items[:1], method_items[:1], experiment_items[:1], limitation_items[:1]]:
+        digest_parts.extend(bucket)
+    digest = " ".join(digest_parts)
+    formulas = _extract_public_formulas(clean, 3)
+    return {
+        "paper_id": first_text(clean, "paper_id", "id", "entry_id") or f"paper_{index}",
+        "title": title,
+        "venue": clean.get("venue"),
+        "year": clean.get("year"),
+        "url": clean.get("url"),
+        "pdf_url": clean.get("pdf_url"),
+        "score": clean.get("read_score") if clean.get("read_score") not in (None, "") else clean.get("score"),
+        "read_score": clean.get("read_score"),
+        "full_text_available": bool(clean.get("full_text_available")),
+        "full_text_status": clean.get("full_text_status"),
+        "verdict": clean.get("verdict"),
+        "support_role": clean.get("support_role"),
+        "method_family_zh": _read_public_markdown_text(clean.get("method_family_zh") or _method_family_zh(" ".join(str(clean.get(key) or "") for key in ["title", "method_details_zh", "method"])), 80),
+        "public_digest_zh": compact(digest or "该论文精读公开摘要待补齐。", 620),
+        "abstract_zh": compact(_read_public_markdown_text(_read_original_abstract_for_display(clean), 520), 520),
+        "motivation_zh": "\n".join(f"- {item}" for item in motivation_items),
+        "method_details_zh": "\n".join(f"- {item}" for item in method_items),
+        "experiments_zh": "\n".join(f"- {item}" for item in experiment_items),
+        "limitations_zh": "\n".join(f"- {item}" for item in limitation_items),
+        "method_advantages_zh": advantages,
+        "method_disadvantages_zh": disadvantages,
+        "public_formulas": formulas,
+        "math_formulas": formulas,
+        "display_policy": "public_compact_reading_view; raw deep-read audit remains in read_results.readings",
+    }
+
+
+def build_public_reading_views(readings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [public_reading_view(row, idx) for idx, row in enumerate([item for item in readings if isinstance(item, dict)], 1)]
 
 
 def _render_read_paragraph(value: Any, fallback: str = "", limit: int = 2600) -> str:
@@ -3900,22 +4084,31 @@ def _render_method_overview(readings: list[dict[str, Any]]) -> list[str]:
     return lines
 
 def render_read_md(readings: list[dict[str, Any]], run_id: str) -> str:
-    visible_readings = [row for row in readings if isinstance(row, dict)]
-    completed = sum(1 for row in visible_readings if _reading_has_full_text_evidence(row) and _reading_has_full_text_content(row))
-    pending = max(0, len(visible_readings) - completed)
-    lines = ["# 当前 Find 推荐论文精读\n\n", f"- run_id: `{run_id}`\n", f"- readings: {len(visible_readings)}\n", f"- 全文精读完成: {completed}\n"]
+    audit_readings = [row for row in readings if isinstance(row, dict)]
+    public_readings = build_public_reading_views(audit_readings)
+    completed = sum(1 for row in audit_readings if _reading_has_full_text_evidence(row) and _reading_has_full_text_content(row))
+    pending = max(0, len(audit_readings) - completed)
+    lines = [
+        "# 当前 Find 推荐论文精读\n\n",
+        f"- run_id: `{run_id}`\n",
+        f"- readings: {len(audit_readings)}\n",
+        f"- 全文精读完成: {completed}\n",
+        "- 展示策略: 公开版只展示短摘要、要点和 KaTeX 公式；完整审计文本保留在 `read_results.json.readings`。\n",
+    ]
     if pending:
         lines.append(f"- 未通过精读合同: {pending}\n")
-    ranking = build_reading_ranking(visible_readings, run_id, source="render_read_md")
+    ranking = build_reading_ranking(audit_readings, run_id, source="render_read_md")
     ranked_items = [item for item in ranking.get("ranked_readings", []) if isinstance(item, dict)]
     if ranked_items:
-        lines.extend(["\n## 读后重评分排序\n\n", str(ranking.get("comparative_summary_zh") or "") + "\n\n", "| 排名 | 分数 | 论文 | 依据 |\n", "|---:|---:|---|---|\n"])
-        for item in ranked_items:
-            title = _sanitize_read_text(item.get("title"), 180).replace("|", " ")
-            reason = _sanitize_read_text(item.get("why_ranked_here_zh"), 360).replace("|", " ")
-            lines.append(f"| {item.get('rank')} | {_score_display(item.get('read_score'))} | {title} | {reason} |\n")
+        lines.extend(["\n## 读后重评分排序\n\n", compact(str(ranking.get("comparative_summary_zh") or ""), 520) + "\n\n"])
+        for item in ranked_items[:8]:
+            title = _sanitize_read_text(item.get("title"), 120).replace("|", " ")
+            reason = _sanitize_read_text(item.get("why_ranked_here_zh"), 170).replace("|", " ")
+            lines.append(f"- {item.get('rank')}. **{title}**（{_score_display(item.get('read_score'))}）：{_protect_inline_math(reason)}\n\n")
+        if len(ranked_items) > 8:
+            lines.append(f"- 其余 {len(ranked_items) - 8} 篇保留在 `read_results.json.reading_ranking` 审计字段中。\n\n")
     lines.append("\n")
-    for idx, row in enumerate(readings, 1):
+    for idx, row in enumerate(public_readings, 1):
         title = _sanitize_read_text(row.get("title"), 240)
         meta = [str(row.get("venue") or "").strip(), str(row.get("year") or "").strip()]
         meta_text = " ".join(item for item in meta if item).strip()
@@ -3923,34 +4116,52 @@ def render_read_md(readings: list[dict[str, Any]], run_id: str) -> str:
             f"## {idx}. {title}\n\n",
             f"- venue/year: {meta_text or '未回填'}\n",
             f"- score: {_score_display(row.get('score'))}\n",
+            f"- full_text_status: {row.get('full_text_status') or '未回填'}\n",
             f"- URL: {row.get('url') or '未回填'}\n",
             f"- PDF: {row.get('pdf_url') or '未回填'}\n\n",
-            "### 原论文摘要（中文）\n",
-            _render_read_paragraph(_read_original_abstract_for_display(row), "（原论文摘要未通过精读合同。）", 2600) + "\n\n",
-            "### 论文动机\n",
-            _render_read_paragraph(_read_field(row, "motivation_zh", "problem"), "（论文动机未通过精读合同。）", 2600) + "\n\n",
-            "### 详细方法\n",
-            _render_read_paragraph(_read_field(row, "method_details_zh", "method"), "（详细方法未通过精读合同。）", 4200) + "\n\n",
-            "### 实验设置与结果\n",
-            _render_read_paragraph(_read_field(row, "experiments_zh", "experiments"), "（实验设置与结果未通过精读合同。）", 3200) + "\n\n",
-            "### 局限性\n",
-            _render_read_paragraph(_read_field(row, "limitations_zh", "limitations"), "（局限性未通过精读合同。）", 2600) + "\n\n",
-            "### 方法优缺点\n",
+            "### 速览\n",
+            _render_read_paragraph(row.get("public_digest_zh"), "（公开摘要未生成。）", 760) + "\n\n",
+            "### 动机\n",
+            (row.get("motivation_zh") or "- （动机要点未生成。）") + "\n\n",
+            "### 机制\n",
+            (row.get("method_details_zh") or "- （机制要点未生成。）") + "\n\n",
+            "### 数学/形式化\n",
         ])
-        advantages = _read_list(row, "method_advantages_zh")
-        disadvantages = _read_list(row, "method_disadvantages_zh")
+        formulas = [formula for formula in as_list(row.get("public_formulas")) if str(formula or "").strip()]
+        if formulas:
+            for formula in formulas[:3]:
+                lines.append(f"- {formula}\n")
+        else:
+            lines.append("- 本文公开精读摘要未抽取到可安全渲染的公式；完整符号细节保留在审计 JSON。\n")
+        lines.extend([
+            "\n### 实验与证据\n",
+            (row.get("experiments_zh") or "- （实验要点未生成。）") + "\n\n",
+            "### 可借鉴点\n",
+        ])
+        advantages = _public_list_items(row.get("method_advantages_zh"), max_items=3, max_chars=220)
         if advantages:
-            lines.append("优点：\n")
             for item in advantages:
-                lines.append(f"- {_protect_inline_math(_ensure_zh_sentence_end(item))}\n")
-        if disadvantages:
-            lines.append("不足：\n")
-            for item in disadvantages:
-                lines.append(f"- {_protect_inline_math(_ensure_zh_sentence_end(item))}\n")
+                lines.append(f"- {_protect_inline_math(item)}\n")
+        else:
+            lines.append("- （可借鉴点未生成。）\n")
+        lines.append("\n### 风险边界\n")
+        risks = _public_list_items(row.get("method_disadvantages_zh"), max_items=3, max_chars=220) or _public_list_items(row.get("limitations_zh"), max_items=2, max_chars=220)
+        if risks:
+            for item in risks:
+                lines.append(f"- {_protect_inline_math(item)}\n")
+        else:
+            lines.append("- （风险边界未生成。）\n")
         lines.append("\n")
-    lines.extend(_render_method_overview(readings))
+    lines.append("## 横向方法比较\n\n")
+    for idx, row in enumerate(public_readings[:8], 1):
+        title = _sanitize_read_text(row.get("title"), 110)
+        family = _sanitize_read_text(row.get("method_family_zh"), 60) or "机制类别缺失"
+        advantage = _public_list_items(row.get("method_advantages_zh"), max_items=1, max_chars=130)
+        risk = _public_list_items(row.get("method_disadvantages_zh"), max_items=1, max_chars=130) or _public_list_items(row.get("limitations_zh"), max_items=1, max_chars=130)
+        lines.append(f"- **{idx}. {title}**：{family}；可借鉴：{advantage[0] if advantage else '待补'}；风险：{risk[0] if risk else '待补'}。\n\n")
+    if len(public_readings) > 8:
+        lines.append(f"- 其余 {len(public_readings) - 8} 篇的完整横向比较保留在 JSON 审计字段中，网页公开版只展示前 8 条摘要。\n\n")
     return "".join(lines)
-
 
 def render_idea_md(ideas: list[dict[str, Any]], run_id: str, paper_index: dict[str, dict[str, Any]] | None = None) -> str:
     lines = ["# 当前 Find 驱动 Ideas\n\n", f"- run_id: `{run_id}`\n", f"- ideas: {len(ideas)}\n\n"]
@@ -4439,6 +4650,7 @@ def write_claude_takeover_prompt(paths, project: str, run_id: str, read_limit: i
 
 硬性要求：
 1. 只围绕当前 run_id `{run_id}`。所有新写入的 `current_find_deep_read_fragments/*.json`、`ideas.json`、`plans.json` 顶层 `run_id` 都必须严格等于 `{run_id}`；任何旧 run_id 分片只能作为审计反例，不能作为当前产物。必须精读 Read canonical reading packet 里的全部 {read_limit} 篇可读论文；当 `full_text_reading/full_text_packet.json` run_id 匹配且 `papers` 非空时，canonical packet 就是其中有 `text_path` 且正文长度足够的 rows，包括同一 run 的 `read_replacement=true` replacement。原始 Find Top-N 是用户可见 Find 输出，不是 Read 完成数的唯一来源；无正文的原推荐、已由 replacement 替掉的原推荐和 packet 中 0 字符 rows 只作审计，禁止写 deep-read 分片或计入完成。不得重写 Find 的用户可见推荐。若 `full_text_reading/full_text_packet.json` 已提供正文抽取文本，必须打开对应 `text_path` 并基于正文写原论文摘要（中文）、论文动机、详细方法、实验设置与结果、局限性、方法优缺点；不得把“全文包已就绪”当成精读内容。主控 Claude Code 必须把每篇论文拆成独立精读任务，并且必须调用 Task/subagent 逐篇审读全文；禁止主控自己用几句 synthesis 替代子任务。若当前会话没有 Task/subagent 工具，必须停止并报告 `blocked: task_subagent_unavailable_for_deep_reading`，不能降级为主控直接写。每篇 reading 必须记录 `subagent_deep_read=true` 和 `deep_read_audit`，包括 `mode=task_subagent`、`subagent_used=true`、`status=completed`、对应 `text_path` 和正文长度。对每篇都要优先使用可用 `pdf_url`/OpenReview 页面/项目页/代码链接和已有正文文本；如果 PDF 或网页无法访问，必须在该条 `full_text_status` 中说明不可访问原因，不能用流程话术代替论文内容。KDD/ACM 论文必须先按正确来源协议探索：从 DOI/ACM DL 页面、OpenAlex/Crossref/DBLP 元数据和作者主页确认论文身份，再查找同题 arXiv 或机构 repository PDF；只有确认同题同作者/年份后才能使用 arXiv/repository PDF，不得一上来堆 fallback，也不得把 ACM 页面抓取失败写成全文不可读。每篇成功精读的 reading 必须写 `full_text_available=true`，`full_text_status` 为 `pdf_text_read`/`html_text_read`/`full_text_read` 之一，并记录 `pdf_text_chars`、`full_text_chars`、`source_text_chars` 或 `source_evidence` 中的正文长度/来源；同时必须写中文合同字段 `abstract_zh`、`motivation_zh`、`method_details_zh` 或中文 `method`、`experiments_zh` 或中文 `experiments`、`limitations_zh` 或中文 `limitations`，以及 `method_advantages_zh`、`method_disadvantages_zh`。`abstract_zh` 可以直接使用或翻译 Find 阶段捕获的论文原摘要；但只有题录、推荐理由、主题命中、流程话术、“全文包已就绪但未写精读 synthesis”、`abstract_from_find` 单独存在且其余精读字段缺失、英文-only 精读字段或“待补全文”都会被 TASTE 门控拒绝。
+   公开阅读展示格式硬要求：完整审计字段可以很长，但每篇 reading 必须额外便于 wrapper 生成短公开版；不要把公开可读内容写成一整段超长文字。方法、实验、局限、优缺点都应天然能切成 2-4 条短要点。数学只使用 Markdown+KaTeX 可渲染写法：行内 `$...$`、块级 `$$...$$`；不要把中文塞进公式，不要输出裸 `\\textit{{}}`/`\\textbf{{}}` 文本样式命令，不要出现半截 dollar delimiter。
    字段质量下限：
    - `abstract_zh` 至少 260 个非空白中文字符，必须呈现论文原摘要的中文内容；可以直接使用/翻译 Find 捕获的论文原摘要，但不能用推荐理由、主题命中、`critique_reason` 或流程说明冒充摘要。
    - `motivation_zh` 至少 180 个非空白中文字符，说明论文要解决的具体矛盾、已有方法不足和任务背景。
@@ -6117,6 +6329,7 @@ def _maybe_recover_read_results_from_subagent_logs(
         "source": CLAUDE_TAKEOVER_SOURCE,
         "generated_at": recovered_at,
         "readings": recovered,
+        "public_readings": build_public_reading_views(recovered),
         "artifact_recovery": {
             "source": "claude_subagent_jsonl",
             "recovered_at": recovered_at,
@@ -7239,6 +7452,7 @@ def normalize_claude_outputs_to_current_find_policy(project: str, paths, run_id:
         "normalization_source": "claude_code_output_guarded_by_current_find_policy",
         "claude_takeover": {key: takeover.get(key) for key in ["status", "return_code", "started_at", "finished_at", "prompt_path"] if key in takeover},
         "readings": readings,
+        "public_readings": build_public_reading_views(readings),
         "reading_ranking": reading_ranking,
         "targeted_search_queries": targeted_queries,
         "reading_ranking_order": reading_ranking.get("reading_ranking_order", []),
@@ -7776,6 +7990,7 @@ def write_current_find_structured_artifacts(
         "generated_at": generated_at,
         "normalization_source": normalization_source,
         "readings": readings,
+        "public_readings": build_public_reading_views(readings),
         "reading_ranking": reading_ranking,
         "reading_ranking_order": reading_ranking.get("reading_ranking_order", []),
         "targeted_search_queries": targeted_queries,
@@ -8288,7 +8503,7 @@ def run_llm_current_find_fallback(project: str, paths, cfg: dict[str, Any], tast
     selection_ready = current_find_selected_execution_ready(ideas, plans) if content_ready else False
     ready = bool(content_ready and selection_ready)
     selection_fields = current_find_selection_fields(ideas, plans, source=LLM_CURRENT_FIND_FALLBACK_SOURCE, executable=ready)
-    read_payload = {"run_id": run_id, "source": LLM_CURRENT_FIND_FALLBACK_SOURCE, "generated_at": generated_at, "readings": readings, "reading_ranking": reading_ranking, "reading_ranking_order": reading_ranking.get("reading_ranking_order", []), "reading_validation": validation, "targeted_search_queries": targeted_queries, "full_text_packet": full_text_packet_summary(full_text_packet), **selection_fields}
+    read_payload = {"run_id": run_id, "source": LLM_CURRENT_FIND_FALLBACK_SOURCE, "generated_at": generated_at, "readings": readings, "public_readings": build_public_reading_views(readings), "reading_ranking": reading_ranking, "reading_ranking_order": reading_ranking.get("reading_ranking_order", []), "reading_validation": validation, "targeted_search_queries": targeted_queries, "full_text_packet": full_text_packet_summary(full_text_packet), **selection_fields}
     idea_payload = {"run_id": run_id, "source": LLM_CURRENT_FIND_FALLBACK_SOURCE, "generated_at": generated_at, "ideas": ideas, "targeted_search_queries": targeted_queries, **selection_fields}
     plan_payload = {"run_id": run_id, "source": LLM_CURRENT_FIND_FALLBACK_SOURCE, "generated_at": generated_at, "plans": plans, "targeted_search_queries": targeted_queries, **selection_fields}
     save_json(taste_dir / "read_results.json", read_payload)
@@ -8866,6 +9081,7 @@ def main() -> int:
         selection_fields = {key: execution_plan.get(key) for key in CURRENT_FIND_SELECTION_FIELD_KEYS}
         if isinstance(read_results, dict):
             read_results["readings"] = readings
+            read_results["public_readings"] = build_public_reading_views(readings)
             read_results.update(selection_fields)
             strip_verbose_claude_takeover(read_results)
             save_json(taste_dir / "read_results.json", read_results)
@@ -8896,7 +9112,7 @@ def main() -> int:
     ideas = build_ideas(readings, repo, fresh_plan if isinstance(fresh_plan, dict) else {}, cfg)[: args.idea_count]
     plans = build_plans(ideas, fresh_plan if isinstance(fresh_plan, dict) else {})
     ideas, plans = enrich_public_projections(ideas, plans)
-    read_payload = {"run_id": run_id, "source": "current_find_bridge_compatibility_only", "generated_at": now_iso(), "readings": readings}
+    read_payload = {"run_id": run_id, "source": "current_find_bridge_compatibility_only", "generated_at": now_iso(), "readings": readings, "public_readings": build_public_reading_views(readings)}
     idea_payload = {"run_id": run_id, "source": "current_find_bridge_compatibility_only", "generated_at": now_iso(), "ideas": ideas, "candidate_pool": [{"title": row.get("title"), "venue": row.get("venue"), "score": row.get("score")} for row in readings], "judge_scores": [{"id": row.get("id"), "score": row.get("score"), "recommendation": row.get("recommendation")} for row in ideas], "llm": {"enabled": False, "reason": "compatibility fallback only; normal TASTE flow delegates current Find Read/Idea/Plan to Claude Code"}}
     plan_payload = {"run_id": run_id, "source": "current_find_bridge_compatibility_only", "generated_at": now_iso(), "plans": plans}
     execution_plan = build_execution_plan(args.project, cfg, run_id, readings, ideas, plans, fresh_plan if isinstance(fresh_plan, dict) else {})
