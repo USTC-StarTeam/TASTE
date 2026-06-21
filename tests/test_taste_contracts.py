@@ -1445,6 +1445,65 @@ def test_experimenting_trusts_empty_structured_permission_denials(tmp_path):
     assert acceptance["permission_denials"] == []
 
 
+def test_experimenting_blocks_synthetic_smoke_for_real_data_plan(tmp_path):
+    runner = _load_experiment_runner()
+    artifact_dir = tmp_path / "iteration_01"
+    artifact_dir.mkdir()
+    log_path = artifact_dir / "claude_stdout.log"
+    log_path.write_text(
+        "# started_at: now\n\n" + json.dumps({"type": "result", "subtype": "success", "result": "done", "permission_denials": []}) + "\n# finished_at: now\n# return_code: 0\n",
+        encoding="utf-8",
+    )
+    (artifact_dir / "experiment_iteration_summary.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "commands": [{"command": "python train.py -C config_kon_demo.yaml", "status": "passed"}],
+                "metrics": {"best_monitor_loss": 16.5881},
+                "dataset": "synthetic_demo",
+                "acceptance_status": "accepted",
+                "judgment": {"verdict": "pipeline_validated", "weakest_slice": "synthetic demo only"},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (artifact_dir / "metrics.json").write_text(
+        json.dumps({"run_metadata": {"dataset": "synthetic_demo"}, "best_monitor_loss": 16.5881}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    plan = runner.ExperimentPlan(
+        path=tmp_path / "plan.json",
+        raw={
+            "plan_id": "plan_5",
+            "environment_requirements": {"training_data": ["ProtDBench wet-lab data", "PDFBench SwissTest", "ProteinShake 12-task set"]},
+            "experiment_stages": [{"success_gate": "GP evaluator on ProtDBench Spearman r > 0.5"}],
+        },
+        text="",
+        experiment_id="plan_5",
+        title="real data plan",
+        method="experiment",
+        dataset="ProtDBench wet-lab data / PDFBench SwissTest",
+        metric="spearman",
+        run_command="",
+        conda_env="",
+        summary="Use real benchmark/wet-lab data, not synthetic demo.",
+    )
+
+    acceptance = runner.evaluate_iteration_acceptance(
+        artifact_dir,
+        {"return_code": 0, "log_path": str(log_path)},
+        {"return_code": 0, "status": "not_configured", "log_path": ""},
+        {"best_monitor_loss": 16.5881},
+        plan,
+    )
+
+    assert acceptance["accepted"] is False
+    assert acceptance["acceptance_status"] == "blocked_real_data_experiment_required"
+    codes = {row["code"] for row in acceptance["acceptance_blockers"]}
+    assert "real_data_experiment_required" in codes
+
+
 def test_experimenting_rejects_summary_acceptance_blockers_without_permission_denial(tmp_path):
     runner = _load_experiment_runner()
     artifact_dir = tmp_path / "iteration_01"

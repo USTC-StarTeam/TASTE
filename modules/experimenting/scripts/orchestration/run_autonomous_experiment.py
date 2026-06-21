@@ -92,6 +92,8 @@ def build_claude_prompt(plan: ExperimentPlan, *, repo: Path, artifact_dir: Path,
 4. 在 artifact_dir 写 `experiment_iteration_summary.json`，至少包含 status、changed_files、commands、metrics、failure_reason、next_action。
 5. 如产生指标，写 `metrics.json`；如发现坏例，写 `bad_cases.json` 或在 summary 中列出路径。
 6. 停止前给出是否继续深化、修复、比较或剪枝的判断。
+7. 如果计划或上下文要求真实数据/benchmark/wet-lab 数据，synthetic/demo 训练只能标记为流程 smoke，不能写 `acceptance_status=accepted` 或声称支持论文结论。
+8. 如果真实数据、生成流水线或评估流水线不可用，必须在 summary 的 `acceptance_blockers` 中写出结构化 blocker，而不是用合成数据替代。
 
 实验计划：
 ```json
@@ -382,6 +384,94 @@ def _summary_acceptance_status_blocks(status: str) -> bool:
     return normalized not in accepted_values or any(term in normalized for term in blocking_terms)
 
 
+def _flatten_for_gate(value: Any, *, limit: int = 60000) -> str:
+    parts: list[str] = []
+
+    def visit(item: Any) -> None:
+        if sum(len(part) for part in parts) > limit:
+            return
+        if item in (None, "", [], {}):
+            return
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if isinstance(key, str):
+                    parts.append(key)
+                visit(child)
+            return
+        if isinstance(item, (list, tuple, set)):
+            for child in item:
+                visit(child)
+            return
+        parts.append(str(item))
+
+    visit(value)
+    return "\n".join(parts)[:limit]
+
+
+def _plan_requires_real_data(plan: ExperimentPlan | None) -> bool:
+    if plan is None:
+        return False
+    plan_text = "\n".join([
+        str(plan.dataset or ""),
+        str(plan.summary or ""),
+        _flatten_for_gate(plan.raw),
+    ]).lower()
+    if not plan_text.strip():
+        return False
+    real_markers = (
+        "real data",
+        "real-data",
+        "真实数据",
+        "真实评估",
+        "wet-lab",
+        "wet lab",
+        "benchmark",
+        "protdbench",
+        "pdfbench",
+        "proteinshake",
+        "swisstest",
+        "cath",
+        "tedbench",
+        "实验标注",
+        "湿实验",
+        "真实数据实验",
+    )
+    return any(marker in plan_text for marker in real_markers)
+
+
+def _payload_is_synthetic_only(payload: Any, artifact_dir: Path, metrics: dict[str, Any]) -> bool:
+    text = "\n".join([
+        _flatten_for_gate(payload),
+        _flatten_for_gate(metrics),
+    ]).lower()
+    metrics_path = artifact_dir / "metrics.json"
+    if metrics_path.exists():
+        try:
+            text += "\n" + _flatten_for_gate(json.loads(metrics_path.read_text(encoding="utf-8"))).lower()
+        except Exception:
+            text += "\n" + metrics_path.read_text(encoding="utf-8", errors="replace")[:12000].lower()
+    synthetic_markers = (
+        "synthetic",
+        "synthetic_demo",
+        "synthetic demo",
+        "demo_data",
+        "config_kon_demo",
+        "prepare_demo_data",
+        "流程自测",
+        "流程验证",
+        "smoke test",
+        "smoke",
+    )
+    return any(marker in text for marker in synthetic_markers)
+
+
+def _payload_has_non_synthetic_real_data_evidence(payload: Any, metrics: dict[str, Any]) -> bool:
+    text = "\n".join([_flatten_for_gate(payload), _flatten_for_gate(metrics)]).lower()
+    real_markers = ("protdbench", "pdfbench", "proteinshake", "wet-lab", "wet lab", "swisstest", "cath", "tedbench", "real data", "真实数据", "湿实验")
+    synthetic_markers = ("synthetic", "demo_data", "config_kon_demo", "prepare_demo_data")
+    return any(marker in text for marker in real_markers) and not any(marker in text for marker in synthetic_markers)
+
+
 def _blocker(code: str, message: str, evidence: Any = None) -> dict[str, Any]:
     item: dict[str, Any] = {"code": code, "message": message}
     if evidence not in (None, "", [], {}):
@@ -393,6 +483,8 @@ def _acceptance_failure_status(blockers: list[dict[str, Any]]) -> str:
     codes = [str(item.get("code") or "") for item in blockers]
     if "claude_permission_denied" in codes:
         return "blocked_claude_permission_denied"
+    if "real_data_experiment_required" in codes:
+        return "blocked_real_data_experiment_required"
     if "missing_generation_pipeline" in codes and "missing_evaluation_pipeline" in codes:
         return "blocked_generation_evaluation_pipeline_missing"
     if "missing_generation_pipeline" in codes:
@@ -427,7 +519,7 @@ def _write_failure_summary_if_needed(artifact_dir: Path, status: str, blockers: 
     return str(target)
 
 
-def evaluate_iteration_acceptance(artifact_dir: Path, claude_result: dict[str, Any], validation_result: dict[str, Any], metrics: dict[str, Any]) -> dict[str, Any]:
+def evaluate_iteration_acceptance(artifact_dir: Path, claude_result: dict[str, Any], validation_result: dict[str, Any], metrics: dict[str, Any], plan: ExperimentPlan | None = None) -> dict[str, Any]:
     blockers: list[dict[str, Any]] = []
     warnings: list[str] = []
     claude_rc = int(claude_result.get("return_code") or 0)
@@ -473,6 +565,22 @@ def evaluate_iteration_acceptance(artifact_dir: Path, claude_result: dict[str, A
             blockers.extend(declared_blockers)
         elif _summary_acceptance_status_blocks(summary_acceptance_status):
             blockers.append(_blocker("iteration_summary_acceptance_not_accepted", f"experiment_iteration_summary.json acceptance_status={summary_acceptance_status}。", str(summary_path)))
+
+    if summary_state == "loaded" and _plan_requires_real_data(plan):
+        synthetic_only = _payload_is_synthetic_only(iteration_summary, artifact_dir, metrics)
+        has_real_data = _payload_has_non_synthetic_real_data_evidence(iteration_summary, metrics)
+        if synthetic_only and not has_real_data:
+            blockers.append(_blocker(
+                "real_data_experiment_required",
+                "实验计划要求真实数据/benchmark 证据，但本轮只产生 synthetic/demo smoke；该结果只能证明流水线可运行，不能作为论文实验成功或指标证据。",
+                {"summary_path": str(summary_path), "plan_dataset": plan.dataset if plan else ""},
+            ))
+        elif not has_real_data:
+            blockers.append(_blocker(
+                "real_data_experiment_required",
+                "实验计划要求真实数据/benchmark 证据，但本轮 summary/metrics 未记录非 synthetic 的真实数据集、benchmark 或 wet-lab 证据。",
+                {"summary_path": str(summary_path), "plan_dataset": plan.dataset if plan else ""},
+            ))
 
     if blockers:
         acceptance_status = _acceptance_failure_status(blockers)
@@ -563,7 +671,7 @@ def main(argv: list[str] | None = None) -> int:
         metric_name, metric_value = primary_metric(metrics, plan.metric)
         command_rc = int(validation_result.get("return_code") or 0)
         claude_rc = int(claude_result.get("return_code") or 0)
-        acceptance = evaluate_iteration_acceptance(artifact_dir, claude_result, validation_result, metrics)
+        acceptance = evaluate_iteration_acceptance(artifact_dir, claude_result, validation_result, metrics, plan)
         success = bool(acceptance.get("accepted")) and acceptance.get("status") == "success"
         status = str(acceptance.get("status") or "failed")
         record = {
