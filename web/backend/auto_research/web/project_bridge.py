@@ -663,9 +663,19 @@ def _venue_requirements_summary(root: Path, venue: str, paper_state: dict[str, A
     }
 
 
+def _public_runtime_with_valid_handoff(root: Path, runtime_public: dict[str, Any] | None) -> dict[str, Any]:
+    runtime = dict(runtime_public or {}) if isinstance(runtime_public, dict) else {}
+    if _environment_handoff_gate_passed(_project_environment_handoff(root)):
+        return _runtime_with_environment_handoff(root, runtime)
+    for key in ["conda_env", "conda_env_prefix", "experiment_conda_env", "experiment_python"]:
+        runtime.pop(key, None)
+    return runtime
+
+
 def _runtime_diagnostics_light(project: str, cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg = cfg if isinstance(cfg, dict) else {}
-    runtime = _runtime_with_environment_handoff(PROJECTS / project, project_runtime_config(project, cfg))
+    root = PROJECTS / project
+    runtime = _public_runtime_with_valid_handoff(root, project_runtime_config(project, cfg))
     try:
         path_head = interactive_env(project, cfg).get("PATH", "").split(os.pathsep)[:12]
     except Exception:
@@ -764,7 +774,9 @@ def _runtime_path_head_with_environment_handoff(root: Path, runtime_public: dict
 
 def _public_run_preferences(project: str, root: Path, cfg: dict[str, Any] | None = None, runtime_public: dict[str, Any] | None = None, selection: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg = cfg if isinstance(cfg, dict) else {}
-    handoff_env = _handoff_conda_env(_project_environment_handoff(root))
+    handoff = _project_environment_handoff(root)
+    handoff_ready = _environment_handoff_gate_passed(handoff)
+    handoff_env = _handoff_conda_env(handoff) if handoff_ready else ""
     paper = cfg.get("paper") if isinstance(cfg.get("paper"), dict) else {}
     venue = _display_venue(cfg.get("target_venue") or cfg.get("venue") or paper.get("target_venue") or "")
     paper = _paper_preferences_for_venue(paper, venue)
@@ -780,7 +792,7 @@ def _public_run_preferences(project: str, root: Path, cfg: dict[str, Any] | None
         "paper": paper,
         "default_find_selection": selection if isinstance(selection, dict) else (_current_project_source_selection(project, root) if project else canonical_source_selection()),
     }
-    runtime = _runtime_with_environment_handoff(root, runtime_public)
+    runtime = _public_runtime_with_valid_handoff(root, runtime_public)
     if runtime:
         out["runtime"] = runtime
     return out
@@ -13191,7 +13203,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         if isinstance(row, dict) and str(row.get("status") or "queued") == "queued"
     ][-5:]
     runtime_public = dict(runtime.get("runtime", {}) if isinstance(runtime.get("runtime"), dict) else {})
-    runtime_public = _runtime_with_environment_handoff(root, runtime_public)
+    runtime_public = _public_runtime_with_valid_handoff(root, runtime_public)
     runtime_public.pop("env_overrides", None)
     runtime_public.pop("extra_path", None)
     runtime_compact = dict(runtime) if isinstance(runtime, dict) else {}
