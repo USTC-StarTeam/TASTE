@@ -22,6 +22,16 @@ PYG_VERIFY_SNIPPET = (
     "import torch_geometric, torch_scatter, torch_sparse, torch_cluster; "
     "print('pyg', torch_geometric.__version__)"
 )
+PROTDIS_METRICS_VERIFY_SNIPPET = (
+    "import sys, numpy as np; "
+    "sys.path.insert(0, 'tasks/proteinshake'); "
+    "from src.models.metrics import compute_metrics, default_metrics; "
+    "metric = default_metrics('classification'); "
+    "assert metric == 'accuracy', metric; "
+    "score = compute_metrics(np.array([[0.1, 0.9], [0.8, 0.2]]), np.array([1, 0]), 'classification', metric); "
+    "assert float(score) == 1.0, score; "
+    "print('tasks metrics module OK', metric, float(score))"
+)
 BIOPYTHON_PACKAGE_NAME = "biopython"
 ATOM3D_PACKAGE_NAME = "atom3d"
 BIOPYTHON_LEGACY_SPEC = "biopython==1.81"
@@ -165,6 +175,12 @@ def _row_verifies_cuda(row: dict[str, Any]) -> bool:
     return "torch.cuda.is_available" in text or "cuda is not available" in text
 
 
+def _row_has_protdis_metrics_keys_mischeck(row: dict[str, Any]) -> bool:
+    text = command_text(_row_command_tokens(row))
+    lowered = text.lower()
+    return "tasks/proteinshake" in lowered and "default_metrics" in lowered and ".keys()" in text
+
+
 def _row_requires_legacy_biopython(row: dict[str, Any]) -> bool:
     tokens = _row_command_tokens(row)
     packages = _pip_install_packages(tokens) | _conda_install_packages(tokens)
@@ -212,6 +228,30 @@ def _pin_legacy_biopython(row: dict[str, Any]) -> dict[str, Any]:
             changed = True
     if changed:
         updated["command"] = tokens
+    return updated
+
+
+def _replace_python_c_snippet(tokens: list[str], snippet: str) -> list[str] | None:
+    inner = _conda_run_inner_tokens(tokens) or tokens
+    offset = len(tokens) - len(inner)
+    for index in range(offset, len(tokens) - 1):
+        if Path(str(tokens[index])).name.startswith("python") and str(tokens[index + 1]) == "-c":
+            updated = list(tokens)
+            if index + 2 < len(updated):
+                updated[index + 2] = snippet
+            else:
+                updated.append(snippet)
+            return updated
+    return None
+
+
+def _protdis_metrics_verify_row(row: dict[str, Any]) -> dict[str, Any]:
+    updated = dict(row)
+    tokens = list(command_tokens(row.get("command")))
+    updated["command"] = _replace_python_c_snippet(tokens, PROTDIS_METRICS_VERIFY_SNIPPET) or ["python", "-c", PROTDIS_METRICS_VERIFY_SNIPPET]
+    updated["timeout_sec"] = int(updated.get("timeout_sec") or 300)
+    updated["required"] = True
+    updated["policy_managed"] = True
     return updated
 
 
@@ -320,7 +360,8 @@ def normalize_environment_plan_commands(plan: dict[str, Any], machine: dict[str,
     needs_pyg = any(isinstance(row, dict) and (_row_installs_pyg_with_conda(row) or _row_installs_pyg_with_pip(row) or _row_verifies_pyg_import(row)) for row in rows)
     conda_installs_torch = any(isinstance(row, dict) and _row_installs_pytorch_with_conda(row) for row in rows)
     needs_biopython_legacy = any(isinstance(row, dict) and _row_requires_legacy_biopython(row) for row in rows) and _plan_or_commands_mention_rigidssl(plan, rows)
-    if not (needs_pyg or (_machine_needs_modern_cuda_stack(machine) and conda_installs_torch) or needs_biopython_legacy):
+    has_protdis_metrics_mischeck = any(isinstance(row, dict) and _row_has_protdis_metrics_keys_mischeck(row) for row in rows)
+    if not (needs_pyg or (_machine_needs_modern_cuda_stack(machine) and conda_installs_torch) or needs_biopython_legacy or has_protdis_metrics_mischeck):
         return plan
 
     normalized = dict(plan)
@@ -382,6 +423,10 @@ def normalize_environment_plan_commands(plan: dict[str, Any], machine: dict[str,
             torch_row_present = True
         if _row_installs_pyg_with_pip(row):
             pyg_row_present = True
+        if _row_has_protdis_metrics_keys_mischeck(row):
+            updated = _protdis_metrics_verify_row(row)
+            rewrites.append({"index": index, "phase": row.get("phase"), "reason": "ProtDiS tasks/proteinshake default_metrics is a function, not a mapping; verify the metrics module by calling default_metrics and compute_metrics instead of inspecting .keys()", "before": row.get("command"), "after": updated.get("command")})
+            row = updated
         new_rows.append(row)
 
     if (needs_pyg or torch_row_present or conda_installs_torch) and not conda_create_present:

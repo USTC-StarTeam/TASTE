@@ -71,10 +71,15 @@ def normalize_success_criteria(plan: dict[str, Any], paper_evidence: dict[str, A
         if schema_issues:
             dropped.append({"index": index, "name": _criterion_name(row), "reason": "non_numeric_or_invalid_success_criterion", "issues": schema_issues, "row": row})
             continue
+        criterion = dict(row)
         if _is_operational_criterion(row):
-            dropped.append({"index": index, "name": _criterion_name(row), "reason": "operational_gate_moved_to_backend_approval_gate", "row": row})
-            continue
-        kept.append(dict(row))
+            criterion.setdefault("approval_scope", "environment_gate")
+            criterion.setdefault("paper_metric", False)
+            criterion.setdefault("non_paper_approval_note", "Environment/data/import/smoke success criteria support the environment handoff only; they cannot approve paper claims or full reproduction metrics.")
+        else:
+            criterion.setdefault("approval_scope", "paper_metric")
+            criterion.setdefault("paper_metric", True)
+        kept.append(criterion)
 
     fallback_used = False
     if not kept and isinstance(paper_evidence, dict):
@@ -98,7 +103,7 @@ def normalize_success_criteria(plan: dict[str, Any], paper_evidence: dict[str, A
             "dropped_count": len(dropped),
             "kept_count": len(kept),
             "fallback_from_paper_evidence": fallback_used,
-            "policy": "success_criteria only carries numeric paper/result metrics; environment setup, CUDA, data download, smoke/import checks are enforced by dedicated backend approval gates.",
+            "policy": "success_criteria preserves numeric environment/data/import/smoke gates as approval_scope=environment_gate while reserving paper_metric criteria for paper/full-reproduction approval.",
             "dropped": dropped[:20],
         },
     ]

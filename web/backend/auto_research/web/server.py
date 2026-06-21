@@ -5035,6 +5035,21 @@ def _ps_row_for_pid(pid: Any) -> dict[str, Any]:
 
 
 
+def _run_id_from_command_line(command: Any) -> str:
+    text = str(command or "")
+    if not text:
+        return ""
+    matches = re.findall(r"(?:^|\s)--run-id(?:=|\s+)([^\s]+)", text)
+    if not matches:
+        matches = re.findall(r"(?:^|\s)--run_id(?:=|\s+)([^\s]+)", text)
+    if matches:
+        return matches[-1].strip().strip("'\"")
+    match = re.search(r"\b(web_environment_[^\s/]+_\d{8}T\d{6}Z)\b", text)
+    if match:
+        return match.group(1).strip().strip("'\"")
+    return ""
+
+
 def _suppress_same_phase_descendant_workers(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep one taskbar row for a stage wrapper and fold its children into logs.
 
@@ -7280,6 +7295,8 @@ def _active_project_worker_job(project: str, root: Path, worker: dict[str, Any],
     paper_substage = _paper_substage_from_cmd(cmd, fallback="paper") if phase == "paper" else ""
     current_find_worker = kind.startswith("current_find") or phase == "read"
     run_id = _project_current_find_run_id(root) if current_find_worker else ""
+    if not run_id and phase == "environment":
+        run_id = _run_id_from_command_line(cmd)
     if not run_id:
         sources = [find_progress, current_plan, full_cycle] if phase == "literature" else [current_plan, find_progress, full_cycle]
         for source in sources:
@@ -7366,6 +7383,7 @@ def _active_project_worker_job(project: str, root: Path, worker: dict[str, Any],
         "run_id": run_id,
         "result": {
             "project": project,
+            "run_id": run_id,
             "pid": pid,
             "phase": phase,
             "raw_stage": paper_substage or kind,
@@ -7374,6 +7392,7 @@ def _active_project_worker_job(project: str, root: Path, worker: dict[str, Any],
             "paper_worker_pid": pid if phase == "paper" else "",
             "paper_worker_kind": kind if phase == "paper" else "",
             "command": cmd,
+            "cmd": cmd,
             "log_path": log_path,
             "artifacts": artifacts,
             "summary": worker_summary,
@@ -8070,6 +8089,8 @@ def _environment_decision_for_job(run_id: Any, result: Any, created_at: Any) -> 
         explicit_path = runs_root / explicit_run / "environment_deployment_decision.json"
         if explicit_path.exists():
             candidates.append((0.0, explicit_path))
+        elif explicit_run.startswith("web_environment_"):
+            return {}
 
     created_ts = _parse_public_job_timestamp(created_at)
     pattern = f"web_environment_{project}_*/environment_deployment_decision.json" if project else "web_environment_*/environment_deployment_decision.json"
@@ -8145,9 +8166,17 @@ def _environment_decision_public_projection(job_id: Any, run_id: Any, result: An
         return {}
     decision_value = str(decision.get("decision") or "").strip()
     exit_code = decision.get("exit_code")
-    if decision_value not in {"continue_repair", "reject", "approve"}:
+    ready_for_experimenting = bool(
+        decision.get("ready_for_experimenting") is True
+        or decision_value == "environment_ready"
+        or (isinstance(decision.get("environment_handoff"), dict) and decision.get("environment_handoff", {}).get("ready_for_experimenting") is True)
+    )
+    if decision_value not in {"continue_repair", "reject", "approve", "environment_ready"} and not ready_for_experimenting:
         return {}
-    if decision_value == "approve":
+    if ready_for_experimenting:
+        status = "ready_for_experimenting"
+        summary = "环境已交付：真实仓库、run-local Conda、数据准备和 loader/model smoke 已通过；论文指标仍由实验阶段验证。"
+    elif decision_value == "approve":
         status = "done"
         summary = "环境配置已通过真实复现和工作区审计，可以进入实验迭代。"
     elif decision_value == "reject":
@@ -8454,6 +8483,120 @@ def _current_find_stage_job_status(stage_state: dict[str, Any], count: int) -> s
     return "done"
 
 
+def _json_count_value(value: Any) -> int:
+    if isinstance(value, list):
+        return len(value)
+    if isinstance(value, dict):
+        return len(value)
+    if value is None or value == "":
+        return 0
+    try:
+        return int(value)
+    except Exception:
+        return 0
+
+
+def _first_positive_count(*values: Any, default: int = 0) -> int:
+    for value in values:
+        count = _json_count_value(value)
+        if count > 0:
+            return count
+    return default
+
+
+def _current_find_read_history_job(project_id: str, root: Path, run_id: str, state_payload: dict[str, Any]) -> dict[str, Any] | None:
+    finding = root / "planning" / "finding"
+    artifact_path = finding / "read_results.json"
+    payload = _read_project_json(artifact_path, {})
+    if not isinstance(payload, dict):
+        return None
+    payload_run_id = _payload_run_id(payload)
+    if payload_run_id and payload_run_id != run_id:
+        return None
+
+    rows = _current_find_stage_list(payload, "readings") or _current_find_stage_list(state_payload, "readings")
+    count = len(rows)
+    if count <= 0:
+        return None
+
+    validation_path = root / "state" / "current_find_claude_reading_validation.json"
+    validation = _read_project_json(validation_path, {})
+    if not isinstance(validation, dict):
+        validation = {}
+    embedded_validation = state_payload.get("reading_validation")
+    if isinstance(embedded_validation, dict):
+        validation = {**validation, **embedded_validation}
+
+    recommended_count = _first_positive_count(
+        validation.get("recommended_reading_count"),
+        validation.get("expected_recommendation_count"),
+        state_payload.get("current_find_reading_count"),
+        payload.get("recommended_reading_count"),
+        default=count,
+    )
+    full_text_count = _first_positive_count(
+        validation.get("full_text_reading_count"),
+        validation.get("full_text_evidence_count"),
+        state_payload.get("full_text_reading_count"),
+        payload.get("full_text_reading_count"),
+        default=sum(1 for row in rows if row.get("full_text_available") or str(row.get("full_text_status") or "").strip()),
+    )
+    pending_count = _json_count_value(
+        validation.get("pending_full_text_reading_count")
+        if "pending_full_text_reading_count" in validation
+        else state_payload.get("pending_full_text_reading_count")
+    )
+    validation_valid = validation.get("valid")
+    status = _current_find_stage_job_status(state_payload, count)
+    if pending_count > 0 or validation_valid is False:
+        status = "blocked"
+
+    if status == "done":
+        summary = f"Read 阶段已完成：当前展示 {count}/{recommended_count or count} 篇；全文精读合格 {full_text_count or count} 篇，待补 {pending_count} 篇。"
+    else:
+        summary = f"Read 阶段仍需补证：当前展示 {count}/{recommended_count or count} 篇；全文精读合格 {full_text_count} 篇，待补 {pending_count} 篇。"
+
+    created_at = _current_find_artifact_timestamp(
+        [artifact_path, validation_path, root / "state" / "current_find_research_plan.json"],
+        str(payload.get("generated_at") or state_payload.get("generated_at") or ""),
+    )
+    result: dict[str, Any] = {
+        "run_id": run_id,
+        "project": project_id,
+        "kind": "current_find_downstream_artifact_history",
+        "source": "planning/finding/read_results.json",
+        "status": status,
+        "summary": summary,
+        "read_count": count,
+        "recommended_reading_count": recommended_count,
+        "full_text_reading_count": full_text_count,
+        "pending_full_text_reading_count": pending_count,
+        "reading_validation_valid": validation_valid,
+    }
+    return {
+        "job_id": f"current-find-read_{_safe_job_fragment(project_id)}_{_safe_job_fragment(run_id)}",
+        "stage": "read",
+        "status": status,
+        "created_at": created_at,
+        "logs": [f"当前状态：{summary}", f"运行编号：{run_id}"],
+        "log_count": 2,
+        "run_id": run_id,
+        "result": result,
+        "internal": False,
+        "display": "",
+        "error": "",
+        "cancel_requested": False,
+        "cancelled_at": "",
+        "progress": {
+            "phase": "complete" if status == "done" else "blocked",
+            "current": count,
+            "total": max(recommended_count, count, 1),
+            "percent": 100 if status == "done" else 0,
+            "message": summary,
+        },
+    }
+
+
 def _current_find_existing_stage_keys(items: list[dict[str, Any]], project_hint: str = "") -> set[tuple[str, str, str]]:
     keys: set[tuple[str, str, str]] = set()
     for item in items:
@@ -8499,6 +8642,9 @@ def _current_find_downstream_stage_history_jobs(project_filter: str = "", existi
             run_id = _payload_run_id(state_payload)
         if not run_id:
             continue
+        read_job = _current_find_read_history_job(project_id, root, run_id, state_payload)
+        if read_job:
+            jobs.append(read_job)
         for stage, artifact_name, rows_key, id_keys, zh_label in [
             ("idea", "ideas.json", "ideas", ("selected_idea_id", "id"), "Idea"),
             ("plan", "plans.json", "plans", ("selected_plan_id", "plan_id"), "Plan"),
@@ -10853,6 +10999,37 @@ def api_jobs(
         for item in dynamic
         if str(item.get("status") or "").lower() in {"queued", "running", "cancelling"}
     }
+    dynamic_live_stage_projects = {
+        (
+            str((item.get("result") if isinstance(item.get("result"), dict) else {}).get("project") or _project_from_job_payload(item.get("job_id"), item) or ""),
+            _public_taste_stage(item.get("stage")),
+        )
+        for item in dynamic
+        if str(item.get("status") or "").lower() in {"queued", "running", "cancelling"}
+    }
+    dynamic_live_stage_projects = {pair for pair in dynamic_live_stage_projects if pair[0] and pair[1] in PROJECT_STAGE_EXCLUSIVE_PHASES}
+    dynamic_live_stage_run_ids: dict[tuple[str, str], str] = {}
+    for item in dynamic:
+        if str(item.get("status") or "").lower() not in {"queued", "running", "cancelling"}:
+            continue
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        project_id = str(result.get("project") or _project_from_job_payload(item.get("job_id"), item) or "").strip()
+        stage_id = _public_taste_stage(item.get("stage"))
+        run_id_value = str(item.get("run_id") or result.get("run_id") or "").strip()
+        if project_id and stage_id in PROJECT_STAGE_EXCLUSIVE_PHASES and run_id_value:
+            dynamic_live_stage_run_ids[(project_id, stage_id)] = run_id_value
+
+    for item in persisted:
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        if str(item.get("status") or "").lower() not in {"queued", "running", "cancelling"}:
+            continue
+        project_id = str(result.get("project") or _project_from_job_payload(item.get("job_id"), item) or "").strip()
+        stage_id = _public_taste_stage(item.get("stage"))
+        live_run_id = dynamic_live_stage_run_ids.get((project_id, stage_id))
+        if live_run_id and not str(item.get("run_id") or result.get("run_id") or "").strip():
+            item["run_id"] = live_run_id
+            if isinstance(result, dict):
+                result["run_id"] = live_run_id
 
     def _hide_persisted_job(item: dict[str, Any]) -> bool:
         if item.get("internal") or str(item.get("display") or "").lower() == "hidden":
@@ -10874,6 +11051,15 @@ def api_jobs(
             project = str(result.get("project") or "")
             if project and project in dynamic_live_projects:
                 return True
+        item_project = str(result.get("project") or _project_from_job_payload(job_id, item) or "").strip()
+        item_stage = _public_taste_stage(stage)
+        item_status = str(item.get("status") or result.get("status") or "").strip().lower()
+        if (
+            item_project
+            and (item_project, item_stage) in dynamic_live_stage_projects
+            and item_status not in {"queued", "running", "cancelling"}
+        ):
+            return True
         return False
 
     persisted = [item for item in persisted if not _hide_persisted_job(item)]
@@ -10926,6 +11112,33 @@ def api_jobs(
         ]
     dynamic_ids = {str(item.get("job_id") or "") for item in dynamic}
     persisted_items = [item for item in persisted if str(item.get("job_id") or "") not in dynamic_ids]
+
+    def _dedupe_persisted_environment_history(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        latest_created: dict[str, str] = {}
+        for item in rows:
+            result = item.get("result") if isinstance(item.get("result"), dict) else {}
+            stage = _public_taste_stage(item.get("stage"))
+            if stage != "environment":
+                continue
+            project_id = str(result.get("project") or _project_from_job_payload(item.get("job_id"), item) or "").strip()
+            if not project_id:
+                continue
+            created = str(item.get("created_at") or "")
+            if project_id not in latest_created or created > latest_created[project_id]:
+                latest_created[project_id] = created
+        if not latest_created:
+            return rows
+        kept: list[dict[str, Any]] = []
+        for item in rows:
+            result = item.get("result") if isinstance(item.get("result"), dict) else {}
+            stage = _public_taste_stage(item.get("stage"))
+            project_id = str(result.get("project") or _project_from_job_payload(item.get("job_id"), item) or "").strip()
+            if stage == "environment" and project_id and str(item.get("created_at") or "") != latest_created.get(project_id):
+                continue
+            kept.append(item)
+        return kept
+
+    persisted_items = _dedupe_persisted_environment_history(persisted_items)
     if live_paper_projects:
         def superseded_by_live_paper(item: dict[str, Any]) -> bool:
             result = item.get("result") if isinstance(item.get("result"), dict) else {}

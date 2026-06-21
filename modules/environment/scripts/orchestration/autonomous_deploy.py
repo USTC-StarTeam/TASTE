@@ -259,6 +259,8 @@ def _is_framework_runtime_write(path: str) -> bool:
         return True
     if rel.startswith("runtime/state/"):
         return True
+    if rel.startswith("runtime/") and rel.endswith(".log") and "/" not in rel[len("runtime/"):]:
+        return True
     if rel.startswith("framework/workspace/"):
         return True
     parts = rel.split("/")
@@ -1137,19 +1139,32 @@ def _looks_like_inline_code_path_literal(value: str) -> bool:
     return _looks_like_explicit_path(text) or normalized.startswith("../") or "/../" in normalized or normalized.endswith("/..")
 
 
+def _joined_string_literal_prefix(node: ast.JoinedStr) -> str:
+    parts: list[str] = []
+    for part in node.values:
+        if isinstance(part, ast.Constant) and isinstance(part.value, str):
+            parts.append(part.value)
+            continue
+        break
+    return "".join(parts)
+
+
 def _python_inline_string_literals(code: str) -> list[str]:
     try:
         tree = ast.parse(str(code or ""))
     except SyntaxError:
         return []
+    parent_by_id = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     literals: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if isinstance(parent_by_id.get(id(node)), ast.JoinedStr):
+                continue
             literals.append(node.value)
         elif isinstance(node, ast.JoinedStr):
-            for part in node.values:
-                if isinstance(part, ast.Constant) and isinstance(part.value, str):
-                    literals.append(part.value)
+            prefix = _joined_string_literal_prefix(node)
+            if prefix:
+                literals.append(prefix)
     return literals
 
 
@@ -1766,15 +1781,29 @@ def _paper_target_source(target: Any) -> str:
     return "paper_evidence.target_metrics"
 
 
+def _criterion_is_environment_gate(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    scope = str(row.get("approval_scope") or "").strip().lower()
+    if scope in {"environment_gate", "environment", "handoff", "runtime_gate", "operational_gate"}:
+        return True
+    return row.get("paper_metric") is False
+
+
+def _paper_metric_success_criteria(criteria: Any) -> list[dict[str, Any]]:
+    if not isinstance(criteria, list):
+        return []
+    return [row for row in criteria if isinstance(row, dict) and not _criterion_is_environment_gate(row)]
+
+
 def _success_criteria_paper_binding_gate(env_plan: dict[str, Any], paper_evidence: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-    criteria = env_plan.get("success_criteria") if isinstance(env_plan.get("success_criteria"), list) else []
+    raw_criteria = env_plan.get("success_criteria") if isinstance(env_plan.get("success_criteria"), list) else []
+    criteria = _paper_metric_success_criteria(raw_criteria)
+    environment_gate_count = len([row for row in raw_criteria if _criterion_is_environment_gate(row)]) if isinstance(raw_criteria, list) else 0
     paper_targets = paper_evidence.get("target_metrics") if isinstance(paper_evidence.get("target_metrics"), list) else []
     issues: list[str] = []
     matches: list[dict[str, Any]] = []
     for index, criterion in enumerate(criteria):
-        if not isinstance(criterion, dict):
-            issues.append(f"success_criteria[{index}] 不是 object，无法绑定论文目标指标")
-            continue
         name = str(criterion.get("name") or criterion.get("metric") or "").strip()
         target_found, target_value, target_key = _criterion_target_value(criterion)
         if not name or not target_found:
@@ -1801,8 +1830,12 @@ def _success_criteria_paper_binding_gate(env_plan: dict[str, Any], paper_evidenc
             matches.append(candidate_matches[0])
         else:
             issues.append(f"success_criteria[{index}] metric={name} target={target_value} 未能绑定到 paper_evidence.target_metrics 中同名且同目标值的论文指标")
+    if not criteria:
+        issues.append("success_criteria 缺少论文级 paper_metric 指标；approval_scope=environment_gate 的标准只能支撑环境交接，不能支撑完整复现或论文效果批准")
     evidence = {
-        "criteria_count": len(criteria),
+        "criteria_count": len(raw_criteria) if isinstance(raw_criteria, list) else 0,
+        "paper_metric_criteria_count": len(criteria),
+        "environment_gate_criteria_count": environment_gate_count,
         "paper_target_metric_count": len(paper_targets),
         "matched_count": len(matches),
         "matches": matches[:8],
@@ -2123,7 +2156,7 @@ def machine_assessment_issues(env_plan: dict[str, Any], machine: dict[str, Any] 
         if gpu_rows and not any(token in evidence_text for token in ["runtime_probe", "nvidia-smi", "machine_profile", "gpu", "cuda", "显存", "显卡"]):
             issues.append("machine_assessment evidence 没有指向 runtime_probe/nvidia-smi/GPU/CUDA/显存等本机探测来源")
     rows = env_plan.get("paper_config_alignment") if isinstance(env_plan.get("paper_config_alignment"), list) else []
-    supported_rows = [row for row in rows if isinstance(row, dict) and _alignment_row_supports_approval(row)]
+    supported_rows = [row for row in rows if isinstance(row, dict) and _alignment_row_is_supported(row)]
     if not any(_alignment_row_mentions_machine(row) for row in supported_rows):
         issues.append("paper_config_alignment 缺少硬件/GPU/CUDA/显存/batch/precision 等本机适配对齐项")
     return issues
@@ -2151,6 +2184,8 @@ def _success_criteria_metric_names(plan: dict[str, Any]) -> set[str]:
     names: set[str] = set()
     for row in rows:
         if not isinstance(row, dict):
+            continue
+        if _criterion_is_environment_gate(row):
             continue
         for key in ["name", "metric"]:
             value = str(row.get(key) or "").strip().lower()
@@ -2220,6 +2255,70 @@ def paper_config_alignment_passed(plan: dict[str, Any]) -> tuple[bool, list[str]
                 f"当前可审计覆盖为：{covered}"
             )
     return not issues, issues
+
+
+def environment_handoff_alignment_passed(plan: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+    rows = plan.get("paper_config_alignment")
+    if not isinstance(rows, list) or not rows:
+        return False, {
+            "issues": ["环境计划缺少 paper_config_alignment；environment 交接至少需要说明已验证入口如何对应论文/仓库配置"],
+            "pending_downstream_alignment": [],
+            "supported_handoff_rows": [],
+        }
+    issues: list[str] = []
+    pending_downstream: list[dict[str, Any]] = []
+    supported_handoff_rows: list[dict[str, Any]] = []
+    command_phases = _command_phase_names(plan)
+    required_command_phases = _required_command_phase_names(plan)
+    optional_command_phases = _optional_command_phase_names(plan)
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            issues.append(f"paper_config_alignment[{index}] 不是 object")
+            continue
+        status = str(row.get("match_status") or row.get("status") or "").strip().lower()
+        phases = _alignment_command_phases(row)
+        has_item = any(str(row.get(key) or "").strip() for key in ["paper_item", "paper_field", "claim", "setting", "category"])
+        has_mapping = any(str(row.get(key) or "").strip() for key in ["implementation_choice", "implementation", "command_phase", "command_ref", "evidence_source"])
+        if not status:
+            issues.append(f"paper_config_alignment[{index}] 缺少 match_status")
+            continue
+        if not has_item:
+            issues.append(f"paper_config_alignment[{index}] 缺少 paper_item/setting")
+            continue
+        if _alignment_row_is_supported(row):
+            if not has_mapping:
+                issues.append(f"paper_config_alignment[{index}] 支持项缺少 implementation_choice/command_phase/evidence_source")
+                continue
+            if phases and command_phases and phases.isdisjoint(command_phases):
+                issues.append(f"paper_config_alignment[{index}] command_phase={sorted(phases)} 不在实际 commands phase 中：{sorted(command_phases)}")
+                continue
+            optional_phase_refs = sorted(phase for phase in phases if phase in optional_command_phases and phase not in required_command_phases)
+            if optional_phase_refs:
+                issues.append(f"paper_config_alignment[{index}] command_phase={optional_phase_refs} 指向 required=false 的可选命令，不能支撑 environment 交接")
+                continue
+            if phases:
+                supported_handoff_rows.append({
+                    "index": index,
+                    "status": status,
+                    "paper_item": row.get("paper_item") or row.get("paper_field") or row.get("setting") or row.get("category"),
+                    "command_phase": sorted(phases),
+                })
+            continue
+        pending_downstream.append({
+            "index": index,
+            "status": status,
+            "critical": row.get("critical") is not False,
+            "paper_item": row.get("paper_item") or row.get("paper_field") or row.get("setting") or row.get("category"),
+            "command_phase": sorted(phases),
+            "reason": "论文级完整配置/指标对齐留给 experimenting/evaluation；environment 只要求真实仓库、环境、数据和 smoke 可交接。",
+        })
+    if not supported_handoff_rows:
+        issues.append("paper_config_alignment 缺少至少一个可映射到实际必需命令的 matched/adapted_for_machine/confirmed/implemented 项")
+    return not issues, {
+        "issues": issues[:10],
+        "pending_downstream_alignment": pending_downstream[:10],
+        "supported_handoff_rows": supported_handoff_rows[:10],
+    }
 
 
 def _compact_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
@@ -3161,6 +3260,87 @@ def _latest_receipts(rounds: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [row for row in payload if isinstance(row, dict)] if isinstance(payload, list) else []
 
 
+def _read_round_receipts(round_record: dict[str, Any], run_dir: Path) -> list[dict[str, Any]]:
+    path_text = str(round_record.get("receipts_path") or "").strip()
+    if not path_text:
+        return []
+    try:
+        receipts_path = ensure_within(Path(path_text).expanduser().resolve(), run_dir.expanduser().resolve())
+    except Exception:
+        return []
+    payload = read_json(receipts_path, [])
+    return [row for row in payload if isinstance(row, dict)] if isinstance(payload, list) else []
+
+
+def _path_exists_within_run_dir(path_text: str, run_dir: Path) -> bool:
+    raw = str(path_text or "").strip()
+    if not raw:
+        return False
+    try:
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = run_dir / candidate
+        candidate = ensure_within(candidate.resolve(), run_dir.expanduser().resolve())
+    except Exception:
+        return False
+    return candidate.exists()
+
+
+def _dataset_receipt_artifact_exists(receipt: dict[str, Any], run_dir: Path) -> bool:
+    candidates: list[str] = []
+    for key in ["artifact_path", "output_path", "data_path", "dataset_path", "local_dir", "repo_path"]:
+        value = receipt.get(key)
+        if isinstance(value, str) and value.strip():
+            candidates.append(value)
+    tokens = receipt.get("tokens") if isinstance(receipt.get("tokens"), list) else []
+    tokens = [str(token) for token in tokens if str(token).strip()]
+    if not tokens:
+        try:
+            tokens = shlex.split(str(receipt.get("command") or ""))
+        except Exception:
+            tokens = []
+    if tokens and tokens[0] == "git" and "clone" in tokens and len(tokens) >= 3:
+        candidates.append(tokens[-1])
+    for option in ["--local-dir", "--output-dir", "--data-dir", "--dataset-dir"]:
+        if option in tokens:
+            index = tokens.index(option)
+            if index + 1 < len(tokens):
+                candidates.append(tokens[index + 1])
+    run_text = str(run_dir)
+    for token in tokens:
+        if token.startswith(("data/", "repos/")) or run_text in token:
+            candidates.append(token)
+    return any(_path_exists_within_run_dir(candidate, run_dir) for candidate in candidates)
+
+
+def _historical_dataset_receipts(rounds: list[dict[str, Any]], run_dir: Path) -> list[dict[str, Any]]:
+    receipts: list[dict[str, Any]] = []
+    for round_record in rounds:
+        if not isinstance(round_record, dict):
+            continue
+        for receipt in _successful_dataset_receipts(_read_round_receipts(round_record, run_dir)):
+            if _dataset_receipt_artifact_exists(receipt, run_dir):
+                enriched = dict(receipt)
+                enriched["handoff_reused_from_round"] = round_record.get("round")
+                receipts.append(enriched)
+    return receipts
+
+
+def _handoff_receipts(rounds: list[dict[str, Any]], latest_receipts: list[dict[str, Any]], run_dir: Path) -> list[dict[str, Any]]:
+    receipts = [row for row in latest_receipts if isinstance(row, dict)]
+    seen = {
+        (str(row.get("phase") or ""), str(row.get("log_path") or ""), str(row.get("command") or ""))
+        for row in receipts
+    }
+    for receipt in _historical_dataset_receipts(rounds, run_dir):
+        key = (str(receipt.get("phase") or ""), str(receipt.get("log_path") or ""), str(receipt.get("command") or ""))
+        if key in seen:
+            continue
+        receipts.append(receipt)
+        seen.add(key)
+    return receipts
+
+
 def _required_environment_commands_gate(receipts: list[dict[str, Any]]) -> tuple[bool, dict[str, Any]]:
     required = [row for row in receipts if isinstance(row, dict) and row.get("required") is not False]
     reproduce_full_rows = [row for row in required if str(row.get("phase") or "").strip().lower() == "reproduce_full"]
@@ -3275,12 +3455,12 @@ def build_environment_handoff_gate(
             ))
             continue
         if name == "paper_config_alignment":
-            alignment_ok, alignment_issues = paper_config_alignment_passed(env_plan) if env_plan else (False, ["缺少 environment plan，无法检查 paper_config_alignment"])
+            alignment_ok, alignment_evidence = environment_handoff_alignment_passed(env_plan) if env_plan else (False, {"issues": ["缺少 environment plan，无法检查 paper_config_alignment"]})
             checks.append(_approval_check(
                 "paper_config_alignment",
                 alignment_ok,
-                "论文配置对齐表通过" if alignment_ok else "论文配置对齐表缺失或存在关键问题",
-                alignment_issues[:10],
+                "Environment 交接配置对齐表通过；论文级完整配置仍留给 experimenting/evaluation" if alignment_ok else "Environment 交接配置对齐表缺失或存在关键问题",
+                alignment_evidence,
             ))
             continue
         if name == "workspace_write_audit":
@@ -3311,6 +3491,8 @@ def _pending_downstream_metrics(env_plan: dict[str, Any], metric_evidence: list[
     pending: list[dict[str, Any]] = []
     for item in env_plan.get("success_criteria") if isinstance(env_plan.get("success_criteria"), list) else []:
         if not isinstance(item, dict):
+            continue
+        if _criterion_is_environment_gate(item):
             continue
         metric = str(item.get("metric") or item.get("name") or "").strip()
         if not metric:
@@ -3451,7 +3633,8 @@ def attach_environment_handoff(
 ) -> dict[str, Any]:
     rounds = decision.get("rounds") if isinstance(decision.get("rounds"), list) else []
     env_plan = _latest_env_plan(rounds)
-    receipts = _latest_receipts(rounds)
+    latest_receipts = _latest_receipts(rounds)
+    receipts = _handoff_receipts(rounds, latest_receipts, run_dir)
     latest_round = _latest_round_with_receipts(rounds)
     metric_evidence = latest_round.get("metric_evidence") if isinstance(latest_round.get("metric_evidence"), list) else []
     approval_gate = decision.get("approval_gate") if isinstance(decision.get("approval_gate"), dict) else {}
@@ -3661,9 +3844,13 @@ def _drop_deprecated_hf_download_flags(tokens: list[str]) -> list[str]:
 
 
 def _normalize_python_inline_code_imports(code: str) -> str:
-    updated = re.sub(r"\bfrom\s+dm_tree\b", "from tree", str(code))
+    updated = str(code)
+    updated = re.sub(r";\s+(for|while|if|with)\b", r"\n\1", updated)
+    updated = re.sub(r"\bfrom\s+dm_tree\b", "from tree", updated)
     updated = re.sub(r"\bimport\s+dm_tree\s+as\s+([A-Za-z_][A-Za-z0-9_]*)", r"import tree as \1", updated)
     updated = re.sub(r"\bimport\s+dm_tree\b(?!\s+as\b)", "import tree as dm_tree", updated)
+    updated = re.sub(r"\bimport\s+biopython\s+as\s+([A-Za-z_][A-Za-z0-9_]*)", r"import Bio as \1", updated)
+    updated = re.sub(r"\bimport\s+biopython\b", "import Bio", updated)
     return updated
 
 
@@ -3694,6 +3881,87 @@ def _direct_env_entrypoint_command(tokens: list[str], env_prefix: Path) -> list[
         executable = "python" if head in {"python", "python3"} else head
         return normalize_python_inline_imports([str(env_prefix / "bin" / executable), *tokens[1:]])
     return []
+
+
+def conda_env_name_from_command(command: Any) -> str:
+    try:
+        tokens = command_tokens(command)
+    except Exception:
+        return ""
+    if not tokens or Path(str(tokens[0] or "")).name not in {"conda", "mamba", "micromamba"}:
+        return ""
+    skip_next = False
+    for index, token in enumerate(tokens):
+        if skip_next:
+            skip_next = False
+            continue
+        value = str(token or "")
+        if value in {"-n", "--name"} and index + 1 < len(tokens):
+            return str(tokens[index + 1] or "").strip()
+        if value.startswith("--name="):
+            return value.split("=", 1)[1].strip()
+        if value in {"-p", "--prefix"}:
+            skip_next = True
+            continue
+    return ""
+
+
+def conda_command_sets_active_env(command: Any) -> bool:
+    try:
+        tokens = command_tokens(command)
+    except Exception:
+        return False
+    if not tokens or Path(str(tokens[0] or "")).name not in {"conda", "mamba", "micromamba"}:
+        return False
+    if len(tokens) >= 3 and str(tokens[1] or "") == "env":
+        return str(tokens[2] or "") in {"create", "update"}
+    if len(tokens) >= 2:
+        return str(tokens[1] or "") in {"create", "install", "update"}
+    return False
+
+
+def conda_command_creates_env(command: Any) -> bool:
+    try:
+        tokens = command_tokens(command)
+    except Exception:
+        return False
+    if not tokens or Path(str(tokens[0] or "")).name not in {"conda", "mamba", "micromamba"}:
+        return False
+    if len(tokens) >= 3 and str(tokens[1] or "") == "env":
+        return str(tokens[2] or "") == "create"
+    return len(tokens) >= 2 and str(tokens[1] or "") == "create"
+
+
+def conda_prefix_has_python(env_prefix: Path) -> bool:
+    return (env_prefix / "bin" / "python").exists()
+
+
+def existing_conda_prefix_receipt(command: list[str], log_path: Path, env_prefix: Path, row: dict[str, Any], uses_conda_prefix: bool, script_migrations: list[dict[str, str]]) -> dict[str, Any]:
+    now = utc_now()
+    text = command_text(command)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(
+        f"$ {text}\n"
+        "[复用已存在 run-local Conda prefix] 已检测到目标 prefix/bin/python，跳过 conda create，避免覆盖已安装依赖。\n"
+        f"conda_env_prefix={env_prefix}\n",
+        encoding="utf-8",
+    )
+    return {
+        "phase": row.get("phase"),
+        "command": text,
+        "status": "passed",
+        "return_code": 0,
+        "required": row.get("required"),
+        "log_path": str(log_path),
+        "conda_env_prefix": str(env_prefix),
+        "uses_conda_prefix": uses_conda_prefix,
+        "script_migrations": script_migrations,
+        "env_keys": sorted((row.get("env") if isinstance(row.get("env"), dict) else {}).keys()),
+        "inline_env_keys": row.get("inline_env_keys", []),
+        "existing_prefix_reused": True,
+        "started_at": now,
+        "finished_at": now,
+    }
 
 
 def rewrite_command(command: Any, conda_exe: str, env_name: str, env_prefix: Path) -> list[str]:
@@ -3920,15 +4188,57 @@ def validation_receipt(issues: list[str], round_dir: Path) -> dict[str, Any]:
         "log_path": str(round_dir / "logs" / "00_plan_validation.log"),
     }
 
+FULL_REPRODUCTION_DEPENDENT_PHASE_TOKENS = (
+    "verify_output",
+    "verify_outputs",
+    "check_output",
+    "check_outputs",
+    "output",
+    "outputs",
+    "result",
+    "results",
+    "metric",
+    "metrics",
+    "eval",
+    "evaluate",
+    "evaluation",
+    "benchmark",
+    "checkpoint",
+    "loss_curve",
+)
+
+
+def _row_depends_on_reproduce_full(row: dict[str, Any]) -> bool:
+    depends_on = row.get("depends_on") or row.get("after") or row.get("requires")
+    if isinstance(depends_on, str):
+        values = [depends_on]
+    elif isinstance(depends_on, list):
+        values = [str(item) for item in depends_on]
+    else:
+        values = []
+    return any(str(item).strip().lower() == "reproduce_full" for item in values)
+
+
+def _phase_is_full_reproduction_dependent(phase: str) -> bool:
+    normalized = str(phase or "").strip().lower().replace("-", "_")
+    return any(token in normalized for token in FULL_REPRODUCTION_DEPENDENT_PHASE_TOKENS)
+
+
 def command_rows(plan: dict[str, Any], include_full: bool, default_timeout: int = 3600) -> list[dict[str, Any]]:
     rows = plan.get("commands") if isinstance(plan.get("commands"), list) else []
     normalized: list[dict[str, Any]] = []
+    skipped_full_reproduction = False
     for index, row in enumerate(rows):
         if not isinstance(row, dict):
             row = {"phase": "unspecified", "command": row}
         phase = str(row.get("phase") or "unspecified").strip()
-        if phase == "reproduce_full" and not include_full:
-            continue
+        phase_lower = phase.lower()
+        if not include_full:
+            if phase_lower == "reproduce_full":
+                skipped_full_reproduction = True
+                continue
+            if _row_depends_on_reproduce_full(row) or (skipped_full_reproduction and _phase_is_full_reproduction_dependent(phase)):
+                continue
         command, env_values, inline_env_issues, inline_env = normalized_command_and_env(row)
         normalized.append({
             "index": index,
@@ -4110,7 +4420,7 @@ def _receipt_phase(receipt: dict[str, Any]) -> str:
 
 def _reusable_command_receipt_key(phase: str, command: list[str]) -> tuple[str, str] | None:
     normalized_phase = str(phase or "").strip().lower()
-    if not normalized_phase or normalized_phase == "reproduce_full":
+    if not normalized_phase or normalized_phase == "reproduce_full" or conda_command_creates_env(command):
         return None
     try:
         normalized_command = command_text(command)
@@ -4153,7 +4463,15 @@ def build_reusable_command_receipt_index(previous_rounds: list[dict[str, Any]], 
             command = str(receipt.get("command") or "").strip()
             if not phase or not command:
                 continue
-            key = (phase, command)
+            prefix = str(receipt.get("conda_env_prefix") or "").strip()
+            if prefix and conda_command_creates_env(command) and receipt.get("existing_prefix_reused") is not True:
+                for key, cached in list(index.items()):
+                    if str(cached.get("conda_env_prefix") or "").strip() == prefix:
+                        index.pop(key, None)
+                continue
+            key = _reusable_command_receipt_key(phase, command_tokens(command))
+            if key is None:
+                continue
             cached = dict(receipt)
             cached["reusable_source_receipts_path"] = str(receipts_path)
             cached["reusable_source_round"] = round_record.get("round")
@@ -4190,12 +4508,15 @@ def reusable_command_receipt(source_receipt: dict[str, Any], log_path: Path) -> 
 
 def execute_plan_commands(plan: dict[str, Any], repo_path: Path, run_dir: Path, round_dir: Path, include_full: bool, default_timeout: int, command_env: dict[str, str], reusable_receipts: dict[tuple[str, str], dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     conda_exe = find_conda_executable()
-    env_name = str(plan.get("env_name") or "").strip()
-    env_prefix = env_prefix_for(run_dir, env_name)
-    env_prefix.parent.mkdir(parents=True, exist_ok=True)
+    default_env_name = str(plan.get("env_name") or "").strip()
+    active_env_name = default_env_name
     receipts: list[dict[str, Any]] = []
     for row in command_rows(plan, include_full, default_timeout=default_timeout):
-        command = rewrite_command(row.get("command"), conda_exe, env_name, env_prefix)
+        requested_env_name = conda_env_name_from_command(row.get("command"))
+        effective_env_name = requested_env_name or active_env_name or default_env_name
+        env_prefix = env_prefix_for(run_dir, effective_env_name)
+        env_prefix.parent.mkdir(parents=True, exist_ok=True)
+        command = rewrite_command(row.get("command"), conda_exe, effective_env_name, env_prefix)
         command, repository_migrations = normalize_repository_command_for_execution(row, command, repo_path, run_dir)
         uses_conda_prefix = command_uses_conda_prefix(command, env_prefix)
         issue = command_is_dangerous(command)
@@ -4245,6 +4566,8 @@ def execute_plan_commands(plan: dict[str, Any], repo_path: Path, run_dir: Path, 
                 receipt["script_migrations"] = script_migrations
                 receipt["env_keys"] = sorted((row.get("env") if isinstance(row.get("env"), dict) else {}).keys())
                 receipt["inline_env_keys"] = row.get("inline_env_keys", [])
+            elif conda_command_creates_env(command) and conda_prefix_has_python(env_prefix):
+                receipt = existing_conda_prefix_receipt(command, log_path, env_prefix, row, uses_conda_prefix, script_migrations)
             else:
                 row_env = row.get("env") if isinstance(row.get("env"), dict) else {}
                 effective_env = command_environment(command_env, repo_path, row_env)
@@ -4256,6 +4579,8 @@ def execute_plan_commands(plan: dict[str, Any], repo_path: Path, run_dir: Path, 
                 receipt["env_keys"] = sorted(row_env.keys())
                 receipt["inline_env_keys"] = row.get("inline_env_keys", [])
         receipts.append(receipt)
+        if receipt.get("return_code") == 0 and requested_env_name and conda_command_sets_active_env(row.get("command")):
+            active_env_name = requested_env_name
         if receipt.get("return_code") != 0 and row.get("required"):
             break
     write_json(round_dir / "command_receipts.json", receipts)

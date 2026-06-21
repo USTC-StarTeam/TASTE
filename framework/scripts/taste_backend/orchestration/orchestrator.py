@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import json
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -329,6 +330,169 @@ def _sync_environment_handoff_to_project(ctx: FrameworkContext, state: WorkflowS
         state.notes.append(f"environment handoff 已同步到项目 {state.project}: {repo_path}")
 
 
+def _registry_rows(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+    if isinstance(payload, dict):
+        for key in ("experiments", "runs", "rows"):
+            rows = payload.get(key)
+            if isinstance(rows, list):
+                return [row for row in rows if isinstance(row, dict)]
+    return []
+
+
+def _experiment_row_identity(row: dict[str, Any]) -> str:
+    run_id = str(row.get("run_id") or "").strip()
+    iteration = str(row.get("iteration") or "").strip()
+    if run_id and iteration:
+        return f"run:{run_id}:iteration:{iteration}"
+    if run_id:
+        return f"run:{run_id}"
+    artifact_path = str(row.get("artifact_path") or "").strip()
+    if artifact_path:
+        return f"artifact:{artifact_path}"
+    return "experiment:" + str(row.get("experiment_id") or row.get("name") or row.get("id") or "").strip()
+
+
+def _merge_nonempty(base: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in update.items():
+        if value in (None, "", [], {}):
+            continue
+        merged[key] = value
+    return merged
+
+
+def _first_summary_command(summary: dict[str, Any]) -> str:
+    commands = summary.get("commands")
+    if not isinstance(commands, list):
+        return ""
+    for item in commands:
+        if isinstance(item, dict):
+            text = str(item.get("command") or item.get("cmd") or "").strip()
+        else:
+            text = str(item or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _enrich_experiment_row_from_artifacts(row: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(row)
+    artifact_text = str(enriched.get("artifact_path") or "").strip()
+    artifact_dir = Path(artifact_text).expanduser() if artifact_text else None
+    if artifact_dir and artifact_dir.exists() and artifact_dir.is_dir():
+        wrapper_path = artifact_dir / "wrapper_iteration_result.json"
+        if wrapper_path.exists():
+            enriched.setdefault("wrapper_iteration_result_path", str(wrapper_path))
+        summary_path = Path(str(enriched.get("experiment_iteration_summary_path") or artifact_dir / "experiment_iteration_summary.json")).expanduser()
+        if summary_path.exists():
+            enriched["experiment_iteration_summary_path"] = str(summary_path)
+            summary = read_json(summary_path, {})
+            if isinstance(summary, dict):
+                command = _first_summary_command(summary)
+                if command and not enriched.get("command"):
+                    enriched["command"] = command
+                if summary.get("metrics") and not enriched.get("metrics"):
+                    enriched["metrics"] = summary.get("metrics")
+                if summary.get("failure_reason") and not enriched.get("failure_reason"):
+                    enriched["failure_reason"] = summary.get("failure_reason")
+                judgment = summary.get("judgment") if isinstance(summary.get("judgment"), dict) else {}
+                verdict = str(judgment.get("verdict") or "").strip()
+                weakest = str(judgment.get("weakest_slice") or "").strip()
+                if verdict and not enriched.get("claim_verdict"):
+                    enriched["claim_verdict"] = verdict
+                if weakest and not enriched.get("notes"):
+                    enriched["notes"] = f"weakest_slice={weakest}"
+        metrics_path = artifact_dir / "metrics.json"
+        if metrics_path.exists():
+            enriched.setdefault("metrics_path", str(metrics_path))
+            metrics_payload = read_json(metrics_path, {})
+            if isinstance(metrics_payload, dict):
+                run_metadata = metrics_payload.get("run_metadata") if isinstance(metrics_payload.get("run_metadata"), dict) else {}
+                dataset = str(run_metadata.get("dataset") or "").strip()
+                if dataset and not enriched.get("dataset"):
+                    enriched["dataset"] = dataset
+                if dataset.lower().startswith("synthetic") and not enriched.get("decision"):
+                    enriched["decision"] = "synthetic_only"
+                scalar_metrics = {
+                    str(key): value
+                    for key, value in metrics_payload.items()
+                    if isinstance(value, (int, float, str))
+                }
+                if scalar_metrics:
+                    merged_metrics = dict(enriched.get("metrics") or {}) if isinstance(enriched.get("metrics"), dict) else {}
+                    merged_metrics.update({key: value for key, value in scalar_metrics.items() if key not in merged_metrics})
+                    enriched["metrics"] = merged_metrics
+    return enriched
+
+
+def _upsert_project_experiment_rows(project_root: Path, rows: list[dict[str, Any]], *, source: str) -> int:
+    if not rows:
+        return 0
+    registry_path = project_root / "state" / "experiment_registry.json"
+    existing_payload = read_json(registry_path, [])
+    existing = _registry_rows(existing_payload)
+    by_id: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for row in existing:
+        identity = _experiment_row_identity(row)
+        if identity and identity not in by_id:
+            order.append(identity)
+        by_id[identity] = row
+    changed = 0
+    for raw_row in rows:
+        row = _enrich_experiment_row_from_artifacts(raw_row)
+        row.setdefault("project_record_source", source)
+        identity = _experiment_row_identity(row)
+        if not identity:
+            continue
+        if identity not in by_id:
+            order.append(identity)
+            by_id[identity] = row
+            changed += 1
+            continue
+        merged = _merge_nonempty(by_id[identity], row)
+        if merged != by_id[identity]:
+            changed += 1
+            by_id[identity] = merged
+    if changed:
+        registry_path.parent.mkdir(parents=True, exist_ok=True)
+        write_json(registry_path, [by_id[item] for item in order if item in by_id])
+    return changed
+
+
+def _refresh_project_experiment_table(ctx: FrameworkContext, project: str) -> dict[str, Any]:
+    command = [ctx.python, str(ctx.workspace_root / "framework" / "scripts" / "run_module.py"), "experimenting", "--action", "record_table", "--project", project]
+    try:
+        proc = subprocess.run(command, cwd=ctx.workspace_root, env=ctx.env(), text=True, capture_output=True, timeout=90)
+        return {"return_code": int(proc.returncode), "stdout_tail": (proc.stdout or "")[-1200:], "stderr_tail": (proc.stderr or "")[-1200:]}
+    except Exception as exc:
+        return {"return_code": 125, "error": str(exc)}
+
+
+def _sync_experimenting_outputs_to_project(ctx: FrameworkContext, state: WorkflowState, result) -> None:
+    if result.stage != "experimenting" or not state.project:
+        return
+    output_root_text = _flag_value(list(result.command), "--output-root")
+    if not output_root_text:
+        return
+    output_root = Path(output_root_text).expanduser()
+    if not output_root.is_absolute():
+        output_root = (ctx.workspace_root / output_root).resolve()
+    registry_path = output_root / "state" / "experiment_registry.json"
+    rows = _registry_rows(read_json(registry_path, []))
+    if not rows:
+        return
+    project_root = ctx.workspace_root / "projects" / state.project
+    changed = _upsert_project_experiment_rows(project_root, rows, source=str(registry_path))
+    if changed:
+        refresh = _refresh_project_experiment_table(ctx, state.project)
+        if int(refresh.get("return_code") or 0) == 0:
+            state.notes.append(f"experimenting 记录已同步到项目 {state.project}: {changed} 行")
+        else:
+            state.notes.append(f"experimenting 记录已同步到项目 {state.project}: {changed} 行；实验记录表刷新失败 rc={refresh.get('return_code')}")
+
 def sync_environment_handoff(args: argparse.Namespace) -> int:
     ctx = FrameworkContext.create(
         run_id=args.run_id or "sync_environment_handoff",
@@ -412,6 +576,7 @@ def run_workflow(args: argparse.Namespace) -> int:
         command_index += 1
         state.records.append(record_from_result(result, message=decision.reason))
         _sync_environment_handoff_to_project(ctx, state, result)
+        _sync_experimenting_outputs_to_project(ctx, state, result)
         if result.return_code == 0:
             if decision.stage not in state.completed_stages:
                 state.completed_stages.append(decision.stage)

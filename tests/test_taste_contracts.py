@@ -33,6 +33,22 @@ def _load_reading_main():
     return module
 
 
+def _load_environment_module(module_name: str, relative_path: str):
+    environment_module_root = ROOT / "modules" / "environment"
+    for name in list(sys.modules):
+        if name == "scripts" or name.startswith("scripts."):
+            sys.modules.pop(name, None)
+    if str(environment_module_root) not in sys.path:
+        sys.path.insert(0, str(environment_module_root))
+    else:
+        sys.path.insert(0, str(sys.path.pop(sys.path.index(str(environment_module_root)))))
+    spec = importlib.util.spec_from_file_location(module_name, environment_module_root / relative_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_reading_cli_explicit_action_keeps_project_for_child_command(monkeypatch):
     reading_main = _load_reading_main()
     calls = []
@@ -102,10 +118,12 @@ def _load_claude_project_session():
 def _load_current_find_orchestrator():
     framework_scripts = ROOT / "framework" / "scripts"
     reading_scripts = ROOT / "modules" / "reading" / "scripts"
+    reading_private = reading_scripts / "private"
     finding_scripts = ROOT / "modules" / "finding" / "scripts"
-    for path in [str(reading_scripts), str(finding_scripts), str(framework_scripts)]:
-        if path not in sys.path:
-            sys.path.insert(0, path)
+    for path in [str(framework_scripts), str(finding_scripts), str(reading_scripts), str(reading_private)]:
+        if path in sys.path:
+            sys.path.remove(path)
+        sys.path.insert(0, path)
     for name in ["common", "literature_policy", "project_paths", "runtime_env", "project_config"]:
         sys.modules.pop(name, None)
     spec = importlib.util.spec_from_file_location(
@@ -655,6 +673,225 @@ def test_environment_rewrites_rigidssl_model_and_smoke_probes(tmp_path):
     assert env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] == "1"
 
 
+def test_environment_machine_alignment_accepts_noncritical_supported_hardware_row():
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_machine_alignment",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+
+    plan = {
+        "machine_assessment": {
+            "paper_hardware_or_runtime_requirement": "≥1×24GB GPU",
+            "local_machine_summary": "NVIDIA GeForce RTX 5090 with 32607 MiB VRAM and CUDA available",
+            "fit_for_local_machine": True,
+            "adaptation_actions": ["Use CUDA 12.8 wheels and FP32 validation on one GPU"],
+            "evidence": ["machine_profile", "nvidia-smi", "GPU CUDA VRAM"],
+        },
+        "paper_config_alignment": [
+            {
+                "paper_item": "hardware/precision",
+                "paper_value": "≥1×24GB GPU, no precision requirement",
+                "implementation_choice": "RTX 5090 32GB, CUDA 12.8, FP32",
+                "command_phase": "verify_cuda_imports",
+                "evidence_source": "machine_profile runtime_probe nvidia-smi",
+                "match_status": "matched",
+                "critical": False,
+            }
+        ],
+    }
+
+    issues = autonomous_deploy.machine_assessment_issues(
+        plan,
+        {"gpu": [{"name": "NVIDIA GeForce RTX 5090", "memory_total": "32607 MiB", "compute_capability": "12.0"}]},
+    )
+
+    assert not issues
+
+
+def test_environment_execute_plan_keeps_named_conda_envs_separate(monkeypatch, tmp_path):
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_named_envs",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+
+    run_dir = tmp_path / "run"
+    repo = run_dir / "repos" / "repo"
+    repo.mkdir(parents=True)
+    round_dir = run_dir / "round_01"
+    executed: list[list[str]] = []
+
+    def fake_run_logged(command, *, cwd, log_path, timeout_sec, env, required):
+        executed.append([str(item) for item in command])
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("ok\n", encoding="utf-8")
+        return {"command": autonomous_deploy.command_text(command), "status": "passed", "return_code": 0, "log_path": str(log_path), "required": required}
+
+    monkeypatch.setattr(autonomous_deploy, "find_conda_executable", lambda: "conda")
+    monkeypatch.setattr(autonomous_deploy, "run_logged", fake_run_logged)
+
+    plan = {
+        "env_name": "default_env",
+        "commands": [
+            {"phase": "conda_setup_protdis", "command": ["conda", "create", "-y", "-n", "protdis_env", "python=3.11"], "required": True},
+            {"phase": "verify_protdis", "command": ["python", "-c", "print('protdis')"], "required": True},
+            {"phase": "conda_setup_kermut", "command": ["conda", "create", "-y", "-n", "kermut_env", "python=3.11"], "required": True},
+            {"phase": "verify_kermut", "command": ["python", "-c", "print('kermut')"], "required": True},
+            {"phase": "verify_protdis_again", "command": ["conda", "run", "-n", "protdis_env", "python", "-c", "print('again')"], "required": True},
+        ],
+    }
+
+    receipts = autonomous_deploy.execute_plan_commands(plan, repo, run_dir, round_dir, include_full=False, default_timeout=30, command_env={})
+
+    protdis_python = str(run_dir / "conda_envs" / "protdis_env" / "bin" / "python")
+    kermut_python = str(run_dir / "conda_envs" / "kermut_env" / "bin" / "python")
+    assert len(receipts) == 5
+    assert executed[0][0:4] == ["conda", "create", "-y", "-p"]
+    assert executed[0][4] == str(run_dir / "conda_envs" / "protdis_env")
+    assert executed[1][0] == protdis_python
+    assert executed[2][4] == str(run_dir / "conda_envs" / "kermut_env")
+    assert executed[3][0] == kermut_python
+    assert executed[4][0] == protdis_python
+
+
+def test_environment_execute_plan_skips_existing_conda_create_prefix(monkeypatch, tmp_path):
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_existing_prefix",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+
+    run_dir = tmp_path / "run"
+    repo = run_dir / "repos" / "repo"
+    repo.mkdir(parents=True)
+    prefix = run_dir / "conda_envs" / "demo_env"
+    (prefix / "bin").mkdir(parents=True)
+    (prefix / "bin" / "python").write_text("", encoding="utf-8")
+    round_dir = run_dir / "round_01"
+    executed: list[list[str]] = []
+
+    def fake_run_logged(command, *, cwd, log_path, timeout_sec, env, required):
+        executed.append([str(item) for item in command])
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("verify ok\n", encoding="utf-8")
+        return {"command": autonomous_deploy.command_text(command), "status": "passed", "return_code": 0, "log_path": str(log_path), "required": required}
+
+    monkeypatch.setattr(autonomous_deploy, "find_conda_executable", lambda: "conda")
+    monkeypatch.setattr(autonomous_deploy, "run_logged", fake_run_logged)
+
+    plan = {
+        "env_name": "demo_env",
+        "commands": [
+            {"phase": "conda_setup", "command": ["conda", "create", "-y", "-n", "demo_env", "python=3.11", "pip"], "required": True},
+            {"phase": "verify", "command": ["python", "-c", "print('ok')"], "required": True},
+        ],
+    }
+
+    receipts = autonomous_deploy.execute_plan_commands(plan, repo, run_dir, round_dir, include_full=False, default_timeout=30, command_env={})
+
+    assert len(receipts) == 2
+    assert receipts[0]["existing_prefix_reused"] is True
+    assert receipts[0]["return_code"] == 0
+    assert "复用已存在" in Path(receipts[0]["log_path"]).read_text(encoding="utf-8")
+    assert len(executed) == 1
+    assert executed[0][0] == str(prefix / "bin" / "python")
+
+
+def test_environment_reusable_receipts_invalidated_by_later_conda_recreate(tmp_path):
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_reuse_invalidation",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+
+    run_dir = tmp_path / "run"
+    prefix = run_dir / "conda_envs" / "demo_env"
+    round_01 = run_dir / "round_01"
+    round_02 = run_dir / "round_02"
+    round_01.mkdir(parents=True)
+    round_02.mkdir(parents=True)
+    install_cmd = str(prefix / "bin" / "python") + " -m pip install torch"
+    create_cmd = "conda create -y -p " + str(prefix) + " python=3.11 pip"
+    (round_01 / "command_receipts.json").write_text(json.dumps([
+        {"phase": "install_torch", "command": install_cmd, "required": True, "status": "passed", "return_code": 0, "conda_env_prefix": str(prefix), "log_path": str(round_01 / "install.log")},
+    ]), encoding="utf-8")
+    (round_02 / "command_receipts.json").write_text(json.dumps([
+        {"phase": "conda_setup", "command": create_cmd, "required": True, "status": "passed", "return_code": 0, "conda_env_prefix": str(prefix), "log_path": str(round_02 / "conda.log")},
+    ]), encoding="utf-8")
+
+    reusable = autonomous_deploy.build_reusable_command_receipt_index([
+        {"round": 1, "receipts_path": str(round_01 / "command_receipts.json")},
+        {"round": 2, "receipts_path": str(round_02 / "command_receipts.json")},
+    ], run_dir)
+
+    assert not reusable
+
+
+def test_environment_rewrites_inline_python_import_aliases_and_compound_statements(tmp_path):
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_inline_normalize",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+
+    command = autonomous_deploy.rewrite_command(
+        [
+            "conda",
+            "run",
+            "-n",
+            "demo_env",
+            "python",
+            "-c",
+            "import biopython; import dm_tree; x = 0; for i in range(2): x += i; print(x)",
+        ],
+        "conda",
+        "demo_env",
+        tmp_path / "conda_envs" / "demo_env",
+    )
+
+    assert command[0] == str(tmp_path / "conda_envs" / "demo_env" / "bin" / "python")
+    assert command[1] == "-c"
+    assert "import Bio" in command[2]
+    assert "import biopython" not in command[2]
+    assert "import tree as dm_tree" in command[2]
+    assert "\nfor i in range(2):" in command[2]
+    compile(command[2], "<environment-inline>", "exec")
+
+
+def test_environment_inline_path_guard_handles_fstring_variable_prefix(tmp_path):
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_inline_fstring_guard",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+    run_dir = tmp_path / "run"
+    repo = run_dir / "repos" / "repo"
+    repo.mkdir(parents=True)
+
+    valid_code = "dr='demo_data'; import os; os.makedirs(f'{dr}/esm_encodings', exist_ok=True); open(f'{dr}/labels/demo.tsv','w').write('ok')"
+    assert autonomous_deploy._python_inline_code_boundary_issues(valid_code, repo, run_dir) == []
+
+    unsafe_code = "name='x'; open(f'/outside/{name}.txt','w').write('bad')"
+    issues = autonomous_deploy._python_inline_code_boundary_issues(unsafe_code, repo, run_dir)
+    assert issues and "/outside/" in issues[0]
+
+
+def test_environment_skip_full_omits_full_dependent_output_checks():
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_skip_full_outputs",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+    plan = {
+        "commands": [
+            {"phase": "verify_imports", "command": ["python", "-c", "import torch"], "required": True},
+            {"phase": "reproduce_full", "command": ["python", "train.py"], "required": True},
+            {"phase": "verify_outputs", "command": ["python", "-c", "check outputs"], "required": True},
+            {"phase": "eval_metrics", "command": ["python", "eval.py"], "depends_on": "reproduce_full", "required": True},
+        ]
+    }
+
+    skip_phases = [row["phase"] for row in autonomous_deploy.command_rows(plan, include_full=False)]
+    full_phases = [row["phase"] for row in autonomous_deploy.command_rows(plan, include_full=True)]
+
+    assert skip_phases == ["verify_imports"]
+    assert full_phases == ["verify_imports", "reproduce_full", "verify_outputs", "eval_metrics"]
+
+
 def test_environment_reuses_previous_success_receipts_but_never_reproduce_full(tmp_path):
     environment_module_root = ROOT / "modules" / "environment"
     for name in list(sys.modules):
@@ -753,6 +990,93 @@ def test_environment_dependency_policy_rewrites_incoherent_torch_pip_versions():
 
 
 
+def test_environment_dependency_policy_rewrites_protdis_metrics_function_smoke():
+    dependency_policy = _load_environment_module(
+        "environment_dependency_policy_protdis_metrics",
+        "scripts/orchestration/dependency_policy.py",
+    )
+    bad_snippet = (
+        "import sys; sys.path.insert(0, 'tasks/proteinshake'); "
+        "from src.models.metrics import compute_metrics, default_metrics; "
+        "print(f'tasks metrics module OK, available: {list(default_metrics.keys())}')"
+    )
+    plan = {
+        "env_name": "protdis_env",
+        "commands": [
+            {
+                "phase": "verify_tasks_import",
+                "command": ["conda", "run", "-n", "protdis_env", "python", "-c", bad_snippet],
+                "cwd": "repo",
+                "timeout_sec": 300,
+                "required": True,
+            }
+        ],
+    }
+
+    normalized = dependency_policy.normalize_environment_plan_commands(plan, machine={}, policy_version="test-policy")
+    row = normalized["commands"][0]
+    command_text = dependency_policy.command_text(row["command"])
+    code = row["command"][-1]
+
+    assert row["phase"] == "verify_tasks_import"
+    assert row["required"] is True
+    assert "default_metrics.keys()" not in code
+    assert "default_metrics('classification')" in code
+    assert "compute_metrics" in code
+    assert row["command"][:5] == ["conda", "run", "-n", "protdis_env", "python"]
+    assert "default_metrics.keys()" not in command_text
+    assert any("default_metrics is a function" in item.get("reason", "") for item in normalized.get("plan_policy_rewrites", []))
+
+
+def test_environment_success_criteria_keeps_operational_handoff_gates():
+    criteria_policy = _load_environment_module(
+        "environment_criteria_policy_contract",
+        "scripts/orchestration/criteria_policy.py",
+    )
+    plan = {
+        "success_criteria": [
+            {"name": "cuda_available", "operator": ">=", "value": 1, "source": "verify_imports confirms CUDA device_count >= 1"},
+            {"name": "designability", "operator": ">=", "value": 0.758, "source": "paper Table 1"},
+        ]
+    }
+
+    normalized = criteria_policy.normalize_success_criteria(plan, paper_evidence={}, policy_version="test-policy")
+
+    assert len(normalized["success_criteria"]) == 2
+    by_name = {row["name"]: row for row in normalized["success_criteria"]}
+    assert by_name["cuda_available"]["approval_scope"] == "environment_gate"
+    assert by_name["cuda_available"]["paper_metric"] is False
+    assert by_name["designability"]["approval_scope"] == "paper_metric"
+    assert by_name["designability"]["paper_metric"] is True
+
+
+def test_environment_gate_success_criteria_cannot_approve_paper_metrics():
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_success_scope",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+    env_plan = {
+        "success_criteria": [
+            {"name": "cuda_available", "operator": ">=", "value": 1, "source": "verify_imports", "approval_scope": "environment_gate", "paper_metric": False},
+            {"name": "designability", "operator": ">=", "value": 0.758, "source": "paper Table 1", "approval_scope": "paper_metric", "paper_metric": True},
+        ]
+    }
+    paper_evidence = {"target_metrics": [{"name": "designability_target", "operator": ">=", "value": 0.758, "source": "paper Table 1"}]}
+
+    ok, evidence = autonomous_deploy._success_criteria_paper_binding_gate(env_plan, paper_evidence)
+
+    assert ok, evidence
+    assert evidence["criteria_count"] == 2
+    assert evidence["paper_metric_criteria_count"] == 1
+    assert evidence["environment_gate_criteria_count"] == 1
+    assert evidence["matched_count"] == 1
+
+    env_only_plan = {"success_criteria": [env_plan["success_criteria"][0]]}
+    ok, evidence = autonomous_deploy._success_criteria_paper_binding_gate(env_only_plan, paper_evidence)
+    assert not ok
+    assert "环境交接" in " ".join(evidence["issues"])
+
+
 def test_environment_binds_rigidssl_designability_target_alias_and_local_full_text_source(tmp_path):
     environment_module_root = ROOT / "modules" / "environment"
     for name in list(sys.modules):
@@ -839,6 +1163,111 @@ def test_environment_normalizes_selected_plan_metrics_and_paper_source(tmp_path)
     assert metrics["designability_tolerance"]["operator"] == "<="
     assert metrics["designability_tolerance"]["value"] in {"3%", "5%"}
     assert "AF2 Structure Database" in normalized["dataset"]["training_data"]
+
+
+def test_environment_workspace_audit_allows_web_runtime_log():
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_workspace_log",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+
+    assert autonomous_deploy._is_framework_runtime_write("runtime/web_8765.log") is True
+    assert autonomous_deploy._filter_framework_runtime_writes(["runtime/web_8765.log", "projects/protein/state/result.json"]) == ["projects/protein/state/result.json"]
+
+
+def test_environment_handoff_reuses_historical_dataset_without_relaxing_full_approval(tmp_path):
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_handoff_history",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+
+    run_dir = tmp_path / "run"
+    round_01 = run_dir / "round_01"
+    round_03 = run_dir / "round_03"
+    repo = run_dir / "repos" / "paper_repo"
+    dataset_repo = run_dir / "repos" / "TEDBench"
+    env_prefix = run_dir / "conda_envs" / "protdis_env"
+    for item in [round_01, round_03, repo, dataset_repo, env_prefix / "bin"]:
+        item.mkdir(parents=True, exist_ok=True)
+    (env_prefix / "bin" / "python").write_text("", encoding="utf-8")
+
+    env_plan = {
+        "env_name": "protdis_env",
+        "commands": [
+            {"phase": "conda_setup", "command": ["conda", "create", "-p", str(env_prefix), "python=3.11", "pip"], "required": True},
+            {"phase": "verify_imports", "command": [str(env_prefix / "bin" / "python"), "-c", "import torch"], "required": True},
+            {"phase": "verify_model", "command": [str(env_prefix / "bin" / "python"), "-c", "print('model ok')"], "required": True},
+            {"phase": "reproduce_smoke", "command": [str(env_prefix / "bin" / "python"), "-c", "print('smoke ok')"], "required": True},
+            {"phase": "reproduce_full", "command": [str(env_prefix / "bin" / "python"), "train.py"], "required": True},
+        ],
+        "machine_assessment": {
+            "status": "suitable",
+            "fit_for_local_machine": True,
+            "paper_hardware_or_runtime_requirement": "CUDA GPU",
+            "local_machine_summary": "local CUDA GPU runtime is available on RTX 5090",
+            "adaptation_actions": ["use CUDA wheel smoke before full reproduction"],
+            "evidence": ["runtime_probe", "nvidia-smi", "machine_profile.json"],
+        },
+        "paper_config_alignment": [
+            {"paper_item": "model_architecture", "paper_value": "ProtDiS encoder", "implementation_choice": "verify_model imports and runs model", "command_phase": "verify_model", "evidence_source": "repo smoke", "match_status": "matched", "critical": True},
+            {"paper_item": "dataset", "paper_value": "TEDBench", "implementation_choice": "dataset cloned in previous environment round", "command_phase": "dataset", "evidence_source": "dataset receipt", "match_status": "missing", "critical": True},
+            {"paper_item": "hardware_precision", "paper_value": "CUDA", "implementation_choice": "verify_imports checks CUDA wheel", "command_phase": "verify_imports", "evidence_source": "runtime probe", "match_status": "adapted_for_machine", "critical": True},
+        ],
+        "success_criteria": [
+            {"name": "auroc", "operator": ">=", "value": 0.8, "source": "paper table", "approval_scope": "paper_metric", "paper_metric": True}
+        ],
+    }
+    env_plan_path = round_03 / "claude_environment_plan_round_03.json"
+    env_plan_path.write_text(json.dumps(env_plan), encoding="utf-8")
+    dataset_receipts = [
+        {
+            "phase": "dataset",
+            "required": True,
+            "return_code": 0,
+            "status": "passed",
+            "command": f"git clone --depth 1 https://github.com/BorgwardtLab/TEDBench {dataset_repo}",
+            "tokens": ["git", "clone", "--depth", "1", "https://github.com/BorgwardtLab/TEDBench", str(dataset_repo)],
+            "log_path": str(round_01 / "dataset.log"),
+            "conda_env_prefix": str(env_prefix),
+        }
+    ]
+    latest_receipts = [
+        {"phase": "conda_setup", "required": True, "return_code": 0, "status": "passed", "command": f"conda create -y -p {env_prefix} python=3.11 pip", "conda_env_prefix": str(env_prefix), "log_path": str(round_03 / "conda.log")},
+        {"phase": "verify_imports", "required": True, "return_code": 0, "status": "passed", "command": f"{env_prefix / 'bin' / 'python'} -c 'import torch'", "conda_env_prefix": str(env_prefix), "log_path": str(round_03 / "verify.log")},
+        {"phase": "verify_model", "required": True, "return_code": 0, "status": "passed", "command": f"{env_prefix / 'bin' / 'python'} -c 'print(model)'", "conda_env_prefix": str(env_prefix), "log_path": str(round_03 / "model.log")},
+        {"phase": "reproduce_smoke", "required": True, "return_code": 0, "status": "passed", "command": f"{env_prefix / 'bin' / 'python'} -c 'print(smoke)'", "conda_env_prefix": str(env_prefix), "log_path": str(round_03 / "smoke.log")},
+    ]
+    (round_01 / "command_receipts.json").write_text(json.dumps(dataset_receipts), encoding="utf-8")
+    (round_03 / "command_receipts.json").write_text(json.dumps(latest_receipts), encoding="utf-8")
+
+    strict_alignment_ok, strict_alignment_issues = autonomous_deploy.paper_config_alignment_passed(env_plan)
+    assert strict_alignment_ok is False
+    assert any("missing" in item for item in strict_alignment_issues)
+
+    decision = {
+        "run_id": "pytest_handoff_history",
+        "decision": "continue_repair",
+        "exit_code": 30,
+        "rounds": [
+            {"round": 1, "receipts_path": str(round_01 / "command_receipts.json")},
+            {"round": 3, "env_plan_path": str(env_plan_path), "receipts_path": str(round_03 / "command_receipts.json"), "metric_evidence": []},
+        ],
+        "approval_gate": {"checks": [{"name": "workspace_write_audit", "passed": True, "reason": "audit ok"}]},
+        "workspace_write_audit": {"status": "passed", "outside_workspace_writes": []},
+        "machine_summary": {"gpu": [{"name": "RTX 5090", "memory_gb": 31}]},
+    }
+    repo_info = {"repo_url": "https://github.com/example/paper_repo", "repo_path": str(repo), "exists": True, "head_commit": "abc", "clone_receipt": {"return_code": 0, "status": "passed"}}
+
+    updated = autonomous_deploy.attach_environment_handoff(decision, run_dir, {"title": "ProtDiS"}, repo_info)
+    handoff = updated["environment_handoff"]
+    checks = {row["name"]: row for row in handoff["handoff_gate"]["checks"]}
+
+    assert handoff["ready_for_experimenting"] is True
+    assert updated["decision"] == "environment_ready"
+    assert checks["dataset_runtime"]["passed"] is True
+    assert checks["paper_config_alignment"]["passed"] is True
+    assert checks["paper_config_alignment"]["evidence"]["pending_downstream_alignment"][0]["paper_item"] == "dataset"
+    assert len(handoff["data"]["successful_dataset_receipts"]) == 1
 
 
 def test_environment_handoff_ready_without_promoting_paper_metrics(tmp_path):
@@ -1132,6 +1561,114 @@ def test_experimenting_imports_autonomous_wrapper_to_project_registry(tmp_path):
     assert registry[0]["experiment_iteration_summary_acceptance_status"] == "partial_with_generation_blocker"
     assert registry[0]["metrics"] == {"throughput": 2.9}
 
+
+
+
+
+def test_framework_syncs_experimenting_module_records_to_project(tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT / "framework" / "scripts"))
+    from taste_backend.orchestration import orchestrator
+    from taste_backend.orchestration.state import WorkflowState
+    from taste_backend.runtime.context import FrameworkContext
+    from taste_backend.runtime.executor import CommandResult
+
+    workspace = tmp_path / "taste"
+    output_root = workspace / "modules" / "experimenting" / "runtime" / "web" / "demo"
+    artifact_dir = output_root / "runs" / "demo_run" / "iteration_01"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "experiment_iteration_summary.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "commands": [{"command": "python train.py -C config_kon_demo.yaml", "status": "passed"}],
+                "judgment": {"verdict": "pipeline_validated", "weakest_slice": "synthetic demo only"},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (artifact_dir / "metrics.json").write_text(
+        json.dumps({"run_metadata": {"dataset": "synthetic_demo"}, "best_monitor_loss": 16.5881}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (artifact_dir / "wrapper_iteration_result.json").write_text("{}", encoding="utf-8")
+    registry_dir = output_root / "state"
+    registry_dir.mkdir(parents=True)
+    (registry_dir / "experiment_registry.json").write_text(
+        json.dumps(
+            [
+                {
+                    "timestamp": "2026-06-21T07:48:10Z",
+                    "run_id": "demo_run",
+                    "experiment_id": "plan_5",
+                    "iteration": 1,
+                    "status": "success",
+                    "method": "experiment",
+                    "artifact_path": str(artifact_dir),
+                    "acceptance_status": "accepted",
+                    "metrics": {"best_epoch": 1.0},
+                }
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    project_state = workspace / "projects" / "demo" / "state"
+    project_state.mkdir(parents=True)
+    monkeypatch.setattr(orchestrator, "_refresh_project_experiment_table", lambda ctx, project: {"return_code": 0})
+    ctx = FrameworkContext(
+        workspace_root=workspace,
+        framework_root=workspace / "framework",
+        state_root=workspace / "framework" / "workspace",
+        run_id="framework_demo",
+        python=sys.executable,
+        mode="execute",
+    )
+    state = WorkflowState(run_id="framework_demo", research_goal="", project="demo")
+    result = CommandResult(
+        stage="experimenting",
+        action="run",
+        command=[sys.executable, str(workspace / "modules" / "experimenting" / "main.py"), "--output-root", str(output_root)],
+        status="completed",
+        return_code=0,
+        started_at="2026-06-21T07:43:47Z",
+        finished_at="2026-06-21T07:48:10Z",
+    )
+
+    orchestrator._sync_experimenting_outputs_to_project(ctx, state, result)
+    project_registry = json.loads((project_state / "experiment_registry.json").read_text(encoding="utf-8"))
+
+    assert len(project_registry) == 1
+    row = project_registry[0]
+    assert row["run_id"] == "demo_run"
+    assert row["dataset"] == "synthetic_demo"
+    assert row["decision"] == "synthetic_only"
+    assert row["command"] == "python train.py -C config_kon_demo.yaml"
+    assert row["metrics"]["best_monitor_loss"] == 16.5881
+    assert row["project_record_source"].endswith("modules/experimenting/runtime/web/demo/state/experiment_registry.json")
+    assert any("experimenting 记录已同步到项目 demo" in note for note in state.notes)
+
+
+def test_experiment_record_tools_acceptance_accepted_is_not_blocker():
+    for path in [
+        ROOT / "modules" / "experimenting" / "scripts" / "common",
+        ROOT / "framework" / "scripts",
+    ]:
+        value = str(path)
+        if value not in sys.path:
+            sys.path.insert(0, value)
+    spec = importlib.util.spec_from_file_location(
+        "experiment_record_tools_for_acceptance",
+        ROOT / "modules" / "experimenting" / "scripts" / "records" / "experiment_record_tools.py",
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module.acceptance_gate_text({"acceptance_status": "accepted", "acceptance_blockers": []}) == ""
+    assert "missing_generation_pipeline" in module.acceptance_gate_text(
+        {"acceptance_status": "blocked_generation_evaluation_pipeline_missing", "acceptance_blockers": [{"code": "missing_generation_pipeline"}]}
+    )
 
 def test_experimenting_requires_iteration_summary_for_success(tmp_path):
     runner = _load_experiment_runner()

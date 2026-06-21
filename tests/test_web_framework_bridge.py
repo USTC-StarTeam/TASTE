@@ -113,6 +113,65 @@ def test_web_experiment_action_prefers_environment_handoff(monkeypatch, tmp_path
     assert f"--conda-env {handoff_env}" in module_arg
 
 
+
+
+def test_web_summary_does_not_report_not_started_after_synthetic_experiment(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    root = _make_project(projects, "demo")
+    repo = root / "repos" / "selected" / "repo"
+    env_prefix = tmp_path / "environment" / "conda_envs" / "protdis_env"
+    (env_prefix / "bin").mkdir(parents=True)
+    (env_prefix / "bin" / "python").write_text("", encoding="utf-8")
+    (root / "state" / "environment_handoff.json").write_text(json.dumps({
+        "status": "ready_for_experimenting",
+        "valid": True,
+        "repo_path": str(repo),
+        "conda_env_prefix": str(env_prefix),
+        "environment_handoff": {
+            "ready_for_experimenting": True,
+            "repo": {"repo_path": str(repo), "repo_url": "https://github.com/example/repo"},
+            "conda": {"prefix": str(env_prefix), "python": str(env_prefix / "bin" / "python")},
+            "data": {"run_data_dir": str(tmp_path / "environment" / "data")},
+        },
+    }), encoding="utf-8")
+    (root / "state" / "full_research_cycle.json").write_text(json.dumps({"status": "not_started", "summary": "旧 not_started"}), encoding="utf-8")
+    (root / "state" / "experiment_registry.json").write_text(json.dumps([
+        {
+            "timestamp": "2026-06-21T07:48:10Z",
+            "run_id": "demo_run",
+            "experiment_id": "plan_5",
+            "status": "success",
+            "method": "experiment",
+            "dataset": "synthetic_demo",
+            "repo_path": str(repo),
+            "artifact_path": str(tmp_path / "runtime" / "iteration_01"),
+            "metrics": {"best_monitor_loss": 16.5881},
+            "acceptance_status": "accepted",
+            "decision": "synthetic_only",
+        }
+    ], ensure_ascii=False), encoding="utf-8")
+    (root / "state" / "experiment_record_table.json").write_text(json.dumps({
+        "row_count": 1,
+        "columns": ["数据集", "指标"],
+        "rows": [{"数据集": "synthetic demo", "指标": "best_monitor_loss=16.5881"}],
+    }, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.setattr(project_bridge, "project_runtime_config", lambda project, cfg: {"conda_env": str(env_prefix), "experiment_python": str(env_prefix / "bin" / "python")})
+    monkeypatch.setattr(project_bridge, "_framework_public_status_for_project", lambda project: {})
+    monkeypatch.setattr(project_bridge, "_remote_process_rows", lambda: [])
+    monkeypatch.setattr(project_bridge, "_current_project_source_selection", lambda project, root: {})
+
+    summary = project_bridge._fast_project_summary("demo", root, json.loads((root / "project.json").read_text(encoding="utf-8")))
+
+    assert summary["status"] == "blocked_real_data_experiment_required"
+    assert "实验 smoke 已完成" in summary["summary"]
+    assert summary["current_blocker"]["category"] == "real_data_experiment_required"
+    assert summary["current_blocker"]["title"] == "需要真实数据实验"
+    assert "真实数据实验" in summary["current_blocker"]["next_action"]
+    assert "投稿准备度" not in summary["current_blocker"]["next_action"]
+    assert summary["state"]["show_synthetic_smoke_warning"] is True
+    assert summary["state"]["experiment_count"] == 1
+
 def test_web_public_state_prefers_environment_handoff_runtime(monkeypatch, tmp_path):
     projects = tmp_path / "projects"
     root = _make_project(projects, "demo")
@@ -244,6 +303,138 @@ def test_web_handoff_experiment_launch_ignores_environment_worker(monkeypatch, t
     assert web_server._project_stage_running_blocker({"project": "demo", "action": "environment"}, "environment") is not None
 
 
+def test_web_environment_worker_uses_command_run_id_instead_of_current_find(monkeypatch, tmp_path):
+    reading_scripts = ROOT / "modules" / "reading" / "scripts"
+    sys.path.insert(0, str(reading_scripts))
+    sys.modules.pop("pipeline", None)
+    from auto_research.web import server as web_server
+
+    monkeypatch.setattr(web_server, "_pid_alive_local", lambda pid: True)
+    row = web_server._active_project_worker_job(
+        "demo",
+        tmp_path,
+        {
+            "pid": "123",
+            "phase": "environment",
+            "kind": "environment_stage",
+            "elapsed": "00:10",
+            "cmd": "python modules/environment/main.py --action deploy_from_plan --run-id web_environment_demo_20260621T054118Z",
+        },
+        {},
+        {"run_id": "find_current"},
+        {"run_id": "find_current"},
+    )
+
+    assert row["stage"] == "environment"
+    assert row["run_id"] == "web_environment_demo_20260621T054118Z"
+    assert row["result"]["run_id"] == "web_environment_demo_20260621T054118Z"
+    assert "find_current" not in json.dumps(row, ensure_ascii=False)
+
+
+def test_web_environment_decision_does_not_fallback_when_explicit_run_missing(monkeypatch, tmp_path):
+    reading_scripts = ROOT / "modules" / "reading" / "scripts"
+    sys.path.insert(0, str(reading_scripts))
+    sys.modules.pop("pipeline", None)
+    from auto_research.web import server as web_server
+
+    monkeypatch.setattr(web_server, "WORKSPACE_ROOT", tmp_path)
+    old_run = tmp_path / "modules" / "environment" / "runs" / "web_environment_demo_20260621T053000Z"
+    old_run.mkdir(parents=True)
+    (old_run / "environment_deployment_decision.json").write_text(json.dumps({
+        "run_id": "web_environment_demo_20260621T053000Z",
+        "decision": "continue_repair",
+        "exit_code": 30,
+    }), encoding="utf-8")
+
+    decision = web_server._environment_decision_for_job(
+        "web_environment_demo_20260621T054118Z",
+        {"project": "demo"},
+        "2026-06-21T05:41:18Z",
+    )
+
+    assert decision == {}
+
+
+def test_web_jobs_merges_live_environment_run_id_into_persisted_running_job(monkeypatch):
+    reading_scripts = ROOT / "modules" / "reading" / "scripts"
+    sys.path.insert(0, str(reading_scripts))
+    sys.modules.pop("pipeline", None)
+    from auto_research.web import server as web_server
+
+    web_server._LIVE_JOBS_CACHE.clear()
+    monkeypatch.setattr(web_server, "_reconcile_detached_launcher_jobs", lambda dynamic=None: None)
+    monkeypatch.setattr(web_server, "_reconcile_stale_cancelling_jobs", lambda: None)
+    monkeypatch.setattr(web_server, "_find_run_history_jobs_from_runs", lambda *args, **kwargs: [])
+    monkeypatch.setattr(web_server, "_current_find_downstream_stage_history_jobs", lambda *args, **kwargs: [])
+    monkeypatch.setattr(web_server, "_environment_decision_public_projection", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        web_server,
+        "_live_jobs_from_projects",
+        lambda compact=True: [{
+            "job_id": "project-worker_demo_123",
+            "stage": "environment",
+            "status": "running",
+            "run_id": "web_environment_demo_20260621T060831Z",
+            "result": {"project": "demo", "phase": "environment", "kind": "environment_stage", "status": "running", "run_id": "web_environment_demo_20260621T060831Z"},
+            "progress": {"phase": "environment", "message": "environment worker running"},
+        }],
+    )
+    job = web_server.JobState("environment_web", "environment")
+    job.status = "running"
+    job.created_at = "2026-06-21T06:08:31Z"
+    job.result = {"project": "demo", "status": "running", "action": "environment"}
+    monkeypatch.setattr(web_server, "JOBS", {job.job_id: job})
+
+    rows = web_server.api_jobs(compact=True, limit=10, include_history=True, project="demo")
+
+    env_rows = [row for row in rows if row.get("job_id") == "environment_web"]
+    assert len(env_rows) == 1
+    assert env_rows[0]["run_id"] == "web_environment_demo_20260621T060831Z"
+    assert env_rows[0]["result"]["run_id"] == "web_environment_demo_20260621T060831Z"
+
+
+def test_web_jobs_hides_stale_environment_history_when_live_environment_running(monkeypatch):
+    reading_scripts = ROOT / "modules" / "reading" / "scripts"
+    sys.path.insert(0, str(reading_scripts))
+    sys.modules.pop("pipeline", None)
+    from auto_research.web import server as web_server
+
+    web_server._LIVE_JOBS_CACHE.clear()
+    monkeypatch.setattr(web_server, "_reconcile_detached_launcher_jobs", lambda dynamic=None: None)
+    monkeypatch.setattr(web_server, "_reconcile_stale_cancelling_jobs", lambda: None)
+    monkeypatch.setattr(web_server, "_find_run_history_jobs_from_runs", lambda *args, **kwargs: [])
+    monkeypatch.setattr(web_server, "_current_find_downstream_stage_history_jobs", lambda *args, **kwargs: [])
+    monkeypatch.setattr(web_server, "_environment_decision_public_projection", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        web_server,
+        "project_summary",
+        lambda project, compact=True: {"status": "environment_running", "stages": {"environment": {"status": "running"}}},
+    )
+    live = {
+        "job_id": "project-worker_demo_123",
+        "stage": "environment",
+        "status": "running",
+        "created_at": "2026-06-21T05:41:18Z",
+        "run_id": "web_environment_demo_20260621T054118Z",
+        "result": {"project": "demo", "phase": "environment", "kind": "environment_stage", "status": "running", "process_alive": True},
+        "progress": {"phase": "environment", "message": "environment worker running"},
+        "logs": ["project=demo", "stage=environment"],
+    }
+    monkeypatch.setattr(web_server, "_live_jobs_from_projects", lambda compact=True: [live])
+
+    stale = web_server.JobState("environment_old", "environment")
+    stale.status = "blocked"
+    stale.created_at = "2026-06-21T05:21:29Z"
+    stale.run_id = "web_environment_demo_20260621T052135Z"
+    stale.result = {"project": "demo", "status": "blocked", "action": "environment"}
+    monkeypatch.setattr(web_server, "JOBS", {stale.job_id: stale})
+
+    rows = web_server.api_jobs(compact=True, limit=10, include_history=True, project="demo")
+
+    assert [row["job_id"] for row in rows] == ["project-worker_demo_123"]
+    assert rows[0]["run_id"] == "web_environment_demo_20260621T054118Z"
+
+
 def test_web_jobs_lists_handoff_environment_worker_as_nonexclusive(monkeypatch):
     reading_scripts = ROOT / "modules" / "reading" / "scripts"
     sys.path.insert(0, str(reading_scripts))
@@ -293,6 +484,31 @@ def test_web_jobs_lists_handoff_environment_worker_as_nonexclusive(monkeypatch):
     assert row["result"]["phase"] == "environment"
     assert row["result"]["exclusive_stage"] is False
     assert "不阻塞实验入口" in row["progress"]["message"]
+
+
+def test_web_environment_decision_projection_supports_environment_ready(monkeypatch):
+    reading_scripts = ROOT / "modules" / "reading" / "scripts"
+    sys.path.insert(0, str(reading_scripts))
+    sys.modules.pop("pipeline", None)
+    from auto_research.web import server as web_server
+
+    monkeypatch.setattr(web_server, "_environment_decision_for_job", lambda *args, **kwargs: {
+        "run_id": "web_environment_demo_20260621T061924Z",
+        "decision": "environment_ready",
+        "exit_code": 0,
+        "allow_next_module": False,
+        "ready_for_experimenting": True,
+        "environment_handoff": {"ready_for_experimenting": True},
+        "workspace_write_audit": {"status": "passed"},
+    })
+
+    projection = web_server._environment_decision_public_projection("environment_demo", "", {"project": "demo"}, "2026-06-21T06:19:22Z")
+
+    assert projection["status"] == "ready_for_experimenting"
+    assert projection["decision"] == "environment_ready"
+    assert projection["exit_code"] == 0
+    assert "环境已交付" in projection["summary"]
+    assert "停在可修复真实门控" not in projection["summary"]
 
 
 def test_web_jobs_maps_handoff_ready_status_to_done_for_frontend():
@@ -428,6 +644,39 @@ def test_web_source_status_marks_partial_openreview_as_limited():
     assert project_bridge._venue_source_public_limited(row) is True
 
 
+def test_web_jobs_keeps_only_latest_persisted_environment_history(monkeypatch):
+    reading_scripts = ROOT / "modules" / "reading" / "scripts"
+    sys.path.insert(0, str(reading_scripts))
+    sys.modules.pop("pipeline", None)
+    from auto_research.web import server as web_server
+
+    web_server._LIVE_JOBS_CACHE.clear()
+    monkeypatch.setattr(web_server, "_reconcile_detached_launcher_jobs", lambda dynamic=None: None)
+    monkeypatch.setattr(web_server, "_reconcile_stale_cancelling_jobs", lambda: None)
+    monkeypatch.setattr(web_server, "_live_jobs_from_projects", lambda compact=True: [])
+    monkeypatch.setattr(web_server, "_find_run_history_jobs_from_runs", lambda *args, **kwargs: [])
+    monkeypatch.setattr(web_server, "_current_find_downstream_stage_history_jobs", lambda *args, **kwargs: [])
+    monkeypatch.setattr(web_server, "_environment_decision_public_projection", lambda *args, **kwargs: {})
+
+    old = web_server.JobState("environment_old", "environment")
+    old.status = "blocked"
+    old.created_at = "2026-06-21T05:21:29Z"
+    old.run_id = "web_environment_demo_20260621T052135Z"
+    old.result = {"project": "demo", "status": "blocked", "summary": "旧 success_criteria 空数组"}
+    new = web_server.JobState("environment_new", "environment")
+    new.status = "blocked"
+    new.created_at = "2026-06-21T05:55:29Z"
+    new.run_id = "web_environment_demo_20260621T054118Z"
+    new.result = {"project": "demo", "status": "blocked", "summary": "新 import biopython blocker"}
+    monkeypatch.setattr(web_server, "JOBS", {old.job_id: old, new.job_id: new})
+
+    rows = web_server.api_jobs(compact=True, limit=10, include_history=True, project="demo")
+
+    env_rows = [row for row in rows if row.get("stage") == "environment"]
+    assert [row["job_id"] for row in env_rows] == ["environment_new"]
+    assert "success_criteria 空数组" not in json.dumps(rows, ensure_ascii=False)
+
+
 def test_web_current_find_pending_read_blocker_is_not_environment_ready():
     blocker = project_bridge._current_find_pipeline_public_blocker({
         "status": "pending_current_find_read",
@@ -441,3 +690,57 @@ def test_web_current_find_pending_read_blocker_is_not_environment_ready():
     assert "Read 精读尚未运行" in blocker["summary"]
     assert "环境阶段" not in blocker["summary"]
     assert "Read 完成前不能进入 Idea、Plan、环境、实验或写作" in blocker["next_action"]
+
+
+def test_web_current_find_read_history_supersedes_stale_blocked_read_job(monkeypatch, tmp_path):
+    reading_scripts = ROOT / "modules" / "reading" / "scripts"
+    sys.path.insert(0, str(reading_scripts))
+    sys.modules.pop("pipeline", None)
+    from auto_research.web import server as web_server
+
+    projects = tmp_path / "projects"
+    root = projects / "demo"
+    (root / "state").mkdir(parents=True)
+    (root / "planning" / "finding").mkdir(parents=True)
+    run_id = "find_current"
+    (root / "state" / "current_find_research_plan.json").write_text(json.dumps({
+        "status": "claude_current_find_read_idea_plan_ready_waiting_for_environment_base_selection",
+        "run_id": run_id,
+        "generated_at": "2026-06-21T05:00:00Z",
+        "current_find_reading_count": 20,
+        "reading_validation": {
+            "valid": True,
+            "recommended_reading_count": 20,
+            "full_text_reading_count": 20,
+            "pending_full_text_reading_count": 0,
+        },
+    }), encoding="utf-8")
+    (root / "planning" / "finding" / "read_results.json").write_text(json.dumps({
+        "run_id": run_id,
+        "generated_at": "2026-06-21T05:01:00Z",
+        "readings": [{"title": f"paper {idx}", "full_text_available": True} for idx in range(20)],
+    }), encoding="utf-8")
+
+    monkeypatch.setattr(web_server, "PROJECT_IDS_ROOT", projects)
+    stale = {
+        "job_id": "read_stale",
+        "stage": "read",
+        "status": "blocked",
+        "created_at": "2026-06-21T02:00:00Z",
+        "run_id": run_id,
+        "result": {"project": "demo", "run_id": run_id, "status": "blocked_current_find_claude_read_failed"},
+        "progress": {"message": "当前 Find 仍有 20 篇缺少同篇全文证据"},
+    }
+
+    synthetic = web_server._current_find_downstream_stage_history_jobs("demo", existing_items=[stale])
+    read_rows = [row for row in synthetic if row.get("stage") == "read"]
+    assert len(read_rows) == 1
+    assert read_rows[0]["status"] == "done"
+    assert "全文精读合格 20 篇，待补 0 篇" in read_rows[0]["progress"]["message"]
+
+    collapsed = web_server._collapse_current_find_read_retry_jobs([stale] + synthetic, project_hint="demo")
+    collapsed_read_rows = [row for row in collapsed if row.get("stage") == "read"]
+    assert len(collapsed_read_rows) == 1
+    assert collapsed_read_rows[0]["job_id"].startswith("current-find-read_")
+    assert collapsed_read_rows[0]["status"] == "done"
+    assert "缺少同篇全文证据" not in json.dumps(collapsed_read_rows[0], ensure_ascii=False)

@@ -205,6 +205,9 @@ def acceptance_gate_text(row: dict[str, Any]) -> str:
             text = str(item or "").strip()
         if text:
             messages.append(text)
+    accepted_statuses = {"accepted", "accept", "pass", "passed", "success", "completed", "ok"}
+    if not messages and (not status or status.lower() in accepted_statuses):
+        return ""
     if status or messages:
         return one_line("；".join([part for part in [status, *messages] if part]), 420)
     return ""
