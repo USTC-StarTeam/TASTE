@@ -122,7 +122,7 @@ Current-Find 的完整精读 JSON 同时保留两层口径：
 | `read_results.json.public_readings` | 网页公开版。由后端从 `readings` 投影生成，字段更短，方法/实验/局限以 2-4 条短要点呈现，供 Read 页卡片优先展示。 |
 | `read.md` | 人类可读 Markdown 公开产物。结构固定为“速览、动机、机制、数学/形式化、实验与证据、可借鉴点、风险边界”。 |
 
-数学公式必须写成 Markdown+KaTeX 能渲染的形式：行内 `$...$` 或块级 `$$...$$`。不要输出半截 `$`，不要把中文句子塞进公式，不要用裸 `\textit{}`、`\textbf{}` 这类 LaTeX 样式命令包装普通文字。网页会优先展示 `public_readings`，但后端合同、Idea/Plan 和项目 Claude Code 仍以完整 `readings` 审计内容为准。
+数学公式必须写成 Markdown+KaTeX 能渲染的形式：行内 `$...$` 或块级 `$$...$$`。不要输出半截 `$`，不要把中文句子塞进公式，不要用裸 `\textit{}`、`\textbf{}` 这类 LaTeX 样式命令包装普通文字。公开版只展示显式公式字段或明确 Markdown 数学定界符中的完整公式，不能从普通中文段落里正则猜测变量片段、阈值或训练超参；没有安全公式时，“数学/形式化”应保留自然语言占位，把完整符号细节放在审计 JSON。网页会优先展示 `public_readings`，但后端合同、Idea/Plan 和项目 Claude Code 仍以完整 `readings` 审计内容为准。
 
 ## 运行流程逻辑
 

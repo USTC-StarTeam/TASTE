@@ -126,13 +126,28 @@ def test_current_find_read_public_projection_is_compact_and_katex_ready():
     par_public = module.build_public_reading_views([{**reading, "paper_id": "par", "method_details_zh": par_method}])[0]
     par_payload = json.dumps(par_public, ensure_ascii=False)
     assert not re.search(r"X=\{x1,\.(?:\s|$)", par_payload)
-    assert any("X=" in formula and "\\ldots" in formula for formula in par_public["public_formulas"])
+    assert par_public["public_formulas"] == []
+
+    noisy_method = (
+        "跨专家接口包含表示级锚定嵌入 e_gen_i = e(k_hat_i) + W_proj h_LLM_i，"
+        "扩散目标 L_gen = E_t,ε [1/|Z_x| Σ_i || ε_i - ε_θ(...) ||^2_2] 通过锚定路径回传。"
+        "阶段I训练10K步，lr=1e-3，批大小256；外循环K≈20轮；Score>15且X={x1,...,xn}。"
+    )
+    noisy_public = module.build_public_reading_views([{**reading, "paper_id": "noisy", "method_details_zh": noisy_method, "method_advantages_zh": [noisy_method]}])[0]
+    noisy_payload = json.dumps(noisy_public, ensure_ascii=False)
+    assert noisy_public["public_formulas"] == []
+    assert "e_gen_i" not in noisy_payload
+    assert "L_gen = E_t" not in noisy_payload
+    assert "lr=1e-3" not in noisy_payload
+    assert "K≈20" not in noisy_payload
+    assert "Score>15" not in noisy_payload
+    assert "X={x1" not in noisy_payload
 
     rendered = module.render_read_md([reading, {**reading, "paper_id": "par", "title": "PAR", "method_details_zh": par_method}], "find_test_run")
     assert "### 数学/形式化" in rendered
     assert "L_{gen}" in rendered
     assert not re.search(r"X=\{x1,\.(?:\s|$)", rendered)
-    assert "\\ldots" in rendered
+    assert "未单独抽取安全、完整的公式" in rendered
     paragraphs = [chunk.strip() for chunk in rendered.split("\n\n") if chunk.strip()]
     assert max(len(chunk) for chunk in paragraphs) < 1800
 

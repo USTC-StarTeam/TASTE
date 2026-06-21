@@ -3415,8 +3415,70 @@ def _normalize_public_latex_text_commands(text: Any) -> str:
     return value
 
 
+PUBLIC_PROSE_FORMULA_SIGNAL_RE = re.compile(
+    r"(?:[A-Za-zΑ-Ωα-ωθΘλΛϕφΦ][A-Za-z0-9Α-Ωα-ωθΘλΛϕφΦ_{}^()|]{0,64}\s*(?:=|≈|<=|>=|<|>)|(?:lr|learning[_-]?rate|epsilon|lambda|alpha)\s*=|[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+)",
+    re.IGNORECASE,
+)
+
+PUBLIC_PROSE_IDENTIFIER_REPLACEMENTS = (
+    (re.compile(r"\be_gen_i\b"), "生成嵌入"),
+    (re.compile(r"\bL_gen\b"), "生成目标"),
+    (re.compile(r"\bL_total\b"), "总损失"),
+    (re.compile(r"\bW_proj\b"), "投影矩阵"),
+    (re.compile(r"\bh_LLM_i\b"), "LLM隐藏表示"),
+    (re.compile(r"\bp_root(?:\^\{[^{}]{1,40}\})?(?:_[A-Za-z0-9{}(),]+)?\b"), "根后验"),
+    (re.compile(r"\bx\^\{\(l\)\}"), "位置状态"),
+    (re.compile(r"\bS_K\b"), "概率单纯形"),
+)
+
+
+def _public_text_has_formula_signal(value: str) -> bool:
+    return bool(PUBLIC_PROSE_FORMULA_SIGNAL_RE.search(str(value or "")))
+
+
+def _defang_public_formula_like_text(value: Any) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+
+    def replace_parenthetical(match: re.Match[str]) -> str:
+        open_bracket, inner, close_bracket = match.group(1), match.group(2), match.group(3)
+        if not _public_text_has_formula_signal(inner):
+            return match.group(0)
+        for sep in ["，", ","]:
+            if sep in inner:
+                suffix = inner.rsplit(sep, 1)[-1].strip()
+                if suffix and re.search(r"[\u4e00-\u9fff]", suffix) and not _public_text_has_formula_signal(suffix):
+                    return f"{open_bracket}{suffix}{close_bracket}"
+        return ""
+
+    text = re.sub(r"([（(])([^（）()]{1,260})([）)])", replace_parenthetical, text)
+    text = re.sub(r"K\s*[≈=]\s*(\d+(?:\.\d+)?)", r"约\1", text)
+    text = re.sub(
+        r"(?:lr|learning[_-]?rate|epsilon|lambda|alpha)\s*=\s*[-+]?\d+(?:\.\d+)?(?:e[-+]?\d+)?(?:\s*[,，]\s*(?:lr|learning[_-]?rate|epsilon|lambda|alpha)\s*=\s*[-+]?\d+(?:\.\d+)?(?:e[-+]?\d+)?)*",
+        "对应超参",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"[A-Za-zΑ-Ωα-ωθΘλΛϕφΦ][A-Za-z0-9Α-Ωα-ωθΘλΛϕφΦ_{}^()| -]{0,64}\s*(?:<=|>=|<|>)\s*[^，。；;、\n]{1,100}",
+        "指标阈值",
+        text,
+    )
+    text = re.sub(
+        r"[A-Za-zΑ-Ωα-ωθΘλΛϕφΦ][A-Za-z0-9Α-Ωα-ωθΘλΛϕφΦ_{}^()| -]{0,64}\s*(?:=|≈)\s*[^，。；;、\n]{1,120}",
+        "符号化定义",
+        text,
+    )
+    for pattern, replacement in PUBLIC_PROSE_IDENTIFIER_REPLACEMENTS:
+        text = pattern.sub(replacement, text)
+    text = re.sub(r"\s{2,}", " ", text)
+    text = re.sub(r"（\s*）|\(\s*\)", "", text)
+    return text.strip()
+
+
 def _read_public_markdown_text(value: Any, limit: int = 900) -> str:
-    clean = _sanitize_read_text(_normalize_public_latex_text_commands(value), limit * 2)
+    clean = _sanitize_read_text(_defang_public_formula_like_text(_normalize_public_latex_text_commands(value)), limit * 2)
     if not clean:
         return ""
     clean = re.sub(r"\n{3,}", "\n\n", clean)
@@ -3501,9 +3563,26 @@ def _formula_candidate_ok(expr: str) -> bool:
     inner = str(expr or "").strip().strip("$").strip()
     if not inner or re.search(r"[\u4e00-\u9fff]", inner):
         return False
+    if not re.match(r"^(?:\\[A-Za-z]+|[A-Za-zΑ-Ωα-ωθΘλΛϕφΦ])", inner):
+        return False
     if re.search(r"[\^_]\s*$", inner):
         return False
     if re.search(r"\\(?:textit|emph|textbf|texttt|textsc|underline)\s*\{", inner):
+        return False
+    if re.search(r"[,，;；:]\s*$", inner):
+        return False
+    # Do not promote scalar hyperparameters, thresholds, or metric cutoffs into
+    # the public "数学/形式化" section. They are experimental settings, not a
+    # standalone formulation, and rendering them as formulas is noisy.
+    scalar_assignment = re.match(
+        r"^([A-Za-zΑ-Ωα-ωθΘλΛϕφΦ_][A-Za-z0-9Α-Ωα-ωθΘλΛϕφΦ_{}^\\-]*)\s*(?:=|<|>|\\le|\\ge|\\approx)\s*[-+]?\d",
+        inner,
+    )
+    if scalar_assignment:
+        return False
+    if re.match(r"^(?:lr|learning[_-]?rate|batch(?:[_-]?size)?|epochs?|steps?|seed|warmup|dropout|temperature|top[_-]?k)\\b", inner, flags=re.IGNORECASE):
+        return False
+    if re.match(r"^[A-Za-zΑ-Ωα-ωθΘλΛϕφΦ_][A-Za-z0-9Α-Ωα-ωθΘλΛϕφΦ_{}^\\-]*\\s*=\\s*[A-Za-zΑ-Ωα-ωθΘλΛϕφΦ_](?:[A-Za-z0-9Α-Ωα-ωθΘλΛϕφΦ_{}^\\-]*)?$", inner):
         return False
     return bool(re.search(r"[=<>≤≥≈≠+*/_^{}]|\\[A-Za-z]+|[Α-Ωα-ω∑∏∫√∞]", inner))
 
@@ -3522,7 +3601,10 @@ def _extract_public_formulas(row: dict[str, Any], limit: int = 3) -> list[str]:
     explicit_values.extend(re.findall(r"(?<!\\)\$([^$\n]{1,180})(?<!\\)\$", text_fields))
     explicit_values.extend(re.findall(r"\\\(([^\n]{1,180})\\\)", text_fields))
     explicit_values.extend(re.findall(r"\\\[([^\n]{1,220})\\\]", text_fields))
-    explicit_values.extend(PUBLIC_INLINE_FORMULA_RE.findall(text_fields))
+    # Do not regex-harvest bare inline math-looking fragments from prose. In
+    # practice this turns variables, thresholds, and half expressions into noisy
+    # public formulas such as `lr=1e-3` or `L_gen=E_t`. Only explicit formula
+    # fields and author/Claude-delimited Markdown math are safe enough to show.
     for raw in explicit_values:
         expr = _normalize_formula_for_katex(raw)
         if expr and _formula_candidate_ok(expr) and expr not in formulas:
@@ -4132,7 +4214,7 @@ def render_read_md(readings: list[dict[str, Any]], run_id: str) -> str:
             for formula in formulas[:3]:
                 lines.append(f"- {formula}\n")
         else:
-            lines.append("- 本文公开精读摘要未抽取到可安全渲染的公式；完整符号细节保留在审计 JSON。\n")
+            lines.append("- 未单独抽取安全、完整的公式；机制要点保留自然语言描述，完整符号细节见审计 JSON。\n")
         lines.extend([
             "\n### 实验与证据\n",
             (row.get("experiments_zh") or "- （实验要点未生成。）") + "\n\n",
