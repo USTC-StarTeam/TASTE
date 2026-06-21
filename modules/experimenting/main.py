@@ -130,6 +130,8 @@ ACTION_SCRIPTS = {
     "launch_run": "execution/launch_experiment_run.py",
     "active_repo_smoke": "execution/run_active_repo_smoke.py",
     "real_repo_smoke": "execution/run_real_repo_smoke.py",
+    "proteinshake_realdata_probe": "execution/proteinshake_realdata_probe.py",
+    "realdata_probe": "execution/proteinshake_realdata_probe.py",
     "watchdog": "execution/experiment_run_watchdog.py",
     "contracts": "common/experiment_contracts.py",
     "analyze_failures": "analysis/analyze_experiment_failures.py",

@@ -1904,6 +1904,8 @@ DATASET_NAME_KEYS = {
     "dataset", "datasets", "dataset_name", "dataset_names", "dataset_title", "dataset_id", "dataset_key",
     "paper_dataset", "paper_datasets", "benchmark", "benchmark_name", "corpus", "corpus_name",
     "data", "data_name", "hf_dataset", "huggingface_dataset", "kaggle_dataset",
+    "training_data", "evaluation_data", "validation_data", "test_data", "wet_lab_data",
+    "data_protocol", "environment_requirements", "benchmarks", "benchmark_suite",
 }
 GENERIC_DATASET_NAMES = {
     "data", "dataset", "datasets", "benchmark", "corpus", "trainingdata", "testdata",
@@ -1912,7 +1914,8 @@ GENERIC_DATASET_NAMES = {
 SYNTHETIC_DATASET_MARKERS = (
     "toy", "synthetic", "dummy", "fake", "mock", "random data", "random dataset",
     "sample data", "sample dataset", "demo data", "demo dataset", "placeholder",
-    "玩具", "合成数据", "伪造", "虚拟", "随机数据", "示例数据", "样例数据",
+    "config_kon_demo", "prepare_demo_data",
+    "玩具", "合成数据", "伪造", "虚拟", "随机数据", "示例数据", "样例数据", "流程自测",
 )
 DATASET_NEGATIVE_OR_REPLACEMENT_MARKERS = (
     "not using", "not use", "do not use", "did not use", "without", "instead of",
@@ -2908,6 +2911,30 @@ def _dataset_receipt_binding_evidence(plan: dict[str, Any], receipts: list[dict[
     return [row for row in _dataset_binding_evidence(plan, receipts, dataset_names) if str(row.get("source") or "").startswith("receipt:")]
 
 
+def _dataset_receipt_names(receipts: list[dict[str, Any]], dataset_names: list[str]) -> set[str]:
+    matched: set[str] = set()
+    for receipt in _successful_dataset_receipts(receipts):
+        text = _receipt_dataset_text(receipt)
+        for name in dataset_names:
+            if _text_matches_dataset_name(text, name):
+                matched.add(name)
+    return matched
+
+
+def _dataset_receipt_artifact_bound_names(receipts: list[dict[str, Any]], dataset_names: list[str], run_dir: Path | None) -> set[str]:
+    if run_dir is None:
+        return set()
+    matched: set[str] = set()
+    for receipt in _successful_dataset_receipts(receipts):
+        if not _dataset_receipt_artifact_exists(receipt, run_dir):
+            continue
+        text = _receipt_dataset_text(receipt)
+        for name in dataset_names:
+            if _text_matches_dataset_name(text, name):
+                matched.add(name)
+    return matched
+
+
 def _dataset_synthetic_markers(plan: dict[str, Any], receipts: list[dict[str, Any]]) -> list[dict[str, str]]:
     markers: list[dict[str, str]] = []
     texts: list[tuple[str, str]] = [("paper_config_alignment", _alignment_row_text(row)) for row in _dataset_alignment_rows(plan)]
@@ -3208,11 +3235,61 @@ def _ensure_approval_gate_for_early_decision(decision: dict[str, Any], paper_evi
     return decision
 
 
-def _dataset_runtime_gate(receipts: list[dict[str, Any]]) -> tuple[bool, dict[str, Any]]:
+def _dataset_requirement_items(env_plan: dict[str, Any] | None, normalized_plan: dict[str, Any] | None = None) -> list[Any]:
+    items: list[Any] = []
+    for source in [env_plan, normalized_plan]:
+        if not isinstance(source, dict):
+            continue
+        for key in ["dataset", "datasets", "data", "benchmark", "benchmarks", "paper_dataset", "training_data", "evaluation_data", "test_data"]:
+            if key in source:
+                items.append(source.get(key))
+        for key in ["selected_plan", "selected_idea", "data_protocol", "environment_requirements", "initial_experiment"]:
+            value = source.get(key)
+            if value not in (None, "", [], {}):
+                items.append(value)
+    return items
+
+
+def _dataset_requirement_names(env_plan: dict[str, Any] | None, normalized_plan: dict[str, Any] | None = None) -> list[str]:
+    names: list[str] = []
+    for item in _dataset_requirement_items(env_plan, normalized_plan):
+        for text in _dataset_candidate_texts(item):
+            compact = _dataset_compact_text(text)
+            if len(compact) < 3 or compact in GENERIC_DATASET_NAMES:
+                continue
+            if text not in names:
+                names.append(text)
+    return names
+
+
+def _dataset_runtime_gate(
+    receipts: list[dict[str, Any]],
+    env_plan: dict[str, Any] | None = None,
+    run_dir: Path | None = None,
+    normalized_plan: dict[str, Any] | None = None,
+) -> tuple[bool, dict[str, Any]]:
     dataset_receipts = _successful_dataset_receipts(receipts)
-    return bool(dataset_receipts), {
+    env_plan = env_plan if isinstance(env_plan, dict) else {}
+    dataset_names = _dataset_requirement_names(env_plan, normalized_plan)
+    synthetic_markers = _dataset_synthetic_markers(env_plan, receipts)
+    receipt_bound_names = _dataset_receipt_names(receipts, dataset_names)
+    artifact_bound_names = _dataset_receipt_artifact_bound_names(receipts, dataset_names, run_dir)
+    missing_receipt_names = [name for name in dataset_names if name not in receipt_bound_names]
+    missing_artifact_names = [name for name in dataset_names if run_dir is not None and name not in artifact_bound_names]
+    required_names_ok = bool(dataset_names) and not missing_receipt_names and (run_dir is None or not missing_artifact_names)
+    if not dataset_names:
+        required_names_ok = bool(dataset_receipts)
+    passed = bool(dataset_receipts and required_names_ok and not synthetic_markers)
+    return passed, {
         "successful_dataset_phases": [str(row.get("phase") or "") for row in dataset_receipts[:8]],
         "sample_dataset_receipts": [_compact_receipt(row) for row in dataset_receipts[:5]],
+        "dataset_name_candidates": dataset_names[:20],
+        "dataset_receipt_bound_names": sorted(receipt_bound_names),
+        "dataset_artifact_bound_names": sorted(artifact_bound_names),
+        "missing_dataset_receipt_names": missing_receipt_names[:20],
+        "missing_dataset_artifact_names": missing_artifact_names[:20],
+        "synthetic_or_toy_markers": synthetic_markers,
+        "required_dataset_names_passed": required_names_ok,
     }
 
 
@@ -3383,6 +3460,7 @@ def build_environment_handoff_gate(
     run_dir: Path | None = None,
     machine: dict[str, Any] | None = None,
     workspace_audit: dict[str, Any] | None = None,
+    normalized_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     approval_checks = {
         str(row.get("name") or ""): row
@@ -3391,7 +3469,7 @@ def build_environment_handoff_gate(
     }
     env_plan = env_plan if isinstance(env_plan, dict) else {}
     runtime_ok, runtime_evidence = _runtime_smoke_gate(receipts)
-    dataset_runtime_ok, dataset_runtime_evidence = _dataset_runtime_gate(receipts)
+    dataset_runtime_ok, dataset_runtime_evidence = _dataset_runtime_gate(receipts, env_plan, run_dir, normalized_plan)
     checks: list[dict[str, Any]] = []
     for name in ENVIRONMENT_HANDOFF_REQUIRED_CHECKS:
         if name == "repository_source":
@@ -3433,7 +3511,7 @@ def build_environment_handoff_gate(
             checks.append(_approval_check(
                 "dataset_runtime",
                 dataset_runtime_ok,
-                "真实数据准备阶段已成功" if dataset_runtime_ok else "缺少成功且必需的数据准备回执",
+                "真实计划数据准备阶段已逐项命中并存在 run-local 产物" if dataset_runtime_ok else "缺少计划要求数据集的成功数据准备回执、run-local 产物，或数据阶段含 synthetic/demo 标记",
                 dataset_runtime_evidence,
             ))
             continue
@@ -3526,7 +3604,7 @@ def build_environment_handoff(
     env_name = str(env_plan.get("env_name") or "").strip()
     handoff_gate = build_environment_handoff_gate(
         approval_gate, receipts, repo_info,
-        env_plan=env_plan, run_dir=run_dir, machine=machine, workspace_audit=workspace_audit,
+        env_plan=env_plan, run_dir=run_dir, machine=machine, workspace_audit=workspace_audit, normalized_plan=normalized_plan,
     )
     conda_prefix = str(env_prefix_for(run_dir, env_name)) if env_name else ""
     full_commands = [row for row in env_plan.get("commands", []) if isinstance(row, dict) and str(row.get("phase") or "").strip().lower() == "reproduce_full"] if isinstance(env_plan.get("commands"), list) else []

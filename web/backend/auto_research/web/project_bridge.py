@@ -5157,7 +5157,7 @@ def _public_experiment_module_summary(
             if isinstance(row, dict) and "通过" in str(row.get("审计状态") or "")
         ])
     total = int(total_count or len(rows_l) or len(record_l) or 0)
-    completed = int(completed_count or audit_ready_count or 0)
+    completed_runs = int(completed_count or 0)
 
     if fresh_find_running:
         zh = "实验模块等待当前 Find 产物落盘；本模块暂不启动新的复现、训练或候选实验。"
@@ -5209,13 +5209,19 @@ def _public_experiment_module_summary(
 
         ref_text = "参考复现已通过" if ref_status == "pass" else f"参考复现状态：{status_label(ref_status)}"
         if total:
-            exp_text = f"当前主线共有 {total} 条实验/复现审计记录，{completed} 条已完成或审计就绪"
+            pieces = [f"当前主线共有 {total} 条实验/复现审计记录"]
+            if completed_runs:
+                pieces.append(f"{completed_runs} 条运行已结束")
+            if real_count:
+                pieces.append(f"{real_count} 条真实数据记录")
+            pieces.append(f"审计就绪论文级实验 {audit_ready_count} 条")
+            exp_text = "，".join(pieces)
         elif real_count:
-            exp_text = f"当前主线已有 {real_count} 条真实数据实验记录"
+            exp_text = f"当前主线已有 {real_count} 条真实数据实验记录；审计就绪论文级实验 {audit_ready_count} 条"
         else:
             exp_text = "当前主线还没有新的审计就绪候选实验记录"
         zh = f"{ref_text}；{exp_text}。科学进展：{status_label(science_status)}；实验循环：{status_label(loop_status)}。"
-        en = f"Reference reproduction: {status_label(ref_status, english=True)}; current-route experiment/reproduction audit records: {completed}/{total or real_count or 0}. Scientific progress: {status_label(science_status, english=True)}; experiment loop: {status_label(loop_status, english=True)}."
+        en = f"Reference reproduction: {status_label(ref_status, english=True)}; current-route experiment/reproduction records: {total or real_count or 0}; completed runs: {completed_runs}; paper-level audit-ready experiments: {audit_ready_count}. Scientific progress: {status_label(science_status, english=True)}; experiment loop: {status_label(loop_status, english=True)}."
         action_zh = "等待项目代理读取证据并给出具体下一步。"
         action_en = "Waiting for the project agent to read the evidence and choose the concrete next step."
     return {
@@ -8414,6 +8420,48 @@ def _has_synthetic_dataset(rows: Any) -> bool:
 def _row_is_real_dataset(row: Any) -> bool:
     name = _row_dataset_name(row).lower()
     return bool(name and not (name.startswith("synthetic") or "synthetic" in name or "合成" in name))
+
+
+def _row_is_accepted_real_data_probe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    parts = [
+        row.get("acceptance_status"),
+        row.get("审计状态"),
+        row.get("decision"),
+        row.get("method"),
+        row.get("method_slug"),
+        row.get("experiment_id"),
+        row.get("实验ID"),
+        row.get("notes"),
+    ]
+    text = " ".join(str(part or "") for part in parts).lower()
+    return "accepted_real_data_probe" in text or "真实数据探针" in text
+
+
+def _accepted_real_data_probe_count(rows: Any) -> int:
+    return len([row for row in (rows if isinstance(rows, list) else []) if _row_is_accepted_real_data_probe(row)])
+
+
+def _latest_experiment_row(rows: Any) -> dict[str, Any]:
+    sorted_rows = sorted(
+        (row for row in (rows if isinstance(rows, list) else []) if isinstance(row, dict)),
+        key=lambda row: str(row.get("timestamp") or row.get("finished_at") or row.get("updated_at") or row.get("时间") or ""),
+        reverse=True,
+    )
+    return sorted_rows[0] if sorted_rows else {}
+
+
+def _paper_level_real_data_experiment_missing(rows: Any, record_rows: Any) -> bool:
+    rows_l = rows if isinstance(rows, list) else []
+    record_l = record_rows if isinstance(record_rows, list) else []
+    probe_count = _accepted_real_data_probe_count(rows_l) or _accepted_real_data_probe_count(record_l)
+    audit_ready = _audit_ready_completed_experiment_count(rows_l)
+    audit_ready += len([
+        row for row in record_l
+        if isinstance(row, dict) and str(row.get("审计状态") or "").startswith("通过：")
+    ])
+    return bool(probe_count and not audit_ready)
 
 
 def _completed_or_live_real_experiment_count(rows: Any) -> int:
@@ -12526,14 +12574,26 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         and not _completed_or_live_real_experiment_count(current_route_experiments_all)
         and not _completed_or_live_real_experiment_count(current_route_record_rows)
     )
+    real_data_probe_requires_paper_experiment = bool(
+        status == "not_started"
+        and not (fresh_find_running or literature_gate_blocked or selected_plan_gate.get("blocked") or env_bootstrap_blocker)
+        and env.get("valid")
+        and _paper_level_real_data_experiment_missing(current_route_experiments_all, current_route_record_rows)
+    )
     real_data_experiment_next_action = "使用 handoff repo/env 设计并运行真实数据实验，绑定可比较指标、坏例/反例和 artifact-local audit；通过前不生成投稿级结论。"
+    paper_level_experiment_next_action = "在 ProteinShake 真实数据探针基础上接入 ProtDiS 编码或 GP 排序器，并继续补齐 ProtDBench/PDFBench 对应数据、工具链、坏例/反例和 artifact-local audit；通过前不生成投稿级结论。"
     if experiment_smoke_requires_real_data:
         status = "blocked_real_data_experiment_required"
         summary = "实验 smoke 已完成：ProtDiS 在 handoff repo/env 上跑通 synthetic demo 训练并产出 checkpoint、loss curve 和指标；该结果只证明流水线可运行，仍缺少真实数据实验、坏例/反例和论文证据，不能投稿。"
         blocker_summary = "最新实验仅为 synthetic demo smoke，未产生可写入论文的真实数据指标；科学进展门控仍阻塞。"
         blocker_next_action = real_data_experiment_next_action
+    elif real_data_probe_requires_paper_experiment:
+        status = "blocked_paper_level_real_data_experiment_required"
+        summary = "真实数据探针已完成：ProteinShake ProteinFamilyTask 已下载、划分并记录多数类基线指标；这是弱真实数据证据，只证明数据/指标链路可审计，尚未验证 ProtDiS/GP 候选方法，也没有完成 ProtDBench/PDFBench 论文级实验，不能投稿。"
+        blocker_summary = "最新真实数据探针已验收，但 audit_ready=0；主论文仍缺少候选方法对真实 benchmark/wet-lab 数据的可比指标、坏例/反例和 artifact-local audit。"
+        blocker_next_action = paper_level_experiment_next_action
     public_blocker_row = _public_blocker_row({
-        "category": "real_data_experiment_required" if experiment_smoke_requires_real_data else selected_plan_gate["category"] if selected_plan_gate.get("blocked") else str(current_find_pipeline_blocker.get("category") or current_find_pipeline_status or "current_find_pipeline") if current_find_pipeline_blocker else "literature_llm_quota_exhausted" if llm_quota_blocked else "fresh_find_running" if fresh_find_running else "literature_recommendation_shortfall" if literature_gate_blocked else "environment_bootstrap_failed" if env_bootstrap_blocker else "environment_anchor_selection_required" if status == "blocked_environment_base_selection_required" else selected_base_blocker_category if selected_base_viability_blocked else "fresh_base_reference_reproduction_running" if reference_full_job_live else "fresh_base_reference_probe_required" if status == "blocked_fresh_base_reference_probe_required" else "submission_readiness" if submission_blockers else str(ref_gate.get("decision") or ref_gate.get("status") or ""),
+        "category": "real_data_experiment_required" if experiment_smoke_requires_real_data else "paper_level_real_data_experiment_required" if real_data_probe_requires_paper_experiment else selected_plan_gate["category"] if selected_plan_gate.get("blocked") else str(current_find_pipeline_blocker.get("category") or current_find_pipeline_status or "current_find_pipeline") if current_find_pipeline_blocker else "literature_llm_quota_exhausted" if llm_quota_blocked else "fresh_find_running" if fresh_find_running else "literature_recommendation_shortfall" if literature_gate_blocked else "environment_bootstrap_failed" if env_bootstrap_blocker else "environment_anchor_selection_required" if status == "blocked_environment_base_selection_required" else selected_base_blocker_category if selected_base_viability_blocked else "fresh_base_reference_reproduction_running" if reference_full_job_live else "fresh_base_reference_probe_required" if status == "blocked_fresh_base_reference_probe_required" else "submission_readiness" if submission_blockers else str(ref_gate.get("decision") or ref_gate.get("status") or ""),
         "severity": "block",
         "issue": blocker_summary,
         "summary": blocker_summary,
@@ -12541,7 +12601,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     })
     handoff_experiment_next_action = "使用 handoff repo/env 进入 experimenting，运行真实评估并绑定 designability、scRMSD、pLDDT、TM-score 等论文指标；未完成前不提升论文结论。"
     current_find_pipeline_next_action = str(current_find_pipeline_blocker.get("next_action") or current_find_pipeline.get("next_required_action") or "") if current_find_pipeline_blocker else ""
-    public_current_goal = real_data_experiment_next_action if experiment_smoke_requires_real_data else handoff_experiment_next_action if status == "ready_for_experimenting" else selected_plan_gate["next_action"] if selected_plan_gate.get("blocked") else current_find_pipeline_next_action if current_find_pipeline_blocker else str(env_bootstrap_blocker.get("next_action") or "重新运行环境阶段，让项目 Claude 基于本机回执重新规划环境。") if env_bootstrap_blocker else running_experiment_next_action if active_experiment_training else "环境阶段需要项目代理验证并锁定 Read/Idea/Plan 提出的候选 repo/base，核查 repo/data/protocol 证据。" if status == "blocked_environment_base_selection_required" else selected_base_viability_next_action if selected_base_viability_blocked else reference_probe_next_action if status == "blocked_fresh_base_reference_probe_required" else _public_text_for_gate(full_cycle.get("current_goal") or "")
+    public_current_goal = real_data_experiment_next_action if experiment_smoke_requires_real_data else paper_level_experiment_next_action if real_data_probe_requires_paper_experiment else handoff_experiment_next_action if status == "ready_for_experimenting" else selected_plan_gate["next_action"] if selected_plan_gate.get("blocked") else current_find_pipeline_next_action if current_find_pipeline_blocker else str(env_bootstrap_blocker.get("next_action") or "重新运行环境阶段，让项目 Claude 基于本机回执重新规划环境。") if env_bootstrap_blocker else running_experiment_next_action if active_experiment_training else "环境阶段需要项目代理验证并锁定 Read/Idea/Plan 提出的候选 repo/base，核查 repo/data/protocol 证据。" if status == "blocked_environment_base_selection_required" else selected_base_viability_next_action if selected_base_viability_blocked else reference_probe_next_action if status == "blocked_fresh_base_reference_probe_required" else _public_text_for_gate(full_cycle.get("current_goal") or "")
     public_continuation_required = True if status == "ready_for_experimenting" else False if (full_job_live or active_experiment_training) else bool(full_cycle.get("continuation_required"))
     public_continuation_reason = "environment handoff ready; experimenting/evaluation must verify paper metrics" if status == "ready_for_experimenting" else str(full_cycle.get("continuation_reason") or "")
     full_cycle_compact = {"status": status, "summary": summary, "summary_zh": summary, "summary_en": _public_status_summary_en(status, base_title=base_title, active_experiment_training=active_experiment_training, reference_full_job_live=reference_full_job_live, fresh_find_running=fresh_find_running, recommendation_shortfall=recommendation_shortfall), "current_goal": _public_internal_names(public_current_goal), "continuation_required": public_continuation_required, "continuation_reason": _public_internal_names(public_continuation_reason), "updated_at": str(full_cycle.get("updated_at") or tick.get("generated_at") or ""), "started_at": str(full_cycle.get("started_at") or full_job.get("started_at") or ""), "latest_step": {**latest_step, "stage": latest_stage or latest_step.get("stage", ""), "phase": latest_phase, "line_count": line_count}, "latest_blockers": [public_blocker_row] if public_blocker_row.get("summary") else [], "experiment_evidence_policy": {"status": str(selected_base_viability.get("status") or base_switch_gate.get("status") or ""), "decision": _public_internal_names(selected_base_viability.get("decision") or base_switch_gate.get("decision") or ""), "authorized": bool(base_switch_authorized), "updated_at": str(selected_base_viability.get("updated_at") or base_switch_gate.get("updated_at") or "")}, "reference_full_job": scalar(reference_full_job, ["status", "decision", "pid", "process_alive", "log_path"]), "full_cycle_job": public_full_job}
@@ -12556,17 +12616,17 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     if literature_gate_blocked and not fresh_find_running:
         supervision_status = "blocked_literature_recommendation_gate"
     reference_running_next_action = "等待 full reference reproduction 完成；随后自动刷新参考复现、科学进展、论文证据、投稿准备度和阻塞行动计划门控。"
-    blocker_next_action = real_data_experiment_next_action if experiment_smoke_requires_real_data else selected_plan_gate["next_action"] if selected_plan_gate.get("blocked") else current_find_pipeline_next_action if current_find_pipeline_blocker else literature_gate_next_action if (fresh_find_running or literature_gate_blocked) else str(env_bootstrap_blocker.get("next_action") or "重新运行环境阶段，让项目 Claude 基于本机回执重新规划环境。") if env_bootstrap_blocker else "环境阶段需要项目代理验证并锁定 Read/Idea/Plan 提出的候选 repo/base，核查 repo/data/protocol 证据。" if status == "blocked_environment_base_selection_required" else selected_base_viability_next_action if selected_base_viability_blocked else reference_running_next_action if reference_full_job_live else reference_probe_next_action if status == "blocked_fresh_base_reference_probe_required" else handoff_experiment_next_action if status == "ready_for_experimenting" else submission_blocker_next_action if submission_blockers else _clean_stale_active_worker_text(tick.get("next_action", "") if isinstance(tick, dict) else "", stale_next_action) if stale_full_job else str(tick.get("next_action") or full_cycle.get("current_goal") or "")
+    blocker_next_action = real_data_experiment_next_action if experiment_smoke_requires_real_data else paper_level_experiment_next_action if real_data_probe_requires_paper_experiment else selected_plan_gate["next_action"] if selected_plan_gate.get("blocked") else current_find_pipeline_next_action if current_find_pipeline_blocker else literature_gate_next_action if (fresh_find_running or literature_gate_blocked) else str(env_bootstrap_blocker.get("next_action") or "重新运行环境阶段，让项目 Claude 基于本机回执重新规划环境。") if env_bootstrap_blocker else "环境阶段需要项目代理验证并锁定 Read/Idea/Plan 提出的候选 repo/base，核查 repo/data/protocol 证据。" if status == "blocked_environment_base_selection_required" else selected_base_viability_next_action if selected_base_viability_blocked else reference_running_next_action if reference_full_job_live else reference_probe_next_action if status == "blocked_fresh_base_reference_probe_required" else handoff_experiment_next_action if status == "ready_for_experimenting" else submission_blocker_next_action if submission_blockers else _clean_stale_active_worker_text(tick.get("next_action", "") if isinstance(tick, dict) else "", stale_next_action) if stale_full_job else str(tick.get("next_action") or full_cycle.get("current_goal") or "")
     if public_blocker_row.get("summary"):
         public_blocker_row["next_action"] = _public_internal_names(blocker_next_action)
         public_blocker_row["source"] = "deterministic_gate_audit"
         public_blocker_row["source_label"] = "来源：确定性门控审计"
     live_reference_job = reference_full_job if reference_full_job else safe_dict(tick.get("full_reference_job"))
     supervision = {**_empty_supervision_payload(), "status": selected_plan_gate["status"] if selected_plan_gate.get("blocked") else current_find_pipeline_status if current_find_pipeline_blocker else "blocked_literature_llm_quota_exhausted" if llm_quota_blocked else "running" if fresh_find_running else str(env_bootstrap_blocker.get("status") or "blocked_environment_bootstrap_failed") if env_bootstrap_blocker else "blocked_environment_base_selection_required" if status == "blocked_environment_base_selection_required" else supervision_status, "action": _public_internal_names(tick.get("action", "")), "generated_at": tick.get("generated_at", ""), "next_action": _public_internal_names(blocker_next_action), "full_reference_job": live_reference_job, "full_cycle_job": public_full_job, "environment_base_selection": _public_environment_selection_summary(env), "claude_current_find_state": safe_dict(tick.get("claude_current_find_state"))}
-    blocker_category = "real_data_experiment_required" if experiment_smoke_requires_real_data else selected_plan_gate["category"] if selected_plan_gate.get("blocked") else str(current_find_pipeline_blocker.get("category") or current_find_pipeline_status or "current_find_pipeline") if current_find_pipeline_blocker else "literature_llm_quota_exhausted" if llm_quota_blocked else "fresh_find_running" if fresh_find_running else "literature_recommendation_shortfall" if literature_gate_blocked else "environment_bootstrap_failed" if env_bootstrap_blocker else "environment_anchor_selection_required" if status == "blocked_environment_base_selection_required" else selected_base_blocker_category if selected_base_viability_blocked else "fresh_base_reference_reproduction_running" if reference_full_job_live else "fresh_base_reference_probe_required" if status == "blocked_fresh_base_reference_probe_required" else "submission_readiness" if submission_blockers else str(ref_gate.get("decision") or ref_gate.get("status") or "")
+    blocker_category = "real_data_experiment_required" if experiment_smoke_requires_real_data else "paper_level_real_data_experiment_required" if real_data_probe_requires_paper_experiment else selected_plan_gate["category"] if selected_plan_gate.get("blocked") else str(current_find_pipeline_blocker.get("category") or current_find_pipeline_status or "current_find_pipeline") if current_find_pipeline_blocker else "literature_llm_quota_exhausted" if llm_quota_blocked else "fresh_find_running" if fresh_find_running else "literature_recommendation_shortfall" if literature_gate_blocked else "environment_bootstrap_failed" if env_bootstrap_blocker else "environment_anchor_selection_required" if status == "blocked_environment_base_selection_required" else selected_base_blocker_category if selected_base_viability_blocked else "fresh_base_reference_reproduction_running" if reference_full_job_live else "fresh_base_reference_probe_required" if status == "blocked_fresh_base_reference_probe_required" else "submission_readiness" if submission_blockers else str(ref_gate.get("decision") or ref_gate.get("status") or "")
     reference_probe_has_dependency_blocker = bool(_reference_protocol_probe_blocker_summary(protocol_probe, base_title))
     selected_base_viability_title = selected_base_viability_public.get("title") or ("缺少审计就绪候选实验证据" if base_switch_gate_unresolved else "缺少当前主线候选实验证据")
-    blocker_title = "需要真实数据实验" if experiment_smoke_requires_real_data else selected_plan_gate["title"] if selected_plan_gate.get("blocked") else str(current_find_pipeline_blocker.get("title") or "等待当前 Find 后处理") if current_find_pipeline_blocker else "LLM API 额度/配置不可用" if llm_quota_blocked else "Find 正在运行" if fresh_find_running else "Find 推荐门控阻塞" if literature_gate_blocked else str(env_bootstrap_blocker.get("title") or "环境 bootstrap 未通过") if env_bootstrap_blocker else "等待环境阶段验证并锁定候选基底" if status == "blocked_environment_base_selection_required" else "候选实验运行中" if selected_base_viability_blocked and active_experiment_training else selected_base_viability_title if selected_base_viability_blocked else "参考复现正在运行" if reference_full_job_live else "参考协议依赖缺失" if status == "blocked_fresh_base_reference_probe_required" and reference_probe_has_dependency_blocker else "等待参考协议/环境 manifest 探针" if status == "blocked_fresh_base_reference_probe_required" else "论文证据/投稿门控阻塞" if submission_blockers else ("当前项目门控状态" if env.get("valid") else "等待环境阶段验证并锁定候选基底")
+    blocker_title = "需要真实数据实验" if experiment_smoke_requires_real_data else "需要论文级真实数据实验" if real_data_probe_requires_paper_experiment else selected_plan_gate["title"] if selected_plan_gate.get("blocked") else str(current_find_pipeline_blocker.get("title") or "等待当前 Find 后处理") if current_find_pipeline_blocker else "LLM API 额度/配置不可用" if llm_quota_blocked else "Find 正在运行" if fresh_find_running else "Find 推荐门控阻塞" if literature_gate_blocked else str(env_bootstrap_blocker.get("title") or "环境 bootstrap 未通过") if env_bootstrap_blocker else "等待环境阶段验证并锁定候选基底" if status == "blocked_environment_base_selection_required" else "候选实验运行中" if selected_base_viability_blocked and active_experiment_training else selected_base_viability_title if selected_base_viability_blocked else "参考复现正在运行" if reference_full_job_live else "参考协议依赖缺失" if status == "blocked_fresh_base_reference_probe_required" and reference_probe_has_dependency_blocker else "等待参考协议/环境 manifest 探针" if status == "blocked_fresh_base_reference_probe_required" else "论文证据/投稿门控阻塞" if submission_blockers else ("当前项目门控状态" if env.get("valid") else "等待环境阶段验证并锁定候选基底")
     if public_blocker_row.get("summary"):
         public_blocker_row["title"] = blocker_title
     legacy_control = {"policy": "历史仓库、实验和参考复现只保留为审计记录；当前主线以本轮 Find 后的环境审查选择为准。", "details_hidden": True}
@@ -12623,15 +12683,13 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     current_experiment_count = 0 if downstream_waiting_on_find else experiment_count
     current_completed_count = 0 if downstream_waiting_on_find else completed_count
     current_experiment_record = {**experiment_record_compact, "row_count": current_experiment_count, "rows": [] if downstream_waiting_on_find else experiment_record_compact.get("rows", [])}
+    latest_experiment = {} if downstream_waiting_on_find else _latest_experiment_row(current_route_experiments_all)
     latest_experiment_acceptance_blocker = {}
-    if not downstream_waiting_on_find:
-        for row in sorted((item for item in current_route_experiments_all if isinstance(item, dict)), key=lambda item: str(item.get("timestamp") or item.get("finished_at") or item.get("updated_at") or ""), reverse=True):
-            if str(row.get("acceptance_status") or "").startswith("blocked_"):
-                latest_experiment_acceptance_blocker = row
-                break
     experiment_acceptance_blocker_summary = ""
     experiment_acceptance_next_action = ""
-    if latest_experiment_acceptance_blocker:
+    experiment_acceptance_display_status = ""
+    if latest_experiment and str(latest_experiment.get("acceptance_status") or "").startswith("blocked_"):
+        latest_experiment_acceptance_blocker = latest_experiment
         acceptance_status = str(latest_experiment_acceptance_blocker.get("acceptance_status") or "").strip()
         blockers = safe_list(latest_experiment_acceptance_blocker.get("acceptance_blockers"))
         codes = {str(item.get("code") or "") for item in blockers if isinstance(item, dict)}
@@ -12648,6 +12706,17 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
             detail = "；".join(messages) or acceptance_status
             experiment_acceptance_blocker_summary = f"最新实验验收阻断：{detail}；本轮不能计为论文实验成功。"
         experiment_acceptance_next_action = str(latest_experiment_acceptance_blocker.get("next_action") or "根据实验验收 blocker 重构实验计划，补齐生成/评估流水线后再运行。")
+        experiment_acceptance_display_status = str(latest_experiment_acceptance_blocker.get("acceptance_status") or "")
+    elif latest_experiment and _row_is_accepted_real_data_probe(latest_experiment):
+        real_probe_count = _accepted_real_data_probe_count(current_route_experiments_all) or _accepted_real_data_probe_count(current_route_record_rows)
+        paper_audit_ready_count = _audit_ready_completed_experiment_count(current_route_experiments_all)
+        paper_audit_ready_count += len([
+            row for row in current_route_record_rows
+            if isinstance(row, dict) and str(row.get("审计状态") or "").startswith("通过：")
+        ])
+        experiment_acceptance_blocker_summary = f"最新真实数据探针已验收：ProteinShake 数据加载、划分和指标记录链路可审计；该探针是弱证据，不支撑主论文结论。当前真实数据记录 {real_probe_count} 条，审计就绪论文级实验 {paper_audit_ready_count} 条；论文级 ProtDiS/GP + ProtDBench/PDFBench 实验仍阻塞。"
+        experiment_acceptance_next_action = str(latest_experiment.get("next_action") or paper_level_experiment_next_action)
+        experiment_acceptance_display_status = "accepted_real_data_probe"
     experiment_display_flags = _experiment_summary_display_flags(current_route_experiments_all if not downstream_waiting_on_find else [], current_route_record_rows if not downstream_waiting_on_find else [])
     experiment_count_label = "实验/复现审计记录"
     experiment_count_help = "这是当前主线下实验与参考复现记录的审计统计，不是完整科研流程完成进度；论文结论仍以科学进展、证据和投稿门控为准。"
@@ -12839,18 +12908,18 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         next_action=blocker_next_action,
     )
     if experiment_acceptance_blocker_summary:
-        experiment_stage_status = "blocked_experiment_acceptance"
+        experiment_stage_status = "blocked_paper_level_real_data_experiment_required" if experiment_acceptance_display_status == "accepted_real_data_probe" else "blocked_experiment_acceptance"
         next_action_text = experiment_acceptance_next_action or "根据实验验收 blocker 重构实验计划，补齐生成/评估流水线后再运行。"
         experiment_module_summary.update({
             "status": experiment_stage_status,
             "summary": experiment_acceptance_blocker_summary,
             "summary_zh": experiment_acceptance_blocker_summary,
-            "summary_en": "Latest experiment iteration is blocked by the acceptance gate; it cannot support paper claims.",
+            "summary_en": "Latest real-data probe is accepted as weak evidence only; paper-level experiments remain blocked." if experiment_acceptance_display_status == "accepted_real_data_probe" else "Latest experiment iteration is blocked by the acceptance gate; it cannot support paper claims.",
             "module_summary": experiment_acceptance_blocker_summary,
             "module_summary_zh": experiment_acceptance_blocker_summary,
-            "module_summary_en": "Latest experiment iteration is blocked by the acceptance gate; it cannot support paper claims.",
+            "module_summary_en": "Latest real-data probe is accepted as weak evidence only; paper-level experiments remain blocked." if experiment_acceptance_display_status == "accepted_real_data_probe" else "Latest experiment iteration is blocked by the acceptance gate; it cannot support paper claims.",
             "next_action": next_action_text,
-            "acceptance_status": str(latest_experiment_acceptance_blocker.get("acceptance_status") or ""),
+            "acceptance_status": experiment_acceptance_display_status,
         })
     read_matches_recommendations = bool(strong_count and display_read_count == strong_count)
     idea_score_values = []
@@ -13042,12 +13111,12 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         display_human_gate_summary = {
             **human_gate_summary,
             "status": "blocked_experiment_acceptance",
-            "title": "实验验收门控阻塞",
+            "title": "真实数据探针已验收，论文级实验仍阻塞" if experiment_acceptance_display_status == "accepted_real_data_probe" else "实验验收门控阻塞",
             "summary": experiment_acceptance_blocker_summary,
             "next_action": experiment_acceptance_next_action or "根据实验验收 blocker 重构实验计划，补齐生成/评估流水线后再运行。",
             "source": "experiment_acceptance_gate",
-            "source_label": "来源：实验模块验收门控",
-            "acceptance_status": str(latest_experiment_acceptance_blocker.get("acceptance_status") or ""),
+            "source_label": "来源：实验模块真实数据探针" if experiment_acceptance_display_status == "accepted_real_data_probe" else "来源：实验模块验收门控",
+            "acceptance_status": experiment_acceptance_display_status,
         }
     experiment_stage = {"status": experiment_stage_status, **experiment_module_summary, "human_gate_summary": display_human_gate_summary, "experiment_count": current_experiment_count, "completed_experiment_count": current_completed_count, "experiment_count_label": experiment_count_label, "experiment_count_help": experiment_count_help, "recent_experiments": current_experiments, "experiments": current_experiments, "experiment_record": current_experiment_record, **experiment_display_flags, "legacy_experiment_audit": legacy_experiment_audit, "reference_reproduction_gate": scalar(display_ref_gate, ["status", "decision", "decision_reason", "human_summary"]), "scientific_progress_gate": _public_gate_status_summary(scientific_progress_gate), "experiment_iteration_audit": _public_gate_status_summary(experiment_iteration_audit), "full_research_cycle": full_cycle_compact}
     if framework_status:
@@ -13385,6 +13454,15 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
         status = 'ready_for_experimenting'
     if env_bootstrap_blocker and not (full_job_live or reference_full_job_live):
         status = str(env_bootstrap_blocker.get('status') or 'blocked_environment_bootstrap_failed')
+    real_data_probe_requires_paper_experiment = bool(
+        status == 'not_started'
+        and not (current_find_pipeline_blocker or recommendation_shortfall or env_bootstrap_blocker)
+        and env.get('valid')
+        and _paper_level_real_data_experiment_missing(current_route_experiments_all, current_route_record_rows)
+    )
+    paper_level_experiment_next_action = '在 ProteinShake 真实数据探针基础上接入 ProtDiS 编码或 GP 排序器，并继续补齐 ProtDBench/PDFBench 对应数据、工具链、坏例/反例和 artifact-local audit；通过前不生成投稿级结论。'
+    if real_data_probe_requires_paper_experiment:
+        status = 'blocked_paper_level_real_data_experiment_required'
     elapsed = str(full_job.get('elapsed') or full_job.get('elapsed_sec') or '') if isinstance(full_job, dict) else ''
     command = str(full_job.get('cmd') or '') if isinstance(full_job, dict) else ''
     full_job_kind = str(full_job.get('kind') or '') if isinstance(full_job, dict) else ''
@@ -13518,6 +13596,8 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
         summary = f'环境阶段已选择当前候选基底：{base_title}；' + (protocol_blocker_summary or '真实数据/loader 已通过，等待参考协议/环境 manifest 探针。')
     elif status == 'ready_for_experimenting':
         summary = '环境已交付：真实仓库、run-local Conda、数据准备和 loader/model smoke 已通过；论文指标仍由实验阶段验证。'
+    elif real_data_probe_requires_paper_experiment:
+        summary = '真实数据探针已完成：ProteinShake ProteinFamilyTask 已下载、划分并记录多数类基线指标；这是弱真实数据证据，只证明数据/指标链路可审计，尚未验证 ProtDiS/GP 候选方法，也没有完成 ProtDBench/PDFBench 论文级实验，不能投稿。'
     elif current_find_pipeline_blocker:
         summary = str(pipeline_contract.get('summary_zh') or current_find_pipeline_blocker.get('summary') or current_find_pipeline_blocker.get('issue') or summary)
     elif waiting_environment_base_selection:
@@ -13591,6 +13671,11 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
         blocker_title = '参考协议依赖缺失' if protocol_blocker_summary else '等待参考协议/环境 manifest 探针'
         blocker_summary = protocol_blocker_summary or f'{base_title} 数据和 loader/import probe 已通过；当前等待参考协议/环境 manifest 探针。'
         next_action = '使用当前配置的实验环境补齐缺失依赖后重新运行 reference-protocol/import probe；通过前不训练、不写论文、不提升结论。' if protocol_blocker_summary else '记录当前基底最小环境 manifest，并对 ready 数据集运行有界只读 reference-protocol/import probe；通过前不训练、不写论文、不提升结论。'
+    elif real_data_probe_requires_paper_experiment:
+        blocker_category = 'paper_level_real_data_experiment_required'
+        blocker_title = '需要论文级真实数据实验'
+        blocker_summary = '最新真实数据探针已验收，但 audit_ready=0；主论文仍缺少候选方法对真实 benchmark/wet-lab 数据的可比指标、坏例/反例和 artifact-local audit。'
+        next_action = paper_level_experiment_next_action
     elif submission_blockers:
         top_submission_blocker = submission_blockers[0]
         blocker_category = str(top_submission_blocker.get('category') or 'submission_readiness')

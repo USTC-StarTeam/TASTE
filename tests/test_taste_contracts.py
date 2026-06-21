@@ -1270,6 +1270,98 @@ def test_environment_handoff_reuses_historical_dataset_without_relaxing_full_app
     assert len(handoff["data"]["successful_dataset_receipts"]) == 1
 
 
+
+
+def test_environment_handoff_rejects_synthetic_dataset_for_real_data_plan(tmp_path):
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_handoff_synthetic_dataset",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+
+    run_dir = tmp_path / "run"
+    repo = run_dir / "repos" / "protdis"
+    demo_data = repo / "demo_data"
+    env_prefix = run_dir / "conda_envs" / "protdis_env"
+    for item in [repo, demo_data, env_prefix / "bin"]:
+        item.mkdir(parents=True, exist_ok=True)
+    (env_prefix / "bin" / "python").write_text("", encoding="utf-8")
+    env_plan = {
+        "env_name": "protdis_env",
+        "commands": [
+            {"phase": "conda_setup", "command": ["conda", "create", "-p", str(env_prefix), "python=3.11"], "required": True},
+            {"phase": "verify_imports", "command": [str(env_prefix / "bin" / "python"), "-c", "import torch"], "required": True},
+            {"phase": "dataset", "command": [str(env_prefix / "bin" / "python"), "prepare_demo_data.py", "--output", str(demo_data)], "required": True},
+            {"phase": "reproduce_smoke", "command": [str(env_prefix / "bin" / "python"), "train.py", "-C", "config_kon_demo.yaml"], "required": True},
+        ],
+        "paper_config_alignment": [
+            {"paper_item": "dataset", "paper_value": "ProtDBench wet-lab data / PDFBench SwissTest / ProteinShake 12-task set", "implementation_choice": "prepare_demo_data synthetic demo only", "command_phase": "dataset", "evidence_source": "demo smoke", "match_status": "matched", "critical": True},
+            {"paper_item": "hardware", "paper_value": "CUDA", "implementation_choice": "local CUDA", "command_phase": "verify_imports", "match_status": "matched", "critical": True},
+        ],
+        "machine_assessment": {"status": "suitable", "fit_for_local_machine": True, "paper_hardware_or_runtime_requirement": "CUDA", "local_machine_summary": "CUDA ok", "adaptation_actions": ["use local GPU"], "evidence": ["nvidia-smi"]},
+    }
+    receipts = [
+        {"phase": "conda_setup", "required": True, "return_code": 0, "status": "passed", "command": f"conda create -p {env_prefix} python=3.11", "conda_env_prefix": str(env_prefix)},
+        {"phase": "verify_imports", "required": True, "return_code": 0, "status": "passed", "command": f"{env_prefix / 'bin' / 'python'} -c 'import torch'", "conda_env_prefix": str(env_prefix)},
+        {"phase": "dataset", "required": True, "return_code": 0, "status": "passed", "command": f"python prepare_demo_data.py --output {demo_data}", "tokens": ["python", "prepare_demo_data.py", "--output", str(demo_data)], "conda_env_prefix": str(env_prefix)},
+        {"phase": "reproduce_smoke", "required": True, "return_code": 0, "status": "passed", "command": "python train.py -C config_kon_demo.yaml", "stdout_tail": "synthetic demo smoke passed", "conda_env_prefix": str(env_prefix)},
+    ]
+    handoff = autonomous_deploy.build_environment_handoff(
+        "pytest_synthetic_data",
+        run_dir,
+        {"selected_plan": {"environment_requirements": {"training_data": ["ProtDBench wet-lab data", "PDFBench SwissTest", "ProteinShake 12-task set"]}}},
+        {"repo_url": "https://github.com/protdis/protdis", "repo_path": str(repo), "exists": True, "head_commit": "abc", "clone_receipt": {"return_code": 0, "status": "passed"}},
+        env_plan,
+        receipts,
+        {"checks": [{"name": "workspace_write_audit", "passed": True, "reason": "audit ok"}]},
+        [],
+        machine={},
+        workspace_audit={"status": "passed", "outside_workspace_writes": []},
+    )
+    checks = {row["name"]: row for row in handoff["handoff_gate"]["checks"]}
+    assert handoff["ready_for_experimenting"] is False
+    assert checks["dataset_runtime"]["passed"] is False
+    evidence = checks["dataset_runtime"]["evidence"]
+    assert "ProtDBench wet-lab data" in evidence["missing_dataset_receipt_names"]
+    assert evidence["synthetic_or_toy_markers"]
+
+
+def test_proteinshake_realdata_probe_writes_real_metrics(tmp_path, monkeypatch):
+    script_path = ROOT / "modules" / "experimenting" / "scripts" / "execution" / "proteinshake_realdata_probe.py"
+    spec = importlib.util.spec_from_file_location("proteinshake_realdata_probe_test", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class FakeProteinFamilyTask:
+        task_type = ("protein", "multi_class")
+        num_classes = 3
+        train_targets = [0, 0, 1, 2]
+        val_targets = [0, 1]
+        test_targets = [0, 2]
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    import types
+    fake_tasks = types.ModuleType("proteinshake.tasks")
+    fake_tasks.ProteinFamilyTask = FakeProteinFamilyTask
+    fake_pkg = types.ModuleType("proteinshake")
+    monkeypatch.setitem(sys.modules, "proteinshake", fake_pkg)
+    monkeypatch.setitem(sys.modules, "proteinshake.tasks", fake_tasks)
+
+    artifact_dir = tmp_path / "artifact"
+    data_root = tmp_path / "data"
+    rc = module.main(["--artifact-dir", str(artifact_dir), "--data-root", str(data_root)])
+
+    assert rc == 0
+    summary = json.loads((artifact_dir / "experiment_iteration_summary.json").read_text(encoding="utf-8"))
+    metrics = json.loads((artifact_dir / "metrics.json").read_text(encoding="utf-8"))
+    assert summary["acceptance_status"] == "accepted_real_data_probe"
+    assert summary["dataset"] == "ProteinShake ProteinFamilyTask"
+    assert metrics["proteinshake_train_samples"] == 4
+    assert metrics["proteinshake_test_majority_accuracy"] == 0.5
+
+
 def test_environment_handoff_ready_without_promoting_paper_metrics(tmp_path):
     environment_module_root = ROOT / "modules" / "environment"
     for name in list(sys.modules):
@@ -1725,6 +1817,17 @@ def test_experiment_record_tools_acceptance_accepted_is_not_blocker():
     spec.loader.exec_module(module)
 
     assert module.acceptance_gate_text({"acceptance_status": "accepted", "acceptance_blockers": []}) == ""
+    probe_row = {
+        "acceptance_status": "accepted_real_data_probe",
+        "acceptance_blockers": [],
+        "status": "success",
+        "dataset": "ProteinShake ProteinFamilyTask",
+        "metrics": {"proteinshake_test_majority_accuracy": 0.0134},
+    }
+    assert module.acceptance_gate_text(probe_row) == ""
+    assert "真实数据探针已验收" in module.audit_text(probe_row)
+    assert "弱证据" in module.audit_text(probe_row)
+    assert "不能支撑主论文结论" in module.reflection(probe_row)
     assert "missing_generation_pipeline" in module.acceptance_gate_text(
         {"acceptance_status": "blocked_generation_evaluation_pipeline_missing", "acceptance_blockers": [{"code": "missing_generation_pipeline"}]}
     )

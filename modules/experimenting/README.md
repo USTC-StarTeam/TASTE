@@ -54,7 +54,39 @@ python modules/experimenting/main.py \
 | `coding_agent` | 直接调用实验 Claude agent。 |
 | `launch` | 执行一次验证/训练命令。 |
 | `reference_reproduction`、`audit_iteration`、`runtime_integrity` | 质量门控/审计动作。 |
+| `proteinshake_realdata_probe` / `realdata_probe` | 有界真实数据探针：加载 ProteinShake `ProteinFamilyTask`，写出真实划分规模和多数类基线指标。该 action 只验证真实数据/指标链路，不代表论文级实验成功。 |
 | `--contract` | 输出模块契约。 |
+
+### ProteinShake 真实数据探针
+
+该探针用于在 full paper experiment 前确认真实数据可获取、可划分、可记录指标。它不调用 Claude，不改 repo，只读/写 `modules/experimenting` 下的运行产物；framework/web 会把必要摘要投影到 `projects/<project>` 供页面和项目 Claude Code 读取。
+
+示例：
+
+```bash
+python modules/experimenting/main.py \
+  --action proteinshake_realdata_probe \
+  --artifact-dir modules/experimenting/runtime/web/protein/runs/proteinshake_realdata_probe_<date>/iteration_01 \
+  --data-root modules/experimenting/runtime/data_probe/protein_<date>_realdata/proteinshake_probe
+```
+
+输入：
+
+| 参数 | 作用 |
+| --- | --- |
+| `--artifact-dir` | 本次探针产物目录，必须在 experimenting 模块 runtime 下或由 framework 传入的模块输出根下。 |
+| `--data-root` | ProteinShake 数据缓存目录；默认在 `modules/experimenting/runtime/data_probe/proteinshake_probe`。 |
+
+输出：
+
+| 文件 | 作用 |
+| --- | --- |
+| `proteinshake_realdata_probe.json` | 数据加载、划分、任务元数据和验收摘要。 |
+| `metrics.json` | `proteinshake_train_samples`、`proteinshake_test_samples`、`proteinshake_num_classes`、多数类 accuracy/macro-F1 等弱基线指标。 |
+| `audit.json` | artifact-local 审计，标明真实数据探针已验收但不是论文级证据。 |
+| `experiment_iteration_summary.json` | 供 registry/web/framework 统一消费的实验迭代摘要，`acceptance_status=accepted_real_data_probe`。 |
+
+解释口径：`accepted_real_data_probe` 表示真实数据链路已验收、可作为后续实验输入依据；它是弱证据，不支撑主论文结论，也不会清除 ProtDBench/PDFBench/候选方法比较等论文级实验阻塞。
 
 ## 输出口径
 

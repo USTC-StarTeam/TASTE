@@ -172,6 +172,84 @@ def test_web_summary_does_not_report_not_started_after_synthetic_experiment(monk
     assert summary["state"]["show_synthetic_smoke_warning"] is True
     assert summary["state"]["experiment_count"] == 1
 
+
+def test_web_summary_keeps_paper_blocked_after_accepted_real_data_probe(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    root = _make_project(projects, "demo")
+    repo = root / "repos" / "selected" / "repo"
+    env_prefix = tmp_path / "environment" / "conda_envs" / "protdis_env"
+    (env_prefix / "bin").mkdir(parents=True)
+    (env_prefix / "bin" / "python").write_text("", encoding="utf-8")
+    (root / "state" / "environment_handoff.json").write_text(json.dumps({
+        "status": "ready_for_experimenting",
+        "valid": True,
+        "repo_path": str(repo),
+        "conda_env_prefix": str(env_prefix),
+        "environment_handoff": {
+            "ready_for_experimenting": True,
+            "repo": {"repo_path": str(repo), "repo_url": "https://github.com/example/repo"},
+            "conda": {"prefix": str(env_prefix), "python": str(env_prefix / "bin" / "python")},
+        },
+    }), encoding="utf-8")
+    (root / "state" / "full_research_cycle.json").write_text(json.dumps({"status": "not_started", "summary": "旧 not_started"}), encoding="utf-8")
+    (root / "state" / "experiment_registry.json").write_text(json.dumps([
+        {
+            "timestamp": "2026-06-21T07:48:10Z",
+            "run_id": "demo_synthetic",
+            "experiment_id": "plan_5",
+            "status": "failed",
+            "dataset": "synthetic_demo",
+            "repo_path": str(repo),
+            "acceptance_status": "blocked_real_data_experiment_required",
+            "acceptance_blockers": [{"code": "real_data_experiment_required", "message": "synthetic smoke only"}],
+            "evidence_status": "blocked_not_promotable",
+        },
+        {
+            "timestamp": "2026-06-21T09:30:00Z",
+            "run_id": "proteinshake_probe",
+            "experiment_id": "plan_5_proteinshake_realdata_probe",
+            "status": "success",
+            "dataset": "ProteinShake ProteinFamilyTask",
+            "method": "proteinshake_realdata_probe",
+            "repo_path": str(repo),
+            "metrics": {"proteinshake_test_majority_accuracy": 0.0134},
+            "acceptance_status": "accepted_real_data_probe",
+            "audit_ready": False,
+            "claim_verdict": "unsupported",
+            "next_action": "接入 ProtDiS/GP 后继续真实数据实验。",
+        },
+    ], ensure_ascii=False), encoding="utf-8")
+    (root / "state" / "experiment_record_table.json").write_text(json.dumps({
+        "row_count": 2,
+        "columns": ["时间", "实验ID", "数据集", "审计状态"],
+        "rows": [
+            {"时间": "2026-06-21T07:48:10Z", "实验ID": "plan_5", "数据集": "synthetic demo", "审计状态": "验收阻断：blocked_real_data_experiment_required", "证据路径": str(repo)},
+            {"时间": "2026-06-21T09:30:00Z", "实验ID": "plan_5_proteinshake_realdata_probe", "数据集": "ProteinShake ProteinFamilyTask", "审计状态": "真实数据探针已验收：弱证据，不支撑主论文结论", "证据路径": str(repo)},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.setattr(project_bridge, "project_runtime_config", lambda project, cfg: {"conda_env": str(env_prefix), "experiment_python": str(env_prefix / "bin" / "python")})
+    monkeypatch.setattr(project_bridge, "_framework_public_status_for_project", lambda project: {})
+    monkeypatch.setattr(project_bridge, "_remote_process_rows", lambda: [])
+    monkeypatch.setattr(project_bridge, "_current_project_source_selection", lambda project, root: {})
+
+    summary = project_bridge._fast_project_summary("demo", root, json.loads((root / "project.json").read_text(encoding="utf-8")))
+
+    assert summary["status"] == "blocked_paper_level_real_data_experiment_required"
+    assert "真实数据探针已完成" in summary["summary"]
+    assert summary["current_blocker"]["category"] == "paper_level_real_data_experiment_required"
+    assert summary["current_blocker"]["title"] == "需要论文级真实数据实验"
+    assert "audit_ready=0" in summary["current_blocker"]["summary"]
+    experiment_stage = summary["stages"]["experiment"]
+    assert experiment_stage["status"] == "blocked_paper_level_real_data_experiment_required"
+    assert experiment_stage["real_experiment_count"] == 1
+    assert experiment_stage["audit_ready_completed_experiment_count"] == 0
+    assert "最新真实数据探针已验收" in experiment_stage["summary"]
+    assert "审计就绪论文级实验 0 条" in experiment_stage["module_summary"]
+    assert "已完成或审计就绪" not in experiment_stage["module_summary"]
+    assert "synthetic smoke only" not in experiment_stage["summary"]
+    assert summary["state"].get("show_synthetic_smoke_warning") is False
+
 def test_web_public_state_prefers_environment_handoff_runtime(monkeypatch, tmp_path):
     projects = tmp_path / "projects"
     root = _make_project(projects, "demo")

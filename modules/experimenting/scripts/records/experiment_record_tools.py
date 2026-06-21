@@ -205,7 +205,7 @@ def acceptance_gate_text(row: dict[str, Any]) -> str:
             text = str(item or "").strip()
         if text:
             messages.append(text)
-    accepted_statuses = {"accepted", "accept", "pass", "passed", "success", "completed", "ok"}
+    accepted_statuses = {"accepted", "accepted_real_data_probe", "accept", "pass", "passed", "success", "completed", "ok"}
     if not messages and (not status or status.lower() in accepted_statuses):
         return ""
     if status or messages:
@@ -213,10 +213,16 @@ def acceptance_gate_text(row: dict[str, Any]) -> str:
     return ""
 
 
+def is_accepted_real_data_probe(row: dict[str, Any]) -> bool:
+    return str(row.get("acceptance_status") or "").strip().lower() == "accepted_real_data_probe"
+
+
 def audit_text(row: dict[str, Any]) -> str:
     gate = acceptance_gate_text(row)
     if gate:
         return "验收阻断：" + gate
+    if is_accepted_real_data_probe(row):
+        return "真实数据探针已验收：弱证据，不支撑主论文结论"
     status = str(row.get("status") or "").strip().lower()
     if status == "running":
         epoch = row.get("progress_epoch")
@@ -254,6 +260,10 @@ def reflection(
     gate = acceptance_gate_text(row)
     if gate:
         return one_line("实验验收未通过：" + gate + "。该记录不能支撑论文结论，需要重构实验计划或补齐缺失流水线。", 420)
+    if is_accepted_real_data_probe(row):
+        metric_summary = metrics_text(row)
+        metric_part = f"；指标：{metric_summary}" if metric_summary else ""
+        return one_line("真实数据探针已完成，证明数据下载、划分和指标记录链路可审计；但它只是弱基线/数据探针，尚未验证候选方法优于可比基线，不能支撑主论文结论" + metric_part + "。", 420)
     if status.lower() in {"invalidated", "obsolete"} or comparison_status in {"not_comparable", "incomparable"} or evidence_status in {"invalidated", "not_promotable"}:
         detail = counter or novelty or str(row.get("notes") or "") or "该记录已失效或不可比，不能作为当前论文证据。"
         return one_line(detail, 360)
@@ -315,6 +325,9 @@ def next_action(row: dict[str, Any]) -> str:
     if gate:
         explicit = str(row.get("next_action") or "").strip()
         return one_line(explicit or "根据验收 blocker 重构实验计划，补齐生成/评估流水线后再运行；当前记录不能进入论文结论。", 260)
+    if is_accepted_real_data_probe(row):
+        explicit = str(row.get("next_action") or "").strip()
+        return one_line(explicit or "在真实数据划分上接入候选方法、可比基线、坏例/反例和 artifact-local audit；通过前不写入论文主结论。", 260)
     if str(row.get("status") or "").strip().lower() == "running":
         return "等待训练进程结束；随后写本地审计、登记最终指标并刷新所有门控"
     decision = str(row.get("decision") or "").strip()
