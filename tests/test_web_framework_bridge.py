@@ -141,6 +141,17 @@ def test_web_experiment_action_prefers_environment_handoff(monkeypatch, tmp_path
     assert f"--conda-env {handoff_env}" in module_arg
 
 
+def test_framework_live_process_detection_matches_run_id_case_insensitively(monkeypatch):
+    class Result:
+        returncode = 0
+        stdout = "1234 S /env/bin/python framework/scripts/orchestration/run_taste_framework.py run --run-id web_environment_demo_20260621T104334Z"
+
+    monkeypatch.setattr(project_bridge.subprocess, "run", lambda *args, **kwargs: Result())
+    monkeypatch.setattr(project_bridge, "_pid_alive", lambda pid: pid == "1234")
+
+    assert project_bridge._framework_run_has_live_process("web_environment_demo_20260621t104334z") is True
+
+
 def test_web_rejects_stale_environment_handoff_policy(monkeypatch, tmp_path):
     projects = tmp_path / "projects"
     root = _make_project(projects, "demo")

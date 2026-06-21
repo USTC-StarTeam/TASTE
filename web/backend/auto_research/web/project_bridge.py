@@ -236,6 +236,7 @@ def _framework_run_has_live_process(run_id: str) -> bool:
         return False
     if proc.returncode != 0:
         return False
+    needle_folded = needle.casefold()
     for line in str(proc.stdout or "").splitlines():
         parts = line.strip().split(None, 2)
         if len(parts) < 3:
@@ -243,7 +244,8 @@ def _framework_run_has_live_process(run_id: str) -> bool:
         pid, stat, cmd = parts
         if "Z" in stat.upper() or not _pid_alive(pid):
             continue
-        if needle in cmd and ("run_taste_framework.py" in cmd or "/modules/" in cmd or "claude -p" in cmd):
+        cmd_folded = cmd.casefold()
+        if needle_folded in cmd_folded and ("run_taste_framework.py" in cmd or "/modules/" in cmd or "claude -p" in cmd):
             return True
     return False
 
