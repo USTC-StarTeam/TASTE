@@ -219,9 +219,8 @@ def ensure_paper_dirs(project: str) -> dict[str, Path]:
 
 
 def draft_title_from_config(cfg: dict) -> str:
-    topic = cfg.get('topic', 'Research Project').strip()
-    words = [word.capitalize() for word in re.split(r'[^a-zA-Z0-9]+', topic) if word]
-    return ' '.join(words[:12]) or 'Research Project'
+    paper = cfg.get('paper') if isinstance(cfg.get('paper'), dict) else {}
+    return str(paper.get('title') or '').strip()
 
 
 def strip_markdown_header(text: str) -> str:

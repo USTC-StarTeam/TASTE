@@ -112,7 +112,8 @@ def main() -> int:
     paths = build_paths(args.project)
     cfg = load_project_config(args.project)
     venue = args.venue or str(get_active_paper_state(args.project).get("venue") or "ICLR")
-    title = args.title or str(get_active_paper_state(args.project, venue=venue).get("title") or cfg.get("topic") or args.project)
+    paper_cfg = cfg.get("paper") if isinstance(cfg.get("paper"), dict) else {}
+    title = str(args.title or get_active_paper_state(args.project, venue=venue).get("title") or paper_cfg.get("title") or "").strip()
     loop_path = paths.state / "paper_figure_repair_loop.json"
     report_path = paths.reports / "paper_figure_repair_loop.md"
     rounds: list[dict[str, Any]] = []

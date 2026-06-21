@@ -483,7 +483,8 @@ def main() -> int:
         )
         print(report_path)
         return 2
-    title = args.title or str(get_active_paper_state(args.project, venue=venue).get("title") or cfg.get("topic") or args.project)
+    paper_cfg = cfg.get("paper") if isinstance(cfg.get("paper"), dict) else {}
+    title = str(args.title or get_active_paper_state(args.project, venue=venue).get("title") or paper_cfg.get("title") or "").strip()
     venue_slug = slugify(venue)
     rounds: list[dict[str, Any]] = []
     starting_state = get_active_paper_state(args.project, venue=venue)

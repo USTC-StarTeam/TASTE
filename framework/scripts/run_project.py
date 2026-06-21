@@ -174,7 +174,6 @@ def effective_project_topic(project: str, args_topic: str | None, cfg: dict, pat
     candidates = [
         args_topic,
         cfg.get('topic') if isinstance(cfg, dict) else '',
-        cfg.get('title') if isinstance(cfg, dict) else '',
         cfg.get('research_interest') if isinstance(cfg, dict) else '',
         cfg.get('user_prompt') if isinstance(cfg, dict) else '',
         selected_plan_topic(paths),

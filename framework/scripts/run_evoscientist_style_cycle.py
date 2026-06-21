@@ -272,8 +272,13 @@ def main() -> None:
         (module_cmd('planning', 'blocker_resolution', '--project', args.project, '--venue', args.venue), args.command_timeout_sec),
         ([sys.executable, 'framework/scripts/build_stagnation_report.py', '--project', args.project, '--venue', args.venue], args.command_timeout_sec),
     ], env)
+    paper_cfg = cfg.get('paper') if isinstance(cfg.get('paper'), dict) else {}
+    write_cmd = module_cmd('writing', 'run', '--project', args.project, '--venue', args.venue)
+    paper_title = str(paper_cfg.get('title') or '').strip()
+    if paper_title:
+        write_cmd.extend(['--title', paper_title])
     append_phase(record, paths, 'write', 'writer', [
-        (module_cmd('writing', 'run', '--project', args.project, '--venue', args.venue, '--title', str(cfg.get('title') or cfg.get('topic') or args.project)), min(180, args.cycle_timeout_sec)),
+        (write_cmd, min(180, args.cycle_timeout_sec)),
     ], env)
     append_phase(record, paths, 'verify', 'debugger_analyst', [
         ([sys.executable, 'framework/scripts/audit_pipeline_runnability.py', '--project', args.project, '--venue', args.venue], min(120, args.cycle_timeout_sec)),

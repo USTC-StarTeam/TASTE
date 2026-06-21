@@ -447,6 +447,9 @@ def _sync_control_state_target_venue(project: str, venue: str, slug: str) -> Non
 def _apply_project_patch(cfg: dict[str, Any], patch: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
     venue_present = "target_venue" in patch or "venue" in patch
     venue = str(patch.get("target_venue") or patch.get("venue") or "").strip()
+    paper_patch = patch.get("paper") if isinstance(patch.get("paper"), dict) else {}
+    title_present = "title" in patch or "title" in paper_patch
+    title_value = paper_patch.get("title") if "title" in paper_patch else patch.get("title")
     if venue_present:
         paper = dict(cfg.get("paper") or {}) if isinstance(cfg.get("paper"), dict) else {}
         if venue:
@@ -467,11 +470,23 @@ def _apply_project_patch(cfg: dict[str, Any], patch: dict[str, Any]) -> tuple[di
             for key in ["target_venue", "venue_slug", "template_family", "template_source_url"]:
                 paper.pop(key, None)
         cfg["paper"] = paper
+    if title_present:
+        # The project-level `title` key was historically overloaded as a paper
+        # title fallback. Keep research topic and manuscript title separate: only
+        # the paper namespace can store an explicit paper title.
+        paper = dict(cfg.get("paper") or {}) if isinstance(cfg.get("paper"), dict) else {}
+        title_text = str(title_value or "").strip()
+        if title_text:
+            paper["title"] = title_text
+        else:
+            paper.pop("title", None)
+        cfg["paper"] = paper
+        cfg.pop("title", None)
     if "topic" in patch:
         topic = str(patch.get("topic") or "").strip()
         if topic:
             cfg["topic"] = topic
-    for key in ["user_prompt", "title", "research_interest", "researcher_profile"]:
+    for key in ["user_prompt", "research_interest", "researcher_profile"]:
         if key in patch:
             cfg[key] = str(patch.get(key) or "").strip()
     if "queries" in patch and isinstance(patch.get("queries"), list):
@@ -517,6 +532,7 @@ def create_project_settings(payload: dict[str, Any]) -> dict[str, Any]:
     cfg["queries"] = [topic]
     cfg.pop("target_venue", None)
     cfg.pop("venue", None)
+    cfg.pop("title", None)
     paper = dict(cfg.get("paper") or {}) if isinstance(cfg.get("paper"), dict) else {}
     for key in ["target_venue", "venue_slug", "template_family", "template_source_url"]:
         paper.pop(key, None)

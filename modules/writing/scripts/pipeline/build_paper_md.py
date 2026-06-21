@@ -183,6 +183,7 @@ def main() -> None:
     experiment_rows = [row for row in all_experiment_rows if isinstance(row, dict) and current_route_row(row, active_repo)] if isinstance(all_experiment_rows, list) else []
 
     title = args.title or draft_title_from_config(cfg)
+    display_title = title or 'Paper Draft'
     venue = args.venue or cfg.get('paper', {}).get('target_venue', '')
     experiment_summary = summarize_experiments(experiment_rows)
     claim_ready_rows = claim_ready_positive_rows(experiment_rows)
@@ -208,7 +209,7 @@ def main() -> None:
         f"- {row['name']}: {row['focus']}" for row in DEFAULT_REVIEWERS
     )
 
-    draft = f'''# {title}
+    draft = f'''# {display_title}
 
 ## Submission Status
 
@@ -297,7 +298,7 @@ Only current selected-route, audit-ready, claim-supporting results may enter the
 - Do not promote legacy-route claims or unsupported rows.
 '''
 
-    review_packet = f'''# Review Packet: {title}
+    review_packet = f'''# Review Packet: {display_title}
 
 ## Target Venue
 

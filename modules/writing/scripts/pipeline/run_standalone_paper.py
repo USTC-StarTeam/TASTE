@@ -148,7 +148,7 @@ def build_prompt(run_dir: Path, venue: str, title: str) -> str:
 Run directory: {run_dir}
 Workspace: {run_dir / 'workspace'}
 Venue: {venue}
-Title hint: {title or '(由论文内容决定)'}
+Title hint: {title or '(to be determined by the writing stage; do not derive a manuscript title from the research topic)'}
 
 必须先阅读这些本地 skill：
 1. {skills / 'taste-paper-writing' / 'SKILL.md'}

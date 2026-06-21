@@ -4400,7 +4400,7 @@ function App() {
     const selection = runPreferences.default_find_selection || (summary as any).default_find_selection || summary.config?.default_find_selection || {};
     setTopic(topic);
     setPrompt(prompt);
-    setTitle(runPreferences.title || runPreferences.paper?.title || "");
+    setTitle(runPreferences.paper?.title || "");
     setVenue(runPreferences.target_venue || runPreferences.venue || summary.human_supervision?.target_venue || summary.config?.target_venue || summary.config?.venue || "");
     setResearchResearchInterest(runPreferences.research_interest || "");
     setResearchResearcherProfile(runPreferences.researcher_profile || "");
@@ -7053,7 +7053,7 @@ function App() {
       }
       patch.target_venue = venueDraft;
       patch.venue = venueDraft;
-      patch.title = researchTitle;
+      patch.paper = { ...(patch.paper || {}), target_venue: venueDraft, title: researchTitle };
     }
     try {
       setProjectConfigSaving(true);

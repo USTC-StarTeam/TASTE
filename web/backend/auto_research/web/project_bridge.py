@@ -203,6 +203,13 @@ def _project_configured_venue(cfg: dict[str, Any] | None, fallback: str = '') ->
     return str(cfg.get('target_venue') or cfg.get('venue') or paper.get('target_venue') or fallback or '').strip()
 
 
+def _project_configured_paper_title(cfg: dict[str, Any] | None) -> str:
+    cfg = cfg if isinstance(cfg, dict) else {}
+    paper = cfg.get('paper') if isinstance(cfg.get('paper'), dict) else {}
+    # Top-level project.title is legacy project metadata, not a manuscript title.
+    return str(paper.get('title') or '').strip()
+
+
 def _paper_receipt_venue_slug(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
 
@@ -886,9 +893,10 @@ def _public_run_preferences(project: str, root: Path, cfg: dict[str, Any] | None
     paper = cfg.get("paper") if isinstance(cfg.get("paper"), dict) else {}
     venue = _display_venue(cfg.get("target_venue") or cfg.get("venue") or paper.get("target_venue") or "")
     paper = _paper_preferences_for_venue(paper, venue)
+    paper_title = str(paper.get("title") or "").strip()
     out = {
         "user_prompt": cfg.get("user_prompt", ""),
-        "title": cfg.get("title", ""),
+        "title": paper_title,
         "target_venue": venue,
         "venue": venue,
         "research_interest": cfg.get("research_interest", ""),
@@ -914,11 +922,12 @@ def _project_summary_public_identity(payload: dict[str, Any]) -> dict[str, Any]:
     if not prefs:
         prefs = {
             key: cfg.get(key, "")
-            for key in ["user_prompt", "title", "target_venue", "venue", "research_interest", "researcher_profile", "conda_env", "paper", "default_find_selection", "coding_agent", "runtime"]
+            for key in ["user_prompt", "target_venue", "venue", "research_interest", "researcher_profile", "conda_env", "paper", "default_find_selection", "coding_agent", "runtime"]
             if key in cfg
         }
     identity = _public_project_identity_config(str(payload.get("project") or cfg.get("name") or ""), cfg, str(payload.get("topic") or cfg.get("topic") or ""))
     paper_prefs = prefs.get("paper") if isinstance(prefs.get("paper"), dict) else {}
+    prefs = {**prefs, "title": str(paper_prefs.get("title") or "").strip()}
     venue = _display_venue(
         prefs.get("target_venue")
         or prefs.get("venue")
@@ -3565,7 +3574,6 @@ def _project_route_context(root: Path, project_id: str = "", cfg: dict[str, Any]
         active.get("selected_base_title") if isinstance(active, dict) else "",
         active.get("title") if isinstance(active, dict) else "",
         active.get("name") if isinstance(active, dict) else "",
-        cfg.get("title") if isinstance(cfg, dict) else "",
         cfg.get("topic") if isinstance(cfg, dict) else "",
         project_id or root.name,
     ]:
@@ -5769,7 +5777,7 @@ def _human_supervision_summary(root: Path, compact: dict[str, Any], raw_summary:
         active_repo = _read_json(root / "state" / "active_repo.json", {})
         env_selection = _current_environment_selection(root)
         selected_base = env_selection.get("selected", {}) if isinstance(env_selection.get("selected"), dict) else {}
-        title = str(cfg.get("title") or cfg.get("topic") or project_id) if isinstance(cfg, dict) else project_id
+        title = str(cfg.get("topic") or project_id) if isinstance(cfg, dict) else project_id
         venue = _display_venue(cfg.get("target_venue") or cfg.get("venue") or "") if isinstance(cfg, dict) else ""
         repo_path = ""
         route_dataset = ""
@@ -5856,7 +5864,7 @@ def _human_supervision_summary(root: Path, compact: dict[str, Any], raw_summary:
     repo = fresh_impl.get("repo", {}) if isinstance(fresh_impl, dict) and isinstance(fresh_impl.get("repo"), dict) else {}
     env_selection = _current_environment_selection(root)
     selected_current = env_selection.get("selected", {}) if env_selection.get("valid") and isinstance(env_selection.get("selected"), dict) else {}
-    title = str(selected_current.get("title") or selected_current.get("literature_base_title") or selected_current.get("selected_base_title") or selected_current.get("name") or fresh_base.get("title") or find_plan.get("selected_base_title") or cfg.get("title") or cfg.get("topic") or "")
+    title = str(selected_current.get("title") or selected_current.get("literature_base_title") or selected_current.get("selected_base_title") or selected_current.get("name") or fresh_base.get("title") or find_plan.get("selected_base_title") or cfg.get("topic") or "")
     repo_path = str(selected_current.get("repo_path") or selected_current.get("local_path") or repo.get("repo_path") or repo.get("local_path") or "")
     route_ready_datasets = _fresh_base_ready_datasets_from_evidence(root, selected_current, active_repo, repo, selected_current.get("claim_ready_datasets") or selected_current.get("ready_datasets") or [])
     route_dataset = str(selected_current.get("dataset") or selected_current.get("claim_ready_dataset") or (route_ready_datasets[0] if route_ready_datasets else "") or "")
@@ -12166,7 +12174,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         status = "stale_full_research_cycle_snapshot"
     venue = _display_venue(cfg.get("target_venue") or cfg.get("venue") or tick.get("target_venue") or "")
     public_full_job = _public_full_cycle_job(full_job, target_venue=venue)
-    topic = str(cfg.get("topic") or cfg.get("title") or project)
+    topic = str(cfg.get("topic") or project)
     current_find_run_id = _current_find_run_id_from_state(root)
     run_id = str(current_find_run_id or current_plan.get("run_id") or lit_packet.get("run_id") or lit_packet.get("source_run_id") or tick.get("find_run_id") or "")
     def same_current_run_payload(payload: Any) -> bool:
@@ -13680,7 +13688,7 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
             repo = {}
 
     venue = _display_venue(cfg.get('target_venue') or cfg.get('venue') or '') if isinstance(cfg, dict) else ''
-    topic = str(cfg.get('topic') or cfg.get('title') or project) if isinstance(cfg, dict) else project
+    topic = str(cfg.get('topic') or project) if isinstance(cfg, dict) else project
     pipeline_contract = safe_dict(_current_find_pipeline_summary(root, find_results=find_results))
     read_count = int((pipeline_contract.get('readings') or pipeline_contract.get('reading_count') or count_payload(read_results, 'readings') or current_plan.get('current_find_reading_count') or 0))
     idea_count = int((pipeline_contract.get('ideas') or pipeline_contract.get('idea_count') or count_payload(ideas_results, 'ideas') or current_plan.get('current_find_idea_count') or 0))

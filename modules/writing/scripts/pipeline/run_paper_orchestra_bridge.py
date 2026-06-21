@@ -1483,6 +1483,7 @@ def claude_prompt(project: str, venue: str, title: str, workspace: Path, repo_di
         "all": "Run the missing writing steps until final/paper.tex and final/paper.pdf exist.",
     }.get(phase, "Run the missing writing steps until final/paper.tex and final/paper.pdf exist.")
     writing_contract = read_text(WRITING_CONTRACT)[:16000] or "Read modules/writing/SKILL.md before writing."
+    title_hint = title or "(to be determined by the writing stage; do not derive a manuscript title from the research topic)"
     return f"""
 Run the writing module on this TASTE-prepared workspace.
 
@@ -1492,7 +1493,7 @@ Read-only TASTE writing contract skill: {WRITING_ACADEMIC_SKILLS_DIR}
 Read-only TASTE Nature-family writing skill: {WRITING_NATURE_REFERENCE_DIR}
 Project: {project}
 Target venue: {venue}
-Title hint: {title}
+Title hint: {title_hint}
 TASTE-controlled writing phase for this call: {phase}
 Focused objective: {phase_instruction}
 Current paper-preview regeneration requested by TASTE user/UI (this means rebuild the venue-formatted manuscript preview from current TASTE evidence; it is not a claim-change directive and not an instruction to intervene in the underlying research project): {force_refresh}
@@ -2093,7 +2094,9 @@ def main() -> int:
 
     paths = build_paths(args.project)
     ensure_paper_dirs(args.project)
-    title = args.title or str(get_active_paper_state(args.project, args.venue).get("title") or load_project_config(args.project).get("topic") or args.project)
+    cfg = load_project_config(args.project)
+    paper_cfg = cfg.get("paper") if isinstance(cfg.get("paper"), dict) else {}
+    title = str(args.title or get_active_paper_state(args.project, args.venue).get("title") or paper_cfg.get("title") or "").strip()
     repo_dir = Path(args.repo_dir).resolve()
     if repo_dir.name == "PaperOrchestra" and not repo_dir.exists():
         repo_dir = WRITING_MODULE_ROOT

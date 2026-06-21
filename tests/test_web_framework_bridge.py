@@ -12,6 +12,7 @@ from path_helpers import ensure_script_paths
 ensure_script_paths()
 
 from auto_research.web import project_bridge
+import project_config
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -384,6 +385,41 @@ def test_web_summary_keeps_paper_blocked_after_accepted_real_data_probe(monkeypa
     assert "已完成或审计就绪" not in experiment_stage["module_summary"]
     assert "synthetic smoke only" not in experiment_stage["summary"]
     assert summary["state"].get("show_synthetic_smoke_warning") is False
+
+def test_web_project_title_comes_only_from_paper_namespace(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    root = _make_project(projects, "demo")
+    cfg = json.loads((root / "project.json").read_text(encoding="utf-8"))
+    cfg["title"] = "legacy project title"
+    cfg["paper"] = {"target_venue": "ICLR", "title": ""}
+    (root / "project.json").write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+
+    prefs = project_bridge._public_run_preferences("demo", root, cfg, selection={})
+
+    assert prefs["title"] == ""
+    assert prefs["paper"]["title"] == ""
+
+
+def test_project_config_title_patch_moves_into_paper_namespace(tmp_path, monkeypatch):
+    monkeypatch.setattr(project_config, "ROOT", tmp_path)
+    cfg = {
+        "name": "demo",
+        "topic": "demo topic",
+        "title": "legacy project title",
+        "paper": {"target_venue": "ICLR"},
+    }
+
+    updated, _ = project_config._apply_project_patch(cfg, {"title": "Explicit Paper Title"})
+
+    assert "title" not in updated
+    assert updated["paper"]["title"] == "Explicit Paper Title"
+
+    cleared, _ = project_config._apply_project_patch(updated, {"title": ""})
+
+    assert "title" not in cleared
+    assert "title" not in cleared.get("paper", {})
+
 
 def test_web_public_state_prefers_environment_handoff_runtime(monkeypatch, tmp_path):
     projects = tmp_path / "projects"

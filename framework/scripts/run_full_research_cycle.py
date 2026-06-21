@@ -4653,7 +4653,8 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
 
     def run_all(self) -> int:
         cfg = load_project_config(self.args.project)
-        title = self.args.title or str(get_active_paper_state(self.args.project, venue=self.args.venue).get("title") or cfg.get("topic") or self.args.project)
+        paper_cfg = cfg.get("paper") if isinstance(cfg.get("paper"), dict) else {}
+        title = str(self.args.title or get_active_paper_state(self.args.project, venue=self.args.venue).get("title") or paper_cfg.get("title") or "").strip()
         self.args.title = title
         run_started_at = now_iso()
         self.state.update(
