@@ -19,7 +19,18 @@ from typing import Any
 from agent_state import append_agent_log, consume_guidance, mark_agent, upsert_agent
 from runtime_env import find_binary, interactive_env
 from project_paths import CLAUDE_SKILL_ROOT, ROOT, build_paths, load_project_config, management_python, project_experiment_python_from_config
-from guard_selected_base_route import repair_project as guard_selected_base_route
+from taste_pythonpath import ensure_taste_pythonpath
+ensure_taste_pythonpath(ROOT)
+try:
+    from guard_selected_base_route import repair_project as guard_selected_base_route
+except ModuleNotFoundError:
+    def guard_selected_base_route(project: str, source_stage: str = "") -> dict[str, Any]:
+        return {
+            "status": "skipped_guard_selected_base_route_unavailable",
+            "project": project,
+            "source_stage": source_stage,
+            "reason": "guard_selected_base_route.py has been migrated out of framework scripts and is not required for current-Find Claude session startup.",
+        }
 from run_project import current_find_execution_contract
 
 NATIVE_SKILL_NAMES = {"experiment-loop", "evidence-gate", "writing"}
@@ -508,6 +519,22 @@ def _python_opens_current_find_file_for_write(command: str, names: list[str]) ->
 
 
 
+def _current_find_readonly_json_probe(command: str) -> bool:
+    lowered = str(command or '').replace('\\', '/').lower()
+    if not re.search(r"(?:^|[;&|]\s*)(?:python|python3(?:\.\d+)?|/[^\s;&|]*/python(?:3(?:\.\d+)?)?)\s+(?:-m\s+json\.tool|-c\b)", lowered):
+        return False
+    if not _mentions_path(lowered, CURRENT_FIND_CONTENT_ARTIFACTS):
+        return False
+    write_markers = ["write_text(", "json.dump(", ".write(", "dump("]
+    if any(marker in lowered for marker in write_markers):
+        return False
+    if _python_opens_current_find_file_for_write(command, CURRENT_FIND_CONTENT_ARTIFACTS + CURRENT_FIND_OWNED_STATE_FILES):
+        return False
+    if _shell_redirects_to_current_find_file(command):
+        return False
+    return bool(any(marker in lowered for marker in ["json.load(", "json.tool", ".read_text(", "open("]))
+
+
 def current_find_artifact_generator_policy_issue(command: str, stage: str = '') -> str:
     if not _current_find_stage(stage):
         return ''
@@ -535,6 +562,8 @@ def current_find_artifact_generator_policy_issue(command: str, stage: str = '') 
     )
     if gate_state_target and (writes_target or open_write_target or redirect_target):
         return CURRENT_FIND_GATE_STATE_WRITER_POLICY
+    if current_find_python_probe and _current_find_readonly_json_probe(raw):
+        current_find_python_probe = False
     if content_target and (content_open_write_target or redirect_target or tmp_generator or fragment_python_writer or fragment_script_execution or current_find_python_probe) and shell_writer:
         return CURRENT_FIND_ARTIFACT_WRITER_POLICY
     return ''

@@ -15,11 +15,10 @@ import time
 from pathlib import Path
 
 from project_paths import ROOT, build_paths, load_project_config
-from experiment_contracts import load_audit_payload
-from pipeline_guard import guard_fresh_base_blocker_entry
-
 from taste_pythonpath import ensure_taste_pythonpath
 ensure_taste_pythonpath(ROOT)
+from experiment_contracts import load_audit_payload
+from pipeline_guard import guard_fresh_base_blocker_entry
 from auto_research.source_selection import canonical_source_selection
 
 

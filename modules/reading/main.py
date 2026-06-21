@@ -300,14 +300,17 @@ def _run_read(args: Sequence[str]) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Reading module public backend entrypoint.", add_help=True)
-    parser.add_argument("action_arg", nargs="?", default="", help="可选位置式 action；等价于 --action。")
-    parser.add_argument("--action", default="read", help="Backend action. Default: read.")
+    parser.usage = "%(prog)s [action] [--action ACTION] [module args ...]"
+    parser.add_argument("--action", default="", help="Backend action. Default: read.")
     parser.add_argument("--contract", action="store_true")
     ns, rest = parser.parse_known_args(argv)
     if ns.contract:
         print(json.dumps(_contract_payload(), ensure_ascii=False, indent=2))
         return 0
-    action = _normalize_action(ns.action_arg or ns.action)
+    action_arg = ""
+    if not ns.action and rest and not rest[0].startswith("-"):
+        action_arg = rest.pop(0)
+    action = _normalize_action(ns.action or action_arg or "read")
     if action in DIRECT_ACTIONS:
         return _run_read(rest)
     if action in STANDALONE_DEEP_READ_ACTIONS:

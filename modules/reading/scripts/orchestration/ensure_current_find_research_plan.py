@@ -19,10 +19,10 @@ from typing import Any
 from literature_policy import build_literature_policy, core_topic_fit_from_text, score_paper
 from llm_client import call_llm, llm_available, llm_disabled_reason
 from project_paths import ROOT, build_paths, configured_max_ideas, load_project_config, management_python
+from common.read_ranking import build_reading_ranking, sort_readings_by_ranking
 from project_config import project_target_venue
 from runtime_env import find_binary as runtime_find_binary
 from auto_research.paths import LEGACY_RUNS_DIR, RUNS_DIR
-from common.read_ranking import build_reading_ranking, sort_readings_by_ranking
 
 
 def now_iso() -> str:
@@ -2885,18 +2885,19 @@ def full_text_packet_summary(packet: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 def validate_claude_readings_against_current_find(readings: list[dict[str, Any]], find_results: dict[str, Any], read_limit: int, paths: Any = None, run_id: str = "") -> tuple[bool, dict[str, Any]]:
-    positive_ids, positive_titles = _current_positive_identities(find_results)
+    validation_packet = load_current_full_text_packet(paths, run_id) if paths is not None and run_id else {}
+    original_recommendation_rows, reading_packet_rows, validation_find_results = _current_reading_validation_view(find_results, validation_packet, read_limit)
+    positive_ids, positive_titles = _current_positive_identities(validation_find_results)
     readings = _enforce_current_find_claim_policy([_reading_content_view(row) for row in readings if isinstance(row, dict)], positive_ids)
-    recommendation_ids, recommendation_titles = _current_recommendation_identities(find_results)
+    recommendation_ids, recommendation_titles = _current_recommendation_identities(validation_find_results)
     recommendation_index: dict[str, dict[str, Any]] = {}
     recommendation_by_title: dict[str, dict[str, Any]] = {}
-    for recommendation_row in _current_recommendation_rows(find_results):
+    for recommendation_row in _current_recommendation_rows(validation_find_results):
         title_key = norm_title(recommendation_row.get("title") or recommendation_row.get("paper_title"))
         if title_key:
             recommendation_by_title.setdefault(title_key, recommendation_row)
         for identity in _identity_values(recommendation_row):
             recommendation_index[identity] = recommendation_row
-    validation_packet = load_current_full_text_packet(paths, run_id) if paths is not None and run_id else {}
     packet_index = _full_text_packet_index(validation_packet if isinstance(validation_packet, dict) else {})
     packet_path = str((validation_packet if isinstance(validation_packet, dict) else {}).get("path") or "")
     known_ids = _current_known_identities(find_results) | recommendation_ids
@@ -3077,6 +3078,12 @@ def validate_claude_readings_against_current_find(readings: list[dict[str, Any]]
         "missing_positive_titles": missing_positive,
         "expected_recommendation_titles": expected_titles,
         "expected_positive_titles": positive_titles,
+        "original_recommendation_count": len(original_recommendation_rows),
+        "reading_replacement_count": len(_reading_packet_replacement_rows(reading_packet_rows)),
+        "reading_replacement_titles": [first_text(row, "title", "paper_title") for row in _reading_packet_replacement_rows(reading_packet_rows)],
+        "replaced_unavailable_recommendation_titles": [first_text(row, "replacement_for_unavailable_recommendation") for row in _reading_packet_replacement_rows(reading_packet_rows)],
+        "unavailable_original_recommendation_count": len(_reading_packet_unavailable_rows(reading_packet_rows)),
+        "unavailable_original_recommendation_titles": [first_text(row, "title", "paper_title") for row in _reading_packet_unavailable_rows(reading_packet_rows)],
         "blockers": blockers,
         "policy": "Every Read-stage packet paper must have full-text/PDF/page evidence, auditable Claude Task/subagent delegation, and non-placeholder deep-read synthesis before it counts as completed deep reading. Find Top-N remains immutable; same-run replacements only affect Read coverage. Only strict positive anchors may be labelled positive; weak/boundary papers remain reading, critique, or search-expansion evidence.",
     }
@@ -4440,7 +4447,7 @@ def write_claude_takeover_prompt(paths, project: str, run_id: str, read_limit: i
    - `method_advantages_zh` 和 `method_disadvantages_zh` 各至少两条，每条至少 55 个非空白中文字符，必须是具体中文结论，不能写“待正文确认”“仅视觉生成验证”这类短占位。
    - 所有公式、LaTeX、代码式标识符、模型名、数据集名、指标名、阿拉伯数字、百分比、p 值、K 值、top-K、学习率、温度、显存/参数规模和实验结果必须保留原始符号写法；禁止把 `0.0264` 写成“零点零二六四”、把 `50.86%` 写成“百分之五十点八六”、把 `1e-5` 写成“一乘以十的负五次方”，也不要把普通短语包成公式。
    提交分片前必须逐篇自查并显著超过上述下限，不要卡线：建议 `abstract_zh` 至少 360 个非空白中文字符、`motivation_zh` 至少 260 个、`method_details_zh` 至少 850 个、`experiments_zh` 至少 560 个、`limitations_zh` 至少 320 个，优缺点每条至少 80 个；如果某字段接近下限，必须继续基于正文补充具体机制、实验或边界，而不是让 wrapper 返修。
-读后重评分排序要求：完成全部逐篇 subagent 精读后，主控 Claude Code 必须基于所有 reading 产物做一次跨论文比较和重新打分。每篇 deep-read 分片的 `reading` 中都必须写入 `read_score`、`read_score_breakdown` 和 `read_score_audit`：`read_score` 为 0-10 分，`read_score_breakdown` 至少含 `topic_relevance`、`evidence_strength`、`deep_read_quality`、`method_transferability`、`risk_control`，`read_score_audit={"mode":"main_claude_code_after_subagent_deep_read","source":"all_readings_cross_paper_rerank","status":"completed","criteria":"基于全部 read 产物的读后重评排序"}`。不要沿用 Find 原始分数；必须比较所有已读论文的正文证据、方法可迁移性、实验可信度、局限风险和对后续 idea/plan 的启发价值。wrapper 会按这些分数重排 `read_results.json.readings`，并写出 `reading_ranking` / `reading_ranking_order` 作为最终排序产物。
+读后重评分排序要求：完成全部逐篇 subagent 精读后，主控 Claude Code 必须基于所有 reading 产物做一次跨论文比较和重新打分。每篇 deep-read 分片的 `reading` 中都必须写入 `read_score`、`read_score_breakdown` 和 `read_score_audit`：`read_score` 为 0-10 分，`read_score_breakdown` 至少含 `topic_relevance`、`evidence_strength`、`deep_read_quality`、`method_transferability`、`risk_control`，`read_score_audit={{"mode":"main_claude_code_after_subagent_deep_read","source":"all_readings_cross_paper_rerank","status":"completed","criteria":"基于全部 read 产物的读后重评排序"}}`。不要沿用 Find 原始分数；必须比较所有已读论文的正文证据、方法可迁移性、实验可信度、局限风险和对后续 idea/plan 的启发价值。wrapper 会按这些分数重排 `read_results.json.readings`，并写出 `reading_ranking` / `reading_ranking_order` 作为最终排序产物。
 
 2. 推荐列表里的论文可以是 strict positive、foundation/borrowing 或 boundary/critique 价值，但都必须写入 `read_results.json.readings`。未达到 strict positive 条件的推荐论文必须标为 `support_role=boundary_audit|search_expansion`、`verdict=recommended_reading_boundary|critique_only|boundary_only`，说明为什么值得读、能借鉴什么、不能证明什么。
 3. 严禁把 `triage_candidates/audit_candidates/evaluated_candidates/title_candidates/retrieval_candidates` 中未进入推荐列表或 strict positive 白名单的论文写成 `claim_ready_anchor`、`positive_anchor_for_planning`、`supporting_evidence` 或 `component_reference`。TASTE 守卫会直接拒绝这种输出。

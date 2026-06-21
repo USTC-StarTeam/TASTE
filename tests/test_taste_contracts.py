@@ -24,6 +24,67 @@ def _load_experiment_runner():
     return runner
 
 
+def _load_reading_main():
+    spec = importlib.util.spec_from_file_location("reading_main_cli", ROOT / "modules" / "reading" / "main.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_reading_cli_explicit_action_keeps_project_for_child_command(monkeypatch):
+    reading_main = _load_reading_main()
+    calls = []
+
+    def fake_run_script(action, args):
+        calls.append((action, list(args)))
+        return 0
+
+    monkeypatch.setattr(reading_main, "_run_script", fake_run_script)
+
+    rc = reading_main.main(["--action", "current_find_research_plan", "--project", "protein", "--read-limit", "0", "--idea-count", "5", "--force"])
+
+    assert rc == 0
+    assert calls == [(
+        "ensure_current_find_research_plan",
+        ["--project", "protein", "--read-limit", "0", "--idea-count", "5", "--force"],
+    )]
+
+
+def test_reading_cli_positional_action_still_forwards_remaining_args(monkeypatch):
+    reading_main = _load_reading_main()
+    calls = []
+
+    def fake_run_script(action, args):
+        calls.append((action, list(args)))
+        return 0
+
+    monkeypatch.setattr(reading_main, "_run_script", fake_run_script)
+
+    rc = reading_main.main(["current-find-research-plan", "--project", "protein", "--force"])
+
+    assert rc == 0
+    assert calls == [("ensure_current_find_research_plan", ["--project", "protein", "--force"])]
+
+
+def test_reading_current_find_wrapper_imports_with_private_common_first():
+    reading_main = _load_reading_main()
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "modules" / "reading" / "scripts" / "ensure_current_find_research_plan.py"), "--help"],
+        cwd=ROOT,
+        env=reading_main._python_env(),
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 0, output
+    assert "No module named 'common.read_ranking'" not in output
+    assert "--project" in output
+
+
 def test_all_stage_contracts_and_framework_dry_run_are_callable():
     for stage in STAGES:
         proc = subprocess.run([sys.executable, str(ROOT / "modules" / stage / "main.py"), "--contract"], cwd=ROOT, text=True, capture_output=True, timeout=30)

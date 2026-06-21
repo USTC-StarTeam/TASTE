@@ -1280,12 +1280,13 @@ def repair_current_find_full_text_evidence(project: str, *, force: bool = False)
     acquired: list[dict[str, Any]] = []
     unavailable: list[dict[str, Any]] = []
     all_attempts: list[dict[str, Any]] = []
-    deadline = time.monotonic() + FULL_TEXT_REPAIR_TIMEOUT_SEC
+    overall_deadline = time.monotonic() + FULL_TEXT_REPAIR_TIMEOUT_SEC
+    original_deadline = time.monotonic() + max(60, int(FULL_TEXT_REPAIR_TIMEOUT_SEC * 0.65))
     save_repair_progress(packet_path, receipt_path, packet, project=project, run_id=run_id, pending=pending, acquired=acquired, unavailable=unavailable, attempts=all_attempts, status="full_text_evidence_repair_running", validation_generated_at=validation_generated_at)
     for title in pending:
-        if time.monotonic() >= deadline:
-            unavailable.append({"title": title, "reason": "full_text_repair_timeout_before_paper", "attempt_count": 0})
-            save_repair_progress(packet_path, receipt_path, packet, project=project, run_id=run_id, pending=pending, acquired=acquired, unavailable=unavailable, attempts=all_attempts, current_title=title, status="partial_full_text_evidence_repair_timeout", validation_generated_at=validation_generated_at)
+        if time.monotonic() >= original_deadline:
+            unavailable.append({"title": title, "reason": "original_recommendation_repair_budget_exhausted_before_paper", "attempt_count": 0})
+            save_repair_progress(packet_path, receipt_path, packet, project=project, run_id=run_id, pending=pending, acquired=acquired, unavailable=unavailable, attempts=all_attempts, current_title=title, status="original_full_text_repair_budget_exhausted_checking_replacements", validation_generated_at=validation_generated_at)
             continue
         paper = find_row_for_title(recommendations, title)
         if not paper:
@@ -1333,7 +1334,7 @@ def repair_current_find_full_text_evidence(project: str, *, force: bool = False)
                     continue
                 if norm_title(candidate.get("title") or candidate.get("paper_title")) == norm_title(missing_title):
                     continue
-                if time.monotonic() >= deadline:
+                if time.monotonic() >= overall_deadline:
                     replacement_attempted.append({"replacement_for": missing_title, "reason": "full_text_repair_timeout_before_replacement", "accepted": False})
                     break
                 replacement_rank = int(candidate.get("read_replacement_source_rank") or 0) or max(1, len(as_list(packet.get("papers"))) + 1)

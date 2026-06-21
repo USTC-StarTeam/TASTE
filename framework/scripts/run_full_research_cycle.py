@@ -22,7 +22,16 @@ from auto_research.paths import CONFIG_PATH
 from paper_common import get_active_paper_state
 from project_config import project_target_venue
 from pipeline_guard import fresh_base_state_names, guard_fresh_base_blocker_entry
-from guard_selected_base_route import repair_project as guard_selected_base_route
+try:
+    from guard_selected_base_route import repair_project as guard_selected_base_route
+except ModuleNotFoundError:
+    def guard_selected_base_route(project: str, source_stage: str = "") -> dict[str, Any]:
+        return {
+            "status": "skipped_guard_selected_base_route_unavailable",
+            "project": project,
+            "source_stage": source_stage,
+            "reason": "guard_selected_base_route.py has been migrated out of framework scripts and is not required for full-cycle startup.",
+        }
 from run_project import current_find_execution_contract
 
 from taste_pythonpath import script_resolver
