@@ -3990,13 +3990,15 @@ function runtimeDraftFromSummary(summary: ProjectSummary | null) {
 
 function environmentDraftFromSummary(summary: ProjectSummary | null) {
   const runPreferences = (summary as any)?.run_preferences || {};
-  const runtime = runPreferences.runtime || summary?.runtime?.runtime || summary?.state?.runtime?.runtime || summary?.config?.runtime || {};
-  const environment = runPreferences.environment || summary?.config?.environment || {};
+  const summaryRuntime = summary?.runtime?.runtime || summary?.state?.runtime?.runtime || {};
+  const configRuntime = summary?.config?.runtime || {};
+  const preferenceRuntime = runPreferences.runtime || {};
+  const environment = summary?.config?.environment || runPreferences.environment || {};
   return {
-    conda_env: runPreferences.conda_env || runtime.conda_env || summary?.config?.conda_env || "",
-    conda_base: runtime.conda_base || environment.conda_base_hint || "",
-    experiment_python: runtime.experiment_python || environment.experiment_python || "",
-    python_executable: runtime.management_python || runtime.python_executable || summary?.config?.python_executable || "",
+    conda_env: summaryRuntime.conda_env || summary?.config?.conda_env || runPreferences.conda_env || preferenceRuntime.conda_env || "",
+    conda_base: summaryRuntime.conda_base || configRuntime.conda_base || environment.conda_base_hint || preferenceRuntime.conda_base || "",
+    experiment_python: summaryRuntime.experiment_python || configRuntime.experiment_python || environment.experiment_python || "",
+    python_executable: summaryRuntime.management_python || summaryRuntime.python_executable || configRuntime.management_python || configRuntime.python_executable || summary?.config?.python_executable || preferenceRuntime.management_python || preferenceRuntime.python_executable || "",
   };
 }
 
