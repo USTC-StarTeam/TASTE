@@ -742,7 +742,10 @@ def _public_runtime_with_valid_handoff(root: Path, runtime_public: dict[str, Any
     runtime = dict(runtime_public or {}) if isinstance(runtime_public, dict) else {}
     if _environment_handoff_gate_passed(_project_environment_handoff(root)):
         return _runtime_with_environment_handoff(root, runtime)
-    for key in ["conda_env", "conda_env_prefix", "experiment_conda_env", "experiment_python"]:
+    conda_env = str(runtime.get("conda_env") or "").strip()
+    if conda_env and ("/" in conda_env or "\\" in conda_env):
+        runtime.pop("conda_env", None)
+    for key in ["conda_env_prefix", "experiment_conda_env", "experiment_python"]:
         runtime.pop(key, None)
     return runtime
 

@@ -55,10 +55,15 @@ def project_runtime_config(project: str | None = None, cfg: dict[str, Any] | Non
     runtime = cfg.get("runtime", {}) if isinstance(cfg.get("runtime", {}), dict) else {}
     coding = cfg.get("coding_agent", {}) if isinstance(cfg.get("coding_agent", {}), dict) else {}
     env_cfg = cfg.get("environment", {}) if isinstance(cfg.get("environment", {}), dict) else {}
-    management_python_path = str(
+    configured_management_python = str(
         runtime.get("management_python")
         or runtime.get("python_executable")
-        or cfg.get("python_executable")
+        or ""
+    ).strip()
+    if configured_management_python and not Path(configured_management_python).expanduser().is_absolute():
+        configured_management_python = ""
+    management_python_path = str(
+        configured_management_python
         or management_python()
         or sys.executable
         or ""
@@ -74,6 +79,7 @@ def project_runtime_config(project: str | None = None, cfg: dict[str, Any] | Non
         "bashrc_path": "",
         "node_bin": str(runtime.get("node_bin") or ""),
         "claude_path": str(runtime.get("claude_path") or coding.get("claude_path_hint") or ""),
+        "conda_env": str(runtime.get("conda_env") or cfg.get("conda_env") or env_cfg.get("conda_env") or ""),
         "conda_base": str(runtime.get("conda_base") or env_cfg.get("conda_base_hint") or runtime_conda_base(cfg) or ""),
         "management_python": management_python_path,
         "experiment_python": experiment_python,

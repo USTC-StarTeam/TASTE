@@ -64,6 +64,28 @@ def _ready_environment_handoff(repo_path: Path, conda_prefix: Path, *, data_dir:
     return payload
 
 
+def test_runtime_projection_keeps_configured_conda_env_without_current_handoff(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    root = _make_project(projects, "demo")
+    cfg = json.loads((root / "project.json").read_text(encoding="utf-8"))
+    cfg["python_executable"] = "python3"
+    cfg["runtime"] = {"conda_base": str(tmp_path / "miniforge"), "management_python": "", "experiment_python": "/stale/env/bin/python"}
+    (root / "project.json").write_text(json.dumps(cfg), encoding="utf-8")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+
+    import runtime_env
+
+    runtime = runtime_env.project_runtime_config("demo", cfg)
+    assert runtime["conda_env"] == "demo_env"
+    assert Path(runtime["management_python"]).is_absolute()
+    assert runtime["management_python"] != "python3"
+
+    public = project_bridge._public_runtime_with_valid_handoff(root, runtime)
+    assert public["conda_env"] == "demo_env"
+    assert public["conda_base"] == str(tmp_path / "miniforge")
+    assert "experiment_python" not in public
+
+
 def test_web_environment_action_uses_framework_single_stage(monkeypatch, tmp_path):
     projects = tmp_path / "projects"
     _make_project(projects, "demo")
