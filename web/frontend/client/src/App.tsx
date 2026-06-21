@@ -5231,6 +5231,15 @@ function App() {
     }).filter(Boolean);
   }, [selectedVenueYears, selectedVenues, venueHealth, venueHealthStatusRows, venues]);
 
+  const hasCurrentFindSourceContext = useMemo(() => Boolean(
+    currentProjectFindRunId
+    || currentFindArtifactRunId
+    || researchLiteratureSurvey?.run_id
+    || researchLiteratureSurvey?.current_find_pipeline?.run_id
+    || researchSummary?.current_find_pipeline?.run_id
+    || researchSummary?.state?.current_find_pipeline?.run_id
+  ), [currentFindArtifactRunId, currentProjectFindRunId, researchLiteratureSurvey, researchSummary]);
+
   const sourceStatus = useMemo(() => {
     const runRows = filterBySourceSelection(expandedSourceStatusRows(runFindState), selectedRunSelection);
     const surveyRows = filterBySourceSelection(researchSourceStatus, selectedRunSelection);
@@ -5240,7 +5249,7 @@ function App() {
     if (hasLiveFindJob && surveyRowsAreCachePlaceholders) return [];
     if (surveyRows.length) return surveyRows;
     if (viewingActiveIncompleteFindRun || activeFindJobForRun || hasLiveFindJob) return [];
-    if (venueHealthSourceStatus.length) return venueHealthSourceStatus;
+    if (!hasCurrentFindSourceContext && venueHealthSourceStatus.length) return venueHealthSourceStatus;
     return [...researchSourceLimitations, ...researchMissingVenueIndexes].map((item: any) => ({
       ...item,
       source: item.source || item.venue || item.venue_id || "TASTE literature source",
@@ -5249,7 +5258,7 @@ function App() {
       count: item.count || 0,
       message: item.message || item.reason || "",
     }));
-  }, [activeFindJobForRun, displayJobs, researchMissingVenueIndexes, researchSourceLimitations, researchSourceStatus, runFindState, selectedRunSelection, venueHealthSourceStatus, viewingActiveIncompleteFindRun]);
+  }, [activeFindJobForRun, displayJobs, hasCurrentFindSourceContext, researchMissingVenueIndexes, researchSourceLimitations, researchSourceStatus, runFindState, selectedRunSelection, venueHealthSourceStatus, viewingActiveIncompleteFindRun]);
   const ideasArtifact = useMemo(() => currentFindArtifactSource.find((a) => a.name === "ideas.json"), [currentFindArtifactSource]);
   const plansArtifact = useMemo(() => currentFindArtifactSource.find((a) => a.name === "plans.json"), [currentFindArtifactSource]);
   const ideas = useMemo(() => ideasArtifact?.content?.ideas ?? [], [ideasArtifact]);
@@ -7194,8 +7203,14 @@ function App() {
     if (sourceStatus.length) return sourceStatus.slice(0, 12);
     if (freshFindActive || hasLiveFindJob) return [];
     if (researchSourceStatus.length) return researchSourceStatus.slice(0, 12);
-    if (researchHealthCheckSourceStatus.length) return researchHealthCheckSourceStatus.slice(0, 12);
-    if (venueHealthSourceStatus.length) return venueHealthSourceStatus.slice(0, 12);
+    const hasCurrentFindSource = Boolean(
+      currentProjectFindRunId
+      || currentFindArtifactRunId
+      || literature.run_id
+      || literature.current_find_pipeline?.run_id
+    );
+    if (!hasCurrentFindSource && researchHealthCheckSourceStatus.length) return researchHealthCheckSourceStatus.slice(0, 12);
+    if (!hasCurrentFindSource && venueHealthSourceStatus.length) return venueHealthSourceStatus.slice(0, 12);
     return (freshFindActive ? researchSourceStatus : (researchSourceStatus.length ? researchSourceStatus : sourceStatus)).slice(0, 12);
   }
 

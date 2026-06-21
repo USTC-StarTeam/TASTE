@@ -1117,6 +1117,9 @@ def test_project_summary_recovers_source_status_from_markdown_when_progress_is_l
 
     assert [row["source"] for row in rows] == ["ICML", "ICLR", "NeurIPS", "SIGKDD"]
     assert [row["count"] for row in rows] == [6431, 5352, 5823, 256]
+    pipeline_rows = summary["current_find_pipeline"]["source_status"]
+    assert [row["source"] for row in pipeline_rows] == ["ICML", "ICLR", "NeurIPS", "SIGKDD"]
+    assert [row["count"] for row in pipeline_rows] == [6431, 5352, 5823, 256]
     assert summary["literature_survey"]["counts"]["raw_title_index_papers"] == 17862
     assert summary["literature_survey"]["source_integrity_gate"]["blocked_count"] == 0
     assert summary["literature_survey"]["status"] == "current_find_packet_ready"

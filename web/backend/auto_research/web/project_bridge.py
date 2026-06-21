@@ -11522,6 +11522,10 @@ def _current_find_pipeline_summary(root: Path, find_results: dict[str, Any] | No
         read_candidate_count = _as_int(find_counts.get("read_candidates"), 0)
     source_status_rows = _json_rows(find_results.get("source_status", [])) if isinstance(find_results, dict) else []
     venue_health_rows = _json_rows(find_results.get("venue_health_report", [])) if isinstance(find_results, dict) else []
+    if not source_status_rows:
+        source_status_rows = _current_find_source_status_rows(root)
+    if not venue_health_rows and source_status_rows:
+        venue_health_rows = source_status_rows
     source_integrity_blockers = _dedupe_source_integrity_blockers(_source_integrity_blocked_rows(source_status_rows) + _source_integrity_blocked_rows(venue_health_rows))
     recommendation_shortfall = _as_int(find_results.get("recommendation_shortfall"), -1) if isinstance(find_results, dict) else -1
     if recommendation_shortfall < 0:
@@ -11697,6 +11701,8 @@ def _current_find_pipeline_summary(root: Path, find_results: dict[str, Any] | No
                 for row in source_integrity_blockers
             ],
         },
+        "source_status": source_status_rows[:20],
+        "venue_health_report": venue_health_rows[:20],
         "recommendation_shortfall": recommendation_shortfall,
         "content_ready": content_ready,
         "read_idea_plan_ready": content_ready,
@@ -12797,6 +12803,8 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         "read_source": str(pipeline_state.get("read_source") or ""),
         "idea_source": str(pipeline_state.get("idea_source") or ""),
         "plan_source": str(pipeline_state.get("plan_source") or ""),
+        "source_status": safe_list(pipeline_state.get("source_status"))[:20],
+        "venue_health_report": safe_list(pipeline_state.get("venue_health_report"))[:20],
         "selected_execution": selected_execution,
         "selected_execution_status": str((pipeline_state.get("selected_execution_status") if pipeline_content_ready else "") or selected_execution.get("status") or ""),
         "selected_execution_issue": str((pipeline_state.get("selected_execution_issue") if pipeline_content_ready else "") or selected_execution.get("selection_issue") or ""),
