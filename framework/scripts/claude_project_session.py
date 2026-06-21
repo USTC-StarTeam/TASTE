@@ -80,7 +80,7 @@ CURRENT_FIND_GATE_STATE_WRITER_POLICY = (
 )
 CURRENT_FIND_FILE_WRITE_WHITELIST_POLICY = (
     "current-Find Read/Idea/Plan may only use Claude file tools on planning/finding/current_find_deep_read_fragments/*.json, "
-    "planning/finding/ideas.json, and planning/finding/plans.json; source code, tests, paper drafts, project history, and state files are read-only during this stage"
+    "planning/finding/ideas.json, planning/finding/idea_scoring.json, and planning/finding/plans.json; source code, tests, paper drafts, project history, and state files are read-only during this stage"
 )
 DIRECT_CONDA_COMMAND_POLICY = (
     "Claude Code may not call conda/mamba/micromamba run/create/install/update/remove directly. "
@@ -159,12 +159,14 @@ CURRENT_FIND_CONTENT_ARTIFACTS = [
     "planning/finding/idea.md",
     "planning/finding/plans.json",
     "planning/finding/plan.md",
+    "planning/finding/idea_scoring.json",
     "planning/finding/current_find_deep_read_fragments",
 ]
 CURRENT_FIND_DEEP_READ_FRAGMENT_DIR = "planning/finding/current_find_deep_read_fragments"
 CURRENT_FIND_JSON_ARTIFACTS = [
     "planning/finding/read_results.json",
     "planning/finding/ideas.json",
+    "planning/finding/idea_scoring.json",
     "planning/finding/plans.json",
 ]
 CURRENT_FIND_MARKDOWN_ARTIFACTS = [
@@ -178,7 +180,7 @@ CURRENT_FIND_OWNED_STATE_FILES = [
     "state/experiment_plan.json",
 ]
 CURRENT_FIND_CONTROLLED_FILE_NAMES = [
-    "read_results.json", "read.md", "ideas.json", "idea.md", "plans.json", "plan.md",
+    "read_results.json", "read.md", "ideas.json", "idea_scoring.json", "idea.md", "plans.json", "plan.md",
     "current_find_research_plan.json", "idea_candidates.json", "experiment_plan.json",
 ]
 
@@ -598,7 +600,7 @@ def current_find_tool_policy_issue(name: str, tool_input: Any, stage: str = '') 
     if label in {'Edit', 'MultiEdit'} and _mentions_path(target, ["planning/finding/read_results.json"]):
         return CURRENT_FIND_READ_RESULTS_WRITE_ONLY_POLICY
     if label in {"Write", "Edit", "MultiEdit"}:
-        if _mentions_path(target, ["planning/finding/ideas.json", "planning/finding/plans.json"]):
+        if _mentions_path(target, ["planning/finding/ideas.json", "planning/finding/idea_scoring.json", "planning/finding/plans.json"]):
             return ""
         return CURRENT_FIND_FILE_WRITE_WHITELIST_POLICY
     return ''
@@ -1659,7 +1661,7 @@ def run_claude(project: str, instruction: str, stage: str, timeout_sec: int, res
         else:
             policy_type = 'current_find_file_write_whitelist' if reason == CURRENT_FIND_FILE_WRITE_WHITELIST_POLICY else 'experiment_launcher'
             policy_text = (
-                'Current-Find takeover can only write the controlled planning/finding JSON artifacts. '
+                'Current-Find takeover can only write the controlled planning/finding JSON artifacts, including the idea scoring audit file. '
                 'All source code, tests, paper drafts, project history, and state files remain read-only during this stage.'
             ) if policy_type == 'current_find_file_write_whitelist' else 'Claude Code may not bypass TASTE control wrappers. New experiment launches must use `framework/scripts/run_module.py experimenting --action launch` with the project experiment Python after `--`.'
         tool_policy_tripped = True

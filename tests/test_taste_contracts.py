@@ -85,6 +85,39 @@ def test_reading_current_find_wrapper_imports_with_private_common_first():
     assert "--project" in output
 
 
+def _load_claude_project_session():
+    framework_scripts = ROOT / "framework" / "scripts"
+    if str(framework_scripts) not in sys.path:
+        sys.path.insert(0, str(framework_scripts))
+    spec = importlib.util.spec_from_file_location(
+        "framework_claude_project_session_policy",
+        framework_scripts / "claude_project_session.py",
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_current_find_allows_controlled_idea_scoring_audit_write():
+    session = _load_claude_project_session()
+
+    assert session.current_find_tool_policy_issue(
+        "Write",
+        {"file_path": "/home/fmh/workspace/TASTE/projects/protein/planning/finding/idea_scoring.json"},
+        "current_find_read_idea_plan",
+    ) == ""
+
+    assert session.current_find_tool_policy_issue(
+        "Write",
+        {"file_path": "/home/fmh/workspace/TASTE/projects/protein/state/idea_scoring.json"},
+        "current_find_read_idea_plan",
+    ) == session.CURRENT_FIND_FILE_WRITE_WHITELIST_POLICY
+
+    unsafe = "/home/fmh/workspace/miniforge/envs/ar_taste/bin/python -c \"open('planning/finding/idea_scoring.json','w').write('{}')\""
+    assert session.current_find_artifact_generator_policy_issue(unsafe, "current_find_read_idea_plan") == session.CURRENT_FIND_ARTIFACT_WRITER_POLICY
+
+
 def test_all_stage_contracts_and_framework_dry_run_are_callable():
     for stage in STAGES:
         proc = subprocess.run([sys.executable, str(ROOT / "modules" / stage / "main.py"), "--contract"], cwd=ROOT, text=True, capture_output=True, timeout=30)
