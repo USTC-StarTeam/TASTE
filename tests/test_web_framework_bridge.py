@@ -847,6 +847,55 @@ def test_web_source_status_marks_partial_openreview_as_limited():
     assert project_bridge._venue_source_public_limited(row) is True
 
 
+def test_web_source_status_keeps_complete_dblp_title_index_limited_but_unblocked(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    root = _make_project(projects, "demo")
+    finding = root / "planning" / "finding"
+    finding.mkdir(parents=True)
+    row = {
+        "source_kind": "venue",
+        "source": "SIGKDD",
+        "venue": "SIGKDD",
+        "venue_id": "sigkdd",
+        "ok": True,
+        "adapter": "dblp_cache",
+        "requested_years": [2026],
+        "effective_years": [2026],
+        "raw_title_index_count": 256,
+        "candidate_count": 256,
+        "count": 256,
+        "metadata_completeness_status": "title_index_only",
+        "metadata_completeness_ok": False,
+        "metadata_completeness_limited": True,
+        "title_index_completeness_status": "complete",
+        "title_index_completeness_ok": True,
+        "title_index_complete": True,
+        "has_official_categories": False,
+        "has_abstracts": False,
+        "source_scope": "dblp_current_index_not_official_accepted_list",
+        "official_title_index_verified": False,
+    }
+    progress = {
+        "run_id": "find_demo",
+        "source_status": [row],
+        "venue_health_report": [row],
+        "counts": {"strong_recommendations": 5, "recommendation_target_count": 5, "recommendation_shortfall": 0},
+    }
+    (finding / "find_progress.json").write_text(json.dumps(progress), encoding="utf-8")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.setattr(project_bridge, "_current_verified_venue_metadata_rows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(project_bridge, "_current_health_check_source_status_rows", lambda *args, **kwargs: [])
+
+    summary = project_bridge._current_find_pipeline_summary(root)
+
+    assert project_bridge._venue_source_integrity_blocker(row) == ""
+    assert project_bridge._source_integrity_blocked_rows([row]) == []
+    assert project_bridge._venue_source_public_limited(row) is True
+    assert project_bridge._derive_source_scope("neurips_official_papers_cache") == "official_neurips_papers_index"
+    assert summary["source_integrity_gate"] == {"status": "passed", "blocked_count": 0, "blockers": []}
+    assert summary["status"] != "source_integrity_blocked"
+
+
 def test_web_find_pipeline_summary_blocks_suspicious_one_paper_core_venue(monkeypatch, tmp_path):
     projects = tmp_path / "projects"
     root = _make_project(projects, "demo")
@@ -894,6 +943,62 @@ def test_web_find_pipeline_summary_blocks_suspicious_one_paper_core_venue(monkey
     assert summary["execution_ready"] is False
     assert summary["takeover_ready"] is False
     assert project_bridge._venue_source_public_limited(progress["source_status"][0]) is True
+
+
+def test_web_project_summary_projects_source_integrity_blocker(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    root = _make_project(projects, "demo")
+    finding = root / "planning" / "finding"
+    finding.mkdir(parents=True, exist_ok=True)
+    run_id = "find_demo"
+    progress = {
+        "run_id": run_id,
+        "source_status": [
+            {
+                "source_kind": "venue",
+                "source": "ICLR",
+                "venue": "ICLR",
+                "venue_id": "openreview_iclr_2026",
+                "ok": True,
+                "adapter": "openreview_cache",
+                "requested_years": [2026],
+                "effective_years": [2026],
+                "raw_title_index_count": 1,
+                "candidate_count": 1,
+                "count": 1,
+                "metadata_completeness_status": "partial",
+                "metadata_completeness_ok": False,
+                "metadata_completeness_limited": True,
+                "title_index_completeness_status": "partial",
+                "title_index_completeness_ok": False,
+                "title_index_complete": False,
+                "has_official_categories": True,
+                "has_abstracts": True,
+                "source_scope": "official_openreview_metadata",
+            }
+        ],
+        "counts": {"strong_recommendations": 5, "recommendation_target_count": 5, "recommendation_shortfall": 0},
+    }
+    (finding / "find_progress.json").write_text(json.dumps(progress), encoding="utf-8")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.setattr(project_bridge, "_PROJECT_SUMMARY_CACHE", {})
+    monkeypatch.setattr(project_bridge, "_current_verified_venue_metadata_rows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(project_bridge, "_current_health_check_source_status_rows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(project_bridge, "_current_project_source_selection", lambda *args, **kwargs: {})
+    monkeypatch.setattr(project_bridge, "_remote_process_rows", lambda: [])
+
+    summary = project_bridge.project_summary("demo")
+
+    assert summary["status"] == "source_integrity_blocked"
+    assert summary["literature_survey"]["status"] == "source_integrity_blocked"
+    assert summary["literature_survey"]["recommendation_gate_status"] == "source_integrity_blocked"
+    assert summary["current_find_pipeline"]["status"] == "source_integrity_blocked"
+    assert summary["current_find_pipeline"]["source_integrity_gate"]["blocked_count"] == 1
+    assert summary["main_route"]["base_selection_status"] == "source_integrity_blocked"
+    assert summary["stages"]["environment"]["status"] == "source_integrity_blocked"
+    assert "Find 来源完整性失败" in summary["stages"]["environment"]["summary"]
+    assert summary["current_blocker"]["category"] == "source_integrity_blocked"
+    assert "不能作为真实会议语料" in summary["current_blocker"]["summary"]
 
 
 def test_web_jobs_keeps_only_latest_persisted_environment_history(monkeypatch):

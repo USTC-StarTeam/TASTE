@@ -449,6 +449,7 @@ from sources.parsing import (
     _openreview_pdf_url,
     _parse_neurips_detail,
     _parse_neurips_list,
+    _parse_neurips_official_papers_list,
     _positive_float_env,
 )
 
@@ -1097,9 +1098,47 @@ def enrich_pmlr_details(papers: list[dict], limit: int | None = None) -> tuple[l
 
 
 def fetch_neurips_title_index(year: int, max_items: int, raise_errors: bool = False) -> list[dict]:
+    requested = int(max_items or 0)
+    limit = requested if requested > 0 else 100000
+    official_url = f"https://papers.nips.cc/paper_files/paper/{year}"
+    official_error = ""
+    try:
+        papers = _parse_neurips_official_papers_list(_request(official_url, timeout=30).text, official_url, limit)
+        if papers:
+            for paper in papers:
+                paper["year"] = year
+            complete = requested <= 0 or len(papers) < requested
+            audit = _venue_metadata_audit(
+                status="complete" if complete else "partial",
+                title_index_completeness_status="complete" if complete else "partial",
+                source_verified=True,
+                complete=complete,
+                title_index_complete=complete,
+                official_metadata_complete=False,
+                adapter="neurips_official_papers",
+                source_url=official_url,
+                requested_years=[year],
+                paper_count=len(papers),
+                source_total_count=len(papers),
+                missing_abstract_count=len(papers),
+                has_abstracts=False,
+                any_abstracts=False,
+                has_official_categories=True,
+                category_status="official_or_cached_categories",
+                source_scope="official_neurips_papers_index",
+                official_title_index_verified=complete,
+                official_accepted_list_verified=complete,
+                completeness_basis="NeurIPS official papers.nips.cc yearly paper index was parsed from paper_files/paper/{year}; it exposes accepted paper titles, authors, URLs, and track labels but not abstracts in the index.",
+            )
+            return _attach_venue_metadata_audit(papers, audit)
+    except Exception as exc:
+        official_error = str(exc)[:240]
+        if raise_errors:
+            raise
+
     list_url = f"https://neurips.cc/virtual/{year}/papers.html"
     try:
-        candidates = _parse_neurips_list(_request(list_url).text, list_url, max_items)
+        candidates = _parse_neurips_list(_request(list_url).text, list_url, limit)
     except Exception:
         if raise_errors:
             raise
@@ -1119,7 +1158,7 @@ def fetch_neurips_title_index(year: int, max_items: int, raise_errors: bool = Fa
             "year": year,
             "category": "",
             "classification_source": "llm_inferred",
-            "metadata": {"venue_url": detail_url, "detail_url": detail_url, "title_index_only": True},
+            "metadata": {"venue_url": detail_url, "detail_url": detail_url, "title_index_only": True, "official_papers_error": official_error},
         }
         _set_presentation_metadata(paper, _presentation_type_from_url(detail_url), source="neurips_virtual_url")
         papers.append(paper)

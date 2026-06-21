@@ -3990,14 +3990,28 @@ function runtimeDraftFromSummary(summary: ProjectSummary | null) {
 
 function environmentDraftFromSummary(summary: ProjectSummary | null) {
   const runPreferences = (summary as any)?.run_preferences || {};
-  const runtime = summary?.runtime?.runtime || summary?.state?.runtime?.runtime || runPreferences.runtime || summary?.config?.runtime || {};
-  const environment = summary?.config?.environment || runPreferences.environment || {};
+  const runtime = runPreferences.runtime || summary?.runtime?.runtime || summary?.state?.runtime?.runtime || summary?.config?.runtime || {};
+  const environment = runPreferences.environment || summary?.config?.environment || {};
   return {
-    conda_env: runPreferences.conda_env || summary?.config?.conda_env || "",
+    conda_env: runPreferences.conda_env || runtime.conda_env || summary?.config?.conda_env || "",
     conda_base: runtime.conda_base || environment.conda_base_hint || "",
     experiment_python: runtime.experiment_python || environment.experiment_python || "",
     python_executable: runtime.management_python || runtime.python_executable || summary?.config?.python_executable || "",
   };
+}
+
+function environmentDraftHasAnyValue(draft: Record<string, any>) {
+  return Boolean(
+    String(draft?.conda_env || "").trim()
+    || String(draft?.conda_base || "").trim()
+    || String(draft?.experiment_python || "").trim()
+  );
+}
+
+function fillEmptyEnvironmentDraftFromSummary(current: Record<string, any>, summary: ProjectSummary | null) {
+  if (environmentDraftHasAnyValue(current)) return current;
+  const next = environmentDraftFromSummary(summary);
+  return environmentDraftHasAnyValue(next) ? next : current;
 }
 
 function derivedCondaPython(condaBase: any, condaEnv: any) {
@@ -4349,6 +4363,7 @@ function App() {
         if (cancelled || activeProjectRef.current !== projectId) return;
         projectSummaryLoadedAtRef.current[projectId] = Date.now();
         setProjectSummary(summary);
+        setResearchEnvDraft((prev) => fillEmptyEnvironmentDraftFromSummary(prev, summary));
         setError((prev) => String(prev || "").includes("Failed to fetch") ? "" : prev);
       } catch {
         // Keep the last visible state; transient refresh failures should not blank the page.
@@ -6076,7 +6091,8 @@ function App() {
     const tickJob = supervisionTick?.full_reference_job || {};
     return blockerJob === "running" || (String(tickJob.status || "") === "running" && tickJob.alive !== false);
   }, [humanSupervision, supervisionTick]);
-  const projectStatusLoadingForLaunch = Boolean(researchProject && (!researchSummary || researchProjectLoading || !jobsLoaded));
+  const projectSummaryLoadingForDisplay = Boolean(researchProject && (!researchSummary || researchProjectLoading));
+  const projectStatusLoadingForLaunch = Boolean(projectSummaryLoadingForDisplay || (researchProject && !jobsLoaded));
   const projectStageLaunchLockedText = useMemo(() => (
     lang === "zh"
       ? "当前项目已有环境/实验/论文阶段任务正在运行或状态仍在刷新；网页已阻止新的全流程/实验/论文启动，避免并发重复任务。需要人工介入时，请在对应阶段的项目代理指令框提交。"
@@ -6103,7 +6119,7 @@ function App() {
   );
   const environmentConfigDisabled = Boolean(
     environmentLocked
-    || projectStatusLoadingForLaunch
+    || projectSummaryLoadingForDisplay
     || environmentStageRunning
     || experimentStageRunning
     || paperStageRunning
@@ -8389,7 +8405,7 @@ function App() {
             </div>
             {!researchProjectsLoaded && !researchProject ? <div className="emptyState">{t.researchProjectLoading}</div> : researchProjectsLoaded && !researchProject ? <div className="emptyState">{t.researchNoProject}</div> : (
               <>
-                {(!researchProjectsLoaded || !researchSummary) && <div className="researchGateNote warning">{lang === "zh" ? "正在刷新当前项目状态；环境配置面板会先保留显示。" : "Refreshing current project state; the Environment panels stay visible."}</div>}
+                {(!researchProjectsLoaded || projectSummaryLoadingForDisplay) && <div className="researchGateNote warning">{lang === "zh" ? "正在刷新当前项目状态；环境配置面板会先保留显示。" : "Refreshing current project state; the Environment panels stay visible."}</div>}
                 <div className="grid two environmentGrid">
                   <div className="panel researchStageCard readableOnly envSummaryPanel">
                     <div className="envSummaryHeader">

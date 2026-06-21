@@ -112,6 +112,51 @@ def _parse_neurips_detail(html: str, url: str, fallback_title: str, year: int) -
     return paper
 
 
+def _parse_neurips_official_papers_list(html: str, list_url: str, max_items: int) -> list[dict]:
+    soup = BeautifulSoup(html, "html.parser")
+    papers: list[dict] = []
+    seen: set[str] = set()
+    limit = int(max_items or 0)
+    for anchor in soup.select('a[href*="/paper_files/paper/"][href*="/hash/"]'):
+        href = str(anchor.get("href") or "")
+        title = _clean_text(anchor.get_text(" ", strip=True))
+        if not _looks_like_paper_title(title):
+            continue
+        detail_url = urljoin(list_url, href)
+        if detail_url in seen:
+            continue
+        seen.add(detail_url)
+        parent = anchor.find_parent("li")
+        track_node = parent.select_one("span") if parent else None
+        track = _clean_text(track_node.get_text(" ", strip=True)) if track_node else ""
+        parent_text = _clean_text(parent.get_text(" ", strip=True)) if parent else ""
+        authors = parent_text
+        if authors.startswith(title):
+            authors = authors[len(title):].strip()
+        if track and authors.endswith(track):
+            authors = authors[: -len(track)].strip()
+        paper = {
+            "id": stable_id("paper", detail_url),
+            "source": "neurips_official_papers",
+            "title": title,
+            "authors": authors,
+            "abstract": "",
+            "url": detail_url,
+            "pdf_url": detail_url.replace("-Abstract-", "-Paper-").replace(".html", ".pdf") if "-Abstract-" in detail_url else "",
+            "venue": "NeurIPS",
+            "year": 0,
+            "category": track,
+            "track": track,
+            "classification_source": "official" if track else "llm_inferred",
+            "metadata": {"venue_url": list_url, "detail_url": detail_url, "title_index_only": True, "source_page": "papers.nips.cc"},
+        }
+        _set_presentation_metadata(paper, _presentation_type_from_text(track), source="neurips_official_papers_track")
+        papers.append(paper)
+        if limit > 0 and len(papers) >= limit:
+            break
+    return papers
+
+
 def _parse_neurips_list(html: str, list_url: str, max_items: int) -> list[tuple[str, str]]:
     soup = BeautifulSoup(html, "html.parser")
     candidates: list[tuple[str, str]] = []

@@ -33,6 +33,36 @@ def _load_reading_main():
     return module
 
 
+def _load_find_pipeline():
+    finding_module_root = ROOT / "modules" / "finding"
+    for path in [ROOT / "framework" / "scripts", ROOT / "web" / "backend", finding_module_root, finding_module_root / "scripts"]:
+        value = str(path)
+        if value in sys.path:
+            sys.path.remove(value)
+        sys.path.insert(0, value)
+    for name in list(sys.modules):
+        if name == "find_support" or name == "find_pipeline" or name == "sources" or name.startswith("sources."):
+            sys.modules.pop(name, None)
+    spec = importlib.util.spec_from_file_location("finding_find_pipeline_contract", finding_module_root / "scripts" / "find_pipeline.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _venue_cache_rows(count: int, audit: dict) -> list[dict]:
+    return [
+        {
+            "id": f"paper_{index}",
+            "title": f"Verified venue paper {index}",
+            "venue": "ICLR",
+            "year": 2026,
+            "metadata": {"venue_metadata_audit": dict(audit)},
+        }
+        for index in range(count)
+    ]
+
+
 def _load_environment_module(module_name: str, relative_path: str):
     environment_module_root = ROOT / "modules" / "environment"
     for name in list(sys.modules):
@@ -47,6 +77,328 @@ def _load_environment_module(module_name: str, relative_path: str):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_find_neurips_official_papers_parser_reads_papers_nips_hash_links():
+    find_pipeline = _load_find_pipeline()
+    parser = sys.modules["sources.parsing"]
+    html = """
+    <html><body><ul>
+      <li><div><a href="/paper_files/paper/2025/hash/abc-Abstract-Conference.html">A Reliable Test-Time Scaling Method</a> Alice A., Bob B. <span>Main Conference Track</span></div></li>
+      <li><div><a href="/paper_files/paper/2025/hash/def-Abstract-Datasets_and_Benchmarks_Track.html">Benchmarking Protein Models at Scale</a> Chen C. <span>Datasets and Benchmarks Track</span></div></li>
+    </ul></body></html>
+    """
+
+    rows = parser._parse_neurips_official_papers_list(html, "https://papers.nips.cc/paper_files/paper/2025", 100)
+
+    assert len(rows) == 2
+    assert rows[0]["source"] == "neurips_official_papers"
+    assert rows[0]["title"] == "A Reliable Test-Time Scaling Method"
+    assert rows[0]["authors"] == "Alice A., Bob B."
+    assert rows[0]["track"] == "Main Conference Track"
+    assert rows[0]["pdf_url"].endswith("abc-Paper-Conference.pdf")
+
+
+def test_find_cache_store_keeps_official_neurips_index_over_smaller_dblp(monkeypatch, tmp_path):
+    find_pipeline = _load_find_pipeline()
+    workspace = tmp_path / "workspace"
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setattr(find_pipeline, "WORKFLOW_RUNTIME_DIR", workspace / "runtime")
+    venue = {"id": "ccf_ai_conference_a_neurips_conference_on_neural_information_processing_systems", "name": "NeurIPS"}
+
+    official_audit = {
+        "status": "complete",
+        "source_verified": True,
+        "complete": True,
+        "title_index_complete": True,
+        "title_index_completeness_status": "complete",
+        "adapter": "neurips_official_papers",
+        "paper_count": 120,
+        "has_abstracts": False,
+        "any_abstracts": False,
+        "has_official_categories": True,
+        "category_status": "official_or_cached_categories",
+        "source_scope": "official_neurips_papers_index",
+        "official_title_index_verified": True,
+        "official_accepted_list_verified": True,
+    }
+    dblp_audit = {
+        "status": "complete",
+        "source_verified": True,
+        "complete": True,
+        "title_index_complete": True,
+        "title_index_completeness_status": "complete",
+        "adapter": "dblp_toc",
+        "paper_count": 80,
+        "has_abstracts": False,
+        "any_abstracts": False,
+        "has_official_categories": False,
+        "category_status": "no_official_categories",
+        "source_scope": "dblp_current_index_not_official_accepted_list",
+        "official_title_index_verified": False,
+        "official_accepted_list_verified": False,
+    }
+    official_rows = _venue_cache_rows(120, official_audit)
+    dblp_rows = _venue_cache_rows(80, dblp_audit)
+    for row in official_rows + dblp_rows:
+        row["venue"] = "NeurIPS"
+
+    find_pipeline._store_venue_title_index_cache(venue, [2025], official_rows, "neurips_official_papers")
+    find_pipeline._store_venue_title_index_cache(venue, [2025], dblp_rows, "dblp")
+    loaded, adapter = find_pipeline._load_venue_title_index_cache(venue, [2025], limit=None)
+
+    assert adapter == "neurips_official_papers_cache"
+    assert len(loaded) == 120
+
+
+def test_find_title_index_cache_validates_full_rows_before_limit(monkeypatch, tmp_path):
+    find_pipeline = _load_find_pipeline()
+    workspace = tmp_path / "workspace"
+    scoped_state = workspace / "modules" / "finding" / ".runtime" / "protein" / "state"
+    scoped_state.mkdir(parents=True)
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setattr(find_pipeline, "WORKFLOW_RUNTIME_DIR", workspace / "runtime")
+
+    venue = {"id": "openreview_iclr", "name": "ICLR"}
+    audit = {
+        "status": "complete",
+        "source_verified": True,
+        "complete": True,
+        "title_index_complete": True,
+        "title_index_completeness_status": "complete",
+        "adapter": "openreview_reference",
+        "paper_count": 80,
+        "has_abstracts": True,
+        "any_abstracts": True,
+        "has_official_categories": True,
+        "category_status": "official_or_cached_categories",
+        "source_scope": "official_openreview_metadata",
+        "official_title_index_verified": True,
+        "official_accepted_list_verified": True,
+    }
+    rows = _venue_cache_rows(80, audit)
+    cache = {
+        "schema": find_pipeline.VENUE_TITLE_INDEX_CACHE_SCHEMA_VERSION,
+        "entries": {
+            find_pipeline._venue_title_index_cache_key(venue, [2026]): {
+                "schema": find_pipeline.VENUE_TITLE_INDEX_CACHE_SCHEMA_VERSION,
+                "venue_id": "openreview_iclr",
+                "venue_name": "ICLR",
+                "years": [2026],
+                "adapter": "openreview_reference",
+                "papers": rows,
+                "count": len(rows),
+            }
+        },
+    }
+    (scoped_state / "venue_title_indexes.json").write_text(json.dumps(cache), encoding="utf-8")
+
+    loaded, adapter = find_pipeline._load_venue_title_index_cache(venue, [2026], limit=1)
+
+    assert adapter == "openreview_reference_cache"
+    assert len(loaded) == 1
+    assert find_pipeline._venue_title_index_cache_rows_usable(venue, [2026], rows, "openreview_reference") is True
+    assert find_pipeline._venue_title_index_cache_rows_usable(venue, [2026], rows[:1], "openreview_reference") is False
+
+
+def test_find_title_index_cache_discovers_scoped_runtime_dblp_title_corpus(monkeypatch, tmp_path):
+    find_pipeline = _load_find_pipeline()
+    workspace = tmp_path / "workspace"
+    scoped_state = workspace / "modules" / "finding" / ".runtime" / "protein" / "state"
+    scoped_state.mkdir(parents=True)
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setattr(find_pipeline, "WORKFLOW_RUNTIME_DIR", workspace / "runtime")
+
+    venue = {"id": "ccf_dm_cs_conference_a_sigkdd_acm_sigkdd_conference_on_knowledge_discovery_and_data_mining", "name": "SIGKDD"}
+    audit = {
+        "status": "complete",
+        "source_verified": True,
+        "complete": True,
+        "title_index_complete": True,
+        "title_index_completeness_status": "complete",
+        "adapter": "dblp_search_api",
+        "paper_count": 70,
+        "has_abstracts": False,
+        "any_abstracts": False,
+        "has_official_categories": False,
+        "category_status": "no_official_categories",
+        "source_scope": "dblp_current_index_not_official_accepted_list",
+        "official_title_index_verified": False,
+        "official_accepted_list_verified": False,
+    }
+    rows = _venue_cache_rows(70, audit)
+    for row in rows:
+        row["venue"] = "SIGKDD"
+    cache = {
+        "schema": find_pipeline.VENUE_TITLE_INDEX_CACHE_SCHEMA_VERSION,
+        "entries": {
+            find_pipeline._venue_title_index_cache_key(venue, [2026]): {
+                "schema": find_pipeline.VENUE_TITLE_INDEX_CACHE_SCHEMA_VERSION,
+                "venue_id": venue["id"],
+                "venue_name": "SIGKDD",
+                "years": [2026],
+                "adapter": "dblp",
+                "papers": rows,
+                "count": len(rows),
+            }
+        },
+    }
+    (scoped_state / "venue_title_indexes.json").write_text(json.dumps(cache), encoding="utf-8")
+
+    loaded, adapter = find_pipeline._load_venue_title_index_cache(venue, [2026], limit=1)
+    fields = find_pipeline._venue_metadata_status_fields(find_pipeline._online_venue_metadata_audit(rows, "dblp"))
+
+    assert adapter == "dblp_cache"
+    assert len(loaded) == 1
+    assert fields["source_integrity_status"] == "passed"
+    assert fields["metadata_completeness_status"] == "title_index_only"
+    assert fields["official_title_index_verified"] is False
+    assert find_pipeline._venue_title_index_cache_rows_usable(venue, [2026], rows, "dblp") is True
+
+
+def test_find_source_health_refresh_replaces_stale_one_row_source_artifact(monkeypatch, tmp_path):
+    find_pipeline = _load_find_pipeline()
+    workspace = tmp_path / "workspace"
+    scoped_state = workspace / "modules" / "finding" / ".runtime" / "protein" / "state"
+    scoped_state.mkdir(parents=True)
+    artifact_dir = workspace / "projects" / "protein" / "planning" / "finding"
+    artifact_dir.mkdir(parents=True)
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setattr(find_pipeline, "WORKFLOW_RUNTIME_DIR", workspace / "runtime")
+
+    venue = {"id": "openreview_iclr", "name": "ICLR"}
+    selection = {
+        "venue_ids": ["openreview_iclr"],
+        "years": [2026],
+        "venue_years": [{"venue_id": "openreview_iclr", "year": 2026}],
+        "include_arxiv": False,
+        "include_biorxiv": False,
+        "include_huggingface": False,
+        "include_github": False,
+        "include_nature": False,
+        "include_science": False,
+    }
+    complete_audit = {
+        "status": "complete",
+        "source_verified": True,
+        "complete": True,
+        "title_index_complete": True,
+        "title_index_completeness_status": "complete",
+        "adapter": "openreview_reference",
+        "paper_count": 80,
+        "has_abstracts": True,
+        "any_abstracts": True,
+        "has_official_categories": True,
+        "category_status": "official_or_cached_categories",
+        "source_scope": "official_openreview_metadata",
+        "official_title_index_verified": True,
+        "official_accepted_list_verified": True,
+    }
+    rows = _venue_cache_rows(80, complete_audit)
+    cache = {
+        "schema": find_pipeline.VENUE_TITLE_INDEX_CACHE_SCHEMA_VERSION,
+        "entries": {
+            find_pipeline._venue_title_index_cache_key(venue, [2026]): {
+                "schema": find_pipeline.VENUE_TITLE_INDEX_CACHE_SCHEMA_VERSION,
+                "venue_id": "openreview_iclr",
+                "venue_name": "ICLR",
+                "years": [2026],
+                "adapter": "openreview_reference",
+                "papers": rows,
+                "count": len(rows),
+            }
+        },
+    }
+    (scoped_state / "venue_title_indexes.json").write_text(json.dumps(cache), encoding="utf-8")
+    stale_row = {
+        "venue_id": "openreview_iclr",
+        "venue": "ICLR",
+        "adapter": "openreview_cache",
+        "requested_years": [2026],
+        "effective_years": [2026],
+        "sample_count": 1,
+        "candidate_count": 1,
+        "corpus_count": 1,
+        "ok": True,
+        "limited": True,
+        "metadata_completeness_status": "partial",
+        "title_index_completeness_status": "partial",
+    }
+    payload = {
+        "run_id": "find_stale",
+        "selection": selection,
+        "venue_health_report": [stale_row],
+        "source_status": [{"source": "ICLR", "count": 1, "source_kind": "venue", "venue": "ICLR"}],
+        "raw_title_index": rows[:1],
+        "counts": {"raw_title_index": 1, "raw_title_index_papers": 1, "title_total_papers": 1},
+        "strong_recommendations": [],
+        "read_candidates": [],
+        "evaluated_candidates": [],
+        "scoring_runtime": {},
+    }
+    (artifact_dir / "find_results.json").write_text(json.dumps(payload), encoding="utf-8")
+    (artifact_dir / "find_progress.json").write_text(json.dumps({**payload, "phase": "complete"}), encoding="utf-8")
+
+    result = find_pipeline.refresh_find_source_health(artifact_dir, selection=selection, log=lambda _message: None)
+    refreshed = json.loads((artifact_dir / "find_results.json").read_text(encoding="utf-8"))
+
+    assert result["source_integrity_gate"]["status"] == "passed"
+    assert result["raw_title_index_count"] == 80
+    row = refreshed["venue_health_report"][0]
+    assert row["corpus_count"] == 80
+    assert row["title_index_completeness_status"] == "complete"
+    assert row["source_integrity_status"] == "passed"
+    assert refreshed["diagnostics"]["source_integrity_gate"]["status"] == "passed"
+    assert refreshed["counts"]["raw_title_index"] == 80
+
+
+def test_find_title_index_cache_rejects_one_row_partial_core_venue(monkeypatch, tmp_path):
+    find_pipeline = _load_find_pipeline()
+    workspace = tmp_path / "workspace"
+    scoped_state = workspace / "modules" / "finding" / ".runtime" / "protein" / "state"
+    scoped_state.mkdir(parents=True)
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setattr(find_pipeline, "WORKFLOW_RUNTIME_DIR", workspace / "runtime")
+
+    venue = {"id": "openreview_iclr", "name": "ICLR"}
+    audit = {
+        "status": "partial",
+        "source_verified": True,
+        "complete": False,
+        "title_index_complete": False,
+        "title_index_completeness_status": "partial",
+        "adapter": "openreview",
+        "paper_count": 1,
+        "has_abstracts": True,
+        "any_abstracts": True,
+        "has_official_categories": True,
+        "category_status": "official_or_cached_categories",
+        "source_scope": "openreview_official_venue_notes",
+        "official_title_index_verified": False,
+        "official_accepted_list_verified": False,
+    }
+    rows = _venue_cache_rows(1, audit)
+    cache = {
+        "schema": find_pipeline.VENUE_TITLE_INDEX_CACHE_SCHEMA_VERSION,
+        "entries": {
+            find_pipeline._venue_title_index_cache_key(venue, [2026]): {
+                "schema": find_pipeline.VENUE_TITLE_INDEX_CACHE_SCHEMA_VERSION,
+                "venue_id": "openreview_iclr",
+                "venue_name": "ICLR",
+                "years": [2026],
+                "adapter": "openreview",
+                "papers": rows,
+                "count": len(rows),
+            }
+        },
+    }
+    (scoped_state / "venue_title_indexes.json").write_text(json.dumps(cache), encoding="utf-8")
+
+    loaded, adapter = find_pipeline._load_venue_title_index_cache(venue, [2026], limit=1)
+
+    assert loaded == []
+    assert adapter == "none"
+    assert find_pipeline._venue_title_index_cache_rows_usable(venue, [2026], rows, "openreview") is False
 
 
 def test_reading_cli_explicit_action_keeps_project_for_child_command(monkeypatch):

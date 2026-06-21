@@ -2337,6 +2337,9 @@ def _venue_title_index_cache_paths() -> list[Path]:
         root / "runtime" / "state" / "venue_title_indexes.json",
         root / "modules" / "finding" / ".runtime" / "state" / "venue_title_indexes.json",
     ]
+    scoped_runtime = root / "modules" / "finding" / ".runtime"
+    if scoped_runtime.is_dir():
+        paths.extend(sorted(scoped_runtime.glob("*/state/venue_title_indexes.json")))
     seen: set[Path] = set()
     unique: list[Path] = []
     for path in paths:
@@ -2349,6 +2352,13 @@ def _venue_title_index_cache_paths() -> list[Path]:
         seen.add(resolved)
         unique.append(path)
     return unique
+
+
+def _venue_title_index_cache_adapter(adapter: object) -> str:
+    text = str(adapter or "cached_title_index").strip() or "cached_title_index"
+    while text.endswith("_cache"):
+        text = text[:-6]
+    return text or "cached_title_index"
 
 
 def _venue_title_index_cache_key(venue: dict, years: list[int]) -> str:
@@ -2416,23 +2426,37 @@ def _load_venue_title_index_cache(venue: dict, years: list[int], limit: int | No
         if not (isinstance(papers, list) and papers):
             continue
         rows = [dict(row) for row in papers if isinstance(row, dict)]
-        if limit and limit > 0:
-            rows = rows[:limit]
-        adapter = str(entry.get("adapter") or "cached_title_index")
+        adapter = _venue_title_index_cache_adapter(entry.get("adapter"))
         if not _venue_title_index_cache_rows_usable(venue, years, rows, adapter):
             continue
+        returned_rows = rows[:limit] if limit and limit > 0 else rows
         if path != _venue_title_index_cache_path():
             _store_venue_title_index_cache(venue, years, rows, adapter)
-        return rows, f"{adapter}_cache"
-    rows, adapter = _latest_project_find_results_title_index(venue, years, limit)
+        return returned_rows, f"{adapter}_cache"
+    rows, adapter = _latest_project_find_results_title_index(venue, years, None)
     if rows and _venue_title_index_cache_rows_usable(venue, years, rows, adapter):
         _store_venue_title_index_cache(venue, years, rows, adapter)
-        return rows, f"{adapter}_cache"
+        returned_rows = rows[:limit] if limit and limit > 0 else rows
+        return returned_rows, f"{adapter}_cache"
     return [], "none"
+
+
+def _venue_title_index_cache_rank(rows: list[dict], adapter: str) -> tuple[int, int, int, int, int, int]:
+    audit = _online_venue_metadata_audit(rows, adapter)
+    source_scope = str(audit.get("source_scope") or "").lower()
+    source_adapter = str(audit.get("source_adapter") or audit.get("adapter") or adapter or "").lower()
+    official = int(bool(audit.get("official_title_index_verified") or audit.get("official_accepted_list_verified") or source_scope.startswith("official_")))
+    accepted_like = int(source_scope in {"official_openreview_metadata", "official_neurips_papers_index", "official_icml_downloads_title_index"})
+    title_complete = int(bool(audit.get("title_index_complete") or audit.get("complete")))
+    source_verified = int(bool(audit.get("source_verified")))
+    coverage = len(rows)
+    non_dblp = int(not (source_scope == "dblp_current_index_not_official_accepted_list" or source_adapter.startswith("dblp")))
+    return (official, accepted_like, title_complete, source_verified, non_dblp, coverage)
 
 
 def _store_venue_title_index_cache(venue: dict, years: list[int], papers: list[dict], adapter: str) -> None:
     rows = [dict(row) for row in papers if isinstance(row, dict)]
+    adapter = _venue_title_index_cache_adapter(adapter)
     if not rows or not str(adapter or "").strip() or str(adapter).strip() == "none":
         return
     if not _venue_title_index_cache_rows_usable(venue, years, rows, adapter):
@@ -2445,7 +2469,16 @@ def _store_venue_title_index_cache(venue: dict, years: list[int], papers: list[d
     if not isinstance(entries, dict):
         entries = {}
         cache["entries"] = entries
-    entries[_venue_title_index_cache_key(venue, years)] = {
+    key = _venue_title_index_cache_key(venue, years)
+    existing = entries.get(key) if isinstance(entries.get(key), dict) else {}
+    existing_papers = existing.get("papers") if isinstance(existing, dict) else []
+    if isinstance(existing_papers, list) and existing_papers:
+        existing_rows = [dict(row) for row in existing_papers if isinstance(row, dict)]
+        existing_adapter = _venue_title_index_cache_adapter(existing.get("adapter"))
+        if _venue_title_index_cache_rows_usable(venue, years, existing_rows, existing_adapter):
+            if _venue_title_index_cache_rank(existing_rows, existing_adapter) >= _venue_title_index_cache_rank(rows, adapter):
+                return
+    entries[key] = {
         "schema": VENUE_TITLE_INDEX_CACHE_SCHEMA_VERSION,
         "venue_id": str(venue.get("id") or ""),
         "venue_name": str(venue.get("name") or ""),
@@ -7029,6 +7062,73 @@ def _source_status(source: str, ok: bool, count: int, message: str, limited: boo
     return {"source": source, "ok": ok, "limited": limited, "count": count, "message": message}
 
 
+def _venue_source_status_rows_from_reports(venue_health_report: list[dict], venue_papers: list[dict] | None = None) -> list[dict]:
+    papers = venue_papers or []
+    rows: list[dict] = []
+    for row in venue_health_report:
+        if not isinstance(row, dict):
+            continue
+        source_name = row.get("venue") or row.get("venue_id") or "venue"
+        count = int(row.get("candidate_count") or row.get("sample_count") or row.get("corpus_count") or 0)
+        message_parts = []
+        adapter_name = row.get("adapter")
+        if adapter_name:
+            message_parts.append(f"adapter={adapter_name}")
+        effective_years_text = ",".join(str(year) for year in (row.get("effective_years") or []))
+        if effective_years_text:
+            message_parts.append(f"years={effective_years_text}")
+        if row.get("corpus_count") is not None:
+            message_parts.append("corpus=" + str(row.get("corpus_count")))
+        if row.get("candidate_count") is not None:
+            message_parts.append("screen_input=" + str(row.get("candidate_count")))
+        if row.get("sample_count") is not None:
+            message_parts.append("fetched=" + str(row.get("sample_count")))
+        if row.get("metadata_completeness_status"):
+            message_parts.append("metadata=" + str(row.get("metadata_completeness_status")))
+        if row.get("category_status"):
+            message_parts.append("category=" + str(row.get("category_status")))
+        if row.get("year_fallback_reason"):
+            message_parts.append(str(row.get("year_fallback_reason")))
+        if row.get("error"):
+            message_parts.append(str(row.get("error")))
+        if row.get("source_integrity_message"):
+            message_parts.append(str(row.get("source_integrity_message")))
+        status = _source_status(str(source_name), bool(row.get("ok")), count, "; ".join(message_parts) or ("ok" if row.get("ok") else "No papers fetched."), limited=_venue_source_public_limited(row))
+        status["source_kind"] = "venue"
+        status["venue_id"] = row.get("venue_id")
+        status["venue"] = row.get("venue") or source_name
+        status["adapter"] = row.get("adapter")
+        status["requested_years"] = row.get("requested_years") or []
+        status["effective_years"] = row.get("effective_years") or []
+        status["raw_title_index_count"] = row.get("corpus_count") or row.get("sample_count") or 0
+        status["candidate_count"] = row.get("candidate_count") or row.get("sample_count") or 0
+        status["metadata_completeness_status"] = row.get("metadata_completeness_status") or ""
+        status["metadata_completeness_ok"] = bool(row.get("metadata_completeness_ok"))
+        status["metadata_completeness_limited"] = bool(row.get("metadata_completeness_limited"))
+        status["metadata_completeness_basis"] = row.get("metadata_completeness_basis") or ""
+        status["title_index_completeness_status"] = row.get("title_index_completeness_status") or ""
+        status["title_index_completeness_ok"] = bool(row.get("title_index_completeness_ok"))
+        status["title_index_complete"] = bool(row.get("title_index_complete") or row.get("title_index_completeness_ok"))
+        status["official_metadata_complete"] = bool(row.get("official_metadata_complete") or row.get("metadata_completeness_ok"))
+        status["source_scope"] = row.get("source_scope") or ""
+        status["source_adapter"] = row.get("source_adapter") or row.get("adapter") or ""
+        status["official_title_index_verified"] = row.get("official_title_index_verified")
+        status["official_accepted_list_verified"] = row.get("official_accepted_list_verified")
+        status["source_verified"] = bool(row.get("source_verified"))
+        status["category_status"] = row.get("category_status") or ""
+        status["has_official_categories"] = bool(row.get("has_official_categories"))
+        status["has_abstracts"] = bool(row.get("has_abstracts"))
+        status["has_abstracts_in_title_index"] = bool(row.get("has_abstracts_in_title_index") or row.get("has_abstracts"))
+        status["any_abstracts"] = bool(row.get("any_abstracts") or row.get("has_abstracts"))
+        status["missing_abstract_count"] = int(row.get("missing_abstract_count") or 0)
+        status["source_integrity_status"] = row.get("source_integrity_status") or "passed"
+        status["source_integrity_blocker"] = row.get("source_integrity_blocker") or ""
+        status["source_integrity_message"] = row.get("source_integrity_message") or ""
+        status["detail_fetched_count"] = sum(1 for paper in papers if isinstance(paper, dict) and str(paper.get("venue") or "").lower() == str(status.get("venue") or "").lower()) or None
+        rows.append(status)
+    return rows
+
+
 CORE_VENUE_MIN_COMPLETE_TITLE_INDEX_COUNT = 50
 
 
@@ -7069,6 +7169,8 @@ def _venue_source_integrity_blocker(row: dict) -> str:
         return "title_index_partial"
     if _is_core_venue_source(row) and count > 0 and count < CORE_VENUE_MIN_COMPLETE_TITLE_INDEX_COUNT:
         return "core_venue_suspiciously_tiny_corpus"
+    if source_scope == "dblp_current_index_not_official_accepted_list":
+        return "" if title_complete else "title_index_partial"
     if official_like and row.get("official_title_index_verified") is False:
         return "official_title_index_not_verified"
     return ""
@@ -7343,6 +7445,116 @@ def _adaptive_arxiv_queries(config: AppConfig) -> list[str]:
     return result
 
 
+def _refresh_venue_source_health(selection: object, log: LogFn = print) -> tuple[list[dict], list[dict], list[dict]]:
+    catalog = catalog_by_id()
+    venue_health_report: list[dict] = []
+    raw_title_index: list[dict] = []
+    title_scan_limit = None
+    for venue_id, requested_years in _selection_venue_year_groups(selection):
+        venue = catalog.get(venue_id)
+        if not venue:
+            venue_health_report.append(_apply_venue_source_integrity({
+                "venue_id": venue_id,
+                "venue": venue_id,
+                "requested_years": requested_years,
+                "effective_years": [],
+                "adapter": "unknown",
+                "sample_count": 0,
+                "candidate_count": 0,
+                "corpus_count": 0,
+                "ok": False,
+                "error": "Unknown venue id.",
+            }))
+            continue
+        effective_years, year_fallback_reason = _resolve_venue_years(venue, requested_years)
+        title_index, adapter = _fetch_venue_title_index_for_find(venue, effective_years, title_scan_limit, timeout_sec=_venue_title_fetch_timeout_sec(), prefer_cache=True)
+        metadata_audit = _online_venue_metadata_audit(title_index, adapter)
+        metadata_fields = _venue_metadata_status_fields(metadata_audit)
+        metadata_limited = bool(metadata_fields.get("metadata_completeness_limited"))
+        source_error = "" if title_index else ("Venue title index fetch timed out." if adapter == "timeout" else "No title index found.")
+        if title_index and metadata_limited:
+            source_error = str(metadata_fields.get("metadata_completeness_basis") or "Venue metadata completeness audit is partial.")
+        venue_health_report.append(_apply_venue_source_integrity({
+            "venue_id": venue_id,
+            "venue": venue.get("name"),
+            "requested_years": requested_years,
+            "effective_years": effective_years,
+            "year_fallback_reason": year_fallback_reason,
+            "adapter": adapter,
+            "sample_count": len(title_index),
+            "candidate_count": len(title_index),
+            "title_filter_input_count": len(title_index),
+            "corpus_count": len(title_index),
+            "ok": bool(title_index),
+            "limited": metadata_limited,
+            "source_observed_date": datetime.now(timezone.utc).date().isoformat() if title_index else "",
+            "release_signal_source": "source_observed_available" if title_index and not metadata_limited else ("source_observed_partial" if title_index else ""),
+            "error": source_error,
+            "suggested_fix": "" if title_index and not metadata_limited else ("Venue/year metadata source is partial; repair the source adapter or build a verified local database before treating it as a complete Find corpus." if title_index else "High-priority venue may need a dedicated proceedings adapter, verified selected-year cache, or an explicitly selected different year."),
+            **metadata_fields,
+        }))
+        raw_title_index.extend(title_index)
+        log(f"{venue.get('name', venue_id)}: refreshed source health with {len(title_index)} title rows via {adapter}")
+    source_status = _venue_source_status_rows_from_reports(venue_health_report, [])
+    return venue_health_report, source_status, _dedupe_items(raw_title_index)
+
+
+def refresh_find_source_health(artifact_dir: Path | str, selection: object | None = None, log: LogFn = print) -> dict:
+    directory = Path(artifact_dir).expanduser()
+    find_results_path = directory / "find_results.json"
+    progress_path = directory / "find_progress.json"
+    find_results = read_json(find_results_path, {}) if find_results_path.exists() else {}
+    progress_payload = read_json(progress_path, {}) if progress_path.exists() else {}
+    if selection is None:
+        selection = progress_payload.get("selection") or find_results.get("selection") or {}
+    venue_health_report, source_status, raw_title_index = _refresh_venue_source_health(selection, log)
+    refreshed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    run_id = str(find_results.get("run_id") or progress_payload.get("run_id") or "")
+    for payload in (find_results, progress_payload):
+        if not isinstance(payload, dict):
+            continue
+        payload["venue_health_report"] = venue_health_report
+        payload["source_status"] = source_status
+        payload["source_health_refreshed_at"] = refreshed_at
+        payload["source_health_refresh_policy"] = "refresh_verified_title_index_cache_v1"
+        if raw_title_index:
+            payload["raw_title_index"] = raw_title_index if payload is find_results else payload.get("raw_title_index", raw_title_index)
+        counts = payload.setdefault("counts", {})
+        if isinstance(counts, dict):
+            counts["raw_title_index"] = len(raw_title_index)
+            counts["raw_title_index_papers"] = len(raw_title_index)
+            counts["title_total_papers"] = len(raw_title_index)
+            counts.setdefault("venue_total_papers_available", len(raw_title_index))
+            counts.setdefault("venue_corpus_audited_papers", len(raw_title_index))
+    if isinstance(find_results, dict):
+        diagnostics = _run_diagnostics(find_results)
+        find_results["diagnostics"] = diagnostics
+        find_results["survey_stats"] = diagnostics.get("survey_stats", {})
+        scoring_runtime = find_results.setdefault("scoring_runtime", {})
+        if isinstance(scoring_runtime, dict):
+            scoring_runtime["source_integrity_gate"] = diagnostics.get("source_integrity_gate", {})
+            scoring_runtime["source_health_refreshed_at"] = refreshed_at
+    if isinstance(progress_payload, dict):
+        progress_payload["diagnostics"] = _run_diagnostics({**find_results, "source_status": source_status, "venue_health_report": venue_health_report, "raw_title_index": raw_title_index})
+        progress_payload["updated_at"] = refreshed_at
+    if find_results_path.exists():
+        write_json(find_results_path, find_results)
+    if progress_path.exists():
+        write_json(progress_path, progress_payload)
+    write_json(directory / "venue_health_report.json", {"run_id": run_id, "results": venue_health_report, "refreshed_at": refreshed_at})
+    write_text(directory / "source_status.md", _status_markdown(source_status, title="Source Status (refreshed)"))
+    return {
+        "status": "refreshed",
+        "run_id": run_id,
+        "artifact_dir": str(directory),
+        "refreshed_at": refreshed_at,
+        "venue_health_report": venue_health_report,
+        "source_status": source_status,
+        "source_integrity_gate": (find_results.get("diagnostics") or {}).get("source_integrity_gate", {}) if isinstance(find_results, dict) else {},
+        "raw_title_index_count": len(raw_title_index),
+    }
+
+
 def run_find(
     request: FindRequest,
     log: LogFn = print,
@@ -7428,69 +7640,7 @@ def run_find(
 
 
     def _venue_source_status_rows() -> list[dict]:
-        rows: list[dict] = []
-        for row in venue_health_report:
-            if not isinstance(row, dict):
-                continue
-            source_name = row.get("venue") or row.get("venue_id") or "venue"
-            count = int(row.get("candidate_count") or row.get("sample_count") or row.get("corpus_count") or 0)
-            message_parts = []
-            adapter_name = row.get("adapter")
-            if adapter_name:
-                message_parts.append(f"adapter={adapter_name}")
-            effective_years_text = ",".join(str(year) for year in (row.get("effective_years") or []))
-            if effective_years_text:
-                message_parts.append(f"years={effective_years_text}")
-            if row.get("corpus_count") is not None:
-                message_parts.append("corpus=" + str(row.get("corpus_count")))
-            if row.get("candidate_count") is not None:
-                message_parts.append("screen_input=" + str(row.get("candidate_count")))
-            if row.get("sample_count") is not None:
-                message_parts.append("fetched=" + str(row.get("sample_count")))
-            if row.get("metadata_completeness_status"):
-                message_parts.append("metadata=" + str(row.get("metadata_completeness_status")))
-            if row.get("category_status"):
-                message_parts.append("category=" + str(row.get("category_status")))
-            if row.get("year_fallback_reason"):
-                message_parts.append(str(row.get("year_fallback_reason")))
-            if row.get("error"):
-                message_parts.append(str(row.get("error")))
-            if row.get("source_integrity_message"):
-                message_parts.append(str(row.get("source_integrity_message")))
-            status = _source_status(str(source_name), bool(row.get("ok")), count, "; ".join(message_parts) or ("ok" if row.get("ok") else "No papers fetched."), limited=_venue_source_public_limited(row))
-            status["source_kind"] = "venue"
-            status["venue_id"] = row.get("venue_id")
-            status["venue"] = row.get("venue") or source_name
-            status["adapter"] = row.get("adapter")
-            status["requested_years"] = row.get("requested_years") or []
-            status["effective_years"] = row.get("effective_years") or []
-            status["raw_title_index_count"] = row.get("corpus_count") or row.get("sample_count") or 0
-            status["candidate_count"] = row.get("candidate_count") or row.get("sample_count") or 0
-            status["metadata_completeness_status"] = row.get("metadata_completeness_status") or ""
-            status["metadata_completeness_ok"] = bool(row.get("metadata_completeness_ok"))
-            status["metadata_completeness_limited"] = bool(row.get("metadata_completeness_limited"))
-            status["metadata_completeness_basis"] = row.get("metadata_completeness_basis") or ""
-            status["title_index_completeness_status"] = row.get("title_index_completeness_status") or ""
-            status["title_index_completeness_ok"] = bool(row.get("title_index_completeness_ok"))
-            status["title_index_complete"] = bool(row.get("title_index_complete") or row.get("title_index_completeness_ok"))
-            status["official_metadata_complete"] = bool(row.get("official_metadata_complete") or row.get("metadata_completeness_ok"))
-            status["source_scope"] = row.get("source_scope") or ""
-            status["source_adapter"] = row.get("source_adapter") or row.get("adapter") or ""
-            status["official_title_index_verified"] = row.get("official_title_index_verified")
-            status["official_accepted_list_verified"] = row.get("official_accepted_list_verified")
-            status["source_verified"] = bool(row.get("source_verified"))
-            status["category_status"] = row.get("category_status") or ""
-            status["has_official_categories"] = bool(row.get("has_official_categories"))
-            status["has_abstracts"] = bool(row.get("has_abstracts"))
-            status["has_abstracts_in_title_index"] = bool(row.get("has_abstracts_in_title_index") or row.get("has_abstracts"))
-            status["any_abstracts"] = bool(row.get("any_abstracts") or row.get("has_abstracts"))
-            status["missing_abstract_count"] = int(row.get("missing_abstract_count") or 0)
-            status["source_integrity_status"] = row.get("source_integrity_status") or "passed"
-            status["source_integrity_blocker"] = row.get("source_integrity_blocker") or ""
-            status["source_integrity_message"] = row.get("source_integrity_message") or ""
-            status["detail_fetched_count"] = sum(1 for paper in venue_papers if str(paper.get("venue") or "").lower() == str(status.get("venue") or "").lower()) or None
-            rows.append(status)
-        return rows
+        return _venue_source_status_rows_from_reports(venue_health_report, venue_papers)
 
     last_progress_write: dict[str, float] = {"time": 0.0}
 

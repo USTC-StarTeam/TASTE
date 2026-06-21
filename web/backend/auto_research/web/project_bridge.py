@@ -1657,7 +1657,13 @@ def _venue_source_integrity_blocker(row: dict[str, Any]) -> str:
         return ""
     source_scope = str(row.get("source_scope") or "").strip().lower()
     adapter = str(row.get("adapter") or row.get("source_adapter") or "").strip().lower()
-    official_like = source_scope in {"official_openreview_metadata", "openreview_official_venue_notes", "official_icml_downloads_title_index"} or adapter.startswith(("openreview", "icml_downloads", "dblp"))
+    title_index_only_scope = source_scope == "dblp_current_index_not_official_accepted_list"
+    official_like = source_scope in {
+        "official_openreview_metadata",
+        "openreview_official_venue_notes",
+        "official_icml_downloads_title_index",
+        "official_neurips_papers_index",
+    } or adapter.startswith(("openreview", "icml_downloads", "neurips_official_papers"))
     venue_like = bool(row.get("source_kind") == "venue" or row.get("venue_id") or row.get("effective_years") or official_like or _is_core_venue_source(row))
     if not venue_like:
         return ""
@@ -1669,6 +1675,8 @@ def _venue_source_integrity_blocker(row: dict[str, Any]) -> str:
         return "title_index_partial"
     if _is_core_venue_source(row) and count > 0 and count < CORE_VENUE_MIN_COMPLETE_TITLE_INDEX_COUNT:
         return "core_venue_suspiciously_tiny_corpus"
+    if title_index_only_scope:
+        return "" if title_complete else "title_index_partial"
     if official_like and row.get("official_title_index_verified") is False:
         return "official_title_index_not_verified"
     return ""
@@ -1717,6 +1725,8 @@ def _derive_source_scope(adapter: str) -> str:
         return "official_icml_downloads_title_index"
     if key.startswith("openreview"):
         return "official_openreview_metadata"
+    if key.startswith("neurips_official_papers"):
+        return "official_neurips_papers_index"
     if key.startswith("dblp"):
         return "dblp_current_index_not_official_accepted_list"
     return ""
@@ -1724,7 +1734,7 @@ def _derive_source_scope(adapter: str) -> str:
 
 def _derive_official_title_index_verified(adapter: str, title_index_complete: bool, explicit: Any = None) -> Any:
     scope = _derive_source_scope(adapter)
-    if scope in {"official_icml_downloads_title_index", "official_openreview_metadata"}:
+    if scope in {"official_icml_downloads_title_index", "official_openreview_metadata", "official_neurips_papers_index"}:
         return bool(title_index_complete)
     if scope == "dblp_current_index_not_official_accepted_list":
         return False
@@ -1738,6 +1748,8 @@ def _derive_official_accepted_list_verified(adapter: str, title_index_complete: 
     if scope == "official_icml_downloads_title_index":
         return bool(title_index_complete)
     if scope == "official_openreview_metadata":
+        return bool(title_index_complete)
+    if scope == "official_neurips_papers_index":
         return bool(title_index_complete)
     if scope == "dblp_current_index_not_official_accepted_list":
         return False
@@ -4668,6 +4680,8 @@ def _public_environment_stage(
         module_summary = "未选定当前基底；候选基底仍未通过 base-switch 门控。"
     elif selection_gate_text.startswith("continued_search"):
         module_summary = "未选定当前基底；需要继续搜索或补齐候选复现证据。"
+    elif status == "source_integrity_blocked":
+        module_summary = "环境配置暂停：当前 Find 来源完整性失败，ICLR/NeurIPS/SIGKDD 仅有 1 篇 partial title index；修复并重跑 Find 前不能选择基底或创建实验环境。"
     elif historical_active_repo:
         module_summary = "未选定当前基底；历史仓库仅作审计保留。"
     elif status == "waiting_for_current_find_results":
@@ -11592,6 +11606,18 @@ def _current_find_pipeline_summary(root: Path, find_results: dict[str, Any] | No
     }
 
 
+def _current_find_pipeline_status_blocks_downstream(status: str) -> bool:
+    return bool(
+        status
+        and status != "claude_takeover_ready"
+        and (
+            status.startswith("pending")
+            or status.startswith("blocked")
+            or status == "source_integrity_blocked"
+        )
+    )
+
+
 def _current_find_pipeline_public_blocker(pipeline: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(pipeline, dict):
         return {}
@@ -11605,6 +11631,27 @@ def _current_find_pipeline_public_blocker(pipeline: dict[str, Any]) -> dict[str,
     pending_full_text = _as_int(pipeline.get("pending_full_text_reading_count") or pipeline.get("pending_without_evidence_count"), 0)
     ideas = _as_int(pipeline.get("ideas") or pipeline.get("idea_count"), 0)
     plans = _as_int(pipeline.get("plans") or pipeline.get("plan_count"), 0)
+    if status == "source_integrity_blocked":
+        gate = pipeline.get("source_integrity_gate") if isinstance(pipeline.get("source_integrity_gate"), dict) else {}
+        blockers = gate.get("blockers") if isinstance(gate.get("blockers"), list) else []
+        parts = []
+        for row in blockers[:4]:
+            if not isinstance(row, dict):
+                continue
+            venue = str(row.get("venue") or "会议源").strip()
+            reason = str(row.get("blocker") or "source_integrity_failed").strip()
+            count = _as_int(row.get("count"), 0)
+            parts.append(f"{venue}: {reason}, count={count}")
+        detail = "；".join(parts) if parts else "核心会议来源完整性未通过"
+        summary = f"当前 Find 来源完整性阻塞：{detail}。这些 1 篇/partial title index 不能作为真实会议语料。"
+        return {
+            "category": status,
+            "title": "Find 来源完整性失败",
+            "summary": summary,
+            "issue": summary,
+            "human_summary": summary,
+            "next_action": "修复会议源适配器或 verified cache 后重新运行 Find；通过前不能进入 Read、Idea、Plan、环境、实验或写作。",
+        }
     if status == "pending_current_find_read":
         summary = f"当前 Find 推荐门控已通过：推荐 {recommended} 篇；Read 精读尚未运行，全文证据覆盖 {full_text_evidence}/{expected or recommended} 篇。"
         return {
@@ -11655,7 +11702,7 @@ def _current_find_pipeline_public_blocker(pipeline: dict[str, Any]) -> dict[str,
             "human_summary": summary,
             "next_action": "让主控 Claude Code 或网页流程在当前 plans 中选择 exactly one selected_plan_id，并同步 current_find_research_plan.json。",
         }
-    if status.startswith("pending") or status.startswith("blocked"):
+    if _current_find_pipeline_status_blocks_downstream(status):
         summary = str(pipeline.get("summary_zh") or pipeline.get("summary") or f"当前 Find 后处理未完成：status={status}；全文精读 {full_text_reading} 篇、idea {ideas} 个、plan {plans} 个。")
         return {
             "category": status,
@@ -12650,17 +12697,23 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         "summary_zh": str(pipeline_state.get("summary_zh") or f"当前 Find 推荐 {strong_count} 篇，全文精读完成 {completed_read_count} 篇，待补全文 {pending_full_text_read_count} 篇，想法 {idea_count} 个，计划 {plan_count} 个。"),
         "summary_en": str(pipeline_state.get("summary_en") or f"Current Find has {strong_count} recommendations, {completed_read_count} full-text readings, {pending_full_text_read_count} pending full-text readings, {idea_count} ideas, and {plan_count} plans."),
     }
+    pipeline_source_integrity_gate = safe_dict(pipeline_state.get("source_integrity_gate"))
+    if pipeline_source_integrity_gate:
+        current_find_pipeline["source_integrity_gate"] = pipeline_source_integrity_gate
+    if pipeline_source_integrity_gate.get("status") == "blocked":
+        recommendation_shortfall = max(recommendation_shortfall, 1)
+        literature_gate_blocked = True
+        literature_status = "source_integrity_blocked"
     selected_plan_gate = _current_find_selected_plan_gate_public(current_find_pipeline)
     current_find_pipeline_status = str(current_find_pipeline.get("status") or "").strip()
+    source_integrity_blocked = bool(pipeline_source_integrity_gate.get("status") == "blocked" or current_find_pipeline_status == "source_integrity_blocked")
     current_find_pipeline_blocks_downstream = bool(
         run_id
-        and current_find_pipeline_status
-        and current_find_pipeline_status != "claude_takeover_ready"
-        and (current_find_pipeline_status.startswith("pending") or current_find_pipeline_status.startswith("blocked"))
+        and _current_find_pipeline_status_blocks_downstream(current_find_pipeline_status)
         and not selected_plan_gate.get("blocked")
         and not fresh_find_running
         and not llm_quota_blocked
-        and not literature_gate_blocked
+        and (not literature_gate_blocked or pipeline_source_integrity_gate.get("status") == "blocked")
     )
     current_find_pipeline_blocker = {}
     if current_find_pipeline_blocks_downstream:
@@ -12671,7 +12724,8 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         "status": literature_status,
         "recommendation_target_count": recommendation_target_count,
         "recommendation_shortfall": recommendation_shortfall,
-        "recommendation_gate_status": "shortfall" if recommendation_shortfall else "pass" if recommendation_target_count else "unknown",
+        "recommendation_gate_status": "source_integrity_blocked" if pipeline_source_integrity_gate.get("status") == "blocked" else "shortfall" if recommendation_shortfall else "pass" if recommendation_target_count else "unknown",
+        "source_integrity_gate": pipeline_source_integrity_gate,
         "selection": selection,
         "source_status": source_status[:20],
         "health_check_source_status": health_check_source_status[:20],
@@ -12792,14 +12846,12 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     ) if isinstance(current_plan, dict) else False
     current_find_blocks_downstream = bool(
         run_id
-        and current_find_status
-        and current_find_status != "claude_takeover_ready"
-        and (current_find_status.startswith("blocked") or current_find_status.startswith("pending"))
+        and _current_find_pipeline_status_blocks_downstream(current_find_status)
         and not current_find_state_declares_ready
         and not fresh_find_running
         and not llm_quota_blocked
     )
-    base_selection_status = current_find_status if current_find_blocks_downstream else selected_plan_gate["status"] if selected_plan_gate.get("blocked") else "waiting_for_current_find_results" if fresh_find_running else "blocked_by_literature_gate" if literature_gate_blocked else ("selected" if env.get("valid") else "waiting_for_environment_claude_code")
+    base_selection_status = current_find_status if current_find_blocks_downstream else selected_plan_gate["status"] if selected_plan_gate.get("blocked") else "waiting_for_current_find_results" if fresh_find_running else "source_integrity_blocked" if source_integrity_blocked else "blocked_by_literature_gate" if literature_gate_blocked else ("selected" if env.get("valid") else "waiting_for_environment_claude_code")
     current_route_ref_gate = ref_gate
     if not env.get("valid") and not literature_gate_blocked and not fresh_find_running and not selected_plan_gate.get("blocked"):
         current_route_ref_gate = {
@@ -13157,7 +13209,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
             **common_paper_fields,
             "paper_preview_repair_loop_status": "blocked" if not paper_state.get("conference_preview_ready") else paper_state.get("paper_preview_repair_loop_status", ""),
             "paper_preview_repair_rounds": paper_state.get("paper_preview_repair_rounds", ""),
-            "status": "preview_available" if preview_pdf_path else ("blocked" if content_policy_blocked else selected_plan_gate["status"] if selected_plan_gate.get("blocked") else "fresh_find_running" if fresh_find_running else "blocked_by_literature_gate" if recommendation_shortfall else "needs_writing"),
+            "status": "preview_available" if preview_pdf_path else ("blocked" if content_policy_blocked else selected_plan_gate["status"] if selected_plan_gate.get("blocked") else "fresh_find_running" if fresh_find_running else "source_integrity_blocked" if source_integrity_blocked else "blocked_by_literature_gate" if recommendation_shortfall else "needs_writing"),
             "summary": "",
             "summary_zh": "",
             "paper_generation_skipped": False,
@@ -13194,8 +13246,8 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         if not paper_stage["summary"]:
             paper_stage["summary"] = _paper_stage_public_message(paper_stage)
             paper_stage["summary_zh"] = paper_stage["summary"]
-    environment_status = str(env_bootstrap_blocker.get("status")) if env_bootstrap_blocker and not (fresh_find_running or literature_gate_blocked) else selected_plan_gate["status"] if selected_plan_gate.get("blocked") else "waiting_for_current_find_results" if fresh_find_running else "blocked_by_literature_gate" if literature_gate_blocked else ("selected" if env.get("valid") else "waiting_for_environment_base_selection")
-    experiment_stage_status = selected_plan_gate["status"] if selected_plan_gate.get("blocked") else "fresh_find_running" if fresh_find_running else "blocked_by_literature_gate" if literature_gate_blocked else status
+    environment_status = str(env_bootstrap_blocker.get("status")) if env_bootstrap_blocker and not (fresh_find_running or literature_gate_blocked) else selected_plan_gate["status"] if selected_plan_gate.get("blocked") else "waiting_for_current_find_results" if fresh_find_running else "source_integrity_blocked" if source_integrity_blocked else "blocked_by_literature_gate" if literature_gate_blocked else ("selected" if env.get("valid") else "waiting_for_environment_base_selection")
+    experiment_stage_status = selected_plan_gate["status"] if selected_plan_gate.get("blocked") else "fresh_find_running" if fresh_find_running else "source_integrity_blocked" if source_integrity_blocked else "blocked_by_literature_gate" if literature_gate_blocked else status
     environment_display_selected = selected if env.get("valid") else {}
     environment_display_active_repo = active_repo if env.get("valid") else {}
     environment_display_repo_name = repo_name if env.get("valid") else ""
@@ -13739,12 +13791,14 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
         or pipeline_contract.get('execution_ready')
     )
     current_find_pipeline_status = str(pipeline_contract.get('status') or '').strip()
+    source_integrity_gate = safe_dict(pipeline_contract.get('source_integrity_gate'))
+    source_integrity_blocked = bool(source_integrity_gate.get('status') == 'blocked')
+    if source_integrity_blocked:
+        recommendation_shortfall = max(recommendation_shortfall, 1)
     current_find_pipeline_blocks_downstream = bool(
         find_summary.get('run_id')
-        and current_find_pipeline_status
-        and current_find_pipeline_status != 'claude_takeover_ready'
-        and (current_find_pipeline_status.startswith('pending') or current_find_pipeline_status.startswith('blocked'))
-        and not current_find_ready_for_environment
+        and _current_find_pipeline_status_blocks_downstream(current_find_pipeline_status)
+        and (not current_find_ready_for_environment or source_integrity_blocked)
     )
     current_find_pipeline_blocker = _current_find_pipeline_public_blocker(pipeline_contract) if current_find_pipeline_blocks_downstream else {}
     waiting_environment_base_selection = bool(current_find_ready_for_environment and not env.get('valid') and not (full_job_live or reference_full_job_live))
@@ -13753,13 +13807,13 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
         status = current_find_pipeline_status
     elif waiting_environment_base_selection:
         status = 'blocked_environment_base_selection_required'
-    if not (full_job_live or reference_full_job_live) and env.get('valid') and not route_ready_datasets and not handoff_ready:
+    if not current_find_pipeline_blocks_downstream and not (full_job_live or reference_full_job_live) and env.get('valid') and not route_ready_datasets and not handoff_ready:
         status = 'blocked_fresh_base_data_required'
-    elif not (full_job_live or reference_full_job_live) and env.get('valid') and route_loader_contract_passed and not handoff_ready and status in {'blocked_fresh_base_data_required', 'blocked_fresh_base_implementation_required', 'blocked_no_viable_base_switch_route'}:
+    elif not current_find_pipeline_blocks_downstream and not (full_job_live or reference_full_job_live) and env.get('valid') and route_loader_contract_passed and not handoff_ready and status in {'blocked_fresh_base_data_required', 'blocked_fresh_base_implementation_required', 'blocked_no_viable_base_switch_route'}:
         status = 'blocked_fresh_base_reference_probe_required'
     elif handoff_ready and _fresh_base_block_status(status):
         status = 'ready_for_experimenting'
-    if env_bootstrap_blocker and not (full_job_live or reference_full_job_live):
+    if env_bootstrap_blocker and not current_find_pipeline_blocks_downstream and not (full_job_live or reference_full_job_live):
         status = str(env_bootstrap_blocker.get('status') or 'blocked_environment_bootstrap_failed')
     real_data_probe_requires_paper_experiment = bool(
         status == 'not_started'
@@ -13808,10 +13862,11 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
     health_check_source_status = _current_health_check_source_status_rows(project, root, source_selection)
     literature_survey = {
         **find_summary,
-        'status': 'fresh_find_running' if fresh_find_running else 'recommendation_shortfall' if recommendation_shortfall else 'current_find_packet_ready' if find_results else 'missing_find_packet',
+        'status': 'fresh_find_running' if fresh_find_running else 'source_integrity_blocked' if source_integrity_blocked else 'recommendation_shortfall' if recommendation_shortfall else 'current_find_packet_ready' if find_results else 'missing_find_packet',
         'recommendation_target_count': recommendation_target_count,
         'recommendation_shortfall': recommendation_shortfall,
-        'recommendation_gate_status': 'running' if fresh_find_running else 'shortfall' if recommendation_shortfall else 'pass' if recommendation_target_count else 'unknown',
+        'recommendation_gate_status': 'running' if fresh_find_running else 'source_integrity_blocked' if source_integrity_blocked else 'shortfall' if recommendation_shortfall else 'pass' if recommendation_target_count else 'unknown',
+        'source_integrity_gate': source_integrity_gate,
         'selection': live_find_progress_payload.get('selection') if isinstance(live_find_progress_payload.get('selection'), dict) else find_results.get('selection') if isinstance(find_results.get('selection'), dict) else _current_project_source_selection(project, root),
         'source_status': (safe_list(live_find_progress_payload.get('source_status')) if fresh_find_running else source_status)[:20],
         'health_check_source_status': health_check_source_status[:20],
@@ -14110,7 +14165,7 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
         else:
             paper_summary = blocker_summary or '当前文献/投稿门控未过；旧 PDF 只能作为历史产物审计，不能作为当前投稿稿或结论提升证据。'
         paper_stage = {
-            'status': 'fresh_find_running' if fresh_find_running else 'blocked_by_literature_gate' if recommendation_shortfall else 'blocked',
+            'status': 'fresh_find_running' if fresh_find_running else 'source_integrity_blocked' if source_integrity_blocked else 'blocked_by_literature_gate' if recommendation_shortfall else 'blocked',
             'summary': paper_summary,
             'summary_zh': paper_summary,
             'venue': venue,
@@ -14207,7 +14262,7 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
     ] if item]
 
     historical_active_repo = safe_dict(_read_json(root / 'state' / 'active_repo.json', {})) if not env.get('valid') else {}
-    environment_light_status = str(env_bootstrap_blocker.get('status')) if env_bootstrap_blocker else 'waiting_for_current_find_results' if fresh_find_running else 'selected' if env.get('valid') else 'waiting_for_environment_base_selection'
+    environment_light_status = str(env_bootstrap_blocker.get('status')) if env_bootstrap_blocker and not source_integrity_blocked else 'waiting_for_current_find_results' if fresh_find_running else 'source_integrity_blocked' if source_integrity_blocked else 'selected' if env.get('valid') else 'waiting_for_environment_base_selection'
     environment_stage = _public_environment_stage(status=environment_light_status, env=env, selected=selected, active_repo=active_repo, repo_name=repo_name, repo_url=repo_url, repo_path=repo_path, ref_gate=ref_gate, reference_full_job=reference_full_job, route_dataset=route_dataset, route_ready_datasets=route_ready_datasets, protocol_probe=protocol_probe, historical_active_repo=historical_active_repo)
     environment_stage = _apply_environment_bootstrap_blocker(environment_stage, env_bootstrap_blocker)
     scientific_progress_gate_light = _read_json(root / 'state' / 'scientific_progress_gate.json', {})

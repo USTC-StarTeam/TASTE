@@ -190,6 +190,21 @@ def _copy_outputs(run_id: str, output_dir: str) -> None:
             shutil.copy2(src, target / name)
 
 
+def _run_refresh_source_health(args: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(description="Refresh Finding venue source-health artifacts without rerunning scoring.")
+    parser.add_argument("--artifact-dir", required=True, help="Finding artifact directory to refresh in place.")
+    parser.add_argument("--selection-json", default="", help="Optional VenueSelection-compatible source selection JSON.")
+    ns = parser.parse_args(list(args))
+    _ensure_runtime_imports()
+    from auto_research.source_selection import normalize_source_selection
+    from find_pipeline import refresh_find_source_health
+
+    selection = normalize_source_selection(_load_json(ns.selection_json, {})) if ns.selection_json else None
+    result = refresh_find_source_health(Path(ns.artifact_dir), selection=selection)
+    print(json.dumps({"stage": STAGE_NAME, "result": result}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _run_find(args: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(description="Run the Finding module backend.")
     parser.add_argument("--config-json", default="", help="AppConfig-compatible JSON with LLM/profile fields.")
@@ -232,6 +247,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     action = _normalize_action(ns.action)
     if action in DIRECT_ACTIONS:
         return _run_find(rest)
+    if action in {"refresh_source_health", "source_health", "refresh_venue_source_health"}:
+        return _run_refresh_source_health(rest)
     if action in FINDING_QUALITY_TOOL_ACTIONS:
         return _run_script("finding_quality_tools", ["--tool-action", action, *rest])
     return _run_script(ACTION_ALIASES.get(action, action), rest)
