@@ -104,6 +104,9 @@ def canonical_repo_url(value: str) -> str:
     return text.rstrip("/").lower()
 
 
+GITHUB_URL_RE = re.compile(r"https?://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?/?")
+
+
 def validate_repo_candidate_review(original_candidates: list[str], reviewed: dict[str, Any]) -> tuple[list[str], list[str]]:
     issues: list[str] = []
     status = str(reviewed.get("status") or "").strip().lower()
@@ -170,6 +173,77 @@ def validate_discovered_repo(discovered: dict[str, Any]) -> tuple[str, list[str]
         except Exception:
             issues.append("仓库发现 confidence 不是数字")
     return repo_url, issues
+
+
+NEGATIVE_REPO_URL_CONTEXT_MARKERS = (
+    "不存在", "返回 404", "404", "not exist", "does not exist", "not found",
+    "missing", "invalid", "wrong", "错误", "不可用", "unavailable",
+)
+
+
+def _github_urls_from_text(text: Any) -> list[str]:
+    body = str(text or "")
+    if not body:
+        return []
+    urls: list[str] = []
+    for match in GITHUB_URL_RE.finditer(body):
+        url = match.group(0).rstrip('/.,);]}>");\'')
+        if is_github_repo_url(url) and canonical_repo_url(url) not in {canonical_repo_url(item) for item in urls}:
+            urls.append(url)
+    return urls
+
+
+def _url_negative_context(text: Any, url: str) -> bool:
+    body = str(text or "")
+    if not body or not url:
+        return False
+    index = body.find(url)
+    if index < 0:
+        return False
+    before = body[max(0, index - 96):index].lower()
+    immediate_before = before[-48:]
+    after = body[index + len(url): min(len(body), index + len(url) + 120)].lower()
+    positive_before_markers = (
+        "official", "官方", "actual", "实际", "correct", "正确", "replacement", "替代", "修正",
+    )
+    if any(marker.lower() in immediate_before for marker in positive_before_markers):
+        return False
+    negative_after = any(marker.lower() in after for marker in NEGATIVE_REPO_URL_CONTEXT_MARKERS)
+    stale_before_markers = ("planned", "计划所列", "original", "原候选", "旧", "stale")
+    stale_before = any(marker.lower() in before for marker in stale_before_markers)
+    negative_before = any(marker.lower() in before[-64:] for marker in NEGATIVE_REPO_URL_CONTEXT_MARKERS)
+    return bool(negative_after or (stale_before and negative_before))
+
+
+def discovered_repo_candidates(discovered: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(url: Any, source: str, evidence: Any = None) -> None:
+        text = str(url or "").strip().rstrip("/.,);]}>\"'")
+        if not is_github_repo_url(text):
+            return
+        key = canonical_repo_url(text)
+        if key in seen:
+            return
+        seen.add(key)
+        row: dict[str, Any] = {"url": text, "source": source}
+        if evidence:
+            row["evidence"] = evidence
+        candidates.append(row)
+
+    add(discovered.get("repo_url"), "repo_url", discovered.get("evidence"))
+    ordered = discovered.get("ordered_repo_urls") if isinstance(discovered.get("ordered_repo_urls"), list) else []
+    for index, item in enumerate(ordered):
+        add(item, f"ordered_repo_urls[{index}]", discovered.get("evidence"))
+    text_sources = list(discovered.get("evidence") if isinstance(discovered.get("evidence"), list) else [])
+    text_sources.append(discovered.get("reject_reason"))
+    for index, item in enumerate(text_sources):
+        for url in _github_urls_from_text(item):
+            if _url_negative_context(item, url):
+                continue
+            add(url, f"discovery_text[{index}]", [str(item)])
+    return candidates
 
 
 def repo_specs_by_url(normalized_plan: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -5298,17 +5372,43 @@ def main() -> int:
         )
         repo_selection_review = review_result
         reviewed = review_result.get("json") if isinstance(review_result.get("json"), dict) else {}
-        if str(reviewed.get("status") or "").strip() == "reject":
-            verdict = {
-                "decision": "reject",
-                "allow_next_module": False,
-                "reject_reason": reviewed.get("reject_reason") or "Claude Code 判定 plan 中的 GitHub 仓库候选不可信",
-                "failure_taxonomy": [{"category": "repository_unreliable", "evidence": reviewed.get("evidence") or [reviewed.get("reject_reason") or "候选仓库不可信"], "repairable": False}],
-            }
-            decision = final_decision_payload(run_id, run_dir, normalized, {"repo_candidates": repo_candidates, "repo_selection_review": repo_selection_review}, machine, [], verdict)
-            write_json(run_dir / "repo_info.json", decision["repo"])
-            return finalize_and_write_decision(decision, run_dir, paper_evidence, baseline_outside_paths)
-        selected_candidates, review_issues, used_deterministic_fallback = repo_candidates_after_review([str(item) for item in repo_candidates], review_result)
+        review_status = str(reviewed.get("status") or "").strip().lower()
+        if review_status == "reject":
+            recovered_candidates = discovered_repo_candidates(reviewed)
+            recovered_urls: list[str] = []
+            for candidate in recovered_candidates:
+                candidate_url = str(candidate.get("url") or "").strip()
+                if not candidate_url or not is_github_repo_url(candidate_url):
+                    continue
+                if canonical_repo_url(candidate_url) not in {canonical_repo_url(item) for item in repo_candidates}:
+                    repo_candidates.append(candidate_url)
+                repo_spec_lookup[canonical_repo_url(candidate_url)] = {
+                    "url": candidate_url,
+                    "source": f"claude_repo_candidate_review.{candidate.get('source') or 'candidate'}",
+                    "evidence": candidate.get("evidence") or reviewed.get("evidence", []),
+                    "review_reject_reason": reviewed.get("reject_reason") or "",
+                }
+                recovered_urls.append(candidate_url)
+            if recovered_urls:
+                repo_selection_review["backend_candidate_recovery"] = {
+                    "recovered_repo_urls": recovered_urls,
+                    "review_reject_reason": reviewed.get("reject_reason") or "",
+                }
+                selected_candidates = [str(item).strip() for item in repo_candidates if is_github_repo_url(str(item))]
+                review_issues = [str(reviewed.get("reject_reason") or "Claude Code 判定原始候选不可信，但后端恢复了可克隆 GitHub 候选并继续验证。")]
+                used_deterministic_fallback = False
+            else:
+                verdict = {
+                    "decision": "continue_repair",
+                    "allow_next_module": False,
+                    "reject_reason": reviewed.get("reject_reason") or "Claude Code 判定 plan 中的 GitHub 仓库候选不可信",
+                    "failure_taxonomy": [{"category": "repository_code", "evidence": reviewed.get("evidence") or [reviewed.get("reject_reason") or "候选仓库不可信"], "repairable": True}],
+                }
+                decision = final_decision_payload(run_id, run_dir, normalized, {"repo_candidates": repo_candidates, "repo_selection_review": repo_selection_review}, machine, [], verdict)
+                write_json(run_dir / "repo_info.json", decision["repo"])
+                return finalize_and_write_decision(decision, run_dir, paper_evidence, baseline_outside_paths)
+        else:
+            selected_candidates, review_issues, used_deterministic_fallback = repo_candidates_after_review([str(item) for item in repo_candidates], review_result)
         if not selected_candidates:
             verdict = {
                 "decision": "continue_repair",
@@ -5344,15 +5444,27 @@ def main() -> int:
         discovered = repo_discovery_result.get("json") if isinstance(repo_discovery_result.get("json"), dict) else {}
         discovered_repo_url, discovery_issues = validate_discovered_repo(discovered)
         if not discovery_issues:
-            repo_candidates.append(discovered_repo_url)
-            repo_spec_lookup[canonical_repo_url(discovered_repo_url)] = {
-                "url": discovered_repo_url,
-                "source": "claude_repo_discovery",
+            discovered_candidates = [{"url": discovered_repo_url, "source": "repo_url", "evidence": discovered.get("evidence", [])}]
+        else:
+            discovered_candidates = discovered_repo_candidates(discovered)
+        for candidate in discovered_candidates:
+            candidate_url = str(candidate.get("url") or "").strip()
+            if not candidate_url or not is_github_repo_url(candidate_url):
+                continue
+            if canonical_repo_url(candidate_url) in {canonical_repo_url(item) for item in repo_candidates}:
+                continue
+            repo_candidates.append(candidate_url)
+            repo_spec_lookup[canonical_repo_url(candidate_url)] = {
+                "url": candidate_url,
+                "source": f"claude_repo_discovery.{candidate.get('source') or 'candidate'}",
                 "confidence": discovered.get("confidence", ""),
-                "evidence": discovered.get("evidence", []),
+                "evidence": candidate.get("evidence") or discovered.get("evidence", []),
+                "discovery_validation_issues": discovery_issues,
             }
-        elif not args.dry_run:
-            verdict = {"decision": "reject", "allow_next_module": False, "reject_reason": discovered.get("reject_reason") or "Claude Code 未能确认可信 GitHub 仓库", "failure_taxonomy": [{"category": "repository_unreliable", "evidence": discovery_issues or [discovered.get("reject_reason") or "缺少可信仓库"], "repairable": False}]}
+        if discovery_issues and discovered_candidates:
+            repo_discovery_result["backend_candidate_recovery"] = {"recovered_repo_urls": list(repo_candidates), "validation_issues": discovery_issues}
+        elif discovery_issues and not args.dry_run:
+            verdict = {"decision": "continue_repair", "allow_next_module": False, "reject_reason": discovered.get("reject_reason") or "Claude Code 未能确认可信 GitHub 仓库", "failure_taxonomy": [{"category": "repository_code", "evidence": discovery_issues or [discovered.get("reject_reason") or "缺少可信仓库"], "repairable": True}]}
             decision = final_decision_payload(run_id, run_dir, normalized, {"repo_discovery": repo_discovery_result, "repo_discovery_validation_issues": discovery_issues}, machine, [], verdict)
             write_json(run_dir / "repo_info.json", decision["repo"])
             return finalize_and_write_decision(decision, run_dir, paper_evidence, baseline_outside_paths)

@@ -821,6 +821,60 @@ def test_environment_repo_review_falls_back_to_plan_github_candidates():
     assert fallback is False
 
 
+def test_environment_plan_schema_extracts_selected_idea_repo_urls(tmp_path):
+    plan_schema = _load_environment_module("environment_plan_schema_selected_idea", "scripts/common/plan_schema.py")
+    plan = {
+        "selected_plan_id": "plan_5",
+        "selected_idea_id": "idea_5",
+        "selected_plan": {"plan_id": "plan_5", "idea_id": "idea_5", "title": "selected plan"},
+        "selected_idea": {
+            "id": "idea_5",
+            "initial_experiment": "Use ProtDiS (https://github.com/protdis/protdis) and Flexible Kernels (https://github.com/GenerateBiomedicines/flexible-kernels).",
+        },
+    }
+
+    normalized = plan_schema.normalize_plan(plan, tmp_path / "experiment_plan.json")
+
+    assert normalized["repo_candidates"] == [
+        "https://github.com/protdis/protdis",
+        "https://github.com/GenerateBiomedicines/flexible-kernels",
+    ]
+    assert normalized["repo_candidate_specs"][0]["source"] == "selected_idea.initial_experiment"
+
+
+def test_environment_discovery_recovers_official_replacement_repos_from_reject():
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_discovery_recovery",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+    discovered = {
+        "status": "reject",
+        "repo_url": "",
+        "confidence": 0.0,
+        "evidence": [
+            "ProtDiS: planned https://github.com/protdis/protdis does not exist; official repository is https://github.com/AI-HPC-Research-Team/ProtDiS.",
+            "MiAE/TEDBench: official repository is https://github.com/BorgwardtLab/TEDBench.",
+        ],
+        "reject_reason": "Flexible Kernels has no public code.",
+    }
+
+    candidates = autonomous_deploy.discovered_repo_candidates(discovered)
+
+    assert [row["url"] for row in candidates] == [
+        "https://github.com/AI-HPC-Research-Team/ProtDiS",
+        "https://github.com/BorgwardtLab/TEDBench",
+    ]
+    assert candidates[0]["source"].startswith("discovery_text")
+
+    reviewed = {
+        "status": "reject",
+        "evidence": ["Original candidate is wrong; official replacement is https://github.com/AI-HPC-Research-Team/ProtDiS."],
+        "reject_reason": "Original plan URL was stale.",
+    }
+    recovered = autonomous_deploy.discovered_repo_candidates(reviewed)
+    assert [row["url"] for row in recovered] == ["https://github.com/AI-HPC-Research-Team/ProtDiS"]
+
+
 def test_environment_rewrites_huggingface_cli_to_current_hf_cli(tmp_path):
     environment_module_root = ROOT / "modules" / "environment"
     for name in list(sys.modules):

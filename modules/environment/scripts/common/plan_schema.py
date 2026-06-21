@@ -7,6 +7,9 @@ from typing import Any
 from scripts.common.io_utils import coerce_list, read_json, slugify
 
 
+GITHUB_URL_RE = re.compile(r"https?://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?/?")
+
+
 def _first_text(*values: Any) -> str:
     for value in values:
         text = str(value or "").strip()
@@ -57,6 +60,16 @@ def _repo_spec_from_value(value: Any, source: str, inherited_refs: dict[str, str
     return spec
 
 
+def _append_repo_specs_from_text(specs: list[dict[str, str]], text: Any, source: str) -> None:
+    body = str(text or "")
+    if not body:
+        return
+    for match in GITHUB_URL_RE.finditer(body):
+        url = match.group(0).rstrip("/.,);]}>\"'")
+        if url:
+            specs.append({"url": url, "source": source})
+
+
 def _selected_plan_payload(plan: dict[str, Any]) -> dict[str, Any]:
     selected = plan.get("selected_plan")
     if isinstance(selected, dict):
@@ -98,6 +111,20 @@ def _append_repo_specs_from_container(specs: list[dict[str, str]], container: di
             if spec:
                 specs.append(spec)
             _append_repo_specs_from_container(specs, nested, f"{source_prefix}{key}.")
+    for key in ["initial_experiment", "experiment_design", "minimum_experiment", "hypothesis", "new_method", "method", "description"]:
+        _append_repo_specs_from_text(specs, container.get(key), f"{source_prefix}{key}")
+    for key in ["environment_requirements", "experiment_stages", "stages", "data_protocol", "training", "reproduction"]:
+        nested = container.get(key)
+        if isinstance(nested, dict):
+            _append_repo_specs_from_container(specs, nested, f"{source_prefix}{key}.")
+        elif isinstance(nested, list):
+            for index, item in enumerate(nested):
+                if isinstance(item, dict):
+                    _append_repo_specs_from_container(specs, item, f"{source_prefix}{key}[{index}].")
+                else:
+                    _append_repo_specs_from_text(specs, item, f"{source_prefix}{key}[{index}]")
+        else:
+            _append_repo_specs_from_text(specs, nested, f"{source_prefix}{key}")
 
 
 def github_candidate_specs(plan: dict[str, Any]) -> list[dict[str, str]]:
@@ -106,6 +133,9 @@ def github_candidate_specs(plan: dict[str, Any]) -> list[dict[str, str]]:
     selected_plan = _selected_plan_payload(plan)
     if selected_plan:
         _append_repo_specs_from_container(specs, selected_plan, "selected_plan.")
+    selected_idea = _selected_idea_payload(plan)
+    if selected_idea:
+        _append_repo_specs_from_container(specs, selected_idea, "selected_idea.")
     out: list[dict[str, str]] = []
     seen: set[str] = set()
     for spec in specs:
