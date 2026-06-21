@@ -1076,6 +1076,52 @@ def test_api_artifacts_light_compacts_large_current_find_progress(monkeypatch, t
     assert len(json.dumps(payload, ensure_ascii=False)) < 20000
 
 
+def test_project_summary_recovers_source_status_from_markdown_when_progress_is_large(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    root = _make_project(projects, "demo")
+    finding = root / "planning" / "finding"
+    finding.mkdir(parents=True, exist_ok=True)
+    run_id = "find_large_progress_demo"
+    (root / "state" / "finding_frontend.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    (root / "state" / "current_find_recommendation_projection.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "source_run_id": run_id,
+                "counts": {
+                    "recommended": 20,
+                    "recommendation_target_count": 20,
+                    "recommendation_shortfall": 0,
+                    "strong_recommendations": 20,
+                },
+                "strong_recommendations": [],
+                "read_candidates": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (finding / "find_progress.json").write_text('{"padding":"' + ('x' * (6 * 1024 * 1024)) + '"}', encoding="utf-8")
+    (finding / "source_status.md").write_text(
+        (ROOT / "projects" / "protein" / "planning" / "finding" / "source_status.md").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.setattr(project_bridge, "_PROJECT_SUMMARY_CACHE", {})
+    monkeypatch.setattr(project_bridge, "_current_verified_venue_metadata_rows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(project_bridge, "_current_health_check_source_status_rows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(project_bridge, "filter_source_status_by_selection", lambda rows, selection: rows)
+    monkeypatch.setattr(project_bridge, "_current_project_source_selection", lambda *args, **kwargs: {})
+
+    summary = project_bridge.project_summary("demo")
+    rows = summary["literature_survey"]["source_status"]
+
+    assert [row["source"] for row in rows] == ["ICML", "ICLR", "NeurIPS", "SIGKDD"]
+    assert [row["count"] for row in rows] == [6431, 5352, 5823, 256]
+    assert summary["literature_survey"]["counts"]["raw_title_index_papers"] == 17862
+    assert summary["literature_survey"]["source_integrity_gate"]["blocked_count"] == 0
+    assert summary["literature_survey"]["status"] == "current_find_packet_ready"
+
+
 def test_web_jobs_keeps_only_latest_persisted_environment_history(monkeypatch):
     reading_scripts = ROOT / "modules" / "reading" / "scripts"
     sys.path.insert(0, str(reading_scripts))

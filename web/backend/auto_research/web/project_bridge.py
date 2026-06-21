@@ -1069,6 +1069,17 @@ def _current_find_results_light(root: Path, project_id: str = "") -> dict[str, A
             payload.setdefault("venue_health_report", progress.get("venue_health_report"))
         if isinstance(progress.get("selection"), dict):
             payload.setdefault("selection", normalize_source_selection(progress.get("selection")))
+    source_status = payload.get("source_status") if isinstance(payload.get("source_status"), list) else []
+    venue_health_report = payload.get("venue_health_report") if isinstance(payload.get("venue_health_report"), list) else []
+    fallback_source_rows = _current_find_source_status_rows(root)
+    if not source_status:
+        source_status = fallback_source_rows
+    if not venue_health_report:
+        venue_health_report = fallback_source_rows
+    if source_status:
+        payload["source_status"] = source_status
+    if venue_health_report:
+        payload["venue_health_report"] = venue_health_report
     if isinstance(frontend, dict) and _same_current_run(frontend):
         survey_stats = frontend.get("survey_stats") if isinstance(frontend.get("survey_stats"), dict) else {}
         if survey_stats:
@@ -2214,6 +2225,122 @@ def _venue_metadata_counts(rows: Any) -> dict[str, Any]:
         "metadata_venue_count": len(venue_rows),
         "venues_without_official_categories": no_official_count,
     }
+
+
+def _source_status_rows_from_markdown(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return []
+    header_re = re.compile(r"^##\s+(.+?)(?:\s+((?:19|20)\d{2}))?\s*$")
+
+    def segment_value(parts: list[str], prefix: str) -> str:
+        needle = f"{prefix}:"
+        for part in parts:
+            if part.startswith(needle):
+                return part[len(needle):].strip()
+        return ""
+
+    def parse_years(text_value: str) -> list[int]:
+        years: list[int] = []
+        for match in re.findall(r"(?:19|20)\d{2}", str(text_value or "")):
+            year = _as_int(match, 0)
+            if year and year not in years:
+                years.append(year)
+        return years
+
+    rows: list[dict[str, Any]] = []
+    source = ""
+    header_year = 0
+    for raw in lines:
+        line = str(raw or "").strip()
+        if not line or line.startswith("# 来源状态") or line.startswith("每一行对应"):
+            continue
+        header = header_re.match(line)
+        if header:
+            source = header.group(1).strip()
+            header_year = _as_int(header.group(2), 0)
+            continue
+        if not source or not line.startswith("- "):
+            continue
+        bullet = line[2:].strip()
+        parts = [part.strip() for part in bullet.split(" / ") if part.strip()]
+        status_text = segment_value(parts, "状态")
+        count = _as_int(segment_value(parts, "标题总数"), 0)
+        category_count = _as_int(segment_value(parts, "分类后"), count)
+        adapter = segment_value(parts, "来源适配器")
+        requested_years = parse_years(segment_value(parts, "请求年份"))
+        effective_years = parse_years(segment_value(parts, "有效年份"))
+        if not effective_years and header_year:
+            effective_years = [header_year]
+        metadata_complete = "元数据完整" in bullet or "OpenReview 官方元数据已核验" in bullet
+        has_categories = "有官方分类" in bullet and "无官方分类" not in bullet
+        has_abstracts = "标题索引含摘要" in bullet and "无摘要" not in bullet
+        source_scope = _derive_source_scope(adapter)
+        if not source_scope and source.lower() == "sigkdd":
+            source_scope = "dblp_current_index_not_official_accepted_list"
+        title_complete = count > 0
+        official_title_verified = bool(
+            "官方标题索引已核验" in bullet
+            or "OpenReview 官方元数据已核验" in bullet
+            or "官方元数据已核验" in bullet
+        )
+        row = {
+            "source_kind": "venue",
+            "source": source,
+            "venue": source,
+            "venue_id": adapter or source.lower(),
+            "ok": bool(count),
+            "limited": "受限" in status_text or "limited" in status_text.lower() or (title_complete and not metadata_complete),
+            "count": count,
+            "message": bullet,
+            "adapter": adapter,
+            "source_adapter": adapter,
+            "requested_years": requested_years or ([header_year] if header_year else []),
+            "effective_years": effective_years,
+            "raw_title_index_count": count,
+            "corpus_count": count,
+            "candidate_count": category_count or count,
+            "selected_category_count": category_count or count,
+            "metadata_completeness_status": "complete" if metadata_complete else "title_index_only" if title_complete else "missing",
+            "metadata_completeness_ok": metadata_complete,
+            "metadata_completeness_limited": bool("受限" in status_text or "limited" in status_text.lower() or not metadata_complete),
+            "metadata_completeness_basis": bullet,
+            "title_index_completeness_status": "complete" if title_complete else "missing",
+            "title_index_completeness_ok": title_complete,
+            "title_index_complete": title_complete,
+            "source_scope": source_scope,
+            "official_title_index_verified": official_title_verified if official_title_verified or source_scope != "dblp_current_index_not_official_accepted_list" else False,
+            "official_accepted_list_verified": False if source_scope == "dblp_current_index_not_official_accepted_list" else bool(official_title_verified or title_complete),
+            "source_verified": title_complete,
+            "category_status": "official_or_cached_categories" if has_categories else "no_official_categories",
+            "has_official_categories": has_categories,
+            "has_abstracts": has_abstracts,
+            "has_abstracts_in_title_index": has_abstracts,
+            "any_abstracts": has_abstracts,
+            "missing_abstract_count": 0 if has_abstracts else count,
+        }
+        rows.append(_normalize_venue_metadata_status_row(row))
+    return rows
+
+
+def _current_find_source_status_rows(root: Path) -> list[dict[str, Any]]:
+    for rel in [
+        ("planning", "finding", "source_status.json"),
+        ("state", "current_find_source_status.json"),
+    ]:
+        payload = _read_json_if_small(root.joinpath(*rel), {})
+        rows = _json_rows(payload.get("source_status")) if isinstance(payload, dict) else _json_rows(payload)
+        if not rows and isinstance(payload, dict) and isinstance(payload.get("rows"), list):
+            rows = _json_rows(payload.get("rows"))
+        if rows:
+            return [_normalize_venue_metadata_status_row(dict(row)) for row in rows]
+    markdown_rows = _source_status_rows_from_markdown(root / "planning" / "finding" / "source_status.md")
+    if markdown_rows:
+        return markdown_rows
+    return []
 
 def _venue_source_rows_from_health(rows: Any) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
@@ -6788,6 +6915,8 @@ def _light_find_survey_from_progress(project_dir: Path) -> dict[str, Any]:
     if not progress and not projection:
         return {}
     source_status = progress.get("source_status") if isinstance(progress.get("source_status"), list) else []
+    if not source_status:
+        source_status = _current_find_source_status_rows(project_dir)
     selection = progress.get("selection") if isinstance(progress.get("selection"), dict) else _current_project_source_selection(project_dir.name, project_dir)
     verified_rows = _current_verified_venue_metadata_rows(project_dir.name, project_dir, selection)
     health_check_source_status = _current_health_check_source_status_rows(project_dir.name, project_dir, selection)
