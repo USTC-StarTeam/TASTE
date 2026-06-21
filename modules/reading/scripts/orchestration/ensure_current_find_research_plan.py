@@ -4455,7 +4455,7 @@ def write_claude_takeover_prompt(paths, project: str, run_id: str, read_limit: i
 4. 检查每篇候选是否真与当前科研主题相关；把无关、泛主题、泛 agent、泛 memory、仅新闻/论文选择/平台选择的文章降为 critique，不得作为 strong evidence。
 5. Idea 必须生成 {idea_plan_count} 个，并且每个 idea 都要综合多篇强锚点、边界审计结论和当前 repo/data/env 约束，不能照抄单篇论文。每个 idea 必须包含三段：`new_method`（详细的新方法，原 hypothesis 的升级版，说明核心机制/模块/训练或推理作用点）、`initial_experiment`（初步详细实验，必须说明候选基底论文或候选 repo 线索、为什么适合、做什么最小改动、对比哪些 baseline/control/ablation、指标和坏例切片、Environment 阶段需验证什么）、`inspired_by`（启发该方法的论文/工作及启发点）。严禁继承旧会话记忆里的历史已选基底、旧 base switch gate、已通过参考复现基底或已经废弃的路线；Find/Read/Idea/Plan 阶段可以且应该提出候选仓库/候选基底 proposal，但不能把任何仓库写成已选基底或可直接执行路径。
 6. 主控 Claude Code 必须为每个 idea 调用独立 Task/subagent 做客观评分，不得由主控直接填 None 或空分数。评分项必须写入 `objective_scores`，字段为 `novelty`、`evidence_alignment`、`feasibility`、`experimentability`、`risk_control`、`overall`，每项 0-10 分；同时写入 `score` 和 `idea_score`，且 `idea_score_audit={{"mode":"task_subagent","subagent_used":true,"status":"completed","criteria":"TASTE-like objective idea scoring"}}`。若 `overall < 7.0` 或任一项为 0，主控必须先修改 idea 再重新评分；不能把低分 idea 交给 plan。
-7. 你要自行决定至少 3 个补充检索主题，并写入 `targeted_search_queries`。当当前推荐门控短缺且本轮 run 尚未刚完成受控补检索时，优先调用一次 TASTE 统一 literature tool 做受控补检索并刷新 packet：`{management_python()} framework/scripts/run_module.py finding --action literature_tool --project {project} --venue {target_venue} --query "<topic 1>" --query "<topic 2>" --query "<topic 3>" --fast-mode --publish-current-find`。如果 `state/literature_tool_last_run.json` 已显示刚完成的 `current_find_run_id` 等于当前 run_id，或当前任务就是为了把刚产生的新 Find run 同步成 Read/Idea/Plan，则不要再启动下一轮 Find；只记录/复用 `targeted_search_queries`，先为当前 run 写出一致的 Read/Idea/Plan。严禁绕过 wrapper 直接调用会失去审计的原始 TASTE 命令。
+7. 你要自行决定至少 3 个补充检索主题，并在 `ideas.json` 或 `plans.json` 顶层写入 `targeted_search_queries`（数组，至少 3 条）。当当前推荐门控短缺且本轮 run 尚未刚完成受控补检索时，优先调用一次 TASTE 统一 literature tool 做受控补检索并刷新 packet：`{management_python()} framework/scripts/run_module.py finding --action literature_tool --project {project} --venue {target_venue} --query "<topic 1>" --query "<topic 2>" --query "<topic 3>" --fast-mode --publish-current-find`。如果 `state/literature_tool_last_run.json` 已显示刚完成的 `current_find_run_id` 等于当前 run_id，或当前任务就是为了把刚产生的新 Find run 同步成 Read/Idea/Plan，则不要再启动下一轮 Find；只记录/复用 `targeted_search_queries`，先为当前 run 写出一致的 Read/Idea/Plan。严禁绕过 wrapper 直接调用会失去审计的原始 TASTE 命令。
 7. 为 {idea_plan_count} 个 idea 分别生成 plan：环境阶段如何比较强推荐论文、如何审计 repo/data/protocol、最小实验、baseline/ablation、bad-case slice、success gate、失败时的停止条件。主控 Claude Code 必须在 {idea_plan_count} 个 plan 中选择唯一最佳执行计划；唯一选中的 plan 必须写 `selected_for_execution=true`、`execute_next=true`、`execution_selection={{"selected": true, "reason": "...", "selected_by": "main_claude_code_after_deep_read"}}`，并具有非空 `plan_id` 与匹配 `idea_id`；其他 {not_selected_count} 个 plan 必须显式写 `selected_for_execution=false`、`execute_next=false`、`execution_selection={{"selected": false, "selected_by": "not_selected_candidate_backlog", "reason": "..."}}`。禁止按第一个、分数、排序或模板代选；必须用精读证据说明为什么被选中的 plan 最值得进入环境阶段。
 8. Find/Read/Idea/Plan 阶段必须给出候选基底 proposal（候选论文/候选 repo 名称或 URL、拟修改模块、数据/指标协议、验证风险），但严禁声称它已经是“当前基底”、严禁写入本地 `repo_path`、严禁写具体数据集训练命令、严禁标记 `ready_to_execute`。Environment 阶段负责验证并锁定基底，只有它才能写入 `state/evidence_ready_repo_selection.json`。
 9. 不启动论文 claim promotion；没有 Environment 阶段基底验证和 repo/data/env/experiment gate 证据时，计划必须保持候选 proposal / `ready_for_gate`，而不是声称已经有结论或已选本地主线。
@@ -4465,9 +4465,9 @@ def write_claude_takeover_prompt(paths, project: str, run_id: str, read_limit: i
 
 必须写入这些结构化 JSON 内容产物，且 JSON 必须可解析。不要写 Markdown artifact，wrapper 会从分片/JSON 渲染 `read.md`、`idea.md`、`plan.md`：
 - `planning/finding/current_find_deep_read_fragments/<rank>_<paper_id>.json`，每篇论文一个文件；返修轮次优先使用 `<rank>_<paper_id>_repair_attempt{attempt}.json` 或唯一时间戳文件名。字段：`run_id`, `source="claude_subagent_deep_read_fragment"`, `reading`。`reading` 至少含 `paper_id`, `title`, `verdict`, `support_role`, `critique_reason`, `abstract_zh`, `motivation_zh`, `method_details_zh` 或中文 `method`, `experiments_zh` 或中文 `experiments`, `limitations_zh` 或中文 `limitations`, `method_advantages_zh`, `method_disadvantages_zh`, `full_text_available`, `full_text_status`, `subagent_deep_read=true`, `deep_read_audit`, `read_score`, `read_score_breakdown`, `read_score_audit`，并在成功读取 PDF/HTML 正文时写入正文长度证据字段。`abstract_from_find` 可以保留作溯源，但不能替代 `abstract_zh`。
-- `planning/finding/ideas.json`，字段：`run_id`, `source="claude_code_current_find_takeover"`, `ideas`，恰好 {idea_plan_count} 个 idea，均为 approved 或 blocked_with_reason。每个 idea 必须含 `id`, `title`, `new_method`, `initial_experiment`, `inspired_by`, `supporting_papers`；每个 idea 还必须含 `objective_scores`、`score`、`idea_score` 和 `idea_score_audit`。可选兼容字段 `method_details`/`mechanism` 可用于内部计划，但用户可见 `idea.md` 只呈现 `new_method`, `initial_experiment`, `inspired_by` 三段；兼容字段 `hypothesis` 应等同 `new_method`，`min_experiment` 应等同 `initial_experiment`。
+- `planning/finding/ideas.json`，字段：`run_id`, `source="claude_code_current_find_takeover"`, `targeted_search_queries`, `ideas`，恰好 {idea_plan_count} 个 idea，均为 approved 或 blocked_with_reason。每个 idea 必须含 `id`, `title`, `new_method`, `initial_experiment`, `inspired_by`, `supporting_papers`；每个 idea 还必须含 `objective_scores`、`score`、`idea_score` 和 `idea_score_audit`。可选兼容字段 `method_details`/`mechanism` 可用于内部计划，但用户可见 `idea.md` 只呈现 `new_method`, `initial_experiment`, `inspired_by` 三段；兼容字段 `hypothesis` 应等同 `new_method`，`min_experiment` 应等同 `initial_experiment`。
 - `planning/finding/idea_scoring.json`，可选受控审计文件，字段建议包含 `run_id`, `source="claude_code_current_find_takeover_scoring_audit"`, `scoring_results`；只能记录独立评分子任务原始结论，不能替代 `ideas.json` 中的正式评分字段。
-- `planning/finding/plans.json`，字段：`run_id`, `source="claude_code_current_find_takeover"`, `plans`，对应 {idea_plan_count} 个 idea。`plans` 中必须且只能有一个 plan 同时满足：非空 `plan_id`、匹配某个 idea 的 `idea_id`、`selected_for_execution=true`、`execute_next=true`、`execution_selection.selected=true`、`execution_selection.selected_by="main_claude_code_after_deep_read"`、`execution_selection.reason` 说明基于精读证据的选择理由。其余 plan 必须显式为 backlog，不能留下空白让 TASTE 代选。
+- `planning/finding/plans.json`，字段：`run_id`, `source="claude_code_current_find_takeover"`, `targeted_search_queries`, `plans`，对应 {idea_plan_count} 个 idea。`plans` 中必须且只能有一个 plan 同时满足：非空 `plan_id`、匹配某个 idea 的 `idea_id`、`selected_for_execution=true`、`execute_next=true`、`execution_selection.selected=true`、`execution_selection.selected_by="main_claude_code_after_deep_read"`、`execution_selection.reason` 说明基于精读证据的选择理由。其余 plan 必须显式为 backlog，不能留下空白让 TASTE 代选。
 
 不要写入或修改这些 TASTE-owned gate/state 文件：`state/current_find_research_plan.json`、`state/idea_candidates.json`、`state/experiment_plan.json`。wrapper 会在读取上述内容产物并通过/阻塞机器校验后，同步这些 state 文件。
 
@@ -6225,7 +6225,9 @@ def load_claude_outputs(taste_dir: Path, run_id: str, find_results: dict[str, An
     elif candidate_readings:
         parsed_readings = candidate_readings
     readings = normalize_readings_full_text_evidence(parsed_readings, full_text_packet)
-    if isinstance(find_results, dict) and not readings:
+    raw_reading_count = len([row for row in as_list((read_payload if isinstance(read_payload, dict) else {}).get("readings")) if isinstance(row, dict)])
+    read_projection_stale = bool(readings and (not read_current or raw_reading_count < len(readings)))
+    if isinstance(find_results, dict) and (not readings or read_projection_stale):
         readings = _maybe_recover_read_results_from_subagent_logs(
             project_paths,
             taste_dir,
@@ -6335,6 +6337,55 @@ def _normalize_queries(values: Any) -> list[str]:
     return out
 
 
+def _query_text_from_value(value: Any, limit: int = 900) -> str:
+    if value in (None, "", []):
+        return ""
+    if isinstance(value, str):
+        return compact(value, limit)
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    try:
+        return compact(json.dumps(json_safe(value), ensure_ascii=False, sort_keys=True), limit)
+    except Exception:
+        return compact(value, limit)
+
+
+def _current_find_selected_rows_for_query_derivation(ideas_results: dict[str, Any], plans_results: dict[str, Any], state_plan: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    plan_rows = [row for row in as_list(plans_results.get("plans")) if isinstance(row, dict)]
+    idea_rows = [row for row in as_list(ideas_results.get("ideas")) if isinstance(row, dict)]
+    state_rows = [row for row in as_list((state_plan or {}).get("plans")) + as_list((state_plan or {}).get("ideas")) if isinstance(row, dict)]
+    selected_plans = [row for row in plan_rows if _current_find_explicit_execution_selection(row, kind="plan")]
+    selected_idea_ids = {str(row.get("idea_id") or row.get("id") or "").strip() for row in selected_plans if str(row.get("idea_id") or row.get("id") or "").strip()}
+    selected_ideas = [row for row in idea_rows if str(row.get("id") or row.get("idea_id") or "").strip() in selected_idea_ids]
+    rows.extend(selected_plans or plan_rows[:2])
+    rows.extend(selected_ideas or idea_rows[:2])
+    rows.extend(state_rows[:2])
+    return rows
+
+
+def _derive_targeted_search_queries_from_artifacts(ideas_results: dict[str, Any], plans_results: dict[str, Any], state_plan: dict[str, Any] | None = None) -> list[str]:
+    rows = _current_find_selected_rows_for_query_derivation(ideas_results, plans_results, state_plan)
+    candidates: list[str] = []
+    for row in rows:
+        title = first_text(row, "title", "idea_title", "plan_title")
+        if title:
+            candidates.append(f"{title} protein design benchmark repository")
+        for key in ["initial_experiment", "new_method", "hypothesis", "method_details", "environment_requirements", "experiment_stages", "steps", "success_gate"]:
+            text = _query_text_from_value(row.get(key), 700)
+            for token in re.findall(r"\b(?:[A-Z][A-Za-z0-9]*(?:[-][A-Za-z0-9]+)?)(?:\s+(?:[A-Z][A-Za-z0-9]*(?:[-][A-Za-z0-9]+)?)){0,3}\b", text):
+                token = " ".join(token.split())
+                if len(token) >= 4 and token.lower() not in {"the", "this", "true", "false", "none", "json"}:
+                    candidates.append(f"{token} protein design code data protocol")
+        for ref in _normalize_inspired_refs(row.get("inspired_by"), as_list(row.get("supporting_papers") or row.get("positive_anchor_papers"))):
+            if not isinstance(ref, dict):
+                continue
+            ref_title = first_text(ref, "title", "paper_title", "paper_id")
+            if ref_title:
+                candidates.append(f"{ref_title} protein design code dataset protocol")
+    return _normalize_queries(candidates)
+
+
 def extract_targeted_search_queries(paths, read_results: dict[str, Any], ideas_results: dict[str, Any], plans_results: dict[str, Any], state_plan: dict[str, Any] | None = None) -> list[str]:
     queries: list[str] = []
     for payload in [read_results, ideas_results, plans_results, state_plan or {}, load_json(paths.state / "taste_targeted_queries.json", {})]:
@@ -6356,6 +6407,18 @@ def extract_targeted_search_queries(paths, read_results: dict[str, Any], ideas_r
         if key not in seen:
             seen.add(key)
             out.append(query)
+    if len(out) < 3:
+        for query in _derive_targeted_search_queries_from_artifacts(
+            ideas_results if isinstance(ideas_results, dict) else {},
+            plans_results if isinstance(plans_results, dict) else {},
+            state_plan if isinstance(state_plan, dict) else {},
+        ):
+            key = query.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(query)
+            if len(out) >= 3:
+                break
     return out
 
 
@@ -7177,6 +7240,7 @@ def normalize_claude_outputs_to_current_find_policy(project: str, paths, run_id:
         "claude_takeover": {key: takeover.get(key) for key in ["status", "return_code", "started_at", "finished_at", "prompt_path"] if key in takeover},
         "readings": readings,
         "reading_ranking": reading_ranking,
+        "targeted_search_queries": targeted_queries,
         "reading_ranking_order": reading_ranking.get("reading_ranking_order", []),
         "positive_anchor_count": len(strong_rows),
         "audit_or_boundary_count": len(audit_rows),
@@ -7704,6 +7768,7 @@ def write_current_find_structured_artifacts(
         source=CLAUDE_TAKEOVER_SOURCE,
         executable=bool(validation.get("valid", True) is not False),
     )
+    targeted_queries = extract_targeted_search_queries(paths, {}, existing_idea_payload, existing_plan_payload, load_json(paths.state / "current_find_research_plan.json", {}))
     readings, reading_ranking = sort_readings_by_ranking(readings, run_id, source=CLAUDE_TAKEOVER_SOURCE)
     read_payload = {
         "run_id": run_id,
@@ -7713,6 +7778,7 @@ def write_current_find_structured_artifacts(
         "readings": readings,
         "reading_ranking": reading_ranking,
         "reading_ranking_order": reading_ranking.get("reading_ranking_order", []),
+        "targeted_search_queries": targeted_queries,
         "claude_takeover": {key: takeover.get(key) for key in ["status", "return_code", "started_at", "finished_at", "prompt_path"] if key in takeover},
         "reading_validation": validation,
         "full_text_packet": full_text_packet_summary(load_full_text_packet_from_taste_dir(taste_dir, run_id)),
@@ -7730,6 +7796,7 @@ def write_current_find_structured_artifacts(
         "generated_at": generated_at,
         "normalization_source": normalization_source,
         "ideas": ideas,
+        "targeted_search_queries": targeted_queries,
         **selection_fields,
     })
     plan_payload = existing_plan_payload if isinstance(existing_plan_payload, dict) else {}
@@ -7739,6 +7806,7 @@ def write_current_find_structured_artifacts(
         "generated_at": generated_at,
         "normalization_source": normalization_source,
         "plans": plans,
+        "targeted_search_queries": targeted_queries,
         **selection_fields,
     })
     save_json(taste_dir / "read_results.json", strip_verbose_claude_takeover(read_payload))

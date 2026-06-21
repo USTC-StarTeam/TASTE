@@ -99,6 +99,25 @@ def _load_claude_project_session():
     return module
 
 
+def _load_current_find_orchestrator():
+    framework_scripts = ROOT / "framework" / "scripts"
+    reading_scripts = ROOT / "modules" / "reading" / "scripts"
+    finding_scripts = ROOT / "modules" / "finding" / "scripts"
+    for path in [str(reading_scripts), str(finding_scripts), str(framework_scripts)]:
+        if path not in sys.path:
+            sys.path.insert(0, path)
+    for name in ["common", "literature_policy", "project_paths", "runtime_env", "project_config"]:
+        sys.modules.pop(name, None)
+    spec = importlib.util.spec_from_file_location(
+        "reading_current_find_orchestrator",
+        reading_scripts / "orchestration" / "ensure_current_find_research_plan.py",
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_current_find_allows_controlled_idea_scoring_audit_write():
     session = _load_claude_project_session()
 
@@ -116,6 +135,52 @@ def test_current_find_allows_controlled_idea_scoring_audit_write():
 
     unsafe = "/home/fmh/workspace/miniforge/envs/ar_taste/bin/python -c \"open('planning/finding/idea_scoring.json','w').write('{}')\""
     assert session.current_find_artifact_generator_policy_issue(unsafe, "current_find_read_idea_plan") == session.CURRENT_FIND_ARTIFACT_WRITER_POLICY
+
+
+def test_current_find_derives_targeted_queries_from_claude_artifacts(tmp_path):
+    orchestrator = _load_current_find_orchestrator()
+
+    class Paths:
+        state = tmp_path / "state"
+
+    Paths.state.mkdir()
+    ideas = {
+        "run_id": "find_test",
+        "source": orchestrator.CLAUDE_TAKEOVER_SOURCE,
+        "ideas": [
+            {
+                "id": "idea_5",
+                "title": "知识引导解耦可解释评估框架",
+                "new_method": "Use ProtDiS representations and Flexible Kernels GP ranking for protein design evaluation.",
+                "initial_experiment": "Validate ProtDiS, Flexible Kernels, PDFBench, and ProtDBench protocols before experiments.",
+                "inspired_by": [
+                    {"paper_id": "paper_9f58", "title": "Learning Protein Structure-Function Relationships through Knowledge-guided Representation Decomposition"},
+                    {"paper_id": "paper_6f85", "title": "Flexible Kernels for Protein Property Prediction"},
+                ],
+            }
+        ],
+    }
+    plans = {
+        "run_id": "find_test",
+        "source": orchestrator.CLAUDE_TAKEOVER_SOURCE,
+        "plans": [
+            {
+                "plan_id": "plan_5",
+                "idea_id": "idea_5",
+                "title": "知识引导解耦的可解释生成评估框架实施计划",
+                "selected_for_execution": True,
+                "execute_next": True,
+                "execution_selection": {"selected": True},
+                "environment_requirements": ["ProtDiS encoder", "Flexible Kernels GP", "PDFBench and ProtDBench data"],
+            }
+        ],
+    }
+
+    queries = orchestrator.extract_targeted_search_queries(Paths, {}, ideas, plans, {})
+
+    assert len(queries) >= 3
+    assert any("ProtDiS" in query for query in queries)
+    assert any("Flexible Kernels" in query for query in queries)
 
 
 def test_all_stage_contracts_and_framework_dry_run_are_callable():
