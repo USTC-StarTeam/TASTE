@@ -39,7 +39,8 @@ python modules/experimenting/main.py \
 | `--conda-env` | 实验运行 Conda 环境名或绝对 Conda prefix；framework/web 通常传 `projects/<project>/state/environment_handoff.json` 中的 `conda_env_prefix`。 |
 | `--output-root` | 模块状态、记录、日志输出根；默认在 `modules/experimenting/runtime/autonomous`。 |
 | `--max-iterations` | 最大实验迭代轮数。 |
-| `--skip-claude` | 只做环境/记录流程自测，不调用 Claude。 |
+| `--skip-claude` | 只做环境/记录流程自测，不调用 Claude；不能作为科研成功证据。 |
+| `--permission-mode` | Claude Code 权限模式；无人值守 web/framework 链路默认 `bypassPermissions`，避免 Bash/Python 命令等待人工批准。 |
 | `--dry-run` | 只写计划和环境锁，不运行 Claude 或验证命令。 |
 
 从 Web 正常进入实验阶段时，输入由 `web -> framework -> environment_handoff -> experimenting` 传递：`repo_path` 指向 environment run 内的真实仓库，`conda_env_prefix` 指向同一 run 内已验证的 Conda 环境，`pending_downstream_metrics` 是本阶段需要通过真实实验/评估日志绑定的论文指标。
@@ -78,6 +79,7 @@ modules/experimenting/runtime/web/<project>/
 | `experiment_records.csv` | 表格化实验记录。 |
 | `实验记录.md` | 人类可读实验记录。 |
 | `runs/<run_id>/iteration_*/` | 每轮 Claude prompt、stdout、validation stdout、metrics、bad cases、summary。 |
+| `runs/<run_id>/iteration_*/wrapper_iteration_result.json` | 包装器验收结果，包含 `acceptance_status`、`acceptance_blockers`、Claude 权限拒绝和 summary 路径。 |
 
 模块独立运行时，这些产物不会自动覆盖 `projects/<project>` 里的网页产物。framework/web 只读取或投影必要状态；项目 Claude Code 可使用这些产物辅助项目内工作。
 
@@ -88,7 +90,8 @@ modules/experimenting/runtime/web/<project>/
 3. 每轮构建 Claude Code prompt，要求它只修改基础 repo，只把本轮日志/指标写入 iteration artifact dir。
 4. 可选执行 plan 或 `--run-command` 中的验证命令。
 5. 收集 `metrics.json`、`bad_cases.json`、`experiment_iteration_summary.json`，更新 registry/CSV/Markdown。
-6. 成功时可提前停止；失败时保留失败原因和下一步建议。
+6. 执行包装器验收：Claude 返回 0 只是必要条件；若出现当前结构化 `permission_denials`、缺少 `experiment_iteration_summary.json`、summary 状态为 blocked/failed/error、summary 自报非 accepted 的 `acceptance_status` 或非空 `acceptance_blockers`、没有真实命令/产物/指标/日志证据，则本轮记为 failed，并写出 `acceptance_blockers`。
+7. 只有验收通过才提前停止；失败时保留失败原因和下一步建议。
 
 ## 脚本结构
 
@@ -106,5 +109,5 @@ modules/experimenting/runtime/web/<project>/
 
 - 实验代码修改只发生在 `--repo-path` 指向的基础 repo。
 - 模块状态和中间产物只写 `modules/experimenting/runtime` 或调用方显式传入的模块内输出根。
-- 不把失败实验包装成成功指标；没有真实日志和指标就保持 blocked/failed。
+- 不把失败实验包装成成功指标；没有真实日志、命令/产物证据或指标就保持 blocked/failed。
 - 不把论文写作、仓库选择、环境部署逻辑塞进本模块。

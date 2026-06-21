@@ -214,3 +214,196 @@ def test_web_full_cycle_job_logs_hide_stale_reference_goal():
     text = "\n".join(rows)
     assert "Run audited Rigidity-Aware" not in text
     assert "使用 handoff repo/env 进入 experimenting" in text
+
+
+def test_web_handoff_experiment_launch_ignores_environment_worker(monkeypatch, tmp_path):
+    reading_scripts = ROOT / "modules" / "reading" / "scripts"
+    sys.path.insert(0, str(reading_scripts))
+    sys.modules.pop("pipeline", None)
+    from auto_research.web import server as web_server
+
+    web_server._JOB_LIST_PROJECT_SUMMARY_CACHE.clear()
+    monkeypatch.setattr(web_server, "_safe_project_root", lambda project: tmp_path)
+    monkeypatch.setattr(
+        web_server,
+        "_active_project_child_processes",
+        lambda project, root, phase_hint="": [
+            {"pid": "123", "phase": "environment", "kind": "environment_stage", "elapsed": "01:00", "cmd": "run_environment_stage.py"}
+        ],
+    )
+    monkeypatch.setattr(
+        web_server,
+        "project_summary",
+        lambda project, compact=True: {
+            "status": "ready_for_experimenting",
+            "stages": {"environment": {"status": "ready_for_experimenting"}},
+        },
+    )
+
+    assert web_server._project_stage_running_blocker({"project": "demo", "action": "experiment"}, "experiment") is None
+    assert web_server._project_stage_running_blocker({"project": "demo", "action": "environment"}, "environment") is not None
+
+
+def test_web_jobs_lists_handoff_environment_worker_as_nonexclusive(monkeypatch):
+    reading_scripts = ROOT / "modules" / "reading" / "scripts"
+    sys.path.insert(0, str(reading_scripts))
+    sys.modules.pop("pipeline", None)
+    from auto_research.web import server as web_server
+
+    web_server._JOB_LIST_PROJECT_SUMMARY_CACHE.clear()
+    monkeypatch.setattr(
+        web_server,
+        "project_summary",
+        lambda project, compact=True: {
+            "status": "ready_for_experimenting",
+            "stages": {"environment": {"status": "ready_for_experimenting"}, "experiment": {"status": "ready_for_experimenting"}},
+        },
+    )
+
+    row = web_server._compact_job_for_list({
+        "job_id": "project-worker_demo_123",
+        "stage": "environment",
+        "status": "running",
+        "created_at": "2026-06-20T22:00:00Z",
+        "logs": [
+            "project=demo",
+            "stage=environment",
+            "process_alive=true",
+            "worker_kind=environment_stage",
+            "full_cycle_log=/tmp/full_research_cycle.log",
+        ],
+        "log_count": 4,
+        "result": {
+            "project": "demo",
+            "pid": "123",
+            "phase": "environment",
+            "raw_stage": "environment_stage",
+            "kind": "environment_stage",
+            "summary": "项目后台 worker 正在运行。",
+            "status": "running",
+            "process_alive": True,
+            "not_full_cycle_controller": True,
+        },
+        "progress": {"phase": "environment", "message": "environment worker running; PID=123"},
+    })
+
+    assert row["stage"] == "handoff_monitor"
+    assert row["stage"] not in web_server.PROJECT_STAGE_EXCLUSIVE_PHASES
+    assert row["status"] == "running"
+    assert row["result"]["phase"] == "environment"
+    assert row["result"]["exclusive_stage"] is False
+    assert "不阻塞实验入口" in row["progress"]["message"]
+
+
+def test_web_jobs_maps_handoff_ready_status_to_done_for_frontend():
+    reading_scripts = ROOT / "modules" / "reading" / "scripts"
+    sys.path.insert(0, str(reading_scripts))
+    sys.modules.pop("pipeline", None)
+    from auto_research.web import server as web_server
+
+    row = web_server._compact_job_for_list({
+        "job_id": "full-cycle_demo",
+        "stage": "full-cycle",
+        "status": "ready_for_experimenting",
+        "created_at": "2026-06-20T22:00:00Z",
+        "logs": ["当前目标：使用 handoff repo/env 进入 experimenting"],
+        "log_count": 1,
+        "result": {
+            "project": "demo",
+            "status": "ready_for_experimenting",
+            "summary": "环境已交付：真实仓库、run-local Conda、数据准备和 loader/model smoke 已通过；论文指标仍由实验阶段验证。",
+            "process_alive": False,
+        },
+        "progress": {"phase": "ready_for_experimenting", "current": 1, "total": 1, "percent": 100},
+    })
+
+    assert row["status"] == "done"
+    assert row["result"]["status"] == "ready_for_experimenting"
+    assert row["progress"]["phase"] == "ready_for_experimenting"
+
+
+def test_web_jobs_maps_experiment_acceptance_blocker_to_blocked_status():
+    reading_scripts = ROOT / "modules" / "reading" / "scripts"
+    sys.path.insert(0, str(reading_scripts))
+    sys.modules.pop("pipeline", None)
+    from auto_research.web import server as web_server
+
+    message = "实验迭代被验收门控阻断：Claude Code 未获准执行必要 Bash/Python 命令；本轮不得计为科研成功。"
+    row = web_server._compact_job_for_list({
+        "job_id": "experiment_demo",
+        "stage": "experiment",
+        "status": "blocked",
+        "created_at": "2026-06-20T23:10:00Z",
+        "logs": ["当前状态：" + message],
+        "log_count": 1,
+        "result": {
+            "project": "demo",
+            "panel_stage": "experiment",
+            "status": "blocked_claude_permission_denied",
+            "acceptance_status": "blocked_claude_permission_denied",
+            "summary": message,
+        },
+        "progress": {"phase": "blocked", "current": 1, "total": 1, "percent": 100, "message": message},
+    })
+
+    assert row["stage"] == "experiment"
+    assert row["status"] == "blocked"
+    assert row["result"]["status"] == "blocked"
+    assert row["result"]["acceptance_status"] == "blocked_claude_permission_denied"
+    assert "不得计为科研成功" in row["progress"]["message"]
+
+
+
+def test_web_jobs_projects_generic_experiment_error_from_registry(monkeypatch, tmp_path):
+    reading_scripts = ROOT / "modules" / "reading" / "scripts"
+    sys.path.insert(0, str(reading_scripts))
+    sys.modules.pop("pipeline", None)
+    from auto_research.web import server as web_server
+
+    monkeypatch.setattr(web_server, "WORKSPACE_ROOT", tmp_path)
+    registry_dir = tmp_path / "modules" / "experimenting" / "runtime" / "web" / "demo" / "state"
+    registry_dir.mkdir(parents=True)
+    artifact_dir = tmp_path / "modules" / "experimenting" / "runtime" / "web" / "demo" / "runs" / "demo_run" / "iteration_01"
+    artifact_dir.mkdir(parents=True)
+    (registry_dir / "experiment_registry.json").write_text(
+        json.dumps(
+            [
+                {
+                    "timestamp": "2026-06-20T23:55:38Z",
+                    "run_id": "demo_run",
+                    "project": "demo",
+                    "status": "failed",
+                    "artifact_path": str(artifact_dir),
+                    "acceptance_status": "blocked_generation_evaluation_pipeline_missing",
+                    "acceptance_blockers": [
+                        {"code": "missing_generation_pipeline", "message": "No generation script."},
+                        {"code": "missing_evaluation_pipeline", "message": "No evaluation script."},
+                    ],
+                    "experiment_iteration_summary_status": "completed",
+                    "experiment_iteration_summary_acceptance_status": "partial_with_generation_blocker",
+                }
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    row = web_server._compact_job_for_list(
+        {
+            "job_id": "experiment_demo",
+            "stage": "experiment",
+            "status": "error",
+            "created_at": "2026-06-20T23:48:41Z",
+            "logs": ["当前状态：research action failed with exit code 1"],
+            "log_count": 1,
+            "result": {"project": "demo", "panel_stage": "experiment", "status": "running", "action": "experiment"},
+            "progress": {"phase": "error", "current": 0, "total": 1, "percent": 0, "message": "research action failed with exit code 1"},
+            "error": "research action failed with exit code 1",
+        }
+    )
+
+    assert row["stage"] == "experiment"
+    assert row["status"] == "blocked"
+    assert row["result"]["status"] == "blocked"
+    assert row["result"]["acceptance_status"] == "blocked_generation_evaluation_pipeline_missing"
+    assert "缺少生成/采样和评估流水线" in row["progress"]["message"]

@@ -10,6 +10,20 @@ ROOT = Path(__file__).resolve().parents[1]
 STAGES = ("finding", "reading", "ideation", "planning", "environment", "experimenting", "writing")
 
 
+def _load_experiment_runner():
+    experimenting_module_root = ROOT / "modules" / "experimenting"
+    for name in ["experiment_plan", "experiment_records", "file_utils", "runtime_environment"]:
+        sys.modules.pop(name, None)
+    spec = importlib.util.spec_from_file_location(
+        "experimenting_run_autonomous_experiment",
+        experimenting_module_root / "scripts" / "orchestration" / "run_autonomous_experiment.py",
+    )
+    assert spec and spec.loader
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    return runner
+
+
 def test_all_stage_contracts_and_framework_dry_run_are_callable():
     for stage in STAGES:
         proc = subprocess.run([sys.executable, str(ROOT / "modules" / stage / "main.py"), "--contract"], cwd=ROOT, text=True, capture_output=True, timeout=30)
@@ -746,3 +760,238 @@ def test_environment_handoff_ready_without_promoting_paper_metrics(tmp_path):
     assert "dataset_evidence" not in handoff_checks
     assert handoff_checks["required_commands"]["passed"] is True
     assert handoff_checks["required_commands"]["evidence"]["ignored_reproduce_full_count"] == 1
+
+
+def test_experimenting_default_permission_mode_is_bypass_permissions():
+    runner = _load_experiment_runner()
+    args = runner.parse_args(["--plan", "plan.json", "--repo-path", "repo"])
+    assert args.permission_mode == "bypassPermissions"
+
+
+def test_experimenting_rejects_permission_denied_claude_success(tmp_path):
+    runner = _load_experiment_runner()
+    artifact_dir = tmp_path / "iteration_01"
+    artifact_dir.mkdir()
+    log_path = artifact_dir / "claude_stdout.log"
+    payload = {
+        "type": "result",
+        "subtype": "success",
+        "result": "The bash/python execution requires approval.",
+        "permission_denials": [
+            {"tool_name": "Bash", "tool_input": {"command": "python smoke_test.py"}},
+        ],
+    }
+    log_path.write_text("# started_at: now\n\n" + json.dumps(payload, ensure_ascii=False) + "\n# finished_at: now\n# return_code: 0\n", encoding="utf-8")
+
+    acceptance = runner.evaluate_iteration_acceptance(
+        artifact_dir,
+        {"return_code": 0, "log_path": str(log_path)},
+        {"return_code": 0, "status": "not_configured", "log_path": ""},
+        {},
+    )
+
+    assert acceptance["accepted"] is False
+    assert acceptance["acceptance_status"] == "blocked_claude_permission_denied"
+    assert any(row["code"] == "claude_permission_denied" for row in acceptance["acceptance_blockers"])
+    fallback_summary = json.loads((artifact_dir / "experiment_iteration_summary.json").read_text(encoding="utf-8"))
+    assert fallback_summary["status"] == "blocked_claude_permission_denied"
+    assert fallback_summary["metrics"] == {}
+
+
+def test_experimenting_trusts_empty_structured_permission_denials(tmp_path):
+    runner = _load_experiment_runner()
+    artifact_dir = tmp_path / "iteration_01"
+    artifact_dir.mkdir()
+    log_path = artifact_dir / "claude_stdout.log"
+    payload = {
+        "type": "result",
+        "subtype": "success",
+        "result": "Previous iteration's permission-denied blocker is resolved; commands executed successfully.",
+        "permission_denials": [],
+    }
+    log_path.write_text(
+        "# started_at: now\n\n" + json.dumps(payload, ensure_ascii=False) + "\n# finished_at: now\n# return_code: 0\n",
+        encoding="utf-8",
+    )
+    (artifact_dir / "experiment_iteration_summary.json").write_text(
+        json.dumps(
+            {
+                "status": "success",
+                "commands": [{"description": "validation", "status": "passed"}],
+                "metrics": {"smoke_metric": 1.0},
+                "acceptance_status": "accepted",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    acceptance = runner.evaluate_iteration_acceptance(
+        artifact_dir,
+        {"return_code": 0, "log_path": str(log_path)},
+        {"return_code": 0, "status": "not_configured", "log_path": ""},
+        {},
+    )
+
+    assert acceptance["accepted"] is True
+    assert acceptance["acceptance_status"] == "accepted"
+    assert acceptance["permission_denials"] == []
+
+
+def test_experimenting_rejects_summary_acceptance_blockers_without_permission_denial(tmp_path):
+    runner = _load_experiment_runner()
+    artifact_dir = tmp_path / "iteration_01"
+    artifact_dir.mkdir()
+    log_path = artifact_dir / "claude_stdout.log"
+    payload = {
+        "type": "result",
+        "subtype": "success",
+        "result": "Previous iteration's permission-denied blocker is resolved; commands executed successfully.",
+        "permission_denials": [],
+    }
+    log_path.write_text(
+        "# started_at: now\n\n" + json.dumps(payload, ensure_ascii=False) + "\n# finished_at: now\n# return_code: 0\n",
+        encoding="utf-8",
+    )
+    (artifact_dir / "experiment_iteration_summary.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "commands": [{"description": "validation", "status": "passed"}],
+                "metrics": {"throughput": 2.9},
+                "acceptance_status": "partial_with_generation_blocker",
+                "acceptance_blockers": [
+                    {"code": "missing_generation_pipeline", "message": "No generation script."},
+                    {"code": "missing_evaluation_pipeline", "message": "No evaluation script."},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    acceptance = runner.evaluate_iteration_acceptance(
+        artifact_dir,
+        {"return_code": 0, "log_path": str(log_path)},
+        {"return_code": 0, "status": "not_configured", "log_path": ""},
+        {},
+    )
+
+    assert acceptance["accepted"] is False
+    assert acceptance["acceptance_status"] == "blocked_generation_evaluation_pipeline_missing"
+    assert acceptance["permission_denials"] == []
+    codes = {row["code"] for row in acceptance["acceptance_blockers"]}
+    assert "claude_permission_denied" not in codes
+    assert {"missing_generation_pipeline", "missing_evaluation_pipeline"} <= codes
+
+
+def test_experimenting_imports_autonomous_wrapper_to_project_registry(tmp_path):
+    sys.path.insert(0, str(ROOT / "framework" / "scripts"))
+    spec = importlib.util.spec_from_file_location(
+        "experimenting_import_experiment_artifacts",
+        ROOT / "modules" / "experimenting" / "scripts" / "records" / "import_experiment_artifacts.py",
+    )
+    assert spec and spec.loader
+    importer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(importer)
+
+    class Paths:
+        root = tmp_path / "projects" / "demo"
+        state = root / "state"
+        experiments = root / "experiments"
+
+    Paths.state.mkdir(parents=True)
+    Paths.experiments.mkdir(parents=True)
+    artifact_dir = tmp_path / "runtime" / "runs" / "demo_run" / "iteration_01"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "experiment_iteration_summary.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "acceptance_status": "partial_with_generation_blocker",
+                "acceptance_blockers": [{"code": "missing_generation_pipeline", "message": "No generation script."}],
+                "metrics": {"throughput": 2.9},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (artifact_dir / "wrapper_iteration_result.json").write_text(
+        json.dumps(
+            {
+                "record": {
+                    "timestamp": "2026-06-21T00:10:00Z",
+                    "run_id": "demo_run",
+                    "experiment_id": "demo_experiment",
+                    "iteration": 1,
+                    "status": "failed",
+                    "method": "experiment",
+                    "repo_path": "/tmp/repo",
+                    "artifact_path": str(artifact_dir),
+                    "metrics": {"throughput": 2.9},
+                    "metric_name": "throughput",
+                    "metric_value": 2.9,
+                    "acceptance_status": "blocked_generation_pipeline_missing",
+                    "acceptance_blockers": [{"code": "missing_generation_pipeline", "message": "No generation script."}],
+                    "experiment_iteration_summary_status": "completed",
+                    "experiment_iteration_summary_acceptance_status": "partial_with_generation_blocker",
+                    "next_action": "replan",
+                },
+                "acceptance": {"acceptance_status": "blocked_generation_pipeline_missing"},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = importer.import_artifact(Paths, artifact_dir)
+    registry = json.loads((Paths.state / "experiment_registry.json").read_text(encoding="utf-8"))
+
+    assert result["status"] == "imported_autonomous_wrapper"
+    assert len(registry) == 1
+    assert registry[0]["run_id"] == "demo_run"
+    assert registry[0]["acceptance_status"] == "blocked_generation_pipeline_missing"
+    assert registry[0]["experiment_iteration_summary_acceptance_status"] == "partial_with_generation_blocker"
+    assert registry[0]["metrics"] == {"throughput": 2.9}
+
+
+def test_experimenting_requires_iteration_summary_for_success(tmp_path):
+    runner = _load_experiment_runner()
+    artifact_dir = tmp_path / "iteration_01"
+    artifact_dir.mkdir()
+    log_path = artifact_dir / "claude_stdout.log"
+    log_path.write_text("# started_at: now\n\n" + json.dumps({"type": "result", "subtype": "success", "result": "done"}) + "\n# finished_at: now\n# return_code: 0\n", encoding="utf-8")
+
+    acceptance = runner.evaluate_iteration_acceptance(
+        artifact_dir,
+        {"return_code": 0, "log_path": str(log_path)},
+        {"return_code": 0, "status": "not_configured", "log_path": ""},
+        {},
+    )
+
+    assert acceptance["accepted"] is False
+    assert acceptance["acceptance_status"] == "blocked_missing_experiment_summary"
+    assert any(row["code"] == "missing_experiment_iteration_summary" for row in acceptance["acceptance_blockers"])
+
+
+def test_experimenting_rejects_success_summary_without_execution_evidence(tmp_path):
+    runner = _load_experiment_runner()
+    artifact_dir = tmp_path / "iteration_01"
+    artifact_dir.mkdir()
+    log_path = artifact_dir / "claude_stdout.log"
+    log_path.write_text("# started_at: now\n\n" + json.dumps({"type": "result", "subtype": "success", "result": "done"}) + "\n# finished_at: now\n# return_code: 0\n", encoding="utf-8")
+    (artifact_dir / "experiment_iteration_summary.json").write_text(
+        json.dumps({"status": "success", "changed_files": ["model.py"], "metrics": {}, "commands": []}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    acceptance = runner.evaluate_iteration_acceptance(
+        artifact_dir,
+        {"return_code": 0, "log_path": str(log_path)},
+        {"return_code": 0, "status": "not_configured", "log_path": ""},
+        {},
+    )
+
+    assert acceptance["accepted"] is False
+    assert acceptance["acceptance_status"] == "blocked_missing_iteration_evidence"
+    assert any(row["code"] == "missing_iteration_evidence" for row in acceptance["acceptance_blockers"])

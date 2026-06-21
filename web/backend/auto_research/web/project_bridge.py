@@ -12487,6 +12487,31 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     current_experiment_count = 0 if downstream_waiting_on_find else experiment_count
     current_completed_count = 0 if downstream_waiting_on_find else completed_count
     current_experiment_record = {**experiment_record_compact, "row_count": current_experiment_count, "rows": [] if downstream_waiting_on_find else experiment_record_compact.get("rows", [])}
+    latest_experiment_acceptance_blocker = {}
+    if not downstream_waiting_on_find:
+        for row in sorted((item for item in current_route_experiments_all if isinstance(item, dict)), key=lambda item: str(item.get("timestamp") or item.get("finished_at") or item.get("updated_at") or ""), reverse=True):
+            if str(row.get("acceptance_status") or "").startswith("blocked_"):
+                latest_experiment_acceptance_blocker = row
+                break
+    experiment_acceptance_blocker_summary = ""
+    experiment_acceptance_next_action = ""
+    if latest_experiment_acceptance_blocker:
+        acceptance_status = str(latest_experiment_acceptance_blocker.get("acceptance_status") or "").strip()
+        blockers = safe_list(latest_experiment_acceptance_blocker.get("acceptance_blockers"))
+        codes = {str(item.get("code") or "") for item in blockers if isinstance(item, dict)}
+        if "missing_generation_pipeline" in codes and "missing_evaluation_pipeline" in codes:
+            experiment_acceptance_blocker_summary = "最新实验验收阻断：RigidSSL 仓库缺少生成/采样和评估流水线；本轮只验证了环境、模型、数据、checkpoint 与训练 smoke，不能计为论文实验成功。"
+        else:
+            messages = []
+            for item in blockers[:3]:
+                if not isinstance(item, dict):
+                    continue
+                message = str(item.get("message") or item.get("code") or "").strip()
+                if message:
+                    messages.append(_public_text_for_gate(message)[:160])
+            detail = "；".join(messages) or acceptance_status
+            experiment_acceptance_blocker_summary = f"最新实验验收阻断：{detail}；本轮不能计为论文实验成功。"
+        experiment_acceptance_next_action = str(latest_experiment_acceptance_blocker.get("next_action") or "根据实验验收 blocker 重构实验计划，补齐生成/评估流水线后再运行。")
     experiment_display_flags = _experiment_summary_display_flags(current_route_experiments_all if not downstream_waiting_on_find else [], current_route_record_rows if not downstream_waiting_on_find else [])
     experiment_count_label = "实验/复现审计记录"
     experiment_count_help = "这是当前主线下实验与参考复现记录的审计统计，不是完整科研流程完成进度；论文结论仍以科学进展、证据和投稿门控为准。"
@@ -12677,6 +12702,20 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         recommendation_shortfall=recommendation_shortfall,
         next_action=blocker_next_action,
     )
+    if experiment_acceptance_blocker_summary:
+        experiment_stage_status = "blocked_experiment_acceptance"
+        next_action_text = experiment_acceptance_next_action or "根据实验验收 blocker 重构实验计划，补齐生成/评估流水线后再运行。"
+        experiment_module_summary.update({
+            "status": experiment_stage_status,
+            "summary": experiment_acceptance_blocker_summary,
+            "summary_zh": experiment_acceptance_blocker_summary,
+            "summary_en": "Latest experiment iteration is blocked by the acceptance gate; it cannot support paper claims.",
+            "module_summary": experiment_acceptance_blocker_summary,
+            "module_summary_zh": experiment_acceptance_blocker_summary,
+            "module_summary_en": "Latest experiment iteration is blocked by the acceptance gate; it cannot support paper claims.",
+            "next_action": next_action_text,
+            "acceptance_status": str(latest_experiment_acceptance_blocker.get("acceptance_status") or ""),
+        })
     read_matches_recommendations = bool(strong_count and display_read_count == strong_count)
     idea_score_values = []
     idea_rows = [row for row in safe_list(ideas_results.get("ideas")) if isinstance(row, dict)]
@@ -12862,7 +12901,19 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     framework_status = _framework_public_status_for_project(project)
     if framework_status:
         full_cycle_compact = {**full_cycle_compact, "framework": framework_status}
-    experiment_stage = {"status": experiment_stage_status, **experiment_module_summary, "human_gate_summary": human_gate_summary, "experiment_count": current_experiment_count, "completed_experiment_count": current_completed_count, "experiment_count_label": experiment_count_label, "experiment_count_help": experiment_count_help, "recent_experiments": current_experiments, "experiments": current_experiments, "experiment_record": current_experiment_record, **experiment_display_flags, "legacy_experiment_audit": legacy_experiment_audit, "reference_reproduction_gate": scalar(display_ref_gate, ["status", "decision", "decision_reason", "human_summary"]), "scientific_progress_gate": _public_gate_status_summary(scientific_progress_gate), "experiment_iteration_audit": _public_gate_status_summary(experiment_iteration_audit), "full_research_cycle": full_cycle_compact}
+    display_human_gate_summary = human_gate_summary
+    if experiment_acceptance_blocker_summary:
+        display_human_gate_summary = {
+            **human_gate_summary,
+            "status": "blocked_experiment_acceptance",
+            "title": "实验验收门控阻塞",
+            "summary": experiment_acceptance_blocker_summary,
+            "next_action": experiment_acceptance_next_action or "根据实验验收 blocker 重构实验计划，补齐生成/评估流水线后再运行。",
+            "source": "experiment_acceptance_gate",
+            "source_label": "来源：实验模块验收门控",
+            "acceptance_status": str(latest_experiment_acceptance_blocker.get("acceptance_status") or ""),
+        }
+    experiment_stage = {"status": experiment_stage_status, **experiment_module_summary, "human_gate_summary": display_human_gate_summary, "experiment_count": current_experiment_count, "completed_experiment_count": current_completed_count, "experiment_count_label": experiment_count_label, "experiment_count_help": experiment_count_help, "recent_experiments": current_experiments, "experiments": current_experiments, "experiment_record": current_experiment_record, **experiment_display_flags, "legacy_experiment_audit": legacy_experiment_audit, "reference_reproduction_gate": scalar(display_ref_gate, ["status", "decision", "decision_reason", "human_summary"]), "scientific_progress_gate": _public_gate_status_summary(scientific_progress_gate), "experiment_iteration_audit": _public_gate_status_summary(experiment_iteration_audit), "full_research_cycle": full_cycle_compact}
     if framework_status:
         experiment_stage["framework"] = framework_status
     stages = {**planning_stages, "environment": environment_stage, "experiment": experiment_stage, "paper": paper_stage}
@@ -12893,7 +12944,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     run_preferences = _public_run_preferences(project, root, cfg, runtime_public, project_selection)
     state_compact = {
         "full_research_cycle": full_cycle_compact,
-        "human_gate_summary": human_gate_summary,
+        "human_gate_summary": display_human_gate_summary,
         "experiment_count": current_experiment_count,
         "completed_experiment_count": current_completed_count,
         "experiment_count_label": experiment_count_label,
@@ -12922,7 +12973,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         "blockers": full_cycle_compact.get("latest_blockers", []),
         "current_blocker": public_blocker_row,
         "human_supervision": human,
-        "human_gate_summary": human_gate_summary,
+        "human_gate_summary": display_human_gate_summary,
         "main_route": main_route,
         "stages": stages,
         "state": state_compact,

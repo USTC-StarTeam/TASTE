@@ -8164,6 +8164,79 @@ def _environment_decision_public_projection(job_id: Any, run_id: Any, result: An
     }
 
 
+def _experiment_acceptance_public_summary(record: dict[str, Any]) -> str:
+    blockers = record.get("acceptance_blockers") if isinstance(record.get("acceptance_blockers"), list) else []
+    codes = {str(item.get("code") or "") for item in blockers if isinstance(item, dict)}
+    if "missing_generation_pipeline" in codes and "missing_evaluation_pipeline" in codes:
+        return "实验迭代被验收门控阻断：当前 RigidSSL 仓库缺少生成/采样和评估流水线；本轮只验证了环境、模型、数据、checkpoint 与训练 smoke，不能计为论文实验成功。"
+    if blockers:
+        messages = []
+        for item in blockers[:3]:
+            if not isinstance(item, dict):
+                continue
+            message = _public_text(str(item.get("message") or item.get("code") or "")).strip()
+            if message:
+                messages.append(message[:160])
+        if messages:
+            return "实验迭代被验收门控阻断：" + "；".join(messages) + "；本轮不得计为科研成功。"
+    acceptance_status = str(record.get("acceptance_status") or "failed_acceptance_gate").strip()
+    return f"实验迭代未通过验收门控：{acceptance_status or 'failed_acceptance_gate'}；本轮不得计为科研成功。"
+
+
+def _latest_experiment_acceptance_projection(project: Any, created_at: Any) -> dict[str, Any]:
+    project_id = str(project or "").strip()
+    if not project_id or not re.fullmatch(r"[A-Za-z0-9_.-]+", project_id):
+        return {}
+    registry_path = WORKSPACE_ROOT / "modules" / "experimenting" / "runtime" / "web" / project_id / "state" / "experiment_registry.json"
+    registry_payload = read_json(registry_path, [])
+    if isinstance(registry_payload, dict):
+        rows = registry_payload.get("experiments") if isinstance(registry_payload.get("experiments"), list) else []
+    elif isinstance(registry_payload, list):
+        rows = registry_payload
+    else:
+        rows = []
+    created_ts = _parse_public_job_timestamp(created_at)
+    candidates: list[tuple[float, dict[str, Any]]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        acceptance_status = str(row.get("acceptance_status") or "").strip()
+        blockers = row.get("acceptance_blockers") if isinstance(row.get("acceptance_blockers"), list) else []
+        row_status = str(row.get("status") or "").strip().lower()
+        if not acceptance_status and not blockers:
+            continue
+        row_ts = _parse_public_job_timestamp(row.get("timestamp"))
+        if created_ts and row_ts and row_ts + 60 < created_ts:
+            continue
+        if not row_ts:
+            artifact_path = Path(str(row.get("artifact_path") or ""))
+            try:
+                row_ts = artifact_path.stat().st_mtime if artifact_path.exists() else 0.0
+            except Exception:
+                row_ts = 0.0
+        if not row_ts:
+            row_ts = created_ts or 0.0
+        if not (acceptance_status.startswith("blocked_") or blockers or row_status in {"failed", "blocked"}):
+            continue
+        candidates.append((row_ts, row))
+    if not candidates:
+        return {}
+    record = sorted(candidates, key=lambda item: item[0], reverse=True)[0][1]
+    acceptance_status = str(record.get("acceptance_status") or "failed_acceptance_gate").strip()
+    return {
+        "run_id": str(record.get("run_id") or ""),
+        "project": project_id,
+        "status": "blocked",
+        "acceptance_status": acceptance_status,
+        "acceptance_blockers": record.get("acceptance_blockers") if isinstance(record.get("acceptance_blockers"), list) else [],
+        "artifact_path": str(record.get("artifact_path") or ""),
+        "experiment_iteration_summary_path": str(record.get("experiment_iteration_summary_path") or ""),
+        "experiment_iteration_summary_status": str(record.get("experiment_iteration_summary_status") or ""),
+        "experiment_iteration_summary_acceptance_status": str(record.get("experiment_iteration_summary_acceptance_status") or ""),
+        "summary": _experiment_acceptance_public_summary(record),
+    }
+
+
 def _normalize_public_job_status(public_status: Any, progress: Any = None, error: Any = "", result: Any = None, stage: Any = "") -> str:
     """Make taskbar status agree with terminal progress/error evidence."""
     if _environment_job_rc30_blocked(stage, progress, error, result):
@@ -8929,6 +9002,35 @@ def _job_list_project_summary(project_id: str, *, compact: bool = True) -> dict[
     return {}
 
 
+def _summary_handoff_ready_for_experimenting(summary: Any) -> bool:
+    if not isinstance(summary, dict):
+        return False
+    stages = summary.get("stages") if isinstance(summary.get("stages"), dict) else {}
+    environment = stages.get("environment") if isinstance(stages.get("environment"), dict) else {}
+    experiment = stages.get("experiment") if isinstance(stages.get("experiment"), dict) else {}
+    handoff = summary.get("environment_handoff") if isinstance(summary.get("environment_handoff"), dict) else {}
+    if handoff.get("ready_for_experimenting") is True:
+        return True
+    status_values = [
+        summary.get("status"),
+        environment.get("status"),
+        environment.get("repo_status"),
+        experiment.get("status"),
+        handoff.get("status"),
+    ]
+    return any(str(value or "").strip().lower() == "ready_for_experimenting" for value in status_values)
+
+
+def _project_handoff_ready_for_experimenting(project_id: Any) -> bool:
+    project = str(project_id or "").strip()
+    if not project:
+        return False
+    try:
+        return _summary_handoff_ready_for_experimenting(_job_list_project_summary(project, compact=True))
+    except Exception:
+        return False
+
+
 def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
     """Small row for the frequently-polled jobs list."""
     result = item.get("result") if isinstance(item.get("result"), dict) else {}
@@ -8936,9 +9038,15 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
     panel_stage = _panel_stage_from_project_agent_result(result)
     paper_job = _is_paper_job(raw_stage, item.get("job_id", ""), result, item.get("logs"))
     full_cycle_job = False if panel_stage else _is_full_cycle_job(raw_stage, item.get("job_id", ""), result, item.get("logs"))
+    recovered_project_worker = bool(
+        str(item.get("job_id") or "").startswith(("project-worker_", "experiment-worker_"))
+        or result.get("not_full_cycle_controller") is True
+    )
+    if full_cycle_job and recovered_project_worker:
+        full_cycle_job = False
     public_stage = panel_stage or ("paper" if paper_job else (_public_full_cycle_stage(raw_stage, item.get("progress"), result) if full_cycle_job else _public_taste_stage(raw_stage)))
     compact_result: dict[str, Any] = {}
-    result_keys = ["run_id", "project", "topic", "target_venue", "action", "agent_id", "target_agent_id", "requested_stage", "panel_stage", "pid", "cmd", "kind", "log_path", "artifact_dir", "find_results_path", "find_results_size_bytes", "phase", "raw_stage", "summary", "status", "process_alive", "alive", "current_substage", "paper_current_substage", "paper_execution_alive", "paper_execution_state", "paper_execution_message", "paper_worker_pid", "paper_worker_kind", "paper_controller_pid", "paper_worker_elapsed", "paper_worker_pcpu", "paper_worker_pmem"]
+    result_keys = ["run_id", "project", "topic", "target_venue", "action", "agent_id", "target_agent_id", "requested_stage", "panel_stage", "pid", "cmd", "kind", "log_path", "artifact_dir", "find_results_path", "find_results_size_bytes", "phase", "raw_stage", "summary", "status", "acceptance_status", "acceptance_blockers", "artifact_path", "process_alive", "alive", "current_substage", "paper_current_substage", "paper_execution_alive", "paper_execution_state", "paper_execution_message", "paper_worker_pid", "paper_worker_kind", "paper_controller_pid", "paper_worker_elapsed", "paper_worker_pcpu", "paper_worker_pmem"]
     if full_cycle_job:
         result_keys = [key for key in result_keys if key != "cmd"]
     for key in result_keys:
@@ -9036,6 +9144,26 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
             public_progress["message"] = command_message
         elif _is_project_agent_panel_job(raw_stage, item.get("job_id", ""), result):
             public_progress["message"] = _public_project_agent_progress_message(public_stage, public_progress.get("message"))
+    if public_stage == "environment" and _job_status_is_live(public_status) and not full_cycle_job:
+        project_id = str(compact_result.get("project") or result.get("project") or _project_from_job_payload(item.get("job_id"), item) or "").strip()
+        result_phase = str(result.get("phase") or compact_result.get("phase") or "").strip().lower()
+        worker_kind = str(result.get("kind") or compact_result.get("kind") or "").strip().lower()
+        recovered_environment_worker = bool(
+            str(item.get("job_id") or "").startswith("project-worker_")
+            or recovered_project_worker
+        )
+        if project_id and result_phase == "environment" and recovered_environment_worker and _project_handoff_ready_for_experimenting(project_id):
+            monitor_message = "环境已交付 experimenting：真实 repo/env/data/loader 可用；后台完整复现/审计仍在记录论文指标证据，不阻塞实验入口。"
+            public_stage = "handoff_monitor"
+            compact_result["raw_stage"] = compact_result.get("raw_stage") or raw_stage or "environment"
+            compact_result["phase"] = "environment"
+            compact_result["kind"] = worker_kind or compact_result.get("kind") or "environment_stage"
+            compact_result["handoff_ready_for_experimenting"] = True
+            compact_result["exclusive_stage"] = False
+            compact_result["summary"] = monitor_message
+            compact_result["status"] = public_status or "running"
+            public_progress["phase"] = "ready_for_experimenting"
+            public_progress["message"] = monitor_message
     if public_stage == "environment" and public_status == "blocked":
         project_id = str(compact_result.get("project") or result.get("project") or "").strip()
         if project_id:
@@ -9166,8 +9294,35 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
             compact_result["summary"] = str(decision_projection.get("summary") or compact_result.get("summary") or "")
             compact_result["run_id"] = str(decision_projection.get("run_id") or compact_result.get("run_id") or "")
             compact_result["environment_decision"] = decision_projection
+    if public_stage == "experiment":
+        project_id = str(compact_result.get("project") or (result.get("project") if isinstance(result, dict) else "") or "").strip()
+        needs_acceptance_projection = public_status in {"error", "failed"} or bool(item.get("error")) or str(compact_result.get("status") or "").startswith("blocked_")
+        if project_id and needs_acceptance_projection:
+            acceptance_projection = _latest_experiment_acceptance_projection(project_id, item.get("created_at", ""))
+            if acceptance_projection:
+                compact_result.update(acceptance_projection)
+                if isinstance(result, dict):
+                    result = {**result, **acceptance_projection}
+                public_status = str(acceptance_projection.get("status") or "blocked")
+                public_progress.update({
+                    "phase": public_status,
+                    "current": 1,
+                    "total": 1,
+                    "percent": 100,
+                    "message": str(acceptance_projection.get("summary") or ""),
+                })
+        detailed_status = str(public_status or "").strip()
+        if detailed_status.startswith("blocked_"):
+            compact_result["acceptance_status"] = compact_result.get("acceptance_status") or detailed_status
+            compact_result["status"] = "blocked"
+            if isinstance(result, dict):
+                result = {**result, "status": "blocked", "acceptance_status": compact_result.get("acceptance_status") or detailed_status}
+            public_status = "blocked"
     public_status = _normalize_public_job_status(public_status, public_progress, item.get("error", ""), compact_result or result, public_stage)
-    if public_status in {"blocked", "error", "cancelled", "done"}:
+    if public_status == "ready_for_experimenting":
+        compact_result["status"] = "ready_for_experimenting"
+        public_status = "done"
+    elif public_status in {"blocked", "error", "cancelled", "done"}:
         compact_result["status"] = public_status
     public_log_result = compact_result if full_cycle_job else result
     payload = {
@@ -10218,6 +10373,8 @@ def _project_stage_running_blocker(payload: dict[str, Any], stage: str) -> dict[
         row for row in _active_project_child_processes(project, root, phase_hint=stage_key)
         if str(row.get("phase") or "").strip().lower() in PROJECT_STAGE_EXCLUSIVE_PHASES
     ]
+    if stage_key == "experiment" and workers and _project_handoff_ready_for_experimenting(project):
+        workers = [row for row in workers if str(row.get("phase") or "").strip().lower() != "environment"]
     if not workers:
         return None
     worker = workers[0]

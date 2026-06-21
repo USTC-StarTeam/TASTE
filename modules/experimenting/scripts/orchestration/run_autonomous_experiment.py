@@ -39,7 +39,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-iterations", type=int, default=3)
     parser.add_argument("--claude-timeout-sec", type=int, default=14400)
     parser.add_argument("--command-timeout-sec", type=int, default=0, help="验证命令超时；0 表示不额外限制。")
-    parser.add_argument("--permission-mode", default="acceptEdits", choices=["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"])
+    parser.add_argument("--permission-mode", default="bypassPermissions", choices=["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"])
     parser.add_argument("--model", default="")
     parser.add_argument("--extra-context", action="append", default=[], help="额外上下文文件，可重复传入。")
     parser.add_argument("--skip-claude", action="store_true", help="只做环境/记录流程自测，不调用 Claude。")
@@ -208,6 +208,303 @@ def summarize_claude_log(log_path: str) -> str:
     return " ".join(body.split())[:1000]
 
 
+def claude_log_body(log_path: str) -> str:
+    if not log_path:
+        return ""
+    path = Path(log_path)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    body = text.split("\n\n", 1)[1] if "\n\n" in text else text
+    return body.rsplit("\n# finished_at:", 1)[0].strip()
+
+
+def _parse_claude_json_payload(body: str) -> tuple[dict[str, Any], bool]:
+    if not body:
+        return {}, False
+    candidates = [body]
+    json_start = body.find("{")
+    json_end = body.rfind("}")
+    if json_start >= 0 and json_end > json_start:
+        candidates.append(body[json_start:json_end + 1])
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            return payload, True
+    return {}, False
+
+
+def claude_json_payload(log_path: str) -> dict[str, Any]:
+    payload, _ = _parse_claude_json_payload(claude_log_body(log_path))
+    return payload
+
+
+def _collect_permission_denials(payload: Any) -> list[Any]:
+    denials: list[Any] = []
+    if isinstance(payload, dict):
+        value = payload.get("permission_denials")
+        if isinstance(value, list):
+            denials.extend(item for item in value if item)
+        for child in payload.values():
+            denials.extend(_collect_permission_denials(child))
+    elif isinstance(payload, list):
+        for child in payload:
+            denials.extend(_collect_permission_denials(child))
+    return denials
+
+
+def _format_permission_denial(item: Any) -> str:
+    if isinstance(item, dict):
+        tool = str(item.get("tool_name") or item.get("name") or item.get("tool") or "tool").strip()
+        tool_input = item.get("tool_input") if isinstance(item.get("tool_input"), dict) else {}
+        command = ""
+        if isinstance(tool_input, dict):
+            command = str(tool_input.get("command") or tool_input.get("cmd") or tool_input.get("description") or "").strip()
+        reason = str(item.get("reason") or item.get("message") or "").strip()
+        text = " ".join(part for part in [tool, command, reason] if part)
+        return text[:500] or json.dumps(item, ensure_ascii=False)[:500]
+    return str(item)[:500]
+
+
+def _unique_permission_denials(denials: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for item in denials:
+        text = " ".join(str(item).split())
+        if text and text not in seen:
+            seen.add(text)
+            unique.append(text)
+    return unique
+
+
+def _body_reports_current_permission_denial(body: str) -> bool:
+    denial_terms = ("requires approval", "permission denied", "permission_denials", "permission-denied")
+    resolved_terms = ("previous", "prior", "historical", "history", "resolved", "already fixed", "already resolved")
+    for raw_line in body.splitlines():
+        lowered = raw_line.lower()
+        if not any(term in lowered for term in denial_terms):
+            continue
+        if "permission_denials" in lowered and "[]" in lowered:
+            continue
+        if any(term in lowered for term in resolved_terms):
+            continue
+        return True
+    return False
+
+
+def claude_permission_denials(log_path: str) -> list[str]:
+    body = claude_log_body(log_path)
+    payload, has_structured_payload = _parse_claude_json_payload(body)
+    denials = [_format_permission_denial(item) for item in _collect_permission_denials(payload)]
+    if has_structured_payload:
+        return _unique_permission_denials(denials)
+    if not denials and body and _body_reports_current_permission_denial(body):
+        denials.append("Claude reported that command execution required approval or was denied.")
+    return _unique_permission_denials(denials)
+
+
+def _load_iteration_summary(artifact_dir: Path) -> tuple[dict[str, Any], str, Path]:
+    path = artifact_dir / "experiment_iteration_summary.json"
+    if not path.exists():
+        return {}, "missing", path
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}, "invalid_json", path
+    if not isinstance(payload, dict):
+        return {}, "invalid_shape", path
+    return payload, "loaded", path
+
+
+def _first_summary_status(summary: dict[str, Any]) -> str:
+    for key in ["status", "state", "outcome"]:
+        value = summary.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _has_payload(value: Any) -> bool:
+    if value in (None, "", [], {}):
+        return False
+    if isinstance(value, dict):
+        return any(_has_payload(child) for child in value.values())
+    if isinstance(value, list):
+        return any(_has_payload(child) for child in value)
+    return True
+
+
+def _summary_has_execution_evidence(summary: dict[str, Any], artifact_dir: Path) -> bool:
+    metrics = summary.get("metrics")
+    if isinstance(metrics, dict) and _has_payload(metrics):
+        return True
+    if (artifact_dir / "metrics.json").exists():
+        try:
+            metrics_payload = json.loads((artifact_dir / "metrics.json").read_text(encoding="utf-8"))
+        except Exception:
+            metrics_payload = {}
+        if _has_payload(metrics_payload):
+            return True
+    for key in ["commands", "command_results", "executed_commands", "validation", "artifacts", "evidence", "logs", "outputs"]:
+        if _has_payload(summary.get(key)):
+            return True
+    return False
+
+
+def _summary_acceptance_blockers(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_blockers = summary.get("acceptance_blockers")
+    if not isinstance(raw_blockers, list):
+        return []
+    blockers: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_blockers, start=1):
+        fallback_code = f"summary_acceptance_blocker_{index}"
+        if isinstance(item, dict):
+            code = str(item.get("code") or fallback_code).strip() or fallback_code
+            message = str(item.get("message") or item.get("summary") or item.get("reason") or code).strip() or code
+            blockers.append(_blocker(code, message, item))
+        elif item not in (None, "", [], {}):
+            blockers.append(_blocker(fallback_code, str(item), item))
+    return blockers
+
+
+def _summary_acceptance_status_blocks(status: str) -> bool:
+    normalized = status.strip().lower().replace(" ", "_").replace("-", "_")
+    if not normalized:
+        return False
+    accepted_values = {"accepted", "accepted_with_warnings", "skipped_self_test"}
+    if normalized in accepted_values:
+        return False
+    blocking_terms = ("block", "fail", "error", "denied", "missing", "partial", "needs_human", "not_configured")
+    return normalized not in accepted_values or any(term in normalized for term in blocking_terms)
+
+
+def _blocker(code: str, message: str, evidence: Any = None) -> dict[str, Any]:
+    item: dict[str, Any] = {"code": code, "message": message}
+    if evidence not in (None, "", [], {}):
+        item["evidence"] = evidence
+    return item
+
+
+def _acceptance_failure_status(blockers: list[dict[str, Any]]) -> str:
+    codes = [str(item.get("code") or "") for item in blockers]
+    if "claude_permission_denied" in codes:
+        return "blocked_claude_permission_denied"
+    if "missing_generation_pipeline" in codes and "missing_evaluation_pipeline" in codes:
+        return "blocked_generation_evaluation_pipeline_missing"
+    if "missing_generation_pipeline" in codes:
+        return "blocked_generation_pipeline_missing"
+    if "missing_evaluation_pipeline" in codes:
+        return "blocked_evaluation_pipeline_missing"
+    if "missing_experiment_iteration_summary" in codes:
+        return "blocked_missing_experiment_summary"
+    if any(code.startswith("invalid_experiment_iteration_summary") for code in codes):
+        return "blocked_invalid_experiment_summary"
+    if "missing_iteration_evidence" in codes:
+        return "blocked_missing_iteration_evidence"
+    if "iteration_summary_acceptance_not_accepted" in codes or any(code.startswith("summary_acceptance_blocker_") for code in codes):
+        return "blocked_iteration_summary_acceptance"
+    return "failed_acceptance_gate"
+
+
+def _write_failure_summary_if_needed(artifact_dir: Path, status: str, blockers: list[dict[str, Any]], summary_state: str, summary_path: Path) -> str:
+    if summary_state == "loaded" and summary_path.exists():
+        return str(summary_path)
+    target = summary_path if summary_state == "missing" else artifact_dir / "wrapper_failure_summary.json"
+    payload = {
+        "status": status,
+        "failure_reason": "; ".join(str(item.get("message") or item.get("code") or "") for item in blockers if item),
+        "acceptance_blockers": blockers,
+        "changed_files": [],
+        "commands": [],
+        "metrics": {},
+        "next_action": "修复本轮阻塞后重新运行实验迭代；禁止把本轮计为科研成功。",
+    }
+    atomic_write_json(target, payload)
+    return str(target)
+
+
+def evaluate_iteration_acceptance(artifact_dir: Path, claude_result: dict[str, Any], validation_result: dict[str, Any], metrics: dict[str, Any]) -> dict[str, Any]:
+    blockers: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    claude_rc = int(claude_result.get("return_code") or 0)
+    command_rc = int(validation_result.get("return_code") or 0)
+    denials = claude_permission_denials(str(claude_result.get("log_path") or ""))
+    if denials:
+        blockers.append(_blocker("claude_permission_denied", "Claude Code 未获准执行必要 Bash/Python 命令。", denials[:8]))
+    if claude_rc != 0:
+        blockers.append(_blocker("claude_return_code_nonzero", f"Claude Code 返回非 0: {claude_rc}"))
+    if command_rc != 0:
+        blockers.append(_blocker("validation_return_code_nonzero", f"验证/训练命令返回非 0: {command_rc}"))
+    validation_status = str(validation_result.get("status") or "")
+    validation_ran = validation_status not in {"", "not_configured", "skipped"} and bool(validation_result.get("log_path"))
+    if validation_status == "not_configured":
+        warnings.append("plan/run-command 未配置；本轮必须依赖 Claude 写出的 summary 和真实命令/产物证据。")
+
+    iteration_summary, summary_state, summary_path = _load_iteration_summary(artifact_dir)
+    summary_status = _first_summary_status(iteration_summary)
+    summary_acceptance_status = str(iteration_summary.get("acceptance_status") or "").strip() if summary_state == "loaded" else ""
+    if summary_state == "missing":
+        blockers.append(_blocker("missing_experiment_iteration_summary", "缺少 experiment_iteration_summary.json；不能把 Claude 返回 0 当作实验成功。", str(summary_path)))
+    elif summary_state != "loaded":
+        blockers.append(_blocker(f"invalid_experiment_iteration_summary_{summary_state}", "experiment_iteration_summary.json 不是有效 JSON 对象。", str(summary_path)))
+    elif not summary_status:
+        blockers.append(_blocker("empty_iteration_summary_status", "experiment_iteration_summary.json 缺少非空 status。", str(summary_path)))
+    else:
+        lowered = summary_status.lower().replace(" ", "_").replace("-", "_")
+        failed_terms = ("fail", "error", "block", "abort", "denied", "missing", "not_configured", "needs_human")
+        success_values = {"success", "succeeded", "passed", "pass", "completed", "complete", "done", "ok", "ready", "finished"}
+        skipped_values = {"skip", "skipped", "skip_claude", "dry_run"}
+        if lowered in skipped_values:
+            warnings.append(f"本轮为 {summary_status}，只能用于流程自测，不能作为论文实验成功证据。")
+        elif any(term in lowered for term in failed_terms):
+            blockers.append(_blocker("iteration_summary_status_failed", f"experiment_iteration_summary.json status={summary_status}。", str(summary_path)))
+        elif lowered not in success_values:
+            blockers.append(_blocker("iteration_summary_status_unrecognized", f"experiment_iteration_summary.json status={summary_status} 不是明确成功状态。", str(summary_path)))
+        elif not _summary_has_execution_evidence(iteration_summary, artifact_dir) and not validation_ran:
+            blockers.append(_blocker("missing_iteration_evidence", "summary 虽标记成功，但没有 metrics、commands、artifacts、evidence、logs 或包装器验证命令证据。", str(summary_path)))
+
+    if summary_state == "loaded":
+        declared_blockers = _summary_acceptance_blockers(iteration_summary)
+        if declared_blockers:
+            blockers.extend(declared_blockers)
+        elif _summary_acceptance_status_blocks(summary_acceptance_status):
+            blockers.append(_blocker("iteration_summary_acceptance_not_accepted", f"experiment_iteration_summary.json acceptance_status={summary_acceptance_status}。", str(summary_path)))
+
+    if blockers:
+        acceptance_status = _acceptance_failure_status(blockers)
+        effective_summary_path = _write_failure_summary_if_needed(artifact_dir, acceptance_status, blockers, summary_state, summary_path)
+        return {
+            "accepted": False,
+            "status": "failed",
+            "acceptance_status": acceptance_status,
+            "acceptance_blockers": blockers,
+            "acceptance_warnings": warnings,
+            "summary_status": summary_status,
+            "summary_acceptance_status": summary_acceptance_status,
+            "summary_path": effective_summary_path,
+            "permission_denials": denials,
+            "next_action": "修复 acceptance_blockers 中的真实阻塞后重新运行；本轮不得进入论文指标或成功结论。",
+        }
+
+    skipped = summary_status.lower().replace(" ", "_").replace("-", "_") in {"skip", "skipped", "skip_claude", "dry_run"}
+    return {
+        "accepted": True,
+        "status": "skipped" if skipped else "success",
+        "acceptance_status": "skipped_self_test" if skipped else "accepted",
+        "acceptance_blockers": [],
+        "acceptance_warnings": warnings,
+        "summary_status": summary_status,
+        "summary_acceptance_status": summary_acceptance_status,
+        "summary_path": str(summary_path),
+        "permission_denials": denials,
+        "next_action": "流程自测完成；正式科研仍需真实实验指标。" if skipped else "停止并分析证据",
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     plan = normalize_plan(args.plan)
@@ -266,8 +563,9 @@ def main(argv: list[str] | None = None) -> int:
         metric_name, metric_value = primary_metric(metrics, plan.metric)
         command_rc = int(validation_result.get("return_code") or 0)
         claude_rc = int(claude_result.get("return_code") or 0)
-        success = claude_rc == 0 and command_rc == 0
-        status = "success" if success else "failed"
+        acceptance = evaluate_iteration_acceptance(artifact_dir, claude_result, validation_result, metrics)
+        success = bool(acceptance.get("accepted")) and acceptance.get("status") == "success"
+        status = str(acceptance.get("status") or "failed")
         record = {
             "timestamp": now_iso(),
             "run_id": run_id,
@@ -285,20 +583,28 @@ def main(argv: list[str] | None = None) -> int:
             "metrics": metrics,
             "metric_name": metric_name,
             "metric_value": metric_value,
+            "acceptance_status": acceptance.get("acceptance_status", ""),
+            "acceptance_blockers": acceptance.get("acceptance_blockers", []),
+            "acceptance_warnings": acceptance.get("acceptance_warnings", []),
+            "experiment_iteration_summary_path": acceptance.get("summary_path", ""),
+            "experiment_iteration_summary_status": acceptance.get("summary_status", ""),
+            "experiment_iteration_summary_acceptance_status": acceptance.get("summary_acceptance_status", ""),
+            "permission_denials": acceptance.get("permission_denials", []),
             "claude_status": claude_result.get("status", ""),
             "claude_summary": summarize_claude_log(str(claude_result.get("log_path") or "")),
             "claude_log_path": claude_result.get("log_path", ""),
             "claude_prompt_path": claude_result.get("prompt_path", ""),
             "validation_log_path": validation_result.get("log_path", ""),
             "environment_lock_path": env_files.get("environment_lock_path", ""),
-            "next_action": "停止并分析证据" if success else "把本轮日志和失败原因交给下一轮 Claude 修复",
+            "next_action": acceptance.get("next_action", ""),
         }
         registry = upsert_record(registry_path, record)
         tables = write_record_tables(output_root, registry)
-        iteration_payload = {"record": record, "tables": tables, "claude_result": claude_result, "validation_result": validation_result}
+        iteration_payload = {"record": record, "tables": tables, "claude_result": claude_result, "validation_result": validation_result, "acceptance": acceptance}
         atomic_write_json(artifact_dir / "wrapper_iteration_result.json", iteration_payload)
         summary["iterations"].append(iteration_payload)
         summary["status"] = status
+        summary["acceptance_status"] = acceptance.get("acceptance_status", "")
         summary["record_tables"] = tables
         atomic_write_json(run_root / "run_summary.json", summary)
         final_rc = 0 if success else 1

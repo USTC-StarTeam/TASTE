@@ -454,16 +454,29 @@ def normalize_registry(payload: Any) -> tuple[list[dict[str, Any]], bool, dict[s
     return [], False, {}
 
 
+def registry_identity(row: dict[str, Any]) -> str:
+    run_id = str(row.get("run_id") or "").strip()
+    iteration = str(row.get("iteration") or "").strip()
+    if run_id and iteration:
+        return f"run:{run_id}:iteration:{iteration}"
+    if run_id:
+        return f"run:{run_id}"
+    artifact_path = str(row.get("artifact_path") or "").strip()
+    if artifact_path:
+        return f"artifact:{artifact_path}"
+    return "experiment:" + str(row.get("experiment_id") or row.get("name") or row.get("id") or "").strip()
+
+
 def upsert_registry(paths, row: dict[str, Any]) -> bool:
     registry_path = paths.state / "experiment_registry.json"
     raw = load_json(registry_path, [])
     rows, wrapped, wrapper = normalize_registry(raw)
-    target_id = str(row.get("experiment_id") or row.get("name") or "")
+    target_id = registry_identity(row)
     changed = False
     next_rows: list[dict[str, Any]] = []
     replaced = False
     for existing in rows:
-        existing_id = str(existing.get("experiment_id") or existing.get("name") or existing.get("id") or "")
+        existing_id = registry_identity(existing)
         if existing_id == target_id:
             if not replaced:
                 if existing != row:
@@ -996,9 +1009,134 @@ def finalize_artifact_contract(
     }
 
 
+def _first_numeric_metric(metrics: Any) -> tuple[str, Any]:
+    if not isinstance(metrics, dict):
+        return "", None
+    for key, value in metrics.items():
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            return str(key), value
+    return "", None
+
+
+def _blocker_summary(blockers: Any) -> str:
+    if not isinstance(blockers, list):
+        return ""
+    messages: list[str] = []
+    for item in blockers[:4]:
+        if isinstance(item, dict):
+            text = str(item.get("message") or item.get("code") or "").strip()
+        else:
+            text = str(item or "").strip()
+        if text:
+            messages.append(text)
+    return "; ".join(messages)
+
+
+def import_autonomous_wrapper_artifact(paths, artifact_dir: Path, *, dry_run: bool = False) -> dict[str, Any]:
+    wrapper_path = artifact_dir / "wrapper_iteration_result.json"
+    wrapper = load_json(wrapper_path, {})
+    if not isinstance(wrapper, dict) or not wrapper:
+        return {"artifact_dir": str(artifact_dir), "status": "skipped", "reason": "invalid wrapper_iteration_result.json"}
+    record = wrapper.get("record") if isinstance(wrapper.get("record"), dict) else {}
+    acceptance = wrapper.get("acceptance") if isinstance(wrapper.get("acceptance"), dict) else {}
+    summary = load_json(artifact_dir / "experiment_iteration_summary.json", {})
+    if not isinstance(summary, dict):
+        summary = {}
+    metrics = record.get("metrics") if isinstance(record.get("metrics"), dict) else summary.get("metrics") if isinstance(summary.get("metrics"), dict) else {}
+    metric_name = str(record.get("metric_name") or "").strip()
+    metric_value = record.get("metric_value")
+    if not metric_name or metric_value in (None, ""):
+        metric_name, metric_value = _first_numeric_metric(metrics)
+    blockers = record.get("acceptance_blockers") if isinstance(record.get("acceptance_blockers"), list) else acceptance.get("acceptance_blockers") if isinstance(acceptance.get("acceptance_blockers"), list) else []
+    acceptance_status = str(record.get("acceptance_status") or acceptance.get("acceptance_status") or "").strip()
+    status = str(record.get("status") or acceptance.get("status") or "failed").strip() or "failed"
+    run_id = str(record.get("run_id") or summary.get("run_id") or artifact_dir.parent.name).strip()
+    iteration = record.get("iteration") or summary.get("iteration") or ""
+    experiment_id = str(record.get("experiment_id") or summary.get("experiment_id") or artifact_dir.parent.name or artifact_dir.name).strip()
+    timestamp = str(record.get("timestamp") or summary.get("timestamp") or now_iso()).strip()
+    repo_path = str(record.get("repo_path") or summary.get("repo_path") or "").strip()
+    env_name = str(record.get("env_name") or summary.get("env_name") or "").strip()
+    blocker_text = _blocker_summary(blockers)
+    notes = "; ".join(
+        part
+        for part in [
+            "autonomous_wrapper_import",
+            f"acceptance_status={acceptance_status}" if acceptance_status else "",
+            f"summary_status={record.get('experiment_iteration_summary_status') or acceptance.get('summary_status') or summary.get('status') or ''}".strip(),
+            f"summary_acceptance_status={record.get('experiment_iteration_summary_acceptance_status') or acceptance.get('summary_acceptance_status') or summary.get('acceptance_status') or ''}".strip(),
+        ]
+        if part and not part.endswith("=")
+    )
+    row = {
+        "timestamp": timestamp,
+        "updated_at": now_iso(),
+        "finished_at": timestamp,
+        "run_id": run_id,
+        "iteration": iteration,
+        "experiment_id": experiment_id,
+        "name": experiment_id,
+        "repo": "",
+        "repo_name": Path(repo_path).name if repo_path else "",
+        "repo_path": repo_path,
+        "dataset": str(record.get("dataset") or summary.get("dataset") or ""),
+        "method": str(record.get("method") or summary.get("method") or "autonomous_experiment"),
+        "method_slug": str(record.get("method") or summary.get("method") or "autonomous_experiment"),
+        "status": status,
+        "metric_name": metric_name,
+        "metric_value": metric_value,
+        "metrics": metrics if isinstance(metrics, dict) else {},
+        "result": acceptance_status or status,
+        "acceptance_status": acceptance_status,
+        "acceptance_blockers": blockers,
+        "acceptance_warnings": record.get("acceptance_warnings") if isinstance(record.get("acceptance_warnings"), list) else acceptance.get("acceptance_warnings", []),
+        "permission_denials": record.get("permission_denials") if isinstance(record.get("permission_denials"), list) else acceptance.get("permission_denials", []),
+        "promotion_status": "blocked_not_promotable" if acceptance_status.startswith("blocked_") or status == "failed" else "candidate_observation_only",
+        "evidence_status": "blocked_not_promotable" if acceptance_status.startswith("blocked_") or status == "failed" else "candidate_observation_only",
+        "claim_verdict": "unsupported",
+        "audit_ready": False,
+        "artifact_path": str(artifact_dir),
+        "log_path": str(record.get("claude_log_path") or artifact_dir / "claude_stdout.log"),
+        "config_path": str(record.get("environment_lock_path") or ""),
+        "environment_lock_path": str(record.get("environment_lock_path") or ""),
+        "env_name": env_name,
+        "command": str(record.get("command") or ""),
+        "notes": notes,
+        "human_goal": "记录 web-framework-module 实验迭代验收结果，供项目 Claude 和 Web 使用；该记录不等同于论文实验成功。",
+        "counterexample_outcome": blocker_text or "本轮未通过 autonomous wrapper 验收门控。",
+        "next_action": str(record.get("next_action") or acceptance.get("next_action") or summary.get("next_action_detail") or summary.get("next_action") or "修复验收 blocker 后重新运行。"),
+        "experiment_iteration_summary_path": str(record.get("experiment_iteration_summary_path") or artifact_dir / "experiment_iteration_summary.json"),
+        "experiment_iteration_summary_status": str(record.get("experiment_iteration_summary_status") or acceptance.get("summary_status") or summary.get("status") or ""),
+        "experiment_iteration_summary_acceptance_status": str(record.get("experiment_iteration_summary_acceptance_status") or acceptance.get("summary_acceptance_status") or summary.get("acceptance_status") or ""),
+        "wrapper_iteration_result_path": str(wrapper_path),
+    }
+    if dry_run:
+        return {
+            "artifact_dir": str(artifact_dir),
+            "status": "would_import_autonomous_wrapper",
+            "changed": False,
+            "experiment_id": experiment_id,
+            "run_id": run_id,
+            "acceptance_status": acceptance_status,
+        }
+    changed = upsert_registry(paths, row)
+    return {
+        "artifact_dir": str(artifact_dir),
+        "status": "imported_autonomous_wrapper",
+        "row_status": status,
+        "changed": changed,
+        "experiment_id": experiment_id,
+        "run_id": run_id,
+        "acceptance_status": acceptance_status,
+    }
+
+
 def import_artifact(paths, artifact_dir: Path, *, require_completed: bool = True, dry_run: bool = False) -> dict[str, Any]:
     artifact_dir = artifact_dir.expanduser().resolve()
     artifact_text = str(artifact_dir)
+    if (artifact_dir / "wrapper_iteration_result.json").exists():
+        return import_autonomous_wrapper_artifact(paths, artifact_dir, dry_run=dry_run)
     if "/fresh_base_reference_reproduction/" in artifact_text or artifact_dir.name.startswith("selected_base_reference_"):
         return {"artifact_dir": artifact_text, "status": "skipped", "reason": "reference reproduction artifacts are managed by reference_reproduction_gate, not generic candidate import"}
     local_contract = load_json(artifact_dir / "run_contract.json", {})

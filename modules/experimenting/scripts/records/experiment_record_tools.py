@@ -194,7 +194,26 @@ def infer_goal(row: dict[str, Any], method_labels: dict[str, Any] | None = None,
     return one_line(readable_goal(row, method_labels, dataset_labels, role_policy), 220)
 
 
+def acceptance_gate_text(row: dict[str, Any]) -> str:
+    status = str(row.get("acceptance_status") or "").strip()
+    blockers = row.get("acceptance_blockers") if isinstance(row.get("acceptance_blockers"), list) else []
+    messages: list[str] = []
+    for item in blockers[:3]:
+        if isinstance(item, dict):
+            text = str(item.get("message") or item.get("code") or "").strip()
+        else:
+            text = str(item or "").strip()
+        if text:
+            messages.append(text)
+    if status or messages:
+        return one_line("；".join([part for part in [status, *messages] if part]), 420)
+    return ""
+
+
 def audit_text(row: dict[str, Any]) -> str:
+    gate = acceptance_gate_text(row)
+    if gate:
+        return "验收阻断：" + gate
     status = str(row.get("status") or "").strip().lower()
     if status == "running":
         epoch = row.get("progress_epoch")
@@ -229,6 +248,9 @@ def reflection(
         metric_hint = (metric_hint + "，" if metric_hint else "") + f"最好记录={format_metric(best_ndcg)}"
     comparison_status = str(row.get("comparison_status") or row.get("comparability_status") or "").strip().lower()
     evidence_status = str(row.get("evidence_status") or "").strip().lower()
+    gate = acceptance_gate_text(row)
+    if gate:
+        return one_line("实验验收未通过：" + gate + "。该记录不能支撑论文结论，需要重构实验计划或补齐缺失流水线。", 420)
     if status.lower() in {"invalidated", "obsolete"} or comparison_status in {"not_comparable", "incomparable"} or evidence_status in {"invalidated", "not_promotable"}:
         detail = counter or novelty or str(row.get("notes") or "") or "该记录已失效或不可比，不能作为当前论文证据。"
         return one_line(detail, 360)
@@ -286,6 +308,10 @@ def reflection(
 
 
 def next_action(row: dict[str, Any]) -> str:
+    gate = acceptance_gate_text(row)
+    if gate:
+        explicit = str(row.get("next_action") or "").strip()
+        return one_line(explicit or "根据验收 blocker 重构实验计划，补齐生成/评估流水线后再运行；当前记录不能进入论文结论。", 260)
     if str(row.get("status") or "").strip().lower() == "running":
         return "等待训练进程结束；随后写本地审计、登记最终指标并刷新所有门控"
     decision = str(row.get("decision") or "").strip()
@@ -311,7 +337,7 @@ def next_action(row: dict[str, Any]) -> str:
 
 
 def evidence_paths(row: dict[str, Any]) -> str:
-    keys = ["artifact_path", "metrics_path", "bad_case_path", "audit_path", "failure_analysis_path"]
+    keys = ["artifact_path", "experiment_iteration_summary_path", "wrapper_iteration_result_path", "metrics_path", "bad_case_path", "audit_path", "failure_analysis_path"]
     values = []
     for key in keys:
         value = str(row.get(key) or "").strip()
