@@ -16,7 +16,7 @@ from typing import Any
 MODULE_ROOT = Path(__file__).resolve().parents[2]
 REPO_ROOT = MODULE_ROOT.parents[1]
 RUNS_ROOT = MODULE_ROOT / "runs"
-DECISION_POLICY_VERSION = "environment.deployment_decision.v78"
+DECISION_POLICY_VERSION = "environment.deployment_decision.v79"
 APPROVAL_GATE_REQUIRED_CHECKS = (
     "repository_source",
     "repository_documentation",

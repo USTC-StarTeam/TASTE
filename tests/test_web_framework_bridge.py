@@ -26,6 +26,43 @@ def _make_project(projects: Path, name: str = "demo") -> Path:
     return root
 
 
+def _ready_environment_handoff(repo_path: Path, conda_prefix: Path, *, data_dir: Path | None = None, run_id: str = "env_run", selected: dict | None = None) -> dict:
+    checks = [
+        {"name": name, "passed": True, "reason": "pytest handoff fixture"}
+        for name in [
+            "repository_source",
+            "conda_environment",
+            "machine_fit",
+            "dataset_runtime",
+            "required_commands",
+            "runtime_smoke",
+            "paper_config_alignment",
+            "workspace_write_audit",
+        ]
+    ]
+    policy = project_bridge.ENVIRONMENT_HANDOFF_POLICY_VERSION
+    data_dir = data_dir or repo_path.parent / "data"
+    payload = {
+        "status": "ready_for_experimenting",
+        "valid": True,
+        "repo_path": str(repo_path),
+        "conda_env_prefix": str(conda_prefix),
+        "experiment_python": str(conda_prefix / "bin" / "python"),
+        "environment_handoff": {
+            "policy_version": policy,
+            "ready_for_experimenting": True,
+            "run_id": run_id,
+            "repo": {"repo_path": str(repo_path), "repo_url": "https://github.com/example/repo", "head_commit": "abc"},
+            "conda": {"prefix": str(conda_prefix), "env_name": conda_prefix.name, "python": str(conda_prefix / "bin" / "python")},
+            "data": {"run_data_dir": str(data_dir)},
+            "handoff_gate": {"policy_version": policy, "passed": True, "missing": [], "checks": checks},
+        },
+    }
+    if selected:
+        payload["selected"] = selected
+    return payload
+
+
 def test_web_environment_action_uses_framework_single_stage(monkeypatch, tmp_path):
     projects = tmp_path / "projects"
     _make_project(projects, "demo")
@@ -89,16 +126,7 @@ def test_web_experiment_action_prefers_environment_handoff(monkeypatch, tmp_path
     handoff_repo.mkdir(parents=True)
     (handoff_env / "bin").mkdir(parents=True)
     (handoff_env / "bin" / "python").write_text("", encoding="utf-8")
-    (root / "state" / "environment_handoff.json").write_text(json.dumps({
-        "status": "ready_for_experimenting",
-        "valid": True,
-        "repo_path": str(handoff_repo),
-        "conda_env_prefix": str(handoff_env),
-        "environment_handoff": {
-            "repo": {"repo_path": str(handoff_repo), "repo_url": "https://github.com/example/repo"},
-            "conda": {"prefix": str(handoff_env), "env_name": "rigid"},
-        },
-    }), encoding="utf-8")
+    (root / "state" / "environment_handoff.json").write_text(json.dumps(_ready_environment_handoff(handoff_repo, handoff_env)), encoding="utf-8")
     (root / "state" / "full_research_cycle.json").write_text(json.dumps({"status": "blocked_fresh_base_data_required"}), encoding="utf-8")
     monkeypatch.setattr(project_bridge, "PROJECTS", projects)
     monkeypatch.setattr(project_bridge, "project_target_venue", lambda project, default="": default or "ICLR")
@@ -113,6 +141,51 @@ def test_web_experiment_action_prefers_environment_handoff(monkeypatch, tmp_path
     assert f"--conda-env {handoff_env}" in module_arg
 
 
+def test_web_rejects_stale_environment_handoff_policy(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    root = _make_project(projects, "demo")
+    handoff_repo = tmp_path / "environment" / "repo"
+    handoff_env = tmp_path / "environment" / "conda_envs" / "rigid"
+    handoff_repo.mkdir(parents=True)
+    (handoff_env / "bin").mkdir(parents=True)
+    (handoff_env / "bin" / "python").write_text("", encoding="utf-8")
+    stale = _ready_environment_handoff(handoff_repo, handoff_env)
+    stale["environment_handoff"]["policy_version"] = "environment.deployment_decision.v78"
+    stale["environment_handoff"]["handoff_gate"]["policy_version"] = "environment.deployment_decision.v78"
+    (root / "state" / "environment_handoff.json").write_text(json.dumps(stale), encoding="utf-8")
+    (root / "state" / "evidence_ready_repo_selection.json").write_text(json.dumps({
+        "status": "ready_for_experimenting",
+        "selection_gate": "environment_handoff_ready_for_experimenting",
+        "accepted_by_claude": True,
+        "fresh_find_run_id": "find_current",
+        "selected_plan_id": "plan_current",
+        "selected": stale["selected"] if isinstance(stale.get("selected"), dict) else {
+            "repo_path": str(handoff_repo),
+            "local_path": str(handoff_repo),
+            "selection_gate": "environment_handoff_ready_for_experimenting",
+            "fresh_find_run_id": "find_current",
+            "selected_plan_id": "plan_current",
+        },
+    }), encoding="utf-8")
+    (root / "state" / "active_repo.json").write_text(json.dumps({
+        "repo_path": str(handoff_repo),
+        "local_path": str(handoff_repo),
+        "selection_gate": "environment_handoff_ready_for_experimenting",
+    }), encoding="utf-8")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.setattr(project_bridge, "project_target_venue", lambda project, default="": default or "ICLR")
+    monkeypatch.setattr(project_bridge, "management_python", lambda: "/env/bin/python")
+    monkeypatch.setattr(project_bridge, "_literature_recommendation_gate_is_blocked", lambda project: False)
+
+    assert project_bridge._environment_handoff_ready_for_experimenting(root) is False
+    assert project_bridge._runtime_with_environment_handoff(root, {"conda_env": "old_env", "experiment_python": "/old/bin/python"}) == {"conda_env": "old_env", "experiment_python": "/old/bin/python"}
+    env = project_bridge._current_environment_selection(root)
+    assert env.get("valid") is False
+    assert env.get("reason") == "stale_environment_handoff_projection"
+    _project, cmd = project_bridge.build_command({"project": "demo", "action": "experiment", "venue": "ICLR", "iterations": 1, "skip_claude": True})
+    assert "blocked_fresh_base_gate_required" in " ".join(cmd)
+
+
 
 
 def test_web_summary_does_not_report_not_started_after_synthetic_experiment(monkeypatch, tmp_path):
@@ -122,18 +195,7 @@ def test_web_summary_does_not_report_not_started_after_synthetic_experiment(monk
     env_prefix = tmp_path / "environment" / "conda_envs" / "protdis_env"
     (env_prefix / "bin").mkdir(parents=True)
     (env_prefix / "bin" / "python").write_text("", encoding="utf-8")
-    (root / "state" / "environment_handoff.json").write_text(json.dumps({
-        "status": "ready_for_experimenting",
-        "valid": True,
-        "repo_path": str(repo),
-        "conda_env_prefix": str(env_prefix),
-        "environment_handoff": {
-            "ready_for_experimenting": True,
-            "repo": {"repo_path": str(repo), "repo_url": "https://github.com/example/repo"},
-            "conda": {"prefix": str(env_prefix), "python": str(env_prefix / "bin" / "python")},
-            "data": {"run_data_dir": str(tmp_path / "environment" / "data")},
-        },
-    }), encoding="utf-8")
+    (root / "state" / "environment_handoff.json").write_text(json.dumps(_ready_environment_handoff(repo, env_prefix, data_dir=tmp_path / "environment" / "data")), encoding="utf-8")
     (root / "state" / "full_research_cycle.json").write_text(json.dumps({"status": "not_started", "summary": "旧 not_started"}), encoding="utf-8")
     (root / "state" / "experiment_registry.json").write_text(json.dumps([
         {
@@ -180,17 +242,7 @@ def test_web_summary_keeps_paper_blocked_after_accepted_real_data_probe(monkeypa
     env_prefix = tmp_path / "environment" / "conda_envs" / "protdis_env"
     (env_prefix / "bin").mkdir(parents=True)
     (env_prefix / "bin" / "python").write_text("", encoding="utf-8")
-    (root / "state" / "environment_handoff.json").write_text(json.dumps({
-        "status": "ready_for_experimenting",
-        "valid": True,
-        "repo_path": str(repo),
-        "conda_env_prefix": str(env_prefix),
-        "environment_handoff": {
-            "ready_for_experimenting": True,
-            "repo": {"repo_path": str(repo), "repo_url": "https://github.com/example/repo"},
-            "conda": {"prefix": str(env_prefix), "python": str(env_prefix / "bin" / "python")},
-        },
-    }), encoding="utf-8")
+    (root / "state" / "environment_handoff.json").write_text(json.dumps(_ready_environment_handoff(repo, env_prefix)), encoding="utf-8")
     (root / "state" / "full_research_cycle.json").write_text(json.dumps({"status": "not_started", "summary": "旧 not_started"}), encoding="utf-8")
     (root / "state" / "experiment_registry.json").write_text(json.dumps([
         {
@@ -258,28 +310,18 @@ def test_web_public_state_prefers_environment_handoff_runtime(monkeypatch, tmp_p
     handoff_repo.mkdir(parents=True)
     (handoff_env / "bin").mkdir(parents=True)
     (handoff_env / "bin" / "python").write_text("", encoding="utf-8")
-    (root / "state" / "environment_handoff.json").write_text(json.dumps({
-        "status": "ready_for_experimenting",
-        "valid": True,
-        "repo_path": str(handoff_repo),
-        "conda_env_prefix": str(handoff_env),
-        "experiment_python": str(handoff_env / "bin" / "python"),
-        "selected": {
+    (root / "state" / "environment_handoff.json").write_text(json.dumps(_ready_environment_handoff(
+        handoff_repo,
+        handoff_env,
+        data_dir=tmp_path / "environment" / "data",
+        selected={
             "repo_path": str(handoff_repo),
             "local_path": str(handoff_repo),
             "fresh_find_run_id": "find_current",
             "selected_plan_id": "plan_current",
             "selection_stage": "environment_claude_code",
         },
-        "environment_handoff": {
-            "ready_for_experimenting": True,
-            "run_id": "env_run",
-            "repo": {"repo_path": str(handoff_repo), "repo_url": "https://github.com/example/repo", "head_commit": "abc"},
-            "conda": {"prefix": str(handoff_env), "env_name": "rigid", "python": str(handoff_env / "bin" / "python")},
-            "data": {"run_data_dir": str(tmp_path / "environment" / "data")},
-            "pending_downstream_metrics": [{"metric": "designability", "status": "pending_experimenting_evaluation"}],
-        },
-    }), encoding="utf-8")
+    )), encoding="utf-8")
     monkeypatch.setattr(project_bridge, "PROJECTS", projects)
 
     prefs = project_bridge._public_run_preferences("demo", root, {"conda_env": "old_env", "target_venue": "ICLR"}, selection={})

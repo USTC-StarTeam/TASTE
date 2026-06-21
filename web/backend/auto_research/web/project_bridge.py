@@ -58,6 +58,7 @@ COMPACT_PROJECT_SUMMARY_TTL_SEC = float(os.environ.get("COMPACT_PROJECT_SUMMARY_
 PROCESS_ROWS_TTL_SEC = float(os.environ.get("PROCESS_ROWS_TTL_SEC", "1.0") or 1.0)
 EXPERIMENT_SYNC_TTL_SEC = float(os.environ.get("EXPERIMENT_SYNC_TTL_SEC", "30.0") or 30.0)
 RUNTIME_DIAGNOSTICS_TTL_SEC = float(os.environ.get("RUNTIME_DIAGNOSTICS_TTL_SEC", "300.0") or 300.0)
+ENVIRONMENT_HANDOFF_POLICY_VERSION = "environment.deployment_decision.v79"
 
 
 def _safe_project(name: str) -> str:
@@ -355,6 +356,48 @@ def _project_environment_handoff(root: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _environment_handoff_payload(handoff: dict[str, Any]) -> dict[str, Any]:
+    payload = handoff.get("environment_handoff") if isinstance(handoff.get("environment_handoff"), dict) else {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _environment_handoff_gate(handoff: dict[str, Any]) -> dict[str, Any]:
+    payload = _environment_handoff_payload(handoff)
+    gate = payload.get("handoff_gate") if isinstance(payload.get("handoff_gate"), dict) else {}
+    return gate if isinstance(gate, dict) else {}
+
+
+def _environment_handoff_policy_current(handoff: dict[str, Any]) -> bool:
+    payload = _environment_handoff_payload(handoff)
+    gate = _environment_handoff_gate(handoff)
+    return bool(
+        payload
+        and gate
+        and str(payload.get("policy_version") or "") == ENVIRONMENT_HANDOFF_POLICY_VERSION
+        and str(gate.get("policy_version") or "") == ENVIRONMENT_HANDOFF_POLICY_VERSION
+    )
+
+
+def _environment_handoff_gate_passed(handoff: dict[str, Any]) -> bool:
+    payload = _environment_handoff_payload(handoff)
+    gate = _environment_handoff_gate(handoff)
+    if not _environment_handoff_policy_current(handoff):
+        return False
+    missing = gate.get("missing")
+    missing_empty = missing in (None, [], "")
+    checks = gate.get("checks") if isinstance(gate.get("checks"), list) else []
+    if not checks:
+        return False
+    return bool(
+        handoff.get("status") == "ready_for_experimenting"
+        and handoff.get("valid") is True
+        and payload.get("ready_for_experimenting") is True
+        and gate.get("passed") is True
+        and missing_empty
+        and all(isinstance(row, dict) and row.get("passed") is True for row in checks)
+    )
+
+
 FRESH_BASE_BLOCK_STATUSES = {
     "blocked_fresh_base_data_required",
     "blocked_fresh_base_reference_probe_required",
@@ -371,12 +414,7 @@ def _fresh_base_block_status(value: Any) -> bool:
 
 def _environment_handoff_ready_for_experimenting(root: Path) -> bool:
     handoff = _project_environment_handoff(root)
-    env_handoff = handoff.get("environment_handoff") if isinstance(handoff.get("environment_handoff"), dict) else {}
-    return bool(
-        handoff.get("status") == "ready_for_experimenting"
-        or handoff.get("valid") is True
-        or env_handoff.get("ready_for_experimenting") is True
-    )
+    return _environment_handoff_gate_passed(handoff)
 
 
 def _handoff_repo_path(handoff: dict[str, Any]) -> str:
@@ -404,7 +442,7 @@ def _handoff_conda_env(handoff: dict[str, Any]) -> str:
 
 def _project_selected_repo_path(root: Path) -> str:
     handoff = _project_environment_handoff(root)
-    if handoff.get("status") == "ready_for_experimenting" or handoff.get("valid") is True:
+    if _environment_handoff_gate_passed(handoff):
         repo_path = _handoff_repo_path(handoff)
         if repo_path:
             return repo_path
@@ -433,7 +471,8 @@ def _project_conda_env(project: str, root: Path, cfg: dict[str, Any], payload: d
     env_name = str(payload.get("conda_env") or "").strip()
     if env_name:
         return env_name
-    handoff_env = _handoff_conda_env(_project_environment_handoff(root))
+    handoff = _project_environment_handoff(root)
+    handoff_env = _handoff_conda_env(handoff) if _environment_handoff_gate_passed(handoff) else ""
     if handoff_env:
         return handoff_env
     active = _active_env_name(root, cfg)
@@ -688,6 +727,8 @@ def _handoff_experiment_python(handoff: dict[str, Any]) -> str:
 def _runtime_with_environment_handoff(root: Path, runtime_public: dict[str, Any] | None) -> dict[str, Any]:
     runtime = dict(runtime_public or {}) if isinstance(runtime_public, dict) else {}
     handoff = _project_environment_handoff(root)
+    if not _environment_handoff_gate_passed(handoff):
+        return runtime
     handoff_env = _handoff_conda_env(handoff)
     handoff_python = _handoff_experiment_python(handoff)
     if handoff_env:
@@ -701,10 +742,11 @@ def _runtime_with_environment_handoff(root: Path, runtime_public: dict[str, Any]
 def _runtime_path_head_with_environment_handoff(root: Path, runtime_public: dict[str, Any] | None, path_head: list[Any]) -> list[str]:
     items = [str(item) for item in path_head if str(item or "").strip()]
     runtime = runtime_public if isinstance(runtime_public, dict) else {}
+    handoff = _project_environment_handoff(root)
     handoff_env = str(
         runtime.get("conda_env_prefix")
         or runtime.get("conda_env")
-        or _handoff_conda_env(_project_environment_handoff(root))
+        or (_handoff_conda_env(handoff) if _environment_handoff_gate_passed(handoff) else "")
         or ""
     ).strip()
     if not handoff_env:
@@ -2196,22 +2238,36 @@ def _path_is_within(path_value: Any, parent_value: Any) -> bool:
 
 
 def _current_selected_repo_path(root: Path) -> Path | None:
+    handoff = _project_environment_handoff(root)
+    if _environment_handoff_gate_passed(handoff):
+        value = _handoff_repo_path(handoff)
+        if value:
+            path = Path(value)
+            if not path.is_absolute():
+                path = root / path
+            if path.exists():
+                return path.resolve()
     for rel in [
-        "state/environment_handoff.json",
         "state/evidence_ready_repo_selection.json",
         "state/active_repo.json",
         "state/fresh_research_base.json",
         "state/fresh_base_implementation_plan.json",
     ]:
         payload = _read_json(root / rel, {})
-        candidates: list[Any] = []
-        if isinstance(payload, dict):
-            candidates.append(payload)
-            for key in ["selected", "active_repo", "repo", "fresh_paper_base"]:
-                if isinstance(payload.get(key), dict):
-                    candidates.append(payload[key])
+        if not isinstance(payload, dict):
+            continue
+        gate = str(payload.get("selection_gate") or payload.get("raw_selection_gate") or "").strip()
+        if gate == "environment_handoff_ready_for_experimenting":
+            continue
+        candidates: list[Any] = [payload]
+        for key in ["selected", "active_repo", "repo", "fresh_paper_base"]:
+            if isinstance(payload.get(key), dict):
+                candidates.append(payload[key])
         for item in candidates:
             if not isinstance(item, dict):
+                continue
+            item_gate = str(item.get("selection_gate") or item.get("raw_selection_gate") or "").strip()
+            if item_gate == "environment_handoff_ready_for_experimenting":
                 continue
             for key in ["repo_path", "local_path", "path", "selected_repo_path", "active_repo_path"]:
                 value = str(item.get(key) or "").strip()
@@ -2725,12 +2781,8 @@ def _current_environment_selection(root: Path) -> dict[str, Any]:
         return invalid_selection("missing_current_find_selected_plan_id")
 
     handoff = _project_environment_handoff(root)
-    handoff_payload = handoff.get("environment_handoff") if isinstance(handoff.get("environment_handoff"), dict) else {}
-    handoff_ready = bool(
-        handoff.get("status") == "ready_for_experimenting"
-        or handoff.get("valid") is True
-        or handoff_payload.get("ready_for_experimenting") is True
-    )
+    handoff_payload = _environment_handoff_payload(handoff)
+    handoff_ready = _environment_handoff_gate_passed(handoff)
     if handoff_ready:
         selected = dict(handoff.get("selected") if isinstance(handoff.get("selected"), dict) else {})
         repo_path = _handoff_repo_path(handoff)
@@ -2844,6 +2896,8 @@ def _current_environment_selection(root: Path) -> dict[str, Any]:
     stage = str(selection.get("selection_stage") or selection.get("selected_by_stage") or selected.get("selection_stage") or selected.get("selected_by_stage") or "").strip()
     decision = selection.get("claude_topic_decision") if isinstance(selection.get("claude_topic_decision"), dict) else {}
     raw_selection_gate = str(selection.get("selection_gate") or selected.get("selection_gate") or "").strip()
+    if raw_selection_gate == "environment_handoff_ready_for_experimenting":
+        return viability_mismatch or invalid_selection("stale_environment_handoff_projection")
     pending_candidate_blocked = raw_selection_gate == "blocked_pending_data_loader_for_claude_best_candidate"
     candidate_base_switch_blocked = raw_selection_gate == "blocked_candidate_base_switch_gate_required"
     pending_loader_selection = bool(
@@ -8012,7 +8066,8 @@ def _active_repo_path(root: Path) -> str:
 
 
 def _active_env_name(root: Path, cfg: dict[str, Any]) -> str:
-    handoff_env = _handoff_conda_env(_project_environment_handoff(root))
+    handoff = _project_environment_handoff(root)
+    handoff_env = _handoff_conda_env(handoff) if _environment_handoff_gate_passed(handoff) else ""
     if handoff_env:
         return handoff_env
     bootstrap = _read_json(root / "state" / "repo_env_bootstrap.json", {})
@@ -14146,6 +14201,9 @@ def _fresh_base_data_is_blocked(project: str) -> bool:
     root = PROJECTS / project
     if _environment_handoff_ready_for_experimenting(root):
         return False
+    env_selection = _current_environment_selection(root)
+    if not env_selection.get("valid") or str(env_selection.get("reason") or "") == "stale_environment_handoff_projection":
+        return True
     full = _read_json(root / "state" / "full_research_cycle.json", {})
     gate = _read_json(root / "state" / "reference_reproduction_gate.json", {})
     blocker_plan = _read_json(root / "state" / "blocker_action_plan.json", {})

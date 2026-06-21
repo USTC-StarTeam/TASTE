@@ -1592,6 +1592,10 @@ class JobState:
                     progress_payload["phase"] = str(result_payload.get("status") or progress_payload.get("phase") or "paper")
         if compact and public_stage == "environment":
             decision_projection = _environment_decision_public_projection(self.job_id, self.run_id, result_payload if isinstance(result_payload, dict) else self.result, self.created_at)
+            project_id = _project_from_job_payload(self.job_id, {"result": result_payload} if isinstance(result_payload, dict) else {"result": self.result}, self)
+            stale_projection = _stale_environment_handoff_job_projection(project_id)
+            if stale_projection and decision_projection.get("status") == "ready_for_experimenting":
+                decision_projection = {**decision_projection, **stale_projection}
             if decision_projection:
                 progress_payload = dict(progress_payload if isinstance(progress_payload, dict) else {})
                 progress_payload.update({
@@ -9161,18 +9165,36 @@ def _summary_handoff_ready_for_experimenting(summary: Any) -> bool:
         return False
     stages = summary.get("stages") if isinstance(summary.get("stages"), dict) else {}
     environment = stages.get("environment") if isinstance(stages.get("environment"), dict) else {}
-    experiment = stages.get("experiment") if isinstance(stages.get("experiment"), dict) else {}
     handoff = summary.get("environment_handoff") if isinstance(summary.get("environment_handoff"), dict) else {}
-    if handoff.get("ready_for_experimenting") is True:
+    selection = environment.get("selection") if isinstance(environment.get("selection"), dict) else {}
+    if str(selection.get("reason") or "") == "stale_environment_handoff_projection":
+        return False
+    if handoff.get("ready_for_experimenting") is True and str(handoff.get("policy_version") or ""):
         return True
-    status_values = [
-        summary.get("status"),
-        environment.get("status"),
-        environment.get("repo_status"),
-        experiment.get("status"),
-        handoff.get("status"),
-    ]
+    status_values = [environment.get("status"), environment.get("repo_status"), handoff.get("status")]
     return any(str(value or "").strip().lower() == "ready_for_experimenting" for value in status_values)
+
+
+def _stale_environment_handoff_job_projection(project_id: Any) -> dict[str, str]:
+    project = str(project_id or "").strip()
+    if not project:
+        return {}
+    summary = _job_list_project_summary(project, compact=True)
+    if not isinstance(summary, dict) or _summary_handoff_ready_for_experimenting(summary):
+        return {}
+    stages = summary.get("stages") if isinstance(summary.get("stages"), dict) else {}
+    environment = stages.get("environment") if isinstance(stages.get("environment"), dict) else {}
+    selection = environment.get("selection") if isinstance(environment.get("selection"), dict) else {}
+    stale = str(selection.get("reason") or "") == "stale_environment_handoff_projection"
+    current_status = str(summary.get("status") or environment.get("status") or "").strip()
+    if not stale and current_status != "blocked_environment_base_selection_required":
+        return {}
+    message = str(summary.get("summary") or environment.get("summary") or "历史 environment handoff 已被当前门控失效；请重新运行环境阶段。")
+    return {
+        "status": "stale",
+        "phase": current_status or "blocked_environment_base_selection_required",
+        "summary": "历史环境交接已被当前环境门控失效：" + message,
+    }
 
 
 def _project_handoff_ready_for_experimenting(project_id: Any) -> bool:
@@ -9437,6 +9459,10 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
             compact_result or result,
             item.get("created_at", ""),
         )
+        project_id = str(compact_result.get("project") or result.get("project") or _project_from_job_payload(item.get("job_id"), item) or "").strip()
+        stale_projection = _stale_environment_handoff_job_projection(project_id)
+        if stale_projection and decision_projection.get("status") == "ready_for_experimenting":
+            decision_projection = {**decision_projection, **stale_projection}
         if decision_projection:
             public_status = str(decision_projection.get("status") or public_status or "blocked")
             public_progress.update({
