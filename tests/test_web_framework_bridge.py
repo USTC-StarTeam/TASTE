@@ -187,6 +187,46 @@ def test_web_rejects_stale_environment_handoff_policy(monkeypatch, tmp_path):
 
 
 
+def test_web_summary_filters_cached_experiment_runtime_without_current_handoff(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    root = _make_project(projects, "demo")
+    stale_env = tmp_path / "old" / "conda_envs" / "protdis_env"
+    (stale_env / "bin").mkdir(parents=True)
+    stale_python = stale_env / "bin" / "python"
+    stale_python.write_text("", encoding="utf-8")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.setattr(project_bridge, "_framework_public_status_for_project", lambda project: {})
+    monkeypatch.setattr(project_bridge, "_remote_process_rows", lambda: [])
+    monkeypatch.setattr(project_bridge, "_current_project_source_selection", lambda project, root: {})
+    monkeypatch.setattr(project_bridge, "_cached_runtime_diagnostics", lambda project, cfg=None: {
+        "project": project,
+        "runtime": {
+            "conda_env": str(stale_env),
+            "conda_env_prefix": str(stale_env),
+            "experiment_python": str(stale_python),
+            "conda_base": str(tmp_path / "miniforge"),
+        },
+        "checks": {
+            "experiment_python": {"path": str(stale_python), "ok": True, "version": "Python 3.11", "reason": "ok"},
+        },
+        "path_head": [str(stale_env / "bin"), "/usr/bin"],
+        "status": "ok",
+    })
+
+    summary = project_bridge._fast_project_summary("demo", root, json.loads((root / "project.json").read_text(encoding="utf-8")))
+
+    assert "experiment_python" not in summary["runtime"]["runtime"]
+    assert "conda_env" not in summary["runtime"]["runtime"]
+    assert summary["runtime"]["checks"]["experiment_python"] == {
+        "path": "",
+        "ok": False,
+        "version": "",
+        "reason": "waiting for current environment handoff",
+    }
+    assert str(stale_env / "bin") not in summary["runtime"]["path_head"]
+    assert "experiment_python" not in summary["run_preferences"].get("runtime", {})
+
+
 
 def test_web_summary_does_not_report_not_started_after_synthetic_experiment(monkeypatch, tmp_path):
     projects = tmp_path / "projects"

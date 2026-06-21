@@ -672,6 +672,42 @@ def _public_runtime_with_valid_handoff(root: Path, runtime_public: dict[str, Any
     return runtime
 
 
+def _public_runtime_payload_with_valid_handoff(root: Path, payload: dict[str, Any] | None) -> dict[str, Any]:
+    out = dict(payload or {}) if isinstance(payload, dict) else {}
+    runtime = _public_runtime_with_valid_handoff(root, out.get("runtime") if isinstance(out.get("runtime"), dict) else {})
+    out["runtime"] = runtime
+    checks = dict(out.get("checks") if isinstance(out.get("checks"), dict) else {})
+    handoff_ready = _environment_handoff_gate_passed(_project_environment_handoff(root))
+
+    def check_path(path_value: Any, missing_reason: str) -> dict[str, Any]:
+        path = str(path_value or "").strip()
+        ok = bool(path and Path(path).expanduser().exists())
+        return {"path": path, "ok": ok, "version": "", "reason": "ok" if ok else missing_reason}
+
+    if handoff_ready:
+        checks["experiment_python"] = check_path(runtime.get("experiment_python"), "experiment Python does not exist")
+    else:
+        checks["experiment_python"] = {
+            "path": "",
+            "ok": False,
+            "version": "",
+            "reason": "waiting for current environment handoff",
+        }
+    out["checks"] = checks
+    raw_path_head = out.get("path_head") if isinstance(out.get("path_head"), list) else []
+    if handoff_ready:
+        out["path_head"] = _runtime_path_head_with_environment_handoff(root, runtime, raw_path_head)
+    else:
+        out["path_head"] = [
+            str(item)
+            for item in raw_path_head
+            if not (str(item).endswith("/bin") and ("/envs/" in str(item) or "/conda_envs/" in str(item)))
+        ][:12]
+    if not handoff_ready and out.get("status") == "ok":
+        out["status"] = "needs_attention"
+    return out
+
+
 def _runtime_diagnostics_light(project: str, cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg = cfg if isinstance(cfg, dict) else {}
     root = PROJECTS / project
@@ -13206,13 +13242,8 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     runtime_public = _public_runtime_with_valid_handoff(root, runtime_public)
     runtime_public.pop("env_overrides", None)
     runtime_public.pop("extra_path", None)
-    runtime_compact = dict(runtime) if isinstance(runtime, dict) else {}
+    runtime_compact = _public_runtime_payload_with_valid_handoff(root, runtime)
     runtime_compact["runtime"] = runtime_public
-    runtime_compact["path_head"] = _runtime_path_head_with_environment_handoff(
-        root,
-        runtime_public,
-        runtime_compact.get("path_head") if isinstance(runtime_compact.get("path_head"), list) else [],
-    )
     run_preferences = _public_run_preferences(project, root, cfg, runtime_public, project_selection)
     state_compact = {
         "full_research_cycle": full_cycle_compact,
@@ -14136,7 +14167,7 @@ def project_summary(project: str, *, compact: bool = True) -> dict[str, Any]:
     public_literature_summary = public_projection.get("literature_survey") if isinstance(public_projection.get("literature_survey"), dict) else literature_summary
     public_full_cycle = public_projection.get("full_research_cycle") if isinstance(public_projection.get("full_research_cycle"), dict) else stages.get("experiment", {}).get("full_research_cycle", {})
     public_claude_status = public_projection.get("claude_status") if isinstance(public_projection.get("claude_status"), dict) else claude_status
-    public_runtime = public_projection.get("runtime") if isinstance(public_projection.get("runtime"), dict) else runtime
+    public_runtime = public_projection.get("runtime") if isinstance(public_projection.get("runtime"), dict) else _public_runtime_payload_with_valid_handoff(root, runtime)
     public_trajectory_system = public_projection.get("trajectory_system") if isinstance(public_projection.get("trajectory_system"), dict) else stages.get("experiment", {}).get("trajectory_system", {})
     state = {
         "discover_count": len(list((root / "discover").glob("*.json"))) if (root / "discover").exists() else 0,
