@@ -829,13 +829,19 @@ function sourceStatusHasUsableOpenReviewMetadata(item: any) {
   const categoryStatus = String(item?.category_status || "").toLowerCase();
   const hasOfficialCategories = Boolean(item?.has_official_categories) && !["no_official_categories", "missing_categories", "no_or_partial_categories"].includes(categoryStatus);
   const hasAbstracts = Boolean(item?.has_abstracts_in_title_index || item?.has_abstracts || item?.any_abstracts);
+  const metadataComplete = Boolean(item?.metadata_completeness_ok);
+  const titleIndexComplete = Boolean(item?.title_index_completeness_ok || item?.title_index_complete);
   const sourceVerified = Boolean(item?.source_verified || item?.official_title_index_verified || String(item?.source_scope || "") === "official_openreview_metadata");
-  return Boolean(item?.ok) && adapter.includes("openreview") && hasOfficialCategories && hasAbstracts && sourceVerified;
+  return Boolean(item?.ok) && adapter.includes("openreview") && hasOfficialCategories && hasAbstracts && metadataComplete && titleIndexComplete && sourceVerified;
 }
 
 function sourceStatusIsLimited(item: any) {
+  if (item?.limited || item?.metadata_completeness_limited) return true;
+  if (item && Object.prototype.hasOwnProperty.call(item, "metadata_completeness_ok") && !Boolean(item.metadata_completeness_ok)) return true;
+  if (item && Object.prototype.hasOwnProperty.call(item, "title_index_completeness_ok") && !Boolean(item.title_index_completeness_ok)) return true;
+  if (item && Object.prototype.hasOwnProperty.call(item, "title_index_complete") && !Boolean(item.title_index_complete)) return true;
   if (sourceStatusHasUsableOpenReviewMetadata(item)) return false;
-  return Boolean(item?.limited || item?.metadata_completeness_limited);
+  return false;
 }
 
 function sourceStatusMessageText(value: any, lang: Lang) {
@@ -2986,6 +2992,7 @@ function jobStatusLabel(status: any, lang: Lang = "zh") {
     error: { zh: "错误", en: "error" },
     cancelling: { zh: "停止中", en: "cancelling" },
     cancelled: { zh: "已取消", en: "cancelled" },
+    interrupted: { zh: "已停止", en: "interrupted" },
   };
   if (labels[value]) return labels[value][lang === "zh" ? "zh" : "en"];
   if (labels[normalized]) return labels[normalized][lang === "zh" ? "zh" : "en"];
@@ -3688,6 +3695,7 @@ function isStoppedWorkflowStatus(status: any) {
     normalized.startsWith("historical_") ||
     normalized.startsWith("blocked_") ||
     normalized.startsWith("cancelled") ||
+    normalized.startsWith("interrupted") ||
     normalized.startsWith("done") ||
     normalized.startsWith("complete") ||
     normalized.startsWith("error") ||
@@ -3743,7 +3751,7 @@ function normalizeJobForState(job: any): Job | null {
   if (!job || typeof job !== "object") return null;
   const jobId = String(job.job_id || "").trim();
   if (!jobId) return null;
-  const allowedStatuses = new Set<Job["status"]>(["queued", "running", "stale", "done", "blocked", "error", "cancelling", "cancelled", "preview_available", "needs_writing", "preview_pdf_blocked"]);
+  const allowedStatuses = new Set<Job["status"]>(["queued", "running", "stale", "interrupted", "done", "blocked", "error", "cancelling", "cancelled", "preview_available", "needs_writing", "preview_pdf_blocked"]);
   const rawStatusText = String(job.status || "queued");
   const rawStatus = rawStatusText as Job["status"];
   const status = (allowedStatuses.has(rawStatus) || rawStatusText.startsWith("blocked") || rawStatusText.startsWith("stale")) ? rawStatus : "queued";

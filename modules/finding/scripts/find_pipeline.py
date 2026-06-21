@@ -2329,6 +2329,28 @@ def _venue_title_index_cache_path() -> Path:
     return _find_cache_path("venue_title_indexes.json")
 
 
+def _venue_title_index_cache_paths() -> list[Path]:
+    root = Path(os.environ.get("WORKSPACE_ROOT") or ROOT).expanduser()
+    paths = [
+        _venue_title_index_cache_path(),
+        WORKFLOW_RUNTIME_DIR / "state" / "venue_title_indexes.json",
+        root / "runtime" / "state" / "venue_title_indexes.json",
+        root / "modules" / "finding" / ".runtime" / "state" / "venue_title_indexes.json",
+    ]
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for path in paths:
+        try:
+            resolved = path.resolve()
+        except Exception:
+            resolved = path
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(path)
+    return unique
+
+
 def _venue_title_index_cache_key(venue: dict, years: list[int]) -> str:
     payload = {
         "schema": VENUE_TITLE_INDEX_CACHE_SCHEMA_VERSION,
@@ -2367,18 +2389,23 @@ def _latest_project_find_results_title_index(venue: dict, years: list[int], limi
 
 
 def _load_venue_title_index_cache(venue: dict, years: list[int], limit: int | None) -> tuple[list[dict], str]:
-    path = _venue_title_index_cache_path()
-    cache = read_json(path, {}) if path.exists() else {}
-    entries = cache.get("entries") if isinstance(cache.get("entries"), dict) else {}
-    entry = entries.get(_venue_title_index_cache_key(venue, years)) if isinstance(entries, dict) else None
-    if isinstance(entry, dict) and entry.get("schema") == VENUE_TITLE_INDEX_CACHE_SCHEMA_VERSION:
+    key = _venue_title_index_cache_key(venue, years)
+    for path in _venue_title_index_cache_paths():
+        cache = read_json(path, {}) if path.exists() else {}
+        entries = cache.get("entries") if isinstance(cache.get("entries"), dict) else {}
+        entry = entries.get(key) if isinstance(entries, dict) else None
+        if not (isinstance(entry, dict) and entry.get("schema") == VENUE_TITLE_INDEX_CACHE_SCHEMA_VERSION):
+            continue
         papers = entry.get("papers")
-        if isinstance(papers, list) and papers:
-            rows = [dict(row) for row in papers if isinstance(row, dict)]
-            if limit and limit > 0:
-                rows = rows[:limit]
-            adapter = str(entry.get("adapter") or "cached_title_index")
-            return rows, f"{adapter}_cache"
+        if not (isinstance(papers, list) and papers):
+            continue
+        rows = [dict(row) for row in papers if isinstance(row, dict)]
+        if limit and limit > 0:
+            rows = rows[:limit]
+        adapter = str(entry.get("adapter") or "cached_title_index")
+        if path != _venue_title_index_cache_path():
+            _store_venue_title_index_cache(venue, years, rows, adapter)
+        return rows, f"{adapter}_cache"
     rows, adapter = _latest_project_find_results_title_index(venue, years, limit)
     if rows:
         _store_venue_title_index_cache(venue, years, rows, adapter)
@@ -2820,6 +2847,12 @@ def _venue_year_probe_timeout_sec() -> float:
 
 
 def _fetch_venue_title_index_online(venue: dict, years: list[int], limit: int | None) -> tuple[list[dict], str]:
+    # Reuse verified title-index caches before online ICML/OpenReview/DBLP fetches.
+    # This keeps the web worker responsive when official pages are slow while
+    # preserving the exact same source rows already audited by prior Find runs.
+    cached, cached_adapter = _load_venue_title_index_cache(venue, years, limit)
+    if cached:
+        return cached, cached_adapter
     if limit is None:
         return fetch_venue_title_index_all(venue, years)
     return fetch_venue_title_index(venue, years, limit)
@@ -6940,6 +6973,14 @@ def _venue_source_public_limited(row: dict) -> bool:
         return False
     if not row.get("ok"):
         return bool(row.get("limited") or row.get("metadata_completeness_limited"))
+    if row.get("limited") or row.get("metadata_completeness_limited"):
+        return True
+    if "metadata_completeness_ok" in row and not bool(row.get("metadata_completeness_ok")):
+        return True
+    if "title_index_completeness_ok" in row and not bool(row.get("title_index_completeness_ok")):
+        return True
+    if "title_index_complete" in row and not bool(row.get("title_index_complete")):
+        return True
     adapter = str(row.get("adapter") or row.get("source_adapter") or "").lower()
     category_status = str(row.get("category_status") or "").lower()
     has_official_categories = bool(row.get("has_official_categories")) and category_status not in {"no_official_categories", "missing_categories", "no_or_partial_categories"}
@@ -6948,11 +6989,13 @@ def _venue_source_public_limited(row: dict) -> bool:
         "openreview" in adapter
         and has_official_categories
         and has_abstracts
+        and bool(row.get("metadata_completeness_ok"))
+        and bool(row.get("title_index_completeness_ok") or row.get("title_index_complete"))
         and bool(row.get("source_verified") or row.get("official_title_index_verified") or str(row.get("source_scope") or "") == "official_openreview_metadata")
     )
     if official_openreview_ready:
         return False
-    return bool(row.get("limited") or row.get("metadata_completeness_limited"))
+    return False
 
 
 def _source_status_label(item: dict) -> str:

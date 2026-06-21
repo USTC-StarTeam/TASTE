@@ -637,7 +637,7 @@ def test_environment_binds_rigidssl_designability_target_alias_and_local_full_te
     assert paper_ok, paper_context
     assert paper_context["substantive_source_count"] == 1
 
-def test_environment_normalizes_selected_plan_metrics_and_paper_source():
+def test_environment_normalizes_selected_plan_metrics_and_paper_source(tmp_path):
     environment_module_root = ROOT / "modules" / "environment"
     for name in list(sys.modules):
         if name == "scripts" or name.startswith("scripts."):
@@ -649,7 +649,26 @@ def test_environment_normalizes_selected_plan_metrics_and_paper_source():
 
     from scripts.common.plan_schema import load_experiment_plan, normalize_plan
 
-    normalized = normalize_plan(load_experiment_plan(ROOT / "projects" / "protein" / "state" / "experiment_plan.json"), ROOT / "projects" / "protein" / "state" / "experiment_plan.json")
+    plan_path = tmp_path / "experiment_plan.json"
+    plan_path.write_text(json.dumps({
+        "selected_plan_id": "plan_rigidssl_controlled",
+        "plans": [
+            {
+                "plan_id": "plan_rigidssl_controlled",
+                "title": "RigidSSL controlled reproduction",
+                "repo_url": "https://github.com/ZhanghanNi/RigidSSL",
+                "data_protocol": {
+                    "training_data": "AF2 Structure Database plus CATH domains",
+                    "evaluation_metrics": [
+                        "Designability improves by 43% on protein design benchmarks",
+                        "设计复现容限不超过 3%",
+                    ],
+                },
+            }
+        ],
+    }), encoding="utf-8")
+
+    normalized = normalize_plan(load_experiment_plan(plan_path), plan_path)
     metrics = {row["name"]: row for row in normalized["target_metrics"]}
 
     assert normalized["schema_version"] == "environment.normalized_plan.v2"

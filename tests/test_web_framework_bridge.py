@@ -407,3 +407,37 @@ def test_web_jobs_projects_generic_experiment_error_from_registry(monkeypatch, t
     assert row["result"]["status"] == "blocked"
     assert row["result"]["acceptance_status"] == "blocked_generation_evaluation_pipeline_missing"
     assert "缺少生成/采样和评估流水线" in row["progress"]["message"]
+
+def test_web_source_status_marks_partial_openreview_as_limited():
+    row = {
+        "source": "ICLR",
+        "ok": True,
+        "adapter": "openreview_cache",
+        "metadata_completeness_status": "partial",
+        "metadata_completeness_ok": False,
+        "metadata_completeness_limited": True,
+        "title_index_completeness_ok": False,
+        "title_index_complete": False,
+        "has_official_categories": True,
+        "has_abstracts": True,
+        "has_abstracts_in_title_index": True,
+        "source_verified": True,
+        "source_scope": "official_openreview_metadata",
+    }
+
+    assert project_bridge._venue_source_public_limited(row) is True
+
+
+def test_web_current_find_pending_read_blocker_is_not_environment_ready():
+    blocker = project_bridge._current_find_pipeline_public_blocker({
+        "status": "pending_current_find_read",
+        "recommended_count": 20,
+        "recommended_reading_count": 20,
+        "full_text_evidence_count": 0,
+        "pending_full_text_reading_count": 20,
+    })
+
+    assert blocker["category"] == "pending_current_find_read"
+    assert "Read 精读尚未运行" in blocker["summary"]
+    assert "环境阶段" not in blocker["summary"]
+    assert "Read 完成前不能进入 Idea、Plan、环境、实验或写作" in blocker["next_action"]

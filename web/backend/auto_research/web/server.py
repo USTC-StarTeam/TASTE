@@ -616,6 +616,8 @@ def _public_job_log_payload(value: Any) -> Any:
 def _public_job_api_payload(value: Any, key: str = "") -> Any:
     if key == "logs":
         return _public_job_log_payload(value)
+    if key == "status" and isinstance(value, str) and value.strip().lower() == "interrupted":
+        return "stale"
     if isinstance(value, str):
         return _public_job_summary_text(value)
     if isinstance(value, list):
@@ -1151,6 +1153,8 @@ def _job_status_message(stage: str, status: str) -> str:
         return f"{label}任务已启动"
     if status == "cancelled":
         return f"{label}任务已取消"
+    if status in {"interrupted", "stale"}:
+        return f"{label}任务已停止"
     if status == "complete":
         return f"{label}任务已完成"
     if status == "running":
@@ -1545,7 +1549,7 @@ class JobState:
         progress = data.get("progress")
         if isinstance(progress, dict):
             job.progress = progress
-        if job.status in {"done", "error", "cancelled", "blocked"}:
+        if job.status in {"done", "error", "cancelled", "blocked", "interrupted", "stale"}:
             job.done.set()
         return job
 
@@ -1611,6 +1615,8 @@ class JobState:
             self.result.setdefault("raw_stage", self.stage)
         public_status = _public_paper_status(self.status, result_payload if isinstance(result_payload, dict) else {}) if paper_job and public_stage == "paper" else self.status
         public_status = _normalize_public_job_status(public_status, progress_payload, self.error, result_payload if isinstance(result_payload, dict) else self.result, public_stage)
+        if str(public_status).strip().lower() == "interrupted":
+            public_status = "stale"
         if public_stage == "environment" and public_status == "blocked" and isinstance(progress_payload, dict):
             message = str(progress_payload.get("message") or "")
             if re.search(r"(?:exit code|错误码|返回错误码)\s*30\b", message, flags=re.I):
@@ -1642,7 +1648,7 @@ class JobState:
         return self.cancel_requested
 
     def request_cancel(self) -> None:
-        if self.status in {"done", "error", "cancelled", "blocked"}:
+        if self.status in {"done", "error", "cancelled", "blocked", "interrupted", "stale"}:
             return
         self.cancel_requested = True
         self.status = "cancelling"
@@ -8255,8 +8261,10 @@ def _normalize_public_job_status(public_status: Any, progress: Any = None, error
     combined = " ".join(part for part in [phase, message, error_text, result_status] if part)
     if phase in {"complete", "completed", "done", "success"}:
         return "done"
-    if phase in {"cancelled", "interrupted"}:
+    if phase == "cancelled":
         return "cancelled"
+    if phase == "interrupted":
+        return "stale"
     if phase.startswith("blocked") or result_status.startswith("blocked") or "blocked_tool_policy" in combined or "tool policy" in combined:
         return "blocked"
     if error_text or phase in {"error", "failed", "fail"} or "research action failed" in combined or "exit code" in combined:
@@ -9099,6 +9107,8 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
     if public_stage != raw_stage and "raw_stage" not in compact_result:
         compact_result["raw_stage"] = raw_stage
     public_status = str(item.get("status", "") or "")
+    if public_status.strip().lower() == "interrupted":
+        public_status = "stale"
     if panel_stage and isinstance(result, dict):
         result_status = str(result.get("status") or "").strip()
         if result_status:
@@ -9319,6 +9329,8 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
                 result = {**result, "status": "blocked", "acceptance_status": compact_result.get("acceptance_status") or detailed_status}
             public_status = "blocked"
     public_status = _normalize_public_job_status(public_status, public_progress, item.get("error", ""), compact_result or result, public_stage)
+    if str(public_status).strip().lower() == "interrupted":
+        public_status = "stale"
     if public_status == "ready_for_experimenting":
         compact_result["status"] = "ready_for_experimenting"
         public_status = "done"
