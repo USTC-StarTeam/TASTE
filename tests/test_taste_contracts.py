@@ -854,6 +854,30 @@ def test_environment_rewrites_inline_python_import_aliases_and_compound_statemen
     compile(command[2], "<environment-inline>", "exec")
 
 
+def test_environment_inline_python_compound_normalization_preserves_loop_boundary(tmp_path):
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_inline_loop_boundary",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+
+    command = autonomous_deploy.rewrite_command(
+        [
+            "python",
+            "-c",
+            "events = []; for k in ['a', 'b']: events.append(k); events.append('after'); print(events)",
+        ],
+        "conda",
+        "demo_env",
+        tmp_path / "conda_envs" / "demo_env",
+    )
+
+    namespace: dict[str, object] = {}
+    exec(command[2], namespace)
+
+    assert namespace["events"] == ["a", "b", "after"]
+    assert "\nevents.append('after')" in command[2]
+
+
 def test_environment_inline_path_guard_handles_fstring_variable_prefix(tmp_path):
     autonomous_deploy = _load_environment_module(
         "environment_autonomous_deploy_inline_fstring_guard",

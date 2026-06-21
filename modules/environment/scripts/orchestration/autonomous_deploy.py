@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import io
 import os
 import json
 import re
@@ -10,6 +11,7 @@ import shlex
 import subprocess
 import sys
 import time
+import tokenize
 from pathlib import Path
 from typing import Any
 
@@ -3921,14 +3923,93 @@ def _drop_deprecated_hf_download_flags(tokens: list[str]) -> list[str]:
     return [str(token) for token in tokens if str(token) != "--resume-download"]
 
 
+def _split_inline_python_top_level_semicolons(code: str) -> list[str]:
+    parts: list[str] = []
+    last_index = 0
+    depth = 0
+    try:
+        token_iter = tokenize.generate_tokens(io.StringIO(code).readline)
+        for token in token_iter:
+            if token.type != tokenize.OP:
+                continue
+            if token.string in {"(", "[", "{"}:
+                depth += 1
+            elif token.string in {")", "]", "}"} and depth > 0:
+                depth -= 1
+            elif token.string == ";" and depth == 0:
+                segment = code[last_index:token.start[1]].strip()
+                if segment:
+                    parts.append(segment)
+                last_index = token.end[1]
+    except tokenize.TokenError:
+        return [code]
+    tail = code[last_index:].strip()
+    if tail:
+        parts.append(tail)
+    return parts or [code]
+
+
+def _split_inline_python_compound_suite(segment: str) -> tuple[str, str] | None:
+    text = str(segment or "").strip()
+    first_word = text.split(None, 1)[0].rstrip(":") if text else ""
+    if first_word not in {"for", "while", "if", "with", "elif", "else", "try", "except", "finally"}:
+        return None
+    depth = 0
+    try:
+        token_iter = tokenize.generate_tokens(io.StringIO(text).readline)
+        for token in token_iter:
+            if token.type != tokenize.OP:
+                continue
+            if token.string in {"(", "[", "{"}:
+                depth += 1
+            elif token.string in {")", "]", "}"} and depth > 0:
+                depth -= 1
+            elif token.string == ":" and depth == 0:
+                header = text[:token.end[1]].strip()
+                suite = text[token.end[1]:].strip()
+                if header and suite:
+                    return header, suite
+                return None
+    except tokenize.TokenError:
+        return None
+    return None
+
+
+def _normalize_inline_python_compound_statements(code: str) -> str:
+    text = str(code)
+    if "\n" in text or "\r" in text or ";" not in text:
+        return text
+    if not re.search(r"(?:^|;)\s*(for|while|if|with|elif|else|try|except|finally)\b", text):
+        return text
+    lines: list[str] = []
+    changed = False
+    for segment in _split_inline_python_top_level_semicolons(text):
+        compound = _split_inline_python_compound_suite(segment)
+        if not compound:
+            lines.append(segment)
+            continue
+        header, suite = compound
+        lines.append(header)
+        lines.append(f"    {suite}")
+        changed = True
+    if not changed:
+        return text
+    candidate = "\n".join(lines)
+    try:
+        compile(candidate, "<environment-inline-normalized>", "exec")
+    except SyntaxError:
+        return text
+    return candidate
+
+
 def _normalize_python_inline_code_imports(code: str) -> str:
     updated = str(code)
-    updated = re.sub(r";\s+(for|while|if|with)\b", r"\n\1", updated)
     updated = re.sub(r"\bfrom\s+dm_tree\b", "from tree", updated)
     updated = re.sub(r"\bimport\s+dm_tree\s+as\s+([A-Za-z_][A-Za-z0-9_]*)", r"import tree as \1", updated)
     updated = re.sub(r"\bimport\s+dm_tree\b(?!\s+as\b)", "import tree as dm_tree", updated)
     updated = re.sub(r"\bimport\s+biopython\s+as\s+([A-Za-z_][A-Za-z0-9_]*)", r"import Bio as \1", updated)
     updated = re.sub(r"\bimport\s+biopython\b", "import Bio", updated)
+    updated = _normalize_inline_python_compound_statements(updated)
     return updated
 
 
