@@ -890,6 +890,9 @@ def test_web_find_pipeline_summary_blocks_suspicious_one_paper_core_venue(monkey
     assert summary["status"] == "source_integrity_blocked"
     assert summary["recommendation_shortfall"] == 1
     assert summary["source_integrity_gate"]["blocked_count"] == 1
+    assert summary["content_ready"] is False
+    assert summary["execution_ready"] is False
+    assert summary["takeover_ready"] is False
     assert project_bridge._venue_source_public_limited(progress["source_status"][0]) is True
 
 

@@ -6617,6 +6617,13 @@ def _compact_project_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "ideas": main_route.get("ideas", counts.get("ideas", 0)),
         "plans": main_route.get("plans", counts.get("plans", 0)),
     }
+    source_integrity_gate = current_find_pipeline.get("source_integrity_gate") if isinstance(current_find_pipeline.get("source_integrity_gate"), dict) else {}
+    if source_integrity_gate.get("status") == "blocked":
+        counts["recommendation_shortfall"] = max(_as_int(counts.get("recommendation_shortfall"), 0), 1)
+        literature_survey["recommendation_shortfall"] = max(_as_int(literature_survey.get("recommendation_shortfall"), 0), 1)
+        literature_survey["recommendation_gate_status"] = "source_integrity_blocked"
+        literature_survey["source_integrity_gate"] = source_integrity_gate
+        literature_survey["status"] = "source_integrity_blocked"
     literature_survey["counts"] = counts
     literature_survey.setdefault("status", "current_find_packet_ready")
     literature_survey["display_hidden_on_blocked_route"] = False
@@ -11485,9 +11492,13 @@ def _current_find_pipeline_summary(root: Path, find_results: dict[str, Any] | No
         status = "blocked_claude_current_find_takeover_incomplete"
     idea_titles = [str(row.get("title") or "").strip() for row in ideas[:5] if isinstance(row, dict) and str(row.get("title") or "").strip()]
     plan_titles = [str(row.get("title") or row.get("plan_id") or "").strip() for row in plans[:5] if isinstance(row, dict) and str(row.get("title") or row.get("plan_id") or "").strip()]
+    if source_integrity_blockers:
+        content_ready = False
+        execution_ready = False
+        takeover_ready = False
     # Selected execution belongs to the completed current-Find Read/Idea/Plan
-    # contract. While Read is pending or validation is blocked, stale plan
-    # selections from older state files must not be projected into the web UI.
+    # contract. While Read is pending, validation is blocked, or source integrity
+    # failed, stale plan selections must not be projected into the web UI.
     public_selected_execution = selected_execution if content_ready else {}
     public_selected_execution_issue = selected_execution_issue if content_ready else ""
     public_selected_plan_id = selected_plan_id if content_ready else ""
@@ -11564,7 +11575,9 @@ def _current_find_pipeline_summary(root: Path, find_results: dict[str, Any] | No
         "idea_titles": idea_titles,
         "plan_titles": plan_titles,
         "summary_zh": (
-            f"当前 Find 推荐门控已通过：推荐 {recommendation_count} 篇，等待 Read 精读；待补全文 {pending_full_text} 篇。"
+            f"当前 Find 来源完整性阻塞：{'; '.join(blockers[:3])}。需要修复会议源适配器或 verified cache 后重跑 Find；Read/Idea/Plan 历史产物只作审计参考，不能进入环境、实验或写作。"
+            if source_integrity_blockers
+            else f"当前 Find 推荐门控已通过：推荐 {recommendation_count} 篇，等待 Read 精读；待补全文 {pending_full_text} 篇。"
             if pending_current_find_read
             else f"Claude Code 接管当前 Find 的 Read/Idea/Plan 产物已通过，但缺少唯一 selected_plan_id；后续环境、实验、论文和结论提升保持阻断，等待主控 Claude Code 或人类监督选择一个计划。"
             if content_ready and selection_blocked
