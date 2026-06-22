@@ -109,5 +109,6 @@ modules/environment/runs/<run_id>/
 
 - 不新增绕过 `main.py` 的公开入口。
 - 不把旧项目状态、旧 active_repo 或弱 fallback 当作当前主线证据。
+- 仓库候选审阅为 reject 时，只能恢复审阅证据同一句/同一分号片段里明确标注为官方、正确、actual、replacement 或“应为”的 GitHub URL/短名；原始 404 候选和完整坏 URL 内部的 `owner/repo` 不能回流。
 - 可修复问题优先继续修复；只有不可修且证据充分时才 reject。
 - 所有人类可读说明使用中文，运行产物不进入 git。

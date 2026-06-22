@@ -7,6 +7,7 @@ import io
 import os
 import json
 import re
+import shutil
 import shlex
 import subprocess
 import sys
@@ -66,7 +67,7 @@ from scripts.common.shell import EXTERNAL_RUNTIME_ENV_KEYS, command_is_dangerous
 from scripts.orchestration.dependency_policy import normalize_environment_plan_commands
 from scripts.orchestration.criteria_policy import normalize_success_criteria
 from scripts.environment.runtime_probe import detect_machine_profile, find_conda_executable
-from scripts.repository.repo_manager import clone_or_reuse, collect_repo_evidence
+from scripts.repository.repo_manager import clone_or_reuse, collect_repo_evidence, repo_slug
 from scripts.reproduction.decision import classify_failures, compare_metric_values, metric_criteria_passed, normalize_verdict, success_criteria_issues
 from scripts.reproduction.paper_evidence import collect_paper_evidence
 
@@ -99,12 +100,18 @@ def is_github_repo_url(value: str) -> bool:
 
 def canonical_repo_url(value: str) -> str:
     text = str(value or "").strip()
+    if text.startswith("git@github.com:"):
+        text = "https://github.com/" + text[len("git@github.com:"):]
+    elif text.startswith("ssh://git@github.com/"):
+        text = "https://github.com/" + text[len("ssh://git@github.com/"):]
+    text = text.rstrip("/")
     if text.endswith(".git"):
         text = text[:-4]
     return text.rstrip("/").lower()
 
 
-GITHUB_URL_RE = re.compile(r"https?://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?/?")
+GITHUB_URL_RE = re.compile(r"(?:https?://)?github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?/?")
+GITHUB_OWNER_REPO_RE = re.compile(r"(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?:\.git)?(?![A-Za-z0-9_.-])")
 
 
 def validate_repo_candidate_review(original_candidates: list[str], reviewed: dict[str, Any]) -> tuple[list[str], list[str]]:
@@ -137,18 +144,279 @@ def validate_repo_candidate_review(original_candidates: list[str], reviewed: dic
     return clean, issues
 
 
-def repo_candidates_after_review(original_candidates: list[str], review_result: dict[str, Any]) -> tuple[list[str], list[str], bool]:
+KNOWN_STALE_REPO_REPLACEMENTS = {
+    canonical_repo_url("https://github.com/protdis/protdis"): ["https://github.com/AI-HPC-Research-Team/ProtDiS"],
+    canonical_repo_url("https://github.com/tedbench/miae"): ["https://github.com/BorgwardtLab/TEDBench"],
+}
+KNOWN_NON_PUBLIC_REPO_CANDIDATES = {
+    canonical_repo_url("https://github.com/GenerateBiomedicines/flexible-kernels"),
+}
+VERIFIED_HISTORICAL_REPO_REPLACEMENTS = {
+    canonical_repo_url("https://github.com/GenerateBiomedicines/flexible-kernels"): {
+        "url": "https://github.com/generatebio/lock_gp",
+        "required_markers": ["flexible kernels for protein property prediction", "lock gp"],
+    },
+}
+
+
+def _repo_origin_urls(repo_path: Path) -> list[str]:
+    urls: list[str] = []
+    try:
+        proc = subprocess.run(["git", "remote", "get-url", "origin"], cwd=repo_path, text=True, capture_output=True, timeout=10)
+        if proc.returncode == 0 and proc.stdout.strip():
+            urls.append(proc.stdout.strip().splitlines()[-1])
+    except Exception:
+        pass
+    config_path = repo_path / ".git" / "config"
+    if config_path.exists():
+        try:
+            text = config_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            text = ""
+        for match in re.finditer(r"^\s*url\s*=\s*(.+)$", text, flags=re.M):
+            urls.append(match.group(1).strip())
+    return urls
+
+
+def _legacy_repo_dir_name(repo_url: str) -> str:
+    key = canonical_repo_url(repo_url)
+    prefix = "https://github.com/"
+    if not key.startswith(prefix):
+        return ""
+    owner_repo = key[len(prefix):].split("/", 1)
+    if len(owner_repo) != 2:
+        return ""
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", f"{owner_repo[0]}_{owner_repo[1]}")
+
+
+def _historical_repo_paths_for_url(repo_url: str, runs_root: Path) -> list[Path]:
+    names = {repo_slug(repo_url)}
+    legacy_name = _legacy_repo_dir_name(repo_url)
+    if legacy_name:
+        names.add(legacy_name)
+        names.add(f"{legacy_name}_*")
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for name in names:
+        for candidate in runs_root.glob(f"*/repos/{name}"):
+            try:
+                resolved = candidate.resolve()
+            except Exception:
+                resolved = candidate
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            paths.append(candidate)
+    return sorted(paths, key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True)
+
+
+def _historical_repo_verification_text(repo_path: Path) -> str:
+    pieces: list[str] = []
+    for name in ["README.md", "README.rst", "README.txt", "pyproject.toml", "setup.py"]:
+        path = repo_path / name
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            pieces.append(path.read_text(encoding="utf-8", errors="replace")[:20000])
+        except Exception:
+            continue
+    return "\n".join(pieces).lower()
+
+
+def verified_historical_replacement_repo_candidates(original_candidates: list[str], runs_root: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for original in original_candidates:
+        key = canonical_repo_url(str(original or ""))
+        spec = VERIFIED_HISTORICAL_REPO_REPLACEMENTS.get(key)
+        if not spec:
+            continue
+        replacement = str(spec.get("url") or "").strip()
+        if not is_github_repo_url(replacement):
+            continue
+        replacement_key = canonical_repo_url(replacement)
+        for repo_path in _historical_repo_paths_for_url(replacement, runs_root):
+            if not (repo_path / ".git").exists():
+                continue
+            if replacement_key not in {canonical_repo_url(url) for url in _repo_origin_urls(repo_path)}:
+                continue
+            verification_text = _historical_repo_verification_text(repo_path)
+            markers = [str(item or "").lower() for item in spec.get("required_markers", []) if str(item or "").strip()]
+            if any(marker not in verification_text for marker in markers):
+                continue
+            rows.append({
+                "url": replacement,
+                "source": "historical_verified_clone",
+                "evidence": [
+                    f"{original} has a locally verified historical replacement clone at {repo_path}: {replacement}",
+                ],
+            })
+            break
+    return rows
+
+
+def recovered_repo_candidate_rows_from_review(reviewed: dict[str, Any], original_candidates: list[str], runs_root: Path | None = None) -> list[dict[str, Any]]:
+    rows = official_replacement_repo_candidates_from_review(reviewed, original_candidates)
+    if runs_root is not None:
+        rows.extend(verified_historical_replacement_repo_candidates(original_candidates, runs_root))
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in _order_recovered_repo_candidate_rows(rows, original_candidates):
+        key = canonical_repo_url(row.get("url"))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    return deduped
+
+
+def deterministic_repo_replacements_for_candidates(original_candidates: list[str]) -> tuple[list[str], list[str]]:
+    replacements: list[str] = []
+    issues: list[str] = []
+    seen: set[str] = set()
+    for item in original_candidates:
+        url = str(item or "").strip()
+        key = canonical_repo_url(url)
+        if not key:
+            continue
+        if key in {canonical_repo_url(candidate) for candidate in KNOWN_NON_PUBLIC_REPO_CANDIDATES}:
+            issues.append(f"已知候选暂无公开可克隆代码，跳过：{url}")
+            continue
+        mapped = KNOWN_STALE_REPO_REPLACEMENTS.get(key, [])
+        if mapped:
+            issues.append(f"已知过期仓库候选已替换：{url} -> {', '.join(mapped)}")
+        for candidate in mapped or [url]:
+            candidate_key = canonical_repo_url(candidate)
+            if candidate_key in seen or not is_github_repo_url(candidate):
+                continue
+            seen.add(candidate_key)
+            replacements.append(candidate)
+    return replacements, issues
+
+
+def _repo_aliases_for_order(url: str) -> set[str]:
+    key = canonical_repo_url(url)
+    aliases = {key} if key else set()
+    github_prefix = "https://github.com/"
+    if key.startswith(github_prefix):
+        aliases.add(key[len(github_prefix):])
+    return {alias for alias in aliases if alias}
+
+
+def _repo_replacement_order_map(original_candidates: list[str]) -> dict[str, int]:
+    order: dict[str, int] = {}
+    non_public = {canonical_repo_url(candidate) for candidate in KNOWN_NON_PUBLIC_REPO_CANDIDATES}
+    for index, item in enumerate(original_candidates):
+        key = canonical_repo_url(str(item or ""))
+        if not key:
+            continue
+        for candidate in KNOWN_STALE_REPO_REPLACEMENTS.get(key, []):
+            order.setdefault(canonical_repo_url(candidate), index)
+        historical = VERIFIED_HISTORICAL_REPO_REPLACEMENTS.get(key)
+        if historical:
+            order.setdefault(canonical_repo_url(historical.get("url")), index)
+        if key not in non_public:
+            order.setdefault(key, index)
+    return order
+
+
+def _recovered_repo_evidence_order(row: dict[str, Any], original_candidates: list[str]) -> int:
+    evidence_text = "\n".join(str(item or "") for item in (row.get("evidence") if isinstance(row.get("evidence"), list) else []))
+    lowered = evidence_text.lower()
+    if not lowered:
+        return len(original_candidates)
+    for index, original in enumerate(original_candidates):
+        if any(alias in lowered for alias in _repo_aliases_for_order(original)):
+            return index
+    return len(original_candidates)
+
+
+def _order_recovered_repo_candidate_rows(recovered_rows: list[dict[str, Any]], original_candidates: list[str]) -> list[dict[str, Any]]:
+    deterministic_order = _repo_replacement_order_map(original_candidates)
+    return sorted(
+        recovered_rows,
+        key=lambda row: (
+            deterministic_order.get(canonical_repo_url(row.get("url")), len(original_candidates)),
+            _recovered_repo_evidence_order(row, original_candidates),
+            recovered_rows.index(row),
+        ),
+    )
+
+
+def _text_review_payload_from_result(review_result: dict[str, Any]) -> dict[str, Any]:
+    """Build a minimal review payload from Claude text when JSON is malformed."""
+    text_sources: list[str] = []
+    for key in ("stdout_tail", "stderr_tail"):
+        value = str(review_result.get(key) or "").strip()
+        if value:
+            text_sources.append(value)
+    for key in ("log_path", "prompt_path"):
+        path_text = str(review_result.get(key) or "").strip()
+        if not path_text:
+            continue
+        path = Path(path_text)
+        if path.exists() and path.is_file():
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                text = ""
+            if text.strip():
+                text_sources.append(text[-12000:])
+    if not text_sources:
+        return {}
+    combined = "\n".join(text_sources)
+    lowered = combined.lower()
+    status = "reject" if any(marker in lowered for marker in ("reject", "拒绝", "404", "not found")) else ""
+    return {
+        "status": status,
+        "ordered_repo_urls": [],
+        "selected_reason": "",
+        "evidence": text_sources,
+        "reject_reason": "Claude repo review did not produce valid JSON; backend recovered repository evidence from review text.",
+    }
+
+
+def _review_payload_for_candidate_recovery(review_result: dict[str, Any]) -> dict[str, Any]:
     reviewed = review_result.get("json") if isinstance(review_result.get("json"), dict) else {}
+    if reviewed:
+        return reviewed
+    return _text_review_payload_from_result(review_result)
+
+
+def repo_candidates_after_review(original_candidates: list[str], review_result: dict[str, Any]) -> tuple[list[str], list[str], bool]:
     github_original = [str(item).strip() for item in original_candidates if is_github_repo_url(str(item))]
-    if isinstance(reviewed, dict) and str(reviewed.get("status") or "").strip().lower() == "reject":
-        return [], [str(reviewed.get("reject_reason") or "Claude Code 判定 plan 中的 GitHub 仓库候选不可信")], False
-    clean_ordered, review_issues = validate_repo_candidate_review([str(item) for item in original_candidates], reviewed if isinstance(reviewed, dict) else {})
-    if review_result.get("return_code") != 0 or not reviewed:
+    reviewed_json = review_result.get("json") if isinstance(review_result.get("json"), dict) else {}
+    reviewed_for_recovery = reviewed_json or _text_review_payload_from_result(review_result)
+    if isinstance(reviewed_for_recovery, dict) and reviewed_for_recovery:
+        recovered_rows = official_replacement_repo_candidates_from_review(reviewed_for_recovery, [str(item) for item in original_candidates])
+        recovered = [row["url"] for row in _order_recovered_repo_candidate_rows(recovered_rows, github_original)]
+        if recovered:
+            deterministic_ordered, deterministic_issues = deterministic_repo_replacements_for_candidates(github_original)
+            merged: list[str] = []
+            seen: set[str] = set()
+            for url in [*recovered, *deterministic_ordered]:
+                key = canonical_repo_url(url)
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(url)
+            issues = [_repo_recovery_issue(reviewed_for_recovery)]
+            issues.extend(deterministic_issues)
+            return merged, issues, False
+    if isinstance(reviewed_json, dict) and reviewed_json and str(reviewed_json.get("status") or "").strip().lower() == "reject":
+        return [], [_repo_recovery_issue(reviewed_json)], False
+    clean_ordered, review_issues = validate_repo_candidate_review([str(item) for item in original_candidates], reviewed_json if isinstance(reviewed_json, dict) else {})
+    if review_result.get("return_code") != 0 or not reviewed_json:
         review_issues.append("repo candidate review did not produce valid JSON")
     if clean_ordered:
-        return clean_ordered, review_issues, False
+        deterministic_ordered, deterministic_issues = deterministic_repo_replacements_for_candidates(clean_ordered)
+        if deterministic_issues:
+            review_issues.extend(deterministic_issues)
+        return deterministic_ordered or clean_ordered, review_issues, False
     if github_original:
-        return github_original, review_issues, True
+        deterministic_ordered, deterministic_issues = deterministic_repo_replacements_for_candidates(github_original)
+        if deterministic_issues:
+            review_issues.extend(deterministic_issues)
+        return deterministic_ordered or github_original, review_issues, True
     return [], review_issues, False
 
 
@@ -188,9 +456,43 @@ def _github_urls_from_text(text: Any) -> list[str]:
     urls: list[str] = []
     for match in GITHUB_URL_RE.finditer(body):
         url = match.group(0).rstrip('/.,);]}>");\'')
+        if url.lower().startswith("github.com/"):
+            url = f"https://{url}"
         if is_github_repo_url(url) and canonical_repo_url(url) not in {canonical_repo_url(item) for item in urls}:
             urls.append(url)
     return urls
+
+
+def _github_owner_repo_urls_from_text(text: Any) -> list[tuple[str, int, int]]:
+    body = str(text or "")
+    if not body:
+        return []
+    occupied_spans = [(match.start(), match.end()) for match in GITHUB_URL_RE.finditer(body)]
+    out: list[tuple[str, int, int]] = []
+    seen: set[str] = set()
+    for match in GITHUB_OWNER_REPO_RE.finditer(body):
+        if any(start <= match.start() < end for start, end in occupied_spans):
+            continue
+        owner_repo = match.group(1).strip().strip('/.,);]}>"\'')
+        owner, _, repo = owner_repo.partition('/')
+        if not owner or not repo:
+            continue
+        if owner.lower() in {"http:", "https:", "github.com", "www.github.com"}:
+            continue
+        url = f"https://github.com/{owner}/{repo}"
+        key = canonical_repo_url(url)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((url, match.start(), match.end()))
+    return out
+
+
+POSITIVE_REPO_REPLACEMENT_CONTEXT_MARKERS = (
+    "official", "官方", "actual", "实际", "correct", "正确",
+    "replacement", "替代", "修正", "应为", "仓库为",
+    "repo is", "repository is", "url is", "url 应为", "url应为",
+)
 
 
 def _url_negative_context(text: Any, url: str) -> bool:
@@ -213,6 +515,108 @@ def _url_negative_context(text: Any, url: str) -> bool:
     stale_before = any(marker.lower() in before for marker in stale_before_markers)
     negative_before = any(marker.lower() in before[-64:] for marker in NEGATIVE_REPO_URL_CONTEXT_MARKERS)
     return bool(negative_after or (stale_before and negative_before))
+
+
+def _clause_bounds(body: str, start: int, end: int) -> tuple[int, int]:
+    clause_start = max(body.rfind(delimiter, 0, start) for delimiter in ("。", "；", ";", "\n"))
+    clause_end_candidates = [body.find(delimiter, end) for delimiter in ("。", "；", ";", "\n")]
+    clause_end = min([index for index in clause_end_candidates if index >= 0], default=len(body))
+    return clause_start + 1, clause_end
+
+
+def _positive_repo_replacement_context(text: Any, start: int, end: int) -> bool:
+    body = str(text or "")
+    if not body:
+        return False
+    lower_body = body.lower()
+    clause_start, clause_end = _clause_bounds(body, start, end)
+    before = lower_body[clause_start:start]
+    after = lower_body[end:clause_end]
+    markers = tuple(marker.lower() for marker in POSITIVE_REPO_REPLACEMENT_CONTEXT_MARKERS)
+    if any(marker in before for marker in markers):
+        return True
+    return any(marker in after for marker in markers)
+
+
+def _positive_owner_repo_replacement_context(text: Any, start: int, end: int) -> bool:
+    body = str(text or "")
+    if not body:
+        return False
+    lower_body = body.lower()
+    clause_start, _clause_end = _clause_bounds(body, start, end)
+    before = lower_body[clause_start:start]
+    markers = tuple(marker.lower() for marker in POSITIVE_REPO_REPLACEMENT_CONTEXT_MARKERS)
+    return any(marker in before for marker in markers)
+
+
+def _span_negative_repo_context(text: Any, start: int, end: int) -> bool:
+    body = str(text or "")
+    if not body:
+        return False
+    lower_body = body.lower()
+    immediate_before = lower_body[max(0, start - 40):start]
+    after = lower_body[end:min(len(lower_body), end + 96)]
+    local_negative = ("not ", "不是", "而非", "非 ", "wrong ", "错误", "invalid ")
+    if any(marker in immediate_before for marker in local_negative):
+        return True
+    if re.search(r"(?:repo|repository)\s+for\s+[`'\"]?$", immediate_before):
+        return True
+    if re.match(r"^\s+(repo|repository)\s+is\s+(?:https?://)?github\.com/", after):
+        return True
+    return any(marker.lower() in after for marker in NEGATIVE_REPO_URL_CONTEXT_MARKERS)
+
+
+def official_replacement_repo_candidates_from_review(reviewed: dict[str, Any], original_candidates: list[str]) -> list[dict[str, Any]]:
+    """Recover only explicit official/correct GitHub replacements from review text."""
+    if not isinstance(reviewed, dict):
+        return []
+    original_keys = {canonical_repo_url(item) for item in original_candidates if str(item).strip()}
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(url: str, source: str, evidence: Any) -> None:
+        clean = str(url or "").strip().rstrip('/.,);]}>"\'')
+        key = canonical_repo_url(clean)
+        if not clean or not is_github_repo_url(clean) or key in seen or key in original_keys:
+            return
+        seen.add(key)
+        row: dict[str, Any] = {"url": clean, "source": source}
+        if evidence:
+            row["evidence"] = evidence
+        candidates.append(row)
+
+    text_sources = list(reviewed.get("evidence") if isinstance(reviewed.get("evidence"), list) else [])
+    for field in ("selected_reason", "reject_reason"):
+        value = reviewed.get(field)
+        if str(value or "").strip():
+            text_sources.append(value)
+    for index, item in enumerate(text_sources):
+        body = str(item or "")
+        if not body.strip():
+            continue
+        for match in GITHUB_URL_RE.finditer(body):
+            url = match.group(0).rstrip('/.,);]}>"\'')
+            if url.lower().startswith("github.com/"):
+                url = f"https://{url}"
+            if not _positive_repo_replacement_context(body, match.start(), match.end()):
+                continue
+            if _url_negative_context(body, url):
+                continue
+            add(url, f"review_text[{index}]", [body])
+        for url, start, end in _github_owner_repo_urls_from_text(body):
+            if not _positive_repo_replacement_context(body, start, end):
+                continue
+            if _span_negative_repo_context(body, start, end):
+                continue
+            add(url, f"review_text[{index}]", [body])
+    return candidates
+
+
+def _repo_recovery_issue(reviewed: dict[str, Any]) -> str:
+    status = str(reviewed.get("status") or "").strip().lower()
+    if status == "reject":
+        return str(reviewed.get("reject_reason") or "Claude Code 判定 plan 中的 GitHub 仓库候选不可信")
+    return "Claude Code 将仓库审阅标记为 ready，但审阅证据明确给出官方/实际/正确替代仓库；后端按替代仓库继续验证。"
 
 
 def discovered_repo_candidates(discovered: dict[str, Any]) -> list[dict[str, Any]]:
@@ -239,10 +643,17 @@ def discovered_repo_candidates(discovered: dict[str, Any]) -> list[dict[str, Any
     text_sources = list(discovered.get("evidence") if isinstance(discovered.get("evidence"), list) else [])
     text_sources.append(discovered.get("reject_reason"))
     for index, item in enumerate(text_sources):
-        for url in _github_urls_from_text(item):
-            if _url_negative_context(item, url):
+        body = str(item or "")
+        for url in _github_urls_from_text(body):
+            if _url_negative_context(body, url):
                 continue
-            add(url, f"discovery_text[{index}]", [str(item)])
+            add(url, f"discovery_text[{index}]", [body])
+        for url, start, end in _github_owner_repo_urls_from_text(body):
+            if not _positive_owner_repo_replacement_context(body, start, end):
+                continue
+            if _span_negative_repo_context(body, start, end):
+                continue
+            add(url, f"discovery_text[{index}]", [body])
     return candidates
 
 
@@ -260,6 +671,74 @@ def repo_specs_by_url(normalized_plan: dict[str, Any]) -> dict[str, dict[str, An
 
 def repo_spec_for_url(url: str, specs: dict[str, dict[str, Any]]) -> dict[str, Any]:
     return dict(specs.get(canonical_repo_url(url)) or {"url": url})
+
+
+def successful_clone_repo_rows(clone_attempts: list[dict[str, Any]], primary_repo_path: str = "") -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    primary_resolved = ""
+    if primary_repo_path:
+        try:
+            primary_resolved = str(Path(primary_repo_path).expanduser().resolve())
+        except Exception:
+            primary_resolved = str(primary_repo_path)
+    for attempt in clone_attempts:
+        if not isinstance(attempt, dict) or attempt.get("exists") is not True:
+            continue
+        receipt = attempt.get("clone_receipt") if isinstance(attempt.get("clone_receipt"), dict) else {}
+        if int(receipt.get("return_code") or 0) != 0:
+            continue
+        repo_path = str(attempt.get("repo_path") or "").strip()
+        if not repo_path:
+            continue
+        try:
+            resolved = str(Path(repo_path).expanduser().resolve())
+            repo_dir = Path(repo_path).name
+        except Exception:
+            resolved = repo_path
+            repo_dir = Path(repo_path).name
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        rows.append({
+            "repo_url": attempt.get("repo_url", ""),
+            "repo_path": repo_path,
+            "repo_dir": repo_dir,
+            "head_commit": attempt.get("head_commit", ""),
+            "role": "primary" if primary_resolved and resolved == primary_resolved else "auxiliary",
+        })
+    return rows
+
+
+def collect_auxiliary_repo_evidence(available_rows: list[dict[str, Any]], primary_repo_path: Path) -> list[dict[str, Any]]:
+    primary_resolved = ""
+    try:
+        primary_resolved = str(primary_repo_path.expanduser().resolve())
+    except Exception:
+        primary_resolved = str(primary_repo_path)
+    out: list[dict[str, Any]] = []
+    for row in available_rows:
+        repo_path_text = str(row.get("repo_path") or "").strip()
+        if not repo_path_text:
+            continue
+        try:
+            repo_path = Path(repo_path_text).expanduser().resolve()
+        except Exception:
+            continue
+        if str(repo_path) == primary_resolved or not repo_path.exists():
+            continue
+        evidence = collect_repo_evidence(repo_path)
+        out.append({
+            "repo_url": row.get("repo_url", ""),
+            "repo_path": str(repo_path),
+            "repo_dir": row.get("repo_dir", repo_path.name),
+            "head_commit": row.get("head_commit", ""),
+            "evidence_summary": evidence.get("evidence_summary", {}),
+            "readmes": (evidence.get("readmes") if isinstance(evidence.get("readmes"), list) else [])[:2],
+            "config_files": (evidence.get("config_files") if isinstance(evidence.get("config_files"), list) else [])[:10],
+            "python_entrypoints": (evidence.get("python_entrypoints") if isinstance(evidence.get("python_entrypoints"), list) else [])[:12],
+        })
+    return out
 
 
 def clone_ref_from_spec(spec: dict[str, Any]) -> tuple[str, str]:
@@ -646,6 +1125,7 @@ def prompt_environment_plan(normalized_plan: dict[str, Any], machine: dict[str, 
 - 这是纯后端模块；不要修改网页前端、不要修改 `modules/environment` 原目录、不要写 `modules/environment` 之外的中间产物。
 - 所有克隆仓库、数据、日志、临时脚本、输出都必须留在本次 run 目录或 repo 子目录内。
 - `cwd` 只能是 `repo`、`run` 或本次 run 目录内路径；命令参数里的路径值和本地脚本/文件参数必须落在本次 run 目录内。已知输出/数据/配置/依赖文件参数即使写成 `outputs/run1` 这类裸相对值，也会按命令实际 `cwd` 解析；`bash scripts/run.sh`、`python train.py`、`python scripts/train.py` 也会解析真实路径，不能指向 run 外或 run 内 symlink 到外部的文件；`outputs/../../outside`、`--output=.../../..`、`-r.../../..` 这类穿越写法会被拒绝。如果命令本身是 `./script.sh` 或绝对脚本路径，脚本也必须位于本次 run/repo 内，外部系统工具请使用命令名而不是外部临时脚本路径。
+- 只能引用后端已经克隆并提供证据的仓库目录。当前主仓库路径见 `repo_evidence.repo_path`，允许的全部仓库目录见 `repo_evidence.available_repo_paths[].repo_dir`；不要编造或引用 `repos/petergroth_kermut`、`repos/BorgwardtLab_TEDBench` 等不存在于本次 run 的目录。凡是 `commands[].command` 或 `python -c` 中出现 `repos/<name>`，该目录必须已经存在于本次 run 目录下，否则后端会拒绝执行计划。
 - 不要为了通过检查而使用 toy/synthetic/dummy/mock/sample 数据或替代数据集冒充论文数据；数据准备命令或日志必须能看到真实论文数据集名称或来源，不能出现 not using / instead of / replacement / 替代 / 改用 这类说明论文数据集未被使用的上下文，`paper_config_alignment` 也要说明该映射。论文数据准备/下载/预处理阶段必须是必需命令，不能标记为 `required=false` 后再拿它支撑批准。
 - HuggingFace Hub 下载必须使用当前可用的 `hf download`；不要使用已废弃不可工作的 `huggingface-cli`，也不要输出 `--resume-download` 参数。数据集仓库用 `hf download <repo_id> --repo-type dataset --local-dir <run内目录>`，模型/checkpoint 仓库用 `hf download <repo_id> --local-dir <run内目录>`。
 - 不要在计划生成阶段运行 `conda search`、`pip index`、包版本矩阵探测或长时间依赖求解探索；PyTorch/PyG/CUDA/Biopython 兼容矩阵由后端 policy 在执行前统一规范化。你只需按 README/论文给出功能阶段命令、数据/权重命令和验证/复现命令。
@@ -831,6 +1311,89 @@ def _replace_or_add_conda_prefix(tokens: list[str], env_prefix: Path) -> list[st
         return [*out[:2], "-p", prefix, *out[2:]]
     return out
 
+def _raw_path_starts_with_run_repos(raw: str) -> bool:
+    normalized = str(raw or "").strip().strip('"').strip("'").replace("\\", "/")
+    return normalized == "repos" or normalized.startswith("repos/")
+
+
+def _path_base_for_value(raw: str, cwd: Path, run_dir: Path) -> Path:
+    if _raw_path_starts_with_run_repos(raw):
+        return run_dir.expanduser().resolve()
+    return cwd.expanduser().resolve()
+
+
+def _resolve_command_path_value(path_value: str, cwd: Path, run_dir: Path) -> Path:
+    value = _strip_path_token(path_value)
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = _path_base_for_value(value, cwd, run_dir) / candidate
+    return ensure_within(candidate, run_dir.expanduser().resolve())
+
+
+def _normalize_run_repo_path_token(token: str, cwd: Path, run_dir: Path) -> tuple[str, bool]:
+    value = _strip_path_token(token)
+    if not value or _is_url_like_token(value) or not _path_is_under_run_repos(value):
+        return str(token), False
+    try:
+        resolved = _resolve_command_path_value(value, cwd, run_dir)
+    except Exception:
+        return str(token), False
+    if not resolved.exists():
+        return str(token), False
+    token_text = str(token)
+    quote = ""
+    stripped = token_text.strip()
+    if (stripped.startswith('"') and stripped.endswith('"')) or (stripped.startswith("'") and stripped.endswith("'")):
+        quote = stripped[0]
+    if "=" in stripped:
+        key, _old_value = stripped.split("=", 1)
+        if key.startswith("--") or key.isupper():
+            replacement = f"{key}={resolved}"
+            return (f"{quote}{replacement}{quote}" if quote else replacement), True
+    for option in sorted(ATTACHED_SHORT_PATH_VALUE_OPTIONS, key=len, reverse=True):
+        if stripped.startswith(option) and len(stripped) > len(option):
+            replacement = f"{option}{resolved}"
+            return (f"{quote}{replacement}{quote}" if quote else replacement), True
+    return str(resolved), True
+
+
+def normalize_run_repo_command_paths(command: list[str], cwd: Path, run_dir: Path) -> tuple[list[str], list[dict[str, str]]]:
+    if not command:
+        return command, []
+    updated = [str(token) for token in command]
+    migrations: list[dict[str, str]] = []
+    inner_command_index = _conda_run_inner_command_index(updated)
+    skip_next_path_value = False
+    for index, token in enumerate(updated):
+        if index == 0:
+            continue
+        candidate_token = token
+        path_value_expected = False
+        command_head = _path_option_head_for_index(updated, index, inner_command_index)
+        if skip_next_path_value:
+            skip_next_path_value = False
+            path_value_expected = True
+        elif token in _path_value_options_for_head(command_head):
+            if index + 1 < len(updated):
+                skip_next_path_value = True
+            continue
+        else:
+            assignment_value = _path_option_assignment_value(token, command_head)
+            attached_value = _attached_short_path_option_value(token, command_head) if assignment_value is None else None
+            if assignment_value is not None or attached_value is not None:
+                path_value_expected = True
+            elif not _path_is_under_run_repos(_strip_path_token(token)):
+                continue
+        if not path_value_expected and not _path_is_under_run_repos(_strip_path_token(candidate_token)):
+            continue
+        before = updated[index]
+        after, changed = _normalize_run_repo_path_token(before, cwd, run_dir)
+        if changed and after != before:
+            updated[index] = after
+            migrations.append({"migration": "normalized run repo path argument to absolute run-local path", "before": before, "after": after})
+    return updated, migrations
+
+
 def resolve_command_cwd(row: dict[str, Any], repo_path: Path, run_dir: Path) -> Path:
     raw = str(row.get("cwd") or "repo").strip()
     if raw in {"", "repo", "."}:
@@ -839,7 +1402,8 @@ def resolve_command_cwd(row: dict[str, Any], repo_path: Path, run_dir: Path) -> 
         return run_dir
     candidate = Path(raw)
     if not candidate.is_absolute():
-        candidate = repo_path / candidate
+        base = run_dir if _raw_path_starts_with_run_repos(raw) else repo_path
+        candidate = base / candidate
     return ensure_within(candidate, run_dir)
 
 
@@ -1244,6 +1808,46 @@ def _python_inline_string_literals(code: str) -> list[str]:
     return literals
 
 
+def _path_is_under_run_repos(path_value: str) -> bool:
+    normalized = str(path_value or "").strip().strip('"').strip("'").replace("\\", "/")
+    return normalized == "repos" or normalized.startswith("repos/") or "/repos/" in normalized
+
+
+def _missing_run_repo_path_issue(path_value: str, cwd: Path, run_dir: Path, *, allow_create: bool = False) -> str | None:
+    value = _strip_path_token(path_value)
+    if allow_create or not value or _is_url_like_token(value) or not _path_is_under_run_repos(value):
+        return None
+    try:
+        candidate = _resolve_command_path_value(value, cwd, run_dir)
+    except ValueError:
+        return None
+    try:
+        exists = candidate.exists()
+    except Exception:
+        exists = False
+    if exists:
+        return None
+    try:
+        display = candidate.relative_to(run_dir.expanduser().resolve()).as_posix()
+    except Exception:
+        display = value
+    return f"引用了不存在的本次 run 仓库路径：{display}；环境计划只能使用已克隆仓库目录，不得编造 repos/<name>"
+
+
+def _python_inline_code_repo_path_issues(code: str, cwd: Path, run_dir: Path) -> list[str]:
+    issues: list[str] = []
+    seen: set[str] = set()
+    for literal in _python_inline_string_literals(str(code or "")):
+        value = _strip_path_token(literal)
+        if value in seen:
+            continue
+        seen.add(value)
+        issue = _missing_run_repo_path_issue(value, cwd, run_dir)
+        if issue:
+            issues.append(f"Python 内联代码{issue}")
+    return issues
+
+
 def _python_inline_code_boundary_issues(code: str, cwd: Path, run_dir: Path) -> list[str]:
     issues: list[str] = []
     seen: set[str] = set()
@@ -1256,11 +1860,8 @@ def _python_inline_code_boundary_issues(code: str, cwd: Path, run_dir: Path) -> 
         if value in seen:
             continue
         seen.add(value)
-        candidate = Path(value).expanduser()
-        if not candidate.is_absolute():
-            candidate = resolved_cwd / candidate
         try:
-            ensure_within(candidate, resolved_run)
+            candidate = _resolve_command_path_value(value, resolved_cwd, resolved_run)
         except ValueError:
             issues.append(f"Python 内联代码路径越界：{value} 不在本次 run 目录内；请把辅助脚本、数据、缓存和输出写到 run/repo 内")
     return issues
@@ -1357,6 +1958,7 @@ def command_boundary_issues(tokens: list[str], cwd: Path, run_dir: Path) -> list
                 issues.append("Python 内联 -c 缺少代码片段")
             else:
                 issues.extend(_python_inline_code_boundary_issues(code, resolved_cwd, resolved_run))
+                issues.extend(_python_inline_code_repo_path_issues(code, resolved_cwd, resolved_run))
             skip_python_code = token == "-c"
             continue
         path_value_expected = False
@@ -1388,12 +1990,17 @@ def command_boundary_issues(tokens: list[str], cwd: Path, run_dir: Path) -> list
             if not value or _is_url_like_token(value):
                 continue
         elif not (_looks_like_explicit_path(value) or local_file_argument):
+            issue = _missing_run_repo_path_issue(value, resolved_cwd, resolved_run)
+            if issue:
+                issues.append(issue)
             continue
-        candidate = Path(value).expanduser()
-        if not candidate.is_absolute():
-            candidate = resolved_cwd / candidate
+        command_head_for_value = _path_option_head_for_index(tokens, index, inner_command_index)
+        allow_missing_repo_create = command_head_for_value == "git" and len(tokens) >= 2 and str(tokens[1]) == "clone" and index == len(tokens) - 1
+        repo_issue = _missing_run_repo_path_issue(value, resolved_cwd, resolved_run, allow_create=allow_missing_repo_create)
+        if repo_issue:
+            issues.append(repo_issue)
         try:
-            ensure_within(candidate, resolved_run)
+            _resolve_command_path_value(value, resolved_cwd, resolved_run)
         except ValueError:
             label = "命令文件/脚本参数路径越界" if local_file_argument else "命令参数路径越界"
             issues.append(f"{label}：{value} 不在本次 run 目录内")
@@ -4637,7 +5244,186 @@ def _is_rigidssl_repo(repo_path: Path) -> bool:
     return (repo_path / "examples" / "RigidSSL_Perturb.py").is_file() and (repo_path / "model" / "velocity_network.py").is_file()
 
 
+def _is_protdis_repo(repo_path: Path) -> bool:
+    return (repo_path / "src" / "models" / "kon.py").is_file()
+
+
+def _flatten_protdis_feature_dims(value: ast.AST) -> list[int] | None:
+    if not isinstance(value, ast.List):
+        return None
+    flattened: list[int] = []
+    changed = False
+    for element in value.elts:
+        if isinstance(element, ast.Constant) and isinstance(element.value, int):
+            flattened.append(int(element.value))
+            continue
+        if isinstance(element, ast.List) and len(element.elts) == 1:
+            inner = element.elts[0]
+            if isinstance(inner, ast.Constant) and isinstance(inner.value, int):
+                flattened.append(int(inner.value))
+                changed = True
+                continue
+        return None
+    return flattened if changed else None
+
+
+def _split_top_level_semicolon_statements(snippet: str) -> list[str]:
+    positions: list[int] = []
+    depth = 0
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(snippet).readline)
+        for token in tokens:
+            if token.type != tokenize.OP:
+                continue
+            if token.string in {"(", "[", "{"}:
+                depth += 1
+            elif token.string in {")",
+                "]",
+                "}",
+            }:
+                depth = max(0, depth - 1)
+            elif token.string == ";" and depth == 0:
+                positions.append(token.start[1])
+    except tokenize.TokenError:
+        return [snippet]
+    if not positions:
+        return [snippet]
+    parts: list[str] = []
+    start = 0
+    for position in positions:
+        part = snippet[start:position].strip()
+        if part:
+            parts.append(part)
+        start = position + 1
+    tail = snippet[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts or [snippet]
+
+
+def _repair_protdis_inline_for_snippet(snippet: str) -> tuple[str, bool]:
+    if "; for " not in str(snippet or ""):
+        return snippet, False
+    statements = _split_top_level_semicolon_statements(snippet)
+    repaired: list[str] = []
+    for index, statement in enumerate(statements):
+        stripped = statement.strip()
+        if not stripped.startswith("for ") or ":" not in stripped:
+            repaired.append(stripped)
+            continue
+        header, first_body = stripped.split(":", 1)
+        body = [first_body.strip()] if first_body.strip() else []
+        body.extend(part.strip() for part in statements[index + 1:] if part.strip())
+        repaired.append(header.strip() + ":")
+        repaired.extend("    " + part for part in body)
+        return "\n".join(part for part in repaired if part), True
+    return snippet, False
+
+
+def _repair_protdis_underindented_training_loop(snippet: str) -> tuple[str, bool]:
+    lines = str(snippet or "").splitlines()
+    changed = False
+    repaired: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        repaired.append(line)
+        stripped = line.strip()
+        if stripped.startswith("for step in range(") and stripped.endswith(":"):
+            index += 1
+            while index < len(lines):
+                next_line = lines[index]
+                next_stripped = next_line.strip()
+                if not next_stripped:
+                    repaired.append(next_line)
+                    index += 1
+                    continue
+                if next_line.startswith((" ", "\t")):
+                    repaired.append(next_line)
+                    index += 1
+                    continue
+                if next_stripped.startswith((
+                    "out = model(",
+                    "loss = ",
+                    "total = ",
+                    "loss.backward(",
+                    "total.backward(",
+                    "optimizer.step(",
+                    "opt.step(",
+                    "print(f'", 'print(f"', "print('Training smoke test PASSED'", 'print("Training smoke test PASSED"',
+                )):
+                    repaired.append("    " + next_stripped)
+                    changed = True
+                    index += 1
+                    continue
+                break
+            continue
+        index += 1
+    return "\n".join(repaired), changed
+
+
+def _normalize_protdis_kon_feature_dims_snippet(snippet: str) -> tuple[str, bool]:
+    snippet = str(snippet or "")
+    repaired_snippet, syntax_changed = _repair_protdis_inline_for_snippet(snippet)
+    repaired_snippet, indentation_changed = _repair_protdis_underindented_training_loop(repaired_snippet)
+    syntax_changed = syntax_changed or indentation_changed
+    if "feature_dims" not in repaired_snippet and not syntax_changed:
+        return snippet, False
+    if "KON" not in repaired_snippet and not syntax_changed:
+        return snippet, False
+    try:
+        tree = ast.parse(repaired_snippet)
+    except SyntaxError:
+        return snippet, False
+    changed = syntax_changed
+
+    class Rewriter(ast.NodeTransformer):
+        def visit_Call(self, node: ast.Call) -> ast.AST:
+            nonlocal changed
+            self.generic_visit(node)
+            func_name = ""
+            if isinstance(node.func, ast.Name):
+                func_name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                func_name = node.func.attr
+            if func_name != "KON":
+                return node
+            for keyword in node.keywords:
+                if keyword.arg != "feature_dims":
+                    continue
+                flattened = _flatten_protdis_feature_dims(keyword.value)
+                if flattened is None:
+                    continue
+                keyword.value = ast.List(elts=[ast.Constant(value=item) for item in flattened], ctx=ast.Load())
+                changed = True
+            return node
+
+    updated = Rewriter().visit(tree)
+    if not changed:
+        return snippet, False
+    ast.fix_missing_locations(updated)
+    return ast.unparse(updated), True
+
+
+def _normalize_protdis_kon_feature_dims_command(command: list[str]) -> tuple[list[str], bool]:
+    updated = list(command)
+    for index in range(len(updated) - 1):
+        if Path(str(updated[index])).name.startswith("python") and str(updated[index + 1]) == "-c":
+            if index + 2 >= len(updated):
+                return command, False
+            snippet, changed = _normalize_protdis_kon_feature_dims_snippet(str(updated[index + 2]))
+            if not changed:
+                return command, False
+            updated[index + 2] = snippet
+            return updated, True
+    return command, False
+
+
 def normalize_repository_command_for_execution(row: dict[str, Any], command: list[str], repo_path: Path, run_dir: Path) -> tuple[list[str], list[dict[str, str]]]:
+    if _is_protdis_repo(repo_path):
+        normalized, changed = _normalize_protdis_kon_feature_dims_command(command)
+        if changed:
+            return normalized, [{"migration": "ProtDiS KON expects feature_dims as a flat list of output dimensions; flattened generated nested singleton lists before model smoke execution"}]
     if not _is_rigidssl_repo(repo_path):
         return command, []
     phase = str(row.get("phase") or "").strip().lower()
@@ -4735,6 +5521,118 @@ def build_reusable_command_receipt_index(previous_rounds: list[dict[str, Any]], 
     return index
 
 
+GIT_CLONE_TRANSIENT_ERROR_PATTERNS = (
+    "gnutls recv error",
+    "the tls connection was non-properly terminated",
+    "failed to connect to github.com port 443",
+    "couldn't connect to server",
+    "connection timed out",
+    "connection reset by peer",
+    "early eof",
+    "http/2 stream",
+    "rpc failed",
+    "remote end hung up unexpectedly",
+)
+GIT_CLONE_PERMANENT_ERROR_PATTERNS = (
+    "repository not found",
+    "not found",
+    "authentication failed",
+    "could not read username",
+    "permission denied",
+    "access denied",
+)
+
+
+def _is_git_clone_command(command: list[str]) -> bool:
+    return len(command) >= 3 and Path(str(command[0])).name == "git" and str(command[1]) == "clone"
+
+
+def _git_clone_destination(command: list[str]) -> str:
+    if not _is_git_clone_command(command) or len(command) < 4:
+        return ""
+    return str(command[-1])
+
+
+def _git_clone_transient_failure(receipt: dict[str, Any]) -> bool:
+    if _receipt_return_code(receipt) == 0:
+        return False
+    text = " ".join(str(receipt.get(key) or "") for key in ("stdout_tail", "stdout_head", "stderr_tail")).lower()
+    if not text:
+        return False
+    if any(pattern in text for pattern in GIT_CLONE_PERMANENT_ERROR_PATTERNS):
+        return False
+    return any(pattern in text for pattern in GIT_CLONE_TRANSIENT_ERROR_PATTERNS)
+
+
+def _remove_partial_git_clone(destination: str, run_dir: Path) -> str:
+    if not destination:
+        return ""
+    try:
+        target = ensure_within(Path(destination), run_dir)
+    except Exception:
+        return ""
+    if target.exists():
+        shutil.rmtree(target)
+        return str(target)
+    return ""
+
+
+def run_logged_with_git_clone_retries(
+    command: list[str],
+    *,
+    cwd: Path,
+    log_path: Path,
+    timeout_sec: int | None,
+    env: dict[str, str],
+    required: bool,
+    run_dir: Path,
+) -> dict[str, Any]:
+    if not _is_git_clone_command(command):
+        return run_logged(command, cwd=cwd, log_path=log_path, timeout_sec=timeout_sec, env=env, required=required)
+    max_attempts = max(1, int(os.environ.get("TASTE_GIT_CLONE_MAX_ATTEMPTS", "3") or "3"))
+    receipts: list[dict[str, Any]] = []
+    attempt_commands: list[list[str]] = []
+    destination = _git_clone_destination(command)
+    for attempt in range(1, max_attempts + 1):
+        attempt_log_path = log_path if attempt == 1 else log_path.with_name(f"{log_path.stem}.retry{attempt}{log_path.suffix}")
+        attempt_command = list(command)
+        if attempt > 1 and "-c" not in attempt_command[:3]:
+            attempt_command = [attempt_command[0], "-c", "http.version=HTTP/1.1", *attempt_command[1:]]
+        attempt_commands.append(attempt_command)
+        if attempt > 1:
+            removed = _remove_partial_git_clone(destination, run_dir)
+            with attempt_log_path.open("a", encoding="utf-8") as handle:
+                handle.write(f"# retry_attempt={attempt}/{max_attempts}; transient git clone failure detected in previous attempt\n")
+                if removed:
+                    handle.write(f"# removed_partial_clone={removed}\n")
+        receipt = run_logged(attempt_command, cwd=cwd, log_path=attempt_log_path, timeout_sec=timeout_sec, env=env, required=required)
+        receipt["git_clone_attempt"] = attempt
+        receipt["git_clone_max_attempts"] = max_attempts
+        receipts.append(receipt)
+        if _receipt_return_code(receipt) == 0:
+            break
+        if not _git_clone_transient_failure(receipt):
+            break
+        if attempt < max_attempts:
+            time.sleep(min(10, attempt * 2))
+    final = dict(receipts[-1])
+    if len(receipts) > 1:
+        final["git_clone_retried"] = True
+        final["git_clone_attempt_count"] = len(receipts)
+        final["git_clone_attempt_receipts"] = receipts
+        final["git_clone_attempt_commands"] = [command_text(item) for item in attempt_commands]
+        final["log_path"] = str(log_path)
+        summary_lines = [f"$ {command_text(command)}", f"[git clone transient retry summary] attempts={len(receipts)} final_status={final.get('status')} return_code={final.get('return_code')}"]
+        for receipt in receipts:
+            summary_lines.append(f"attempt {receipt.get('git_clone_attempt')}: status={receipt.get('status')} return_code={receipt.get('return_code')} log={receipt.get('log_path')}")
+            tail = str(receipt.get("stdout_tail") or receipt.get("stderr_tail") or "").strip()
+            if tail:
+                summary_lines.append(tail[-1200:])
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("\n".join(summary_lines).rstrip() + "\n", encoding="utf-8")
+    return final
+
+
 def reusable_command_receipt(source_receipt: dict[str, Any], log_path: Path) -> dict[str, Any]:
     receipt = dict(source_receipt)
     original_log_path = str(source_receipt.get("log_path") or "")
@@ -4783,6 +5681,8 @@ def execute_plan_commands(plan: dict[str, Any], repo_path: Path, run_dir: Path, 
         script_migrations: list[dict[str, str]] = list(repository_migrations)
         try:
             cwd = resolve_command_cwd(row, repo_path, run_dir)
+            command, run_repo_migrations = normalize_run_repo_command_paths(command, cwd, run_dir)
+            script_migrations.extend(run_repo_migrations)
             script_migrations.extend(normalize_generated_script_commands_for_command(command, cwd, run_dir))
             missing_script_issue = missing_shell_script_issue(command, cwd, run_dir)
             boundary_issues = command_boundary_issues(command, cwd, run_dir)
@@ -4827,7 +5727,16 @@ def execute_plan_commands(plan: dict[str, Any], repo_path: Path, run_dir: Path, 
             else:
                 row_env = row.get("env") if isinstance(row.get("env"), dict) else {}
                 effective_env = command_environment(command_env, repo_path, row_env)
-                receipt = run_logged(command, cwd=cwd, log_path=log_path, timeout_sec=row.get("timeout_sec"), env=effective_env, required=bool(row.get("required")))
+                cwd.mkdir(parents=True, exist_ok=True)
+                receipt = run_logged_with_git_clone_retries(
+                    command,
+                    cwd=cwd,
+                    log_path=log_path,
+                    timeout_sec=row.get("timeout_sec"),
+                    env=effective_env,
+                    required=bool(row.get("required")),
+                    run_dir=run_dir,
+                )
                 receipt["phase"] = row.get("phase")
                 receipt["conda_env_prefix"] = str(env_prefix)
                 receipt["uses_conda_prefix"] = uses_conda_prefix
@@ -5371,42 +6280,50 @@ def main() -> int:
             env=claude_env,
         )
         repo_selection_review = review_result
-        reviewed = review_result.get("json") if isinstance(review_result.get("json"), dict) else {}
+        reviewed = _review_payload_for_candidate_recovery(review_result)
         review_status = str(reviewed.get("status") or "").strip().lower()
-        if review_status == "reject":
-            recovered_candidates = discovered_repo_candidates(reviewed)
-            recovered_urls: list[str] = []
+        original_repo_candidates = [str(item).strip() for item in repo_candidates if str(item).strip()]
+        recovered_candidates = recovered_repo_candidate_rows_from_review(reviewed, original_repo_candidates, work_root)
+        recovered_urls: list[str] = []
+        if recovered_candidates:
             for candidate in recovered_candidates:
                 candidate_url = str(candidate.get("url") or "").strip()
+                candidate_key = canonical_repo_url(candidate_url)
                 if not candidate_url or not is_github_repo_url(candidate_url):
                     continue
-                if canonical_repo_url(candidate_url) not in {canonical_repo_url(item) for item in repo_candidates}:
-                    repo_candidates.append(candidate_url)
-                repo_spec_lookup[canonical_repo_url(candidate_url)] = {
+                repo_spec_lookup[candidate_key] = {
                     "url": candidate_url,
                     "source": f"claude_repo_candidate_review.{candidate.get('source') or 'candidate'}",
                     "evidence": candidate.get("evidence") or reviewed.get("evidence", []),
+                    "review_status": review_status,
                     "review_reject_reason": reviewed.get("reject_reason") or "",
                 }
                 recovered_urls.append(candidate_url)
-            if recovered_urls:
-                repo_selection_review["backend_candidate_recovery"] = {
-                    "recovered_repo_urls": recovered_urls,
-                    "review_reject_reason": reviewed.get("reject_reason") or "",
-                }
-                selected_candidates = [str(item).strip() for item in repo_candidates if is_github_repo_url(str(item))]
-                review_issues = [str(reviewed.get("reject_reason") or "Claude Code 判定原始候选不可信，但后端恢复了可克隆 GitHub 候选并继续验证。")]
-                used_deterministic_fallback = False
-            else:
-                verdict = {
-                    "decision": "continue_repair",
-                    "allow_next_module": False,
-                    "reject_reason": reviewed.get("reject_reason") or "Claude Code 判定 plan 中的 GitHub 仓库候选不可信",
-                    "failure_taxonomy": [{"category": "repository_code", "evidence": reviewed.get("evidence") or [reviewed.get("reject_reason") or "候选仓库不可信"], "repairable": True}],
-                }
-                decision = final_decision_payload(run_id, run_dir, normalized, {"repo_candidates": repo_candidates, "repo_selection_review": repo_selection_review}, machine, [], verdict)
-                write_json(run_dir / "repo_info.json", decision["repo"])
-                return finalize_and_write_decision(decision, run_dir, paper_evidence, baseline_outside_paths)
+        if recovered_urls:
+            recovery_payload = {
+                "recovered_repo_urls": recovered_urls,
+                "original_repo_urls": original_repo_candidates,
+                "review_status": review_status,
+                "review_reject_reason": reviewed.get("reject_reason") or "",
+                "policy": "只要审阅证据明确给出官方/实际/正确 GitHub 替代仓库，后端就改用替代仓库继续验证；即使 Claude Code 把审阅状态误标为 ready，也不再克隆原始 404/SSO URL。",
+            }
+            reviewed["backend_candidate_recovery"] = recovery_payload
+            write_json(review_path, reviewed)
+            repo_selection_review["json"] = reviewed
+            repo_selection_review["backend_candidate_recovery"] = recovery_payload
+            selected_candidates = recovered_urls
+            review_issues = [_repo_recovery_issue(reviewed)]
+            used_deterministic_fallback = False
+        elif review_status == "reject":
+            verdict = {
+                "decision": "continue_repair",
+                "allow_next_module": False,
+                "reject_reason": reviewed.get("reject_reason") or "Claude Code 判定 plan 中的 GitHub 仓库候选不可信",
+                "failure_taxonomy": [{"category": "repository_code", "evidence": reviewed.get("evidence") or [reviewed.get("reject_reason") or "候选仓库不可信"], "repairable": True}],
+            }
+            decision = final_decision_payload(run_id, run_dir, normalized, {"repo_candidates": repo_candidates, "repo_selection_review": repo_selection_review}, machine, [], verdict)
+            write_json(run_dir / "repo_info.json", decision["repo"])
+            return finalize_and_write_decision(decision, run_dir, paper_evidence, baseline_outside_paths)
         else:
             selected_candidates, review_issues, used_deterministic_fallback = repo_candidates_after_review([str(item) for item in repo_candidates], review_result)
         if not selected_candidates:
@@ -5486,10 +6403,9 @@ def main() -> int:
             attempt = clone_or_reuse(str(candidate_url), repos_dir=repos_dir, log_dir=logs_dir, branch=branch_or_tag, commit=commit, timeout_sec=900, env=claude_env)
             attempt["repo_candidate_spec"] = candidate_spec
             clone_attempts.append(attempt)
-            if attempt.get("exists") and int((attempt.get("clone_receipt") or {}).get("return_code") or 0) == 0:
+            if attempt.get("exists") and int((attempt.get("clone_receipt") or {}).get("return_code") or 0) == 0 and not repo_info:
                 repo_info = dict(attempt)
                 selected_repo_url = str(candidate_url)
-                break
         if not repo_info:
             verdict = {
                 "decision": "continue_repair",
@@ -5508,10 +6424,18 @@ def main() -> int:
         repo_info["clone_attempts"] = clone_attempts
     if rejected_repo_candidates:
         repo_info["rejected_non_github_candidates"] = rejected_repo_candidates
-    write_json(run_dir / "repo_info.json", repo_info)
 
     repo_path = Path(str(repo_info.get("repo_path") or ""))
+    available_repo_paths = successful_clone_repo_rows(clone_attempts, str(repo_path)) if clone_attempts else []
+    if available_repo_paths:
+        repo_info["available_repo_paths"] = available_repo_paths
+        repo_info["auxiliary_repo_paths"] = [row for row in available_repo_paths if row.get("role") == "auxiliary"]
+    write_json(run_dir / "repo_info.json", repo_info)
+
     repo_evidence = collect_repo_evidence(repo_path) if repo_path.exists() else {"repo_path": str(repo_path), "readmes": [], "config_files": [], "dry_run": args.dry_run}
+    if available_repo_paths:
+        repo_evidence["available_repo_paths"] = available_repo_paths
+        repo_evidence["auxiliary_repositories"] = collect_auxiliary_repo_evidence(available_repo_paths, repo_path)
     write_json(run_dir / "repo_evidence.json", repo_evidence)
 
     rounds: list[dict[str, Any]] = []

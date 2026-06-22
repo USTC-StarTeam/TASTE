@@ -86,6 +86,32 @@ def test_runtime_projection_keeps_configured_conda_env_without_current_handoff(m
     assert "experiment_python" not in public
 
 
+def test_environment_launch_runtime_excludes_stale_experiment_python_path(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    root = _make_project(projects, "demo")
+    stale_python = tmp_path / "old_env" / "bin" / "python"
+    stale_python.parent.mkdir(parents=True)
+    stale_python.write_text("#!/bin/sh\n", encoding="utf-8")
+    cfg = json.loads((root / "project.json").read_text(encoding="utf-8"))
+    cfg["runtime"] = {
+        "node_bin": "/opt/node/bin",
+        "conda_base": str(tmp_path / "miniforge"),
+        "experiment_python": str(stale_python),
+    }
+    (root / "project.json").write_text(json.dumps(cfg), encoding="utf-8")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.delenv("EXPERIMENT_PYTHON", raising=False)
+    monkeypatch.delenv("PROJECT_PYTHON", raising=False)
+
+    import runtime_env
+
+    env = runtime_env.interactive_env("demo", cfg, include_experiment_python=False)
+
+    assert str(stale_python.parent) not in env["PATH"].split(os.pathsep)[:8]
+    assert "EXPERIMENT_PYTHON" not in env
+    assert "PROJECT_PYTHON" not in env
+
+
 def test_web_environment_action_uses_framework_single_stage(monkeypatch, tmp_path):
     projects = tmp_path / "projects"
     _make_project(projects, "demo")
@@ -102,6 +128,26 @@ def test_web_environment_action_uses_framework_single_stage(monkeypatch, tmp_pat
     module_arg = cmd[cmd.index("--module-arg") + 1]
     assert module_arg.startswith("environment=--plan ")
     assert "modules/environment/main.py" not in " ".join(cmd)
+
+
+def test_web_environment_init_alias_uses_framework_single_stage(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    _make_project(projects, "demo")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.setattr(project_bridge, "project_target_venue", lambda project, default="": default or "ICLR")
+    monkeypatch.setattr(project_bridge, "management_python", lambda: "/env/bin/python")
+
+    assert project_bridge.job_stage({"project": "demo", "action": "init"}) == "environment"
+    project, cmd = project_bridge.build_command({"project": "demo", "action": "init", "venue": "ICLR", "conda_env": "demo_env"})
+
+    assert project == "demo"
+    assert cmd[:3] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "orchestration" / "run_taste_framework.py"), "run"]
+    assert "--only-stage" in cmd
+    assert cmd[cmd.index("--only-stage") + 1] == "environment"
+    module_arg = cmd[cmd.index("--module-arg") + 1]
+    assert module_arg.startswith("environment=--plan ")
+    assert "modules/experimenting/main.py" not in " ".join(cmd)
+
 
 
 def test_web_experiment_action_uses_framework_and_module_runtime(monkeypatch, tmp_path):
@@ -251,6 +297,47 @@ def test_web_run_preferences_show_current_environment_plan_runtime_without_hando
     assert prefs["runtime"]["conda_env_prefix"] == str(env_prefix)
     assert prefs["runtime"]["experiment_python"] == str(env_prefix / "bin" / "python")
     assert prefs["runtime"]["environment_decision"] == "continue_repair"
+
+
+def test_web_run_preferences_project_conda_env_overrides_stale_environment_plan(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    root = _make_project(projects, "demo")
+    run_dir = tmp_path / "modules" / "environment" / "runs" / "web_environment_demo_20260621T000000Z"
+    round_dir = run_dir / "round_01"
+    stale_prefix = run_dir / "conda_envs" / "taste_protein_env"
+    (stale_prefix / "bin").mkdir(parents=True)
+    (stale_prefix / "bin" / "python").write_text("", encoding="utf-8")
+    round_dir.mkdir(parents=True)
+    (round_dir / "claude_environment_plan_round_01.json").write_text(json.dumps({
+        "status": "ready_to_execute",
+        "env_name": "taste_protein_env",
+        "commands": [],
+    }), encoding="utf-8")
+    (run_dir / "environment_deployment_decision.json").write_text(json.dumps({
+        "run_id": run_dir.name,
+        "decision": "continue_repair",
+        "ready_for_experimenting": False,
+    }), encoding="utf-8")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.setattr(project_bridge, "ROOT", tmp_path)
+
+    prefs = project_bridge._public_run_preferences(
+        "demo",
+        root,
+        {"conda_env": "protdis_env", "target_venue": "ICLR"},
+        runtime_public={"conda_env": "protdis_env", "conda_base": "/opt/miniforge"},
+        selection={},
+    )
+    path_head = project_bridge._runtime_path_head_with_environment_handoff(root, prefs["runtime"], ["/usr/bin"])
+
+    assert prefs["conda_env"] == "protdis_env"
+    assert prefs["runtime"]["conda_env"] == "protdis_env"
+    assert prefs["runtime"].get("conda_env_prefix") is None
+    assert prefs["runtime"].get("experiment_python") is None
+    assert prefs["runtime"]["environment_run_id"] == run_dir.name
+    assert "taste_protein_env" not in json.dumps(prefs, ensure_ascii=False)
+    assert path_head == ["/usr/bin"]
+
 
 
 def test_web_summary_filters_cached_experiment_runtime_without_current_handoff(monkeypatch, tmp_path):
@@ -954,6 +1041,60 @@ def test_web_source_status_keeps_complete_dblp_title_index_limited_but_unblocked
     assert summary["status"] != "source_integrity_blocked"
 
 
+def test_web_source_status_does_not_promote_missing_verified_cache_rows():
+    missing_rows = [
+        {
+            "source": "ICLR",
+            "source_kind": "venue",
+            "venue_id": "openreview_iclr",
+            "venue": "ICLR",
+            "ok": False,
+            "limited": True,
+            "count": 0,
+            "raw_title_index_count": 0,
+            "candidate_count": 0,
+            "metadata_completeness_status": "missing",
+            "message": "verified local venue metadata cache missing",
+        },
+        {
+            "source": "NeurIPS",
+            "source_kind": "venue",
+            "venue_id": "ccf_ai_conference_a_neurips_conference_on_neural_information_processing_systems",
+            "venue": "NeurIPS",
+            "ok": False,
+            "limited": True,
+            "count": 0,
+            "raw_title_index_count": 0,
+            "candidate_count": 0,
+            "metadata_completeness_status": "missing",
+            "message": "verified local venue metadata cache missing",
+        },
+    ]
+
+    assert project_bridge._merge_verified_venue_metadata_rows([], missing_rows) == []
+
+    current_rows = [
+        {
+            "source": "ICLR",
+            "source_kind": "venue",
+            "venue_id": "openreview_iclr",
+            "venue": "ICLR",
+            "ok": True,
+            "limited": False,
+            "count": 5352,
+            "raw_title_index_count": 5352,
+            "candidate_count": 5352,
+            "metadata_completeness_status": "complete",
+            "metadata_completeness_ok": True,
+        }
+    ]
+    merged = project_bridge._merge_verified_venue_metadata_rows(current_rows, missing_rows)
+
+    assert len(merged) == 1
+    assert merged[0]["source"] == "ICLR"
+    assert merged[0]["raw_title_index_count"] == 5352
+
+
 def test_web_find_pipeline_summary_blocks_suspicious_one_paper_core_venue(monkeypatch, tmp_path):
     projects = tmp_path / "projects"
     root = _make_project(projects, "demo")
@@ -1099,6 +1240,40 @@ def test_api_artifacts_light_compacts_large_current_find_progress(monkeypatch, t
     assert len(json.dumps(payload, ensure_ascii=False)) < 20000
 
 
+def test_api_artifacts_resolves_environment_framework_and_module_roots(monkeypatch, tmp_path):
+    reading_scripts = ROOT / "modules" / "reading" / "scripts"
+    sys.path.insert(0, str(reading_scripts))
+    sys.modules.pop("pipeline", None)
+    from auto_research.web import server as web_server
+
+    run_id = "web_environment_demo_20260621T220925Z"
+    framework_run = tmp_path / "framework" / "workspace" / "runs" / run_id.lower()
+    module_run = tmp_path / "modules" / "environment" / "runs" / run_id
+    (framework_run / "public").mkdir(parents=True)
+    module_run.mkdir(parents=True)
+    (framework_run / "public" / "workflow_status.md").write_text("# 环境状态\nblocked", encoding="utf-8")
+    (framework_run / "public" / "frontend_status.json").write_text(json.dumps({"status": "blocked"}), encoding="utf-8")
+    (module_run / "environment_deployment_decision.json").write_text(json.dumps({"run_id": run_id, "decision": "continue_repair"}), encoding="utf-8")
+    (module_run / "repo_info.json").write_text(json.dumps({"repo_candidates": ["https://github.com/example/repo"]}), encoding="utf-8")
+
+    monkeypatch.setattr(web_server, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(web_server, "FRAMEWORK_RUNS_DIR", tmp_path / "framework" / "workspace" / "runs")
+    monkeypatch.setattr(web_server, "ENVIRONMENT_RUNS_DIR", tmp_path / "modules" / "environment" / "runs")
+    monkeypatch.setattr(web_server, "run_dir", lambda _run_id: (_ for _ in ()).throw(FileNotFoundError(_run_id)))
+    web_server._RUN_ARTIFACTS_CACHE.clear()
+
+    payload = web_server.api_artifacts(run_id, light=False)
+
+    by_name = {item["name"]: item for item in payload["artifacts"]}
+    assert "workflow_status.md" in by_name
+    assert by_name["workflow_status.md"]["path"].endswith("public/workflow_status.md")
+    assert by_name["frontend_status.json"]["content"] == {"status": "blocked"}
+    assert by_name["environment_deployment_decision.json"]["content"]["decision"] == "continue_repair"
+    assert by_name["repo_info.json"]["content"]["repo_candidates"] == ["https://github.com/example/repo"]
+    assert str(framework_run) in payload["artifact_roots"]
+    assert str(module_run) in payload["artifact_roots"]
+
+
 def test_api_artifacts_light_recovers_current_find_source_status_from_markdown(monkeypatch, tmp_path):
     reading_scripts = ROOT / "modules" / "reading" / "scripts"
     sys.path.insert(0, str(reading_scripts))
@@ -1115,7 +1290,23 @@ def test_api_artifacts_light_recovers_current_find_source_status_from_markdown(m
         json.dumps(
             {
                 "run_id": run_id,
-                "counts": {"recommended": 20, "venue_title_filter_input_papers": 6434},
+                "counts": {
+                    "recommended": 20,
+                    "raw_title_index_papers": 6434,
+                    "venue_total_papers_available": 6434,
+                    "venue_title_filter_input_papers": 6434,
+                    "category_filtered_papers": 6434,
+                    "tfidf_screened_papers": 6434,
+                    "llm_title_scored_papers": 5204,
+                    "venue_final_title_candidates": 1503,
+                },
+                "survey_stats": {
+                    "raw_title_index_papers": 6434,
+                    "category_filtered_papers": 6434,
+                    "tfidf_screened_papers": 6434,
+                    "llm_title_scored_papers": 5204,
+                    "venue_final_title_candidates": 1503,
+                },
                 "strong_recommendations": [{"title": "paper", "id": "p1"}],
                 "read_candidates": [{"title": "paper", "id": "p1"}],
             }
@@ -1143,9 +1334,14 @@ def test_api_artifacts_light_recovers_current_find_source_status_from_markdown(m
         rows = content["source_status"]
         assert [row["source"] for row in rows] == ["ICML", "ICLR", "NeurIPS", "SIGKDD"]
         assert [row["count"] for row in rows] == [6431, 5352, 5823, 256]
-        assert content["counts"]["raw_title_index_papers"] == 17862
-        assert content["counts"]["venue_total_papers_available"] == 17862
-        assert content["survey_stats"]["raw_title_index_papers"] == 17862
+        assert content["source_status_totals"]["raw_title_index_papers"] == 17862
+        assert content["source_status_totals"]["venue_title_filter_input_papers"] == 17862
+        assert content["counts"]["raw_title_index_papers"] == 6434
+        assert content["counts"]["venue_total_papers_available"] == 6434
+        assert content["counts"]["category_filtered_papers"] == 6434
+        assert content["counts"]["llm_title_scored_papers"] == 5204
+        assert content["survey_stats"]["raw_title_index_papers"] == 6434
+        assert content["survey_stats"]["venue_final_title_candidates"] == 1503
 
 
 def test_project_summary_recovers_source_status_from_markdown_when_progress_is_large(monkeypatch, tmp_path):
@@ -1165,6 +1361,20 @@ def test_project_summary_recovers_source_status_from_markdown_when_progress_is_l
                     "recommendation_target_count": 20,
                     "recommendation_shortfall": 0,
                     "strong_recommendations": 20,
+                    "raw_title_index_papers": 6434,
+                    "venue_title_filter_input_papers": 6434,
+                    "category_filtered_papers": 6434,
+                    "tfidf_screened_papers": 6434,
+                    "llm_title_scored_papers": 5204,
+                    "venue_final_title_candidates": 1503,
+                },
+                "survey_stats": {
+                    "raw_title_index_papers": 6434,
+                    "venue_title_filter_input_papers": 6434,
+                    "category_filtered_papers": 6434,
+                    "tfidf_screened_papers": 6434,
+                    "llm_title_scored_papers": 5204,
+                    "venue_final_title_candidates": 1503,
                 },
                 "strong_recommendations": [],
                 "read_candidates": [],
@@ -1195,7 +1405,10 @@ def test_project_summary_recovers_source_status_from_markdown_when_progress_is_l
     stage_rows = summary["stages"]["find"]["source_status"]
     assert [row["source"] for row in stage_rows] == ["ICML", "ICLR", "NeurIPS", "SIGKDD"]
     assert [row["count"] for row in stage_rows] == [6431, 5352, 5823, 256]
-    assert summary["literature_survey"]["counts"]["raw_title_index_papers"] == 17862
+    assert summary["literature_survey"]["source_status_totals"]["raw_title_index_papers"] == 17862
+    assert summary["literature_survey"]["counts"]["raw_title_index_papers"] == 6434
+    assert summary["literature_survey"]["counts"]["category_filtered_papers"] == 6434
+    assert summary["literature_survey"]["counts"]["llm_title_scored_papers"] == 5204
     assert summary["literature_survey"]["source_integrity_gate"]["blocked_count"] == 0
     assert summary["literature_survey"]["status"] == "current_find_packet_ready"
 

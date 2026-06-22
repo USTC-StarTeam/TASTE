@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import re
@@ -875,6 +876,435 @@ def test_environment_discovery_recovers_official_replacement_repos_from_reject()
     assert [row["url"] for row in recovered] == ["https://github.com/AI-HPC-Research-Team/ProtDiS"]
 
 
+def test_environment_repo_review_reject_uses_known_replacements_not_freeform_short_names():
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_review_reject_no_freeform_short_names",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+    original = [
+        "https://github.com/protdis/protdis",
+        "https://github.com/GenerateBiomedicines/flexible-kernels",
+        "https://github.com/tedbench/miae",
+    ]
+    reviewed = {
+        "status": "reject",
+        "ordered_repo_urls": [],
+        "evidence": [
+            "GitHub API 对 https://github.com/protdis/protdis 返回 404，用户/组织 protdis 不存在；实际官方仓库为 AI-HPC-Research-Team/ProtDiS",
+            "GitHub API 对 https://github.com/GenerateBiomedicines/flexible-kernels 返回 404，组织 GenerateBiomedicines 无公开 GitHub 存在；论文代码未公开发布",
+            "GitHub API 对 https://github.com/tedbench/miae 返回 404；实际官方仓库为 BorgwardtLab/TEDBench (ICML 2026 oral)",
+            "actual MiAE/TEDBench repo is github.com/BorgwardtLab/TEDBench",
+        ],
+        "reject_reason": "三个候选 URL 经 GitHub API 验证均返回 404 Not Found。protdis/protdis 的正确 URL 应为 AI-HPC-Research-Team/ProtDiS；tedbench/miae 的正确 URL 应为 BorgwardtLab/TEDBench；GenerateBiomedicines/flexible-kernels 对应的论文代码未公开发布。",
+    }
+
+    recovered = autonomous_deploy.discovered_repo_candidates(reviewed)
+    selected, issues, fallback = autonomous_deploy.repo_candidates_after_review(original, {"return_code": 0, "json": reviewed})
+
+    assert [row["url"] for row in recovered] == [
+        "https://github.com/AI-HPC-Research-Team/ProtDiS",
+        "https://github.com/BorgwardtLab/TEDBench",
+    ]
+    assert "https://github.com/MiAE/TEDBench" not in [row["url"] for row in recovered]
+    assert selected == [
+        "https://github.com/AI-HPC-Research-Team/ProtDiS",
+        "https://github.com/BorgwardtLab/TEDBench",
+    ]
+    assert "https://github.com/GenerateBiomedicines/flexible-kernels" not in selected
+    assert fallback is False
+    assert issues[0] == reviewed["reject_reason"]
+    assert any("已知过期仓库候选已替换" in item for item in issues)
+    assert any("暂无公开可克隆代码" in item for item in issues)
+
+
+def test_environment_repo_review_reject_recovers_positive_owner_repo_short_names():
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_review_reject_positive_owner_repo",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+    original = [
+        "https://github.com/protdis/protdis",
+        "https://github.com/GenerateBiomedicines/flexible-kernels",
+        "https://github.com/tedbench/miae",
+    ]
+    reviewed = {
+        "status": "reject",
+        "ordered_repo_urls": [],
+        "evidence": [
+            "HTTP 404: https://github.com/protdis/protdis; the actual official repo is at AI-HPC-Research-Team/ProtDiS (HTTP 200).",
+            "HTTP 404: https://github.com/tedbench/miae; the correct repository is BorgwardtLab/TEDBench, not MiAE/TEDBench.",
+            "GenerateBiomedicines/flexible-kernels has no public code repository found.",
+        ],
+        "reject_reason": "Use verified official replacements only.",
+    }
+
+    recovered = autonomous_deploy.official_replacement_repo_candidates_from_review(reviewed, original)
+    selected, issues, fallback = autonomous_deploy.repo_candidates_after_review(original, {"return_code": 0, "json": reviewed})
+
+    recovered_urls = [row["url"] for row in recovered]
+    assert recovered_urls == [
+        "https://github.com/AI-HPC-Research-Team/ProtDiS",
+        "https://github.com/BorgwardtLab/TEDBench",
+    ]
+    assert "https://github.com/MiAE/TEDBench" not in recovered_urls
+    assert selected == [
+        "https://github.com/AI-HPC-Research-Team/ProtDiS",
+        "https://github.com/BorgwardtLab/TEDBench",
+    ]
+    assert fallback is False
+    assert issues[0] == reviewed["reject_reason"]
+
+
+def test_environment_repo_review_recovered_replacements_preserve_original_candidate_order():
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_recovered_replacement_order",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+    original = [
+        "https://github.com/protdis/protdis",
+        "https://github.com/GenerateBiomedicines/flexible-kernels",
+        "https://github.com/tedbench/miae",
+    ]
+    reviewed = {
+        "status": "reject",
+        "ordered_repo_urls": [],
+        "evidence": [
+            "GenerateBiomedicines/flexible-kernels returns 404; the real repo is generatebio/lock_gp (https://github.com/generatebio/lock_gp).",
+            "protdis/protdis -> AI-HPC-Research-Team/ProtDiS (https://github.com/AI-HPC-Research-Team/ProtDiS) official code.",
+            "tedbench/miae -> BorgwardtLab/TEDBench (https://github.com/BorgwardtLab/TEDBench) official code.",
+        ],
+        "reject_reason": "Original URLs are stale.",
+    }
+
+    selected, issues, fallback = autonomous_deploy.repo_candidates_after_review(original, {"return_code": 0, "json": reviewed})
+
+    assert selected == [
+        "https://github.com/AI-HPC-Research-Team/ProtDiS",
+        "https://github.com/generatebio/lock_gp",
+        "https://github.com/BorgwardtLab/TEDBench",
+    ]
+    assert fallback is False
+    assert issues[0] == "Original URLs are stale."
+
+
+def test_environment_review_uses_verified_historical_lock_gp_replacement(tmp_path):
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_historical_lock_gp_replacement",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+    original = [
+        "https://github.com/protdis/protdis",
+        "https://github.com/GenerateBiomedicines/flexible-kernels",
+        "https://github.com/tedbench/miae",
+    ]
+    repo = tmp_path / "old_run" / "repos" / "generatebio_lock_gp_8513f55d"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".git" / "config").write_text(
+        "[remote \"origin\"]\n	url = https://github.com/generatebio/lock_gp\n",
+        encoding="utf-8",
+    )
+    (repo / "README.md").write_text(
+        "# Flexible Kernels for Protein Property Prediction\nThis repo contains LOCK GP code.",
+        encoding="utf-8",
+    )
+
+    rows = autonomous_deploy.recovered_repo_candidate_rows_from_review(
+        {
+            "status": "reject",
+            "evidence": [
+                "protdis/protdis actual official repo is AI-HPC-Research-Team/ProtDiS.",
+                "GenerateBiomedicines/flexible-kernels may not be public.",
+                "tedbench/miae correct repository is BorgwardtLab/TEDBench.",
+            ],
+            "reject_reason": "Some candidates are stale.",
+        },
+        original,
+        tmp_path,
+    )
+
+    assert [row["url"] for row in rows] == [
+        "https://github.com/AI-HPC-Research-Team/ProtDiS",
+        "https://github.com/generatebio/lock_gp",
+        "https://github.com/BorgwardtLab/TEDBench",
+    ]
+    assert any(row["source"] == "historical_verified_clone" for row in rows)
+
+
+def test_environment_repo_review_recovers_replacements_from_malformed_json_text(tmp_path):
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_malformed_review_text_recovery",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+    original = [
+        "https://github.com/protdis/protdis",
+        "https://github.com/GenerateBiomedicines/flexible-kernels",
+        "https://github.com/tedbench/miae",
+    ]
+    log_path = tmp_path / "claude_repo_candidate_review.log"
+    log_path.write_text(
+        '''--- STDOUT ---
+| `protdis/protdis` | `AI-HPC-Research-Team/ProtDiS` | actual official repo |
+| `GenerateBiomedicines/flexible-kernels` | `generatebio/lock_gp` | correct repo for Flexible Kernels |
+| `tedbench/miae` | `BorgwardtLab/TEDBench` | correct repository for MiAE/TEDBench |
+由于候选 URL 返回 404，审阅结论：拒绝。
+''',
+        encoding="utf-8",
+    )
+    review_result = {
+        "return_code": 0,
+        "status": "failed",
+        "json": {},
+        "stdout_tail": "输出已写入指定路径。",
+        "log_path": str(log_path),
+    }
+
+    recovered = autonomous_deploy.official_replacement_repo_candidates_from_review(
+        autonomous_deploy._text_review_payload_from_result(review_result),
+        original,
+    )
+    selected, issues, fallback = autonomous_deploy.repo_candidates_after_review(original, review_result)
+
+    assert "https://github.com/MiAE/TEDBench" not in [row["url"] for row in recovered]
+    assert selected == [
+        "https://github.com/AI-HPC-Research-Team/ProtDiS",
+        "https://github.com/generatebio/lock_gp",
+        "https://github.com/BorgwardtLab/TEDBench",
+    ]
+    assert fallback is False
+    assert "valid JSON" in issues[0]
+
+
+def test_environment_repo_review_ready_uses_known_stale_repo_replacements():
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_known_stale_repo_replacements",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+    original = [
+        "https://github.com/protdis/protdis",
+        "https://github.com/GenerateBiomedicines/flexible-kernels",
+        "https://github.com/tedbench/miae",
+    ]
+    reviewed = {
+        "status": "ready",
+        "ordered_repo_urls": list(original),
+        "selected_reason": "三个候选均可信，按实验核心依赖排序。",
+        "evidence": [
+            "protdis/protdis：候选名称与论文方法名 ProtDiS 对应",
+            "GenerateBiomedicines/flexible-kernels：作者机构一致",
+            "tedbench/miae：MiAE 在实验阶段1环境验证中被列为依赖",
+        ],
+    }
+
+    selected, issues, fallback = autonomous_deploy.repo_candidates_after_review(original, {"return_code": 0, "json": reviewed})
+
+    assert selected == [
+        "https://github.com/AI-HPC-Research-Team/ProtDiS",
+        "https://github.com/BorgwardtLab/TEDBench",
+    ]
+    assert fallback is False
+    assert any("已知过期仓库候选已替换" in item for item in issues)
+    assert any("暂无公开可克隆代码" in item for item in issues)
+
+
+
+def test_environment_repo_review_ready_requires_explicit_github_replacements():
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_review_ready_explicit_github_recovery",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+    original = [
+        "https://github.com/protdis/protdis",
+        "https://github.com/GenerateBiomedicines/flexible-kernels",
+        "https://github.com/tedbench/miae",
+    ]
+    reviewed = {
+        "status": "ready",
+        "ordered_repo_urls": [original[0], original[1], original[2]],
+        "selected_reason": "优先级沿用原始实验计划。",
+        "evidence": [
+            "搜索验证：protdis/protdis 对应 ICML 2026 论文，官方代码库在 github.com/AI-HPC-Research-Team/ProtDiS（候选URL可能重定向）",
+            "搜索验证：GenerateBiomedicines/flexible-kernels 对应论文，Generate Biomedicines 为作者所属机构，但未明确给出替代仓库",
+            "搜索验证：tedbench/miae 对应 ICML 2026 Oral 论文；实际主项目仓库为 github.com/BorgwardtLab/TEDBench，实验阶段需处理候选URL有效性",
+        ],
+        "reject_reason": "",
+    }
+
+    recovered = autonomous_deploy.official_replacement_repo_candidates_from_review(reviewed, original)
+    selected, issues, fallback = autonomous_deploy.repo_candidates_after_review(original, {"return_code": 0, "json": reviewed})
+
+    assert [row["url"] for row in recovered] == [
+        "https://github.com/AI-HPC-Research-Team/ProtDiS",
+        "https://github.com/BorgwardtLab/TEDBench",
+    ]
+    assert selected == [
+        "https://github.com/AI-HPC-Research-Team/ProtDiS",
+        "https://github.com/BorgwardtLab/TEDBench",
+    ]
+    assert original[0] not in selected
+    assert original[1] not in selected
+    assert original[2] not in selected
+    assert fallback is False
+    assert "ready" in issues[0]
+    assert any("已知过期仓库候选已替换" in item for item in issues)
+    assert any("暂无公开可克隆代码" in item for item in issues)
+
+
+def test_environment_repo_review_reject_recovers_official_replacements_only():
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_review_reject_recovery",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+    original = [
+        "https://github.com/protdis/protdis",
+        "https://github.com/GenerateBiomedicines/flexible-kernels",
+        "https://github.com/tedbench/miae",
+    ]
+    reviewed = {
+        "status": "reject",
+        "ordered_repo_urls": [original[1], original[0], original[2]],
+        "evidence": [
+            "protdis/protdis is 404; actual official ProtDiS repo is https://github.com/AI-HPC-Research-Team/ProtDiS.",
+            "tedbench/miae is 404; actual official MiAE repo is https://github.com/BorgwardtLab/TEDBench.",
+        ],
+        "reject_reason": "Original URLs are stale or inaccessible.",
+    }
+
+    selected, issues, fallback = autonomous_deploy.repo_candidates_after_review(original, {"return_code": 0, "json": reviewed})
+
+    assert selected == [
+        "https://github.com/AI-HPC-Research-Team/ProtDiS",
+        "https://github.com/BorgwardtLab/TEDBench",
+    ]
+    assert fallback is False
+    assert issues[0] == "Original URLs are stale or inaccessible."
+    assert any("已知过期仓库候选已替换" in item for item in issues)
+    assert any("暂无公开可克隆代码" in item for item in issues)
+
+
+def test_environment_repo_manager_prefers_historical_clone_without_network(tmp_path, monkeypatch):
+    repo_manager = _load_environment_module(
+        "environment_repo_manager_historical_clone",
+        "scripts/repository/repo_manager.py",
+    )
+    repo_url = "https://github.com/example/repo"
+    runs_root = tmp_path / "runs"
+    old_repo = runs_root / "old_run" / "repos" / repo_manager.repo_slug(repo_url)
+    old_repo.mkdir(parents=True)
+    subprocess.run(["git", "init"], cwd=old_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    subprocess.run(["git", "config", "user.email", "taste@example.com"], cwd=old_repo, check=True)
+    subprocess.run(["git", "config", "user.name", "TASTE"], cwd=old_repo, check=True)
+    subprocess.run(["git", "remote", "add", "origin", repo_url + ".git"], cwd=old_repo, check=True)
+    (old_repo / "README.md").write_text("historical clone\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=old_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=old_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=old_repo, check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+
+    def fail_on_network(command, **kwargs):
+        raise AssertionError(f"historical clone should avoid network command: {command}")
+
+    monkeypatch.setattr(repo_manager, "run_logged", fail_on_network)
+    current_repos = runs_root / "new_run" / "repos"
+    result = repo_manager.clone_or_reuse(repo_url, current_repos, runs_root / "new_run" / "logs")
+
+    assert result["exists"] is True
+    assert result["head_commit"] == head
+    assert result["clone_receipt"]["reused_historical_clone"] is True
+    assert Path(result["repo_path"], "README.md").read_text(encoding="utf-8") == "historical clone\n"
+
+
+def test_environment_repo_manager_skips_wrong_origin_workspace_historical_clone(tmp_path, monkeypatch):
+    repo_manager = _load_environment_module(
+        "environment_repo_manager_historical_clone_origin_guard",
+        "scripts/repository/repo_manager.py",
+    )
+    repo_url = "https://github.com/generatebio/lock_gp"
+    runs_root = tmp_path / "runs"
+    bad_repo = runs_root / "newer_bad" / "repos" / repo_manager.repo_slug(repo_url)
+    bad_repo.mkdir(parents=True)
+    subprocess.run(["git", "init"], cwd=bad_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    subprocess.run(["git", "config", "user.email", "taste@example.com"], cwd=bad_repo, check=True)
+    subprocess.run(["git", "config", "user.name", "TASTE"], cwd=bad_repo, check=True)
+    subprocess.run(["git", "remote", "add", "origin", "git@github.com:USTC-StarTeam/TASTE.git"], cwd=bad_repo, check=True)
+    (bad_repo / "工作状态.txt").write_text("TASTE status\n", encoding="utf-8")
+    (bad_repo / "modules").mkdir()
+    (bad_repo / "web").mkdir()
+    subprocess.run(["git", "add", "."], cwd=bad_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "bad workspace copy"], cwd=bad_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    good_repo = runs_root / "older_good" / "repos" / "generatebio_lock_gp"
+    good_repo.mkdir(parents=True)
+    subprocess.run(["git", "init"], cwd=good_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    subprocess.run(["git", "config", "user.email", "taste@example.com"], cwd=good_repo, check=True)
+    subprocess.run(["git", "config", "user.name", "TASTE"], cwd=good_repo, check=True)
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/generatebio/lock_gp.git"], cwd=good_repo, check=True)
+    (good_repo / "README.md").write_text("# Flexible Kernels for Protein Property Prediction\nLOCK GP\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=good_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "good lock gp"], cwd=good_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    good_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=good_repo, check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+
+    def fail_on_network(command, **kwargs):
+        raise AssertionError(f"historical clone should avoid network command: {command}")
+
+    monkeypatch.setattr(repo_manager, "run_logged", fail_on_network)
+    result = repo_manager.clone_or_reuse(repo_url, runs_root / "current" / "repos", runs_root / "current" / "logs")
+
+    assert result["exists"] is True
+    assert result["head_commit"] == good_head
+    assert result["clone_receipt"]["reused_historical_clone"] is True
+    assert result["clone_receipt"]["reused_from_repo_path"] == str(good_repo)
+    copied = Path(result["repo_path"])
+    assert (copied / "README.md").read_text(encoding="utf-8").startswith("# Flexible Kernels")
+    assert not (copied / "工作状态.txt").exists()
+
+
+
+def test_environment_repo_manager_rejects_wrong_origin_clone_result_and_reuses_history(tmp_path, monkeypatch):
+    repo_manager = _load_environment_module(
+        "environment_repo_manager_post_clone_origin_guard",
+        "scripts/repository/repo_manager.py",
+    )
+    repo_url = "https://github.com/BorgwardtLab/TEDBench"
+    runs_root = tmp_path / "runs"
+    good_repo = runs_root / "older_good" / "repos" / "BorgwardtLab_TEDBench"
+    good_repo.mkdir(parents=True)
+    subprocess.run(["git", "init"], cwd=good_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    subprocess.run(["git", "config", "user.email", "taste@example.com"], cwd=good_repo, check=True)
+    subprocess.run(["git", "config", "user.name", "TASTE"], cwd=good_repo, check=True)
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/BorgwardtLab/TEDBench.git"], cwd=good_repo, check=True)
+    (good_repo / "README.md").write_text("# TEDBench\nreal repository\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=good_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "good tedbench"], cwd=good_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    good_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=good_repo, check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+
+    def fake_run_logged(command, **kwargs):
+        if command[:2] == ["git", "clone"]:
+            target = Path(command[-1])
+            target.mkdir(parents=True)
+            subprocess.run(["git", "init"], cwd=target, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            subprocess.run(["git", "config", "user.email", "taste@example.com"], cwd=target, check=True)
+            subprocess.run(["git", "config", "user.name", "TASTE"], cwd=target, check=True)
+            subprocess.run(["git", "remote", "add", "origin", "git@github.com:USTC-StarTeam/TASTE.git"], cwd=target, check=True)
+            (target / "工作状态.txt").write_text("TASTE status\n", encoding="utf-8")
+            (target / "web").mkdir()
+            (target / "projects").mkdir()
+            subprocess.run(["git", "add", "."], cwd=target, check=True)
+            subprocess.run(["git", "commit", "-m", "bad clone"], cwd=target, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            return {"command": " ".join(map(str, command)), "return_code": 0, "status": "passed", "stdout_tail": "cloned wrong repo"}
+        raise AssertionError(f"unexpected command after invalid clone: {command}")
+
+    monkeypatch.setattr(repo_manager, "run_logged", fake_run_logged)
+    result = repo_manager.clone_or_reuse(repo_url, runs_root / "current" / "repos", runs_root / "current" / "logs", branch="main")
+
+    assert result["exists"] is True
+    assert result["head_commit"] == good_head
+    assert result["clone_receipt"]["reused_historical_clone"] is True
+    assert "invalid_clone_reason" in result["clone_receipt"]
+    copied = Path(result["repo_path"])
+    assert (copied / "README.md").read_text(encoding="utf-8").startswith("# TEDBench")
+    assert not (copied / "工作状态.txt").exists()
+    assert repo_manager._repo_origin_matches(repo_url, copied) is True
+
+
 def test_environment_rewrites_huggingface_cli_to_current_hf_cli(tmp_path):
     environment_module_root = ROOT / "modules" / "environment"
     for name in list(sys.modules):
@@ -1152,6 +1582,62 @@ def test_environment_rewrites_rigidssl_model_and_smoke_probes(tmp_path):
     assert env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] == "1"
 
 
+def test_environment_rewrites_protdis_nested_feature_dims_smoke(tmp_path):
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_protdis_feature_dims",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+
+    run_dir = tmp_path / "run"
+    repo = run_dir / "repos" / "ProtDiS"
+    (repo / "src" / "models").mkdir(parents=True)
+    (repo / "src" / "models" / "kon.py").write_text("class KON: pass\n", encoding="utf-8")
+
+    code = (
+        "from src.models.kon import KON; "
+        "model = KON(d_model=256, feature_dims=[[8],[16],[22],[12]], discrete_labels=['ss']); "
+        "print(model)"
+    )
+    command, migrations = autonomous_deploy.normalize_repository_command_for_execution(
+        {"phase": "model_smoke"},
+        [str(run_dir / "conda_envs" / "protdis_env" / "bin" / "python"), "-c", code],
+        repo,
+        run_dir,
+    )
+
+    assert migrations
+    assert "feature_dims=[8, 16, 22, 12]" in command[2]
+    assert "feature_dims=[[8]" not in command[2]
+
+    training_code = "\n".join([
+        "from src.models.kon import KON; from torch.optim import AdamW",
+        "model = KON(d_model=256, feature_dims=[[8],[16],[22],[12]], discrete_labels=['ss'])",
+        "optimizer = AdamW(model.parameters(), lr=1e-3)",
+        "for step in range(3):",
+        "    optimizer.zero_grad()",
+        "    out = model(batch)",
+        "    loss = out['total_loss']",
+        "    loss.backward()",
+        "    optimizer.step()",
+        "    print(f'Step {step+1}: total_loss={loss.item():.4f}')",
+        "    print('Training smoke test PASSED')",
+    ])
+    training_command, training_migrations = autonomous_deploy.normalize_repository_command_for_execution(
+        {"phase": "reproduce_smoke"},
+        [str(run_dir / "conda_envs" / "protdis_env" / "bin" / "python"), "-c", training_code],
+        repo,
+        run_dir,
+    )
+
+    assert training_migrations
+    assert "feature_dims=[8, 16, 22, 12]" in training_command[2]
+    assert "feature_dims=[[8]" not in training_command[2]
+    assert "for step in range(3):" in training_command[2]
+    assert "\n    out = model(batch)" in training_command[2]
+    assert "\n    optimizer.step()" in training_command[2]
+    ast.parse(training_command[2])
+
+
 def test_environment_machine_alignment_accepts_noncritical_supported_hardware_row():
     autonomous_deploy = _load_environment_module(
         "environment_autonomous_deploy_machine_alignment",
@@ -1232,6 +1718,170 @@ def test_environment_execute_plan_keeps_named_conda_envs_separate(monkeypatch, t
     assert executed[4][0] == protdis_python
 
 
+def test_environment_plan_rejects_uncloned_run_repo_references(tmp_path):
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_uncloned_repo_refs",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+
+    run_dir = tmp_path / "run"
+    repo = run_dir / "repos" / "AI-HPC-Research-Team_ProtDiS_ef2b8b2b"
+    repo.mkdir(parents=True)
+    plan = {
+        "status": "ready_to_execute",
+        "env_name": "bad_repo_refs",
+        "machine_assessment": {
+            "paper_hardware_or_runtime_requirement": "single CUDA GPU with at least 24GB VRAM",
+            "local_machine_summary": "GPU: NVIDIA GeForce RTX 5090 32GB, CUDA available",
+            "fit_for_local_machine": True,
+            "adaptation_actions": ["Use CUDA 12.8 wheels and run bounded import smoke tests on one GPU"],
+            "evidence": ["runtime_probe GPU", "nvidia-smi RTX 5090 32GB"],
+        },
+        "commands": [
+            {
+                "phase": "conda_setup",
+                "command": ["conda", "create", "-y", "-n", "bad_repo_refs", "python=3.11", "pip"],
+                "cwd": "run",
+                "required": True,
+            },
+            {
+                "phase": "install_made_up_repo",
+                "command": ["python", "-m", "pip", "install", "-e", "repos/petergroth_kermut/"],
+                "cwd": "run",
+                "required": True,
+            },
+            {
+                "phase": "verify_made_up_repo",
+                "command": [
+                    "python",
+                    "-c",
+                    "import sys; sys.path.insert(0, 'repos/BorgwardtLab_TEDBench'); print('bad')",
+                ],
+                "cwd": "run",
+                "required": True,
+            },
+        ],
+        "success_criteria": [],
+    }
+
+    issues = autonomous_deploy.validate_environment_plan(
+        plan,
+        require_full_reproduction=False,
+        repo_path=repo,
+        run_dir=run_dir,
+        machine={"gpu": [{"name": "NVIDIA GeForce RTX 5090", "memory_total_gb": 32}]},
+        paper_evidence={},
+    )
+
+    joined = "\n".join(issues)
+    assert "repos/petergroth_kermut" in joined
+    assert "repos/BorgwardtLab_TEDBench" in joined
+    assert "只能使用已克隆仓库目录" in joined
+
+
+def test_environment_plan_allows_run_root_aux_repo_paths_with_primary_cwd(monkeypatch, tmp_path):
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_aux_repo_paths",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+
+    run_dir = tmp_path / "run"
+    primary_repo = run_dir / "repos" / "AI-HPC-Research-Team_ProtDiS_ef2b8b2b"
+    tedbench_repo = run_dir / "repos" / "BorgwardtLab_TEDBench_8bee7df5"
+    primary_repo.mkdir(parents=True)
+    tedbench_repo.mkdir(parents=True)
+    (tedbench_repo / "requirements.txt").write_text("numpy\n", encoding="utf-8")
+    round_dir = run_dir / "round_01"
+    executed: list[tuple[list[str], Path]] = []
+
+    def fake_run_logged(command, *, cwd, log_path, timeout_sec, env, required):
+        executed.append(([str(item) for item in command], Path(cwd)))
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("install ok\n", encoding="utf-8")
+        return {
+            "command": autonomous_deploy.command_text(command),
+            "status": "passed",
+            "return_code": 0,
+            "stdout_tail": "install ok",
+            "log_path": str(log_path),
+            "required": required,
+        }
+
+    monkeypatch.setattr(autonomous_deploy, "find_conda_executable", lambda: "conda")
+    monkeypatch.setattr(autonomous_deploy, "run_logged", fake_run_logged)
+
+    plan = {
+        "status": "ready_to_execute",
+        "env_name": "prot_ev_env",
+        "machine_assessment": {
+            "paper_hardware_or_runtime_requirement": "single CUDA GPU with at least 24GB VRAM",
+            "local_machine_summary": "GPU: NVIDIA GeForce RTX 5090 32GB, CUDA available",
+            "fit_for_local_machine": True,
+            "adaptation_actions": ["Use CUDA 12.8 wheels and run bounded import smoke tests on one GPU"],
+            "evidence": ["runtime_probe GPU", "nvidia-smi RTX 5090 32GB"],
+        },
+        "commands": [
+            {
+                "phase": "conda_setup",
+                "command": ["conda", "create", "-y", "-n", "prot_ev_env", "python=3.11", "pip"],
+                "cwd": "repos/AI-HPC-Research-Team_ProtDiS_ef2b8b2b",
+                "required": True,
+                "timeout_sec": 30,
+            },
+            {
+                "phase": "install_tedbench_deps",
+                "command": ["conda", "run", "-n", "prot_ev_env", "pip", "install", "-r", "repos/BorgwardtLab_TEDBench_8bee7df5/requirements.txt"],
+                "cwd": ".",
+                "required": True,
+                "timeout_sec": 30,
+            },
+            {
+                "phase": "verify_imports",
+                "command": ["conda", "run", "-n", "prot_ev_env", "python", "-c", "print('ok')"],
+                "cwd": "repos/BorgwardtLab_TEDBench_8bee7df5",
+                "required": True,
+                "timeout_sec": 30,
+            },
+        ],
+        "success_criteria": [
+            {"name": "environment_ready", "operator": "==", "value": 1, "source": "environment_gate"},
+        ],
+        "paper_config_alignment": [
+            {
+                "paper_item": "hardware/runtime",
+                "paper_value": "single CUDA GPU with at least 24GB VRAM",
+                "implementation_choice": "RTX 5090 32GB, CUDA 12.8 run-local Conda environment",
+                "command_phase": "verify_imports",
+                "evidence_source": "runtime_probe nvidia-smi",
+                "match_status": "matched",
+                "critical": False,
+            }
+        ],
+    }
+
+    issues = autonomous_deploy.validate_environment_plan(
+        plan,
+        require_full_reproduction=False,
+        repo_path=primary_repo,
+        run_dir=run_dir,
+        machine={"gpu": [{"name": "NVIDIA GeForce RTX 5090", "memory_total_gb": 32}]},
+        paper_evidence={},
+    )
+
+    assert not issues
+    receipts = autonomous_deploy.execute_plan_commands(
+        plan, primary_repo, run_dir, round_dir, include_full=False, default_timeout=30, command_env={}
+    )
+
+    assert all(receipt["return_code"] == 0 for receipt in receipts)
+    install_command, install_cwd = executed[1]
+    assert install_cwd == primary_repo
+    assert str(tedbench_repo / "requirements.txt") in install_command
+    verify_command, verify_cwd = executed[2]
+    assert verify_cwd == tedbench_repo
+    assert verify_command[-1] == "print('ok')"
+
+
 def test_environment_execute_plan_skips_existing_conda_create_prefix(monkeypatch, tmp_path):
     autonomous_deploy = _load_environment_module(
         "environment_autonomous_deploy_existing_prefix",
@@ -1272,6 +1922,174 @@ def test_environment_execute_plan_skips_existing_conda_create_prefix(monkeypatch
     assert "复用已存在" in Path(receipts[0]["log_path"]).read_text(encoding="utf-8")
     assert len(executed) == 1
     assert executed[0][0] == str(prefix / "bin" / "python")
+
+
+def test_environment_execute_plan_creates_missing_run_cwd_before_git_clone(monkeypatch, tmp_path):
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_git_clone_missing_cwd",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+
+    run_dir = tmp_path / "run"
+    repo = run_dir / "repos" / "repo"
+    repo.mkdir(parents=True)
+    clone_cwd = run_dir / "repos"
+    round_dir = run_dir / "round_01"
+    seen_cwds: list[Path] = []
+
+    def fake_run_logged(command, *, cwd, log_path, timeout_sec, env, required):
+        seen_cwds.append(Path(cwd))
+        assert Path(cwd).is_dir()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("clone ok\n", encoding="utf-8")
+        return {
+            "command": autonomous_deploy.command_text(command),
+            "status": "passed",
+            "return_code": 0,
+            "stdout_tail": "done",
+            "log_path": str(log_path),
+            "required": required,
+        }
+
+    monkeypatch.setattr(autonomous_deploy, "run_logged", fake_run_logged)
+    monkeypatch.setattr(autonomous_deploy, "find_conda_executable", lambda: "conda")
+
+    plan = {
+        "env_name": "demo_env",
+        "commands": [
+            {
+                "phase": "clone_tedbench",
+                "command": ["git", "clone", "https://github.com/BorgwardtLab/TEDBench.git"],
+                "cwd": "repos",
+                "required": False,
+                "timeout_sec": 30,
+            }
+        ],
+    }
+
+    receipts = autonomous_deploy.execute_plan_commands(plan, repo, run_dir, round_dir, include_full=False, default_timeout=30, command_env={})
+
+    assert receipts[0]["return_code"] == 0
+    assert seen_cwds == [clone_cwd]
+    assert clone_cwd.is_dir()
+
+
+def test_environment_execute_plan_retries_transient_git_clone_failures(monkeypatch, tmp_path):
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_git_clone_retry",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+
+    run_dir = tmp_path / "run"
+    repo = run_dir / "repos" / "repo"
+    repo.mkdir(parents=True)
+    target = run_dir / "repos" / "lock_gp"
+    round_dir = run_dir / "round_01"
+    attempts: list[list[str]] = []
+
+    def fake_run_logged(command, *, cwd, log_path, timeout_sec, env, required):
+        attempts.append([str(item) for item in command])
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("attempt\n", encoding="utf-8")
+        if len(attempts) == 1:
+            target.mkdir(parents=True)
+            (target / ".git").mkdir()
+            return {
+                "command": autonomous_deploy.command_text(command),
+                "status": "failed",
+                "return_code": 128,
+                "stdout_tail": "fatal: unable to access 'https://github.com/generatebio/lock_gp/': GnuTLS recv error (-110): The TLS connection was non-properly terminated.",
+                "log_path": str(log_path),
+                "required": required,
+            }
+        target.mkdir(parents=True)
+        (target / "README.md").write_text("ok", encoding="utf-8")
+        return {
+            "command": autonomous_deploy.command_text(command),
+            "status": "passed",
+            "return_code": 0,
+            "stdout_tail": "done",
+            "log_path": str(log_path),
+            "required": required,
+        }
+
+    monkeypatch.setenv("TASTE_GIT_CLONE_MAX_ATTEMPTS", "2")
+    monkeypatch.setattr(autonomous_deploy, "run_logged", fake_run_logged)
+    monkeypatch.setattr(autonomous_deploy, "find_conda_executable", lambda: "conda")
+
+    plan = {
+        "env_name": "demo_env",
+        "commands": [
+            {
+                "phase": "clone_lock_gp",
+                "command": ["git", "clone", "--depth", "1", "https://github.com/generatebio/lock_gp", str(target)],
+                "cwd": str(run_dir / "repos"),
+                "required": True,
+                "timeout_sec": 30,
+            }
+        ],
+    }
+
+    receipts = autonomous_deploy.execute_plan_commands(plan, repo, run_dir, round_dir, include_full=False, default_timeout=30, command_env={})
+
+    assert len(receipts) == 1
+    assert receipts[0]["return_code"] == 0
+    assert receipts[0]["git_clone_retried"] is True
+    assert receipts[0]["git_clone_attempt_count"] == 2
+    assert attempts[0][:2] == ["git", "clone"]
+    assert attempts[1][:4] == ["git", "-c", "http.version=HTTP/1.1", "clone"]
+    assert (target / "README.md").read_text(encoding="utf-8") == "ok"
+    assert "transient retry summary" in (round_dir / "logs" / "00_clone_lock_gp.log").read_text(encoding="utf-8")
+
+
+def test_environment_execute_plan_does_not_retry_permanent_git_clone_404(monkeypatch, tmp_path):
+    autonomous_deploy = _load_environment_module(
+        "environment_autonomous_deploy_git_clone_no_retry",
+        "scripts/orchestration/autonomous_deploy.py",
+    )
+
+    run_dir = tmp_path / "run"
+    repo = run_dir / "repos" / "repo"
+    repo.mkdir(parents=True)
+    round_dir = run_dir / "round_01"
+    attempts: list[list[str]] = []
+
+    def fake_run_logged(command, *, cwd, log_path, timeout_sec, env, required):
+        attempts.append([str(item) for item in command])
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("attempt\n", encoding="utf-8")
+        return {
+            "command": autonomous_deploy.command_text(command),
+            "status": "failed",
+            "return_code": 128,
+            "stdout_tail": "remote: Repository not found. fatal: repository 'https://github.com/missing/repo/' not found",
+            "log_path": str(log_path),
+            "required": required,
+        }
+
+    monkeypatch.setenv("TASTE_GIT_CLONE_MAX_ATTEMPTS", "3")
+    monkeypatch.setattr(autonomous_deploy, "run_logged", fake_run_logged)
+    monkeypatch.setattr(autonomous_deploy, "find_conda_executable", lambda: "conda")
+
+    plan = {
+        "env_name": "demo_env",
+        "commands": [
+            {
+                "phase": "clone_missing",
+                "command": ["git", "clone", "--depth", "1", "https://github.com/missing/repo", str(run_dir / "repos" / "missing")],
+                "cwd": str(run_dir / "repos"),
+                "required": True,
+                "timeout_sec": 30,
+            }
+        ],
+    }
+
+    receipts = autonomous_deploy.execute_plan_commands(plan, repo, run_dir, round_dir, include_full=False, default_timeout=30, command_env={})
+
+    assert len(receipts) == 1
+    assert receipts[0]["return_code"] == 128
+    assert receipts[0].get("git_clone_retried") is not True
+    assert len(attempts) == 1
 
 
 def test_environment_reusable_receipts_invalidated_by_later_conda_recreate(tmp_path):
@@ -1454,6 +2272,44 @@ def test_environment_reuses_previous_success_receipts_but_never_reproduce_full(t
     assert (run_dir / "full_ran.txt").read_text(encoding="utf-8") == "ran"
     assert "既有成功回执" in (round_02 / "logs" / "00_conda_create.log").read_text(encoding="utf-8")
 
+def test_environment_dependency_policy_orders_conda_create_before_policy_installs():
+    dependency_policy = _load_environment_module(
+        "environment_dependency_policy_conda_order",
+        "scripts/orchestration/dependency_policy.py",
+    )
+    plan = {
+        "env_name": "protdis_eval_env",
+        "commands": [
+            {"phase": "clone_lockgp", "command": ["git", "clone", "https://github.com/generatebio/lock_gp.git", "repos/generatebio_lock_gp"], "required": True},
+            {"phase": "install_torch_cuda", "command": ["python", "-m", "pip", "install", "torch==2.10.0", "torchvision==0.21.0", "torchaudio==2.10.0"], "required": True},
+            {"phase": "clone_tedbench", "command": ["git", "clone", "https://github.com/BorgwardtLab/TEDBench.git", "repos/BorgwardtLab_TEDBench"], "required": True},
+            {"phase": "conda_create", "command": ["conda", "create", "-y", "-n", "protdis_eval_env", "python=3.10", "pip"], "required": True},
+            {"phase": "install_deps", "command": ["python", "-m", "pip", "install", "torch-geometric", "torch-scatter", "torch-sparse", "torch-cluster"], "required": True},
+        ],
+    }
+
+    normalized = dependency_policy.normalize_environment_plan_commands(
+        plan,
+        machine={"gpu": [{"name": "NVIDIA GeForce RTX 5090", "compute_capability": "12.0"}]},
+        policy_version="test-policy",
+    )
+    phases = [row["phase"] for row in normalized["commands"] if isinstance(row, dict)]
+
+    assert phases[:3] == ["clone_lockgp", "clone_tedbench", "conda_create"]
+    conda_index = phases.index("conda_create")
+    assert phases.index("install_torch_cuda") > conda_index
+    assert phases.index("install_deps") > conda_index
+    assert not any(
+        row.get("policy_managed") and dependency_policy.command_text(row["command"]).startswith("python -m pip")
+        for row in normalized["commands"][:conda_index]
+        if isinstance(row, dict)
+    )
+    assert any(
+        rewrite.get("phase") == "conda_bootstrap_order"
+        for rewrite in normalized.get("plan_policy_rewrites", [])
+    )
+
+
 def test_environment_dependency_policy_rewrites_incoherent_torch_pip_versions():
     environment_module_root = ROOT / "modules" / "environment"
     for name in list(sys.modules):
@@ -1505,7 +2361,7 @@ def test_environment_dependency_policy_preserves_non_pyg_protdis_deps_and_instal
                 "phase": "install_protdis_deps",
                 "command": [
                     "python", "-m", "pip", "install",
-                    "torch_geometric", "torch_scatter", "torch_sparse", "torch_cluster",
+                    "torch_geometric", "torch_scatter", "torch_sparse", "torch_cluster", "torch_spline_conv",
                     "esm", "gpytorch", "pytorch-lightning", "biopython", "pandas",
                     "scikit-learn", "pyyaml", "tqdm", "matplotlib", "seaborn",
                 ],
@@ -1532,9 +2388,50 @@ def test_environment_dependency_policy_preserves_non_pyg_protdis_deps_and_instal
     assert "seaborn" in command_text
     assert "gpytorch" in command_text
     assert "pytorch-lightning" in command_text
+    assert "torch-spline-conv" in command_text
+    non_pyg_row = next(row for row in normalized["commands"] if isinstance(row, dict) and row["phase"] == "install_protdis_deps_non_pyg_deps")
+    non_pyg_command_text = dependency_policy.command_text(non_pyg_row["command"])
+    assert "torch_spline_conv" not in non_pyg_command_text
+    assert "torch-spline-conv" not in non_pyg_command_text
     assert phases.index("install_protdis_deps_non_pyg_deps") < phases.index("verify_imports")
     assert command_text.count("torch-geometric") == 1
 
+
+
+def test_environment_dependency_policy_replaces_evolutionaryscale_esm_git_install():
+    dependency_policy = _load_environment_module(
+        "environment_dependency_policy_esm_git_replace",
+        "scripts/orchestration/dependency_policy.py",
+    )
+    plan = {
+        "env_name": "protdis_env",
+        "commands": [
+            {"phase": "conda", "command": ["conda", "create", "-n", "protdis_env", "python=3.11", "pip", "-y"], "required": True},
+            {
+                "phase": "install_pyg",
+                "command": ["python", "-m", "pip", "install", "torch_geometric", "torch_scatter", "torch_sparse", "torch_cluster", "torch_spline_conv"],
+                "required": True,
+            },
+            {
+                "phase": "install_esm",
+                "command": ["python", "-m", "pip", "install", "git+https://github.com/evolutionaryscale/esm.git"],
+                "required": True,
+            },
+            {"phase": "verify_esm", "command": ["python", "-c", "import esm; print('esm ok')"], "required": True},
+        ],
+    }
+
+    normalized = dependency_policy.normalize_environment_plan_commands(
+        plan,
+        machine={"gpu": [{"name": "NVIDIA GeForce RTX 5090", "compute_capability": "12.0"}]},
+        policy_version="test-policy",
+    )
+    command_text = "\n".join(dependency_policy.command_text(row["command"]) for row in normalized["commands"] if isinstance(row, dict))
+    install_esm_row = next(row for row in normalized["commands"] if isinstance(row, dict) and row["phase"] == "install_esm")
+
+    assert "git+https://github.com/evolutionaryscale/esm.git" not in command_text
+    assert dependency_policy.command_text(install_esm_row["command"]).endswith("esm==3.2.1.post1")
+    assert command_text.count("esm==3.2.1.post1") == 1
 
 
 def test_environment_dependency_policy_rewrites_protdis_metrics_function_smoke():
@@ -1595,6 +2492,74 @@ def test_environment_success_criteria_keeps_operational_handoff_gates():
     assert by_name["cuda_available"]["paper_metric"] is False
     assert by_name["designability"]["approval_scope"] == "paper_metric"
     assert by_name["designability"]["paper_metric"] is True
+
+
+def test_environment_success_criteria_empty_plan_gets_handoff_gate_from_required_commands():
+    criteria_policy = _load_environment_module(
+        "environment_criteria_policy_empty_handoff_contract",
+        "scripts/orchestration/criteria_policy.py",
+    )
+    plan = {
+        "success_criteria": [],
+        "commands": [
+            {"phase": "conda_create", "command": ["conda", "create", "-n", "protdis_env"], "required": True},
+            {"phase": "install_core_deps", "command": ["conda", "run", "-n", "protdis_env", "python", "-m", "pip", "install", "numpy"], "required": True},
+            {"phase": "clone_tedbench", "command": ["git", "clone", "https://github.com/BorgwardtLab/TEDBench", "repos/BorgwardtLab_TEDBench"], "required": True},
+            {"phase": "verify_imports", "command": ["conda", "run", "-n", "protdis_env", "python", "-c", "import torch"], "required": True},
+            {"phase": "reproduce_smoke", "command": ["conda", "run", "-n", "protdis_env", "python", "-c", "print('smoke ok')"], "required": True},
+            {"phase": "reproduce_full", "command": ["conda", "run", "-n", "protdis_env", "python", "train.py"], "required": False},
+        ],
+    }
+
+    normalized = criteria_policy.normalize_success_criteria(plan, paper_evidence={}, policy_version="test-policy")
+    criteria = normalized["success_criteria"]
+    rewrite = normalized["success_criteria_policy_rewrites"][-1]
+    names = {row["name"] for row in criteria}
+
+    assert rewrite["fallback_from_environment_handoff_commands"] is True
+    assert names >= {"conda_environment_ready", "runtime_smoke_ready", "data_runtime_ready", "required_environment_commands_ready"}
+    assert all(row["approval_scope"] == "environment_gate" for row in criteria)
+    assert all(row["paper_metric"] is False for row in criteria)
+    assert all("paper claims" in row["non_paper_approval_note"] for row in criteria)
+
+
+def test_environment_metric_criteria_passed_ignores_handoff_gates():
+    decision = _load_environment_module(
+        "environment_reproduction_decision_environment_gate_metrics",
+        "scripts/reproduction/decision.py",
+    )
+    criteria = [
+        {
+            "name": "runtime_smoke_ready",
+            "operator": ">=",
+            "value": 1,
+            "source": "environment handoff: smoke command",
+            "approval_scope": "environment_gate",
+            "paper_metric": False,
+        },
+        {
+            "name": "designability",
+            "operator": ">=",
+            "value": 0.758,
+            "source": "paper Table 1",
+            "approval_scope": "paper_metric",
+            "paper_metric": True,
+        },
+    ]
+    receipts = [
+        {"phase": "verify_imports", "required": True, "return_code": 0, "stdout_tail": "runtime_smoke_ready: 1"},
+        {"phase": "reproduce_full", "required": True, "return_code": 0, "stdout_tail": "loss: 1.23"},
+    ]
+
+    env_only_ok, env_only_evidence = decision.metric_criteria_passed(criteria[:1], receipts, allowed_phases={"reproduce_full"})
+    mixed_ok, mixed_evidence = decision.metric_criteria_passed(criteria, receipts, allowed_phases={"reproduce_full"})
+
+    assert env_only_ok is False
+    assert env_only_evidence == []
+    assert mixed_ok is False
+    assert len(mixed_evidence) == 1
+    assert mixed_evidence[0]["metric"] == "designability"
+    assert "runtime_smoke_ready" not in json.dumps(mixed_evidence, ensure_ascii=False)
 
 
 def test_environment_gate_success_criteria_cannot_approve_paper_metrics():

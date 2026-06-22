@@ -68,6 +68,8 @@ async def _prevent_stale_frontend_cache(request, call_next):
 WORKSPACE_ROOT = Path(os.environ.get("WORKSPACE_ROOT") or Path(__file__).resolve().parents[4]).expanduser().resolve()
 CLIENT_DIST = WORKSPACE_ROOT / "web" / "frontend" / "client" / "dist"
 PROJECT_IDS_ROOT = WORKSPACE_ROOT / "projects"
+FRAMEWORK_RUNS_DIR = WORKSPACE_ROOT / "framework" / "workspace" / "runs"
+ENVIRONMENT_RUNS_DIR = WORKSPACE_ROOT / "modules" / "environment" / "runs"
 LARGE_JSON_ARTIFACT_LIMIT_BYTES = int(os.environ.get("LARGE_JSON_ARTIFACT_LIMIT_BYTES", "5000000") or 5000000)
 LARGE_MARKDOWN_ARTIFACT_LIMIT_BYTES = int(os.environ.get("LARGE_MARKDOWN_ARTIFACT_LIMIT_BYTES", "500000") or 500000)
 MARKDOWN_ARTIFACT_PREVIEW_CHARS = int(os.environ.get("MARKDOWN_ARTIFACT_PREVIEW_CHARS", "120000") or 120000)
@@ -1679,6 +1681,8 @@ JOBS_PATH = STATE_DIR / "web_jobs.json"
 JOBS_LOCK = threading.RLock()
 LIVE_JOBS_TTL_SEC = float(os.environ.get("LIVE_JOBS_TTL_SEC", "5.0") or 5.0)
 _LIVE_JOBS_CACHE: dict[str, Any] = {"expires_at": 0.0, "items": []}
+JOB_PROJECT_ID_CACHE_TTL_SEC = float(os.environ.get("JOB_PROJECT_ID_CACHE_TTL_SEC", "30.0") or 30.0)
+_JOB_PROJECT_ID_CACHE: dict[str, Any] = {}
 PROCESS_ROWS_TTL_SEC = float(os.environ.get("PROCESS_ROWS_TTL_SEC", "1.5") or 1.5)
 _PROCESS_ROWS_CACHE: dict[str, Any] = {"expires_at": 0.0, "rows": []}
 ACTIVE_LAUNCHER_ROWS_TTL_SEC = float(os.environ.get("ACTIVE_LAUNCHER_ROWS_TTL_SEC", "3.0") or 3.0)
@@ -1690,6 +1694,8 @@ _WEB_JOB_PROJECT_CACHE: dict[str, dict[str, Any]] = {}
 _WEB_JOB_PROJECT_MAP_CACHE: dict[str, Any] = {"expires_at": 0.0, "map": {}}
 JOB_LIST_PROJECT_SUMMARY_TTL_SEC = float(os.environ.get("JOB_LIST_PROJECT_SUMMARY_TTL_SEC", "30.0") or 30.0)
 _JOB_LIST_PROJECT_SUMMARY_CACHE: dict[tuple[str, bool, int], dict[str, Any]] = {}
+DETACHED_JOB_RECONCILE_TTL_SEC = float(os.environ.get("DETACHED_JOB_RECONCILE_TTL_SEC", "10.0") or 10.0)
+_DETACHED_JOB_RECONCILE_CACHE: dict[str, Any] = {"expires_at": 0.0}
 RUN_PROJECT_CACHE_TTL_SEC = float(os.environ.get("RUN_PROJECT_CACHE_TTL_SEC", "30.0") or 30.0)
 _RUN_PROJECT_CACHE: dict[str, dict[str, Any]] = {}
 RUN_ARTIFACTS_CACHE_TTL_SEC = float(os.environ.get("RUN_ARTIFACTS_CACHE_TTL_SEC", "10.0") or 10.0)
@@ -1721,6 +1727,82 @@ FIND_SURVEY_COUNT_KEYS = [
     "llm_scored_candidates", "recommended_papers", "abstract_fetch_failed_candidates", "final_llm_scoring_skipped_candidates",
     "category_scan_reports", "title_filter_reports", "arxiv_raw_count", "arxiv_prefiltered_count", "arxiv_pages_fetched",
 ]
+ENVIRONMENT_ARTIFACT_MARKDOWN_NAMES = ["workflow_status.md", "运行说明.txt"]
+ENVIRONMENT_ARTIFACT_JSON_NAMES = [
+    "frontend_status.json", "module_contracts_payload.json", "module_contracts.json",
+    "environment_deployment_decision.json", "repo_info.json", "claude_repo_candidate_review.json",
+    "machine_profile.json", "input_plan.normalized.json", "paper_evidence.json",
+]
+
+
+def _safe_run_id_text(run_id: Any) -> str:
+    text = str(run_id or "").strip()
+    if not text or not re.fullmatch(r"[A-Za-z0-9_.-]+", text):
+        raise FileNotFoundError(f"Run not found: {run_id}")
+    return text
+
+
+def _run_id_variants(run_id: Any) -> list[str]:
+    raw = _safe_run_id_text(run_id)
+    variants: list[str] = []
+    for item in [raw, raw.lower()]:
+        if item and item not in variants:
+            variants.append(item)
+    return variants
+
+
+def _case_insensitive_run_child(root: Path, run_id: str) -> Path | None:
+    for name in _run_id_variants(run_id):
+        candidate = root / name
+        if candidate.is_dir():
+            return candidate
+    lower = run_id.lower()
+    try:
+        for item in root.iterdir():
+            if item.is_dir() and item.name.lower() == lower:
+                return item
+    except OSError:
+        return None
+    return None
+
+
+def _run_artifact_roots(run_id: str) -> list[Path]:
+    roots: list[Path] = []
+    try:
+        roots.append(run_dir(run_id))
+    except FileNotFoundError:
+        pass
+    for root in [FRAMEWORK_RUNS_DIR, ENVIRONMENT_RUNS_DIR]:
+        candidate = _case_insensitive_run_child(root, run_id)
+        if candidate and candidate not in roots:
+            roots.append(candidate)
+    if not roots:
+        raise FileNotFoundError(f"Run not found: {run_id}")
+    return roots
+
+
+def _run_artifact_public_path(root: Path, name: str) -> Path:
+    direct = root / name
+    if direct.exists():
+        return direct
+    public = root / "public" / name
+    if public.exists():
+        return public
+    return direct
+
+
+def _run_artifact_path(name: str, roots: list[Path], fallback_root: Path) -> Path:
+    for root in roots:
+        candidate = _run_artifact_public_path(root, name)
+        if candidate.exists():
+            return candidate
+    return _run_artifact_public_path(fallback_root, name)
+
+
+def _environment_artifact_run(roots: list[Path], run_id: str) -> bool:
+    if str(run_id or "").lower().startswith("web_environment_"):
+        return True
+    return any((root / "environment_deployment_decision.json").exists() for root in roots)
 
 
 def _runs_fingerprint() -> tuple[int, int, int]:
@@ -3292,25 +3374,58 @@ def _filter_runs_for_project(items: list[dict], project: str) -> list[dict]:
     return [row for row in rows if str(row.get("project") or "") == project]
 
 
+def _job_project_cache_key(item: dict[str, Any]) -> str:
+    result = item.get("result") if isinstance(item.get("result"), dict) else {}
+    progress = item.get("progress") if isinstance(item.get("progress"), dict) else {}
+    return json.dumps(
+        [
+            item.get("job_id"),
+            item.get("stage"),
+            item.get("run_id"),
+            result.get("project"),
+            result.get("run_id"),
+            progress.get("phase"),
+        ],
+        ensure_ascii=False,
+        default=str,
+    )
+
+
 def _job_project_id(item: dict[str, Any]) -> str:
+    cache_key = _job_project_cache_key(item)
+    now = time.monotonic()
+    cached = _JOB_PROJECT_ID_CACHE.get(cache_key)
+    if isinstance(cached, dict) and now < float(cached.get("expires_at") or 0.0):
+        return str(cached.get("project") or "")
+
+    def finish(project_id: str) -> str:
+        _JOB_PROJECT_ID_CACHE[cache_key] = {
+            "expires_at": time.monotonic() + JOB_PROJECT_ID_CACHE_TTL_SEC,
+            "project": str(project_id or ""),
+        }
+        if len(_JOB_PROJECT_ID_CACHE) > 512:
+            for key in list(_JOB_PROJECT_ID_CACHE)[:128]:
+                _JOB_PROJECT_ID_CACHE.pop(key, None)
+        return str(project_id or "")
+
     result = item.get("result") if isinstance(item.get("result"), dict) else {}
     paper_stage = result.get("paper_stage") if isinstance(result.get("paper_stage"), dict) else {}
     project = str(result.get("project") or result.get("project_id") or paper_stage.get("project") or "").strip()
     if project:
-        return project
+        return finish(project)
     run_id = str(item.get("run_id") or result.get("run_id") or "").strip()
     if run_id:
         project = _project_id_for_find_run(run_id)
         if project:
-            return project
+            return finish(project)
     job_id = str(item.get("job_id") or "")
     fast_project = _project_from_job_id_fast(job_id)
     if fast_project:
-        return fast_project
+        return finish(fast_project)
     try:
-        return _project_from_job_payload(job_id, item)
+        return finish(_project_from_job_payload(job_id, item))
     except Exception:
-        return ""
+        return finish("")
 
 
 def _job_belongs_to_project(item: dict[str, Any], project: str) -> bool:
@@ -3650,32 +3765,51 @@ def _hydrate_compact_find_source_state(payload: dict[str, Any], project_root: Pa
     except Exception:
         venue_counts = {}
     if isinstance(venue_counts, dict) and venue_counts:
+        source_totals: dict[str, Any] = {}
+        for key, value in venue_counts.items():
+            if value in (None, ""):
+                continue
+            try:
+                source_totals[key] = int(value)
+            except Exception:
+                source_totals[key] = value
+        if source_totals:
+            payload["source_status_totals"] = source_totals
         counts = payload.get("counts") if isinstance(payload.get("counts"), dict) else {}
         counts = dict(counts)
         survey_stats = payload.get("survey_stats") if isinstance(payload.get("survey_stats"), dict) else {}
         survey_stats = dict(survey_stats)
-        force_keys = {
+        run_funnel_keys = {
+            "raw_title_index_papers",
+            "category_filtered_papers",
+            "tfidf_screened_papers",
+            "venue_title_filter_input_papers",
+            "title_score_input_papers",
+            "llm_title_scored_papers",
+            "venue_final_title_candidates",
+            "venue_detail_fetched_candidates",
+            "abstract_scored_papers",
+            "llm_scored_candidates",
+            "recommended_papers",
+        }
+        has_run_funnel_counts = any(counts.get(key) not in (None, "", 0) or survey_stats.get(key) not in (None, "", 0) for key in run_funnel_keys)
+        metadata_keys = {"metadata_complete_venue_count", "metadata_venue_count", "venues_without_official_categories"}
+        fallback_keys = {
             "raw_title_index_papers",
             "venue_total_papers_available",
             "venue_corpus_audited_papers",
             "category_selected_papers",
             "venue_category_selected_papers",
-            "metadata_complete_venue_count",
-            "metadata_venue_count",
-            "venues_without_official_categories",
+            "venue_title_filter_input_papers",
         }
-        for key, value in venue_counts.items():
-            if value in (None, ""):
-                continue
-            try:
-                numeric = int(value)
-            except Exception:
-                numeric = value
-            if key in force_keys or counts.get(key) in (None, "", 0):
-                counts[key] = numeric
-            if key in force_keys or survey_stats.get(key) in (None, "", 0):
-                survey_stats[key] = numeric
-        payload["counts"] = counts
+        for key, numeric in source_totals.items():
+            if key in metadata_keys or (not has_run_funnel_counts and key in fallback_keys):
+                if counts.get(key) in (None, "", 0):
+                    counts[key] = numeric
+                if survey_stats.get(key) in (None, "", 0):
+                    survey_stats[key] = numeric
+        if counts:
+            payload["counts"] = counts
         if survey_stats:
             payload["survey_stats"] = survey_stats
     return payload
@@ -7627,7 +7761,7 @@ def _active_project_worker_job(project: str, root: Path, worker: dict[str, Any],
     }
 
 
-def _live_jobs_from_projects(*, compact: bool = True) -> list[dict[str, Any]]:
+def _live_jobs_from_projects(*, compact: bool = True, project_filter: str = "") -> list[dict[str, Any]]:
     """Build live research job rows without calling project_summary.
 
     This endpoint is polled frequently by the UI. It must only read small state
@@ -7635,15 +7769,26 @@ def _live_jobs_from_projects(*, compact: bool = True) -> list[dict[str, Any]]:
     main TASTE panels separately.
     """
     now = time.monotonic()
+    project_filter = _api_query_str(project_filter)
+    cache_key = f"{'compact' if compact else 'full'}:{project_filter}"
     if compact:
-        cached_items = _LIVE_JOBS_CACHE.get("items")
-        if isinstance(cached_items, list) and now < float(_LIVE_JOBS_CACHE.get("expires_at") or 0.0):
-            return [dict(item) for item in cached_items if isinstance(item, dict)]
+        cached = _LIVE_JOBS_CACHE.get(cache_key)
+        if isinstance(cached, dict) and now < float(cached.get("expires_at") or 0.0):
+            cached_items = cached.get("items")
+            if isinstance(cached_items, list):
+                return [dict(item) for item in cached_items if isinstance(item, dict)]
     jobs: list[dict[str, Any]] = []
-    try:
-        projects = list_projects()
-    except Exception:
-        return jobs
+    if project_filter:
+        root = PROJECT_IDS_ROOT / project_filter
+        cfg = _read_project_json(root / "project.json", {})
+        if not root.exists() or not root.is_dir() or not isinstance(cfg, dict):
+            return jobs
+        projects = [{"id": project_filter, "name": cfg.get("name", project_filter), "path": str(root)}]
+    else:
+        try:
+            projects = list_projects()
+        except Exception:
+            return jobs
     for project_row in projects:
         project = str(project_row.get("id") or project_row.get("name") or "").strip()
         if not project:
@@ -8210,8 +8355,7 @@ def _live_jobs_from_projects(*, compact: bool = True) -> list[dict[str, Any]]:
             "progress": {"phase": phase, "current": progress_current, "total": progress_total, "percent": progress_percent, "message": "；".join(message_bits)},
         })
     if compact:
-        _LIVE_JOBS_CACHE["items"] = [dict(item) for item in jobs]
-        _LIVE_JOBS_CACHE["expires_at"] = time.monotonic() + LIVE_JOBS_TTL_SEC
+        _LIVE_JOBS_CACHE[cache_key] = {"items": [dict(item) for item in jobs], "expires_at": time.monotonic() + LIVE_JOBS_TTL_SEC}
     return jobs
 
 def _humanize_stale_tail(text: Any, process_alive: bool) -> str:
@@ -9263,7 +9407,7 @@ def _terminate_process_tree(root_pid: Any) -> dict[str, Any]:
     return {"requested_pid": str(root_pid or ""), "terminated_pids": pids, "terminated_pgids": sorted(pgids)}
 
 
-def _reconcile_detached_launcher_jobs(dynamic_items: list[dict[str, Any]] | None = None) -> None:
+def _reconcile_detached_launcher_jobs(dynamic_items: list[dict[str, Any]] | None = None, *, force: bool = False) -> None:
     """Keep web-created detached research jobs aligned with project state.
 
     /api/jobs/project starts full-cycle as a detached worker so the web server can
@@ -9272,6 +9416,10 @@ def _reconcile_detached_launcher_jobs(dynamic_items: list[dict[str, Any]] | None
     running/blocked/done instead of showing an idle launcher plus a separate
     synthetic row.
     """
+    now = time.monotonic()
+    if not force and now < float(_DETACHED_JOB_RECONCILE_CACHE.get("expires_at") or 0.0):
+        return
+    _DETACHED_JOB_RECONCILE_CACHE["expires_at"] = now + DETACHED_JOB_RECONCILE_TTL_SEC
     changed = False
     if dynamic_items is None:
         try:
@@ -10136,8 +10284,7 @@ def _venue_health_source_rows(results: list[dict[str, Any]]) -> list[dict[str, A
             "limited": False,
             "count": sample_count,
             "sample_count": sample_count,
-            "raw_title_index_count": sample_count,
-            "candidate_count": sample_count,
+            "health_sample_count": sample_count,
             "adapter": adapter,
             "source_adapter": adapter,
             "message": str(result.get("message") or ("ok" if ok else "No papers fetched.")),
@@ -11178,8 +11325,19 @@ def api_jobs(
     project: str = Query(""),
 ) -> list[dict]:
     project = _api_query_str(project)
-    dynamic = _live_jobs_from_projects(compact=True)
-    _reconcile_detached_launcher_jobs(dynamic)
+    try:
+        dynamic = _live_jobs_from_projects(compact=True, project_filter=project)
+    except TypeError as exc:
+        if "project_filter" not in str(exc):
+            raise
+        dynamic = _live_jobs_from_projects(compact=True)
+    if not compact:
+        try:
+            _reconcile_detached_launcher_jobs(dynamic, force=True)
+        except TypeError as exc:
+            if "force" not in str(exc):
+                raise
+            _reconcile_detached_launcher_jobs(dynamic)
     _reconcile_stale_cancelling_jobs()
     if project:
         dynamic = [item for item in dynamic if _job_belongs_to_project(item, project)]
@@ -11442,7 +11600,12 @@ def api_jobs(
 
 @app.get("/api/jobs/{job_id}")
 def api_job(job_id: str, compact: bool = Query(False)) -> dict:
-    _reconcile_detached_launcher_jobs()
+    try:
+        _reconcile_detached_launcher_jobs(force=True)
+    except TypeError as exc:
+        if "force" not in str(exc):
+            raise
+        _reconcile_detached_launcher_jobs()
     if job_id:
         live_job = next((item for item in _live_jobs_from_projects(compact=compact) if str(item.get("job_id") or "") == job_id), None)
         if not live_job and job_id.startswith("full_cycle_"):
@@ -11623,15 +11786,26 @@ def api_runs(project: str = Query("")) -> list[dict]:
 @app.get("/api/runs/{run_id}/artifacts")
 def api_artifacts(run_id: str, light: bool = Query(False)) -> dict:
     light_mode = bool(light) if isinstance(light, bool) else bool(getattr(light, "default", False))
-    directory = run_dir(run_id)
+    try:
+        artifact_roots = _run_artifact_roots(run_id)
+    except FileNotFoundError as exc:
+        return JSONResponse({"error": str(exc), "run_id": run_id, "artifacts": []}, status_code=404)
+    directory = artifact_roots[0]
     project_root = _project_root_for_find_run(run_id)
+    environment_run = _environment_artifact_run(artifact_roots, run_id)
 
     def artifact_path(name: str) -> Path:
-        return _project_taste_artifact_path(project_root, run_id, name) or (directory / name)
+        project_artifact = _project_taste_artifact_path(project_root, run_id, name)
+        if project_artifact:
+            return project_artifact
+        return _run_artifact_path(name, artifact_roots, directory)
 
     markdown_names: list[str]
     json_names: list[str]
-    if light_mode:
+    if environment_run:
+        markdown_names = ENVIRONMENT_ARTIFACT_MARKDOWN_NAMES
+        json_names = ENVIRONMENT_ARTIFACT_JSON_NAMES
+    elif light_mode:
         markdown_names, json_names = _project_current_find_light_artifact_names(project_root, run_id)
     else:
         markdown_names, json_names = [], []
@@ -11703,7 +11877,7 @@ def api_artifacts(run_id: str, light: bool = Query(False)) -> dict:
             if name == "config.json" and isinstance(content, dict):
                 content = redacted_config(content)
             artifacts.append({"name": name, "kind": "json", "content": _strip_public_taste_marker(content), "path": str(path), "content_truncated": False, "size_bytes": stat.st_size if stat is not None else 0})
-    payload = {"run_id": run_id, "artifacts": artifacts}
+    payload = {"run_id": run_id, "artifacts": artifacts, "artifact_roots": [str(path) for path in artifact_roots]}
     _RUN_ARTIFACTS_CACHE[run_id] = {"key": cache_key, "expires_at": now + RUN_ARTIFACTS_CACHE_TTL_SEC, "payload": payload}
     return payload
 

@@ -37,7 +37,9 @@
 3. environment 页面和实验配置展示以 `environment_handoff.json` 为当前真值；它可以显示 `ready_for_experimenting`，但不能把它解释为论文级 full reproduction 或指标已通过。
 4. 用户可见 Markdown/HTML 要经过统一渲染和清洗，避免把内部 marker、paper id、JSON 字段、Claude scratchpad 或 reader 指令直接展示出来。
 5. 产物默认展示上一个已完成结果；新任务未完成前不能用半成品替换当前用户可见产物。
-6. 测试网页时必须实际打开 `http://127.0.0.1:8765`，在相应 tab 视觉检查所有关键文本、按钮、计数和产物，不只看命令行输出。
+6. Find 来源状态只能展示真实 Find run 的 `source_status` 或项目摘要；`检查可抓取性` 的 venue health sample 只能显示在会议列表中，不能当作“标题总数/分类后”回退来源。
+7. Find 页面必须区分“来源覆盖总量”和“本 run 漏斗计数”：`source_status_totals` 用于说明渠道覆盖，`counts/survey_stats` 用于显示本次实际处理的标题入口、标题筛选、LLM 打分和推荐结果，二者不能互相覆盖。
+8. 测试网页时必须实际打开 `http://127.0.0.1:8765`，在相应 tab 视觉检查所有关键文本、按钮、计数和产物，不只看命令行输出。
 
 ## 运行与测试
 

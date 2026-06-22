@@ -246,13 +246,16 @@ def find_binary(binary: str, project: str | None = None, cfg: dict[str, Any] | N
     return ""
 
 
-def _runtime_path_entries(runtime: dict[str, Any]) -> list[str]:
+def _runtime_path_entries(runtime: dict[str, Any], *, include_experiment_python: bool = True) -> list[str]:
     entries: list[str] = []
     for key in ["node_bin"]:
         value = str(runtime.get(key) or "").strip()
         if value:
             entries.append(value)
-    for key in ["claude_path", "management_python", "python_executable", "experiment_python"]:
+    executable_path_keys = ["claude_path", "management_python", "python_executable"]
+    if include_experiment_python:
+        executable_path_keys.append("experiment_python")
+    for key in executable_path_keys:
         value = str(runtime.get(key) or "").strip()
         if value:
             entries.append(str(Path(value).expanduser().parent))
@@ -272,10 +275,10 @@ def _runtime_path_entries(runtime: dict[str, Any]) -> list[str]:
     return out
 
 
-def interactive_env(project: str | None = None, cfg: dict[str, Any] | None = None) -> dict[str, str]:
+def interactive_env(project: str | None = None, cfg: dict[str, Any] | None = None, *, include_experiment_python: bool = True) -> dict[str, str]:
     env = os.environ.copy()
     runtime = project_runtime_config(project, cfg)
-    path_entries = _runtime_path_entries(runtime)
+    path_entries = _runtime_path_entries(runtime, include_experiment_python=include_experiment_python)
     existing = env.get("PATH", "")
     env["PATH"] = os.pathsep.join([*path_entries, existing]) if existing else os.pathsep.join(path_entries)
     env["WORKSPACE_ROOT"] = str(ROOT)
@@ -288,7 +291,7 @@ def interactive_env(project: str | None = None, cfg: dict[str, Any] | None = Non
     experiment_python = str(runtime.get("experiment_python") or "").strip()
     if management_python:
         env["MANAGEMENT_PYTHON"] = management_python
-    if experiment_python:
+    if include_experiment_python and experiment_python:
         env["EXPERIMENT_PYTHON"] = experiment_python
         env["PROJECT_PYTHON"] = experiment_python
     for key, value in runtime.get("env_overrides", {}).items():

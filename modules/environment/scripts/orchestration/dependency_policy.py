@@ -6,22 +6,22 @@ from typing import Any
 
 from scripts.common.shell import command_text, command_tokens
 
-PYG_CONDA_PACKAGE_NAMES = {"pyg", "pytorch-cluster", "pytorch-scatter", "pytorch-sparse"}
-PYG_PIP_PACKAGE_NAMES = {"torch-geometric", "torch-cluster", "torch-scatter", "torch-sparse", "pyg-lib"}
+PYG_CONDA_PACKAGE_NAMES = {"pyg", "pytorch-cluster", "pytorch-scatter", "pytorch-sparse", "pytorch-spline-conv"}
+PYG_PIP_PACKAGE_NAMES = {"torch-geometric", "torch-cluster", "torch-scatter", "torch-sparse", "torch-spline-conv", "pyg-lib"}
 PYTORCH_PACKAGE_NAMES = {"torch", "torchvision", "torchaudio", "pytorch", "pytorch-cuda"}
 PYTORCH_CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu128"
 PYTORCH_CUDA_VERSION = "2.9.1"
 TORCHVISION_CUDA_SPEC = "torchvision==0.24.1+cu128"
 TORCHAUDIO_CUDA_SPEC = f"torchaudio=={PYTORCH_CUDA_VERSION}+cu128"
 PYG_CUDA_WHEEL_URL = f"https://data.pyg.org/whl/torch-{PYTORCH_CUDA_VERSION}+cu128.html"
-PYG_REQUIRED_PACKAGES = ["torch-geometric", "torch-scatter", "torch-sparse", "torch-cluster"]
+PYG_REQUIRED_PACKAGES = ["torch-geometric", "torch-scatter", "torch-sparse", "torch-cluster", "torch-spline-conv"]
 ESM_PIP_SPEC = "esm==3.2.1.post1"
 PIP_PACKAGE_SPEC_OVERRIDES = {"esm": ESM_PIP_SPEC}
 PYG_VERIFY_SNIPPET = (
     "import torch; "
     "print('torch', torch.__version__, 'cuda', torch.version.cuda, 'available', torch.cuda.is_available()); "
     "assert torch.cuda.is_available(), 'CUDA is not available in the run-local environment'; "
-    "import torch_geometric, torch_scatter, torch_sparse, torch_cluster; "
+    "import torch_geometric, torch_scatter, torch_sparse, torch_cluster, torch_spline_conv; "
     "print('pyg', torch_geometric.__version__)"
 )
 PROTDIS_METRICS_VERIFY_SNIPPET = (
@@ -44,6 +44,9 @@ CONDA_RUN_ASSIGNMENT_OPTIONS_WITH_VALUE = ("--name=", "--prefix=", "--cwd=")
 
 def _token_package_name(token: str) -> str:
     value = str(token or "").strip().strip('"').strip("'")
+    lowered = value.lower()
+    if "github.com/evolutionaryscale/esm" in lowered or re.search(r"(?:^|/)esm(?:\.git)?(?:[#@?].*)?$", lowered):
+        return "esm"
     if not value or value.startswith("-") or value.startswith(("http://", "https://", "git+", "file://")):
         return ""
     value = value.split("[", 1)[0]
@@ -147,6 +150,43 @@ def _pip_install_start_index(tokens: list[str]) -> tuple[list[str], int, int] | 
 def _normalize_pip_package_spec(token: str) -> str:
     package = _token_package_name(token)
     return PIP_PACKAGE_SPEC_OVERRIDES.get(package, str(token))
+
+
+def _normalize_pip_install_package_specs(row: dict[str, Any]) -> dict[str, Any]:
+    tokens = list(command_tokens(row.get("command")))
+    parsed = _pip_install_start_index(tokens)
+    if not parsed:
+        return row
+    pip_tokens, start, offset = parsed
+    options_with_values = {
+        "-r", "--requirement", "-c", "--constraint", "-f", "--find-links", "-i", "--index-url",
+        "--extra-index-url", "--trusted-host", "--platform", "--python-version", "--implementation",
+        "--abi", "--target", "--prefix", "--root", "--src", "--cache-dir",
+    }
+    changed = False
+    skip_next = False
+    for index in range(start, len(pip_tokens)):
+        value = str(pip_tokens[index] or "")
+        if skip_next:
+            skip_next = False
+            continue
+        if value in options_with_values:
+            skip_next = True
+            continue
+        if value.startswith("-"):
+            continue
+        package = _token_package_name(value)
+        if not package:
+            continue
+        normalized = _normalize_pip_package_spec(value)
+        if normalized != value:
+            tokens[offset + index] = normalized
+            changed = True
+    if not changed:
+        return row
+    updated = dict(row)
+    updated["command"] = tokens
+    return updated
 
 
 def _pip_install_package_specs(tokens: list[str]) -> list[str]:
@@ -383,6 +423,49 @@ def _row_creates_conda_env(row: dict[str, Any]) -> bool:
     return action == "create" or (len(tokens) >= 3 and Path(str(tokens[0])).name in {"conda", "mamba", "micromamba"} and str(tokens[1]) == "env" and str(tokens[2]) == "create")
 
 
+def _row_is_env_independent_bootstrap(row: dict[str, Any]) -> bool:
+    tokens = _row_command_tokens(row)
+    if len(tokens) >= 2 and Path(str(tokens[0])).name == "git" and str(tokens[1]) == "clone":
+        return True
+    return False
+
+
+def _row_requires_created_conda_env(row: dict[str, Any]) -> bool:
+    tokens = _row_command_tokens(row)
+    if not tokens or _row_creates_conda_env(row) or _row_is_env_independent_bootstrap(row):
+        return False
+    head = Path(str(tokens[0])).name
+    action = _conda_action(tokens)
+    if action in {"install", "update", "run"}:
+        return True
+    if _conda_run_inner_tokens(tokens):
+        return True
+    if head.startswith("python") or head in {"pip", "pip3"}:
+        return True
+    phase = str(row.get("phase") or "").lower()
+    return any(marker in phase for marker in ("install", "verify", "dataset", "reproduce", "train", "evaluate"))
+
+
+def _order_rows_for_conda_bootstrap(rows: list[Any]) -> tuple[list[Any], bool]:
+    if not any(isinstance(row, dict) and _row_creates_conda_env(row) for row in rows):
+        return rows, False
+    if not any(isinstance(row, dict) and _row_requires_created_conda_env(row) for row in rows):
+        return rows, False
+
+    bootstrap_rows: list[Any] = []
+    conda_rows: list[Any] = []
+    remaining_rows: list[Any] = []
+    for row in rows:
+        if isinstance(row, dict) and _row_is_env_independent_bootstrap(row):
+            bootstrap_rows.append(row)
+        elif isinstance(row, dict) and _row_creates_conda_env(row):
+            conda_rows.append(row)
+        else:
+            remaining_rows.append(row)
+    ordered = [*bootstrap_rows, *conda_rows, *remaining_rows]
+    return ordered, ordered != rows
+
+
 def _torch_cuda_install_row(source_phase: str) -> dict[str, Any]:
     return {
         "phase": source_phase or "install_torch_cuda",
@@ -466,6 +549,10 @@ def normalize_environment_plan_commands(plan: dict[str, Any], machine: dict[str,
             new_rows.append(raw_row)
             continue
         row = dict(raw_row)
+        updated = _normalize_pip_install_package_specs(row)
+        if updated.get("command") != row.get("command"):
+            rewrites.append({"index": index, "phase": row.get("phase"), "reason": "Backend dependency policy replaces known incompatible pip install specs with Python-version-compatible pins before execution", "before": row.get("command"), "after": updated.get("command")})
+            row = updated
         if _row_creates_conda_env(row):
             updated = _normalize_create_command_python(row, "3.11")
             conda_create_present = True
@@ -546,6 +633,17 @@ def normalize_environment_plan_commands(plan: dict[str, Any], machine: dict[str,
         insert_at = next((i for i, item in enumerate(new_rows) if isinstance(item, dict) and _row_imports_module(item, "esm")), len(new_rows))
         new_rows.insert(insert_at, row)
         rewrites.append({"index": None, "phase": "install_esm_sdk", "reason": "Verify/import commands require the esm Python module; install the ESM SDK before import gates", "after": row["command"]})
+
+    ordered_rows, reordered = _order_rows_for_conda_bootstrap(new_rows)
+    if reordered:
+        rewrites.append({
+            "index": None,
+            "phase": "conda_bootstrap_order",
+            "reason": "Run-local Python, pip, conda run, install, verify, dataset, and reproduce commands must execute only after the Conda environment has been created; git clone bootstrap commands remain before Conda creation.",
+            "before_phases": [row.get("phase") for row in new_rows if isinstance(row, dict)],
+            "after_phases": [row.get("phase") for row in ordered_rows if isinstance(row, dict)],
+        })
+        new_rows = ordered_rows
 
     normalized["commands"] = new_rows
     if rewrites:

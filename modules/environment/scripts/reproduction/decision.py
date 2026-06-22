@@ -397,14 +397,22 @@ def _find_metric_observation(name: str, receipts: list[dict[str, Any]], allowed_
     return None, {}
 
 
+def _criterion_is_environment_gate(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    scope = str(item.get("approval_scope") or "").strip().lower()
+    return scope in {"environment_gate", "environment", "handoff", "runtime_gate", "operational_gate"} or item.get("paper_metric") is False
+
+
 def metric_criteria_passed(criteria: list[Any], receipts: list[dict[str, Any]], allowed_phases: set[str] | None = None) -> tuple[bool, list[dict[str, Any]]]:
-    if not criteria:
+    paper_criteria = [item for item in criteria if not _criterion_is_environment_gate(item)]
+    if not paper_criteria:
         return False, []
     evidence: list[dict[str, Any]] = []
     all_passed = True
     allowed_hint = sorted(allowed_phases) if allowed_phases else []
     ignored_optional_phases = _ignored_optional_metric_phases(receipts, allowed_phases)
-    for item in criteria:
+    for item in paper_criteria:
         if not isinstance(item, dict):
             all_passed = False
             evidence.append({"criterion": item, "passed": False, "reason": "指标条件不是 object"})

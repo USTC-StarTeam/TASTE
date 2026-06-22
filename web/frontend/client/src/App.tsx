@@ -939,10 +939,13 @@ function sourceStatusDetail(item: any, lang: Lang = "zh") {
     parts.push(text);
   };
   pushPart(`${labels.status}: ${state}`);
-  const rawTitleIndex = item?.raw_title_index_count ?? item?.corpus_count;
+  const isVenueHealth = String(item?.source_kind || "").trim().toLowerCase() === "venue_health";
+  const rawTitleIndex = isVenueHealth ? undefined : item?.raw_title_index_count ?? item?.corpus_count;
   if (rawTitleIndex !== undefined && rawTitleIndex !== "") pushPart(`${labels.raw}: ${rawTitleIndex}`);
-  const count = item?.count ?? item?.candidate_count ?? item?.sample_count;
-  if (count !== undefined && count !== "") pushPart(`${labels.screen}: ${count}`);
+  const count = isVenueHealth ? item?.health_sample_count ?? item?.sample_count ?? item?.count : item?.count ?? item?.candidate_count ?? item?.sample_count;
+  if (isVenueHealth) {
+    if (count !== undefined && count !== "") pushPart(`${zh ? "健康检查样本" : "health-check samples"}: ${count}`);
+  } else if (count !== undefined && count !== "") pushPart(`${labels.screen}: ${count}`);
   const detailFetched = item?.detail_fetched_count ?? item?.detail_fetched ?? item?.fetched_count;
   if (detailFetched !== undefined && detailFetched !== "") pushPart(`${labels.detail}: ${detailFetched}`);
   const scopeText = sourceScopeText(item, lang);
@@ -984,10 +987,13 @@ function sourceStatusCompactDetail(item: any, lang: Lang = "zh") {
     parts.push(line);
   };
   pushPart(`${labels.status}: ${state}`);
-  const rawTitleIndex = item?.raw_title_index_count ?? item?.corpus_count;
+  const isVenueHealth = String(item?.source_kind || "").trim().toLowerCase() === "venue_health";
+  const rawTitleIndex = isVenueHealth ? undefined : item?.raw_title_index_count ?? item?.corpus_count;
   if (rawTitleIndex !== undefined && rawTitleIndex !== "") pushPart(`${labels.raw}: ${rawTitleIndex}`);
-  const count = item?.count ?? item?.candidate_count ?? item?.sample_count;
-  if (count !== undefined && count !== "") pushPart(`${labels.screen}: ${count}`);
+  const count = isVenueHealth ? item?.health_sample_count ?? item?.sample_count ?? item?.count : item?.count ?? item?.candidate_count ?? item?.sample_count;
+  if (isVenueHealth) {
+    if (count !== undefined && count !== "") pushPart(`${zh ? "健康检查样本" : "health-check samples"}: ${count}`);
+  } else if (count !== undefined && count !== "") pushPart(`${labels.screen}: ${count}`);
   const effectiveYears = asArray(item?.effective_years).map(String).filter(Boolean);
   const requestedYears = asArray(item?.requested_years).map(String).filter(Boolean);
   if (effectiveYears.length && requestedYears.length && effectiveYears.join(",") !== requestedYears.join(",")) {
@@ -1007,8 +1013,8 @@ function sourceStatusArtifactMarkdown(rows: any[], lang: Lang = "zh") {
   if (!sourceRows.length) return "";
   const title = lang === "zh" ? "来源状态" : "Source Status";
   const intro = lang === "zh"
-    ? "每一行对应一次真实 Find 来源或会议渠道。标题总数表示抓到的标题索引规模；分类后表示按官方分类或无分类策略进入标题筛选的数量；元数据详情表示详情阶段抓到摘要或链接的候选数量。"
-    : "Each row is one real Find source or venue. Title total is the fetched title-index size; after-category is the number entering title screening after official-category selection or the no-category policy; metadata details is the candidate count enriched with abstracts or links.";
+    ? "每一行对应一次真实 Find 来源或会议渠道。标题总数表示抓到的标题索引规模；进入标题筛选表示按官方分类或无分类策略送入标题筛选的数量；本 run 漏斗统计只使用该 run 实际处理过的计数。元数据详情表示详情阶段抓到摘要或链接的候选数量。"
+    : "Each row is one real Find source or venue. Title total is the fetched title-index size; title-screen input is the number entering title screening after official-category selection or the no-category policy; run funnel counts use only papers actually processed by that run. metadata details is the candidate count enriched with abstracts or links.";
   const lines = [`# ${title}`, "", intro, ""];
   sourceRows.forEach((item: any) => {
     lines.push(`## ${sourceStatusLabel(item, undefined, lang)}`, "", `- ${sourceStatusDetail(item, lang)}`, "");
@@ -1118,10 +1124,10 @@ const TEXT = {
     researchLiteratureSurvey: "Find 文献调研验收",
     researchLiteratureSurveyHelp: "显示当前 Find run 的渠道抓取、候选筛选和评分概览。",
     venuePapersScanned: "会议标题池",
-    rawTitleIndexPapers: "标题总数",
+    rawTitleIndexPapers: "本 run 标题入口",
     titleScreenInputPapers: "标题预筛输入",
-    categoryFilteredPapers: "分类后",
-    tfidfScreenedPapers: "初筛标题后",
+    categoryFilteredPapers: "进入标题筛选",
+    tfidfScreenedPapers: "标题预筛后",
     titleScoredPapers: "标题打分后",
     abstractScoredPapers: "摘要打分后",
     titleCandidatePapers: "标题打分后",
@@ -1669,9 +1675,9 @@ const TEXT = {
     researchLiteratureSurvey: "Find Survey Gate",
     researchLiteratureSurveyHelp: "Shows source fetching, candidate screening, and scoring for the current Find run.",
     venuePapersScanned: "Venue papers",
-    rawTitleIndexPapers: "Title total",
+    rawTitleIndexPapers: "Run title input",
     titleScreenInputPapers: "Title-screen input",
-    categoryFilteredPapers: "After categories",
+    categoryFilteredPapers: "Title-screen input",
     tfidfScreenedPapers: "After title prefilter",
     titleScoredPapers: "After title scoring",
     abstractScoredPapers: "After abstract scoring",
@@ -3976,7 +3982,14 @@ function statusBool(value: any) {
 }
 
 function runtimeDraftFromSummary(summary: ProjectSummary | null) {
-  const runtime = summary?.runtime?.runtime || summary?.state?.runtime?.runtime || summary?.config?.runtime || {};
+  const runPreferences = (summary as any)?.run_preferences || {};
+  const preferenceRuntime = runPreferences.runtime || {};
+  const runtime = {
+    ...(summary?.config?.runtime || {}),
+    ...(summary?.state?.runtime?.runtime || {}),
+    ...(summary?.runtime?.runtime || {}),
+    ...preferenceRuntime,
+  };
   const codingAgent = summary?.config?.coding_agent || {};
   return {
     source_bashrc: false,
@@ -3990,15 +4003,19 @@ function runtimeDraftFromSummary(summary: ProjectSummary | null) {
 
 function environmentDraftFromSummary(summary: ProjectSummary | null) {
   const runPreferences = (summary as any)?.run_preferences || {};
-  const summaryRuntime = summary?.runtime?.runtime || summary?.state?.runtime?.runtime || {};
-  const configRuntime = summary?.config?.runtime || {};
   const preferenceRuntime = runPreferences.runtime || {};
+  const summaryRuntime = {
+    ...(summary?.config?.runtime || {}),
+    ...(summary?.state?.runtime?.runtime || {}),
+    ...(summary?.runtime?.runtime || {}),
+    ...preferenceRuntime,
+  };
   const environment = summary?.config?.environment || runPreferences.environment || {};
   return {
-    conda_env: summaryRuntime.conda_env || summary?.config?.conda_env || runPreferences.conda_env || preferenceRuntime.conda_env || "",
-    conda_base: summaryRuntime.conda_base || configRuntime.conda_base || environment.conda_base_hint || preferenceRuntime.conda_base || "",
-    experiment_python: summaryRuntime.experiment_python || configRuntime.experiment_python || environment.experiment_python || "",
-    python_executable: summaryRuntime.management_python || summaryRuntime.python_executable || configRuntime.management_python || configRuntime.python_executable || summary?.config?.python_executable || preferenceRuntime.management_python || preferenceRuntime.python_executable || "",
+    conda_env: summaryRuntime.conda_env || runPreferences.conda_env || summary?.config?.conda_env || "",
+    conda_base: summaryRuntime.conda_base || environment.conda_base_hint || "",
+    experiment_python: summaryRuntime.experiment_python || environment.experiment_python || "",
+    python_executable: summaryRuntime.management_python || summaryRuntime.python_executable || summary?.config?.python_executable || "",
   };
 }
 
@@ -4015,10 +4032,10 @@ function fillEmptyEnvironmentDraftFromSummary(current: Record<string, any>, summ
   if (!environmentDraftHasAnyValue(next)) return current;
   return {
     ...current,
-    conda_env: String(current?.conda_env || "").trim() ? current.conda_env : next.conda_env,
-    conda_base: String(current?.conda_base || "").trim() ? current.conda_base : next.conda_base,
-    experiment_python: String(current?.experiment_python || "").trim() ? current.experiment_python : next.experiment_python,
-    python_executable: String(current?.python_executable || "").trim() ? current.python_executable : next.python_executable,
+    conda_env: next.conda_env || current?.conda_env || "",
+    conda_base: next.conda_base || current?.conda_base || "",
+    experiment_python: next.experiment_python || current?.experiment_python || "",
+    python_executable: next.python_executable || current?.python_executable || "",
   };
 }
 
@@ -4267,7 +4284,6 @@ function App() {
   const [llmProbeResult, setLLMProbeResult] = useState<{ ok: boolean; error: string; summary?: Record<string, any> } | null>(null);
   const [checkingVenues, setCheckingVenues] = useState(false);
   const [venueHealth, setVenueHealth] = useState<Record<string, { ok: boolean; message: string; source_adapter: string; sample_count: number }>>({});
-  const [venueHealthStatusRows, setVenueHealthStatusRows] = useState<any[]>([]);
   const [rawArtifacts, setRawArtifacts] = useState<Record<string, boolean>>({});
   const [activeArtifact, setActiveArtifact] = useState("");
   const [emailReceiversOverride, setEmailReceiversOverride] = useState("");
@@ -4945,7 +4961,6 @@ function App() {
     try {
       setError("");
       setVenueHealth({});
-      setVenueHealthStatusRows([]);
       const nextConfig = configWithCurrentFindSelection();
       const savedConfig = await saveConfig(nextConfig);
       setConfig(savedConfig);
@@ -5037,7 +5052,6 @@ function App() {
   const researchReadCandidates = useMemo(() => readableLiteraturePapers(asArray(researchLiteratureSurvey?.read_candidates)), [researchLiteratureSurvey]);
   const researchStrongRecommendations = useMemo(() => asArray(researchLiteratureSurvey?.strong_recommendations).filter((paper: any) => paper && typeof paper === "object" && Boolean(paper.title || paper.id)), [researchLiteratureSurvey]);
   const researchSourceStatus = useMemo(() => asArray(researchLiteratureSurvey?.source_status), [researchLiteratureSurvey]);
-  const researchHealthCheckSourceStatus = useMemo(() => asArray(researchLiteratureSurvey?.health_check_source_status), [researchLiteratureSurvey]);
   const projectRunPinnedIds = useMemo(() => Array.from(new Set([currentProjectFindRunId, runId].filter(Boolean))), [currentProjectFindRunId, runId]);
   const projectRuns = useMemo(
     () => runs.filter((run) => runMatchesProject(run, researchProject, projectRunPinnedIds)),
@@ -5142,7 +5156,13 @@ function App() {
     const rawProgressCounts = runFindState?.counts || {};
     const progressCounts = viewingActiveIncompleteFindRun ? rawProgressCounts : {};
     const artifactSourceRowsForCounts = expandedSourceStatusRows(runFindState);
-    const summarySourceRowsForCounts = filterBySourceSelection(researchSourceStatus, selectedRunSelection);
+    const summarySourceRowsForCounts = filterBySourceSelection(firstNonEmptyArray(
+      researchSourceStatus,
+      expandedSourceStatusRows(researchSummary?.current_find_pipeline || {}),
+      expandedSourceStatusRows(researchSummary?.state?.current_find_pipeline || {}),
+      expandedSourceStatusRows(researchLiteratureSurvey?.current_find_pipeline || {}),
+      expandedSourceStatusRows(researchStages?.find || researchSummary?.state?.stages?.find || {}),
+    ), selectedRunSelection);
     const sourceRowsForCounts = artifactSourceRowsForCounts.length ? artifactSourceRowsForCounts : summarySourceRowsForCounts;
     const sourceRowTotal = sourceRowsForCounts.reduce((total: number, row: any) => total + Number(row?.raw_title_index_count || row?.corpus_count || row?.count || row?.sample_count || 0), 0);
     const sourceRowCategoryTotal = sourceRowsForCounts.reduce((total: number, row: any) => total + Number(row?.selected_category_count || row?.candidate_count || row?.count || row?.sample_count || 0), 0);
@@ -5155,8 +5175,21 @@ function App() {
     const titleInputCount = surveyStats.venue_title_filter_input_papers ?? sum(titleRows, "title_filter_input_papers");
     const arxivEnabled = Boolean(selectedRunSelection.include_arxiv);
     const useArFallback = useCurrentFindPacket || !viewingActiveIncompleteFindRun;
-    const scannedTotal = sourceRowTotal || surveyStats.raw_title_index_papers || surveyStats.venue_corpus_audited_papers || surveyStats.venue_total_papers_available || rawTitleCount || progressCounts.raw_title_index || titleInputCount || sum(categoryRows, "total_papers") || (useArFallback ? (researchLiteratureCounts.raw_title_index_papers || researchLiteratureCounts.venue_corpus_audited_papers || researchLiteratureCounts.venue_total_papers_available) : "") || "";
-    const selectedTotal = sourceRowCategoryTotal || (surveyStats.venue_category_selected_papers ?? sum(categoryRows, "selected_category_papers")) || (useArFallback ? researchLiteratureCounts.venue_category_selected_papers : "") || "";
+    const runFunnelHasCounts = Boolean(
+      surveyStats.raw_title_index_papers
+      || surveyStats.category_filtered_papers
+      || surveyStats.tfidf_screened_papers
+      || surveyStats.venue_title_filter_input_papers
+      || surveyStats.llm_title_scored_papers
+      || surveyStats.venue_final_title_candidates
+      || rawTitleCount
+      || progressCounts.raw_title_index
+      || progressCounts.raw_title_index_papers,
+    );
+    const summaryFunnelRaw = useArFallback ? (researchLiteratureCounts.raw_title_index_papers || researchLiteratureCounts.venue_corpus_audited_papers || researchLiteratureCounts.venue_total_papers_available) : "";
+    const scannedTotal = surveyStats.raw_title_index_papers || surveyStats.venue_corpus_audited_papers || surveyStats.venue_total_papers_available || rawTitleCount || progressCounts.raw_title_index || progressCounts.raw_title_index_papers || titleInputCount || sum(categoryRows, "total_papers") || summaryFunnelRaw || (!runFunnelHasCounts ? sourceRowTotal : "") || "";
+    const titleScreenInputTotal = surveyStats.category_filtered_papers || progressCounts.category_filtered_papers || titleInputCount || surveyStats.venue_title_filter_input_papers || progressCounts.venue_title_filter_input_papers || (useArFallback ? Number(researchLiteratureCounts.category_filtered_papers || researchLiteratureCounts.venue_title_filter_input_papers || 0) : 0) || (!runFunnelHasCounts ? sourceRowCategoryTotal : "") || "";
+    const selectedTotal = surveyStats.venue_category_selected_papers || surveyStats.category_selected_papers || sum(categoryRows, "selected_category_papers") || titleScreenInputTotal || (useArFallback ? researchLiteratureCounts.venue_category_selected_papers : "") || (!runFunnelHasCounts ? sourceRowCategoryTotal : "") || "";
     return {
       raw_title_index_papers: scannedTotal,
       venue_total_papers_available: scannedTotal,
@@ -5166,7 +5199,7 @@ function App() {
       scanned: scannedTotal,
       corpusAudited: scannedTotal,
       selected: selectedTotal,
-      categoryFiltered: selectedTotal || surveyStats.category_filtered_papers || progressCounts.category_filtered_papers || titleInputCount || (useArFallback ? Number(researchLiteratureCounts.category_filtered_papers || researchLiteratureCounts.venue_title_filter_input_papers || 0) : 0),
+      categoryFiltered: titleScreenInputTotal,
       titleInput: titleInputCount || (useArFallback ? researchLiteratureCounts.venue_title_filter_input_papers : "") || "",
       tfidfScreened: surveyStats.tfidf_screened_papers || progressCounts.tfidf_screened_papers || titleInputCount || (useArFallback ? Number(researchLiteratureCounts.tfidf_screened_papers || researchLiteratureCounts.venue_title_filter_input_papers || 0) : 0),
       titleScoreInput: surveyStats.title_score_input_papers || progressCounts.title_score_input_papers || titleInputCount || 0,
@@ -5196,7 +5229,7 @@ function App() {
       auditPool: screened.length || (useArFallback ? Number(researchLiteratureCounts.screened_ranking || 0) : 0),
       evaluated: asArray(findResults?.evaluated_candidates).length || progressCounts.evaluated_candidates || (useArFallback ? Number(researchLiteratureCounts.evaluated_candidates || 0) : 0),
     };
-  }, [activeStrongLiteratureRows, researchLiteratureCounts, researchSourceStatus, findResults, runFindState, selectedRunSelection, useCurrentFindPacket, viewingActiveIncompleteFindRun]);
+  }, [activeStrongLiteratureRows, researchLiteratureCounts, researchLiteratureSurvey, researchSourceStatus, researchStages, researchSummary, findResults, runFindState, selectedRunSelection, useCurrentFindPacket, viewingActiveIncompleteFindRun]);
   const retrievalPool = useMemo(() => {
     const source = firstNonEmptyArray(
       findResults?.retrieval_candidates,
@@ -5232,48 +5265,6 @@ function App() {
   const readArtifactStale = Boolean(readResultsArtifact && publishedReadCount > auditReadingCount);
   const readCandidatesStillSyncing = Boolean((!currentReadings.length || readArtifactStale) && expectedReadCandidateCount > 0 && (!readResultsArtifact || currentFindArtifactLoading || (useCurrentFindPacket && readCandidatePool.length === 0)));
   const hasSurveyCandidates = retrievalPool.length > 0 || readCandidatePool.length > 0 || readCandidatesStillSyncing || expectedReadCandidateCount > 0 || Number(literatureCounts.evaluated || 0) > 0 || Number(literatureCounts.arxivCandidates || 0) > 0 || (!viewingActiveIncompleteFindRun && Number(researchLiteratureCounts.survey_candidates || 0) > 0);
-  const venueHealthSourceStatus = useMemo(() => {
-    const byId = venueMapWithAliases(venues);
-    const selectedPairs = venueYearPairs(selectedVenues, selectedVenueYears);
-    const selectedPairKeys = new Set(selectedPairs.flatMap((pair) => venueYearComparableKeys(pair.venue_id, pair.year, byId)));
-    const selectedIdKeys = new Set(selectedVenues.flatMap((id) => Array.from(venueComparableKeys(id, byId))));
-    const explicitRows = venueHealthStatusRows.filter((row: any) => {
-      const rowVenueId = String(row?.venue_id || "");
-      const rowPairKeys = venueYearComparableKeys(rowVenueId, row?.year, byId);
-      if (selectedPairKeys.size) return rowPairKeys.some((key) => selectedPairKeys.has(key));
-      if (!selectedIdKeys.size) return true;
-      return Array.from(venueComparableKeys(rowVenueId, byId)).some((key) => selectedIdKeys.has(key));
-    });
-    if (explicitRows.length) return explicitRows;
-    const ids = selectedVenues.length ? selectedVenues : Object.keys(venueHealth);
-    return ids.map((id) => {
-      const idKeys = venueComparableKeys(id, byId);
-      const matched = venueHealth[id]
-        ? [id, venueHealth[id]] as const
-        : Object.entries(venueHealth).find(([healthId]) => Array.from(venueComparableKeys(healthId, byId)).some((key) => idKeys.has(key)));
-      const health = matched?.[1];
-      if (!health) return null;
-      const venue = byId.get(id) || CORE_VENUE_FALLBACKS[id];
-      return {
-        source: venue?.name || id,
-        source_kind: "venue_health",
-        venue_id: id,
-        venue: venue?.name || id,
-        status: health.ok ? "ok" : "failed",
-        ok: Boolean(health.ok),
-        limited: false,
-        count: health.sample_count,
-        sample_count: health.sample_count,
-        raw_title_index_count: health.sample_count,
-        adapter: health.source_adapter,
-        source_adapter: health.source_adapter,
-        message: health.message || (health.ok ? "ok" : "No papers fetched."),
-        requested_years: yearsForVenue(selectedVenueYears, id),
-        effective_years: yearsForVenue(selectedVenueYears, id),
-      };
-    }).filter(Boolean);
-  }, [selectedVenueYears, selectedVenues, venueHealth, venueHealthStatusRows, venues]);
-
   const hasCurrentFindSourceContext = useMemo(() => Boolean(
     currentProjectFindRunId
     || currentFindArtifactRunId
@@ -5286,23 +5277,35 @@ function App() {
   const sourceStatus = useMemo(() => {
     const runRows = filterBySourceSelection(expandedSourceStatusRows(runFindState), selectedRunSelection);
     const surveyRows = filterBySourceSelection(researchSourceStatus, selectedRunSelection);
+    const pipelineRows = filterBySourceSelection(firstNonEmptyArray(
+      expandedSourceStatusRows(researchSummary?.current_find_pipeline || {}),
+      expandedSourceStatusRows(researchSummary?.state?.current_find_pipeline || {}),
+      expandedSourceStatusRows(researchLiteratureSurvey?.current_find_pipeline || {}),
+    ), selectedRunSelection);
+    const stageRows = filterBySourceSelection(
+      expandedSourceStatusRows(researchStages?.find || researchSummary?.state?.stages?.find || {}),
+      selectedRunSelection,
+    );
     const hasLiveFindJob = displayJobs.some((job: any) => isFindRunJob(job) && isLiveJob(job));
-    const surveyRowsAreCachePlaceholders = surveyRows.length > 0 && surveyRows.every((row: any) => String(row?.message || row?.reason || "").includes("verified local venue metadata cache missing"));
-    if (runRows.length) return runRows;
-    if (hasLiveFindJob && surveyRowsAreCachePlaceholders) return [];
-    if (surveyRows.length) return surveyRows;
+    const usableRows = (rows: any[]) => rows.filter((row: any) => {
+      const message = String(row?.message || row?.reason || "");
+      if (message.includes("verified local venue metadata cache missing")) return false;
+      if (String(row?.source_kind || "").trim().toLowerCase() !== "venue_health") return true;
+      return Boolean(row?.raw_title_index_count || row?.corpus_count || row?.candidate_count || row?.count || row?.sample_count);
+    });
+    const runUsableRows = usableRows(runRows);
+    const surveyUsableRows = usableRows(surveyRows);
+    const pipelineUsableRows = usableRows(pipelineRows);
+    const stageUsableRows = usableRows(stageRows);
+    if (runUsableRows.length) return runUsableRows;
+    if (hasLiveFindJob && !surveyUsableRows.length && !pipelineUsableRows.length && !stageUsableRows.length) return [];
+    if (surveyUsableRows.length) return surveyUsableRows;
+    if (pipelineUsableRows.length) return pipelineUsableRows;
+    if (stageUsableRows.length) return stageUsableRows;
     if (viewingActiveIncompleteFindRun || activeFindJobForRun || hasLiveFindJob) return [];
-    if (!hasCurrentFindSourceContext && venueHealthSourceStatus.length) return venueHealthSourceStatus;
     if (hasCurrentFindSourceContext) return [];
-    return [...researchSourceLimitations, ...researchMissingVenueIndexes].map((item: any) => ({
-      ...item,
-      source: item.source || item.venue || item.venue_id || "TASTE literature source",
-      ok: String(item.status || "").toLowerCase() === "ok",
-      limited: String(item.status || "").toLowerCase() === "limited",
-      count: item.count || 0,
-      message: item.message || item.reason || "",
-    }));
-  }, [activeFindJobForRun, displayJobs, hasCurrentFindSourceContext, researchMissingVenueIndexes, researchSourceLimitations, researchSourceStatus, runFindState, selectedRunSelection, venueHealthSourceStatus, viewingActiveIncompleteFindRun]);
+    return [];
+  }, [activeFindJobForRun, displayJobs, hasCurrentFindSourceContext, researchLiteratureSurvey, researchSourceStatus, researchStages, researchSummary, runFindState, selectedRunSelection, viewingActiveIncompleteFindRun]);
   const ideasArtifact = useMemo(() => currentFindArtifactSource.find((a) => a.name === "ideas.json"), [currentFindArtifactSource]);
   const plansArtifact = useMemo(() => currentFindArtifactSource.find((a) => a.name === "plans.json"), [currentFindArtifactSource]);
   const ideas = useMemo(() => ideasArtifact?.content?.ideas ?? [], [ideasArtifact]);
@@ -6083,7 +6086,15 @@ function App() {
   }, [researchSummary, researchFullCycle, lang]);
   const researchNextActions = useMemo(() => firstNonEmptyArray(researchSummary?.next_actions, researchFullCycle?.blocker_action_plan?.actions), [researchSummary, researchFullCycle]);
   const runtimeChecks = useMemo(() => researchRuntime?.checks || {}, [researchRuntime]);
-  const effectiveResearchEnvDraft = useMemo(() => fillEmptyEnvironmentDraftFromSummary(researchEnvDraft, researchSummary), [researchEnvDraft, researchSummary]);
+  const summaryEnvironmentDraft = useMemo(() => environmentDraftFromSummary(researchSummary), [researchSummary]);
+  const effectiveResearchEnvDraft = useMemo(() => ({
+    ...summaryEnvironmentDraft,
+    ...researchEnvDraft,
+    conda_env: researchEnvDraft.conda_env || summaryEnvironmentDraft.conda_env || "",
+    conda_base: researchEnvDraft.conda_base || summaryEnvironmentDraft.conda_base || "",
+    experiment_python: researchEnvDraft.experiment_python || summaryEnvironmentDraft.experiment_python || "",
+    python_executable: researchEnvDraft.python_executable || summaryEnvironmentDraft.python_executable || "",
+  }), [researchEnvDraft, summaryEnvironmentDraft]);
   const supervisionTick = useMemo(() => researchSummary?.supervision || humanSupervision?.supervision || {}, [researchSummary, humanSupervision]);
   const claudeCurrentFindState = useMemo(() => supervisionTick?.claude_current_find_state || humanSupervision?.supervision?.claude_current_find_state || {}, [supervisionTick, humanSupervision]);
   const claudeCurrentFindStale = Boolean(claudeCurrentFindState?.takeover_stale || claudeCurrentFindState?.reading_validation_stale);
@@ -6150,6 +6161,7 @@ function App() {
   }, [humanSupervision, supervisionTick]);
   const projectSummaryLoadingForDisplay = Boolean(researchProject && (!researchSummary || researchProjectLoading));
   const projectStatusLoadingForLaunch = Boolean(projectSummaryLoadingForDisplay || (researchProject && !jobsLoaded));
+  const environmentConfigLoading = Boolean(projectSummaryLoadingForDisplay && !environmentDraftHasAnyValue(effectiveResearchEnvDraft));
   const projectStageLaunchLockedText = useMemo(() => (
     lang === "zh"
       ? "当前项目已有环境/实验/论文阶段任务正在运行或状态仍在刷新；网页已阻止新的全流程/实验/论文启动，避免并发重复任务。需要人工介入时，请在对应阶段的项目代理指令框提交。"
@@ -6175,7 +6187,8 @@ function App() {
     || stageLaunchDisabledByProjectWorker
   );
   const environmentConfigDisabled = Boolean(
-    environmentLocked
+    environmentConfigLoading
+    || environmentLocked
     || environmentStageRunning
     || experimentStageRunning
     || paperStageRunning
@@ -6956,27 +6969,6 @@ function App() {
         ? venueYearPairs(selectedVenues, selectedVenueYears)
         : ids.flatMap((venueId) => addCandidateYears.map((year) => ({ venue_id: venueId, year })));
       const byId = venueMapWithAliases(venues);
-      const pendingRows = pairs.map((pair) => {
-        const venue = byId.get(pair.venue_id) || CORE_VENUE_FALLBACKS[pair.venue_id];
-        const venueName = venue?.name || pair.venue_id;
-        return {
-          source: `${venueName} ${pair.year || ""}`.trim(),
-          source_kind: "venue_health",
-          venue_id: pair.venue_id,
-          venue: venueName,
-          year: pair.year,
-          status: "checking",
-          ok: false,
-          count: "",
-          sample_count: "",
-          adapter: "",
-          source_adapter: "",
-          message: lang === "zh" ? "正在检查可抓取性" : "checking fetchability",
-          requested_years: pair.year ? [pair.year] : [],
-          effective_years: pair.year ? [pair.year] : [],
-        };
-      });
-      if (pendingRows.length) setVenueHealthStatusRows(pendingRows);
       const response = await checkVenueHealth({
         project: researchProject,
         venue_ids: ids,
@@ -6985,28 +6977,6 @@ function App() {
         sample_limit: 2,
       });
       const next: Record<string, { ok: boolean; message: string; source_adapter: string; sample_count: number }> = {};
-      const statusRows = response.results.map((result) => {
-        const venue = byId.get(result.venue_id) || CORE_VENUE_FALLBACKS[result.venue_id];
-        const venueName = venue?.name || result.venue_id;
-        return {
-          source: `${venueName} ${result.year || ""}`.trim(),
-          source_kind: "venue_health",
-          venue_id: result.venue_id,
-          venue: venueName,
-          year: result.year,
-          status: result.ok ? "ok" : "failed",
-          ok: Boolean(result.ok),
-          limited: false,
-          count: result.sample_count,
-          sample_count: result.sample_count,
-          raw_title_index_count: result.sample_count,
-          adapter: result.source_adapter,
-          source_adapter: result.source_adapter,
-          message: result.message || (result.ok ? "ok" : "No papers fetched."),
-          requested_years: result.year ? [result.year] : [],
-          effective_years: result.year ? [result.year] : [],
-        };
-      });
       for (const result of response.results) {
         const resultKeys = venueComparableKeys(result.venue_id, byId);
         const matchingSelectedIds = selectedVenues.filter((id) => {
@@ -7025,7 +6995,6 @@ function App() {
           };
         }
       }
-      setVenueHealthStatusRows(statusRows);
       setVenueHealth((prev) => ({ ...prev, ...next }));
     } catch (err) {
       setError(String(err));
@@ -7253,8 +7222,6 @@ function App() {
       || literature.run_id
       || literature.current_find_pipeline?.run_id
     );
-    if (!hasCurrentFindSource && researchHealthCheckSourceStatus.length) return researchHealthCheckSourceStatus.slice(0, 12);
-    if (!hasCurrentFindSource && venueHealthSourceStatus.length) return venueHealthSourceStatus.slice(0, 12);
     return (freshFindActive ? researchSourceStatus : (researchSourceStatus.length ? researchSourceStatus : sourceStatus)).slice(0, 12);
   }
 
@@ -8505,32 +8472,38 @@ function App() {
                   <div className="panel">
                     <h3>{t.experimentCondaPythonConfig}</h3>
                     <p className="help">{t.experimentCondaPythonHelp}</p>
-                    <label>{t.condaEnvName}</label>
-                    <input value={effectiveResearchEnvDraft.conda_env || ""} onChange={(e) => updateEnvDraft("conda_env", e.target.value)} placeholder={researchProject || "project_env"} disabled={environmentConfigDisabled} />
-                    <label>{t.condaBase}</label>
-                    <input value={effectiveResearchEnvDraft.conda_base || ""} onChange={(e) => updateEnvDraft("conda_base", e.target.value)} placeholder="~/miniforge3" disabled={environmentConfigDisabled} />
-                    <label>{t.experimentPythonExecutable}</label>
-                    <input value={effectiveResearchEnvDraft.experiment_python || ""} onChange={(e) => updateEnvDraft("experiment_python", e.target.value)} placeholder={derivedCondaPython(effectiveResearchEnvDraft.conda_base, effectiveResearchEnvDraft.conda_env) || "python"} disabled={environmentConfigDisabled} />
-                    <p className="help">{lang === "zh" ? `当前训练/实验 Python: ${effectiveResearchEnvDraft.experiment_python || derivedCondaPython(effectiveResearchEnvDraft.conda_base, effectiveResearchEnvDraft.conda_env) || "由 Conda 环境名称派生"}` : `Current training/experiment Python: ${effectiveResearchEnvDraft.experiment_python || derivedCondaPython(effectiveResearchEnvDraft.conda_base, effectiveResearchEnvDraft.conda_env) || "derived from the Conda environment name"}`}</p>
-                    <div className="saveBar">
-                      <button onClick={saveEnvConfig} disabled={!researchProject || researchEnvSaving || environmentConfigDisabled}>{researchEnvSaving ? t.saving : environmentLocked ? t.envLockedCreated : t.saveExperimentEnv}</button>
-                      {researchEnvMessage && <span>{researchEnvMessage}</span>}
-                    </div>
-                    <div className="runtimeChecks envRuntimeChecks">
-                      {["conda", "experiment_python", "conda_base"].map((name) => {
-                        const check = runtimeChecks?.[name] || {};
-                        const lockedReady = environmentLocked && Object.keys(check).length === 0;
-                        const ok = Boolean(check.ok || lockedReady);
-                        return (
-                          <div className={ok ? "runtimeCheck ok" : "runtimeCheck fail"} key={"env-" + name}>
-                            <strong>{name}</strong>
-                            <span>{ok ? (lockedReady ? t.runtimeLockedReady : "ok") : t.missing}</span>
-                            <small>{check.path || check.reason || (lockedReady ? t.runtimeLockedReadyDetail : t.noDiagnostics)}</small>
-                            {check.version && <small>{check.version}</small>}
-                          </div>
-                        );
-                      })}
-                    </div>
+                    {environmentConfigLoading ? (
+                      <div className="researchGateNote warning">{lang === "zh" ? "正在刷新当前项目环境配置；加载完成前不会显示空 Conda 配置。" : "Refreshing the current project environment configuration; empty Conda values are hidden until loading completes."}</div>
+                    ) : (
+                      <>
+                        <label>{t.condaEnvName}</label>
+                        <input value={effectiveResearchEnvDraft.conda_env || ""} onChange={(e) => updateEnvDraft("conda_env", e.target.value)} placeholder={researchProject || "project_env"} disabled={environmentConfigDisabled} />
+                        <label>{t.condaBase}</label>
+                        <input value={effectiveResearchEnvDraft.conda_base || ""} onChange={(e) => updateEnvDraft("conda_base", e.target.value)} placeholder="~/miniforge3" disabled={environmentConfigDisabled} />
+                        <label>{t.experimentPythonExecutable}</label>
+                        <input value={effectiveResearchEnvDraft.experiment_python || ""} onChange={(e) => updateEnvDraft("experiment_python", e.target.value)} placeholder={derivedCondaPython(effectiveResearchEnvDraft.conda_base, effectiveResearchEnvDraft.conda_env) || "python"} disabled={environmentConfigDisabled} />
+                        <p className="help">{lang === "zh" ? `当前训练/实验 Python: ${effectiveResearchEnvDraft.experiment_python || derivedCondaPython(effectiveResearchEnvDraft.conda_base, effectiveResearchEnvDraft.conda_env) || "由 Conda 环境名称派生"}` : `Current training/experiment Python: ${effectiveResearchEnvDraft.experiment_python || derivedCondaPython(effectiveResearchEnvDraft.conda_base, effectiveResearchEnvDraft.conda_env) || "derived from the Conda environment name"}`}</p>
+                        <div className="saveBar">
+                          <button onClick={saveEnvConfig} disabled={!researchProject || researchEnvSaving || environmentConfigDisabled}>{researchEnvSaving ? t.saving : environmentLocked ? t.envLockedCreated : t.saveExperimentEnv}</button>
+                          {researchEnvMessage && <span>{researchEnvMessage}</span>}
+                        </div>
+                        <div className="runtimeChecks envRuntimeChecks">
+                          {["conda", "experiment_python", "conda_base"].map((name) => {
+                            const check = runtimeChecks?.[name] || {};
+                            const lockedReady = environmentLocked && Object.keys(check).length === 0;
+                            const ok = Boolean(check.ok || lockedReady);
+                            return (
+                              <div className={ok ? "runtimeCheck ok" : "runtimeCheck fail"} key={"env-" + name}>
+                                <strong>{name}</strong>
+                                <span>{ok ? (lockedReady ? t.runtimeLockedReady : "ok") : t.missing}</span>
+                                <small>{check.path || check.reason || (lockedReady ? t.runtimeLockedReadyDetail : t.noDiagnostics)}</small>
+                                {check.version && <small>{check.version}</small>}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </>
+                    )}
                     <h3>{t.firstEnvCreateControl}</h3>
                     <p className="help">{environmentLocked ? (lang === "zh" ? "首次仓库/数据/Conda bootstrap 已完成；环境配置页只保留当前环境状态和状态刷新入口，不再展示创建时的自然语言提示。" : "Initial repo/data/conda bootstrap is complete. The Environment page now keeps only current environment status and status refresh controls, not the creation-time prompt.") : t.firstEnvCreateHelp}</p>
                     {!environmentLocked && <>
