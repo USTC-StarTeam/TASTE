@@ -55,7 +55,7 @@ Planning 不能做这些事：
 所有命令建议在远端 TASTE 根目录执行，并先进入正确环境：
 
 ```bash
-cd /home/fmh/workspace/TASTE
+cd <TASTE_ROOT>
 source /home/fmh/workspace/miniforge/etc/profile.d/conda.sh
 conda activate ar_taste
 export NVM_DIR=/home/fmh/workspace/.nvm
@@ -132,7 +132,7 @@ python modules/planning/main.py --action plan \
 
 ## 7. 维护规则
 
-- 修改前先读 `工作状态.txt`、本 README、`script_manifest.json` 和相关真实实现脚本。
+- 修改前先读本 README、`script_manifest.json` 和相关真实实现脚本；本机忽略的 `工作状态.txt` 若存在，只能作为维护交接背景。
 - 只改 `modules/planning` 内文件；不改 web 前端、framework 或其它科研模块。
 - standalone 调试输出放在 `modules/planning/runs/` 或 `modules/planning/.tmp/`，这些路径已被 `.gitignore` 排除。
 - 不新增一次性脚本；小工具优先合并到现有分类实现。

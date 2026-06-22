@@ -29,6 +29,8 @@ backups/
 # but never publish a machine-specific default project, API-key state, or maintainer handoff.
 /config.json
 /工作状态.txt
+**/工作状态.txt
+**/测试报告.md
 /handoff/
 
 # Imported local patch bundles, macOS resource forks, and manual pre-patch copies.

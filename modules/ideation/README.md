@@ -14,7 +14,7 @@
 必须在远端 TASTE 工作目录运行，并显式激活 `ar_taste` 与 nvm/Claude Code 环境：
 
 ```bash
-cd /home/fmh/workspace/TASTE
+cd <TASTE_ROOT>
 source /home/fmh/workspace/miniforge/etc/profile.d/conda.sh
 conda activate ar_taste
 . /home/fmh/workspace/.nvm/nvm.sh
@@ -76,7 +76,7 @@ python modules/ideation/main.py \
 所有运行产物默认写入：
 
 ```text
-/home/fmh/workspace/TASTE/modules/ideation/runs/<run_id>/
+<TASTE_ROOT>/modules/ideation/runs/<run_id>/
 ```
 
 `runs/` 已被本目录 `.gitignore` 忽略，避免中间产物进入 git。

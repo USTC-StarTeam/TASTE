@@ -10,12 +10,12 @@
 
 ## 运行环境
 
-在远程工作区 `/home/fmh/workspace/TASTE` 中运行。不要使用系统默认 `python`，也不要依赖默认 PATH 中是否有 `rg`。
+在远程工作区 `<TASTE_ROOT>` 中运行。不要使用系统默认 `python`，也不要依赖默认 PATH 中是否有 `rg`。
 
 推荐环境：
 
 ```bash
-cd /home/fmh/workspace/TASTE
+cd <TASTE_ROOT>
 PY=/home/fmh/workspace/miniforge/envs/ar_taste/bin/python3.11
 RG=/home/fmh/workspace/miniforge/envs/ar_taste/bin/rg
 NODE_BIN=/home/fmh/workspace/.nvm/versions/node/v22.21.0/bin
@@ -38,7 +38,7 @@ PATH="$NODE_BIN:$PATH" "$PY" modules/reading/main.py --contract
 给定一篇论文，使用 `deep-read` action：
 
 ```bash
-cd /home/fmh/workspace/TASTE
+cd <TASTE_ROOT>
 PY=/home/fmh/workspace/miniforge/envs/ar_taste/bin/python3.11
 PATH=/home/fmh/workspace/.nvm/versions/node/v22.21.0/bin:$PATH \
   "$PY" modules/reading/main.py \
@@ -142,7 +142,7 @@ Current-Find 的完整精读 JSON 同时保留两层口径：
 用于测试多个论文来源渠道的下载、正文抽取和阅读任务产物生成：
 
 ```bash
-cd /home/fmh/workspace/TASTE
+cd <TASTE_ROOT>
 PY=/home/fmh/workspace/miniforge/envs/ar_taste/bin/python3.11
 PATH=/home/fmh/workspace/.nvm/versions/node/v22.21.0/bin:$PATH \
   "$PY" modules/reading/main.py \
@@ -170,7 +170,7 @@ PATH=/home/fmh/workspace/.nvm/versions/node/v22.21.0/bin:$PATH \
 批量产物审计使用 `audit-channel-batch` action。它会逐渠道核对指定数量的合格产物，检查 `read_results.json`、`full_text_packet.json`、正文路径是否仍在 Reading 内、`full_text_available`、正文长度、`Task/subagent` 和 `subagent_deep_read` prompt 标记，并写出中文审计报告：
 
 ```bash
-cd /home/fmh/workspace/TASTE
+cd <TASTE_ROOT>
 PY=/home/fmh/workspace/miniforge/envs/ar_taste/bin/python3.11
 "$PY" modules/reading/main.py audit-channel-batch \
   --run-id channel_batch_示例 \
@@ -211,7 +211,7 @@ PY=/home/fmh/workspace/miniforge/envs/ar_taste/bin/python3.11
 | `scripts/orchestration/` | Claude 编排 | Claude/subagent prompt 与当前 Find Read/Idea/Plan 编排。 |
 | `scripts/repair/` | 证据修复 | 当前 Find 全文证据修复真实实现。 |
 | `script_manifest.json` | 脚本清单 | 由当前文件结构生成的人类可读清单。 |
-| `工作状态.txt` | 工作记录 | 记录 Reading 模块较大修改、状态和后续注意事项。 |
+| 本机 `工作状态.txt` | 维护记录 | 被 `.gitignore` 忽略；若存在，只作交接背景，不属于仓库文件或模块契约。 |
 
 ## 边界和约束
 

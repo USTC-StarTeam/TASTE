@@ -3,8 +3,8 @@
   "module": "framework_dev",
   "backend_only": true,
   "frontend_dependency": false,
-  "workspace_root": "/home/fmh/workspace/TASTE",
-  "framework_dev_root": "/home/fmh/workspace/TASTE/framework_dev",
+  "workspace_root": "<TASTE_ROOT>",
+  "framework_dev_root": "<TASTE_ROOT>/framework_dev",
   "stage_order": [
     "finding",
     "reading",

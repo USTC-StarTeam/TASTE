@@ -81,6 +81,33 @@ def _load_environment_module(module_name: str, relative_path: str):
     return module
 
 
+def test_local_maintainer_notes_are_ignored_not_tracked():
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+    ).stdout.decode("utf-8", "surrogateescape").split("\0")
+    forbidden = [path for path in tracked if Path(path).name in {"工作状态.txt", "测试报告.md"}]
+    assert forbidden == []
+
+    ignored_paths = [
+        "工作状态.txt",
+        "framework/工作状态.txt",
+        "modules/finding/工作状态.txt",
+        "modules/experimenting/测试报告.md",
+    ]
+    ignored_raw = subprocess.run(
+        ["git", "check-ignore", "-z", "--stdin"],
+        cwd=ROOT,
+        input=("\0".join(ignored_paths) + "\0").encode("utf-8"),
+        check=True,
+        stdout=subprocess.PIPE,
+    ).stdout
+    ignored = ignored_raw.decode("utf-8", "surrogateescape").strip("\0").split("\0")
+    assert set(ignored) == set(ignored_paths)
+
+
 def test_current_find_read_public_projection_is_compact_and_katex_ready():
     spec = importlib.util.spec_from_file_location(
         "reading_current_find_contract",
@@ -567,13 +594,13 @@ def test_current_find_allows_controlled_idea_scoring_audit_write():
 
     assert session.current_find_tool_policy_issue(
         "Write",
-        {"file_path": "/home/fmh/workspace/TASTE/projects/protein/planning/finding/idea_scoring.json"},
+        {"file_path": str(ROOT / "projects" / "protein" / "planning" / "finding" / "idea_scoring.json")},
         "current_find_read_idea_plan",
     ) == ""
 
     assert session.current_find_tool_policy_issue(
         "Write",
-        {"file_path": "/home/fmh/workspace/TASTE/projects/protein/state/idea_scoring.json"},
+        {"file_path": str(ROOT / "projects" / "protein" / "state" / "idea_scoring.json")},
         "current_find_read_idea_plan",
     ) == session.CURRENT_FIND_FILE_WRITE_WHITELIST_POLICY
 

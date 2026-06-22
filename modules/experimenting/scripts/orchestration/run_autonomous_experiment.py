@@ -69,7 +69,7 @@ def build_claude_prompt(plan: ExperimentPlan, *, repo: Path, artifact_dir: Path,
 硬约束：
 - 只能修改基础代码库: {repo}
 - 只能把本轮中间产物、指标、坏例、审计摘要写入: {artifact_dir}
-- 不要修改 /home/fmh/workspace/TASTE/modules/experimenting 或其它 TASTE 模块；也不要改 web/frontend/framework。
+- 不要修改 TASTE 仓库的 modules/experimenting 或其它 TASTE 模块；也不要改 web/frontend/framework。
 - 必须使用下面的运行环境方式，不要使用系统 python、裸 conda run 或其它未锁定解释器。
 - 不要伪造指标、日志、坏例、引用或实验结论。没有跑通就如实记录失败原因。
 

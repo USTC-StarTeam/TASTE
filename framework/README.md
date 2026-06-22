@@ -10,7 +10,7 @@
 
 ```bash
 ssh hidimension_5090_1
-cd /home/fmh/workspace/TASTE
+cd <TASTE_ROOT>
 source /home/fmh/workspace/miniforge/etc/profile.d/conda.sh
 conda activate ar_taste
 source /home/fmh/workspace/.nvm/nvm.sh
