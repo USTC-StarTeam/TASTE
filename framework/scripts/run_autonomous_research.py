@@ -166,7 +166,7 @@ Live experiment safety and observability rules:
 - If the log is temporarily empty while the process is alive, record `running_waiting_for_output` and keep waiting; do not probe the process in a way that changes its state.
 - If a run must be stopped, first write the reason, PID, command, artifact path, and evidence to an artifact-local audit or run note.
 
-Before selecting a new method, base-work switch, or code route, read `planning/literature_tool_packet.md` or `state/literature_tool_packet.json` plus at least one raw artifact under `planning/finding/`. If the packet is stale, empty, or unrelated to the current blocker, run `{management_python()} framework/scripts/run_module.py finding --action literature_tool --project {project} --query "<targeted research query>" --fast-mode --venue {venue}` as an internal project-agent survey and read the packet path printed under `state/internal_literature_runs/...`; do not publish it to the web-facing current Find unless the TASTE wrapper/user explicitly requests `--publish-current-find`. Use these survey outputs as planning signals only; local experiment artifacts are still required for claims.
+Before selecting a new method, base-work switch, or code route, read `planning/literature_tool_packet.md` or `state/literature_tool_packet.json` plus at least one raw artifact under `planning/finding/`. If the packet is stale, empty, or unrelated to the current blocker, refresh the configured Find route with `{management_python()} framework/scripts/run_frontend.py --project {project} --deep-survey --query "<targeted research query>"`, then rebuild downstream artifacts with `{management_python()} framework/scripts/run_module.py reading --action current_find_research_plan --project {project}`. Use these survey outputs as planning signals only; local experiment artifacts are still required for claims.
 
 Current-Find selected execution contract:
 ```json
@@ -219,7 +219,14 @@ def gate_passed(gate: dict, *, decision: str | None = None) -> bool:
 
 
 def stop_for_current_find_full_text_gate(args, paths, agent_id: str) -> None:
-    ensure_cmd = [sys.executable, str(SCRIPTS / "ensure_current_find_research_plan.py"), "--project", args.project]
+    ensure_cmd = [
+        management_python(),
+        str(ROOT / "modules" / "reading" / "main.py"),
+        "--action",
+        "current_find_research_plan",
+        "--project",
+        args.project,
+    ]
     run(ensure_cmd, required=False, project=args.project, agent_id=agent_id, stage="current-find-read-idea-plan-gate")
     gate = current_find_full_text_gate_status(paths)
     if not isinstance(gate, dict) or not gate.get("blocking"):

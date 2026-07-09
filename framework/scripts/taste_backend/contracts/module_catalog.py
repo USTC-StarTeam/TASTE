@@ -67,6 +67,7 @@ class ModuleContract:
     required_external_inputs: tuple[str, ...] = ()
     artifacts_in: tuple[str, ...] = ()
     artifacts_out: tuple[str, ...] = ()
+    public_final_artifact: str = ""
     gate_actions: tuple[str, ...] = ()
     source: str = "static"
     contract_error: str = ""
@@ -123,6 +124,7 @@ def _contract_from_payload(stage: str, payload: dict[str, Any]) -> ModuleContrac
         required_external_inputs=_tuple_text(contract.get("required_external_inputs") or contract.get("external_inputs")),
         artifacts_in=_tuple_text(contract.get("artifacts_in")),
         artifacts_out=_tuple_text(contract.get("artifacts_out")),
+        public_final_artifact=str(contract.get("public_final_artifact") or ""),
         gate_actions=QUALITY_GATE_ACTIONS.get(stage, ()),
         source="module_cli_contract",
     )

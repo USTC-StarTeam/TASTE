@@ -12,7 +12,6 @@ import sys
 import time
 import threading
 import traceback
-from concurrent.futures import TimeoutError as FutureTimeoutError, ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -23,19 +22,29 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from find_support import catalog_by_id, load_catalog
-from find_pipeline import FIND_RECOMMENDATION_POLICY, SCORING_POLICY_VERSION, _critique_candidates, _llm_live_gate, _recommendation_quality_audit, _recommended, _screened_ranking, _triage_candidates, run_find
-from find_support import fetch_venue_sample
+WORKSPACE_ROOT = Path(os.environ.get("WORKSPACE_ROOT") or Path(__file__).resolve().parents[4]).expanduser().resolve()
+_IMPORT_PRIORITY_DIRS = [
+    WORKSPACE_ROOT / "modules" / "ideation" / "scripts",
+    WORKSPACE_ROOT / "modules" / "planning" / "scripts",
+    WORKSPACE_ROOT / "framework" / "scripts",
+    WORKSPACE_ROOT / "web" / "backend",
+]
+for _entry in [str(path) for path in reversed(_IMPORT_PRIORITY_DIRS) if path.exists()]:
+    while _entry in sys.path:
+        sys.path.remove(_entry)
+    sys.path.insert(0, _entry)
+
 from idea_pipeline import patch_idea, run_idea
 from plan_pipeline import finish_plan, polish_plan, run_plan
-from read_pipeline import run_read
 from auto_research.emailer import send_run_email
+from auto_research.finding_catalog import catalog_by_id, fetch_venue_sample, load_catalog
 from auto_research.jobs import JobCancelled
-from auto_research.llm import LLMClient
+from auto_research.llm import LLMClient, extract_json
 from auto_research.markdown import paper_markdown
-from auto_research.models import AppConfig, EmailJobRequest, FindRequest, IdeaPatch, IdeaRequest, PlanPolishRequest, PlanRequest, ReadRequest, VenueHealthRequest
+from auto_research.models import AppConfig, EmailJobRequest, FindRequest, IdeaPatch, IdeaRequest, LLMRoleConfig, PlanPolishRequest, PlanRequest, ReadRequest, VenueHealthRequest
+from auto_research.reading_bridge import prepare_current_find_read_input, sync_current_find_read_outputs
 from auto_research.source_selection import canonical_source_selection, normalize_source_selection, save_canonical_source_selection, project_config_path
-from auto_research.paths import CONFIG_PATH, RUNS_DIR, STATE_DIR, ensure_directories
+from auto_research.paths import CONFIG_PATH, FINDING_RUNS_DIR, RUNS_DIR, RUNS_SEARCH_DIRS, STATE_DIR, ensure_directories
 from auto_research.storage import delete_run, list_runs, read_json, redacted_config, run_dir, write_json
 from auto_research.web.project_bridge import action_gate_blocker, job_stage, create_project_config, detect_runtime_config, list_projects as list_projects, project_summary, run_action, runtime_status, update_project_config, update_runtime_config, _cleruntime_caches, _current_find_pipeline_summary, _current_find_source_status_rows, _venue_metadata_counts
 from paper_common import get_active_paper_state
@@ -65,11 +74,11 @@ async def _prevent_stale_frontend_cache(request, call_next):
     return response
 
 
-WORKSPACE_ROOT = Path(os.environ.get("WORKSPACE_ROOT") or Path(__file__).resolve().parents[4]).expanduser().resolve()
 CLIENT_DIST = WORKSPACE_ROOT / "web" / "frontend" / "client" / "dist"
 PROJECT_IDS_ROOT = WORKSPACE_ROOT / "projects"
 FRAMEWORK_RUNS_DIR = WORKSPACE_ROOT / "framework" / "workspace" / "runs"
 ENVIRONMENT_RUNS_DIR = WORKSPACE_ROOT / "modules" / "environment" / "runs"
+DEFAULT_LOCAL_LLM_CONFIG_PATH = WORKSPACE_ROOT / "modules" / "finding" / "config" / "llm.local.json"
 LARGE_JSON_ARTIFACT_LIMIT_BYTES = int(os.environ.get("LARGE_JSON_ARTIFACT_LIMIT_BYTES", "5000000") or 5000000)
 LARGE_MARKDOWN_ARTIFACT_LIMIT_BYTES = int(os.environ.get("LARGE_MARKDOWN_ARTIFACT_LIMIT_BYTES", "500000") or 500000)
 MARKDOWN_ARTIFACT_PREVIEW_CHARS = int(os.environ.get("MARKDOWN_ARTIFACT_PREVIEW_CHARS", "120000") or 120000)
@@ -111,9 +120,133 @@ def _config_with_env_overrides(config: AppConfig) -> AppConfig:
     return config
 
 
+def _local_llm_config_path() -> Path:
+    raw = os.environ.get("FINDING_LLM_CONFIG", "").strip()
+    return Path(raw).expanduser() if raw else DEFAULT_LOCAL_LLM_CONFIG_PATH
+
+
+def _read_local_llm_config() -> dict[str, Any]:
+    path = _local_llm_config_path()
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_local_llm_config(payload: dict[str, Any]) -> None:
+    path = _local_llm_config_path()
+    write_json(path, payload)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _missing_config_value(value: Any) -> bool:
+    return value is None or value == "" or value == [] or value == {}
+
+
+def _config_with_local_llm_config(config: AppConfig, *, override_defaults: bool = False) -> AppConfig:
+    local = _read_local_llm_config()
+    if not local:
+        return config
+    updates: dict[str, Any] = {}
+    for key in ("provider", "base_url", "model", "temperature"):
+        value = local.get(key)
+        if _missing_config_value(value):
+            continue
+        if override_defaults or _missing_config_value(getattr(config, key, None)):
+            updates[key] = value
+    local_key = str(local.get("api_key") or "").strip()
+    if local_key:
+        updates["api_key"] = local_key
+
+    local_roles = local.get("llm_roles") if isinstance(local.get("llm_roles"), dict) else {}
+    if local_roles:
+        merged_roles = dict(config.llm_roles or {})
+        for role, raw_role_config in local_roles.items():
+            if not isinstance(raw_role_config, dict):
+                continue
+            current = merged_roles.get(str(role)) or LLMRoleConfig()
+            current_payload = current.model_dump() if hasattr(current, "model_dump") else {}
+            role_updates: dict[str, Any] = {}
+            for key in ("provider", "base_url", "model", "temperature"):
+                value = raw_role_config.get(key)
+                if _missing_config_value(value):
+                    continue
+                if override_defaults or _missing_config_value(current_payload.get(key)):
+                    role_updates[key] = value
+            role_key = str(raw_role_config.get("api_key") or "").strip()
+            if role_key:
+                role_updates["api_key"] = role_key
+            if role_updates:
+                merged_roles[str(role)] = current.model_copy(update=role_updates)
+        updates["llm_roles"] = merged_roles
+    return config.model_copy(update=updates) if updates else config
+
+
+def _persist_local_llm_config_from_config(config: AppConfig) -> None:
+    current = _read_local_llm_config()
+    payload: dict[str, Any] = {
+        key: value
+        for key, value in current.items()
+        if key in {"provider", "base_url", "model", "api_key", "temperature", "llm_roles"}
+    }
+    for key in ("provider", "base_url", "model", "temperature"):
+        value = getattr(config, key, None)
+        if not _missing_config_value(value):
+            payload[key] = value
+    api_key = str(config.api_key or "").strip()
+    if api_key:
+        payload["api_key"] = api_key
+
+    roles_payload = payload.get("llm_roles") if isinstance(payload.get("llm_roles"), dict) else {}
+    roles_payload = dict(roles_payload)
+    for role, role_config in (config.llm_roles or {}).items():
+        role_data = role_config.model_dump() if hasattr(role_config, "model_dump") else dict(role_config or {})
+        target = dict(roles_payload.get(str(role)) or {})
+        for key in ("provider", "base_url", "model", "temperature"):
+            value = role_data.get(key)
+            if not _missing_config_value(value):
+                target[key] = value
+        role_key = str(role_data.get("api_key") or "").strip()
+        if role_key:
+            target["api_key"] = role_key
+        if target:
+            roles_payload[str(role)] = target
+    if roles_payload:
+        payload["llm_roles"] = roles_payload
+    if payload and payload != current:
+        _write_local_llm_config(payload)
+
+
+def _persist_local_llm_config_from_find_request(config: AppConfig, request_config: AppConfig | None) -> None:
+    request_key = str(getattr(request_config, "api_key", "") or "").strip() if request_config is not None else ""
+    provider = str(config.provider or "").strip().lower()
+    if provider == "mock" and not request_key:
+        return
+    _persist_local_llm_config_from_config(config)
+
+
+def _strip_llm_secrets_from_config_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    data = dict(payload)
+    data["api_key"] = ""
+    roles = data.get("llm_roles") if isinstance(data.get("llm_roles"), dict) else {}
+    for role_cfg in roles.values():
+        if isinstance(role_cfg, dict):
+            role_cfg["api_key"] = ""
+    if roles:
+        data["llm_roles"] = roles
+    return data
+
+
 def load_config() -> AppConfig:
     data = read_json(CONFIG_PATH, {})
     config = AppConfig(**data) if data else AppConfig()
+    config = _config_with_local_llm_config(config, override_defaults=not bool(data))
     canonical = canonical_source_selection(project_config_path=project_config_path())
     if config.default_find_selection != canonical:
         config = config.model_copy(update={"default_find_selection": canonical})
@@ -282,6 +415,9 @@ def _sync_project_research_preferences_from_config(config: AppConfig) -> None:
     if not isinstance(project_config, dict):
         return
     updates: dict[str, str] = {}
+    topic_value = str(getattr(config, "research_topic", "") or "").strip()
+    if topic_value:
+        updates["topic"] = topic_value
     for key in ("research_interest", "researcher_profile"):
         value = str(getattr(config, key, "") or "").strip()
         if value:
@@ -297,14 +433,38 @@ def _sync_project_research_preferences_from_config(config: AppConfig) -> None:
         write_json(project_path, project_config)
 
 
+def _sync_project_finding_config_from_request(config: AppConfig) -> None:
+    project_path = project_config_path()
+    if project_path is None:
+        return
+    project_config = read_json(project_path, {})
+    if not isinstance(project_config, dict):
+        return
+    finding = config.model_dump()
+    finding["api_key"] = ""
+    email = finding.get("email") if isinstance(finding.get("email"), dict) else {}
+    if email:
+        email["smtp_password"] = ""
+        finding["email"] = email
+    roles = finding.get("llm_roles") if isinstance(finding.get("llm_roles"), dict) else {}
+    for role_cfg in roles.values():
+        if isinstance(role_cfg, dict):
+            role_cfg["api_key"] = ""
+    if roles:
+        finding["llm_roles"] = roles
+    project_config["finding"] = finding
+    write_json(project_path, project_config)
+
+
 def save_config(config: AppConfig) -> AppConfig:
     project_path = project_config_path()
     canonical = save_canonical_source_selection(config.default_find_selection, project_config_path=project_path)
     config = config.model_copy(update={"default_find_selection": canonical})
-    payload = config.model_dump()
+    _persist_local_llm_config_from_config(config)
+    payload = _strip_llm_secrets_from_config_payload(config.model_dump())
     if project_path is not None:
-        # Source selection is project state. Runtime config keeps only local UI,
-        # secret, and fallback settings for sessions without a current project.
+        # Source selection is project state. LLM secrets live in the local
+        # modules/finding/config/llm.local.json file, not project/runtime state.
         payload.pop("default_find_selection", None)
     if read_json(CONFIG_PATH, {}) != payload:
         write_json(CONFIG_PATH, payload)
@@ -437,7 +597,7 @@ def _strip_legacy_artifact_pointer_lines(text: str) -> str:
             cleaned_lines.append(line)
             continue
         lower = stripped.lower()
-        points_to_article_artifact = "article.md" in lower
+        points_to_find_artifact = "find.md" in lower
         pointer_verb = bool(re.search(r"(?:见|查看|打开|see|open|refer)", stripped, flags=re.I))
         duplicated_article_fields = bool(re.search(r"(?:摘要|推荐理由|完整|abstract|recommendation)", stripped, flags=re.I))
         legacy_metadata_line = bool(
@@ -445,7 +605,7 @@ def _strip_legacy_artifact_pointer_lines(text: str) -> str:
             or re.match(r"^(?:url|pdf)$", stripped, flags=re.I)
         )
         legacy_score_line = ("/" in stripped or "|" in stripped) and bool(re.search(r"(?:Fit|Score)\s*=", stripped, flags=re.I))
-        if (points_to_article_artifact and pointer_verb and duplicated_article_fields) or legacy_metadata_line or legacy_score_line:
+        if (points_to_find_artifact and pointer_verb and duplicated_article_fields) or legacy_metadata_line or legacy_score_line:
             continue
         cleaned_lines.append(line)
     cleaned = "\n".join(cleaned_lines)
@@ -555,7 +715,7 @@ def _public_job_summary_text(value: Any) -> str:
     if complete_match:
         return _job_status_message(complete_match.group(1), "complete")
     if re.search(r"\b(?:read|idea|plan)\b.*stopped at an evidence gate", lowered_initial):
-        return "当前 Find 的精读/想法/计划仍有机器校验未通过；请查看本阶段状态并继续运行对应步骤。"
+        return "当前 Find 的精读/想法/计划仍未完成；请查看本阶段状态并继续运行对应步骤。"
     if "stopped at an evidence gate" in lowered_initial:
         return "当前任务停在后续证据门控。"
     text = re.sub(
@@ -800,12 +960,12 @@ def _is_full_cycle_job(stage: Any = "", job_id: Any = "", result: Any = None, lo
 
 
 def _current_find_worker_phase_and_kind(cmd: str) -> tuple[str, str, int]:
-    lowered = str(cmd or "").lower()
-    if "ensure_current_find_research_plan.py" in lowered or ("modules/reading/main.py" in lowered and "current_find_research_plan" in lowered):
+    lowered = str(cmd or "").lower().replace("_", "-")
+    if "ensure-current-find-research-plan.py" in lowered or ("modules/reading/main.py" in lowered and "current-find-research-plan" in lowered):
         return "read", "current_find_read_idea_plan_wrapper", 2
-    if "claude_project_session.py" in lowered and "current-find-claude-read-idea-plan" in lowered:
+    if "claude-project-session.py" in lowered and "current-find-claude-read-idea-plan" in lowered:
         return "read", "current_find_claude_read_idea_plan", 2
-    if "claude_project_session.py" in lowered and "current-find" in lowered:
+    if "claude-project-session.py" in lowered and "current-find" in lowered:
         return "read", "current_find_claude_session", 2
     return "", "", 99
 
@@ -1143,6 +1303,9 @@ STAGE_LABELS_ZH = {
     "full-cycle": "完整科研循环",
     "full_research_cycle": "完整科研循环",
 }
+
+READING_PUBLIC_ENTRY_ACTION_MISSING_STATUS = "blocked_reading_public_entry_action_missing"
+READING_PUBLIC_ENTRY_ACTION_MISSING_MESSAGE = "Reading 公共入口未实现 current_find_research_plan action；Web/Framework 已按公共入口交接，需在 Reading 模块入口补齐该 action 后重跑。"
 
 
 def _stage_label_zh(stage: str) -> str:
@@ -1562,6 +1725,8 @@ class JobState:
             if match:
                 self.run_id = match.group(1)
         self.logs.append(line)
+        if _public_taste_stage(self.stage) == "read":
+            self.progress_version += 1
         _persist_jobs()
 
     def as_dict(self, *, compact: bool = False) -> dict:
@@ -1615,10 +1780,16 @@ class JobState:
                     "environment_decision": decision_projection,
                     "run_id": decision_projection.get("run_id") or base_result.get("run_id"),
                 }
+        if public_stage == "read":
+            progress_payload = _read_job_progress_payload(self.logs, progress_payload, result_payload if isinstance(result_payload, dict) else self.result, status=self.status)
+            if isinstance(result_payload, dict) and isinstance(progress_payload.get("read_progress"), dict):
+                result_payload = {**result_payload, "read_progress": progress_payload.get("read_progress")}
         log_stage = panel_stage or ("paper" if paper_job else self.stage)
-        logs = _public_job_logs(log_stage, self.logs, progress_payload, result_payload if isinstance(result_payload, dict) else self.result, limit=80) if compact else self.logs
+        logs = _public_job_logs(log_stage, self.logs, progress_payload, result_payload if isinstance(result_payload, dict) else self.result, limit=80) if compact or public_stage == "read" else self.logs
         if public_stage != self.stage and isinstance(self.result, dict):
             self.result.setdefault("raw_stage", self.stage)
+        if compact and isinstance(result_payload, dict) and self.run_id and not str(result_payload.get("run_id") or "").strip():
+            result_payload["run_id"] = self.run_id
         public_status = _public_paper_status(self.status, result_payload if isinstance(result_payload, dict) else {}) if paper_job and public_stage == "paper" else self.status
         public_status = _normalize_public_job_status(public_status, progress_payload, self.error, result_payload if isinstance(result_payload, dict) else self.result, public_stage)
         if str(public_status).strip().lower() == "interrupted":
@@ -1704,7 +1875,7 @@ _RUN_ARTIFACTS_CACHE: dict[str, Any] = {}
 _RUNS_CACHE: dict[str, Any] = {"expires_at": 0.0, "fingerprint": None, "items": []}
 
 MARKDOWN_ARTIFACT_NAMES = [
-    "article.md", "screened_ranking.md", "read_candidates.md", "critique_candidates.md",
+    "find.md",
     "biorxiv.md", "nature.md", "science.md", "hf.md", "github.md", "source_status.md",
     "read.md", "idea.md", "plan.md",
 ]
@@ -1717,7 +1888,7 @@ JSON_ARTIFACT_NAMES = [
     "huggingface_raw.json", "github_raw.json",
     "read_results.json", "ideas.json", "plans.json", "config.json", "selection.json", "email_report.json",
 ]
-LIGHT_ARTIFACT_MARKDOWN_NAMES = ["article.md", "source_status.md", "read.md", "idea.md", "plan.md"]
+LIGHT_ARTIFACT_MARKDOWN_NAMES = ["find.md", "source_status.md", "read.md", "idea.md", "plan.md"]
 LIGHT_ARTIFACT_JSON_NAMES = ["find_progress.json", "find_results.json", "read_results.json", "ideas.json", "plans.json", "selection.json"]
 FIND_SURVEY_COUNT_KEYS = [
     "raw_title_index_papers", "title_total_papers", "venue_total_papers_available", "venue_corpus_audited_papers",
@@ -1772,7 +1943,7 @@ def _run_artifact_roots(run_id: str) -> list[Path]:
         roots.append(run_dir(run_id))
     except FileNotFoundError:
         pass
-    for root in [FRAMEWORK_RUNS_DIR, ENVIRONMENT_RUNS_DIR]:
+    for root in [FINDING_RUNS_DIR, FRAMEWORK_RUNS_DIR, ENVIRONMENT_RUNS_DIR]:
         candidate = _case_insensitive_run_child(root, run_id)
         if candidate and candidate not in roots:
             roots.append(candidate)
@@ -1805,12 +1976,22 @@ def _environment_artifact_run(roots: list[Path], run_id: str) -> bool:
     return any((root / "environment_deployment_decision.json").exists() for root in roots)
 
 
-def _runs_fingerprint() -> tuple[int, int, int]:
-    try:
-        root_stat = RUNS_DIR.stat()
+def _runs_fingerprint() -> tuple[tuple[str, int, int, int], ...]:
+    entries: list[tuple[str, int, int, int]] = []
+    for root in RUNS_SEARCH_DIRS:
+        try:
+            root_stat = root.stat()
+        except OSError:
+            entries.append((str(root), 0, 0, 0))
+            continue
         count = 0
         newest_manifest = 0
-        for item in RUNS_DIR.iterdir():
+        try:
+            children = list(root.iterdir())
+        except OSError:
+            entries.append((str(root), root_stat.st_mtime_ns, 0, 0))
+            continue
+        for item in children:
             if not item.is_dir():
                 continue
             count += 1
@@ -1818,9 +1999,8 @@ def _runs_fingerprint() -> tuple[int, int, int]:
                 newest_manifest = max(newest_manifest, (item / "manifest.json").stat().st_mtime_ns)
             except OSError:
                 continue
-        return (root_stat.st_mtime_ns, count, newest_manifest)
-    except OSError:
-        return (0, 0, 0)
+        entries.append((str(root), root_stat.st_mtime_ns, count, newest_manifest))
+    return tuple(entries)
 
 
 def _run_stage_names_from_artifacts(path_value: Any, existing: Any = None) -> list[str]:
@@ -1829,8 +2009,8 @@ def _run_stage_names_from_artifacts(path_value: Any, existing: Any = None) -> li
     if not path.exists():
         return stages
     checks = [
-        ("find", ["find_results.json", "article.md"]),
-        ("read", ["read_results.json", "read.md"]),
+        ("find", ["find_results.json", "find.md"]),
+        ("read", ["read.md", "read_results.json"]),
         ("idea", ["ideas.json", "idea.md"]),
         ("plan", ["plans.json", "plan.md"]),
     ]
@@ -2997,6 +3177,756 @@ def _public_find_job_logs(logs: list[str], progress: dict[str, Any], result: dic
     return out[-max(1, limit):]
 
 
+def _read_progress_percent(current: Any, total: Any) -> int:
+    try:
+        total_int = int(total or 0)
+        current_int = int(current or 0)
+    except (TypeError, ValueError):
+        return 0
+    if total_int <= 0:
+        return 0
+    return max(0, min(100, int(round((current_int / total_int) * 100))))
+
+
+def _read_progress_title(value: Any, *, max_len: int = 180) -> str:
+    text = _redact_public_log_text(_public_text(str(value or ""))).strip()
+    text = re.sub(r"\s+", " ", text).strip(" -")
+    return text[: max_len - 1].rstrip() + "…" if len(text) > max_len else text
+
+
+def _read_progress_status_label(value: Any, *, phase: str) -> str:
+    text = _read_progress_title(value, max_len=180)
+    lowered = text.lower()
+    if not text:
+        return ""
+    if phase == "full_text":
+        if "full_text=false" in lowered or lowered.endswith("false"):
+            return "全文未就绪"
+        if "full_text=true" in lowered or "prepared_full_text" in lowered or "verified_full_text" in lowered:
+            return "全文可用"
+    if phase == "deep_read":
+        if "deep_read=true" in lowered or "complete" in lowered:
+            return "精读完成"
+        if "deep_read=false" in lowered or "missing" in lowered or "invalid" in lowered or "blocked" in lowered:
+            return "精读未完成"
+    return text
+
+
+def _read_phase_row(label: str) -> dict[str, Any]:
+    return {
+        "label": label,
+        "current": 0,
+        "total": 0,
+        "percent": 0,
+        "status": "pending",
+        "workers": 0,
+        "active_index": 0,
+        "active_title": "",
+        "last_index": 0,
+        "last_title": "",
+        "last_status": "",
+    }
+
+
+def _read_log_detail(prefix: str, index: int, total: int, title: str, extra: str = "", *, count_label: str = "") -> str:
+    count = count_label or (f"{index}/{total}" if total else str(index or ""))
+    pieces = [prefix, count]
+    if title:
+        pieces.append(title)
+    if extra:
+        pieces.append(extra)
+    return "：".join([pieces[0], " ".join(piece for piece in pieces[1:] if piece)]) if len(pieces) > 1 else prefix
+
+
+def _read_job_artifact_progress(result: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
+    project = str(result.get("project") or "").strip()
+    run_id = str(result.get("run_id") or result.get("find_run_id") or "").strip()
+    projection: dict[str, Any] = {}
+    read_payload: dict[str, Any] = {}
+    project_read_md_present = False
+    if project:
+        try:
+            root = _safe_project_root(project)
+        except Exception:
+            root = None
+        if root is not None:
+            try:
+                project_read_md_present = bool((root / "planning" / "finding" / "read.md").read_text(encoding="utf-8", errors="replace").strip())
+            except OSError:
+                project_read_md_present = False
+            payload = _read_project_json(root / "planning" / "finding" / "read_results.json", {})
+            if isinstance(payload, dict):
+                payload_run_id = str(payload.get("source_run_id") or payload.get("run_id") or "").strip()
+                if not run_id or not payload_run_id or payload_run_id == run_id:
+                    read_payload = payload
+                    projection["run_id"] = payload_run_id or run_id
+
+    readings = read_payload.get("readings") if isinstance(read_payload.get("readings"), list) else []
+    artifact_counts = result.get("artifact_counts") if isinstance(result.get("artifact_counts"), dict) else {}
+    validation = read_payload.get("reading_validation") if isinstance(read_payload.get("reading_validation"), dict) else {}
+    result_validation = result.get("reading_validation") if isinstance(result.get("reading_validation"), dict) else {}
+    prepared_input = result.get("prepared_reading_input") if isinstance(result.get("prepared_reading_input"), dict) else {}
+
+    def as_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    result_readings_count = result.get("readings")
+    if isinstance(result_readings_count, list):
+        result_readings_count = len(result_readings_count)
+
+    message = str(progress.get("message") or result.get("summary") or "")
+    msg_match = re.search(
+        r"生成\s*(\d+)\s*/\s*(\d+)\s*条\s*Reading\s*记录.*?全文证据\s*(\d+)\s*篇.*?待补全文\s*(\d+)\s*篇.*?待补\s*(?:Claude/)?subagent\s*深读\s*(\d+)\s*篇",
+        message,
+        flags=re.I,
+    )
+    message_read_current = message_read_total = message_full_current = message_pending_full = message_pending_deep = 0
+    if msg_match:
+        message_read_current = as_int(msg_match.group(1))
+        message_read_total = as_int(msg_match.group(2))
+        message_full_current = as_int(msg_match.group(3))
+        message_pending_full = as_int(msg_match.group(4))
+        message_pending_deep = as_int(msg_match.group(5))
+
+    total = max(
+        as_int(read_payload.get("recommendation_count")),
+        as_int(read_payload.get("processed_recommendation_count")),
+        as_int(read_payload.get("input_article_count")),
+        as_int(result.get("recommendation_count")),
+        as_int(result.get("input_article_count")),
+        as_int(prepared_input.get("input_article_count")),
+        as_int(prepared_input.get("recommendation_count")),
+        as_int(validation.get("expected_recommendation_count")),
+        as_int(validation.get("recommended_reading_count")),
+        as_int(result_validation.get("expected_recommendation_count")),
+        as_int(result_validation.get("recommended_reading_count")),
+        as_int(artifact_counts.get("recommended_reading")),
+        as_int(artifact_counts.get("read")),
+        len(readings),
+        as_int(result_readings_count),
+        message_read_total,
+    )
+    full_ready_from_rows = sum(
+        1
+        for row in readings
+        if isinstance(row, dict)
+        and (
+            row.get("full_text_available") is True
+            or row.get("pdf_text_read") is True
+            or str(row.get("full_text_status") or "").strip() in {"pdf_text_read", "html_text_read", "xml_text_read", "full_text_ready"}
+        )
+    )
+    full_current = max(
+        as_int(read_payload.get("full_text_ready_count")),
+        as_int(read_payload.get("full_text_reading_count")),
+        as_int(result.get("full_text_ready_count")),
+        as_int(result.get("full_text_reading_count")),
+        as_int(validation.get("full_text_reading_count")),
+        as_int(validation.get("full_text_evidence_count")),
+        as_int(result_validation.get("full_text_reading_count")),
+        as_int(result_validation.get("full_text_evidence_count")),
+        as_int(artifact_counts.get("full_text_reading")),
+        full_ready_from_rows,
+        message_full_current,
+    )
+    result_pending_full = max(
+        as_int(result.get("pending_full_text_reading_count")),
+        as_int(validation.get("pending_full_text_reading_count")),
+        as_int(result_validation.get("pending_full_text_reading_count")),
+        message_pending_full,
+    )
+    if total and result_pending_full:
+        full_current = max(full_current, total - result_pending_full)
+    read_attempt_current = max(
+        as_int(read_payload.get("deep_read_attempted_count")),
+        len(readings),
+        as_int(result_readings_count),
+        message_read_current,
+    )
+    result_pending_deep = max(
+        as_int(result.get("pending_deep_read_synthesis_count")),
+        as_int(validation.get("pending_deep_read_synthesis_count")),
+        as_int(result_validation.get("pending_deep_read_synthesis_count")),
+        message_pending_deep,
+    )
+    deep_current = max(
+        as_int(read_payload.get("deep_read_complete_count")),
+        as_int(result.get("deep_read_complete_count")),
+        as_int(validation.get("deep_read_complete_count")),
+        as_int(result_validation.get("deep_read_complete_count")),
+        sum(1 for row in readings if isinstance(row, dict) and row.get("deep_read_complete") is True),
+    )
+    if total and result_pending_deep:
+        deep_current = max(deep_current, total - result_pending_deep)
+    if total <= 0 and (full_current or read_attempt_current or deep_current):
+        total = max(full_current, read_attempt_current, deep_current)
+    if total <= 0:
+        return {}
+
+    validation_valid = validation.get("valid") is True or result_validation.get("valid") is True
+    public_read_md_present = bool(read_payload.get("public_final_artifact_present") or project_read_md_present)
+    warning_details = read_payload.get("warning_details") if isinstance(read_payload.get("warning_details"), list) else []
+    error_details = read_payload.get("error_details") if isinstance(read_payload.get("error_details"), list) else []
+    full_current = max(0, min(total, full_current))
+    read_attempt_current = max(0, min(total, read_attempt_current))
+    deep_current = max(0, min(total, deep_current))
+    pending_full = max(0, total - full_current, result_pending_full)
+    pending_deep = max(0, total - deep_current, result_pending_deep)
+    projection.update({
+        "total": total,
+        "full_text_current": full_current,
+        "deep_read_current": deep_current,
+        "deep_read_attempted": read_attempt_current,
+        "pending_full_text": pending_full,
+        "pending_deep_read": pending_deep,
+        "public_read_md_present": public_read_md_present,
+        "validation_valid": validation_valid,
+        "warning_count": max(as_int(read_payload.get("warning_count")), len(warning_details)),
+        "error_count": max(as_int(read_payload.get("error_count")), len(error_details)),
+    })
+    return projection
+
+
+def _read_job_project_read_payload(result: dict[str, Any]) -> dict[str, Any]:
+    project = str(result.get("project") or "").strip()
+    run_id = str(result.get("run_id") or result.get("find_run_id") or "").strip()
+    if not project:
+        return {}
+    try:
+        root = _safe_project_root(project)
+    except Exception:
+        return {}
+    payload = _read_project_json(root / "planning" / "finding" / "read_results.json", {})
+    if not isinstance(payload, dict):
+        return {}
+    payload_run_id = str(payload.get("source_run_id") or payload.get("run_id") or "").strip()
+    if run_id and payload_run_id and payload_run_id != run_id:
+        return {}
+    return payload
+
+
+def _read_job_machine_warning_lines(result: dict[str, Any], *, limit: int = 8) -> list[str]:
+    payload = _read_job_project_read_payload(result)
+    if not payload:
+        return []
+    validation = payload.get("reading_validation") if isinstance(payload.get("reading_validation"), dict) else {}
+    aggregation = payload.get("read_markdown_aggregation") if isinstance(payload.get("read_markdown_aggregation"), dict) else {}
+    details: list[dict[str, Any]] = []
+    for source in [
+        payload.get("error_details"),
+        validation.get("error_details") if isinstance(validation, dict) else None,
+        payload.get("warning_details"),
+        validation.get("warning_details") if isinstance(validation, dict) else None,
+        aggregation.get("warning_items") if isinstance(aggregation, dict) else None,
+    ]:
+        if isinstance(source, list):
+            details.extend(item for item in source if isinstance(item, dict))
+    out: list[str] = []
+    seen: set[str] = set()
+    for detail in details:
+        title = _read_progress_title(detail.get("title") or "Untitled", max_len=140)
+        phase = _read_progress_title(detail.get("phase") or "read", max_len=80)
+        status = _read_progress_title(detail.get("status") or detail.get("message") or "", max_len=140)
+        err_type = _read_progress_title(detail.get("error_type") or "", max_len=80)
+        err_msg = _read_progress_title(detail.get("error_message") or "", max_len=180)
+        prefix = "错误" if err_type or str(status).startswith("error_") else "警告"
+        bits = [phase, title]
+        if status:
+            bits.append(status)
+        if err_type:
+            bits.append(err_type)
+        if err_msg:
+            bits.append(err_msg)
+        line = prefix + "：" + " / ".join(bit for bit in bits if bit)
+        if line in seen:
+            continue
+        seen.add(line)
+        out.append(line)
+        if len(out) >= limit:
+            break
+    if len(out) < limit:
+        warning_texts: list[str] = []
+        for source in [payload.get("warnings"), validation.get("warnings") if isinstance(validation, dict) else None]:
+            if isinstance(source, list):
+                warning_texts.extend(str(item).strip() for item in source if str(item).strip())
+        for warning in warning_texts:
+            text = "警告：" + _read_progress_title(warning, max_len=260)
+            if text in seen:
+                continue
+            seen.add(text)
+            out.append(text)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def _read_job_progress_from_logs(
+    logs: Any,
+    progress: Any = None,
+    result: Any = None,
+    *,
+    status: Any = "",
+) -> dict[str, Any]:
+    raw = [str(line or "").strip() for line in (logs if isinstance(logs, list) else []) if str(line or "").strip()]
+    progress = progress if isinstance(progress, dict) else {}
+    result = result if isinstance(result, dict) else {}
+    existing = progress.get("read_progress") if isinstance(progress.get("read_progress"), dict) else result.get("read_progress") if isinstance(result.get("read_progress"), dict) else {}
+    phases = {
+        "full_text": _read_phase_row("爬取全文"),
+        "deep_read": _read_phase_row("精读全文"),
+    }
+    details: list[str] = []
+    errors: list[str] = []
+    completed_full_text: set[int] = set()
+    completed_deep_read: set[int] = set()
+    exact_totals: set[str] = set()
+    signal_seen = False
+
+    def mark_total(key: str, total: int, workers: int = 0, *, exact: bool = False) -> None:
+        if total > 0:
+            if exact:
+                phases[key]["total"] = total
+                exact_totals.add(key)
+            elif key not in exact_totals:
+                phases[key]["total"] = max(int(phases[key].get("total") or 0), total)
+        if workers > 0:
+            phases[key]["workers"] = workers
+
+    def mark_active(key: str, index: int, total: int, title: str, status_value: str) -> None:
+        mark_total(key, total)
+        phases[key]["active_index"] = index
+        phases[key]["active_title"] = title
+        phases[key]["status"] = status_value
+
+    def mark_completed(key: str, completed: set[int], index: int, total: int, title: str, status_value: str) -> None:
+        mark_total(key, total)
+        completed.add(index)
+        phases[key]["last_index"] = index
+        phases[key]["last_title"] = title
+        phases[key]["last_status"] = status_value
+        if phases[key].get("active_index") == index:
+            phases[key]["active_index"] = 0
+            phases[key]["active_title"] = ""
+
+    for line in raw:
+        text = _strip_public_taste_marker(line)
+        lowered = str(text).lower()
+        if text == _job_status_message("read", "started") or text == "精读任务已启动":
+            signal_seen = True
+            phases["full_text"]["status"] = "running"
+            continue
+        full_phase = re.search(r"full[- ]text acquisition phase:\s*(\d+)\s+papers(?:,\s*(\d+)\s+workers)?", text, flags=re.I)
+        if full_phase:
+            signal_seen = True
+            total = int(full_phase.group(1))
+            workers = int(full_phase.group(2) or 0)
+            mark_total("full_text", total, workers)
+            phases["full_text"]["status"] = "running"
+            details.append(f"爬取全文启动：共 {total} 篇" + (f"，并发 {workers}" if workers else ""))
+            continue
+        full_start = re.search(r"(acquiring|queueing)\s+full[- ]text(?:\s+acquisition)?\s+(\d+)\s*/\s*(\d+)\s*:\s*(.+)", text, flags=re.I)
+        if full_start:
+            signal_seen = True
+            action = full_start.group(1).lower()
+            index = int(full_start.group(2))
+            total = int(full_start.group(3))
+            title = _read_progress_title(full_start.group(4))
+            if action == "queueing":
+                mark_total("full_text", total)
+            else:
+                mark_active("full_text", index, total, title, "running")
+            details.append(_read_log_detail("排队爬取全文" if action == "queueing" else "正在爬取全文", index, total, title))
+            continue
+        full_done = re.search(r"(?:finished|completed)\s+full[- ]text\s+acquisition\s+(\d+)\s*/\s*(\d+)\s*:\s*(.*?)(?:\s+-\s+(.+))?$", text, flags=re.I)
+        if full_done:
+            signal_seen = True
+            index = int(full_done.group(1))
+            total = int(full_done.group(2))
+            raw_status_text = _read_progress_title(full_done.group(3), max_len=120)
+            status_text = _read_progress_status_label(raw_status_text, phase="full_text")
+            title = _read_progress_title(full_done.group(4) or "")
+            if "full_text=false" in raw_status_text.lower():
+                mark_total("full_text", total)
+                phases["full_text"]["last_index"] = index
+                phases["full_text"]["last_title"] = title
+                phases["full_text"]["last_status"] = status_text
+            else:
+                mark_completed("full_text", completed_full_text, index, total, title, status_text)
+            details.append(_read_log_detail("完成全文爬取", index, total, title, status_text))
+            continue
+        read_phase = re.search(r"reading subagent phase:\s*(\d+)\s+papers(?:,\s*(\d+)\s+workers)?", text, flags=re.I)
+        if read_phase:
+            signal_seen = True
+            total = int(read_phase.group(1))
+            workers = int(read_phase.group(2) or 0)
+            mark_total("deep_read", total, workers, exact=True)
+            phases["deep_read"]["status"] = "running" if total else "complete"
+            details.append(f"精读全文启动：共 {total} 篇" + (f"，并发 {workers}" if workers else ""))
+            continue
+        read_start = re.search(r"(starting|queueing)\s+reading subagent\s+(\d+)\s*/\s*(\d+)\s*:\s*(.+)", text, flags=re.I)
+        if read_start:
+            signal_seen = True
+            action = read_start.group(1).lower()
+            index = int(read_start.group(2))
+            total = int(read_start.group(3))
+            title = _read_progress_title(read_start.group(4))
+            if action == "queueing":
+                mark_total("deep_read", total)
+            else:
+                mark_active("deep_read", index, total, title, "running")
+            details.append(_read_log_detail("排队精读全文" if action == "queueing" else "正在精读全文", index, total, title, count_label=f"第{index}篇"))
+            continue
+        read_done = re.search(r"(?:finished|completed)\s+reading subagent\s+(\d+)\s*/\s*(\d+)\s*:\s*(.*?)(?:\s+-\s+(.+))?$", text, flags=re.I)
+        if read_done:
+            signal_seen = True
+            index = int(read_done.group(1))
+            total = int(read_done.group(2))
+            raw_status_text = _read_progress_title(read_done.group(3), max_len=120)
+            status_text = _read_progress_status_label(raw_status_text, phase="deep_read")
+            title = _read_progress_title(read_done.group(4) or "")
+            if re.search(r"deep_read\s*=\s*true", raw_status_text, flags=re.I):
+                mark_completed("deep_read", completed_deep_read, index, total, title, status_text)
+            else:
+                mark_total("deep_read", total)
+                phases["deep_read"]["last_index"] = index
+                phases["deep_read"]["last_title"] = title
+                phases["deep_read"]["last_status"] = status_text
+            details.append(_read_log_detail("完成全文精读", index, total, title, status_text, count_label=f"第{index}篇"))
+            continue
+        if re.search(r"final read\.md aggregation phase", text, flags=re.I):
+            signal_seen = True
+            details.append("正在生成最终 read.md：汇总所有论文精读结果")
+            continue
+        if re.search(r"final read\.md aggregation complete", text, flags=re.I):
+            signal_seen = True
+            details.append("最终 read.md 汇总完成：" + _read_progress_title(text.split(":", 1)[-1], max_len=140))
+            continue
+        public_progress = re.search(
+            r"阶段进度[:：]\s*爬取全文\s*(\d+)\s*/\s*(\d+|\?)\s*[；;]\s*精读全文\s*(\d+)\s*/\s*(\d+|\?)",
+            text,
+            flags=re.I,
+        )
+        if public_progress:
+            signal_seen = True
+            full_current = int(public_progress.group(1))
+            full_total = int(public_progress.group(2)) if public_progress.group(2).isdigit() else 0
+            deep_current = int(public_progress.group(3))
+            deep_total = int(public_progress.group(4)) if public_progress.group(4).isdigit() else 0
+            phases["full_text"]["current"] = max(int(phases["full_text"].get("current") or 0), full_current)
+            phases["full_text"]["total"] = max(int(phases["full_text"].get("total") or 0), full_total)
+            phases["deep_read"]["current"] = max(int(phases["deep_read"].get("current") or 0), deep_current)
+            if "deep_read" not in exact_totals:
+                phases["deep_read"]["total"] = max(int(phases["deep_read"].get("total") or 0), deep_total)
+            continue
+        if re.match(r"^(?:当前状态|状态|当前动作|阶段进度|运行编号|细节)[:：]", text):
+            continue
+        if any(marker in lowered for marker in ["traceback", "failed", "error", "blocked", "exception", "失败", "错误", "阻塞"]):
+            cleaned_error = _read_progress_title(text, max_len=260)
+            if cleaned_error:
+                while cleaned_error.startswith("错误：错误："):
+                    cleaned_error = cleaned_error.removeprefix("错误：")
+                while cleaned_error.startswith("错误：警告："):
+                    cleaned_error = cleaned_error.removeprefix("错误：")
+                errors.append(cleaned_error)
+
+    for key, completed in [("full_text", completed_full_text), ("deep_read", completed_deep_read)]:
+        if completed:
+            phases[key]["current"] = max(int(phases[key].get("current") or 0), len(completed))
+        total = int(phases[key].get("total") or 0)
+        current = int(phases[key].get("current") or 0)
+        if total > 0 and current >= total:
+            phases[key]["status"] = "complete"
+            phases[key]["active_index"] = 0
+            phases[key]["active_title"] = ""
+        phases[key]["percent"] = _read_progress_percent(phases[key].get("current"), phases[key].get("total"))
+
+    status_text = " ".join(
+        str(value or "").strip().lower()
+        for value in [status, result.get("status"), progress.get("phase")]
+        if str(value or "").strip()
+    )
+    cancelled_status = any(marker in status_text for marker in ["cancelled", "canceled"])
+    live_read_status = any(marker in status_text for marker in ["running", "queued", "cancelling"])
+    prefer_live_log_progress = signal_seen and live_read_status
+    if live_read_status and not signal_seen:
+        signal_seen = True
+        phases["full_text"]["status"] = "running"
+        prefer_live_log_progress = True
+    if cancelled_status:
+        signal_seen = True
+        errors = []
+        for key in ["full_text", "deep_read"]:
+            phases[key]["status"] = "cancelled"
+            phases[key]["active_index"] = 0
+            phases[key]["active_title"] = ""
+    if not prefer_live_log_progress and not cancelled_status:
+        try:
+            result_input_count = int(result.get("input_article_count") or 0)
+        except (TypeError, ValueError):
+            result_input_count = 0
+        try:
+            result_full_count = int(result.get("full_text_ready_count") or 0)
+        except (TypeError, ValueError):
+            result_full_count = 0
+        try:
+            result_deep_count = int(result.get("deep_read_complete_count") or result.get("readings") or 0)
+        except (TypeError, ValueError):
+            result_deep_count = 0
+        if result_input_count > 0:
+            signal_seen = True
+            phases["full_text"]["total"] = max(int(phases["full_text"].get("total") or 0), result_input_count)
+            phases["deep_read"]["total"] = max(int(phases["deep_read"].get("total") or 0), result_input_count)
+        if result_full_count > 0:
+            signal_seen = True
+            phases["full_text"]["current"] = max(int(phases["full_text"].get("current") or 0), result_full_count)
+        if result_deep_count > 0:
+            signal_seen = True
+            phases["deep_read"]["current"] = max(int(phases["deep_read"].get("current") or 0), result_deep_count)
+
+        artifact_progress = _read_job_artifact_progress(result, progress)
+        if artifact_progress:
+            signal_seen = True
+            total = int(artifact_progress.get("total") or 0)
+            full_current = int(artifact_progress.get("full_text_current") or 0)
+            deep_current = int(artifact_progress.get("deep_read_current") or 0)
+            deep_attempted = int(artifact_progress.get("deep_read_attempted") or 0)
+            pending_full = int(artifact_progress.get("pending_full_text") or 0)
+            pending_deep = int(artifact_progress.get("pending_deep_read") or 0)
+            public_read_md_present = artifact_progress.get("public_read_md_present") is True
+            validation_valid = artifact_progress.get("validation_valid") is True
+            warning_count = int(artifact_progress.get("warning_count") or 0)
+            warning_suffix = f"；warning {warning_count} 项" if warning_count else ""
+            if total:
+                phases["full_text"]["total"] = max(int(phases["full_text"].get("total") or 0), total)
+                phases["deep_read"]["total"] = max(int(phases["deep_read"].get("total") or 0), total)
+            phases["full_text"]["current"] = max(int(phases["full_text"].get("current") or 0), full_current)
+            phases["deep_read"]["current"] = deep_current
+            if pending_full:
+                phases["full_text"]["status"] = "blocked"
+                phases["full_text"]["last_status"] = f"待补全文 {pending_full} 篇"
+            elif total and full_current >= total:
+                phases["full_text"]["status"] = "complete"
+                phases["full_text"]["last_status"] = "同篇全文证据已覆盖"
+            if pending_deep:
+                if pending_full:
+                    phases["deep_read"]["status"] = "blocked"
+                    phases["deep_read"]["last_status"] = f"已完成精读 {deep_current}/{total}；{pending_full} 篇因缺少同篇全文未进入精读"
+                elif public_read_md_present and validation_valid:
+                    phases["deep_read"]["status"] = "warning"
+                    phases["deep_read"]["last_status"] = f"已完成精读 {deep_current}/{total}；{pending_deep} 篇未进入最终 read.md，仅记录在任务日志和机器状态{warning_suffix}"
+                else:
+                    phases["deep_read"]["status"] = "blocked"
+                    phases["deep_read"]["last_status"] = f"已完成精读 {deep_current}/{total}；已启动 {deep_attempted}/{total}，待精读 {pending_deep} 篇"
+                details.append(str(phases["deep_read"].get("last_status") or ""))
+            elif total and deep_current >= total:
+                phases["deep_read"]["status"] = "complete"
+                phases["deep_read"]["last_status"] = f"已完成精读 {deep_current}/{total}"
+    if not signal_seen and existing:
+        existing_payload = dict(existing)
+        existing_payload["has_signal"] = existing_payload.get("has_signal", True)
+        return existing_payload
+    for key in ["full_text", "deep_read"]:
+        phases[key]["percent"] = _read_progress_percent(phases[key].get("current"), phases[key].get("total"))
+
+    current_stage = ""
+    current_action = ""
+    full_total_for_stage = int(phases["full_text"].get("total") or 0)
+    full_current_for_stage = int(phases["full_text"].get("current") or 0)
+    if cancelled_status:
+        current_stage = "full_text"
+        current_action = "任务已取消。"
+    elif (
+        str(phases["full_text"].get("status") or "") == "blocked"
+        and phases["full_text"].get("last_status")
+        and (not full_total_for_stage or full_current_for_stage < full_total_for_stage)
+    ):
+        current_stage = "full_text"
+        current_action = "爬取全文阻塞：" + str(phases["full_text"].get("last_status") or "")
+    elif str(phases["deep_read"].get("status") or "") == "blocked" and phases["deep_read"].get("last_status"):
+        current_stage = "deep_read"
+        current_action = "精读全文阻塞：" + str(phases["deep_read"].get("last_status") or "")
+    elif str(phases["deep_read"].get("status") or "") == "warning" and phases["deep_read"].get("last_status"):
+        current_stage = "deep_read"
+        current_action = "精读全文完成并有警告：" + str(phases["deep_read"].get("last_status") or "")
+    elif phases["deep_read"].get("active_title"):
+        current_stage = "deep_read"
+        current_action = _read_log_detail(
+            "正在精读全文",
+            int(phases["deep_read"].get("active_index") or 0),
+            int(phases["deep_read"].get("total") or 0),
+            str(phases["deep_read"].get("active_title") or ""),
+        )
+    elif phases["full_text"].get("active_title"):
+        current_stage = "full_text"
+        current_action = _read_log_detail(
+            "正在爬取全文",
+            int(phases["full_text"].get("active_index") or 0),
+            int(phases["full_text"].get("total") or 0),
+            str(phases["full_text"].get("active_title") or ""),
+        )
+    elif details:
+        current_stage = "deep_read" if any("精读" in item or "read.md" in item for item in details[-3:]) else "full_text"
+        prefix = "精读全文并发处理中，最近进展" if current_stage == "deep_read" else "全文爬取处理中，最近进展"
+        current_action = f"{prefix}：{details[-1]}"
+    if not current_action and live_read_status and details:
+        current_stage = "deep_read" if any("精读" in item or "read.md" in item for item in details[-3:]) else "full_text"
+        current_action = details[-1]
+    if not current_action:
+        message = _read_progress_title(progress.get("message") or result.get("summary") or status, max_len=220)
+        if live_read_status and ("阻塞" in message or "blocked" in message.lower() or "准备当前 Find 输入" in message):
+            message = ""
+        current_stage = "full_text" if live_read_status else str(progress.get("phase") or status or "full_text")
+        current_action = message or "爬取全文等待开始。"
+
+    overall_deep_total = int(phases["deep_read"].get("total") or phases["full_text"].get("total") or 0)
+    overall_total = int(phases["full_text"].get("total") or 0) + overall_deep_total
+    overall_current = int(phases["full_text"].get("current") or 0) + int(phases["deep_read"].get("current") or 0)
+    if overall_total <= 0 and int(progress.get("total") or 0) > 0:
+        overall_total = int(progress.get("total") or 0)
+        overall_current = int(progress.get("current") or 0)
+    recent_details = ["任务已取消。"] if cancelled_status else details[-10:]
+    if not recent_details:
+        for line in raw[-30:]:
+            text = _strip_public_taste_marker(line)
+            if re.match(
+                r"^(?:queueing|acquiring|finished|completed|starting)\s+(?:full[- ]text(?:\s+acquisition)?|reading subagent)\s+\d+\s*/\s*\d+\s*:",
+                text,
+                flags=re.I,
+            ) or re.match(r"^reusing verified full[- ]text packet", text, flags=re.I):
+                cleaned = _read_progress_title(text, max_len=300)
+                if cleaned:
+                    recent_details.append(cleaned)
+        recent_details = recent_details[-10:]
+    recent_details = [item for item in recent_details if "准备当前 Find 输入" not in item and "精读任务已启动" not in item]
+    if not recent_details and current_action:
+        recent_details = [current_action]
+    return {
+        "has_signal": signal_seen,
+        "current_stage": current_stage,
+        "current_action": current_action,
+        "overall_current": overall_current,
+        "overall_total": overall_total,
+        "overall_percent": _read_progress_percent(overall_current, overall_total),
+        "phases": phases,
+        "recent_details": recent_details,
+        "recent_errors": errors[-5:],
+    }
+
+
+def _read_job_progress_payload(logs: Any, progress: Any = None, result: Any = None, *, status: Any = "") -> dict[str, Any]:
+    progress_payload = dict(progress if isinstance(progress, dict) else {})
+    read_progress = _read_job_progress_from_logs(logs, progress_payload, result, status=status)
+    if read_progress.get("has_signal"):
+        progress_payload["read_progress"] = read_progress
+        progress_payload["phase"] = str(read_progress.get("current_stage") or progress_payload.get("phase") or "read")
+        progress_payload["message"] = str(read_progress.get("current_action") or progress_payload.get("message") or "")
+        phases = read_progress.get("phases") if isinstance(read_progress.get("phases"), dict) else {}
+        current_phase = phases.get(str(read_progress.get("current_stage") or "")) if isinstance(phases.get(str(read_progress.get("current_stage") or "")), dict) else {}
+        if int(current_phase.get("total") or 0) > 0:
+            progress_payload["current"] = int(current_phase.get("current") or 0)
+            progress_payload["total"] = int(current_phase.get("total") or 0)
+            progress_payload["percent"] = int(current_phase.get("percent") or 0)
+        elif int(read_progress.get("overall_total") or 0) > 0:
+            progress_payload["current"] = int(read_progress.get("overall_current") or 0)
+            progress_payload["total"] = int(read_progress.get("overall_total") or 0)
+            progress_payload["percent"] = int(read_progress.get("overall_percent") or 0)
+    return progress_payload
+
+
+def _public_read_job_logs(logs: list[str], progress: dict[str, Any], result: dict[str, Any], *, limit: int = 24) -> list[str]:
+    read_progress = _read_job_progress_from_logs(logs, progress, result, status=result.get("status") or progress.get("phase"))
+    live_status = str(result.get("status") or progress.get("phase") or "").strip().lower()
+    live_read_job = live_status in {"queued", "running", "cancelling", "full_text", "deep_read", "read"}
+    if not read_progress.get("has_signal"):
+        out: list[str] = []
+        action = str(read_progress.get("current_action") or progress.get("message") or result.get("summary") or "").strip()
+        if "准备当前 Find 输入" in action or "精读任务已启动" in action:
+            action = ""
+        out.append("当前状态：" + (action or "爬取全文等待开始。"))
+        run_id = str(result.get("run_id") or result.get("find_run_id") or "").strip()
+        if run_id:
+            out.append("运行编号：" + run_id)
+        for line in (logs or [])[-20:]:
+            text = _read_progress_title(_strip_public_taste_marker(line), max_len=300)
+            lowered = text.lower()
+            if not text or text.startswith(("{", "}", "[", "]", "$")) or '":' in text[:160]:
+                continue
+            if "bin/python" in lowered or "claude -p" in lowered or lowered.startswith("delegating current find read/idea/plan"):
+                continue
+            out.append("细节：" + text)
+        if not live_read_job and live_status not in {"cancelled", "canceled"}:
+            out.extend(_read_job_machine_warning_lines(result, limit=6))
+        dedup: list[str] = []
+        seen: set[str] = set()
+        for line in out:
+            if line in seen:
+                continue
+            seen.add(line)
+            dedup.append(line)
+        return dedup[:max(1, min(limit, 12))]
+    header: list[str] = []
+    action = str(read_progress.get("current_action") or "").strip()
+    if action:
+        header.append("当前状态：" + action)
+    run_id = str(result.get("run_id") or result.get("find_run_id") or "").strip()
+    if run_id:
+        header.append("运行编号：" + run_id)
+    phases = read_progress.get("phases") if isinstance(read_progress.get("phases"), dict) else {}
+    full_text = phases.get("full_text") if isinstance(phases.get("full_text"), dict) else {}
+    deep_read = phases.get("deep_read") if isinstance(phases.get("deep_read"), dict) else {}
+    current_stage = str(read_progress.get("current_stage") or "")
+    current_phase = (
+        deep_read
+        if current_stage in {"deep_read", "complete"} and int(deep_read.get("total") or 0) > 0
+        else full_text if current_stage == "full_text" else {}
+    )
+    if current_phase:
+        label = str(current_phase.get("label") or ("精读全文" if current_stage == "deep_read" else "爬取全文"))
+        total = int(current_phase.get("total") or 0)
+        if total > 0:
+            header.append(f"阶段进度：{label} {int(current_phase.get('current') or 0)}/{total}")
+        else:
+            header.append(f"阶段进度：{label} 准备中")
+    else:
+        full_total = int(full_text.get("total") or 0)
+        if full_total > 0:
+            header.append(f"阶段进度：爬取全文 {int(full_text.get('current') or 0)}/{full_total}")
+        else:
+            header.append("阶段进度：准备中")
+    detail_lines: list[str] = []
+    normalized_action = _read_progress_title(action, max_len=300)
+    for detail in read_progress.get("recent_details") or []:
+        text = _read_progress_title(detail, max_len=300)
+        if text and text != normalized_action and "准备当前 Find 输入" not in text and "精读任务已启动" not in text:
+            detail_lines.append("细节：" + text)
+    error_lines: list[str] = []
+    for error in read_progress.get("recent_errors") or []:
+        text = _read_progress_title(error, max_len=300)
+        if text:
+            while text.startswith("错误：错误："):
+                text = text.removeprefix("错误：")
+            while text.startswith("错误：警告："):
+                text = text.removeprefix("错误：")
+            if text.startswith("警告：") or text.startswith("警告:"):
+                error_lines.append(text)
+            else:
+                error_lines.append("错误：" + text)
+    machine_warning_lines = [] if live_read_job else _read_job_machine_warning_lines(result, limit=6)
+    detail_budget = max(0, limit - len(header) - min(len(error_lines), 3) - min(len(machine_warning_lines), 6))
+    out = [*header, *detail_lines[-detail_budget:], *error_lines[-3:], *machine_warning_lines[:6]]
+    dedup: list[str] = []
+    seen: set[str] = set()
+    for line in out:
+        if line in seen:
+            continue
+        seen.add(line)
+        dedup.append(line)
+    return dedup[:max(1, limit)]
+
+
 def _public_read_idea_plan_job_logs(stage: str, logs: list[str], progress: dict[str, Any], result: dict[str, Any], *, limit: int = 8) -> list[str]:
     """Keep literature-reasoning taskbar rows human-facing, not agent transcripts."""
     label_map = {"read": "精读", "idea": "Idea", "plan": "Plan"}
@@ -3005,14 +3935,16 @@ def _public_read_idea_plan_job_logs(stage: str, logs: list[str], progress: dict[
     status = str(result.get("status") or progress.get("phase") or "").strip()
     message = str(progress.get("message") or result.get("summary") or status or "").strip()
     lowered = "\n".join([message, status, "\n".join(logs[-12:])]).lower()
-    if "claude_current_find_read_idea_plan_ready_waiting_for_environment_base_selection" in lowered or "claude_takeover_ready" in lowered:
+    if status == READING_PUBLIC_ENTRY_ACTION_MISSING_STATUS or "unknown reading module action: current_find_research_plan" in lowered or ("reading 公共入口未实现" in lowered and "current_find_research_plan" in lowered):
+        out.append("当前状态：" + READING_PUBLIC_ENTRY_ACTION_MISSING_MESSAGE)
+    elif "claude_current_find_read_idea_plan_ready_waiting_for_environment_base_selection" in lowered or "claude_takeover_ready" in lowered:
         out.append("当前状态：精读、Idea 和 Plan 已完成，等待环境阶段选择基底。")
-    elif any(marker in lowered for marker in ["blocked_current_find_deep_read_validation_pending", "claude_deep_read_rewrite_required", "pending_deep_read_synthesis"]):
-        out.append("当前状态：当前 Find 的全文证据已覆盖，但精读 synthesis 仍未通过机器校验；TASTE 需要继续返修未通过论文。")
+    elif any(marker in lowered for marker in ["blocked_current_find_deep_read_pending", "claude_deep_read_required", "pending_deep_read_synthesis"]):
+        out.append("当前状态：当前 Find 的全文证据已覆盖，但仍有论文未完成精读；TASTE 需要继续运行 Reading subagent。")
     elif any(marker in lowered for marker in ["blocked_current_find_full_text_evidence_pending", "full_text_evidence_missing", "pending_full_text_reading"]):
         out.append("当前状态：当前 Find 仍缺少同篇全文证据，Read 已停在全文证据门控。")
     elif any(marker in lowered for marker in ["evidence gate", "waiting_for_environment", "waiting for environment", "blocked"]):
-        out.append("当前状态：当前阶段仍有机器校验未通过，TASTE 已暂停下游发布。")
+        out.append("当前状态：当前阶段仍未完成，TASTE 已暂停下游发布。")
     elif "complete" in lowered or "done" in lowered:
         out.append(f"当前状态：{label}阶段已完成。")
     elif message:
@@ -3020,7 +3952,10 @@ def _public_read_idea_plan_job_logs(stage: str, logs: list[str], progress: dict[
         if cleaned_message:
             out.append("当前状态：" + cleaned_message[:220])
     else:
-        out.append(f"当前状态：{label}任务已记录。")
+        if stage == "read":
+            out.append("当前状态：爬取全文等待开始。")
+        else:
+            out.append(f"当前状态：{label}任务已记录。")
     run_id = str(result.get("run_id") or result.get("find_run_id") or "").strip()
     if run_id:
         out.append("运行编号：" + run_id)
@@ -3036,7 +3971,7 @@ def _public_read_idea_plan_job_logs(stage: str, logs: list[str], progress: dict[
             counts.append(f"{text} {value}")
     if counts:
         out.append("阶段数量：" + " / ".join(counts))
-    if logs:
+    if logs and stage != "read":
         out.append(f"详细日志：已保留 {len(logs)} 行原始日志；任务栏只显示阶段摘要。")
     dedup: list[str] = []
     seen: set[str] = set()
@@ -3065,7 +4000,10 @@ def _public_job_logs(stage: Any, logs: Any, progress: Any = None, result: Any = 
     if public_stage == "find" or raw_stage.startswith("find"):
         return _public_find_job_logs(raw, progress, result, limit=min(limit, 8))
 
-    if public_stage in {"read", "idea", "plan"}:
+    if public_stage == "read":
+        return _public_read_job_logs(raw, progress, result, limit=min(limit, 24))
+
+    if public_stage in {"idea", "plan"}:
         return _public_read_idea_plan_job_logs(public_stage, raw, progress, result, limit=min(limit, 8))
 
     if public_stage == "paper" or raw_stage.startswith("paper"):
@@ -3202,10 +4140,8 @@ def _fresh_find_result_for_job(job: "JobState") -> Any:
     result.setdefault("artifact_dir", str(directory))
     result.setdefault("artifact_paths", {
         "find_results": str(directory / "find_results.json"),
-        "article": str(directory / "article.md"),
+        "find": str(directory / "find.md"),
         "source_status": str(directory / "source_status.md"),
-        "read_candidates": str(directory / "read_candidates.md"),
-        "critique_candidates": str(directory / "critique_candidates.md"),
     })
     find_path = directory / "find_results.json"
     if find_path.exists():
@@ -3220,7 +4156,7 @@ def _fresh_find_result_for_job(job: "JobState") -> Any:
     for key in [
         "raw_title_index", "retrieval_candidates", "title_candidates",
         "evaluated_candidates", "screened_ranking", "strong_recommendations",
-        "read_candidates", "triage_candidates", "audit_candidates", "critique_candidates", "articles",
+        "triage_candidates", "audit_candidates", "critique_candidates",
         "source_status", "venue_health_report", "category_scan_report",
         "title_filter_report",
     ]:
@@ -3271,6 +4207,21 @@ def _artifact_compact_paper_row(row: Any) -> dict[str, Any]:
     if "title" in out:
         out["title"] = _artifact_compact_text(out["title"], 220)
     return out
+
+
+def _strip_redundant_find_public_json_aliases(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    for key in ("articles", "read_candidates"):
+        payload.pop(key, None)
+    for counts_key in ("counts", "artifact_counts"):
+        counts = payload.get(counts_key)
+        if isinstance(counts, dict):
+            counts.pop("articles", None)
+            counts.pop("read_candidates", None)
+            if not counts:
+                payload.pop(counts_key, None)
+    return payload
 
 
 
@@ -3469,7 +4420,7 @@ def _current_find_recommendation_projection(project_root: Path, run_id: str = ""
 
 
 PROJECT_ARTIFACT_NAMES = {
-    "article.md", "read.md", "idea.md", "plan.md", "source_status.md",
+    "find.md", "read.md", "idea.md", "plan.md", "source_status.md",
     "find_progress.json", "find_results.json", "read_results.json", "ideas.json", "plans.json",
     "selection.json",
 }
@@ -3561,7 +4512,19 @@ def _blocked_current_find_downstream_markdown_names(project_root: Path | None, r
         return set()
     if summary.get("content_ready") or summary.get("read_idea_plan_ready") or summary.get("takeover_ready"):
         return set()
-    return set(PROJECT_DOWNSTREAM_MARKDOWN_RUN_GUARDS)
+    blocked = set(PROJECT_DOWNSTREAM_MARKDOWN_RUN_GUARDS)
+    read_payload = _read_project_json(project_root / "planning" / "finding" / "read_results.json", {})
+    validation = _read_project_json(project_root / "state" / "current_find_claude_reading_validation.json", {})
+    if (
+        isinstance(read_payload, dict)
+        and isinstance(validation, dict)
+        and _payload_run_id(read_payload) == str(run_id or "").strip()
+        and _payload_run_id(validation) == str(run_id or "").strip()
+        and validation.get("valid") is True
+        and read_payload.get("public_final_artifact_present") is True
+    ):
+        blocked.discard("read.md")
+    return blocked
 
 
 def _project_taste_artifact_path(project_root: Path | None, run_id: str, name: str) -> Path | None:
@@ -3585,6 +4548,18 @@ def _project_taste_artifact_path(project_root: Path | None, run_id: str, name: s
             return None
         return candidate
     if name in PROJECT_DOWNSTREAM_MARKDOWN_RUN_GUARDS:
+        if name == "read.md":
+            read_payload = _read_project_json(project_root / "planning" / "finding" / "read_results.json", {})
+            validation = _read_project_json(project_root / "state" / "current_find_claude_reading_validation.json", {})
+            read_run = _payload_run_id(read_payload)
+            validation_run = _payload_run_id(validation)
+            if (
+                read_run != expected
+                or validation_run != expected
+                or validation.get("valid") is not True
+                or read_payload.get("public_final_artifact_present") is not True
+            ):
+                return None
         return candidate if _project_downstream_markdown_matches_run(project_root, candidate, name, expected) else None
     current = _project_current_find_run_id(project_root, allow_large_find_results=False)
     return candidate if current == expected else None
@@ -3740,11 +4715,39 @@ def _compact_find_source_row_count(row: Any) -> int:
     return 0
 
 
+def _compact_find_source_rows_need_refresh(rows: list[dict[str, Any]]) -> bool:
+    def as_int(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except Exception:
+            return 0
+
+    if not rows or sum(_compact_find_source_row_count(row) for row in rows) <= 0:
+        return True
+    dynamic_sources = {"arxiv", "biorxiv", "nature", "science"}
+    for row in rows:
+        source = str(row.get("source") or row.get("venue") or "").strip().lower()
+        if source not in dynamic_sources and source not in {"nature portfolio", "science family"}:
+            continue
+        count = _compact_find_source_row_count(row)
+        visible_count = as_int(row.get("count") or row.get("raw_count") or row.get("prefiltered_count"))
+        if row.get("ok") is False and count > 0:
+            return True
+        if visible_count <= 0 and as_int(row.get("candidate_count")) > 0:
+            return True
+    return False
+
+
 def _hydrate_compact_find_source_state(payload: dict[str, Any], project_root: Path | None) -> dict[str, Any]:
     if project_root is None or not isinstance(payload, dict):
         return payload
     payload_rows = [row for row in _as_list(payload.get("source_status")) if isinstance(row, dict)]
-    rows = payload_rows if sum(_compact_find_source_row_count(row) for row in payload_rows) > 0 else []
+    rows = payload_rows if not _compact_find_source_rows_need_refresh(payload_rows) else []
+    if not rows:
+        progress_payload = _read_project_json(project_root / "planning" / "finding" / "find_progress.json", {})
+        progress_rows = [row for row in _as_list(progress_payload.get("source_status")) if isinstance(row, dict)] if isinstance(progress_payload, dict) else []
+        if not _compact_find_source_rows_need_refresh(progress_rows):
+            rows = progress_rows
     if not rows:
         try:
             rows = _current_find_source_status_rows(project_root)
@@ -3879,7 +4882,7 @@ def _compact_large_find_progress_artifact(
             if omitted_keys:
                 payload["omitted_keys"] = omitted_keys
     _hydrate_compact_find_source_state(payload, project_root)
-    return _strip_public_taste_marker(payload)
+    return _strip_public_taste_marker(_strip_redundant_find_public_json_aliases(payload))
 
 
 def _compact_large_find_results_artifact(directory: Path, run_id: str, size_bytes: int) -> dict[str, Any]:
@@ -3929,20 +4932,16 @@ def _compact_large_find_results_artifact(directory: Path, run_id: str, size_byte
             if recommendation_rows:
                 compact_rows = [_artifact_compact_paper_row(row) for row in recommendation_rows[:compact_recommendation_limit] if isinstance(row, dict)]
                 payload["strong_recommendations"] = compact_rows
-                payload["articles"] = compact_rows
-            if read_rows:
-                payload["read_candidates"] = [_artifact_compact_paper_row(row) for row in read_rows[:compact_recommendation_limit] if isinstance(row, dict)]
             triage_rows = projection.get("triage_candidates") if isinstance(projection.get("triage_candidates"), list) else projection.get("audit_candidates") if isinstance(projection.get("audit_candidates"), list) else []
             if triage_rows:
                 payload["triage_candidates"] = [_artifact_compact_paper_row(row) for row in triage_rows[:50] if isinstance(row, dict)]
-                payload["audit_candidates"] = payload["triage_candidates"]
             counts = projection.get("counts") if isinstance(projection.get("counts"), dict) else {}
             if counts:
                 merged_counts = payload.get("counts") if isinstance(payload.get("counts"), dict) else {}
                 for key, value in counts.items():
                     if value in (None, ""):
                         continue
-                    if key in {"recommended", "strong_recommendations", "read_candidates", "strict_strong_anchor_count", "articles"} or merged_counts.get(key) in (None, "", 0):
+                    if key in {"recommended", "strong_recommendations", "strict_strong_anchor_count"} or merged_counts.get(key) in (None, "", 0):
                         merged_counts[key] = value
                 payload["counts"] = merged_counts
             for key in ["recommendation_target_count", "recommendation_shortfall", "strict_strong_anchor_count", "recommendation_quality", "coverage_explanation_i18n", "semantics"]:
@@ -3959,10 +4958,10 @@ def _compact_large_find_results_artifact(directory: Path, run_id: str, size_byte
                 payload.setdefault("strict_strong_anchor_count", len(payload.get("strong_recommendations") or []))
                 payload.setdefault("recommendation_target_count", summary.get("recommendation_target_count"))
                 payload.setdefault("recommendation_shortfall", summary.get("recommendation_shortfall"))
-        if isinstance(current_plan, dict) and not payload.get("read_candidates"):
+        if isinstance(current_plan, dict) and not payload.get("strong_recommendations"):
             readings = current_plan.get("readings") if isinstance(current_plan.get("readings"), list) else []
             if readings:
-                payload["read_candidates"] = [_artifact_compact_paper_row(row) for row in readings[:max(len(readings), 1)] if isinstance(row, dict)]
+                payload["strong_recommendations"] = [_artifact_compact_paper_row(row) for row in readings[:max(len(readings), 1)] if isinstance(row, dict)]
     if survey_stats:
         payload["survey_stats"] = survey_stats
         merged_counts = payload.get("counts") if isinstance(payload.get("counts"), dict) else {}
@@ -3972,7 +4971,7 @@ def _compact_large_find_results_artifact(directory: Path, run_id: str, size_byte
                 merged_counts[key] = value
         payload["counts"] = merged_counts
     _hydrate_compact_find_source_state(payload, project_root)
-    return _strip_public_taste_marker(payload)
+    return _strip_public_taste_marker(_strip_redundant_find_public_json_aliases(payload))
 
 
 def _job_is_hollow_route(item: dict[str, Any]) -> bool:
@@ -4276,122 +5275,25 @@ def _find_artifact_run_dir_for_project(root: Path, run_id: str) -> Path:
     raise FileNotFoundError(f"Current Find results not found for run_id={run_id}")
 
 
-def _find_selection_source_count(selection: Any) -> int:
-    if not isinstance(selection, dict):
-        return 1
-    pairs = []
-    seen_pairs: set[tuple[str, int]] = set()
-    for item in selection.get("venue_years") or []:
-        if not isinstance(item, dict):
-            continue
-        venue_id = str(item.get("venue_id") or item.get("venue") or item.get("id") or "").strip()
-        raw_years = item.get("years") if isinstance(item.get("years"), list) else [item.get("year")]
-        if not venue_id:
-            continue
-        for raw_year in raw_years:
-            try:
-                year = int(raw_year)
-            except (TypeError, ValueError):
-                continue
-            key = (venue_id, year)
-            if key not in seen_pairs:
-                seen_pairs.add(key)
-                pairs.append(key)
-    venues = selection.get("venue_ids") or selection.get("venues") or []
-    years = selection.get("years") or []
-    if pairs:
-        count = len(pairs)
-    elif isinstance(venues, list):
-        year_count = len(years) if isinstance(years, list) and years else 1
-        count = len(venues) * max(1, year_count)
-    else:
-        count = 0
-    for name in ("include_arxiv", "include_biorxiv", "include_huggingface", "include_github", "include_nature", "include_science"):
-        if selection.get(name):
-            count += 1
-    return max(1, count)
-
-def _strict_find_projection_config(config: AppConfig) -> AppConfig:
-    updates: dict[str, Any] = {}
-    if not str(config.provider or "").strip() or str(config.provider or "").lower() == "mock":
-        updates["provider"] = "openai"
-    if not str(config.api_key or "").strip():
-        updates["api_key"] = "find-projection-local-gate"
-    if not str(config.model or "").strip():
-        updates["model"] = "find-projection-local-gate"
-    return config.model_copy(update=updates) if updates else config
-
-
 def _reproject_find_results_with_current_contract(find_results: dict[str, Any], config: AppConfig, source: str) -> dict[str, Any]:
-    """Rebuild user-visible Find pools from evaluated candidates.
+    """Do not recompute Finding ranking inside Web.
 
-    This does not score or translate papers. It only applies the currently loaded
-    Find recommendation contract so stale runs cannot keep audit-only rows in
-    articles/read_candidates after the framework gate changes.
+    Web adopts the recommendation contract already materialized by the Finding
+    public run artifact. If the contract changes, rerun Finding through the
+    framework route instead of repairing Finding-owned ranking in this layer.
     """
     if not isinstance(find_results, dict):
         return {"status": "skipped_invalid_find_results"}
-    evaluated = find_results.get("evaluated_candidates")
-    if not isinstance(evaluated, list) or not evaluated:
-        return {"status": "skipped_missing_evaluated_candidates"}
-    gate_config = _strict_find_projection_config(config)
-    source_count = _find_selection_source_count(find_results.get("selection"))
-    previous = find_results.get("strong_recommendations") if isinstance(find_results.get("strong_recommendations"), list) else find_results.get("articles") if isinstance(find_results.get("articles"), list) else []
-    for row in evaluated:
-        if not isinstance(row, dict):
-            continue
-        for key in ("find_recommendation", "recommended_by_llm_ranking", "_user_visible_recommendation"):
-            row.pop(key, None)
-    recommendations = _recommended(evaluated, gate_config, source_count=source_count)
-    recommendation_ids = {str(row.get("id") or row.get("url") or row.get("title") or "") for row in recommendations if isinstance(row, dict)}
-    for row in evaluated:
-        if isinstance(row, dict) and str(row.get("id") or row.get("url") or row.get("title") or "") not in recommendation_ids:
-            row.pop("_user_visible_recommendation", None)
-    for row in recommendations:
-        if isinstance(row, dict):
-            row["_user_visible_recommendation"] = True
-    screened = _screened_ranking(evaluated, gate_config)
-    triage = _triage_candidates(evaluated, gate_config)
-    critique = _critique_candidates(evaluated, gate_config)
-    quality = _recommendation_quality_audit(recommendations)
-    scoring_runtime = find_results.setdefault("scoring_runtime", {})
-    if not isinstance(scoring_runtime, dict):
-        scoring_runtime = {}
-        find_results["scoring_runtime"] = scoring_runtime
-    target_count = int(scoring_runtime.get("recommendation_target_count") or find_results.get("recommendation_target_count") or max(1, source_count) * 5)
-    shortfall = max(0, target_count - len(recommendations))
-    find_results["scoring_policy_version"] = SCORING_POLICY_VERSION
-    find_results["strong_recommendations"] = recommendations
-    find_results["articles"] = recommendations
-    find_results["read_candidates"] = recommendations
-    find_results["screened_ranking"] = screened
-    find_results["triage_candidates"] = triage
-    find_results["audit_candidates"] = triage
-    find_results["critique_candidates"] = critique
-    find_results["recommendation_quality"] = quality
-    find_results["strict_strong_anchor_count"] = len(recommendations)
-    find_results["recommendation_target_count"] = target_count
-    find_results["recommendation_shortfall"] = shortfall
-    find_results["recommendation_policy"] = FIND_RECOMMENDATION_POLICY
-    scoring_runtime.update({
-        "recommendation_quality": quality,
-        "recommendation_actual_count": len(recommendations),
-        "strict_strong_anchor_count": len(recommendations),
-        "recommendation_target_count": target_count,
-        "recommendation_shortfall": shortfall,
-        "recommendation_policy": find_results["recommendation_policy"],
-        "scoring_policy_version": SCORING_POLICY_VERSION,
-        "reprojected_with_current_contract_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        "reprojected_with_current_contract_source": source,
-    })
+    recommendations = find_results.get("strong_recommendations") if isinstance(find_results.get("strong_recommendations"), list) else find_results.get("articles") if isinstance(find_results.get("articles"), list) else []
+    scoring_runtime = find_results.get("scoring_runtime") if isinstance(find_results.get("scoring_runtime"), dict) else {}
+    target_count = int(find_results.get("recommendation_target_count") or scoring_runtime.get("recommendation_target_count") or len(recommendations) or 0)
+    shortfall = max(0, target_count - len(recommendations)) if target_count else int(find_results.get("recommendation_shortfall") or scoring_runtime.get("recommendation_shortfall") or 0)
     return {
-        "status": "reprojected",
+        "status": "artifact_contract_preserved",
         "source": source,
-        "previous_recommendation_count": len(previous),
         "recommendation_count": len(recommendations),
         "recommendation_target_count": target_count,
         "recommendation_shortfall": shortfall,
-        "source_count": source_count,
     }
 
 def _missing_recommendation_abstract_zh(recommendations: list[Any]) -> list[dict[str, str]]:
@@ -4459,8 +5361,6 @@ def _sync_current_find_projection(root: Path, run_id: str, find_results: dict[st
         "source": source,
         "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "strong_recommendations": recommendations,
-        "articles": recommendations,
-        "read_candidates": recommendations,
         "counts": {"recommended": len(recommendations), "read_candidates": len(recommendations), "strict_strong_anchor_count": len(recommendations)},
         "strict_strong_anchor_count": len(recommendations),
         "recommendation_target_count": target_count,
@@ -4627,21 +5527,8 @@ def _reset_current_find_downstream_artifacts(root: Path, run_id: str, recommenda
 
 def _write_current_find_markdown(directory: Path, find_results: dict[str, Any]) -> None:
     recommendations = find_results.get("strong_recommendations") if isinstance(find_results.get("strong_recommendations"), list) else find_results.get("articles") if isinstance(find_results.get("articles"), list) else []
-    read_candidates = recommendations
-    screened = find_results.get("screened_ranking") if isinstance(find_results.get("screened_ranking"), list) else []
-    triage = find_results.get("triage_candidates") if isinstance(find_results.get("triage_candidates"), list) else []
-    audit = find_results.get("audit_candidates") if isinstance(find_results.get("audit_candidates"), list) else triage
-    critique = find_results.get("critique_candidates") if isinstance(find_results.get("critique_candidates"), list) else []
-    (directory / "article.md").write_text(paper_markdown(recommendations, "Recommended Articles"), encoding="utf-8")
-    (directory / "read_candidates.md").write_text(paper_markdown(read_candidates, "Read Candidates"), encoding="utf-8")
-    if screened:
-        (directory / "screened_ranking.md").write_text(paper_markdown(screened, "Screened Strong Ranking"), encoding="utf-8")
-    if triage:
-        (directory / "triage_candidates.md").write_text(paper_markdown(triage, "Triage Candidates"), encoding="utf-8")
-    if audit:
-        (directory / "audit_candidates.md").write_text(paper_markdown(audit, "Audit Candidates"), encoding="utf-8")
-    if critique:
-        (directory / "critique_candidates.md").write_text(paper_markdown(critique, "Critique Candidates"), encoding="utf-8")
+    article_text = paper_markdown(recommendations, "Recommended Articles")
+    (directory / "find.md").write_text(article_text, encoding="utf-8")
 
 
 
@@ -4800,7 +5687,7 @@ def _adopt_find_run_for_project(root: Path, project: str, run_id: str, *, source
     copied: list[str] = []
     stale_reset: list[str] = []
     find_names = [
-        "article.md", "source_status.md", "screened_ranking.md", "read_candidates.md", "triage_candidates.md", "audit_candidates.md", "critique_candidates.md",
+        "find.md", "source_status.md",
         "find_results.json", "find_progress.json", "manifest.json", "selection.json", "venue_health_report.json", "category_scan_report.json", "title_filter_report.json",
         "arxiv_raw.json", "arxiv_prefiltered.json", "biorxiv_raw.json", "biorxiv_prefiltered.json", "nature_raw.json", "nature_prefiltered.json", "science_raw.json", "science_prefiltered.json",
         "hf.md", "github.md", "biorxiv.md", "nature.md", "science.md",
@@ -4883,7 +5770,7 @@ def _adopt_find_run_for_project(root: Path, project: str, run_id: str, *, source
     downstream_reset_receipt: dict[str, Any] = {}
     if completed_downstream_ready:
         downstream_status = "completed_downstream_adopted"
-        for name in ["read_results.json", "ideas.json", "plans.json", "read.md", "idea.md", "plan.md"]:
+        for name in ["read.md", "read_results.json", "idea.md", "ideas.json", "plan.md", "plans.json"]:
             src = directory / name
             if not src.exists():
                 continue
@@ -4955,8 +5842,6 @@ def _adopt_find_run_for_project(root: Path, project: str, run_id: str, *, source
         "source": source,
         "created_at": now,
         "strong_recommendations": recommendations,
-        "articles": recommendations,
-        "read_candidates": recommendations,
         "counts": {"recommended": len(recommendations), "read_candidates": len(recommendations), "strict_strong_anchor_count": len(recommendations)},
         "strict_strong_anchor_count": len(recommendations),
         "recommendation_target_count": target_count,
@@ -5051,10 +5936,11 @@ def _adopt_find_run_for_project(root: Path, project: str, run_id: str, *, source
             "selected_idea": selected_idea,
             "execution_policy": execution_policy if isinstance(execution_policy, dict) else {},
             "artifacts": {
+                "read_md": str(taste_dir / "read.md"),
                 "read_results": str(taste_dir / "read_results.json"),
+                "public_final_artifact": str(taste_dir / "read.md"),
                 "ideas": str(taste_dir / "ideas.json"),
                 "plans": str(taste_dir / "plans.json"),
-                "read_md": str(taste_dir / "read.md"),
                 "idea_md": str(taste_dir / "idea.md"),
                 "plan_md": str(taste_dir / "plan.md"),
             },
@@ -5696,7 +6582,7 @@ def _is_inspection_or_wrapper_cmd(command: Any) -> bool:
     lowered = text.lower()
     if not text:
         return False
-    if any(marker in lowered for marker in ["api/jobs", "api/projects", "urllib.request.urlopen", "http://127.0.0.1:8765/api/", "curl -s http://127.0.0.1:8765/api/"]):
+    if any(marker in lowered for marker in ["api/jobs", "api/projects", "urllib.request.urlopen", "http://127.0.0.1:8879/api/", "curl -s http://127.0.0.1:8879/api/"]):
         return True
     if "python - <<" in lowered or "python3 - <<" in lowered or "python3.11 - <<" in lowered or "python -c" in lowered or "python3 -c" in lowered or "python3.11 -c" in lowered:
         inspection_terms = [
@@ -8907,15 +9793,39 @@ def _current_find_read_history_job(project_id: str, root: Path, run_id: str, sta
         if "pending_full_text_reading_count" in validation
         else state_payload.get("pending_full_text_reading_count")
     )
+    pending_deep_count = _json_count_value(
+        validation.get("pending_deep_read_synthesis_count")
+        if "pending_deep_read_synthesis_count" in validation
+        else state_payload.get("pending_deep_read_synthesis_count")
+    )
+    deep_read_count = _first_positive_count(
+        validation.get("deep_read_complete_count"),
+        payload.get("deep_read_complete_count"),
+        default=sum(1 for row in rows if row.get("deep_read_complete") is True),
+    )
     validation_valid = validation.get("valid")
+    read_md_path = finding / "read.md"
+    try:
+        read_md_present = bool(read_md_path.read_text(encoding="utf-8", errors="replace").strip())
+    except OSError:
+        read_md_present = False
+    warning_details = validation.get("warning_details") if isinstance(validation.get("warning_details"), list) else []
     status = _current_find_stage_job_status(state_payload, count)
+    read_complete_with_warnings = bool(validation_valid is True and read_md_present and pending_count <= 0 and pending_deep_count > 0)
     if pending_count > 0 or validation_valid is False:
         status = "blocked"
+    elif read_complete_with_warnings:
+        status = "done"
+    elif pending_deep_count > 0:
+        status = "blocked"
 
-    if status == "done":
-        summary = f"Read 阶段已完成：当前展示 {count}/{recommended_count or count} 篇；全文精读合格 {full_text_count or count} 篇，待补 {pending_count} 篇。"
+    if read_complete_with_warnings:
+        summary = f"Read 阶段已完成并有警告：当前展示 {count}/{recommended_count or count} 篇；同篇全文证据 {full_text_count or count}/{recommended_count or count} 篇；精读完成 {deep_read_count or count}/{recommended_count or count} 篇；{pending_deep_count} 篇未进入最终 read.md，仅记录在任务日志和机器状态。"
+    elif status == "done":
+        warning_suffix = f"；warning {len(warning_details)} 项" if warning_details else ""
+        summary = f"Read 阶段已完成：当前展示 {count}/{recommended_count or count} 篇；同篇全文证据 {full_text_count or count}/{recommended_count or count} 篇；精读完成 {deep_read_count or count}/{recommended_count or count} 篇{warning_suffix}。"
     else:
-        summary = f"Read 阶段仍需补证：当前展示 {count}/{recommended_count or count} 篇；全文精读合格 {full_text_count} 篇，待补 {pending_count} 篇。"
+        summary = f"Read 阶段仍需补证：当前展示 {count}/{recommended_count or count} 篇；同篇全文证据 {full_text_count}/{recommended_count or count} 篇；精读完成 {deep_read_count}/{recommended_count or count} 篇；待补全文 {pending_count} 篇，待精读 {pending_deep_count} 篇。"
 
     created_at = _current_find_artifact_timestamp(
         [artifact_path, validation_path, root / "state" / "current_find_research_plan.json"],
@@ -8932,6 +9842,8 @@ def _current_find_read_history_job(project_id: str, root: Path, run_id: str, sta
         "recommended_reading_count": recommended_count,
         "full_text_reading_count": full_text_count,
         "pending_full_text_reading_count": pending_count,
+        "deep_read_complete_count": deep_read_count,
+        "pending_deep_read_synthesis_count": pending_deep_count,
         "reading_validation_valid": validation_valid,
     }
     return {
@@ -9074,7 +9986,9 @@ def _current_find_downstream_stage_history_jobs(project_filter: str = "", existi
 def _collapse_current_find_read_retry_jobs(rows: list[dict[str, Any]], project_hint: str = "") -> list[dict[str, Any]]:
     """Keep one public read row per project/run while preserving active work."""
     latest_created: dict[tuple[str, str], str] = {}
+    active_real_job_keys: set[tuple[str, str]] = set()
     representative_statuses = {"queued", "running", "cancelling", "done", "blocked", "cancelled", "interrupted", "stale", "error"}
+    active_statuses = {"queued", "running", "cancelling"}
     for item in rows:
         if _job_public_stage(item) != "read":
             continue
@@ -9088,6 +10002,9 @@ def _collapse_current_find_read_retry_jobs(rows: list[dict[str, Any]], project_h
             continue
         created = str(item.get("created_at") or "")
         key = (project, run_id)
+        is_history = str(result.get("kind") or "") == "current_find_downstream_artifact_history"
+        if not is_history and status in active_statuses:
+            active_real_job_keys.add(key)
         if created > latest_created.get(key, ""):
             latest_created[key] = created
 
@@ -9102,7 +10019,10 @@ def _collapse_current_find_read_retry_jobs(rows: list[dict[str, Any]], project_h
         run_id = str(item.get("run_id") or result.get("run_id") or "").strip()
         status = str(item.get("status") or "").strip().lower()
         created = str(item.get("created_at") or "")
-        latest = latest_created.get((project, run_id), "")
+        key = (project, run_id)
+        if key in active_real_job_keys and str(result.get("kind") or "") == "current_find_downstream_artifact_history":
+            continue
+        latest = latest_created.get(key, "")
         if project and run_id and status in hideable_statuses and latest and created < latest:
             continue
         kept.append(item)
@@ -9861,6 +10781,11 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
             if isinstance(result, dict):
                 result = {**result, "status": "blocked", "acceptance_status": compact_result.get("acceptance_status") or detailed_status}
             public_status = "blocked"
+    if public_stage == "read":
+        public_progress = _read_job_progress_payload(item.get("logs"), public_progress, result, status=public_status)
+        if isinstance(public_progress.get("read_progress"), dict):
+            compact_result["read_progress"] = public_progress.get("read_progress")
+            result = {**result, "read_progress": public_progress.get("read_progress")} if isinstance(result, dict) else compact_result
     public_status = _normalize_public_job_status(public_status, public_progress, item.get("error", ""), compact_result or result, public_stage)
     if str(public_status).strip().lower() == "interrupted":
         public_status = "stale"
@@ -9894,8 +10819,15 @@ def _persist_jobs() -> None:
         return
     with JOBS_LOCK:
         jobs_snapshot = list(JOBS.values())
+    persisted_snapshot: list[dict[str, Any]] = []
+    for job in jobs_snapshot:
+        public_stage = _public_taste_stage(getattr(job, "stage", ""))
+        compact = not (public_stage == "read" and str(getattr(job, "status", "") or "").lower() in {"queued", "running", "cancelling"})
+        item = job.as_dict(compact=compact)
+        if not _job_is_hollow_route(item):
+            persisted_snapshot.append(item)
     items = sorted(
-        [item for item in (job.as_dict(compact=True) for job in jobs_snapshot) if not _job_is_hollow_route(item)],
+        persisted_snapshot,
         key=lambda item: item["created_at"],
         reverse=True,
     )
@@ -9953,7 +10885,7 @@ def _find_run_history_jobs_from_runs(existing_run_ids: set[str], *, limit: int =
             manifest = {}
         counts = progress.get("counts") if isinstance(progress.get("counts"), dict) else {}
         find_results_path = directory / "find_results.json"
-        article_path = directory / "article.md"
+        find_md_path = directory / "find.md"
         phase = str(progress.get("phase") or ("complete" if find_results_path.exists() else "interrupted"))
         live = progress.get("live_progress") if isinstance(progress.get("live_progress"), dict) else {}
         live_phase = str(live.get("phase") or "")
@@ -9988,7 +10920,7 @@ def _find_run_history_jobs_from_runs(existing_run_ids: set[str], *, limit: int =
             phase = "interrupted"
         else:
             status = "cancelled" if not find_results_path.exists() else "blocked"
-        if status == "done" and not article_path.exists():
+        if status == "done" and not find_md_path.exists():
             status = "blocked"
         total = _as_int(live.get("total"), 0)
         current = _as_int(live.get("current"), 0)
@@ -10002,7 +10934,7 @@ def _find_run_history_jobs_from_runs(existing_run_ids: set[str], *, limit: int =
             "artifact_paths": {
                 "find_results": str(directory / "find_results.json"),
                 "find_progress": str(directory / "find_progress.json"),
-                "article": str(directory / "article.md"),
+                "find": str(directory / "find.md"),
                 "source_status": str(directory / "source_status.md"),
             },
             "phase": phase,
@@ -10179,7 +11111,12 @@ def start_job(stage: str, fn: Callable[[Callable[[str], None], Callable[[], bool
                 job.set_progress(str(current.get("phase") or "running"), int(current.get("current") or 0), int(current.get("total") or 0), str(current.get("message") or _job_status_message(stage, "running")))
             else:
                 job.set_progress("complete", 1, 1, _job_status_message(stage, "complete"))
-            job.log(_job_status_message(stage, "cancelled" if job.status == "cancelled" else "blocked" if job.status == "blocked" else "running" if job.status == "running" else "complete"))
+            final_status = "cancelled" if job.status == "cancelled" else "blocked" if job.status == "blocked" else "running" if job.status == "running" else "complete"
+            final_message = _job_status_message(stage, final_status)
+            if final_status == "blocked" and isinstance(job.result, dict):
+                blocker = job.result.get("blocker") if isinstance(job.result.get("blocker"), dict) else {}
+                final_message = _human_progress_message(job.result.get("summary") or blocker or job.result, fallback=final_message)
+            job.log(final_message)
             if job.status == "done":
                 _auto_email_after_success(stage, job.result)
         except JobCancelled as exc:
@@ -10219,25 +11156,34 @@ def api_save_config(config: AppConfig) -> dict:
 
 @app.post("/api/config/llm-probe")
 def api_llm_probe() -> dict:
-    """Validate the saved LLM config with the same scoring-shaped probe used by Find."""
+    """Validate the saved Find LLM config through the framework LLM client."""
     cfg = load_config()
     llm = LLMClient(cfg, "find")
+    summary = llm.summary()
     try:
-        result = _llm_live_gate(llm)
+        if not llm.enabled:
+            result = {"ok": False, "error": "LLM is not configured", "probe": "framework_json_live_probe"}
+        else:
+            raw = llm.chat(
+                'Return exactly this JSON object with no markdown: {"ok": true, "score": 1, "reason": "ready"}',
+                temperature=0,
+                max_tokens=120,
+            )
+            parsed = extract_json(raw)
+            result = {"ok": bool(isinstance(parsed, dict) and parsed.get("ok")), "probe": "framework_json_live_probe"}
     except Exception as exc:
-        result = {"ok": False, "error": str(exc), "summary": llm.summary(), "probe": "scoring_shape"}
-    summary = result.get("summary") if isinstance(result, dict) and isinstance(result.get("summary"), dict) else llm.summary()
+        result = {"ok": False, "error": str(exc), "probe": "framework_json_live_probe"}
     return {
         "ok": bool(isinstance(result, dict) and result.get("ok")),
         "error": str(result.get("error") or result.get("reason") or "")[:800] if isinstance(result, dict) else "LLM probe failed",
-        "probe": str(result.get("probe") or "scoring_shape") if isinstance(result, dict) else "scoring_shape",
+        "probe": str(result.get("probe") or "framework_json_live_probe") if isinstance(result, dict) else "framework_json_live_probe",
         "summary": {key: summary.get(key) for key in ["role", "provider", "base_url", "model", "temperature", "enabled", "api_mode"]},
     }
 
 
 @app.get("/api/config/meta")
 def api_config_meta() -> dict:
-    return {"saved": CONFIG_PATH.exists()}
+    return {"saved": CONFIG_PATH.exists(), "llm_config_saved": _local_llm_config_path().exists()}
 
 
 @app.get("/api/frontend/version")
@@ -10316,14 +11262,6 @@ def _record_project_venue_health(project: str, results: list[dict[str, Any]]) ->
     _cleruntime_caches(project_id)
 
 
-def _venue_health_timeout_sec() -> float:
-    try:
-        value = float(os.environ.get("VENUE_HEALTH_TIMEOUT_SEC", "8") or 8)
-    except (TypeError, ValueError):
-        value = 8.0
-    return max(2.0, min(30.0, value))
-
-
 def _venue_health_failure(venue_id: str, year: int, message: str, adapter: str = "timeout") -> dict:
     return {
         "venue_id": venue_id,
@@ -10356,18 +11294,10 @@ def _venue_health_result_for_request(result: Any, venue_id: str, year: int) -> d
 
 
 def _fetch_venue_sample_with_timeout(venue: dict, venue_id: str, year: int, sample_limit: int) -> dict:
-    timeout_sec = _venue_health_timeout_sec()
-    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="venue-health")
-    future = executor.submit(fetch_venue_sample, venue, year, sample_limit)
     try:
-        return _venue_health_result_for_request(future.result(timeout=timeout_sec), venue_id, year)
-    except FutureTimeoutError:
-        future.cancel()
-        return _venue_health_failure(venue_id, year, f"Venue health check timed out after {timeout_sec:.0f}s.")
+        return _venue_health_result_for_request(fetch_venue_sample(venue, year, sample_limit), venue_id, year)
     except Exception as exc:
         return _venue_health_failure(venue_id, year, str(exc) or "Venue health check failed.", adapter="error")
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
 
 
 @app.post("/api/catalog/venue-health")
@@ -10437,8 +11367,9 @@ def api_find(request: FindRequest) -> dict:
     if current and explicit_reason:
         project, root = current
         _record_new_find_restart_approval(root, project, source="api_jobs_find", reason=explicit_reason)
-    # Starting a run must not mutate the persisted config. The UI saves config
-    # explicitly via /api/config; API callers may pass temporary run overrides.
+    # Web owns the user input surface. Before starting framework orchestration,
+    # persist the non-secret Find request into project state so framework can
+    # produce explicit config/selection JSON for the Finding public CLI.
     config = _request_config_with_persisted_secrets(request.config)
     if not (str(config.research_interest or "").strip() or str(config.researcher_profile or "").strip()):
         return JSONResponse(
@@ -10449,56 +11380,50 @@ def api_find(request: FindRequest) -> dict:
             },
         )
     selection = normalize_source_selection(request.selection.model_dump() if request.selection else canonical_source_selection(project_config_path=project_config_path()))
-    selection_type = type(request.selection) if request.selection else FindRequest.model_fields["selection"].default_factory().__class__
+    project_path = project_config_path()
+    save_canonical_source_selection(selection, project_config_path=project_path)
+    _persist_local_llm_config_from_find_request(config, request.config)
+    _sync_project_llm_from_config(config)
+    _sync_project_research_preferences_from_config(config)
+    _sync_project_finding_config_from_request(config)
+
+    def runtime_env_for_find() -> dict[str, str]:
+        env: dict[str, str] = {}
+        local_llm_config = _local_llm_config_path()
+        if local_llm_config.exists():
+            env["FINDING_LLM_CONFIG"] = str(local_llm_config)
+        for env_key, value in [
+            ("LLM_API_BASE", config.base_url),
+            ("LLM_MODEL", config.model),
+            ("LLM_PROVIDER", config.provider),
+            ("LLM_TEMPERATURE", config.temperature),
+        ]:
+            text = str(value or "").strip()
+            if text:
+                env[env_key] = text
+        return env
 
     def run_find_and_adopt(log, should_cancel, progress):
         project_context = current or _current_project_for_find_guard()
-        old_project_id = os.environ.get("PROJECT_ID")
-        old_default_project_id = os.environ.get("DEFAULT_PROJECT_ID")
-        if project_context:
-            project_id, _root = project_context
-            os.environ["PROJECT_ID"] = project_id
-            os.environ["DEFAULT_PROJECT_ID"] = project_id
-        try:
-            result = run_find(FindRequest(config=config, selection=selection_type(**selection)), log, should_cancel, progress)
-        finally:
-            if old_project_id is None:
-                os.environ.pop("PROJECT_ID", None)
-            else:
-                os.environ["PROJECT_ID"] = old_project_id
-            if old_default_project_id is None:
-                os.environ.pop("DEFAULT_PROJECT_ID", None)
-            else:
-                os.environ["DEFAULT_PROJECT_ID"] = old_default_project_id
-        run_id = str((result if isinstance(result, dict) else {}).get("run_id") or "").strip()
-        result_dict = result if isinstance(result, dict) else {}
-        target = current or _current_project_for_find_guard()
-        gate_metrics = _find_adoption_gate_metrics(run_id, result_dict)
-        target_count = int(gate_metrics["target_count"])
-        shortfall = int(gate_metrics["shortfall"])
-        strong_count = int(gate_metrics["strong_count"])
-        result_status = str(gate_metrics.get("status") or "").lower()
-        # Publish any completed, non-blocked current-Find packet that has real
-        # recommendations. A recommendation shortfall is a downstream-visible
-        # gate status; hiding the whole packet makes the project look missing.
-        adoption_allowed = bool(
-            run_id
-            and target
-            and not should_cancel()
-            and not result_status.startswith("blocked")
-            and strong_count > 0
-        )
-        if adoption_allowed:
-            project, root = target
-            receipt = _adopt_find_run_for_project(root, project, run_id, source="api_jobs_find_complete")
-            if isinstance(result, dict):
-                result = {**result, "project_adoption": receipt}
-            log(f"Find run {run_id} adopted as current project Find for {project}: {receipt.get('status')}")
-        elif run_id and target:
-            log(
-                f"Find run {run_id} not adopted: cancel_requested={should_cancel()} "
-                f"strong={strong_count}/{target_count or '?'} shortfall={shortfall} status={result_status or 'complete'}"
-            )
+        if not project_context:
+            raise RuntimeError("No current project is selected for Find.")
+        project_id, _root = project_context
+        payload = {
+            "action": "find",
+            "project": project_id,
+            "max_papers": int(config.max_recommended_papers or 20),
+            "max_ideas": int(config.max_ideas or 6),
+            "runtime_env": runtime_env_for_find(),
+        }
+        venue_scan_limit = int(config.venue_title_scan_limit or 0)
+        find_recall_count = int(config.find_recall_count or 0)
+        detail_fetch_count = int(config.detail_fetch_count or 0)
+        if venue_scan_limit >= 1000 or find_recall_count >= 1000 or detail_fetch_count >= 200:
+            payload["deep_survey"] = True
+        result = run_action(payload, log, should_cancel, progress)
+        if isinstance(result, dict):
+            result.setdefault("project", project_id)
+            result.setdefault("action", "find")
         return result
 
     job = start_job("find", run_find_and_adopt)
@@ -10535,7 +11460,7 @@ def _request_targets_current_project_find(request: ReadRequest, project: str, ro
     return bool(current_run_id and (not requested_run_id or requested_run_id == current_run_id))
 
 
-def _current_find_read_is_incomplete(root: Path, run_id: str, idea_count: int = 1) -> bool:
+def _current_find_read_is_incomplete(root: Path, run_id: str, idea_count: int = 1, *, require_idea_plan: bool = True) -> bool:
     run_id = str(run_id or "").strip()
     if not run_id:
         return False
@@ -10566,6 +11491,15 @@ def _current_find_read_is_incomplete(root: Path, run_id: str, idea_count: int = 
     readings = (read_payload if isinstance(read_payload, dict) else {}).get("readings")
     if not isinstance(readings, list) or not readings:
         return True
+    read_md = taste_dir / "read.md"
+    try:
+        read_md_text = read_md.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        read_md_text = ""
+    if not read_md_text.strip().startswith("# 论文精读"):
+        return True
+    if not require_idea_plan:
+        return False
     try:
         required_ideas = max(1, int(idea_count or 1))
     except (TypeError, ValueError):
@@ -10585,7 +11519,7 @@ def _read_request_should_use_current_find_wrapper(request: ReadRequest, project:
         return False
     if _request_targets_current_project_find(request, project, root):
         return True
-    return _current_find_read_is_incomplete(root, current_run_id)
+    return _current_find_read_is_incomplete(root, current_run_id, require_idea_plan=False)
 
 
 def _current_find_downstream_gate_blocker(stage: str, run_id: str = "") -> dict[str, Any] | None:
@@ -10596,7 +11530,7 @@ def _current_find_downstream_gate_blocker(stage: str, run_id: str = "") -> dict[
         return None
     project, root = current
     run_id = _current_project_find_run_id(root)
-    if not run_id or not _current_find_read_is_incomplete(root, run_id):
+    if not run_id or not _current_find_read_is_incomplete(root, run_id, require_idea_plan=False):
         return None
     validation = _read_project_json(root / "state" / "current_find_claude_reading_validation.json", {})
     state_plan = _read_project_json(root / "state" / "current_find_research_plan.json", {})
@@ -10642,7 +11576,7 @@ def _current_find_downstream_blocked_job(stage: str, blocker: dict[str, Any]) ->
 
 def _current_find_read_validation_requires_repair(root: Path, run_id: str) -> bool:
     validation = _read_project_json(root / "state" / "current_find_claude_reading_validation.json", {})
-    if not isinstance(validation, dict) or validation.get("valid") is True:
+    if not isinstance(validation, dict):
         return False
     validation_run_id = str(validation.get("run_id") or "").strip()
     if validation_run_id and validation_run_id != run_id:
@@ -10662,9 +11596,28 @@ def _current_find_read_validation_requires_repair(root: Path, run_id: str) -> bo
         or (isinstance(pending_titles, list) and pending_titles)
         or pending_deep_count > 0
         or (isinstance(pending_deep_titles, list) and pending_deep_titles)
+        or validation.get("warning_details")
+        or validation.get("error_details")
         or validation.get("deep_read_content_gap_details")
         or validation.get("blockers")
     )
+
+
+def _current_find_wrapper_failure_summary(output_lines: list[str]) -> tuple[str, str]:
+    tail = [line.strip() for line in output_lines[-20:] if str(line).strip()]
+    tail_text = "\n".join(tail)
+    if "Unknown reading module action: current_find_research_plan" in tail_text:
+        return (
+            READING_PUBLIC_ENTRY_ACTION_MISSING_STATUS,
+            READING_PUBLIC_ENTRY_ACTION_MISSING_MESSAGE,
+        )
+    for line in reversed(tail):
+        lowered = line.lower()
+        if "traceback" in lowered or line.startswith(("{", "}", "[", "]")) or '":' in line[:160]:
+            continue
+        if line:
+            return ("blocked_current_find_claude_read_failed", line[:800])
+    return ("blocked_current_find_claude_read_failed", "")
 
 
 def _run_current_find_claude_read_job(project: str, root: Path, request: ReadRequest, log, should_cancel, progress) -> dict:
@@ -10673,14 +11626,29 @@ def _run_current_find_claude_read_job(project: str, root: Path, request: ReadReq
         raise RuntimeError("current project Find run is missing; run Find before Read")
     if should_cancel():
         raise JobCancelled("Task cancelled by user.")
-    progress("current_find_claude_takeover", 0, 1, "主控 Claude Code 正在接管当前 Find 的全文精读、idea 和 plan。")
+    progress("full_text", 0, 0, "正在准备当前 Find 推荐论文的全文爬取输入。")
     management_python = os.environ.get("MANAGEMENT_PYTHON") or sys.executable
     try:
         configured_idea_count = int(getattr(load_config(), "max_ideas", 0) or 0)
     except Exception:
         configured_idea_count = 0
     idea_count = max(1, configured_idea_count or AppConfig().max_ideas)
-    repair_mode = _current_find_read_validation_requires_repair(root, run_id) or _current_find_read_is_incomplete(root, run_id, idea_count=idea_count)
+    force_requested = bool(getattr(request, "force", False))
+    repair_mode = _current_find_read_validation_requires_repair(root, run_id) or _current_find_read_is_incomplete(root, run_id, idea_count=idea_count, require_idea_plan=False)
+    force_deep_read = force_requested
+    prepared_input = prepare_current_find_read_input(
+        project,
+        read_limit=0,
+        projects_root=PROJECT_IDS_ROOT,
+        reading_root=WORKSPACE_ROOT / "modules" / "reading",
+    )
+    try:
+        prepared_count = int(prepared_input.get("input_article_count") or prepared_input.get("recommendation_count") or 0)
+    except (TypeError, ValueError):
+        prepared_count = 0
+    if prepared_count > 0:
+        log(f"Full-text acquisition phase: {prepared_count} papers")
+        progress("full_text", 0, prepared_count, f"准备爬取当前 Find 的 {prepared_count} 篇推荐论文全文。")
     cmd = [
         management_python,
         str(WORKSPACE_ROOT / "modules" / "reading" / "main.py"),
@@ -10688,20 +11656,27 @@ def _run_current_find_claude_read_job(project: str, root: Path, request: ReadReq
         "current_find_research_plan",
         "--project",
         project,
+        "--input-json",
+        str(prepared_input["input_json"]),
+        "--find-run-id",
+        str(prepared_input["run_id"]),
         "--read-limit",
         "0",
         "--idea-count",
         str(idea_count),
     ]
-    if repair_mode:
+    if force_deep_read:
         cmd.append("--force")
     env = os.environ.copy()
     env["WORKSPACE_ROOT"] = str(WORKSPACE_ROOT)
     env["PROJECT_ID"] = project
     env["DEFAULT_PROJECT_ID"] = project
+    env["READING_REUSE_EXISTING_FULL_TEXT_PACKET"] = "1"
+    if not force_requested:
+        env["READING_REUSE_EXISTING_DEEP_READ_RESULTS"] = "1"
     env.setdefault("MANAGEMENT_PYTHON", management_python)
     env["PYTHONPATH"] = taste_pythonpath_string(WORKSPACE_ROOT, env.get("PYTHONPATH", ""))
-    log(("Delegating current Find Read/Idea/Plan repair to wrapper: " if repair_mode else "Delegating current Find Read/Idea/Plan to wrapper: ") + " ".join(cmd))
+    log(("Delegating current Find Read/Idea/Plan rerun to wrapper: " if repair_mode else "Delegating current Find Read/Idea/Plan to wrapper: ") + " ".join(cmd))
     proc = subprocess.Popen(cmd, cwd=str(WORKSPACE_ROOT), env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1)
     output_lines: list[str] = []
     suppressed_structured_lines = 0
@@ -10716,7 +11691,7 @@ def _run_current_find_claude_read_job(project: str, root: Path, request: ReadReq
                 if looks_structured:
                     suppressed_structured_lines += 1
                     if suppressed_structured_lines == 1:
-                        log("Wrapper emitted structured evidence JSON; suppressing verbose taskbar fragments. Full evidence is stored under planning/finding/full_text_reading and state JSON files.")
+                        log("Wrapper emitted structured evidence JSON; suppressing verbose taskbar fragments. Full evidence is stored under Reading runtime and then synced into project artifacts by Web.")
                     elif suppressed_structured_lines % 250 == 0:
                         log(f"Wrapper structured evidence output suppressed: {suppressed_structured_lines} JSON-like lines read.")
                 else:
@@ -10743,6 +11718,20 @@ def _run_current_find_claude_read_job(project: str, root: Path, request: ReadReq
         if isinstance(candidate, dict):
             result_payload = candidate
             break
+    sync_result: dict[str, Any] = {}
+    try:
+        sync_result = sync_current_find_read_outputs(
+            project,
+            result_payload=result_payload,
+            stdout_text=joined,
+            projects_root=PROJECT_IDS_ROOT,
+            reading_root=WORKSPACE_ROOT / "modules" / "reading",
+        )
+        log(f"Synced Reading runtime outputs into project: {sync_result.get('status')} from {sync_result.get('runtime_project_sync_dir')}")
+    except Exception as exc:
+        if rc == 0:
+            raise RuntimeError(f"Reading completed but Web failed to sync runtime outputs into the project: {exc}") from exc
+        log(f"Reading runtime output sync skipped/failed after blocked wrapper return: {exc}")
     read_payload = _read_project_json(root / "planning" / "finding" / "read_results.json", {})
     idea_payload = _read_project_json(root / "planning" / "finding" / "ideas.json", {})
     plan_payload = _read_project_json(root / "planning" / "finding" / "plans.json", {})
@@ -10750,10 +11739,14 @@ def _run_current_find_claude_read_job(project: str, root: Path, request: ReadReq
     validation = _read_project_json(root / "state" / "current_find_claude_reading_validation.json", {})
     status = str((result_payload if isinstance(result_payload, dict) else {}).get("status") or (current_plan if isinstance(current_plan, dict) else {}).get("status") or "").strip()
     if rc != 0 and not status.startswith("blocked"):
-        status = "blocked_current_find_claude_read_failed"
+        status, failure_summary = _current_find_wrapper_failure_summary(output_lines)
     elif not status:
         status = "current_find_claude_read_complete"
+    else:
+        failure_summary = ""
     summary = str((current_plan if isinstance(current_plan, dict) else {}).get("summary_zh") or (current_plan if isinstance(current_plan, dict) else {}).get("summary") or "").strip()
+    if not summary and rc != 0:
+        summary = failure_summary
     if not summary and isinstance(validation, dict):
         try:
             pending_deep = int(validation.get("pending_deep_read_synthesis_count") or 0)
@@ -10764,18 +11757,22 @@ def _run_current_find_claude_read_job(project: str, root: Path, request: ReadReq
         except (TypeError, ValueError):
             pending_full_text = 0
         titles = [str(item).strip() for item in (validation.get("pending_deep_read_synthesis_titles") or []) if str(item).strip()]
-        if "deep_read_validation" in status or pending_deep:
-            title_hint = "；未通过：" + "、".join(titles[:3]) if titles else ""
-            summary = f"当前 Find 全文证据已覆盖，但仍有 {pending_deep or len(titles)} 篇精读 synthesis 未通过机器校验{title_hint}。"
+        if (("deep_read" in status and "pending" in status) or pending_deep):
+            title_hint = "；待精读：" + "、".join(titles[:3]) if titles else ""
+            summary = f"当前 Find 全文证据已覆盖，但仍有 {pending_deep or len(titles)} 篇论文未完成精读{title_hint}。"
         elif "full_text_evidence" in status or pending_full_text:
             summary = f"当前 Find 仍有 {pending_full_text} 篇缺少同篇全文证据，Read 已停在全文证据门控。"
-    progress("complete" if rc == 0 and not status.startswith("blocked") else "blocked", 1, 1, summary or status)
+    read_valid = isinstance(validation, dict) and validation.get("valid") is True
+    if read_valid and status.startswith("blocked_current_find_claude_read_failed"):
+        status = str(validation.get("status") or "current_find_deep_read_complete")
+    progress("complete" if read_valid or (rc == 0 and not status.startswith("blocked")) else "blocked", 1, 1, summary or status)
     return {
         "status": status,
         "project": project,
         "run_id": run_id,
         "source": "current_find_claude_read_idea_plan_wrapper",
         "repair_mode": repair_mode,
+        "force_deep_read_requested": force_requested,
         "idea_count": idea_count,
         "return_code": rc,
         "failure_type": (current_plan if isinstance(current_plan, dict) else {}).get("failure_type"),
@@ -10785,10 +11782,38 @@ def _run_current_find_claude_read_job(project: str, root: Path, request: ReadReq
         "ideas": len((idea_payload if isinstance(idea_payload, dict) else {}).get("ideas") or []),
         "plans": len((plan_payload if isinstance(plan_payload, dict) else {}).get("plans") or []),
         "current_find_research_plan": str(root / "state" / "current_find_research_plan.json"),
+        "read_md": str(root / "planning" / "finding" / "read.md"),
+        "public_final_artifact": str(root / "planning" / "finding" / "read.md"),
         "read_results": str(root / "planning" / "finding" / "read_results.json"),
+        "prepared_reading_input": prepared_input,
+        "reading_sync": sync_result,
         "wrapper_result": result_payload,
+        "stdout_tail": output_lines[-20:],
         "summary": summary,
     }
+
+
+def _read_requires_current_find_job(request: ReadRequest) -> JobState:
+    run_id = str(getattr(request, "run_id", "") or "").strip()
+    message = "Read 必须从项目当前 Find 后续触发；请先在左侧选择项目并采用当前 Find，再点击 Read。"
+    job = JobState(f"read_{uuid4().hex[:10]}", "read")
+    job.status = "blocked"
+    job.run_id = run_id
+    job.result = {
+        "status": "blocked_missing_current_project_find_context",
+        "stage": "read",
+        "run_id": run_id,
+        "source": "web_read_project_bridge",
+        "message": message,
+        "next_required_action": "select_or_adopt_project_current_find_then_run_read",
+        "policy": "Web does not call Reading private pipeline internals. Current-Find Read must use modules/reading/main.py --action current_find_research_plan through the project bridge.",
+    }
+    JOBS[job.job_id] = job
+    job.set_progress("blocked", 1, 1, message)
+    job.log(message)
+    job.done.set()
+    _persist_jobs()
+    return job
 
 
 @app.post("/api/jobs/read")
@@ -10811,9 +11836,7 @@ def api_read(request: ReadRequest) -> dict:
             }
             _persist_jobs()
             return job.as_dict()
-    config = load_config()
-    job = start_job("read", lambda log, should_cancel, _progress: run_read(request, config, log, should_cancel))
-    return job.as_dict()
+    return _read_requires_current_find_job(request).as_dict()
 
 
 @app.post("/api/jobs/idea")
@@ -11386,7 +12409,11 @@ def api_jobs(
         job_snapshot = [job for job in job_snapshot if _job_state_belongs_to_project(job, project)]
     if compact:
         effective_limit = min(limit, 30 if include_history else 10)
-        persisted = [_compact_job_for_list(job.as_dict(compact=True)) for job in job_snapshot]
+        persisted = []
+        for job in job_snapshot:
+            public_stage = _public_taste_stage(getattr(job, "stage", ""))
+            source_item = job.as_dict(compact=False) if public_stage == "read" else job.as_dict(compact=True)
+            persisted.append(_compact_job_for_list(source_item))
     else:
         effective_limit = limit
         persisted = [job.as_dict(compact=False) for job in job_snapshot]
@@ -11451,6 +12478,12 @@ def api_jobs(
         item_project = str(result.get("project") or _project_from_job_payload(job_id, item) or "").strip()
         item_stage = _public_taste_stage(stage)
         item_status = str(item.get("status") or result.get("status") or "").strip().lower()
+        item_run_id = str(item.get("run_id") or result.get("run_id") or result.get("find_run_id") or "").strip()
+        stopped = item_status not in {"queued", "running", "cancelling"}
+        if stopped and item_project and not (PROJECT_IDS_ROOT / item_project).is_dir():
+            return True
+        if stopped and ("reading_web_smoke" in item_project or "find_reading_web_smoke" in item_run_id):
+            return True
         if (
             item_project
             and (item_project, item_stage) in dynamic_live_stage_projects
@@ -11599,7 +12632,7 @@ def api_jobs(
 
 
 @app.get("/api/jobs/{job_id}")
-def api_job(job_id: str, compact: bool = Query(False)) -> dict:
+def api_job(job_id: str, compact: bool = Query(True)) -> dict:
     try:
         _reconcile_detached_launcher_jobs(force=True)
     except TypeError as exc:
@@ -11627,7 +12660,10 @@ def api_job(job_id: str, compact: bool = Query(False)) -> dict:
             if history:
                 return _public_job_api_payload(_compact_job_for_list(history) if compact else history)
         return JSONResponse({"error": "job not found"}, status_code=404)
-    return _public_job_api_payload(_compact_job_for_list(job.as_dict(compact=True)) if compact else job.as_dict(compact=False))
+    if compact:
+        source_item = job.as_dict(compact=False) if _public_taste_stage(job.stage) == "read" else job.as_dict(compact=True)
+        return _public_job_api_payload(_compact_job_for_list(source_item))
+    return _public_job_api_payload(job.as_dict(compact=False))
 
 
 @app.post("/api/jobs/{job_id}/cancel")
@@ -11730,6 +12766,10 @@ async def ws_job(websocket: WebSocket, job_id: str):
                     await websocket.send_json({"type": "progress", "progress": _public_job_api_payload(compact_live_job.get("progress") or {})})
                     await websocket.send_json({"type": "complete", "job": compact_live_job})
                     return
+                if live_stage == "read":
+                    await websocket.send_json({"type": "snapshot", "job": _compact_job_for_list(live_job)})
+                    await asyncio.sleep(2.0)
+                    continue
                 logs = [str(line) for line in (live_job.get("logs") or [])]
                 new_logs = logs[sent:]
                 if live_stage in {"environment", "experiment", "read", "idea", "plan"}:
@@ -11758,6 +12798,10 @@ async def ws_job(websocket: WebSocket, job_id: str):
                 await websocket.send_json({"type": "progress", "progress": _public_job_api_payload(compact_job.get("progress") or {})})
                 await websocket.send_json({"type": "complete", "job": compact_job})
                 return
+            if job_stage == "read":
+                await websocket.send_json({"type": "snapshot", "job": _compact_job_for_list(job.as_dict(compact=False))})
+                await asyncio.sleep(2.0)
+                continue
             new_logs = _strip_public_taste_marker(job.logs[sent:])
             if job_stage in {"environment", "experiment", "read", "idea", "plan"}:
                 new_logs = _public_job_logs(job.stage, new_logs, {}, {}, limit=6)
@@ -11786,12 +12830,15 @@ def api_runs(project: str = Query("")) -> list[dict]:
 @app.get("/api/runs/{run_id}/artifacts")
 def api_artifacts(run_id: str, light: bool = Query(False)) -> dict:
     light_mode = bool(light) if isinstance(light, bool) else bool(getattr(light, "default", False))
+    project_root = _project_root_for_find_run(run_id)
     try:
         artifact_roots = _run_artifact_roots(run_id)
     except FileNotFoundError as exc:
-        return JSONResponse({"error": str(exc), "run_id": run_id, "artifacts": []}, status_code=404)
+        if project_root and _project_current_find_run_id(project_root) == str(run_id or "").strip():
+            artifact_roots = [project_root / "planning" / "finding"]
+        else:
+            return JSONResponse({"error": str(exc), "run_id": run_id, "artifacts": []}, status_code=404)
     directory = artifact_roots[0]
-    project_root = _project_root_for_find_run(run_id)
     environment_run = _environment_artifact_run(artifact_roots, run_id)
 
     def artifact_path(name: str) -> Path:
@@ -11876,6 +12923,8 @@ def api_artifacts(run_id: str, light: bool = Query(False)) -> dict:
             content = read_json(path, {})
             if name == "config.json" and isinstance(content, dict):
                 content = redacted_config(content)
+            if name in {"find_progress.json", "find_results.json"}:
+                content = _strip_redundant_find_public_json_aliases(content)
             artifacts.append({"name": name, "kind": "json", "content": _strip_public_taste_marker(content), "path": str(path), "content_truncated": False, "size_bytes": stat.st_size if stat is not None else 0})
     payload = {"run_id": run_id, "artifacts": artifacts, "artifact_roots": [str(path) for path in artifact_roots]}
     _RUN_ARTIFACTS_CACHE[run_id] = {"key": cache_key, "expires_at": now + RUN_ARTIFACTS_CACHE_TTL_SEC, "payload": payload}

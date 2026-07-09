@@ -71,7 +71,7 @@ def main() -> None:
     record("all_python_scripts_compile", ok, detail)
 
     required_scripts = [
-        "run_frontend.py", "ensure_current_find_research_plan.py", "run_autonomous_research.py", "run_full_research_cycle.py", "run_loop.py", "run_project.py",
+        "run_frontend.py", "run_autonomous_research.py", "run_full_research_cycle.py", "run_loop.py", "run_project.py",
         "claude_project_session.py", "run_coding_agent.py", "run_environment_stage.py", "run_paper_pipeline.py", "planning_tools.py",
         "bootstrap_repo_env.py", "research_healthcheck.py", "repo_data_tools.py", "environment_data_tools.py",
         "restart_after_data_blocker.py", "audit_repo_candidate_pool.py",
@@ -79,7 +79,18 @@ def main() -> None:
         "run_autoscientist_continuous.py", "build_stagnation_report.py", "run_evoscientist_style_cycle.py", "refresh_project_reports.py", "check_llm_ready.py", "llm_client.py",
     ]
     for script in required_scripts:
-        record(f"script_exists:{script}", resolve_script_path(script, ROOT).exists(), "missing script")
+        try:
+            script_path = resolve_script_path(script, ROOT)
+        except FileNotFoundError as exc:
+            record(f"script_exists:{script}", False, str(exc))
+        else:
+            record(f"script_exists:{script}", script_path.exists(), "missing script")
+    reading_public_entry = ROOT / "modules" / "reading" / "main.py"
+    record(
+        "reading_public_entry:current_find_research_plan",
+        reading_public_entry.exists() and file_contains(reading_public_entry, "current_find_research_plan"),
+        "modules/reading/main.py must expose --action current_find_research_plan",
+    )
 
     removed_team_script = "run_" + "llm_" + "research_team.py"
     record("autonomous_runner_accepts_venue", file_contains(ROOT / "framework/scripts/run_autonomous_research.py", "parser.add_argument(\"--venue\""), "missing --venue argument")

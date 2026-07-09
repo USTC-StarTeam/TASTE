@@ -17,6 +17,10 @@ runs/
 run/
 state/
 cache/
+!/scripts/cache/
+!/scripts/cache/**
+/scripts/cache/__pycache__/
+/scripts/cache/**/*.py[cod]
 caches/
 local_database/
 discover/
@@ -36,6 +40,11 @@ tmp/
 /config.json
 /.config.json
 /config.local.json
+/config/*.json
+/config/*.local.json
+/config/local*.json
+/config/*secret*.json
+/config/*credentials*.json
 
 # macOS / 编辑器杂物
 .DS_Store

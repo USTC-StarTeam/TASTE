@@ -1,58 +1,113 @@
-# Finding / Find 模块
+# Finding 用户手册
 
-TASTE 七阶段中 `Find` 阶段的**独立后端模块**。框架可通过网页/任务队列调用它，但模块自身只依赖
-**显式输入**与**外部维护的产物**，不隐式读取其它阶段的历史状态来替代输入。
+Finding 是 TASTE 的论文发现模块。它根据研究主题、研究兴趣、研究者画像和来源选择，抓取论文元数据，筛选候选，调用 LLM 评分，输出一份可读的推荐清单。
 
-> 本 README 描述稳定的对外口径与用法。若本机存在被 `.gitignore` 忽略的 `工作状态.txt`，只能作为维护交接背景，
-> 不能作为仓库契约、项目科研记忆或提交内容。
+请通过 `modules/finding/main.py` 使用本模块。所有 Python 命令都使用 conda `taste` 环境运行。
 
----
+## 快速开始
 
-## 1. 职责边界
+### 网页使用
 
-契约原文：*Collect, filter, score, and rank literature/tool candidates from the research topic and profile.
-Full-text reading evidence is explicitly outside this module.*
+从 TASTE 仓库根目录启动网页：
 
-从「研究主题 + 研究兴趣 + 研究者画像 + 来源选择」出发，抓取候选文献/代码线索，完成
-标题池 → 分类 → TF-IDF/关键词初筛 → LLM 标题评分 → 抓摘要/详情做摘要评分 → 程序性加分 →
-最终推荐排序。**Find 不做全文精读**，也不把全文可用性当作前置门槛（全文证据属于 `reading` 模块）。
+```bash
+CONDA_ENV_NAME=taste framework/scripts/start_web.sh
+```
 
----
+浏览器打开：
 
-## 2. 两条发现路径（维护第一要务：先分清楚）
+```text
+http://127.0.0.1:8879
+```
 
-`scripts/` 里有两条**互不调用**的发现路径，看错会得出错误结论：
+常用流程：
 
-- **路径 A —— 真正的 Find 流水线（主线）**
-  `main.py --action find` → `find_pipeline.run_find(FindRequest(config, selection))`，
-  用 `find_support.py` 的真实 `fetch_*` 适配器抓数，按 `VenueSelection.include_*` 开关取数。
-  这是与网页 Find、与本模块"独立可用"对应的路径。
+1. 选择项目。
+2. 填写研究主题、研究兴趣、LLM 配置和来源选择。
+3. 在 Finding 页面选择会议、年份和补充来源。
+4. 点击 Find。
+5. 在结果区域打开 `find.md`。
 
-- **路径 B —— 项目耦合的 discover 脚本（旧/并行线）**
-  `discover_arxiv.py` / `discover_semantic_scholar.py` / `discover_github_repos.py` / `ingest_discovery.py`，
-  需要 `--project`，把结果写进 `projects/<id>/...`，只服务项目工作流（被 `run_project.py`、`environment` 调用），
-  **`find_pipeline` 不调用它们**。
-  ⚠️ 只看 `discover_*.py` 会误以为 bioRxiv/HuggingFace 没实现——它们在路径 A 的 `find_support.py` 里。
+`find.md` 是用户阅读的最终推荐列表。网页会直接渲染这个 Markdown 文件。
 
----
+### 命令行使用
 
-## 3. 输入口径
+从 TASTE 仓库根目录运行：
 
-`main.py --action find` 接受两个 JSON 文件参数：
+```bash
+conda run -n taste python modules/finding/main.py --action find \
+  --config-json path/to/config.json \
+  --selection-json path/to/selection.json
+```
 
-| 参数 | 对应类型 | 含义 |
-| --- | --- | --- |
-| `--config-json`    | `auto_research.models.AppConfig`     | LLM 配置 + 研究主题/兴趣/画像 + 各类策略（含 `VenueMetadataPolicy` 的起止日期等） |
-| `--selection-json` | `auto_research.models.VenueSelection`| 来源选择：开哪些源、哪些会议、哪些年份 |
-| `--output-dir`     | 路径（可选）                          | 额外把产物拷贝到这个目录（框架/项目调用时用） |
+也可以进入模块目录运行：
 
-`VenueSelection` 关键字段（缺省全部为关 / 空，调用方必须显式打开要抓的源）：
+```bash
+cd modules/finding
+conda run -n taste python main.py --action find \
+  --config-json path/to/config.json \
+  --selection-json path/to/selection.json
+```
 
-```jsonc
+查看公开入口合同：
+
+```bash
+conda run -n taste python modules/finding/main.py --contract
+```
+
+查看可选会议目录：
+
+```bash
+conda run -n taste python modules/finding/main.py --action catalog
+```
+
+## Finding 能做什么
+
+Finding 提供这些功能：
+
+- 按研究主题查找相关论文。
+- 从会议、arXiv、bioRxiv、Nature、Science、HuggingFace、GitHub 等来源收集候选。
+- 优先使用会议官方论文列表、官方详情页和可验证摘要来源。
+- 记录会议展示类型，例如 Oral、Spotlight、Poster。
+- 用 LLM 对标题、摘要和研究匹配度评分。
+- 按相关性、多样性和来源质量生成推荐排序。
+- 输出 `find.md`、`find_results.json`、`source_status.md`、`find_progress.json`。
+
+Finding 负责发现和推荐。全文精读、想法生成、计划选择、实验和论文写作由 TASTE 后续阶段处理。
+
+## 输入文件
+
+Finding 需要两个输入文件：
+
+- `config.json`：研究主题、研究兴趣、研究者画像、推荐数量和 LLM 配置。
+- `selection.json`：会议、年份和来源开关。
+
+### config.json 示例
+
+```json
 {
-  "venue_ids": ["iclr", "neurips"],          // 要抓的会议/期刊 id（对应 data/ccf_venues.json 等）
-  "years": [2025, 2026],                      // 年份
-  "venue_years": [{"venue_id":"iclr","year":2026}], // 或精确到 venue×year（给了它就覆盖上面两项的叉乘）
+  "research_topic": "protein generation with diffusion models",
+  "research_interest": "methods that improve controllability, diversity, and experimental feasibility for protein design",
+  "researcher_profile": "Machine learning researcher working on generative models for protein design.",
+  "max_recommended_papers": 10,
+  "provider": "openai_compatible",
+  "base_url": "https://example-compatible-endpoint/v1",
+  "model": "model-name",
+  "temperature": 0.2
+}
+```
+
+### selection.json 示例
+
+```json
+{
+  "venue_ids": ["openreview_iclr", "dblp_icml", "openreview_neurips"],
+  "years": [2026, 2025],
+  "venue_years": [
+    {"venue_id": "openreview_iclr", "year": 2026},
+    {"venue_id": "dblp_icml", "year": 2026},
+    {"venue_id": "openreview_neurips", "year": 2025}
+  ],
   "include_arxiv": true,
   "include_biorxiv": false,
   "include_huggingface": false,
@@ -62,141 +117,216 @@ Full-text reading evidence is explicitly outside this module.*
 }
 ```
 
-时间窗：会议按 `year` 整数（含"最近已发布年份"回填）；预印本/期刊按 `AppConfig` 里
-`VenueMetadataPolicy` 的 `arxiv/biorxiv/nature/science_start_date/end_date`（arXiv 缺省近 180 天、
-bioRxiv 缺省近 30 天）；GitHub 用 `github_since`（daily/weekly/monthly）。
-已知弱点：HuggingFace papers 流不支持日期窗；medRxiv/PubMed 未实现。
+### LLM 配置
 
----
+LLM key 可以放在本机私有文件：
 
-## 4. 输出口径
-
-独立运行 `modules/finding/main.py --action find` 时，主线产物默认写到模块私有运行目录
-`modules/finding/.runtime/runs/<run_id>/`（被 `modules/finding/.gitignore` 忽略），`--output-dir` 会再额外拷一份。
-如果外部框架/网页调用需要共享运行根，调用方应显式设置 `WORKFLOW_RUNTIME_DIR`；Finding 入口不会覆盖这个显式设置。
-
-| 产物 | 作用 |
-| --- | --- |
-| `find_results.json` | 结构化推荐、来源状态、阶段计数、分数与调试信息（核心产物） |
-| `article.md` | 用户可读的 Find 产物 |
-| `source_status.md` | 各来源健康/分类统计 |
-| `find_progress.json` / `*_report.json` | 分类扫描、标题筛选、评分等阶段报告 |
-
-> **中间产物落点（现状）**：路径 A standalone run、stage latest、state/cache/local_database 默认都在
-> `modules/finding/.runtime/` 下；这一路径被模块级 `.gitignore` 忽略。路径 B 的 `discover_*`/`ingest_discovery`
-> 仍是项目耦合旧线，会按其 `--project` 语义写 `projects/<id>/...`，不属于主线 `find_pipeline`。
-
----
-
-## 5. 运行逻辑（路径 A，run_find 的主流程）
-
-1. 读取/规范化来源选择与画像；会议优先用带官方分类/track/类型信息的渠道（OpenReview 等），缺官方分类才退到标题池。
-2. 聚合各源候选，构建标题总池与分类后池；TF-IDF/关键词召回控制候选规模。
-3. 对更多标题做 LLM 标题评分，再抓摘要/详情做摘要评分。
-4. 把 LLM 分、venue/track 类型、稳定性、多样性等程序性信号合成最终推荐分并排序。
-5. 只发布"有真实标题 + 真实摘要证据"的用户可见推荐；内部 reader 线索保留为结构化字段，不混进面向用户文案。
-
----
-
-## 6. 独立（单机）使用方法
-
-```bash
-# 全部在远程：ssh hidimension_5090_1，工作根 <TASTE_ROOT>
-PY=/home/fmh/workspace/miniforge/envs/ar_taste/bin/python3.11   # 正确 python（系统 python3 缺依赖）
-
-# 零依赖冒烟：打印契约
-$PY modules/finding/main.py --contract
-
-# 跑一次 Find（默认产物：modules/finding/.runtime/runs/<run_id>/；--output-dir 只是额外拷贝）
-WORKSPACE_ROOT=<TASTE_ROOT> \
-$PY modules/finding/main.py --action find \
-    --config-json modules/finding/.tmp/config.json \
-    --selection-json modules/finding/.tmp/selection.json \
-    --output-dir modules/finding/.tmp/finding_out
-
-# 外部框架若确实要共享运行根，可显式覆盖；standalone 不建议这么做
-WORKFLOW_RUNTIME_DIR=<TASTE_ROOT>/runtime \
-$PY modules/finding/main.py --action find --config-json ... --selection-json ...
+```text
+modules/finding/config/llm.local.json
 ```
 
-LLM 配置走环境变量或 `AppConfig` 字段（key 绝不入库）：
-`LLM_PROVIDER` / `LLM_API_BASE` / `LLM_MODEL` / `OPENAI_API_KEY` / `LLM_TIMEOUT_SEC` / `LLM_MAX_TOKENS`。
+示例：
 
-> 运营约定（见根 README/AGENTS）：端到端验证走网页 UI，CLI 只用于调试/测试/查状态；
-> 验证改动用 `pytest tests/`（ar_taste python）。
+```json
+{
+  "provider": "openai_compatible",
+  "base_url": "https://example-compatible-endpoint/v1",
+  "model": "model-name",
+  "api_key": "",
+  "temperature": 0.2
+}
+```
 
----
+也可以通过环境变量提供：
 
-## 7. 统一入口与 action 路由
+```bash
+export LLM_PROVIDER=openai_compatible
+export LLM_API_BASE="https://example-compatible-endpoint/v1"
+export LLM_MODEL="model-name"
+export OPENAI_API_KEY="..."
+export LLM_TIMEOUT_SEC=60
+export LLM_MAX_TOKENS=1200
+```
 
-`main.py` 是本模块**唯一公开后端入口**，`--contract` 输出输入/产物/职责边界。`scripts/` 是私有后端，
-需要暴露的能力先在 `main.py` 注册 action。当前 action（节选）：
+密钥只保存在本机私有配置或本机环境变量中。`config/llm.local.json` 已被 git 忽略。
 
-- `find`（缺省）→ 路径 A 主流水线
-- `plan_literature` / `paper_quality` / `literature_base_candidates` → `finding_quality_tools.py`
-- `discover_arxiv` / `discover_semantic_scholar` / `discover_github` / `ingest_discovery` → 路径 B
-- `venue_metadata_cache` / `openreview_cache` / `local_database` → 缓存构建
-- `literature_tool` / `tool_packet` / `literature_base_audit` → 工具包与基底审计
+## 支持的来源
 
----
+### 重点会议
 
-## 8. 脚本清单（与 `script_manifest.json` 保持一致）
+Finding 对这些会议提供稳定支持：
 
-### 核心流程
-| 脚本 | 真实作用 |
+| 会议 | 常用 venue id | 说明 |
+| --- | --- | --- |
+| NeurIPS / NIPS | `openreview_neurips` | 使用 NeurIPS 官方论文索引和 virtual 页面；展示类型会合并 Oral、Spotlight、Poster。 |
+| ICLR | `openreview_iclr` | 使用 OpenReview 官方元数据。 |
+| ICML | `dblp_icml` | 优先使用官方 virtual / proceedings 元数据。 |
+| SIGKDD / KDD | `dblp_kdd` | 使用官方来源和可验证摘要补全来源。 |
+| WWW | `dblp_www` | 使用官方 accepted/proceedings 线索和可验证摘要补全来源。 |
+| SIGIR | `dblp_sigir` | 使用官方 accepted/proceedings 线索和可验证摘要补全来源。 |
+| CIKM | `dblp_cikm` | 使用官方 proceedings 页面。 |
+| AAAI | `dblp_aaai` | 使用 AAAI 官方 OJS 页面。 |
+| ICCV | `dblp_iccv` | 使用 CVF Open Access。 |
+| CVPR | `dblp_cvpr` | 使用 CVF Open Access。 |
+| ACL | `dblp_acl` | 使用 ACL Anthology。 |
+| IJCAI | `dblp_ijcai` | 使用 IJCAI 官方 proceedings。 |
+| ECCV | `dblp_eccv` | 使用 ECVA / ECCV official 页面。 |
+| EMNLP | `dblp_emnlp` | 使用 ACL Anthology。 |
+
+也可以通过 `--action catalog` 查看更多 CCF、DBLP 和自定义会议条目。
+
+### 补充来源
+
+可按需要打开：
+
+- `include_arxiv`
+- `include_biorxiv`
+- `include_huggingface`
+- `include_github`
+- `include_nature`
+- `include_science`
+
+建议先选择核心会议和年份，再按研究主题补充 arXiv 或 bioRxiv。
+
+## Finding 如何生成推荐
+
+Finding 的推荐过程分为六步：
+
+1. 读取研究主题、研究兴趣和来源选择。
+2. 抓取会议论文列表、摘要、作者、年份、链接和展示类型。
+3. 合并可验证补全来源，例如 DOI、OpenAlex、Semantic Scholar、官方 PDF 或官方详情页。
+4. 用本地召回先筛出主题相关候选。
+5. 用 LLM 对标题和摘要做相关性评分。
+6. 综合相关性、多样性、会议质量和展示类型，生成推荐列表。
+
+展示类型在元数据阶段进入论文记录。推荐结果中会看到类似：
+
+```text
+ICML 2026 / Spotlight
+NeurIPS 2025 / Poster
+ICLR 2026 / Oral
+```
+
+展示类型加分规则：
+
+| 类型 | 加分 |
+| --- | ---: |
+| Best Paper / Award | +0.50 |
+| Oral | +0.45 |
+| Spotlight / Highlight / Notable / Top-5% | +0.20 |
+| Poster | +0.00 |
+
+展示类型只在论文已经和研究主题有明确关系时影响排序。
+
+## 输出文件怎么看
+
+Finding run 默认写入：
+
+```text
+modules/finding/.runtime/runs/<run_id>/
+```
+
+最常用文件：
+
+| 文件 | 用途 |
 | --- | --- |
-| `scripts/find_pipeline.py` | Find 主流水线（唯一对外符号 `run_find`）：来源聚合、阶段计数、标题/摘要评分、推荐排序、产物写出。 |
-| `scripts/find_support.py` | 兼容门面 + sources 主体：保留会议/期刊/预印本适配器、摘要/链接抓取、来源状态构造，以及对已拆分实现的 re-export；`requests`/`fetch_*` monkeypatch 面保持不变。 |
-| `scripts/find_local_rank.py` | 兼容 wrapper：对外导出 `rank_papers_tfidf`，实际实现位于 `scripts/ranking/local_rank.py`，供主流水线和测试仍通过 `find_support.rank_papers_tfidf` 使用。 |
-| `scripts/catalog/venue_catalog.py` | Venue catalog 实现：加载 packaged/default/custom/OpenReview/CCF catalog，合并别名与年份，输出 `load_catalog`/`catalog_by_id`。 |
-| `scripts/selection/category_select.py` | Category selection 实现：基于研究兴趣/画像、LLM 或 deterministic fallback 从本地 category summary 中挑相关类别，并维护项目级选择缓存。 |
-| `scripts/research_profile/normalize.py` | Stage 0 研究画像规范化：约束 LLM 输出 schema，生成安全扩展词、硬排除/条件排除、检索文本和 fallback profile。 |
-| `scripts/quality/metadata.py` | 会议/期刊质量元数据查表与附加：匹配 venue、track、presentation label，给候选补充 quality tier 与可用 bonus。 |
-| `scripts/ranking/local_rank.py` | 研究画像驱动的本地 TF-IDF/关键词召回排名实现：从研究主题/兴趣/画像中抽取信号，按全局预算和类别平衡生成召回候选。 |
-| `scripts/sources/common.py` | Sources 纯工具层：稳定 id、文本清理、presentation metadata、标题 key、日期规范化、venue family/OpenReview 支持判断；不做网络请求。 |
-| `scripts/sources/audit.py` | Sources 元数据审计层：venue metadata audit 结构、OpenReview/venue 审计附加与合并、metadata timeout；不做网络请求，供 venue/source 适配器与 pipeline 复用。 |
-| `scripts/sources/metadata.py` | Sources 元数据解析层：Semantic Scholar cache 判定、DOI/ACM URL、DBLP record metadata、OpenAlex 候选匹配/摘要/PDF helper；不做网络请求、不读写 cache。 |
-| `scripts/sources/source_choice.py` | Venue source 选择层：统计官方分类覆盖、构造 source audit、在 OpenReview/ICML/PMLR/DBLP 等候选之间选择优先源；不做网络请求。 |
-| `scripts/sources/parsing.py` | Sources HTML/JSON-LD 解析层：标题过滤、NeurIPS virtual 详情/列表解析、conference virtual 摘要/作者解析、detail target/defer helper；不做网络请求。 |
-| `scripts/sources/journals.py` | Nature/Science 期刊族纯实现层：期刊清单、feed/listing/Crossref URL 构造、RSS/HTML/Crossref 解析、DOI/摘要 helper；不做网络请求。 |
-| `scripts/sources/preprints.py` | arXiv/bioRxiv 预印本纯实现层：日期窗、查询构造、title-match 查询、entry 作者/id 提取、paper 组装和 bioRxiv URL/category helper；不做网络请求。 |
-| `scripts/sources/conferences.py` | 会议来源纯实现层：内置 ICLR 参考读取、DBLP URL/stream/authors/payload helper、OpenReview content helper、ICML/PMLR/ACL 标题/URL/摘要 helper、DBLP/adapter enrichment merge；不做网络请求。 |
-| `scripts/sources/venue_cache.py` | Venue/year 可信缓存读取层：从 Finding runtime/latest/显式项目 run 中寻找已验证 venue-year 结果，给 ICML/DBLP fallback 复用；只读缓存，不做网络请求、不写产物。 |
-| `scripts/literature_policy.py` | 路径 B 与质量工具共享的来源/筛选策略常量与轻量打分规则。 |
+| `find.md` | 用户阅读的最终推荐列表。 |
+| `find_results.json` | 机器可读结果，推荐池字段为 `strong_recommendations`。 |
+| `source_status.md` | 来源状态摘要，显示每个来源的抓取情况。 |
+| `find_progress.json` | 运行进度和计数。 |
 
-### 来源抓取与缓存
-| 脚本 | 真实作用 |
-| --- | --- |
-| `scripts/build_venue_metadata_cache.py` | 为指定 venue/year 构建本地会议元数据缓存（优先保留官方分类/track/presentation 类型）。 |
-| `scripts/local_store/local_index.py` | 本地 venue/year 索引读取：生成 venue cache key、兼容 OpenReview/年份后缀别名，从本地数据库加载 papers/summary/manifest。 |
-| `scripts/local_store/local_cache.py` | 本地 venue/year 缓存写入与读取：规范化 paper、生成 category summary/source report，只写入调用者给定的本地数据库根。 |
-| `scripts/build_openreview_cache.py` | 构建 OpenReview（ICLR/NeurIPS）论文索引缓存。 |
-| `scripts/build_category_summary.py` | 为本地 venue/year JSON 生成中性分类摘要，供分类选择/状态展示。 |
-| `scripts/update_local_database.py` | 刷新 TASTE 本地 venue 索引与集成数据库。 |
-| `scripts/discover_arxiv.py` | 路径 B：arXiv 候选抓取（写 `projects/<id>/discover`）。 |
-| `scripts/discover_semantic_scholar.py` | 路径 B：Semantic Scholar 候选抓取。 |
-| `scripts/discover_github_repos.py` | 路径 B：GitHub 仓库候选抓取。 |
-| `scripts/ingest_discovery.py` | 路径 B：把 discover 结果归一化、打分、入库到项目候选池/raw 论文。 |
+`find.md` 是人工查看结果的首选文件。其它文件主要用于网页、项目同步和后续阶段。
 
-### 计划、工具包与基底审计
-| 脚本 | 真实作用 |
-| --- | --- |
-| `scripts/finding_quality_tools.py` | 合并后的文献计划/论文质量审计/文献基底候选审计；用 `--tool-action plan_literature/paper_quality/literature_base_candidates` 选子功能。 |
-| `scripts/build_literature_tool_packet.py` | 把 Find 结果压缩成 Claude Code 可调用的 literature packet。 |
-| `scripts/run_literature_tool.py` | 给项目代理用的 literature tool 包装入口（内部调用 Find 并刷新 packet）。 |
-| `scripts/run_literature_base_audit.py` | 把 Find 候选送入 repo/data/env 前置审计，防止不可执行基底进入后续阶段。 |
+`find.md` 中每篇论文通常包含：
 
----
+- 标题
+- 会议/年份/展示类型
+- 分数
+- 推荐理由
+- 摘要
+- 链接
 
-## 9. 冗余控制原则（防屎山）
+## 常用命令
 
-- `find_pipeline.py` / `find_support.py` 是核心大块；拆/合只围绕「来源适配器、评分器、产物渲染器」三类边界，
-  且必须保住对外公共面（`run_find`、`find_support` 的被消费符号 + tests 的 `requests` monkeypatch）。
-  `find_support.py` 的干净参考版在 `third_party/reference_TASTE_latest/auto_research/auto_find/`，拆分=反拼接；当前已抽出 `catalog/`、`local_store/`、`quality/`、`selection/`、`research_profile/`、`ranking/`、`sources/` 实现目录，并用 `find_support.py`（以及 `find_local_rank.py` 兼容 wrapper）保持旧公共面；sources 抓取段仍留在门面内，避免破坏 tests 对 `requests`/`fetch_*` 的 monkeypatch。
-- `discover_*` 是不同外部 API 的薄适配器；共同逻辑应进 `find_support`/统一 source adapter 层，不再新增零散 helper。
-- 修改本模块必须先读相关脚本、`script_manifest.json` 与本 README，找到根因再改；本机忽略的维护记录只作辅助背景；
-  禁止为某个论文、某个项目、某个本机路径写特异规则。
-- 用户可见产物必须一遍生成正确；fallback 只能作为最后兼容路线，不能替代主流程质量。
-- **任何结构改动（脚本分子目录、巨型文件拆分、产物落点迁移）都受框架"模块边界契约"约束**
-  （`tests/test_module_boundaries.py` 强制扁平脚本 + 文件名归属注册表 + manifest 精确匹配）。
-  动结构前务必重新核对框架模块边界契约、manifest 与测试，并让全部测试保持绿。
+运行 Find：
+
+```bash
+conda run -n taste python modules/finding/main.py --action find \
+  --config-json path/to/config.json \
+  --selection-json path/to/selection.json
+```
+
+查看可用会议：
+
+```bash
+conda run -n taste python modules/finding/main.py --action catalog
+```
+
+刷新某个 run 的来源状态：
+
+```bash
+conda run -n taste python modules/finding/main.py --action refresh_source_health \
+  --run-dir modules/finding/.runtime/runs/<run_id>
+```
+
+检查重点会议元数据覆盖：
+
+```bash
+conda run -n taste python modules/finding/main.py --action priority_venue_metadata_audit \
+  --year 2026 \
+  --max-backfill-years 3
+```
+
+在确认结果可复用后写入本地缓存：
+
+```bash
+conda run -n taste python modules/finding/main.py --action priority_venue_metadata_audit \
+  --year 2026 \
+  --max-backfill-years 3 \
+  --write-cache
+```
+
+## 常见问题
+
+### 没有推荐结果
+
+优先检查：
+
+- LLM provider、base URL、model、API key 是否可用。
+- `selection.json` 是否选了会议和年份。
+- `include_arxiv` 等补充来源是否按需要开启。
+- `source_status.md` 是否显示来源受限、403、超时或没有摘要。
+
+### NeurIPS / ICLR / ICML 没有 Oral 或 Spotlight
+
+检查来源年份是否已经公开展示类型页面。Finding 会在抓元数据时合并官方展示类型；官方页面还未发布时，结果中只显示可验证字段。
+
+### `find.md` 和 JSON 信息有差异
+
+人工阅读以 `find.md` 为准。`find_results.json` 提供结构化字段给网页和后续阶段使用。
+
+### 会议年份还没公开
+
+Finding 会优先使用请求年份。请求年份没有完整公开元数据时，会使用最近可验证年份作为可用来源，并在来源状态里说明。
+
+### 输出目录在哪里
+
+命令行结束时会打印 run id 和 run 目录。也可以查看：
+
+```text
+modules/finding/.runtime/runs/
+```
+
+最新一次正常 run 会复制到：
+
+```text
+modules/finding/.runtime/latest_run/
+```
+
+## 使用建议
+
+- 先用 3 到 5 个核心会议和最近 1 到 2 年运行。
+- 初次探索打开 arXiv，正式筛选优先使用会议来源。
+- 推荐数量先设为 10 到 20。
+- 每次改研究主题后重新运行 Find。
+- 查看 `source_status.md` 判断来源覆盖，再阅读 `find.md`。

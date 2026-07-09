@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import MarkdownIt from "markdown-it";
 import katex from "katex";
+import texmath from "markdown-it-texmath";
 import "katex/dist/katex.min.css";
 import {
   Project,
@@ -213,6 +215,22 @@ type Tab = "find" | "read" | "ideas" | "plan" | "environment" | "experiment" | "
 type Lang = "zh" | "en";
 type ArtifactPanelSnapshot = { runId: string; artifacts: Artifact[] };
 
+const markdownRenderer = new MarkdownIt({
+  html: false,
+  linkify: true,
+  breaks: false,
+  typographer: false,
+}).use(texmath, {
+  engine: katex,
+  delimiters: ["dollars", "brackets", "beg_end"],
+  katexOptions: {
+    throwOnError: false,
+    strict: "ignore",
+    trust: false,
+    output: "html",
+  },
+});
+
 const FIND_RUN_ARTIFACT_TABS: Tab[] = ["find", "read", "ideas", "plan"];
 
 
@@ -302,160 +320,8 @@ function filterBySourceSelection(items: any[], selection: any) {
 }
 
 
-function cleanAbstractText(value: any) {
-  const text = String(value || "").replace(/\s+/g, " ").trim();
-  const lowered = text.toLowerCase();
-  if (!text || lowered === "no abstract available" || lowered === "no abstract available." || lowered === "abstract not available" || lowered === "abstract not available.") return "";
-  if (text.includes("当前候选缺少真实摘要") || text.includes("当前索引元数据缺少真实摘要")) return "";
-  if (lowered.includes("lacks a real abstract") || lowered.includes("indexed metadata lacks a real abstract")) return "";
-  return text;
-}
-
 function containsCJKText(value: any) {
   return /[一-鿿]/.test(String(value ?? ""));
-}
-
-function localizedChineseFallback(text: string, label: string, lang: Lang) {
-  const value = String(text || "").trim();
-  if (!value) return "";
-  if (lang === "zh" || !containsCJKText(value)) return value;
-  if (label === "abstract") return "English abstract is not available in the current packet.";
-  return "";
-}
-
-function paperAbstract(paper: any, lang: Lang) {
-  const zh = cleanAbstractText(paper?.abstract_zh || paper?.abstract_i18n?.zh);
-  const en = cleanAbstractText(paper?.abstract_en || paper?.abstract_i18n?.en || paper?.abstract || paper?.abstract_excerpt);
-  return lang === "zh" ? (zh || en) : (en || localizedChineseFallback(zh, "abstract", lang));
-}
-
-function cleanMarkdownLine(value: any) {
-  return String(value ?? "").replace(/\r/g, "").replace(/\n{3,}/g, "\n\n").trim();
-}
-
-function localizedPaperField(paper: any, zhKeys: string[], enKeys: string[], lang: Lang, publicText = false) {
-  const keys = lang === "zh" ? [...zhKeys, ...enKeys] : [...enKeys, ...zhKeys];
-  for (const key of keys) {
-    const raw = paper?.[key];
-    if (Array.isArray(raw)) {
-      const values = raw.map((item) => cleanMarkdownLine(item)).filter(Boolean);
-      if (values.length) return values.join(lang === "zh" ? "，" : ", ");
-      continue;
-    }
-    const text = cleanMarkdownLine(raw);
-    if (!text) continue;
-    if (publicText && hasInternalFindPublicText(text)) continue;
-    if (lang === "en" && containsCJKText(text)) continue;
-    return text;
-  }
-  return "";
-}
-
-function paperReasonText(paper: any, lang: Lang) {
-  return localizedPaperField(
-    paper,
-    ["reason_zh", "recommendation_reason_zh", "fit_explanation_zh", "match_explanation_zh"],
-    ["reason_en", "recommendation_reason_en", "fit_explanation_en", "reason", "recommendation_reason"],
-    lang,
-    true,
-  );
-}
-
-function paperDirectionText(paper: any, lang: Lang) {
-  return localizedPaperField(
-    paper,
-    ["hit_directions_zh", "directions_zh", "category_zh", "category"],
-    ["hit_directions_en", "directions_en", "category_en", "category"],
-    lang,
-  );
-}
-
-function paperPresentationText(paper: any, lang: Lang) {
-  const raw = cleanMarkdownLine(paper?.presentation_label || paper?.track || paper?.presentation_type || "");
-  if (!raw) return "";
-  const venue = cleanMarkdownLine(paper?.venue || paper?.conference || "");
-  const year = cleanMarkdownLine(paper?.year || "");
-  const prefix = [venue, year].filter(Boolean).join(" ");
-  let label = raw;
-  if (prefix && label.toLowerCase().startsWith(prefix.toLowerCase())) label = label.slice(prefix.length).trim();
-  label = label.replace(/^[-–—:/\s]+/, "").trim();
-  if (!label) label = raw;
-  if (lang === "zh") {
-    if (/^poster$/i.test(label)) return "Poster";
-    if (/^oral$/i.test(label)) return "Oral";
-    if (/^spotlight$/i.test(label)) return "Spotlight";
-  }
-  return label;
-}
-
-function paperScoreText(paper: any) {
-  const raw = paper?.recommendation_score ?? paper?.score ?? paper?.final_score ?? paper?.llm_fit_score ?? paper?.fit_score;
-  const num = Number(raw);
-  if (Number.isFinite(num)) return num.toFixed(2);
-  return cleanMarkdownLine(raw);
-}
-
-function paperLinksMarkdown(paper: any, lang: Lang) {
-  const links: string[] = [];
-  const paperUrl = cleanMarkdownLine(paper?.url || paper?.html_url || paper?.landing_url || "");
-  const pdfUrl = cleanMarkdownLine(paper?.pdf_url || paper?.pdf || "");
-  const doi = cleanMarkdownLine(paper?.doi || paper?.metadata?.doi || "");
-  if (paperUrl) links.push(`[${lang === "zh" ? "论文页" : "Paper"}](${paperUrl})`);
-  if (pdfUrl && pdfUrl !== paperUrl) links.push(`[PDF](${pdfUrl})`);
-  if (doi && !links.some((link) => link.includes(doi))) links.push(`[DOI](https://doi.org/${doi.replace(/^https?:\/\/doi\.org\//i, "")})`);
-  return links.join(" / ");
-}
-
-function findRecommendationsFromPayload(payload: any) {
-  if (!payload || typeof payload !== "object") return [];
-  const candidates = [payload.strong_recommendations, payload.articles, payload.read_candidates];
-  for (const rows of candidates) {
-    const papers = asArray(rows).filter((paper: any) => paper && typeof paper === "object");
-    if (papers.length) return papers;
-  }
-  return [];
-}
-
-function isFindRecommendationArtifactName(name: any) {
-  return ["article.md", "read_candidates.md"].includes(String(name || ""));
-}
-
-function findRecommendationArtifactMarkdown(artifact: any, payload: any, lang: Lang) {
-  if (!isFindRecommendationArtifactName(artifact?.name)) return "";
-  const papers = findRecommendationsFromPayload(payload);
-  if (!papers.length) return "";
-  const lines: string[] = [];
-  lines.push(`# ${lang === "zh" ? "推荐文章" : "Recommended papers"}`);
-  lines.push("");
-  lines.push(`${lang === "zh" ? "条目数" : "Count"}: ${papers.length}`);
-  for (const [index, paper] of papers.entries()) {
-    const title = cleanMarkdownLine(paper?.title || paper?.id || `${lang === "zh" ? "论文" : "Paper"} ${index + 1}`);
-    const venue = cleanMarkdownLine(paper?.venue || paper?.conference || paper?.source || "");
-    const year = cleanMarkdownLine(paper?.year || "");
-    const presentation = paperPresentationText(paper, lang);
-    const score = paperScoreText(paper);
-    const directions = paperDirectionText(paper, lang);
-    const links = paperLinksMarkdown(paper, lang);
-    const abstract = paperAbstract(paper, lang);
-    const reason = paperReasonText(paper, lang);
-    lines.push("");
-    lines.push(`## ${index + 1}. ${title}`);
-    if (venue || year || presentation) lines.push(`${lang === "zh" ? "会议/年份" : "Venue/year"}: ${[venue, year].filter(Boolean).join(" ")}${presentation ? ` / ${presentation}` : ""}`);
-    if (score) lines.push(lang === "zh" ? `推荐分数: ${score}（满分 10）` : `Recommendation score: ${score} out of 10`);
-    if (directions) lines.push(`${lang === "zh" ? "命中方向" : "Matched directions"}: ${directions}`);
-    if (links) lines.push(`${lang === "zh" ? "链接" : "Links"}: ${links}`);
-    if (abstract) {
-      lines.push("");
-      lines.push(`### ${lang === "zh" ? "摘要" : "Abstract"}`);
-      lines.push(abstract);
-    }
-    if (reason) {
-      lines.push("");
-      lines.push(`### ${lang === "zh" ? "推荐理由" : "Recommendation reason"}`);
-      lines.push(reason);
-    }
-  }
-  return lines.join("\n");
 }
 
 const INTERNAL_FIND_PUBLIC_TEXT_MARKERS = [
@@ -2170,14 +2036,6 @@ function normalizeSelectedYears(value: string | number[]) {
   return uniqueYears.length ? uniqueYears : [DEFAULT_FIND_YEAR];
 }
 
-function escapeHtml(value: string) {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
 function isLegacyRecommendationCardStart(lines: string[], index: number) {
   const text = String(lines[index] || "").trim();
   if (!/^#\d+\b/.test(text)) return false;
@@ -2215,13 +2073,13 @@ function stripLegacyArtifactPointerLines(markdown: string) {
       const text = line.trim();
       if (!text) return true;
       const lower = text.toLowerCase();
-      const pointsToArticleArtifact = lower.includes("article.md");
+      const pointsToFindArtifact = lower.includes("find.md");
       const pointerVerb = /(?:见|查看|打开|see|open|refer)/i.test(text);
       const duplicatedArticleFields = /(?:摘要|推荐理由|完整|abstract|recommendation)/i.test(text);
       const legacyMetadataLine = /^(?:[-*]\s*)?(?:\*\*)?(?:id|url|pdf|fit(?:\s*分数)?|score|final\s*score|最终分数)(?:\*\*)?\s*[:：]\s*.*$/i.test(text)
         || /^(?:url|pdf)$/i.test(text);
       const legacyScoreLine = /[\/|]/.test(text) && /(?:Fit|Score)\s*=/i.test(text);
-      return !(pointsToArticleArtifact && pointerVerb && duplicatedArticleFields) && !legacyMetadataLine && !legacyScoreLine;
+      return !(pointsToFindArtifact && pointerVerb && duplicatedArticleFields) && !legacyMetadataLine && !legacyScoreLine;
     })
     .join("\n")
     .replace(/\s*\/\s*(?:Fit|Score)\s*=\s*[^\n/]+/gi, "")
@@ -2247,7 +2105,6 @@ function normalizePublicLatexLinks(text: string) {
   return value.replace(/\\textemdash(?:\{\})?/g, " -- ");
 }
 
-
 function publicMarkdownArtifact(markdown: string) {
   return normalizePublicLatexLinks(stripLegacyArtifactPointerLines(markdown))
     .replace(/可作为重点精读候选/g, "可作为推荐精读候选")
@@ -2257,716 +2114,8 @@ function publicMarkdownArtifact(markdown: string) {
     .replace(/方法类型：/g, "方法侧重：");
 }
 
-const INLINE_PLACEHOLDER_RE = /^@@TASTE_INLINE_\d+@@$/;
-const MATH_LATEX_COMMAND_RE = /\\(?:frac|sqrt|sum|prod|int|oint|lim|log|ln|exp|sin|cos|tan|min|max|argmax|argmin|softmax|sigmoid|Pr|KL|CE|MSE|mathbb|mathcal|mathbf|mathrm|mathit|mathtt|operatorname|text|textit|emph|textbf|texttt|textsc|underline|left|right|cdot|times|div|pm|mp|sim|leq?|geq?|neq|approx|propto|to|rightarrow|leftarrow|leftrightarrow|Rightarrow|Leftarrow|uparrow|downarrow|cdots|ldots|dots|ell|in|notin|subseteq?|supseteq?|cup|cap|mid|lVert|rVert|alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|pi|rho|sigma|tau|upsilon|phi|varphi|chi|psi|omega|Omega|Sigma|Delta|Gamma|Lambda|nabla|partial|infty)\b/;
-const MATH_SYMBOL_RE = /[Α-Ωα-ωϕΩ∑∏Π∫√∞≈≠≤≥±×÷·∈∉∩∪⊂⊆⊃⊇⊕⊗⊙→←↔⇒⇔↑↓∂∇∼∝∆δθλμσπΩΣτℓ⌈⌉⌊⌋]/;
-const MATH_COMPARATOR_RE = /(?:<=|>=|!=|==|->|<-|=>|<|>|=|≤|≥|≈|≠|∼|∝|→|←|↔|⇒|⇔)/;
-const MATH_BINARY_OPERATOR_RE = /(?:^(?:[A-Za-zΑ-Ωα-ωϕ]|\d+(?:\.\d+)?)\s*[+*/\-·×÷−⊙]\s*(?:[A-Za-zΑ-Ωα-ωϕ]|\d+(?:\.\d+)?)$|[({\[]\s*[A-Za-z0-9Α-Ωα-ωϕ]\s*[-+*/·×÷−⊙]\s*[A-Za-z0-9Α-Ωα-ωϕ]\s*[)}\]])/;
-const MATH_SPACED_OPERATOR_RE = /(?:^|[\s(])(?:[A-Za-zΑ-Ωα-ωϕ]|[A-Z][a-z]|[A-Za-zΑ-Ωα-ωϕ]_\{?[-+A-Za-z0-9Α-Ωα-ωϕ]+\}?|\d+(?:\.\d+)?)\s*[+*/=\-·×÷−⊙]\s*(?:[A-Za-zΑ-Ωα-ωϕ]|[A-Z][a-z]|[A-Za-zΑ-Ωα-ωϕ]_\{?[-+A-Za-z0-9Α-Ωα-ωϕ]+\}?|\d+(?:\.\d+)?)(?:$|[\s,)])/;
-const MATH_INDEX_OFFSET_RE = /\b[A-Za-zΑ-Ωα-ωϕ](?:[a-zΑ-Ωα-ωϕ0-9']{0,4}|_\{?[-+A-Za-z0-9Α-Ωα-ωϕ]+\}?)\s*\+\s*\d+(?:\.\d+)?\b/;
-const MATH_SUB_SUP_RE = /\b(?:[A-Z][A-Za-z0-9]{0,8}|[a-zΑ-Ωα-ωϕ][A-Za-z0-9Α-Ωα-ωϕ]{0,8})[_^]\{?[-+A-Za-z0-9Α-Ωα-ωϕ]+\}?/;
-const MATH_FUNCTION_RE = /\b(?:p|P|Pr|q|Q|f|g|h|L|D|O|N|E|Rank|rank|Var|Cov|log|ln|exp|sum|Norm|sin|cos|softmax|sigmoid|argmax|argmin|Sample|sample|KL|CE|MSE|NDCG|AUC)\s*\(/;
-const MATH_WORD_RE = /^(?:argmax|argmin|softmax|sigmoid|log|ln|exp|sum|Norm|sin|cos|KL|CE|MSE|NDCG|AUC|BPR|Sample|sample|Rank|rank|Pr|Var|Cov)$/;
-const LATEX_TEXT_STYLE_COMMANDS = new Set(["textit", "emph", "textbf", "texttt", "textsc", "underline"]);
-const BARE_LATEX_TEXT_COMMAND_START_RE = /\\(textit|emph|textbf|texttt|textsc|underline|mathrm|mathbf|mathit|mathtt|text)\s*\{/g;
-const NON_MATH_SLASH_TOKEN_RE = /^(?:w\/?o|w\/|n\/?a|and\/or)$/i;
-
-function looksLikeCodeIdentifierOrLabel(raw: string) {
-  const value = normalizeMathTokenCore(raw).replace(/[:：]+$/, "").trim();
-  if (!value || !/_/.test(value)) return false;
-  if (/[\\{}()[\]^=<>+*\/·×÷−⊙∑ΣΠπθλμσρφψωαβγδζεηκνξϕΩΩ]/.test(value)) return false;
-  return /^[A-Za-z][A-Za-z0-9:-]*(?:_[A-Za-z0-9:-]+)+$/.test(value);
-}
-
-function looksLikePlainMetadataAssignment(raw: string) {
-  const value = decodeBasicHtmlEntities(stripMathDelimiters(raw)).replace(/^\s*[-*]\s*/, "").trim();
-  if (!value || value.length > 260) return false;
-  if (MATH_LATEX_COMMAND_RE.test(value) || /\\[A-Za-z]+/.test(value)) return false;
-  if (/[\\{}()[\]^<>≤≥≈≠∼∝→←↔⇒⇔∑ΣΠπθλμσρφψωαβγδζεηκνξϕΩΩ]/.test(value)) return false;
-  const clauses = value.split(/[;,；]/).map((part) => part.trim()).filter(Boolean);
-  if (!clauses.length) return false;
-  return clauses.every((clause) => {
-    const match = clause.match(/^([A-Za-z][A-Za-z0-9_ -]{2,48})\s*[:=]\s*(.{1,120})$/);
-    if (!match) return false;
-    const key = String(match[1] || "").trim();
-    const rhs = String(match[2] || "").trim();
-    if (!key || !rhs || MATH_WORD_RE.test(key)) return false;
-    if (/^[A-Za-zΑ-Ωα-ωϕ]{1,2}$/.test(key)) return false;
-    if (/[\\{}()[\]^<>≤≥≈≠∼∝→←↔⇒⇔∑ΣΠπθλμσρφψωαβγδζεηκνξϕΩΩ]/.test(rhs)) return false;
-    return true;
-  });
-}
-
-const MATH_COMMAND_SYMBOL_REPLACEMENTS: Array<[RegExp, string]> = [
-  [/\\cdot/g, "·"],
-  [/\\times/g, "×"],
-  [/\\div/g, "÷"],
-  [/\\pm/g, "±"],
-  [/\\mp/g, "∓"],
-  [/\\sim/g, "∼"],
-  [/\\leq?/g, "≤"],
-  [/\\geq?/g, "≥"],
-  [/\\neq/g, "≠"],
-  [/\\approx/g, "≈"],
-  [/\\propto/g, "∝"],
-  [/\\rightarrow|\\to/g, "→"],
-  [/\\leftarrow/g, "←"],
-  [/\\leftrightarrow/g, "↔"],
-  [/\\Rightarrow/g, "⇒"],
-  [/\\Leftarrow/g, "⇐"],
-  [/\\uparrow/g, "↑"],
-  [/\\downarrow/g, "↓"],
-  [/\\cdots|\\ldots|\\dots/g, "…"],
-  [/\\ell/g, "ℓ"],
-  [/\\infty/g, "∞"],
-  [/\\partial/g, "∂"],
-  [/\\nabla/g, "∇"],
-  [/\\sum/g, "∑"],
-  [/\\prod/g, "∏"],
-  [/\\int/g, "∫"],
-  [/\\in/g, "∈"],
-  [/\\notin/g, "∉"],
-  [/\\subseteq/g, "⊆"],
-  [/\\subset/g, "⊂"],
-  [/\\supseteq/g, "⊇"],
-  [/\\supset/g, "⊃"],
-  [/\\cup/g, "∪"],
-  [/\\cap/g, "∩"],
-  [/\\mid/g, "|"],
-  [/\\lVert/g, "||"],
-  [/\\rVert/g, "||"],
-  [/\\alpha/g, "α"],
-  [/\\beta/g, "β"],
-  [/\\gamma/g, "γ"],
-  [/\\delta/g, "δ"],
-  [/\\epsilon|\\varepsilon/g, "ε"],
-  [/\\zeta/g, "ζ"],
-  [/\\eta/g, "η"],
-  [/\\theta|\\vartheta/g, "θ"],
-  [/\\iota/g, "ι"],
-  [/\\kappa/g, "κ"],
-  [/\\lambda/g, "λ"],
-  [/\\mu/g, "μ"],
-  [/\\nu/g, "ν"],
-  [/\\xi/g, "ξ"],
-  [/\\pi/g, "π"],
-  [/\\rho/g, "ρ"],
-  [/\\sigma/g, "σ"],
-  [/\\tau/g, "τ"],
-  [/\\upsilon/g, "υ"],
-  [/\\phi|\\varphi/g, "φ"],
-  [/\\chi/g, "χ"],
-  [/\\psi/g, "ψ"],
-  [/\\omega/g, "ω"],
-  [/\\Omega/g, "Ω"],
-  [/\\Sigma/g, "Σ"],
-  [/\\Delta/g, "∆"],
-  [/\\Gamma/g, "Γ"],
-  [/\\Lambda/g, "Λ"],
-];
-
-
-function decodeBasicHtmlEntities(raw: string) {
-  let value = String(raw || "");
-  for (let index = 0; index < 5; index += 1) {
-    const next = value
-      .replace(/&lt;|&#60;|&#x3c;/gi, "<")
-      .replace(/&gt;|&#62;|&#x3e;/gi, ">")
-      .replace(/&le;|&#8804;|&#x2264;/gi, "≤")
-      .replace(/&ge;|&#8805;|&#x2265;/gi, "≥")
-      .replace(/&minus;|&#8722;|&#x2212;/gi, "−")
-      .replace(/&times;|&#215;|&#xd7;/gi, "×")
-      .replace(/&amp;|&#38;|&#x26;/gi, "&");
-    if (next === value) break;
-    value = next;
-  }
-  return value;
-}
-
-function stripMathDelimiters(raw: string) {
-  let value = String(raw || "").trim();
-  const pairs: Array<[RegExp, RegExp]> = [
-    [/^\$\$\s*/, /\s*\$\$$/],
-    [/^\$\s*/, /\s*\$$/],
-    [/^\\\(\s*/, /\s*\\\)$/],
-    [/^\\\[\s*/, /\s*\\\]$/],
-  ];
-  pairs.forEach(([left, right]) => {
-    if (left.test(value) && right.test(value)) value = value.replace(left, "").replace(right, "");
-  });
-  return value.trim();
-}
-
-function normalizeMathTokenCore(token: string) {
-  return String(token || "")
-    .replace(/^["'“”‘’]+/, "")
-    .replace(/["'“”‘’]+$/, "")
-    .replace(/^[,.;!?，。；、]+/, "")
-    .replace(/[,.;!?，。；、]+$/, "");
-}
-
-function isStrongMathToken(token: string) {
-  const core = normalizeMathTokenCore(token);
-  if (!core || INLINE_PLACEHOLDER_RE.test(core) || /^https?:\/\//i.test(core) || NON_MATH_SLASH_TOKEN_RE.test(core)) return false;
-  if (/^[+\-−]?\d+(?:\.\d+)?\s*(?:[×x%％]|\\%)$/.test(core)) return false;
-  if (/^[A-Za-z][A-Za-z0-9]{1,32}_[A-Za-z][A-Za-z0-9]{1,32}$/.test(core)) return false;
-  if (looksLikeCodeIdentifierOrLabel(core) || looksLikePlainMetadataAssignment(core)) return false;
-  if (/^[A-Za-z][A-Za-z0-9]{1,32}\*$/.test(core)) return false;
-  if (MATH_LATEX_COMMAND_RE.test(core) || /^\\[A-Za-z]+/.test(core)) return true;
-  if (MATH_INDEX_OFFSET_RE.test(core)) return true;
-  if (MATH_SYMBOL_RE.test(core) || MATH_SUB_SUP_RE.test(core) || MATH_COMPARATOR_RE.test(core)) return true;
-  if (/^[A-Za-zΑ-Ωα-ωϕ][A-Za-z0-9_']{0,32}\([^)]{1,160}\)$/.test(core) && /[|_^=<>≤≥≈≠∼,+*/'\-]|[Α-Ωα-ωϕ]|,/.test(core)) return true;
-  if (MATH_BINARY_OPERATOR_RE.test(core) || MATH_FUNCTION_RE.test(core)) return true;
-  if (/^[A-Za-zΑ-Ωα-ωϕ]\([^)]{1,120}\)$/.test(core) && /[A-Za-z0-9Α-Ωα-ωϕ_^\-+*/=,|]/.test(core)) return true;
-  return false;
-}
-
-function isVariableMathToken(token: string) {
-  const core = normalizeMathTokenCore(token);
-  if (!core || INLINE_PLACEHOLDER_RE.test(core)) return false;
-  if (/^[A-Za-zΑ-Ωα-ω][0-9']?$/.test(core)) return true;
-  if (/^[A-Z][a-z][0-9']*$/.test(core)) return true;
-  if (/^[A-Za-zΑ-Ωα-ω]\)$/.test(core) || /^\([A-Za-zΑ-Ωα-ω]$/.test(core)) return true;
-  return false;
-}
-
-function isMathConnectorToken(token: string) {
-  const core = normalizeMathTokenCore(token);
-  if (!core) return false;
-  return /^(?:[+\-*/=<>≤≥≈≠∼∝→←↔⇒⇔×÷·−±|∣,]|\|\||\\mid)$/.test(core);
-}
-
-function neighboringTokenIndex(pieces: string[], index: number, step: -1 | 1) {
-  for (let cursor = index + step; cursor >= 0 && cursor < pieces.length; cursor += step) {
-    const part = pieces[cursor];
-    if (!part || /^\s+$/.test(part) || INLINE_PLACEHOLDER_RE.test(part)) continue;
-    return cursor;
-  }
-  return -1;
-}
-
-function looksLikeBareMathExpression(raw: string) {
-  const value = decodeBasicHtmlEntities(stripMathDelimiters(raw)).replace(/\s+/g, " ").trim();
-  if (!value || value.length > 520) return false;
-  if (NON_MATH_SLASH_TOKEN_RE.test(value)) return false;
-  if (INLINE_PLACEHOLDER_RE.test(value) || /^https?:\/\//i.test(value)) return false;
-  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) return false;
-  if (/@/.test(value) && !/[=Σ∑_^]/.test(value)) return false;
-  if (/^[+\-−]?\d+(?:\.\d+)?\s*(?:[×x%％]|\%)$/.test(value)) return false;
-  if (/^[A-Za-z][A-Za-z0-9]{1,32}_[A-Za-z][A-Za-z0-9]{1,32}$/.test(value)) return false;
-  if (looksLikeCodeIdentifierOrLabel(value) || looksLikePlainMetadataAssignment(value)) return false;
-  if (/^[A-Za-z][A-Za-z0-9]{1,32}\*$/.test(value)) return false;
-  if (/\bRECTOKEN\b/.test(value) || /^<\/?(?:think|ground|answer|feedback|item_list)>$/i.test(value)) return false;
-  if (/^\*+[:：]?\s*[A-Za-z0-9_:-]+$/.test(value)) return false;
-  if (/\b(?:icml_downloads|openreview|dblp|semantic_scholar)\b/i.test(value)) return false;
-  if (/^(?:run|job|project|source|stage|task|current|management)_[A-Za-z0-9_:-]+:?$/.test(value)) return false;
-  if (/^[a-z]{4,}_[a-z]{4,}$/.test(value)) return false;
-  if (/^<\/?[A-Za-z][A-Za-z0-9_:-]*>$/.test(value)) return false;
-  if (/^[\d.,]+$/.test(value)) return false;
-  if (/[一-鿿]/.test(value)) return false;
-  const hasCommand = MATH_LATEX_COMMAND_RE.test(value) || /\\[A-Za-z]+/.test(value);
-  const hasSymbol = MATH_SYMBOL_RE.test(value);
-  const hasSubSup = MATH_SUB_SUP_RE.test(value);
-  const hasComparator = MATH_COMPARATOR_RE.test(value) && /[A-Za-zΑ-Ωα-ωϕ0-9]/.test(value);
-  const hasIndexOffset = MATH_INDEX_OFFSET_RE.test(value);
-  const hasOperator = (MATH_BINARY_OPERATOR_RE.test(value) || MATH_SPACED_OPERATOR_RE.test(value)) && /[A-Za-zΑ-Ωα-ωϕ]/.test(value);
-  const hasNamedFunction = MATH_FUNCTION_RE.test(value);
-  const hasCompactFunction = /^[A-Za-zΑ-Ωα-ωϕ][A-Za-z0-9_']{0,32}\([^)]{1,160}\)$/.test(value)
-    && /[A-Za-z0-9Α-Ωα-ωϕ_^\-+*/=,|]/.test(value);
-  const hasBracketFormula = /(?:\|\|[^|]{1,220}\|\||[A-Za-zΑ-Ωα-ωϕ][A-Za-z0-9_']{0,32}\[[^\]]{1,220}\]|\[[^\]]*[=+\-*/^_<>≤≥≈∑Σ][^\]]*\])/.test(value);
-  const hasMathKeyword = /\b(?:max|min|argmax|argmin|Sigma|alpha|beta|gamma|delta|theta|lambda|kappa|pi|sigma)\b/.test(value)
-    && /[()[\]{}_^+\-*/=<>|]/.test(value);
-  const words = value.match(/[A-Za-z]{3,}/g) || [];
-  const proseWords = words.filter((word) => !MATH_WORD_RE.test(word) && !/^[A-Z][a-z]$/.test(word));
-  const signals = [hasCommand, hasSymbol, hasSubSup, hasComparator, hasIndexOffset, hasOperator, hasNamedFunction, hasCompactFunction, hasBracketFormula, hasMathKeyword].filter(Boolean).length;
-  if (hasComparator && signals === 1 && proseWords.length >= 2 && !/[(){}\[\]_^Α-Ωα-ωϕ\d]/.test(value)) return false;
-  if (proseWords.length >= 4 && signals < 2) return false;
-  return signals > 0;
-}
-
-function renderBareMathTokenGroups(text: string, protectMath: (expression: string) => string) {
-  const pieces = String(text || "").match(/@@TASTE_INLINE_\d+@@|\s+|[，。；、！？：；]+|[一-鿿]+|[^\s一-鿿，。；、！？：；]+/g) || [];
-  const strong = pieces.map((part) => Boolean(part && !/^\s+$/.test(part) && !INLINE_PLACEHOLDER_RE.test(part) && isStrongMathToken(part)));
-  const variable = pieces.map((part) => Boolean(part && !/^\s+$/.test(part) && !INLINE_PLACEHOLDER_RE.test(part) && isVariableMathToken(part)));
-  const connector = pieces.map((part) => Boolean(part && !/^\s+$/.test(part) && !INLINE_PLACEHOLDER_RE.test(part) && isMathConnectorToken(part)));
-  const included = pieces.map((_part, index) => {
-    if (strong[index]) return true;
-    const prev = neighboringTokenIndex(pieces, index, -1);
-    const next = neighboringTokenIndex(pieces, index, 1);
-    if (connector[index]) return (prev >= 0 && (strong[prev] || variable[prev])) || (next >= 0 && (strong[next] || variable[next]));
-    if (variable[index]) return (prev >= 0 && (strong[prev] || connector[prev])) || (next >= 0 && (strong[next] || connector[next]));
-    return false;
-  });
-  const output: string[] = [];
-  const group: string[] = [];
-  const flushGroup = () => {
-    if (!group.length) return;
-    const raw = group.join("");
-    const leading = raw.match(/^\s*/)?.[0] || "";
-    const trailingWhitespace = raw.match(/\s*$/)?.[0] || "";
-    let core = raw.slice(leading.length, raw.length - trailingWhitespace.length);
-    const trailingPunctuation = core.match(/[,.;!?，。；、]+$/)?.[0] || "";
-    if (trailingPunctuation) core = core.slice(0, -trailingPunctuation.length);
-    if (looksLikeBareMathExpression(core)) {
-      output.push(`${leading}${protectMath(core)}${trailingPunctuation}${trailingWhitespace}`);
-    } else {
-      output.push(raw);
-    }
-    group.length = 0;
-  };
-  pieces.forEach((part, index) => {
-    if (INLINE_PLACEHOLDER_RE.test(part)) {
-      flushGroup();
-      output.push(part);
-      return;
-    }
-    if (/^\s+$/.test(part)) {
-      if (group.length) group.push(part);
-      else output.push(part);
-      return;
-    }
-    if (included[index]) {
-      group.push(part);
-      return;
-    }
-    flushGroup();
-    output.push(part);
-  });
-  flushGroup();
-  return output.join("");
-}
-
-function renderBareMathChunk(chunk: string, protectMath: (expression: string) => string) {
-  const raw = String(chunk || "");
-  if (!raw.trim()) return raw;
-  const leadingWhitespace = raw.match(/^\s*/)?.[0] || "";
-  const trailingWhitespace = raw.match(/\s*$/)?.[0] || "";
-  let core = raw.slice(leadingWhitespace.length, raw.length - trailingWhitespace.length);
-  const leadingQuote = core.match(/^["'“”‘’]+/)?.[0] || "";
-  if (leadingQuote) core = core.slice(leadingQuote.length);
-  const trailingQuote = core.match(/["'“”‘’]+$/)?.[0] || "";
-  if (trailingQuote) core = core.slice(0, -trailingQuote.length);
-  const trailingPunctuation = core.match(/[,.;!?]+$/)?.[0] || "";
-  if (trailingPunctuation) core = core.slice(0, -trailingPunctuation.length);
-  if (!core) return raw;
-  if (looksLikeBareMathExpression(core)) {
-    return `${leadingWhitespace}${leadingQuote}${protectMath(core)}${trailingPunctuation}${trailingQuote}${trailingWhitespace}`;
-  }
-  return `${leadingWhitespace}${leadingQuote}${renderBareMathTokenGroups(core, protectMath)}${trailingPunctuation}${trailingQuote}${trailingWhitespace}`;
-}
-
-function balancedLatexCommandEnd(value: string, openIndex: number) {
-  let depth = 0;
-  for (let index = openIndex; index < value.length; index += 1) {
-    const char = value[index];
-    if (char === "{") depth += 1;
-    if (char === "}") {
-      depth -= 1;
-      if (depth === 0) return index + 1;
-    }
-  }
-  return -1;
-}
-
-function renderBareLatexCommandsInText(
-  text: string,
-  protectMath: (expression: string) => string,
-  protectTextCommand: (command: string, innerText: string) => string,
-): string {
-  const value = String(text || "");
-  let cursor = 0;
-  let output = "";
-  BARE_LATEX_TEXT_COMMAND_START_RE.lastIndex = 0;
-  for (;;) {
-    const match = BARE_LATEX_TEXT_COMMAND_START_RE.exec(value);
-    if (!match) break;
-    const command = String(match[1] || "");
-    const openIndex = value.indexOf("{", match.index);
-    const end = balancedLatexCommandEnd(value, openIndex);
-    if (end < 0) continue;
-    output += value.slice(cursor, match.index);
-    const rawCommand = value.slice(match.index, end);
-    if (LATEX_TEXT_STYLE_COMMANDS.has(command)) {
-      const inner = value.slice(openIndex + 1, end - 1);
-      const nestedText = renderBareLatexCommandsInText(inner, protectMath, protectTextCommand);
-      output += protectTextCommand(command, renderBareMathInText(nestedText, protectMath));
-    } else {
-      output += protectMath(rawCommand);
-    }
-    cursor = end;
-    BARE_LATEX_TEXT_COMMAND_START_RE.lastIndex = end;
-  }
-  return output + value.slice(cursor);
-}
-
-function renderBareMathInText(text: string, protectMath: (expression: string) => string) {
-  const parts = String(text || "").split(/(@@TASTE_INLINE_\d+@@|[一-鿿]+|[，。；、！？：；]|[（）])/g).filter((part) => part !== "");
-  return parts.map((part) => {
-    if (INLINE_PLACEHOLDER_RE.test(part)) return part;
-    if (/^[一-鿿]+$/.test(part) || /^[，。；、！？：；（）]$/.test(part)) return part;
-    return renderBareMathChunk(part, protectMath);
-  }).join("");
-}
-
-const UNICODE_MATH_TO_LATEX: Array<[RegExp, string]> = [
-  [/−/g, "-"],
-  [/·/g, "\\cdot "],
-  [/×/g, "\\times "],
-  [/÷/g, "\\div "],
-  [/∼/g, "\\sim "],
-  [/≈/g, "\\approx "],
-  [/≠/g, "\\ne "],
-  [/≤/g, "\\le "],
-  [/≥/g, "\\ge "],
-  [/→/g, "\\to "],
-  [/←/g, "\\leftarrow "],
-  [/↔/g, "\\leftrightarrow "],
-  [/±/g, "\\pm "],
-  [/∓/g, "\\mp "],
-  [/∝/g, "\\propto "],
-  [/∈/g, "\\in "],
-  [/∉/g, "\\notin "],
-  [/⊆/g, "\\subseteq "],
-  [/⊂/g, "\\subset "],
-  [/⊇/g, "\\supseteq "],
-  [/⊃/g, "\\supset "],
-  [/∪/g, "\\cup "],
-  [/∩/g, "\\cap "],
-  [/∑/g, "\\sum "],
-  [/∏/g, "\\prod "],
-  [/∫/g, "\\int "],
-  [/∇/g, "\\nabla "],
-  [/∂/g, "\\partial "],
-  [/∞/g, "\\infty "],
-  [/ℓ/g, "\\ell "],
-  [/Ω/g, "\\Omega "],
-  [/Ω/g, "\\Omega "],
-  [/Σ/g, "\\Sigma "],
-  [/∆/g, "\\Delta "],
-  [/Δ/g, "\\Delta "],
-  [/Γ/g, "\\Gamma "],
-  [/Λ/g, "\\Lambda "],
-  [/α/g, "\\alpha "],
-  [/β/g, "\\beta "],
-  [/γ/g, "\\gamma "],
-  [/δ/g, "\\delta "],
-  [/ε/g, "\\epsilon "],
-  [/ζ/g, "\\zeta "],
-  [/η/g, "\\eta "],
-  [/θ/g, "\\theta "],
-  [/ι/g, "\\iota "],
-  [/κ/g, "\\kappa "],
-  [/λ/g, "\\lambda "],
-  [/μ/g, "\\mu "],
-  [/ν/g, "\\nu "],
-  [/ξ/g, "\\xi "],
-  [/π/g, "\\pi "],
-  [/ρ/g, "\\rho "],
-  [/σ/g, "\\sigma "],
-  [/τ/g, "\\tau "],
-  [/υ/g, "\\upsilon "],
-  [/φ/g, "\\phi "],
-  [/ϕ/g, "\\phi "],
-  [/χ/g, "\\chi "],
-  [/ψ/g, "\\psi "],
-  [/ω/g, "\\omega "],
-];
-
-const WORD_MATH_TO_LATEX: Array<[RegExp, string]> = [
-  [/(^|[^\\A-Za-z])lambda\b/g, "$1\\lambda "],
-  [/(^|[^\\A-Za-z])kappa\b/g, "$1\\kappa "],
-  [/(^|[^\\A-Za-z])theta\b/g, "$1\\theta "],
-  [/(^|[^\\A-Za-z])rho\b/g, "$1\\rho "],
-  [/(^|[^\\A-Za-z])sigma\b/g, "$1\\sigma "],
-  [/(^|[^\\A-Za-z])tau\b/g, "$1\\tau "],
-  [/(^|[^\\A-Za-z])alpha\b/g, "$1\\alpha "],
-  [/(^|[^\\A-Za-z])beta\b/g, "$1\\beta "],
-  [/(^|[^\\A-Za-z])gamma\b/g, "$1\\gamma "],
-];
-
-const SUPERSCRIPT_DIGIT_MAP: Record<string, string> = {
-  "⁰": "0",
-  "¹": "1",
-  "²": "2",
-  "³": "3",
-  "⁴": "4",
-  "⁵": "5",
-  "⁶": "6",
-  "⁷": "7",
-  "⁸": "8",
-  "⁹": "9",
-};
-
-function normalizeUnicodeSuperscriptRun(raw: string) {
-  const sign = raw.startsWith("⁻") ? "-" : raw.startsWith("⁺") ? "+" : "";
-  const digits = raw.replace(/^[⁺⁻]/, "").split("").map((digit) => SUPERSCRIPT_DIGIT_MAP[digit] || digit).join("");
-  return digits ? `^{${sign}${digits}}` : raw;
-}
-
-function normalizeInformalMathForKatex(raw: string) {
-  let value = decodeBasicHtmlEntities(stripMathDelimiters(raw))
-    .replace(/\r?\n/g, " ")
-    .replace(/\\begin\{[^{}]+\}/g, "")
-    .replace(/\\end\{[^{}]+\}/g, "")
-    .replace(/\\left\s*/g, "")
-    .replace(/\\right\s*/g, "")
-    .replace(/\\(?:,|;|:)\s*/g, " ")
-    .replace(/\\!/g, "")
-    .replace(/\\~/g, "\\sim ")
-    .replace(/(\\[A-Za-z]+|[A-Za-zΑ-Ωα-ω])\s*\u0303\s*\u0332/g, "\\underline{\\tilde{$1}}")
-    .replace(/(\\[A-Za-z]+|[A-Za-zΑ-Ωα-ω])\s*\u0304/g, "\\bar{$1}")
-    .replace(/(\\[A-Za-z]+|[A-Za-zΑ-Ωα-ω])\s*\u0303/g, "\\tilde{$1}")
-    .replace(/(\\[A-Za-z]+|[A-Za-zΑ-Ωα-ω])\s*\u0332/g, "\\underline{$1}")
-    .replace(/\\_/g, "_")
-    .replace(/(^|[^\\])&/g, "$1\\&")
-    .replace(/[⁺⁻]?[⁰¹²³⁴⁵⁶⁷⁸⁹]+/g, normalizeUnicodeSuperscriptRun);
-  value = value
-    .replace(/^\^\{?([+\-−]?[A-Za-z0-9Α-Ωα-ω]+(?:[+\-−][A-Za-z0-9Α-Ωα-ω]+)?)\}?$/, "{}^{$1}")
-    .replace(/^_\{?([A-Za-z0-9Α-Ωα-ω,+\-]+)\}?$/, "{}_{$1}")
-    .replace(/([A-Za-zΑ-Ωα-ω0-9)}\]])\^\(([^()]{1,100})\)/g, "$1^{$2}")
-    .replace(/([A-Za-zΑ-Ωα-ω0-9)}\]])_\(([^()]{1,100})\)/g, "$1_{$2}")
-    .replace(/([A-Za-zΑ-Ωα-ω0-9)}\]])\^\[([^\[\]]{1,100})\]/g, "$1^{$2}")
-    .replace(/([A-Za-zΑ-Ωα-ω0-9)}\]])_\[([^\[\]]{1,100})\]/g, "$1_{$2}")
-    .replace(/([A-Za-zΑ-Ωα-ω0-9)}\]])\^([+\-−]?(?:\d+(?:\.\d+)?|[Α-Ωα-ωA-Za-z]))/g, "$1^{$2}")
-    .replace(/([A-Za-zΑ-Ωα-ω0-9)}\]])_([A-Za-zΑ-Ωα-ω0-9]+(?:,[A-Za-zΑ-Ωα-ω0-9]+)+)(?!_)/g, "$1_{$2}")
-    .replace(/([πΠΣθτλμσρφψωαβγδζεηκνξϕΩΩ])([A-Za-z0-9]+(?:,[A-Za-z0-9]+)+)/g, "$1_{$2}")
-    .replace(/\b([A-Za-z])([A-Za-z0-9]+(?:,[A-Za-z0-9]+)+)\b/g, "$1_{$2}")
-    .replace(/\b([PQ])([θτλμσρφψωαβγδζεηκνξϕ])(?=\()/g, "$1_{$2}")
-    .replace(/\b([ypu])([itjkuxv])(?=[,|)<>])/g, "$1_{$2}")
-    .replace(/\b(w)([uvxy]),/g, "$1_{$2},");
-  WORD_MATH_TO_LATEX.forEach(([pattern, replacement]) => {
-    value = value.replace(pattern, replacement);
-  });
-  UNICODE_MATH_TO_LATEX.forEach(([pattern, replacement]) => {
-    value = value.replace(pattern, replacement);
-  });
-  value = value.replace(/\\\\(alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|pi|rho|sigma|tau|upsilon|phi|varphi|chi|psi|omega|Omega|Sigma|Delta|Gamma|Lambda|infty|ell|cdot|times|div|sim|approx|ne|leq?|geq?|to|rightarrow|leftarrow|leftrightarrow|pm|mp|propto|in|notin|subseteq|subset|supseteq|supset|cup|cap|sum|prod|int|nabla|partial)\b/g, "\\$1");
-  value = value
-    .replace(/_\\([A-Za-z]+)\s*_([A-Za-z0-9]+)/g, "_{\\$1,$2}")
-    .replace(/_\{([^{}]+)\}_([A-Za-z0-9]+)/g, "_{$1,$2}")
-    .replace(/_([A-Za-z0-9]+)_\{([^{}]+)\}/g, "_{$1,$2}")
-    .replace(/_([A-Za-z0-9]+)_([A-Za-z0-9]+)/g, "_{$1,$2}");
-  return value.replace(/\s+/g, " " ).trim();
-}
-
-function renderMathSource(raw: string, displayMode = false) {
-  const latex = normalizeInformalMathForKatex(raw);
-  try {
-    return katex.renderToString(latex, {
-      displayMode,
-      throwOnError: false,
-      strict: "ignore",
-      output: "html",
-      trust: false,
-    });
-  } catch (_error) {
-    return escapeHtml(decodeBasicHtmlEntities(stripMathDelimiters(raw)));
-  }
-}
-
-function mathInlineHtml(raw: string) {
-  const label = escapeHtml(decodeBasicHtmlEntities(stripMathDelimiters(raw)));
-  return `<span class="math-inline" aria-label="${label}">${renderMathSource(raw, false)}</span>`;
-}
-
-function mathDisplayHtml(raw: string) {
-  const label = escapeHtml(decodeBasicHtmlEntities(stripMathDelimiters(raw)));
-  return `<div class="math-display" aria-label="${label}">${renderMathSource(raw, true)}</div>`;
-}
-
-function isLikelyDelimitedMath(raw: string) {
-  const value = stripMathDelimiters(raw);
-  if (!value || /[一-鿿]/.test(value)) return false;
-  if (/^\\(?:textit|emph|textbf|texttt|textsc|underline|mathrm|mathbf|mathit|mathtt|text)\s*\{[\s\S]{1,320}\}$/.test(value)) return true;
-  if (/^\d+(?:\.\d+)?\s*(?:USD|RMB|CNY|dollars?)?$/i.test(value)) return false;
-  if (/^https?:\/\//i.test(value)) return false;
-  if (/^[+\-−]?\d+(?:\.\d+)?\s*(?:\\%|%|％)$/.test(value)) return true;
-  return looksLikeBareMathExpression(value) || /^[A-Za-zΑ-Ωα-ωℓ][A-Za-z0-9_^{},+\-*/=\s().|·×÷−%\\]{0,120}$/.test(value);
-}
-
-function isDelimitedMathAffixInContext(raw: string, before: string, after: string) {
-  const value = decodeBasicHtmlEntities(stripMathDelimiters(raw)).replace(/\s+/g, "").trim();
-  if (!value || /[一-鿿]/.test(value)) return false;
-  const left = String(before || "");
-  const right = String(after || "");
-  if (!/[A-Za-zΑ-Ωα-ω0-9)}\]]/.test(left)) return false;
-  if (right === "$" || /^\d/.test(right)) return false;
-  return /^(?:\^\{?[+\-−]?[A-Za-z0-9Α-Ωα-ω]+(?:[+\-−][A-Za-z0-9Α-Ωα-ω]+)?\}?|_\{?[A-Za-z0-9Α-Ωα-ω,+\-]+\}?)$/.test(value);
-}
-
-function isNumericDelimitedMathInContext(raw: string, before: string, after: string) {
-  const value = decodeBasicHtmlEntities(stripMathDelimiters(raw)).replace(/\\%/g, "%").trim();
-  if (!/^[+\-−]?\d+(?:\.\d+)?%?$/.test(value)) return false;
-  const left = String(before || "");
-  const right = String(after || "");
-  return /[×·*/^%±]|[A-Za-zΑ-Ωα-ωℓ]/.test(right) || /[×·*/^±]/.test(left);
-}
-
-function displayMathExpressionFromLine(line: string) {
-  const value = String(line || "").trim();
-  let match = value.match(/^\$\$\s*([\s\S]+?)\s*\$\$$/);
-  if (match) return match[1];
-  match = value.match(/^\\\[\s*([\s\S]+?)\s*\\\]$/);
-  if (match) return match[1];
-  match = value.match(/^\\begin\{(equation\*?|align\*?|aligned|gather\*?|multline\*?)\}\s*([\s\S]+?)\s*\\end\{\1\}$/);
-  if (match) return match[2];
-  return "";
-}
-
 function markdownToHtml(markdown: string) {
-  const lines = publicMarkdownArtifact(markdown).split(/\r?\n/);
-  const html: string[] = [];
-  let inList = false;
-  let listTag = "ul";
-  let inCode = false;
-  const codeLines: string[] = [];
-  const closeList = () => {
-    if (inList) {
-      html.push(`</${listTag}>`);
-      inList = false;
-    }
-  };
-  const flushCode = () => {
-    if (inCode) {
-      html.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
-      codeLines.length = 0;
-      inCode = false;
-    }
-  };
-  const inline = (text: string) => {
-    const tokens: string[] = [];
-    const protect = (htmlValue: string) => {
-      const token = `@@TASTE_INLINE_${tokens.length}@@`;
-      tokens.push(htmlValue);
-      return token;
-    };
-    let value = normalizePublicLatexLinks(String(text ?? ""));
-    const restoreInlineTokens = (htmlValue: string) => {
-      let restored = htmlValue;
-      tokens.forEach((tokenHtml, idx) => {
-        restored = restored.replace(new RegExp(`@@TASTE_INLINE_${idx}@@`, "g"), tokenHtml);
-      });
-      return restored;
-    };
-    const protectLatexTextCommandHtml = (command: string, innerText: string) => {
-      const innerHtml = restoreInlineTokens(escapeHtml(innerText));
-      if (command === "textbf") return protect(`<strong>${innerHtml}</strong>`);
-      if (command === "texttt") return protect(`<code>${innerHtml}</code>`);
-      if (command === "textsc") return protect(`<span class="latex-small-caps">${innerHtml}</span>`);
-      if (command === "underline") return protect(`<span class="latex-underline">${innerHtml}</span>`);
-      return protect(`<em>${innerHtml}</em>`);
-    };
-    value = value.replace(/`([^`]+)`/g, (_match, code) => protect(`<code>${escapeHtml(String(code || ""))}</code>`));
-    value = value.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, (_match, label, url) => {
-      const href = escapeHtml(String(url || ""));
-      return protect(`<a href="${href}" target="_blank" rel="noreferrer">${escapeHtml(String(label || url || ""))}</a>`);
-    });
-    value = value.replace(/\\begin\{(equation\*?|align\*?|aligned|gather\*?|multline\*?)\}([\s\S]{1,700}?)\\end\{\1\}/g, (_match, _env, expr) => protect(mathInlineHtml(String(expr || ""))));
-    value = value.replace(/\\\[([\s\S]{1,700}?)\\\]/g, (_match, expr) => protect(mathInlineHtml(String(expr || ""))));
-    value = value.replace(/\\\(([\s\S]{1,360}?)\\\)/g, (_match, expr) => protect(mathInlineHtml(String(expr || ""))));
-    value = value.replace(/([A-Za-zΑ-Ωα-ω][A-Za-z0-9Α-Ωα-ω]{0,32})\$((?:\^\{?[^$\n]{1,40}\}?|_\{?[^$\n]{1,60}\}?))\$([A-Za-zΑ-Ωα-ω][A-Za-z0-9Α-Ωα-ω]{0,32})/g, (_match, left, expr, right) => protect(mathInlineHtml(`${left}${expr}${right}`)));
-    value = value.replace(/(^|[^\\])\$\$([^$\n]{1,700})\$\$/g, (_match, prefix, expr) => `${prefix}${protect(mathInlineHtml(String(expr || "")))}`);
-    value = value.replace(/(^|[^\\])\$([^$\n]{1,360})\$/g, (match, prefix, expr, offset, input) => {
-      const expression = String(expr || "");
-      const after = String(input || "").charAt(Number(offset) + String(match || "").length);
-      const before = String(prefix || "").slice(-1);
-      if (!isLikelyDelimitedMath(expression) && !isNumericDelimitedMathInContext(expression, before, after) && !isDelimitedMathAffixInContext(expression, before, after)) return `${prefix}$${expression}$`;
-      return `${prefix}${protect(mathInlineHtml(expression))}`;
-    });
-    value = renderBareLatexCommandsInText(value, (expression) => protect(mathInlineHtml(expression)), protectLatexTextCommandHtml);
-    value = renderBareMathInText(value, (expression) => protect(mathInlineHtml(expression)));
-    value = value.replace(/\\%/g, "%");
-    let escaped = escapeHtml(value)
-      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-      .replace(/(^|[^*])\*([^*\n]+?)\*(?!\*)/g, "$1<em>$2</em>");
-    tokens.forEach((htmlValue, idx) => {
-      escaped = escaped.replace(new RegExp(`@@TASTE_INLINE_${idx}@@`, "g"), htmlValue);
-    });
-    return escaped;
-  };
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (line.trim().startsWith("```")) {
-      if (inCode) {
-        flushCode();
-      } else {
-        closeList();
-        inCode = true;
-      }
-      continue;
-    }
-    if (inCode) {
-      codeLines.push(line);
-      continue;
-    }
-    if (!line.trim()) {
-      closeList();
-      continue;
-    }
-    const displayMath = displayMathExpressionFromLine(line);
-    if (displayMath) {
-      closeList();
-      html.push(mathDisplayHtml(displayMath));
-      continue;
-    }
-    if (line.trim().startsWith("|") && lines[index + 1]?.match(/^\s*\|?[\s:-]+\|[\s|:-]*$/)) {
-      closeList();
-      const rows: string[][] = [];
-      rows.push(line.split("|").map((cell) => cell.trim()).filter(Boolean));
-      index += 2;
-      while (index < lines.length && lines[index].trim().startsWith("|")) {
-        rows.push(lines[index].split("|").map((cell) => cell.trim()).filter(Boolean));
-        index += 1;
-      }
-      index -= 1;
-      const [head, ...body] = rows;
-      html.push("<table><thead><tr>");
-      head.forEach((cell) => html.push(`<th>${inline(cell)}</th>`));
-      html.push("</tr></thead><tbody>");
-      body.forEach((row) => {
-        html.push("<tr>");
-        row.forEach((cell) => html.push(`<td>${inline(cell)}</td>`));
-        html.push("</tr>");
-      });
-      html.push("</tbody></table>");
-      continue;
-    }
-    const heading = line.match(/^(#{1,4})\s+(.+)$/);
-    if (heading) {
-      closeList();
-      const level = heading[1].length;
-      html.push(`<h${level}>${inline(heading[2])}</h${level}>`);
-      continue;
-    }
-    const bullet = line.match(/^[-*]\s+(.+)$/);
-    if (bullet) {
-      if (!inList || listTag !== "ul") {
-        closeList();
-        listTag = "ul";
-        html.push("<ul>");
-        inList = true;
-      }
-      html.push(`<li>${inline(bullet[1])}</li>`);
-      continue;
-    }
-    const numbered = line.match(/^\d+\.\s+(.+)$/);
-    if (numbered) {
-      if (!inList || listTag !== "ol") {
-        closeList();
-        listTag = "ol";
-        html.push("<ol>");
-        inList = true;
-      }
-      html.push(`<li>${inline(numbered[1])}</li>`);
-      continue;
-    }
-    closeList();
-    html.push(`<p>${inline(line)}</p>`);
-  }
-  flushCode();
-  closeList();
-  return html.join("\n");
+  return markdownRenderer.render(publicMarkdownArtifact(markdown));
 }
 
 
@@ -3044,6 +2193,9 @@ function jobProgressPhaseLabel(job: any, lang: Lang = "zh") {
   if (phase === "complete") return jobStatusLabel("done", lang);
   if (["cancelled", "blocked", "error", "interrupted", "queued", "running", "cancelling"].includes(phase) || normalized.startsWith("blocked_")) return jobStatusLabel(phase, lang);
   if (phase === "started") return lang === "zh" ? "已启动" : "started";
+  if (normalized === "current_find_read") return lang === "zh" ? "当前 Find 精读" : "current Find reading";
+  if (normalized === "full_text") return lang === "zh" ? "爬取全文" : "full-text acquisition";
+  if (normalized === "deep_read") return lang === "zh" ? "精读全文" : "deep reading";
   return phase.replace(/_/g, " ");
 }
 
@@ -3328,6 +2480,9 @@ function publicJobMessageText(job: any, lang: Lang = "zh") {
   const message = String(job?.progress?.message || "").trim();
   if (!message) return "";
   const publicText = publicLogText(message, lang);
+  if (canonicalJobStage(job) === "read") {
+    return publicText.length > 300 ? `${publicText.slice(0, 300)}...` : publicText;
+  }
   const lower = message.toLowerCase();
   const isGateDump = lower.includes("deterministic base-switch")
     || lower.includes("base_switch_gate")
@@ -3414,8 +2569,11 @@ function summarizeJobLogLine(line: string, lang: Lang, contextTab?: Tab) {
     return lang === "zh" ? `状态：${publicLogText(value, lang)}` : `status: ${publicLogText(value, lang)}`;
   }
   if (text.startsWith("阶段状态：")) return lang === "zh" ? `阶段状态：${publicLogText(text.slice(5), lang)}` : `stage status: ${publicLogText(text.slice(5), lang)}`;
+  if (text.startsWith("阶段进度：")) return lang === "zh" ? `阶段进度：${publicLogText(text.slice(5), lang)}` : `stage progress: ${publicLogText(text.slice(5), lang)}`;
   if (text.startsWith("当前动作：")) return lang === "zh" ? `当前动作：${publicLogText(text.slice(5), lang)}` : `current action: ${publicLogText(text.slice(5), lang)}`;
   if (text.startsWith("当前步骤：")) return text.replace("当前步骤：", lang === "zh" ? "当前动作：" : "current action: ");
+  if (text.startsWith("细节：")) return lang === "zh" ? `细节：${publicLogText(text.slice(3), lang)}` : `detail: ${publicLogText(text.slice(3), lang)}`;
+  if (text.startsWith("错误：")) return lang === "zh" ? `错误：${publicLogText(text.slice(3), lang)}` : `error: ${publicLogText(text.slice(3), lang)}`;
   if (text.startsWith("find_activity=") || text.startsWith("[TASTE]")) return originalFindLogLine(text);
   if (text.startsWith("find_live_progress=")) return originalFindLogLine(text.replace("find_live_progress=", ""));
   if (text.startsWith("find_source_status=")) return text.replace("find_source_status=", lang === "zh" ? "来源状态：" : "source status: ");
@@ -3902,7 +3060,7 @@ function displayName(row: any, fallback = "Unnamed") {
 }
 
 const ARTIFACT_DISPLAY_NAMES: Record<string, { zh: string; en: string }> = {
-  "article.md": { zh: "推荐文章", en: "Recommended papers" },
+  "find.md": { zh: "推荐文章", en: "Recommended papers" },
   "source_status.md": { zh: "来源状态", en: "Source status" },
   "find_results.json": { zh: "Find 结果审计", en: "Find result audit" },
   "read.md": { zh: "精读正文", en: "Reading brief" },
@@ -4047,7 +3205,7 @@ function derivedCondaPython(condaBase: any, condaEnv: any) {
 }
 
 const HIDDEN_RUN_ARTIFACTS = new Set(["literature_tool_packet.md", "literature_tool_packet.json"]);
-const FIND_ARTIFACT_NAMES = new Set(["article.md", "source_status.md", "find_results.json"]);
+const FIND_ARTIFACT_NAMES = new Set(["find.md", "source_status.md", "find_results.json"]);
 const READ_ARTIFACT_NAMES = new Set(["read.md", "read_results.md", "read_results.json"]);
 const IDEA_ARTIFACT_NAMES = new Set(["idea.md", "ideas.md", "ideas.json"]);
 const PLAN_ARTIFACT_NAMES = new Set(["plans.md", "plan.md", "plans.json"]);
@@ -4870,6 +4028,9 @@ function App() {
       if (message.type === "progress") {
         setJobs((prev) => prev.map((item) => item.job_id === normalizedJobId ? { ...item, progress: message.progress } : item));
       }
+      if (message.type === "snapshot") {
+        updateJob(message.job);
+      }
       if (message.type === "complete") {
         updateJob(message.job);
         const resultRunId = message.job?.result?.run_id || runId;
@@ -4988,7 +4149,7 @@ function App() {
       return;
     }
     const readPaperIds = readRunId === currentProjectFindRunId ? [] : selectedPapers;
-    attachJob(await startRead(readRunId, readPaperIds), "ideas");
+    attachJob(await startRead(readRunId, readPaperIds), "read");
   }
 
   async function runIdeas() {
@@ -7200,9 +6361,7 @@ function App() {
       if (localizedSourceStatus) return options.raw ? publicMarkdownArtifact(localizedSourceStatus) : localizedSourceStatus;
     }
     if (options.raw) return publicMarkdownArtifact(rawContent);
-    const structuredFindMarkdown = findRecommendationArtifactMarkdown(artifact, findResults || activeFindResults, lang);
-    if (structuredFindMarkdown) return structuredFindMarkdown;
-    if (lang === "en" && containsCJKText(localizedContent)) {
+    if (artifact?.name !== "find.md" && lang === "en" && containsCJKText(localizedContent)) {
       return "This artifact is authored in Chinese by the project agent. The structured English projection for this step is shown above; use Raw to inspect the original artifact. No scientific status is changed by this display fallback.";
     }
     return publicLogText(localizedContent, lang);
@@ -7213,16 +6372,16 @@ function App() {
     const literature = researchLiteratureSurvey || {};
     const freshFindActive = freshFindRunning || String(literature.status || "").toLowerCase() === "fresh_find_running";
     const hasLiveFindJob = displayJobs.some((job: any) => isFindRunJob(job) && isLiveJob(job));
-    if (sourceStatus.length) return sourceStatus.slice(0, 12);
+    if (sourceStatus.length) return sourceStatus;
     if (freshFindActive || hasLiveFindJob) return [];
-    if (researchSourceStatus.length) return researchSourceStatus.slice(0, 12);
+    if (researchSourceStatus.length) return researchSourceStatus;
     const hasCurrentFindSource = Boolean(
       currentProjectFindRunId
       || currentFindArtifactRunId
       || literature.run_id
       || literature.current_find_pipeline?.run_id
     );
-    return (freshFindActive ? researchSourceStatus : (researchSourceStatus.length ? researchSourceStatus : sourceStatus)).slice(0, 12);
+    return freshFindActive ? researchSourceStatus : (researchSourceStatus.length ? researchSourceStatus : sourceStatus);
   }
 
   function findSurveyVisibleStatus(status?: string) {
@@ -7364,7 +6523,7 @@ function App() {
             </div>
           </details>
         )}
-        {currentFindArtifactLoading && !freshFindActive && (
+        {currentFindArtifactLoading && !freshFindActive && !sourceRows.length && !recommendedCount && !evaluated && (
           <div className="emptyState">{lang === "zh" ? "正在加载 Find 验收状态..." : "Loading Find review status..."}</div>
         )}
       </>
@@ -7814,7 +6973,7 @@ function App() {
           <span className="mark" aria-label="TASTE">T</span>
           <div>
             <h1>TASTE</h1>
-            <p>127.0.0.1:8765</p>
+            <p>127.0.0.1:8879</p>
           </div>
         </div>
         <div className="langSwitch" aria-label="Language">
@@ -8196,7 +7355,7 @@ function App() {
           <section className="stage">
             <div className="toolbar">
               <h2>{t.read}</h2>
-              <button className="primary" onClick={runRead} disabled={!runId || stageLaunchDisabledByFullCycle}>{t.runRead}</button>
+              <button className="primary" data-testid="run-read-button" onClick={runRead} disabled={!(currentProjectFindRunId || runId) || stageLaunchDisabledByFullCycle}>{t.runRead}</button>
             </div>
             <div className="panel readStatusPanel">
               <h3>{lang === "zh" ? "精读状态" : "Reading status"}</h3>
@@ -8682,7 +7841,8 @@ function App() {
               <div className="status">{t.idle}</div>
             ) : (
               <div className="jobList">
-                {displayJobs.map((item) => (
+                {displayJobs.map((item) => {
+                  return (
                   <article className="jobCard" key={item.job_id}>
                     <div className="jobHeader">
                       <strong>{jobDisplayTitle(item, lang)}</strong>
@@ -8706,7 +7866,8 @@ function App() {
                     )}
                     <pre>{jobRecentLogs(item, lang, tab).join("\n")}</pre>
                   </article>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
 
-from .paths import LEGACY_RUNS_DIRS, ROOT, RUNS_DIR, ensure_directories, stage_latest_path
+from .paths import ROOT, RUNS_DIR, RUNS_SEARCH_DIRS, ensure_directories, stage_latest_path
 
 
 def utc_run_id() -> str:
@@ -24,7 +24,7 @@ def create_run_dir(prefix: str = "run") -> tuple[str, Path]:
 
 
 def run_dir(run_id: str) -> Path:
-    for runs_root in (RUNS_DIR, *LEGACY_RUNS_DIRS):
+    for runs_root in RUNS_SEARCH_DIRS:
         path = runs_root / run_id
         if path.exists():
             return path
@@ -103,13 +103,8 @@ def _project_current_find_run_id(project_root: Path) -> str:
 
 
 PROJECT_SYNC_MARKDOWN_WITH_RUN_CONTEXT = {
-    "article.md",
+    "find.md",
     "source_status.md",
-    "screened_ranking.md",
-    "read_candidates.md",
-    "triage_candidates.md",
-    "audit_candidates.md",
-    "critique_candidates.md",
     "biorxiv.md",
     "nature.md",
     "science.md",
@@ -190,7 +185,7 @@ def list_runs() -> list[dict]:
     ensure_directories()
     items = []
     seen: set[str] = set()
-    for runs_root in (RUNS_DIR, *LEGACY_RUNS_DIRS):
+    for runs_root in RUNS_SEARCH_DIRS:
         if not runs_root.exists():
             continue
         for path in runs_root.iterdir():

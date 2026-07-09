@@ -16,6 +16,7 @@ class ModuleBoundary:
     artifacts_in: tuple[str, ...]
     artifacts_out: tuple[str, ...]
     private_backend_roots: tuple[str, ...]
+    public_final_artifact: str = ""
 
 
 STAGE_MODULES: tuple[ModuleBoundary, ...] = (
@@ -27,8 +28,14 @@ STAGE_MODULES: tuple[ModuleBoundary, ...] = (
         responsibility="Collect, filter, score, and rank literature/tool candidates from the research topic and profile. Full-text reading evidence is explicitly outside this module.",
         external_inputs=("llm_api", "research_topic", "research_interest", "researcher_profile", "source_selection"),
         artifacts_in=("config/profile JSON", "venue/source selection JSON"),
-        artifacts_out=("find_results.json", "article.md", "source_status.md", "category/title/detail/scoring reports"),
-        private_backend_roots=("modules/finding/scripts/find_pipeline.py", "modules/finding/scripts/find_support.py", "modules/finding/scripts/finding_quality_tools.py", "modules/finding/scripts/build_literature_tool_packet.py"),
+        artifacts_out=("find_results.json", "find.md", "source_status.md", "category/title/detail/scoring reports"),
+        private_backend_roots=(
+            "modules/finding/scripts/core",
+            "modules/finding/scripts/flow",
+            "modules/finding/scripts/sources.py",
+            "modules/finding/scripts/cache",
+        ),
+        public_final_artifact="find.md",
     ),
     ModuleBoundary(
         key="reading",
@@ -37,9 +44,15 @@ STAGE_MODULES: tuple[ModuleBoundary, ...] = (
         legacy_stage="Read",
         responsibility="Acquire verified paper-body text for the selected Find packet and synthesize reading notes. Same-run replacements for unavailable public full text happen here, never inside Finding.",
         external_inputs=("llm_api_or_claude", "finding_artifact_packet", "artifact_root"),
-        artifacts_in=("find_results.json", "article.md", "full_text_reading/manual_full_text_sources.json"),
-        artifacts_out=("read_results.json", "read.md", "full_text_reading/full_text_packet.json", "current_find_full_text_evidence_repair.json"),
-        private_backend_roots=("modules/reading/scripts/read_pipeline.py", "modules/reading/scripts/repair_current_find_full_text_evidence.py", "modules/reading/scripts/ensure_current_find_research_plan.py"),
+        artifacts_in=("find_results.json", "find.md", "full_text_reading/manual_full_text_sources.json"),
+        artifacts_out=("read.md", "read_results.json", "full_text_reading/full_text_packet.json", "current_find_full_text_evidence_repair.json"),
+        private_backend_roots=(
+            "modules/reading/scripts/core",
+            "modules/reading/scripts/pipeline",
+            "modules/reading/scripts/acquisition",
+            "modules/reading/scripts/orchestration",
+        ),
+        public_final_artifact="read.md",
     ),
     ModuleBoundary(
         key="ideation",
@@ -123,6 +136,7 @@ SCRIPT_OWNER_OVERRIDES: dict[str, str] = {
     "init_project.py": TASTE_FRAMEWORK_OWNER,
     "init_workspace.py": TASTE_FRAMEWORK_OWNER,
     "list_projects.py": TASTE_FRAMEWORK_OWNER,
+    "literature_policy.py": TASTE_FRAMEWORK_OWNER,
     "llm_client.py": TASTE_FRAMEWORK_OWNER,
     "pipeline_guard.py": TASTE_FRAMEWORK_OWNER,
     "project_config.py": TASTE_FRAMEWORK_OWNER,
@@ -151,21 +165,11 @@ SCRIPT_OWNER_OVERRIDES: dict[str, str] = {
     "record_safe_unblock_web_job.py": WEB_FRONTEND_OWNER,
     "run_frontend.py": WEB_FRONTEND_OWNER,
     "start_web.sh": WEB_FRONTEND_OWNER,
-    "build_literature_tool_packet.py": "finding",
     "build_category_summary.py": "finding",
     "build_openreview_cache.py": "finding",
     "build_venue_metadata_cache.py": "finding",
     "find_pipeline.py": "finding",
     "find_support.py": "finding",
-    "find_local_rank.py": "finding",
-    "finding_quality_tools.py": "finding",
-    "discover_arxiv.py": "finding",
-    "discover_github_repos.py": "finding",
-    "discover_semantic_scholar.py": "finding",
-    "ingest_discovery.py": "finding",
-    "literature_policy.py": "finding",
-    "run_literature_base_audit.py": "finding",
-    "run_literature_tool.py": "finding",
     "update_local_database.py": "finding",
     "read_pipeline.py": "reading",
     "ensure_current_find_research_plan.py": "reading",
@@ -293,6 +297,7 @@ def module_contracts_payload() -> dict[str, Any]:
             "external_inputs": list(module.external_inputs),
             "artifacts_in": list(module.artifacts_in),
             "artifacts_out": list(module.artifacts_out),
+            "public_final_artifact": module.public_final_artifact,
             "private_backend_roots": list(module.private_backend_roots),
         }
         for module in STAGE_MODULES

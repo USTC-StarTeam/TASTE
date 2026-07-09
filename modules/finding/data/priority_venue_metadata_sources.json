@@ -1,0 +1,264 @@
+{
+  "schema_version": 1,
+  "description": "Official metadata-source policy for the 14 priority Find venues. A priority venue cache is reusable only when it satisfies the policy for the effective venue/year; title-only fallbacks are audit-only unless the policy explicitly allows them.",
+  "venues": {
+    "openreview_neurips": {
+      "aliases": ["neurips", "nips"],
+      "preferred_sources": [
+        {
+          "adapter": "neurips_official_papers",
+          "source": "NeurIPS papers.nips.cc yearly proceedings index plus per-paper detail pages",
+          "url_template": "https://papers.nips.cc/paper_files/paper/{year}",
+          "coverage": "accepted proceedings papers; index gives titles/authors/track/PDF and detail pages provide abstracts when public"
+        },
+        {
+          "adapter": "neurips_virtual",
+          "source": "NeurIPS virtual site paper pages",
+          "url_template": "https://neurips.cc/virtual/{year}/papers.html",
+          "coverage": "official virtual paper pages; use as detail enrichment/fallback"
+        }
+      ],
+      "full_abstract_required": true,
+      "official_categories_expected": true,
+      "allow_title_only_verified_cache": false,
+      "fallback_policy": "Use older released NeurIPS years only when requested-year proceedings are objectively unavailable; never mark a title-only NeurIPS cache complete."
+    },
+    "openreview_iclr": {
+      "aliases": ["iclr"],
+      "preferred_sources": [
+        {
+          "adapter": "openreview_reference",
+          "source": "OpenReview official ICLR venue notes/API",
+          "url_template": "https://api2.openreview.net/notes",
+          "coverage": "accepted submissions with title, abstract, keywords, area/category, decision/presentation metadata"
+        }
+      ],
+      "full_abstract_required": true,
+      "official_categories_expected": true,
+      "allow_title_only_verified_cache": false,
+      "fallback_policy": "OpenReview is the primary source; DBLP is not an acceptable verified cache for ICLR when OpenReview metadata exists."
+    },
+    "dblp_icml": {
+      "aliases": ["icml"],
+      "preferred_sources": [
+        {
+          "adapter": "icml_official_virtual",
+          "source": "ICML official virtual site",
+          "url_template": "https://icml.cc/virtual/{year}/papers.html",
+          "coverage": "official accepted papers with virtual detail pages; latest-year source before PMLR proceedings are published"
+        },
+        {
+          "adapter": "pmlr",
+          "source": "PMLR proceedings",
+          "url_template": "https://proceedings.mlr.press/",
+          "coverage": "official archival proceedings with abstracts, authors, PDFs and bib metadata after volume release"
+        }
+      ],
+      "full_abstract_required": true,
+      "official_categories_expected": true,
+      "allow_title_only_verified_cache": false,
+      "fallback_policy": "Prefer ICML virtual for current year and PMLR for archival years; ICML downloads/title pages alone are not full metadata."
+    },
+    "dblp_kdd": {
+      "aliases": ["kdd", "sigkdd"],
+      "preferred_sources": [
+        {
+          "adapter": "acm_dl",
+          "source": "ACM Digital Library SIGKDD proceedings and official conference accepted-paper pages",
+          "url_template": "https://dl.acm.org/conference/kdd/proceedings",
+          "coverage": "official ACM proceedings metadata with abstracts/DOIs/PDF landing pages when published"
+        }
+      ],
+      "full_abstract_required": true,
+      "official_categories_expected": false,
+      "allow_title_only_verified_cache": false,
+      "allow_indexed_abstract_enrichment": true,
+      "indexed_abstract_enrichment_sources": ["acm_dl_pdf", "openalex_doi_for_acm", "openalex_title_for_acm", "semantic_scholar_doi_for_acm", "semantic_scholar_title_for_acm", "arxiv_title_match_for_acm", "chatpaper_title_for_acm"],
+      "fallback_policy": "DBLP may seed titles and DOIs but must not be cached as verified full SIGKDD metadata without ACM/official abstracts."
+    },
+    "dblp_www": {
+      "aliases": ["www", "the web conference", "webconf"],
+      "preferred_sources": [
+        {
+          "adapter": "www_official_accepted",
+          "source": "The Web Conference official accepted-paper pages",
+          "url_template": "https://www2026.thewebconf.org/accepted/research-tracks.html",
+          "coverage": "official accepted-paper title, author, track, and paper-code seed; no abstracts are exposed on these pages"
+        },
+        {
+          "adapter": "acm_dl",
+          "source": "ACM Digital Library Web Conference proceedings and official accepted-paper pages",
+          "url_template": "https://dl.acm.org/conference/www/proceedings",
+          "coverage": "official ACM proceedings metadata with abstracts/DOIs/PDF landing pages when published"
+        }
+      ],
+      "full_abstract_required": true,
+      "official_categories_expected": false,
+      "allow_title_only_verified_cache": false,
+      "allow_indexed_abstract_enrichment": true,
+      "indexed_abstract_enrichment_sources": ["acm_dl_pdf", "openalex_doi_for_acm", "openalex_title_for_acm", "openalex_oa_pdf_for_acm", "semantic_scholar_doi_for_acm", "semantic_scholar_title_for_acm", "arxiv_title_match_for_acm", "hal_title_for_acm", "public_publication_page_for_acm", "public_pdf_search_for_acm"],
+      "fallback_policy": "DBLP title records are a fallback seed only; full cache requires ACM/official abstracts."
+    },
+    "dblp_sigir": {
+      "aliases": ["sigir"],
+      "preferred_sources": [
+        {
+          "adapter": "sigir_official_accepted",
+          "source": "SIGIR official accepted-paper page",
+          "url_template": "https://sigir2025.dei.unipd.it/accepted-papers.html",
+          "coverage": "official accepted-paper title and track seed; no abstracts are exposed on this page"
+        },
+        {
+          "adapter": "sigir_official_proceedings",
+          "source": "SIGIR official proceedings mirror page",
+          "url_template": "https://sigir2025.dei.unipd.it/proceedings.html",
+          "coverage": "partial official proceedings mirror with DOI links and inline abstracts for a subset; not a full SIGIR corpus"
+        },
+        {
+          "adapter": "acm_dl",
+          "source": "ACM Digital Library SIGIR proceedings and official accepted-paper pages",
+          "url_template": "https://dl.acm.org/conference/sigir/proceedings",
+          "coverage": "official ACM proceedings metadata with abstracts/DOIs/PDF landing pages when published"
+        }
+      ],
+      "full_abstract_required": true,
+      "official_categories_expected": false,
+      "allow_title_only_verified_cache": false,
+      "allow_indexed_abstract_enrichment": true,
+      "indexed_abstract_enrichment_sources": ["acm_dl_pdf", "openalex_doi_for_acm", "openalex_title_for_acm", "semantic_scholar_doi_for_acm", "semantic_scholar_title_for_acm", "arxiv_title_match_for_acm"],
+      "fallback_policy": "DBLP title records are a fallback seed only; full cache requires ACM/official abstracts."
+    },
+    "dblp_cikm": {
+      "aliases": ["cikm"],
+      "preferred_sources": [
+        {
+          "adapter": "cikm_official_proceedings",
+          "source": "CIKM official proceedings page",
+          "url_template": "https://cikm2025.org/program/proceedings",
+          "coverage": "official proceedings HTML with ACM DOI links, authors, sessions and inline abstracts when published"
+        },
+        {
+          "adapter": "acm_dl",
+          "source": "ACM Digital Library CIKM proceedings and official accepted-paper pages",
+          "url_template": "https://dl.acm.org/conference/cikm/proceedings",
+          "coverage": "official ACM proceedings metadata with abstracts/DOIs/PDF landing pages when published"
+        }
+      ],
+      "full_abstract_required": true,
+      "official_categories_expected": false,
+      "allow_title_only_verified_cache": false,
+      "fallback_policy": "Prefer the official CIKM proceedings page when it exposes inline abstracts; DBLP title records are a fallback seed only and cannot be verified full metadata without official abstracts."
+    },
+    "dblp_aaai": {
+      "aliases": ["aaai"],
+      "preferred_sources": [
+        {
+          "adapter": "aaai_ojs",
+          "source": "AAAI official OJS proceedings archive and article pages",
+          "url_template": "https://ojs.aaai.org/index.php/AAAI/issue/archive",
+          "coverage": "official proceedings issues with article detail pages, abstracts, authors, PDFs and technical-track section metadata"
+        }
+      ],
+      "full_abstract_required": true,
+      "official_categories_expected": true,
+      "allow_title_only_verified_cache": false,
+      "fallback_policy": "AAAI OJS issue listings must be enriched from article pages before a cache is verified."
+    },
+    "dblp_iccv": {
+      "aliases": ["iccv"],
+      "preferred_sources": [
+        {
+          "adapter": "cvf_openaccess",
+          "source": "CVF Open Access official proceedings",
+          "url_template": "https://openaccess.thecvf.com/ICCV{year}?day=all",
+          "coverage": "official CVF paper pages with title, authors, abstract and PDF"
+        }
+      ],
+      "full_abstract_required": true,
+      "official_categories_expected": false,
+      "allow_title_only_verified_cache": false,
+      "fallback_policy": "CVF list pages are title indexes only; full cache requires each CVF paper detail abstract."
+    },
+    "dblp_cvpr": {
+      "aliases": ["cvpr"],
+      "preferred_sources": [
+        {
+          "adapter": "cvf_openaccess",
+          "source": "CVF Open Access official proceedings",
+          "url_template": "https://openaccess.thecvf.com/CVPR{year}?day=all",
+          "coverage": "official CVF paper pages with title, authors, abstract and PDF"
+        }
+      ],
+      "full_abstract_required": true,
+      "official_categories_expected": false,
+      "allow_title_only_verified_cache": false,
+      "fallback_policy": "CVF list pages are title indexes only; full cache requires each CVF paper detail abstract."
+    },
+    "dblp_acl": {
+      "aliases": ["acl"],
+      "preferred_sources": [
+        {
+          "adapter": "acl_anthology",
+          "source": "ACL Anthology official event and paper pages",
+          "url_template": "https://aclanthology.org/events/acl-{year}/",
+          "coverage": "official paper pages with title, authors, abstract, PDF and Anthology IDs"
+        }
+      ],
+      "full_abstract_required": true,
+      "official_categories_expected": false,
+      "allow_title_only_verified_cache": false,
+      "fallback_policy": "ACL event pages must be enriched from Anthology paper pages before a cache is verified."
+    },
+    "dblp_ijcai": {
+      "aliases": ["ijcai"],
+      "preferred_sources": [
+        {
+          "adapter": "ijcai_proceedings",
+          "source": "IJCAI official proceedings pages",
+          "url_template": "https://www.ijcai.org/proceedings/{year}/",
+          "coverage": "official paper detail pages with title, authors, abstract and PDF"
+        }
+      ],
+      "full_abstract_required": true,
+      "official_categories_expected": false,
+      "allow_title_only_verified_cache": false,
+      "fallback_policy": "IJCAI index pages are not enough; full cache requires per-paper abstract detail."
+    },
+    "dblp_eccv": {
+      "aliases": ["eccv"],
+      "preferred_sources": [
+        {
+          "adapter": "eccv_virtual",
+          "source": "ECCV ECVA official virtual proceedings",
+          "url_template": "https://eccv.ecva.net/virtual/{year}/papers.html",
+          "coverage": "official ECVA virtual paper pages with detail metadata when available"
+        },
+        {
+          "adapter": "springer",
+          "source": "Springer LNCS proceedings",
+          "url_template": "https://link.springer.com/conference/eccv",
+          "coverage": "archival proceedings metadata when volume pages are available"
+        }
+      ],
+      "full_abstract_required": true,
+      "official_categories_expected": false,
+      "allow_title_only_verified_cache": false,
+      "fallback_policy": "ECVA/Springer detail abstracts are required; ECVA list titles alone are not verified full metadata."
+    },
+    "dblp_emnlp": {
+      "aliases": ["emnlp"],
+      "preferred_sources": [
+        {
+          "adapter": "acl_anthology",
+          "source": "ACL Anthology official EMNLP event and paper pages",
+          "url_template": "https://aclanthology.org/events/emnlp-{year}/",
+          "coverage": "official paper pages with title, authors, abstract, PDF and Anthology IDs"
+        }
+      ],
+      "full_abstract_required": true,
+      "official_categories_expected": false,
+      "allow_title_only_verified_cache": false,
+      "fallback_policy": "EMNLP event pages must be enriched from Anthology paper pages before a cache is verified."
+    }
+  }
+}

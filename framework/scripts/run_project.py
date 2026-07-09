@@ -406,7 +406,7 @@ def current_find_execution_contract(paths) -> dict:
         ambiguous = contract.get('selection_issue') == 'ambiguous_selected_plan'
         contract['selection_issue'] = 'ambiguous_selected_plan' if ambiguous else 'missing_selected_plan'
         contract['status'] = 'blocked_ambiguous_selected_plan' if ambiguous else 'blocked_missing_selected_plan'
-        contract['reason'] = 'current Find produced multiple explicit selected plans; rerun current-Find Claude selection so exactly one selected_plan_id exists before executing experiments' if ambiguous else 'current Find produced idea/plan candidates but no selected_plan_id contract exists; rerun ensure_current_find_research_plan.py or project Claude selection before executing experiments'
+        contract['reason'] = 'current Find produced multiple explicit selected plans; rerun current-Find Claude selection so exactly one selected_plan_id exists before executing experiments' if ambiguous else 'current Find produced idea/plan candidates but no selected_plan_id contract exists; rerun framework/scripts/run_module.py reading --action current_find_research_plan or project Claude selection before executing experiments'
         contract['execution_policy'] = {
             **contract.get('execution_policy', {}),
             'status': 'no_selected_plan',
@@ -1143,36 +1143,16 @@ def main() -> int:
 
     discovery_mode = []
     if not args.skip_discovery:
-        run(module_cmd('finding', 'plan_literature', '--project', args.project), paths.root, paths.logs / '01d_plan_literature_review.log')
         cfg = load_project_config(args.project)
-        source_selection = canonical_source_selection()
         queries = planned_discovery_queries(cfg, paths, topic, max_queries=int(cfg.get('discovery', {}).get('max_planned_queries', 6) or 6), project=args.project)
-        arxiv_enabled = bool(source_selection.get('include_arxiv')) and not args.skip_arxiv
-        if arxiv_enabled:
-            for index, query in enumerate(queries, start=1):
-                code = run(module_cmd('finding', 'discover_arxiv', '--project', args.project, '--query', query, '--max-results', str(max_results), '--retries', str(discover_retries)), paths.root, paths.logs / f'02_discover_arxiv_{index}.log', timeout=int(os.environ.get('DISCOVER_ARXIV_TIMEOUT_SEC', '45')))
-                if code == 0 and 'arxiv' not in discovery_mode:
-                    discovery_mode.append('arxiv')
-                elif code != 0:
-                    print(f'arxiv discovery failed for query={query}; continuing', file=sys.stderr)
-
-        ss_enabled = 'semantic_scholar' in cfg.get('discovery', {}).get('enabled_sources', []) and not args.skip_semantic_scholar
-        if ss_enabled:
-            ss_budget = int(cfg.get('discovery', {}).get('semantic_scholar', {}).get('query_budget', 3) or 3)
-            for index, query in enumerate(queries[:ss_budget], start=1):
-                ss_code = run(module_cmd('finding', 'discover_semantic_scholar', '--project', args.project, '--query', query), paths.root, paths.logs / f'03_discover_semantic_schol{index}.log')
-                if ss_code == 0 and 'semantic_scholar' not in discovery_mode:
-                    discovery_mode.append('semantic_scholar')
-
-        github_enabled = bool(source_selection.get('include_github')) and not args.skip_github
-        if github_enabled:
-            github_queries = [query for query in queries if any(token in query.lower() for token in ['code', 'github', 'repository', 'repo', 'implementation', 'open-source', 'opensource'])][:3] or queries[:2]
-            for index, query in enumerate(github_queries, start=1):
-                gh_code = run(module_cmd('finding', 'discover_github', '--project', args.project, '--query', query), paths.root, paths.logs / f'03b_discover_github_{index}.log', timeout=int(os.environ.get('DISCOVER_GITHUB_TIMEOUT_SEC', '45')))
-                if gh_code == 0 and 'github' not in discovery_mode:
-                    discovery_mode.append('github')
-
-        run(module_cmd('finding', 'ingest_discovery', '--project', args.project, '--limit', str(cfg.get('loop', {}).get('ingest_limit', 5))), paths.root, paths.logs / '04_ingest.log')
+        (paths.logs / '01d_plan_literature_review.log').write_text(
+            'Finding no longer exposes per-source discover/ingest actions. '
+            'Planned queries are recorded and the configured Find route runs through framework/scripts/run_frontend.py.\n'
+            + json.dumps({"queries": queries, "max_results_legacy": max_results, "discover_retries_legacy": discover_retries}, indent=2, ensure_ascii=False)
+            + '\n',
+            encoding='utf-8',
+        )
+        discovery_mode.append('configured_find')
     else:
         discovery_mode.append('skipped')
 
@@ -1180,7 +1160,7 @@ def main() -> int:
         if not args.skip_llm:
             if args.skip_discovery:
                 os.environ.setdefault('USE_EXISTING_LITERATURE_PACKET', '1')
-                skip_msg = 'finding frontend skipped because --skip-discovery is active; reusing existing canonical Find/literature packet. Controlled targeted literature repair remains available through `framework/scripts/run_module.py finding --action literature_tool`.'
+                skip_msg = 'finding frontend skipped because --skip-discovery is active; reusing existing current Find artifacts.'
                 print(skip_msg, flush=True)
                 (paths.logs / '05a_finding_frontend.log').write_text(skip_msg + '\n', encoding='utf-8')
             else:
@@ -1191,7 +1171,7 @@ def main() -> int:
                     taste_cmd.append('--fast-mode')
                 run(taste_cmd, paths.root, paths.logs / '05a_finding_frontend.log', timeout=int(os.environ.get('TIMEOUT_SEC', '3600')) + 120)
             run([sys.executable, str(script_dir / 'sync_outputs.py'), '--project', args.project, '--allow-empty'], paths.root, paths.logs / '05a_taste_sync.log', timeout=120)
-            run(module_cmd('finding', 'tool_packet', '--project', args.project, *(['--venue', args.venue] if args.venue else [])), paths.root, paths.logs / '05ab_literature_tool_packet.log', timeout=180)
+            run(module_cmd('reading', 'current_find_research_plan', '--project', args.project, *(['--venue', args.venue] if args.venue else [])), paths.root, paths.logs / '05ab_current_find_research_plan.log', timeout=600)
             (paths.logs / '05aa_current_find_read_idea_plan_route.log').write_text('downstream planning is handled by the current-Find Claude Code Read/Idea/Plan route; Find remains the only default LLM-scored module.\n', encoding='utf-8')
         run(module_cmd('ideation', 'initialization', '--project', args.project), paths.root, paths.logs / '05_ideation_initialization.log')
         run(module_cmd('ideation', 'arena', '--project', args.project), paths.root, paths.logs / '05c_hypothesis_arena.log')
@@ -1213,8 +1193,7 @@ def main() -> int:
         run(plan_cmd, paths.root, paths.logs / '05b_parallel_plan.log')
 
     run([sys.executable, str(script_dir / 'wiki_tools.py'), '--tool-action', 'bootstrap', '--project', args.project], paths.root, paths.logs / '06_bootstrap_wiki.log')
-    run(module_cmd('finding', 'paper_quality', '--project', args.project), paths.root, paths.logs / '07_assess_paper_quality.log')
-    run(module_cmd('finding', 'tool_packet', '--project', args.project, *(['--venue', args.venue] if args.venue else [])), paths.root, paths.logs / '07aa_literature_tool_packet_refresh.log', timeout=180)
+    run(module_cmd('reading', 'current_find_research_plan', '--project', args.project, *(['--venue', args.venue] if args.venue else [])), paths.root, paths.logs / '07aa_current_find_research_plan_refresh.log', timeout=600)
     run(module_cmd('environment', 'assess_repo', '--project', args.project), paths.root, paths.logs / '07a_assess_repo_candidates.log')
     run(module_cmd('ideation', 'assess', '--project', args.project), paths.root, paths.logs / '07b_idea_assessment.log')
     run(module_cmd('experimenting', 'reference_reproduction', '--project', args.project, *(['--venue', args.venue] if args.venue else [])), paths.root, paths.logs / '07c_reference_reproduction_gate.log')

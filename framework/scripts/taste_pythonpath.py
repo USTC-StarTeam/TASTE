@@ -15,6 +15,11 @@ STAGE_MODULE_DIRS = (
     "writing",
 )
 
+# Framework/Web may orchestrate Reading only through modules/reading/main.py.
+# Exposing modules/reading/scripts on PYTHONPATH lets bridge code accidentally
+# import private acquisition/pipeline helpers and breaks that boundary.
+PUBLIC_ENTRY_ONLY_STAGES = {"reading"}
+
 
 def resolve_repo_root(start: Path | str | None = None) -> Path:
     if start is not None:
@@ -37,7 +42,14 @@ def resolve_repo_root(start: Path | str | None = None) -> Path:
 
 def taste_script_dirs(root: Path | str | None = None) -> list[Path]:
     repo = resolve_repo_root(root)
-    return [repo / "framework" / "scripts", *(repo / "modules" / name / "scripts" for name in STAGE_MODULE_DIRS)]
+    return [
+        repo / "framework" / "scripts",
+        *(
+            repo / "modules" / name / "scripts"
+            for name in STAGE_MODULE_DIRS
+            if name not in PUBLIC_ENTRY_ONLY_STAGES
+        ),
+    ]
 
 
 def taste_script_import_dirs(root: Path | str | None = None) -> list[Path]:
@@ -46,7 +58,11 @@ def taste_script_import_dirs(root: Path | str | None = None) -> list[Path]:
     for directory in taste_script_dirs(repo):
         dirs.append(directory)
         if directory.is_dir():
-            dirs.extend(path for path in sorted(directory.rglob("*")) if path.is_dir() and path.name != "__pycache__")
+            dirs.extend(
+                path
+                for path in sorted(directory.rglob("*"))
+                if path.is_dir() and path.name != "__pycache__"
+            )
     return dirs
 
 
@@ -124,3 +140,7 @@ def ensure_taste_pythonpath(root: Path | str | None = None) -> list[str]:
         if entry not in sys.path:
             sys.path.insert(0, entry)
     return entries
+
+
+if __name__ == "__main__":
+    print(taste_pythonpath_string())

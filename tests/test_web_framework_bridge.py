@@ -27,6 +27,25 @@ def _make_project(projects: Path, name: str = "demo") -> Path:
     return root
 
 
+def _source_status_fixture_markdown() -> str:
+    return "\n".join([
+        "# 来源状态",
+        "",
+        "## ICML 2026",
+        "- 状态: normal / 标题总数: 6431 / 分类后: 6431 / 来源适配器: icml_downloads / 请求年份: 2026 / 有效年份: 2026 / 官方标题索引已核验 / 元数据完整 / 有官方分类 / 标题索引含摘要",
+        "",
+        "## ICLR 2026",
+        "- 状态: normal / 标题总数: 5352 / 分类后: 5352 / 来源适配器: openreview_reference / 请求年份: 2026 / 有效年份: 2026 / OpenReview 官方元数据已核验 / 元数据完整 / 有官方分类 / 标题索引含摘要",
+        "",
+        "## NeurIPS 2025",
+        "- 状态: normal / 标题总数: 5823 / 分类后: 5823 / 来源适配器: neurips_virtual / 请求年份: 2025 / 有效年份: 2025 / 官方标题索引已核验 / 元数据完整 / 有官方分类 / 标题索引含摘要",
+        "",
+        "## SIGKDD 2026",
+        "- 状态: limited / 标题总数: 256 / 分类后: 256 / 来源适配器: dblp / 请求年份: 2026 / 有效年份: 2026 / 官方标题索引已核验 / 受限 / 无官方分类 / 无摘要",
+        "",
+    ])
+
+
 def _ready_environment_handoff(repo_path: Path, conda_prefix: Path, *, data_dir: Path | None = None, run_id: str = "env_run", selected: dict | None = None) -> dict:
     checks = [
         {"name": name, "passed": True, "reason": "pytest handoff fixture"}
@@ -128,6 +147,228 @@ def test_web_environment_action_uses_framework_single_stage(monkeypatch, tmp_pat
     module_arg = cmd[cmd.index("--module-arg") + 1]
     assert module_arg.startswith("environment=--plan ")
     assert "modules/environment/main.py" not in " ".join(cmd)
+
+
+def test_web_find_action_uses_framework_run_frontend(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    _make_project(projects, "demo")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.setattr(project_bridge, "management_python", lambda: "/env/bin/python")
+
+    project, cmd = project_bridge.build_command({
+        "project": "demo",
+        "action": "find",
+        "max_papers": 7,
+        "max_ideas": 3,
+        "skip_arxiv": True,
+        "deep_survey": True,
+        "queries": ["protein design"],
+    })
+
+    assert project == "demo"
+    assert cmd[:4] == ["/env/bin/python", str(project_bridge.SCRIPTS / "run_frontend.py"), "--project", "demo"]
+    assert "--max-papers" in cmd and cmd[cmd.index("--max-papers") + 1] == "7"
+    assert "--max-ideas" in cmd and cmd[cmd.index("--max-ideas") + 1] == "3"
+    assert "--skip-arxiv" in cmd
+    assert "--deep-survey" in cmd
+    assert "--query" in cmd and cmd[cmd.index("--query") + 1] == "protein design"
+
+
+def test_project_bridge_runtime_env_overrides_are_llm_only():
+    env = project_bridge._runtime_env_overrides_from_payload({
+        "runtime_env": {
+            "LLM_API_KEY": "secret",
+            "OPENAI_API_KEY": "secret2",
+            "LLM_API_BASE": "https://llm.example/v1",
+            "PATH": "/tmp/unsafe",
+            "PYTHONPATH": "/tmp/unsafe",
+        }
+    })
+
+    assert env["LLM_API_KEY"] == "secret"
+    assert env["OPENAI_API_KEY"] == "secret2"
+    assert env["LLM_API_BASE"] == "https://llm.example/v1"
+    assert "PATH" not in env
+    assert "PYTHONPATH" not in env
+
+
+def test_web_config_saves_llm_secret_to_local_finding_config(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    runtime_config = tmp_path / "runtime" / ".config.json"
+    local_llm_config = tmp_path / "modules" / "finding" / "config" / "llm.local.json"
+    monkeypatch.setenv("FINDING_LLM_CONFIG", str(local_llm_config))
+    monkeypatch.setattr(web_server, "CONFIG_PATH", runtime_config)
+    monkeypatch.setattr(web_server, "project_config_path", lambda: None)
+    monkeypatch.setattr(web_server, "canonical_source_selection", lambda project_config_path=None: {})
+    monkeypatch.setattr(web_server, "save_canonical_source_selection", lambda selection, project_config_path=None: {})
+
+    config = web_server.AppConfig(
+        provider="openai_compatible",
+        base_url="https://llm.example.test/v1",
+        model="generic-model",
+        api_key="local-secret",
+        temperature=0.2,
+    )
+
+    web_server.save_config(config)
+
+    local_payload = json.loads(local_llm_config.read_text(encoding="utf-8"))
+    runtime_payload = json.loads(runtime_config.read_text(encoding="utf-8"))
+    assert local_payload["api_key"] == "local-secret"
+    assert local_payload["provider"] == "openai_compatible"
+    assert runtime_payload["api_key"] == ""
+
+    loaded = web_server.load_config()
+    public = web_server._public_config_response(loaded)
+    assert loaded.api_key == "local-secret"
+    assert public["api_key"] == ""
+    assert public["api_key_saved"] is True
+
+
+def test_web_find_mock_request_does_not_overwrite_local_llm_config(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    local_llm_config = tmp_path / "modules" / "finding" / "config" / "llm.local.json"
+    local_llm_config.parent.mkdir(parents=True)
+    local_llm_config.write_text(json.dumps({
+        "provider": "openai_compatible",
+        "base_url": "https://llm.example.test/v1",
+        "model": "real-model",
+        "api_key": "local-secret",
+        "temperature": 0.3,
+    }), encoding="utf-8")
+    monkeypatch.setenv("FINDING_LLM_CONFIG", str(local_llm_config))
+
+    mock_run_config = web_server.AppConfig(
+        provider="mock",
+        base_url="",
+        model="mock-model",
+        api_key="",
+        temperature=0.2,
+    )
+    web_server._persist_local_llm_config_from_find_request(mock_run_config, mock_run_config)
+
+    unchanged = json.loads(local_llm_config.read_text(encoding="utf-8"))
+    assert unchanged["provider"] == "openai_compatible"
+    assert unchanged["model"] == "real-model"
+    assert unchanged["api_key"] == "local-secret"
+
+    real_run_config = web_server.AppConfig(
+        provider="openai_compatible",
+        base_url="https://new.example.test/v1",
+        model="new-model",
+        api_key="new-secret",
+        temperature=0.1,
+    )
+    web_server._persist_local_llm_config_from_find_request(real_run_config, real_run_config)
+
+    updated = json.loads(local_llm_config.read_text(encoding="utf-8"))
+    assert updated["provider"] == "openai_compatible"
+    assert updated["base_url"] == "https://new.example.test/v1"
+    assert updated["model"] == "new-model"
+    assert updated["api_key"] == "new-secret"
+
+
+def test_run_frontend_finding_input_snapshot_omits_api_key():
+    text = (ROOT / "framework" / "scripts" / "run_frontend.py").read_text(encoding="utf-8")
+
+    assert '"api_key": "",' in text
+    assert '"api_key": api_key' not in text
+
+
+def test_web_find_small_budget_does_not_force_deep_survey():
+    text = (ROOT / "web" / "backend" / "auto_research" / "web" / "server.py").read_text(encoding="utf-8")
+
+    assert "venue_title_scan_limit or 0) > 0" not in text
+    assert "venue_scan_limit >= 1000" in text
+    assert "find_recall_count >= 1000" in text
+    assert "detail_fetch_count >= 200" in text
+
+
+def test_run_frontend_uses_project_finding_budget_defaults():
+    text = (ROOT / "framework" / "scripts" / "run_frontend.py").read_text(encoding="utf-8")
+
+    assert 'venue_scan_limit = env_int("VENUE_TITLE_SCAN_LIMIT", config_positive_int("venue_title_scan_limit"' in text
+    assert 'find_recall_count = env_int("FIND_RECALL_COUNT", config_positive_int("find_recall_count"' in text
+    assert 'detail_fetch_count = env_int("DETAIL_FETCH_COUNT", config_positive_int("detail_fetch_count"' in text
+
+
+def test_run_frontend_runtime_tuning_preserves_web_scoring_budget():
+    text = (ROOT / "framework" / "scripts" / "run_frontend.py").read_text(encoding="utf-8")
+
+    assert "elif name not in runtime_tuning and default is not None:" in text
+    assert 'abstract_scoring_max_workers = env_int("ABSTRACT_SCORING_MAX_WORKERS", config_positive_int("abstract_scoring_max_workers"' in text
+    assert 'abstract_scoring_batch_size = env_int("ABSTRACT_SCORING_BATCH_SIZE", config_positive_int("abstract_scoring_batch_size"' in text
+    assert 'runtime_default("ABSTRACT_SCORING_BATCH_SIZE", str(abstract_scoring_batch_size))' in text
+    assert 'runtime_default("ABSTRACT_SCORING_MAX_WORKERS", str(abstract_scoring_max_workers))' in text
+    assert 'runtime_default("ABSTRACT_SCORING_TIMEOUT_SEC", str(abstract_scoring_timeout_sec))' in text
+
+
+def test_single_job_api_defaults_to_compact_find_status():
+    text = (ROOT / "web" / "backend" / "auto_research" / "web" / "server.py").read_text(encoding="utf-8")
+
+    assert "def api_job(job_id: str, compact: bool = Query(True))" in text
+    assert 'result_payload["run_id"] = self.run_id' in text
+
+
+def test_finding_main_public_cli_uses_real_private_module_paths():
+    text = (ROOT / "modules" / "finding" / "main.py").read_text(encoding="utf-8")
+
+    assert '_private_import("flow.pipeline")' in text
+    assert '_private_import("flow.support")' in text
+    assert '_private_import("pipeline.find_pipeline")' not in text
+    assert '_private_import("support.find_support")' not in text
+
+
+def test_user_facing_find_markdown_is_canonical():
+    sync_text = (ROOT / "framework" / "scripts" / "sync_outputs.py").read_text(encoding="utf-8")
+    frontend_text = (ROOT / "framework" / "scripts" / "run_frontend.py").read_text(encoding="utf-8")
+    server_text = (ROOT / "web" / "backend" / "auto_research" / "web" / "server.py").read_text(encoding="utf-8")
+    finding_text = (ROOT / "modules" / "finding" / "main.py").read_text(encoding="utf-8")
+    pipeline_text = (ROOT / "modules" / "finding" / "scripts" / "flow" / "pipeline.py").read_text(encoding="utf-8")
+
+    assert '"find.md"' in sync_text
+    assert '"find.md"' in frontend_text
+    assert '"find.md"' in server_text
+    assert '(directory / "find.md").write_text(article_text' in server_text
+    assert '"find.md"' in finding_text
+    assert 'run_dir / "find.md"' in pipeline_text
+    old_find_markdown = "article" + ".md"
+    for text in [sync_text, frontend_text, server_text, finding_text, pipeline_text]:
+        assert old_find_markdown not in text
+
+
+def test_find_web_project_artifacts_do_not_expose_maintainer_status():
+    bridge_text = (ROOT / "web" / "backend" / "auto_research" / "web" / "project_bridge.py").read_text(encoding="utf-8")
+    frontend_text = (ROOT / "framework" / "scripts" / "run_frontend.py").read_text(encoding="utf-8")
+    sync_text = (ROOT / "framework" / "scripts" / "sync_outputs.py").read_text(encoding="utf-8")
+
+    assert '("工作状态.txt", ROOT / "工作状态.txt"' not in bridge_text
+    assert 'root / "planning" / "finding_frontend.md"' in bridge_text
+    assert "# Find Frontend" in frontend_text
+    assert "# Find Frontend" in sync_text
+    assert "# native Frontend" not in frontend_text
+    assert "# native Frontend" not in sync_text
+
+
+def test_web_framework_do_not_import_finding_private_backend():
+    files = [
+        ROOT / "web" / "backend" / "auto_research" / "web" / "server.py",
+        ROOT / "web" / "backend" / "auto_research" / "web" / "project_bridge.py",
+        ROOT / "framework" / "scripts" / "run_frontend.py",
+    ]
+    forbidden = [
+        "from finding_runtime",
+        "import finding_runtime",
+        "from pipeline.find_pipeline",
+        "from support.find_support",
+        "modules/finding/scripts",
+    ]
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        for marker in forbidden:
+            assert marker not in text, f"{path} still references Finding private backend marker {marker!r}"
 
 
 def test_web_environment_init_alias_uses_framework_single_stage(monkeypatch, tmp_path):
@@ -604,9 +845,6 @@ def test_web_pid_alive_does_not_spawn_ps(monkeypatch):
     assert project_bridge._pid_alive(-1) is False
 
 def test_web_full_cycle_job_logs_hide_stale_reference_goal():
-    reading_scripts = ROOT / "modules" / "reading" / "scripts"
-    sys.path.insert(0, str(reading_scripts))
-    sys.modules.pop("pipeline", None)
     from auto_research.web import server as web_server
 
     rows = web_server._public_full_cycle_job_logs(
@@ -624,9 +862,6 @@ def test_web_full_cycle_job_logs_hide_stale_reference_goal():
 
 
 def test_web_handoff_experiment_launch_ignores_environment_worker(monkeypatch, tmp_path):
-    reading_scripts = ROOT / "modules" / "reading" / "scripts"
-    sys.path.insert(0, str(reading_scripts))
-    sys.modules.pop("pipeline", None)
     from auto_research.web import server as web_server
 
     web_server._JOB_LIST_PROJECT_SUMMARY_CACHE.clear()
@@ -652,9 +887,6 @@ def test_web_handoff_experiment_launch_ignores_environment_worker(monkeypatch, t
 
 
 def test_web_environment_worker_uses_command_run_id_instead_of_current_find(monkeypatch, tmp_path):
-    reading_scripts = ROOT / "modules" / "reading" / "scripts"
-    sys.path.insert(0, str(reading_scripts))
-    sys.modules.pop("pipeline", None)
     from auto_research.web import server as web_server
 
     monkeypatch.setattr(web_server, "_pid_alive_local", lambda pid: True)
@@ -680,9 +912,6 @@ def test_web_environment_worker_uses_command_run_id_instead_of_current_find(monk
 
 
 def test_web_environment_decision_does_not_fallback_when_explicit_run_missing(monkeypatch, tmp_path):
-    reading_scripts = ROOT / "modules" / "reading" / "scripts"
-    sys.path.insert(0, str(reading_scripts))
-    sys.modules.pop("pipeline", None)
     from auto_research.web import server as web_server
 
     monkeypatch.setattr(web_server, "WORKSPACE_ROOT", tmp_path)
@@ -704,9 +933,6 @@ def test_web_environment_decision_does_not_fallback_when_explicit_run_missing(mo
 
 
 def test_web_jobs_merges_live_environment_run_id_into_persisted_running_job(monkeypatch):
-    reading_scripts = ROOT / "modules" / "reading" / "scripts"
-    sys.path.insert(0, str(reading_scripts))
-    sys.modules.pop("pipeline", None)
     from auto_research.web import server as web_server
 
     web_server._LIVE_JOBS_CACHE.clear()
@@ -742,9 +968,6 @@ def test_web_jobs_merges_live_environment_run_id_into_persisted_running_job(monk
 
 
 def test_web_jobs_hides_stale_environment_history_when_live_environment_running(monkeypatch):
-    reading_scripts = ROOT / "modules" / "reading" / "scripts"
-    sys.path.insert(0, str(reading_scripts))
-    sys.modules.pop("pipeline", None)
     from auto_research.web import server as web_server
 
     web_server._LIVE_JOBS_CACHE.clear()
@@ -784,9 +1007,6 @@ def test_web_jobs_hides_stale_environment_history_when_live_environment_running(
 
 
 def test_web_jobs_lists_handoff_environment_worker_as_nonexclusive(monkeypatch):
-    reading_scripts = ROOT / "modules" / "reading" / "scripts"
-    sys.path.insert(0, str(reading_scripts))
-    sys.modules.pop("pipeline", None)
     from auto_research.web import server as web_server
 
     web_server._JOB_LIST_PROJECT_SUMMARY_CACHE.clear()
@@ -835,9 +1055,6 @@ def test_web_jobs_lists_handoff_environment_worker_as_nonexclusive(monkeypatch):
 
 
 def test_web_environment_decision_projection_supports_environment_ready(monkeypatch):
-    reading_scripts = ROOT / "modules" / "reading" / "scripts"
-    sys.path.insert(0, str(reading_scripts))
-    sys.modules.pop("pipeline", None)
     from auto_research.web import server as web_server
 
     monkeypatch.setattr(web_server, "_environment_decision_for_job", lambda *args, **kwargs: {
@@ -860,9 +1077,6 @@ def test_web_environment_decision_projection_supports_environment_ready(monkeypa
 
 
 def test_web_jobs_maps_handoff_ready_status_to_done_for_frontend():
-    reading_scripts = ROOT / "modules" / "reading" / "scripts"
-    sys.path.insert(0, str(reading_scripts))
-    sys.modules.pop("pipeline", None)
     from auto_research.web import server as web_server
 
     row = web_server._compact_job_for_list({
@@ -887,9 +1101,6 @@ def test_web_jobs_maps_handoff_ready_status_to_done_for_frontend():
 
 
 def test_web_jobs_maps_experiment_acceptance_blocker_to_blocked_status():
-    reading_scripts = ROOT / "modules" / "reading" / "scripts"
-    sys.path.insert(0, str(reading_scripts))
-    sys.modules.pop("pipeline", None)
     from auto_research.web import server as web_server
 
     message = "实验迭代被验收门控阻断：Claude Code 未获准执行必要 Bash/Python 命令；本轮不得计为科研成功。"
@@ -919,9 +1130,6 @@ def test_web_jobs_maps_experiment_acceptance_blocker_to_blocked_status():
 
 
 def test_web_jobs_projects_generic_experiment_error_from_registry(monkeypatch, tmp_path):
-    reading_scripts = ROOT / "modules" / "reading" / "scripts"
-    sys.path.insert(0, str(reading_scripts))
-    sys.modules.pop("pipeline", None)
     from auto_research.web import server as web_server
 
     monkeypatch.setattr(web_server, "WORKSPACE_ROOT", tmp_path)
@@ -1201,9 +1409,6 @@ def test_web_project_summary_projects_source_integrity_blocker(monkeypatch, tmp_
 
 
 def test_api_artifacts_light_compacts_large_current_find_progress(monkeypatch, tmp_path):
-    reading_scripts = ROOT / "modules" / "reading" / "scripts"
-    sys.path.insert(0, str(reading_scripts))
-    sys.modules.pop("pipeline", None)
     from auto_research.web import server as web_server
 
     projects = tmp_path / "projects"
@@ -1240,10 +1445,50 @@ def test_api_artifacts_light_compacts_large_current_find_progress(monkeypatch, t
     assert len(json.dumps(payload, ensure_ascii=False)) < 20000
 
 
+def test_api_artifacts_compact_find_results_preserves_dynamic_source_status(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    projects = tmp_path / "projects"
+    root = _make_project(projects, "demo")
+    finding = root / "planning" / "finding"
+    finding.mkdir(parents=True, exist_ok=True)
+    run_id = "find_large_results_dynamic_sources_demo"
+    (root / "state" / "finding_frontend.json").write_text(json.dumps({"taste_run_id": run_id, "counts": {"recommended": 3}}), encoding="utf-8")
+    progress = {
+        "run_id": run_id,
+        "phase": "complete",
+        "source_status": [
+            {"source": "nature", "ok": True, "limited": False, "count": 331, "prefiltered_count": 331, "date_coverage": {"oldest": "2026-04-08", "newest": "2026-07-02"}},
+            {"source": "arxiv", "ok": True, "limited": True, "count": 8565, "raw_count": 8565, "prefiltered_count": 2000, "message": "arXiv rate limited after 94 pages"},
+            {"source": "biorxiv", "ok": True, "limited": False, "count": 16602, "raw_count": 16602, "prefiltered_count": 2000},
+        ],
+    }
+    (finding / "find_progress.json").write_text(json.dumps(progress), encoding="utf-8")
+    (finding / "find_results.json").write_text(json.dumps({"run_id": run_id, "padding": "x" * 5000}), encoding="utf-8")
+    run_directory = tmp_path / "runs" / run_id
+    run_directory.mkdir(parents=True)
+    (run_directory / "find_progress.json").write_text(json.dumps(progress), encoding="utf-8")
+
+    monkeypatch.setattr(web_server, "run_dir", lambda _run_id: run_directory)
+    monkeypatch.setattr(web_server, "PROJECT_IDS_ROOT", projects)
+    monkeypatch.setattr(web_server, "LARGE_JSON_ARTIFACT_LIMIT_BYTES", 1024)
+    web_server._RUN_ARTIFACTS_CACHE.clear()
+
+    payload = web_server.api_artifacts(run_id, light=True)
+
+    find_results_artifact = next(item for item in payload["artifacts"] if item["name"] == "find_results.json")
+    rows = {row["source"]: row for row in find_results_artifact["content"]["source_status"]}
+    assert rows["nature"]["ok"] is True
+    assert rows["nature"]["limited"] is False
+    assert rows["nature"]["count"] == 331
+    assert rows["arxiv"]["limited"] is True
+    assert rows["arxiv"]["raw_count"] == 8565
+    assert rows["biorxiv"]["ok"] is True
+    assert rows["biorxiv"]["limited"] is False
+    assert rows["biorxiv"]["prefiltered_count"] == 2000
+
+
 def test_api_artifacts_resolves_environment_framework_and_module_roots(monkeypatch, tmp_path):
-    reading_scripts = ROOT / "modules" / "reading" / "scripts"
-    sys.path.insert(0, str(reading_scripts))
-    sys.modules.pop("pipeline", None)
     from auto_research.web import server as web_server
 
     run_id = "web_environment_demo_20260621T220925Z"
@@ -1274,10 +1519,89 @@ def test_api_artifacts_resolves_environment_framework_and_module_roots(monkeypat
     assert str(module_run) in payload["artifact_roots"]
 
 
+def test_api_artifacts_resolves_finding_runtime_runs(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    run_id = "find_20260703_205019_627705"
+    finding_runs = tmp_path / "modules" / "finding" / ".runtime" / "runs"
+    run_root = finding_runs / run_id
+    run_root.mkdir(parents=True)
+    (run_root / "find.md").write_text("# Find\n\n- 推荐论文 A", encoding="utf-8")
+    (run_root / "source_status.md").write_text("# 来源状态\n\n## arXiv\n- 状态: normal", encoding="utf-8")
+    (run_root / "find_progress.json").write_text(json.dumps({"run_id": run_id, "phase": "complete"}), encoding="utf-8")
+    (run_root / "find_results.json").write_text(json.dumps({"run_id": run_id, "strong_recommendations": [{"title": "A"}]}), encoding="utf-8")
+
+    monkeypatch.setattr(web_server, "PROJECT_IDS_ROOT", tmp_path / "projects")
+    monkeypatch.setattr(web_server, "FINDING_RUNS_DIR", finding_runs)
+    monkeypatch.setattr(web_server, "run_dir", lambda _run_id: (_ for _ in ()).throw(FileNotFoundError(_run_id)))
+    web_server._RUN_ARTIFACTS_CACHE.clear()
+
+    payload = web_server.api_artifacts(run_id, light=True)
+
+    by_name = {item["name"]: item for item in payload["artifacts"]}
+    assert str(run_root) in payload["artifact_roots"]
+    assert by_name["find.md"]["content"].startswith("# Find")
+    assert "来源状态" in by_name["source_status.md"]["content"]
+    assert by_name["find_progress.json"]["content"]["phase"] == "complete"
+    assert by_name["find_results.json"]["content"]["strong_recommendations"] == [{"title": "A"}]
+
+
+def test_api_artifacts_falls_back_to_project_current_find_read_md(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    projects = tmp_path / "projects"
+    root = _make_project(projects, "demo")
+    finding = root / "planning" / "finding"
+    finding.mkdir(parents=True, exist_ok=True)
+    run_id = "find_project_current"
+    (root / "state" / "current_find_research_plan.json").write_text(json.dumps({
+        "run_id": run_id,
+        "status": "current_find_deep_read_complete",
+        "current_find_reading_count": 1,
+        "current_find_idea_count": 0,
+        "current_find_plan_count": 0,
+        "read_idea_plan_ready": False,
+    }), encoding="utf-8")
+    (root / "state" / "current_find_claude_reading_validation.json").write_text(json.dumps({
+        "run_id": run_id,
+        "valid": True,
+        "status": "current_find_deep_read_complete",
+        "expected_recommendation_count": 1,
+        "actual_reading_count": 1,
+        "full_text_reading_count": 1,
+        "pending_full_text_reading_count": 0,
+        "pending_deep_read_synthesis_count": 0,
+    }), encoding="utf-8")
+    (finding / "find_results.json").write_text(json.dumps({
+        "run_id": run_id,
+        "strong_recommendations": [{"title": "Paper A"}],
+    }), encoding="utf-8")
+    (finding / "find_progress.json").write_text(json.dumps({"run_id": run_id, "phase": "complete"}), encoding="utf-8")
+    (finding / "read.md").write_text("# 论文精读\n\n## 逐篇精读\n\n### 1. Paper A\n", encoding="utf-8")
+    (finding / "read_results.json").write_text(json.dumps({
+        "run_id": run_id,
+        "source": "claude_code_current_find_takeover",
+        "status": "current_find_deep_read_complete",
+        "readings": [{"title": "Paper A", "full_text_available": True, "deep_read_complete": True}],
+        "public_final_artifact_present": True,
+    }), encoding="utf-8")
+
+    monkeypatch.setattr(web_server, "PROJECT_IDS_ROOT", projects)
+    monkeypatch.setattr(web_server, "run_dir", lambda _run_id: (_ for _ in ()).throw(FileNotFoundError(_run_id)))
+    web_server._RUN_ARTIFACTS_CACHE.clear()
+    web_server._RUN_PROJECT_CACHE.clear()
+
+    payload = web_server.api_artifacts(run_id, light=False)
+
+    by_name = {item["name"]: item for item in payload["artifacts"]}
+    assert str(finding) in payload["artifact_roots"]
+    assert "read.md" in by_name
+    assert by_name["read.md"]["content"].startswith("# 论文精读")
+    assert "read_results.json" in by_name
+    assert by_name["read_results.json"]["content"]["status"] == "current_find_deep_read_complete"
+
+
 def test_api_artifacts_light_recovers_current_find_source_status_from_markdown(monkeypatch, tmp_path):
-    reading_scripts = ROOT / "modules" / "reading" / "scripts"
-    sys.path.insert(0, str(reading_scripts))
-    sys.modules.pop("pipeline", None)
     from auto_research.web import server as web_server
 
     projects = tmp_path / "projects"
@@ -1315,10 +1639,7 @@ def test_api_artifacts_light_recovers_current_find_source_status_from_markdown(m
     )
     (finding / "find_progress.json").write_text('{"padding":"' + ('x' * (6 * 1024 * 1024)) + '"}', encoding="utf-8")
     (finding / "find_results.json").write_text('{"padding":"' + ('x' * (6 * 1024 * 1024)) + '"}', encoding="utf-8")
-    (finding / "source_status.md").write_text(
-        (ROOT / "projects" / "protein" / "planning" / "finding" / "source_status.md").read_text(encoding="utf-8"),
-        encoding="utf-8",
-    )
+    (finding / "source_status.md").write_text(_source_status_fixture_markdown(), encoding="utf-8")
     run_directory = tmp_path / "runs" / run_id
     run_directory.mkdir(parents=True)
     monkeypatch.setattr(web_server, "run_dir", lambda _run_id: run_directory)
@@ -1383,10 +1704,7 @@ def test_project_summary_recovers_source_status_from_markdown_when_progress_is_l
         encoding="utf-8",
     )
     (finding / "find_progress.json").write_text('{"padding":"' + ('x' * (6 * 1024 * 1024)) + '"}', encoding="utf-8")
-    (finding / "source_status.md").write_text(
-        (ROOT / "projects" / "protein" / "planning" / "finding" / "source_status.md").read_text(encoding="utf-8"),
-        encoding="utf-8",
-    )
+    (finding / "source_status.md").write_text(_source_status_fixture_markdown(), encoding="utf-8")
     monkeypatch.setattr(project_bridge, "PROJECTS", projects)
     monkeypatch.setattr(project_bridge, "_PROJECT_SUMMARY_CACHE", {})
     monkeypatch.setattr(project_bridge, "_current_verified_venue_metadata_rows", lambda *args, **kwargs: [])
@@ -1413,10 +1731,74 @@ def test_project_summary_recovers_source_status_from_markdown_when_progress_is_l
     assert summary["literature_survey"]["status"] == "current_find_packet_ready"
 
 
+def test_dynamic_source_status_is_not_normalized_as_venue_metadata():
+    source_status = [
+        {
+            "source": "nature",
+            "ok": True,
+            "limited": False,
+            "count": 331,
+            "prefiltered_count": 331,
+            "message": "ok; date coverage 2026-04-08 to 2026-07-02",
+            "date_coverage": {"oldest": "2026-04-08", "newest": "2026-07-02"},
+        },
+        {
+            "source": "arxiv",
+            "ok": True,
+            "limited": True,
+            "count": 8565,
+            "raw_count": 8565,
+            "prefiltered_count": 2000,
+            "message": "arXiv rate limited after 94 pages; kept 8565 papers.",
+            "date_coverage": {"oldest": "2026-04-03", "newest": "2026-07-02"},
+        },
+        {
+            "source": "biorxiv",
+            "ok": True,
+            "limited": False,
+            "count": 16602,
+            "raw_count": 16602,
+            "prefiltered_count": 2000,
+            "message": "ok; complete native date window scanned",
+            "date_coverage": {"oldest": "2026-04-03", "newest": "2026-07-03"},
+        },
+    ]
+    venue_health = [
+        {
+            "venue_id": "openreview_iclr",
+            "venue": "ICLR",
+            "ok": True,
+            "adapter": "openreview_reference",
+            "corpus_count": 5352,
+            "candidate_count": 1381,
+            "effective_years": [2026],
+            "requested_years": [2026],
+            "metadata_completeness_ok": True,
+            "metadata_completeness_status": "complete",
+            "title_index_completeness_ok": True,
+            "has_official_categories": True,
+            "has_abstracts": True,
+        }
+    ]
+
+    expanded = project_bridge._expand_source_status_rows(source_status, venue_health)
+    rows = {row["source"]: row for row in project_bridge._merge_verified_venue_metadata_rows(expanded, [])}
+
+    assert rows["nature"]["ok"] is True
+    assert rows["nature"]["limited"] is False
+    assert rows["nature"]["count"] == 331
+    assert rows["nature"]["prefiltered_count"] == 331
+    assert rows["nature"]["date_coverage"]["oldest"] == "2026-04-08"
+    assert rows["arxiv"]["ok"] is True
+    assert rows["arxiv"]["limited"] is True
+    assert rows["arxiv"]["raw_count"] == 8565
+    assert rows["arxiv"]["prefiltered_count"] == 2000
+    assert rows["biorxiv"]["ok"] is True
+    assert rows["biorxiv"]["limited"] is False
+    assert rows["biorxiv"]["raw_count"] == 16602
+
+
 def test_web_jobs_keeps_only_latest_persisted_environment_history(monkeypatch):
-    reading_scripts = ROOT / "modules" / "reading" / "scripts"
-    sys.path.insert(0, str(reading_scripts))
-    sys.modules.pop("pipeline", None)
     from auto_research.web import server as web_server
 
     web_server._LIVE_JOBS_CACHE.clear()
@@ -1456,15 +1838,63 @@ def test_web_current_find_pending_read_blocker_is_not_environment_ready():
     })
 
     assert blocker["category"] == "pending_current_find_read"
-    assert "Read 精读尚未运行" in blocker["summary"]
+    assert "Find 已完成" in blocker["summary"]
+    assert "Read 精读、Idea 和 Plan 尚未运行" in blocker["summary"]
     assert "环境阶段" not in blocker["summary"]
-    assert "Read 完成前不能进入 Idea、Plan、环境、实验或写作" in blocker["next_action"]
+    assert "启动 Read" in blocker["next_action"]
+    assert "唯一研究计划" in blocker["next_action"]
+
+
+def test_web_find_only_completion_is_pending_read_not_claude_gate(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    root = _make_project(projects, "demo")
+    finding = root / "planning" / "finding"
+    finding.mkdir(parents=True, exist_ok=True)
+    run_id = "find_demo"
+    (finding / "find_progress.json").write_text(json.dumps({
+        "run_id": run_id,
+        "counts": {
+            "strong_recommendations": 3,
+            "recommendation_target_count": 3,
+            "recommendation_shortfall": 0,
+        },
+        "recommendation_target_count": 3,
+        "recommendation_shortfall": 0,
+        "source_status": [],
+        "venue_health_report": [],
+    }), encoding="utf-8")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.setattr(project_bridge, "_PROJECT_SUMMARY_CACHE", {})
+    monkeypatch.setattr(project_bridge, "_framework_public_status_for_project", lambda project: {})
+    monkeypatch.setattr(project_bridge, "_remote_process_rows", lambda: [])
+    monkeypatch.setattr(project_bridge, "_current_project_source_selection", lambda *args, **kwargs: {})
+    monkeypatch.setattr(project_bridge, "_current_verified_venue_metadata_rows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(project_bridge, "_current_health_check_source_status_rows", lambda *args, **kwargs: [])
+
+    summary = project_bridge._current_find_pipeline_summary(root)
+    blocker = project_bridge._current_find_pipeline_public_blocker(summary)
+    public_text = json.dumps({"summary": summary, "blocker": blocker}, ensure_ascii=False)
+
+    assert summary["status"] == "pending_current_find_read"
+    assert summary["next_required_action"] == "run_read_for_current_find"
+    assert blocker["title"] == "Find 已完成，等待运行 Read/Idea/Plan"
+    assert "Find 已完成" in blocker["summary"]
+    assert "Claude 接管 gate" not in public_text
+    assert "等待当前 Find 后处理" not in public_text
+
+    cfg = json.loads((root / "project.json").read_text(encoding="utf-8"))
+    project_summary = project_bridge._fast_project_summary("demo", root, cfg)
+    projected = project_summary["literature_survey"]["current_find_pipeline"]
+    projected_blocker = project_summary["human_gate_summary"]
+    projected_text = json.dumps({"pipeline": projected, "blocker": projected_blocker}, ensure_ascii=False)
+    assert projected["status"] == "pending_current_find_read"
+    assert projected["next_required_action"] == "run_read_for_current_find"
+    assert "Find 已完成" in projected["summary_zh"]
+    assert "Claude 接管 gate" not in projected_text
+    assert "等待当前 Find 后处理" not in projected_text
 
 
 def test_web_current_find_read_history_supersedes_stale_blocked_read_job(monkeypatch, tmp_path):
-    reading_scripts = ROOT / "modules" / "reading" / "scripts"
-    sys.path.insert(0, str(reading_scripts))
-    sys.modules.pop("pipeline", None)
     from auto_research.web import server as web_server
 
     projects = tmp_path / "projects"
@@ -1505,7 +1935,9 @@ def test_web_current_find_read_history_supersedes_stale_blocked_read_job(monkeyp
     read_rows = [row for row in synthetic if row.get("stage") == "read"]
     assert len(read_rows) == 1
     assert read_rows[0]["status"] == "done"
-    assert "全文精读合格 20 篇，待补 0 篇" in read_rows[0]["progress"]["message"]
+    assert "当前展示 20/20 篇" in read_rows[0]["progress"]["message"]
+    assert "同篇全文证据 20/20 篇" in read_rows[0]["progress"]["message"]
+    assert "精读完成 20/20 篇" in read_rows[0]["progress"]["message"]
 
     collapsed = web_server._collapse_current_find_read_retry_jobs([stale] + synthetic, project_hint="demo")
     collapsed_read_rows = [row for row in collapsed if row.get("stage") == "read"]
@@ -1513,3 +1945,85 @@ def test_web_current_find_read_history_supersedes_stale_blocked_read_job(monkeyp
     assert collapsed_read_rows[0]["job_id"].startswith("current-find-read_")
     assert collapsed_read_rows[0]["status"] == "done"
     assert "缺少同篇全文证据" not in json.dumps(collapsed_read_rows[0], ensure_ascii=False)
+
+
+def test_web_project_summary_lists_read_md_before_read_results(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    root = _make_project(projects, "demo")
+    run_id = "find_current"
+    finding = root / "planning" / "finding"
+    finding.mkdir(parents=True, exist_ok=True)
+    (finding / "find_results.json").write_text(json.dumps({
+        "run_id": run_id,
+        "recommendations": [{"title": "Paper A"}],
+        "articles": [{"title": "Paper A"}],
+    }), encoding="utf-8")
+    (finding / "read.md").write_text("# 精读\n\nPaper A\n", encoding="utf-8")
+    (finding / "read_results.json").write_text(json.dumps({
+        "run_id": run_id,
+        "readings": [{"title": "Paper A", "full_text_available": True}],
+    }), encoding="utf-8")
+    (root / "state" / "current_find_claude_reading_validation.json").write_text(json.dumps({
+        "run_id": run_id,
+        "valid": True,
+        "expected_recommendation_count": 1,
+        "actual_reading_count": 1,
+    }), encoding="utf-8")
+    (root / "state" / "current_find_research_plan.json").write_text(json.dumps({
+        "run_id": run_id,
+        "read_idea_plan_ready": True,
+        "current_find_reading_count": 1,
+    }), encoding="utf-8")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.setattr(project_bridge, "_PROJECT_SUMMARY_CACHE", {})
+    monkeypatch.setattr(project_bridge, "_framework_public_status_for_project", lambda project: {})
+    monkeypatch.setattr(project_bridge, "_remote_process_rows", lambda: [])
+    monkeypatch.setattr(project_bridge, "_current_project_source_selection", lambda *args, **kwargs: {})
+
+    summary = project_bridge.project_summary("demo")
+    names = [item["name"] for item in summary["artifacts"]]
+
+    assert "read.md" in names
+    assert "read_results.json" in names
+    assert names.index("read.md") < names.index("read_results.json")
+
+
+def test_web_project_summary_hides_unfinalized_read_results(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    root = _make_project(projects, "demo")
+    run_id = "find_current"
+    finding = root / "planning" / "finding"
+    finding.mkdir(parents=True, exist_ok=True)
+    (finding / "find_results.json").write_text(json.dumps({
+        "run_id": run_id,
+        "recommendations": [{"title": "Paper A"}],
+        "articles": [{"title": "Paper A"}],
+    }), encoding="utf-8")
+    (finding / "read_results.json").write_text(json.dumps({
+        "run_id": run_id,
+        "readings": [{"title": "Paper A", "full_text_available": True}],
+        "public_final_artifact_present": False,
+        "reading_validation": {
+            "run_id": run_id,
+            "valid": False,
+            "blockers": ["final read.md is missing"],
+        },
+    }), encoding="utf-8")
+    (root / "state" / "current_find_claude_reading_validation.json").write_text(json.dumps({
+        "run_id": run_id,
+        "valid": False,
+        "expected_recommendation_count": 1,
+        "actual_reading_count": 1,
+        "blockers": ["final read.md is missing"],
+    }), encoding="utf-8")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.setattr(project_bridge, "_PROJECT_SUMMARY_CACHE", {})
+    monkeypatch.setattr(project_bridge, "_framework_public_status_for_project", lambda project: {})
+    monkeypatch.setattr(project_bridge, "_remote_process_rows", lambda: [])
+    monkeypatch.setattr(project_bridge, "_current_project_source_selection", lambda *args, **kwargs: {})
+
+    summary = project_bridge.project_summary("demo")
+    names = [item["name"] for item in summary["artifacts"]]
+
+    assert "read.md" not in names
+    assert "read_results.json" not in names

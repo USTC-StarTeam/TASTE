@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -296,7 +297,7 @@ def literature_snapshot(paths) -> dict[str, Any]:
         'files': {
             'find_results': str(paths.planning / 'finding' / 'find_results.json'),
             'find_progress': str(paths.planning / 'finding' / 'find_progress.json'),
-            'article': str(paths.planning / 'finding' / 'article.md'),
+            'find': str(paths.planning / 'finding' / 'find.md'),
         },
     }
 
@@ -311,6 +312,21 @@ def http_json(url: str, timeout: int = 45, retries: int = 2) -> tuple[Any, str]:
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
             last_error = str(exc)
     return {}, last_error
+
+
+def web_api_base_url() -> str:
+    host = str(os.environ.get('WEB_HOST') or '127.0.0.1').strip() or '127.0.0.1'
+    if host in {'0.0.0.0', '::'}:
+        host = '127.0.0.1'
+    port = str(os.environ.get('WEB_PORT') or '8879').strip() or '8879'
+    if ':' in host and not host.startswith('['):
+        host = f'[{host}]'
+    return f'http://{host}:{port}'
+
+
+def web_api_url(path: str) -> str:
+    suffix = path if path.startswith('/') else f'/{path}'
+    return f'{web_api_base_url()}{suffix}'
 
 
 def pid_alive(pid: Any) -> bool:
@@ -1008,8 +1024,9 @@ def append_work_status(project: str, payload: dict[str, Any]) -> None:
 def generic_supervision_tick(project: str, venue: str, *, supervise: bool) -> dict[str, Any]:
     paths = build_paths(project)
     repairs = ensure_project_config(project, venue)
-    jobs_payload, jobs_error = http_json('http://127.0.0.1:8765/api/jobs?compact=1&limit=20', timeout=30, retries=1)
-    compact_payload, compact_error = http_json(f'http://127.0.0.1:8765/api/projects/{project}?compact=1', timeout=60, retries=2)
+    project_path = urllib.parse.quote(project, safe='')
+    jobs_payload, jobs_error = http_json(web_api_url('/api/jobs?compact=1&limit=20'), timeout=30, retries=1)
+    compact_payload, compact_error = http_json(web_api_url(f'/api/projects/{project_path}?compact=1'), timeout=60, retries=2)
     full = load_json(paths.state / 'full_research_cycle.json', {})
     find_plan = load_json(paths.state / 'current_find_research_plan.json', {})
     env_selection = current_environment_base_selection(paths)

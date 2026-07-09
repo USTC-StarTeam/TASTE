@@ -1419,9 +1419,9 @@ class FullCycle:
             env = os.environ.copy()
             if "--skip-discovery" in {str(part) for part in cmd}:
                 # Reuse the validated current Find packet for normal discovery, but do
-                # not create a global Find lock. Literature shortfall repair must
-                # still be able to launch framework/scripts/run_module.py finding --action literature_tool unless a
-                # caller explicitly sets DISABLE_NEW_FIND=1 or --record-only.
+                # not create a global Find lock. Literature shortfall repair must still
+                # be able to refresh the configured Find route unless a caller explicitly
+                # sets DISABLE_NEW_FIND=1.
                 env.setdefault("USE_EXISTING_LITERATURE_PACKET", "1")
             if stage == "autonomous-research":
                 env.setdefault("ARXIV_TIMEOUT_SEC", "12")
@@ -1668,7 +1668,7 @@ class FullCycle:
             "AUTHORITATIVE TASTE HARD-GATE CONTEXT. This block overrides stale Claude session memory and prior summaries.",
             "If these facts contradict earlier session text, the JSON below is correct.",
             "P0: LLM API availability must be judged from web-saved TASTE config or injected runtime env, not from a bare non-interactive shell env. project.json intentionally does not store raw API keys; do not ask to put secrets in bashrc.",
-            "P0: Claude may repair a literature shortfall only through framework/scripts/run_module.py finding --action literature_tool. That wrapper runs internal surveys by default; user-visible current-Find repair must pass --publish-current-find, while DISABLE_NEW_FIND=1/--record-only only records queries; do not call raw finding-module commands or run duplicate concurrent Finds.",
+            "P0: Claude may repair a literature shortfall only through the configured Find refresh route (`framework/scripts/run_frontend.py --project <project> --deep-survey`) followed by `framework/scripts/run_module.py reading --action current_find_research_plan`. DISABLE_NEW_FIND=1 only records/reuses existing Find state; do not call raw finding-module internals or run duplicate concurrent Finds.",
             "P0: Before declaring any experiment interrupted, stopped, failed, or restarting it, inspect active_experiment_processes plus ps/proc status and the actual log mtime/tail. A live PID is authoritative over an incomplete epoch log.",
             "P0: If active_experiment_processes contains a matching finetune/main.py/exp_text_init/python-c training run, do not start another run with the same dataset, descriptor, semantic embedding path, objective, or artifact_dir. Wait for the live process to finish, then audit its final artifacts.",
             "P0 EXPERIMENT ARTIFACT CONTRACT: every new experiment must use one fresh unique artifact_dir under projects/<project>/artifacts, one stdout_stderr.log, and exactly one python worker. Never reuse an artifact_dir after a failed/contaminated launch.",
@@ -1697,7 +1697,7 @@ class FullCycle:
         if target_state.get("blocking"):
             hard_lines.extend([
                 f"P0: Current Find recommended papers are {target_state.get('actual')}/{target_state.get('target')} with shortfall={target_state.get('shortfall')}. These recommendations must come from real abstracts scored by the LLM; do not treat the stricter claim-anchor count as a recommendation shortfall, and do not promote weak/unscored papers.",
-                "P0 HARD STOP: While this recommendation shortfall remains, the only allowed actions are Find title+abstract scoring/packet repair actions: finding --action tool_packet, finding --action literature_tool, finding --action literature_base_candidates, writing --action submission_readiness, and planning --action blocker_action_plan.",
+                "P0 HARD STOP: While this recommendation shortfall remains, the only allowed actions are configured Find refresh, current-Find Read/Idea/Plan rebuild, writing --action submission_readiness, and planning --action blocker_action_plan.",
                 "P0 FORBIDDEN until the literature gate clears: repair_paper_orchestra_citations.py, revise_paper_citation_coverage.py, run_paper_pipeline.py, repair_paper_preview_loop.py, repair_paper_figures_loop.py, build_conference_preview_paper.py, figure repair, citation repair, paper writing, paper polishing, base promotion, experiment launch, and claim promotion.",
             ])
         if isinstance(submission, dict) and not bool(submission.get("submission_ready")):
@@ -2303,7 +2303,7 @@ Title: {self.args.title or '(TASTE may refine the working title in state)'}
 
 Required behavior:
 - Before choosing a route, read `planning/reference_workflow_and_claude_code.md`, `planning/literature_tool_packet.md` or `state/literature_tool_packet.json`, and at least one raw artifact in `planning/finding/` so the survey work is not wasted.
-- If the current packet is stale, empty, or not specific enough for the current blocker, run `{management_python()} framework/scripts/run_module.py finding --action literature_tool --project {self.args.project} --query "<targeted query>" --fast-mode --venue {self.args.venue}` as an internal project-agent survey and read the packet path printed under `state/internal_literature_runs/...`; use `--deep-survey` only when broad venue/arXiv coverage is necessary, and add `--publish-current-find` only when a human/TASTE wrapper explicitly asks for visible current-Find refresh.
+- If the current packet is stale, empty, or not specific enough for the current blocker, record targeted queries and refresh through `{management_python()} framework/scripts/run_frontend.py --project {self.args.project} --deep-survey --query "<targeted query>"`, then run `{management_python()} framework/scripts/run_module.py reading --action current_find_research_plan --project {self.args.project}`. Do not call deleted Finding literature-tool actions.
 - Perform additional network-backed literature/repository search when Claude Code tools allow it; otherwise record the exact network/tool blocker.
 - Use TASTE's native research-direction, evolutionary-memory, evidence-assurance, trajectory-optimization, and paper-production modules. Do not address those capabilities by external source-project names.
 - Decide whether the current repo remains the best transformable route or whether The workflow should search/switch, based on evidence, not hard-coded topic gates.
@@ -3389,7 +3389,11 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
             self.state["summary_zh"] = "新的 Find/文献调研正在运行；等待本轮标题筛选、摘要抓取和 LLM 摘要评分产物。"
             self.state["current_goal"] = "run fresh Find/literature survey and replace stale literature outputs"
             self.save()
-            step(self.run(module_cmd('finding', 'plan_literature', '--project', self.args.project), stage="literature-plan"))
+            (self.paths.logs / "literature_plan.log").write_text(
+                "Finding no longer exposes plan_literature/tool_packet actions. "
+                "Fresh discovery uses framework/scripts/run_frontend.py and downstream Read/Idea/Plan uses reading --action current_find_research_plan.\n",
+                encoding="utf-8",
+            )
             taste_timeout = max(1800, min(self.args.autonomous_timeout_sec, int(os.environ.get("TIMEOUT_SEC", "14400"))))
             if os.environ.get("FULL_CYCLE_REFRESH_LOCAL_DB", "1").lower() in {"1", "true", "yes", "on"}:
                 db_timeout = int(os.environ.get("DB_UPDATE_TIMEOUT_SEC", "1800"))
@@ -3454,7 +3458,6 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
                 self.save()
                 return cycle
             step(self.run([sys.executable, str(SCRIPTS / "sync_outputs.py"), "--project", self.args.project, "--allow-empty"], stage="literature-sync", timeout=180))
-            step(self.run(module_cmd('finding', 'tool_packet', '--project', self.args.project, '--venue', self.args.venue), stage="literature-tool-packet", timeout=180))
             cycle["current_find_research_plan_status"] = self.ensure_current_find_research_plan(step)
             plan_bridge_gate_after_read = current_find_plan_bridge_gate_status(self.paths, cycle["current_find_research_plan_status"])
             if plan_bridge_gate_after_read.get("blocking"):
@@ -3481,7 +3484,6 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
             self.save()
         else:
             step(self.run([sys.executable, str(SCRIPTS / "sync_outputs.py"), "--project", self.args.project, "--allow-empty"], stage="literature-sync-existing", required=False, timeout=180))
-            step(self.run(module_cmd('finding', 'tool_packet', '--project', self.args.project, '--venue', self.args.venue), stage="literature-tool-packet-refresh", required=False, timeout=180))
             cycle["current_find_research_plan_status"] = self.ensure_current_find_research_plan(step, stage_suffix="-refresh")
             plan_bridge_gate_after_read = current_find_plan_bridge_gate_status(self.paths, cycle["current_find_research_plan_status"])
             if plan_bridge_gate_after_read.get("blocking"):
@@ -3504,7 +3506,6 @@ Return concise Markdown with: Root Cause, Files/State Changed, Commands Run, Evi
             cycle["literature_after_survey"] = survey_summary
             self.state["literature_after_survey"] = survey_summary
             self.save()
-        step(self.run(module_cmd('finding', 'literature_base_candidates', '--project', self.args.project), stage="literature-base-candidate-assessment", required=False, timeout=180))
         step(self.run(module_cmd('experimenting', 'reference_reproduction', '--project', self.args.project, '--venue', self.args.venue), stage="reference-reproduction-gate-initial"))
         step(self.run([sys.executable, str(SCRIPTS / "build_research_trajectory_system.py"), "--project", self.args.project, "--venue", self.args.venue], stage="trajectory-refresh"))
         step(self.run(module_cmd('environment', 'selected_base_viability', '--project', self.args.project, '--venue', self.args.venue), stage="selected-base-viability-initial"))

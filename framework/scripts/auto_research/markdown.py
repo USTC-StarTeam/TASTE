@@ -227,9 +227,6 @@ def _paper_zh_hits(paper: dict) -> str:
 
 _TITLE_ZH = {
     "Recommended Articles": "推荐文章",
-    "Screened Strong Ranking": "推荐文章排名",
-    "Read Candidates": "精读候选",
-    "Critique Candidates": "边界/审计候选",
     "bioRxiv Articles": "bioRxiv 文章",
     "Nature Portfolio Articles": "Nature Portfolio 文章",
     "Science Family Articles": "Science Family 文章",

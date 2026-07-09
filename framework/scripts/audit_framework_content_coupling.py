@@ -17,14 +17,11 @@ IGNORED_DIR_NAMES = {"__pycache__", ".pytest_cache", "node_modules", "dist", "bu
 RUNTIME_STATE_DIR_NAMES = {"runs", "state", "logs", "cache", ".cache", "local_database", "quarantine"}
 DEBRIS_NAME_MARKERS = (".bak", ".tmp.", ".broken_", ".orig", ".rej")
 GENERATED_FRAMEWORK_CACHE_NAMES = {
-    "article.md",
+    "find.md",
     "read.md",
     "idea.md",
     "plan.md",
     "strict_recommendation_audit.md",
-    "critique_candidates.md",
-    "read_candidates.md",
-    "screened_ranking.md",
     "source_status.md",
     "biorxiv.md",
     "github.md",

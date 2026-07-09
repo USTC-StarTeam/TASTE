@@ -82,6 +82,7 @@ class AppConfig(BaseModel):
     github_since: Literal["daily", "weekly", "monthly"] = "daily"
     hf_include_papers: bool = True
     hf_include_models: bool = True
+    runtime_tuning: dict[str, Any] = Field(default_factory=dict)
     default_find_selection: dict[str, Any] = Field(default_factory=dict)
     email: EmailConfig = Field(default_factory=EmailConfig)
 
@@ -111,6 +112,7 @@ class ReadRequest(BaseModel):
     run_id: str
     paper_ids: list[str] = Field(default_factory=list)
     max_papers: int = 5
+    force: bool = False
 
 
 class IdeaRequest(BaseModel):

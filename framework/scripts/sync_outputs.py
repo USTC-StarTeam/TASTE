@@ -16,17 +16,16 @@ from literature_policy import now_utc, paper_sort_key, repo_sort_key, score_pape
 from taste_pythonpath import ensure_taste_pythonpath
 ensure_taste_pythonpath(ROOT)
 from auto_research.source_selection import canonical_source_selection, paper_source_allowed, source_enabled
-from auto_research.paths import LEGACY_RUNS_DIR, RUNS_DIR
+from auto_research.paths import FINDING_RUNS_DIR, LEGACY_RUNS_DIR, RUNS_DIR
 
 
 STANDARD_ARTIFACTS = [
-    "article.md", "read.md", "idea.md", "plan.md", "source_status.md", "hf.md", "github.md",
-    "find_results.json", "find_progress.json", "read_results.json", "ideas.json", "plans.json",
-    "manifest.json", "selection.json", "venue_health_report.json", "category_scan_report.json",
-    "title_filter_report.json", "arxiv_raw.json", "arxiv_prefiltered.json", "biorxiv.md",
-    "biorxiv_raw.json", "biorxiv_prefiltered.json", "nature.md", "nature_raw.json",
-    "nature_prefiltered.json", "science.md", "science_raw.json", "science_prefiltered.json",
-    "read_candidates.md", "triage_candidates.md", "audit_candidates.md", "critique_candidates.md", "screened_ranking.md",
+    "find.md", "source_status.md", "hf.md", "github.md",
+    "find_results.json", "find_progress.json", "manifest.json", "selection.json",
+    "venue_health_report.json", "category_scan_report.json", "title_filter_report.json",
+    "arxiv_raw.json", "arxiv_prefiltered.json", "biorxiv.md", "biorxiv_raw.json",
+    "biorxiv_prefiltered.json", "nature.md", "nature_raw.json", "nature_prefiltered.json",
+    "science.md", "science_raw.json", "science_prefiltered.json",
 ]
 
 
@@ -41,6 +40,7 @@ def resolve_taste_run_dir(run_id: str, state: Any | None = None) -> Path | None:
     if state_run_id == run_id and state_run_dir:
         candidates.append(Path(state_run_dir))
     candidates.extend([
+        FINDING_RUNS_DIR / run_id,
         RUNS_DIR / run_id,
         LEGACY_RUNS_DIR / run_id,
     ])
@@ -72,10 +72,9 @@ def adopt_taste_find_run(paths: Any, state: Any, run_id: str) -> dict[str, Any]:
     state_payload = dict(state) if isinstance(state, dict) else {}
     counts = state_payload.get("counts") if isinstance(state_payload.get("counts"), dict) else {}
     if isinstance(find_results, dict):
+        strong_count = len(find_results.get("strong_recommendations") or find_results.get("articles") or [])
         counts.update({
-            "articles": len(find_results.get("articles") or []),
-            "strong_recommendations": len(find_results.get("strong_recommendations") or find_results.get("articles") or []),
-            "read_candidates": len(find_results.get("read_candidates") or []),
+            "strong_recommendations": strong_count,
             "evaluated_candidates": len(find_results.get("evaluated_candidates") or []),
             "title_candidates": len(find_results.get("title_candidates") or find_results.get("retrieval_candidates") or []),
             "raw_title_index": len(find_results.get("raw_title_index") or []),
@@ -101,7 +100,7 @@ def adopt_taste_find_run(paths: Any, state: Any, run_id: str) -> dict[str, Any]:
     save_json(paths.state / "finding_frontend.json", state_payload)
     nl = chr(10)
     summary = []
-    summary.append("# native Frontend" + nl + nl)
+    summary.append("# Find Frontend" + nl + nl)
     summary.append("- status: find_completed_current_web_run_adopted" + nl)
     summary.append(f"- taste_run_id: {run_id}" + nl)
     summary.append(f"- taste_run_dir: {run_dir}" + nl)
@@ -123,6 +122,7 @@ def sync_current_find_progress(state: Any, taste_dir: Path) -> dict[str, Any]:
         candidates.append(Path(run_dir_text) / "find_progress.json")
     if run_id:
         candidates.extend([
+            FINDING_RUNS_DIR / run_id / "find_progress.json",
             RUNS_DIR / run_id / "find_progress.json",
             LEGACY_RUNS_DIR / run_id / "find_progress.json",
         ])
@@ -414,6 +414,8 @@ def main() -> None:
         "title_filter_report": str(taste_dir / "title_filter_report.json"),
         "arxiv_raw": str(taste_dir / "arxiv_raw.json"),
         "arxiv_prefiltered": str(taste_dir / "arxiv_prefiltered.json"),
+        "read_md": str(taste_dir / "read.md"),
+        "public_final_artifact": str(taste_dir / "read.md"),
         "read_results": str(taste_dir / "read_results.json"),
         "ideas": str(taste_dir / "ideas.json"),
         "plans": str(taste_dir / "plans.json"),
@@ -446,7 +448,7 @@ def main() -> None:
     find_results = load_json(taste_dir / "find_results.json", {})
     payload["survey_stats"] = survey_stats_from_find(find_results, payload.get("survey_stats", {}))
     if isinstance(find_results, dict):
-        articles = find_results.get("articles", []) if isinstance(find_results.get("articles", []), list) else []
+        articles = find_results.get("strong_recommendations", []) if isinstance(find_results.get("strong_recommendations", []), list) else []
         fallback_only = bool(articles) and all(str(row.get("source", "")) == "taste_recoverable_fallback" for row in articles if isinstance(row, dict))
         if str(find_results.get("run_id") or "") == "taste_recoverable_fallback" or fallback_only:
             payload.update({
@@ -468,10 +470,8 @@ def main() -> None:
         # they cannot be promoted by generic source/recency ranking.
         source_pools = [
             ("strong_recommendations", "strong_recommendation"),
-            ("articles", "strong_recommendation"),
             ("screened_ranking", "strong_ranking"),
             ("triage_candidates", "triage_candidate"),
-            ("audit_candidates", "audit_candidate"),
             ("arxiv_prefiltered", "nethreshold_arxiv"),
             ("evaluated_candidates", "evaluated_candidate"),
             ("title_candidates", "title_candidate"),
@@ -531,7 +531,7 @@ def main() -> None:
             "taste_intermediates": taste_intermediates,
             "candidate_pool_counts": {
                 key: sum(1 for row in (find_results.get(key, []) or []) if isinstance(row, dict) and paper_source_allowed(row, source_selection))
-                for key in ["articles", "screened_ranking", "read_candidates", "triage_candidates", "audit_candidates", "arxiv_prefiltered", "evaluated_candidates", "title_candidates", "critique_candidates"]
+                for key in ["strong_recommendations", "screened_ranking", "triage_candidates", "arxiv_prefiltered", "evaluated_candidates", "title_candidates", "critique_candidates"]
             },
             "synced_candidate_count": len(paper_items),
             "audit_candidate_count": len(audit_items),

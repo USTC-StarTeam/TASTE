@@ -22,9 +22,9 @@ Do not copy only `framework/` to run TASTE. The framework needs the full tracked
 Run from the repository root:
 
 ```bash
-PYTHONPATH="$PWD/framework/scripts:$PWD/framework:$PWD/web/backend:$PWD/modules/finding:$PWD/modules/reading:$PWD/modules/ideation:$PWD/modules/planning:$PWD/modules/environment:$PWD/modules/experimenting:$PWD/modules/writing:$PWD/modules/finding/scripts:$PWD/modules/reading/scripts:$PWD/modules/ideation/scripts:$PWD/modules/planning/scripts:$PWD/modules/environment/scripts:$PWD/modules/experimenting/scripts:$PWD/modules/writing/scripts:$PWD" python -m pytest tests -q
+PYTHONPATH="$(python framework/scripts/taste_pythonpath.py 2>/dev/null || printf '%s' "$PWD/framework/scripts:$PWD/framework:$PWD/web/backend:$PWD")" python -m pytest tests -q
 npm --prefix web/frontend/client run build
 framework/scripts/start_web.sh
 ```
 
-TASTE listens on `127.0.0.1:8765` by default. For remote servers, use an SSH tunnel and open the page from your local browser.
+TASTE listens on `127.0.0.1:8879` by default. For remote servers, use an SSH tunnel and open the page from your local browser.

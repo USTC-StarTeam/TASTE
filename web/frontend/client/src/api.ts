@@ -108,6 +108,7 @@ export type Job = {
     total: number;
     percent: number;
     message: string;
+    read_progress?: any;
   };
 };
 

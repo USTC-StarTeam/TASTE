@@ -5,7 +5,8 @@
 ## 输入
 
 - 浏览器中的用户操作：项目选择、配置编辑、模块按钮、产物展开、人工编辑 idea/plan。
-- `runtime/.config.json`：本机网页配置和密钥运行态。
+- `runtime/.config.json`：本机网页配置、非敏感偏好和运行参数。
+- `modules/finding/config/llm.local.json`：本机私有 Find LLM 配置，保存 provider/base URL/model/API key/temperature；也可用 `FINDING_LLM_CONFIG` 指向其它本机路径。
 - `projects/<project>/project.json` 与各阶段产物：网页只读取和 patch 明确字段。
 - `projects/<project>/state/environment_handoff.json`：environment 已完成交接时的当前 repo、run-local Conda prefix、实验 Python、待实验指标和数据入口；网页状态和实验按钮必须优先使用它，避免回退到旧 `conda_env` 或旧 `active_repo`。
 - FastAPI 后端返回的 job、artifact、status 和 Markdown/JSON 片段。
@@ -39,7 +40,7 @@
 5. 产物默认展示上一个已完成结果；新任务未完成前不能用半成品替换当前用户可见产物。
 6. Find 来源状态只能展示真实 Find run 的 `source_status` 或项目摘要；`检查可抓取性` 的 venue health sample 只能显示在会议列表中，不能当作“标题总数/分类后”回退来源。
 7. Find 页面必须区分“来源覆盖总量”和“本 run 漏斗计数”：`source_status_totals` 用于说明渠道覆盖，`counts/survey_stats` 用于显示本次实际处理的标题入口、标题筛选、LLM 打分和推荐结果，二者不能互相覆盖。
-8. 测试网页时必须实际打开 `http://127.0.0.1:8765`，在相应 tab 视觉检查所有关键文本、按钮、计数和产物，不只看命令行输出。
+8. 测试网页时必须实际打开 `http://127.0.0.1:8879`，在相应 tab 视觉检查所有关键文本、按钮、计数和产物，不只看命令行输出。
 
 ## 运行与测试
 
@@ -48,7 +49,7 @@ framework/scripts/start_web.sh
 npm --prefix web/frontend/client run build
 ```
 
-远端服务器使用 SSH tunnel 后在本地浏览器访问 `http://127.0.0.1:8765`。维护者测试 TASTE 功能时，除 debug/单元测试外，应尽量通过网页按钮触发模块任务，模拟真实用户路径。
+远端服务器使用 SSH tunnel 后在本地浏览器访问 `http://127.0.0.1:8879`。维护者测试 TASTE 功能时，除 debug/单元测试外，应尽量通过网页按钮触发模块任务，模拟真实用户路径。
 
 ## 冗余控制原则
 

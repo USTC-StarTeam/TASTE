@@ -20,6 +20,7 @@ if str(FRAMEWORK_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(FRAMEWORK_SCRIPTS))
 from taste_pythonpath import ensure_taste_pythonpath, script_resolver
 ensure_taste_pythonpath(ROOT)
+from auto_research.finding_catalog import catalog_by_id
 from auto_research.source_selection import canonical_source_selection, filter_papers_by_source_selection, filter_source_status_by_selection, normalize_source_selection
 from auto_research.paths import CONFIG_PATH, LOCAL_DATABASE_DIR, RUNS_DIR
 from auto_research.jobs import JobCancelled
@@ -1128,9 +1129,8 @@ def _current_find_results_light(root: Path, project_id: str = "") -> dict[str, A
         read_rows = _human_readable_literature_rows(raw_read_rows) or recommendation_rows
         if recommendation_rows:
             payload["strong_recommendations"] = recommendation_rows
-            payload["articles"] = recommendation_rows
-        if read_rows:
-            payload["read_candidates"] = read_rows
+        elif read_rows:
+            payload["strong_recommendations"] = read_rows
         projection_counts = projection.get("counts") if isinstance(projection.get("counts"), dict) else {}
         projection_survey_stats = projection.get("survey_stats") if isinstance(projection.get("survey_stats"), dict) else {}
         if projection_survey_stats:
@@ -1183,10 +1183,7 @@ def _current_find_results_light(root: Path, project_id: str = "") -> dict[str, A
             payload.setdefault("strict_strong_anchor_count", len(filtered_strong_papers))
         if filtered_strong_papers and not isinstance(payload.get("strong_recommendations"), list):
             payload.setdefault("strong_recommendations", filtered_strong_papers)
-        if filtered_strong_papers and not isinstance(payload.get("articles"), list):
-            payload.setdefault("articles", filtered_strong_papers)
     if isinstance(plan, dict) and _same_current_run(plan):
-        payload.setdefault("read_candidates", plan.get("readings") if isinstance(plan.get("readings"), list) else [])
         payload.setdefault("ideas", plan.get("ideas") if isinstance(plan.get("ideas"), list) else [])
         payload.setdefault("plans", plan.get("plans") if isinstance(plan.get("plans"), list) else [])
     selection = payload.get("selection")
@@ -1291,11 +1288,11 @@ def _active_stage_is_fresh_find(stage: Any) -> bool:
 
 
 def _is_current_find_read_worker_cmd(cmd: str) -> bool:
-    lowered = str(cmd or "").lower()
+    lowered = str(cmd or "").lower().replace("_", "-")
     return (
-        "ensure_current_find_research_plan.py" in lowered
-        or ("modules/reading/main.py" in lowered and "current_find_research_plan" in lowered)
-        or ("claude_project_session.py" in lowered and "current-find" in lowered)
+        "ensure-current-find-research-plan.py" in lowered
+        or ("modules/reading/main.py" in lowered and "current-find-research-plan" in lowered)
+        or ("claude-project-session.py" in lowered and "current-find" in lowered)
     )
 
 
@@ -1982,7 +1979,6 @@ def _venue_display_name_from_catalog(venue_id: Any) -> str:
     if not text:
         return "venue"
     try:
-        from find_support import catalog_by_id
         venue = catalog_by_id().get(text) or {}
     except Exception:
         venue = {}
@@ -2149,6 +2145,22 @@ def _normalize_venue_metadata_status_row(row: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _source_status_row_is_venue(row: dict[str, Any]) -> bool:
+    source_kind = str(row.get("source_kind") or "").strip().lower()
+    if source_kind in {"venue", "venue_health"}:
+        return True
+    if source_kind == "venue_summary":
+        return False
+    if source_kind:
+        return False
+    source = str(row.get("source") or row.get("venue") or "").strip().lower()
+    if source in {"venues", "venue summary", "venue_summary"}:
+        return False
+    if source in {"arxiv", "biorxiv", "nature", "science", "huggingface", "hf", "github"}:
+        return False
+    return bool(row.get("venue_id") or row.get("venue") or row.get("raw_title_index_count") or row.get("corpus_count"))
+
+
 def _venue_status_has_run_evidence(row: dict[str, Any]) -> bool:
     if bool(row.get("ok")):
         return True
@@ -2178,7 +2190,10 @@ def _venue_status_is_missing_cache(row: dict[str, Any]) -> bool:
 
 
 def _merge_verified_venue_metadata_rows(current_rows: Any, verified_rows: Any) -> list[dict[str, Any]]:
-    rows = [_normalize_venue_metadata_status_row(dict(row)) for row in _json_rows(current_rows)]
+    rows = [
+        _normalize_venue_metadata_status_row(dict(row)) if _source_status_row_is_venue(row) else dict(row)
+        for row in _json_rows(current_rows)
+    ]
     verified = [_normalize_venue_metadata_status_row(dict(row)) for row in _json_rows(verified_rows)]
     if not verified:
         return rows
@@ -2186,6 +2201,9 @@ def _merge_verified_venue_metadata_rows(current_rows: Any, verified_rows: Any) -
     merged: list[dict[str, Any]] = []
     used: set[str] = set()
     for row in rows:
+        if not _source_status_row_is_venue(row):
+            merged.append(row)
+            continue
         key = _venue_source_key(row)
         replacement = by_key.get(key)
         if replacement:
@@ -5676,7 +5694,7 @@ def _compact_literature_survey(survey: Any) -> Any:
         return survey
     out = dict(survey)
     # Compact project polling must stay status/count oriented. Full paper rows
-    # are exposed through article.md and the artifact endpoints, not this API.
+    # are exposed through find.md and the artifact endpoints, not this API.
     for key in [
         "strong_recommendations",
         "screened_ranking_audit_only",
@@ -10505,6 +10523,15 @@ def _reading_content_view(row: dict[str, Any]) -> dict[str, Any]:
     return clean
 
 
+def _reading_uses_article_markdown_contract(row: dict[str, Any]) -> bool:
+    row = _reading_content_view(row)
+    if row.get("deep_read_complete") is not True:
+        return False
+    if str(row.get("reading_content_source") or "") == "article_markdown":
+        return True
+    return bool(str(row.get("article_markdown_path") or row.get("article_markdown") or row.get("read_md") or "").strip())
+
+
 def _title_identity_key(value: Any) -> str:
     text = str(value or "").strip().lower()
     text = (
@@ -10842,6 +10869,8 @@ def _deep_read_list_ok(value: Any) -> bool:
 
 def _field_specific_deep_read_gaps(row: dict[str, Any]) -> list[str]:
     row = _reading_content_view(row)
+    if _reading_uses_article_markdown_contract(row):
+        return []
     gaps: list[str] = []
     abstract = _field_text(row.get("abstract_zh") or row.get("summary"), 2200)
     motivation = _field_text(row.get("motivation_zh") or row.get("problem"), 2200)
@@ -10900,6 +10929,8 @@ def _reading_deep_read_content_gaps(row: dict[str, Any]) -> list[str]:
     row = _reading_content_view(row)
     if not isinstance(row, dict):
         return ["reading row is not an object"]
+    if _reading_uses_article_markdown_contract(row):
+        return []
     checks = [
         ("abstract_zh", row.get("abstract_zh") or row.get("deep_read_abstract_zh") or row.get("summary"), DEEP_READ_FIELD_MIN_CHARS["abstract_zh"], "原论文摘要必须写入 abstract_zh 或 summary，且为中文；可直接使用/翻译 Find 捕获的论文原摘要，但推荐理由、主题命中和流程说明不能替代该字段"),
         ("motivation_zh", row.get("motivation_zh") or row.get("problem"), DEEP_READ_FIELD_MIN_CHARS["motivation_zh"], "论文动机必须写入 motivation_zh 或 problem，且为中文全文 synthesis；relevance 枚举值不能替代动机"),
@@ -11227,7 +11258,7 @@ def _current_find_reading_validation(find_results: dict[str, Any], readings: lis
         if pending_deep_read_synthesis:
             blockers.append("recommended readings have full-text packets but still need Claude Code deep-read synthesis in read_results/read.md")
             if deep_read_content_gap_details:
-                blockers.append("recommended readings lack required Chinese deep-read JSON fields: abstract_zh, motivation_zh, method_details_zh/method, experiments_zh/experiments, limitations_zh/limitations")
+                blockers.append("recommended readings lack completed per-paper Markdown or legacy deep-read content fields")
         if pending_without_evidence:
             blockers.append("recommended readings still lack full-text evidence; Claude Code must read the full paper/PDF/page before marking deep reading complete")
     if len(readings) < min(read_limit, max(len(expected_titles), 1)):
@@ -11614,23 +11645,9 @@ def _current_find_pipeline_summary(root: Path, find_results: dict[str, Any] | No
         pending_without_evidence = 0
         pending_full_text = 0
         full_text_evidence_count = packet_evidence_count
-    read_gate_ready = bool(
-        run_id
-        and recommendation_count > 0
-        and recommendation_shortfall == 0
-        and (read_candidate_count in {0, recommendation_count})
-    )
     pending_current_find_read = bool(
         not readings
-        and read_gate_ready
-        and (
-            full_text_packet_ready
-            or (
-                state_plan_matches
-                and recommendation_gate_ready
-                and (state_status == "pending_current_find_read" or state_next_action == "run_read_for_current_find")
-            )
-        )
+        and recommendation_gate_ready
     )
     if pending_current_find_read:
         blockers = ["current Find recommendation gate passed; Read stage has not run yet"]
@@ -11763,16 +11780,16 @@ def _current_find_pipeline_summary(root: Path, find_results: dict[str, Any] | No
         "summary_zh": (
             f"当前 Find 来源完整性阻塞：{'; '.join(blockers[:3])}。需要修复会议源适配器或 verified cache 后重跑 Find；Read/Idea/Plan 历史产物只作审计参考，不能进入环境、实验或写作。"
             if source_integrity_blockers
-            else f"当前 Find 推荐门控已通过：推荐 {recommendation_count} 篇，等待 Read 精读；待补全文 {pending_full_text} 篇。"
+            else f"Find 已完成：推荐 {recommendation_count} 篇；Read 精读、Idea 和 Plan 尚未运行。"
             if pending_current_find_read
             else f"Claude Code 接管当前 Find 的 Read/Idea/Plan 产物已通过，但缺少唯一 selected_plan_id；后续环境、实验、论文和结论提升保持阻断，等待主控 Claude Code 或人类监督选择一个计划。"
             if content_ready and selection_blocked
             else f"Claude Code 接管当前 Find 已通过：全文精读 {validation.get('full_text_reading_count', 0)} 篇、内部审计/边界候选 {validation.get('critique_or_boundary_count', 0)} 个、idea {len(ideas)} 个、plan {len(plans)} 个；run_id={run_id}。"
             if takeover_ready
             else (
-                f"当前 Find 后处理已执行，但全文证据 gate 阻塞：全文精读 {validation.get('full_text_reading_count', 0)} 篇、待补全文证据 {pending_full_text} 篇、idea {len(ideas)} 个、plan {len(plans)} 个。"
+                f"当前 Find 的全文证据仍需补齐：全文精读 {validation.get('full_text_reading_count', 0)} 篇、待补全文证据 {pending_full_text} 篇、idea {len(ideas)} 个、plan {len(plans)} 个。"
                 if failure_type == "full_text_evidence_missing"
-                else f"当前 Find 后处理未通过 Claude 接管 gate：全文精读 {validation.get('full_text_reading_count', 0)} 篇、待补全文 {pending_full_text} 篇、非法正锚点 {validation.get('invalid_positive_count', 0)} 篇、idea {len(ideas)} 个、plan {len(plans)} 个。"
+                else f"当前 Find 的后续步骤尚未完成：全文精读 {validation.get('full_text_reading_count', 0)} 篇、待补全文 {pending_full_text} 篇、需要修正的精读锚点 {validation.get('invalid_positive_count', 0)} 篇、idea {len(ideas)} 个、plan {len(plans)} 个。"
             )
         ),
     }
@@ -11825,14 +11842,14 @@ def _current_find_pipeline_public_blocker(pipeline: dict[str, Any]) -> dict[str,
             "next_action": "修复会议源适配器或 verified cache 后重新运行 Find；通过前不能进入 Read、Idea、Plan、环境、实验或写作。",
         }
     if status == "pending_current_find_read":
-        summary = f"当前 Find 推荐门控已通过：推荐 {recommended} 篇；Read 精读尚未运行，全文证据覆盖 {full_text_evidence}/{expected or recommended} 篇。"
+        summary = f"Find 已完成：推荐 {recommended} 篇；Read 精读、Idea 和 Plan 尚未运行。"
         return {
             "category": "pending_current_find_read",
-            "title": "等待 Read 精读当前 Find 推荐",
+            "title": "Find 已完成，等待运行 Read/Idea/Plan",
             "summary": summary,
             "issue": summary,
             "human_summary": summary,
-            "next_action": "从网页启动 Read 精读，读取当前 Find 的 20 篇推荐论文并补齐同篇 PDF/HTML 全文证据；Read 完成前不能进入 Idea、Plan、环境、实验或写作。",
+            "next_action": "从网页启动 Read；Read 完成后继续运行 Idea 和 Plan，形成当前 Find 对应的唯一研究计划。",
         }
     if status == "blocked_current_find_full_text_evidence_pending":
         summary = f"当前 Find 的 Read 阶段缺少全文证据：全文证据覆盖 {full_text_evidence}/{expected or recommended} 篇，仍缺 {pending_full_text} 篇。"
@@ -11852,7 +11869,7 @@ def _current_find_pipeline_public_blocker(pipeline: dict[str, Any]) -> dict[str,
             "summary": summary,
             "issue": summary,
             "human_summary": summary,
-            "next_action": "重新运行 Read，补齐 abstract_zh、motivation_zh、method_details_zh、experiments_zh、limitations_zh 等精读字段。",
+            "next_action": "重新运行 Read，确保每篇已取得全文证据的论文都生成单篇 read.md，并由机器回执标记 deep_read_complete。",
         }
     if status == "blocked_current_find_idea_plan_incomplete":
         summary = f"当前 Find 的 Read 已完成但 Idea/Plan 尚未完整：全文精读 {full_text_reading} 篇，idea {ideas} 个，plan {plans} 个；环境阶段输入还不完整。"
@@ -11875,14 +11892,14 @@ def _current_find_pipeline_public_blocker(pipeline: dict[str, Any]) -> dict[str,
             "next_action": "让主控 Claude Code 或网页流程在当前 plans 中选择 exactly one selected_plan_id，并同步 current_find_research_plan.json。",
         }
     if _current_find_pipeline_status_blocks_downstream(status):
-        summary = str(pipeline.get("summary_zh") or pipeline.get("summary") or f"当前 Find 后处理未完成：status={status}；全文精读 {full_text_reading} 篇、idea {ideas} 个、plan {plans} 个。")
+        summary = str(pipeline.get("summary_zh") or pipeline.get("summary") or f"当前 Find 的后续步骤尚未完成：status={status}；全文精读 {full_text_reading} 篇、idea {ideas} 个、plan {plans} 个。")
         return {
             "category": status,
-            "title": "等待当前 Find 后处理",
+            "title": "等待当前 Find 的后续步骤",
             "summary": summary,
             "issue": summary,
             "human_summary": summary,
-            "next_action": str(pipeline.get("next_required_action") or "继续运行当前 Find 对应的 Read/Idea/Plan 后处理，通过后再进入环境阶段。"),
+            "next_action": str(pipeline.get("next_required_action") or "继续运行当前 Find 对应的 Read/Idea/Plan，通过后再进入环境阶段。"),
         }
     return {}
 
@@ -12193,6 +12210,8 @@ def _taste_literature_summary(root: Path) -> dict[str, Any]:
         "readings": readings[:recommendation_display_limit],
         "files": {
             "find_results": str(root / "planning" / "finding" / "find_results.json"),
+            "read_md": str(root / "planning" / "finding" / "read.md"),
+            "public_final_artifact": str(root / "planning" / "finding" / "read.md"),
             "read_results": str(root / "planning" / "finding" / "read_results.json"),
             "frontend_state": str(root / "state" / "finding_frontend.json"),
             "intermediates": str(root / "state" / "taste_literature_intermediates.json"),
@@ -12366,14 +12385,32 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         payload_run_id = str(payload.get("run_id") or payload.get("source_run_id") or payload.get("find_run_id") or "").strip()
         return bool(payload_run_id and payload_run_id == run_id)
 
+    current_read_artifact_ready = False
     current_downstream_artifact_ready = False
 
     def current_run_artifact(name: str, path: Path, kind: str = "json") -> dict[str, Any] | None:
         if path.name == "find_results.json" and run_id:
             return artifact(name, path, kind)
-        if path.name in {"find_progress.json", "current_find_research_plan.json", "literature_tool_packet.json", "article.md"}:
+        if path.name in {"find_progress.json", "current_find_research_plan.json", "literature_tool_packet.json", "find.md"}:
             return artifact(name, path, kind)
-        if path.name in {"read_results.json", "ideas.json", "plans.json"} and not current_downstream_artifact_ready:
+        if path.name == "read.md":
+            if not current_read_artifact_ready:
+                return None
+            guard_payload = _read_json(path.parent / "read_results.json", {})
+            if not same_current_run_payload(guard_payload):
+                return None
+            return artifact(name, path, kind)
+        markdown_guard = {"idea.md": "ideas.json", "plan.md": "plans.json"}
+        if path.name in markdown_guard:
+            if not current_downstream_artifact_ready:
+                return None
+            guard_payload = _read_json(path.parent / markdown_guard[path.name], {})
+            if not same_current_run_payload(guard_payload):
+                return None
+            return artifact(name, path, kind)
+        if path.name == "read_results.json" and not current_read_artifact_ready:
+            return None
+        if path.name in {"ideas.json", "plans.json"} and not current_downstream_artifact_ready:
             return None
         payload = _read_json(path, {})
         if not same_current_run_payload(payload):
@@ -12396,6 +12433,21 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     plan_ready = bool(same_current_run_payload(current_plan) and current_plan.get("read_idea_plan_ready") is True)
     downstream_readings = safe_list(raw_read_results.get("readings"))
     downstream_ready_source = str(raw_read_results.get("normalization_source") or "").strip()
+    read_md_path = root / "planning" / "finding" / "read.md"
+    read_public_final_artifact_present = bool(
+        raw_read_results.get("public_final_artifact_present") is True
+        or (
+            read_md_path.exists()
+            and _read_text(read_md_path).strip()
+            and validation_ready
+        )
+    )
+    current_read_artifact_ready = bool(
+        same_current_run_payload(raw_read_results)
+        and len(safe_list(raw_read_results.get("readings"))) > 0
+        and validation_ready
+        and read_public_final_artifact_present
+    )
     current_downstream_artifact_ready = bool(pipeline_contract.get("content_ready") or pipeline_contract.get("read_idea_plan_ready") or pipeline_contract.get("takeover_ready"))
     read_results = raw_read_results if current_downstream_artifact_ready else {}
     ideas_results = raw_ideas_results if current_downstream_artifact_ready else {}
@@ -12858,11 +12910,31 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
             and (idea_count or plan_count)
         )
     )
+    pipeline_status = str(pipeline_state.get("status") or "")
+    pipeline_failure_type = str(pipeline_state.get("failure_type") or "")
+    pipeline_next_required_action = str(pipeline_state.get("next_required_action") or "")
+    pipeline_summary_zh = str(pipeline_state.get("summary_zh") or f"当前 Find 推荐 {strong_count} 篇，全文精读完成 {completed_read_count} 篇，待补全文 {pending_full_text_read_count} 篇，想法 {idea_count} 个，计划 {plan_count} 个。")
+    pipeline_source_integrity_gate = safe_dict(pipeline_state.get("source_integrity_gate"))
+    if (
+        pipeline_status == "blocked_or_refreshing_claude_takeover"
+        and pipeline_failure_type == "claude_artifacts_missing"
+        and strong_count > 0
+        and recommendation_shortfall == 0
+        and raw_read_count == 0
+        and completed_read_count == 0
+        and pipeline_source_integrity_gate.get("status") != "blocked"
+        and not fresh_find_running
+        and not llm_quota_blocked
+    ):
+        pipeline_status = "pending_current_find_read"
+        pipeline_failure_type = ""
+        pipeline_next_required_action = "run_read_for_current_find"
+        pipeline_summary_zh = f"Find 已完成：推荐 {strong_count} 篇；Read 精读、Idea 和 Plan 尚未运行。"
     current_find_pipeline = {
         "run_id": run_id,
-        "status": str(pipeline_state.get("status") or ""),
-        "failure_type": str(pipeline_state.get("failure_type") or ""),
-        "next_required_action": str(pipeline_state.get("next_required_action") or ""),
+        "status": pipeline_status,
+        "failure_type": pipeline_failure_type,
+        "next_required_action": pipeline_next_required_action,
         "content_ready": bool(pipeline_state.get("content_ready") or pipeline_state.get("read_idea_plan_ready")),
         "read_idea_plan_ready": bool(pipeline_state.get("read_idea_plan_ready") or pipeline_state.get("content_ready")),
         "execution_ready": bool(pipeline_state.get("execution_ready")),
@@ -12921,10 +12993,9 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
         "pending_without_evidence_count": _as_int(pipeline_state.get("pending_without_evidence_count"), 0),
         "idea_count": idea_count,
         "plan_count": plan_count,
-        "summary_zh": str(pipeline_state.get("summary_zh") or f"当前 Find 推荐 {strong_count} 篇，全文精读完成 {completed_read_count} 篇，待补全文 {pending_full_text_read_count} 篇，想法 {idea_count} 个，计划 {plan_count} 个。"),
+        "summary_zh": pipeline_summary_zh,
         "summary_en": str(pipeline_state.get("summary_en") or f"Current Find has {strong_count} recommendations, {completed_read_count} full-text readings, {pending_full_text_read_count} pending full-text readings, {idea_count} ideas, and {plan_count} plans."),
     }
-    pipeline_source_integrity_gate = safe_dict(pipeline_state.get("source_integrity_gate"))
     if pipeline_source_integrity_gate:
         current_find_pipeline["source_integrity_gate"] = pipeline_source_integrity_gate
     if pipeline_source_integrity_gate.get("status") == "blocked":
@@ -13218,7 +13289,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     blocker_category = "real_data_experiment_required" if experiment_smoke_requires_real_data else "paper_level_real_data_experiment_required" if real_data_probe_requires_paper_experiment else selected_plan_gate["category"] if selected_plan_gate.get("blocked") else str(current_find_pipeline_blocker.get("category") or current_find_pipeline_status or "current_find_pipeline") if current_find_pipeline_blocker else "literature_llm_quota_exhausted" if llm_quota_blocked else "fresh_find_running" if fresh_find_running else "literature_recommendation_shortfall" if literature_gate_blocked else "environment_bootstrap_failed" if env_bootstrap_blocker else "environment_anchor_selection_required" if status == "blocked_environment_base_selection_required" else selected_base_blocker_category if selected_base_viability_blocked else "fresh_base_reference_reproduction_running" if reference_full_job_live else "fresh_base_reference_probe_required" if status == "blocked_fresh_base_reference_probe_required" else "submission_readiness" if submission_blockers else str(ref_gate.get("decision") or ref_gate.get("status") or "")
     reference_probe_has_dependency_blocker = bool(_reference_protocol_probe_blocker_summary(protocol_probe, base_title))
     selected_base_viability_title = selected_base_viability_public.get("title") or ("缺少审计就绪候选实验证据" if base_switch_gate_unresolved else "缺少当前主线候选实验证据")
-    blocker_title = "需要真实数据实验" if experiment_smoke_requires_real_data else "需要论文级真实数据实验" if real_data_probe_requires_paper_experiment else selected_plan_gate["title"] if selected_plan_gate.get("blocked") else str(current_find_pipeline_blocker.get("title") or "等待当前 Find 后处理") if current_find_pipeline_blocker else "LLM API 额度/配置不可用" if llm_quota_blocked else "Find 正在运行" if fresh_find_running else "Find 推荐门控阻塞" if literature_gate_blocked else str(env_bootstrap_blocker.get("title") or "环境 bootstrap 未通过") if env_bootstrap_blocker else "等待环境阶段验证并锁定候选基底" if status == "blocked_environment_base_selection_required" else "候选实验运行中" if selected_base_viability_blocked and active_experiment_training else selected_base_viability_title if selected_base_viability_blocked else "参考复现正在运行" if reference_full_job_live else "参考协议依赖缺失" if status == "blocked_fresh_base_reference_probe_required" and reference_probe_has_dependency_blocker else "等待参考协议/环境 manifest 探针" if status == "blocked_fresh_base_reference_probe_required" else "论文证据/投稿门控阻塞" if submission_blockers else ("当前项目门控状态" if env.get("valid") else "等待环境阶段验证并锁定候选基底")
+    blocker_title = "需要真实数据实验" if experiment_smoke_requires_real_data else "需要论文级真实数据实验" if real_data_probe_requires_paper_experiment else selected_plan_gate["title"] if selected_plan_gate.get("blocked") else str(current_find_pipeline_blocker.get("title") or "等待当前 Find 的后续步骤") if current_find_pipeline_blocker else "LLM API 额度/配置不可用" if llm_quota_blocked else "Find 正在运行" if fresh_find_running else "Find 推荐门控阻塞" if literature_gate_blocked else str(env_bootstrap_blocker.get("title") or "环境 bootstrap 未通过") if env_bootstrap_blocker else "等待环境阶段验证并锁定候选基底" if status == "blocked_environment_base_selection_required" else "候选实验运行中" if selected_base_viability_blocked and active_experiment_training else selected_base_viability_title if selected_base_viability_blocked else "参考复现正在运行" if reference_full_job_live else "参考协议依赖缺失" if status == "blocked_fresh_base_reference_probe_required" and reference_probe_has_dependency_blocker else "等待参考协议/环境 manifest 探针" if status == "blocked_fresh_base_reference_probe_required" else "论文证据/投稿门控阻塞" if submission_blockers else ("当前项目门控状态" if env.get("valid") else "等待环境阶段验证并锁定候选基底")
     if public_blocker_row.get("summary"):
         public_blocker_row["title"] = blocker_title
     legacy_control = {"policy": "历史仓库、实验和参考复现只保留为审计记录；当前主线以本轮 Find 后的环境审查选择为准。", "details_hidden": True}
@@ -13724,7 +13795,7 @@ def _fast_project_summary(project: str, root: Path, cfg: dict[str, Any]) -> dict
     if framework_status and isinstance(framework_status.get("artifacts"), dict):
         framework_artifact_path = Path(str(framework_status["artifacts"].get("frontend_status") or ""))
         framework_artifact = artifact("framework_frontend_status.json", framework_artifact_path) if str(framework_artifact_path) else None
-    artifacts = [item for item in [artifact("find_progress.json", root / "planning" / "finding" / "find_progress.json"), current_run_artifact("find_results.json", root / "planning" / "finding" / "find_results.json"), artifact("article.md", root / "planning" / "finding" / "article.md", "markdown") if run_id else None, current_run_artifact("read_results.json", root / "planning" / "finding" / "read_results.json"), current_run_artifact("ideas.json", root / "planning" / "finding" / "ideas.json"), current_run_artifact("plans.json", root / "planning" / "finding" / "plans.json"), current_run_artifact("current_find_research_plan.json", root / "state" / "current_find_research_plan.json"), artifact("evidence_ready_repo_selection.json", root / "state" / "evidence_ready_repo_selection.json") if not downstream_waiting_on_find else None, artifact("blocker_action_plan.json", root / "state" / "blocker_action_plan.json") if not downstream_waiting_on_find else None, artifact("reference_reproduction_gate.json", root / "state" / "reference_reproduction_gate.json"), artifact("scientific_progress_gate.json", root / "state" / "scientific_progress_gate.json") if not downstream_waiting_on_find else None, artifact("experiment_iteration_audit.json", root / "state" / "experiment_iteration_audit.json") if not downstream_waiting_on_find else None, artifact("full_research_cycle.json", root / "state" / "full_research_cycle.json"), framework_artifact, artifact("experiment_records.csv", root / "experiments" / "experiment_records.csv", "text") if not downstream_waiting_on_find else None, artifact("experiment_record_table.json", root / "state" / "experiment_record_table.json") if not downstream_waiting_on_find else None, artifact("supervision_tick.json", root / "state" / "supervision_tick.json"), artifact("paper.pdf", pdf_path, "pdf") if (pdf_path and not paper_blocked) else None] if item]
+    artifacts = [item for item in [artifact("find_progress.json", root / "planning" / "finding" / "find_progress.json"), current_run_artifact("find_results.json", root / "planning" / "finding" / "find_results.json"), artifact("find.md", root / "planning" / "finding" / "find.md", "markdown") if run_id else None, current_run_artifact("read.md", root / "planning" / "finding" / "read.md", "markdown"), current_run_artifact("read_results.json", root / "planning" / "finding" / "read_results.json"), current_run_artifact("ideas.json", root / "planning" / "finding" / "ideas.json"), current_run_artifact("plans.json", root / "planning" / "finding" / "plans.json"), current_run_artifact("current_find_research_plan.json", root / "state" / "current_find_research_plan.json"), artifact("evidence_ready_repo_selection.json", root / "state" / "evidence_ready_repo_selection.json") if not downstream_waiting_on_find else None, artifact("blocker_action_plan.json", root / "state" / "blocker_action_plan.json") if not downstream_waiting_on_find else None, artifact("reference_reproduction_gate.json", root / "state" / "reference_reproduction_gate.json"), artifact("scientific_progress_gate.json", root / "state" / "scientific_progress_gate.json") if not downstream_waiting_on_find else None, artifact("experiment_iteration_audit.json", root / "state" / "experiment_iteration_audit.json") if not downstream_waiting_on_find else None, artifact("full_research_cycle.json", root / "state" / "full_research_cycle.json"), framework_artifact, artifact("experiment_records.csv", root / "experiments" / "experiment_records.csv", "text") if not downstream_waiting_on_find else None, artifact("experiment_record_table.json", root / "state" / "experiment_record_table.json") if not downstream_waiting_on_find else None, artifact("supervision_tick.json", root / "state" / "supervision_tick.json"), artifact("paper.pdf", pdf_path, "pdf") if (pdf_path and not paper_blocked) else None] if item]
     runtime = runtime_payload()
     claude_status = _claude_status_payload(root)
     guidance_queue = safe_list(_read_json(root / "state" / "guidance_queue.json", []))
@@ -13870,6 +13941,27 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
     ideas_results = safe_dict(_read_json(root / 'planning' / 'finding' / 'ideas.json', {}))
     plans_results = safe_dict(_read_json(root / 'planning' / 'finding' / 'plans.json', {}))
     current_plan = safe_dict(_read_json(root / 'state' / 'current_find_research_plan.json', {}))
+    current_reading_validation = safe_dict(_read_json(root / 'state' / 'current_find_claude_reading_validation.json', {}))
+    current_find_run_id_for_read = str(
+        _payload_run_id(find_results)
+        or _payload_run_id(current_plan)
+        or _current_find_run_id_from_state(root)
+        or ''
+    ).strip()
+
+    def same_current_find_payload(payload: Any) -> bool:
+        payload_run = _payload_run_id(payload)
+        return bool(current_find_run_id_for_read and payload_run and payload_run == current_find_run_id_for_read)
+
+    read_md_path = root / 'planning' / 'finding' / 'read.md'
+    current_read_artifact_ready = bool(
+        same_current_find_payload(read_results)
+        and same_current_find_payload(current_reading_validation)
+        and current_reading_validation.get('valid') is True
+        and read_results.get('public_final_artifact_present') is True
+        and read_md_path.exists()
+        and _read_text(read_md_path).strip()
+    )
     fresh_impl = safe_dict(_read_json(root / 'state' / 'fresh_base_implementation_plan.json', {}))
     env_bootstrap_blocker = _environment_bootstrap_blocker(root)
     ref_gate = safe_dict(_read_json(root / 'state' / 'reference_reproduction_gate.json', {}))
@@ -14248,9 +14340,9 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
         next_action = '新的 Find/文献调研正在运行；等待本轮推荐文章、精读、想法和计划产物落盘。'
     elif current_find_pipeline_blocker:
         blocker_category = str(current_find_pipeline_blocker.get('category') or current_find_pipeline_status or 'current_find_pipeline')
-        blocker_title = str(current_find_pipeline_blocker.get('title') or '等待当前 Find 后处理')
+        blocker_title = str(current_find_pipeline_blocker.get('title') or '等待当前 Find 的后续步骤')
         blocker_summary = str(current_find_pipeline_blocker.get('summary') or current_find_pipeline_blocker.get('issue') or summary)
-        next_action = str(current_find_pipeline_blocker.get('next_action') or pipeline_contract.get('next_required_action') or '运行当前 Find 对应的下一步后处理。')
+        next_action = str(current_find_pipeline_blocker.get('next_action') or pipeline_contract.get('next_required_action') or '运行当前 Find 对应的下一步。')
     elif recommendation_shortfall:
         blocker_category = 'literature_recommendation_shortfall'
         blocker_title = 'Find 推荐门控阻塞'
@@ -14495,8 +14587,9 @@ def _lightweight_project_summary(project: str, root: Path, cfg: dict[str, Any]) 
 
     artifacts = [item for item in [
         artifact('find_results.json', root / 'planning' / 'finding' / 'find_results.json'),
-        artifact('article.md', root / 'planning' / 'finding' / 'article.md', 'markdown'),
-        artifact('read_results.json', root / 'planning' / 'finding' / 'read_results.json'),
+        artifact('find.md', root / 'planning' / 'finding' / 'find.md', 'markdown'),
+        artifact('read.md', read_md_path, 'markdown') if current_read_artifact_ready else None,
+        artifact('read_results.json', root / 'planning' / 'finding' / 'read_results.json') if current_read_artifact_ready else None,
         artifact('ideas.json', root / 'planning' / 'finding' / 'ideas.json'),
         artifact('plans.json', root / 'planning' / 'finding' / 'plans.json'),
         artifact('current_find_research_plan.json', root / 'state' / 'current_find_research_plan.json'),
@@ -14610,17 +14703,18 @@ def project_summary(project: str, *, compact: bool = True) -> dict[str, Any]:
         ("status.md", root / "reports" / "status.md", "markdown"),
         ("data_availability_claude_audit.md", root / "reports" / "data_availability_claude_audit.md", "markdown"),
         ("blocker_resolution_packet.md", root / "reports" / "blocker_resolution_packet.md", "markdown"),
-        ("工作状态.txt", ROOT / "工作状态.txt", "text"),
         ("init_brief.md", root / "obsidian" / "planning" / "init_brief.md", "markdown"),
         ("research_plan.md", root / "obsidian" / "planning" / "research_plan.md", "markdown"),
         ("next_actions.md", root / "obsidian" / "planning" / "next_actions.md", "markdown"),
         ("finding_frontend.md", root / "obsidian" / "planning" / "finding_frontend.md", "markdown"),
+        ("finding_frontend.md", root / "planning" / "finding_frontend.md", "markdown"),
         ("taste_sync.md", root / "reports" / "taste_sync.md", "markdown"),
         ("finding_frontend.json", root / "state" / "finding_frontend.json", "json"),
         ("taste_sync.json", root / "state" / "taste_sync.json", "json"),
         ("taste_literature_intermediates.json", root / "state" / "taste_literature_intermediates.json", "json"),
         ("find_results.json", root / "planning" / "finding" / "find_results.json", "json"),
-        ("article.md", root / "planning" / "finding" / "article.md", "markdown"),
+        ("find.md", root / "planning" / "finding" / "find.md", "markdown"),
+        ("read.md", root / "planning" / "finding" / "read.md", "markdown"),
         ("read_results.json", root / "planning" / "finding" / "read_results.json", "json"),
         ("ideas.json", root / "planning" / "finding" / "ideas.json", "json"),
         ("plans.json", root / "planning" / "finding" / "plans.json", "json"),
@@ -14647,8 +14741,20 @@ def project_summary(project: str, *, compact: bool = True) -> dict[str, Any]:
     ]
     artifacts: list[dict[str, Any]] = []
     if not compact:
+        current_find_run_id_for_read = _current_find_run_id_from_state(root)
+        read_results_for_artifact = safe_dict(_read_json(root / "planning" / "finding" / "read_results.json", {}))
+        validation_for_artifact = safe_dict(_read_json(root / "state" / "current_find_claude_reading_validation.json", {}))
+        read_md_ready_for_artifact = bool(
+            current_find_run_id_for_read
+            and _payload_run_id(read_results_for_artifact) == current_find_run_id_for_read
+            and _payload_run_id(validation_for_artifact) == current_find_run_id_for_read
+            and validation_for_artifact.get("valid") is True
+            and read_results_for_artifact.get("public_final_artifact_present") is True
+        )
         for name, path, kind in report_candidates:
             if not path.exists():
+                continue
+            if name == "read.md" and not read_md_ready_for_artifact:
                 continue
             content: Any = _read_json(path, {}) if kind == "json" else _read_text(path)
             artifacts.append({"name": name, "kind": kind, "path": str(path), "content": content})
@@ -15203,7 +15309,7 @@ def build_command(payload: dict[str, Any]) -> tuple[str, list[str]]:
         ):
             cmd.append("--use-existing-literature-packet")
     elif action == "current-find-selection":
-        cmd = _module_cmd(py, "reading", "current_find_research_plan", "--project", project, _current_find_selection_command_mode(project))
+        cmd = [py, str(ROOT / "framework" / "scripts" / "run_module.py"), "reading", "--action", "current_find_research_plan", "--project", project, _current_find_selection_command_mode(project)]
     elif action in {"literature-base-audit", "literature_base_audit"}:
         limit = max(1, min(200, int(payload.get("limit") or 26)))
         repo_search_per_candidate = max(1, min(8, int(payload.get("repo_search_per_candidate") or 2)))
@@ -15224,6 +15330,40 @@ def build_command(payload: dict[str, Any]) -> tuple[str, list[str]]:
             "--probe-timeout-sec",
             str(probe_timeout_sec),
         )
+    elif action == "find":
+        max_papers = max(1, min(200, int(payload.get("max_papers") or payload.get("max_recommended_papers") or 20)))
+        max_ideas = max(1, min(50, int(payload.get("max_ideas") or 6)))
+        repair_rounds = max(0, min(10, int(payload.get("repair_rounds") or 2)))
+        timeout_sec = max(60, int(payload.get("timeout_sec") or os.environ.get("TIMEOUT_SEC", "3600") or 3600))
+        cmd = [
+            py,
+            str(SCRIPTS / "run_frontend.py"),
+            "--project",
+            project,
+            "--max-papers",
+            str(max_papers),
+            "--max-ideas",
+            str(max_ideas),
+            "--repair-rounds",
+            str(repair_rounds),
+            "--timeout-sec",
+            str(timeout_sec),
+        ]
+        for key, flag in [
+            ("skip_arxiv", "--skip-arxiv"),
+            ("skip_huggingface", "--skip-huggingface"),
+            ("skip_github", "--skip-github"),
+            ("skip_venues", "--skip-venues"),
+            ("fast_mode", "--fast-mode"),
+            ("deep_survey", "--deep-survey"),
+            ("wide_survey", "--wide-survey"),
+        ]:
+            if payload.get(key):
+                cmd.append(flag)
+        for query in payload.get("queries", []) if isinstance(payload.get("queries"), list) else []:
+            text = str(query or "").strip()
+            if text:
+                cmd.extend(["--query", text])
     elif action == "environment":
         root = PROJECTS / project
         cfg = _read_json(root / "project.json", {})
@@ -15971,6 +16111,7 @@ def _post_action_refresh_research_gates(project: str, venue: str, env: dict[str,
 
 def _research_action_label(action: str) -> str:
     labels = {
+        "find": "Find",
         "environment": "环境配置",
         "experiment": "实验迭代",
         "paper": "论文撰写",
@@ -16020,6 +16161,33 @@ def _requested_panel_stage(payload: dict[str, Any], action: str) -> tuple[str, s
     return requested, ""
 
 
+def _runtime_env_overrides_from_payload(payload: dict[str, Any]) -> dict[str, str]:
+    raw = payload.get("runtime_env")
+    if not isinstance(raw, dict):
+        raw = payload.get("env_overrides") if isinstance(payload.get("env_overrides"), dict) else {}
+    allowed = {
+        "OPENAI_API_KEY",
+        "LLM_API_KEY",
+        "LLM_API_KEY_ENV",
+        "LLM_API_BASE",
+        "OPENAI_API_BASE",
+        "LLM_MODEL",
+        "LLM_PROVIDER",
+        "LLM_API_MODE",
+        "LLM_TEMPERATURE",
+        "FINDING_LLM_CONFIG",
+    }
+    overrides: dict[str, str] = {}
+    for key, value in raw.items():
+        key_text = str(key or "").strip()
+        if key_text not in allowed:
+            continue
+        value_text = str(value or "").strip()
+        if value_text:
+            overrides[key_text] = value_text
+    return overrides
+
+
 def run_action(payload: dict[str, Any], log: LogFn, should_cancel: CancelFn, progress: ProgressFn) -> dict[str, Any]:
     payload = _payload_with_project_config_venue(payload)
     project, cmd = build_command(payload)
@@ -16049,6 +16217,7 @@ def run_action(payload: dict[str, Any], log: LogFn, should_cancel: CancelFn, pro
     log("Workflow command: " + " ".join(cmd))
     append_agent_log(project, agent_id, "Workflow command: " + " ".join(cmd))
     env = interactive_env(project, include_experiment_python=action not in {"environment"})
+    env.update(_runtime_env_overrides_from_payload(payload))
     env.setdefault("PYTHONUNBUFFERED", "1")
     env["PROJECT_ID"] = project
     env["PROJECT_CONFIG"] = str(PROJECTS / project / "project.json")

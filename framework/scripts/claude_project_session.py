@@ -1323,7 +1323,7 @@ def build_context(project: str, instruction: str, stage: str, repo_path: str = '
         paths.planning / 'reference_workflow_and_claude_code.md',
         paths.planning / 'literature_tool_packet.md',
         paths.planning / 'finding' / 'find_results.json',
-        paths.planning / 'finding' / 'article.md',
+        paths.planning / 'finding' / 'find.md',
         paths.planning / 'finding' / 'read.md',
         paths.planning / 'finding' / 'idea.md',
         paths.planning / 'finding' / 'plan.md',
@@ -1365,7 +1365,7 @@ def build_context(project: str, instruction: str, stage: str, repo_path: str = '
             'base_work_candidates': literature_packet.get('base_work_candidates', [])[:6],
             'suggested_followup_queries': literature_packet.get('suggested_followup_queries', [])[:10],
             'last_run': literature_last_run,
-        } if isinstance(literature_packet, dict) and literature_packet else 'not built yet; run ' + str(ROOT / 'framework/scripts/run_module.py') + ' finding --action tool_packet --project ' + project + ' before literature-dependent decisions'
+        } if isinstance(literature_packet, dict) and literature_packet else 'not built yet; read planning/finding/find_results.json and run ' + str(ROOT / 'framework/scripts/run_module.py') + ' reading --action current_find_research_plan --project ' + project + ' after a real Find refresh'
     literature_context_text = json.dumps(literature_context, ensure_ascii=False, indent=2) if isinstance(literature_context, dict) else str(literature_context)
     experiment_python = project_experiment_python(project)
     allowed_experiment_python_list = sorted(allowed_experiment_pythons(project))
@@ -1470,7 +1470,7 @@ Hard rules:
 - Preserve method references in audit state when required, but do not surface external source-project names as active agents or roles.
 - Read TASTE recoverable-cycle memory files before deciding whether to retry, repair, prune, or switch direction.
 - Before selecting a base paper, generating an idea, modifying code from a paper, or writing literature-related claims, first read `state/current_find_research_plan.json`, `state/experiment_plan.json`, and `state/taste_plan_bridge.json`; then read `planning/literature_tool_packet.md` or `state/literature_tool_packet.json` and at least one raw artifact under `planning/finding/`.
-- If the packet is missing, stale, too generic, or does not cover the current blocker, run `{management_python()} {ROOT / 'framework/scripts/run_module.py'} finding --action literature_tool --project {project} --query "<targeted research query>" --fast-mode` for an internal project-agent survey, or add `--deep-survey` when the route depends on broad conference/arXiv coverage. The default output is `state/internal_literature_runs/...` and must not replace web-facing Find artifacts; use `--publish-current-find` only when the TASTE wrapper/user explicitly asks for a visible current-Find refresh. Then read the internal packet path printed by the command, or rerun `{management_python()} {ROOT / 'framework/scripts/run_module.py'} finding --action tool_packet --project {project}` only for the web-facing packet.
+- If the packet is missing, stale, too generic, or does not cover the current blocker, refresh the configured Find route with `{management_python()} {ROOT / 'framework/scripts/run_frontend.py'} --project {project} --deep-survey --query "<targeted research query>"`, then rebuild downstream artifacts with `{management_python()} {ROOT / 'framework/scripts/run_module.py'} reading --action current_find_research_plan --project {project}`. Do not call deleted Finding literature-tool/tool-packet actions.
 - Use the literature tool only as TASTE's internal survey capability. Do not describe it as a separate agent or outsource decisions to it.
 - Reuse survey intermediate files (`find_results.json`, `read_results.json`, `ideas.json`, `plans.json`, category/title/arXiv reports) for idea generation, base-work switching, repo selection, and experiment planning instead of redoing blind search.
 - Current-Find Read/Idea/Plan stage (`current-find-claude-read-idea-plan`) is responsible for reading every recommended paper through auditable Task/subagent delegation, generating exactly 5 three-part ideas, generating exactly 5 plans, and choosing exactly one best plan by writing one non-empty `selected_plan_id` with `selected_for_execution=true` and `execute_next=true`; the other plans are backlog only.

@@ -1,1308 +1,3990 @@
 {
-  "generated_at": "2026-06-18T11:24:10.600313Z",
+  "schema_version": 1,
+  "generated_by": "ast_script_manifest",
   "module": "finding",
-  "contract": {
-    "directory": "modules/finding",
-    "display_name": "Finding",
-    "legacy_stage": "Find",
-    "responsibility": "Collect, filter, score, and rank literature/tool candidates from the research topic and profile. Full-text reading evidence is explicitly outside this module.",
-    "external_inputs": [
-      "llm_api",
-      "research_topic",
-      "research_interest",
-      "researcher_profile",
-      "source_selection"
-    ],
-    "artifacts_in": [
-      "config/profile JSON",
-      "venue/source selection JSON"
-    ],
-    "artifacts_out": [
-      "find_results.json",
-      "article.md",
-      "source_status.md",
-      "category/title/detail/scoring reports"
-    ],
-    "private_backend_roots": [
-      "modules/finding/scripts/find_pipeline.py",
-      "modules/finding/scripts/find_support.py",
-      "modules/finding/scripts/finding_quality_tools.py",
-      "modules/finding/scripts/build_literature_tool_packet.py"
-    ]
-  },
-  "script_count": 16,
+  "script_count": 17,
+  "top_level_function_count": 961,
+  "top_level_class_count": 8,
   "scripts": [
     {
-      "script": "build_category_summary.py",
-      "path": "modules/finding/scripts/build_category_summary.py",
-      "owner": "finding",
-      "owner_reason": "literature/source discovery, source scoring, or Find artifact preparation",
-      "function_count": 7,
-      "functions": [
-        "_category_name",
-        "_clean_sample",
-        "build_category_summary",
-        "_summary_path_for",
-        "write_summary_file",
-        "iter_json_files",
-        "main"
+      "path": "main.py",
+      "top_level_functions": [
+        {
+          "name": "contract",
+          "lineno": 41
+        },
+        {
+          "name": "_contract_payload",
+          "lineno": 55
+        },
+        {
+          "name": "_configure_private_runtime_env",
+          "lineno": 62
+        },
+        {
+          "name": "_ensure_runtime_imports",
+          "lineno": 68
+        },
+        {
+          "name": "_private_import",
+          "lineno": 76
+        },
+        {
+          "name": "_action_module",
+          "lineno": 96
+        },
+        {
+          "name": "_load_json",
+          "lineno": 103
+        },
+        {
+          "name": "_local_llm_config_path",
+          "lineno": 107
+        },
+        {
+          "name": "_load_local_llm_config",
+          "lineno": 112
+        },
+        {
+          "name": "_missing_config_value",
+          "lineno": 123
+        },
+        {
+          "name": "_with_local_llm_config",
+          "lineno": 127
+        },
+        {
+          "name": "_with_llm_env_defaults",
+          "lineno": 136
+        },
+        {
+          "name": "_display_path",
+          "lineno": 155
+        },
+        {
+          "name": "_normalize_action",
+          "lineno": 166
+        },
+        {
+          "name": "_run_action_module",
+          "lineno": 170
+        },
+        {
+          "name": "_result_summary",
+          "lineno": 202
+        },
+        {
+          "name": "_run_refresh_source_health",
+          "lineno": 223
+        },
+        {
+          "name": "_venue_health_pairs",
+          "lineno": 237
+        },
+        {
+          "name": "_run_catalog",
+          "lineno": 278
+        },
+        {
+          "name": "_run_venue_health",
+          "lineno": 296
+        },
+        {
+          "name": "_run_find",
+          "lineno": 341
+        },
+        {
+          "name": "main",
+          "lineno": 373
+        }
       ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "auto_research.paths",
-        "collections",
-        "datetime",
-        "json",
-        "pathlib",
-        "typing"
+      "top_level_classes": []
+    },
+    {
+      "path": "scripts/cache/audit_priority_venue_metadata.py",
+      "top_level_functions": [
+        {
+          "name": "_truthy_env",
+          "lineno": 57
+        },
+        {
+          "name": "_priority_audit_network_enrichment_enabled",
+          "lineno": 61
+        },
+        {
+          "name": "_caller_cwd",
+          "lineno": 79
+        },
+        {
+          "name": "_resolve_cli_path",
+          "lineno": 86
+        },
+        {
+          "name": "_clean_key",
+          "lineno": 96
+        },
+        {
+          "name": "_parse_date",
+          "lineno": 100
+        },
+        {
+          "name": "_venue_name",
+          "lineno": 107
+        },
+        {
+          "name": "_objective_unavailable_reason",
+          "lineno": 111
+        },
+        {
+          "name": "_regular_venue_year",
+          "lineno": 125
+        },
+        {
+          "name": "_year_candidates",
+          "lineno": 134
+        },
+        {
+          "name": "_cache_manifest",
+          "lineno": 156
+        },
+        {
+          "name": "_cached_verified_row",
+          "lineno": 165
+        },
+        {
+          "name": "_audit_ok",
+          "lineno": 211
+        },
+        {
+          "name": "_audit_one",
+          "lineno": 217
+        },
+        {
+          "name": "run_cli",
+          "lineno": 339
+        }
+      ],
+      "top_level_classes": []
+    },
+    {
+      "path": "scripts/cache/build_category_summary.py",
+      "top_level_functions": [
+        {
+          "name": "_category_name",
+          "lineno": 18
+        },
+        {
+          "name": "_clean_sample",
+          "lineno": 26
+        },
+        {
+          "name": "build_category_summary",
+          "lineno": 31
+        },
+        {
+          "name": "_summary_path_for",
+          "lineno": 71
+        },
+        {
+          "name": "write_summary_file",
+          "lineno": 77
+        },
+        {
+          "name": "iter_json_files",
+          "lineno": 101
+        },
+        {
+          "name": "run_cli",
+          "lineno": 113
+        }
+      ],
+      "top_level_classes": []
+    },
+    {
+      "path": "scripts/cache/build_openreview_cache.py",
+      "top_level_functions": [
+        {
+          "name": "_slug",
+          "lineno": 55
+        },
+        {
+          "name": "_venue_label",
+          "lineno": 60
+        },
+        {
+          "name": "_expanded_openreview_venues",
+          "lineno": 79
+        },
+        {
+          "name": "_venue_aliases",
+          "lineno": 104
+        },
+        {
+          "name": "venue_spec",
+          "lineno": 115
+        },
+        {
+          "name": "_clean_text",
+          "lineno": 123
+        },
+        {
+          "name": "_content_raw",
+          "lineno": 127
+        },
+        {
+          "name": "_content_text",
+          "lineno": 134
+        },
+        {
+          "name": "_content_list",
+          "lineno": 143
+        },
+        {
+          "name": "_first_content_text",
+          "lineno": 152
+        },
+        {
+          "name": "_collect_keywords",
+          "lineno": 160
+        },
+        {
+          "name": "_looks_like_paper_title",
+          "lineno": 173
+        },
+        {
+          "name": "_note_url",
+          "lineno": 183
+        },
+        {
+          "name": "_normalize_note",
+          "lineno": 191
+        },
+        {
+          "name": "_request_json",
+          "lineno": 248
+        },
+        {
+          "name": "_probe_timeout",
+          "lineno": 262
+        },
+        {
+          "name": "_openreview_venue_ids_for_spec",
+          "lineno": 266
+        },
+        {
+          "name": "_probe_openreview_route",
+          "lineno": 276
+        },
+        {
+          "name": "_audit_counts",
+          "lineno": 323
+        },
+        {
+          "name": "_category_counts",
+          "lineno": 331
+        },
+        {
+          "name": "_write_papers_payload",
+          "lineno": 339
+        },
+        {
+          "name": "_stable_source_papers",
+          "lineno": 372
+        },
+        {
+          "name": "_fetch_notes",
+          "lineno": 383
+        },
+        {
+          "name": "_openreview_live_audit",
+          "lineno": 454
+        },
+        {
+          "name": "build_openreview_year",
+          "lineno": 508
+        },
+        {
+          "name": "parse_years",
+          "lineno": 558
+        },
+        {
+          "name": "run_cli",
+          "lineno": 562
+        }
+      ],
+      "top_level_classes": []
+    },
+    {
+      "path": "scripts/cache/build_venue_metadata_cache.py",
+      "top_level_functions": [
+        {
+          "name": "_clean_text",
+          "lineno": 18
+        },
+        {
+          "name": "_official_title_index_scope",
+          "lineno": 26
+        },
+        {
+          "name": "_source_has_official_categories",
+          "lineno": 37
+        },
+        {
+          "name": "_as_int",
+          "lineno": 42
+        },
+        {
+          "name": "_abstract_unavailable_verified",
+          "lineno": 49
+        },
+        {
+          "name": "_missing_abstract_count",
+          "lineno": 54
+        },
+        {
+          "name": "_abstract_unavailable_count",
+          "lineno": 58
+        },
+        {
+          "name": "_missing_title_count",
+          "lineno": 62
+        },
+        {
+          "name": "_category_total",
+          "lineno": 66
+        },
+        {
+          "name": "_is_dblp_title_index",
+          "lineno": 74
+        },
+        {
+          "name": "_normalize_metadata_audit",
+          "lineno": 81
+        },
+        {
+          "name": "_venue_metadata_status_fields",
+          "lineno": 164
+        },
+        {
+          "name": "_manifest_metadata_fields",
+          "lineno": 247
+        },
+        {
+          "name": "_paper_category",
+          "lineno": 259
+        },
+        {
+          "name": "_normalize_paper",
+          "lineno": 271
+        },
+        {
+          "name": "_category_summary",
+          "lineno": 288
+        },
+        {
+          "name": "_write_cache",
+          "lineno": 320
+        },
+        {
+          "name": "_audit_existing_cache",
+          "lineno": 399
+        },
+        {
+          "name": "write_manifest_for_existing_cache",
+          "lineno": 435
+        },
+        {
+          "name": "_audit_with_venue_context",
+          "lineno": 462
+        },
+        {
+          "name": "_metadata_ready_or_raise",
+          "lineno": 469
+        },
+        {
+          "name": "build_cache",
+          "lineno": 488
+        },
+        {
+          "name": "run_cli",
+          "lineno": 523
+        }
+      ],
+      "top_level_classes": []
+    },
+    {
+      "path": "scripts/cache/update_local_database.py",
+      "top_level_functions": [
+        {
+          "name": "parse_csv",
+          "lineno": 21
+        },
+        {
+          "name": "parse_years",
+          "lineno": 25
+        },
+        {
+          "name": "default_years_for_builder",
+          "lineno": 37
+        },
+        {
+          "name": "load_paper_count",
+          "lineno": 44
+        },
+        {
+          "name": "current_index_snapshot",
+          "lineno": 53
+        },
+        {
+          "name": "_builder_venue",
+          "lineno": 68
+        },
+        {
+          "name": "refresh_database",
+          "lineno": 77
+        },
+        {
+          "name": "run_cli",
+          "lineno": 139
+        }
+      ],
+      "top_level_classes": []
+    },
+    {
+      "path": "scripts/core/catalog.py",
+      "top_level_functions": [
+        {
+          "name": "_safe_id",
+          "lineno": 40
+        },
+        {
+          "name": "_venue_name_key",
+          "lineno": 50
+        },
+        {
+          "name": "_catalog_source_priority",
+          "lineno": 64
+        },
+        {
+          "name": "_venue_identity_key",
+          "lineno": 68
+        },
+        {
+          "name": "_merge_year_values",
+          "lineno": 76
+        },
+        {
+          "name": "_venue_alias_record",
+          "lineno": 90
+        },
+        {
+          "name": "_append_alias",
+          "lineno": 106
+        },
+        {
+          "name": "_merge_catalog_entry",
+          "lineno": 115
+        },
+        {
+          "name": "_merge_catalog_by_identity",
+          "lineno": 150
+        },
+        {
+          "name": "_load_json_catalog",
+          "lineno": 172
+        },
+        {
+          "name": "_copy_catalog_row",
+          "lineno": 196
+        },
+        {
+          "name": "_load_catalog_cached",
+          "lineno": 205
+        },
+        {
+          "name": "load_catalog",
+          "lineno": 217
+        },
+        {
+          "name": "_catalog_by_id_cached",
+          "lineno": 222
+        },
+        {
+          "name": "catalog_by_id",
+          "lineno": 279
+        },
+        {
+          "name": "_register_compat_aliases",
+          "lineno": 284
+        }
+      ],
+      "top_level_classes": []
+    },
+    {
+      "path": "scripts/core/finding_runtime.py",
+      "top_level_functions": [
+        {
+          "name": "display_path",
+          "lineno": 24
+        },
+        {
+          "name": "ensure_directories",
+          "lineno": 35
+        },
+        {
+          "name": "_unique_strings",
+          "lineno": 55
+        },
+        {
+          "name": "_normalize_year_values",
+          "lineno": 67
+        },
+        {
+          "name": "_normalize_venue_year_pairs",
+          "lineno": 83
+        },
+        {
+          "name": "_pairs_from_venues_and_years",
+          "lineno": 108
+        },
+        {
+          "name": "default_source_selection",
+          "lineno": 121
+        },
+        {
+          "name": "normalize_source_selection",
+          "lineno": 138
+        },
+        {
+          "name": "_env_float",
+          "lineno": 177
+        },
+        {
+          "name": "runtime_tuning_env",
+          "lineno": 301
+        },
+        {
+          "name": "apply_runtime_tuning_env",
+          "lineno": 322
+        },
+        {
+          "name": "utc_run_id",
+          "lineno": 371
+        },
+        {
+          "name": "create_run_dir",
+          "lineno": 375
+        },
+        {
+          "name": "_remove_path",
+          "lineno": 383
+        },
+        {
+          "name": "publish_latest_run_for_review",
+          "lineno": 390
+        },
+        {
+          "name": "run_dir",
+          "lineno": 416
+        },
+        {
+          "name": "write_json",
+          "lineno": 423
+        },
+        {
+          "name": "read_json",
+          "lineno": 440
+        },
+        {
+          "name": "read_json_safely",
+          "lineno": 446
+        },
+        {
+          "name": "write_text",
+          "lineno": 453
+        },
+        {
+          "name": "json_file_lock",
+          "lineno": 459
+        },
+        {
+          "name": "_merge_json_dicts",
+          "lineno": 494
+        },
+        {
+          "name": "write_json_cache",
+          "lineno": 505
+        },
+        {
+          "name": "redacted_config",
+          "lineno": 515
+        },
+        {
+          "name": "update_manifest",
+          "lineno": 528
+        },
+        {
+          "name": "_strip_abstract_ui_controls",
+          "lineno": 570
+        },
+        {
+          "name": "table",
+          "lineno": 574
+        },
+        {
+          "name": "_normalize_public_latex_markup",
+          "lineno": 585
+        },
+        {
+          "name": "_paper_title_text",
+          "lineno": 593
+        },
+        {
+          "name": "_paper_text",
+          "lineno": 599
+        },
+        {
+          "name": "_metadata_dict",
+          "lineno": 610
+        },
+        {
+          "name": "_clean_link_url",
+          "lineno": 614
+        },
+        {
+          "name": "_paper_doi",
+          "lineno": 619
+        },
+        {
+          "name": "_append_link",
+          "lineno": 632
+        },
+        {
+          "name": "_paper_link_line",
+          "lineno": 639
+        },
+        {
+          "name": "_paper_score_line",
+          "lineno": 652
+        },
+        {
+          "name": "_paper_list_text",
+          "lineno": 664
+        },
+        {
+          "name": "_paper_presentation_kind",
+          "lineno": 679
+        },
+        {
+          "name": "_paper_presentation_text",
+          "lineno": 696
+        },
+        {
+          "name": "_paper_presentation_suffix",
+          "lineno": 726
+        },
+        {
+          "name": "_paper_brief_metadata_lines",
+          "lineno": 738
+        },
+        {
+          "name": "_markdown_title",
+          "lineno": 772
+        },
+        {
+          "name": "paper_markdown",
+          "lineno": 776
+        },
+        {
+          "name": "_strip_json_fences",
+          "lineno": 813
+        },
+        {
+          "name": "_json_span",
+          "lineno": 821
+        },
+        {
+          "name": "_escape_invalid_json_backslashes",
+          "lineno": 834
+        },
+        {
+          "name": "_repair_json_text",
+          "lineno": 838
+        },
+        {
+          "name": "_loads_json_lenient",
+          "lineno": 848
+        },
+        {
+          "name": "extract_partial_json_array",
+          "lineno": 862
+        },
+        {
+          "name": "_extract_named_array",
+          "lineno": 900
+        },
+        {
+          "name": "_recover_expected_json",
+          "lineno": 935
+        },
+        {
+          "name": "extract_json",
+          "lineno": 946
+        },
+        {
+          "name": "_prompt_with_json_response_hint",
+          "lineno": 958
+        },
+        {
+          "name": "_chat_url",
+          "lineno": 966
+        },
+        {
+          "name": "_responses_url",
+          "lineno": 975
+        },
+        {
+          "name": "_content_to_text",
+          "lineno": 984
+        },
+        {
+          "name": "_chat_response_debug",
+          "lineno": 1007
+        },
+        {
+          "name": "_extract_chat_text",
+          "lineno": 1024
+        },
+        {
+          "name": "clamp_workers",
+          "lineno": 1238
+        },
+        {
+          "name": "_text_terms",
+          "lineno": 1252
+        },
+        {
+          "name": "keyword_category",
+          "lineno": 1263
+        },
+        {
+          "name": "_interest_terms",
+          "lineno": 1268
+        },
+        {
+          "name": "_interest_phrases",
+          "lineno": 1272
+        },
+        {
+          "name": "fallback_score",
+          "lineno": 1285
+        },
+        {
+          "name": "_register_compat_aliases",
+          "lineno": 1300
+        }
+      ],
+      "top_level_classes": [
+        {
+          "name": "LLMRoleConfig",
+          "lineno": 184
+        },
+        {
+          "name": "EmailConfig",
+          "lineno": 192
+        },
+        {
+          "name": "AppConfig",
+          "lineno": 203
+        },
+        {
+          "name": "VenueSelection",
+          "lineno": 330
+        },
+        {
+          "name": "FindRequest",
+          "lineno": 342
+        },
+        {
+          "name": "JobCancelled",
+          "lineno": 353
+        },
+        {
+          "name": "LLMClient",
+          "lineno": 1055
+        }
       ]
     },
     {
-      "script": "build_literature_tool_packet.py",
-      "path": "modules/finding/scripts/build_literature_tool_packet.py",
-      "owner": "finding",
-      "owner_reason": "literature/source discovery, source scoring, or Find artifact preparation",
-      "function_count": 31,
-      "functions": [
-        "now_iso",
-        "load_json",
-        "read_text",
-        "save_json",
-        "compact",
-        "as_list",
-        "safe_int",
-        "enabled_literature_source_count",
-        "recommendation_target_from_progress",
-        "normalize_key",
-        "numeric",
-        "yeof",
-        "display_score_of",
-        "score_of",
-        "extract_links",
-        "code_links",
-        "candidate_key",
-        "is_non_positive_candidate",
-        "compact_score",
-        "candidate_from_row",
-        "extract_candidates",
-        "claim_ready_candidates",
-        "audit_only_candidates",
-        "summarize_repo_candidates",
-        "load_artifact_file_map",
-        "source_filtered_rows",
-        "coverage_from",
-        "current_blockers",
-        "suggested_queries",
-        "render_markdown",
-        "main"
+      "path": "scripts/core/local_store.py",
+      "top_level_functions": [
+        {
+          "name": "venue_cache_key",
+          "lineno": 16
+        },
+        {
+          "name": "_venue_id_candidates",
+          "lineno": 30
+        },
+        {
+          "name": "load_local_venue_year",
+          "lineno": 53
+        },
+        {
+          "name": "cache_directory",
+          "lineno": 114
+        },
+        {
+          "name": "_first_existing_directory",
+          "lineno": 118
+        },
+        {
+          "name": "normalize_cached_paper",
+          "lineno": 126
+        },
+        {
+          "name": "build_category_summary",
+          "lineno": 170
+        },
+        {
+          "name": "load_cached_venue_year",
+          "lineno": 206
+        },
+        {
+          "name": "write_venue_year_cache",
+          "lineno": 234
+        },
+        {
+          "name": "_register_compat_aliases",
+          "lineno": 287
+        }
       ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "auto_research.source_selection",
-        "collections",
-        "datetime",
-        "json",
-        "math",
-        "pathlib",
-        "project_paths",
-        "re",
-        "sys",
-        "taste_pythonpath",
-        "typing"
+      "top_level_classes": []
+    },
+    {
+      "path": "scripts/core/quality.py",
+      "top_level_functions": [
+        {
+          "name": "_load_json",
+          "lineno": 23
+        },
+        {
+          "name": "_conference_table",
+          "lineno": 33
+        },
+        {
+          "name": "_journal_table",
+          "lineno": 38
+        },
+        {
+          "name": "_norm",
+          "lineno": 42
+        },
+        {
+          "name": "_metadata",
+          "lineno": 48
+        },
+        {
+          "name": "_venue_ids",
+          "lineno": 53
+        },
+        {
+          "name": "_label_candidates",
+          "lineno": 62
+        },
+        {
+          "name": "_quality_payload",
+          "lineno": 88
+        },
+        {
+          "name": "_lookup_conference_quality",
+          "lineno": 103
+        },
+        {
+          "name": "_lookup_journal_quality",
+          "lineno": 142
+        },
+        {
+          "name": "attach_quality_metadata",
+          "lineno": 182
+        },
+        {
+          "name": "_register_compat_aliases",
+          "lineno": 194
+        }
+      ],
+      "top_level_classes": []
+    },
+    {
+      "path": "scripts/core/ranking.py",
+      "top_level_functions": [
+        {
+          "name": "_tokens",
+          "lineno": 19
+        },
+        {
+          "name": "_paper_text",
+          "lineno": 24
+        },
+        {
+          "name": "_profile_phrases",
+          "lineno": 36
+        },
+        {
+          "name": "rank_papers_tfidf",
+          "lineno": 49
+        },
+        {
+          "name": "_register_compat_aliases",
+          "lineno": 176
+        }
+      ],
+      "top_level_classes": []
+    },
+    {
+      "path": "scripts/core/research_profile.py",
+      "top_level_functions": [
+        {
+          "name": "_as_string",
+          "lineno": 57
+        },
+        {
+          "name": "_as_optional_string",
+          "lineno": 63
+        },
+        {
+          "name": "_as_string_list",
+          "lineno": 68
+        },
+        {
+          "name": "_normalize_expansions",
+          "lineno": 81
+        },
+        {
+          "name": "_normalize_conditional_exclusions",
+          "lineno": 110
+        },
+        {
+          "name": "_canonical_condition",
+          "lineno": 134
+        },
+        {
+          "name": "_dedupe_conditional_exclusions",
+          "lineno": 144
+        },
+        {
+          "name": "normalize_profile_shape",
+          "lineno": 164
+        },
+        {
+          "name": "_keyword_terms",
+          "lineno": 202
+        },
+        {
+          "name": "_split_terms",
+          "lineno": 214
+        },
+        {
+          "name": "_append_unique",
+          "lineno": 223
+        },
+        {
+          "name": "_append_expansion",
+          "lineno": 229
+        },
+        {
+          "name": "_config_research_text",
+          "lineno": 243
+        },
+        {
+          "name": "_extract_conditional_exclusions",
+          "lineno": 248
+        },
+        {
+          "name": "_extract_preference_hints",
+          "lineno": 267
+        },
+        {
+          "name": "_augment_safe_expansions",
+          "lineno": 275
+        },
+        {
+          "name": "_postprocess_profile",
+          "lineno": 330
+        },
+        {
+          "name": "fallback_profile",
+          "lineno": 369
+        },
+        {
+          "name": "build_stage0_prompt",
+          "lineno": 401
+        },
+        {
+          "name": "_profile_signal_count",
+          "lineno": 444
+        },
+        {
+          "name": "normalize_user_profile",
+          "lineno": 454
+        },
+        {
+          "name": "profile_retrieval_text",
+          "lineno": 473
+        },
+        {
+          "name": "_han_ratio",
+          "lineno": 577
+        },
+        {
+          "name": "_clean_phrase",
+          "lineno": 585
+        },
+        {
+          "name": "_dedupe_keep_order",
+          "lineno": 590
+        },
+        {
+          "name": "_is_english_phrase",
+          "lineno": 605
+        },
+        {
+          "name": "_english_terms_from_text",
+          "lineno": 612
+        },
+        {
+          "name": "_search_terms_config_research_text",
+          "lineno": 629
+        },
+        {
+          "name": "_validate_categories",
+          "lineno": 638
+        },
+        {
+          "name": "build_search_terms_prompt",
+          "lineno": 652
+        },
+        {
+          "name": "_normalize_search_terms",
+          "lineno": 708
+        },
+        {
+          "name": "_fallback_search_terms",
+          "lineno": 754
+        },
+        {
+          "name": "extract_search_terms",
+          "lineno": 780
+        },
+        {
+          "name": "_register_compat_aliases",
+          "lineno": 819
+        }
+      ],
+      "top_level_classes": []
+    },
+    {
+      "path": "scripts/core/selection.py",
+      "top_level_functions": [
+        {
+          "name": "_interest_text",
+          "lineno": 19
+        },
+        {
+          "name": "_category_entries",
+          "lineno": 23
+        },
+        {
+          "name": "_compact_entries",
+          "lineno": 43
+        },
+        {
+          "name": "_use_llm_category_select",
+          "lineno": 60
+        },
+        {
+          "name": "_json_or_none",
+          "lineno": 71
+        },
+        {
+          "name": "_category_select_cache_enabled",
+          "lineno": 80
+        },
+        {
+          "name": "_category_select_cache_path",
+          "lineno": 90
+        },
+        {
+          "name": "_normalized_text",
+          "lineno": 96
+        },
+        {
+          "name": "_llm_identity",
+          "lineno": 100
+        },
+        {
+          "name": "_cache_entries_fingerprint",
+          "lineno": 113
+        },
+        {
+          "name": "_category_select_cache_key",
+          "lineno": 125
+        },
+        {
+          "name": "_load_category_select_cache",
+          "lineno": 148
+        },
+        {
+          "name": "_valid_cached_selection",
+          "lineno": 159
+        },
+        {
+          "name": "_store_category_select_cache_entry",
+          "lineno": 179
+        },
+        {
+          "name": "_normalize_selected_rows",
+          "lineno": 203
+        },
+        {
+          "name": "_min_llm_category_recall",
+          "lineno": 226
+        },
+        {
+          "name": "_supplement_selected_for_recall",
+          "lineno": 236
+        },
+        {
+          "name": "_fallback_select",
+          "lineno": 268
+        },
+        {
+          "name": "_build_rejected",
+          "lineno": 297
+        },
+        {
+          "name": "select_relevant_categories",
+          "lineno": 309
+        },
+        {
+          "name": "filter_papers_by_selected_categories",
+          "lineno": 410
+        },
+        {
+          "name": "_register_compat_aliases",
+          "lineno": 422
+        }
+      ],
+      "top_level_classes": []
+    },
+    {
+      "path": "scripts/core/venue_metadata_policy.py",
+      "top_level_functions": [
+        {
+          "name": "_clean_key",
+          "lineno": 13
+        },
+        {
+          "name": "_policy_payload",
+          "lineno": 19
+        },
+        {
+          "name": "_policy_index",
+          "lineno": 29
+        },
+        {
+          "name": "priority_venue_policy",
+          "lineno": 49
+        },
+        {
+          "name": "priority_venue_policy_for_audit",
+          "lineno": 67
+        },
+        {
+          "name": "policy_requires_full_abstracts",
+          "lineno": 76
+        },
+        {
+          "name": "policy_requires_official_categories",
+          "lineno": 81
+        },
+        {
+          "name": "policy_summary",
+          "lineno": 86
+        }
+      ],
+      "top_level_classes": []
+    },
+    {
+      "path": "scripts/flow/pipeline.py",
+      "top_level_functions": [
+        {
+          "name": "sync_latest",
+          "lineno": 114
+        },
+        {
+          "name": "_publish_latest_review_copy",
+          "lineno": 119
+        },
+        {
+          "name": "_run_path",
+          "lineno": 128
+        },
+        {
+          "name": "_existing_run_path",
+          "lineno": 132
+        },
+        {
+          "name": "_write_run_json",
+          "lineno": 140
+        },
+        {
+          "name": "_write_run_text",
+          "lineno": 146
+        },
+        {
+          "name": "_emit_progress",
+          "lineno": 152
+        },
+        {
+          "name": "_raise_if_cancelled",
+          "lineno": 216
+        },
+        {
+          "name": "_chunks",
+          "lineno": 221
+        },
+        {
+          "name": "_positive_int_env",
+          "lineno": 225
+        },
+        {
+          "name": "_clamp_int",
+          "lineno": 234
+        },
+        {
+          "name": "_source_fetch_wall_timeout",
+          "lineno": 238
+        },
+        {
+          "name": "_run_with_wall_timeout",
+          "lineno": 254
+        },
+        {
+          "name": "_source_fetch_timeout_status",
+          "lineno": 281
+        },
+        {
+          "name": "_detail_fetch_timeout_stats",
+          "lineno": 296
+        },
+        {
+          "name": "_compact_scoring_interest",
+          "lineno": 311
+        },
+        {
+          "name": "_adaptive_final_scoring_batch_size",
+          "lineno": 333
+        },
+        {
+          "name": "_rate_limited_llm_provider",
+          "lineno": 361
+        },
+        {
+          "name": "_adaptive_final_scoring_workers",
+          "lineno": 367
+        },
+        {
+          "name": "_dedupe_items",
+          "lineno": 389
+        },
+        {
+          "name": "_normalized_recommendation_title",
+          "lineno": 401
+        },
+        {
+          "name": "_recommendation_identity_key",
+          "lineno": 406
+        },
+        {
+          "name": "_dedupe_recommendation_items",
+          "lineno": 419
+        },
+        {
+          "name": "_mock_offline_venue_title_index",
+          "lineno": 436
+        },
+        {
+          "name": "_paper_identity_keys",
+          "lineno": 492
+        },
+        {
+          "name": "_evaluated_by_identity",
+          "lineno": 510
+        },
+        {
+          "name": "_is_llm_rate_limit_error",
+          "lineno": 525
+        },
+        {
+          "name": "_is_fatal_llm_configuration_error",
+          "lineno": 550
+        },
+        {
+          "name": "_fatal_llm_configuration_message",
+          "lineno": 577
+        },
+        {
+          "name": "_raise_if_fatal_llm_configuration_error",
+          "lineno": 582
+        },
+        {
+          "name": "_is_transient_llm_service_error",
+          "lineno": 587
+        },
+        {
+          "name": "_as_float",
+          "lineno": 613
+        },
+        {
+          "name": "_as_int",
+          "lineno": 623
+        },
+        {
+          "name": "_normalize_hit_directions",
+          "lineno": 630
+        },
+        {
+          "name": "_hit_direction_i18n",
+          "lineno": 638
+        },
+        {
+          "name": "_set_hit_direction_language_fields",
+          "lineno": 664
+        },
+        {
+          "name": "_combined_score",
+          "lineno": 675
+        },
+        {
+          "name": "_final_recommendation_score",
+          "lineno": 681
+        },
+        {
+          "name": "_minimum_user_visible_llm_fit_score",
+          "lineno": 686
+        },
+        {
+          "name": "_flatten_quality_value",
+          "lineno": 693
+        },
+        {
+          "name": "_quality_signal_text",
+          "lineno": 703
+        },
+        {
+          "name": "_quality_metadata_signal_text",
+          "lineno": 722
+        },
+        {
+          "name": "_presentation_bonus",
+          "lineno": 753
+        },
+        {
+          "name": "_presentation_labels",
+          "lineno": 764
+        },
+        {
+          "name": "_canonical_presentation_type",
+          "lineno": 793
+        },
+        {
+          "name": "_presentation_display",
+          "lineno": 812
+        },
+        {
+          "name": "_normalize_presentation_metadata",
+          "lineno": 818
+        },
+        {
+          "name": "_normalize_presentation_fields",
+          "lineno": 841
+        },
+        {
+          "name": "_set_quality_labels",
+          "lineno": 848
+        },
+        {
+          "name": "_quality_bonus_allowed",
+          "lineno": 863
+        },
+        {
+          "name": "_presentation_bonus_allowed",
+          "lineno": 882
+        },
+        {
+          "name": "_quality_table_bonus",
+          "lineno": 892
+        },
+        {
+          "name": "_venue_bonus",
+          "lineno": 902
+        },
+        {
+          "name": "_screening_negative_relevance_text",
+          "lineno": 916
+        },
+        {
+          "name": "_screening_relevance_signal",
+          "lineno": 927
+        },
+        {
+          "name": "_screening_quality_bonus_allowed",
+          "lineno": 951
+        },
+        {
+          "name": "_screening_quality_bonus",
+          "lineno": 963
+        },
+        {
+          "name": "_local_screening_quality_bonus",
+          "lineno": 986
+        },
+        {
+          "name": "_apply_quality_bonus",
+          "lineno": 991
+        },
+        {
+          "name": "_stable_rank_key",
+          "lineno": 1032
+        },
+        {
+          "name": "_final_llm_scoring_pool",
+          "lineno": 1054
+        },
+        {
+          "name": "_topic_evidence_source_text",
+          "lineno": 1060
+        },
+        {
+          "name": "_contains_any",
+          "lineno": 1068
+        },
+        {
+          "name": "_adaptive_signal_terms",
+          "lineno": 1072
+        },
+        {
+          "name": "_route_domain_anchor_terms",
+          "lineno": 1093
+        },
+        {
+          "name": "_profile_chunk_is_guardrail",
+          "lineno": 1119
+        },
+        {
+          "name": "_topic_interest_chunks",
+          "lineno": 1149
+        },
+        {
+          "name": "_topic_interest_text",
+          "lineno": 1170
+        },
+        {
+          "name": "_route_support_threshold",
+          "lineno": 1174
+        },
+        {
+          "name": "_term_family_markers",
+          "lineno": 1182
+        },
+        {
+          "name": "_source_marker_is_negated",
+          "lineno": 1212
+        },
+        {
+          "name": "_source_has_unnegated_marker",
+          "lineno": 1226
+        },
+        {
+          "name": "_source_has_negated_route_term",
+          "lineno": 1236
+        },
+        {
+          "name": "_route_terms_have_source_support",
+          "lineno": 1244
+        },
+        {
+          "name": "_route_core_terms",
+          "lineno": 1252
+        },
+        {
+          "name": "_foundation_route_terms_have_source_support",
+          "lineno": 1262
+        },
+        {
+          "name": "_route_source_support",
+          "lineno": 1270
+        },
+        {
+          "name": "_best_source_supported_route",
+          "lineno": 1296
+        },
+        {
+          "name": "_record_source_supported_adaptive_route",
+          "lineno": 1320
+        },
+        {
+          "name": "_candidate_judgment_text",
+          "lineno": 1328
+        },
+        {
+          "name": "_topic_gate_required_groups",
+          "lineno": 1352
+        },
+        {
+          "name": "_topic_group_markers",
+          "lineno": 1361
+        },
+        {
+          "name": "_source_topic_group_hits",
+          "lineno": 1398
+        },
+        {
+          "name": "_source_has_actionable_method_or_evidence",
+          "lineno": 1407
+        },
+        {
+          "name": "_source_is_generic_background_for_required_topic",
+          "lineno": 1418
+        },
+        {
+          "name": "_foundation_matches_current_axes",
+          "lineno": 1429
+        },
+        {
+          "name": "_explicit_llm_negative_strong_reason",
+          "lineno": 1441
+        },
+        {
+          "name": "_strict_strong_invalid_reason",
+          "lineno": 1465
+        },
+        {
+          "name": "_strong_topic_invalid_reason",
+          "lineno": 1478
+        },
+        {
+          "name": "_foundation_invalid_reason",
+          "lineno": 1505
+        },
+        {
+          "name": "_foundation_strong_enough",
+          "lineno": 1543
+        },
+        {
+          "name": "_repair_weak_topic_fit_consistency",
+          "lineno": 1581
+        },
+        {
+          "name": "_demote_unstable_foundation_item",
+          "lineno": 1614
+        },
+        {
+          "name": "_mark_not_positive_for_strong_gate",
+          "lineno": 1635
+        },
+        {
+          "name": "_json_or_error",
+          "lineno": 1657
+        },
+        {
+          "name": "_llm_live_gate",
+          "lineno": 1667
+        },
+        {
+          "name": "_json_or_error_wall_timeout",
+          "lineno": 1711
+        },
+        {
+          "name": "_route_word_count",
+          "lineno": 1775
+        },
+        {
+          "name": "_looks_like_complete_topic_route",
+          "lineno": 1779
+        },
+        {
+          "name": "_adaptive_topic_route_lines",
+          "lineno": 1789
+        },
+        {
+          "name": "_adaptive_topic_routes_block",
+          "lineno": 1822
+        },
+        {
+          "name": "_route_match_key",
+          "lineno": 1830
+        },
+        {
+          "name": "_canonical_adaptive_route",
+          "lineno": 1835
+        },
+        {
+          "name": "_route_anchor_text",
+          "lineno": 1845
+        },
+        {
+          "name": "_route_anchor_terms",
+          "lineno": 1852
+        },
+        {
+          "name": "_route_anchor_source_support",
+          "lineno": 1860
+        },
+        {
+          "name": "_complete_route_source_support",
+          "lineno": 1891
+        },
+        {
+          "name": "_best_complete_source_supported_route",
+          "lineno": 1898
+        },
+        {
+          "name": "_text_has_negated_route_term",
+          "lineno": 1921
+        },
+        {
+          "name": "_judgment_negates_complete_route_anchor",
+          "lineno": 1930
+        },
+        {
+          "name": "_append_missing_topic_evidence",
+          "lineno": 1939
+        },
+        {
+          "name": "_demote_incomplete_llm_topic_route",
+          "lineno": 1954
+        },
+        {
+          "name": "_apply_complete_route_guard",
+          "lineno": 1965
+        },
+        {
+          "name": "_matched_topic_route",
+          "lineno": 2011
+        },
+        {
+          "name": "_has_adaptive_recall_hit",
+          "lineno": 2024
+        },
+        {
+          "name": "_stable_source_ranking_score",
+          "lineno": 2029
+        },
+        {
+          "name": "_citation_count",
+          "lineno": 2049
+        },
+        {
+          "name": "_venue_key",
+          "lineno": 2070
+        },
+        {
+          "name": "_parse_release_date",
+          "lineno": 2077
+        },
+        {
+          "name": "_known_conference_release_date",
+          "lineno": 2087
+        },
+        {
+          "name": "_latest_released_venue_context",
+          "lineno": 2094
+        },
+        {
+          "name": "_attach_latest_released_venue_context",
+          "lineno": 2123
+        },
+        {
+          "name": "_source_context_bonus",
+          "lineno": 2133
+        },
+        {
+          "name": "_is_default_fallback_text",
+          "lineno": 2168
+        },
+        {
+          "name": "_normalize_llm_supported_text_fields",
+          "lineno": 2172
+        },
+        {
+          "name": "_apply_stable_ranking_score",
+          "lineno": 2185
+        },
+        {
+          "name": "_apply_relevance_guard",
+          "lineno": 2215
+        },
+        {
+          "name": "_normalize_topic_evidence_value",
+          "lineno": 2226
+        },
+        {
+          "name": "_has_topic_evidence_contradiction",
+          "lineno": 2238
+        },
+        {
+          "name": "_screening_topic_evidence_blocks_quality_bonus",
+          "lineno": 2290
+        },
+        {
+          "name": "_apply_llm_topic_evidence",
+          "lineno": 2303
+        },
+        {
+          "name": "_find_cache_path",
+          "lineno": 2348
+        },
+        {
+          "name": "_source_row_published_date",
+          "lineno": 2358
+        },
+        {
+          "name": "_source_date_coverage",
+          "lineno": 2373
+        },
+        {
+          "name": "_date_window_gap_days",
+          "lineno": 2379
+        },
+        {
+          "name": "_source_effective_date_window",
+          "lineno": 2390
+        },
+        {
+          "name": "_source_search_phrases_signature",
+          "lineno": 2412
+        },
+        {
+          "name": "_source_positive_int_env",
+          "lineno": 2417
+        },
+        {
+          "name": "_source_request_params",
+          "lineno": 2425
+        },
+        {
+          "name": "_source_freshness_tolerance_days",
+          "lineno": 2480
+        },
+        {
+          "name": "_source_freshness_report",
+          "lineno": 2491
+        },
+        {
+          "name": "_annotate_source_completeness",
+          "lineno": 2510
+        },
+        {
+          "name": "_final_llm_score_cache_enabled",
+          "lineno": 2572
+        },
+        {
+          "name": "_venue_title_index_cache_adapter",
+          "lineno": 2586
+        },
+        {
+          "name": "_venue_title_index_cache_key",
+          "lineno": 2593
+        },
+        {
+          "name": "_latest_find_results_title_index",
+          "lineno": 2604
+        },
+        {
+          "name": "_sanitize_venue_metadata_audit",
+          "lineno": 2633
+        },
+        {
+          "name": "_sanitize_venue_title_index_rows",
+          "lineno": 2651
+        },
+        {
+          "name": "_neurips_track_from_detail_url",
+          "lineno": 2697
+        },
+        {
+          "name": "_sanitize_neurips_official_row",
+          "lineno": 2707
+        },
+        {
+          "name": "_venue_title_index_cache_rows_usable",
+          "lineno": 2738
+        },
+        {
+          "name": "_load_venue_title_index_cache_candidates",
+          "lineno": 2756
+        },
+        {
+          "name": "_venue_prefers_official_title_source",
+          "lineno": 2779
+        },
+        {
+          "name": "_venue_title_index_cache_is_strong",
+          "lineno": 2798
+        },
+        {
+          "name": "_load_venue_title_index_cache",
+          "lineno": 2819
+        },
+        {
+          "name": "_venue_title_index_cache_rank",
+          "lineno": 2836
+        },
+        {
+          "name": "_store_venue_title_index_cache",
+          "lineno": 2851
+        },
+        {
+          "name": "_stage0_profile_model_identity",
+          "lineno": 2889
+        },
+        {
+          "name": "_stage0_profile_cache_key",
+          "lineno": 2896
+        },
+        {
+          "name": "_load_stage0_profile_cache",
+          "lineno": 2907
+        },
+        {
+          "name": "_store_stage0_profile_cache",
+          "lineno": 2926
+        },
+        {
+          "name": "_final_llm_score_model_identity",
+          "lineno": 2949
+        },
+        {
+          "name": "_cache_normalized_text",
+          "lineno": 2957
+        },
+        {
+          "name": "_stage0_profile_cache_enabled",
+          "lineno": 2962
+        },
+        {
+          "name": "_title_llm_score_cache_enabled",
+          "lineno": 2967
+        },
+        {
+          "name": "_title_llm_score_cache_policy",
+          "lineno": 2981
+        },
+        {
+          "name": "_title_llm_score_cache_key",
+          "lineno": 2990
+        },
+        {
+          "name": "_load_title_llm_score_cache",
+          "lineno": 3008
+        },
+        {
+          "name": "_title_llm_cache_title_index",
+          "lineno": 3019
+        },
+        {
+          "name": "_title_llm_cache_entry_valid",
+          "lineno": 3036
+        },
+        {
+          "name": "_apply_cached_title_llm_score",
+          "lineno": 3051
+        },
+        {
+          "name": "_title_llm_score_cache_entry",
+          "lineno": 3073
+        },
+        {
+          "name": "_store_title_llm_score_cache_entries",
+          "lineno": 3094
+        },
+        {
+          "name": "_final_llm_score_cache_key",
+          "lineno": 3115
+        },
+        {
+          "name": "_load_final_llm_score_cache",
+          "lineno": 3132
+        },
+        {
+          "name": "_final_llm_cache_reason_unusable",
+          "lineno": 3143
+        },
+        {
+          "name": "_final_llm_cache_entry_valid",
+          "lineno": 3151
+        },
+        {
+          "name": "_apply_cached_final_llm_score",
+          "lineno": 3168
+        },
+        {
+          "name": "_final_llm_score_cache_entry",
+          "lineno": 3189
+        },
+        {
+          "name": "_store_final_llm_score_cache_entries",
+          "lineno": 3218
+        },
+        {
+          "name": "_apply_topic_evidence_guard",
+          "lineno": 3239
+        },
+        {
+          "name": "_scan_count",
+          "lineno": 3258
+        },
+        {
+          "name": "_venue_title_fetch_limit",
+          "lineno": 3263
+        },
+        {
+          "name": "_timeout_env_value",
+          "lineno": 3279
+        },
+        {
+          "name": "_fetch_venue_title_index_online",
+          "lineno": 3290
+        },
+        {
+          "name": "_fetch_venue_title_index_for_find",
+          "lineno": 3302
+        },
+        {
+          "name": "_target_recall_count",
+          "lineno": 3349
+        },
+        {
+          "name": "_min_title_candidates",
+          "lineno": 3358
+        },
+        {
+          "name": "_min_detail_candidates",
+          "lineno": 3370
+        },
+        {
+          "name": "_large_pool_threshold",
+          "lineno": 3377
+        },
+        {
+          "name": "_full_venue_corpus_audit_enabled",
+          "lineno": 3381
+        },
+        {
+          "name": "_local_database_metadata_audit",
+          "lineno": 3388
+        },
+        {
+          "name": "_online_venue_metadata_audit",
+          "lineno": 3486
+        },
+        {
+          "name": "_audit_with_venue_context",
+          "lineno": 3516
+        },
+        {
+          "name": "_venue_metadata_status_fields",
+          "lineno": 3523
+        },
+        {
+          "name": "_combined_metadata_audit",
+          "lineno": 3636
+        },
+        {
+          "name": "_store_verified_live_venue_cache",
+          "lineno": 3682
+        },
+        {
+          "name": "_selection_list_value",
+          "lineno": 3713
+        },
+        {
+          "name": "_normalize_selection_years",
+          "lineno": 3726
+        },
+        {
+          "name": "_selection_venue_year_pairs",
+          "lineno": 3742
+        },
+        {
+          "name": "_selection_venue_year_groups",
+          "lineno": 3778
+        },
+        {
+          "name": "_selection_venue_unit_count",
+          "lineno": 3782
+        },
+        {
+          "name": "_source_count_hint",
+          "lineno": 3790
+        },
+        {
+          "name": "_recommendation_target_hint",
+          "lineno": 3799
+        },
+        {
+          "name": "_llm_title_filter_scan_budget",
+          "lineno": 3814
+        },
+        {
+          "name": "_local_title_screen_budget",
+          "lineno": 3832
+        },
+        {
+          "name": "_title_detail_candidate_target",
+          "lineno": 3840
+        },
+        {
+          "name": "_title_rank_key",
+          "lineno": 3851
+        },
+        {
+          "name": "_score_title_pool",
+          "lineno": 3861
+        },
+        {
+          "name": "_local_title_screen_pool",
+          "lineno": 3883
+        },
+        {
+          "name": "_ranked_recall_pool",
+          "lineno": 3899
+        },
+        {
+          "name": "_venue_recall_result_limit",
+          "lineno": 3904
+        },
+        {
+          "name": "_detail_fetch_count",
+          "lineno": 3916
+        },
+        {
+          "name": "_venue_detail_fetch_count",
+          "lineno": 3926
+        },
+        {
+          "name": "_venue_detail_wall_timeout_sec",
+          "lineno": 3942
+        },
+        {
+          "name": "_target_triage_candidate_count",
+          "lineno": 3954
+        },
+        {
+          "name": "_final_llm_scoring_limit",
+          "lineno": 3959
+        },
+        {
+          "name": "_source_final_llm_scoring_limit",
+          "lineno": 3971
+        },
+        {
+          "name": "_abstract_enrichment_limits",
+          "lineno": 3985
+        },
+        {
+          "name": "_abstract_lookup_failure_reason",
+          "lineno": 3998
+        },
+        {
+          "name": "_find_selection_allows_arxiv",
+          "lineno": 4021
+        },
+        {
+          "name": "_abstract_enrichment_timed_out",
+          "lineno": 4026
+        },
+        {
+          "name": "_abstract_enrichment_filled_count",
+          "lineno": 4030
+        },
+        {
+          "name": "_enrich_missing_abstracts_for_adaptive_recall",
+          "lineno": 4034
+        },
+        {
+          "name": "_enrich_missing_abstracts_for_final_scoring",
+          "lineno": 4169
+        },
+        {
+          "name": "_apply_result_limit_with_floor",
+          "lineno": 4197
+        },
+        {
+          "name": "_detail_presentation_recall_per_type",
+          "lineno": 4204
+        },
+        {
+          "name": "_presentation_recall_title_floor",
+          "lineno": 4211
+        },
+        {
+          "name": "_detail_candidate_key",
+          "lineno": 4218
+        },
+        {
+          "name": "_local_quality_recall_signal",
+          "lineno": 4222
+        },
+        {
+          "name": "_quality_local_recall_rank_key",
+          "lineno": 4237
+        },
+        {
+          "name": "_quality_local_title_recall_supplement",
+          "lineno": 4248
+        },
+        {
+          "name": "_title_fit_for_recall",
+          "lineno": 4301
+        },
+        {
+          "name": "_detail_titles_with_presentation_recall",
+          "lineno": 4316
+        },
+        {
+          "name": "_prefilter_titles",
+          "lineno": 4372
+        },
+        {
+          "name": "_paper_category",
+          "lineno": 4832
+        },
+        {
+          "name": "_has_trusted_title_categories",
+          "lineno": 4852
+        },
+        {
+          "name": "_title_filter_policy",
+          "lineno": 4861
+        },
+        {
+          "name": "_title_filter_groups",
+          "lineno": 4884
+        },
+        {
+          "name": "_title_filter_prompt_context",
+          "lineno": 4920
+        },
+        {
+          "name": "_category_summary_from_title_index",
+          "lineno": 4931
+        },
+        {
+          "name": "_public_category_selection",
+          "lineno": 4959
+        },
+        {
+          "name": "_quality_category_recall_supplement",
+          "lineno": 4980
+        },
+        {
+          "name": "_adaptive_category_paper_recall_supplement",
+          "lineno": 5075
+        },
+        {
+          "name": "_select_official_category_title_index",
+          "lineno": 5155
+        },
+        {
+          "name": "_dynamic_title_prune",
+          "lineno": 5226
+        },
+        {
+          "name": "_append_title_filter_report",
+          "lineno": 5260
+        },
+        {
+          "name": "_load_local_category_guided_index",
+          "lineno": 5327
+        },
+        {
+          "name": "_venue_regular_year",
+          "lineno": 5418
+        },
+        {
+          "name": "_venue_year_objective_unavailable_reason",
+          "lineno": 5427
+        },
+        {
+          "name": "_venue_yewindow",
+          "lineno": 5445
+        },
+        {
+          "name": "_venue_yeis_released",
+          "lineno": 5462
+        },
+        {
+          "name": "_release_block_reason",
+          "lineno": 5470
+        },
+        {
+          "name": "_local_venue_year_verified",
+          "lineno": 5474
+        },
+        {
+          "name": "_local_venue_year_metadata_complete",
+          "lineno": 5478
+        },
+        {
+          "name": "_resolve_latest_available_venue_years",
+          "lineno": 5491
+        },
+        {
+          "name": "_resolve_venue_years",
+          "lineno": 5613
+        },
+        {
+          "name": "_evaluate_items",
+          "lineno": 5629
+        },
+        {
+          "name": "_apply_mock_final_scoring",
+          "lineno": 6049
+        },
+        {
+          "name": "_has_final_title_abstract_llm_scoring",
+          "lineno": 6081
+        },
+        {
+          "name": "_metadata_tldr_text",
+          "lineno": 6087
+        },
+        {
+          "name": "_abstract_is_semantic_tldr",
+          "lineno": 6095
+        },
+        {
+          "name": "_has_real_abstract",
+          "lineno": 6104
+        },
+        {
+          "name": "_readable_text_len",
+          "lineno": 6115
+        },
+        {
+          "name": "_first_nonempty_text",
+          "lineno": 6119
+        },
+        {
+          "name": "_list_text",
+          "lineno": 6127
+        },
+        {
+          "name": "_reason_is_too_short",
+          "lineno": 6133
+        },
+        {
+          "name": "_has_unsupported_availability_claim",
+          "lineno": 6148
+        },
+        {
+          "name": "_has_internal_find_public_text",
+          "lineno": 6251
+        },
+        {
+          "name": "_public_route_text",
+          "lineno": 6260
+        },
+        {
+          "name": "_public_interest_context",
+          "lineno": 6268
+        },
+        {
+          "name": "_sanitize_public_recommendation_text",
+          "lineno": 6274
+        },
+        {
+          "name": "_ensure_recommendation_readability",
+          "lineno": 6310
+        },
+        {
+          "name": "_recommendation_quality_audit",
+          "lineno": 6479
+        },
+        {
+          "name": "_missing_chinese_abstract_ids",
+          "lineno": 6509
+        },
+        {
+          "name": "_recommendation_translation_status",
+          "lineno": 6519
+        },
+        {
+          "name": "_metadata_chinese_abstract_fallback",
+          "lineno": 6527
+        },
+        {
+          "name": "_fill_missing_chinese_abstracts_with_metadata",
+          "lineno": 6541
+        },
+        {
+          "name": "_has_strong_topic_evidence",
+          "lineno": 6558
+        },
+        {
+          "name": "_mark_evidence_tier",
+          "lineno": 6575
+        },
+        {
+          "name": "_recommendation_rank_key",
+          "lineno": 6634
+        },
+        {
+          "name": "_final_topic_evidence_invalid_reason",
+          "lineno": 6658
+        },
+        {
+          "name": "_find_recommendation_invalid_reason",
+          "lineno": 6681
+        },
+        {
+          "name": "_recommendable_ranked",
+          "lineno": 6715
+        },
+        {
+          "name": "_strict_rank_input",
+          "lineno": 6747
+        },
+        {
+          "name": "_supported_ranked",
+          "lineno": 6757
+        },
+        {
+          "name": "_true_strong_recommendation",
+          "lineno": 6776
+        },
+        {
+          "name": "_selection_source_count",
+          "lineno": 6796
+        },
+        {
+          "name": "_strong_recommendation_count_cap",
+          "lineno": 6806
+        },
+        {
+          "name": "_strong_recommendation_target_count",
+          "lineno": 6816
+        },
+        {
+          "name": "_recommended",
+          "lineno": 6831
+        },
+        {
+          "name": "_screened_ranking",
+          "lineno": 6857
+        },
+        {
+          "name": "_candidate_is_positive_evidence",
+          "lineno": 6862
+        },
+        {
+          "name": "_retrieval_only_copy",
+          "lineno": 6882
+        },
+        {
+          "name": "_triage_candidates",
+          "lineno": 6934
+        },
+        {
+          "name": "_critique_candidates",
+          "lineno": 6969
+        },
+        {
+          "name": "_looks_english",
+          "lineno": 6975
+        },
+        {
+          "name": "_clean_abstract_text",
+          "lineno": 6981
+        },
+        {
+          "name": "_clean_missing_abstract_phrasing",
+          "lineno": 7000
+        },
+        {
+          "name": "_sanitize_explanation_fields",
+          "lineno": 7017
+        },
+        {
+          "name": "_chinese_translation_min_len",
+          "lineno": 7040
+        },
+        {
+          "name": "_clean_chinese_translation_output",
+          "lineno": 7045
+        },
+        {
+          "name": "_repair_translation_latex_commands",
+          "lineno": 7091
+        },
+        {
+          "name": "_balanced_latex_command_spans",
+          "lineno": 7100
+        },
+        {
+          "name": "_latex_translation_spans",
+          "lineno": 7119
+        },
+        {
+          "name": "_prepare_abstract_translation_prompt_text",
+          "lineno": 7138
+        },
+        {
+          "name": "_translation_prompt_abstract",
+          "lineno": 7165
+        },
+        {
+          "name": "_restore_latex_translation_placeholders",
+          "lineno": 7172
+        },
+        {
+          "name": "_translation_preserves_latex_segments",
+          "lineno": 7184
+        },
+        {
+          "name": "_clear_translation_latex_state",
+          "lineno": 7198
+        },
+        {
+          "name": "_chinese_translation_reject_reason",
+          "lineno": 7204
+        },
+        {
+          "name": "_translation_text_from_data",
+          "lineno": 7226
+        },
+        {
+          "name": "_translation_priority",
+          "lineno": 7257
+        },
+        {
+          "name": "_attach_abstract_language_fields",
+          "lineno": 7263
+        },
+        {
+          "name": "_run_diagnostics",
+          "lineno": 7503
+        },
+        {
+          "name": "_source_status",
+          "lineno": 7683
+        },
+        {
+          "name": "_venue_source_status_rows_from_reports",
+          "lineno": 7687
+        },
+        {
+          "name": "_venue_identity_text",
+          "lineno": 7758
+        },
+        {
+          "name": "_is_core_venue_source",
+          "lineno": 7762
+        },
+        {
+          "name": "_venue_row_count",
+          "lineno": 7767
+        },
+        {
+          "name": "_venue_source_integrity_blocker",
+          "lineno": 7778
+        },
+        {
+          "name": "_apply_venue_source_integrity",
+          "lineno": 7805
+        },
+        {
+          "name": "_venue_source_public_limited",
+          "lineno": 7831
+        },
+        {
+          "name": "_source_status_label",
+          "lineno": 7863
+        },
+        {
+          "name": "_public_source_status_message_parts",
+          "lineno": 7889
+        },
+        {
+          "name": "_source_status_message_text",
+          "lineno": 7905
+        },
+        {
+          "name": "_source_scope_text",
+          "lineno": 7931
+        },
+        {
+          "name": "_source_metadata_status_text",
+          "lineno": 7951
+        },
+        {
+          "name": "_source_category_text",
+          "lineno": 7968
+        },
+        {
+          "name": "_source_abstract_text",
+          "lineno": 7979
+        },
+        {
+          "name": "_source_status_detail_parts",
+          "lineno": 7993
+        },
+        {
+          "name": "_status_markdown",
+          "lineno": 8042
+        },
+        {
+          "name": "_adaptive_arxiv_queries",
+          "lineno": 8061
+        },
+        {
+          "name": "_refresh_venue_source_health",
+          "lineno": 8080
+        },
+        {
+          "name": "refresh_find_source_health",
+          "lineno": 8140
+        },
+        {
+          "name": "run_find",
+          "lineno": 8197
+        },
+        {
+          "name": "_register_compat_aliases",
+          "lineno": 9141
+        }
+      ],
+      "top_level_classes": [
+        {
+          "name": "FatalLLMConfigurationError",
+          "lineno": 521
+        }
       ]
     },
     {
-      "script": "build_openreview_cache.py",
-      "path": "modules/finding/scripts/build_openreview_cache.py",
-      "owner": "finding",
-      "owner_reason": "literature/source discovery, source scoring, or Find artifact preparation",
-      "function_count": 15,
-      "functions": [
-        "venue_spec",
-        "_clean_text",
-        "_content_raw",
-        "_content_text",
-        "_content_list",
-        "_first_content_text",
-        "_collect_keywords",
-        "_looks_like_paper_title",
-        "_note_url",
-        "_normalize_note",
-        "_request_json",
-        "_fetch_notes",
-        "build_openreview_year",
-        "parse_years",
-        "main"
+      "path": "scripts/flow/support.py",
+      "top_level_functions": [
+        {
+          "name": "_contact_mailto",
+          "lineno": 157
+        },
+        {
+          "name": "_default_user_agent",
+          "lineno": 167
+        },
+        {
+          "name": "_positive_int_env",
+          "lineno": 186
+        },
+        {
+          "name": "_date_window_days",
+          "lineno": 195
+        },
+        {
+          "name": "_coverage_misses_start",
+          "lineno": 206
+        },
+        {
+          "name": "_coverage_gap_days",
+          "lineno": 212
+        },
+        {
+          "name": "_semantic_scholar_cache_path",
+          "lineno": 312
+        },
+        {
+          "name": "_openalex_cache_path",
+          "lineno": 316
+        },
+        {
+          "name": "_openalex_oa_pdf_abstract_cache_path",
+          "lineno": 320
+        },
+        {
+          "name": "_acm_pdf_abstract_cache_path",
+          "lineno": 324
+        },
+        {
+          "name": "_acm_detail_abstract_cache_path",
+          "lineno": 328
+        },
+        {
+          "name": "_chatpaper_abstract_cache_path",
+          "lineno": 332
+        },
+        {
+          "name": "_pure_portal_abstract_cache_path",
+          "lineno": 336
+        },
+        {
+          "name": "_hal_abstract_cache_path",
+          "lineno": 340
+        },
+        {
+          "name": "_author_pdf_abstract_cache_path",
+          "lineno": 344
+        },
+        {
+          "name": "_public_pdf_search_cache_path",
+          "lineno": 348
+        },
+        {
+          "name": "_public_publication_page_search_cache_path",
+          "lineno": 352
+        },
+        {
+          "name": "_save_state_cache",
+          "lineno": 359
+        },
+        {
+          "name": "_load_semantic_scholar_cache",
+          "lineno": 393
+        },
+        {
+          "name": "_save_semantic_scholar_cache",
+          "lineno": 404
+        },
+        {
+          "name": "_load_openalex_cache",
+          "lineno": 409
+        },
+        {
+          "name": "_save_openalex_cache",
+          "lineno": 420
+        },
+        {
+          "name": "_load_openalex_oa_pdf_abstract_cache",
+          "lineno": 425
+        },
+        {
+          "name": "_save_openalex_oa_pdf_abstract_cache",
+          "lineno": 436
+        },
+        {
+          "name": "_load_acm_pdf_abstract_cache",
+          "lineno": 441
+        },
+        {
+          "name": "_save_acm_pdf_abstract_cache",
+          "lineno": 452
+        },
+        {
+          "name": "_load_acm_detail_abstract_cache",
+          "lineno": 457
+        },
+        {
+          "name": "_save_acm_detail_abstract_cache",
+          "lineno": 468
+        },
+        {
+          "name": "_clean_chatpaper_title",
+          "lineno": 473
+        },
+        {
+          "name": "_load_chatpaper_abstract_cache",
+          "lineno": 478
+        },
+        {
+          "name": "_save_chatpaper_abstract_cache",
+          "lineno": 510
+        },
+        {
+          "name": "_load_pure_portal_abstract_cache",
+          "lineno": 515
+        },
+        {
+          "name": "_save_pure_portal_abstract_cache",
+          "lineno": 526
+        },
+        {
+          "name": "_load_hal_abstract_cache",
+          "lineno": 531
+        },
+        {
+          "name": "_save_hal_abstract_cache",
+          "lineno": 542
+        },
+        {
+          "name": "_load_author_pdf_abstract_cache",
+          "lineno": 547
+        },
+        {
+          "name": "_save_author_pdf_abstract_cache",
+          "lineno": 558
+        },
+        {
+          "name": "_load_public_pdf_search_cache",
+          "lineno": 563
+        },
+        {
+          "name": "_save_public_pdf_search_cache",
+          "lineno": 574
+        },
+        {
+          "name": "_load_public_publication_page_search_cache",
+          "lineno": 579
+        },
+        {
+          "name": "_save_public_publication_page_search_cache",
+          "lineno": 590
+        },
+        {
+          "name": "_paper_doi",
+          "lineno": 595
+        },
+        {
+          "name": "_paper_year",
+          "lineno": 654
+        },
+        {
+          "name": "_paper_venue_context",
+          "lineno": 666
+        },
+        {
+          "name": "_infer_acm_venue_key",
+          "lineno": 681
+        },
+        {
+          "name": "_acm_venue_markers_for_paper",
+          "lineno": 694
+        },
+        {
+          "name": "_year_markers",
+          "lineno": 703
+        },
+        {
+          "name": "_acm_venue_evidence_from_text",
+          "lineno": 710
+        },
+        {
+          "name": "_acm_venue_search_labels_for_paper",
+          "lineno": 733
+        },
+        {
+          "name": "_apply_acm_detail_cached_abstract",
+          "lineno": 756
+        },
+        {
+          "name": "_openalex_author_text",
+          "lineno": 773
+        },
+        {
+          "name": "_apply_openalex_acm_item",
+          "lineno": 785
+        },
+        {
+          "name": "_apply_cached_acm_abstract_sources",
+          "lineno": 816
+        },
+        {
+          "name": "_chatpaper_request",
+          "lineno": 1108
+        },
+        {
+          "name": "_chatpaper_id_from_href",
+          "lineno": 1116
+        },
+        {
+          "name": "_chatpaper_paper_id_from_href",
+          "lineno": 1121
+        },
+        {
+          "name": "_chatpaper_venue_label_for_paper",
+          "lineno": 1126
+        },
+        {
+          "name": "_chatpaper_venue_years_for_papers",
+          "lineno": 1137
+        },
+        {
+          "name": "_chatpaper_cache_titles",
+          "lineno": 1156
+        },
+        {
+          "name": "_chatpaper_cache_venues",
+          "lineno": 1161
+        },
+        {
+          "name": "_discover_chatpaper_venue_ids",
+          "lineno": 1166
+        },
+        {
+          "name": "_chatpaper_paper_links_for_track",
+          "lineno": 1218
+        },
+        {
+          "name": "_parse_chatpaper_paper_page",
+          "lineno": 1240
+        },
+        {
+          "name": "_ensure_chatpaper_venue_cache",
+          "lineno": 1271
+        },
+        {
+          "name": "enrich_acm_doi_with_chatpaper",
+          "lineno": 1320
+        },
+        {
+          "name": "_pure_portal_urls_from_env",
+          "lineno": 1407
+        },
+        {
+          "name": "_pure_portal_meta_values",
+          "lineno": 1419
+        },
+        {
+          "name": "_extract_pure_portal_abstract",
+          "lineno": 1430
+        },
+        {
+          "name": "_parse_pure_portal_publication",
+          "lineno": 1450
+        },
+        {
+          "name": "_apply_pure_portal_item",
+          "lineno": 1505
+        },
+        {
+          "name": "enrich_acm_doi_with_pure_portal",
+          "lineno": 1536
+        },
+        {
+          "name": "_hal_titles_cache",
+          "lineno": 1589
+        },
+        {
+          "name": "_hal_title_query",
+          "lineno": 1597
+        },
+        {
+          "name": "_hal_doc_list",
+          "lineno": 1602
+        },
+        {
+          "name": "_hal_doc_text",
+          "lineno": 1610
+        },
+        {
+          "name": "_hal_doc_years",
+          "lineno": 1615
+        },
+        {
+          "name": "_hal_doc_to_item",
+          "lineno": 1628
+        },
+        {
+          "name": "_apply_hal_item",
+          "lineno": 1681
+        },
+        {
+          "name": "_fetch_hal_items_for_targets",
+          "lineno": 1712
+        },
+        {
+          "name": "enrich_acm_doi_with_hal",
+          "lineno": 1754
+        },
+        {
+          "name": "_author_pdf_urls_from_env",
+          "lineno": 1821
+        },
+        {
+          "name": "_author_pdf_reader_url",
+          "lineno": 1833
+        },
+        {
+          "name": "_extract_author_pdf_abstract",
+          "lineno": 1837
+        },
+        {
+          "name": "_author_pdf_markdown_title",
+          "lineno": 1861
+        },
+        {
+          "name": "_author_pdf_venue_evidence",
+          "lineno": 1871
+        },
+        {
+          "name": "_author_pdf_venue_verified",
+          "lineno": 1875
+        },
+        {
+          "name": "_author_pdf_publication_year",
+          "lineno": 1879
+        },
+        {
+          "name": "_author_pdf_text_title",
+          "lineno": 1886
+        },
+        {
+          "name": "_fetch_author_pdf_text",
+          "lineno": 1910
+        },
+        {
+          "name": "_parse_author_pdf_publication",
+          "lineno": 1945
+        },
+        {
+          "name": "_apply_author_pdf_item",
+          "lineno": 2024
+        },
+        {
+          "name": "_apply_public_pdf_search_item",
+          "lineno": 2057
+        },
+        {
+          "name": "_public_page_search_queries",
+          "lineno": 2094
+        },
+        {
+          "name": "_public_page_url_allowed",
+          "lineno": 2124
+        },
+        {
+          "name": "_doi_evidence_in_text",
+          "lineno": 2166
+        },
+        {
+          "name": "_public_page_candidate_urls_from_text",
+          "lineno": 2174
+        },
+        {
+          "name": "_meta_values",
+          "lineno": 2179
+        },
+        {
+          "name": "_jsonld_abstract_values",
+          "lineno": 2191
+        },
+        {
+          "name": "_extract_public_page_abstract",
+          "lineno": 2220
+        },
+        {
+          "name": "_public_page_citation_export_urls",
+          "lineno": 2255
+        },
+        {
+          "name": "_citation_export_field",
+          "lineno": 2290
+        },
+        {
+          "name": "_parse_public_page_citation_export_text",
+          "lineno": 2296
+        },
+        {
+          "name": "_public_page_title",
+          "lineno": 2323
+        },
+        {
+          "name": "_parse_public_publication_page",
+          "lineno": 2335
+        },
+        {
+          "name": "_apply_public_publication_page_item",
+          "lineno": 2441
+        },
+        {
+          "name": "enrich_acm_doi_with_public_publication_page_search",
+          "lineno": 2474
+        },
+        {
+          "name": "_public_search_reader_urls",
+          "lineno": 2619
+        },
+        {
+          "name": "_public_pdf_search_reader_url",
+          "lineno": 2645
+        },
+        {
+          "name": "_public_pdf_request_once",
+          "lineno": 2649
+        },
+        {
+          "name": "_public_pdf_decode_search_url",
+          "lineno": 2655
+        },
+        {
+          "name": "_public_pdf_canonicalize_url",
+          "lineno": 2678
+        },
+        {
+          "name": "_public_pdf_url_allowed",
+          "lineno": 2701
+        },
+        {
+          "name": "_public_pdf_url_looks_like_pdf",
+          "lineno": 2743
+        },
+        {
+          "name": "_title_token_coverage",
+          "lineno": 2762
+        },
+        {
+          "name": "_public_pdf_url_title_coverage",
+          "lineno": 2770
+        },
+        {
+          "name": "_public_pdf_search_queries",
+          "lineno": 2780
+        },
+        {
+          "name": "_public_pdf_candidate_urls_from_text",
+          "lineno": 2816
+        },
+        {
+          "name": "_public_pdf_sort_candidate_urls",
+          "lineno": 2846
+        },
+        {
+          "name": "_public_pdf_links_from_page",
+          "lineno": 2866
+        },
+        {
+          "name": "_parse_public_pdf_search_publication",
+          "lineno": 2889
+        },
+        {
+          "name": "enrich_acm_doi_with_author_pdf",
+          "lineno": 2935
+        },
+        {
+          "name": "enrich_acm_doi_with_public_pdf_search",
+          "lineno": 2990
+        },
+        {
+          "name": "_refresh_acm_doi_abstract_enrichment_audit",
+          "lineno": 3164
+        },
+        {
+          "name": "enrich_acm_doi_with_openalex",
+          "lineno": 3213
+        },
+        {
+          "name": "enrich_acm_doi_with_openalex_oa_pdf",
+          "lineno": 3355
+        },
+        {
+          "name": "_extract_acm_pdf_abstract_from_text",
+          "lineno": 3519
+        },
+        {
+          "name": "_fetch_acm_pdf_text",
+          "lineno": 3536
+        },
+        {
+          "name": "_acm_pdf_error_retryable",
+          "lineno": 3573
+        },
+        {
+          "name": "_acm_pdf_urls_for_paper",
+          "lineno": 3578
+        },
+        {
+          "name": "enrich_acm_doi_with_official_pdf",
+          "lineno": 3600
+        },
+        {
+          "name": "enrich_acm_doi_with_indexed_abstracts",
+          "lineno": 3722
+        },
+        {
+          "name": "enrich_with_openalex",
+          "lineno": 3910
+        },
+        {
+          "name": "_request",
+          "lineno": 4046
+        },
+        {
+          "name": "_dblp_search_hits",
+          "lineno": 4065
+        },
+        {
+          "name": "fetch_dblp_stream_api",
+          "lineno": 4136
+        },
+        {
+          "name": "_openreview_probe_timeout",
+          "lineno": 4223
+        },
+        {
+          "name": "_openreview_probe_notes",
+          "lineno": 4231
+        },
+        {
+          "name": "_openreview_probe_summary",
+          "lineno": 4278
+        },
+        {
+          "name": "_attach_openreview_fetch_audit",
+          "lineno": 4298
+        },
+        {
+          "name": "_openreview_notes_paginated",
+          "lineno": 4317
+        },
+        {
+          "name": "fetch_openreview_venue",
+          "lineno": 4350
+        },
+        {
+          "name": "fetch_cvf_openaccess",
+          "lineno": 4437
+        },
+        {
+          "name": "fetch_eccv_virtual",
+          "lineno": 4527
+        },
+        {
+          "name": "_fetch_icml_presentation_overrides",
+          "lineno": 4607
+        },
+        {
+          "name": "fetch_icml_downloads",
+          "lineno": 4659
+        },
+        {
+          "name": "fetch_pmlr_index",
+          "lineno": 4773
+        },
+        {
+          "name": "enrich_pmlr_details",
+          "lineno": 4834
+        },
+        {
+          "name": "fetch_neurips_title_index",
+          "lineno": 4876
+        },
+        {
+          "name": "_neurips_virtual_presentation_index",
+          "lineno": 4968
+        },
+        {
+          "name": "_enrich_neurips_official_with_virtual_presentations",
+          "lineno": 5020
+        },
+        {
+          "name": "fetch_neurips_details",
+          "lineno": 5038
+        },
+        {
+          "name": "_parse_dblp_yelinks",
+          "lineno": 5094
+        },
+        {
+          "name": "_dblp_toc_papers",
+          "lineno": 5143
+        },
+        {
+          "name": "fetch_dblp_venue",
+          "lineno": 5301
+        },
+        {
+          "name": "fetch_acl_anthology",
+          "lineno": 5314
+        },
+        {
+          "name": "_is_cikm_venue",
+          "lineno": 5404
+        },
+        {
+          "name": "_is_www_venue",
+          "lineno": 5409
+        },
+        {
+          "name": "_is_sigir_venue",
+          "lineno": 5419
+        },
+        {
+          "name": "_track_from_heading",
+          "lineno": 5424
+        },
+        {
+          "name": "fetch_www_official_accepted",
+          "lineno": 5436
+        },
+        {
+          "name": "_google_redirect_target",
+          "lineno": 5547
+        },
+        {
+          "name": "fetch_sigir_official_proceedings",
+          "lineno": 5559
+        },
+        {
+          "name": "fetch_sigir_official_accepted",
+          "lineno": 5664
+        },
+        {
+          "name": "fetch_cikm_official_proceedings",
+          "lineno": 5762
+        },
+        {
+          "name": "_aaai_issue_links",
+          "lineno": 5858
+        },
+        {
+          "name": "fetch_aaai_ojs",
+          "lineno": 5882
+        },
+        {
+          "name": "fetch_ijcai_proceedings",
+          "lineno": 6032
+        },
+        {
+          "name": "fetch_venue_title_index",
+          "lineno": 6136
+        },
+        {
+          "name": "_fetch_enrichment_sources",
+          "lineno": 6246
+        },
+        {
+          "name": "fetch_venue_title_index_all",
+          "lineno": 6307
+        },
+        {
+          "name": "_fetch_one_conference_virtual_detail",
+          "lineno": 6418
+        },
+        {
+          "name": "_official_detail_source",
+          "lineno": 6474
+        },
+        {
+          "name": "_official_detail_url",
+          "lineno": 6495
+        },
+        {
+          "name": "_meta_values",
+          "lineno": 6505
+        },
+        {
+          "name": "_extract_aaai_abstract",
+          "lineno": 6514
+        },
+        {
+          "name": "_extract_acm_abstract",
+          "lineno": 6531
+        },
+        {
+          "name": "_extract_cvf_abstract",
+          "lineno": 6557
+        },
+        {
+          "name": "_extract_ijcai_abstract",
+          "lineno": 6566
+        },
+        {
+          "name": "_extract_acl_anthology_abstract",
+          "lineno": 6586
+        },
+        {
+          "name": "_extract_pdf_text",
+          "lineno": 6596
+        },
+        {
+          "name": "_clean_pdf_abstract_text",
+          "lineno": 6618
+        },
+        {
+          "name": "_extract_acl_pdf_abstract",
+          "lineno": 6626
+        },
+        {
+          "name": "_extract_acl_pdf_abstract_from_text",
+          "lineno": 6630
+        },
+        {
+          "name": "_official_detail_request",
+          "lineno": 6641
+        },
+        {
+          "name": "_fetch_one_official_detail",
+          "lineno": 6665
+        },
+        {
+          "name": "enrich_official_details",
+          "lineno": 6823
+        },
+        {
+          "name": "enrich_conference_virtual_details",
+          "lineno": 6923
+        },
+        {
+          "name": "fetch_selected_venue_details",
+          "lineno": 7065
+        },
+        {
+          "name": "fetch_venue_sample",
+          "lineno": 7110
+        },
+        {
+          "name": "enrich_with_semantic_scholar",
+          "lineno": 7182
+        },
+        {
+          "name": "enrich_with_arxiv_title_match",
+          "lineno": 7336
+        },
+        {
+          "name": "_clean_arxiv_web_abstract",
+          "lineno": 7424
+        },
+        {
+          "name": "enrich_with_arxiv_web_title_match",
+          "lineno": 7431
+        },
+        {
+          "name": "enrich_nature_details",
+          "lineno": 7510
+        },
+        {
+          "name": "_journal_search_phrases",
+          "lineno": 7552
+        },
+        {
+          "name": "fetch_nature_portfolio",
+          "lineno": 7569
+        },
+        {
+          "name": "enrich_science_details",
+          "lineno": 7952
+        },
+        {
+          "name": "fetch_science_family",
+          "lineno": 7998
+        },
+        {
+          "name": "_biorxiv_paper_from_openalex",
+          "lineno": 8672
+        },
+        {
+          "name": "_phrase_or_clause",
+          "lineno": 8722
+        },
+        {
+          "name": "_fetch_biorxiv_openalex",
+          "lineno": 8734
+        },
+        {
+          "name": "_fetch_biorxiv_europepmc",
+          "lineno": 8813
+        },
+        {
+          "name": "fetch_biorxiv_targeted",
+          "lineno": 8906
+        },
+        {
+          "name": "fetch_biorxiv",
+          "lineno": 8980
+        },
+        {
+          "name": "_request_arxiv_page",
+          "lineno": 9525
+        },
+        {
+          "name": "fetch_arxiv",
+          "lineno": 9542
+        },
+        {
+          "name": "fetch_huggingface",
+          "lineno": 9701
+        },
+        {
+          "name": "fetch_github_trending",
+          "lineno": 9772
+        },
+        {
+          "name": "_register_compat_aliases",
+          "lineno": 9864
+        }
       ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "auto_research.paths",
-        "datetime",
-        "find_support",
-        "json",
-        "pathlib",
-        "re",
-        "requests",
-        "sys",
-        "taste_pythonpath",
-        "time",
-        "typing"
-      ]
+      "top_level_classes": []
     },
     {
-      "script": "build_venue_metadata_cache.py",
-      "path": "modules/finding/scripts/build_venue_metadata_cache.py",
-      "owner": "finding",
-      "owner_reason": "literature/source discovery, source scoring, or Find artifact preparation",
-      "function_count": 19,
-      "functions": [
-        "_clean_text",
-        "_official_title_index_scope",
-        "_source_has_official_categories",
-        "_as_int",
-        "_missing_abstract_count",
-        "_missing_title_count",
-        "_category_total",
-        "_is_dblp_title_index",
-        "_normalize_metadata_audit",
-        "_venue_metadata_status_fields",
-        "_manifest_metadata_fields",
-        "_paper_category",
-        "_normalize_paper",
-        "_category_summary",
-        "_write_cache",
-        "_audit_existing_cache",
-        "write_manifest_for_existing_cache",
-        "build_cache",
-        "main"
+      "path": "scripts/sources.py",
+      "top_level_functions": [
+        {
+          "name": "stable_id",
+          "lineno": 12
+        },
+        {
+          "name": "_clean_text",
+          "lineno": 17
+        },
+        {
+          "name": "_strip_abstract_ui_controls",
+          "lineno": 27
+        },
+        {
+          "name": "_presentation_type_from_url",
+          "lineno": 31
+        },
+        {
+          "name": "_presentation_type_from_text",
+          "lineno": 44
+        },
+        {
+          "name": "_presentation_display_label",
+          "lineno": 59
+        },
+        {
+          "name": "_set_presentation_metadata",
+          "lineno": 67
+        },
+        {
+          "name": "_title_key",
+          "lineno": 82
+        },
+        {
+          "name": "normalize_date",
+          "lineno": 86
+        },
+        {
+          "name": "_in_date_range",
+          "lineno": 102
+        },
+        {
+          "name": "is_neurips_venue",
+          "lineno": 114
+        },
+        {
+          "name": "is_acl_family_venue",
+          "lineno": 119
+        },
+        {
+          "name": "is_iclr_venue",
+          "lineno": 124
+        },
+        {
+          "name": "is_cvf_venue",
+          "lineno": 129
+        },
+        {
+          "name": "is_pmlr_venue",
+          "lineno": 134
+        },
+        {
+          "name": "is_icml_venue",
+          "lineno": 139
+        },
+        {
+          "name": "is_aaai_venue",
+          "lineno": 144
+        },
+        {
+          "name": "is_ijcai_venue",
+          "lineno": 149
+        },
+        {
+          "name": "_venue_text",
+          "lineno": 172
+        },
+        {
+          "name": "_matches_venue_keyword",
+          "lineno": 176
+        },
+        {
+          "name": "_openreview_patterns_for_venue",
+          "lineno": 183
+        },
+        {
+          "name": "is_openreview_supported_venue",
+          "lineno": 192
+        },
+        {
+          "name": "_openreview_venue_ids",
+          "lineno": 196
+        },
+        {
+          "name": "_venue_metadata_audit",
+          "lineno": 213
+        },
+        {
+          "name": "_attach_venue_metadata_audit",
+          "lineno": 225
+        },
+        {
+          "name": "_attach_openreview_metadata_audit",
+          "lineno": 233
+        },
+        {
+          "name": "venue_metadata_audit_from_papers",
+          "lineno": 260
+        },
+        {
+          "name": "_metadata_timeout",
+          "lineno": 330
+        },
+        {
+          "name": "_looks_like_paper_title",
+          "lineno": 349
+        },
+        {
+          "name": "_openreview_pdf_url",
+          "lineno": 370
+        },
+        {
+          "name": "_extract_between_markers",
+          "lineno": 376
+        },
+        {
+          "name": "_parse_neurips_detail",
+          "lineno": 388
+        },
+        {
+          "name": "_parse_neurips_official_papers_list",
+          "lineno": 455
+        },
+        {
+          "name": "_neurips_track_from_url",
+          "lineno": 494
+        },
+        {
+          "name": "_neurips_authors_from_parent",
+          "lineno": 504
+        },
+        {
+          "name": "_parse_neurips_list",
+          "lineno": 528
+        },
+        {
+          "name": "_extract_conference_virtual_abstract",
+          "lineno": 548
+        },
+        {
+          "name": "_jsonld_nodes",
+          "lineno": 578
+        },
+        {
+          "name": "_name_from_jsonld_author",
+          "lineno": 594
+        },
+        {
+          "name": "_extract_conference_virtual_authors",
+          "lineno": 607
+        },
+        {
+          "name": "_positive_float_env",
+          "lineno": 633
+        },
+        {
+          "name": "_mark_detail_fetch_deferred",
+          "lineno": 641
+        },
+        {
+          "name": "_conference_virtual_detail_url",
+          "lineno": 649
+        },
+        {
+          "name": "_conference_virtual_detail_source",
+          "lineno": 654
+        },
+        {
+          "name": "_conference_virtual_detail_label",
+          "lineno": 670
+        },
+        {
+          "name": "_semantic_scholar_cache_key",
+          "lineno": 686
+        },
+        {
+          "name": "_same_metadata_text",
+          "lineno": 690
+        },
+        {
+          "name": "_semantic_scholar_cache_real_abstract",
+          "lineno": 694
+        },
+        {
+          "name": "_apply_semantic_scholar_cache",
+          "lineno": 707
+        },
+        {
+          "name": "_semantic_scholar_errors_retryable",
+          "lineno": 723
+        },
+        {
+          "name": "_semantic_scholar_cache_miss_is_retryable",
+          "lineno": 735
+        },
+        {
+          "name": "_semantic_scholar_cache_is_permanent_miss",
+          "lineno": 741
+        },
+        {
+          "name": "_doi_from_url",
+          "lineno": 745
+        },
+        {
+          "name": "_doi_url",
+          "lineno": 755
+        },
+        {
+          "name": "_acm_ids_from_doi",
+          "lineno": 760
+        },
+        {
+          "name": "_acm_metadata_from_doi",
+          "lineno": 769
+        },
+        {
+          "name": "_dblp_record_metadata",
+          "lineno": 786
+        },
+        {
+          "name": "_openalex_pdf_url",
+          "lineno": 819
+        },
+        {
+          "name": "_openalex_landing_url",
+          "lineno": 836
+        },
+        {
+          "name": "_title_token_similarity",
+          "lineno": 841
+        },
+        {
+          "name": "_author_family_tokens",
+          "lineno": 849
+        },
+        {
+          "name": "_openalex_author_family_tokens",
+          "lineno": 864
+        },
+        {
+          "name": "_openalex_candidate_matches",
+          "lineno": 875
+        },
+        {
+          "name": "_openalex_item_from_payload",
+          "lineno": 885
+        },
+        {
+          "name": "_openalex_abstract_from_inverted_index",
+          "lineno": 895
+        },
+        {
+          "name": "_openalex_cache_key",
+          "lineno": 912
+        },
+        {
+          "name": "_nature_journal_meta",
+          "lineno": 987
+        },
+        {
+          "name": "_nature_feed_url",
+          "lineno": 992
+        },
+        {
+          "name": "_nature_listing_url",
+          "lineno": 997
+        },
+        {
+          "name": "_looks_like_xml",
+          "lineno": 1004
+        },
+        {
+          "name": "_xml_text",
+          "lineno": 1009
+        },
+        {
+          "name": "_xml_attr",
+          "lineno": 1019
+        },
+        {
+          "name": "_parse_nature_feed",
+          "lineno": 1032
+        },
+        {
+          "name": "_parse_nature_listing_html",
+          "lineno": 1082
+        },
+        {
+          "name": "_extract_nature_doi",
+          "lineno": 1134
+        },
+        {
+          "name": "_science_journal_meta",
+          "lineno": 1146
+        },
+        {
+          "name": "_science_feed_url",
+          "lineno": 1151
+        },
+        {
+          "name": "_science_pdf_url",
+          "lineno": 1155
+        },
+        {
+          "name": "_science_abs_url",
+          "lineno": 1160
+        },
+        {
+          "name": "_extract_science_doi",
+          "lineno": 1165
+        },
+        {
+          "name": "_extract_science_abstract",
+          "lineno": 1173
+        },
+        {
+          "name": "_crossref_date",
+          "lineno": 1201
+        },
+        {
+          "name": "_crossref_first_text",
+          "lineno": 1217
+        },
+        {
+          "name": "_crossref_authors",
+          "lineno": 1223
+        },
+        {
+          "name": "_science_crossref_url",
+          "lineno": 1236
+        },
+        {
+          "name": "_parse_science_crossref_items",
+          "lineno": 1251
+        },
+        {
+          "name": "_parse_science_feed",
+          "lineno": 1288
+        },
+        {
+          "name": "_iclr2026_guide_cache_path",
+          "lineno": 1369
+        },
+        {
+          "name": "_icml2026_official_cache_path",
+          "lineno": 1373
+        },
+        {
+          "name": "_load_json_url_with_cache",
+          "lineno": 1377
+        },
+        {
+          "name": "_load_iclr2026_guide_payload",
+          "lineno": 1390
+        },
+        {
+          "name": "fetch_openreview_iclr_2026",
+          "lineno": 1416
+        },
+        {
+          "name": "_icml_author_names",
+          "lineno": 1488
+        },
+        {
+          "name": "_load_icml2026_guide_payload",
+          "lineno": 1502
+        },
+        {
+          "name": "_icml2026_guide_papers",
+          "lineno": 1521
+        },
+        {
+          "name": "_icml_official_paper_url",
+          "lineno": 1606
+        },
+        {
+          "name": "fetch_icml_official_virtual_2026",
+          "lineno": 1613
+        },
+        {
+          "name": "_dblp_page_url",
+          "lineno": 1723
+        },
+        {
+          "name": "_dblp_stream_id",
+          "lineno": 1731
+        },
+        {
+          "name": "_dblp_authors",
+          "lineno": 1739
+        },
+        {
+          "name": "_dblp_hits_payload",
+          "lineno": 1755
+        },
+        {
+          "name": "_dblp_stream_query",
+          "lineno": 1769
+        },
+        {
+          "name": "_content_value",
+          "lineno": 1776
+        },
+        {
+          "name": "_content_list",
+          "lineno": 1783
+        },
+        {
+          "name": "_content_first_value",
+          "lineno": 1794
+        },
+        {
+          "name": "_content_first_list",
+          "lineno": 1809
+        },
+        {
+          "name": "_icml_event_paper_title",
+          "lineno": 1824
+        },
+        {
+          "name": "_pmlr_detail_url",
+          "lineno": 1834
+        },
+        {
+          "name": "_extract_pmlr_abstract",
+          "lineno": 1845
+        },
+        {
+          "name": "_merge_dblp_paper_sources",
+          "lineno": 1873
+        },
+        {
+          "name": "_acl_event_urls",
+          "lineno": 1937
+        },
+        {
+          "name": "_merge_enrichment",
+          "lineno": 1949
+        },
+        {
+          "name": "_merge_enrichments",
+          "lineno": 1995
+        },
+        {
+          "name": "_title_match_queries",
+          "lineno": 2025
+        },
+        {
+          "name": "_biorxiv_category_matches",
+          "lineno": 2052
+        },
+        {
+          "name": "_biorxiv_content_url",
+          "lineno": 2059
+        },
+        {
+          "name": "_arxiv_entry_id",
+          "lineno": 2066
+        },
+        {
+          "name": "_arxiv_fallback_queries",
+          "lineno": 2075
+        },
+        {
+          "name": "_arxiv_date_clause",
+          "lineno": 2094
+        },
+        {
+          "name": "_arxiv_phrase_clause",
+          "lineno": 2102
+        },
+        {
+          "name": "_arxiv_or_group",
+          "lineno": 2113
+        },
+        {
+          "name": "build_arxiv_targeted_queries",
+          "lineno": 2129
+        },
+        {
+          "name": "_arxiv_search_queries",
+          "lineno": 2174
+        },
+        {
+          "name": "build_biorxiv_search_phrases",
+          "lineno": 2206
+        },
+        {
+          "name": "_append_arxiv_entry",
+          "lineno": 2225
+        },
+        {
+          "name": "_arxiv_date_window",
+          "lineno": 2270
+        },
+        {
+          "name": "_allow_old_run_venue_cache",
+          "lineno": 2287
+        },
+        {
+          "name": "_venue_cache_candidate_paths",
+          "lineno": 2291
+        },
+        {
+          "name": "_verified_venue_yecache_from_paths",
+          "lineno": 2311
+        },
+        {
+          "name": "_icml_verified_download_cache",
+          "lineno": 2388
+        },
+        {
+          "name": "_recent_verified_venue_yecache",
+          "lineno": 2400
+        },
+        {
+          "name": "_paper_has_official_category",
+          "lineno": 2488
+        },
+        {
+          "name": "_venue_source_official_category_count",
+          "lineno": 2497
+        },
+        {
+          "name": "_venue_source_audit",
+          "lineno": 2501
+        },
+        {
+          "name": "_venue_source_has_official_categories",
+          "lineno": 2522
+        },
+        {
+          "name": "_venue_source_category_priority_eligible",
+          "lineno": 2529
+        },
+        {
+          "name": "_venue_source_score",
+          "lineno": 2544
+        },
+        {
+          "name": "_choose_best_venue_source",
+          "lineno": 2572
+        },
+        {
+          "name": "_source_has_confident_official_categories",
+          "lineno": 2586
+        },
+        {
+          "name": "_source_is_complete_official_title_index",
+          "lineno": 2592
+        },
+        {
+          "name": "_register_compat_aliases",
+          "lineno": 2598
+        }
       ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "auto_research.llm",
-        "auto_research.paths",
-        "collections",
-        "datetime",
-        "find_support",
-        "json",
-        "pathlib",
-        "sys",
-        "taste_pythonpath",
-        "typing"
-      ]
-    },
-    {
-      "script": "discover_arxiv.py",
-      "path": "modules/finding/scripts/discover_arxiv.py",
-      "owner": "finding",
-      "owner_reason": "literature/source discovery, source scoring, or Find artifact preparation",
-      "function_count": 6,
-      "functions": [
-        "safe_discovery_slug",
-        "parse_args",
-        "build_arxiv_search_query",
-        "fetch",
-        "parse_feed",
-        "main"
-      ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "auto_research.source_selection",
-        "datetime",
-        "json",
-        "literature_policy",
-        "os",
-        "pathlib",
-        "project_paths",
-        "random",
-        "re",
-        "sys",
-        "taste_pythonpath",
-        "time",
-        "urllib.error",
-        "urllib.parse",
-        "urllib.request",
-        "xml.etree.ElementTree"
-      ]
-    },
-    {
-      "script": "discover_github_repos.py",
-      "path": "modules/finding/scripts/discover_github_repos.py",
-      "owner": "finding",
-      "owner_reason": "literature/source discovery, source scoring, or Find artifact preparation",
-      "function_count": 5,
-      "functions": [
-        "parse_args",
-        "load_json",
-        "save_json",
-        "update_repo_registry",
-        "main"
-      ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "auto_research.source_selection",
-        "json",
-        "literature_policy",
-        "os",
-        "pathlib",
-        "project_paths",
-        "sys",
-        "taste_pythonpath",
-        "urllib.error",
-        "urllib.parse",
-        "urllib.request"
-      ]
-    },
-    {
-      "script": "discover_semantic_scholar.py",
-      "path": "modules/finding/scripts/discover_semantic_scholar.py",
-      "owner": "finding",
-      "owner_reason": "literature/source discovery, source scoring, or Find artifact preparation",
-      "function_count": 2,
-      "functions": [
-        "parse_args",
-        "main"
-      ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "json",
-        "literature_policy",
-        "os",
-        "project_paths",
-        "random",
-        "sys",
-        "time",
-        "urllib.error",
-        "urllib.parse",
-        "urllib.request"
-      ]
-    },
-    {
-      "script": "find_pipeline.py",
-      "path": "modules/finding/scripts/find_pipeline.py",
-      "owner": "finding",
-      "owner_reason": "literature/source discovery, source scoring, or Find artifact preparation",
-      "function_count": 337,
-      "functions": [
-        "_emit_progress",
-        "_raise_if_cancelled",
-        "_chunks",
-        "_positive_int_env",
-        "_clamp_int",
-        "_compact_scoring_interest",
-        "_adaptive_final_scoring_batch_size",
-        "_rate_limited_llm_provider",
-        "_adaptive_final_scoring_workers",
-        "_dedupe_items",
-        "_mock_offline_venue_title_index",
-        "_paper_identity_keys",
-        "_evaluated_by_identity",
-        "_is_llm_rate_limit_error",
-        "_is_fatal_llm_configuration_error",
-        "_fatal_llm_configuration_message",
-        "_raise_if_fatal_llm_configuration_error",
-        "_is_transient_llm_service_error",
-        "_as_float",
-        "_as_int",
-        "_normalize_hit_directions",
-        "_hit_direction_i18n",
-        "_set_hit_direction_language_fields",
-        "_combined_score",
-        "_final_recommendation_score",
-        "_flatten_quality_value",
-        "_quality_signal_text",
-        "_quality_metadata_signal_text",
-        "_presentation_bonus",
-        "_presentation_labels",
-        "_set_quality_labels",
-        "_quality_bonus_allowed",
-        "_presentation_bonus_allowed",
-        "_quality_table_bonus",
-        "_venue_bonus",
-        "_screening_negative_relevance_text",
-        "_screening_relevance_signal",
-        "_screening_quality_bonus_allowed",
-        "_screening_quality_bonus",
-        "_local_screening_quality_bonus",
-        "_apply_quality_bonus",
-        "_stable_rank_key",
-        "_topic_axis_score",
-        "_final_llm_candidate_key",
-        "_final_llm_scoring_pool",
-        "_topic_evidence_source_text",
-        "_contains_any",
-        "_adaptive_signal_terms",
-        "_profile_chunk_is_guardrail",
-        "_topic_interest_chunks",
-        "_topic_interest_text",
-        "_route_support_threshold",
-        "_term_family_present",
-        "_term_family_markers",
-        "_source_marker_is_negated",
-        "_source_has_unnegated_marker",
-        "_source_has_route_term",
-        "_source_has_negated_route_term",
-        "_route_terms_have_source_support",
-        "_route_core_terms",
-        "_foundation_route_terms_have_source_support",
-        "_route_source_support",
-        "_best_source_supported_route",
-        "_record_source_supported_adaptive_route",
-        "_candidate_has_source_supported_adaptive_route",
-        "_candidate_judgment_text",
-        "_interest_required_topic_groups",
-        "_topic_gate_required_groups",
-        "_strict_strong_required_groups",
-        "_topic_group_markers",
-        "_source_has_topic_group",
-        "_source_topic_group_hits",
-        "_source_has_actionable_method_or_evidence",
-        "_source_is_generic_background_for_required_topic",
-        "_foundation_matches_current_axes",
-        "_has_actionable_foundation_axis",
-        "_explicit_llm_negative_strong_reason",
-        "_strict_strong_invalid_reason",
-        "_strong_topic_invalid_reason",
-        "_foundation_invalid_reason",
-        "_foundation_strong_enough",
-        "_llm_weak_verdict_only_misses_other_route_components",
-        "_repair_llm_alternative_route_false_negative",
-        "_repair_passed_topic_fit_consistency",
-        "_repair_weak_topic_fit_consistency",
-        "_demote_unstable_foundation_item",
-        "_mark_not_positive_for_strong_gate",
-        "_json_or_error",
-        "_llm_live_gate",
-        "_json_or_error_wall_timeout",
-        "_route_word_count",
-        "_looks_like_complete_topic_route",
-        "_adaptive_topic_route_lines",
-        "_adaptive_topic_routes_block",
-        "_route_match_key",
-        "_canonical_adaptive_route",
-        "_title_abstract_evidence_text",
-        "_route_anchor_text",
-        "_route_anchor_terms",
-        "_route_anchor_source_support",
-        "_complete_route_source_support",
-        "_best_complete_source_supported_route",
-        "_text_has_negated_route_term",
-        "_judgment_negates_complete_route_anchor",
-        "_append_missing_topic_evidence",
-        "_demote_incomplete_llm_topic_route",
-        "_apply_complete_route_guard",
-        "_matched_topic_route",
-        "_has_adaptive_recall_hit",
-        "_stable_source_ranking_score",
-        "_citation_count",
-        "_venue_key",
-        "_parse_release_date",
-        "_known_conference_release_date",
-        "_latest_released_venue_context",
-        "_attach_latest_released_venue_context",
-        "_source_context_bonus",
-        "_is_default_fallback_text",
-        "_normalize_llm_supported_text_fields",
-        "_apply_stable_ranking_score",
-        "_apply_relevance_guard",
-        "_normalize_topic_evidence_value",
-        "_has_topic_evidence_contradiction",
-        "_screening_topic_evidence_blocks_quality_bonus",
-        "_apply_llm_topic_evidence",
-        "_find_cache_path",
-        "_final_llm_score_cache_enabled",
-        "_final_llm_score_cache_path",
-        "_stage0_profile_cache_path",
-        "_venue_title_index_cache_path",
-        "_venue_title_index_cache_key",
-        "_latest_project_find_results_title_index",
-        "_load_venue_title_index_cache",
-        "_store_venue_title_index_cache",
-        "_stage0_profile_model_identity",
-        "_stage0_profile_cache_key",
-        "_load_stage0_profile_cache",
-        "_store_stage0_profile_cache",
-        "_final_llm_score_model_identity",
-        "_cache_normalized_text",
-        "_title_llm_score_cache_enabled",
-        "_title_llm_score_cache_path",
-        "_title_llm_score_cache_policy",
-        "_title_llm_score_cache_key",
-        "_load_title_llm_score_cache",
-        "_title_llm_cache_title_lookup_key",
-        "_title_llm_cache_title_index",
-        "_title_llm_cache_entry_valid",
-        "_apply_cached_title_llm_score",
-        "_title_llm_score_cache_entry",
-        "_store_title_llm_score_cache_entries",
-        "_final_llm_score_cache_key",
-        "_load_final_llm_score_cache",
-        "_final_llm_cache_reason_unusable",
-        "_final_llm_cache_entry_valid",
-        "_apply_cached_final_llm_score",
-        "_final_llm_score_cache_entry",
-        "_store_final_llm_score_cache_entries",
-        "_apply_topic_evidence_guard",
-        "_scan_count",
-        "_venue_title_fetch_limit",
-        "_timeout_env_value",
-        "_venue_title_fetch_timeout_sec",
-        "_venue_year_probe_timeout_sec",
-        "_fetch_venue_title_index_online",
-        "_fetch_venue_title_index_for_find",
-        "_target_recall_count",
-        "_min_title_candidates",
-        "_min_detail_candidates",
-        "_large_pool_threshold",
-        "_full_venue_corpus_audit_enabled",
-        "_local_database_metadata_audit",
-        "_online_venue_metadata_audit",
-        "_venue_metadata_status_fields",
-        "_combined_metadata_audit",
-        "_selection_list_value",
-        "_normalize_selection_years",
-        "_selection_venue_year_pairs",
-        "_selection_venue_year_groups",
-        "_selection_venue_unit_count",
-        "_source_count_hint",
-        "_recommendation_target_hint",
-        "_llm_title_filter_scan_budget",
-        "_local_title_screen_budget",
-        "_title_detail_candidate_target",
-        "_title_score_floor",
-        "_title_rank_key",
-        "_score_title_pool",
-        "_local_title_screen_pool",
-        "_ranked_recall_pool",
-        "_venue_recall_result_limit",
-        "_detail_fetch_count",
-        "_venue_detail_fetch_count",
-        "_venue_detail_wall_timeout_sec",
-        "_target_triage_candidate_count",
-        "_final_llm_scoring_limit",
-        "_abstract_enrichment_limits",
-        "_abstract_lookup_failure_reason",
-        "_find_selection_allows_arxiv",
-        "_abstract_enrichment_timed_out",
-        "_abstract_enrichment_filled_count",
-        "_enrich_missing_abstracts_for_adaptive_recall",
-        "_enrich_missing_abstracts_for_final_scoring",
-        "_apply_result_limit_with_floor",
-        "_detail_presentation_recall_per_type",
-        "_presentation_recall_title_floor",
-        "_detail_candidate_key",
-        "_local_quality_recall_signal",
-        "_quality_local_recall_rank_key",
-        "_quality_local_title_recall_supplement",
-        "_title_fit_for_recall",
-        "_detail_titles_with_presentation_recall",
-        "_prefilter_titles",
-        "_paper_category",
-        "_has_trusted_title_categories",
-        "_title_filter_policy",
-        "_title_filter_groups",
-        "_title_filter_prompt_context",
-        "_category_summary_from_title_index",
-        "_public_category_selection",
-        "_quality_category_recall_supplement",
-        "_adaptive_category_paper_recall_supplement",
-        "_select_official_category_title_index",
-        "_dynamic_title_prune",
-        "_append_title_filter_report",
-        "_load_local_category_guided_index",
-        "_venue_yewindow",
-        "_venue_yeis_released",
-        "_release_block_reason",
-        "_resolve_latest_available_venue_years",
-        "_resolve_venue_years",
-        "_evaluate_items",
-        "_apply_mock_final_scoring",
-        "_has_final_title_abstract_llm_scoring",
-        "_is_llm_supported",
-        "_metadata_tldr_text",
-        "_abstract_is_semantic_tldr",
-        "_has_real_abstract",
-        "_item_metadata",
-        "_readable_text_len",
-        "_first_nonempty_text",
-        "_list_text",
-        "_reason_is_too_short",
-        "_has_internal_find_public_text",
-        "_public_route_text",
-        "_public_interest_context",
-        "_ensure_recommendation_readability",
-        "_recommendation_quality_audit",
-        "_missing_chinese_abstract_ids",
-        "_recommendation_translation_status",
-        "_metadata_chinese_abstract_fallback",
-        "_fill_missing_chinese_abstracts_with_metadata",
-        "_has_strong_topic_evidence",
-        "_llm_expected",
-        "_mark_evidence_tier",
-        "_recommendation_presentation_rank_bonus",
-        "_recommendation_rank_key",
-        "_final_topic_evidence_invalid_reason",
-        "_find_recommendation_invalid_reason",
-        "_recommendable_ranked",
-        "_strict_rank_input",
-        "_supported_ranked",
-        "_true_strong_recommendation",
-        "_strong_recommendation_rank_key",
-        "_strong_ranked",
-        "_selection_source_count",
-        "_strong_recommendation_count_cap",
-        "_strong_recommendation_target_count",
-        "_strong_recommendation_output_count",
-        "_recommended",
-        "_strict_strong_anchor_count",
-        "_screened_ranking",
-        "_candidate_is_positive_evidence",
-        "_retrieval_only_copy",
-        "_retrieval_only_pool",
-        "_read_candidates",
-        "_triage_candidates",
-        "_critique_candidates",
-        "_looks_english",
-        "_clean_abstract_text",
-        "_clean_missing_abstract_phrasing",
-        "_sanitize_explanation_fields",
-        "_chinese_translation_min_len",
-        "_clean_chinese_translation_output",
-        "_repair_translation_latex_commands",
-        "_balanced_latex_command_spans",
-        "_latex_translation_spans",
-        "_prepare_abstract_translation_prompt_text",
-        "_translation_prompt_abstract",
-        "_restore_latex_translation_placeholders",
-        "_translation_preserves_latex_segments",
-        "_clear_translation_latex_state",
-        "_chinese_translation_reject_reason",
-        "_looks_complete_chinese_translation",
-        "_translation_text_from_data",
-        "_translation_priority",
-        "_attach_abstract_language_fields",
-        "_run_diagnostics",
-        "_source_status",
-        "_venue_source_public_limited",
-        "_source_status_label",
-        "_public_source_status_message_parts",
-        "_source_status_message_text",
-        "_source_scope_text",
-        "_source_metadata_status_text",
-        "_source_category_text",
-        "_source_abstract_text",
-        "_source_status_detail_parts",
-        "_status_markdown",
-        "_adaptive_arxiv_queries",
-        "run_find",
-        "dedupe",
-        "_handle_timeout",
-        "probe",
-        "_sentence_join",
-        "zh_reason",
-        "zh_fit_explanation",
-        "en_fit_explanation",
-        "en_reason",
-        "reader_instruction_zh",
-        "reader_instruction_en",
-        "repl",
-        "_sum",
-        "_venue_source_status_rows",
-        "_title_filter_report_sum",
-        "_find_progress_payload",
-        "_persist_find_progress",
-        "_progress",
-        "_build_find_artifacts",
-        "_write_find_outputs",
-        "_target",
-        "mark_items_unscored",
-        "single_scoring_prompt",
-        "retry_items_singly",
-        "queue_single_retry",
-        "retry_policy_text",
-        "apply_result"
-      ],
-      "class_count": 1,
-      "classes": [
-        "FatalLLMConfigurationError"
-      ],
-      "imports": [
-        "__future__",
-        "auto_research.jobs",
-        "auto_research.llm",
-        "auto_research.markdown",
-        "auto_research.models",
-        "auto_research.paths",
-        "auto_research.storage",
-        "collections",
-        "concurrent.futures",
-        "datetime",
-        "find_support",
-        "hashlib",
-        "json",
-        "math",
-        "os",
-        "pathlib",
-        "re",
-        "signal",
-        "threading",
-        "time",
-        "typing"
-      ]
-    },
-    {
-      "script": "find_local_rank.py",
-      "path": "modules/finding/scripts/find_local_rank.py",
-      "owner": "finding",
-      "owner_reason": "compatibility re-export for ranking/local_rank.py; keeps legacy find_support public surface stable",
-      "function_count": 1,
-      "functions": [
-        "rank_papers_tfidf"
-      ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__",
-        "ranking.local_rank"
-      ],
-      "implementation_modules": [
-        "modules/finding/scripts/ranking/local_rank.py"
-      ]
-    },
-    {
-      "script": "find_support.py",
-      "path": "modules/finding/scripts/find_support.py",
-      "owner": "finding",
-      "owner_reason": "literature/source discovery, source scoring, or Find artifact preparation",
-      "function_count": 59,
-      "functions": [
-        "_semantic_scholar_cache_path",
-        "_openalex_cache_path",
-        "_load_semantic_scholar_cache",
-        "_save_semantic_scholar_cache",
-        "_load_openalex_cache",
-        "_save_openalex_cache",
-        "enrich_with_openalex",
-        "_request",
-        "_dblp_search_hits",
-        "fetch_dblp_stream_api",
-        "_openreview_notes_paginated",
-        "fetch_openreview_venue",
-        "fetch_cvf_openaccess",
-        "fetch_eccv_virtual",
-        "_fetch_icml_presentation_overrides",
-        "fetch_icml_downloads",
-        "fetch_pmlr_index",
-        "enrich_pmlr_details",
-        "fetch_neurips_title_index",
-        "fetch_neurips_details",
-        "fetch_neurips_virtual",
-        "_parse_dblp_yelinks",
-        "_dblp_toc_papers",
-        "fetch_dblp_venue",
-        "fetch_acl_anthology",
-        "fetch_venue_title_index",
-        "_fetch_enrichment_sources",
-        "fetch_venue_title_index_all",
-        "_fetch_one_conference_virtual_detail",
-        "_fetch_one_icml_virtual_detail",
-        "enrich_conference_virtual_details",
-        "enrich_icml_virtual_details",
-        "fetch_selected_venue_details",
-        "fetch_venue_sample",
-        "enrich_with_semantic_scholar",
-        "_arxiv_title_match_cache_path",
-        "_load_arxiv_title_match_cache",
-        "_save_arxiv_title_match_cache",
-        "enrich_with_arxiv_title_match",
-        "enrich_nature_details",
-        "fetch_nature_portfolio",
-        "enrich_science_details",
-        "fetch_science_family",
-        "fetch_biorxiv",
-        "_request_arxiv_page",
-        "fetch_arxiv",
-        "fetch_huggingface",
-        "fetch_github_trending",
-        "direct_links",
-        "reached_limit",
-        "submit_next",
-        "_cache_keys",
-        "_apply_item",
-        "reached_limit",
-        "add_papers",
-        "older_than_start",
-        "reached_limit",
-        "add_papers",
-        "run_query"
-      ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__.annotations",
-        "catalog.venue_catalog.ADDRESS_OVERRIDES",
-        "catalog.venue_catalog.FIELD_LABELS",
-        "catalog.venue_catalog.NAME_ALIASES",
-        "catalog.venue_catalog.SOURCE_PRIORITY",
-        "catalog.venue_catalog._append_alias",
-        "catalog.venue_catalog._catalog_by_id_cached",
-        "catalog.venue_catalog._catalog_source_priority",
-        "catalog.venue_catalog._copy_catalog_row",
-        "catalog.venue_catalog._load_catalog_cached",
-        "catalog.venue_catalog._load_json_catalog",
-        "catalog.venue_catalog._merge_catalog_by_identity",
-        "catalog.venue_catalog._merge_catalog_entry",
-        "catalog.venue_catalog._merge_year_values",
-        "catalog.venue_catalog._safe_id",
-        "catalog.venue_catalog._venue_alias_record",
-        "catalog.venue_catalog._venue_identity_key",
-        "catalog.venue_catalog._venue_name_key",
-        "catalog.venue_catalog.catalog_by_id",
-        "catalog.venue_catalog.load_catalog",
-        "catalog.venue_catalog.load_ccf_catalog",
-        "catalog.venue_catalog.load_custom_catalog",
-        "catalog.venue_catalog.load_default_catalog",
-        "catalog.venue_catalog.load_openreview_catalog",
-        "catalog.venue_catalog.load_packaged_ccf_catalog",
-        "local_store.local_index._venue_id_candidates",
-        "local_store.local_index.load_local_venue_year",
-        "local_store.local_index.venue_cache_key",
-        "local_store.local_cache.SCHEMA_VERSION",
-        "local_store.local_cache._category_key",
-        "local_store.local_cache._first_existing_directory",
-        "local_store.local_cache._json_path",
-        "local_store.local_cache.build_category_summary",
-        "local_store.local_cache.cache_directory",
-        "local_store.local_cache.load_cached_venue_year",
-        "local_store.local_cache.normalize_cached_paper",
-        "local_store.local_cache.write_venue_year_cache",
-        "find_local_rank.rank_papers_tfidf",
-        "quality.metadata.CONFERENCE_QUALITY_TABLE",
-        "quality.metadata.JOURNAL_QUALITY_TABLE",
-        "quality.metadata.QUALITY_DATA_DIR",
-        "quality.metadata._candidate_tables",
-        "quality.metadata._conference_table",
-        "quality.metadata._journal_table",
-        "quality.metadata._label_candidates",
-        "quality.metadata._load_json",
-        "quality.metadata._lookup_conference_quality",
-        "quality.metadata._lookup_journal_quality",
-        "quality.metadata._metadata",
-        "quality.metadata._norm",
-        "quality.metadata._quality_payload",
-        "quality.metadata._venue_ids",
-        "quality.metadata._venue_names",
-        "quality.metadata.attach_quality_metadata",
-        "quality.metadata.attach_quality_metadata_many",
-        "selection.category_select.CATEGORY_SELECT_CACHE_MAX_ENTRIES",
-        "selection.category_select.CATEGORY_SELECT_CACHE_SCHEMA_VERSION",
-        "selection.category_select.CATEGORY_SELECT_TEMPERATURE",
-        "selection.category_select._build_rejected",
-        "selection.category_select._cache_entries_fingerprint",
-        "selection.category_select._category_entries",
-        "selection.category_select._category_select_cache_enabled",
-        "selection.category_select._category_select_cache_key",
-        "selection.category_select._category_select_cache_path",
-        "selection.category_select._compact_entries",
-        "selection.category_select._fallback_select",
-        "selection.category_select._interest_text",
-        "selection.category_select._json_or_none",
-        "selection.category_select._llm_identity",
-        "selection.category_select._load_category_select_cache",
-        "selection.category_select._min_llm_category_recall",
-        "selection.category_select._normalize_selected_rows",
-        "selection.category_select._normalized_text",
-        "selection.category_select._project_cache_dir",
-        "selection.category_select._store_category_select_cache_entry",
-        "selection.category_select._supplement_selected_for_recall",
-        "selection.category_select._use_llm_category_select",
-        "selection.category_select._valid_cached_selection",
-        "selection.category_select.filter_papers_by_selected_categories",
-        "selection.category_select.select_relevant_categories",
-        "research_profile.normalize.PROFILE_SCHEMA",
-        "research_profile.normalize._append_expansion",
-        "research_profile.normalize._append_unique",
-        "research_profile.normalize._as_optional_string",
-        "research_profile.normalize._as_string",
-        "research_profile.normalize._as_string_list",
-        "research_profile.normalize._augment_safe_expansions",
-        "research_profile.normalize._canonical_condition",
-        "research_profile.normalize._dedupe_conditional_exclusions",
-        "research_profile.normalize._extract_conditional_exclusions",
-        "research_profile.normalize._extract_preference_hints",
-        "research_profile.normalize._keyword_terms",
-        "research_profile.normalize._normalize_conditional_exclusions",
-        "research_profile.normalize._normalize_expansions",
-        "research_profile.normalize._postprocess_profile",
-        "research_profile.normalize._profile_signal_count",
-        "research_profile.normalize._split_terms",
-        "research_profile.normalize.build_stage0_prompt",
-        "research_profile.normalize.fallback_profile",
-        "research_profile.normalize.normalize_profile_shape",
-        "research_profile.normalize.normalize_user_profile",
-        "research_profile.normalize.profile_retrieval_text",
-        "hashlib",
-        "html",
-        "json",
-        "os",
-        "re",
-        "time",
-        "xml.etree.ElementTree",
-        "concurrent.futures.FIRST_COMPLETED",
-        "concurrent.futures.ThreadPoolExecutor",
-        "concurrent.futures.wait",
-        "datetime.date",
-        "datetime.datetime",
-        "datetime.timedelta",
-        "pathlib.Path",
-        "urllib.parse.quote_plus",
-        "urllib.parse.urlencode",
-        "typing.Any",
-        "typing.Callable",
-        "requests",
-        "bs4.BeautifulSoup",
-        "auto_research.paths.WORKFLOW_RUNTIME_DIR",
-        "auto_research.paths.LEGACY_RUNS_DIR",
-        "auto_research.paths.ROOT",
-        "auto_research.paths.RUNS_DIR",
-        "auto_research.paths.STATE_DIR",
-        "sources.audit.VENUE_METADATA_AUDIT_KEY",
-        "sources.audit._attach_openreview_metadata_audit",
-        "sources.audit._attach_venue_metadata_audit",
-        "sources.audit._metadata_timeout",
-        "sources.audit._venue_metadata_audit",
-        "sources.audit.venue_metadata_audit_from_papers",
-        "sources.journals.NATURE_JOURNALS",
-        "sources.journals.SCIENCE_JOURNALS",
-        "sources.journals._crossref_authors",
-        "sources.journals._crossref_date",
-        "sources.journals._crossref_first_text",
-        "sources.journals._extract_nature_doi",
-        "sources.journals._extract_science_abstract",
-        "sources.journals._extract_science_doi",
-        "sources.journals._looks_like_xml",
-        "sources.journals._nature_feed_url",
-        "sources.journals._nature_journal_meta",
-        "sources.journals._nature_listing_url",
-        "sources.journals._parse_nature_feed",
-        "sources.journals._parse_nature_listing_html",
-        "sources.journals._parse_science_crossref_items",
-        "sources.journals._parse_science_feed",
-        "sources.journals._science_abs_url",
-        "sources.journals._science_crossref_url",
-        "sources.journals._science_feed_url",
-        "sources.journals._science_journal_meta",
-        "sources.journals._science_pdf_url",
-        "sources.journals._xml_attr",
-        "sources.journals._xml_text",
-        "sources.conferences.fetch_openreview_iclr_2026",
-        "sources.conferences._acl_event_urls",
-        "sources.conferences._content_first_list",
-        "sources.conferences._content_first_value",
-        "sources.conferences._content_list",
-        "sources.conferences._content_value",
-        "sources.conferences._dblp_authors",
-        "sources.conferences._dblp_hits_payload",
-        "sources.conferences._dblp_page_url",
-        "sources.conferences._dblp_stream_id",
-        "sources.conferences._dblp_stream_query",
-        "sources.conferences._extract_pmlr_abstract",
-        "sources.conferences._icml_event_paper_title",
-        "sources.conferences._merge_dblp_paper_sources",
-        "sources.conferences._merge_enrichment",
-        "sources.conferences._merge_enrichments",
-        "sources.conferences._pmlr_detail_url",
-        "sources.common.OPENREVIEW_VENUE_PATTERNS",
-        "sources.common._ABSTRACT_UI_CONTROL_RE",
-        "sources.common._clean_text",
-        "sources.common._in_date_range",
-        "sources.common._matches_venue_keyword",
-        "sources.common._openreview_patterns_for_venue",
-        "sources.common._openreview_venue_ids",
-        "sources.common._presentation_display_label",
-        "sources.common._presentation_type_from_text",
-        "sources.common._presentation_type_from_url",
-        "sources.common._set_presentation_metadata",
-        "sources.common._strip_abstract_ui_controls",
-        "sources.common._title_key",
-        "sources.common._venue_text",
-        "sources.common.is_acl_family_venue",
-        "sources.common.is_cvf_venue",
-        "sources.common.is_iclr_venue",
-        "sources.common.is_icml_venue",
-        "sources.common.is_neurips_venue",
-        "sources.common.is_openreview_supported_venue",
-        "sources.common.is_pmlr_venue",
-        "sources.common.normalize_date",
-        "sources.common.stable_id",
-        "sources.metadata._SEMANTIC_SCHOLAR_RETRYABLE_STATUS_CODES",
-        "sources.metadata._acm_ids_from_doi",
-        "sources.metadata._acm_metadata_from_doi",
-        "sources.metadata._apply_semantic_scholar_cache",
-        "sources.metadata._author_family_tokens",
-        "sources.metadata._dblp_record_metadata",
-        "sources.metadata._doi_from_url",
-        "sources.metadata._doi_url",
-        "sources.metadata._openalex_abstract_from_inverted_index",
-        "sources.metadata._openalex_author_family_tokens",
-        "sources.metadata._openalex_cache_key",
-        "sources.metadata._openalex_candidate_matches",
-        "sources.metadata._openalex_item_from_payload",
-        "sources.metadata._openalex_landing_url",
-        "sources.metadata._openalex_pdf_url",
-        "sources.metadata._same_metadata_text",
-        "sources.metadata._semantic_scholar_cache_is_permanent_miss",
-        "sources.metadata._semantic_scholar_cache_key",
-        "sources.metadata._semantic_scholar_cache_miss_is_retryable",
-        "sources.metadata._semantic_scholar_cache_real_abstract",
-        "sources.metadata._semantic_scholar_errors_retryable",
-        "sources.metadata._title_token_similarity",
-        "sources.parsing._conference_virtual_detail_label",
-        "sources.parsing._conference_virtual_detail_source",
-        "sources.parsing._conference_virtual_detail_target",
-        "sources.parsing._conference_virtual_detail_url",
-        "sources.parsing._extract_between_markers",
-        "sources.parsing._extract_conference_virtual_abstract",
-        "sources.parsing._extract_conference_virtual_authors",
-        "sources.parsing._extract_icml_virtual_abstract",
-        "sources.parsing._extract_icml_virtual_authors",
-        "sources.parsing._icml_virtual_detail_target",
-        "sources.parsing._jsonld_nodes",
-        "sources.parsing._looks_like_paper_title",
-        "sources.parsing._mark_detail_fetch_deferred",
-        "sources.parsing._name_from_jsonld_author",
-        "sources.parsing._openreview_pdf_url",
-        "sources.parsing._parse_neurips_detail",
-        "sources.parsing._parse_neurips_list",
-        "sources.parsing._positive_float_env",
-        "sources.preprints.ARXIV_DEFAULT_RECENT_DAYS",
-        "sources.preprints._append_arxiv_entry",
-        "sources.preprints._arxiv_date_window",
-        "sources.preprints._arxiv_entry_authors",
-        "sources.preprints._arxiv_entry_id",
-        "sources.preprints._arxiv_fallback_queries",
-        "sources.preprints._arxiv_search_queries",
-        "sources.preprints._biorxiv_category_matches",
-        "sources.preprints._biorxiv_content_url",
-        "sources.preprints._biorxiv_default_start_date",
-        "sources.preprints._title_match_queries",
-        "sources.venue_cache._icml_verified_download_cache",
-        "sources.venue_cache._recent_verified_venue_yecache",
-        "sources.venue_cache._venue_cache_candidate_paths",
-        "sources.venue_cache._verified_venue_yecache_from_paths",
-        "sources.source_choice._choose_best_venue_source",
-        "sources.source_choice._paper_has_official_category",
-        "sources.source_choice._source_has_confident_official_categories",
-        "sources.source_choice._source_is_complete_official_title_index",
-        "sources.source_choice._venue_source_audit",
-        "sources.source_choice._venue_source_category_priority_eligible",
-        "sources.source_choice._venue_source_has_official_categories",
-        "sources.source_choice._venue_source_official_category_count",
-        "sources.source_choice._venue_source_score"
-      ],
-      "implementation_modules": [
-        "modules/finding/scripts/catalog/venue_catalog.py",
-        "modules/finding/scripts/quality/metadata.py",
-        "modules/finding/scripts/local_store/local_index.py",
-        "modules/finding/scripts/local_store/local_cache.py",
-        "modules/finding/scripts/selection/category_select.py",
-        "modules/finding/scripts/research_profile/normalize.py",
-        "modules/finding/scripts/sources/common.py",
-        "modules/finding/scripts/sources/audit.py",
-        "modules/finding/scripts/sources/metadata.py",
-        "modules/finding/scripts/sources/source_choice.py",
-        "modules/finding/scripts/sources/parsing.py",
-        "modules/finding/scripts/sources/journals.py",
-        "modules/finding/scripts/sources/preprints.py",
-        "modules/finding/scripts/sources/conferences.py",
-        "modules/finding/scripts/sources/venue_cache.py"
-      ]
-    },
-    {
-      "script": "finding_quality_tools.py",
-      "path": "modules/finding/scripts/finding_quality_tools.py",
-      "owner": "finding",
-      "owner_reason": "literature/source discovery, source scoring, or Find artifact preparation",
-      "function_count": 34,
-      "functions": [
-        "_paper_quality_load_json",
-        "_paper_quality_save_json",
-        "_paper_quality_tokenize",
-        "_paper_quality_bucket",
-        "_paper_quality_capped_count",
-        "_paper_quality_heuristic_signals",
-        "_paper_quality_venue_short_label",
-        "_paper_quality_quality_row",
-        "_paper_quality_append_group",
-        "run_paper_quality",
-        "_base_candidates_now_iso",
-        "_base_candidates_load_json",
-        "_base_candidates_save_json",
-        "_base_candidates_as_list",
-        "_base_candidates_normalize_title",
-        "_base_candidates_has_any",
-        "_base_candidates_has_positive_signal",
-        "_base_candidates_code_signals",
-        "_base_candidates_candidate_url",
-        "_base_candidates_merge_rows",
-        "_base_candidates_assess_candidate",
-        "_base_candidates_build",
-        "_base_candidates_write_report",
-        "run_literature_base_candidates",
-        "_literature_plan_save_json",
-        "_literature_plan_tokens",
-        "_literature_plan_has_any",
-        "_literature_plan_infer_direction",
-        "_literature_plan_build_queries",
-        "_literature_plan_plan_venues",
-        "_literature_plan_update_project_config",
-        "_literature_plan_write_taste_custom_venues",
-        "run_plan_literature",
-        "main"
-      ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "auto_research.source_selection",
-        "datetime",
-        "json",
-        "literature_policy",
-        "pathlib",
-        "project_paths",
-        "re",
-        "taste_pythonpath",
-        "typing"
-      ]
-    },
-    {
-      "script": "ingest_discovery.py",
-      "path": "modules/finding/scripts/ingest_discovery.py",
-      "owner": "finding",
-      "owner_reason": "literature/source discovery, source scoring, or Find artifact preparation",
-      "function_count": 9,
-      "functions": [
-        "load_json",
-        "save_json",
-        "render_markdown",
-        "merge_paper_metadata",
-        "latest_discoveries",
-        "normalize_paper_id",
-        "cleanup_empty_ingest_artifacts",
-        "ranked_candidates",
-        "main"
-      ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "auto_research.source_selection",
-        "json",
-        "literature_policy",
-        "pathlib",
-        "project_paths",
-        "shutil",
-        "sys",
-        "taste_pythonpath"
-      ]
-    },
-    {
-      "script": "literature_policy.py",
-      "path": "modules/finding/scripts/literature_policy.py",
-      "owner": "finding",
-      "owner_reason": "literature/source discovery, source scoring, or Find artifact preparation",
-      "function_count": 43,
-      "functions": [
-        "_listify",
-        "_topic_terms_from_text",
-        "configured_topic_axes",
-        "now_utc",
-        "normalize_text",
-        "normalize_label",
-        "tokenize",
-        "coerce_int",
-        "coerce_float",
-        "parse_datetime_text",
-        "dedupe_keep_order",
-        "build_literature_policy",
-        "extract_text_blob",
-        "extract_repo_blob",
-        "extract_venue_candidates",
-        "_match_signal",
-        "venue_quality",
-        "_contains_any",
-        "project_required_topic_groups",
-        "topic_group_hits_from_text",
-        "topic_group_hits",
-        "core_topic_fit_from_text",
-        "core_topic_fit",
-        "repo_core_topic_fit",
-        "topic_match_score",
-        "repo_topic_match_score",
-        "taste_signal",
-        "paper_actionability_score",
-        "recency_features",
-        "citation_signal",
-        "foundational_keep",
-        "selection_bucket",
-        "is_not_positive_literature_signal",
-        "score_paper",
-        "repo_activity_features",
-        "repo_adoption_score",
-        "repo_usability_score",
-        "score_repo_candidate",
-        "dataset_readiness_component",
-        "idea_recommendation",
-        "paper_sort_key",
-        "repo_sort_key",
-        "selection_rank"
-      ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__",
-        "datetime",
-        "re",
-        "typing"
-      ]
-    },
-    {
-      "script": "run_literature_base_audit.py",
-      "path": "modules/finding/scripts/run_literature_base_audit.py",
-      "owner": "finding",
-      "owner_reason": "literature/source discovery, source scoring, or Find artifact preparation",
-      "function_count": 19,
-      "functions": [
-        "now_iso",
-        "load_json",
-        "save_json",
-        "flush_progress",
-        "one_line",
-        "safe_slug",
-        "candidate_search_queries",
-        "github_search",
-        "current_find_run_id",
-        "_candidate_row_from_base",
-        "candidates_from_fresh_base_state",
-        "candidates_from_current_find",
-        "candidates_from_current_fresh_base",
-        "repo_rows_from_code_links",
-        "repo_registry_rows",
-        "merge_repo_rows",
-        "run_cmd",
-        "build",
-        "main"
-      ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "datetime",
-        "json",
-        "literature_policy",
-        "pathlib",
-        "project_paths",
-        "re",
-        "select_fresh_research_base",
-        "subprocess",
-        "sys",
-        "typing",
-        "urllib.error",
-        "urllib.parse",
-        "urllib.request"
-      ]
-    },
-    {
-      "script": "run_literature_tool.py",
-      "path": "modules/finding/scripts/run_literature_tool.py",
-      "owner": "finding",
-      "owner_reason": "literature/source discovery, source scoring, or Find artifact preparation",
-      "function_count": 13,
-      "functions": [
-        "load_json",
-        "save_json",
-        "current_find_progress",
-        "write_running_state",
-        "write_completed_full_cycle_state",
-        "read_focus_queries",
-        "dedupe",
-        "_redact",
-        "run",
-        "_looks_like_llm_quota_blocker",
-        "_failure_summary_from_logs",
-        "sync_current_find_plan_queries",
-        "main"
-      ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "datetime",
-        "json",
-        "os",
-        "pathlib",
-        "project_paths",
-        "subprocess",
-        "sys",
-        "typing"
-      ]
-    },
-    {
-      "script": "update_local_database.py",
-      "path": "modules/finding/scripts/update_local_database.py",
-      "owner": "finding",
-      "owner_reason": "literature/source discovery, source scoring, or Find artifact preparation",
-      "function_count": 7,
-      "functions": [
-        "parse_csv",
-        "parse_years",
-        "load_paper_count",
-        "current_index_snapshot",
-        "run_driver",
-        "write_state",
-        "main"
-      ],
-      "class_count": 0,
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "auto_research.paths",
-        "datetime",
-        "json",
-        "os",
-        "pathlib",
-        "project_paths",
-        "shutil",
-        "subprocess",
-        "sys",
-        "taste_pythonpath",
-        "typing"
-      ]
+      "top_level_classes": []
     }
   ]
 }

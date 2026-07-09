@@ -23,6 +23,34 @@ from project_paths import build_paths as _build_project_paths
 
 DEFAULT_ENV = os.environ.get("FIND_ENV_NAME") or os.environ.get("CONDA_ENV_NAME", "")
 DEFAULT_CORE_VENUE_IDS = ["openreview_iclr_2026", "openreview_neurips", "dblp_icml", "dblp_kdd"]
+DEFAULT_LOCAL_LLM_CONFIG_PATH = ROOT / "modules" / "finding" / "config" / "llm.local.json"
+
+
+def _local_llm_config_path() -> Path:
+    raw = os.environ.get("FINDING_LLM_CONFIG", "").strip()
+    return Path(raw).expanduser() if raw else DEFAULT_LOCAL_LLM_CONFIG_PATH
+
+
+def _load_local_llm_config() -> dict:
+    path = _local_llm_config_path()
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _env_or_local_api_key(env: dict[str, str] | None = None) -> str:
+    source = env if env is not None else os.environ
+    local_llm = _load_local_llm_config()
+    api_key_env = source.get("LLM_API_KEY_ENV") or "OPENAI_API_KEY"
+    return (
+        (source.get(api_key_env, "") if api_key_env else "")
+        or source.get("LLM_API_KEY", "")
+        or str(local_llm.get("api_key") or "")
+    )
 
 DRIVER_TEMPLATE = r'''
 from __future__ import annotations
@@ -30,6 +58,7 @@ import json
 import os
 import shutil
 import signal
+import subprocess
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -40,15 +69,10 @@ if str(framework_scripts) not in sys.path:
     sys.path.insert(0, str(framework_scripts))
 from taste_pythonpath import ensure_taste_pythonpath
 ensure_taste_pythonpath(root)
+os.environ["WORKFLOW_RUNTIME_DIR"] = os.environ.get("FINDING_RUNTIME_DIR") or str(root / "modules" / "finding" / ".runtime")
 
-from find_pipeline import run_find
-from read_pipeline import run_read
-from idea_pipeline import patch_idea, run_idea
-from plan_pipeline import run_plan
-from auto_research.models import AppConfig, FindRequest, IdeaPatch, IdeaRequest, PlanRequest, ReadRequest, VenueSelection
-from auto_research.storage import run_dir
-from auto_research.markdown import paper_markdown
 from project_paths import build_paths, load_project_config
+from sync_outputs import adopt_taste_find_run
 
 DEFAULT_CORE_VENUE_IDS = {core_venue_ids_json}
 project = {project_json}
@@ -65,13 +89,34 @@ paths = build_paths(project)
 internal_output_dir_raw = os.environ.get("TASTE_INTERNAL_FIND_OUTPUT_DIR", "").strip()
 internal_output_dir = Path(internal_output_dir_raw).expanduser() if internal_output_dir_raw else None
 publish_outputs = internal_output_dir is None
+finding_module = root / "modules" / "finding"
+finding_entrypoint = finding_module / "main.py"
+def read_json_file(path):
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return {{}}
+    return payload if isinstance(payload, dict) else {{}}
+
+def local_llm_config_path():
+    raw = os.environ.get("FINDING_LLM_CONFIG", "").strip()
+    return Path(raw).expanduser() if raw else finding_module / "config" / "llm.local.json"
+
+local_llm_path = local_llm_config_path()
+if not os.environ.get("FINDING_LLM_CONFIG", "").strip() and local_llm_path.exists():
+    os.environ["FINDING_LLM_CONFIG"] = str(local_llm_path)
+local_llm = read_json_file(local_llm_path)
+input_dir_raw = os.environ.get("TASTE_FIND_INPUT_DIR", "").strip()
+input_dir = Path(input_dir_raw).expanduser() if input_dir_raw else paths.root / "tmp" / "finding" / "input"
+input_dir.mkdir(parents=True, exist_ok=True)
 cfg = load_project_config(project)
+finding_cfg = cfg.get("finding", {{}}) if isinstance(cfg.get("finding", {{}}), dict) else {{}}
 llm = cfg.get("llm", {{}})
 api_key_env = os.environ.get("LLM_API_KEY_ENV") or llm.get("api_key_env", "OPENAI_API_KEY")
-api_key = (os.environ.get(api_key_env, "") if api_key_env else "") or os.environ.get("LLM_API_KEY", "") or llm.get("api_key", "")
-api_base = os.environ.get("LLM_API_BASE") or llm.get("api_base") or "https://api.openai.com/v1"
-model = os.environ.get("LLM_MODEL") or llm.get("model") or "mock-model"
-provider = os.environ.get("LLM_PROVIDER") or llm.get("provider") or "mock"
+api_key = (os.environ.get(api_key_env, "") if api_key_env else "") or os.environ.get("LLM_API_KEY", "") or local_llm.get("api_key", "")
+api_base = os.environ.get("LLM_API_BASE") or llm.get("api_base") or local_llm.get("base_url") or "https://api.openai.com/v1"
+model = os.environ.get("LLM_MODEL") or llm.get("model") or local_llm.get("model") or "mock-model"
+provider = os.environ.get("LLM_PROVIDER") or llm.get("provider") or local_llm.get("provider") or "mock"
 if not (api_base and model and api_key):
     provider = "mock"
 
@@ -94,6 +139,7 @@ evolution = read_text(paths.reports / "evolution_memory.md", 4000)
 reflection = read_text(paths.reports / "iteration_reflection.md", 4000)
 last_taste = read_text(paths.planning / "finding_frontend.md", 3000)
 research_goal = "\n".join([str(cfg.get("topic", "")), str(cfg.get("user_prompt", "")), ", ".join(cfg.get("queries", []))])
+configured_topic = str(finding_cfg.get("research_topic") or cfg.get("topic") or research_goal).strip()
 feedback_profile = f"""
 Research goal:
 {{research_goal}}
@@ -142,7 +188,7 @@ for item in extra_queries:
     if item and item not in topic_queries:
         topic_queries.append(item)
 if not topic_queries:
-    topic = str(cfg.get("topic") or cfg.get("research_interest") or research_goal).strip()
+    topic = str(configured_topic or finding_cfg.get("research_interest") or cfg.get("research_interest") or research_goal).strip()
     if topic:
         topic_queries.extend([
             f"{{topic}} reproducible code dataset",
@@ -150,44 +196,102 @@ if not topic_queries:
             f"{{topic}} executable research idea",
         ])
 
-deep_survey = os.environ.get("DEEP_SURVEY", "0").lower() in {{"1", "true", "yes", "on"}}
+deep_survey = {deep_survey}
+fast_mode = {fast_mode}
 DEFAULT_ARXIV_WINDOW_DAYS = 180
 literature_cfg = cfg.get("literature", {{}}) if isinstance(cfg.get("literature", {{}}), dict) else {{}}
-arxiv_window_days = env_int("WINDOW_DAYS", literature_cfg.get("arxiv_window_days", DEFAULT_ARXIV_WINDOW_DAYS) or DEFAULT_ARXIV_WINDOW_DAYS)
-venue_scan_limit = env_int("VENUE_TITLE_SCAN_LIMIT", 12000 if deep_survey else 3000)
-find_recall_count = env_int("FIND_RECALL_COUNT", 1000 if deep_survey else 200)
-detail_fetch_count = env_int("DETAIL_FETCH_COUNT", 240 if deep_survey else 50)
-arxiv_candidate_limit = env_int("ARXIV_LLM_CANDIDATE_LIMIT", 0)
-arxiv_per_category = env_int("ARXIV_LLM_CANDIDATES_PER_CATEGORY", 0)
+for _key, _value in finding_cfg.items():
+    if _key not in literature_cfg and _key not in {{"api_key", "email", "llm_roles"}}:
+        literature_cfg[_key] = _value
 
-app_cfg = AppConfig(
-    provider=provider,
-    base_url=api_base,
-    api_key=api_key,
-    model=model,
-    temperature=float(os.environ.get("LLM_TEMPERATURE") or llm.get("temperature", 0.2) or 0.2),
-    research_interest=research_goal,
-    researcher_profile=feedback_profile,
-    max_fetch_papers=max(120 if deep_survey else 80, max_papers * 6),
-    max_recommended_papers=max_papers,
-    max_ideas=max_ideas,
-    venue_title_scan_limit=venue_scan_limit,
-    find_recall_count=find_recall_count,
-    detail_fetch_count=detail_fetch_count,
-    arxiv_llm_candidate_limit=arxiv_candidate_limit,
-    arxiv_llm_candidates_per_category=arxiv_per_category,
-    llm_concurrency=env_int("LLM_CONCURRENCY", 8 if deep_survey else 6),
-    idea_parallel_workers=env_int("IDEA_WORKERS", 2 if deep_survey else 1),
-    abstract_scoring_max_workers=env_int("ABSTRACT_SCORING_MAX_WORKERS", 6 if deep_survey else 4),
-    abstract_scoring_batch_size=env_int("ABSTRACT_SCORING_BATCH_SIZE", 10 if deep_survey else 6),
-    abstract_scoring_timeout_sec=env_int("ABSTRACT_SCORING_TIMEOUT_SEC", 180),
-    arxiv_categories=["cs.IR", "cs.LG", "cs.AI"],
-    arxiv_queries=topic_queries,
-    github_languages=["python", "all"],
-    github_since="monthly",
-    arxiv_start_date=(date.today() - timedelta(days=arxiv_window_days)).isoformat(),
-    arxiv_end_date=date.today().isoformat(),
-)
+def config_positive_int(name, default):
+    try:
+        value = int(literature_cfg.get(name) or 0)
+    except (TypeError, ValueError):
+        value = 0
+    return value if value > 0 else int(default)
+
+arxiv_default_window_days = DEFAULT_ARXIV_WINDOW_DAYS if deep_survey else literature_cfg.get("arxiv_window_days", DEFAULT_ARXIV_WINDOW_DAYS) or DEFAULT_ARXIV_WINDOW_DAYS
+arxiv_window_days = env_int("WINDOW_DAYS", arxiv_default_window_days)
+max_fetch_count = config_positive_int("max_fetch_papers", max(120 if deep_survey else 80, max_papers * 6))
+venue_scan_limit = env_int("VENUE_TITLE_SCAN_LIMIT", config_positive_int("venue_title_scan_limit", 12000 if deep_survey else 3000))
+find_recall_count = env_int("FIND_RECALL_COUNT", config_positive_int("find_recall_count", 3000 if deep_survey else 200))
+detail_fetch_count = env_int("DETAIL_FETCH_COUNT", config_positive_int("detail_fetch_count", 800 if deep_survey else 50))
+arxiv_max_queries = env_int("ARXIV_MAX_QUERIES", config_positive_int("arxiv_max_queries", 3))
+arxiv_per_query_limit = env_int("ARXIV_PER_QUERY_LIMIT", config_positive_int("arxiv_per_query_limit", 100 if deep_survey else 50))
+arxiv_timeout_sec = env_int("ARXIV_TIMEOUT_SEC", config_positive_int("arxiv_timeout_sec", 45 if deep_survey else 15))
+arxiv_candidate_limit = env_int("ARXIV_LLM_CANDIDATE_LIMIT", config_positive_int("arxiv_llm_candidate_limit", 0))
+arxiv_per_category = env_int("ARXIV_LLM_CANDIDATES_PER_CATEGORY", config_positive_int("arxiv_llm_candidates_per_category", 0))
+biorxiv_candidate_limit = env_int("BIORXIV_LLM_CANDIDATE_LIMIT", config_positive_int("biorxiv_llm_candidate_limit", 0))
+biorxiv_per_category = env_int("BIORXIV_LLM_CANDIDATES_PER_CATEGORY", config_positive_int("biorxiv_llm_candidates_per_category", 0))
+nature_candidate_limit = env_int("NATURE_CANDIDATE_LIMIT", config_positive_int("nature_candidate_limit", 200))
+science_candidate_limit = env_int("SCIENCE_CANDIDATE_LIMIT", config_positive_int("science_candidate_limit", 200))
+abstract_scoring_max_workers = env_int("ABSTRACT_SCORING_MAX_WORKERS", config_positive_int("abstract_scoring_max_workers", 6 if deep_survey else 4))
+abstract_scoring_batch_size = env_int("ABSTRACT_SCORING_BATCH_SIZE", config_positive_int("abstract_scoring_batch_size", 10 if deep_survey else 6))
+abstract_scoring_timeout_sec = env_int("ABSTRACT_SCORING_TIMEOUT_SEC", config_positive_int("abstract_scoring_timeout_sec", 180))
+
+runtime_tuning = dict(literature_cfg.get("runtime_tuning") or {{}}) if isinstance(literature_cfg.get("runtime_tuning"), dict) else {{}}
+def runtime_default(name, default=None):
+    raw = os.environ.get(name, "")
+    if str(raw).strip():
+        runtime_tuning[name] = raw
+    elif name not in runtime_tuning and default is not None:
+        runtime_tuning[name] = default
+
+runtime_keys = [
+    "ARXIV_FULL_SCAN",
+    "ARXIV_MAX_QUERIES",
+    "ARXIV_PER_QUERY_LIMIT",
+    "ARXIV_TIMEOUT_SEC",
+    "MIN_TITLE_CANDIDATES",
+    "MIN_DETAIL_CANDIDATES",
+    "ABSTRACT_SCORING_BATCH_SIZE",
+    "ABSTRACT_SCORING_MAX_BATCH_SIZE",
+    "ABSTRACT_SCORING_MAX_TOKENS",
+    "SINGLE_ABSTRACT_SCORING_MAX_TOKENS",
+    "ABSTRACT_SCORING_LLM_RETRIES",
+    "ABSTRACT_SCORING_WALL_TIMEOUT_SEC",
+    "ABSTRACT_SCORING_MAX_WORKERS",
+    "ABSTRACT_SCORING_WORKER_CAP",
+    "ABSTRACT_SCORING_TIMEOUT_SEC",
+    "OMITTED_ITEM_RETRY_ATTEMPTS",
+    "USE_LLM_TITLE_FILTER",
+    "LARGE_TITLE_POOL_THRESHOLD",
+]
+for key in runtime_keys:
+    runtime_default(key)
+runtime_default("ABSTRACT_SCORING_BATCH_SIZE", str(abstract_scoring_batch_size))
+runtime_default("ABSTRACT_SCORING_MAX_BATCH_SIZE", str(max(1, abstract_scoring_batch_size)))
+runtime_default("ABSTRACT_SCORING_MAX_WORKERS", str(abstract_scoring_max_workers))
+runtime_default("ABSTRACT_SCORING_WORKER_CAP", str(max(1, abstract_scoring_max_workers)))
+runtime_default("ABSTRACT_SCORING_TIMEOUT_SEC", str(abstract_scoring_timeout_sec))
+if deep_survey:
+    runtime_default("VENUE_TITLE_SCAN_LIMIT", str(venue_scan_limit))
+    runtime_default("FIND_RECALL_COUNT", str(find_recall_count))
+    runtime_default("DETAIL_FETCH_COUNT", str(detail_fetch_count))
+    runtime_default("ARXIV_FULL_SCAN", "1")
+    runtime_default("ARXIV_MAX_QUERIES", "3")
+    runtime_default("ARXIV_PER_QUERY_LIMIT", "100")
+    runtime_default("ARXIV_TIMEOUT_SEC", "45")
+    runtime_default("MIN_TITLE_CANDIDATES", "240")
+    runtime_default("MIN_DETAIL_CANDIDATES", "80")
+    runtime_default("ABSTRACT_SCORING_BATCH_SIZE", "10")
+    runtime_default("ABSTRACT_SCORING_MAX_BATCH_SIZE", "10")
+    runtime_default("ABSTRACT_SCORING_MAX_TOKENS", "12000")
+    runtime_default("SINGLE_ABSTRACT_SCORING_MAX_TOKENS", "3000")
+    runtime_default("ABSTRACT_SCORING_LLM_RETRIES", "2")
+    runtime_default("ABSTRACT_SCORING_WALL_TIMEOUT_SEC", "180")
+    runtime_default("ABSTRACT_SCORING_MAX_WORKERS", "6")
+    runtime_default("ABSTRACT_SCORING_WORKER_CAP", "6")
+    runtime_default("ABSTRACT_SCORING_TIMEOUT_SEC", "180")
+    runtime_default("OMITTED_ITEM_RETRY_ATTEMPTS", "2")
+    runtime_default("LARGE_TITLE_POOL_THRESHOLD", "800")
+if os.environ.get("DISABLE_LLM_TITLE_FILTER", "0").lower() in {{"1", "true", "yes", "on"}}:
+    runtime_tuning["USE_LLM_TITLE_FILTER"] = "0"
+elif os.environ.get("FORCE_LLM_TITLE_FILTER", "0").lower() in {{"1", "true", "yes", "on"}}:
+    runtime_tuning["USE_LLM_TITLE_FILTER"] = "1"
+elif deep_survey:
+    runtime_default("USE_LLM_TITLE_FILTER", "1")
 
 year = date.today().year
 venue_ids = list(source_selection.get("venue_ids") or [])
@@ -201,32 +305,158 @@ for item in source_selection.get("years") or [year]:
         pass
 if not years:
     years = [year]
-result = run_find(
-    FindRequest(
-        config=app_cfg,
-        selection=VenueSelection(
-            venue_ids=venue_ids,
-            years=years,
-            include_arxiv=include_arxiv,
-            include_huggingface=include_huggingface,
-            include_github=include_github,
-        ),
-    ),
-    log=lambda msg: print(str(msg), flush=True),
-)
-run_id = result["run_id"]
 
-directory = run_dir(run_id)
+project_interest = str(finding_cfg.get("research_interest") or cfg.get("research_interest") or cfg.get("user_prompt") or research_goal).strip()
+project_profile = str(finding_cfg.get("researcher_profile") or cfg.get("researcher_profile") or "").strip()
+if project_profile:
+    researcher_profile = (project_profile + "\n\n" + feedback_profile)[:18000]
+else:
+    researcher_profile = feedback_profile
+
+config_payload = {{
+    "research_topic": configured_topic,
+    "research_interest": project_interest or configured_topic,
+    "researcher_profile": researcher_profile,
+    "provider": provider,
+    "base_url": api_base,
+    "api_key": "",
+    "model": model,
+    "temperature": float(os.environ.get("LLM_TEMPERATURE") or llm.get("temperature") or local_llm.get("temperature", 0.2) or 0.2),
+    "max_fetch_papers": max_fetch_count,
+    "max_recommended_papers": max_papers,
+    "max_ideas": max_ideas,
+    "venue_title_scan_limit": venue_scan_limit,
+    "find_recall_count": find_recall_count,
+    "detail_fetch_count": detail_fetch_count,
+    "arxiv_max_queries": arxiv_max_queries,
+    "arxiv_per_query_limit": arxiv_per_query_limit,
+    "arxiv_timeout_sec": arxiv_timeout_sec,
+    "arxiv_llm_candidate_limit": arxiv_candidate_limit,
+    "arxiv_llm_candidates_per_category": arxiv_per_category,
+    "biorxiv_llm_candidate_limit": biorxiv_candidate_limit,
+    "biorxiv_llm_candidates_per_category": biorxiv_per_category,
+    "llm_concurrency": env_int("LLM_CONCURRENCY", config_positive_int("llm_concurrency", 4 if fast_mode else 8 if deep_survey else 6)),
+    "idea_parallel_workers": env_int("IDEA_WORKERS", config_positive_int("idea_parallel_workers", 2 if deep_survey else 1)),
+    "abstract_scoring_max_workers": abstract_scoring_max_workers,
+    "abstract_scoring_batch_size": abstract_scoring_batch_size,
+    "abstract_scoring_timeout_sec": abstract_scoring_timeout_sec,
+    "arxiv_categories": literature_cfg.get("arxiv_categories") if isinstance(literature_cfg.get("arxiv_categories"), list) else ["cs.IR", "cs.LG", "cs.AI"],
+    "arxiv_queries": topic_queries,
+    "github_languages": literature_cfg.get("github_languages") if isinstance(literature_cfg.get("github_languages"), list) else ["python", "all"],
+    "github_since": str(literature_cfg.get("github_since") or "monthly"),
+    "arxiv_start_date": str(literature_cfg.get("arxiv_start_date") or (date.today() - timedelta(days=arxiv_window_days)).isoformat()),
+    "arxiv_end_date": str(literature_cfg.get("arxiv_end_date") or date.today().isoformat()),
+    "biorxiv_categories": literature_cfg.get("biorxiv_categories") if isinstance(literature_cfg.get("biorxiv_categories"), list) else ["bioinformatics"],
+    "biorxiv_start_date": str(literature_cfg.get("biorxiv_start_date") or ""),
+    "biorxiv_end_date": str(literature_cfg.get("biorxiv_end_date") or ""),
+    "nature_journals": literature_cfg.get("nature_journals") if isinstance(literature_cfg.get("nature_journals"), list) else ["nature", "natmachintell", "natcomputsci", "nmeth", "ncomms"],
+    "nature_article_types": literature_cfg.get("nature_article_types") if isinstance(literature_cfg.get("nature_article_types"), list) else ["article"],
+    "nature_start_date": str(literature_cfg.get("nature_start_date") or ""),
+    "nature_end_date": str(literature_cfg.get("nature_end_date") or ""),
+    "nature_candidate_limit": nature_candidate_limit,
+    "science_journals": literature_cfg.get("science_journals") if isinstance(literature_cfg.get("science_journals"), list) else ["science", "sciadv"],
+    "science_article_types": literature_cfg.get("science_article_types") if isinstance(literature_cfg.get("science_article_types"), list) else ["Research Article"],
+    "science_start_date": str(literature_cfg.get("science_start_date") or ""),
+    "science_end_date": str(literature_cfg.get("science_end_date") or ""),
+    "science_candidate_limit": science_candidate_limit,
+    "runtime_tuning": runtime_tuning,
+}}
+selection_payload = dict(source_selection)
+selection_payload.update({{
+    "venue_ids": venue_ids,
+    "years": years,
+    "venue_years": [
+        pair for pair in source_selection.get("venue_years", [])
+        if isinstance(pair, dict) and str(pair.get("venue_id") or "") in set(venue_ids)
+    ] if venue_ids else [],
+    "include_arxiv": bool(include_arxiv),
+    "include_huggingface": bool(include_huggingface),
+    "include_github": bool(include_github),
+    "include_biorxiv": bool(source_selection.get("include_biorxiv")),
+    "include_nature": bool(source_selection.get("include_nature")),
+    "include_science": bool(source_selection.get("include_science")),
+}})
+if venue_ids and not selection_payload.get("venue_years"):
+    selection_payload["venue_years"] = [
+        {{"venue_id": venue_id, "year": int(year_value)}}
+        for venue_id in venue_ids
+        for year_value in years
+    ]
+
+config_path = input_dir / "config.json"
+selection_path = input_dir / "selection.json"
+config_path.write_text(json.dumps(config_payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+selection_path.write_text(json.dumps(selection_payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+def _extract_json_tail(text):
+    for index in range(len(text) - 1, -1, -1):
+        if text[index] != "{{":
+            continue
+        candidate = text[index:].strip()
+        try:
+            return json.loads(candidate)
+        except Exception:
+            continue
+    return {{}}
+
+find_cmd = [
+    sys.executable,
+    str(finding_entrypoint),
+    "--action",
+    "find",
+    "--config-json",
+    str(config_path),
+    "--selection-json",
+    str(selection_path),
+]
+print("[framework] Finding public CLI input: " + str(config_path) + " / " + str(selection_path), flush=True)
+proc = subprocess.Popen(find_cmd, cwd=str(root), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1)
+find_output = []
+assert proc.stdout is not None
+for line in proc.stdout:
+    find_output.append(line)
+    print(line, end="", flush=True)
+returncode = proc.wait()
+combined_output = "".join(find_output)
+if returncode != 0:
+    raise SystemExit(returncode)
+cli_payload = _extract_json_tail(combined_output)
+run_id = str(cli_payload.get("run_id") or "")
+run_dir_text = str(cli_payload.get("run_dir") or "")
+if not run_id or not run_dir_text:
+    raise RuntimeError("Finding CLI did not return run_id/run_dir")
+directory = Path(run_dir_text)
+if not directory.is_absolute():
+    directory = finding_module / directory
+if not (directory / "find_results.json").exists():
+    raise RuntimeError("Finding CLI completed but find_results.json is missing: " + str(directory))
+result = json.loads((directory / "find_results.json").read_text(encoding="utf-8"))
 out_dir = internal_output_dir if internal_output_dir is not None else paths.planning / "finding"
 out_dir.mkdir(parents=True, exist_ok=True)
-for name in ["article.md", "source_status.md", "hf.md", "github.md"]:
-    source = directory / name
-    if source.exists():
-        shutil.copyfile(source, out_dir / name)
-for name in ["find_results.json", "find_progress.json", "manifest.json", "selection.json", "venue_health_report.json", "category_scan_report.json", "title_filter_report.json", "arxiv_raw.json", "arxiv_prefiltered.json"]:
-    source = directory / name
-    if source.exists():
-        shutil.copyfile(source, out_dir / name)
+
+STANDARD_FIND_ARTIFACTS = [
+    "find.md", "source_status.md", "hf.md", "github.md",
+    "find_results.json", "find_progress.json", "manifest.json", "selection.json",
+    "venue_health_report.json", "category_scan_report.json", "title_filter_report.json",
+    "arxiv_raw.json", "arxiv_prefiltered.json", "biorxiv.md", "biorxiv_raw.json",
+    "biorxiv_prefiltered.json", "nature.md", "nature_raw.json", "nature_prefiltered.json",
+    "science.md", "science_raw.json", "science_prefiltered.json",
+]
+
+def _copy_find_artifacts(target_dir):
+    copied = []
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for name in STANDARD_FIND_ARTIFACTS:
+        source = directory / name
+        if source.exists():
+            shutil.copyfile(source, target_dir / name)
+            copied.append(name)
+    return copied
+
+if publish_outputs:
+    adopt_taste_find_run(paths, {{"taste_run_id": run_id, "taste_run_dir": str(directory)}}, run_id)
+else:
+    _copy_find_artifacts(out_dir)
 
 def _safe_int(value, default=0):
     try:
@@ -264,7 +494,7 @@ def _survey_stats_from_find(find_result):
         "llm_scored_candidates": llm_scored or len(evaluated),
         "full_venue_corpus_audit": bool(raw_count),
         "llm_scoring_policy": "Full venue corpus is audited; category/title-screened candidates are batch-scored by LLM for efficiency.",
-        "venue_read_candidates": len(find_result.get("read_candidates", [])) if isinstance(find_result, dict) else 0,
+        "venue_read_candidates": len(find_result.get("strong_recommendations", []) or find_result.get("articles", [])) if isinstance(find_result, dict) else 0,
         "strong_recommendations": len(find_result.get("strong_recommendations", []) or find_result.get("articles", [])) if isinstance(find_result, dict) else 0,
         "category_scan_reports": len(category_scan_rows),
         "title_filter_reports": len(title_filter_rows),
@@ -279,7 +509,7 @@ def _write_frontend_state(stage, find_result, read_result=None, idea_result=None
     stats = _survey_stats_from_find(find_result)
     payload = {{
         "project": project,
-        "repo_root": str(ROOT),
+        "repo_root": str(root),
         "taste_run_id": run_id,
         "taste_run_dir": str(directory),
         "output_dir": str(out_dir),
@@ -316,9 +546,7 @@ def _write_frontend_state(stage, find_result, read_result=None, idea_result=None
             "arxiv_window_days": arxiv_window_days,
         }},
         "counts": {{
-            "articles": len(find_result.get("articles", [])) if isinstance(find_result, dict) else 0,
             "strong_recommendations": len(find_result.get("strong_recommendations", []) or find_result.get("articles", [])) if isinstance(find_result, dict) else 0,
-            "read_candidates": len(find_result.get("read_candidates", [])) if isinstance(find_result, dict) else 0,
             "evaluated_candidates": len(find_result.get("evaluated_candidates", [])) if isinstance(find_result, dict) else 0,
             "huggingface": len(find_result.get("huggingface", [])) if isinstance(find_result, dict) else 0,
             "github": len(find_result.get("github", [])) if isinstance(find_result, dict) else 0,
@@ -330,7 +558,7 @@ def _write_frontend_state(stage, find_result, read_result=None, idea_result=None
     state_path = paths.state / "finding_frontend.json" if publish_outputs else out_dir / "finding_frontend.json"
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    summary = ["# native Frontend\n\n"]
+    summary = ["# Find Frontend\n\n"]
     for key in ["taste_run_id", "stage", "provider", "api_mode", "model", "output_dir"]:
         summary.append("- " + key + ": " + str(payload.get(key, "")) + "\n")
     if extra_queries:
@@ -420,9 +648,8 @@ def _load_backup_articles(limit):
             break
     return unique
 
-if not result.get("articles") and not (
-    result.get("read_candidates")
-    or result.get("screened_ranking")
+if not result.get("strong_recommendations") and not result.get("articles") and not (
+    result.get("screened_ranking")
     or result.get("evaluated_candidates")
     or result.get("title_candidates")
     or result.get("retrieval_candidates")
@@ -430,42 +657,35 @@ if not result.get("articles") and not (
     if os.environ.get("ALLOW_STALE_CACHE_RECOVERY", "0").lower() in {{"1", "true", "yes", "on"}}:
         backup_articles = _load_backup_articles(max_papers)
         if backup_articles:
-            print(f"Live sources produced no articles; recovered {{len(backup_articles)}} articles from TASTE cache", flush=True)
-            result["articles"] = backup_articles
+            print(f"Live sources produced no recommendations; recovered {{len(backup_articles)}} recommendations from TASTE cache", flush=True)
+            result["strong_recommendations"] = backup_articles
             result.setdefault("source_status", []).append({{"source": "cache_recovery", "ok": True, "limited": True, "count": len(backup_articles), "message": "Recovered articles from TASTE cache because live sources were empty or rate-limited."}})
-            directory = run_dir(run_id)
             (directory / "find_results.json").write_text(json.dumps(result, indent=2, ensure_ascii=False) + chr(10), encoding="utf-8")
-            (directory / "article.md").write_text(paper_markdown(backup_articles, "Recommended Articles"), encoding="utf-8")
+            article_lines = ["# Recommended Articles", ""]
+            for index, item in enumerate(backup_articles, 1):
+                article_lines.extend([
+                    f"## {{index}}. {{item.get('title', 'Untitled')}}",
+                    "",
+                    f"- Source: {{item.get('source', '')}}",
+                    f"- Venue: {{item.get('venue', '')}}",
+                    f"- URL: {{item.get('url', '')}}",
+                    "",
+                    str(item.get("abstract") or item.get("reason") or "").strip(),
+                    "",
+                ])
+            recovered_article = chr(10).join(article_lines)
+            (directory / "find.md").write_text(recovered_article, encoding="utf-8")
             status_lines = ["# Source Status", "", "## cache_recovery", "", f"- **Status**: ok", f"- **Count**: {{len(backup_articles)}}", "- **Message**: Recovered articles from TASTE cache because live sources were empty or rate-limited.", ""]
             (directory / "source_status.md").write_text(chr(10).join(status_lines), encoding="utf-8")
     else:
         raise RuntimeError("Fresh Find produced no usable candidates; stale TASTE cache recovery is disabled. Fix sources/scoring before continuing.")
-read = run_read(ReadRequest(run_id=run_id, max_papers=max_papers), app_cfg, log=lambda msg: print(str(msg), flush=True))
-for name in ["read.md", "read_results.json"]:
-    source = directory / name
-    if source.exists():
-        shutil.copyfile(source, out_dir / name)
-_write_frontend_state("read_completed", result, read_result=read)
-idea = run_idea(IdeaRequest(run_id=run_id, max_ideas=max_ideas, parallel_workers=2), app_cfg, log=lambda msg: print(str(msg), flush=True))
-for item in idea.get("ideas", [])[:max_ideas]:
-    patch_idea(run_id, item["id"], IdeaPatch(status="approved"))
-for name in ["idea.md", "ideas.json"]:
-    source = directory / name
-    if source.exists():
-        shutil.copyfile(source, out_dir / name)
-_write_frontend_state("idea_completed", result, read_result=read, idea_result=idea)
-plan = run_plan(PlanRequest(run_id=run_id, idea_ids=[item["id"] for item in idea.get("ideas", [])[:max_ideas]], repair_rounds=repair_rounds), app_cfg, log=lambda msg: print(str(msg), flush=True))
 
-for name in ["article.md", "read.md", "idea.md", "plan.md", "source_status.md", "hf.md", "github.md"]:
-    source = directory / name
-    if source.exists():
-        shutil.copyfile(source, out_dir / name)
-for name in ["find_results.json", "find_progress.json", "read_results.json", "ideas.json", "plans.json", "manifest.json", "selection.json", "venue_health_report.json", "category_scan_report.json", "title_filter_report.json", "arxiv_raw.json", "arxiv_prefiltered.json"]:
-    source = directory / name
-    if source.exists():
-        shutil.copyfile(source, out_dir / name)
+if publish_outputs:
+    adopt_taste_find_run(paths, {{"taste_run_id": run_id, "taste_run_dir": str(directory)}}, run_id)
+else:
+    _copy_find_artifacts(out_dir)
 
-payload = _write_frontend_state("plan_completed", result, read_result=read, idea_result=idea, plan_result=plan)
+payload = _write_frontend_state("find_completed", result)
 print(json.dumps(payload, ensure_ascii=False))
 '''
 
@@ -620,7 +840,7 @@ def merge_extra_queries(args: argparse.Namespace) -> list[str]:
     return merged
 
 
-def write_driver(path: Path, project: str, max_papers: int, max_ideas: int, repair_rounds: int, include_arxiv: bool, include_huggingface: bool, include_github: bool, use_venues: bool, source_selection: dict[str, Any]) -> None:
+def write_driver(path: Path, project: str, max_papers: int, max_ideas: int, repair_rounds: int, include_arxiv: bool, include_huggingface: bool, include_github: bool, use_venues: bool, source_selection: dict[str, Any], *, deep_survey: bool = False, fast_mode: bool = False) -> None:
     code = DRIVER_TEMPLATE.format(
         root_json=json.dumps(str(ROOT)),
         taste_root_json=json.dumps(str(ROOT)),
@@ -635,6 +855,8 @@ def write_driver(path: Path, project: str, max_papers: int, max_ideas: int, repa
         source_selection_json=repr(source_selection),
         api_mode_json=json.dumps(os.environ.get("LLM_API_MODE", "chat_completions")),
         core_venue_ids_json=json.dumps(DEFAULT_CORE_VENUE_IDS),
+        deep_survey=bool(deep_survey),
+        fast_mode=bool(fast_mode),
     )
     path.write_text(code, encoding="utf-8")
 
@@ -644,6 +866,9 @@ def redact(text: str) -> str:
         value = os.environ.get(key, "")
         if value:
             text = text.replace(value, "<redacted>")
+    local_key = str(_load_local_llm_config().get("api_key") or "")
+    if local_key:
+        text = text.replace(local_key, "<redacted>")
     return text
 
 
@@ -682,11 +907,11 @@ def _taste_signature(args: argparse.Namespace, extra_queries: list[str]) -> dict
     llm = cfg.get("llm", {}) if isinstance(cfg.get("llm", {}), dict) else {}
     literature_cfg = cfg.get("literature", {}) if isinstance(cfg.get("literature", {}), dict) else {}
     deep = bool(args.deep_survey)
-    wide = bool(args.wide_survey) or os.environ.get("WIDE_SURVEY", "0").lower() in {"1", "true", "yes", "on"}
+    wide = bool(args.wide_survey)
     selection = _effective_source_selection(args)
     venues = list(selection.get("venue_ids") or [])
     years = [int(item) for item in selection.get("years") or [dt.date.today().year]]
-    window_days = _env_int("WINDOW_DAYS", int(literature_cfg.get("secondary_window_days", 120) or 120) if deep else int(literature_cfg.get("primary_window_days", 90) or 90))
+    window_days = _env_int("WINDOW_DAYS", 180 if deep else int(literature_cfg.get("primary_window_days", 90) or 90))
     topic_queries: list[str] = []
     for item in cfg.get("queries", []) or []:
         if isinstance(item, str) and item.strip():
@@ -694,11 +919,12 @@ def _taste_signature(args: argparse.Namespace, extra_queries: list[str]) -> dict
     for item in extra_queries:
         if item and item not in topic_queries:
             topic_queries.append(item)
+    local_llm = _load_local_llm_config()
     api_key_env = os.environ.get("LLM_API_KEY_ENV") or llm.get("api_key_env") or "OPENAI_API_KEY"
-    api_key = (os.environ.get(api_key_env, "") if api_key_env else "") or os.environ.get("LLM_API_KEY", "") or llm.get("api_key", "")
-    api_base = os.environ.get("LLM_API_BASE") or llm.get("api_base") or ""
-    model = os.environ.get("LLM_MODEL") or llm.get("model") or "mock-model"
-    provider = os.environ.get("LLM_PROVIDER") or llm.get("provider") or "mock"
+    api_key = (os.environ.get(api_key_env, "") if api_key_env else "") or os.environ.get("LLM_API_KEY", "") or str(local_llm.get("api_key") or "")
+    api_base = os.environ.get("LLM_API_BASE") or llm.get("api_base") or local_llm.get("base_url") or ""
+    model = os.environ.get("LLM_MODEL") or llm.get("model") or local_llm.get("model") or "mock-model"
+    provider = os.environ.get("LLM_PROVIDER") or llm.get("provider") or local_llm.get("provider") or "mock"
     payload = {
         "schema": 1,
         "scoring_policy_version": "quality_bonus_v4_selective_venue",
@@ -741,10 +967,11 @@ def _copy_cached_taste_outputs(project: str, run_dir_path: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     copied: list[str] = []
     for name in [
-        "article.md", "read.md", "idea.md", "plan.md", "source_status.md", "hf.md", "github.md",
-        "find_results.json", "read_results.json", "ideas.json", "plans.json", "manifest.json",
+        "find.md", "source_status.md", "hf.md", "github.md",
+        "find_results.json", "find_progress.json", "manifest.json", "selection.json",
         "venue_health_report.json", "category_scan_report.json", "title_filter_report.json",
-        "arxiv_raw.json", "arxiv_prefiltered.json",
+        "arxiv_raw.json", "arxiv_prefiltered.json", "biorxiv_raw.json", "biorxiv_prefiltered.json",
+        "nature_raw.json", "nature_prefiltered.json", "science_raw.json", "science_prefiltered.json",
     ]:
         source = run_dir_path / name
         if source.exists():
@@ -754,6 +981,8 @@ def _copy_cached_taste_outputs(project: str, run_dir_path: Path) -> dict:
 
 
 def maybe_reuse_taste_run(args: argparse.Namespace, extra_queries: list[str]) -> dict | None:
+    if os.environ.get("ALLOW_FIND_RUN_REUSE", "0").lower() not in {"1", "true", "yes", "on"}:
+        return None
     if os.environ.get("FORCE_REFRESH", "0").lower() in {"1", "true", "yes", "on"}:
         return None
     paths = build_paths(args.project)
@@ -775,7 +1004,7 @@ def maybe_reuse_taste_run(args: argparse.Namespace, extra_queries: list[str]) ->
             age_ok = (dt.datetime.now(dt.timezone.utc) - created).total_seconds() <= reuse_ttl_hours * 3600
         except Exception:
             age_ok = False
-    required = ["find_results.json", "article.md", "read_results.json", "read.md"]
+    required = ["find_results.json", "find.md"]
     if (
         state.get("signature") == expected.get("signature")
         and age_ok
@@ -796,7 +1025,7 @@ def maybe_reuse_taste_run(args: argparse.Namespace, extra_queries: list[str]) ->
         }
         (paths.state / "finding_frontend.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         (paths.planning / "finding_frontend.md").write_text(
-            "# native Frontend\n\n"
+            "# Find Frontend\n\n"
             "- status: reused\n"
             f"- taste_run_id: {payload['taste_run_id']}\n"
             f"- taste_run_dir: {payload['taste_run_dir']}\n"
@@ -818,7 +1047,7 @@ def save_taste_reuse_signature(project: str, run_id: str, run_dir_path: Path, ar
         "run_id": run_id,
         "run_dir": str(run_dir_path),
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-        "required_files": ["find_results.json", "article.md", "read_results.json", "read.md"],
+        "required_files": ["find_results.json", "find.md"],
     }
     (paths.state / "taste_reuse_signature.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
@@ -826,7 +1055,8 @@ def save_taste_reuse_signature(project: str, run_id: str, run_dir_path: Path, ar
 
 
 def latest_taste_run_hint() -> dict:
-    runs = sorted((ROOT / "runtime" / "runs").glob("find_*"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+    runtime_root = Path(os.environ.get("FINDING_RUNTIME_DIR") or ROOT / "modules" / "finding" / ".runtime").expanduser()
+    runs = sorted((runtime_root / "runs").glob("find_*"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
     if not runs:
         return {}
     latest = runs[0]
@@ -837,121 +1067,49 @@ def latest_taste_run_hint() -> dict:
 
 
 
-def write_missing_downstream_fallback_outputs(project: str, reason: str, log_path: Path, max_ideas: int) -> dict:
-    import datetime as dt
+def write_find_timeout_state(
+    project: str,
+    *,
+    status: str,
+    reason: str,
+    log_path: Path,
+    timeout_sec: int,
+    elapsed_sec: float,
+    run_dir: Path | None = None,
+    output_dir: Path | None = None,
+) -> dict:
     paths = build_paths(project)
-    out_dir = paths.planning / "finding"
+    out_dir = output_dir or paths.planning / "finding"
     out_dir.mkdir(parents=True, exist_ok=True)
-    ideas = []
-    for index in range(max(1, max_ideas)):
-        ideas.append({
-            "id": f"idea-{index + 1:03d}",
-            "title": "Downstream TASTE ideation blocked after real Find output",
-            "hypothesis": "TASTE discovered real literature signals, but Read/Idea/Plan did not complete before timeout; do not accept fallback ideas as scientific proposals.",
-            "min_experiment": "Repair Responses API compatibility or run a shorter downstream-only TASTE pass, then regenerate ideas from the real Find output.",
-            "novelty": "UNASSESSED",
-            "feasibility": "BLOCKED_BY_LLM_OR_TIMEOUT",
-            "score": 0,
-            "status": "pending",
-            "inspired_by": [],
-        })
-    plans = [{
-        "plan_id": "plan-idea-001",
-        "idea_id": "idea-001",
-        "title": ideas[0]["title"],
-        "hypothesis": ideas[0]["hypothesis"],
-        "completed": False,
-        "completed_at": "",
-        "versions": [{
-            "version_id": "v1",
-            "initial_plan": {"experimental_design": "Use real Find outputs after LLM/API repair.", "feasibility": "Operational fallback only.", "steps": ["Inspect real article.md/find_results.json.", "Fix Responses API or approved backend.", "Rerun Read/Idea/Plan."]},
-            "evaluation_rounds": [],
-            "final_plan": {"experimental_design": "Use real Find outputs after LLM/API repair.", "feasibility": "Operational fallback only.", "steps": ["Inspect real article.md/find_results.json.", "Fix Responses API or approved backend.", "Rerun Read/Idea/Plan."], "risks": ["Fallback idea is not scientific evidence."], "metrics": ["Non-fallback ideas_synced > 0", "LLM live_ok=True"]},
-            "llm": {"api_mode": "chat_completions", "enabled": False, "reason": reason},
-        }],
-    }]
-    (out_dir / "ideas.json").write_text(json.dumps({"run_id": "taste_downstream_recoverable_fallback", "ideas": ideas, "candidate_pool": [], "judge_scores": [], "llm": {"api_mode": "chat_completions", "enabled": False, "reason": reason}}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    (out_dir / "plans.json").write_text(json.dumps({"run_id": "taste_downstream_recoverable_fallback", "plans": plans}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    if not (out_dir / "read.md").exists():
-        (out_dir / "read.md").write_text("# Paper Readings\n\nFallback only: Find completed, but downstream reading did not finish.\n", encoding="utf-8")
-    (out_dir / "idea.md").write_text("# Research Ideas\n\nFallback only: rerun downstream TASTE after LLM/API repair.\n", encoding="utf-8")
-    (out_dir / "plan.md").write_text("# Research Plans\n\nFallback downstream repair plan only.\n", encoding="utf-8")
-    return {"output_dir": str(out_dir), "counts": {"ideas": len(ideas), "plans": len(plans)}, "status": "downstream_recoverable_fallback", "reason": reason}
-
-
-def write_minimal_fallback_outputs(project: str, reason: str, log_path: Path, max_papers: int, max_ideas: int) -> dict:
-    import datetime as dt
-    paths = build_paths(project)
-    cfg = __import__('project_paths').load_project_config(project)
-    out_dir = paths.planning / "finding"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    now = dt.datetime.now(dt.timezone.utc)
-    topic = str(cfg.get("topic", "research"))
-    queries = cfg.get("queries", []) or [topic]
-    articles = []
-    for index, query in enumerate(queries[: max(1, max_papers)], 1):
-        articles.append({
-            "id": f"taste-fallback-{index:03d}",
-            "source": "taste_recoverable_fallback",
-            "title": f"Recoverable TASTE research signal for {query}",
-            "abstract": "TASTE could not complete external discovery or LLM scoring inside the current budget. This placeholder records the exact research query so TASTE can continue discovery through ordinary arXiv/GitHub/Semantic Scholar modules without fabricating paper evidence.",
-            "url": "",
-            "pdf_url": "",
-            "venue": "recoverable-fallback",
-            "year": now.year,
-            "category": "cs.IR",
-            "reason": reason,
-            "score": 0,
-            "fit_score": 0,
-            "diversity_score": 0,
-            "classification_source": "fallback",
-        })
-    ideas = []
-    for index in range(max(1, max_ideas)):
-        ideas.append({
-            "id": f"idea-{index + 1:03d}",
-            "title": "Recover TASTE discovery before scientific ideation",
-            "hypothesis": "No scientific idea should be accepted from this fallback alone; repair LLM/network/source access, then rerun TASTE to obtain evidence-backed ideas.",
-            "min_experiment": "Run TASTE with Responses API live_ok=True and at least one real paper/repo signal, then evaluate idea novelty and feasibility.",
-            "novelty": "UNASSESSED",
-            "feasibility": "BLOCKED_BY_LLM_OR_SOURCE",
-            "score": 0,
-            "status": "pending",
-            "inspired_by": [],
-        })
-    plans = [{
-        "plan_id": "plan-idea-001",
-        "idea_id": "idea-001",
-        "title": ideas[0]["title"],
-        "hypothesis": ideas[0]["hypothesis"],
-        "completed": False,
-        "completed_at": "",
-        "versions": [{
-            "version_id": "v1",
-            "initial_plan": {"experimental_design": "Repair TASTE/LLM connectivity before scientific execution.", "feasibility": "Operational fallback only.", "steps": ["Verify Responses API live call.", "Run TASTE arXiv-first discovery.", "Sync outputs into research state."]},
-            "evaluation_rounds": [],
-            "final_plan": {"experimental_design": "Repair TASTE/LLM connectivity before scientific execution.", "feasibility": "Operational fallback only.", "steps": ["Verify Responses API live call.", "Run TASTE arXiv-first discovery.", "Sync outputs into research state."], "risks": ["Not scientific evidence."], "metrics": ["TASTE papers_synced > 0", "LLM live_ok=True"]},
-            "llm": {"api_mode": "chat_completions", "enabled": False, "reason": reason},
-        }],
-    }]
     payload = {
-        "run_id": "taste_recoverable_fallback",
-        "created_at": now.isoformat(),
-        "articles": articles,
-        "huggingface": [],
-        "github": [],
-        "source_status": [{"source": "taste", "ok": False, "limited": True, "count": len(articles), "message": reason}],
-        "guardrail": "Fallback outputs keep the workflow connected but are not scientific evidence and must not support paper claims.",
+        "project": project,
+        "status": status,
+        "stage": status,
+        "timeout_sec": timeout_sec,
+        "elapsed_sec": round(elapsed_sec, 3),
+        "reason": reason,
+        "log_path": str(log_path),
+        "taste_run_dir": str(run_dir) if run_dir else "",
+        "output_dir": str(out_dir),
+        "guardrail": "Find timeout records must not create fallback papers, readings, ideas, or plans. Rerun Find or rebuild downstream via reading --action current_find_research_plan only after real Find artifacts exist.",
     }
-    (out_dir / "find_results.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    (out_dir / "ideas.json").write_text(json.dumps({"run_id": payload["run_id"], "ideas": ideas, "candidate_pool": [], "judge_scores": [], "llm": {"api_mode": "chat_completions", "enabled": False, "reason": reason}}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    (out_dir / "plans.json").write_text(json.dumps({"run_id": payload["run_id"], "plans": plans}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    (out_dir / "article.md").write_text("# Recommended Articles\n\n" + "\n".join(f"## {{i+1}}. {{item['title']}}\n\n{{item['abstract']}}\n" for i, item in enumerate(articles)), encoding="utf-8")
-    (out_dir / "read.md").write_text("# Paper Readings\n\nFallback only: no paper was read because TASTE did not complete.\n", encoding="utf-8")
-    (out_dir / "idea.md").write_text("# Research Ideas\n\nFallback only: rerun TASTE after LLM/source repair.\n", encoding="utf-8")
-    (out_dir / "plan.md").write_text("# Research Plans\n\nFallback operational repair plan only.\n", encoding="utf-8")
-    (out_dir / "source_status.md").write_text(f"# Source Status\n\n- status: recoverable_fallback\n- reason: {reason}\n- log_path: {log_path}\n", encoding="utf-8")
-    return {"output_dir": str(out_dir), "counts": {"articles": len(articles), "ideas": len(ideas), "plans": len(plans)}, "status": "recoverable_fallback", "reason": reason}
+    state_path = paths.state / "finding_frontend.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    md_lines = [
+        "# Find Frontend",
+        "",
+        f"- status: {status}",
+        f"- timeout_sec: {timeout_sec}",
+        f"- elapsed_sec: {elapsed_sec:.3f}",
+        f"- output_dir: {out_dir}",
+        f"- log_path: {log_path}",
+        "",
+        "No fallback scientific artifacts were generated. Use real `find_results.json` plus `reading --action current_find_research_plan` before downstream stages.",
+    ]
+    (paths.planning / "finding_frontend.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+    (out_dir / "finding_frontend_timeout.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return payload
 
 def write_timeout_state(project: str, timeout_sec: int, elapsed_sec: float, log_path: Path) -> None:
     paths = build_paths(project)
@@ -961,21 +1119,21 @@ def write_timeout_state(project: str, timeout_sec: int, elapsed_sec: float, log_
         "timeout_sec": timeout_sec,
         "elapsed_sec": round(elapsed_sec, 3),
         "log_path": str(log_path),
-        "recommendation": "Retry with --fast-mode, smaller --max-papers/--max-ideas, or disabled slow external sources; The workflow should continue with ordinary discovery and existing memory.",
+        "recommendation": "Retry Find with narrower budgets or repair source/LLM access. Do not synthesize fallback papers, ideas, or plans.",
         "partial_run_hint": latest_taste_run_hint(),
     }
     (paths.state / "finding_frontend.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     (paths.planning / "finding_frontend.md").write_text(
-        "# native Frontend\n\n"
+        "# Find Frontend\n\n"
         "- status: timeout\n"
         f"- timeout_sec: {timeout_sec}\n"
         f"- elapsed_sec: {elapsed_sec:.3f}\n"
-        "\nTASTE did not finish inside the configured budget. The research loop must not block on this; use existing discovery artifacts, then retry TASTE in fast mode or with narrower feedback.\n",
+        "\nFind did not finish inside the configured budget. Do not create fallback literature artifacts; retry with narrower feedback or repair the failing source/LLM path.\n",
         encoding="utf-8",
     )
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run vendored Find->Read->Idea->Plan inside The workflow and sync artifacts into the project.")
+    parser = argparse.ArgumentParser(description="Run the configured Find route and sync real Find artifacts into the project.")
     parser.add_argument("--project", required=True)
     parser.add_argument("--env-name", default=DEFAULT_ENV)
     parser.add_argument("--max-papers", type=int, default=20)
@@ -991,7 +1149,7 @@ def main() -> int:
     parser.add_argument("--wide-survey", action="store_true", help="Allow broader venue/year scope. Default follows the project canonical source selection.")
     parser.add_argument("--query", action="append", default=[], help="Targeted query supplied by project agent; appended to project literature queries.")
     parser.add_argument("--focus-file", default="", help="Optional JSON/Markdown/TXT file with targeted queries or paper titles.")
-    parser.add_argument("--internal-output-dir", default="", help="Run Find->Read->Idea->Plan into this internal directory without publishing to the web-facing project artifacts.")
+    parser.add_argument("--internal-output-dir", default="", help="Run Find into this internal directory without publishing to the web-facing project artifacts.")
     args = parser.parse_args()
     if os.environ.get("DISABLE_NEW_FIND", "0").lower() in {"1", "true", "yes", "on"}:
         paths = build_paths(args.project)
@@ -1012,7 +1170,7 @@ def main() -> int:
             payload["existing_find_error"] = str(exc)[:300]
         (paths.state / "finding_frontend.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         (paths.planning / "finding_frontend.md").write_text(
-            "# native Frontend\n\n"
+            "# Find Frontend\n\n"
             "- status: existing_find_reused_record_only\n"
             f"- existing_find_results: {existing_find}\n"
             "- guardrail: existing-literature mode was explicitly requested; no TASTE run was launched by this invocation.\n",
@@ -1024,48 +1182,14 @@ def main() -> int:
     internal_output_dir = Path(args.internal_output_dir).expanduser() if str(args.internal_output_dir or "").strip() else None
     if internal_output_dir is not None:
         internal_output_dir.mkdir(parents=True, exist_ok=True)
-        os.environ.setdefault("FORCE_REFRESH", "1")
-    if args.wide_survey:
-        os.environ.setdefault("WIDE_SURVEY", "1")
 
     if args.deep_survey:
-        os.environ.setdefault("DEEP_SURVEY", "1")
-        os.environ.setdefault("ARXIV_FULL_SCAN", "1")
-        os.environ.setdefault("ARXIV_MAX_QUERIES", "3")
-        os.environ.setdefault("ARXIV_PER_QUERY_LIMIT", "100")
-        os.environ.setdefault("ARXIV_TIMEOUT_SEC", "45")
-        os.environ.setdefault("WINDOW_DAYS", "180")
-        os.environ.setdefault("VENUE_TITLE_SCAN_LIMIT", "12000")
-        os.environ.setdefault("FIND_RECALL_COUNT", "3000")
-        os.environ.setdefault("DETAIL_FETCH_COUNT", "800")
-        os.environ.setdefault("MIN_TITLE_CANDIDATES", "240")
-        os.environ.setdefault("MIN_DETAIL_CANDIDATES", "80")
-        os.environ.setdefault("ABSTRACT_SCORING_BATCH_SIZE", "10")
-        os.environ.setdefault("ABSTRACT_SCORING_MAX_BATCH_SIZE", "10")
-        os.environ.setdefault("ABSTRACT_SCORING_MAX_TOKENS", "12000")
-        os.environ.setdefault("SINGLE_ABSTRACT_SCORING_MAX_TOKENS", "3000")
-        os.environ.setdefault("ABSTRACT_SCORING_LLM_RETRIES", "2")
-        os.environ.setdefault("ABSTRACT_SCORING_WALL_TIMEOUT_SEC", "180")
-        os.environ.setdefault("ABSTRACT_SCORING_MAX_WORKERS", "6")
-        os.environ.setdefault("ABSTRACT_SCORING_WORKER_CAP", "6")
-        os.environ.setdefault("ABSTRACT_SCORING_TIMEOUT_SEC", "180")
-        os.environ.setdefault("OMITTED_ITEM_RETRY_ATTEMPTS", "2")
-        if os.environ.get("DISABLE_LLM_TITLE_FILTER", "0").lower() in {"1", "true", "yes", "on"}:
-            os.environ["USE_LLM_TITLE_FILTER"] = "0"
-        else:
-            os.environ.setdefault("USE_LLM_TITLE_FILTER", "1")
-        os.environ.setdefault("LARGE_TITLE_POOL_THRESHOLD", "800")
-        # Deep survey should finish the discovery pass even if downstream idea/plan LLM
-        # stages are slow or unavailable; the live survey evidence must still land.
-        os.environ.setdefault("USE_LLM_IDEA", "0")
-        os.environ.setdefault("PLAN_USE_LLM", "0")
-        os.environ.setdefault("READ_USE_LLM", "0")
         if os.environ.get("REFRESH_LOCAL_DB", "0").lower() in {"1", "true", "yes", "on"}:
             refresh_cmd = [
                 sys.executable,
-                str(ROOT / "modules" / "finding" / "scripts" / "update_local_database.py"),
-                "--project",
-                args.project,
+                str(ROOT / "modules" / "finding" / "main.py"),
+                "--action",
+                "local_database",
                 "--if-missing",
             ]
             years = os.environ.get("YEARS", "").strip()
@@ -1074,8 +1198,6 @@ def main() -> int:
             venues = os.environ.get("LOCAL_DB_VENUES", "").strip()
             if venues:
                 refresh_cmd.extend(["--venues", venues])
-            if args.env_name:
-                refresh_cmd.extend(["--env-name", args.env_name])
             subprocess.run(refresh_cmd, cwd=ROOT, text=True, capture_output=True, timeout=min(args.timeout_sec, int(os.environ.get("DB_UPDATE_TIMEOUT_SEC", "1800")) + 60))
 
     if args.fast_mode:
@@ -1085,19 +1207,9 @@ def main() -> int:
         args.skip_huggingface = True
         args.skip_github = True
         args.skip_venues = True
-        os.environ.setdefault("SKIP_PDF", "1")
-        os.environ.setdefault("READ_USE_LLM", "0")
-        os.environ.setdefault("PLAN_USE_LLM", "0")
-        os.environ.setdefault("LLM_CONCURRENCY", "4")
-        os.environ.setdefault("ABSTRACT_SCORING_MAX_WORKERS", "6")
-        os.environ.setdefault("ABSTRACT_SCORING_BATCH_SIZE", "10")
-        os.environ.setdefault("IDEA_WORKERS", "1")
-        os.environ.setdefault("IDEA_TIMEOUT_SEC", "600")
-        os.environ.setdefault("IDEA_MAX_TOKENS", "4000")
-    os.environ.setdefault("YEARS", str(__import__("datetime").date.today().year))
 
-    if not (ROOT / "framework" / "auto_research").exists():
-        print(f"missing framework root: {ROOT / 'framework' / 'auto_research'}", file=sys.stderr)
+    if not (ROOT / "framework" / "scripts" / "auto_research").exists():
+        print(f"missing framework root: {ROOT / 'framework' / 'scripts' / 'auto_research'}", file=sys.stderr)
         return 2
     source_selection = _effective_source_selection(args)
     reuse_payload = None if internal_output_dir is not None else maybe_reuse_taste_run(args, extra_queries)
@@ -1105,10 +1217,24 @@ def main() -> int:
         return 0
     paths = build_paths(args.project)
     cfg = _load_project_config(args.project)
-    tmp_dir = paths.root / "tmp" / "finding"
+    run_token = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d_%H%M%S_%f") + f"_{os.getpid()}"
+    tmp_dir = paths.root / "tmp" / "finding" / run_token
     tmp_dir.mkdir(parents=True, exist_ok=True)
     driver = tmp_dir / "run_driver.py"
-    write_driver(driver, args.project, args.max_papers, args.max_ideas, args.repair_rounds, bool(source_selection.get("include_arxiv")), bool(source_selection.get("include_huggingface")), bool(source_selection.get("include_github")), bool(source_selection.get("venue_ids")), source_selection)
+    write_driver(
+        driver,
+        args.project,
+        args.max_papers,
+        args.max_ideas,
+        args.repair_rounds,
+        bool(source_selection.get("include_arxiv")),
+        bool(source_selection.get("include_huggingface")),
+        bool(source_selection.get("include_github")),
+        bool(source_selection.get("venue_ids")),
+        source_selection,
+        deep_survey=bool(args.deep_survey),
+        fast_mode=bool(args.fast_mode),
+    )
     if extra_queries:
         targeted_path = (internal_output_dir / "taste_targeted_queries.json") if internal_output_dir is not None else paths.state / "taste_targeted_queries.json"
         try:
@@ -1122,20 +1248,25 @@ def main() -> int:
     log_path = (internal_output_dir / "finding_frontend.log") if internal_output_dir is not None else paths.logs / "finding_frontend.log"
     start = time.time()
     run_env = os.environ.copy()
+    run_env["WORKFLOW_RUNTIME_DIR"] = run_env.get("FINDING_RUNTIME_DIR") or str(ROOT / "modules" / "finding" / ".runtime")
+    run_env["TASTE_FIND_INPUT_DIR"] = str(tmp_dir / "input")
     if internal_output_dir is not None:
         run_env["TASTE_INTERNAL_FIND_OUTPUT_DIR"] = str(internal_output_dir)
     llm = cfg.get("llm", {}) if isinstance(cfg.get("llm"), dict) else {}
+    local_llm_path = _local_llm_config_path()
+    if not run_env.get("FINDING_LLM_CONFIG") and local_llm_path.exists():
+        run_env["FINDING_LLM_CONFIG"] = str(local_llm_path)
+    local_llm = _load_local_llm_config()
     api_key_env = run_env.get("LLM_API_KEY_ENV") or llm.get("api_key_env") or "OPENAI_API_KEY"
-    api_key = (run_env.get(api_key_env, "") if api_key_env else "") or run_env.get("LLM_API_KEY", "") or llm.get("api_key", "")
+    api_key = (run_env.get(api_key_env, "") if api_key_env else "") or run_env.get("LLM_API_KEY", "") or str(local_llm.get("api_key") or "")
     if api_key_env:
         run_env["LLM_API_KEY_ENV"] = str(api_key_env)
-    if api_key:
-        run_env["LLM_API_KEY"] = str(api_key)
-        if api_key_env:
-            run_env[str(api_key_env)] = str(api_key)
     for env_key, cfg_key in [("LLM_API_BASE", "api_base"), ("LLM_MODEL", "model"), ("LLM_PROVIDER", "provider"), ("LLM_API_MODE", "api_mode")]:
         if not run_env.get(env_key) and llm.get(cfg_key):
             run_env[env_key] = str(llm.get(cfg_key))
+    for env_key, local_key in [("LLM_API_BASE", "base_url"), ("LLM_MODEL", "model"), ("LLM_PROVIDER", "provider")]:
+        if not run_env.get(env_key) and local_llm.get(local_key):
+            run_env[env_key] = str(local_llm.get(local_key))
     try:
         driver_cmd = driver_python_command(args, cfg, driver)
     except RuntimeError as exc:
@@ -1153,7 +1284,7 @@ def main() -> int:
             driver.unlink()
         except FileNotFoundError:
             pass
-        fallback_reason = f"TASTE timed out after {args.timeout_sec}s before complete Find->Read->Idea->Plan."
+        fallback_reason = f"Find timed out after {args.timeout_sec}s before producing a complete usable result."
         if internal_output_dir is not None:
             timeout_payload = {
                 "project": args.project,
@@ -1176,53 +1307,46 @@ def main() -> int:
         if latest_dir.exists() and (latest_dir / "find_results.json").exists():
             out_dir = paths.planning / "finding"
             out_dir.mkdir(parents=True, exist_ok=True)
-            for name in ["article.md", "find_results.json", "selection.json", "source_status.md", "venue_health_report.json", "category_scan_report.json", "title_filter_report.json", "arxiv_raw.json", "arxiv_prefiltered.json", "hf.md", "github.md"]:
+            for name in ["find.md", "find_results.json", "selection.json", "source_status.md", "venue_health_report.json", "category_scan_report.json", "title_filter_report.json", "arxiv_raw.json", "arxiv_prefiltered.json", "hf.md", "github.md"]:
                 source = latest_dir / name
                 if source.exists():
                     shutil.copyfile(source, out_dir / name)
-            fallback = write_missing_downstream_fallback_outputs(args.project, fallback_reason, log_path, args.max_ideas)
-            fallback["status"] = "find_completed_downstream_timeout"
-            fallback["taste_run_dir"] = str(latest_dir)
-            fallback["guardrail"] = "Real Find artifacts were copied; fallback ideas/plans remain operational placeholders only."
-            write_timeout_state(args.project, args.timeout_sec, elapsed, log_path)
-            state_path = paths.state / "finding_frontend.json"
-            try:
-                state_payload = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
-            except Exception:
-                state_payload = {}
-            state_payload.update({
-                "status": "find_completed_downstream_timeout",
-                "stage": "find_completed_downstream_timeout",
-                "timeout_sec": args.timeout_sec,
-                "elapsed_sec": round(elapsed, 3),
-                "taste_run_dir": str(latest_dir),
-                "output_dir": str(out_dir),
-                "reason": fallback_reason,
-                "guardrail": "Use copied Find artifacts as literature signals; do not sync fallback ideas/plans as scientific proposals.",
-            })
-            state_path.write_text(json.dumps(state_payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-            print(json.dumps(fallback, ensure_ascii=False))
-            print(f"native frontend timed out after {args.timeout_sec}s after real Find; continuing with Find artifacts only.", file=sys.stderr)
+            payload = write_find_timeout_state(
+                args.project,
+                status="find_artifacts_copied_after_timeout",
+                reason=fallback_reason,
+                log_path=log_path,
+                timeout_sec=args.timeout_sec,
+                elapsed_sec=elapsed,
+                run_dir=latest_dir,
+                output_dir=out_dir,
+            )
+            print(json.dumps(payload, ensure_ascii=False))
+            print(f"native frontend timed out after {args.timeout_sec}s; copied real Find artifacts only.", file=sys.stderr)
             return 0
         else:
-            fallback = write_minimal_fallback_outputs(args.project, fallback_reason, log_path, args.max_papers, args.max_ideas)
-            write_timeout_state(args.project, args.timeout_sec, elapsed, log_path)
-            print(json.dumps(fallback, ensure_ascii=False))
-            print(f"native frontend timed out after {args.timeout_sec}s before usable Find; wrote fallback artifacts only.", file=sys.stderr)
+            payload = write_find_timeout_state(
+                args.project,
+                status="blocked_find_timeout_no_usable_artifacts",
+                reason=fallback_reason,
+                log_path=log_path,
+                timeout_sec=args.timeout_sec,
+                elapsed_sec=elapsed,
+                run_dir=None,
+                output_dir=paths.planning / "finding",
+            )
+            print(json.dumps(payload, ensure_ascii=False))
+            print(f"native frontend timed out after {args.timeout_sec}s before usable Find; no fallback artifacts were written.", file=sys.stderr)
             return 124
     log_path.write_text(redact(proc.stdout) + "\n--- STDERR ---\n" + redact(proc.stderr), encoding="utf-8")
     try:
         driver.unlink()
     except FileNotFoundError:
         pass
-    if proc.stdout:
-        print(redact(proc.stdout), end="")
-    if proc.stderr:
-        print(redact(proc.stderr), end="", file=sys.stderr)
     try:
         hint = latest_taste_run_hint()
         run_dir = Path(str(hint.get("latest_run_dir") or ""))
-        if internal_output_dir is None and proc.returncode == 0 and run_dir.exists() and (run_dir / "find_results.json").exists():
+        if os.environ.get("ALLOW_FIND_RUN_REUSE", "0").lower() in {"1", "true", "yes", "on"} and internal_output_dir is None and proc.returncode == 0 and run_dir.exists() and (run_dir / "find_results.json").exists():
             run_id = run_dir.name
             save_taste_reuse_signature(args.project, run_id, run_dir, args, extra_queries)
     except Exception as exc:
