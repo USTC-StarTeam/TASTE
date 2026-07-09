@@ -2558,7 +2558,12 @@ def _tail_lines(path: Path, limit: int = 80) -> list[str]:
 
 def _current_project_source_selection(project_id: str, root: Path | None = None) -> dict[str, Any]:
     project_root = root or (PROJECTS / project_id)
-    if project_id:
+    project_find_config = _read_json(project_root / "config" / "finding.json", {})
+    if isinstance(project_find_config, dict):
+        configured_selection = project_find_config.get("selection")
+        if isinstance(configured_selection, dict):
+            return normalize_source_selection(configured_selection)
+    if project_id and os.environ.get("TASTE_USE_LEGACY_PROJECT_SOURCE_SELECTION", "").strip().lower() in {"1", "true", "yes", "on"}:
         configured = project_source_selection(project_id)
         if configured.get("venue_ids"):
             return configured

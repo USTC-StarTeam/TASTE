@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "config": {
+    "llm_concurrency": 8,
+    "idea_parallel_workers": 2,
+    "max_fetch_papers": 120,
+    "max_recommended_papers": 20,
+    "max_ideas": 6,
+    "venue_title_scan_limit": 0,
+    "venue_title_scan_fraction": 1.0,
+    "find_recall_count": 2000,
+    "detail_fetch_count": 160,
+    "full_venue_corpus_audit": true,
+    "title_filter_timeout_sec": 120,
+    "abstract_scoring_max_workers": 8,
+    "abstract_scoring_batch_size": 6,
+    "abstract_scoring_timeout_sec": 180,
+    "arxiv_max_queries": 3,
+    "arxiv_per_query_limit": 50,
+    "arxiv_timeout_sec": 15,
+    "arxiv_categories": [
+      "cs.IR",
+      "cs.LG",
+      "cs.AI"
+    ],
+    "arxiv_queries": [],
+    "arxiv_start_date": "",
+    "arxiv_end_date": "",
+    "arxiv_llm_candidate_limit": 0,
+    "arxiv_llm_candidates_per_category": 0,
+    "biorxiv_categories": [
+      "bioinformatics"
+    ],
+    "biorxiv_start_date": "",
+    "biorxiv_end_date": "",
+    "biorxiv_llm_candidate_limit": 0,
+    "biorxiv_llm_candidates_per_category": 0,
+    "nature_journals": [
+      "nature",
+      "natmachintell",
+      "natcomputsci",
+      "nmeth",
+      "ncomms"
+    ],
+    "nature_article_types": [
+      "article"
+    ],
+    "nature_start_date": "",
+    "nature_end_date": "",
+    "nature_candidate_limit": 200,
+    "science_journals": [
+      "science",
+      "sciadv"
+    ],
+    "science_article_types": [
+      "Research Article"
+    ],
+    "science_start_date": "",
+    "science_end_date": "",
+    "science_candidate_limit": 200,
+    "github_languages": [
+      "python",
+      "all"
+    ],
+    "github_since": "monthly",
+    "hf_include_papers": true,
+    "hf_include_models": true,
+    "runtime_tuning": {}
+  },
+  "selection": {
+    "venue_ids": [
+      "openreview_iclr_2026",
+      "openreview_neurips",
+      "dblp_icml",
+      "dblp_kdd"
+    ],
+    "years": [
+      2026
+    ],
+    "venue_years": [
+      {
+        "venue_id": "openreview_iclr_2026",
+        "year": 2026
+      },
+      {
+        "venue_id": "openreview_neurips",
+        "year": 2026
+      },
+      {
+        "venue_id": "dblp_icml",
+        "year": 2026
+      },
+      {
+        "venue_id": "dblp_kdd",
+        "year": 2026
+      }
+    ],
+    "include_arxiv": false,
+    "include_biorxiv": false,
+    "include_huggingface": false,
+    "include_github": false,
+    "include_nature": false,
+    "include_science": false
+  }
+}

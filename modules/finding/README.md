@@ -23,12 +23,31 @@ http://127.0.0.1:8879
 常用流程：
 
 1. 选择项目。
-2. 填写研究主题、研究兴趣、LLM 配置和来源选择。
-3. 在 Finding 页面选择会议、年份和补充来源。
-4. 点击 Find。
-5. 在结果区域打开 `find.md`。
+2. 填写研究主题、研究兴趣和研究者画像。
+3. 保存 LLM 配置。
+4. 在 Finding 页面选择会议、年份、补充来源和推荐数量。
+5. 点击 Find。
+6. 在结果区域打开 `find.md`。
 
 `find.md` 是用户阅读的最终推荐列表。网页会直接渲染这个 Markdown 文件。
+
+网页中的 Find 配置和命令行配置使用同一套字段。模块默认配置在：
+
+```text
+modules/finding/config/find.config.json
+```
+
+使用 TASTE 项目运行时，网页会为当前项目保存一份配置副本：
+
+```text
+projects/<project>/config/finding.json
+```
+
+LLM API 配置只保存到：
+
+```text
+modules/finding/config/llm.local.json
+```
 
 ### 命令行使用
 
@@ -36,8 +55,8 @@ http://127.0.0.1:8879
 
 ```bash
 conda run -n taste python modules/finding/main.py --action find \
-  --config-json path/to/config.json \
-  --selection-json path/to/selection.json
+  --config-json modules/finding/config/find.config.json \
+  --input-json path/to/input.json
 ```
 
 也可以进入模块目录运行：
@@ -45,8 +64,8 @@ conda run -n taste python modules/finding/main.py --action find \
 ```bash
 cd modules/finding
 conda run -n taste python main.py --action find \
-  --config-json path/to/config.json \
-  --selection-json path/to/selection.json
+  --config-json config/find.config.json \
+  --input-json path/to/input.json
 ```
 
 查看公开入口合同：
@@ -75,51 +94,62 @@ Finding 提供这些功能：
 
 Finding 负责发现和推荐。全文精读、想法生成、计划选择、实验和论文写作由 TASTE 后续阶段处理。
 
-## 输入文件
+## 配置和输入
 
-Finding 需要两个输入文件：
+Finding 使用三类文件：
 
-- `config.json`：研究主题、研究兴趣、研究者画像、推荐数量和 LLM 配置。
-- `selection.json`：会议、年份和来源开关。
+- `config/find.config.json`：推荐数量、来源参数、会议、年份和渠道开关。
+- `input.json`：本次运行的研究主题、研究兴趣、研究者画像和检索查询。
+- `config/llm.local.json`：本机 LLM API 配置。
 
-### config.json 示例
+### find.config.json 示例
+
+```json
+{
+  "schema_version": 1,
+  "config": {
+    "max_recommended_papers": 10,
+    "max_fetch_papers": 120,
+    "llm_concurrency": 8,
+    "arxiv_categories": ["cs.IR", "cs.LG", "cs.AI"],
+    "github_languages": ["python", "all"],
+    "github_since": "monthly"
+  },
+  "selection": {
+    "venue_ids": ["openreview_iclr_2026", "openreview_neurips", "dblp_icml"],
+    "years": [2026],
+    "venue_years": [
+      {"venue_id": "openreview_iclr_2026", "year": 2026},
+      {"venue_id": "openreview_neurips", "year": 2026},
+      {"venue_id": "dblp_icml", "year": 2026}
+    ],
+    "include_arxiv": true,
+    "include_biorxiv": false,
+    "include_huggingface": false,
+    "include_github": false,
+    "include_nature": false,
+    "include_science": false
+  }
+}
+```
+
+### input.json 示例
 
 ```json
 {
   "research_topic": "protein generation with diffusion models",
   "research_interest": "methods that improve controllability, diversity, and experimental feasibility for protein design",
   "researcher_profile": "Machine learning researcher working on generative models for protein design.",
-  "max_recommended_papers": 10,
-  "provider": "openai_compatible",
-  "base_url": "https://example-compatible-endpoint/v1",
-  "model": "model-name",
-  "temperature": 0.2
-}
-```
-
-### selection.json 示例
-
-```json
-{
-  "venue_ids": ["openreview_iclr", "dblp_icml", "openreview_neurips"],
-  "years": [2026, 2025],
-  "venue_years": [
-    {"venue_id": "openreview_iclr", "year": 2026},
-    {"venue_id": "dblp_icml", "year": 2026},
-    {"venue_id": "openreview_neurips", "year": 2025}
-  ],
-  "include_arxiv": true,
-  "include_biorxiv": false,
-  "include_huggingface": false,
-  "include_github": false,
-  "include_nature": false,
-  "include_science": false
+  "arxiv_queries": [
+    "protein generation diffusion model controllability",
+    "protein design generative model benchmark"
+  ]
 }
 ```
 
 ### LLM 配置
 
-LLM key 可以放在本机私有文件：
+LLM key 放在本机私有文件：
 
 ```text
 modules/finding/config/llm.local.json
@@ -137,18 +167,7 @@ modules/finding/config/llm.local.json
 }
 ```
 
-也可以通过环境变量提供：
-
-```bash
-export LLM_PROVIDER=openai_compatible
-export LLM_API_BASE="https://example-compatible-endpoint/v1"
-export LLM_MODEL="model-name"
-export OPENAI_API_KEY="..."
-export LLM_TIMEOUT_SEC=60
-export LLM_MAX_TOKENS=1200
-```
-
-密钥只保存在本机私有配置或本机环境变量中。`config/llm.local.json` 已被 git 忽略。
+网页保存或验证 LLM 时会创建或更新这个文件。`config/llm.local.json` 已被 git 忽略。
 
 ## 支持的来源
 
@@ -252,8 +271,8 @@ modules/finding/.runtime/runs/<run_id>/
 
 ```bash
 conda run -n taste python modules/finding/main.py --action find \
-  --config-json path/to/config.json \
-  --selection-json path/to/selection.json
+  --config-json modules/finding/config/find.config.json \
+  --input-json path/to/input.json
 ```
 
 查看可用会议：
@@ -293,7 +312,7 @@ conda run -n taste python modules/finding/main.py --action priority_venue_metada
 优先检查：
 
 - LLM provider、base URL、model、API key 是否可用。
-- `selection.json` 是否选了会议和年份。
+- `find.config.json` 是否选了会议和年份。
 - `include_arxiv` 等补充来源是否按需要开启。
 - `source_status.md` 是否显示来源受限、403、超时或没有摘要。
 

@@ -23,6 +23,52 @@ PROJECT_ENV = "PROJECT_ID"
 DEFAULT_VENUE_IDS: list[str] = []
 
 
+def _module_find_config_path() -> Path:
+    explicit = os.environ.get("FINDING_CONFIG", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    llm_config = os.environ.get("FINDING_LLM_CONFIG", "").strip()
+    if llm_config:
+        return Path(llm_config).expanduser().parent / "find.config.json"
+    return _workspace_root() / "modules" / "finding" / "config" / "find.config.json"
+
+
+def _project_find_config_path(project_path: Path | None) -> Path | None:
+    return project_path.parent / "config" / "finding.json" if project_path else None
+
+
+def _find_config_selection(path: Path | None) -> dict[str, Any] | None:
+    payload = _read_json(path, {}) if path else {}
+    if not isinstance(payload, dict):
+        return None
+    raw = payload.get("selection")
+    if not isinstance(raw, dict):
+        raw = payload.get("default_find_selection")
+    return normalize_source_selection(raw) if isinstance(raw, dict) else None
+
+
+def _selection_has_content(selection: dict[str, Any]) -> bool:
+    return bool(
+        selection.get("venue_ids")
+        or selection.get("venue_years")
+        or selection.get("include_arxiv")
+        or selection.get("include_biorxiv")
+        or selection.get("include_huggingface")
+        or selection.get("include_github")
+        or selection.get("include_nature")
+        or selection.get("include_science")
+    )
+
+
+def _write_find_config_selection(path: Path, selection: dict[str, Any]) -> None:
+    payload = _read_json(path, {}) if path.exists() else {}
+    if not isinstance(payload, dict):
+        payload = {}
+    payload["schema_version"] = int(payload.get("schema_version") or 1)
+    payload["selection"] = selection
+    _write_json(path, payload)
+
+
 def _unique_strings(values: list[Any]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
@@ -166,21 +212,35 @@ def project_config_path() -> Path | None:
 
 
 def _project_selection(project_path: Path | None) -> dict[str, Any] | None:
+    project_find_path = _project_find_config_path(project_path)
+    project_find_selection = _find_config_selection(project_find_path)
+    if project_find_path is not None and project_find_path.exists() and project_find_selection is not None:
+        return project_find_selection
+    if os.environ.get("TASTE_USE_LEGACY_PROJECT_SOURCE_SELECTION", "").strip().lower() not in {"1", "true", "yes", "on"}:
+        return None
     config = _read_json(project_path, {}) if project_path else {}
     if not isinstance(config, dict):
         return None
     discovery = config.get("discovery", {}) if isinstance(config.get("discovery"), dict) else {}
     raw = discovery.get("canonical_source_selection") or config.get("default_find_selection")
-    return normalize_source_selection(raw) if isinstance(raw, dict) else None
+    normalized = normalize_source_selection(raw) if isinstance(raw, dict) else None
+    return normalized if normalized and _selection_has_content(normalized) else None
 
 
 def canonical_source_selection(config_path: Path = CONFIG_PATH, project_config_path: Path | None = None) -> dict[str, Any]:
     project_selection = _project_selection(project_config_path or _configured_project_path())
     if project_selection is not None:
         return project_selection
+    module_selection = _find_config_selection(_module_find_config_path())
+    if module_selection is not None:
+        return module_selection
     config = _read_json(config_path, {}) if config_path.exists() else {}
     raw = config.get("default_find_selection") if isinstance(config, dict) else {}
-    return normalize_source_selection(raw)
+    if isinstance(raw, dict):
+        normalized = normalize_source_selection(raw)
+        if _selection_has_content(normalized):
+            return normalized
+    return normalize_source_selection({})
 
 
 def _enabled_sources_for(selection: dict[str, Any]) -> list[str]:
@@ -204,6 +264,7 @@ def save_canonical_source_selection(selection: Any, config_path: Path = CONFIG_P
     normalized = normalize_source_selection(selection)
     project_path = project_config_path or _configured_project_path()
     if project_path:
+        _write_find_config_selection(project_path.parent / "config" / "finding.json", normalized)
         project_config = _read_json(project_path, {})
         if not isinstance(project_config, dict):
             project_config = {}
@@ -220,6 +281,7 @@ def save_canonical_source_selection(selection: Any, config_path: Path = CONFIG_P
         config = {}
     config["default_find_selection"] = normalized
     _write_json(config_path, config)
+    _write_find_config_selection(_module_find_config_path(), normalized)
     return normalized
 
 

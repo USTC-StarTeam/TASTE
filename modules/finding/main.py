@@ -13,8 +13,8 @@ from typing import Any, Sequence
 STAGE_NAME = "finding"
 DISPLAY_NAME = "Finding"
 RESPONSIBILITY = "Collect candidate papers/tools from explicit sources and rank recommendations for later reading."
-REQUIRED_EXTERNAL_INPUTS = ("config_json", "selection_json")
-ARTIFACTS_IN = ("config.json", "selection.json")
+REQUIRED_EXTERNAL_INPUTS = ("find_config_json", "input_json")
+ARTIFACTS_IN = ("find.config.json", "input.json")
 PUBLIC_FINAL_ARTIFACT = "find.md"
 ARTIFACTS_OUT = ("find_results.json", PUBLIC_FINAL_ARTIFACT, "source_status.md", "find_progress.json")
 MACHINE_SUPPORT_ARTIFACTS = ("find_results.json", "source_status.md", "find_progress.json")
@@ -28,6 +28,7 @@ PRIVATE_BACKEND_ROOTS = (
 MODULE_ROOT = Path(__file__).resolve().parent
 MODULE_RUNTIME_DIR = MODULE_ROOT / ".runtime"
 MODULE_CONFIG_DIR = MODULE_ROOT / "config"
+DEFAULT_FIND_CONFIG_PATH = MODULE_CONFIG_DIR / "find.config.json"
 LOCAL_LLM_CONFIG_PATH = MODULE_CONFIG_DIR / "llm.local.json"
 SCRIPTS = MODULE_ROOT / "scripts"
 SCRIPT_IMPORT_DIRS = (
@@ -100,8 +101,91 @@ def _action_module(action: str) -> str:
     return ACTION_MODULES.get(normalized, normalized)
 
 
-def _load_json(path: str, default):
-    return json.loads(Path(path).read_text(encoding="utf-8")) if path else default
+FIND_INPUT_FIELDS = {"research_topic", "research_interest", "researcher_profile", "arxiv_queries"}
+
+
+def _load_json(path: str | Path, default):
+    if not path:
+        return default
+    try:
+        payload = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
+    return payload
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(current, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _split_find_config_payload(payload: Any) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return {}, {}, {}
+    structured = any(key in payload for key in ("config", "selection", "input"))
+    if structured:
+        config_payload = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+        selection_payload = payload.get("selection") if isinstance(payload.get("selection"), dict) else {}
+        input_payload = payload.get("input") if isinstance(payload.get("input"), dict) else {}
+        config_payload = dict(config_payload)
+        for key, value in payload.items():
+            if key not in {"schema_version", "config", "selection", "input", "description"}:
+                config_payload.setdefault(key, value)
+    else:
+        config_payload = dict(payload)
+        selection_payload = {}
+        input_payload = {}
+    embedded_selection = config_payload.pop("default_find_selection", None)
+    if isinstance(embedded_selection, dict) and not selection_payload:
+        selection_payload = embedded_selection
+    return config_payload, dict(selection_payload), dict(input_payload)
+
+
+def _load_find_config_payload(path: str | Path = "") -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    return _split_find_config_payload(_load_json(path, {}))
+
+
+def _default_find_config_path() -> Path:
+    override = os.environ.get("FINDING_CONFIG", "").strip()
+    if override:
+        return Path(override).expanduser()
+    llm_override = os.environ.get("FINDING_LLM_CONFIG", "").strip()
+    if llm_override:
+        return Path(llm_override).expanduser().parent / "find.config.json"
+    return DEFAULT_FIND_CONFIG_PATH
+
+
+def _find_request_payloads(
+    *,
+    config_json: str = "",
+    selection_json: str = "",
+    input_json: str = "",
+    default_selection: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    default_config, default_config_selection, default_input = _load_find_config_payload(_default_find_config_path())
+    override_config, override_selection, override_input = _load_find_config_payload(config_json) if config_json else ({}, {}, {})
+    config_payload = _deep_merge(default_config, override_config)
+    selection_payload = _deep_merge(default_config_selection, override_selection)
+    if selection_json:
+        raw_selection = _load_json(selection_json, {})
+        if isinstance(raw_selection, dict):
+            selection_payload = _deep_merge(selection_payload, raw_selection)
+    if not selection_payload:
+        selection_payload = dict(default_selection or {})
+    input_payload = _deep_merge(default_input, override_input)
+    raw_input = _load_json(input_json, {}) if input_json else {}
+    if isinstance(raw_input, dict):
+        input_payload = _deep_merge(input_payload, raw_input)
+    for key in FIND_INPUT_FIELDS:
+        if key in input_payload:
+            config_payload[key] = input_payload[key]
+    return config_payload, selection_payload
 
 
 def _local_llm_config_path() -> Path:
@@ -126,7 +210,7 @@ def _missing_config_value(value: Any) -> bool:
 
 def _with_local_llm_config(payload: dict[str, Any]) -> dict[str, Any]:
     data = dict(payload)
-    allowed_keys = {"provider", "base_url", "model", "api_key", "temperature"}
+    allowed_keys = {"provider", "base_url", "model", "api_key", "temperature", "llm_roles"}
     for key, value in _load_local_llm_config().items():
         if key in allowed_keys and not _missing_config_value(value) and _missing_config_value(data.get(key)):
             data[key] = value
@@ -340,19 +424,22 @@ def _run_venue_health(args: Sequence[str]) -> int:
 
 def _run_find(args: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(description="Run Finding.")
-    parser.add_argument("--config-json", default="", help="AppConfig-compatible JSON with LLM/profile fields.")
-    parser.add_argument("--selection-json", default="", help="VenueSelection-compatible source selection JSON.")
+    parser.add_argument("--config-json", default="", help="Optional Find config JSON. Defaults to config/find.config.json.")
+    parser.add_argument("--selection-json", default="", help="Optional VenueSelection-compatible source selection JSON override.")
+    parser.add_argument("--input-json", default="", help="Optional research input JSON with topic/profile/query fields.")
     ns = parser.parse_args(list(args))
     models = _private_import("finding_runtime.models")
     source_selection = _private_import("finding_runtime.source_selection")
     find_pipeline = _private_import("flow.pipeline")
 
-    config_payload = _load_json(ns.config_json, {})
-    if not isinstance(config_payload, dict):
-        config_payload = {}
+    config_payload, selection_payload = _find_request_payloads(
+        config_json=ns.config_json,
+        selection_json=ns.selection_json,
+        input_json=ns.input_json,
+        default_selection=source_selection.default_source_selection(),
+    )
     config = models.AppConfig(**_with_llm_env_defaults(config_payload))
     applied_runtime_tuning = models.apply_runtime_tuning_env(config)
-    selection_payload = _load_json(ns.selection_json, source_selection.default_source_selection())
     selection = models.VenueSelection(**source_selection.normalize_source_selection(selection_payload))
     log_stream = io.StringIO()
     with contextlib.redirect_stdout(log_stream):

@@ -91,12 +91,47 @@ internal_output_dir = Path(internal_output_dir_raw).expanduser() if internal_out
 publish_outputs = internal_output_dir is None
 finding_module = root / "modules" / "finding"
 finding_entrypoint = finding_module / "main.py"
+module_find_config_path = finding_module / "config" / "find.config.json"
+project_find_config_path = paths.root / "config" / "finding.json"
 def read_json_file(path):
     try:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
     except Exception:
         return {{}}
     return payload if isinstance(payload, dict) else {{}}
+
+def write_json_file(path, payload):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+def split_find_config_payload(payload):
+    if not isinstance(payload, dict):
+        return {{}}, {{}}
+    if "config" in payload or "selection" in payload:
+        config_payload = payload.get("config") if isinstance(payload.get("config"), dict) else {{}}
+        selection_payload = payload.get("selection") if isinstance(payload.get("selection"), dict) else {{}}
+        config_payload = dict(config_payload)
+    else:
+        config_payload = dict(payload)
+        selection_payload = {{}}
+    embedded_selection = config_payload.pop("default_find_selection", None)
+    if isinstance(embedded_selection, dict) and not selection_payload:
+        selection_payload = embedded_selection
+    return config_payload, dict(selection_payload)
+
+def ensure_project_find_config():
+    if not project_find_config_path.exists():
+        payload = read_json_file(module_find_config_path)
+        if not payload:
+            payload = {{"schema_version": 1, "config": {{}}, "selection": dict(source_selection)}}
+        write_json_file(project_find_config_path, payload)
+    return project_find_config_path
+
+project_find_config_source = ensure_project_find_config()
+project_find_config_payload = read_json_file(project_find_config_source)
+finding_cfg, configured_selection = split_find_config_payload(project_find_config_payload)
+legacy_finding_cfg = {{}}
 
 def local_llm_config_path():
     raw = os.environ.get("FINDING_LLM_CONFIG", "").strip()
@@ -110,13 +145,15 @@ input_dir_raw = os.environ.get("TASTE_FIND_INPUT_DIR", "").strip()
 input_dir = Path(input_dir_raw).expanduser() if input_dir_raw else paths.root / "tmp" / "finding" / "input"
 input_dir.mkdir(parents=True, exist_ok=True)
 cfg = load_project_config(project)
-finding_cfg = cfg.get("finding", {{}}) if isinstance(cfg.get("finding", {{}}), dict) else {{}}
-llm = cfg.get("llm", {{}})
-api_key_env = os.environ.get("LLM_API_KEY_ENV") or llm.get("api_key_env", "OPENAI_API_KEY")
+legacy_finding_cfg = cfg.get("finding", {{}}) if isinstance(cfg.get("finding", {{}}), dict) else {{}}
+for _key, _value in legacy_finding_cfg.items():
+    if _key not in finding_cfg and _key not in {{"api_key", "email", "llm_roles", "provider", "base_url", "model", "temperature", "default_find_selection"}}:
+        finding_cfg[_key] = _value
+api_key_env = os.environ.get("LLM_API_KEY_ENV") or "OPENAI_API_KEY"
 api_key = (os.environ.get(api_key_env, "") if api_key_env else "") or os.environ.get("LLM_API_KEY", "") or local_llm.get("api_key", "")
-api_base = os.environ.get("LLM_API_BASE") or llm.get("api_base") or local_llm.get("base_url") or "https://api.openai.com/v1"
-model = os.environ.get("LLM_MODEL") or llm.get("model") or local_llm.get("model") or "mock-model"
-provider = os.environ.get("LLM_PROVIDER") or llm.get("provider") or local_llm.get("provider") or "mock"
+api_base = os.environ.get("LLM_API_BASE") or local_llm.get("base_url") or "https://api.openai.com/v1"
+model = os.environ.get("LLM_MODEL") or local_llm.get("model") or "mock-model"
+provider = os.environ.get("LLM_PROVIDER") or local_llm.get("provider") or "mock"
 if not (api_base and model and api_key):
     provider = "mock"
 
@@ -321,7 +358,7 @@ config_payload = {{
     "base_url": api_base,
     "api_key": "",
     "model": model,
-    "temperature": float(os.environ.get("LLM_TEMPERATURE") or llm.get("temperature") or local_llm.get("temperature", 0.2) or 0.2),
+    "temperature": float(os.environ.get("LLM_TEMPERATURE") or local_llm.get("temperature", 0.2) or 0.2),
     "max_fetch_papers": max_fetch_count,
     "max_recommended_papers": max_papers,
     "max_ideas": max_ideas,
@@ -383,8 +420,32 @@ if venue_ids and not selection_payload.get("venue_years"):
         for year_value in years
     ]
 
+input_payload = {{
+    "research_topic": configured_topic,
+    "research_interest": project_interest or configured_topic,
+    "researcher_profile": researcher_profile,
+    "arxiv_queries": topic_queries,
+}}
+find_input_fields = {{"research_topic", "research_interest", "researcher_profile", "arxiv_queries"}}
+find_llm_fields = {{"provider", "base_url", "api_key", "model", "temperature", "llm_roles"}}
+find_config_payload = {{
+    key: value
+    for key, value in config_payload.items()
+    if key not in find_input_fields and key not in find_llm_fields and key not in {{"default_find_selection", "email"}}
+}}
+combined_find_config = {{
+    "schema_version": 1,
+    "config": find_config_payload,
+    "selection": selection_payload,
+}}
+write_json_file(project_find_config_path, combined_find_config)
+
+find_config_path = input_dir / "find.config.json"
+input_path = input_dir / "input.json"
 config_path = input_dir / "config.json"
 selection_path = input_dir / "selection.json"
+write_json_file(find_config_path, combined_find_config)
+write_json_file(input_path, input_payload)
 config_path.write_text(json.dumps(config_payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 selection_path.write_text(json.dumps(selection_payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
@@ -405,11 +466,11 @@ find_cmd = [
     "--action",
     "find",
     "--config-json",
-    str(config_path),
-    "--selection-json",
-    str(selection_path),
+    str(find_config_path),
+    "--input-json",
+    str(input_path),
 ]
-print("[framework] Finding public CLI input: " + str(config_path) + " / " + str(selection_path), flush=True)
+print("[framework] Finding public CLI input: " + str(find_config_path) + " / " + str(input_path), flush=True)
 proc = subprocess.Popen(find_cmd, cwd=str(root), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1)
 find_output = []
 assert proc.stdout is not None
@@ -904,7 +965,6 @@ def _effective_source_selection(args: argparse.Namespace) -> dict[str, Any]:
 
 def _taste_signature(args: argparse.Namespace, extra_queries: list[str]) -> dict:
     cfg = _load_project_config(args.project)
-    llm = cfg.get("llm", {}) if isinstance(cfg.get("llm", {}), dict) else {}
     literature_cfg = cfg.get("literature", {}) if isinstance(cfg.get("literature", {}), dict) else {}
     deep = bool(args.deep_survey)
     wide = bool(args.wide_survey)
@@ -920,11 +980,11 @@ def _taste_signature(args: argparse.Namespace, extra_queries: list[str]) -> dict
         if item and item not in topic_queries:
             topic_queries.append(item)
     local_llm = _load_local_llm_config()
-    api_key_env = os.environ.get("LLM_API_KEY_ENV") or llm.get("api_key_env") or "OPENAI_API_KEY"
+    api_key_env = os.environ.get("LLM_API_KEY_ENV") or "OPENAI_API_KEY"
     api_key = (os.environ.get(api_key_env, "") if api_key_env else "") or os.environ.get("LLM_API_KEY", "") or str(local_llm.get("api_key") or "")
-    api_base = os.environ.get("LLM_API_BASE") or llm.get("api_base") or local_llm.get("base_url") or ""
-    model = os.environ.get("LLM_MODEL") or llm.get("model") or local_llm.get("model") or "mock-model"
-    provider = os.environ.get("LLM_PROVIDER") or llm.get("provider") or local_llm.get("provider") or "mock"
+    api_base = os.environ.get("LLM_API_BASE") or local_llm.get("base_url") or ""
+    model = os.environ.get("LLM_MODEL") or local_llm.get("model") or "mock-model"
+    provider = os.environ.get("LLM_PROVIDER") or local_llm.get("provider") or "mock"
     payload = {
         "schema": 1,
         "scoring_policy_version": "quality_bonus_v4_selective_venue",
@@ -949,10 +1009,10 @@ def _taste_signature(args: argparse.Namespace, extra_queries: list[str]) -> dict
         "max_ideas": int(args.max_ideas),
         "provider": provider,
         "model": model,
-        "api_mode": os.environ.get("LLM_API_MODE", llm.get("api_mode", "chat_completions")),
+        "api_mode": os.environ.get("LLM_API_MODE", "chat_completions"),
         "api_base": api_base,
         "api_key_env": api_key_env,
-        "llm_config_source": "project_json_or_env",
+        "llm_config_source": "modules/finding/config/llm.local.json_or_env",
         "llm_key_available": bool(api_key),
         "llm_title_filter": "forced" if os.environ.get("FORCE_LLM_TITLE_FILTER", "0").lower() in {"1", "true", "yes", "on"} else "disabled_for_large_pools",
     }
@@ -1252,18 +1312,14 @@ def main() -> int:
     run_env["TASTE_FIND_INPUT_DIR"] = str(tmp_dir / "input")
     if internal_output_dir is not None:
         run_env["TASTE_INTERNAL_FIND_OUTPUT_DIR"] = str(internal_output_dir)
-    llm = cfg.get("llm", {}) if isinstance(cfg.get("llm"), dict) else {}
     local_llm_path = _local_llm_config_path()
     if not run_env.get("FINDING_LLM_CONFIG") and local_llm_path.exists():
         run_env["FINDING_LLM_CONFIG"] = str(local_llm_path)
     local_llm = _load_local_llm_config()
-    api_key_env = run_env.get("LLM_API_KEY_ENV") or llm.get("api_key_env") or "OPENAI_API_KEY"
+    api_key_env = run_env.get("LLM_API_KEY_ENV") or "OPENAI_API_KEY"
     api_key = (run_env.get(api_key_env, "") if api_key_env else "") or run_env.get("LLM_API_KEY", "") or str(local_llm.get("api_key") or "")
     if api_key_env:
         run_env["LLM_API_KEY_ENV"] = str(api_key_env)
-    for env_key, cfg_key in [("LLM_API_BASE", "api_base"), ("LLM_MODEL", "model"), ("LLM_PROVIDER", "provider"), ("LLM_API_MODE", "api_mode")]:
-        if not run_env.get(env_key) and llm.get(cfg_key):
-            run_env[env_key] = str(llm.get(cfg_key))
     for env_key, local_key in [("LLM_API_BASE", "base_url"), ("LLM_MODEL", "model"), ("LLM_PROVIDER", "provider")]:
         if not run_env.get(env_key) and local_llm.get(local_key):
             run_env[env_key] = str(local_llm.get(local_key))

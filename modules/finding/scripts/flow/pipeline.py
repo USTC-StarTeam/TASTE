@@ -68,6 +68,8 @@ FIND_RECOMMENDATION_POLICY = "topn_final_llm_supported_topic_real_abstract_read_
 FIND_FINAL_SCORING_TEMPERATURE = 0.0
 FIND_TITLE_FILTER_TEMPERATURE = 0.0
 FINAL_LLM_SCORE_CACHE_SCHEMA_VERSION = "find_final_llm_score_cache_v1"
+FIND_INPUT_FIELDS = {"research_topic", "research_interest", "researcher_profile", "arxiv_queries"}
+FIND_LLM_CONFIG_FIELDS = {"provider", "base_url", "api_key", "model", "temperature", "llm_roles"}
 FINAL_LLM_SCORE_CACHE_PROMPT_POLICY = "final_title_abstract_prompt_v30_source_guard_domain_anchor"
 FINAL_LLM_SCORE_CACHE_MAX_ENTRIES = 50000
 FINAL_LLM_SCORE_CACHE_FIELDS = (
@@ -8205,7 +8207,22 @@ def run_find(
     if config.default_find_selection != selection_payload:
         config = config.model_copy(update={"default_find_selection": selection_payload})
     run_id, run_dir = create_run_dir("find")
-    _write_run_json(run_dir, "inputs/config.json", redacted_config(config.model_dump()))
+    config_snapshot = redacted_config(config.model_dump())
+    input_snapshot = {
+        key: config_snapshot.get(key)
+        for key in FIND_INPUT_FIELDS
+        if key in config_snapshot and config_snapshot.get(key) not in ("", [], {}, None)
+    }
+    find_config_snapshot = {
+        key: value
+        for key, value in config_snapshot.items()
+        if key not in FIND_INPUT_FIELDS
+        and key not in FIND_LLM_CONFIG_FIELDS
+        and key not in {"default_find_selection", "email"}
+    }
+    _write_run_json(run_dir, "inputs/find.config.json", {"schema_version": 1, "config": find_config_snapshot, "selection": selection_payload})
+    _write_run_json(run_dir, "inputs/input.json", input_snapshot)
+    _write_run_json(run_dir, "inputs/config.json", config_snapshot)
     _write_run_json(run_dir, "inputs/selection.json", selection_payload)
     log(f"Created run {run_id}")
 

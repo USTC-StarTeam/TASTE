@@ -78,6 +78,7 @@ CLIENT_DIST = WORKSPACE_ROOT / "web" / "frontend" / "client" / "dist"
 PROJECT_IDS_ROOT = WORKSPACE_ROOT / "projects"
 FRAMEWORK_RUNS_DIR = WORKSPACE_ROOT / "framework" / "workspace" / "runs"
 ENVIRONMENT_RUNS_DIR = WORKSPACE_ROOT / "modules" / "environment" / "runs"
+DEFAULT_FIND_CONFIG_PATH = WORKSPACE_ROOT / "modules" / "finding" / "config" / "find.config.json"
 DEFAULT_LOCAL_LLM_CONFIG_PATH = WORKSPACE_ROOT / "modules" / "finding" / "config" / "llm.local.json"
 LARGE_JSON_ARTIFACT_LIMIT_BYTES = int(os.environ.get("LARGE_JSON_ARTIFACT_LIMIT_BYTES", "5000000") or 5000000)
 LARGE_MARKDOWN_ARTIFACT_LIMIT_BYTES = int(os.environ.get("LARGE_MARKDOWN_ARTIFACT_LIMIT_BYTES", "500000") or 500000)
@@ -243,13 +244,109 @@ def _strip_llm_secrets_from_config_payload(payload: dict[str, Any]) -> dict[str,
     return data
 
 
+FIND_CONFIG_INPUT_FIELDS = {"research_topic", "research_interest", "researcher_profile", "arxiv_queries"}
+FIND_CONFIG_LLM_FIELDS = {"provider", "base_url", "api_key", "model", "temperature", "llm_roles"}
+FIND_CONFIG_EXCLUDED_FIELDS = FIND_CONFIG_INPUT_FIELDS | FIND_CONFIG_LLM_FIELDS | {"default_find_selection", "email"}
+
+
+def _finding_config_path() -> Path:
+    raw = os.environ.get("FINDING_CONFIG", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    llm_raw = os.environ.get("FINDING_LLM_CONFIG", "").strip()
+    if llm_raw:
+        return Path(llm_raw).expanduser().parent / "find.config.json"
+    return DEFAULT_FIND_CONFIG_PATH
+
+
+def _project_finding_config_path(project_root: Path | None = None, project_path: Path | None = None) -> Path | None:
+    if project_root is not None:
+        return project_root / "config" / "finding.json"
+    target_project_path = project_path if project_path is not None else project_config_path()
+    return target_project_path.parent / "config" / "finding.json" if target_project_path else None
+
+
+def _read_finding_config_payload(path: Path | None = None) -> dict[str, Any]:
+    payload = read_json(path or _finding_config_path(), {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def _split_finding_config_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return {}, {}
+    if any(key in payload for key in ("config", "selection")):
+        config_payload = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+        selection_payload = payload.get("selection") if isinstance(payload.get("selection"), dict) else {}
+        config_payload = dict(config_payload)
+    else:
+        config_payload = dict(payload)
+        selection_payload = {}
+    embedded_selection = config_payload.pop("default_find_selection", None)
+    if isinstance(embedded_selection, dict) and not selection_payload:
+        selection_payload = embedded_selection
+    return config_payload, dict(selection_payload)
+
+
+def _write_finding_config_payload(path: Path, config_payload: dict[str, Any], selection: dict[str, Any]) -> None:
+    existing = _read_finding_config_payload(path)
+    payload = dict(existing)
+    payload["schema_version"] = int(payload.get("schema_version") or 1)
+    payload["config"] = dict(config_payload)
+    payload["selection"] = normalize_source_selection(selection)
+    write_json(path, payload)
+
+
+def _app_find_config_payload(config: AppConfig) -> dict[str, Any]:
+    payload = config.model_dump()
+    return {
+        key: value
+        for key, value in payload.items()
+        if key not in FIND_CONFIG_EXCLUDED_FIELDS
+    }
+
+
+def _ensure_project_finding_config(project_root: Path | None = None, project_path: Path | None = None) -> Path | None:
+    target = _project_finding_config_path(project_root=project_root, project_path=project_path)
+    if target is None:
+        return None
+    if target.exists():
+        return target
+    source_payload = _read_finding_config_payload(_finding_config_path())
+    if not source_payload:
+        source_payload = {"schema_version": 1, "config": {}, "selection": normalize_source_selection({})}
+    write_json(target, source_payload)
+    return target
+
+
+def _active_finding_config_path(*, create_project_copy: bool = False) -> Path:
+    project_path = project_config_path()
+    if project_path is not None:
+        project_config = _ensure_project_finding_config(project_path=project_path) if create_project_copy else _project_finding_config_path(project_path=project_path)
+        if project_config is not None and project_config.exists():
+            return project_config
+    return _finding_config_path()
+
+
+def _persist_finding_config_from_config(config: AppConfig, selection: dict[str, Any], *, project_root: Path | None = None) -> Path:
+    project_target = _ensure_project_finding_config(project_root=project_root) if project_root is not None else _active_finding_config_path(create_project_copy=True)
+    target = project_target or _finding_config_path()
+    _write_finding_config_payload(target, _app_find_config_payload(config), selection)
+    return target
+
+
 def load_config() -> AppConfig:
-    data = read_json(CONFIG_PATH, {})
-    config = AppConfig(**data) if data else AppConfig()
-    config = _config_with_local_llm_config(config, override_defaults=not bool(data))
-    canonical = canonical_source_selection(project_config_path=project_config_path())
+    config_path = _active_finding_config_path(create_project_copy=True)
+    finding_payload = _read_finding_config_payload(config_path)
+    config_payload, selection_payload = _split_finding_config_payload(finding_payload)
+    legacy_payload = read_json(CONFIG_PATH, {})
+    if isinstance(legacy_payload, dict) and isinstance(legacy_payload.get("email"), dict):
+        config_payload["email"] = legacy_payload["email"]
+    config = AppConfig(**config_payload) if config_payload else AppConfig()
+    canonical = normalize_source_selection(selection_payload) if selection_payload else canonical_source_selection(project_config_path=project_config_path())
     if config.default_find_selection != canonical:
         config = config.model_copy(update={"default_find_selection": canonical})
+    config = _config_with_project_research_preferences(config)
+    config = _config_with_local_llm_config(config, override_defaults=True)
     return _config_with_env_overrides(config)
 
 
@@ -349,29 +446,7 @@ def _source_status_markdown_from_find_results(find_results: Any, fallback: str =
 
 
 def _sync_project_llm_from_config(config: AppConfig) -> None:
-    project_path = project_config_path()
-    if project_path is None:
-        return
-    project_config = read_json(project_path, {})
-    if not isinstance(project_config, dict):
-        return
-    llm = dict(project_config.get("llm") or {}) if isinstance(project_config.get("llm"), dict) else {}
-    llm["enabled"] = bool(str(config.api_key or "").strip() and str(config.model or "").strip() and str(config.provider or "").strip().lower() != "mock")
-    llm["provider"] = str(config.provider or "openai_compatible")
-    llm["api_base"] = str(config.base_url or "")
-    llm["model"] = str(config.model or "")
-    llm["api_key_env"] = str(llm.get("api_key_env") or os.environ.get("LLM_API_KEY_ENV") or "OPENAI_API_KEY")
-    # Project state/API is frequently displayed to Claude and the browser. Keep
-    # the editable secret in TASTE config; research jobs inject it into env at runtime.
-    llm.pop("api_key", None)
-    llm["timeout_sec"] = int(os.environ.get("LLM_TIMEOUT_SEC", llm.get("timeout_sec", 600) or 600))
-    llm["max_tokens"] = int(os.environ.get("LLM_MAX_TOKENS", llm.get("max_tokens", 4000) or 4000))
-    llm["temperature"] = float(config.temperature)
-    llm["api_mode"] = str(os.environ.get("LLM_API_MODE", llm.get("api_mode", "chat_completions")) or "chat_completions")
-    if project_config.get("llm") == llm:
-        return
-    project_config["llm"] = llm
-    write_json(project_path, project_config)
+    return
 
 
 def _current_project_research_preferences() -> dict[str, str]:
@@ -437,23 +512,11 @@ def _sync_project_finding_config_from_request(config: AppConfig) -> None:
     project_path = project_config_path()
     if project_path is None:
         return
+    _persist_finding_config_from_config(config, config.default_find_selection, project_root=project_path.parent)
     project_config = read_json(project_path, {})
-    if not isinstance(project_config, dict):
-        return
-    finding = config.model_dump()
-    finding["api_key"] = ""
-    email = finding.get("email") if isinstance(finding.get("email"), dict) else {}
-    if email:
-        email["smtp_password"] = ""
-        finding["email"] = email
-    roles = finding.get("llm_roles") if isinstance(finding.get("llm_roles"), dict) else {}
-    for role_cfg in roles.values():
-        if isinstance(role_cfg, dict):
-            role_cfg["api_key"] = ""
-    if roles:
-        finding["llm_roles"] = roles
-    project_config["finding"] = finding
-    write_json(project_path, project_config)
+    if isinstance(project_config, dict) and "finding" in project_config:
+        project_config.pop("finding", None)
+        write_json(project_path, project_config)
 
 
 def save_config(config: AppConfig) -> AppConfig:
@@ -461,6 +524,7 @@ def save_config(config: AppConfig) -> AppConfig:
     canonical = save_canonical_source_selection(config.default_find_selection, project_config_path=project_path)
     config = config.model_copy(update={"default_find_selection": canonical})
     _persist_local_llm_config_from_config(config)
+    _persist_finding_config_from_config(config, canonical, project_root=project_path.parent if project_path is not None else None)
     payload = _strip_llm_secrets_from_config_payload(config.model_dump())
     if project_path is not None:
         # Source selection is project state. LLM secrets live in the local
@@ -468,8 +532,8 @@ def save_config(config: AppConfig) -> AppConfig:
         payload.pop("default_find_selection", None)
     if read_json(CONFIG_PATH, {}) != payload:
         write_json(CONFIG_PATH, payload)
-    _sync_project_llm_from_config(config)
     _sync_project_research_preferences_from_config(config)
+    _sync_project_finding_config_from_request(config)
     return config
 
 
@@ -524,26 +588,17 @@ def _request_config_with_persisted_secrets(request_config: AppConfig | None) -> 
 def _public_config_response(config: AppConfig) -> dict[str, Any]:
     """Return UI-editable config without sending saved secrets to the browser."""
     data = config.model_dump()
+    config_file = _active_finding_config_path(create_project_copy=False)
     try:
-        config_stat = CONFIG_PATH.stat() if CONFIG_PATH.exists() else None
+        config_stat = config_file.stat() if config_file.exists() else None
     except OSError:
         config_stat = None
-    project_llm: dict[str, Any] = {}
-    project_path = project_config_path()
-    if project_path is not None:
-        project_config = read_json(project_path, {})
-        if isinstance(project_config, dict) and isinstance(project_config.get("llm"), dict):
-            project_llm = dict(project_config.get("llm") or {})
     api_key_value = str(data.get("api_key") or "")
     data["api_key_saved"] = bool(api_key_value.strip())
     data["api_key_suffix"] = api_key_value[-4:] if api_key_value else ""
     data["config_saved_at"] = datetime.fromtimestamp(config_stat.st_mtime, UTC).isoformat() if config_stat else ""
-    data["config_path"] = ""
-    data["project_llm_synced"] = bool(
-        project_llm
-        and str(project_llm.get("api_base") or "") == str(config.base_url or "")
-        and str(project_llm.get("model") or "") == str(config.model or "")
-    )
+    data["config_path"] = str(config_file)
+    data["project_llm_synced"] = _local_llm_config_path().exists()
     data["api_key"] = ""
     roles = data.get("llm_roles") if isinstance(data.get("llm_roles"), dict) else {}
     for role_cfg in roles.values():
@@ -11183,7 +11238,7 @@ def api_llm_probe() -> dict:
 
 @app.get("/api/config/meta")
 def api_config_meta() -> dict:
-    return {"saved": CONFIG_PATH.exists(), "llm_config_saved": _local_llm_config_path().exists()}
+    return {"saved": _active_finding_config_path(create_project_copy=False).exists(), "llm_config_saved": _local_llm_config_path().exists()}
 
 
 @app.get("/api/frontend/version")
@@ -11382,25 +11437,18 @@ def api_find(request: FindRequest) -> dict:
     selection = normalize_source_selection(request.selection.model_dump() if request.selection else canonical_source_selection(project_config_path=project_config_path()))
     project_path = project_config_path()
     save_canonical_source_selection(selection, project_config_path=project_path)
+    config = config.model_copy(update={"default_find_selection": selection})
     _persist_local_llm_config_from_find_request(config, request.config)
-    _sync_project_llm_from_config(config)
     _sync_project_research_preferences_from_config(config)
     _sync_project_finding_config_from_request(config)
+    if current:
+        _persist_finding_config_from_config(config, selection, project_root=current[1])
 
     def runtime_env_for_find() -> dict[str, str]:
         env: dict[str, str] = {}
         local_llm_config = _local_llm_config_path()
         if local_llm_config.exists():
             env["FINDING_LLM_CONFIG"] = str(local_llm_config)
-        for env_key, value in [
-            ("LLM_API_BASE", config.base_url),
-            ("LLM_MODEL", config.model),
-            ("LLM_PROVIDER", config.provider),
-            ("LLM_TEMPERATURE", config.temperature),
-        ]:
-            text = str(value or "").strip()
-            if text:
-                env[env_key] = text
         return env
 
     def run_find_and_adopt(log, should_cancel, progress):

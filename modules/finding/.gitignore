@@ -40,7 +40,7 @@ tmp/
 /config.json
 /.config.json
 /config.local.json
-/config/*.json
+/config/llm.local.json
 /config/*.local.json
 /config/local*.json
 /config/*secret*.json

@@ -3,7 +3,7 @@
   "generated_by": "ast_script_manifest",
   "module": "finding",
   "script_count": 17,
-  "top_level_function_count": 961,
+  "top_level_function_count": 966,
   "top_level_class_count": 8,
   "scripts": [
     {
@@ -11,91 +11,111 @@
       "top_level_functions": [
         {
           "name": "contract",
-          "lineno": 41
+          "lineno": 42
         },
         {
           "name": "_contract_payload",
-          "lineno": 55
+          "lineno": 56
         },
         {
           "name": "_configure_private_runtime_env",
-          "lineno": 62
+          "lineno": 63
         },
         {
           "name": "_ensure_runtime_imports",
-          "lineno": 68
+          "lineno": 69
         },
         {
           "name": "_private_import",
-          "lineno": 76
+          "lineno": 77
         },
         {
           "name": "_action_module",
-          "lineno": 96
+          "lineno": 97
         },
         {
           "name": "_load_json",
-          "lineno": 103
-        },
-        {
-          "name": "_local_llm_config_path",
           "lineno": 107
         },
         {
+          "name": "_deep_merge",
+          "lineno": 117
+        },
+        {
+          "name": "_split_find_config_payload",
+          "lineno": 128
+        },
+        {
+          "name": "_load_find_config_payload",
+          "lineno": 150
+        },
+        {
+          "name": "_default_find_config_path",
+          "lineno": 154
+        },
+        {
+          "name": "_find_request_payloads",
+          "lineno": 164
+        },
+        {
+          "name": "_local_llm_config_path",
+          "lineno": 191
+        },
+        {
           "name": "_load_local_llm_config",
-          "lineno": 112
+          "lineno": 196
         },
         {
           "name": "_missing_config_value",
-          "lineno": 123
+          "lineno": 207
         },
         {
           "name": "_with_local_llm_config",
-          "lineno": 127
+          "lineno": 211
         },
         {
           "name": "_with_llm_env_defaults",
-          "lineno": 136
+          "lineno": 220
         },
         {
           "name": "_display_path",
-          "lineno": 155
+          "lineno": 239
         },
         {
           "name": "_normalize_action",
-          "lineno": 166
+          "lineno": 250
         },
         {
           "name": "_run_action_module",
-          "lineno": 170
+          "lineno": 254
         },
         {
           "name": "_result_summary",
-          "lineno": 202
+          "lineno": 286
         },
         {
           "name": "_run_refresh_source_health",
-          "lineno": 223
+          "lineno": 307
         },
         {
           "name": "_venue_health_pairs",
-          "lineno": 237
+          "lineno": 321
         },
         {
           "name": "_run_catalog",
-          "lineno": 278
+          "lineno": 362
         },
         {
           "name": "_run_venue_health",
-          "lineno": 296
+          "lineno": 380
         },
         {
           "name": "_run_find",
-          "lineno": 341
+          "lineno": 425
         },
         {
           "name": "main",
-          "lineno": 373
+          "lineno": 460
         }
       ],
       "top_level_classes": []
@@ -1220,1357 +1240,1357 @@
       "top_level_functions": [
         {
           "name": "sync_latest",
-          "lineno": 114
+          "lineno": 116
         },
         {
           "name": "_publish_latest_review_copy",
-          "lineno": 119
+          "lineno": 121
         },
         {
           "name": "_run_path",
-          "lineno": 128
+          "lineno": 130
         },
         {
           "name": "_existing_run_path",
-          "lineno": 132
+          "lineno": 134
         },
         {
           "name": "_write_run_json",
-          "lineno": 140
+          "lineno": 142
         },
         {
           "name": "_write_run_text",
-          "lineno": 146
+          "lineno": 148
         },
         {
           "name": "_emit_progress",
-          "lineno": 152
+          "lineno": 154
         },
         {
           "name": "_raise_if_cancelled",
-          "lineno": 216
+          "lineno": 218
         },
         {
           "name": "_chunks",
-          "lineno": 221
+          "lineno": 223
         },
         {
           "name": "_positive_int_env",
-          "lineno": 225
+          "lineno": 227
         },
         {
           "name": "_clamp_int",
-          "lineno": 234
+          "lineno": 236
         },
         {
           "name": "_source_fetch_wall_timeout",
-          "lineno": 238
+          "lineno": 240
         },
         {
           "name": "_run_with_wall_timeout",
-          "lineno": 254
+          "lineno": 256
         },
         {
           "name": "_source_fetch_timeout_status",
-          "lineno": 281
+          "lineno": 283
         },
         {
           "name": "_detail_fetch_timeout_stats",
-          "lineno": 296
+          "lineno": 298
         },
         {
           "name": "_compact_scoring_interest",
-          "lineno": 311
+          "lineno": 313
         },
         {
           "name": "_adaptive_final_scoring_batch_size",
-          "lineno": 333
+          "lineno": 335
         },
         {
           "name": "_rate_limited_llm_provider",
-          "lineno": 361
+          "lineno": 363
         },
         {
           "name": "_adaptive_final_scoring_workers",
-          "lineno": 367
+          "lineno": 369
         },
         {
           "name": "_dedupe_items",
-          "lineno": 389
+          "lineno": 391
         },
         {
           "name": "_normalized_recommendation_title",
-          "lineno": 401
+          "lineno": 403
         },
         {
           "name": "_recommendation_identity_key",
-          "lineno": 406
+          "lineno": 408
         },
         {
           "name": "_dedupe_recommendation_items",
-          "lineno": 419
+          "lineno": 421
         },
         {
           "name": "_mock_offline_venue_title_index",
-          "lineno": 436
+          "lineno": 438
         },
         {
           "name": "_paper_identity_keys",
-          "lineno": 492
+          "lineno": 494
         },
         {
           "name": "_evaluated_by_identity",
-          "lineno": 510
+          "lineno": 512
         },
         {
           "name": "_is_llm_rate_limit_error",
-          "lineno": 525
+          "lineno": 527
         },
         {
           "name": "_is_fatal_llm_configuration_error",
-          "lineno": 550
+          "lineno": 552
         },
         {
           "name": "_fatal_llm_configuration_message",
-          "lineno": 577
+          "lineno": 579
         },
         {
           "name": "_raise_if_fatal_llm_configuration_error",
-          "lineno": 582
+          "lineno": 584
         },
         {
           "name": "_is_transient_llm_service_error",
-          "lineno": 587
+          "lineno": 589
         },
         {
           "name": "_as_float",
-          "lineno": 613
+          "lineno": 615
         },
         {
           "name": "_as_int",
-          "lineno": 623
+          "lineno": 625
         },
         {
           "name": "_normalize_hit_directions",
-          "lineno": 630
+          "lineno": 632
         },
         {
           "name": "_hit_direction_i18n",
-          "lineno": 638
+          "lineno": 640
         },
         {
           "name": "_set_hit_direction_language_fields",
-          "lineno": 664
+          "lineno": 666
         },
         {
           "name": "_combined_score",
-          "lineno": 675
+          "lineno": 677
         },
         {
           "name": "_final_recommendation_score",
-          "lineno": 681
+          "lineno": 683
         },
         {
           "name": "_minimum_user_visible_llm_fit_score",
-          "lineno": 686
+          "lineno": 688
         },
         {
           "name": "_flatten_quality_value",
-          "lineno": 693
+          "lineno": 695
         },
         {
           "name": "_quality_signal_text",
-          "lineno": 703
+          "lineno": 705
         },
         {
           "name": "_quality_metadata_signal_text",
-          "lineno": 722
+          "lineno": 724
         },
         {
           "name": "_presentation_bonus",
-          "lineno": 753
+          "lineno": 755
         },
         {
           "name": "_presentation_labels",
-          "lineno": 764
+          "lineno": 766
         },
         {
           "name": "_canonical_presentation_type",
-          "lineno": 793
+          "lineno": 795
         },
         {
           "name": "_presentation_display",
-          "lineno": 812
+          "lineno": 814
         },
         {
           "name": "_normalize_presentation_metadata",
-          "lineno": 818
+          "lineno": 820
         },
         {
           "name": "_normalize_presentation_fields",
-          "lineno": 841
+          "lineno": 843
         },
         {
           "name": "_set_quality_labels",
-          "lineno": 848
+          "lineno": 850
         },
         {
           "name": "_quality_bonus_allowed",
-          "lineno": 863
+          "lineno": 865
         },
         {
           "name": "_presentation_bonus_allowed",
-          "lineno": 882
+          "lineno": 884
         },
         {
           "name": "_quality_table_bonus",
-          "lineno": 892
+          "lineno": 894
         },
         {
           "name": "_venue_bonus",
-          "lineno": 902
+          "lineno": 904
         },
         {
           "name": "_screening_negative_relevance_text",
-          "lineno": 916
+          "lineno": 918
         },
         {
           "name": "_screening_relevance_signal",
-          "lineno": 927
+          "lineno": 929
         },
         {
           "name": "_screening_quality_bonus_allowed",
-          "lineno": 951
+          "lineno": 953
         },
         {
           "name": "_screening_quality_bonus",
-          "lineno": 963
+          "lineno": 965
         },
         {
           "name": "_local_screening_quality_bonus",
-          "lineno": 986
+          "lineno": 988
         },
         {
           "name": "_apply_quality_bonus",
-          "lineno": 991
+          "lineno": 993
         },
         {
           "name": "_stable_rank_key",
-          "lineno": 1032
+          "lineno": 1034
         },
         {
           "name": "_final_llm_scoring_pool",
-          "lineno": 1054
+          "lineno": 1056
         },
         {
           "name": "_topic_evidence_source_text",
-          "lineno": 1060
+          "lineno": 1062
         },
         {
           "name": "_contains_any",
-          "lineno": 1068
+          "lineno": 1070
         },
         {
           "name": "_adaptive_signal_terms",
-          "lineno": 1072
+          "lineno": 1074
         },
         {
           "name": "_route_domain_anchor_terms",
-          "lineno": 1093
+          "lineno": 1095
         },
         {
           "name": "_profile_chunk_is_guardrail",
-          "lineno": 1119
+          "lineno": 1121
         },
         {
           "name": "_topic_interest_chunks",
-          "lineno": 1149
+          "lineno": 1151
         },
         {
           "name": "_topic_interest_text",
-          "lineno": 1170
+          "lineno": 1172
         },
         {
           "name": "_route_support_threshold",
-          "lineno": 1174
+          "lineno": 1176
         },
         {
           "name": "_term_family_markers",
-          "lineno": 1182
+          "lineno": 1184
         },
         {
           "name": "_source_marker_is_negated",
-          "lineno": 1212
+          "lineno": 1214
         },
         {
           "name": "_source_has_unnegated_marker",
-          "lineno": 1226
+          "lineno": 1228
         },
         {
           "name": "_source_has_negated_route_term",
-          "lineno": 1236
+          "lineno": 1238
         },
         {
           "name": "_route_terms_have_source_support",
-          "lineno": 1244
+          "lineno": 1246
         },
         {
           "name": "_route_core_terms",
-          "lineno": 1252
+          "lineno": 1254
         },
         {
           "name": "_foundation_route_terms_have_source_support",
-          "lineno": 1262
+          "lineno": 1264
         },
         {
           "name": "_route_source_support",
-          "lineno": 1270
+          "lineno": 1272
         },
         {
           "name": "_best_source_supported_route",
-          "lineno": 1296
+          "lineno": 1298
         },
         {
           "name": "_record_source_supported_adaptive_route",
-          "lineno": 1320
+          "lineno": 1322
         },
         {
           "name": "_candidate_judgment_text",
-          "lineno": 1328
+          "lineno": 1330
         },
         {
           "name": "_topic_gate_required_groups",
-          "lineno": 1352
+          "lineno": 1354
         },
         {
           "name": "_topic_group_markers",
-          "lineno": 1361
+          "lineno": 1363
         },
         {
           "name": "_source_topic_group_hits",
-          "lineno": 1398
+          "lineno": 1400
         },
         {
           "name": "_source_has_actionable_method_or_evidence",
-          "lineno": 1407
+          "lineno": 1409
         },
         {
           "name": "_source_is_generic_background_for_required_topic",
-          "lineno": 1418
+          "lineno": 1420
         },
         {
           "name": "_foundation_matches_current_axes",
-          "lineno": 1429
+          "lineno": 1431
         },
         {
           "name": "_explicit_llm_negative_strong_reason",
-          "lineno": 1441
+          "lineno": 1443
         },
         {
           "name": "_strict_strong_invalid_reason",
-          "lineno": 1465
+          "lineno": 1467
         },
         {
           "name": "_strong_topic_invalid_reason",
-          "lineno": 1478
+          "lineno": 1480
         },
         {
           "name": "_foundation_invalid_reason",
-          "lineno": 1505
+          "lineno": 1507
         },
         {
           "name": "_foundation_strong_enough",
-          "lineno": 1543
+          "lineno": 1545
         },
         {
           "name": "_repair_weak_topic_fit_consistency",
-          "lineno": 1581
+          "lineno": 1583
         },
         {
           "name": "_demote_unstable_foundation_item",
-          "lineno": 1614
+          "lineno": 1616
         },
         {
           "name": "_mark_not_positive_for_strong_gate",
-          "lineno": 1635
+          "lineno": 1637
         },
         {
           "name": "_json_or_error",
-          "lineno": 1657
+          "lineno": 1659
         },
         {
           "name": "_llm_live_gate",
-          "lineno": 1667
+          "lineno": 1669
         },
         {
           "name": "_json_or_error_wall_timeout",
-          "lineno": 1711
+          "lineno": 1713
         },
         {
           "name": "_route_word_count",
-          "lineno": 1775
+          "lineno": 1777
         },
         {
           "name": "_looks_like_complete_topic_route",
-          "lineno": 1779
+          "lineno": 1781
         },
         {
           "name": "_adaptive_topic_route_lines",
-          "lineno": 1789
+          "lineno": 1791
         },
         {
           "name": "_adaptive_topic_routes_block",
-          "lineno": 1822
+          "lineno": 1824
         },
         {
           "name": "_route_match_key",
-          "lineno": 1830
+          "lineno": 1832
         },
         {
           "name": "_canonical_adaptive_route",
-          "lineno": 1835
+          "lineno": 1837
         },
         {
           "name": "_route_anchor_text",
-          "lineno": 1845
+          "lineno": 1847
         },
         {
           "name": "_route_anchor_terms",
-          "lineno": 1852
+          "lineno": 1854
         },
         {
           "name": "_route_anchor_source_support",
-          "lineno": 1860
+          "lineno": 1862
         },
         {
           "name": "_complete_route_source_support",
-          "lineno": 1891
+          "lineno": 1893
         },
         {
           "name": "_best_complete_source_supported_route",
-          "lineno": 1898
+          "lineno": 1900
         },
         {
           "name": "_text_has_negated_route_term",
-          "lineno": 1921
+          "lineno": 1923
         },
         {
           "name": "_judgment_negates_complete_route_anchor",
-          "lineno": 1930
+          "lineno": 1932
         },
         {
           "name": "_append_missing_topic_evidence",
-          "lineno": 1939
+          "lineno": 1941
         },
         {
           "name": "_demote_incomplete_llm_topic_route",
-          "lineno": 1954
+          "lineno": 1956
         },
         {
           "name": "_apply_complete_route_guard",
-          "lineno": 1965
+          "lineno": 1967
         },
         {
           "name": "_matched_topic_route",
-          "lineno": 2011
+          "lineno": 2013
         },
         {
           "name": "_has_adaptive_recall_hit",
-          "lineno": 2024
+          "lineno": 2026
         },
         {
           "name": "_stable_source_ranking_score",
-          "lineno": 2029
+          "lineno": 2031
         },
         {
           "name": "_citation_count",
-          "lineno": 2049
+          "lineno": 2051
         },
         {
           "name": "_venue_key",
-          "lineno": 2070
+          "lineno": 2072
         },
         {
           "name": "_parse_release_date",
-          "lineno": 2077
+          "lineno": 2079
         },
         {
           "name": "_known_conference_release_date",
-          "lineno": 2087
+          "lineno": 2089
         },
         {
           "name": "_latest_released_venue_context",
-          "lineno": 2094
+          "lineno": 2096
         },
         {
           "name": "_attach_latest_released_venue_context",
-          "lineno": 2123
+          "lineno": 2125
         },
         {
           "name": "_source_context_bonus",
-          "lineno": 2133
+          "lineno": 2135
         },
         {
           "name": "_is_default_fallback_text",
-          "lineno": 2168
+          "lineno": 2170
         },
         {
           "name": "_normalize_llm_supported_text_fields",
-          "lineno": 2172
+          "lineno": 2174
         },
         {
           "name": "_apply_stable_ranking_score",
-          "lineno": 2185
+          "lineno": 2187
         },
         {
           "name": "_apply_relevance_guard",
-          "lineno": 2215
+          "lineno": 2217
         },
         {
           "name": "_normalize_topic_evidence_value",
-          "lineno": 2226
+          "lineno": 2228
         },
         {
           "name": "_has_topic_evidence_contradiction",
-          "lineno": 2238
+          "lineno": 2240
         },
         {
           "name": "_screening_topic_evidence_blocks_quality_bonus",
-          "lineno": 2290
+          "lineno": 2292
         },
         {
           "name": "_apply_llm_topic_evidence",
-          "lineno": 2303
+          "lineno": 2305
         },
         {
           "name": "_find_cache_path",
-          "lineno": 2348
+          "lineno": 2350
         },
         {
           "name": "_source_row_published_date",
-          "lineno": 2358
+          "lineno": 2360
         },
         {
           "name": "_source_date_coverage",
-          "lineno": 2373
+          "lineno": 2375
         },
         {
           "name": "_date_window_gap_days",
-          "lineno": 2379
+          "lineno": 2381
         },
         {
           "name": "_source_effective_date_window",
-          "lineno": 2390
+          "lineno": 2392
         },
         {
           "name": "_source_search_phrases_signature",
-          "lineno": 2412
+          "lineno": 2414
         },
         {
           "name": "_source_positive_int_env",
-          "lineno": 2417
+          "lineno": 2419
         },
         {
           "name": "_source_request_params",
-          "lineno": 2425
+          "lineno": 2427
         },
         {
           "name": "_source_freshness_tolerance_days",
-          "lineno": 2480
+          "lineno": 2482
         },
         {
           "name": "_source_freshness_report",
-          "lineno": 2491
+          "lineno": 2493
         },
         {
           "name": "_annotate_source_completeness",
-          "lineno": 2510
+          "lineno": 2512
         },
         {
           "name": "_final_llm_score_cache_enabled",
-          "lineno": 2572
+          "lineno": 2574
         },
         {
           "name": "_venue_title_index_cache_adapter",
-          "lineno": 2586
+          "lineno": 2588
         },
         {
           "name": "_venue_title_index_cache_key",
-          "lineno": 2593
+          "lineno": 2595
         },
         {
           "name": "_latest_find_results_title_index",
-          "lineno": 2604
+          "lineno": 2606
         },
         {
           "name": "_sanitize_venue_metadata_audit",
-          "lineno": 2633
+          "lineno": 2635
         },
         {
           "name": "_sanitize_venue_title_index_rows",
-          "lineno": 2651
+          "lineno": 2653
         },
         {
           "name": "_neurips_track_from_detail_url",
-          "lineno": 2697
+          "lineno": 2699
         },
         {
           "name": "_sanitize_neurips_official_row",
-          "lineno": 2707
+          "lineno": 2709
         },
         {
           "name": "_venue_title_index_cache_rows_usable",
-          "lineno": 2738
+          "lineno": 2740
         },
         {
           "name": "_load_venue_title_index_cache_candidates",
-          "lineno": 2756
+          "lineno": 2758
         },
         {
           "name": "_venue_prefers_official_title_source",
-          "lineno": 2779
+          "lineno": 2781
         },
         {
           "name": "_venue_title_index_cache_is_strong",
-          "lineno": 2798
+          "lineno": 2800
         },
         {
           "name": "_load_venue_title_index_cache",
-          "lineno": 2819
+          "lineno": 2821
         },
         {
           "name": "_venue_title_index_cache_rank",
-          "lineno": 2836
+          "lineno": 2838
         },
         {
           "name": "_store_venue_title_index_cache",
-          "lineno": 2851
+          "lineno": 2853
         },
         {
           "name": "_stage0_profile_model_identity",
-          "lineno": 2889
+          "lineno": 2891
         },
         {
           "name": "_stage0_profile_cache_key",
-          "lineno": 2896
+          "lineno": 2898
         },
         {
           "name": "_load_stage0_profile_cache",
-          "lineno": 2907
+          "lineno": 2909
         },
         {
           "name": "_store_stage0_profile_cache",
-          "lineno": 2926
+          "lineno": 2928
         },
         {
           "name": "_final_llm_score_model_identity",
-          "lineno": 2949
+          "lineno": 2951
         },
         {
           "name": "_cache_normalized_text",
-          "lineno": 2957
+          "lineno": 2959
         },
         {
           "name": "_stage0_profile_cache_enabled",
-          "lineno": 2962
+          "lineno": 2964
         },
         {
           "name": "_title_llm_score_cache_enabled",
-          "lineno": 2967
+          "lineno": 2969
         },
         {
           "name": "_title_llm_score_cache_policy",
-          "lineno": 2981
+          "lineno": 2983
         },
         {
           "name": "_title_llm_score_cache_key",
-          "lineno": 2990
+          "lineno": 2992
         },
         {
           "name": "_load_title_llm_score_cache",
-          "lineno": 3008
+          "lineno": 3010
         },
         {
           "name": "_title_llm_cache_title_index",
-          "lineno": 3019
+          "lineno": 3021
         },
         {
           "name": "_title_llm_cache_entry_valid",
-          "lineno": 3036
+          "lineno": 3038
         },
         {
           "name": "_apply_cached_title_llm_score",
-          "lineno": 3051
+          "lineno": 3053
         },
         {
           "name": "_title_llm_score_cache_entry",
-          "lineno": 3073
+          "lineno": 3075
         },
         {
           "name": "_store_title_llm_score_cache_entries",
-          "lineno": 3094
+          "lineno": 3096
         },
         {
           "name": "_final_llm_score_cache_key",
-          "lineno": 3115
+          "lineno": 3117
         },
         {
           "name": "_load_final_llm_score_cache",
-          "lineno": 3132
+          "lineno": 3134
         },
         {
           "name": "_final_llm_cache_reason_unusable",
-          "lineno": 3143
+          "lineno": 3145
         },
         {
           "name": "_final_llm_cache_entry_valid",
-          "lineno": 3151
+          "lineno": 3153
         },
         {
           "name": "_apply_cached_final_llm_score",
-          "lineno": 3168
+          "lineno": 3170
         },
         {
           "name": "_final_llm_score_cache_entry",
-          "lineno": 3189
+          "lineno": 3191
         },
         {
           "name": "_store_final_llm_score_cache_entries",
-          "lineno": 3218
+          "lineno": 3220
         },
         {
           "name": "_apply_topic_evidence_guard",
-          "lineno": 3239
+          "lineno": 3241
         },
         {
           "name": "_scan_count",
-          "lineno": 3258
+          "lineno": 3260
         },
         {
           "name": "_venue_title_fetch_limit",
-          "lineno": 3263
+          "lineno": 3265
         },
         {
           "name": "_timeout_env_value",
-          "lineno": 3279
+          "lineno": 3281
         },
         {
           "name": "_fetch_venue_title_index_online",
-          "lineno": 3290
+          "lineno": 3292
         },
         {
           "name": "_fetch_venue_title_index_for_find",
-          "lineno": 3302
+          "lineno": 3304
         },
         {
           "name": "_target_recall_count",
-          "lineno": 3349
+          "lineno": 3351
         },
         {
           "name": "_min_title_candidates",
-          "lineno": 3358
+          "lineno": 3360
         },
         {
           "name": "_min_detail_candidates",
-          "lineno": 3370
+          "lineno": 3372
         },
         {
           "name": "_large_pool_threshold",
-          "lineno": 3377
+          "lineno": 3379
         },
         {
           "name": "_full_venue_corpus_audit_enabled",
-          "lineno": 3381
+          "lineno": 3383
         },
         {
           "name": "_local_database_metadata_audit",
-          "lineno": 3388
+          "lineno": 3390
         },
         {
           "name": "_online_venue_metadata_audit",
-          "lineno": 3486
+          "lineno": 3488
         },
         {
           "name": "_audit_with_venue_context",
-          "lineno": 3516
+          "lineno": 3518
         },
         {
           "name": "_venue_metadata_status_fields",
-          "lineno": 3523
+          "lineno": 3525
         },
         {
           "name": "_combined_metadata_audit",
-          "lineno": 3636
+          "lineno": 3638
         },
         {
           "name": "_store_verified_live_venue_cache",
-          "lineno": 3682
+          "lineno": 3684
         },
         {
           "name": "_selection_list_value",
-          "lineno": 3713
+          "lineno": 3715
         },
         {
           "name": "_normalize_selection_years",
-          "lineno": 3726
+          "lineno": 3728
         },
         {
           "name": "_selection_venue_year_pairs",
-          "lineno": 3742
+          "lineno": 3744
         },
         {
           "name": "_selection_venue_year_groups",
-          "lineno": 3778
+          "lineno": 3780
         },
         {
           "name": "_selection_venue_unit_count",
-          "lineno": 3782
+          "lineno": 3784
         },
         {
           "name": "_source_count_hint",
-          "lineno": 3790
+          "lineno": 3792
         },
         {
           "name": "_recommendation_target_hint",
-          "lineno": 3799
+          "lineno": 3801
         },
         {
           "name": "_llm_title_filter_scan_budget",
-          "lineno": 3814
+          "lineno": 3816
         },
         {
           "name": "_local_title_screen_budget",
-          "lineno": 3832
+          "lineno": 3834
         },
         {
           "name": "_title_detail_candidate_target",
-          "lineno": 3840
+          "lineno": 3842
         },
         {
           "name": "_title_rank_key",
-          "lineno": 3851
+          "lineno": 3853
         },
         {
           "name": "_score_title_pool",
-          "lineno": 3861
+          "lineno": 3863
         },
         {
           "name": "_local_title_screen_pool",
-          "lineno": 3883
+          "lineno": 3885
         },
         {
           "name": "_ranked_recall_pool",
-          "lineno": 3899
+          "lineno": 3901
         },
         {
           "name": "_venue_recall_result_limit",
-          "lineno": 3904
+          "lineno": 3906
         },
         {
           "name": "_detail_fetch_count",
-          "lineno": 3916
+          "lineno": 3918
         },
         {
           "name": "_venue_detail_fetch_count",
-          "lineno": 3926
+          "lineno": 3928
         },
         {
           "name": "_venue_detail_wall_timeout_sec",
-          "lineno": 3942
+          "lineno": 3944
         },
         {
           "name": "_target_triage_candidate_count",
-          "lineno": 3954
+          "lineno": 3956
         },
         {
           "name": "_final_llm_scoring_limit",
-          "lineno": 3959
+          "lineno": 3961
         },
         {
           "name": "_source_final_llm_scoring_limit",
-          "lineno": 3971
+          "lineno": 3973
         },
         {
           "name": "_abstract_enrichment_limits",
-          "lineno": 3985
+          "lineno": 3987
         },
         {
           "name": "_abstract_lookup_failure_reason",
-          "lineno": 3998
+          "lineno": 4000
         },
         {
           "name": "_find_selection_allows_arxiv",
-          "lineno": 4021
+          "lineno": 4023
         },
         {
           "name": "_abstract_enrichment_timed_out",
-          "lineno": 4026
+          "lineno": 4028
         },
         {
           "name": "_abstract_enrichment_filled_count",
-          "lineno": 4030
+          "lineno": 4032
         },
         {
           "name": "_enrich_missing_abstracts_for_adaptive_recall",
-          "lineno": 4034
+          "lineno": 4036
         },
         {
           "name": "_enrich_missing_abstracts_for_final_scoring",
-          "lineno": 4169
+          "lineno": 4171
         },
         {
           "name": "_apply_result_limit_with_floor",
-          "lineno": 4197
+          "lineno": 4199
         },
         {
           "name": "_detail_presentation_recall_per_type",
-          "lineno": 4204
+          "lineno": 4206
         },
         {
           "name": "_presentation_recall_title_floor",
-          "lineno": 4211
+          "lineno": 4213
         },
         {
           "name": "_detail_candidate_key",
-          "lineno": 4218
+          "lineno": 4220
         },
         {
           "name": "_local_quality_recall_signal",
-          "lineno": 4222
+          "lineno": 4224
         },
         {
           "name": "_quality_local_recall_rank_key",
-          "lineno": 4237
+          "lineno": 4239
         },
         {
           "name": "_quality_local_title_recall_supplement",
-          "lineno": 4248
+          "lineno": 4250
         },
         {
           "name": "_title_fit_for_recall",
-          "lineno": 4301
+          "lineno": 4303
         },
         {
           "name": "_detail_titles_with_presentation_recall",
-          "lineno": 4316
+          "lineno": 4318
         },
         {
           "name": "_prefilter_titles",
-          "lineno": 4372
+          "lineno": 4374
         },
         {
           "name": "_paper_category",
-          "lineno": 4832
+          "lineno": 4834
         },
         {
           "name": "_has_trusted_title_categories",
-          "lineno": 4852
+          "lineno": 4854
         },
         {
           "name": "_title_filter_policy",
-          "lineno": 4861
+          "lineno": 4863
         },
         {
           "name": "_title_filter_groups",
-          "lineno": 4884
+          "lineno": 4886
         },
         {
           "name": "_title_filter_prompt_context",
-          "lineno": 4920
+          "lineno": 4922
         },
         {
           "name": "_category_summary_from_title_index",
-          "lineno": 4931
+          "lineno": 4933
         },
         {
           "name": "_public_category_selection",
-          "lineno": 4959
+          "lineno": 4961
         },
         {
           "name": "_quality_category_recall_supplement",
-          "lineno": 4980
+          "lineno": 4982
         },
         {
           "name": "_adaptive_category_paper_recall_supplement",
-          "lineno": 5075
+          "lineno": 5077
         },
         {
           "name": "_select_official_category_title_index",
-          "lineno": 5155
+          "lineno": 5157
         },
         {
           "name": "_dynamic_title_prune",
-          "lineno": 5226
+          "lineno": 5228
         },
         {
           "name": "_append_title_filter_report",
-          "lineno": 5260
+          "lineno": 5262
         },
         {
           "name": "_load_local_category_guided_index",
-          "lineno": 5327
+          "lineno": 5329
         },
         {
           "name": "_venue_regular_year",
-          "lineno": 5418
+          "lineno": 5420
         },
         {
           "name": "_venue_year_objective_unavailable_reason",
-          "lineno": 5427
+          "lineno": 5429
         },
         {
           "name": "_venue_yewindow",
-          "lineno": 5445
+          "lineno": 5447
         },
         {
           "name": "_venue_yeis_released",
-          "lineno": 5462
+          "lineno": 5464
         },
         {
           "name": "_release_block_reason",
-          "lineno": 5470
+          "lineno": 5472
         },
         {
           "name": "_local_venue_year_verified",
-          "lineno": 5474
+          "lineno": 5476
         },
         {
           "name": "_local_venue_year_metadata_complete",
-          "lineno": 5478
+          "lineno": 5480
         },
         {
           "name": "_resolve_latest_available_venue_years",
-          "lineno": 5491
+          "lineno": 5493
         },
         {
           "name": "_resolve_venue_years",
-          "lineno": 5613
+          "lineno": 5615
         },
         {
           "name": "_evaluate_items",
-          "lineno": 5629
+          "lineno": 5631
         },
         {
           "name": "_apply_mock_final_scoring",
-          "lineno": 6049
+          "lineno": 6051
         },
         {
           "name": "_has_final_title_abstract_llm_scoring",
-          "lineno": 6081
+          "lineno": 6083
         },
         {
           "name": "_metadata_tldr_text",
-          "lineno": 6087
+          "lineno": 6089
         },
         {
           "name": "_abstract_is_semantic_tldr",
-          "lineno": 6095
+          "lineno": 6097
         },
         {
           "name": "_has_real_abstract",
-          "lineno": 6104
+          "lineno": 6106
         },
         {
           "name": "_readable_text_len",
-          "lineno": 6115
+          "lineno": 6117
         },
         {
           "name": "_first_nonempty_text",
-          "lineno": 6119
+          "lineno": 6121
         },
         {
           "name": "_list_text",
-          "lineno": 6127
+          "lineno": 6129
         },
         {
           "name": "_reason_is_too_short",
-          "lineno": 6133
+          "lineno": 6135
         },
         {
           "name": "_has_unsupported_availability_claim",
-          "lineno": 6148
+          "lineno": 6150
         },
         {
           "name": "_has_internal_find_public_text",
-          "lineno": 6251
+          "lineno": 6253
         },
         {
           "name": "_public_route_text",
-          "lineno": 6260
+          "lineno": 6262
         },
         {
           "name": "_public_interest_context",
-          "lineno": 6268
+          "lineno": 6270
         },
         {
           "name": "_sanitize_public_recommendation_text",
-          "lineno": 6274
+          "lineno": 6276
         },
         {
           "name": "_ensure_recommendation_readability",
-          "lineno": 6310
+          "lineno": 6312
         },
         {
           "name": "_recommendation_quality_audit",
-          "lineno": 6479
+          "lineno": 6481
         },
         {
           "name": "_missing_chinese_abstract_ids",
-          "lineno": 6509
+          "lineno": 6511
         },
         {
           "name": "_recommendation_translation_status",
-          "lineno": 6519
+          "lineno": 6521
         },
         {
           "name": "_metadata_chinese_abstract_fallback",
-          "lineno": 6527
+          "lineno": 6529
         },
         {
           "name": "_fill_missing_chinese_abstracts_with_metadata",
-          "lineno": 6541
+          "lineno": 6543
         },
         {
           "name": "_has_strong_topic_evidence",
-          "lineno": 6558
+          "lineno": 6560
         },
         {
           "name": "_mark_evidence_tier",
-          "lineno": 6575
+          "lineno": 6577
         },
         {
           "name": "_recommendation_rank_key",
-          "lineno": 6634
+          "lineno": 6636
         },
         {
           "name": "_final_topic_evidence_invalid_reason",
-          "lineno": 6658
+          "lineno": 6660
         },
         {
           "name": "_find_recommendation_invalid_reason",
-          "lineno": 6681
+          "lineno": 6683
         },
         {
           "name": "_recommendable_ranked",
-          "lineno": 6715
+          "lineno": 6717
         },
         {
           "name": "_strict_rank_input",
-          "lineno": 6747
+          "lineno": 6749
         },
         {
           "name": "_supported_ranked",
-          "lineno": 6757
+          "lineno": 6759
         },
         {
           "name": "_true_strong_recommendation",
-          "lineno": 6776
+          "lineno": 6778
         },
         {
           "name": "_selection_source_count",
-          "lineno": 6796
+          "lineno": 6798
         },
         {
           "name": "_strong_recommendation_count_cap",
-          "lineno": 6806
+          "lineno": 6808
         },
         {
           "name": "_strong_recommendation_target_count",
-          "lineno": 6816
+          "lineno": 6818
         },
         {
           "name": "_recommended",
-          "lineno": 6831
+          "lineno": 6833
         },
         {
           "name": "_screened_ranking",
-          "lineno": 6857
+          "lineno": 6859
         },
         {
           "name": "_candidate_is_positive_evidence",
-          "lineno": 6862
+          "lineno": 6864
         },
         {
           "name": "_retrieval_only_copy",
-          "lineno": 6882
+          "lineno": 6884
         },
         {
           "name": "_triage_candidates",
-          "lineno": 6934
+          "lineno": 6936
         },
         {
           "name": "_critique_candidates",
-          "lineno": 6969
+          "lineno": 6971
         },
         {
           "name": "_looks_english",
-          "lineno": 6975
+          "lineno": 6977
         },
         {
           "name": "_clean_abstract_text",
-          "lineno": 6981
+          "lineno": 6983
         },
         {
           "name": "_clean_missing_abstract_phrasing",
-          "lineno": 7000
+          "lineno": 7002
         },
         {
           "name": "_sanitize_explanation_fields",
-          "lineno": 7017
+          "lineno": 7019
         },
         {
           "name": "_chinese_translation_min_len",
-          "lineno": 7040
+          "lineno": 7042
         },
         {
           "name": "_clean_chinese_translation_output",
-          "lineno": 7045
+          "lineno": 7047
         },
         {
           "name": "_repair_translation_latex_commands",
-          "lineno": 7091
+          "lineno": 7093
         },
         {
           "name": "_balanced_latex_command_spans",
-          "lineno": 7100
+          "lineno": 7102
         },
         {
           "name": "_latex_translation_spans",
-          "lineno": 7119
+          "lineno": 7121
         },
         {
           "name": "_prepare_abstract_translation_prompt_text",
-          "lineno": 7138
+          "lineno": 7140
         },
         {
           "name": "_translation_prompt_abstract",
-          "lineno": 7165
+          "lineno": 7167
         },
         {
           "name": "_restore_latex_translation_placeholders",
-          "lineno": 7172
+          "lineno": 7174
         },
         {
           "name": "_translation_preserves_latex_segments",
-          "lineno": 7184
+          "lineno": 7186
         },
         {
           "name": "_clear_translation_latex_state",
-          "lineno": 7198
+          "lineno": 7200
         },
         {
           "name": "_chinese_translation_reject_reason",
-          "lineno": 7204
+          "lineno": 7206
         },
         {
           "name": "_translation_text_from_data",
-          "lineno": 7226
+          "lineno": 7228
         },
         {
           "name": "_translation_priority",
-          "lineno": 7257
+          "lineno": 7259
         },
         {
           "name": "_attach_abstract_language_fields",
-          "lineno": 7263
+          "lineno": 7265
         },
         {
           "name": "_run_diagnostics",
-          "lineno": 7503
+          "lineno": 7505
         },
         {
           "name": "_source_status",
-          "lineno": 7683
+          "lineno": 7685
         },
         {
           "name": "_venue_source_status_rows_from_reports",
-          "lineno": 7687
+          "lineno": 7689
         },
         {
           "name": "_venue_identity_text",
-          "lineno": 7758
+          "lineno": 7760
         },
         {
           "name": "_is_core_venue_source",
-          "lineno": 7762
+          "lineno": 7764
         },
         {
           "name": "_venue_row_count",
-          "lineno": 7767
+          "lineno": 7769
         },
         {
           "name": "_venue_source_integrity_blocker",
-          "lineno": 7778
+          "lineno": 7780
         },
         {
           "name": "_apply_venue_source_integrity",
-          "lineno": 7805
+          "lineno": 7807
         },
         {
           "name": "_venue_source_public_limited",
-          "lineno": 7831
+          "lineno": 7833
         },
         {
           "name": "_source_status_label",
-          "lineno": 7863
+          "lineno": 7865
         },
         {
           "name": "_public_source_status_message_parts",
-          "lineno": 7889
+          "lineno": 7891
         },
         {
           "name": "_source_status_message_text",
-          "lineno": 7905
+          "lineno": 7907
         },
         {
           "name": "_source_scope_text",
-          "lineno": 7931
+          "lineno": 7933
         },
         {
           "name": "_source_metadata_status_text",
-          "lineno": 7951
+          "lineno": 7953
         },
         {
           "name": "_source_category_text",
-          "lineno": 7968
+          "lineno": 7970
         },
         {
           "name": "_source_abstract_text",
-          "lineno": 7979
+          "lineno": 7981
         },
         {
           "name": "_source_status_detail_parts",
-          "lineno": 7993
+          "lineno": 7995
         },
         {
           "name": "_status_markdown",
-          "lineno": 8042
+          "lineno": 8044
         },
         {
           "name": "_adaptive_arxiv_queries",
-          "lineno": 8061
+          "lineno": 8063
         },
         {
           "name": "_refresh_venue_source_health",
-          "lineno": 8080
+          "lineno": 8082
         },
         {
           "name": "refresh_find_source_health",
-          "lineno": 8140
+          "lineno": 8142
         },
         {
           "name": "run_find",
-          "lineno": 8197
+          "lineno": 8199
         },
         {
           "name": "_register_compat_aliases",
-          "lineno": 9141
+          "lineno": 9158
         }
       ],
       "top_level_classes": [
         {
           "name": "FatalLLMConfigurationError",
-          "lineno": 521
+          "lineno": 523
         }
       ]
     },
