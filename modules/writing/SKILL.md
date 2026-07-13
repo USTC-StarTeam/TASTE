@@ -10,57 +10,75 @@ This module is the public writing capability. It uses TASTE native writing contr
 
 ## Role
 
-The writing agent must generate a real venue-formatted research manuscript, not a gate report, status report, audit report, or project-management note. The manuscript should look like a serious conference submission: title, abstract, introduction, related work, method, experiments/protocol, conclusion, bibliography, and venue template compliance.
+The writing agent must generate a real venue-formatted research manuscript. The manuscript must use submission-native sections: title, abstract, introduction, related work, method, experiments/protocol, conclusion, bibliography, and venue template compliance.
 
 ## Source-Method Use
 
-- Treat third-party repositories as read-only method references. Do not edit them.
+- Treat third-party repositories as read-only method references.
 - Absorb useful patterns into writing: outline, section drafting, literature/citation control, figure/table checks, refinement, review-response, re-review, and compile.
-- Use native names in prompts and outputs. Do not expose source project names as workflow names, role names, UI labels, or manuscript content.
+- Use native TASTE Writing names in prompts, logs, UI text, and manuscript-adjacent outputs.
 
 ## Manuscript Policy
 
-- Do not fabricate experiments, metrics, datasets, citations, code paths, or completed superiority claims.
-- If current evidence lacks a promotable positive result, still write the strongest possible venue-formatted manuscript preview: innovation thesis, method design, mathematical formulation, algorithm, reproducibility contract, and verified reference-calibration evidence. The text must read as a paper, not as a proposal or experiment plan.
-- Do not put failed hypotheses, negative results, internal blockers, readiness gates, unsupported-claim lists, or legacy-route stories into the manuscript body.
-- Non-positive or weak runs may be used internally to decide what not to claim, but they should not become the paper story. Do not re-scope the manuscript from the configured user topic to a weaker-only story merely because evidence is blocked.
-- The abstract and introduction may sell the motivation and proposed mechanism. They must not claim empirical superiority unless a current-route audit-ready result supports it.
+- Experiments, metrics, datasets, citations, code paths, and completed superiority claims must come from current input evidence or verified literature.
+- If current evidence lacks a promotable positive result, still write the strongest possible venue-formatted manuscript preview: innovation thesis, method design, mathematical formulation, algorithm, reproducibility contract, and verified reference-calibration evidence. The text must read as a paper.
+- The manuscript body must contain only submission-facing scientific content.
+- Non-positive or weak runs may be used internally to calibrate claim strength. The paper story must stay anchored to the configured topic and supported evidence.
+- The abstract and introduction may sell the motivation and proposed mechanism. Empirical superiority requires current-route audit-ready evidence.
 - The paper must visually and rhetorically read like a serious conference submission, not like a checklist. Include equations, an algorithmic description, compact tables, and clear figures when evidence permits.
-- The experiments section should contain verified reference/calibration results, dataset/protocol details, and implementation analysis. It must not read like a planned study, ablation proposal, TODO list, or evidence-gate explanation.
-- When proposed-method evidence is still incomplete, use verified reference calibration and method analysis as the empirical anchor. Do not use phrases such as ablation study design, evaluation matrix, planned, future, blocked, inspection, or draft.
-- Do not create a visible `Limitations`, `Future Work`, `Planned Study`, `Success Criteria`, or `Inspection Draft` section. Scope caveats belong in neutral method/protocol prose, not as a submission-facing weakness list.
-- For anonymous review, use only an anonymous author block. Do not include placeholder affiliations, city/country, emails, or tool-generated author metadata.
-- Do not write phrases such as `planned ablation`, `future empirical validation`, `no empirical superiority claims`, `blocked`, `claim promotion`, or `audit-ready` into `paper.tex`.
+- The experiments section should contain verified reference/calibration results, dataset/protocol details, and implementation analysis.
+- When proposed-method evidence is still incomplete, use verified reference calibration and method analysis as the empirical anchor.
+- Scope caveats belong in manuscript-native method/protocol prose.
+- For anonymous review, use only a venue-valid anonymous author block.
+- `paper.tex` must contain manuscript language only.
 
 ## Venue Contract
 
-- Every writing run must first use the current venue-intelligence contract for the configured venue and track. Do not reuse another venue/year template, page rule, anonymity rule, bibliography style, or citation target.
+- Every formal Writing work item must first use the current venue-intelligence contract for the configured venue and track. Use the venue/year/track template, page rule, anonymity rule, bibliography style, and citation target from that contract.
 - If the official venue has no minimum reference count, writing must still meet the recorded the recorded reference-quality target with real verified references. The target is a writing-quality bar, not an official rule.
 - If body pages are within the official limit, never reframe the task as prose shortening. The first repairs are figure/table footprint, bibliography density, unresolved citations, reference coverage, and template details.
 
 - Before writing or revising, read the target venue contract generated by venue-intelligence: `projects/<project>/paper/venues/<venue>/venue_requirements.json`, `template_source.json`, and `workspace/inputs/template.tex`.
-- Treat venue requirements as dynamic facts from current official sources. Do not assume ICLR, ACM, CIKM, or any other fixed template/page rule unless the resolved venue contract says so.
+- Treat venue requirements as dynamic facts from current official sources. Venue-specific template/page assumptions must come from the resolved venue contract.
 - If the body page count is within the official limit, treat the task as layout/citation/template quality repair: diagnose figure/table footprint, bibliography density, unresolved citations, and reference quality first.
-- If the venue has no official minimum reference count, follow the recorded writing-quality reference target with real verified references; never invent citations or call TASTE's quality target an official rule.
+- If the venue has no official minimum reference count, follow the recorded writing-quality reference target with real verified references and label it as a workflow quality target.
 
 
 ## Nature-Family Article Mode
 
 When the configured target venue resolves to a Nature-family journal, writing must switch to Nature-family article mode from the dynamic venue contract, not from a hard-coded project topic or old conference setting.
 
-- Use the writing vendor reference under `modules/writing_dev/skills/nature-family-writing` only as read-only method guidance. Public Workflow prompts, logs, UI text, and manuscripts must still call this the writing module.
+- Use only the local skills under `modules/writing/skills/` as writing guidance. Public prompts, logs, UI text, and manuscripts must call this the writing module.
 - Apply a routing-style writing loop: detect article type, section, language, and Nature-family journal from `venue_requirements.json`; load only the relevant local vendor reference fragments; then draft from the TASTE evidence packet.
 - Nature-family manuscripts need broad-reader significance, a compact unstructured summary-style abstract when the resolved journal allows it, a clear `Here we show` contribution sentence only when evidence supports it, calibrated evidence verbs, reproducible Methods, Data availability, Code availability when applicable, and main-text figures/tables whose claims are supported.
-- If the resolved Nature-family contract says first submission accepts flexible format or a single Word/PDF, record that as venue policy. Do not invent a LaTeX-only hard rule. If The workflow generates LaTeX/PDF for preview, label it as a workflow venue-formatted manuscript preview and keep submission/readiness gates truthful.
-- If the Nature-family official source has a reference cap, treat it as a cap/shape constraint, not as an instruction to delete necessary verified citations blindly. If there is no official minimum reference count, use TASTE's recorded writing-quality target with real verified references and call it a workflow quality target.
-- Do not use conference section labels or page-count assumptions unless the resolved venue contract explicitly asks for them. Nature-family article mode may use Introduction, Results, Discussion, Methods, references, Data availability, Code availability, and figure legends according to the current official contract.
-- Do not promote empirical superiority, translational impact, or broad significance beyond current audit-ready evidence. Weak or blocked experiments may constrain claims but must not become visible gate vocabulary in `paper.tex`.
+- If the resolved Nature-family contract says first submission accepts flexible format or a single Word/PDF, record that as venue policy. If the workflow generates LaTeX/PDF for preview, label it as a workflow venue-formatted manuscript preview and keep submission/readiness gates truthful.
+- If the Nature-family official source has a reference cap, treat it as a cap/shape constraint. If there is no official minimum reference count, use TASTE's recorded writing-quality target with real verified references and call it a workflow quality target.
+- Section labels and page-count assumptions must follow the resolved venue contract. Nature-family article mode may use Introduction, Results, Discussion, Methods, references, Data availability, Code availability, and figure legends according to the current official contract.
+- Empirical superiority, translational impact, and broad significance require current audit-ready evidence. Weak or blocked experiments only calibrate claim strength.
 
 ## Project-Specific Story Source
 
-The writing agent must derive the paper thesis, method notation, experiment emphasis, and venue positioning from the current research project state and the prepared workspace inputs, especially `workspace/inputs/idea.md`, `workspace/inputs/experimental_log.md`, `workspace/inputs/conference_guidelines.md`, and `workspace/inputs/method_contract.md`. The global writing module must not contain fixed paper titles, repository names, datasets, or equations for one project.
+The Writing controller must derive the paper thesis, method notation, experiment emphasis, and venue positioning from current project state, selected Idea/Plan artifacts, experiment records, raw logs, and the canonical `paper/writing/` workspace. Project-specific titles, repository names, datasets, and equations belong only in that project.
 
-If the current project state proposes a mathematical mechanism, use it only when local implementation/planning evidence supports that mechanism. If implementation evidence is incomplete, phrase it as the paper's proposed method and validated protocol context, not as completed superiority evidence and not as a future plan.
+If the current project state proposes a mathematical mechanism, use it only when local implementation/planning evidence supports that mechanism. If implementation evidence is incomplete, phrase it as the paper's proposed method and validated protocol context.
+
+## Runtime Boundary
+
+- The only public entrypoint is `modules/writing/main.py`.
+- Each project has one Writing-owned Claude Code session. Formal work, Web chat, and blocked-audit repair resume only that session; audit turns always use fresh independent sessions.
+- The Writing controller runs with `projects/<project>/` as its working directory.
+- Write canonical scientific artifacts only under `projects/<project>/paper/writing/`.
+- Keep the module-owned project-to-session map under `modules/writing/.runtime/controller_sessions.json`.
+- Controller work and chat create no run directories and perform no project-copy step.
+- `modules/writing/scripts/` has no public runtime scripts. Audit and judgment work is a separate Claude Code action launched by `main.py` with `skills/writing-audit/SKILL.md`.
+
+## Skill Routing
+
+- Read `modules/writing/skills/skill-router/SKILL.md` before selecting task-specific skills.
+- Use the router to load every applicable `modules/writing/skills/*/SKILL.md`.
+- For full paper writing, the router must activate the paper-orchestra chain: outline, plotting, literature review, section writing, and content refinement.
+- For pass/blocked judgment, the router must activate `writing-audit`.
+- For blocked audit repair, the Writing controller must read the audit JSON/Markdown, apply the repair instructions in the canonical project workspace, and then submit the result to a fresh independent audit round.
 
 ## Required Writing Loop
 
@@ -70,8 +88,10 @@ If the current project state proposes a mathematical mechanism, use it only when
 4. Use only verified citation keys and keep references synchronized with the TeX.
 5. Run figure/table, content-policy, and paper-normality checks after edits.
 6. Compile PDF when possible.
-7. Return concise execution notes to the caller, but never place those notes inside `paper.tex`.
+7. Accept independent audit results as repair input when the audit returns `blocked`.
+8. Repair only the files needed to satisfy the audit instructions, preserving input evidence boundaries.
+9. Return concise execution notes to the caller. `paper.tex` remains manuscript content.
 
 ## Hard Output Boundary
 
-`paper.tex` must be manuscript content only. It must not contain headings such as Revision Status, Submission Blockers, Paper Blockers, Required Revision Actions, Evidence Snapshot, Section Ledger, Writing Blockers, or Next Actions.
+`paper.tex` must be manuscript content only. Revision status, blockers, required actions, evidence snapshots, section ledgers, writing blockers, and next actions belong in audits/provenance.

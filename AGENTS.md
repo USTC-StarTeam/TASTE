@@ -4,21 +4,24 @@ This workspace must be operated from the workspace root represented as `<workspa
 
 ## Default Operating Mode
 
-Use the project-based workflow under `projects/<project>/`. TASTE has one public runtime route:
+Use the project-based workflow under `projects/<project>/`. Every stage has one public module entrypoint, and Framework is the only component allowed to invoke project-stage modules:
 
 - Find uses the configured LLM for title/abstract/detail scoring and recommendation ranking.
-- Read, Idea, and Plan are handled by the project Claude Code session through `modules/reading/main.py --action current_find_research_plan`.
-- If the `claude` CLI is unavailable, Read/Idea/Plan may use the configured LLM only as a structured fallback; that fallback must not execute code, choose an environment, run experiments, write papers, or promote claims.
-- Environment, Experiment, and Paper are Claude Code plus deterministic gate stages. They use the single project-agent route and deterministic gates, with no separate text-only engineering, repair, reviewer, or writing route.
+- Read runs through `framework/scripts/run_module.py reading --action current_find_research_plan`, which prepares and validates the current-Find reading input before invoking `modules/reading/main.py`.
+- Idea runs through `framework/scripts/run_module.py ideation --action idea`, which validates current Find/Read artifacts, prepares a normalized input bundle, invokes `modules/ideation/main.py`, and synchronizes the explicit timestamped run into the project.
+- Plan runs through the Planning public entrypoint and may consume only explicitly approved ideas from the same current Find run.
+- Web never invokes module entrypoints or synchronizes module artifacts directly. It displays project artifacts, transports configuration/commands to Framework, and reports Framework job state.
+- If the `claude` CLI is unavailable, downstream structured fallbacks must not execute code, choose an environment, run experiments, write papers, or promote claims.
+- Environment, Experiment, and Paper each own a separate module-controller Claude Code session plus deterministic gates. Framework supplies the project and invokes the module; Web talks to that module controller through Framework.
 
 ## Takeover Boundaries
 
 There are two different handoff scopes; do not mix them.
 
-Framework-maintainer agents that are repairing or refactoring TASTE itself should read root `AGENTS.md`, root `README.md`, and root `工作状态.txt` on the active machine when present. Historical maintainer handoff/audit material, if preserved, belongs under ignored `runtime/maintenance/`; it describes framework maintenance, not project scientific evidence.
+Framework-maintainer agents that are repairing or refactoring TASTE itself should read root `AGENTS.md`, root `README.md`, and root `工作状态.txt` on the active machine when present. Human-readable maintainer handoff belongs in root `工作状态.txt`; disposable diagnostics belong only in the owning component's ignored `.runtime/` and are not takeover state.
 
-Project Claude Code sessions must keep their scientific state inside `projects/<project>/`. Their project handoff, if any, belongs under that project directory and must not depend on root `工作状态.txt` or ignored `runtime/maintenance/` maintainer notes.
-TASTE-launched project Claude Code sessions must run with `projects/<project>/` as their working directory. They may call TASTE wrapper scripts by absolute path, but their own notes, handoff, and scientific state stay project-local.
+Module-controller Claude Code sessions must keep their scientific state inside `projects/<project>/`. Their project handoff, if any, belongs under that project directory and must not depend on root `工作状态.txt` or component-local maintainer diagnostics.
+TASTE-launched module controllers must run with `projects/<project>/` as their working directory. Each module owns exactly one controller session per project and must not reuse another module's session.
 
 For a project-stage takeover before major work:
 
@@ -45,15 +48,16 @@ Scripts are decision-support tools, not unquestionable authorities.
 
 - Do not assume a fixed GPU model, GPU count, CUDA version, Conda base path, package manager, or local absolute workspace path.
 - Do not write API keys, user account settings, downloaded repos, datasets, logs, generated papers, or private project artifacts into tracked files.
-- Project-agent work should use root `CLAUDE.md` plus `framework/resources/claude/agents`, `framework/resources/claude/commands`, and `framework/resources/claude/skills` as local framework templates only. User-specific `.claude/settings.json` is never tracked.
+- Module-controller work may use root `CLAUDE.md` plus `framework/resources/claude/agents`, `framework/resources/claude/commands`, and `framework/resources/claude/skills` as local framework templates only. User-specific `.claude/settings.json` is never tracked.
 - Find LLM configuration belongs in local config or environment variables. Downstream Claude Code account/API configuration belongs to the user's own Claude Code setup and must not be overwritten by TASTE.
 
 ## TASTE Integration
 
 - The web UI runs through `framework/scripts/start_web.sh` and `web/backend/auto_research/web/server.py`.
 - Find outputs are synchronized into `projects/<project>/planning/finding/` and summarized in `planning/finding_frontend.md`.
-- Current-Find Read/Idea/Plan must stay tied to the latest selected Find run. Do not let Environment, Experiment, or Paper consume stale or non-selected ideas.
+- Current-Find Read, Idea, and Plan must each stay tied to the latest selected Find run. Framework owns these run-id and readiness checks; modules consume only the explicit inputs Framework passes them.
 - Environment, Experiment, and Paper may consume only the single selected plan/idea contract. Non-selected ideas and plans are backlog only.
+- `idea.md` is the user-facing Ideation source of truth. `ideas.json` is a derived machine projection for status and Planning interoperability; Web must render `idea.md` directly.
 
 ## LLM Configuration
 

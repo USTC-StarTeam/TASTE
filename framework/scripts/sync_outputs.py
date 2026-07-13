@@ -16,7 +16,7 @@ from literature_policy import now_utc, paper_sort_key, repo_sort_key, score_pape
 from taste_pythonpath import ensure_taste_pythonpath
 ensure_taste_pythonpath(ROOT)
 from auto_research.source_selection import canonical_source_selection, paper_source_allowed, source_enabled
-from auto_research.paths import FINDING_RUNS_DIR, LEGACY_RUNS_DIR, RUNS_DIR
+from auto_research.paths import FINDING_RUNS_DIR, RUNS_DIR
 
 
 STANDARD_ARTIFACTS = [
@@ -42,7 +42,6 @@ def resolve_taste_run_dir(run_id: str, state: Any | None = None) -> Path | None:
     candidates.extend([
         FINDING_RUNS_DIR / run_id,
         RUNS_DIR / run_id,
-        LEGACY_RUNS_DIR / run_id,
     ])
     seen: set[str] = set()
     for candidate in candidates:
@@ -124,7 +123,6 @@ def sync_current_find_progress(state: Any, taste_dir: Path) -> dict[str, Any]:
         candidates.extend([
             FINDING_RUNS_DIR / run_id / "find_progress.json",
             RUNS_DIR / run_id / "find_progress.json",
-            LEGACY_RUNS_DIR / run_id / "find_progress.json",
         ])
     target = taste_dir / "find_progress.json"
     for source in candidates:
@@ -163,11 +161,6 @@ def normalize_taste_state(state: Any) -> dict[str, Any]:
     if normalized and normalized.get("taste_root") != str(ROOT):
         normalized["taste_root"] = str(ROOT)
     return normalized
-
-
-def slug(text: str, fallback: str = "taste") -> str:
-    value = re.sub(r"[^a-zA-Z0-9]+", "_", str(text or "").strip().lower()).strip("_")
-    return (value or fallback)[:90]
 
 
 def normalize_article(row: dict[str, Any], cfg: dict[str, Any], index: int, reference_time: dt.datetime) -> dict[str, Any]:
@@ -315,45 +308,24 @@ def normalize_repo(row: dict[str, Any], cfg: dict[str, Any], reference_time: dt.
     return item
 
 
-def extract_ideas(taste_dir: Path) -> list[dict[str, Any]]:
-    ideas_payload = load_json(taste_dir / "ideas.json", {})
-    run_id = str(ideas_payload.get("run_id") or "") if isinstance(ideas_payload, dict) else ""
-    llm_state = ideas_payload.get("llm", {}) if isinstance(ideas_payload, dict) and isinstance(ideas_payload.get("llm", {}), dict) else {}
-    if "recoverable_fallback" in run_id or llm_state.get("enabled") is False:
-        return []
-    ideas = ideas_payload.get("ideas", []) if isinstance(ideas_payload, dict) else ideas_payload if isinstance(ideas_payload, list) else []
-    out: list[dict[str, Any]] = []
-    for index, row in enumerate(ideas, 1):
-        if not isinstance(row, dict):
-            continue
-        title = str(row.get('title') or row.get('name') or row.get("idea") or f"TASTE idea {index}")
-        text = str(row.get("description") or row.get("content") or row.get("summary") or row.get("rationale") or "")
-        out.append({
-            "idea_id": str(row.get("id") or f"taste_{slug(title, str(index))}"),
-            "title": title,
-            "description": text,
-            "source": "finding",
-            "status": row.get("status", "watch"),
-            "score": row.get("score") or row.get("novelty_score") or row.get("fit_score") or 0,
-            "novelty": row.get("novelty") or row.get("novelty_score") or "",
-            "feasibility": row.get("feasibility") or row.get("feasibility_score") or "",
-            "evidence": row.get("evidence") or row.get("supporting_papers") or [],
-            "guardrail": "TASTE ideas are planning signals only; executable repo/data evidence is required before they can influence manuscript conclusions.",
-        })
-    return out
-
-
 def extract_plans(taste_dir: Path) -> dict[str, Any]:
     plans_payload = load_json(taste_dir / "plans.json", {})
     run_id = str(plans_payload.get("run_id") or "") if isinstance(plans_payload, dict) else ""
     if "recoverable_fallback" in run_id:
-        return {"source": "finding", "plans_json": {}, "plan_markdown_path": "", "plan_markdown_excerpt": "", "guardrail": "Fallback finding plans are operational repair notes only and are not synced."}
-    plan_md = (taste_dir / "plan.md").read_text(encoding="utf-8", errors="ignore") if (taste_dir / "plan.md").exists() else ""
+        return {"source": "finding", "public_final_artifact": "plan.md", "plans_json_path": "", "plan_markdown_path": "", "guardrail": "Fallback finding plans are operational repair notes only and are not synced."}
+    plan_md_path = taste_dir / "plan.md"
     return {
         "source": "finding",
-        "plans_json": plans_payload,
-        "plan_markdown_path": str(taste_dir / "plan.md") if plan_md else "",
-        "plan_markdown_excerpt": plan_md[:12000],
+        "public_final_artifact": "plan.md",
+        "plans_json_path": str(taste_dir / "plans.json") if isinstance(plans_payload, dict) and plans_payload else "",
+        "plan_markdown_path": str(plan_md_path) if plan_md_path.exists() else "",
+        "selected_idea_id": plans_payload.get("selected_idea_id", "") if isinstance(plans_payload, dict) else "",
+        "selected_plan_id": plans_payload.get("selected_plan_id", "") if isinstance(plans_payload, dict) else "",
+        "artifact_policy": {
+            "public_plan_body": "plan.md",
+            "plans_json_role": "machine audit/control state; no Markdown body copy",
+            "taste_plan_bridge_role": "lightweight paths and selection index only",
+        },
         "guardrail": "Plan must be reconciled with TASTE repo/data/evidence checks before execution.",
     }
 
@@ -573,34 +545,8 @@ def main() -> None:
         payload["counts"]["repos_synced"] = len(repo_items)
         payload["top_repos"] = merged[:10]
 
-    ideas = extract_ideas(taste_dir)
-    if ideas:
-        idea_path = paths.state / "idea_candidates.json"
-        current = load_json(idea_path, {"ideas": []})
-        current_ideas = current.get("ideas", []) if isinstance(current, dict) else []
-        by_id = {str(row.get("idea_id") or row.get('title')): row for row in current_ideas if isinstance(row, dict)}
-        for idea in ideas:
-            by_id[str(idea.get("idea_id") or idea.get("title"))] = idea
-        merged_ideas = list(by_id.values())
-        save_json(idea_path, {
-            "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-            "project": args.project,
-            "ideas": merged_ideas,
-            "summary": {
-                "idea_count": len(merged_ideas),
-                "taste_synced_count": len(ideas),
-                # TASTE marks viable ideas as approved/pending; TASTE's literature gate
-                # expects pursue/watch/prune buckets. Approved ideas are planning
-                # seeds only; manuscript conclusions still require local evidence checks.
-                "pursue_count": sum(1 for row in merged_ideas if str(row.get("recommendation", row.get("status", ""))).lower() in {"pursue", "approved"}),
-                "watch_count": sum(1 for row in merged_ideas if str(row.get("recommendation", row.get("status", ""))).lower() in {"watch", "pending"}),
-                "prune_count": sum(1 for row in merged_ideas if str(row.get("recommendation", row.get("status", ""))).lower() in {"prune", "deleted"}),
-            },
-        })
-        payload["counts"]["ideas_synced"] = len(ideas)
-
     plans = extract_plans(taste_dir)
-    if plans.get("plans_json") or plans.get("plan_markdown_excerpt"):
+    if plans.get("plans_json_path") or plans.get("plan_markdown_path"):
         save_json(paths.state / "taste_plan_bridge.json", plans)
         payload["counts"]["plans_synced"] = 1
 

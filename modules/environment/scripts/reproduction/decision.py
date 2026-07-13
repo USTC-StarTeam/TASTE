@@ -3,187 +3,18 @@ from __future__ import annotations
 import re
 from typing import Any
 
-FAILURE_PATTERNS = [
-    (
-        "conda_environment",
-        [
-            "ResolvePackageNotFound", "PackagesNotFoundError", "UnsatisfiableError", "Solving environment",
-            "No module named", "ImportError", "ModuleNotFoundError", "pip", "conda", "cuda version", "torch version",
-        ],
-    ),
-    (
-        "machine_compute",
-        ["CUDA out of memory", "out of memory", "no kernel image", "CUDA error", "NVIDIA", "sm_", "显存", "illegal memory access"],
-    ),
-    (
-        "repository_code",
-        ["SyntaxError", "AttributeError", "KeyError", "FileNotFoundError", "bug", "not implemented", "No such file or directory", "Traceback"],
-    ),
-    (
-        "dataset",
-        ["dataset", "download", "403", "404", "No such file", "Permission denied", "数据集", "license", "data not found", "file not found", "corrupt"],
-    ),
-    (
-        "paper_config",
-        ["metric", "epoch", "hyperparameter", "config", "checkpoint", "论文配置", "batch size", "learning rate", "seed"],
-    ),
-]
-PHASE_CATEGORY_HINTS = {
-    "conda": "conda_environment",
-    "install": "conda_environment",
-    "verify": "conda_environment",
-    "dataset": "dataset",
-    "data": "dataset",
-    "download": "dataset",
-    "reproduce_full": "paper_config",
-    "reproduce_smoke": "paper_config",
-    "train": "paper_config",
-    "eval": "paper_config",
-    "plan_validation": "paper_config",
-}
-PHASE_CATEGORY_TOKEN_HINTS = [
-    ("conda_environment", {"conda", "mamba", "micromamba", "pip", "install", "dependency", "dependencies", "deps", "requirement", "requirements", "env", "environment", "verify", "import", "setup"}),
-    ("dataset", {"dataset", "datasets", "data", "download", "prepare", "preprocess", "preprocessing", "fetch", "extract", "build"}),
-    ("paper_config", {"reproduce", "reproduction", "full", "smoke", "train", "training", "eval", "evaluate", "evaluation", "test", "benchmark", "metric", "checkpoint", "ckpt", "config"}),
-]
-PHASE_CATEGORY_COMPACT_HINTS = [
-    ("conda_environment", {"conda", "mamba", "pip", "requirements", "dependency", "environment", "verifyimport"}),
-    ("dataset", {"dataset", "downloaddata", "downloaddataset", "preparedata", "preparedataset", "preprocessdata", "preprocessdataset", "fetchdata", "fetchdataset"}),
-    ("paper_config", {"reproducefull", "reproducesmoke", "trainfull", "evalfull", "evaluation", "benchmark", "checkpoint", "paperconfig"}),
-]
 SUPPORTED_CRITERION_OPERATORS = {">=", ">", "<=", "<", "=="}
 METRIC_NUMBER_RE = re.compile(r"^[+-]?(?:(?:\d+(?:,\d{3})+|\d+)(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\s*%?$")
 METRIC_NUMBER_FRAGMENT = r"[+-]?(?:(?:\d+(?:,\d{3})+|\d+)(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\s*%?"
 METRIC_NAME_SEPARATORS = r"[-_\s./@]*"
-METRIC_ALIAS_PATTERNS = {
-    "accuracy": ["acc"],
-    "acc": ["accuracy"],
-    "f1": ["f1_score", "f1score"],
-    "f1score": ["f1", "f1_score"],
-    "auc": ["auroc", "roc_auc", "rocauc"],
-    "auroc": ["auc", "roc_auc", "rocauc"],
-    "meanaverageprecision": ["map", "m_ap"],
-    "map": ["mean_average_precision"],
-    "meaniou": ["miou", "mean_iou"],
-    "miou": ["mean_iou"],
-    "top1accuracy": ["top1", "top_1", "top-1", "acc@1", "top1_acc"],
-    "top5accuracy": ["top5", "top_5", "top-5", "acc@5", "top5_acc"],
-}
 
 
 def _receipt_output_text(receipt: dict[str, Any]) -> str:
     return "\n".join(str(receipt.get(key) or "") for key in ["stdout_head", "stdout_tail", "stderr_tail"])
 
 
-def _receipt_text(receipt: dict[str, Any]) -> str:
-    return "\n".join([_receipt_output_text(receipt), *(str(receipt.get(key) or "") for key in ["status", "command", "phase"])])
-
-
-def _matching_lines(text: str, markers: list[str], limit: int = 4) -> list[str]:
-    lowered_markers = [marker.lower() for marker in markers]
-    out: list[str] = []
-    for raw in str(text or "").splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        lowered = line.lower()
-        if any(marker in lowered for marker in lowered_markers):
-            out.append(line[:500])
-        if len(out) >= limit:
-            break
-    return out
-
-
-def _phase_tokens(phase: str) -> set[str]:
-    return {token for token in re.split(r"[^a-z0-9一-鿿]+", str(phase or "").strip().lower()) if token}
-
-
-def _category_for_phase(phase: str) -> str:
-    lowered = str(phase or "").strip().lower()
-    exact = PHASE_CATEGORY_HINTS.get(lowered)
-    if exact:
-        return exact
-    tokens = _phase_tokens(lowered)
-    for category, hints in PHASE_CATEGORY_TOKEN_HINTS:
-        if tokens & hints:
-            return category
-    compact = re.sub(r"[^a-z0-9一-鿿]+", "", lowered)
-    for category, hints in PHASE_CATEGORY_COMPACT_HINTS:
-        if any(hint in compact for hint in hints):
-            return category
-    return "unknown"
-
-
-def classify_failures(receipts: list[dict[str, Any]], extra_text: str = "") -> list[dict[str, Any]]:
-    buckets: dict[str, dict[str, Any]] = {}
-    failed_receipts = [row for row in receipts if int(row.get("return_code") or 0) != 0]
-    combined_extra = str(extra_text or "")
-    for receipt in failed_receipts:
-        text = _receipt_text(receipt) + "\n" + combined_extra
-        lowered = text.lower()
-        matched_any = False
-        for category, markers in FAILURE_PATTERNS:
-            hits = [marker for marker in markers if marker.lower() in lowered]
-            if not hits:
-                continue
-            matched_any = True
-            bucket = buckets.setdefault(
-                category,
-                {"category": category, "markers": [], "evidence": [], "phases": [], "commands": [], "return_codes": [], "repairable": True},
-            )
-            for marker in hits:
-                if marker not in bucket["markers"]:
-                    bucket["markers"].append(marker)
-            for line in _matching_lines(text, hits):
-                if line not in bucket["evidence"]:
-                    bucket["evidence"].append(line)
-            phase = str(receipt.get("phase") or "").strip()
-            command = str(receipt.get("command") or "").strip()
-            if phase and phase not in bucket["phases"]:
-                bucket["phases"].append(phase)
-            if command and command not in bucket["commands"]:
-                bucket["commands"].append(command[:500])
-            code = receipt.get("return_code")
-            if code not in bucket["return_codes"]:
-                bucket["return_codes"].append(code)
-        if not matched_any:
-            category = _category_for_phase(str(receipt.get("phase") or ""))
-            bucket = buckets.setdefault(
-                category,
-                {"category": category, "markers": [], "evidence": [], "phases": [], "commands": [], "return_codes": [], "repairable": True},
-            )
-            phase = str(receipt.get("phase") or "").strip()
-            command = str(receipt.get("command") or "").strip()
-            status = str(receipt.get("status") or "").strip()
-            if phase and phase not in bucket["phases"]:
-                bucket["phases"].append(phase)
-            if command and command not in bucket["commands"]:
-                bucket["commands"].append(command[:500])
-            code = receipt.get("return_code")
-            if code not in bucket["return_codes"]:
-                bucket["return_codes"].append(code)
-            evidence = str(receipt.get("stderr_tail") or _receipt_output_text(receipt) or status or "命令失败但缺少日志摘要").strip()[:500]
-            if evidence and evidence not in bucket["evidence"]:
-                bucket["evidence"].append(evidence)
-    out: list[dict[str, Any]] = []
-    for bucket in buckets.values():
-        bucket["markers"] = bucket.get("markers", [])[:8]
-        bucket["evidence"] = bucket.get("evidence", [])[:8]
-        bucket["phases"] = bucket.get("phases", [])[:8]
-        bucket["commands"] = bucket.get("commands", [])[:5]
-        bucket["return_codes"] = bucket.get("return_codes", [])[:8]
-        out.append(bucket)
-    if not out and failed_receipts:
-        out.append({"category": "unknown", "markers": [], "evidence": ["命令失败但未匹配到已知类别"], "repairable": True})
-    return out
-
-
 def _metric_name_tokens(name: str) -> list[str]:
     return [token for token in re.split(r"[^A-Za-z0-9]+", str(name or "").strip().lower()) if token]
-
-
-def _metric_name_compact(name: str) -> str:
-    return "".join(_metric_name_tokens(name))
 
 
 def _metric_name_patterns(name: str) -> list[tuple[str, str]]:
@@ -199,10 +30,6 @@ def _metric_name_patterns(name: str) -> list[tuple[str, str]]:
     compact = "".join(tokens)
     if compact and compact != raw.lower():
         variants.append((compact, re.escape(compact)))
-    for alias in METRIC_ALIAS_PATTERNS.get(compact, []):
-        alias_tokens = _metric_name_tokens(alias)
-        alias_pattern = METRIC_NAME_SEPARATORS.join(re.escape(token) for token in alias_tokens) if alias_tokens else re.escape(alias)
-        variants.append((alias, alias_pattern))
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
     for label, pattern in variants:
@@ -401,7 +228,7 @@ def _criterion_is_environment_gate(item: Any) -> bool:
     if not isinstance(item, dict):
         return False
     scope = str(item.get("approval_scope") or "").strip().lower()
-    return scope in {"environment_gate", "environment", "handoff", "runtime_gate", "operational_gate"} or item.get("paper_metric") is False
+    return scope == "environment_gate" or item.get("paper_metric") is False
 
 
 def metric_criteria_passed(criteria: list[Any], receipts: list[dict[str, Any]], allowed_phases: set[str] | None = None) -> tuple[bool, list[dict[str, Any]]]:
@@ -427,6 +254,10 @@ def metric_criteria_passed(criteria: list[Any], receipts: list[dict[str, Any]], 
         if not target_found:
             all_passed = False
             evidence.append({"criterion": item, "metric": name, "passed": False, "reason": "缺少 value/target/paper_value"})
+            continue
+        if op not in SUPPORTED_CRITERION_OPERATORS:
+            all_passed = False
+            evidence.append({"criterion": item, "metric": name, "passed": False, "reason": f"operator={op} 不受支持"})
             continue
         observed, source = _find_metric_observation(name, receipts, allowed_phases)
         observed_f = _coerce_metric_number(observed)
@@ -454,7 +285,7 @@ def metric_criteria_passed(criteria: list[Any], receipts: list[dict[str, Any]], 
             "<=": observed_f <= target_f,
             "<": observed_f < target_f,
             "==": observed_f == target_f,
-        }.get(op, observed_f >= target_f)
+        }[op]
         evidence.append({
             "metric": name,
             "operator": op,
@@ -470,17 +301,11 @@ def metric_criteria_passed(criteria: list[Any], receipts: list[dict[str, Any]], 
     return all_passed, evidence
 
 
-def normalize_verdict(verdict: dict[str, Any], receipts: list[dict[str, Any]]) -> dict[str, Any]:
-    decision = str(verdict.get("decision") or verdict.get("status") or "").strip().lower()
-    if decision in {"approved", "approval", "pass", "passed"}:
-        decision = "approve"
-    if decision in {"rejected", "refuse", "refused", "fail_unrecoverable"}:
-        decision = "reject"
+def normalize_verdict(verdict: dict[str, Any]) -> dict[str, Any]:
+    decision = str(verdict.get("decision") or "").strip().lower()
     if decision not in {"approve", "reject", "continue_repair"}:
         decision = "continue_repair"
     taxonomy = verdict.get("failure_taxonomy") if isinstance(verdict.get("failure_taxonomy"), list) else []
-    if not taxonomy:
-        taxonomy = classify_failures(receipts, jsonish(verdict))
     allow_next = bool(decision == "approve" and verdict.get("allow_next_module") is True)
     return {
         **verdict,
@@ -488,11 +313,3 @@ def normalize_verdict(verdict: dict[str, Any], receipts: list[dict[str, Any]]) -
         "allow_next_module": allow_next,
         "failure_taxonomy": taxonomy,
     }
-
-
-def jsonish(value: Any) -> str:
-    try:
-        import json
-        return json.dumps(value, ensure_ascii=False)
-    except Exception:
-        return str(value)

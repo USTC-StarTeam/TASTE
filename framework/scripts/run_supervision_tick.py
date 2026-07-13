@@ -789,7 +789,7 @@ def sync_fresh_base_gate_state(paths, snapshot: dict[str, Any]) -> list[str]:
         return ['synced_fresh_base_gate_state']
     return []
 
-def run_step(name: str, cmd: list[str], *, timeout: int = 240) -> dict[str, Any]:
+def run_step(name: str, cmd: list[str], *, timeout: int | None = 240) -> dict[str, Any]:
     started = now_iso()
     try:
         proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, timeout=timeout)
@@ -900,10 +900,10 @@ def selected_base_label(env_selection: dict[str, Any]) -> str:
 def refresh_gates(project: str, venue: str) -> list[dict[str, Any]]:
     py = sys.executable
     return [
-        run_step('audit_reference_reproduction', [py, str(ROOT / 'modules' / 'experimenting' / 'scripts' / 'audit_reference_reproduction.py'), '--project', project, '--venue', venue], timeout=180),
+        run_step('audit_reference_reproduction', [py, str(ROOT / 'framework' / 'scripts' / 'run_module.py'), 'experimenting', '--action', 'reference_reproduction', '--project', project, '--venue', venue], timeout=180),
         run_step('build_blocker_action_plan', [py, str(ROOT / 'modules' / 'planning' / 'scripts' / 'build_blocker_action_plan.py'), '--project', project, '--venue', venue], timeout=180),
         run_step('audit_framework_content_coupling', [py, str(ROOT / 'framework' / 'scripts' / 'audit_framework_content_coupling.py'), '--project', project], timeout=180),
-        run_step('audit_obsolete_baseline_cleanup', [py, str(ROOT / 'modules' / 'environment' / 'scripts' / 'audit_obsolete_baseline_cleanup.py'), '--project', project], timeout=180),
+        run_step('audit_obsolete_baseline_cleanup', [py, str(ROOT / 'framework' / 'scripts' / 'run_module.py'), 'environment', '--action', 'chat', '--project', project, '--message', 'Must only audit project-local obsolete Environment baseline candidates against the current selected route. Must record protected paths, eligible paths, and exact evidence in the project before reporting completion.'], timeout=None),
     ]
 
 
@@ -1008,7 +1008,7 @@ def launch_project_full_cycle(paths, project: str, venue: str) -> dict[str, Any]
     log_dir.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d_%H%M%S')
     log_path = log_dir / f'full_research_cycle_{stamp}.log'
-    cmd = [sys.executable, str(ROOT / 'framework' / 'scripts' / 'run_full_research_cycle.py'), '--project', project, '--venue', venue, '--max-cycles', '3', '--iterations-per-cycle', '1', '--trajectory-rounds', '1', '--max-launches', '1', '--use-existing-literature-packet']
+    cmd = [sys.executable, str(ROOT / 'framework' / 'scripts' / 'run_full_research_cycle.py'), '--project', project, '--venue', venue]
     with log_path.open('ab') as handle:
         proc = subprocess.Popen(cmd, cwd=ROOT, stdout=handle, stderr=subprocess.STDOUT, start_new_session=True)
     payload = {'project': project, 'venue': venue, 'status': 'running', 'pid': proc.pid, 'command': cmd, 'log_path': str(log_path), 'started_at': now_iso(), 'guardrail': 'Continue the single full research pipeline from the validated current Find packet; no second Find and no legacy main-route fallback.'}

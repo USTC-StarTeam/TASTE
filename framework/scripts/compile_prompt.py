@@ -33,7 +33,8 @@ def main() -> None:
     paths = build_paths(args.project)
     compile_limit = int(cfg.get('loop', {}).get('compile_limit', 8) or 8)
     quality = load_json(paths.state / 'paper_quality.json') if (paths.state / 'paper_quality.json').exists() else {'papers': []}
-    ideas = load_json(paths.state / 'idea_candidates.json') if (paths.state / 'idea_candidates.json').exists() else {'ideas': []}
+    idea_path = paths.planning / 'finding' / 'ideas.json'
+    ideas = load_json(idea_path) if idea_path.exists() else {'ideas': []}
     repos = load_json(paths.state / 'repo_candidates.json') if (paths.state / 'repo_candidates.json').exists() else []
     papers = quality.get('papers', []) if isinstance(quality, dict) else []
     papers = sorted(papers, key=paper_sort_key)
@@ -133,11 +134,9 @@ def main() -> None:
         maybe_include(paths.reports / 'dataset_registry.md', 'Dataset Registry'),
         maybe_include(paths.planning / 'init_brief.md', 'Initialization Brief'),
         maybe_include(paths.planning / 'paper_quality.md', 'Paper Quality Assessment'),
-        maybe_include(paths.planning / 'idea_candidates.md', 'Idea Candidates'),
         maybe_include(paths.experiments / 'experiment_log.md', 'Experiment Log'),
         maybe_include(paths.benchmarks / 'benchmark_matrix.md', 'Benchmark Matrix'),
         maybe_include(paths.reports / 'iteration_reflection.md', 'Iteration Reflection'),
-        maybe_include(paths.planning / 'hypothesis_arena.md', 'Hypothesis Arena'),
         maybe_include(paths.planning / 'method_frontier.md', 'Method Frontier'),
         maybe_include(paths.planning / 'workflow_blueprint.md', 'Workflow Blueprint'),
         maybe_include(paths.reports / 'workflow_connectivity.md', 'Workflow Connectivity Audit'),

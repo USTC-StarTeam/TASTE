@@ -9,7 +9,7 @@ from auto_research.source_selection import default_source_selection
 
 
 ClassificationSource = Literal["official", "llm_inferred", "fallback"]
-LLMRole = Literal["find", "read", "idea_generator", "idea_judge", "plan_generator", "plan_evaluator"]
+LLMRole = Literal["find"]
 
 
 class LLMRoleConfig(BaseModel):
@@ -41,7 +41,6 @@ class AppConfig(BaseModel):
     temperature: float = 0.4
     llm_roles: dict[str, LLMRoleConfig] = Field(default_factory=dict)
     llm_concurrency: int = 8
-    idea_parallel_workers: int = 2
     max_fetch_papers: int = 120
     max_recommended_papers: int = 20
     max_ideas: int = 6
@@ -116,16 +115,23 @@ class ReadRequest(BaseModel):
 
 
 class IdeaRequest(BaseModel):
-    run_id: str
-    max_ideas: int | None = None
-    candidate_multiplier: int = 2
-    parallel_workers: int | None = None
+    run_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.-]+$")
+    project: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.-]+$")
+    max_ideas: int | None = Field(default=None, ge=1, le=50)
+
+
+class IdeaMarkdownUpdate(BaseModel):
+    markdown: str = Field(min_length=1, max_length=1_000_000)
+
+
+class PlanMarkdownUpdate(BaseModel):
+    markdown: str
 
 
 class PlanRequest(BaseModel):
     run_id: str
     idea_ids: list[str] = Field(default_factory=list)
-    repair_rounds: int = 3
+    repair_rounds: int = Field(default=3, ge=0)
 
 
 class PlanPolishRequest(BaseModel):
@@ -152,16 +158,10 @@ class EmailJobRequest(BaseModel):
 
 
 class IdeaPatch(BaseModel):
-    title: str | None = None
-    hypothesis: str | None = None
-    mechanism: str | None = None
-    new_method: str | None = None
-    method_details: str | None = None
-    min_experiment: str | None = None
-    minimum_experiment: str | None = None
-    initial_experiment: str | None = None
-    inspired_by_text: str | None = None
     status: Literal["pending", "approved", "deleted"] | None = None
+    title: str | None = Field(default=None, max_length=300)
+    new_method: str | None = Field(default=None, max_length=12_000)
+    initial_experiment: str | None = Field(default=None, max_length=12_000)
 
 
 class Artifact(BaseModel):

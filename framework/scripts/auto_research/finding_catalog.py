@@ -8,6 +8,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from .paths import FRAMEWORK_INPUTS_DIR
+
 
 ROOT = Path(os.environ.get("WORKSPACE_ROOT") or Path(__file__).resolve().parents[3]).expanduser().resolve()
 FINDING_ENTRYPOINT = ROOT / "modules" / "finding" / "main.py"
@@ -69,7 +71,7 @@ def catalog_by_id() -> dict[str, dict[str, Any]]:
 
 
 def venue_health(selection: dict[str, Any], *, sample_limit: int = 3, timeout_sec: float = 30.0) -> list[dict[str, Any]]:
-    input_dir = ROOT / "runtime" / "web_finding_bridge"
+    input_dir = FRAMEWORK_INPUTS_DIR / "finding"
     input_dir.mkdir(parents=True, exist_ok=True)
     selection_path = input_dir / f"venue_health_{os.getpid()}_{id(selection)}.json"
     selection_path.write_text(json.dumps(selection, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

@@ -137,16 +137,8 @@ def command_is_dangerous(command: list[str]) -> str:
 
 def runtime_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     env = os.environ.copy()
-    nvm_bin = env.get("NVM_BIN", "")
-    if not nvm_bin:
-        candidates = [Path("/home/fmh/workspace/.nvm/versions/node/v22.21.0/bin")]
-        for candidate in candidates:
-            if candidate.exists():
-                nvm_bin = str(candidate)
-                env["NVM_BIN"] = nvm_bin
-                env.setdefault("NVM_DIR", str(candidate.parents[2]))
-                break
-    if nvm_bin:
+    nvm_bin = str(env.get("NVM_BIN") or "").strip()
+    if nvm_bin and Path(nvm_bin).exists():
         parts = [nvm_bin, *[part for part in env.get("PATH", "").split(os.pathsep) if part and part != nvm_bin]]
         env["PATH"] = os.pathsep.join(parts)
     env.setdefault("DISABLE_AUTOUPDATER", "1")

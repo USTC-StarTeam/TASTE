@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import importlib.util
 import json
 import os
 import sys
+import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -11,7 +15,8 @@ from path_helpers import ensure_script_paths
 
 ensure_script_paths()
 
-from auto_research.web import project_bridge
+from auto_research import project_bridge
+from auto_research import paper_state
 import project_config
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +49,470 @@ def _source_status_fixture_markdown() -> str:
         "- 状态: limited / 标题总数: 256 / 分类后: 256 / 来源适配器: dblp / 请求年份: 2026 / 有效年份: 2026 / 官方标题索引已核验 / 受限 / 无官方分类 / 无摘要",
         "",
     ])
+
+
+def test_ideation_framework_owns_normalized_input_and_explicit_run_sync(tmp_path):
+    from auto_research.ideation_bridge import prepare_current_find_ideation_input, sync_current_find_ideation_outputs
+
+    projects = tmp_path / "projects"
+    project_root = projects / "demo"
+    finding = project_root / "planning" / "finding"
+    state = project_root / "state"
+    finding.mkdir(parents=True)
+    state.mkdir(parents=True)
+    run_id = "find-run-1"
+    (finding / "find_results.json").write_text(json.dumps({
+        "run_id": run_id,
+        "strong_recommendations": [{"title": "Evidence A", "url": "https://example.org/a", "summary": "auditable evidence"}],
+    }), encoding="utf-8")
+    (finding / "read_results.json").write_text(json.dumps({
+        "run_id": run_id,
+        "public_final_artifact_present": True,
+        "readings": [{"title": "Evidence A", "url": "https://example.org/a", "summary": "deep reading"}],
+    }), encoding="utf-8")
+    (finding / "read.md").write_text("# 论文精读\n\n## Evidence A\n\n正文证据。\n", encoding="utf-8")
+    (state / "current_find_claude_reading_validation.json").write_text(json.dumps({"run_id": run_id, "valid": True}), encoding="utf-8")
+    (state / "current_find_research_plan.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+
+    prepared = prepare_current_find_ideation_input(
+        "demo",
+        requested_run_id=run_id,
+        projects_root=projects,
+        runtime_root=tmp_path / "framework-runtime",
+    )
+    bundle = json.loads(Path(prepared["input_json"]).read_text(encoding="utf-8"))
+    assert bundle["schema_version"] == "taste.ideation_input.v1"
+    assert bundle["run_id"] == run_id
+    assert [item["title"] for item in bundle["items"]] == ["Evidence A"]
+    assert bundle["items"][0]["source"] == "read"
+    assert bundle["items"][0]["summary"] == "deep reading"
+    assert bundle["items"][0]["url"] == "https://example.org/a"
+    assert "read_results" not in bundle
+    assert bundle["read_markdown"].startswith("# 论文精读")
+
+    ideation_root = tmp_path / "ideation"
+    timestamp_id = "20260710T010203123456Z"
+    module_run = ideation_root / ".runtime" / "output" / timestamp_id
+    module_run.mkdir(parents=True)
+    idea_markdown = "# Ideation 生成的新论文想法\n\n## 1. Idea A\n"
+    (module_run / "idea.md").write_text(idea_markdown, encoding="utf-8")
+    (module_run / "ideas.json").write_text(json.dumps({
+        "run_id": run_id,
+        "source_run_id": run_id,
+        "ideation_run_id": timestamp_id,
+        "machine_projection_from": "idea.md",
+        "ideas": [{"id": "idea-001", "title": "Idea A", "new_method": "m" * 50, "initial_experiment": "e" * 50, "inspired_by": [{"title": "Evidence A"}]}],
+    }), encoding="utf-8")
+    (module_run / "manifest.json").write_text(json.dumps({
+        "run_id": timestamp_id,
+        "source_run_id": run_id,
+        "public_final_artifact": "idea.md",
+    }), encoding="utf-8")
+
+    result = sync_current_find_ideation_outputs(
+        "demo",
+        result_payload={"result": {"run_dir": str(module_run)}},
+        projects_root=projects,
+        ideation_root=ideation_root,
+    )
+    project_run = finding / "ideation_runs" / timestamp_id
+    assert result["ideation_run_id"] == timestamp_id
+    assert (finding / "idea.md").read_text(encoding="utf-8") == idea_markdown
+    assert (project_run / "idea.md").read_text(encoding="utf-8") == idea_markdown
+    assert "ideas" not in json.loads((state / "current_find_research_plan.json").read_text(encoding="utf-8"))
+    assert sorted(path.name for path in (finding / "ideation_runs").iterdir()) == [timestamp_id]
+
+
+def test_ideation_edit_rejects_artifact_from_stale_find(tmp_path):
+    from auto_research.ideation_bridge import current_find_ideation_run_dir
+
+    projects = tmp_path / "projects"
+    project_root = projects / "demo"
+    finding = project_root / "planning" / "finding"
+    state = project_root / "state"
+    finding.mkdir(parents=True)
+    state.mkdir(parents=True)
+    timestamp_id = "20260710T010203123456Z"
+    (state / "current_find_research_plan.json").write_text(json.dumps({"run_id": "find-new"}), encoding="utf-8")
+    (finding / "ideas.json").write_text(json.dumps({
+        "run_id": "find-old",
+        "ideation_run_id": timestamp_id,
+    }), encoding="utf-8")
+    ideation_root = tmp_path / "ideation"
+    (ideation_root / ".runtime" / "output" / timestamp_id).mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="artifact is stale"):
+        current_find_ideation_run_dir(
+            "demo",
+            requested_run_id="find-new",
+            projects_root=projects,
+            ideation_root=ideation_root,
+        )
+
+
+def test_planning_framework_owns_approved_input_and_explicit_run_sync(tmp_path):
+    from auto_research.planning_bridge import (
+        prepare_current_find_planning_input,
+        prepare_planning_refresh_after_idea_change,
+        sync_current_find_planning_outputs,
+    )
+
+    projects = tmp_path / "projects"
+    project_root = projects / "demo"
+    finding = project_root / "planning" / "finding"
+    state = project_root / "state"
+    finding.mkdir(parents=True)
+    state.mkdir(parents=True)
+    run_id = "find-run-planning"
+    (finding / "find_progress.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    (finding / "read_results.json").write_text(json.dumps({"run_id": run_id, "readings": [{"title": "Paper"}]}), encoding="utf-8")
+    (state / "current_find_claude_reading_validation.json").write_text(json.dumps({"run_id": run_id, "valid": True}), encoding="utf-8")
+    (state / "current_find_research_plan.json").write_text(json.dumps({"run_id": run_id, "current_find_idea_count": 3}), encoding="utf-8")
+    ideas = [
+        {"id": "idea-a", "title": "Idea A", "status": "approved", "new_method": "method a", "initial_experiment": "experiment a"},
+        {"id": "idea-b", "title": "Idea B", "approved_for_planning": True, "new_method": "method b", "initial_experiment": "experiment b"},
+        {"id": "idea-c", "title": "Idea C", "status": "pending", "new_method": "method c", "initial_experiment": "experiment c"},
+    ]
+    (finding / "ideas.json").write_text(json.dumps({"run_id": run_id, "source": "taste_ideation", "ideas": ideas}), encoding="utf-8")
+    (finding / "idea.md").write_text("# Ideas\n\n## Idea A\n\n## Idea B\n", encoding="utf-8")
+
+    prepared = prepare_current_find_planning_input(
+        "demo",
+        action="plan",
+        requested_run_id=run_id,
+        projects_root=projects,
+        runtime_root=tmp_path / "planning-inputs",
+    )
+    bundle = json.loads(Path(prepared["input_json"]).read_text(encoding="utf-8"))
+    assert bundle["schema_version"] == "taste.planning_input.v1"
+    assert prepared["approved_idea_ids"] == ["idea-a", "idea-b"]
+    assert [row["id"] for row in bundle["ideas"]["ideas"]] == ["idea-a", "idea-b"]
+    assert "approved_ideas" not in bundle
+    assert "idea_markdown" not in bundle
+    selected = prepare_current_find_planning_input(
+        "demo",
+        action="plan",
+        requested_run_id=run_id,
+        requested_idea_ids=["idea-a"],
+        projects_root=projects,
+        runtime_root=tmp_path / "planning-inputs",
+    )
+    selected_bundle = json.loads(Path(selected["input_json"]).read_text(encoding="utf-8"))
+    assert selected["selected_idea_ids"] == ["idea-a"]
+    assert [row["id"] for row in selected_bundle["ideas"]["ideas"]] == ["idea-a"]
+    with pytest.raises(ValueError, match="invalid IDs: idea-c"):
+        prepare_current_find_planning_input(
+            "demo",
+            action="plan",
+            requested_run_id=run_id,
+            requested_idea_ids=["idea-c"],
+            projects_root=projects,
+            runtime_root=tmp_path / "planning-inputs",
+        )
+
+    planning_root = tmp_path / "planning-module"
+    planning_run_id = "20260710T010203123456Z_plan_pid42"
+    module_run = planning_root / ".runtime" / "runs" / planning_run_id
+    module_run.mkdir(parents=True)
+    plan_markdown = """# Research Plans
+
+## 1. Plan A
+
+- **Plan ID**: `plan-idea-a`
+- **Idea ID**: `idea-a`
+- **Latest Version**: `v1`
+- **Selected for Execution**: false
+- **Completed**: false
+
+### New Method
+Use a falsifiable candidate method.
+
+### Initial Experiment
+Compare the candidate, baseline, and ablation under one protocol.
+
+### 启发来源
+- No external source was supplied in the approved Idea.
+
+### Step-by-step Plan
+1. Implement the candidate and matched baseline.
+2. Run the ablation and audit failure cases.
+
+### Risks
+- The candidate may not improve the matched baseline.
+
+### Metrics
+- Primary task score and runtime cost.
+"""
+    planned_ideas = [ideas[0]]
+    idea_revision = hashlib.sha256(json.dumps(planned_ideas, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    plan_rows = [{
+        "plan_id": "plan-idea-a",
+        "idea_id": "idea-a",
+        "order": 1,
+        "selected_for_execution": False,
+        "completed": False,
+        "versions": [{"version_id": "v1", "source": "claude_code_direct"}],
+    }]
+    (module_run / "plans.json").write_text(json.dumps({
+        "run_id": run_id,
+        "source": "plan_md_projection",
+        "machine_projection_from": "plan.md",
+        "public_final_artifact": "plan.md",
+        "planned_idea_ids": ["idea-a"],
+        "idea_revision": idea_revision,
+        "plans": plan_rows,
+        "selected_plan_id": "",
+        "plan_markdown_generation": {
+            "source": "claude_code_direct",
+            "sha256": hashlib.sha256(plan_markdown.encode("utf-8")).hexdigest(),
+            "audit": {"status": "pass", "issues": []},
+        },
+    }), encoding="utf-8")
+    (module_run / "plan.md").write_text(plan_markdown, encoding="utf-8")
+    (module_run / "experiment_plan.json").write_text(json.dumps({"run_id": run_id, "status": "blocked_missing_plan_selection"}), encoding="utf-8")
+    (module_run / "taste_plan_bridge.json").write_text(json.dumps({"run_id": run_id, "selected_plan_id": ""}), encoding="utf-8")
+    (module_run / "run_meta.json").write_text(json.dumps({"planning_run_id": planning_run_id}), encoding="utf-8")
+
+    result = sync_current_find_planning_outputs(
+        "demo",
+        result_payload={"result": {"planning_run_dir": str(module_run)}},
+        projects_root=projects,
+        planning_root=planning_root,
+    )
+    synced_state = json.loads((state / "current_find_research_plan.json").read_text(encoding="utf-8"))
+    assert result["planning_run_id"] == planning_run_id
+    assert result["plan_count"] == 1
+    assert (finding / "plan.md").read_text(encoding="utf-8").startswith("# Research Plans")
+    assert (finding / "planning_runs" / planning_run_id / "plan.md").is_file()
+    assert synced_state["current_find_plan_count"] == 1
+    assert synced_state["current_find_approved_idea_count"] == 1
+    assert synced_state["read_idea_plan_ready"] is True
+    assert synced_state["claude_current_find_ready"] is False
+    assert synced_state["status"] == "awaiting_plan_selection"
+    follow_up = prepare_current_find_planning_input(
+        "demo",
+        action="select",
+        requested_run_id=run_id,
+        projects_root=projects,
+        runtime_root=tmp_path / "planning-inputs",
+    )
+    follow_up_bundle = json.loads(Path(follow_up["input_json"]).read_text(encoding="utf-8"))
+    assert follow_up_bundle["plan_markdown"] == plan_markdown
+
+    unaffected = prepare_planning_refresh_after_idea_change("demo", changed_idea_id="idea-b", projects_root=projects)
+    assert unaffected == {"required": False, "reason": "changed_idea_has_no_plan"}
+    refresh = prepare_planning_refresh_after_idea_change("demo", changed_idea_id="idea-a", projects_root=projects)
+    assert refresh["required"] is True
+    assert refresh["idea_ids"] == ["idea-a"]
+    assert not (finding / "plan.md").exists()
+    assert not (finding / "plans.json").exists()
+    assert (finding / "planning_runs" / planning_run_id / "plan.md").is_file()
+
+
+def test_planning_claude_writes_canonical_markdown_with_exact_repair_rounds(monkeypatch, tmp_path):
+    module_path = ROOT / "modules" / "planning" / "scripts" / "core" / "plan_pipeline.py"
+    spec = importlib.util.spec_from_file_location("test_plan_pipeline", module_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    run_id = "find-plan-direct"
+    idea = {
+        "id": "idea-a",
+        "title": "Candidate A",
+        "status": "approved",
+        "new_method": "Use a falsifiable intervention.",
+        "initial_experiment": "Compare candidate, baseline, and ablation.",
+    }
+    (tmp_path / "ideas.json").write_text(json.dumps({"run_id": run_id, "ideas": [idea]}), encoding="utf-8")
+    calls: list[str] = []
+
+    def fake_claude_writer(prompt, directory, target_path, label, log):
+        calls.append(label)
+        if not target_path.exists():
+            target_path.write_text(module.render_plan_markdown([idea]), encoding="utf-8")
+        else:
+            target_path.write_text(target_path.read_text(encoding="utf-8").rstrip() + "\n", encoding="utf-8")
+        return {"status": "ok_file_written"}
+
+    monkeypatch.setenv("PLANNING_PUBLIC_ENTRYPOINT_ACTIVE", "1")
+    monkeypatch.setenv("PLAN_BACKEND", "claude_code")
+    monkeypatch.setattr(module, "_run_claude_markdown_writer", fake_claude_writer)
+    result = module.run_plan_at_directory(
+        tmp_path,
+        module.PlanRequest(run_id=run_id, idea_ids=["idea-a"], repair_rounds=3),
+        module.PlanningConfig(),
+    )
+
+    assert calls == ["plan_md_initial", "plan_md_repair_1", "plan_md_repair_2", "plan_md_repair_3"]
+    assert result["machine_projection_from"] == "plan.md"
+    assert result["plan_markdown_generation"]["repair_rounds"] == 3
+    assert result["plan_markdown_generation"]["audit"]["status"] == "pass"
+    assert result["plans"][0]["versions"][-1]["version_id"] == "v1"
+    assert not ({"title", "new_method", "initial_experiment", "steps", "risks", "metrics"} & set(result["plans"][0]))
+    assert (tmp_path / "plan.md").read_text(encoding="utf-8").startswith("# Research Plans")
+
+
+def test_framework_ideation_patch_regenerates_existing_plan(monkeypatch, tmp_path):
+    import run_module
+
+    planning_calls: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(run_module, "_project_module_lock", lambda stage, project: nullcontext())
+    monkeypatch.setattr(run_module, "current_find_ideation_run_dir", lambda project, requested_run_id="": tmp_path / "idea-run")
+    monkeypatch.setattr(run_module, "_run_streaming", lambda cmd, env, input_text="": (0, '{"status":"ok"}'))
+    monkeypatch.setattr(run_module, "sync_current_find_ideation_outputs", lambda project, result_payload: {"run_id": "find-1"})
+    monkeypatch.setattr(run_module, "prepare_planning_refresh_after_idea_change", lambda project, changed_idea_id="": {
+        "required": True,
+        "run_id": "find-1",
+        "idea_ids": ["idea-a"],
+    })
+
+    def fake_planning(action, args, **kwargs):
+        assert kwargs == {"_lock": False}
+        planning_calls.append((action, list(args)))
+        return 0
+
+    monkeypatch.setattr(run_module, "_run_current_find_planning_bridge", fake_planning)
+    rc = run_module._run_current_find_ideation_bridge(
+        "patch",
+        ["--project", "demo", "--run-id", "find-1", "--idea-id", "idea-a"],
+    )
+
+    assert rc == 0
+    assert planning_calls == [("plan", [
+        "--project", "demo",
+        "--run-id", "find-1",
+        "--repair-rounds", "3",
+        "--idea-id", "idea-a",
+    ])]
+
+
+def test_web_planning_is_framework_only_and_restores_editor_artifact_layout(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    _make_project(projects, "demo")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.setattr(project_bridge, "management_python", lambda: "/env/bin/python")
+    _project, command = project_bridge.build_command({"project": "demo", "action": "current-find-selection"})
+
+    server_text = (ROOT / "web" / "backend" / "auto_research" / "web" / "server.py").read_text(encoding="utf-8")
+    app_text = (ROOT / "web" / "frontend" / "client" / "src" / "App.tsx").read_text(encoding="utf-8")
+    assert command[:5] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "run_module.py"), "planning", "--action", "select"]
+    assert "modules/planning/main.py" not in server_text
+    assert '"planning",\n        "--action"' in server_text
+    assert '@app.put("/api/runs/{run_id}/plan-markdown")' in server_text
+    assert 'data-testid="plan-human-editor"' in app_text
+    assert 'data-testid={tab === "plan" ? "plan-artifact-panel" : undefined}' in app_text
+    assert "planFinalMarkdownPanel" not in app_text
+    assert "planIdeaIds" in app_text
+    assert '"plan": (["plan.md"], ["ideas.json", "plans.json"])' in server_text
+    assert 'cmd.extend(["--idea-id", idea_id])' in server_text
+    assert "planWorkspaceGrid" not in app_text
+    assert "planMarkdownSourceEditor" not in app_text
+    assert "planTitlesFromMarkdown(planMarkdownText)" in app_text
+    assert "rejectHistoricalRunMutation()" in app_text
+    assert 'return selected.startsWith("find_")' not in app_text
+    assert "prepare_planning_refresh_after_idea_change" in (ROOT / "framework" / "scripts" / "run_module.py").read_text(encoding="utf-8")
+
+
+def test_ideation_module_has_one_decoupled_input_pipeline():
+    module_root = ROOT / "modules" / "ideation"
+    main_text = (module_root / "main.py").read_text(encoding="utf-8")
+    pipeline_text = (module_root / "scripts" / "idea_pipeline.py").read_text(encoding="utf-8")
+    render_text = (module_root / "scripts" / "ideation_quality" / "render.py").read_text(encoding="utf-8")
+    schema_text = (module_root / "scripts" / "ideation_quality" / "schema.py").read_text(encoding="utf-8")
+    workspace_text = (module_root / "scripts" / "artifact_io" / "workspace.py").read_text(encoding="utf-8")
+    app_text = (ROOT / "web" / "frontend" / "client" / "src" / "App.tsx").read_text(encoding="utf-8")
+
+    assert 'parser.add_argument("--input-json", required=True' in main_text
+    assert "STANDALONE_ACTIONS" not in main_text
+    assert "FINALIZE_ACTIONS" not in main_text
+    assert "auto_research" not in pipeline_text
+    assert not (module_root / "__init__.py").exists()
+    assert not (module_root / "scripts" / "ideation_tools.py").exists()
+    assert not (module_root / "scripts" / "core" / "standalone_pipeline.py").exists()
+    assert "禁止输出 `### 自检`" in pipeline_text
+    assert '"### 自检",' not in render_text
+    assert '"### 坏例切片",' not in render_text
+    assert '"### 重点验证场景",' not in render_text
+    assert 'expected_headings = ("新方法", "机制细节", "初步实验", "启发来源", "风险与停止标准")' in schema_text
+    assert "bad_case_slice" not in schema_text
+    assert "validation_scenarios" not in schema_text
+    assert "validation_scenarios" not in pipeline_text
+    assert "idea?.validation_scenarios" not in app_text
+    assert "idea?.bad_case_slice" not in app_text
+    assert "无法对应就删除" in pipeline_text
+    assert "无直接风险证据时只写提案的停止规则" in pipeline_text
+    assert 'bundle.get("read_results")' not in pipeline_text
+    assert "MAX_INPUT_BYTES" in pipeline_text
+    assert "fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)" in workspace_text
+    assert "shutil.copytree(source, tmp)" in workspace_text
+
+
+def test_web_ideation_is_markdown_first_and_framework_only():
+    from pydantic import ValidationError
+
+    from auto_research.models import IdeaPatch, IdeaRequest
+
+    server_text = (ROOT / "web" / "backend" / "auto_research" / "web" / "server.py").read_text(encoding="utf-8")
+    app_text = (ROOT / "web" / "frontend" / "client" / "src" / "App.tsx").read_text(encoding="utf-8")
+    framework_bridge = ROOT / "framework" / "scripts" / "auto_research" / "project_bridge.py"
+
+    assert framework_bridge.exists()
+    assert not (ROOT / "web" / "backend" / "auto_research" / "web" / "project_bridge.py").exists()
+    assert "from auto_research.project_bridge import" in server_text
+    assert "modules/ideation/main.py" not in server_text
+    assert 'str(WORKSPACE_ROOT / "framework" / "scripts" / "run_module.py")' in server_text
+    assert 'currentArtifact.name === "idea.md" ? "idea-artifact-markdown"' in app_text
+    assert "markdownRenderer.render(artifactPanelContent(currentArtifact))" in app_text
+    assert "markdownRenderer.render(ideaMarkdownText)" not in app_text
+    assert 'if name != "plan.md"' in server_text
+    assert "saveIdeaFields(ideaId)" in app_text
+    assert "updateIdeaMarkdown(ideaRunId, ideaMarkdownDraft" in app_text
+    assert "startIdea(ideaRunId, maxIdeas, researchProject)" in app_text
+    assert "with JOBS_LOCK:" in server_text
+    assert "_ideation_framework_env" in server_text
+    assert "start_new_session=True" in server_text
+    assert 'project: str = Query(..., min_length=1' in server_text
+    with pytest.raises(ValidationError):
+        IdeaRequest(run_id="find-run", max_ideas=4)
+    request = IdeaRequest(run_id="find-run", project="demo", max_ideas=4)
+    assert request.project == "demo"
+    patch = IdeaPatch(title="Title", new_method="Method", initial_experiment="Experiment")
+    assert patch.model_dump(exclude_none=True) == {
+        "title": "Title",
+        "new_method": "Method",
+        "initial_experiment": "Experiment",
+    }
+
+
+def test_web_framework_process_cancellation_does_not_wait_for_child_output():
+    from auto_research.web import server as web_server
+
+    started = time.monotonic()
+    with pytest.raises(web_server.JobCancelled):
+        web_server._run_framework_process(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            os.environ.copy(),
+            lambda _message: None,
+            lambda: time.monotonic() - started > 0.3,
+        )
+    assert time.monotonic() - started < 5
+
+
+def test_web_ideation_error_message_hides_traceback_and_local_paths():
+    from auto_research.web import server as web_server
+
+    stdout = "\n".join([
+        "Traceback (most recent call last):",
+        '  File "/private/workspace/modules/ideation/main.py", line 10, in main',
+        "ValueError: idea.md failed its Markdown contract: missing section",
+    ])
+    message = web_server._framework_user_error(stdout, "fallback")
+
+    assert message == "idea.md failed its Markdown contract: missing section"
+    assert "Traceback" not in message
+    assert "/private/workspace" not in message
 
 
 def _ready_environment_handoff(repo_path: Path, conda_prefix: Path, *, data_dir: Path | None = None, run_id: str = "env_run", selected: dict | None = None) -> dict:
@@ -172,6 +641,93 @@ def test_web_find_action_uses_framework_run_frontend(monkeypatch, tmp_path):
     assert "--skip-arxiv" in cmd
     assert "--deep-survey" in cmd
     assert "--query" in cmd and cmd[cmd.index("--query") + 1] == "protein design"
+
+
+def test_web_paper_chat_action_uses_writing_module(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    _make_project(projects, "demo")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.setattr(project_bridge, "project_target_venue", lambda project, default="": default or "ICLR")
+    monkeypatch.setattr(project_bridge, "management_python", lambda: "/env/bin/python")
+
+    payload = {"project": "demo", "action": "writing-chat", "stage": "paper", "message": "检查当前论文状态", "venue": "ICLR"}
+    project, cmd = project_bridge.build_command(payload)
+
+    assert project == "demo"
+    assert cmd[:5] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "run_module.py"), "writing", "--action", "chat"]
+    assert "--project" in cmd and cmd[cmd.index("--project") + 1] == "demo"
+    assert "--message" in cmd and cmd[cmd.index("--message") + 1] == "检查当前论文状态"
+    assert "--venue" in cmd and cmd[cmd.index("--venue") + 1] == "ICLR"
+    assert "--queue-if-busy" in cmd
+    assert project_bridge.job_stage(payload) == "writing-chat"
+    assert project_bridge._requested_panel_stage(payload, "writing-chat") == ("paper", "paper")
+
+
+def test_web_paper_work_uses_framework_and_no_run_action(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    _make_project(projects, "demo")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.setattr(project_bridge, "project_target_venue", lambda project, default="": default or "ICLR")
+    monkeypatch.setattr(project_bridge, "management_python", lambda: "/env/bin/python")
+
+    project, cmd = project_bridge.build_command({"project": "demo", "action": "paper", "venue": "ICLR"})
+
+    assert project == "demo"
+    assert cmd[:5] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "run_module.py"), "writing", "--action", "work"]
+    assert "--project" in cmd and cmd[cmd.index("--project") + 1] == "demo"
+    assert "--queue-if-busy" in cmd
+    assert "run" not in cmd
+
+
+def test_legacy_claude_message_environment_stage_routes_to_environment_chat(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    _make_project(projects, "demo")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.setattr(project_bridge, "management_python", lambda: "/env/bin/python")
+
+    payload = {"project": "demo", "action": "claude-message", "stage": "environment", "message": "检查环境门控"}
+    project, cmd = project_bridge.build_command(payload)
+
+    assert project == "demo"
+    assert project_bridge.job_stage(payload) == "environment-chat"
+    assert cmd[:5] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "run_module.py"), "environment", "--action", "chat"]
+    assert "--project" in cmd and cmd[cmd.index("--project") + 1] == "demo"
+    assert "--message" in cmd and cmd[cmd.index("--message") + 1] == "检查环境门控"
+
+
+def test_legacy_claude_message_paper_stage_routes_to_writing_chat(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    _make_project(projects, "demo")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.setattr(project_bridge, "project_target_venue", lambda project, default="": default or "ICLR")
+    monkeypatch.setattr(project_bridge, "management_python", lambda: "/env/bin/python")
+
+    payload = {"project": "demo", "action": "claude-message", "stage": "paper", "message": "检查论文证据", "venue": "ICLR"}
+    project, cmd = project_bridge.build_command(payload)
+
+    assert project == "demo"
+    assert project_bridge.job_stage(payload) == "writing-chat"
+    assert cmd[:5] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "run_module.py"), "writing", "--action", "chat"]
+    assert "--message" in cmd and cmd[cmd.index("--message") + 1] == "检查论文证据"
+    assert "--venue" in cmd and cmd[cmd.index("--venue") + 1] == "ICLR"
+
+
+def test_legacy_claude_message_experiment_stage_routes_to_experimenting_chat(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    _make_project(projects, "demo")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.setattr(project_bridge, "management_python", lambda: "/env/bin/python")
+
+    payload = {"project": "demo", "action": "claude-message", "stage": "experiment", "message": "检查实验 blocker"}
+    project, cmd = project_bridge.build_command(payload)
+
+    assert project == "demo"
+    assert project_bridge.job_stage(payload) == "experimenting-chat"
+    assert cmd[:5] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "run_module.py"), "experimenting", "--action", "chat"]
+    assert "--project" in cmd and cmd[cmd.index("--project") + 1] == "demo"
+    assert "--stage" not in cmd
+    assert "--queue-if-busy" in cmd
+    assert "--message" in cmd and cmd[cmd.index("--message") + 1] == "检查实验 blocker"
 
 
 def test_project_bridge_runtime_env_overrides_are_llm_only():
@@ -331,7 +887,7 @@ def test_user_facing_find_markdown_is_canonical():
     assert '"find.md"' in sync_text
     assert '"find.md"' in frontend_text
     assert '"find.md"' in server_text
-    assert '(directory / "find.md").write_text(article_text' in server_text
+    assert '(directory / "find.md").write_text' not in server_text
     assert '"find.md"' in finding_text
     assert 'run_dir / "find.md"' in pipeline_text
     old_find_markdown = "article" + ".md"
@@ -340,7 +896,7 @@ def test_user_facing_find_markdown_is_canonical():
 
 
 def test_find_web_project_artifacts_do_not_expose_maintainer_status():
-    bridge_text = (ROOT / "web" / "backend" / "auto_research" / "web" / "project_bridge.py").read_text(encoding="utf-8")
+    bridge_text = (ROOT / "framework" / "scripts" / "auto_research" / "project_bridge.py").read_text(encoding="utf-8")
     frontend_text = (ROOT / "framework" / "scripts" / "run_frontend.py").read_text(encoding="utf-8")
     sync_text = (ROOT / "framework" / "scripts" / "sync_outputs.py").read_text(encoding="utf-8")
 
@@ -355,7 +911,7 @@ def test_find_web_project_artifacts_do_not_expose_maintainer_status():
 def test_web_framework_do_not_import_finding_private_backend():
     files = [
         ROOT / "web" / "backend" / "auto_research" / "web" / "server.py",
-        ROOT / "web" / "backend" / "auto_research" / "web" / "project_bridge.py",
+        ROOT / "framework" / "scripts" / "auto_research" / "project_bridge.py",
         ROOT / "framework" / "scripts" / "run_frontend.py",
     ]
     forbidden = [
@@ -391,10 +947,9 @@ def test_web_environment_init_alias_uses_framework_single_stage(monkeypatch, tmp
 
 
 
-def test_web_experiment_action_uses_framework_and_module_runtime(monkeypatch, tmp_path):
+def test_web_experiment_action_uses_framework_module_controller(monkeypatch, tmp_path):
     projects = tmp_path / "projects"
     root = _make_project(projects, "demo")
-    repo = root / "repos" / "selected" / "repo"
     monkeypatch.setattr(project_bridge, "PROJECTS", projects)
     monkeypatch.setattr(project_bridge, "project_target_venue", lambda project, default="": default or "ICLR")
     monkeypatch.setattr(project_bridge, "management_python", lambda: "/env/bin/python")
@@ -404,13 +959,51 @@ def test_web_experiment_action_uses_framework_and_module_runtime(monkeypatch, tm
     project, cmd = project_bridge.build_command({"project": "demo", "action": "experiment", "venue": "ICLR", "iterations": 2, "skip_claude": True})
 
     assert project == "demo"
-    assert "--only-stage" in cmd
-    assert cmd[cmd.index("--only-stage") + 1] == "experimenting"
-    module_arg = cmd[cmd.index("--module-arg") + 1]
-    assert module_arg.startswith("experimenting=--plan ")
-    assert f"--repo-path {repo}" in module_arg
-    assert "--conda-env demo_env" in module_arg
-    assert "--output-root " in module_arg and "modules/experimenting/runtime/web/demo" in module_arg
+    assert cmd[:5] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "run_module.py"), "experimenting", "--action", "work"]
+    assert cmd[cmd.index("--project") + 1] == "demo"
+    assert cmd[cmd.index("--iterations") + 1] == "2"
+    assert "--queue-if-busy" in cmd
+    assert "--plan" not in cmd
+    assert "--repo-path" not in cmd
+    assert "--conda-env" not in cmd
+
+
+def test_web_rejects_claude_message_without_module_stage(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    _make_project(projects, "demo")
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+
+    with pytest.raises(ValueError, match="explicit module stage"):
+        project_bridge.build_command({"project": "demo", "action": "claude-message", "message": "检查当前实验 blocker"})
+
+
+def test_experiment_panel_never_falls_back_to_legacy_project_session(tmp_path):
+    from auto_research.web import server as web_server
+
+    root = tmp_path / "demo"
+    state = root / "state"
+    state.mkdir(parents=True)
+    legacy = {
+        "stage": "experiment",
+        "status": "completed",
+        "response_markdown": "legacy project session response",
+        "web_visible_response": True,
+    }
+    (state / "claude_project_session_last_result.json").write_text(json.dumps(legacy), encoding="utf-8")
+
+    assert project_bridge._latest_claude_receipt_for_stage(root, "experiment") == {}
+    result, session_key, reason = web_server._latest_claude_stage_last_result(root, "experiment")
+    assert result == {}
+    assert session_key == "experimenting_controller"
+    assert reason == "stage_receipt_not_found"
+
+    controller = {**legacy, "response_markdown": "module controller response", "session_id": "session-1"}
+    (state / "experimenting_controller_last_result.json").write_text(json.dumps(controller), encoding="utf-8")
+    assert project_bridge._latest_claude_receipt_for_stage(root, "experiment")["response_markdown"] == "module controller response"
+    result, session_key, reason = web_server._latest_claude_stage_last_result(root, "experiment")
+    assert result["response_markdown"] == "module controller response"
+    assert session_key == "experimenting_controller"
+    assert reason == ""
 
 
 def test_missing_plan_returns_human_readable_blocker(monkeypatch, tmp_path):
@@ -428,7 +1021,7 @@ def test_missing_plan_returns_human_readable_blocker(monkeypatch, tmp_path):
     assert "缺少可执行实验计划" in cmd[2]
 
 
-def test_web_experiment_action_prefers_environment_handoff(monkeypatch, tmp_path):
+def test_web_experiment_action_leaves_handoff_consumption_to_module(monkeypatch, tmp_path):
     projects = tmp_path / "projects"
     root = _make_project(projects, "demo")
     handoff_repo = tmp_path / "environment" / "repo"
@@ -445,10 +1038,45 @@ def test_web_experiment_action_prefers_environment_handoff(monkeypatch, tmp_path
     monkeypatch.setattr(project_bridge, "_fresh_base_data_is_blocked", lambda project: False)
 
     _project, cmd = project_bridge.build_command({"project": "demo", "action": "experiment", "venue": "ICLR", "iterations": 1, "skip_claude": True})
-    module_arg = cmd[cmd.index("--module-arg") + 1]
     assert "blocked_fresh_base_gate_required" not in " ".join(cmd)
-    assert f"--repo-path {handoff_repo}" in module_arg
-    assert f"--conda-env {handoff_env}" in module_arg
+    assert cmd[:5] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "run_module.py"), "experimenting", "--action", "work"]
+    assert "--repo-path" not in cmd
+    assert "--conda-env" not in cmd
+
+
+def test_full_cycle_only_sequences_the_seven_framework_actions():
+    source = (ROOT / "framework" / "scripts" / "run_full_research_cycle.py").read_text(encoding="utf-8")
+    bridge_source = (ROOT / "framework" / "scripts" / "auto_research" / "project_bridge.py").read_text(encoding="utf-8")
+
+    assert 'STAGE_ACTIONS = ("find", "read", "idea", "plan", "environment", "experiment", "paper")' in source
+    assert "build_command(payload)" in source
+    assert 'action == "plan"' in source
+    assert '"current-find-selection"' in source
+    assert 'default=3' in source
+    assert "claude_project_session.py" not in source
+    assert "trajectory" not in source
+    assert "audit_" not in source
+    assert "experiment_registry" not in source
+    assert "use_existing_literature_packet" not in source
+    assert "_full_cycle_llm_readiness_block" not in bridge_source
+
+
+def test_full_cycle_is_not_preempted_by_a_stage_specific_literature_gate(monkeypatch, tmp_path):
+    projects = tmp_path / "projects"
+    (projects / "demo").mkdir(parents=True)
+    monkeypatch.setattr(project_bridge, "PROJECTS", projects)
+    monkeypatch.setattr(project_bridge, "management_python", lambda: "/env/bin/python")
+    monkeypatch.setattr(project_bridge, "project_target_venue", lambda project, default="": default or "ICLR")
+    monkeypatch.setattr(project_bridge, "_live_full_cycle_guard", lambda project: {})
+    monkeypatch.setattr(project_bridge, "_literature_recommendation_gate_is_blocked", lambda project: True)
+    payload = {"project": "demo", "action": "full-cycle", "venue": "ICLR"}
+
+    assert project_bridge.action_gate_blocker(payload) is None
+    _project, command = project_bridge.build_command(payload)
+    joined = " ".join(command)
+    assert "run_full_research_cycle.py" in joined
+    assert "use-existing-literature-packet" not in joined
+    assert "force-discovery" not in joined
 
 
 def test_framework_live_process_detection_matches_run_id_case_insensitively(monkeypatch):
@@ -511,7 +1139,7 @@ def test_web_rejects_stale_environment_handoff_policy(monkeypatch, tmp_path):
 def test_web_run_preferences_show_current_environment_plan_runtime_without_handoff(monkeypatch, tmp_path):
     projects = tmp_path / "projects"
     root = _make_project(projects, "demo")
-    run_dir = tmp_path / "modules" / "environment" / "runs" / "web_environment_demo_20260621T000000Z"
+    run_dir = tmp_path / "modules" / "environment" / ".runtime" / "runs" / "web_environment_demo_20260621T000000Z"
     round_dir = run_dir / "round_01"
     env_prefix = run_dir / "conda_envs" / "protdis_env"
     (env_prefix / "bin").mkdir(parents=True)
@@ -528,6 +1156,10 @@ def test_web_run_preferences_show_current_environment_plan_runtime_without_hando
         "decision": "continue_repair",
         "ready_for_experimenting": False,
     }), encoding="utf-8")
+    (run_dir / "run_meta.json").write_text(json.dumps({
+        "requested_project": "demo",
+        "requested_run_id": "web_environment_demo_20260621T000000Z",
+    }), encoding="utf-8")
     monkeypatch.setattr(project_bridge, "PROJECTS", projects)
     monkeypatch.setattr(project_bridge, "ROOT", tmp_path)
 
@@ -543,7 +1175,7 @@ def test_web_run_preferences_show_current_environment_plan_runtime_without_hando
 def test_web_run_preferences_project_conda_env_overrides_stale_environment_plan(monkeypatch, tmp_path):
     projects = tmp_path / "projects"
     root = _make_project(projects, "demo")
-    run_dir = tmp_path / "modules" / "environment" / "runs" / "web_environment_demo_20260621T000000Z"
+    run_dir = tmp_path / "modules" / "environment" / ".runtime" / "runs" / "web_environment_demo_20260621T000000Z"
     round_dir = run_dir / "round_01"
     stale_prefix = run_dir / "conda_envs" / "taste_protein_env"
     (stale_prefix / "bin").mkdir(parents=True)
@@ -558,6 +1190,10 @@ def test_web_run_preferences_project_conda_env_overrides_stale_environment_plan(
         "run_id": run_dir.name,
         "decision": "continue_repair",
         "ready_for_experimenting": False,
+    }), encoding="utf-8")
+    (run_dir / "run_meta.json").write_text(json.dumps({
+        "requested_project": "demo",
+        "requested_run_id": "web_environment_demo_20260621T000000Z",
     }), encoding="utf-8")
     monkeypatch.setattr(project_bridge, "PROJECTS", projects)
     monkeypatch.setattr(project_bridge, "ROOT", tmp_path)
@@ -805,11 +1441,15 @@ def test_web_public_state_prefers_environment_handoff_runtime(monkeypatch, tmp_p
     diagnostics = project_bridge._runtime_diagnostics_light("demo", {})
     env = project_bridge._current_environment_selection(root)
 
-    assert prefs["conda_env"] == str(handoff_env)
+    assert prefs["conda_env"] == "old_env"
+    assert prefs["runtime"]["conda_env"] == "old_env"
     assert prefs["runtime"]["experiment_python"] == str(handoff_env / "bin" / "python")
-    assert merged_runtime["conda_env"] == str(handoff_env)
+    assert prefs["runtime"]["conda_env_prefix"] == str(handoff_env)
+    assert merged_runtime["conda_env"] == "rigid"
+    assert merged_runtime["conda_env_prefix"] == str(handoff_env)
     assert merged_runtime["experiment_python"] == str(handoff_env / "bin" / "python")
-    assert diagnostics["runtime"]["conda_env"] == str(handoff_env)
+    assert diagnostics["runtime"]["conda_env"] == "rigid"
+    assert diagnostics["runtime"]["conda_env_prefix"] == str(handoff_env)
     assert diagnostics["runtime"]["experiment_python"] == str(handoff_env / "bin" / "python")
     assert diagnostics["checks"]["experiment_python"]["path"] == str(handoff_env / "bin" / "python")
     assert diagnostics["path_head"][0] == str(handoff_env / "bin")
@@ -1054,6 +1694,131 @@ def test_web_jobs_lists_handoff_environment_worker_as_nonexclusive(monkeypatch):
     assert "不阻塞实验入口" in row["progress"]["message"]
 
 
+def test_web_read_job_compaction_preserves_phase_progress_when_repeated():
+    from auto_research.web import server as web_server
+
+    source = {
+        "job_id": "read_demo",
+        "stage": "read",
+        "status": "running",
+        "created_at": "2026-07-10T14:00:00Z",
+        "logs": [
+            "Full-text acquisition phase: 3 papers, 2 workers",
+            "Finished full-text acquisition 1/3: full_text=true - Paper One",
+            "Finished full-text acquisition 2/3: full_text=false - Paper Two",
+            "Finished full-text acquisition 3/3: full_text=true - Paper Three",
+            "Reading subagent phase: 2 papers, 2 workers",
+        ],
+        "log_count": 5,
+        "result": {"run_id": "find_demo", "status": "running"},
+        "progress": {"phase": "full_text", "current": 1, "total": 3, "percent": 33, "message": "running"},
+    }
+
+    first = web_server._compact_job_for_list(source)
+    second = web_server._compact_job_for_list(first)
+
+    first_phase = first["progress"]["read_progress"]["phases"]["full_text"]
+    second_phase = second["progress"]["read_progress"]["phases"]["full_text"]
+    assert (first_phase["current"], first_phase["total"], first_phase["workers"], first_phase["status"]) == (3, 3, 2, "complete")
+    assert second_phase == first_phase
+    assert first["progress"]["read_progress"]["current_stage"] == "deep_read"
+    assert "阶段进度：读文章 0/2" in second["logs"]
+
+
+def test_web_read_startup_is_human_facing_and_deduplicated():
+    from auto_research.web import server as web_server
+
+    queued = web_server._read_job_progress_from_logs(
+        [],
+        {"phase": "queued", "current": 0, "total": 0, "percent": 0, "message": "Queued"},
+        {"status": "running", "run_id": "find_demo"},
+        status="running",
+    )
+    started = web_server._read_job_progress_from_logs(
+        [
+            "Full-text acquisition phase: 90 papers",
+            "Full-text acquisition phase: 90 papers, 16 workers",
+        ],
+        {"phase": "full_text", "message": "running"},
+        {"status": "running", "run_id": "find_demo"},
+        status="running",
+    )
+
+    assert queued["current_action"] == "等待爬文章开始。"
+    assert queued["recent_details"] == ["等待爬文章开始。"]
+    assert started["current_action"] == "爬文章启动：共 90 篇，并发 16"
+    assert started["recent_details"] == ["爬文章启动：共 90 篇，并发 16"]
+
+
+def test_web_cancelled_read_keeps_completed_phase_and_current_run_logs():
+    from auto_research.web import server as web_server
+
+    job = web_server.JobState("read_demo", "read")
+    job.status = "cancelled"
+    job.run_id = "find_current"
+    job.logs = [
+        "Full-text acquisition phase: 3 papers, 2 workers",
+        "Finished full-text acquisition 1/3: full_text=true - Paper One",
+        "Finished full-text acquisition 2/3: full_text=true - Paper Two",
+        "Finished full-text acquisition 3/3: full_text=true - Paper Three",
+        "Reading subagent phase: 3 papers, 2 workers",
+        "Finished reading subagent 1/3: complete / deep_read=True - Paper One",
+        "Finished reading subagent 2/3: complete / deep_read=True - Paper Two",
+        "Cancellation requested.",
+    ]
+    job.progress = {"phase": "cancelled", "current": 0, "total": 1, "percent": 0, "message": "Task cancelled by user."}
+    job.result = {
+        "status": "current_find_deep_read_complete_with_warnings",
+        "run_id": "find_current",
+        "summary": "旧 run 已完成精读 87/87",
+        "warnings": [{"stage": "read", "title": "Old Paper", "status": "blocked_full_text_unavailable"}],
+    }
+
+    payload = job.as_dict(compact=True)
+    phases = payload["progress"]["read_progress"]["phases"]
+
+    assert (phases["full_text"]["current"], phases["full_text"]["total"], phases["full_text"]["status"]) == (3, 3, "complete")
+    assert (phases["deep_read"]["current"], phases["deep_read"]["total"], phases["deep_read"]["status"]) == (2, 3, "cancelled")
+    assert payload["progress"]["read_progress"]["current_stage"] == "deep_read"
+    assert payload["logs"][0] == "当前状态：任务已取消：读文章停在 2/3。"
+    assert any("Paper Two" in line for line in payload["logs"])
+    assert all("87/87" not in line and "Old Paper" not in line for line in payload["logs"])
+
+
+def test_web_completed_read_uses_attempted_and_eligible_phase_totals(monkeypatch):
+    from auto_research.web import server as web_server
+
+    monkeypatch.setattr(
+        web_server,
+        "_read_job_artifact_progress",
+        lambda result, progress: {
+            "total": 90,
+            "full_text_current": 87,
+            "deep_read_current": 87,
+            "deep_read_attempted": 87,
+            "pending_full_text": 3,
+            "pending_deep_read": 3,
+            "public_read_md_present": True,
+            "validation_valid": True,
+            "warning_count": 3,
+        },
+    )
+
+    read_progress = web_server._read_job_progress_from_logs(
+        [],
+        {"phase": "complete"},
+        {"status": "framework_synced_reading_outputs"},
+        status="done",
+    )
+
+    full_text = read_progress["phases"]["full_text"]
+    deep_read = read_progress["phases"]["deep_read"]
+    assert (full_text["current"], full_text["total"], full_text["status"]) == (90, 90, "warning")
+    assert (deep_read["current"], deep_read["total"], deep_read["status"]) == (87, 87, "complete")
+    assert read_progress["current_stage"] == "deep_read"
+    assert read_progress["overall_percent"] == 100
+
+
 def test_web_environment_decision_projection_supports_environment_ready(monkeypatch):
     from auto_research.web import server as web_server
 
@@ -1133,9 +1898,9 @@ def test_web_jobs_projects_generic_experiment_error_from_registry(monkeypatch, t
     from auto_research.web import server as web_server
 
     monkeypatch.setattr(web_server, "WORKSPACE_ROOT", tmp_path)
-    registry_dir = tmp_path / "modules" / "experimenting" / "runtime" / "web" / "demo" / "state"
+    registry_dir = tmp_path / "projects" / "demo" / "state"
     registry_dir.mkdir(parents=True)
-    artifact_dir = tmp_path / "modules" / "experimenting" / "runtime" / "web" / "demo" / "runs" / "demo_run" / "iteration_01"
+    artifact_dir = tmp_path / "projects" / "demo" / "experiments" / "experimenting_runs" / "demo_run" / "iteration_01"
     artifact_dir.mkdir(parents=True)
     (registry_dir / "experiment_registry.json").write_text(
         json.dumps(
@@ -1445,6 +2210,62 @@ def test_api_artifacts_light_compacts_large_current_find_progress(monkeypatch, t
     assert len(json.dumps(payload, ensure_ascii=False)) < 20000
 
 
+def test_api_artifacts_ideas_scope_reads_only_ideation_files(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    projects = tmp_path / "projects"
+    root = _make_project(projects, "demo")
+    finding = root / "planning" / "finding"
+    finding.mkdir(parents=True, exist_ok=True)
+    run_id = "find_ideas_scope_demo"
+    (root / "state" / "finding_frontend.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    (finding / "idea.md").write_text(
+        "# Ideation 生成的新论文想法\n\n[Paper](https://papers.nips.cc/paper_files/paper/2025/hash/demo.html)\n",
+        encoding="utf-8",
+    )
+    (finding / "ideas.json").write_text(json.dumps({"run_id": run_id, "ideas": []}), encoding="utf-8")
+    (finding / "read_results.json").write_text("not valid json", encoding="utf-8")
+    run_directory = tmp_path / "runs" / run_id
+    run_directory.mkdir(parents=True)
+    monkeypatch.setattr(web_server, "run_dir", lambda _run_id: run_directory)
+    monkeypatch.setattr(web_server, "PROJECT_IDS_ROOT", projects)
+    monkeypatch.setattr(web_server, "_current_find_public_paper_ref_index", lambda _root: (_ for _ in ()).throw(AssertionError("paper_files URL must not hydrate paper ids")))
+    web_server._RUN_ARTIFACTS_CACHE.clear()
+
+    payload = web_server.api_artifacts(run_id, light=True, scope="ideas", project="demo")
+
+    assert payload["project"] == "demo"
+    assert payload["scope"] == "ideas"
+    assert [item["name"] for item in payload["artifacts"]] == ["idea.md", "ideas.json"]
+
+
+def test_api_artifacts_cache_is_scoped_by_explicit_project(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    projects = tmp_path / "projects"
+    run_id = "find_shared_id"
+    for project, title in (("alpha", "Alpha Idea"), ("beta", "Beta Idea")):
+        root = _make_project(projects, project)
+        finding = root / "planning" / "finding"
+        finding.mkdir(parents=True, exist_ok=True)
+        (root / "state" / "finding_frontend.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+        (finding / "idea.md").write_text(f"# Ideation 生成的新论文想法\n\n## 1. {title}\n", encoding="utf-8")
+        (finding / "ideas.json").write_text(json.dumps({"run_id": run_id, "ideas": [{"title": title}]}), encoding="utf-8")
+    run_directory = tmp_path / "runs" / run_id
+    run_directory.mkdir(parents=True)
+    monkeypatch.setattr(web_server, "run_dir", lambda _run_id: run_directory)
+    monkeypatch.setattr(web_server, "PROJECT_IDS_ROOT", projects)
+    web_server._RUN_ARTIFACTS_CACHE.clear()
+
+    alpha = web_server.api_artifacts(run_id, light=True, scope="ideas", project="alpha")
+    beta = web_server.api_artifacts(run_id, light=True, scope="ideas", project="beta")
+
+    alpha_markdown = next(item["content"] for item in alpha["artifacts"] if item["name"] == "idea.md")
+    beta_markdown = next(item["content"] for item in beta["artifacts"] if item["name"] == "idea.md")
+    assert "Alpha Idea" in alpha_markdown
+    assert "Beta Idea" in beta_markdown
+
+
 def test_api_artifacts_compact_find_results_preserves_dynamic_source_status(monkeypatch, tmp_path):
     from auto_research.web import server as web_server
 
@@ -1488,6 +2309,32 @@ def test_api_artifacts_compact_find_results_preserves_dynamic_source_status(monk
     assert rows["biorxiv"]["prefiltered_count"] == 2000
 
 
+def test_active_paper_state_projects_canonical_writing_workspace(tmp_path):
+    root = _make_project(tmp_path / "projects", "demo")
+    workspace = root / "paper" / "writing"
+    (workspace / "workspace" / "final").mkdir(parents=True)
+    (workspace / "workspace" / "audits").mkdir(parents=True)
+    (workspace / "venue").mkdir(parents=True)
+    (workspace / "workspace" / "final" / "paper.tex").write_text("\\section{Demo}", encoding="utf-8")
+    (workspace / "workspace" / "final" / "paper.pdf").write_text("%PDF-1.4", encoding="utf-8")
+    (workspace / "workspace" / "refs.bib").write_text("@inproceedings{demo,title={Demo}}", encoding="utf-8")
+    (workspace / "audit_repair_loop.json").write_text(json.dumps({"final_audit_status": "pass", "repair_history": [{"round": 1}]}), encoding="utf-8")
+    (workspace / "workspace" / "audits" / "claude_quality_audit.json").write_text(json.dumps({"status": "pass", "blockers": []}), encoding="utf-8")
+    (workspace / "venue" / "venue_requirements.json").write_text(json.dumps({"venue": "ICLR"}), encoding="utf-8")
+    (workspace / "venue" / "template_source.json").write_text(json.dumps({"source": "official"}), encoding="utf-8")
+    metadata = root / "paper" / "metadata"
+    metadata.mkdir(parents=True)
+    (metadata / "paper_pipeline.json").write_text(json.dumps({"writing_workspace": str(workspace), "writing_status": "generated"}), encoding="utf-8")
+
+    state = paper_state.active_paper_state(root, "demo", {"target_venue": "ICLR"})
+
+    assert state["writing_workspace"] == str(workspace)
+    assert state["conference_preview_ready"] is True
+    assert state["pdf_path"].endswith("workspace/final/paper.pdf")
+    assert state["paper_citation_render_status"] == "pass"
+    assert state["venue_requirements_status"] == "pass"
+
+
 def test_api_artifacts_resolves_environment_framework_and_module_roots(monkeypatch, tmp_path):
     from auto_research.web import server as web_server
 
@@ -1517,6 +2364,25 @@ def test_api_artifacts_resolves_environment_framework_and_module_roots(monkeypat
     assert by_name["repo_info.json"]["content"]["repo_candidates"] == ["https://github.com/example/repo"]
     assert str(framework_run) in payload["artifact_roots"]
     assert str(module_run) in payload["artifact_roots"]
+
+
+def test_api_artifacts_does_not_scan_writing_run_directories(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    run_id = "20260709T010203000000Z_chat-demo_pid123"
+    projects = tmp_path / "projects"
+    run_root = projects / "demo" / "paper" / "writing_chat_runs" / run_id
+    run_root.mkdir(parents=True)
+
+    monkeypatch.setattr(web_server, "PROJECT_IDS_ROOT", projects)
+    monkeypatch.setattr(web_server, "FINDING_RUNS_DIR", tmp_path / "missing-finding-runs")
+    monkeypatch.setattr(web_server, "FRAMEWORK_RUNS_DIR", tmp_path / "missing-framework-runs")
+    monkeypatch.setattr(web_server, "ENVIRONMENT_RUNS_DIR", tmp_path / "missing-environment-runs")
+    monkeypatch.setattr(web_server, "run_dir", lambda _run_id: (_ for _ in ()).throw(FileNotFoundError(_run_id)))
+    web_server._RUN_ARTIFACTS_CACHE.clear()
+
+    with pytest.raises(FileNotFoundError):
+        web_server._run_artifact_roots(run_id)
 
 
 def test_api_artifacts_resolves_finding_runtime_runs(monkeypatch, tmp_path):
@@ -1945,6 +2811,68 @@ def test_web_current_find_read_history_supersedes_stale_blocked_read_job(monkeyp
     assert collapsed_read_rows[0]["job_id"].startswith("current-find-read_")
     assert collapsed_read_rows[0]["status"] == "done"
     assert "缺少同篇全文证据" not in json.dumps(collapsed_read_rows[0], ensure_ascii=False)
+
+
+def test_web_completed_read_job_keeps_detailed_logs_after_history_refresh():
+    from auto_research.web import server as web_server
+
+    run_id = "find_current"
+    completed = {
+        "job_id": "read_completed",
+        "stage": "read",
+        "status": "done",
+        "created_at": "2026-06-21T05:00:00Z",
+        "run_id": run_id,
+        "logs": ["阶段进度：读文章 20/20", "细节：已完成精读 20/20"],
+        "result": {"project": "demo", "run_id": run_id},
+    }
+    history = {
+        "job_id": "current-find-read_demo_find_current",
+        "stage": "read",
+        "status": "done",
+        "created_at": "2026-06-21T05:01:00Z",
+        "run_id": run_id,
+        "logs": ["当前状态：Read 阶段已完成。"],
+        "result": {
+            "project": "demo",
+            "run_id": run_id,
+            "kind": "current_find_downstream_artifact_history",
+        },
+    }
+
+    collapsed = web_server._collapse_current_find_read_retry_jobs([completed, history], project_hint="demo")
+
+    assert collapsed == [completed]
+    assert collapsed[0]["logs"] == ["阶段进度：读文章 20/20", "细节：已完成精读 20/20"]
+
+
+def test_web_read_machine_warnings_are_human_facing(monkeypatch):
+    from auto_research.web import server as web_server
+
+    monkeypatch.setattr(web_server, "_read_job_project_read_payload", lambda _result: {
+        "warning_details": [
+            {
+                "phase": "full_text_acquisition",
+                "title": "Paper A",
+                "status": "blocked_full_text_unavailable",
+            },
+            {
+                "phase": "read",
+                "title": "Paper A",
+                "status": "blocked_full_text_unavailable",
+            },
+        ],
+        "warnings": ["1 篇当前 Find 推荐仍缺少同篇全文证据；错误/警告只进入任务日志和 read_results.json。"],
+    })
+
+    lines = web_server._read_job_machine_warning_lines({"project": "demo", "run_id": "find_current"})
+
+    assert lines == [
+        "警告：Paper A 的全文未就绪，因此未进入读文章阶段。",
+        "警告：1 篇论文仍缺少同篇全文证据。",
+    ]
+    assert "blocked_" not in " ".join(lines)
+    assert "read_results.json" not in " ".join(lines)
 
 
 def test_web_project_summary_lists_read_md_before_read_results(monkeypatch, tmp_path):

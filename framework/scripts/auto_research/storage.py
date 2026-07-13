@@ -113,7 +113,6 @@ PROJECT_SYNC_MARKDOWN_WITH_RUN_CONTEXT = {
     "read.md",
     "read_results.md",
     "idea.md",
-    "ideas.md",
     "plan.md",
     "plans.md",
 }

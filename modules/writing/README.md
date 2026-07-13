@@ -1,140 +1,144 @@
-# Writing / 论文写作模块
+# Writing / 论文撰写模块
 
-`modules/writing` 是 TASTE 七阶段中的正式论文写作后端模块。它基于 idea、plan、实验记录、证据审计和目标会议/期刊要求，调研官方投稿规则、下载/验证官方模板，并让 Claude Code 生成证据受控的 venue-formatted 论文。
+Writing 为每个 TASTE 项目维护一个独立的主控 Claude Code 会话。它读取项目已经选定的 Idea、Plan、实验记录和原始证据，在项目目录中生成目标 venue 的论文，并执行“独立审计、主控返修、再次独立审计”闭环。
 
-本模块不负责做实验，也不负责伪造证据。实验产物来自 `experimenting` 或项目目录中已审计的记录；证据不足时只能生成预览/诊断稿，不能标记为投稿通过。
+Writing 只负责论文撰写、修订、引用、图表、模板和论文质量。实验结果、指标和坏例必须来自项目已有证据。
 
-## 运行环境
+## 使用条件
+
+所有调用必须使用 conda `taste` 环境。正式写作还需要当前环境能找到 `claude` CLI；生成 PDF 需要可用的 LaTeX 工具。
 
 ```bash
-ssh hidimension_5090_1
 cd <TASTE_ROOT>
-source /home/fmh/workspace/miniforge/etc/profile.d/conda.sh
-conda activate ar_taste
-source /home/fmh/workspace/.nvm/nvm.sh
+conda run -n taste python framework/scripts/run_module.py writing --contract
 ```
 
-需要 `python`、`rg`、Claude Code；PDF 编译可用 `latexmk` 或 `pdflatex`，不可用时模块会留下编译阻塞报告。
+Writing 没有文本模型降级写作路径。`claude` 不可用时会明确阻塞。
 
-## 两种使用方式
+## 开始写作
 
-### 1. 独立输入包写作
-
-先从项目复制写作输入：
+项目需要已经存在目标 venue、唯一 selected Idea/Plan，以及可供论文使用的实验记录。通过 Framework 启动：
 
 ```bash
-python modules/writing/main.py \
-  --action project_input_pack \
+conda run -n taste python framework/scripts/run_module.py writing \
+  --action work \
   --project <project_id> \
-  --pack-id <pack_id>
+  --venue "ICLR 2027"
 ```
 
-该动作只读项目目录，只写：
+可选参数：
+
+- `--title`：论文工作标题。
+- `--max-audit-repair-rounds`：独立审计阻塞后的最大返修轮数，默认 2。
+- `--timeout-sec`：单次 Claude 调用超时。
+- `--dry-run`：验证会话和队列接口，不调用 Claude。
+
+`work` 不创建 run。Writing 主控的工作目录固定为：
 
 ```text
-modules/writing/runs/source_packs/<pack_id>/
+projects/<project_id>/
 ```
 
-再独立运行写作：
-
-```bash
-python modules/writing/main.py \
-  --action standalone \
-  --venue "ICLR 2026" \
-  --idea modules/writing/runs/source_packs/<pack_id>/idea.md \
-  --plan modules/writing/runs/source_packs/<pack_id>/plan.md \
-  --experimental-log modules/writing/runs/source_packs/<pack_id>/experimental_log.md \
-  --records modules/writing/runs/source_packs/<pack_id>/records \
-  --title "可选标题"
-```
-
-如果只准备 prompt 和目录，不调用 Claude：
-
-```bash
-python modules/writing/main.py --action standalone --venue "ICLR 2026" --idea ... --plan ... --experimental-log ... --records ... --prepare-only
-```
-
-### 2. TASTE 项目态论文预览
-
-```bash
-python modules/writing/main.py \
-  --action pipeline \
-  --project <project_id> \
-  --venue "ICLR" \
-  --generate-paper-preview \
-  --refresh-current-venue
-```
-
-项目态入口会读取 `projects/<project>` 里的当前 Find/Read/Idea/Plan/Experiment/Paper 状态，并把项目论文预览写回项目目录。Web 的 paper 按钮使用这条兼容路径。
-
-## 输入口径
-
-独立写作需要：
-
-- idea：研究问题、核心假设、贡献和方法直觉。
-- plan：实验路线、数据、指标、基线、对照和成功/失败判据。
-- experimental-log：真实实验、环境、命令、指标、失败和坏例记录。
-- records：CSV/JSON/Markdown/图片/PDF/日志等证据目录。
-- venue：目标会议/期刊，例如 `ICLR 2026`、`Nature Machine Intelligence`、`ACL 2026`。
-
-项目态写作需要：
-
-- `--project`：已有 TASTE 项目。
-- `--venue`：目标会议/期刊。
-- 当前项目中已有足够实验/引用/投稿审计证据；不足时生成预览但保持门控阻塞。
-
-## 输出口径
-
-独立写作输出：
+论文产物固定写入：
 
 ```text
-modules/writing/runs/<run_id>/
+projects/<project_id>/paper/writing/
 ```
 
-常见文件：
+## 网页对话
 
-| 文件 | 作用 |
+Paper 页的 Writing 主控对话框直接向该项目唯一的 Writing 主控 Claude 发送命令。Web 只把消息交给 Framework；Framework 调用 Writing 公共入口，Web 不调用模块，也不复制模块文件。
+
+命令行等价调用：
+
+```bash
+conda run -n taste python framework/scripts/run_module.py writing \
+  --action chat \
+  --project <project_id> \
+  --message "检查引用真实性并修复发现的问题"
+```
+
+主控忙碌时：
+
+- 普通发送进入 Writing 模块队列，网页显示排队消息正文。
+- “打断当前任务并优先发送”会终止当前 Claude 进程，先处理网页指令。
+- 网页指令完成后，同一个 Writing 会话恢复被打断的正式写作或返修任务。
+- 同一项目的所有 Writing 工作只能续接同一个模块会话。
+
+网页回复来自：
+
+```text
+projects/<project_id>/state/writing_controller_last_result.json
+projects/<project_id>/state/writing_controller_history.json
+```
+
+## 完整工作流程
+
+1. Framework 把明确的项目、venue 和用户指令传给 `modules/writing/main.py`。
+2. Writing 从模块自己的项目到会话对照表取得该项目唯一的 Claude UUID。
+3. Writing 以 `projects/<project>/` 为 Claude 工作目录，要求主控先读 Writing 总规约和 skill-router。
+4. skill-router 为正式写作加载 venue、引用、质量和 PaperOrchestra 全链路 skills；条件型任务只加载匹配的 skill。
+5. 主控读取 selected Idea/Plan、Find/Read、实验 registry、records、报告和原始日志。
+6. 主控直接更新 canonical `paper/writing/` 中的 venue contract、模板、TeX、BibTeX、图表、审计支持文件和 PDF。
+7. 主入口启动一个不带主控 session ID 的全新 Claude 进程执行独立审计。
+8. 审计返回 `blocked` 时，必须给出具体原因、文件、证据或计数，以及可复查的修复指导；主入口把这些意见交回同一个 Writing 主控会话返修。
+9. 每轮返修后重新启动新的独立审计，直到 `pass` 或达到返修上限。
+
+## 会话与队列状态
+
+模块自己的唯一会话对照表：
+
+```text
+modules/writing/.runtime/controller_sessions.json
+modules/writing/.runtime/controllers/<project>/controller.json
+```
+
+项目中的公开状态：
+
+```text
+projects/<project>/state/writing_controller.json
+projects/<project>/state/writing_controller_last_result.json
+projects/<project>/state/writing_controller_history.json
+```
+
+`.runtime` 只保存 Writing 自己的会话映射、队列和进程回执，不保存论文 run 或项目科学产物。
+
+查看状态：
+
+```bash
+conda run -n taste python framework/scripts/run_module.py writing \
+  --action controller_status \
+  --project <project_id>
+```
+
+## 论文产物
+
+| 路径 | 内容 |
 | --- | --- |
-| `venue/venue_requirements.json` | 官方投稿要求解析。 |
-| `venue/template_source/` | 官方模板或官方允许模板来源。 |
-| `workspace/inputs/` | idea、plan、实验日志和 records 快照。 |
-| `workspace/final/paper.tex` / `paper.pdf` | 最终 TeX/PDF。 |
-| `workspace/refs.bib` | 引用库。 |
-| `workspace/audits/*.json|md` | 引用、claim、页数、normality、submission readiness 审计。 |
-| `workspace/provenance.json` | 证据和生成来源。 |
+| `paper/writing/venue/venue_requirements.json` | 当前官方 venue、year、track 要求和来源。 |
+| `paper/writing/venue/template_source.json` | 官方模板来源。 |
+| `paper/writing/workspace/inputs/template.tex` | 当前论文使用的模板入口。 |
+| `paper/writing/workspace/final/paper.tex` | canonical 论文源码。 |
+| `paper/writing/workspace/final/paper.pdf` | 编译成功后的论文 PDF。 |
+| `paper/writing/workspace/refs.bib` | 真实且与正文 key 一致的引用库。 |
+| `paper/writing/workspace/audits/` | claim、页数和每轮独立质量审计。 |
+| `paper/writing/workspace/repair_rounds/` | 主控根据审计意见执行的返修回执。 |
+| `paper/writing/workspace/provenance.json` | 输入、证据、venue、模板、引用和编译来源。 |
+| `paper/writing/audit_repair_loop.json` | 审计与返修轮次摘要。 |
+| `paper/metadata/paper_pipeline.json` | Framework/Web 使用的论文公开状态。 |
 
-项目态写作输出在 `projects/<project>/paper/...` 和 `projects/<project>/state/...`，供 Web 展示。
+## Skills
 
-## 运行流程
+`modules/writing/SKILL.md` 是 Writing 的总工作边界；`modules/writing/skills/skill-router/SKILL.md` 是每次 Claude turn 的 skill 选择入口。主控 prompt 强制先读取这两个文件，再读取 router 选中的具体 skill。
 
-1. 解析目标 venue，抓取/核对官方 author guidelines、模板、页数、匿名、引用和 AI disclosure 要求。
-2. 准备写作工作区和输入证据快照。
-3. 让 Claude Code 生成或修订论文，但所有 claim 必须绑定输入证据。
-4. 渲染 TeX、尝试编译 PDF。
-5. 执行 citation、claim ledger、figure、normality、page/submission readiness 等审计。
-6. 证据不足或格式不合规时保持 blocked，并输出可读阻塞原因。
+检查所有 skill 是否存在且都有路由：
 
-## 脚本结构
+```bash
+conda run -n taste python framework/scripts/run_module.py writing --action assets
+```
 
-| 目录 | 作用 |
-| --- | --- |
-| `scripts/core/` | 路径、JSON/text、venue policy、LaTeX 和审计公共函数。 |
-| `scripts/pipeline/` | 主流水线、独立运行、项目输入包、Claude 写作桥。 |
-| `scripts/venue/` | 官方 venue 要求解析和模板下载。 |
-| `scripts/rendering/` | Markdown/结构化稿转 TeX、PDF 编译。 |
-| `scripts/audit/` | 证据、引用、图表、normality、submission readiness、claim ledger 审计。 |
-| `scripts/repair/` | 图表、引用、预览稿、Markdown 修复循环。 |
-| `scripts/review/` | 内部评审、作者回应、再评审。 |
-| `scripts/maintenance/` | 内部 skill/helper 完整性检查。 |
+当前 `modules/writing/scripts/` 不保留运行脚本。`skills/*/scripts/` 中仍存在的 Python 文件是 skill 明确调用的确定性环境工具，例如模板初始化、BibTeX/引用一致性、LaTeX 检查和证据门控；它们不管理会话、不决定论文结论，也不能作为 Writing 公共入口。
 
-## 内部 skills
+## 结果判断
 
-`skills/` 中保存写作规约，如 `taste-paper-writing`、`venue-intelligence`、`citation-integrity`、`nature-family-writing`、`writing-quality` 和内化的 PaperOrchestra 工作流。运行时不再依赖 `vendor/`。
-
-## 维护原则
-
-- 不恢复 `vendor/`。需要的外部知识必须整理进 `skills/` 或干净脚本。
-- 不把运行产物、PDF、LaTeX 临时文件、缓存提交进 git。
-- 不把 web 前端逻辑写进本模块。
-- 新增脚本放入对应功能子目录，优先复用 `core/`。
-- 没有真实证据就保持门控阻塞，不能把预览稿当作投稿通过。
+只有独立审计为 `pass`，且 canonical TeX/PDF、真实引用、venue contract、页数审计和 claim-evidence 审计齐全时，Framework 才会显示会议论文预览就绪。PDF 存在但审计阻塞时，只能作为检查预览。

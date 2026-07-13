@@ -1,0 +1,82 @@
+{
+  "default_channels": [
+    "nips",
+    "iclr",
+    "icml",
+    "sigkdd",
+    "sigir",
+    "cikm",
+    "aaai",
+    "iccv",
+    "www",
+    "cvpr",
+    "acl",
+    "ijcai",
+    "eccv",
+    "emnlp"
+  ],
+  "runtime": {
+    "root": ".runtime",
+    "output_dir": ".runtime/output",
+    "latest_run_dir": ".runtime/latest_run"
+  },
+  "http": {
+    "default_timeout_sec": 30,
+    "max_retry_after_sec": 86400,
+    "user_agent": "TASTE-Reading/1.0",
+    "min_interval_sec": {
+      "arxiv": 3.2,
+      "biorxiv": 30.0,
+      "science": 10.0,
+      "openreview": 20.0,
+      "iclr": 10.0,
+      "icml": 10.0,
+      "crossref": 1.0,
+      "openalex": 1.0,
+      "semanticscholar": 1.0,
+      "europepmc": 0.25,
+      "springernature": 0.7,
+      "unpaywall": 0.25,
+      "acm": 5.0,
+      "reader": 2.0,
+      "chatpaper": 1.0,
+      "generic": 0.05
+    },
+    "challenge_cooldown_sec": {
+      "biorxiv": 180.0,
+      "science": 90.0,
+      "openreview": 120.0,
+      "iclr": 600.0,
+      "icml": 600.0,
+      "acm": 60.0,
+      "generic": 20.0
+    },
+    "access_denied_cooldown_sec": {
+      "openreview": 60.0,
+      "iclr": 600.0,
+      "icml": 600.0
+    },
+    "rate_limit_cooldown_sec": 120.0,
+    "batch_challenge_cooldown_wait_cap_sec": 240.0
+  },
+  "openreview": {
+    "allow_anonymous_http": true,
+    "allow_anonymous_official_client": true,
+    "reader_pdf_text": true,
+    "browser_login_pdf_fallback": false
+  },
+  "semantic_scholar": {
+    "enabled_without_key": false
+  },
+  "search": {
+    "query_limit": 3,
+    "acm_query_limit": 8,
+    "duckduckgo_direct_attempts": 1,
+    "duckduckgo_timeout_sec": 5.0,
+    "startpage_timeout_sec": 5.0
+  },
+  "pdf": {
+    "failure_sleep_sec": 0.3
+  },
+  "full_text_min_chars": 1200
+}

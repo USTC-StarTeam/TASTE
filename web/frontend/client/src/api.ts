@@ -13,7 +13,6 @@ export type Config = {
   temperature: number;
   llm_roles: Record<string, { provider?: string; base_url?: string; api_key?: string; api_key_saved?: boolean; api_key_suffix?: string; model?: string; temperature?: number | null }>;
   llm_concurrency: number;
-  idea_parallel_workers: number;
   max_fetch_papers: number;
   max_recommended_papers: number;
   max_ideas: number;
@@ -252,12 +251,12 @@ export async function startRead(runId: string, paperIds: string[]) {
   );
 }
 
-export async function startIdea(runId: string, maxIdeas: number, parallelWorkers: number) {
+export async function startIdea(runId: string, maxIdeas: number, project: string) {
   return json<Job>(
     await apiFetch("/api/jobs/idea", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ run_id: runId, max_ideas: maxIdeas, parallel_workers: parallelWorkers, candidate_multiplier: 2 }),
+      body: JSON.stringify({ run_id: runId, max_ideas: maxIdeas, project }),
     }),
   );
 }
@@ -305,15 +304,33 @@ export async function getRuns(project?: string) {
   return asArrayResponse<RunInfo>(await json<any>(await apiFetch(`/api/runs${query}`)), "runs");
 }
 
-export async function getArtifacts(runId: string, options: { light?: boolean } = {}) {
-  const suffix = options.light ? "?light=1" : "";
+export async function getArtifacts(runId: string, options: { light?: boolean; scope?: "find" | "read" | "ideas" | "plan"; project?: string } = {}) {
+  const params = new URLSearchParams();
+  if (options.light) params.set("light", "1");
+  if (options.scope) params.set("scope", options.scope);
+  if (options.project) params.set("project", options.project);
+  const suffix = params.size ? `?${params.toString()}` : "";
   return json<{ run_id: string; artifacts: Artifact[] }>(await apiFetch(`/api/runs/${runId}/artifacts${suffix}`));
 }
 
 export async function getJobs(project?: string) {
   const params = new URLSearchParams({ compact: "1", limit: "12", include_history: "1" });
   if (project) params.set("project", project);
-  return asArrayResponse<Job>(await json<any>(await apiFetch(`/api/jobs?${params.toString()}`)), "jobs");
+  const jobs = asArrayResponse<Job>(await json<any>(await apiFetch(`/api/jobs?${params.toString()}`)), "jobs");
+  const liveReadJobs = jobs.filter((job) =>
+    String(job.stage || "").toLowerCase() === "read"
+    && ["queued", "running", "cancelling"].includes(String(job.status || "")),
+  );
+  if (!liveReadJobs.length) return jobs;
+  const detailed = await Promise.all(liveReadJobs.map(async (job) => {
+    try {
+      return await json<Job>(await apiFetch(`/api/jobs/${encodeURIComponent(job.job_id)}?compact=0`));
+    } catch {
+      return job;
+    }
+  }));
+  const byId = new Map(detailed.map((job) => [job.job_id, job]));
+  return jobs.map((job) => byId.get(job.job_id) || job);
 }
 
 export async function cancelJob(jobId: string) {
@@ -332,13 +349,35 @@ export async function deleteRun(runId: string) {
   );
 }
 
-export async function patchIdea(runId: string, ideaId: string, patch: Record<string, string>, project?: string) {
-  const params = project ? `?project=${encodeURIComponent(project)}` : "";
+export async function patchIdea(runId: string, ideaId: string, patch: Record<string, string>, project: string) {
+  const params = `?project=${encodeURIComponent(project)}`;
   return json<any>(
     await apiFetch(`/api/runs/${runId}/ideas/${ideaId}${params}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(patch),
+    }),
+  );
+}
+
+export async function updateIdeaMarkdown(runId: string, markdown: string, project: string) {
+  const params = `?project=${encodeURIComponent(project)}`;
+  return json<any>(
+    await apiFetch(`/api/runs/${runId}/idea-markdown${params}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ markdown }),
+    }),
+  );
+}
+
+export async function updatePlanMarkdown(runId: string, markdown: string, project?: string) {
+  const params = project ? `?project=${encodeURIComponent(project)}` : "";
+  return json<any>(
+    await apiFetch(`/api/runs/${runId}/plan-markdown${params}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ markdown }),
     }),
   );
 }

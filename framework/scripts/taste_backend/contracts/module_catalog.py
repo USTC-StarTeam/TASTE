@@ -36,7 +36,7 @@ DEFAULT_ACTIONS: dict[str, str] = {
     "ideation": "run",
     "planning": "plan",
     "environment": "deploy_from_plan",
-    "experimenting": "run",
+    "experimenting": "work",
     "writing": "run",
 }
 
@@ -145,7 +145,7 @@ def runtime_env(root: Path | None = None) -> dict[str, str]:
         for stage_dir in sorted(path for path in modules_root.iterdir() if path.is_dir()):
             entries.append(str(stage_dir))
             scripts = stage_dir / "scripts"
-            if scripts.is_dir():
+            if scripts.is_dir() and stage_dir.name not in {"reading", "environment"}:
                 entries.append(str(scripts))
     existing = [part for part in env.get("PYTHONPATH", "").split(os.pathsep) if part]
     seen: set[str] = set()
@@ -157,6 +157,11 @@ def runtime_env(root: Path | None = None) -> dict[str, str]:
     env["PYTHONPATH"] = os.pathsep.join(merged)
     env["WORKSPACE_ROOT"] = str(root)
     env["TASTE_FRAMEWORK_ROOT"] = str(framework)
+    env["ENVIRONMENT_WORKSPACE_AUDIT_IGNORE_PATHS"] = os.pathsep.join([
+        str(framework / "workspace"),
+        str(framework / ".runtime"),
+        str(root / "web" / ".runtime"),
+    ])
     return env
 
 

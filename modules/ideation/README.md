@@ -1,134 +1,122 @@
-# Ideation / Ideas 模块
+# Ideation / Ideas 用户手册
 
-本目录是 TASTE 的 `Ideation / Ideas` 后端模块边界。当前维护目标是：模块只依赖显式输入的论文精读产物、研究主题/兴趣/配置和 Claude Code CLI，就能独立生成创新、可行、可审计的新论文 idea。它不依赖网页前端，不要求前端拼接脚本路径，也不把中间产物写到其它模块。
+Ideation 模块把 Find 和 Read 的论文证据转成可编辑的研究想法。`idea.md` 是给用户审阅的最终产物；`ideas.json` 只是网页卡片、状态同步和后续模块读取用的机器投影。模块只生成候选 idea，不选择最终执行路线，不配置环境，不运行实验，也不写论文。
 
-## 职责边界
+## 运行环境
 
-- 输入论文精读产物，生成可编辑、可筛选、可实验化的新论文 idea。
-- 调用主控 Claude Code 进行正式 idea 生成，并用本模块内的质量门做结构化审计。
-- 输出 `ideas.json`、`idea.md`、`hypothesis_arena.json/md` 和质量审计。
-- 不选择最终执行路线，不创建实验环境，不运行实验，不写 web 前端产物。
-
-## 独立运行方式
-
-必须在远端 TASTE 工作目录运行，并显式激活 `ar_taste` 与 nvm/Claude Code 环境：
+在 TASTE 仓库根目录使用 `taste` conda 环境运行：
 
 ```bash
 cd <TASTE_ROOT>
-source /home/fmh/workspace/miniforge/etc/profile.d/conda.sh
-conda activate ar_taste
-. /home/fmh/workspace/.nvm/nvm.sh
+conda activate taste
 ```
 
-正式调用 Claude Code 生成 idea：
+正式生成需要当前终端能调用 Claude Code。Claude Code 会直接生成 `idea.md`，模块再从 `idea.md` 解析出 `ideas.json`。开发自检可以使用 `--mock`，不会调用 Claude Code。
 
-```bash
-python modules/ideation/main.py \
-  --action generate \
-  --input /path/to/read_results.json \
-  --input /path/to/read.md \
-  --research-topic "你的研究主题" \
-  --research-interest "你的研究兴趣" \
-  --researcher-profile "研究者画像或偏好" \
-  --idea-constraints '{"max_risk":"medium"}' \
-  --max-ideas 6 \
-  --model sonnet \
-  --effort high
+如果 Claude 首稿只因固定栏目、证据引用、占位文本、公式或链接检查失败，模块会把明确错误和原稿交给 Claude 做一次完整 Markdown 修复；修复稿仍不合格时，本次 run 失败且 Framework 不会替换项目当前产物。
+
+## 网页使用
+
+通常从 TASTE 网页点击 Ideas。网页只发送明确的项目、当前 Find run、idea 数量上限和任务指令；Framework 校验当前 Find/Read、构建规范化输入包，再通过 `framework/scripts/run_module.py ideation --action idea` 调用本模块。Framework 对同一项目的生成和编辑使用阻塞式文件锁，不同项目可以独立运行。Framework 随后把本次模块 run 复制到：
+
+```text
+projects/<project>/planning/finding/ideation_runs/<ideation_timestamp>/
 ```
 
-开发自检可以使用 `--mock`，这不会调用 Claude Code，只验证输入读取、产物写入、schema、渲染和质量审计链路：
+这里的目录名是本次 Ideation run 的 UTC 微秒时间戳，不是 Find `run_id`。网页展示使用项目中的：
+
+```text
+projects/<project>/planning/finding/idea.md
+projects/<project>/planning/finding/ideas.json
+```
+
+`ideation_runs/<ideation_timestamp>/` 是对应模块 run 的完整副本，便于追溯。项目状态文件只保存当前时间戳、idea 数量和门控/选择状态，不再复制完整 idea 内容。
+
+## 命令行使用
+
+独立使用也走与 Framework 相同的公开动作。调用方先准备一个规范化的 `ideation_input.json`，模块不扫描项目目录，也不寻找或校验 Find/Read 项目状态：
 
 ```bash
-python modules/ideation/main.py \
-  --action generate \
-  --input modules/ideation/runs/self_check_input/read_results.json \
-  --research-topic "推荐系统中的语义增强" \
-  --research-interest "可审计、可消融的新方法" \
+conda run -n taste python modules/ideation/main.py \
+  --action idea \
+  --run-id <find_run_id> \
+  --input-json /path/to/ideation_input.json \
+  --max-ideas 6
+```
+
+只做本地自检：
+
+```bash
+conda run -n taste python modules/ideation/main.py \
+  --action idea \
+  --run-id test-find-run \
+  --input-json /path/to/ideation_input.json \
   --max-ideas 2 \
   --mock
 ```
 
-如果 Claude Code 已经成功返回、但本地解析或后处理在旧代码中断，可以不重新调用 Claude，直接从已保存的 `claude_stdout.json` 续写最终产物：
+## 输入
 
-```bash
-python modules/ideation/main.py \
-  --action finalize \
-  --run-id <run_id>
-```
+模块只接受一个 JSON 对象：
 
-`finalize` 会读取 `modules/ideation/runs/<run_id>/input_bundle.json`、`claude_command.json` 和 `claude_stdout.json`，重新生成 `claude_payload.json`、`ideas.json`、`idea.md`、`idea_quality_audit.json`、`hypothesis_arena.json/md` 与 `manifest.json`。它不会再次调用 Claude Code。
+| 输入 | 说明 |
+| --- | --- |
+| `schema_version` | 固定为 `taste.ideation_input.v1`。 |
+| `run_id` | 与命令行 `--run-id` 相同。 |
+| `items` | 至少一条带 `title` 的规范化证据；可含 `url`、`summary`、`source` 和分数。 |
+| `read_markdown` | 调用方提供的精读 Markdown 正文。 |
 
-## 输入口径
+项目工作流中，Find/Read 完整性、同一 `run_id` 和 Read 门控都由 Framework 负责。Idea 模块只消费 Framework 生成的单个 `ideation_input.json`，并把它保存为本次 run 的 `input_bundle.json`；模块不寻找项目、不检查项目状态，也不构建 Find/Read 输入目录。
 
-`--input` 和 `--input-dir` 可以重复传入。模块只读取这些显式路径，不隐式扫描其它 TASTE 状态。
+## 输出
 
-支持的输入包括：
-
-- `read_results.json`：包含 `readings`、`papers`、`articles` 等列表的精读结果。
-- `read.md` / Markdown 精读笔记：按标题和章节切分为证据。
-- `current_find_deep_read_fragments/*.json`：逐篇深读分片目录。
-- `find_results.json` 或其它含标题、摘要、方法、实验、局限字段的 JSON。
-
-核心字段会被规范为：论文标题、paper_id、url、summary、method、experiments、limitations、novelty、key_findings 等。Claude prompt 中只会使用规范化后的证据包。
-
-## 输出口径
-
-所有运行产物默认写入：
+每次运行都会在启动时创建一个固定 run 目录：
 
 ```text
-<TASTE_ROOT>/modules/ideation/runs/<run_id>/
+modules/ideation/.runtime/output/YYYYMMDDTHHMMSSffffffZ/
 ```
 
-`runs/` 已被本目录 `.gitignore` 忽略，避免中间产物进入 git。
+同一进程只写入这个一开始创建好的目录。并发运行会得到不同的微秒级 UTC 时间戳目录。
 
-每次独立生成会产出：
+常见输出：
 
-| 文件 | 作用 |
+| 文件 | 说明 |
 | --- | --- |
-| `input_bundle.json` | 本次显式输入和规范化证据包。 |
-| `claude_prompt.md` | 发送给主控 Claude Code 的完整 prompt。 |
-| `claude_command.json` | Claude Code 调用命令和运行元信息。 |
-| `claude_stdout.json` / `claude_stderr.log` | Claude Code 原始输出和错误日志。 |
-| `claude_payload.json` | 从 Claude Code 输出解析出的 JSON payload。 |
-| `ideas.json` | 最终结构化 idea、配置、质量审计和 Claude 调用元信息。 |
-| `idea.md` | 人类可读的新论文 idea 卡片。 |
-| `idea_quality_audit.json` | 字段完整性、主题贴合、实验协议和启发来源审计。 |
-| `hypothesis_arena.json` | 将 idea 转成可对比假设面板。 |
-| `hypothesis_arena.md` | 人类可读假设面板。 |
-| `manifest.json` | 本次运行产物清单。 |
+| `input_bundle.json` | 调用方已经构建好的规范化输入包。 |
+| `claude_prompt.md` | 发送给 Claude Code 的 prompt，要求其直接输出 `idea.md`。 |
+| `claude_stdout.json` / `claude_stderr.log` | Claude Code 原始输出。 |
+| `claude_repair_*.json` / `claude_repair_stderr.log` | 仅首稿未过门控时出现的一次修复调用回执。 |
+| `idea.md` | 最终公开产物，Claude Code 直接生成，包含新方法、机制细节、初步实验、启发来源、风险与停止标准。 |
+| `ideas.json` | 从 `idea.md` 解析出的机器投影，供状态控制、项目同步和 Planning 使用；网页正文不从它渲染。 |
+| `manifest.json` | 本次 run 的产物清单。 |
 
-## 运行流程逻辑
+`idea.md` 中关于已有工作的能力、局限、数据和数字事实必须来自输入证据。所有 Markdown 网页链接都必须使用输入中已有的精确证据标题和对应 URL。新方法、初步实验和停止标准属于研究提案，不代表已经实现或得到结果；没有直接风险证据时只写停止规则，不推测失败原因或失败样本。
 
-1. `main.py --action generate` 解析输入路径、配置和运行参数。
-2. `artifact_io/artifacts.py` 只读加载论文精读产物，统一成证据列表。
-3. `core/prompting.py` 将研究主题、研究兴趣、研究者画像、配置约束和证据包组装为 Claude Code prompt。
-4. `claude/runner.py` 调用 `claude -p --output-format json --json-schema ...`，并限制工作目录/允许目录为 `modules/ideation`。
-5. `ideation_quality/schema.py` 规范化 Claude 输出，固定 `new_method`、`method_details`、`initial_experiment`、`bad_case_slice`、`inspired_by` 等字段。
-6. `ideation_quality/schema.py` 执行质量审计：字段长度、初步实验协议、主题贴合、启发来源是否来自输入证据；若 idea 已正确锚定输入精读证据，也允许英文 idea 通过中文主题场景。
-7. `ideation_quality/render.py` 渲染 `idea.md` 和 `hypothesis_arena`。
-8. `core/standalone_pipeline.py` 将所有产物写入 `modules/ideation/runs/<run_id>/`。
-9. `main.py --action finalize` 可从已保存的 Claude stdout 续写完整产物，用于恢复已成功调用但后处理失败的运行。
+运行结束后，模块取得 `.latest_run.lock` 的阻塞式文件锁，再把本次 run 完整复制到：
 
-## 脚本结构
+```text
+modules/ideation/.runtime/latest_run/
+```
 
-| 路径 | 类别 | 作用 |
-| --- | --- | --- |
-| `main.py` | 公开入口 | 本模块唯一公开后端入口；注册 `generate`、`finalize`、旧 `idea` 兼容入口和少量 legacy tool action。 |
-| `scripts/core/prompting.py` | 核心流程 | 构造 Claude Code prompt 和证据包。 |
-| `scripts/core/standalone_pipeline.py` | 核心流程 | 独立 idea 生成总控流程；负责运行目录、调用、审计、产物写入和 stdout 恢复。 |
-| `scripts/artifact_io/workspace.py` | 输入输出 | 定义 ideation 模块根目录、安全写入、run 目录和 JSON/文本写入。 |
-| `scripts/artifact_io/artifacts.py` | 输入输出 | 读取并规范化论文精读 JSON/Markdown/分片。 |
-| `scripts/claude/runner.py` | Claude 调用 | 查找 nvm 中的 Claude Code CLI，执行 JSON schema 约束调用并解析输出。 |
-| `scripts/ideation_quality/schema.py` | 质量门 | 定义 Claude 输出 schema、idea 规范化和质量审计。 |
-| `scripts/ideation_quality/render.py` | 展示产物 | 渲染人类可读 `idea.md` 和假设面板。 |
-| `scripts/idea_pipeline.py` | 兼容入口 | 保留 TASTE 既有 `run_idea/patch_idea` 兼容函数。新增独立能力不依赖它。 |
-| `scripts/ideation_tools.py` | 兼容工具 | 保留旧 `assess/arena/initialization` 工具入口；新独立生成请优先使用 `--action generate`。 |
+`latest_run` 只给人审查，程序不会把它当输入或同步来源。
 
-## 维护原则
+## 编辑 idea
 
-- 新功能优先放进 `scripts/core`、`scripts/artifact_io`、`scripts/claude`、`scripts/ideation_quality` 这些分类目录，不再随意新增扁平脚本。
-- 所有运行中间产物必须写到 `modules/ideation/runs/` 或显式传入的 ideation 内部输出目录。
-- `runs/`、`tmp/`、`__pycache__/` 不进 git。
-- 正式 idea 生成必须调用 Claude Code；`--mock` 只用于开发自检。
-- 不为特定论文、特定项目、特定本机路径写硬编码规则。
-- 代码应保持薄入口、清晰分层、函数复用，避免把读取、调用、审计、渲染混在一个大函数里。
+网页上方是人工修改区：每个 idea 保留标题、新方法、初步实验以及通过/待定/删除控件，点击“保存修改”时才提交；也可以切换到完整 Markdown 源文编辑。Framework 定位当前项目对应的 timestamp Ideation run，通过 `modules/ideation/main.py --action patch` 或 `--action update_markdown` 原地更新该 run，再同步同一个项目 run 副本和项目当前 `idea.md`。
+
+页面右下“产物”栏直接使用 Markdown 库和 KaTeX 渲染项目当前 `idea.md`；它只负责审阅最终产物，不替代上方人工修改区。
+
+通过、待定和删除按钮同样原地修改 `idea.md` 中对应 idea 的 `status`，不会创建新的 Ideation run。`ideas.json` 随后从更新后的 Markdown 重新派生，供状态控制和 Planning 使用。
+
+## 常见问题
+
+### 为什么 `idea.md` 没有“自检”栏目？
+
+Markdown 标题、数学公式定界符、网页链接和栏目完整性由模块在后台检查。Claude Code 也会在提交前自行检查，但检查过程和 pass/fail 清单不会写进用户产物。
+
+| 问题 | 处理方式 |
+| --- | --- |
+| 没有生成 idea | 确认输入包版本、`run_id`、`items` 和 `read_markdown` 完整，并检查 `latest_run/claude_stderr.log`。 |
+| 想只检查链路 | 使用 `--mock`。 |
+| 网页没有显示最新 idea | 确认当前项目的 Find run 与 `ideas.json.run_id` 一致，再刷新网页。 |
+| 想审查最近一次运行 | 打开 `modules/ideation/.runtime/latest_run/`。 |

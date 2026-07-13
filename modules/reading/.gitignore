@@ -6,6 +6,8 @@ __pycache__/
 .pytest_cache/
 
 # 独立论文精读运行区：PDF、正文抽取、Claude 输出、临时结果都必须留在这里且不入 git
+.runtime/
+cache/
 workspace/
 
 # 临时文件与日志
@@ -13,3 +15,6 @@ workspace/
 *.temp
 *.log
 .DS_Store
+
+# 本机敏感配置，允许在 config/ 下统一管理但禁止入 git
+config/local/

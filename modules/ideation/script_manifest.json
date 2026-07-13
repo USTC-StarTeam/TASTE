@@ -1,115 +1,49 @@
 {
-  "generated_at": "2026-06-18T10:50:49.515203+00:00",
+  "generated_at": "2026-07-10T12:45:00+00:00",
   "module": "ideation",
   "contract": {
     "directory": "modules/ideation",
     "display_name": "Ideation",
     "legacy_stage": "Ideas",
-    "responsibility": "Turn reading/finding artifacts into editable research ideas without selecting an execution route.",
+    "responsibility": "Consume one caller-normalized evidence bundle and generate or edit research ideas without project input discovery.",
     "external_inputs": [
-      "llm_api_or_claude",
-      "reading_artifacts",
-      "research_profile"
+      "caller_normalized_input_bundle",
+      "claude_code",
+      "runtime_config"
     ],
     "artifacts_in": [
-      "find_results.json",
-      "read_results.json",
-      "read.md"
+      "ideation_input.json"
     ],
     "artifacts_out": [
-      "ideas.json",
       "idea.md",
-      "hypothesis_arena.md",
-      "idea candidate audits"
+      "ideas.json"
     ],
+    "public_final_artifact": "idea.md",
     "private_backend_roots": [
-      "modules/ideation/scripts/idea_pipeline.py",
-      "modules/ideation/scripts/ideation_tools.py",
-      "modules/ideation/scripts/core",
-      "modules/ideation/scripts/artifact_io",
-      "modules/ideation/scripts/claude",
-      "modules/ideation/scripts/ideation_quality"
+      "modules/ideation/scripts/idea_pipeline.py"
     ]
   },
-  "script_count": 14,
+  "script_count": 5,
   "scripts": [
-    {
-      "script": "__init__.py",
-      "path": "modules/ideation/scripts/__init__.py",
-      "category": "legacy_entrypoint",
-      "owner": "ideation",
-      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
-      "function_count": 0,
-      "functions": [],
-      "classes": [],
-      "imports": [],
-      "parse_error": ""
-    },
-    {
-      "script": "__init__.py",
-      "path": "modules/ideation/scripts/artifact_io/__init__.py",
-      "category": "artifact_io",
-      "owner": "ideation",
-      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
-      "function_count": 0,
-      "functions": [],
-      "classes": [],
-      "imports": [],
-      "parse_error": ""
-    },
-    {
-      "script": "artifacts.py",
-      "path": "modules/ideation/scripts/artifact_io/artifacts.py",
-      "category": "artifact_io",
-      "owner": "ideation",
-      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
-      "function_count": 14,
-      "functions": [
-        "_first_text",
-        "_as_detail_mapping",
-        "_row_has_signal",
-        "_normalize_row",
-        "_flatten_json_rows",
-        "_markdown_title",
-        "_load_json_file",
-        "_load_markdown_file",
-        "_markdown_sections",
-        "_input_files_from_dir",
-        "discover_input_files",
-        "load_reading_evidence",
-        "_dedupe_evidence",
-        "to_prompt_dict"
-      ],
-      "classes": [
-        "ReadingEvidence"
-      ],
-      "imports": [
-        "__future__",
-        "artifact_io",
-        "dataclasses",
-        "json",
-        "pathlib",
-        "re",
-        "typing"
-      ],
-      "parse_error": ""
-    },
     {
       "script": "workspace.py",
       "path": "modules/ideation/scripts/artifact_io/workspace.py",
       "category": "artifact_io",
       "owner": "ideation",
-      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
-      "function_count": 10,
+      "owner_reason": "modules/ideation 内部实现；项目流程只能由 Framework 调用 modules/ideation/main.py",
+      "function_count": 13,
       "functions": [
         "utc_now_iso",
-        "safe_run_id",
+        "timestamp_run_id",
         "ensure_inside_ideation",
         "ensure_parent",
         "write_json",
         "write_text",
         "read_json",
+        "ensure_runtime_run_dir",
         "make_run_dir",
+        "existing_run_dir",
+        "refresh_latest_run",
         "public_path",
         "compact_text"
       ],
@@ -117,23 +51,15 @@
       "imports": [
         "__future__",
         "datetime",
+        "fcntl",
         "json",
+        "os",
         "pathlib",
         "re",
+        "shutil",
+        "time",
         "typing"
       ],
-      "parse_error": ""
-    },
-    {
-      "script": "__init__.py",
-      "path": "modules/ideation/scripts/claude/__init__.py",
-      "category": "claude",
-      "owner": "ideation",
-      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
-      "function_count": 0,
-      "functions": [],
-      "classes": [],
-      "imports": [],
       "parse_error": ""
     },
     {
@@ -141,18 +67,15 @@
       "path": "modules/ideation/scripts/claude/runner.py",
       "category": "claude",
       "owner": "ideation",
-      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
-      "function_count": 9,
+      "owner_reason": "modules/ideation 内部实现；项目流程只能由 Framework 调用 modules/ideation/main.py",
+      "function_count": 6,
       "functions": [
         "_candidate_claude_paths",
         "find_claude_executable",
-        "_json_span",
-        "parse_json_from_text",
         "_outer_result_text",
-        "_extract_payload",
-        "extract_payload_from_stdout",
         "_safe_env",
-        "run_claude_json"
+        "extract_markdown_from_stdout",
+        "run_claude_markdown"
       ],
       "classes": [
         "ClaudeRunConfig"
@@ -165,7 +88,6 @@
         "json",
         "os",
         "pathlib",
-        "re",
         "shutil",
         "subprocess",
         "typing"
@@ -173,123 +95,40 @@
       "parse_error": ""
     },
     {
-      "script": "__init__.py",
-      "path": "modules/ideation/scripts/core/__init__.py",
-      "category": "core",
-      "owner": "ideation",
-      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
-      "function_count": 0,
-      "functions": [],
-      "classes": [],
-      "imports": [],
-      "parse_error": ""
-    },
-    {
-      "script": "prompting.py",
-      "path": "modules/ideation/scripts/core/prompting.py",
-      "category": "core",
-      "owner": "ideation",
-      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
-      "function_count": 2,
-      "functions": [
-        "build_evidence_packet",
-        "build_generation_prompt"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "artifact_io",
-        "json",
-        "typing"
-      ],
-      "parse_error": ""
-    },
-    {
-      "script": "standalone_pipeline.py",
-      "path": "modules/ideation/scripts/core/standalone_pipeline.py",
-      "category": "core",
-      "owner": "ideation",
-      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
-      "function_count": 9,
-      "functions": [
-        "load_generation_config",
-        "_topic_text",
-        "_mock_payload",
-        "_render_arena_markdown",
-        "_persist_generation_outputs",
-        "run_standalone_ideation",
-        "finalize_standalone_run",
-        "from_mapping",
-        "public_dict"
-      ],
-      "classes": [
-        "StandaloneIdeationConfig"
-      ],
-      "imports": [
-        "__future__",
-        "artifact_io",
-        "claude",
-        "core",
-        "dataclasses",
-        "ideation_quality",
-        "json",
-        "pathlib",
-        "typing"
-      ],
-      "parse_error": ""
-    },
-    {
       "script": "idea_pipeline.py",
       "path": "modules/ideation/scripts/idea_pipeline.py",
-      "category": "legacy_entrypoint",
+      "category": "pipeline",
       "owner": "ideation",
-      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
-      "function_count": 38,
+      "owner_reason": "modules/ideation 内部实现；项目流程只能由 Framework 调用 modules/ideation/main.py",
+      "function_count": 18,
       "functions": [
         "_raise_if_cancelled",
-        "_source_items",
-        "_item_text",
         "_config_topic_text",
         "_topic_terms",
-        "_topic_rank",
-        "_select_relevant_seeds",
-        "_is_generic_experiment_placeholder",
-        "_normalize_inspired_by",
-        "_inspired_by_text",
-        "_parse_inspired_by_text",
-        "_normalize_idea_schema",
-        "_fallback_ideas",
-        "_quality_flags",
-        "_usable_idea",
-        "_fill_with_fallback",
-        "_dedupe_ideas",
-        "_score_value",
-        "_display_score_value",
-        "_idea_markdown_score",
-        "_item_windows",
+        "_select_relevant_items",
+        "_build_prompt",
+        "_claude_config_from_env",
+        "_evidence_titles",
+        "_validate_bundle",
+        "_write_manifest",
+        "_persist_markdown",
+        "_mock_ideas",
         "run_idea",
-        "_markdown_value",
-        "_idea_public_new_method_text",
-        "_idea_public_initial_experiment_text",
-        "render_ideas_markdown",
-        "_project_name",
-        "_project_root",
-        "_project_taste_dir",
-        "_payload_run_id",
-        "_project_current_find_run_id",
-        "_project_sync_allowed_for_run",
-        "_idea_key_for_merge",
-        "_merge_idea_rows",
-        "_load_patch_ideas_data",
-        "_idea_three_part_ready_for_state",
-        "_sync_project_ideas",
+        "_idea_blocks",
+        "_replace_section_body",
+        "_patch_markdown",
+        "_run_result",
+        "update_idea_markdown",
         "patch_idea"
       ],
       "classes": [],
       "imports": [
         "__future__",
-        "auto_research",
+        "artifact_io",
+        "claude",
         "datetime",
+        "ideation_quality",
+        "json",
         "os",
         "pathlib",
         "re",
@@ -298,28 +137,15 @@
       "parse_error": ""
     },
     {
-      "script": "__init__.py",
-      "path": "modules/ideation/scripts/ideation_quality/__init__.py",
-      "category": "ideation_quality",
-      "owner": "ideation",
-      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
-      "function_count": 0,
-      "functions": [],
-      "classes": [],
-      "imports": [],
-      "parse_error": ""
-    },
-    {
       "script": "render.py",
       "path": "modules/ideation/scripts/ideation_quality/render.py",
       "category": "ideation_quality",
       "owner": "ideation",
-      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
-      "function_count": 3,
+      "owner_reason": "modules/ideation 内部实现；项目流程只能由 Framework 调用 modules/ideation/main.py",
+      "function_count": 2,
       "functions": [
         "_score_text",
-        "render_ideas_markdown",
-        "build_hypothesis_arena"
+        "render_ideas_markdown"
       ],
       "classes": [],
       "imports": [
@@ -334,16 +160,20 @@
       "path": "modules/ideation/scripts/ideation_quality/schema.py",
       "category": "ideation_quality",
       "owner": "ideation",
-      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
-      "function_count": 11,
+      "owner_reason": "modules/ideation 内部实现；项目流程只能由 Framework 调用 modules/ideation/main.py",
+      "function_count": 15,
       "functions": [
-        "idea_output_schema",
         "_score_number",
-        "_objective_scores",
+        "_section_text",
         "_dedupe_source_rows",
         "normalize_inspired_by",
         "normalize_idea",
-        "normalize_ideas",
+        "_strip_markdown_link",
+        "_parse_source_line",
+        "_parse_meta_line",
+        "_section_map",
+        "ideas_from_markdown",
+        "markdown_contract_issues",
         "_topic_terms",
         "_contains_experiment_protocol",
         "idea_quality_issues",
@@ -357,37 +187,12 @@
         "typing"
       ],
       "parse_error": ""
-    },
-    {
-      "script": "ideation_tools.py",
-      "path": "modules/ideation/scripts/ideation_tools.py",
-      "category": "legacy_entrypoint",
-      "owner": "ideation",
-      "owner_reason": "modules/ideation 内部后端实现；新增代码按功能分类到 scripts 子目录",
-      "function_count": 11,
-      "functions": [
-        "load_json_default",
-        "lexical_overlap",
-        "repo_execution_ready",
-        "repo_selection_bucket",
-        "build_idea_rows",
-        "run_assess_idea_candidates",
-        "run_build_hypothesis_arena",
-        "load_json_list",
-        "load_mapping",
-        "run_prepare_initialization",
-        "main"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "json",
-        "literature_policy",
-        "pathlib",
-        "project_paths"
-      ],
-      "parse_error": ""
     }
-  ]
+  ],
+  "audit": {
+    "status": "pass",
+    "script_count": 5,
+    "top_level_function_count": 54,
+    "top_level_class_count": 1
+  }
 }

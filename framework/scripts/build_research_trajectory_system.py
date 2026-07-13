@@ -63,7 +63,6 @@ def read_text(path: Path, max_chars: int = 12000) -> str:
 
 
 HELPER_MODULE_ACTIONS = {
-    "ideation:arena": ("ideation", "arena"),
     "planning:review_board": ("planning", "review_board"),
     "writing:audit_evidence": ("writing", "audit_evidence"),
     "planning:method_frontier": ("planning", "method_frontier"),
@@ -573,11 +572,11 @@ def build_research_landscape(cfg: dict[str, Any], paths, paper_quality: dict[str
         "updated_at": now_iso(),
         "nodes": {"papers": paper, "ideas": idea, "repos": repo, "datasets": dataset, "experiments": experiment},
         "edges": edges[-500:],
-        "evidence_files": evidence_refs(paths.state / "paper_quality.json", paths.state / "idea_candidates.json", paths.state / "repo_candidates.json", paths.state / "dataset_registry.json", paths.state / "experiment_registry.json"),
+        "evidence_files": evidence_refs(paths.state / "paper_quality.json", paths.planning / "finding" / "ideas.json", paths.state / "repo_candidates.json", paths.state / "dataset_registry.json", paths.state / "experiment_registry.json"),
     }
 
 
-def build_novelty_map(ideas: dict[str, Any], hypothesis_arena: dict[str, Any], method_frontier: dict[str, Any]) -> dict[str, Any]:
+def build_novelty_map(ideas: dict[str, Any], method_frontier: dict[str, Any]) -> dict[str, Any]:
     nodes = []
     for row in ideas.get("ideas", []) if isinstance(ideas, dict) else []:
         if isinstance(row, dict):
@@ -588,20 +587,9 @@ def build_novelty_map(ideas: dict[str, Any], hypothesis_arena: dict[str, Any], m
                 "score": row.get("idea_score", row.get("score", 0)),
                 "nearest_neighbor": row.get("paper_id", ""),
                 "status": "candidate",
-                "evidence": [item for item in ["state/idea_candidates.json", row.get("paper_id", ""), row.get("repo_name", ""), row.get("dataset_name", "")] if item],
+                "evidence": [item for item in ["planning/finding/ideas.json", row.get("paper_id", ""), row.get("repo_name", ""), row.get("dataset_name", "")] if item],
             })
-    for row in hypothesis_arena.get("hypotheses", []) if isinstance(hypothesis_arena, dict) else []:
-        if isinstance(row, dict):
-            nodes.append({
-                "id": row.get("hypothesis_id", ""),
-                "title": row.get("title", ""),
-                "novelty_delta": row.get("novelty_delta", ""),
-                "nearest_neighbor": row.get("nearest_neighbor", ""),
-                "status": "hypothesis",
-                "evidence_needed": row.get("support_evidence_needed", ""),
-                "evidence": [item for item in ["state/hypothesis_arena.json", row.get("repo_anchor", ""), row.get("dataset_anchor", "")] if item],
-            })
-    return {"updated_at": now_iso(), "nodes": nodes[:160], "elite_methods": method_frontier.get("elite_methods", []) if isinstance(method_frontier, dict) else [], "evidence_files": ["state/idea_candidates.json", "state/hypothesis_arena.json", "state/method_frontier.json"]}
+    return {"updated_at": now_iso(), "nodes": nodes[:160], "elite_methods": method_frontier.get("elite_methods", []) if isinstance(method_frontier, dict) else [], "evidence_files": ["planning/finding/ideas.json", "state/method_frontier.json"]}
 
 
 def build_failed_hypothesis_graph(experiments: Any, aris_board: dict[str, Any], next_actions: dict[str, Any]) -> dict[str, Any]:
@@ -1444,7 +1432,7 @@ def build_evolutionary_memory_index(paths, trajectory: dict[str, Any], research_
     indexed_items = []
     for row in idea_rows[:12]:
         if isinstance(row, dict):
-            indexed_items.append({"type": "idea", "id": row.get("idea_id") or row.get("id") or first_text(row, "title", "idea"), "score": row.get("idea_score", row.get("score", 0)), "evidence": ["state/idea_candidates.json"]})
+            indexed_items.append({"type": "idea", "id": row.get("idea_id") or row.get("id") or first_text(row, "title", "idea"), "score": row.get("idea_score", row.get("score", 0)), "evidence": ["planning/finding/ideas.json"]})
     for row in exp_rows[-20:]:
         if isinstance(row, dict):
             indexed_items.append({"type": "experiment", "id": row.get("experiment_id") or row.get("name"), "status": row.get("status", ""), "audit_ready": bool(row.get("audit_ready")), "evidence": [item for item in [row.get("audit_path", ""), row.get("artifact_path", "")] if item] or ["state/experiment_registry.json"]})
@@ -1728,16 +1716,15 @@ def main() -> None:
     helper_runs = []
     if not args.skip_helpers:
         venue_extra = ["--venue", args.venue] if args.venue else []
-        helper_runs.extend([run_helper(args.project, "ideation:arena", []), run_helper(args.project, "planning:review_board", []), run_helper(args.project, "writing:audit_evidence", venue_extra), run_helper(args.project, "planning:method_frontier", []), run_helper(args.project, "update_evolution_memory.py", venue_extra)])
+        helper_runs.extend([run_helper(args.project, "planning:review_board", []), run_helper(args.project, "writing:audit_evidence", venue_extra), run_helper(args.project, "planning:method_frontier", []), run_helper(args.project, "update_evolution_memory.py", venue_extra)])
     paper_quality = load_json(paths.state / "paper_quality.json", {})
-    ideas = load_json(paths.state / "idea_candidates.json", {})
+    ideas = load_json(paths.planning / "finding" / "ideas.json", {})
     repos = load_json(paths.state / "repo_candidates.json", [])
     raw_datasets = load_json(paths.state / "dataset_registry.json", [])
     experiments = load_json(paths.state / "experiment_registry.json", [])
     if isinstance(experiments, dict) and isinstance(experiments.get("experiments"), list):
         experiments = experiments.get("experiments", [])
     datasets = merge_dataset_evidence(paths, raw_datasets, experiments)
-    hypothesis_arena = load_json(paths.state / "hypothesis_arena.json", {})
     method_frontier = load_json(paths.state / "method_frontier.json", {})
     aris_board = load_json(paths.state / "aris_review_board.json", {})
     evolution_memory = load_json(paths.state / "evolution_memory.json", {})
@@ -1763,7 +1750,7 @@ def main() -> None:
     evo_cycle = summarize_evoscientist_cycle(paths)
     skills = load_skill_contracts()
     landscape = build_research_landscape(cfg, paths, paper_quality, ideas, repos, datasets, experiments)
-    novelty = build_novelty_map(ideas, hypothesis_arena, method_frontier)
+    novelty = build_novelty_map(ideas, method_frontier)
     failed = build_failed_hypothesis_graph(experiments, aris_board, next_actions)
     niches = build_unexplored_niche_graph(novelty, failed, datasets, repos, experiments)
     assurance = build_assurance_layer(paths, experiments, datasets, active_repo, evidence_audit, aris_board, claim_ledger)

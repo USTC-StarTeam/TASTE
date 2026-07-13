@@ -279,7 +279,7 @@ def verify_skills_and_prompts(paths) -> dict[str, Any]:
         check("core_skills_do_not_expose_source_agents", all(all(term not in text for term in source_name_leaks) for text in skill_texts.values()), evidence=[str(path) for path in skill_paths]),
         check("skill_contracts_exported", isinstance(contracts, list) and len(contracts) >= len(required), evidence=[str(paths.state / "research_skill_contracts.json")], detail=f"contracts={len(contracts) if isinstance(contracts, list) else 'n/a'}"),
         check("claude_prompt_reads_long_horizon_assets", source_contains(SCRIPTS / "claude_project_session.py", ["research_graph_history", "research_evidence_manifest", "evolutionary_memory_ledger", "Optimize the whole trajectory", "framework/resources/claude/skills"]), evidence=[str(SCRIPTS / "claude_project_session.py")]),
-        check("coding_agent_reads_trajectory_assets", source_contains(SCRIPTS / "run_coding_agent.py", ["research_evidence_manifest", "research_graph_history", "evolutionary_memory_ledger", "research_trajectory_capability_audit"]), evidence=[str(SCRIPTS / "run_coding_agent.py")]),
+        check("experimenting_skill_binds_selected_plan_context", source_contains(ROOT / "modules" / "experimenting" / "skills" / "experiment-iteration" / "SKILL.md", ["selected_plan_id", "selected_idea_id", "experiment_iteration_summary.json"]), evidence=[str(ROOT / "modules" / "experimenting" / "skills" / "experiment-iteration" / "SKILL.md")]),
     ]
     return module_payload("skills_and_prompt_context_e2e", checks, {
         "skill_contract_count": len([path for path in skill_paths if path.exists()]),
@@ -304,7 +304,7 @@ def verify_third_party_stack(paths) -> dict[str, Any]:
     missing_available_module_count = int(summary.get("missing_module_count", 0) or 0)
     synced_skill_count = int(summary.get("synced_skill_count", 0) or 0)
     min_adapter_count = min(5, max(1, len(capability_names)))
-    bridge = ROOT / "web" / "backend" / "auto_research" / "web" / "project_bridge.py"
+    bridge = ROOT / "framework" / "scripts" / "auto_research" / "project_bridge.py"
     app = ROOT / "web" / "frontend" / "client" / "src" / "App.tsx"
     checks = [
         check("third_party_stack_file", stack_path.exists(), evidence=[str(stack_path)]),
@@ -330,7 +330,7 @@ def verify_third_party_stack(paths) -> dict[str, Any]:
 
 
 def verify_web_visibility(paths) -> dict[str, Any]:
-    bridge = ROOT / "web" / "backend" / "auto_research" / "web" / "project_bridge.py"
+    bridge = ROOT / "framework" / "scripts" / "auto_research" / "project_bridge.py"
     app = ROOT / "web" / "frontend" / "client" / "src" / "App.tsx"
     checks = [
         check("api_exposes_verification", source_contains(bridge, ["research_trajectory_end_to_end_verification", "end_to_end_verification_status"]), evidence=[str(bridge)]),

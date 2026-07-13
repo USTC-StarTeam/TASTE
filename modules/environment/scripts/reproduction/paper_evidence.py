@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from typing import Any
 
-from scripts.common.io_utils import coerce_list, read_json, read_text_limited, utc_now, write_json
+from scripts.common.io_utils import read_json, read_text_limited, utc_now, write_json
 from scripts.common.shell import isolated_runtime_env, runtime_env
 
 TEXT_KEYS = (
@@ -177,7 +177,7 @@ def _project_root_from_source_path(normalized_plan: dict[str, Any]) -> Path | No
     return Path(*parts[:projects_index + 2])
 
 
-def _paper_identity_strings(normalized_plan: dict[str, Any], include_repo_fallback: bool = False) -> list[str]:
+def _paper_identity_strings(normalized_plan: dict[str, Any]) -> list[str]:
     identities: list[str] = []
     paper_source = normalized_plan.get("paper_source") if isinstance(normalized_plan.get("paper_source"), dict) else {}
     for key in ["title", "url", "pdf_url"]:
@@ -188,12 +188,6 @@ def _paper_identity_strings(normalized_plan: dict[str, Any], include_repo_fallba
         title = str(normalized_plan.get("title") or "").strip()
         if title:
             identities.append(title.lower())
-    if include_repo_fallback:
-        for spec in coerce_list(normalized_plan.get("repo_candidate_specs")):
-            if isinstance(spec, dict):
-                value = str(spec.get("url") or "").strip().lower()
-                if value:
-                    identities.append(value)
     return identities
 
 
@@ -201,76 +195,10 @@ def _identity_matches_paper(row: dict[str, Any], identities: list[str]) -> bool:
     if not identities:
         return False
     haystack = "\n".join(str(row.get(key) or "") for key in ["title", "url", "pdf_url", "abstract", "abstract_en", "reason", "reason_zh"]).lower()
-    aliases = {
-        "zhanghanni/rigidssl": ["rigidssl", "rigidity-aware geometric pretraining"],
-        "openreview.net/forum?id=yawpzcxhnp": ["yawpzcxhnp", "rigidssl"],
-        "openreview.net/pdf?id=yawpzcxhnp": ["yawpzcxhnp", "rigidssl"],
-    }
     for identity in identities:
         if identity and identity in haystack:
             return True
-        for needle, alias_values in aliases.items():
-            if needle in identity and any(alias in haystack for alias in alias_values):
-                return True
     return False
-
-
-def _append_target_metric(out: list[dict[str, Any]], seen: set[tuple[str, str]], name: str, operator: str, value: Any, source: str, description: str) -> None:
-    key = (str(name).lower(), str(value))
-    if key in seen:
-        return
-    seen.add(key)
-    out.append({"name": name, "operator": operator, "value": value, "source": source, "description": description})
-
-
-def _local_full_text_target_metrics(full_text_evidence: dict[str, Any]) -> list[dict[str, Any]]:
-    text = "\n".join(str(full_text_evidence.get(key) or "") for key in ["paper_title", "abstract", "text_excerpt"])
-    lowered = text.lower()
-    out: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
-    if "rigidssl" not in lowered:
-        return out
-    if "0.758" in text and "foldflow-2" in lowered:
-        _append_target_metric(
-            out,
-            seen,
-            "designability_target",
-            ">=",
-            0.758,
-            "RigidSSL paper Table 1, FoldFlow-2 + RigidSSL-Perturb designability fraction",
-            "FoldFlow-2 with RigidSSL-Perturb reports designability fraction 0.758 +/- 0.016 in Table 1.",
-        )
-    if "42.9" in text:
-        _append_target_metric(
-            out,
-            seen,
-            "designability_improvement",
-            ">=",
-            "42.9%",
-            "RigidSSL paper Section 4.1, FoldFlow-2 RigidSSL-Perturb relative designability gain",
-            "RigidSSL-Perturb improves FoldFlow-2 mean designability by 42.9% relative to the unpretrained model.",
-        )
-    elif "43%" in text:
-        _append_target_metric(
-            out,
-            seen,
-            "designability_improvement",
-            ">=",
-            "43%",
-            "RigidSSL paper abstract",
-            "RigidSSL variants improve designability by up to 43% in unconditional generation.",
-        )
-    if "5.8%" in text:
-        _append_target_metric(
-            out,
-            seen,
-            "motif_scaffolding_success_improvement",
-            ">=",
-            "5.8%",
-            "RigidSSL paper abstract",
-            "RigidSSL-Perturb improves the success rate by 5.8% in zero-shot motif scaffolding.",
-        )
-    return out
 
 
 def _merge_target_metrics(*groups: Any) -> list[Any]:
@@ -299,33 +227,28 @@ def _local_full_text_evidence(normalized_plan: dict[str, Any]) -> dict[str, Any]
         return {"status": "missing", "packet_path": str(packet_path)}
     packet = read_json(packet_path, {})
     papers = packet.get("papers") if isinstance(packet, dict) and isinstance(packet.get("papers"), list) else []
-    identity_sets = [
-        _paper_identity_strings(normalized_plan, include_repo_fallback=False),
-        _paper_identity_strings(normalized_plan, include_repo_fallback=True),
-    ]
-    for identities in identity_sets:
-        for row in papers:
-            if not isinstance(row, dict) or not _identity_matches_paper(row, identities):
-                continue
-            text_path = Path(str(row.get("text_path") or "")).expanduser()
-            if not text_path.is_absolute():
-                text_path = project_root / text_path
-            text_excerpt = read_text_limited(text_path, 50000) if text_path.exists() else ""
-            return {
-                "status": "passed" if text_excerpt else "text_missing",
-                "packet_path": str(packet_path),
-                "paper_title": row.get("title", ""),
-                "paper_id": row.get("paper_id", ""),
-                "url": row.get("url", ""),
-                "pdf_url": row.get("pdf_url", ""),
-                "text_path": str(text_path),
-                "text_excerpt": text_excerpt,
-                "abstract": row.get("abstract", ""),
-                "venue": row.get("venue", ""),
-                "year": row.get("year", ""),
-                "identity_match_mode": "paper_source" if identities == identity_sets[0] else "repo_fallback",
-            }
-    identities = identity_sets[-1]
+    identities = _paper_identity_strings(normalized_plan)
+    for row in papers:
+        if not isinstance(row, dict) or not _identity_matches_paper(row, identities):
+            continue
+        text_path = Path(str(row.get("text_path") or "")).expanduser()
+        if not text_path.is_absolute():
+            text_path = project_root / text_path
+        text_excerpt = read_text_limited(text_path, 50000) if text_path.exists() else ""
+        return {
+            "status": "passed" if text_excerpt else "text_missing",
+            "packet_path": str(packet_path),
+            "paper_title": row.get("title", ""),
+            "paper_id": row.get("paper_id", ""),
+            "url": row.get("url", ""),
+            "pdf_url": row.get("pdf_url", ""),
+            "text_path": str(text_path),
+            "text_excerpt": text_excerpt,
+            "abstract": row.get("abstract", ""),
+            "venue": row.get("venue", ""),
+            "year": row.get("year", ""),
+            "identity_match_mode": "paper_identity",
+        }
     return {"status": "not_found", "packet_path": str(packet_path), "identity_count": len(identities), "sample_identities": identities[:8]}
 
 
@@ -373,24 +296,7 @@ def collect_paper_evidence(normalized_plan: dict[str, Any], run_dir: Path, allow
         if excerpt:
             text_blocks.append({"source": f"url:{url}", "text": excerpt})
 
-    local_full_text_metrics = _local_full_text_target_metrics(full_text_evidence)
-    target_metrics = _merge_target_metrics(normalized_plan.get("target_metrics") or [], local_full_text_metrics)
-
-    claims: list[str] = []
-    for row in text_blocks:
-        text = row.get("text", "")
-        for line in text.splitlines():
-            clean = line.strip(" -\t")
-            lowered = clean.lower()
-            if not clean or len(clean) < 12:
-                continue
-            if any(token in lowered for token in ["accuracy", "auc", "f1", "loss", "epoch", "batch", "learning rate", "lr", "dataset", "训练", "指标", "数据集", "复现"]):
-                if clean not in claims:
-                    claims.append(clean[:500])
-            if len(claims) >= 80:
-                break
-        if len(claims) >= 80:
-            break
+    target_metrics = _merge_target_metrics(normalized_plan.get("target_metrics") or [])
 
     has_context = bool(text_blocks or normalized_plan.get("target_metrics") or normalized_plan.get("training") or normalized_plan.get("dataset"))
     payload = {
@@ -402,9 +308,9 @@ def collect_paper_evidence(normalized_plan: dict[str, Any], run_dir: Path, allow
         "url_fetch": url_evidence,
         "local_full_text": full_text_evidence,
         "text_blocks": text_blocks[:40],
-        "paper_claims_or_training_signals": claims,
+        "paper_claims_or_training_signals": [],
         "target_metrics": target_metrics,
-        "local_full_text_target_metrics": local_full_text_metrics,
+        "local_full_text_target_metrics": [],
         "dataset": normalized_plan.get("dataset") or [],
         "training": normalized_plan.get("training") or {},
         "limits": {"max_source_bytes": MAX_PAPER_SOURCE_BYTES, "local_text_suffixes": sorted(LOCAL_PAPER_TEXT_SUFFIXES), "local_pdf_allowed": True, "fetch_env_isolated": True},

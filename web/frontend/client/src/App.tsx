@@ -29,6 +29,8 @@ import {
   getVenues,
   probeLLMConfig,
   patchIdea,
+  updateIdeaMarkdown,
+  updatePlanMarkdown,
   saveConfig,
   saveRuntime,
   saveProjectConfig,
@@ -69,7 +71,6 @@ const DEFAULT_CONFIG: Config = {
   model: "gpt-4o-mini",
   temperature: 0.4,
   llm_roles: {},
-  idea_parallel_workers: 2,
   max_ideas: 6,
   ...STANDARD_FIND_DEFAULTS,
   arxiv_categories: ["cs.IR", "cs.LG", "cs.AI"],
@@ -214,6 +215,8 @@ const SCIENCE_JOURNAL_NAMES = Object.fromEntries([...SCIENCE_JOURNALS, ...SCIENC
 type Tab = "find" | "read" | "ideas" | "plan" | "environment" | "experiment" | "paperWrite";
 type Lang = "zh" | "en";
 type ArtifactPanelSnapshot = { runId: string; artifacts: Artifact[] };
+type CurrentFindArtifactScope = "find" | "read" | "ideas" | "plan";
+type IdeaEditorDraft = { title: string; new_method: string; initial_experiment: string };
 
 const markdownRenderer = new MarkdownIt({
   html: false,
@@ -231,7 +234,73 @@ const markdownRenderer = new MarkdownIt({
   },
 });
 
+function planTitlesFromMarkdown(markdown: string) {
+  const titles: Record<string, string> = {};
+  const tokens = markdownRenderer.parse(String(markdown || ""), {});
+  let candidateTitle = "";
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.type === "heading_open" && token.tag === "h2") {
+      const heading = String(tokens[index + 1]?.content || "").match(/^\d+\.\s+(.+)$/);
+      candidateTitle = heading ? heading[1].trim() : "";
+      continue;
+    }
+    if (!candidateTitle || token.type !== "inline") continue;
+    const planId = String(token.content || "").match(/^\*\*Plan ID\*\*:\s*`([^`]+)`\s*$/i)?.[1]?.trim();
+    if (planId) titles[planId] = candidateTitle;
+  }
+  return titles;
+}
+
+function fitRenderedMath(root: ParentNode = document) {
+  const mathNodes = Array.from(root.querySelectorAll<HTMLElement>(".markdownBody .katex"));
+  mathNodes.forEach((math) => { math.style.fontSize = ""; });
+  const displayNodes = Array.from(root.querySelectorAll<HTMLElement>(".markdownBody .katex-display"));
+  displayNodes.forEach((display) => { display.classList.remove("fitWrappedMath"); });
+  const narrowViewport = window.matchMedia("(max-width: 760px)").matches;
+
+  const shrinkToWidth = (math: HTMLElement, container: HTMLElement, useScrollWidth = false) => {
+    const containerWidth = container.clientWidth;
+    const available = containerWidth - 3;
+    if (available <= 0) return;
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const required = useScrollWidth ? container.scrollWidth : math.getBoundingClientRect().width;
+      if (required <= containerWidth + 1) break;
+      const fontSize = Number.parseFloat(window.getComputedStyle(math).fontSize);
+      if (!Number.isFinite(fontSize) || fontSize <= 0) break;
+      math.style.fontSize = `${fontSize * available / required}px`;
+    }
+  };
+
+  displayNodes.forEach((display) => {
+    const math = display.querySelector<HTMLElement>(":scope > .katex");
+    if (!math) return;
+    if (display.scrollWidth > display.clientWidth + 1) {
+      display.classList.add("fitWrappedMath");
+    }
+    if (display.scrollWidth > display.clientWidth + 1) {
+      shrinkToWidth(math, display, true);
+    }
+  });
+  if (!narrowViewport) return;
+  mathNodes.forEach((math) => {
+    if (math.closest(".katex-display")) return;
+    const container = math.closest<HTMLElement>("p, li, td, th, .markdownBody");
+    if (container) shrinkToWidth(math, container);
+  });
+}
+
 const FIND_RUN_ARTIFACT_TABS: Tab[] = ["find", "read", "ideas", "plan"];
+const CURRENT_FIND_SCOPE_ARTIFACT_NAMES: Record<CurrentFindArtifactScope, string[]> = {
+  find: ["find.md", "source_status.md", "find_progress.json", "find_results.json", "selection.json"],
+  read: ["read.md", "read_results.json"],
+  ideas: ["idea.md", "ideas.json"],
+  plan: ["plan.md", "plans.json"],
+};
+
+function currentFindArtifactScope(tab: Tab): CurrentFindArtifactScope {
+  return FIND_RUN_ARTIFACT_TABS.includes(tab) ? tab as CurrentFindArtifactScope : "find";
+}
 
 
 function isFallbackPaper(paper: any) {
@@ -909,15 +978,6 @@ function paperQualityLabels(paper: any) {
   return Array.from(new Set(labels));
 }
 
-const LLM_ROLES = [
-  ["find", "Find"],
-  ["read", "Read"],
-  ["idea_generator", "Idea Generator"],
-  ["idea_judge", "Idea Judge"],
-  ["plan_generator", "Plan Generator"],
-  ["plan_evaluator", "Plan Evaluator"],
-] as const;
-
 const TEXT = {
   zh: {
     profile: "研究画像",
@@ -926,7 +986,7 @@ const TEXT = {
     researcher: "研究者画像",
     researcherHelp: "填写你的背景、已有项目、偏好的实验条件、长期研究方向等。",
     llm: "LLM 配置",
-    llmHelp: "Find 使用这里的 LLM 做题名/摘要评分、分类推断和补检索评分；Read/Idea/Plan 默认交给 Claude Code，只有用户没有配置 Claude Code 或显式需要兼容兜底时才使用 LLM。环境、实验、论文撰写不走这里的 LLM 路线。",
+    llmHelp: "这里只配置 Find 使用的 LLM，用于题名/摘要评分、分类推断和补检索评分。Read、Idea、Plan 及后续阶段不使用这套 LLM 配置。",
     provider: "服务商",
     providerHelp: "兼容 OpenAI 协议的服务类型，例如 openai、siliconflow；mock 表示不调用远程 LLM。",
     baseUrl: "基础地址",
@@ -937,8 +997,6 @@ const TEXT = {
     apiKeyHelp: "仅保存在本地配置文件，用于调用你的 LLM 服务。",
     temperature: "温度",
     temperatureHelp: "控制生成随机性；精读和筛选建议 0.2-0.6。",
-    roleConfig: "角色 LLM 配置",
-    roleConfigHelp: "高级兼容配置：Find 可独立覆盖；Read/Idea/Plan 仅作为 Claude Code 不可用时的兜底。留空则继承上方全局 LLM。",
     validateLLM: "验证 LLM",
     validatingLLM: "验证中...",
     llmProbeHelp: "使用 Find 相同的 JSON 评分探针验证当前保存的 LLM 配置；不会显示 API key。",
@@ -1014,15 +1072,13 @@ const TEXT = {
     projectRunHistoryHelp: "只显示当前项目的历史运行；run ID 保留用于定位具体产物。",
     llmConcurrency: "LLM 评估并发数",
     llmConcurrencyHelp: "发现等评估任务使用，范围 1-32，默认 8；慢速兼容 API 建议 4-8。",
-    ideaWorkers: "想法生成并发数",
-    ideaWorkersHelp: "范围 1-8，默认 2。每个工作器使用不同论文窗口，不重复喂同一批论文。",
     repairRounds: "计划修复轮数",
-    repairRoundsHelp: "每个计划先生成初版，再执行评估到修复的轮数。",
+    repairRoundsHelp: "Claude 生成初版后，精确执行这里设置的修复轮数；0 表示不追加修复。",
     polishRounds: "继续优化轮数",
     polishFurther: "继续优化",
-    finishPlan: "完成",
-    planCompleted: "已完成",
-    finishPlanConfirm: "完成后页面和 plan.md 将只保留正文，评估/修复过程仍保存在 plans.json 中。确认完成？",
+    finishPlan: "选为执行计划",
+    planCompleted: "已选定",
+    finishPlanConfirm: "确认将此候选设为唯一执行计划？Claude Code 会重写并检查最终 plan.md。",
     fetchLimit: "非会议来源抓取上限",
     fetchLimitHelp: "用于 arXiv/bioRxiv 等非会议论文源的初始抓取上限；会议来源不读这个值，会议标题默认按所选会议/年份全量抓取。",
     recommendLimit: "最终推荐数量",
@@ -1165,8 +1221,8 @@ const TEXT = {
     researchTitle: "论文标题",
     researchIterations: "迭代轮数",
     researchOptions: "执行选项",
-    researchCodingBackend: "项目代理",
-    researchCodingBackendHelp: "环境配置、实验迭代和论文撰写统一由用户本机已配置的 Claude Code 项目代理执行；Find 阶段保留 LLM 评分。",
+    researchCodingBackend: "模块 Claude Code",
+    researchCodingBackendHelp: "Environment、Experimenting、Writing 分别使用各自模块的主控 Claude Code；Find 阶段保留 LLM 评分。",
     researchExecutePlan: "执行实验计划",
     researchPrepareEnv: "准备环境计划",
     researchRealBootstrapEnv: "真实创建/安装 Conda 环境",
@@ -1181,7 +1237,7 @@ const TEXT = {
     noData: "暂无",
     unnamed: "未命名",
     runtimeSaved: "运行环境已保存并重新诊断。",
-    runtimeDetected: "已自动检测并保存项目代理和 Node 路径。",
+    runtimeDetected: "已自动检测并保存 Claude Code 和 Node 路径。",
     envConfigSaved: "实验环境配置已保存；Conda/Python 仅在环境配置步骤使用。",
     runtimeLockedReady: "环境已锁定",
     runtimeLockedReadyDetail: "使用远端已锁定配置；无需重复创建或重新诊断。",
@@ -1195,34 +1251,35 @@ const TEXT = {
     researchProjectCreated: "项目已创建并切换。",
     researchGlobalHelp: "这里仅放全局研究主题；仓库、数据、环境状态和阻塞原因会在调研/计划之后进入“环境配置”阶段展示。",
     researchRuntimeTitle: "运行环境",
-    researchRuntimeHelp: "这里仅配置项目代理、Node 和额外 PATH。Conda/Python 实验环境只在“环境配置”步骤设置；系统会用这些显式路径同时覆盖交互式与非交互式执行。",
+    researchRuntimeHelp: "这里仅配置 Claude Code、Node 和额外 PATH。Conda/Python 实验环境只在“环境配置”步骤设置；系统会用这些显式路径同时覆盖交互式与非交互式执行。",
     remoteToolPaths: "远端工具路径",
     managementPythonExecutable: "管理 Python",
     experimentPythonExecutable: "实验 Python",
     nodeBinDir: "Node 可执行目录",
-    claudeExecutable: "项目代理可执行文件",
+    claudeExecutable: "Claude Code 可执行文件",
     extraPath: "额外路径",
-    autoDetectProjectAgent: "自动检测项目代理",
+    autoDetectClaude: "自动检测 Claude Code",
     saveAndDiagnose: "保存并诊断",
     missing: "缺失",
     noDiagnostics: "暂无诊断",
-    claudeWaiting: "主控已收到指令，正在等待输出...",
-    claudeSessionTitle: "项目代理对话",
-    claudeSessionHelp: "这里是少量人类监督入口；主流程应由项目科研代理按证据门控自主推进。如果项目代理正在运行，指令会排队到下一次安全检查点消费。",
+    claudeWaiting: "模块 Claude 已收到指令，正在等待输出...",
+    claudeSessionTitle: "模块 Claude Code 对话",
+    claudeSessionHelp: "这里是少量人类监督入口；Environment、Experimenting、Writing 分别发送给各自模块 Claude Code。",
     notCreated: "尚未创建",
-    claudeDone: "最近一次 主控指令已完成",
-    claudeFailed: "最近一次 主控指令失败",
-    claudeWorking: "主控正在处理这条指令",
+    claudeDone: "最近一次模块指令已完成",
+    claudeFailed: "最近一次模块指令失败",
+    claudeWorking: "模块 Claude 正在处理这条指令",
     events: "条事件",
-    claudeSentWaiting: "已提交给当前项目代理；若它正忙，会先进入待处理队列。",
+    claudeSentWaiting: "已提交给对应模块 Claude Code。",
     claudeEnvPlaceholder: "例如：请自主检查当前仓库和数据门控，说明是否能进入真实实验，不要使用我的分析结论作为证据。",
     claudeExperimentPlaceholder: "例如：请基于当前计划和真实加载器就绪数据，检查下一步实验应如何实现，必须自己读取代码和证据。",
     claudePaperPlaceholder: "例如：请继续按目标 venue 格式自主修订论文，检查引用、图表和证据门控，不合格就继续迭代，不要手写或虚构实验结论。",
-    queueAgentGuidance: "发送给项目代理",
-    agentGuidanceQueued: "指令已进入当前项目代理队列；当前长跑任务或下一轮安全检查点会读取。",
-    queuedGuidance: "待项目代理读取",
-    claudeTranscriptTitle: "最近一次项目代理处理摘要",
-    noClaudeTranscript: "还没有项目代理处理摘要；真实运行日志请看底部 任务栏中的当前 job。",
+    queueAgentGuidance: "发送给模块 Claude Code",
+    interruptEnvironmentClaude: "打断当前任务并优先发送",
+    agentGuidanceQueued: "指令已提交给对应模块 Claude Code；需要排队时由该模块自己的检查点读取。",
+    queuedGuidance: "等待模块 Claude Code",
+    claudeTranscriptTitle: "最近一次模块主控处理摘要",
+    noClaudeTranscript: "还没有模块主控处理摘要；真实运行日志请看底部任务栏中的当前 job。",
     arxivTopicQueries: "arXiv 主题检索词",
     arxivTopicQueriesHelp: "可留空。留空时发现阶段会根据研究兴趣自动生成主题检索词；填写后会和自动检索词合并。",
     arxivTopicQueriesPlaceholder: "留空则按当前研究主题自动生成",
@@ -1263,7 +1320,7 @@ const TEXT = {
     envAssetsBlockHelp: "点击每个卡片查看具体仓库、数据集、可用性和阻塞原因；这里不展示冗余项目产物，只展示能辅助判断流程是否健康的信息。",
     claudeRepoDecision: "Claude 仓库决策",
     notSelected: "尚未选择",
-    claudeNoStructuredDecision: "项目代理尚未给出结构化仓库/主题适配判断；系统不会把当前仓库当作最终路线。",
+    claudeNoStructuredDecision: "Environment 主控 Claude 尚未给出结构化仓库/主题适配判断；系统不会把当前仓库当作最终路线。",
     requiredModification: "需要改造",
     riskGap: "风险/缺口",
     evidence: "证据",
@@ -1477,7 +1534,7 @@ const TEXT = {
     researcher: "Researcher Profile",
     researcherHelp: "Add your background, existing projects, preferred experimental constraints, and long-term directions.",
     llm: "LLM Settings",
-    llmHelp: "Find uses this LLM for title/abstract scoring, inferred categories, and repair scoring. Read/Idea/Plan use Claude Code by default and only fall back to LLM when Claude Code is unavailable or explicitly configured. Environment, Experiment, and Paper do not use this LLM route.",
+    llmHelp: "This config is used only by Find for title/abstract scoring, inferred categories, and repair scoring. Read, Idea, Plan, and later stages do not use it.",
     provider: "Provider",
     providerHelp: "OpenAI-compatible service type, such as openai or siliconflow; mock disables remote LLM calls.",
     baseUrl: "Base URL",
@@ -1488,8 +1545,6 @@ const TEXT = {
     apiKeyHelp: "Stored only in the local config file for your LLM service.",
     temperature: "Temperature",
     temperatureHelp: "Controls generation randomness; 0.2-0.6 is usually better for reading and filtering.",
-    roleConfig: "Role LLM Settings",
-    roleConfigHelp: "Advanced compatibility settings: Find may override independently; Read/Idea/Plan use these only as a fallback when Claude Code is unavailable. Blank fields inherit the global LLM above.",
     validateLLM: "Validate LLM",
     validatingLLM: "Validating...",
     llmProbeHelp: "Uses the same JSON scoring probe as Find against the saved LLM config; API keys are never shown.",
@@ -1565,15 +1620,13 @@ const TEXT = {
     projectRunHistoryHelp: "Only runs for the current project are shown; run ID is kept for artifact lookup.",
     llmConcurrency: "LLM evaluation concurrency",
     llmConcurrencyHelp: "Used by Find-style evaluation tasks. Range 1-32, default 8; use 4-8 for slower compatible APIs.",
-    ideaWorkers: "Idea generation workers",
-    ideaWorkersHelp: "Range 1-8, default 2. Each worker receives a distinct paper window.",
     repairRounds: "Plan repair rounds",
-    repairRoundsHelp: "Each plan gets an initial draft, then evaluate -> repair for this many rounds.",
+    repairRoundsHelp: "After Claude writes the initial draft, run exactly this many repair rounds; 0 adds no repair round.",
     polishRounds: "Polish rounds",
     polishFurther: "Polish further",
-    finishPlan: "Finish",
-    planCompleted: "Completed",
-    finishPlanConfirm: "After finishing, the page and plan.md will keep only the final body. Evaluation/repair history remains in plans.json. Continue?",
+    finishPlan: "Select for execution",
+    planCompleted: "Selected",
+    finishPlanConfirm: "Select this candidate as the sole execution plan? Claude Code will rewrite and validate the final plan.md.",
     fetchLimit: "Non-venue fetch cap",
     fetchLimitHelp: "Initial fetch cap for arXiv/bioRxiv-like non-venue paper sources. Venue sources do not use this value; selected venue/year title indexes are fetched broadly by default.",
     recommendLimit: "Final recommendation count",
@@ -1716,8 +1769,8 @@ const TEXT = {
     researchTitle: "Paper title",
     researchIterations: "Iterations",
     researchOptions: "Execution options",
-    researchCodingBackend: "Project agent",
-    researchCodingBackendHelp: "Environment, experiment, and paper stages are handled by the user-configured Claude Code project agent; Find keeps LLM scoring.",
+    researchCodingBackend: "Module Claude Code",
+    researchCodingBackendHelp: "Environment, Experimenting, and Writing each use their own module controller Claude Code; Find keeps LLM scoring.",
     researchExecutePlan: "Execute experiment plan",
     researchPrepareEnv: "Prepare env plan",
     researchRealBootstrapEnv: "Create/install conda env for real",
@@ -1732,7 +1785,7 @@ const TEXT = {
     noData: "N/A",
     unnamed: "Unnamed",
     runtimeSaved: "runtime saved and diagnosed again.",
-    runtimeDetected: "Project-agent and Node paths were auto-detected and saved.",
+    runtimeDetected: "Claude Code and Node paths were auto-detected and saved.",
     envConfigSaved: "Experiment environment config saved; Conda/Python are configured only in the Environment step.",
     runtimeLockedReady: "Environment locked",
     runtimeLockedReadyDetail: "Using the locked remote configuration; no repeated creation or diagnosis is needed.",
@@ -1746,34 +1799,35 @@ const TEXT = {
     researchProjectCreated: "research project created and selected.",
     researchGlobalHelp: "This panel only stores the global research topic. Repo, data, environment status, and blockers appear in the Environment stage after research/planning.",
     researchRuntimeTitle: "Runtime",
-    researchRuntimeHelp: "Configure only the project agent, Node, and extra PATH here. Conda/Python experiment environments are configured only in the Environment step; the workflow uses these explicit paths for both interactive and non-interactive execution.",
+    researchRuntimeHelp: "Configure only Claude Code, Node, and extra PATH here. Conda/Python experiment environments are configured only in the Environment step; the workflow uses these explicit paths for both interactive and non-interactive execution.",
     remoteToolPaths: "Remote Tool Paths",
     managementPythonExecutable: "management Python",
     experimentPythonExecutable: "Experiment Python",
     nodeBinDir: "Node bin directory",
-    claudeExecutable: "Project-agent executable",
+    claudeExecutable: "Claude Code executable",
     extraPath: "Extra PATH",
-    autoDetectProjectAgent: "Auto-detect project agent",
+    autoDetectClaude: "Auto-detect Claude Code",
     saveAndDiagnose: "Save and diagnose",
     missing: "missing",
     noDiagnostics: "No diagnostics yet",
-    claudeWaiting: "The controller received the instruction and is waiting for output...",
-    claudeSessionTitle: "Project Agent Chat",
-    claudeSessionHelp: "Use this area only for limited human supervision; the research loop should advance through evidence gates and the project research agent. If the project agent is already running, guidance is queued until the next safe checkpoint.",
+    claudeWaiting: "The module Claude received the instruction and is waiting for output...",
+    claudeSessionTitle: "Module Claude Code Chat",
+    claudeSessionHelp: "Use this area only for limited human supervision; Environment, Experimenting, and Writing route to separate module Claude Code sessions.",
     notCreated: "Not created yet",
-    claudeDone: "Latest controller instruction completed",
-    claudeFailed: "Latest controller instruction failed",
-    claudeWorking: "The controller is processing this instruction",
+    claudeDone: "Latest module instruction completed",
+    claudeFailed: "Latest module instruction failed",
+    claudeWorking: "The module Claude is processing this instruction",
     events: "events",
-    claudeSentWaiting: "Submitted to the current project agent; if it is busy, it is queued for the next safe checkpoint.",
+    claudeSentWaiting: "Submitted to the matching module Claude Code.",
     claudeEnvPlaceholder: "Example: autonomously inspect the current repo and data gates, explain whether real experiments can start, and do not use my analysis as evidence.",
     claudeExperimentPlaceholder: "Example: based on the current plan and real loader-ready data, inspect how the next experiment should be implemented; read the code and evidence yourself.",
     claudePaperPlaceholder: "Example: keep revising the paper in the target venue format, checking citations, figures, and evidence gates; if it fails, keep iterating without hand-writing or inventing claims.",
-    queueAgentGuidance: "Send to project agent",
-    agentGuidanceQueued: "Guidance was queued for the current project agent; the active long run or next safe checkpoint will read it.",
-    queuedGuidance: "Waiting for project agent",
-    claudeTranscriptTitle: "Latest project-agent processing summary",
-    noClaudeTranscript: "No project-agent processing summary yet; real run logs are shown in the bottom taskbar job entries.",
+    queueAgentGuidance: "Send to module Claude Code",
+    interruptEnvironmentClaude: "Interrupt current task and send first",
+    agentGuidanceQueued: "Guidance was submitted to the matching module Claude Code; module-owned checkpoints read it when queuing is needed.",
+    queuedGuidance: "Waiting for module Claude Code",
+    claudeTranscriptTitle: "Latest module-controller summary",
+    noClaudeTranscript: "No module-controller summary yet; real run logs are shown in the bottom taskbar job entries.",
     arxivTopicQueries: "arXiv topic queries",
     arxivTopicQueriesHelp: "Optional. If empty, Find auto-generates topic queries from the research interest and merges them with any manual queries.",
     arxivTopicQueriesPlaceholder: "leave empty to auto-generate from this research topic",
@@ -1814,7 +1868,7 @@ const TEXT = {
     envAssetsBlockHelp: "Open each card to inspect repo, dataset, availability, and blockers. This panel hides redundant artifacts and shows only health-relevant details.",
     claudeRepoDecision: "Claude Repo Decision",
     notSelected: "Not selected yet",
-    claudeNoStructuredDecision: "The project agent has not produced a structured repo/topic-fit judgment yet; The workflow will not treat the current repo as the final route.",
+    claudeNoStructuredDecision: "The Environment controller has not produced a structured repo/topic-fit judgment yet; the workflow will not treat the current repo as the final route.",
     requiredModification: "Required modification",
     riskGap: "Risk/gap",
     evidence: "Evidence",
@@ -2091,6 +2145,7 @@ function normalizeMalformedLatexCommands(text: string) {
   const commandMap: Record<string, string> = { extit: "textit", extbf: "textbf", exttt: "texttt", extsc: "textsc", ext: "text" };
   return String(text ?? "").replace(/(^|[^A-Za-z\\])(extit|extbf|exttt|extsc|ext)\{/g, (_match, prefix, command) => String(prefix || "") + String.fromCharCode(92) + (commandMap[String(command)] || "text") + "{");
 }
+
 function normalizePublicLatexLinks(text: string) {
   const value = normalizeMalformedLatexCommands(text)
     .replace(/\\href\{(https?:\/\/[^{}\s]+)\}\{([^{}]+)\}/g, (_match, url, label) => {
@@ -2141,8 +2196,8 @@ function jobStatusLabel(status: any, lang: Lang = "zh") {
     preview_pdf_blocked: { zh: "预览受门控", en: "preview gated" },
     blocked: { zh: "阻塞", en: "blocked" },
     blocked_environment_base_selection_required: { zh: "等待环境阶段选择当前基底", en: "waiting for environment-stage base selection" },
-    blocked_environment_bootstrap_failed: { zh: "环境 bootstrap 未通过", en: "environment bootstrap failed" },
-    blocked_environment_bootstrap_required: { zh: "等待环境 bootstrap", en: "environment bootstrap required" },
+    blocked_environment_bootstrap_failed: { zh: "Environment handoff 尚未就绪", en: "Environment handoff not ready" },
+    blocked_environment_bootstrap_required: { zh: "Environment handoff 尚未就绪", en: "Environment handoff not ready" },
     environment_anchor_selection_required: { zh: "等待环境阶段选择当前基底", en: "waiting for environment-stage base selection" },
     error: { zh: "错误", en: "error" },
     cancelling: { zh: "停止中", en: "cancelling" },
@@ -2194,8 +2249,8 @@ function jobProgressPhaseLabel(job: any, lang: Lang = "zh") {
   if (["cancelled", "blocked", "error", "interrupted", "queued", "running", "cancelling"].includes(phase) || normalized.startsWith("blocked_")) return jobStatusLabel(phase, lang);
   if (phase === "started") return lang === "zh" ? "已启动" : "started";
   if (normalized === "current_find_read") return lang === "zh" ? "当前 Find 精读" : "current Find reading";
-  if (normalized === "full_text") return lang === "zh" ? "爬取全文" : "full-text acquisition";
-  if (normalized === "deep_read") return lang === "zh" ? "精读全文" : "deep reading";
+  if (normalized === "full_text") return lang === "zh" ? "爬文章" : "acquire papers";
+  if (normalized === "deep_read") return lang === "zh" ? "读文章" : "read papers";
   return phase.replace(/_/g, " ");
 }
 
@@ -2205,8 +2260,8 @@ function isFullCycleHeartbeatLine(line: string) {
 }
 
 function publicLogText(value: any, lang: Lang = "zh"): string {
-  const agentName = lang === "zh" ? "项目代理" : "project agent";
-  const researchAgentName = lang === "zh" ? "项目代理" : "research project agent";
+  const agentName = lang === "zh" ? "模块主控 Claude" : "module controller";
+  const researchAgentName = lang === "zh" ? "模块主控 Claude" : "module controller";
   let text = String(value ?? "")
     .replace(/主控\s*Claude Code/gi, "__MAIN_CLAUDE_CODE_ZH__")
     .replace(/main\s+Claude Code/gi, "__MAIN_CLAUDE_CODE_EN__")
@@ -2233,8 +2288,8 @@ function publicLogText(value: any, lang: Lang = "zh"): string {
     .replace(/来源：确定性门控审计/g, "")
     .replace(/Source: deterministic gate audit \(status and counts are computed from project artifacts, not free-form project-agent text\)/gi, "")
     .replace(/Source: deterministic gate audit/gi, "")
-    .replace(/项目代理最近一次处理已记录；阶段=[^，。]+，状态=blocked[_ ]tool[_ ]policy。详细审计保留在远端日志\/receipt 中。/g, lang === "zh" ? "项目代理最近一次处理被安全策略拦截；详细审计保留在远端日志中。" : "The latest project-agent turn was safely blocked; detailed audit remains in remote logs.")
-    .replace(/项目代理状态已记录；阶段=[^，。]+，状态=blocked[_ ]tool[_ ]policy。/g, lang === "zh" ? "项目代理处理被安全策略拦截。" : "The project-agent turn was safely blocked.")
+    .replace(/项目代理最近一次处理已记录；阶段=[^，。]+，状态=blocked[_ ]tool[_ ]policy。详细审计保留在远端日志\/receipt 中。/g, lang === "zh" ? "模块主控 Claude 最近一次处理被安全策略拦截；详细审计保留在远端日志中。" : "The latest module-controller turn was safely blocked; detailed audit remains in remote logs.")
+    .replace(/项目代理状态已记录；阶段=[^，。]+，状态=blocked[_ ]tool[_ ]policy。/g, lang === "zh" ? "模块主控 Claude 处理被安全策略拦截。" : "The module-controller turn was safely blocked.")
     .replace(/状态=blocked[_ ]tool[_ ]policy/gi, lang === "zh" ? "状态=安全策略拦截" : "status=safely blocked")
     .replace(/blocked[_ ]tool[_ ]policy/gi, lang === "zh" ? "安全策略拦截" : "safely blocked")
     .replace(/summary_source[:=]\s*deterministic_gate_audit/gi, "")
@@ -2247,9 +2302,9 @@ function publicLogText(value: any, lang: Lang = "zh"): string {
     .replace(/repo\/data\/protocol/g, lang === "zh" ? "仓库、数据、协议" : "repo/data/protocol")
     .replace(/idea-code-run-log\/loss-analysis-reflection-next plan/g, lang === "zh" ? "想法、代码、运行日志、loss 分析、反思和下一步计划" : "idea-code-run-log/loss-analysis-reflection-next plan")
     .replace(/实验循环：warn/g, lang === "zh" ? "实验循环：需继续检查" : "experiment loop: needs review")
-    .replace(/确定性门控只确认当前状态；具体下一步应由项目代理读取证据后给出。/g, lang === "zh" ? "等待项目代理读取证据并给出具体下一步。" : "Waiting for the project agent to read the evidence and choose the concrete next step.")
-    .replace(/确定性门控只确认当前缺口；具体实验或修复动作由项目代理读取证据后决定。/g, lang === "zh" ? "等待项目代理读取当前缺口证据，并给出下一轮实验或修复动作。" : "Waiting for the project agent to read the current evidence gap and choose the next experiment or repair action.")
-    .replace(/确定性门控只确认当前主线缺少候选实验证据；具体下一步由项目代理读取证据后决定。/g, lang === "zh" ? "等待项目代理读取候选实验证据缺口，并给出下一步实验动作。" : "Waiting for the project agent to read the candidate-evidence gap and choose the next experiment action.")
+    .replace(/确定性门控只确认当前状态；具体下一步应由项目代理读取证据后给出。/g, lang === "zh" ? "等待对应模块主控 Claude 读取证据并给出具体下一步。" : "Waiting for the relevant module controller to read the evidence and choose the concrete next step.")
+    .replace(/确定性门控只确认当前缺口；具体实验或修复动作由项目代理读取证据后决定。/g, lang === "zh" ? "等待 Experimenting 主控 Claude 读取当前缺口证据，并给出下一轮实验或修复动作。" : "Waiting for the Experimenting controller to read the current evidence gap and choose the next experiment or repair action.")
+    .replace(/确定性门控只确认当前主线缺少候选实验证据；具体下一步由项目代理读取证据后决定。/g, lang === "zh" ? "等待 Experimenting 主控 Claude 读取候选实验证据缺口，并给出下一步实验动作。" : "Waiting for the Experimenting controller to read the candidate-evidence gap and choose the next experiment action.")
     .replace(/Real-data comparison mixes metrics \(([^)]*)\); The workflow must compare on the same metric before paper promotion\./g, lang === "zh" ? "真实数据比较使用了不一致指标（$1）；需要先用同一指标重新比较，才能推进论文结论。" : "Real-data comparison uses inconsistent metrics ($1); compare on the same metric before paper promotion.")
     .replace(/native frontend skipped/g, "finding frontend skipped")
     .replace(/native frontend/g, "finding frontend")
@@ -2257,8 +2312,8 @@ function publicLogText(value: any, lang: Lang = "zh"): string {
     .replace(/阶段/g, "阶段")
     .replace(/TASTE\/计划/g, "Find/Plan")
     .replace(/TASTE\/Plan/g, "Find/Plan")
-    .replace(/missing bib entries for cited keys=[^；。\n]+/gi, lang === "zh" ? "引用/参考文献仍需修复，具体修复清单已交由项目代理处理" : "Citation/references still need repair; detailed repair items are reserved for the project agent")
-    .replace(/latex_undefined_citations[^；。\n]*/gi, lang === "zh" ? "引用/参考文献仍需修复，具体修复清单已交由项目代理处理" : "Citation/references still need repair; detailed repair items are reserved for the project agent")
+    .replace(/missing bib entries for cited keys=[^；。\n]+/gi, lang === "zh" ? "引用/参考文献仍需修复，具体修复清单已交由 Writing 主控 Claude 处理" : "Citation/references still need repair; detailed repair items are reserved for the Writing controller")
+    .replace(/latex_undefined_citations[^；。\n]*/gi, lang === "zh" ? "引用/参考文献仍需修复，具体修复清单已交由 Writing 主控 Claude 处理" : "Citation/references still need repair; detailed repair items are reserved for the Writing controller")
     .replace(/natbib_author_undefined/gi, lang === "zh" ? "natbib 作者型引用未渲染" : "natbib author citation did not render")
     .replace(/pdf_unresolved_citation_markers/gi, lang === "zh" ? "PDF 未解析引用标记" : "PDF unresolved citation markers")
     .replace(/nature_numeric_style_textual_citations/gi, lang === "zh" ? "Nature 数字模板中的作者型引用命令" : "author-style citation commands in a Nature numeric template")
@@ -2270,21 +2325,21 @@ function publicLogText(value: any, lang: Lang = "zh"): string {
     .replace(/run_frontend/g, "run_finding")
     .replace(/run-finding/g, "run-finding")
     .replace(/PaperOrchestra/g, "writing")
-    .replace(/Claude Code 原始回复/g, "项目代理处理摘要")
-    .replace(/最近一次 Claude Code 原始回复/g, "最近一次项目代理处理摘要")
-    .replace(/Raw Claude Code response/gi, "project-agent processing summary")
-    .replace(/Latest raw Claude Code response/gi, "Latest project-agent processing summary")
+    .replace(/Claude Code 原始回复/g, "模块主控处理摘要")
+    .replace(/最近一次 Claude Code 原始回复/g, "最近一次模块主控处理摘要")
+    .replace(/Raw Claude Code response/gi, "module-controller processing summary")
+    .replace(/Latest raw Claude Code response/gi, "Latest module-controller processing summary")
     .replace(/TASTE\/Claude Code/gi, researchAgentName)
     .replace(/TASTE\/Claude/gi, researchAgentName)
     .replace(/Claude Code/gi, agentName)
-    .replace(/Idea came from (?:项目代理|project agent) under TASTE control and was normalized by the current-Find evidence guard; it cannot bind a repo, dataset, command, or (?:selected repository|selected base|当前路线|current route) before environment(?:-stage)? selection\.?/gi, lang === "zh" ? "该想法由 项目代理基于当前 Find 精读证据形成；环境审查前不会绑定仓库、数据、命令或当前路线。" : "This idea was generated by the research project agent from the current Find/read evidence; before environment review it does not bind a repo, dataset, command, or base.")
-    .replace(/Idea came from (?:项目代理|project agent) under TASTE control and was normalized by the current-Find evidence guard; paper conclusions still require repo\/data\/env\/experiment gates\.?/gi, lang === "zh" ? "该想法由 项目代理基于当前 Find 精读证据形成；论文结论仍需要仓库、数据、环境和实验门控通过。" : "This idea was generated by the research project agent from the current Find/read evidence; paper conclusions still require repository, data, environment, and experiment gates.")
+    .replace(/Idea came from (?:项目代理|project agent) under TASTE control and was normalized by the current-Find evidence guard; it cannot bind a repo, dataset, command, or (?:selected repository|selected base|当前路线|current route) before environment(?:-stage)? selection\.?/gi, lang === "zh" ? "该想法由 Ideation 主控 Claude 基于当前 Find 精读证据形成；环境审查前不会绑定仓库、数据、命令或当前路线。" : "This idea was generated by the Ideation controller from the current Find/read evidence; before environment review it does not bind a repo, dataset, command, or base.")
+    .replace(/Idea came from (?:项目代理|project agent) under TASTE control and was normalized by the current-Find evidence guard; paper conclusions still require repo\/data\/env\/experiment gates\.?/gi, lang === "zh" ? "该想法由 Ideation 主控 Claude 基于当前 Find 精读证据形成；论文结论仍需要仓库、数据、环境和实验门控通过。" : "This idea was generated by the Ideation controller from the current Find/read evidence; paper conclusions still require repository, data, environment, and experiment gates.")
     .replace(/原始回复/g, "处理摘要")
     .replace(/paper_orchestra/g, "paper writing")
     .replace(/paper-orchestra/g, "paper writing")
-    .replace(/blocked[_ ]environment[_ ]bootstrap[_ ]failed/gi, lang === "zh" ? "环境 bootstrap 未通过" : "environment bootstrap failed")
-    .replace(/blocked[_ ]environment[_ ]bootstrap[_ ]required/gi, lang === "zh" ? "等待环境 bootstrap" : "environment bootstrap required")
-    .replace(/environment[_ ]bootstrap[_ ]failed/gi, lang === "zh" ? "环境 bootstrap 未通过" : "environment bootstrap failed")
+    .replace(/blocked[_ ]environment[_ ]bootstrap[_ ]failed/gi, lang === "zh" ? "Environment handoff 尚未就绪" : "Environment handoff not ready")
+    .replace(/blocked[_ ]environment[_ ]bootstrap[_ ]required/gi, lang === "zh" ? "Environment handoff 尚未就绪" : "Environment handoff not ready")
+    .replace(/environment[_ ]bootstrap[_ ]failed/gi, lang === "zh" ? "Environment handoff 尚未就绪" : "Environment handoff not ready")
     .replace(/environment_claude_code/g, "environment review")
     .replace(/environment-stage base selection/gi, "environment review")
     .replace(/environment-stage base selected/gi, "environment selected")
@@ -2300,7 +2355,7 @@ function publicLogText(value: any, lang: Lang = "zh"): string {
     const enReplacements: Array<[RegExp, string]> = [
       [/期刊稿预览已生成；正文页数\s*(\d+)；写作引用质量目标\s*([^；]+)；图表版面提示\s*(\d+)\s*项，优先处理图表占地；投稿\/证据门控仍按真实状态保留，不标记为投稿通过。/g, "Journal-style paper preview has been generated; body pages $1; citation target $2; figure-layout warnings $3; submission/evidence gates remain truthful and are not marked as passed."],
       [/参考复现已通过；当前主线还缺少可审计、可写入论文的候选实验结果。/g, "Reference reproduction has passed; the current route still lacks auditable candidate-experiment results that can be written into the paper."],
-      [/项目代理\s*需要补齐候选实验的来源、数据、协议、完整运行和本地产物审计；完成前不会更换当前路线或提升论文结论。/g, "The research project agent must complete source, data, protocol, full-run, and artifact-local audit evidence for candidate experiments; before that it will keep the current route and avoid promoting paper conclusions."],
+      [/项目代理\s*需要补齐候选实验的来源、数据、协议、完整运行和本地产物审计；完成前不会更换当前路线或提升论文结论。/g, "The Experimenting controller must complete source, data, protocol, full-run, and artifact-local audit evidence for candidate experiments; before that it will keep the current route and avoid promoting paper conclusions."],
       [/需要补齐候选实验的来源、数据、协议、完整运行和本地产物审计；完成前不会更换当前路线或提升论文结论。/g, "must complete source, data, protocol, full-run, and artifact-local audit evidence for candidate experiments; before that it will keep the current route and avoid promoting paper conclusions."],
       [/继续补齐候选实验的来源、数据加载、协议、完整运行和本地产物审计；完成后刷新科学进展、论文证据和投稿准备度。/g, "Continue completing candidate-experiment source, data-loader, protocol, full-run, and artifact-local audit evidence; then refresh scientific-progress, paper-evidence, and submission-readiness gates."],
       [/参考工作复现已达到可继续作为基底的门槛。/g, "The reference reproduction has met the threshold for continuing with this base."],
@@ -2320,10 +2375,9 @@ function publicLogText(value: any, lang: Lang = "zh"): string {
       [/参考复现/g, "reference reproduction"],
       [/当前主线/g, "current route"],
       [/当前路线/g, "current route"],
-      [/项目代理最近一次处理已记录；阶段=([^，]+)，状态=([^。]+)。详细审计保留在远端日志\/receipt 中。/g, "The latest project-agent turn has been recorded; stage=$1, status=$2. Detailed audit remains in the remote logs/receipt."],
-      [/项目代理状态已记录；阶段=([^，]+)，状态=([^。]+)。/g, "Project-agent status has been recorded; stage=$1, status=$2."],
-      [/项目代理正在处理\s*([^；]+)；详细审计保留在远端日志\/receipt 中，普通页面只展示处理摘要。/g, "The project agent is processing $1. Detailed audit remains in the remote logs/receipt; the page shows only the processing summary."],
-      [/项目代理最近一次处理已记录；阶段=current-find-claude-read-idea-plan，状态=completed。详细审计保留在远端日志\/receipt 中。/g, "The latest project-agent turn has been recorded; stage=current Find reading/ideas/plans, status=completed. Detailed audit remains in the remote logs/receipt."],
+      [/项目代理最近一次处理已记录；阶段=([^，]+)，状态=([^。]+)。详细审计保留在远端日志\/receipt 中。/g, "The latest module-controller turn has been recorded; stage=$1, status=$2. Detailed audit remains in the remote logs/receipt."],
+      [/项目代理状态已记录；阶段=([^，]+)，状态=([^。]+)。/g, "Module-controller status has been recorded; stage=$1, status=$2."],
+      [/项目代理正在处理\s*([^；]+)；详细审计保留在远端日志\/receipt 中，普通页面只展示处理摘要。/g, "The module controller is processing $1. Detailed audit remains in the remote logs/receipt; the page shows only the processing summary."],
       [/检验当前选中基底下的候选实验是否能超过当前参考复现。/g, "Test whether the candidate experiment under the current selected base can outperform the current reference reproduction."],
       [/候选实验观察记录/g, "candidate experiment observation record"],
       [/不得据此声称改进成立/g, "do not claim improvement from this record"],
@@ -2362,8 +2416,8 @@ function publicLogText(value: any, lang: Lang = "zh"): string {
       .replace(/候选实验/g, "candidate experiments")
       .replace(/来源、数据、协议、完整运行和本地产物审计/g, "source, data, protocol, full-run, and artifact-local audit")
       .replace(/需要补齐candidate experiment的来源、数据、协议、full run和artifact-local audit；完成前不会更换current route或提升paper conclusions。/g, "must complete candidate-experiment source, data, protocol, full-run, and artifact-local audit evidence; before that it will keep the current route and avoid promoting paper conclusions.")
-      .replace(/research project agent\s*需要补齐candidate experiment的来源、数据、协议、full run和artifact-local audit；完成前不会更换current route或提升paper conclusions。/g, "The research project agent must complete candidate-experiment source, data, protocol, full-run, and artifact-local audit evidence; before that it will keep the current route and avoid promoting paper conclusions.")
-      .replace(/项目代理/g, "project agent")
+      .replace(/research project agent\s*需要补齐candidate experiment的来源、数据、协议、full run和artifact-local audit；完成前不会更换current route或提升paper conclusions。/g, "The Experimenting controller must complete candidate-experiment source, data, protocol, full-run, and artifact-local audit evidence; before that it will keep the current route and avoid promoting paper conclusions.")
+      .replace(/项目代理/g, "module controller")
       .replace(/论文结论提升/g, "paper-conclusion gating")
       .replace(/论文写作/g, "paper writing")
       .replace(/论文证据/g, "paper evidence")
@@ -2372,9 +2426,9 @@ function publicLogText(value: any, lang: Lang = "zh"): string {
       .replace(/claim-ready/gi, "auditable")
       .replace(/claim ready/gi, "auditable")
       .replace(/paper conclusions?/gi, "paper conclusions")
-      .replace(/paper\.research project agent/gi, "paper. research project agent")
-      .replace(/research project agentmust/gi, "research project agent must")
-      .replace(/project agentmust/gi, "project agent must")
+      .replace(/paper\.research project agent/gi, "paper. Writing controller")
+      .replace(/research project agentmust/gi, "module controller must")
+      .replace(/project agentmust/gi, "module controller must")
       .replace(/candidate experimentobservation/gi, "candidate experiment observation")
       .replace(/candidate experimentsobservation/gi, "candidate experiment observation")
       .replace(/candidate experiment的/g, "candidate-experiment ")
@@ -2604,7 +2658,7 @@ function summarizeJobLogLine(line: string, lang: Lang, contextTab?: Tab) {
   if (text.startsWith("claude_takeover=")) {
     const value = text.slice(16).trim();
     const label = value === "completed" ? (lang === "zh" ? "已完成" : "completed") : value.replace(/_/g, " ");
-    return lang === "zh" ? `项目代理接管状态：${label}` : `project-agent takeover: ${label}`;
+    return lang === "zh" ? `模块主控接管状态：${label}` : `module-controller takeover: ${label}`;
   }
   if (text.startsWith("latest=")) {
     const value = text.slice(7).trim();
@@ -3067,7 +3121,6 @@ const ARTIFACT_DISPLAY_NAMES: Record<string, { zh: string; en: string }> = {
   "read_results.md": { zh: "精读结果", en: "Reading results" },
   "read_results.json": { zh: "精读结果审计", en: "Reading audit" },
   "idea.md": { zh: "想法正文", en: "Idea brief" },
-  "ideas.md": { zh: "想法正文", en: "Idea brief" },
   "ideas.json": { zh: "想法结果审计", en: "Idea audit" },
   "plan.md": { zh: "计划正文", en: "Plan brief" },
   "plans.md": { zh: "计划正文", en: "Plan brief" },
@@ -3207,7 +3260,7 @@ function derivedCondaPython(condaBase: any, condaEnv: any) {
 const HIDDEN_RUN_ARTIFACTS = new Set(["literature_tool_packet.md", "literature_tool_packet.json"]);
 const FIND_ARTIFACT_NAMES = new Set(["find.md", "source_status.md", "find_results.json"]);
 const READ_ARTIFACT_NAMES = new Set(["read.md", "read_results.md", "read_results.json"]);
-const IDEA_ARTIFACT_NAMES = new Set(["idea.md", "ideas.md", "ideas.json"]);
+const IDEA_ARTIFACT_NAMES = new Set(["idea.md", "ideas.json"]);
 const PLAN_ARTIFACT_NAMES = new Set(["plans.md", "plan.md", "plans.json"]);
 const EXPERIMENT_ARTIFACT_RE = /(experiment|reproduction|reference|trajectory|gate|audit|record|log|metrics|result)/i;
 const PAPER_ARTIFACT_RE = /(paper|latex|tex|pdf|submission|camera|figure)/i;
@@ -3250,7 +3303,13 @@ function normalizeClaudePanelStage(value: any): ClaudePanelStage | "" {
 function isClaudeGuidanceJob(job: any) {
   const result = job?.result && typeof job.result === "object" ? job.result : {};
   const haystack = [job?.stage, result.raw_stage, result.action, result.kind, job?.job_id].map((item) => String(item || "").toLowerCase()).join(" ");
-  return haystack.includes("claude-message") || haystack.includes("agent-guidance");
+  return haystack.includes("claude-message")
+    || haystack.includes("agent-guidance")
+    || haystack.includes("environment-chat")
+    || haystack.includes("experimenting-chat")
+    || haystack.includes("experiment-chat")
+    || haystack.includes("writing-chat")
+    || haystack.includes("paper-chat");
 }
 
 function jobPanelStage(job: any): ClaudePanelStage | "" {
@@ -3416,10 +3475,18 @@ function App() {
   const [planRepairRounds, setPlanRepairRounds] = useState(3);
   const [polishRounds, setPolishRounds] = useState<Record<string, number>>({});
   const [selectedPlanId, setSelectedPlanId] = useState("");
+  const [planMarkdownDraft, setPlanMarkdownDraft] = useState("");
+  const [planMarkdownDirty, setPlanMarkdownDirty] = useState(false);
+  const [planMarkdownSaving, setPlanMarkdownSaving] = useState(false);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [jobsLoaded, setJobsLoaded] = useState(false);
   const [findLaunchPending, setFindLaunchPending] = useState(false);
   const [ideaStatusSaving, setIdeaStatusSaving] = useState<Record<string, string>>({});
+  const [ideaEditorDrafts, setIdeaEditorDrafts] = useState<Record<string, IdeaEditorDraft>>({});
+  const [ideaEditorSaving, setIdeaEditorSaving] = useState<Record<string, boolean>>({});
+  const [ideaMarkdownEditing, setIdeaMarkdownEditing] = useState(false);
+  const [ideaMarkdownDraft, setIdeaMarkdownDraft] = useState("");
+  const [ideaMarkdownSaving, setIdeaMarkdownSaving] = useState(false);
   const activeProjectRef = useRef("");
   const projectSummaryLoadedAtRef = useRef<Record<string, number>>({});
   const projectSummaryInFlightRef = useRef("");
@@ -3429,6 +3496,7 @@ function App() {
   const runLoadSeq = useRef(0);
   const userSelectedRunRef = useRef(false);
   const currentFindArtifactsInFlightRef = useRef("");
+  const currentFindArtifactsRunRef = useRef("");
   const activeFindArtifactsInFlightRef = useRef("");
   const fallbackRunArtifactsInFlightRef = useRef("");
   const fallbackRunArtifactCacheRef = useRef<Record<string, Artifact[]>>({});
@@ -3660,7 +3728,6 @@ function App() {
         const summaryFindRunId = currentFindRunIdFromSummary(summary);
         if (summaryFindRunId) {
           setRunId(summaryFindRunId);
-          void loadCurrentFindArtifacts(summaryFindRunId);
         }
         void getRuns(initialProjectId).then((projectRunData) => {
           if (activeProjectRef.current !== initialProjectId) return;
@@ -3698,27 +3765,38 @@ function App() {
     }
   }
 
-  async function loadCurrentFindArtifacts(id: string, options: { loading?: boolean } = {}) {
+  async function loadCurrentFindArtifacts(id: string, options: { loading?: boolean; scope?: CurrentFindArtifactScope } = {}) {
     if (!id) {
       currentFindArtifactsInFlightRef.current = "";
+      currentFindArtifactsRunRef.current = "";
       setCurrentFindArtifacts([]);
       setActiveArtifact("");
       setRawArtifacts({});
       return;
     }
-    if (currentFindArtifactsInFlightRef.current === id) return;
+    if (currentFindArtifactsRunRef.current !== id) {
+      currentFindArtifactsRunRef.current = id;
+      setCurrentFindArtifacts([]);
+    }
+    const requestKey = `${researchProject}:${id}:${options.scope || "all"}`;
+    if (currentFindArtifactsInFlightRef.current === requestKey) return;
     setActiveArtifact("");
     setRawArtifacts({});
-    currentFindArtifactsInFlightRef.current = id;
+    currentFindArtifactsInFlightRef.current = requestKey;
     const showLoading = options.loading !== false;
     if (showLoading) setCurrentFindArtifactsLoading(true);
     try {
-      const data = await getArtifacts(id, { light: true });
-      setCurrentFindArtifacts(data.artifacts);
+      const data = await getArtifacts(id, { light: true, scope: options.scope, project: researchProject || undefined });
+      if (options.scope) {
+        const scopeNames = new Set(CURRENT_FIND_SCOPE_ARTIFACT_NAMES[options.scope]);
+        setCurrentFindArtifacts((prev) => [...prev.filter((artifact) => !scopeNames.has(artifact.name)), ...data.artifacts]);
+      } else {
+        setCurrentFindArtifacts(data.artifacts);
+      }
     } catch {
-      setCurrentFindArtifacts([]);
+      if (!options.scope) setCurrentFindArtifacts([]);
     } finally {
-      if (currentFindArtifactsInFlightRef.current === id) currentFindArtifactsInFlightRef.current = "";
+      if (currentFindArtifactsInFlightRef.current === requestKey) currentFindArtifactsInFlightRef.current = "";
       if (showLoading) setCurrentFindArtifactsLoading(false);
     }
   }
@@ -3749,6 +3827,9 @@ function App() {
     setProjectLoading(true);
     setSelectedPapers([]);
     setPlanIdeaIds([]);
+    setSelectedPlanId("");
+    setPlanMarkdownDraft("");
+    setPlanMarkdownDirty(false);
     setActiveProjectArtifact("");
     setLastVisibleRunArtifactsByTab({});
     fallbackRunArtifactsInFlightRef.current = "";
@@ -3767,7 +3848,6 @@ function App() {
       setActiveProjectArtifact(asArray(summary.artifacts)[0]?.name || "");
       const summaryFindRunId = currentFindRunIdFromSummary(summary);
       if (summaryFindRunId) {
-        void loadCurrentFindArtifacts(summaryFindRunId);
         void refreshRuns(summaryFindRunId, id).catch(() => {});
       }
     } finally {
@@ -3874,20 +3954,6 @@ function App() {
       partial: count > 0 && count < journals.length,
       count,
     };
-  }
-
-  function updateRoleConfig(role: string, key: string, value: string | number | null) {
-    setConfig((prev) => ({
-      ...prev,
-      llm_roles: {
-        ...(prev.llm_roles || {}),
-        [role]: {
-          ...((prev.llm_roles || {})[role] || {}),
-          [key]: value,
-        },
-      },
-    }));
-    setSaveMessage("");
   }
 
   function updateEmailConfig(key: string, value: string | number | boolean | string[]) {
@@ -4142,6 +4208,7 @@ function App() {
   }
 
   async function runRead() {
+    if (rejectHistoricalRunMutation()) return;
     const readRunId = currentProjectFindRunId || runId;
     if (!readRunId) return;
     if (stageLaunchDisabledByFullCycle) {
@@ -4153,41 +4220,54 @@ function App() {
   }
 
   async function runIdeas() {
-    if (!runId) return;
+    if (rejectHistoricalRunMutation()) return;
+    const ideaRunId = currentProjectFindRunId || runId;
+    if (!ideaRunId || !researchProject) return;
     if (stageLaunchDisabledByFullCycle) {
       setError(stageLaunchLockedText);
       return;
     }
-    attachJob(await startIdea(runId, config.max_ideas, config.idea_parallel_workers), "ideas");
+    const maxIdeas = Math.min(50, Math.max(1, Number(config.max_ideas) || 1));
+    attachJob(await startIdea(ideaRunId, maxIdeas, researchProject), "ideas");
   }
 
   async function runPlan() {
-    if (!runId) return;
+    if (rejectHistoricalRunMutation()) return;
+    const planRunId = currentProjectFindRunId || runId;
+    if (!planRunId) return;
     if (stageLaunchDisabledByFullCycle) {
       setError(stageLaunchLockedText);
       return;
     }
-    attachJob(await startPlan(runId, planIdeaIds, planRepairRounds), "plan");
+    if (!planIdeaIds.length) {
+      setError(lang === "zh" ? "请至少选择一个已批准的 Idea。" : "Select at least one approved Idea.");
+      return;
+    }
+    attachJob(await startPlan(planRunId, planIdeaIds, planRepairRounds), "plan");
   }
 
   async function runPlanPolish(planId: string, versionId: string) {
-    if (!runId) return;
+    if (rejectHistoricalRunMutation()) return;
+    const planRunId = currentProjectFindRunId || runId;
+    if (!planRunId) return;
     if (stageLaunchDisabledByFullCycle) {
       setError(stageLaunchLockedText);
       return;
     }
-    attachJob(await startPlanPolish(runId, planId, versionId, polishRounds[planId] || 1), "plan");
+    attachJob(await startPlanPolish(planRunId, planId, versionId, polishRounds[planId] || 1), "plan");
   }
 
   async function runPlanFinish(planId: string) {
-    if (!runId) return;
+    if (rejectHistoricalRunMutation()) return;
+    const planRunId = currentProjectFindRunId || runId;
+    if (!planRunId) return;
     if (stageLaunchDisabledByFullCycle) {
       setError(stageLaunchLockedText);
       return;
     }
     if (!window.confirm(t.finishPlanConfirm)) return;
-    await finishPlan(runId, planId);
-    await loadRun(runId);
+    await finishPlan(planRunId, planId);
+    await loadRun(planRunId);
   }
 
   const activeFindRunId = useMemo(() => {
@@ -4203,9 +4283,8 @@ function App() {
     const fromSummary = currentFindRunIdFromSummary(researchSummary);
     if (fromSummary) return fromSummary;
     if (currentFindRunIdFromVisibleJobs) return currentFindRunIdFromVisibleJobs;
-    const selected = String(runId || "").trim();
-    return selected.startsWith("find_") ? selected : "";
-  }, [researchSummary, currentFindRunIdFromVisibleJobs, runId]);
+    return "";
+  }, [researchSummary, currentFindRunIdFromVisibleJobs]);
   const researchLiteratureSurvey = useMemo(() => researchSummary?.literature_survey || researchSummary?.state?.literature_survey || activeProjectInfo?.literature_survey_preview || {}, [researchSummary, activeProjectInfo]);
   const researchLiteratureCounts = useMemo(() => researchLiteratureSurvey?.counts || {}, [researchLiteratureSurvey]);
   const researchSurveyCandidates = useMemo(() => recommendationLiteraturePapers(asArray(researchLiteratureSurvey?.survey_candidates)), [researchLiteratureSurvey]);
@@ -4253,6 +4332,11 @@ function App() {
   const selectedRunArtifactsMatchCurrentFind = Boolean(currentFindArtifactRunId && runId === currentFindArtifactRunId && artifacts.length && (!selectedRunArtifactsRunId || selectedRunArtifactsRunId === currentFindArtifactRunId));
   const viewingCurrentProjectFindRun = Boolean(currentFindArtifactRunId && runId === currentFindArtifactRunId);
   const viewingSelectedHistoricalFindRun = Boolean(String(runId || "").startsWith("find_") && !viewingCurrentProjectFindRun);
+  function rejectHistoricalRunMutation() {
+    if (!viewingSelectedHistoricalFindRun) return false;
+    setError(lang === "zh" ? "历史 run 仅供查看；请切回当前 Find 后再修改。" : "Historical runs are read-only. Switch back to the current Find before making changes.");
+    return true;
+  }
   const currentFindArtifactSource = useMemo(() => {
     if (viewingSelectedHistoricalFindRun) return artifacts;
     if (currentFindArtifactsMatch) return currentFindArtifacts;
@@ -4467,8 +4551,13 @@ function App() {
     if (hasCurrentFindSourceContext) return [];
     return [];
   }, [activeFindJobForRun, displayJobs, hasCurrentFindSourceContext, researchLiteratureSurvey, researchSourceStatus, researchStages, researchSummary, runFindState, selectedRunSelection, viewingActiveIncompleteFindRun]);
+  const ideaMarkdownArtifact = useMemo(() => currentFindArtifactSource.find((a) => a.name === "idea.md"), [currentFindArtifactSource]);
+  const ideaMarkdownText = useMemo(() => String(ideaMarkdownArtifact?.content ?? ""), [ideaMarkdownArtifact]);
   const ideasArtifact = useMemo(() => currentFindArtifactSource.find((a) => a.name === "ideas.json"), [currentFindArtifactSource]);
   const plansArtifact = useMemo(() => currentFindArtifactSource.find((a) => a.name === "plans.json"), [currentFindArtifactSource]);
+  const planMarkdownArtifact = useMemo(() => currentFindArtifactSource.find((a) => a.name === "plan.md"), [currentFindArtifactSource]);
+  const planMarkdownText = useMemo(() => String(planMarkdownArtifact?.content ?? planMarkdownArtifact?.content_zh ?? planMarkdownArtifact?.content_en ?? ""), [planMarkdownArtifact]);
+  const planMarkdownTitles = useMemo(() => planTitlesFromMarkdown(planMarkdownText), [planMarkdownText]);
   const ideas = useMemo(() => ideasArtifact?.content?.ideas ?? [], [ideasArtifact]);
   const plans = useMemo(() => plansArtifact?.content?.plans ?? [], [plansArtifact]);
   const selectedPlanFromArtifact = useMemo(() => plans.find((plan: any) => {
@@ -4547,38 +4636,51 @@ function App() {
   const plansArtifactStale = Boolean(plansArtifact && publishedPlanCount > plans.length);
   const ideasStillSyncing = Boolean((!ideas.length || ideasArtifactStale) && expectedIdeaCount > 0 && (!ideasArtifact || currentFindArtifactLoading || plans.length > 0));
   const plansStillSyncing = Boolean((!plans.length || plansArtifactStale) && expectedPlanCount > 0 && (!plansArtifact || currentFindArtifactLoading));
+  useEffect(() => {
+    if (!ideaMarkdownEditing) setIdeaMarkdownDraft(ideaMarkdownText);
+  }, [ideaMarkdownEditing, ideaMarkdownText]);
+  useEffect(() => {
+    if (!planMarkdownDirty) setPlanMarkdownDraft(planMarkdownText);
+  }, [planMarkdownDirty, planMarkdownText]);
+  useEffect(() => {
+    const next: Record<string, IdeaEditorDraft> = {};
+    ideas.forEach((idea: any, index: number) => {
+      const id = String(idea?.id || idea?.title || `idea-${index}`).trim();
+      next[id] = {
+        title: String(idea?.title || ""),
+        new_method: String(idea?.new_method || ""),
+        initial_experiment: String(idea?.initial_experiment || ""),
+      };
+    });
+    setIdeaEditorDrafts(next);
+  }, [ideas]);
   function ideaKey(idea: any, index?: number) {
     return String(idea?.id || idea?.idea_id || idea?.title || (index !== undefined ? `idea-${index}` : "")).trim();
   }
   const approvedIdeas = useMemo(() => ideas.filter((idea: any) => {
     const status = String(idea?.status || idea?.recommendation || "").toLowerCase();
-    if (["deleted", "rejected", "reject", "archived"].includes(status)) return false;
-    const executionSelection = idea?.execution_selection && typeof idea.execution_selection === "object" ? idea.execution_selection : {};
-    const selectedIdeaId = String(contractSelectedIdeaId || ideasArtifact?.content?.selected_idea_id || "").trim();
-    const selectedForExecution = idea?.selected_for_execution === true || idea?.execute_next === true || executionSelection?.selected === true || (selectedIdeaId && ideaKey(idea) === selectedIdeaId);
-    return selectedForExecution || idea?.approved === true || idea?.approved_for_planning === true || idea?.pursue === true || status === "approved" || status.includes("approved") || status.includes("pursue");
-  }), [contractSelectedIdeaId, ideas, ideasArtifact]);
+    if (["deleted", "rejected", "reject", "archived", "pending"].includes(status)) return false;
+    return idea?.approved === true
+      || idea?.approved_for_planning === true
+      || idea?.pursue === true
+      || status === "approved"
+      || status.includes("approved")
+      || status.includes("pursue");
+  }), [ideas]);
+  useEffect(() => {
+    const approvedIds = approvedIdeas.map((idea: any, index: number) => ideaKey(idea, index)).filter(Boolean);
+    setPlanIdeaIds((previous) => {
+      const retained = previous.filter((ideaId) => approvedIds.includes(ideaId));
+      return retained.length ? retained : approvedIds;
+    });
+  }, [runId, approvedIdeas]);
   function ideaScoreText(idea: any) {
-    const objective = idea?.objective_scores && typeof idea.objective_scores === "object" ? idea.objective_scores : {};
-    const value = objective.overall ?? idea?.score ?? idea?.idea_score ?? idea?.judge_score ?? idea?.overall_score;
+    const value = idea?.score;
     if (value === undefined || value === null || value === "") return "";
     return numberText(value);
   }
-  function ideaAuditText(idea: any) {
-    const audit = idea?.idea_score_audit && typeof idea.idea_score_audit === "object" ? idea.idea_score_audit : {};
-    if (audit.subagent_used === true && String(audit.status || "").toLowerCase().startsWith("completed")) {
-      return lang === "zh" ? "subagent 已评分" : "subagent scored";
-    }
-    return "";
-  }
-  function ideaSelectionText(idea: any) {
-    if (idea?.selected_for_execution === true || idea?.execute_next === true || idea?.execution_selection?.selected === true) {
-      return lang === "zh" ? "已选主线" : "selected";
-    }
-    return lang === "zh" ? "候选" : "candidate";
-  }
   function ideaEvidencePapers(idea: any) {
-    return firstNonEmptyArray(idea?.supporting_papers, idea?.positive_anchor_papers, idea?.evidence_papers).slice(0, 8);
+    return firstNonEmptyArray(idea?.inspired_by, idea?.supporting_papers, idea?.positive_anchor_papers, idea?.evidence_papers).slice(0, 8);
   }
   function stageArtifactText(value: any, fallback = "") {
     if (value && typeof value === "object" && !Array.isArray(value)) {
@@ -4593,12 +4695,12 @@ function App() {
     let text = displayArtifactText(value, fallback).trim();
     if (!text) return fallback;
     const zhReplacements: Record<string, string> = {
-      "After environment-stage base selection, run a minimal same-protocol baseline/candidate/ablation experiment with audited metrics and bad cases.": "待项目代理根据精读结果补齐初步实验。",
-      "After environment review, run a minimal same-protocol baseline/candidate/ablation experiment with audited metrics and bad cases.": "待项目代理根据精读结果补齐初步实验。",
-      "Idea came from Claude Code under TASTE control and was normalized by the current-Find evidence guard; it cannot bind a repo, dataset, command, or selected repository before environment-stage selection.": "该想法由 项目代理基于当前 Find 精读证据形成；环境审查前不会绑定仓库、数据、命令或当前路线。",
-      "Idea came from Claude Code under TASTE control and was normalized by the current-Find evidence guard; it cannot bind a repo, dataset, command, or selected base before environment-stage selection.": "该想法由 项目代理基于当前 Find 精读证据形成；环境审查前不会绑定仓库、数据、命令或当前路线。",
+      "After environment-stage base selection, run a minimal same-protocol baseline/candidate/ablation experiment with audited metrics and bad cases.": "idea.md 未提供具体初步实验；请重新生成或手动补齐。",
+      "After environment review, run a minimal same-protocol baseline/candidate/ablation experiment with audited metrics and bad cases.": "idea.md 未提供具体初步实验；请重新生成或手动补齐。",
+      "Idea came from Claude Code under TASTE control and was normalized by the current-Find evidence guard; it cannot bind a repo, dataset, command, or selected repository before environment-stage selection.": "该想法由 Ideation 主控 Claude 基于当前 Find 精读证据形成；环境审查前不会绑定仓库、数据、命令或当前路线。",
+      "Idea came from Claude Code under TASTE control and was normalized by the current-Find evidence guard; it cannot bind a repo, dataset, command, or selected base before environment-stage selection.": "该想法由 Ideation 主控 Claude 基于当前 Find 精读证据形成；环境审查前不会绑定仓库、数据、命令或当前路线。",
       "Verify current Find run_id and guarded read/idea/plan outputs.": "核对当前 Find run_id 以及受门控保护的精读、想法和计划产物。",
-      "Environment-stage Claude Code reads all current strong recommendations and audits candidate repos/data/protocols.": "环境审查阶段由项目代理精读全部推荐论文，并审计候选仓库、数据和协议。",
+      "Environment-stage Claude Code reads all current strong recommendations and audits candidate repos/data/protocols.": "环境审查阶段由 Environment 主控 Claude 精读全部推荐论文，并审计候选仓库、数据和协议。",
       "Accept a base only by writing state/evidence_ready_repo_selection.json with selection_stage=environment_claude_code and fresh_find_run_id matching the current run.": "只有写入可审计的仓库选择记录，并确认 Find run_id 与当前运行一致后，才能接受当前路线。",
       "Refresh reference/scientific/evidence/submission gates before paper writing or paper-conclusion gating.": "论文写作或论文结论提升前，必须刷新参考复现、科学进展、证据和投稿门控。",
       "environment-stage base selected": "环境审查已完成",
@@ -4613,12 +4715,12 @@ function App() {
       "local evidence gates pass": "本地证据门控通过",
     };
     const enReplacements: Record<string, string> = {
-      "After environment-stage base selection, run a minimal same-protocol baseline/candidate/ablation experiment with audited metrics and bad cases.": "Initial experiment details are pending project-agent completion from the current readings.",
-      "After environment review, run a minimal same-protocol baseline/candidate/ablation experiment with audited metrics and bad cases.": "Initial experiment details are pending project-agent completion from the current readings.",
-      "Idea came from Claude Code under TASTE control and was normalized by the current-Find evidence guard; it cannot bind a repo, dataset, command, or selected repository before environment-stage selection.": "This idea was generated by the research project agent from the current Find/read evidence; before environment review it does not bind a repo, dataset, command, or base.",
-      "Idea came from Claude Code under TASTE control and was normalized by the current-Find evidence guard; it cannot bind a repo, dataset, command, or selected base before environment-stage selection.": "This idea was generated by the research project agent from the current Find/read evidence; before environment review it does not bind a repo, dataset, command, or base.",
+      "After environment-stage base selection, run a minimal same-protocol baseline/candidate/ablation experiment with audited metrics and bad cases.": "idea.md did not provide a concrete initial experiment; regenerate or edit it.",
+      "After environment review, run a minimal same-protocol baseline/candidate/ablation experiment with audited metrics and bad cases.": "idea.md did not provide a concrete initial experiment; regenerate or edit it.",
+      "Idea came from Claude Code under TASTE control and was normalized by the current-Find evidence guard; it cannot bind a repo, dataset, command, or selected repository before environment-stage selection.": "This idea was generated by the Ideation controller from the current Find/read evidence; before environment review it does not bind a repo, dataset, command, or base.",
+      "Idea came from Claude Code under TASTE control and was normalized by the current-Find evidence guard; it cannot bind a repo, dataset, command, or selected base before environment-stage selection.": "This idea was generated by the Ideation controller from the current Find/read evidence; before environment review it does not bind a repo, dataset, command, or base.",
       "Verify current Find run_id and guarded read/idea/plan outputs.": "Verify the current Find run ID and the guarded reading, idea, and plan outputs.",
-      "Environment-stage Claude Code reads all current strong recommendations and audits candidate repos/data/protocols.": "During environment review, the project agent reads all recommended papers and audits candidate repositories, data, and protocols.",
+      "Environment-stage Claude Code reads all current strong recommendations and audits candidate repos/data/protocols.": "During environment review, the Environment controller reads all recommended papers and audits candidate repositories, data, and protocols.",
       "Accept a base only by writing state/evidence_ready_repo_selection.json with selection_stage=environment_claude_code and fresh_find_run_id matching the current run.": "Accept the selected repository only after an auditable repository-selection record confirms the Find run ID matches the current run.",
       "Refresh reference/scientific/evidence/submission gates before paper writing or paper-conclusion gating.": "Refresh reference-reproduction, scientific-progress, evidence, and submission gates before paper writing or paper-conclusion gating.",
       "environment-stage base selected": "environment review completed",
@@ -4634,18 +4736,18 @@ function App() {
     };
     if (lang === "zh") {
       text = zhReplacements[text] || text
-        .replace(/Idea came from 项目代理 under TASTE control.*?environment(?:-stage)? selection\.?/gi, "该想法由 项目代理基于当前 Find 精读证据形成；环境审查前不会绑定仓库、数据、命令或当前路线。")
-        .replace(/Idea came from project agent under TASTE control.*?environment(?:-stage)? selection\.?/gi, "该想法由 项目代理基于当前 Find 精读证据形成；环境审查前不会绑定仓库、数据、命令或当前路线。")
+        .replace(/Idea came from 项目代理 under TASTE control.*?environment(?:-stage)? selection\.?/gi, "该想法由 Ideation 主控 Claude 基于当前 Find 精读证据形成；环境审查前不会绑定仓库、数据、命令或当前路线。")
+        .replace(/Idea came from project agent under TASTE control.*?environment(?:-stage)? selection\.?/gi, "该想法由 Ideation 主控 Claude 基于当前 Find 精读证据形成；环境审查前不会绑定仓库、数据、命令或当前路线。")
         .replace(/environment-stage base selection/gi, "环境审查")
         .replace(/environment-stage base selected/gi, "环境审查已完成")
         .replace(/repo\/data\/env\/protocol gate passed/gi, "仓库、数据、环境和协议门控通过")
         .replace(/same-protocol baseline\/candidate\/ablation experiment/gi, "同协议基线/候选/消融实验")
         .replace(/audited metrics and bad cases/gi, "审计指标和坏例")
         .replace(/waiting for environment-stage base selection/gi, "环境审查后执行")
-        .replace(/Idea came from 项目代理 under TASTE control and was normalized by the current-Find evidence guard; it cannot bind a repo, dataset, command, or selected repository before environment-stage selection\.?/gi, "该想法由 项目代理基于当前 Find 精读证据形成；环境审查前不会绑定仓库、数据、命令或当前路线。")
-        .replace(/Idea came from 项目代理 under TASTE control and was normalized by the current-Find evidence guard; it cannot bind a repo, dataset, command, or selected repository before environment review\.?/gi, "该想法由 项目代理基于当前 Find 精读证据形成；环境审查前不会绑定仓库、数据、命令或当前路线。")
-        .replace(/Idea came from project agent under TASTE control and was normalized by the current-Find evidence guard; it cannot bind a repo, dataset, command, or selected repository before environment-stage selection\.?/gi, "该想法由 项目代理基于当前 Find 精读证据形成；环境审查前不会绑定仓库、数据、命令或当前路线。")
-        .replace(/Environment-stage 项目代理 reads all current strong recommendations and audits candidate repos\/data\/protocols\.?/gi, "环境审查阶段由项目代理精读全部推荐论文，并审计候选仓库、数据和协议。")
+        .replace(/Idea came from 项目代理 under TASTE control and was normalized by the current-Find evidence guard; it cannot bind a repo, dataset, command, or selected repository before environment-stage selection\.?/gi, "该想法由 Ideation 主控 Claude 基于当前 Find 精读证据形成；环境审查前不会绑定仓库、数据、命令或当前路线。")
+        .replace(/Idea came from 项目代理 under TASTE control and was normalized by the current-Find evidence guard; it cannot bind a repo, dataset, command, or selected repository before environment review\.?/gi, "该想法由 Ideation 主控 Claude 基于当前 Find 精读证据形成；环境审查前不会绑定仓库、数据、命令或当前路线。")
+        .replace(/Idea came from project agent under TASTE control and was normalized by the current-Find evidence guard; it cannot bind a repo, dataset, command, or selected repository before environment-stage selection\.?/gi, "该想法由 Ideation 主控 Claude 基于当前 Find 精读证据形成；环境审查前不会绑定仓库、数据、命令或当前路线。")
+        .replace(/Environment-stage 项目代理 reads all current strong recommendations and audits candidate repos\/data\/protocols\.?/gi, "环境审查阶段由 Environment 主控 Claude 精读全部推荐论文，并审计候选仓库、数据和协议。")
         .replace(/Accept a base only by writing state\/evidence_ready_repo_selection\.json with selection_stage=environment review and fresh_find_run_id matching the current run\.?/gi, "只有写入可审计的仓库选择记录，并确认 Find run_id 与当前运行一致后，才能接受当前路线。")
         .replace(/After current base repo\/data\/env\/protocol gates pass, run minimal baseline\/candidate\/ablation experiments with identical data, seed, metrics, logs, and bad-case extraction\.?/gi, "仓库、数据、环境和协议门控通过后，在相同数据、seed、指标、日志和坏例抽取设置下运行最小对比实验。")
         .replace(/After 当前路线 repo\/data\/env\/protocol gates pass, run minimal baseline\/candidate\/ablation experiments with identical data, seed, metrics, logs, and bad-case extraction\.?/gi, "仓库、数据、环境和协议门控通过后，在相同数据、seed、指标、日志和坏例抽取设置下运行最小对比实验。")
@@ -4656,8 +4758,8 @@ function App() {
         .replace(/paper-conclusion gating/gi, "论文结论提升")
         .replace(/主控\s*Claude Code/gi, "主控 Claude Code")
         .replace(/main\s+Claude Code/gi, "主控 Claude Code")
-        .replace(/Claude Code/gi, "项目代理")
-        .replace(/project agent/gi, "项目代理")
+        .replace(/Claude Code/gi, "模块主控 Claude")
+        .replace(/project agent/gi, "模块主控 Claude")
         .replace(/selected repository/gi, "当前路线")
         .replace(/current route/gi, "当前路线")
         .replace(/current base/gi, "当前路线");
@@ -4667,7 +4769,7 @@ function App() {
         .replace(/environment-stage base selected/gi, "environment review completed")
         .replace(/waiting for environment-stage base selection/gi, "waiting for environment review")
         .replace(/same-protocol baseline\/candidate\/ablation experiment/gi, "same-protocol baseline/candidate/ablation experiment")
-        .replace(/Environment-stage project agent reads all current strong recommendations and audits candidate repos\/data\/protocols\.?/gi, "During environment review, the project agent reads all recommended papers and audits candidate repositories, data, and protocols.")
+        .replace(/Environment-stage project agent reads all current strong recommendations and audits candidate repos\/data\/protocols\.?/gi, "During environment review, the Environment controller reads all recommended papers and audits candidate repositories, data, and protocols.")
         .replace(/Accept a base only by writing state\/evidence_ready_repo_selection\.json with selection_stage=environment review and fresh_find_run_id matching the current run\.?/gi, "Accept the selected repository only after an auditable repository-selection record confirms the Find run ID matches the current run.")
         .replace(/After current base repo\/data\/env\/protocol gates pass, run minimal baseline\/candidate\/ablation experiments with identical data, seed, metrics, logs, and bad-case extraction\.?/gi, "After repository, data, environment, and protocol gates pass, run the minimal comparison under identical data, seed, metrics, logs, and bad-case extraction settings.")
         .replace(/Verify current Find run_id and guarded read\/idea\/plan outputs\.?/gi, "Verify the current Find run ID and the guarded reading, idea, and plan outputs.")
@@ -4676,7 +4778,7 @@ function App() {
         .replace(/论文结论提升/g, "paper-conclusion gating")
         .replace(/主控\s*Claude Code/gi, "main Claude Code")
         .replace(/main\s+Claude Code/gi, "main Claude Code")
-        .replace(/Claude Code/gi, "project agent");
+        .replace(/Claude Code/gi, "module controller");
     }
     const publicText = publicLogText(text, lang);
     return englishArtifactFallback(publicText, fallback);
@@ -4693,13 +4795,13 @@ function App() {
     return out;
   }
   function ideaRiskItems(idea: any) {
-    return compactTextList(idea?.bad_case_slice, idea?.risks, idea?.risk, idea?.limitations, idea?.success_gate).slice(0, 8);
+    return compactTextList(idea?.risks, idea?.risk, idea?.limitations, idea?.success_gate).slice(0, 8);
   }
   function ideaWorkflowStatus(idea: any) {
     const status = String(idea?.status || idea?.recommendation || "").toLowerCase();
     if (["deleted", "rejected", "reject", "archived"].includes(status)) return "deleted";
     if (status === "pending" || status === "todo" || status === "draft") return "pending";
-    if (idea?.approved === true || idea?.approved_for_planning === true || idea?.pursue === true || status === "approved" || status.includes("approved") || status.includes("pursue")) return "approved";
+    if (status === "approved") return "approved";
     return status || "pending";
   }
   function ideaWorkflowStatusLabel(status: string) {
@@ -4731,62 +4833,15 @@ function App() {
     if (lang === "en" && containsCJKText(text)) return fallback;
     return text || fallback;
   }
-  function ideaExperimentText(idea: any) {
-    const localized = localizedStageField(idea, "min_experiment", "") || localizedStageField(idea, "minimum_experiment", "");
-    return stageArtifactText(localized || idea?.min_experiment || idea?.minimum_experiment || idea?.implementation_target, t.noData);
-  }
   function ideaTitleText(idea: any, index: number) {
     const title = localizedStageField(idea, "title", "") || displayArtifactText(idea?.title || "", "");
     if (lang === "en" && (!title || containsCJKText(title))) return `Idea ${index + 1}: current-reading candidate`;
     return title || (lang === "zh" ? `想法 ${index + 1}` : `Idea ${index + 1}`);
   }
-  function ideaBodyText(value: any, fallback: string) {
-    const text = displayArtifactText(value, "");
-    if (lang === "en" && (!text || containsCJKText(text))) return fallback;
-    return text || fallback;
-  }
-  function ideaHypothesisText(idea: any) {
-    return localizedStageField(idea, "hypothesis", lang === "zh" ? t.noData : "Current-reading hypothesis; it remains planning evidence until environment, data, and experiment gates pass.");
-  }
-  function ideaMechanismText(idea: any) {
-    return localizedStageField(idea, "mechanism", "") || localizedStageField(idea, "rationale", lang === "zh" ? t.noData : "Mechanism details are tied to the current reading packet and must be audited in a real repository before claims are promoted.");
-  }
-  function isGenericIdeaExperiment(value: any) {
-    const text = String(value || "").trim().toLowerCase();
-    return Boolean(text && [
-      "after environment-stage base selection",
-      "after environment review",
-      "run a minimal same-protocol baseline/candidate/ablation",
-      "baseline/candidate/ablation experiment with audited metrics and bad cases",
-    ].some((marker) => text.includes(marker)));
-  }
-  function ideaNewMethodEditorText(idea: any) {
-    const explicit = String(idea?.new_method || "").trim();
-    const hypothesis = String(idea?.hypothesis || "").trim();
-    const legacyDetails = String(idea?.method_details || idea?.mechanism || "").trim();
-    return explicit || hypothesis || legacyDetails;
-  }
-  function ideaInitialExperimentEditorText(idea: any) {
-    const value = String(idea?.initial_experiment || idea?.experiment_design || idea?.experimental_design || idea?.min_experiment || idea?.minimum_experiment || "").trim();
-    return isGenericIdeaExperiment(value) ? "" : value;
-  }
-  function ideaInspiredByEditorText(idea: any) {
-    const explicit = String(idea?.inspired_by_text || "").trim();
-    if (explicit) return explicit;
-    const rows = firstNonEmptyArray(idea?.inspired_by, idea?.supporting_papers, idea?.positive_anchor_papers).slice(0, 8);
-    return rows.map((row: any) => {
-      if (!row || typeof row !== "object") return String(row || "").trim();
-      const title = displayArtifactText(row.title || row.paper_title || row.name || "", "");
-      const meta = [row.source || row.venue || row.evidence_role, row.year].filter(Boolean).join(" ");
-      const reason = displayArtifactText(row.reason || row.use || row.mechanism || "", "");
-      const url = displayArtifactText(row.url || row.pdf_url || "", "");
-      return [title, meta, reason, url].filter(Boolean).join(" | ");
-    }).filter(Boolean).join("\n");
-  }
   function planTitleText(plan: any, index: number) {
-    const title = localizedStageField(plan, "title", "") || displayArtifactText(plan?.title || "", "");
+    const title = localizedStageField(plan, "title", "") || displayArtifactText(plan?.title || planMarkdownTitles[String(plan?.plan_id || "")] || "", "");
     if (lang === "en" && (!title || containsCJKText(title))) return `Plan ${index + 1}: current-reading experiment plan`;
-    return title || (lang === "zh" ? `计划 ${index + 1}` : `Plan ${index + 1}`);
+    return title || String(plan?.plan_id || "") || (lang === "zh" ? `计划 ${index + 1}` : `Plan ${index + 1}`);
   }
   function planHypothesisText(plan: any) {
     return localizedStageField(plan, "hypothesis", lang === "zh" ? "" : "Planning hypothesis from current reading; it needs environment, data, and experiment evidence before it can support claims.");
@@ -4806,9 +4861,9 @@ function App() {
     return publicLogText(value, "en")
       .replace(/，/g, ", ")
       .replace(/最好记录/g, "best record")
-      .replace(/paper\.research project agent/gi, "paper. research project agent")
-      .replace(/research project agentmust/gi, "research project agent must")
-      .replace(/project agentmust/gi, "project agent must")
+      .replace(/paper\.research project agent/gi, "paper. Writing controller")
+      .replace(/research project agentmust/gi, "module controller must")
+      .replace(/project agentmust/gi, "module controller must")
       .replace(/candidate experimentobservation/gi, "candidate experiment observation")
       .replace(/candidate experimentsobservation/gi, "candidate experiment observation")
       .replace(/\s+/g, " ")
@@ -4833,9 +4888,6 @@ function App() {
   function planStatusText(plan: any) {
     return displayValue(plan?.status || plan?.recommendation || "pending");
   }
-  function planEvidencePapers(plan: any) {
-    return firstNonEmptyArray(plan?.positive_anchor_papers, plan?.supporting_papers, plan?.evidence_papers).slice(0, 8);
-  }
   function planMetaText(plan: any, versions: any[], papers: any[], gates: any[]) {
     const parts = [
       planStatusText(plan),
@@ -4845,65 +4897,9 @@ function App() {
     ].map((item) => String(item || "").trim()).filter((item) => item && item !== "/" && item !== "0");
     return parts.length ? parts.join(" / ") : (lang === "zh" ? "等待环境审查后执行" : "waiting for environment review");
   }
-  function planAuditPapers(plan: any) {
-    return firstNonEmptyArray(plan?.audit_context_papers, plan?.boundary_papers).slice(0, 4);
-  }
   function latestPlanVersion(plan: any) {
     const versions = asArray(plan?.versions);
     return versions[versions.length - 1] || {};
-  }
-  function planExperimentText(plan: any, latest: any) {
-    const localized = localizedStageField(plan, "experiment_design", "")
-      || localizedStageField(plan, "experimental_design", "")
-      || localizedStageField(plan, "minimum_experiment", "")
-      || localizedStageField(plan, "min_experiment", "");
-    return stageArtifactText(
-      localized
-      || latest?.final_plan?.experimental_design
-      || latest?.implementation?.minimum_experiment
-      || plan?.minimum_experiment
-      || plan?.evidence_policy,
-      t.noData,
-    );
-  }
-  function planOverviewText(plan: any, latest: any) {
-    const description = stageArtifactText(
-      localizedStageField(plan, "description", "")
-      || plan?.description
-      || localizedStageField(latest?.final_plan, "description", "")
-      || latest?.final_plan?.description
-      || latest?.description,
-      "",
-    );
-    if (description) return description;
-    const experiment = plan?.experiment_plan || latest?.final_plan?.experiment_plan;
-    if (experiment && typeof experiment === "object" && !Array.isArray(experiment)) {
-      const rows = Object.values(experiment as Record<string, any>)
-        .map((value) => stageArtifactText(value, ""))
-        .filter(Boolean);
-      if (rows.length) return rows.slice(0, 2).join(lang === "zh" ? "；" : "; " );
-    }
-    const experimentText = stageArtifactText(experiment, "");
-    if (experimentText) return experimentText;
-    const fallbackRows = compactTextList(
-      plan?.baseline_comparison,
-      plan?.ablation,
-      plan?.bad_case_slices,
-      plan?.stop_condition,
-      latest?.final_plan?.baseline_comparison,
-      latest?.final_plan?.ablation,
-    );
-    if (fallbackRows.length) return fallbackRows.slice(0, 3).join(lang === "zh" ? "；" : "; " );
-    return planExperimentText(plan, latest);
-  }
-  function planStepItems(plan: any, latest: any) {
-    const stepSource = lang === "en"
-      ? firstNonEmptyArray(plan?.steps_en, latest?.final_plan?.steps_en, plan?.steps, latest?.final_plan?.steps)
-      : firstNonEmptyArray(plan?.steps, latest?.final_plan?.steps);
-    return compactTextList(stepSource).slice(0, 6);
-  }
-  function planGateItems(plan: any, latest: any) {
-    return compactTextList(plan?.success_gate, latest?.implementation?.success_gate).slice(0, 8);
   }
   const selectedRunArtifacts = useMemo(() => artifacts.filter((a) => a.kind === "markdown" && !HIDDEN_RUN_ARTIFACTS.has(a.name)), [artifacts]);
   const currentFindMarkdownArtifacts = useMemo(() => currentFindArtifactSource.filter((a) => a.kind === "markdown" && !HIDDEN_RUN_ARTIFACTS.has(a.name)), [currentFindArtifactSource]);
@@ -5154,7 +5150,7 @@ function App() {
   const stageLaunchLockedText = useMemo(() => {
     if (!stageLaunchDisabledByFullCycle) return "";
     return lang === "zh"
-      ? "完整科研流程正在运行；网页已锁定新的 Find/Read/Idea/Plan/环境/实验/论文启动按钮，避免并发重复任务。需要人工介入时，请在对应阶段的项目代理指令框提交，指令会进入当前流程队列。"
+      ? "完整科研流程正在运行；网页已锁定新的 Find/Read/Idea/Plan/环境/实验/论文启动按钮，避免并发重复任务。需要人工介入时，请在对应阶段的模块主控指令框提交。"
       : "The full research cycle is running; new Find/Read/Idea/Plan/environment/experiment/paper launches are locked to avoid duplicate concurrent jobs. Use the stage guidance box to queue intervention for the active workflow.";
   }, [stageLaunchDisabledByFullCycle, lang]);
   const fullCycleRunningText = useMemo(() => {
@@ -5286,8 +5282,8 @@ function App() {
   const currentMainNoExperimentRowsText = useMemo(() => {
     if (referenceGateAlreadyPassed) {
       return lang === "zh"
-        ? "当前路线 reference reproduction gate 已通过；当前主线训练或候选方法实验尚未产出可展开记录，等待 项目代理在安全检查点刷新实验审计。"
-        : "The current-base reference reproduction gate has passed; the main training or candidate-method run has not produced an expandable record yet. Waiting for the research project agent to refresh the experiment audit at a safe checkpoint.";
+        ? "当前路线 reference reproduction gate 已通过；当前主线训练或候选方法实验尚未产出可展开记录，等待 Experimenting 主控 Claude 刷新实验审计。"
+        : "The current-base reference reproduction gate has passed; the main training or candidate-method run has not produced an expandable record yet. Waiting for the Experimenting controller to refresh the experiment audit.";
     }
     return lang === "zh"
       ? "当前路线还没有实验/参考复现记录。流程必须先完成当前路线 reference reproduction gate，之后才会启动主线实验。"
@@ -5325,7 +5321,7 @@ function App() {
   const environmentConfigLoading = Boolean(projectSummaryLoadingForDisplay && !environmentDraftHasAnyValue(effectiveResearchEnvDraft));
   const projectStageLaunchLockedText = useMemo(() => (
     lang === "zh"
-      ? "当前项目已有环境/实验/论文阶段任务正在运行或状态仍在刷新；网页已阻止新的全流程/实验/论文启动，避免并发重复任务。需要人工介入时，请在对应阶段的项目代理指令框提交。"
+      ? "当前项目已有环境/实验/论文阶段任务正在运行或状态仍在刷新；网页已阻止新的全流程/实验/论文启动，避免并发重复任务。需要人工介入时，请在对应阶段的模块主控指令框提交。"
       : "A project environment/experiment/paper stage job is running or the project state is still refreshing; new workflow, experiment, and paper launches are locked to avoid duplicate concurrent tasks. Use the stage guidance box for intervention."
   ), [lang]);
   const workflowLaunchDisabled = Boolean(fullCycleLaunchDisabled || stageLaunchDisabledByProjectWorker || projectStatusLoadingForLaunch);
@@ -5703,13 +5699,13 @@ function App() {
     const evidenceRows = asArray(paper?.paper_self_review_evidence_blockers);
     if (evidenceRows.length) {
       return lang === "zh"
-        ? "PDF 仅作预览；科研证据与投稿准备度仍需继续迭代，具体修复项已交由项目代理处理。"
-        : "The PDF is preview-only; scientific evidence and submission readiness still need iteration, and detailed repair items are handled by the project agent.";
+        ? "PDF 仅作预览；科研证据与投稿准备度仍需继续迭代，具体修复项已交由 Writing 主控 Claude 处理。"
+        : "The PDF is preview-only; scientific evidence and submission readiness still need iteration, and detailed repair items are handled by the Writing controller.";
     }
     if (paperSelfReviewRows(paper).length || paperCitationRenderRows(paper).length) {
       return lang === "zh"
-        ? "PDF 仅作预览；底层 LaTeX/BibTeX/自审诊断已保留给项目代理处理，不在这里展开。"
-        : "The PDF is preview-only; low-level LaTeX/BibTeX/self-review diagnostics are reserved for the project agent and are not expanded here.";
+        ? "PDF 仅作预览；底层 LaTeX/BibTeX/自审诊断已保留给 Writing 主控 Claude 处理，不在这里展开。"
+        : "The PDF is preview-only; low-level LaTeX/BibTeX/self-review diagnostics are reserved for the Writing controller and are not expanded here.";
     }
     if (paperAcceptedPreviewBlocked(paper)) return lang === "zh" ? "这份 PDF 是当前论文预览，可用于查看排版和内容；系统仍会根据质量、证据和投稿门控继续审计和修订。" : "This PDF is the current paper preview; The workflow will continue auditing and revising against quality, evidence, and submission gates.";
     return paper?.status === "running" ? t.runningPdfPreviewHelp : t.blockedPdfPreviewHelp;
@@ -5780,14 +5776,12 @@ function App() {
     waiting_for_current_find_results: { zh: "等待当前 Find 结果", en: "waiting for current Find results" },
     real_data_loader_ready: { zh: "真实数据/loader 已就绪", en: "real data/loader ready" },
     waiting_for_real_data_loader_evidence: { zh: "等待真实数据/loader 证据", en: "waiting for real data/loader evidence" },
-    approved_for_planning: { zh: "已通过，可进入计划", en: "approved for planning" },
     wait_for_environment_base_selection: { zh: "环境审查后执行", en: "run after environment review" },
     waiting_for_environment_base_selection: { zh: "环境审查后执行", en: "run after environment review" },
     waiting_for_environment_review: { zh: "环境审查后执行", en: "run after environment review" },
     route_authorization_gate: { zh: "路线授权门控", en: "route authorization gate" },
     current_base: { zh: "当前路线", en: "current route" },
     claude_code_current_find_takeover: { zh: "当前 Find 精读产物", en: "current-Find reading output" },
-    "current-find-claude-read-idea-plan": { zh: "当前 Find 精读/想法/计划", en: "current Find reading/ideas/plans" },
     queued: { zh: "排队中", en: "queued" },
     stale: { zh: "已停止", en: "stale" },
     warn: { zh: "需继续检查", en: "needs review" },
@@ -5906,6 +5900,21 @@ function App() {
   }, [renderedRunArtifacts, activeArtifact]);
 
   useEffect(() => {
+    if (tab !== "read") return undefined;
+    let frame = 0;
+    const fit = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => fitRenderedMath());
+    };
+    fit();
+    window.addEventListener("resize", fit);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("resize", fit);
+    };
+  }, [currentArtifact?.name, rawArtifacts, renderedRunArtifactsSignature, tab]);
+
+  useEffect(() => {
     if (!FIND_RUN_ARTIFACT_TABS.includes(tab)) return;
     if (!visibleRunArtifacts.length || !visibleRunArtifactsRunId) return;
     setLastVisibleRunArtifactsByTab((prev) => {
@@ -5962,20 +5971,30 @@ function App() {
     }
   }, [renderedRunArtifacts, activeArtifact]);
 
+  useEffect(() => {
+    if (tab === "plan" && !activeArtifact && renderedRunArtifacts.some((artifact) => artifact.name === "plan.md")) {
+      setActiveArtifact("plan.md");
+    }
+  }, [activeArtifact, renderedRunArtifacts, tab]);
+
 
   useEffect(() => {
     if (!currentFindArtifactRunId) {
+      currentFindArtifactsRunRef.current = "";
       setCurrentFindArtifacts([]);
       return;
     }
-    void loadCurrentFindArtifacts(currentFindArtifactRunId, { loading: true });
-  }, [currentFindArtifactRunId]);
+    if (!FIND_RUN_ARTIFACT_TABS.includes(tab)) return;
+    void loadCurrentFindArtifacts(currentFindArtifactRunId, { loading: true, scope: currentFindArtifactScope(tab) });
+  }, [currentFindArtifactRunId, tab]);
 
   useEffect(() => {
     if (!currentFindArtifactRunId || !hasLiveCurrentFindArtifactJob) return;
     let cancelled = false;
     const refreshCurrentFindArtifacts = () => {
-      if (!cancelled) void loadCurrentFindArtifacts(currentFindArtifactRunId, { loading: false });
+      if (!cancelled && FIND_RUN_ARTIFACT_TABS.includes(tab)) {
+        void loadCurrentFindArtifacts(currentFindArtifactRunId, { loading: false, scope: currentFindArtifactScope(tab) });
+      }
     };
     refreshCurrentFindArtifacts();
     const timer = window.setInterval(refreshCurrentFindArtifacts, 20000);
@@ -5983,7 +6002,7 @@ function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [currentFindArtifactRunId, hasLiveCurrentFindArtifactJob]);
+  }, [currentFindArtifactRunId, hasLiveCurrentFindArtifactJob, tab]);
 
   useEffect(() => {
     if (!activeFindRunId || !activeFindJobForRun) {
@@ -6003,16 +6022,6 @@ function App() {
   }, [activeFindRunId, activeFindJobForRun]);
 
   useEffect(() => {
-    if (!currentProjectFindRunId || !(["read", "ideas", "plan"] as Tab[]).includes(tab)) return;
-    const needsRead = tab === "read" && expectedReadCandidateCount > 0 && (!readResultsArtifact || readArtifactStale);
-    const needsIdeas = tab === "ideas" && expectedIdeaCount > 0 && (!ideasArtifact || ideasArtifactStale);
-    const needsPlans = tab === "plan" && expectedPlanCount > 0 && (!plansArtifact || plansArtifactStale);
-    if (needsRead || needsIdeas || needsPlans || currentFindArtifactsPending) {
-      void loadCurrentFindArtifacts(currentProjectFindRunId, { loading: true });
-    }
-  }, [currentProjectFindRunId, tab, expectedReadCandidateCount, expectedIdeaCount, expectedPlanCount, readResultsArtifact, ideasArtifact, plansArtifact, readArtifactStale, ideasArtifactStale, plansArtifactStale, currentFindArtifactsPending]);
-
-  useEffect(() => {
     if (!currentProjectFindRunId || activeFindRunId || userSelectedRunRef.current) return;
     if (runId === currentProjectFindRunId) return;
     if (!runExists(runs, currentProjectFindRunId)) return;
@@ -6028,16 +6037,12 @@ function App() {
   }, [currentProjectArtifact, activeProjectArtifact]);
 
   useEffect(() => {
-    const approvedIds = approvedIdeas.map((idea: any, index: number) => ideaKey(idea, index)).filter(Boolean);
-    setPlanIdeaIds((prev) => {
-      const kept = prev.filter((id) => approvedIds.includes(id));
-      return kept.length ? kept : approvedIds;
-    });
-  }, [runId, approvedIdeas]);
+    setPlanMarkdownDraft("");
+    setPlanMarkdownDirty(false);
+  }, [researchProject, runId]);
 
   function ideaStatusPatch(status: "approved" | "deleted" | "pending") {
-    if (status === "approved") return { status, approved: true, approved_for_planning: true, pursue: true };
-    return { status, approved: false, approved_for_planning: false, pursue: false };
+    return { status };
   }
 
   function patchIdeaArtifactRows(list: Artifact[], ideaId: string, updates: Record<string, any>) {
@@ -6061,23 +6066,53 @@ function App() {
     setActiveFindArtifacts((prev) => patchIdeaArtifactRows(prev, ideaId, updates));
   }
 
-  async function setIdeaStatus(ideaId: string, status: "approved" | "deleted" | "pending") {
+  function updateIdeaEditorDraft(ideaId: string, idea: any, field: keyof IdeaEditorDraft, value: string) {
+    setIdeaEditorDrafts((prev) => {
+      const current = prev[ideaId] || {
+        title: String(idea?.title || ""),
+        new_method: String(idea?.new_method || ""),
+        initial_experiment: String(idea?.initial_experiment || ""),
+      };
+      return { ...prev, [ideaId]: { ...current, [field]: value } };
+    });
+  }
+
+  async function saveIdeaFields(ideaId: string) {
+    if (rejectHistoricalRunMutation()) return;
     const ideaRunId = currentProjectFindRunId || runId;
-    if (!ideaRunId) return;
+    const draft = ideaEditorDrafts[ideaId];
+    if (!ideaRunId || !draft || !researchProject) return;
+    setIdeaEditorSaving((prev) => ({ ...prev, [ideaId]: true }));
+    try {
+      await patchIdea(ideaRunId, ideaId, draft, researchProject);
+      applyIdeaArtifactPatch(ideaId, draft);
+      currentFindArtifactsInFlightRef.current = "";
+      await loadCurrentFindArtifacts(ideaRunId, { loading: false, scope: "ideas" });
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setIdeaEditorSaving((prev) => ({ ...prev, [ideaId]: false }));
+    }
+  }
+
+  async function setIdeaStatus(ideaId: string, status: "approved" | "deleted" | "pending") {
+    if (rejectHistoricalRunMutation()) return;
+    const ideaRunId = currentProjectFindRunId || runId;
+    if (!ideaRunId || !researchProject) return;
     const updates = ideaStatusPatch(status);
     setIdeaStatusSaving((prev) => ({ ...prev, [ideaId]: status }));
     applyIdeaArtifactPatch(ideaId, updates);
-    setPlanIdeaIds((prev) => status === "approved" ? Array.from(new Set([...prev, ideaId])) : prev.filter((id) => id !== ideaId));
+    setPlanIdeaIds((previous) => status === "approved"
+      ? Array.from(new Set([...previous, ideaId]))
+      : previous.filter((selectedId) => selectedId !== ideaId));
     try {
-      await patchIdea(ideaRunId, ideaId, { status }, researchProject || undefined);
+      await patchIdea(ideaRunId, ideaId, { status }, researchProject);
       currentFindArtifactsInFlightRef.current = "";
-      await loadCurrentFindArtifacts(ideaRunId, { loading: false });
-      if (runId === ideaRunId) await loadRun(ideaRunId, { clear: false, loading: false });
+      await loadCurrentFindArtifacts(ideaRunId, { loading: false, scope: "ideas" });
     } catch (err) {
       setError(String(err));
       currentFindArtifactsInFlightRef.current = "";
-      await loadCurrentFindArtifacts(ideaRunId, { loading: false });
-      if (runId === ideaRunId) await loadRun(ideaRunId, { clear: false, loading: false });
+      await loadCurrentFindArtifacts(ideaRunId, { loading: false, scope: "ideas" });
     } finally {
       setIdeaStatusSaving((prev) => {
         const next = { ...prev };
@@ -6087,12 +6122,38 @@ function App() {
     }
   }
 
-  async function editIdea(ideaId: string, field: string, value: string) {
+  async function saveIdeaMarkdown() {
+    if (rejectHistoricalRunMutation()) return;
     const ideaRunId = currentProjectFindRunId || runId;
-    if (!ideaRunId) return;
-    await patchIdea(ideaRunId, ideaId, { [field]: value }, researchProject || undefined);
-    await loadCurrentFindArtifacts(ideaRunId, { loading: false });
-    if (runId === ideaRunId) await loadRun(ideaRunId, { clear: false, loading: false });
+    if (!ideaRunId || !researchProject) return;
+    setIdeaMarkdownSaving(true);
+    try {
+      await updateIdeaMarkdown(ideaRunId, ideaMarkdownDraft, researchProject);
+      currentFindArtifactsInFlightRef.current = "";
+      await loadCurrentFindArtifacts(ideaRunId, { loading: false, scope: "ideas" });
+      setIdeaMarkdownEditing(false);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setIdeaMarkdownSaving(false);
+    }
+  }
+
+  async function savePlanMarkdown() {
+    if (rejectHistoricalRunMutation()) return;
+    const planRunId = currentProjectFindRunId || runId;
+    if (!planRunId || !planMarkdownDraft.trim()) return;
+    setPlanMarkdownSaving(true);
+    try {
+      await updatePlanMarkdown(planRunId, planMarkdownDraft, researchProject || undefined);
+      setPlanMarkdownDirty(false);
+      currentFindArtifactsInFlightRef.current = "";
+      await loadCurrentFindArtifacts(planRunId, { loading: false, scope: "plan" });
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setPlanMarkdownSaving(false);
+    }
   }
 
   async function handleDeleteRun(id: string) {
@@ -6110,6 +6171,9 @@ function App() {
           setArtifacts([]);
           setSelectedPapers([]);
           setPlanIdeaIds([]);
+          setSelectedPlanId("");
+          setPlanMarkdownDraft("");
+          setPlanMarkdownDirty(false);
         }
       }
     } catch (err) {
@@ -6164,10 +6228,9 @@ function App() {
     }
   }
 
-  function researchPayload(action: string, options: { freshDiscovery?: boolean; venue?: string } = {}) {
-    const freshDiscovery = action === "full-cycle" && Boolean(options.freshDiscovery);
+  function researchPayload(action: string, options: { venue?: string } = {}) {
     const paperAction = action === "paper";
-    const venueAction = paperAction || action === "full-cycle" || action === "full_research_cycle" || action === "autonomous";
+    const venueAction = paperAction || action === "full-cycle" || action === "full_research_cycle";
     const summaryVenue = String(
       (researchSummary as any)?.run_preferences?.target_venue
       || (researchSummary as any)?.run_preferences?.venue
@@ -6182,17 +6245,14 @@ function App() {
       project: researchProject,
       prompt: researchPrompt,
       topic: researchTopic,
-      title: paperAction ? researchTitle : "",
+      title: venueAction ? researchTitle : "",
+      max_papers: config.max_recommended_papers,
+      max_ideas: config.max_ideas,
+      repair_rounds: planRepairRounds,
       iterations: researchIterations,
       iterations_per_cycle: researchIterations,
       max_cycles: action === "full-cycle" ? Math.max(3, researchIterations) : researchIterations,
       max_launches: researchMaxLaunches,
-      fresh_start: freshDiscovery,
-      force_discovery: freshDiscovery,
-      restart_full_cycle: freshDiscovery,
-      human_approved_new_find: freshDiscovery,
-      new_find_reason: freshDiscovery ? "user_explicit_restart_full_cycle_from_web" : "",
-      use_existing_literature_packet: action === "full-cycle" && !freshDiscovery,
       execute_plan: researchExecutePlan,
       prepare_env: researchPrepareEnv,
       real_bootstrap_env: researchRealBootstrapEnv,
@@ -6265,10 +6325,9 @@ function App() {
     return await saveProjectConfigDraft({ silent: true, propagateError: true, includePaperSettings: action === "paper" });
   }
 
-  async function runAR(action: string, options: { freshDiscovery?: boolean } = {}) {
+  async function runAR(action: string) {
     if (!researchProject) return;
-    const freshDiscovery = action === "full-cycle" && Boolean(options.freshDiscovery);
-    const exclusiveAction = ["full-cycle", "environment", "experiment", "paper", "autonomous", "current-find-selection"].includes(action);
+    const exclusiveAction = ["full-cycle", "environment", "experiment", "paper", "current-find-selection"].includes(action);
     if (stageLaunchDisabledByFullCycle && exclusiveAction) {
       setError(stageLaunchLockedText);
       return;
@@ -6292,11 +6351,11 @@ function App() {
         await persistEnvConfigForRun();
       }
       const savedRunPreferences = (savedSummary as any)?.run_preferences || {};
-      const venueAction = action === "paper" || action === "full-cycle" || action === "full_research_cycle" || action === "autonomous";
+      const venueAction = action === "paper" || action === "full-cycle" || action === "full_research_cycle";
       const savedVenue = venueAction
         ? (savedRunPreferences.target_venue || savedRunPreferences.venue || (savedSummary as any)?.human_supervision?.target_venue || (savedSummary as any)?.config?.target_venue || (savedSummary as any)?.config?.venue || researchVenue)
         : "";
-      const nextJob = await startProjectJob(researchPayload(action, { ...options, venue: savedVenue }));
+      const nextJob = await startProjectJob(researchPayload(action, { venue: savedVenue }));
       const nextTab: Tab = action === "environment" ? "environment" : action === "experiment" || action === "full-cycle" ? "experiment" : action === "paper" ? "paperWrite" : action === "current-find-selection" ? "plan" : tab;
       attachJob(nextJob, nextTab);
     } catch (err) {
@@ -6304,15 +6363,21 @@ function App() {
     }
   }
 
-  async function queueAgentGuidance(stage: string, agentId = "main") {
-    const key = `${stage}:${agentId}`;
+  async function queueAgentGuidance(stage: string, interruptCurrent = false) {
+    const key = `${stage}:controller`;
     const text = String(agentGuidanceMessages[key] || agentGuidanceMessage || "").trim();
     if (!researchProject || !text) return;
     setError("");
-    const claudeBusy = Boolean(supervisionTick?.full_cycle_job?.process_alive || supervisionTick?.full_cycle_job?.alive)
-      || jobs.some((item) => String(item.result?.project || "") === researchProject && String(item.status || "") === "running");
-    const action = claudeBusy ? "agent-guidance" : "claude-message";
-    const nextJob = await startProjectJob({ action, project: researchProject, stage, agent_id: agentId, message: text, timeout_sec: 14400 });
+    const action = stage === "paper" ? "writing-chat" : stage === "environment" ? "environment-chat" : "experimenting-chat";
+    const nextJob = await startProjectJob({
+      action,
+      project: researchProject,
+      stage,
+      message: text,
+      ...(stage === "environment" ? {} : { timeout_sec: 14400 }),
+      queue_if_busy: true,
+      interrupt_current: interruptCurrent,
+    });
     setAgentGuidanceMessages((prev) => ({ ...prev, [key]: "" }));
     setAgentGuidanceMessage("");
     attachJob(nextJob, stage === "paper" ? "paperWrite" : stage === "experiment" ? "experiment" : "environment");
@@ -6352,6 +6417,7 @@ function App() {
 
   function artifactPanelContent(artifact: any, options: { raw?: boolean } = {}) {
     const rawContent = String(artifact?.content ?? "");
+    if (artifact?.name === "idea.md") return rawContent;
     const localizedContent = lang === "zh"
       ? String(artifact?.content_zh ?? artifact?.content ?? "")
       : String(artifact?.content_en ?? artifact?.content ?? "");
@@ -6362,7 +6428,7 @@ function App() {
     }
     if (options.raw) return publicMarkdownArtifact(rawContent);
     if (artifact?.name !== "find.md" && lang === "en" && containsCJKText(localizedContent)) {
-      return "This artifact is authored in Chinese by the project agent. The structured English projection for this step is shown above; use Raw to inspect the original artifact. No scientific status is changed by this display fallback.";
+      return "This artifact is authored in Chinese by a module controller. The structured English projection for this step is shown above; use Raw to inspect the original artifact. No scientific status is changed by this display fallback.";
     }
     return publicLogText(localizedContent, lang);
   }
@@ -6560,7 +6626,7 @@ function App() {
       const refLog = displayMaybe(referenceJob?.log_path || humanSupervision?.blocker?.reference_full_job_log, t.noData);
       return (
         <div className="panel experimentGatePanel compactHumanPanel">
-          <div className="toolbar compactToolbar"><div><h3>{t.experimentGateOverview}</h3><p className="help">{lang === "zh" ? "当前参考复现进程来自真实 PID/日志；这里仅显示确定性运行状态，项目代理原文单独显示在项目代理回复中。" : "The current reproduction process comes from a real PID/log; this panel shows deterministic run status only, while project-agent text is shown separately."}</p></div></div>
+          <div className="toolbar compactToolbar"><div><h3>{t.experimentGateOverview}</h3><p className="help">{lang === "zh" ? "当前参考复现进程来自真实 PID/日志；这里仅显示确定性运行状态，Experimenting 主控原文单独显示在模块回复中。" : "The current reproduction process comes from a real PID/log; this panel shows deterministic run status only, while Experimenting-controller text is shown separately."}</p></div></div>
           <div className="trajectorySupervisorGrid humanSummaryGrid">
             <article className="supervisorCard"><span>{lang === "zh" ? "主线基底" : "Main base"}</span><strong>{baseTitle}</strong><small>{repoName}</small></article>
             <article className="supervisorCard"><span>{lang === "zh" ? "当前任务" : "Current task"}</span><strong>{lang === "zh" ? "论文级参考复现" : "Full reference reproduction"}</strong><small>{lang === "zh" ? `运行中 / PID=${refPid}` : `running / PID=${refPid}`}</small></article>
@@ -6763,11 +6829,16 @@ function App() {
   }
 
   function renderClaudeSessionPanel(stage: "environment" | "experiment" | "paper") {
+    const moduleClaudeLabel = stage === "paper"
+      ? (lang === "zh" ? "Writing 主控 Claude" : "Writing controller")
+      : stage === "environment"
+        ? (lang === "zh" ? "Environment 主控 Claude" : "Environment controller")
+        : (lang === "zh" ? "Experimenting 主控 Claude" : "Experimenting controller");
     const guidanceJob = jobs.find((item) => jobMatchesClaudePanelStage(item, stage));
-    const guidanceKey = `${stage}:main`;
+    const guidanceKey = `${stage}:controller`;
     const guidanceDraft = agentGuidanceMessages[guidanceKey] ?? agentGuidanceMessage;
     const guidanceProgressText = guidanceJob?.progress
-      ? `${displayMaybe(guidanceJob.progress.phase || guidanceJob.stage || stage)} / ${guidanceJob.progress.total ? `${guidanceJob.progress.current}/${guidanceJob.progress.total}` : `${guidanceJob.progress.current || 0} ${t.events}`}`
+      ? String(guidanceJob.progress.message || `${displayMaybe(guidanceJob.progress.phase || guidanceJob.stage || stage)} / ${guidanceJob.progress.total ? `${guidanceJob.progress.current}/${guidanceJob.progress.total}` : `${guidanceJob.progress.current || 0} ${t.events}`}`)
       : "";
     const guidanceRows = Array.isArray((researchSummary as any)?.queued_guidance)
       ? (researchSummary as any).queued_guidance
@@ -6777,7 +6848,11 @@ function App() {
       .filter((item: any) => normalizeClaudePanelStage(item?.stage) === stage)
       .map((item: any) => {
         const created = formatDateMinute(item?.created_at, lang) || displayMaybe(item?.created_at, "");
-        const status = lang === "zh" ? "待项目代理消费" : "queued for project agent";
+        const status = stage === "environment"
+          ? (lang === "zh" ? "等待 Environment 主控 Claude" : "queued for Environment controller")
+          : stage === "paper"
+            ? (lang === "zh" ? "等待 Writing 主控 Claude" : "queued for Writing controller")
+            : (lang === "zh" ? "等待 Experimenting 主控 Claude" : "queued for Experimenting controller");
         const itemStage = String(item?.stage || "project");
         const stageLabel = itemStage && itemStage !== stage ? `${lang === "zh" ? "阶段" : "stage"}=${displayValue(itemStage)}` : "";
         return [created, status, stageLabel, displayMaybe(item?.message, "")].filter(Boolean).join(" / ");
@@ -6790,11 +6865,32 @@ function App() {
       ? (lang === "zh" ? "安全策略已拦截" : "Safely blocked")
       : displayValue(receiptStatusRaw);
     const fullResponseRequest = latestClaudeFullResponseRequests.find((item) => item.stage === stage);
-    const receiptRows = latestReceipt?.response_markdown ? [{
+    const controllerConversation = (stage === "paper" || stage === "environment") && Array.isArray(latestReceipt?.conversation)
+      ? latestReceipt.conversation
+      : [];
+    const receiptRows = controllerConversation.length > 0 ? controllerConversation.map((turn: any, index: number) => ({
+      id: turn?.message_id || `${stage}-claude-${index}`,
+      status: displayValue(turn?.status || "completed"),
+      meta: [
+        turn?.finished_at ? `${lang === "zh" ? "完成时间" : "finished"}=${formatDateMinute(turn.finished_at, lang) || turn.finished_at}` : "",
+        turn?.controller_turn ? `${lang === "zh" ? "主控轮次" : "controller turn"}=${turn.controller_turn}` : "",
+        turn?.target_venue ? `${lang === "zh" ? "投稿目标" : "venue"}=${turn.target_venue}` : "",
+        turn?.session_id ? `session=${String(turn.session_id).slice(0, 8)}` : "",
+      ].filter(Boolean).join(" / "),
+      instruction: String(turn?.instruction || ""),
+      response: publicLogText(String(turn?.response_markdown || ""), lang),
+      fullResponseKey: index === controllerConversation.length - 1 ? (fullResponseRequest?.key || claudeFullResponseKeyForStage(stage, latestReceipt)) : "",
+      fullResponseStage: stage,
+      fullResponseAvailable: index === controllerConversation.length - 1 && Boolean(fullResponseRequest?.available || latestReceipt?.full_response_available),
+      responseCharCount: index === controllerConversation.length - 1 ? Number(latestReceipt?.response_chcount || 0) : 0,
+      source: String(turn?.response_source || ""),
+    })) : latestReceipt?.response_markdown ? [{
       id: latestReceipt?.session_id || `${stage}-claude-latest`,
       status: receiptStatusLabel,
       meta: [
         latestReceipt?.finished_at ? `${lang === "zh" ? "完成时间" : "finished"}=${formatDateMinute(latestReceipt.finished_at, lang) || latestReceipt.finished_at}` : "",
+        latestReceipt?.controller_turn ? `${lang === "zh" ? "主控轮次" : "controller turn"}=${latestReceipt.controller_turn}` : "",
+        stage === "paper" && latestReceipt?.session_id ? `session=${String(latestReceipt.session_id).slice(0, 8)}` : "",
       ].filter(Boolean).join(" / "),
       instruction: String(latestReceipt?.instruction || ""),
       response: publicLogText(String(latestReceipt?.response_markdown || ""), lang),
@@ -6804,24 +6900,40 @@ function App() {
       responseCharCount: Number(latestReceipt?.response_chcount || 0),
       source: String(latestReceipt?.response_source || ""),
     }] : [];
-    const statusHelp = lang === "zh"
-      ? "输入的自然语言会进入当前项目代理；上方状态卡片展示当前实时状态，底部 任务栏展示真实 run/job 阶段、进度、日志和产物状态。"
-      : "Natural-language input goes to the current project agent; state cards show live workflow status, and the bottom taskbar shows real run/job stage, progress, logs, commands, and artifacts.";
-    const logRedirectHelp = lang === "zh"
-      ? "如果当前项目代理正在运行，本面板会先把指令排队到项目队列；下一次安全检查点会读取并执行。若没有正在运行的项目代理，会直接启动项目会话。"
-      : "If the project agent is already running, this panel queues guidance for the project; the next safe checkpoint consumes it. If no project agent is running, it starts a project session directly.";
+    const statusHelp = stage === "paper"
+      ? (lang === "zh"
+        ? "输入的自然语言只进入本项目独立的 Writing 主控 Claude Code；每条消息续接同一个会话，回复会直接显示在这里。"
+        : "Natural-language input goes only to this project's dedicated Writing controller; every message resumes the same session and its reply appears here.")
+      : stage === "environment"
+        ? (lang === "zh"
+          ? "输入的自然语言只进入当前项目唯一的 Environment 主控 Claude 会话。"
+          : "Natural-language input goes only to the project's unique Environment controller session.")
+        : (lang === "zh"
+          ? "输入的自然语言只进入当前项目唯一的 Experimenting 主控 Claude 会话。"
+          : "Natural-language input goes only to the project's unique Experimenting controller session.");
+    const logRedirectHelp = stage === "paper"
+      ? (lang === "zh"
+        ? "本面板只连接当前项目唯一的 Writing 主控 Claude；忙碌时消息进入模块队列，也可打断当前任务并优先处理。原任务随后由同一会话恢复。"
+        : "This panel only targets the project's unique Writing controller; busy messages enter the module queue, or can interrupt the current task and run first. The same session then resumes the original work.")
+      : stage === "environment"
+        ? (lang === "zh"
+          ? "本面板只连接 Environment 主控会话；环境部署和审计仍由 Environment 阶段按钮提交给同一模块。"
+          : "This panel only connects to the Environment controller session; the Environment stage button submits deployment and audit work to that same module.")
+        : (lang === "zh"
+          ? "本面板只连接当前项目唯一的 Experimenting 主控 Claude；忙碌时消息进入模块队列，也可打断当前任务并优先处理。"
+          : "This panel only targets the project's unique Experimenting controller; busy messages enter the module queue, or can interrupt the current task and run first.");
     return (
       <div className="panel claudeSessionPanel">
         <div className="toolbar compactToolbar">
           <div>
-            <h3>{t.claudeSessionTitle}</h3>
+            <h3>{stage === "environment" ? (lang === "zh" ? "Environment 主控 Claude 对话" : "Environment Controller Chat") : t.claudeSessionTitle}</h3>
             <p className="help">{t.claudeSessionHelp}</p>
           </div>
         </div>
         <div className="agentPanel guidancePanel">
           <div className="agentHeader">
             <div>
-              <h4>{t.queueAgentGuidance}</h4>
+              <h4>{lang === "zh" ? `发送给 ${moduleClaudeLabel}` : `Send to ${moduleClaudeLabel}`}</h4>
               <p className="help">{statusHelp}</p>
             </div>
           </div>
@@ -6840,7 +6952,10 @@ function App() {
             autoCapitalize="off"
             spellCheck={false}
           />
-          <div className="actions"><button onClick={() => queueAgentGuidance(stage, "main")} disabled={!researchProject || !String(guidanceDraft || "").trim()}>{t.queueAgentGuidance}</button></div>
+          <div className="actions">
+            <button onClick={() => queueAgentGuidance(stage)} disabled={!researchProject || !String(guidanceDraft || "").trim()}>{lang === "zh" ? `发送给 ${moduleClaudeLabel}` : `Send to ${moduleClaudeLabel}`}</button>
+            <button className="danger" onClick={() => queueAgentGuidance(stage, true)} disabled={!researchProject || !String(guidanceDraft || "").trim()}>{t.interruptEnvironmentClaude}</button>
+          </div>
         </div>
         {guidanceJob && (
           <div className={guidanceJob.status === "error" ? "claudeLiveBox errorLiveBox" : "claudeLiveBox"}>
@@ -6849,11 +6964,12 @@ function App() {
               <span>{displayValue(guidanceJob.status)}</span>
             </div>
             {guidanceProgressText && <small className="claudeProgress">{guidanceProgressText}</small>}
+            {String(guidanceJob?.progress?.phase || "") === "queued" && (guidanceJob?.result?.instruction || guidanceJob?.progress?.message) && <p><strong>{lang === "zh" ? "正在排队的消息：" : "Queued message: "}</strong>{String(guidanceJob?.result?.instruction || guidanceJob?.progress?.message)}</p>}
             <p className="help">{logRedirectHelp}</p>
           </div>
         )}
         <details className="transcriptBox" open>
-          <summary>{t.claudeTranscriptTitle}</summary>
+          <summary>{stage === "environment" ? (lang === "zh" ? "Environment 主控 Claude 会话记录" : "Environment controller conversation") : t.claudeTranscriptTitle}</summary>
           {receiptRows.length > 0 ? (
             <div className="guidanceReceiptList">
               {receiptRows.map((item: any, index: number) => {
@@ -6868,22 +6984,23 @@ function App() {
                 return <div className="guidanceReceipt" key={item.id || `${stage}-guidance-${index}`}>
                   <strong>{item.status}</strong>
                   {item.meta ? <small>{item.meta}</small> : null}
-                  <strong>{lang === "zh" ? "处理摘要" : "Processing summary"}</strong>
-                  {item.response ? <pre>{publicLogText(item.response, lang)}</pre> : <p>{lang === "zh" ? "最近一次项目代理尚无处理摘要。" : "The latest project-agent turn has no processing summary yet."}</p>}
+                  {item.instruction ? <><strong>{lang === "zh" ? "你的指令" : "Your instruction"}</strong><pre>{publicLogText(item.instruction, lang)}</pre></> : null}
+                  <strong>{stage === "paper" ? (lang === "zh" ? "Writing 主控回复" : "Writing controller reply") : stage === "environment" ? (lang === "zh" ? "Environment 主控回复" : "Environment controller reply") : (lang === "zh" ? "处理摘要" : "Processing summary")}</strong>
+                  {item.response ? <pre>{publicLogText(item.response, lang)}</pre> : <p>{stage === "environment" ? (lang === "zh" ? "Environment 主控 Claude 尚未返回处理结果。" : "The Environment controller has not returned a result yet.") : (lang === "zh" ? "对应模块 Claude 尚无处理摘要。" : "The module Claude turn has no processing summary yet.")}</p>}
                   {item.fullResponseAvailable && (
                     <div className="receiptActions">
-                      <button type="button" onClick={() => loadClaudeFullResponse(item.fullResponseKey, item.fullResponseStage || stage)} disabled={Boolean(fullState.loading)}>{fullState.loading ? (lang === "zh" ? "正在加载完整回复..." : "Loading full response...") : fullText ? (lang === "zh" ? "刷新完整项目代理回复" : "Refresh full project-agent response") : (lang === "zh" ? "查看完整项目代理回复" : "Show full project-agent response")}</button>
+                      <button type="button" onClick={() => loadClaudeFullResponse(item.fullResponseKey, item.fullResponseStage || stage)} disabled={Boolean(fullState.loading)}>{fullState.loading ? (lang === "zh" ? "正在加载完整回复..." : "Loading full response...") : fullText ? (lang === "zh" ? "刷新模块主控完整回复" : "Refresh full controller response") : (lang === "zh" ? "查看模块主控完整回复" : "Show full controller response")}</button>
                       {item.responseCharCount ? <small>{lang === "zh" ? `完整回复约 ${item.responseCharCount} 字符；点击按钮可查看或刷新。` : `Full response is about ${item.responseCharCount} chars; use the button to show or refresh it.`}</small> : null}
                     </div>
                   )}
                   {fullState.error && <p className="errorText">{fullState.error}</p>}
-                  {fullText && <div className="fullClaudeResponse"><strong>{lang === "zh" ? "完整项目代理回复" : "Full project-agent response"}</strong>{fullMeta && <small>{fullMeta}</small>}<pre>{fullText}</pre></div>}
+                  {fullText && <div className="fullClaudeResponse"><strong>{lang === "zh" ? "模块主控完整回复" : "Full module-controller response"}</strong>{fullMeta && <small>{fullMeta}</small>}<pre>{fullText}</pre></div>}
                 </div>;
               })}
               <p className="help">{logRedirectHelp}</p>
             </div>
           ) : (
-            <div className="emptyState"><p>{t.noClaudeTranscript}</p><p className="help">{logRedirectHelp}</p></div>
+            <div className="emptyState"><p>{stage === "environment" ? (lang === "zh" ? "Environment 主控 Claude 尚无处理摘要；当前任务状态显示在底部任务栏。" : "The Environment controller has no processing summary yet; current task status appears in the bottom taskbar.") : t.noClaudeTranscript}</p><p className="help">{logRedirectHelp}</p></div>
           )}
         </details>
       </div>
@@ -6909,7 +7026,7 @@ function App() {
           <label>{t.extraPath}</label>
           <input value={researchRuntimeDraft.extra_path || ""} onChange={(e) => updateRuntimeDraft("extra_path", e.target.value)} placeholder="/custom/bin:/another/bin" />
           <div className="saveBar">
-            <button onClick={detectRuntimeConfig} disabled={researchRuntimeSaving}>{t.autoDetectProjectAgent}</button>
+            <button onClick={detectRuntimeConfig} disabled={researchRuntimeSaving}>{t.autoDetectClaude}</button>
             <button className="primary" onClick={saveRuntimeConfig} disabled={researchRuntimeSaving}>{researchRuntimeSaving ? t.saving : t.saveAndDiagnose}</button>
             {researchRuntimeMessage && <span>{researchRuntimeMessage}</span>}
           </div>
@@ -6973,7 +7090,7 @@ function App() {
           <span className="mark" aria-label="TASTE">T</span>
           <div>
             <h1>TASTE</h1>
-            <p>127.0.0.1:8879</p>
+            <p>{window.location.host}</p>
           </div>
         </div>
         <div className="langSwitch" aria-label="Language">
@@ -7050,24 +7167,6 @@ function App() {
           <div className="row">
             <input value={config.temperature} onChange={(e) => updateConfig("temperature", Number(e.target.value))} type="number" step="0.1" />
           </div>
-          <details className="roleSettings">
-            <summary>{t.roleConfig}</summary>
-            <p className="help">{t.roleConfigHelp}</p>
-            {LLM_ROLES.map(([role, label]) => {
-              const roleConfig = (config.llm_roles || {})[role] || {};
-              return (
-                <div className="roleBox" key={role}>
-                  <h4>{label}</h4>
-                  <input value={roleConfig.provider || ""} onChange={(e) => updateRoleConfig(role, "provider", e.target.value)} placeholder={t.provider} />
-                  <input value={roleConfig.base_url || ""} onChange={(e) => updateRoleConfig(role, "base_url", e.target.value)} placeholder={t.baseUrl} />
-                  <input value={roleConfig.model || ""} onChange={(e) => updateRoleConfig(role, "model", e.target.value)} placeholder={t.model} />
-                  <input value={roleConfig.api_key || ""} onChange={(e) => updateRoleConfig(role, "api_key", e.target.value)} placeholder={roleConfig.api_key_saved ? (lang === "zh" ? "已保存，输入新 key 替换" : "Saved, enter a new key to replace") : t.apiKey} type="password" autoComplete="new-password" />
-                  {roleConfig.api_key_saved && !roleConfig.api_key && <p className="help">{savedSecretHint(roleConfig.api_key_saved)}</p>}
-                  <input value={roleConfig.temperature ?? ""} onChange={(e) => updateRoleConfig(role, "temperature", e.target.value ? Number(e.target.value) : null)} placeholder={t.temperature} type="number" step="0.1" />
-                </div>
-              );
-            })}
-          </details>
           <details className="roleSettings">
             <summary>{t.emailSettings}</summary>
             <p className="help">{t.emailHelp}</p>
@@ -7355,7 +7454,7 @@ function App() {
           <section className="stage">
             <div className="toolbar">
               <h2>{t.read}</h2>
-              <button className="primary" data-testid="run-read-button" onClick={runRead} disabled={!(currentProjectFindRunId || runId) || stageLaunchDisabledByFullCycle}>{t.runRead}</button>
+              <button className="primary" data-testid="run-read-button" onClick={runRead} disabled={!(currentProjectFindRunId || runId) || stageLaunchDisabledByFullCycle || viewingSelectedHistoricalFindRun}>{t.runRead}</button>
             </div>
             <div className="panel readStatusPanel">
               <h3>{lang === "zh" ? "精读状态" : "Reading status"}</h3>
@@ -7374,64 +7473,99 @@ function App() {
           <section className="stage">
             <div className="toolbar">
               <h2>{t.ideas}</h2>
-              <button className="primary" onClick={runIdeas} disabled={!runId || stageLaunchDisabledByFullCycle}>{t.runIdeas}</button>
+              <div className="actions">
+                {ideaMarkdownText && (
+                  <button disabled={viewingSelectedHistoricalFindRun} onClick={() => {
+                    setIdeaMarkdownDraft(ideaMarkdownText);
+                    setIdeaMarkdownEditing((editing) => !editing);
+                  }}>
+                    {ideaMarkdownEditing ? (lang === "zh" ? "返回字段编辑" : "Back to fields") : (lang === "zh" ? "编辑 Markdown 源文" : "Edit Markdown source")}
+                  </button>
+                )}
+                <button className="primary" onClick={runIdeas} disabled={!(currentProjectFindRunId || runId) || !researchProject || stageLaunchDisabledByFullCycle || viewingSelectedHistoricalFindRun}>{t.runIdeas}</button>
+              </div>
             </div>
             <div className="panel ideaRunBudgetPanel">
               <h3>{t.ideaRunBudget}</h3>
               <p className="help">{t.ideaBudgetHelp}</p>
-              <div className="row"><div><label>{t.ideaLimit}</label><p className="help">{t.ideaLimitHelp}</p><input value={config.max_ideas} onChange={(e) => updateConfig("max_ideas", Number(e.target.value))} type="number" min="1" /></div><div><label>{t.ideaWorkers}</label><p className="help">{t.ideaWorkersHelp}</p><input value={config.idea_parallel_workers} onChange={(e) => updateConfig("idea_parallel_workers", Math.max(1, Math.min(8, Number(e.target.value))))} type="number" min="1" max="8" /></div></div>
+              <div><label>{t.ideaLimit}</label><p className="help">{t.ideaLimitHelp}</p><input value={config.max_ideas} onChange={(e) => updateConfig("max_ideas", Number(e.target.value))} type="number" min="1" max="50" /></div>
               <div className="saveBar"><button className="primary" onClick={handleSaveConfig} disabled={savingConfig}>{savingConfig ? t.saving : t.saveConfig}</button>{saveMessage && <span>{saveMessage}</span>}</div>
             </div>
-            <div className="ideaGrid">
-              {currentFindArtifactLoading || ideasStillSyncing ? (
-                <div className="emptyState">{lang === "zh" ? "正在加载当前 Find 的想法产物..." : "Loading current Find idea artifacts..."}</div>
-              ) : ideas.length === 0 ? (
-                <div className="emptyState">{lang === "zh" ? "当前 Find 尚未产出想法。" : "No ideas have been produced for the current Find run yet."}</div>
-              ) : ideas.map((idea: any, index: number) => {
-                const ideaId = String(idea.id || idea.idea_id || idea.title || index);
-                const status = ideaWorkflowStatus(idea);
-                const savingStatus = ideaStatusSaving[ideaId];
-                return (
-                  <article className={`idea ideaEditorCard ${status}`} key={ideaId}>
-                    <input
-                      className="ideaTitle"
-                      value={String(idea.title || "")}
-                      onChange={(e) => editIdea(ideaId, "title", e.target.value)}
-                      aria-label={lang === "zh" ? "idea 标题" : "idea title"}
-                    />
-                    <div className="ideaMetaLine">
-                      {ideaScoreText(idea) && <span>{lang === "zh" ? `评分 ${ideaScoreText(idea)}/10` : `score ${ideaScoreText(idea)}/10`}</span>}
-                      <span className={`ideaStatusBadge ${status}`}>{ideaWorkflowStatusLabel(status)}</span>
-                      {ideaAuditText(idea) && <span>{ideaAuditText(idea)}</span>}
-                    </div>
-                    <label className="ideaFieldLabel">{lang === "zh" ? "新方法" : "New method"}</label>
-                    <textarea
-                      className="ideaLargeTextarea"
-                      value={ideaNewMethodEditorText(idea)}
-                      onChange={(e) => editIdea(ideaId, "new_method", e.target.value)}
-                      placeholder={lang === "zh" ? "说明核心假设、机制模块、训练或推理作用点，以及为什么可能有效。" : "Describe the core hypothesis, mechanism/module, training or inference hook, and why it may work."}
-                      aria-label={lang === "zh" ? "新方法" : "new method"}
-                    />
-                    <label className="ideaFieldLabel">{lang === "zh" ? "初步实验" : "Initial experiment"}</label>
-                    <textarea
-                      className="ideaLargeTextarea"
-                      value={ideaInitialExperimentEditorText(idea)}
-                      onChange={(e) => editIdea(ideaId, "initial_experiment", e.target.value)}
-                      placeholder={lang === "zh" ? "说明基于哪篇工作或可审计基底、做什么最小改动、对比哪些 baseline/control/ablation、指标和坏例切片。" : "State the prior work or auditable base, minimal change, baseline/control/ablation, metrics, and bad-case slices."}
-                      aria-label={lang === "zh" ? "初步实验" : "initial experiment"}
-                    />
-                    {idea.initial_experiment_required && (
-                      <p className="ideaGuardrail">{lang === "zh" ? "初步实验需要由项目代理根据精读结果补齐；通用环境审查占位不会作为实验设计展示。" : "The project agent still needs to fill the initial experiment from the reading results; generic environment-review placeholders are hidden."}</p>
-                    )}
-                    <div className="actions ideaStatusActions" aria-label={lang === "zh" ? "想法状态" : "idea status"}>
-                      <button className={status === "approved" ? "active" : ""} onClick={() => setIdeaStatus(ideaId, "approved")} disabled={Boolean(savingStatus)}>{savingStatus === "approved" ? t.saving : t.approve}</button>
-                      <button className={status === "pending" ? "active" : ""} onClick={() => setIdeaStatus(ideaId, "pending")} disabled={Boolean(savingStatus)}>{savingStatus === "pending" ? t.saving : t.pending}</button>
-                      <button className={status === "deleted" ? "danger active" : "danger"} onClick={() => setIdeaStatus(ideaId, "deleted")} disabled={Boolean(savingStatus)}>{savingStatus === "deleted" ? t.saving : t.delete}</button>
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
+            {currentFindArtifactLoading || ideasStillSyncing ? (
+              <div className="emptyState">{lang === "zh" ? "正在加载当前 Find 的想法产物..." : "Loading idea artifacts for the current Find run..."}</div>
+            ) : ideas.length === 0 ? (
+              <div className="emptyState">{lang === "zh" ? "当前 Find 尚未产出想法。" : "No ideas have been produced for the current Find run yet."}</div>
+            ) : ideaMarkdownEditing ? (
+              <div className="panel ideaMarkdownEditorPanel">
+                <textarea
+                  className="ideaMarkdownSourceEditor"
+                  value={ideaMarkdownDraft}
+                  onChange={(event) => setIdeaMarkdownDraft(event.target.value)}
+                  readOnly={viewingSelectedHistoricalFindRun}
+                  spellCheck={false}
+                  aria-label="idea.md"
+                />
+                <div className="actions">
+                  <button onClick={() => { setIdeaMarkdownDraft(ideaMarkdownText); setIdeaMarkdownEditing(false); }} disabled={ideaMarkdownSaving || viewingSelectedHistoricalFindRun}>{lang === "zh" ? "取消" : "Cancel"}</button>
+                  <button className="primary" onClick={saveIdeaMarkdown} disabled={ideaMarkdownSaving || !ideaMarkdownDraft.trim() || viewingSelectedHistoricalFindRun}>{ideaMarkdownSaving ? t.saving : (lang === "zh" ? "保存 idea.md" : "Save idea.md")}</button>
+                </div>
+              </div>
+            ) : (
+              <div className="ideaGrid">
+                {ideas.map((idea: any, index: number) => {
+                  const ideaId = String(idea.id || idea.title || index);
+                  const status = ideaWorkflowStatus(idea);
+                  const savingStatus = ideaStatusSaving[ideaId];
+                  const savingEdit = Boolean(ideaEditorSaving[ideaId]);
+                  const draft = ideaEditorDrafts[ideaId] || {
+                    title: String(idea.title || ""),
+                    new_method: String(idea.new_method || ""),
+                    initial_experiment: String(idea.initial_experiment || ""),
+                  };
+                  const dirty = draft.title !== String(idea.title || "")
+                    || draft.new_method !== String(idea.new_method || "")
+                    || draft.initial_experiment !== String(idea.initial_experiment || "");
+                  const invalid = !draft.title.trim() || !draft.new_method.trim() || !draft.initial_experiment.trim();
+                  return (
+                    <article className={`idea ideaEditorCard ${status}`} key={ideaId}>
+                      <input
+                        className="ideaTitle"
+                        value={draft.title}
+                        disabled={viewingSelectedHistoricalFindRun}
+                        onChange={(event) => updateIdeaEditorDraft(ideaId, idea, "title", event.target.value)}
+                        aria-label={lang === "zh" ? "idea 标题" : "idea title"}
+                      />
+                      <div className="ideaMetaLine">
+                        {ideaScoreText(idea) && <span>{lang === "zh" ? `评分 ${ideaScoreText(idea)}/10` : `score ${ideaScoreText(idea)}/10`}</span>}
+                        <span className={`ideaStatusBadge ${status}`}>{ideaWorkflowStatusLabel(status)}</span>
+                      </div>
+                      <label className="ideaFieldLabel">{lang === "zh" ? "新方法" : "New method"}</label>
+                      <textarea
+                        className="ideaLargeTextarea"
+                        value={draft.new_method}
+                        disabled={viewingSelectedHistoricalFindRun}
+                        onChange={(event) => updateIdeaEditorDraft(ideaId, idea, "new_method", event.target.value)}
+                        aria-label={lang === "zh" ? "新方法" : "new method"}
+                      />
+                      <label className="ideaFieldLabel">{lang === "zh" ? "初步实验" : "Initial experiment"}</label>
+                      <textarea
+                        className="ideaLargeTextarea"
+                        value={draft.initial_experiment}
+                        disabled={viewingSelectedHistoricalFindRun}
+                        onChange={(event) => updateIdeaEditorDraft(ideaId, idea, "initial_experiment", event.target.value)}
+                        aria-label={lang === "zh" ? "初步实验" : "initial experiment"}
+                      />
+                      <div className="actions ideaStatusActions" aria-label={lang === "zh" ? "想法操作" : "idea actions"}>
+                        <button className="primary" onClick={() => saveIdeaFields(ideaId)} disabled={!dirty || invalid || savingEdit || Boolean(savingStatus) || viewingSelectedHistoricalFindRun}>{savingEdit ? t.saving : (lang === "zh" ? "保存修改" : "Save changes")}</button>
+                        <button className={status === "approved" ? "active" : ""} onClick={() => setIdeaStatus(ideaId, "approved")} disabled={dirty || savingEdit || Boolean(savingStatus) || viewingSelectedHistoricalFindRun}>{savingStatus === "approved" ? t.saving : t.approve}</button>
+                        <button className={status === "pending" ? "active" : ""} onClick={() => setIdeaStatus(ideaId, "pending")} disabled={dirty || savingEdit || Boolean(savingStatus) || viewingSelectedHistoricalFindRun}>{savingStatus === "pending" ? t.saving : t.pending}</button>
+                        <button className={status === "deleted" ? "danger active" : "danger"} onClick={() => setIdeaStatus(ideaId, "deleted")} disabled={dirty || savingEdit || Boolean(savingStatus) || viewingSelectedHistoricalFindRun}>{savingStatus === "deleted" ? t.saving : t.delete}</button>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
           </section>
         )}
 
@@ -7439,7 +7573,7 @@ function App() {
           <section className="stage">
             <div className="toolbar">
               <h2>{t.plan}</h2>
-              <button className="primary" onClick={runPlan} disabled={!runId || !planIdeaIds.length || stageLaunchDisabledByFullCycle}>{t.runPlan}</button>
+              <button className="primary" onClick={runPlan} disabled={!runId || !planIdeaIds.length || stageLaunchDisabledByFullCycle || viewingSelectedHistoricalFindRun}>{t.runPlan}</button>
             </div>
             <div className="planControlGrid planTopGrid">
               <div className="panel planControlPanel planIdeasPanel">
@@ -7454,8 +7588,8 @@ function App() {
                 ) : (
                   <>
                     <div className="actions compactActions">
-                      <button onClick={() => setPlanIdeaIds(approvedIdeas.map((idea: any, index: number) => ideaKey(idea, index)).filter(Boolean))}>{t.selectAll}</button>
-                      <button onClick={() => setPlanIdeaIds([])}>{t.clearAll}</button>
+                      <button disabled={viewingSelectedHistoricalFindRun} onClick={() => setPlanIdeaIds(approvedIdeas.map((idea: any, index: number) => ideaKey(idea, index)).filter(Boolean))}>{t.selectAll}</button>
+                      <button disabled={viewingSelectedHistoricalFindRun} onClick={() => setPlanIdeaIds([])}>{t.clearAll}</button>
                     </div>
                     <div className="planPickList">
                       {approvedIdeas.map((idea: any, index: number) => {
@@ -7464,8 +7598,9 @@ function App() {
                           <label className="check paper compactPlanPick" key={key}>
                             <input
                               type="checkbox"
+                              disabled={viewingSelectedHistoricalFindRun}
                               checked={planIdeaIds.includes(key)}
-                              onChange={(e) => setPlanIdeaIds((prev) => e.target.checked ? Array.from(new Set([...prev, key])) : prev.filter((id) => id !== key))}
+                              onChange={(event) => setPlanIdeaIds((previous) => event.target.checked ? Array.from(new Set([...previous, key])) : previous.filter((ideaId) => ideaId !== key))}
                             />
                             <span>{ideaTitleText(idea, index)}</span>
                             <small>{[ideaScoreText(idea) ? (lang === "zh" ? "评分 " + ideaScoreText(idea) + "/10" : "score " + ideaScoreText(idea) + "/10") : "", ideaStatusText(idea)].filter(Boolean).join(" / ")}</small>
@@ -7480,101 +7615,71 @@ function App() {
                 <h3>{lang === "zh" ? "生成设置" : "Generation settings"}</h3>
                 <label>{t.repairRounds}</label>
                 <p className="help">{t.repairRoundsHelp}</p>
-                <input value={planRepairRounds} onChange={(e) => setPlanRepairRounds(Math.max(1, Number(e.target.value)))} type="number" min="1" />
+                <input value={planRepairRounds} onChange={(event) => setPlanRepairRounds(Math.max(0, Math.trunc(Number(event.target.value) || 0)))} type="number" min="0" disabled={viewingSelectedHistoricalFindRun} />
+                <div className="actions compactActions">
+                  <button className="primary" onClick={runPlan} disabled={!runId || !planIdeaIds.length || stageLaunchDisabledByFullCycle || viewingSelectedHistoricalFindRun}>{t.runPlan}</button>
+                </div>
               </div>
-              <div className="panel planControlPanel planCurrentPanel">
-                <h3>{lang === "zh" ? "当前执行计划" : "Current execution plan"}</h3>
+              <div className="panel planControlPanel planActionsPanel" data-testid="plan-human-editor">
+                <h3>{lang === "zh" ? "计划操作" : "Plan actions"}</h3>
                 {currentFindArtifactLoading || plansStillSyncing ? (
                   <div className="emptyState">{lang === "zh" ? "正在加载当前 Find 的计划产物..." : "Loading plans for the current Find run..."}</div>
                 ) : plans.length === 0 ? (
                   <div className="emptyState">{lang === "zh" ? "当前 Find 尚未产出计划。" : "No plans have been produced for the current Find run yet."}</div>
-                ) : contractSelectedPlanId ? (
-                  <div className="planExecutionSummary ready">
-                    <strong>{contractSelectedPlan ? planTitleText(contractSelectedPlan, Math.max(0, plans.indexOf(contractSelectedPlan))) : (lang === "zh" ? "已选择执行计划" : "Selected execution plan")}</strong>
-                    {contractSelectedPlan && planIdeaLabel(contractSelectedPlan) && <p>{planIdeaLabel(contractSelectedPlan)}</p>}
-                    <small>{selectedExecutionStatus ? displayValue(selectedExecutionStatus) : (lang === "zh" ? "已选择" : "selected")}</small>
-                  </div>
                 ) : (
-                  <div className="planExecutionSummary blocked">
-                    <strong>{lang === "zh" ? "尚未选择执行计划" : "No execution plan selected"}</strong>
-                    <p>{lang === "zh" ? "候选计划已生成，但还没有唯一执行计划；环境、实验和写作不会把任意第一项当主线。" : "Plan candidates exist, but no single execution plan is selected yet; downstream stages will not use the first item by default."}</p>
-                    <div className="actions compactActions selectionActions">
-                      <button className="primary" onClick={() => runAR("current-find-selection")} disabled={!researchProject || stageLaunchDisabledByFullCycle}>
-                        {t.selectExecutionPlan}
-                      </button>
+                  <>
+                    <div className={contractSelectedPlanId ? "planExecutionContract ready" : "planExecutionContract blocked"}>
+                      <strong>{lang === "zh" ? "执行合同" : "Execution contract"}</strong>
+                      <span>{selectedExecutionText}</span>
+                      {selectedExecutionStatus && <small>{displayValue(selectedExecutionStatus)}</small>}
                     </div>
-                  </div>
+                    <label>{lang === "zh" ? "候选计划操作对象" : "Candidate plan for editing"}</label>
+                    <select className="planSelect" value={selectedPlanId || contractSelectedPlanId} onChange={(event) => setSelectedPlanId(event.target.value)} disabled={viewingSelectedHistoricalFindRun}>
+                      <option value="">{lang === "zh" ? "请选择候选计划" : "Select a candidate plan"}</option>
+                      {plans.map((plan: any, index: number) => (
+                        <option value={String(plan.plan_id || "")} key={plan.plan_id || plan.idea_id || index}>{planTitleText(plan, index)}</option>
+                      ))}
+                    </select>
+                    <small className="planControlMeta">{selectedPlanForControls ? [planMetaText(selectedPlanForControls, asArray(selectedPlanForControls.versions), [], []), planIdeaLabel(selectedPlanForControls)].filter(Boolean).join(" / ") : ""}</small>
+                    {selectedExecutionMissing && (
+                      <div className="actions compactActions selectionActions">
+                        <button className="primary" onClick={() => runAR("current-find-selection")} disabled={!researchProject || stageLaunchDisabledByFullCycle || viewingSelectedHistoricalFindRun}>{t.selectExecutionPlan}</button>
+                      </div>
+                    )}
+                    <label>{lang === "zh" ? "计划正文" : "Plan body"}</label>
+                    <textarea
+                      className="planTextEditor"
+                      value={planMarkdownDraft}
+                      onChange={(event) => {
+                        setPlanMarkdownDraft(event.target.value);
+                        setPlanMarkdownDirty(true);
+                      }}
+                      aria-label={lang === "zh" ? "计划正文" : "Plan body"}
+                      readOnly={viewingSelectedHistoricalFindRun}
+                      spellCheck={false}
+                    />
+                    <div className="actions compactActions planEditorActions">
+                      <button onClick={() => { setPlanMarkdownDraft(planMarkdownText); setPlanMarkdownDirty(false); }} disabled={planMarkdownSaving || !planMarkdownDirty || viewingSelectedHistoricalFindRun}>{lang === "zh" ? "重置" : "Reset"}</button>
+                      <button className="primary" onClick={savePlanMarkdown} disabled={planMarkdownSaving || !planMarkdownDirty || !planMarkdownDraft.trim() || viewingSelectedHistoricalFindRun}>{planMarkdownSaving ? t.saving : (lang === "zh" ? "保存修改" : "Save changes")}</button>
+                    </div>
+                    <div className="compactPlanControls">
+                      <label>{t.polishRounds}</label>
+                      <input
+                        value={polishRounds[selectedPlanForControls?.plan_id] || 1}
+                        onChange={(event) => selectedPlanForControls && setPolishRounds((previous) => ({ ...previous, [selectedPlanForControls.plan_id]: Math.max(1, Number(event.target.value)) }))}
+                        type="number"
+                        min="1"
+                        disabled={viewingSelectedHistoricalFindRun}
+                      />
+                    </div>
+                    <div className="actions compactActions">
+                      <button onClick={() => selectedPlanForControls && runPlanPolish(selectedPlanForControls.plan_id, selectedPlanLatest.version_id)} disabled={!selectedPlanForControls?.plan_id || !selectedPlanLatest?.version_id || stageLaunchDisabledByFullCycle || viewingSelectedHistoricalFindRun}>{t.polishFurther}</button>
+                      <button className={selectedPlanForControls?.completed ? "" : "primary"} onClick={() => selectedPlanForControls && runPlanFinish(selectedPlanForControls.plan_id)} disabled={!selectedPlanForControls?.plan_id || selectedPlanForControls?.completed || stageLaunchDisabledByFullCycle || viewingSelectedHistoricalFindRun}>{selectedPlanForControls?.completed ? t.planCompleted : t.finishPlan}</button>
+                    </div>
+                  </>
                 )}
               </div>
             </div>
-            {plans.length > 0 && (
-              <div className="planCandidateSection">
-                <div className="planSectionHeading">
-                  <div>
-                    <h3>{lang === "zh" ? "候选计划" : "Plan candidates"}</h3>
-                    <p>{lang === "zh" ? "每张卡片对应一个可审查的计划；只有标记为当前执行计划的卡片会进入后续环境、实验和写作。" : "Each card is an auditable plan candidate; only the selected execution plan can drive downstream environment, experiments, and writing."}</p>
-                  </div>
-                  <span>{plans.length}</span>
-                </div>
-                <div className="ideaGrid planCardGrid">
-                  {plans.map((plan: any, index: number) => {
-                    const versions = asArray(plan?.versions);
-                    const latest = latestPlanVersion(plan);
-                    const planId = String(plan?.plan_id || "").trim();
-                    const selected = Boolean(
-                      (contractSelectedPlanId && planId && planId === contractSelectedPlanId)
-                      || plan?.selected_for_execution === true
-                      || plan?.execute_next === true
-                      || (plan?.execution_selection && typeof plan.execution_selection === "object" && plan.execution_selection.selected === true)
-                    );
-                    const ideaLabel = planIdeaLabel(plan);
-                    const ideaDisplayText = lang === "zh" ? ideaLabel.replace(/^对应想法\s*/, "") : ideaLabel.replace(/^idea\s*/, "");
-                    const overviewText = planOverviewText(plan, latest);
-                    const statusLabel = selected ? (lang === "zh" ? "当前执行计划" : "selected") : (lang === "zh" ? "候选计划" : "candidate");
-                    return (
-                      <article className="idea ideaEditorCard planCandidateCard" key={plan.plan_id || plan.idea_id || index}>
-                        <div className="ideaTitle planTitleBox">{planTitleText(plan, index)}</div>
-                        <div className="ideaMetaLine">
-                          <span className={`ideaStatusBadge ${selected ? "approved" : ""}`}>{statusLabel}</span>
-                          {versions.length ? <span>{lang === "zh" ? `${versions.length} 轮版本` : `${versions.length} versions`}</span> : null}
-                          {plan.completed ? <span>{t.planCompleted}</span> : null}
-                        </div>
-                        {ideaDisplayText && (
-                          <>
-                            <label className="ideaFieldLabel">{lang === "zh" ? "对应想法" : "Related idea"}</label>
-                            <div className="planReadOnlyBox">{ideaDisplayText}</div>
-                          </>
-                        )}
-                        {overviewText && overviewText !== t.noData && (
-                          <>
-                            <label className="ideaFieldLabel">{lang === "zh" ? "计划要点" : "Plan focus"}</label>
-                            <div className="planReadOnlyBox planOverviewBox">{overviewText}</div>
-                          </>
-                        )}
-                        <div className="compactPlanControls planCardRoundControl">
-                          <label>{t.polishRounds}</label>
-                          <input
-                            value={polishRounds[plan.plan_id] || 1}
-                            onChange={(e) => setPolishRounds((prev) => ({ ...prev, [plan.plan_id]: Math.max(1, Number(e.target.value)) }))}
-                            type="number"
-                            min="1"
-                            disabled={!plan.plan_id || stageLaunchDisabledByFullCycle}
-                          />
-                        </div>
-                        <div className="actions planCardActions">
-                          <button onClick={() => runPlanPolish(plan.plan_id, latest.version_id)} disabled={!plan.plan_id || !latest.version_id || stageLaunchDisabledByFullCycle}>
-                            {t.polishFurther}
-                          </button>
-                          <button className={plan.completed ? "" : "primary"} onClick={() => runPlanFinish(plan.plan_id)} disabled={!plan.plan_id || plan.completed || stageLaunchDisabledByFullCycle}>
-                            {plan.completed ? t.planCompleted : t.finishPlan}
-                          </button>
-                        </div>
-                      </article>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
           </section>
         )}
 
@@ -7664,7 +7769,7 @@ function App() {
                       </>
                     )}
                     <h3>{t.firstEnvCreateControl}</h3>
-                    <p className="help">{environmentLocked ? (lang === "zh" ? "首次仓库/数据/Conda bootstrap 已完成；环境配置页只保留当前环境状态和状态刷新入口，不再展示创建时的自然语言提示。" : "Initial repo/data/conda bootstrap is complete. The Environment page now keeps only current environment status and status refresh controls, not the creation-time prompt.") : t.firstEnvCreateHelp}</p>
+                    <p className="help">{environmentLocked ? (lang === "zh" ? "仓库、数据与 Conda handoff 已完成；环境配置页保留当前状态和刷新入口。" : "The repository, data, and Conda handoff is complete; the Environment page keeps its current status and refresh controls.") : t.firstEnvCreateHelp}</p>
                     {!environmentLocked && <>
                       <label>{t.researchPrompt}</label>
                       <textarea
@@ -7734,8 +7839,7 @@ function App() {
               </div>
               <div className="toolbarActions experimentMainActions">
                 <button onClick={() => refreshProject()} disabled={!researchProject}>{t.researchRefresh}</button>
-                <button className="primary" onClick={() => runAR("full-cycle")} disabled={workflowLaunchDisabled}>{freshBaseMainBlocked ? (lang === "zh" ? "继续全流程" : "Continue workflow") : t.runFullResearchCycle}</button>
-                <button className="primary" onClick={() => runAR("full-cycle", { freshDiscovery: true })} disabled={workflowLaunchDisabled}>{lang === "zh" ? "重新启动完整流程" : "Restart full workflow"}</button>
+                <button className="primary" onClick={() => runAR("full-cycle")} disabled={workflowLaunchDisabled}>{t.runFullResearchCycle}</button>
                 <button onClick={() => runAR("experiment")} disabled={experimentLoopLaunchDisabled}>{t.runExperimentLoop}</button>
               </div>
             </div>
@@ -7841,8 +7945,7 @@ function App() {
               <div className="status">{t.idle}</div>
             ) : (
               <div className="jobList">
-                {displayJobs.map((item) => {
-                  return (
+                {displayJobs.map((item) => (
                   <article className="jobCard" key={item.job_id}>
                     <div className="jobHeader">
                       <strong>{jobDisplayTitle(item, lang)}</strong>
@@ -7866,12 +7969,11 @@ function App() {
                     )}
                     <pre>{jobRecentLogs(item, lang, tab).join("\n")}</pre>
                   </article>
-                  );
-                })}
+                ))}
               </div>
             )}
           </div>
-          {showRunArtifactPanel && <div className="panel artifactPanel">
+          {showRunArtifactPanel && <div className="panel artifactPanel" data-testid={tab === "plan" ? "plan-artifact-panel" : undefined}>
             <h2 data-testid="global-artifact-heading">{t.artifacts}</h2>
             {t.artifactHelp && <p className="help">{t.artifactHelp}</p>}
             {renderedRunArtifacts.length === 0 && (
@@ -7912,7 +8014,15 @@ function App() {
                     {rawArtifacts[currentArtifact.name] ? (
                       <pre>{artifactPanelContent(currentArtifact, { raw: true })}</pre>
                     ) : (
-                      <div className="markdownBody" dangerouslySetInnerHTML={{ __html: markdownToHtml(artifactPanelContent(currentArtifact)) }} />
+                      <div
+                        className="markdownBody"
+                        data-testid={currentArtifact.name === "idea.md" ? "idea-artifact-markdown" : currentArtifact.name === "plan.md" ? "plan-artifact-markdown" : undefined}
+                        dangerouslySetInnerHTML={{
+                          __html: currentArtifact.name === "idea.md"
+                            ? markdownRenderer.render(artifactPanelContent(currentArtifact))
+                            : markdownToHtml(artifactPanelContent(currentArtifact)),
+                        }}
+                      />
                     )}
                   </div>
                 )}

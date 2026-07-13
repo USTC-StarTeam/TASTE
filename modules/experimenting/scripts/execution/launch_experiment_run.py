@@ -524,4 +524,13 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _common = _Path(__file__).resolve().parents[1] / "common"
+    if str(_common) not in _sys.path:
+        _sys.path.insert(0, str(_common))
+    from entrypoint_guard import ensure_main_entrypoint
+
+    ensure_main_entrypoint()
     raise SystemExit(main())

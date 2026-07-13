@@ -41,7 +41,7 @@ def main() -> None:
     paths = build_paths(args.project)
     experiments = load_json(paths.state / 'experiment_registry.json', [])
     next_actions = load_json(paths.state / 'next_actions.json', {'method_summaries': []})
-    ideas = load_json(paths.state / 'idea_candidates.json', {'ideas': []})
+    ideas = load_json(paths.planning / 'finding' / 'ideas.json', {'ideas': []})
     paper_quality = load_json(paths.state / 'paper_quality.json', {'papers': [], 'summary': {}})
     paper_state = get_active_paper_state(args.project, venue=args.venue)
     methods = next_actions.get('method_summaries', []) if isinstance(next_actions, dict) else []

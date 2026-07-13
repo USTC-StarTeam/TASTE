@@ -15,10 +15,8 @@ STAGE_MODULE_DIRS = (
     "writing",
 )
 
-# Framework/Web may orchestrate Reading only through modules/reading/main.py.
-# Exposing modules/reading/scripts on PYTHONPATH lets bridge code accidentally
-# import private acquisition/pipeline helpers and breaks that boundary.
-PUBLIC_ENTRY_ONLY_STAGES = {"reading"}
+# Framework/Web may orchestrate these stages only through modules/<stage>/main.py.
+PUBLIC_ENTRY_ONLY_STAGES = {"reading", "environment"}
 
 
 def resolve_repo_root(start: Path | str | None = None) -> Path:

@@ -132,33 +132,15 @@ def fast_supervisor_step(project: str, venue: str, use_llm: bool, total_timeout_
         'commands': [],
         'guardrail': 'Fast supervisor mode performs bounded evidence maintenance only; it must not create paper claims or treat synthetic smoke results as final evidence.',
     }
-    repo_path = active_repo_path(paths)
-    if repo_path:
-        append_command(record, module_cmd('environment', 'data_requirements', '--project', project, '--repo-path', repo_path), command_timeout_sec, env, 'build_repo_data_requirements', deadline)
-        append_command(record, module_cmd('environment', 'probe_repo', '--project', project, '--repo-path', repo_path, '--timeout-sec', str(min(120, command_timeout_sec))), command_timeout_sec, env, 'probe_repo_dataset', deadline)
-    else:
-        record['commands'].append({'label': 'active_repo_path', 'command': 'infer active repo', 'return_code': 125, 'started_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'finished_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'duration_sec': 0, 'stdout_tail': '', 'stderr_tail': 'No active repo path found; skipping repo data probes.'})
-
-    append_command(record, module_cmd('environment', 'plan_data', '--project', project), min(120, command_timeout_sec), env, 'plan_data_acquisition', deadline)
-    if allow_data_attempt and attempts_count(paths) < int(os.environ.get('SUPERVISOR_MAX_DATA_ATTEMPTS', '4')):
-        cmd = module_cmd('environment', 'attempt_data', '--project', project)
-        if repo_path:
-            cmd.extend(['--repo-path', repo_path])
-        append_command(record, cmd, min(300, command_timeout_sec), env, 'attempt_data_acquisition', deadline)
-    else:
-        record['commands'].append({'label': 'attempt_data_acquisition', 'command': 'skipped by bounded attempt policy', 'return_code': 0, 'started_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'finished_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'duration_sec': 0, 'stdout_tail': '', 'stderr_tail': ''})
-
-    append_command(record, module_cmd('environment', 'data_policy', '--project', project), min(120, command_timeout_sec), env, 'data_unavailability_policy', deadline)
-    policy_before_restart = load_json(paths.state / 'data_unavailability_policy.json', {})
-    decision = str(policy_before_restart.get('decision', '')) if isinstance(policy_before_restart, dict) else ''
-    if allow_restart_discovery and decision in {'expand_discovery_or_request_user_data_before_switching', 'ask_user_for_data_or_expand_discovery', 'switch_or_backtrack_to_evidence_ready_repo'}:
-        append_command(record, module_cmd('environment', 'restart_discovery', '--project', project, '--limit', str(max(1, audit_limit)), '--query-budget', str(max(1, min(1, audit_limit))), '--command-timeout-sec', str(min(45, command_timeout_sec))), max(60, min(command_timeout_sec, 180)), env, 'restart_after_data_blocker', deadline)
-    else:
-        record['commands'].append({'label': 'restart_after_data_blocker', 'command': 'skipped fast-cycle discovery expansion', 'return_code': 0, 'started_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'finished_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'duration_sec': 0, 'stdout_tail': '', 'stderr_tail': f'decision={decision}; allow_restart_discovery={allow_restart_discovery}'})
-
-    append_command(record, module_cmd('environment', 'candidate_pool', '--project', project, '--limit', str(max(1, audit_limit)), '--include-watch', '--use-cursor'), max(180, min(command_timeout_sec, 600)), env, 'audit_repo_candidate_pool', deadline)
+    append_command(
+        record,
+        module_cmd('environment', 'deploy_from_plan', '--project', project),
+        command_timeout_sec,
+        env,
+        'environment_deploy_from_selected_plan',
+        deadline,
+    )
     maintenance = [
-        ('reconcile_active_and_pool_candidates', module_cmd('environment', 'reconcile_candidates', '--project', project)),
         ('planning_blocker_resolution', module_cmd('planning', 'blocker_resolution', '--project', project, '--venue', venue)),
         ('audit_paper_evidence', module_cmd('writing', 'audit_evidence', '--project', project, '--venue', venue)),
         ('research_manifest', [sys.executable, 'framework/scripts/research_manifest.py', '--project', project, '--venue', venue]),

@@ -88,9 +88,6 @@ def module_command(project: str, stage: str, action: str, *extra: str) -> str:
 
 
 PUBLIC_SCRIPT_ACTIONS: dict[tuple[str, str], str] = {
-    ("finding", "build_literature_tool_packet.py"): "tool_packet",
-    ("finding", "run_literature_tool.py"): "literature_tool",
-    ("finding", "run_literature_base_audit.py"): "literature_base_audit",
     ("environment", "select_fresh_research_base.py"): "fresh_base_selection",
     ("environment", "probe_fresh_base_data_acquisition.py"): "fresh_base_data_probe",
     ("environment", "run_safe_unblock.py"): "safe_unblock",
@@ -104,6 +101,22 @@ PUBLIC_SCRIPT_ACTIONS: dict[tuple[str, str], str] = {
     ("writing", "run_paper_pipeline.py"): "run",
     ("planning", "build_blocker_action_plan.py"): "blocker_action",
 }
+
+
+def current_find_refresh_command(project: str) -> str:
+    parts = [
+        management_python(),
+        "framework/scripts/run_frontend.py",
+        "--project",
+        project,
+        "--deep-survey",
+    ]
+    return " ".join(shlex.quote(str(part)) for part in parts)
+
+
+def current_find_bridge_command(project: str, venue: str = "") -> str:
+    extra = ["--venue", venue] if venue else []
+    return module_command(project, "reading", "current_find_research_plan", *extra)
 
 
 def command(project: str, script_or_venue: str, *extra: str) -> str:
@@ -767,8 +780,8 @@ def action_template(kind: str, project: str, venue: str, skills: dict[str, str])
                 "Do not promote weak papers, select/promote a base, run experiments, repair citations/figures, run the paper pipeline, or claim the paper is ready."
             ),
             "recommended_commands": [
-                command(project, venue, "build_literature_tool_packet.py"),
-                command(project, "run_literature_tool.py", *((["--venue", venue] if venue else []) + ["--query", "\"<targeted literature gap query>\"", "--fast-mode", "--publish-current-find"])),
+                current_find_refresh_command(project),
+                current_find_bridge_command(project, venue),
                 command(project, venue, "audit_submission_readiness.py"),
                 command(project, venue, "build_blocker_action_plan.py"),
             ],
@@ -792,9 +805,7 @@ def action_template(kind: str, project: str, venue: str, skills: dict[str, str])
                 "evidence_ready_repo_selection.json or repo_selection_blocker.json with the fresh_find_run_id."
             ),
             "recommended_commands": [
-                command(project, venue, "build_literature_tool_packet.py"),
-                module_command(project, "finding", "literature_base_candidates"),
-                command(project, "run_literature_base_audit.py", "--limit", "8", "--repo-search-per-candidate", "3"),
+                current_find_bridge_command(project, venue),
                 command(project, venue, "audit_reference_reproduction.py"),
                 command(project, venue, "build_blocker_action_plan.py"),
             ],
@@ -907,10 +918,9 @@ def action_template(kind: str, project: str, venue: str, skills: dict[str, str])
                 "Resolve official code/artifacts, or implement the smallest reproducible fresh-base route with real data/protocol evidence under TASTE audit."
             ),
             "recommended_commands": [
-                command(project, venue, "build_literature_tool_packet.py"),
+                current_find_bridge_command(project, venue),
                 command(project, "select_fresh_research_base.py"),
                 module_command(project, "environment", "fresh_base_plan"),
-                command(project, "run_literature_base_audit.py", "--limit", "12", "--repo-search-per-candidate", "4"),
                 command(project, venue, "audit_reference_reproduction.py"),
                 command(project, venue, "build_blocker_action_plan.py"),
             ],
@@ -1781,8 +1791,8 @@ def enforce_literature_recommendation_gate(
                 ]
             else:
                 row["recommended_commands"] = [
-                    command(project, venue, "build_literature_tool_packet.py"),
-                    command(project, "run_literature_tool.py", *((["--venue", venue] if venue else []) + ["--query", "\"<targeted literature gap query>\"", "--fast-mode", "--publish-current-find"])),
+                    current_find_refresh_command(project),
+                    current_find_bridge_command(project, venue),
                     command(project, venue, "audit_submission_readiness.py"),
                     command(project, venue, "build_blocker_action_plan.py"),
                 ]

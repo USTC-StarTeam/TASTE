@@ -58,29 +58,29 @@ NATIVE_SKILL_LABELS = {
     "writing": "writing contract",
 }
 CURRENT_FIND_ARTIFACT_WRITER_POLICY = (
-    "current-Find Read/Idea/Plan JSON artifacts and deep-read fragments must not be generated or patched by Bash/Python/cat/heredoc; "
-    "Claude file tools may author or repair individual deep-read fragment JSON files, while read_results.json, ideas.json, and plans.json must be complete Claude Write artifacts"
+    "current-Find Read/Idea JSON artifacts and deep-read fragments must not be generated or patched by Bash/Python/cat/heredoc; "
+    "Planning artifacts are owned by the Planning module and may not be written by a project Claude session"
 )
 CURRENT_FIND_READ_RESULTS_WRITE_ONLY_POLICY = (
     "current-Find read_results.json is rendered by the wrapper from validated per-paper deep-read fragments; "
     "Claude must not patch read_results.json directly. Repair the relevant fragment JSON instead, then let the wrapper rebuild read_results.json."
 )
 CURRENT_FIND_SELECTION_ONLY_POLICY = (
-    "current-Find selection-only stage may only use Claude file tools on planning/finding/plans.json; "
-    "read_results.json, ideas.json, deep-read fragments, Markdown projections, and TASTE-owned state remain read-only"
+    "current-Find plan selection must run through framework/scripts/run_module.py planning --action select; "
+    "project Claude sessions may not write plans.json, plan.md, or TASTE-owned selection state"
 )
 CURRENT_FIND_MARKDOWN_OWNED_POLICY = (
-    "current-Find Markdown artifacts are rendered by the wrapper from validated JSON; "
-    "Claude must not write read.md, idea.md, or plan.md directly in current-Find Read/Idea/Plan"
+    "current-Find Markdown artifacts are module-owned; Planning Claude writes plan.md only inside the fixed Planning runtime run; "
+    "project Claude sessions must not write read.md, idea.md, or plan.md directly"
 )
 CURRENT_FIND_GATE_STATE_WRITER_POLICY = (
     "TASTE-owned current-Find gate/state files are read-only for Claude in current-Find Read/Idea/Plan; "
-    "the wrapper writes state/current_find_research_plan.json, state/idea_candidates.json, and "
-    "state/experiment_plan.json only after machine validation passes or blocks"
+    "Framework writes state/current_find_research_plan.json and state/experiment_plan.json only after machine validation passes or blocks; "
+    "planning/finding/ideas.json remains the single machine projection of idea.md"
 )
 CURRENT_FIND_FILE_WRITE_WHITELIST_POLICY = (
     "current-Find Read/Idea/Plan may only use Claude file tools on planning/finding/current_find_deep_read_fragments/*.json, "
-    "planning/finding/ideas.json, planning/finding/idea_scoring.json, and planning/finding/plans.json; source code, tests, paper drafts, project history, and state files are read-only during this stage"
+    "planning/finding/ideas.json, and planning/finding/idea_scoring.json; Planning outputs, source code, tests, paper drafts, project history, and state files are read-only during this stage"
 )
 DIRECT_CONDA_COMMAND_POLICY = (
     "Claude Code may not call conda/mamba/micromamba run/create/install/update/remove directly. "
@@ -101,8 +101,8 @@ RUNTIME_ATTACH_PROBE_POLICY = (
     "Use stdout/stderr logs, ps state, nvidia-smi, watchdog state, and artifact contracts for non-invasive observation."
 )
 RUNTIME_ARTIFACT_STATE_WRITE_POLICY = (
-    "Claude Code may not write launcher/artifact runtime state files directly from Bash or file tools in experiment/trajectory/reference/paper stages. "
-    "Runtime status, stop reasons, failure markers, metrics, audits, contracts, locks, import control files, and experiment registries are wrapper-owned."
+    "Claude Code may write experiment metrics and records only through the Experimenting recording contract. "
+    "Launcher contracts, locks, PID files, contamination markers, and runtime status remain wrapper-owned."
 )
 RUNTIME_PROJECT_STATE_ARTIFACTS = [
     "state/experiment_registry.json",
@@ -176,18 +176,25 @@ CURRENT_FIND_MARKDOWN_ARTIFACTS = [
 ]
 CURRENT_FIND_OWNED_STATE_FILES = [
     "state/current_find_research_plan.json",
-    "state/idea_candidates.json",
     "state/experiment_plan.json",
 ]
 CURRENT_FIND_CONTROLLED_FILE_NAMES = [
     "read_results.json", "read.md", "ideas.json", "idea_scoring.json", "idea.md", "plans.json", "plan.md",
-    "current_find_research_plan.json", "idea_candidates.json", "experiment_plan.json",
+    "current_find_research_plan.json", "experiment_plan.json",
 ]
 
 
 def is_current_find_artifact_policy_reason(reason: Any) -> bool:
     text = str(reason or "")
     return (
+        text in {
+            CURRENT_FIND_ARTIFACT_WRITER_POLICY,
+            CURRENT_FIND_READ_RESULTS_WRITE_ONLY_POLICY,
+            CURRENT_FIND_SELECTION_ONLY_POLICY,
+            CURRENT_FIND_MARKDOWN_OWNED_POLICY,
+            CURRENT_FIND_FILE_WRITE_WHITELIST_POLICY,
+        }
+        or
         "current-Find Read/Idea/Plan artifacts" in text
         or "current-Find Read/Idea/Plan JSON artifacts" in text
         or "current-Find JSON artifacts" in text
@@ -583,6 +590,8 @@ def current_find_tool_policy_issue(name: str, tool_input: Any, stage: str = '') 
         return CURRENT_FIND_GATE_STATE_WRITER_POLICY
     if _mentions_path(target, CURRENT_FIND_MARKDOWN_ARTIFACTS):
         return CURRENT_FIND_MARKDOWN_OWNED_POLICY
+    if _mentions_path(target, ["planning/finding/plans.json"]):
+        return CURRENT_FIND_SELECTION_ONLY_POLICY
     fragment_target = _mentions_path(target, [CURRENT_FIND_DEEP_READ_FRAGMENT_DIR])
     if fragment_target:
         lowered_target = target.replace("\\", "/").lower()
@@ -592,15 +601,13 @@ def current_find_tool_policy_issue(name: str, tool_input: Any, stage: str = '') 
             return CURRENT_FIND_SELECTION_ONLY_POLICY
         return ""
     if _current_find_selection_stage(stage):
-        if label in {"Write", "Edit", "MultiEdit"} and _mentions_path(target, ["planning/finding/plans.json"]):
-            return ""
         if _mentions_path(target, CURRENT_FIND_JSON_ARTIFACTS):
             return CURRENT_FIND_SELECTION_ONLY_POLICY
         return CURRENT_FIND_FILE_WRITE_WHITELIST_POLICY
     if label in {'Edit', 'MultiEdit'} and _mentions_path(target, ["planning/finding/read_results.json"]):
         return CURRENT_FIND_READ_RESULTS_WRITE_ONLY_POLICY
     if label in {"Write", "Edit", "MultiEdit"}:
-        if _mentions_path(target, ["planning/finding/ideas.json", "planning/finding/idea_scoring.json", "planning/finding/plans.json"]):
+        if _mentions_path(target, ["planning/finding/ideas.json", "planning/finding/idea_scoring.json"]):
             return ""
         return CURRENT_FIND_FILE_WRITE_WHITELIST_POLICY
     return ''
@@ -826,12 +833,11 @@ def bash_command_tool_policy_issue(command: str, project: str, stage: str = '') 
     if direct_artifact_issue:
         return direct_artifact_issue
     nested_environment_stage = (
-        re.search(r"framework/scripts/run_module\.py\s+environment\b(?=[^;&|]*--action\s+(?:run_environment_stage|run_stage))", lowered)
-        or re.search(r"modules/environment/main\.py\b(?=[^;&|]*--action\s+(?:run_environment_stage|run_stage))", lowered)
-        or 'modules/environment/scripts/run_environment_stage.py' in lowered
+        re.search(r"framework/scripts/run_module\.py\s+environment\b", lowered)
+        or re.search(r"modules/environment/main\.py\b", lowered)
     )
     if nested_environment_stage:
-        return 'project agent may not recursively run the parent environment stage; use specific TASTE environment probe actions only'
+        return 'Environment may be invoked only by Framework orchestration or the Environment module controller route'
     direct_conda_issue = direct_conda_command_policy_issue(policy_command)
     if direct_conda_issue:
         return direct_conda_issue
@@ -1148,7 +1154,7 @@ def history_path(paths, session_key: str = 'main') -> Path:
     return paths.reports / f'claude_project_session_{key}.md'
 
 
-FRESH_SESSION_STAGES = {"current-find-claude-read-idea-plan", "current-find-claude-select-plan"}
+FRESH_SESSION_STAGES = {"current-find-claude-select-plan"}
 # Runtime-control stages must start from authoritative state, not stale Claude process memory.
 FRESH_SESSION_STAGE_PREFIXES = ("full-cycle-ideation", "full-cycle-blocker-repair", "trajectory")
 
@@ -1313,7 +1319,7 @@ def build_context(project: str, instruction: str, stage: str, repo_path: str = '
         paths.state / 'current_find_research_plan.json',
         paths.state / 'experiment_plan.json',
         paths.state / 'taste_plan_bridge.json',
-        paths.state / 'idea_candidates.json',
+        paths.planning / 'finding' / 'ideas.json',
         paths.state / 'fresh_base_implementation_plan.json',
         paths.state / 'literature_tool_packet.json',
         paths.state / 'literature_tool_last_run.json',
@@ -1460,7 +1466,7 @@ Hard rules:
 - If a training process is already alive, observe it non-invasively only: do not send signals, attach tracing/debuggers, read blocking `/proc/<pid>/fd/*` pipes, kill, restart, or launch a duplicate unless the process has exited or artifact-local evidence proves a hard failure.
 - New training launches must go through the launcher template shown in the TASTE runtime execution contract: `{launcher_template}`. The command after `--` must begin with the exact `project_experiment_python` path; do not use `<project-experiment-python>` as a literal placeholder.
 - Do not use system `python`, bare `python3`, `conda run`, raw `nohup`, shell backgrounding, or manual stdout redirection for new experiments. The launcher will reject them.
-- Do not use bare or inline Python to parse experiment logs, registry rows, or metrics in experiment/trajectory/reference/paper/full-cycle stages. Use `{management_python()} {ROOT / 'framework/scripts/run_module.py'} experimenting --action import_artifacts --project {project} --scan-completed` plus the audit/report scripts, and use `python -m json.tool` only for JSON syntax checks allowed by the tool policy.
+- Experiment execution, validation, metrics, and records belong to the project-unique Experimenting module controller. Delegate them through `{management_python()} {ROOT / 'framework/scripts/run_module.py'} experimenting --action work --project {project}` and consume its project artifacts afterward.
 - Never write experiment registries, record tables, launcher contracts, metrics, audits, bad-case files, running status, locks, or import-control markers directly with shell redirection or Claude file tools; TASTE launch/import/audit scripts own those files.
 - The launcher creates `run_contract.json`, `run.lock`, `launcher.pid.json`, and `stdout_stderr.log`, rejects reused/contaminated artifact dirs, records `python_executable`, `environment_contract`, `expected_outputs`, and gives TASTE one PID/log/artifact contract to monitor.
 - If a repo training script cannot accept an artifact path or unbuffered logging, write a small repo-local wrapper once, then launch that wrapper through `{ROOT / 'framework/scripts/run_module.py'} experimenting --action launch`; do not create ad-hoc background shell jobs.
@@ -1473,7 +1479,7 @@ Hard rules:
 - If the packet is missing, stale, too generic, or does not cover the current blocker, refresh the configured Find route with `{management_python()} {ROOT / 'framework/scripts/run_frontend.py'} --project {project} --deep-survey --query "<targeted research query>"`, then rebuild downstream artifacts with `{management_python()} {ROOT / 'framework/scripts/run_module.py'} reading --action current_find_research_plan --project {project}`. Do not call deleted Finding literature-tool/tool-packet actions.
 - Use the literature tool only as TASTE's internal survey capability. Do not describe it as a separate agent or outsource decisions to it.
 - Reuse survey intermediate files (`find_results.json`, `read_results.json`, `ideas.json`, `plans.json`, category/title/arXiv reports) for idea generation, base-work switching, repo selection, and experiment planning instead of redoing blind search.
-- Current-Find Read/Idea/Plan stage (`current-find-claude-read-idea-plan`) is responsible for reading every recommended paper through auditable Task/subagent delegation, generating exactly 5 three-part ideas, generating exactly 5 plans, and choosing exactly one best plan by writing one non-empty `selected_plan_id` with `selected_for_execution=true` and `execute_next=true`; the other plans are backlog only.
+- Current-Find Read, Idea, and Plan are separate Framework-controlled module calls. This project session must not generate or patch their artifacts in one combined route; it may consume only the selected execution contract produced after those stages.
 - Current-Find deep-read artifacts must be readable by humans: write public-facing reading summaries as short structured bullets, not giant paragraphs; preserve math as Markdown+KaTeX (`$...$` or `$$...$$`), avoid malformed dollar delimiters, avoid bare `\textit{{}}`/`\textbf{{}}` prose styling commands, and do not put Chinese prose inside formulas.
 - Downstream stages after Current-Find may consume only `selected_plan_id` from the selected execution contract above. Non-selected ideas/plans are supervision backlog only and must not drive environment, experiment, writing, or claim work.
 - In downstream stages, if current-Find candidates exist and `selected_plan_id` is empty or ambiguous, stop downstream work and ask the wrapper/current-Find Claude selection stage to rebuild `state/current_find_research_plan.json`, `state/taste_plan_bridge.json`, and `state/experiment_plan.json`; do not choose an execution route ad hoc.
@@ -1526,10 +1532,6 @@ def run_claude(project: str, instruction: str, stage: str, timeout_sec: int, res
     env["DISABLE_AUTOUPDATER"] = "1"
     env["CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL"] = "1"
     env.pop("FORCE_AUTOUPDATE_PLUGINS", None)
-    if env.get("USE_EXISTING_LITERATURE_PACKET") and stage in {"current-find-claude-read-idea-plan"}:
-        env.pop("DISABLE_NEW_FIND", None)
-    elif stage in {"current-find-claude-read-idea-plan"}:
-        env.pop("DISABLE_NEW_FIND", None)
     if Path(claude).exists():
         env['PATH'] = os.pathsep.join([str(Path(claude).parent), env.get('PATH', '')])
     started = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -1644,7 +1646,7 @@ def run_claude(project: str, instruction: str, stage: str, timeout_sec: int, res
                 'Current-Find Read/Idea/Plan artifact writing is recoverable but must be authored through '
                 'Claude file tools after reading full-text evidence. Bash/Python generators and python -c/open(...) probes on current-Find artifacts '
                 'are blocked because they can fabricate or bulk-patch scientific content. read_results.json is wrapper-owned and must be repaired '
-                'through per-paper deep-read fragments; ideas.json and plans.json may be authored or revised with Claude file tools, with final JSON/contract validation by the wrapper. '
+                'through per-paper deep-read fragments; ideas.json may be authored or revised with Claude file tools, while plans.json and plan.md are owned by the Planning module. '
                 'JSON syntax checks should use python -m json.tool only.'
             )
         elif 'trajectory supervisor recursion' in reason:
@@ -2244,7 +2246,7 @@ def run_claude(project: str, instruction: str, stage: str, timeout_sec: int, res
         if 'trajectory supervisor recursion' in str(tool_policy_report.get('reason') or ''):
             result['stdout'] = (str(result.get('stdout') or '') + '\n\n[tool policy guard] Blocked nested trajectory supervisor launch; finish the assigned trajectory item instead of spawning another supervisor.').strip()[-20000:]
         elif is_current_find_artifact_policy_reason(tool_policy_report.get('reason')):
-            result['stdout'] = (str(result.get('stdout') or '') + '\n\n[tool policy guard] Blocked unsafe current-Find artifact writing. This is recoverable: rerun the current-Find repair prompt and author or repair per-paper deep-read fragments with Claude file tools plus complete ideas.json/plans.json Write artifacts after reading full-text files; The workflow will merge validated fragments.').strip()[-20000:]
+            result['stdout'] = (str(result.get('stdout') or '') + '\n\n[tool policy guard] Blocked unsafe current-Find artifact writing. This is recoverable: repair Read fragments or Ideas through their Framework routes. Planning candidates, plan.md, and selection must use framework/scripts/run_module.py planning; project Claude sessions may not write them directly.').strip()[-20000:]
         elif is_current_find_gate_state_policy_reason(tool_policy_report.get('reason')):
             result['stdout'] = (str(result.get('stdout') or '') + '\n\n[tool policy guard] Blocked direct current-Find gate/state edits. This Claude turn was terminated; wrapper writes state files only after machine validation passes.').strip()[-20000:]
         elif tool_policy_report.get('reason') in {DIRECT_CONDA_COMMAND_POLICY, DIRECT_PYTHON_COMMAND_POLICY}:

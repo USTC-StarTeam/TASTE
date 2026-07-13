@@ -32,8 +32,8 @@ def find_conda_executable() -> str:
         if value:
             candidates.append(Path(value))
     candidates.extend([
-        Path("/home/fmh/workspace/miniforge/bin/conda"),
-        Path("/home/fmh/workspace/miniforge/condabin/conda"),
+        Path.home() / "miniforge" / "bin" / "conda",
+        Path.home() / "miniforge" / "condabin" / "conda",
         Path.home() / "miniforge3" / "bin" / "conda",
         Path.home() / "miniconda3" / "bin" / "conda",
         Path.home() / "anaconda3" / "bin" / "conda",
@@ -48,23 +48,6 @@ def find_conda_executable() -> str:
         if candidate.exists():
             return text
     return ""
-
-
-def conda_env_exists(conda_exe: str, env_name: str) -> bool:
-    if not conda_exe or not env_name:
-        return False
-    proc = _run([conda_exe, "env", "list", "--json"], timeout=30)
-    if proc.get("return_code") != 0:
-        return False
-    try:
-        payload = json.loads(str(proc.get("stdout") or "{}"))
-    except Exception:
-        return False
-    for item in payload.get("envs", []) if isinstance(payload, dict) else []:
-        path = Path(str(item))
-        if path.name == env_name or str(path).endswith(f"/envs/{env_name}"):
-            return True
-    return False
 
 
 def detect_machine_profile() -> dict[str, Any]:

@@ -1,145 +1,131 @@
-# Experimenting / 实验执行模块
+# Experimenting / 实验迭代模块
 
-`modules/experimenting` 是 TASTE 七阶段中的正式实验阶段后端模块。它在给定实验 plan、已锁定代码仓库和 Conda 环境后，让 Claude Code 在目标 repo 内做最小、可审计的实验迭代，并维护实验记录、指标和日志。
+Experimenting 使用每个项目唯一的主控 Claude Code 会话完成实验设计、代码修改、真实运行、失败修补、指标整理和实验记录。不同项目使用不同会话；Environment、Experimenting、Writing 也各自使用独立会话。
 
-本模块不负责选择仓库或搭环境；这些属于 `environment`。本模块也不写论文；论文属于 `writing`。
+## 使用要求
 
-## 运行环境
+- 管理命令必须在 Conda `taste` 环境运行。
+- 必须指定 `projects/<project>/` 下已经存在的项目。
+- 项目必须先有当前选中的 Idea/Plan 和 Environment handoff。
+- Claude Code 必须已由用户自己的 Claude 配置授权；模块不会写入账号或 API 配置。
+
+Framework 是 Web 和模块之间的唯一调用者。命令行单独使用模块时，也只能调用 `main.py`，不能直接执行 `scripts/`。
+
+## 继续实验工作
 
 ```bash
-ssh hidimension_5090_1
 cd <TASTE_ROOT>
-source /home/fmh/workspace/miniforge/etc/profile.d/conda.sh
-conda activate ar_taste
-source /home/fmh/workspace/.nvm/nvm.sh
+conda run -n taste python modules/experimenting/main.py \
+  --action work \
+  --project <project> \
+  --iterations 1
 ```
 
-`python` 和 `rg` 来自 `ar_taste`；实验命令通过指定的 `--conda-env` 运行。
+`work` 会把“继续完成 Experimenting 本职工作”的任务发送给该项目已有的 Experimenting 主控会话。不存在会话时模块创建一个，以后该项目的实验按钮和网页对话都只恢复这个会话。
 
-## 输入口径
-
-最小输入：
-
-```bash
-python modules/experimenting/main.py \
-  --action autonomous_experiment \
-  --plan /abs/path/to/experiment_plan.json \
-  --repo-path /abs/path/to/selected/repo \
-  --conda-env /abs/path/to/environment/run/conda_envs/experiment_env \
-  --output-root modules/experimenting/runtime/autonomous \
-  --max-iterations 3
-```
-
-参数说明：
-
-| 参数 | 作用 |
-| --- | --- |
-| `--plan` | JSON/YAML/文本实验计划。 |
-| `--repo-path` | environment 已锁定的基础代码仓库；Claude 默认只能修改这个 repo。 |
-| `--conda-env` | 实验运行 Conda 环境名或绝对 Conda prefix；framework/web 通常传 `projects/<project>/state/environment_handoff.json` 中的 `conda_env_prefix`。 |
-| `--output-root` | 模块状态、记录、日志输出根；默认在 `modules/experimenting/runtime/autonomous`。 |
-| `--max-iterations` | 最大实验迭代轮数。 |
-| `--skip-claude` | 只做环境/记录流程自测，不调用 Claude；不能作为科研成功证据。 |
-| `--permission-mode` | Claude Code 权限模式；无人值守 web/framework 链路默认 `bypassPermissions`，避免 Bash/Python 命令等待人工批准。 |
-| `--dry-run` | 只写计划和环境锁，不运行 Claude 或验证命令。 |
-
-从 Web 正常进入实验阶段时，输入由 `web -> framework -> environment_handoff -> experimenting` 传递：`repo_path` 指向 environment run 内的真实仓库，`conda_env_prefix` 指向同一 run 内已验证的 Conda 环境，`pending_downstream_metrics` 是本阶段需要通过真实实验/评估日志绑定的论文指标。
-
-公开 action：
-
-| action | 作用 |
-| --- | --- |
-| `autonomous_experiment` / `run` | 主实验迭代流程。 |
-| `runtime_env` | 运行环境检查/锁定辅助。 |
-| `coding_agent` | 直接调用实验 Claude agent。 |
-| `launch` | 执行一次验证/训练命令。 |
-| `reference_reproduction`、`audit_iteration`、`runtime_integrity` | 质量门控/审计动作。 |
-| `proteinshake_realdata_probe` / `realdata_probe` | 有界真实数据探针：加载 ProteinShake `ProteinFamilyTask`，写出真实划分规模和多数类基线指标。该 action 只验证真实数据/指标链路，不代表论文级实验成功。 |
-| `--contract` | 输出模块契约。 |
-
-### ProteinShake 真实数据探针
-
-该探针用于在 full paper experiment 前确认真实数据可获取、可划分、可记录指标。它不调用 Claude，不改 repo，只读/写 `modules/experimenting` 下的运行产物；framework/web 会把必要摘要投影到 `projects/<project>` 供页面和项目 Claude Code 读取。
-
-示例：
-
-```bash
-python modules/experimenting/main.py \
-  --action proteinshake_realdata_probe \
-  --artifact-dir modules/experimenting/runtime/web/protein/runs/proteinshake_realdata_probe_<date>/iteration_01 \
-  --data-root modules/experimenting/runtime/data_probe/protein_<date>_realdata/proteinshake_probe
-```
-
-输入：
-
-| 参数 | 作用 |
-| --- | --- |
-| `--artifact-dir` | 本次探针产物目录，必须在 experimenting 模块 runtime 下或由 framework 传入的模块输出根下。 |
-| `--data-root` | ProteinShake 数据缓存目录；默认在 `modules/experimenting/runtime/data_probe/proteinshake_probe`。 |
-
-输出：
-
-| 文件 | 作用 |
-| --- | --- |
-| `proteinshake_realdata_probe.json` | 数据加载、划分、任务元数据和验收摘要。 |
-| `metrics.json` | `proteinshake_train_samples`、`proteinshake_test_samples`、`proteinshake_num_classes`、多数类 accuracy/macro-F1 等弱基线指标。 |
-| `audit.json` | artifact-local 审计，标明真实数据探针已验收但不是论文级证据。 |
-| `experiment_iteration_summary.json` | 供 registry/web/framework 统一消费的实验迭代摘要，`acceptance_status=accepted_real_data_probe`。 |
-
-解释口径：`accepted_real_data_probe` 表示真实数据链路已验收、可作为后续实验输入依据；它是弱证据，不支撑主论文结论，也不会清除 ProtDBench/PDFBench/候选方法比较等论文级实验阻塞。
-
-## 输出口径
-
-默认输出在：
+Claude 的工作目录固定为：
 
 ```text
-modules/experimenting/runtime/autonomous/
+projects/<project>/
 ```
 
-Web/framework 单阶段调用会把 `--output-root` 指到：
+它从当前项目读取 selected Idea/Plan、Environment handoff、Find/Read 证据和已有实验记录，并在需要时更新执行级实验方案。
+
+## 与主控对话
+
+```bash
+conda run -n taste python modules/experimenting/main.py \
+  --action chat \
+  --project <project> \
+  --message "检查当前失败实验，先修复最关键 blocker，再继续原实验任务。"
+```
+
+主控忙碌时，消息进入该项目的 Experimenting 模块队列。网页会显示排队消息，主控完成当前操作后按顺序处理。
+
+需要让网页指令立即优先时：
+
+```bash
+conda run -n taste python modules/experimenting/main.py \
+  --action chat \
+  --project <project> \
+  --message "立即停止当前方向，先检查这条人工修正。" \
+  --interrupt-current
+```
+
+主控会中止当前 Claude 调用、优先完成新指令，然后在同一会话中恢复被中断的 Experimenting 工作。
+
+## 实验记录顺序
+
+每个新实验必须按以下顺序完成：
+
+1. 读取当前研究合同和 Environment handoff。
+2. 更新执行级实验方案。
+3. 修改选定仓库并运行真实实验。
+4. 等待实验和最终验证命令结束。
+5. 从最终输出解析指标、失败、坏例和反例。
+6. 写入 artifact record、项目 registry、CSV 和 Markdown 实验表。
+7. 运行 Experimenting 审计并修补未通过项。
+
+完成态 registry 行必须包含 `validation_finished_at`、`validation_return_code=0` 和不早于验证结束时间的 `recorded_at`。模块的确定性 Gate 会阻止记录顺序不成立的结果，并命令同一主控会话修补一次；仍未通过时本次工作返回阻塞。
+
+## 运行与审计工具
+
+主控需要确定性工具时仍通过 `main.py` 调用：
+
+| Action | 用途 |
+| --- | --- |
+| `runtime_env` | 记录指定 Conda 运行环境。 |
+| `launch` | 用项目实验 Python 启动一个带独立 artifact 目录、PID 和日志的实验进程。 |
+| `watchdog` | 检查项目实验进程、重复 writer、解释器和产物污染。 |
+| `audit_iteration` | 新开 Claude 审计会话检查实验轮次证据。 |
+| `runtime_integrity` | 新开 Claude 审计会话检查运行完整性。 |
+| `reference_reproduction` | 新开 Claude 审计会话检查参考复现证据。 |
+| `audit_adjudication` | 对指定审计包进行独立裁决。 |
+| `controller_status` | 查看项目对应的 Experimenting 会话状态。 |
+
+具体参数可运行：
+
+```bash
+conda run -n taste python modules/experimenting/main.py --action <action> --help
+```
+
+## 运行产物
+
+`work`、`chat`、`controller_status` 不创建 run，也不为每条消息创建新工作区。它们固定使用：
 
 ```text
-modules/experimenting/runtime/web/<project>/
+modules/experimenting/.runtime/controllers/<project>/
 ```
 
-关键产物：
+会话映射、队列、提示、日志和最近回执保存在：
 
-| 文件/目录 | 作用 |
-| --- | --- |
-| `environment_lock.json` | Conda/NVM/Claude/runtime 锁定信息。 |
-| `state/experiment_registry.json` | 结构化实验记录。 |
-| `experiment_records.csv` | 表格化实验记录。 |
-| `实验记录.md` | 人类可读实验记录。 |
-| `runs/<run_id>/iteration_*/` | 每轮 Claude prompt、stdout、validation stdout、metrics、bad cases、summary。 |
-| `runs/<run_id>/iteration_*/wrapper_iteration_result.json` | 包装器验收结果，包含 `acceptance_status`、`acceptance_blockers`、Claude 权限拒绝和 summary 路径。 |
+```text
+modules/experimenting/.runtime/controller_sessions.json
+modules/experimenting/.runtime/controllers/<project>/
+```
 
-模块独立运行时，这些产物不会自动覆盖 `projects/<project>` 里的网页产物。framework/web 只读取或投影必要状态；项目 Claude Code 可使用这些产物辅助项目内工作。
+`runtime_env`、`launch`、`watchdog` 和独立审计等确定性工具需要不可变进程回执，因此工具进程使用：
 
-## 运行流程
+```text
+modules/experimenting/.runtime/runs/<精确UTC时间_action_pid>/
+```
 
-1. 解析实验 plan，归一化 experiment_id、标题、方法、数据、指标、运行命令和 Conda 环境。
-2. 检查 `repo-path` 和 Conda/NVM/Claude runtime，支持 Conda 环境名或绝对 prefix，并写出环境锁。
-3. 每轮构建 Claude Code prompt，要求它只修改基础 repo，只把本轮日志/指标写入 iteration artifact dir。
-4. 可选执行 plan 或 `--run-command` 中的验证命令。
-5. 收集 `metrics.json`、`bad_cases.json`、`experiment_iteration_summary.json`，更新 registry/CSV/Markdown。
-6. 执行包装器验收：Claude 返回 0 只是必要条件；若出现当前结构化 `permission_denials`、缺少 `experiment_iteration_summary.json`、summary 状态为 blocked/failed/error、summary 自报非 accepted 的 `acceptance_status` 或非空 `acceptance_blockers`、没有真实命令/产物/指标/日志证据，则本轮记为 failed，并写出 `acceptance_blockers`。
-7. 只有验收通过才提前停止；失败时保留失败原因和下一步建议。
+同一工具进程始终使用这个目录。结束后模块复制一份到 `.runtime/latest_run/`，它只供人工审查，程序不读取它；主控工作和网页对话不使用 `latest_run`。
 
-## 脚本结构
+项目可见的主控状态和最近回复保存在：
 
-| 目录 | 作用 |
-| --- | --- |
-| `scripts/orchestration/` | 主实验循环与框架循环。 |
-| `scripts/common/` | plan schema、runtime lock、记录表、文件工具。 |
-| `scripts/agent/` | Claude Code 实验代理。 |
-| `scripts/execution/` | 启动命令、smoke、watchdog。 |
-| `scripts/audits/` | 参考复现、迭代审计、runtime 完整性审计。 |
-| `scripts/analysis/` | 失败分析。 |
-| `scripts/records/` | 实验记录导入和表格工具。 |
+```text
+projects/<project>/state/experimenting_controller.json
+projects/<project>/state/experimenting_controller_last_result.json
+projects/<project>/reports/experimenting_controller.md
+```
 
-## 维护原则
+## Web 与 Framework
 
-- 实验代码修改只发生在 `--repo-path` 指向的基础 repo。
-- 模块状态和中间产物只写 `modules/experimenting/runtime` 或调用方显式传入的模块内输出根。
-- 不把失败实验包装成成功指标；没有真实日志、命令/产物证据或指标就保持 blocked/failed。
-- 不把论文写作、仓库选择、环境部署逻辑塞进本模块。
+- Web 只向 Framework 提交 `experiment` 或 `experimenting-chat` 请求。
+- Framework 只把项目、消息、迭代数和排队/中断选项传给 Experimenting 公共入口。
+- 实验按钮和网页对话使用同一个项目唯一 Experimenting 会话。
+- Web 不调用模块脚本、不维护会话映射、不复制模块产物。
+- full-cycle 只按顺序触发 Find、Read、Idea、Plan、Environment、Experimenting、Writing，效果等同于依次点击七个阶段按钮。
+
+剩余私有脚本及其保留理由见 `SCRIPT_AUDIT.md`。

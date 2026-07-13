@@ -1,18 +1,20 @@
 ---
 name: venue-intelligence
-description: 当前官方投稿要求和模板解析规约，供 writing_dev 在写论文前使用。
+description: 当前官方投稿要求、page policy、review policy、AI disclosure、citation policy 和官方模板解析规约。Use before writing or auditing any venue-formatted paper and whenever venue_requirements.json/template_source must be created or repaired.
 ---
 
 # Venue Intelligence Skill
 
 目标是为指定会议/期刊生成自包含的 `venue_requirements.json`，并下载最新官方模板。该 skill 只接受官方来源或官方明确链接的模板来源。
 
+所有产物只写入当前项目 canonical `paper/writing/venue/` 目录。
+
 ## 官方来源优先级
 
 1. 会议/期刊官网 author instructions、call for papers、submission guidelines。
 2. 出版方官网模板页，例如 ACM、IEEE、Springer Nature、ACL、NeurIPS、ICML、OpenReview 官方链接。
 3. 官方 GitHub/Overleaf/zip/arxiv style 链接，必须能从官方页面回链确认。
-4. 第三方博客、旧年仓库、非官方镜像只能作为线索，不能作为最终依据。
+4. 第三方博客、旧年仓库、非官方镜像只作为线索；最终依据必须来自 1-3 类来源。
 
 ## 必须解析字段
 

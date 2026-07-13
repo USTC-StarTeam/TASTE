@@ -1,14 +1,62 @@
 from __future__ import annotations
 
+import importlib
 import os
 import re
+import sys
 import time
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import requests
 
-READ_USER_AGENT = "TASTE-reading-semantic-scholar/1.0"
+_SCRIPTS_ROOT = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_ROOT))
+importlib.invalidate_caches()
+_core_common_module = sys.modules.get("core.common")
+if _core_common_module is not None:
+    _core_common_path = Path(str(getattr(_core_common_module, "__file__", ""))).resolve(strict=False)
+    if _core_common_path != (_SCRIPTS_ROOT / "core" / "common.py").resolve(strict=False):
+        sys.modules.pop("core.common", None)
+_core_module = sys.modules.get("core")
+if _core_module is not None:
+    _core_path = str((_SCRIPTS_ROOT / "core").resolve(strict=False))
+    _core_package_paths = getattr(_core_module, "__path__", None)
+    if _core_package_paths is None:
+        sys.modules.pop("core", None)
+    else:
+        _core_paths = [str(Path(str(path)).resolve(strict=False)) for path in _core_package_paths]
+        if _core_path not in _core_paths:
+            _core_package_paths.insert(0, _core_path)
+try:
+    _core_common_spec = importlib.util.find_spec("core.common")
+except ModuleNotFoundError:
+    _core_common_spec = None
+if _core_common_spec is None:
+    import types
+
+    _core_path = str((_SCRIPTS_ROOT / "core").resolve(strict=False))
+    _core_package = sys.modules.get("core")
+    if _core_package is None or getattr(_core_package, "__path__", None) is None:
+        _core_package = types.ModuleType("core")
+        sys.modules["core"] = _core_package
+    _core_package_paths = [
+        str(Path(str(path)).resolve(strict=False))
+        for path in getattr(_core_package, "__path__", [])
+    ]
+    _core_package.__path__ = [_core_path, *[path for path in _core_package_paths if path != _core_path]]
+    _core_common_spec = importlib.util.spec_from_file_location("core.common", _SCRIPTS_ROOT / "core" / "common.py")
+    if _core_common_spec is None or _core_common_spec.loader is None:
+        raise ModuleNotFoundError("core.common")
+    _core_common_module = importlib.util.module_from_spec(_core_common_spec)
+    sys.modules["core.common"] = _core_common_module
+    _core_common_spec.loader.exec_module(_core_common_module)
+
+from core.common import DEFAULT_USER_AGENT, config_bool, env_bool, response_receipt, service_get
+
+READ_USER_AGENT = DEFAULT_USER_AGENT
 API_BASE = "https://api.semanticscholar.org/graph/v1"
 DEFAULT_TIMEOUT = 20
 DEFAULT_FIELDS = ",".join([
@@ -33,18 +81,18 @@ DEFAULT_FIELDS = ",".join([
 ])
 
 DOI_RE = re.compile(r"\b(10\.\d{4,9}/[^\s\"<>]+)", re.I)
-ARXIV_RE = re.compile(r"(?:arxiv\.org/(?:abs|pdf)/|arxiv:)?([0-9]{4}\.[0-9]{4,5}|[a-z\-]+(?:\.[A-Z]{2})?/\d{7})(?:v\d+)?", re.I)
-
-
-def _truthy(value: object) -> bool:
-    return str(value or "").strip().lower() in {"1", "true", "yes", "on", "enable", "enabled"}
+ARXIV_ID_RE = re.compile(r"([0-9]{4}\.[0-9]{4,5}|[a-z\-]+(?:\.[A-Z]{2})?/\d{7})(?:v\d+)?", re.I)
+ARXIV_LINK_RE = re.compile(r"(?:arxiv\.org/(?:abs|pdf)/|arxiv:)\s*([0-9]{4}\.[0-9]{4,5}|[a-z\-]+(?:\.[A-Z]{2})?/\d{7})(?:v\d+)?", re.I)
 
 
 def semantic_scholar_enabled() -> bool:
     """Semantic Scholar 是可选增强源；无 key 时默认不请求，避免共享限流拖慢主流程。"""
     if str(os.environ.get("SEMANTIC_SCHOLAR_API_KEY") or os.environ.get("S2_API_KEY") or "").strip():
         return True
-    return _truthy(os.environ.get("READING_ENABLE_SEMANTIC_SCHOLAR"))
+    return env_bool(
+        "READING_ENABLE_SEMANTIC_SCHOLAR",
+        config_bool("semantic_scholar.enabled_without_key", False),
+    )
 
 
 def _headers() -> dict[str, str]:
@@ -71,7 +119,11 @@ def _doi_from_paper(paper: dict[str, Any]) -> str:
 
 
 def _arxiv_from_text(value: object) -> str:
-    match = ARXIV_RE.search(str(value or ""))
+    text = str(value or "").strip()
+    match = ARXIV_LINK_RE.search(text)
+    if match:
+        return match.group(1)
+    match = ARXIV_ID_RE.fullmatch(text.removeprefix("arXiv:").strip())
     return match.group(1) if match else ""
 
 
@@ -85,7 +137,8 @@ def _arxiv_from_paper(paper: dict[str, Any]) -> str:
 
 def _title_tokens(value: object) -> set[str]:
     stop = {"a", "an", "and", "for", "in", "of", "on", "the", "to", "towards", "toward", "with"}
-    return {token.lower() for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_.+-]*", str(value or "")) if len(token) >= 2 and token.lower() not in stop}
+    normalized = re.sub(r"[\u2010-\u2015]", "-", str(value or ""))
+    return {token.lower() for token in re.findall(r"[A-Za-z0-9]+", normalized) if len(token) >= 2 and token.lower() not in stop}
 
 
 def _title_similarity(left: object, right: object) -> float:
@@ -113,12 +166,11 @@ def _paper_lookup_id(paper: dict[str, Any]) -> str:
 def _request_json(url: str, *, params: dict[str, str], timeout: int = DEFAULT_TIMEOUT) -> tuple[dict[str, Any], dict[str, Any]]:
     started = time.time()
     try:
-        response = requests.get(url, params=params, headers=_headers(), timeout=timeout)
+        response = service_get(url, params=params, headers=_headers(), timeout=timeout, service="semanticscholar")
     except Exception as exc:
         return {}, {"status": "fetch_failed", "error": exc.__class__.__name__, "url": url, "seconds": round(time.time() - started, 3)}
     receipt: dict[str, Any] = {
-        "status_code": response.status_code,
-        "url": response.url,
+        **response_receipt(response, service="semanticscholar"),
         "seconds": round(time.time() - started, 3),
     }
     if response.status_code == 429:
@@ -257,6 +309,49 @@ def semantic_scholar_enrich_paper(paper: dict[str, Any], *, enabled: bool | None
 def semantic_scholar_pdf_candidates(paper: dict[str, Any], *, enabled: bool | None = None, timeout: int = DEFAULT_TIMEOUT) -> list[dict[str, Any]]:
     enriched, receipt = semantic_scholar_enrich_paper(paper, enabled=enabled, timeout=timeout)
     pdf_url = str(enriched.get("semantic_scholar_open_access_pdf_url") or "").strip()
+    if not pdf_url.startswith("http"):
+        if receipt.get("status") == "skipped_disabled":
+            return []
+        reason = "http_429_rate_limited" if int(receipt.get("status_code") or 0) == 429 else receipt.get("status") or "no_open_access_pdf"
+        return [{
+            "kind": "semantic_scholar_open_access_pdf",
+            "accepted": False,
+            "reason": reason,
+            "semantic_scholar_receipt": receipt,
+            "service": receipt.get("service") or "semanticscholar",
+            "status_code": receipt.get("status_code"),
+            "content_type": receipt.get("content_type"),
+            "url": receipt.get("url"),
+            "retry_after": receipt.get("retry_after"),
+        }]
+    if receipt.get("status") != "ok":
+        return [{
+            "kind": "semantic_scholar_open_access_pdf",
+            "pdf_url": pdf_url,
+            "accepted": False,
+            "reason": receipt.get("status") or "semantic_scholar_receipt_not_ok",
+            "semantic_scholar_receipt": receipt,
+        }]
+    expected_title = str(paper.get("title") or "").strip()
+    found_title = str(enriched.get("semantic_scholar_context", {}).get("title") or enriched.get("title") or "").strip()
+    if expected_title and found_title and _title_similarity(expected_title, found_title) < 0.82:
+        return [{
+            "kind": "semantic_scholar_open_access_pdf",
+            "pdf_url": pdf_url,
+            "accepted": False,
+            "reason": "semantic_scholar_title_mismatch",
+            "semantic_scholar_context": enriched.get("semantic_scholar_context") or {},
+            "semantic_scholar_receipt": receipt,
+        }]
+    if pdf_url.startswith("https://openreview.net/"):
+        return [{
+            "kind": "semantic_scholar_open_access_pdf",
+            "pdf_url": pdf_url,
+            "accepted": False,
+            "reason": "semantic_scholar_openreview_pdf_deferred_to_official_route",
+            "semantic_scholar_context": enriched.get("semantic_scholar_context") or {},
+            "semantic_scholar_receipt": receipt,
+        }]
     if not pdf_url.startswith("http"):
         return []
     return [{

@@ -1,225 +1,361 @@
 # Reading 论文精读模块
 
-本模块负责获取经过验证的论文正文材料，并基于正文生成精读任务产物；当公开全文不可用时，同轮替换只发生在 Reading 内，不回写 Finding。
+Reading 根据论文标题或已知链接获取同篇论文的全文或 PDF，并生成中文精读结果。只提供标题即可独立运行；URL、PDF、DOI、arXiv ID、OpenReview ID、作者和来源信息可以提高全文定位速度与准确性。最终面向用户的产物是 Markdown 文件 `read.md`。
 
-边界契约原句：`Acquire verified paper-body text for the selected Find packet and synthesize reading notes`。这句话与 `main.py` 中的 `RESPONSIBILITY` 保持一致，用于模块边界测试；实际使用说明仍以本文中文描述为准。
+## 功能概览
 
-`modules/reading` 是 TASTE 中专门负责“论文精读”的后端模块。它必须能够脱离网页前端单独运行：给定一篇论文或当前 Find 产物，自己完成题录整理、PDF/全文资料获取、正文抽取、Claude Code 主控提示生成，并要求主控 Claude Code 调用 Task/subagent 做逐篇精读。
+Reading 可以完成这些工作：
 
-本模块只维护后端能力，和 web 前端没有直接关系。前端或 TASTE 框架如果要使用 Reading，只能调用 `modules/reading/main.py` 暴露的 action，不应该直接拼内部脚本路径。
+- 接收论文标题、arXiv、bioRxiv、OpenReview、期刊页面、PDF 链接、DOI 等论文输入。
+- 获取同篇论文的全文材料或 PDF，并保存每篇论文的获取记录。
+- 为每篇论文生成中文精读。
+- 在会议明确提供展示类型时，将 `Oral`、`Spotlight` 或 `Poster` 写入来源。
+- 汇总多篇论文，生成一个最终 `read.md`。
+- 复用同篇论文的历史全文、PDF 和单篇精读结果。
+- 通过网页 Read 页或命令行运行。
+
+Reading 专注于同篇论文的全文获取和精读，不扫描会议论文列表。TASTE 的 Find 结果可以通过 Framework 作为普通 Reading 输入传入，其中已有的作者、URL、PDF、DOI、OpenReview ID 等字段会直接用于全文定位。
 
 ## 运行环境
 
-在远程工作区 `<TASTE_ROOT>` 中运行。不要使用系统默认 `python`，也不要依赖默认 PATH 中是否有 `rg`。
-
-推荐环境：
+在 TASTE 仓库根目录运行命令，并使用 `taste` conda 环境：
 
 ```bash
+conda activate taste
 cd <TASTE_ROOT>
-PY=/home/fmh/workspace/miniforge/envs/ar_taste/bin/python3.11
-RG=/home/fmh/workspace/miniforge/envs/ar_taste/bin/rg
-NODE_BIN=/home/fmh/workspace/.nvm/versions/node/v22.21.0/bin
-PATH="$NODE_BIN:$PATH" "$PY" modules/reading/main.py --contract
 ```
 
-`ar_taste` 环境负责 Python 依赖，例如 `requests`、`PyMuPDF/fitz`。Claude Code 命令来自项目配置中的 nvm Node 环境：`/home/fmh/workspace/.nvm/versions/node/v22.21.0/bin/claude`。
-
-可选增强环境变量：
-
-| 变量 | 含义 |
-| --- | --- |
-| `SEMANTIC_SCHOLAR_API_KEY` / `S2_API_KEY` | 启用 Semantic Scholar Graph 增强，用于补 DOI/arXiv/PMCID、引用数、TLDR、领域标签和开放 PDF 候选。无 key 时默认不请求，避免共享限流拖慢主流程。 |
-| `READING_ENABLE_SEMANTIC_SCHOLAR=1` | 无 key 时仍显式尝试 Semantic Scholar；若遇到 `429` 只记录证据，不阻塞全文获取。 |
-| `OPENALEX_API_KEY` / `OPENALEX_MAILTO` | OpenAlex 增强参数；用于提高开放索引请求稳定性。 |
-| `UNPAYWALL_EMAIL` | 启用 Unpaywall DOI 开放全文位置兜底。 |
-
-## 独立精读入口
-
-给定一篇论文，使用 `deep-read` action：
+检查 Reading 是否可用：
 
 ```bash
-cd <TASTE_ROOT>
-PY=/home/fmh/workspace/miniforge/envs/ar_taste/bin/python3.11
-PATH=/home/fmh/workspace/.nvm/versions/node/v22.21.0/bin:$PATH \
-  "$PY" modules/reading/main.py \
-  --action deep-read \
-  --article "https://arxiv.org/abs/1706.03762" \
-  --claude-mode auto
+python modules/reading/main.py --contract
+```
 
-# 也支持位置式 action，等价于 --action deep-read：
-PATH=/home/fmh/workspace/.nvm/versions/node/v22.21.0/bin:$PATH \
-  "$PY" modules/reading/main.py deep-read \
+生成精读需要 Claude Code。确认当前 shell 可以找到 `claude`：
+
+```bash
+claude --version
+```
+
+如果 Claude Code 在固定路径，可以这样指定：
+
+```bash
+export CLAUDE_PATH=/path/to/claude
+```
+
+## 配置
+
+公开配置文件：
+
+```text
+modules/reading/config/reading.json
+```
+
+本机私有配置目录：
+
+```text
+modules/reading/config/local/
+```
+
+OpenReview 登录信息可以写入：
+
+```text
+modules/reading/config/local/openreview.env
+```
+
+示例：
+
+```bash
+OPENREVIEW_USERNAME=your_email@example.com
+OPENREVIEW_PASSWORD=your_password
+```
+
+常用环境变量：
+
+| 变量 | 用途 |
+| --- | --- |
+| `OPENREVIEW_USERNAME` / `OPENREVIEW_PASSWORD` | 访问需要登录的 OpenReview 页面或附件。 |
+| `READING_OPENREVIEW_COOKIE` / `OPENREVIEW_COOKIE` | 使用已有 OpenReview Cookie。 |
+| `SEMANTIC_SCHOLAR_API_KEY` / `S2_API_KEY` | 查找同篇论文的开放 PDF 候选。 |
+| `UNPAYWALL_EMAIL` | 通过 Unpaywall 查找 DOI 对应开放全文。 |
+| `OPENALEX_API_KEY` / `OPENALEX_MAILTO` | 提高 OpenAlex 查询稳定性。 |
+| `READING_READ_WORKERS` | 设置多篇论文并发处理数量。 |
+| `READING_DISABLE_ARTICLE_CACHE=1` | 本次运行跳过文章级缓存。 |
+| `READING_DISABLE_RUNTIME_CACHE=1` | 本次运行重新获取全文材料。 |
+
+OpenReview、ICLR 和 ICML 官方站点按主机串行访问，跨 Read worker 和跨进程的并发上限均为 `1`，相邻请求至少间隔 20 秒。收到 `403` 或 `429` 后会进入共享冷却期，后续同站点候选直接跳过。`read-workers` 仍可并行处理不同站点的全文获取和后续单篇精读。
+
+## 网页使用
+
+启动网页：
+
+```bash
+framework/scripts/start_web.sh
+```
+
+默认地址：
+
+```text
+http://127.0.0.1:8879
+```
+
+使用步骤：
+
+1. 打开网页并选择项目。
+2. 确认当前 Find 结果已经选定；Framework 会把推荐论文转换成 Reading 输入。
+3. 进入 Read 页。
+4. 点击 Read 运行精读。
+5. 在任务日志中查看“爬文章”和“读文章”两个阶段进度。
+6. 任务完成后，在 Read 页查看 `read.md`。
+
+需要重新生成单篇精读时，使用网页中的强制重读选项。
+
+## 命令行使用
+
+### 单篇论文
+
+```bash
+python modules/reading/main.py deep-read \
   --article "https://arxiv.org/abs/1706.03762" \
-  --claude-mode prepare
+  --title "Attention Is All You Need" \
+  --claude-mode run
+```
+
+只有标题时也可以独立查找同篇全文：
+
+```bash
+python modules/reading/main.py deep-read \
+  --title "Attention Is All You Need" \
+  --claude-mode run
 ```
 
 常用参数：
 
-| 参数 | 含义 |
+| 参数 | 用途 |
 | --- | --- |
-| `--article` | 论文 URL、arXiv 编号/链接、PDF URL 或 DOI。 |
-| `--title` | 可选标题；非 arXiv/非 PDF 输入时建议提供。 |
-| `--authors` | 可选作者，逗号分隔。 |
-| `--abstract` | 可选摘要。 |
+| `--article` | 可选论文页面、PDF 链接、arXiv 编号或 DOI。 |
+| `--title` | 论文标题。 |
 | `--pdf-url` | 已知 PDF 地址。 |
-| `--input-json` | 可选输入 JSON；模块只读取它，不在它旁边写产物。 |
-| `--run-id` | 可选运行 ID；默认由时间戳和标题生成。 |
-| `--claude-mode auto` | 默认模式：正文足够且 Claude 可用时调用 Claude Code。 |
-| `--claude-mode prepare` | 只下载/抽取/生成 Claude prompt，不实际调用 Claude，适合调试和离线验收。 |
-| `--claude-mode run` | 强制尝试调用 Claude Code。 |
-| `--timeout-sec` | Claude Code 调用超时时间，默认 1800 秒。 |
+| `--abstract` | 已知摘要。 |
+| `--claude-mode run` | 获取全文并生成精读。 |
+| `--claude-mode prepare` | 只获取和整理全文材料。 |
+| `--force` | 重新生成单篇精读结果。 |
+| `--timeout-sec` | 单次运行超时时间，单位为秒。 |
 
-## 输入口径
+### 多篇论文
 
-独立精读最小输入是一条 `--article`。如果输入是 arXiv 链接或编号，模块会查询 arXiv 元数据并获取 PDF。如果输入是 PDF URL，模块会直接下载并验证 PDF。如果输入是 DOI 或普通页面 URL，建议同时给出 `--title`、`--authors`、`--abstract` 或 `--pdf-url`，便于题录和 PDF 获取。
+多篇精读使用 JSON 文件输入：
 
-`--input-json` 可以提供同样的信息，例如：
+```bash
+python modules/reading/main.py read \
+  --input-json modules/reading/.runtime/output/<run-id>/input/source_input.json \
+  --claude-mode run \
+  --read-workers 2 \
+  --timeout-sec 1800
+```
+
+只检查全文获取情况：
+
+```bash
+python modules/reading/main.py read \
+  --input-json modules/reading/.runtime/output/<run-id>/input/source_input.json \
+  --claude-mode prepare \
+  --read-workers 4
+```
+
+`--read-workers` 可以提高多篇论文处理速度。建议从 `2` 或 `4` 开始，根据机器负载和 Claude Code 稳定性调整。
+
+### 使用当前 Find 结果
+
+网页会通过 Framework 完成输入转换、Reading 调用和项目同步。命令行使用：
+
+```bash
+python framework/scripts/run_module.py reading \
+  --action current_find_research_plan \
+  --project <project>
+```
+
+Framework 会调用 Reading 的通用 `read` action。Reading 模块自身不读取项目目录或 Find 状态。
+
+## 输入 JSON
+
+最小示例：
 
 ```json
 {
-  "article": "https://arxiv.org/abs/1706.03762",
-  "title": "Attention Is All You Need",
-  "authors": ["Ashish Vaswani", "Noam Shazeer"],
-  "abstract": "..."
+  "articles": [
+    {
+      "title": "Attention Is All You Need"
+    }
+  ]
 }
 ```
 
-## 输出口径
+带可选定位信息的示例：
 
-所有独立精读运行产物都写在：
-
-```text
-modules/reading/workspace/runs/<run-id>/
+```json
+{
+  "articles": [
+    {
+      "source": "arxiv",
+      "paper_id": "1706.03762",
+      "title": "Attention Is All You Need",
+      "authors": ["Ashish Vaswani"],
+      "url": "https://arxiv.org/abs/1706.03762",
+      "pdf_url": "https://arxiv.org/pdf/1706.03762"
+    }
+  ]
+}
 ```
 
-该目录已由 `modules/reading/.gitignore` 排除，PDF、正文、Claude 输出等中间产物不会进入 git。
+常见字段：
 
-主要输出：
+| 字段 | 说明 |
+| --- | --- |
+| `source` | 来源，如 `arxiv`、`biorxiv`、`openreview`、`nature`。 |
+| `paper_id` / `id` | 论文 ID。 |
+| `title` | 论文标题。 |
+| `authors` | 作者列表或字符串。 |
+| `abstract` | 摘要。 |
+| `url` / `abs_url` | 论文页面。 |
+| `pdf_url` | PDF 地址。 |
+| `doi` | DOI。 |
+| `venue` / `year` | 会议、期刊或年份。 |
+| `presentation_type` | 可选的会议展示类型：`oral`、`spotlight` 或 `poster`。 |
+
+`title` 是最小输入。已知的 `url`、`pdf_url`、`doi`、arXiv ID、OpenReview ID 和作者信息会优先用于同篇全文定位。输入中的 `abstract` 会作为精读上下文使用。
+
+Framework 从 Find 启动 Reading 时会把 Find 已确认的会议展示类型写入 Reading 输入。独立运行时可直接提供 `presentation_type`；输入未提供时，来源保持会议与年份。
+
+## 输出位置
+
+单次运行结果保存在：
+
+```text
+modules/reading/.runtime/output/<run-id>/
+```
+
+最近一次运行会复制到：
+
+```text
+modules/reading/.runtime/latest_run/
+```
+
+`latest_run` 只供人工审查；程序始终使用明确的时间戳 run 目录。
+
+常看文件：
 
 | 文件 | 内容 |
 | --- | --- |
-| `input.json` | 本次 CLI 和输入 JSON 的留痕。 |
-| `paper.json` | 归一化后的论文题录；启用 Semantic Scholar 时会包含 `semantic_scholar_context`、引用数量、TLDR、外部 ID 和开放 PDF 候选。 |
-| `downloads/*.pdf` | 下载到的论文 PDF。 |
-| `extracted/full_text.txt` | 从 PDF 抽取的正文文本。 |
-| `extracted/full_text_xml.txt` | 从 EuropePMC/PMC XML 兜底抽取的论文正文文本。 |
-| `full_text_packet.json` | Reading 内部全文证据包。 |
-| `prompts/deep_read_prompt.md` | 交给主控 Claude Code 的中文任务提示，明确要求调用 Task/subagent。 |
-| `outputs/reading_result.json` | Claude/subagent 预期写入的精读 JSON。 |
-| `claude/claude_receipt.json` | Claude Code 调用状态、stdout/stderr 路径和解析结果。 |
-| `read_results.json` | 本次运行的结构化总结果。 |
-| `read.md` | 人类可读中文精读摘要或阻塞说明。 |
+| `read.md` | 最终中文精读结果。 |
+| `read_results.json` | 运行状态、完成数量、warning、error 和结果路径。 |
+| `full_text_reading/full_text_packet.json` | 本次运行的全文获取汇总。 |
+| `papers/*/read.md` | 单篇论文精读结果。 |
+| `papers/*/full_text_packet.json` | 单篇论文全文获取记录。 |
+| `papers/*/paper.json` | 单篇论文题录信息。 |
 
-`modules/reading/workspace/latest_run.json` 会指向最近一次独立精读运行。
+通过网页运行时，项目中也会同步一份结果：
 
-## 网页公开精读格式
-
-Current-Find 的完整精读 JSON 同时保留两层口径：
-
-| 字段/文件 | 用途 |
-| --- | --- |
-| `read_results.json.readings` | 完整审计版。保留 Claude/subagent 的长字段、全文证据、评分、边界角色和后续 Idea/Plan 所需上下文。不要为了网页短展示删减它。 |
-| `read_results.json.public_readings` | 网页公开版。由后端从 `readings` 投影生成，字段更短，方法/实验/局限以 2-4 条短要点呈现，供 Read 页卡片优先展示。 |
-| `read.md` | 人类可读 Markdown 公开产物。结构固定为“速览、动机、机制、数学/形式化、实验与证据、可借鉴点、风险边界”。 |
-
-数学公式必须写成 Markdown+KaTeX 能渲染的形式：行内 `$...$` 或块级 `$$...$$`。不要输出半截 `$`，不要把中文句子塞进公式，不要用裸 `\textit{}`、`\textbf{}` 这类 LaTeX 样式命令包装普通文字。公开版只展示显式公式字段或明确 Markdown 数学定界符中的完整公式，不能从普通中文段落里正则猜测变量片段、阈值或训练超参；没有安全公式时，“数学/形式化”应保留自然语言占位，把完整符号细节放在审计 JSON。网页会优先展示 `public_readings`，但后端合同、Idea/Plan 和项目 Claude Code 仍以完整 `readings` 审计内容为准。
-
-## 运行流程逻辑
-
-1. `main.py` 解析 action，只把公开 action 分发到模块内部脚本。
-2. `standalone_deep_read.py` 创建 `modules/reading/workspace/runs/<run-id>/`，确保所有运行产物留在 Reading 模块内。
-3. `paper_sources.py` 归一化论文输入，必要时查询 arXiv 元数据；如果配置了 Semantic Scholar，则只把它作为题录、引用图谱和开放 PDF 候选增强源，不把它的摘要或题录直接当全文。
-4. 资料获取层复用 `read_pipeline.py` 中已有 PDF 候选、下载和 PDF 文本抽取函数；所有候选 PDF 都必须通过文件类型和正文抽取校验。
-5. 模块写出 `full_text_packet.json`，记录 PDF、正文路径、字数和获取证据。
-6. `claude_subagent.py` 生成主控 Claude Code prompt。prompt 强制要求主控调用 Task/subagent 做全文精读；如果没有 Task/subagent，必须写 blocked JSON，不能由主控短写替代。
-7. `--claude-mode auto/run` 会调用项目 nvm 环境中的 Claude Code；`prepare` 只生成 prompt 和证据包。
-8. 模块汇总 Claude 结果、全文证据和运行状态到 `read_results.json` 与 `read.md`。
-9. 在当前 Find/旧 Read 流水线中，模块会基于全部 reading 产物重新打分排序，写入 `reading_ranking`、`reading_ranking_order`，并按读后分数输出最终阅读顺序。
-
-
-## 多渠道批量验收入口
-
-用于测试多个论文来源渠道的下载、正文抽取和阅读任务产物生成：
-
-```bash
-cd <TASTE_ROOT>
-PY=/home/fmh/workspace/miniforge/envs/ar_taste/bin/python3.11
-PATH=/home/fmh/workspace/.nvm/versions/node/v22.21.0/bin:$PATH \
-  "$PY" modules/reading/main.py \
-  --action channel-batch-test \
-  --run-id channel_batch_示例 \
-  --per-channel 10 \
-  --candidate-limit 100 \
-  --claude-mode prepare \
-  --workers 2
+```text
+projects/<project>/planning/finding/read.md
+projects/<project>/planning/finding/read_results.json
+projects/<project>/planning/finding/reading_runs/<run-id>/
 ```
 
-常用参数：
+`read.md` 放精读正文。JSON 文件用于查看状态、路径和错误信息。
 
-| 参数 | 含义 |
-| --- | --- |
-| `--channels` | 逗号分隔渠道，默认测试 `nips2025,iclr2026,icml2026,sigkdd2026,arxiv,biorxiv,nature,science_family`。 |
-| `--per-channel` | 每个渠道要求生成的合格阅读任务产物数量，默认 10。 |
-| `--candidate-limit` | 每个渠道最多尝试多少个候选，默认 100。 |
-| `--claude-mode prepare` | 只生成全文证据包和主控 Claude/subagent prompt，不实际调用 Claude。 |
-| `--claude-mode run` | 对合格全文候选实际调用 Claude Code。该模式会消耗时间和模型额度。 |
-| `--workers` | 并发处理渠道数，默认 2；Science 等站点对并发敏感，过高可能触发 403。 |
+## read.md 内容格式
 
-批量验收产物写入 `modules/reading/workspace/batch_tests/<run-id>/`，包括每个渠道的 `crawl_receipt.json`、`channel_summary.json`、每篇论文的 `paper.json`、`full_text_packet.json`、`prompts/deep_read_prompt.md`、`read_results.json`、`read.md`，以及总报告 `batch_report.json` / `batch_report.md`。
+最终 `read.md` 的结构：
 
-批量产物审计使用 `audit-channel-batch` action。它会逐渠道核对指定数量的合格产物，检查 `read_results.json`、`full_text_packet.json`、正文路径是否仍在 Reading 内、`full_text_available`、正文长度、`Task/subagent` 和 `subagent_deep_read` prompt 标记，并写出中文审计报告：
+```markdown
+# 论文精读
 
-```bash
-cd <TASTE_ROOT>
-PY=/home/fmh/workspace/miniforge/envs/ar_taste/bin/python3.11
-"$PY" modules/reading/main.py audit-channel-batch \
-  --run-id channel_batch_示例 \
-  --per-channel 10
+## 逐篇精读
+
+### 001. Paper Title
+
+**来源：** ICLR 2026 Oral
+
+**论文链接：** URL：[论文页面](<https://example.org/paper>)；PDF：[PDF](<https://example.org/paper.pdf>)
+
+#### 摘要
+
+...
+
+#### 动机与核心创新
+
+...
+
+#### 方法
+
+...
+
+#### 实验结果
+
+...
+
+#### 优缺点总结
+
+...
 ```
 
-默认审计报告写到 `modules/reading/workspace/batch_tests/<run-id>/manual_audit_zh.md`，结构化结果写到同名 `.json`。
+每篇论文标题下只展示两项元数据：
 
-多渠道候选来源会优先使用对应渠道的官方或开放索引：NeurIPS proceedings、ICLR/ICML virtual 页面与 OpenAlex/arXiv 公开 PDF、SIGKDD ACM proceedings DOI 前缀、arXiv API/OpenAlex 兜底、bioRxiv 官方 published mapping、Nature 搜索页与 Nature PDF、Science 系列 DOI/OpenAlex/Crossref。Semantic Scholar 只在配置 API key 或显式开启时作为增强源补题录、引用图谱、外部 ID 和开放 PDF 候选；它返回的题录、TLDR、摘要或 `openAccessPdf` 不能绕过 PDF/HTML/XML 正文校验。对 Science/PMC 这类 PDF 或 science.org 页面在当前环境被 403/PoW 拦截的情况，模块会从 OpenAlex 候选中识别 PMCID，并通过 EuropePMC `fullTextXML` 抽取正文。OpenReview、bioRxiv、ACM DL、science.org 等页面如果在当前环境返回 403，模块会记录证据并改用公开 PDF/HTML/XML 兜底；不会把 403 页、poster、RSS、题录或摘要算作全文。
+- `来源`：简洁写法，如 `ICLR 2026 Oral`、`NeurIPS 2025 Poster`、`arXiv 2026-06-01`、`Nature 2026-06-24`。会议有明确展示类型时附加 `Oral`、`Spotlight` 或 `Poster`。
+- `论文链接`：Markdown 链接格式，如 `URL：[论文页面](<...>)；PDF：[PDF](<...>)`。PDF 缺失时显示 `未提供`。
 
-合格标准不是“有摘要就算读过”：必须有可访问 PDF 正文或具备论文正文结构的 HTML 正文，`full_text_available=true`，并且 prompt 中包含 `Task/subagent`、`subagent_deep_read` 和实际正文路径。会议 poster 摘要页、RSS、Crossref 摘要、题录页、Cloudflare/403 页面都不能冒充全文精读。
+正文栏目说明：
 
-最近一次严格验收：`channel_batch_20260618_semantic_v1_all_channels`，`nips2025`、`iclr2026`、`icml2026`、`sigkdd2026`、`arxiv`、`biorxiv`、`nature`、`science_family` 均达到 10/10；审计报告在该运行目录的 `manual_audit_zh.md`，结构化结果为 `manual_audit_zh.json`，`problem_count=0`，其中 XML 全文兜底条目 9 篇。上一轮稳定基线为 `channel_batch_20260618_rerank_v1_all_channels`。
-
-## 与 TASTE 当前 Find 的兼容入口
-
-旧有 TASTE 流程仍可通过这些 action 调用，根目录脚本只是兼容薄壳，真实实现已分到子目录：
-
-| action | 作用 |
+| 栏目 | 内容 |
 | --- | --- |
-| `audit-channel-batch` | 审计多渠道批量验收产物，核对全文证据、prompt 标记和路径边界。 |
-| `read` / `pipeline` | 读取 Find run 的推荐论文并生成 Read 结果；最终 `read_results.json` 包含基于精读产物的 `reading_ranking` 和 `reading_ranking_order`。 |
-| `repair-full-text` | 修复当前 Find 的全文证据包，不回写 Finding 产物。 |
-| `current-find-research-plan` | 编排当前 Find 的 Read/Idea/Plan，驱动 Claude Code 项目会话和 subagent 精读审计。 |
-| `import` | 向项目原始论文区导入单篇外部论文题录，兼容旧 TASTE 项目数据结构。 |
+| `摘要` | 输入提供 `abstract_zh` 时逐字使用该中文摘要；缺失时由单篇阅读 subagent 翻译原文摘要。 |
+| `动机与核心创新` | 两段内容，分别说明研究动机和核心创新。 |
+| `方法` | 论文自己的创新方法，结合数学公式做通俗解释。 |
+| `实验结果` | 概括实验类型和总体效果。 |
+| `优缺点总结` | 简短总结主要优点和风险边界。 |
 
-## 脚本结构
+数学变量使用 `$...$` 行内公式，关键方程使用独立的 `$$...$$` 公式块。网页会直接渲染 LaTeX；范数、条件概率、上下标和数学算子按标准 LaTeX 写法展示。
 
-| 路径 | 分类 | 作用 |
-| --- | --- | --- |
-| `main.py` | 公开入口 | Reading 唯一公开后端入口，负责 action 路由和 `--contract`。 |
-| `scripts/read_pipeline.py` | 兼容薄壳 | 保持旧导入 `from read_pipeline import run_read` 可用。 |
-| `scripts/repair_current_find_full_text_evidence.py` | 兼容薄壳 | 保持旧修复脚本路径可执行。 |
-| `scripts/ensure_current_find_research_plan.py` | 兼容薄壳 | 保持旧编排脚本路径可执行。 |
-| `scripts/common/` | 通用工具 | Reading 内部路径、JSON、文本、slug 和读后重评分排序工具。 |
-| `scripts/acquisition/` | 资料获取 | 论文题录归一化、arXiv 元数据、可选 Semantic Scholar 增强、PDF 获取和正文抽取。 |
-| `scripts/pipeline/` | 流水线 | 独立单篇精读流水线、多渠道批量验收/审计流水线，以及旧 Find run Read 流水线真实实现。 |
-| `scripts/orchestration/` | Claude 编排 | Claude/subagent prompt 与当前 Find Read/Idea/Plan 编排。 |
-| `scripts/repair/` | 证据修复 | 当前 Find 全文证据修复真实实现。 |
-| `script_manifest.json` | 脚本清单 | 由当前文件结构生成的人类可读清单。 |
-| 本机 `工作状态.txt` | 维护记录 | 被 `.gitignore` 忽略；若存在，只作交接背景，不属于仓库文件或模块契约。 |
+## 缓存与重读
 
-## 边界和约束
+Reading 会按文章复用历史结果。同篇论文已经有全文、PDF 或单篇 `read.md` 时，后续项目和新 run 会优先使用已有结果。
 
-- Reading 的独立运行产物只能写入 `modules/reading/workspace/`。
-- 不在 `web/`、其它 `modules/` 或 TASTE 框架目录产生 Reading 中间产物。
-- `scripts/` 新增脚本必须放入功能子目录；根目录只保留兼容薄壳。
-- 不新增只服务某一篇论文的特例脚本；论文差异通过输入和通用获取逻辑处理。
-- Claude 精读结果必须有 `subagent_deep_read=true` 和 `deep_read_audit`，否则不能视为完成精读。
-- 主控 Claude Code 完成逐篇精读后应写入 `read_score`、`read_score_breakdown`、`read_score_audit`；模块会据此形成 `reading_ranking` 最终排序，缺失时仅使用确定性保底排序并记录来源。
-- Semantic Scholar、Crossref、OpenAlex 等元数据源只能补候选和证据说明；最终精读必须依赖通过校验的 PDF/HTML/XML 正文。
-- 无全文证据时状态应为 blocked 或 prepared，不能用摘要/推荐理由冒充全文精读。
+全文获取会优先使用会议、期刊或 OpenReview 的官方 PDF。若同篇论文的 PDF 或全文内容发生更新，对应的旧单篇精读会自动失效，并基于新内容重新生成；内容一致时继续复用。
+
+需要重新生成时：
+
+- 网页：使用强制重读选项。
+- 命令行：添加 `--force`。
+
+跳过文章缓存：
+
+```bash
+READING_DISABLE_ARTICLE_CACHE=1 python modules/reading/main.py read \
+  --input-json modules/reading/.runtime/output/<run-id>/input/source_input.json \
+  --claude-mode run
+```
+
+## 工作流程
+
+Reading 只有两个阶段：
+
+1. `爬文章`：根据标题和可选定位信息获取或复用同篇全文。
+2. `读文章`：生成或复用单篇精读，并汇总为最终 `read.md`。
+
+## 常见问题
+
+| 现象 | 查看位置 |
+| --- | --- |
+| 没有最终 `read.md` | `read_results.json` 里的运行状态、warning 和 error。 |
+| 某篇论文没有精读 | 对应 `papers/<paper>/read_results.json`。 |
+| 全文获取失败 | 对应 `papers/<paper>/full_text_packet.json`。 |
+| OpenReview 访问失败 | 确认 `config/local/openreview.env` 或 Cookie 配置，并查看全文获取记录。 |
+| 网页进度停在爬取全文 | 查看缺全文论文列表和任务日志。 |
+| 网页显示 warning | 查看 Web 任务日志和 `read_results.json.warning_items`。 |
+
+## 快速检查
+
+```bash
+python modules/reading/main.py --contract
+```

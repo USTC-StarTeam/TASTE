@@ -901,6 +901,18 @@ summary {
   border-color: #8a2f28;
 }
 
+.ideaMarkdownEditorPanel {
+  margin-top: 0.9rem;
+}
+
+.ideaMarkdownSourceEditor {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  line-height: 1.55;
+  min-height: 65vh;
+  resize: vertical;
+  width: 100%;
+}
+
 .ideaFieldLabel {
   color: #39485a;
   display: block;
@@ -1134,17 +1146,39 @@ summary {
   padding: 0.08rem 0.28rem;
 }
 
+.markdownBody eq,
+.markdownBody eqn,
+.markdownBody .katex,
+.markdownBody .katex * {
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
 .markdownBody .katex {
-  font-size: 1em;
   line-height: 1.2;
+  text-rendering: optimizeLegibility;
 }
 
 .markdownBody .katex-display {
   max-width: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
-  margin: 0.65rem 0;
-  padding: 0.15rem 0;
+  margin: 0.72rem 0;
+  padding: 0.18rem 0;
+}
+
+.markdownBody .katex-display.fitWrappedMath > .katex {
+  display: block;
+  white-space: normal;
+}
+
+.markdownBody .katex-display.fitWrappedMath .base {
+  display: inline;
+  white-space: normal;
+}
+
+@media (max-width: 760px) {
+  .markdownBody .katex-display > .katex {
+    white-space: normal;
+  }
 }
 
 .markdownBody pre {
@@ -2590,7 +2624,7 @@ select {
 
 .planControlGrid {
   display: grid;
-  grid-template-columns: minmax(340px, 1.15fr) minmax(220px, 0.55fr) minmax(280px, 0.8fr);
+  grid-template-columns: minmax(260px, 1fr) minmax(220px, 0.65fr) minmax(260px, 0.85fr);
   gap: 1rem;
   align-items: start;
 }
@@ -2600,23 +2634,18 @@ select {
   min-width: 0;
 }
 
-.planPanelHeader,
-.planSectionHeading,
-.planCardHeader {
+.planPanelHeader {
   align-items: flex-start;
   display: flex;
   gap: 0.75rem;
   justify-content: space-between;
 }
 
-.planPanelHeader h3,
-.planSectionHeading h3,
-.planCardHeader h3 {
+.planPanelHeader h3 {
   margin: 0;
 }
 
-.planPanelHeader span,
-.planSectionHeading span {
+.planPanelHeader span {
   background: #eef3f7;
   border-radius: 999px;
   color: #516174;
@@ -2626,93 +2655,20 @@ select {
   white-space: nowrap;
 }
 
-.planExecutionSummary {
-  border: 1px solid #d7dee7;
-  border-radius: 8px;
-  display: grid;
-  gap: 0.4rem;
-  margin-top: 0.65rem;
-  padding: 0.78rem;
+.planTextEditor {
+  box-sizing: border-box;
+  display: block;
+  font: inherit;
+  line-height: 1.5;
+  margin-top: 0.35rem;
+  min-height: 260px;
+  resize: vertical;
+  width: 100%;
 }
 
-.planExecutionSummary.ready {
-  background: #f2faf6;
-  border-color: #9acbb7;
-}
-
-.planExecutionSummary.blocked {
-  background: #fff8ed;
-  border-color: #efc27f;
-}
-
-.planExecutionSummary strong,
-.planExecutionSummary p,
-.planExecutionSummary small {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.planExecutionSummary p,
-.planIdeaText,
-.planSectionHeading p {
-  color: #536376;
-  line-height: 1.45;
-}
-
-.planCandidateSection {
-  margin-top: 1rem;
-}
-
-.planSectionHeading {
-  margin: 0 0 0.75rem;
-}
-
-.planSectionHeading p {
-  margin: 0.25rem 0 0;
-}
-
-.planCardGrid {
-  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
-}
-
-.planCandidateCard {
-  border-color: #2d8a62;
-}
-
-.planTitleBox,
-.planReadOnlyBox {
-  background: #ffffff;
-  border: 1px solid #c9d2dc;
-  border-radius: 7px;
-  color: #18212f;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-  padding: 0.62rem 0.72rem;
-}
-
-.planTitleBox {
-  font-weight: 700;
-}
-
-.planReadOnlyBox {
-  max-height: 118px;
-  min-height: 44px;
-  overflow: auto;
-}
-
-.planOverviewBox {
-  max-height: 220px;
-  min-height: 132px;
-}
-
-.planCardRoundControl {
-  border-top: 1px solid #e5ebf1;
-  margin-top: auto;
-  padding-top: 0.75rem;
-}
-
-.planCardActions {
-  margin: 0.55rem 0 0;
+.planEditorActions {
+  justify-content: flex-end;
+  margin: 0.75rem 0 0;
 }
 
 .planPickList {
@@ -2774,6 +2730,10 @@ select {
 @media (max-width: 980px) {
   .planControlGrid {
     grid-template-columns: 1fr;
+  }
+
+  .planTextEditor {
+    min-height: 320px;
   }
 }
 

@@ -1,66 +1,32 @@
 from __future__ import annotations
 
 import argparse
+import ast
+import datetime as dt
+import importlib.util
 import json
 import os
-import shutil
-import subprocess
 import sys
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
-STAGE_NAME = 'reading'
-DISPLAY_NAME = 'Reading'
-RESPONSIBILITY = 'Acquire verified paper-body text for the selected Find packet and synthesize reading notes. Same-run replacements for unavailable public full text happen here, never inside Finding.'
-REQUIRED_EXTERNAL_INPUTS = ('llm_api_or_claude', 'finding_artifact_packet', 'artifact_root')
-ARTIFACTS_IN = ('find_results.json', 'article.md', 'full_text_reading/manual_full_text_sources.json')
-ARTIFACTS_OUT = ('read_results.json', 'read.md', 'full_text_reading/full_text_packet.json', 'current_find_full_text_evidence_repair.json')
+STAGE_NAME = "reading"
+DISPLAY_NAME = "Reading"
+RESPONSIBILITY = "Acquire verified same-paper full text from generic local paper inputs and synthesize reading notes; a title is sufficient, optional locators accelerate resolution, and article replacement is forbidden."
+REQUIRED_EXTERNAL_INPUTS = ("local_input_json", "claude_or_prepare_mode")
+ARTIFACTS_IN = ("local input JSON under this directory",)
+PUBLIC_FINAL_ARTIFACT = "read.md"
+ARTIFACTS_OUT = (PUBLIC_FINAL_ARTIFACT, "read_results.json", "full_text_reading/full_text_packet.json")
+MACHINE_SUPPORT_ARTIFACTS = ("read_results.json", "full_text_reading/full_text_packet.json")
 PRIVATE_BACKEND_ROOTS = (
-    'modules/reading/scripts/read_pipeline.py',
-    'modules/reading/scripts/ensure_current_find_research_plan.py',
-    'modules/reading/scripts/repair_current_find_full_text_evidence.py',
-    'modules/reading/scripts/pipeline/read_pipeline.py',
-    'modules/reading/scripts/pipeline/standalone_deep_read.py',
-    'modules/reading/scripts/pipeline/channel_batch_test.py',
-    'modules/reading/scripts/pipeline/audit_channel_batch.py',
-    'modules/reading/scripts/acquisition/paper_sources.py',
-    'modules/reading/scripts/acquisition/semantic_scholar.py',
-    'modules/reading/scripts/orchestration/claude_subagent.py',
-    'modules/reading/scripts/orchestration/ensure_current_find_research_plan.py',
-    'modules/reading/scripts/repair/repair_current_find_full_text_evidence.py',
+    "scripts/pipeline/read_pipeline.py",
+    "scripts/core/common.py",
+    "scripts/acquisition/paper_sources.py",
+    "scripts/acquisition/conference_sources.py",
+    "scripts/acquisition/openreview_official.py",
+    "scripts/acquisition/semantic_scholar.py",
+    "scripts/orchestration/claude_subagent.py",
 )
-
-
-@dataclass(slots=True)
-class ArtifactRef:
-    name: str
-    path: str = ""
-    kind: str = "json"
-    role: str = "input"
-    required: bool = False
-
-
-@dataclass(slots=True)
-class StageInvocation:
-    research_topic: str = ""
-    research_interest: str = ""
-    researcher_profile: str = ""
-    artifact_root: str = ""
-    llm: dict[str, Any] = field(default_factory=dict)
-    inputs: list[ArtifactRef] = field(default_factory=list)
-    options: dict[str, Any] = field(default_factory=dict)
-
-    def root_path(self) -> Path:
-        return Path(self.artifact_root).expanduser() if self.artifact_root else Path.cwd()
-
-
-@dataclass(slots=True)
-class StageResult:
-    status: str
-    artifacts: list[ArtifactRef] = field(default_factory=list)
-    metrics: dict[str, Any] = field(default_factory=dict)
-    message: str = ""
 
 
 def contract() -> dict[str, Any]:
@@ -71,53 +37,52 @@ def contract() -> dict[str, Any]:
         "required_external_inputs": list(REQUIRED_EXTERNAL_INPUTS),
         "artifacts_in": list(ARTIFACTS_IN),
         "artifacts_out": list(ARTIFACTS_OUT),
+        "public_final_artifact": PUBLIC_FINAL_ARTIFACT,
+        "machine_support_artifacts": list(MACHINE_SUPPORT_ARTIFACTS),
         "private_backend_roots": list(PRIVATE_BACKEND_ROOTS),
     }
 
 
-ROOT = Path(__file__).resolve().parents[2]
-SCRIPTS = Path(__file__).resolve().parent / "scripts"
+READING_ROOT = Path(__file__).resolve().parent
+SCRIPTS = READING_ROOT / "scripts"
+DEFAULT_READ_WORKERS = 8
+MAX_READ_WORKER_CAP = 16
+
+
+def _read_worker_cap(default: int = MAX_READ_WORKER_CAP) -> int:
+    raw = str(os.environ.get("READING_READ_WORKER_CAP") or "").strip()
+    if raw:
+        try:
+            return max(1, min(MAX_READ_WORKER_CAP, int(raw)))
+        except ValueError:
+            pass
+    return max(1, min(MAX_READ_WORKER_CAP, int(default or DEFAULT_READ_WORKERS)))
 
 
 def _python_env() -> dict[str, str]:
     env = os.environ.copy()
     reading_entries: list[str] = [
-        str(ROOT / "modules" / STAGE_NAME),
+        str(READING_ROOT),
         str(SCRIPTS),
     ]
     if SCRIPTS.is_dir():
         reading_entries.extend(
             str(path)
-            for path in sorted(SCRIPTS.iterdir())
+            for path in sorted(SCRIPTS.rglob("*"))
             if path.is_dir() and not path.name.startswith("__")
         )
-    entries: list[str] = [
-        *reading_entries,
-        str(ROOT / "framework"),
-        str(ROOT / "framework" / "scripts"),
-        str(ROOT / "web" / "backend"),
-        str(ROOT),
-    ]
-    modules_root = ROOT / "modules"
-    for stage_dir in sorted(path for path in modules_root.iterdir() if path.is_dir()):
-        entries.append(str(stage_dir))
-        scripts = stage_dir / "scripts"
-        if scripts.is_dir():
-            entries.append(str(scripts))
     existing = [part for part in env.get("PYTHONPATH", "").split(os.pathsep) if part]
     seen: set[str] = set()
     merged: list[str] = []
-    for item in [*entries, *existing]:
+    for item in [*reading_entries, *existing]:
         if item and item not in seen:
             seen.add(item)
             merged.append(item)
     env["PYTHONPATH"] = os.pathsep.join(merged)
-    env["WORKSPACE_ROOT"] = str(ROOT)
     return env
 
 
 def _ensure_runtime_imports() -> None:
-    # Reading 内部包名（如 pipeline/common）必须优先于其它 TASTE 模块的同名包。
     for entry in reversed(_python_env()["PYTHONPATH"].split(os.pathsep)):
         if not entry:
             continue
@@ -126,13 +91,9 @@ def _ensure_runtime_imports() -> None:
         sys.path.insert(0, entry)
 
 
-def _load_json(path: str, default):
-    return json.loads(Path(path).read_text(encoding="utf-8")) if path else default
-
-
 def _contract_payload() -> dict:
     payload = contract()
-    payload["entrypoint"] = f"modules/{STAGE_NAME}/main.py"
+    payload["entrypoint"] = "main.py"
     payload["scripts_are_private_backend"] = True
     return payload
 
@@ -141,161 +102,232 @@ def _normalize_action(action: str) -> str:
     return str(action or "").strip().replace("-", "_")
 
 
-def _run_script(script_stem: str, args: Sequence[str]) -> int:
-    script = SCRIPTS / f"{_normalize_action(script_stem)}.py"
-    if not script.exists():
-        raise SystemExit(f"Unknown {STAGE_NAME} module action: {script_stem}")
-    proc = subprocess.run([sys.executable, str(script), *args], cwd=ROOT, env=_python_env(), text=True)
-    return int(proc.returncode)
+def _module_path(path: Path) -> str:
+    return ".".join(path.relative_to(SCRIPTS).with_suffix("").parts)
+
+
+def _imports(tree: ast.AST) -> list[str]:
+    values: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            values.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            prefix = "." * int(node.level or 0) + (node.module or "")
+            for alias in node.names:
+                values.add(prefix + (("." + alias.name) if prefix and alias.name != "*" else alias.name))
+    return sorted(values)
+
+
+def _script_record(path: Path) -> dict[str, Any]:
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(path))
+    functions = [node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    classes = [node.name for node in tree.body if isinstance(node, ast.ClassDef)]
+    parts = path.relative_to(SCRIPTS).parts
+    category = parts[0] if len(parts) > 1 else "core"
+    return {
+        "path": path.relative_to(READING_ROOT).as_posix(),
+        "module": _module_path(path),
+        "category": category,
+        "role": "implementation",
+        "line_count": len(source.splitlines()),
+        "function_count": len(functions),
+        "functions": functions,
+        "class_count": len(classes),
+        "classes": classes,
+        "imports": _imports(tree),
+    }
+
+
+def _build_manifest() -> dict[str, Any]:
+    scripts = [
+        _script_record(path)
+        for path in sorted(SCRIPTS.rglob("*.py"))
+        if "__pycache__" not in path.parts
+    ]
+    top_level_files = sorted(path.name for path in SCRIPTS.glob("*.py"))
+    duplicate_modules: dict[str, list[str]] = {}
+    for record in scripts:
+        duplicate_modules.setdefault(str(record["module"]).rsplit(".", 1)[-1], []).append(str(record["path"]))
+    conflicting_duplicate_modules = {
+        name: paths for name, paths in duplicate_modules.items() if len(paths) > 1 and name != "__init__"
+    }
+    count_limit = 7
+    status = "pass" if not conflicting_duplicate_modules and len(scripts) <= count_limit else "fail"
+    return {
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "module": "reading",
+        "purpose": "论文全文获取、精读准备和 Reading 正式执行脚本清单。",
+        "boundary": "scripts 只保留 Reading 内部全文获取、精读和 Claude prompt 运行代码；测试/批测脚本不得放入模块 scripts 目录。配置在 config/，运行输入和产物在 .runtime/output/<UTC精确时间run-id>/；latest_run 只是人工审查副本，程序不得从中同步。",
+        "public_entrypoint": "main.py",
+        "script_count": len(scripts),
+        "script_count_limit": count_limit,
+        "scripts": scripts,
+        "audit": {
+            "top_level_python_files": top_level_files,
+            "conflicting_duplicate_basenames": conflicting_duplicate_modules,
+            "script_count_within_limit": len(scripts) <= count_limit,
+            "status": status,
+        },
+    }
+
+
+def _load_private_script_module(relative_path: str, module_name: str) -> Any:
+    _ensure_runtime_imports()
+    module_path = (SCRIPTS / relative_path).resolve(strict=False)
+    try:
+        module_path.relative_to(SCRIPTS.resolve(strict=False))
+    except ValueError as exc:
+        raise ModuleNotFoundError(f"Reading private module path escapes scripts root: {relative_path}") from exc
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise ModuleNotFoundError(f"Cannot load Reading private module: {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _private_core_module(stem: str) -> Any:
+    _ensure_runtime_imports()
+    module_name = f"core.{stem}"
+    expected_path = (SCRIPTS / "core" / f"{stem}.py").resolve(strict=False)
+    loaded = sys.modules.get(module_name)
+    if loaded is not None:
+        loaded_path = Path(str(getattr(loaded, "__file__", ""))).resolve(strict=False)
+        if loaded_path == expected_path:
+            return loaded
+    try:
+        spec = importlib.util.find_spec(module_name)
+        if spec is not None and spec.loader is not None and spec.origin:
+            module_path = Path(spec.origin).resolve(strict=False)
+            module_path.relative_to(SCRIPTS.resolve(strict=False))
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
+            return module
+    except Exception:
+        pass
+    return _load_private_script_module(f"core/{stem}.py", f"reading_private_core_{stem}")
+
+
+def _common_module() -> Any:
+    return _private_core_module("common")
+
+
+def _read_pipeline_module() -> Any:
+    _ensure_runtime_imports()
+    try:
+        from pipeline import read_pipeline
+
+        module_path = Path(str(getattr(read_pipeline, "__file__", ""))).resolve(strict=False)
+        module_path.relative_to(SCRIPTS.resolve(strict=False))
+        return read_pipeline
+    except Exception:
+        return _load_private_script_module("pipeline/read_pipeline.py", "reading_private_read_pipeline")
+
+
+def _private_pipeline_module(stem: str) -> Any:
+    _ensure_runtime_imports()
+    try:
+        module_name = f"pipeline.{stem}"
+        spec = importlib.util.find_spec(module_name)
+        if spec is not None and spec.loader is not None and spec.origin:
+            module_path = Path(spec.origin).resolve(strict=False)
+            module_path.relative_to(SCRIPTS.resolve(strict=False))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+    except Exception:
+        pass
+    return _load_private_script_module(f"pipeline/{stem}.py", f"reading_private_{stem}")
 
 
 DIRECT_ACTIONS = {"", "read", "pipeline", "read_pipeline"}
 STANDALONE_DEEP_READ_ACTIONS = {"deep_read", "deep_read_paper", "standalone", "standalone_deep_read"}
-CHANNEL_BATCH_TEST_ACTIONS = {"channel_batch_test", "batch_channel_test", "test_channels", "channel_test"}
-AUDIT_CHANNEL_BATCH_ACTIONS = {"audit_channel_batch", "channel_batch_audit", "audit_batch", "audit_channel_test"}
-ACTION_ALIASES = {
-    "repair_full_text": "repair_current_find_full_text_evidence",
-    "current_find_research_plan": "ensure_current_find_research_plan",
-    "ensure_current_find_research_plan": "ensure_current_find_research_plan",
-}
-
-
-def _load_json_list(path: Path) -> list[Any]:
-    if not path.exists():
-        return []
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return data if isinstance(data, list) else []
-
-
-def _save_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-
-
-def _run_import_paper(args: Sequence[str]) -> int:
-    parser = argparse.ArgumentParser(description="Import one external paper into the Reading module input store.")
-    parser.add_argument("--project", required=True)
-    parser.add_argument("--paper-id", required=True)
-    parser.add_argument("--title", required=True)
-    parser.add_argument("--authors", default="")
-    parser.add_argument("--published", default="")
-    parser.add_argument("--categories", default="")
-    parser.add_argument("--abs-url", default="")
-    parser.add_argument("--pdf-url", default="")
-    parser.add_argument("--summary", default="")
-    parser.add_argument("--source", default="manual")
-    parser.add_argument("--venue", default="")
-    parser.add_argument("--journal", default="")
-    parser.add_argument("--citations", default="")
-    parser.add_argument("--influential-citations", default="")
-    ns = parser.parse_args(list(args))
-
-    _ensure_runtime_imports()
-    from auto_research.source_selection import canonical_source_selection, paper_source_allowed
-    from literature_policy import now_utc, score_paper
-    from project_paths import build_paths, load_project_config
-
-    cfg = load_project_config(ns.project)
-    paths = build_paths(ns.project)
-    item: dict[str, Any] = {
-        "source": ns.source,
-        "paper_id": ns.paper_id,
-        "entry_id": ns.abs_url or ns.paper_id,
-        "title": ns.title,
-        "summary": ns.summary,
-        "published": ns.published,
-        "updated": ns.published,
-        "authors": [part.strip() for part in ns.authors.split(",") if part.strip()],
-        "categories": [part.strip() for part in ns.categories.split(",") if part.strip()],
-        "pdf_url": ns.pdf_url,
-        "abs_url": ns.abs_url,
-        "citations": ns.citations or None,
-        "influential_citations": ns.influential_citations or None,
-        "tldr": None,
-        "venue": ns.venue,
-        "journal": ns.journal,
-    }
-    selection = canonical_source_selection(project_config_path=paths.config)
-    if not paper_source_allowed(item, selection):
-        print("source disabled by canonical source selection; import skipped")
-        return 0
-
-    item.update(score_paper(item, cfg, reference_time=now_utc()))
-    paper_dir = paths.raw_papers / ns.paper_id
-    paper_dir.mkdir(parents=True, exist_ok=True)
-    _save_json(paper_dir / "metadata.json", item)
-    (paper_dir / "source.md").write_text(
-        f"# {ns.title}\n\n"
-        f"- source: {ns.source}\n"
-        f"- paper_id: `{ns.paper_id}`\n"
-        f"- authors: {ns.authors}\n"
-        f"- published: {ns.published}\n"
-        f"- venue: {ns.venue}\n"
-        f"- journal: {ns.journal}\n"
-        f"- categories: {ns.categories}\n"
-        f"- abs: {ns.abs_url}\n"
-        f"- pdf: {ns.pdf_url}\n"
-        f"- citations: {ns.citations}\n"
-        f"- selection_bucket: {item.get('selection_bucket', '')}\n"
-        f"- discovery_priority_score: {item.get('discovery_priority_score', '')}\n\n"
-        "## Abstract\n\n"
-        f"{ns.summary}\n",
-        encoding="utf-8",
-    )
-
-    ingested_path = paths.state / "ingested_ids.json"
-    ingested = _load_json_list(ingested_path)
-    if ns.paper_id not in ingested:
-        ingested.append(ns.paper_id)
-        _save_json(ingested_path, ingested)
-    print(paper_dir)
-    return 0
+MANIFEST_ACTIONS = {"manifest", "script_manifest", "audit_scripts", "generate_script_manifest"}
 
 def _run_standalone_deep_read(args: Sequence[str]) -> int:
-    _ensure_runtime_imports()
-    from pipeline.standalone_deep_read import main as standalone_main
+    parser = argparse.ArgumentParser(description="Run Reading single-paper deep-read through the public main.py entrypoint.")
+    parser.add_argument("--article", default="", help="可选论文 URL、arXiv 链接/编号、PDF URL 或 DOI；也可只提供标题。")
+    parser.add_argument("--input-json", default="", help="可选本地输入 JSON。")
+    parser.add_argument("--run-id", default="", help="可选运行 ID；产物写入 .runtime/output/<run-id>。")
+    parser.add_argument("--paper-id", default="")
+    parser.add_argument("--title", default="")
+    parser.add_argument("--authors", default="")
+    parser.add_argument("--abstract", default="")
+    parser.add_argument("--url", default="")
+    parser.add_argument("--pdf-url", default="")
+    parser.add_argument("--source", default="")
+    parser.add_argument("--claude-mode", choices=["auto", "run", "prepare"], default="auto")
+    parser.add_argument("--timeout-sec", type=int, default=1800)
+    parser.add_argument("--force", action="store_true", help="Regenerate reading Markdown while still allowing same-paper full-text cache reuse.")
+    parsed = parser.parse_args(list(args))
+    read_pipeline = _read_pipeline_module()
+    result = read_pipeline.run_standalone_deep_read(parsed)
+    payload = {
+        "status": result.get("status"),
+        "run_id": result.get("run_id"),
+        "run_dir": result.get("run_dir"),
+        "latest_run": result.get("latest_run"),
+        "read_md": result.get("public_final_artifact"),
+        "read_results": str(Path(str(result.get("run_dir") or "")) / "read_results.json") if result.get("run_dir") else "",
+    }
+    try:
+        payload = read_pipeline.make_reading_paths_relative(payload)
+    except Exception:
+        pass
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if result.get("status") in {"complete", "prepared_for_claude_subagent", "prepared_for_main_claude_subagent"} else 2
 
-    return standalone_main(list(args))
 
-
-def _run_channel_batch_test(args: Sequence[str]) -> int:
-    _ensure_runtime_imports()
-    from pipeline.channel_batch_test import main as batch_main
-
-    return batch_main(list(args))
-
-
-def _run_channel_batch_audit(args: Sequence[str]) -> int:
-    _ensure_runtime_imports()
-    from pipeline.audit_channel_batch import main as audit_main
-
-    return audit_main(list(args))
+def _run_manifest(args: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(description="Generate or audit Reading script_manifest.json.")
+    parser.add_argument("--check", action="store_true", help="Do not write; fail if the existing manifest differs.")
+    parsed = parser.parse_args(list(args))
+    manifest_path = READING_ROOT / "script_manifest.json"
+    payload = _build_manifest()
+    if parsed.check:
+        existing = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+        if existing.get("scripts") != payload.get("scripts") or existing.get("audit") != payload.get("audit"):
+            print(json.dumps({"status": "fail", "reason": "script_manifest_out_of_date"}, ensure_ascii=False, indent=2))
+            return 2
+        print(json.dumps({"status": payload["audit"]["status"], "script_count": payload["script_count"]}, ensure_ascii=False, indent=2))
+        return 0 if payload["audit"]["status"] == "pass" else 2
+    manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps({"status": payload["audit"]["status"], "script_count": payload["script_count"], "manifest": str(manifest_path)}, ensure_ascii=False, indent=2))
+    return 0 if payload["audit"]["status"] == "pass" else 2
 
 
 def _run_read(args: Sequence[str]) -> int:
-    parser = argparse.ArgumentParser(description="Run the Reading module backend.")
-    parser.add_argument("--run-id", default="", help="Finding run id to read.")
-    parser.add_argument("--config-json", default="", help="AppConfig-compatible JSON.")
-    parser.add_argument("--max-papers", type=int, default=5)
-    parser.add_argument("--paper-id", action="append", default=[])
-    parser.add_argument("--project", default="", help="Project id for current-Find repair compatibility.")
-    parser.add_argument("--repair-full-text", action="store_true", help="Compatibility alias for --action repair_full_text.")
-    ns, rest = parser.parse_known_args(list(args))
-    if ns.repair_full_text:
-        if not ns.project:
-            raise SystemExit("--project is required with --repair-full-text")
-        forwarded = ["--project", ns.project, "--force", *rest]
-        return _run_script("repair_current_find_full_text_evidence", forwarded)
-    if not ns.run_id:
-        raise SystemExit("--run-id is required unless --action selects a project adapter")
-    _ensure_runtime_imports()
-    from auto_research.models import AppConfig, ReadRequest
-    from read_pipeline import run_read
-
-    config = AppConfig(**_load_json(ns.config_json, {}))
-    result = run_read(ReadRequest(run_id=ns.run_id, paper_ids=ns.paper_id, max_papers=ns.max_papers), config)
-    print(json.dumps({"stage": STAGE_NAME, "run_id": ns.run_id, "result": result}, ensure_ascii=False, indent=2))
-    return 0
+    parser = argparse.ArgumentParser(description="Read exactly the local input articles through the public main.py entrypoint.")
+    parser.add_argument("--input-json", required=True, help="Input JSON inside this directory, with articles/input_articles/papers.")
+    parser.add_argument("--run-id", default="", help="Output run id under .runtime/output.")
+    parser.add_argument("--max-papers", type=int, default=0, help="Optional local truncation for smoke tests only; 0 means all input articles.")
+    parser.add_argument("--claude-mode", choices=["prepare", "run", "auto"], default="prepare")
+    parser.add_argument("--timeout-sec", type=int, default=1800)
+    parser.add_argument("--read-workers", type=int, default=0, help="Parallel paper workers; 0 uses READING_READ_WORKERS or the Reading default.")
+    parser.add_argument("--force", action="store_true", help="Regenerate reading subagent Markdown instead of reusing complete per-paper results.")
+    parsed = parser.parse_args(list(args))
+    env_workers = str(os.environ.get("READING_READ_WORKERS") or "").strip()
+    try:
+        read_workers = int(parsed.read_workers or env_workers or 0)
+    except ValueError:
+        read_workers = 0
+    if read_workers <= 0:
+        read_workers = DEFAULT_READ_WORKERS if parsed.claude_mode != "prepare" else 1
+    read_workers = max(1, min(_read_worker_cap(), read_workers))
+    result = _read_pipeline_module().run_read(
+        run_id=parsed.run_id,
+        input_json=parsed.input_json,
+        claude_mode=parsed.claude_mode,
+        timeout_sec=parsed.timeout_sec,
+        max_papers=parsed.max_papers,
+        max_workers=read_workers,
+        force_deep_read=bool(parsed.force),
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result.get("status") in {"complete", "prepared_all_full_text_pending_claude"} else 2
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -315,13 +347,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_read(rest)
     if action in STANDALONE_DEEP_READ_ACTIONS:
         return _run_standalone_deep_read(rest)
-    if action in CHANNEL_BATCH_TEST_ACTIONS:
-        return _run_channel_batch_test(rest)
-    if action in AUDIT_CHANNEL_BATCH_ACTIONS:
-        return _run_channel_batch_audit(rest)
-    if action in {"import", "import_paper"}:
-        return _run_import_paper(rest)
-    return _run_script(ACTION_ALIASES.get(action, action), rest)
+    if action in MANIFEST_ACTIONS:
+        return _run_manifest(rest)
+    raise SystemExit(f"Unknown {STAGE_NAME} module action: {action}")
 
 
 if __name__ == "__main__":

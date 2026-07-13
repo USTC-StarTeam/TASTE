@@ -1,11 +1,11 @@
 ---
 name: nature-family-writing
-description: Nature / Springer Nature 期刊形状的写作规约，替代旧 vendor 中杂乱的 Nature 参考。
+description: Nature / Springer Nature 期刊文章形状、语气、section、availability statement 和 reference policy 规约。Use when venue_requirements.json identifies Nature-family, Springer Nature, Nature Machine Intelligence, or similar journal submission mode.
 ---
 
 # Nature-Family Writing Skill
 
-当 `venue_requirements.json` 解析出 Springer Nature 或 Nature-family 期刊时，writing_dev 必须切换到期刊文章模式。
+当 `venue_requirements.json` 解析出 Springer Nature 或 Nature-family 期刊时，TASTE Writing 必须切换到期刊文章模式。
 
 ## 写作形状
 

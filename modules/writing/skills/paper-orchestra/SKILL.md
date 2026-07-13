@@ -1,7 +1,6 @@
 ---
 name: paper-orchestra
 description: Orchestrate the full PaperOrchestra (Song et al., 2026, arXiv:2604.05018) five-agent pipeline to turn unstructured research materials (idea, experimental log, LaTeX template, conference guidelines, optional figures) into a submission-ready LaTeX manuscript and compiled PDF. TRIGGER when the user asks to "write a paper from my experiments", "turn this idea and these results into a paper", "generate a conference submission", "run paper-orchestra on X", or otherwise wants the end-to-end paper-writing pipeline. Coordinates the outline-agent, plotting-agent, literature-review-agent, section-writing-agent, and content-refinement-agent skills.
-data_access_level: raw
 ---
 
 # paper-orchestra (Orchestrator)

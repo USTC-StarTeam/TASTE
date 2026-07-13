@@ -299,7 +299,7 @@ def main() -> None:
     exp_rows = load_json(paths.state / "experiment_registry.json")
     requests = load_json(paths.state / "natural_language_requests.json")
     plan = load_json(paths.state / "parallel_plan.json")
-    ideas = load_json(paths.state / "idea_candidates.json")
+    ideas = load_json(paths.planning / "finding" / "ideas.json")
     paper_quality = load_json(paths.state / "paper_quality.json")
     active_repo = load_json(paths.state / "active_repo.json") if (paths.state / "active_repo.json").exists() else {}
     repo_data_requirements = load_json(paths.state / "repo_data_requirements.json") if (paths.state / "repo_data_requirements.json").exists() else {}
@@ -348,7 +348,7 @@ def main() -> None:
         current_repo.setdefault('selection_source', 'evidence_ready_repo_selection')
     current_repo_path = str(current_repo.get('repo_path') or current_repo.get('local_path') or '') if isinstance(current_repo, dict) else ''
     real_probe = load_json(paths.state / "real_dataset_probe.json") if (paths.state / "real_dataset_probe.json").exists() else {}
-    bootstrap = load_json(paths.state / "repo_env_bootstrap.json") if (paths.state / "repo_env_bootstrap.json").exists() else {}
+    environment_record = load_json(paths.state / "environment_handoff.json") if (paths.state / "environment_handoff.json").exists() else {}
     machine = load_json(paths.reports / "machine_profile.json")
     paper_state = get_active_paper_state(args.project, venue=args.venue)
     methods = plan.get("methods", []) if isinstance(plan, dict) else plan
@@ -375,9 +375,17 @@ def main() -> None:
     llm_ready = llm_available(cfg)
     llm_reason = "" if llm_ready else llm_disabled_reason(cfg)
     claude_available = bool(find_claude(cfg))
-    active_env = bootstrap.get('env_name', '') if isinstance(bootstrap, dict) else ''
-    active_env_status = bootstrap.get('status', '') if isinstance(bootstrap, dict) else ''
-    active_env_installed = active_env_status == 'completed'
+    environment_handoff = environment_record.get('environment_handoff') if isinstance(environment_record, dict) and isinstance(environment_record.get('environment_handoff'), dict) else {}
+    environment_gate = environment_handoff.get('handoff_gate') if isinstance(environment_handoff.get('handoff_gate'), dict) else {}
+    environment_conda = environment_handoff.get('conda') if isinstance(environment_handoff.get('conda'), dict) else {}
+    active_env = str(environment_conda.get('env_name') or cfg.get('conda_env') or '')
+    active_env_status = str(environment_record.get('status') or '') if isinstance(environment_record, dict) else ''
+    active_env_installed = bool(
+        isinstance(environment_record, dict)
+        and environment_record.get('valid') is True
+        and environment_handoff.get('ready_for_experimenting') is True
+        and environment_gate.get('passed') is True
+    )
     blocked_datasets = list(repo_data_requirements.get('blocked_datasets', []) if isinstance(repo_data_requirements, dict) else [])
     ready_datasets = list(repo_data_requirements.get('ready_datasets', []) if isinstance(repo_data_requirements, dict) else [])
     if isinstance(real_probe, dict) and str(real_probe.get('repo_path') or '') == current_repo_path:
@@ -501,7 +509,7 @@ def main() -> None:
         f"- experiments failed_or_incomplete: {len(failed)}\n",
         f"- failed runs with analysis: {len(analyzed_failed)}\n",
         f"- natural-language requests logged: {len(requests) if isinstance(requests, list) else 0}\n",
-        f"- environment bootstrap prepared: {(paths.state / 'repo_env_bootstrap.json').exists()}\n",
+        f"- environment handoff ready: {active_env_installed}\n",
         f"- next actions generated: {(paths.state / 'next_actions.json').exists()}\n",
         f"- evolution memory ready: {(paths.state / 'evolution_memory.json').exists()}\n",
         f"- workflow blueprint ready: {(paths.planning / 'workflow_blueprint.md').exists()}\n",

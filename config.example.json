@@ -6,52 +6,7 @@
   "api_key": "",
   "model": "",
   "temperature": 0.4,
-  "llm_roles": {
-    "find": {
-      "provider": "",
-      "base_url": "",
-      "api_key": "",
-      "model": "",
-      "temperature": null
-    },
-    "read": {
-      "provider": "",
-      "base_url": "",
-      "api_key": "",
-      "model": "",
-      "temperature": null
-    },
-    "idea_generator": {
-      "provider": "",
-      "base_url": "",
-      "api_key": "",
-      "model": "",
-      "temperature": null
-    },
-    "idea_judge": {
-      "provider": "",
-      "base_url": "",
-      "api_key": "",
-      "model": "",
-      "temperature": null
-    },
-    "plan_generator": {
-      "provider": "",
-      "base_url": "",
-      "api_key": "",
-      "model": "",
-      "temperature": null
-    },
-    "plan_evaluator": {
-      "provider": "",
-      "base_url": "",
-      "api_key": "",
-      "model": "",
-      "temperature": null
-    }
-  },
   "llm_concurrency": 8,
-  "idea_parallel_workers": 2,
   "max_fetch_papers": 120,
   "max_recommended_papers": 20,
   "max_ideas": 6,

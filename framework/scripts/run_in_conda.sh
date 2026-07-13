@@ -11,12 +11,24 @@ fi
 PROJECT_NAME="${1:-}"
 shift || true
 ENV_OVERRIDE=""
-if [[ "${1:-}" == "--env-name" ]]; then
-  ENV_OVERRIDE="${2:-}"
-  shift 2 || true
-fi
+ENV_PREFIX_OVERRIDE=""
+while [[ "$#" -gt 0 ]]; do
+  case "${1:-}" in
+    --env-name)
+      ENV_OVERRIDE="${2:-}"
+      shift 2 || true
+      ;;
+    --env-prefix)
+      ENV_PREFIX_OVERRIDE="${2:-}"
+      shift 2 || true
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 if [[ -z "$PROJECT_NAME" || "$#" -eq 0 ]]; then
-  echo "usage: framework/scripts/run_in_conda.sh <project> [--env-name <env>] <command...>" >&2
+  echo "usage: framework/scripts/run_in_conda.sh <project> [--env-name <env>] [--env-prefix <prefix>] <command...>" >&2
   exit 1
 fi
 
@@ -47,6 +59,16 @@ if [[ -z "$CONDA_ENV" ]]; then
 import json, sys
 print(json.load(open(sys.argv[1], 'r', encoding='utf-8')).get('conda_env', ''))
 PY2
+)"
+fi
+CONDA_PREFIX_PATH="$ENV_PREFIX_OVERRIDE"
+if [[ -z "$CONDA_PREFIX_PATH" ]]; then
+  CONDA_PREFIX_PATH="$("$MANAGEMENT_PYTHON_BIN" - <<'PY_PREFIX' "$CONFIG"
+import json, sys
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+runtime = cfg.get('runtime') if isinstance(cfg.get('runtime'), dict) else {}
+print(runtime.get('conda_env_prefix', ''))
+PY_PREFIX
 )"
 fi
 
@@ -81,7 +103,7 @@ locate_conda_exe() {
 CONDA_EXE_PATH="$(locate_conda_exe || true)"
 if [[ -z "$CONDA_EXE_PATH" ]]; then
   echo "unable to locate a conda executable for project $PROJECT_NAME" >&2
-  echo "remediation: $MANAGEMENT_PYTHON_BIN $ROOT/framework/scripts/run_module.py environment --action bootstrap --project $PROJECT_NAME --repo-path <repo-path> --prepare-only" >&2
+  echo "remediation: $MANAGEMENT_PYTHON_BIN $ROOT/framework/scripts/run_module.py environment --action deploy_from_plan --project $PROJECT_NAME" >&2
   exit 1
 fi
 
@@ -95,6 +117,16 @@ if [[ -z "$CONDA_BASE" || ! -f "$CONDA_BASE/etc/profile.d/conda.sh" ]]; then
 fi
 
 source "$CONDA_BASE/etc/profile.d/conda.sh"
+
+if [[ -n "$CONDA_PREFIX_PATH" ]]; then
+  if [[ ! -x "$CONDA_PREFIX_PATH/bin/python" ]]; then
+    echo "configured Environment handoff prefix is not runnable: $CONDA_PREFIX_PATH" >&2
+    echo "remediation: $MANAGEMENT_PYTHON_BIN $ROOT/framework/scripts/run_module.py environment --action deploy_from_plan --project $PROJECT_NAME" >&2
+    exit 2
+  fi
+  cd "$ROOT"
+  exec "$CONDA_EXE_PATH" run -p "$CONDA_PREFIX_PATH" "$@"
+fi
 
 if [[ -n "$CONDA_ENV" && "$CONDA_ENV" != "base" ]]; then
   ENV_JSON="$($CONDA_EXE_PATH env list --json 2>/dev/null || true)"
@@ -112,7 +144,7 @@ PY3
 )"
   if [[ "$ENV_EXISTS" != "yes" ]]; then
     echo "conda environment '$CONDA_ENV' does not exist for project $PROJECT_NAME" >&2
-    echo "remediation: $MANAGEMENT_PYTHON_BIN $ROOT/framework/scripts/run_module.py environment --action bootstrap --project $PROJECT_NAME --repo-path <repo-path> --env-name $CONDA_ENV --prepare-only" >&2
+    echo "remediation: $MANAGEMENT_PYTHON_BIN $ROOT/framework/scripts/run_module.py environment --action deploy_from_plan --project $PROJECT_NAME" >&2
     exit 1
   fi
 fi

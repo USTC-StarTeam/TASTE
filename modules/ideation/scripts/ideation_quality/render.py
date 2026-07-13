@@ -33,13 +33,24 @@ def render_ideas_markdown(ideas: Sequence[dict[str, Any]], audit: dict[str, Any]
             "### 新方法", compact_text(idea.get("new_method"), 5000), "",
             "### 机制细节", compact_text(idea.get("method_details"), 5000), "",
             "### 初步实验", compact_text(idea.get("initial_experiment"), 5000), "",
-            "### 坏例切片", compact_text(idea.get("bad_case_slice"), 2000), "",
             "### 启发来源",
         ])
         for source in idea.get("inspired_by", []):
             if isinstance(source, dict):
-                parts = [source.get("title", ""), source.get("source", ""), source.get("reason", ""), source.get("url", "")]
-                lines.append("- " + " | ".join(compact_text(part, 500) for part in parts if compact_text(part, 20)))
+                title = compact_text(source.get("title"), 500)
+                url = compact_text(source.get("url"), 700)
+                reason = compact_text(source.get("reason"), 700)
+                source_name = compact_text(source.get("source"), 120)
+                label = f"[{title}]({url})" if title and url else title
+                details = " - ".join(part for part in [source_name, reason] if part)
+                lines.append(f"- {label}{(' - ' + details) if details else ''}")
+        risks = idea.get("risks") if isinstance(idea.get("risks"), list) else []
+        lines.extend(["", "### 风险与停止标准"])
+        if risks:
+            for risk in risks:
+                lines.append(f"- {compact_text(risk, 500)}")
+        else:
+            lines.append("若同协议 baseline/control/ablation 下没有稳定改进，则暂停或剪枝该想法。")
         if issues_by_id.get(idea.get("id")):
             lines.append("")
             lines.append("### 质量审计提示")
@@ -47,23 +58,3 @@ def render_ideas_markdown(ideas: Sequence[dict[str, Any]], audit: dict[str, Any]
                 lines.append(f"- {issue}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
-
-
-def build_hypothesis_arena(ideas: Sequence[dict[str, Any]], topic_text: str) -> dict[str, Any]:
-    hypotheses = []
-    for index, idea in enumerate(ideas, 1):
-        hypotheses.append({
-            "hypothesis_id": f"h{index:02d}_{idea.get('id', f'idea_{index}')}",
-            "title": idea.get("title", ""),
-            "method_hypothesis": idea.get("new_method", ""),
-            "nearest_evidence": idea.get("inspired_by", []),
-            "minimal_test": idea.get("initial_experiment", ""),
-            "counterexample_slice": idea.get("bad_case_slice", ""),
-            "kill_criteria": "若同协议 baseline/control/ablation 下没有稳定改进，或坏例切片退化且无法由机制解释，则暂停或剪枝该想法。",
-            "priority": index,
-        })
-    return {
-        "generated_at": utc_now_iso(),
-        "topic_text": topic_text,
-        "hypotheses": hypotheses,
-    }

@@ -1,4 +1,5 @@
 # Planning standalone/runtime artifacts; source files and docs stay tracked.
+/.runtime/
 /runs/
 /.runs/
 /tmp/

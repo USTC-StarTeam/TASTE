@@ -373,7 +373,6 @@ config_payload = {{
     "biorxiv_llm_candidate_limit": biorxiv_candidate_limit,
     "biorxiv_llm_candidates_per_category": biorxiv_per_category,
     "llm_concurrency": env_int("LLM_CONCURRENCY", config_positive_int("llm_concurrency", 4 if fast_mode else 8 if deep_survey else 6)),
-    "idea_parallel_workers": env_int("IDEA_WORKERS", config_positive_int("idea_parallel_workers", 2 if deep_survey else 1)),
     "abstract_scoring_max_workers": abstract_scoring_max_workers,
     "abstract_scoring_batch_size": abstract_scoring_batch_size,
     "abstract_scoring_timeout_sec": abstract_scoring_timeout_sec,
@@ -671,7 +670,7 @@ def _taste_article_from_item(row, source):
 def _load_backup_articles(limit):
     candidates = []
     # Prefer prior successful TASTE runs because they already match TASTE's schema.
-    runs_root = root / "runtime" / "runs"
+    runs_root = root / "modules" / "finding" / ".runtime" / "runs"
     for find_path in sorted(runs_root.glob("find_*/find_results.json"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True):
         if run_id in str(find_path):
             continue
@@ -1198,7 +1197,7 @@ def main() -> int:
     parser.add_argument("--env-name", default=DEFAULT_ENV)
     parser.add_argument("--max-papers", type=int, default=20)
     parser.add_argument("--max-ideas", type=int, default=6)
-    parser.add_argument("--repair-rounds", type=int, default=2)
+    parser.add_argument("--repair-rounds", type=int, default=3)
     parser.add_argument("--skip-arxiv", action="store_true")
     parser.add_argument("--skip-huggingface", action="store_true")
     parser.add_argument("--skip-github", action="store_true")

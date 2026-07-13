@@ -1,7 +1,5 @@
-# writing_dev 运行中间产物，只能本地保留，不进入 git
-runs/
-workspaces/
-outputs/
+# Writing 本地会话、队列和工具缓存，不进入 git
+.runtime/
 cache/
 .cache/
 *.aux

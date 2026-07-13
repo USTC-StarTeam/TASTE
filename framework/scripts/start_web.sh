@@ -86,16 +86,7 @@ export WORKSPACE_ROOT="${WORKSPACE_ROOT:-$ROOT}"
 export PROJECT_ID="${PROJECT_ID:-${DEFAULT_PROJECT_ID:-}}"
 export DEFAULT_PROJECT_ID="${DEFAULT_PROJECT_ID:-${PROJECT_ID:-}}"
 export MANAGEMENT_PYTHON="${MANAGEMENT_PYTHON:-$PYTHON}"
-PY_ROOTS=("$ROOT/framework" "$ROOT/web/backend" "$ROOT/modules/finding" "$ROOT/modules/reading" "$ROOT/modules/ideation" "$ROOT/modules/planning" "$ROOT/modules/environment" "$ROOT/modules/experimenting" "$ROOT/modules/writing" "$ROOT" "$ROOT/framework/scripts" "$ROOT/modules/ideation/scripts" "$ROOT/modules/planning/scripts" "$ROOT/modules/environment/scripts" "$ROOT/modules/experimenting/scripts" "$ROOT/modules/writing/scripts")
-for module_scripts in "$ROOT"/modules/*/scripts; do
-  [[ -d "$module_scripts" ]] || continue
-  if [[ "$module_scripts" == "$ROOT/modules/finding/scripts" || "$module_scripts" == "$ROOT/modules/reading/scripts" ]]; then
-    continue
-  fi
-  while IFS= read -r subdir; do
-    PY_ROOTS+=("$subdir")
-  done < <(find "$module_scripts" -type d ! -name "__pycache__" | sort)
-done
+PY_ROOTS=("$ROOT/framework" "$ROOT/web/backend" "$ROOT" "$ROOT/framework/scripts")
 PY_JOINED="$(IFS=:; echo "${PY_ROOTS[*]}")"
 export PYTHONPATH="$PY_JOINED${PYTHONPATH:+:$PYTHONPATH}"
 exec "$PYTHON" -m uvicorn auto_research.web.server:app --host "$HOST" --port "$PORT"

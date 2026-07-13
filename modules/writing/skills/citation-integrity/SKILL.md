@@ -1,6 +1,6 @@
 ---
 name: citation-integrity
-description: 写作模块的真实引用、BibTeX、正文 citation 覆盖和查重规约。
+description: TASTE Writing 的真实引用、BibTeX、正文 citation 覆盖、查重和 citation-key 一致性规约。Use when Claude needs to build refs.bib, verify citations, repair missing BibTeX keys, enforce citation coverage, or audit reference真实性.
 ---
 
 # Citation Integrity Skill

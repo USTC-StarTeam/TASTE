@@ -1,4 +1,5 @@
 # 本开发模块的运行中间产物，不纳入 git。
+.runtime/
 __pycache__/
 *.py[cod]
 .pytest_cache/

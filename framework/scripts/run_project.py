@@ -269,6 +269,14 @@ def _current_find_payloads(paths) -> list[dict]:
             nested = data.get('plans_json')
             if isinstance(nested, dict):
                 payloads.append(nested)
+            plans_json_path = str(data.get('plans_json_path') or '').strip()
+            if plans_json_path:
+                nested_path = Path(plans_json_path).expanduser()
+                if not nested_path.is_absolute():
+                    nested_path = ROOT / nested_path
+                nested_payload = load_json(nested_path)
+                if isinstance(nested_payload, dict):
+                    payloads.append(nested_payload)
     return payloads
 
 
@@ -675,31 +683,37 @@ def execute_trial_process(project: str, paths, script_dir: Path, repo_path: str,
     command = str(trial.get('command', ''))
     structured_argv = extract_structured_argv(trial)
     conda_exe = locate_conda_executable()
-    env_ready = conda_env_exists(env_name, conda_exe)
-    if (not env_name or env_name == 'base') and os.environ.get('ALLOW_CONDA_BASE', '0') != '1':
-        return subprocess.CompletedProcess(['refuse-base-env'], 2, '', 'refusing to run trial without a non-base project conda env; set env_name or ALLOW_CONDA_BASE=1 for diagnostics')
+    cfg = load_json(paths.config)
+    handoff_runtime = environment_handoff_runtime(paths, cfg if isinstance(cfg, dict) else {})
+    env_prefix = str(handoff_runtime.get('conda_env_prefix') or '')
+    experiment_python = str(handoff_runtime.get('experiment_python') or '')
+    if not handoff_runtime.get('ready'):
+        return subprocess.CompletedProcess(
+            ['blocked-environment-handoff'],
+            2,
+            '',
+            'Environment handoff is not ready; refusing to run an experiment outside its exact Conda prefix.',
+        ), command, 'blocked-environment-handoff'
+    if not conda_exe:
+        return subprocess.CompletedProcess(['missing-conda'], 127, '', 'unable to locate conda for the Environment handoff prefix'), command, 'blocked-missing-conda'
 
     if structured_argv:
-        exec_cmd = structured_argv
+        exec_cmd = list(structured_argv)
+        if experiment_python and Path(exec_cmd[0]).name in {'python', 'python3'}:
+            exec_cmd[0] = experiment_python
         display = shlex.join(structured_argv)
-        mode = 'structured-argv'
-        if env_name and env_ready and conda_exe:
-            exec_cmd = [conda_exe, 'run', '-n', env_name, *structured_argv]
-            mode = 'conda-run-argv'
+        exec_cmd = [conda_exe, 'run', '-p', env_prefix, *exec_cmd]
+        mode = 'conda-prefix-run-argv'
         try:
             proc = subprocess.run(exec_cmd, cwd=repo_cwd, env=runtime_env(env), text=True, capture_output=True)
         except FileNotFoundError as exc:
             proc = subprocess.CompletedProcess(exec_cmd, 127, '', f'executable not found: {exc.filename}')
         return proc, display, mode
 
-    if env_name and env_ready:
-        wrapped = f'cd {shlex.quote(repo_path)} && {command}'
-        exec_cmd = [str(script_dir / 'run_in_conda.sh'), project, '--env-name', env_name, 'bash', '-lc', wrapped]
-        proc = subprocess.run(exec_cmd, cwd=paths.root, env=runtime_env(env), text=True, capture_output=True)
-        return proc, command, 'shell-fallback-in-conda'
-
-    proc = subprocess.run(['bash', '-lc', command], cwd=repo_cwd, env=runtime_env(env), text=True, capture_output=True)
-    return proc, command, 'shell-fallback'
+    wrapped = f'cd {shlex.quote(str(repo_cwd))} && {command}'
+    exec_cmd = [str(script_dir / 'run_in_conda.sh'), project, '--env-prefix', env_prefix, 'bash', '-lc', wrapped]
+    proc = subprocess.run(exec_cmd, cwd=paths.root, env=runtime_env(env), text=True, capture_output=True)
+    return proc, command, 'shell-in-environment-handoff-prefix'
 
 
 def load_method_overrides(paths) -> dict:
@@ -739,18 +753,8 @@ def project_agent_timeout(cfg: dict) -> int:
 
 
 
-def repo_env_locked(paths, cfg: dict, repo_path: str, env_name: str) -> bool:
-    if not repo_path or not env_name:
-        return False
-    bootstrap = load_repo_env_bootstrap(paths)
-    same_env = str(bootstrap.get('env_name', '')) == str(env_name)
-    same_repo = str(bootstrap.get('repo_path', '')) == str(repo_path)
-    if same_env and same_repo and str(bootstrap.get('status', '')).lower() == 'completed' and conda_env_exists(env_name, cfg=cfg):
-        return True
-    return conda_env_exists(env_name, cfg=cfg)
-
-def load_repo_env_bootstrap(paths) -> dict:
-    path = paths.state / 'repo_env_bootstrap.json'
+def load_environment_handoff(paths) -> dict:
+    path = paths.state / 'environment_handoff.json'
     if not path.exists():
         return {}
     try:
@@ -758,6 +762,46 @@ def load_repo_env_bootstrap(paths) -> dict:
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+
+def environment_handoff_runtime(paths, cfg: dict) -> dict:
+    record = load_environment_handoff(paths)
+    handoff = record.get('environment_handoff') if isinstance(record.get('environment_handoff'), dict) else {}
+    gate = handoff.get('handoff_gate') if isinstance(handoff.get('handoff_gate'), dict) else {}
+    conda = handoff.get('conda') if isinstance(handoff.get('conda'), dict) else {}
+    runtime = cfg.get('runtime') if isinstance(cfg.get('runtime'), dict) else {}
+    env_name = str(cfg.get('conda_env') if 'conda_env' in cfg else runtime.get('conda_env') or conda.get('env_name') or '').strip()
+    handoff_env_name = str(conda.get('env_name') or '').strip()
+    prefix = str(runtime.get('conda_env_prefix') or conda.get('prefix') or '').strip()
+    experiment_python = str(runtime.get('experiment_python') or conda.get('python') or (Path(prefix) / 'bin' / 'python' if prefix else '')).strip()
+    ready = bool(
+        record.get('valid') is True
+        and handoff.get('ready_for_experimenting') is True
+        and gate.get('passed') is True
+        and prefix
+        and Path(prefix).is_dir()
+        and experiment_python
+        and Path(experiment_python).is_file()
+        and (not env_name or not handoff_env_name or env_name == handoff_env_name)
+    )
+    return {
+        'ready': ready,
+        'conda_env': handoff_env_name or env_name,
+        'conda_env_prefix': prefix,
+        'experiment_python': experiment_python,
+        'record': record,
+    }
+
+
+def repo_env_locked(paths, cfg: dict, repo_path: str, env_name: str) -> bool:
+    runtime = environment_handoff_runtime(paths, cfg)
+    if not runtime.get('ready'):
+        return False
+    record = runtime.get('record') if isinstance(runtime.get('record'), dict) else {}
+    handoff_repo = str(record.get('repo_path') or record.get('local_path') or '').strip()
+    same_repo = not repo_path or not handoff_repo or Path(repo_path).resolve() == Path(handoff_repo).resolve()
+    same_env = not env_name or str(runtime.get('conda_env') or '') == str(env_name)
+    return bool(same_repo and same_env)
 
 
 def mark_method_env_bootstrap_failed(paths, methods: list[dict], method: dict, reason: str) -> None:
@@ -906,7 +950,7 @@ def execute_parallel_plan(args: argparse.Namespace, cfg: dict, paths, script_dir
         env_name = method.get('env_name', cfg.get('conda_env', ''))
         method_slug = method.get('method_slug', method.get('method', 'method'))
         if repo_path and not Path(str(repo_path)).exists():
-            update_parallel_status(paths, method_name, 0, 'planned', result_summary='skipped: repo_path missing or archived; project Claude must refresh the current-route plan before launch', decision='repo_path_missing_or_archived')
+            update_parallel_status(paths, method_name, 0, 'planned', result_summary='skipped: repo_path missing or archived; Environment controller must refresh the current-route handoff before launch', decision='repo_path_missing_or_archived')
             skip_log = paths.logs / f'env_bootstrap_{method_slug}.log'
             skip_log.write_text('Skipped stale parallel-plan method because repo_path is missing or archived. The workflow must refresh the project plan from current active route before launch.' + chr(10), encoding='utf-8')
             print(skip_log, flush=True)
@@ -920,18 +964,18 @@ def execute_parallel_plan(args: argparse.Namespace, cfg: dict, paths, script_dir
                 print(skip_log, flush=True)
             else:
                 bootstrap_cmd = [
-                    *module_cmd('environment', 'bootstrap'), '--project', args.project,
-                    '--repo-path', repo_path, '--env-name', env_name, '--verify-only',
+                    *module_cmd('environment', 'deploy_from_plan'), '--project', args.project,
                 ]
                 if not args.real_bootstrap_env:
-                    bootstrap_cmd.append('--prepare-only')
-                else:
-                    bootstrap_cmd.append('--update-project-config')
+                    bootstrap_cmd.append('--dry-run')
                 bootstrap_rc = run(bootstrap_cmd, paths.root, paths.logs / f'env_bootstrap_{method_slug}.log', timeout=max(1800, coding_agent_timeout(cfg)))
-                bootstrap_state = load_repo_env_bootstrap(paths)
-                bootstrap_status = str(bootstrap_state.get('status', '')).lower()
-                if args.real_bootstrap_env and (bootstrap_rc != 0 or bootstrap_status != 'completed'):
-                    reason = bootstrap_state.get('failed_step') or bootstrap_state.get('missing_import') or bootstrap_state.get('status') or f'return_code={bootstrap_rc}'
+                handoff_runtime = environment_handoff_runtime(paths, cfg)
+                handoff_state = handoff_runtime.get('record') if isinstance(handoff_runtime.get('record'), dict) else {}
+                handoff = handoff_state.get('environment_handoff') if isinstance(handoff_state.get('environment_handoff'), dict) else {}
+                gate = handoff.get('handoff_gate') if isinstance(handoff.get('handoff_gate'), dict) else {}
+                if args.real_bootstrap_env and (bootstrap_rc not in {0, 20, 30} or not handoff_runtime.get('ready')):
+                    missing = gate.get('missing') if isinstance(gate.get('missing'), list) else []
+                    reason = '; '.join(str(item) for item in missing[:3]) or handoff_state.get('status') or f'return_code={bootstrap_rc}'
                     mark_method_env_bootstrap_failed(paths, methods, method, str(reason))
                     continue
 
@@ -1172,10 +1216,7 @@ def main() -> int:
                 run(taste_cmd, paths.root, paths.logs / '05a_finding_frontend.log', timeout=int(os.environ.get('TIMEOUT_SEC', '3600')) + 120)
             run([sys.executable, str(script_dir / 'sync_outputs.py'), '--project', args.project, '--allow-empty'], paths.root, paths.logs / '05a_taste_sync.log', timeout=120)
             run(module_cmd('reading', 'current_find_research_plan', '--project', args.project, *(['--venue', args.venue] if args.venue else [])), paths.root, paths.logs / '05ab_current_find_research_plan.log', timeout=600)
-            (paths.logs / '05aa_current_find_read_idea_plan_route.log').write_text('downstream planning is handled by the current-Find Claude Code Read/Idea/Plan route; Find remains the only default LLM-scored module.\n', encoding='utf-8')
-        run(module_cmd('ideation', 'initialization', '--project', args.project), paths.root, paths.logs / '05_ideation_initialization.log')
-        run(module_cmd('ideation', 'arena', '--project', args.project), paths.root, paths.logs / '05c_hypothesis_arena.log')
-        run(module_cmd('ideation', 'assess', '--project', args.project), paths.root, paths.logs / '05ca_idea_candidates.log')
+            (paths.logs / '05aa_current_find_stage_routes.log').write_text('Read, Idea, and Plan use separate public module entrypoints orchestrated by Framework; Find remains the only default LLM-scored module.\n', encoding='utf-8')
         run(module_cmd('planning', 'workflow', '--project', args.project), paths.root, paths.logs / '05d_workflow_blueprint.log')
 
     if args.parallel_method and args.dataset and args.benchmark and args.metric:
@@ -1194,8 +1235,8 @@ def main() -> int:
 
     run([sys.executable, str(script_dir / 'wiki_tools.py'), '--tool-action', 'bootstrap', '--project', args.project], paths.root, paths.logs / '06_bootstrap_wiki.log')
     run(module_cmd('reading', 'current_find_research_plan', '--project', args.project, *(['--venue', args.venue] if args.venue else [])), paths.root, paths.logs / '07aa_current_find_research_plan_refresh.log', timeout=600)
-    run(module_cmd('environment', 'assess_repo', '--project', args.project), paths.root, paths.logs / '07a_assess_repo_candidates.log')
-    run(module_cmd('ideation', 'assess', '--project', args.project), paths.root, paths.logs / '07b_idea_assessment.log')
+    run(module_cmd('ideation', 'idea', '--project', args.project), paths.root, paths.logs / '07ab_current_find_ideation.log', timeout=1200)
+    run(module_cmd('environment', 'deploy_from_plan', '--project', args.project), paths.root, paths.logs / '07a_environment_deploy.log')
     run(module_cmd('experimenting', 'reference_reproduction', '--project', args.project, *(['--venue', args.venue] if args.venue else [])), paths.root, paths.logs / '07c_reference_reproduction_gate.log')
     run([sys.executable, str(script_dir / 'wiki_tools.py'), '--tool-action', 'refresh_index', '--project', args.project, '--log-entry', f'iteration topic={topic} discovery={discovery_mode or ["manual_only"]}'], paths.root, paths.logs / '08_refresh_index.log')
     run([sys.executable, str(script_dir / 'compile_prompt.py'), '--project', args.project], paths.root, paths.logs / '09_compile_prompt.log')
@@ -1208,7 +1249,6 @@ def main() -> int:
         run(module_cmd('planning', 'next_actions', '--project', args.project), paths.root, paths.logs / '12b_next_actions.log')
         run(module_cmd('planning', 'method_frontier', '--project', args.project), paths.root, paths.logs / '12c_method_frontier.log')
         run(module_cmd('planning', 'review_board', '--project', args.project), paths.root, paths.logs / '12e_aris_review_board.log')
-        run(module_cmd('ideation', 'arena', '--project', args.project), paths.root, paths.logs / '12d_refresh_hypothesis_arena.log')
         run(module_cmd('experimenting', 'reference_reproduction', '--project', args.project, *(['--venue', args.venue] if args.venue else [])), paths.root, paths.logs / '12f_reference_reproduction_gate.log')
 
     run([sys.executable, str(script_dir / 'wiki_tools.py'), '--tool-action', 'lint', '--project', args.project], paths.root, paths.logs / '11_lint.log')

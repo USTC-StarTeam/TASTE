@@ -5,24 +5,25 @@
 ## 输入
 
 - 浏览器中的用户操作：项目选择、配置编辑、模块按钮、产物展开、人工编辑 idea/plan。
-- `runtime/.config.json`：本机网页配置、非敏感偏好和运行参数。
+- `framework/.runtime/.config.json`：Framework 持有的本机网页配置、非敏感偏好和运行参数。
 - `modules/finding/config/llm.local.json`：本机私有 Find LLM 配置，保存 provider/base URL/model/API key/temperature；也可用 `FINDING_LLM_CONFIG` 指向其它本机路径。
-- `projects/<project>/project.json` 与各阶段产物：网页只读取和 patch 明确字段。
-- `projects/<project>/state/environment_handoff.json`：environment 已完成交接时的当前 repo、run-local Conda prefix、实验 Python、待实验指标和数据入口；网页状态和实验按钮必须优先使用它，避免回退到旧 `conda_env` 或旧 `active_repo`。
+- `projects/<project>/project.json` 与各阶段产物：网页只读取展示；保存配置或编辑产物时把指令交给 Framework。
+- `projects/<project>/project.json` 与 `state/environment_handoff.json`：Web 已保存的 `conda_env` 名称直接使用；未填写时显示 Environment 主控选择并由 Framework 固定到项目配置的名称。handoff 通过后提供 run-local prefix、实验 Python、repo、数据入口和待实验指标。
 - FastAPI 后端返回的 job、artifact、status 和 Markdown/JSON 片段。
 
 ## 输出
 
-- API 请求：创建项目、保存配置、启动/停止模块任务、选择 run、编辑 idea/plan 状态。
+- API 请求：创建项目、保存配置、启动/停止模块任务、选择 run、编辑 idea 内容与状态。
 - 用户可见页面：七个模块页、任务栏、运行历史、状态面板、产物预览。
 - 不直接生成科研结论；结论必须来自后端模块产物。
+- `web/.runtime/state/web_jobs.json`：本机任务栏状态；不属于科研项目证据。
 
 ## 目录结构
 
 | 路径 | 作用 |
 | --- | --- |
 | `backend/auto_research/web/server.py` | FastAPI 服务入口，负责配置、项目、job、artifact 和静态前端服务。 |
-| `backend/auto_research/web/project_bridge.py` | 把项目文件系统状态整理成网页可读模型；必须过滤内部字段、陈旧状态和用户不可读内容。 |
+| `framework/scripts/auto_research/project_bridge.py` | Framework 负责项目命令、运行编排和网页所需的项目状态投影；Web 只调用其公开函数。 |
 | `backend/auto_research/web/script_manifest.json` | 后端网页脚本清单。 |
 | `frontend/client/src/App.tsx` | React 单页应用主界面，包含七阶段页面和任务栏。 |
 | `frontend/client/src/api.ts` | 前端 API 客户端。 |
@@ -34,13 +35,18 @@
 ## 前后端分工
 
 1. 前端只维护 UI 状态、表单状态和用户操作，不在浏览器里计算科研推荐或实验结论。
-2. 后端 web bridge 只做 API、任务派发、状态整形和安全过滤；核心逻辑必须调用 `framework/scripts` 或 `modules/*/scripts`。
-3. environment 页面和实验配置展示以 `environment_handoff.json` 为当前真值；它可以显示 `ready_for_experimenting`，但不能把它解释为论文级 full reproduction 或指标已通过。
-4. 用户可见 Markdown/HTML 要经过统一渲染和清洗，避免把内部 marker、paper id、JSON 字段、Claude scratchpad 或 reader 指令直接展示出来。
-5. 产物默认展示上一个已完成结果；新任务未完成前不能用半成品替换当前用户可见产物。
-6. Find 来源状态只能展示真实 Find run 的 `source_status` 或项目摘要；`检查可抓取性` 的 venue health sample 只能显示在会议列表中，不能当作“标题总数/分类后”回退来源。
-7. Find 页面必须区分“来源覆盖总量”和“本 run 漏斗计数”：`source_status_totals` 用于说明渠道覆盖，`counts/survey_stats` 用于显示本次实际处理的标题入口、标题筛选、LLM 打分和推荐结果，二者不能互相覆盖。
-8. 测试网页时必须实际打开 `http://127.0.0.1:8879`，在相应 tab 视觉检查所有关键文本、按钮、计数和产物，不只看命令行输出。
+2. Web 后端只做 API、任务传输、job 连接、静态文件和展示安全过滤；项目命令、状态投影和模块调用统一由 Framework 负责，Web 不直接调用模块。
+3. Environment 页面直接向该项目唯一的 Environment 主控 Claude 会话发送指令并显示会话历史。主控忙碌时消息持续排队且没有等待超时；页面提供优先打断和取消入口，Web 不维护会话或执行 Claude。
+4. Environment handoff 可以显示 `ready_for_experimenting`，但不能把它解释为论文级 full reproduction 或指标已通过。`conda_env` 显示名称，`conda_env_prefix` 显示路径。
+5. 用户可见 Markdown/HTML 要经过统一渲染和清洗，避免把内部 marker、paper id、JSON 字段、Claude scratchpad 或 reader 指令直接展示出来。
+6. 产物默认展示上一个已完成结果；新任务未完成前不能用半成品替换当前用户可见产物。
+7. Find 来源状态只能展示真实 Find run 的 `source_status` 或项目摘要；`检查可抓取性` 的 venue health sample 只能显示在会议列表中，不能当作“标题总数/分类后”回退来源。
+8. 当前 Find 产物按页面作用域传输：Ideas 请求显式携带项目和当前 Find run，只读取 `idea.md` 和 `ideas.json`，不会为了渲染想法同时读取超大的 Find/Read 产物。Ideas 页面上方保留人工修改卡片，最终 `idea.md` 只在右下产物栏渲染。
+9. Plan 页面显示 Framework 确认的已批准 Ideas，并允许勾选一个或多个作为本次输入；没有选中项时禁用生成。页面保持三栏布局，右上“计划操作”直接修改 `plan.md`，右下产物栏渲染同一个项目文件；页面主体不得再复制一份正文。
+10. Plan 生成、润色、Claude 选择、人类选择和 Markdown 保存都调用 `framework/scripts/run_module.py planning`。Web 不读取模块 `.runtime`、不复制 run，也不自行判断 Read/Ideas 是否就绪。
+11. Plan 修复轮数是精确次数，默认 3，允许 0。切换到历史 Find run 后，Read/Idea/Plan 的生成、编辑、批准、保存和选择控件必须只读，不能借历史页面状态修改当前项目。
+12. Find 页面必须区分“来源覆盖总量”和“本 run 漏斗计数”：`source_status_totals` 用于说明渠道覆盖，`counts/survey_stats` 用于显示本次实际处理的标题入口、标题筛选、LLM 打分和推荐结果，二者不能互相覆盖。
+13. 测试网页时必须实际打开 `http://127.0.0.1:8879`，在相应 tab 视觉检查所有关键文本、按钮、计数和产物，不只看命令行输出。
 
 ## 运行与测试
 

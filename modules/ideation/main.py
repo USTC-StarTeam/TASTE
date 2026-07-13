@@ -3,58 +3,19 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
-import subprocess
 import sys
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
 STAGE_NAME = 'ideation'
 DISPLAY_NAME = 'Ideation'
-RESPONSIBILITY = 'Turn reading/finding artifacts into editable research ideas without selecting an execution route.'
-REQUIRED_EXTERNAL_INPUTS = ('llm_api_or_claude', 'reading_artifacts', 'research_profile')
-ARTIFACTS_IN = ('find_results.json', 'read_results.json', 'read.md')
-ARTIFACTS_OUT = ('ideas.json', 'idea.md', 'hypothesis_arena.md', 'idea candidate audits')
+RESPONSIBILITY = 'Consume one normalized evidence bundle and turn it into editable research ideas without discovering project inputs or selecting an execution route.'
+REQUIRED_EXTERNAL_INPUTS = ('caller_normalized_input_bundle', 'claude_code', 'runtime_config')
+ARTIFACTS_IN = ('ideation_input.json',)
+ARTIFACTS_OUT = ('idea.md', 'ideas.json')
 PRIVATE_BACKEND_ROOTS = (
     'modules/ideation/scripts/idea_pipeline.py',
-    'modules/ideation/scripts/ideation_tools.py',
-    'modules/ideation/scripts/core',
-    'modules/ideation/scripts/artifact_io',
-    'modules/ideation/scripts/claude',
-    'modules/ideation/scripts/ideation_quality',
 )
-
-
-@dataclass(slots=True)
-class ArtifactRef:
-    name: str
-    path: str = ""
-    kind: str = "json"
-    role: str = "input"
-    required: bool = False
-
-
-@dataclass(slots=True)
-class StageInvocation:
-    research_topic: str = ""
-    research_interest: str = ""
-    researcher_profile: str = ""
-    artifact_root: str = ""
-    llm: dict[str, Any] = field(default_factory=dict)
-    inputs: list[ArtifactRef] = field(default_factory=list)
-    options: dict[str, Any] = field(default_factory=dict)
-
-    def root_path(self) -> Path:
-        return Path(self.artifact_root).expanduser() if self.artifact_root else Path.cwd()
-
-
-@dataclass(slots=True)
-class StageResult:
-    status: str
-    artifacts: list[ArtifactRef] = field(default_factory=list)
-    metrics: dict[str, Any] = field(default_factory=dict)
-    message: str = ""
 
 
 def contract() -> dict[str, Any]:
@@ -69,44 +30,26 @@ def contract() -> dict[str, Any]:
     }
 
 
-ROOT = Path(__file__).resolve().parents[2]
-SCRIPTS = Path(__file__).resolve().parent / "scripts"
-
-
-def _python_env() -> dict[str, str]:
-    env = os.environ.copy()
-    entries: list[str] = [
-        str(ROOT / "framework"),
-        str(ROOT / "framework" / "scripts"),
-        str(ROOT / "web" / "backend"),
-        str(ROOT),
-    ]
-    modules_root = ROOT / "modules"
-    for stage_dir in sorted(path for path in modules_root.iterdir() if path.is_dir()):
-        entries.append(str(stage_dir))
-        scripts = stage_dir / "scripts"
-        if scripts.is_dir():
-            entries.append(str(scripts))
-    existing = [part for part in env.get("PYTHONPATH", "").split(os.pathsep) if part]
-    seen: set[str] = set()
-    merged: list[str] = []
-    for item in [*entries, *existing]:
-        if item and item not in seen:
-            seen.add(item)
-            merged.append(item)
-    env["PYTHONPATH"] = os.pathsep.join(merged)
-    env["WORKSPACE_ROOT"] = str(ROOT)
-    return env
-
-
 def _ensure_runtime_imports() -> None:
-    for entry in reversed(_python_env()["PYTHONPATH"].split(os.pathsep)):
-        if entry and entry not in sys.path:
-            sys.path.insert(0, entry)
+    scripts = str(Path(__file__).resolve().parent / "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
 
 
 def _load_json(path: str, default):
-    return json.loads(Path(path).read_text(encoding="utf-8")) if path else default
+    if not path:
+        return default
+    candidate = Path(path).expanduser()
+    if candidate.exists():
+        return json.loads(candidate.read_text(encoding="utf-8"))
+    return json.loads(path)
+
+
+def _load_app_config(path_or_json: str = "") -> dict[str, Any]:
+    if path_or_json:
+        return _load_json(path_or_json, {})
+    env_payload = os.environ.get("TASTE_IDEATION_CONFIG_JSON", "").strip()
+    return json.loads(env_payload) if env_payload else {}
 
 
 def _contract_payload() -> dict:
@@ -120,104 +63,75 @@ def _normalize_action(action: str) -> str:
     return str(action or "").strip().replace("-", "_")
 
 
-def _run_script(script_stem: str, args: Sequence[str]) -> int:
-    script = SCRIPTS / f"{_normalize_action(script_stem)}.py"
-    if not script.exists():
-        raise SystemExit(f"Unknown {STAGE_NAME} module action: {script_stem}")
-    proc = subprocess.run([sys.executable, str(script), *args], cwd=ROOT, env=_python_env(), text=True)
-    return int(proc.returncode)
+def _require_taste_conda() -> None:
+    if os.environ.get("CONDA_DEFAULT_ENV", "").strip() != "taste":
+        raise SystemExit("Ideation must run in the conda environment named 'taste'.")
 
 
-DIRECT_ACTIONS = {"", "idea", "ideation", "pipeline", "idea_pipeline"}
-STANDALONE_ACTIONS = {"generate", "generate_ideas", "standalone"}
-FINALIZE_ACTIONS = {"finalize", "finalize_run", "replay_claude"}
-IDEATION_TOOL_ACTIONS = {
-    "assess": "assess",
-    "arena": "arena",
-    "initialization": "initialization",
-}
+DIRECT_ACTIONS = {"", "idea"}
+PATCH_ACTIONS = {"patch"}
+UPDATE_MARKDOWN_ACTIONS = {"update_markdown"}
 
 
 def _run_idea(args: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(description="Run the Ideation module backend.")
-    parser.add_argument("--run-id", default="")
+    parser.add_argument("--run-id", required=True, help="调用方提供的当前 Find run_id。")
+    parser.add_argument("--input-json", required=True, help="调用方构建并校验的规范化输入包。")
     parser.add_argument("--config-json", default="")
     parser.add_argument("--max-ideas", type=int, default=0)
-    parser.add_argument("--parallel-workers", type=int, default=0)
+    parser.add_argument("--mock", action="store_true", help="仅用于本地链路自检。")
     ns = parser.parse_args(list(args))
-    if not ns.run_id:
-        raise SystemExit("--run-id is required")
     _ensure_runtime_imports()
-    from auto_research.models import AppConfig, IdeaRequest
     from idea_pipeline import run_idea
 
-    config = AppConfig(**_load_json(ns.config_json, {}))
     result = run_idea(
-        IdeaRequest(run_id=ns.run_id, max_ideas=ns.max_ideas or None, parallel_workers=ns.parallel_workers or None),
-        config,
+        ns.run_id,
+        ns.max_ideas,
+        _load_app_config(ns.config_json),
+        input_json=ns.input_json,
+        mock=ns.mock,
     )
     print(json.dumps({"stage": STAGE_NAME, "run_id": ns.run_id, "result": result}, ensure_ascii=False, indent=2))
     return 0
 
 
-
-def _run_generate(args: Sequence[str]) -> int:
-    parser = argparse.ArgumentParser(description="Run standalone Claude-Code ideation inside modules/ideation.")
-    parser.add_argument("--input", action="append", dest="inputs", default=[], help="论文精读产物文件或目录，可重复。")
-    parser.add_argument("--input-dir", action="append", dest="input_dirs", default=[], help="论文精读产物目录，可重复。")
-    parser.add_argument("--config-file", default="", help="独立生成配置 JSON 文件。")
-    parser.add_argument("--config-json", default="", help="配置 JSON 字符串；若该值是存在的路径，则按文件读取。")
-    parser.add_argument("--run-id", default="", help="运行 ID；默认自动生成。")
-    parser.add_argument("--output-root", default="", help="输出根目录，必须位于 modules/ideation 内。")
-    parser.add_argument("--research-topic", default="")
-    parser.add_argument("--research-interest", default="")
-    parser.add_argument("--researcher-profile", default="")
-    parser.add_argument("--idea-constraints", default="")
-    parser.add_argument("--max-ideas", type=int, default=0)
-    parser.add_argument("--model", default="")
-    parser.add_argument("--effort", default="")
-    parser.add_argument("--timeout-sec", type=int, default=0)
-    parser.add_argument("--mock", action="store_true", help="仅用于开发自检：不调用 Claude Code。")
-    parser.add_argument("--strict", action="store_true", help="质量审计有问题时返回失败。")
+def _run_patch(args: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(description="Patch one idea in an existing Ideation run.")
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--run-dir", required=True, help="要原地修改的 timestamp Ideation run。")
+    parser.add_argument("--idea-id", required=True)
+    parser.add_argument("--patch-json", default="", help="JSON 字符串或 JSON 文件路径；为空时读 TASTE_IDEATION_PATCH_JSON。")
+    parser.add_argument("--config-json", default="")
     ns = parser.parse_args(list(args))
-    input_paths = [*ns.inputs, *ns.input_dirs]
-    overrides = {
-        "research_topic": ns.research_topic,
-        "research_interest": ns.research_interest,
-        "researcher_profile": ns.researcher_profile,
-        "idea_constraints": ns.idea_constraints,
-        "max_ideas": ns.max_ideas or None,
-        "model": ns.model,
-        "effort": ns.effort,
-        "timeout_sec": ns.timeout_sec or None,
-        "mock": ns.mock or None,
-        "strict": ns.strict or None,
-    }
+    patch_payload = _load_json(ns.patch_json, {}) if ns.patch_json else json.loads(os.environ.get("TASTE_IDEATION_PATCH_JSON", "{}"))
     _ensure_runtime_imports()
-    from core.standalone_pipeline import load_generation_config, run_standalone_ideation
+    from idea_pipeline import patch_idea
 
-    config = load_generation_config(ns.config_file, ns.config_json, overrides)
-    result = run_standalone_ideation(input_paths, config, run_id=ns.run_id, output_root=ns.output_root)
-    print(json.dumps({"stage": STAGE_NAME, "action": "generate", "result": result}, ensure_ascii=False, indent=2))
+    result = patch_idea(ns.run_dir, ns.run_id, ns.idea_id, patch_payload, config=_load_app_config(ns.config_json))
+    print(json.dumps({"stage": STAGE_NAME, "run_id": ns.run_id, "action": "patch", "result": result}, ensure_ascii=False, indent=2))
     return 0
 
 
-def _run_finalize(args: Sequence[str]) -> int:
-    parser = argparse.ArgumentParser(description="Finalize a standalone ideation run from saved Claude stdout.")
-    parser.add_argument("--run-id", default="", help="modules/ideation/runs 下的运行 ID。")
-    parser.add_argument("--run-dir", default="", help="已有 run 目录；必须位于 modules/ideation 内。")
-    parser.add_argument("--strict", action="store_true", help="质量审计有问题时返回失败。")
+def _run_update_markdown(args: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(description="Replace idea.md in an existing Ideation run.")
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--run-dir", required=True)
+    parser.add_argument("--markdown-file", default="")
+    parser.add_argument("--stdin-markdown", action="store_true")
+    parser.add_argument("--config-json", default="")
     ns = parser.parse_args(list(args))
-    if not ns.run_id and not ns.run_dir:
-        raise SystemExit("--run-id or --run-dir is required")
-    run_dir = Path(ns.run_dir).expanduser() if ns.run_dir else (SCRIPTS.parent / "runs" / ns.run_id)
+    if ns.stdin_markdown:
+        markdown = sys.stdin.read()
+    elif ns.markdown_file:
+        markdown = Path(ns.markdown_file).expanduser().read_text(encoding="utf-8")
+    else:
+        raise SystemExit("--stdin-markdown or --markdown-file is required")
     _ensure_runtime_imports()
-    from core.standalone_pipeline import finalize_standalone_run
+    from idea_pipeline import update_idea_markdown
 
-    result = finalize_standalone_run(run_dir, strict=ns.strict)
-    print(json.dumps({"stage": STAGE_NAME, "action": "finalize", "result": result}, ensure_ascii=False, indent=2))
+    result = update_idea_markdown(ns.run_dir, ns.run_id, markdown, config=_load_app_config(ns.config_json))
+    print(json.dumps({"stage": STAGE_NAME, "run_id": ns.run_id, "action": "update_markdown", "result": result}, ensure_ascii=False, indent=2))
     return 0
-
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Ideation module public backend entrypoint.", add_help=True)
@@ -227,15 +141,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if ns.contract:
         print(json.dumps(_contract_payload(), ensure_ascii=False, indent=2))
         return 0
+    _require_taste_conda()
     action = _normalize_action(ns.action)
-    if action in STANDALONE_ACTIONS:
-        return _run_generate(rest)
-    if action in FINALIZE_ACTIONS:
-        return _run_finalize(rest)
+    if action in PATCH_ACTIONS:
+        return _run_patch(rest)
+    if action in UPDATE_MARKDOWN_ACTIONS:
+        return _run_update_markdown(rest)
     if action in DIRECT_ACTIONS:
         return _run_idea(rest)
-    if action in IDEATION_TOOL_ACTIONS:
-        return _run_script("ideation_tools", ["--tool-action", IDEATION_TOOL_ACTIONS[action], *rest])
     raise SystemExit(f"Unknown {STAGE_NAME} module action: {ns.action}")
 
 

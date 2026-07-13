@@ -6,24 +6,21 @@
 
 ## 运行环境
 
-必须在远程工作区运行：
+必须在 TASTE 工作区根目录和 conda `taste` 环境运行：
 
 ```bash
-ssh hidimension_5090_1
 cd <TASTE_ROOT>
-source /home/fmh/workspace/miniforge/etc/profile.d/conda.sh
-conda activate ar_taste
-source /home/fmh/workspace/.nvm/nvm.sh
+conda activate taste
 ```
 
-`python`、`rg` 来自 `ar_taste`；Claude/Node 使用远程 nvm。不要使用系统 Python 或本地机器路径。
+不要在 tracked 配置中写固定 Conda、Node、GPU 或工作区绝对路径。Claude Code 和 Node 使用当前用户自己的安装与账号配置。
 
 ## 输入口径
 
 框架输入是“科研目标 + 项目信息 + 模块公开参数”，不是前端页面对象，也不是模块私有中间文件。常用参数：
 
 - `--research-goal`：自然语言研究目标。
-- `--project`：项目 ID，仅作为框架状态字段；是否传给模块由 `--module-arg` 决定。
+- `--project`：项目 ID。Environment 的部署与对话会由 Framework 自动传给模块公开入口。
 - `--venue`：目标会议/期刊。
 - `--mode dry-run|execute`：`dry-run` 只写命令计划，`execute` 才实际运行模块。
 - `--strategy deterministic|hybrid|claude`：确定性七阶段推进，或交给 Claude Code 决策。
@@ -49,7 +46,7 @@ framework/workspace/runs/<run_id>/
 | `public/module_contracts*.json` | 本次使用的七模块契约。 |
 | `logs/*.stdout.log` / `logs/*.stderr.log` / `logs/*.receipt.json` | 每条模块/门控命令的日志和回执。 |
 
-模块科学产物仍由各模块写在自己的目录；框架状态不会直接覆盖项目产物。Web 需要展示时，由 Web 后端读取框架 public 状态和项目目录里的正式产物做投影。
+模块科学产物先写入各模块自己的 timestamp run；Framework 校验明确 run 后生成 Web 所需的项目状态投影。Environment run 不复制到项目，Framework 只写 handoff、Conda 名称/前缀和完整对话历史等轻量状态。Web 只读取这些投影和项目正式产物。Ideation 的完整候选只存在于 `idea.md` 和派生的 `ideas.json`，current-Find state 不保存第二份 idea 列表。
 
 ## 七阶段默认动作
 
@@ -58,9 +55,9 @@ framework/workspace/runs/<run_id>/
 | finding | `find` | 召回、过滤、评分、排序候选文献/工具。 |
 | reading | `read` | 获取全文证据并生成精读材料。 |
 | ideation | `run` | 从文献证据生成候选研究想法。 |
-| planning | `plan` | 形成可执行实验计划和唯一执行合同。 |
+| planning | `plan` | 从一个或多个选中的已批准 Ideas 形成候选计划。 |
 | environment | `deploy_from_plan` | 根据实验 plan 选择/部署仓库、数据、环境并裁决能否进入实验。 |
-| experimenting | `run` | 在锁定 repo/env 中执行实验并维护实验记录。 |
+| experimenting | `work` | 把项目交给该项目唯一的 Experimenting 主控会话；会话在项目目录中执行、验证并维护实验记录。 |
 | writing | `run` | 基于证据生成、修订、编译和审计论文。 |
 
 ## 单独使用
@@ -94,26 +91,67 @@ python framework/scripts/orchestration/run_taste_framework.py run \
   --module-arg "environment=--plan projects/protein/state/experiment_plan.json --run-id web_environment_protein"
 ```
 
+当前 Find 的 Reading 由 Framework 读取推荐项、保留可用的 URL/PDF/DOI/OpenReview 等定位信息，并调用 Reading 的通用 `read` action：
+
+```bash
+conda run -n taste python framework/scripts/run_module.py reading \
+  --action current_find_research_plan \
+  --project <project>
+```
+
+Reading 只接收生成在自身 timestamp run 中的通用输入 JSON；项目校验和产物同步由 Framework 完成。
+
+当前 Find 的 Ideation 也由专用桥接处理：Framework 校验项目、当前 Find、Read 完成标记和 Read validation，提取去重证据并构建单个输入包，再调用 `modules/ideation/main.py`。模块返回后，Framework 只接受身份一致的明确 timestamp run，并同步到项目；生成、卡片编辑和整篇 Markdown 编辑共用同一个项目级阻塞锁：
+
+```bash
+conda run -n taste python framework/scripts/run_module.py ideation \
+  --action idea \
+  --project <project> \
+  --run-id <current_find_run_id>
+```
+
+Web 不读取 Find/Read 来构造 Ideation 输入，也不访问模块 `.runtime`。`latest_run` 只是模块的人工作业副本，Framework 不使用它。
+
+当前 Find 的 Planning 由专用桥接处理：Framework 校验 Read/Ideas、run_id 和选中的已批准 Idea ID，生成显式输入包，调用 `modules/planning/main.py`，再校验并同步模块返回的精确 timestamp run。可选一个或多个 `--idea-id`；不传时使用全部已批准项。生成候选与选择执行计划是两个动作：
+
+```bash
+conda run -n taste python framework/scripts/run_module.py planning --action plan --project <project>
+conda run -n taste python framework/scripts/run_module.py planning --action select --project <project>
+```
+
+Web 不准备 Planning 输入、不判断项目就绪状态，也不复制 Planning 产物。
+
+如果 Ideation 已同步的修改影响当前 `plans.json` 中的 Idea，Framework 会使当前 `plan.md` 和机器投影失效，并用原已规划且仍批准的 Idea 自动重跑 Planning，默认精确修复 3 轮；`planning_runs/` 历史不参与当前状态，也不会被删除。Full Cycle 在 Plan 成功后自动执行 `current-find-selection`，取得唯一执行计划后才进入 Environment。
+
 查看状态：
 
 ```bash
 python framework/scripts/orchestration/run_taste_framework.py status --run-id demo_dry_run
 ```
 
-从已有 environment run 刷新并同步 handoff 到项目状态（不会启动新环境部署或实验，只读取 `modules/environment/runs/<run_id>` 里的真实回执重新计算 `environment_handoff.ready_for_experimenting`）：
+从已有 environment run 刷新并同步 handoff 到项目状态（不会启动新环境部署或实验，只读取 `modules/environment/.runtime/runs/<run_id>` 里的真实回执重新计算 `environment_handoff.ready_for_experimenting`）：
 
 ```bash
 python framework/scripts/orchestration/run_taste_framework.py sync-environment-handoff \
   --project protein \
-  --environment-run-dir modules/environment/runs/<run_id>
+  --environment-run-dir modules/environment/.runtime/runs/<run_id>
 ```
 
 该命令写入 `projects/<project>/state/environment_handoff.json`、`evidence_ready_repo_selection.json` 和 `active_repo.json`。`ready_for_experimenting=true` 只表示 repo、run-local Conda、数据准备和 loader/model smoke 可交给 experimenting；`allow_next_module=true` 仍必须等待真实 full reproduction 和论文指标证据。
 
+Environment 对话始终通过同一个公开入口进入模块自己的项目唯一会话：
+
+```bash
+conda run -n taste python framework/scripts/run_module.py environment \
+  --action chat --project <project> --message "<instruction>"
+```
+
+普通消息在主控忙碌时持续排队且没有等待超时；追加 `--interrupt-current` 会优先处理本条消息，并在完成后恢复被打断的 Environment 工作。取消对应 Web job 会撤销尚未处理的消息并终止该消息正在使用的 Claude turn。
+
 ## 维护原则
 
 - 框架只做编排、传参、状态记录和门控串联，不把模块实现搬进框架。
-- 单模块产物留在模块目录；项目产物由框架/Web/项目代理按规则同步或投影。
+- 单模块产物留在模块目录；项目产物只由 Framework 按明确 run 同步，Web 不复制或改写模块产物。
 - Web 单阶段按钮必须走 `web -> framework -> module`，不能绕开新契约调用旧脚本。
 - 新增兼容逻辑应进统一路径解析/PYTHONPATH/契约层，不在业务分支硬塞路径。
 - `tests/` 只保留能守住七模块契约和 Web 桥接的核心测试。

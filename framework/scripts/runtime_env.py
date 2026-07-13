@@ -4,6 +4,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -74,12 +75,18 @@ def project_runtime_config(project: str | None = None, cfg: dict[str, Any] | Non
         or project_experiment_python_from_config(cfg)
         or ""
     )
+    if "conda_env" in cfg:
+        conda_env = str(cfg.get("conda_env") or "")
+    elif "conda_env" in runtime:
+        conda_env = str(runtime.get("conda_env") or "")
+    else:
+        conda_env = str(env_cfg.get("conda_env") or "")
     return {
         "source_bashrc": False,
         "bashrc_path": "",
         "node_bin": str(runtime.get("node_bin") or ""),
         "claude_path": str(runtime.get("claude_path") or coding.get("claude_path_hint") or ""),
-        "conda_env": str(runtime.get("conda_env") or cfg.get("conda_env") or env_cfg.get("conda_env") or ""),
+        "conda_env": conda_env,
         "conda_base": str(runtime.get("conda_base") or env_cfg.get("conda_base_hint") or runtime_conda_base(cfg) or ""),
         "management_python": management_python_path,
         "experiment_python": experiment_python,
@@ -108,8 +115,14 @@ def update_project_runtime(project: str, patch: dict[str, Any]) -> dict[str, Any
             runtime["management_python"] = management_value
     if "conda_env" in patch:
         conda_env_value = str(patch.get("conda_env") or "").strip()
-        if conda_env_value:
-            cfg["conda_env"] = conda_env_value
+        if conda_env_value and not re.fullmatch(r"[A-Za-z0-9_.-]+", conda_env_value):
+            raise ValueError("conda_env may contain only letters, numbers, dot, underscore, and dash")
+        previous_conda_env = str(cfg.get("conda_env") or runtime.get("conda_env") or "").strip()
+        cfg["conda_env"] = conda_env_value
+        runtime["conda_env"] = conda_env_value
+        if conda_env_value != previous_conda_env:
+            for key in ["conda_env_prefix", "experiment_python", "environment_run_id", "environment_runtime_source_run_id"]:
+                runtime.pop(key, None)
     if "extra_path" in patch:
         value = patch.get("extra_path")
         if isinstance(value, str):

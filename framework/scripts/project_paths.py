@@ -136,14 +136,13 @@ def load_project_config(name: str) -> dict:
 
 
 def load_runtime_config() -> dict:
-    runtime_dir = Path(os.environ.get('WORKFLOW_RUNTIME_DIR') or ROOT / 'runtime').expanduser()
-    for candidate in [runtime_dir / '.config.json', ROOT / 'runtime' / '.config.json']:
-        try:
-            payload = json.loads(candidate.read_text(encoding='utf-8'))
-        except Exception:
-            continue
-        if isinstance(payload, dict):
-            return payload
+    runtime_dir = Path(os.environ.get('FRAMEWORK_RUNTIME_DIR') or ROOT / 'framework' / '.runtime').expanduser()
+    try:
+        payload = json.loads((runtime_dir / '.config.json').read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+    if isinstance(payload, dict):
+        return payload
     return {}
 
 

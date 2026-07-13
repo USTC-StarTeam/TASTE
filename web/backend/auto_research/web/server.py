@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
-import shutil
+import queue
 import re
 import signal
 import subprocess
@@ -24,8 +24,6 @@ from fastapi.staticfiles import StaticFiles
 
 WORKSPACE_ROOT = Path(os.environ.get("WORKSPACE_ROOT") or Path(__file__).resolve().parents[4]).expanduser().resolve()
 _IMPORT_PRIORITY_DIRS = [
-    WORKSPACE_ROOT / "modules" / "ideation" / "scripts",
-    WORKSPACE_ROOT / "modules" / "planning" / "scripts",
     WORKSPACE_ROOT / "framework" / "scripts",
     WORKSPACE_ROOT / "web" / "backend",
 ]
@@ -34,22 +32,17 @@ for _entry in [str(path) for path in reversed(_IMPORT_PRIORITY_DIRS) if path.exi
         sys.path.remove(_entry)
     sys.path.insert(0, _entry)
 
-from idea_pipeline import patch_idea, run_idea
-from plan_pipeline import finish_plan, polish_plan, run_plan
 from auto_research.emailer import send_run_email
 from auto_research.finding_catalog import catalog_by_id, fetch_venue_sample, load_catalog
 from auto_research.jobs import JobCancelled
 from auto_research.llm import LLMClient, extract_json
-from auto_research.markdown import paper_markdown
-from auto_research.models import AppConfig, EmailJobRequest, FindRequest, IdeaPatch, IdeaRequest, LLMRoleConfig, PlanPolishRequest, PlanRequest, ReadRequest, VenueHealthRequest
-from auto_research.reading_bridge import prepare_current_find_read_input, sync_current_find_read_outputs
+from auto_research.models import AppConfig, EmailJobRequest, FindRequest, IdeaMarkdownUpdate, IdeaPatch, IdeaRequest, LLMRoleConfig, PlanMarkdownUpdate, PlanPolishRequest, PlanRequest, ReadRequest, VenueHealthRequest
 from auto_research.source_selection import canonical_source_selection, normalize_source_selection, save_canonical_source_selection, project_config_path
 from auto_research.paths import CONFIG_PATH, FINDING_RUNS_DIR, RUNS_DIR, RUNS_SEARCH_DIRS, STATE_DIR, ensure_directories
 from auto_research.storage import delete_run, list_runs, read_json, redacted_config, run_dir, write_json
-from auto_research.web.project_bridge import action_gate_blocker, job_stage, create_project_config, detect_runtime_config, list_projects as list_projects, project_summary, run_action, runtime_status, update_project_config, update_runtime_config, _cleruntime_caches, _current_find_pipeline_summary, _current_find_source_status_rows, _venue_metadata_counts
-from paper_common import get_active_paper_state
+from auto_research.project_bridge import action_gate_blocker, job_stage, create_project_config, detect_runtime_config, list_projects as list_projects, project_summary, run_action, runtime_status, update_project_config, update_runtime_config, _cleruntime_caches, _current_find_pipeline_summary, _current_find_source_status_rows, _venue_metadata_counts
+from auto_research.paper_state import active_paper_state as load_active_paper_state
 from taste_pythonpath import taste_pythonpath_string
-
 
 ensure_directories()
 
@@ -77,7 +70,7 @@ async def _prevent_stale_frontend_cache(request, call_next):
 CLIENT_DIST = WORKSPACE_ROOT / "web" / "frontend" / "client" / "dist"
 PROJECT_IDS_ROOT = WORKSPACE_ROOT / "projects"
 FRAMEWORK_RUNS_DIR = WORKSPACE_ROOT / "framework" / "workspace" / "runs"
-ENVIRONMENT_RUNS_DIR = WORKSPACE_ROOT / "modules" / "environment" / "runs"
+ENVIRONMENT_RUNS_DIR = WORKSPACE_ROOT / "modules" / "environment" / ".runtime" / "runs"
 DEFAULT_FIND_CONFIG_PATH = WORKSPACE_ROOT / "modules" / "finding" / "config" / "find.config.json"
 DEFAULT_LOCAL_LLM_CONFIG_PATH = WORKSPACE_ROOT / "modules" / "finding" / "config" / "llm.local.json"
 LARGE_JSON_ARTIFACT_LIMIT_BYTES = int(os.environ.get("LARGE_JSON_ARTIFACT_LIMIT_BYTES", "5000000") or 5000000)
@@ -674,7 +667,7 @@ def _normalize_public_workspace_paths(text: str) -> str:
     current_root = str(WORKSPACE_ROOT)
     parent = str(WORKSPACE_ROOT.parent)
     if parent and current_root.startswith(parent):
-        sibling_root = re.escape(parent) + r"/[A-Z][A-Z0-9_]*(?=/(?:projects|runtime|modules)(?:/|$))"
+        sibling_root = re.escape(parent) + r"/[A-Z][A-Z0-9_]*(?=/(?:projects|modules)(?:/|$))"
         text = re.sub(sibling_root, current_root, text)
     legacy_find_dir = "ar" + "_finding"
     text = text.replace(f"/planning/{legacy_find_dir}/", "/planning/finding/")
@@ -775,37 +768,37 @@ def _public_job_summary_text(value: Any) -> str:
         return "当前任务停在后续证据门控。"
     text = re.sub(
         r"missing bib entries for cited keys=[^；。\n]+",
-        "引用/参考文献仍需修复；具体修复清单已交由项目代理处理",
+        "引用/参考文献仍需修复；具体修复清单已交由 Writing 主控 Claude 处理",
         text,
         flags=re.I,
     )
     text = re.sub(
         r"latex_undefined_citations[^；。\n]*",
-        "引用/参考文献仍需修复；具体修复清单已交由项目代理处理",
+        "引用/参考文献仍需修复；具体修复清单已交由 Writing 主控 Claude 处理",
         text,
         flags=re.I,
     )
     text = re.sub(
         r"(?:Claude Code|项目代理)\s*自审未通过[^；。\n]*",
-        "论文自审未通过，具体修复项已交由项目代理处理",
+        "论文自审未通过，具体修复项已交由 Writing 主控 Claude 处理",
         text,
         flags=re.I,
     )
     text = re.sub(
         r"项目代理需独立读\s*PDF/TeX/BibTeX/log/venue contract\s*后修复并写\s*receipt",
-        "具体修复项已交由项目代理处理",
+        "具体修复项已交由 Writing 主控 Claude 处理",
         text,
         flags=re.I,
     )
     text = re.sub(
         r"self_review_hash_mismatch[^；。\n]*",
-        "论文自审未通过，具体修复项已交由项目代理处理",
+        "论文自审未通过，具体修复项已交由 Writing 主控 Claude 处理",
         text,
         flags=re.I,
     )
     text = re.sub(
         r"下一步由\s*project agent\s*继续真实实验迭代",
-        "具体下一步由项目代理读取证据后决定",
+        "具体下一步由对应模块主控 Claude 读取证据后决定",
         text,
         flags=re.I,
     )
@@ -995,8 +988,8 @@ def _is_full_cycle_job(stage: Any = "", job_id: Any = "", result: Any = None, lo
     if isinstance(result, dict):
         kind_text = str(result.get("kind") or result.get("raw_stage") or "").lower().replace("_", "-")
         cmd_text = str(result.get("cmd") or result.get("command") or "").lower().replace("_", "-")
-        current_find_module_cmd = "modules/reading/main.py" in cmd_text and "current-find-research-plan" in cmd_text
-        if kind_text.startswith("current-find") or "ensure-current-find-research-plan.py" in cmd_text or current_find_module_cmd or ("claude-project-session.py" in cmd_text and "current-find" in cmd_text):
+        current_find_framework_cmd = "framework/scripts/run-module.py" in cmd_text and "current-find-research-plan" in cmd_text
+        if kind_text.startswith("current-find") or current_find_framework_cmd:
             return False
     hay_parts = [str(stage or ""), str(job_id or "")]
     if isinstance(result, dict):
@@ -1016,12 +1009,8 @@ def _is_full_cycle_job(stage: Any = "", job_id: Any = "", result: Any = None, lo
 
 def _current_find_worker_phase_and_kind(cmd: str) -> tuple[str, str, int]:
     lowered = str(cmd or "").lower().replace("_", "-")
-    if "ensure-current-find-research-plan.py" in lowered or ("modules/reading/main.py" in lowered and "current-find-research-plan" in lowered):
-        return "read", "current_find_read_idea_plan_wrapper", 2
-    if "claude-project-session.py" in lowered and "current-find-claude-read-idea-plan" in lowered:
-        return "read", "current_find_claude_read_idea_plan", 2
-    if "claude-project-session.py" in lowered and "current-find" in lowered:
-        return "read", "current_find_claude_session", 2
+    if "framework/scripts/run-module.py" in lowered and "current-find-research-plan" in lowered:
+        return "read", "current_find_read_framework", 2
     return "", "", 99
 
 
@@ -1047,7 +1036,7 @@ def _process_has_current_find_ancestor(row: Any, rows: list[dict[str, Any]] | No
     return False
 
 
-def _normalize_project_agent_panel_stage(value: Any) -> str:
+def _normalize_module_controller_panel_stage(value: Any) -> str:
     raw = str(value or "").strip().lower().replace("_", "-")
     if not raw:
         return ""
@@ -1060,56 +1049,69 @@ def _normalize_project_agent_panel_stage(value: Any) -> str:
     return ""
 
 
-def _panel_stage_from_project_agent_result(result: Any) -> str:
+def _panel_stage_from_module_controller_result(result: Any) -> str:
     if not isinstance(result, dict):
         return ""
     for key in ["panel_stage", "requested_stage", "stage"]:
-        normalized = _normalize_project_agent_panel_stage(result.get(key))
+        normalized = _normalize_module_controller_panel_stage(result.get(key))
         if normalized:
             return normalized
     return ""
 
 
-def _initial_project_agent_job_result(payload: Any, stage: Any) -> dict[str, Any]:
+def _initial_module_controller_job_result(payload: Any, stage: Any) -> dict[str, Any]:
     row = payload if isinstance(payload, dict) else {}
     action = str(row.get("action") or stage or "").strip()
     requested_stage = str(row.get("stage") or "").strip()
-    panel_stage = _normalize_project_agent_panel_stage(requested_stage)
+    panel_stage = _normalize_module_controller_panel_stage(requested_stage)
     if not panel_stage:
-        panel_stage = _normalize_project_agent_panel_stage(action)
-    if action not in {"claude-message", "agent-guidance"} and not panel_stage:
+        panel_stage = _normalize_module_controller_panel_stage(action)
+    if action not in {"claude-message", "agent-guidance", "environment-chat", "environment_chat", "experimenting-chat", "experiment-chat", "writing-chat", "paper-chat"} and not panel_stage:
         return {}
-    return {
+    controller_ids = {
+        "environment": "environment_controller",
+        "experiment": "experimenting_controller",
+        "paper": "writing_controller",
+    }
+    result = {
         "project": str(row.get("project") or "").strip(),
         "action": action,
-        "agent_id": str(row.get("agent_id") or "main").strip() or "main",
+        "agent_id": controller_ids.get(panel_stage, ""),
         "requested_stage": requested_stage,
         "panel_stage": panel_stage,
         "status": "running",
     }
+    if panel_stage and action in {"environment-chat", "environment_chat", "experimenting-chat", "experiment-chat", "writing-chat", "paper-chat", "claude-message"}:
+        result["instruction"] = str(row.get("message") or row.get("prompt") or "").strip()
+        result["interrupt_current"] = bool(row.get("interrupt_current"))
+    return result
 
 
-def _is_project_agent_panel_job(stage: Any = "", job_id: Any = "", result: Any = None) -> bool:
+def _is_module_controller_panel_job(stage: Any = "", job_id: Any = "", result: Any = None) -> bool:
     parts = [str(stage or ""), str(job_id or "")]
     if isinstance(result, dict):
         parts.extend(str(result.get(key) or "") for key in ["action", "kind", "raw_stage"])
     haystack = "\n".join(parts).lower().replace("_", "-")
     action = str(result.get("action") or "").strip().lower().replace("_", "-") if isinstance(result, dict) else ""
-    return action in {"claude-message", "agent-guidance"} or any(marker in haystack for marker in [
+    return action in {"claude-message", "agent-guidance", "environment-chat", "experimenting-chat", "experiment-chat", "writing-chat", "paper-chat"} or any(marker in haystack for marker in [
         "claude-message",
-        "claude-message",
+        "environment-chat",
+        "experimenting-chat",
+        "experiment-chat",
         "project-agent-guidance",
         "agent-guidance",
+        "writing-chat",
+        "paper-chat",
     ])
 
 
 def _is_paper_job(stage: Any = "", job_id: Any = "", result: Any = None, logs: Any = None) -> bool:
-    if _is_project_agent_panel_job(stage, job_id, result):
-        return _panel_stage_from_project_agent_result(result) == "paper"
+    if _is_module_controller_panel_job(stage, job_id, result):
+        return _panel_stage_from_module_controller_result(result) == "paper"
     stage_norm = str(stage or "").strip().lower().replace("_", "-")
     job_norm = str(job_id or "").strip().lower().replace("_", "-")
     action_norm = str((result or {}).get("action") or "").strip().lower().replace("_", "-") if isinstance(result, dict) else ""
-    if stage_norm in {"paper", "paperwrite", "paper-write", "paper-writing"} or job_norm.startswith("paper-") or action_norm == "paper":
+    if stage_norm in {"paper", "paperwrite", "paper-write", "paper-writing", "writing-chat", "paper-chat"} or job_norm.startswith("paper-") or action_norm in {"paper", "writing-chat", "paper-chat"}:
         return True
     hay_parts = [str(stage or ""), str(job_id or "")]
     if isinstance(result, dict):
@@ -1255,7 +1257,7 @@ def _phase_hint_from_job(job_id: Any, live_job: Any = None, known_job: Any = Non
         return "experiment"
     if isinstance(live_job, dict):
         result = live_job.get("result") if isinstance(live_job.get("result"), dict) else {}
-        panel_stage = _panel_stage_from_project_agent_result(result)
+        panel_stage = _panel_stage_from_module_controller_result(result)
         if panel_stage:
             return panel_stage
         if _is_paper_job(live_job.get("stage"), live_job.get("job_id") or job_id, result, live_job.get("logs")):
@@ -1265,7 +1267,7 @@ def _phase_hint_from_job(job_id: Any, live_job: Any = None, known_job: Any = Non
             return phase
     if known_job is not None:
         known_result = known_job.result if isinstance(getattr(known_job, "result", None), dict) else {}
-        panel_stage = _panel_stage_from_project_agent_result(known_result)
+        panel_stage = _panel_stage_from_module_controller_result(known_result)
         if panel_stage:
             return panel_stage
         if _is_paper_job(getattr(known_job, "stage", ""), getattr(known_job, "job_id", "") or job_id, known_result, getattr(known_job, "logs", [])):
@@ -1359,8 +1361,6 @@ STAGE_LABELS_ZH = {
     "full_research_cycle": "完整科研循环",
 }
 
-READING_PUBLIC_ENTRY_ACTION_MISSING_STATUS = "blocked_reading_public_entry_action_missing"
-READING_PUBLIC_ENTRY_ACTION_MISSING_MESSAGE = "Reading 公共入口未实现 current_find_research_plan action；Web/Framework 已按公共入口交接，需在 Reading 模块入口补齐该 action 后重跑。"
 
 
 def _stage_label_zh(stage: str) -> str:
@@ -1438,7 +1438,9 @@ def _paper_substage_from_cmd(cmd: Any, fallback: str = "") -> str:
             return stage
     if "run_paper_orchestra_bridge.py" in lowered:
         return "writing:orchestra"
-    if "run_paper_pipeline.py" in lowered or ("modules/writing/main.py" in lowered and ("--action run" in lowered or "--action paper_pipeline" in lowered)):
+    if "modules/writing/main.py" in lowered and "--action chat" in lowered:
+        return "paper:chat"
+    if "modules/writing/main.py" in lowered and "--action work" in lowered:
         return "paper:pipeline"
     if "fetch_latex_template.py" in lowered:
         return "paper:template"
@@ -1460,10 +1462,7 @@ def _paper_worker_projection_from_process(row: dict[str, Any], *, controller_pid
     lowered = cmd.lower()
     kind = ""
     priority = 99
-    if "claude_project_session.py" in lowered and ("writing" in lowered or "paper" in lowered):
-        kind = "paper_claude_session"
-        priority = 0
-    elif re.search(r"(?:^|/)claude\s+-p\b", cmd) or "bin/claude -p" in lowered:
+    if re.search(r"(?:^|/)claude\s+-p\b", cmd) or "bin/claude -p" in lowered:
         kind = "paper_claude_cli"
         priority = 1
     elif any(marker in lowered for marker in ["repair_paper_preview_loop.py", "repair_paper_figures_loop.py"]):
@@ -1472,7 +1471,10 @@ def _paper_worker_projection_from_process(row: dict[str, Any], *, controller_pid
     elif "run_paper_orchestra_bridge.py" in lowered:
         kind = "paper_orchestra_bridge"
         priority = 3
-    elif "run_paper_pipeline.py" in lowered or ("modules/writing/main.py" in lowered and ("--action run" in lowered or "--action paper_pipeline" in lowered)):
+    elif "modules/writing/main.py" in lowered and "--action chat" in lowered:
+        kind = "paper_claude_session"
+        priority = 0
+    elif "modules/writing/main.py" in lowered and "--action work" in lowered:
         kind = "paper_pipeline"
         priority = 4
     elif any(marker in lowered for marker in ["fetch_latex_template.py", "resolve_venue_requirements.py", "compile_paper_pdf.py", "latexmk", "pdflatex"]):
@@ -1660,8 +1662,10 @@ def _public_taste_stage(stage: Any) -> str:
         return 'environment'
     if lowered == 'email':
         return 'paper'
-    if lowered == 'paper' or lowered.startswith('paper-') or lowered.startswith('paper_'):
+    if lowered in {"writing-chat", "paper-chat"} or lowered == 'paper' or lowered.startswith('paper-') or lowered.startswith('paper_'):
         return 'paper'
+    if lowered in {"environment-chat"}:
+        return "environment"
     if lowered in {'find', 'read', 'idea', 'plan', 'environment', 'experiment', 'paper'}:
         return lowered
     if not lowered:
@@ -1786,7 +1790,7 @@ class JobState:
 
     def as_dict(self, *, compact: bool = False) -> dict:
         result_payload = _compact_job_result(self.result, self.stage, self.job_id, self.logs) if compact else self.result
-        panel_stage = _panel_stage_from_project_agent_result(result_payload if isinstance(result_payload, dict) else self.result)
+        panel_stage = _panel_stage_from_module_controller_result(result_payload if isinstance(result_payload, dict) else self.result)
         paper_job = _is_paper_job(self.stage, self.job_id, result_payload if isinstance(result_payload, dict) else self.result, self.logs)
         public_stage = panel_stage or ("paper" if paper_job else _public_taste_stage(self.stage))
         progress_payload = self.progress
@@ -1839,6 +1843,8 @@ class JobState:
             progress_payload = _read_job_progress_payload(self.logs, progress_payload, result_payload if isinstance(result_payload, dict) else self.result, status=self.status)
             if isinstance(result_payload, dict) and isinstance(progress_payload.get("read_progress"), dict):
                 result_payload = {**result_payload, "read_progress": progress_payload.get("read_progress")}
+                if self.status in {"cancelling", "cancelled"}:
+                    result_payload["status"] = self.status
         log_stage = panel_stage or ("paper" if paper_job else self.stage)
         logs = _public_job_logs(log_stage, self.logs, progress_payload, result_payload if isinstance(result_payload, dict) else self.result, limit=80) if compact or public_stage == "read" else self.logs
         if public_stage != self.stage and isinstance(self.result, dict):
@@ -1945,6 +1951,12 @@ JSON_ARTIFACT_NAMES = [
 ]
 LIGHT_ARTIFACT_MARKDOWN_NAMES = ["find.md", "source_status.md", "read.md", "idea.md", "plan.md"]
 LIGHT_ARTIFACT_JSON_NAMES = ["find_progress.json", "find_results.json", "read_results.json", "ideas.json", "plans.json", "selection.json"]
+CURRENT_FIND_ARTIFACT_SCOPES = {
+    "find": (["find.md", "source_status.md"], ["find_progress.json", "find_results.json", "selection.json"]),
+    "read": (["read.md"], ["read_results.json"]),
+    "ideas": (["idea.md"], ["ideas.json"]),
+    "plan": (["plan.md"], ["ideas.json", "plans.json"]),
+}
 FIND_SURVEY_COUNT_KEYS = [
     "raw_title_index_papers", "title_total_papers", "venue_total_papers_available", "venue_corpus_audited_papers",
     "category_corpus_audited_papers", "category_filtered_papers", "venue_category_selected_papers",
@@ -1958,6 +1970,30 @@ ENVIRONMENT_ARTIFACT_JSON_NAMES = [
     "frontend_status.json", "module_contracts_payload.json", "module_contracts.json",
     "environment_deployment_decision.json", "repo_info.json", "claude_repo_candidate_review.json",
     "machine_profile.json", "input_plan.normalized.json", "paper_evidence.json",
+]
+WRITING_ARTIFACT_MARKDOWN_NAMES = [
+    "prompts/writing_claude_prompt.md",
+    "prompts/writing_chat_claude_prompt.md",
+    "workspace/chat/response.md",
+    "workspace/final/paper.tex",
+    "workspace/refs.bib",
+    "workspace/audits/claude_quality_audit.md",
+    "workspace/audits/round_00/claude_quality_audit.md",
+    "workspace/repair_rounds/round_01/repair_plan.md",
+]
+WRITING_ARTIFACT_JSON_NAMES = [
+    "run_summary.json",
+    "run_manifest.json",
+    "run_meta.json",
+    "audit_repair_loop.json",
+    "workspace/chat/chat_result.json",
+    "workspace/provenance.json",
+    "venue/venue_requirements.json",
+    "venue/template_source.json",
+    "workspace/audits/quality_audit_from_main.json",
+    "workspace/audits/claude_quality_audit.json",
+    "workspace/audits/round_00/claude_quality_audit.json",
+    "workspace/repair_rounds/round_01/repair_report.json",
 ]
 
 
@@ -2091,7 +2127,8 @@ def _cached_list_runs() -> list[dict]:
 def _clerun_caches(run_id: str = "") -> None:
     _RUNS_CACHE.update({"expires_at": 0.0, "fingerprint": None, "items": []})
     if run_id:
-        _RUN_ARTIFACTS_CACHE.pop(run_id, None)
+        for key in [key for key in _RUN_ARTIFACTS_CACHE if key == run_id or key.startswith(f"{run_id}:")]:
+            _RUN_ARTIFACTS_CACHE.pop(key, None)
     else:
         _RUN_ARTIFACTS_CACHE.clear()
 
@@ -2202,11 +2239,7 @@ def _paper_receipt_stale_for_current_venue(root: Path, payload: Any, response_te
 
 
 def _active_paper_state(root: Path, project: str, cfg: dict[str, Any] | None = None, venue: str = '') -> dict[str, Any]:
-    target = venue or _project_configured_venue(cfg)
-    try:
-        state = get_active_paper_state(project, venue=target)
-    except Exception:
-        state = _read_project_json(root / 'paper' / 'metadata' / 'paper_pipeline.json', {})
+    state = load_active_paper_state(root, project, cfg, venue=venue or _project_configured_venue(cfg))
     return state if isinstance(state, dict) else {}
 
 
@@ -2305,7 +2338,7 @@ def _paper_public_blocker_text(value: Any) -> str:
     if "manuscript_candidate_rejected" in lowered or "manuscript_content_policy_violation" in lowered:
         return "候选稿内容策略未通过；不能作为当前会议格式预览或投稿稿，需要由 writing 从当前证据重新生成。"
     if "missing bib entries" in lowered or "missing bibliography entries" in lowered or "cited keys=" in lowered or "latex_undefined_citations" in lowered or "undefined citations" in lowered:
-        return "引用/参考文献仍需修复；具体修复清单已交由项目代理处理。"
+        return "引用/参考文献仍需修复；具体修复清单已交由 Writing 主控 Claude 处理。"
     if "nature_numeric_style_textual_citations" in lowered or "\\citet" in text or "\\citeauthor" in text or "作者型引用命令" in text:
         return "Nature 数字引用模板下检测到作者型引用命令；应改为正常叙述加数字引用，重新编译并确认 PDF 不再出现 `(author?)`。"
     if "pdf_unresolved_citation_markers" in lowered or "未解析引用标记" in text or "[?]" in text or "??" in text:
@@ -2420,7 +2453,7 @@ def _paper_public_self_review_evidence_projection(category: str, detail: str) ->
         return {
             "public_title": "缺少新方法实验验证",
             "public_summary": "当前论文预览还没有用同一数据、同一 seed、同一指标验证拟议新方法；已有数字只适合作为参考基底校准或初始化检查。",
-            "public_next_action": "继续由项目代理执行候选方法、基线和关键消融实验，写入可审计指标后再刷新论文。",
+            "public_next_action": "继续由 Experimenting 主控 Claude 执行候选方法、基线和关键消融实验，写入可审计指标后再刷新论文。",
         }
     if "results_contains_untested_design_space" in marker or "method design space" in marker or "untested architectural variants" in marker:
         return {
@@ -2449,7 +2482,7 @@ def _paper_public_self_review_evidence_projection(category: str, detail: str) ->
     return {
         "public_title": "科研证据待补齐",
         "public_summary": "Claude Code 独立审稿发现一项未解决的科研证据问题；完整原文保留在后端审计 artifact。",
-        "public_next_action": "让项目代理根据审稿 receipt 继续修实验、证据和论文，再刷新审计。",
+        "public_next_action": "让对应模块主控 Claude 根据审稿 receipt 继续修实验、证据和论文，再刷新审计。",
     }
 
 
@@ -2569,7 +2602,7 @@ def _paper_stage_from_project_snapshot(project: str) -> dict[str, Any]:
         else:
             diagnostics.append("预览仍需完善：" + blocker_text)
     if self_review_blockers or str(paper_state.get("paper_self_review_status") or "").strip().lower() == "block":
-        diagnostics.append("论文自审未通过；具体修复项已交由项目代理处理。")
+        diagnostics.append("论文自审未通过；具体修复项已交由 Writing 主控 Claude 处理。")
     if self_review_evidence_blockers:
         diagnostics.append(f"Claude Code 独立审稿发现 {len(self_review_evidence_blockers)} 项未解决科研证据问题；PDF 只能作为检查预览，不能标记为投稿通过。")
     if pdf_path and paper_state.get("conference_preview_ready"):
@@ -2731,7 +2764,7 @@ def _paper_stage_job_message(row: dict[str, Any]) -> str:
     self_review_blockers = row.get("paper_self_review_blockers") if isinstance(row.get("paper_self_review_blockers"), list) else []
     self_review_status = str(row.get("paper_self_review_status") or "").strip().lower()
     if self_review_blockers or self_review_status == "block":
-        parts.append("论文自审未通过，具体修复项已交由项目代理处理")
+        parts.append("论文自审未通过，具体修复项已交由 Writing 主控 Claude 处理")
     self_review_evidence_blockers = row.get("paper_self_review_evidence_blockers") if isinstance(row.get("paper_self_review_evidence_blockers"), list) else []
     if self_review_evidence_blockers:
         parts.append(f"论文自审发现 {len(self_review_evidence_blockers)} 项未解决科研证据问题，预览不能标记为投稿通过")
@@ -3048,7 +3081,7 @@ def _public_stage_command_message(stage: Any, value: Any) -> str:
     return ""
 
 
-def _public_project_agent_progress_message(stage: Any, value: Any) -> str:
+def _public_module_controller_progress_message(stage: Any, value: Any) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
@@ -3057,12 +3090,14 @@ def _public_project_agent_progress_message(stage: Any, value: Any) -> str:
         return command
     lowered = text.lower()
     stage_label = _public_stage_label(stage)
+    if lowered.startswith("running environment-chat") or lowered.startswith("environment-chat started"):
+        return "Environment 主控 Claude 正在处理环境配置请求。"
     if lowered.startswith("running claude-message") or lowered.startswith("claude-message started"):
-        return f"项目代理正在处理{stage_label}请求。"
+        return f"模块主控 Claude 正在处理{stage_label}请求。"
     if lowered.startswith("claude: executable=") or lowered.startswith("claude: permission_mode") or lowered.startswith("claude: session_key="):
-        return f"项目代理会话已启动，正在处理{stage_label}请求。"
+        return f"模块主控 Claude 会话已启动，正在处理{stage_label}请求。"
     if "调用工具" in text or "tool use" in lowered or "read file=" in lowered or "edit file=" in lowered or "bash command=" in lowered:
-        return f"项目代理正在读取/修改当前项目证据以处理{stage_label}门控。"
+        return f"模块主控 Claude 正在读取/修改当前项目证据以处理{stage_label}门控。"
     text = _redact_public_log_text(_public_text(text))
     text = re.sub(r'/[^\s;,\"\']*/(?:workspace|TASTE|projects|runtime|\.nvm|miniforge)[^\s;,\"\']*', '[local-path]', text)
     text = re.sub(r"\s+", " ", text).strip()
@@ -3483,19 +3518,27 @@ def _read_job_machine_warning_lines(result: dict[str, Any], *, limit: int = 8) -
     seen: set[str] = set()
     for detail in details:
         title = _read_progress_title(detail.get("title") or "Untitled", max_len=140)
-        phase = _read_progress_title(detail.get("phase") or "read", max_len=80)
-        status = _read_progress_title(detail.get("status") or detail.get("message") or "", max_len=140)
+        phase_raw = _read_progress_title(detail.get("phase") or "read", max_len=80)
+        phase = {
+            "full_text_acquisition": "爬文章",
+            "full_text": "爬文章",
+            "read": "读文章",
+            "deep_read": "读文章",
+        }.get(phase_raw.lower(), phase_raw)
+        status_raw = _read_progress_title(detail.get("status") or detail.get("message") or "", max_len=140)
+        status = {
+            "blocked_full_text_unavailable": "全文未就绪",
+            "blocked_article_markdown_missing": "精读产物缺失",
+            "blocked_deep_read_incomplete": "精读未完成",
+        }.get(status_raw.lower(), status_raw)
         err_type = _read_progress_title(detail.get("error_type") or "", max_len=80)
         err_msg = _read_progress_title(detail.get("error_message") or "", max_len=180)
         prefix = "错误" if err_type or str(status).startswith("error_") else "警告"
-        bits = [phase, title]
-        if status:
-            bits.append(status)
-        if err_type:
-            bits.append(err_type)
-        if err_msg:
-            bits.append(err_msg)
-        line = prefix + "：" + " / ".join(bit for bit in bits if bit)
+        if status_raw.lower() == "blocked_full_text_unavailable":
+            line = f"警告：{title} 的全文未就绪，因此未进入读文章阶段。"
+        else:
+            detail_text = err_msg or err_type or status or "未完成"
+            line = f"{prefix}：{title} 在{phase}阶段{detail_text}。"
         if line in seen:
             continue
         seen.add(line)
@@ -3508,7 +3551,10 @@ def _read_job_machine_warning_lines(result: dict[str, Any], *, limit: int = 8) -
             if isinstance(source, list):
                 warning_texts.extend(str(item).strip() for item in source if str(item).strip())
         for warning in warning_texts:
-            text = "警告：" + _read_progress_title(warning, max_len=260)
+            readable_warning = _read_progress_title(warning, max_len=260)
+            readable_warning = readable_warning.replace("当前 Find 推荐", "论文")
+            readable_warning = re.sub(r"；错误/警告只进入任务日志和\s*read_results\.json。?$", "。", readable_warning)
+            text = "警告：" + readable_warning
             if text in seen:
                 continue
             seen.add(text)
@@ -3530,8 +3576,8 @@ def _read_job_progress_from_logs(
     result = result if isinstance(result, dict) else {}
     existing = progress.get("read_progress") if isinstance(progress.get("read_progress"), dict) else result.get("read_progress") if isinstance(result.get("read_progress"), dict) else {}
     phases = {
-        "full_text": _read_phase_row("爬取全文"),
-        "deep_read": _read_phase_row("精读全文"),
+        "full_text": _read_phase_row("爬文章"),
+        "deep_read": _read_phase_row("读文章"),
     }
     details: list[str] = []
     errors: list[str] = []
@@ -3580,7 +3626,9 @@ def _read_job_progress_from_logs(
             workers = int(full_phase.group(2) or 0)
             mark_total("full_text", total, workers)
             phases["full_text"]["status"] = "running"
-            details.append(f"爬取全文启动：共 {total} 篇" + (f"，并发 {workers}" if workers else ""))
+            startup_prefix = f"爬文章启动：共 {total} 篇"
+            details = [item for item in details if not item.startswith(startup_prefix)]
+            details.append(startup_prefix + (f"，并发 {workers}" if workers else ""))
             continue
         full_start = re.search(r"(acquiring|queueing)\s+full[- ]text(?:\s+acquisition)?\s+(\d+)\s*/\s*(\d+)\s*:\s*(.+)", text, flags=re.I)
         if full_start:
@@ -3593,7 +3641,7 @@ def _read_job_progress_from_logs(
                 mark_total("full_text", total)
             else:
                 mark_active("full_text", index, total, title, "running")
-            details.append(_read_log_detail("排队爬取全文" if action == "queueing" else "正在爬取全文", index, total, title))
+            details.append(_read_log_detail("排队爬文章" if action == "queueing" else "正在爬文章", index, total, title))
             continue
         full_done = re.search(r"(?:finished|completed)\s+full[- ]text\s+acquisition\s+(\d+)\s*/\s*(\d+)\s*:\s*(.*?)(?:\s+-\s+(.+))?$", text, flags=re.I)
         if full_done:
@@ -3603,14 +3651,8 @@ def _read_job_progress_from_logs(
             raw_status_text = _read_progress_title(full_done.group(3), max_len=120)
             status_text = _read_progress_status_label(raw_status_text, phase="full_text")
             title = _read_progress_title(full_done.group(4) or "")
-            if "full_text=false" in raw_status_text.lower():
-                mark_total("full_text", total)
-                phases["full_text"]["last_index"] = index
-                phases["full_text"]["last_title"] = title
-                phases["full_text"]["last_status"] = status_text
-            else:
-                mark_completed("full_text", completed_full_text, index, total, title, status_text)
-            details.append(_read_log_detail("完成全文爬取", index, total, title, status_text))
+            mark_completed("full_text", completed_full_text, index, total, title, status_text)
+            details.append(_read_log_detail("文章爬取完成", index, total, title, status_text))
             continue
         read_phase = re.search(r"reading subagent phase:\s*(\d+)\s+papers(?:,\s*(\d+)\s+workers)?", text, flags=re.I)
         if read_phase:
@@ -3619,7 +3661,7 @@ def _read_job_progress_from_logs(
             workers = int(read_phase.group(2) or 0)
             mark_total("deep_read", total, workers, exact=True)
             phases["deep_read"]["status"] = "running" if total else "complete"
-            details.append(f"精读全文启动：共 {total} 篇" + (f"，并发 {workers}" if workers else ""))
+            details.append(f"读文章启动：共 {total} 篇" + (f"，并发 {workers}" if workers else ""))
             continue
         read_start = re.search(r"(starting|queueing)\s+reading subagent\s+(\d+)\s*/\s*(\d+)\s*:\s*(.+)", text, flags=re.I)
         if read_start:
@@ -3632,7 +3674,7 @@ def _read_job_progress_from_logs(
                 mark_total("deep_read", total)
             else:
                 mark_active("deep_read", index, total, title, "running")
-            details.append(_read_log_detail("排队精读全文" if action == "queueing" else "正在精读全文", index, total, title, count_label=f"第{index}篇"))
+            details.append(_read_log_detail("排队读文章" if action == "queueing" else "正在读文章", index, total, title, count_label=f"第{index}篇"))
             continue
         read_done = re.search(r"(?:finished|completed)\s+reading subagent\s+(\d+)\s*/\s*(\d+)\s*:\s*(.*?)(?:\s+-\s+(.+))?$", text, flags=re.I)
         if read_done:
@@ -3649,7 +3691,7 @@ def _read_job_progress_from_logs(
                 phases["deep_read"]["last_index"] = index
                 phases["deep_read"]["last_title"] = title
                 phases["deep_read"]["last_status"] = status_text
-            details.append(_read_log_detail("完成全文精读", index, total, title, status_text, count_label=f"第{index}篇"))
+            details.append(_read_log_detail("文章阅读完成", index, total, title, status_text, count_label=f"第{index}篇"))
             continue
         if re.search(r"final read\.md aggregation phase", text, flags=re.I):
             signal_seen = True
@@ -3705,6 +3747,11 @@ def _read_job_progress_from_logs(
     )
     cancelled_status = any(marker in status_text for marker in ["cancelled", "canceled"])
     live_read_status = any(marker in status_text for marker in ["running", "queued", "cancelling"])
+    finished_read_status = not live_read_status and any(marker in status_text for marker in ["done", "complete", "framework_synced"])
+    if not signal_seen and existing:
+        existing_payload = dict(existing)
+        existing_payload["has_signal"] = existing_payload.get("has_signal", True)
+        return existing_payload
     prefer_live_log_progress = signal_seen and live_read_status
     if live_read_status and not signal_seen:
         signal_seen = True
@@ -3714,7 +3761,15 @@ def _read_job_progress_from_logs(
         signal_seen = True
         errors = []
         for key in ["full_text", "deep_read"]:
-            phases[key]["status"] = "cancelled"
+            phase = phases[key]
+            phase_current = int(phase.get("current") or 0)
+            phase_total = int(phase.get("total") or 0)
+            if phase_total > 0 and phase_current >= phase_total:
+                phase["status"] = "complete"
+            elif phase_current > 0 or str(phase.get("status") or "") == "running":
+                phase["status"] = "cancelled"
+            else:
+                phase["status"] = "pending"
             phases[key]["active_index"] = 0
             phases[key]["active_title"] = ""
     if not prefer_live_log_progress and not cancelled_status:
@@ -3754,21 +3809,24 @@ def _read_job_progress_from_logs(
             validation_valid = artifact_progress.get("validation_valid") is True
             warning_count = int(artifact_progress.get("warning_count") or 0)
             warning_suffix = f"；warning {warning_count} 项" if warning_count else ""
+            readable_total = max(0, total - pending_full) if total else max(deep_attempted, deep_current)
             if total:
                 phases["full_text"]["total"] = max(int(phases["full_text"].get("total") or 0), total)
-                phases["deep_read"]["total"] = max(int(phases["deep_read"].get("total") or 0), total)
+                phases["deep_read"]["total"] = readable_total if pending_full else max(int(phases["deep_read"].get("total") or 0), total)
             phases["full_text"]["current"] = max(int(phases["full_text"].get("current") or 0), full_current)
             phases["deep_read"]["current"] = deep_current
             if pending_full:
-                phases["full_text"]["status"] = "blocked"
-                phases["full_text"]["last_status"] = f"待补全文 {pending_full} 篇"
+                phases["full_text"]["current"] = total
+                phases["full_text"]["status"] = "warning"
+                phases["full_text"]["last_status"] = f"已处理 {total}/{total}；全文可用 {full_current} 篇，未就绪 {pending_full} 篇"
             elif total and full_current >= total:
                 phases["full_text"]["status"] = "complete"
                 phases["full_text"]["last_status"] = "同篇全文证据已覆盖"
             if pending_deep:
                 if pending_full:
-                    phases["deep_read"]["status"] = "blocked"
-                    phases["deep_read"]["last_status"] = f"已完成精读 {deep_current}/{total}；{pending_full} 篇因缺少同篇全文未进入精读"
+                    eligible_complete = readable_total > 0 and deep_current >= readable_total
+                    phases["deep_read"]["status"] = "complete" if eligible_complete else "blocked"
+                    phases["deep_read"]["last_status"] = f"已完成精读 {deep_current}/{readable_total}；{pending_full} 篇因缺少同篇全文未进入精读"
                 elif public_read_md_present and validation_valid:
                     phases["deep_read"]["status"] = "warning"
                     phases["deep_read"]["last_status"] = f"已完成精读 {deep_current}/{total}；{pending_deep} 篇未进入最终 read.md，仅记录在任务日志和机器状态{warning_suffix}"
@@ -3779,10 +3837,6 @@ def _read_job_progress_from_logs(
             elif total and deep_current >= total:
                 phases["deep_read"]["status"] = "complete"
                 phases["deep_read"]["last_status"] = f"已完成精读 {deep_current}/{total}"
-    if not signal_seen and existing:
-        existing_payload = dict(existing)
-        existing_payload["has_signal"] = existing_payload.get("has_signal", True)
-        return existing_payload
     for key in ["full_text", "deep_read"]:
         phases[key]["percent"] = _read_progress_percent(phases[key].get("current"), phases[key].get("total"))
 
@@ -3791,25 +3845,34 @@ def _read_job_progress_from_logs(
     full_total_for_stage = int(phases["full_text"].get("total") or 0)
     full_current_for_stage = int(phases["full_text"].get("current") or 0)
     if cancelled_status:
-        current_stage = "full_text"
-        current_action = "任务已取消。"
+        current_stage = "deep_read" if str(phases["deep_read"].get("status") or "") == "cancelled" else "full_text"
+        cancelled_phase = phases[current_stage]
+        cancelled_label = str(cancelled_phase.get("label") or ("读文章" if current_stage == "deep_read" else "爬文章"))
+        cancelled_current = int(cancelled_phase.get("current") or 0)
+        cancelled_total = int(cancelled_phase.get("total") or 0)
+        current_action = f"任务已取消：{cancelled_label}停在 {cancelled_current}/{cancelled_total}。" if cancelled_total else "任务已取消。"
     elif (
         str(phases["full_text"].get("status") or "") == "blocked"
         and phases["full_text"].get("last_status")
         and (not full_total_for_stage or full_current_for_stage < full_total_for_stage)
     ):
         current_stage = "full_text"
-        current_action = "爬取全文阻塞：" + str(phases["full_text"].get("last_status") or "")
+        current_action = "爬文章阻塞：" + str(phases["full_text"].get("last_status") or "")
     elif str(phases["deep_read"].get("status") or "") == "blocked" and phases["deep_read"].get("last_status"):
         current_stage = "deep_read"
-        current_action = "精读全文阻塞：" + str(phases["deep_read"].get("last_status") or "")
+        current_action = "读文章阻塞：" + str(phases["deep_read"].get("last_status") or "")
     elif str(phases["deep_read"].get("status") or "") == "warning" and phases["deep_read"].get("last_status"):
         current_stage = "deep_read"
-        current_action = "精读全文完成并有警告：" + str(phases["deep_read"].get("last_status") or "")
+        current_action = "读文章完成并有警告：" + str(phases["deep_read"].get("last_status") or "")
+    elif finished_read_status and str(phases["deep_read"].get("status") or "") == "complete":
+        current_stage = "deep_read"
+        current_action = "读文章已完成：" + str(phases["deep_read"].get("last_status") or "全部可读论文均已完成")
+        if str(phases["full_text"].get("status") or "") == "warning":
+            current_action += "；" + str(phases["full_text"].get("last_status") or "")
     elif phases["deep_read"].get("active_title"):
         current_stage = "deep_read"
         current_action = _read_log_detail(
-            "正在精读全文",
+            "正在读文章",
             int(phases["deep_read"].get("active_index") or 0),
             int(phases["deep_read"].get("total") or 0),
             str(phases["deep_read"].get("active_title") or ""),
@@ -3817,24 +3880,29 @@ def _read_job_progress_from_logs(
     elif phases["full_text"].get("active_title"):
         current_stage = "full_text"
         current_action = _read_log_detail(
-            "正在爬取全文",
+            "正在爬文章",
             int(phases["full_text"].get("active_index") or 0),
             int(phases["full_text"].get("total") or 0),
             str(phases["full_text"].get("active_title") or ""),
         )
     elif details:
-        current_stage = "deep_read" if any("精读" in item or "read.md" in item for item in details[-3:]) else "full_text"
-        prefix = "精读全文并发处理中，最近进展" if current_stage == "deep_read" else "全文爬取处理中，最近进展"
-        current_action = f"{prefix}：{details[-1]}"
+        current_stage = "deep_read" if any("精读" in item or "读文章" in item or "read.md" in item for item in details[-3:]) else "full_text"
+        if details[-1].startswith(("爬文章启动：", "读文章启动：")):
+            current_action = details[-1]
+        else:
+            prefix = "读文章并发处理中，最近进展" if current_stage == "deep_read" else "爬文章并发处理中，最近进展"
+            current_action = f"{prefix}：{details[-1]}"
     if not current_action and live_read_status and details:
-        current_stage = "deep_read" if any("精读" in item or "read.md" in item for item in details[-3:]) else "full_text"
+        current_stage = "deep_read" if any("精读" in item or "读文章" in item or "read.md" in item for item in details[-3:]) else "full_text"
         current_action = details[-1]
     if not current_action:
         message = _read_progress_title(progress.get("message") or result.get("summary") or status, max_len=220)
+        if message.strip().lower() in {"queued", "started", "running", "read started"}:
+            message = ""
         if live_read_status and ("阻塞" in message or "blocked" in message.lower() or "准备当前 Find 输入" in message):
             message = ""
         current_stage = "full_text" if live_read_status else str(progress.get("phase") or status or "full_text")
-        current_action = message or "爬取全文等待开始。"
+        current_action = message or "等待爬文章开始。"
 
     overall_deep_total = int(phases["deep_read"].get("total") or phases["full_text"].get("total") or 0)
     overall_total = int(phases["full_text"].get("total") or 0) + overall_deep_total
@@ -3842,7 +3910,10 @@ def _read_job_progress_from_logs(
     if overall_total <= 0 and int(progress.get("total") or 0) > 0:
         overall_total = int(progress.get("total") or 0)
         overall_current = int(progress.get("current") or 0)
-    recent_details = ["任务已取消。"] if cancelled_status else details[-10:]
+    recent_details = details[-10:]
+    if cancelled_status:
+        recent_details.append("任务已取消。")
+        recent_details = recent_details[-10:]
     if not recent_details:
         for line in raw[-30:]:
             text = _strip_public_taste_marker(line)
@@ -3900,7 +3971,7 @@ def _public_read_job_logs(logs: list[str], progress: dict[str, Any], result: dic
         action = str(read_progress.get("current_action") or progress.get("message") or result.get("summary") or "").strip()
         if "准备当前 Find 输入" in action or "精读任务已启动" in action:
             action = ""
-        out.append("当前状态：" + (action or "爬取全文等待开始。"))
+        out.append("当前状态：" + (action or "等待爬文章开始。"))
         run_id = str(result.get("run_id") or result.get("find_run_id") or "").strip()
         if run_id:
             out.append("运行编号：" + run_id)
@@ -3939,7 +4010,7 @@ def _public_read_job_logs(logs: list[str], progress: dict[str, Any], result: dic
         else full_text if current_stage == "full_text" else {}
     )
     if current_phase:
-        label = str(current_phase.get("label") or ("精读全文" if current_stage == "deep_read" else "爬取全文"))
+        label = str(current_phase.get("label") or ("读文章" if current_stage == "deep_read" else "爬文章"))
         total = int(current_phase.get("total") or 0)
         if total > 0:
             header.append(f"阶段进度：{label} {int(current_phase.get('current') or 0)}/{total}")
@@ -3948,7 +4019,7 @@ def _public_read_job_logs(logs: list[str], progress: dict[str, Any], result: dic
     else:
         full_total = int(full_text.get("total") or 0)
         if full_total > 0:
-            header.append(f"阶段进度：爬取全文 {int(full_text.get('current') or 0)}/{full_total}")
+            header.append(f"阶段进度：爬文章 {int(full_text.get('current') or 0)}/{full_total}")
         else:
             header.append("阶段进度：准备中")
     detail_lines: list[str] = []
@@ -3969,7 +4040,7 @@ def _public_read_job_logs(logs: list[str], progress: dict[str, Any], result: dic
                 error_lines.append(text)
             else:
                 error_lines.append("错误：" + text)
-    machine_warning_lines = [] if live_read_job else _read_job_machine_warning_lines(result, limit=6)
+    machine_warning_lines = [] if live_read_job or live_status in {"cancelled", "canceled"} else _read_job_machine_warning_lines(result, limit=6)
     detail_budget = max(0, limit - len(header) - min(len(error_lines), 3) - min(len(machine_warning_lines), 6))
     out = [*header, *detail_lines[-detail_budget:], *error_lines[-3:], *machine_warning_lines[:6]]
     dedup: list[str] = []
@@ -3982,6 +4053,17 @@ def _public_read_job_logs(logs: list[str], progress: dict[str, Any], result: dic
     return dedup[:max(1, limit)]
 
 
+def _public_plan_stage_detail(logs: list[str]) -> str:
+    for raw_line in reversed(logs[-12:]):
+        line = _public_text(raw_line)
+        if line.startswith("Planning idea:"):
+            title = line.split(":", 1)[1].strip() or "已批准 Idea"
+            return f"正在为 Idea 生成 Plan：{title}"
+        if line == "Plan stage complete":
+            return "Plan 已产出，正在同步项目产物。"
+    return ""
+
+
 def _public_read_idea_plan_job_logs(stage: str, logs: list[str], progress: dict[str, Any], result: dict[str, Any], *, limit: int = 8) -> list[str]:
     """Keep literature-reasoning taskbar rows human-facing, not agent transcripts."""
     label_map = {"read": "精读", "idea": "Idea", "plan": "Plan"}
@@ -3990,9 +4072,8 @@ def _public_read_idea_plan_job_logs(stage: str, logs: list[str], progress: dict[
     status = str(result.get("status") or progress.get("phase") or "").strip()
     message = str(progress.get("message") or result.get("summary") or status or "").strip()
     lowered = "\n".join([message, status, "\n".join(logs[-12:])]).lower()
-    if status == READING_PUBLIC_ENTRY_ACTION_MISSING_STATUS or "unknown reading module action: current_find_research_plan" in lowered or ("reading 公共入口未实现" in lowered and "current_find_research_plan" in lowered):
-        out.append("当前状态：" + READING_PUBLIC_ENTRY_ACTION_MISSING_MESSAGE)
-    elif "claude_current_find_read_idea_plan_ready_waiting_for_environment_base_selection" in lowered or "claude_takeover_ready" in lowered:
+    stage_detail = _public_plan_stage_detail(logs) if stage == "plan" else ""
+    if "claude_current_find_read_idea_plan_ready_waiting_for_environment_base_selection" in lowered or "claude_takeover_ready" in lowered:
         out.append("当前状态：精读、Idea 和 Plan 已完成，等待环境阶段选择基底。")
     elif any(marker in lowered for marker in ["blocked_current_find_deep_read_pending", "claude_deep_read_required", "pending_deep_read_synthesis"]):
         out.append("当前状态：当前 Find 的全文证据已覆盖，但仍有论文未完成精读；TASTE 需要继续运行 Reading subagent。")
@@ -4002,13 +4083,15 @@ def _public_read_idea_plan_job_logs(stage: str, logs: list[str], progress: dict[
         out.append("当前状态：当前阶段仍未完成，TASTE 已暂停下游发布。")
     elif "complete" in lowered or "done" in lowered:
         out.append(f"当前状态：{label}阶段已完成。")
+    elif stage_detail:
+        out.append("当前状态：" + stage_detail[:220])
     elif message:
         cleaned_message = _public_job_summary_text(_public_text(message))
         if cleaned_message:
             out.append("当前状态：" + cleaned_message[:220])
     else:
         if stage == "read":
-            out.append("当前状态：爬取全文等待开始。")
+            out.append("当前状态：等待爬文章开始。")
         else:
             out.append(f"当前状态：{label}任务已记录。")
     run_id = str(result.get("run_id") or result.get("find_run_id") or "").strip()
@@ -4651,7 +4734,7 @@ def _compact_large_markdown_artifact(path: Path, size_bytes: int) -> dict[str, A
     }
 
 
-CURRENT_FIND_PUBLIC_MARKDOWN_PAPER_REF_RE = re.compile(r"\bpaper[_-][A-Za-z0-9]+\b", re.IGNORECASE)
+CURRENT_FIND_PUBLIC_MARKDOWN_PAPER_REF_RE = re.compile(r"\bpaper[_-][0-9a-f]{8,}\b", re.IGNORECASE)
 
 
 def _current_find_reference_artifact_paths(project_root: Path | None) -> list[Path]:
@@ -4710,7 +4793,7 @@ def _current_find_public_paper_ref_index(project_root: Path | None) -> dict[str,
 
 
 def _hydrate_current_find_markdown_paper_refs(content: str, project_root: Path | None, name: str) -> str:
-    if name not in {"idea.md", "plan.md"} or project_root is None or "paper_" not in content:
+    if name != "plan.md" or project_root is None or not CURRENT_FIND_PUBLIC_MARKDOWN_PAPER_REF_RE.search(content):
         return content
     index = _current_find_public_paper_ref_index(project_root)
     if not index:
@@ -5156,7 +5239,7 @@ def _taskbgate_projection(root: Path, cycle_status: Any = "", raw_issue: Any = "
             "gate": "候选路线仍在取证",
             "issue": "参考复现已通过；候选新路线尚未获得独立授权，当前主线基底保持不变，不能自动切换基底或提升论文结论。",
             "goal": "候选路线仍需补齐可审计证据。",
-            "next": "等待项目代理基于当前候选路线证据给出下一步判断；门控通过前不自动切换基底或提升论文结论。",
+            "next": "等待 Experimenting 主控 Claude 基于当前候选路线证据给出下一步判断；门控通过前不自动切换基底或提升论文结论。",
         }
     selected_evidence_block = (
         "blocked_selected_base_viability_gate" in hay
@@ -5173,20 +5256,20 @@ def _taskbgate_projection(root: Path, cycle_status: Any = "", raw_issue: Any = "
             "gate": "缺少主线候选实验证据",
             "issue": "参考复现已通过；当前主线还缺少可审计、可写入论文的候选实验证据。论文稿可以生成检查版，但不能被标记为投稿通过。",
             "goal": "当前基底保持不变，继续补齐当前主线候选实验证据。",
-            "next": "等待项目代理读取当前门控证据后给出下一步实验判断；门控通过前不提升论文结论。",
+            "next": "等待 Experimenting 主控 Claude 读取当前门控证据后给出下一步实验判断；门控通过前不提升论文结论。",
         }
     if issue_text.strip():
         return {
             "gate": "科研门控阻塞",
             "issue": issue_text.strip()[:500],
             "goal": "当前科研门控未通过，需继续补齐证据。",
-            "next": next_text.strip()[:500] or "等待项目代理读取当前证据后给出下一步判断。",
+            "next": next_text.strip()[:500] or "等待对应模块主控 Claude 读取当前证据后给出下一步判断。",
         }
     return {
         "gate": str(cycle_status or "科研门控").replace("_", " "),
         "issue": "当前科研门控未通过；原始证据保留在 state/report 产物中。",
         "goal": "当前科研门控未通过，需继续补齐证据。",
-        "next": next_text.strip()[:500] or "等待项目代理读取当前证据后给出下一步判断。",
+        "next": next_text.strip()[:500] or "等待对应模块主控 Claude 读取当前证据后给出下一步判断。",
     }
 
 
@@ -5195,58 +5278,6 @@ def _as_int(value: Any, default: int = 0) -> int:
         return int(value)
     except Exception:
         return default
-
-
-def _find_adoption_gate_metrics(run_id: str, result_dict: Any) -> dict[str, Any]:
-    payload = result_dict if isinstance(result_dict, dict) else {}
-    counts = payload.get("counts") if isinstance(payload.get("counts"), dict) else {}
-    scoring_runtime = payload.get("scoring_runtime") if isinstance(payload.get("scoring_runtime"), dict) else {}
-    progress_payload: dict[str, Any] = {}
-    run_id = str(run_id or "").strip()
-    if run_id:
-        try:
-            progress = read_json(run_dir(run_id) / "find_progress.json", {})
-            if isinstance(progress, dict):
-                progress_payload = progress
-        except Exception:
-            progress_payload = {}
-    target_count = max(
-        _as_int(payload.get("recommendation_target_count"), 0),
-        _as_int(scoring_runtime.get("recommendation_target_count"), 0),
-        _as_int(progress_payload.get("recommendation_target_count"), 0),
-        _as_int(counts.get("recommendation_target_count"), 0),
-    )
-    shortfall_values = [
-        _as_int(payload.get("recommendation_shortfall"), -1),
-        _as_int(scoring_runtime.get("recommendation_shortfall"), -1),
-        _as_int(progress_payload.get("recommendation_shortfall"), -1),
-        _as_int(counts.get("recommendation_shortfall"), -1),
-    ]
-    shortfall = next((value for value in shortfall_values if value >= 0), -1)
-    recommendations = payload.get("strong_recommendations") or payload.get("articles") or []
-    strong_count = len(recommendations) if isinstance(recommendations, list) else 0
-    strong_count = max(
-        strong_count,
-        _as_int(payload.get("strong_recommendation_count"), 0),
-        _as_int(scoring_runtime.get("strict_strong_anchor_count"), 0),
-        _as_int(scoring_runtime.get("recommendation_actual_count"), 0),
-        _as_int(progress_payload.get("strong_recommendation_count"), 0),
-        _as_int(progress_payload.get("strict_strong_anchor_count"), 0),
-        _as_int(counts.get("strong_recommendations"), 0),
-        _as_int(counts.get("recommended"), 0),
-    )
-    if shortfall < 0 and target_count:
-        shortfall = max(0, target_count - strong_count)
-    elif shortfall < 0:
-        shortfall = 0
-    result_status = str(payload.get("status") or progress_payload.get("phase") or "").lower()
-    return {
-        "strong_count": strong_count,
-        "target_count": target_count,
-        "shortfall": shortfall,
-        "status": result_status,
-        "progress_phase": str(progress_payload.get("phase") or ""),
-    }
 
 
 def _current_project_for_find_guard() -> tuple[str, Path] | None:
@@ -5315,278 +5346,6 @@ def _record_new_find_restart_approval(root: Path, project: str, *, source: str, 
 
 
 
-def _find_artifact_run_dir_for_project(root: Path, run_id: str) -> Path:
-    run_id = str(run_id or "").strip()
-    if run_id:
-        try:
-            directory = run_dir(run_id)
-            if (directory / "find_results.json").exists():
-                return directory
-        except Exception:
-            pass
-    taste_find = root / "planning" / "finding" / "find_results.json"
-    if taste_find.exists():
-        return taste_find.parent
-    raise FileNotFoundError(f"Current Find results not found for run_id={run_id}")
-
-
-def _reproject_find_results_with_current_contract(find_results: dict[str, Any], config: AppConfig, source: str) -> dict[str, Any]:
-    """Do not recompute Finding ranking inside Web.
-
-    Web adopts the recommendation contract already materialized by the Finding
-    public run artifact. If the contract changes, rerun Finding through the
-    framework route instead of repairing Finding-owned ranking in this layer.
-    """
-    if not isinstance(find_results, dict):
-        return {"status": "skipped_invalid_find_results"}
-    recommendations = find_results.get("strong_recommendations") if isinstance(find_results.get("strong_recommendations"), list) else find_results.get("articles") if isinstance(find_results.get("articles"), list) else []
-    scoring_runtime = find_results.get("scoring_runtime") if isinstance(find_results.get("scoring_runtime"), dict) else {}
-    target_count = int(find_results.get("recommendation_target_count") or scoring_runtime.get("recommendation_target_count") or len(recommendations) or 0)
-    shortfall = max(0, target_count - len(recommendations)) if target_count else int(find_results.get("recommendation_shortfall") or scoring_runtime.get("recommendation_shortfall") or 0)
-    return {
-        "status": "artifact_contract_preserved",
-        "source": source,
-        "recommendation_count": len(recommendations),
-        "recommendation_target_count": target_count,
-        "recommendation_shortfall": shortfall,
-    }
-
-def _missing_recommendation_abstract_zh(recommendations: list[Any]) -> list[dict[str, str]]:
-    missing: list[dict[str, str]] = []
-    for index, row in enumerate(recommendations, 1):
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("abstract") or row.get("abstract_en") or "").strip() and not str(row.get("abstract_zh") or "").strip():
-            missing.append({"rank": str(index), "id": str(row.get("id") or ""), "title": str(row.get("title") or "")})
-    return missing
-
-
-def _abstract_translation_status_for_recommendations(recommendations: list[Any], stored_status: Any = "") -> str:
-    has_abstract = any(
-        isinstance(row, dict) and str(row.get("abstract") or row.get("abstract_en") or "").strip()
-        for row in recommendations
-    )
-    if _missing_recommendation_abstract_zh(recommendations):
-        return "partial"
-    if has_abstract:
-        return "completed"
-    return str(stored_status or "not_needed")
-
-
-def _sync_find_translation_quality(find_results: dict[str, Any], recommendations: list[Any], translation_status: str, missing_zh: list[dict[str, str]]) -> None:
-    find_results["abstract_translation_status"] = translation_status
-    scoring_runtime = find_results.get("scoring_runtime") if isinstance(find_results.get("scoring_runtime"), dict) else {}
-    if isinstance(scoring_runtime, dict):
-        scoring_runtime["abstract_translation_status"] = translation_status
-    quality = find_results.get("recommendation_quality") if isinstance(find_results.get("recommendation_quality"), dict) else {}
-    if isinstance(quality, dict):
-        quality["missing_chinese_abstract_count"] = len(missing_zh)
-        quality["english_abstract_fallback_count"] = len(missing_zh)
-        quality["missing_chinese_abstract_ids"] = [str(item.get("id") or item.get("title") or "") for item in missing_zh[:50]]
-        if missing_zh:
-            quality["status"] = "needs_translation"
-        elif str(quality.get("status") or "").strip() in {"ok_with_translation_todo", "needs_translation", "completed"}:
-            quality["status"] = "ok"
-        find_results["recommendation_quality"] = quality
-        if isinstance(scoring_runtime, dict):
-            scoring_runtime["recommendation_quality"] = quality
-        diagnostics = find_results.get("diagnostics") if isinstance(find_results.get("diagnostics"), dict) else {}
-        if isinstance(diagnostics, dict):
-            diagnostics["recommendation_quality"] = quality
-            find_results["diagnostics"] = diagnostics
-
-
-def _sync_current_find_projection(root: Path, run_id: str, find_results: dict[str, Any], source: str) -> dict[str, Any]:
-    state_dir = root / "state"
-    state_dir.mkdir(parents=True, exist_ok=True)
-    recommendations = find_results.get("strong_recommendations") if isinstance(find_results.get("strong_recommendations"), list) else find_results.get("articles") if isinstance(find_results.get("articles"), list) else []
-    scoring_runtime = find_results.get("scoring_runtime") if isinstance(find_results.get("scoring_runtime"), dict) else {}
-    progress = read_json(_find_artifact_run_dir_for_project(root, run_id) / "find_progress.json", {})
-    if not isinstance(progress, dict):
-        progress = {}
-    missing_zh = _missing_recommendation_abstract_zh(recommendations)
-    stored_translation_status = progress.get("abstract_translation_status") or scoring_runtime.get("abstract_translation_status") or find_results.get("abstract_translation_status") or ""
-    translation_status = _abstract_translation_status_for_recommendations(recommendations, stored_translation_status)
-    _sync_find_translation_quality(find_results, recommendations, translation_status, missing_zh)
-    target_count = int(progress.get("recommendation_target_count") or scoring_runtime.get("recommendation_target_count") or len(recommendations) or 0)
-    shortfall = max(0, target_count - len(recommendations)) if target_count else 0
-    projection = {
-        "run_id": run_id,
-        "source_run_id": run_id,
-        "source": source,
-        "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        "strong_recommendations": recommendations,
-        "counts": {"recommended": len(recommendations), "read_candidates": len(recommendations), "strict_strong_anchor_count": len(recommendations)},
-        "strict_strong_anchor_count": len(recommendations),
-        "recommendation_target_count": target_count,
-        "recommendation_shortfall": shortfall,
-        "recommendation_quality": find_results.get("recommendation_quality") or scoring_runtime.get("recommendation_quality") or {},
-        "abstract_translation_status": translation_status,
-        "missing_recommendation_abstract_zh": missing_zh,
-    }
-    survey_stats = _find_survey_stats_from_payloads(progress, find_results)
-    if survey_stats:
-        projection["survey_stats"] = survey_stats
-        counts = projection.get("counts") if isinstance(projection.get("counts"), dict) else {}
-        for key, value in survey_stats.items():
-            if value not in (None, ""):
-                counts[key] = value
-        projection["counts"] = counts
-    write_json(state_dir / "current_find_recommendation_projection.json", projection)
-    return projection
-
-
-def _current_find_artifact_row_title(row: Any) -> str:
-    if not isinstance(row, dict):
-        return str(row or "").strip()
-    return str(row.get("title") or row.get("paper_title") or row.get("id") or row.get("paper_id") or "").strip()
-
-
-def _current_find_artifact_row_key(row: Any) -> str:
-    if not isinstance(row, dict):
-        return str(row or "").strip()
-    return str(row.get("id") or row.get("paper_id") or row.get("url") or row.get("pdf_url") or row.get("title") or row.get("paper_title") or "").strip()
-
-
-def _current_find_read_reset_reason(root: Path, run_id: str, recommendations: list[dict[str, Any]]) -> str:
-    taste_dir = root / "planning" / "finding"
-    read_payload = _read_project_json(taste_dir / "read_results.json", {})
-    if not isinstance(read_payload, dict):
-        return "missing_or_invalid_current_find_read_results"
-    if str(read_payload.get("run_id") or "").strip() != run_id:
-        return "read_results_run_id_mismatch"
-    if str(read_payload.get("source") or "").strip() == "pending_new_find_read" and str(read_payload.get("status") or "").strip() == "pending":
-        return ""
-    readings = read_payload.get("readings") if isinstance(read_payload.get("readings"), list) else []
-    if len(readings) != len(recommendations):
-        return "read_results_recommendation_count_mismatch"
-    expected_keys = {_current_find_artifact_row_key(row) for row in recommendations if _current_find_artifact_row_key(row)}
-    reading_keys = {_current_find_artifact_row_key(row) for row in readings if _current_find_artifact_row_key(row)}
-    if expected_keys and reading_keys and expected_keys != reading_keys:
-        return "read_results_recommendation_set_mismatch"
-    expected_titles = {_current_find_artifact_row_title(row) for row in recommendations if _current_find_artifact_row_title(row)}
-    reading_titles = {_current_find_artifact_row_title(row) for row in readings if _current_find_artifact_row_title(row)}
-    if expected_titles and reading_titles and expected_titles != reading_titles:
-        return "read_results_recommendation_title_mismatch"
-    return ""
-
-
-def _reset_current_find_downstream_artifacts(root: Path, run_id: str, recommendations: list[dict[str, Any]], source: str, reason: str) -> dict[str, Any]:
-    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-    taste_dir = root / "planning" / "finding"
-    state_dir = root / "state"
-    taste_dir.mkdir(parents=True, exist_ok=True)
-    state_dir.mkdir(parents=True, exist_ok=True)
-    safe_now = now.replace(":", "").replace("-", "").replace(".", "_")
-    backup_root = state_dir / "current_find_artifact_backups" / f"repair_current_find_reset_{run_id}_{safe_now}"
-
-    def backup(path: Path) -> None:
-        if not path.exists():
-            return
-        try:
-            rel = path.relative_to(root)
-        except Exception:
-            rel = Path(path.name)
-        target = backup_root / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(path, target)
-
-    def backup_tree(path: Path) -> None:
-        if not path.exists() or not path.is_dir():
-            return
-        try:
-            rel = path.relative_to(root)
-        except Exception:
-            rel = Path(path.name)
-        target = backup_root / rel
-        if target.exists():
-            shutil.rmtree(target)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(path, target)
-
-    reset_files: list[str] = []
-    placeholders = {
-        "read_results.json": {"run_id": run_id, "source": "pending_new_find_read", "status": "pending", "readings": [], "created_at": now, "reset_source": source, "reset_reason": reason},
-        "ideas.json": {"run_id": run_id, "source": "pending_new_find_idea", "status": "pending", "ideas": [], "created_at": now, "reset_source": source, "reset_reason": reason},
-        "plans.json": {"run_id": run_id, "source": "pending_new_find_plan", "status": "pending", "plans": [], "created_at": now, "reset_source": source, "reset_reason": reason},
-    }
-    for name, payload in placeholders.items():
-        dst = taste_dir / name
-        backup(dst)
-        write_json(dst, payload)
-        reset_files.append(name)
-    markdown = {
-        "read.md": f"# 精读等待执行\n\n当前 Find {run_id} 的推荐列表已按最新推荐合同更新；请通过网页 Read 按钮触发 project agent 对当前 20 篇推荐论文逐篇全文精读。\n",
-        "idea.md": f"# 想法等待生成\n\n当前 Find {run_id} 的精读尚未完成；Idea 必须在 Read 产物通过后生成。\n",
-        "plan.md": f"# 计划等待生成\n\n当前 Find {run_id} 的 Idea 尚未完成；Plan 必须在 Idea 通过后生成。\n",
-    }
-    for name, content in markdown.items():
-        dst = taste_dir / name
-        backup(dst)
-        dst.write_text(content, encoding="utf-8")
-        reset_files.append(name)
-    full_text_dir = taste_dir / "full_text_reading"
-    backup_tree(full_text_dir)
-    if full_text_dir.exists():
-        shutil.rmtree(full_text_dir)
-        reset_files.append("full_text_reading/")
-    full_text_dir.mkdir(parents=True, exist_ok=True)
-    write_json(
-        full_text_dir / "full_text_packet.json",
-        {"run_id": run_id, "source": "pending_new_find_full_text_evidence", "status": "pending", "papers": [], "created_at": now, "reset_source": source, "reset_reason": reason},
-    )
-    reset_files.append("full_text_reading/full_text_packet.json")
-    fragment_dir = taste_dir / "current_find_deep_read_fragments"
-    backup_tree(fragment_dir)
-    if fragment_dir.exists():
-        shutil.rmtree(fragment_dir)
-        reset_files.append("current_find_deep_read_fragments/")
-    fragment_dir.mkdir(parents=True, exist_ok=True)
-
-    validation = {
-        "run_id": run_id,
-        "valid": False,
-        "status": "pending_current_find_read",
-        "source": source,
-        "generated_at": now,
-        "expected_recommendation_count": len(recommendations),
-        "actual_reading_count": 0,
-        "full_text_reading_count": 0,
-        "pending_full_text_reading_count": len(recommendations),
-        "blockers": ["current Find recommendation packet changed; Read must process the current recommendation list before Idea or Plan can be current"],
-        "reset_reason": reason,
-    }
-    backup(state_dir / "current_find_claude_reading_validation.json")
-    write_json(state_dir / "current_find_claude_reading_validation.json", validation)
-    plan_stub = {
-        "run_id": run_id,
-        "source_run_id": run_id,
-        "source": source,
-        "status": "pending_current_find_read",
-        "created_at": now,
-        "current_find_reading_count": 0,
-        "current_find_idea_count": 0,
-        "current_find_plan_count": 0,
-        "recommended_count": len(recommendations),
-        "literature_gate": {"status": "pass", "strong_recommendations": len(recommendations), "recommendation_target_count": len(recommendations), "recommendation_shortfall": 0},
-        "reading_validation": validation,
-        "next_required_action": "run_read_for_current_find",
-        "selected_plan_id": "",
-        "selected_idea_id": "",
-        "reset_reason": reason,
-    }
-    backup(state_dir / "current_find_research_plan.json")
-    write_json(state_dir / "current_find_research_plan.json", plan_stub)
-    return {"status": "reset", "run_id": run_id, "source": source, "reason": reason, "reset_files": reset_files, "backup_dir": str(backup_root) if backup_root.exists() else ""}
-
-
-def _write_current_find_markdown(directory: Path, find_results: dict[str, Any]) -> None:
-    recommendations = find_results.get("strong_recommendations") if isinstance(find_results.get("strong_recommendations"), list) else find_results.get("articles") if isinstance(find_results.get("articles"), list) else []
-    article_text = paper_markdown(recommendations, "Recommended Articles")
-    (directory / "find.md").write_text(article_text, encoding="utf-8")
-
-
-
 def _parse_last_json_object_from_lines(lines: list[str]) -> dict[str, Any]:
     joined = "\n".join(lines)
     for start in [idx for idx, char in enumerate(joined) if char == "{"][-16:]:
@@ -5597,459 +5356,6 @@ def _parse_last_json_object_from_lines(lines: list[str]) -> dict[str, Any]:
         if isinstance(candidate, dict):
             return candidate
     return {}
-
-
-def _script_pythonpath_env(env: dict[str, str]) -> None:
-    env["PYTHONPATH"] = taste_pythonpath_string(WORKSPACE_ROOT, env.get("PYTHONPATH", ""))
-
-
-def _run_current_find_full_text_evidence_repair(project: str, root: Path, log: Callable[[str], None], should_cancel: Callable[[], bool], progress: Callable[[str, int, int, str], None]) -> dict[str, Any]:
-    progress("full_text_evidence_repair", 0, 1, "正在补抓当前 Find 推荐论文全文证据。")
-    management_python = os.environ.get("MANAGEMENT_PYTHON") or sys.executable
-    module_entry = WORKSPACE_ROOT / "modules" / "reading" / "main.py"
-    cmd = [management_python, str(module_entry), "--action", "repair_full_text", "--project", project, "--force"]
-    env = os.environ.copy()
-    env["WORKSPACE_ROOT"] = str(WORKSPACE_ROOT)
-    env["PROJECT_ID"] = project
-    env["DEFAULT_PROJECT_ID"] = project
-    env.setdefault("MANAGEMENT_PYTHON", management_python)
-    _script_pythonpath_env(env)
-    log("Delegating current Find full-text evidence repair to wrapper: " + " ".join(cmd))
-    proc = subprocess.Popen(cmd, cwd=str(WORKSPACE_ROOT), env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1)
-    output_lines: list[str] = []
-    suppressed_structured_lines = 0
-    try:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            line = line.rstrip("\n")
-            if line:
-                output_lines.append(line)
-                stripped = line.strip()
-                looks_structured = stripped.startswith(("{", "}", "[", "]", "\"")) or '":' in stripped[:120]
-                if looks_structured:
-                    suppressed_structured_lines += 1
-                    if suppressed_structured_lines == 1:
-                        log("Wrapper emitted structured evidence JSON; suppressing verbose taskbar fragments. Full evidence is stored under planning/finding/full_text_reading and state JSON files.")
-                    elif suppressed_structured_lines % 250 == 0:
-                        log(f"Wrapper structured evidence output suppressed: {suppressed_structured_lines} JSON-like lines read.")
-                else:
-                    log(line[:1200])
-            if should_cancel():
-                proc.terminate()
-                raise JobCancelled("Task cancelled by user.")
-        rc = proc.wait(timeout=5)
-    except JobCancelled:
-        raise
-    except Exception:
-        try:
-            proc.terminate()
-        except Exception:
-            pass
-        raise
-
-    receipt = _parse_last_json_object_from_lines(output_lines)
-    if not receipt:
-        saved_receipt = _read_project_json(root / "state" / "current_find_full_text_evidence_repair.json", {})
-        if isinstance(saved_receipt, dict):
-            receipt = saved_receipt
-    status = str((receipt if isinstance(receipt, dict) else {}).get("status") or "").strip()
-    acquired_count = int((receipt if isinstance(receipt, dict) else {}).get("acquired_count") or 0)
-    unavailable_count = int((receipt if isinstance(receipt, dict) else {}).get("unavailable_count") or 0)
-    pending_after = (receipt if isinstance(receipt, dict) else {}).get("pending_after_repair")
-    if not isinstance(pending_after, list):
-        pending_after = []
-    ok_codes = {0, 2}
-    if rc not in ok_codes:
-        progress("full_text_evidence_repair_failed", 1, 1, status or f"全文证据修复脚本失败，退出码 {rc}")
-        return {
-            "status": status or "full_text_evidence_repair_failed",
-            "returncode": rc,
-            "project": project,
-            "receipt": receipt,
-            "stdout_tail": output_lines[-40:],
-        }
-    if pending_after or unavailable_count:
-        message = f"全文证据修复部分完成：已取得 {acquired_count} 篇，仍缺 {len(pending_after) or unavailable_count} 篇。"
-        progress("full_text_evidence_blocked", 1, 1, message)
-    else:
-        message = f"全文证据修复完成：已取得 {acquired_count} 篇。"
-        progress("full_text_evidence_repair", 1, 1, message)
-    return {
-        "status": status or ("partial_full_text_evidence_repair" if rc == 2 else "done"),
-        "returncode": rc,
-        "project": project,
-        "acquired_count": acquired_count,
-        "unavailable_count": unavailable_count,
-        "pending_after_repair": pending_after,
-        "receipt": receipt,
-        "stdout_tail": output_lines[-40:],
-    }
-
-def _adopt_find_run_for_project(root: Path, project: str, run_id: str, *, source: str = "web_find_complete") -> dict[str, Any]:
-    """Make a completed Web/API Find run the project-level current Find packet.
-
-    Runtime runs are historical by default. A user-approved Web/API Find must be
-    explicitly adopted into the project packet so Read/Idea/Plan cannot keep
-    consuming stale project artifacts from the previous run.
-    """
-    run_id = str(run_id or "").strip()
-    if not run_id:
-        return {"status": "skipped", "reason": "missing_run_id"}
-    directory = run_dir(run_id)
-    find_results_path = directory / "find_results.json"
-    if not find_results_path.exists():
-        return {"status": "skipped", "reason": "missing_find_results", "run_id": run_id}
-    find_results = read_json(find_results_path, {})
-    if not isinstance(find_results, dict):
-        return {"status": "skipped", "reason": "invalid_find_results", "run_id": run_id}
-    reproject_receipt = _reproject_find_results_with_current_contract(find_results, load_config(), f"{source}_adoption")
-    if reproject_receipt.get("status") == "reprojected":
-        write_json(find_results_path, find_results)
-        _write_current_find_markdown(directory, find_results)
-    actual_run_id = str(find_results.get("run_id") or "").strip()
-    if actual_run_id and actual_run_id != run_id:
-        return {"status": "skipped", "reason": "run_id_mismatch", "run_id": run_id, "actual_run_id": actual_run_id}
-    progress = read_json(directory / "find_progress.json", {})
-    if not isinstance(progress, dict):
-        progress = {}
-    recommendations = find_results.get("strong_recommendations") if isinstance(find_results.get("strong_recommendations"), list) else find_results.get("articles") if isinstance(find_results.get("articles"), list) else []
-    scoring_runtime = find_results.get("scoring_runtime") if isinstance(find_results.get("scoring_runtime"), dict) else {}
-    target_count = int(find_results.get("recommendation_target_count") or progress.get("recommendation_target_count") or scoring_runtime.get("recommendation_target_count") or len(recommendations) or 0)
-    shortfall = max(0, target_count - len(recommendations)) if target_count else int(find_results.get("recommendation_shortfall") or progress.get("recommendation_shortfall") or scoring_runtime.get("recommendation_shortfall") or 0)
-    find_results["recommendation_target_count"] = target_count
-    find_results["recommendation_actual_count"] = len(recommendations)
-    find_results["strict_strong_anchor_count"] = len(recommendations)
-    find_results["strong_recommendation_count"] = len(recommendations)
-    find_results["recommendation_shortfall"] = shortfall
-    missing_zh = _missing_recommendation_abstract_zh(recommendations)
-    stored_translation_status = find_results.get("abstract_translation_status") or progress.get("abstract_translation_status") or scoring_runtime.get("abstract_translation_status") or ""
-    translation_status = _abstract_translation_status_for_recommendations(recommendations, stored_translation_status)
-    _sync_find_translation_quality(find_results, recommendations, translation_status, missing_zh)
-    if isinstance(scoring_runtime, dict):
-        scoring_runtime["recommendation_target_count"] = target_count
-        scoring_runtime["recommendation_actual_count"] = len(recommendations)
-        scoring_runtime["strict_strong_anchor_count"] = len(recommendations)
-        scoring_runtime["recommendation_shortfall"] = shortfall
-        scoring_runtime["abstract_translation_status"] = translation_status
-    write_json(find_results_path, find_results)
-    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-    taste_dir = root / "planning" / "finding"
-    state_dir = root / "state"
-    safe_now = now.replace(":", "").replace("-", "").replace(".", "_")
-    backup_root = state_dir / "current_find_artifact_backups" / f"adopt_{run_id}_{safe_now}"
-    taste_dir.mkdir(parents=True, exist_ok=True)
-    state_dir.mkdir(parents=True, exist_ok=True)
-    copied: list[str] = []
-    stale_reset: list[str] = []
-    find_names = [
-        "find.md", "source_status.md",
-        "find_results.json", "find_progress.json", "manifest.json", "selection.json", "venue_health_report.json", "category_scan_report.json", "title_filter_report.json",
-        "arxiv_raw.json", "arxiv_prefiltered.json", "biorxiv_raw.json", "biorxiv_prefiltered.json", "nature_raw.json", "nature_prefiltered.json", "science_raw.json", "science_prefiltered.json",
-        "hf.md", "github.md", "biorxiv.md", "nature.md", "science.md",
-    ]
-    def backup(path: Path) -> None:
-        if not path.exists():
-            return
-        rel = path.relative_to(root)
-        target = backup_root / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(path, target)
-
-    def backup_tree(path: Path) -> None:
-        if not path.exists() or not path.is_dir():
-            return
-        rel = path.relative_to(root)
-        target = backup_root / rel
-        if target.exists():
-            shutil.rmtree(target)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(path, target)
-
-    for name in find_names:
-        src = directory / name
-        if not src.exists():
-            continue
-        dst = taste_dir / name
-        backup(dst)
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, dst)
-        copied.append(name)
-
-    completed_downstream_copied: list[str] = []
-    downstream_status = "pending_downstream_reset"
-    read_src_payload = read_json(directory / "read_results.json", {})
-    idea_src_payload = read_json(directory / "ideas.json", {})
-    plan_src_payload = read_json(directory / "plans.json", {})
-
-    def same_run_payload(payload: Any) -> bool:
-        return isinstance(payload, dict) and str(payload.get("run_id") or payload.get("source_run_id") or payload.get("find_run_id") or "").strip() == run_id
-
-    def completed_payload(payload: Any, list_key: str) -> bool:
-        return (
-            same_run_payload(payload)
-            and str(payload.get("source") or "").strip() == "claude_code_current_find_takeover"
-            and isinstance(payload.get(list_key), list)
-            and len(payload.get(list_key) or []) > 0
-        )
-
-    reading_validation = read_src_payload.get("reading_validation") if isinstance(read_src_payload, dict) and isinstance(read_src_payload.get("reading_validation"), dict) else {}
-    validation_run_id = str(reading_validation.get("run_id") or "").strip()
-    validation_matches = bool(not validation_run_id or validation_run_id == run_id)
-    expected_readings = int(reading_validation.get("expected_recommendation_count") or len(recommendations) or 0) if isinstance(reading_validation, dict) else len(recommendations)
-    completed_downstream_ready = bool(
-        completed_payload(read_src_payload, "readings")
-        and completed_payload(idea_src_payload, "ideas")
-        and completed_payload(plan_src_payload, "plans")
-        and isinstance(reading_validation, dict)
-        and reading_validation.get("valid") is True
-        and validation_matches
-        and len(read_src_payload.get("readings") or []) >= max(1, expected_readings)
-    )
-
-    def packet_text_evidence_count(packet: Any) -> int:
-        if not isinstance(packet, dict):
-            return 0
-        count = 0
-        for row in packet.get("papers") or []:
-            if not isinstance(row, dict):
-                continue
-            try:
-                chars = int(row.get("text_chars") or row.get("full_text_chars") or row.get("pdf_text_chars") or 0)
-            except Exception:
-                chars = 0
-            if str(row.get("text_path") or "").strip() and chars >= 1200:
-                count += 1
-        return count
-
-    adopted_find_full_text_evidence_count = 0
-    downstream_reset_receipt: dict[str, Any] = {}
-    if completed_downstream_ready:
-        downstream_status = "completed_downstream_adopted"
-        for name in ["read.md", "read_results.json", "idea.md", "ideas.json", "plan.md", "plans.json"]:
-            src = directory / name
-            if not src.exists():
-                continue
-            dst = taste_dir / name
-            backup(dst)
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(src, dst)
-            completed_downstream_copied.append(name)
-        existing_full_text_dir = taste_dir / "full_text_reading"
-        run_full_text_dir = directory / "full_text_reading"
-        if run_full_text_dir.exists():
-            backup_tree(existing_full_text_dir)
-            if existing_full_text_dir.exists():
-                shutil.rmtree(existing_full_text_dir)
-            shutil.copytree(run_full_text_dir, existing_full_text_dir)
-            completed_downstream_copied.append("full_text_reading/")
-        else:
-            packet = read_json(existing_full_text_dir / "full_text_packet.json", {})
-            if not (isinstance(packet, dict) and str(packet.get("run_id") or "").strip() == run_id and isinstance(packet.get("papers"), list) and packet.get("papers")):
-                downstream_status = "completed_downstream_adopted_without_full_text_packet"
-        reading_validation = {**reading_validation, "run_id": run_id, "source": "claude_code_current_find_takeover", "synced_from": str(directory / "read_results.json"), "synced_at": now}
-        backup(state_dir / "current_find_claude_reading_validation.json")
-        write_json(state_dir / "current_find_claude_reading_validation.json", reading_validation)
-    else:
-        downstream_reset_receipt = _reset_current_find_downstream_artifacts(root, run_id, recommendations, source, "new_find_adopted_without_completed_same_run_downstream")
-        stale_reset = list(downstream_reset_receipt.get("reset_files") or [])
-        downstream_status = "pending_downstream_reset"
-        existing_full_text_dir = taste_dir / "full_text_reading"
-        run_full_text_dir = directory / "full_text_reading"
-        if run_full_text_dir.exists():
-            backup_tree(existing_full_text_dir)
-            if existing_full_text_dir.exists():
-                shutil.rmtree(existing_full_text_dir)
-            shutil.copytree(run_full_text_dir, existing_full_text_dir)
-            copied.append("full_text_reading/")
-            adopted_packet = read_json(existing_full_text_dir / "full_text_packet.json", {})
-            adopted_find_full_text_evidence_count = packet_text_evidence_count(adopted_packet)
-            if adopted_find_full_text_evidence_count >= len(recommendations):
-                downstream_status = "find_full_text_evidence_ready_pending_current_find_read"
-
-    fragment_dir = taste_dir / "current_find_deep_read_fragments"
-    run_fragment_dir = directory / "current_find_deep_read_fragments"
-    had_fragment_dir = fragment_dir.exists()
-    had_run_fragment_dir = run_fragment_dir.exists()
-    backup_tree(fragment_dir)
-    if fragment_dir.exists():
-        shutil.rmtree(fragment_dir)
-    fragment_dir.mkdir(parents=True, exist_ok=True)
-    copied_fragment_count = 0
-    if run_fragment_dir.exists():
-        for src in sorted(run_fragment_dir.glob("*.json")):
-            payload = read_json(src, {})
-            payload_run = str((payload if isinstance(payload, dict) else {}).get("run_id") or (payload if isinstance(payload, dict) else {}).get("current_find_run_id") or "").strip()
-            if payload_run != run_id:
-                continue
-            shutil.copyfile(src, fragment_dir / src.name)
-            copied_fragment_count += 1
-    if copied_fragment_count:
-        copied.append("current_find_deep_read_fragments/")
-    elif had_fragment_dir or had_run_fragment_dir:
-        if "current_find_deep_read_fragments/" not in stale_reset:
-            stale_reset.append("current_find_deep_read_fragments/")
-
-    missing_zh = _missing_recommendation_abstract_zh(recommendations)
-    translation_status = _abstract_translation_status_for_recommendations(recommendations, find_results.get("abstract_translation_status") or progress.get("abstract_translation_status") or scoring_runtime.get("abstract_translation_status") or "")
-    projection = {
-        "run_id": run_id,
-        "source_run_id": run_id,
-        "source": source,
-        "created_at": now,
-        "strong_recommendations": recommendations,
-        "counts": {"recommended": len(recommendations), "read_candidates": len(recommendations), "strict_strong_anchor_count": len(recommendations)},
-        "strict_strong_anchor_count": len(recommendations),
-        "recommendation_target_count": target_count,
-        "recommendation_shortfall": shortfall,
-        "recommendation_quality": find_results.get("recommendation_quality") or scoring_runtime.get("recommendation_quality") or {},
-        "abstract_translation_status": translation_status,
-        "missing_recommendation_abstract_zh": missing_zh,
-    }
-    survey_stats = _find_survey_stats_from_payloads(progress, find_results)
-    if survey_stats:
-        projection["survey_stats"] = survey_stats
-        projection_counts = projection.get("counts") if isinstance(projection.get("counts"), dict) else {}
-        for key, value in survey_stats.items():
-            if value not in (None, ""):
-                projection_counts[key] = value
-        projection["counts"] = projection_counts
-    write_json(state_dir / "current_find_recommendation_projection.json", projection)
-    def rows_from(payload: Any, key: str) -> list[Any]:
-        if isinstance(payload, dict) and isinstance(payload.get(key), list):
-            return payload.get(key) or []
-        return []
-
-    def first_nonempty(*values: Any) -> Any:
-        for value in values:
-            if value not in (None, "", [], {}):
-                return value
-        return ""
-
-    read_rows = rows_from(read_src_payload, "readings") if completed_downstream_ready else []
-    idea_rows = rows_from(idea_src_payload, "ideas") if completed_downstream_ready else []
-    plan_rows = rows_from(plan_src_payload, "plans") if completed_downstream_ready else []
-    pending_reading_validation = {
-        "run_id": run_id,
-        "valid": False,
-        "status": "current_find_full_text_evidence_ready_pending_deep_read" if adopted_find_full_text_evidence_count >= len(recommendations) and recommendations else "pending_current_find_read",
-        "source": "web_find_adoption",
-        "generated_at": now,
-        "expected_recommendation_count": len(recommendations),
-        "actual_reading_count": 0,
-        "full_text_evidence_count": adopted_find_full_text_evidence_count,
-        "full_text_reading_count": adopted_find_full_text_evidence_count,
-        "pending_without_evidence_count": max(0, len(recommendations) - adopted_find_full_text_evidence_count),
-        "pending_full_text_reading_count": max(0, len(recommendations) - adopted_find_full_text_evidence_count),
-        "blockers": ["current Find adopted with full-text evidence; Read stage has not synthesized deep readings yet"] if adopted_find_full_text_evidence_count >= len(recommendations) and recommendations else ["current Find adopted; Read stage has not processed this run yet"],
-    }
-    if not completed_downstream_ready:
-        backup(state_dir / "current_find_claude_reading_validation.json")
-        write_json(state_dir / "current_find_claude_reading_validation.json", pending_reading_validation)
-    selected_idea_id = str(first_nonempty(
-        plan_src_payload.get("selected_idea_id") if isinstance(plan_src_payload, dict) else "",
-        idea_src_payload.get("selected_idea_id") if isinstance(idea_src_payload, dict) else "",
-        read_src_payload.get("selected_idea_id") if isinstance(read_src_payload, dict) else "",
-    ) or "")
-    selected_plan_id = str(first_nonempty(
-        plan_src_payload.get("selected_plan_id") if isinstance(plan_src_payload, dict) else "",
-        idea_src_payload.get("selected_plan_id") if isinstance(idea_src_payload, dict) else "",
-        read_src_payload.get("selected_plan_id") if isinstance(read_src_payload, dict) else "",
-    ) or "")
-    selected_idea = next((row for row in idea_rows if isinstance(row, dict) and str(row.get("id") or row.get("idea_id") or "") == selected_idea_id), {})
-    selected_plan = next((row for row in plan_rows if isinstance(row, dict) and str(row.get("plan_id") or row.get("id") or "") == selected_plan_id), {})
-    execution_policy = first_nonempty(
-        plan_src_payload.get("execution_policy") if isinstance(plan_src_payload, dict) else {},
-        idea_src_payload.get("execution_policy") if isinstance(idea_src_payload, dict) else {},
-        read_src_payload.get("execution_policy") if isinstance(read_src_payload, dict) else {},
-    )
-    if completed_downstream_ready:
-        plan_stub = {
-            "run_id": run_id,
-            "source_run_id": run_id,
-            "source": "claude_code_current_find_takeover",
-            "status": "claude_takeover_ready",
-            "downstream_status": downstream_status,
-            "created_at": now,
-            "synced_from_run_dir": str(directory),
-            "current_find_reading_count": len(read_rows),
-            "current_find_idea_count": len(idea_rows),
-            "current_find_plan_count": len(plan_rows),
-            "recommended_count": len(recommendations),
-            "literature_gate": {
-                "status": "pass" if recommendations and shortfall == 0 else "recommendation_shortfall",
-                "strong_recommendations": len(recommendations),
-                "recommendation_target_count": target_count,
-                "recommendation_shortfall": shortfall,
-            },
-            "reading_validation": reading_validation,
-            "full_text_reading_count": int(reading_validation.get("full_text_reading_count") or len(read_rows) or 0),
-            "pending_full_text_reading_count": int(reading_validation.get("pending_full_text_reading_count") or 0),
-            "next_required_action": "environment_base_selection_and_repo_data_protocol_audit",
-            "selected_plan_id": selected_plan_id,
-            "selected_idea_id": selected_idea_id,
-            "selected_plan": selected_plan,
-            "selected_idea": selected_idea,
-            "execution_policy": execution_policy if isinstance(execution_policy, dict) else {},
-            "artifacts": {
-                "read_md": str(taste_dir / "read.md"),
-                "read_results": str(taste_dir / "read_results.json"),
-                "public_final_artifact": str(taste_dir / "read.md"),
-                "ideas": str(taste_dir / "ideas.json"),
-                "plans": str(taste_dir / "plans.json"),
-                "idea_md": str(taste_dir / "idea.md"),
-                "plan_md": str(taste_dir / "plan.md"),
-            },
-        }
-    else:
-        plan_stub = {
-            "run_id": run_id,
-            "source_run_id": run_id,
-            "source": "web_find_adoption",
-            "status": "pending_current_find_read",
-            "downstream_status": downstream_status,
-            "preserved_downstream": False,
-            "stale_downstream_reset": stale_reset,
-            "created_at": now,
-            "current_find_reading_count": 0,
-            "current_find_idea_count": 0,
-            "current_find_plan_count": 0,
-            "recommended_count": len(recommendations),
-            "literature_gate": {
-                "status": "pass" if recommendations and shortfall == 0 else "recommendation_shortfall",
-                "strong_recommendations": len(recommendations),
-                "recommendation_target_count": target_count,
-                "recommendation_shortfall": shortfall,
-            },
-            "reading_validation": pending_reading_validation,
-            "next_required_action": "run_read_for_current_find",
-            "selected_plan_id": "",
-            "selected_idea_id": "",
-        }
-    backup(state_dir / "current_find_research_plan.json")
-    write_json(state_dir / "current_find_research_plan.json", plan_stub)
-    receipt = {
-        "status": "adopted",
-        "project": project,
-        "run_id": run_id,
-        "source": source,
-        "created_at": now,
-        "run_dir": str(directory),
-        "project_taste_dir": str(taste_dir),
-        "copied": copied,
-        "downstream_status": downstream_status,
-        "completed_downstream_copied": completed_downstream_copied,
-        "stale_downstream_reset": stale_reset,
-        "downstream_reset": downstream_reset_receipt,
-        "recommended_count": len(recommendations),
-        "reprojection": reproject_receipt,
-        "missing_recommendation_abstract_zh_count": len(missing_zh),
-        "backup_dir": str(backup_root) if backup_root.exists() else "",
-    }
-    write_json(state_dir / "latest_find_adoption_receipt.json", receipt)
-    with (state_dir / "find_adoption_audit.jsonl").open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(receipt, ensure_ascii=False) + "\n")
-    _clerun_caches(run_id)
-    return receipt
 
 
 def _new_find_guard_blocker(request: FindRequest | None = None) -> dict[str, Any] | None:
@@ -6252,7 +5558,7 @@ def _blocked_by_live_full_cycle_payload(project: str, stage: str, live_full_cycl
         "project": project,
         "stage": stage,
         "message": "A full research cycle is already running; duplicate stage launch is blocked.",
-        "message_zh": "完整科研流程正在运行；已阻止重复启动新的 Find/Read/Idea/Plan 阶段任务。需要人工介入时请使用项目代理指令队列。",
+        "message_zh": "完整科研流程正在运行；已阻止重复启动新的 Find/Read/Idea/Plan 阶段任务。需要人工介入时请使用对应模块主控指令框。",
         "existing_full_cycle": live_full_cycle,
     }
 
@@ -6392,7 +5698,7 @@ def _active_project_child_processes(project: str, root: Path, phase_hint: str = 
             phase = current_find_phase
             priority = current_find_priority
         elif current_find_child:
-            kind = "current_find_claude_child"
+            kind = "current_find_child"
             phase = "read"
             priority = 3
         elif "run_driver.py" in lowered:
@@ -6411,7 +5717,11 @@ def _active_project_child_processes(project: str, root: Path, phase_hint: str = 
             kind = "experiment_training"
             phase = "experiment"
             priority = 3
-        elif "run_paper_pipeline.py" in lowered or ("modules/writing/main.py" in lowered and ("--action run" in lowered or "--action paper_pipeline" in lowered)):
+        elif "modules/writing/main.py" in lowered and "--action chat" in lowered:
+            kind = "paper_claude_session"
+            phase = "paper"
+            priority = 4
+        elif "modules/writing/main.py" in lowered and "--action work" in lowered:
             kind = "paper_pipeline"
             phase = "paper"
             priority = 4
@@ -6419,10 +5729,6 @@ def _active_project_child_processes(project: str, root: Path, phase_hint: str = 
             kind = "paper_repair_loop"
             phase = "paper"
             priority = 4
-        elif "claude_project_session.py" in lowered and ("paper" in lowered or "writing" in lowered or "writing" in lowered):
-            kind = "paper_claude_session"
-            phase = "paper"
-            priority = 5
         elif "run_full_research_cycle.py" in lowered:
             kind = "full_cycle"
             phase = "full-cycle"
@@ -7099,7 +6405,7 @@ def _launcher_artifact_registry_status_message(root: Path, artifact: Path) -> st
         metric_value = matched_row.get("metric_value")
         metric_part = f"；{metric_name}={metric_value}" if metric_name and metric_value not in (None, "") else ""
         if audit_ready and ("not" in promotion or "candidate_observation_only" in promotion or "unsupported" in promotion or "not_above" in comparison):
-            return "最近一次实验训练已结束并已登记审计" + metric_part + "；当前结果未通过科研进展门控，等待 project agent 基于失败证据规划下一步。"
+            return "最近一次实验训练已结束并已登记审计" + metric_part + "；当前结果未通过科研进展门控，等待 Experimenting 主控 Claude 基于失败证据规划下一步。"
         if audit_ready:
             return "最近一次实验训练已结束并已登记审计" + metric_part + "；正在等待科研进展门控给出下一步。"
         return "最近一次实验训练已结束并已写入实验登记" + metric_part + "；等待审计和门控刷新。"
@@ -7108,7 +6414,7 @@ def _launcher_artifact_registry_status_message(root: Path, artifact: Path) -> st
     if isinstance(gate, dict):
         non_promotable = gate.get("non_promotable_candidate_runs") if isinstance(gate.get("non_promotable_candidate_runs"), list) else []
         if artifact_name in {str(item) for item in non_promotable}:
-            return "最近一次实验训练已结束并已被科研进展门控识别；当前候选结果不可提升，等待 project agent 基于负向证据规划下一步。"
+            return "最近一次实验训练已结束并已被科研进展门控识别；当前候选结果不可提升，等待 Experimenting 主控 Claude 基于负向证据规划下一步。"
     return ""
 
 
@@ -7166,9 +6472,6 @@ def _active_detail_lines(root: Path, full_cycle_pid: Any, phase: str) -> tuple[l
                 priority = -2
             elif "finetune_llm.py" in lowered and "nohup" not in lowered:
                 priority = -1
-        elif "claude_project_session.py" in lowered:
-            label = "项目 Claude 会话"
-            priority = 1
         elif "run_autonomous_research.py" in lowered:
             label = "TASTE 自主科研"
             priority = 2
@@ -7440,7 +6743,7 @@ def _active_detail_lines(root: Path, full_cycle_pid: Any, phase: str) -> tuple[l
             recent_completed_mode = True
             status_message = _launcher_artifact_registry_status_message(root, current_nonempty_logs[0].parent)
             if not status_message:
-                status_message = "最近一次实验训练已结束；下方展示该已完成训练的真实日志尾部，等待 project agent 登记审计和刷新门控。"
+                status_message = "最近一次实验训练已结束；下方展示该已完成训练的真实日志尾部，等待 Experimenting 主控 Claude 登记审计和刷新门控。"
             logs.append("experiment_output_status=" + status_message)
         else:
             logs.append("experiment_output_status=当前没有检测到活跃训练命令；任务栏仅展示当前 TASTE 子进程和 full-cycle 日志，不把历史训练日志当作当前输出。")
@@ -7563,7 +6866,7 @@ def _phase_from_stage(stage: Any) -> str:
         return "environment"
     if any(marker in text for marker in ["autonomous-research", "experiment", "trajectory", "scientific-progress", "iteration-audit", "training", "blocker-repair", "blocker-action-plan", "guidance-checkin"]):
         return "experiment"
-    if "current-find-selection" in text or "current-find-claude-select-plan" in text or "current-find-read-idea-plan" in text or ("plan" in text and "literature-plan" not in text):
+    if "current-find-selection" in text or "current-find-claude-select-plan" in text or ("plan" in text and "literature-plan" not in text):
         return "plan"
     if "ideation" in text or "idea" in text:
         return "idea"
@@ -7579,7 +6882,7 @@ def _active_stage_is_fresh_find(stage: Any) -> bool:
     text = str(stage or "").strip().lower().replace("_", "-")
     if not text:
         return False
-    blocked_markers = ["sync-outputs", "literature-tool-packet", "build-literature-tool-packet", "ensure-current-find", "current-find-read-idea-plan", "current-find-selection", "current-find-claude-select-plan", "blocker-action-plan", "build-blocker-action-plan"]
+    blocked_markers = ["sync-outputs", "literature-tool-packet", "build-literature-tool-packet", "ensure-current-find", "current-find-readiness-gate", "current-find-selection", "current-find-claude-select-plan", "blocker-action-plan", "build-blocker-action-plan"]
     if any(marker in text for marker in blocked_markers):
         return False
     return any(marker in text for marker in ["literature-survey", "run-finding", "run-finding.py"])
@@ -7614,10 +6917,10 @@ def _humanize_stage(stage: Any) -> str:
         ("literature-survey", "Find 文献调研"),
         ("sync-outputs", "同步 Find 产物"),
         ("literature-tool-packet", "构建文献证据包"),
-        ("ensure-current-find", "Claude 精读当前 Find 并生成 idea/plan"),
+        ("ensure-current-find", "Framework 校验当前 Find 下游就绪状态"),
         ("current-find-selection", "主控 Claude 选择唯一执行计划"),
         ("current-find-claude-select-plan", "主控 Claude 选择唯一执行计划"),
-        ("current-find-read-idea-plan", "Claude 精读当前 Find 并生成 idea/plan"),
+        ("current-find-readiness-gate", "当前 Find Read 就绪门控"),
         ("experiment-postprocess", "实验后处理：整理产物并解析指标"),
         ("paper-evidence-audit", "实验后审计：刷新论文证据门控"),
         ("submission-readiness", "实验后审计：刷新投稿准备度门控"),
@@ -7760,7 +7063,7 @@ def _current_stage_status_line(raw_stage: Any) -> str:
     if "autonomous-research" in lowered:
         return "TASTE：正在运行自主实验子循环；若需要新训练，必须通过 launcher 接管 PID、日志和产物。"
     if "full-cycle-ideation" in lowered or "ideation" in lowered:
-        return "project agent 正在设计下一轮当前主线候选实验；未审计通过前不写论文结论。"
+        return "Experimenting 主控 Claude 正在设计下一轮当前主线候选实验；未审计通过前不写论文结论。"
     if "trajectory" in lowered:
         return "TASTE：正在刷新科研轨迹、失败假设和下一步优化队列。"
     return ""
@@ -7947,7 +7250,7 @@ def _summarize_claude_taskbline(line: Any) -> str:
         return ""
     lowered = text.lower()
     if "waiting for claude code output" in lowered:
-        return "项目代理会话运行中；等待真实输出写入日志。"
+        return "模块主控 Claude 会话运行中；等待真实输出写入日志。"
     if text.endswith((" for", " and", " or", " to", " with", " while", "—")):
         return ""
     return text[:900]
@@ -7958,7 +7261,7 @@ def _is_generic_claude_taskbsummary(value: Any) -> bool:
     if not text:
         return True
     generic = {
-        "项目代理会话运行中；等待真实输出写入日志。",
+        "模块主控 Claude 会话运行中；等待真实输出写入日志。",
     }
     return text in generic or "当前动作=；" in text or text.endswith("当前动作=")
 
@@ -8048,16 +7351,16 @@ def _clean_claude_taskbline(line: Any) -> str:
     return text[:900]
 
 
-def _is_live_claude_agent_row(row: dict[str, Any]) -> bool:
-    """Return True only for an actual Claude session/worker, not the controller."""
+def _is_live_module_controller_row(row: dict[str, Any]) -> bool:
     status = str(row.get("status") or "").strip().lower()
     if status not in {"running", "queued", "cancelling"}:
         return False
     role = str(row.get("role") or "").strip().lower()
     command = " ".join(str(part) for part in row.get("command", [])) if isinstance(row.get("command"), list) else str(row.get("command") or "")
     command_l = command.lower()
-    is_claude = role in {"claude-main", "claude-worker"} or "claude_project_session" in command_l or "/claude" in command_l or command_l.startswith("claude ")
-    if not is_claude:
+    agent_id = str(row.get("id") or "").strip().lower()
+    is_controller = role == "module-controller" or agent_id in {"environment_controller", "experimenting_controller", "writing_controller"}
+    if not is_controller:
         return False
     pid = row.get("pid") or row.get("claude_pid")
     if status in {"running", "cancelling"} and pid not in (None, "") and not _pid_alive_local(pid):
@@ -8065,81 +7368,23 @@ def _is_live_claude_agent_row(row: dict[str, Any]) -> bool:
     return True
 
 
-def _agent_matches_taskbscope(row: dict[str, Any], stage_scope: str = "") -> bool:
+def _module_controller_matches_scope(row: dict[str, Any], stage_scope: str = "") -> bool:
     scope = str(stage_scope or "").strip().lower()
     if not scope:
         return True
     stage = str(row.get("stage") or row.get("last_stage") or "").strip().lower()
     agent_id = str(row.get("id") or "").strip().lower()
+    if scope == "environment":
+        return agent_id == "environment_controller" or stage.startswith("environment")
     if scope == "experiment":
-        if stage.startswith("writing") or "paper" in stage or agent_id.startswith(("writing", "paper_", "venue-intelligence")):
-            return False
-        return agent_id in {"main", ""} or any(token in stage for token in ["experiment", "reference", "environment", "autonomous", "trajectory", "blocker", "selected-base"])
+        return agent_id == "experimenting_controller" or stage.startswith("experiment")
     if scope == "paper":
-        return stage.startswith("writing") or "paper" in stage or agent_id.startswith(("writing", "paper_", "venue-intelligence"))
+        return agent_id == "writing_controller" or stage.startswith("writing") or stage.startswith("paper")
     return True
 
 
-def _latest_claude_agent_status_lines(root: Path, *, limit: int = 10, stage_scope: str = "") -> list[str]:
-    last = _read_project_json(root / "state" / "claude_project_session_last_result.json", {})
+def _latest_module_controller_status_lines(root: Path, *, limit: int = 10, stage_scope: str = "") -> list[str]:
     lines: list[str] = []
-    session = _read_project_json(root / "state" / "claude_project_session.json", {})
-    session_status = str(session.get("status") or "").strip().lower() if isinstance(session, dict) else ""
-    session_pid = session.get("pid") or session.get("claude_pid") if isinstance(session, dict) else None
-    active_session = bool(isinstance(session, dict) and session_status in {"running", "queued", "cancelling"})
-    if active_session and session_status in {"running", "cancelling"} and session_pid not in (None, "") and not _pid_alive_local(session_pid):
-        active_session = False
-    if active_session:
-        stage = str(session.get("stage") or session.get("last_stage") or "").strip()
-        status = str(session.get("status") or "").strip()
-        pid = str(session.get("pid") or session.get("claude_pid") or "").strip()
-        updated = str(session.get("updated_at") or "").strip()
-        bits = []
-        if stage:
-            bits.append(f"阶段={_humanize_stage(stage) or stage}")
-        if status:
-            bits.append(f"状态={_humanize_job_status(status)}")
-        if pid:
-            bits.append(f"PID={pid}")
-        if updated:
-            bits.append(f"更新={updated}")
-        if bits:
-            lines.append("claude_status=" + "；".join(bits))
-        live_agent_lines: list[str] = []
-        payload = _read_project_json(root / "state" / "agents.json", {})
-        agents = payload.get("agents") if isinstance(payload, dict) else []
-        if isinstance(agents, list):
-            live_rows = [row for row in agents if isinstance(row, dict) and _is_live_claude_agent_row(row) and _agent_matches_taskbscope(row, stage_scope)]
-            if live_rows:
-                latest_live = sorted(live_rows, key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""), reverse=True)[0]
-                current_items = []
-                if isinstance(latest_live.get("log_tail"), list):
-                    # Prefer the newest live Claude stream entries. The current_step
-                    # field can lag behind a long-running session and should not pin
-                    # the taskbar to an early summary.
-                    current_items.extend(reversed(latest_live.get("log_tail")))
-                current_items.append(latest_live.get("current_step"))
-                for raw in current_items:
-                    cleaned = _summarize_claude_taskbline(raw)
-                    if cleaned and not _is_generic_claude_taskbsummary(cleaned):
-                        line = "claude_current=" + cleaned
-                        if line not in live_agent_lines:
-                            live_agent_lines.append(line)
-                    if len(live_agent_lines) >= 3:
-                        break
-        prompt_path = str(session.get("message_file") or session.get("prompt_path") or "").strip()
-        if live_agent_lines:
-            # Keep claude_current rows chronological so the client, which reads
-            # the last matching row as latest, shows the true current action.
-            lines.extend(list(reversed(live_agent_lines))[: max(0, limit - len(lines))])
-        elif prompt_path:
-            lines.append("claude_current=项目代理会话运行中；等待真实输出写入日志。")
-        if lines:
-            # The global taskbar should describe the live Claude worker only.
-            # Completed Claude replies are shown in the dedicated recent-reply panel,
-            # not replayed as current job output.
-            return lines[:limit]
-
     payload = _read_project_json(root / "state" / "agents.json", {})
     agents = payload.get("agents") if isinstance(payload, dict) else []
     if isinstance(agents, list):
@@ -8147,7 +7392,7 @@ def _latest_claude_agent_status_lines(root: Path, *, limit: int = 10, stage_scop
         for row in agents:
             if not isinstance(row, dict):
                 continue
-            if not _is_live_claude_agent_row(row) or not _agent_matches_taskbscope(row, stage_scope):
+            if not _is_live_module_controller_row(row) or not _module_controller_matches_scope(row, stage_scope):
                 continue
             sort_key = str(row.get("updated_at") or row.get("created_at") or "")
             live_candidates.append({**row, "_sort_key": sort_key})
@@ -8598,7 +7843,7 @@ def _active_project_worker_job(project: str, root: Path, worker: dict[str, Any],
                     break
     controller_note = "由当前完整科研循环管理；不是完整科研循环控制器。" if controller_alive else "不是完整科研循环控制器；控制器未存活或需恢复。"
     if current_find_worker:
-        worker_summary = f"当前 Find 精读/想法/计划 worker 正在运行；{controller_note}"
+        worker_summary = f"当前 Find Read Framework worker 正在运行；{controller_note}"
     elif phase == "paper":
         worker_summary = f"论文写作 worker 正在运行：{paper_substage or 'paper'}；{controller_note}"
     else:
@@ -8945,7 +8190,7 @@ def _live_jobs_from_projects(*, compact: bool = True, project_filter: str = "") 
                     current_summary = str(full_cycle.get("summary_zh") or full_cycle.get("summary") or "")
                     desired_goal = ""
                     if phase == "experiment" and _has_active_experiment_training(root, pid):
-                        desired_goal = "等待当前训练日志和指标落盘；完成后由 project agent 写本地审计记录、登记实验表，并刷新科学进展、论文证据、投稿准备度和阻塞行动计划门控。"
+                        desired_goal = "等待当前训练日志和指标落盘；完成后由 Experimenting 主控 Claude 写本地审计记录、登记实验表，并刷新科学进展、论文证据、投稿准备度和阻塞行动计划门控。"
                     else:
                         raw_goal = str(full_cycle.get("current_goal") or "")
                         raw_goal_lower = raw_goal.lower()
@@ -9039,7 +8284,7 @@ def _live_jobs_from_projects(*, compact: bool = True, project_filter: str = "") 
             logs.append("下一步：" + projected_gate["next"])
         # Experiment details are appended below in compact form to avoid duplicate raw tails.
         logs = [line for line in logs if not _is_low_signal_claude_tool_line(line)]
-        claude_status_lines = _latest_claude_agent_status_lines(root, limit=12, stage_scope=phase) if process_alive else []
+        claude_status_lines = _latest_module_controller_status_lines(root, limit=12, stage_scope=phase) if process_alive else []
         if claude_status_lines:
             claude_status_lines = [
                 line for line in claude_status_lines
@@ -9362,6 +8607,16 @@ def _parse_web_environment_run_timestamp(run_id: Any) -> float:
         return 0.0
 
 
+def _parse_environment_runtime_dir_timestamp(run_id: Any) -> float:
+    match = re.match(r"(\d{8})t(\d{6})(\d{6})z_", str(run_id or "").strip().lower())
+    if not match:
+        return 0.0
+    try:
+        return datetime.strptime("".join(match.groups()), "%Y%m%d%H%M%S%f").replace(tzinfo=UTC).timestamp()
+    except Exception:
+        return 0.0
+
+
 def _parse_public_job_timestamp(value: Any) -> float:
     text = str(value or "").strip()
     if not text:
@@ -9383,10 +8638,16 @@ def _load_json_file(path: Path) -> dict[str, Any]:
 def _environment_decision_for_job(run_id: Any, result: Any, created_at: Any) -> dict[str, Any]:
     result_payload = result if isinstance(result, dict) else {}
     project = str(result_payload.get("project") or "").strip()
-    runs_root = WORKSPACE_ROOT / "modules" / "environment" / "runs"
+    runs_root = ENVIRONMENT_RUNS_DIR
     candidates: list[tuple[float, Path]] = []
 
-    explicit_run = str(run_id or result_payload.get("run_id") or "").strip()
+    explicit_run = str(
+        result_payload.get("environment_run_id")
+        or result_payload.get("run_id")
+        or Path(str(result_payload.get("run_dir") or "")).name
+        or run_id
+        or ""
+    ).strip()
     if explicit_run:
         explicit_path = runs_root / explicit_run / "environment_deployment_decision.json"
         if explicit_path.exists():
@@ -9395,16 +8656,20 @@ def _environment_decision_for_job(run_id: Any, result: Any, created_at: Any) -> 
             return {}
 
     created_ts = _parse_public_job_timestamp(created_at)
-    pattern = f"web_environment_{project}_*/environment_deployment_decision.json" if project else "web_environment_*/environment_deployment_decision.json"
     try:
-        paths = list(runs_root.glob(pattern))
+        paths = list(runs_root.glob("*/environment_deployment_decision.json"))
     except Exception:
         paths = []
     for path in paths:
         candidate_run = path.parent.name
-        if project and f"web_environment_{project}_" not in candidate_run:
+        meta = _load_json_file(path.parent / "run_meta.json")
+        requested_run = str(meta.get("requested_run_id") or "").strip()
+        requested_project = str(meta.get("requested_project") or "").strip()
+        if project and requested_project and requested_project != project:
             continue
-        run_ts = _parse_web_environment_run_timestamp(candidate_run)
+        if project and not requested_project and f"web_environment_{project}_" not in requested_run:
+            continue
+        run_ts = _parse_web_environment_run_timestamp(requested_run) or _parse_environment_runtime_dir_timestamp(candidate_run)
         if created_ts and run_ts:
             diff = abs(run_ts - created_ts)
             if diff > 20 * 60:
@@ -9418,12 +8683,10 @@ def _environment_decision_for_job(run_id: Any, result: Any, created_at: Any) -> 
         candidates.append((score, path))
 
     if not candidates:
-        latest_path = WORKSPACE_ROOT / "modules" / "environment" / "latest_decision.json"
-        latest = _load_json_file(latest_path)
-        latest_run = str(latest.get("run_id") or "").strip()
-        latest_ts = _parse_web_environment_run_timestamp(latest_run)
-        if latest and (not project or f"web_environment_{project}_" in latest_run) and (not created_ts or not latest_ts or abs(latest_ts - created_ts) <= 20 * 60):
-            return latest
+        latest_record = _load_json_file(WORKSPACE_ROOT / "projects" / project / "state" / "environment_handoff.json") if project else {}
+        source = Path(str(latest_record.get("source") or "")) if isinstance(latest_record, dict) else Path("")
+        if source.exists() and source.name == "environment_deployment_decision.json":
+            return _load_json_file(source)
         return {}
 
     _score, path = sorted(candidates, key=lambda item: item[0])[0]
@@ -9524,8 +8787,17 @@ def _latest_experiment_acceptance_projection(project: Any, created_at: Any) -> d
     project_id = str(project or "").strip()
     if not project_id or not re.fullmatch(r"[A-Za-z0-9_.-]+", project_id):
         return {}
-    registry_path = WORKSPACE_ROOT / "modules" / "experimenting" / "runtime" / "web" / project_id / "state" / "experiment_registry.json"
-    registry_payload = read_json(registry_path, [])
+    project_root = WORKSPACE_ROOT / "projects" / project_id
+    latest_run = read_json(project_root / "state" / "latest_experimenting_run.json", {})
+    registry_paths = [project_root / "state" / "experiment_registry.json"]
+    if isinstance(latest_run, dict) and latest_run.get("project_copy_dir"):
+        registry_paths.append(Path(str(latest_run.get("project_copy_dir"))) / "state" / "experiment_registry.json")
+    registry_payload: Any = []
+    for registry_path in registry_paths:
+        payload = read_json(registry_path, [])
+        if payload:
+            registry_payload = payload
+            break
     if isinstance(registry_payload, dict):
         rows = registry_payload.get("experiments") if isinstance(registry_payload.get("experiments"), list) else []
     elif isinstance(registry_payload, list):
@@ -9642,17 +8914,14 @@ def _environment_history_superseded_at(project: str) -> float:
     if not root.exists():
         return 0.0
     state = root / "state"
-    bootstrap = _read_project_json(state / "repo_env_bootstrap.json", {})
-    if not isinstance(bootstrap, dict):
-        bootstrap = {}
-    bootstrap_status = str(bootstrap.get("status") or "").strip().lower()
-    runtime_ok = bool(
-        bootstrap_status in {"completed", "prepared", "ok", "pass"}
-        and (bootstrap.get("env_exists_after") is not False)
-        and (bootstrap.get("env_name") or bootstrap.get("python_executable") or bootstrap.get("executed"))
-    )
+    record = _read_project_json(state / "environment_handoff.json", {})
+    if not isinstance(record, dict):
+        record = {}
+    handoff = record.get("environment_handoff") if isinstance(record.get("environment_handoff"), dict) else {}
+    gate = handoff.get("handoff_gate") if isinstance(handoff.get("handoff_gate"), dict) else {}
+    runtime_ok = bool(record.get("valid") is True and handoff.get("ready_for_experimenting") is True and gate.get("passed") is True)
     if runtime_ok:
-        ts = _parse_job_time(bootstrap.get("timestamp") or bootstrap.get("generated_at") or bootstrap.get("updated_at"))
+        ts = _parse_job_time(record.get("updated_at") or handoff.get("finished_at"))
         if ts > 0:
             return ts
     full_job = _read_project_json(state / "fresh_base_reference_full_reproduction_job.json", {})
@@ -9867,14 +9136,24 @@ def _current_find_read_history_job(project_id: str, root: Path, run_id: str, sta
     warning_details = validation.get("warning_details") if isinstance(validation.get("warning_details"), list) else []
     status = _current_find_stage_job_status(state_payload, count)
     read_complete_with_warnings = bool(validation_valid is True and read_md_present and pending_count <= 0 and pending_deep_count > 0)
-    if pending_count > 0 or validation_valid is False:
+    read_run_complete_with_missing_full_text = bool(
+        read_md_present
+        and pending_count > 0
+        and pending_deep_count <= 0
+        and deep_read_count + pending_count >= (recommended_count or count)
+    )
+    if read_run_complete_with_missing_full_text:
+        status = "done"
+    elif pending_count > 0 or validation_valid is False:
         status = "blocked"
     elif read_complete_with_warnings:
         status = "done"
     elif pending_deep_count > 0:
         status = "blocked"
 
-    if read_complete_with_warnings:
+    if read_run_complete_with_missing_full_text:
+        summary = f"Read 阶段已完成并有警告：爬文章已处理 {recommended_count or count}/{recommended_count or count} 篇，其中同篇全文可用 {full_text_count}/{recommended_count or count} 篇；读文章完成 {deep_read_count}/{deep_read_count} 篇；{pending_count} 篇全文未就绪，保留在下游证据门控。"
+    elif read_complete_with_warnings:
         summary = f"Read 阶段已完成并有警告：当前展示 {count}/{recommended_count or count} 篇；同篇全文证据 {full_text_count or count}/{recommended_count or count} 篇；精读完成 {deep_read_count or count}/{recommended_count or count} 篇；{pending_deep_count} 篇未进入最终 read.md，仅记录在任务日志和机器状态。"
     elif status == "done":
         warning_suffix = f"；warning {len(warning_details)} 项" if warning_details else ""
@@ -9993,7 +9272,7 @@ def _current_find_downstream_stage_history_jobs(project_filter: str = "", existi
             selected_id = _current_find_selected_id(state_payload, payload, rows, *id_keys)
             status = _current_find_stage_job_status(state_payload, count)
             if stage == "idea":
-                scored_count = sum(1 for row in rows if row.get("score") not in (None, "") or row.get("idea_score") not in (None, "") or isinstance(row.get("objective_scores"), dict))
+                scored_count = sum(1 for row in rows if row.get("score") not in (None, ""))
             else:
                 scored_count = sum(1 for row in rows if row.get("selected_for_execution") or row.get("execute_next") or row.get("ready_for_gate"))
             summary_parts = [f"{zh_label} 阶段已形成 {count} 条产物"]
@@ -10040,31 +9319,41 @@ def _current_find_downstream_stage_history_jobs(project_filter: str = "", existi
 
 def _collapse_current_find_read_retry_jobs(rows: list[dict[str, Any]], project_hint: str = "") -> list[dict[str, Any]]:
     """Keep one public read row per project/run while preserving active work."""
-    latest_created: dict[tuple[str, str], str] = {}
-    active_real_job_keys: set[tuple[str, str]] = set()
-    representative_statuses = {"queued", "running", "cancelling", "done", "blocked", "cancelled", "interrupted", "stale", "error"}
-    active_statuses = {"queued", "running", "cancelling"}
+    latest_real: dict[tuple[str, str], dict[str, Any]] = {}
+    latest_history: dict[tuple[str, str], dict[str, Any]] = {}
     for item in rows:
         if _job_public_stage(item) != "read":
-            continue
-        status = str(item.get("status") or "").strip().lower()
-        if status not in representative_statuses:
             continue
         result = item.get("result") if isinstance(item.get("result"), dict) else {}
         project = _job_public_project(item, project_hint)
         run_id = str(item.get("run_id") or result.get("run_id") or "").strip()
         if not project or not run_id:
             continue
-        created = str(item.get("created_at") or "")
         key = (project, run_id)
         is_history = str(result.get("kind") or "") == "current_find_downstream_artifact_history"
-        if not is_history and status in active_statuses:
-            active_real_job_keys.add(key)
-        if created > latest_created.get(key, ""):
-            latest_created[key] = created
+        target = latest_history if is_history else latest_real
+        previous = target.get(key)
+        if previous is None or str(item.get("created_at") or "") >= str(previous.get("created_at") or ""):
+            target[key] = item
+
+    chosen: dict[tuple[str, str], dict[str, Any]] = {}
+    for key in set(latest_real) | set(latest_history):
+        real = latest_real.get(key)
+        history = latest_history.get(key)
+        if real is None:
+            chosen[key] = history
+            continue
+        if history is None:
+            chosen[key] = real
+            continue
+        real_status = str(real.get("status") or "").strip().lower()
+        real_is_current = (
+            real_status in {"queued", "running", "cancelling", "done"}
+            or str(real.get("created_at") or "") >= str(history.get("created_at") or "")
+        )
+        chosen[key] = real if real_is_current else history
 
     kept: list[dict[str, Any]] = []
-    hideable_statuses = {"done", "blocked", "cancelled", "interrupted", "stale", "error"}
     for item in rows:
         if _job_public_stage(item) != "read":
             kept.append(item)
@@ -10072,13 +9361,8 @@ def _collapse_current_find_read_retry_jobs(rows: list[dict[str, Any]], project_h
         result = item.get("result") if isinstance(item.get("result"), dict) else {}
         project = _job_public_project(item, project_hint)
         run_id = str(item.get("run_id") or result.get("run_id") or "").strip()
-        status = str(item.get("status") or "").strip().lower()
-        created = str(item.get("created_at") or "")
         key = (project, run_id)
-        if key in active_real_job_keys and str(result.get("kind") or "") == "current_find_downstream_artifact_history":
-            continue
-        latest = latest_created.get(key, "")
-        if project and run_id and status in hideable_statuses and latest and created < latest:
+        if project and run_id and chosen.get(key) is not item:
             continue
         kept.append(item)
     return kept
@@ -10547,7 +9831,7 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
     """Small row for the frequently-polled jobs list."""
     result = item.get("result") if isinstance(item.get("result"), dict) else {}
     raw_stage = str(item.get("stage", ""))
-    panel_stage = _panel_stage_from_project_agent_result(result)
+    panel_stage = _panel_stage_from_module_controller_result(result)
     paper_job = _is_paper_job(raw_stage, item.get("job_id", ""), result, item.get("logs"))
     full_cycle_job = False if panel_stage else _is_full_cycle_job(raw_stage, item.get("job_id", ""), result, item.get("logs"))
     recovered_project_worker = bool(
@@ -10656,8 +9940,8 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
         command_message = _public_stage_command_message(public_stage, public_progress.get("message"))
         if command_message:
             public_progress["message"] = command_message
-        elif _is_project_agent_panel_job(raw_stage, item.get("job_id", ""), result):
-            public_progress["message"] = _public_project_agent_progress_message(public_stage, public_progress.get("message"))
+        elif _is_module_controller_panel_job(raw_stage, item.get("job_id", ""), result):
+            public_progress["message"] = _public_module_controller_progress_message(public_stage, public_progress.get("message"))
     if public_stage == "environment" and _job_status_is_live(public_status) and not full_cycle_job:
         project_id = str(compact_result.get("project") or result.get("project") or _project_from_job_payload(item.get("job_id"), item) or "").strip()
         result_phase = str(result.get("phase") or compact_result.get("phase") or "").strip().lower()
@@ -10841,6 +10125,16 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
         if isinstance(public_progress.get("read_progress"), dict):
             compact_result["read_progress"] = public_progress.get("read_progress")
             result = {**result, "read_progress": public_progress.get("read_progress")} if isinstance(result, dict) else compact_result
+    if public_stage == "plan" and str(public_status or "").lower() in {"queued", "running", "cancelling"}:
+        raw_logs = item.get("logs") if isinstance(item.get("logs"), list) else []
+        stage_detail = _public_plan_stage_detail(raw_logs)
+        if stage_detail:
+            public_progress["message"] = stage_detail
+            if str(public_progress.get("phase") or "").strip().lower() in {"", "queued", "started"}:
+                public_progress["phase"] = "planning"
+            public_progress["current"] = int(public_progress.get("current") or 0)
+            public_progress["total"] = int(public_progress.get("total") or 1)
+            public_progress["percent"] = int(public_progress.get("percent") or 0)
     public_status = _normalize_public_job_status(public_status, public_progress, item.get("error", ""), compact_result or result, public_stage)
     if str(public_status).strip().lower() == "interrupted":
         public_status = "stale"
@@ -10849,7 +10143,7 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
         public_status = "done"
     elif public_status in {"blocked", "error", "cancelled", "done"}:
         compact_result["status"] = public_status
-    public_log_result = compact_result if full_cycle_job else result
+    public_log_result = compact_result if full_cycle_job or public_stage == "read" else result
     payload = {
         "job_id": item.get("job_id", ""),
         "stage": public_stage,
@@ -11534,7 +10828,10 @@ def _current_find_read_is_incomplete(root: Path, run_id: str, idea_count: int = 
         return True
     if not same_run(read_payload):
         return True
-    if str((read_payload if isinstance(read_payload, dict) else {}).get("source") or "").strip() != "claude_code_current_find_takeover":
+    if str((read_payload if isinstance(read_payload, dict) else {}).get("source") or "").strip() not in {
+        "claude_code_current_find_takeover",
+        "framework_current_find_read_adapter",
+    }:
         return True
     readings = (read_payload if isinstance(read_payload, dict) else {}).get("readings")
     if not isinstance(readings, list) or not readings:
@@ -11653,12 +10950,6 @@ def _current_find_read_validation_requires_repair(root: Path, run_id: str) -> bo
 
 def _current_find_wrapper_failure_summary(output_lines: list[str]) -> tuple[str, str]:
     tail = [line.strip() for line in output_lines[-20:] if str(line).strip()]
-    tail_text = "\n".join(tail)
-    if "Unknown reading module action: current_find_research_plan" in tail_text:
-        return (
-            READING_PUBLIC_ENTRY_ACTION_MISSING_STATUS,
-            READING_PUBLIC_ENTRY_ACTION_MISSING_MESSAGE,
-        )
     for line in reversed(tail):
         lowered = line.lower()
         if "traceback" in lowered or line.startswith(("{", "}", "[", "]")) or '":' in line[:160]:
@@ -11674,7 +10965,7 @@ def _run_current_find_claude_read_job(project: str, root: Path, request: ReadReq
         raise RuntimeError("current project Find run is missing; run Find before Read")
     if should_cancel():
         raise JobCancelled("Task cancelled by user.")
-    progress("full_text", 0, 0, "正在准备当前 Find 推荐论文的全文爬取输入。")
+    progress("full_text", 0, 0, "等待爬文章开始。")
     management_python = os.environ.get("MANAGEMENT_PYTHON") or sys.executable
     try:
         configured_idea_count = int(getattr(load_config(), "max_ideas", 0) or 0)
@@ -11684,30 +10975,24 @@ def _run_current_find_claude_read_job(project: str, root: Path, request: ReadReq
     force_requested = bool(getattr(request, "force", False))
     repair_mode = _current_find_read_validation_requires_repair(root, run_id) or _current_find_read_is_incomplete(root, run_id, idea_count=idea_count, require_idea_plan=False)
     force_deep_read = force_requested
-    prepared_input = prepare_current_find_read_input(
-        project,
-        read_limit=0,
-        projects_root=PROJECT_IDS_ROOT,
-        reading_root=WORKSPACE_ROOT / "modules" / "reading",
-    )
-    try:
-        prepared_count = int(prepared_input.get("input_article_count") or prepared_input.get("recommendation_count") or 0)
-    except (TypeError, ValueError):
-        prepared_count = 0
+    plan_state = _read_project_json(root / "state" / "current_find_research_plan.json", {})
+    find_progress = _read_project_json(root / "planning" / "finding" / "find_progress.json", {})
+    prepared_count = next((count for count in [
+        _as_int((plan_state if isinstance(plan_state, dict) else {}).get("current_find_reading_count"), 0),
+        _as_int((find_progress if isinstance(find_progress, dict) else {}).get("strong_recommendation_count"), 0),
+        _as_int((find_progress if isinstance(find_progress, dict) else {}).get("recommendation_target_count"), 0),
+    ] if count > 0), 0)
     if prepared_count > 0:
         log(f"Full-text acquisition phase: {prepared_count} papers")
-        progress("full_text", 0, prepared_count, f"准备爬取当前 Find 的 {prepared_count} 篇推荐论文全文。")
+        progress("full_text", 0, prepared_count, f"爬文章：当前 Find 共 {prepared_count} 篇。")
     cmd = [
         management_python,
-        str(WORKSPACE_ROOT / "modules" / "reading" / "main.py"),
+        str(WORKSPACE_ROOT / "framework" / "scripts" / "run_module.py"),
+        "reading",
         "--action",
         "current_find_research_plan",
         "--project",
         project,
-        "--input-json",
-        str(prepared_input["input_json"]),
-        "--find-run-id",
-        str(prepared_input["run_id"]),
         "--read-limit",
         "0",
         "--idea-count",
@@ -11724,7 +11009,7 @@ def _run_current_find_claude_read_job(project: str, root: Path, request: ReadReq
         env["READING_REUSE_EXISTING_DEEP_READ_RESULTS"] = "1"
     env.setdefault("MANAGEMENT_PYTHON", management_python)
     env["PYTHONPATH"] = taste_pythonpath_string(WORKSPACE_ROOT, env.get("PYTHONPATH", ""))
-    log(("Delegating current Find Read/Idea/Plan rerun to wrapper: " if repair_mode else "Delegating current Find Read/Idea/Plan to wrapper: ") + " ".join(cmd))
+    log(("Delegating current Find Read rerun to Framework wrapper: " if repair_mode else "Delegating current Find Read to Framework wrapper: ") + " ".join(cmd))
     proc = subprocess.Popen(cmd, cwd=str(WORKSPACE_ROOT), env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1)
     output_lines: list[str] = []
     suppressed_structured_lines = 0
@@ -11739,22 +11024,21 @@ def _run_current_find_claude_read_job(project: str, root: Path, request: ReadReq
                 if looks_structured:
                     suppressed_structured_lines += 1
                     if suppressed_structured_lines == 1:
-                        log("Wrapper emitted structured evidence JSON; suppressing verbose taskbar fragments. Full evidence is stored under Reading runtime and then synced into project artifacts by Web.")
+                        log("Wrapper emitted structured evidence JSON; suppressing verbose taskbar fragments. Full evidence is stored under Reading runtime and synchronized into project artifacts by Framework.")
                     elif suppressed_structured_lines % 250 == 0:
                         log(f"Wrapper structured evidence output suppressed: {suppressed_structured_lines} JSON-like lines read.")
                 else:
                     log(line[:1200])
             if should_cancel():
-                proc.terminate()
+                _terminate_process_tree(proc.pid)
                 raise JobCancelled("Task cancelled by user.")
         rc = proc.wait(timeout=5)
+        if should_cancel():
+            raise JobCancelled("Task cancelled by user.")
     except JobCancelled:
         raise
     except Exception:
-        try:
-            proc.terminate()
-        except Exception:
-            pass
+        _terminate_process_tree(proc.pid)
         raise
     result_payload: dict[str, Any] = {}
     joined = "\n".join(output_lines)
@@ -11766,20 +11050,6 @@ def _run_current_find_claude_read_job(project: str, root: Path, request: ReadReq
         if isinstance(candidate, dict):
             result_payload = candidate
             break
-    sync_result: dict[str, Any] = {}
-    try:
-        sync_result = sync_current_find_read_outputs(
-            project,
-            result_payload=result_payload,
-            stdout_text=joined,
-            projects_root=PROJECT_IDS_ROOT,
-            reading_root=WORKSPACE_ROOT / "modules" / "reading",
-        )
-        log(f"Synced Reading runtime outputs into project: {sync_result.get('status')} from {sync_result.get('runtime_project_sync_dir')}")
-    except Exception as exc:
-        if rc == 0:
-            raise RuntimeError(f"Reading completed but Web failed to sync runtime outputs into the project: {exc}") from exc
-        log(f"Reading runtime output sync skipped/failed after blocked wrapper return: {exc}")
     read_payload = _read_project_json(root / "planning" / "finding" / "read_results.json", {})
     idea_payload = _read_project_json(root / "planning" / "finding" / "ideas.json", {})
     plan_payload = _read_project_json(root / "planning" / "finding" / "plans.json", {})
@@ -11818,7 +11088,7 @@ def _run_current_find_claude_read_job(project: str, root: Path, request: ReadReq
         "status": status,
         "project": project,
         "run_id": run_id,
-        "source": "current_find_claude_read_idea_plan_wrapper",
+        "source": "current_find_claude_read_wrapper",
         "repair_mode": repair_mode,
         "force_deep_read_requested": force_requested,
         "idea_count": idea_count,
@@ -11833,8 +11103,8 @@ def _run_current_find_claude_read_job(project: str, root: Path, request: ReadReq
         "read_md": str(root / "planning" / "finding" / "read.md"),
         "public_final_artifact": str(root / "planning" / "finding" / "read.md"),
         "read_results": str(root / "planning" / "finding" / "read_results.json"),
-        "prepared_reading_input": prepared_input,
-        "reading_sync": sync_result,
+        "prepared_reading_input": {"source": "framework", "recommendation_count": prepared_count},
+        "reading_sync": result_payload.get("reading_sync") if isinstance(result_payload, dict) else {},
         "wrapper_result": result_payload,
         "stdout_tail": output_lines[-20:],
         "summary": summary,
@@ -11854,7 +11124,7 @@ def _read_requires_current_find_job(request: ReadRequest) -> JobState:
         "source": "web_read_project_bridge",
         "message": message,
         "next_required_action": "select_or_adopt_project_current_find_then_run_read",
-        "policy": "Web does not call Reading private pipeline internals. Current-Find Read must use modules/reading/main.py --action current_find_research_plan through the project bridge.",
+        "policy": "Web sends Read commands only to framework/scripts/run_module.py; Framework prepares inputs, invokes Reading, and synchronizes project artifacts.",
     }
     JOBS[job.job_id] = job
     job.set_progress("blocked", 1, 1, message)
@@ -11862,6 +11132,206 @@ def _read_requires_current_find_job(request: ReadRequest) -> JobState:
     job.done.set()
     _persist_jobs()
     return job
+
+
+def _framework_module_env(config: AppConfig, project: str = "") -> dict[str, str]:
+    env = os.environ.copy()
+    env["WORKSPACE_ROOT"] = str(WORKSPACE_ROOT)
+    if project:
+        env["PROJECT_ID"] = project
+        env["DEFAULT_PROJECT_ID"] = project
+    env.setdefault("MANAGEMENT_PYTHON", os.environ.get("MANAGEMENT_PYTHON") or sys.executable)
+    env["PYTHONPATH"] = taste_pythonpath_string(WORKSPACE_ROOT, env.get("PYTHONPATH", ""))
+    config_json = json.dumps(config.model_dump(), ensure_ascii=False)
+    env["TASTE_IDEATION_CONFIG_JSON"] = config_json
+    env["TASTE_APP_CONFIG_JSON"] = config_json
+    return env
+
+
+def _ideation_framework_env(config: AppConfig, project: str) -> dict[str, str]:
+    env = _framework_module_env(config, project)
+    env["TASTE_IDEATION_CONFIG_JSON"] = json.dumps({
+        "research_interest": str(config.research_interest or ""),
+        "researcher_profile": str(config.researcher_profile or ""),
+        "max_ideas": int(config.max_ideas or 1),
+    }, ensure_ascii=False)
+    env.pop("TASTE_APP_CONFIG_JSON", None)
+    return env
+
+
+def _run_framework_process(
+    cmd: list[str],
+    env: dict[str, str],
+    log: Callable[[str], None],
+    should_cancel: Callable[[], bool],
+    *,
+    input_text: str = "",
+) -> tuple[int, str, dict[str, Any]]:
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(WORKSPACE_ROOT),
+        env=env,
+        text=True,
+        stdin=subprocess.PIPE if input_text else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=1,
+        start_new_session=True,
+    )
+    output_lines: list[str] = []
+    structured_lines = 0
+    output_queue: queue.Queue[str | None] = queue.Queue()
+    assert proc.stdout is not None
+
+    def read_output() -> None:
+        try:
+            for output_line in proc.stdout:
+                output_queue.put(output_line)
+        finally:
+            output_queue.put(None)
+
+    reader = threading.Thread(target=read_output, daemon=True)
+    reader.start()
+    try:
+        if input_text and proc.stdin is not None:
+            proc.stdin.write(input_text)
+            proc.stdin.close()
+        while True:
+            if should_cancel():
+                _terminate_process_tree(proc.pid)
+                raise JobCancelled("Task cancelled by user.")
+            try:
+                line = output_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if line is None:
+                break
+            line = line.rstrip("\n")
+            if line:
+                output_lines.append(line)
+                stripped = line.strip()
+                looks_structured = stripped.startswith(("{", "}", "[", "]", "\"")) or '":' in stripped[:120]
+                if looks_structured:
+                    structured_lines += 1
+                    if structured_lines == 1:
+                        log("Framework emitted structured JSON; full output remains in the stage runtime artifacts.")
+                else:
+                    log(line[:1200])
+        rc = proc.wait(timeout=5)
+        reader.join(timeout=1)
+    except JobCancelled:
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        reader.join(timeout=1)
+        raise
+    except Exception:
+        try:
+            _terminate_process_tree(proc.pid)
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        reader.join(timeout=1)
+        raise
+    stdout_text = "\n".join(output_lines)
+    return rc, stdout_text, _parse_last_json_object_from_lines(output_lines)
+
+
+def _framework_user_error(stdout_text: str, fallback: str) -> str:
+    for line in reversed(str(stdout_text or "").splitlines()):
+        text = line.strip()
+        match = re.match(r"^(?:ValueError|RuntimeError|FileNotFoundError|KeyError):\s*(.+)$", text)
+        if match:
+            return _redact_public_log_text(match.group(1))[:1600]
+        if text.lower().startswith("framework failed to "):
+            return _redact_public_log_text(text)[:1600]
+    return fallback
+
+
+def _run_ideation_framework_job(
+    project: str,
+    request: IdeaRequest,
+    config: AppConfig,
+    log: Callable[[str], None],
+    should_cancel: Callable[[], bool],
+    progress: Callable[[str, int, int, str], None],
+) -> dict[str, Any]:
+    if not project:
+        raise RuntimeError("Ideas requires an active project so Framework can validate and prepare current-Find inputs.")
+    management_python = os.environ.get("MANAGEMENT_PYTHON") or sys.executable
+    cmd = [
+        management_python,
+        str(WORKSPACE_ROOT / "framework" / "scripts" / "run_module.py"),
+        "ideation",
+        "--action",
+        "idea",
+        "--project",
+        project,
+        "--run-id",
+        request.run_id,
+    ]
+    if request.max_ideas:
+        cmd.extend(["--max-ideas", str(request.max_ideas)])
+    progress("ideation", 0, 1, "正在生成当前 Find 的 Ideas。")
+    log("Delegating Ideation to Framework: " + " ".join(cmd))
+    rc, stdout_text, result_payload = _run_framework_process(cmd, _ideation_framework_env(config, project), log, should_cancel)
+    if rc != 0:
+        raise RuntimeError(_framework_user_error(stdout_text, f"Framework Ideation failed with exit code {rc}."))
+    _cleruntime_caches(project)
+    _clerun_caches(request.run_id)
+    progress("ideation", 1, 1, "Ideas 已生成。")
+    return {
+        "status": "ok",
+        "run_id": request.run_id,
+        "source": "framework_ideation_entrypoint",
+        "framework": result_payload,
+        "stdout_tail": stdout_text[-4000:],
+    }
+
+
+def _run_planning_module_job(
+    project: str,
+    request: PlanRequest | PlanPolishRequest,
+    config: AppConfig,
+    action: str,
+    log: Callable[[str], None],
+    should_cancel: Callable[[], bool],
+    progress: Callable[[str, int, int, str], None],
+) -> dict[str, Any]:
+    if not project:
+        raise RuntimeError("Planning requires an active project.")
+    cmd = [
+        os.environ.get("MANAGEMENT_PYTHON") or sys.executable,
+        str(WORKSPACE_ROOT / "framework" / "scripts" / "run_module.py"),
+        "planning",
+        "--action",
+        action,
+        "--project",
+        project,
+        "--run-id",
+        request.run_id,
+    ]
+    if isinstance(request, PlanRequest):
+        for idea_id in request.idea_ids:
+            cmd.extend(["--idea-id", idea_id])
+        cmd.extend(["--repair-rounds", str(request.repair_rounds)])
+    else:
+        cmd.extend(["--plan-id", request.plan_id, "--rounds", str(request.rounds)])
+        if request.version_id:
+            cmd.extend(["--version-id", request.version_id])
+    progress("planning", 0, 1, "正在通过 Framework 运行 Planning。")
+    log("Delegating Planning to Framework: " + " ".join(cmd))
+    rc, stdout_text, payload = _run_framework_process(cmd, _framework_module_env(config, project), log, should_cancel)
+    if rc != 0:
+        raise RuntimeError(f"Framework Planning failed with exit code {rc}: {stdout_text[-2000:]}")
+    _cleruntime_caches(project)
+    _clerun_caches(request.run_id)
+    progress("planning", 1, 1, "Planning 已完成。")
+    return {"status": "ok", "run_id": request.run_id, "source": "framework_planning_entrypoint", "framework": payload}
 
 
 @app.post("/api/jobs/read")
@@ -11879,7 +11349,7 @@ def api_read(request: ReadRequest) -> dict:
             job.result = {
                 "project": project,
                 "run_id": current_run_id,
-                "source": "current_find_claude_read_idea_plan_wrapper",
+                "source": "current_find_claude_read_wrapper",
                 "status": "running",
             }
             _persist_jobs()
@@ -11892,12 +11362,17 @@ def api_idea(request: IdeaRequest) -> dict:
     blocker = _taste_stage_live_full_cycle_blocker("idea")
     if blocker:
         return JSONResponse(status_code=409, content=blocker)
-    downstream_blocker = _current_find_downstream_gate_blocker("idea", request.run_id)
-    if downstream_blocker:
-        return _current_find_downstream_blocked_job("idea", downstream_blocker).as_dict()
     config = load_config()
-    job = start_job("idea", lambda log, should_cancel, _progress: run_idea(request, config, log, should_cancel))
-    return job.as_dict()
+    project = request.project
+    with JOBS_LOCK:
+        duplicate = _active_web_stage_job_blocker(project, "idea")
+        if duplicate:
+            return JSONResponse(status_code=409, content=duplicate)
+        job = start_job("idea", lambda log, should_cancel, progress: _run_ideation_framework_job(project, request, config, log, should_cancel, progress))
+        job.run_id = request.run_id
+        job.result = {"project": project, "run_id": request.run_id, "status": "running", "source": "framework_ideation_entrypoint"}
+        _persist_jobs()
+        return job.as_dict()
 
 
 @app.post("/api/jobs/plan")
@@ -11905,11 +11380,10 @@ def api_plan(request: PlanRequest) -> dict:
     blocker = _taste_stage_live_full_cycle_blocker("plan")
     if blocker:
         return JSONResponse(status_code=409, content=blocker)
-    downstream_blocker = _current_find_downstream_gate_blocker("plan", request.run_id)
-    if downstream_blocker:
-        return _current_find_downstream_blocked_job("plan", downstream_blocker).as_dict()
     config = load_config()
-    job = start_job("plan", lambda log, should_cancel, _progress: run_plan(request, config, log, should_cancel))
+    current = _project_context_for_find_run(request.run_id) or _current_project_for_find_guard()
+    project = current[0] if current else ""
+    job = start_job("plan", lambda log, should_cancel, progress: _run_planning_module_job(project, request, config, "plan", log, should_cancel, progress))
     return job.as_dict()
 
 
@@ -11918,11 +11392,10 @@ def api_plan_polish(request: PlanPolishRequest) -> dict:
     blocker = _taste_stage_live_full_cycle_blocker("plan-polish")
     if blocker:
         return JSONResponse(status_code=409, content=blocker)
-    downstream_blocker = _current_find_downstream_gate_blocker("plan-polish")
-    if downstream_blocker:
-        return _current_find_downstream_blocked_job("plan-polish", downstream_blocker).as_dict()
     config = load_config()
-    job = start_job("plan-polish", lambda log, should_cancel, _progress: polish_plan(request, config, log, should_cancel))
+    current = _project_context_for_find_run(request.run_id) or _current_project_for_find_guard()
+    project = current[0] if current else ""
+    job = start_job("plan-polish", lambda log, should_cancel, progress: _run_planning_module_job(project, request, config, "polish", log, should_cancel, progress))
     return job.as_dict()
 
 
@@ -12090,139 +11563,38 @@ def _safe_claude_response_session_key(value: Any = "") -> str:
     return key.strip("._-")[:80] or "main"
 
 
-def _claude_response_state_path(root: Path, stem: str, session_key: str = "main", suffix: str = ".json") -> Path:
-    key = _safe_claude_response_session_key(session_key)
-    if key == "main":
-        return root / "state" / f"{stem}{suffix}"
-    return root / "state" / f"{stem}_{key}{suffix}"
-
-
 def _claude_response_report_path(root: Path, session_key: str = "main") -> Path:
     key = _safe_claude_response_session_key(session_key)
-    if key == "main":
-        return root / "reports" / "claude_project_session.md"
-    return root / "reports" / f"claude_project_session_{key}.md"
-
-
-def _claude_response_session_key_from_last_result_path(path: Path) -> str:
-    stem = "claude_project_session_last_result"
-    name = path.name
-    if name == f"{stem}.json":
-        return "main"
-    if name.startswith(f"{stem}_") and name.endswith(".json"):
-        return _safe_claude_response_session_key(name[len(stem) + 1:-5])
-    return ""
-
-
-def _claude_response_stage_keys(stage: Any) -> list[str]:
-    panel = _safe_claude_response_session_key(stage).lower()
-    if panel == "environment":
-        return ["environment"]
-    if panel == "experiment":
-        return ["experiment"]
-    if panel == "paper":
-        return ["paper", "writing_revision", "writing_refinement", "paper_preview_repair"]
-    return []
-
-
-def _claude_response_stage_keys_for_root(root: Path, stage: Any) -> list[str]:
-    panel = _safe_claude_response_session_key(stage).lower()
-    keys = list(_claude_response_stage_keys(panel))
-    if panel != "experiment":
-        return keys
-    state_dir = root / "state"
-    if not state_dir.exists():
-        return keys
-    seen = set(keys)
-    for path in sorted(state_dir.glob("claude_project_session_last_result*.json")):
-        key = _claude_response_session_key_from_last_result_path(path)
-        if not key or key == "main":
-            continue
-        if key not in seen:
-            seen.add(key)
-            keys.append(key)
-    return keys
-
-
-def _claude_response_stage_matches(result_stage: Any, panel_stage: str) -> bool:
-    stage = str(result_stage or "").strip().lower().replace("_", "-")
-    panel = str(panel_stage or "").strip().lower()
-    if not stage or panel not in CLAUDE_RESPONSE_PANEL_STAGES:
-        return False
-    if panel == "environment":
-        return stage == "environment" or stage.startswith("environment-") or "environment" in stage
-    if panel == "experiment":
-        return stage == "experiment" or stage.startswith("experiment-") or any(marker in stage for marker in [
-            "experiment",
-            "trajectory",
-            "autonomous",
-            "scientific-progress",
-            "iteration",
-            "training",
-            "blocker",
-            "evidence",
-            "research",
-            "selected-base",
-            "safe-unblock",
-        ])
-    if panel == "paper":
-        return stage == "paper" or stage.startswith("paper-") or "paper" in stage or "writing" in stage or "writing" in stage
-    return False
-
-
-def _claude_response_is_current_route_global_result(result: Any) -> bool:
-    row = result if isinstance(result, dict) else {}
-    haystack = "\\n".join([
-        str(row.get("stage") or ""),
-        str(row.get("session_key") or ""),
-        str(row.get("instruction") or ""),
-        str(row.get("prompt_path") or ""),
-    ]).lower().replace("_", "-")
-    return any(marker in haystack for marker in [
-        "current-find-claude-read-idea-plan",
-        "current-find-claude-select-plan",
-        "current-find-selection",
-        "current-find-read-idea-plan",
-    ])
-
-
-def _claude_response_time_value(payload: Any) -> str:
-    row = payload if isinstance(payload, dict) else {}
-    return str(row.get("finished_at") or row.get("started_at") or "")
+    if key == "environment_controller":
+        return root / "reports" / "environment_controller.md"
+    if key == "experimenting_controller":
+        return root / "reports" / "experimenting_controller.md"
+    if key == "writing_controller":
+        return root / "reports" / "writing_controller.md"
+    return root / "reports" / f"{key}.md"
 
 
 def _latest_claude_stage_last_result(root: Path, stage: Any) -> tuple[dict[str, Any], str, str]:
     panel = _safe_claude_response_session_key(stage).lower()
     if panel not in CLAUDE_RESPONSE_PANEL_STAGES:
-        result = _read_project_json(root / "state" / "claude_project_session_last_result.json", {})
-        return (result if isinstance(result, dict) else {}), "main", ""
-    candidates: list[tuple[str, str, dict[str, Any]]] = []
-    stale_for_venue = 0
+        return {}, "", "module_stage_required"
+    if panel == "environment":
+        controller = _read_project_json(root / "state" / "environment_controller_last_result.json", {})
+        if isinstance(controller, dict) and controller:
+            return controller, "environment_controller", ""
+        return {}, "environment_controller", "stage_receipt_not_found"
     if panel == "experiment":
-        current_route_result = _read_project_json(root / "state" / "claude_project_session_last_result.json", {})
-        if isinstance(current_route_result, dict) and _claude_response_is_current_route_global_result(current_route_result):
-            candidates.append((_claude_response_time_value(current_route_result), "main", current_route_result))
-    for session_key in _claude_response_stage_keys_for_root(root, panel):
-        result = _read_project_json(_claude_response_state_path(root, "claude_project_session_last_result", session_key), {})
-        if isinstance(result, dict) and result:
-            if not _claude_response_stage_matches(result.get("stage"), panel):
-                continue
-            response, _source = _extract_latest_claude_response(result)
-            if panel == "paper" and _paper_receipt_stale_for_current_venue(root, result, response):
-                stale_for_venue += 1
-                continue
-            candidates.append((_claude_response_time_value(result), session_key, result))
-    if candidates:
-        _stamp, session_key, result = sorted(candidates, key=lambda item: item[0], reverse=True)[0]
-        fallback_reason = "current_route_global_receipt_for_experiment" if panel == "experiment" and session_key == "main" and _claude_response_is_current_route_global_result(result) else ""
-        return result, session_key, fallback_reason
-    result = _read_project_json(root / "state" / "claude_project_session_last_result.json", {})
-    if isinstance(result, dict) and _claude_response_stage_matches(result.get("stage"), panel):
-        response, _source = _extract_latest_claude_response(result)
-        if panel == "paper" and _paper_receipt_stale_for_current_venue(root, result, response):
-            return {}, panel, "stage_receipt_stale_for_current_venue"
-        return result, "main", "historical_global_receipt_for_same_stage"
-    return {}, panel, "stage_receipt_stale_for_current_venue" if stale_for_venue else "stage_receipt_not_found"
+        controller = _read_project_json(root / "state" / "experimenting_controller_last_result.json", {})
+        if isinstance(controller, dict) and controller:
+            return controller, "experimenting_controller", ""
+        return {}, "experimenting_controller", "stage_receipt_not_found"
+    controller = _read_project_json(root / "state" / "writing_controller_last_result.json", {})
+    if not isinstance(controller, dict) or not controller:
+        return {}, "writing_controller", "stage_receipt_not_found"
+    response, _source = _extract_latest_claude_response(controller)
+    if _paper_receipt_stale_for_current_venue(root, controller, response):
+        return {}, "writing_controller", "stage_receipt_stale_for_current_venue"
+    return controller, "writing_controller", ""
 
 
 def _latest_claude_response_payload(root: Path, *, max_chars: int = 1000000, stage: str = "") -> dict[str, Any]:
@@ -12230,13 +11602,12 @@ def _latest_claude_response_payload(root: Path, *, max_chars: int = 1000000, sta
     if requested_stage:
         last_result, session_key, fallback_reason = _latest_claude_stage_last_result(root, requested_stage)
     else:
-        last_result = _read_project_json(root / "state" / "claude_project_session_last_result.json", {})
-        last_result = last_result if isinstance(last_result, dict) else {}
-        session_key = "main"
-        fallback_reason = ""
+        last_result = {}
+        session_key = ""
+        fallback_reason = "module_stage_required"
     last_result = last_result if isinstance(last_result, dict) else {}
     response, source = _extract_latest_claude_response(last_result)
-    if not response:
+    if not response and requested_stage:
         report_path = _claude_response_report_path(root, session_key)
         response = _tail_file_text(report_path, max_bytes=max(262144, min(max_chars, 1000000)))
         source = f"{report_path.relative_to(root)}.tail" if response and root in report_path.parents else (str(report_path) + ".tail" if response else "")
@@ -12256,7 +11627,7 @@ def _latest_claude_response_payload(root: Path, *, max_chars: int = 1000000, sta
         "requested_stage": requested_stage,
         "stage_session_key": session_key,
         "stage_local": bool(requested_stage and not fallback_reason),
-        "fallback_from_session_key": "main" if fallback_reason in {"historical_global_receipt_for_same_stage", "current_route_global_receipt_for_experiment"} else "",
+        "fallback_from_session_key": "",
         "fallback_reason": fallback_reason,
         "return_code": last_result.get("return_code", ""),
         "started_at": last_result.get("started_at", ""),
@@ -12334,13 +11705,14 @@ def api_job(payload: dict[str, Any]) -> dict:
         return JSONResponse(status_code=409, content=stage_blocker)
     job_id = f"{stage}_{uuid4().hex[:10]}"
     payload_with_job = {**payload, "web_job_id": job_id}
-    initial_result = _initial_project_agent_job_result(payload_with_job, stage)
+    initial_result = _initial_module_controller_job_result(payload_with_job, stage)
     job = start_job(stage, lambda log, should_cancel, progress: run_action(payload_with_job, log, should_cancel, progress), job_id=job_id)
     if initial_result:
         job.result = initial_result
         panel_stage = str(initial_result.get("panel_stage") or "").strip()
         if panel_stage:
-            job.progress = {"phase": panel_stage, "current": 0, "total": 0, "percent": 0, "message": f"项目代理正在处理{_public_stage_label(panel_stage)}请求。"}
+            message = "Environment 主控 Claude 正在处理环境配置请求。" if panel_stage == "environment" else f"模块主控 Claude 正在处理{_public_stage_label(panel_stage)}请求。"
+            job.progress = {"phase": panel_stage, "current": 0, "total": 0, "percent": 0, "message": message}
             job.progress_version += 1
         _persist_jobs()
     return job.as_dict()
@@ -12364,7 +11736,7 @@ def api_project_file(project: str, file_path: str):
             target = legacy_target
     if target != root and root not in target.parents:
         return JSONResponse({"error": "file path outside project"}, status_code=403)
-    artifact_roots = [root / "paper" / "output", root / "paper" / "venues", root / "experiments", root / "state"]
+    artifact_roots = [root / "paper" / "output", root / "paper" / "venues", root / "paper" / "writing", root / "experiments", root / "state"]
     planning_roots = [root / "planning" / "finding", root / "planning" / "finding"]
     allowed_roots = artifact_roots + planning_roots
     if not any(base.exists() and (target == base.resolve() or base.resolve() in target.parents) for base in allowed_roots):
@@ -12381,7 +11753,29 @@ def api_project_file(project: str, file_path: str):
 @app.post("/api/runs/{run_id}/plans/{plan_id}/finish")
 def api_finish_plan(run_id: str, plan_id: str):
     try:
-        return finish_plan(run_id, plan_id)
+        current = _project_context_for_find_run(run_id) or _current_project_for_find_guard()
+        project = current[0] if current else ""
+        if not project:
+            raise ValueError("Plan selection requires an active project.")
+        cmd = [
+            os.environ.get("MANAGEMENT_PYTHON") or sys.executable,
+            str(WORKSPACE_ROOT / "framework" / "scripts" / "run_module.py"),
+            "planning",
+            "--action",
+            "finish",
+            "--project",
+            project,
+            "--run-id",
+            run_id,
+            "--plan-id",
+            plan_id,
+        ]
+        rc, stdout_text, payload = _run_framework_process(cmd, _framework_module_env(load_config(), project), lambda _message: None, lambda: False)
+        if rc != 0:
+            return JSONResponse({"error": "Framework Planning selection failed", "stdout_tail": stdout_text[-4000:]}, status_code=500)
+        _clerun_caches(run_id)
+        _cleruntime_caches(project)
+        return payload
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
 
@@ -12460,7 +11854,7 @@ def api_jobs(
         persisted = []
         for job in job_snapshot:
             public_stage = _public_taste_stage(getattr(job, "stage", ""))
-            source_item = job.as_dict(compact=False) if public_stage == "read" else job.as_dict(compact=True)
+            source_item = job.as_dict(compact=False) if public_stage in {"read", "idea", "plan"} else job.as_dict(compact=True)
             persisted.append(_compact_job_for_list(source_item))
     else:
         effective_limit = limit
@@ -12566,7 +11960,7 @@ def api_jobs(
             item for item in dynamic
             if not (
                 str((item.get("result") if isinstance(item.get("result"), dict) else {}).get("project") or "") in active_current_find_projects
-                and str((item.get("result") if isinstance(item.get("result"), dict) else {}).get("kind") or "") in {"current_find_claude_read_idea_plan", "current_find_claude_session", "current_find_claude_child"}
+                and str((item.get("result") if isinstance(item.get("result"), dict) else {}).get("kind") or "") == "current_find_child"
             )
         ]
     current_project_context = _current_project_for_find_guard()
@@ -12709,7 +12103,7 @@ def api_job(job_id: str, compact: bool = Query(True)) -> dict:
                 return _public_job_api_payload(_compact_job_for_list(history) if compact else history)
         return JSONResponse({"error": "job not found"}, status_code=404)
     if compact:
-        source_item = job.as_dict(compact=False) if _public_taste_stage(job.stage) == "read" else job.as_dict(compact=True)
+        source_item = job.as_dict(compact=False) if _public_taste_stage(job.stage) in {"read", "idea", "plan"} else job.as_dict(compact=True)
         return _public_job_api_payload(_compact_job_for_list(source_item))
     return _public_job_api_payload(job.as_dict(compact=False))
 
@@ -12840,13 +12234,14 @@ async def ws_job(websocket: WebSocket, job_id: str):
                 return
             job_stage = _public_taste_stage(job.stage)
             if job.status in {"done", "error", "cancelled", "blocked"}:
-                compact_job = _compact_job_for_list(job.as_dict(compact=True)) if job_stage in {"environment", "experiment", "find", "read", "idea", "plan"} else job.as_dict(compact=True)
+                compact_source = job.as_dict(compact=False) if job_stage in {"read", "idea", "plan"} else job.as_dict(compact=True)
+                compact_job = _compact_job_for_list(compact_source) if job_stage in {"environment", "experiment", "find", "read", "idea", "plan"} else compact_source
                 for line in (compact_job.get("logs") or []):
                     await websocket.send_json({"type": "log", "message": str(line)})
                 await websocket.send_json({"type": "progress", "progress": _public_job_api_payload(compact_job.get("progress") or {})})
                 await websocket.send_json({"type": "complete", "job": compact_job})
                 return
-            if job_stage == "read":
+            if job_stage in {"read", "idea", "plan"}:
                 await websocket.send_json({"type": "snapshot", "job": _compact_job_for_list(job.as_dict(compact=False))})
                 await asyncio.sleep(2.0)
                 continue
@@ -12861,7 +12256,8 @@ async def ws_job(websocket: WebSocket, job_id: str):
             if job.progress_version != sent_progress:
                 job_progress_payload = _public_job_api_payload(job.progress)
                 if job_stage in {"environment", "experiment", "find", "read", "idea", "plan"}:
-                    compact_job = _compact_job_for_list(job.as_dict(compact=True))
+                    compact_source = job.as_dict(compact=False) if job_stage in {"read", "idea", "plan"} else job.as_dict(compact=True)
+                    compact_job = _compact_job_for_list(compact_source)
                     job_progress_payload = _public_job_api_payload(compact_job.get("progress") or job_progress_payload)
                 await websocket.send_json({"type": "progress", "progress": job_progress_payload})
                 sent_progress = job.progress_version
@@ -12876,9 +12272,27 @@ def api_runs(project: str = Query("")) -> list[dict]:
 
 
 @app.get("/api/runs/{run_id}/artifacts")
-def api_artifacts(run_id: str, light: bool = Query(False)) -> dict:
+def api_artifacts(run_id: str, light: bool = Query(False), scope: str = Query(""), project: str = Query("")) -> dict:
     light_mode = bool(light) if isinstance(light, bool) else bool(getattr(light, "default", False))
-    project_root = _project_root_for_find_run(run_id)
+    artifact_scope = str(scope if isinstance(scope, str) else getattr(scope, "default", "") or "").strip().lower()
+    project_id = _api_query_str(project)
+    if artifact_scope and artifact_scope not in CURRENT_FIND_ARTIFACT_SCOPES:
+        return JSONResponse({"error": f"Unknown artifact scope: {artifact_scope}"}, status_code=400)
+    if project_id:
+        try:
+            project_root = _safe_project_root(project_id)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        current_run_id = _project_current_find_run_id(project_root)
+        if current_run_id != str(run_id or "").strip():
+            return JSONResponse({
+                "error": "Requested run is not the project's current Find run.",
+                "project": project_id,
+                "run_id": run_id,
+                "current_find_run_id": current_run_id,
+            }, status_code=409)
+    else:
+        project_root = _project_root_for_find_run(run_id)
     try:
         artifact_roots = _run_artifact_roots(run_id)
     except FileNotFoundError as exc:
@@ -12897,7 +12311,9 @@ def api_artifacts(run_id: str, light: bool = Query(False)) -> dict:
 
     markdown_names: list[str]
     json_names: list[str]
-    if environment_run:
+    if artifact_scope:
+        markdown_names, json_names = CURRENT_FIND_ARTIFACT_SCOPES[artifact_scope]
+    elif environment_run:
         markdown_names = ENVIRONMENT_ARTIFACT_MARKDOWN_NAMES
         json_names = ENVIRONMENT_ARTIFACT_JSON_NAMES
     elif light_mode:
@@ -12930,8 +12346,9 @@ def api_artifacts(run_id: str, light: bool = Query(False)) -> dict:
                 mtimes.append((f"paper-ref:{ref_path.name}", stat.st_mtime_ns, stat.st_size))
             except OSError:
                 continue
-    cache_key = json.dumps([run_id, "light" if light_mode else "full", mtimes], separators=(",", ":"), ensure_ascii=False)
-    cached = _RUN_ARTIFACTS_CACHE.get(run_id)
+    cache_slot = f"{run_id}:{project_id}:{artifact_scope or ('light' if light_mode else 'full')}"
+    cache_key = json.dumps([run_id, project_id, artifact_scope or ("light" if light_mode else "full"), mtimes], separators=(",", ":"), ensure_ascii=False)
+    cached = _RUN_ARTIFACTS_CACHE.get(cache_slot)
     now = time.monotonic()
     if isinstance(cached, dict) and cached.get("key") == cache_key and float(cached.get("expires_at") or 0) > now:
         return cached["payload"]
@@ -12974,8 +12391,8 @@ def api_artifacts(run_id: str, light: bool = Query(False)) -> dict:
             if name in {"find_progress.json", "find_results.json"}:
                 content = _strip_redundant_find_public_json_aliases(content)
             artifacts.append({"name": name, "kind": "json", "content": _strip_public_taste_marker(content), "path": str(path), "content_truncated": False, "size_bytes": stat.st_size if stat is not None else 0})
-    payload = {"run_id": run_id, "artifacts": artifacts, "artifact_roots": [str(path) for path in artifact_roots]}
-    _RUN_ARTIFACTS_CACHE[run_id] = {"key": cache_key, "expires_at": now + RUN_ARTIFACTS_CACHE_TTL_SEC, "payload": payload}
+    payload = {"run_id": run_id, "project": project_id, "scope": artifact_scope, "artifacts": artifacts, "artifact_roots": [str(path) for path in artifact_roots]}
+    _RUN_ARTIFACTS_CACHE[cache_slot] = {"key": cache_key, "expires_at": now + RUN_ARTIFACTS_CACHE_TTL_SEC, "payload": payload}
     return payload
 
 
@@ -12987,22 +12404,105 @@ def api_delete_run(run_id: str) -> dict:
 
 
 @app.patch("/api/runs/{run_id}/ideas/{idea_id}")
-def api_patch_idea(run_id: str, idea_id: str, patch: IdeaPatch, project: str = "") -> dict:
-    previous_project = os.environ.get("PROJECT_ID")
-    if project:
-        os.environ["PROJECT_ID"] = project
-    try:
-        result = patch_idea(run_id, idea_id, patch)
-    finally:
-        if project:
-            if previous_project is None:
-                os.environ.pop("PROJECT_ID", None)
-            else:
-                os.environ["PROJECT_ID"] = previous_project
+def api_patch_idea(
+    run_id: str,
+    idea_id: str,
+    patch: IdeaPatch,
+    project: str = Query(..., min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.-]+$"),
+) -> dict:
+    project_id = project
+    blocker = _active_web_stage_job_blocker(project_id, "idea")
+    if blocker:
+        return JSONResponse(status_code=409, content=blocker)
+    cmd = [
+        os.environ.get("MANAGEMENT_PYTHON") or sys.executable,
+        str(WORKSPACE_ROOT / "framework" / "scripts" / "run_module.py"),
+        "ideation",
+        "--action",
+        "patch",
+        "--project",
+        project_id,
+        "--run-id",
+        run_id,
+        "--idea-id",
+        idea_id,
+    ]
+    env = _ideation_framework_env(load_config(), project_id)
+    env["TASTE_IDEATION_PATCH_JSON"] = json.dumps(patch.model_dump(exclude_none=True), ensure_ascii=False)
+    rc, stdout_text, payload = _run_framework_process(cmd, env, lambda _message: None, lambda: False)
+    if rc != 0:
+        detail = _framework_user_error(stdout_text, f"Framework rejected Idea patch with exit code {rc}.")
+        return JSONResponse(status_code=400, content={"status": "error", "message": detail})
     _clerun_caches(run_id)
-    if project:
-        _cleruntime_caches(project)
-    return result
+    _cleruntime_caches(project_id)
+    return payload
+
+
+@app.put("/api/runs/{run_id}/idea-markdown")
+def api_update_idea_markdown(
+    run_id: str,
+    update: IdeaMarkdownUpdate,
+    project: str = Query(..., min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.-]+$"),
+) -> dict:
+    project_id = project
+    blocker = _active_web_stage_job_blocker(project_id, "idea")
+    if blocker:
+        return JSONResponse(status_code=409, content=blocker)
+    cmd = [
+        os.environ.get("MANAGEMENT_PYTHON") or sys.executable,
+        str(WORKSPACE_ROOT / "framework" / "scripts" / "run_module.py"),
+        "ideation",
+        "--action",
+        "update_markdown",
+        "--project",
+        project_id,
+        "--run-id",
+        run_id,
+    ]
+    rc, stdout_text, payload = _run_framework_process(
+        cmd,
+        _ideation_framework_env(load_config(), project_id),
+        lambda _message: None,
+        lambda: False,
+        input_text=update.markdown,
+    )
+    if rc != 0:
+        detail = _framework_user_error(stdout_text, "Framework rejected idea.md update.")
+        return JSONResponse(status_code=400, content={"status": "error", "message": detail})
+    _clerun_caches(run_id)
+    _cleruntime_caches(project_id)
+    return payload
+
+
+@app.put("/api/runs/{run_id}/plan-markdown")
+def api_update_plan_markdown(run_id: str, update: PlanMarkdownUpdate, project: str = "") -> dict:
+    current = (project, PROJECT_IDS_ROOT / project) if project else (_project_context_for_find_run(run_id) or ("", None))
+    project_id, _root = current
+    if not project_id:
+        return JSONResponse(status_code=409, content={"status": "error", "message": "Plan Markdown editing requires an active project."})
+    cmd = [
+        os.environ.get("MANAGEMENT_PYTHON") or sys.executable,
+        str(WORKSPACE_ROOT / "framework" / "scripts" / "run_module.py"),
+        "planning",
+        "--action",
+        "update_markdown",
+        "--project",
+        project_id,
+        "--run-id",
+        run_id,
+    ]
+    rc, stdout_text, payload = _run_framework_process(
+        cmd,
+        _framework_module_env(load_config(), project_id),
+        lambda _message: None,
+        lambda: False,
+        input_text=update.markdown,
+    )
+    if rc != 0:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Framework rejected plan.md update.", "stdout_tail": stdout_text[-4000:]})
+    _clerun_caches(run_id)
+    _cleruntime_caches(project_id)
+    return payload
 
 
 @app.get("/health")

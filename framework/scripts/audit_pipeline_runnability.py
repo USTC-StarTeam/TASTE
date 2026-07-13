@@ -71,11 +71,10 @@ def main() -> None:
     record("all_python_scripts_compile", ok, detail)
 
     required_scripts = [
-        "run_frontend.py", "run_autonomous_research.py", "run_full_research_cycle.py", "run_loop.py", "run_project.py",
-        "claude_project_session.py", "run_coding_agent.py", "run_environment_stage.py", "run_paper_pipeline.py", "planning_tools.py",
-        "bootstrap_repo_env.py", "research_healthcheck.py", "repo_data_tools.py", "environment_data_tools.py",
-        "restart_after_data_blocker.py", "audit_repo_candidate_pool.py",
-        "run_active_repo_smoke.py", "run_autoscientist_supervisor.py",
+        "run_frontend.py", "run_autonomous_research.py", "run_full_research_cycle.py", "run_project.py",
+        "claude_project_session.py", "run_paper_pipeline.py", "planning_tools.py",
+        "research_healthcheck.py",
+        "run_autoscientist_supervisor.py",
         "run_autoscientist_continuous.py", "build_stagnation_report.py", "run_evoscientist_style_cycle.py", "refresh_project_reports.py", "check_llm_ready.py", "llm_client.py",
     ]
     for script in required_scripts:
@@ -86,18 +85,42 @@ def main() -> None:
         else:
             record(f"script_exists:{script}", script_path.exists(), "missing script")
     reading_public_entry = ROOT / "modules" / "reading" / "main.py"
+    environment_public_entry = ROOT / "modules" / "environment" / "main.py"
+    framework_module_entry = ROOT / "framework" / "scripts" / "run_module.py"
     record(
-        "reading_public_entry:current_find_research_plan",
-        reading_public_entry.exists() and file_contains(reading_public_entry, "current_find_research_plan"),
-        "modules/reading/main.py must expose --action current_find_research_plan",
+        "environment_framework_adapter:public_entry_only",
+        environment_public_entry.exists()
+        and file_contains(framework_module_entry, '_run_environment_bridge')
+        and file_contains(framework_module_entry, 'module_entry("environment")'),
+        "Framework must invoke Environment only through modules/environment/main.py",
+    )
+    record(
+        "reading_framework_adapter:current_find_research_plan",
+        reading_public_entry.exists()
+        and file_contains(reading_public_entry, 'DIRECT_ACTIONS = {"", "read"')
+        and file_contains(framework_module_entry, "_run_current_find_read_bridge")
+        and file_contains(framework_module_entry, '"--action", "read"'),
+        "Framework must adapt current-Find rows to the generic modules/reading/main.py read action",
     )
 
     removed_team_script = "run_" + "llm_" + "research_team.py"
     record("autonomous_runner_accepts_venue", file_contains(ROOT / "framework/scripts/run_autonomous_research.py", "parser.add_argument(\"--venue\""), "missing --venue argument")
-    record("autonomous_runner_passes_venue_to_loop", file_contains(ROOT / "framework/scripts/run_autonomous_research.py", "loop_cmd.extend([\"--venue\", args.venue])"), "run_autonomous_research.py does not pass venue into run_loop.py")
-    record("run_loop_passes_venue_to_project", file_contains(ROOT / "modules/experimenting/scripts/run_loop.py", "run_cmd.extend([\"--venue\", args.venue])"), "run_loop.py does not pass venue into run_project.py")
+    record("autonomous_runner_passes_venue_to_loop", file_contains(ROOT / "framework/scripts/run_autonomous_research.py", "loop_cmd.extend([\"--venue\", args.venue])"), "run_autonomous_research.py does not pass venue into the autonomous loop")
+    experimenting_entry = ROOT / "modules/experimenting/main.py"
+    record(
+        "experimenting_public_entry_routes_controller",
+        experimenting_entry.exists()
+        and file_contains(experimenting_entry, '"work": "orchestration/controller_session.py"')
+        and not file_contains(experimenting_entry, '"run":'),
+        "modules/experimenting/main.py must route work/chat through the module-owned controller and expose no run route",
+    )
     record("run_project_no_removed_team_route", not file_contains(ROOT / "framework/scripts/run_project.py", removed_team_script), "removed downstream team route is still referenced")
-    record("run_coding_agent_forces_claude", file_contains(ROOT / "modules/experimenting/scripts/run_coding_agent.py", "effective_backend = \"claude\"") or file_contains(ROOT / "modules/experimenting/scripts/run_coding_agent.py", "return \"claude\""), "run_coding_agent.py should force Claude Code downstream")
+    record(
+        "experimenting_claude_tools_are_skills_not_flow_scripts",
+        file_contains(ROOT / "modules/experimenting/skills/experiment-runtime-tools/SKILL.md", "Public Route Only")
+        and file_contains(ROOT / "modules/experimenting/skills/experiment-iteration/SKILL.md", "Live Evidence And Adaptive Planning"),
+        "Experimenting should expose Claude Code execution guidance as module-local skills, not as a separate coding-agent flow script",
+    )
     record("run_project_passes_venue_to_memory", file_contains(ROOT / "framework/scripts/run_project.py", "update_evolution_memory.py") and file_contains(ROOT / "framework/scripts/run_project.py", "'--venue', args.venue"), "run_project.py does not pass venue into evolution memory")
 
     find_llm_ready = llm_available(cfg)

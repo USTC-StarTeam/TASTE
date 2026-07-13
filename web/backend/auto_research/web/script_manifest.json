@@ -1,90 +1,18 @@
 {
-  "generated_at": "2026-06-15T22:40:11.956990+00:00",
+  "generated_at": "2026-07-10T10:10:12+00:00",
   "owner": "web_frontend",
-  "script_count": 3,
+  "script_count": 1,
   "scripts": [
     {
-      "script": "record_safe_unblock_web_job.py",
-      "path": "framework/scripts/record_safe_unblock_web_job.py",
+      "script": "server.py",
+      "path": "web/backend/auto_research/web/server.py",
       "owner": "web_frontend",
-      "owner_reason": "web server/client job bridge or frontend startup",
-      "function_count": 5,
-      "functions": [
-        "load",
-        "save",
-        "tail",
-        "selected_base_label",
-        "main"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "datetime",
-        "json",
-        "os",
-        "pathlib",
-        "typing"
-      ],
-      "parse_error": ""
-    },
-    {
-      "script": "run_frontend.py",
-      "path": "framework/scripts/run_frontend.py",
-      "owner": "web_frontend",
-      "owner_reason": "web server/client job bridge or frontend startup",
-      "function_count": 18,
-      "functions": [
-        "driver_python_command",
-        "run",
-        "read_focus_queries",
-        "merge_extra_queries",
-        "write_driver",
-        "redact",
-        "_load_project_config",
-        "_env_int",
-        "_effective_source_selection",
-        "_taste_signature",
-        "_copy_cached_taste_outputs",
-        "maybe_reuse_taste_run",
-        "save_taste_reuse_signature",
-        "latest_taste_run_hint",
-        "write_missing_downstream_fallback_outputs",
-        "write_minimal_fallback_outputs",
-        "write_timeout_state",
-        "main"
-      ],
-      "classes": [],
-      "imports": [
-        "__future__",
-        "argparse",
-        "auto_research.source_selection",
-        "datetime",
-        "hashlib",
-        "json",
-        "os",
-        "pathlib",
-        "project_paths",
-        "select",
-        "shutil",
-        "signal",
-        "subprocess",
-        "sys",
-        "taste_pythonpath",
-        "time"
-      ],
-      "parse_error": ""
-    },
-    {
-      "script": "start_web.sh",
-      "path": "framework/scripts/start_web.sh",
-      "owner": "web_frontend",
-      "owner_reason": "web server/client job bridge or frontend startup",
-      "function_count": 0,
-      "functions": [],
-      "classes": [],
-      "imports": [],
-      "parse_error": ""
+      "owner_reason": "HTTP/WebSocket transport, job connection, artifact delivery, and static frontend serving",
+      "framework_dependencies": [
+        "framework/scripts/auto_research/project_bridge.py",
+        "framework/scripts/auto_research/paper_state.py",
+        "framework/scripts/run_module.py"
+      ]
     }
   ]
 }

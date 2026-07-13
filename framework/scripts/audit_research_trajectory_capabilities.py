@@ -264,7 +264,7 @@ def audit_end_to_end_verification(paths) -> dict[str, Any]:
         check("end_to_end_verification_has_modules", len(modules) >= 6, severity="warn", evidence=[str(verification_path)], detail=f"modules={len(modules)}"),
         check("end_to_end_verification_no_failed_checks", failed_checks == 0, evidence=[str(verification_path)], detail=f"failed={failed_checks}"),
         check("trajectory_builder_runs_end_to_end_verifier", source_contains("build_research_trajectory_system.py", ["run_end_to_end_verification", "verify_research_trajectory_end_to_end.py"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
-        check("web_exposes_end_to_end_verification", source_contains("../web/backend/auto_research/web/project_bridge.py", ["research_trajectory_end_to_end_verification", "end_to_end_verification_status"]), evidence=[str(ROOT / "web" / "backend" / "auto_research" / "web" / "project_bridge.py")]),
+        check("framework_exposes_end_to_end_verification", source_contains("auto_research/project_bridge.py", ["research_trajectory_end_to_end_verification", "end_to_end_verification_status"]), evidence=[str(ROOT / "framework" / "scripts" / "auto_research" / "project_bridge.py")]),
     ]
     return {
         "id": "end_to_end_verification",
@@ -349,7 +349,7 @@ def audit_trajectory_system(paths) -> dict[str, Any]:
         check("trajectory_checkpoints_append", int(checkpoints.get("checkpoint_count", 0) or 0) > 0, severity="warn", evidence=[str(checkpoints_path)], detail=f"checkpoints={checkpoints.get('checkpoint_count', 0)}"),
         check("supervisor_state_file", supervisor_state_path.exists(), severity="warn", evidence=[str(supervisor_state_path)]),
         check("supervisor_has_round_history", len(rounds) > 0, severity="warn", evidence=[str(supervisor_state_path)], detail=f"rounds={len(rounds)}"),
-        check("run_loop_integrates_trajectory_supervisor", source_contains("run_loop.py", ["run_research_trajectory_supervisor.py", "trajectory-rounds"]), evidence=[str(SCRIPTS / "run_loop.py")]),
+        check("autonomous_research_integrates_project_and_trajectory_loops", source_contains("run_autonomous_research.py", ["run_project.py", "run_research_trajectory_supervisor.py", "iterations"]), evidence=[str(SCRIPTS / "run_autonomous_research.py")]),
         check("supervisor_delegates_persistent_claude_trajectory_stage", source_contains("run_research_trajectory_supervisor.py", ["claude_project_session.py", "--stage", "trajectory"]), evidence=[str(SCRIPTS / "run_research_trajectory_supervisor.py")]),
         check("supervisor_rebuilds_after_worker", source_contains("run_research_trajectory_supervisor.py", ["build_research_trajectory_system.py", "post_rebuild_return_code"]), evidence=[str(SCRIPTS / "run_research_trajectory_supervisor.py")]),
         check("protocol_declares_worker_contract", isinstance(protocol.get("worker_contract", {}), dict) and bool(protocol.get("worker_contract", {})), evidence=[str(protocol_path)]),
@@ -392,7 +392,7 @@ def audit_skill_and_code_bindings(paths) -> dict[str, Any]:
         check("trajectory_builder_exports_local_skill_contracts", source_contains("build_research_trajectory_system.py", ["load_skill_contracts", "research_skill_contracts"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
         check("trajectory_builder_maintains_graph_history_and_manifest", source_contains("build_research_trajectory_system.py", ["update_research_graph_history", "research_evidence_manifest", "update_evolutionary_memory_ledger"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
         check("claude_project_session_requires_trajectory_and_skills", source_contains("claude_project_session.py", ["research_trajectory_capability_audit", "framework/resources/claude/skills", "Optimize the whole trajectory"]), evidence=[str(SCRIPTS / "claude_project_session.py")]),
-        check("coding_agent_reads_capability_audit", source_contains("run_coding_agent.py", ["research_trajectory_capability_audit", "trajectory_context"]), evidence=[str(SCRIPTS / "run_coding_agent.py")]),
+        check("experimenting_claude_skill_reads_capability_context", (ROOT / "modules" / "experimenting" / "skills" / "experiment-iteration" / "SKILL.md").exists() and source_contains(str(ROOT / "modules" / "experimenting" / "skills" / "experiment-iteration" / "SKILL.md"), ["selected_plan_id", "selected_idea_id", "Optional Find/Read/Idea/Plan Refresh"]), evidence=[str(ROOT / "modules" / "experimenting" / "skills" / "experiment-iteration" / "SKILL.md")]),
     ])
     for family, scripts in required_scripts.items():
         for script in scripts:
@@ -441,7 +441,7 @@ def audit_third_party_research_stack(paths) -> dict[str, Any]:
         check("third_party_selected_modules_available", int(summary.get("missing_module_count", 0) or 0) == 0 and not missing_available_modules and bool(available_modules), evidence=[str(stack_path)], detail=f"available={len(available_modules)} missing_available={len(missing_available_modules)} optional_missing={summary.get('optional_missing_module_count', 0)}"),
         check("third_party_builder_invokes_sync", source_contains("build_research_trajectory_system.py", ["writing", "sync_stack", "third_party_research_stack"]), evidence=[str(SCRIPTS / "build_research_trajectory_system.py")]),
         check("claude_prompt_uses_native_method_context", source_contains("claude_project_session.py", ["third_party_research_stack", "native method capability contracts"]) and source_omits("claude_project_session.py", ["Use ARIS/EvoScientist/academic-research-skills/PaperOrchestra", "Third-party research stack that you must use as external method contracts"]), evidence=[str(SCRIPTS / "claude_project_session.py")]),
-        check("third_party_web_exposed", source_contains("../web/backend/auto_research/web/project_bridge.py", ["third_party_research_stack", "third_party_stack_status"]), evidence=[str(ROOT / "web" / "backend" / "auto_research" / "web" / "project_bridge.py")]),
+        check("third_party_framework_exposed", source_contains("auto_research/project_bridge.py", ["third_party_research_stack", "third_party_stack_status"]), evidence=[str(ROOT / "framework" / "scripts" / "auto_research" / "project_bridge.py")]),
     ]
     return {
         "id": "native_method_contract_stack",

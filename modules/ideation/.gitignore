@@ -1,4 +1,5 @@
 # Ideation 模块运行时产物
+.runtime/
 runs/
 tmp/
 *.tmp

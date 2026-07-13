@@ -25,8 +25,7 @@ def main() -> None:
     checks = [
         ('request_to_loop_state', exists(paths.state / 'natural_language_requests.json') and exists(paths.state / 'loop_history.json')),
         ('discovery_to_shared_research', exists(paths.reports / 'shared_research.md')),
-        ('shared_research_to_hypothesis_arena', exists(paths.planning / 'hypothesis_arena.md') and exists(paths.state / 'hypothesis_arena.json')),
-        ('initialization_to_parallel_plan', exists(paths.planning / 'init_brief.md') and exists(paths.state / 'parallel_plan.json')),
+        ('shared_research_to_ideas', exists(paths.planning / 'finding' / 'idea.md') and exists(paths.planning / 'finding' / 'ideas.json')),
         ('parallel_plan_to_experiment_registry', exists(paths.state / 'parallel_plan.json') and exists(paths.state / 'experiment_registry.json')),
         ('experiment_registry_to_next_actions', exists(paths.state / 'experiment_registry.json') and exists(paths.planning / 'next_actions.md')),
         ('next_actions_to_method_frontier', exists(paths.planning / 'next_actions.md') and exists(paths.planning / 'method_frontier.md')),

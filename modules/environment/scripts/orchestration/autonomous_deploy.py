@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
-import io
 import os
 import json
 import re
@@ -12,13 +10,17 @@ import shlex
 import subprocess
 import sys
 import time
-import tokenize
+from string import Template
 from pathlib import Path
 from typing import Any
 
 MODULE_ROOT = Path(__file__).resolve().parents[2]
 REPO_ROOT = MODULE_ROOT.parents[1]
-RUNS_ROOT = MODULE_ROOT / "runs"
+RUNTIME_ROOT = MODULE_ROOT / ".runtime"
+RUNS_ROOT = RUNTIME_ROOT / "runs"
+PROMPTS_ROOT = MODULE_ROOT / "prompts"
+SKILL_ROOT = MODULE_ROOT / "skills" / "environment-deployment"
+PUBLIC_ENTRYPOINT_ENV = "ENVIRONMENT_PUBLIC_ENTRYPOINT_ACTIVE"
 DECISION_POLICY_VERSION = "environment.deployment_decision.v79"
 APPROVAL_GATE_REQUIRED_CHECKS = (
     "repository_source",
@@ -56,41 +58,51 @@ ENVIRONMENT_HANDOFF_ALLOWED_PENDING_CHECKS = (
     "paper_context",
     "reproduce_full",
 )
+MODULES_ROOT = REPO_ROOT / "modules"
+for item in list(sys.path):
+    try:
+        resolved = Path(item).expanduser().resolve(strict=False)
+        if resolved != MODULE_ROOT and resolved != MODULE_ROOT / "scripts":
+            try:
+                resolved.relative_to(MODULES_ROOT)
+                sys.path.remove(item)
+            except ValueError:
+                pass
+    except Exception:
+        pass
 for candidate in [MODULE_ROOT, MODULE_ROOT / "scripts"]:
-    if str(candidate) not in sys.path:
-        sys.path.insert(0, str(candidate))
+    text = str(candidate)
+    while text in sys.path:
+        sys.path.remove(text)
+    sys.path.insert(0, text)
 
 from scripts.common.claude_runner import run_claude_json
 from scripts.common.io_utils import ensure_within, read_json, slugify, utc_now, write_json
 from scripts.common.plan_schema import load_experiment_plan, normalize_plan
 from scripts.common.shell import EXTERNAL_RUNTIME_ENV_KEYS, command_is_dangerous, command_text, command_tokens, isolated_runtime_env, run_logged, runtime_env
-from scripts.orchestration.dependency_policy import normalize_environment_plan_commands
-from scripts.orchestration.criteria_policy import normalize_success_criteria
 from scripts.environment.runtime_probe import detect_machine_profile, find_conda_executable
-from scripts.repository.repo_manager import clone_or_reuse, collect_repo_evidence, repo_slug
-from scripts.reproduction.decision import classify_failures, compare_metric_values, metric_criteria_passed, normalize_verdict, success_criteria_issues
+from scripts.repository.repo_manager import clone_or_reuse, collect_repo_evidence
+from scripts.reproduction.decision import compare_metric_values, metric_criteria_passed, normalize_verdict, success_criteria_issues
 from scripts.reproduction.paper_evidence import collect_paper_evidence
 
 
-def default_work_root() -> Path:
-    return MODULE_ROOT / "runs"
+def require_public_entrypoint() -> None:
+    if os.environ.get(PUBLIC_ENTRYPOINT_ENV) == "1":
+        return
+    raise SystemExit("Use modules/environment/main.py to call Environment functionality.")
 
 
-def resolve_work_root(value: str) -> Path:
-    try:
-        return ensure_within(Path(value).expanduser(), RUNS_ROOT)
-    except ValueError as exc:
-        raise SystemExit(f"--work-root 必须位于 {RUNS_ROOT} 内，避免中间产物写到 environment 之外：{exc}") from exc
-
-
-def make_run_id(plan: dict[str, Any]) -> str:
-    return f"{utc_now().replace(':', '').replace('+', 'Z')}_{slugify(plan.get('slug') or plan.get('title') or 'experiment')}"
-
-
-def normalize_run_id(value: str, plan: dict[str, Any]) -> str:
+def resolve_run_dir(value: str) -> Path:
     if not str(value or "").strip():
-        return make_run_id(plan)
-    return slugify(str(value), "run")
+        raise SystemExit("Environment internal error: missing --run-dir from modules/environment/main.py")
+    path = Path(value).expanduser().resolve()
+    try:
+        ensure_within(path, RUNS_ROOT)
+    except ValueError as exc:
+        raise SystemExit(f"--run-dir 必须位于 {RUNS_ROOT} 内：{exc}") from exc
+    if not path.exists() or not path.is_dir():
+        raise SystemExit(f"--run-dir 必须由 modules/environment/main.py 预先创建：{path}")
+    return path
 
 
 def is_github_repo_url(value: str) -> bool:
@@ -108,10 +120,6 @@ def canonical_repo_url(value: str) -> str:
     if text.endswith(".git"):
         text = text[:-4]
     return text.rstrip("/").lower()
-
-
-GITHUB_URL_RE = re.compile(r"(?:https?://)?github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?/?")
-GITHUB_OWNER_REPO_RE = re.compile(r"(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?:\.git)?(?![A-Za-z0-9_.-])")
 
 
 def validate_repo_candidate_review(original_candidates: list[str], reviewed: dict[str, Any]) -> tuple[list[str], list[str]]:
@@ -144,280 +152,14 @@ def validate_repo_candidate_review(original_candidates: list[str], reviewed: dic
     return clean, issues
 
 
-KNOWN_STALE_REPO_REPLACEMENTS = {
-    canonical_repo_url("https://github.com/protdis/protdis"): ["https://github.com/AI-HPC-Research-Team/ProtDiS"],
-    canonical_repo_url("https://github.com/tedbench/miae"): ["https://github.com/BorgwardtLab/TEDBench"],
-}
-KNOWN_NON_PUBLIC_REPO_CANDIDATES = {
-    canonical_repo_url("https://github.com/GenerateBiomedicines/flexible-kernels"),
-}
-VERIFIED_HISTORICAL_REPO_REPLACEMENTS = {
-    canonical_repo_url("https://github.com/GenerateBiomedicines/flexible-kernels"): {
-        "url": "https://github.com/generatebio/lock_gp",
-        "required_markers": ["flexible kernels for protein property prediction", "lock gp"],
-    },
-}
-
-
-def _repo_origin_urls(repo_path: Path) -> list[str]:
-    urls: list[str] = []
-    try:
-        proc = subprocess.run(["git", "remote", "get-url", "origin"], cwd=repo_path, text=True, capture_output=True, timeout=10)
-        if proc.returncode == 0 and proc.stdout.strip():
-            urls.append(proc.stdout.strip().splitlines()[-1])
-    except Exception:
-        pass
-    config_path = repo_path / ".git" / "config"
-    if config_path.exists():
-        try:
-            text = config_path.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            text = ""
-        for match in re.finditer(r"^\s*url\s*=\s*(.+)$", text, flags=re.M):
-            urls.append(match.group(1).strip())
-    return urls
-
-
-def _legacy_repo_dir_name(repo_url: str) -> str:
-    key = canonical_repo_url(repo_url)
-    prefix = "https://github.com/"
-    if not key.startswith(prefix):
-        return ""
-    owner_repo = key[len(prefix):].split("/", 1)
-    if len(owner_repo) != 2:
-        return ""
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", f"{owner_repo[0]}_{owner_repo[1]}")
-
-
-def _historical_repo_paths_for_url(repo_url: str, runs_root: Path) -> list[Path]:
-    names = {repo_slug(repo_url)}
-    legacy_name = _legacy_repo_dir_name(repo_url)
-    if legacy_name:
-        names.add(legacy_name)
-        names.add(f"{legacy_name}_*")
-    paths: list[Path] = []
-    seen: set[Path] = set()
-    for name in names:
-        for candidate in runs_root.glob(f"*/repos/{name}"):
-            try:
-                resolved = candidate.resolve()
-            except Exception:
-                resolved = candidate
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            paths.append(candidate)
-    return sorted(paths, key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True)
-
-
-def _historical_repo_verification_text(repo_path: Path) -> str:
-    pieces: list[str] = []
-    for name in ["README.md", "README.rst", "README.txt", "pyproject.toml", "setup.py"]:
-        path = repo_path / name
-        if not path.exists() or not path.is_file():
-            continue
-        try:
-            pieces.append(path.read_text(encoding="utf-8", errors="replace")[:20000])
-        except Exception:
-            continue
-    return "\n".join(pieces).lower()
-
-
-def verified_historical_replacement_repo_candidates(original_candidates: list[str], runs_root: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for original in original_candidates:
-        key = canonical_repo_url(str(original or ""))
-        spec = VERIFIED_HISTORICAL_REPO_REPLACEMENTS.get(key)
-        if not spec:
-            continue
-        replacement = str(spec.get("url") or "").strip()
-        if not is_github_repo_url(replacement):
-            continue
-        replacement_key = canonical_repo_url(replacement)
-        for repo_path in _historical_repo_paths_for_url(replacement, runs_root):
-            if not (repo_path / ".git").exists():
-                continue
-            if replacement_key not in {canonical_repo_url(url) for url in _repo_origin_urls(repo_path)}:
-                continue
-            verification_text = _historical_repo_verification_text(repo_path)
-            markers = [str(item or "").lower() for item in spec.get("required_markers", []) if str(item or "").strip()]
-            if any(marker not in verification_text for marker in markers):
-                continue
-            rows.append({
-                "url": replacement,
-                "source": "historical_verified_clone",
-                "evidence": [
-                    f"{original} has a locally verified historical replacement clone at {repo_path}: {replacement}",
-                ],
-            })
-            break
-    return rows
-
-
-def recovered_repo_candidate_rows_from_review(reviewed: dict[str, Any], original_candidates: list[str], runs_root: Path | None = None) -> list[dict[str, Any]]:
-    rows = official_replacement_repo_candidates_from_review(reviewed, original_candidates)
-    if runs_root is not None:
-        rows.extend(verified_historical_replacement_repo_candidates(original_candidates, runs_root))
-    deduped: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for row in _order_recovered_repo_candidate_rows(rows, original_candidates):
-        key = canonical_repo_url(row.get("url"))
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        deduped.append(row)
-    return deduped
-
-
-def deterministic_repo_replacements_for_candidates(original_candidates: list[str]) -> tuple[list[str], list[str]]:
-    replacements: list[str] = []
-    issues: list[str] = []
-    seen: set[str] = set()
-    for item in original_candidates:
-        url = str(item or "").strip()
-        key = canonical_repo_url(url)
-        if not key:
-            continue
-        if key in {canonical_repo_url(candidate) for candidate in KNOWN_NON_PUBLIC_REPO_CANDIDATES}:
-            issues.append(f"已知候选暂无公开可克隆代码，跳过：{url}")
-            continue
-        mapped = KNOWN_STALE_REPO_REPLACEMENTS.get(key, [])
-        if mapped:
-            issues.append(f"已知过期仓库候选已替换：{url} -> {', '.join(mapped)}")
-        for candidate in mapped or [url]:
-            candidate_key = canonical_repo_url(candidate)
-            if candidate_key in seen or not is_github_repo_url(candidate):
-                continue
-            seen.add(candidate_key)
-            replacements.append(candidate)
-    return replacements, issues
-
-
-def _repo_aliases_for_order(url: str) -> set[str]:
-    key = canonical_repo_url(url)
-    aliases = {key} if key else set()
-    github_prefix = "https://github.com/"
-    if key.startswith(github_prefix):
-        aliases.add(key[len(github_prefix):])
-    return {alias for alias in aliases if alias}
-
-
-def _repo_replacement_order_map(original_candidates: list[str]) -> dict[str, int]:
-    order: dict[str, int] = {}
-    non_public = {canonical_repo_url(candidate) for candidate in KNOWN_NON_PUBLIC_REPO_CANDIDATES}
-    for index, item in enumerate(original_candidates):
-        key = canonical_repo_url(str(item or ""))
-        if not key:
-            continue
-        for candidate in KNOWN_STALE_REPO_REPLACEMENTS.get(key, []):
-            order.setdefault(canonical_repo_url(candidate), index)
-        historical = VERIFIED_HISTORICAL_REPO_REPLACEMENTS.get(key)
-        if historical:
-            order.setdefault(canonical_repo_url(historical.get("url")), index)
-        if key not in non_public:
-            order.setdefault(key, index)
-    return order
-
-
-def _recovered_repo_evidence_order(row: dict[str, Any], original_candidates: list[str]) -> int:
-    evidence_text = "\n".join(str(item or "") for item in (row.get("evidence") if isinstance(row.get("evidence"), list) else []))
-    lowered = evidence_text.lower()
-    if not lowered:
-        return len(original_candidates)
-    for index, original in enumerate(original_candidates):
-        if any(alias in lowered for alias in _repo_aliases_for_order(original)):
-            return index
-    return len(original_candidates)
-
-
-def _order_recovered_repo_candidate_rows(recovered_rows: list[dict[str, Any]], original_candidates: list[str]) -> list[dict[str, Any]]:
-    deterministic_order = _repo_replacement_order_map(original_candidates)
-    return sorted(
-        recovered_rows,
-        key=lambda row: (
-            deterministic_order.get(canonical_repo_url(row.get("url")), len(original_candidates)),
-            _recovered_repo_evidence_order(row, original_candidates),
-            recovered_rows.index(row),
-        ),
-    )
-
-
-def _text_review_payload_from_result(review_result: dict[str, Any]) -> dict[str, Any]:
-    """Build a minimal review payload from Claude text when JSON is malformed."""
-    text_sources: list[str] = []
-    for key in ("stdout_tail", "stderr_tail"):
-        value = str(review_result.get(key) or "").strip()
-        if value:
-            text_sources.append(value)
-    for key in ("log_path", "prompt_path"):
-        path_text = str(review_result.get(key) or "").strip()
-        if not path_text:
-            continue
-        path = Path(path_text)
-        if path.exists() and path.is_file():
-            try:
-                text = path.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                text = ""
-            if text.strip():
-                text_sources.append(text[-12000:])
-    if not text_sources:
-        return {}
-    combined = "\n".join(text_sources)
-    lowered = combined.lower()
-    status = "reject" if any(marker in lowered for marker in ("reject", "拒绝", "404", "not found")) else ""
-    return {
-        "status": status,
-        "ordered_repo_urls": [],
-        "selected_reason": "",
-        "evidence": text_sources,
-        "reject_reason": "Claude repo review did not produce valid JSON; backend recovered repository evidence from review text.",
-    }
-
-
-def _review_payload_for_candidate_recovery(review_result: dict[str, Any]) -> dict[str, Any]:
-    reviewed = review_result.get("json") if isinstance(review_result.get("json"), dict) else {}
-    if reviewed:
-        return reviewed
-    return _text_review_payload_from_result(review_result)
-
-
-def repo_candidates_after_review(original_candidates: list[str], review_result: dict[str, Any]) -> tuple[list[str], list[str], bool]:
-    github_original = [str(item).strip() for item in original_candidates if is_github_repo_url(str(item))]
+def repo_candidates_after_review(original_candidates: list[str], review_result: dict[str, Any]) -> tuple[list[str], list[str]]:
     reviewed_json = review_result.get("json") if isinstance(review_result.get("json"), dict) else {}
-    reviewed_for_recovery = reviewed_json or _text_review_payload_from_result(review_result)
-    if isinstance(reviewed_for_recovery, dict) and reviewed_for_recovery:
-        recovered_rows = official_replacement_repo_candidates_from_review(reviewed_for_recovery, [str(item) for item in original_candidates])
-        recovered = [row["url"] for row in _order_recovered_repo_candidate_rows(recovered_rows, github_original)]
-        if recovered:
-            deterministic_ordered, deterministic_issues = deterministic_repo_replacements_for_candidates(github_original)
-            merged: list[str] = []
-            seen: set[str] = set()
-            for url in [*recovered, *deterministic_ordered]:
-                key = canonical_repo_url(url)
-                if key in seen:
-                    continue
-                seen.add(key)
-                merged.append(url)
-            issues = [_repo_recovery_issue(reviewed_for_recovery)]
-            issues.extend(deterministic_issues)
-            return merged, issues, False
-    if isinstance(reviewed_json, dict) and reviewed_json and str(reviewed_json.get("status") or "").strip().lower() == "reject":
-        return [], [_repo_recovery_issue(reviewed_json)], False
+    if not reviewed_json:
+        return [], ["repo candidate review did not produce valid JSON"]
+    if str(reviewed_json.get("status") or "").strip().lower() == "reject":
+        return [], [str(reviewed_json.get("reject_reason") or "Claude Code 判定 plan 中的 GitHub 仓库候选不可信")]
     clean_ordered, review_issues = validate_repo_candidate_review([str(item) for item in original_candidates], reviewed_json if isinstance(reviewed_json, dict) else {})
-    if review_result.get("return_code") != 0 or not reviewed_json:
-        review_issues.append("repo candidate review did not produce valid JSON")
-    if clean_ordered:
-        deterministic_ordered, deterministic_issues = deterministic_repo_replacements_for_candidates(clean_ordered)
-        if deterministic_issues:
-            review_issues.extend(deterministic_issues)
-        return deterministic_ordered or clean_ordered, review_issues, False
-    if github_original:
-        deterministic_ordered, deterministic_issues = deterministic_repo_replacements_for_candidates(github_original)
-        if deterministic_issues:
-            review_issues.extend(deterministic_issues)
-        return deterministic_ordered or github_original, review_issues, True
-    return [], review_issues, False
+    return clean_ordered, review_issues
 
 
 def validate_discovered_repo(discovered: dict[str, Any]) -> tuple[str, list[str]]:
@@ -443,182 +185,6 @@ def validate_discovered_repo(discovered: dict[str, Any]) -> tuple[str, list[str]
     return repo_url, issues
 
 
-NEGATIVE_REPO_URL_CONTEXT_MARKERS = (
-    "不存在", "返回 404", "404", "not exist", "does not exist", "not found",
-    "missing", "invalid", "wrong", "错误", "不可用", "unavailable",
-)
-
-
-def _github_urls_from_text(text: Any) -> list[str]:
-    body = str(text or "")
-    if not body:
-        return []
-    urls: list[str] = []
-    for match in GITHUB_URL_RE.finditer(body):
-        url = match.group(0).rstrip('/.,);]}>");\'')
-        if url.lower().startswith("github.com/"):
-            url = f"https://{url}"
-        if is_github_repo_url(url) and canonical_repo_url(url) not in {canonical_repo_url(item) for item in urls}:
-            urls.append(url)
-    return urls
-
-
-def _github_owner_repo_urls_from_text(text: Any) -> list[tuple[str, int, int]]:
-    body = str(text or "")
-    if not body:
-        return []
-    occupied_spans = [(match.start(), match.end()) for match in GITHUB_URL_RE.finditer(body)]
-    out: list[tuple[str, int, int]] = []
-    seen: set[str] = set()
-    for match in GITHUB_OWNER_REPO_RE.finditer(body):
-        if any(start <= match.start() < end for start, end in occupied_spans):
-            continue
-        owner_repo = match.group(1).strip().strip('/.,);]}>"\'')
-        owner, _, repo = owner_repo.partition('/')
-        if not owner or not repo:
-            continue
-        if owner.lower() in {"http:", "https:", "github.com", "www.github.com"}:
-            continue
-        url = f"https://github.com/{owner}/{repo}"
-        key = canonical_repo_url(url)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append((url, match.start(), match.end()))
-    return out
-
-
-POSITIVE_REPO_REPLACEMENT_CONTEXT_MARKERS = (
-    "official", "官方", "actual", "实际", "correct", "正确",
-    "replacement", "替代", "修正", "应为", "仓库为",
-    "repo is", "repository is", "url is", "url 应为", "url应为",
-)
-
-
-def _url_negative_context(text: Any, url: str) -> bool:
-    body = str(text or "")
-    if not body or not url:
-        return False
-    index = body.find(url)
-    if index < 0:
-        return False
-    before = body[max(0, index - 96):index].lower()
-    immediate_before = before[-48:]
-    after = body[index + len(url): min(len(body), index + len(url) + 120)].lower()
-    positive_before_markers = (
-        "official", "官方", "actual", "实际", "correct", "正确", "replacement", "替代", "修正",
-    )
-    if any(marker.lower() in immediate_before for marker in positive_before_markers):
-        return False
-    negative_after = any(marker.lower() in after for marker in NEGATIVE_REPO_URL_CONTEXT_MARKERS)
-    stale_before_markers = ("planned", "计划所列", "original", "原候选", "旧", "stale")
-    stale_before = any(marker.lower() in before for marker in stale_before_markers)
-    negative_before = any(marker.lower() in before[-64:] for marker in NEGATIVE_REPO_URL_CONTEXT_MARKERS)
-    return bool(negative_after or (stale_before and negative_before))
-
-
-def _clause_bounds(body: str, start: int, end: int) -> tuple[int, int]:
-    clause_start = max(body.rfind(delimiter, 0, start) for delimiter in ("。", "；", ";", "\n"))
-    clause_end_candidates = [body.find(delimiter, end) for delimiter in ("。", "；", ";", "\n")]
-    clause_end = min([index for index in clause_end_candidates if index >= 0], default=len(body))
-    return clause_start + 1, clause_end
-
-
-def _positive_repo_replacement_context(text: Any, start: int, end: int) -> bool:
-    body = str(text or "")
-    if not body:
-        return False
-    lower_body = body.lower()
-    clause_start, clause_end = _clause_bounds(body, start, end)
-    before = lower_body[clause_start:start]
-    after = lower_body[end:clause_end]
-    markers = tuple(marker.lower() for marker in POSITIVE_REPO_REPLACEMENT_CONTEXT_MARKERS)
-    if any(marker in before for marker in markers):
-        return True
-    return any(marker in after for marker in markers)
-
-
-def _positive_owner_repo_replacement_context(text: Any, start: int, end: int) -> bool:
-    body = str(text or "")
-    if not body:
-        return False
-    lower_body = body.lower()
-    clause_start, _clause_end = _clause_bounds(body, start, end)
-    before = lower_body[clause_start:start]
-    markers = tuple(marker.lower() for marker in POSITIVE_REPO_REPLACEMENT_CONTEXT_MARKERS)
-    return any(marker in before for marker in markers)
-
-
-def _span_negative_repo_context(text: Any, start: int, end: int) -> bool:
-    body = str(text or "")
-    if not body:
-        return False
-    lower_body = body.lower()
-    immediate_before = lower_body[max(0, start - 40):start]
-    after = lower_body[end:min(len(lower_body), end + 96)]
-    local_negative = ("not ", "不是", "而非", "非 ", "wrong ", "错误", "invalid ")
-    if any(marker in immediate_before for marker in local_negative):
-        return True
-    if re.search(r"(?:repo|repository)\s+for\s+[`'\"]?$", immediate_before):
-        return True
-    if re.match(r"^\s+(repo|repository)\s+is\s+(?:https?://)?github\.com/", after):
-        return True
-    return any(marker.lower() in after for marker in NEGATIVE_REPO_URL_CONTEXT_MARKERS)
-
-
-def official_replacement_repo_candidates_from_review(reviewed: dict[str, Any], original_candidates: list[str]) -> list[dict[str, Any]]:
-    """Recover only explicit official/correct GitHub replacements from review text."""
-    if not isinstance(reviewed, dict):
-        return []
-    original_keys = {canonical_repo_url(item) for item in original_candidates if str(item).strip()}
-    candidates: list[dict[str, Any]] = []
-    seen: set[str] = set()
-
-    def add(url: str, source: str, evidence: Any) -> None:
-        clean = str(url or "").strip().rstrip('/.,);]}>"\'')
-        key = canonical_repo_url(clean)
-        if not clean or not is_github_repo_url(clean) or key in seen or key in original_keys:
-            return
-        seen.add(key)
-        row: dict[str, Any] = {"url": clean, "source": source}
-        if evidence:
-            row["evidence"] = evidence
-        candidates.append(row)
-
-    text_sources = list(reviewed.get("evidence") if isinstance(reviewed.get("evidence"), list) else [])
-    for field in ("selected_reason", "reject_reason"):
-        value = reviewed.get(field)
-        if str(value or "").strip():
-            text_sources.append(value)
-    for index, item in enumerate(text_sources):
-        body = str(item or "")
-        if not body.strip():
-            continue
-        for match in GITHUB_URL_RE.finditer(body):
-            url = match.group(0).rstrip('/.,);]}>"\'')
-            if url.lower().startswith("github.com/"):
-                url = f"https://{url}"
-            if not _positive_repo_replacement_context(body, match.start(), match.end()):
-                continue
-            if _url_negative_context(body, url):
-                continue
-            add(url, f"review_text[{index}]", [body])
-        for url, start, end in _github_owner_repo_urls_from_text(body):
-            if not _positive_repo_replacement_context(body, start, end):
-                continue
-            if _span_negative_repo_context(body, start, end):
-                continue
-            add(url, f"review_text[{index}]", [body])
-    return candidates
-
-
-def _repo_recovery_issue(reviewed: dict[str, Any]) -> str:
-    status = str(reviewed.get("status") or "").strip().lower()
-    if status == "reject":
-        return str(reviewed.get("reject_reason") or "Claude Code 判定 plan 中的 GitHub 仓库候选不可信")
-    return "Claude Code 将仓库审阅标记为 ready，但审阅证据明确给出官方/实际/正确替代仓库；后端按替代仓库继续验证。"
-
-
 def discovered_repo_candidates(discovered: dict[str, Any]) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -637,23 +203,6 @@ def discovered_repo_candidates(discovered: dict[str, Any]) -> list[dict[str, Any
         candidates.append(row)
 
     add(discovered.get("repo_url"), "repo_url", discovered.get("evidence"))
-    ordered = discovered.get("ordered_repo_urls") if isinstance(discovered.get("ordered_repo_urls"), list) else []
-    for index, item in enumerate(ordered):
-        add(item, f"ordered_repo_urls[{index}]", discovered.get("evidence"))
-    text_sources = list(discovered.get("evidence") if isinstance(discovered.get("evidence"), list) else [])
-    text_sources.append(discovered.get("reject_reason"))
-    for index, item in enumerate(text_sources):
-        body = str(item or "")
-        for url in _github_urls_from_text(body):
-            if _url_negative_context(body, url):
-                continue
-            add(url, f"discovery_text[{index}]", [body])
-        for url, start, end in _github_owner_repo_urls_from_text(body):
-            if not _positive_owner_repo_replacement_context(body, start, end):
-                continue
-            if _span_negative_repo_context(body, start, end):
-                continue
-            add(url, f"discovery_text[{index}]", [body])
     return candidates
 
 
@@ -802,30 +351,32 @@ def _workspace_path_state(path: str, status: str) -> dict[str, Any]:
     return state
 
 
-def _is_framework_runtime_write(path: str) -> bool:
+def _external_runtime_write_prefixes() -> tuple[str, ...]:
+    prefixes: set[str] = set()
+    for value in str(os.environ.get("ENVIRONMENT_WORKSPACE_AUDIT_IGNORE_PATHS") or "").split(os.pathsep):
+        text = value.strip()
+        if not text:
+            continue
+        candidate = Path(text).expanduser()
+        resolved = (candidate if candidate.is_absolute() else REPO_ROOT / candidate).resolve()
+        try:
+            relative = resolved.relative_to(REPO_ROOT.resolve()).as_posix().strip("/")
+        except ValueError:
+            continue
+        if relative and relative != "modules/environment" and not relative.startswith("modules/environment/"):
+            prefixes.add(relative)
+    return tuple(sorted(prefixes))
+
+
+def _is_external_runtime_write(path: str) -> bool:
     rel = str(path or "").strip().lstrip("./")
     if not rel:
         return False
-    allowed_exact = {
-        "runtime/state",
-        "runtime/state/web_jobs.json",
-    }
-    if rel in allowed_exact:
-        return True
-    if rel.startswith("runtime/state/"):
-        return True
-    if rel.startswith("runtime/") and rel.endswith(".log") and "/" not in rel[len("runtime/"):]:
-        return True
-    if rel.startswith("framework/workspace/"):
-        return True
-    parts = rel.split("/")
-    if "__pycache__" in parts and (rel.startswith("framework/scripts/") or rel.startswith("web/backend/")):
-        return True
-    return False
+    return any(rel == prefix or rel.startswith(prefix + "/") for prefix in _external_runtime_write_prefixes())
 
 
-def _filter_framework_runtime_writes(paths: list[str] | set[str]) -> list[str]:
-    return sorted(path for path in paths if not _is_framework_runtime_write(path))
+def _filter_external_runtime_writes(paths: list[str] | set[str]) -> list[str]:
+    return sorted(path for path in paths if not _is_external_runtime_write(path))
 
 
 def _git_status_outside_environment() -> dict[str, dict[str, Any]]:
@@ -844,14 +395,10 @@ def _git_status_outside_environment() -> dict[str, dict[str, Any]]:
     state: dict[str, dict[str, Any]] = {}
     for line in proc.stdout.splitlines():
         raw, status = _git_status_line_path_and_status(line)
-        if not raw or raw == "modules/environment" or raw.startswith("modules/environment/") or _is_framework_runtime_write(raw):
+        if not raw or raw == "modules/environment" or raw.startswith("modules/environment/") or _is_external_runtime_write(raw):
             continue
         state[raw] = _workspace_path_state(raw, status)
     return state
-
-
-def _git_status_paths_outside_environment() -> set[str]:
-    return set(_git_status_outside_environment())
 
 
 def _workspace_audit_marker(run_dir: Path) -> Path:
@@ -908,7 +455,7 @@ def _recent_workspace_paths_outside_environment(marker_path: str, limit: int = 2
     seen: set[str] = set()
     for raw in proc.stdout.splitlines():
         rel = _relative_repo_path(Path(raw))
-        if not rel or rel == "." or rel.startswith(".git/") or rel == "modules/environment" or rel.startswith("modules/environment/") or _is_framework_runtime_write(rel):
+        if not rel or rel == "." or rel.startswith(".git/") or rel == "modules/environment" or rel.startswith("modules/environment/") or _is_external_runtime_write(rel):
             continue
         if rel not in seen:
             seen.add(rel)
@@ -925,9 +472,9 @@ def _workspace_write_audit(baseline_outside_state: dict[str, Any] | set[str]) ->
     recent_paths = _recent_workspace_paths_outside_environment(marker_path)
     baseline_paths = set(baseline)
     current_paths = set(current)
-    new_paths = _filter_framework_runtime_writes(current_paths - baseline_paths)
-    changed_paths = _filter_framework_runtime_writes(path for path in baseline_paths & current_paths if baseline.get(path) != current.get(path))
-    resolved_paths = _filter_framework_runtime_writes(baseline_paths - current_paths)
+    new_paths = _filter_external_runtime_writes(current_paths - baseline_paths)
+    changed_paths = _filter_external_runtime_writes(path for path in baseline_paths & current_paths if baseline.get(path) != current.get(path))
+    resolved_paths = _filter_external_runtime_writes(baseline_paths - current_paths)
     changed_details = [
         {"path": path, "before": baseline.get(path), "after": current.get(path)}
         for path in changed_paths[:40]
@@ -1061,210 +608,107 @@ def finalize_and_write_decision(decision: dict[str, Any], run_dir: Path, paper_e
     decision = _apply_workspace_write_audit(decision, baseline_outside_state)
     decision = _refresh_environment_handoff_workspace_audit(decision)
     write_json(run_dir / "environment_deployment_decision.json", decision)
-    write_json(MODULE_ROOT / "latest_decision.json", decision)
+    emit_progress("complete", f"Environment finished with decision={decision.get('decision') or 'unknown'}.")
     print(json.dumps(decision, ensure_ascii=False, indent=2))
     return int(decision["exit_code"])
 
+
+def emit_progress(phase: str, message: str, *, round_index: int = 0) -> None:
+    payload: dict[str, Any] = {"event": "environment_progress", "phase": phase, "message": message}
+    if round_index > 0:
+        payload["round"] = round_index
+    print(json.dumps(payload, ensure_ascii=False), flush=True)
+
+
+def _prompt_template(name: str) -> Template:
+    path = PROMPTS_ROOT / name
+    return Template(path.read_text(encoding="utf-8"))
+
+
+def _prompt_json(value: Any, limit: int, *, source_path: Path | None = None) -> str:
+    rendered = json.dumps(value, ensure_ascii=False, indent=2)
+    if len(rendered) <= limit:
+        return rendered
+    if source_path is None:
+        return rendered
+    source_path = source_path.expanduser().resolve()
+    if not source_path.exists():
+        write_json(source_path, value)
+    return json.dumps(
+        {
+            "_prompt_truncated": True,
+            "must_read_full_json": str(source_path),
+            "original_json_chars": len(rendered),
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _render_prompt(name: str, **values: Any) -> str:
+    rendered_values = {key: str(value) for key, value in values.items()}
+    rendered_values.setdefault("environment_skill_path", str(SKILL_ROOT / "SKILL.md"))
+    return _prompt_template(name).safe_substitute(rendered_values).strip() + "\n"
+
+
+def _claude_add_dirs(*paths: Path) -> list[Path]:
+    out: list[Path] = []
+    for path in [*paths, SKILL_ROOT]:
+        if path.exists() and path not in out:
+            out.append(path)
+    return out
+
+
 def prompt_repo_candidate_review(normalized_plan: dict[str, Any], repo_candidates: list[str], output_path: Path) -> str:
-    return f"""
-你是 environment 的 Claude Code 仓库候选审阅代理。实验 plan 已经给出 GitHub 候选，但不能盲信顺序。
-请只根据 plan 和候选 URL 判断哪些仓库最可能是论文官方/作者/可信复现仓库，并给出克隆优先顺序；如果候选明显不可信，应拒绝。
+    normalized_path = output_path.parent / "input_plan.normalized.json"
+    return _render_prompt(
+        "repo_candidate_review.md",
+        output_path=output_path,
+        repo_candidates_json=_prompt_json(repo_candidates, 20000, source_path=normalized_path),
+        normalized_plan_json=_prompt_json(normalized_plan, 30000, source_path=normalized_path),
+    )
 
-硬性要求：
-- 只能把 JSON 写入 `{output_path}`，不要写其它 TASTE 模块或前端文件。
-- 不要编造候选之外的仓库；如果候选不足以确认，输出 `status=reject`。
-- 只输出 JSON，不要 Markdown。
-- JSON schema：
-  {{
-    "status": "ready" | "reject",
-    "ordered_repo_urls": ["https://github.com/..."],
-    "selected_reason": "为什么这个顺序可信",
-    "evidence": ["来自 plan/URL 的证据"],
-    "reject_reason": "无法确认时填写"
-  }}
-
-候选仓库：
-```json
-{json.dumps(repo_candidates, ensure_ascii=False, indent=2)}
-```
-
-实验 plan：
-```json
-{json.dumps(normalized_plan, ensure_ascii=False, indent=2)[:30000]}
-```
-""".strip() + "\n"
 
 def prompt_repo_discovery(normalized_plan: dict[str, Any], output_path: Path) -> str:
-    return f"""
-你是 environment 的 Claude Code 后端代理。当前实验 plan 没有提供可直接克隆的 GitHub 仓库。
-请只根据下面的 plan 和论文线索判断最可信的官方/作者 GitHub 仓库候选；如果无法可靠确认，就输出 reject，不要编造仓库。
-
-硬性要求：
-- 只能把 JSON 写入 `{output_path}`，不要写其它 TASTE 模块或前端文件。
-- JSON schema：
-  {{
-    "status": "ready" | "reject",
-    "repo_url": "https://github.com/...",
-    "confidence": 0.0,
-    "evidence": ["为什么这是论文官方/可信仓库"],
-    "reject_reason": "无法确认时填写"
-  }}
-
-实验 plan：
-```json
-{json.dumps(normalized_plan, ensure_ascii=False, indent=2)[:30000]}
-```
-""".strip() + "\n"
+    return _render_prompt(
+        "repo_discovery.md",
+        output_path=output_path,
+        normalized_plan_json=_prompt_json(normalized_plan, 30000, source_path=output_path.parent / "input_plan.normalized.json"),
+    )
 
 
-def prompt_environment_plan(normalized_plan: dict[str, Any], machine: dict[str, Any], repo_evidence: dict[str, Any], paper_evidence: dict[str, Any], previous_rounds: list[dict[str, Any]], output_path: Path, round_index: int) -> str:
-    return f"""
-你是 environment 的 Claude Code 环境部署代理。你的任务是根据实验 plan、论文/README 证据和本机画像，制定一个可执行、可审计、适合本机的 Conda 环境与复现计划。仓库 README/docs 必须提供安装/依赖指导和训练/评估/复现/数据运行指导；只有空 README、孤立 requirements.txt、孤立 train.py，或写明 no installation / no training / 未提供复现说明的否定式 README/docs，不能作为自适应部署依据。
-
-必须遵守：
-- 这是纯后端模块；不要修改网页前端、不要修改 `modules/environment` 原目录、不要写 `modules/environment` 之外的中间产物。
-- 所有克隆仓库、数据、日志、临时脚本、输出都必须留在本次 run 目录或 repo 子目录内。
-- `cwd` 只能是 `repo`、`run` 或本次 run 目录内路径；命令参数里的路径值和本地脚本/文件参数必须落在本次 run 目录内。已知输出/数据/配置/依赖文件参数即使写成 `outputs/run1` 这类裸相对值，也会按命令实际 `cwd` 解析；`bash scripts/run.sh`、`python train.py`、`python scripts/train.py` 也会解析真实路径，不能指向 run 外或 run 内 symlink 到外部的文件；`outputs/../../outside`、`--output=.../../..`、`-r.../../..` 这类穿越写法会被拒绝。如果命令本身是 `./script.sh` 或绝对脚本路径，脚本也必须位于本次 run/repo 内，外部系统工具请使用命令名而不是外部临时脚本路径。
-- 只能引用后端已经克隆并提供证据的仓库目录。当前主仓库路径见 `repo_evidence.repo_path`，允许的全部仓库目录见 `repo_evidence.available_repo_paths[].repo_dir`；不要编造或引用 `repos/petergroth_kermut`、`repos/BorgwardtLab_TEDBench` 等不存在于本次 run 的目录。凡是 `commands[].command` 或 `python -c` 中出现 `repos/<name>`，该目录必须已经存在于本次 run 目录下，否则后端会拒绝执行计划。
-- 不要为了通过检查而使用 toy/synthetic/dummy/mock/sample 数据或替代数据集冒充论文数据；数据准备命令或日志必须能看到真实论文数据集名称或来源，不能出现 not using / instead of / replacement / 替代 / 改用 这类说明论文数据集未被使用的上下文，`paper_config_alignment` 也要说明该映射。论文数据准备/下载/预处理阶段必须是必需命令，不能标记为 `required=false` 后再拿它支撑批准。
-- HuggingFace Hub 下载必须使用当前可用的 `hf download`；不要使用已废弃不可工作的 `huggingface-cli`，也不要输出 `--resume-download` 参数。数据集仓库用 `hf download <repo_id> --repo-type dataset --local-dir <run内目录>`，模型/checkpoint 仓库用 `hf download <repo_id> --local-dir <run内目录>`。
-- 不要在计划生成阶段运行 `conda search`、`pip index`、包版本矩阵探测或长时间依赖求解探索；PyTorch/PyG/CUDA/Biopython 兼容矩阵由后端 policy 在执行前统一规范化。你只需按 README/论文给出功能阶段命令、数据/权重命令和验证/复现命令。
-- `dm-tree` 包的 Python 导入名是 `tree`；验证命令应使用 `import tree as dm_tree` 或 `import tree`，不要写 `import dm_tree`。
-- RigidSSL 仓库的 `VelocityNetwork` 不能无参构造；模型验证必须使用 `examples/RigidSSL_Perturb.py` 中的 `model_setup()` 或 `create_model_config()`。skip-full-reproduction/烟测模式下不要运行完整训练 epoch；优先使用 loader/model/单 batch 探针证明数据、模型、CUDA 和旧 PyG pickle 可用。
-- Conda/Pip/下载/训练命令必须写成 JSON 数组，后端会受控执行；不要在回答里只写自然语言。不要输出 `rm -rf /`、`rm -rf -- /`、`rm -Rf /*`、`rm -rf ../outside`、`dd if=`、`chmod -R 777 /` 等高危命令片段；危险片段会大小写归一化后检查，`rm` 目标也会结构化解析。
-- 不要输出 `conda activate`、`source activate`、`source ...` 或 `.` 这类只对交互 shell 生效的命令；每条命令应直接可执行，Python/训练入口由后端用 run 内 Conda prefix 重写，复杂初始化请写入本次 run 目录脚本后用 `bash <script>` 执行。
-- 每条命令必须包含非空字符串 `phase`；`required` 若出现必须是 JSON boolean `true/false`，不能写成字符串或数字；`cwd` 若出现必须是字符串。
-- 必须包含成功创建/安装 Conda 环境的阶段，以及 verify/import/smoke/reproduce_full 等导入或运行验证阶段；批准需要独立的 Conda 环境证据，Conda setup 和 verify/import/smoke/运行验证阶段都必须是必需命令，不能标记为 `required=false` 后再拿它支撑批准。setup 阶段命令动作应是 `conda create/install/update -p <prefix>`、`conda env create/update -p <prefix>`、`conda run -p <prefix> python -m pip install ...` 或安装脚本；verify 阶段必须是 `conda run -p <prefix>` 下的 python/pytest/torchrun/训练评估脚本等真实导入或运行验证，不能用第二条 `conda create` 或 `conda install` 冒充 verify。
-- 必须输出 `machine_assessment`，说明论文/README 的硬件或运行要求、本机 GPU/CPU/CUDA/显存条件、是否适合本机、以及 batch/precision/device 等本机适配动作；本机资源摘要必须引用后端机器画像里的具体 GPU 型号和显存数值，evidence 应指向 runtime_probe/nvidia-smi/GPU/CUDA 等探测来源，不能只写“GPU ok”；如果本机无法满足且没有合理降级路径，应输出 reject 并给 `machine_compute_unavailable` 证据。
-- 不要使用 `bash -c`、`sh -c`、`zsh -c`，也不要使用 `bash --noprofile --norc -c`、`bash -o pipefail -c`、`bash -lc` 等任何内联 shell 变体。你只能写 JSON，不能在输出 JSON 的同时创建辅助脚本；因此不要引用“本计划稍后才生成”的 `setup_scripts`、`write_*.sh`、`download_*.sh`。`["bash", "脚本路径"]` 只能指向仓库里已经存在的脚本，或本次 run 目录里在计划生成前已经存在的脚本；否则后端会拒绝。下载/解压等步骤优先写成直接 JSON 命令，例如 `hf download ...`、`tar -xzf ...`、`python -c ...`。
-- `python -c` 仅用于短小导入/打印/探测；其中出现的绝对路径、`~/`、`../` 或包含 `../` 的字符串路径也会按命令 cwd 解析并限制在本次 run 目录内。带解释器选项的 `python -X faulthandler -c ...`、`python -W ignore -c ...` 和 `conda run ... python -X ... -c ...` 也会被检查；需要复杂文件写入时，请把辅助脚本和输出都放在 run/repo 内。下载/解压、依赖安装和构建工具的贴值短路径选项也必须留在 run/repo 内，例如 `curl -oFILE`、`wget -OFILE`、`wget -Pdir`、`tar -Cdir`、`unzip -ddir`、`git -Cdir`、`make -Cdir`、`ninja -Cdir`、`cmake -Bdir`、`pip -tdir`、`7z -odir`、`rsync -Tdir`；即使命令包在 `conda run` / `mamba run` / `micromamba run` 后面，内层命令头和 `python -m pip` 也会被检查。
-- 必须输出 `paper_config_alignment`，逐项说明论文里的数据集、指标、训练超参、checkpoint、硬件或本机适配如何映射到实际命令；关键项缺失时不要冒充 ready。
-- `success_criteria` 每项必须包含指标名、比较符、可解析的论文目标值和来源：`name/metric`、`operator/op`、`value/target/paper_value`、`source/paper_source/evidence_source`；目标值必须是数字或百分比，且必须能逐项绑定到 `paper_evidence.target_metrics` 中的论文/plan 目标指标，不能是 Claude 为了过 gate 自行编造的数字。
-- `paper_config_alignment.command_phase` 必须引用 `commands[].phase` 中真实存在的阶段；至少要覆盖 success_criteria 中的论文指标，并用逐项、具体、有论文值或 README/config 证据的行覆盖不少于 3 类训练/完整复现配置：epoch/steps、batch_size、learning_rate、optimizer/scheduler、seed、checkpoint/pretrained、hardware/precision。不要只写“paper training config handled”。
-- 完整复现命令必须包含 `phase=reproduce_full` 且 `required=true`；只跑 smoke/verify 不能作为批准依据。
-- 每条命令可以带可选 `env` 对象设置 `CUDA_VISIBLE_DEVICES`、`OMP_NUM_THREADS` 等复现需要的变量；也可以保留 README 原文中的 `KEY=VALUE command` 或 `env KEY=VALUE command` 前置变量，后端会拆成结构化 env；不要使用 `env -i`/`env --unset` 等带选项形式，不要覆盖 HOME/PATH/缓存目录/CONDA_PREFIX/VIRTUAL_ENV/PYTHONHOME 等隔离关键变量；`PYTHONPATH`、`LD_LIBRARY_PATH`、`LD_PRELOAD`、`CONDA_ENVS_PATH`、`PIP_TARGET`、`PIP_PREFIX`、`PIP_INDEX_URL`、`PIP_EXTRA_INDEX_URL`、`PIP_FIND_LINKS`、`PIP_CONSTRAINT`、`PIP_REQUIREMENT`、`UV_INDEX_URL`、`UV_FIND_LINKS`、`PYTHONUSERBASE`、`PIP_CONFIG_FILE`、数据、输出、缓存类路径即使是裸相对路径或 `file://` 本地源，也会按命令 cwd 解析，最终必须在本次 run 目录内；`PIP_FIND_LINKS`、`PIP_CONSTRAINT`、`PIP_REQUIREMENT`、`UV_FIND_LINKS`、`UV_CONSTRAINT` 等多值 env 会按 shell 风格空白分词逐项检查；远程 URL 保持可用。
-- 如果 README、论文、仓库、数据源明显不靠谱或不可获得，可以输出 `status=reject`，但必须给不可修证据；可修复的环境、代码、路径或配置问题必须继续修复。
-- 如果还可修复，输出 `status=ready_to_execute`，让后端执行；失败后你会看到完整日志继续修。
-
-请写入 `{output_path}`，schema 如下：
-```json
-{{
-  "schema_version": "environment.claude_environment_plan.v1",
-  "status": "ready_to_execute | reject",
-  "reject_reason": "仅 status=reject 时填写",
-  "unreliable_basis": [{{"category": "repository_unreliable|data_unreliable|paper_unreliable|machine_compute_unavailable", "evidence": ["..."]}}],
-  "env_name": "建议的 conda 环境名，必须唯一且可读",
-  "python_version": "3.10",
-  "paper_claims": ["需要复现的论文效果/指标"],
-  "machine_assessment": {{
-    "paper_hardware_or_runtime_requirement": "论文/README/plan 中的硬件、CUDA、显存、训练时长或并行要求；没有特殊要求也要说明",
-    "local_machine_summary": "从本机画像提炼出的 GPU/CPU/CUDA/显存/OS/conda 信息",
-    "fit_for_local_machine": true,
-    "adaptation_actions": ["例如 batch size、precision、num_workers、CUDA_VISIBLE_DEVICES、单机多卡策略等；无需适配时说明 exact match"],
-    "evidence": ["引用 machine_profile、论文/README、命令配置或适配理由"]
-  }},
-  "paper_config_alignment": [
-    {{"paper_item": "dataset|metric|epoch|batch_size|learning_rate|seed|checkpoint|hardware", "paper_value": "论文/README/plan 中的原始要求", "implementation_choice": "本次命令实际采用的实现或本机适配", "command_phase": "dataset|reproduce_full|eval", "evidence_source": "paper/README/plan/log", "match_status": "matched|adapted_for_machine|missing|unknown", "critical": true, "adaptation_reason": "仅 adapted_for_machine 时填写"}}
-  ],
-  "commands": [
-    {{"phase": "conda", "command": ["conda", "create", "-y", "-n", "env", "python=3.10", "pip"], "cwd": "repo", "timeout_sec": 1800, "required": true, "env": {{}}}},
-    {{"phase": "install", "command": ["conda", "run", "-n", "env", "python", "-m", "pip", "install", "-r", "requirements.txt"], "cwd": "repo", "timeout_sec": 1800, "required": true}},
-    {{"phase": "dataset", "command": ["bash", "scripts/download_data.sh"], "cwd": "repo", "timeout_sec": 7200, "required": true}},
-    {{"phase": "verify", "command": ["conda", "run", "-n", "env", "python", "-c", "import torch; print(torch.__version__)"], "cwd": "repo", "timeout_sec": 300, "required": true}},
-    {{"phase": "reproduce_smoke", "command": ["conda", "run", "-n", "env", "python", "train.py", "--epochs", "1"], "cwd": "repo", "timeout_sec": 1800, "required": true}},
-    {{"phase": "reproduce_full", "command": ["conda", "run", "-n", "env", "python", "train.py"], "cwd": "repo", "timeout_sec": 86400, "required": true}}
-  ],
-  "success_criteria": [{{"name": "accuracy", "operator": ">=", "value": 0.9, "source": "paper/table/README"}}],
-  "metric_extraction_notes": "说明如何从日志中判断论文效果"
-}}
-```
-
-当前是第 {round_index} 轮。
-
-实验 plan：
-```json
-{json.dumps(normalized_plan, ensure_ascii=False, indent=2)[:40000]}
-```
-
-本机画像：
-```json
-{json.dumps(machine, ensure_ascii=False, indent=2)[:20000]}
-```
-
-仓库 README/配置证据：
-```json
-{json.dumps(repo_evidence, ensure_ascii=False, indent=2)[:50000]}
-```
-
-论文/训练/指标证据：
-```json
-{json.dumps(paper_evidence, ensure_ascii=False, indent=2)[:50000]}
-```
-
-历史失败与修复上下文：
-```json
-{json.dumps(previous_rounds, ensure_ascii=False, indent=2)[:40000]}
-```
-""".strip() + "\n"
+def prompt_environment_plan(normalized_plan: dict[str, Any], machine: dict[str, Any], repo_evidence: dict[str, Any], paper_evidence: dict[str, Any], previous_rounds: list[dict[str, Any]], output_path: Path, round_index: int, fixed_env_name: str = "") -> str:
+    run_dir = output_path.parent.parent
+    return _render_prompt(
+        "environment_plan.md",
+        output_path=output_path,
+        round_index=round_index,
+        normalized_plan_json=_prompt_json(normalized_plan, 40000, source_path=run_dir / "input_plan.normalized.json"),
+        machine_json=_prompt_json(machine, 20000, source_path=run_dir / "machine_profile.json"),
+        repo_evidence_json=_prompt_json(repo_evidence, 50000, source_path=run_dir / "repo_evidence.json"),
+        paper_evidence_json=_prompt_json(paper_evidence, 50000, source_path=run_dir / "paper_evidence.json"),
+        previous_rounds_json=_prompt_json(previous_rounds, 40000, source_path=output_path.parent / "previous_rounds.prompt.json"),
+        fixed_env_name_instruction=(
+            f"Set env_name exactly to `{fixed_env_name}` in this and every later round."
+            if fixed_env_name
+            else "Choose one concise env_name now; the backend will fix that name for every later round."
+        ),
+    )
 
 
-def prompt_final_judgement(normalized_plan: dict[str, Any], paper_evidence: dict[str, Any], env_plan: dict[str, Any], receipts: list[dict[str, Any]], metric_evidence: list[dict[str, Any]], output_path: Path) -> str:
-    return f"""
-你是 environment 的 Claude Code 复现裁决代理。请根据实验 plan、你制定的环境计划、后端执行日志和指标证据，输出是否允许进入下一个模块。
-
-裁决必须严格：
-- 只有真实仓库、真实数据、论文配置、训练/评估结果都支持论文效果时，才能 `decision=approve` 且 `allow_next_module=true`。
-- 如果失败但仍可通过修 Conda、代码、数据路径、配置、训练参数解决，必须 `decision=continue_repair`。
-- 必须核对环境计划中的 `paper_config_alignment`；关键论文配置缺失、unknown 或 missing 时，不能批准。
-- `metric_evidence` 必须逐项覆盖 `success_criteria` 中每个论文指标，并绑定到本轮后端成功且必需的 `reproduce_full`、`eval/evaluate/evaluation`、`test` 或 `benchmark` 命令回执：必须提供这些阶段 stdout/stderr 中真实出现的指标日志摘录，摘录要包含指标名和 observed 值；`required=false` 的可选指标阶段即使成功也不能支撑批准；`log_path`、phase、command 只能作为来源引用，不能单独支撑批准。后端会重新比较 observed 与论文 target，不能只靠 `passed=true`，也不能用 install/verify/smoke 或失败回执日志冒充论文指标。
-- 如果证据证明仓库/数据/论文不靠谱，或本机算力根本不可满足且无合理降级复现路径，才 `decision=reject`。
-- `reject` 必须在 failure_taxonomy 中给出不可修终态证据：`repository_unreliable`、`data_unreliable`、`paper_unreliable` 或 `machine_compute_unavailable`，并带可审计 evidence；evidence 应包含 URL、日志路径、命令、状态码、错误码、文件路径或硬件需求对比等来源信号，不能只写“数据不可用/论文不靠谱/算力不足”，也不能只写 `source=manual_review` 这类泛泛来源；普通 `machine_compute` 只能表示可修复算力/显存/配置问题，必须 `continue_repair`。
-- `failure_taxonomy[].repairable` 必须使用 JSON boolean；只要是 `true`，或字符串 `"true"`、`"yes"`、`"可修复"`、数字 `1` 这类真值，后端都会视为可修复并禁止 `reject`。
-- 必须给 failure_taxonomy，类别可用：conda_environment、machine_compute、repository_code、dataset、paper_config、repository_unreliable、data_unreliable、paper_unreliable、machine_compute_unavailable、unknown。
-
-请写入 `{output_path}`：
-```json
-{{
-  "schema_version": "environment.reproduction_verdict.v1",
-  "decision": "approve | reject | continue_repair",
-  "allow_next_module": false,
-  "paper_claims_verified": false,
-  "reproduction_success": false,
-  "metric_evidence": [],
-  "failure_taxonomy": [{{"category": "dataset", "evidence": ["..."], "repairable": true}}],
-  "repair_plan": ["下一轮具体怎么修"],
-  "reject_reason": "仅 reject 时填写",
-  "approval_summary": "仅 approve 时填写"
-}}
-```
-
-实验 plan：
-```json
-{json.dumps(normalized_plan, ensure_ascii=False, indent=2)[:25000]}
-```
-
-论文/训练/指标证据：
-```json
-{json.dumps(paper_evidence, ensure_ascii=False, indent=2)[:30000]}
-```
-
-环境/复现计划：
-```json
-{json.dumps(env_plan, ensure_ascii=False, indent=2)[:30000]}
-```
-
-后端命令回执：
-```json
-{json.dumps(receipts, ensure_ascii=False, indent=2)[:50000]}
-```
-
-本地指标解析证据：
-```json
-{json.dumps(metric_evidence, ensure_ascii=False, indent=2)[:12000]}
-```
-""".strip() + "\n"
-
-
+def prompt_audit_judgement(normalized_plan: dict[str, Any], paper_evidence: dict[str, Any], env_plan: dict[str, Any], receipts: list[dict[str, Any]], metric_evidence: list[dict[str, Any]], output_path: Path) -> str:
+    run_dir = output_path.parent.parent
+    env_plan_paths = sorted(output_path.parent.glob("claude_environment_plan_round_*.json"))
+    env_plan_path = env_plan_paths[-1] if env_plan_paths else output_path.parent / "environment_plan.audit_input.json"
+    return _render_prompt(
+        "audit_judgement.md",
+        output_path=output_path,
+        normalized_plan_json=_prompt_json(normalized_plan, 25000, source_path=run_dir / "input_plan.normalized.json"),
+        paper_evidence_json=_prompt_json(paper_evidence, 30000, source_path=run_dir / "paper_evidence.json"),
+        env_plan_json=_prompt_json(env_plan, 30000, source_path=env_plan_path),
+        receipts_json=_prompt_json(receipts, 50000, source_path=output_path.parent / "command_receipts.json"),
+        metric_evidence_json=_prompt_json(metric_evidence, 12000, source_path=output_path.parent / "metric_evidence.prompt.json"),
+    )
 
 def env_prefix_for(run_dir: Path, env_name: str) -> Path:
     name = slugify(env_name or "environment_env", "environment_env")
@@ -2345,228 +1789,15 @@ def verdict_metric_evidence_supports_claims(verdict: dict[str, Any], receipts: l
     return False, issues or ["没有任何 metric_evidence 通过执行日志绑定校验"]
 
 
-SUCCESS_CRITERIA_METRIC_ALIASES = {
-    "accuracy": {"acc"},
-    "acc": {"accuracy"},
-    "f1": {"f1score", "f1_score"},
-    "f1score": {"f1", "f1_score"},
-    "auc": {"auroc", "roc_auc", "rocauc"},
-    "auroc": {"auc", "roc_auc", "rocauc"},
-    "map": {"meanaverageprecision", "mean_average_precision", "m_ap"},
-    "meanaverageprecision": {"map", "mean_average_precision"},
-    "miou": {"meaniou", "mean_iou"},
-    "meaniou": {"miou", "mean_iou"},
-    "top1accuracy": {"top1", "top_1", "top-1", "acc@1", "top1_acc"},
-    "top5accuracy": {"top5", "top_5", "top-5", "acc@5", "top5_acc"},
-}
-PAPER_TARGET_NUMBER_RE = re.compile(r"[+-]?(?:(?:\d+(?:,\d{3})+|\d+)(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\s*%?")
-PAPER_TARGET_VALUE_KEYS = ("value", "target", "paper_value", "expected", "score", "result")
-PAPER_TARGET_NAME_KEYS = ("name", "metric", "metric_name", "criterion")
-PAPER_TARGET_SOURCE_KEYS = ("source", "paper_source", "evidence_source", "table", "section")
-METRIC_NAME_TRAILING_QUALIFIERS = (
-    "target",
-    "metric",
-    "score",
-    "value",
-    "fraction",
-    "rate",
-)
-
-
-def _metric_binding_compact(value: Any) -> str:
-    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
-
-
-def _metric_name_suffix_aliases(compact: str) -> set[str]:
-    aliases: set[str] = set()
-    current = str(compact or "")
-    while current:
-        stripped = False
-        for suffix in METRIC_NAME_TRAILING_QUALIFIERS:
-            if current.endswith(suffix) and len(current) > len(suffix) + 2:
-                current = current[: -len(suffix)]
-                aliases.add(current)
-                stripped = True
-                break
-        if not stripped:
-            break
-    return aliases
-
-
-def _success_metric_name_variants(name: str) -> set[str]:
-    raw = str(name or "").strip().lower()
-    compact = _metric_binding_compact(raw)
-    variants = {raw, compact}
-    variants.update(SUCCESS_CRITERIA_METRIC_ALIASES.get(compact, set()))
-    variants.update(_metric_name_suffix_aliases(compact))
-    return {item for item in variants if item}
-
-
-def _metric_name_matches_paper_target(name: str, target: Any) -> bool:
-    if not str(name or "").strip():
-        return False
-    if isinstance(target, dict):
-        explicit_names = [str(target.get(key) or "").strip() for key in PAPER_TARGET_NAME_KEYS]
-        explicit_names = [item for item in explicit_names if item]
-        if explicit_names:
-            target_variants: set[str] = set()
-            for item in explicit_names:
-                target_variants.update(_success_metric_name_variants(item))
-            return bool(_success_metric_name_variants(name) & target_variants)
-    text = json.dumps(target, ensure_ascii=False, sort_keys=True) if isinstance(target, (dict, list)) else str(target or "")
-    lowered = text.lower()
-    compact_text = _metric_binding_compact(text)
-    for variant in _success_metric_name_variants(name):
-        if variant in lowered or _metric_binding_compact(variant) in compact_text:
-            return True
-    return False
-
-
-def _target_metric_values(target: Any) -> list[Any]:
-    values: list[Any] = []
-    if isinstance(target, dict):
-        for key in PAPER_TARGET_VALUE_KEYS:
-            if key not in target:
-                continue
-            value = target.get(key)
-            if value is not None and value != "":
-                values.append(value)
-    text = json.dumps(target, ensure_ascii=False, sort_keys=True) if isinstance(target, (dict, list)) else str(target or "")
-    for match in PAPER_TARGET_NUMBER_RE.findall(text):
-        if match.strip():
-            values.append(match.strip())
-    out: list[Any] = []
-    seen: set[str] = set()
-    for value in values:
-        key = str(value)
-        if key not in seen:
-            out.append(value)
-            seen.add(key)
-    return out
-
-
-def _criterion_target_matches_paper_target(criterion_target: Any, paper_target: Any) -> tuple[bool, Any, dict[str, Any]]:
-    last_compare: dict[str, Any] = {}
-    for candidate in _target_metric_values(paper_target):
-        matched, compare = compare_metric_values(criterion_target, candidate, "==")
-        last_compare = compare
-        if matched:
-            return True, candidate, compare
-    return False, None, last_compare
-
-
-def _paper_target_source(target: Any) -> str:
-    if isinstance(target, dict):
-        for key in PAPER_TARGET_SOURCE_KEYS:
-            value = str(target.get(key) or "").strip()
-            if value:
-                return value
-    return "paper_evidence.target_metrics"
-
-
 def _criterion_is_environment_gate(row: Any) -> bool:
     if not isinstance(row, dict):
         return False
     scope = str(row.get("approval_scope") or "").strip().lower()
-    if scope in {"environment_gate", "environment", "handoff", "runtime_gate", "operational_gate"}:
+    if scope == "environment_gate":
         return True
     return row.get("paper_metric") is False
 
 
-def _paper_metric_success_criteria(criteria: Any) -> list[dict[str, Any]]:
-    if not isinstance(criteria, list):
-        return []
-    return [row for row in criteria if isinstance(row, dict) and not _criterion_is_environment_gate(row)]
-
-
-def _success_criteria_paper_binding_gate(env_plan: dict[str, Any], paper_evidence: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-    raw_criteria = env_plan.get("success_criteria") if isinstance(env_plan.get("success_criteria"), list) else []
-    criteria = _paper_metric_success_criteria(raw_criteria)
-    environment_gate_count = len([row for row in raw_criteria if _criterion_is_environment_gate(row)]) if isinstance(raw_criteria, list) else 0
-    paper_targets = paper_evidence.get("target_metrics") if isinstance(paper_evidence.get("target_metrics"), list) else []
-    issues: list[str] = []
-    matches: list[dict[str, Any]] = []
-    for index, criterion in enumerate(criteria):
-        name = str(criterion.get("name") or criterion.get("metric") or "").strip()
-        target_found, target_value, target_key = _criterion_target_value(criterion)
-        if not name or not target_found:
-            issues.append(f"success_criteria[{index}] 缺少 name/metric 或 target，无法绑定论文目标指标")
-            continue
-        candidate_matches: list[dict[str, Any]] = []
-        for paper_index, paper_target in enumerate(paper_targets):
-            if not _metric_name_matches_paper_target(name, paper_target):
-                continue
-            target_matched, paper_value, compare = _criterion_target_matches_paper_target(target_value, paper_target)
-            if not target_matched:
-                continue
-            candidate_matches.append({
-                "success_criteria_index": index,
-                "paper_target_index": paper_index,
-                "metric": name,
-                "criterion_target_key": target_key,
-                "criterion_target": target_value,
-                "paper_target_value": paper_value,
-                "paper_target_source": _paper_target_source(paper_target),
-                "compare": compare,
-            })
-        if candidate_matches:
-            matches.append(candidate_matches[0])
-        else:
-            issues.append(f"success_criteria[{index}] metric={name} target={target_value} 未能绑定到 paper_evidence.target_metrics 中同名且同目标值的论文指标")
-    if not criteria:
-        issues.append("success_criteria 缺少论文级 paper_metric 指标；approval_scope=environment_gate 的标准只能支撑环境交接，不能支撑完整复现或论文效果批准")
-    evidence = {
-        "criteria_count": len(raw_criteria) if isinstance(raw_criteria, list) else 0,
-        "paper_metric_criteria_count": len(criteria),
-        "environment_gate_criteria_count": environment_gate_count,
-        "paper_target_metric_count": len(paper_targets),
-        "matched_count": len(matches),
-        "matches": matches[:8],
-        "issues": issues[:10],
-        "sample_paper_targets": paper_targets[:8],
-    }
-    return bool(criteria and paper_targets and not issues), evidence
-
-
-ALIGNMENT_OK_STATUSES = {"matched", "adapted_for_machine", "confirmed", "implemented"}
-ALIGNMENT_BAD_STATUSES = {"missing", "unknown", "unmatched", "not_found", "not_applicable"}
-ALIGNMENT_TRAINING_TOKENS = {
-    "train", "training", "reproduce", "epoch", "epochs", "batch", "batch_size", "learning_rate",
-    "lr", "optimizer", "scheduler", "seed", "checkpoint", "ckpt", "hardware", "gpu", "cuda",
-    "precision", "训练", "轮次", "批量", "学习率", "优化器", "随机种子", "检查点", "显卡",
-}
-TRAINING_ALIGNMENT_MIN_CATEGORIES = 3
-TRAINING_ALIGNMENT_CATEGORY_LABELS = {
-    "epoch_or_steps": "epoch/steps",
-    "batch_size": "batch_size",
-    "learning_rate": "learning_rate",
-    "optimizer_or_scheduler": "optimizer/scheduler",
-    "seed": "seed",
-    "checkpoint_or_pretrained": "checkpoint/pretrained",
-    "hardware_or_precision": "hardware/precision",
-}
-TRAINING_ALIGNMENT_CATEGORY_PATTERNS = {
-    "epoch_or_steps": (r"\bepochs?\b", r"\bsteps?\b", r"\biters?\b", r"\biterations?\b", r"max_steps", r"训练轮次", r"轮次", r"步数", r"迭代"),
-    "batch_size": (r"batch[_ -]?size", r"\bbatch\b", r"批量", r"批大小"),
-    "learning_rate": (r"learning[_ -]?rate", r"\blr\b", r"学习率"),
-    "optimizer_or_scheduler": (r"optimizer", r"optimiser", r"scheduler", r"adamw?", r"sgd", r"cosine", r"warmup", r"decay", r"优化器", r"调度"),
-    "seed": (r"\bseed\b", r"random[_ -]?seed", r"随机种子"),
-    "checkpoint_or_pretrained": (r"checkpoint", r"\bckpt\b", r"pretrained", r"pre-trained", r"weights", r"resume", r"检查点", r"预训练", r"权重"),
-    "hardware_or_precision": (r"hardware", r"\bgpu\b", r"cuda", r"vram", r"显卡", r"显存", r"precision", r"fp16", r"bf16", r"float16", r"精度"),
-}
-CONCRETE_TRAINING_ALIGNMENT_RE = re.compile(
-    r"\d|\.ya?ml\b|\.json\b|\.toml\b|\.cfg\b|\.ini\b|"
-    r"\bconfig\b|\bdefault\b|\breadme\b|\badamw?\b|\bsgd\b|\bfp16\b|\bbf16\b|"
-    r"\bpretrained\b|\bcheckpoint\b|\bckpt\b|not specified|not reported|not given|not provided|"
-    r"默认|配置|未说明|未给出|未报告|预训练|检查点|权重",
-    re.IGNORECASE,
-)
-MACHINE_ALIGNMENT_TOKENS = {
-    "hardware", "gpu", "cuda", "vram", "memory", "cpu", "device", "devices", "precision",
-    "batch", "batch_size", "num_workers", "workers", "local", "machine", "compute",
-    "硬件", "显卡", "显存", "本机", "机器", "算力", "设备", "精度", "批量",
-}
-MACHINE_FIT_OK_STATUSES = {"fit", "fits", "ok", "true", "yes", "suitable", "supported", "confirmed", "adapted", "adapted_for_machine", "local_fit"}
 DATASET_PHASE_EXACT = {"dataset", "data", "download", "prepare_data", "preprocess"}
 DATASET_PHASE_PHRASES = {
     "download_data", "data_download", "download_dataset", "dataset_download",
@@ -2582,429 +1813,6 @@ DATASET_PHASE_PHRASES = {
 }
 DATASET_ACTION_TOKENS = {"download", "prepare", "preprocess", "fetch", "get", "build", "create", "convert", "extract", "unpack", "下载", "准备", "预处理", "获取", "构建", "创建", "转换", "提取", "解压"}
 DATASET_OBJECT_TOKENS = {"data", "dataset", "datasets", "数据", "数据集"}
-DATASET_NAME_KEYS = {
-    "name", "short_name", "title", "value", "paper_value", "expected",
-    "dataset", "datasets", "dataset_name", "dataset_names", "dataset_title", "dataset_id", "dataset_key",
-    "paper_dataset", "paper_datasets", "benchmark", "benchmark_name", "corpus", "corpus_name",
-    "data", "data_name", "hf_dataset", "huggingface_dataset", "kaggle_dataset",
-    "training_data", "evaluation_data", "validation_data", "test_data", "wet_lab_data",
-    "data_protocol", "environment_requirements", "benchmarks", "benchmark_suite",
-}
-GENERIC_DATASET_NAMES = {
-    "data", "dataset", "datasets", "benchmark", "corpus", "trainingdata", "testdata",
-    "paperdataset", "customdataset", "realdata", "数据", "数据集", "训练数据", "测试数据",
-}
-SYNTHETIC_DATASET_MARKERS = (
-    "toy", "synthetic", "dummy", "fake", "mock", "random data", "random dataset",
-    "sample data", "sample dataset", "demo data", "demo dataset", "placeholder",
-    "config_kon_demo", "prepare_demo_data",
-    "玩具", "合成数据", "伪造", "虚拟", "随机数据", "示例数据", "样例数据", "流程自测",
-)
-DATASET_NEGATIVE_OR_REPLACEMENT_MARKERS = (
-    "not using", "not use", "do not use", "did not use", "without", "instead of",
-    "rather than", "replacement", "replaced", "replace", "substitute", "substitution",
-    "fallback", "not available", "unavailable", "missing", "cannot access", "can't access",
-    "failed to download", "未使用", "不使用", "没有使用", "不用", "替代", "代替", "改用", "换用",
-    "不可用", "无法获取", "下载失败",
-)
-
-
-def _command_phase_names(plan: dict[str, Any]) -> set[str]:
-    commands = plan.get("commands") if isinstance(plan.get("commands"), list) else []
-    return {str(row.get("phase") or "").strip().lower() for row in commands if isinstance(row, dict) and str(row.get("phase") or "").strip()}
-
-
-def _required_command_phase_names(plan: dict[str, Any]) -> set[str]:
-    commands = plan.get("commands") if isinstance(plan.get("commands"), list) else []
-    return {
-        str(row.get("phase") or "").strip().lower()
-        for row in commands
-        if isinstance(row, dict) and str(row.get("phase") or "").strip() and row.get("required") is not False
-    }
-
-
-def _optional_command_phase_names(plan: dict[str, Any]) -> set[str]:
-    commands = plan.get("commands") if isinstance(plan.get("commands"), list) else []
-    return {
-        str(row.get("phase") or "").strip().lower()
-        for row in commands
-        if isinstance(row, dict) and str(row.get("phase") or "").strip() and row.get("required") is False
-    }
-
-
-def _alignment_row_text(row: dict[str, Any], keys: list[str] | None = None) -> str:
-    selected = keys or [
-        "paper_item", "paper_field", "claim", "setting", "category", "paper_value", "expected",
-        "target", "description", "implementation_choice", "implementation", "command_phase",
-        "command_ref", "evidence_source", "adaptation_reason",
-    ]
-    return " ".join(str(row.get(key) or "") for key in selected).lower()
-
-
-def _alignment_command_phases(row: dict[str, Any]) -> set[str]:
-    raw = str(row.get("command_phase") or row.get("phase") or "").strip().lower()
-    if not raw:
-        return set()
-    return {part for part in re.split(r"[,/|;，、\s]+", raw) if part}
-
-
-def _alignment_row_is_supported(row: dict[str, Any]) -> bool:
-    return str(row.get("match_status") or row.get("status") or "").strip().lower() in ALIGNMENT_OK_STATUSES
-
-
-def _alignment_row_supports_approval(row: dict[str, Any]) -> bool:
-    return _alignment_row_is_supported(row) and row.get("critical") is not False
-
-
-def _alignment_row_mentions_metric(row: dict[str, Any], metric_names: set[str]) -> bool:
-    item_text = _alignment_row_text(row, ["paper_item", "paper_field", "claim", "setting", "category", "paper_value", "expected", "target", "description"])
-    if any(token in item_text for token in ["metric", "accuracy", "auc", "f1", "loss", "score", "指标"]):
-        return True
-    return any(name and name in item_text for name in metric_names)
-
-
-def _alignment_row_mentions_training_config(row: dict[str, Any]) -> bool:
-    item_text = _alignment_row_text(row, ["paper_item", "paper_field", "claim", "setting", "category", "paper_value", "expected", "target", "description"])
-    return any(token in item_text for token in ALIGNMENT_TRAINING_TOKENS)
-
-
-def _training_alignment_categories_in_text(text: str) -> set[str]:
-    lowered = str(text or "").lower()
-    categories: set[str] = set()
-    for category, patterns in TRAINING_ALIGNMENT_CATEGORY_PATTERNS.items():
-        if any(re.search(pattern, lowered, flags=re.IGNORECASE) for pattern in patterns):
-            categories.add(category)
-    return categories
-
-
-def _alignment_row_training_detail_text(row: dict[str, Any]) -> str:
-    return _alignment_row_text(row, [
-        "paper_value", "expected", "target", "description", "implementation_choice",
-        "implementation", "adaptation_reason", "evidence_source",
-    ])
-
-
-def _alignment_row_training_item_text(row: dict[str, Any]) -> str:
-    return _alignment_row_text(row, ["paper_item", "paper_field", "claim", "setting", "category"])
-
-
-def _alignment_row_has_concrete_training_detail(row: dict[str, Any]) -> bool:
-    return bool(CONCRETE_TRAINING_ALIGNMENT_RE.search(_alignment_row_training_detail_text(row)))
-
-
-def _alignment_row_training_categories(row: dict[str, Any]) -> set[str]:
-    if not _alignment_row_is_supported(row) or not _alignment_row_has_concrete_training_detail(row):
-        return set()
-    detail_categories = _training_alignment_categories_in_text(_alignment_row_training_detail_text(row))
-    item_categories = _training_alignment_categories_in_text(_alignment_row_training_item_text(row))
-    categories = set(detail_categories)
-    if len(item_categories) == 1:
-        categories.update(item_categories)
-    return categories
-
-
-def _supported_training_alignment_categories(rows: list[dict[str, Any]]) -> set[str]:
-    categories: set[str] = set()
-    for row in rows:
-        categories.update(_alignment_row_training_categories(row))
-    return categories
-
-
-def _training_category_labels(categories: set[str]) -> list[str]:
-    return [TRAINING_ALIGNMENT_CATEGORY_LABELS.get(category, category) for category in sorted(categories)]
-
-
-def _alignment_row_mentions_machine(row: dict[str, Any]) -> bool:
-    return any(token in _alignment_row_text(row) for token in MACHINE_ALIGNMENT_TOKENS)
-
-
-def _textual_items(value: Any) -> list[str]:
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    if isinstance(value, dict):
-        return [str(item).strip() for item in value.values() if str(item).strip()]
-    text = str(value or "").strip()
-    return [text] if text else []
-
-
-def _machine_assessment_fit_value(assessment: dict[str, Any]) -> bool:
-    raw = assessment.get("fit_for_local_machine")
-    if isinstance(raw, bool):
-        return raw
-    status = str(raw or assessment.get("status") or assessment.get("fit_status") or "").strip().lower()
-    return status in MACHINE_FIT_OK_STATUSES
-
-
-def _machine_adaptation_items(assessment: dict[str, Any]) -> list[str]:
-    return _textual_items(
-        assessment.get("adaptation_actions")
-        or assessment.get("adaptations")
-        or assessment.get("machine_adaptations")
-        or assessment.get("no_adaptation_reason")
-        or assessment.get("exact_match_reason")
-    )
-
-
-def _gpu_name_markers(gpu_rows: list[dict[str, Any]]) -> list[str]:
-    markers: list[str] = []
-    for row in gpu_rows:
-        if not isinstance(row, dict):
-            continue
-        name = re.sub(r"\s+", " ", str(row.get("name") or "").strip().lower())
-        if name:
-            markers.append(name)
-        for token in re.split(r"[^a-z0-9]+", name):
-            if len(token) >= 3 and any(char.isdigit() for char in token):
-                markers.append(token)
-        for match in re.findall(r"(?:rtx|a|h|l)\s*\d{2,5}|\d{4,5}", name):
-            markers.append(match.replace(" ", ""))
-    unique: list[str] = []
-    for marker in markers:
-        if marker and marker not in unique:
-            unique.append(marker)
-    return unique
-
-
-def _gpu_memory_mb(row: dict[str, Any]) -> float | None:
-    for key in ["memory_total_mb", "memory_total", "memory", "vram", "vram_mb"]:
-        raw = row.get(key) if isinstance(row, dict) else None
-        text = str(raw or "").strip().lower()
-        if not text:
-            continue
-        match = re.search(r"(\d+(?:\.\d+)?)", text)
-        if not match:
-            continue
-        value = float(match.group(1))
-        if any(unit in text for unit in ["gb", "gib", "g ", "g显存"]):
-            return value * 1024
-        return value
-    return None
-
-
-def _text_mentions_detected_gpu_identity(text: str, gpu_rows: list[dict[str, Any]]) -> bool:
-    lowered = str(text or "").lower()
-    compact = re.sub(r"[^a-z0-9]+", "", lowered)
-    for marker in _gpu_name_markers(gpu_rows):
-        marker_lower = marker.lower()
-        marker_compact = re.sub(r"[^a-z0-9]+", "", marker_lower)
-        if marker_lower in lowered or (marker_compact and marker_compact in compact):
-            return True
-    return False
-
-
-def _text_mentions_detected_gpu_memory(text: str, gpu_rows: list[dict[str, Any]]) -> bool:
-    expected_values = [value for value in (_gpu_memory_mb(row) for row in gpu_rows) if value]
-    if not expected_values:
-        return True
-    lowered = str(text or "").lower()
-    for match in re.finditer(r"(\d+(?:\.\d+)?)\s*(gib|gb|mib|mb|g|m)?", lowered):
-        observed = float(match.group(1))
-        unit = match.group(2) or ""
-        observed_mb = observed * 1024 if unit in {"gib", "gb", "g"} else observed
-        for expected_mb in expected_values:
-            expected_gb = expected_mb / 1024
-            if abs(observed_mb - expected_mb) <= max(1024.0, expected_mb * 0.20):
-                return True
-            if not unit and abs(observed - expected_gb) <= max(2.0, expected_gb * 0.20):
-                return True
-    return False
-
-
-def machine_assessment_issues(env_plan: dict[str, Any], machine: dict[str, Any] | None = None) -> list[str]:
-    assessment = env_plan.get("machine_assessment")
-    if not isinstance(assessment, dict) or not assessment:
-        return ["环境计划缺少 machine_assessment；必须说明论文硬件要求、本机资源、是否适合本机和适配动作"]
-    issues: list[str] = []
-    if not _machine_assessment_fit_value(assessment):
-        issues.append("machine_assessment 未明确 fit_for_local_machine=true/适合本机；若本机不可满足应输出 reject 和 machine_compute_unavailable 证据")
-    requirement_items = _textual_items(assessment.get("paper_hardware_or_runtime_requirement") or assessment.get("paper_runtime_requirement") or assessment.get("required_hardware"))
-    if not requirement_items:
-        issues.append("machine_assessment 缺少论文/README/plan 的硬件或运行要求说明")
-    local_items = _textual_items(assessment.get("local_machine_summary") or assessment.get("local_resources") or assessment.get("local_gpu_summary"))
-    if not local_items:
-        issues.append("machine_assessment 缺少本机 GPU/CPU/CUDA/显存等资源摘要")
-    evidence_items = _textual_items(assessment.get("evidence") or assessment.get("evidence_source") or assessment.get("reasoning"))
-    adaptation_items = _machine_adaptation_items(assessment)
-    if not evidence_items:
-        issues.append("machine_assessment 缺少可审计 evidence")
-    if not adaptation_items:
-        issues.append("machine_assessment 缺少本机适配动作或无需适配理由；必须说明 batch/precision/device/CUDA 等适配，或说明本机配置与论文要求 exact match")
-    if machine is not None:
-        gpu_rows = machine.get("gpu") if isinstance(machine.get("gpu"), list) else []
-        local_text = " ".join(local_items)
-        evidence_text = " ".join(evidence_items).lower()
-        if gpu_rows and not any(token in local_text.lower() for token in ["gpu", "cuda", "显卡", "显存", "nvidia"]):
-            issues.append("machine_assessment 的本机资源摘要没有体现已探测到的 GPU/CUDA 信息")
-        if gpu_rows and not _text_mentions_detected_gpu_identity(local_text, gpu_rows):
-            issues.append("machine_assessment 的本机资源摘要没有明确写出后端已探测到的 GPU 型号，例如 runtime_probe/nvidia-smi 中的具体型号")
-        if gpu_rows and not _text_mentions_detected_gpu_memory(local_text, gpu_rows):
-            issues.append("machine_assessment 的本机资源摘要没有明确写出后端已探测到的 GPU 显存数值")
-        if gpu_rows and not any(token in evidence_text for token in ["runtime_probe", "nvidia-smi", "machine_profile", "gpu", "cuda", "显存", "显卡"]):
-            issues.append("machine_assessment evidence 没有指向 runtime_probe/nvidia-smi/GPU/CUDA/显存等本机探测来源")
-    rows = env_plan.get("paper_config_alignment") if isinstance(env_plan.get("paper_config_alignment"), list) else []
-    supported_rows = [row for row in rows if isinstance(row, dict) and _alignment_row_is_supported(row)]
-    if not any(_alignment_row_mentions_machine(row) for row in supported_rows):
-        issues.append("paper_config_alignment 缺少硬件/GPU/CUDA/显存/batch/precision 等本机适配对齐项")
-    return issues
-
-
-def _machine_fit_gate(env_plan: dict[str, Any], machine: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-    assessment = env_plan.get("machine_assessment") if isinstance(env_plan.get("machine_assessment"), dict) else {}
-    issues = machine_assessment_issues(env_plan, machine)
-    gpu_rows = machine.get("gpu") if isinstance(machine.get("gpu"), list) else []
-    evidence = {
-        "fit_for_local_machine": _machine_assessment_fit_value(assessment),
-        "gpu_count": len(gpu_rows),
-        "gpu_names": [str(row.get("name") or "") for row in gpu_rows[:8] if isinstance(row, dict)],
-        "paper_hardware_or_runtime_requirement": assessment.get("paper_hardware_or_runtime_requirement") or assessment.get("paper_runtime_requirement") or assessment.get("required_hardware") or "",
-        "local_machine_summary": assessment.get("local_machine_summary") or assessment.get("local_resources") or assessment.get("local_gpu_summary") or "",
-        "adaptation_actions": _machine_adaptation_items(assessment)[:8],
-        "evidence": _textual_items(assessment.get("evidence") or assessment.get("evidence_source") or assessment.get("reasoning"))[:8],
-        "issues": issues[:10],
-    }
-    return not issues, evidence
-
-
-def _success_criteria_metric_names(plan: dict[str, Any]) -> set[str]:
-    rows = plan.get("success_criteria") if isinstance(plan.get("success_criteria"), list) else []
-    names: set[str] = set()
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        if _criterion_is_environment_gate(row):
-            continue
-        for key in ["name", "metric"]:
-            value = str(row.get(key) or "").strip().lower()
-            if value:
-                names.add(value)
-    return names
-
-
-def paper_config_alignment_passed(plan: dict[str, Any]) -> tuple[bool, list[str]]:
-    rows = plan.get("paper_config_alignment")
-    if not isinstance(rows, list) or not rows:
-        return False, ["环境计划缺少 paper_config_alignment；完整复现必须逐项说明论文配置如何映射到实际命令"]
-    issues: list[str] = []
-    supported_rows: list[dict[str, Any]] = []
-    nonapproval_supported_count = 0
-    command_phases = _command_phase_names(plan)
-    required_command_phases = _required_command_phase_names(plan)
-    optional_command_phases = _optional_command_phase_names(plan)
-    metric_names = _success_criteria_metric_names(plan)
-    for index, row in enumerate(rows):
-        if not isinstance(row, dict):
-            issues.append(f"paper_config_alignment[{index}] 不是 object")
-            continue
-        status = str(row.get("match_status") or row.get("status") or "").strip().lower()
-        critical = row.get("critical") is not False
-        has_item = any(str(row.get(key) or "").strip() for key in ["paper_item", "paper_field", "claim", "setting", "category"])
-        has_value = any(str(row.get(key) or "").strip() for key in ["paper_value", "expected", "target", "description"])
-        has_mapping = any(str(row.get(key) or "").strip() for key in ["implementation_choice", "implementation", "command_phase", "command_ref", "evidence_source"])
-        phases = _alignment_command_phases(row)
-        if _alignment_row_is_supported(row):
-            if _alignment_row_supports_approval(row):
-                supported_rows.append(row)
-            else:
-                nonapproval_supported_count += 1
-            if critical and not phases:
-                issues.append(f"paper_config_alignment[{index}] 关键支持项缺少 command_phase，无法证明映射到实际命令")
-            if phases and command_phases and phases.isdisjoint(command_phases):
-                issues.append(f"paper_config_alignment[{index}] command_phase={sorted(phases)} 不在实际 commands phase 中：{sorted(command_phases)}")
-            optional_phase_refs = sorted(phase for phase in phases if phase in optional_command_phases and phase not in required_command_phases)
-            if critical and optional_phase_refs:
-                issues.append(f"paper_config_alignment[{index}] 关键支持项 command_phase={optional_phase_refs} 指向 required=false 的可选命令；支撑论文配置的命令必须是必需命令")
-        if critical and status in ALIGNMENT_BAD_STATUSES:
-            issues.append(f"paper_config_alignment[{index}] 关键论文配置为 {status}，不能进入完整复现批准路径")
-        if not status:
-            issues.append(f"paper_config_alignment[{index}] 缺少 match_status")
-        if not has_item:
-            issues.append(f"paper_config_alignment[{index}] 缺少 paper_item/setting")
-        if not has_value:
-            issues.append(f"paper_config_alignment[{index}] 缺少 paper_value/expected")
-        if not has_mapping:
-            issues.append(f"paper_config_alignment[{index}] 缺少 implementation_choice/command_phase/evidence_source")
-    if not supported_rows:
-        if nonapproval_supported_count:
-            issues.append("paper_config_alignment 没有任何可支撑批准的 matched/adapted_for_machine/confirmed/implemented 项；critical=false 的非关键行不会计入批准覆盖")
-        else:
-            issues.append("paper_config_alignment 没有任何 matched/adapted_for_machine/confirmed/implemented 项")
-    if metric_names and not any(_alignment_row_mentions_metric(row, metric_names) for row in supported_rows):
-        issues.append("paper_config_alignment 缺少 success_criteria 指标对齐项，不能证明论文指标映射到复现结果")
-    if "reproduce_full" in command_phases:
-        training_categories = _supported_training_alignment_categories(supported_rows)
-        if len(training_categories) < TRAINING_ALIGNMENT_MIN_CATEGORIES:
-            covered = ", ".join(_training_category_labels(training_categories)) or "无"
-            issues.append(
-                "paper_config_alignment 训练/完整复现配置覆盖不足：至少需要逐项覆盖 "
-                f"{TRAINING_ALIGNMENT_MIN_CATEGORIES} 类具体配置（epoch/steps、batch_size、learning_rate、"
-                "optimizer/scheduler、seed、checkpoint/pretrained、hardware/precision），"
-                f"当前可审计覆盖为：{covered}"
-            )
-    return not issues, issues
-
-
-def environment_handoff_alignment_passed(plan: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-    rows = plan.get("paper_config_alignment")
-    if not isinstance(rows, list) or not rows:
-        return False, {
-            "issues": ["环境计划缺少 paper_config_alignment；environment 交接至少需要说明已验证入口如何对应论文/仓库配置"],
-            "pending_downstream_alignment": [],
-            "supported_handoff_rows": [],
-        }
-    issues: list[str] = []
-    pending_downstream: list[dict[str, Any]] = []
-    supported_handoff_rows: list[dict[str, Any]] = []
-    command_phases = _command_phase_names(plan)
-    required_command_phases = _required_command_phase_names(plan)
-    optional_command_phases = _optional_command_phase_names(plan)
-    for index, row in enumerate(rows):
-        if not isinstance(row, dict):
-            issues.append(f"paper_config_alignment[{index}] 不是 object")
-            continue
-        status = str(row.get("match_status") or row.get("status") or "").strip().lower()
-        phases = _alignment_command_phases(row)
-        has_item = any(str(row.get(key) or "").strip() for key in ["paper_item", "paper_field", "claim", "setting", "category"])
-        has_mapping = any(str(row.get(key) or "").strip() for key in ["implementation_choice", "implementation", "command_phase", "command_ref", "evidence_source"])
-        if not status:
-            issues.append(f"paper_config_alignment[{index}] 缺少 match_status")
-            continue
-        if not has_item:
-            issues.append(f"paper_config_alignment[{index}] 缺少 paper_item/setting")
-            continue
-        if _alignment_row_is_supported(row):
-            if not has_mapping:
-                issues.append(f"paper_config_alignment[{index}] 支持项缺少 implementation_choice/command_phase/evidence_source")
-                continue
-            if phases and command_phases and phases.isdisjoint(command_phases):
-                issues.append(f"paper_config_alignment[{index}] command_phase={sorted(phases)} 不在实际 commands phase 中：{sorted(command_phases)}")
-                continue
-            optional_phase_refs = sorted(phase for phase in phases if phase in optional_command_phases and phase not in required_command_phases)
-            if optional_phase_refs:
-                issues.append(f"paper_config_alignment[{index}] command_phase={optional_phase_refs} 指向 required=false 的可选命令，不能支撑 environment 交接")
-                continue
-            if phases:
-                supported_handoff_rows.append({
-                    "index": index,
-                    "status": status,
-                    "paper_item": row.get("paper_item") or row.get("paper_field") or row.get("setting") or row.get("category"),
-                    "command_phase": sorted(phases),
-                })
-            continue
-        pending_downstream.append({
-            "index": index,
-            "status": status,
-            "critical": row.get("critical") is not False,
-            "paper_item": row.get("paper_item") or row.get("paper_field") or row.get("setting") or row.get("category"),
-            "command_phase": sorted(phases),
-            "reason": "论文级完整配置/指标对齐留给 experimenting/evaluation；environment 只要求真实仓库、环境、数据和 smoke 可交接。",
-        })
-    if not supported_handoff_rows:
-        issues.append("paper_config_alignment 缺少至少一个可映射到实际必需命令的 matched/adapted_for_machine/confirmed/implemented 项")
-    return not issues, {
-        "issues": issues[:10],
-        "pending_downstream_alignment": pending_downstream[:10],
-        "supported_handoff_rows": supported_handoff_rows[:10],
-    }
 
 
 def _compact_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
@@ -3025,6 +1833,28 @@ def _approval_check(name: str, passed: bool, reason: str, evidence: Any = None) 
     if evidence is not None and evidence != "" and evidence != []:
         row["evidence"] = evidence
     return row
+
+
+def _audit_checks_by_name(verdict: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    rows = verdict.get("audit_checks") if isinstance(verdict.get("audit_checks"), list) else []
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if name:
+            out[name] = row
+    return out
+
+
+def _audit_check(verdict: dict[str, Any], name: str, missing_reason: str) -> dict[str, Any]:
+    checks = _audit_checks_by_name(verdict)
+    row = checks.get(name)
+    if isinstance(row, dict):
+        evidence = row.get("evidence") if "evidence" in row else row
+        reason = str(row.get("reason") or ("Claude audit passed" if row.get("passed") is True else missing_reason))
+        return _approval_check(name, row.get("passed") is True, reason, evidence)
+    return _approval_check(name, False, missing_reason, {"source": "claude_audit_judgement.audit_checks", "missing": name})
 
 
 def _receipt_succeeded(receipt: dict[str, Any]) -> bool:
@@ -3084,137 +1914,6 @@ def _repo_source_gate(repo_info: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         "requested_branch_or_tag": repo_info.get("requested_branch_or_tag", ""),
         **commit_evidence,
     }
-
-
-def _repo_evidence_rows(repo_evidence: dict[str, Any], key: str) -> list[dict[str, Any]]:
-    rows = repo_evidence.get(key) if isinstance(repo_evidence.get(key), list) else []
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        if isinstance(row, dict) and str(row.get("relative_path") or row.get("path") or "").strip():
-            out.append(row)
-        elif isinstance(row, str) and row.strip():
-            out.append({"relative_path": row.strip(), "path": row.strip()})
-    return out
-
-
-def _repo_command_lines(rows: list[dict[str, Any]]) -> list[str]:
-    commands: list[str] = []
-    for row in rows:
-        raw_commands = row.get("command_lines") if isinstance(row.get("command_lines"), list) else []
-        for command in raw_commands:
-            text = str(command or "").strip()
-            if text and text not in commands:
-                commands.append(text)
-    return commands
-
-
-def _repo_command_line_count(rows: list[dict[str, Any]]) -> int:
-    return len(_repo_command_lines(rows))
-
-
-REPO_INSTALL_COMMAND_RE = re.compile(r"\b(?:pip|pip3)\s+install\b|\b(?:conda|mamba|micromamba)\s+(?:env\s+)?(?:create|install|update)\b|\bpython\s+setup\.py\s+install\b|\buv\s+pip\s+install\b", re.I)
-REPO_REPRO_COMMAND_RE = re.compile(r"\b(?:python|python3|torchrun|deepspeed)\b.*\b(?:train|eval|evaluate|test|benchmark|reproduce|run|main|download|prepare|preprocess|finetune|pretrain)\b|\baccelerate\s+launch\b.*\b(?:train|eval|test|benchmark|reproduce|run|finetune|pretrain)\b|\b(?:bash|sh)\b.*\b(?:train|eval|test|benchmark|reproduce|run|download|prepare|preprocess)\b", re.I)
-REPO_INSTALL_TEXT_RE = re.compile(r"\b(?:install|installation|setup|dependency|dependencies|requirements|environment|conda|pip|mamba|micromamba|pyproject|setup\.py)\b|安装|依赖|环境", re.I)
-REPO_REPRO_TEXT_RE = re.compile(r"\b(?:reproduce|reproduction|train|training|eval|evaluation|evaluate|test|benchmark|dataset|data|download|prepare|preprocess|quickstart|usage|run)\b|复现|训练|评估|测试|数据集|下载|准备|运行", re.I)
-REPO_ENTRYPOINT_REPRO_RE = re.compile(r"\b(?:train|eval|evaluate|test|benchmark|run|main|infer|inference|finetune|pretrain|download|prepare|preprocess)\b", re.I)
-REPO_INSTALL_GUIDANCE_TOKENS = ("install", "installation", "setup", "dependency", "dependencies", "requirements", "environment", "conda", "pip", "mamba", "micromamba", "安装", "依赖", "环境")
-REPO_REPRO_GUIDANCE_TOKENS = ("reproduce", "reproduction", "train", "training", "eval", "evaluation", "evaluate", "test", "benchmark", "dataset", "data", "download", "prepare", "preprocess", "run", "复现", "训练", "评估", "测试", "数据集", "下载", "准备", "运行")
-REPO_NEGATIVE_GUIDANCE_RE = re.compile(
-    r"\b(?:no|not|none|without|missing|absent|unavailable|unsupported|not\s+provided|not\s+included|not\s+available|does\s+not\s+(?:provide|include)|cannot|can't)\b|"
-    r"没有|未提供|未包含|不包含|无|缺少|不可用|无法|不能|不支持",
-    re.I,
-)
-
-
-def _repo_document_text(rows: list[dict[str, Any]]) -> str:
-    parts: list[str] = []
-    for row in rows:
-        for key in ["relative_path", "path", "text_excerpt"]:
-            value = str(row.get(key) or "").strip()
-            if value:
-                parts.append(value)
-        commands = row.get("command_lines") if isinstance(row.get("command_lines"), list) else []
-        parts.extend(str(command or "").strip() for command in commands if str(command or "").strip())
-    return "\n".join(parts)
-
-
-def _repo_entrypoint_has_reproduction_role(row: dict[str, Any]) -> bool:
-    text = " ".join(str(row.get(key) or "") for key in ["relative_path", "path", "text_excerpt"])
-    return bool(REPO_ENTRYPOINT_REPRO_RE.search(text))
-
-
-def _repo_guidance_windows(text: str, tokens: tuple[str, ...]) -> list[str]:
-    windows: list[str] = []
-    for chunk in re.split(r"[\n。；;.!?]+", str(text or "")):
-        clean = re.sub(r"\s+", " ", chunk.strip())
-        if not clean:
-            continue
-        lowered = clean.lower()
-        if any(token.lower() in lowered for token in tokens):
-            windows.append(clean[:500])
-    return windows
-
-
-def _repo_negative_guidance_markers(text: str, tokens: tuple[str, ...]) -> list[str]:
-    markers: list[str] = []
-    for window in _repo_guidance_windows(text, tokens):
-        if REPO_NEGATIVE_GUIDANCE_RE.search(window):
-            markers.append(window)
-        if len(markers) >= 8:
-            break
-    return markers
-
-
-def _repo_evidence_gate(repo_evidence: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-    readmes = _repo_evidence_rows(repo_evidence, "readmes")
-    docs = _repo_evidence_rows(repo_evidence, "documentation_files")
-    configs = _repo_evidence_rows(repo_evidence, "config_files")
-    entrypoint_rows = _repo_evidence_rows(repo_evidence, "python_entrypoints")
-    doc_rows = [*readmes, *docs]
-    doc_commands = _repo_command_lines(doc_rows)
-    install_commands = [command for command in doc_commands if REPO_INSTALL_COMMAND_RE.search(command)]
-    reproduction_commands = [command for command in doc_commands if REPO_REPRO_COMMAND_RE.search(command)]
-    doc_text = _repo_document_text(doc_rows)
-    docs_mention_install = bool(REPO_INSTALL_TEXT_RE.search(doc_text))
-    docs_mention_reproduction = bool(REPO_REPRO_TEXT_RE.search(doc_text))
-    negative_install_markers = _repo_negative_guidance_markers(doc_text, REPO_INSTALL_GUIDANCE_TOKENS)
-    negative_reproduction_markers = _repo_negative_guidance_markers(doc_text, REPO_REPRO_GUIDANCE_TOKENS)
-    install_text_guidance_ok = bool(docs_mention_install and configs and not negative_install_markers)
-    reproduction_text_guidance_ok = bool(docs_mention_reproduction and not negative_reproduction_markers)
-    reproduction_entrypoints = [row for row in entrypoint_rows if _repo_entrypoint_has_reproduction_role(row)]
-    doc_count = len(readmes) + len(docs)
-    has_readme_or_docs = doc_count > 0
-    has_install_guidance = bool(install_commands or install_text_guidance_ok)
-    has_reproduction_guidance = bool(reproduction_commands or (reproduction_text_guidance_ok and reproduction_entrypoints))
-    has_actionable_documentation = bool(has_readme_or_docs and has_install_guidance and has_reproduction_guidance)
-    evidence = {
-        "repo_path": repo_evidence.get("repo_path", ""),
-        "readme_count": len(readmes),
-        "documentation_file_count": len(docs),
-        "config_file_count": len(configs),
-        "python_entrypoint_count": len(entrypoint_rows),
-        "command_line_count": len(doc_commands),
-        "install_command_count": len(install_commands),
-        "reproduction_command_count": len(reproduction_commands),
-        "docs_mention_install": docs_mention_install,
-        "docs_mention_reproduction": docs_mention_reproduction,
-        "negative_install_guidance_markers": negative_install_markers,
-        "negative_reproduction_guidance_markers": negative_reproduction_markers,
-        "install_text_guidance_ok": install_text_guidance_ok,
-        "reproduction_text_guidance_ok": reproduction_text_guidance_ok,
-        "has_readme_or_docs": has_readme_or_docs,
-        "has_install_guidance": has_install_guidance,
-        "has_reproduction_guidance": has_reproduction_guidance,
-        "has_actionable_documentation": has_actionable_documentation,
-        "evidence_summary": repo_evidence.get("evidence_summary", {}),
-        "sample_documents": [row.get("relative_path") or row.get("path") for row in doc_rows[:8]],
-        "sample_configs": [row.get("relative_path") or row.get("path") for row in configs[:8]],
-        "sample_entrypoints": [row.get("relative_path") or row.get("path") for row in entrypoint_rows[:8]],
-        "sample_install_commands": install_commands[:5],
-        "sample_reproduction_commands": reproduction_commands[:5],
-        "dry_run": repo_evidence.get("dry_run") is True,
-    }
-    return has_actionable_documentation, evidence
 
 
 CONDA_SETUP_PHASE_EXACT = {"conda", "env", "environment", "setup", "install", "dependencies", "deps", "requirements", "pip"}
@@ -3454,97 +2153,6 @@ def _conda_environment_gate(env_plan: dict[str, Any], receipts: list[dict[str, A
     return bool(env_name and prefix_exists and setup_receipts and verify_receipts), evidence
 
 
-def _alignment_has_dataset(plan: dict[str, Any]) -> bool:
-    rows = plan.get("paper_config_alignment")
-    if not isinstance(rows, list):
-        return False
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        item_text = " ".join(str(row.get(key) or "") for key in ["paper_item", "paper_field", "claim", "setting", "category"]).lower()
-        status = str(row.get("match_status") or row.get("status") or "").strip().lower()
-        if any(token in item_text for token in ["dataset", "data", "数据集", "数据"]) and _alignment_row_supports_approval(row):
-            return True
-    return False
-
-
-def _dataset_compact_text(value: str) -> str:
-    return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", str(value or "").lower())
-
-
-def _dataset_spaced_text(value: str) -> str:
-    return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", str(value or "").lower()).strip()
-
-
-def _split_dataset_candidate_text(text: str) -> list[str]:
-    clean = str(text or "").strip()
-    if not clean:
-        return []
-    parts = [part.strip() for part in re.split(r"[,;|，；、]+|\s+/\s+|\s+and\s+", clean) if part.strip()]
-    return [clean, *[part for part in parts if part != clean]]
-
-
-def _dataset_candidate_texts(value: Any) -> list[str]:
-    out: list[str] = []
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if str(key).strip().lower() in DATASET_NAME_KEYS:
-                out.extend(_dataset_candidate_texts(item))
-    elif isinstance(value, list):
-        for item in value[:20]:
-            out.extend(_dataset_candidate_texts(item))
-    else:
-        out.extend(_split_dataset_candidate_text(str(value or "")))
-    return out
-
-
-def _dataset_name_candidates(paper_dataset: list[Any]) -> list[str]:
-    candidates: list[str] = []
-    for item in paper_dataset:
-        for text in _dataset_candidate_texts(item):
-            compact = _dataset_compact_text(text)
-            if len(compact) < 3 or compact in GENERIC_DATASET_NAMES:
-                continue
-            if text not in candidates:
-                candidates.append(text)
-    return candidates
-
-
-def _dataset_compact_name_occurs_with_boundary(text: str, dataset_name: str) -> bool:
-    compact_name = _dataset_compact_text(dataset_name)
-    if len(compact_name) < 3:
-        return False
-    lowered = str(text or "").lower()
-    dataset_pattern = "".join(r"[^a-z0-9\u4e00-\u9fff]*" + re.escape(char) for char in compact_name)
-    boundary_pattern = rf"(?<![a-z0-9\u4e00-\u9fff]){dataset_pattern}(?![a-z0-9\u4e00-\u9fff])"
-    return bool(re.search(boundary_pattern, lowered, flags=re.IGNORECASE))
-
-
-def _text_matches_dataset_name(text: str, dataset_name: str) -> bool:
-    compact_name = _dataset_compact_text(dataset_name)
-    spaced_name = _dataset_spaced_text(dataset_name)
-    if len(compact_name) < 3:
-        return False
-    if _dataset_compact_name_occurs_with_boundary(text, dataset_name):
-        return True
-    spaced_text = _dataset_spaced_text(text)
-    return bool(spaced_name and len(spaced_name) >= 3 and re.search(rf"(?<![a-z0-9\u4e00-\u9fff]){re.escape(spaced_name)}(?![a-z0-9\u4e00-\u9fff])", spaced_text, flags=re.IGNORECASE))
-
-
-def _dataset_alignment_rows(plan: dict[str, Any]) -> list[dict[str, Any]]:
-    rows = plan.get("paper_config_alignment")
-    if not isinstance(rows, list):
-        return []
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        if not isinstance(row, dict) or not _alignment_row_supports_approval(row):
-            continue
-        item_text = " ".join(str(row.get(key) or "") for key in ["paper_item", "paper_field", "claim", "setting", "category"]).lower()
-        if any(token in item_text for token in ["dataset", "data", "corpus", "benchmark", "数据集", "数据"]):
-            out.append(row)
-    return out
-
-
 def _successful_dataset_receipts(receipts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for receipt in receipts:
@@ -3556,118 +2164,6 @@ def _successful_dataset_receipts(receipts: list[dict[str, Any]]) -> list[dict[st
         if _phase_indicates_dataset(phase):
             rows.append(receipt)
     return rows
-
-
-def _optional_successful_dataset_receipts(receipts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for receipt in receipts:
-        phase = str(receipt.get("phase") or "").strip()
-        if not phase or int(receipt.get("return_code") or 0) != 0:
-            continue
-        if receipt.get("required") is False and _phase_indicates_dataset(phase):
-            rows.append(receipt)
-    return rows
-
-
-def _receipt_dataset_text(receipt: dict[str, Any]) -> str:
-    return "\n".join([str(receipt.get(key) or "") for key in ["phase", "command"]] + [_receipt_output_text(receipt)])
-
-
-def _dataset_binding_evidence(plan: dict[str, Any], receipts: list[dict[str, Any]], dataset_names: list[str]) -> list[dict[str, str]]:
-    evidence: list[dict[str, str]] = []
-    for row in _dataset_alignment_rows(plan):
-        text = _alignment_row_text(row)
-        for name in dataset_names:
-            if _text_matches_dataset_name(text, name):
-                evidence.append({"source": "paper_config_alignment", "dataset": name, "excerpt": text[:300]})
-                break
-    for receipt in _successful_dataset_receipts(receipts):
-        text = _receipt_dataset_text(receipt)
-        for name in dataset_names:
-            if _text_matches_dataset_name(text, name):
-                evidence.append({"source": f"receipt:{receipt.get('phase')}", "dataset": name, "excerpt": text[:300]})
-                break
-    return evidence[:12]
-
-
-def _dataset_receipt_binding_evidence(plan: dict[str, Any], receipts: list[dict[str, Any]], dataset_names: list[str]) -> list[dict[str, str]]:
-    return [row for row in _dataset_binding_evidence(plan, receipts, dataset_names) if str(row.get("source") or "").startswith("receipt:")]
-
-
-def _dataset_receipt_names(receipts: list[dict[str, Any]], dataset_names: list[str]) -> set[str]:
-    matched: set[str] = set()
-    for receipt in _successful_dataset_receipts(receipts):
-        text = _receipt_dataset_text(receipt)
-        for name in dataset_names:
-            if _text_matches_dataset_name(text, name):
-                matched.add(name)
-    return matched
-
-
-def _dataset_receipt_artifact_bound_names(receipts: list[dict[str, Any]], dataset_names: list[str], run_dir: Path | None) -> set[str]:
-    if run_dir is None:
-        return set()
-    matched: set[str] = set()
-    for receipt in _successful_dataset_receipts(receipts):
-        if not _dataset_receipt_artifact_exists(receipt, run_dir):
-            continue
-        text = _receipt_dataset_text(receipt)
-        for name in dataset_names:
-            if _text_matches_dataset_name(text, name):
-                matched.add(name)
-    return matched
-
-
-def _dataset_synthetic_markers(plan: dict[str, Any], receipts: list[dict[str, Any]]) -> list[dict[str, str]]:
-    markers: list[dict[str, str]] = []
-    texts: list[tuple[str, str]] = [("paper_config_alignment", _alignment_row_text(row)) for row in _dataset_alignment_rows(plan)]
-    texts.extend((f"receipt:{receipt.get('phase')}", _receipt_dataset_text(receipt)) for receipt in _successful_dataset_receipts(receipts))
-    for source, text in texts:
-        lowered = text.lower()
-        for marker in SYNTHETIC_DATASET_MARKERS:
-            if marker in lowered:
-                markers.append({"source": source, "marker": marker, "excerpt": text[:300]})
-                break
-    return markers[:12]
-
-
-def _dataset_name_windows(text: str, dataset_name: str, radius: int = 120) -> list[str]:
-    lowered = str(text or "").lower()
-    variants = [str(dataset_name or "").strip().lower(), _dataset_spaced_text(dataset_name)]
-    compact_name = _dataset_compact_text(dataset_name)
-    compact_text = _dataset_compact_text(text)
-    windows: list[str] = []
-    for variant in [item for item in variants if item]:
-        start = 0
-        while True:
-            index = lowered.find(variant, start)
-            if index < 0:
-                break
-            windows.append(lowered[max(0, index - radius): index + len(variant) + radius])
-            start = index + max(1, len(variant))
-    if compact_name and compact_name in compact_text and not windows:
-        windows.append(lowered[: min(len(lowered), radius * 2)])
-    return windows
-
-
-def _dataset_negative_or_replacement_markers(plan: dict[str, Any], receipts: list[dict[str, Any]], dataset_names: list[str]) -> list[dict[str, str]]:
-    markers: list[dict[str, str]] = []
-    if not dataset_names:
-        return markers
-    texts: list[tuple[str, str]] = [("paper_config_alignment", _alignment_row_text(row)) for row in _dataset_alignment_rows(plan)]
-    texts.extend((f"receipt:{receipt.get('phase')}", _receipt_dataset_text(receipt)) for receipt in _successful_dataset_receipts(receipts))
-    for source, text in texts:
-        for dataset_name in dataset_names:
-            if not _text_matches_dataset_name(text, dataset_name):
-                continue
-            for window in _dataset_name_windows(text, dataset_name):
-                for marker in DATASET_NEGATIVE_OR_REPLACEMENT_MARKERS:
-                    if marker in window:
-                        markers.append({"source": source, "dataset": dataset_name, "marker": marker, "excerpt": text[:300]})
-                        break
-                if markers and markers[-1].get("source") == source and markers[-1].get("dataset") == dataset_name:
-                    break
-    return markers[:12]
 
 
 def _phase_tokens(phase: str) -> set[str]:
@@ -3686,121 +2182,12 @@ def _phase_indicates_dataset(phase: str) -> bool:
     return bool(has_object and has_action)
 
 
-def _successful_dataset_phases(receipts: list[dict[str, Any]]) -> list[str]:
-    phases: list[str] = []
-    for receipt in _successful_dataset_receipts(receipts):
-        phase = str(receipt.get("phase") or "").strip()
-        if phase and phase not in phases:
-            phases.append(phase)
-    return phases
-
-
-def _dataset_gate(env_plan: dict[str, Any], paper_evidence: dict[str, Any], receipts: list[dict[str, Any]]) -> tuple[bool, dict[str, Any]]:
-    paper_dataset = paper_evidence.get("dataset") if isinstance(paper_evidence.get("dataset"), list) else []
-    paper_dataset_items = [item for item in paper_dataset if str(item).strip()]
-    has_paper_dataset = bool(paper_dataset_items)
-    dataset_names = _dataset_name_candidates(paper_dataset)
-    alignment_has_dataset = _alignment_has_dataset(env_plan)
-    successful_dataset_phases = _successful_dataset_phases(receipts)
-    optional_dataset_receipts = _optional_successful_dataset_receipts(receipts)
-    receipts_have_dataset = bool(successful_dataset_phases)
-    binding_evidence = _dataset_binding_evidence(env_plan, receipts, dataset_names)
-    receipt_binding_evidence = _dataset_receipt_binding_evidence(env_plan, receipts, dataset_names)
-    synthetic_markers = _dataset_synthetic_markers(env_plan, receipts)
-    negative_or_replacement_markers = _dataset_negative_or_replacement_markers(env_plan, receipts, dataset_names)
-    dataset_name_binding_ok = bool(dataset_names and binding_evidence)
-    dataset_receipt_binding_ok = bool(dataset_names and receipt_binding_evidence)
-    no_synthetic_markers = not synthetic_markers
-    no_negative_or_replacement_markers = not negative_or_replacement_markers
-    command_phases = [str(row.get("phase") or "") for row in env_plan.get("commands", []) if isinstance(row, dict)] if isinstance(env_plan.get("commands"), list) else []
-    return bool(has_paper_dataset and dataset_name_binding_ok and dataset_receipt_binding_ok and alignment_has_dataset and receipts_have_dataset and no_synthetic_markers and no_negative_or_replacement_markers), {
-        "paper_dataset_count": len(paper_dataset_items),
-        "dataset_name_candidates": dataset_names[:12],
-        "dataset_name_binding_passed": dataset_name_binding_ok,
-        "dataset_name_binding_evidence": binding_evidence,
-        "dataset_receipt_binding_passed": dataset_receipt_binding_ok,
-        "dataset_receipt_binding_evidence": receipt_binding_evidence,
-        "synthetic_or_toy_markers": synthetic_markers,
-        "negative_or_replacement_dataset_markers": negative_or_replacement_markers,
-        "alignment_has_dataset": alignment_has_dataset,
-        "successful_dataset_phase": receipts_have_dataset,
-        "successful_dataset_phases": successful_dataset_phases,
-        "ignored_optional_dataset_phase_count": len(optional_dataset_receipts),
-        "ignored_optional_dataset_phases": [str(row.get("phase") or "") for row in optional_dataset_receipts[:8]],
-        "sample_ignored_optional_dataset_commands": [str(row.get("command") or "") for row in optional_dataset_receipts[:3]],
-        "command_phases": command_phases,
-        "accepted_phase_examples": sorted(DATASET_PHASE_EXACT | DATASET_PHASE_PHRASES)[:20],
-    }
-
-
-PAPER_CONTEXT_SOURCE_HINTS = (
-    "local_file:",
-    "local_full_text:",
-    "url:",
-    "plan.paper",
-    "plan.paper_text",
-    "plan.paper_notes",
-    "plan.training",
-    "plan.train",
-    "plan.reproduction",
-    "plan.hyperparameters",
-    "plan.expected_results",
-    "plan.results",
-    "plan.evaluation",
-)
-
-
-def _paper_context_sources(paper_evidence: dict[str, Any]) -> list[str]:
-    blocks = paper_evidence.get("text_blocks") if isinstance(paper_evidence.get("text_blocks"), list) else []
-    sources: list[str] = []
-    for row in blocks:
-        if not isinstance(row, dict):
-            continue
-        source = str(row.get("source") or "").strip()
-        text = str(row.get("text") or "").strip()
-        if source and text:
-            sources.append(source)
-    return sources
-
-
-def _paper_context_source_is_substantive(source: str) -> bool:
-    lowered = str(source or "").lower()
-    return any(hint in lowered for hint in PAPER_CONTEXT_SOURCE_HINTS)
-
-
-def _paper_context_gate(paper_evidence: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-    target_metrics = paper_evidence.get("target_metrics") if isinstance(paper_evidence.get("target_metrics"), list) else []
-    claims = paper_evidence.get("paper_claims_or_training_signals") if isinstance(paper_evidence.get("paper_claims_or_training_signals"), list) else []
-    sources = _paper_context_sources(paper_evidence)
-    substantive_sources = [source for source in sources if _paper_context_source_is_substantive(source)]
-    local_paper = paper_evidence.get("local_paper") if isinstance(paper_evidence.get("local_paper"), dict) else {}
-    url_fetch = paper_evidence.get("url_fetch") if isinstance(paper_evidence.get("url_fetch"), dict) else {}
-    local_ok = local_paper.get("status") == "passed" and bool(str(local_paper.get("text_excerpt") or "").strip())
-    url_ok = url_fetch.get("status") == "passed" and bool(str(url_fetch.get("text_excerpt") or "").strip())
-    has_metric_targets = bool([row for row in target_metrics if str(row).strip()])
-    has_claim_signals = bool([row for row in claims if str(row).strip()])
-    has_substantive_source = bool(substantive_sources or local_ok or url_ok)
-    evidence = {
-        "has_paper_context": bool(paper_evidence.get("has_paper_context")),
-        "target_metric_count": len([row for row in target_metrics if str(row).strip()]),
-        "claim_signal_count": len([row for row in claims if str(row).strip()]),
-        "text_block_count": len(sources),
-        "substantive_source_count": len(substantive_sources) + int(local_ok) + int(url_ok),
-        "sample_sources": sources[:8],
-        "substantive_sources": substantive_sources[:8],
-        "local_paper_status": local_paper.get("status", ""),
-        "url_fetch_status": url_fetch.get("status", ""),
-    }
-    return bool(has_metric_targets and has_claim_signals and has_substantive_source), evidence
-
-
 def _ensure_approval_gate_for_early_decision(decision: dict[str, Any], paper_evidence: dict[str, Any]) -> dict[str, Any]:
     if _approval_gate_from_decision(decision):
         return decision
     verdict = decision.get("verdict") if isinstance(decision.get("verdict"), dict) else {}
     repo_info = decision.get("repo") if isinstance(decision.get("repo"), dict) else {}
     repo_ok, repo_gate_evidence = _repo_source_gate(repo_info)
-    paper_ok, paper_context_evidence = _paper_context_gate(paper_evidence)
     early_reason = str(verdict.get("reject_reason") or verdict.get("reason") or "尚未进入完整复现流程").strip()
     early_evidence = {
         "decision": decision.get("decision"),
@@ -3871,9 +2258,9 @@ def _ensure_approval_gate_for_early_decision(decision: dict[str, Any], paper_evi
         ),
         _approval_check(
             "paper_context",
-            paper_ok,
-            "存在可审计的论文/训练配置来源、目标指标和训练/结果信号" if paper_ok else "缺少可审计的论文/训练配置来源、目标指标或训练/结果信号",
-            paper_context_evidence,
+            False,
+            "早停路径尚未由 Claude audit 完成论文上下文裁决",
+            early_evidence,
         ),
         _approval_check(
             "reproduce_full",
@@ -3916,64 +2303,6 @@ def _ensure_approval_gate_for_early_decision(decision: dict[str, Any], paper_evi
             verdict.setdefault("repair_plan", []).append("后端降级：最终裁决缺少完整 approval_gate，已补齐早停门槛并禁止进入下一模块。")
             decision["verdict"] = verdict
     return decision
-
-
-def _dataset_requirement_items(env_plan: dict[str, Any] | None, normalized_plan: dict[str, Any] | None = None) -> list[Any]:
-    items: list[Any] = []
-    for source in [env_plan, normalized_plan]:
-        if not isinstance(source, dict):
-            continue
-        for key in ["dataset", "datasets", "data", "benchmark", "benchmarks", "paper_dataset", "training_data", "evaluation_data", "test_data"]:
-            if key in source:
-                items.append(source.get(key))
-        for key in ["selected_plan", "selected_idea", "data_protocol", "environment_requirements", "initial_experiment"]:
-            value = source.get(key)
-            if value not in (None, "", [], {}):
-                items.append(value)
-    return items
-
-
-def _dataset_requirement_names(env_plan: dict[str, Any] | None, normalized_plan: dict[str, Any] | None = None) -> list[str]:
-    names: list[str] = []
-    for item in _dataset_requirement_items(env_plan, normalized_plan):
-        for text in _dataset_candidate_texts(item):
-            compact = _dataset_compact_text(text)
-            if len(compact) < 3 or compact in GENERIC_DATASET_NAMES:
-                continue
-            if text not in names:
-                names.append(text)
-    return names
-
-
-def _dataset_runtime_gate(
-    receipts: list[dict[str, Any]],
-    env_plan: dict[str, Any] | None = None,
-    run_dir: Path | None = None,
-    normalized_plan: dict[str, Any] | None = None,
-) -> tuple[bool, dict[str, Any]]:
-    dataset_receipts = _successful_dataset_receipts(receipts)
-    env_plan = env_plan if isinstance(env_plan, dict) else {}
-    dataset_names = _dataset_requirement_names(env_plan, normalized_plan)
-    synthetic_markers = _dataset_synthetic_markers(env_plan, receipts)
-    receipt_bound_names = _dataset_receipt_names(receipts, dataset_names)
-    artifact_bound_names = _dataset_receipt_artifact_bound_names(receipts, dataset_names, run_dir)
-    missing_receipt_names = [name for name in dataset_names if name not in receipt_bound_names]
-    missing_artifact_names = [name for name in dataset_names if run_dir is not None and name not in artifact_bound_names]
-    required_names_ok = bool(dataset_names) and not missing_receipt_names and (run_dir is None or not missing_artifact_names)
-    if not dataset_names:
-        required_names_ok = bool(dataset_receipts)
-    passed = bool(dataset_receipts and required_names_ok and not synthetic_markers)
-    return passed, {
-        "successful_dataset_phases": [str(row.get("phase") or "") for row in dataset_receipts[:8]],
-        "sample_dataset_receipts": [_compact_receipt(row) for row in dataset_receipts[:5]],
-        "dataset_name_candidates": dataset_names[:20],
-        "dataset_receipt_bound_names": sorted(receipt_bound_names),
-        "dataset_artifact_bound_names": sorted(artifact_bound_names),
-        "missing_dataset_receipt_names": missing_receipt_names[:20],
-        "missing_dataset_artifact_names": missing_artifact_names[:20],
-        "synthetic_or_toy_markers": synthetic_markers,
-        "required_dataset_names_passed": required_names_ok,
-    }
 
 
 def _runtime_smoke_gate(receipts: list[dict[str, Any]]) -> tuple[bool, dict[str, Any]]:
@@ -4141,7 +2470,6 @@ def build_environment_handoff_gate(
     repo_info: dict[str, Any],
     env_plan: dict[str, Any] | None = None,
     run_dir: Path | None = None,
-    machine: dict[str, Any] | None = None,
     workspace_audit: dict[str, Any] | None = None,
     normalized_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -4152,7 +2480,6 @@ def build_environment_handoff_gate(
     }
     env_plan = env_plan if isinstance(env_plan, dict) else {}
     runtime_ok, runtime_evidence = _runtime_smoke_gate(receipts)
-    dataset_runtime_ok, dataset_runtime_evidence = _dataset_runtime_gate(receipts, env_plan, run_dir, normalized_plan)
     checks: list[dict[str, Any]] = []
     for name in ENVIRONMENT_HANDOFF_REQUIRED_CHECKS:
         if name == "repository_source":
@@ -4178,25 +2505,12 @@ def build_environment_handoff_gate(
                 checks.append({**source, "name": name} if isinstance(source, dict) else _approval_check(name, False, f"缺少 approval gate 检查项：{name}"))
             continue
         if name == "machine_fit":
-            if env_plan and isinstance(machine, dict):
-                machine_ok, machine_evidence = _machine_fit_gate(env_plan, machine)
-                checks.append(_approval_check(
-                    "machine_fit",
-                    machine_ok,
-                    "已证明论文运行要求适合本机或已有合理本机适配" if machine_ok else "缺少本机资源适配评估或硬件/算力对齐证据",
-                    machine_evidence,
-                ))
-            else:
-                source = approval_checks.get(name)
-                checks.append({**source, "name": name} if isinstance(source, dict) else _approval_check(name, False, f"缺少 approval gate 检查项：{name}"))
+            source = approval_checks.get(name)
+            checks.append({**source, "name": name} if isinstance(source, dict) else _approval_check(name, False, f"缺少 approval gate 检查项：{name}"))
             continue
         if name == "dataset_runtime":
-            checks.append(_approval_check(
-                "dataset_runtime",
-                dataset_runtime_ok,
-                "真实计划数据准备阶段已逐项命中并存在 run-local 产物" if dataset_runtime_ok else "缺少计划要求数据集的成功数据准备回执、run-local 产物，或数据阶段含 synthetic/demo 标记",
-                dataset_runtime_evidence,
-            ))
+            source = approval_checks.get("dataset_evidence")
+            checks.append({**source, "name": "dataset_runtime"} if isinstance(source, dict) else _approval_check("dataset_runtime", False, "Claude audit 缺少 dataset_evidence 检查"))
             continue
         if name == "required_commands":
             commands_ok, commands_evidence = _required_environment_commands_gate(receipts)
@@ -4216,13 +2530,8 @@ def build_environment_handoff_gate(
             ))
             continue
         if name == "paper_config_alignment":
-            alignment_ok, alignment_evidence = environment_handoff_alignment_passed(env_plan) if env_plan else (False, {"issues": ["缺少 environment plan，无法检查 paper_config_alignment"]})
-            checks.append(_approval_check(
-                "paper_config_alignment",
-                alignment_ok,
-                "Environment 交接配置对齐表通过；论文级完整配置仍留给 experimenting/evaluation" if alignment_ok else "Environment 交接配置对齐表缺失或存在关键问题",
-                alignment_evidence,
-            ))
+            source = approval_checks.get(name)
+            checks.append({**source, "name": name} if isinstance(source, dict) else _approval_check(name, False, f"缺少 approval gate 检查项：{name}"))
             continue
         if name == "workspace_write_audit":
             checks.append(_handoff_workspace_audit_gate(workspace_audit, approval_checks))
@@ -4281,25 +2590,25 @@ def build_environment_handoff(
     receipts: list[dict[str, Any]],
     approval_gate: dict[str, Any],
     metric_evidence: list[dict[str, Any]],
-    machine: dict[str, Any] | None = None,
     workspace_audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     env_name = str(env_plan.get("env_name") or "").strip()
     handoff_gate = build_environment_handoff_gate(
         approval_gate, receipts, repo_info,
-        env_plan=env_plan, run_dir=run_dir, machine=machine, workspace_audit=workspace_audit, normalized_plan=normalized_plan,
+        env_plan=env_plan, run_dir=run_dir, workspace_audit=workspace_audit, normalized_plan=normalized_plan,
     )
     conda_prefix = str(env_prefix_for(run_dir, env_name)) if env_name else ""
     full_commands = [row for row in env_plan.get("commands", []) if isinstance(row, dict) and str(row.get("phase") or "").strip().lower() == "reproduce_full"] if isinstance(env_plan.get("commands"), list) else []
     smoke_receipts = [row for row in _required_successful_receipts(receipts) if "smoke" in str(row.get("phase") or "").lower() or "loader" in str(row.get("phase") or "").lower()]
     dataset_receipts = _successful_dataset_receipts(receipts)
+    ready = bool(handoff_gate.get("passed"))
     return {
         "schema_version": "environment.handoff.v1",
         "policy_version": DECISION_POLICY_VERSION,
         "run_id": run_id,
         "run_dir": str(run_dir),
-        "ready_for_experimenting": bool(handoff_gate.get("passed")),
-        "status": "ready_for_experimenting" if handoff_gate.get("passed") else "blocked_environment_handoff",
+        "ready_for_experimenting": ready,
+        "status": "ready_for_experimenting" if ready else "blocked_environment_handoff",
         "repo": {
             "repo_url": repo_info.get("repo_url", ""),
             "repo_path": repo_info.get("repo_path", ""),
@@ -4326,7 +2635,11 @@ def build_environment_handoff(
         "reference_command_templates": full_commands[:3],
         "pending_downstream_metrics": _pending_downstream_metrics(env_plan, metric_evidence),
         "handoff_gate": handoff_gate,
-        "note": "environment 已验证真实仓库、run-local Conda、数据准备和 loader/model smoke；论文级指标仍需 experimenting/evaluation 读取本 handoff 后运行并记录。",
+        "note": (
+            "Environment 已验证真实仓库、run-local Conda、数据准备和 loader/model smoke；论文级指标由 Experimenting 基于本 handoff 继续验证。"
+            if ready
+            else "Environment handoff 尚未通过；必须按 handoff_gate.missing 继续修复，Experimenting 不得使用本次 handoff。"
+        ),
     }
 
 
@@ -4403,7 +2716,6 @@ def attach_environment_handoff(
         run_id=str(decision.get("run_id") or ""), run_dir=run_dir,
         normalized_plan=normalized_plan, repo_info=repo_info, env_plan=env_plan,
         receipts=receipts, approval_gate=approval_gate, metric_evidence=metric_evidence,
-        machine=decision.get("machine_summary") if isinstance(decision.get("machine_summary"), dict) else {},
         workspace_audit=decision.get("workspace_write_audit") if isinstance(decision.get("workspace_write_audit"), dict) else None,
     )
     decision["environment_handoff"] = handoff
@@ -4420,27 +2732,20 @@ def attach_environment_handoff(
 def build_approval_gate(
     verdict: dict[str, Any],
     receipts: list[dict[str, Any]],
-    paper_evidence: dict[str, Any],
     env_plan: dict[str, Any],
     repo_info: dict[str, Any],
-    repo_evidence: dict[str, Any],
-    machine: dict[str, Any],
     run_dir: Path,
     criteria_passed: bool,
     metric_evidence: list[dict[str, Any]],
     verdict_metric_ok: bool,
     verdict_metric_issues: list[str],
-    paper_alignment_ok: bool,
-    paper_alignment_issues: list[str],
 ) -> dict[str, Any]:
     required_failures = [row for row in receipts if row.get("return_code") != 0 and row.get("required") is not False]
     required_ok = bool(receipts and not required_failures)
     claims_ok = bool(verdict.get("paper_claims_verified") is True and verdict.get("reproduction_success") is True)
     criteria_schema_issues = success_criteria_issues(env_plan.get("success_criteria"))
     criteria_schema_ok = not criteria_schema_issues
-    criteria_paper_ok, criteria_paper_evidence = _success_criteria_paper_binding_gate(env_plan, paper_evidence)
     metric_ok = bool(criteria_passed or verdict_metric_ok)
-    paper_ok, paper_context_evidence = _paper_context_gate(paper_evidence)
     full_receipts = [
         row for row in _required_successful_receipts(receipts)
         if str(row.get("phase") or "").strip().lower() == "reproduce_full"
@@ -4451,10 +2756,7 @@ def build_approval_gate(
     ]
     full_ok = bool(full_receipts)
     repo_ok, repo_gate_evidence = _repo_source_gate(repo_info)
-    repo_doc_ok, repo_doc_evidence = _repo_evidence_gate(repo_evidence)
     conda_ok, conda_gate_evidence = _conda_environment_gate(env_plan, receipts, run_dir)
-    machine_ok, machine_gate_evidence = _machine_fit_gate(env_plan, machine)
-    dataset_ok, dataset_gate_evidence = _dataset_gate(env_plan, paper_evidence, receipts)
     checks = [
         _approval_check(
             "repository_source",
@@ -4462,30 +2764,15 @@ def build_approval_gate(
             "GitHub 仓库已克隆、版本已固定并记录 head_commit" if repo_ok else "缺少可信 GitHub 仓库克隆证据，或指定 commit 未成功 checkout/匹配 HEAD",
             repo_gate_evidence,
         ),
-        _approval_check(
-            "repository_documentation",
-            repo_doc_ok,
-            "README/docs 已提供安装/依赖和训练/评估/复现运行指导" if repo_doc_ok else "缺少 README/docs 中可支撑自适应部署的安装/依赖指导或训练/评估/复现运行指导",
-            repo_doc_evidence,
-        ),
+        _audit_check(verdict, "repository_documentation", "Claude audit 缺少 repository_documentation 检查"),
         _approval_check(
             "conda_environment",
             conda_ok,
             "Conda 环境 prefix、依赖安装和导入/运行验证通过" if conda_ok else "缺少可审计的 Conda 环境部署或导入/运行验证证据",
             conda_gate_evidence,
         ),
-        _approval_check(
-            "machine_fit",
-            machine_ok,
-            "已证明论文运行要求适合本机或已有合理本机适配" if machine_ok else "缺少本机资源适配评估或硬件/算力对齐证据",
-            machine_gate_evidence,
-        ),
-        _approval_check(
-            "dataset_evidence",
-            dataset_ok,
-            "数据集证据、对齐表和数据准备回执通过" if dataset_ok else "缺少真实数据集证据、数据集对齐项或成功的数据准备阶段",
-            dataset_gate_evidence,
-        ),
+        _audit_check(verdict, "machine_fit", "Claude audit 缺少 machine_fit 检查"),
+        _audit_check(verdict, "dataset_evidence", "Claude audit 缺少 dataset_evidence 检查"),
         _approval_check(
             "required_commands",
             required_ok,
@@ -4504,12 +2791,7 @@ def build_approval_gate(
             "success_criteria 指标名、比较符、可比较目标值和来源完整" if criteria_schema_ok else "success_criteria 缺少指标名、比较符、可解析目标值或论文/README 来源",
             {"issues": criteria_schema_issues[:10], "criterion_count": len(env_plan.get("success_criteria") if isinstance(env_plan.get("success_criteria"), list) else [])},
         ),
-        _approval_check(
-            "success_criteria_paper_binding",
-            criteria_paper_ok,
-            "success_criteria 已逐项绑定到论文目标指标" if criteria_paper_ok else "success_criteria 未能逐项绑定到 paper_evidence.target_metrics 中的论文目标指标",
-            criteria_paper_evidence,
-        ),
+        _audit_check(verdict, "success_criteria_paper_binding", "Claude audit 缺少 success_criteria_paper_binding 检查"),
         _approval_check(
             "metric_evidence",
             metric_ok,
@@ -4521,12 +2803,7 @@ def build_approval_gate(
                 "claude_metric_evidence_issues": verdict_metric_issues[:10],
             },
         ),
-        _approval_check(
-            "paper_context",
-            paper_ok,
-            "存在可审计的论文/训练配置来源、目标指标和训练/结果信号" if paper_ok else "缺少可审计的论文/训练配置来源、目标指标或训练/结果信号",
-            paper_context_evidence,
-        ),
+        _audit_check(verdict, "paper_context", "Claude audit 缺少 paper_context 检查"),
         _approval_check(
             "reproduce_full",
             full_ok,
@@ -4537,12 +2814,7 @@ def build_approval_gate(
                 "ignored_optional_reproduce_full_receipts": [_compact_receipt(row) for row in optional_full_receipts[:3]],
             },
         ),
-        _approval_check(
-            "paper_config_alignment",
-            paper_alignment_ok,
-            "论文配置对齐表通过" if paper_alignment_ok else "论文配置对齐表缺失或存在关键问题",
-            paper_alignment_issues[:10],
-        ),
+        _audit_check(verdict, "paper_config_alignment", "Claude audit 缺少 paper_config_alignment 检查"),
     ]
     missing = [row["reason"] for row in checks if not row.get("passed")]
     return {
@@ -4600,149 +2872,15 @@ def command_uses_conda_prefix(tokens: list[str], env_prefix: Path) -> bool:
     return _command_uses_direct_env_executable(tokens, env_prefix)
 
 
-def _drop_deprecated_hf_download_flags(tokens: list[str]) -> list[str]:
-    return [str(token) for token in tokens if str(token) != "--resume-download"]
-
-
-def _split_inline_python_top_level_semicolons(code: str) -> list[str]:
-    parts: list[str] = []
-    last_index = 0
-    depth = 0
-    try:
-        token_iter = tokenize.generate_tokens(io.StringIO(code).readline)
-        for token in token_iter:
-            if token.type != tokenize.OP:
-                continue
-            if token.string in {"(", "[", "{"}:
-                depth += 1
-            elif token.string in {")", "]", "}"} and depth > 0:
-                depth -= 1
-            elif token.string == ";" and depth == 0:
-                segment = code[last_index:token.start[1]].strip()
-                if segment:
-                    parts.append(segment)
-                last_index = token.end[1]
-    except tokenize.TokenError:
-        return [code]
-    tail = code[last_index:].strip()
-    if tail:
-        parts.append(tail)
-    return parts or [code]
-
-
-def _split_inline_python_compound_suite(segment: str) -> tuple[str, str] | None:
-    text = str(segment or "").strip()
-    first_word = text.split(None, 1)[0].rstrip(":") if text else ""
-    if first_word not in {"for", "while", "if", "with", "elif", "else", "try", "except", "finally"}:
-        return None
-    depth = 0
-    try:
-        token_iter = tokenize.generate_tokens(io.StringIO(text).readline)
-        for token in token_iter:
-            if token.type != tokenize.OP:
-                continue
-            if token.string in {"(", "[", "{"}:
-                depth += 1
-            elif token.string in {")", "]", "}"} and depth > 0:
-                depth -= 1
-            elif token.string == ":" and depth == 0:
-                header = text[:token.end[1]].strip()
-                suite = text[token.end[1]:].strip()
-                if header and suite:
-                    return header, suite
-                return None
-    except tokenize.TokenError:
-        return None
-    return None
-
-
-def _normalize_inline_python_compound_statements(code: str) -> str:
-    text = str(code)
-    if "\n" in text or "\r" in text or ";" not in text:
-        return text
-    if not re.search(r"(?:^|;)\s*(for|while|if|with|elif|else|try|except|finally)\b", text):
-        return text
-    lines: list[str] = []
-    changed = False
-    for segment in _split_inline_python_top_level_semicolons(text):
-        compound = _split_inline_python_compound_suite(segment)
-        if not compound:
-            lines.append(segment)
-            continue
-        header, suite = compound
-        lines.append(header)
-        lines.append(f"    {suite}")
-        changed = True
-    if not changed:
-        return text
-    candidate = "\n".join(lines)
-    try:
-        compile(candidate, "<environment-inline-normalized>", "exec")
-    except SyntaxError:
-        return text
-    return candidate
-
-
-def _normalize_python_import_item(item: str) -> str:
-    text = str(item or "").strip()
-    match = re.match(r"^([A-Za-z_][A-Za-z0-9_\.]*)(\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?$", text)
-    if not match:
-        return text
-    module_name = match.group(1)
-    alias = match.group(3) or ""
-    if module_name == "dm_tree":
-        return f"tree as {alias or 'dm_tree'}"
-    if module_name == "biopython":
-        return f"Bio as {alias}" if alias else "Bio"
-    return text
-
-
-def _normalize_python_import_statement_aliases(code: str) -> str:
-    def repl(match: re.Match[str]) -> str:
-        prefix = match.group(1) or ""
-        spacing = match.group(2) or ""
-        imports = match.group(3) or ""
-        normalized = ", ".join(_normalize_python_import_item(part) for part in imports.split(","))
-        return f"{prefix}{spacing}import {normalized}"
-
-    return re.sub(r"(^|[;\n])(\s*)import\s+([^;\n]+)", repl, str(code))
-
-
-def _normalize_python_inline_code_imports(code: str) -> str:
-    updated = str(code)
-    updated = re.sub(r"\bfrom\s+dm_tree\b", "from tree", updated)
-    updated = re.sub(r"\bfrom\s+biopython\b", "from Bio", updated)
-    updated = _normalize_python_import_statement_aliases(updated)
-    updated = _normalize_inline_python_compound_statements(updated)
-    return updated
-
-
-def normalize_python_inline_imports(tokens: list[str]) -> list[str]:
-    if not tokens:
-        return tokens
-    normalized = [str(token) for token in tokens]
-    if Path(str(normalized[0] or "")).name not in {"python", "python3"}:
-        return normalized
-    for index, token in enumerate(normalized[:-1]):
-        if token != "-c":
-            continue
-        normalized[index + 1] = _normalize_python_inline_code_imports(normalized[index + 1])
-        break
-    return normalized
-
-
 def _direct_env_entrypoint_command(tokens: list[str], env_prefix: Path) -> list[str]:
     if not tokens:
         return []
-    tokens = _drop_deprecated_hf_download_flags(tokens)
     head = Path(str(tokens[0] or "")).name
     if head in {"pip", "pip3"}:
         return [str(env_prefix / "bin" / "python"), "-m", "pip", *tokens[1:]]
-    if head == "huggingface-cli" and len(tokens) > 1 and str(tokens[1]) == "download":
-        return [str(env_prefix / "bin" / "hf"), *tokens[1:]]
     if head in RUN_ENV_ENTRYPOINTS:
         executable = "python" if head in {"python", "python3"} else head
-        return normalize_python_inline_imports([str(env_prefix / "bin" / executable), *tokens[1:]])
+        return [str(env_prefix / "bin" / executable), *tokens[1:]]
     return []
 
 
@@ -4840,20 +2978,13 @@ def rewrite_command(command: Any, conda_exe: str, env_name: str, env_prefix: Pat
         if inner_index is not None and env_name:
             direct = _direct_env_entrypoint_command(tokens[inner_index:], env_prefix)
             if direct:
-                return normalize_python_inline_imports(direct)
-        return normalize_python_inline_imports(tokens)
+                return direct
+        return tokens
     if env_name:
         direct = _direct_env_entrypoint_command(tokens, env_prefix)
         if direct:
-            return normalize_python_inline_imports(direct)
-    return normalize_python_inline_imports(tokens)
-
-
-def _migrate_deprecated_huggingface_cli_script(text: str) -> str:
-    updated = re.sub(r"\bhuggingface-cli\s+download\b", "hf download", text)
-    updated = re.sub(r"(?m)^[ \t]*--resume-download[ \t]*\\?[ \t]*(?:#.*)?\n", "", updated)
-    updated = re.sub(r"[ \t]+--resume-download(?=[ \t\n]|$)", "", updated)
-    return updated
+            return direct
+    return tokens
 
 
 def _command_shell_script_tokens(tokens: list[str]) -> list[str]:
@@ -4897,41 +3028,20 @@ def missing_shell_script_issue(tokens: list[str], cwd: Path, run_dir: Path) -> s
         return f"shell 脚本不存在：{script_path}；环境计划不能引用未实际生成的辅助脚本，请直接使用 JSON 命令或仓库中已存在的脚本"
     return ""
 
-
-def normalize_generated_script_commands_for_command(tokens: list[str], cwd: Path, run_dir: Path) -> list[dict[str, str]]:
-    migrations: list[dict[str, str]] = []
-    for token in _command_shell_script_tokens(tokens):
-        script_path = _resolve_run_script_path(token, cwd, run_dir)
-        if script_path is None or not script_path.is_file():
-            continue
-        try:
-            before = script_path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            continue
-        after = _migrate_deprecated_huggingface_cli_script(before)
-        if after == before:
-            continue
-        script_path.write_text(after, encoding="utf-8")
-        migrations.append({
-            "path": str(script_path),
-            "migration": "huggingface-cli download -> hf download; removed --resume-download",
-        })
-    return migrations
-
-
-
-
 def command_required(row: dict[str, Any]) -> bool:
     return row.get("required") is not False
 
 
-def validate_environment_plan(plan: dict[str, Any], require_full_reproduction: bool, repo_path: Path | None = None, run_dir: Path | None = None, machine: dict[str, Any] | None = None, paper_evidence: dict[str, Any] | None = None) -> list[str]:
+def validate_environment_plan(plan: dict[str, Any], require_full_reproduction: bool, repo_path: Path | None = None, run_dir: Path | None = None) -> list[str]:
     issues: list[str] = []
     status = str(plan.get("status") or "").strip()
-    if status not in {"ready_to_execute", "ready", "execute", "approved"}:
-        issues.append(f"环境计划 status 不是 ready_to_execute/ready/execute/approved：{status or 'missing'}")
-    if not str(plan.get("env_name") or "").strip():
+    if status != "ready_to_execute":
+        issues.append(f"环境计划 status 必须是 ready_to_execute：{status or 'missing'}")
+    env_name = str(plan.get("env_name") or "").strip()
+    if not env_name:
         issues.append("环境计划缺少 env_name")
+    elif not re.fullmatch(r"[A-Za-z0-9_.-]+", env_name):
+        issues.append("环境计划 env_name 只能包含字母、数字、点、下划线和连字符")
     commands = plan.get("commands")
     if not isinstance(commands, list) or not commands:
         issues.append("环境计划缺少 commands 数组")
@@ -5006,12 +3116,6 @@ def validate_environment_plan(plan: dict[str, Any], require_full_reproduction: b
     criteria = plan.get("success_criteria")
     criteria_schema_issues = success_criteria_issues(criteria)
     issues.extend(criteria_schema_issues)
-    if require_full_reproduction and paper_evidence is not None and not criteria_schema_issues:
-        criteria_paper_ok, criteria_paper_evidence = _success_criteria_paper_binding_gate(plan, paper_evidence)
-        if not criteria_paper_ok:
-            binding_issues = [str(item) for item in criteria_paper_evidence.get("issues", []) if str(item).strip()]
-            suffix = "；" + "；".join(binding_issues[:5]) if binding_issues else ""
-            issues.append("success_criteria 未能逐项绑定到 paper_evidence.target_metrics 中的论文/plan 目标指标；不能执行完整复现计划" + suffix)
     if not conda_setup_phase_present:
         if optional_conda_setup_phases:
             issues.append("环境计划只有 required=false 的 Conda 环境创建/安装/依赖阶段；支撑批准的 Conda setup 必须是必需命令：" + ", ".join(optional_conda_setup_phases[:5]))
@@ -5032,11 +3136,6 @@ def validate_environment_plan(plan: dict[str, Any], require_full_reproduction: b
         issues.append("默认完整复现模式要求 commands 包含 phase=reproduce_full")
     if require_full_reproduction and "reproduce_full" in phases_lower and not reproduce_full_required:
         issues.append("默认完整复现模式要求 phase=reproduce_full 的命令必须是 required=true")
-    issues.extend(machine_assessment_issues(plan, machine))
-    if require_full_reproduction:
-        alignment_ok, alignment_issues = paper_config_alignment_passed(plan)
-        if not alignment_ok:
-            issues.extend(alignment_issues)
     return issues
 
 
@@ -5118,322 +3217,7 @@ def command_rows(plan: dict[str, Any], include_full: bool, default_timeout: int 
 
 
 
-def deterministic_rigidssl_environment_plan(run_dir: Path, repo_path: Path, paper_evidence: dict[str, Any] | None = None) -> dict[str, Any]:
-    data_dir = run_dir / "data"
-    return {
-        "status": "ready_to_execute",
-        "env_name": "rigidssl_protein",
-        "source": "backend_deterministic_rigidssl_plan",
-        "commands": [
-            {"phase": "conda_create", "command": ["conda", "create", "-y", "-p", str(run_dir / "envs" / "rigidssl_protein"), "python=3.11", "pip"], "cwd": "repo", "timeout_sec": 1800, "required": True},
-            {"phase": "conda_install_pytorch", "command": ["python", "-m", "pip", "install", "torch", "torchvision", "torchaudio"], "cwd": "repo", "timeout_sec": 1800, "required": True},
-            {"phase": "conda_install_pyg", "command": ["python", "-m", "pip", "install", "torch-geometric", "torch-scatter", "torch-sparse", "torch-cluster"], "cwd": "repo", "timeout_sec": 1800, "required": True},
-            {"phase": "pip_install", "command": ["python", "-m", "pip", "install", "atom3d", "biopython", "mdtraj", "ml-collections", "dm-tree", "einops", "huggingface_hub[cli]"], "cwd": "repo", "timeout_sec": 1800, "required": True},
-            {"phase": "dataset", "command": ["hf", "download", "tonynzh/RigidSSL", "--repo-type", "dataset", "--local-dir", str(data_dir)], "cwd": "run", "timeout_sec": 2400, "required": True},
-            {"phase": "dataset", "command": ["tar", "-xzf", str(data_dir / "RigidSSL_Perturb_data.tar.gz"), "-C", str(data_dir)], "cwd": "run", "timeout_sec": 2400, "required": True},
-            {"phase": "dataset", "command": ["tar", "-xzf", str(data_dir / "RigidSSL_MD_data.tar.gz"), "-C", str(data_dir)], "cwd": "run", "timeout_sec": 2400, "required": True},
-            {"phase": "checkpoint", "command": ["hf", "download", "tonynzh/RigidSSL", "--local-dir", str(run_dir / "checkpoints")], "cwd": "run", "timeout_sec": 900, "required": True},
-            {"phase": "verify", "command": ["python", "-c", "import torch; import torch_geometric; import torch_scatter, torch_sparse, torch_cluster; import atom3d; import Bio; import mdtraj; import ml_collections; import tree as dm_tree; import einops; print('PyTorch', torch.__version__, 'CUDA', torch.version.cuda, 'PyG', torch_geometric.__version__); assert torch.cuda.is_available(), 'CUDA not available'"], "cwd": "repo", "timeout_sec": 300, "required": True},
-            {"phase": "verify_model", "command": ["python", "-c", _rigidssl_model_probe_code(repo_path)], "cwd": "repo", "timeout_sec": 300, "required": True},
-            {"phase": "reproduce_smoke", "command": ["python", "-c", _rigidssl_loader_probe_code(repo_path, run_dir)], "cwd": "repo", "timeout_sec": 600, "required": True},
-            {"phase": "reproduce_full", "command": ["python", "RigidSSL_Perturb.py", "--dataset_portion", "full", "--epochs", "10", "--input_data_dir", str(data_dir / "RigidSSL_Perturb_data"), "--output_model_dir", str(run_dir / "output" / "perturb"), "--seed", "42"], "cwd": str(repo_path / "examples"), "timeout_sec": 86400, "required": True},
-        ],
-        "success_criteria": [
-            {"name": "designability", "metric": "designability", "operator": ">=", "op": ">=", "value": 0.758, "target": 0.758, "source": "paper Table 1: FoldFlow-2+RigidSSL-Perturb designability = 0.758", "evidence_source": "paper_evidence.target_metrics"},
-            {"name": "scRMSD", "metric": "scRMSD", "operator": "<", "op": "<", "value": 2.0, "target": 2.0, "source": "paper/plan designability threshold scRMSD < 2.0 Angstrom", "evidence_source": "paper_evidence.target_metrics"},
-            {"name": "pLDDT", "metric": "pLDDT", "operator": ">", "op": ">", "value": 0.8, "target": 0.8, "source": "plan target pLDDT > 0.8", "evidence_source": "paper_evidence.target_metrics"},
-            {"name": "TM_score", "metric": "TM_score", "operator": "<", "op": "<", "value": 0.7, "target": 0.7, "source": "plan diversity threshold TM-score < 0.7", "evidence_source": "paper_evidence.target_metrics"},
-        ],
-        "machine_assessment": {
-            "status": "suitable",
-            "fit_for_local_machine": True,
-            "paper_hardware_or_runtime_requirement": "RigidSSL README provides single-machine training scripts and does not require a special cluster; GPU/CUDA is required for practical PyTorch/PyG training.",
-            "local_machine_summary": "Backend runtime_probe/nvidia-smi detects NVIDIA GeForce RTX 5090 CUDA GPU with about 32 GB VRAM; dependency policy uses CUDA 12.8 PyTorch/PyG wheels for Blackwell.",
-            "adaptation_actions": [
-                "Use Python 3.11 and CUDA 12.8 PyTorch/PyG wheels for RTX 5090 compatibility.",
-                "Run smoke as loader/model single-batch probe; keep full reproduction as the required reproduce_full command outside skip-full mode.",
-                "Use run-local PYTHONPATH and TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 for RigidSSL legacy PyG dataset pickles.",
-            ],
-            "evidence": ["machine_profile.json", "runtime_probe", "nvidia-smi", "GPU CUDA VRAM", "repo README", "backend dependency policy"],
-        },
-        "paper_config_alignment": [
-            {"paper_item": "designability metric", "paper_value": "Table 1 FoldFlow-2+RigidSSL-Perturb designability 0.758", "implementation_choice": "success_criteria designability >= 0.758; full metric evidence must come from reproduce_full/evaluation logs", "command_phase": "reproduce_full", "evidence_source": "paper_evidence.target_metrics", "match_status": "matched", "critical": True},
-            {"paper_item": "scRMSD designability threshold", "paper_value": "scRMSD < 2.0 Angstrom", "implementation_choice": "success_criteria scRMSD < 2.0", "command_phase": "reproduce_full", "evidence_source": "paper Table 1 / selected plan target_metrics", "match_status": "matched", "critical": True},
-            {"paper_item": "pLDDT confidence threshold", "paper_value": "pLDDT > 0.8", "implementation_choice": "success_criteria pLDDT > 0.8", "command_phase": "reproduce_full", "evidence_source": "selected plan target_metrics", "match_status": "matched", "critical": True},
-            {"paper_item": "diversity TM-score threshold", "paper_value": "TM-score < 0.7", "implementation_choice": "success_criteria TM_score < 0.7", "command_phase": "reproduce_full", "evidence_source": "selected plan target_metrics", "match_status": "matched", "critical": True},
-            {"paper_item": "dataset", "paper_value": "RigidSSL processed Perturb and MD datasets from tonynzh/RigidSSL", "implementation_choice": "dataset phases download tonynzh/RigidSSL from HuggingFace and extract RigidSSL_Perturb_data.tar.gz and RigidSSL_MD_data.tar.gz", "command_phase": "dataset", "evidence_source": "RigidSSL README Data section", "match_status": "matched", "critical": True},
-            {"paper_item": "epochs", "paper_value": "RigidSSL README official training script uses config default epochs=10", "implementation_choice": "reproduce_full passes --epochs 10 to examples/RigidSSL_Perturb.py", "command_phase": "reproduce_full", "evidence_source": "examples/config.py", "match_status": "matched", "critical": True},
-            {"paper_item": "batch_size", "paper_value": "examples/config.py default batch_size=64", "implementation_choice": "reproduce_full uses official default batch_size=64; smoke probe adapts to batch_size=1 only for bounded loader validation", "command_phase": "reproduce_full", "evidence_source": "examples/config.py", "match_status": "matched", "critical": True},
-            {"paper_item": "learning_rate", "paper_value": "examples/config.py default lr=1e-4", "implementation_choice": "reproduce_full uses official default lr=1e-4", "command_phase": "reproduce_full", "evidence_source": "examples/config.py", "match_status": "matched", "critical": True},
-            {"paper_item": "optimizer/scheduler", "paper_value": "Adam optimizer and CosineAnnealingLR scheduler defaults", "implementation_choice": "reproduce_full uses official RigidSSL_Perturb.py optimizer/scheduler defaults", "command_phase": "reproduce_full", "evidence_source": "examples/config.py and RigidSSL_Perturb.py", "match_status": "matched", "critical": True},
-            {"paper_item": "seed", "paper_value": "default seed 42", "implementation_choice": "reproduce_full passes --seed 42", "command_phase": "reproduce_full", "evidence_source": "examples/config.py", "match_status": "matched", "critical": True},
-            {"paper_item": "checkpoint/pretrained", "paper_value": "RigidSSL pretrained checkpoints available on HuggingFace", "implementation_choice": "checkpoint phase downloads tonynzh/RigidSSL checkpoint artifacts into run-local checkpoints", "command_phase": "checkpoint", "evidence_source": "RigidSSL README Training section", "match_status": "matched", "critical": True},
-            {"paper_item": "hardware/precision", "paper_value": "GPU/CUDA PyTorch training; README has no special precision requirement", "implementation_choice": "Use detected NVIDIA GeForce RTX 5090 CUDA GPU with about 32 GB VRAM; dependency policy normalizes to torch/torchvision/torchaudio cu128 and PyG cu128 wheels", "command_phase": "verify", "evidence_source": "machine_profile.json runtime_probe nvidia-smi", "match_status": "adapted_for_machine", "critical": True, "adaptation_reason": "RTX 5090/Blackwell requires current CUDA 12.8 wheels rather than old conda CUDA builds."},
-        ],
-    }
-
-def _rigidssl_model_probe_code(repo_path: Path) -> str:
-    repo = str(repo_path.expanduser().resolve())
-    examples = str((repo_path / "examples").expanduser().resolve())
-    return (
-        "import sys; "
-        f"sys.path[:0] = [{examples!r}, {repo!r}]; "
-        "from RigidSSL_Perturb import model_setup; "
-        "model = model_setup(); "
-        "print('RigidSSL VelocityNetwork parameters', sum(p.numel() for p in model.parameters()))"
-    )
-
-
-def _rigidssl_full_reproduction_code(repo_path: Path, run_dir: Path, command: list[str]) -> str:
-    repo = str(repo_path.expanduser().resolve())
-    examples = str((repo_path / "examples").expanduser().resolve())
-    script = str((repo_path / "examples" / "RigidSSL_Perturb.py").expanduser().resolve())
-    try:
-        script_index = next(index for index, token in enumerate(command) if Path(str(token)).name == "RigidSSL_Perturb.py")
-    except StopIteration:
-        script_index = 0
-    script_args = [str(token) for token in command[script_index + 1:]]
-    lines = [
-        "import os, runpy, sys",
-        f"sys.path[:0] = [{examples!r}, {repo!r}]",
-        "os.environ.setdefault('TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD', '1')",
-        "import torch_geometric.loader as _pyg_loader",
-        "_OriginalDataLoader = _pyg_loader.DataLoader",
-        "def _single_worker_dataloader(*loader_args, **loader_kwargs):",
-        "    loader_kwargs['num_workers'] = 0",
-        "    loader_kwargs['pin_memory'] = False",
-        "    loader_kwargs.pop('persistent_workers', None)",
-        "    return _OriginalDataLoader(*loader_args, **loader_kwargs)",
-        "_pyg_loader.DataLoader = _single_worker_dataloader",
-        f"sys.argv = [{script!r}] + {script_args!r}",
-        f"runpy.run_path({script!r}, run_name='__main__')",
-    ]
-    return "\n".join(lines)
-
-
-def _rigidssl_loader_probe_code(repo_path: Path, run_dir: Path) -> str:
-    repo = str(repo_path.expanduser().resolve())
-    examples = str((repo_path / "examples").expanduser().resolve())
-    data_dir = str((run_dir / "data" / "RigidSSL_Perturb_data").expanduser().resolve())
-    lines = [
-        "import os, sys",
-        f"sys.path[:0] = [{examples!r}, {repo!r}]",
-        "os.environ.setdefault('TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD', '1')",
-        "from config import args",
-        "args.batch_size = 1",
-        "args.train_number = 1",
-        "args.dataset_portion = 'full'",
-        "import RigidSSL_Perturb as rigidssl_perturb",
-        "from torch_geometric.loader import DataLoader",
-        "def _single_worker_dataloader(*loader_args, **loader_kwargs):",
-        "    loader_kwargs['num_workers'] = 0",
-        "    loader_kwargs['pin_memory'] = False",
-        "    loader_kwargs.pop('persistent_workers', None)",
-        "    return DataLoader(*loader_args, **loader_kwargs)",
-        "rigidssl_perturb.DataLoaderClass = _single_worker_dataloader",
-        "rigidssl_perturb.dataloader_kwargs = {}",
-        f"loader = rigidssl_perturb.load_dataset({data_dir!r}, '1', args)",
-        "batch = next(iter(loader))",
-        "model = rigidssl_perturb.model_setup()",
-        "print('RigidSSL loader probe batch_graphs', getattr(batch, 'num_graphs', 'unknown'), 'model_params', sum(p.numel() for p in model.parameters()))",
-    ]
-    return "\n".join(lines)
-
-
-def _is_rigidssl_repo(repo_path: Path) -> bool:
-    return (repo_path / "examples" / "RigidSSL_Perturb.py").is_file() and (repo_path / "model" / "velocity_network.py").is_file()
-
-
-def _is_protdis_repo(repo_path: Path) -> bool:
-    return (repo_path / "src" / "models" / "kon.py").is_file()
-
-
-def _flatten_protdis_feature_dims(value: ast.AST) -> list[int] | None:
-    if not isinstance(value, ast.List):
-        return None
-    flattened: list[int] = []
-    changed = False
-    for element in value.elts:
-        if isinstance(element, ast.Constant) and isinstance(element.value, int):
-            flattened.append(int(element.value))
-            continue
-        if isinstance(element, ast.List) and len(element.elts) == 1:
-            inner = element.elts[0]
-            if isinstance(inner, ast.Constant) and isinstance(inner.value, int):
-                flattened.append(int(inner.value))
-                changed = True
-                continue
-        return None
-    return flattened if changed else None
-
-
-def _split_top_level_semicolon_statements(snippet: str) -> list[str]:
-    positions: list[int] = []
-    depth = 0
-    try:
-        tokens = tokenize.generate_tokens(io.StringIO(snippet).readline)
-        for token in tokens:
-            if token.type != tokenize.OP:
-                continue
-            if token.string in {"(", "[", "{"}:
-                depth += 1
-            elif token.string in {")",
-                "]",
-                "}",
-            }:
-                depth = max(0, depth - 1)
-            elif token.string == ";" and depth == 0:
-                positions.append(token.start[1])
-    except tokenize.TokenError:
-        return [snippet]
-    if not positions:
-        return [snippet]
-    parts: list[str] = []
-    start = 0
-    for position in positions:
-        part = snippet[start:position].strip()
-        if part:
-            parts.append(part)
-        start = position + 1
-    tail = snippet[start:].strip()
-    if tail:
-        parts.append(tail)
-    return parts or [snippet]
-
-
-def _repair_protdis_inline_for_snippet(snippet: str) -> tuple[str, bool]:
-    if "; for " not in str(snippet or ""):
-        return snippet, False
-    statements = _split_top_level_semicolon_statements(snippet)
-    repaired: list[str] = []
-    for index, statement in enumerate(statements):
-        stripped = statement.strip()
-        if not stripped.startswith("for ") or ":" not in stripped:
-            repaired.append(stripped)
-            continue
-        header, first_body = stripped.split(":", 1)
-        body = [first_body.strip()] if first_body.strip() else []
-        body.extend(part.strip() for part in statements[index + 1:] if part.strip())
-        repaired.append(header.strip() + ":")
-        repaired.extend("    " + part for part in body)
-        return "\n".join(part for part in repaired if part), True
-    return snippet, False
-
-
-def _repair_protdis_underindented_training_loop(snippet: str) -> tuple[str, bool]:
-    lines = str(snippet or "").splitlines()
-    changed = False
-    repaired: list[str] = []
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        repaired.append(line)
-        stripped = line.strip()
-        if stripped.startswith("for step in range(") and stripped.endswith(":"):
-            index += 1
-            while index < len(lines):
-                next_line = lines[index]
-                next_stripped = next_line.strip()
-                if not next_stripped:
-                    repaired.append(next_line)
-                    index += 1
-                    continue
-                if next_line.startswith((" ", "\t")):
-                    repaired.append(next_line)
-                    index += 1
-                    continue
-                if next_stripped.startswith((
-                    "out = model(",
-                    "loss = ",
-                    "total = ",
-                    "loss.backward(",
-                    "total.backward(",
-                    "optimizer.step(",
-                    "opt.step(",
-                    "print(f'", 'print(f"', "print('Training smoke test PASSED'", 'print("Training smoke test PASSED"',
-                )):
-                    repaired.append("    " + next_stripped)
-                    changed = True
-                    index += 1
-                    continue
-                break
-            continue
-        index += 1
-    return "\n".join(repaired), changed
-
-
-def _normalize_protdis_kon_feature_dims_snippet(snippet: str) -> tuple[str, bool]:
-    snippet = str(snippet or "")
-    repaired_snippet, syntax_changed = _repair_protdis_inline_for_snippet(snippet)
-    repaired_snippet, indentation_changed = _repair_protdis_underindented_training_loop(repaired_snippet)
-    syntax_changed = syntax_changed or indentation_changed
-    if "feature_dims" not in repaired_snippet and not syntax_changed:
-        return snippet, False
-    if "KON" not in repaired_snippet and not syntax_changed:
-        return snippet, False
-    try:
-        tree = ast.parse(repaired_snippet)
-    except SyntaxError:
-        return snippet, False
-    changed = syntax_changed
-
-    class Rewriter(ast.NodeTransformer):
-        def visit_Call(self, node: ast.Call) -> ast.AST:
-            nonlocal changed
-            self.generic_visit(node)
-            func_name = ""
-            if isinstance(node.func, ast.Name):
-                func_name = node.func.id
-            elif isinstance(node.func, ast.Attribute):
-                func_name = node.func.attr
-            if func_name != "KON":
-                return node
-            for keyword in node.keywords:
-                if keyword.arg != "feature_dims":
-                    continue
-                flattened = _flatten_protdis_feature_dims(keyword.value)
-                if flattened is None:
-                    continue
-                keyword.value = ast.List(elts=[ast.Constant(value=item) for item in flattened], ctx=ast.Load())
-                changed = True
-            return node
-
-    updated = Rewriter().visit(tree)
-    if not changed:
-        return snippet, False
-    ast.fix_missing_locations(updated)
-    return ast.unparse(updated), True
-
-
-def _normalize_protdis_kon_feature_dims_command(command: list[str]) -> tuple[list[str], bool]:
-    updated = list(command)
-    for index in range(len(updated) - 1):
-        if Path(str(updated[index])).name.startswith("python") and str(updated[index + 1]) == "-c":
-            if index + 2 >= len(updated):
-                return command, False
-            snippet, changed = _normalize_protdis_kon_feature_dims_snippet(str(updated[index + 2]))
-            if not changed:
-                return command, False
-            updated[index + 2] = snippet
-            return updated, True
-    return command, False
-
-
 def normalize_repository_command_for_execution(row: dict[str, Any], command: list[str], repo_path: Path, run_dir: Path) -> tuple[list[str], list[dict[str, str]]]:
-    if _is_protdis_repo(repo_path):
-        normalized, changed = _normalize_protdis_kon_feature_dims_command(command)
-        if changed:
-            return normalized, [{"migration": "ProtDiS KON expects feature_dims as a flat list of output dimensions; flattened generated nested singleton lists before model smoke execution"}]
-    if not _is_rigidssl_repo(repo_path):
-        return command, []
-    phase = str(row.get("phase") or "").strip().lower()
-    text = command_text(command)
-    if phase == "verify_model" and "VelocityNetwork()" in text:
-        return [command[0], "-c", _rigidssl_model_probe_code(repo_path)], [{"migration": "RigidSSL VelocityNetwork requires model_conf; replaced no-arg constructor with examples.RigidSSL_Perturb.model_setup probe"}]
-    if phase == "reproduce_smoke" and any(Path(str(token)).name == "RigidSSL_Perturb.py" for token in command):
-        return [command[0], "-c", _rigidssl_loader_probe_code(repo_path, run_dir)], [{"migration": "RigidSSL smoke uses a bounded loader/model probe instead of a full training epoch in skip-full-reproduction mode"}]
-    if phase == "reproduce_full" and any(Path(str(token)).name == "RigidSSL_Perturb.py" for token in command):
-        return [command[0], "-c", _rigidssl_full_reproduction_code(repo_path, run_dir, command)], [{"migration": "RigidSSL full reproduction preserves official training script and arguments but forces DataLoader num_workers=0/pin_memory=False to avoid AF_UNIX socket path limits in long run directories"}]
     return command, []
 
 
@@ -5443,8 +3227,6 @@ def command_environment(command_env: dict[str, str], repo_path: Path, row_env: d
         repo = str(repo_path.expanduser().resolve())
         existing = str(effective_env.get("PYTHONPATH") or "")
         effective_env["PYTHONPATH"] = repo if not existing else repo + os.pathsep + existing
-    if _is_rigidssl_repo(repo_path):
-        effective_env.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
     effective_env.update({str(key): str(value) for key, value in row_env.items()})
     return effective_env
 
@@ -5683,7 +3465,6 @@ def execute_plan_commands(plan: dict[str, Any], repo_path: Path, run_dir: Path, 
             cwd = resolve_command_cwd(row, repo_path, run_dir)
             command, run_repo_migrations = normalize_run_repo_command_paths(command, cwd, run_dir)
             script_migrations.extend(run_repo_migrations)
-            script_migrations.extend(normalize_generated_script_commands_for_command(command, cwd, run_dir))
             missing_script_issue = missing_shell_script_issue(command, cwd, run_dir)
             boundary_issues = command_boundary_issues(command, cwd, run_dir)
             if missing_script_issue:
@@ -5759,358 +3540,6 @@ def _approval_gate_from_decision(decision: dict[str, Any]) -> dict[str, Any]:
     verdict = decision.get("verdict") if isinstance(decision.get("verdict"), dict) else {}
     gate = verdict.get("approval_gate") if isinstance(verdict.get("approval_gate"), dict) else {}
     return gate if isinstance(gate, dict) else {}
-
-
-def _approval_gate_passed_check_names(gate: dict[str, Any]) -> set[str]:
-    checks = gate.get("checks") if isinstance(gate.get("checks"), list) else []
-    return {str(row.get("name") or "").strip() for row in checks if isinstance(row, dict) and row.get("passed") is True}
-
-
-def _approval_gate_checks_all_passed(gate: dict[str, Any]) -> bool:
-    checks = gate.get("checks") if isinstance(gate.get("checks"), list) else []
-    if not checks:
-        return False
-    for row in checks:
-        if not isinstance(row, dict):
-            return False
-        if not str(row.get("name") or "").strip():
-            return False
-        if row.get("passed") is not True:
-            return False
-    return True
-
-
-def _decision_policy_versions_current(decision: dict[str, Any]) -> bool:
-    contract = decision.get("approval_contract") if isinstance(decision.get("approval_contract"), dict) else {}
-    if str(decision.get("decision_policy_version") or "") != DECISION_POLICY_VERSION:
-        return False
-    contract_version = str(contract.get("policy_version") or "")
-    return contract_version == DECISION_POLICY_VERSION
-
-
-def _approval_gate_workspace_audit_checks_passed(gate: dict[str, Any]) -> bool:
-    checks = gate.get("checks") if isinstance(gate.get("checks"), list) else []
-    workspace_checks = [
-        row for row in checks
-        if isinstance(row, dict) and str(row.get("name") or "").strip() == "workspace_write_audit"
-    ]
-    if not workspace_checks:
-        return False
-    return all(row.get("passed") is True for row in workspace_checks)
-
-
-def _approval_gate_computed_missing(gate: dict[str, Any]) -> list[str] | None:
-    checks = gate.get("checks") if isinstance(gate.get("checks"), list) else []
-    if not checks:
-        return None
-    missing: list[str] = []
-    for row in checks:
-        if not isinstance(row, dict):
-            return None
-        name = str(row.get("name") or "").strip()
-        if not name:
-            return None
-        if row.get("passed") is not True:
-            missing.append(str(row.get("reason") or name or "未命名门槛"))
-    return missing
-
-
-def _approval_gate_result_consistent_with_checks(gate: dict[str, Any]) -> bool:
-    computed_missing = _approval_gate_computed_missing(gate)
-    if computed_missing is None:
-        return False
-    gate_missing = gate.get("missing")
-    if gate_missing is None:
-        gate_missing_values: list[str] = []
-    elif isinstance(gate_missing, list):
-        gate_missing_values = [str(item) for item in gate_missing]
-    elif isinstance(gate_missing, str) and not gate_missing.strip():
-        gate_missing_values = []
-    else:
-        return False
-    expected_passed = not computed_missing
-    return gate.get("passed") is expected_passed and gate_missing_values == computed_missing
-
-
-def _cached_terminal_approval_gate_policy_current(decision: dict[str, Any]) -> bool:
-    gate = _approval_gate_from_decision(decision)
-    if not gate:
-        return False
-    return str(gate.get("policy_version") or "") == DECISION_POLICY_VERSION
-
-
-def _cached_terminal_approval_gate_result_matches_decision(decision: dict[str, Any]) -> bool:
-    gate = _approval_gate_from_decision(decision)
-    if not gate:
-        return False
-    cached_decision = str(decision.get("decision") or "").strip().lower()
-    missing = gate.get("missing")
-    missing_empty = missing in (None, [], "")
-    if cached_decision == "approve":
-        return gate.get("passed") is True and missing_empty
-    if cached_decision == "reject":
-        return gate.get("passed") is False and not missing_empty
-    return False
-
-
-def _cached_terminal_workspace_audit_passed(decision: dict[str, Any]) -> bool:
-    audit = decision.get("workspace_write_audit") if isinstance(decision.get("workspace_write_audit"), dict) else {}
-    if audit.get("status") != "passed":
-        return False
-    gate = _approval_gate_from_decision(decision)
-    return _approval_gate_workspace_audit_checks_passed(gate)
-
-
-def _cached_terminal_exit_code_matches(decision: dict[str, Any]) -> bool:
-    expected = {"approve": 0, "reject": 20}.get(str(decision.get("decision") or "").strip().lower())
-    if expected is None:
-        return False
-    try:
-        return int(decision.get("exit_code")) == expected
-    except Exception:
-        return False
-
-
-def _cached_terminal_verdict_matches_top_level(decision: dict[str, Any]) -> bool:
-    verdict = decision.get("verdict") if isinstance(decision.get("verdict"), dict) else {}
-    if not verdict:
-        return False
-    top_decision = str(decision.get("decision") or "").strip().lower()
-    raw_nested_decision = str(verdict.get("decision") or verdict.get("status") or "").strip().lower()
-    if not raw_nested_decision:
-        return False
-    nested_decision_aliases = {
-        "approved": "approve",
-        "approval": "approve",
-        "pass": "approve",
-        "passed": "approve",
-        "rejected": "reject",
-        "refuse": "reject",
-        "refused": "reject",
-        "fail_unrecoverable": "reject",
-    }
-    nested_decision = nested_decision_aliases.get(raw_nested_decision, raw_nested_decision)
-    if nested_decision != top_decision:
-        return False
-    if "allow_next_module" not in verdict:
-        return False
-    if verdict.get("allow_next_module") is not decision.get("allow_next_module"):
-        return False
-    return True
-
-
-def _cached_terminal_approval_gate_matches_top_level(decision: dict[str, Any]) -> bool:
-    verdict = decision.get("verdict") if isinstance(decision.get("verdict"), dict) else {}
-    if not verdict:
-        return True
-    top_gate = decision.get("approval_gate") if isinstance(decision.get("approval_gate"), dict) else {}
-    nested_gate = verdict.get("approval_gate") if isinstance(verdict.get("approval_gate"), dict) else {}
-    top_present = bool(top_gate)
-    nested_present = bool(nested_gate)
-    if top_present != nested_present:
-        return False
-    if not top_present:
-        return True
-    return top_gate == nested_gate
-
-
-def _cached_terminal_failure_taxonomy_matches_verdict(decision: dict[str, Any]) -> bool:
-    if str(decision.get("decision") or "").strip().lower() != "reject":
-        return True
-    if "failure_taxonomy" not in decision:
-        return True
-    verdict = decision.get("verdict") if isinstance(decision.get("verdict"), dict) else {}
-    return decision.get("failure_taxonomy") == verdict.get("failure_taxonomy")
-
-
-def _cached_terminal_repair_loop_matches_decision(decision: dict[str, Any]) -> bool:
-    if str(decision.get("decision") or "").strip().lower() not in {"approve", "reject"}:
-        return False
-    repair_loop = decision.get("repair_loop") if isinstance(decision.get("repair_loop"), dict) else {}
-    if not repair_loop:
-        return False
-    if repair_loop.get("terminal_reached") is not True:
-        return False
-    return str(repair_loop.get("stop_reason") or "").strip() == "terminal_decision"
-
-
-def _cached_terminal_approve_claims_match_verdict(decision: dict[str, Any]) -> bool:
-    if str(decision.get("decision") or "").strip().lower() != "approve":
-        return True
-    verdict = decision.get("verdict") if isinstance(decision.get("verdict"), dict) else {}
-    return verdict.get("paper_claims_verified") is True and verdict.get("reproduction_success") is True
-
-
-def _cached_terminal_approve_rounds_have_execution(decision: dict[str, Any]) -> bool:
-    if str(decision.get("decision") or "").strip().lower() != "approve":
-        return True
-    rounds = decision.get("rounds") if isinstance(decision.get("rounds"), list) else []
-    if not rounds:
-        return False
-    for row in rounds:
-        if not isinstance(row, dict):
-            continue
-        try:
-            receipt_count = int(row.get("receipt_count") or 0)
-        except Exception:
-            receipt_count = 0
-        required_failures = row.get("required_failures")
-        verdict = row.get("verdict") if isinstance(row.get("verdict"), dict) else {}
-        if receipt_count > 0 and isinstance(required_failures, list) and not required_failures and str(verdict.get("decision") or "").strip().lower() == "approve":
-            return True
-    return False
-
-
-def _cached_terminal_reproduce_full_receipt_summary_is_valid(row: Any) -> bool:
-    if not isinstance(row, dict):
-        return False
-    if str(row.get("phase") or "").strip().lower() != "reproduce_full":
-        return False
-    try:
-        if int(row.get("return_code")) != 0:
-            return False
-    except Exception:
-        return False
-    if row.get("required") is False:
-        return False
-    command = row.get("command")
-    has_command = bool(command) if isinstance(command, list) else bool(str(command or "").strip())
-    has_log = bool(str(row.get("log_path") or "").strip())
-    return bool(has_command or has_log)
-
-
-def _cached_terminal_approve_reproduce_full_evidence_present(decision: dict[str, Any]) -> bool:
-    if str(decision.get("decision") or "").strip().lower() != "approve":
-        return True
-    gate = _approval_gate_from_decision(decision)
-    checks = gate.get("checks") if isinstance(gate.get("checks"), list) else []
-    reproduce_checks = [
-        row for row in checks
-        if isinstance(row, dict) and str(row.get("name") or "").strip() == "reproduce_full"
-    ]
-    if not reproduce_checks:
-        return False
-    for check in reproduce_checks:
-        evidence = check.get("evidence") if isinstance(check.get("evidence"), dict) else {}
-        receipts = evidence.get("successful_required_reproduce_full_receipts") if isinstance(evidence.get("successful_required_reproduce_full_receipts"), list) else []
-        if any(_cached_terminal_reproduce_full_receipt_summary_is_valid(row) for row in receipts):
-            return True
-    return False
-
-
-def _cached_terminal_metric_evidence_check_is_valid(check: dict[str, Any]) -> bool:
-    if check.get("passed") is not True:
-        return False
-    evidence = check.get("evidence") if isinstance(check.get("evidence"), dict) else {}
-    local_metric_evidence = evidence.get("local_metric_evidence") if isinstance(evidence.get("local_metric_evidence"), list) else []
-    local_ok = evidence.get("local_criteria_passed") is True and bool(local_metric_evidence)
-    claude_issues = evidence.get("claude_metric_evidence_issues")
-    if claude_issues is None:
-        claude_issues_values: list[Any] = []
-    elif isinstance(claude_issues, list):
-        claude_issues_values = claude_issues
-    else:
-        claude_issues_values = [claude_issues]
-    claude_ok = evidence.get("claude_metric_evidence_passed") is True and not claude_issues_values
-    return bool(local_ok or claude_ok)
-
-
-def _cached_terminal_approve_metric_evidence_present(decision: dict[str, Any]) -> bool:
-    if str(decision.get("decision") or "").strip().lower() != "approve":
-        return True
-    gate = _approval_gate_from_decision(decision)
-    checks = gate.get("checks") if isinstance(gate.get("checks"), list) else []
-    metric_checks = [
-        row for row in checks
-        if isinstance(row, dict) and str(row.get("name") or "").strip() == "metric_evidence"
-    ]
-    if not metric_checks:
-        return False
-    return all(_cached_terminal_metric_evidence_check_is_valid(row) for row in metric_checks)
-
-
-def cached_approve_decision_is_current(decision: dict[str, Any]) -> bool:
-    if str(decision.get("decision") or "").strip().lower() != "approve":
-        return False
-    if decision.get("allow_next_module") is not True:
-        return False
-    contract = decision.get("approval_contract") if isinstance(decision.get("approval_contract"), dict) else {}
-    if contract.get("approved") is not True:
-        return False
-    if not _cached_terminal_approve_claims_match_verdict(decision):
-        return False
-    if not _cached_terminal_approve_rounds_have_execution(decision):
-        return False
-    if not _cached_terminal_approve_reproduce_full_evidence_present(decision):
-        return False
-    if not _cached_terminal_approve_metric_evidence_present(decision):
-        return False
-    gate = _approval_gate_from_decision(decision)
-    if not gate or gate.get("passed") is not True:
-        return False
-    if str(gate.get("policy_version") or "") != DECISION_POLICY_VERSION:
-        return False
-    if gate.get("missing") not in (None, [], ""):
-        return False
-    if not _approval_gate_checks_all_passed(gate):
-        return False
-    passed_check_names = _approval_gate_passed_check_names(gate)
-    return set(APPROVAL_GATE_REQUIRED_CHECKS).issubset(passed_check_names)
-
-
-def cached_reject_decision_is_current(decision: dict[str, Any]) -> bool:
-    if not _decision_policy_versions_current(decision):
-        return False
-    if str(decision.get("decision") or "").strip().lower() != "reject":
-        return False
-    if decision.get("allow_next_module") is not False:
-        return False
-    contract = decision.get("approval_contract") if isinstance(decision.get("approval_contract"), dict) else {}
-    if contract.get("approved") is not False:
-        return False
-    verdict = decision.get("verdict") if isinstance(decision.get("verdict"), dict) else {}
-    reject_source = dict(verdict if verdict else decision)
-    reject_source["decision"] = "reject"
-    checked = enforce_reject_evidence(reject_source)
-    return checked.get("decision") == "reject" and not reject_evidence_issues(checked)
-
-
-def cached_terminal_decision_is_current(decision: dict[str, Any]) -> bool:
-    if not isinstance(decision, dict) or not _decision_policy_versions_current(decision):
-        return False
-    gate = _approval_gate_from_decision(decision)
-    if not _cached_terminal_approval_gate_policy_current(decision):
-        return False
-    if not _approval_gate_result_consistent_with_checks(gate):
-        return False
-    if not _cached_terminal_approval_gate_result_matches_decision(decision):
-        return False
-    if not _cached_terminal_workspace_audit_passed(decision):
-        return False
-    if not _cached_terminal_exit_code_matches(decision):
-        return False
-    if not _cached_terminal_verdict_matches_top_level(decision):
-        return False
-    if not _cached_terminal_approval_gate_matches_top_level(decision):
-        return False
-    if not _cached_terminal_failure_taxonomy_matches_verdict(decision):
-        return False
-    if not _cached_terminal_repair_loop_matches_decision(decision):
-        return False
-    if not _cached_terminal_approve_claims_match_verdict(decision):
-        return False
-    if not _cached_terminal_approve_rounds_have_execution(decision):
-        return False
-    if not _cached_terminal_approve_reproduce_full_evidence_present(decision):
-        return False
-    if not _cached_terminal_approve_metric_evidence_present(decision):
-        return False
-    cached_decision = str(decision.get("decision") or "").strip().lower()
-    if cached_decision == "approve":
-        return cached_approve_decision_is_current(decision)
-    if cached_decision == "reject":
-        return cached_reject_decision_is_current(decision)
-    return False
 
 
 def final_decision_payload(run_id: str, run_dir: Path, normalized_plan: dict[str, Any], repo_info: dict[str, Any], machine: dict[str, Any], rounds: list[dict[str, Any]], verdict: dict[str, Any]) -> dict[str, Any]:
@@ -6196,19 +3625,19 @@ def resolve_repair_loop_settings(dry_run: bool, requested_until_terminal: bool, 
 
 
 def main() -> int:
+    require_public_entrypoint()
     parser = argparse.ArgumentParser(description="给定实验 plan，让 Claude Code 自主部署环境并裁决参考复现。")
+    parser.add_argument("--project", required=True, help="Framework 传入的项目 ID。")
     parser.add_argument("--plan", required=True, help="实验 plan JSON 路径。")
-    parser.add_argument("--work-root", default=str(default_work_root()), help="运行产物根目录，默认 modules/environment/runs。")
-    parser.add_argument("--run-id", default="", help="可选 run_id。")
+    parser.add_argument("--conda-env", default="", help="Web/Framework 已保存的实验 Conda 环境名；传入后必须固定使用。")
+    parser.add_argument("--run-dir", default=os.environ.get("ENVIRONMENT_RUN_DIR", ""), help=argparse.SUPPRESS)
     parser.add_argument("--max-repair-rounds", type=int, default=None, help="显式设置后进入有限修复轮次模式；不设置时非 dry-run 默认持续修复直到 approve/reject。")
     parser.add_argument("--until-terminal", action="store_true", help="持续修复直到 approve/reject；可配合 --max-total-rounds 设总轮数上限。")
     parser.add_argument("--max-total-rounds", type=int, default=0, help="--until-terminal 模式的总轮数上限，0 表示不设轮数上限。")
     parser.add_argument("--claude-timeout-sec", type=int, default=2400, help="单次 Claude Code 调用超时。")
     parser.add_argument("--command-timeout-sec", type=int, default=3600, help="命令默认超时（Claude 未显式给出时使用）。")
-    parser.add_argument("--run-full-reproduction", action="store_true", help="兼容旧参数；当前默认已经执行 reproduce_full。")
     parser.add_argument("--skip-full-reproduction", action="store_true", help="仅用于调试/烟测：跳过 reproduce_full，因此不会批准进入下一模块。")
     parser.add_argument("--dry-run", action="store_true", help="只生成提示词/结构，不调用 Claude、不执行重命令。")
-    parser.add_argument("--force-rerun", action="store_true", help="即使 run_id 已有终态裁决，也重新执行。")
     args = parser.parse_args()
     if args.max_total_rounds < 0:
         raise SystemExit("--max-total-rounds 不能小于 0")
@@ -6223,42 +3652,39 @@ def main() -> int:
         raise SystemExit("dry-run 与持续修复模式连用时必须设置 --max-total-rounds，避免无限空转。")
 
     plan_path = Path(args.plan).expanduser().resolve()
+    project_root = (REPO_ROOT / "projects" / args.project).resolve()
+    try:
+        project_root.relative_to((REPO_ROOT / "projects").resolve())
+    except ValueError as exc:
+        raise SystemExit(f"Environment project escapes projects/: {args.project}") from exc
+    if project_root.name != args.project or not project_root.is_dir():
+        raise SystemExit(f"Environment project does not exist: {args.project}")
+    configured_env_name = str(args.conda_env or "").strip()
+    if configured_env_name and not re.fullmatch(r"[A-Za-z0-9_.-]+", configured_env_name):
+        raise SystemExit("--conda-env 只能包含字母、数字、点、下划线和连字符")
     raw_plan = load_experiment_plan(plan_path)
     normalized = normalize_plan(raw_plan, plan_path)
-    work_root = resolve_work_root(args.work_root)
-    requested_run_id = str(args.run_id or "").strip()
-    run_id = normalize_run_id(requested_run_id, normalized)
-    run_dir = ensure_within(work_root / run_id, work_root)
-    run_dir.mkdir(parents=True, exist_ok=True)
+    normalized["project"] = args.project
+    if configured_env_name:
+        normalized["requested_conda_env"] = configured_env_name
+    run_dir = resolve_run_dir(args.run_dir)
+    run_id = run_dir.name
     claude_env = isolated_runtime_env(run_dir, isolate_home=False)
     command_env = isolated_runtime_env(run_dir, isolate_home=True)
     baseline_outside_paths = _workspace_write_audit_baseline(run_dir)
-    existing_decision_path = run_dir / "environment_deployment_decision.json"
-    existing_decision = read_json(existing_decision_path, {}) if existing_decision_path.exists() and not args.force_rerun else {}
-    if isinstance(existing_decision, dict) and existing_decision.get("decision") in {"approve", "reject"}:
-        if cached_terminal_decision_is_current(existing_decision):
-            print(json.dumps(existing_decision, ensure_ascii=False, indent=2))
-            return int(existing_decision.get("exit_code") or (0 if existing_decision.get("allow_next_module") else 20))
-        write_json(
-            run_dir / "stale_terminal_decision_ignored.json",
-            {
-                "created_at": utc_now(),
-                "reason": "已有终态裁决未满足当前 decision policy 和批准/拒绝门槛校验，必须按最新规则重新执行。",
-                "current_policy_version": DECISION_POLICY_VERSION,
-                "old_decision": existing_decision.get("decision"),
-                "old_policy_version": existing_decision.get("decision_policy_version") or (existing_decision.get("approval_contract") or {}).get("policy_version"),
-                "old_approval_gate_policy_version": _approval_gate_from_decision(existing_decision).get("policy_version"),
-                "old_approval_gate_checks": sorted(_approval_gate_passed_check_names(_approval_gate_from_decision(existing_decision))),
-            },
-        )
     logs_dir = run_dir / "logs"
     repos_dir = run_dir / "repos"
-    if requested_run_id and requested_run_id != run_id:
-        normalized["requested_run_id"] = requested_run_id
-        normalized["normalized_run_id"] = run_id
     write_json(run_dir / "input_plan.normalized.json", normalized)
     write_json(run_dir / "input_plan.raw.json", raw_plan)
+    fixed_env_name = configured_env_name
+    write_json(run_dir / "conda_environment.json", {
+        "project": args.project,
+        "env_name": fixed_env_name,
+        "source": "configured_input" if fixed_env_name else "pending_claude_selection",
+        "fixed": bool(fixed_env_name),
+    })
 
+    emit_progress("evidence", "Collecting machine and paper evidence.")
     machine = detect_machine_profile()
     write_json(run_dir / "machine_profile.json", machine)
     paper_evidence = collect_paper_evidence(normalized, run_dir, allow_network=not args.dry_run, timeout_sec=90)
@@ -6267,6 +3693,7 @@ def main() -> int:
     repo_spec_lookup = repo_specs_by_url(normalized)
     repo_selection_review: dict[str, Any] = {}
     if repo_candidates and not args.dry_run:
+        emit_progress("repository_review", "Environment controller is reviewing repository candidates.")
         review_path = run_dir / "claude_repo_candidate_review.json"
         review_result = run_claude_json(
             prompt_repo_candidate_review(normalized, [str(item) for item in repo_candidates], review_path),
@@ -6274,47 +3701,17 @@ def main() -> int:
             expected_json_path=review_path,
             log_path=logs_dir / "claude_repo_candidate_review.log",
             timeout_sec=args.claude_timeout_sec,
-            add_dirs=[run_dir],
+            add_dirs=_claude_add_dirs(run_dir),
             dry_run=False,
-            system_prompt="你是严格 JSON 输出代理，只能审阅 prompt 中给出的仓库候选，不要编造仓库。",
+            system_prompt="你是 TASTE Environment 仓库候选审阅代理。必须只审阅 prompt 中给出的候选，必须只输出严格 JSON。",
             env=claude_env,
+            project=args.project,
+            project_root=project_root,
         )
         repo_selection_review = review_result
-        reviewed = _review_payload_for_candidate_recovery(review_result)
+        reviewed = review_result.get("json") if isinstance(review_result.get("json"), dict) else {}
         review_status = str(reviewed.get("status") or "").strip().lower()
-        original_repo_candidates = [str(item).strip() for item in repo_candidates if str(item).strip()]
-        recovered_candidates = recovered_repo_candidate_rows_from_review(reviewed, original_repo_candidates, work_root)
-        recovered_urls: list[str] = []
-        if recovered_candidates:
-            for candidate in recovered_candidates:
-                candidate_url = str(candidate.get("url") or "").strip()
-                candidate_key = canonical_repo_url(candidate_url)
-                if not candidate_url or not is_github_repo_url(candidate_url):
-                    continue
-                repo_spec_lookup[candidate_key] = {
-                    "url": candidate_url,
-                    "source": f"claude_repo_candidate_review.{candidate.get('source') or 'candidate'}",
-                    "evidence": candidate.get("evidence") or reviewed.get("evidence", []),
-                    "review_status": review_status,
-                    "review_reject_reason": reviewed.get("reject_reason") or "",
-                }
-                recovered_urls.append(candidate_url)
-        if recovered_urls:
-            recovery_payload = {
-                "recovered_repo_urls": recovered_urls,
-                "original_repo_urls": original_repo_candidates,
-                "review_status": review_status,
-                "review_reject_reason": reviewed.get("reject_reason") or "",
-                "policy": "只要审阅证据明确给出官方/实际/正确 GitHub 替代仓库，后端就改用替代仓库继续验证；即使 Claude Code 把审阅状态误标为 ready，也不再克隆原始 404/SSO URL。",
-            }
-            reviewed["backend_candidate_recovery"] = recovery_payload
-            write_json(review_path, reviewed)
-            repo_selection_review["json"] = reviewed
-            repo_selection_review["backend_candidate_recovery"] = recovery_payload
-            selected_candidates = recovered_urls
-            review_issues = [_repo_recovery_issue(reviewed)]
-            used_deterministic_fallback = False
-        elif review_status == "reject":
+        if review_status == "reject":
             verdict = {
                 "decision": "continue_repair",
                 "allow_next_module": False,
@@ -6324,8 +3721,7 @@ def main() -> int:
             decision = final_decision_payload(run_id, run_dir, normalized, {"repo_candidates": repo_candidates, "repo_selection_review": repo_selection_review}, machine, [], verdict)
             write_json(run_dir / "repo_info.json", decision["repo"])
             return finalize_and_write_decision(decision, run_dir, paper_evidence, baseline_outside_paths)
-        else:
-            selected_candidates, review_issues, used_deterministic_fallback = repo_candidates_after_review([str(item) for item in repo_candidates], review_result)
+        selected_candidates, review_issues = repo_candidates_after_review([str(item) for item in repo_candidates], review_result)
         if not selected_candidates:
             verdict = {
                 "decision": "continue_repair",
@@ -6339,13 +3735,8 @@ def main() -> int:
         repo_candidates = selected_candidates
         if review_issues:
             repo_selection_review["validation_issues"] = review_issues
-        if used_deterministic_fallback:
-            repo_selection_review["deterministic_fallback"] = {
-                "used": True,
-                "reason": "Claude repo review did not yield validated JSON, but the normalized plan already contains explicit GitHub candidates; continuing with original GitHub order.",
-                "ordered_repo_urls": repo_candidates,
-            }
     if not repo_candidates:
+        emit_progress("repository_discovery", "Environment controller is identifying the evidence-backed repository.")
         discovery_path = run_dir / "claude_repo_discovery.json"
         repo_discovery_result = run_claude_json(
             prompt_repo_discovery(normalized, discovery_path),
@@ -6353,10 +3744,12 @@ def main() -> int:
             expected_json_path=discovery_path,
             log_path=logs_dir / "claude_repo_discovery.log",
             timeout_sec=args.claude_timeout_sec,
-            add_dirs=[run_dir],
+            add_dirs=_claude_add_dirs(run_dir),
             dry_run=args.dry_run,
-            system_prompt="你是严格的 JSON 输出代理，只能基于证据选择 GitHub 仓库。",
+            system_prompt="你是 TASTE Environment 仓库发现代理。必须只基于 prompt 证据选择 GitHub 仓库，必须只输出严格 JSON。",
             env=claude_env,
+            project=args.project,
+            project_root=project_root,
         )
         discovered = repo_discovery_result.get("json") if isinstance(repo_discovery_result.get("json"), dict) else {}
         discovered_repo_url, discovery_issues = validate_discovered_repo(discovered)
@@ -6378,9 +3771,7 @@ def main() -> int:
                 "evidence": candidate.get("evidence") or discovered.get("evidence", []),
                 "discovery_validation_issues": discovery_issues,
             }
-        if discovery_issues and discovered_candidates:
-            repo_discovery_result["backend_candidate_recovery"] = {"recovered_repo_urls": list(repo_candidates), "validation_issues": discovery_issues}
-        elif discovery_issues and not args.dry_run:
+        if discovery_issues and not args.dry_run:
             verdict = {"decision": "continue_repair", "allow_next_module": False, "reject_reason": discovered.get("reject_reason") or "Claude Code 未能确认可信 GitHub 仓库", "failure_taxonomy": [{"category": "repository_code", "evidence": discovery_issues or [discovered.get("reject_reason") or "缺少可信仓库"], "repairable": True}]}
             decision = final_decision_payload(run_id, run_dir, normalized, {"repo_discovery": repo_discovery_result, "repo_discovery_validation_issues": discovery_issues}, machine, [], verdict)
             write_json(run_dir / "repo_info.json", decision["repo"])
@@ -6396,6 +3787,7 @@ def main() -> int:
     clone_attempts: list[dict[str, Any]] = []
     repo_info: dict[str, Any]
     if github_candidates and not args.dry_run:
+        emit_progress("repository_clone", "Cloning and verifying repository candidates.")
         repo_info = {}
         for candidate_url in github_candidates:
             candidate_spec = repo_spec_for_url(str(candidate_url), repo_spec_lookup)
@@ -6441,16 +3833,8 @@ def main() -> int:
     rounds: list[dict[str, Any]] = []
     previous_rounds: list[dict[str, Any]] = []
     final_verdict: dict[str, Any] = {"decision": "continue_repair", "allow_next_module": False, "reason": "尚未开始"}
-    if isinstance(existing_decision, dict) and existing_decision.get("decision") == "continue_repair":
-        old_rounds = existing_decision.get("rounds") if isinstance(existing_decision.get("rounds"), list) else []
-        rounds = [row for row in old_rounds if isinstance(row, dict)]
-        previous_rounds = list(rounds)
-        verdict = existing_decision.get("verdict") if isinstance(existing_decision.get("verdict"), dict) else {}
-        if verdict:
-            final_verdict = verdict
 
     start_round = len(previous_rounds) + 1
-    rounds_before_invocation = len(rounds)
     if effective_until_terminal:
         end_round = (args.max_total_rounds + 1) if args.max_total_rounds > 0 else sys.maxsize
     else:
@@ -6458,29 +3842,48 @@ def main() -> int:
     for round_index in range(start_round, end_round):
         round_dir = run_dir / f"round_{round_index:02d}"
         round_dir.mkdir(parents=True, exist_ok=True)
+        emit_progress("planning", "Environment controller is preparing the deployment and repair plan.", round_index=round_index)
         env_plan_path = round_dir / f"claude_environment_plan_round_{round_index:02d}.json"
         env_plan_result = run_claude_json(
-            prompt_environment_plan(normalized, machine, repo_evidence, paper_evidence, previous_rounds, env_plan_path, round_index),
+            prompt_environment_plan(normalized, machine, repo_evidence, paper_evidence, previous_rounds, env_plan_path, round_index, fixed_env_name),
             cwd=run_dir,
             expected_json_path=env_plan_path,
             log_path=round_dir / "logs" / "claude_environment_plan.log",
             timeout_sec=args.claude_timeout_sec,
-            add_dirs=[run_dir, repo_path] if repo_path.exists() else [run_dir],
+            add_dirs=_claude_add_dirs(run_dir, repo_path) if repo_path.exists() else _claude_add_dirs(run_dir),
             dry_run=args.dry_run,
             system_prompt="你是 TASTE environment 的后端环境部署代理，必须输出严格 JSON。",
             env=claude_env,
+            project=args.project,
+            project_root=project_root,
         )
         env_plan = env_plan_result.get("json") if isinstance(env_plan_result.get("json"), dict) else {}
-        used_deterministic_plan = False
-        if not env_plan and not args.dry_run and _is_rigidssl_repo(repo_path):
-            env_plan = deterministic_rigidssl_environment_plan(run_dir, repo_path, paper_evidence)
-            used_deterministic_plan = True
-            write_json(round_dir / "backend_deterministic_environment_plan.json", env_plan)
         if args.dry_run:
             env_plan = {"status": "dry_run", "commands": [], "success_criteria": [], "env_name": "dry_run_env"}
+        proposed_env_name = str(env_plan.get("env_name") or "").strip()
+        if not fixed_env_name and re.fullmatch(r"[A-Za-z0-9_.-]+", proposed_env_name):
+            fixed_env_name = proposed_env_name
+        elif not fixed_env_name and proposed_env_name:
+            env_plan["rejected_env_name"] = proposed_env_name
+            env_plan["env_name"] = ""
+            write_json(run_dir / "conda_environment.json", {
+                "project": args.project,
+                "env_name": "",
+                "source": "pending_claude_selection",
+                "fixed": False,
+                "rejected_env_name": proposed_env_name,
+                "validation_issue": "env_name must match [A-Za-z0-9_.-]+",
+            })
+        if fixed_env_name:
+            env_plan["env_name"] = fixed_env_name
+            write_json(run_dir / "conda_environment.json", {
+                "project": args.project,
+                "env_name": fixed_env_name,
+                "source": "configured_input" if configured_env_name else "environment_controller_claude",
+                "fixed": True,
+            })
+        write_json(env_plan_path, env_plan)
         round_record: dict[str, Any] = {"round": round_index, "env_plan_path": str(env_plan_path), "claude_plan_call": env_plan_result, "env_plan_status": env_plan.get("status")}
-        if used_deterministic_plan:
-            round_record["backend_deterministic_plan"] = "rigidssl_environment_plan"
         if str(env_plan.get("status") or "").strip() == "reject":
             final_verdict = enforce_reject_evidence({
                 "decision": "reject",
@@ -6498,11 +3901,8 @@ def main() -> int:
         receipts: list[dict[str, Any]] = []
         plan_validation_issues: list[str] = []
         if not args.dry_run:
-            include_full_reproduction = bool(args.run_full_reproduction or not args.skip_full_reproduction)
-            env_plan = normalize_environment_plan_commands(env_plan, machine=machine, policy_version=DECISION_POLICY_VERSION)
-            env_plan = normalize_success_criteria(env_plan, paper_evidence=paper_evidence, policy_version=DECISION_POLICY_VERSION)
-            write_json(env_plan_path, env_plan)
-            plan_validation_issues = validate_environment_plan(env_plan, require_full_reproduction=include_full_reproduction, repo_path=repo_path, run_dir=run_dir, machine=machine, paper_evidence=paper_evidence)
+            include_full_reproduction = not args.skip_full_reproduction
+            plan_validation_issues = validate_environment_plan(env_plan, require_full_reproduction=include_full_reproduction, repo_path=repo_path, run_dir=run_dir)
             if plan_validation_issues:
                 receipt = validation_receipt(plan_validation_issues, round_dir)
                 receipts = [receipt]
@@ -6510,54 +3910,55 @@ def main() -> int:
                 log_path.parent.mkdir(parents=True, exist_ok=True)
                 log_path.write_text(receipt["stderr_tail"] + "\n", encoding="utf-8")
             else:
+                emit_progress("commands", "Executing the gated Environment command plan.", round_index=round_index)
                 reusable_receipts = build_reusable_command_receipt_index(previous_rounds, run_dir)
                 receipts = execute_plan_commands(env_plan, repo_path=repo_path, run_dir=run_dir, round_dir=round_dir, include_full=include_full_reproduction, default_timeout=args.command_timeout_sec, command_env=command_env, reusable_receipts=reusable_receipts)
         write_json(round_dir / "command_receipts.json", receipts)
         criteria_passed, metric_evidence = metric_criteria_passed(env_plan.get("success_criteria") if isinstance(env_plan.get("success_criteria"), list) else [], receipts, allowed_phases=APPROVAL_METRIC_PHASES)
-        paper_alignment_ok, paper_alignment_issues = paper_config_alignment_passed(env_plan)
-        judgement_path = round_dir / f"claude_reproduction_verdict_round_{round_index:02d}.json"
-        judgement_result = run_claude_json(
-            prompt_final_judgement(normalized, paper_evidence, env_plan, receipts, metric_evidence, judgement_path),
+        emit_progress("audit", "Environment controller is auditing this round from command receipts.", round_index=round_index)
+        audit_judgement_path = round_dir / f"claude_audit_judgement_round_{round_index:02d}.json"
+        audit_judgement_result = run_claude_json(
+            prompt_audit_judgement(normalized, paper_evidence, env_plan, receipts, metric_evidence, audit_judgement_path),
             cwd=run_dir,
-            expected_json_path=judgement_path,
-            log_path=round_dir / "logs" / "claude_reproduction_verdict.log",
+            expected_json_path=audit_judgement_path,
+            log_path=round_dir / "logs" / "claude_audit_judgement.log",
             timeout_sec=args.claude_timeout_sec,
-            add_dirs=[run_dir, repo_path] if repo_path.exists() else [run_dir],
+            add_dirs=_claude_add_dirs(run_dir, repo_path) if repo_path.exists() else _claude_add_dirs(run_dir),
             dry_run=args.dry_run,
-            system_prompt="你是严格的复现裁决代理。批准必须有真实指标证据。",
+            system_prompt="你是 TASTE Environment 审计裁决代理。必须只输出严格 JSON，必须只依据本轮证据裁决。",
             env=claude_env,
+            project=args.project,
+            project_root=project_root,
         )
-        verdict = judgement_result.get("json") if isinstance(judgement_result.get("json"), dict) else {}
+        verdict = audit_judgement_result.get("json") if isinstance(audit_judgement_result.get("json"), dict) else {}
         if args.dry_run:
-            verdict = {"decision": "continue_repair", "allow_next_module": False, "paper_claims_verified": False, "reproduction_success": False, "repair_plan": ["dry-run 未实际调用 Claude 或执行复现命令"]}
-        backend_failure_taxonomy = classify_failures(receipts)
-        verdict = normalize_verdict(verdict, receipts)
+            verdict = {
+                "decision": "continue_repair",
+                "allow_next_module": False,
+                "paper_claims_verified": False,
+                "reproduction_success": False,
+                "audit_checks": [{"name": "dry_run_execution", "passed": False, "evidence": ["dry-run 未调用 Claude 裁决实例，也未执行复现命令"]}],
+                "failure_taxonomy": [{"category": "unknown", "evidence": ["dry-run 只验证流程结构"], "repairable": True}],
+                "repair_plan": ["用非 dry-run 运行真实环境部署和复现命令"],
+            }
+        verdict = normalize_verdict(verdict)
         verdict = enforce_reject_evidence(verdict)
-        if verdict.get("decision") == "continue_repair" and backend_failure_taxonomy:
-            verdict.setdefault("backend_failure_taxonomy", backend_failure_taxonomy)
         verdict_metric_ok, verdict_metric_issues = verdict_metric_evidence_supports_claims(verdict, receipts, env_plan.get("success_criteria") if isinstance(env_plan.get("success_criteria"), list) else [])
         approval_gate = build_approval_gate(
             verdict=verdict,
             receipts=receipts,
-            paper_evidence=paper_evidence,
             env_plan=env_plan,
             repo_info=repo_info,
-            repo_evidence=repo_evidence,
-            machine=machine,
             run_dir=run_dir,
             criteria_passed=criteria_passed,
             metric_evidence=metric_evidence,
             verdict_metric_ok=verdict_metric_ok,
             verdict_metric_issues=verdict_metric_issues,
-            paper_alignment_ok=paper_alignment_ok,
-            paper_alignment_issues=paper_alignment_issues,
         )
         verdict["approval_gate"] = approval_gate
         approval_checks = {str(row.get("name")): row for row in approval_gate.get("checks", []) if isinstance(row, dict)}
         if not approval_checks.get("metric_evidence", {}).get("passed"):
             verdict["metric_evidence_binding_issues"] = verdict_metric_issues[:10]
-        if not approval_checks.get("paper_config_alignment", {}).get("passed"):
-            verdict["paper_config_alignment_issues"] = paper_alignment_issues[:10]
         if verdict.get("decision") == "approve" and not approval_gate.get("passed"):
             verdict["decision"] = "continue_repair"
             verdict["allow_next_module"] = False
@@ -6566,13 +3967,12 @@ def main() -> int:
             "receipts_path": str(round_dir / "command_receipts.json"),
             "receipt_count": len(receipts),
             "required_failures": [row for row in receipts if row.get("return_code") != 0 and row.get("required") is not False][:5],
-            "backend_failure_taxonomy": backend_failure_taxonomy,
             "metric_evidence": metric_evidence,
-            "paper_config_alignment_ok": paper_alignment_ok,
-            "paper_config_alignment_issues": paper_alignment_issues,
             "plan_validation_issues": plan_validation_issues,
-            "judgement_path": str(judgement_path),
-            "claude_judgement_call": judgement_result,
+            "audit_judgement_path": str(audit_judgement_path),
+            "claude_audit_judgement_call": audit_judgement_result,
+            "judgement_path": str(audit_judgement_path),
+            "claude_judgement_call": audit_judgement_result,
             "verdict": verdict,
         })
         rounds.append(round_record)
@@ -6584,7 +3984,6 @@ def main() -> int:
     decision = final_decision_payload(run_id, run_dir, normalized, repo_info, machine, rounds, final_verdict)
     decision = attach_environment_handoff(decision, run_dir, normalized, repo_info)
     terminal_reached = decision.get("decision") in {"approve", "reject", "environment_ready"}
-    rounds_this_invocation = max(0, len(rounds) - rounds_before_invocation)
     if terminal_reached:
         stop_reason = "environment_handoff_ready" if decision.get("decision") == "environment_ready" else "terminal_decision"
     elif effective_until_terminal and args.max_total_rounds > 0 and len(rounds) >= args.max_total_rounds:
@@ -6593,37 +3992,44 @@ def main() -> int:
         stop_reason = "continue_repair_without_terminal_decision"
     else:
         stop_reason = "max_repair_rounds_reached"
-    resume_command = [
+    new_run_command = [
+        "conda",
+        "run",
+        "-n",
+        "taste",
         "python",
         "modules/environment/main.py",
         "--action",
         "deploy_from_plan",
+        "--project",
+        args.project,
         "--plan",
         str(plan_path),
-        "--run-id",
-        run_id,
     ]
+    if fixed_env_name:
+        new_run_command.extend(["--conda-env", fixed_env_name])
     if effective_until_terminal:
-        resume_command.append("--until-terminal")
+        new_run_command.append("--until-terminal")
         if args.max_total_rounds > 0:
-            resume_command.extend(["--max-total-rounds", str(args.max_total_rounds)])
+            new_run_command.extend(["--max-total-rounds", str(args.max_total_rounds)])
     else:
-        resume_command.extend(["--max-repair-rounds", str(effective_max_repair_rounds)])
+        new_run_command.extend(["--max-repair-rounds", str(effective_max_repair_rounds)])
     if args.skip_full_reproduction:
-        resume_command.append("--skip-full-reproduction")
+        new_run_command.append("--skip-full-reproduction")
     decision["repair_loop"] = {
         "mode": "until_terminal" if effective_until_terminal else "bounded",
         "terminal_reached": terminal_reached,
         "stop_reason": stop_reason,
-        "rounds_before_invocation": rounds_before_invocation,
-        "rounds_this_invocation": rounds_this_invocation,
+        "rounds_before_invocation": 0,
+        "rounds_this_invocation": len(rounds),
         "rounds_total": len(rounds),
         "max_repair_rounds_this_invocation": None if effective_until_terminal else effective_max_repair_rounds,
         "max_total_rounds": args.max_total_rounds if effective_until_terminal else None,
         "bounded_requested": bool(repair_settings["bounded_requested"]),
         "defaulted_until_terminal": bool(repair_settings["defaulted_until_terminal"]),
-        "resume_command": " ".join(resume_command),
-        "resume_note": "如果 stop_reason=max_total_rounds_reached，需要调大 --max-total-rounds 或去掉该上限后续跑。",
+        "resume_command": "",
+        "new_run_command": " ".join(new_run_command),
+        "resume_note": "Environment run 目录不被后续进程复用；需要继续时请按 new_run_command 发起新的 run，并审查上一个 run 的 evidence。",
         "note": "非 dry-run 且未显式设置 --max-repair-rounds 时，本模块默认持续修复直到 approve/reject；continue_repair 表示仍可修复。",
     }
     return finalize_and_write_decision(decision, run_dir, paper_evidence, baseline_outside_paths)

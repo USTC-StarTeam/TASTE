@@ -7,6 +7,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.vscode/
 .DS_Store
 framework/.venv/
 web/frontend/client/node_modules/
@@ -21,7 +22,6 @@ tmp/
 tmp_*.txt
 .probe/
 .runtime/
-runtime/
 taste_web*.log
 backups/
 
@@ -82,7 +82,7 @@ outputs/
 *.rar
 *.7z
 
-# Legacy package-local generated runtime dirs; canonical runtime is /runtime and ignored above.
+# Legacy generated runtime dirs retained only for ignore compatibility.
 framework/auto_research/runs/
 framework/auto_research/.config.json
 framework/auto_research/local_database/

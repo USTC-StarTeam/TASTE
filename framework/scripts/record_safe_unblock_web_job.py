@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(os.environ.get('WORKSPACE_ROOT') or Path(__file__).resolve().parents[1]).expanduser().resolve()
-WEB_JOBS = ROOT / 'runtime' / 'state' / 'web_jobs.json'
+WEB_JOBS = ROOT / 'web' / '.runtime' / 'state' / 'web_jobs.json'
 
 
 def load(path: Path, default: Any) -> Any:

@@ -27,6 +27,13 @@ from taste_pythonpath import script_resolver
 SCRIPTS = script_resolver(ROOT)
 
 
+def experimenting_cmd(action: str, project: str, venue: str = "") -> list[str]:
+    cmd = [sys.executable, str(ROOT / "framework" / "scripts" / "run_module.py"), "experimenting", "--action", action, "--project", project]
+    if venue:
+        cmd.extend(["--venue", venue])
+    return cmd
+
+
 def load_json(path: Path, default):
     try:
         return json.loads(path.read_text(encoding="utf-8")) if path.exists() else default
@@ -221,13 +228,14 @@ def gate_passed(gate: dict, *, decision: str | None = None) -> bool:
 def stop_for_current_find_full_text_gate(args, paths, agent_id: str) -> None:
     ensure_cmd = [
         management_python(),
-        str(ROOT / "modules" / "reading" / "main.py"),
+        str(ROOT / "framework" / "scripts" / "run_module.py"),
+        "reading",
         "--action",
         "current_find_research_plan",
         "--project",
         args.project,
     ]
-    run(ensure_cmd, required=False, project=args.project, agent_id=agent_id, stage="current-find-read-idea-plan-gate")
+    run(ensure_cmd, required=False, project=args.project, agent_id=agent_id, stage="current-find-readiness-gate")
     gate = current_find_full_text_gate_status(paths)
     if not isinstance(gate, dict) or not gate.get("blocking"):
         return
@@ -236,7 +244,7 @@ def stop_for_current_find_full_text_gate(args, paths, agent_id: str) -> None:
     state_path.write_text(json.dumps({
         "project": args.project,
         "status": "blocked_current_find_full_text_reading",
-        "stage": "current-find-read-idea-plan-gate",
+        "stage": "current-find-readiness-gate",
         "gate": gate,
         "policy": "Standalone autonomous research must not enter reference repair, experiment iteration, trajectory, paper writing, or claim repair until the Read-stage reading packet has verified full-text evidence or eligible same-run replacements plus non-placeholder deep-read synthesis.",
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -365,7 +373,7 @@ def main() -> None:
     paths = build_paths(args.project)
     stop_for_current_find_full_text_gate(args, paths, agent_id)
     selected_execution_contract = stop_for_missing_selected_plan(args, paths, agent_id) if args.execute_plan else compact_selected_contract(current_find_execution_contract(paths))
-    run([sys.executable, str(SCRIPTS / "audit_reference_reproduction.py"), "--project", args.project] + (["--venue", args.venue] if args.venue else []), required=False, project=args.project, agent_id=agent_id, stage="reference-reproduction-gate")
+    run(experimenting_cmd("reference_reproduction", args.project, args.venue), required=False, project=args.project, agent_id=agent_id, stage="reference-reproduction-gate")
     run([sys.executable, str(SCRIPTS / "audit_selected_base_viability.py"), "--project", args.project] + (["--venue", args.venue] if args.venue else []), required=False, project=args.project, agent_id=agent_id, stage="selected-base-viability-gate")
     run([sys.executable, str(SCRIPTS / "build_blocker_action_plan.py"), "--project", args.project] + (["--venue", args.venue] if args.venue else []), required=False, project=args.project, agent_id=agent_id, stage="blocker-action-plan")
     selected_gate_required, _, _ = selected_base_requires_base_switch_gate(paths)
@@ -386,21 +394,16 @@ def main() -> None:
             prompt_path.write_text(reference_gate_switch_prompt(args.project, args.venue, reference_gate, action_plan), encoding="utf-8")
             run([
                 sys.executable,
-                str(SCRIPTS / "claude_project_session.py"),
+                str(ROOT / "framework" / "scripts" / "run_module.py"),
+                "environment",
+                "--action",
+                "chat",
                 "--project",
                 args.project,
-                "--stage",
-                "reference-base-switch",
                 "--message-file",
                 str(prompt_path),
-                "--timeout-sec",
-                "14400",
-                "--agent-id",
-                agent_id,
             ], required=False, project=args.project, agent_id=agent_id, stage="reference-base-switch")
-            env_cmd = [sys.executable, str(SCRIPTS / "run_environment_stage.py"), "--project", args.project, "--real-bootstrap-env", "--repo-search-rounds", "3", "--skip-reference-repair"]
-            if args.venue:
-                env_cmd.extend(["--venue", args.venue])
+            env_cmd = [sys.executable, str(ROOT / "framework" / "scripts" / "run_module.py"), "environment", "--action", "deploy_from_plan", "--project", args.project]
             run(env_cmd, required=False, project=args.project, agent_id=agent_id, stage="reference-base-switch-search")
         else:
             upsert_agent(
@@ -426,8 +429,8 @@ def main() -> None:
                 "--agent-id",
                 agent_id,
             ], required=False, project=args.project, agent_id=agent_id, stage="reference-reproduction-repair")
-        run([sys.executable, str(SCRIPTS / "audit_reference_reproduction.py"), "--project", args.project] + (["--venue", args.venue] if args.venue else []), required=False, project=args.project, agent_id=agent_id, stage="reference-reproduction-gate-after-repair")
-        run([sys.executable, str(SCRIPTS / "audit_experiment_iteration.py"), "--project", args.project], required=False, project=args.project, agent_id=agent_id, stage="experiment-iteration-audit")
+        run(experimenting_cmd("reference_reproduction", args.project, args.venue), required=False, project=args.project, agent_id=agent_id, stage="reference-reproduction-gate-after-repair")
+        run(experimenting_cmd("audit_iteration", args.project), required=False, project=args.project, agent_id=agent_id, stage="experiment-iteration-audit")
         run([sys.executable, str(SCRIPTS / "audit_paper_evidence.py"), "--project", args.project] + (["--venue", args.venue] if args.venue else []), required=False, project=args.project, agent_id=agent_id, stage="paper-evidence-gate")
         run([sys.executable, str(SCRIPTS / "audit_submission_readiness.py"), "--project", args.project] + (["--venue", args.venue] if args.venue else []), required=False, project=args.project, agent_id=agent_id, stage="submission-readiness")
         run([sys.executable, str(SCRIPTS / "build_research_trajectory_system.py"), "--project", args.project] + (["--venue", args.venue] if args.venue else []), required=False, project=args.project, agent_id=agent_id, stage="trajectory")
@@ -441,56 +444,54 @@ def main() -> None:
             run([sys.executable, str(SCRIPTS / "generate_handoff.py"), "--project", args.project], required=False, project=args.project, agent_id=agent_id, stage="handoff")
             return
 
-    loop_cmd = [sys.executable, str(SCRIPTS / "run_loop.py"), "--project", args.project, "--iterations", str(args.iterations)]
-    if args.prompt:
-        loop_cmd.extend(["--prompt", args.prompt])
+    project_cmd = [sys.executable, str(SCRIPTS / "run_project.py"), "--project", args.project]
     if args.topic:
-        loop_cmd.extend(["--topic", args.topic])
+        project_cmd.extend(["--topic", args.topic])
     if args.max_results is not None:
-        loop_cmd.extend(["--max-results", str(args.max_results)])
+        project_cmd.extend(["--max-results", str(args.max_results)])
     if args.discover_retries is not None:
-        loop_cmd.extend(["--discover-retries", str(args.discover_retries)])
+        project_cmd.extend(["--discover-retries", str(args.discover_retries)])
     if args.skip_llm:
-        loop_cmd.append("--skip-llm")
+        project_cmd.append("--skip-llm")
     if args.skip_semantic_scholar:
-        loop_cmd.append("--skip-semantic-scholar")
+        project_cmd.append("--skip-semantic-scholar")
     if args.skip_github:
-        loop_cmd.append("--skip-github")
+        project_cmd.append("--skip-github")
     if args.skip_initialization:
-        loop_cmd.append("--skip-initialization")
+        project_cmd.append("--skip-initialization")
     if args.skip_discovery:
         os.environ.setdefault("USE_EXISTING_LITERATURE_PACKET", "1")
-        loop_cmd.append("--skip-discovery")
+        project_cmd.append("--skip-discovery")
     if args.deep_literature_survey:
-        loop_cmd.append("--deep-literature-survey")
+        project_cmd.append("--deep-literature-survey")
     if args.execute_plan:
-        loop_cmd.append("--execute-plan")
+        project_cmd.append("--execute-plan")
     if args.prepare_env:
-        loop_cmd.append("--prepare-env")
+        project_cmd.append("--prepare-env")
     if args.real_bootstrap_env:
-        loop_cmd.append("--real-bootstrap-env")
+        project_cmd.append("--real-bootstrap-env")
     if args.benchmark:
-        loop_cmd.extend(["--benchmark", args.benchmark])
+        project_cmd.extend(["--benchmark", args.benchmark])
     if args.metric:
-        loop_cmd.extend(["--metric", args.metric])
+        project_cmd.extend(["--metric", args.metric])
     if args.dataset:
-        loop_cmd.extend(["--dataset", args.dataset])
+        project_cmd.extend(["--dataset", args.dataset])
     if args.repo_name:
-        loop_cmd.extend(["--repo-name", args.repo_name])
+        project_cmd.extend(["--repo-name", args.repo_name])
     if args.repo_path:
-        loop_cmd.extend(["--repo-path", args.repo_path])
+        project_cmd.extend(["--repo-path", args.repo_path])
     if args.command_template:
-        loop_cmd.extend(["--command-template", args.command_template])
+        project_cmd.extend(["--command-template", args.command_template])
     if args.max_launches is not None:
-        loop_cmd.extend(["--max-launches", str(args.max_launches)])
-    if args.conda_env:
-        loop_cmd.extend(["--conda-env", args.conda_env])
+        project_cmd.extend(["--max-launches", str(args.max_launches)])
     if args.venue:
-        loop_cmd.extend(["--venue", args.venue])
+        project_cmd.extend(["--venue", args.venue])
     for method in args.parallel_method:
-        loop_cmd.extend(["--parallel-method", method])
+        project_cmd.extend(["--parallel-method", method])
 
-    run(loop_cmd, project=args.project, agent_id=agent_id, stage="experiment")
+    for iteration in range(max(1, int(args.iterations or 1))):
+        upsert_agent(args.project, agent_id, status="running", stage="experiment", current_step=f"running project iteration {iteration + 1}/{max(1, int(args.iterations or 1))}")
+        run(project_cmd, project=args.project, agent_id=agent_id, stage="experiment")
 
     supervisor_cmd = [
         sys.executable,
@@ -509,8 +510,8 @@ def main() -> None:
     # Rebuild gates after experiments before paper production. Paper writing is
     # blocked until the reproduced base is still valid and a real-data candidate
     # beats a comparable audit-ready baseline/control.
-    run([sys.executable, str(SCRIPTS / "audit_reference_reproduction.py"), "--project", args.project] + (["--venue", args.venue] if args.venue else []), required=False, project=args.project, agent_id=agent_id, stage="reference-reproduction-gate-post-experiment")
-    run([sys.executable, str(SCRIPTS / "audit_experiment_iteration.py"), "--project", args.project], required=False, project=args.project, agent_id=agent_id, stage="experiment-iteration-audit-post-experiment")
+    run(experimenting_cmd("reference_reproduction", args.project, args.venue), required=False, project=args.project, agent_id=agent_id, stage="reference-reproduction-gate-post-experiment")
+    run(experimenting_cmd("audit_iteration", args.project), required=False, project=args.project, agent_id=agent_id, stage="experiment-iteration-audit-post-experiment")
     run([sys.executable, str(SCRIPTS / "audit_paper_evidence.py"), "--project", args.project] + (["--venue", args.venue] if args.venue else []), required=False, project=args.project, agent_id=agent_id, stage="paper-evidence-gate-post-experiment")
     run([sys.executable, str(SCRIPTS / "audit_submission_readiness.py"), "--project", args.project] + (["--venue", args.venue] if args.venue else []), required=False, project=args.project, agent_id=agent_id, stage="submission-readiness-post-experiment")
     run([sys.executable, str(SCRIPTS / "audit_selected_base_viability.py"), "--project", args.project] + (["--venue", args.venue] if args.venue else []), required=False, project=args.project, agent_id=agent_id, stage="selected-base-viability-gate-post-experiment")
@@ -551,8 +552,8 @@ def main() -> None:
             "--agent-id",
             agent_id,
         ], required=False, project=args.project, agent_id=agent_id, stage="experiment-evidence-repair")
-        run([sys.executable, str(SCRIPTS / "audit_reference_reproduction.py"), "--project", args.project] + (["--venue", args.venue] if args.venue else []), required=False, project=args.project, agent_id=agent_id, stage="reference-reproduction-gate-after-experiment-repair")
-        run([sys.executable, str(SCRIPTS / "audit_experiment_iteration.py"), "--project", args.project], required=False, project=args.project, agent_id=agent_id, stage="experiment-iteration-audit-after-repair")
+        run(experimenting_cmd("reference_reproduction", args.project, args.venue), required=False, project=args.project, agent_id=agent_id, stage="reference-reproduction-gate-after-experiment-repair")
+        run(experimenting_cmd("audit_iteration", args.project), required=False, project=args.project, agent_id=agent_id, stage="experiment-iteration-audit-after-repair")
         run([sys.executable, str(SCRIPTS / "audit_paper_evidence.py"), "--project", args.project] + (["--venue", args.venue] if args.venue else []), required=False, project=args.project, agent_id=agent_id, stage="paper-evidence-gate-after-experiment-repair")
         run([sys.executable, str(SCRIPTS / "audit_submission_readiness.py"), "--project", args.project] + (["--venue", args.venue] if args.venue else []), required=False, project=args.project, agent_id=agent_id, stage="submission-readiness-after-experiment-repair")
         run([sys.executable, str(SCRIPTS / "audit_selected_base_viability.py"), "--project", args.project] + (["--venue", args.venue] if args.venue else []), required=False, project=args.project, agent_id=agent_id, stage="selected-base-viability-gate-after-repair")

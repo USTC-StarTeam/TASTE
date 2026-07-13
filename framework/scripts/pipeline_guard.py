@@ -369,15 +369,20 @@ def append_guard_status(project: str, entrypoint: str, venue: str, action: str, 
 
 
 def run_safe_unblock(project: str, venue: str, *, download_timeout_sec: int = 120) -> int:
+    message = (
+        f"Must only inspect and repair the current Environment repository, data, Conda, and loader blockers for venue {venue or 'unspecified'}. "
+        "Must write project-local evidence for every repair and finish with the exact remaining Environment gate."
+    )
     cmd = [
         sys.executable,
-        str(ROOT / "modules" / "environment" / "scripts" / "run_safe_unblock.py"),
+        str(ROOT / "framework" / "scripts" / "run_module.py"),
+        "environment",
+        "--action",
+        "chat",
         "--project",
         project,
-        "--venue",
-        venue,
-        "--download-timeout-sec",
-        str(download_timeout_sec),
+        "--message",
+        message,
     ]
     proc = subprocess.run(cmd, cwd=ROOT, text=True)
     return int(proc.returncode or 0)

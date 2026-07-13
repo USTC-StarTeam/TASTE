@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import shlex
 import subprocess
@@ -16,6 +15,7 @@ from taste_backend.orchestration.state import WorkflowState, record_from_result,
 from taste_backend.runtime.context import FrameworkContext
 from taste_backend.runtime.executor import run_module
 from taste_backend.status.render import render_markdown
+from auto_research.environment_bridge import prepare_environment_invocation, sync_environment_outputs
 
 
 def parse_module_args(items: list[str]) -> dict[str, list[str]]:
@@ -80,21 +80,65 @@ def _flag_value(command: list[str], flag: str) -> str:
     return ""
 
 
-def _module_root_from_command(result) -> Path | None:
-    marker = f"modules/{result.stage}/main.py"
-    for item in result.command:
-        text = str(item)
-        if text.endswith(marker):
-            return Path(text).expanduser().resolve().parent
-    return None
+def _stdout_text(result, limit: int = 500_000) -> str:
+    path_text = str(getattr(result, "stdout_log", "") or "")
+    if path_text:
+        path = Path(path_text)
+        try:
+            if path.exists() and path.is_file():
+                return path.read_text(encoding="utf-8", errors="replace")[-limit:]
+        except Exception:
+            pass
+    return str(getattr(result, "stdout_tail", "") or "")[-limit:]
 
 
-def _module_run_dir(result) -> Path | None:
-    run_id = _flag_value(list(result.command), "--run-id")
-    module_root = _module_root_from_command(result)
-    if not run_id or module_root is None:
+def _json_dicts_from_text(text: str) -> list[dict[str, Any]]:
+    decoder = json.JSONDecoder()
+    payloads: list[dict[str, Any]] = []
+    index = 0
+    while index < len(text):
+        start = text.find("{", index)
+        if start < 0:
+            break
+        try:
+            payload, end = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            index = start + 1
+            continue
+        if isinstance(payload, dict):
+            payloads.append(payload)
+        index = start + max(end, 1)
+    return payloads
+
+
+def _resolve_experimenting_run_dir(ctx: FrameworkContext, value: Any) -> Path | None:
+    text = str(value or "").strip()
+    if not text:
         return None
-    return module_root / "runs" / run_id
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        path = (ctx.workspace_root / path).resolve()
+    else:
+        path = path.resolve()
+    runs_root = (ctx.workspace_root / "modules" / "experimenting" / ".runtime" / "runs").resolve()
+    try:
+        path.relative_to(runs_root)
+    except ValueError:
+        return None
+    if path.name == "latest_run" or not path.exists() or not path.is_dir():
+        return None
+    return path
+
+
+def _experimenting_run_dir_from_result(ctx: FrameworkContext, result) -> Path | None:
+    legacy_output_root = _resolve_experimenting_run_dir(ctx, _flag_value(list(result.command), "--output-root"))
+    if legacy_output_root is not None:
+        return legacy_output_root
+    for payload in reversed(_json_dicts_from_text(_stdout_text(result))):
+        run_dir = _resolve_experimenting_run_dir(ctx, payload.get("output_root") or payload.get("run_dir"))
+        if run_dir is not None:
+            return run_dir
+    return None
 
 
 def _text_items(value: Any, limit: int = 4) -> list[str]:
@@ -106,11 +150,11 @@ def _text_items(value: Any, limit: int = 4) -> list[str]:
 
 
 def _environment_blocker_reason(result) -> str:
-    run_dir = _module_run_dir(result)
-    if run_dir is None:
-        return ""
-    decision_payload = read_json(run_dir / "environment_deployment_decision.json", {})
-    if not isinstance(decision_payload, dict):
+    decision_payload = next(
+        (payload for payload in reversed(_json_dicts_from_text(_stdout_text(result))) if payload.get("decision")),
+        {},
+    )
+    if not decision_payload:
         return ""
     verdict = decision_payload.get("verdict") if isinstance(decision_payload.get("verdict"), dict) else {}
     parts: list[str] = []
@@ -153,373 +197,42 @@ def _record_blocker(state: WorkflowState, decision: Decision, result) -> None:
     })
 
 
-def _current_find_run_id(project_root: Path) -> str:
-    for rel in [
-        "planning/finding/find_progress.json",
-        "state/current_find_research_plan.json",
-        "state/current_find_recommendation_projection.json",
-        "planning/finding/find_results.json",
-    ]:
-        payload = read_json(project_root / rel, {})
-        if isinstance(payload, dict):
-            value = str(payload.get("run_id") or payload.get("find_run_id") or payload.get("source_run_id") or payload.get("current_find_run_id") or "").strip()
-            if value:
-                return value
-    return ""
-
-
-def _current_selected_execution_ids(project_root: Path) -> tuple[str, str]:
-    for rel in ["state/current_find_research_plan.json", "planning/finding/plans.json"]:
-        payload = read_json(project_root / rel, {})
-        if isinstance(payload, dict):
-            plan_id = str(payload.get("selected_plan_id") or "").strip()
-            idea_id = str(payload.get("selected_idea_id") or "").strip()
-            if plan_id or idea_id:
-                return plan_id, idea_id
-    return "", ""
-
-
-def _environment_autonomous_deploy_module(ctx: FrameworkContext):
-    module_root = ctx.workspace_root / "modules" / "environment"
-    script = module_root / "scripts" / "orchestration" / "autonomous_deploy.py"
-    if not script.exists():
-        raise FileNotFoundError(f"缺少 environment handoff 刷新脚本：{script}")
-    for entry in [str(module_root), str(module_root / "scripts")]:
-        if entry not in sys.path:
-            sys.path.insert(0, entry)
-    spec = importlib.util.spec_from_file_location("taste_environment_autonomous_deploy_sync", script)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"无法加载 environment handoff 刷新脚本：{script}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _refresh_environment_handoff_for_run(ctx: FrameworkContext, run_dir: Path, decision: dict[str, Any]) -> dict[str, Any]:
-    normalized = read_json(run_dir / "input_plan.normalized.json", {})
-    repo_info = read_json(run_dir / "repo_info.json", {})
-    if not isinstance(decision, dict) or not isinstance(normalized, dict) or not isinstance(repo_info, dict):
-        return decision if isinstance(decision, dict) else {}
-    if not normalized or not repo_info:
-        return decision
-    module = _environment_autonomous_deploy_module(ctx)
-    refreshed = module.attach_environment_handoff(dict(decision), run_dir, normalized, repo_info)
-    write_json(run_dir / "environment_deployment_decision.json", refreshed)
-    latest_path = ctx.workspace_root / "modules" / "environment" / "latest_decision.json"
-    latest = read_json(latest_path, {})
-    if not isinstance(latest, dict) or not latest or str(latest.get("run_id") or "") == str(refreshed.get("run_id") or ""):
-        write_json(latest_path, refreshed)
-    return refreshed
-
-
-def _environment_run_dir_from_arg(ctx: FrameworkContext, value: str) -> Path:
-    raw = Path(str(value or "")).expanduser()
-    run_dir = raw if raw.is_absolute() else ctx.workspace_root / raw
-    run_dir = run_dir.resolve()
-    runs_root = (ctx.workspace_root / "modules" / "environment" / "runs").resolve()
-    try:
-        run_dir.relative_to(runs_root)
-    except ValueError as exc:
-        raise SystemExit(f"environment run_dir 必须位于 {runs_root} 内：{run_dir}") from exc
-    return run_dir
-
-
-def _sync_environment_decision_to_project(ctx: FrameworkContext, project: str, run_dir: Path, decision: dict[str, Any]) -> str:
-    if not project or not isinstance(decision, dict):
-        return ""
-    handoff = decision.get("environment_handoff") if isinstance(decision.get("environment_handoff"), dict) else {}
-    if handoff.get("ready_for_experimenting") is not True:
-        return ""
-    repo = handoff.get("repo") if isinstance(handoff.get("repo"), dict) else {}
-    conda = handoff.get("conda") if isinstance(handoff.get("conda"), dict) else {}
-    paper = handoff.get("paper") if isinstance(handoff.get("paper"), dict) else {}
-    repo_path = str(repo.get("repo_path") or "").strip()
-    if not repo_path or not Path(repo_path).exists():
-        return ""
-    project_root = ctx.workspace_root / "projects" / project
-    project_state = project_root / "state"
-    project_state.mkdir(parents=True, exist_ok=True)
-    current_run = _current_find_run_id(project_root)
-    current_plan_id, current_idea_id = _current_selected_execution_ids(project_root)
-    selected_plan_id = str(paper.get("selected_plan_id") or current_plan_id).strip()
-    selected_idea_id = str(paper.get("selected_idea_id") or current_idea_id).strip()
-    selected = {
-        "name": str(repo.get("repo_url") or repo_path),
-        "repo": str(repo.get("repo_url") or ""),
-        "repo_url": str(repo.get("repo_url") or ""),
-        "repo_path": repo_path,
-        "local_path": repo_path,
-        "head_commit": str(repo.get("head_commit") or ""),
-        "fresh_find_run_id": current_run,
-        "current_find_run_id": current_run,
-        "selected_plan_id": selected_plan_id,
-        "selected_idea_id": selected_idea_id,
-        "selection_stage": "environment_claude_code",
-        "selected_by_stage": "environment_claude_code",
-        "selection_gate": "environment_handoff_ready_for_experimenting",
-        "environment_run_id": str(handoff.get("run_id") or decision.get("run_id") or run_dir.name),
-    }
-    conda_prefix = str(conda.get("prefix") or "")
-    experiment_python = str(conda.get("python") or (str(Path(conda_prefix) / "bin" / "python") if conda_prefix else ""))
-    env_record = {
-        "schema_version": "project.environment_handoff_projection.v1",
-        "updated_at": utc_now(),
-        "status": "ready_for_experimenting",
-        "valid": True,
-        "source": str(run_dir / "environment_deployment_decision.json"),
-        "environment_handoff": handoff,
-        "repo_path": repo_path,
-        "local_path": repo_path,
-        "repo_url": str(repo.get("repo_url") or ""),
-        "conda_env": conda_prefix or str(conda.get("env_name") or ""),
-        "conda_env_prefix": conda_prefix,
-        "experiment_python": experiment_python,
-        "pending_downstream_metrics": handoff.get("pending_downstream_metrics") if isinstance(handoff.get("pending_downstream_metrics"), list) else [],
-        "selected": selected,
-    }
-    selection_record = {
-        "schema_version": "project.evidence_ready_repo_selection.v2",
-        "status": "ready_for_experimenting",
-        "decision": "environment_handoff_ready_for_experimenting",
-        "valid": True,
-        "accepted_by_claude": True,
-        "selection_stage": "environment_claude_code",
-        "selected_by_stage": "environment_claude_code",
-        "selection_gate": "environment_handoff_ready_for_experimenting",
-        "fresh_find_run_id": current_run,
-        "current_find_run_id": current_run,
-        "selected_plan_id": selected_plan_id,
-        "selected_idea_id": selected_idea_id,
-        "selected": selected,
-        "environment_handoff_path": str(project_state / "environment_handoff.json"),
-    }
-    active_repo = {
-        "name": selected["name"],
-        "repo": selected["repo"],
-        "repo_url": selected["repo_url"],
-        "repo_path": repo_path,
-        "local_path": repo_path,
-        "head_commit": selected["head_commit"],
-        "conda_env": env_record["conda_env"],
-        "conda_env_prefix": env_record["conda_env_prefix"],
-        "experiment_python": env_record["experiment_python"],
-        "environment_run_id": selected["environment_run_id"],
-        "role": "main_fresh_base",
-        "selection_stage": "environment_claude_code",
-        "selection_gate": "environment_handoff_ready_for_experimenting",
-        "selected_plan_id": selected_plan_id,
-        "selected_idea_id": selected_idea_id,
-    }
-    write_json(project_state / "environment_handoff.json", env_record)
-    write_json(project_state / "evidence_ready_repo_selection.json", selection_record)
-    write_json(project_state / "active_repo.json", active_repo)
-    return repo_path
-
-
 def _sync_environment_handoff_to_project(ctx: FrameworkContext, state: WorkflowState, result) -> None:
     if result.stage != "environment" or not state.project:
         return
-    run_dir = _module_run_dir(result)
-    if run_dir is None:
-        return
-    decision = read_json(run_dir / "environment_deployment_decision.json", {})
-    if not isinstance(decision, dict):
-        return
-    repo_path = _sync_environment_decision_to_project(ctx, state.project, run_dir, decision)
-    if repo_path:
-        state.notes.append(f"environment handoff 已同步到项目 {state.project}: {repo_path}")
-
-
-def _registry_rows(payload: Any) -> list[dict[str, Any]]:
-    if isinstance(payload, list):
-        return [row for row in payload if isinstance(row, dict)]
-    if isinstance(payload, dict):
-        for key in ("experiments", "runs", "rows"):
-            rows = payload.get(key)
-            if isinstance(rows, list):
-                return [row for row in rows if isinstance(row, dict)]
-    return []
-
-
-def _experiment_row_identity(row: dict[str, Any]) -> str:
-    run_id = str(row.get("run_id") or "").strip()
-    iteration = str(row.get("iteration") or "").strip()
-    if run_id and iteration:
-        return f"run:{run_id}:iteration:{iteration}"
-    if run_id:
-        return f"run:{run_id}"
-    artifact_path = str(row.get("artifact_path") or "").strip()
-    if artifact_path:
-        return f"artifact:{artifact_path}"
-    return "experiment:" + str(row.get("experiment_id") or row.get("name") or row.get("id") or "").strip()
-
-
-def _merge_nonempty(base: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
-    merged = dict(base)
-    for key, value in update.items():
-        if value in (None, "", [], {}):
-            continue
-        merged[key] = value
-    return merged
-
-
-def _first_summary_command(summary: dict[str, Any]) -> str:
-    commands = summary.get("commands")
-    if not isinstance(commands, list):
-        return ""
-    for item in commands:
-        if isinstance(item, dict):
-            text = str(item.get("command") or item.get("cmd") or "").strip()
-        else:
-            text = str(item or "").strip()
-        if text:
-            return text
-    return ""
-
-
-def _enrich_experiment_row_from_artifacts(row: dict[str, Any]) -> dict[str, Any]:
-    enriched = dict(row)
-    artifact_text = str(enriched.get("artifact_path") or "").strip()
-    artifact_dir = Path(artifact_text).expanduser() if artifact_text else None
-    if artifact_dir and artifact_dir.exists() and artifact_dir.is_dir():
-        wrapper_path = artifact_dir / "wrapper_iteration_result.json"
-        if wrapper_path.exists():
-            enriched.setdefault("wrapper_iteration_result_path", str(wrapper_path))
-        summary_path = Path(str(enriched.get("experiment_iteration_summary_path") or artifact_dir / "experiment_iteration_summary.json")).expanduser()
-        if summary_path.exists():
-            enriched["experiment_iteration_summary_path"] = str(summary_path)
-            summary = read_json(summary_path, {})
-            if isinstance(summary, dict):
-                command = _first_summary_command(summary)
-                if command and not enriched.get("command"):
-                    enriched["command"] = command
-                if summary.get("metrics") and not enriched.get("metrics"):
-                    enriched["metrics"] = summary.get("metrics")
-                if summary.get("failure_reason") and not enriched.get("failure_reason"):
-                    enriched["failure_reason"] = summary.get("failure_reason")
-                judgment = summary.get("judgment") if isinstance(summary.get("judgment"), dict) else {}
-                verdict = str(judgment.get("verdict") or "").strip()
-                weakest = str(judgment.get("weakest_slice") or "").strip()
-                if verdict and not enriched.get("claim_verdict"):
-                    enriched["claim_verdict"] = verdict
-                if weakest and not enriched.get("notes"):
-                    enriched["notes"] = f"weakest_slice={weakest}"
-        metrics_path = artifact_dir / "metrics.json"
-        if metrics_path.exists():
-            enriched.setdefault("metrics_path", str(metrics_path))
-            metrics_payload = read_json(metrics_path, {})
-            if isinstance(metrics_payload, dict):
-                run_metadata = metrics_payload.get("run_metadata") if isinstance(metrics_payload.get("run_metadata"), dict) else {}
-                dataset = str(run_metadata.get("dataset") or "").strip()
-                if dataset and not enriched.get("dataset"):
-                    enriched["dataset"] = dataset
-                if dataset.lower().startswith("synthetic") and not enriched.get("decision"):
-                    enriched["decision"] = "synthetic_only"
-                scalar_metrics = {
-                    str(key): value
-                    for key, value in metrics_payload.items()
-                    if isinstance(value, (int, float, str))
-                }
-                if scalar_metrics:
-                    merged_metrics = dict(enriched.get("metrics") or {}) if isinstance(enriched.get("metrics"), dict) else {}
-                    merged_metrics.update({key: value for key, value in scalar_metrics.items() if key not in merged_metrics})
-                    enriched["metrics"] = merged_metrics
-    return enriched
-
-
-def _upsert_project_experiment_rows(project_root: Path, rows: list[dict[str, Any]], *, source: str) -> int:
-    if not rows:
-        return 0
-    registry_path = project_root / "state" / "experiment_registry.json"
-    existing_payload = read_json(registry_path, [])
-    existing = _registry_rows(existing_payload)
-    by_id: dict[str, dict[str, Any]] = {}
-    order: list[str] = []
-    for row in existing:
-        identity = _experiment_row_identity(row)
-        if identity and identity not in by_id:
-            order.append(identity)
-        by_id[identity] = row
-    changed = 0
-    for raw_row in rows:
-        row = _enrich_experiment_row_from_artifacts(raw_row)
-        row.setdefault("project_record_source", source)
-        identity = _experiment_row_identity(row)
-        if not identity:
-            continue
-        if identity not in by_id:
-            order.append(identity)
-            by_id[identity] = row
-            changed += 1
-            continue
-        merged = _merge_nonempty(by_id[identity], row)
-        if merged != by_id[identity]:
-            changed += 1
-            by_id[identity] = merged
-    if changed:
-        registry_path.parent.mkdir(parents=True, exist_ok=True)
-        write_json(registry_path, [by_id[item] for item in order if item in by_id])
-    return changed
-
-
-def _refresh_project_experiment_table(ctx: FrameworkContext, project: str) -> dict[str, Any]:
-    command = [ctx.python, str(ctx.workspace_root / "framework" / "scripts" / "run_module.py"), "experimenting", "--action", "record_table", "--project", project]
+    stdout_text = _stdout_text(result)
+    payloads = _json_dicts_from_text(stdout_text)
+    result_payload = next(
+        (payload for payload in reversed(payloads) if payload.get("run_dir") or payload.get("environment_run_id")),
+        {},
+    )
     try:
-        proc = subprocess.run(command, cwd=ctx.workspace_root, env=ctx.env(), text=True, capture_output=True, timeout=90)
-        return {"return_code": int(proc.returncode), "stdout_tail": (proc.stdout or "")[-1200:], "stderr_tail": (proc.stderr or "")[-1200:]}
+        synced = sync_environment_outputs(
+            state.project,
+            action=result.action or "deploy_from_plan",
+            result_payload=result_payload,
+            stdout_text=stdout_text,
+        )
     except Exception as exc:
-        return {"return_code": 125, "error": str(exc)}
+        state.notes.append(f"environment 显式 run 同步失败: {exc}")
+        return
+    state.notes.append(
+        f"environment run 已投影到项目 {state.project}: {synced.get('environment_run_id', '')}"
+    )
 
-
-def _sync_experimenting_outputs_to_project(ctx: FrameworkContext, state: WorkflowState, result) -> None:
-    if result.stage != "experimenting" or not state.project:
-        return
-    output_root_text = _flag_value(list(result.command), "--output-root")
-    if not output_root_text:
-        return
-    output_root = Path(output_root_text).expanduser()
-    if not output_root.is_absolute():
-        output_root = (ctx.workspace_root / output_root).resolve()
-    registry_path = output_root / "state" / "experiment_registry.json"
-    rows = _registry_rows(read_json(registry_path, []))
-    if not rows:
-        return
-    project_root = ctx.workspace_root / "projects" / state.project
-    changed = _upsert_project_experiment_rows(project_root, rows, source=str(registry_path))
-    if changed:
-        refresh = _refresh_project_experiment_table(ctx, state.project)
-        if int(refresh.get("return_code") or 0) == 0:
-            state.notes.append(f"experimenting 记录已同步到项目 {state.project}: {changed} 行")
-        else:
-            state.notes.append(f"experimenting 记录已同步到项目 {state.project}: {changed} 行；实验记录表刷新失败 rc={refresh.get('return_code')}")
 
 def sync_environment_handoff(args: argparse.Namespace) -> int:
-    ctx = FrameworkContext.create(
-        run_id=args.run_id or "sync_environment_handoff",
-        state_root=Path(args.state_root) if args.state_root else None,
-        python=args.python,
-        mode="dry-run",
-    )
-    run_dir = _environment_run_dir_from_arg(ctx, args.environment_run_dir)
-    decision = read_json(run_dir / "environment_deployment_decision.json", {})
-    if not isinstance(decision, dict) or not decision:
-        print(json.dumps({"status": "missing_decision", "run_dir": str(run_dir)}, ensure_ascii=False, indent=2))
+    try:
+        payload = sync_environment_outputs(
+            str(args.project or "").strip(),
+            action="deploy_from_plan",
+            result_payload={"run_dir": str(args.environment_run_dir)},
+        )
+    except Exception as exc:
+        print(json.dumps({"status": "sync_failed", "error": str(exc)}, ensure_ascii=False, indent=2))
         return 2
-    if not args.no_refresh:
-        decision = _refresh_environment_handoff_for_run(ctx, run_dir, decision)
-    repo_path = _sync_environment_decision_to_project(ctx, str(args.project or "").strip(), run_dir, decision)
-    payload = {
-        "status": "synced" if repo_path else "not_ready_for_experimenting",
-        "project": str(args.project or ""),
-        "run_dir": str(run_dir),
-        "repo_path": repo_path,
-        "ready_for_experimenting": bool((decision.get("environment_handoff") if isinstance(decision.get("environment_handoff"), dict) else {}).get("ready_for_experimenting")),
-        "decision": decision.get("decision"),
-        "exit_code": decision.get("exit_code"),
-        "environment_handoff_path": str(ctx.workspace_root / "projects" / str(args.project or "") / "state" / "environment_handoff.json") if repo_path else "",
-    }
     print(json.dumps(payload, ensure_ascii=False, indent=2))
-    return 0 if repo_path else 2
+    return 0 if payload.get("ready_for_experimenting") else 2
 
 def run_workflow(args: argparse.Namespace) -> int:
     plan = load_plan_json(args.plan_json)
@@ -564,11 +277,18 @@ def run_workflow(args: argparse.Namespace) -> int:
         state.status = "running"
         save_state(ctx, state, contracts, render_markdown)
 
+        module_args = decision.args or list(state.module_args.get(decision.stage, []))
+        if decision.stage == "environment":
+            module_args = prepare_environment_invocation(
+                state.project,
+                action=decision.action or contract.default_action,
+                args=list(module_args),
+            )
         result = run_module(
             ctx,
             contract=contract,
             action=decision.action or contract.default_action,
-            args=decision.args or list(state.module_args.get(decision.stage, [])),
+            args=module_args,
             index=command_index,
             kind="module",
             timeout_sec=args.timeout_sec,
@@ -576,7 +296,6 @@ def run_workflow(args: argparse.Namespace) -> int:
         command_index += 1
         state.records.append(record_from_result(result, message=decision.reason))
         _sync_environment_handoff_to_project(ctx, state, result)
-        _sync_experimenting_outputs_to_project(ctx, state, result)
         if result.return_code == 0:
             if decision.stage not in state.completed_stages:
                 state.completed_stages.append(decision.stage)
@@ -683,13 +402,12 @@ def build_parser() -> argparse.ArgumentParser:
     contracts.add_argument("--no-contract-probe", action="store_true")
     contracts.set_defaults(func=print_contracts)
 
-    sync = sub.add_parser("sync-environment-handoff", help="从已有 environment run 刷新 handoff 并同步到项目 state。")
+    sync = sub.add_parser("sync-environment-handoff", help="从已有 environment run 同步项目 state。")
     sync.add_argument("--project", required=True, help="项目 ID。")
-    sync.add_argument("--environment-run-dir", required=True, help="modules/environment/runs/<run_id> 目录。")
+    sync.add_argument("--environment-run-dir", required=True, help="modules/environment/.runtime/runs/<run_id> 目录。")
     sync.add_argument("--run-id", default="sync_environment_handoff", help="framework 同步命令自身的 run_id。")
     sync.add_argument("--state-root", default="")
     sync.add_argument("--python", default="")
-    sync.add_argument("--no-refresh", action="store_true", help="只投影已有 decision，不重新计算 handoff。")
     sync.set_defaults(func=sync_environment_handoff)
     return parser
 

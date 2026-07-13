@@ -76,46 +76,6 @@ def _repo_origin_matches(repo_url: str, repo_path: Path) -> bool:
     return target in {_canonical_repo_url(url) for url in _repo_origin_urls(repo_path)}
 
 
-def _legacy_repo_dir_name(repo_url: str) -> str:
-    key = _canonical_repo_url(repo_url)
-    prefix = "https://github.com/"
-    if not key.startswith(prefix):
-        return ""
-    owner_repo = key[len(prefix):].split("/", 1)
-    if len(owner_repo) != 2:
-        return ""
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", f"{owner_repo[0]}_{owner_repo[1]}")
-
-
-def _legacy_repo_dir_name_preserve_case(repo_url: str) -> str:
-    text = str(repo_url or "").strip().rstrip("/")
-    if text.startswith("git@github.com:"):
-        text = "https://github.com/" + text[len("git@github.com:"):]
-    elif text.startswith("ssh://git@github.com/"):
-        text = "https://github.com/" + text[len("ssh://git@github.com/"):]
-    if text.endswith(".git"):
-        text = text[:-4]
-    prefix = "https://github.com/"
-    if not text.startswith(prefix):
-        return ""
-    owner_repo = text[len(prefix):].split("/", 1)
-    if len(owner_repo) != 2:
-        return ""
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", f"{owner_repo[0]}_{owner_repo[1]}")
-
-
-def _historical_clone_patterns(repo_url: str) -> list[str]:
-    patterns = [repo_slug(repo_url)]
-    for legacy in (_legacy_repo_dir_name(repo_url), _legacy_repo_dir_name_preserve_case(repo_url)):
-        if legacy:
-            patterns.extend([legacy, f"{legacy}_*"])
-    out: list[str] = []
-    for item in patterns:
-        if item and item not in out:
-            out.append(item)
-    return out
-
-
 def _looks_like_taste_workspace_copy(repo_path: Path) -> bool:
     if not (repo_path / "工作状态.txt").exists():
         return False
@@ -173,82 +133,12 @@ def _failed_validation_receipt(repo_url: str, target: Path, log_path: Path, reas
     return receipt
 
 
-def _repair_invalid_clone(repo_url: str, target: Path, run_dir: Path, log_path: Path, previous_receipt: dict[str, Any]) -> tuple[dict[str, Any], str]:
+def _repair_invalid_clone(repo_url: str, target: Path, log_path: Path, previous_receipt: dict[str, Any]) -> tuple[dict[str, Any], str]:
     reason = _invalid_repo_reason(repo_url, target)
     if not reason or reason == "missing":
         return previous_receipt, reason
     _remove_path(target)
-    reused, reuse_receipt, _reuse_head = _reuse_historical_clone(repo_url, target, run_dir, log_path)
-    if reused:
-        reuse_receipt["previous_clone_receipt"] = previous_receipt
-        reuse_receipt["invalid_clone_reason"] = reason
-        return reuse_receipt, ""
     return _failed_validation_receipt(repo_url, target, log_path, reason, previous_receipt), reason
-
-
-def _historical_clone_source(repo_url: str, target: Path, runs_root: Path) -> tuple[Path, str]:
-    target_resolved = target.expanduser().resolve()
-    candidates: list[Path] = []
-    seen: set[Path] = set()
-    for pattern in _historical_clone_patterns(repo_url):
-        for candidate in runs_root.glob(f"*/repos/{pattern}"):
-            try:
-                resolved = candidate.expanduser().resolve()
-            except Exception:
-                continue
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            candidates.append(candidate)
-    for candidate in sorted(candidates, key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True):
-        try:
-            resolved = candidate.expanduser().resolve()
-        except Exception:
-            continue
-        if resolved == target_resolved or not (candidate / ".git").exists():
-            continue
-        if _looks_like_taste_workspace_copy(candidate) or not _repo_origin_matches(repo_url, candidate):
-            continue
-        head = _git_head(candidate)
-        if head:
-            return candidate, head
-    return Path(), ""
-
-
-def _reuse_historical_clone(repo_url: str, target: Path, run_dir: Path, log_path: Path) -> tuple[bool, dict[str, Any], str]:
-    source, head = _historical_clone_source(repo_url, target, run_dir.parent)
-    if not source:
-        return False, {}, ""
-    if target.exists():
-        shutil.rmtree(target)
-    shutil.copytree(source, target, symlinks=True, ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache", "outputs", "runs", "logs"))
-    copied_head = _git_head(target)
-    ok = bool(copied_head)
-    receipt = {
-        "command": f"reuse historical clone {source} -> {target}",
-        "tokens": ["reuse_historical_clone", str(source), str(target)],
-        "cwd": str(target.parent),
-        "log_path": str(log_path),
-        "started_at": "",
-        "finished_at": "",
-        "required": True,
-        "status": "passed" if ok else "failed",
-        "return_code": 0 if ok else 128,
-        "stdout_tail": f"reused_from_repo_path={source}\nhead_commit={copied_head or head}\n",
-        "reused_historical_clone": True,
-        "reused_from_repo_path": str(source),
-        "reused_from_head_commit": head,
-    }
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.write_text(
-        f"$ reuse historical clone {source} -> {target}\n"
-        "[本地历史仓库复用] GitHub 直连克隆失败或目标缺失，复用 modules/environment/runs 内同 URL 的已验证克隆。\n"
-        f"source_repo_path={source}\n"
-        f"source_head_commit={head}\n"
-        f"copied_head_commit={copied_head}\n",
-        encoding="utf-8",
-    )
-    return ok, receipt, copied_head or head
 
 
 def clone_or_reuse(repo_url: str, repos_dir: Path, log_dir: Path, branch: str = "", commit: str = "", timeout_sec: int = 900, env: dict[str, str] | None = None) -> dict[str, Any]:
@@ -274,12 +164,7 @@ def clone_or_reuse(repo_url: str, repos_dir: Path, log_dir: Path, branch: str = 
     log_path = log_dir / f"git_clone_{target.name}.log"
     if target.exists() and _invalid_repo_reason(repo_url, target):
         _remove_path(target)
-    reused_before_network = False
-    if not target.exists() and not branch and not commit:
-        reused_before_network, reuse_receipt, _reuse_head = _reuse_historical_clone(repo_url, target, run_dir, log_path)
-        receipt = reuse_receipt if reused_before_network else {}
-    else:
-        receipt = {}
+    receipt: dict[str, Any] = {}
     if not target.exists():
         cmd = ["git", "clone"]
         if not commit:
@@ -288,19 +173,9 @@ def clone_or_reuse(repo_url: str, repos_dir: Path, log_dir: Path, branch: str = 
             cmd.extend(["--branch", branch])
         cmd.extend([repo_url, str(target)])
         receipt = run_logged(cmd, cwd=repos_dir, log_path=log_path, timeout_sec=timeout_sec, env=env)
-        if int(receipt.get("return_code") or 0) != 0 or not _git_head(target):
-            reused, reuse_receipt, _reuse_head = _reuse_historical_clone(repo_url, target, run_dir, log_path)
-            if reused:
-                reuse_receipt["previous_clone_receipt"] = receipt
-                receipt = reuse_receipt
-    elif not reused_before_network:
+    else:
         receipt = run_logged(["git", "fetch", "--all", "--prune"], cwd=target, log_path=log_path, timeout_sec=timeout_sec, required=False, env=env)
-        if not _git_head(target):
-            reused, reuse_receipt, _reuse_head = _reuse_historical_clone(repo_url, target, run_dir, log_path)
-            if reused:
-                reuse_receipt["previous_clone_receipt"] = receipt
-                receipt = reuse_receipt
-    receipt, _invalid_before_checkout = _repair_invalid_clone(repo_url, target, run_dir, log_path, receipt)
+    receipt, _invalid_before_checkout = _repair_invalid_clone(repo_url, target, log_path, receipt)
     checkout_receipt: dict[str, Any] = {}
     if commit and target.exists():
         checkout_receipt = run_logged(["git", "checkout", commit], cwd=target, log_path=log_path, timeout_sec=120, env=env)

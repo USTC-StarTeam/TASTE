@@ -22,23 +22,19 @@ ROOT = _repo_root(PACKAGE_DIR)
 PROJECT_ROOT = ROOT / "framework"
 REFERENCE_ROOT = ROOT / "third_party" / "reference_TASTE_latest"
 PACKAGE_RUNTIME_DIR = PROJECT_ROOT / "scripts" / "auto_research"
-WORKFLOW_RUNTIME_DIR = Path(os.environ.get("WORKFLOW_RUNTIME_DIR") or ROOT / "runtime").expanduser()
-LEGACY_WORKFLOW_RUNTIME_DIR = WORKFLOW_RUNTIME_DIR
+FRAMEWORK_RUNTIME_DIR = Path(os.environ.get("FRAMEWORK_RUNTIME_DIR") or PROJECT_ROOT / ".runtime").expanduser()
+WEB_RUNTIME_DIR = Path(os.environ.get("WEB_RUNTIME_DIR") or ROOT / "web" / ".runtime").expanduser()
+WORKFLOW_RUNTIME_DIR = Path(os.environ.get("WORKFLOW_RUNTIME_DIR") or FRAMEWORK_RUNTIME_DIR).expanduser()
+FRAMEWORK_INPUTS_DIR = FRAMEWORK_RUNTIME_DIR / "inputs"
+FRAMEWORK_LOCKS_DIR = FRAMEWORK_RUNTIME_DIR / "locks"
 DATA_DIR = ROOT / "modules" / "finding" / "data"
 RUNS_DIR = WORKFLOW_RUNTIME_DIR / "runs"
-STATE_DIR = WORKFLOW_RUNTIME_DIR / "state"
+STATE_DIR = WEB_RUNTIME_DIR / "state"
 LOCAL_DATABASE_DIR = WORKFLOW_RUNTIME_DIR / "local_database"
-CONFIG_PATH = WORKFLOW_RUNTIME_DIR / ".config.json"
+CONFIG_PATH = FRAMEWORK_RUNTIME_DIR / ".config.json"
 FINDING_RUNTIME_DIR = Path(os.environ.get("FINDING_RUNTIME_DIR") or ROOT / "modules" / "finding" / ".runtime").expanduser()
 FINDING_RUNS_DIR = FINDING_RUNTIME_DIR / "runs"
-LEGACY_RUNS_DIR = LEGACY_WORKFLOW_RUNTIME_DIR / "runs"
-LEGACY_STATE_DIR = LEGACY_WORKFLOW_RUNTIME_DIR / "state"
-LEGACY_LOCAL_DATABASE_DIR = LEGACY_WORKFLOW_RUNTIME_DIR / "local_database"
-LEGACY_CONFIG_PATH = LEGACY_WORKFLOW_RUNTIME_DIR / ".config.json"
-LEGACY_RUNS_DIRS = (LEGACY_RUNS_DIR,) if LEGACY_RUNS_DIR != RUNS_DIR else tuple()
-RUNS_SEARCH_DIRS = tuple(
-    dict.fromkeys([RUNS_DIR, *LEGACY_RUNS_DIRS, FINDING_RUNS_DIR])
-)
+RUNS_SEARCH_DIRS = tuple(dict.fromkeys([RUNS_DIR, FINDING_RUNS_DIR]))
 
 
 def ensure_directories() -> None:
@@ -50,6 +46,8 @@ def ensure_directories() -> None:
         WORKFLOW_RUNTIME_DIR / "ideation",
         WORKFLOW_RUNTIME_DIR / "planning",
         LOCAL_DATABASE_DIR,
+        FRAMEWORK_INPUTS_DIR,
+        FRAMEWORK_LOCKS_DIR,
     ):
         path.mkdir(parents=True, exist_ok=True)
 

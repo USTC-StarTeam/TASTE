@@ -1707,8 +1707,9 @@
         "coding_backend_enabled",
         "coding_agent_timeout",
         "project_agent_timeout",
+        "load_environment_handoff",
+        "environment_handoff_runtime",
         "repo_env_locked",
-        "load_repo_env_bootstrap",
         "mark_method_env_bootstrap_failed",
         "build_coding_request",
         "write_trial_context",
@@ -1740,7 +1741,7 @@
         "taste_pythonpath",
         "time"
       ],
-      "function_count": 50,
+      "function_count": 51,
       "class_count": 0
     },
     {
