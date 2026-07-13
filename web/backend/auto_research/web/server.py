@@ -475,8 +475,8 @@ def _config_with_project_research_preferences(config: AppConfig, provided_fields
     return config.model_copy(update=updates) if updates else config
 
 
-def _sync_project_research_preferences_from_config(config: AppConfig) -> None:
-    project_path = project_config_path()
+def _sync_project_research_preferences_from_config(config: AppConfig, target_project_path: Path | None = None) -> None:
+    project_path = target_project_path or project_config_path()
     if project_path is None:
         return
     project_config = read_json(project_path, {})
@@ -501,8 +501,8 @@ def _sync_project_research_preferences_from_config(config: AppConfig) -> None:
         write_json(project_path, project_config)
 
 
-def _sync_project_finding_config_from_request(config: AppConfig) -> None:
-    project_path = project_config_path()
+def _sync_project_finding_config_from_request(config: AppConfig, target_project_path: Path | None = None) -> None:
+    project_path = target_project_path or project_config_path()
     if project_path is None:
         return
     _persist_finding_config_from_config(config, config.default_find_selection, project_root=project_path.parent)
@@ -5304,6 +5304,13 @@ def _current_project_for_find_guard() -> tuple[str, Path] | None:
                 root = (Path.cwd() / root).resolve()
             return project, root
     return None
+
+
+def _project_for_find_request(request: FindRequest) -> tuple[str, Path] | None:
+    requested_project = str(request.project or "").strip()
+    if requested_project:
+        return requested_project, _safe_project_root(requested_project)
+    return _current_project_for_find_guard()
 
 
 def _project_context_for_find_run(run_id: str) -> tuple[str, Path] | None:
@@ -10705,7 +10712,10 @@ def api_venue_health(request: VenueHealthRequest) -> dict:
 
 @app.post("/api/jobs/find")
 def api_find(request: FindRequest) -> dict:
-    current = _current_project_for_find_guard()
+    try:
+        current = _project_for_find_request(request)
+    except ValueError as exc:
+        return JSONResponse(status_code=404, content={"error": str(exc)})
     active_blocker = _active_web_stage_job_blocker(current[0] if current else "", "find")
     if active_blocker:
         return JSONResponse(status_code=409, content=active_blocker)
@@ -10729,14 +10739,12 @@ def api_find(request: FindRequest) -> dict:
             },
         )
     selection = normalize_source_selection(request.selection.model_dump() if request.selection else canonical_source_selection(project_config_path=project_config_path()))
-    project_path = project_config_path()
+    project_path = current[1] / "project.json" if current else project_config_path()
     save_canonical_source_selection(selection, project_config_path=project_path)
     config = config.model_copy(update={"default_find_selection": selection})
     _persist_local_llm_config_from_find_request(config, request.config)
-    _sync_project_research_preferences_from_config(config)
-    _sync_project_finding_config_from_request(config)
-    if current:
-        _persist_finding_config_from_config(config, selection, project_root=current[1])
+    _sync_project_research_preferences_from_config(config, project_path)
+    _sync_project_finding_config_from_request(config, project_path)
 
     def runtime_env_for_find() -> dict[str, str]:
         env: dict[str, str] = {}
@@ -10755,6 +10763,7 @@ def api_find(request: FindRequest) -> dict:
             "project": project_id,
             "max_papers": int(config.max_recommended_papers or 20),
             "max_ideas": int(config.max_ideas or 6),
+            "selection": selection,
             "runtime_env": runtime_env_for_find(),
         }
         venue_scan_limit = int(config.venue_title_scan_limit or 0)

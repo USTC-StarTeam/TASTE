@@ -949,8 +949,12 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _effective_source_selection(args: argparse.Namespace) -> dict[str, Any]:
-    project_path = _build_project_paths(args.project).config
-    selection = canonical_source_selection(project_config_path=project_path)
+    explicit_selection = str(getattr(args, "selection_json", "") or "").strip()
+    if explicit_selection:
+        selection = normalize_source_selection(json.loads(explicit_selection))
+    else:
+        project_path = _build_project_paths(args.project).config
+        selection = canonical_source_selection(project_config_path=project_path)
     if getattr(args, "skip_venues", False):
         selection["venue_ids"] = []
     if getattr(args, "skip_arxiv", False):
@@ -1202,6 +1206,7 @@ def main() -> int:
     parser.add_argument("--skip-huggingface", action="store_true")
     parser.add_argument("--skip-github", action="store_true")
     parser.add_argument("--skip-venues", action="store_true", help="Skip slow venue title-index sources and use arXiv/HF/GitHub only.")
+    parser.add_argument("--selection-json", default="", help="Explicit source selection JSON supplied by Framework for this Find request.")
     parser.add_argument("--timeout-sec", type=int, default=int(os.environ.get("TIMEOUT_SEC", "3600")))
     parser.add_argument("--fast-mode", action="store_true", help="Use conservative budgets and skip slower external sources so initialization cannot dominate the loop.")
     parser.add_argument("--deep-survey", action="store_true", help="Use TASTE focused deep survey mode: full venue-corpus audit, category prefiltering, and screened-candidate LLM scoring.")

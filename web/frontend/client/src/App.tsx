@@ -4196,6 +4196,7 @@ function App() {
         void loadProject(researchProject, { resetDrafts: false }).catch(() => {});
       }
       const nextJob = await startFind(savedConfig, savedConfig.default_find_selection, {
+        project: researchProject,
         human_approved_new_find: true,
         approval_reason: "user_explicit_find_run_from_web",
       });

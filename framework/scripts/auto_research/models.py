@@ -99,6 +99,7 @@ class VenueSelection(BaseModel):
 
 
 class FindRequest(BaseModel):
+    project: str = Field(default="", max_length=128, pattern=r"^[A-Za-z0-9_.-]*$")
     config: AppConfig | None = None
     selection: VenueSelection = Field(default_factory=lambda: VenueSelection(**default_source_selection()))
     force_new_find: bool = False

@@ -14923,6 +14923,12 @@ def build_command(payload: dict[str, Any]) -> tuple[str, list[str]]:
             "--timeout-sec",
             str(timeout_sec),
         ]
+        selection = payload.get("selection")
+        if isinstance(selection, dict):
+            cmd.extend([
+                "--selection-json",
+                json.dumps(normalize_source_selection(selection), ensure_ascii=False, separators=(",", ":")),
+            ])
         for key, flag in [
             ("skip_arxiv", "--skip-arxiv"),
             ("skip_huggingface", "--skip-huggingface"),

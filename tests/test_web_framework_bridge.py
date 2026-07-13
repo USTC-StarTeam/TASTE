@@ -632,6 +632,12 @@ def test_web_find_action_uses_framework_run_frontend(monkeypatch, tmp_path):
         "skip_arxiv": True,
         "deep_survey": True,
         "queries": ["protein design"],
+        "selection": {
+            "venue_ids": ["dblp_icml"],
+            "years": [2026],
+            "venue_years": [{"venue_id": "dblp_icml", "year": 2026}],
+            "include_arxiv": True,
+        },
     })
 
     assert project == "demo"
@@ -641,6 +647,64 @@ def test_web_find_action_uses_framework_run_frontend(monkeypatch, tmp_path):
     assert "--skip-arxiv" in cmd
     assert "--deep-survey" in cmd
     assert "--query" in cmd and cmd[cmd.index("--query") + 1] == "protein design"
+    explicit_selection = json.loads(cmd[cmd.index("--selection-json") + 1])
+    assert explicit_selection["venue_ids"] == ["dblp_icml"]
+    assert explicit_selection["venue_years"] == [{"venue_id": "dblp_icml", "year": 2026}]
+    assert explicit_selection["include_arxiv"] is True
+
+
+def test_web_find_request_passes_project_selection_to_framework(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    project_root = tmp_path / "projects" / "demo"
+    (project_root / "state").mkdir(parents=True)
+    (project_root / "project.json").write_text(json.dumps({"name": "demo"}), encoding="utf-8")
+    selection = {
+        "venue_ids": ["dblp_icml"],
+        "years": [2026],
+        "venue_years": [{"venue_id": "dblp_icml", "year": 2026}],
+        "include_arxiv": True,
+    }
+    request = web_server.FindRequest(
+        project="demo",
+        config=web_server.AppConfig(research_interest="protein design"),
+        selection=selection,
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(web_server, "_safe_project_root", lambda project: project_root)
+    monkeypatch.setattr(web_server, "_active_web_stage_job_blocker", lambda *args, **kwargs: None)
+    monkeypatch.setattr(web_server, "_new_find_guard_blocker", lambda *args, **kwargs: None)
+    monkeypatch.setattr(web_server, "_request_config_with_persisted_secrets", lambda config: config)
+    monkeypatch.setattr(web_server, "save_canonical_source_selection", lambda value, project_config_path=None: value)
+    monkeypatch.setattr(web_server, "_persist_local_llm_config_from_find_request", lambda *args, **kwargs: None)
+    monkeypatch.setattr(web_server, "_sync_project_research_preferences_from_config", lambda *args, **kwargs: None)
+    monkeypatch.setattr(web_server, "_sync_project_finding_config_from_request", lambda *args, **kwargs: None)
+    monkeypatch.setattr(web_server, "_persist_jobs", lambda: None)
+
+    def fake_run_action(payload, _log, _should_cancel, _progress):
+        captured.update(payload)
+        return {"status": "done"}
+
+    class FakeJob:
+        job_id = "find_test"
+        result = None
+
+        def as_dict(self):
+            return {"job_id": self.job_id, "result": self.result}
+
+    def fake_start_job(_stage, fn):
+        job = FakeJob()
+        job.result = fn(lambda _line: None, lambda: False, lambda *_args: None)
+        return job
+
+    monkeypatch.setattr(web_server, "run_action", fake_run_action)
+    monkeypatch.setattr(web_server, "start_job", fake_start_job)
+
+    web_server.api_find(request)
+
+    assert captured["project"] == "demo"
+    assert captured["selection"] == web_server.normalize_source_selection(selection)
 
 
 def test_web_paper_chat_action_uses_writing_module(monkeypatch, tmp_path):
