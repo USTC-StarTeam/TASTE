@@ -1208,12 +1208,12 @@ def main() -> int:
                 print(skip_msg, flush=True)
                 (paths.logs / '05a_finding_frontend.log').write_text(skip_msg + '\n', encoding='utf-8')
             else:
-                taste_cmd = [sys.executable, str(script_dir / 'run_frontend.py'), '--project', args.project, '--timeout-sec', str(int(os.environ.get('TIMEOUT_SEC', '3600')))]
+                taste_cmd = [sys.executable, str(script_dir / 'run_frontend.py'), '--project', args.project]
                 if args.deep_literature_survey:
                     taste_cmd.append('--deep-survey')
                 else:
                     taste_cmd.append('--fast-mode')
-                run(taste_cmd, paths.root, paths.logs / '05a_finding_frontend.log', timeout=int(os.environ.get('TIMEOUT_SEC', '3600')) + 120)
+                run(taste_cmd, paths.root, paths.logs / '05a_finding_frontend.log', timeout=None)
             run([sys.executable, str(script_dir / 'sync_outputs.py'), '--project', args.project, '--allow-empty'], paths.root, paths.logs / '05a_taste_sync.log', timeout=120)
             run(module_cmd('reading', 'current_find_research_plan', '--project', args.project, *(['--venue', args.venue] if args.venue else [])), paths.root, paths.logs / '05ab_current_find_research_plan.log', timeout=600)
             (paths.logs / '05aa_current_find_stage_routes.log').write_text('Read, Idea, and Plan use separate public module entrypoints orchestrated by Framework; Find remains the only default LLM-scored module.\n', encoding='utf-8')

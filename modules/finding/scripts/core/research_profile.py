@@ -414,6 +414,11 @@ Important rules:
 - Separate explicit user statements from safe retrieval expansions.
 - Safe expansions must be conservative: direct synonyms, standard abbreviations, or clearly adjacent retrieval terms only.
 - Every safe expansion must include term, source_term, expansion_type, and reason. The source_term must come from explicit user input.
+- For every non-English application term and domain term, include at least one
+  complete English safe expansion that can stand alone as a literature-search
+  phrase. Preserve the full domain/object/task qualifiers from the explicit
+  term, and use that complete explicit term as source_term rather than a
+  context-free substring.
 - Preserve conditional exclusions. For "avoid X unless Y", do not put X in hard_exclusions; put it in conditional_exclusions with the condition.
 - Use soft_penalties for disliked topics that may still be useful if strongly relevant.
 - Use preference_hints for ranking/filtering preferences such as practical systems, reproducible pipelines, or lightweight experiments.
@@ -525,10 +530,9 @@ def profile_retrieval_text(profile: dict[str, Any]) -> str:
 
 """Keyword-targeted search-term extraction for preprint/journal crawling.
 
-This module turns a (possibly non-English) research topic + interest into a
-small, structured set of ENGLISH retrieval signals used to build targeted
-queries for arXiv / bioRxiv / OpenAlex / Crossref instead of pulling an entire
-category and re-ranking locally.
+This module turns a (possibly non-English) research topic, interest, and
+researcher profile into a flat set of ENGLISH retrieval keywords used to build
+targeted queries for arXiv / bioRxiv / OpenAlex / Crossref.
 
 It is deliberately self-contained (no import of find_pipeline) so the four
 source fetchers and the local ranker can share one canonical query model.
@@ -536,14 +540,9 @@ source fetchers and the local ranker can share one canonical query model.
 Output shape (``SearchTerms``-like dict)::
 
     {
-      "anchor_terms":  [..],   # 4-10 CORE English phrases; ANY match == on-topic
-                                # -> arXiv anchor OR-group, the recall workhorse
-      "refine_groups": [[..]], # 0-2 secondary concept groups (OR within each);
-                                # ANDed with the anchor for higher-precision queries
-      "english_keywords": [..],# 6-18 English phrases for TF-IDF / OpenAlex search
-      "biorxiv_search":  "..", # short space-joined keyword string (OpenAlex default.search)
-      "arxiv_categories":[..], # suggested arXiv categories (used only if config empty)
-      "excluded_terms":  [..], # English exclusion hints (optional)
+      "search_keywords": [..], # equal-status English terms, ORed independently
+      "arxiv_categories":[..], # explicit configured categories only
+      "biorxiv_categories":[..], # explicit configured subjects only
       "source":          "llm" | "fallback",
     }
 """
@@ -556,15 +555,50 @@ from finding_runtime import LLMClient
 from finding_runtime import AppConfig
 
 
-SEARCH_TERMS_PROMPT_VERSION = "search_terms_en_groups_v1"
+SEARCH_TERMS_PROMPT_VERSION = "search_terms_flat_equal_v1"
 
-# A pragmatic allow-list of arXiv category prefixes / codes for validation. We do
-# not need the full taxonomy; we just reject obvious hallucinations.
-_ARXIV_CATEGORY_RE = re.compile(
-    r"^(cs|math|stat|q-bio|q-fin|eess|econ|physics|astro-ph|cond-mat|gr-qc|hep-ex|"
-    r"hep-lat|hep-ph|hep-th|math-ph|nlin|nucl-ex|nucl-th|quant-ph)"
-    r"(\.[A-Za-z]{2,})?$"
+_ARXIV_CATEGORY_CODES = {
+    "astro-ph.CO", "astro-ph.EP", "astro-ph.GA", "astro-ph.HE", "astro-ph.IM", "astro-ph.SR",
+    "cond-mat.dis-nn", "cond-mat.mes-hall", "cond-mat.mtrl-sci", "cond-mat.other",
+    "cond-mat.quant-gas", "cond-mat.soft", "cond-mat.stat-mech", "cond-mat.str-el", "cond-mat.supr-con",
+    "cs.AI", "cs.AR", "cs.CC", "cs.CE", "cs.CG", "cs.CL", "cs.CR", "cs.CV", "cs.CY",
+    "cs.DB", "cs.DC", "cs.DL", "cs.DM", "cs.DS", "cs.ET", "cs.FL", "cs.GL", "cs.GR",
+    "cs.GT", "cs.HC", "cs.IR", "cs.IT", "cs.LG", "cs.LO", "cs.MA", "cs.MM", "cs.MS",
+    "cs.NA", "cs.NE", "cs.NI", "cs.OH", "cs.OS", "cs.PF", "cs.PL", "cs.RO", "cs.SC",
+    "cs.SD", "cs.SE", "cs.SI", "cs.SY",
+    "econ.EM", "econ.GN", "econ.TH",
+    "eess.AS", "eess.IV", "eess.SP", "eess.SY",
+    "gr-qc", "hep-ex", "hep-lat", "hep-ph", "hep-th", "math-ph", "nucl-ex", "nucl-th", "quant-ph",
+    "math.AC", "math.AG", "math.AP", "math.AT", "math.CA", "math.CO", "math.CT", "math.CV",
+    "math.DG", "math.DS", "math.FA", "math.GM", "math.GN", "math.GR", "math.GT", "math.HO",
+    "math.IT", "math.KT", "math.LO", "math.MG", "math.MP", "math.NA", "math.NT", "math.OA",
+    "math.OC", "math.PR", "math.QA", "math.RA", "math.RT", "math.SG", "math.SP", "math.ST",
+    "nlin.AO", "nlin.CD", "nlin.CG", "nlin.PS", "nlin.SI",
+    "physics.acc-ph", "physics.ao-ph", "physics.app-ph", "physics.atm-clus", "physics.atom-ph",
+    "physics.bio-ph", "physics.chem-ph", "physics.class-ph", "physics.comp-ph", "physics.data-an", "physics.ed-ph",
+    "physics.flu-dyn", "physics.gen-ph", "physics.geo-ph", "physics.hist-ph", "physics.ins-det",
+    "physics.med-ph", "physics.optics", "physics.plasm-ph", "physics.pop-ph", "physics.soc-ph", "physics.space-ph",
+    "q-bio.BM", "q-bio.CB", "q-bio.GN", "q-bio.MN", "q-bio.NC", "q-bio.OT", "q-bio.PE",
+    "q-bio.QM", "q-bio.SC", "q-bio.TO",
+    "q-fin.CP", "q-fin.EC", "q-fin.GN", "q-fin.MF", "q-fin.PM", "q-fin.PR", "q-fin.RM",
+    "q-fin.ST", "q-fin.TR",
+    "stat.AP", "stat.CO", "stat.ME", "stat.ML", "stat.OT", "stat.TH",
+}
+
+BIORXIV_SUBJECT_CATEGORIES = {
+    "animal behavior and cognition", "biochemistry", "bioengineering", "bioinformatics", "biophysics",
+    "cancer biology", "cell biology", "developmental biology", "ecology",
+    "evolutionary biology", "genetics", "genomics", "immunology", "microbiology", "molecular biology",
+    "neuroscience", "paleontology", "pathology", "pharmacology and toxicology", "physiology", "plant biology",
+    "scientific communication and education", "synthetic biology", "systems biology", "zoology", "all",
+}
+
+_SEARCH_TRANSPORT_PREFIX_RE = re.compile(
+    r"^(?:core topic routes?|core concept terms?|retrieval (?:method|application|domain) terms?|"
+    r"retrieval expansions?|preference hints?|conditional exclusions?|researcher background|excluded topics?)\b",
+    re.IGNORECASE,
 )
+_QUERY_SYNTAX_RE = re.compile(r"(?:\b(?:AND|OR|NOT)\b|\b(?:all|ti|abs|cat):|[\[\]{}])", re.IGNORECASE)
 
 _STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "de", "for", "from", "in",
@@ -572,7 +606,6 @@ _STOPWORDS = {
     "using", "use", "based", "via", "study", "paper", "model", "models", "method",
     "methods", "approach", "architecture", "novel", "new", "toward", "towards",
 }
-
 
 def _han_ratio(text: str) -> float:
     chars = [ch for ch in str(text or "") if not ch.isspace()]
@@ -609,6 +642,16 @@ def _is_english_phrase(text: str) -> bool:
     return bool(re.search(r"[A-Za-z]", text))
 
 
+def _is_search_phrase(text: str) -> bool:
+    cleaned = _clean_phrase(text)
+    if not _is_english_phrase(cleaned):
+        return False
+    if _SEARCH_TRANSPORT_PREFIX_RE.search(cleaned) or _QUERY_SYNTAX_RE.search(cleaned):
+        return False
+    words = re.findall(r"[A-Za-z][A-Za-z0-9+./-]*", cleaned)
+    return 1 <= len(words) <= 3
+
+
 def _english_terms_from_text(text: str) -> list[str]:
     """Deterministic English keyword extraction (fallback path)."""
     phrases: list[str] = []
@@ -623,7 +666,7 @@ def _english_terms_from_text(text: str) -> list[str]:
             phrase = " ".join(words)
             if len(phrase) >= 3:
                 phrases.append(phrase)
-    return _dedupe_keep_order(phrases)
+    return [phrase for phrase in _dedupe_keep_order(phrases) if _is_search_phrase(phrase)]
 
 
 def _search_terms_config_research_text(config: AppConfig) -> str:
@@ -635,61 +678,78 @@ def _search_terms_config_research_text(config: AppConfig) -> str:
     return "\n".join(str(p) for p in parts if p).strip()
 
 
-def _validate_categories(values: Any, config_categories: list[str]) -> list[str]:
-    suggested = _dedupe_keep_order(
-        [str(v) for v in values if isinstance(v, str)] if isinstance(values, list) else [],
-        lower_key=False,
-    )
-    valid = [c for c in suggested if _ARXIV_CATEGORY_RE.match(c)]
-    # config categories always win as primary; LLM categories only supplement.
-    config_clean = _dedupe_keep_order([str(c) for c in (config_categories or [])], lower_key=False)
-    if config_clean:
-        merged = config_clean + [c for c in valid if c not in config_clean]
-        return merged[:8]
-    return valid[:6]
+def _structured_profile_search_phrases(profile: dict[str, Any] | None) -> list[str]:
+    payload = profile if isinstance(profile, dict) else {}
+    signals = payload.get("explicit_retrieval_signals") if isinstance(payload.get("explicit_retrieval_signals"), dict) else {}
+    safe = payload.get("safe_expansions") if isinstance(payload.get("safe_expansions"), dict) else {}
+    phrases = [
+        value
+        for key in ("core_concepts", "method_terms", "application_terms", "domain_terms")
+        for value in _as_string_list(signals.get(key))
+        if _is_search_phrase(value)
+    ]
+    for item in _normalize_expansions(safe.get("synonyms_or_abbreviations")):
+        term = _clean_phrase(item.get("term"))
+        if _is_search_phrase(term):
+            phrases.append(term)
+    return _dedupe_keep_order(phrases)
+
+
+def _validate_categories(config_categories: list[str]) -> list[str]:
+    canonical_by_lower = {category.lower(): category for category in _ARXIV_CATEGORY_CODES}
+
+    def normalize(value: Any) -> str:
+        return canonical_by_lower.get(_clean_phrase(value).lower(), "")
+
+    config_clean = [
+        category
+        for category in _dedupe_keep_order([normalize(c) for c in (config_categories or [])], lower_key=False)
+        if category
+    ]
+    return config_clean
+
+
+def _validate_biorxiv_categories(config_categories: list[str]) -> list[str]:
+    def normalize(value: Any) -> str:
+        return re.sub(r"[_-]+", " ", _clean_phrase(value).lower())
+
+    configured = _dedupe_keep_order([normalize(value) for value in (config_categories or [])])
+    configured = [category for category in configured if category in BIORXIV_SUBJECT_CATEGORIES]
+    return configured
 
 
 def build_search_terms_prompt(config: AppConfig) -> str:
     topic = str(getattr(config, "research_topic", "") or "")
     interest = str(getattr(config, "research_interest", "") or "")
-    profile = str(getattr(config, "researcher_profile", "") or "")
+    researcher_profile = str(getattr(config, "researcher_profile", "") or "")
+    queries = [str(value).strip() for value in (getattr(config, "arxiv_queries", []) or []) if str(value).strip()]
     return f"""
-You build TARGETED literature-search queries from a researcher's interest. The
-corpora (arXiv, bioRxiv, Nature, Science) are ENGLISH, so EVERY term you output
-must be ENGLISH. Translate any non-English input. Output JSON only.
+Extract literature-search keywords for arXiv and bioRxiv directly from the
+user's research topic, research interest, researcher profile, and any explicit
+search terms. The corpora are English, so every keyword must be English;
+translate non-English concepts. Output JSON only.
 
-Produce, as JSON with this exact shape:
+Return this exact shape:
 {{
-  "anchor_terms": ["core english phrase", "synonym phrase", ...],
-  "refine_groups": [["english phrase", "synonym", ...], ["..."]],
-  "english_keywords": ["english phrase", ...],
-  "biorxiv_search": "few space separated english keywords",
-  "arxiv_categories": ["q-bio.BM", "cs.LG"],
-  "excluded_terms": ["english phrase", ...]
+  "search_keywords": ["english keyword or short phrase", "..."]
 }}
 
 Rules:
-- anchor_terms: 5-9 CORE english phrases naming the topic itself. ANY ONE of them
-  matching a paper should mean the paper is on-topic (they are ORed together in
-  the query), so they must be reasonably BROAD, not hyper-specific. Include 1-2
-  BROAD umbrella phrases that most papers in the field would contain, plus the
-  standard task names, close synonyms, and common abbreviations stated or
-  implied by the user's input. Avoid over-long phrases that almost nothing
-  matches and avoid generic single words alone ("generation", "model",
-  "learning"). Prefer 2-3 word noun phrases.
-- refine_groups: 0-2 secondary concept groups (each a list of english synonyms)
-  that NARROW the topic (method/condition/application). They are ANDed with the
-  anchor for a higher-precision query. Omit if the topic is already specific.
-- english_keywords: 6-18 english phrases (anchor + refinements + key methods)
-  used for local relevance ranking and keyword search. Include translated
-  versions of every important user concept.
-- biorxiv_search: 3-8 of the strongest english keywords as one space-separated
-  string (used as a full-text search query).
-- arxiv_categories: 1-4 arXiv category codes most relevant to the topic
-  (e.g. q-bio.BM, q-bio.QM, cs.LG, cs.AI, cs.CV, cs.CL, eess.IV). Only valid
-  codes.
-- excluded_terms: english phrases the user wants to avoid (optional, can be []).
-- Do NOT invent interests the user did not express. Be faithful and specific.
+- Include the central domain, object, task, method, and training concepts stated
+  by the user. Every item must contain 1-3 words.
+- You MUST include the basic, standalone concepts themselves as equal-status
+  items, such as the domain/object and each core method or training concept.
+  Do not return only combined or specialized phrases. For example, when the
+  input mentions proteins, diffusion, and reinforcement learning, the output
+  must include basic items such as "protein", "diffusion", and
+  "reinforcement learning" in addition to any useful short phrases.
+- Every item has exactly the same retrieval status and will be ORed independently.
+  Do not rank, group, label, anchor, refine, combine with AND, or exclude items.
+- Do not infer source categories and do not add negative keywords or any concept
+  that is absent from the user's inputs.
+- Prefer direct standard terms used in paper titles. Keep useful standard
+  acronyms as searchable terms when the user used them.
+- Return 4-12 unique keywords or short phrases, each containing 1-3 words.
 
 [TOPIC]
 {topic}
@@ -698,60 +758,47 @@ Rules:
 {interest}
 [/INTEREST]
 [RESEARCHER_PROFILE]
-{profile}
+{researcher_profile}
 [/RESEARCHER_PROFILE]
+[EXPLICIT_SEARCH_TERMS]
+{json.dumps(queries, ensure_ascii=False)}
+[/EXPLICIT_SEARCH_TERMS]
 
 Return JSON only.
 """.strip()
 
 
-def _normalize_search_terms(data: Any, config: AppConfig, *, source: str) -> dict[str, Any]:
+def _normalize_search_terms(
+    data: Any,
+    config: AppConfig,
+    *,
+    source: str,
+) -> dict[str, Any]:
     data = data if isinstance(data, dict) else {}
-    anchor = _dedupe_keep_order([t for t in (data.get("anchor_terms") or []) if isinstance(t, str)])
-    anchor = [t for t in anchor if _is_english_phrase(t)][:10]
+    keywords = _dedupe_keep_order([
+        value for value in (data.get("search_keywords") or []) if isinstance(value, str)
+    ])
+    keywords = [term for term in keywords if _is_search_phrase(term)][:12]
+    configured_keywords = _dedupe_keep_order([
+        str(value) for value in (getattr(config, "arxiv_queries", []) or [])
+    ])
+    configured_keywords = [term for term in configured_keywords if _is_search_phrase(term)]
+    keywords = _dedupe_keep_order([*keywords, *configured_keywords])
 
-    refine_groups: list[list[str]] = []
-    for group in (data.get("refine_groups") or []):
-        if not isinstance(group, list):
-            continue
-        terms = [t for t in _dedupe_keep_order([g for g in group if isinstance(g, str)]) if _is_english_phrase(t)]
-        if terms:
-            refine_groups.append(terms[:8])
-        if len(refine_groups) >= 2:
-            break
-
-    english_keywords = _dedupe_keep_order([t for t in (data.get("english_keywords") or []) if isinstance(t, str)])
-    english_keywords = [t for t in english_keywords if _is_english_phrase(t)][:20]
-
-    biorxiv_search = _clean_phrase(data.get("biorxiv_search"))
-    if not _is_english_phrase(biorxiv_search):
-        biorxiv_search = ""
-
-    excluded = _dedupe_keep_order([t for t in (data.get("excluded_terms") or []) if isinstance(t, str)])
-    excluded = [t for t in excluded if _is_english_phrase(t)][:12]
-
-    categories = _validate_categories(data.get("arxiv_categories"), list(getattr(config, "arxiv_categories", []) or []))
-
-    # Backfill anchor/keywords from each other so neither is empty when one is.
-    if not english_keywords:
-        english_keywords = list(anchor)
-    if not anchor:
-        anchor = [t for t in english_keywords[:8]]
-    if not biorxiv_search and (english_keywords or anchor):
-        biorxiv_search = " ".join((english_keywords or anchor)[:6])
+    configured_arxiv = _validate_categories(list(getattr(config, "arxiv_categories", []) or []))
+    configured_biorxiv = _validate_biorxiv_categories(list(getattr(config, "biorxiv_categories", []) or []))
 
     return {
-        "anchor_terms": anchor,
-        "refine_groups": refine_groups,
-        "english_keywords": english_keywords,
-        "biorxiv_search": biorxiv_search,
-        "arxiv_categories": categories,
-        "excluded_terms": excluded,
+        "search_keywords": keywords,
+        "arxiv_categories": configured_arxiv,
+        "arxiv_category_source": "configured" if configured_arxiv else "none",
+        "biorxiv_categories": configured_biorxiv,
+        "biorxiv_category_source": "configured" if configured_biorxiv else "none",
         "source": source,
     }
 
 
-def _fallback_search_terms(config: AppConfig) -> dict[str, Any]:
+def _fallback_search_terms(config: AppConfig, normalized_profile: dict[str, Any] | None = None) -> dict[str, Any]:
     """Deterministic English search terms when no LLM is available.
 
     Pulls from config.arxiv_queries (already English in normal use) and any
@@ -761,56 +808,76 @@ def _fallback_search_terms(config: AppConfig) -> dict[str, Any]:
     candidates: list[str] = []
     for q in (getattr(config, "arxiv_queries", []) or []):
         candidates.extend(_english_terms_from_text(str(q)))
-    candidates.extend(_english_terms_from_text(_search_terms_config_research_text(config)))
+    candidates.extend(_english_terms_from_text(str(getattr(config, "research_topic", "") or "")))
+    candidates.extend(_english_terms_from_text(str(getattr(config, "research_interest", "") or "")))
+    candidates.extend(_english_terms_from_text(str(getattr(config, "researcher_profile", "") or "")))
     keywords = _dedupe_keep_order(candidates)
-    # Prefer multi-word phrases as anchors (more specific).
-    multiword = [k for k in keywords if len(k.split()) >= 2]
-    anchor = (multiword or keywords)[:8]
+    profile_keywords = _structured_profile_search_phrases(normalized_profile)
     data = {
-        "anchor_terms": anchor,
-        "refine_groups": [],
-        "english_keywords": keywords[:20],
-        "biorxiv_search": " ".join((multiword or keywords)[:6]),
-        "arxiv_categories": list(getattr(config, "arxiv_categories", []) or []),
-        "excluded_terms": [],
+        "search_keywords": _dedupe_keep_order([*profile_keywords, *keywords])[:20],
     }
-    return _normalize_search_terms(data, config, source="fallback")
+    source = "profile_fallback" if isinstance(normalized_profile, dict) else "fallback"
+    return _normalize_search_terms(data, config, source=source)
 
 
-def extract_search_terms(config: AppConfig, llm: LLMClient | None, *, log=None) -> dict[str, Any]:
+def extract_search_terms(
+    config: AppConfig,
+    llm: LLMClient | None,
+    *,
+    normalized_profile: dict[str, Any] | None = None,
+    log=None,
+) -> dict[str, Any]:
     """Return freshly extracted English search terms for the current topic."""
 
     research_text = _search_terms_config_research_text(config)
     if not research_text:
-        return _fallback_search_terms(config)
+        return _fallback_search_terms(config, normalized_profile)
 
     if llm is None or not getattr(llm, "enabled", False):
-        terms = _fallback_search_terms(config)
+        terms = _fallback_search_terms(config, normalized_profile)
         if log:
             log("search-terms: no LLM; deterministic English fallback")
         return terms
 
     data = None
+    llm_error = ""
     try:
-        data = llm.json_or_none(build_search_terms_prompt(config), temperature=0.1, max_tokens=900)
+        prompt = build_search_terms_prompt(config)
+        if hasattr(llm, "json_or_error"):
+            result = llm.json_or_error(prompt, temperature=0.1, max_tokens=1800)
+            if isinstance(result, dict) and result.get("ok") and isinstance(result.get("data"), dict):
+                data = result["data"]
+            elif isinstance(result, dict):
+                llm_error = str(result.get("error") or "")
+        else:
+            data = llm.json_or_none(prompt, temperature=0.1, max_tokens=1800)
     except Exception as exc:  # pragma: no cover - defensive
+        llm_error = str(exc)
         if log:
             log(f"search-terms: LLM error ({exc}); using fallback")
     if not isinstance(data, dict):
-        terms = _fallback_search_terms(config)
+        terms = _fallback_search_terms(config, normalized_profile)
         if log:
-            log("search-terms: LLM returned no JSON; deterministic English fallback")
+            detail = f" ({llm_error[:240]})" if llm_error else ""
+            log(f"search-terms: LLM returned no JSON{detail}; deterministic English fallback")
         return terms
 
+    raw_keywords_valid = any(
+        _is_search_phrase(value)
+        for value in (data.get("search_keywords") or [])
+        if isinstance(value, str)
+    )
     terms = _normalize_search_terms(data, config, source="llm")
-    if not terms.get("anchor_terms") and not terms.get("english_keywords"):
-        terms = _fallback_search_terms(config)
+    if not raw_keywords_valid or not terms.get("search_keywords"):
+        terms = _fallback_search_terms(config, normalized_profile)
+        if log:
+            log("search-terms: LLM returned no valid flat keywords; used deterministic fallback")
     if log:
         log(
             "search-terms: extracted "
-            f"{len(terms.get('anchor_terms', []))} anchors, "
-            f"{len(terms.get('english_keywords', []))} keywords, "
-            f"cats={terms.get('arxiv_categories')}"
+            f"{len(terms.get('search_keywords', []))} equal-status keywords, "
+            f"arxiv_cats={terms.get('arxiv_categories')}, "
+            f"biorxiv_cats={terms.get('biorxiv_categories')}"
         )
     return terms
 

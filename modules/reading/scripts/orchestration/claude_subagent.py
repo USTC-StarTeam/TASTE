@@ -381,6 +381,10 @@ def find_claude() -> str:
 
 def claude_env(run_path: Path) -> dict[str, str]:
     env = os.environ.copy()
+    # Do not let a module-local Claude process discover the enclosing TASTE repository.
+    env["GIT_CEILING_DIRECTORIES"] = os.pathsep.join(
+        filter(None, (str(READING_ROOT.parents[1]), env.get("GIT_CEILING_DIRECTORIES", "")))
+    )
     tmp_dir = ensure_inside_runtime(run_path / "tmp", label="Claude 临时目录")
     tmp_dir.mkdir(parents=True, exist_ok=True)
     env["TMPDIR"] = "tmp"
@@ -713,6 +717,8 @@ def run_claude_deep_read(
         "bypassPermissions",
         "--output-format",
         "json",
+        "--disallowedTools",
+        "Agent,Task,EnterWorktree,ExitWorktree",
         "--add-dir",
         ".",
     ]

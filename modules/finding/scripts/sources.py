@@ -479,10 +479,16 @@ def _parse_neurips_official_papers_list(html: str, list_url: str, max_items: int
             "pdf_url": detail_url.replace("-Abstract-", "-Paper-").replace(".html", ".pdf") if "-Abstract-" in detail_url else "",
             "venue": "NeurIPS",
             "year": 0,
-            "category": track,
+            "category": "",
             "track": track,
-            "classification_source": "official" if track else "llm_inferred",
-            "metadata": {"venue_url": list_url, "detail_url": detail_url, "title_index_only": True, "source_page": "papers.nips.cc"},
+            "classification_source": "official_track" if track else "llm_inferred",
+            "metadata": {
+                "venue_url": list_url,
+                "detail_url": detail_url,
+                "title_index_only": True,
+                "source_page": "papers.nips.cc",
+                "category_semantics": "presentation_track_only",
+            },
         }
         _set_presentation_metadata(paper, _presentation_type_from_text(track), source="neurips_official_papers_track")
         papers.append(paper)
@@ -2072,20 +2078,6 @@ def _arxiv_entry_id(entry_id: str) -> str:
     return re.sub(r"\.pdf$", "", text)
 
 
-def _arxiv_fallback_queries(categories: list[str], start_date: str = "", end_date: str = "") -> list[tuple[str, str]]:
-    cleaned_categories = [c.strip() for c in categories if c.strip()] or ["cs.AI"]
-    queries: list[tuple[str, str]] = []
-    if len(cleaned_categories) > 1:
-        category_expr = " OR ".join(f"cat:{category}" for category in cleaned_categories)
-        queries.append(("selected_categories", f"({category_expr})"))
-    queries.extend((category, f"cat:{category}") for category in cleaned_categories)
-    if start_date or end_date:
-        start_stamp = (start_date or "1991-01-01").replace("-", "") + "0000"
-        end_stamp = (end_date or "3000-01-01").replace("-", "") + "2359"
-        queries = [(label, f"{query_text} AND submittedDate:[{start_stamp} TO {end_stamp}]") for label, query_text in queries]
-    return queries
-
-
 ARXIV_QUERY_STOPWORDS = {
     "a", "an", "and", "are", "de", "for", "in", "of", "on", "or", "the", "to", "with",
 }
@@ -2110,8 +2102,13 @@ def _arxiv_phrase_clause(phrase: str, field: str = "all") -> str:
     return f"{field}:{text}"
 
 
-def _arxiv_or_group(terms: list[str], field: str = "all") -> str:
-    clauses = [c for c in (_arxiv_phrase_clause(term, field) for term in (terms or [])) if c]
+def _arxiv_or_group(terms: list[str]) -> str:
+    clauses = []
+    for term in terms or []:
+        title_clause = _arxiv_phrase_clause(term, "ti")
+        abstract_clause = _arxiv_phrase_clause(term, "abs")
+        if title_clause and abstract_clause:
+            clauses.append(f"({title_clause} OR {abstract_clause})")
     # de-dup while preserving order
     seen: set[str] = set()
     unique: list[str] = []
@@ -2127,23 +2124,14 @@ def _arxiv_or_group(terms: list[str], field: str = "all") -> str:
 
 
 def build_arxiv_targeted_queries(
-    anchor_terms: list[str],
-    refine_groups: list[list[str]] | None,
+    search_keywords: list[str],
     categories: list[str],
     start_date: str = "",
     end_date: str = "",
 ) -> list[tuple[str, str]]:
-    """Build keyword-targeted arXiv boolean queries from an anchor OR-group.
-
-    The anchor group ORs core synonym phrases (any match == on-topic); it is
-    ANDed with an OR-group of categories and the submitted-date window. This is
-    the high-recall, on-topic "workhorse" query. When refine_groups are present,
-    a higher-precision query (anchor AND refine) is emitted FIRST so that, under
-    a soft per-run cap, the most precise matches are collected first; the broad
-    anchor query then backfills.
-    """
-    anchor_expr = _arxiv_or_group(anchor_terms)
-    if not anchor_expr:
+    """Build one arXiv query that ORs every extracted keyword equally."""
+    keyword_expr = _arxiv_or_group(search_keywords)
+    if not keyword_expr:
         return []
     cleaned_categories = [c.strip() for c in (categories or []) if c.strip()]
     cat_expr = ("(" + " OR ".join(f"cat:{c}" for c in cleaned_categories) + ")") if cleaned_categories else ""
@@ -2161,20 +2149,14 @@ def build_arxiv_targeted_queries(
             seen.add(text)
             queries.append((label, text))
 
-    # Precision-first: anchor AND each refine group.
-    for index, group in enumerate(refine_groups or [], 1):
-        refine_expr = _arxiv_or_group(group)
-        if refine_expr:
-            add(f"anchor+refine{index}", [anchor_expr, refine_expr, cat_expr, date_clause])
-    # Recall workhorse: anchor AND categories.
-    add("anchor", [anchor_expr, cat_expr, date_clause])
+    add("keywords", [keyword_expr, cat_expr, date_clause])
     return queries
 
 
 def _arxiv_search_queries(categories: list[str], topic_queries: list[str], start_date: str = "", end_date: str = "") -> list[tuple[str, str]]:
     queries: list[tuple[str, str]] = []
     seen: set[str] = set()
-    cleaned_categories = [category.strip() for category in (categories or []) if category.strip()] or ["cs.AI"]
+    cleaned_categories = [category.strip() for category in (categories or []) if category.strip()]
     cleaned_topics = [" ".join(str(query).split()) for query in (topic_queries or []) if str(query).strip()]
     for topic in cleaned_topics:
         terms = [
@@ -2203,15 +2185,11 @@ def _arxiv_search_queries(categories: list[str], topic_queries: list[str], start
     return queries
 
 
-def build_biorxiv_search_phrases(search_terms: dict, *, max_phrases: int = 8) -> list[str]:
-    """Build a list of anchor PHRASES for keyword-targeted bioRxiv search
-    (Europe PMC OR-of-phrases, OpenAlex per-phrase). Prefers the anchor terms;
-    falls back to english_keywords. Each phrase is searched independently and
-    unioned, so this is OR semantics, not a single AND-ed query string.
-    """
+def build_biorxiv_search_phrases(search_terms: dict, *, max_phrases: int = 0) -> list[str]:
+    """Return equal-status bioRxiv phrases, searched independently and unioned."""
     if not isinstance(search_terms, dict):
         return []
-    phrases = search_terms.get("anchor_terms") or search_terms.get("english_keywords") or []
+    phrases = search_terms.get("search_keywords") or []
     out: list[str] = []
     seen: set[str] = set()
     for phrase in phrases:
@@ -2219,10 +2197,10 @@ def build_biorxiv_search_phrases(search_terms: dict, *, max_phrases: int = 8) ->
         if text and text.lower() not in seen:
             seen.add(text.lower())
             out.append(text)
-    return out[:max_phrases]
+    return out[:max_phrases] if max_phrases > 0 else out
 
 
-def _append_arxiv_entry(papers: list[dict], by_key: dict[str, dict], entry, ns: dict, query_label: str, query_text: str, start_date: str, end_date: str, *, fallback_query: bool = False) -> None:
+def _append_arxiv_entry(papers: list[dict], by_key: dict[str, dict], entry, ns: dict, query_label: str, query_text: str, start_date: str, end_date: str) -> None:
     published = (entry.findtext("a:published", default="", namespaces=ns) or "")[:10]
     updated = (entry.findtext("a:updated", default="", namespaces=ns) or "")[:10]
     if not _in_date_range(published, start_date, end_date):
@@ -2234,16 +2212,28 @@ def _append_arxiv_entry(papers: list[dict], by_key: dict[str, dict], entry, ns: 
     key = arxiv_id or title.lower()
     if not key:
         return
+    category_terms = [
+        str(node.attrib.get("term") or "").strip()
+        for node in entry.findall("a:category", ns)
+        if str(node.attrib.get("term") or "").strip()
+    ]
+    primary_node = entry.find("{http://arxiv.org/schemas/atom}primary_category")
+    primary_category = str(primary_node.attrib.get("term") or "").strip() if primary_node is not None else ""
+    all_categories = list(dict.fromkeys(([primary_category] if primary_category else []) + category_terms))
+    matched_query = {"label": query_label, "query": query_text}
     existing = by_key.get(key)
     if existing:
-        categories_seen = existing.setdefault("categories", [existing.get("category", "")])
-        category_name = str(query_label).replace("topic:", "")
-        if category_name not in categories_seen:
-            categories_seen.append(category_name)
-        existing.setdefault("metadata", {})["all_categories"] = categories_seen
+        categories_seen = existing.setdefault("categories", [])
+        for category in all_categories:
+            if category not in categories_seen:
+                categories_seen.append(category)
+        metadata = existing.setdefault("metadata", {})
+        metadata["all_categories"] = categories_seen
+        matched_queries = metadata.setdefault("matched_queries", [])
+        if matched_query not in matched_queries:
+            matched_queries.append(matched_query)
         return
     pdf_url = entry_id.replace("/abs/", "/pdf/") if "/abs/" in entry_id else ""
-    all_categories = [str(query_label).replace("topic:", "")]
     paper = {
         "id": stable_id("paper", entry_id or title),
         "source": "arxiv",
@@ -2255,10 +2245,18 @@ def _append_arxiv_entry(papers: list[dict], by_key: dict[str, dict], entry, ns: 
         "pdf_url": pdf_url,
         "venue": "arXiv",
         "year": int(published[:4]) if published[:4].isdigit() else date.today().year,
-        "category": query_label,
+        "category": primary_category or (all_categories[0] if all_categories else ""),
         "categories": all_categories,
-        "classification_source": "llm_inferred",
-        "metadata": {"published": published, "updated": updated, "arxiv_query": query_text, "arxiv_query_label": query_label, "fallback_query": fallback_query, "all_categories": all_categories},
+        "classification_source": "official",
+        "metadata": {
+            "published": published,
+            "updated": updated,
+            "arxiv_query": query_text,
+            "arxiv_query_label": query_label,
+            "matched_queries": [matched_query],
+            "primary_category": primary_category,
+            "all_categories": all_categories,
+        },
     }
     by_key[key] = paper
     papers.append(paper)
@@ -2491,7 +2489,7 @@ def _paper_has_official_category(paper: dict) -> bool:
     source = str(paper.get("classification_source") or "").lower()
     if source not in {"official", "official_cached", "venue_official", "openreview", "local_metadata_category"}:
         return False
-    return bool(str(paper.get("primary_area") or paper.get("category") or paper.get("track") or "").strip())
+    return bool(str(paper.get("primary_area") or paper.get("category") or "").strip())
 
 
 def _venue_source_official_category_count(papers: list[dict]) -> int:

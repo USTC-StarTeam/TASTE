@@ -157,12 +157,6 @@ provider = os.environ.get("LLM_PROVIDER") or local_llm.get("provider") or "mock"
 if not (api_base and model and api_key):
     provider = "mock"
 
-def read_text(path, limit=5000):
-    try:
-        return Path(path).read_text(encoding="utf-8", errors="ignore")[:limit]
-    except Exception:
-        return ""
-
 def env_int(name, default):
     raw = os.environ.get(name, "")
     try:
@@ -171,41 +165,10 @@ def env_int(name, default):
         value = 0
     return value if value > 0 else int(default)
 
-next_actions = read_text(paths.planning / "next_actions.md", 4000)
-evolution = read_text(paths.reports / "evolution_memory.md", 4000)
-reflection = read_text(paths.reports / "iteration_reflection.md", 4000)
-last_taste = read_text(paths.planning / "finding_frontend.md", 3000)
 research_goal = "\n".join([str(cfg.get("topic", "")), str(cfg.get("user_prompt", "")), ", ".join(cfg.get("queries", []))])
 configured_topic = str(finding_cfg.get("research_topic") or cfg.get("topic") or research_goal).strip()
-feedback_profile = f"""
-Research goal:
-{{research_goal}}
-
-The workflow should prioritize papers and ideas that directly help the current research loop. Strong preference:
-- papers matching the project topic, configured queries, and current research plan
-- recent high-quality papers with runnable code, datasets, and clear evaluation protocols
-- ideas that can become executable plans with baselines, bad-case slicing, counterexamples, and prune/deepen rules
-- literature signals that connect to local repo/data/env audits instead of standalone claims
-
-Avoid generic adjacent papers unless they provide a transferable mechanism for the configured project topic.
-
-TASTE next actions:
-{{next_actions}}
-
-TASTE evolution memory:
-{{evolution}}
-
-TASTE iteration reflection:
-{{reflection}}
-
-Previous TASTE frontend summary:
-{{last_taste}}
-"""[:18000]
 
 topic_queries = []
-for item in cfg.get("queries", []):
-    if isinstance(item, str) and item.strip():
-        topic_queries.append(item.strip())
 extra_queries = []
 for raw in os.environ.get("EXTRA_QUERIES", "").splitlines():
     raw = raw.strip()
@@ -224,14 +187,9 @@ if os.environ.get("EXTRA_QUERY", "").strip():
 for item in extra_queries:
     if item and item not in topic_queries:
         topic_queries.append(item)
-if not topic_queries:
-    topic = str(configured_topic or finding_cfg.get("research_interest") or cfg.get("research_interest") or research_goal).strip()
-    if topic:
-        topic_queries.extend([
-            f"{{topic}} reproducible code dataset",
-            f"{{topic}} recent benchmark method",
-            f"{{topic}} executable research idea",
-        ])
+for item in cfg.get("queries", []):
+    if isinstance(item, str) and item.strip() and item.strip() not in topic_queries:
+        topic_queries.append(item.strip())
 
 deep_survey = {deep_survey}
 fast_mode = {fast_mode}
@@ -248,14 +206,23 @@ def config_positive_int(name, default):
         value = 0
     return value if value > 0 else int(default)
 
+def config_nonnegative_int(name, default=0):
+    try:
+        return max(0, int(literature_cfg.get(name) if literature_cfg.get(name) is not None else default))
+    except (TypeError, ValueError):
+        return max(0, int(default))
+
 arxiv_default_window_days = DEFAULT_ARXIV_WINDOW_DAYS if deep_survey else literature_cfg.get("arxiv_window_days", DEFAULT_ARXIV_WINDOW_DAYS) or DEFAULT_ARXIV_WINDOW_DAYS
 arxiv_window_days = env_int("WINDOW_DAYS", arxiv_default_window_days)
-max_fetch_count = config_positive_int("max_fetch_papers", max(120 if deep_survey else 80, max_papers * 6))
-venue_scan_limit = env_int("VENUE_TITLE_SCAN_LIMIT", config_positive_int("venue_title_scan_limit", 12000 if deep_survey else 3000))
-find_recall_count = env_int("FIND_RECALL_COUNT", config_positive_int("find_recall_count", 3000 if deep_survey else 200))
-detail_fetch_count = env_int("DETAIL_FETCH_COUNT", config_positive_int("detail_fetch_count", 800 if deep_survey else 50))
+nonvenue_fetch_limit = config_positive_int("nonvenue_fetch_limit", 5000)
+venue_scan_limit = config_nonnegative_int("venue_title_scan_limit", 0)
+if str(os.environ.get("VENUE_TITLE_SCAN_LIMIT") or "").strip():
+    try:
+        venue_scan_limit = max(0, int(os.environ["VENUE_TITLE_SCAN_LIMIT"]))
+    except (TypeError, ValueError):
+        pass
+title_abstract_scoring_limit = config_positive_int("title_abstract_scoring_limit", 1000)
 arxiv_max_queries = env_int("ARXIV_MAX_QUERIES", config_positive_int("arxiv_max_queries", 3))
-arxiv_per_query_limit = env_int("ARXIV_PER_QUERY_LIMIT", config_positive_int("arxiv_per_query_limit", 100 if deep_survey else 50))
 arxiv_timeout_sec = env_int("ARXIV_TIMEOUT_SEC", config_positive_int("arxiv_timeout_sec", 45 if deep_survey else 15))
 arxiv_candidate_limit = env_int("ARXIV_LLM_CANDIDATE_LIMIT", config_positive_int("arxiv_llm_candidate_limit", 0))
 arxiv_per_category = env_int("ARXIV_LLM_CANDIDATES_PER_CATEGORY", config_positive_int("arxiv_llm_candidates_per_category", 0))
@@ -278,10 +245,7 @@ def runtime_default(name, default=None):
 runtime_keys = [
     "ARXIV_FULL_SCAN",
     "ARXIV_MAX_QUERIES",
-    "ARXIV_PER_QUERY_LIMIT",
     "ARXIV_TIMEOUT_SEC",
-    "MIN_TITLE_CANDIDATES",
-    "MIN_DETAIL_CANDIDATES",
     "ABSTRACT_SCORING_BATCH_SIZE",
     "ABSTRACT_SCORING_MAX_BATCH_SIZE",
     "ABSTRACT_SCORING_MAX_TOKENS",
@@ -304,14 +268,9 @@ runtime_default("ABSTRACT_SCORING_WORKER_CAP", str(max(1, abstract_scoring_max_w
 runtime_default("ABSTRACT_SCORING_TIMEOUT_SEC", str(abstract_scoring_timeout_sec))
 if deep_survey:
     runtime_default("VENUE_TITLE_SCAN_LIMIT", str(venue_scan_limit))
-    runtime_default("FIND_RECALL_COUNT", str(find_recall_count))
-    runtime_default("DETAIL_FETCH_COUNT", str(detail_fetch_count))
-    runtime_default("ARXIV_FULL_SCAN", "1")
+    runtime_default("ARXIV_FULL_SCAN", "0")
     runtime_default("ARXIV_MAX_QUERIES", "3")
-    runtime_default("ARXIV_PER_QUERY_LIMIT", "100")
     runtime_default("ARXIV_TIMEOUT_SEC", "45")
-    runtime_default("MIN_TITLE_CANDIDATES", "240")
-    runtime_default("MIN_DETAIL_CANDIDATES", "80")
     runtime_default("ABSTRACT_SCORING_BATCH_SIZE", "10")
     runtime_default("ABSTRACT_SCORING_MAX_BATCH_SIZE", "10")
     runtime_default("ABSTRACT_SCORING_MAX_TOKENS", "12000")
@@ -330,6 +289,13 @@ elif os.environ.get("FORCE_LLM_TITLE_FILTER", "0").lower() in {{"1", "true", "ye
 elif deep_survey:
     runtime_default("USE_LLM_TITLE_FILTER", "1")
 
+# Structured Find settings are the public configuration contract. Replace
+# stale auto-generated runtime_tuning values instead of letting an older run
+# silently override the current Web values.
+runtime_tuning["ARXIV_FULL_SCAN"] = str(os.environ.get("ARXIV_FULL_SCAN") or "0")
+runtime_tuning["ARXIV_MAX_QUERIES"] = str(arxiv_max_queries)
+runtime_tuning["ARXIV_TIMEOUT_SEC"] = str(arxiv_timeout_sec)
+
 year = date.today().year
 venue_ids = list(source_selection.get("venue_ids") or [])
 if not use_venues:
@@ -345,10 +311,7 @@ if not years:
 
 project_interest = str(finding_cfg.get("research_interest") or cfg.get("research_interest") or cfg.get("user_prompt") or research_goal).strip()
 project_profile = str(finding_cfg.get("researcher_profile") or cfg.get("researcher_profile") or "").strip()
-if project_profile:
-    researcher_profile = (project_profile + "\n\n" + feedback_profile)[:18000]
-else:
-    researcher_profile = feedback_profile
+researcher_profile = project_profile[:18000]
 
 config_payload = {{
     "research_topic": configured_topic,
@@ -359,14 +322,12 @@ config_payload = {{
     "api_key": "",
     "model": model,
     "temperature": float(os.environ.get("LLM_TEMPERATURE") or local_llm.get("temperature", 0.2) or 0.2),
-    "max_fetch_papers": max_fetch_count,
+    "nonvenue_fetch_limit": nonvenue_fetch_limit,
     "max_recommended_papers": max_papers,
     "max_ideas": max_ideas,
     "venue_title_scan_limit": venue_scan_limit,
-    "find_recall_count": find_recall_count,
-    "detail_fetch_count": detail_fetch_count,
+    "title_abstract_scoring_limit": title_abstract_scoring_limit,
     "arxiv_max_queries": arxiv_max_queries,
-    "arxiv_per_query_limit": arxiv_per_query_limit,
     "arxiv_timeout_sec": arxiv_timeout_sec,
     "arxiv_llm_candidate_limit": arxiv_candidate_limit,
     "arxiv_llm_candidates_per_category": arxiv_per_category,
@@ -376,13 +337,13 @@ config_payload = {{
     "abstract_scoring_max_workers": abstract_scoring_max_workers,
     "abstract_scoring_batch_size": abstract_scoring_batch_size,
     "abstract_scoring_timeout_sec": abstract_scoring_timeout_sec,
-    "arxiv_categories": literature_cfg.get("arxiv_categories") if isinstance(literature_cfg.get("arxiv_categories"), list) else ["cs.IR", "cs.LG", "cs.AI"],
+    "arxiv_categories": literature_cfg.get("arxiv_categories") if isinstance(literature_cfg.get("arxiv_categories"), list) else [],
     "arxiv_queries": topic_queries,
     "github_languages": literature_cfg.get("github_languages") if isinstance(literature_cfg.get("github_languages"), list) else ["python", "all"],
     "github_since": str(literature_cfg.get("github_since") or "monthly"),
     "arxiv_start_date": str(literature_cfg.get("arxiv_start_date") or (date.today() - timedelta(days=arxiv_window_days)).isoformat()),
     "arxiv_end_date": str(literature_cfg.get("arxiv_end_date") or date.today().isoformat()),
-    "biorxiv_categories": literature_cfg.get("biorxiv_categories") if isinstance(literature_cfg.get("biorxiv_categories"), list) else ["bioinformatics"],
+    "biorxiv_categories": literature_cfg.get("biorxiv_categories") if isinstance(literature_cfg.get("biorxiv_categories"), list) else [],
     "biorxiv_start_date": str(literature_cfg.get("biorxiv_start_date") or ""),
     "biorxiv_end_date": str(literature_cfg.get("biorxiv_end_date") or ""),
     "nature_journals": literature_cfg.get("nature_journals") if isinstance(literature_cfg.get("nature_journals"), list) else ["nature", "natmachintell", "natcomputsci", "nmeth", "ncomms"],
@@ -595,14 +556,14 @@ def _write_frontend_state(stage, find_result, read_result=None, idea_result=None
         "topic_queries": topic_queries,
         "arxiv_window_days": arxiv_window_days,
         "survey_policy": {{
-            "scope": "configured venue channels with full-corpus audit, category prefilter, and screened-candidate LLM scoring",
+            "scope": "all configured literature sources with source-specific retrieval, title scoring, and globally bounded title+abstract scoring",
             "title_scan_limit": venue_scan_limit,
             "title_scan_limit_meaning": "safety cap per venue/year; local databases smaller than this are scanned fully",
-            "find_recall_count": find_recall_count,
-            "find_recall_count_meaning": "high-recall title candidates kept after local ranking for downstream scoring",
-            "detail_fetch_count": detail_fetch_count,
-            "detail_fetch_count_meaning": "top high-recall candidates whose abstracts/details are fetched and strictly scored",
-            "llm_title_filter_policy": "large title pools use local high-recall ranking; LLM judges abstracts/details downstream",
+            "nonvenue_fetch_limit": nonvenue_fetch_limit,
+            "nonvenue_fetch_limit_meaning": "maximum papers retained per enabled arXiv/bioRxiv source, newest publication date first",
+            "title_abstract_scoring_limit": title_abstract_scoring_limit,
+            "title_abstract_scoring_limit_meaning": "maximum title-scored candidates entering abstract/detail retrieval and final title+abstract LLM scoring",
+            "llm_title_filter_policy": "source candidates complete title scoring before the global title-score ranking and final title+abstract scoring",
             "arxiv_window_days": arxiv_window_days,
         }},
         "counts": {{
@@ -629,14 +590,14 @@ def _write_frontend_state(stage, find_result, read_result=None, idea_result=None
     for key in ["deep_survey", "venue_total_papers_available", "venue_corpus_audited_papers", "venue_category_selected_papers", "venue_title_filter_input_papers", "venue_final_title_candidates", "venue_detail_fetched_candidates", "llm_scored_candidates", "venue_read_candidates", "arxiv_raw_count", "arxiv_prefiltered_count", "arxiv_pages_fetched"]:
         summary.append("- " + key + ": " + str(stats.get(key)) + "\n")
     summary.append("\n## Survey Policy\n")
-    summary.append("- scope: configured venue channels with full-corpus audit; category signals are prefilters, not a requirement to LLM-score every crawled paper\n")
+    summary.append("- scope: all configured literature sources; publication-venue category signals are source-specific prefilters\n")
     summary.append(f"- title_scan_limit: {{venue_scan_limit}}; safety cap, not a target sample size\n")
-    summary.append(f"- find_recall_count: {{find_recall_count}}; high-recall title candidates kept for downstream scoring\n")
-    summary.append(f"- detail_fetch_count: {{detail_fetch_count}}; candidates fetched/scored with details\n")
-    summary.append("- large title pools: local high-recall ranking first; LLM strict judging at abstract/detail stage\n")
+    summary.append(f"- nonvenue_fetch_limit: {{nonvenue_fetch_limit}}; maximum papers retained per enabled arXiv/bioRxiv source, newest first\n")
+    summary.append(f"- title_abstract_scoring_limit: {{title_abstract_scoring_limit}}; maximum title-scored candidates entering final title+abstract scoring\n")
+    summary.append("- scoring order: source retrieval, title LLM scoring, global title-score ranking, then title+abstract LLM scoring\n")
     summary.append("\n## Usage In TASTE\n")
     summary.append("- Find-stage artifacts are written immediately after Find so Claude/experiments can use them while Read/Idea/Plan continues.\n")
-    summary.append("- Treat candidates not promoted by evidence gates as literature signals only, not paper-claim evidence.\n")
+    summary.append("- Treat candidates not selected by the final ranking as literature signals only, not paper-claim evidence.\n")
     frontend_md_path = paths.planning / "finding_frontend.md" if publish_outputs else out_dir / "finding_frontend.md"
     frontend_md_path.parent.mkdir(parents=True, exist_ok=True)
     frontend_md_path.write_text("".join(summary), encoding="utf-8")
@@ -948,6 +909,16 @@ def _env_int(name: str, default: int) -> int:
     return value if value > 0 else int(default)
 
 
+def _env_nonnegative_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw in (None, ""):
+        return max(0, int(default))
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return max(0, int(default))
+
+
 def _effective_source_selection(args: argparse.Namespace) -> dict[str, Any]:
     explicit_selection = str(getattr(args, "selection_json", "") or "").strip()
     if explicit_selection:
@@ -976,12 +947,14 @@ def _taste_signature(args: argparse.Namespace, extra_queries: list[str]) -> dict
     years = [int(item) for item in selection.get("years") or [dt.date.today().year]]
     window_days = _env_int("WINDOW_DAYS", 180 if deep else int(literature_cfg.get("primary_window_days", 90) or 90))
     topic_queries: list[str] = []
-    for item in cfg.get("queries", []) or []:
-        if isinstance(item, str) and item.strip():
-            topic_queries.append(" ".join(item.split()))
     for item in extra_queries:
         if item and item not in topic_queries:
             topic_queries.append(item)
+    for item in cfg.get("queries", []) or []:
+        if isinstance(item, str) and item.strip():
+            normalized = " ".join(item.split())
+            if normalized not in topic_queries:
+                topic_queries.append(normalized)
     local_llm = _load_local_llm_config()
     api_key_env = os.environ.get("LLM_API_KEY_ENV") or "OPENAI_API_KEY"
     api_key = (os.environ.get(api_key_env, "") if api_key_env else "") or os.environ.get("LLM_API_KEY", "") or str(local_llm.get("api_key") or "")
@@ -1003,9 +976,9 @@ def _taste_signature(args: argparse.Namespace, extra_queries: list[str]) -> dict
         "include_huggingface": bool(selection.get("include_huggingface")),
         "include_github": bool(selection.get("include_github")),
         "arxiv_window_days": window_days,
-        "venue_title_scan_limit": _env_int("VENUE_TITLE_SCAN_LIMIT", 12000 if deep else 3000),
-        "find_recall_count": _env_int("FIND_RECALL_COUNT", 3000 if deep else 200),
-        "detail_fetch_count": _env_int("DETAIL_FETCH_COUNT", 800 if deep else 50),
+        "venue_title_scan_limit": _env_nonnegative_int("VENUE_TITLE_SCAN_LIMIT", int(literature_cfg.get("venue_title_scan_limit") or 0)),
+        "nonvenue_fetch_limit": int(literature_cfg.get("nonvenue_fetch_limit") or 5000),
+        "title_abstract_scoring_limit": int(literature_cfg.get("title_abstract_scoring_limit") or 1000),
         "abstract_scoring_max_workers": _env_int("ABSTRACT_SCORING_MAX_WORKERS", 6 if deep else 4),
         "abstract_scoring_batch_size": _env_int("ABSTRACT_SCORING_BATCH_SIZE", 10 if deep else 6),
         "max_papers": int(args.max_papers),
@@ -1198,6 +1171,7 @@ def write_timeout_state(project: str, timeout_sec: int, elapsed_sec: float, log_
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the configured Find route and sync real Find artifacts into the project.")
     parser.add_argument("--project", required=True)
+    parser.add_argument("--web-job-id", default="", help=argparse.SUPPRESS)
     parser.add_argument("--env-name", default=DEFAULT_ENV)
     parser.add_argument("--max-papers", type=int, default=20)
     parser.add_argument("--max-ideas", type=int, default=6)
@@ -1207,7 +1181,7 @@ def main() -> int:
     parser.add_argument("--skip-github", action="store_true")
     parser.add_argument("--skip-venues", action="store_true", help="Skip slow venue title-index sources and use arXiv/HF/GitHub only.")
     parser.add_argument("--selection-json", default="", help="Explicit source selection JSON supplied by Framework for this Find request.")
-    parser.add_argument("--timeout-sec", type=int, default=int(os.environ.get("TIMEOUT_SEC", "3600")))
+    parser.add_argument("--timeout-sec", type=int, default=0, help="Optional overall Find timeout; 0 disables the overall timeout.")
     parser.add_argument("--fast-mode", action="store_true", help="Use conservative budgets and skip slower external sources so initialization cannot dominate the loop.")
     parser.add_argument("--deep-survey", action="store_true", help="Use TASTE focused deep survey mode: full venue-corpus audit, category prefiltering, and screened-candidate LLM scoring.")
     parser.add_argument("--wide-survey", action="store_true", help="Allow broader venue/year scope. Default follows the project canonical source selection.")
@@ -1262,7 +1236,10 @@ def main() -> int:
             venues = os.environ.get("LOCAL_DB_VENUES", "").strip()
             if venues:
                 refresh_cmd.extend(["--venues", venues])
-            subprocess.run(refresh_cmd, cwd=ROOT, text=True, capture_output=True, timeout=min(args.timeout_sec, int(os.environ.get("DB_UPDATE_TIMEOUT_SEC", "1800")) + 60))
+            db_update_timeout = int(os.environ.get("DB_UPDATE_TIMEOUT_SEC", "1800")) + 60
+            if args.timeout_sec > 0:
+                db_update_timeout = min(args.timeout_sec, db_update_timeout)
+            subprocess.run(refresh_cmd, cwd=ROOT, text=True, capture_output=True, timeout=db_update_timeout)
 
     if args.fast_mode:
         args.max_papers = min(args.max_papers, 3)

@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import importlib
-import io
 import json
 import os
 import sys
@@ -441,12 +440,10 @@ def _run_find(args: Sequence[str]) -> int:
     config = models.AppConfig(**_with_llm_env_defaults(config_payload))
     applied_runtime_tuning = models.apply_runtime_tuning_env(config)
     selection = models.VenueSelection(**source_selection.normalize_source_selection(selection_payload))
-    log_stream = io.StringIO()
-    with contextlib.redirect_stdout(log_stream):
+    # Keep stdout reserved for the final JSON contract while streaming Find
+    # progress, including the newly created run ID, to the caller immediately.
+    with contextlib.redirect_stdout(sys.stderr):
         result = find_pipeline.run_find(models.FindRequest(config=config, selection=selection))
-    logs = log_stream.getvalue()
-    if logs:
-        print(logs, end="", file=sys.stderr)
     run_id = str(result.get("run_id") or "") if isinstance(result, dict) else ""
     run_dir = ""
     if run_id:

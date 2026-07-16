@@ -2332,7 +2332,7 @@ def _source_status_rows_from_markdown(path: Path) -> list[dict[str, Any]]:
         parts = [part.strip() for part in bullet.split(" / ") if part.strip()]
         status_text = segment_value(parts, "状态")
         count = _as_int(segment_value(parts, "标题总数"), 0)
-        category_count = _as_int(segment_value(parts, "分类后"), count)
+        category_count = _as_int(segment_value(parts, "渠道候选") or segment_value(parts, "分类后"), count)
         adapter = segment_value(parts, "来源适配器")
         requested_years = parse_years(segment_value(parts, "请求年份"))
         effective_years = parse_years(segment_value(parts, "有效年份"))
@@ -14908,7 +14908,6 @@ def build_command(payload: dict[str, Any]) -> tuple[str, list[str]]:
         max_ideas = max(1, min(50, int(payload.get("max_ideas") or 6)))
         raw_repair_rounds = payload.get("repair_rounds")
         repair_rounds = max(0, min(10, int(3 if raw_repair_rounds is None else raw_repair_rounds)))
-        timeout_sec = max(60, int(payload.get("timeout_sec") or os.environ.get("TIMEOUT_SEC", "3600") or 3600))
         cmd = [
             py,
             str(SCRIPTS / "run_frontend.py"),
@@ -14920,9 +14919,10 @@ def build_command(payload: dict[str, Any]) -> tuple[str, list[str]]:
             str(max_ideas),
             "--repair-rounds",
             str(repair_rounds),
-            "--timeout-sec",
-            str(timeout_sec),
         ]
+        if payload.get("timeout_sec") is not None:
+            cmd.extend(["--timeout-sec", str(max(0, int(payload["timeout_sec"])))])
+        _append(cmd, "--web-job-id", payload.get("web_job_id"))
         selection = payload.get("selection")
         if isinstance(selection, dict):
             cmd.extend([

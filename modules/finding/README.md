@@ -25,7 +25,7 @@ http://127.0.0.1:8879
 1. 选择项目。
 2. 填写研究主题、研究兴趣和研究者画像。
 3. 保存 LLM 配置。
-4. 在 Finding 页面选择会议、年份、补充来源和推荐数量。
+4. 在 Finding 页面选择会议、年份、补充来源和最低推荐数量。
 5. 点击 Find。
 6. 在结果区域打开 `find.md`。
 
@@ -109,9 +109,11 @@ Finding 使用三类文件：
   "schema_version": 1,
   "config": {
     "max_recommended_papers": 10,
-    "max_fetch_papers": 120,
+    "nonvenue_fetch_limit": 5000,
+    "title_abstract_scoring_limit": 1000,
     "llm_concurrency": 8,
-    "arxiv_categories": ["cs.IR", "cs.LG", "cs.AI"],
+    "arxiv_categories": [],
+    "biorxiv_categories": [],
     "github_languages": ["python", "all"],
     "github_since": "monthly"
   },
@@ -132,6 +134,12 @@ Finding 使用三类文件：
   }
 }
 ```
+
+`arxiv_categories` 和 `biorxiv_categories` 仅在用户显式配置时作为分类约束，留空就是不按分类过滤。Find LLM 直接根据研究主题、研究兴趣和研究者画像抽取 1-3 个单词组成的平级英文关键词，并且必须包含领域、对象、方法和训练方式等基础概念本身；arXiv 与 bioRxiv 都在标题和摘要中按 OR 语义检索，并把最终关键词及显式分类写入当前 run 的 `intermediate/search_terms.json`。对有真实主题分类的每个出版渠道年份，LLM 使用分类名、样例标题和关键词一次性返回全部分类的严格排序，以及相关/有用分类前缀的唯一截止位。代码完整保留该前缀；只有前缀内论文不足 1000 篇时，才沿同一排序继续加入后续分类，累计首次达到至少 1000 篇后停止。相关前缀本身超过 1000 篇时不裁掉其中任何分类，全部分类总量不足 1000 篇时则全部保留。LLM 输出不完整或包含额外字段会明确报错，不切换本地排序。Poster/Oral、Main/Datasets、Full/Short/Demo、议程 session 和编号卷期只作为 track 审计信息，不作为主题分类裁剪论文。没有真实主题分类的出版渠道直接使用完整标题池。`nonvenue_fetch_limit` 是每个 arXiv/bioRxiv 来源的抓取上限，默认 5000；命中更多时按发表时间保留最近论文。bioRxiv 的 OpenAlex 后备检索可从本机环境变量 `OPENALEX_API_KEY` 读取免费 API key，密钥不会写入 run 产物。
+
+`title_abstract_scoring_limit` 是全局最终评分上限。所有完成标题 LLM 评分的候选去重并按标题分排序后，最多取该数量抓取摘要/详情并进入最终标题+摘要 LLM 评分；默认值为 1000。
+
+`max_recommended_papers` 是兼容保留的字段名，当前语义是最低推荐数量。最终目标 N 取该配置值与“每个已选来源 5 篇”的较大者；Find 对有真实摘要、已完成最终 LLM 评分且去重后的候选做全局排序，直接展示前 N，不使用主题证据或固定分数阈值减少结果数。
 
 ### input.json 示例
 
@@ -212,7 +220,7 @@ Finding 对这些会议提供稳定支持：
 Finding 的推荐过程分为六步：
 
 1. 读取研究主题、研究兴趣和来源选择。
-2. 抓取会议论文列表、摘要、作者、年份、链接和展示类型。
+2. 抓取所选出版渠道的论文列表、摘要、作者、年份、链接和展示类型。
 3. 合并可验证补全来源，例如 DOI、OpenAlex、Semantic Scholar、官方 PDF 或官方详情页。
 4. 用本地召回先筛出主题相关候选。
 5. 用 LLM 对标题和摘要做相关性评分。
@@ -345,7 +353,7 @@ modules/finding/.runtime/latest_run/
 ## 使用建议
 
 - 先用 3 到 5 个核心会议和最近 1 到 2 年运行。
-- 初次探索打开 arXiv，正式筛选优先使用会议来源。
+- 初次探索可打开 arXiv，正式筛选可同时使用所选会议、期刊和预印本来源。
 - 推荐数量先设为 10 到 20。
 - 每次改研究主题后重新运行 Find。
 - 查看 `source_status.md` 判断来源覆盖，再阅读 `find.md`。

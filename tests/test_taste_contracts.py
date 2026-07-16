@@ -5,6 +5,7 @@ import argparse
 import importlib.util
 import json
 import multiprocessing
+import os
 import re
 import shutil
 import subprocess
@@ -1406,6 +1407,7 @@ def test_reading_claude_subagent_runs_inside_single_runtime_item(monkeypatch, tm
     assert captured["cwd"] == run_path
     cmd = captured["cmd"]
     assert isinstance(cmd, list)
+    assert cmd[cmd.index("--disallowedTools") + 1] == "Agent,Task,EnterWorktree,ExitWorktree"
     assert cmd[cmd.index("--add-dir") + 1] == "."
     assert cmd[cmd.index("--add-dir") + 1] != str(reading_root)
     env = captured["env"]
@@ -1414,6 +1416,7 @@ def test_reading_claude_subagent_runs_inside_single_runtime_item(monkeypatch, tm
     assert env["TMP"] == "tmp"
     assert env["TEMP"] == "tmp"
     assert env["TASTE_READING_RUN_DIR"] == "."
+    assert str(ROOT) in env["GIT_CEILING_DIRECTORIES"].split(os.pathsep)
     assert receipt["expected_output_audit"]["valid_json"] is True
     assert receipt["nonruntime_artifact_audit"]["problem_count"] == 0
     assert receipt["external_temp_artifact_audit"]["status"] == "passed"
@@ -3898,6 +3901,499 @@ def _isolate_find_runtime(monkeypatch, find_pipeline, runtime: Path) -> None:
         monkeypatch.setattr(runtime_module, "CONFIG_PATH", runtime / ".config.json", raising=False)
 
 
+def test_find_recommendations_rank_without_topic_or_score_gates():
+    find_pipeline = _load_find_pipeline()
+    config = find_pipeline.AppConfig(
+        provider="openai_compatible",
+        api_key="test-key",
+        model="test-model",
+        max_recommended_papers=2,
+        research_interest="protein design",
+    )
+
+    def candidate(item_id: str, score: float, **updates) -> dict:
+        row = {
+            "id": item_id,
+            "title": f"Paper {item_id}",
+            "abstract": "This real abstract describes a concrete method, evaluation protocol, and experimental result.",
+            "reason_source": "llm abstract evaluation",
+            "fit_score": score,
+            "llm_fit_score": score,
+            "diversity_score": score,
+            "recommendation_score": score,
+            "topic_evidence_supported": False,
+            "topic_evidence": "weak: missing adaptive topic evidence",
+            "missing_topic_evidence": ["protein target"],
+            "llm_complete_route_guard_failed": True,
+            "foundation_demoted_from_strong": True,
+            "not_positive_support": True,
+        }
+        row.update(updates)
+        return row
+
+    ranked = find_pipeline._recommended(
+        [
+            candidate("low", 2.1),
+            candidate("high", 4.9, title="Shared protein design paper"),
+            candidate("duplicate", 1.0, title="Shared protein design paper"),
+            candidate("missing-abstract", 10.0, abstract=""),
+            candidate("unscored", 8.0, reason_source="llm title filter"),
+        ],
+        config,
+        source_count=1,
+    )
+
+    assert [item["id"] for item in ranked] == ["high", "low"]
+    assert all(item["find_recommendation"] for item in ranked)
+    assert all(item["topic_evidence_supported"] is False for item in ranked)
+    assert all("foundation_demoted_from_strong" not in item for item in ranked)
+    assert all("not_positive_support" not in item for item in ranked)
+    assert ranked[1]["fit_score"] == 2.1
+
+    local_only = candidate("local-only", 9.9, reason_source="adaptive profile fallback")
+    assert find_pipeline._recommended(
+        [local_only],
+        find_pipeline.AppConfig(provider="mock", api_key="", max_recommended_papers=1),
+        source_count=1,
+    ) == []
+
+
+def test_find_recommendation_target_is_at_least_five_per_selected_source():
+    find_pipeline = _load_find_pipeline()
+
+    config = find_pipeline.AppConfig(
+        provider="openai_compatible",
+        api_key="test-key",
+        model="test-model",
+        max_recommended_papers=20,
+    )
+    assert find_pipeline._strong_recommendation_target_count(
+        config,
+        source_count=5,
+    ) == 25
+    assert find_pipeline._strong_recommendation_target_count(
+        find_pipeline.AppConfig(max_recommended_papers=40),
+        source_count=5,
+    ) == 40
+
+    candidates = [
+        {
+            "id": f"paper-{index}",
+            "title": f"Unique final-scored paper number {index}",
+            "abstract": "This real abstract describes a concrete method, controlled evaluation, and reusable result.",
+            "reason_source": "llm abstract evaluation",
+            "fit_score": 10.0 - index * 0.1,
+            "llm_fit_score": 10.0 - index * 0.1,
+            "diversity_score": 5.0,
+            "recommendation_score": 10.0 - index * 0.1,
+        }
+        for index in range(30)
+    ]
+    recommended = find_pipeline._recommended(candidates, config, source_count=5)
+    assert len(recommended) == 25
+    assert [item["id"] for item in recommended] == [f"paper-{index}" for index in range(25)]
+
+
+def test_find_weak_topic_audit_does_not_rewrite_final_llm_scores():
+    find_pipeline = _load_find_pipeline()
+    item = {
+        "id": "audit-only",
+        "title": "Transfer method",
+        "abstract": "This real abstract describes a reusable transfer method and controlled evaluation protocol.",
+        "reason_source": "llm abstract evaluation",
+        "fit_score": 7.4,
+        "diversity_score": 6.8,
+    }
+
+    find_pipeline._apply_llm_topic_evidence(
+        item,
+        {
+            "topic_evidence_supported": False,
+            "topic_evidence": "weak: missing adaptive topic evidence",
+            "missing_topic_evidence": ["protein target"],
+        },
+        "protein design",
+    )
+
+    assert item["topic_evidence_audit_only"] is True
+    assert item["topic_evidence_supported"] is False
+    assert item["fit_score"] == 7.4
+    assert item["diversity_score"] == 6.8
+
+    foundation = {
+        **item,
+        "recommendation_score": 7.25,
+        "stable_rank_score": 7.1,
+        "stable_source_score": 6.9,
+        "foundation_invalid_reason": "audit-only route mismatch",
+    }
+    find_pipeline._demote_unstable_foundation_item(foundation)
+    assert foundation["fit_score"] == 7.4
+    assert foundation["diversity_score"] == 6.8
+    assert foundation["recommendation_score"] == 7.25
+    assert foundation["stable_rank_score"] == 7.1
+    assert foundation["stable_source_score"] == 6.9
+
+
+def test_find_stage0_prompt_requires_complete_searchable_domain_expansions():
+    finding_main = _load_finding_main()
+    research_profile = finding_main._private_import("research_profile")
+    finding_runtime = finding_main._private_import("finding_runtime")
+    prompt = research_profile.build_stage0_prompt(finding_runtime.AppConfig(
+        research_topic="非英文领域任务",
+        research_interest="非英文方法和应用",
+    ))
+    compact_prompt = " ".join(prompt.split())
+
+    assert "complete English safe expansion" in compact_prompt
+    assert "stand alone as a literature-search phrase" in compact_prompt
+    assert "full domain/object/task qualifiers" in compact_prompt
+
+
+def test_find_search_terms_keep_all_llm_keywords_equal_and_ignore_inferred_categories():
+    finding_main = _load_finding_main()
+    research_profile = finding_main._private_import("research_profile")
+    finding_runtime = finding_main._private_import("finding_runtime")
+    class FakeLLM:
+        enabled = True
+
+        def __init__(self):
+            self.prompt = ""
+
+        def json_or_none(self, prompt, **_kwargs):
+            self.prompt = prompt
+            return {
+                "search_keywords": [
+                    "Retrieval application terms",
+                    "protein",
+                    "diffusion",
+                    "RL",
+                    "protein inverse folding",
+                    "reinforcement learning",
+                ],
+                "arxiv_categories": ["q-bio.BM", "q-bio.QM", "q-bio.ZZ"],
+                "biorxiv_categories": ["bioinformatics", "biophysics", "epidemiology", "invented biology"],
+            }
+
+    config = finding_runtime.AppConfig(
+        research_topic="蛋白质条件生成扩散后训练",
+        research_interest="离散扩散后训练用于蛋白质逆折叠",
+        researcher_profile="研究蛋白质生成与强化学习",
+        arxiv_categories=[],
+        biorxiv_categories=[],
+    )
+    llm = FakeLLM()
+    terms = research_profile.extract_search_terms(config, llm)
+
+    assert terms["search_keywords"] == [
+        "protein",
+        "diffusion",
+        "RL",
+        "protein inverse folding",
+        "reinforcement learning",
+    ]
+    assert terms["arxiv_categories"] == []
+    assert terms["biorxiv_categories"] == []
+    assert terms["arxiv_category_source"] == "none"
+    assert terms["biorxiv_category_source"] == "none"
+    assert "anchor_terms" not in terms
+    assert "refine_groups" not in terms
+    assert "研究蛋白质生成与强化学习" in llm.prompt
+    assert '"arxiv_categories"' not in llm.prompt
+
+
+def test_find_search_terms_manual_categories_override_llm_suggestions():
+    finding_main = _load_finding_main()
+    research_profile = finding_main._private_import("research_profile")
+    finding_runtime = finding_main._private_import("finding_runtime")
+
+    class FakeLLM:
+        enabled = True
+
+        def json_or_none(self, *_args, **_kwargs):
+            return {
+                "search_keywords": ["protein", "diffusion", "RL"],
+                "arxiv_categories": ["q-bio.BM", "cs.LG"],
+                "biorxiv_categories": ["biophysics", "bioengineering"],
+            }
+
+    config = finding_runtime.AppConfig(
+        research_topic="protein design",
+        research_interest="protein inverse folding with diffusion",
+        arxiv_categories=["cs.ai", "physics.ed-ph"],
+        biorxiv_categories=["bioinformatics", "molecular biology"],
+    )
+    terms = research_profile.extract_search_terms(config, FakeLLM())
+
+    assert terms["arxiv_categories"] == ["cs.AI", "physics.ed-ph"]
+    assert terms["arxiv_category_source"] == "configured"
+    assert terms["biorxiv_categories"] == ["bioinformatics", "molecular biology"]
+    assert terms["biorxiv_category_source"] == "configured"
+
+
+def test_find_search_terms_use_json_parse_retry_result():
+    finding_main = _load_finding_main()
+    research_profile = finding_main._private_import("research_profile")
+    finding_runtime = finding_main._private_import("finding_runtime")
+    calls = []
+
+    class FakeLLM:
+        enabled = True
+
+        def json_or_error(self, _prompt, **kwargs):
+            calls.append(kwargs)
+            return {
+                "ok": True,
+                "data": {
+                    "search_keywords": [
+                        "protein",
+                        "protein inverse folding",
+                        "protein thermostability",
+                        "reinforcement learning",
+                        "discrete diffusion",
+                    ],
+                },
+            }
+
+        def json_or_none(self, *_args, **_kwargs):
+            raise AssertionError("json_or_none must not bypass the parse-retry result")
+
+    terms = research_profile.extract_search_terms(
+        finding_runtime.AppConfig(
+            research_topic="protein inverse folding",
+            research_interest="reinforcement learning for protein thermostability",
+        ),
+        FakeLLM(),
+    )
+
+    assert calls == [{"temperature": 0.1, "max_tokens": 1800}]
+    assert terms["search_keywords"] == [
+        "protein",
+        "protein inverse folding",
+        "protein thermostability",
+        "reinforcement learning",
+        "discrete diffusion",
+    ]
+
+
+def test_find_search_terms_reject_more_than_three_words_and_prompt_requires_basics():
+    finding_main = _load_finding_main()
+    research_profile = finding_main._private_import("research_profile")
+    finding_runtime = finding_main._private_import("finding_runtime")
+
+    class FakeLLM:
+        enabled = True
+
+        def __init__(self):
+            self.prompt = ""
+
+        def json_or_none(self, prompt, **_kwargs):
+            self.prompt = prompt
+            return {
+                "search_keywords": [
+                    "protein",
+                    "diffusion",
+                    "reinforcement learning",
+                    "protein inverse folding",
+                    "reinforcement learning for diffusion models",
+                ]
+            }
+
+    llm = FakeLLM()
+    terms = research_profile.extract_search_terms(
+        finding_runtime.AppConfig(
+            research_topic="protein diffusion",
+            research_interest="reinforcement learning for protein inverse folding",
+        ),
+        llm,
+    )
+
+    assert terms["search_keywords"] == [
+        "protein",
+        "diffusion",
+        "reinforcement learning",
+        "protein inverse folding",
+    ]
+    assert "Every item must contain 1-3 words" in llm.prompt
+    assert "MUST include the basic, standalone concepts" in llm.prompt
+
+
+def test_find_search_terms_keep_valid_manual_phrases_as_equal_status_keywords():
+    finding_main = _load_finding_main()
+    research_profile = finding_main._private_import("research_profile")
+    finding_runtime = finding_main._private_import("finding_runtime")
+
+    class FakeLLM:
+        enabled = True
+
+        def json_or_none(self, *_args, **_kwargs):
+            return {"search_keywords": ["protein", "diffusion"]}
+
+    terms = research_profile.extract_search_terms(
+        finding_runtime.AppConfig(
+            research_topic="protein diffusion",
+            arxiv_queries=[
+                "reinforcement learning",
+                "protein inverse folding",
+                "too many words for one valid search phrase",
+            ],
+        ),
+        FakeLLM(),
+    )
+
+    assert terms["search_keywords"] == [
+        "protein",
+        "diffusion",
+        "reinforcement learning",
+        "protein inverse folding",
+    ]
+
+
+def test_find_search_terms_do_not_demote_method_keywords():
+    finding_main = _load_finding_main()
+    research_profile = finding_main._private_import("research_profile")
+    finding_runtime = finding_main._private_import("finding_runtime")
+    class FakeLLM:
+        enabled = True
+
+        def json_or_none(self, *_args, **_kwargs):
+            return {
+                "search_keywords": ["protein", "diffusion", "RL", "protein inverse folding"],
+            }
+
+    config = finding_runtime.AppConfig(
+        research_topic="蛋白质逆折叠",
+        research_interest="离散扩散用于蛋白质生成",
+    )
+    terms = research_profile.extract_search_terms(config, FakeLLM())
+
+    assert terms["search_keywords"] == ["protein", "diffusion", "RL", "protein inverse folding"]
+
+
+def test_find_search_terms_never_use_llm_inferred_source_categories():
+    finding_main = _load_finding_main()
+    research_profile = finding_main._private_import("research_profile")
+    finding_runtime = finding_main._private_import("finding_runtime")
+    class FakeLLM:
+        enabled = True
+
+        def json_or_none(self, *_args, **_kwargs):
+            return {
+                "search_keywords": ["protein", "reinforcement learning", "discrete diffusion models"],
+                "arxiv_categories": ["q-bio.BM", "q-bio.QM", "cs.LG"],
+                "biorxiv_categories": ["bioinformatics", "biophysics"],
+            }
+
+    config = finding_runtime.AppConfig(
+        research_topic="蛋白质条件生成扩散后训练",
+        research_interest="离散扩散后训练用于蛋白质逆折叠和热稳定性增强",
+        arxiv_categories=[],
+        biorxiv_categories=[],
+    )
+    terms = research_profile.extract_search_terms(config, FakeLLM())
+
+    assert terms["search_keywords"] == ["protein", "reinforcement learning", "discrete diffusion models"]
+    assert terms["arxiv_categories"] == []
+    assert terms["biorxiv_categories"] == []
+    assert terms["source"] == "llm"
+
+
+def test_find_source_queries_use_one_equal_status_keyword_or_group():
+    finding_main = _load_finding_main()
+    sources = finding_main._private_import("sources")
+    queries = sources.build_arxiv_targeted_queries(
+        ["protein", "diffusion", "RL", "protein inverse folding"],
+        ["q-bio.BM", "cs.LG"],
+        "2026-01-01",
+        "2026-07-01",
+    )
+
+    assert [label for label, _query in queries] == ["keywords"]
+    query = queries[0][1]
+    assert '(ti:protein OR abs:protein)' in query
+    assert '(ti:diffusion OR abs:diffusion)' in query
+    assert '(ti:RL OR abs:RL)' in query
+    assert '(ti:"protein inverse folding" OR abs:"protein inverse folding")' in query
+    assert "AND (cat:q-bio.BM OR cat:cs.LG)" in query
+    assert sources.build_biorxiv_search_phrases({
+        "search_keywords": ["protein", "diffusion", "RL", "protein inverse folding"],
+    }) == ["protein", "diffusion", "RL", "protein inverse folding"]
+
+
+def test_find_framework_passes_only_the_saved_researcher_profile():
+    source = (ROOT / "framework" / "scripts" / "run_frontend.py").read_text(encoding="utf-8")
+
+    assert "feedback_profile" not in source
+    assert "Previous TASTE frontend summary" not in source
+    assert "researcher_profile = project_profile[:18000]" in source
+
+
+def test_find_arxiv_atom_categories_are_official_not_query_labels():
+    from xml.etree import ElementTree as ET
+
+    finding_main = _load_finding_main()
+    sources = finding_main._private_import("sources")
+    entry = ET.fromstring("""
+      <entry xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+        <id>http://arxiv.org/abs/2606.00001v1</id>
+        <published>2026-06-20T00:00:00Z</published>
+        <updated>2026-06-21T00:00:00Z</updated>
+        <title>Protein inverse folding with diffusion</title>
+        <summary>Abstract.</summary>
+        <author><name>A. Author</name></author>
+        <arxiv:primary_category term="q-bio.BM" />
+        <category term="q-bio.BM" />
+        <category term="cs.LG" />
+      </entry>
+    """)
+    papers = []
+    by_key = {}
+    sources._append_arxiv_entry(
+        papers,
+        by_key,
+        entry,
+        {"a": "http://www.w3.org/2005/Atom"},
+        "keywords",
+        'all:"protein inverse folding"',
+        "2026-01-01",
+        "2026-07-01",
+    )
+
+    assert papers[0]["category"] == "q-bio.BM"
+    assert papers[0]["categories"] == ["q-bio.BM", "cs.LG"]
+    assert papers[0]["classification_source"] == "official"
+    assert "keywords" not in papers[0]["categories"]
+    assert papers[0]["metadata"]["matched_queries"][0]["label"] == "keywords"
+    assert "fallback" not in papers[0]["metadata"]["matched_queries"][0]
+
+
+def test_find_source_wall_timeout_sets_cooperative_cancel_and_stops_work():
+    find_pipeline = _load_find_pipeline()
+    cancelled = threading.Event()
+    calls = []
+
+    def cooperative_worker():
+        while not cancelled.is_set():
+            calls.append(time.monotonic())
+            cancelled.wait(0.002)
+        return "stopped"
+
+    done, value, error = find_pipeline._run_with_wall_timeout(
+        "cooperative source",
+        cooperative_worker,
+        0.02,
+        on_timeout=cancelled.set,
+    )
+
+    assert done is False
+    assert value is None
+    assert error is None
+    assert cancelled.is_set()
+    count_after_timeout = len(calls)
+    time.sleep(0.02)
+    assert len(calls) == count_after_timeout
+
+
 def test_find_adaptive_route_terms_ignore_stopwords():
     find_pipeline = _load_find_pipeline()
 
@@ -4107,10 +4603,435 @@ def test_find_neurips_official_papers_parser_reads_papers_nips_hash_links():
     assert rows[0]["title"] == "A Reliable Test-Time Scaling Method"
     assert rows[0]["authors"] == "Alice A., Bob B."
     assert rows[0]["track"] == "Main Conference Track"
+    assert rows[0]["category"] == ""
+    assert rows[0]["classification_source"] == "official_track"
     assert rows[0]["pdf_url"].endswith("abc-Paper-Conference.pdf")
     assert rows[2]["authors"] == "Dana D., Evan E."
     assert rows[2]["track"] == "Datasets and Benchmarks Track"
-    assert rows[2]["category"] == "Datasets and Benchmarks Track"
+    assert rows[2]["category"] == ""
+
+
+def test_find_neurips_legacy_tracks_skip_category_pruning(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    venue = {"id": "openreview_neurips", "name": "NeurIPS"}
+    audit = {
+        "status": "complete",
+        "source_verified": True,
+        "complete": True,
+        "title_index_complete": True,
+        "adapter": "neurips_official_papers",
+        "source_adapter": "neurips_official_papers",
+        "source_scope": "official_neurips_papers_index",
+        "paper_count": 60,
+        "has_abstracts": True,
+        "any_abstracts": True,
+        "has_official_categories": True,
+        "category_status": "official_or_cached_categories",
+        "official_title_index_verified": True,
+        "official_accepted_list_verified": True,
+    }
+    tracks = ["Main Conference Track", "Datasets and Benchmarks Track", "Position Paper Track"]
+    rows = []
+    for index in range(60):
+        track = tracks[index % len(tracks)]
+        rows.append({
+            "id": f"paper-{index}",
+            "source": "neurips_official_papers",
+            "title": f"NeurIPS paper title {index}",
+            "abstract": "A real abstract for category semantics testing.",
+            "url": "https://papers.nips.cc/paper_files/paper/2025/hash/"
+            f"{index}-Abstract-{track.replace('Main Conference Track', 'Conference').replace(' ', '_')}.html",
+            "venue": "NeurIPS",
+            "year": 2025,
+            "primary_area": track,
+            "category": track,
+            "track": track,
+            "classification_source": "official",
+            "metadata": {"venue_metadata_audit": dict(audit)},
+        })
+    local = {
+        "venue_id": "openreview_neurips",
+        "venue": "NeurIPS",
+        "year": 2025,
+        "paper_count": len(rows),
+        "papers": rows,
+        "source_adapter": "neurips_official_papers",
+        "papers_path": "local/neurips/2025/papers.json",
+        "category_summary_path": "local/neurips/2025/category_summary.json",
+        "metadata_completeness_audit": dict(audit),
+        "category_summary": {
+            "paper_count": len(rows),
+            "category_summary": [{"name": track, "count": 20} for track in tracks],
+        },
+    }
+    monkeypatch.setattr(find_pipeline, "load_local_venue_year", lambda *_args, **_kwargs: local)
+
+    result = find_pipeline._load_local_category_guided_index(
+        venue,
+        [2025],
+        find_pipeline.AppConfig(provider="mock", research_topic="protein design"),
+        object(),
+        None,
+        lambda _message: None,
+    )
+
+    assert result is not None
+    selected, reports, corpus = result
+    assert len(selected) == len(corpus) == 60
+    assert all(not row.get("category") and not row.get("primary_area") for row in selected)
+    assert {row.get("track") for row in selected} == set(tracks)
+    assert reports[0]["has_official_categories"] is False
+    assert reports[0]["category_status"] == "no_official_categories"
+    assert reports[0]["category_pruning_applied"] is False
+    assert reports[0]["selected_category_papers"] == 60
+    assert reports[0]["title_filter_input_papers"] == 60
+
+    online_selected, online_reports = find_pipeline._select_official_category_title_index(
+        venue,
+        [2025],
+        selected,
+        reports[0]["metadata_audit"],
+        find_pipeline.AppConfig(provider="mock", research_topic="protein design"),
+        object(),
+        lambda _message: None,
+    )
+    assert len(online_selected) == 60
+    assert online_reports[0]["category_status"] == "no_official_categories"
+    assert online_reports[0]["selected_category_papers"] == 60
+    assert online_reports[0]["category_pruning_applied"] is False
+
+
+def test_find_category_selection_keeps_complete_useful_prefix_above_1000(monkeypatch):
+    finding_main = _load_finding_main()
+    selection_module = finding_main._private_import("selection")
+    finding_runtime = finding_main._private_import("finding_runtime")
+    monkeypatch.setenv("USE_LLM_CATEGORY_SELECT", "1")
+    monkeypatch.setenv("DISABLE_FIND_CATEGORY_SELECT_CACHE", "1")
+    monkeypatch.delenv("VENUE_CATEGORY_SELECT_MAX", raising=False)
+
+    entries = [
+        {
+            "name": f"Topic {index:02d}",
+            "count": 600,
+            "sample_titles": [f"Protein diffusion topic {index}"],
+            "sample_keywords": ["protein", "diffusion"],
+        }
+        for index in range(5)
+    ]
+    prompts = []
+
+    class FakeLLM:
+        enabled = True
+
+        def json_or_none(self, prompt, *_args, **_kwargs):
+            prompts.append(prompt)
+            return {
+                "ranked_categories": [entry["name"] for entry in entries],
+                "useful_through_rank": 3,
+            }
+
+    selection = selection_module.select_relevant_categories(
+        {
+            "venue_id": "dblp_icml",
+            "venue": "ICML",
+            "year": 2026,
+            "paper_count": 5000,
+            "category_summary": entries,
+        },
+        finding_runtime.AppConfig(
+            provider="openai_compatible",
+            research_topic="protein design",
+            research_interest="protein diffusion",
+            researcher_profile="Researcher studying controllable protein generation.",
+        ),
+        FakeLLM(),
+    )
+
+    assert selection["category_selection_max"] == 5
+    assert selection["category_selection_target_papers"] == 1000
+    assert selection["useful_through_rank"] == 3
+    assert selection["useful_category_cutoff"] == "Topic 02"
+    assert selection["useful_category_paper_count"] == 1800
+    assert selection["selected_paper_count"] == 1800
+    assert [row["name"] for row in selection["selected_categories"]] == [entry["name"] for entry in entries[:3]]
+    assert all("relevant/useful" in row["reason"] for row in selection["selected_categories"])
+    assert len(prompts) == 1
+    assert "protein design" in prompts[0]
+    assert "protein diffusion" in prompts[0]
+    assert "controllable protein generation" in prompts[0]
+    assert "Topic 04" in prompts[0]
+    assert "Rank every available category" in prompts[0]
+    assert "useful_through_rank" in prompts[0]
+    assert "fewer than 1000 categorized papers" in prompts[0]
+
+    filtered = selection_module.filter_papers_by_selected_categories(
+        [
+            {"id": "selected", "primary_area": selection["selected_categories"][0]["name"]},
+            {"id": "rejected", "primary_area": "Not a venue category"},
+            {"id": "poster-only", "category": "", "track": "Poster"},
+        ],
+        selection,
+    )
+    assert [row["id"] for row in filtered] == ["selected"]
+
+
+def test_find_category_selection_supplements_only_when_useful_prefix_is_below_1000(monkeypatch):
+    finding_main = _load_finding_main()
+    selection_module = finding_main._private_import("selection")
+    finding_runtime = finding_main._private_import("finding_runtime")
+    monkeypatch.setenv("USE_LLM_CATEGORY_SELECT", "1")
+    monkeypatch.setenv("DISABLE_FIND_CATEGORY_SELECT_CACHE", "1")
+
+    entries = [
+        {"name": f"Topic {index}", "count": 250, "sample_titles": [], "sample_keywords": []}
+        for index in range(6)
+    ]
+
+    class FakeLLM:
+        enabled = True
+
+        def json_or_none(self, *_args, **_kwargs):
+            return {
+                "ranked_categories": [entry["name"] for entry in entries],
+                "useful_through_rank": 2,
+            }
+
+    selection = selection_module.select_relevant_categories(
+        {
+            "venue_id": "venue",
+            "venue": "Venue",
+            "year": 2026,
+            "paper_count": 1500,
+            "category_summary": entries,
+        },
+        finding_runtime.AppConfig(provider="openai_compatible", research_topic="protein diffusion"),
+        FakeLLM(),
+    )
+
+    assert selection["useful_category_paper_count"] == 500
+    assert selection["selected_paper_count"] == 1000
+    assert [row["name"] for row in selection["selected_categories"]] == [entry["name"] for entry in entries[:4]]
+    assert all("relevant/useful" in row["reason"] for row in selection["selected_categories"][:2])
+    assert all("supplement" in row["reason"].lower() for row in selection["selected_categories"][2:])
+    assert [row["minimum_target_supplement"] for row in selection["category_ranking"]] == [False, False, True, True, False, False]
+
+
+def test_find_category_selection_keeps_all_categories_when_total_is_below_1000(monkeypatch):
+    finding_main = _load_finding_main()
+    selection_module = finding_main._private_import("selection")
+    finding_runtime = finding_main._private_import("finding_runtime")
+    monkeypatch.setenv("USE_LLM_CATEGORY_SELECT", "1")
+    monkeypatch.setenv("DISABLE_FIND_CATEGORY_SELECT_CACHE", "1")
+    entries = [
+        {"name": f"Topic {index}", "count": 200, "sample_titles": [], "sample_keywords": []}
+        for index in range(4)
+    ]
+
+    class FakeLLM:
+        enabled = True
+
+        def json_or_none(self, *_args, **_kwargs):
+            return {
+                "ranked_categories": [entry["name"] for entry in entries],
+                "useful_through_rank": 1,
+            }
+
+    selection = selection_module.select_relevant_categories(
+        {"venue": "Venue", "year": 2026, "paper_count": 800, "category_summary": entries},
+        finding_runtime.AppConfig(provider="openai_compatible", research_topic="protein diffusion"),
+        FakeLLM(),
+    )
+
+    assert selection["selected_paper_count"] == 800
+    assert len(selection["selected_categories"]) == 4
+
+
+def test_find_category_selection_rejects_incomplete_llm_ranking(monkeypatch):
+    finding_main = _load_finding_main()
+    selection_module = finding_main._private_import("selection")
+    finding_runtime = finding_main._private_import("finding_runtime")
+    monkeypatch.setenv("USE_LLM_CATEGORY_SELECT", "1")
+    monkeypatch.setenv("DISABLE_FIND_CATEGORY_SELECT_CACHE", "1")
+
+    class IncompleteLLM:
+        enabled = True
+
+        def json_or_none(self, *_args, **_kwargs):
+            return {"ranked_categories": ["Topic A"], "useful_through_rank": 1}
+
+    try:
+        selection_module.select_relevant_categories(
+            {
+                "venue_id": "venue",
+                "venue": "Venue",
+                "year": 2026,
+                "paper_count": 1200,
+                "category_summary": [
+                    {"name": "Topic A", "count": 600},
+                    {"name": "Topic B", "count": 600},
+                ],
+            },
+            finding_runtime.AppConfig(
+                provider="openai_compatible",
+                research_topic="protein diffusion",
+                research_interest="reinforcement learning",
+            ),
+            IncompleteLLM(),
+        )
+    except RuntimeError as exc:
+        assert "incomplete category ranking" in str(exc)
+    else:
+        raise AssertionError("Incomplete LLM category ranking must fail instead of using a fallback")
+
+
+def test_find_category_selection_rejects_non_strict_llm_payloads(monkeypatch):
+    finding_main = _load_finding_main()
+    selection_module = finding_main._private_import("selection")
+    finding_runtime = finding_main._private_import("finding_runtime")
+    monkeypatch.setenv("USE_LLM_CATEGORY_SELECT", "1")
+    monkeypatch.setenv("DISABLE_FIND_CATEGORY_SELECT_CACHE", "1")
+    invalid_payloads = [
+        {"ranked_categories": ["Topic A", "Topic B"]},
+        {"ranked_categories": ["Topic A", "Topic B"], "useful_through_rank": True},
+        {"ranked_categories": ["Topic A", "Topic B"], "useful_through_rank": "1"},
+        {"ranked_categories": ["Topic A", "Topic B"], "useful_through_rank": 3},
+        {"ranked_categories": ["Topic A", "Topic A"], "useful_through_rank": 1},
+        {"ranked_categories": ["Topic A", "Unknown"], "useful_through_rank": 1},
+        {"ranked_categories": [{"name": "Topic A"}, "Topic B"], "useful_through_rank": 1},
+        {"ranked_categories": ["Topic A", "Topic B"], "useful_through_rank": 1, "reason": "extra"},
+    ]
+    category_summary = {
+        "venue": "Venue",
+        "year": 2026,
+        "paper_count": 1200,
+        "category_summary": [
+            {"name": "Topic A", "count": 600},
+            {"name": "Topic B", "count": 600},
+        ],
+    }
+    config = finding_runtime.AppConfig(provider="openai_compatible", research_topic="protein diffusion")
+
+    for payload in invalid_payloads:
+        class InvalidLLM:
+            enabled = True
+
+            def json_or_none(self, *_args, **_kwargs):
+                return payload
+
+        try:
+            selection_module.select_relevant_categories(category_summary, config, InvalidLLM())
+        except RuntimeError as exc:
+            assert "category ranking failed" in str(exc)
+        else:
+            raise AssertionError(f"Non-strict category payload must fail: {payload}")
+
+
+def test_find_category_selection_cache_recomputes_prefix_from_cutoff():
+    finding_main = _load_finding_main()
+    selection_module = finding_main._private_import("selection")
+    entries = [
+        {"name": "Topic A", "count": 600},
+        {"name": "Topic B", "count": 600},
+        {"name": "Topic C", "count": 100},
+    ]
+    cached = {
+        "schema": selection_module.CATEGORY_SELECT_CACHE_SCHEMA_VERSION,
+        "ranked_categories": ["Topic A", "Topic B", "Topic C"],
+        "useful_through_rank": 1,
+        "selected_categories": [{"name": "Topic C", "reason": "stale"}],
+        "rejected_categories": [],
+    }
+
+    selection = selection_module._valid_cached_selection(cached, entries, 3)
+
+    assert selection is not None
+    assert [row["name"] for row in selection["selected_categories"]] == ["Topic A", "Topic B"]
+    assert selection["useful_through_rank"] == 1
+    assert selection["useful_category_paper_count"] == 600
+    assert selection["selected_paper_count"] == 1200
+
+
+def test_find_icml_presentation_labels_are_not_topic_categories():
+    find_pipeline = _load_find_pipeline()
+    poster = {
+        "id": "poster",
+        "venue": "ICML",
+        "year": 2026,
+        "primary_area": "Poster",
+        "category": "Poster",
+        "track": "Poster",
+        "classification_source": "llm_inferred",
+        "metadata": {"presentation_type": "poster"},
+    }
+    topical = {
+        "id": "topic",
+        "venue": "ICML",
+        "year": 2026,
+        "primary_area": "Applications->Chemistry, Physics, and Earth Sciences",
+        "category": "Applications->Chemistry, Physics, and Earth Sciences",
+        "track": "Spotlight",
+        "classification_source": "official",
+        "metadata": {"presentation_type": "spotlight", "category_status": "official_or_cached_categories"},
+    }
+
+    find_pipeline._sanitize_presentation_category_row(poster)
+    find_pipeline._sanitize_presentation_category_row(topical)
+    summary = find_pipeline._category_summary_from_title_index(
+        {"id": "dblp_icml", "name": "ICML"},
+        [2026],
+        [poster, topical],
+    )
+
+    assert poster["category"] == poster["primary_area"] == ""
+    assert poster["track"] == "Poster"
+    assert [row["name"] for row in summary["category_summary"]] == [
+        "Applications->Chemistry, Physics, and Earth Sciences"
+    ]
+
+
+def test_find_track_session_and_issue_labels_are_not_topic_categories():
+    find_pipeline = _load_find_pipeline()
+    fixtures = [
+        ("aaai_ojs", "Vol. 40 No. 1: AAAI-26 Technical Tracks 1"),
+        ("cikm_official_proceedings", "SESSION: Full Research Papers"),
+        ("www_official_accepted", "Short Papers"),
+        ("sigir_official_accepted", "Demo Papers"),
+    ]
+    rows = []
+    for index, (source, label) in enumerate(fixtures):
+        rows.append({
+            "id": f"paper-{index}",
+            "source": source,
+            "title": f"Paper {index}",
+            "venue": source,
+            "year": 2026,
+            "category": label,
+            "track": label,
+            "classification_source": "official",
+            "metadata": {
+                "venue_metadata_audit": {
+                    "adapter": source,
+                    "has_official_categories": True,
+                    "category_status": "official_or_cached_categories",
+                },
+            },
+        })
+
+    sanitized = find_pipeline._sanitize_venue_title_index_rows(rows)
+    summary = find_pipeline._category_summary_from_title_index(
+        {"id": "mixed", "name": "Mixed"},
+        [2026],
+        sanitized,
+    )
+
+    assert summary["category_summary"] == []
+    assert all(not row.get("category") and not row.get("primary_area") for row in sanitized)
+    assert all(row.get("classification_source") == "official_track" for row in sanitized)
+    assert [row.get("track") for row in sanitized] == [label for _source, label in fixtures]
+    assert all(
+        row["metadata"]["venue_metadata_audit"]["category_status"] == "no_official_categories"
+        for row in sanitized
+    )
 
 
 def test_find_cache_store_keeps_official_neurips_index_over_smaller_dblp(monkeypatch, tmp_path):
@@ -4563,7 +5484,7 @@ def test_find_collects_all_selected_sources_before_final_scoring(monkeypatch, tm
         max_recommended_papers=20,
         nature_candidate_limit=10,
         science_candidate_limit=10,
-        max_fetch_papers=10,
+        nonvenue_fetch_limit=10,
     )
     selection = sys.modules["finding_runtime.models"].VenueSelection(
         venue_ids=[],
@@ -4588,6 +5509,64 @@ def test_find_collects_all_selected_sources_before_final_scoring(monkeypatch, tm
         "score:arxiv",
         "score:biorxiv",
     }
+
+
+def test_find_title_abstract_scoring_groups_use_global_rank_and_deduplication():
+    find_pipeline = _load_find_pipeline()
+    config = find_pipeline.AppConfig(
+        provider="openai_compatible",
+        api_key="test-key",
+        model="test-model",
+        title_abstract_scoring_limit=3,
+    )
+    low = {
+        "id": "low",
+        "title": "Unique lower ranked paper",
+        "title_llm_fit_score": 6.0,
+    }
+    duplicate_high = {
+        "id": "duplicate-high",
+        "title": "Shared duplicate paper title",
+        "title_llm_fit_score": 9.0,
+    }
+    missing_llm_score = {
+        "id": "missing-score",
+        "title": "Paper without an LLM title score",
+        "fit_score": 10.0,
+    }
+    duplicate_low = {
+        "id": "duplicate-low",
+        "title": "Shared duplicate paper title",
+        "title_llm_fit_score": 7.0,
+    }
+    middle = {
+        "id": "middle",
+        "title": "Unique middle ranked paper",
+        "title_llm_fit_score": 8.0,
+    }
+    logs = []
+
+    selected_groups = find_pipeline._select_title_abstract_scoring_groups(
+        [
+            ("source-a", [low, duplicate_high, missing_llm_score], "sink-a"),
+            ("source-b", [duplicate_low, middle], "sink-b"),
+        ],
+        config,
+        require_title_llm_score=True,
+        log=logs.append,
+    )
+
+    selected = [item for _source, items, _sink in selected_groups for item in items]
+    assert {item["id"] for item in selected} == {"duplicate-high", "middle", "low"}
+    assert {item["id"]: item["title_abstract_scoring_global_rank"] for item in selected} == {
+        "duplicate-high": 1,
+        "middle": 2,
+        "low": 3,
+    }
+    assert "title_abstract_scoring_selected" not in duplicate_low
+    assert "title_abstract_scoring_selected" not in missing_llm_score
+    assert logs and "eligible_title_scored=4" in logs[-1]
+    assert "unique_selected=3" in logs[-1]
 
 
 def test_find_journal_year_window_marks_partial_coverage_limited(monkeypatch):
@@ -4877,7 +5856,7 @@ def test_find_targeted_query_exhaustion_satisfies_completeness_date_basis():
     assert status["cap_truncated"] is False
 
 
-def test_find_arxiv_targeted_complete_raw_pool_ignores_candidate_limit(monkeypatch):
+def test_find_arxiv_fetch_limit_keeps_newest_targeted_results(monkeypatch):
     _load_find_pipeline()
     find_support = sys.modules["support.find_support"]
 
@@ -4908,16 +5887,691 @@ def test_find_arxiv_targeted_complete_raw_pool_ignores_candidate_limit(monkeypat
 
     papers, status = find_support.fetch_arxiv(
         ["cs.AI"],
-        max_items=1,
+        fetch_limit=1,
         start_date="2026-06-01",
         end_date="2026-06-24",
         targeted_queries=[("topic:test", "all:protein AND submittedDate:[202606010000 TO 202606242359]")],
     )
 
+    assert [paper["title"] for paper in papers] == ["Conditional protein design two"]
+    assert status["fetch_limit"] == 1
+    assert status["fetch_limit_reached"] is True
+    assert status["raw_item_limit"] == 1
+    assert "minimum_target" not in status
+
+
+def test_find_arxiv_scans_past_first_full_page_until_query_exhaustion(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    starts = []
+
+    class FakeResponse:
+        def __init__(self, start):
+            count = 100 if start == 0 else 1 if start == 100 else 0
+            entries = []
+            for offset in range(count):
+                index = start + offset
+                entries.append(
+                    f"<entry><id>http://arxiv.org/abs/2606.{index:05d}v1</id>"
+                    "<published>2026-06-20T00:00:00Z</published>"
+                    "<updated>2026-06-20T00:00:00Z</updated>"
+                    f"<title>Protein design {index}</title><summary>Abstract.</summary>"
+                    "<author><name>A</name></author></entry>"
+                )
+            self.text = '<?xml version="1.0" encoding="UTF-8"?><feed xmlns="http://www.w3.org/2005/Atom">' + "".join(entries) + "</feed>"
+
+    def fake_request(url, *_args, **_kwargs):
+        start = int(parse_qs(urlparse(url).query)["start"][0])
+        starts.append(start)
+        return FakeResponse(start)
+
+    monkeypatch.setenv("ARXIV_TARGETED_COMPLETE", "1")
+    monkeypatch.delenv("ARXIV_FULL_SCAN", raising=False)
+    monkeypatch.setenv("ARXIV_REQUEST_SPACING_SEC", "0")
+    monkeypatch.setattr(find_support, "_request_arxiv_page", fake_request)
+
+    papers, status = find_support.fetch_arxiv(
+        ["q-bio.BM"],
+        fetch_limit=200,
+        start_date="2026-06-01",
+        end_date="2026-06-24",
+        targeted_queries=[("anchor", 'all:"protein design"')],
+        max_queries=1,
+    )
+
+    assert len(papers) == 101
+    assert starts == [0, 100]
+    assert status["page_size"] == 100
+    assert status["fetch_limit_reached"] is False
+
+
+def test_find_arxiv_targeted_fetch_limit_is_a_result_limit(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+
+    class FakeResponse:
+        text = """<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <entry><id>http://arxiv.org/abs/2606.00001v1</id><published>2026-06-20T00:00:00Z</published><updated>2026-06-20T00:00:00Z</updated><title>Protein design one</title><summary>One.</summary><author><name>A</name></author><arxiv:primary_category term="q-bio.BM"/><category term="q-bio.BM"/></entry>
+  <entry><id>http://arxiv.org/abs/2606.00002v1</id><published>2026-06-21T00:00:00Z</published><updated>2026-06-21T00:00:00Z</updated><title>Protein design two</title><summary>Two.</summary><author><name>B</name></author><arxiv:primary_category term="q-bio.BM"/><category term="q-bio.BM"/></entry>
+</feed>"""
+
+    monkeypatch.delenv("ARXIV_TARGETED_COMPLETE", raising=False)
+    monkeypatch.setenv("ARXIV_REQUEST_SPACING_SEC", "0")
+    monkeypatch.setattr(find_support, "_request_arxiv_page", lambda *_args, **_kwargs: FakeResponse())
+
+    papers, status = find_support.fetch_arxiv(
+        ["q-bio.BM"],
+        fetch_limit=1,
+        start_date="2026-06-01",
+        end_date="2026-06-24",
+        targeted_queries=[("anchor", 'all:"protein design" AND cat:q-bio.BM')],
+    )
+
+    assert [paper["title"] for paper in papers] == ["Protein design two"]
+    assert status["fetch_limit"] == 1
+    assert status["fetch_limit_reached"] is True
+    assert status["raw_item_limit"] == 1
+
+
+def test_find_arxiv_non_targeted_honors_query_limit_without_result_truncation(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    seen_urls = []
+
+    class FakeResponse:
+        text = """<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <entry><id>http://arxiv.org/abs/2606.00001v1</id><published>2026-06-20T00:00:00Z</published><updated>2026-06-20T00:00:00Z</updated><title>Protein design one</title><summary>One.</summary><author><name>A</name></author><arxiv:primary_category term="q-bio.BM"/><category term="q-bio.BM"/></entry>
+  <entry><id>http://arxiv.org/abs/2606.00002v1</id><published>2026-06-21T00:00:00Z</published><updated>2026-06-21T00:00:00Z</updated><title>Protein design two</title><summary>Two.</summary><author><name>B</name></author><arxiv:primary_category term="q-bio.BM"/><category term="q-bio.BM"/></entry>
+</feed>"""
+
+    def fake_request(url, *_args, **_kwargs):
+        seen_urls.append(url)
+        return FakeResponse()
+
+    monkeypatch.delenv("ARXIV_FULL_SCAN", raising=False)
+    monkeypatch.setenv("ARXIV_REQUEST_SPACING_SEC", "0")
+    monkeypatch.setattr(find_support, "_request_arxiv_page", fake_request)
+
+    papers, status = find_support.fetch_arxiv(
+        ["q-bio.BM", "cs.LG"],
+        fetch_limit=10,
+        start_date="2026-06-01",
+        end_date="2026-06-24",
+        topic_queries=[],
+        max_queries=1,
+    )
+
     assert len(papers) == 2
-    assert status["candidate_limit"] == 1
-    assert status["targeted_complete_scan"] is True
-    assert status["target_count_reached"] is False
+    assert len(seen_urls) == 1
+    assert status["full_scan"] is False
+    assert status["query_limit"] == 1
+    assert len(status["queries"]) == 1
+
+
+def test_find_arxiv_targeted_query_never_uses_category_only_fallback(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    seen_urls = []
+
+    class EmptyResponse:
+        text = '<?xml version="1.0" encoding="UTF-8"?><feed xmlns="http://www.w3.org/2005/Atom"></feed>'
+
+    def fake_request(url, *_args, **_kwargs):
+        seen_urls.append(url)
+        return EmptyResponse()
+
+    monkeypatch.delenv("ARXIV_FULL_SCAN", raising=False)
+    monkeypatch.setenv("ARXIV_REQUEST_SPACING_SEC", "0")
+    monkeypatch.setattr(find_support, "_request_arxiv_page", fake_request)
+
+    papers, status = find_support.fetch_arxiv(
+        ["q-bio.BM", "cs.LG"],
+        fetch_limit=5,
+        start_date="2026-06-01",
+        end_date="2026-06-24",
+        targeted_queries=[
+            ("keywords", '(all:protein OR all:diffusion OR all:RL)'),
+        ],
+        max_queries=3,
+    )
+
+    assert papers == []
+    assert len(seen_urls) == 1
+    assert status["queries"] == ['(all:protein OR all:diffusion OR all:RL)']
+    assert "recall_fallback_used" not in status
+
+
+def test_find_biorxiv_europepmc_uses_publisher_and_accepts_new_doi(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    seen_urls = []
+
+    class FakeResponse:
+        def json(self):
+            return {
+                "resultList": {
+                    "result": [
+                        {
+                            "doi": "10.64898/2026.04.20.719544",
+                            "title": "Protein inverse folding through joint geometry",
+                            "abstractText": "A bioRxiv protein-design preprint.",
+                            "firstPublicationDate": "2026-04-20",
+                            "authorString": "A. Author",
+                            "bookOrReportDetails": {"publisher": "bioRxiv"},
+                        },
+                        {
+                            "doi": "10.1101/medrxiv-record",
+                            "title": "A medRxiv record",
+                            "abstractText": "Not a bioRxiv record.",
+                            "firstPublicationDate": "2026-04-21",
+                            "authorString": "B. Author",
+                            "bookOrReportDetails": {"publisher": "medRxiv"},
+                        },
+                    ]
+                }
+            }
+
+    def fake_request(url, *_args, **_kwargs):
+        seen_urls.append(url)
+        return FakeResponse()
+
+    monkeypatch.setenv("EUROPEPMC_REQUEST_SPACING_SEC", "0")
+    monkeypatch.setattr(find_support, "_request", fake_request)
+    status = {"errors": [], "pages_fetched": 0}
+    papers = find_support._fetch_biorxiv_europepmc(
+        ["protein inverse folding"],
+        10,
+        "2026-01-01",
+        "2026-07-01",
+        status,
+    )
+
+    query = parse_qs(urlparse(seen_urls[0]).query)["query"][0]
+    assert 'PUBLISHER:"bioRxiv"' in query
+    assert 'TITLE:"protein inverse folding"' in query
+    assert 'ABSTRACT:"protein inverse folding"' in query
+    assert "sort_date:y" in query
+    assert [paper["biorxiv_doi"] for paper in papers] == ["10.64898/2026.04.20.719544"]
+    assert papers[0]["classification_source"] == "unavailable"
+
+
+def test_find_biorxiv_openalex_reports_exhausted_daily_budget_without_waiting(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    calls = []
+
+    class RateLimitError(RuntimeError):
+        pass
+
+    error = RateLimitError("429 Client Error: Too Many Requests")
+    error.response = type("Response", (), {
+        "status_code": 429,
+        "headers": {"Retry-After": "64000", "X-RateLimit-Remaining": "0", "X-RateLimit-Remaining-USD": "0"},
+        "text": "Insufficient budget. Resets at midnight UTC.",
+    })()
+
+    def fail_request(url, *_args, **_kwargs):
+        calls.append(url)
+        raise error
+
+    monkeypatch.setenv("OPENALEX_REQUEST_RETRIES", "4")
+    monkeypatch.setenv("OPENALEX_REQUEST_SPACING_SEC", "0")
+    monkeypatch.setattr(find_support, "_request", fail_request)
+    status = {"errors": [], "pages_fetched": 0, "limited": False}
+
+    papers = find_support._fetch_biorxiv_openalex(
+        ["protein design", "protein inverse folding", "protein sequence design"],
+        10,
+        "2026-01-01",
+        "2026-07-01",
+        status,
+    )
+
+    assert papers == []
+    assert len(calls) == 1
+    assert status["limited"] is True
+    assert status["openalex_rate_limited"] is True
+    assert status["stopped_reason"] == "openalex_daily_budget_exhausted"
+    assert status["openalex_retry_after_sec"] == 64000
+
+
+def test_find_biorxiv_openalex_queries_one_equal_status_or_group(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    requested = []
+
+    class FakeResponse:
+        def __init__(self, phrase):
+            self.phrase = phrase
+
+        def json(self):
+            return {"results": [{"phrase": self.phrase}], "meta": {"next_cursor": None}}
+
+    def fake_request(url, *_args, **_kwargs):
+        phrase = parse_qs(urlparse(url).query)["search"][0]
+        requested.append(phrase)
+        return FakeResponse(phrase)
+
+    def fake_paper(item, *_args):
+        phrase = item["phrase"]
+        return {
+            "id": phrase,
+            "source": "biorxiv",
+            "biorxiv_doi": f"10.64898/{phrase}",
+            "title": phrase,
+            "metadata": {"published": "2026-06-01"},
+        }
+
+    monkeypatch.setenv("OPENALEX_REQUEST_SPACING_SEC", "0")
+    monkeypatch.setattr(find_support, "_request", fake_request)
+    monkeypatch.setattr(find_support, "_biorxiv_paper_from_openalex", fake_paper)
+    status = {"errors": [], "pages_fetched": 0, "limited": False}
+
+    papers = find_support._fetch_biorxiv_openalex(
+        ["protein", "diffusion", "RL"],
+        2,
+        "2026-01-01",
+        "2026-07-01",
+        status,
+    )
+
+    assert requested == ["protein OR diffusion OR RL"]
+    assert len(papers) == 1
+
+
+def test_find_biorxiv_openalex_uses_api_key_and_retries_short_429(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    calls = []
+
+    class RateLimitError(RuntimeError):
+        pass
+
+    error = RateLimitError("429 for api_key=secret-key")
+    error.response = type("Response", (), {
+        "status_code": 429,
+        "headers": {"Retry-After": "1", "X-RateLimit-Remaining": "0", "X-RateLimit-Remaining-USD": "0.97"},
+        "text": "Too many requests per second.",
+    })()
+
+    class SuccessResponse:
+        def json(self):
+            return {"results": [], "meta": {"next_cursor": None}}
+
+    def fake_request(url, *_args, **_kwargs):
+        calls.append(url)
+        if len(calls) == 1:
+            raise error
+        return SuccessResponse()
+
+    monkeypatch.setenv("OPENALEX_API_KEY", "secret-key")
+    monkeypatch.setenv("OPENALEX_REQUEST_RETRIES", "2")
+    monkeypatch.setattr(find_support.time, "sleep", lambda *_args: None)
+    monkeypatch.setattr(find_support, "_request", fake_request)
+    status = {"errors": [], "pages_fetched": 0, "limited": False}
+
+    papers = find_support._fetch_biorxiv_openalex(
+        ["protein", "diffusion"],
+        10,
+        "2026-01-01",
+        "2026-07-01",
+        status,
+    )
+
+    assert papers == []
+    assert len(calls) == 2
+    assert all(parse_qs(urlparse(url).query)["api_key"] == ["secret-key"] for url in calls)
+    assert status["openalex_api_key_configured"] is True
+    assert "secret-key" not in " ".join(status["errors"])
+
+
+def test_find_biorxiv_openalex_long_retry_is_not_misreported_as_daily_budget(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+
+    class RateLimitError(RuntimeError):
+        pass
+
+    error = RateLimitError("429 Client Error: Too Many Requests")
+    error.response = type("Response", (), {
+        "status_code": 429,
+        "headers": {"Retry-After": "60", "X-RateLimit-Remaining": "0", "X-RateLimit-Remaining-USD": "0.85"},
+        "text": "Too many requests per second.",
+    })()
+
+    monkeypatch.setenv("OPENALEX_MAX_RETRY_WAIT_SEC", "30")
+    monkeypatch.setattr(find_support, "_request", lambda *_args, **_kwargs: (_ for _ in ()).throw(error))
+    status = {"errors": [], "pages_fetched": 0, "limited": False}
+
+    papers = find_support._fetch_biorxiv_openalex(
+        ["protein"],
+        10,
+        "2026-01-01",
+        "2026-07-01",
+        status,
+    )
+
+    assert papers == []
+    assert status["stopped_reason"] == "openalex_rate_limited"
+    assert "daily API budget exhausted" not in " ".join(status["errors"])
+
+
+def test_find_biorxiv_targeted_full_target_skips_openalex_and_native_fallback(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    targeted = [{
+        "id": f"targeted-{index}",
+        "source": "biorxiv",
+        "biorxiv_doi": f"10.64898/targeted-{index}",
+        "title": f"Targeted protein design {index}",
+        "abstract": "A targeted match.",
+        "metadata": {"published": "2026-06-02", "doi": f"10.64898/targeted-{index}"},
+    } for index in range(5)]
+
+    monkeypatch.delenv("BIORXIV_COMPLETE_WINDOW", raising=False)
+    monkeypatch.setattr(find_support, "_fetch_biorxiv_europepmc", lambda *_args, **_kwargs: list(targeted))
+    monkeypatch.setattr(find_support, "_fetch_biorxiv_openalex", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("OpenAlex must not run after Europe PMC succeeds")))
+    monkeypatch.setattr(find_support, "_request", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("native fallback must not run after targeted success")))
+
+    papers, status = find_support.fetch_biorxiv(
+        ["all"],
+        fetch_limit=5,
+        start_date="2026-06-01",
+        end_date="2026-06-02",
+        search_phrases=["protein design"],
+    )
+
+    assert papers == targeted
+    assert status["targeted"] is True
+    assert status["openalex_skipped_reason"] == "explicit internal raw item limit reached"
+    assert status["fetch_limit_reached"] is True
+
+
+def test_find_biorxiv_targeted_partial_europepmc_does_not_treat_limit_as_target(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    epmc = [{
+        "id": "epmc",
+        "source": "biorxiv",
+        "biorxiv_doi": "10.64898/epmc",
+        "title": "Europe PMC protein design",
+        "abstract": "A targeted match.",
+        "metadata": {"published": "2026-06-02", "doi": "10.64898/epmc"},
+    }]
+    monkeypatch.setattr(find_support, "_fetch_biorxiv_europepmc", lambda *_args, **_kwargs: list(epmc))
+    monkeypatch.setattr(find_support, "_fetch_biorxiv_openalex", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("a fetch limit is not a backfill target")))
+
+    papers, status = find_support.fetch_biorxiv_targeted(
+        ["protein design"],
+        fetch_limit=3,
+        start_date="2026-06-01",
+        end_date="2026-06-02",
+    )
+
+    assert {paper["id"] for paper in papers} == {"epmc"}
+    assert status["openalex_skipped_reason"] == "Europe PMC returned keyword-matched papers"
+    assert status["fetch_limit_reached"] is False
+
+
+def test_find_biorxiv_targeted_category_filter_does_not_turn_limit_into_minimum(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    epmc = [
+        {
+            "id": f"epmc-{index}",
+            "source": "biorxiv",
+            "biorxiv_doi": f"10.64898/epmc-{index}",
+            "title": f"Europe PMC protein design {index}",
+            "metadata": {"published": "2026-06-02"},
+        }
+        for index in range(3)
+    ]
+    openalex = [{
+        "id": "openalex",
+        "source": "biorxiv",
+        "biorxiv_doi": "10.64898/openalex",
+        "title": "OpenAlex protein design",
+        "metadata": {"published": "2026-06-01"},
+    }]
+    openalex_calls = []
+
+    monkeypatch.setattr(find_support, "_fetch_biorxiv_europepmc", lambda *_args, **_kwargs: list(epmc))
+
+    def fake_openalex(*_args, **_kwargs):
+        openalex_calls.append(True)
+        return list(openalex)
+
+    monkeypatch.setattr(find_support, "_fetch_biorxiv_openalex", fake_openalex)
+    monkeypatch.setattr(
+        find_support,
+        "_filter_biorxiv_targeted_by_official_category",
+        lambda papers, *_args, **_kwargs: [paper for paper in papers if paper["id"] in {"epmc-0", "openalex"}],
+    )
+
+    papers, status = find_support.fetch_biorxiv_targeted(
+        ["protein design"],
+        fetch_limit=3,
+        start_date="2026-06-01",
+        end_date="2026-06-02",
+        categories=["bioinformatics"],
+    )
+
+    assert openalex_calls == []
+    assert {paper["id"] for paper in papers} == {"epmc-0"}
+    assert status["openalex_skipped_reason"] == "explicit internal raw item limit reached"
+    assert status["fetch_limit_reached"] is True
+
+
+def test_find_biorxiv_partial_target_never_falls_back_to_native_window(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    targeted = [{
+        "id": "targeted",
+        "source": "biorxiv",
+        "biorxiv_doi": "10.64898/targeted",
+        "title": "Targeted protein design",
+        "abstract": "A targeted match.",
+        "metadata": {"published": "2026-06-02", "doi": "10.64898/targeted"},
+    }]
+
+    monkeypatch.delenv("BIORXIV_COMPLETE_WINDOW", raising=False)
+    monkeypatch.setattr(find_support, "fetch_biorxiv_targeted", lambda *_args, **_kwargs: (
+        list(targeted),
+        {"message": "partial", "queries": ["targeted"], "errors": []},
+    ))
+    monkeypatch.setattr(
+        find_support,
+        "_request",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("native window must not run")),
+    )
+
+    papers, status = find_support.fetch_biorxiv(
+        ["all"],
+        fetch_limit=3,
+        start_date="2026-06-01",
+        end_date="2026-06-02",
+        search_phrases=["protein design"],
+    )
+
+    assert papers == targeted
+    assert status["queries"] == ["targeted"]
+
+
+def test_find_biorxiv_native_fallback_pushes_multiple_categories_to_api(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    seen_categories = []
+
+    class FakeResponse:
+        def __init__(self, category):
+            self.category = category
+
+        def json(self):
+            return {
+                "messages": [{"total": "3", "count": "3", "category": self.category}],
+                "collection": [
+                    {
+                            "date": "2026-06-02",
+                        "category": self.category,
+                        "title": f"Native {self.category} protein paper {index}",
+                        "abstract": "A native category result.",
+                        "doi": f"10.64898/{self.category.replace(' ', '-')}-{index}",
+                        "version": "1",
+                        "authors": "A. Author",
+                    }
+                    for index in range(3)
+                ],
+            }
+
+    def fake_request(url, *_args, **_kwargs):
+        category = parse_qs(urlparse(url).query).get("category", ["all"])[0]
+        seen_categories.append(category)
+        return FakeResponse(category)
+
+    monkeypatch.setenv("BIORXIV_TARGETED", "0")
+    monkeypatch.delenv("BIORXIV_COMPLETE_WINDOW", raising=False)
+    monkeypatch.setenv("BIORXIV_REQUEST_SPACING_SEC", "0")
+    monkeypatch.setattr(find_support, "_request", fake_request)
+
+    papers, status = find_support.fetch_biorxiv(
+        ["bioinformatics", "biophysics"],
+        fetch_limit=10,
+        start_date="2026-06-01",
+        end_date="2026-06-02",
+        search_phrases=[],
+    )
+
+    assert len(papers) == 6
+    assert set(seen_categories) == {"bioinformatics", "biophysics"}
+    assert {paper["category"] for paper in papers} == {"bioinformatics", "biophysics"}
+    assert all(paper["classification_source"] == "official" for paper in papers)
+    assert status["fetch_limit_reached"] is False
+
+
+def test_find_biorxiv_native_query_scans_all_pages_without_minimum_truncation(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    seen_cursors = []
+
+    class FakeResponse:
+        def __init__(self, cursor):
+            self.cursor = cursor
+
+        def json(self):
+            records = []
+            for index in range(self.cursor, min(47, self.cursor + 30)):
+                published = (date(2025, 1, 1) + timedelta(days=index)).isoformat()
+                records.append({
+                    "date": published,
+                    "category": "paleontology",
+                    "title": f"Chronological paper {index}",
+                    "abstract": "An official category record.",
+                    "doi": f"10.64898/chronological-{index}",
+                    "version": "1",
+                    "authors": "A. Author",
+                })
+            return {
+                "messages": [{"total": "47", "count": str(len(records))}],
+                "collection": records,
+            }
+
+    def fake_request(url, *_args, **_kwargs):
+        cursor = int(str(url).rstrip("/").split("/")[-2])
+        seen_cursors.append(cursor)
+        return FakeResponse(cursor)
+
+    monkeypatch.setenv("BIORXIV_TARGETED", "0")
+    monkeypatch.delenv("BIORXIV_COMPLETE_WINDOW", raising=False)
+    monkeypatch.setenv("BIORXIV_WINDOW_DAYS", "60")
+    monkeypatch.setenv("BIORXIV_REQUEST_SPACING_SEC", "0")
+    monkeypatch.setattr(find_support, "_request", fake_request)
+
+    papers, status = find_support.fetch_biorxiv(
+        ["paleontology"],
+        fetch_limit=50,
+        start_date="2025-01-01",
+        end_date="2025-02-16",
+        search_phrases=[],
+    )
+
+    assert len(papers) == 47
+    assert papers[0]["title"] == "Chronological paper 46"
+    assert papers[-1]["title"] == "Chronological paper 0"
+    assert seen_cursors == [0, 30]
+    assert status["fetch_limit_reached"] is False
+    assert status["stopped_reason"] == "selected queries exhausted"
+
+
+def test_find_biorxiv_explicit_category_drops_unverified_targeted_records(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    paper = {
+        "id": "unverified",
+        "source": "biorxiv",
+        "biorxiv_doi": "10.64898/unverified",
+        "title": "Unverified category paper",
+        "metadata": {"doi": "10.64898/unverified", "published": "2026-06-02"},
+    }
+
+    monkeypatch.setattr(find_support, "_request", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")))
+    status = {"errors": [], "limited": False}
+    papers = find_support._filter_biorxiv_targeted_by_official_category(
+        [paper],
+        ["molecular biology"],
+        status,
+    )
+
+    assert papers == []
+    assert paper["classification_source"] == "unavailable"
+    assert status["official_category_unverified_count"] == 1
+    assert status["official_category_unverified_dropped_count"] == 1
+    assert status["limited"] is True
+
+
+def test_find_biorxiv_rejects_category_api_silent_fallback_to_all(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    calls = []
+
+    class SilentFallbackResponse:
+        def json(self):
+            return {
+                "messages": [{"total": "367", "count": "30", "category": "all"}],
+                "collection": [{
+                    "date": "2026-06-02",
+                    "category": "neuroscience",
+                    "title": "Unrelated all-category record",
+                    "abstract": "This must not enter an unsupported category request.",
+                    "doi": "10.64898/unrelated-all",
+                    "version": "1",
+                    "authors": "A. Author",
+                }],
+            }
+
+    def fake_request(url, *_args, **_kwargs):
+        calls.append(url)
+        return SilentFallbackResponse()
+
+    monkeypatch.setenv("BIORXIV_TARGETED", "0")
+    monkeypatch.delenv("BIORXIV_COMPLETE_WINDOW", raising=False)
+    monkeypatch.setenv("BIORXIV_REQUEST_SPACING_SEC", "0")
+    monkeypatch.setattr(find_support, "_request", fake_request)
+
+    papers, status = find_support.fetch_biorxiv(
+        ["epidemiology"],
+        fetch_limit=5,
+        start_date="2026-06-01",
+        end_date="2026-06-02",
+        search_phrases=[],
+    )
+
+    assert papers == []
+    assert len(calls) == 1
+    assert status["unsupported_categories"] == ["epidemiology"]
+    assert status["limited"] is True
+    assert "API reported 'all'" in status["errors"][0]
 
 
 def test_find_biorxiv_complete_window_does_not_truncate_raw_pool(monkeypatch):
@@ -4977,7 +6631,7 @@ def test_find_biorxiv_complete_window_does_not_truncate_raw_pool(monkeypatch):
 
     papers, status = find_support.fetch_biorxiv(
         ["bioinformatics"],
-        max_items=1,
+        fetch_limit=10,
         start_date="2026-06-01",
         end_date="2026-06-02",
         search_phrases=["protein design"],
@@ -5023,7 +6677,7 @@ def test_find_biorxiv_complete_window_skips_targeted_seed_by_default(monkeypatch
 
     papers, status = find_support.fetch_biorxiv(
         ["bioinformatics"],
-        max_items=1,
+        fetch_limit=10,
         start_date="2026-06-01",
         end_date="2026-06-02",
         search_phrases=["protein design"],
@@ -5066,10 +6720,12 @@ def test_find_biorxiv_complete_window_fetches_all_native_cursors(monkeypatch):
             }
 
     seen_cursors = []
+    seen_categories = []
 
     def fake_request(url, *_args, **_kwargs):
         cursor = int(str(url).rstrip("/").split("/")[-2])
         seen_cursors.append(cursor)
+        seen_categories.append(parse_qs(urlparse(url).query).get("category", ["all"])[0])
         return FakeResponse(cursor)
 
     monkeypatch.setenv("BIORXIV_COMPLETE_WINDOW", "1")
@@ -5079,7 +6735,7 @@ def test_find_biorxiv_complete_window_fetches_all_native_cursors(monkeypatch):
 
     papers, status = find_support.fetch_biorxiv(
         ["bioinformatics"],
-        max_items=1,
+        fetch_limit=100,
         start_date="2026-06-01",
         end_date="2026-06-02",
         search_phrases=["protein design"],
@@ -5087,13 +6743,61 @@ def test_find_biorxiv_complete_window_fetches_all_native_cursors(monkeypatch):
 
     assert len(papers) == 61
     assert sorted(seen_cursors) == [0, 30, 60]
+    assert set(seen_categories) == {"bioinformatics"}
     assert status["complete_window_scan"] is True
     assert status["parallel_page_fetch_used"] is True
     assert status["pages_fetched"] == 3
     assert status["stopped_reason"] == "full window scanned"
 
 
-def test_find_biorxiv_targeted_seed_ignores_candidate_limit(monkeypatch):
+def test_find_biorxiv_complete_window_does_not_schedule_after_raw_cap(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    calls = []
+
+    class FakeResponse:
+        def json(self):
+            return {
+                "messages": [{"total": "300", "count": "30"}],
+                "collection": [
+                    {
+                        "date": "2026-06-02",
+                        "category": "bioinformatics",
+                        "title": f"Native capped paper {index}",
+                        "abstract": "A category-filtered native result.",
+                        "doi": f"10.64898/capped-{index}",
+                        "version": "1",
+                        "authors": "A. Author",
+                    }
+                    for index in range(30)
+                ],
+            }
+
+    def fake_request(url, *_args, **_kwargs):
+        calls.append(url)
+        return FakeResponse()
+
+    monkeypatch.setenv("BIORXIV_COMPLETE_WINDOW", "1")
+    monkeypatch.setenv("BIORXIV_PARALLEL_PAGES", "4")
+    monkeypatch.setenv("BIORXIV_REQUEST_SPACING_SEC", "0")
+    monkeypatch.setattr(find_support, "_request", fake_request)
+
+    papers, status = find_support.fetch_biorxiv(
+        ["bioinformatics"],
+        fetch_limit=1,
+        start_date="2026-06-01",
+        end_date="2026-06-02",
+        search_phrases=[],
+    )
+
+    assert len(papers) == 1
+    assert len(calls) == 1
+    assert parse_qs(urlparse(calls[0]).query)["category"] == ["bioinformatics"]
+    assert status["raw_item_limit_reached"] is True
+    assert status["limited"] is True
+
+
+def test_find_biorxiv_targeted_fetch_limit_keeps_newest_results(monkeypatch):
     _load_find_pipeline()
     find_support = sys.modules["support.find_support"]
 
@@ -5108,6 +6812,7 @@ def test_find_biorxiv_targeted_seed_ignores_candidate_limit(monkeypatch):
                             "abstractText": "A targeted seed for conditional protein design.",
                             "firstPublicationDate": "2026-06-02",
                             "authorString": "A. Author",
+                            "bookOrReportDetails": {"publisher": "bioRxiv"},
                         },
                         {
                             "doi": "10.1101/target2",
@@ -5115,26 +6820,69 @@ def test_find_biorxiv_targeted_seed_ignores_candidate_limit(monkeypatch):
                             "abstractText": "Another targeted seed for conditional protein design.",
                             "firstPublicationDate": "2026-06-01",
                             "authorString": "B. Author",
+                            "bookOrReportDetails": {"publisher": "bioRxiv"},
                         },
                     ]
                 }
             }
 
     monkeypatch.setenv("BIORXIV_OPENALEX", "0")
+    monkeypatch.delenv("BIORXIV_TARGETED_RAW_MAX_ITEMS", raising=False)
     monkeypatch.setenv("EUROPEPMC_REQUEST_SPACING_SEC", "0")
     monkeypatch.setattr(find_support, "_request", lambda *_args, **_kwargs: FakeResponse())
 
     papers, status = find_support.fetch_biorxiv_targeted(
         ["protein design"],
-        max_items=1,
+        fetch_limit=1,
         start_date="2026-06-01",
         end_date="2026-06-02",
     )
 
-    assert len(papers) == 2
-    assert status["candidate_limit"] == 1
-    assert status["target_count_reached"] is False
-    assert status["raw_item_limit"] is None
+    assert [paper["title"] for paper in papers] == ["Targeted bioRxiv seed one"]
+    assert status["fetch_limit"] == 1
+    assert status["fetch_limit_reached"] is True
+    assert status["raw_item_limit"] == 1
+    assert "minimum_target" not in status
+
+
+def test_find_biorxiv_targeted_reports_raw_cap_before_category_filter(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    targeted = [
+        {
+            "id": f"targeted-{index}",
+            "source": "biorxiv",
+            "biorxiv_doi": f"10.64898/targeted-{index}",
+            "title": f"Targeted protein paper {index}",
+            "abstract": "A precise keyword match.",
+            "metadata": {"published": "2026-06-02", "doi": f"10.64898/targeted-{index}"},
+        }
+        for index in range(2)
+    ]
+
+    class CategoryResponse:
+        def json(self):
+            return {
+                "collection": [{"doi": "", "category": "bioinformatics"}],
+            }
+
+    monkeypatch.setattr(find_support, "_fetch_biorxiv_europepmc", lambda *_args, **_kwargs: list(targeted))
+    monkeypatch.setattr(find_support, "_request", lambda *_args, **_kwargs: CategoryResponse())
+
+    papers, status = find_support.fetch_biorxiv_targeted(
+        ["protein inverse folding"],
+        fetch_limit=2,
+        start_date="2026-06-01",
+        end_date="2026-06-02",
+        categories=["biophysics"],
+    )
+
+    assert papers == []
+    assert status["raw_count"] == 2
+    assert status["raw_item_limit_reached"] is True
+    assert status["fetch_limit_reached"] is True
+    assert status["official_category_rejected_count"] == 2
+    assert status["limited"] is True
 
 
 def test_find_dynamic_source_raw_cache_helpers_are_removed(monkeypatch, tmp_path):
@@ -5157,12 +6905,12 @@ def test_find_dynamic_source_raw_cache_helpers_are_removed(monkeypatch, tmp_path
         "url": "https://example.test/n1",
         "metadata": {"published": "2026-06-10", "doi": "10.1038/current-run"},
     }]
-    status = find_pipeline._annotate_source_completeness("nature", {"ok": True, "limited": False, "count": 1}, rows, params, min_count=1)
+    status = find_pipeline._annotate_source_completeness("nature", {"ok": True, "limited": False, "count": 1}, rows, params)
 
     assert not hasattr(find_pipeline, "_write_source_raw_cache")
     assert not hasattr(find_pipeline, "_load_source_raw_cache_seed")
     assert not (tmp_path / "runtime" / "state" / "source_raw_cache.json").exists()
-    assert status["min_count_required"] == 1
+    assert "min_count_required" not in status
     assert "cache_min_count_required" not in status
 
 

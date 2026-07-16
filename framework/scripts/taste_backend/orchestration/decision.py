@@ -104,7 +104,14 @@ def ask_claude_decision(ctx: FrameworkContext, state: WorkflowState, contracts: 
     prompt_path = ctx.state_dir / "last_claude_decision_prompt.md"
     write_text(prompt_path, prompt + "\n")
     try:
-        proc = subprocess.run([claude, "-p", prompt], cwd=ctx.run_dir, env=ctx.env(), text=True, capture_output=True, timeout=timeout_sec)
+        proc = subprocess.run(
+            [claude, "-p", "--tools", "", prompt],
+            cwd=ctx.run_dir,
+            env=ctx.env(),
+            text=True,
+            capture_output=True,
+            timeout=timeout_sec,
+        )
     except Exception as exc:
         state.notes.append(f"Claude 决策不可用：{exc}")
         return None

@@ -508,6 +508,10 @@ def _invoke_claude(
     env["WRITING_WORKSPACE"] = str(_paper_root(project_root))
     env["DISABLE_AUTOUPDATER"] = "1"
     env["CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL"] = "1"
+    # Hide the enclosing TASTE repository while preserving project-local repositories.
+    env["GIT_CEILING_DIRECTORIES"] = os.pathsep.join(
+        filter(None, (str(ROOT), env.get("GIT_CEILING_DIRECTORIES", "")))
+    )
     started = _now_iso()
     proc: subprocess.Popen[str] | None = None
     stdout = ""

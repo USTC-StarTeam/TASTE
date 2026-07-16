@@ -384,6 +384,7 @@ When a specific literature gap blocks the selected experiment, use `conda run -n
 When current-Find reading is stale or incomplete, use `conda run -n taste python {framework_entrypoint} reading --action current_find_research_plan --project {project_root.name}`.
 When the current idea must be regenerated, use `conda run -n taste python {framework_entrypoint} ideation --action idea --project {project_root.name}`, then wait for one selected Plan and matching Environment handoff before launching experiments.
 After any refresh, re-read the resulting project files before continuing.
+Task subagents must omit worktree isolation unless their cwd is an independent Git repository whose top-level remains inside {project_root}.
 """.strip()
     message = str(item.get("message") or "").strip()
     gate_feedback = [str(value) for value in item.get("gate_feedback", []) if str(value).strip()]
@@ -470,11 +471,16 @@ def _invoke_controller(
     stdout = ""
     stderr = ""
     timed_out = False
+    controller_env = os.environ.copy()
+    # Hide the enclosing TASTE repository while preserving project-local repositories.
+    controller_env["GIT_CEILING_DIRECTORIES"] = os.pathsep.join(
+        filter(None, (str(WORKSPACE_ROOT), controller_env.get("GIT_CEILING_DIRECTORIES", "")))
+    )
     try:
         proc = subprocess.Popen(
             cmd,
             cwd=str(project_root),
-            env=os.environ.copy(),
+            env=controller_env,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

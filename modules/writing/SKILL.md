@@ -67,6 +67,7 @@ If the current project state proposes a mathematical mechanism, use it only when
 - The only public entrypoint is `modules/writing/main.py`.
 - Each project has one Writing-owned Claude Code session. Formal work, Web chat, and blocked-audit repair resume only that session; audit turns always use fresh independent sessions.
 - The Writing controller runs with `projects/<project>/` as its working directory.
+- Subagents must omit worktree isolation unless their cwd is an independent Git repository whose top-level remains inside the current `projects/<project>/` directory.
 - Write canonical scientific artifacts only under `projects/<project>/paper/writing/`.
 - Keep the module-owned project-to-session map under `modules/writing/.runtime/controller_sessions.json`.
 - Controller work and chat create no run directories and perform no project-copy step.

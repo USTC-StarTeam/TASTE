@@ -40,7 +40,7 @@
 4. Environment handoff 可以显示 `ready_for_experimenting`，但不能把它解释为论文级 full reproduction 或指标已通过。`conda_env` 显示名称，`conda_env_prefix` 显示路径。
 5. 用户可见 Markdown/HTML 要经过统一渲染和清洗，避免把内部 marker、paper id、JSON 字段、Claude scratchpad 或 reader 指令直接展示出来。
 6. 产物默认展示上一个已完成结果；新任务未完成前不能用半成品替换当前用户可见产物。
-7. Find 来源状态只能展示真实 Find run 的 `source_status` 或项目摘要；`检查可抓取性` 的 venue health sample 只能显示在会议列表中，不能当作“标题总数/分类后”回退来源。
+7. Find 来源状态只能展示真实 Find run 的 `source_status` 或项目摘要；`检查可抓取性` 的 venue health sample 只能显示在出版渠道列表中，不能当作“题录总数/渠道候选”回退来源。
 8. 当前 Find 产物按页面作用域传输：Ideas 请求显式携带项目和当前 Find run，只读取 `idea.md` 和 `ideas.json`，不会为了渲染想法同时读取超大的 Find/Read 产物。Ideas 页面上方保留人工修改卡片，最终 `idea.md` 只在右下产物栏渲染。
 9. Plan 页面显示 Framework 确认的已批准 Ideas，并允许勾选一个或多个作为本次输入；没有选中项时禁用生成。页面保持三栏布局，右上“计划操作”直接修改 `plan.md`，右下产物栏渲染同一个项目文件；页面主体不得再复制一份正文。
 10. Plan 生成、润色、Claude 选择、人类选择和 Markdown 保存都调用 `framework/scripts/run_module.py planning`。Web 不读取模块 `.runtime`、不复制 run，也不自行判断 Read/Ideas 是否就绪。

@@ -325,6 +325,11 @@ def _invoke_controller(
     stdout = ""
     stderr = ""
     timed_out = False
+    controller_env = dict(env or runtime_env())
+    # Hide the enclosing TASTE repository while preserving project-local repositories.
+    controller_env["GIT_CEILING_DIRECTORIES"] = os.pathsep.join(
+        filter(None, (str(_workspace_root()), controller_env.get("GIT_CEILING_DIRECTORIES", "")))
+    )
     try:
         proc = subprocess.Popen(
             cmd,
@@ -333,7 +338,7 @@ def _invoke_controller(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env=env or runtime_env(),
+            env=controller_env,
             start_new_session=True,
         )
         with _state_lock(controller_dir):

@@ -131,7 +131,7 @@ def normalize_cached_paper(paper: dict[str, Any], venue: dict[str, Any], year: i
     categories = paper.get("categories")
     if not isinstance(categories, list):
         categories = []
-    category = str(paper.get("primary_area") or paper.get("category") or paper.get("track") or "")
+    category = str(paper.get("primary_area") or paper.get("category") or "")
     if category and category not in categories:
         categories = [category, *categories]
     row = {
@@ -170,7 +170,7 @@ def normalize_cached_paper(paper: dict[str, Any], venue: dict[str, Any], year: i
 def build_category_summary(venue: dict[str, Any], year: int, papers: list[dict[str, Any]], adapter: str) -> dict[str, Any]:
     buckets: dict[str, list[dict[str, Any]]] = {}
     for paper in papers:
-        category = str(paper.get("primary_area") or paper.get("category") or paper.get("track") or "").strip()
+        category = str(paper.get("primary_area") or paper.get("category") or "").strip()
         if category:
             buckets.setdefault(category, []).append(paper)
     counts = Counter({name: len(items) for name, items in buckets.items()})

@@ -404,6 +404,10 @@ def run_claude(args: argparse.Namespace, prompt: str, output_root: Path) -> tupl
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env["EXPERIMENTING_AUDIT_OUTPUT_DIR"] = str(output_root)
+    # Do not let an audit process discover the enclosing TASTE repository.
+    env["GIT_CEILING_DIRECTORIES"] = os.pathsep.join(
+        filter(None, (str(ROOT), env.get("GIT_CEILING_DIRECTORIES", "")))
+    )
     try:
         proc = subprocess.run(
             cmd,

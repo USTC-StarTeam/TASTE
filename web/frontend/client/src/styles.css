@@ -601,6 +601,13 @@ label {
   gap: 1rem;
 }
 
+.bottom > *,
+.logPanel,
+.artifactPanel {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .researchControlPanel {
   display: grid;
   gap: 0.85rem;
@@ -627,6 +634,9 @@ label {
 .artifactPanel pre {
   white-space: pre-wrap;
   word-break: break-word;
+  overflow-wrap: anywhere;
+  min-width: 0;
+  max-width: 100%;
   max-height: 420px;
   overflow: auto;
   background: #111827;
@@ -643,7 +653,10 @@ label {
 
 .jobList {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.75rem;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .jobCard {
@@ -651,11 +664,17 @@ label {
   border-radius: 8px;
   padding: 0.75rem;
   background: #fbfcfd;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .jobCard pre {
   max-height: 210px;
-  margin: 0.65rem 0 0;
+  margin: 0.45rem 0 0;
+  width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .jobHeader {
@@ -672,6 +691,13 @@ label {
   color: #4b5b6e;
   padding: 0.12rem 0.5rem;
   font-size: 0.78rem;
+  flex: 0 0 auto;
+}
+
+.jobHeader strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .jobCard > small {
@@ -702,8 +728,38 @@ label {
   font-size: 0.82rem;
 }
 
+.progressMeta span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.progressMeta strong {
+  flex: 0 0 auto;
+}
+
 .progressBlock small {
   color: #6f7f91;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+@media (max-width: 600px) {
+  .logPanel {
+    padding: 0.75rem;
+  }
+
+  .jobCard {
+    padding: 0.65rem;
+  }
+
+  .jobHeader {
+    align-items: flex-start;
+  }
+
+  .progressMeta {
+    align-items: flex-start;
+  }
 }
 
 .sourceStatus {

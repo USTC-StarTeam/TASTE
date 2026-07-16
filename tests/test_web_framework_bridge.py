@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import sys
 import time
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -623,10 +626,12 @@ def test_web_find_action_uses_framework_run_frontend(monkeypatch, tmp_path):
     _make_project(projects, "demo")
     monkeypatch.setattr(project_bridge, "PROJECTS", projects)
     monkeypatch.setattr(project_bridge, "management_python", lambda: "/env/bin/python")
+    monkeypatch.setenv("TIMEOUT_SEC", "3600")
 
     project, cmd = project_bridge.build_command({
         "project": "demo",
         "action": "find",
+        "web_job_id": "find_test_web_action",
         "max_papers": 7,
         "max_ideas": 3,
         "skip_arxiv": True,
@@ -644,9 +649,11 @@ def test_web_find_action_uses_framework_run_frontend(monkeypatch, tmp_path):
     assert cmd[:4] == ["/env/bin/python", str(project_bridge.SCRIPTS / "run_frontend.py"), "--project", "demo"]
     assert "--max-papers" in cmd and cmd[cmd.index("--max-papers") + 1] == "7"
     assert "--max-ideas" in cmd and cmd[cmd.index("--max-ideas") + 1] == "3"
+    assert "--web-job-id" in cmd and cmd[cmd.index("--web-job-id") + 1] == "find_test_web_action"
     assert "--skip-arxiv" in cmd
     assert "--deep-survey" in cmd
     assert "--query" in cmd and cmd[cmd.index("--query") + 1] == "protein design"
+    assert "--timeout-sec" not in cmd
     explicit_selection = json.loads(cmd[cmd.index("--selection-json") + 1])
     assert explicit_selection["venue_ids"] == ["dblp_icml"]
     assert explicit_selection["venue_years"] == [{"venue_id": "dblp_icml", "year": 2026}]
@@ -667,10 +674,17 @@ def test_web_find_request_passes_project_selection_to_framework(monkeypatch, tmp
     }
     request = web_server.FindRequest(
         project="demo",
-        config=web_server.AppConfig(research_interest="protein design"),
+        config=web_server.AppConfig(
+            research_interest="protein design",
+            arxiv_queries=["protein inverse folding"],
+            nonvenue_fetch_limit=2400,
+            title_abstract_scoring_limit=1800,
+            venue_title_scan_limit=0,
+        ),
         selection=selection,
     )
     captured: dict[str, object] = {}
+    persisted_config: dict[str, object] = {}
 
     monkeypatch.setattr(web_server, "_safe_project_root", lambda project: project_root)
     monkeypatch.setattr(web_server, "_active_web_stage_job_blocker", lambda *args, **kwargs: None)
@@ -679,7 +693,11 @@ def test_web_find_request_passes_project_selection_to_framework(monkeypatch, tmp
     monkeypatch.setattr(web_server, "save_canonical_source_selection", lambda value, project_config_path=None: value)
     monkeypatch.setattr(web_server, "_persist_local_llm_config_from_find_request", lambda *args, **kwargs: None)
     monkeypatch.setattr(web_server, "_sync_project_research_preferences_from_config", lambda *args, **kwargs: None)
-    monkeypatch.setattr(web_server, "_sync_project_finding_config_from_request", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        web_server,
+        "_sync_project_finding_config_from_request",
+        lambda config, _project_path: persisted_config.update(config.model_dump()),
+    )
     monkeypatch.setattr(web_server, "_persist_jobs", lambda: None)
 
     def fake_run_action(payload, _log, _should_cancel, _progress):
@@ -693,8 +711,10 @@ def test_web_find_request_passes_project_selection_to_framework(monkeypatch, tmp
         def as_dict(self):
             return {"job_id": self.job_id, "result": self.result}
 
-    def fake_start_job(_stage, fn):
+    def fake_start_job(_stage, fn, job_id=None, initial_result=None):
         job = FakeJob()
+        job.job_id = job_id or job.job_id
+        job.result = initial_result
         job.result = fn(lambda _line: None, lambda: False, lambda *_args: None)
         return job
 
@@ -704,7 +724,13 @@ def test_web_find_request_passes_project_selection_to_framework(monkeypatch, tmp
     web_server.api_find(request)
 
     assert captured["project"] == "demo"
+    assert str(captured["web_job_id"]).startswith("find_")
     assert captured["selection"] == web_server.normalize_source_selection(selection)
+    assert captured["queries"] == ["protein inverse folding"]
+    assert "deep_survey" not in captured
+    assert persisted_config["nonvenue_fetch_limit"] == 2400
+    assert persisted_config["title_abstract_scoring_limit"] == 1800
+    assert persisted_config["venue_title_scan_limit"] == 0
 
 
 def test_web_paper_chat_action_uses_writing_module(monkeypatch, tmp_path):
@@ -897,21 +923,38 @@ def test_run_frontend_finding_input_snapshot_omits_api_key():
     assert '"api_key": api_key' not in text
 
 
-def test_web_find_small_budget_does_not_force_deep_survey():
+def test_web_find_settings_do_not_implicitly_force_deep_survey():
     text = (ROOT / "web" / "backend" / "auto_research" / "web" / "server.py").read_text(encoding="utf-8")
 
-    assert "venue_title_scan_limit or 0) > 0" not in text
-    assert "venue_scan_limit >= 1000" in text
-    assert "find_recall_count >= 1000" in text
-    assert "detail_fetch_count >= 200" in text
+    assert 'payload["deep_survey"]' not in text
+    assert "venue_scan_limit >=" not in text
 
 
-def test_run_frontend_uses_project_finding_budget_defaults():
+def test_run_frontend_transmits_project_finding_budget_contract():
     text = (ROOT / "framework" / "scripts" / "run_frontend.py").read_text(encoding="utf-8")
 
-    assert 'venue_scan_limit = env_int("VENUE_TITLE_SCAN_LIMIT", config_positive_int("venue_title_scan_limit"' in text
-    assert 'find_recall_count = env_int("FIND_RECALL_COUNT", config_positive_int("find_recall_count"' in text
-    assert 'detail_fetch_count = env_int("DETAIL_FETCH_COUNT", config_positive_int("detail_fetch_count"' in text
+    assert 'nonvenue_fetch_limit = config_positive_int("nonvenue_fetch_limit", 5000)' in text
+    assert 'title_abstract_scoring_limit = config_positive_int("title_abstract_scoring_limit", 1000)' in text
+    assert 'venue_scan_limit = config_nonnegative_int("venue_title_scan_limit", 0)' in text
+    assert '"nonvenue_fetch_limit": nonvenue_fetch_limit,' in text
+    assert '"title_abstract_scoring_limit": title_abstract_scoring_limit,' in text
+    assert '"venue_title_scan_limit": venue_scan_limit,' in text
+    assert '"venue_title_scan_limit": _env_nonnegative_int(' in text
+    assert "reproducible code dataset" not in text
+    assert "recent benchmark method" not in text
+    assert "executable research idea" not in text
+
+
+def test_find_has_no_default_overall_3600_second_timeout():
+    frontend_text = (ROOT / "framework" / "scripts" / "run_frontend.py").read_text(encoding="utf-8")
+    project_text = (ROOT / "framework" / "scripts" / "run_project.py").read_text(encoding="utf-8")
+    bridge_text = (ROOT / "framework" / "scripts" / "auto_research" / "project_bridge.py").read_text(encoding="utf-8")
+
+    assert 'parser.add_argument("--timeout-sec", type=int, default=0' in frontend_text
+    assert 'if args.timeout_sec > 0:' in frontend_text
+    assert 'timeout_sec = max(60, int(payload.get("timeout_sec")' not in bridge_text
+    assert "os.environ.get('TIMEOUT_SEC', '3600')" not in project_text
+    assert "run(taste_cmd, paths.root, paths.logs / '05a_finding_frontend.log', timeout=None)" in project_text
 
 
 def test_run_frontend_runtime_tuning_preserves_web_scoring_budget():
@@ -923,6 +966,40 @@ def test_run_frontend_runtime_tuning_preserves_web_scoring_budget():
     assert 'runtime_default("ABSTRACT_SCORING_BATCH_SIZE", str(abstract_scoring_batch_size))' in text
     assert 'runtime_default("ABSTRACT_SCORING_MAX_WORKERS", str(abstract_scoring_max_workers))' in text
     assert 'runtime_default("ABSTRACT_SCORING_TIMEOUT_SEC", str(abstract_scoring_timeout_sec))' in text
+    assert 'runtime_tuning["ARXIV_FULL_SCAN"] = str(os.environ.get("ARXIV_FULL_SCAN") or "0")' in text
+    assert 'runtime_tuning["ARXIV_MAX_QUERIES"] = str(arxiv_max_queries)' in text
+    assert 'runtime_tuning["ARXIV_TIMEOUT_SEC"] = str(arxiv_timeout_sec)' in text
+
+
+def test_find_bridge_public_contract_has_no_legacy_budget_fields_or_env():
+    paths = [
+        ROOT / "framework" / "scripts" / "auto_research" / "models.py",
+        ROOT / "framework" / "scripts" / "run_frontend.py",
+        ROOT / "web" / "backend" / "auto_research" / "web" / "server.py",
+    ]
+    text = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+
+    for field in ("max_fetch_papers", "find_recall_count", "detail_fetch_count", "arxiv_per_query_limit"):
+        assert field not in text
+    for env_name in ("FIND_RECALL_COUNT", "DETAIL_FETCH_COUNT", "ARXIV_PER_QUERY_LIMIT"):
+        assert env_name not in text
+    assert "MIN_TITLE_CANDIDATES" not in text
+    assert "MIN_DETAIL_CANDIDATES" not in text
+
+
+def test_web_biorxiv_category_input_preserves_official_multiword_subjects():
+    text = (ROOT / "web" / "frontend" / "client" / "src" / "App.tsx").read_text(encoding="utf-8")
+
+    assert "function splitCategoryList(value: string)" in text
+    assert "value.split(/[,，;；\\n]+/)" in text
+    assert 'updateConfig("biorxiv_categories", splitCategoryList(e.target.value))' in text
+
+
+def test_web_manual_search_input_preserves_multiword_phrases():
+    text = (ROOT / "web" / "frontend" / "client" / "src" / "App.tsx").read_text(encoding="utf-8")
+
+    assert "function splitPhraseList(value: string)" in text
+    assert 'updateConfig("arxiv_queries", splitPhraseList(e.target.value))' in text
 
 
 def test_single_job_api_defaults_to_compact_find_status():
@@ -939,6 +1016,56 @@ def test_finding_main_public_cli_uses_real_private_module_paths():
     assert '_private_import("flow.support")' in text
     assert '_private_import("pipeline.find_pipeline")' not in text
     assert '_private_import("support.find_support")' not in text
+
+
+def test_finding_main_streams_run_binding_before_pipeline_returns(monkeypatch, tmp_path):
+    module_path = ROOT / "modules" / "finding" / "main.py"
+    spec = importlib.util.spec_from_file_location("finding_main_stream_test", module_path)
+    assert spec and spec.loader
+    finding_main = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(finding_main)
+
+    class FakeConfig:
+        def __init__(self, **_kwargs):
+            pass
+
+    class FakeSelection:
+        def __init__(self, **_kwargs):
+            pass
+
+    class FakeFindRequest:
+        def __init__(self, **kwargs):
+            self.config = kwargs.get("config")
+            self.selection = kwargs.get("selection")
+
+    stderr = io.StringIO()
+
+    def run_find(_request):
+        print("Created run find_streamed")
+        assert "Created run find_streamed" in stderr.getvalue()
+        return {"run_id": "find_streamed"}
+
+    modules = {
+        "finding_runtime.models": SimpleNamespace(
+            AppConfig=FakeConfig,
+            VenueSelection=FakeSelection,
+            FindRequest=FakeFindRequest,
+            apply_runtime_tuning_env=lambda _config: {},
+        ),
+        "finding_runtime.source_selection": SimpleNamespace(
+            default_source_selection=lambda: {},
+            normalize_source_selection=lambda payload: payload,
+        ),
+        "flow.pipeline": SimpleNamespace(run_find=run_find),
+        "finding_runtime.storage": SimpleNamespace(run_dir=lambda _run_id: tmp_path),
+    }
+    monkeypatch.setattr(finding_main, "_private_import", lambda name: modules[name])
+    monkeypatch.setattr(finding_main, "_find_request_payloads", lambda **_kwargs: ({}, {}))
+    monkeypatch.setattr(finding_main, "_result_summary", lambda _result, _run_dir: {})
+    monkeypatch.setattr(finding_main.sys, "stderr", stderr)
+
+    assert finding_main._run_find([]) == 0
+    assert "Created run find_streamed" in stderr.getvalue()
 
 
 def test_user_facing_find_markdown_is_canonical():
@@ -1671,6 +1798,375 @@ def test_web_jobs_merges_live_environment_run_id_into_persisted_running_job(monk
     assert env_rows[0]["result"]["run_id"] == "web_environment_demo_20260621T060831Z"
 
 
+def test_web_find_worker_tree_collapses_through_unclassified_wrappers():
+    from auto_research.web import server as web_server
+
+    frontend = {"pid": "100", "ppid": "10", "phase": "literature", "kind": "frontend_recovery"}
+    driver = {"pid": "400", "ppid": "300", "phase": "literature", "kind": "driver_recovery"}
+    process_rows = [
+        {"pid": "100", "ppid": "10"},
+        {"pid": "200", "ppid": "100"},
+        {"pid": "300", "ppid": "200"},
+        {"pid": "400", "ppid": "300"},
+    ]
+
+    rows = web_server._suppress_same_phase_descendant_workers([frontend, driver], process_rows)
+
+    assert rows == [frontend]
+
+
+def test_web_find_progress_projection_is_end_to_end_and_monotonic():
+    from auto_research.web import server as web_server
+
+    web_server._FIND_OVERALL_PROGRESS_CACHE.clear()
+    base = {
+        "run_id": "find_demo",
+        "selection": {"venue_ids": ["iclr"], "include_arxiv": True, "include_biorxiv": True},
+        "counts": {"raw_title_index": 5000, "evaluated_candidates": 0},
+    }
+    external = web_server._find_progress_projection({
+        **base,
+        "phase": "arxiv",
+        "live_progress": {"phase": "arxiv", "current": 1, "total": 1, "percent": 100, "message": "arXiv complete"},
+    })
+    final_detail = web_server._find_progress_projection({
+        **base,
+        "phase": "final_detail_fetch",
+        "live_progress": {"phase": "final_detail_fetch", "current": 1, "total": 2, "percent": 50, "message": "ICLR: fetching selected paper details"},
+    })
+    scoring = web_server._find_progress_projection({
+        **base,
+        "phase": "abstract_scoring",
+        "live_progress": {"phase": "abstract_scoring", "current": 2, "total": 4, "percent": 50, "message": "Scoring batch 2/4"},
+    })
+    repeated_earlier_subphase = web_server._find_progress_projection({
+        **base,
+        "phase": "final_ranking_prepare",
+        "live_progress": {"phase": "final_ranking_prepare", "current": 0, "total": 10, "percent": 0, "message": "Preparing next source"},
+    })
+
+    assert external == {
+        "raw_phase": "arxiv",
+        "raw_current": 1,
+        "raw_total": 1,
+        "stage_index": 3,
+        "stage_total": 6,
+        "stage_key": "extended_sources",
+        "stage_label": "扩展渠道检索",
+        "overall_percent": 51,
+        "stage_percent": 50,
+        "message": "arXiv complete",
+        "counts": {"raw_title_index": 5000, "evaluated_candidates": 0},
+    }
+    assert final_detail["stage_key"] == "llm_evaluation"
+    assert final_detail["overall_percent"] >= external["overall_percent"]
+    assert scoring["overall_percent"] >= external["overall_percent"]
+    assert repeated_earlier_subphase["overall_percent"] == scoring["overall_percent"]
+
+    web_server._FIND_OVERALL_PROGRESS_CACHE.clear()
+    venue_start = web_server._find_progress_projection({
+        **base,
+        "selection": {"venue_ids": ["iclr", "neurips", "icml"]},
+        "venue_health_report": [{"venue_id": "iclr", "ok": True}],
+        "live_progress": {"phase": "llm_title_filter", "current": 50, "total": 100, "percent": 50, "message": "ICLR: scored title batch 50/100"},
+    })
+    venue_later = web_server._find_progress_projection({
+        **base,
+        "selection": {"venue_ids": ["iclr", "neurips", "icml"]},
+        "venue_health_report": [{"venue_id": "iclr", "ok": True}],
+        "live_progress": {"phase": "detail_fetch", "current": 80, "total": 100, "percent": 80, "message": "ICLR: fetching selected paper details"},
+    })
+    assert venue_start["stage_key"] == "venue_pipeline"
+    assert 0 < venue_start["stage_percent"] < venue_later["stage_percent"] < 34
+    assert venue_later["overall_percent"] >= venue_start["overall_percent"]
+
+
+def test_web_find_worker_waits_for_current_web_job_run_binding(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    web_server._FIND_OVERALL_PROGRESS_CACHE.clear()
+    job = web_server.JobState("find_web", "find")
+    job.status = "running"
+    job.result = {"project": "demo", "action": "find"}
+    monkeypatch.setattr(web_server, "JOBS", {job.job_id: job})
+    monkeypatch.setattr(web_server, "_pid_alive_local", lambda _pid: True)
+    monkeypatch.setattr(
+        web_server,
+        "_latest_find_run_id_from_runs",
+        lambda *_args, **_kwargs: pytest.fail("a Web Find without a run binding must not scan global runs"),
+    )
+    old_complete = {
+        "run_id": "find_old",
+        "phase": "complete",
+        "live_progress": {"phase": "complete", "current": 1, "total": 1, "percent": 100, "message": "complete"},
+    }
+
+    row = web_server._active_project_worker_job(
+        "demo",
+        tmp_path,
+        {"pid": "100", "phase": "literature", "kind": "frontend_recovery", "cmd": "run_frontend.py --project demo --web-job-id find_web"},
+        {},
+        {"run_id": "find_old"},
+        old_complete,
+    )
+
+    assert row["run_id"] == ""
+    assert row["result"]["find_progress"]["raw_phase"] == "initializing"
+    assert row["progress"]["percent"] == 0
+
+
+def test_web_find_worker_reads_only_current_web_job_bound_run(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    web_server._FIND_OVERALL_PROGRESS_CACHE.clear()
+    job = web_server.JobState("find_web", "find")
+    job.status = "running"
+    job.run_id = "find_new"
+    job.result = {"project": "demo", "action": "find"}
+    monkeypatch.setattr(web_server, "JOBS", {job.job_id: job})
+    monkeypatch.setattr(web_server, "_pid_alive_local", lambda _pid: True)
+    run_directory = tmp_path / "find_new"
+    run_directory.mkdir()
+    (run_directory / "find_progress.json").write_text(json.dumps({
+        "run_id": "find_new",
+        "phase": "llm_title_filter",
+        "live_progress": {"phase": "llm_title_filter", "current": 2, "total": 10, "percent": 20, "message": "scored title batch 2/10"},
+    }), encoding="utf-8")
+    monkeypatch.setattr(web_server, "run_dir", lambda _run_id: run_directory)
+
+    row = web_server._active_project_worker_job(
+        "demo",
+        tmp_path,
+        {"pid": "100", "phase": "literature", "kind": "frontend_recovery", "cmd": "run_frontend.py --project demo --web-job-id find_web"},
+        {},
+        {"run_id": "find_old"},
+        {"run_id": "find_old", "phase": "complete"},
+    )
+
+    assert row["run_id"] == "find_new"
+    assert row["result"]["find_progress"]["raw_phase"] == "llm_title_filter"
+    assert row["result"]["find_progress"]["message"] == "scored title batch 2/10"
+
+
+def test_web_find_worker_rejects_another_projects_execution_id(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    job_a = web_server.JobState("find_a", "find")
+    job_a.status = "running"
+    job_a.run_id = "run_a"
+    job_a.result = {"project": "project_a", "action": "find"}
+    job_b = web_server.JobState("find_b", "find")
+    job_b.status = "running"
+    job_b.run_id = "run_b"
+    job_b.result = {"project": "project_b", "action": "find"}
+    monkeypatch.setattr(web_server, "JOBS", {job_a.job_id: job_a, job_b.job_id: job_b})
+    monkeypatch.setattr(web_server, "_pid_alive_local", lambda _pid: True)
+
+    row = web_server._active_project_worker_job(
+        "project_a",
+        tmp_path,
+        {"pid": "100", "phase": "literature", "kind": "frontend_recovery", "cmd": "run_frontend.py --project project_a --web-job-id find_b"},
+        {},
+        {},
+        {"run_id": "run_old", "phase": "complete"},
+    )
+
+    assert row["run_id"] == ""
+    assert row["result"]["find_progress"]["raw_phase"] == "initializing"
+
+
+def test_web_find_merge_rejects_unbound_stale_worker_progress():
+    from auto_research.web import server as web_server
+
+    old_projection = {
+        "raw_phase": "complete",
+        "stage_label": "Find 完成",
+        "overall_percent": 100,
+        "message": "complete",
+    }
+    dynamic = [{
+        "job_id": "project-worker_demo_100",
+        "stage": "literature",
+        "status": "running",
+        "run_id": "find_old",
+        "result": {
+            "project": "demo",
+            "run_id": "find_old",
+            "kind": "frontend_recovery",
+            "process_alive": True,
+            "web_job_id": "find_web",
+            "find_progress": old_projection,
+        },
+        "progress": {"phase": "find", "current": 100, "total": 100, "percent": 100, "message": "Find 完成：complete"},
+    }]
+    persisted = [{
+        "job_id": "find_web",
+        "stage": "find",
+        "status": "running",
+        "created_at": "2026-07-14T10:54:44Z",
+        "run_id": "",
+        "result": {"project": "demo", "action": "find", "web_job_id": "find_web"},
+        "logs": ["Find started"],
+        "progress": {"phase": "running", "current": 0, "total": 0, "percent": 0, "message": "Find running"},
+    }]
+
+    visible_dynamic, merged = web_server._merge_live_find_workers_into_web_jobs(dynamic, persisted)
+
+    assert visible_dynamic == []
+    assert merged[0]["run_id"] == ""
+    assert merged[0]["result"]["find_progress"]["raw_phase"] == "initializing"
+    assert merged[0]["progress"]["percent"] == 0
+
+
+def test_web_jobs_merges_live_find_worker_and_run_progress_into_primary_job(monkeypatch):
+    from auto_research.web import server as web_server
+
+    web_server._LIVE_JOBS_CACHE.clear()
+    monkeypatch.setattr(web_server, "_reconcile_detached_launcher_jobs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(web_server, "_reconcile_stale_cancelling_jobs", lambda: None)
+    monkeypatch.setattr(web_server, "_current_find_downstream_stage_history_jobs", lambda *args, **kwargs: [])
+    monkeypatch.setattr(web_server, "_environment_decision_public_projection", lambda *args, **kwargs: {})
+    run_id = "find_test_web_merge_130408"
+    find_projection = {
+        "raw_phase": "abstract_scoring",
+        "raw_current": 2,
+        "raw_total": 4,
+        "stage_index": 4,
+        "stage_total": 6,
+        "stage_label": "摘要校验与 LLM 综合评估",
+        "overall_percent": 74,
+        "stage_percent": 55,
+        "message": "NeurIPS: scoring batch 2/4",
+        "counts": {"evaluated_candidates": 120},
+    }
+    dynamic = [
+        {
+            "job_id": "project-worker_demo_100",
+            "stage": "literature",
+            "status": "running",
+            "created_at": "2026-07-13T13:04:03Z",
+            "run_id": run_id,
+            "logs": ["worker_kind=frontend_recovery", "find_live_progress=NeurIPS: scoring batch 2/4"],
+            "result": {"project": "demo", "run_id": run_id, "web_job_id": "find_web", "kind": "frontend_recovery", "pid": "100", "process_alive": True, "find_progress": find_projection},
+            "progress": {"phase": "find", "current": 74, "total": 100, "percent": 74, "message": "摘要校验与 LLM 综合评估：NeurIPS: scoring batch 2/4"},
+        },
+        {
+            "job_id": "project-worker_demo_400",
+            "stage": "literature",
+            "status": "running",
+            "created_at": "2026-07-13T13:04:04Z",
+            "run_id": run_id,
+            "logs": ["worker_kind=driver_recovery"],
+            "result": {"project": "demo", "run_id": run_id, "web_job_id": "find_web", "kind": "driver_recovery", "pid": "400", "process_alive": True},
+            "progress": {"phase": "find", "current": 74, "total": 100, "percent": 74, "message": "Find running"},
+        },
+    ]
+    monkeypatch.setattr(web_server, "_live_jobs_from_projects", lambda **kwargs: dynamic)
+    history_existing_run_ids = []
+
+    def find_history(existing_run_ids, **kwargs):
+        history_existing_run_ids.append(set(existing_run_ids))
+        if run_id not in existing_run_ids:
+            return [{
+                "job_id": f"find-run-{run_id}",
+                "stage": "find",
+                "status": "cancelled",
+                "run_id": run_id,
+                "result": {"project": "demo", "run_id": run_id},
+            }]
+        return []
+
+    monkeypatch.setattr(web_server, "_find_run_history_jobs_from_runs", find_history)
+    job = web_server.JobState("find_web", "find")
+    job.status = "cancelled"
+    job.created_at = "2026-07-13T13:04:02Z"
+    job.run_id = run_id
+    job.logs = ["Find started"]
+    job.result = {"project": "demo", "action": "find", "run_id": run_id, "web_job_id": "find_web"}
+    job.cancelled_at = "2026-07-13T13:20:00Z"
+    monkeypatch.setattr(web_server, "JOBS", {job.job_id: job})
+
+    rows = web_server.api_jobs(compact=True, limit=10, include_history=True, project="demo")
+
+    assert [row["job_id"] for row in rows] == ["find_web"]
+    assert rows[0]["status"] == "running"
+    assert rows[0]["run_id"] == run_id
+    assert rows[0]["result"]["run_id"] == run_id
+    assert rows[0]["result"]["find_progress"] == find_projection
+    assert rows[0]["progress"]["percent"] == 74
+    assert any("scoring batch 2/4" in line for line in rows[0]["logs"])
+    assert history_existing_run_ids == [{run_id}]
+
+    detail = web_server.api_job("find_web", compact=False)
+    assert detail["run_id"] == run_id
+    assert detail["result"]["find_progress"]["overall_percent"] == 74
+
+
+def test_web_find_websocket_keeps_live_merged_snapshot(monkeypatch):
+    from auto_research.web import server as web_server
+
+    projection = {
+        "raw_phase": "abstract_scoring",
+        "raw_current": 3,
+        "raw_total": 4,
+        "stage_index": 4,
+        "stage_total": 6,
+        "stage_key": "llm_evaluation",
+        "stage_label": "摘要校验与 LLM 综合评估",
+        "overall_percent": 80,
+        "stage_percent": 75,
+        "message": "NeurIPS: scoring batch 3/4",
+        "counts": {"abstract_scored_papers": 90},
+    }
+    worker = {
+        "job_id": "project-worker_demo_100",
+        "stage": "literature",
+        "status": "running",
+        "run_id": "find_live",
+        "logs": ["find_live_progress=NeurIPS: scoring batch 3/4"],
+        "result": {
+            "project": "demo",
+            "run_id": "find_live",
+            "kind": "frontend_recovery",
+            "pid": "100",
+            "process_alive": True,
+            "web_job_id": "find_web",
+            "find_progress": projection,
+        },
+        "progress": {"phase": "find", "current": 80, "total": 100, "percent": 80, "message": "NeurIPS: scoring batch 3/4"},
+    }
+    monkeypatch.setattr(web_server, "_live_jobs_from_projects", lambda **kwargs: [worker])
+    job = web_server.JobState("find_web", "find")
+    job.status = "cancelled"
+    job.run_id = "find_live"
+    job.result = {"project": "demo", "action": "find", "run_id": "find_live", "web_job_id": "find_web"}
+    monkeypatch.setattr(web_server, "JOBS", {job.job_id: job})
+
+    class FakeWebSocket:
+        def __init__(self):
+            self.messages = []
+
+        async def accept(self):
+            return None
+
+        async def send_json(self, payload):
+            self.messages.append(payload)
+
+    socket = FakeWebSocket()
+
+    async def stop_after_snapshot(_seconds):
+        raise web_server.WebSocketDisconnect()
+
+    monkeypatch.setattr(web_server.asyncio, "sleep", stop_after_snapshot)
+    asyncio.run(web_server.ws_job(socket, "find_web"))
+
+    snapshots = [message["job"] for message in socket.messages if message.get("type") == "snapshot"]
+    assert len(snapshots) == 1
+    assert snapshots[0]["status"] == "running"
+    assert snapshots[0]["run_id"] == "find_live"
+    assert snapshots[0]["result"]["find_progress"]["overall_percent"] == 80
+
+
 def test_web_jobs_hides_stale_environment_history_when_live_environment_running(monkeypatch):
     from auto_research.web import server as web_server
 
@@ -2272,6 +2768,46 @@ def test_api_artifacts_light_compacts_large_current_find_progress(monkeypatch, t
     assert "raw_title_index" in content["omitted_keys"]
     assert "raw_title_index" not in content
     assert len(json.dumps(payload, ensure_ascii=False)) < 20000
+
+
+def test_api_artifacts_allows_read_only_find_scope_for_matching_live_project_run(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    projects = tmp_path / "projects"
+    root = _make_project(projects, "demo")
+    (root / "state" / "finding_frontend.json").write_text(json.dumps({"run_id": "find_previous"}), encoding="utf-8")
+    run_id = "find_live"
+    run_directory = tmp_path / "runs" / run_id
+    run_directory.mkdir(parents=True)
+    (run_directory / "find_progress.json").write_text(json.dumps({
+        "run_id": run_id,
+        "phase": "llm_title_filter",
+        "live_progress": {"phase": "llm_title_filter", "current": 4, "total": 10, "percent": 40},
+    }), encoding="utf-8")
+    worker = {
+        "job_id": "project-worker_demo_100",
+        "stage": "literature",
+        "status": "running",
+        "run_id": run_id,
+        "result": {
+            "project": "demo",
+            "run_id": run_id,
+            "kind": "frontend_recovery",
+            "pid": "100",
+            "process_alive": True,
+        },
+    }
+    monkeypatch.setattr(web_server, "PROJECT_IDS_ROOT", projects)
+    monkeypatch.setattr(web_server, "run_dir", lambda _run_id: run_directory)
+    monkeypatch.setattr(web_server, "_live_jobs_from_projects", lambda **kwargs: [worker])
+    web_server._RUN_ARTIFACTS_CACHE.clear()
+
+    payload = web_server.api_artifacts(run_id, light=True, scope="find", project="demo")
+
+    assert payload["project"] == "demo"
+    assert payload["scope"] == "find"
+    progress = next(item for item in payload["artifacts"] if item["name"] == "find_progress.json")
+    assert progress["content"]["run_id"] == run_id
 
 
 def test_api_artifacts_ideas_scope_reads_only_ideation_files(monkeypatch, tmp_path):

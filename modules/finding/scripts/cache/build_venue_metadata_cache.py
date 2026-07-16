@@ -36,6 +36,10 @@ def _official_title_index_scope(adapter: str) -> str:
 
 def _source_has_official_categories(audit: dict[str, Any]) -> bool:
     status = str(audit.get("category_status") or "").lower()
+    adapter = str(audit.get("source_adapter") or audit.get("adapter") or "").lower()
+    source_scope = str(audit.get("source_scope") or "").lower()
+    if adapter.startswith("neurips_official_papers") or source_scope == "official_neurips_papers_index":
+        return False
     return bool(audit.get("has_official_categories")) and status not in _NO_OFFICIAL_CATEGORY_STATUSES
 
 
@@ -98,7 +102,11 @@ def _normalize_metadata_audit(
 
     category_status = str(normalized.get("category_status") or "").lower()
     has_official_categories = _source_has_official_categories(normalized)
-    if not category_status:
+    neurips_track_only = str(adapter or "").lower().startswith("neurips_official_papers") or str(normalized.get("source_scope") or "").lower() == "official_neurips_papers_index"
+    if neurips_track_only:
+        has_official_categories = False
+        category_status = "no_official_categories"
+    elif not category_status:
         has_official_categories = bool(categories and category_total == expected and not dblp_title_index)
         category_status = "official_or_cached_categories" if has_official_categories else "no_official_categories" if categories else "missing_categories"
     elif category_status in _NO_OFFICIAL_CATEGORY_STATUSES:
@@ -132,6 +140,8 @@ def _normalize_metadata_audit(
         "expected_paper_count": expected,
         "category_count": len(categories),
         "category_total_count": category_total,
+        "categorized_paper_count": category_total,
+        "category_coverage": (category_total / expected) if expected else 0.0,
         "missing_title_count": missing_titles,
         "missing_abstract_count": missing_abstracts,
         "official_abstract_unavailable_count": abstract_unavailable,
@@ -257,7 +267,7 @@ def _manifest_metadata_fields(audit: dict[str, Any]) -> dict[str, Any]:
 
 
 def _paper_category(paper: dict[str, Any], *, allow_local_topic: bool = False) -> str:
-    for key in ("primary_area", "category", "track"):
+    for key in ("primary_area", "category"):
         value = _clean_text(paper.get(key))
         if value and not value.lower().startswith("local topic:"):
             return value

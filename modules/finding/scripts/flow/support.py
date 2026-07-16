@@ -79,24 +79,25 @@ from quality import (
 from selection import (
     CATEGORY_SELECT_CACHE_MAX_ENTRIES,
     CATEGORY_SELECT_CACHE_SCHEMA_VERSION,
+    CATEGORY_SELECTION_PAPER_TARGET,
     CATEGORY_SELECT_TEMPERATURE,
     _build_rejected,
     _cache_entries_fingerprint,
     _category_entries,
+    _category_json_or_error,
+    _category_selection_max,
     _category_select_cache_enabled,
     _category_select_cache_key,
     _category_select_cache_path,
     _compact_entries,
-    _fallback_select,
     _interest_text,
     _json_or_none,
     _llm_identity,
     _load_category_select_cache,
-    _min_llm_category_recall,
     _normalize_selected_rows,
     _normalized_text,
+    _select_ranked_categories_until_target,
     _store_category_select_cache_entry,
-    _supplement_selected_for_recall,
     _use_llm_category_select,
     _valid_cached_selection,
     filter_papers_by_selected_categories,
@@ -145,7 +146,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from threading import Lock
-from urllib.parse import parse_qs, quote_plus, unquote, urlencode, urljoin, urlparse
+from urllib.parse import parse_qs, quote, quote_plus, unquote, urlencode, urljoin, urlparse
 from typing import Any, Callable
 
 import requests
@@ -4026,7 +4027,6 @@ from sources import (
     _append_arxiv_entry,
     _arxiv_date_window,
     _arxiv_entry_id,
-    _arxiv_fallback_queries,
     _arxiv_search_queries,
     _biorxiv_category_matches,
     _biorxiv_content_url,
@@ -4043,6 +4043,14 @@ from sources import (
 
 
 
+def _http_status_code(exc: BaseException) -> int | None:
+    response = getattr(exc, "response", None)
+    try:
+        return int(getattr(response, "status_code", 0) or 0) or None
+    except (TypeError, ValueError):
+        return None
+
+
 def _request(url: str, timeout: int = 12) -> requests.Response:
     retries = max(1, int(os.environ.get("FIND_HTTP_RETRIES", "3") or 3))
     last_exc: Exception | None = None
@@ -4053,8 +4061,8 @@ def _request(url: str, timeout: int = 12) -> requests.Response:
             return response
         except Exception as exc:
             last_exc = exc
-            status = getattr(getattr(exc, "response", None), "status_code", None)
-            if attempt + 1 >= retries or status in {400, 401, 403, 404}:
+            status = _http_status_code(exc)
+            if attempt + 1 >= retries or status in {400, 401, 403, 404, 429}:
                 raise
             time.sleep(min(12.0, 2.0 * (attempt + 1)))
     if last_exc:
@@ -4910,15 +4918,15 @@ def fetch_neurips_title_index(year: int, max_items: int, raise_errors: bool = Fa
                 missing_abstract_count=len(papers),
                 has_abstracts=False,
                 any_abstracts=False,
-                has_official_categories=True,
-                category_status="official_or_cached_categories",
+                has_official_categories=False,
+                category_status="no_official_categories",
                 source_scope="official_neurips_papers_index",
                 official_title_index_verified=complete,
                 official_accepted_list_verified=complete,
                 presentation_metadata_count=sum(presentation_counts.values()) if presentation_counts else 0,
                 presentation_type_counts=presentation_counts,
                 presentation_metadata_source="neurips.cc_virtual_pages" if presentation_counts else "",
-                completeness_basis="NeurIPS official papers.nips.cc yearly paper index was parsed from paper_files/paper/{year}; it exposes accepted paper titles, authors, URLs, and track labels but not abstracts in the index. NeurIPS virtual pages are merged by title to attach item-level oral/spotlight/poster presentation metadata when available.",
+                completeness_basis="NeurIPS official papers.nips.cc yearly paper index was parsed from paper_files/paper/{year}; it exposes accepted paper titles, authors, URLs, and presentation/acceptance tracks, but no topical category taxonomy or abstracts in the index. NeurIPS virtual pages are merged by title to attach item-level oral/spotlight/poster presentation metadata when available.",
             )
             return _attach_venue_metadata_audit(papers, audit)
     except Exception as exc:
@@ -5496,14 +5504,15 @@ def fetch_www_official_accepted(venue: dict, years: list[int], max_items: int) -
                 "pdf_url": "",
                 "venue": "WWW",
                 "year": 2026,
-                "category": track,
+                "category": "",
                 "track": track,
-                "classification_source": "official" if track else "llm_inferred",
+                "classification_source": "official_track" if track else "unavailable",
                 "metadata": {
                     "venue_id": venue.get("id"),
                     "source_url": source_url,
                     "accepted_page": page_label,
                     "paper_code": paper_code,
+                    "category_semantics": "track_or_paper_type_not_verified_topic_taxonomy",
                     "title_index_only": True,
                     "abstract_unavailable_reason": "www2026_official_accepted_page_has_titles_authors_no_abstracts",
                 },
@@ -5533,8 +5542,8 @@ def fetch_www_official_accepted(venue: dict, years: list[int], max_items: int) -
         missing_abstract_count=len(papers),
         has_abstracts=False,
         any_abstracts=False,
-        has_official_categories=any(_clean_text(paper.get("category")) for paper in papers),
-        category_status="official_or_cached_categories" if any(_clean_text(paper.get("category")) for paper in papers) else "no_official_categories",
+        has_official_categories=False,
+        category_status="no_official_categories",
         source_scope="official_www_accepted_title_index",
         official_title_index_verified=complete_title_index,
         official_accepted_list_verified=complete_title_index,
@@ -5618,14 +5627,15 @@ def fetch_sigir_official_proceedings(venue: dict, years: list[int], max_items: i
             "doi": doi,
             "venue": "SIGIR",
             "year": 2025,
-            "category": track,
+            "category": "",
             "track": track,
-            "classification_source": "official" if track else "llm_inferred",
+            "classification_source": "official_track" if track else "unavailable",
             "metadata": {
                 "venue_id": venue.get("id"),
                 "source_url": source_url,
                 "detail_url": href,
                 "doi": doi,
+                "category_semantics": "track_or_paper_type_not_verified_topic_taxonomy",
                 "abstract_source": "sigir2025_official_proceedings_html" if abstract else "",
             },
         })
@@ -5650,8 +5660,8 @@ def fetch_sigir_official_proceedings(venue: dict, years: list[int], max_items: i
         missing_abstract_count=missing_abstracts,
         has_abstracts=bool(papers) and missing_abstracts == 0,
         any_abstracts=bool(papers) and missing_abstracts < len(papers),
-        has_official_categories=any(_clean_text(paper.get("category")) for paper in papers),
-        category_status="official_or_cached_categories" if papers else "unknown",
+        has_official_categories=False,
+        category_status="no_official_categories",
         source_scope="official_sigir_proceedings_partial_html",
         official_title_index_verified=False,
         official_accepted_list_verified=False,
@@ -5715,13 +5725,14 @@ def fetch_sigir_official_accepted(venue: dict, years: list[int], max_items: int)
                 "pdf_url": "",
                 "venue": "SIGIR",
                 "year": 2025,
-                "category": track,
+                "category": "",
                 "track": track,
-                "classification_source": "official" if track else "llm_inferred",
+                "classification_source": "official_track" if track else "unavailable",
                 "metadata": {
                     "venue_id": venue.get("id"),
                     "source_url": source_url,
                     "accepted_track": track,
+                    "category_semantics": "track_or_paper_type_not_verified_topic_taxonomy",
                     "title_index_only": True,
                     "abstract_unavailable_reason": "sigir2025_official_accepted_page_has_titles_no_abstracts",
                 },
@@ -5748,8 +5759,8 @@ def fetch_sigir_official_accepted(venue: dict, years: list[int], max_items: int)
         missing_abstract_count=len(papers),
         has_abstracts=False,
         any_abstracts=False,
-        has_official_categories=any(_clean_text(paper.get("category")) for paper in papers),
-        category_status="official_or_cached_categories" if papers else "unknown",
+        has_official_categories=False,
+        category_status="no_official_categories",
         source_scope="official_sigir_accepted_title_index",
         official_title_index_verified=complete_title_index,
         official_accepted_list_verified=complete_title_index,
@@ -5812,14 +5823,16 @@ def fetch_cikm_official_proceedings(venue: dict, years: list[int], max_items: in
             "doi": doi,
             "venue": "CIKM",
             "year": 2025,
-            "category": session,
-            "classification_source": "official" if session else "llm_inferred",
+            "category": "",
+            "track": session,
+            "classification_source": "official_track" if session else "unavailable",
             "metadata": {
                 "venue_id": venue.get("id"),
                 "source_url": source_url,
                 "doi": doi,
                 "detail_url": href,
                 "session": session,
+                "category_semantics": "program_session_or_paper_type_not_topic",
                 "abstract_source": "cikm_official_proceedings_html" if abstract else "",
             },
         })
@@ -5844,8 +5857,8 @@ def fetch_cikm_official_proceedings(venue: dict, years: list[int], max_items: in
         missing_abstract_count=missing_abstracts,
         has_abstracts=bool(papers) and missing_abstracts == 0,
         any_abstracts=bool(papers) and missing_abstracts < len(papers),
-        has_official_categories=any(_clean_text(paper.get("category")) for paper in papers),
-        category_status="official_or_cached_categories",
+        has_official_categories=False,
+        category_status="no_official_categories",
         source_scope="official_cikm_proceedings_html",
         official_title_index_verified=complete,
         official_accepted_list_verified=complete,
@@ -5958,13 +5971,14 @@ def fetch_aaai_ojs(venue: dict, years: list[int], max_items: int) -> list[dict]:
                     "pdf_url": pdf_url,
                     "venue": "AAAI",
                     "year": int(year),
-                    "category": section or issue_label,
+                    "category": "",
                     "track": section or issue_label,
-                    "classification_source": "official" if section or issue_label else "llm_inferred",
+                    "classification_source": "official_track" if section or issue_label else "unavailable",
                     "metadata": {
                         "venue_id": venue.get("id"),
                         "aaai_issue_url": issue_url,
                         "aaai_issue": issue_label,
+                        "category_semantics": "publication_issue_not_topic",
                         "pages": pages,
                         "detail_url": article_url,
                         "title_index_only": True,
@@ -6018,13 +6032,13 @@ def fetch_aaai_ojs(venue: dict, years: list[int], max_items: int) -> list[dict]:
         missing_abstract_count=len(papers),
         has_abstracts=False,
         any_abstracts=False,
-        has_official_categories=True,
-        category_status="official_or_cached_categories",
+        has_official_categories=False,
+        category_status="no_official_categories",
         source_scope="official_aaai_ojs_proceedings",
         official_title_index_verified=complete,
         official_accepted_list_verified=complete,
         truncated=truncated,
-        completeness_basis="AAAI official OJS proceedings archive/issue pages were parsed for all AAAI technical-track article metadata; article abstracts are fetched later from selected detail pages.",
+        completeness_basis="AAAI official OJS proceedings issue pages were parsed for accepted article metadata. Numbered issue labels are publication shards, not topical categories; article abstracts are fetched later from selected detail pages.",
     )
     return _attach_venue_metadata_audit(papers, audit) if papers else papers
 
@@ -8707,7 +8721,7 @@ def _biorxiv_paper_from_openalex(item: dict, start_date: str, end_date: str) -> 
         "year": int(published[:4]) if published[:4].isdigit() else date.today().year,
         "category": "",
         "categories": [],
-        "classification_source": "llm_inferred",
+        "classification_source": "unavailable",
         "metadata": {
             "published": published,
             "doi": doi,
@@ -8719,7 +8733,7 @@ def _biorxiv_paper_from_openalex(item: dict, start_date: str, end_date: str) -> 
     }
 
 
-def _phrase_or_clause(phrases: list[str]) -> str:
+def _phrase_or_clause(phrases: list[str], *, fields: tuple[str, ...] = ()) -> str:
     parts: list[str] = []
     seen: set[str] = set()
     for phrase in phrases or []:
@@ -8727,90 +8741,145 @@ def _phrase_or_clause(phrases: list[str]) -> str:
         if not text or text.lower() in seen:
             continue
         seen.add(text.lower())
-        parts.append(f'"{text}"' if " " in text or "-" in text else text)
+        term = f'"{text}"' if " " in text or "-" in text else text
+        parts.append("(" + " OR ".join(f'{field}:{term}' for field in fields) + ")" if fields else term)
     return " OR ".join(parts)
 
 
-def _fetch_biorxiv_openalex(phrases: list[str], max_items: int, start_date: str, end_date: str, status: dict, log=None) -> list[dict]:
-    """Per-phrase OpenAlex relevance search over bioRxiv, unioned. OpenAlex
-    ``search`` is roughly AND-like, so each anchor PHRASE is searched separately
-    (taking the most relevant per phrase) rather than one long AND-ed string."""
+def _fetch_biorxiv_openalex(phrases: list[str], max_items: int, start_date: str, end_date: str, status: dict, log=None, should_cancel=None) -> list[dict]:
+    """Search one equal-status OR group, sorted by publication date."""
     timeout = _positive_int_env("OPENALEX_REQUEST_TIMEOUT_SEC", 25)
     retries = _positive_int_env("OPENALEX_REQUEST_RETRIES", 4)
     try:
         spacing = max(0.0, float(os.environ.get("OPENALEX_REQUEST_SPACING_SEC", "1.0") or 1.0))
     except (TypeError, ValueError):
         spacing = 1.0
-    per_page = max(20, min(200, _positive_int_env("BIORXIV_OPENALEX_PER_PAGE", 100)))
-    max_pages_per_phrase = _positive_int_env("BIORXIV_OPENALEX_MAX_PAGES_PER_PHRASE", 30)
+    per_page = max(20, min(100, _positive_int_env("BIORXIV_OPENALEX_PER_PAGE", 100)))
     item_limit = max(0, int(max_items or 0))
-    mailto = _contact_mailto()
+    api_key = str(os.environ.get("OPENALEX_API_KEY") or "").strip()
+    max_retry_wait = _positive_int_env("OPENALEX_MAX_RETRY_WAIT_SEC", 30)
     by_key: dict[str, dict] = {}
-    phrase_list = [p for p in (phrases or []) if str(p).strip()][:12]
-    for phrase in phrase_list:
-        if item_limit and len(by_key) >= item_limit:
-            break
-        cursor = "*"
-        pages_for_phrase = 0
-        while cursor and pages_for_phrase < max_pages_per_phrase and (not item_limit or len(by_key) < item_limit):
-            filters = [
-                f"primary_location.source.id:{BIORXIV_OPENALEX_SOURCE_ID}",
-                f"from_publication_date:{start_date}",
-                f"to_publication_date:{end_date}",
-            ]
-            params = {
-                "filter": ",".join(filters),
-                "search": phrase,
-                "per-page": per_page,
-                "cursor": cursor,
-                "select": "id,doi,display_name,publication_date,authorships,abstract_inverted_index,primary_location,type",
-                "mailto": mailto,
-            }
-            url = "https://api.openalex.org/works?" + urlencode(params)
-            payload = None
-            last_error = ""
-            for attempt in range(1, max(1, retries) + 1):
-                try:
-                    payload = _request(url, timeout=timeout).json()
-                    break
-                except Exception as exc:
-                    last_error = str(exc)
+    phrase_list = [str(value).strip() for value in (phrases or []) if str(value).strip()]
+    search_query = _phrase_or_clause(phrase_list)
+    cursor = "*"
+    while search_query and cursor and (not item_limit or len(by_key) < item_limit):
+        if should_cancel and should_cancel():
+            status["stopped_reason"] = "cancelled"
+            return list(by_key.values())
+        filters = [
+            f"primary_location.source.id:{BIORXIV_OPENALEX_SOURCE_ID}",
+            f"from_publication_date:{start_date}",
+            f"to_publication_date:{end_date}",
+        ]
+        params = {
+            "filter": ",".join(filters),
+            "search": search_query,
+            "per-page": per_page,
+            "cursor": cursor,
+            "sort": "publication_date:desc",
+            "select": "id,doi,display_name,publication_date,authorships,abstract_inverted_index,primary_location,type",
+        }
+        if api_key:
+            params["api_key"] = api_key
+        url = "https://api.openalex.org/works?" + urlencode(params)
+        payload = None
+        last_error = ""
+        for attempt in range(1, max(1, retries) + 1):
+            if should_cancel and should_cancel():
+                status["stopped_reason"] = "cancelled"
+                return list(by_key.values())
+            try:
+                payload = _request(url, timeout=timeout).json()
+                break
+            except Exception as exc:
+                last_error = str(exc).replace(api_key, "[REDACTED]") if api_key else str(exc)
+                if _http_status_code(exc) == 429:
+                    status["openalex_rate_limited"] = True
+                    response = getattr(exc, "response", None)
+                    headers = getattr(response, "headers", {}) or {}
+                    try:
+                        retry_after = max(0, int(float(headers.get("Retry-After") or headers.get("X-RateLimit-Reset") or 0)))
+                    except (TypeError, ValueError):
+                        retry_after = 0
+                    remaining = str(headers.get("X-RateLimit-Remaining") or "")
+                    remaining_usd = str(headers.get("X-RateLimit-Remaining-USD") or "").strip()
+                    response_text = str(getattr(response, "text", "") or "").lower()
+                    status["openalex_retry_after_sec"] = retry_after
+                    status["openalex_rate_limit_remaining"] = remaining
+                    daily_budget_exhausted = (
+                        remaining_usd in {"0", "0.0", "$0", "$0.0"}
+                        or "insufficient budget" in response_text
+                    )
+                    if daily_budget_exhausted:
+                        status["stopped_reason"] = "openalex_daily_budget_exhausted"
+                        status["limited"] = True
+                        budget_message = (
+                            "openalex: daily API budget exhausted; "
+                            f"retry after {retry_after}s"
+                            + ("" if api_key else "; set OPENALEX_API_KEY for the higher free daily budget")
+                        )
+                        status["errors"].append(budget_message)
+                        if log:
+                            log(budget_message)
+                        return list(by_key.values())
+                    if retry_after > max_retry_wait:
+                        status["stopped_reason"] = "openalex_rate_limited"
+                        status["limited"] = True
+                        status["errors"].append(f"openalex: rate limited; retry after {retry_after}s exceeds the configured wait limit")
+                        if log:
+                            log(f"openalex: rate limited; retry after {retry_after}s exceeds the configured wait limit")
+                        return list(by_key.values())
                     if attempt < max(1, retries):
-                        time.sleep(min(8.0, max(1.0, spacing) * attempt))
-            if payload is None:
-                status["errors"].append(f"openalex '{phrase}': {last_error}")
+                        if log:
+                            log(f"openalex: rate limited; retrying in {max(1, retry_after or 2 ** (attempt - 1))}s")
+                        time.sleep(max(1.0, float(retry_after or 2 ** (attempt - 1))))
+                        continue
+                    status["stopped_reason"] = "openalex_rate_limited"
+                    status["limited"] = True
+                    status["errors"].append(f"openalex: {last_error}")
+                    if log:
+                        log("openalex: rate limited after retry budget was exhausted")
+                    return list(by_key.values())
+                if attempt < max(1, retries):
+                    time.sleep(min(8.0, max(1.0, spacing) * attempt))
+        if payload is None:
+            status["errors"].append(f"openalex: {last_error}")
+            break
+        results = payload.get("results") if isinstance(payload, dict) else []
+        if not isinstance(results, list) or not results:
+            break
+        added = 0
+        for item in results:
+            paper = _biorxiv_paper_from_openalex(item, start_date, end_date)
+            if not paper:
+                continue
+            key = paper.get("biorxiv_doi") or paper.get("title", "").lower()
+            if key and key not in by_key:
+                by_key[key] = paper
+                added += 1
+            if item_limit and len(by_key) >= item_limit:
                 break
-            results = payload.get("results") if isinstance(payload, dict) else []
-            if not isinstance(results, list) or not results:
-                break
-            added = 0
-            pages_for_phrase += 1
-            for item in results:
-                paper = _biorxiv_paper_from_openalex(item, start_date, end_date)
-                if not paper:
-                    continue
-                key = paper.get("biorxiv_doi") or paper.get("title", "").lower()
-                if key and key not in by_key:
-                    by_key[key] = paper
-                    added += 1
-                if item_limit and len(by_key) >= item_limit:
-                    break
-            status["pages_fetched"] = status.get("pages_fetched", 0) + 1
-            if log:
-                log(f"bioRxiv/OpenAlex '{phrase[:30]}': +{added} (total {len(by_key)})")
-            cursor = (payload.get("meta") or {}).get("next_cursor") if isinstance(payload.get("meta"), dict) else None
-            if len(results) < per_page:
-                break
-            if spacing:
-                time.sleep(spacing)
-        if pages_for_phrase >= max_pages_per_phrase and cursor:
-            status["openalex_page_limit_reached"] = True
-            status["limited"] = True
-    status["openalex_count"] = len(by_key)
-    return list(by_key.values())
+        status["pages_fetched"] = status.get("pages_fetched", 0) + 1
+        if log:
+            log(f"bioRxiv/OpenAlex OR query: +{added} (total {len(by_key)})")
+        cursor = (payload.get("meta") or {}).get("next_cursor") if isinstance(payload.get("meta"), dict) else None
+        if len(results) < per_page:
+            break
+        if spacing:
+            time.sleep(spacing)
+    status["openalex_api_key_configured"] = bool(api_key)
+    papers = sorted(
+        by_key.values(),
+        key=lambda paper: normalize_date(str(paper.get("metadata", {}).get("published", ""))[:10]) or "",
+        reverse=True,
+    )
+    if item_limit:
+        papers = papers[:item_limit]
+    status["openalex_count"] = len(papers)
+    return papers
 
 
-def _fetch_biorxiv_europepmc(phrases: list[str], max_items: int, start_date: str, end_date: str, status: dict, log=None) -> list[dict]:
+def _fetch_biorxiv_europepmc(phrases: list[str], max_items: int, start_date: str, end_date: str, status: dict, log=None, should_cancel=None) -> list[dict]:
     timeout = _positive_int_env("EUROPEPMC_REQUEST_TIMEOUT_SEC", 25)
     retries = _positive_int_env("EUROPEPMC_REQUEST_RETRIES", 3)
     try:
@@ -8822,10 +8891,13 @@ def _fetch_biorxiv_europepmc(phrases: list[str], max_items: int, start_date: str
     cursor = "*"
     pages = 0
     item_limit = max(0, int(max_items or 0))
-    max_pages = _positive_int_env("BIORXIV_EUROPEPMC_MAX_PAGES", 100)
-    or_clause = _phrase_or_clause(phrases) or "preprint"
-    query = f'(SRC:PPR) AND ({or_clause}) AND (FIRST_PDATE:[{start_date} TO {end_date}])'
-    while cursor and pages < max_pages and (not item_limit or len(by_key) < item_limit):
+    max_pages = _positive_int_env("BIORXIV_EUROPEPMC_MAX_PAGES", 0)
+    or_clause = _phrase_or_clause(phrases, fields=("TITLE", "ABSTRACT")) or "preprint"
+    query = f'(SRC:PPR) AND (PUBLISHER:"bioRxiv") AND ({or_clause}) AND (FIRST_PDATE:[{start_date} TO {end_date}]) sort_date:y'
+    while cursor and (not max_pages or pages < max_pages) and (not item_limit or len(by_key) < item_limit):
+        if should_cancel and should_cancel():
+            status["stopped_reason"] = "cancelled"
+            break
         params = {
             "query": query,
             "format": "json",
@@ -8837,11 +8909,20 @@ def _fetch_biorxiv_europepmc(phrases: list[str], max_items: int, start_date: str
         payload = None
         last_error = ""
         for attempt in range(1, max(1, retries) + 1):
+            if should_cancel and should_cancel():
+                status["stopped_reason"] = "cancelled"
+                return list(by_key.values())
             try:
                 payload = _request(url, timeout=timeout).json()
                 break
             except Exception as exc:
                 last_error = str(exc)
+                if _http_status_code(exc) == 429:
+                    status["europepmc_rate_limited"] = True
+                    status["stopped_reason"] = "europepmc_rate_limited"
+                    status["limited"] = True
+                    status["errors"].append(f"europepmc page {pages}: {last_error}")
+                    return list(by_key.values())
                 if attempt < max(1, retries):
                     time.sleep(min(6.0, max(0.5, spacing) * attempt))
         if payload is None:
@@ -8855,8 +8936,9 @@ def _fetch_biorxiv_europepmc(phrases: list[str], max_items: int, start_date: str
             if not isinstance(record, dict):
                 continue
             doi = str(record.get("doi") or "").strip().lower()
-            # Keep only Cold Spring Harbor preprints (bioRxiv/medRxiv DOI prefix).
-            if doi and not doi.startswith("10.1101/"):
+            report_details = record.get("bookOrReportDetails") if isinstance(record.get("bookOrReportDetails"), dict) else {}
+            publisher = str(record.get("publisher") or report_details.get("publisher") or "").strip()
+            if publisher.lower() != "biorxiv":
                 continue
             title = _clean_text(str(record.get("title") or ""))
             if not title:
@@ -8883,8 +8965,8 @@ def _fetch_biorxiv_europepmc(phrases: list[str], max_items: int, start_date: str
                 "year": int(published[:4]) if published[:4].isdigit() else date.today().year,
                 "category": "",
                 "categories": [],
-                "classification_source": "llm_inferred",
-                "metadata": {"published": published, "doi": doi, "retrieval": "europepmc"},
+                "classification_source": "unavailable",
+                "metadata": {"published": published, "doi": doi, "retrieval": "europepmc", "publisher": publisher},
             }
             added += 1
             if item_limit and len(by_key) >= item_limit:
@@ -8896,22 +8978,125 @@ def _fetch_biorxiv_europepmc(phrases: list[str], max_items: int, start_date: str
         cursor = payload.get("nextCursorMark") if isinstance(payload, dict) else None
         if spacing:
             time.sleep(spacing)
-    if pages >= max_pages and cursor:
+    if max_pages and pages >= max_pages and cursor:
         status["europepmc_page_limit_reached"] = True
         status["limited"] = True
-    status["europepmc_count"] = len(by_key)
-    return list(by_key.values())
+    papers = sorted(
+        by_key.values(),
+        key=lambda paper: normalize_date(str(paper.get("metadata", {}).get("published", ""))[:10]) or "",
+        reverse=True,
+    )
+    if item_limit:
+        papers = papers[:item_limit]
+    status["europepmc_count"] = len(papers)
+    return papers
 
 
-def fetch_biorxiv_targeted(phrases: list[str], max_items: int, start_date: str = "", end_date: str = "", log=None) -> tuple[list[dict], dict]:
+def _filter_biorxiv_targeted_by_official_category(
+    papers: list[dict],
+    categories: list[str],
+    status: dict,
+    log=None,
+    should_cancel=None,
+) -> list[dict]:
+    selected = [category.strip().lower() for category in (categories or []) if category.strip() and category.strip().lower() != "all"]
+    if not selected or not papers:
+        return papers
+    timeout = _positive_int_env("BIORXIV_CATEGORY_REQUEST_TIMEOUT_SEC", 15)
+    workers = max(1, min(6, _positive_int_env("BIORXIV_CATEGORY_WORKERS", 4), len(papers)))
+
+    def lookup(paper: dict) -> tuple[dict, str, str]:
+        if should_cancel and should_cancel():
+            return paper, "", "cancelled"
+        doi = str(paper.get("biorxiv_doi") or paper.get("metadata", {}).get("doi") or "").strip()
+        if not doi:
+            return paper, "", "missing DOI"
+        try:
+            payload = _request(f"https://api.biorxiv.org/details/biorxiv/{quote(doi, safe='/')}", timeout=timeout).json()
+        except Exception as exc:
+            return paper, "", str(exc)
+        records = payload.get("collection") if isinstance(payload, dict) else []
+        if not isinstance(records, list):
+            records = []
+        matching = [
+            record for record in records
+            if isinstance(record, dict) and str(record.get("doi") or "").strip().lower() == doi.lower()
+        ]
+        record = matching[-1] if matching else (records[-1] if records and isinstance(records[-1], dict) else {})
+        return paper, str(record.get("category") or "").strip(), "" if record else "official DOI lookup returned no record"
+
+    matched: list[dict] = []
+    unverified: list[dict] = []
+    rejected = 0
+    cancelled_early = False
+    executor = ThreadPoolExecutor(max_workers=workers)
+    futures = {
+        executor.submit(lookup, paper)
+        for paper in papers
+        if not (should_cancel and should_cancel())
+    }
+    pending = set(futures)
+    try:
+        while pending:
+            if should_cancel and should_cancel():
+                cancelled_early = True
+                status["stopped_reason"] = "cancelled"
+                status["limited"] = True
+                for future in pending:
+                    future.cancel()
+                break
+            completed, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+            for future in completed:
+                paper, category, error = future.result()
+                if category:
+                    paper["category"] = category
+                    paper["categories"] = [category]
+                    paper["classification_source"] = "official"
+                    metadata = paper.setdefault("metadata", {})
+                    metadata["biorxiv_category"] = category
+                    metadata["primary_category"] = category
+                    metadata["all_categories"] = [category]
+                    if _biorxiv_category_matches(category, selected):
+                        matched.append(paper)
+                    else:
+                        rejected += 1
+                else:
+                    paper["classification_source"] = "unavailable"
+                    unverified.append(paper)
+                    if error:
+                        status.setdefault("errors", []).append(f"category lookup {paper.get('biorxiv_doi') or paper.get('title')}: {error}")
+    finally:
+        executor.shutdown(wait=not cancelled_early, cancel_futures=True)
+    status["official_category_matched_count"] = len(matched)
+    status["official_category_rejected_count"] = rejected
+    status["official_category_unverified_count"] = len(unverified)
+    if unverified:
+        status["limited"] = True
+        status["official_category_unverified_dropped_count"] = len(unverified)
+    if log:
+        log(
+            f"bioRxiv official category filter: matched={len(matched)}; "
+            f"rejected={rejected}; unverified_dropped={len(unverified)}"
+        )
+    return matched
+
+
+def fetch_biorxiv_targeted(
+    phrases: list[str],
+    fetch_limit: int,
+    start_date: str = "",
+    end_date: str = "",
+    categories: list[str] | None = None,
+    log=None,
+    should_cancel=None,
+) -> tuple[list[dict], dict]:
     """Keyword-targeted bioRxiv metadata crawl from a list of anchor PHRASES
-    (Europe PMC primary OR-of-phrases, OpenAlex secondary per-phrase). Returns
+    (Europe PMC primary OR-of-phrases, OpenAlex only as an unavailable/empty fallback). Returns
     metadata only (title/abstract/authors/doi/date/url)."""
     start_date = normalize_date(start_date) or (date.today() - timedelta(days=BIORXIV_DEFAULT_RECENT_DAYS)).isoformat()
     end_date = normalize_date(end_date) or date.today().isoformat()
-    candidate_limit = max(1, int(max_items or 100))
-    raw_item_limit = _positive_int_env("BIORXIV_TARGETED_RAW_MAX_ITEMS", 0)
-    fetch_limit = raw_item_limit
+    fetch_limit = max(1, int(fetch_limit or 5000))
+    raw_item_limit = fetch_limit
     phrases = [str(p).strip() for p in (phrases or []) if str(p).strip()]
     status = {
         "source": "biorxiv",
@@ -8919,7 +9104,7 @@ def fetch_biorxiv_targeted(phrases: list[str], max_items: int, start_date: str =
         "limited": False,
         "count": 0,
         "message": "",
-        "categories": ["keyword-targeted"],
+        "categories": list(categories or []),
         "start_date": start_date,
         "end_date": end_date,
         "queries": [f"europepmc SRC:PPR OR({len(phrases)} phrases) FIRST_PDATE:{start_date}..{end_date}"],
@@ -8928,8 +9113,8 @@ def fetch_biorxiv_targeted(phrases: list[str], max_items: int, start_date: str =
         "targeted": True,
         "retrieval": "europepmc+openalex",
         "phrases": phrases,
-        "candidate_limit": candidate_limit,
-        "raw_item_limit": raw_item_limit or None,
+        "fetch_limit": fetch_limit,
+        "raw_item_limit": fetch_limit,
     }
     by_key: dict[str, dict] = {}
 
@@ -8947,20 +9132,45 @@ def fetch_biorxiv_targeted(phrases: list[str], max_items: int, start_date: str =
     use_epmc = os.environ.get("BIORXIV_EUROPEPMC", "1").lower() in {"1", "true", "yes", "on"}
     use_openalex = os.environ.get("BIORXIV_OPENALEX", "1").lower() in {"1", "true", "yes", "on"}
     if use_epmc:
-        add(_fetch_biorxiv_europepmc(phrases, fetch_limit, start_date, end_date, status, log))
-    if use_openalex and (not fetch_limit or len(by_key) < fetch_limit):
-        status["queries"].append(f"openalex source:biorxiv per-phrase({len(phrases)})")
-        add(_fetch_biorxiv_openalex(phrases, fetch_limit, start_date, end_date, status, log))
+        add(_fetch_biorxiv_europepmc(phrases, raw_item_limit, start_date, end_date, status, log, should_cancel))
+    raw_limit_reached = bool(raw_item_limit and len(by_key) >= raw_item_limit)
+    if (
+        use_openalex
+        and not by_key
+        and not raw_limit_reached
+        and not (should_cancel and should_cancel())
+    ):
+        status["queries"].append(
+            f"openalex source:biorxiv OR({len(phrases)} phrases)"
+        )
+        status["openalex_fallback_requested"] = True
+        add(_fetch_biorxiv_openalex(phrases, fetch_limit, start_date, end_date, status, log, should_cancel))
+    elif use_openalex:
+        status["openalex_skipped_reason"] = (
+            "explicit internal raw item limit reached"
+            if raw_limit_reached
+            else "Europe PMC returned keyword-matched papers"
+        )
 
-    papers = list(by_key.values())
+    raw_targeted_count = len(by_key)
+    papers = _filter_biorxiv_targeted_by_official_category(
+        list(by_key.values()),
+        list(categories or []),
+        status,
+        log,
+        should_cancel,
+    )
     papers.sort(key=lambda p: normalize_date(str(p.get("metadata", {}).get("published", ""))[:10]) or "", reverse=True)
+    papers = papers[:fetch_limit]
     status["count"] = len(papers)
     status["deduped_count"] = len(papers)
+    status["raw_count"] = raw_targeted_count
     status["ok"] = bool(papers)
-    status["raw_item_limit_reached"] = bool(fetch_limit and len(papers) >= fetch_limit)
-    status["target_count_reached"] = False
+    status["raw_item_limit_reached"] = bool(raw_item_limit and raw_targeted_count >= raw_item_limit)
+    status["fetch_limit_reached"] = raw_targeted_count >= fetch_limit
     if status["raw_item_limit_reached"]:
         status["limited"] = True
+        status["stopped_reason"] = "explicit internal raw item limit"
     if papers:
         dates = [normalize_date(str(p.get("metadata", {}).get("published", ""))[:10]) for p in papers]
         dates = [d for d in dates if d]
@@ -8968,7 +9178,8 @@ def fetch_biorxiv_targeted(phrases: list[str], max_items: int, start_date: str =
             status["date_coverage"] = {"newest": max(dates), "oldest": min(dates)}
         status["message"] = (
             f"ok; keyword-targeted; europepmc={status.get('europepmc_count', 0)}; "
-            f"openalex={status.get('openalex_count', 0)}; queries={'; '.join(status['queries'])}"
+            f"openalex={status.get('openalex_count', 0)}; fetch_limit={fetch_limit}; "
+            f"queries={'; '.join(status['queries'])}"
         )
     elif status["errors"]:
         status["message"] = "bioRxiv keyword search unavailable: " + " | ".join(status["errors"][:3])
@@ -8977,41 +9188,62 @@ def fetch_biorxiv_targeted(phrases: list[str], max_items: int, start_date: str =
     return papers, status
 
 
-def fetch_biorxiv(categories: list[str], max_items: int, start_date: str = "", end_date: str = "", search_phrases: list[str] | None = None, log=None) -> tuple[list[dict], dict]:
-    # Keyword-targeted path: when anchor phrases are available and enabled, fetch
-    # on-topic bioRxiv preprints from Europe PMC/OpenAlex instead of bulk-pulling
-    # an entire date window and re-ranking. Falls back to the native window dump.
+def fetch_biorxiv(
+    categories: list[str],
+    fetch_limit: int,
+    start_date: str = "",
+    end_date: str = "",
+    search_phrases: list[str] | None = None,
+    log=None,
+    should_cancel=None,
+) -> tuple[list[dict], dict]:
+    # Normal runs require the extracted keyword query. Native date-window scans
+    # are reserved for the explicit complete-window audit mode.
     targeted_enabled = os.environ.get("BIORXIV_TARGETED", "1").lower() in {"1", "true", "yes", "on"}
-    complete_window_scan = os.environ.get("BIORXIV_COMPLETE_WINDOW", "1").lower() in {"1", "true", "yes", "on"}
+    complete_window_scan = os.environ.get("BIORXIV_COMPLETE_WINDOW", "0").lower() in {"1", "true", "yes", "on"}
     targeted_before_complete_window = os.environ.get("BIORXIV_TARGETED_BEFORE_COMPLETE_WINDOW", "0").lower() in {"1", "true", "yes", "on"}
+    fetch_limit = max(1, int(fetch_limit or 5000))
+    categories = [category.strip() for category in (categories or []) if category.strip()] or ["all"]
     search_phrases = [p for p in (search_phrases or []) if str(p).strip()]
     skip_targeted_for_complete_window = bool(search_phrases and targeted_enabled and complete_window_scan and not targeted_before_complete_window)
     targeted_seed: list[dict] = []
     targeted_status: dict = {}
     if search_phrases and targeted_enabled and not skip_targeted_for_complete_window:
-        papers, status = fetch_biorxiv_targeted(search_phrases, max_items, start_date, end_date, log=log)
+        papers, status = fetch_biorxiv_targeted(
+            search_phrases,
+            fetch_limit,
+            start_date,
+            end_date,
+            categories=categories,
+            log=log,
+            should_cancel=should_cancel,
+        )
+        if not complete_window_scan:
+            return papers, status
         if complete_window_scan:
             targeted_seed = list(papers)
             targeted_status = dict(status)
             if log:
                 log(f"bioRxiv targeted recall seeded {len(targeted_seed)} papers; continuing with complete native window scan")
-        else:
-            floor = _positive_int_env("BIORXIV_TARGETED_MIN_RESULTS", 5)
-            require_target = os.environ.get("BIORXIV_TARGETED_REQUIRE_TARGET", "1").lower() in {"1", "true", "yes", "on"}
-            target_reached = len(papers) >= max(1, int(max_items or 1))
-            if papers and len(papers) >= floor and (target_reached or not require_target):
-                return papers, status
-            # Targeted recall too low - fall through to the native window dump as a
-            # backstop so a bad/empty query does not zero out bioRxiv.
-            if log:
-                reason = f"<{floor}" if len(papers) < floor else f"below target {max_items}"
-                log(f"bioRxiv targeted returned {len(papers)} ({reason}); falling back to native window scan")
+    if targeted_enabled and not search_phrases and not complete_window_scan:
+        return [], {
+            "source": "biorxiv",
+            "ok": False,
+            "limited": True,
+            "count": 0,
+            "message": "bioRxiv keyword extraction returned no valid search keywords; no unfiltered window scan was run.",
+            "categories": categories,
+            "start_date": normalize_date(start_date),
+            "end_date": normalize_date(end_date),
+            "queries": [],
+            "errors": ["missing_search_keywords"],
+            "targeted": True,
+            "fetch_limit": fetch_limit,
+        }
     papers: list[dict] = []
     by_key: dict[str, dict] = {}
     start_date = normalize_date(start_date) or (date.today() - timedelta(days=BIORXIV_DEFAULT_RECENT_DAYS)).isoformat()
     end_date = normalize_date(end_date) or date.today().isoformat()
-    categories = [category.strip() for category in (categories or []) if category.strip()] or ["bioinformatics"]
-    max_items = max(1, int(max_items or 100))
     request_timeout = _positive_int_env("BIORXIV_REQUEST_TIMEOUT_SEC", 20)
     request_retries = _positive_int_env("BIORXIV_REQUEST_RETRIES", 3)
     max_pages = _positive_int_env("BIORXIV_MAX_PAGES", 0)
@@ -9021,11 +9253,7 @@ def fetch_biorxiv(categories: list[str], max_items: int, start_date: str = "", e
         request_spacing_sec = max(0.0, float(os.environ.get("BIORXIV_REQUEST_SPACING_SEC", "0.35") or 0.35))
     except (TypeError, ValueError):
         request_spacing_sec = 0.35
-    latest_first = os.environ.get("BIORXIV_LATEST_FIRST", "1").lower() in {"1", "true", "yes", "on"}
-    if complete_window_scan:
-        latest_first = False
-    complete_window_cap = _positive_int_env("BIORXIV_COMPLETE_WINDOW_MAX_ITEMS", 0)
-    raw_item_limit = complete_window_cap if complete_window_scan else max_items
+    raw_item_limit = fetch_limit
     status = {
         "source": "biorxiv",
         "ok": False,
@@ -9045,10 +9273,10 @@ def fetch_biorxiv(categories: list[str], max_items: int, start_date: str = "", e
         "request_timeout_sec": request_timeout,
         "request_retries": request_retries,
         "request_spacing_sec": request_spacing_sec,
-        "latest_first": latest_first,
+        "latest_first": False,
         "complete_window_scan": complete_window_scan,
-        "raw_item_limit": raw_item_limit or None,
-        "candidate_limit": max_items,
+        "raw_item_limit": fetch_limit,
+        "fetch_limit": fetch_limit,
         "max_pages": max_pages or None,
         "window_days": window_days,
         "parallel_pages": parallel_pages,
@@ -9066,6 +9294,13 @@ def fetch_biorxiv(categories: list[str], max_items: int, start_date: str = "", e
         status["targeted_recall_queries"] = list(targeted_status.get("queries") or [])
         status["queries"].extend(query for query in status["targeted_recall_queries"] if query not in status["queries"])
         status["errors"].extend(str(error) for error in targeted_status.get("errors") or [] if str(error))
+
+    def cancelled() -> bool:
+        if should_cancel and should_cancel():
+            status["stopped_reason"] = "cancelled"
+            status["limited"] = True
+            return True
+        return False
 
     def parse_total(payload: dict) -> int:
         messages = payload.get("messages") if isinstance(payload, dict) else []
@@ -9090,17 +9325,46 @@ def fetch_biorxiv(categories: list[str], max_items: int, start_date: str = "", e
                 return 0
         return 0
 
-    def request_page(window_start: str, window_end: str, cursor: int, window_report: dict) -> dict | None:
+    def request_page(window_start: str, window_end: str, cursor: int, window_report: dict, category: str = "") -> dict | None:
+        if cancelled():
+            return None
+        unsupported_categories = status.setdefault("unsupported_categories", [])
+        if category and category.lower() in {str(value).lower() for value in unsupported_categories}:
+            return None
         url = f"https://api.biorxiv.org/details/biorxiv/{window_start}/{window_end}/{cursor}/json"
+        if category and category.lower() != "all":
+            url += "?" + urlencode({"category": category})
         last_error = ""
         for attempt in range(1, max(1, request_retries) + 1):
+            if cancelled():
+                return None
             try:
                 response = _request(url, timeout=request_timeout)
                 if request_spacing_sec:
                     time.sleep(request_spacing_sec)
-                return response.json()
+                payload = response.json()
+                messages = payload.get("messages") if isinstance(payload, dict) else []
+                message = messages[0] if isinstance(messages, list) and messages and isinstance(messages[0], dict) else {}
+                reported_category = str(message.get("category") or "").strip()
+                if category and reported_category and reported_category.lower() != category.lower():
+                    error = (
+                        f"bioRxiv category '{category}' is unavailable or unsupported; "
+                        f"API reported '{reported_category}'"
+                    )
+                    if category not in unsupported_categories:
+                        unsupported_categories.append(category)
+                    status["limited"] = True
+                    status["errors"].append(error)
+                    window_report.setdefault("errors", []).append(error)
+                    return None
+                return payload
             except Exception as exc:
                 last_error = str(exc)
+                if _http_status_code(exc) == 429:
+                    status["rate_limited"] = True
+                    status["limited"] = True
+                    status["stopped_reason"] = "rate limited"
+                    break
                 if attempt < max(1, request_retries):
                     time.sleep(min(8.0, max(0.5, request_spacing_sec) * attempt))
         message = f"{window_start}..{window_end} cursor={cursor}: {last_error}"
@@ -9129,10 +9393,17 @@ def fetch_biorxiv(categories: list[str], max_items: int, start_date: str = "", e
             metadata.setdefault(field, value)
         return False
 
-    def consume_records(records: list[dict], window_start: str, window_end: str) -> int:
+    def consume_records(
+        records: list[dict],
+        window_start: str,
+        window_end: str,
+        *,
+        max_new_items: int = 0,
+    ) -> int:
         matched_this_page = 0
+        added_this_page = 0
         for record in records:
-            if raw_limit_reached():
+            if raw_limit_reached() or (max_new_items and added_this_page >= max_new_items):
                 break
             if not isinstance(record, dict):
                 continue
@@ -9173,7 +9444,7 @@ def fetch_biorxiv(categories: list[str], max_items: int, start_date: str = "", e
                 "year": int(published[:4]) if published[:4].isdigit() else date.today().year,
                 "category": category,
                 "categories": all_categories,
-                "classification_source": "llm_inferred",
+                "classification_source": "official",
                 "metadata": {
                     "published": published,
                     "biorxiv_category": category,
@@ -9191,9 +9462,10 @@ def fetch_biorxiv(categories: list[str], max_items: int, start_date: str = "", e
             }
             by_key[key] = paper
             papers.append(paper)
+            added_this_page += 1
             if raw_limit_reached():
                 status["raw_item_limit_reached"] = True
-                status["stopped_reason"] = "raw item limit"
+                status["stopped_reason"] = "explicit internal raw item limit"
                 break
         return matched_this_page
 
@@ -9202,16 +9474,14 @@ def fetch_biorxiv(categories: list[str], max_items: int, start_date: str = "", e
         status["count"] = len(papers)
         status["deduped_count"] = len(papers)
         status["ok"] = bool(papers)
-        status["target_count_reached"] = bool((not complete_window_scan) and len(papers) >= max_items)
+        status["fetch_limit_reached"] = bool(raw_item_limit and len(papers) >= raw_item_limit)
         status["raw_item_limit_reached"] = bool(raw_item_limit and len(papers) >= raw_item_limit)
         if status["raw_item_limit_reached"] and status.get("stopped_reason") in {"", None}:
-            status["stopped_reason"] = "raw item limit"
-        elif status["target_count_reached"] and status.get("stopped_reason") in {"", None}:
-            status["stopped_reason"] = "target count reached"
+            status["stopped_reason"] = "explicit internal raw item limit"
         if complete_window_scan and status.get("stopped_reason") in {"", None}:
             status["stopped_reason"] = "full window scanned"
-        if status["target_count_reached"] and status.get("stopped_reason") in {"item limit", "target count reached"}:
-            status["limited"] = False
+        elif status.get("stopped_reason") in {"", None}:
+            status["stopped_reason"] = "selected queries exhausted"
         if status.get("raw_item_limit_reached"):
             status["limited"] = True
         if papers:
@@ -9221,10 +9491,8 @@ def fetch_biorxiv(categories: list[str], max_items: int, start_date: str = "", e
                 status["date_coverage"] = {"newest": max(dates), "oldest": min(dates)}
             if complete_window_scan and not status.get("raw_item_limit_reached") and status.get("stopped_reason") != "page limit":
                 limit_message = "complete native date window scanned"
-            elif status.get("stopped_reason") == "raw item limit":
-                limit_message = "reached raw item limit"
-            elif status.get("stopped_reason") in {"item limit", "target count reached"}:
-                limit_message = "reached requested max_items"
+            elif status.get("stopped_reason") == "explicit internal raw item limit":
+                limit_message = "reached explicit internal raw item limit"
             elif status.get("stopped_reason") == "page limit":
                 limit_message = "limited by page limit"
             else:
@@ -9243,9 +9511,11 @@ def fetch_biorxiv(categories: list[str], max_items: int, start_date: str = "", e
         return papers, status
 
     for seed_paper in targeted_seed:
+        if cancelled():
+            break
         if raw_limit_reached():
             status["raw_item_limit_reached"] = True
-            status["stopped_reason"] = "raw item limit"
+            status["stopped_reason"] = "explicit internal raw item limit"
             break
         if add_existing_paper(dict(seed_paper)):
             status["targeted_seed_added"] = int(status.get("targeted_seed_added") or 0) + 1
@@ -9266,99 +9536,34 @@ def fetch_biorxiv(categories: list[str], max_items: int, start_date: str = "", e
         windows.append((current_start.isoformat(), current_end.isoformat()))
         current_end = current_start - timedelta(days=1)
 
-    if latest_first:
+    native_categories = [""] if any(category.lower() == "all" for category in categories) else list(categories)
+
+    window_requests = [
+        (window_start, window_end, category)
+        for window_start, window_end in windows
+        for category in native_categories
+    ]
+    for window_start, window_end, native_category in window_requests:
+        if cancelled():
+            break
+        if raw_limit_reached():
+            status["limited"] = True
+            status["stopped_reason"] = "explicit internal raw item limit"
+            break
+        cursor = 0
         window_report = {
-            "start_date": start_date,
-            "end_date": end_date,
-            "mode": "latest_first_interval",
+            "start_date": window_start,
+            "end_date": window_end,
+            "category": native_category or "all",
             "pages": 0,
             "api_records": 0,
             "matched_records": 0,
             "total": 0,
-            "cursor_start": 0,
-            "cursor_end": 0,
             "errors": [],
         }
-        first_payload = request_page(start_date, end_date, 0, window_report)
-        first_records = first_payload.get("collection") if isinstance(first_payload, dict) else []
-        if not isinstance(first_records, list):
-            first_records = []
-        total_for_range = parse_total(first_payload or {}) or len(first_records)
-        page_size = parse_page_count(first_payload or {}) or len(first_records) or 30
-        window_report["total"] = total_for_range
-        status["api_total"] = total_for_range
-        raw_cursor_start = max(0, total_for_range - max_items)
-        cursor_start = (raw_cursor_start // page_size) * page_size if page_size else raw_cursor_start
-        cursor_end = max(cursor_start, total_for_range)
-        window_report["cursor_start"] = cursor_start
-        window_report["raw_cursor_start"] = raw_cursor_start
-        window_report["cursor_end"] = cursor_end
-        cursors = list(range(cursor_start, cursor_end, page_size)) if total_for_range else [0]
-        if not cursors:
-            cursors = [0]
-        if cursor_start == 0 and first_records:
-            payload_by_cursor = {0: first_payload}
-        else:
-            payload_by_cursor = {}
-        for cursor in cursors:
-            if max_pages and status["pages_fetched"] >= max_pages:
-                status["stopped_reason"] = "page limit"
-                status["limited"] = True
-                break
-            payload = payload_by_cursor.get(cursor)
-            if payload is None:
-                payload = request_page(start_date, end_date, cursor, window_report)
-            records = payload.get("collection") if isinstance(payload, dict) else []
-            if not isinstance(records, list) or not records:
-                continue
-            status["pages_fetched"] += 1
-            window_report["pages"] += 1
-            window_report["api_records"] += len(records)
-            status["api_raw_count"] += len(records)
-            status["raw_count"] = status["api_raw_count"]
-            matched = consume_records(records, start_date, end_date)
-            window_report["matched_records"] += matched
-            status["matched_category_count"] += matched
-            if len(papers) >= max_items:
-                status["stopped_reason"] = "target count reached"
-                break
-        backfill_cursor = cursor_start
-        while len(papers) < max_items and backfill_cursor > 0:
-            if max_pages and status["pages_fetched"] >= max_pages:
-                status["stopped_reason"] = "page limit"
-                status["limited"] = True
-                break
-            backfill_cursor = max(0, backfill_cursor - page_size)
-            payload = request_page(start_date, end_date, backfill_cursor, window_report)
-            records = payload.get("collection") if isinstance(payload, dict) else []
-            if not isinstance(records, list) or not records:
-                if backfill_cursor == 0:
-                    break
-                continue
-            status["pages_fetched"] += 1
-            window_report["pages"] += 1
-            window_report["api_records"] += len(records)
-            status["api_raw_count"] += len(records)
-            status["raw_count"] = status["api_raw_count"]
-            matched = consume_records(records, start_date, end_date)
-            window_report["matched_records"] += matched
-            status["matched_category_count"] += matched
-            if len(papers) >= max_items:
-                status["stopped_reason"] = "target count reached"
-                break
-        status["windows"].append(window_report)
-        return finalize_biorxiv_status()
-
-    for window_start, window_end in windows:
-        if raw_limit_reached():
-            status["limited"] = True
-            status["stopped_reason"] = "raw item limit"
-            break
-        cursor = 0
-        window_report = {"start_date": window_start, "end_date": window_end, "pages": 0, "api_records": 0, "matched_records": 0, "total": 0, "errors": []}
         seen_page_keys: set[str] = set()
         if complete_window_scan and parallel_pages > 1:
-            first_payload = request_page(window_start, window_end, 0, window_report)
+            first_payload = request_page(window_start, window_end, 0, window_report, native_category)
             first_records = first_payload.get("collection") if isinstance(first_payload, dict) else []
             if not isinstance(first_records, list):
                 first_records = []
@@ -9389,25 +9594,50 @@ def fetch_biorxiv(categories: list[str], max_items: int, start_date: str = "", e
             if max_pages:
                 remaining = max(0, max_pages - status["pages_fetched"])
                 cursors = cursors[:remaining]
-            if cursors:
+            if cursors and not raw_limit_reached() and not cancelled():
                 status["parallel_page_fetch_used"] = True
                 worker_count = max(1, min(parallel_pages, len(cursors)))
-                with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                    future_to_cursor = {
-                        executor.submit(request_page, window_start, window_end, page_cursor, window_report): page_cursor
-                        for page_cursor in cursors
-                    }
-                    for future in as_completed(future_to_cursor):
-                        if max_pages and status["pages_fetched"] >= max_pages:
-                            status["stopped_reason"] = "page limit"
-                            status["limited"] = True
+                executor = ThreadPoolExecutor(max_workers=worker_count)
+                future_to_cursor = {
+                    executor.submit(
+                        request_page,
+                        window_start,
+                        window_end,
+                        page_cursor,
+                        window_report,
+                        native_category,
+                    ): page_cursor
+                    for page_cursor in cursors
+                }
+                pending = set(future_to_cursor)
+                stopped_early = False
+                try:
+                    while pending:
+                        if cancelled():
+                            stopped_early = True
+                            for future in pending:
+                                future.cancel()
                             break
-                        payload = future.result()
-                        consume_payload(payload)
-                        if raw_limit_reached():
-                            status["limited"] = True
-                            status["stopped_reason"] = "raw item limit"
+                        completed, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+                        for future in completed:
+                            if max_pages and status["pages_fetched"] >= max_pages:
+                                status["stopped_reason"] = "page limit"
+                                status["limited"] = True
+                                stopped_early = True
+                                break
+                            payload = future.result()
+                            consume_payload(payload)
+                            if raw_limit_reached():
+                                status["limited"] = True
+                                status["stopped_reason"] = "explicit internal raw item limit"
+                                stopped_early = True
+                                break
+                        if stopped_early:
+                            for future in pending:
+                                future.cancel()
                             break
+                finally:
+                    executor.shutdown(wait=not stopped_early, cancel_futures=True)
             status["windows"].append(window_report)
             if max_pages and status["pages_fetched"] >= max_pages:
                 status["stopped_reason"] = "page limit"
@@ -9417,18 +9647,14 @@ def fetch_biorxiv(categories: list[str], max_items: int, start_date: str = "", e
                 break
             continue
         while not raw_limit_reached():
+            if cancelled():
+                break
             if max_pages and status["pages_fetched"] >= max_pages:
                 status["limited"] = True
                 status["stopped_reason"] = "page limit"
                 break
-            url = f"https://api.biorxiv.org/details/biorxiv/{window_start}/{window_end}/{cursor}/json"
-            try:
-                response = _request(url, timeout=request_timeout)
-                data = response.json()
-            except Exception as exc:
-                message = f"{window_start}..{window_end} cursor={cursor}: {exc}"
-                status["errors"].append(message)
-                window_report["errors"].append(message)
+            data = request_page(window_start, window_end, cursor, window_report, native_category)
+            if not isinstance(data, dict):
                 break
             records = data.get("collection") if isinstance(data, dict) else []
             if not isinstance(records, list) or not records:
@@ -9446,69 +9672,7 @@ def fetch_biorxiv(categories: list[str], max_items: int, start_date: str = "", e
             window_report["api_records"] += len(records)
             status["api_raw_count"] += len(records)
             status["raw_count"] = status["api_raw_count"]
-            matched_this_page = 0
-            for record in records:
-                if not isinstance(record, dict):
-                    continue
-                published = normalize_date(str(record.get("date") or ""))
-                if not _in_date_range(published, start_date, end_date):
-                    continue
-                category = str(record.get("category") or "").strip()
-                if not _biorxiv_category_matches(category, categories):
-                    continue
-                matched_this_page += 1
-                title = " ".join(str(record.get("title") or "").split())
-                abstract = " ".join(str(record.get("abstract") or "").split())
-                doi = str(record.get("doi") or "").strip()
-                version = str(record.get("version") or "").strip()
-                key = doi.lower() or title.lower()
-                if not key:
-                    continue
-                paper = by_key.get(key)
-                if paper:
-                    categories_seen = paper.setdefault("categories", [paper.get("category", "")])
-                    if category and category not in categories_seen:
-                        categories_seen.append(category)
-                    paper.setdefault("metadata", {})["all_categories"] = categories_seen
-                    continue
-                url = _biorxiv_content_url(doi, version)
-                pdf_url = f"{url}.full.pdf" if url else ""
-                all_categories = [category] if category else []
-                paper = {
-                    "id": stable_id("paper", doi or title),
-                    "source": "biorxiv",
-                    "biorxiv_doi": doi,
-                    "title": title,
-                    "authors": str(record.get("authors") or ""),
-                    "abstract": abstract,
-                    "url": url,
-                    "pdf_url": pdf_url,
-                    "venue": "bioRxiv",
-                    "year": int(published[:4]) if published[:4].isdigit() else date.today().year,
-                    "category": category,
-                    "categories": all_categories,
-                    "classification_source": "llm_inferred",
-                    "metadata": {
-                        "published": published,
-                        "biorxiv_category": category,
-                        "primary_category": category,
-                        "all_categories": all_categories,
-                        "doi": doi,
-                        "version": version,
-                        "license": record.get("license") or "",
-                        "server": record.get("server") or "biorxiv",
-                        "type": record.get("type") or "",
-                        "published_journal": record.get("published") or "",
-                        "window_start_date": window_start,
-                        "window_end_date": window_end,
-                    },
-                }
-                by_key[key] = paper
-                papers.append(paper)
-                if raw_limit_reached():
-                    status["limited"] = True
-                    status["stopped_reason"] = "raw item limit"
-                    break
+            matched_this_page = consume_records(records, window_start, window_end)
             window_report["matched_records"] += matched_this_page
             status["matched_category_count"] += matched_this_page
             if raw_limit_reached():
@@ -9518,7 +9682,7 @@ def fetch_biorxiv(categories: list[str], max_items: int, start_date: str = "", e
                 break
             time.sleep(0.25)
         status["windows"].append(window_report)
-        if status.get("stopped_reason") in {"item limit", "page limit"}:
+        if status.get("stopped_reason") in {"explicit internal raw item limit", "page limit", "rate limited", "cancelled"}:
             break
     return finalize_biorxiv_status()
 
@@ -9532,6 +9696,8 @@ def _request_arxiv_page(url: str, timeout_sec: int, attempts: int = 3):
                 return _request(url)
         except Exception as exc:
             last_error = exc
+            if _http_status_code(exc) == 429:
+                break
             if attempt < attempts:
                 time.sleep(0.8 * attempt)
     if last_error:
@@ -9539,32 +9705,26 @@ def _request_arxiv_page(url: str, timeout_sec: int, attempts: int = 3):
     raise RuntimeError("arXiv request failed")
 
 
-def fetch_arxiv(categories: list[str], max_items: int, start_date: str = "", end_date: str = "", topic_queries: list[str] | None = None, log=None, progress=None, should_cancel=None, max_queries: int | None = None, per_query_limit: int | None = None, timeout_sec: int | None = None, targeted_queries: list[tuple[str, str]] | None = None) -> tuple[list[dict], dict]:
+_ARXIV_PAGE_SIZE = 100
+
+
+def fetch_arxiv(categories: list[str], fetch_limit: int, start_date: str = "", end_date: str = "", topic_queries: list[str] | None = None, log=None, progress=None, should_cancel=None, max_queries: int | None = None, timeout_sec: int | None = None, targeted_queries: list[tuple[str, str]] | None = None) -> tuple[list[dict], dict]:
     papers: list[dict] = []
     by_key: dict[str, dict] = {}
     start_date, end_date, date_window_source = _arxiv_date_window(start_date, end_date)
-    categories = [category.strip() for category in (categories or []) if category.strip()] or ["cs.AI"]
-    full_scan = os.environ.get("ARXIV_FULL_SCAN", "1").lower() in {"1", "true", "yes", "on"}
-    env_per_query = int(os.environ.get("ARXIV_PER_QUERY_LIMIT", "0") or 0)
+    categories = [category.strip() for category in (categories or []) if category.strip()]
+    fetch_limit = max(1, int(fetch_limit or 5000))
+    full_scan = os.environ.get("ARXIV_FULL_SCAN", "0").lower() in {"1", "true", "yes", "on"}
     env_max_queries = int(os.environ.get("ARXIV_MAX_QUERIES", "0") or 0)
     env_timeout = int(os.environ.get("ARXIV_TIMEOUT_SEC", "0") or 0)
-    env_total_limit = int(os.environ.get("ARXIV_MAX_TOTAL", "0") or 0)
     try:
         request_spacing_sec = max(0.0, float(os.environ.get("ARXIV_REQUEST_SPACING_SEC", "3.0") or 3.0))
     except (TypeError, ValueError):
         request_spacing_sec = 3.0
     use_targeted = bool(targeted_queries)
-    per_query_limit = max(10, min(100, env_per_query or int(per_query_limit or (100 if full_scan else 50))))
     max_queries = max(1, env_max_queries or int(max_queries or (len(categories) + len(topic_queries or []) if full_scan else 3)))
     arxiv_timeout = max(20, env_timeout or int(timeout_sec or 45))
-    # Keyword-targeted crawling scans the targeted query to exhaustion by default
-    # (ARXIV_TARGETED_COMPLETE=1). max_items remains the cap for broad category
-    # fallback, where the population is much larger and only used as recall
-    # backstop before downstream ranking.
-    total_limit = max(0, env_total_limit or (max_items if (not full_scan and not use_targeted) else 0))
-    targeted_complete_scan = os.environ.get("ARXIV_TARGETED_COMPLETE", "1").lower() in {"1", "true", "yes", "on"}
-    default_topic_floor = 1 if use_targeted else max_items
-    topic_min_results = _positive_int_env("ARXIV_TOPIC_MIN_RESULTS", default_topic_floor)
+    total_limit = fetch_limit
     status = {
         "source": "arxiv",
         "ok": False,
@@ -9579,43 +9739,40 @@ def fetch_arxiv(categories: list[str], max_items: int, start_date: str = "", end
         "queries": [],
         "errors": [],
         "query_limit": max_queries,
-        "per_query_limit": per_query_limit,
+        "page_size": _ARXIV_PAGE_SIZE,
         "full_scan": full_scan,
         "pages_fetched": 0,
         "deduped_count": 0,
         "total_limit": total_limit,
-        "candidate_limit": max_items,
-        "raw_item_limit": total_limit or None,
+        "fetch_limit": fetch_limit,
+        "raw_item_limit": fetch_limit,
         "request_spacing_sec": request_spacing_sec,
-        "topic_min_results": topic_min_results,
-        "recall_fallback_used": False,
-        "target_count_reached": False,
-        "targeted_complete_scan": targeted_complete_scan if use_targeted else False,
     }
     if use_targeted:
-        queries = list(targeted_queries or [])
-        primary_sort = "relevance"
+        queries = list(targeted_queries or [])[:max_queries]
+        primary_sort = "submittedDate"
     else:
         queries = _arxiv_search_queries(categories, topic_queries or [], start_date, end_date)[:max_queries]
         primary_sort = "submittedDate"
     status["targeted"] = use_targeted
     status["primary_sort"] = primary_sort
-    fallback_queries = [query for query in _arxiv_fallback_queries(categories, start_date, end_date) if query not in queries]
     ns = {"a": "http://www.w3.org/2005/Atom"}
 
-    def run_query(query_index: int, total_queries: int, query_label: str, query_text: str, *, fallback_query: bool = False, soft_limit: int = 0, sort_by: str = "submittedDate") -> None:
+    def run_query(query_index: int, total_queries: int, query_label: str, query_text: str, *, sort_by: str = "submittedDate") -> None:
         query = quote_plus(query_text)
         status["queries"].append(query_text)
         start = 0
         while True:
             if should_cancel and should_cancel():
                 status["errors"].append("cancelled")
+                status["limited"] = True
+                status["stopped_reason"] = "cancelled"
                 return
             if log:
                 log(f"arXiv query {query_index}/{total_queries} [{query_label}] page_start={start}: {query_text[:180]}")
             if progress:
                 progress("arxiv", query_index - 1, max(1, total_queries), f"arXiv query {query_index}/{total_queries}: {query_label}, page start {start}")
-            url = f"https://export.arxiv.org/api/query?search_query={query}&sortBy={sort_by}&sortOrder=descending&start={start}&max_results={per_query_limit}"
+            url = f"https://export.arxiv.org/api/query?search_query={query}&sortBy={sort_by}&sortOrder=descending&start={start}&max_results={_ARXIV_PAGE_SIZE}"
             try:
                 root = ET.fromstring(_request_arxiv_page(url, arxiv_timeout).text)
             except Exception as exc:
@@ -9623,7 +9780,11 @@ def fetch_arxiv(categories: list[str], max_items: int, start_date: str = "", end
                 status["errors"].append(f"{query_label} start={start}: {error_text}")
                 if "429" in error_text or "Too Many Requests" in error_text:
                     status["limited"] = True
+                    status["stopped_reason"] = "rate limited"
                     status["message"] = f"arXiv rate limited after {status['pages_fetched']} pages; kept {len(papers)} papers."
+                else:
+                    status["limited"] = True
+                    status["stopped_reason"] = "request failed"
                 if log:
                     log(f"arXiv query {query_index}/{total_queries} failed at start={start}: {error_text[:240]}")
                 return
@@ -9633,62 +9794,46 @@ def fetch_arxiv(categories: list[str], max_items: int, start_date: str = "", end
                 return
             before = len(papers)
             for entry in entries:
-                _append_arxiv_entry(papers, by_key, entry, ns, query_label, query_text, start_date, end_date, fallback_query=fallback_query)
-                if total_limit and len(papers) >= total_limit:
-                    status["target_count_reached"] = total_limit >= max_items
-                    status["limited"] = total_limit < max_items
-                    status["stopped_reason"] = "target count reached" if status["target_count_reached"] else "configured total limit"
-                    status["message"] = (
-                        f"Reached configured arXiv total_limit={total_limit}; "
-                        f"collected {len(papers)} papers for downstream keyword filtering."
-                    )
-                    return
-                if soft_limit and len(papers) >= soft_limit:
-                    status["target_count_reached"] = soft_limit >= max_items
-                    status["stopped_reason"] = "target count reached" if status["target_count_reached"] else "soft limit"
-                    return
+                _append_arxiv_entry(papers, by_key, entry, ns, query_label, query_text, start_date, end_date)
+            if total_limit and len(papers) >= total_limit:
+                papers.sort(
+                    key=lambda paper: normalize_date(str(paper.get("metadata", {}).get("published", ""))[:10]) or "",
+                    reverse=True,
+                )
+                del papers[total_limit:]
+                status["raw_item_limit_reached"] = True
+                status["limited"] = True
+                status["stopped_reason"] = "explicit internal raw item limit"
+                status["message"] = (
+                    f"Reached configured arXiv fetch_limit={fetch_limit}; "
+                    f"kept the {len(papers)} most recently submitted matching papers."
+                )
+                return
             if log:
                 log(f"arXiv query {query_index}/{total_queries} collected {len(papers) - before} new papers on this page; total {len(papers)}")
-            if len(entries) < per_query_limit:
+            if len(entries) < _ARXIV_PAGE_SIZE:
                 return
-            if not full_scan and len(papers) >= max_items:
-                status["target_count_reached"] = True
-                status["stopped_reason"] = "target count reached"
-                return
-            if soft_limit and len(papers) >= soft_limit:
-                status["target_count_reached"] = soft_limit >= max_items
-                return
-            start += per_query_limit
+            start += _ARXIV_PAGE_SIZE
             if request_spacing_sec:
                 time.sleep(request_spacing_sec)
 
-    targeted_cap = 0 if (use_targeted and targeted_complete_scan) else max_items if use_targeted else 0
     for query_index, (query_label, query_text) in enumerate(queries, 1):
-        run_query(query_index, len(queries), query_label, query_text, sort_by=primary_sort, soft_limit=targeted_cap)
-        if status.get("message", "").startswith("arXiv rate limited") or (total_limit and len(papers) >= total_limit) or (targeted_cap and len(papers) >= targeted_cap) or (not full_scan and not use_targeted and len(papers) >= max_items):
+        run_query(query_index, len(queries), query_label, query_text, sort_by=primary_sort)
+        if status.get("stopped_reason") in {"cancelled", "rate limited", "request failed", "explicit internal raw item limit"}:
             break
+    papers.sort(
+        key=lambda paper: normalize_date(str(paper.get("metadata", {}).get("published", ""))[:10]) or "",
+        reverse=True,
+    )
+    papers = papers[:fetch_limit]
     status["topic_result_count"] = len(papers)
-    # In targeted mode the on-topic pool is intentionally small; only widen to
-    # the category recency backfill if recall fell below the small floor.
-    backfill_floor = topic_min_results if use_targeted else min(max_items, topic_min_results)
-    should_backfill = bool(fallback_queries and len(papers) < backfill_floor and not status.get("message", "").startswith("arXiv rate limited"))
-    if should_backfill:
-        status["recall_fallback_used"] = True
-        status["topic_result_shortfall"] = max(0, backfill_floor - len(papers))
-        if log:
-            log(f"arXiv topic queries returned {len(papers)} papers; using category recall backfill before TF-IDF keyword filtering")
-        fallback_soft_limit = total_limit or max_items
-        for fallback_index, (query_label, query_text) in enumerate(fallback_queries, 1):
-            run_query(fallback_index, len(fallback_queries), query_label, query_text, fallback_query=True, soft_limit=fallback_soft_limit)
-            if len(papers) >= fallback_soft_limit or status.get("message", "").startswith("arXiv rate limited"):
-                break
     status["count"] = len(papers)
     status["deduped_count"] = len(by_key)
     status["ok"] = bool(papers)
+    status["fetch_limit_reached"] = len(papers) >= fetch_limit
     if papers:
         status["message"] = status.get("message") or f"ok; pages_fetched={status['pages_fetched']}; queries={'; '.join(status['queries'])}"
         if total_limit and len(papers) >= total_limit:
-            status["target_count_reached"] = True
             status["raw_item_limit_reached"] = True
     elif status["limited"]:
         status["message"] = status.get("message") or "arXiv rate limited before returning papers. Retry later or reduce query volume."
@@ -9696,7 +9841,7 @@ def fetch_arxiv(categories: list[str], max_items: int, start_date: str = "", end
         status["message"] = "arXiv unavailable or query failed: " + " | ".join(status["errors"][:3])
     else:
         status["message"] = f"No arXiv papers found; queries={'; '.join(status['queries'])}"
-    return (papers[:total_limit] if total_limit else papers), status
+    return papers, status
 
 def fetch_huggingface(
     max_papers: int,

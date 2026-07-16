@@ -46,6 +46,7 @@ call = {
     "mode": "resume" if session_flag == "--resume" else "create" if session_flag else "independent",
     "session_id": session_id,
     "prompt": prompt[:200],
+    "git_ceiling_directories": os.environ.get("GIT_CEILING_DIRECTORIES", ""),
 }
 with (state / "fake_claude_calls.jsonl").open("a", encoding="utf-8") as handle:
     handle.write(json.dumps(call) + "\\n")
@@ -129,6 +130,7 @@ def test_project_writing_controller_is_created_then_resumed(monkeypatch, tmp_pat
     assert [row["mode"] for row in calls] == ["create", "resume"]
     assert all(row["cwd"] == str(project_root) for row in calls)
     assert all(row["session_id"] == session_id for row in calls)
+    assert all(str(tmp_path) in row["git_ceiling_directories"].split(os.pathsep) for row in calls)
     assert not (runtime / "runs").exists()
 
     history = json.loads((project_root / "state" / "writing_controller_history.json").read_text(encoding="utf-8"))

@@ -2,35 +2,25 @@
   "schema_version": 1,
   "config": {
     "llm_concurrency": 8,
-    "idea_parallel_workers": 2,
-    "max_fetch_papers": 120,
-    "max_recommended_papers": 20,
+    "nonvenue_fetch_limit": 5000,
+    "max_recommended_papers": 50,
     "max_ideas": 6,
     "venue_title_scan_limit": 0,
     "venue_title_scan_fraction": 1.0,
-    "find_recall_count": 2000,
-    "detail_fetch_count": 160,
+    "title_abstract_scoring_limit": 1000,
     "full_venue_corpus_audit": true,
     "title_filter_timeout_sec": 120,
     "abstract_scoring_max_workers": 8,
     "abstract_scoring_batch_size": 6,
     "abstract_scoring_timeout_sec": 180,
     "arxiv_max_queries": 3,
-    "arxiv_per_query_limit": 50,
     "arxiv_timeout_sec": 15,
-    "arxiv_categories": [
-      "cs.IR",
-      "cs.LG",
-      "cs.AI"
-    ],
-    "arxiv_queries": [],
+    "arxiv_categories": [],
     "arxiv_start_date": "",
     "arxiv_end_date": "",
     "arxiv_llm_candidate_limit": 0,
     "arxiv_llm_candidates_per_category": 0,
-    "biorxiv_categories": [
-      "bioinformatics"
-    ],
+    "biorxiv_categories": [],
     "biorxiv_start_date": "",
     "biorxiv_end_date": "",
     "biorxiv_llm_candidate_limit": 0,
@@ -70,9 +60,8 @@
   "selection": {
     "venue_ids": [
       "openreview_iclr_2026",
-      "openreview_neurips",
-      "dblp_icml",
-      "dblp_kdd"
+      "ccf_ai_conference_a_neurips_conference_on_neural_information_processing_systems",
+      "ccf_ai_conference_a_icml_international_conference_on_machine_learning"
     ],
     "years": [
       2026
@@ -83,20 +72,16 @@
         "year": 2026
       },
       {
-        "venue_id": "openreview_neurips",
+        "venue_id": "ccf_ai_conference_a_neurips_conference_on_neural_information_processing_systems",
         "year": 2026
       },
       {
-        "venue_id": "dblp_icml",
-        "year": 2026
-      },
-      {
-        "venue_id": "dblp_kdd",
+        "venue_id": "ccf_ai_conference_a_icml_international_conference_on_machine_learning",
         "year": 2026
       }
     ],
-    "include_arxiv": false,
-    "include_biorxiv": false,
+    "include_arxiv": true,
+    "include_biorxiv": true,
     "include_huggingface": false,
     "include_github": false,
     "include_nature": false,

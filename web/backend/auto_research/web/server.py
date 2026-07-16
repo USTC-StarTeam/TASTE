@@ -3245,15 +3245,15 @@ def _public_find_job_logs(logs: list[str], progress: dict[str, Any], result: dic
         recommended = stats.get("recommended_papers")
         pieces = []
         if title_total not in (None, ""):
-            pieces.append(f"标题总数 {title_total}")
+            pieces.append(f"题录入口 {title_total}")
         if category_count not in (None, ""):
-            pieces.append(f"分类后 {category_count}")
+            pieces.append(f"进入标题筛选 {category_count}")
         if tfidf_count not in (None, ""):
-            pieces.append(f"初筛标题后 {tfidf_count}")
+            pieces.append(f"进入标题 LLM {tfidf_count}")
         if title_scored not in (None, ""):
-            pieces.append(f"标题打分后 {title_scored}")
+            pieces.append(f"标题 LLM 已评分 {title_scored}")
         if abstract_scored not in (None, ""):
-            pieces.append(f"摘要打分后 {abstract_scored}")
+            pieces.append(f"标题+摘要 LLM 已评分 {abstract_scored}")
         if recommended not in (None, ""):
             pieces.append(f"推荐 {recommended}")
         if pieces:
@@ -5655,14 +5655,22 @@ def _run_id_from_command_line(command: Any) -> str:
     return ""
 
 
-def _suppress_same_phase_descendant_workers(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _suppress_same_phase_descendant_workers(
+    rows: list[dict[str, Any]],
+    process_rows: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Keep one taskbar row for a stage wrapper and fold its children into logs.
 
     A standalone environment/experiment/paper launch often starts a Python
     wrapper which then spawns selector/probe/Claude child processes. Showing each
     child as another project-worker makes the UI look like duplicate launches.
     """
-    by_pid = {str(row.get('pid') or ''): row for row in rows if isinstance(row, dict) and str(row.get('pid') or '')}
+    classified_by_pid = {str(row.get('pid') or ''): row for row in rows if isinstance(row, dict) and str(row.get('pid') or '')}
+    process_by_pid = {
+        str(row.get("pid") or ""): row
+        for row in (process_rows or rows)
+        if isinstance(row, dict) and str(row.get("pid") or "")
+    }
 
     def has_same_phase_ancestor(row: dict[str, Any]) -> bool:
         phase = str(row.get('phase') or '').strip().lower()
@@ -5670,13 +5678,15 @@ def _suppress_same_phase_descendant_workers(rows: list[dict[str, Any]]) -> list[
         seen: set[str] = set()
         while current and current not in seen:
             seen.add(current)
-            parent = by_pid.get(current)
+            parent = process_by_pid.get(current)
             if not parent:
                 return False
-            parent_phase = str(parent.get('phase') or '').strip().lower()
-            parent_kind = str(parent.get('kind') or '').strip().lower()
-            if phase and parent_phase == phase and parent_kind != 'full_cycle':
-                return True
+            classified_parent = classified_by_pid.get(current)
+            if classified_parent:
+                parent_phase = str(classified_parent.get('phase') or '').strip().lower()
+                parent_kind = str(classified_parent.get('kind') or '').strip().lower()
+                if phase and parent_phase == phase and parent_kind != 'full_cycle':
+                    return True
             current = str(parent.get('ppid') or '').strip()
         return False
 
@@ -5749,7 +5759,7 @@ def _active_project_child_processes(project: str, root: Path, phase_hint: str = 
         if launcher_pid and launcher_pid not in known_pids:
             rows.append(dict(launcher_row))
             known_pids.add(launcher_pid)
-    rows = _suppress_same_phase_descendant_workers(rows)
+    rows = _suppress_same_phase_descendant_workers(rows, process_rows)
     target_phase = str(phase_hint or "").strip().lower()
     if target_phase:
         phase_rows = [row for row in rows if str(row.get("phase") or "").strip().lower() == target_phase]
@@ -7143,7 +7153,10 @@ def _find_run_status_lines(run_id: str, *, limit: int = 6) -> list[str]:
     run_id = str(run_id or "").strip()
     if not run_id:
         return []
-    directory = run_dir(run_id)
+    try:
+        directory = run_dir(run_id)
+    except (FileNotFoundError, OSError, ValueError):
+        return []
     lines: list[str] = []
     progress_payload = read_json(directory / "find_progress.json", {})
     source_rows: list[Any] = []
@@ -7227,6 +7240,163 @@ def _find_live_progress_message(find_progress: dict[str, Any]) -> str:
     total = live.get("total", "?")
     percent = live.get("percent", "?")
     return f"{message}; progress {current}/{total}; {percent}%"
+
+
+_FIND_OVERALL_PROGRESS_CACHE: dict[str, dict[str, int]] = {}
+
+
+def _find_progress_projection(find_progress: dict[str, Any]) -> dict[str, Any]:
+    """Map Find's nested batch progress to stable end-to-end progress."""
+    payload = find_progress if isinstance(find_progress, dict) else {}
+    live = payload.get("live_progress") if isinstance(payload.get("live_progress"), dict) else {}
+    raw_phase = str(live.get("phase") or payload.get("phase") or "initializing").strip().lower()
+    raw_current = max(0, _as_int(live.get("current"), 0))
+    raw_total = max(0, _as_int(live.get("total"), 0))
+    raw_percent = max(0, min(100, _as_int(live.get("percent"), round((raw_current / raw_total) * 100) if raw_total else 0)))
+    message = str(live.get("message") or raw_phase.replace("_", " ") or "Find initializing").strip()
+    counts = payload.get("counts") if isinstance(payload.get("counts"), dict) else {}
+
+    stage_index = 1
+    stage_key = "initializing"
+    stage_label = "初始化研究画像"
+    stage_percent = raw_percent
+    base_percent, span_percent = 0, 8
+
+    venue_phases = {
+        "venue_title_index", "title_prefilter", "llm_title_filter", "detail_fetch",
+        "detail_enrichment", "abstract_enrichment", "venue_scan_complete",
+    }
+    external_phase_names = ["nature", "science", "arxiv", "biorxiv", "huggingface", "github"]
+    external_phases = set(external_phase_names) | {"nature_detail_enrichment", "science_detail_enrichment", "source_collection_complete"}
+    scoring_phase = bool(
+        raw_phase in {"final_detail_fetch", "final_ranking_prepare", "abstract_contract", "abstract_scoring", "abstract_scoring_retry"}
+        or raw_phase.endswith("_llm_scoring_complete")
+    )
+    finalizing_phase = raw_phase in {
+        "preliminary_artifacts_written", "abstract_translation", "abstract_translation_retry",
+        "abstract_translation_final",
+    }
+
+    if raw_phase == "complete":
+        stage_index = 6
+        stage_key = "complete"
+        stage_label = "Find 完成"
+        stage_percent = 100
+        base_percent, span_percent = 100, 0
+    elif finalizing_phase:
+        stage_index = 5
+        stage_key = "publishing"
+        stage_label = "推荐排序与产物生成"
+        base_percent, span_percent = 88, 11
+        if raw_phase == "preliminary_artifacts_written":
+            stage_percent = 5
+        elif raw_phase == "abstract_translation":
+            stage_percent = 10 + round(raw_percent * 0.8)
+        else:
+            stage_percent = 90 + round(raw_percent * 0.09)
+    elif scoring_phase:
+        stage_index = 4
+        stage_key = "llm_evaluation"
+        stage_label = "摘要校验与 LLM 综合评估"
+        base_percent, span_percent = 58, 30
+        selection = payload.get("selection") if isinstance(payload.get("selection"), dict) else {}
+        scoring_sources = (["articles"] if selection.get("venue_ids") else []) + [
+            name for name in external_phase_names if bool(selection.get(f"include_{name}"))
+        ]
+        source_match = re.match(r"^([^:]{1,40}):", message)
+        source_name = str(source_match.group(1) if source_match else "").strip().lower().replace(" ", "_")
+        if raw_phase.endswith("_llm_scoring_complete"):
+            source_name = raw_phase.removesuffix("_llm_scoring_complete")
+        source_index = scoring_sources.index(source_name) if source_name in scoring_sources else 0
+        if raw_phase == "final_detail_fetch":
+            source_fraction = 0.02 + (raw_percent / 100) * 0.08
+        elif raw_phase == "final_ranking_prepare":
+            source_fraction = 0.05 + (raw_percent / 100) * 0.10
+        elif raw_phase == "abstract_contract":
+            source_fraction = 0.15 + (raw_percent / 100) * 0.05
+        elif raw_phase == "abstract_scoring":
+            source_fraction = 0.20 + (raw_percent / 100) * 0.70
+        elif raw_phase == "abstract_scoring_retry":
+            source_fraction = 0.90 + (raw_percent / 100) * 0.08
+        else:
+            source_fraction = 1.0
+        stage_percent = round(((source_index + source_fraction) / max(1, len(scoring_sources))) * 100)
+    elif raw_phase in external_phases:
+        stage_index = 3
+        stage_key = "extended_sources"
+        stage_label = "扩展渠道检索"
+        base_percent, span_percent = 43, 15
+        if raw_phase == "source_collection_complete":
+            stage_percent = 100
+        else:
+            selection = payload.get("selection") if isinstance(payload.get("selection"), dict) else {}
+            enabled = [
+                name for name in external_phase_names
+                if bool(selection.get(f"include_{name}"))
+            ]
+            root_phase = raw_phase.split("_detail_enrichment", 1)[0]
+            if root_phase in enabled and enabled:
+                stage_percent = round(((enabled.index(root_phase) + raw_percent / 100) / len(enabled)) * 100)
+    elif raw_phase in venue_phases:
+        stage_index = 2
+        stage_key = "venue_pipeline"
+        stage_label = "会议/期刊题录检索与标题筛选"
+        base_percent, span_percent = 8, 35
+        if raw_phase == "venue_scan_complete":
+            stage_percent = 100
+        else:
+            selection = payload.get("selection") if isinstance(payload.get("selection"), dict) else {}
+            requested_venues = selection.get("venue_ids") if isinstance(selection.get("venue_ids"), list) else []
+            if requested_venues:
+                venue_rows = payload.get("venue_health_report") if isinstance(payload.get("venue_health_report"), list) else []
+                venue_count = len(requested_venues)
+                observed_count = min(venue_count, len([row for row in venue_rows if isinstance(row, dict)]))
+                message_lower = message.lower()
+                if raw_phase == "venue_title_index":
+                    title_index_ready = "ready" in message_lower or "unavailable" in message_lower
+                    current_venue = max(1, observed_count if title_index_ready else min(venue_count, observed_count + 1))
+                    venue_fraction = 0.10 if title_index_ready else 0.03
+                else:
+                    current_venue = max(1, observed_count)
+                    if raw_phase == "title_prefilter":
+                        venue_fraction = 0.10 + (raw_percent / 100) * 0.10
+                    elif raw_phase == "llm_title_filter":
+                        venue_fraction = 0.20 + (raw_percent / 100) * 0.35
+                    elif raw_phase in {"abstract_enrichment", "detail_enrichment"}:
+                        venue_fraction = 0.55 + (raw_percent / 100) * 0.20
+                    elif raw_phase == "detail_fetch":
+                        venue_fraction = 0.75 + (raw_percent / 100) * 0.25
+                    else:
+                        venue_fraction = 0.50
+                stage_percent = min(99, round(((current_venue - 1 + venue_fraction) / venue_count) * 100))
+
+    stage_percent = max(0, min(100, stage_percent))
+    overall_percent = 100 if stage_index == 6 else base_percent + round((stage_percent / 100) * span_percent)
+    run_id = str(payload.get("run_id") or "").strip()
+    if run_id:
+        cached = _FIND_OVERALL_PROGRESS_CACHE.get(run_id, {})
+        if stage_index == _as_int(cached.get("stage_index"), 0):
+            stage_percent = max(_as_int(cached.get("stage_percent"), 0), stage_percent)
+            overall_percent = 100 if stage_index == 6 else base_percent + round((stage_percent / 100) * span_percent)
+        overall_percent = max(_as_int(cached.get("overall_percent"), 0), overall_percent)
+        _FIND_OVERALL_PROGRESS_CACHE[run_id] = {
+            "stage_index": stage_index,
+            "stage_percent": stage_percent,
+            "overall_percent": overall_percent,
+        }
+    return {
+        "raw_phase": raw_phase,
+        "raw_current": raw_current,
+        "raw_total": raw_total,
+        "stage_index": stage_index,
+        "stage_total": 6,
+        "stage_key": stage_key,
+        "stage_label": stage_label,
+        "overall_percent": max(0, min(100, overall_percent)),
+        "stage_percent": stage_percent,
+        "message": message,
+        "counts": dict(counts),
+    }
 
 
 def _compact_log_lines(lines: Any, *, limit: int = 40) -> list[str]:
@@ -7806,7 +7976,12 @@ def _current_stage(full_cycle: dict[str, Any], log_path: str = "") -> tuple[str,
 def _latest_find_run_id_from_runs(project_root: Path | None = None, *, prefer_run_dir: bool = False) -> str:
     def latest_run_dir_id() -> str:
         try:
-            candidates = [path for path in RUNS_DIR.glob("find_*") if path.is_dir()]
+            candidates = [
+                path
+                for runs_root in RUNS_SEARCH_DIRS
+                for path in runs_root.glob("find_*")
+                if path.is_dir()
+            ]
         except Exception:
             return ""
         if not candidates:
@@ -7824,6 +7999,30 @@ def _latest_find_run_id_from_runs(project_root: Path | None = None, *, prefer_ru
     return latest_run_dir_id()
 
 
+def _web_find_job_id_from_command(command: Any) -> str:
+    match = re.search(r"(?:^|\s)--web-job-id(?:=|\s+)([^\s]+)", str(command or ""))
+    return match.group(1).strip().strip("'\"") if match else ""
+
+
+def _active_web_find_run_binding(project: str, web_job_id: str) -> tuple[bool, str]:
+    """Return the exact Web Find job binding carried by a Framework worker."""
+    project_id = str(project or "").strip()
+    target_job_id = str(web_job_id or "").strip()
+    if not project_id or not target_job_id:
+        return False, ""
+    with JOBS_LOCK:
+        job = JOBS.get(target_job_id)
+    if job is None or _public_taste_stage(job.stage) != "find" or job.cancel_requested:
+        return False, ""
+    status = str(job.status or "").strip().lower()
+    if status not in {"queued", "running", "cancelling", "cancelled", "interrupted", "stale"}:
+        return False, ""
+    result = job.result if isinstance(job.result, dict) else {}
+    if str(result.get("project") or "").strip() != project_id:
+        return False, ""
+    return True, str(job.run_id or result.get("run_id") or "").strip()
+
+
 def _active_project_worker_job(project: str, root: Path, worker: dict[str, Any], full_cycle: dict[str, Any], current_plan: dict[str, Any], find_progress: dict[str, Any], *, compact: bool = True, controller_alive: bool = False) -> dict[str, Any]:
     if not isinstance(worker, dict) or not worker:
         return {}
@@ -7834,22 +8033,39 @@ def _active_project_worker_job(project: str, root: Path, worker: dict[str, Any],
         return {}
     phase = str(worker.get("phase") or "experiment").strip().lower() or "experiment"
     kind = str(worker.get("kind") or "active_project_worker").strip() or "active_project_worker"
+    find_worker = phase == "literature" and kind in {"frontend_recovery", "driver_recovery"}
     cmd = str(worker.get("cmd") or "")
+    web_find_job_id = _web_find_job_id_from_command(cmd) if find_worker else ""
     elapsed = str(worker.get("elapsed") or "")
     paper_substage = _paper_substage_from_cmd(cmd, fallback="paper") if phase == "paper" else ""
     current_find_worker = kind.startswith("current_find") or phase == "read"
-    run_id = _project_current_find_run_id(root) if current_find_worker else ""
+    web_find_binding, web_find_run_id = _active_web_find_run_binding(project, web_find_job_id) if find_worker else (False, "")
+    run_id = web_find_run_id if web_find_binding else (_project_current_find_run_id(root) if current_find_worker else "")
     if not run_id and phase == "environment":
         run_id = _run_id_from_command_line(cmd)
-    if not run_id:
+    if not run_id and not find_worker:
         sources = [find_progress, current_plan, full_cycle] if phase == "literature" else [current_plan, find_progress, full_cycle]
         for source in sources:
             if isinstance(source, dict):
                 run_id = str(source.get("run_id") or source.get("taste_run_id") or source.get("source_run_id") or source.get("current_find_run_id") or source.get("find_run_id") or "").strip()
                 if run_id:
                     break
+    live_find_progress = (
+        {"run_id": run_id, "live_progress": {"phase": "initializing", "current": 0, "total": 0, "percent": 0, "message": "Find initializing"}, "counts": {}}
+        if find_worker
+        else (find_progress if isinstance(find_progress, dict) else {})
+    )
+    if find_worker and run_id:
+        try:
+            run_progress = read_json(run_dir(run_id) / "find_progress.json", {})
+        except (FileNotFoundError, OSError, ValueError):
+            run_progress = {}
+        if isinstance(run_progress, dict) and run_progress:
+            live_find_progress = run_progress
     controller_note = "由当前完整科研循环管理；不是完整科研循环控制器。" if controller_alive else "不是完整科研循环控制器；控制器未存活或需恢复。"
-    if current_find_worker:
+    if find_worker:
+        worker_summary = "Find Framework worker 正在运行；由 Web Find 主任务管理。"
+    elif current_find_worker:
         worker_summary = f"当前 Find Read Framework worker 正在运行；{controller_note}"
     elif phase == "paper":
         worker_summary = f"论文写作 worker 正在运行：{paper_substage or 'paper'}；{controller_note}"
@@ -7871,6 +8087,10 @@ def _active_project_worker_job(project: str, root: Path, worker: dict[str, Any],
         detail_logs, detail_artifacts = _active_detail_lines(root, pid, "experiment")
         for line in _compact_experiment_detail_lines(detail_logs, limit=36):
             logs.append(line[:900])
+    elif find_worker:
+        for line in _find_run_status_lines(run_id, limit=6):
+            logs.append(line[:900])
+        logs.append(f"cmd={cmd[:900]}")
     else:
         logs.append(f"cmd={cmd[:900]}")
     latest_status = _latest_experiment_status_line(logs) if phase == "experiment" else ""
@@ -7881,7 +8101,15 @@ def _active_project_worker_job(project: str, root: Path, worker: dict[str, Any],
         log_path = _latest_project_log(root, "logs/supervision/full_research_cycle_*.log")
     if log_path:
         logs.append(f"full_cycle_log={log_path}")
-    if current_find_worker:
+    if find_worker and run_id:
+        directory = run_dir(run_id)
+        artifacts = [
+            str(directory / "find_progress.json"),
+            str(directory / "source_status.md"),
+            str(directory / "find_results.json"),
+            str(directory / "find.md"),
+        ]
+    elif current_find_worker:
         artifacts = [
             str(root / "state" / "current_find_research_plan.json"),
             str(root / "state" / "current_find_claude_reading_validation.json"),
@@ -7899,14 +8127,24 @@ def _active_project_worker_job(project: str, root: Path, worker: dict[str, Any],
     progress_current = 0
     progress_total = 0
     progress_percent = 0
+    find_progress_projection: dict[str, Any] = {}
     if phase == "experiment":
         progress_current, progress_total, progress_percent = _experiment_epoch_progress(logs, command=cmd)
+    elif find_worker:
+        find_progress_projection = _find_progress_projection(live_find_progress)
+        progress_current = _as_int(find_progress_projection.get("overall_percent"), 0)
+        progress_total = 100
+        progress_percent = progress_current
     if phase == "paper":
         message_bits = [_paper_live_status_message({
             "paper_current_substage": paper_substage or "paper",
             "paper_worker_pid": pid,
             "paper_worker_kind": kind,
         })]
+    elif find_worker:
+        stage_label = str(find_progress_projection.get("stage_label") or "Find")
+        live_message = str(find_progress_projection.get("message") or "Find running")
+        message_bits = [f"{stage_label}：{live_message}", f"PID={pid}"]
     else:
         message_bits = [f"{phase} worker running", f"PID={pid}"]
         if elapsed:
@@ -7943,14 +8181,16 @@ def _active_project_worker_job(project: str, root: Path, worker: dict[str, Any],
             "status": "running",
             "process_alive": True,
             "kind": kind,
+            **({"web_job_id": web_find_job_id} if web_find_job_id else {}),
             "not_full_cycle_controller": True,
+            **({"find_progress": find_progress_projection} if find_worker else {}),
         },
         "internal": False,
         "display": "",
         "error": "",
         "cancel_requested": False,
         "cancelled_at": "",
-        "progress": {"phase": progress_phase, "current": progress_current, "total": progress_total, "percent": progress_percent, "message": "；".join(message_bits)},
+        "progress": {"phase": "find" if find_worker else progress_phase, "current": progress_current, "total": progress_total, "percent": progress_percent, "message": "；".join(message_bits)},
     }
 
 
@@ -9849,7 +10089,7 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
         full_cycle_job = False
     public_stage = panel_stage or ("paper" if paper_job else (_public_full_cycle_stage(raw_stage, item.get("progress"), result) if full_cycle_job else _public_taste_stage(raw_stage)))
     compact_result: dict[str, Any] = {}
-    result_keys = ["run_id", "project", "topic", "target_venue", "action", "agent_id", "target_agent_id", "requested_stage", "panel_stage", "pid", "cmd", "kind", "log_path", "artifact_dir", "find_results_path", "find_results_size_bytes", "phase", "raw_stage", "summary", "status", "acceptance_status", "acceptance_blockers", "artifact_path", "process_alive", "alive", "current_substage", "paper_current_substage", "paper_execution_alive", "paper_execution_state", "paper_execution_message", "paper_worker_pid", "paper_worker_kind", "paper_controller_pid", "paper_worker_elapsed", "paper_worker_pcpu", "paper_worker_pmem"]
+    result_keys = ["run_id", "project", "topic", "target_venue", "action", "agent_id", "target_agent_id", "requested_stage", "panel_stage", "pid", "cmd", "kind", "log_path", "artifact_dir", "find_results_path", "find_results_size_bytes", "phase", "raw_stage", "summary", "status", "acceptance_status", "acceptance_blockers", "artifact_path", "process_alive", "alive", "find_progress", "current_substage", "paper_current_substage", "paper_execution_alive", "paper_execution_state", "paper_execution_message", "paper_worker_pid", "paper_worker_kind", "paper_controller_pid", "paper_worker_elapsed", "paper_worker_pcpu", "paper_worker_pmem"]
     if full_cycle_job:
         result_keys = [key for key in result_keys if key != "cmd"]
     for key in result_keys:
@@ -10420,9 +10660,11 @@ def _auto_email_after_success(stage: str, result: Any) -> None:
     start_job("email", lambda log, should_cancel, _progress: send_run_email(request, config, log, should_cancel))
 
 
-def start_job(stage: str, fn: Callable[[Callable[[str], None], Callable[[], bool], Callable[[str, int, int, str], None]], Any], job_id: str | None = None) -> JobState:
+def start_job(stage: str, fn: Callable[[Callable[[str], None], Callable[[], bool], Callable[[str, int, int, str], None]], Any], job_id: str | None = None, initial_result: Any = None) -> JobState:
     job_id = job_id or f"{stage}_{uuid4().hex[:10]}"
     job = JobState(job_id, stage)
+    if initial_result is not None:
+        job.result = initial_result
     JOBS[job_id] = job
     _persist_jobs()
 
@@ -10753,35 +10995,36 @@ def api_find(request: FindRequest) -> dict:
             env["FINDING_LLM_CONFIG"] = str(local_llm_config)
         return env
 
+    project_context = current or _current_project_for_find_guard()
+    if not project_context:
+        return JSONResponse(status_code=400, content={"error": "No current project is selected for Find."})
+    project_id, _root = project_context
+    job_id = f"find_{uuid4().hex[:10]}"
+
     def run_find_and_adopt(log, should_cancel, progress):
-        project_context = current or _current_project_for_find_guard()
-        if not project_context:
-            raise RuntimeError("No current project is selected for Find.")
-        project_id, _root = project_context
         payload = {
             "action": "find",
             "project": project_id,
+            "web_job_id": job_id,
             "max_papers": int(config.max_recommended_papers or 20),
             "max_ideas": int(config.max_ideas or 6),
+            "queries": [str(query).strip() for query in (config.arxiv_queries or []) if str(query).strip()],
             "selection": selection,
             "runtime_env": runtime_env_for_find(),
         }
-        venue_scan_limit = int(config.venue_title_scan_limit or 0)
-        find_recall_count = int(config.find_recall_count or 0)
-        detail_fetch_count = int(config.detail_fetch_count or 0)
-        if venue_scan_limit >= 1000 or find_recall_count >= 1000 or detail_fetch_count >= 200:
-            payload["deep_survey"] = True
         result = run_action(payload, log, should_cancel, progress)
         if isinstance(result, dict):
             result.setdefault("project", project_id)
             result.setdefault("action", "find")
+            result.setdefault("web_job_id", job_id)
         return result
 
-    job = start_job("find", run_find_and_adopt)
-    if current:
-        project, _root = current
-        job.result = {"project": project, "action": "find"}
-        _persist_jobs()
+    job = start_job(
+        "find",
+        run_find_and_adopt,
+        job_id=job_id,
+        initial_result={"project": project_id, "action": "find", "web_job_id": job_id},
+    )
     return job.as_dict()
 
 
@@ -11453,6 +11696,170 @@ def _safe_project_root(project: str) -> Path:
 
 PROJECT_STAGE_EXCLUSIVE_ACTIONS = {"environment", "experiment", "paper", "full-cycle", "full_research_cycle", "autonomous"}
 PROJECT_STAGE_EXCLUSIVE_PHASES = {"environment", "experiment", "paper"}
+_FIND_PROCESS_WORKER_KINDS = {"frontend_recovery", "driver_recovery"}
+
+
+def _live_find_process_worker(item: dict[str, Any]) -> bool:
+    result = item.get("result") if isinstance(item.get("result"), dict) else {}
+    return bool(
+        _public_taste_stage(item.get("stage")) == "find"
+        and str(item.get("status") or "").strip().lower() in {"queued", "running", "cancelling"}
+        and str(result.get("kind") or "").strip() in _FIND_PROCESS_WORKER_KINDS
+        and result.get("process_alive") is True
+    )
+
+
+def _live_find_run_matches_project(project: str, run_id: str) -> bool:
+    project_id = str(project or "").strip()
+    target_run_id = str(run_id or "").strip()
+    if not project_id or not target_run_id:
+        return False
+    try:
+        live_items = _live_jobs_from_projects(compact=True, project_filter=project_id)
+    except TypeError as exc:
+        if "project_filter" not in str(exc):
+            raise
+        live_items = _live_jobs_from_projects(compact=True)
+    for item in live_items:
+        if not isinstance(item, dict) or not _live_find_process_worker(item):
+            continue
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        item_project = str(result.get("project") or _project_from_job_payload(item.get("job_id"), item) or "").strip()
+        item_run_id = str(item.get("run_id") or result.get("run_id") or "").strip()
+        if item_project == project_id and item_run_id == target_run_id:
+            return True
+    return False
+
+
+def _merge_live_find_workers_into_web_jobs(
+    dynamic: list[dict[str, Any]],
+    persisted: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Project each live Find worker onto the Web job ID carried by its command."""
+    workers_by_web_job: dict[str, list[dict[str, Any]]] = {}
+    for item in dynamic:
+        if not isinstance(item, dict) or not _live_find_process_worker(item):
+            continue
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        web_job_id = str(result.get("web_job_id") or "").strip()
+        if web_job_id:
+            workers_by_web_job.setdefault(web_job_id, []).append(item)
+    if not workers_by_web_job:
+        return dynamic, persisted
+
+    def worker_rank(item: dict[str, Any]) -> tuple[int, str]:
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        rank = 0 if str(result.get("kind") or "") == "frontend_recovery" else 1
+        return rank, str(item.get("created_at") or "")
+
+    merged_web_job_ids: set[str] = set()
+    merged_persisted: list[dict[str, Any]] = []
+    for item in persisted:
+        if not isinstance(item, dict):
+            continue
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        project_id = str(result.get("project") or _project_from_job_payload(item.get("job_id"), item) or "").strip()
+        web_job_id = str(item.get("job_id") or "").strip()
+        status = str(item.get("status") or "").strip().lower()
+        workers = workers_by_web_job.get(web_job_id, [])
+        if (
+            item.get("cancel_requested") is True
+            or _public_taste_stage(item.get("stage")) != "find"
+            or status not in {"queued", "running", "cancelling", "cancelled", "interrupted", "stale"}
+            or not workers
+        ):
+            merged_persisted.append(item)
+            continue
+
+        worker = min(workers, key=worker_rank)
+        worker_result = worker.get("result") if isinstance(worker.get("result"), dict) else {}
+        worker_project = str(worker_result.get("project") or _project_from_job_payload(worker.get("job_id"), worker) or "").strip()
+        if not project_id or worker_project != project_id:
+            merged_persisted.append(item)
+            continue
+        run_id = str(item.get("run_id") or result.get("run_id") or "").strip()
+        worker_run_id = str(worker.get("run_id") or worker_result.get("run_id") or "").strip()
+        execution_keys = {
+            "pid", "cmd", "command", "kind", "process_alive", "log_path",
+            "artifact_dir", "find_results_path", "phase", "raw_stage", "summary",
+        }
+        merged_result = dict(result)
+        merged_result.update({key: worker_result.get(key) for key in execution_keys if key in worker_result})
+        merged_result["project"] = project_id
+        merged_result.pop("find_progress", None)
+        worker_progress = worker.get("progress") if isinstance(worker.get("progress"), dict) else {}
+        if run_id:
+            merged_result["run_id"] = run_id
+            try:
+                bound_progress = read_json(run_dir(run_id) / "find_progress.json", {})
+            except (FileNotFoundError, OSError, ValueError):
+                bound_progress = {}
+            if isinstance(bound_progress, dict) and bound_progress:
+                projection = _find_progress_projection(bound_progress)
+                merged_result["find_progress"] = projection
+                percent = _as_int(projection.get("overall_percent"), 0)
+                worker_progress = {
+                    "phase": "find",
+                    "current": percent,
+                    "total": 100,
+                    "percent": percent,
+                    "message": f"{projection.get('stage_label') or 'Find'}：{projection.get('message') or 'Find running'}",
+                }
+            elif worker_run_id == run_id and isinstance(worker_result.get("find_progress"), dict):
+                merged_result["find_progress"] = worker_result["find_progress"]
+            else:
+                initializing = _find_progress_projection({"run_id": run_id})
+                merged_result["find_progress"] = initializing
+                worker_progress = {
+                    "phase": "find",
+                    "current": 0,
+                    "total": 100,
+                    "percent": 0,
+                    "message": f"{initializing.get('stage_label') or 'Find'}：{initializing.get('message') or 'Find initializing'}",
+                }
+        else:
+            merged_result.pop("run_id", None)
+            initializing = _find_progress_projection({})
+            merged_result["find_progress"] = initializing
+            worker_progress = {
+                "phase": "find",
+                "current": 0,
+                "total": 100,
+                "percent": 0,
+                "message": f"{initializing.get('stage_label') or 'Find'}：{initializing.get('message') or 'Find initializing'}",
+            }
+
+        logs = _dedupe_recent_lines(
+            [
+                *[str(line) for line in item.get("logs", []) if str(line or "").strip()],
+                *[str(line) for line in worker.get("logs", []) if str(line or "").strip()],
+            ],
+            limit=80,
+        )
+        merged = {
+            **item,
+            "status": str(worker.get("status") or "running"),
+            "run_id": run_id,
+            "result": merged_result,
+            "logs": logs,
+            "log_count": max(_as_int(item.get("log_count"), 0), len(logs)),
+            "error": "",
+            "cancelled_at": "",
+        }
+        if worker_progress:
+            merged["progress"] = dict(worker_progress)
+        merged_persisted.append(merged)
+        merged_web_job_ids.add(web_job_id)
+
+    if not merged_web_job_ids:
+        return dynamic, merged_persisted
+    visible_dynamic = []
+    for item in dynamic:
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        if str(result.get("web_job_id") or "").strip() in merged_web_job_ids and _live_find_process_worker(item):
+            continue
+        visible_dynamic.append(item)
+    return visible_dynamic, merged_persisted
 
 
 def _project_stage_running_blocker(payload: dict[str, Any], stage: str) -> dict[str, Any] | None:
@@ -11868,6 +12275,7 @@ def api_jobs(
     else:
         effective_limit = limit
         persisted = [job.as_dict(compact=False) for job in job_snapshot]
+    dynamic, persisted = _merge_live_find_workers_into_web_jobs(dynamic, persisted)
     hidden_taskbstages = set()
     dynamic_live_projects = {
         str((item.get("result") if isinstance(item.get("result"), dict) else {}).get("project") or "")
@@ -12090,15 +12498,16 @@ def api_job(job_id: str, compact: bool = Query(True)) -> dict:
         if "force" not in str(exc):
             raise
         _reconcile_detached_launcher_jobs()
+    live_items = _live_jobs_from_projects(compact=compact)
     if job_id:
-        live_job = next((item for item in _live_jobs_from_projects(compact=compact) if str(item.get("job_id") or "") == job_id), None)
+        live_job = next((item for item in live_items if str(item.get("job_id") or "") == job_id), None)
         if not live_job and job_id.startswith("full_cycle_"):
             project_id = job_id[len("full_cycle_"):]
-            live_job = next((item for item in _live_jobs_from_projects(compact=compact) if str((item.get("result") if isinstance(item.get("result"), dict) else {}).get("project") or "") == project_id), None)
+            live_job = next((item for item in live_items if str((item.get("result") if isinstance(item.get("result"), dict) else {}).get("project") or "") == project_id), None)
         if live_job:
             return _public_job_api_payload(live_job)
         if job_id.startswith(("full-cycle_", "full-cycle-", "full_cycle_", "full_cycle-")):
-            for item in _live_jobs_from_projects(compact=compact):
+            for item in live_items:
                 result = item.get("result") if isinstance(item.get("result"), dict) else {}
                 command_text = str(result.get("command") or result.get("cmd") or "")
                 if "run_full_research_cycle.py" in command_text and str(item.get("status") or "").lower() in {"queued", "running", "cancelling", "blocked"}:
@@ -12111,10 +12520,12 @@ def api_job(job_id: str, compact: bool = Query(True)) -> dict:
             if history:
                 return _public_job_api_payload(_compact_job_for_list(history) if compact else history)
         return JSONResponse({"error": "job not found"}, status_code=404)
+    source_item = job.as_dict(compact=False) if not compact or _public_taste_stage(job.stage) in {"read", "idea", "plan"} else job.as_dict(compact=True)
+    _, merged_items = _merge_live_find_workers_into_web_jobs(live_items, [source_item])
+    merged_item = merged_items[0] if merged_items else source_item
     if compact:
-        source_item = job.as_dict(compact=False) if _public_taste_stage(job.stage) in {"read", "idea", "plan"} else job.as_dict(compact=True)
-        return _public_job_api_payload(_compact_job_for_list(source_item))
-    return _public_job_api_payload(job.as_dict(compact=False))
+        merged_item = _compact_job_for_list(merged_item)
+    return _public_job_api_payload(merged_item)
 
 
 @app.post("/api/jobs/{job_id}/cancel")
@@ -12201,11 +12612,21 @@ async def ws_job(websocket: WebSocket, job_id: str):
         sent_progress = -1
         while True:
             live_job = None
+            live_items: list[dict[str, Any]] = []
             if job_id:
-                live_job = next((item for item in _live_jobs_from_projects(compact=True) if str(item.get("job_id") or "") == job_id), None)
+                live_items = _live_jobs_from_projects(compact=True)
+                live_job = next((item for item in live_items if str(item.get("job_id") or "") == job_id), None)
                 if not live_job and job_id.startswith("full_cycle_"):
                     project_id = job_id[len("full_cycle_"):]
-                    live_job = next((item for item in _live_jobs_from_projects(compact=True) if str((item.get("result") if isinstance(item.get("result"), dict) else {}).get("project") or "") == project_id), None)
+                    live_job = next((item for item in live_items if str((item.get("result") if isinstance(item.get("result"), dict) else {}).get("project") or "") == project_id), None)
+                if not live_job:
+                    known_job = JOBS.get(job_id)
+                    if known_job is not None and _public_taste_stage(known_job.stage) == "find":
+                        source_item = known_job.as_dict(compact=True)
+                        _, merged_items = _merge_live_find_workers_into_web_jobs(live_items, [source_item])
+                        merged_item = merged_items[0] if merged_items else {}
+                        if str(merged_item.get("status") or "").lower() in {"queued", "running", "cancelling"}:
+                            live_job = merged_item
             if live_job:
                 live_job = _strip_public_taste_marker(live_job)
                 live_status = str(live_job.get("status") or "")
@@ -12217,8 +12638,9 @@ async def ws_job(websocket: WebSocket, job_id: str):
                     await websocket.send_json({"type": "progress", "progress": _public_job_api_payload(compact_live_job.get("progress") or {})})
                     await websocket.send_json({"type": "complete", "job": compact_live_job})
                     return
-                if live_stage == "read":
-                    await websocket.send_json({"type": "snapshot", "job": _compact_job_for_list(live_job)})
+                if live_stage in {"find", "read"}:
+                    snapshot = _public_job_api_payload(_compact_job_for_list(live_job))
+                    await websocket.send_json({"type": "snapshot", "job": snapshot})
                     await asyncio.sleep(2.0)
                     continue
                 logs = [str(line) for line in (live_job.get("logs") or [])]
@@ -12293,7 +12715,9 @@ def api_artifacts(run_id: str, light: bool = Query(False), scope: str = Query(""
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=404)
         current_run_id = _project_current_find_run_id(project_root)
-        if current_run_id != str(run_id or "").strip():
+        requested_run_id = str(run_id or "").strip()
+        live_find_read = artifact_scope == "find" and _live_find_run_matches_project(project_id, requested_run_id)
+        if current_run_id != requested_run_id and not live_find_read:
             return JSONResponse({
                 "error": "Requested run is not the project's current Find run.",
                 "project": project_id,

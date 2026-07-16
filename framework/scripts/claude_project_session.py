@@ -1527,6 +1527,10 @@ def run_claude(project: str, instruction: str, stage: str, timeout_sec: int, res
         cmd.extend(['--model', model])
     launch_command = ' '.join(shlex.quote(item) for item in cmd) + ' < ' + shlex.quote(str(prompt_file))
     env = interactive_env(project, cfg)
+    # Only a Git repository rooted inside projects/<project> may back Claude worktrees.
+    env['GIT_CEILING_DIRECTORIES'] = os.pathsep.join(
+        filter(None, (str(ROOT), env.get('GIT_CEILING_DIRECTORIES', '')))
+    )
     # TASTE sessions are non-interactive wrapper calls; plugin marketplace auto-install/update
     # can block startup on network git clones before Claude emits any stream events.
     env["DISABLE_AUTOUPDATER"] = "1"

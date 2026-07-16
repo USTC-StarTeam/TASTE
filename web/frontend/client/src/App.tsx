@@ -46,19 +46,17 @@ import {
 
 const STANDARD_FIND_DEFAULTS = {
   llm_concurrency: 8,
-  max_fetch_papers: 120,
+  nonvenue_fetch_limit: 5000,
   max_recommended_papers: 20,
   venue_title_scan_limit: 0,
   venue_title_scan_fraction: 1.0,
-  find_recall_count: 2000,
-  detail_fetch_count: 160,
+  title_abstract_scoring_limit: 1000,
   full_venue_corpus_audit: true,
   title_filter_timeout_sec: 120,
   abstract_scoring_max_workers: 8,
   abstract_scoring_batch_size: 6,
   abstract_scoring_timeout_sec: 180,
   arxiv_max_queries: 3,
-  arxiv_per_query_limit: 50,
   arxiv_timeout_sec: 15,
 } as const;
 
@@ -73,11 +71,11 @@ const DEFAULT_CONFIG: Config = {
   llm_roles: {},
   max_ideas: 6,
   ...STANDARD_FIND_DEFAULTS,
-  arxiv_categories: ["cs.IR", "cs.LG", "cs.AI"],
+  arxiv_categories: [],
   arxiv_queries: [],
   arxiv_start_date: "",
   arxiv_end_date: "",
-  biorxiv_categories: ["bioinformatics"],
+  biorxiv_categories: [],
   biorxiv_start_date: "",
   biorxiv_end_date: "",
   biorxiv_llm_candidate_limit: 0,
@@ -435,6 +433,9 @@ const INTERNAL_FIND_PUBLIC_TEXT_MARKERS = [
   "recommendation pool",
   "retrieval candidate",
   "fallback-only",
+  "minimum_target",
+  "minimum target",
+  "fetch_limit=",
 ];
 
 function hasInternalFindPublicText(value: any) {
@@ -684,7 +685,7 @@ function venueMetaLabel(venue: Venue, labels?: Record<string, string>, selectedY
 function sourceStatusLabel(item: any, venueById?: Map<string, Venue>, lang: Lang = "zh") {
   const source = String(item?.source || item?.venue || item?.venue_id || "source");
   const kind = String(item?.source_kind || "");
-  if (kind === "venue_summary") return lang === "zh" ? "会议渠道汇总" : "Venue channels summary";
+  if (kind === "venue_summary") return lang === "zh" ? "出版渠道汇总" : "Publication venue summary";
   if (kind === "venue") {
     const years = asArray(item?.effective_years).length ? ` ${asArray(item.effective_years).join(",")}` : "";
     const venue = venueById?.get(String(item?.venue_id || "")) || venueById?.get(source);
@@ -694,7 +695,7 @@ function sourceStatusLabel(item: any, venueById?: Map<string, Venue>, lang: Lang
   if (source === "biorxiv") return "bioRxiv";
   if (source === "nature") return "Nature Portfolio";
   if (source === "science") return "Science Family";
-  if (source === "venue_summary") return lang === "zh" ? "会议渠道汇总" : "Venue channels summary";
+  if (source === "venue_summary") return lang === "zh" ? "出版渠道汇总" : "Publication venue summary";
   return source;
 }
 
@@ -848,18 +849,18 @@ function sourceCategoryAvailabilityText(item: any, lang: Lang) {
 
 function sourceAbstractAvailabilityText(item: any, lang: Lang) {
   const zh = lang === "zh";
-  if (item?.has_abstracts_in_title_index || item?.has_abstracts) return zh ? "标题索引含摘要" : "abstracts present in title index";
+  if (item?.has_abstracts_in_title_index || item?.has_abstracts) return zh ? "题录含摘要" : "abstracts present in records";
   if (item?.any_abstracts) return zh ? "部分条目已有摘要" : "some abstracts present";
   const missing = Number(item?.missing_abstract_count || 0);
-  if (missing > 0 || String(item?.metadata_completeness_status || "") === "title_index_only") return zh ? "标题索引无摘要，详情阶段补摘要" : "title index has no abstracts; details stage enriches abstracts";
+  if (missing > 0 || String(item?.metadata_completeness_status || "") === "title_index_only") return zh ? "题录无摘要，详情阶段补摘要" : "records have no abstracts; details stage enriches abstracts";
   return "";
 }
 
 function sourceStatusDetail(item: any, lang: Lang = "zh") {
   const zh = lang === "zh";
   const labels = zh
-    ? { status: "状态", ok: "正常", limited: "受限", failed: "失败", checking: "检查中", raw: "标题总数", screen: "分类后数量", detail: "元数据详情", adapter: "来源适配器", years: "有效年份", requested: "请求年份", metadata: "元数据完整性" }
-    : { status: "Status", ok: "ok", limited: "limited", failed: "failed", checking: "checking", raw: "title-index total", screen: "title-screen input", detail: "metadata details", adapter: "adapter", years: "effective years", requested: "requested years", metadata: "metadata completeness" };
+    ? { status: "状态", ok: "正常", limited: "受限", failed: "失败", checking: "检查中", raw: "题录总数", screen: "来源候选", detail: "详情已抓取", adapter: "来源适配器", years: "有效年份", requested: "请求年份", metadata: "元数据完整性" }
+    : { status: "Status", ok: "ok", limited: "limited", failed: "failed", checking: "checking", raw: "record total", screen: "source candidates", detail: "details fetched", adapter: "adapter", years: "effective years", requested: "requested years", metadata: "metadata completeness" };
   const rawStatus = String(item?.status || item?.phase || "").trim().toLowerCase();
   const limited = sourceStatusIsLimited(item);
   const state = rawStatus === "checking" || rawStatus === "fetching" ? labels.checking : limited ? labels.limited : item?.ok ? labels.ok : labels.failed;
@@ -881,6 +882,8 @@ function sourceStatusDetail(item: any, lang: Lang = "zh") {
   if (isVenueHealth) {
     if (count !== undefined && count !== "") pushPart(`${zh ? "健康检查样本" : "health-check samples"}: ${count}`);
   } else if (count !== undefined && count !== "") pushPart(`${labels.screen}: ${count}`);
+  const fetchLimit = Number(item?.fetch_limit || 0);
+  if (fetchLimit > 0) pushPart(`${zh ? "抓取上限" : "fetch limit"}: ${fetchLimit}`);
   const detailFetched = item?.detail_fetched_count ?? item?.detail_fetched ?? item?.fetched_count;
   if (detailFetched !== undefined && detailFetched !== "") pushPart(`${labels.detail}: ${detailFetched}`);
   const scopeText = sourceScopeText(item, lang);
@@ -899,6 +902,9 @@ function sourceStatusDetail(item: any, lang: Lang = "zh") {
   if (asArray(item?.journals).length) pushPart(`${zh ? "期刊" : "journals"}: ${asArray(item.journals).join(", ")}`);
   if (asArray(item?.categories).length) pushPart(`${zh ? "分类" : "categories"}: ${asArray(item.categories).join(", ")}`);
   if (item?.date_coverage?.oldest || item?.date_coverage?.newest) pushPart(`${zh ? "日期范围" : "dates"}: ${item.date_coverage.oldest || "?"}..${item.date_coverage.newest || "?"}`);
+  const stoppedReason = String(item?.stopped_reason || "").trim().toLowerCase();
+  if (limited && stoppedReason === "openalex_daily_budget_exhausted") pushPart(zh ? "OpenAlex 日预算已耗尽" : "OpenAlex daily API budget exhausted");
+  if (limited && stoppedReason === "openalex_rate_limited") pushPart(zh ? "OpenAlex 请求频率受限" : "OpenAlex rate limited");
   if (item?.message) String(item.message).split(";").map((chunk) => sourceStatusMessageText(chunk, lang)).filter((chunk) => !hasInternalFindPublicText(chunk)).forEach((chunk) => pushPart(chunk));
   return parts.join(" / ");
 }
@@ -906,8 +912,8 @@ function sourceStatusDetail(item: any, lang: Lang = "zh") {
 function sourceStatusCompactDetail(item: any, lang: Lang = "zh") {
   const zh = lang === "zh";
   const labels = zh
-    ? { status: "状态", ok: "正常", limited: "受限", failed: "失败", checking: "检查中", raw: "标题总数", screen: "分类后", yearUsed: "使用年份", requested: "请求年份" }
-    : { status: "Status", ok: "ok", limited: "limited", failed: "failed", checking: "checking", raw: "title total", screen: "after category", yearUsed: "year used", requested: "requested year" };
+    ? { status: "状态", ok: "正常", limited: "受限", failed: "失败", checking: "检查中", raw: "题录总数", screen: "来源候选", yearUsed: "使用年份", requested: "请求年份" }
+    : { status: "Status", ok: "ok", limited: "limited", failed: "failed", checking: "checking", raw: "record total", screen: "source candidates", yearUsed: "year used", requested: "requested year" };
   const rawStatus = String(item?.status || item?.phase || "").trim().toLowerCase();
   const limited = sourceStatusIsLimited(item);
   const state = rawStatus === "checking" || rawStatus === "fetching" ? labels.checking : limited ? labels.limited : item?.ok ? labels.ok : labels.failed;
@@ -929,6 +935,8 @@ function sourceStatusCompactDetail(item: any, lang: Lang = "zh") {
   if (isVenueHealth) {
     if (count !== undefined && count !== "") pushPart(`${zh ? "健康检查样本" : "health-check samples"}: ${count}`);
   } else if (count !== undefined && count !== "") pushPart(`${labels.screen}: ${count}`);
+  const fetchLimit = Number(item?.fetch_limit || 0);
+  if (fetchLimit > 0) pushPart(`${zh ? "抓取上限" : "fetch limit"}: ${fetchLimit}`);
   const effectiveYears = asArray(item?.effective_years).map(String).filter(Boolean);
   const requestedYears = asArray(item?.requested_years).map(String).filter(Boolean);
   if (effectiveYears.length && requestedYears.length && effectiveYears.join(",") !== requestedYears.join(",")) {
@@ -948,8 +956,8 @@ function sourceStatusArtifactMarkdown(rows: any[], lang: Lang = "zh") {
   if (!sourceRows.length) return "";
   const title = lang === "zh" ? "来源状态" : "Source Status";
   const intro = lang === "zh"
-    ? "每一行对应一次真实 Find 来源或会议渠道。标题总数表示抓到的标题索引规模；进入标题筛选表示按官方分类或无分类策略送入标题筛选的数量；本 run 漏斗统计只使用该 run 实际处理过的计数。元数据详情表示详情阶段抓到摘要或链接的候选数量。"
-    : "Each row is one real Find source or venue. Title total is the fetched title-index size; title-screen input is the number entering title screening after official-category selection or the no-category policy; run funnel counts use only papers actually processed by that run. metadata details is the candidate count enriched with abstracts or links.";
+    ? "每一行对应一个真实 Find 来源或出版渠道，来源候选只描述该行自身的抓取结果。下方统计候选题录进入标题筛选、标题 LLM 和标题+摘要 LLM 综合评分的数量；不同来源可以从不同步骤进入。详情已抓取表示详情阶段获得摘要或链接的候选数量。"
+    : "Each row represents one real Find source or publication venue, and source candidates describe only that row's retrieval result. The counts below track candidates entering title screening, title LLM, and title+abstract LLM scoring; sources may enter at different steps. Details fetched counts candidates enriched with abstracts or links.";
   const lines = [`# ${title}`, "", intro, ""];
   sourceRows.forEach((item: any) => {
     lines.push(`## ${sourceStatusLabel(item, undefined, lang)}`, "", `- ${sourceStatusDetail(item, lang)}`, "");
@@ -1037,7 +1045,7 @@ const TEXT = {
     literatureGateNote: "审计说明",
     noStrongRecommendationButCandidates: "调研已完成并保留了未入选线索；只是当前没有足够论文进入推荐列表，这不是爬取失败。",
     diversityScore: "Diversity",
-    diversityHelp: "Diversity 是 LLM 对论文覆盖当前研究方向广度的 1-10 分；推荐资格仍以真实摘要和最终 Fit 分为准。",
+    diversityHelp: "Diversity 是 LLM 对论文覆盖当前研究方向广度的 1-10 分，并参与最终全局排序，不作为推荐硬门槛。",
     abstract: "摘要",
     scoreDetail: "评分明细",
     sourceBonus: "新颖/引用",
@@ -1046,15 +1054,15 @@ const TEXT = {
     stableScore: "排序参考分",
     labels: "标识",
     researchLiteratureSurvey: "Find 文献调研验收",
-    researchLiteratureSurveyHelp: "显示当前 Find run 的渠道抓取、候选筛选和评分概览。",
-    venuePapersScanned: "会议标题池",
-    rawTitleIndexPapers: "本 run 标题入口",
-    titleScreenInputPapers: "标题预筛输入",
+    researchLiteratureSurveyHelp: "显示当前 Find run 各来源的抓取状态，以及候选题录进入标题筛选、标题 LLM、标题+摘要 LLM 综合评分和最终推荐的处理数量。不同来源可以从不同步骤进入。",
+    venuePapersScanned: "已抓取题录",
+    rawTitleIndexPapers: "题录总数",
+    titleScreenInputPapers: "标题 LLM 输入",
     categoryFilteredPapers: "进入标题筛选",
-    tfidfScreenedPapers: "标题预筛后",
-    titleScoredPapers: "标题打分后",
-    abstractScoredPapers: "摘要打分后",
-    titleCandidatePapers: "标题打分后",
+    tfidfScreenedPapers: "进入标题 LLM",
+    titleScoredPapers: "标题 LLM 已评分",
+    abstractScoredPapers: "标题+摘要 LLM 已评分",
+    titleCandidatePapers: "标题 LLM 后候选",
     recentArxivCandidates: "近半年 arXiv 候选",
     notEnabled: "未启用",
     papersRead: "已精读",
@@ -1062,7 +1070,7 @@ const TEXT = {
     noLiteratureSurvey: "当前 Find run 尚未产出可展示的调研验收结果；Find 完成后这里会显示抓取、筛选、评分和推荐计数。",
     recommendationShortfall: "推荐不足",
     findRunBudget: "Find 运行设置",
-    findBudgetHelp: "标准使用只需要设置最终推荐数量和 LLM 并发；会议标题默认全量抓取，召回、详情评分和超时使用标准值。高级预算仅用于测试、限流或异常源保护。",
+    findBudgetHelp: "标准使用只需设置最低推荐数量和 LLM 并发；arXiv/bioRxiv 抓取上限和综合评分上限已有标准值。高级设置用于调整抓取深度或评分成本。",
     advancedFindSettings: "高级预算",
     standardFindProfile: "标准配置",
     restoreStandardFindDefaults: "恢复标准值",
@@ -1079,30 +1087,26 @@ const TEXT = {
     finishPlan: "选为执行计划",
     planCompleted: "已选定",
     finishPlanConfirm: "确认将此候选设为唯一执行计划？Claude Code 会重写并检查最终 plan.md。",
-    fetchLimit: "非会议来源抓取上限",
-    fetchLimitHelp: "用于 arXiv/bioRxiv 等非会议论文源的初始抓取上限；会议来源不读这个值，会议标题默认按所选会议/年份全量抓取。",
-    recommendLimit: "最终推荐数量",
-    recommendLimitHelp: "Find 最后展示的推荐论文数量；候选召回和详情评分会保留更宽的池子，最终只展示通过真实摘要和 LLM 评分后的前 N 篇。",
+    nonvenueFetchLimit: "arXiv/bioRxiv 抓取上限",
+    nonvenueFetchLimitHelp: "默认 5000。检索结果超过设置值时，每个来源只保留该上限内最近发表的文章。",
+    recommendLimit: "最低推荐数量",
+    recommendLimitHelp: "Find 的最低推荐目标；实际 N 取此值与已选渠道数 × 5 的较大者，并从有真实摘要且完成 LLM 评分的候选中按全局排名取前 N。",
     ideaLimit: "想法最大数量",
     ideaLimitHelp: "想法阶段生成的研究想法数量上限。",
-    titleScanLimit: "会议标题全扫保护上限",
-    titleScanLimitHelp: "会议库默认全扫该会议/年份的标题；填 0 表示不设数量上限。只有测试或异常数据源保护时才填正数。",
-    titleScanFraction: "标题扫描比例",
-    titleScanFractionHelp: "对已抓到的会议标题池抽取多少比例，1 表示全扫；只有想省时间时才调低。",
-    recallCount: "主题候选保留上限",
-    recallCountHelp: "标题打分后最多保留多少篇进入详情抓取前的候选池。它不是最终推荐数；调大可提高标题打分后的召回。",
-    detailFetchCount: "详情抓取/评分预算",
-    detailFetchCountHelp: "标题召回后，最多抓取多少候选的摘要/详情并进入最终 LLM 评分；会议标题仍会先全量扫描，这里控制的是昂贵的详情阶段。",
+    titleScanLimit: "出版渠道题录全扫保护上限",
+    titleScanLimitHelp: "会议或期刊题录默认按所选出版渠道和年份全量扫描；填 0 表示不设数量上限。只有测试或异常来源保护时才填正数。",
+    titleScanFraction: "题录扫描比例",
+    titleScanFractionHelp: "对已抓到的出版渠道题录池抽取多少比例，1 表示全扫；只有想节省时间时才调低。",
+    titleAbstractScoringLimit: "标题+摘要 LLM 综合评分上限",
+    titleAbstractScoringLimitHelp: "所有完成标题 LLM 评分的候选全局去重并按标题分排序后，最多选择此数量抓取摘要/详情并进入标题+摘要 LLM 综合评分。默认 1000。",
     titleFilterTimeout: "标题筛选单批超时秒数",
     titleFilterTimeoutHelp: "LLM 标题筛选每个批次的最长等待时间。",
     abstractWorkers: "摘要评分最大并发",
     abstractWorkersHelp: "最终评分阶段最大 LLM 并发；太大会触发限流，建议 4。",
     abstractTimeout: "摘要评分单批超时秒数",
     abstractTimeoutHelp: "最终评分每个批次的最长等待时间。",
-    arxivMaxQueries: "arXiv 最大检索词数",
-    arxivMaxQueriesHelp: "arXiv 每轮最多请求几个检索词，建议 2-3，避免 429。",
-    arxivPerQuery: "arXiv 每个检索词数量",
-    arxivPerQueryHelp: "每个 arXiv 检索词请求多少篇，建议 30-50。",
+    arxivMaxQueries: "arXiv 备用查询组上限",
+    arxivMaxQueriesHelp: "正常 Find 将全部关键词合成一个平级 OR 查询；此项只限制非标准备用查询路径的查询组数量。",
     arxivTimeout: "arXiv 单检索词超时秒数",
     arxivTimeoutHelp: "单个 arXiv 请求超时；超时或 429 会降级为受限状态。",
     saveConfig: "保存配置",
@@ -1132,15 +1136,15 @@ const TEXT = {
     fullCycle: "完整科研流程",
     paperWrite: "论文撰写",
     runFind: "运行发现",
-    venues: "会议 / 期刊",
-    venueHelp: "选择一个或多个会议/期刊。ICLR 使用官方分类；CCF/DBLP 分类由 LLM 推断并标注。",
-    selectedVenuesTitle: "已选会议",
-    availableVenuesTitle: "未选会议",
+    venues: "出版渠道（会议或期刊）",
+    venueHelp: "选择一个或多个会议或期刊出版渠道。ICLR 使用官方分类；CCF/DBLP 分类由 LLM 推断并标注。",
+    selectedVenuesTitle: "已选出版渠道",
+    availableVenuesTitle: "可选出版渠道",
     add: "添加",
     remove: "移除",
-    venueSearch: "搜索会议、期刊、领域或等级",
+    venueSearch: "搜索出版渠道、领域或等级",
     years: "年份",
-    yearsHelp: "默认待添加年份为最新一年；修改这里不会改变已选会议，点击下方会议的添加后才会把年份加入该会议。",
+    yearsHelp: "默认待添加年份为最新一年；修改这里不会改变已选出版渠道，点击下方渠道的添加后才会把年份加入该渠道。",
     selectedYear: "选择年份",
     addYears: "待添加年份",
     availableYears: "可用年份",
@@ -1150,12 +1154,12 @@ const TEXT = {
     sources: "来源",
     sourcesHelp: "控制是否额外收集 arXiv、bioRxiv、Nature、Science、HuggingFace 和 GitHub 热门内容；未勾选不会进入本轮 Find。",
     arxivCategories: "arXiv 分类",
-    arxivHelp: "可输入多个分类，用逗号或空格隔开，例如 cs.AI, cs.CV。",
+    arxivHelp: "留空表示不限制分类；也可输入多个分类作为明确限制，例如 cs.AI, cs.CV。",
     arxivDateHelp: "可选日期范围，格式 YYYY-MM-DD 或 YYYY/MM/DD；arXiv/HuggingFace/GitHub 共用。arXiv 两个日期都留空时默认抓取近半年。",
     sourceStatus: "来源状态",
     biorxivCategories: "bioRxiv 分类",
-    biorxivHelp: "可输入多个 bioRxiv 学科分类，用逗号或空格隔开，例如 bioinformatics, neuroscience；输入 all 表示不过滤分类。",
-    biorxivDateHelp: "可选日期范围，格式 YYYY-MM-DD 或 YYYY/MM/DD；留空时默认抓取最近 30 天。",
+    biorxivHelp: "留空或输入 all 表示不限制分类；也可输入多个官方分类作为明确限制，例如 bioinformatics, neuroscience。",
+    biorxivDateHelp: "可选日期范围，格式 YYYY-MM-DD 或 YYYY/MM/DD；留空时默认抓取最近 180 天。",
     naturePortfolio: "Nature Portfolio",
     natureHelp: "作为独立期刊流抓取重要 Nature-branded 期刊，并合并进入论文推荐。默认关闭，只有勾选后才进入本轮 Find。",
     naturePresets: "Nature 预设",
@@ -1203,7 +1207,7 @@ const TEXT = {
     fullResearchCycleHelp: "从调研/idea、环境复现、实验迭代、论文生成到审计修复串起来运行；状态分散显示在对应页面，不单独作为另一套流程。",
     fullCycleAlreadyRunning: "完整科研流程正在运行",
     fullCycleAlreadyRunningHelp: "已有完整科研流程进程存活，网页已禁用重复启动；请在任务栏查看 PID、日志和阶段进度。",
-    venueHardRules: "会议硬要求",
+    venueHardRules: "投稿会议或期刊硬要求",
     bodyPages: "正文页数",
     referencePages: "参考页数",
     totalPages: "总页数",
@@ -1227,7 +1231,7 @@ const TEXT = {
     researchPrepareEnv: "准备环境计划",
     researchRealBootstrapEnv: "真实创建/安装 Conda 环境",
     researchSkipPaper: "自动科研后跳过论文流水线",
-    researchForceTemplate: "系统会按当前会议要求生成论文预览",
+    researchForceTemplate: "系统会按当前投稿会议或期刊要求生成论文预览",
     researchAutoInstallLatex: "缺 LaTeX 依赖时尝试自动安装",
     researchArtifacts: "阶段摘要",
     researchNoProject: "未找到 项目。",
@@ -1280,8 +1284,8 @@ const TEXT = {
     queuedGuidance: "等待模块 Claude Code",
     claudeTranscriptTitle: "最近一次模块主控处理摘要",
     noClaudeTranscript: "还没有模块主控处理摘要；真实运行日志请看底部任务栏中的当前 job。",
-    arxivTopicQueries: "arXiv 主题检索词",
-    arxivTopicQueriesHelp: "可留空。留空时发现阶段会根据研究兴趣自动生成主题检索词；填写后会和自动检索词合并。",
+    arxivTopicQueries: "arXiv/bioRxiv 手工检索词",
+    arxivTopicQueriesHelp: "可留空。每项必须是 1-3 个英文单词，用逗号分隔；填写后与 LLM 抽取词平级合并，并同时用于 arXiv 和 bioRxiv。",
     arxivTopicQueriesPlaceholder: "留空则按当前研究主题自动生成",
     retrievalPool: "未入选检索线索",
     retrievalPoolHelp: "未入选线索只用于排查推荐质量和补充检索，不在主列表展示；人类监督只看覆盖统计、推荐文章和精读论文。",
@@ -1585,7 +1589,7 @@ const TEXT = {
     literatureGateNote: "Audit note",
     noStrongRecommendationButCandidates: "Survey succeeded and retained candidate papers; no paper is recommended yet, so this is not a crawl failure.",
     diversityScore: "Diversity",
-    diversityHelp: "Diversity measures whether the paper hits multiple real research directions or complements method/domain coverage. The final stable ranking mainly uses source evidence; low diversity can lower the raw LLM combined score but should not remove a directly relevant paper by itself.",
+    diversityHelp: "Diversity measures coverage across the configured research directions and contributes to the final global ranking; it is not a hard recommendation gate.",
     abstract: "Abstract",
     scoreDetail: "Score detail",
     sourceBonus: "Novelty/citation",
@@ -1594,15 +1598,15 @@ const TEXT = {
     stableScore: "Stable source score",
     labels: "Labels",
     researchLiteratureSurvey: "Find Survey Gate",
-    researchLiteratureSurveyHelp: "Shows source fetching, candidate screening, and scoring for the current Find run.",
-    venuePapersScanned: "Venue papers",
-    rawTitleIndexPapers: "Run title input",
-    titleScreenInputPapers: "Title-screen input",
-    categoryFilteredPapers: "Title-screen input",
-    tfidfScreenedPapers: "After title prefilter",
-    titleScoredPapers: "After title scoring",
-    abstractScoredPapers: "After abstract scoring",
-    titleCandidatePapers: "After title scoring",
+    researchLiteratureSurveyHelp: "Shows retrieval status for every source and candidate counts entering title screening, title LLM, title+abstract LLM scoring, and final recommendations. Sources may enter at different steps.",
+    venuePapersScanned: "Records retrieved",
+    rawTitleIndexPapers: "Record total",
+    titleScreenInputPapers: "Title-LLM input",
+    categoryFilteredPapers: "Entering title screening",
+    tfidfScreenedPapers: "Entering title LLM",
+    titleScoredPapers: "Title-LLM scored",
+    abstractScoredPapers: "Title+abstract LLM scored",
+    titleCandidatePapers: "Candidates after title LLM",
     recentArxivCandidates: "Recent arXiv candidates",
     notEnabled: "not enabled",
     papersRead: "Papers read",
@@ -1610,7 +1614,7 @@ const TEXT = {
     noLiteratureSurvey: "No current Find audit result is visible yet. Once Find completes, this panel shows retrieval, screening, scoring, and recommended papers.",
     recommendationShortfall: "recommendation shortfall",
     findRunBudget: "Find Settings",
-    findBudgetHelp: "Standard use only needs the final recommendation count and LLM concurrency. Venue titles are fetched broadly by default; recall, detail scoring, and timeouts use standard values. Advanced budgets are for tests, rate limits, or abnormal sources.",
+    findBudgetHelp: "Standard use only needs the minimum recommendation count and LLM concurrency. The arXiv/bioRxiv fetch cap and combined-scoring limit have standard defaults. Use advanced settings to adjust retrieval depth or scoring cost.",
     advancedFindSettings: "Advanced budgets",
     standardFindProfile: "standard profile",
     restoreStandardFindDefaults: "Restore standards",
@@ -1627,30 +1631,26 @@ const TEXT = {
     finishPlan: "Select for execution",
     planCompleted: "Selected",
     finishPlanConfirm: "Select this candidate as the sole execution plan? Claude Code will rewrite and validate the final plan.md.",
-    fetchLimit: "Non-venue fetch cap",
-    fetchLimitHelp: "Initial fetch cap for arXiv/bioRxiv-like non-venue paper sources. Venue sources do not use this value; selected venue/year title indexes are fetched broadly by default.",
-    recommendLimit: "Final recommendation count",
-    recommendLimitHelp: "How many papers Find finally displays. Recall and detail scoring keep a wider candidate pool; the page shows only the top N papers after real-abstract LLM scoring.",
+    nonvenueFetchLimit: "arXiv/bioRxiv fetch cap",
+    nonvenueFetchLimitHelp: "Defaults to 5000. When a source has more matches, it retains the configured number of most recently published papers.",
+    recommendLimit: "Minimum recommendation count",
+    recommendLimitHelp: "Find targets at least the larger of this value and 5 × selected sources, then takes the global top N among candidates with real abstracts and completed LLM scoring.",
     ideaLimit: "Max ideas",
     ideaLimitHelp: "Maximum research ideas generated in the Idea stage.",
-    titleScanLimit: "Venue full-scan safety cap",
-    titleScanLimitHelp: "Venue libraries are full-scanned by default; 0 means no configured count cap. Set a positive value only for tests or abnormal-source protection.",
-    titleScanFraction: "Title scan fraction",
-    titleScanFractionHelp: "Fraction of the collected title pool to prefilter. 1 means all, 0.25 means the first 25%.",
-    recallCount: "Topic-candidate cap",
-    recallCountHelp: "After title scoring, keep up to this many candidates before detail fetch. It is not a final recommendation count; increase it for broader title-stage recall.",
-    detailFetchCount: "Detail fetch/scoring budget",
-    detailFetchCountHelp: "After title recall, at most this many candidates fetch abstracts/details and enter final LLM scoring. Venue titles are still scanned broadly; this controls the expensive detail stage.",
+    titleScanLimit: "Publication-record full-scan safety cap",
+    titleScanLimitHelp: "Conference or journal records are fully scanned by publication venue and year by default. 0 means no configured cap; use a positive value only for tests or abnormal-source protection.",
+    titleScanFraction: "Record scan fraction",
+    titleScanFractionHelp: "Fraction of the collected publication-record pool to scan. 1 means all; lower it only to reduce runtime.",
+    titleAbstractScoringLimit: "Title+abstract LLM scoring cap",
+    titleAbstractScoringLimitHelp: "After all title-LLM-scored candidates are globally deduplicated and ranked by title score, at most this many fetch abstracts/details and enter combined title+abstract LLM scoring. Default: 1000.",
     titleFilterTimeout: "Title filter timeout (sec)",
     titleFilterTimeoutHelp: "Maximum wait per LLM title-filter batch.",
     abstractWorkers: "Abstract scoring max workers",
     abstractWorkersHelp: "Maximum LLM concurrency for final scoring. Recommended: 4 to avoid rate limits.",
     abstractTimeout: "Abstract scoring timeout (sec)",
     abstractTimeoutHelp: "Maximum wait per final-scoring batch.",
-    arxivMaxQueries: "arXiv max queries",
-    arxivMaxQueriesHelp: "Maximum arXiv queries per run. Recommended: 2-3 to avoid 429.",
-    arxivPerQuery: "arXiv per-query count",
-    arxivPerQueryHelp: "Requested papers per arXiv query. Recommended: 30-50.",
+    arxivMaxQueries: "arXiv fallback query cap",
+    arxivMaxQueriesHelp: "Normal Find combines all keywords into one equal-status OR query. This only caps query groups on fallback paths.",
     arxivTimeout: "arXiv timeout (sec)",
     arxivTimeoutHelp: "Timeout per arXiv request; timeout/429 degrades to limited status.",
     saveConfig: "Save Config",
@@ -1698,12 +1698,12 @@ const TEXT = {
     sources: "Sources",
     sourcesHelp: "Choose whether to also collect arXiv, bioRxiv, Nature, Science, HuggingFace, and GitHub signals. Disabled sources are not used in this Find run.",
     arxivCategories: "arXiv categories",
-    arxivHelp: "Enter multiple categories separated by commas or spaces, e.g. cs.AI, cs.CV.",
+    arxivHelp: "Leave blank to search without a category constraint, or enter explicit categories separated by commas or spaces, e.g. cs.AI, cs.CV.",
     arxivDateHelp: "Optional date range in YYYY-MM-DD or YYYY/MM/DD; shared by arXiv/HuggingFace/GitHub. For arXiv, leaving both empty defaults to the most recent 180 days.",
     sourceStatus: "Source Status",
     biorxivCategories: "bioRxiv categories",
-    biorxivHelp: "Enter bioRxiv subject categories separated by commas or spaces, e.g. bioinformatics, neuroscience; use all to skip category filtering.",
-    biorxivDateHelp: "Optional date range in YYYY-MM-DD or YYYY/MM/DD. Leave blank to fetch the latest 30 days.",
+    biorxivHelp: "Leave blank or use all to search without a category constraint, or enter official categories such as bioinformatics, neuroscience.",
+    biorxivDateHelp: "Optional date range in YYYY-MM-DD or YYYY/MM/DD. Leave blank to fetch the latest 180 days.",
     naturePortfolio: "Nature Portfolio",
     natureHelp: "Fetch important Nature-branded journals through a separate journal stream and merge them into paper recommendations. Disabled by default; only checked sources enter this Find run.",
     naturePresets: "Nature presets",
@@ -1828,8 +1828,8 @@ const TEXT = {
     queuedGuidance: "Waiting for module Claude Code",
     claudeTranscriptTitle: "Latest module-controller summary",
     noClaudeTranscript: "No module-controller summary yet; real run logs are shown in the bottom taskbar job entries.",
-    arxivTopicQueries: "arXiv topic queries",
-    arxivTopicQueriesHelp: "Optional. If empty, Find auto-generates topic queries from the research interest and merges them with any manual queries.",
+    arxivTopicQueries: "arXiv/bioRxiv manual keywords",
+    arxivTopicQueriesHelp: "Optional. Each comma-separated item must contain 1-3 English words; manual items merge as equal-status keywords for both arXiv and bioRxiv.",
     arxivTopicQueriesPlaceholder: "leave empty to auto-generate from this research topic",
     retrievalPool: "Retrieval audit pool",
     retrievalPoolHelp: "Audit-only retrieval traces. The main UI shows coverage, recommendations, and deep-reading papers instead.",
@@ -2079,6 +2079,14 @@ const TEXT = {
 
 function splitList(value: string) {
   return value.split(/[,\s]+/).map((item) => item.trim()).filter(Boolean);
+}
+
+function splitCategoryList(value: string) {
+  return value.split(/[,，;；\n]+/).map((item) => item.trim()).filter(Boolean);
+}
+
+function splitPhraseList(value: string) {
+  return value.split(/[,，;；\n]+/).map((item) => item.trim()).filter(Boolean);
 }
 
 function normalizeSelectedYears(value: string | number[]) {
@@ -2734,6 +2742,156 @@ function isFindRunJob(job: any) {
   const stage = canonicalJobStage(job);
   const jobId = String(job?.job_id || "").trim();
   return stage === "find" || jobId.startsWith("find-run-find") || jobId.startsWith("find_");
+}
+
+function isPrimaryFindTaskJob(job: any) {
+  const jobId = String(job?.job_id || "").trim();
+  return isFindRunJob(job) && (jobId.startsWith("find_") || String(job?.result?.action || "") === "find");
+}
+
+type FindTaskProgressView = {
+  stagePercent: number;
+  stageIndex: number;
+  stageCount: number;
+  stageLabel: string;
+  stepLabel: string;
+  action: string;
+  logLines: string[];
+};
+
+function boundedPercent(value: any) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.max(0, Math.min(100, Math.round(number)));
+}
+
+function findPhaseLabel(phase: string, lang: Lang) {
+  const labels: Record<string, { zh: string; en: string }> = {
+    initializing: { zh: "初始化 Find 任务", en: "initializing Find" },
+    queued: { zh: "等待启动", en: "waiting to start" },
+    running: { zh: "初始化 Find 任务", en: "initializing Find" },
+    started: { zh: "初始化 Find 任务", en: "initializing Find" },
+    venue_title_index: { zh: "抓取出版渠道题录", en: "fetching publication records" },
+    venue_scan_complete: { zh: "出版渠道处理完成", en: "publication venues complete" },
+    title_prefilter: { zh: "本地标题召回", en: "local title recall" },
+    llm_title_filter: { zh: "标题 LLM 筛选", en: "LLM title screening" },
+    detail_fetch: { zh: "抓取候选详情", en: "fetching candidate details" },
+    detail_enrichment: { zh: "补全候选详情", en: "enriching candidate details" },
+    abstract_enrichment: { zh: "补全真实摘要", en: "enriching real abstracts" },
+    nature_detail_enrichment: { zh: "补全 Nature 文章详情", en: "enriching Nature article details" },
+    science_detail_enrichment: { zh: "补全 Science 文章详情", en: "enriching Science article details" },
+    nature: { zh: "检索 Nature 渠道", en: "searching Nature sources" },
+    science: { zh: "检索 Science 渠道", en: "searching Science sources" },
+    arxiv: { zh: "检索 arXiv 渠道", en: "searching arXiv" },
+    biorxiv: { zh: "检索 bioRxiv 渠道", en: "searching bioRxiv" },
+    huggingface: { zh: "检索 HuggingFace 渠道", en: "searching HuggingFace" },
+    github: { zh: "检索 GitHub 渠道", en: "searching GitHub" },
+    source_collection_complete: { zh: "候选池收集完成", en: "candidate collection complete" },
+    abstract_contract: { zh: "校验真实摘要", en: "validating real abstracts" },
+    abstract_scoring: { zh: "摘要 LLM 评估", en: "LLM abstract evaluation" },
+    abstract_scoring_retry: { zh: "重试未完成的摘要评估", en: "retrying incomplete abstract evaluations" },
+    final_ranking_prepare: { zh: "生成最终推荐排序", en: "building final recommendation ranking" },
+    preliminary_artifacts_written: { zh: "整理推荐结果", en: "assembling recommendation results" },
+    abstract_translation: { zh: "翻译推荐论文摘要", en: "translating recommended abstracts" },
+    abstract_translation_retry: { zh: "重试摘要翻译", en: "retrying abstract translation" },
+    abstract_translation_final: { zh: "完成摘要翻译", en: "finalizing abstract translations" },
+    complete: { zh: "Find 产物写入完成", en: "Find artifacts complete" },
+  };
+  if (labels[phase]) return labels[phase][lang === "zh" ? "zh" : "en"];
+  if (phase.endsWith("_llm_scoring_complete")) {
+    const source = phase.replace(/_llm_scoring_complete$/, "").replace(/_/g, " ");
+    return lang === "zh" ? `${source} 摘要评估完成` : `${source} abstract evaluation complete`;
+  }
+  return phase.replace(/_/g, " ") || (lang === "zh" ? "初始化 Find 任务" : "initializing Find");
+}
+
+function findStageProjectionLabel(value: any, lang: Lang) {
+  const label = String(value || "").trim();
+  const labels: Record<string, { zh: string; en: string }> = {
+    "初始化研究画像": { zh: "初始化研究画像", en: "Initialize research profile" },
+    "会议论文检索与标题筛选": { zh: "出版渠道题录检索与标题筛选", en: "Publication-record retrieval and title screening" },
+    "扩展渠道论文检索": { zh: "扩展来源论文检索", en: "Extended-source retrieval" },
+    "摘要校验与 LLM 综合评估": { zh: "摘要校验与 LLM 综合评估", en: "Abstract validation and LLM evaluation" },
+    "推荐排序与产物生成": { zh: "推荐排序与产物生成", en: "Recommendation ranking and artifact generation" },
+    "Find 完成": { zh: "Find 完成", en: "Find complete" },
+  };
+  return labels[label]?.[lang === "zh" ? "zh" : "en"] || label || "Find";
+}
+
+function findActionText(value: any, phase: string, lang: Lang) {
+  const raw = publicLogText(String(value || "").trim(), lang);
+  if (!raw) return findPhaseLabel(phase, lang);
+  if (lang !== "zh") return raw;
+  return raw
+    .replace(/^Starting venue title index fetch$/i, "开始抓取所选出版渠道题录")
+    .replace(/^Checking year availability:\s*/i, "检查出版渠道年份可用性：")
+    .replace(/^Fetching title index:\s*/i, "抓取出版渠道题录：")
+    .replace(/^Fetching selected paper details$/i, "抓取入选论文详情")
+    .replace(/:\s*fetching selected paper details$/i, "：抓取入选论文详情")
+    .replace(/:\s*metadata details ready$/i, "：候选详情已就绪")
+    .replace(/:\s*detail fetch complete$/i, "：候选详情抓取完成")
+    .replace(/:\s*starting LLM title filter, uncached batches\s*/i, "：开始标题 LLM 筛选；未缓存批次 ")
+    .replace(/:\s*scoring title batch\s*/i, "：正在评估标题批次 ")
+    .replace(/:\s*scored title batch\s*/i, "：已完成标题批次 ")
+    .replace(/:\s*processed\s+(\d+)\s+title batches; scored\s+(\d+)/i, "：标题批次已处理 $1；已评分标题 $2")
+    .replace(/:\s*scoring batch\s*/i, "：正在评估摘要批次 ")
+    .replace(/:\s*scored batch\s*/i, "：已完成摘要批次 ")
+    .replace(/^Fetching arXiv$/i, "开始检索 arXiv")
+    .replace(/^Fetching bioRxiv$/i, "开始检索 bioRxiv")
+    .replace(/^Fetching Nature Portfolio$/i, "开始检索 Nature Portfolio")
+    .replace(/^Fetching Science Family$/i, "开始检索 Science Family")
+    .replace(/^Fetching HuggingFace$/i, "开始检索 HuggingFace")
+    .replace(/^Fetching GitHub$/i, "开始检索 GitHub")
+    .replace(/^arXiv query\s+([^:]+):\s*([^,]+),\s*page start\s+(\d+)/i, "arXiv 查询 $1：$2，当前抓取页起点 $3")
+    .replace(/with\s+(\d+)\s+workers?/i, "并发 $1")
+    .replace(/cache_hits\s+(\d+)/i, "缓存命中 $1")
+    .replace(/cache_hits=(\d+)/i, "缓存命中 $1");
+}
+
+function findCountLogLine(counts: any, lang: Lang) {
+  if (!counts || typeof counts !== "object") return "";
+  const number = (value: any) => Number(value || 0).toLocaleString(lang === "zh" ? "zh-CN" : "en-US");
+  const titleInput = Number(counts.title_score_input_papers || counts.tfidf_screened_papers || counts.category_filtered_papers || 0);
+  const titleScored = Number(counts.llm_title_scored_papers || 0);
+  if (lang === "zh") {
+    return `实时计数：题录 ${number(counts.raw_title_index || counts.raw_title_index_papers)}；标题 LLM ${number(titleScored)}/${number(titleInput)}；标题候选 ${number(counts.title_candidates)}；详情 ${number(counts.detail_fetched)}；摘要 LLM ${number(counts.abstract_scored_papers || counts.llm_scored_candidates)}`;
+  }
+  return `Live counts: titles ${number(counts.raw_title_index || counts.raw_title_index_papers)}; title LLM ${number(titleScored)}/${number(titleInput)}; title candidates ${number(counts.title_candidates)}; details ${number(counts.detail_fetched)}; abstract LLM ${number(counts.abstract_scored_papers || counts.llm_scored_candidates)}`;
+}
+
+function findTaskProgressView(job: any, lang: Lang): FindTaskProgressView | null {
+  if (!isPrimaryFindTaskJob(job)) return null;
+  const projection = job?.result?.find_progress;
+  if (!projection || typeof projection !== "object") return null;
+  const stageCount = Math.max(1, Number(projection.stage_total || 6));
+  const stageIndex = Math.max(1, Math.min(stageCount, Number(projection.stage_index || 1)));
+  const phase = String(projection.raw_phase || "initializing").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const action = findActionText(projection.message, phase, lang);
+  const stageLabel = findStageProjectionLabel(projection.stage_label, lang);
+  const countLine = findCountLogLine(projection.counts, lang);
+  const rawCurrent = Number(projection.raw_current || 0);
+  const rawTotal = Number(projection.raw_total || 0);
+  const messageBatch = String(projection.message || "").match(/batch\s+(\d+)\/(\d+)/i);
+  const batchCurrent = Number(messageBatch?.[1] || rawCurrent);
+  const batchTotal = Number(messageBatch?.[2] || rawTotal);
+  const batchLine = batchTotal > 0
+    ? `${lang === "zh" ? "当前步骤批次" : "Current step batches"}：${batchCurrent}/${batchTotal}`
+    : "";
+  const logLines = [
+    `${lang === "zh" ? "当前具体任务" : "Current task"}：${action}`,
+    `${lang === "zh" ? "流程位置" : "Workflow position"}：${stageLabel}；${lang === "zh" ? "具体步骤" : "step"}：${findPhaseLabel(phase, lang)}`,
+    batchLine,
+    countLine,
+  ].filter(Boolean);
+  return {
+    stagePercent: boundedPercent(projection.stage_percent),
+    stageIndex,
+    stageCount,
+    stageLabel,
+    stepLabel: findPhaseLabel(phase, lang),
+    action,
+    logLines,
+  };
 }
 
 function jobProcessAliveValue(job: any): boolean | null {
@@ -4434,7 +4592,7 @@ function App() {
     );
     const summaryFunnelRaw = useArFallback ? (researchLiteratureCounts.raw_title_index_papers || researchLiteratureCounts.venue_corpus_audited_papers || researchLiteratureCounts.venue_total_papers_available) : "";
     const scannedTotal = surveyStats.raw_title_index_papers || surveyStats.venue_corpus_audited_papers || surveyStats.venue_total_papers_available || rawTitleCount || progressCounts.raw_title_index || progressCounts.raw_title_index_papers || titleInputCount || sum(categoryRows, "total_papers") || summaryFunnelRaw || (!runFunnelHasCounts ? sourceRowTotal : "") || "";
-    const titleScreenInputTotal = surveyStats.category_filtered_papers || progressCounts.category_filtered_papers || titleInputCount || surveyStats.venue_title_filter_input_papers || progressCounts.venue_title_filter_input_papers || (useArFallback ? Number(researchLiteratureCounts.category_filtered_papers || researchLiteratureCounts.venue_title_filter_input_papers || 0) : 0) || (!runFunnelHasCounts ? sourceRowCategoryTotal : "") || "";
+    const titleScreenInputTotal = surveyStats.category_filtered_papers || progressCounts.category_filtered_papers || (useArFallback ? Number(researchLiteratureCounts.category_filtered_papers || 0) : 0) || (!runFunnelHasCounts ? sourceRowCategoryTotal : "") || "";
     const selectedTotal = surveyStats.venue_category_selected_papers || surveyStats.category_selected_papers || sum(categoryRows, "selected_category_papers") || titleScreenInputTotal || (useArFallback ? researchLiteratureCounts.venue_category_selected_papers : "") || (!runFunnelHasCounts ? sourceRowCategoryTotal : "") || "";
     return {
       raw_title_index_papers: scannedTotal,
@@ -6500,7 +6658,7 @@ function App() {
     const freshFindActive = !hasCompletedFindResultsForPanel && (freshFindRunning || viewingActiveIncompleteFindRun || Boolean(activeFindJobForRun) || literatureFreshFindRunning);
     const currentFindCounts: any = freshFindActive ? {} : literatureCounts || {};
     const sourceLimitations = freshFindActive ? [] : [...researchSourceLimitations, ...researchMissingVenueIndexes].slice(0, 4);
-    const categoryFilteredCount = (freshFindActive ? 0 : (currentFindCounts as any).categoryFiltered) || counts.category_filtered_papers || (freshFindActive ? 0 : (currentFindCounts as any).titleInput);
+    const categoryFilteredCount = (freshFindActive ? 0 : (currentFindCounts as any).categoryFiltered) || counts.category_filtered_papers;
     const tfidfScreenedCount = (freshFindActive ? 0 : (currentFindCounts as any).tfidfScreened) || counts.tfidf_screened_papers || (freshFindActive ? 0 : (currentFindCounts as any).titleInput);
     const titleScoredCount = (freshFindActive ? 0 : (currentFindCounts as any).llmTitleScored) || counts.llm_title_scored_papers || (freshFindActive ? 0 : (currentFindCounts as any).titleCandidates);
     const detailFetched = counts.detail_fetched || counts.venue_detail_fetched_candidates || (freshFindActive ? 0 : (currentFindCounts as any).detailFetched);
@@ -7280,7 +7438,7 @@ function App() {
                       <h4>{t.availableVenuesTitle}</h4>
                       {hiddenAvailableVenueCount > 0 && <button className="smallButton" onClick={() => setShowAllAvailableVenues(true)}>{lang === "zh" ? `显示更多 ${hiddenAvailableVenueCount}` : `Show ${hiddenAvailableVenueCount} more`}</button>}
                     </div>
-                    {!venueQuery.trim() && hiddenAvailableVenueCount > 0 && <p className="help">{lang === "zh" ? "默认只显示前 24 个会议；用搜索框定位会议，或展开更多。" : "Showing the first 24 venues by default; search to narrow the list or expand more."}</p>}
+                    {!venueQuery.trim() && hiddenAvailableVenueCount > 0 && <p className="help">{lang === "zh" ? "默认只显示前 24 个出版渠道；用搜索框定位渠道，或展开更多。" : "Showing the first 24 venues by default; search to narrow the list or expand more."}</p>}
                     <div className="venueList">
                       {visibleAvailableVenues.map((venue) => {
                         const health = venueHealth[venue.id];
@@ -7312,7 +7470,7 @@ function App() {
                 <input value={config.arxiv_categories.join(", ")} onChange={(e) => updateConfig("arxiv_categories", splitList(e.target.value))} placeholder="cs.AI, cs.CV" />
                 <label>{t.arxivTopicQueries}</label>
                 <p className="help">{t.arxivTopicQueriesHelp}</p>
-                <input value={(config.arxiv_queries || []).join(", ")} onChange={(e) => updateConfig("arxiv_queries", splitList(e.target.value))} placeholder={t.arxivTopicQueriesPlaceholder} />
+                <input value={(config.arxiv_queries || []).join(", ")} onChange={(e) => updateConfig("arxiv_queries", splitPhraseList(e.target.value))} placeholder={t.arxivTopicQueriesPlaceholder} />
                 <p className="help">{t.arxivDateHelp}</p>
                 <div className="row">
                   <input value={config.arxiv_start_date} onChange={(e) => updateConfig("arxiv_start_date", e.target.value)} placeholder={t.startDate} />
@@ -7320,7 +7478,7 @@ function App() {
                 </div>
                 <label>{t.biorxivCategories}</label>
                 <p className="help">{t.biorxivHelp}</p>
-                <input value={(config.biorxiv_categories || ["bioinformatics"]).join(", ")} onChange={(e) => updateConfig("biorxiv_categories", splitList(e.target.value))} placeholder="bioinformatics, neuroscience" />
+                <input value={(config.biorxiv_categories || []).join(", ")} onChange={(e) => updateConfig("biorxiv_categories", splitCategoryList(e.target.value))} placeholder="bioinformatics, molecular biology" />
                 <p className="help">{t.biorxivDateHelp}</p>
                 <div className="row">
                   <input value={config.biorxiv_start_date || ""} onChange={(e) => updateConfig("biorxiv_start_date", e.target.value)} placeholder={t.startDate} />
@@ -7439,9 +7597,8 @@ function App() {
               <div className="row"><div><label>{t.recommendLimit}</label><p className="help">{t.recommendLimitHelp}</p><input value={config.max_recommended_papers} onChange={(e) => updateConfig("max_recommended_papers", Number(e.target.value))} type="number" min="1" /></div><div><label>{t.llmConcurrency}</label><p className="help">{t.llmConcurrencyHelp}</p><input value={config.llm_concurrency} onChange={(e) => updateConfig("llm_concurrency", Math.max(1, Math.min(32, Number(e.target.value))))} type="number" min="1" max="32" /></div></div>
               <details className="subPanel collapsiblePanel">
                 <summary><span>{t.advancedFindSettings}</span><small>{t.standardFindProfile}</small></summary>
-                <div className="row"><div><label>{t.fetchLimit}</label><p className="help">{t.fetchLimitHelp}</p><input value={config.max_fetch_papers} onChange={(e) => updateConfig("max_fetch_papers", Number(e.target.value))} type="number" min="1" /></div><div><label>{t.arxivMaxQueries}</label><p className="help">{t.arxivMaxQueriesHelp}</p><input value={config.arxiv_max_queries} onChange={(e) => updateConfig("arxiv_max_queries", Math.max(1, Number(e.target.value)))} type="number" min="1" /></div></div>
-                <div className="row"><div><label>{t.arxivPerQuery}</label><p className="help">{t.arxivPerQueryHelp}</p><input value={config.arxiv_per_query_limit} onChange={(e) => updateConfig("arxiv_per_query_limit", Math.max(1, Number(e.target.value)))} type="number" min="1" /></div><div><label>{t.titleScanLimit}</label><p className="help">{t.titleScanLimitHelp}</p><input value={config.venue_title_scan_limit} onChange={(e) => updateConfig("venue_title_scan_limit", Math.max(0, Number(e.target.value)))} type="number" min="0" /></div></div>
-                <div className="row"><div><label>{t.recallCount}</label><p className="help">{t.recallCountHelp}</p><input value={config.find_recall_count} onChange={(e) => updateConfig("find_recall_count", Number(e.target.value))} type="number" min="1" /></div><div><label>{t.detailFetchCount}</label><p className="help">{t.detailFetchCountHelp}</p><input value={config.detail_fetch_count} onChange={(e) => updateConfig("detail_fetch_count", Number(e.target.value))} type="number" min="1" /></div></div>
+                <div className="row"><div><label>{t.nonvenueFetchLimit}</label><p className="help">{t.nonvenueFetchLimitHelp}</p><input value={config.nonvenue_fetch_limit} onChange={(e) => updateConfig("nonvenue_fetch_limit", Math.max(1, Number(e.target.value)))} type="number" min="1" /></div><div><label>{t.arxivMaxQueries}</label><p className="help">{t.arxivMaxQueriesHelp}</p><input value={config.arxiv_max_queries} onChange={(e) => updateConfig("arxiv_max_queries", Math.max(1, Number(e.target.value)))} type="number" min="1" /></div></div>
+                <div className="row"><div><label>{t.titleAbstractScoringLimit}</label><p className="help">{t.titleAbstractScoringLimitHelp}</p><input value={config.title_abstract_scoring_limit} onChange={(e) => updateConfig("title_abstract_scoring_limit", Math.max(1, Number(e.target.value)))} type="number" min="1" /></div><div><label>{t.titleScanLimit}</label><p className="help">{t.titleScanLimitHelp}</p><input value={config.venue_title_scan_limit} onChange={(e) => updateConfig("venue_title_scan_limit", Math.max(0, Number(e.target.value)))} type="number" min="0" /></div></div>
               </details>
               <div className="saveBar"><button onClick={applyStandardFindDefaults} disabled={savingConfig}>{t.restoreStandardFindDefaults}</button><button className="primary" onClick={handleSaveConfig} disabled={savingConfig}>{savingConfig ? t.saving : t.saveConfig}</button>{saveMessage && <span>{saveMessage}</span>}</div>
             </div>
@@ -7946,31 +8103,53 @@ function App() {
               <div className="status">{t.idle}</div>
             ) : (
               <div className="jobList">
-                {displayJobs.map((item) => (
-                  <article className="jobCard" key={item.job_id}>
-                    <div className="jobHeader">
-                      <strong>{jobDisplayTitle(item, lang)}</strong>
-                      <span>{jobStatusLabel(item.status, lang)}</span>
-                    </div>
-                    <small>{jobMetaLine(item, lang)}</small>
-                    {["queued", "running", "cancelling"].includes(item.status) && (
-                      <button className="danger smallButton" onClick={() => stopJob(item.job_id)} disabled={item.status === "cancelling"}>
-                        {t.stop}
-                      </button>
-                    )}
-                    {item.progress && (
-                      <div className="progressBlock">
-                        <div className="progressMeta">
-                          <span>{displayJobProgressMessage(item, lang)}</span>
-                          {Number(item.progress.total || 0) > 0 && <strong>{item.progress.percent}%</strong>}
-                        </div>
-                        {Number(item.progress.total || 0) > 0 && <progress value={item.progress.percent} max="100" />}
-                        <small>{Number(item.progress.total || 0) > 0 ? `${jobProgressPhaseLabel(item, lang)} / ${item.progress.current} / ${item.progress.total}` : `${jobProgressPhaseLabel(item, lang)} ${jobStatusLabel(item.status, lang)}`}</small>
+                {displayJobs.map((item) => {
+                  const detailedFindProgress = findTaskProgressView(item, lang);
+                  const showDetailedFindProgress = Boolean(detailedFindProgress);
+                  const taskLogLines = showDetailedFindProgress ? detailedFindProgress?.logLines || [] : [];
+                  const consoleLines = [...taskLogLines, ...jobRecentLogs(item, lang, tab)]
+                    .filter((line, index, rows) => Boolean(String(line || "").trim()) && rows.indexOf(line) === index);
+                  const progressView = detailedFindProgress ? {
+                    message: `${lang === "zh" ? "当前阶段" : "Current stage"} ${detailedFindProgress.stageIndex}/${detailedFindProgress.stageCount} · ${detailedFindProgress.stageLabel}`,
+                    percent: detailedFindProgress.stagePercent,
+                    measured: true,
+                    detail: `${lang === "zh" ? "具体步骤" : "Step"}：${detailedFindProgress.stepLabel} · ${lang === "zh" ? "正在进行" : "Now"}：${detailedFindProgress.action}`,
+                    ariaLabel: lang === "zh" ? "Find 当前阶段进度" : "Current Find stage progress",
+                  } : item.progress ? {
+                    message: displayJobProgressMessage(item, lang),
+                    percent: Number(item.progress.percent || 0),
+                    measured: Number(item.progress.total || 0) > 0,
+                    detail: Number(item.progress.total || 0) > 0
+                      ? `${jobProgressPhaseLabel(item, lang)} / ${item.progress.current} / ${item.progress.total}`
+                      : `${jobProgressPhaseLabel(item, lang)} ${jobStatusLabel(item.status, lang)}`,
+                    ariaLabel: "",
+                  } : null;
+                  return (
+                    <article className="jobCard" key={item.job_id}>
+                      <div className="jobHeader">
+                        <strong>{jobDisplayTitle(item, lang)}</strong>
+                        <span>{jobStatusLabel(item.status, lang)}</span>
                       </div>
-                    )}
-                    <pre>{jobRecentLogs(item, lang, tab).join("\n")}</pre>
-                  </article>
-                ))}
+                      <small>{jobMetaLine(item, lang)}</small>
+                      {["queued", "running", "cancelling"].includes(item.status) && (
+                        <button className="danger smallButton" onClick={() => stopJob(item.job_id)} disabled={item.status === "cancelling"}>
+                          {t.stop}
+                        </button>
+                      )}
+                      {progressView && (
+                        <div className="progressBlock" data-testid={detailedFindProgress ? "find-task-progress" : undefined}>
+                          <div className="progressMeta">
+                            <span>{progressView.message}</span>
+                            {progressView.measured && <strong>{progressView.percent}%</strong>}
+                          </div>
+                          {progressView.measured && <progress aria-label={progressView.ariaLabel || undefined} value={progressView.percent} max="100" />}
+                          <small>{progressView.detail}</small>
+                        </div>
+                      )}
+                      <pre>{consoleLines.join("\n")}</pre>
+                    </article>
+                  );
+                })}
               </div>
             )}
           </div>

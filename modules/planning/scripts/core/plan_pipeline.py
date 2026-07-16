@@ -136,7 +136,13 @@ def _find_claude_executable() -> Path | None:
 
 
 def _claude_env() -> dict[str, str]:
-    return os.environ.copy()
+    env = os.environ.copy()
+    workspace_root = Path(__file__).resolve().parents[4]
+    # Do not let a module-local Claude process discover the enclosing TASTE repository.
+    env["GIT_CEILING_DIRECTORIES"] = os.pathsep.join(
+        filter(None, (str(workspace_root), env.get("GIT_CEILING_DIRECTORIES", "")))
+    )
+    return env
 
 
 def _safe_label(value: str) -> str:

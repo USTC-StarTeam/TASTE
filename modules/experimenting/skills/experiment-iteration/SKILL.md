@@ -17,6 +17,7 @@ Use this skill when Experimenting asks the controller Claude Code to design, imp
 - Use exactly the selected `selected_plan_id` and `selected_idea_id`. Non-selected ideas and plans are backlog only.
 - Verify that `state/environment_handoff.json` and `state/evidence_ready_repo_selection.json` still match the selected IDs and repo before launching work.
 - Treat TASTE framework/module code as read-only context during an experiment iteration.
+- Task subagents must omit worktree isolation unless their cwd is an independent Git repository whose top-level remains inside the current `projects/<project>/` directory.
 - Ground metrics, logs, bad cases, citations, data availability, and claims in local evidence files.
 - Use the experiment environment locked by the current Environment handoff.
 - Record weak or missing evidence as `blocked` with `acceptance_blockers`.

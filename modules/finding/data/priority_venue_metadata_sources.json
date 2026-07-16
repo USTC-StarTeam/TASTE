@@ -19,7 +19,7 @@
         }
       ],
       "full_abstract_required": true,
-      "official_categories_expected": true,
+      "official_categories_expected": false,
       "allow_title_only_verified_cache": false,
       "fallback_policy": "Use older released NeurIPS years only when requested-year proceedings are objectively unavailable; never mark a title-only NeurIPS cache complete."
     },
@@ -156,11 +156,11 @@
           "adapter": "aaai_ojs",
           "source": "AAAI official OJS proceedings archive and article pages",
           "url_template": "https://ojs.aaai.org/index.php/AAAI/issue/archive",
-          "coverage": "official proceedings issues with article detail pages, abstracts, authors, PDFs and technical-track section metadata"
+          "coverage": "official proceedings issues with article detail pages, abstracts, authors and PDFs; numbered issue labels are not topical categories"
         }
       ],
       "full_abstract_required": true,
-      "official_categories_expected": true,
+      "official_categories_expected": false,
       "allow_title_only_verified_cache": false,
       "fallback_policy": "AAAI OJS issue listings must be enriched from article pages before a cache is verified."
     },

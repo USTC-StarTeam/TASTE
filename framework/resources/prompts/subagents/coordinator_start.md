@@ -1,6 +1,6 @@
 Coordinator startup for a new project session in `<workspace_root>`:
 
-1. Read the root `AGENTS.md` for stable TASTE boundaries.
+1. Read the root `CLAUDE.md` for stable TASTE boundaries.
 2. Read `framework/resources/automation/three_agent_protocol.md`.
 3. Read `projects/<project>/AGENTS.md`.
 4. Read project-local status, reports, and state artifacts under `projects/<project>/`; project handoff files belong only inside the project directory.

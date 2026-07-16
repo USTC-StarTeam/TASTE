@@ -212,28 +212,26 @@ class AppConfig(BaseModel):
     llm_roles: dict[str, LLMRoleConfig] = Field(default_factory=dict)
     llm_concurrency: int = 8
     idea_parallel_workers: int = 2
-    max_fetch_papers: int = 120
+    nonvenue_fetch_limit: int = 5000
     max_recommended_papers: int = 20
     max_ideas: int = 6
     venue_title_scan_limit: int = 0
     venue_title_scan_fraction: float = 1.0
-    find_recall_count: int = 2000
-    detail_fetch_count: int = 160
+    title_abstract_scoring_limit: int = 1000
     full_venue_corpus_audit: bool = True
     title_filter_timeout_sec: int = 120
     abstract_scoring_max_workers: int = 8
     abstract_scoring_batch_size: int = 6
     abstract_scoring_timeout_sec: int = 180
     arxiv_max_queries: int = 3
-    arxiv_per_query_limit: int = 50
     arxiv_timeout_sec: int = 15
-    arxiv_categories: list[str] = Field(default_factory=lambda: ["cs.AI"])
+    arxiv_categories: list[str] = Field(default_factory=list)
     arxiv_queries: list[str] = Field(default_factory=list)
     arxiv_start_date: str = ""
     arxiv_end_date: str = ""
     arxiv_llm_candidate_limit: int = 0
     arxiv_llm_candidates_per_category: int = 0
-    biorxiv_categories: list[str] = Field(default_factory=lambda: ["bioinformatics"])
+    biorxiv_categories: list[str] = Field(default_factory=list)
     biorxiv_start_date: str = ""
     biorxiv_end_date: str = ""
     biorxiv_llm_candidate_limit: int = 0

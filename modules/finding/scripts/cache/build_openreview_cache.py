@@ -211,7 +211,7 @@ def _normalize_note(note: dict[str, Any], year: int, spec: dict[str, Any], openr
         ],
     )
     track = _first_content_text(content, ["track", "Track", "venue", "Venue"])
-    category = primary_area or track or _first_content_text(content, ["category", "Category"])
+    category = primary_area or _first_content_text(content, ["category", "Category"])
     keywords = _collect_keywords(content)
 
     metadata = {
@@ -331,7 +331,7 @@ def _audit_counts(papers: list[dict[str, Any]]) -> dict[str, int]:
 def _category_counts(papers: list[dict[str, Any]]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for paper in papers:
-        category = _clean_text(paper.get("primary_area") or paper.get("category") or paper.get("track") or "(uncategorized)")
+        category = _clean_text(paper.get("primary_area") or paper.get("category") or "(uncategorized)")
         counts[category] = counts.get(category, 0) + 1
     return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
 
@@ -461,7 +461,7 @@ def _openreview_live_audit(
     probe_audits: list[dict[str, Any]],
 ) -> dict[str, Any]:
     missing_abstracts = sum(1 for paper in papers if not _clean_text(paper.get("abstract")))
-    has_categories = any(_clean_text(paper.get("primary_area") or paper.get("category") or paper.get("track")) for paper in papers)
+    has_categories = any(_clean_text(paper.get("primary_area") or paper.get("category")) for paper in papers)
     audit = {
         "schema_version": 1,
         "status": "partial",

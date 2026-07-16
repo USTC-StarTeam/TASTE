@@ -11,7 +11,7 @@ import signal
 import threading
 import time
 from collections import Counter
-from math import ceil
+from math import ceil, isfinite
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, TimeoutError as FutureTimeoutError, wait
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -63,14 +63,14 @@ from sources import _in_date_range, normalize_date
 LogFn = Callable[[str], None]
 CancelFn = Callable[[], bool]
 ProgressFn = Callable[..., None]
-SCORING_POLICY_VERSION = "direct_llm_title_abstract_ranked_topn_v23_supported_topic_boundary"
-FIND_RECOMMENDATION_POLICY = "topn_final_llm_supported_topic_real_abstract_read_owned_full_text_v25"
+SCORING_POLICY_VERSION = "direct_llm_title_abstract_ranked_topn_v24_no_topic_gate"
+FIND_RECOMMENDATION_POLICY = "topn_final_llm_real_abstract_no_topic_or_score_gate_v26"
 FIND_FINAL_SCORING_TEMPERATURE = 0.0
 FIND_TITLE_FILTER_TEMPERATURE = 0.0
 FINAL_LLM_SCORE_CACHE_SCHEMA_VERSION = "find_final_llm_score_cache_v1"
 FIND_INPUT_FIELDS = {"research_topic", "research_interest", "researcher_profile", "arxiv_queries"}
 FIND_LLM_CONFIG_FIELDS = {"provider", "base_url", "api_key", "model", "temperature", "llm_roles"}
-FINAL_LLM_SCORE_CACHE_PROMPT_POLICY = "final_title_abstract_prompt_v30_source_guard_domain_anchor"
+FINAL_LLM_SCORE_CACHE_PROMPT_POLICY = "final_title_abstract_prompt_v31_topic_audit_only"
 FINAL_LLM_SCORE_CACHE_MAX_ENTRIES = 50000
 FINAL_LLM_SCORE_CACHE_FIELDS = (
     "category",
@@ -168,7 +168,7 @@ Final Find recommendation contract:
 - Category selection, title filtering, local TF-IDF rank, source health, citations, and freshness are recall/audit signals only. They must never promote a paper into the user-visible recommendation list.
 - A user-visible recommendation must be judged from the real title plus real abstract/description in this final LLM scoring step.
 - fit_score is the final title+abstract ranking score. Use the full 0-10 range consistently with one decimal place: 9.0-10.0 exact center, 7.0-8.9 strong match, 5.0-6.9 partial/background usefulness, 3.0-4.9 weak/generic, and <=2.9 unrelated items. Do not default to integer or x.5 scores when evidence supports a finer distinction.
-- The workflow selects user-visible recommendations by sorting eligible final-scored rows. Eligibility requires real title+abstract judgment, topic_evidence_supported=true for the current core route, and a non-weak final LLM fit score; do not use weak rows merely to fill the target count.
+- The workflow selects user-visible recommendations by sorting all valid final-scored rows. Eligibility requires a real title+abstract judgment and a finite final LLM fit score; topic-evidence annotations and score magnitude do not create additional gates.
 - Broad background, inspiration-only, prerequisite-only, or partial-match papers should receive lower fit_score unless the abstract itself gives concrete reusable method/data/protocol/benchmark/evaluation/theory value.
 - Do not use venue prestige, citation count, local rank, title-only similarity, diversity_score, or route/foundation/claim labels to raise fit_score.
 - Missing abstract, metadata-only evidence, and title-only evidence cannot be recommended because they were not judged from real title+abstract content. Score magnitude affects ranking, not eligibility.
@@ -176,10 +176,10 @@ Final Find recommendation contract:
 - Preference hints, evaluation preferences, implementation preferences, and generic desiderata such as reproducibility, efficiency, safety, interpretability, or lightweight experiments are modifiers, not standalone topic routes. They can increase usefulness only after the title+abstract also supports the profile's core research object; by themselves they must not make topic_evidence_supported=true or justify a 7+ fit_score.
 - The generated route list is authoritative for matched_topic_route. When explicit routes are listed, copy one complete route from that list; do not return a short route fragment such as a subproblem, method component, desideratum, or hint as matched_topic_route.
 - If a route is written as "core route: evidence axes, desiderata, or examples", the text before the colon is the core route boundary. The comma-separated details after the colon are useful evidence axes and preferences, not mandatory components that every recommended paper must cover. A paper can support the route when the title+abstract directly addresses the core route and gives concrete reusable method/data/protocol/benchmark/evaluation/theory value, even if it covers only some listed axes.
-- A transferable method or foundation component is not a direct topic match by itself. If the title+abstract only shows that it might be adapted to the current profile, or does not directly address the core route boundary, set topic_evidence_supported=false and score it in the weak/generic band.
+- A transferable method or foundation component is not a direct topic match by itself. If the title+abstract only shows that it might be adapted to the current profile, or does not directly address the core route boundary, set topic_evidence_supported=false; calibrate fit_score independently from the overall title+abstract relevance.
 - Mentions of the profile domain only as a possible application, benchmark/dataset domain, motivating example, or background use case are boundary/background usefulness only. Keep them at 5-6 or lower unless the title+abstract also provides a method, data construction, evaluation protocol, theory, or actionable analysis that is concretely reusable for the research profile.
 - For every high score, the topic_evidence_basis must name the concrete profile-specific evidence found in the title+abstract. If the abstract uses a shared term in a different or generic setting, score it as weak/generic and set topic_evidence_supported=false with the missing profile evidence named.
-- Keep topic_evidence_supported and fit_score self-consistent: when topic_evidence_supported=false or topic_evidence starts with weak:, fit_score must stay in the weak/generic band (<=4.9) and diversity_score must not compensate it into a high recommendation.
+- Keep topic_evidence_supported, missing_topic_evidence, and matched_topic_route as audit explanations only. They must not cap fit_score, alter ranking scores, or decide recommendation eligibility.
 - Do not decide downstream experimental support here. Find recommends papers for Read; later full-text reading, repo/data/env/reproduction, and local experiment gates decide usable evidence scope.
 """.strip()
 
@@ -253,7 +253,14 @@ def _source_fetch_wall_timeout(source: str, default: int = 0) -> int:
     return specific or _positive_int_env("SOURCE_FETCH_WALL_TIMEOUT_SEC", default)
 
 
-def _run_with_wall_timeout(label: str, call: Callable[[], Any], timeout_sec: int | float, log: LogFn | None = None) -> tuple[bool, Any, BaseException | None]:
+def _run_with_wall_timeout(
+    label: str,
+    call: Callable[[], Any],
+    timeout_sec: int | float,
+    log: LogFn | None = None,
+    *,
+    on_timeout: Callable[[], None] | None = None,
+) -> tuple[bool, Any, BaseException | None]:
     timeout = float(timeout_sec or 0)
     if timeout <= 0:
         try:
@@ -275,6 +282,8 @@ def _run_with_wall_timeout(label: str, call: Callable[[], Any], timeout_sec: int
     worker.start()
     if done.wait(timeout):
         return True, result.get("value"), result.get("error")
+    if on_timeout is not None:
+        on_timeout()
     if log:
         log(f"{label}: wall timeout after {timeout:g}s; marking this source limited and continuing")
     return False, None, None
@@ -685,13 +694,6 @@ def _final_recommendation_score(fit_score: object, diversity_score: object = Non
     return round(min(10.0, base + max(0.0, _as_float(quality_bonus))), 2)
 
 
-def _minimum_user_visible_llm_fit_score() -> float:
-    try:
-        return max(0.0, min(10.0, float(os.environ.get("FIND_MIN_USER_VISIBLE_LLM_FIT_SCORE", "5.0") or 5.0)))
-    except (TypeError, ValueError):
-        return 5.0
-
-
 def _flatten_quality_value(value: object, *, depth: int = 0) -> str:
     if value is None or depth > 2:
         return ""
@@ -875,19 +877,16 @@ def _quality_bonus_allowed(item: dict) -> bool:
         fit < 6.5
         or base_score < 6.0
         or any(marker in relevance_text for marker in ["不相关", "无关", "irrelevant", "not relevant", "unrelated"])
-        or _has_topic_evidence_contradiction(item)
     ):
         return False
-    return _has_strong_topic_evidence(item)
+    return True
 
 
 def _presentation_bonus_allowed(item: dict) -> bool:
     fit = _as_float(item.get("fit_score"))
     if fit < 6.0:
         return False
-    if _has_topic_evidence_contradiction(item):
-        return False
-    return _has_strong_topic_evidence(item) and _has_real_abstract(item)
+    return _has_real_abstract(item)
 
 
 
@@ -1580,39 +1579,6 @@ def _foundation_strong_enough(item: dict, interest: str = "") -> bool:
         return False
     return True
 
-def _repair_weak_topic_fit_consistency(item: dict) -> bool:
-    if str(item.get("reason_source") or "") != "llm abstract evaluation":
-        return False
-    if str(item.get("topic_evidence_source") or "") != "llm_adaptive":
-        return False
-    evidence = str(item.get("topic_evidence") or "").lower()
-    if not (item.get("topic_evidence_supported") is False or evidence.startswith("weak:") or _has_topic_evidence_contradiction(item)):
-        return False
-    fit = _as_float(item.get("fit_score"))
-    diversity = _as_float(item.get("diversity_score"))
-    weak_fit_cap = 4.8
-    weak_diversity_cap = 4.8
-    if fit <= weak_fit_cap and diversity <= weak_diversity_cap and _as_float(item.get("quality_bonus")) <= 0:
-        return False
-    item.setdefault("llm_weak_topic_fit_score_original", fit)
-    item.setdefault("llm_weak_topic_diversity_score_original", diversity)
-    item["fit_score"] = min(fit, weak_fit_cap)
-    item["diversity_score"] = min(diversity, weak_diversity_cap)
-    item["score"] = _combined_score(item.get("fit_score"), item.get("diversity_score"))
-    item["quality_bonus"] = 0.0
-    item["quality_bonus_reason"] = ""
-    item["quality_bonus_policy"] = SCORING_POLICY_VERSION
-    item["llm_weak_topic_fit_consistency_repaired"] = True
-    item["weak_candidate_for_critique"] = True
-    item["not_positive_support"] = True
-    if item.get("recommendation_score") not in (None, ""):
-        item["recommendation_score"] = min(
-            _as_float(item.get("recommendation_score"), item.get("score")),
-            _final_recommendation_score(item.get("fit_score"), item.get("diversity_score"), 0.0),
-        )
-    return True
-
-
 def _demote_unstable_foundation_item(item: dict) -> None:
     reason = str(item.get("foundation_invalid_reason") or "").strip()
     item["topic_evidence_supported"] = False
@@ -1623,12 +1589,6 @@ def _demote_unstable_foundation_item(item: dict) -> None:
     item["weak_candidate_for_critique"] = True
     item["foundation_demoted_from_strong"] = True
     item["not_positive_support"] = True
-    item["fit_score"] = min(_as_float(item.get("fit_score")), 4.8)
-    item["diversity_score"] = min(_as_float(item.get("diversity_score")), 3.8)
-    item["score"] = _combined_score(item.get("fit_score"), item.get("diversity_score"))
-    item["recommendation_score"] = min(_as_float(item.get("recommendation_score"), item.get("score")), item["score"])
-    item["stable_rank_score"] = min(_as_float(item.get("stable_rank_score"), item.get("stable_source_score")), 5.5)
-    item["stable_source_score"] = min(_as_float(item.get("stable_source_score")), 5.5)
     item["recommendation_note_zh"] = "未入选线索：LLM解释或摘要证据没有达到当前 Find 推荐要求，不展示为推荐论文。"
     item["recommendation_note_en"] = "Not selected for recommendation: the LLM explanation or source evidence did not satisfy the current Find recommendation contract."
     item["recommendation_note"] = item["recommendation_note_zh"] if not reason else f"{item['recommendation_note_zh']} Gate reason: {reason}"
@@ -2037,14 +1997,7 @@ def _stable_source_ranking_score(item: dict, interest: str) -> float:
     if local_rank > 0:
         local_bonus += max(0.0, 0.4 * (1.0 - min(local_rank, 200) / 200.0))
     abstract_bonus = 0.2 if _clean_abstract_text(item.get("abstract")) else 0.0
-    evidence = str(item.get("topic_evidence") or "").lower()
     score = source_fit + local_bonus + abstract_bonus
-    if evidence.startswith("passed:"):
-        score += 0.35
-    elif evidence.startswith("weak:"):
-        score = min(score, 5.75)
-    else:
-        score = min(score, 6.0)
     return round(max(0.0, min(10.0, score)), 2)
 
 
@@ -2342,7 +2295,6 @@ def _apply_llm_topic_evidence(item: dict, row: dict, interest: str) -> None:
         item["topic_evidence"] = "weak: missing real abstract evidence"
         item["topic_evidence_supported"] = False
         item["topic_evidence_basis"] = item.get("topic_evidence_basis") or "title_only"
-    _repair_weak_topic_fit_consistency(item)
     item["topic_evidence_audit_only"] = True
 
 
@@ -2424,32 +2376,38 @@ def _source_positive_int_env(name: str, default: int = 0) -> int:
     return value if value > 0 else int(default)
 
 
-def _source_request_params(source: str, config: AppConfig, *, search_terms: dict[str, Any] | None = None, arxiv_targeted: list[tuple[str, str]] | None = None, biorxiv_phrases: list[str] | None = None) -> dict[str, Any]:
+def _source_request_params(
+    source: str,
+    config: AppConfig,
+    *,
+    search_terms: dict[str, Any] | None = None,
+    arxiv_targeted: list[tuple[str, str]] | None = None,
+    biorxiv_phrases: list[str] | None = None,
+    arxiv_categories: list[str] | None = None,
+    biorxiv_categories: list[str] | None = None,
+) -> dict[str, Any]:
     source = str(source or "").lower()
     start_date, end_date, date_window_source = _source_effective_date_window(source, config)
     if source == "arxiv":
         return {
-            "categories": list(config.arxiv_categories or []),
+            "categories": list(arxiv_categories if arxiv_categories is not None else config.arxiv_categories or []),
             "queries": list(config.arxiv_queries or []),
             "start_date": start_date,
             "end_date": end_date,
             "date_window_source": date_window_source,
-            "max_items": max(1, int(config.max_fetch_papers or 1)),
-            "candidate_limit": max(1, int(config.max_fetch_papers or 1)),
-            "raw_item_limit": _source_positive_int_env("ARXIV_MAX_TOTAL", 0),
+            "fetch_limit": max(1, int(config.nonvenue_fetch_limit or 5000)),
+            "raw_item_limit": max(1, int(config.nonvenue_fetch_limit or 5000)),
             "max_queries": int(config.arxiv_max_queries or 0),
-            "per_query_limit": int(config.arxiv_per_query_limit or 0),
         }
     if source == "biorxiv":
         return {
-            "categories": list(config.biorxiv_categories or []),
+            "categories": list(biorxiv_categories if biorxiv_categories is not None else config.biorxiv_categories or []),
             "start_date": start_date,
             "end_date": end_date,
             "date_window_source": date_window_source,
-            "max_items": max(1, int(config.max_fetch_papers or 1)),
-            "candidate_limit": max(1, int(config.max_fetch_papers or 1)),
-            "raw_item_limit": _source_positive_int_env("BIORXIV_COMPLETE_WINDOW_MAX_ITEMS", 0),
-            "complete_window_scan": os.environ.get("BIORXIV_COMPLETE_WINDOW", "1").lower() in {"1", "true", "yes", "on"},
+            "fetch_limit": max(1, int(config.nonvenue_fetch_limit or 5000)),
+            "raw_item_limit": max(1, int(config.nonvenue_fetch_limit or 5000)),
+            "complete_window_scan": os.environ.get("BIORXIV_COMPLETE_WINDOW", "0").lower() in {"1", "true", "yes", "on"},
             "search_phrases": list(biorxiv_phrases or _source_search_phrases_signature(search_terms)),
         }
     if source == "nature":
@@ -2509,7 +2467,7 @@ def _source_freshness_report(source: str, coverage: dict[str, str], requested_en
     }
 
 
-def _annotate_source_completeness(source: str, status: dict, rows: list[dict], params: dict[str, Any], *, min_count: int = 1) -> dict:
+def _annotate_source_completeness(source: str, status: dict, rows: list[dict], params: dict[str, Any]) -> dict:
     status = dict(status or {})
     coverage = _source_date_coverage(rows)
     start = normalize_date(str(params.get("start_date") or ""))
@@ -2520,16 +2478,17 @@ def _annotate_source_completeness(source: str, status: dict, rows: list[dict], p
     tolerance_applied = bool(status.get("coverage_tolerance_applied"))
     targeted_query_exhausted = bool(status.get("targeted_query_exhausted"))
     date_coverage_reaches_start = bool((not start) or (oldest and oldest <= start) or tolerance_applied or targeted_query_exhausted)
-    requested_max = int(params.get("raw_item_limit") or params.get("max_items") or 0)
     source_lower = str(source or "").lower()
     api_total = int(status.get("api_total") or 0)
     cap_truncated = False
     if source_lower == "biorxiv":
         if status.get("complete_window_scan") and not status.get("raw_item_limit_reached") and status.get("stopped_reason") != "page limit":
             cap_truncated = False
+        elif status.get("raw_item_limit_reached"):
+            cap_truncated = True
         elif api_total and len(rows) < api_total:
             cap_truncated = True
-    elif source_lower == "arxiv" and (bool(status.get("raw_item_limit_reached")) or (bool(status.get("target_count_reached")) and requested_max and len(rows) >= requested_max)):
+    elif source_lower == "arxiv" and bool(status.get("raw_item_limit_reached")):
         cap_truncated = True
     elif source_lower in {"nature", "science"} and (bool(status.get("raw_item_limit_reached")) or bool(status.get("targeted_page_limit_reached")) or bool(status.get("openalex_page_limit_reached"))):
         cap_truncated = True
@@ -2558,7 +2517,6 @@ def _annotate_source_completeness(source: str, status: dict, rows: list[dict], p
     status["date_coverage_reaches_start"] = date_coverage_reaches_start
     status["coverage_gap_days"] = int(status.get("coverage_gap_days") or coverage_gap)
     status["cap_truncated"] = cap_truncated
-    status["min_count_required"] = max(1, int(min_count or 1))
     status.update(freshness)
     if cap_truncated:
         status["omission_risk"] = "capped source scan; records outside the cap may be omitted before downstream ranking"
@@ -2647,6 +2605,29 @@ def _sanitize_venue_metadata_audit(audit: object) -> dict:
     legacy_reference_dir = "/".join(["third" + "_party", "reference_TASTE" + "_latest"])
     if legacy_reference_dir in source_url or ("/" + "reference_TASTE_latest" + "/") in source_url:
         cleaned["source_url"] = ""
+    source_adapter = str(cleaned.get("source_adapter") or cleaned.get("adapter") or "").lower()
+    source_scope = str(cleaned.get("source_scope") or "").lower()
+    non_topical_adapters = (
+        "aaai_ojs",
+        "cikm_official_proceedings",
+        "sigir_official",
+        "www_official_accepted",
+    )
+    non_topical_scopes = {
+        "official_aaai_ojs_proceedings",
+        "official_cikm_proceedings_html",
+        "official_sigir_accepted_title_index",
+        "official_sigir_proceedings_partial_html",
+        "official_www_accepted_title_index",
+    }
+    if (
+        source_adapter.startswith("neurips_official_papers")
+        or source_scope == "official_neurips_papers_index"
+        or source_adapter.startswith(non_topical_adapters)
+        or source_scope in non_topical_scopes
+    ):
+        cleaned["has_official_categories"] = False
+        cleaned["category_status"] = "no_official_categories"
     return cleaned
 
 
@@ -2657,6 +2638,8 @@ def _sanitize_venue_title_index_rows(rows: list[dict]) -> list[dict]:
         if not isinstance(row, dict):
             continue
         item = dict(row)
+        _sanitize_non_topical_category_row(item)
+        _sanitize_presentation_category_row(item)
         _sanitize_neurips_official_row(item)
         metadata = item.get("metadata")
         if isinstance(metadata, dict):
@@ -2729,12 +2712,82 @@ def _sanitize_neurips_official_row(item: dict) -> None:
     track = _neurips_track_from_detail_url(detail_url)
     if not track:
         return
-    item["category"] = track
     item["track"] = track
-    item["classification_source"] = "official"
+    for key in ("primary_area", "category"):
+        if str(item.get(key) or "").strip().lower() == track.lower():
+            item[key] = ""
+    if not str(item.get("primary_area") or item.get("category") or "").strip():
+        item["classification_source"] = "official_track"
+    metadata = dict(metadata)
+    metadata["category_semantics"] = "presentation_track_only"
+    audit = metadata.get("venue_metadata_audit")
+    if isinstance(audit, dict):
+        metadata["venue_metadata_audit"] = _sanitize_venue_metadata_audit(audit)
+    item["metadata"] = metadata
     authors = str(item.get("authors") or "").strip()
     if authors.endswith(track):
         item["authors"] = authors[: -len(track)].strip(" ,")
+
+
+def _sanitize_non_topical_category_row(item: dict) -> None:
+    if not isinstance(item, dict):
+        return
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    audit = metadata.get("venue_metadata_audit") if isinstance(metadata.get("venue_metadata_audit"), dict) else {}
+    source_text = " ".join(
+        str(value or "").lower()
+        for value in (
+            item.get("source"),
+            audit.get("adapter"),
+            audit.get("source_adapter"),
+            audit.get("source_scope"),
+        )
+    )
+    semantics = ""
+    if "aaai_ojs" in source_text:
+        semantics = "publication_issue_not_topic"
+    elif "cikm_official_proceedings" in source_text:
+        semantics = "program_session_or_paper_type_not_topic"
+    elif "www_official_accepted" in source_text or "sigir_official" in source_text:
+        semantics = "track_or_paper_type_not_verified_topic_taxonomy"
+    if not semantics:
+        return
+    track = str(item.get("track") or item.get("primary_area") or item.get("category") or "").strip()
+    if track:
+        item["track"] = track
+    item["primary_area"] = ""
+    item["category"] = ""
+    item["classification_source"] = "official_track" if track else "unavailable"
+    metadata = dict(metadata)
+    metadata["category_semantics"] = semantics
+    item["metadata"] = metadata
+
+
+def _sanitize_presentation_category_row(item: dict) -> None:
+    if not isinstance(item, dict):
+        return
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    track = str(item.get("track") or "").strip()
+    presentation_type = _canonical_presentation_type(
+        item.get("presentation_type")
+        or metadata.get("presentation_type")
+        or track
+    )
+    if not presentation_type:
+        return
+    cleared = False
+    for key in ("primary_area", "category"):
+        value = str(item.get(key) or "").strip()
+        if not value:
+            continue
+        if (track and value.lower() == track.lower()) or _canonical_presentation_type(value) == presentation_type:
+            item[key] = ""
+            cleared = True
+    if cleared and not str(item.get("primary_area") or item.get("category") or "").strip():
+        item["classification_source"] = "official_presentation"
+        metadata = dict(metadata)
+        metadata["category_semantics"] = "presentation_not_topic"
+        item["metadata"] = metadata
 
 
 def _venue_title_index_cache_rows_usable(venue: dict, years: list[int], rows: list[dict], adapter: str) -> bool:
@@ -3332,6 +3385,7 @@ def _fetch_venue_title_index_for_find(
     else:
         papers, adapter = _fetch_venue_title_index_online(venue, years, limit)
     if papers:
+        papers = _sanitize_venue_title_index_rows(papers)
         if _venue_title_index_cache_rows_usable(venue, years, papers, adapter):
             _store_venue_title_index_cache(venue, years, papers, adapter)
             cached, cached_adapter = _load_venue_title_index_cache(venue, years, limit)
@@ -3346,34 +3400,6 @@ def _fetch_venue_title_index_for_find(
     if cached:
         return cached, cached_adapter
     return papers, adapter
-
-
-def _target_recall_count(config: AppConfig, scanned_count: int) -> int:
-    requested = int(os.environ.get("FIND_RECALL_COUNT", "0") or 0)
-    if requested <= 0:
-        requested = int(config.find_recall_count or 0)
-    if requested <= 0:
-        requested = max(config.max_fetch_papers, config.venue_title_scan_limit)
-    return max(1, min(scanned_count, requested))
-
-
-def _min_title_candidates(config: AppConfig, scanned_count: int) -> int:
-    requested = int(os.environ.get("MIN_TITLE_CANDIDATES", "0") or 0)
-    if requested <= 0:
-        requested = max(
-            60,
-            int(config.max_recommended_papers or 0) * 3,
-            int(config.max_fetch_papers or 0),
-            int(config.detail_fetch_count or 0),
-        )
-    return max(1, min(scanned_count, requested))
-
-
-def _min_detail_candidates(config: AppConfig, recall_count: int) -> int:
-    requested = int(os.environ.get("MIN_DETAIL_CANDIDATES", "0") or 0)
-    if requested <= 0:
-        requested = max(40, int(config.max_recommended_papers or 0) * 2)
-    return max(1, min(recall_count, requested))
 
 
 def _large_pool_threshold() -> int:
@@ -3392,7 +3418,8 @@ def _local_database_metadata_audit(local: dict) -> dict:
     summary = local.get("category_summary") if isinstance(local.get("category_summary"), dict) else {}
     expected_count = int(local.get("paper_count") or 0)
     category_entries = summary.get("category_summary") if isinstance(summary.get("category_summary"), list) else []
-    manifest_audit = local.get("metadata_completeness_audit") if isinstance(local.get("metadata_completeness_audit"), dict) else {}
+    raw_manifest_audit = local.get("metadata_completeness_audit") if isinstance(local.get("metadata_completeness_audit"), dict) else {}
+    manifest_audit = _sanitize_venue_metadata_audit(raw_manifest_audit)
     manifest = local.get("manifest") if isinstance(local.get("manifest"), dict) else {}
     source_adapter = str(
         local.get("source_adapter")
@@ -3434,7 +3461,6 @@ def _local_database_metadata_audit(local: dict) -> dict:
         expected_count > 0
         and len(papers) == expected_count
         and missing_titles == 0
-        and (not categories_are_official or (bool(category_entries) and category_total == expected_count))
     )
     complete = local_files_consistent and (bool(manifest_audit.get("complete")) if manifest_audit else True)
     audit = dict(manifest_audit) if manifest_audit else {}
@@ -3469,6 +3495,8 @@ def _local_database_metadata_audit(local: dict) -> dict:
         "expected_paper_count": expected_count,
         "category_count": len(category_entries),
         "category_total_count": category_total,
+        "categorized_paper_count": category_total,
+        "category_coverage": (category_total / expected_count) if expected_count else 0.0,
         "missing_title_count": missing_titles,
         "missing_abstract_count": missing_abstracts,
         "official_abstract_unavailable_count": unavailable_abstracts,
@@ -3800,32 +3828,26 @@ def _source_count_hint(selection: object) -> int:
 
 def _recommendation_target_hint(config: AppConfig) -> int:
     configured = int(os.environ.get("STRONG_RECOMMENDATION_TARGET_COUNT", "0") or 0)
-    if configured > 0:
-        return max(1, configured)
     source_count = _source_count_hint(config.default_find_selection or {})
     source_target = max(1, source_count) * 5 if source_count > 0 else 0
     requested = int(config.max_recommended_papers or 0)
-    # This hint sizes title/detail recall pools, not the final visible Top-N.
+    # This hint sizes internal title-screening work, not the final visible Top-N.
     # A project may keep a compact visible recommendation target while asking
     # Find to inspect a much wider candidate pool before final title+abstract
     # scoring. Use the larger configured hint so large venues are not sampled
     # down to only a few hundred titles before abstracts are fetched.
-    return max(1, requested, source_target, 20)
+    return max(1, configured, requested, source_target, 20)
 
 
 def _llm_title_filter_scan_budget(config: AppConfig, scanned_count: int) -> int:
     explicit = int(os.environ.get("LLM_TITLE_FILTER_MAX_TITLES", "0") or 0)
     if explicit <= 0:
         target = _recommendation_target_hint(config)
-        recall_budget = _target_recall_count(config, scanned_count)
-        detail_budget = int(getattr(config, "detail_fetch_count", 0) or 0)
         default_cap = int(os.environ.get("LLM_TITLE_FILTER_DEFAULT_MAX_TITLES", "0") or 0)
         if default_cap <= 0:
             default_cap = 5000
         explicit = max(
             400,
-            recall_budget,
-            detail_budget * 2,
             min(default_cap, target * 100),
         )
     return max(1, min(scanned_count, explicit))
@@ -3837,17 +3859,6 @@ def _local_title_screen_budget(config: AppConfig, scanned_count: int) -> int:
         target = _recommendation_target_hint(config)
         explicit = max(160, min(1200, target * 25))
     return max(1, min(scanned_count, explicit))
-
-
-def _title_detail_candidate_target(config: AppConfig, scanned_count: int) -> int:
-    explicit = int(os.environ.get("TITLE_DETAIL_CANDIDATE_TARGET", "0") or 0)
-    if explicit <= 0:
-        target = _recommendation_target_hint(config)
-        detail_budget = int(getattr(config, "detail_fetch_count", 0) or 0)
-        recall_budget = _target_recall_count(config, scanned_count)
-        explicit = max(240, detail_budget, min(recall_budget, max(1500, target * 60)))
-    return max(1, min(scanned_count, explicit))
-
 
 
 def _title_rank_key(row: dict) -> tuple:
@@ -3870,7 +3881,7 @@ def _score_title_pool(items: list[dict], config: AppConfig, interest: str, *, gl
         per_category_limit = 200
     limit = int(global_limit or 0)
     if limit <= 0:
-        limit = max(_target_recall_count(config, len(items)), len(items))
+        limit = len(items)
     limit = max(1, min(len(items), limit))
     ranked, _report = rank_papers_tfidf(
         items,
@@ -3898,49 +3909,6 @@ def _local_title_screen_pool(items: list[dict], config: AppConfig, interest: str
     return ranked
 
 
-def _ranked_recall_pool(items: list[dict], config: AppConfig) -> list[dict]:
-    ranked = sorted(_dedupe_items(items), key=_stable_rank_key)
-    return ranked[: _target_recall_count(config, len(ranked))]
-
-
-def _venue_recall_result_limit(config: AppConfig, scanned_count: int) -> int:
-    # Venue discovery is a broad title-screening stage. max_fetch_papers is kept for
-    # non-venue sources; conference title pools should honor the Find recall/detail
-    # settings so large proceedings are not collapsed before abstract scoring.
-    requested = max(
-        _target_recall_count(config, scanned_count),
-        int(config.detail_fetch_count or 0),
-        int(config.max_recommended_papers or 0),
-    )
-    return max(1, min(scanned_count, requested))
-
-
-def _detail_fetch_count(config: AppConfig, recall_count: int) -> int:
-    requested = int(os.environ.get("DETAIL_FETCH_COUNT", "0") or 0)
-    if requested <= 0:
-        requested = int(config.detail_fetch_count or 0)
-    if requested <= 0:
-        requested = max(config.max_fetch_papers, config.max_recommended_papers, min(recall_count, 80))
-    requested = max(requested, _min_detail_candidates(config, recall_count))
-    return max(1, min(recall_count, requested))
-
-
-def _venue_detail_fetch_count(config: AppConfig, recall_count: int) -> int:
-    """Return how many venue candidates enter detail fetch and LLM scoring.
-
-    Conference proceedings can expose thousands of retained title candidates.
-    Detail pages are slow external resources, so the default must be bounded by
-    the run config. A caller can explicitly opt into full venue detail scoring
-    for controlled audits.
-    """
-    if os.environ.get("FULL_VENUE_DETAIL_FETCH", "0").lower() in {"1", "true", "yes", "on", "full"}:
-        return max(1, recall_count)
-    explicit = int(os.environ.get("VENUE_DETAIL_FETCH_COUNT", "0") or 0)
-    if explicit > 0:
-        return max(1, min(recall_count, explicit))
-    return _detail_fetch_count(config, recall_count)
-
-
 def _venue_detail_wall_timeout_sec(venue_name: str, adapter: str, candidate_count: int) -> float:
     explicit = float(os.environ.get("VENUE_DETAIL_WALL_TIMEOUT_SEC", "0") or 0)
     if explicit > 0:
@@ -3959,29 +3927,49 @@ def _target_triage_candidate_count(config: AppConfig) -> int:
 
 
 def _final_llm_scoring_limit(config: AppConfig, candidate_count: int) -> int:
-    configured = int(os.environ.get("FINAL_LLM_SCORING_LIMIT", "0") or 0)
-    if configured > 0:
-        return max(1, min(candidate_count, configured))
-    target = _strong_recommendation_target_count(config)
-    # Strong recommendations can only come from final LLM-scored rows. By default
-    # every detail-fetched candidate is judged by the LLM; explicit environment
-    # limits are the only way to reduce this for a one-off constrained run.
-    default_limit = candidate_count
-    return max(1, min(candidate_count, default_limit))
+    if candidate_count <= 0:
+        return 0
+    configured = max(1, int(getattr(config, "title_abstract_scoring_limit", 1000) or 1000))
+    return max(1, min(candidate_count, configured))
 
 
-def _source_final_llm_scoring_limit(config: AppConfig, source_name: str, candidate_count: int) -> int:
-    limit = _final_llm_scoring_limit(config, candidate_count)
-    source_key = str(source_name or "").strip().lower().replace(" ", "_").replace("-", "_")
-    if source_key:
-        specific = _positive_int_env(f"{source_key.upper()}_FINAL_LLM_SCORING_LIMIT", 0)
-        if specific:
-            limit = min(limit, specific)
-    if source_key in {"nature", "science", "arxiv", "biorxiv", "huggingface", "github"}:
-        nonvenue_limit = _positive_int_env("NONVENUE_FINAL_LLM_SCORING_LIMIT", 0)
-        if nonvenue_limit:
-            limit = min(limit, nonvenue_limit)
-    return max(1, min(candidate_count, limit))
+def _select_title_abstract_scoring_groups(
+    groups: list[tuple[str, list[dict], str]],
+    config: AppConfig,
+    *,
+    require_title_llm_score: bool,
+    log: LogFn,
+) -> list[tuple[str, list[dict], str]]:
+    candidates = [item for _source, items, _sink in groups for item in items]
+    if require_title_llm_score:
+        candidates = [item for item in candidates if item.get("title_llm_fit_score") not in (None, "")]
+    ranked = sorted(candidates, key=_title_rank_key)
+    selected: list[dict] = []
+    seen: set[str] = set()
+    limit = _final_llm_scoring_limit(config, len(ranked)) if ranked else 0
+    for item in ranked:
+        key = _recommendation_identity_key(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        selected.append(item)
+        if len(selected) >= limit:
+            break
+    selected_ids = {id(item) for item in selected}
+    for rank, item in enumerate(selected, 1):
+        item["title_abstract_scoring_selected"] = True
+        item["title_abstract_scoring_global_rank"] = rank
+    selected_groups = [
+        (source_name, [item for item in items if id(item) in selected_ids], sink_name)
+        for source_name, items, sink_name in groups
+    ]
+    selected_groups = [group for group in selected_groups if group[1]]
+    log(
+        "Global title+abstract scoring selection: "
+        f"eligible_title_scored={len(ranked)}, unique_selected={len(selected)}, "
+        f"configured_limit={int(config.title_abstract_scoring_limit)}"
+    )
+    return selected_groups
 
 
 def _abstract_enrichment_limits(config: AppConfig, missing_count: int) -> tuple[int, int]:
@@ -4196,179 +4184,10 @@ def _enrich_missing_abstracts_for_final_scoring(
 
 
 
-def _apply_result_limit_with_floor(items: list[dict], limit: int | None, config: AppConfig) -> list[dict]:
+def _apply_result_limit(items: list[dict], limit: int | None) -> list[dict]:
     if not limit or len(items) <= limit:
         return items
-    effective_limit = max(int(limit), _min_title_candidates(config, len(items)))
-    return items[:effective_limit]
-
-
-def _detail_presentation_recall_per_type(detail_count: int) -> int:
-    explicit = int(os.environ.get("PRESENTATION_RECALL_DETAIL_PER_TYPE", "0") or 0)
-    if explicit > 0:
-        return explicit
-    return max(2, min(8, ceil(max(1, int(detail_count or 0)) * 0.04)))
-
-
-def _presentation_recall_title_floor() -> float:
-    raw = os.environ.get("PRESENTATION_RECALL_TITLE_SCORE_FLOOR", "")
-    if raw not in (None, ""):
-        return max(0.0, min(10.0, _as_float(raw)))
-    return 5.0
-
-
-def _detail_candidate_key(item: dict) -> str:
-    return str(item.get("id") or item.get("url") or item.get("title") or "")
-
-
-def _local_quality_recall_signal(item: dict) -> bool:
-    local_score = _as_float(item.get("local_score"), item.get("local_rank_score"))
-    phrase_matches = _as_int(item.get("local_profile_phrase_match_count"), 0)
-    local_rank = _as_int(item.get("local_rank") or item.get("title_local_rank"), 10**9)
-    try:
-        score_floor = float(os.environ.get("QUALITY_LOCAL_RECALL_SCORE_FLOOR", "0.08") or 0.08)
-    except Exception:
-        score_floor = 0.08
-    try:
-        rank_cap = int(os.environ.get("QUALITY_LOCAL_RECALL_RANK_CAP", "300") or 300)
-    except Exception:
-        rank_cap = 300
-    return local_score >= max(0.0, score_floor) or phrase_matches > 0 or local_rank <= max(1, rank_cap)
-
-
-def _quality_local_recall_rank_key(item: dict) -> tuple:
-    presentation_bonus, _reason = _presentation_bonus(item)
-    return (
-        -presentation_bonus,
-        -_title_fit_for_recall(item),
-        -_as_float(item.get("local_score"), item.get("local_rank_score")),
-        _as_int(item.get("local_rank") or item.get("title_local_rank"), 10**9),
-        str(item.get("title") or item.get("id") or item.get("url") or "").lower(),
-    )
-
-
-def _quality_local_title_recall_supplement(
-    scanned_titles: list[dict],
-    selected_titles: list[dict],
-    venue_name: str,
-    log: LogFn,
-) -> list[dict]:
-    if not scanned_titles or not selected_titles:
-        return selected_titles
-    try:
-        per_type = int(os.environ.get("QUALITY_LOCAL_TITLE_RECALL_PER_TYPE", "0") or 0)
-    except Exception:
-        per_type = 0
-    if per_type <= 0:
-        per_type = 8
-    if per_type <= 0:
-        return selected_titles
-    selected = list(selected_titles)
-    seen = {_detail_candidate_key(item) for item in selected if _detail_candidate_key(item)}
-    added_counts: Counter[str] = Counter()
-    for label in ("oral", "spotlight"):
-        eligible = [
-            item
-            for item in scanned_titles
-            if label in _presentation_labels(item)
-            and _detail_candidate_key(item)
-            and _detail_candidate_key(item) not in seen
-            and _screening_quality_bonus(item) > 0
-            and (_local_quality_recall_signal(item) or _title_fit_for_recall(item) >= _presentation_recall_title_floor())
-        ]
-        if not eligible:
-            continue
-        eligible.sort(key=_quality_local_recall_rank_key)
-        for item in eligible[:per_type]:
-            item["quality_local_title_recall"] = True
-            item["reason_source"] = "quality local title recall"
-            item.setdefault(
-                "title_reason",
-                "Retained for detail fetching by high-quality local recall; final recommendations still require a real abstract and final relevance scoring.",
-            )
-            item.setdefault("recommendation_note_zh", "高质量展示形式且有局部相关信号，因此补入详情候选；是否推荐仍只由真实摘要和最终相关性评分决定。")
-            item.setdefault("recommendation_note_en", "Retained by high-quality local recall for detail fetching; recommendation is still decided only from real abstracts and final relevance scoring.")
-            selected.append(item)
-            seen.add(_detail_candidate_key(item))
-            added_counts[label] += 1
-    if added_counts:
-        summary = ", ".join(f"{label} +{count}" for label, count in sorted(added_counts.items()))
-        log(
-            f"{venue_name}: high-quality local recall added {sum(added_counts.values())} title candidates "
-            f"({summary}) before detail fetching; final recommendations still require real abstracts and final LLM relevance scoring"
-        )
-    return selected
-
-
-def _title_fit_for_recall(item: dict) -> float:
-    score = 0.0
-    for key in ("title_llm_fit_score", "fit_score", "score", "abstract_fit_score", "retrieval_fit_score"):
-        value = item.get(key)
-        if value not in (None, ""):
-            score = max(score, _as_float(value))
-    local = _as_float(item.get("local_rank_score"), item.get("local_score") or item.get("local_tfidf_score"))
-    if local > 0:
-        score = max(score, min(10.0, local * 10.0))
-    phrase_matches = _as_int(item.get("local_profile_phrase_match_count"), 0)
-    if phrase_matches > 0:
-        score = max(score, min(10.0, 5.0 + phrase_matches))
-    return score
-
-
-def _detail_titles_with_presentation_recall(
-    selected_titles: list[dict],
-    detail_count: int,
-    venue_name: str,
-    log: LogFn,
-) -> list[dict]:
-    if not selected_titles or detail_count <= 0:
-        return []
-    base = list(selected_titles[:detail_count])
-    if len(selected_titles) <= len(base):
-        return base
-    per_type = _detail_presentation_recall_per_type(len(base))
-    if per_type <= 0:
-        return base
-    floor = _presentation_recall_title_floor()
-    seen = {_detail_candidate_key(item) for item in base if _detail_candidate_key(item)}
-    added_counts: Counter[str] = Counter()
-    recall_marked = [item for item in selected_titles if item.get("quality_local_title_recall")]
-    if recall_marked:
-        recall_marked.sort(key=_quality_local_recall_rank_key)
-        target = min(per_type, len(recall_marked))
-        for item in recall_marked[:target]:
-            key = _detail_candidate_key(item)
-            if not key or key in seen:
-                continue
-            base.append(item)
-            seen.add(key)
-            added_counts["local_quality"] += 1
-    for label in ("oral", "spotlight"):
-        eligible = [
-            item
-            for item in selected_titles
-            if label in _presentation_labels(item)
-            and (_title_fit_for_recall(item) >= floor or _local_quality_recall_signal(item))
-            and _screening_quality_bonus(item) > 0
-        ]
-        if not eligible:
-            continue
-        eligible.sort(key=_quality_local_recall_rank_key)
-        target = min(per_type, len(eligible))
-        for item in eligible[:target]:
-            key = _detail_candidate_key(item)
-            if not key or key in seen:
-                continue
-            base.append(item)
-            seen.add(key)
-            added_counts[label] += 1
-    if added_counts:
-        summary = ", ".join(f"{label} +{count}" for label, count in sorted(added_counts.items()))
-        log(
-            f"{venue_name}: presentation recall added {sum(added_counts.values())} detail candidates "
-            f"({summary}) beyond base {detail_count}; final recommendations still require real abstracts and final LLM relevance scoring"
-        )
-    return base
+    return items[: max(1, int(limit))]
 
 
 def _prefilter_titles(
@@ -4717,7 +4536,6 @@ Rules:
             for item in scanned:
                 _apply_topic_evidence_guard(item, interest)
                 _apply_quality_bonus(item)
-        target_count = _title_detail_candidate_target(config, len(scanned))
         scored_pool = _dedupe_items(scored_rows or selected)
         seen_keys = {str(item.get("id") or item.get("url") or item.get("title") or "") for item in scored_pool}
         missing_rows: list[dict] = []
@@ -4725,51 +4543,30 @@ Rules:
             key = str(item.get("id") or item.get("url") or item.get("title") or "")
             if key and key not in seen_keys:
                 missing_rows.append(item)
-        missing_backfill_budget = max(0, target_count - len(scored_pool))
-        if missing_rows:
-            omission_ratio = len(missing_rows) / max(1, len(scanned))
-            full_backfill_floor = max(0.0, min(1.0, _as_float(os.environ.get("TITLE_LLM_OMISSION_FULL_BACKFILL_RATIO", "0.10"), 0.10)))
-            if omission_ratio >= full_backfill_floor:
-                missing_backfill_budget = len(missing_rows)
-            elif missing_backfill_budget <= 0:
-                extra_ratio = max(0.0, min(0.5, _as_float(os.environ.get("TITLE_LLM_OMISSION_EXTRA_RECALL_RATIO", "0.05"), 0.05)))
-                extra_floor = max(0, _as_int(os.environ.get("TITLE_LLM_OMISSION_EXTRA_RECALL_MIN", "20"), 20))
-                missing_backfill_budget = min(len(missing_rows), max(extra_floor, int(ceil(target_count * extra_ratio))))
-        missing_backfilled = 0
-        for item in missing_rows[:missing_backfill_budget]:
-            item["title_llm_missing"] = True
-            item["reason_source"] = "local title ranking after incomplete title LLM"
-            item["title_reason"] = "Retained by local title ranking because the title LLM did not return this row; final recommendations still require a real abstract and final relevance scoring."
-            item.setdefault("recommendation_note_zh", "题名 LLM 未返回该行时按本地题名排序保留到详情池；是否推荐仍只由真实摘要和最终相关性评分决定。")
-            item.setdefault("recommendation_note_en", "Retained by local title ranking after incomplete title-LLM output; recommendation is still decided only from real abstracts and final relevance scoring.")
-            scored_pool.append(item)
-            missing_backfilled += 1
         if missing_rows:
             log(
                 f"{venue_name}: title LLM omitted {len(missing_rows)} title rows; "
-                f"backfilled {missing_backfilled} with local title ranking before detail candidate sorting"
+                "only rows with a completed title-LLM score remain eligible for title+abstract scoring"
             )
         scored_pool = sorted(scored_pool, key=_title_rank_key)
-        selected = scored_pool[:target_count]
-        merged = sorted(_dedupe_items(selected), key=_title_rank_key)
+        merged = sorted(_dedupe_items(scored_pool), key=_title_rank_key)
         selected_before_prune = len(merged)
         pruned_count = len(merged)
         if dynamic_title_filter and merged:
             merged = _dynamic_title_prune(merged, title_groups, log, venue_name)
             pruned_count = len(merged)
-            if len(merged) < min(target_count, len(scored_pool)):
+            if len(merged) < len(scored_pool):
                 seen_keys = {str(item.get("id") or item.get("url") or item.get("title") or "") for item in merged}
                 for item in scored_pool:
                     key = str(item.get("id") or item.get("url") or item.get("title") or "")
                     if key and key not in seen_keys:
                         merged.append(item)
                         seen_keys.add(key)
-                    if len(merged) >= min(target_count, len(scored_pool)):
+                    if len(merged) >= len(scored_pool):
                         break
                 merged.sort(key=_title_rank_key)
-        limit = config.max_fetch_papers if result_limit is None else result_limit
-        merged = _apply_result_limit_with_floor(merged, limit, config)
-        merged = _quality_local_title_recall_supplement(scanned, merged, venue_name, log)
+        limit = result_limit
+        merged = _apply_result_limit(merged, limit)
         _append_title_filter_report(
             title_filter_reports,
             venue_name,
@@ -4780,7 +4577,6 @@ Rules:
             pruned_count,
             len(merged),
             limit,
-            _target_recall_count(config, len(scanned)),
             "llm",
             category_filtered_count=category_filtered_count if category_filtered_count is not None else len(items),
             tfidf_screened_count=len(scanned),
@@ -4805,10 +4601,9 @@ Rules:
     if dynamic_title_filter:
         ranked = _dynamic_title_prune(ranked, title_groups, log, venue_name)
         pruned_count = len(ranked)
-    recall_pool = _ranked_recall_pool(ranked, config)
-    limit = config.max_fetch_papers if result_limit is None else result_limit
-    recall_pool = _apply_result_limit_with_floor(recall_pool, limit, config)
-    recall_pool = _quality_local_title_recall_supplement(ranked, recall_pool, venue_name, log)
+    ranked_pool = sorted(_dedupe_items(ranked), key=_stable_rank_key)
+    limit = result_limit
+    ranked_pool = _apply_result_limit(ranked_pool, limit)
     _append_title_filter_report(
         title_filter_reports,
         venue_name,
@@ -4817,9 +4612,8 @@ Rules:
         len(_chunks(scanned, 10)),
         selected_before_prune,
         pruned_count,
-        len(recall_pool),
+        len(ranked_pool),
         limit,
-        _target_recall_count(config, len(scanned)),
         "local_title_rank",
         category_filtered_count=category_filtered_count if category_filtered_count is not None else len(items),
         tfidf_screened_count=len(ranked),
@@ -4827,8 +4621,8 @@ Rules:
         llm_title_scored_count=0,
         local_title_ranked_count=len(ranked),
     )
-    log(f"{venue_name}: local title screen retained {len(recall_pool)} / {len(scanned)} candidates for detail scoring")
-    return recall_pool
+    log(f"{venue_name}: local title screen retained {len(ranked_pool)} / {len(scanned)} candidates for detail scoring")
+    return ranked_pool
 
 
 def _paper_category(item: dict) -> str:
@@ -4837,7 +4631,7 @@ def _paper_category(item: dict) -> str:
     metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
     category_status = str(metadata.get("category_status") or metadata.get("venue_category_status") or "").lower()
     classification_source = str(item.get("classification_source") or "").lower()
-    raw_values = [str(item.get(key) or "").strip() for key in ("primary_area", "category", "track")]
+    raw_values = [str(item.get(key) or "").strip() for key in ("primary_area", "category")]
     raw = next((value for value in raw_values if value), "")
     if not raw:
         return ""
@@ -4969,6 +4763,14 @@ def _public_category_selection(selection: dict | None) -> dict:
         "paper_count",
         "category_count",
         "selected_paper_count",
+        "category_selection_target_papers",
+        "category_selection_max",
+        "category_ranking_source",
+        "ranked_categories",
+        "useful_through_rank",
+        "useful_category_cutoff",
+        "useful_category_paper_count",
+        "category_ranking",
         "selected_categories",
         "rejected_categories",
         "category_status",
@@ -4979,181 +4781,6 @@ def _public_category_selection(selection: dict | None) -> dict:
 
 
 
-def _quality_category_recall_supplement(
-    papers: list[dict],
-    selection: dict,
-    config: AppConfig,
-    max_categories: int,
-    log: LogFn,
-    venue_name: str,
-) -> tuple[dict, list[str]]:
-    if not papers or not isinstance(selection, dict):
-        return selection, []
-    try:
-        supplement_cap = int(os.environ.get("VENUE_CATEGORY_QUALITY_SUPPLEMENT_MAX", "2") or 2)
-    except Exception:
-        supplement_cap = 2
-    if supplement_cap <= 0:
-        return selection, []
-    selected_rows = [dict(row) for row in selection.get("selected_categories", []) if isinstance(row, dict)]
-    selected_names = {str(row.get("name") or "") for row in selected_rows if str(row.get("name") or "")}
-    high_quality_unselected = [
-        paper for paper in papers
-        if _paper_category(paper)
-        and _paper_category(paper) not in selected_names
-        and _presentation_bonus(paper)[0] > 0
-    ]
-    if not high_quality_unselected:
-        return selection, []
-    ranked, _report = rank_papers_tfidf(
-        papers,
-        _topic_interest_text(config),
-        per_category_limit=len(papers),
-        global_limit=len(papers),
-    )
-    high_quality_keys = {
-        str(paper.get("id") or paper.get("title") or "")
-        for paper in high_quality_unselected
-        if str(paper.get("id") or paper.get("title") or "")
-    }
-    try:
-        local_score_floor = float(os.environ.get("VENUE_CATEGORY_QUALITY_SUPPLEMENT_LOCAL_SCORE_FLOOR", "0.08") or 0.08)
-    except Exception:
-        local_score_floor = 0.08
-    try:
-        local_rank_cap = int(os.environ.get("VENUE_CATEGORY_QUALITY_SUPPLEMENT_RANK_CAP", "300") or 300)
-    except Exception:
-        local_rank_cap = 300
-    best_by_category: dict[str, tuple[tuple[float, float, int, str], dict]] = {}
-    for row in ranked:
-        key = str(row.get("id") or row.get("title") or "")
-        if key not in high_quality_keys:
-            continue
-        category = _paper_category(row)
-        if not category or category in selected_names:
-            continue
-        local_score = _as_float(row.get("local_score"), 0.0)
-        phrase_matches = _as_int(row.get("local_profile_phrase_match_count"), 0)
-        local_rank = _as_int(row.get("local_rank"), 10**9)
-        if local_score < local_score_floor and not (phrase_matches > 0 and local_rank <= local_rank_cap):
-            continue
-        presentation_bonus, _reason = _presentation_bonus(row)
-        quality_rank = (local_score + presentation_bonus, presentation_bonus, -local_rank, str(row.get("title") or ""))
-        current = best_by_category.get(category)
-        if current is None or quality_rank > current[0]:
-            best_by_category[category] = (quality_rank, row)
-    if not best_by_category:
-        return selection, []
-    added: list[str] = []
-    supplemented_rows = selected_rows[:]
-    for category, (_rank_key, row) in sorted(best_by_category.items(), key=lambda item: item[1][0], reverse=True):
-        if len(added) >= supplement_cap:
-            break
-        supplemented_rows.append({
-            "name": category,
-            "reason": (
-                "High-quality presentation recall supplement after official category selection; "
-                f"local_profile_score={_as_float(row.get('local_score'), 0.0):.3f}; "
-                f"local_rank={_as_int(row.get('local_rank'), 0)}."
-            ),
-        })
-        selected_names.add(category)
-        added.append(category)
-    if not added:
-        return selection, []
-    supplemented = dict(selection)
-    supplemented["selected_categories"] = supplemented_rows
-    rejected = []
-    for row in selection.get("rejected_categories", []) or []:
-        if isinstance(row, dict) and str(row.get("name") or "") not in selected_names:
-            rejected.append(row)
-    supplemented["rejected_categories"] = rejected
-    selected_count = sum(1 for paper in papers if _paper_category(paper) in selected_names)
-    supplemented["selected_paper_count"] = selected_count
-    log(f"{venue_name}: high-quality presentation category recall added {len(added)} official categories before title screening")
-    return supplemented, added
-
-
-def _adaptive_category_paper_recall_supplement(
-    papers: list[dict],
-    filtered: list[dict],
-    selection: dict,
-    config: AppConfig,
-    log: LogFn,
-    venue_name: str,
-) -> tuple[list[dict], dict[str, Any]]:
-    if not papers or not filtered or not isinstance(selection, dict):
-        return filtered, {}
-    interest = _topic_interest_text(config)
-    if not interest:
-        return filtered, {}
-    selected_categories = {
-        str(row.get("name") or "").strip()
-        for row in selection.get("selected_categories", [])
-        if isinstance(row, dict) and str(row.get("name") or "").strip()
-    }
-    if not selected_categories:
-        return filtered, {}
-    try:
-        cap = int(os.environ.get("VENUE_CATEGORY_PAPER_RECALL_MAX", "0") or 0)
-    except Exception:
-        cap = 0
-    if cap <= 0:
-        cap = max(20, min(160, _recommendation_target_hint(config) * 4))
-    try:
-        floor = float(os.environ.get("VENUE_CATEGORY_PAPER_RECALL_LOCAL_SCORE_FLOOR", "0.12") or 0.12)
-    except Exception:
-        floor = 0.12
-    if cap <= 0 or floor < 0:
-        return filtered, {}
-    ranked, _report = rank_papers_tfidf(
-        papers,
-        interest,
-        per_category_limit=len(papers),
-        global_limit=len(papers),
-        ranking_bonus=_local_screening_quality_bonus,
-    )
-    seen = {_detail_candidate_key(item) for item in filtered if _detail_candidate_key(item)}
-    supplements: list[dict] = []
-    supplement_categories: Counter[str] = Counter()
-    for row in ranked:
-        key = _detail_candidate_key(row)
-        if not key or key in seen:
-            continue
-        category = _paper_category(row)
-        if not category or category in selected_categories:
-            continue
-        local_score = _as_float(row.get("local_score"), row.get("local_rank_score"))
-        phrase_matches = _as_int(row.get("local_profile_phrase_match_count"), 0)
-        if local_score < floor and phrase_matches <= 0:
-            continue
-        item = dict(row)
-        item["category_paper_recall_supplement"] = True
-        item["category_paper_recall_original_category"] = category
-        item["category_paper_recall_reason"] = (
-            "Paper-level adaptive recall after official category selection; final recommendations still require real abstracts and final relevance scoring."
-        )
-        item.setdefault("recommendation_note_zh", "论文级元数据与当前画像高度匹配，因此补入标题筛选池；是否推荐仍由真实摘要和最终相关性评分决定。")
-        item.setdefault("recommendation_note_en", "Paper-level metadata strongly matches the current profile, so it is retained for title screening; recommendation is still decided from real abstracts and final relevance scoring.")
-        item.setdefault("recommendation_note", item.get("recommendation_note_zh") or item.get("recommendation_note_en"))
-        supplements.append(item)
-        supplement_categories[category] += 1
-        seen.add(key)
-        if len(supplements) >= cap:
-            break
-    if not supplements:
-        return filtered, {}
-    merged = _dedupe_items(list(filtered) + supplements)
-    log(
-        f"{venue_name}: adaptive paper-level recall added {len(supplements)} papers from non-selected official categories before title screening"
-    )
-    return merged, {
-        "adaptive_paper_recall_supplement_count": len(supplements),
-        "adaptive_paper_recall_supplement_categories": dict(sorted(supplement_categories.items())),
-        "adaptive_paper_recall_score_floor": floor,
-        "adaptive_paper_recall_cap": cap,
-    }
-
 def _select_official_category_title_index(
     venue: dict,
     years: list[int],
@@ -5163,39 +4790,47 @@ def _select_official_category_title_index(
     llm: LLMClient,
     log: LogFn,
 ) -> tuple[list[dict], list[dict]]:
-    if not papers or not _has_trusted_title_categories(papers, metadata_audit):
+    if not papers:
         return papers, []
+    if not _has_trusted_title_categories(papers, metadata_audit):
+        selection = {
+            "venue_id": venue.get("id", ""),
+            "venue": venue.get("name", ""),
+            "year": years[0] if len(years) == 1 else ",".join(str(year) for year in years),
+            "paper_count": len(papers),
+            "category_count": 0,
+            "selected_paper_count": len(papers),
+            "selected_categories": [],
+            "rejected_categories": [],
+            "category_status": metadata_audit.get("category_status") or "no_official_categories",
+        }
+        report = {
+            "venue_id": venue.get("id", ""),
+            "venue": venue.get("name", ""),
+            "year": selection["year"],
+            "adapter": str(metadata_audit.get("adapter") or "online_venue"),
+            "total_papers": len(papers),
+            "selected_category_papers": len(papers),
+            "category_pruning_applied": False,
+            "corpus_audit_papers": len(papers),
+            "full_venue_corpus_audit": True,
+            "used_all_categories_fallback": False,
+            "selection": _public_category_selection(selection),
+            "title_filter_input_papers": len(papers),
+            "metadata_audit": metadata_audit,
+            **_venue_metadata_status_fields(metadata_audit),
+        }
+        log(f"{venue.get('name', '')}: official title corpus has no topical categories; sending all {len(papers)} papers to title screening")
+        return list(papers), [report]
     category_summary = _category_summary_from_title_index(venue, years, papers)
     if not category_summary.get("category_summary"):
         return papers, []
-    try:
-        max_categories = int(os.environ.get("VENUE_CATEGORY_SELECT_MAX", "0") or 0)
-    except Exception:
-        max_categories = 0
-    if max_categories <= 0:
-        max_categories = 8
-    selection = select_relevant_categories(category_summary, config, llm, max_categories=max_categories)
+    selection = select_relevant_categories(category_summary, config, llm)
     filtered = filter_papers_by_selected_categories(papers, selection)
-    selection, quality_category_supplements = _quality_category_recall_supplement(papers, selection, config, max_categories, log, str(venue.get("name") or venue.get("id") or "venue"))
-    if quality_category_supplements:
-        filtered = filter_papers_by_selected_categories(papers, selection)
     selected_category_papers = len(filtered)
-    adaptive_paper_recall: dict[str, Any] = {}
-    used_all_categories_fallback = False
     if not filtered and papers:
-        filtered = list(papers)
-        used_all_categories_fallback = True
-        selection = dict(selection)
-        selection["fallback_to_all_categories"] = True
-        selection["fallback_reason"] = "category selector returned 0 papers for a non-empty online venue-year"
-    elif filtered:
-        filtered, adaptive_paper_recall = _adaptive_category_paper_recall_supplement(
-            papers,
-            filtered,
-            selection,
-            config,
-            log,
-            str(venue.get("name") or venue.get("id") or "venue"),
+        raise RuntimeError(
+            f"{venue.get('name', '')} category ranking selected categories that matched no papers; refusing an all-category fallback."
         )
     report = {
         "venue_id": venue.get("id", ""),
@@ -5203,24 +4838,17 @@ def _select_official_category_title_index(
         "year": years[0] if len(years) == 1 else ",".join(str(year) for year in years),
         "adapter": str(metadata_audit.get("adapter") or "online_venue"),
         "total_papers": len(papers),
-        "selected_category_papers": selected_category_papers if not used_all_categories_fallback else 0,
+        "selected_category_papers": selected_category_papers,
         "corpus_audit_papers": len(papers),
         "full_venue_corpus_audit": True,
-        "used_all_categories_fallback": used_all_categories_fallback,
-        "quality_category_supplements": quality_category_supplements if not used_all_categories_fallback else [],
-        **adaptive_paper_recall,
+        "used_all_categories_fallback": False,
         "selection": _public_category_selection(selection),
         "title_filter_input_papers": len(filtered),
         "metadata_audit": metadata_audit,
         **_venue_metadata_status_fields(metadata_audit),
     }
     selected_names = [item.get("name", "") for item in selection.get("selected_categories", [])]
-    if used_all_categories_fallback:
-        log(f"{venue.get('name', '')}: online category scan selected 0/{len(papers)} papers; using all {len(filtered)} papers for title screening because category selection returned none")
-    else:
-        supplement_count = int(adaptive_paper_recall.get("adaptive_paper_recall_supplement_count") or 0)
-        suffix = f"; {len(filtered)} enter title screening after paper-level recall" if supplement_count else ""
-        log(f"{venue.get('name', '')}: online category scan selected {selected_category_papers}/{len(papers)} papers from {len(selected_names)} official categories{suffix}")
+    log(f"{venue.get('name', '')}: online category scan selected {selected_category_papers}/{len(papers)} papers from {len(selected_names)} official categories in one category decision")
     return filtered, [report]
 
 
@@ -5269,7 +4897,6 @@ def _append_title_filter_report(
     selected_after_prune: int,
     final_count: int,
     result_limit: int | None,
-    recall_target: int,
     mode: str,
     *,
     category_filtered_count: int | None = None,
@@ -5311,6 +4938,7 @@ def _append_title_filter_report(
         "venue": venue_name,
         "mode": mode,
         "category_filtered_papers": category_filtered_count,
+        "title_screen_input_papers": category_filtered_count,
         "tfidf_screened_papers": tfidf_screened_count,
         "title_filter_input_papers": title_score_input_count,
         "title_score_input_papers": title_score_input_count,
@@ -5321,7 +4949,6 @@ def _append_title_filter_report(
         "after_code_side_dynamic_pruning": selected_after_prune,
         "post_title_candidate_limit": result_limit,
         "final_title_candidates": final_count,
-        "recall_target": recall_target,
         "groups": group_rows,
     })
 
@@ -5339,6 +4966,31 @@ def _load_local_category_guided_index(
         local = load_local_venue_year(venue, year)
         if not local:
             continue
+        local = dict(local)
+        sanitized_papers: list[dict] = []
+        for raw_paper in local.get("papers") or []:
+            if not isinstance(raw_paper, dict):
+                continue
+            paper = dict(raw_paper)
+            _sanitize_non_topical_category_row(paper)
+            _sanitize_presentation_category_row(paper)
+            _sanitize_neurips_official_row(paper)
+            metadata = paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}
+            if metadata:
+                metadata = dict(metadata)
+                audit = metadata.get("venue_metadata_audit")
+                if isinstance(audit, dict):
+                    metadata["venue_metadata_audit"] = _sanitize_venue_metadata_audit(audit)
+                paper["metadata"] = metadata
+            sanitized_papers.append(paper)
+        local["papers"] = sanitized_papers
+        local["paper_count"] = len(sanitized_papers)
+        local["metadata_completeness_audit"] = _sanitize_venue_metadata_audit(local.get("metadata_completeness_audit"))
+        existing_summary = local.get("category_summary") if isinstance(local.get("category_summary"), dict) else {}
+        local["category_summary"] = {
+            **existing_summary,
+            **_category_summary_from_title_index(venue, [year], sanitized_papers),
+        }
         if int(local.get("paper_count") or 0) <= 0:
             log(f"{venue.get('name', '')} {year}: local database exists but has 0 papers; trying the selected-year live source")
             continue
@@ -5376,16 +5028,10 @@ def _load_local_category_guided_index(
                 "category_status": metadata_audit.get("category_status") or "no_official_categories",
             }
             filtered = list(local["papers"])
-        used_all_categories_fallback = False
         if not filtered and local["papers"]:
-            # A source with real papers must not be silently dropped because the
-            # coarse category selector returned no category. Keep all titles for
-            # downstream title ranking; final recommendations remain LLM-gated.
-            filtered = list(local["papers"])
-            used_all_categories_fallback = True
-            selection = dict(selection)
-            selection["fallback_to_all_categories"] = True
-            selection["fallback_reason"] = "category selector returned 0 papers for a non-empty local venue-year"
+            raise RuntimeError(
+                f"{venue.get('name', '')} {local.get('year', '')} category ranking selected categories that matched no papers; refusing an all-category fallback."
+            )
         combined.extend(filtered)
         corpus.extend(local["papers"] if _full_venue_corpus_audit_enabled(config) else filtered)
         reports.append({
@@ -5396,18 +5042,17 @@ def _load_local_category_guided_index(
             "papers_path": local["papers_path"],
             "category_summary_path": local["category_summary_path"],
             "total_papers": local["paper_count"],
-            "selected_category_papers": len(filtered) if use_category_selection else 0,
+            "selected_category_papers": len(filtered),
+            "category_pruning_applied": use_category_selection,
             "corpus_audit_papers": len(local["papers"]) if _full_venue_corpus_audit_enabled(config) else len(filtered),
             "full_venue_corpus_audit": _full_venue_corpus_audit_enabled(config),
-            "used_all_categories_fallback": used_all_categories_fallback,
+            "used_all_categories_fallback": False,
             "selection": _public_category_selection(selection),
             "title_filter_input_papers": len(filtered),
             **_venue_metadata_status_fields(metadata_audit),
         })
         selected_names = [item.get("name", "") for item in selection.get("selected_categories", [])]
-        if used_all_categories_fallback:
-            log("{} {}: local category scan selected 0/{} papers; using all {} papers for title screening because category selection returned none".format(venue.get("name", ""), local["year"], local["paper_count"], len(filtered)))
-        elif not use_category_selection:
+        if not use_category_selection:
             log("{} {}: verified local title corpus has no official categories; sending all {} papers to title screening".format(venue.get("name", ""), local["year"], len(filtered)))
         else:
             log("{} {}: local category scan selected {}/{} papers from {} categories; full corpus audited={}".format(venue.get("name", ""), local["year"], len(filtered), local["paper_count"], len(selected_names), len(local["papers"])))
@@ -5665,13 +5310,6 @@ def _evaluate_items(
         evaluated.append(item)
     if llm.enabled and interest:
         scoring_items = _final_llm_scoring_pool(evaluated, config)
-        source_scoring_limit = _source_final_llm_scoring_limit(config, source_name, len(scoring_items))
-        if source_scoring_limit < len(scoring_items):
-            log(
-                f"{source_name}: capped final LLM scoring pool to {source_scoring_limit}/{len(scoring_items)} "
-                "items for this source; remaining candidates stay in retrieval-only audit"
-            )
-            scoring_items = scoring_items[:source_scoring_limit]
         scoring_items = _enrich_missing_abstracts_for_final_scoring(scoring_items, config, source_name, log, progress, should_cancel)
         abstract_missing_scoring_items = [item for item in scoring_items if not _has_real_abstract(item)]
         if abstract_missing_scoring_items:
@@ -5748,10 +5386,10 @@ Rules:
 - Score by explicit title/abstract evidence only; venue prestige must not raise fit_score.
 - Use the whole 0-10 range consistently with one decimal place: 9.0-10.0 exact center, 7.0-8.9 strong match, 5.0-6.9 partial/background usefulness, 3.0-4.9 weak/generic, <=2.9 unrelated. Do not default to integer or x.5 scores when evidence supports a finer distinction.
 - Broad background papers are weak unless the abstract itself gives concrete reusable method, data, benchmark, protocol, theory, or evaluation value for the current research interest.
-- recommend_for_deep_reading is an audit field only. The workflow chooses the user-visible list by ranking eligible final title+abstract rows; eligibility requires topic_evidence_supported=true for the current core route, not this boolean and not an absolute score cutoff.
-- Set topic_evidence_supported=true only when the title+abstract directly supports one complete configured/adaptive core route from the list above. Copy that full route into matched_topic_route; never use a short subphrase, method component, desideratum, or hint as matched_topic_route. If the route contains a colon, do not require every post-colon evidence axis; require direct support for the pre-colon core route plus concrete reusable value. Set topic_evidence to passed:/strong: and give a concise topic_evidence_basis.
+- recommend_for_deep_reading and topic_evidence_supported are audit fields only. The workflow chooses the user-visible list by ranking all valid final title+abstract scores; neither field is an eligibility gate and there is no absolute score cutoff.
+- Set topic_evidence_supported=true only when the title+abstract directly supports one complete configured/adaptive core route from the list above. Copy that full route into matched_topic_route; never use a short subphrase, method component, desideratum, or hint as matched_topic_route. If the route contains a colon, do not require every post-colon evidence axis; require direct support for the pre-colon core route plus concrete reusable value. Set topic_evidence to passed:/strong: and give a concise topic_evidence_basis. This evidence annotation is diagnostic and must not replace your calibrated fit_score.
 - If the abstract is generic, background-only, venue/title-only, or does not directly support the current core route, set topic_evidence_supported=false, topic_evidence="weak: missing adaptive topic evidence", and list concrete missing_topic_evidence.
-- If you set topic_evidence_supported=false or topic_evidence starts with weak:, keep fit_score <= 4.9; do not return a strong 7+ score for a weak topic-evidence verdict.
+- Score fit independently from the topic-evidence audit fields. Do not cap or otherwise change fit_score because topic_evidence_supported=false or topic_evidence starts with weak:.
 - User-facing recommendation reasons must explain concrete value for the user research project first, then summarize abstract-level uncertainty as a user-facing risk. Do not write reader instructions such as Reading note, full-text reading must verify, or the abstract is not a substitute for full-text reading.
 - Missing abstract, metadata-only evidence, or title-only evidence cannot be recommended.
 {FIND_FINAL_SCORING_ROUTE_RULES}
@@ -5808,7 +5446,7 @@ Abstract/Description: {(item.get('abstract') or '')[:900]}
 Return strict JSON only:
 {{"evaluations":[{{"id":"{item.get("id")}","category":"short category","fit_score":7.3,"diversity_score":6.4,"recommend_for_deep_reading":true,"topic_evidence":"passed: direct title+abstract evidence for a current topic route, or weak: missing adaptive topic evidence","topic_evidence_supported":true,"matched_topic_route":"the specific configured/adaptive route supported by the abstract, or empty","topic_evidence_basis":"short title/abstract evidence used for the route decision","missing_topic_evidence":["missing route component if unsupported"],"hit_directions_zh":["中文命中方向"],"hit_directions_en":["English hit direction"],"fit_explanation":"2-3句中文：面向用户说明摘要证据、相关性和可复用价值","fit_explanation_zh":"2-3句中文：面向用户说明摘要证据、相关性和可复用价值","fit_explanation_en":"2-3 English sentences for the user with title/abstract evidence, relevance, and reusable value","reason":"2-4句中文：面向用户说明对当前研究方向的价值、可借鉴什么、以及摘要层面的风险或不确定性","reason_zh":"2-4句中文：面向用户说明对当前研究方向的价值、可借鉴什么、以及摘要层面的风险或不确定性","reason_en":"2-4 English sentences for the user: value to the current research direction, reusable content, and abstract-level risks or uncertainty"}}]}}
 
-Scoring rules: judge this item independently from its real title and abstract. fit_score is the final ranking score used by the workflow; use one decimal place: 9.0-10.0 exact center, 7.0-8.9 strong match, 5.0-6.9 partial/background usefulness, 3.0-4.9 weak/generic, <=2.9 unrelated. Do not default to integer or x.5 scores when evidence supports a finer distinction. recommend_for_deep_reading is only an audit field; the workflow ranks eligible final title+abstract rows, and eligibility requires topic_evidence_supported=true for the current core route. Set topic_evidence_supported=true only when the title+abstract directly supports one complete configured/adaptive core route from the list above; copy the full route into matched_topic_route, never a short subphrase or component. If the route contains a colon, treat the pre-colon text as the core route and the post-colon details as evidence axes/preferences, not mandatory all-of conditions. Otherwise set it false with weak topic_evidence and concrete missing_topic_evidence, and keep fit_score <= 4.9. User-facing recommendation reasons must explain reusable value before limitations, and must not contain reader instructions such as Reading note, full-text reading must verify, or the abstract is not a substitute for full-text reading. Provide both Chinese and English explanation fields, plus hit_directions_zh in Chinese and hit_directions_en in English.
+Scoring rules: judge this item independently from its real title and abstract. fit_score is the final ranking score used by the workflow; use one decimal place: 9.0-10.0 exact center, 7.0-8.9 strong match, 5.0-6.9 partial/background usefulness, 3.0-4.9 weak/generic, <=2.9 unrelated. Do not default to integer or x.5 scores when evidence supports a finer distinction. recommend_for_deep_reading and topic_evidence_supported are audit fields only; the workflow ranks all valid final title+abstract rows with no topic-evidence or absolute-score eligibility gate. Set topic_evidence_supported=true only when the title+abstract directly supports one complete configured/adaptive core route from the list above; copy the full route into matched_topic_route, never a short subphrase or component. If the route contains a colon, treat the pre-colon text as the core route and the post-colon details as evidence axes/preferences, not mandatory all-of conditions. Otherwise set it false with weak topic_evidence and concrete missing_topic_evidence. Never cap or alter fit_score because of that audit verdict. User-facing recommendation reasons must explain reusable value before limitations, and must not contain reader instructions such as Reading note, full-text reading must verify, or the abstract is not a substitute for full-text reading. Provide both Chinese and English explanation fields, plus hit_directions_zh in Chinese and hit_directions_en in English.
 {FIND_FINAL_SCORING_ROUTE_RULES}
 """
 
@@ -6657,40 +6295,16 @@ def _recommendation_rank_key(item: dict) -> tuple:
     )
 
 
-def _final_topic_evidence_invalid_reason(item: dict, config: AppConfig | None) -> str:
-    evidence = str(item.get("topic_evidence") or "").strip().lower()
-    role = str(item.get("evidence_role") or "").strip().lower()
-    if item.get("topic_evidence_supported") is False:
-        return "unsupported_final_topic_evidence"
-    if evidence.startswith("weak:"):
-        return "weak_final_topic_evidence"
-    if _has_topic_evidence_contradiction(item):
-        return "contradictory_final_topic_evidence"
-    if role == "foundation_borrowing":
-        return "background_or_foundation_not_user_visible_recommendation"
-    if _has_final_title_abstract_llm_scoring(item):
-        interest = ""
-        if config is not None:
-            try:
-                interest = _topic_interest_text(config)
-            except Exception:
-                interest = ""
-        if interest and not evidence:
-            return "missing_final_topic_evidence"
-    return ""
-
-
 def _find_recommendation_invalid_reason(item: dict, config: AppConfig | None) -> str:
     """Validate the single user-visible Find recommendation contract.
 
     Find recommends papers for deep reading by one path only: the title screen
     supplies candidates, detail enrichment supplies a real abstract, the final
     title+abstract LLM judge scores them, and the UI/Read pool takes the top-N
-    ranked rows. The final topic-evidence verdict is part of the user-visible eligibility
-    contract. Weak/boundary/foundation rows stay available for triage and
-    critique, but they must not be used to fill the recommended-reading pool.
+    ranked rows. Topic-evidence fields remain available for audit, but do not
+    create a second eligibility or score gate after the final LLM ranking.
     """
-    if bool(config and config.api_key and config.model and config.provider.lower() != "mock") and not _has_final_title_abstract_llm_scoring(item):
+    if not _has_final_title_abstract_llm_scoring(item):
         return "missing_final_title_abstract_llm_scoring"
     if item.get("llm_final_scoring_skipped") or item.get("llm_retry_exhausted"):
         return str(item.get("llm_final_scoring_skip_reason") or item.get("llm_retry_reason") or "final_llm_scoring_unavailable")
@@ -6698,19 +6312,18 @@ def _find_recommendation_invalid_reason(item: dict, config: AppConfig | None) ->
         return "missing_real_abstract"
     if item.get("abstract_fetch_failed"):
         return str(item.get("abstract_fetch_failed_reason") or "abstract_fetch_failed")
-    if item.get("llm_fit_score") in (None, "") and item.get("fit_score") in (None, ""):
+    score_value = item.get("llm_fit_score")
+    if score_value in (None, ""):
+        score_value = item.get("fit_score")
+    if score_value in (None, ""):
         return "missing_final_title_abstract_llm_fit_score"
-    llm_fit = _as_float(item.get("llm_fit_score"), item.get("fit_score"))
-    min_fit = _minimum_user_visible_llm_fit_score()
-    if llm_fit < min_fit:
-        return f"final_llm_fit_below_user_visible_threshold:{llm_fit:.2f}<{min_fit:.2f}"
-    if item.get("llm_complete_route_guard_failed"):
-        return "complete_route_guard_failed"
-    topic_reason = _final_topic_evidence_invalid_reason(item, config)
-    if topic_reason:
-        return topic_reason
-    # Diversity and source-quality signals may only order rows that already have
-    # real abstracts, final LLM scores, and supported current-topic evidence.
+    try:
+        if not isfinite(float(score_value)):
+            return "invalid_final_title_abstract_llm_fit_score"
+    except (TypeError, ValueError):
+        return "invalid_final_title_abstract_llm_fit_score"
+    # Topic evidence, route guards, diversity, and source-quality signals are
+    # ranking/audit data only once a real abstract has a valid final LLM score.
     return ""
 
 
@@ -6805,29 +6418,13 @@ def _selection_source_count(selection: object) -> int:
             count += 1
     return max(1, count)
 
-def _strong_recommendation_count_cap(target: int, source_count: int | None = None) -> int:
-    limits = [max(1, int(target or 1))]
-    configured_max = int(os.environ.get("STRONG_RECOMMENDATION_MAX_COUNT", "0") or 0)
-    if configured_max > 0:
-        limits.append(configured_max)
-    if source_count is not None:
-        limits.append(max(1, int(source_count or 1)) * 5)
-    return max(1, min(limits))
-
-
 def _strong_recommendation_target_count(config: AppConfig, source_count: int | None = None) -> int:
-    configured_target = int(os.environ.get("STRONG_RECOMMENDATION_TARGET_COUNT", "0") or 0)
-    if configured_target > 0:
-        return _strong_recommendation_count_cap(configured_target, source_count)
     requested = int(getattr(config, "max_recommended_papers", 0) or 0)
-    if requested > 0:
-        return _strong_recommendation_count_cap(requested, source_count)
-    if source_count is not None:
-        return _strong_recommendation_count_cap(max(1, int(source_count or 1)) * 5, source_count)
-    source_hint = _source_count_hint(config.default_find_selection or {})
-    if source_hint > 0:
-        return _strong_recommendation_count_cap(source_hint * 5, source_hint)
-    return _strong_recommendation_count_cap(20)
+    source_hint = int(source_count or 0)
+    if source_hint <= 0:
+        source_hint = _source_count_hint(config.default_find_selection or {})
+    source_minimum = max(1, source_hint) * 5 if source_hint > 0 else 0
+    return max(1, requested, source_minimum)
 
 
 def _recommended(items: list[dict], config: AppConfig, source_count: int | None = None) -> list[dict]:
@@ -6841,6 +6438,8 @@ def _recommended(items: list[dict], config: AppConfig, source_count: int | None 
         item.pop("find_recommendation_candidate", None)
         item.pop("not_positive_support", None)
         item.pop("strong_gate_reject_reason", None)
+        item.pop("find_recommendation_reject_reason", None)
+        item.pop("foundation_demoted_from_strong", None)
         item["recommended_by_llm_ranking"] = True
         item["find_recommendation"] = True
         item["_user_visible_recommendation"] = True
@@ -7575,6 +7174,7 @@ def _run_diagnostics(artifacts: dict) -> dict:
         "llm_title_scored_papers": llm_title_scored_count,
         "venue_final_title_candidates": final_title_candidates_count,
         "abstract_scored_papers": llm_scored_count,
+        "detail_fetched_candidates": len(evaluated),
         "venue_detail_fetched_candidates": len(evaluated),
         "llm_scored_candidates": llm_scored_count,
         "recommended_papers": len(strong),
@@ -7582,7 +7182,8 @@ def _run_diagnostics(artifacts: dict) -> dict:
         "category_scan_reports": len(category_rows),
         "title_filter_reports": len(title_rows),
         "full_venue_corpus_audit": any(bool(row.get("full_venue_corpus_audit")) for row in category_rows if isinstance(row, dict)),
-        "llm_scoring_policy": "all detail-fetched candidates are sent to the final LLM judge by default; the full venue corpus is audited before category/title/detail screening",
+        "llm_scoring_policy": "all sources complete title scoring first; globally ranked unique candidates are capped by title_abstract_scoring_limit before detail enrichment and final title+abstract LLM scoring",
+        "title_abstract_scoring_limit": int(scoring_runtime.get("title_abstract_scoring_limit") or 0),
     }
     warnings: list[dict] = []
     if evaluated:
@@ -7614,7 +7215,7 @@ def _run_diagnostics(artifacts: dict) -> dict:
         warnings.append({
             "code": "recommendation_shortfall",
             "severity": "warning",
-            "message": f"Only {recommendation_actual}/{recommendation_target} LLM title+abstract scored recommendations with real abstracts were available. This indicates scoring-pool or abstract-fetch coverage, not a strict-fit cutoff.",
+            "message": f"Only {recommendation_actual}/{recommendation_target} unique candidates with real abstracts and valid final LLM scores were available. Find applies no topic-evidence or absolute-score cutoff; inspect scoring coverage, abstract enrichment, and duplicate removal.",
         })
     for item in failed_sources:
         message = str(item.get("message") or "")
@@ -7885,6 +7486,9 @@ _SOURCE_STATUS_MESSAGE_SKIP_MARKERS = (
     "ar skips category pruning",
     "source remains partial until",
     "adapter did not provide an explicit venue metadata completeness audit",
+    "minimum_target",
+    "minimum target",
+    "fetch_limit=",
 )
 
 
@@ -8001,7 +7605,10 @@ def _source_status_detail_parts(item: dict) -> list[str]:
         parts.append(f"标题总数: {raw_title_index}")
     count = item.get("count") if item.get("count") is not None else item.get("candidate_count")
     if count not in (None, ""):
-        parts.append(f"分类后: {count}")
+        parts.append(f"渠道候选: {count}")
+    fetch_limit = item.get("fetch_limit")
+    if fetch_limit not in (None, ""):
+        parts.append(f"抓取上限: {fetch_limit}")
     if item.get("detail_fetched_count") not in (None, ""):
         parts.append(f"元数据详情: {item.get('detail_fetched_count')}")
     if item.get("raw_count") is not None:
@@ -8048,7 +7655,7 @@ def _status_markdown(statuses: list[dict], title: str = "Source Status") -> str:
     lines = [
         f"# 来源状态{suffix}",
         "",
-        "每一行对应一次真实 Find 来源或会议渠道。标题总数表示抓到的标题索引规模；分类后表示按官方分类或无分类策略进入标题筛选的数量；元数据详情表示详情阶段抓到摘要或链接的候选数量。",
+        "每一行对应一个真实 Find 来源或出版渠道。标题总数表示抓到的题录规模；渠道候选表示该来源进入后续处理的候选数量；元数据详情表示详情阶段获得摘要或链接的候选数量。",
         "",
     ]
     for item in statuses:
@@ -8059,25 +7666,6 @@ def _status_markdown(statuses: list[dict], title: str = "Source Status") -> str:
             "",
         ])
     return "\n".join(lines).rstrip() + "\n"
-
-def _adaptive_arxiv_queries(config: AppConfig) -> list[str]:
-    existing = [query for query in config.arxiv_queries if str(query).strip()]
-    interest_parts = _topic_interest_chunks(config)
-    generated: list[str] = []
-    for part in interest_parts:
-        for chunk in re.split(r"[\n;；。.!?]+", str(part)):
-            query = " ".join(chunk.split()).strip()
-            if 4 <= len(query) <= 120:
-                generated.append(query)
-    seen: set[str] = set()
-    result: list[str] = []
-    for query in existing + generated:
-        key = str(query).strip()
-        if key and key.lower() not in seen:
-            seen.add(key.lower())
-            result.append(key)
-    return result
-
 
 def _refresh_venue_source_health(selection: object, log: LogFn = print) -> tuple[list[dict], list[dict], list[dict]]:
     catalog = catalog_by_id()
@@ -8375,7 +7963,7 @@ def run_find(
             "venue_title_index", "title_prefilter", "llm_title_filter", "detail_fetch", "detail_enrichment",
             "abstract_enrichment", "nature_detail_enrichment", "science_detail_enrichment", "arxiv", "biorxiv",
             "nature", "science", "huggingface", "github", "abstract_scoring", "abstract_scoring_retry",
-            "abstract_translation", "abstract_translation_retry", "final_ranking_prepare",
+            "abstract_translation", "abstract_translation_retry", "final_detail_fetch", "final_ranking_prepare",
         }
         if phase in live_phases:
             now = datetime.now(timezone.utc).timestamp()
@@ -8401,8 +7989,7 @@ def run_find(
                     "count_updates": live_count_updates,
                 })
 
-    # Venue sources should be scanned fully by default. max_fetch_papers only
-    # controls non-venue sources; venue_title_scan_limit is an explicit testing or
+    # Venue sources should be scanned fully by default. venue_title_scan_limit is an explicit testing or
     # emergency safety cap when set to a positive value. A zero/empty value means
     # use the all-corpus venue fetch path.
     title_scan_limit = _venue_title_fetch_limit(config)
@@ -8486,28 +8073,15 @@ def run_find(
                 should_cancel,
                 _progress,
                 dynamic_title_filter=trusted_categories,
-                result_limit=_venue_recall_result_limit(config, len(titles)),
+                result_limit=None,
                 scan_all=True,
                 title_filter_reports=title_filter_report,
                 category_filtered_count=category_selected_papers_for_report,
             )
             title_candidates.extend(selected_titles)
-            detail_count = _venue_detail_fetch_count(config, len(selected_titles))
-            detail_titles = _detail_titles_with_presentation_recall(selected_titles, detail_count, venue.get("name", venue_id), log)
-            log(f"{venue.get('name')}: title screen retained {len(selected_titles)} candidates; scoring {len(detail_titles)} detailed records")
-            detailed = list(detail_titles)
-            detailed, pmlr_stats = enrich_pmlr_details(detailed)
-            if pmlr_stats.get("attempted"):
-                log(
-                    f"{venue.get('name', venue_id)}: PMLR detail enrichment filled abstracts "
-                    f"{pmlr_stats.get('abstracts_filled', 0)}/{pmlr_stats.get('attempted', 0)}, "
-                    f"pdfs {pmlr_stats.get('pdfs_filled', 0)}/{pmlr_stats.get('attempted', 0)}"
-                )
-            detailed = _enrich_missing_abstracts_for_adaptive_recall(detailed, effective_config, venue.get("name", venue_id), log, _progress, should_cancel)
-            detailed = [attach_quality_metadata(item) for item in detailed]
-            venue_papers.extend(detailed)
-            ready_detail_count = len(_dedupe_items(venue_papers))
-            _progress("detail_fetch", len(detail_titles), max(1, len(detail_titles)), f"{venue.get('name')}: metadata details ready", count_updates={"detail_fetched": ready_detail_count, "venue_detail_fetched_candidates": ready_detail_count})
+            if selected_titles:
+                deferred_scoring_groups.append((venue.get("name", venue_id), list(selected_titles), "venue"))
+            log(f"{venue.get('name')}: title screen completed for {len(selected_titles)} candidates; details wait for the global title-score ranking")
             continue
 
         log(f"Fetching title index for {venue.get('name')} years {effective_years}")
@@ -8580,50 +8154,26 @@ def run_find(
             should_cancel,
             _progress,
             dynamic_title_filter=trusted_categories,
-            result_limit=_venue_recall_result_limit(config, len(title_index)),
+            result_limit=None,
             scan_all=adapter == "local_database",
             title_filter_reports=title_filter_report,
             category_filtered_count=category_selected_papers_for_report,
         )
         title_candidates.extend(selected_titles)
         _raise_if_cancelled(should_cancel)
-        detail_count = _venue_detail_fetch_count(config, len(selected_titles))
-        detail_titles = _detail_titles_with_presentation_recall(selected_titles, detail_count, venue.get("name", venue_id), log)
-        detail_wall_timeout = _venue_detail_wall_timeout_sec(str(venue.get('name') or venue_id), adapter, len(detail_titles))
-        log(f"{venue.get('name')}: title screen retained {len(selected_titles)} candidates; fetching details for {len(detail_titles)}; wall_timeout={detail_wall_timeout:.0f}s")
-        _progress("detail_fetch", 0, max(1, len(detail_titles)), f"{venue.get('name')}: fetching selected paper details")
-        detailed = fetch_selected_venue_details(detail_titles, should_cancel=should_cancel, wall_timeout_sec=detail_wall_timeout)
-        deferred_count = sum(1 for item in detailed if item.get("detail_fetch_deferred") or (isinstance(item.get("metadata"), dict) and item.get("metadata", {}).get("detail_fetch_deferred")))
-        if deferred_count:
-            log(f"{venue.get('name')}: detail fetch deferred {deferred_count}/{len(detail_titles)} slow/cancelled candidates; deferred candidates remain internal audit only unless later abstract enrichment succeeds.")
-        _raise_if_cancelled(should_cancel)
-        detailed, pmlr_stats = enrich_pmlr_details(detailed)
-        if pmlr_stats.get("attempted"):
-            log(
-                f"{venue.get('name', venue_id)}: PMLR detail enrichment filled abstracts "
-                f"{pmlr_stats.get('abstracts_filled', 0)}/{pmlr_stats.get('attempted', 0)}, "
-                f"pdfs {pmlr_stats.get('pdfs_filled', 0)}/{pmlr_stats.get('attempted', 0)}"
-            )
-        detailed = _enrich_missing_abstracts_for_adaptive_recall(detailed, effective_config, venue.get("name", venue_id), log, _progress, should_cancel)
-        detailed = [attach_quality_metadata(item) for item in detailed]
-        venue_papers.extend(detailed)
-        ready_detail_count = len(_dedupe_items(venue_papers))
-        _progress("detail_fetch", len(detail_titles), max(1, len(detail_titles)), f"{venue.get('name')}: detail fetch complete", count_updates={"detail_fetched": ready_detail_count, "venue_detail_fetched_candidates": ready_detail_count})
+        if selected_titles:
+            deferred_scoring_groups.append((venue.get("name", venue_id), list(selected_titles), "venue"))
+        log(f"{venue.get('name')}: title screen completed for {len(selected_titles)} candidates; details wait for the global title-score ranking")
     raw_title_index = _dedupe_items(raw_title_index)
     title_candidates = _dedupe_items(title_candidates)
     venue_papers = _dedupe_items(venue_papers)
-    if venue_year_groups:
-        source_status.extend(_venue_source_status_rows())
-        # Do not append an anonymous aggregate venue row here. The UI and
-        # source_status.md render each requested venue from venue_health_report;
-        # keeping only per-source rows avoids opaque statuses like
-        # "venues ok / retrieval_pool=...".
     _persist_find_progress("venue_scan_complete")
 
     if llm.enabled and not llm_live.get("ok"):
         source_status.append(_source_status("llm_final_scoring", False, 0, "LLM live gate failed; continuing with local fallback scoring where real title/abstract metadata is available. " + str(llm_live.get("error") or llm_live.get("reason") or "unknown"), limited=True))
     latest_released_venue = _latest_released_venue_context(venue_health_report)
-    _attach_latest_released_venue_context(venue_papers, latest_released_venue)
+    venue_title_candidates = [item for _source, items, sink in deferred_scoring_groups if sink == "venue" for item in items]
+    _attach_latest_released_venue_context(venue_title_candidates, latest_released_venue)
     if latest_released_venue.get("venue"):
         log(
             "Latest released venue for freshness bonus: "
@@ -8634,16 +8184,23 @@ def run_find(
     else:
         log("No eligible latest released venue found for freshness bonus; no venue-year freshness bonus will be applied.")
     scoring_llm = llm if (not llm.enabled or llm_live.get("ok")) else LLMClient(config.model_copy(update={"api_key": ""}), "find")
-    if venue_papers:
-        deferred_scoring_groups.append(("articles", list(venue_papers), "venue"))
 
     if request.selection.include_nature or request.selection.include_science or request.selection.include_arxiv or request.selection.include_biorxiv:
         # Shared topic terms for non-conference sources. Journal sources use these
         # as a targeted recall layer and then fall back to broader indexes unless
         # explicitly configured otherwise.
-        search_terms = extract_search_terms(effective_config, scoring_llm, log=log)
+        search_terms = extract_search_terms(
+            config,
+            scoring_llm,
+            normalized_profile=stage0_profile,
+            log=log,
+        )
     else:
         search_terms = {}
+    effective_arxiv_categories = list(search_terms.get("arxiv_categories") or [])
+    effective_biorxiv_categories = list(search_terms.get("biorxiv_categories") or [])
+    if search_terms:
+        _write_run_json(run_dir, "intermediate/search_terms.json", search_terms)
     journal_search_phrases = build_biorxiv_search_phrases(search_terms, max_phrases=12)
 
     if request.selection.include_nature:
@@ -8674,8 +8231,9 @@ def run_find(
         else:
             nature_raw_items = []
             nature_status = _source_fetch_timeout_status("nature", "Nature Portfolio", nature_fetch_timeout)
-        nature_status = _annotate_source_completeness("nature", nature_status, nature_raw_items, nature_params, min_count=1)
+        nature_status = _annotate_source_completeness("nature", nature_status, nature_raw_items, nature_params)
         source_status.append(nature_status)
+        raw_title_index.extend(nature_raw_items)
         nature_prefiltered_items = _prefilter_titles(
             nature_raw_items,
             effective_config,
@@ -8690,27 +8248,9 @@ def run_find(
             title_filter_reports=title_filter_report,
         )
         title_candidates.extend(nature_prefiltered_items)
-        _progress("nature_detail_enrichment", 0, max(1, len(nature_prefiltered_items)), "Nature Portfolio: enriching selected article details")
-        nature_detail_timeout = _source_fetch_wall_timeout("nature_detail", default=0)
-        nature_detail_done, nature_detail_value, nature_detail_error = _run_with_wall_timeout(
-            "Nature Portfolio detail enrichment",
-            lambda: enrich_nature_details(nature_prefiltered_items, limit=len(nature_prefiltered_items)),
-            nature_detail_timeout,
-            log,
-        )
-        if nature_detail_error:
-            raise nature_detail_error
-        if nature_detail_done:
-            nature_detailed_items, nature_detail_stats = nature_detail_value
-        else:
-            nature_detailed_items = nature_prefiltered_items
-            nature_detail_stats = _detail_fetch_timeout_stats("Nature Portfolio", nature_detail_timeout)
         nature_status["prefiltered_count"] = len(nature_prefiltered_items)
-        nature_status["detail_enrichment"] = nature_detail_stats
-        _progress("nature_detail_enrichment", len(nature_prefiltered_items), max(1, len(nature_prefiltered_items)), "Nature Portfolio: detail enrichment complete")
-        nature_detailed_items = [attach_quality_metadata(item) for item in nature_detailed_items]
-        if nature_detailed_items:
-            deferred_scoring_groups.append(("nature", list(nature_detailed_items), "nature"))
+        if nature_prefiltered_items:
+            deferred_scoring_groups.append(("nature", list(nature_prefiltered_items), "nature"))
         _progress("nature", 1, 1, "Nature Portfolio complete")
 
     if request.selection.include_science:
@@ -8740,8 +8280,9 @@ def run_find(
         else:
             science_raw_items = []
             science_status = _source_fetch_timeout_status("science", "Science Family", science_fetch_timeout)
-        science_status = _annotate_source_completeness("science", science_status, science_raw_items, science_params, min_count=1)
+        science_status = _annotate_source_completeness("science", science_status, science_raw_items, science_params)
         source_status.append(science_status)
+        raw_title_index.extend(science_raw_items)
         science_prefiltered_items = _prefilter_titles(
             science_raw_items,
             effective_config,
@@ -8756,50 +8297,37 @@ def run_find(
             title_filter_reports=title_filter_report,
         )
         title_candidates.extend(science_prefiltered_items)
-        _progress("science_detail_enrichment", 0, max(1, len(science_prefiltered_items)), "Science Family: enriching selected article details")
-        science_detail_timeout = _source_fetch_wall_timeout("science_detail", default=0)
-        science_detail_done, science_detail_value, science_detail_error = _run_with_wall_timeout(
-            "Science Family detail enrichment",
-            lambda: enrich_science_details(science_prefiltered_items, limit=len(science_prefiltered_items)),
-            science_detail_timeout,
-            log,
-        )
-        if science_detail_error:
-            raise science_detail_error
-        if science_detail_done:
-            science_detailed_items, science_detail_stats = science_detail_value
-        else:
-            science_detailed_items = science_prefiltered_items
-            science_detail_stats = _detail_fetch_timeout_stats("Science Family", science_detail_timeout)
         science_status["prefiltered_count"] = len(science_prefiltered_items)
-        science_status["detail_enrichment"] = science_detail_stats
-        _progress("science_detail_enrichment", len(science_prefiltered_items), max(1, len(science_prefiltered_items)), "Science Family: detail enrichment complete")
-        science_detailed_items = [attach_quality_metadata(item) for item in science_detailed_items]
-        if science_detailed_items:
-            deferred_scoring_groups.append(("science", list(science_detailed_items), "science"))
+        if science_prefiltered_items:
+            deferred_scoring_groups.append(("science", list(science_prefiltered_items), "science"))
         _progress("science", 1, 1, "Science Family complete")
 
     if request.selection.include_arxiv:
         _raise_if_cancelled(should_cancel)
-        arxiv_queries = _adaptive_arxiv_queries(config)
-        arxiv_fetch_count = max(1, config.max_fetch_papers)
+        arxiv_queries: list[str] = []
+        arxiv_fetch_limit = max(1, config.nonvenue_fetch_limit)
         arxiv_start_date, arxiv_end_date, _arxiv_date_window_source = _source_effective_date_window("arxiv", config)
         arxiv_targeted = build_arxiv_targeted_queries(
-            search_terms.get("anchor_terms") or [],
-            search_terms.get("refine_groups") or [],
-            search_terms.get("arxiv_categories") or config.arxiv_categories,
+            search_terms.get("search_keywords") or [],
+            effective_arxiv_categories,
             arxiv_start_date,
             arxiv_end_date,
         )
         if arxiv_targeted:
-            log("arXiv keyword-targeted queries (anchor OR-group): " + " | ".join(label for label, _ in arxiv_targeted))
+            log("arXiv keyword-targeted query (equal-status OR-group): " + " | ".join(label for label, _ in arxiv_targeted))
         else:
-            log(f"Fetching arXiv categories: {', '.join(config.arxiv_categories)}; topic queries: {', '.join(arxiv_queries) if arxiv_queries else 'none'}; max={arxiv_fetch_count}")
+            log(f"Fetching arXiv categories: {', '.join(effective_arxiv_categories) or 'all'}; topic queries: {', '.join(arxiv_queries) if arxiv_queries else 'none'}; fetch_limit={arxiv_fetch_limit}")
         _progress("arxiv", 0, 1, "Fetching arXiv")
-        arxiv_params = _source_request_params("arxiv", config, search_terms=search_terms, arxiv_targeted=arxiv_targeted)
+        arxiv_params = _source_request_params(
+            "arxiv",
+            config,
+            search_terms=search_terms,
+            arxiv_targeted=arxiv_targeted,
+            arxiv_categories=effective_arxiv_categories,
+        )
         arxiv_items, arxiv_status = fetch_arxiv(
-            config.arxiv_categories,
-            arxiv_fetch_count,
+            effective_arxiv_categories,
+            arxiv_fetch_limit,
             arxiv_start_date,
             arxiv_end_date,
             arxiv_queries,
@@ -8807,24 +8335,36 @@ def run_find(
             progress=_progress,
             should_cancel=should_cancel,
             max_queries=config.arxiv_max_queries,
-            per_query_limit=config.arxiv_per_query_limit,
             timeout_sec=config.arxiv_timeout_sec,
             targeted_queries=arxiv_targeted or None,
         )
         arxiv_raw_items = arxiv_items
         query_text = _topic_interest_text(effective_config)
-        arxiv_prefiltered_items, arxiv_prefilter_report = rank_papers_tfidf(
+        arxiv_ranked_items, arxiv_prefilter_report = rank_papers_tfidf(
             arxiv_items,
             query_text,
             per_category_limit=config.arxiv_llm_candidates_per_category,
             global_limit=config.arxiv_llm_candidate_limit,
             ranking_bonus=_local_screening_quality_bonus,
         )
+        arxiv_prefiltered_items = _prefilter_titles(
+            arxiv_ranked_items,
+            effective_config,
+            scoring_llm,
+            "arXiv",
+            log,
+            should_cancel,
+            _progress,
+            result_limit=config.arxiv_llm_candidate_limit or None,
+            scan_all=True,
+            title_filter_reports=title_filter_report,
+            category_filtered_count=len(arxiv_items),
+        )
         arxiv_status["raw_count"] = len(arxiv_raw_items)
         arxiv_status["prefiltered_count"] = len(arxiv_prefiltered_items)
         arxiv_status["prefilter"] = arxiv_prefilter_report
-        arxiv_status = _annotate_source_completeness("arxiv", arxiv_status, arxiv_raw_items, arxiv_params, min_count=arxiv_fetch_count)
-        log(f"arXiv: fetched {len(arxiv_raw_items)} raw records; TF-IDF shortlisted {len(arxiv_prefiltered_items)} for LLM scoring")
+        arxiv_status = _annotate_source_completeness("arxiv", arxiv_status, arxiv_raw_items, arxiv_params)
+        log(f"arXiv: fetched {len(arxiv_raw_items)} raw records; title LLM completed for {len(arxiv_prefiltered_items)} candidates")
         source_status.append(arxiv_status)
         raw_title_index.extend(arxiv_raw_items)
         title_candidates.extend(arxiv_prefiltered_items)
@@ -8834,25 +8374,35 @@ def run_find(
 
     if request.selection.include_biorxiv:
         _raise_if_cancelled(should_cancel)
-        log("Fetching bioRxiv categories: " + ", ".join(config.biorxiv_categories))
+        log("Fetching bioRxiv categories: " + (", ".join(effective_biorxiv_categories) or "all"))
         _progress("biorxiv", 0, 1, "Fetching bioRxiv")
-        biorxiv_fetch_count = max(1, config.max_fetch_papers)
+        biorxiv_fetch_limit = max(1, config.nonvenue_fetch_limit)
         biorxiv_start_date, biorxiv_end_date, _biorxiv_date_window_source = _source_effective_date_window("biorxiv", config)
         biorxiv_phrases = build_biorxiv_search_phrases(search_terms)
-        biorxiv_params = _source_request_params("biorxiv", config, search_terms=search_terms, biorxiv_phrases=biorxiv_phrases)
+        biorxiv_params = _source_request_params(
+            "biorxiv",
+            config,
+            search_terms=search_terms,
+            biorxiv_phrases=biorxiv_phrases,
+            biorxiv_categories=effective_biorxiv_categories,
+        )
         biorxiv_fetch_timeout = _source_fetch_wall_timeout("biorxiv", default=0)
+        biorxiv_cancel = threading.Event()
+        biorxiv_should_cancel = lambda: biorxiv_cancel.is_set() or bool(should_cancel and should_cancel())
         biorxiv_fetch_done, biorxiv_fetch_value, biorxiv_fetch_error = _run_with_wall_timeout(
             "bioRxiv fetch",
             lambda: fetch_biorxiv(
-                config.biorxiv_categories,
-                biorxiv_fetch_count,
+                effective_biorxiv_categories,
+                biorxiv_fetch_limit,
                 biorxiv_start_date,
                 biorxiv_end_date,
                 search_phrases=biorxiv_phrases,
                 log=log,
+                should_cancel=biorxiv_should_cancel,
             ),
             biorxiv_fetch_timeout,
             log,
+            on_timeout=biorxiv_cancel.set,
         )
         if biorxiv_fetch_error:
             raise biorxiv_fetch_error
@@ -8863,18 +8413,31 @@ def run_find(
             biorxiv_status = _source_fetch_timeout_status("biorxiv", "bioRxiv", biorxiv_fetch_timeout)
         biorxiv_raw_items = biorxiv_items
         query_text = _topic_interest_text(effective_config)
-        biorxiv_prefiltered_items, biorxiv_prefilter_report = rank_papers_tfidf(
+        biorxiv_ranked_items, biorxiv_prefilter_report = rank_papers_tfidf(
             biorxiv_items,
             query_text,
             per_category_limit=config.biorxiv_llm_candidates_per_category,
             global_limit=config.biorxiv_llm_candidate_limit,
             ranking_bonus=_local_screening_quality_bonus,
         )
+        biorxiv_prefiltered_items = _prefilter_titles(
+            biorxiv_ranked_items,
+            effective_config,
+            scoring_llm,
+            "bioRxiv",
+            log,
+            should_cancel,
+            _progress,
+            result_limit=config.biorxiv_llm_candidate_limit or None,
+            scan_all=True,
+            title_filter_reports=title_filter_report,
+            category_filtered_count=len(biorxiv_items),
+        )
         biorxiv_status["raw_count"] = len(biorxiv_raw_items)
         biorxiv_status["prefiltered_count"] = len(biorxiv_prefiltered_items)
         biorxiv_status["prefilter"] = biorxiv_prefilter_report
-        biorxiv_status = _annotate_source_completeness("biorxiv", biorxiv_status, biorxiv_raw_items, biorxiv_params, min_count=biorxiv_fetch_count)
-        log(f"bioRxiv: fetched {len(biorxiv_raw_items)} raw records; TF-IDF shortlisted {len(biorxiv_prefiltered_items)} for LLM scoring")
+        biorxiv_status = _annotate_source_completeness("biorxiv", biorxiv_status, biorxiv_raw_items, biorxiv_params)
+        log(f"bioRxiv: fetched {len(biorxiv_raw_items)} raw records; title LLM completed for {len(biorxiv_prefiltered_items)} candidates")
         source_status.append(biorxiv_status)
         raw_title_index.extend(biorxiv_raw_items)
         title_candidates.extend(biorxiv_prefiltered_items)
@@ -8911,7 +8474,17 @@ def run_find(
         source_status.append(hf_status)
         hf_raw_items = hf_papers + hf_models
         if hf_raw_items:
-            deferred_scoring_groups.append(("huggingface", list(hf_raw_items), "huggingface"))
+            hf_title_items = _prefilter_titles(
+                hf_raw_items,
+                effective_config,
+                scoring_llm,
+                "HuggingFace",
+                log,
+                should_cancel,
+                _progress,
+                scan_all=True,
+            )
+            deferred_scoring_groups.append(("huggingface", hf_title_items, "huggingface"))
         _progress("huggingface", 1, 1, "HuggingFace complete")
 
     github_items: list[dict] = []
@@ -8941,13 +8514,86 @@ def run_find(
             github_status = _source_fetch_timeout_status("github", "GitHub", github_fetch_timeout)
         source_status.append(github_status)
         if github_raw:
-            deferred_scoring_groups.append(("github", list(github_raw), "github"))
+            github_title_items = _prefilter_titles(
+                github_raw,
+                effective_config,
+                scoring_llm,
+                "GitHub",
+                log,
+                should_cancel,
+                _progress,
+                scan_all=True,
+            )
+            deferred_scoring_groups.append(("github", github_title_items, "github"))
         _progress("github", 1, 1, "GitHub complete")
 
     _raise_if_cancelled(should_cancel)
     _persist_find_progress("source_collection_complete")
+    deferred_scoring_groups = _select_title_abstract_scoring_groups(
+        deferred_scoring_groups,
+        config,
+        require_title_llm_score=scoring_llm.enabled,
+        log=log,
+    )
+    title_abstract_scoring_selected_count = sum(len(items) for _source, items, _sink in deferred_scoring_groups)
     for source_name, source_items, sink_name in deferred_scoring_groups:
         _raise_if_cancelled(should_cancel)
+        if sink_name == "venue":
+            metadata = source_items[0].get("metadata") if source_items and isinstance(source_items[0].get("metadata"), dict) else {}
+            adapter = str(metadata.get("source_adapter") or metadata.get("adapter") or "")
+            detail_wall_timeout = _venue_detail_wall_timeout_sec(source_name, adapter, len(source_items))
+            log(f"{source_name}: fetching details for {len(source_items)} globally selected title-scored candidates; wall_timeout={detail_wall_timeout:.0f}s")
+            _progress("final_detail_fetch", 0, max(1, len(source_items)), f"{source_name}: fetching selected paper details")
+            source_items = fetch_selected_venue_details(source_items, should_cancel=should_cancel, wall_timeout_sec=detail_wall_timeout)
+            deferred_count = sum(
+                1
+                for item in source_items
+                if item.get("detail_fetch_deferred")
+                or (isinstance(item.get("metadata"), dict) and item.get("metadata", {}).get("detail_fetch_deferred"))
+            )
+            if deferred_count:
+                log(f"{source_name}: detail fetch deferred {deferred_count}/{len(source_items)} slow or cancelled candidates")
+            source_items, pmlr_stats = enrich_pmlr_details(source_items)
+            if pmlr_stats.get("attempted"):
+                log(
+                    f"{source_name}: PMLR detail enrichment filled abstracts "
+                    f"{pmlr_stats.get('abstracts_filled', 0)}/{pmlr_stats.get('attempted', 0)}, "
+                    f"pdfs {pmlr_stats.get('pdfs_filled', 0)}/{pmlr_stats.get('attempted', 0)}"
+                )
+            source_items = [attach_quality_metadata(item) for item in source_items]
+            venue_papers.extend(source_items)
+            ready_detail_count = len(_dedupe_items(venue_papers))
+            _progress(
+                "final_detail_fetch",
+                len(source_items),
+                max(1, len(source_items)),
+                f"{source_name}: detail fetch complete",
+                count_updates={"detail_fetched": ready_detail_count, "venue_detail_fetched_candidates": ready_detail_count},
+            )
+        elif sink_name in {"nature", "science"}:
+            display_name = "Nature Portfolio" if sink_name == "nature" else "Science Family"
+            detail_phase = "final_detail_fetch"
+            detail_timeout = _source_fetch_wall_timeout(f"{sink_name}_detail", default=0)
+            _progress(detail_phase, 0, max(1, len(source_items)), f"{display_name}: enriching globally selected article details")
+            enrich = enrich_nature_details if sink_name == "nature" else enrich_science_details
+            detail_done, detail_value, detail_error = _run_with_wall_timeout(
+                f"{display_name} detail enrichment",
+                lambda items=list(source_items), enrich=enrich: enrich(items, limit=len(items)),
+                detail_timeout,
+                log,
+            )
+            if detail_error:
+                raise detail_error
+            if detail_done:
+                source_items, detail_stats = detail_value
+            else:
+                detail_stats = _detail_fetch_timeout_stats(display_name, detail_timeout)
+            for status_row in source_status:
+                if str(status_row.get("source") or "").lower() == sink_name:
+                    status_row["detail_enrichment"] = detail_stats
+                    break
+            source_items = [attach_quality_metadata(item) for item in source_items]
+            _progress(detail_phase, len(source_items), max(1, len(source_items)), f"{display_name}: detail enrichment complete")
         scored_items = _evaluate_items(source_items, effective_config, scoring_llm, source_name, log, should_cancel, _progress)
         if sink_name == "huggingface":
             hf_items = scored_items[: config.max_recommended_papers]
@@ -8958,6 +8604,10 @@ def run_find(
         else:
             evaluated_candidates.extend(scored_items)
         _persist_find_progress(f"{source_name}_llm_scoring_complete")
+
+    venue_papers = _dedupe_items(venue_papers)
+    if venue_year_groups:
+        source_status.extend(_venue_source_status_rows())
 
     raw_title_index = _dedupe_items(raw_title_index)
     title_candidates = _dedupe_items(title_candidates)
@@ -9037,7 +8687,9 @@ def run_find(
                 "recommendation_shortfall": recommendation_shortfall,
                 "recommendation_policy": FIND_RECOMMENDATION_POLICY,
                 "read_stage_full_text_policy": read_stage_full_text_policy,
-                "strong_recommendation_max_count": _strong_recommendation_target_count(config, source_count),
+                "recommendation_minimum_count": _strong_recommendation_target_count(config, source_count),
+                "title_abstract_scoring_limit": int(config.title_abstract_scoring_limit),
+                "title_abstract_scoring_selected_count": title_abstract_scoring_selected_count,
                 "final_llm_scoring_limit": _final_llm_scoring_limit(config, len(evaluated_candidates)),
                 "final_llm_scoring_skipped_count": sum(1 for item in evaluated_candidates if item.get("llm_final_scoring_skipped")),
                 "llm": llm.summary(),
