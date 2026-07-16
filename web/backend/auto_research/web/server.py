@@ -164,6 +164,10 @@ async def _authenticate_api_requests(request: Request, call_next):
 async def _prevent_stale_frontend_cache(request, call_next):
     response = await call_next(request)
     path = str(request.url.path or "")
+    if _request_uses_https(request):
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
     if path == "/" or path.startswith("/assets/") or path.endswith((".html", ".js", ".css")):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"

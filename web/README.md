@@ -57,6 +57,26 @@ npm --prefix web/frontend/client run build
 
 启动脚本默认监听 `0.0.0.0:8879`，可直接通过 `http://服务器地址:8879` 检查，也可由 Nginx/Caddy 反向代理到 HTTPS 域名；仍可通过 `WEB_HOST=127.0.0.1` 限制为仅本机访问。网页提供注册、登录和退出功能，会话保存在 HttpOnly Cookie 中。
 
+推荐由反向代理终止 HTTPS，再转发到 `http://127.0.0.1:8879`。代理必须传递协议和 WebSocket 头，TASTE 才会设置 Secure Cookie，并让任务连接自动使用 WSS：
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8879;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+}
+```
+
+默认只信任本机代理头；若代理来自容器或另一台可信主机，用 `WEB_FORWARDED_ALLOW_IPS` 设置其来源 IP。若需要让 TASTE 自己直接在 8879 提供 TLS，可同时指定证书和私钥（此模式下 8879 将只接受 HTTPS）：
+
+```bash
+WEB_SSL_CERTFILE=/path/fullchain.pem WEB_SSL_KEYFILE=/path/privkey.pem framework/scripts/start_web.sh
+```
+
 账户数据采用 Web 到 Framework 的账户项目映射隔离：项目产物与任务访问按账户校验，账户的 LLM/邮件配置保存在 `web/.runtime/accounts/<account-id>/`。Find/Read 的公共下载、题录和全文缓存继续由所有账户共享，科研模块本身不为账户复制；共享缓存不包含其他账户项目产物的访问权限。
 
 维护者测试 TASTE 功能时，除 debug/单元测试外，应尽量通过网页按钮触发模块任务，模拟真实用户路径。

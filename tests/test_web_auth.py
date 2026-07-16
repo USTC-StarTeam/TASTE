@@ -85,3 +85,22 @@ def test_account_configuration_is_isolated(tmp_path, monkeypatch):
     assert alice.post("/api/config", json=alice_config).status_code == 200
     assert alice.get("/api/config").json()["research_interest"] == "alice-only-interest"
     assert bob.get("/api/config").json()["research_interest"] != "alice-only-interest"
+
+
+def test_https_proxy_sets_secure_cookie_and_security_headers(tmp_path, monkeypatch):
+    import auto_research.web.server as server
+    from auto_research.web.auth import AuthStore
+
+    monkeypatch.setattr(server, "AUTH_STORE", AuthStore(tmp_path / "auth.sqlite3"))
+    client = TestClient(server.app)
+    response = client.post(
+        "/api/auth/register",
+        headers={"X-Forwarded-Proto": "https"},
+        json={"username": "https_user", "password": "password-https"},
+    )
+    assert response.status_code == 200
+    cookie = response.headers["set-cookie"]
+    assert "HttpOnly" in cookie
+    assert "Secure" in cookie
+    assert "SameSite=lax" in cookie
+    assert response.headers["strict-transport-security"] == "max-age=31536000"
