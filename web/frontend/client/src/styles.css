@@ -22,6 +22,83 @@ body {
   overflow-y: auto;
 }
 
+.authShell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 1.25rem;
+  background: #eef2f5;
+}
+
+.authCard {
+  width: min(100%, 420px);
+  padding: 1.5rem;
+  border: 1px solid #d7dee7;
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 16px 40px rgba(24, 33, 47, 0.08);
+}
+
+.authHeading {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  margin-bottom: 1.2rem;
+}
+
+.authHeading h1,
+.authHeading p,
+.authCard > p {
+  margin: 0;
+}
+
+.authHeading p,
+.authHelp,
+.authCard > p {
+  color: #607083;
+  font-size: 0.86rem;
+}
+
+.authMark {
+  width: 50px;
+  height: 50px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: #1e5a5a;
+  color: #ffffff;
+  font-size: 1.55rem;
+  font-weight: 800;
+}
+
+.authTabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+  margin-bottom: 0.9rem;
+}
+
+.authTabs button.active {
+  border-color: #1e5a5a;
+  background: #1e5a5a;
+  color: #ffffff;
+}
+
+.authSubmit {
+  width: 100%;
+  margin-top: 1rem;
+}
+
+.authError {
+  margin: 0.75rem 0 0;
+  color: #a33a32;
+  font-size: 0.86rem;
+}
+
+.authHelp {
+  margin-top: 0.8rem !important;
+}
+
 button,
 input,
 textarea,
@@ -96,6 +173,26 @@ label {
   gap: 0.8rem;
   align-items: center;
   margin-bottom: 1rem;
+}
+
+.accountBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin: -0.35rem 0 0.9rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 7px;
+  background: #eef3f7;
+  color: #46576a;
+}
+
+.accountBar span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
 }
 
 .langSwitch {

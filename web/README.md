@@ -55,7 +55,11 @@ framework/scripts/start_web.sh
 npm --prefix web/frontend/client run build
 ```
 
-远端服务器使用 SSH tunnel 后在本地浏览器访问 `http://127.0.0.1:8879`。维护者测试 TASTE 功能时，除 debug/单元测试外，应尽量通过网页按钮触发模块任务，模拟真实用户路径。
+启动脚本默认监听 `0.0.0.0:8879`，可直接通过 `http://服务器地址:8879` 检查，也可由 Nginx/Caddy 反向代理到 HTTPS 域名；仍可通过 `WEB_HOST=127.0.0.1` 限制为仅本机访问。网页提供注册、登录和退出功能，会话保存在 HttpOnly Cookie 中。
+
+账户数据采用 Web 到 Framework 的账户项目映射隔离：项目产物与任务访问按账户校验，账户的 LLM/邮件配置保存在 `web/.runtime/accounts/<account-id>/`。Find/Read 的公共下载、题录和全文缓存继续由所有账户共享，科研模块本身不为账户复制；共享缓存不包含其他账户项目产物的访问权限。
+
+维护者测试 TASTE 功能时，除 debug/单元测试外，应尽量通过网页按钮触发模块任务，模拟真实用户路径。
 
 ## 冗余控制原则
 

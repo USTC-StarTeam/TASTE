@@ -16,7 +16,7 @@ if [[ -n "$CONDA_EXE" ]]; then
 fi
 ENV_NAME="${CONDA_ENV_NAME:-}"
 PORT="${WEB_PORT:-8879}"
-HOST="${WEB_HOST:-127.0.0.1}"
+HOST="${WEB_HOST:-0.0.0.0}"
 
 activate_conda_env_if_available() {
   if [[ -z "$ENV_NAME" || -z "$CONDA" || ! -f "$CONDA/etc/profile.d/conda.sh" ]]; then

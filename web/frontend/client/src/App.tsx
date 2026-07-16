@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import MarkdownIt from "markdown-it";
 import katex from "katex";
 import texmath from "markdown-it-texmath";
@@ -6,6 +6,7 @@ import "katex/dist/katex.min.css";
 import {
   Project,
   ProjectSummary,
+  AuthUser,
   Artifact,
   Config,
   Job,
@@ -24,6 +25,7 @@ import {
   getConfigMeta,
   getClaudeLatestResponse,
   getFrontendVersion,
+  getCurrentUser,
   getJobs,
   getRuns,
   getVenues,
@@ -34,6 +36,9 @@ import {
   saveConfig,
   saveRuntime,
   saveProjectConfig,
+  login,
+  logout,
+  register,
   startProjectJob,
   startEmail,
   startFind,
@@ -3571,7 +3576,7 @@ function tabUrlValue(tab: Tab) {
   return tab;
 }
 
-function App() {
+function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => void }) {
   const [tab, setTabState] = useState<Tab>(() => initialTabFromLocation());
   const [lang, setLang] = useState<Lang>(() => (localStorage.getItem("ui_lang") as Lang) || (localStorage.getItem("auto_research_lang") as Lang) || "zh");
   const [config, setConfig] = useState<Config>(DEFAULT_CONFIG);
@@ -7252,6 +7257,10 @@ function App() {
             <p>{window.location.host}</p>
           </div>
         </div>
+        <div className="accountBar">
+          <span title={account.username}>{account.username}</span>
+          <button className="smallButton" onClick={onLogout}>{lang === "zh" ? "退出" : "Sign out"}</button>
+        </div>
         <div className="langSwitch" aria-label="Language">
           <button className={lang === "zh" ? "active" : ""} onClick={() => setLang("zh")}>{t.languageChinese}</button>
           <button className={lang === "en" ? "active" : ""} onClick={() => setLang("en")}>{t.languageEnglish}</button>
@@ -8213,6 +8222,110 @@ function App() {
       </section>
     </main>
   );
+}
+
+function authErrorMessage(error: unknown) {
+  const raw = String(error || "");
+  const jsonStart = raw.indexOf("{");
+  if (jsonStart >= 0) {
+    try {
+      const payload = JSON.parse(raw.slice(jsonStart));
+      if (payload?.error) return String(payload.error);
+    } catch {
+      // Keep the original network error when the response is not JSON.
+    }
+  }
+  return raw.replace(/^Error:\s*/, "") || "请求失败，请稍后重试。";
+}
+
+function App() {
+  const [account, setAccount] = useState<AuthUser | null | undefined>(undefined);
+  const [mode, setMode] = useState<"login" | "register">("login");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    void getCurrentUser()
+      .then(setAccount)
+      .catch((error) => {
+        setAuthError(authErrorMessage(error));
+        setAccount(null);
+      });
+    const requireAuth = () => setAccount(null);
+    window.addEventListener("taste:auth-required", requireAuth);
+    return () => window.removeEventListener("taste:auth-required", requireAuth);
+  }, []);
+
+  async function submitAuth(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (mode === "register" && password !== confirmPassword) {
+      setAuthError("两次输入的密码不一致。");
+      return;
+    }
+    setSubmitting(true);
+    setAuthError("");
+    try {
+      const response = mode === "login" ? await login(username, password) : await register(username, password);
+      localStorage.removeItem("selected_project");
+      setAccount(response.user);
+      setPassword("");
+      setConfirmPassword("");
+    } catch (error) {
+      setAuthError(authErrorMessage(error));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function signOut() {
+    try {
+      await logout();
+    } finally {
+      localStorage.removeItem("selected_project");
+      setAccount(null);
+    }
+  }
+
+  if (account === undefined) {
+    return <main className="authShell"><section className="authCard"><div className="authMark">T</div><p>正在连接 TASTE…</p></section></main>;
+  }
+
+  if (!account) {
+    return (
+      <main className="authShell">
+        <section className="authCard">
+          <div className="authHeading">
+            <div className="authMark">T</div>
+            <div><h1>TASTE</h1><p>服务器版 · 账户数据独立</p></div>
+          </div>
+          <div className="authTabs">
+            <button type="button" className={mode === "login" ? "active" : ""} onClick={() => { setMode("login"); setAuthError(""); }}>登录</button>
+            <button type="button" className={mode === "register" ? "active" : ""} onClick={() => { setMode("register"); setAuthError(""); }}>注册</button>
+          </div>
+          <form onSubmit={submitAuth}>
+            <label htmlFor="auth-username">用户名</label>
+            <input id="auth-username" value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required minLength={3} maxLength={64} autoFocus />
+            <label htmlFor="auth-password">密码</label>
+            <input id="auth-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === "login" ? "current-password" : "new-password"} required minLength={8} maxLength={128} />
+            {mode === "register" && (
+              <>
+                <label htmlFor="auth-password-confirm">确认密码</label>
+                <input id="auth-password-confirm" type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} autoComplete="new-password" required minLength={8} maxLength={128} />
+              </>
+            )}
+            {authError && <p className="authError" role="alert">{authError}</p>}
+            <button className="primary authSubmit" disabled={submitting}>{submitting ? "请稍候…" : mode === "login" ? "登录" : "创建账户"}</button>
+          </form>
+          {mode === "register" && <p className="authHelp">用户名 3-64 个字符；密码至少 8 个字符。</p>}
+        </section>
+      </main>
+    );
+  }
+
+  return <TasteApp key={account.id} account={account} onLogout={() => void signOut()} />;
 }
 
 export default App;

@@ -168,6 +168,9 @@ function apiFetch(url: string, options: RequestOptions = {}): Promise<ApiRespons
 
 async function json<T>(response: ApiResponse | Response): Promise<T> {
   if (!response.ok) {
+    if (response.status === 401 && typeof window !== "undefined") {
+      window.dispatchEvent(new Event("taste:auth-required"));
+    }
     throw new Error(await response.text());
   }
   return response.json() as Promise<T>;
@@ -184,6 +187,35 @@ function asArrayResponse<T>(value: any, key = "items"): T[] {
 
 function asObjectResponse<T extends Record<string, any>>(value: any, fallback: T): T {
   return value && typeof value === "object" && !Array.isArray(value) ? value as T : fallback;
+}
+
+export type AuthUser = { id: string; username: string };
+
+export async function getCurrentUser(): Promise<AuthUser | null> {
+  const response = await apiFetch("/api/auth/me");
+  if (response.status === 401) return null;
+  const payload = await json<{ user: AuthUser }>(response);
+  return payload.user;
+}
+
+export async function login(username: string, password: string) {
+  return json<{ user: AuthUser }>(await apiFetch("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  }));
+}
+
+export async function register(username: string, password: string) {
+  return json<{ user: AuthUser }>(await apiFetch("/api/auth/register", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  }));
+}
+
+export async function logout() {
+  return json<{ status: string }>(await apiFetch("/api/auth/logout", { method: "POST" }));
 }
 
 export async function getFrontendVersion() {
