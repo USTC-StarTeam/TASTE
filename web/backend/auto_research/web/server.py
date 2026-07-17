@@ -13176,10 +13176,10 @@ async def ws_job(websocket: WebSocket, job_id: str):
                     for line in (compact_live_job.get("logs") or []):
                         await websocket.send_json({"type": "log", "message": str(line)})
                     await websocket.send_json({"type": "progress", "progress": _public_job_api_payload(compact_live_job.get("progress") or {})})
-                    await websocket.send_json({"type": "complete", "job": compact_live_job})
+                    await websocket.send_json({"type": "complete", "job": _public_account_payload(compact_live_job)})
                     return
                 if live_stage in {"find", "read"}:
-                    snapshot = _public_job_api_payload(_compact_job_for_list(live_job))
+                    snapshot = _public_account_payload(_public_job_api_payload(_compact_job_for_list(live_job)))
                     await websocket.send_json({"type": "snapshot", "job": snapshot})
                     await asyncio.sleep(2.0)
                     continue
@@ -13210,10 +13210,10 @@ async def ws_job(websocket: WebSocket, job_id: str):
                 for line in (compact_job.get("logs") or []):
                     await websocket.send_json({"type": "log", "message": str(line)})
                 await websocket.send_json({"type": "progress", "progress": _public_job_api_payload(compact_job.get("progress") or {})})
-                await websocket.send_json({"type": "complete", "job": compact_job})
+                await websocket.send_json({"type": "complete", "job": _public_account_payload(compact_job)})
                 return
             if job_stage in {"read", "idea", "plan"}:
-                await websocket.send_json({"type": "snapshot", "job": _compact_job_for_list(job.as_dict(compact=False))})
+                await websocket.send_json({"type": "snapshot", "job": _public_account_payload(_compact_job_for_list(job.as_dict(compact=False)))})
                 await asyncio.sleep(2.0)
                 continue
             new_logs = _strip_public_taste_marker(job.logs[sent:])

@@ -3193,11 +3193,17 @@ function normalizeJobForState(job: any): Job | null {
   };
 }
 
-function preserveLiveFindProgress(previous: Job | undefined, next: Job) {
-  if (!previous || !isLiveJob(next) || !isFindRunJob(next) || runIdFromJob(previous) !== runIdFromJob(next)) return next;
+function mergeFindJobSnapshot(previous: Job | undefined, next: Job) {
+  if (!previous || !isFindRunJob(next) || runIdFromJob(previous) !== runIdFromJob(next)) return next;
   const previousProgress = previous.result?.find_progress;
-  if (!previousProgress || next.result?.find_progress) return next;
-  return { ...next, result: { ...(next.result || {}), find_progress: previousProgress } };
+  return {
+    ...next,
+    result: {
+      ...(next.result || {}),
+      project: previous.result?.project || next.result?.project,
+      find_progress: next.result?.find_progress || previousProgress,
+    },
+  };
 }
 
 function isConfirmedLiveProcess(row: any) {
@@ -3765,7 +3771,7 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
       const jobData = await getJobs(activeId);
       if ((options.isCurrent && !options.isCurrent()) || activeProjectRef.current !== activeId) return;
       const visibleJobData = jobsForProjectResponse(jobData, activeId);
-      setJobs((prev) => visibleJobData.map((item) => preserveLiveFindProgress(prev.find((current) => current.job_id === item.job_id), item)));
+      setJobs((prev) => visibleJobData.map((item) => mergeFindJobSnapshot(prev.find((current) => current.job_id === item.job_id), item)));
       jobsLoadedAtRef.current[activeId] = Date.now();
       setJobsLoaded(true);
       visibleJobData.filter(isWatchableWebJob).forEach((item) => watchExistingJob(item.job_id));
@@ -4310,7 +4316,7 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
     if (!normalizedJob) return;
     setJobs((prev) => {
       const exists = prev.some((item) => item.job_id === normalizedJob.job_id);
-      const merged = exists ? prev.map((item) => item.job_id === normalizedJob.job_id ? preserveLiveFindProgress(item, normalizedJob) : item) : [normalizedJob, ...prev];
+      const merged = exists ? prev.map((item) => item.job_id === normalizedJob.job_id ? mergeFindJobSnapshot(item, normalizedJob) : item) : [normalizedJob, ...prev];
       return jobsForProject(merged, activeProjectRef.current || researchProject || "");
     });
   }
