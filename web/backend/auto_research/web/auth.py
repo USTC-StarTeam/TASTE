@@ -14,7 +14,8 @@ from uuid import uuid4
 
 
 SESSION_COOKIE = "taste_session"
-SESSION_DAYS = 30
+SESSION_DAYS = 7
+SESSION_LIMIT_PER_USER = 2
 PASSWORD_ITERATIONS = 310_000
 VERIFICATION_CODE_ITERATIONS = 120_000
 VERIFICATION_CODE_TTL = timedelta(minutes=10)
@@ -399,10 +400,23 @@ class AuthStore:
         now = datetime.now(UTC)
         expires = now + timedelta(days=SESSION_DAYS)
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute("DELETE FROM sessions WHERE expires_at <= ?", (now.isoformat(),))
             connection.execute(
                 "INSERT INTO sessions(token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
                 (self._token_hash(token), user.id, expires.isoformat(), now.isoformat()),
+            )
+            connection.execute(
+                """
+                DELETE FROM sessions
+                WHERE user_id = ? AND token_hash NOT IN (
+                    SELECT token_hash FROM sessions
+                    WHERE user_id = ?
+                    ORDER BY created_at DESC, rowid DESC
+                    LIMIT ?
+                )
+                """,
+                (user.id, user.id, SESSION_LIMIT_PER_USER),
             )
         return token
 

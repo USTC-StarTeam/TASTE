@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import stat
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -59,6 +60,13 @@ def test_auth_store_hashes_passwords_and_expires_sessions(tmp_path):
     store.delete_session(token)
     assert store.user_for_session(token) is None
 
+    oldest = store.create_session(user)
+    middle = store.create_session(user)
+    newest = store.create_session(user)
+    assert store.user_for_session(oldest) is None
+    assert store.user_for_session(middle) == user
+    assert store.user_for_session(newest) == user
+
     try:
         duplicate = store.begin_email_verification("another@example.com", "test-client")
         store.register("alice", "another@example.com", "another-password", duplicate.code)
@@ -66,6 +74,17 @@ def test_auth_store_hashes_passwords_and_expires_sessions(tmp_path):
         assert "已注册" in str(exc)
     else:
         raise AssertionError("duplicate usernames must be rejected")
+
+
+def test_session_limit_holds_for_concurrent_logins(tmp_path):
+    from auto_research.web.auth import AuthStore
+
+    store = AuthStore(tmp_path / "auth.sqlite3")
+    verification = store.begin_email_verification("concurrent@example.com", "test-client")
+    user = store.register("concurrent", "concurrent@example.com", "correct-horse", verification.code)
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        tokens = list(executor.map(lambda _: store.create_session(user), range(6)))
+    assert sum(store.user_for_session(token) == user for token in tokens) == 2
 
 
 def test_email_verification_rate_limit_and_email_login(tmp_path, monkeypatch):
