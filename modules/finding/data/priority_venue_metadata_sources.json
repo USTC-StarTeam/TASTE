@@ -199,15 +199,15 @@
       "preferred_sources": [
         {
           "adapter": "acl_anthology",
-          "source": "ACL Anthology official event and paper pages",
-          "url_template": "https://aclanthology.org/events/acl-{year}/",
-          "coverage": "official paper pages with title, authors, abstract, PDF and Anthology IDs"
+          "source": "ACL Anthology official source XML and paper pages",
+          "url_template": "https://raw.githubusercontent.com/acl-org/acl-anthology/master/data/xml/{year}.acl.xml",
+          "coverage": "official source records with title, authors, abstract, PDF, DOI and Anthology IDs"
         }
       ],
       "full_abstract_required": true,
       "official_categories_expected": false,
       "allow_title_only_verified_cache": false,
-      "fallback_policy": "ACL event pages must be enriched from Anthology paper pages before a cache is verified."
+      "fallback_policy": "ACL source XML provides full metadata directly; event-page rows must still be enriched from Anthology paper pages before a cache is verified."
     },
     "dblp_ijcai": {
       "aliases": ["ijcai"],
@@ -250,15 +250,15 @@
       "preferred_sources": [
         {
           "adapter": "acl_anthology",
-          "source": "ACL Anthology official EMNLP event and paper pages",
-          "url_template": "https://aclanthology.org/events/emnlp-{year}/",
-          "coverage": "official paper pages with title, authors, abstract, PDF and Anthology IDs"
+          "source": "ACL Anthology official EMNLP source XML and paper pages",
+          "url_template": "https://raw.githubusercontent.com/acl-org/acl-anthology/master/data/xml/{year}.emnlp.xml",
+          "coverage": "official source records with title, authors, abstract, PDF, DOI and Anthology IDs"
         }
       ],
       "full_abstract_required": true,
       "official_categories_expected": false,
       "allow_title_only_verified_cache": false,
-      "fallback_policy": "EMNLP event pages must be enriched from Anthology paper pages before a cache is verified."
+      "fallback_policy": "EMNLP source XML provides full metadata directly; event-page rows must still be enriched from Anthology paper pages before a cache is verified."
     }
   }
 }

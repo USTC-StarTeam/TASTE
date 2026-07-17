@@ -107,6 +107,6 @@ def fetch_venue_sample(venue: dict[str, Any], year: int, sample_limit: int = 3) 
             "venue_years": [{"venue_id": venue_id, "year": int(year)}],
         },
         sample_limit=sample_limit,
-        timeout_sec=float(os.environ.get("VENUE_HEALTH_TIMEOUT_SEC", "8") or 8) + 5.0,
+        timeout_sec=float(os.environ.get("VENUE_HEALTH_TIMEOUT_SEC", "45") or 45) + 5.0,
     )
     return results[0] if results else {"venue_id": venue_id, "year": int(year), "ok": False, "sample_count": 0, "source_adapter": "unknown", "message": "No venue health result.", "samples": []}

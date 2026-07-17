@@ -1617,6 +1617,9 @@ def _icml_official_paper_url(item: dict[str, Any], year: int) -> str:
 
 
 def fetch_icml_official_virtual_2026(max_items: int) -> list[dict]:
+    guide_papers = _icml2026_guide_papers(max_items)
+    if guide_papers:
+        return guide_papers
     try:
         raw, source_url = _load_json_url_with_cache(
             ICML2026_OFFICIAL_ORALS_POSTERS_URL,
@@ -1627,7 +1630,7 @@ def fetch_icml_official_virtual_2026(max_items: int) -> list[dict]:
             _icml2026_official_cache_path("icml-2026-abstracts.json"),
         )
     except Exception:
-        return _icml2026_guide_papers(max_items)
+        return []
     results = raw.get("results") if isinstance(raw, dict) else []
     if not isinstance(results, list) or not results:
         return []
