@@ -6130,9 +6130,6 @@ def run_read(
     latest_read_md = Path(str(latest_run)) / "read.md"
     latest_public_final_artifact_present = bool(latest_read_md.exists() and latest_read_md.read_text(encoding="utf-8", errors="replace").strip())
     if payload["public_final_artifact_present"] and not latest_public_final_artifact_present:
-        shutil.copyfile(read_md_path, latest_read_md)
-        latest_public_final_artifact_present = True
-    if payload["public_final_artifact_present"] and not latest_public_final_artifact_present:
         raise RuntimeError(f"latest_run did not receive final read.md: {latest_read_md}")
     return make_reading_paths_relative({
         "status": status,
@@ -6349,9 +6346,6 @@ def run_standalone_deep_read(args: object) -> dict:
     latest_run = refresh_latest_run(current_run_dir)
     latest_read_md = Path(str(latest_run)) / "read.md"
     latest_public_final_artifact_present = bool(latest_read_md.exists() and latest_read_md.read_text(encoding="utf-8", errors="replace").strip())
-    if result_payload["public_final_artifact_present"] and not latest_public_final_artifact_present:
-        shutil.copyfile(read_md_path, latest_read_md)
-        latest_public_final_artifact_present = True
     if result_payload["public_final_artifact_present"] and not latest_public_final_artifact_present:
         raise RuntimeError(f"latest_run did not receive final read.md: {latest_read_md}")
     result_payload["latest_run"] = str(latest_run)

@@ -16,6 +16,8 @@ from datetime import date, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 STAGES = ("finding", "reading", "ideation", "planning", "environment", "experimenting", "writing")
 _READING_TEST_RUN_COUNTER = 0
@@ -93,6 +95,14 @@ def _load_reading_common():
 def _load_reading_pipeline():
     reading_main = _load_reading_main()
     return reading_main._read_pipeline_module()
+
+
+@pytest.fixture
+def isolated_reading_latest_run(monkeypatch, tmp_path):
+    common = _load_reading_common()
+    target = tmp_path / "latest_run"
+    monkeypatch.setattr(common, "LATEST_RUN_ROOT", target)
+    return target
 
 
 def _load_reading_private(relative_path: str, module_name: str):
@@ -232,6 +242,46 @@ def test_reading_runtime_paths_are_under_dot_runtime():
         else:
             raise AssertionError(f"legacy runtime path was accepted as an output path: {bad_path}")
     shutil.rmtree(run_path, ignore_errors=True)
+
+
+def test_reading_latest_run_refresh_replaces_the_complete_snapshot(isolated_reading_latest_run):
+    paths = _load_reading_common()
+    source = paths.create_run_dir()
+    target = isolated_reading_latest_run
+
+    def snapshot(directory: Path) -> dict[str, bytes]:
+        return {
+            path.relative_to(directory).as_posix(): path.read_bytes()
+            for path in directory.rglob("*")
+            if path.is_file()
+        }
+
+    try:
+        (source / "read.md").write_text("# current read\n", encoding="utf-8")
+        (source / "read_results.json").write_text(
+            json.dumps({"run_id": source.name, "status": "complete"}) + "\n",
+            encoding="utf-8",
+        )
+        paper_dir = source / "papers" / "001"
+        paper_dir.mkdir(parents=True)
+        (paper_dir / "read.md").write_text("# paper\n", encoding="utf-8")
+
+        assert os.environ.get("PYTEST_CURRENT_TEST")
+        assert not target.exists()
+        assert paths.refresh_latest_run(source) == target
+        assert snapshot(target) == snapshot(source)
+
+        (target / "run_manifest.json").write_text('{"run_id":"stale"}\n', encoding="utf-8")
+        (target / "read.md").write_text("# stale read\n", encoding="utf-8")
+        (target / "stale_only.txt").write_text("stale\n", encoding="utf-8")
+        paths.refresh_latest_run(source)
+        assert snapshot(target) == snapshot(source)
+
+        (target / "read.md").unlink()
+        paths.refresh_latest_run(source)
+        assert snapshot(target) == snapshot(source)
+    finally:
+        shutil.rmtree(source, ignore_errors=True)
 
 
 def test_reading_http_client_classifies_jina_reader_service():
@@ -727,7 +777,7 @@ def test_reading_standalone_complete_requires_task_subagent_audit():
     assert status == "blocked_claude_result_missing_or_invalid"
 
 
-def test_reading_standalone_title_reuses_article_cache_before_acquisition(monkeypatch):
+def test_reading_standalone_title_reuses_article_cache_before_acquisition(monkeypatch, isolated_reading_latest_run):
     read_pipeline = _load_reading_pipeline()
     paper_sources = _load_reading_paper_sources()
     input_path = _write_reading_input(_reading_test_run_id(), {
@@ -750,7 +800,6 @@ def test_reading_standalone_title_reuses_article_cache_before_acquisition(monkey
         }
 
     monkeypatch.setattr(read_pipeline, "_restore_article_read_cache", fake_restore)
-    monkeypatch.setattr(read_pipeline, "refresh_latest_run", lambda directory: directory)
     monkeypatch.setattr(
         paper_sources,
         "acquire_full_text",
@@ -776,6 +825,10 @@ def test_reading_standalone_title_reuses_article_cache_before_acquisition(monkey
         assert result["status"] == "complete"
         assert result["article_cache"]["hit"] is True
         assert result["public_final_artifact_present"] is True
+        assert Path(result["latest_run"]) == isolated_reading_latest_run
+        assert (isolated_reading_latest_run / "read.md").read_text(encoding="utf-8").startswith("# Cached Standalone")
+        latest_result = json.loads((isolated_reading_latest_run / "read_results.json").read_text(encoding="utf-8"))
+        assert latest_result["run_id"] == run_dir.name
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
 
@@ -1155,7 +1208,7 @@ def test_reading_run_read_does_not_self_select_weak_fallback_pool(monkeypatch):
     _cleanup_reading_input("pytest_read_no_weak_pool_contract")
 
 
-def test_reading_run_read_prepare_splits_full_text_and_reading_subagent_phases(monkeypatch):
+def test_reading_run_read_prepare_splits_full_text_and_reading_subagent_phases(monkeypatch, isolated_reading_latest_run):
     monkeypatch.setenv("READING_DISABLE_ARTICLE_CACHE", "1")
     _cleanup_reading_output("pytest_read_prepare_two_phase_contract")
     _cleanup_reading_input("pytest_read_prepare_two_phase_contract")
@@ -1168,6 +1221,9 @@ def test_reading_run_read_prepare_splits_full_text_and_reading_subagent_phases(m
         ]
     })
     run_id = _reading_run_id_from_input(input_path)
+    isolated_reading_latest_run.mkdir(parents=True)
+    (isolated_reading_latest_run / "read.md").write_text("# stale read\n", encoding="utf-8")
+    (isolated_reading_latest_run / "run_manifest.json").write_text('{"run_id":"stale"}\n', encoding="utf-8")
 
     def fake_acquire_full_text(paper, item_dir, log=print):
         text = "full text evidence " * 120
@@ -1217,11 +1273,14 @@ def test_reading_run_read_prepare_splits_full_text_and_reading_subagent_phases(m
     assert "method_summary_table" not in aggregation
     assert payload["public_final_artifact_present"] is False
     assert not (run_root / "read.md").exists()
+    latest_payload = json.loads((isolated_reading_latest_run / "read_results.json").read_text(encoding="utf-8"))
+    assert latest_payload["run_id"] == run_id
+    assert not (isolated_reading_latest_run / "read.md").exists()
     _cleanup_reading_output(run_id)
     _cleanup_reading_input("pytest_read_prepare_two_phase_contract")
 
 
-def test_reading_run_read_uses_subagent_article_markdown_aggregation_and_audit(monkeypatch):
+def test_reading_run_read_uses_subagent_article_markdown_aggregation_and_audit(monkeypatch, isolated_reading_latest_run):
     monkeypatch.setenv("READING_DISABLE_ARTICLE_CACHE", "1")
     _cleanup_reading_output("pytest_read_subagent_md_contract")
     _cleanup_reading_input("pytest_read_subagent_md_contract")
@@ -1237,6 +1296,9 @@ def test_reading_run_read_uses_subagent_article_markdown_aggregation_and_audit(m
         ]
     })
     run_id = _reading_run_id_from_input(input_path)
+    isolated_reading_latest_run.mkdir(parents=True)
+    (isolated_reading_latest_run / "read.md").write_text("# stale read\n", encoding="utf-8")
+    (isolated_reading_latest_run / "run_manifest.json").write_text('{"run_id":"stale"}\n', encoding="utf-8")
 
     def fake_acquire_full_text(paper, item_dir, log=print):
         text = "这是用于精读的完整正文证据，包含方法、实验、局限和证据边界。 " * 120
@@ -1355,6 +1417,9 @@ def test_reading_run_read_uses_subagent_article_markdown_aggregation_and_audit(m
     assert "| 序号 | 论文 | 来源 | 方法类别 | 核心机制 | 关键实验/指标 | 主要优点 | 主要局限 | 可借鉴点 |" not in read_md
     assert "原论文摘要（中文）" not in read_md
     assert all(item["validation"]["deep_read_complete"] is True for item in payload["items"])
+    latest_payload = json.loads((isolated_reading_latest_run / "read_results.json").read_text(encoding="utf-8"))
+    assert latest_payload["run_id"] == run_id
+    assert (isolated_reading_latest_run / "read.md").read_text(encoding="utf-8") == read_md
     for item in payload["items"]:
         article_md = Path(item["artifacts"]["article_markdown"])
         if not article_md.is_absolute():
