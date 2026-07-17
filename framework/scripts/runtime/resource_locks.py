@@ -3,11 +3,31 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Callable, Iterator
 
 from .framework_paths import FRAMEWORK_LOCKS_DIR
+
+
+@contextmanager
+def project_workflow_lease(*, workflow: str, project: str) -> Iterator[None]:
+    """Serialize one project's artifact workflow across server processes."""
+    workflow = str(workflow or "").strip()
+    project = str(project or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", workflow):
+        raise ValueError(f"Invalid workflow lock name: {workflow}")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", project):
+        raise ValueError(f"Invalid project name for {workflow} lock: {project}")
+    FRAMEWORK_LOCKS_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = FRAMEWORK_LOCKS_DIR / f"{workflow}_{project}.lock"
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 @contextmanager

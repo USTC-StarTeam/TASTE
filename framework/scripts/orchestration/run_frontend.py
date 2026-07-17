@@ -20,7 +20,7 @@ from runtime.taste_pythonpath import ensure_taste_pythonpath
 ensure_taste_pythonpath(ROOT)
 from policies.source_selection import canonical_source_selection, normalize_source_selection
 from project.project_paths import build_paths as _build_project_paths
-from runtime.resource_locks import crawl_resource_lease
+from runtime.resource_locks import crawl_resource_lease, project_workflow_lease
 
 DEFAULT_ENV = os.environ.get("FIND_ENV_NAME") or os.environ.get("CONDA_ENV_NAME", "")
 DEFAULT_CORE_VENUE_IDS = ["openreview_iclr_2026", "openreview_neurips", "dblp_icml", "dblp_kdd"]
@@ -736,7 +736,8 @@ def run(cmd: list[str], cwd: Path = ROOT, env: dict[str, str] | None = None, tim
         on_wait=lambda: print("Waiting for the shared crawl resource.", flush=True),
         on_acquired=lambda: print("Shared crawl resource acquired.", flush=True),
     ):
-        return _run_with_crawl_lease(cmd, cwd=cwd, env=env, timeout_sec=timeout_sec, live_log_path=live_log_path)
+        with project_workflow_lease(workflow="current_find", project=project):
+            return _run_with_crawl_lease(cmd, cwd=cwd, env=env, timeout_sec=timeout_sec, live_log_path=live_log_path)
 
 
 def _run_with_crawl_lease(cmd: list[str], cwd: Path = ROOT, env: dict[str, str] | None = None, timeout_sec: int = 900, live_log_path: Path | None = None) -> subprocess.CompletedProcess[str]:

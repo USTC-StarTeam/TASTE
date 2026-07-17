@@ -995,6 +995,7 @@
       "category": "bridges",
       "kind": "python",
       "functions": [
+        "_atomic_write_text",
         "_timestamp_run_id",
         "_as_int",
         "_payload_run_id",
@@ -1035,13 +1036,15 @@
         "__future__",
         "datetime",
         "json",
+        "os",
         "pathlib",
         "re",
         "runtime.framework_io",
         "shutil",
+        "tempfile",
         "typing"
       ],
-      "function_count": 34,
+      "function_count": 35,
       "class_count": 0
     },
     {
@@ -1072,6 +1075,7 @@
       "category": "bridges",
       "kind": "python",
       "functions": [
+        "_atomic_copyfile",
         "resolve_taste_run_dir",
         "adopt_taste_find_run",
         "sync_current_find_progress",
@@ -1091,6 +1095,7 @@
         "argparse",
         "datetime",
         "json",
+        "os",
         "pathlib",
         "policies.literature_policy",
         "policies.source_selection",
@@ -1099,9 +1104,10 @@
         "runtime.framework_paths",
         "runtime.taste_pythonpath",
         "shutil",
+        "tempfile",
         "typing"
       ],
-      "function_count": 12,
+      "function_count": 13,
       "class_count": 0
     },
     {
@@ -1488,13 +1494,11 @@
         "bridges.planning_bridge",
         "bridges.reading_bridge",
         "contextlib",
-        "fcntl",
         "importlib.util",
         "json",
         "os",
         "pathlib",
         "project.project_paths",
-        "re",
         "runtime.framework_paths",
         "runtime.resource_locks",
         "runtime.taste_pythonpath",
@@ -2532,6 +2536,7 @@
         "read_json",
         "write_json",
         "write_json_raw",
+        "_atomic_write_json",
         "write_json_existing",
         "read_json_list",
         "read_json_default_strict",
@@ -2554,11 +2559,13 @@
         "datetime",
         "hashlib",
         "json",
+        "os",
         "pathlib",
         "re",
+        "tempfile",
         "typing"
       ],
-      "function_count": 19,
+      "function_count": 20,
       "class_count": 0
     },
     {
@@ -2610,6 +2617,7 @@
       "category": "runtime",
       "kind": "python",
       "functions": [
+        "project_workflow_lease",
         "crawl_resource_lease"
       ],
       "classes": [],
@@ -2621,9 +2629,10 @@
         "framework_paths",
         "json",
         "os",
+        "re",
         "typing"
       ],
-      "function_count": 1,
+      "function_count": 2,
       "class_count": 0
     },
     {

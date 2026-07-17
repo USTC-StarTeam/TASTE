@@ -351,19 +351,27 @@ def refresh_latest_run(source: Path) -> Path:
         raise ValueError("latest_run 来源必须是已存在的运行目录")
     if os.environ.get("PYTEST_CURRENT_TEST") and not env_bool("READING_REFRESH_LATEST_DURING_TESTS", False):
         return LATEST_RUN_ROOT
-    for attempt in range(3):
+    LATEST_RUN_ROOT.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = LATEST_RUN_ROOT.parent / ".latest_run.lock"
+    temp_dir = LATEST_RUN_ROOT.parent / f".latest_run.tmp.{os.getpid()}.{source_dir.name}"
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        if fcntl is not None:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
         try:
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir)
+            shutil.copytree(source_dir, temp_dir, ignore=shutil.ignore_patterns("__pycache__"))
             if LATEST_RUN_ROOT.exists():
                 if LATEST_RUN_ROOT.is_symlink() or LATEST_RUN_ROOT.is_file():
                     LATEST_RUN_ROOT.unlink()
                 else:
                     shutil.rmtree(LATEST_RUN_ROOT)
-            shutil.copytree(source_dir, LATEST_RUN_ROOT, ignore=shutil.ignore_patterns("__pycache__"))
-            break
-        except OSError:
-            if attempt >= 2:
-                raise
-            time.sleep(0.1 * (attempt + 1))
+            temp_dir.rename(LATEST_RUN_ROOT)
+        finally:
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            if fcntl is not None:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
     return LATEST_RUN_ROOT
 
 

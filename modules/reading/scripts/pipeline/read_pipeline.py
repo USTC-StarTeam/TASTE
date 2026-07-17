@@ -6127,13 +6127,9 @@ def run_read(
     write_json(directory / "read_results.json", payload)
     scrub_reading_paths_under(directory)
     latest_run = refresh_latest_run(directory)
-    latest_read_md = Path(str(latest_run)) / "read.md"
-    latest_public_final_artifact_present = bool(latest_read_md.exists() and latest_read_md.read_text(encoding="utf-8", errors="replace").strip())
-    if payload["public_final_artifact_present"] and not latest_public_final_artifact_present:
-        shutil.copyfile(read_md_path, latest_read_md)
-        latest_public_final_artifact_present = True
-    if payload["public_final_artifact_present"] and not latest_public_final_artifact_present:
-        raise RuntimeError(f"latest_run did not receive final read.md: {latest_read_md}")
+    # latest_run is a shared human-review copy. Another process may refresh it
+    # immediately, so program success must only depend on this explicit run.
+    latest_public_final_artifact_present = payload["public_final_artifact_present"]
     return make_reading_paths_relative({
         "status": status,
         "run_id": directory.name,
@@ -6278,7 +6274,7 @@ def run_standalone_deep_read(args: object) -> dict:
         scrub_reading_paths_under(current_run_dir)
         latest_run = refresh_latest_run(current_run_dir)
         cached_read["latest_run"] = str(latest_run)
-        cached_read["latest_public_final_artifact_present"] = (latest_run / "read.md").is_file()
+        cached_read["latest_public_final_artifact_present"] = (current_run_dir / "read.md").is_file()
         return cached_read
     packet_entry = _restore_article_full_text_cache(paper, current_run_dir)
     if not packet_entry:
@@ -6347,13 +6343,6 @@ def run_standalone_deep_read(args: object) -> dict:
     write_json(current_run_dir / "read_results.json", result_payload)
     scrub_reading_paths_under(current_run_dir)
     latest_run = refresh_latest_run(current_run_dir)
-    latest_read_md = Path(str(latest_run)) / "read.md"
-    latest_public_final_artifact_present = bool(latest_read_md.exists() and latest_read_md.read_text(encoding="utf-8", errors="replace").strip())
-    if result_payload["public_final_artifact_present"] and not latest_public_final_artifact_present:
-        shutil.copyfile(read_md_path, latest_read_md)
-        latest_public_final_artifact_present = True
-    if result_payload["public_final_artifact_present"] and not latest_public_final_artifact_present:
-        raise RuntimeError(f"latest_run did not receive final read.md: {latest_read_md}")
     result_payload["latest_run"] = str(latest_run)
-    result_payload["latest_public_final_artifact_present"] = latest_public_final_artifact_present
+    result_payload["latest_public_final_artifact_present"] = result_payload["public_final_artifact_present"]
     return result_payload

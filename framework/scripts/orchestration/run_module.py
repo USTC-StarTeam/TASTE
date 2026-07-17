@@ -2,11 +2,9 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import importlib.util
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -43,9 +41,9 @@ from bridges.environment_bridge import (  # noqa: E402
     prepare_environment_invocation,
     sync_environment_outputs,
 )
-from runtime.framework_paths import FRAMEWORK_INPUTS_DIR, FRAMEWORK_LOCKS_DIR, FRAMEWORK_RUNTIME_DIR, WEB_RUNTIME_DIR  # noqa: E402
+from runtime.framework_paths import FRAMEWORK_INPUTS_DIR, FRAMEWORK_RUNTIME_DIR, WEB_RUNTIME_DIR  # noqa: E402
 from project.project_paths import configured_max_read_papers  # noqa: E402
-from runtime.resource_locks import crawl_resource_lease  # noqa: E402
+from runtime.resource_locks import crawl_resource_lease, project_workflow_lease  # noqa: E402
 from runtime.taste_pythonpath import resolve_script_path  # noqa: E402
 
 
@@ -249,17 +247,8 @@ def _run_current_find_read_bridge(action: str, rest: Sequence[str]) -> int:
 
 @contextmanager
 def _project_module_lock(stage: str, project: str) -> Iterator[None]:
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+", str(project or "")):
-        raise ValueError(f"Invalid project name for {stage} lock: {project}")
-    lock_root = FRAMEWORK_LOCKS_DIR
-    lock_root.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_root / f"{stage}_{project}.lock"
-    with lock_path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    with project_workflow_lease(workflow=stage, project=project):
+        yield
 
 
 def _run_current_find_ideation_bridge(action: str, rest: Sequence[str]) -> int:
@@ -275,7 +264,7 @@ def _run_current_find_ideation_bridge(action: str, rest: Sequence[str]) -> int:
         print("Ideation Markdown update requires Markdown on stdin.", file=sys.stderr)
         return 2
     try:
-        with _project_module_lock("ideation", project):
+        with _project_module_lock("current_find", project):
             if normalized in {"", "idea"}:
                 prepared = prepare_current_find_ideation_input(project, requested_run_id=requested_run_id)
                 prepared_input = str(prepared["input_json"])
@@ -380,7 +369,7 @@ def _run_current_find_planning_bridge(action: str, rest: Sequence[str], *, _lock
     config_path = ""
     env = _python_env()
     try:
-        with (_project_module_lock("planning", project) if _lock else nullcontext()):
+        with (_project_module_lock("current_find", project) if _lock else nullcontext()):
             prepared = prepare_current_find_planning_input(
                 project,
                 action=normalized,
@@ -500,7 +489,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             on_wait=lambda: print("Waiting for the shared crawl resource.", flush=True),
             on_acquired=lambda: print("Shared crawl resource acquired.", flush=True),
         ):
-            return _run_module_dispatch(ns, rest, cmd)
+            with (_project_module_lock("current_find", project) if project else nullcontext()):
+                return _run_module_dispatch(ns, rest, cmd)
     return _run_module_dispatch(ns, rest, cmd)
 
 
