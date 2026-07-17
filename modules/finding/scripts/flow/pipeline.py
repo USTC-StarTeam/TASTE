@@ -344,7 +344,7 @@ def _compact_scoring_interest(config: AppConfig, interest: str) -> str:
 def _adaptive_final_scoring_batch_size(config: AppConfig, scoring_items: list[dict], scoring_interest: str, topic_routes_block: str) -> int:
     env_value = _positive_int_env("ABSTRACT_SCORING_BATCH_SIZE", 0)
     configured_value = int(getattr(config, "abstract_scoring_batch_size", 0) or 0)
-    max_batch = _positive_int_env("ABSTRACT_SCORING_MAX_BATCH_SIZE", 8)
+    max_batch = _positive_int_env("ABSTRACT_SCORING_MAX_BATCH_SIZE", max(10, configured_value))
     max_batch = _clamp_int(max_batch, 1, 20)
     if env_value > 0:
         return _clamp_int(env_value, 1, max_batch)
@@ -378,11 +378,11 @@ def _rate_limited_llm_provider(config: AppConfig) -> bool:
 def _adaptive_final_scoring_workers(config: AppConfig, prompt_count: int) -> int:
     env_workers = _positive_int_env("ABSTRACT_SCORING_MAX_WORKERS", 0)
     provider_cap = 2 if _rate_limited_llm_provider(config) else 6
-    max_workers = _positive_int_env("ABSTRACT_SCORING_WORKER_CAP", provider_cap)
+    configured = int(getattr(config, "abstract_scoring_max_workers", 0) or 0)
+    max_workers = _positive_int_env("ABSTRACT_SCORING_WORKER_CAP", max(provider_cap, configured))
     max_workers = _clamp_int(max_workers, 1, 32)
     if env_workers > 0:
         return _clamp_int(env_workers, 1, max_workers)
-    configured = int(getattr(config, "abstract_scoring_max_workers", 0) or 0)
     if prompt_count >= 128:
         adaptive = 8
     elif prompt_count >= 32:
@@ -1644,7 +1644,7 @@ def _llm_live_gate(llm: LLMClient) -> dict:
     if hasattr(llm, "timeout_sec"):
         llm.timeout_sec = timeout
     if hasattr(llm, "retries"):
-        llm.retries = 1
+        llm.retries = max(1, int(os.environ.get("LLM_LIVE_GATE_RETRIES", "2") or 2))
     try:
         result = _json_or_error_wall_timeout(llm, prompt, temperature=0.0, max_tokens=320, timeout_sec=timeout)
         data = result.get("data")
@@ -3942,7 +3942,21 @@ def _select_title_abstract_scoring_groups(
 ) -> list[tuple[str, list[dict], str]]:
     candidates = [item for _source, items, _sink in groups for item in items]
     if require_title_llm_score:
-        candidates = [item for item in candidates if item.get("title_llm_fit_score") not in (None, "")]
+        candidates = [
+            item
+            for item in candidates
+            if (
+                not isinstance(item.get("title_llm_fit_score"), bool)
+                and isinstance(item.get("title_llm_fit_score"), (int, float))
+                and isfinite(float(item.get("title_llm_fit_score")))
+            )
+            or (
+                bool(item.get("title_filter_fallback_used"))
+                and not isinstance(item.get("fit_score"), bool)
+                and isinstance(item.get("fit_score"), (int, float))
+                and isfinite(float(item.get("fit_score")))
+            )
+        ]
     ranked = sorted(candidates, key=_title_rank_key)
     selected: list[dict] = []
     seen: set[str] = set()
@@ -4329,7 +4343,7 @@ def _prefilter_titles(
             ]
         else:
             batches_with_context = [(batch, "") for batch in _chunks(scanned, batch_size)]
-        seen: set[str] = set()
+        seen_items: set[int] = set()
         scored_rows: list[dict] = []
         title_cache_path: Path | None = None
         title_score_cache: dict = {}
@@ -4347,7 +4361,6 @@ def _prefilter_titles(
                     expected_policy = _title_llm_score_cache_policy(item)
                     cache_key = _title_llm_score_cache_key(item, config, scoring_interest, context)
                     title_cache_keys[id(item)] = cache_key
-                    item_id = str(item.get("id") or "")
                     cache_hit = _apply_cached_title_llm_score(item, cache_entries.get(cache_key), interest, expected_policy=expected_policy)
                     if not cache_hit:
                         title_cache_by_title = title_cache_by_policy.get(expected_policy)
@@ -4361,9 +4374,9 @@ def _prefilter_titles(
                             title_cache_migrated_hits += 1
                     if cache_hit:
                         title_cache_hits += 1
-                        if item_id and item_id not in seen:
+                        if id(item) not in seen_items:
                             scored_rows.append(item)
-                            seen.add(item_id)
+                            seen_items.add(id(item))
                     else:
                         uncached_batch.append(item)
                 if uncached_batch:
@@ -4381,47 +4394,140 @@ def _prefilter_titles(
                 )
             batches_with_context = uncached_batches_with_context
         batches = [batch for batch, _context in batches_with_context]
-        prompts: list[str] = []
-        for batch_index, (batch, context) in enumerate(batches_with_context, 1):
-            _raise_if_cancelled(should_cancel)
+
+        def build_title_prompt(batch: list[dict], context: str, batch_label: str) -> tuple[str, dict[str, dict]]:
+            alias_map = {f"p{position:03d}": item for position, item in enumerate(batch, 1)}
             paper_lines: list[str] = []
-            for item in batch:
+            for alias, item in alias_map.items():
                 abstract = _clean_abstract_text(item.get("abstract"))
                 if abstract:
-                    paper_lines.append(f"- {item.get('id')}: {item.get('title')}\n  abstract: {abstract[:700]}")
+                    paper_lines.append(f"- {alias}: {item.get('title')}\n  abstract: {abstract[:700]}")
                 else:
-                    paper_lines.append(f"- {item.get('id')}: {item.get('title')}")
+                    paper_lines.append(f"- {alias}: {item.get('title')}")
             title_lines = "\n".join(paper_lines)
             context_block = f"\nBatch context:\n{context}\n" if context else ""
-            prompts.append(f"""
+            prompt = f"""
 You are strictly filtering accepted papers before expensive detail/PDF fetching.
 
 Research interest/profile:
 {scoring_interest}
 {context_block}
 
-Paper titles and available abstract snippets, batch {batch_index}/{len(batches_with_context)}:
+Paper titles and available abstract snippets, {batch_label}:
 {title_lines}
 
 Return strict JSON:
-{{"scored":[{{"id":"paper id","fit_score":7.3,"diversity_score":6.4,"hit_directions":["direction"],"category":"short category","reason":"one concise Chinese title-level reason"}}]}}
+{{"scored":[{{"id":"p001","fit_score":7.3,"diversity_score":6.4,"hit_directions":["direction"],"category":"short category","reason":"one concise Chinese title-level reason"}}]}}
 
 Rules:
-- Score every paper in this batch; do not omit low-confidence papers.
+- Return exactly {len(batch)} scored rows, one for every input ID, including low-confidence papers.
+- IDs are opaque request-local identifiers. Copy each pNNN ID exactly once; never shorten, rewrite, or invent an ID.
 - fit_score is the metadata-level match to the profile, not a final recommendation score: 9-10 exceptional, 7-8 strong, 5-6 possible, <=4 weak/unrelated.
 - When an abstract snippet is present, use it to decide whether a generic title actually supports the user's methods, domains, or constraints.
 - Generic AI/ML papers should score low unless the title or abstract concretely connects to the user's methods, domains, or constraints.
 - diversity_score only rewards hitting multiple real user directions or adding a complementary method/domain. It cannot rescue low fit.
 - This title screen only decides which papers receive abstract/detail fetching. Final recommendations are decided later from real abstracts and final relevance scoring.
-""")
-        workers = 1 if os.environ.get("TITLE_FILTER_SEQUENTIAL", "0").lower() in {"1", "true", "yes", "on"} else clamp_workers(config.llm_concurrency, default=16, maximum=32)
+"""
+            return prompt, alias_map
+
+        def parsed_title_rows(result: dict, alias_map: dict[str, dict]) -> tuple[list[tuple[dict, dict]], list[dict]]:
+            data = result.get("data")
+            rows: list = []
+            if isinstance(data, dict):
+                value = data.get("scored")
+                if isinstance(value, list):
+                    rows = value
+            rows_by_alias: dict[str, list[dict]] = {alias: [] for alias in alias_map}
+            for row in rows:
+                alias = str(row.get("id") or "") if isinstance(row, dict) else ""
+                if alias not in rows_by_alias or not isinstance(row, dict):
+                    continue
+                rows_by_alias[alias].append(row)
+            matched: list[tuple[dict, dict]] = []
+            missing: list[dict] = []
+            for alias, item in alias_map.items():
+                alias_rows = rows_by_alias[alias]
+                if len(alias_rows) != 1:
+                    missing.append(item)
+                    continue
+                row = alias_rows[0]
+                scores = (row.get("fit_score"), row.get("diversity_score"))
+                try:
+                    scores_valid = all(
+                        not isinstance(value, bool)
+                        and isfinite(float(value))
+                        and 0 <= float(value) <= 10
+                        for value in scores
+                    )
+                except (TypeError, ValueError):
+                    scores_valid = False
+                if not scores_valid:
+                    missing.append(item)
+                    continue
+                matched.append((item, row))
+            return matched, missing
+
+        def score_title_batch(batch_index: int, batch: list[dict], context: str) -> tuple[list[tuple[dict, dict]], list[dict], list[str], int]:
+            pending_items = list(batch)
+            matched: list[tuple[dict, dict]] = []
+            errors: list[str] = []
+            request_count = 0
+            for attempt in range(1, 3):
+                if not pending_items:
+                    break
+                prompt, alias_map = build_title_prompt(
+                    pending_items,
+                    context,
+                    f"batch {batch_index}/{len(batches_with_context)}, attempt {attempt}",
+                )
+                result = _json_or_error_wall_timeout(
+                    llm,
+                    prompt,
+                    temperature=FIND_TITLE_FILTER_TEMPERATURE,
+                    max_tokens=0,
+                    timeout_sec=wall_timeout,
+                )
+                request_count += 1
+                if not result.get("ok"):
+                    error = str(result.get("error") or "unknown LLM error")
+                    _raise_if_fatal_llm_configuration_error(error, f"{venue_name} title filtering")
+                    errors.append(error)
+                recovered, pending_items = parsed_title_rows(result, alias_map)
+                matched.extend(recovered)
+            if pending_items:
+                unresolved: list[dict] = []
+                for item in pending_items:
+                    prompt, alias_map = build_title_prompt(
+                        [item],
+                        context,
+                        f"batch {batch_index}/{len(batches_with_context)}, single-item completion",
+                    )
+                    result = _json_or_error_wall_timeout(
+                        llm,
+                        prompt,
+                        temperature=FIND_TITLE_FILTER_TEMPERATURE,
+                        max_tokens=0,
+                        timeout_sec=wall_timeout,
+                    )
+                    request_count += 1
+                    if not result.get("ok"):
+                        error = str(result.get("error") or "unknown LLM error")
+                        _raise_if_fatal_llm_configuration_error(error, f"{venue_name} title filtering")
+                        errors.append(error)
+                    recovered, missing = parsed_title_rows(result, alias_map)
+                    matched.extend(recovered)
+                    unresolved.extend(missing)
+                pending_items = unresolved
+            return matched, pending_items, errors, request_count
+
+        workers = 1 if os.environ.get("TITLE_FILTER_SEQUENTIAL", "0").lower() in {"1", "true", "yes", "on"} else clamp_workers(config.llm_concurrency, default=10, maximum=32)
         title_timeout = int(os.environ.get("TITLE_FILTER_TIMEOUT_SEC", "0") or 0) or int(config.title_filter_timeout_sec or 120)
         original_timeout = getattr(llm, "timeout_sec", title_timeout)
         if hasattr(llm, "timeout_sec"):
             llm.timeout_sec = min(original_timeout, title_timeout)
         active_timeout = getattr(llm, "timeout_sec", title_timeout)
-        log(f"{venue_name}: starting LLM title prefilter for {len(scanned)} titles in {len(prompts)} uncached batches with {workers} workers; cache_hits={title_cache_hits}; per-batch timeout={active_timeout}s")
-        progress("llm_title_filter", title_cache_hits, max(1, len(scanned)), f"{venue_name}: starting LLM title filter, uncached batches {len(prompts)}, cache_hits {title_cache_hits}")
+        log(f"{venue_name}: starting LLM title prefilter for {len(scanned)} titles in {len(batches)} uncached batches with {workers} workers; cache_hits={title_cache_hits}; per-batch timeout={active_timeout}s")
+        progress("llm_title_filter", title_cache_hits, max(1, len(scanned)), f"{venue_name}: starting LLM title filter, uncached batches {len(batches)}, cache_hits {title_cache_hits}")
         wall_timeout = max(
             10,
             int(os.environ.get("TITLE_FILTER_WALL_TIMEOUT_SEC", "0") or 0)
@@ -4429,17 +4535,16 @@ Rules:
         )
         if workers == 1:
             result_iter = []
-            for batch_index, (batch, prompt) in enumerate(zip(batches, prompts, strict=False), 1):
+            for batch_index, (batch, context) in enumerate(batches_with_context, 1):
                 _raise_if_cancelled(should_cancel)
                 progress("llm_title_filter", batch_index - 1, len(batches), f"{venue_name}: scoring title batch {batch_index}/{len(batches)}")
-                result = _json_or_error_wall_timeout(llm, prompt, temperature=FIND_TITLE_FILTER_TEMPERATURE, timeout_sec=wall_timeout)
-                result_iter.append((batch_index, batch, result))
+                result_iter.append((batch_index, batch, *score_title_batch(batch_index, batch, context)))
         else:
             result_iter = []
             executor = ThreadPoolExecutor(max_workers=workers)
             futures = {
-                executor.submit(_json_or_error_wall_timeout, llm, prompt, temperature=FIND_TITLE_FILTER_TEMPERATURE, timeout_sec=wall_timeout): (batch_index, batch)
-                for batch_index, (batch, prompt) in enumerate(zip(batches, prompts, strict=False), 1)
+                executor.submit(score_title_batch, batch_index, batch, context): (batch_index, batch)
+                for batch_index, (batch, context) in enumerate(batches_with_context, 1)
             }
             pending = set(futures)
             completed = 0
@@ -4454,10 +4559,10 @@ Rules:
                         batch_index, batch = futures[future]
                         completed += 1
                         try:
-                            result = future.result()
+                            matched, unresolved, errors, request_count = future.result()
                         except Exception as exc:
-                            result = {"ok": False, "data": None, "error": str(exc)}
-                        result_iter.append((batch_index, batch, result))
+                            matched, unresolved, errors, request_count = [], list(batch), [str(exc)], 1
+                        result_iter.append((batch_index, batch, matched, unresolved, errors, request_count))
                         progress("llm_title_filter", completed, len(batches), f"{venue_name}: scored title batch {completed}/{len(batches)}, workers {workers}")
             except JobCancelled:
                 for future in pending:
@@ -4469,55 +4574,63 @@ Rules:
             result_iter.sort(key=lambda row: row[0])
         if hasattr(llm, "timeout_sec"):
             llm.timeout_sec = original_timeout
-        for result_position, (batch_index, batch, result) in enumerate(result_iter, 1):
+        for batch_index, batch, matched, unresolved, errors, request_count in result_iter:
             _raise_if_cancelled(should_cancel)
-            data = result.get("data")
             appended = 0
-            if not result.get("ok"):
-                error = result.get("error", "")
+            for error in errors:
                 _raise_if_fatal_llm_configuration_error(error, f"{venue_name} title filtering")
-                log(f"{venue_name}: title batch {batch_index}/{len(batches)} LLM failed: {str(error)[:240]}; rows can still be retained by local title ranking for downstream abstract scoring")
-            rows = []
-            if isinstance(data, dict):
-                for key in ("scored", "evaluations", "selected"):
-                    value = data.get(key)
-                    if isinstance(value, list):
-                        rows = value
-                        break
-            if rows:
-                for row in rows:
-                    item = by_id.get(str(row.get("id") or "")) if isinstance(row, dict) else None
-                    if not item or item.get("id") in seen:
-                        continue
-                    item["fit_score"] = _as_float(row.get("fit_score"), _as_float(row.get("score"), item.get("fit_score") or 0))
-                    item["title_llm_fit_score"] = item["fit_score"]
-                    item["diversity_score"] = _as_float(row.get("diversity_score"), item.get("diversity_score") or 0)
-                    item["score"] = _combined_score(item["fit_score"], item["diversity_score"])
-                    item["hit_directions"] = _normalize_hit_directions(row.get("hit_directions"))
-                    item["category"] = str(row.get("category") or item.get("category") or "")
-                    item["title_reason"] = str(row.get("reason") or item.get("title_reason") or "")
-                    item["fit_explanation"] = item["title_reason"]
-                    item["reason_source"] = "llm title filter"
-                    group = group_by_id.get(str(item.get("id") or ""))
-                    if group:
-                        item["title_filter_context"] = {
-                            "venue": group["venue"],
-                            "year": group["year"],
-                            "category": group["category"],
-                            "category_size": group["category_size"],
-                            "venue_yetotal": group["venue_yetotal"],
-                            "category_ratio": group["category_ratio"],
-                            "strictness": group["policy"]["label"],
-                            "min_fit_score": group["policy"]["min_score"],
-                            "keep_ratio": group["policy"]["keep_ratio"],
-                        }
-                    _apply_relevance_guard(item)
-                    _apply_topic_evidence_guard(item, interest)
-                    _apply_quality_bonus(item)
-                    scored_rows.append(item)
-                    seen.add(item.get("id", ""))
-                    appended += 1
-            log(f"{venue_name}: title batch {batch_index}/{len(batches)} scored {appended}; scored_titles={len(scored_rows)}")
+                log(f"{venue_name}: title batch {batch_index}/{len(batches)} LLM attempt failed: {str(error)[:240]}")
+            for item, row in matched:
+                item_id = str(item.get("id") or "")
+                if id(item) in seen_items:
+                    continue
+                item["fit_score"] = _as_float(row.get("fit_score"), _as_float(row.get("score"), item.get("fit_score") or 0))
+                item["title_llm_fit_score"] = item["fit_score"]
+                item["diversity_score"] = _as_float(row.get("diversity_score"), item.get("diversity_score") or 0)
+                item["score"] = _combined_score(item["fit_score"], item["diversity_score"])
+                item["hit_directions"] = _normalize_hit_directions(row.get("hit_directions"))
+                item["category"] = str(row.get("category") or item.get("category") or "")
+                item["title_reason"] = str(row.get("reason") or item.get("title_reason") or "")
+                item["fit_explanation"] = item["title_reason"]
+                item["reason_source"] = "llm title filter"
+                group = group_by_id.get(item_id)
+                if group:
+                    item["title_filter_context"] = {
+                        "venue": group["venue"],
+                        "year": group["year"],
+                        "category": group["category"],
+                        "category_size": group["category_size"],
+                        "venue_yetotal": group["venue_yetotal"],
+                        "category_ratio": group["category_ratio"],
+                        "strictness": group["policy"]["label"],
+                        "min_fit_score": group["policy"]["min_score"],
+                        "keep_ratio": group["policy"]["keep_ratio"],
+                    }
+                _apply_relevance_guard(item)
+                _apply_topic_evidence_guard(item, interest)
+                _apply_quality_bonus(item)
+                scored_rows.append(item)
+                seen_items.add(id(item))
+                appended += 1
+            retry_note = f"; requests={request_count}" if request_count > 1 else ""
+            log(f"{venue_name}: title batch {batch_index}/{len(batches)} scored {appended}/{len(batch)}{retry_note}; scored_titles={len(scored_rows)}")
+        fallback_items = [
+            item
+            for item in scanned
+            if id(item) not in seen_items
+        ]
+        for local_rank, item in enumerate(sorted(fallback_items, key=_title_rank_key), 1):
+            item["title_filter_fallback_used"] = True
+            item["title_llm_missing"] = True
+            item["title_llm_retry_exhausted"] = True
+            item["title_filter_fallback_reason"] = "LLM title row remained invalid or missing after bounded batch and single-item retries."
+            item["title_local_rank"] = local_rank
+        if fallback_items:
+            unresolved_ids = [str(item.get("id") or "") for item in fallback_items]
+            log(
+                f"{venue_name}: title LLM left {len(fallback_items)} rows unresolved after bounded retries; "
+                f"local title scores retained them for downstream abstract scoring; sample={unresolved_ids[:10]}"
+            )
         if batches:
             _emit_progress(
                 progress,
@@ -4536,7 +4649,7 @@ Rules:
             for item in scanned:
                 _apply_topic_evidence_guard(item, interest)
                 _apply_quality_bonus(item)
-        scored_pool = _dedupe_items(scored_rows or selected)
+        scored_pool = _dedupe_items([*scored_rows, *fallback_items])
         seen_keys = {str(item.get("id") or item.get("url") or item.get("title") or "") for item in scored_pool}
         missing_rows: list[dict] = []
         for item in scanned:
@@ -4545,8 +4658,7 @@ Rules:
                 missing_rows.append(item)
         if missing_rows:
             log(
-                f"{venue_name}: title LLM omitted {len(missing_rows)} title rows; "
-                "only rows with a completed title-LLM score remain eligible for title+abstract scoring"
+                f"{venue_name}: {len(missing_rows)} title rows were unavailable after LLM and local fallback reconciliation"
             )
         scored_pool = sorted(scored_pool, key=_title_rank_key)
         merged = sorted(_dedupe_items(scored_pool), key=_title_rank_key)
@@ -4572,18 +4684,22 @@ Rules:
             venue_name,
             scanned,
             title_groups,
-            len(prompts),
+            len(batches),
             selected_before_prune,
             pruned_count,
             len(merged),
             limit,
-            "llm",
+            "llm_with_local_fallback" if fallback_items else "llm",
             category_filtered_count=category_filtered_count if category_filtered_count is not None else len(items),
             tfidf_screened_count=len(scanned),
             title_score_input_count=len(scanned),
             llm_title_scored_count=len(scored_rows),
+            local_title_ranked_count=len(fallback_items),
         )
-        log(f"{venue_name}: LLM title prefilter scored {len(scored_rows)} titles; retained {len(merged)} title-screened candidates for detail scoring from {len(scanned)} title-screened titles")
+        log(
+            f"{venue_name}: LLM title prefilter scored {len(scored_rows)} titles with {len(fallback_items)} local fallbacks; "
+            f"retained {len(merged)} title-screened candidates for detail scoring from {len(scanned)} title-screened titles"
+        )
         return merged
 
     ranked = _local_title_screen_pool(scanned, config, interest)
@@ -4773,6 +4889,11 @@ def _public_category_selection(selection: dict | None) -> dict:
         "category_ranking",
         "selected_categories",
         "rejected_categories",
+        "fallback_used",
+        "selection_mode",
+        "llm_error",
+        "category_match_fallback_used",
+        "category_match_fallback_reason",
         "category_status",
     ):
         if key in selection:
@@ -4826,12 +4947,24 @@ def _select_official_category_title_index(
     if not category_summary.get("category_summary"):
         return papers, []
     selection = select_relevant_categories(category_summary, config, llm)
-    filtered = filter_papers_by_selected_categories(papers, selection)
-    selected_category_papers = len(filtered)
-    if not filtered and papers:
-        raise RuntimeError(
-            f"{venue.get('name', '')} category ranking selected categories that matched no papers; refusing an all-category fallback."
+    if selection.get("fallback_used"):
+        log(
+            f"{venue.get('name', '')}: category LLM ranking unavailable after bounded repair; "
+            f"using {selection.get('category_ranking_source') or 'deterministic fallback'}"
         )
+    filtered = filter_papers_by_selected_categories(papers, selection)
+    used_all_categories_fallback = False
+    if not filtered and papers:
+        filtered = list(papers)
+        used_all_categories_fallback = True
+        selection = dict(selection)
+        selection["category_match_fallback_used"] = True
+        selection["category_match_fallback_reason"] = "Selected canonical categories matched no paper rows; full title pool retained for paper-level screening."
+        log(
+            f"{venue.get('name', '')}: selected canonical categories matched no paper rows; "
+            f"retaining all {len(papers)} papers for title screening"
+        )
+    selected_category_papers = len(filtered)
     report = {
         "venue_id": venue.get("id", ""),
         "venue": venue.get("name", ""),
@@ -4839,16 +4972,18 @@ def _select_official_category_title_index(
         "adapter": str(metadata_audit.get("adapter") or "online_venue"),
         "total_papers": len(papers),
         "selected_category_papers": selected_category_papers,
+        "category_pruning_applied": not used_all_categories_fallback,
         "corpus_audit_papers": len(papers),
         "full_venue_corpus_audit": True,
-        "used_all_categories_fallback": False,
+        "used_all_categories_fallback": used_all_categories_fallback,
         "selection": _public_category_selection(selection),
         "title_filter_input_papers": len(filtered),
         "metadata_audit": metadata_audit,
         **_venue_metadata_status_fields(metadata_audit),
     }
     selected_names = [item.get("name", "") for item in selection.get("selected_categories", [])]
-    log(f"{venue.get('name', '')}: online category scan selected {selected_category_papers}/{len(papers)} papers from {len(selected_names)} official categories in one category decision")
+    if not used_all_categories_fallback:
+        log(f"{venue.get('name', '')}: online category scan selected {selected_category_papers}/{len(papers)} papers from {len(selected_names)} official categories in one category decision")
     return filtered, [report]
 
 
@@ -5012,8 +5147,14 @@ def _load_local_category_guided_index(
     for local in local_years:
         metadata_audit = _local_database_metadata_audit(local)
         use_category_selection = bool(metadata_audit.get("has_official_categories")) and str(metadata_audit.get("category_status") or "").lower() not in {"no_official_categories", "missing_categories", "no_or_partial_categories"}
+        used_all_categories_fallback = False
         if use_category_selection:
             selection = select_relevant_categories(local["category_summary"], config, llm)
+            if selection.get("fallback_used"):
+                log(
+                    f"{venue.get('name', '')} {local.get('year', '')}: category LLM ranking unavailable after bounded repair; "
+                    f"using {selection.get('category_ranking_source') or 'deterministic fallback'}"
+                )
             filtered = filter_papers_by_selected_categories(local["papers"], selection)
         else:
             selection = {
@@ -5029,8 +5170,14 @@ def _load_local_category_guided_index(
             }
             filtered = list(local["papers"])
         if not filtered and local["papers"]:
-            raise RuntimeError(
-                f"{venue.get('name', '')} {local.get('year', '')} category ranking selected categories that matched no papers; refusing an all-category fallback."
+            filtered = list(local["papers"])
+            used_all_categories_fallback = True
+            selection = dict(selection)
+            selection["category_match_fallback_used"] = True
+            selection["category_match_fallback_reason"] = "Selected canonical categories matched no paper rows; full title pool retained for paper-level screening."
+            log(
+                f"{venue.get('name', '')} {local.get('year', '')}: selected canonical categories matched no paper rows; "
+                f"retaining all {len(local['papers'])} papers for title screening"
             )
         combined.extend(filtered)
         corpus.extend(local["papers"] if _full_venue_corpus_audit_enabled(config) else filtered)
@@ -5043,16 +5190,18 @@ def _load_local_category_guided_index(
             "category_summary_path": local["category_summary_path"],
             "total_papers": local["paper_count"],
             "selected_category_papers": len(filtered),
-            "category_pruning_applied": use_category_selection,
+            "category_pruning_applied": use_category_selection and not used_all_categories_fallback,
             "corpus_audit_papers": len(local["papers"]) if _full_venue_corpus_audit_enabled(config) else len(filtered),
             "full_venue_corpus_audit": _full_venue_corpus_audit_enabled(config),
-            "used_all_categories_fallback": False,
+            "used_all_categories_fallback": used_all_categories_fallback,
             "selection": _public_category_selection(selection),
             "title_filter_input_papers": len(filtered),
             **_venue_metadata_status_fields(metadata_audit),
         })
         selected_names = [item.get("name", "") for item in selection.get("selected_categories", [])]
-        if not use_category_selection:
+        if used_all_categories_fallback:
+            log("{} {}: category match fallback sent all {} papers to title screening".format(venue.get("name", ""), local["year"], len(filtered)))
+        elif not use_category_selection:
             log("{} {}: verified local title corpus has no official categories; sending all {} papers to title screening".format(venue.get("name", ""), local["year"], len(filtered)))
         else:
             log("{} {}: local category scan selected {}/{} papers from {} categories; full corpus audited={}".format(venue.get("name", ""), local["year"], len(filtered), local["paper_count"], len(selected_names), len(local["papers"])))
@@ -5365,8 +5514,8 @@ def _evaluate_items(
         scoring_batch_size = _adaptive_final_scoring_batch_size(config, scoring_items, scoring_interest, topic_routes_block)
         for batch_index, batch in enumerate(_chunks(scoring_items, scoring_batch_size), 1):
             item_lines = "\n\n".join(
-                f"ID: {item.get('id')}\nTitle: {item.get('title')}\nAbstract/Description: {(item.get('abstract') or '')[:650]}"
-                for item in batch
+                f"ID: p{position:03d}\nTitle: {item.get('title')}\nAbstract/Description: {(item.get('abstract') or '')[:650]}"
+                for position, item in enumerate(batch, 1)
             )
             prompts.append(f"""
 You are the final strict relevance judge for literature discovery. Return JSON only.
@@ -5380,9 +5529,10 @@ Candidate items, batch {batch_index}:
 {item_lines}
 
 Return exactly this schema. The evaluations array is the final LLM evaluation rows; include one row for every candidate ID in the batch and never return an empty object. fit_score is the final calibrated recommendation score; use one decimal place and avoid default integer or x.5 scores:
-{{"evaluations":[{{"id":"paper id","category":"short category","fit_score":7.3,"diversity_score":6.4,"recommend_for_deep_reading":true,"topic_evidence":"passed: direct title+abstract evidence for a current topic route, or weak: missing adaptive topic evidence","topic_evidence_supported":true,"matched_topic_route":"the specific configured/adaptive route supported by the abstract, or empty","topic_evidence_basis":"short title/abstract evidence used for the route decision","missing_topic_evidence":["missing route component if unsupported"],"hit_directions_zh":["中文命中方向"],"hit_directions_en":["English hit direction"],"fit_explanation_zh":"2-3句中文：面向用户说明摘要中的具体证据、为什么与当前调研主题相关、以及可复用价值","fit_explanation_en":"2-3 English sentences for the user with title/abstract evidence, relevance, and reusable value","reason_zh":"2-4句中文：面向用户说明该论文对当前研究方向的具体价值、可借鉴的方法/数据/协议/理论/评测信息，以及摘要层面的风险或不确定性；不要写给 reader 的精读指令","reason_en":"2-4 English sentences for the user: concrete value to the current research direction, reusable method/data/protocol/theory/evaluation value, and abstract-level risks or uncertainty; do not write reader instructions"}}]}}
+{{"evaluations":[{{"id":"p001","category":"short category","fit_score":7.3,"diversity_score":6.4,"recommend_for_deep_reading":true,"topic_evidence":"passed: direct title+abstract evidence for a current topic route, or weak: missing adaptive topic evidence","topic_evidence_supported":true,"matched_topic_route":"the specific configured/adaptive route supported by the abstract, or empty","topic_evidence_basis":"short title/abstract evidence used for the route decision","missing_topic_evidence":["missing route component if unsupported"],"hit_directions_zh":["中文命中方向"],"hit_directions_en":["English hit direction"],"fit_explanation_zh":"2-3句中文：面向用户说明摘要中的具体证据、为什么与当前调研主题相关、以及可复用价值","fit_explanation_en":"2-3 English sentences for the user with title/abstract evidence, relevance, and reusable value","reason_zh":"2-4句中文：面向用户说明该论文对当前研究方向的具体价值、可借鉴的方法/数据/协议/理论/评测信息，以及摘要层面的风险或不确定性；不要写给 reader 的精读指令","reason_en":"2-4 English sentences for the user: concrete value to the current research direction, reusable method/data/protocol/theory/evaluation value, and abstract-level risks or uncertainty; do not write reader instructions"}}]}}
 
 Rules:
+- Return exactly {len(batch)} evaluation rows. IDs are opaque request-local identifiers; copy every pNNN ID exactly once and never rewrite or invent an ID.
 - Score by explicit title/abstract evidence only; venue prestige must not raise fit_score.
 - Use the whole 0-10 range consistently with one decimal place: 9.0-10.0 exact center, 7.0-8.9 strong match, 5.0-6.9 partial/background usefulness, 3.0-4.9 weak/generic, <=2.9 unrelated. Do not default to integer or x.5 scores when evidence supports a finer distinction.
 - Broad background papers are weak unless the abstract itself gives concrete reusable method, data, benchmark, protocol, theory, or evaluation value for the current research interest.
@@ -5410,8 +5560,8 @@ Rules:
         progress("abstract_scoring", 0, max(1, len(prompt_batches)), f"{source_name}: starting LLM final scoring")
 
         single_retry_attempts = max(0, int(os.environ.get("OMITTED_ITEM_RETRY_ATTEMPTS", os.environ.get("ABSTRACT_SCORING_SINGLE_RETRY_ATTEMPTS", "3")) or 0))
-        scoring_max_tokens = max(4000, int(os.environ.get("ABSTRACT_SCORING_MAX_TOKENS", "0") or 0) or max(9000, scoring_batch_size * 1400))
-        single_scoring_max_tokens = max(1500, int(os.environ.get("SINGLE_ABSTRACT_SCORING_MAX_TOKENS", "2500") or 2500))
+        scoring_max_tokens = 0
+        single_scoring_max_tokens = 0
         scoring_wall_timeout = max(0, int(os.environ.get("ABSTRACT_SCORING_WALL_TIMEOUT_SEC", "0") or 0))
         single_scoring_timeout = max(10, int(os.environ.get("SINGLE_ABSTRACT_SCORING_TIMEOUT_SEC", "75") or 75))
         pending_single_retries: list[tuple[int, list[dict], str]] = []
@@ -5439,12 +5589,12 @@ Research interest/profile:
 {topic_routes_block}
 
 Candidate item:
-ID: {item.get('id')}
+ID: p001
 Title: {item.get('title')}
 Abstract/Description: {(item.get('abstract') or '')[:900]}
 
 Return strict JSON only:
-{{"evaluations":[{{"id":"{item.get("id")}","category":"short category","fit_score":7.3,"diversity_score":6.4,"recommend_for_deep_reading":true,"topic_evidence":"passed: direct title+abstract evidence for a current topic route, or weak: missing adaptive topic evidence","topic_evidence_supported":true,"matched_topic_route":"the specific configured/adaptive route supported by the abstract, or empty","topic_evidence_basis":"short title/abstract evidence used for the route decision","missing_topic_evidence":["missing route component if unsupported"],"hit_directions_zh":["中文命中方向"],"hit_directions_en":["English hit direction"],"fit_explanation":"2-3句中文：面向用户说明摘要证据、相关性和可复用价值","fit_explanation_zh":"2-3句中文：面向用户说明摘要证据、相关性和可复用价值","fit_explanation_en":"2-3 English sentences for the user with title/abstract evidence, relevance, and reusable value","reason":"2-4句中文：面向用户说明对当前研究方向的价值、可借鉴什么、以及摘要层面的风险或不确定性","reason_zh":"2-4句中文：面向用户说明对当前研究方向的价值、可借鉴什么、以及摘要层面的风险或不确定性","reason_en":"2-4 English sentences for the user: value to the current research direction, reusable content, and abstract-level risks or uncertainty"}}]}}
+{{"evaluations":[{{"id":"p001","category":"short category","fit_score":7.3,"diversity_score":6.4,"recommend_for_deep_reading":true,"topic_evidence":"passed: direct title+abstract evidence for a current topic route, or weak: missing adaptive topic evidence","topic_evidence_supported":true,"matched_topic_route":"the specific configured/adaptive route supported by the abstract, or empty","topic_evidence_basis":"short title/abstract evidence used for the route decision","missing_topic_evidence":["missing route component if unsupported"],"hit_directions_zh":["中文命中方向"],"hit_directions_en":["English hit direction"],"fit_explanation":"2-3句中文：面向用户说明摘要证据、相关性和可复用价值","fit_explanation_zh":"2-3句中文：面向用户说明摘要证据、相关性和可复用价值","fit_explanation_en":"2-3 English sentences for the user with title/abstract evidence, relevance, and reusable value","reason":"2-4句中文：面向用户说明对当前研究方向的价值、可借鉴什么、以及摘要层面的风险或不确定性","reason_zh":"2-4句中文：面向用户说明对当前研究方向的价值、可借鉴什么、以及摘要层面的风险或不确定性","reason_en":"2-4 English sentences for the user: value to the current research direction, reusable content, and abstract-level risks or uncertainty"}}]}}
 
 Scoring rules: judge this item independently from its real title and abstract. fit_score is the final ranking score used by the workflow; use one decimal place: 9.0-10.0 exact center, 7.0-8.9 strong match, 5.0-6.9 partial/background usefulness, 3.0-4.9 weak/generic, <=2.9 unrelated. Do not default to integer or x.5 scores when evidence supports a finer distinction. recommend_for_deep_reading and topic_evidence_supported are audit fields only; the workflow ranks all valid final title+abstract rows with no topic-evidence or absolute-score eligibility gate. Set topic_evidence_supported=true only when the title+abstract directly supports one complete configured/adaptive core route from the list above; copy the full route into matched_topic_route, never a short subphrase or component. If the route contains a colon, treat the pre-colon text as the core route and the post-colon details as evidence axes/preferences, not mandatory all-of conditions. Otherwise set it false with weak topic_evidence and concrete missing_topic_evidence. Never cap or alter fit_score because of that audit verdict. User-facing recommendation reasons must explain reusable value before limitations, and must not contain reader instructions such as Reading note, full-text reading must verify, or the abstract is not a substitute for full-text reading. Provide both Chinese and English explanation fields, plus hit_directions_zh in Chinese and hit_directions_en in English.
 {FIND_FINAL_SCORING_ROUTE_RULES}
@@ -5518,7 +5668,7 @@ Scoring rules: judge this item independently from its real title and abstract. f
             return "single-item retry disabled; marking unresolved items for audit"
 
         def apply_result(batch_index: int, batch: list[dict], result: dict, allow_missing_retry: bool = True) -> None:
-            by_id = {str(item.get("id")): item for item in batch}
+            by_id = {f"p{position:03d}": item for position, item in enumerate(batch, 1)}
             assigned_items: set[int] = set()
             if not result.get("ok"):
                 error = result.get("error", "")
@@ -5538,17 +5688,23 @@ Scoring rules: judge this item independently from its real title and abstract. f
                 if isinstance(rows, dict):
                     rows = [rows]
                 if isinstance(rows, list):
-                    use_order_fallback = len(rows) == len(batch)
-                    for row_index, row in enumerate(rows):
+                    seen_row_ids: set[str] = set()
+                    for row in rows:
                         if not isinstance(row, dict):
                             continue
                         row_id = str(row.get("id") or "")
                         item = by_id.get(row_id)
-                        if not item and use_order_fallback and row_index < len(batch):
-                            item = batch[row_index]
-                            item["llm_id_mismatch_recovered"] = True
-                            item["llm_returned_id"] = row_id
-                        if not item:
+                        if not item or row_id in seen_row_ids:
+                            continue
+                        seen_row_ids.add(row_id)
+                        scores = (row.get("fit_score"), row.get("diversity_score"))
+                        if any(
+                            isinstance(value, bool)
+                            or not isinstance(value, (int, float))
+                            or not isfinite(float(value))
+                            or not 0 <= float(value) <= 10
+                            for value in scores
+                        ):
                             continue
                         row_reason_zh = row.get("reason_zh") or row.get("reason")
                         if _final_llm_cache_reason_unusable(row_reason_zh):
@@ -7818,6 +7974,11 @@ def run_find(
     llm_live = _llm_live_gate(llm)
     if llm.enabled and not llm_live.get("ok"):
         log("LLM live gate failed before Find scoring: " + str(llm_live.get("error") or llm_live.get("reason") or "unknown"))
+    active_llm = (
+        llm
+        if (not llm.enabled or llm_live.get("ok"))
+        else LLMClient(config.model_copy(update={"api_key": ""}), "find")
+    )
     cached_stage0_profile = _load_stage0_profile_cache(config)
     if cached_stage0_profile:
         stage0_profile = cached_stage0_profile
@@ -7825,7 +7986,7 @@ def run_find(
         stage0_error = "Reused stable project profile normalization cache."
         log("Stage 0 profile normalization reused stable project cache")
     else:
-        stage0_profile, stage0_fallback_used, stage0_error = normalize_user_profile(config, llm if llm_live.get("ok") else LLMClient(config.model_copy(update={"api_key": ""}), "find"))
+        stage0_profile, stage0_fallback_used, stage0_error = normalize_user_profile(config, active_llm)
         if not stage0_fallback_used:
             _store_stage0_profile_cache(config, stage0_profile)
     stage0_retrieval_text = profile_retrieval_text(stage0_profile)
@@ -8031,7 +8192,7 @@ def run_find(
             online_category_reports: list[dict] = []
             category_selected_papers_for_report: int | None = None
             if titles:
-                titles, online_category_reports = _select_official_category_title_index(venue, effective_years, title_corpus_index, metadata_audit, effective_config, llm, log)
+                titles, online_category_reports = _select_official_category_title_index(venue, effective_years, title_corpus_index, metadata_audit, effective_config, active_llm, log)
                 category_scan_report.extend(online_category_reports)
                 if online_category_reports:
                     category_selected_papers_for_report = _as_int(online_category_reports[-1].get("selected_category_papers"), len(titles))
@@ -8067,7 +8228,7 @@ def run_find(
             selected_titles = _prefilter_titles(
                 titles,
                 effective_config,
-                llm,
+                active_llm,
                 venue.get("name", venue_id),
                 log,
                 should_cancel,
@@ -8086,7 +8247,7 @@ def run_find(
 
         log(f"Fetching title index for {venue.get('name')} years {effective_years}")
         _progress("venue_title_index", venue_index - 1, len(venue_year_groups), f"Fetching title index: {venue.get('name')}")
-        local_result = _load_local_category_guided_index(venue, effective_years, effective_config, llm, title_scan_limit, log)
+        local_result = _load_local_category_guided_index(venue, effective_years, effective_config, active_llm, title_scan_limit, log)
         venue_metadata_audit: dict = {}
         category_selected_papers_for_report: int | None = None
         if local_result:
@@ -8106,7 +8267,7 @@ def run_find(
             _store_verified_live_venue_cache(venue, effective_years, title_corpus_index, adapter, log)
             online_category_reports: list[dict] = []
             if title_index:
-                title_index, online_category_reports = _select_official_category_title_index(venue, effective_years, title_corpus_index, venue_metadata_audit, effective_config, llm, log)
+                title_index, online_category_reports = _select_official_category_title_index(venue, effective_years, title_corpus_index, venue_metadata_audit, effective_config, active_llm, log)
                 category_scan_report.extend(online_category_reports)
                 if online_category_reports:
                     category_selected_papers_for_report = _as_int(online_category_reports[-1].get("selected_category_papers"), len(title_index))
@@ -8148,7 +8309,7 @@ def run_find(
         selected_titles = _prefilter_titles(
             title_index,
             effective_config,
-            llm,
+            active_llm,
             venue.get("name", venue_id),
             log,
             should_cancel,
@@ -8183,7 +8344,7 @@ def run_find(
         )
     else:
         log("No eligible latest released venue found for freshness bonus; no venue-year freshness bonus will be applied.")
-    scoring_llm = llm if (not llm.enabled or llm_live.get("ok")) else LLMClient(config.model_copy(update={"api_key": ""}), "find")
+    scoring_llm = active_llm
 
     if request.selection.include_nature or request.selection.include_science or request.selection.include_arxiv or request.selection.include_biorxiv:
         # Shared topic terms for non-conference sources. Journal sources use these

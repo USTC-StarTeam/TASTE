@@ -29,8 +29,8 @@ Use this skill when Experimenting asks the controller Claude Code to design, imp
 3. Start from `planning/finding/find.md`; use targeted Grep/Read on `find_results.json` whenever provenance, competing methods, or additional paper evidence is needed.
 4. Write `adaptive_experiment_plan.json` in the iteration artifact directory before changing code or launching a command.
 5. Keep execution-level adaptations inside the current selected idea/plan and record every source file used.
-6. If missing current-Find reading blocks the selected experiment, invoke `framework/scripts/run_module.py reading --action current_find_research_plan --project <project>` through Conda `taste`, then reload the project evidence.
-7. If a useful route requires a different research idea, invoke `framework/scripts/run_module.py ideation --action idea --project <project>` through Conda `taste`, then wait for one selected Plan and matching Environment handoff.
+6. If missing current-Find reading blocks the selected experiment, invoke `python framework/scripts/main.py module reading --action current_find_research_plan --project <project>` through Conda `taste`, then reload the project evidence.
+7. If a useful route requires a different research idea, invoke `python framework/scripts/main.py module ideation --action idea --project <project>` through Conda `taste`, then wait for one selected Plan and matching Environment handoff.
 
 ## Controller And Task Agents
 

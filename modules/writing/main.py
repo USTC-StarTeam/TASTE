@@ -75,7 +75,7 @@ def _require_taste() -> None:
         return
     raise SystemExit(
         "Writing must run in conda environment taste. "
-        "Use: conda run -n taste python framework/scripts/run_module.py writing --action work --project <project>"
+        "Use: conda run -n taste python framework/scripts/main.py module writing --action work --project <project>"
     )
 
 
@@ -1174,6 +1174,7 @@ def _contract_payload() -> dict[str, Any]:
         "display_name": "Writing",
         "responsibility": "Own one Writing controller Claude session per project and produce an independently audited canonical manuscript.",
         "entrypoint": "modules/writing/main.py",
+        "scripts_are_private_backend": True,
         "runtime_root": "modules/writing/.runtime",
         "public_actions": ["work", "chat", "controller_status", "assets"],
         "required_external_inputs": ["project"],

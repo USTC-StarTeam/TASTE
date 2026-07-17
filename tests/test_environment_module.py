@@ -8,15 +8,25 @@ import sys
 import time
 from pathlib import Path
 
-from auto_research import environment_bridge, project_bridge
-import run_project
+from bridges import environment_bridge, project_bridge
+from orchestration import run_project
 from scripts.common import claude_runner
 from scripts.common.shell import command_is_dangerous
-from scripts.orchestration import autonomous_deploy
 
 
 ROOT = Path(__file__).resolve().parents[1]
 ENVIRONMENT_ROOT = ROOT / "modules" / "environment"
+
+
+def _load_environment_script(relative_path: str, module_name: str):
+    spec = importlib.util.spec_from_file_location(module_name, ENVIRONMENT_ROOT / "scripts" / relative_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+autonomous_deploy = _load_environment_script("orchestration/autonomous_deploy.py", "environment_autonomous_deploy_test")
 
 
 def _load_environment_main():

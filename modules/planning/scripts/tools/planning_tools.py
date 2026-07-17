@@ -23,12 +23,12 @@ ROOT = _repo_root(Path(__file__).resolve())
 FRAMEWORK_SCRIPTS = ROOT / "framework" / "scripts"
 if str(FRAMEWORK_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(FRAMEWORK_SCRIPTS))
-from taste_pythonpath import ensure_taste_pythonpath
+from runtime.taste_pythonpath import ensure_taste_pythonpath
 
 ensure_taste_pythonpath(ROOT)
 
 from experiment_contracts import PRUNE_RECOMMENDATIONS, row_promotion_blockers
-from project_paths import build_paths, load_project_config, management_python
+from project.project_paths import build_paths, load_project_config, management_python
 
 
 # ---- review board tool ----
@@ -180,10 +180,10 @@ def run_blocker_resolution(argv=None):
     repo_path = active.get('repo_path', '<active_repo>')
     venue_suffix = f' --venue \"{args.venue}\"' if args.venue else ''
     verification_commands = [
-        f"{management_python()} framework/scripts/run_module.py environment --action data_requirements --project {args.project} --repo-path {repo_path}",
-        f"{management_python()} framework/scripts/run_module.py environment --action probe_repo --project {args.project} --repo-path {repo_path} --env-name <active_env>",
-        f"{management_python()} framework/scripts/run_module.py writing --action audit_evidence --project {args.project}{venue_suffix}",
-        f"{management_python()} framework/scripts/report_status.py --project {args.project}{venue_suffix}",
+        f"{management_python()} framework/scripts/main.py module environment --action data_requirements --project {args.project} --repo-path {repo_path}",
+        f"{management_python()} framework/scripts/main.py module environment --action probe_repo --project {args.project} --repo-path {repo_path} --env-name <active_env>",
+        f"{management_python()} framework/scripts/main.py module writing --action audit_evidence --project {args.project}{venue_suffix}",
+        f"{management_python()} framework/scripts/reporting/report_status.py --project {args.project}{venue_suffix}",
     ]
     payload = {'generated_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'project': args.project, 'venue_snapshot': args.venue, 'blocker_type': 'active_repo_real_data_missing' if hard_real_data_blocker else 'none', 'active_repo': active, 'ready_datasets': ready_datasets, 'blocked_datasets': missing_datasets if hard_real_data_blocker else [], 'non_ready_optional_datasets': missing_datasets if not hard_real_data_blocker else [], 'required_files_per_dataset': req.get('contract', {}).get('required_files_per_dataset', []), 'data_policy_decision': policy.get('decision', ''), 'data_acquisition_attempts': len([row for row in attempts if not row.get('dry_run')]), 'recorded_attempts_including_dry_run': len(attempts), 'evidence_ready_candidate_count': len(evidence_ready), 'audited_candidate_count': len(audited), 'allowed_resolution_paths': allowed_paths, 'blocked_actions': blocked_actions, 'exact_user_data_placement_requests': placement, 'paper_gate_summary': 'hold-markdown-only' if 'promotion_gate_recommendation: hold-markdown-only' in audit else 'unknown_or_missing', 'verification_commands': verification_commands, 'completion_condition': 'At least one real dataset must be present, loader-probed, and used in an audit-ready active-repo experiment before paper claims can advance.' if hard_real_data_blocker else 'Active repo has ready real dataset evidence; do not treat other missing optional datasets as the active blocker. Paper promotion remains controlled by the evidence audit gate.'}
     _blocker_resolution_save_json(paths.state / 'blocker_resolution_packet.json', payload)

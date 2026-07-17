@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from project_paths import build_paths, load_project_config, project_experiment_python_from_config
+from project.project_paths import build_paths, load_project_config, project_experiment_python_from_config
 
 
 def now_iso() -> str:

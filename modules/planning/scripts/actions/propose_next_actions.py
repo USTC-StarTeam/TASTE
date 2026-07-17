@@ -18,12 +18,12 @@ ROOT = _repo_root(Path(__file__).resolve())
 FRAMEWORK_SCRIPTS = ROOT / "framework" / "scripts"
 if str(FRAMEWORK_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(FRAMEWORK_SCRIPTS))
-from taste_pythonpath import ensure_taste_pythonpath
+from runtime.taste_pythonpath import ensure_taste_pythonpath
 
 ensure_taste_pythonpath(ROOT)
 
 from experiment_contracts import PRUNE_RECOMMENDATIONS, claim_strength_score, counterexample_score, evidence_gate, method_is_baseline_or_control, metric_higher_is_better, novelty_score, parse_float, row_matches_method
-from project_paths import build_paths, load_project_config
+from project.project_paths import build_paths, load_project_config
 
 def load_json(path: Path):
     return json.loads(path.read_text(encoding='utf-8')) if path.exists() else []

@@ -461,6 +461,25 @@ label {
   margin-top: 0.65rem;
 }
 
+.readSettingsPanel .row {
+  align-items: end;
+  margin-top: 0.7rem;
+}
+
+.readScopeSummary {
+  border: 1px solid #cfe0da;
+  border-radius: 7px;
+  background: #f3f9f7;
+  color: #1e5a5a;
+  font-weight: 700;
+  margin: 0;
+  padding: 0.62rem 0.72rem;
+}
+
+.saveBar .readLimitDirty {
+  color: #9d5b00;
+}
+
 .grid.two {
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
@@ -698,6 +717,11 @@ label {
   min-width: 0;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.jobElapsed {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .jobCard > small {

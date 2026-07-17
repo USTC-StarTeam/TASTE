@@ -25,7 +25,15 @@ pythonpath = ["scripts", ".", "..", "../web/backend", "../modules/finding", "../
 
 [tool.setuptools.packages.find]
 where = ["scripts"]
-include = ["auto_research*"]
-
-[tool.setuptools.package-data]
-auto_research = ["data/**/*.json"]
+include = [
+  "automation*",
+  "bridges*",
+  "contracts*",
+  "integrations*",
+  "orchestration*",
+  "policies*",
+  "project*",
+  "reporting*",
+  "runtime*",
+  "validation*",
+]

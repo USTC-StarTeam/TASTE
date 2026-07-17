@@ -93,6 +93,7 @@ try:
     from orchestration.claude_subagent import (
         article_metadata_markdown_lines,
         build_deep_read_prompt,
+        build_reading_score_prompt,
         run_claude_deep_read,
     )
 except ModuleNotFoundError:
@@ -104,6 +105,7 @@ except ModuleNotFoundError:
     _CLAUDE_SUBAGENT_SPEC.loader.exec_module(_CLAUDE_SUBAGENT)
     article_metadata_markdown_lines = _CLAUDE_SUBAGENT.article_metadata_markdown_lines
     build_deep_read_prompt = _CLAUDE_SUBAGENT.build_deep_read_prompt
+    build_reading_score_prompt = _CLAUDE_SUBAGENT.build_reading_score_prompt
     run_claude_deep_read = _CLAUDE_SUBAGENT.run_claude_deep_read
 
 try:
@@ -3628,13 +3630,44 @@ def _dedupe_papers(papers: list[dict]) -> list[dict]:
 
 
 def _input_articles(payload: dict) -> list[dict]:
-    for key in ["articles", "input_articles", "papers"]:
+    for key in ["ranked_articles", "ranked_papers", "articles", "input_articles", "papers"]:
         value = payload.get(key)
         if isinstance(value, list):
             return _dedupe_papers([item for item in value if isinstance(item, dict)])
     if any(payload.get(key) for key in ["title", "article", "url", "pdf_url", "doi"]):
         return [payload]
     return []
+
+
+def _research_context_from_input(payload: dict) -> dict:
+    nested = payload.get("research_context")
+    context = dict(nested) if isinstance(nested, dict) else {}
+    aliases = {
+        "research_topic": ("research_topic", "topic"),
+        "research_interest": ("research_interest", "interest"),
+        "researcher_profile": ("researcher_profile", "research_profile", "profile"),
+    }
+    for target, keys in aliases.items():
+        if context.get(target) not in (None, "", [], {}):
+            continue
+        for key in keys:
+            value = payload.get(key)
+            if value not in (None, "", [], {}):
+                context[target] = value
+                break
+    return context
+
+
+def _select_ranked_input_articles(payload: dict, max_papers: int = 0) -> tuple[list[dict], list[dict], int]:
+    all_input_papers = _input_articles(payload)
+    configured_default = max(1, config_int("reading.default_max_papers", 50))
+    try:
+        selected_limit = int(max_papers or 0)
+    except (TypeError, ValueError):
+        selected_limit = 0
+    if selected_limit <= 0:
+        selected_limit = configured_default
+    return all_input_papers, all_input_papers[:selected_limit], selected_limit
 
 
 def _load_local_input_json(path: str) -> tuple[Path, dict]:
@@ -5249,7 +5282,230 @@ def _article_title_for_log(item: dict, fallback: str = "Untitled") -> str:
     return str(reading.get("title") or paper.get("title") or paper.get("paper_id") or fallback).strip() or fallback
 
 
-def _demote_article_markdown(text: str, *, index: int, title: str) -> str:
+def _score_number(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not 0.0 <= score <= 10.0:
+        return None
+    return round(score, 1)
+
+
+def _reading_scoring_receipt_gate(receipt: dict) -> dict[str, object]:
+    status = str(receipt.get("status") or "").strip()
+    expected_audit = receipt.get("expected_output_audit") if isinstance(receipt.get("expected_output_audit"), dict) else {}
+    nonruntime_audit = receipt.get("nonruntime_artifact_audit") if isinstance(receipt.get("nonruntime_artifact_audit"), dict) else {}
+    external_temp_audit = receipt.get("external_temp_artifact_audit") if isinstance(receipt.get("external_temp_artifact_audit"), dict) else {}
+    checks = {
+        "status_acceptable": status in {"complete", "completed", "claude_completed"},
+        "run_executed": receipt.get("run_executed") is True,
+        "return_code_zero": receipt.get("return_code") == 0,
+        "expected_output_valid": expected_audit.get("exists") is True and expected_audit.get("valid_json") is True,
+        "nonruntime_artifact_audit_passed": (
+            int(nonruntime_audit.get("problem_count") or 0) == 0
+            and nonruntime_audit.get("status") == "passed"
+        ),
+        "external_temp_artifact_audit_passed": (
+            int(external_temp_audit.get("problem_count") or 0) == 0
+            and external_temp_audit.get("status") == "passed"
+        ),
+    }
+    return {
+        "accepted": all(checks.values()),
+        "status": status,
+        "checks": checks,
+    }
+
+
+def _normalize_reading_scores(payload: dict, items: list[dict]) -> dict[int, dict[str, float]]:
+    valid_indices = {
+        int(item.get("paper_index") or index)
+        for index, item in enumerate(items, 1)
+        if item.get("validation", {}).get("deep_read_complete") is True
+    }
+    rows = payload.get("scores") if isinstance(payload, dict) else []
+    normalized: dict[int, dict[str, float]] = {}
+    if not isinstance(rows, list):
+        return normalized
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            paper_index = int(row.get("paper_index"))
+        except (TypeError, ValueError):
+            continue
+        match_score = _score_number(row.get("match_score"))
+        transferability_score = _score_number(row.get("transferability_score"))
+        if paper_index not in valid_indices or match_score is None or transferability_score is None:
+            continue
+        normalized[paper_index] = {
+            "match_score": match_score,
+            "transferability_score": transferability_score,
+            "average_score": round((match_score + transferability_score) / 2.0, 2),
+        }
+    return normalized
+
+
+def _apply_reading_scores_and_rank(
+    items: list[dict],
+    scores: dict[int, dict[str, float]],
+    *,
+    rerank: bool = True,
+) -> list[dict]:
+    indexed_items: list[tuple[int, dict]] = []
+    for original_order, item in enumerate(items, 1):
+        paper_index = int(item.get("paper_index") or original_order)
+        reading = item.get("reading") if isinstance(item.get("reading"), dict) else None
+        item.pop("match_score", None)
+        item.pop("transferability_score", None)
+        item.pop("average_score", None)
+        if reading is not None:
+            reading.pop("match_score", None)
+            reading.pop("transferability_score", None)
+            reading.pop("average_score", None)
+        score = scores.get(paper_index)
+        if score:
+            item.update(score)
+            if reading is not None:
+                reading.update(score)
+        indexed_items.append((original_order, item))
+    if rerank:
+        indexed_items.sort(key=lambda entry: (
+            entry[1].get("average_score") is None,
+            -float(entry[1].get("average_score") or 0.0),
+            entry[0],
+        ))
+    ranked = [item for _, item in indexed_items]
+    for final_rank, item in enumerate(ranked, 1):
+        item["final_read_rank"] = final_rank
+        reading = item.get("reading") if isinstance(item.get("reading"), dict) else None
+        if reading is not None:
+            reading["final_read_rank"] = final_rank
+    return ranked
+
+
+def _run_final_reading_scoring(
+    *,
+    directory: Path,
+    items: list[dict],
+    research_context: dict,
+    claude_mode: str,
+    timeout_sec: int,
+    log: LogFn,
+) -> tuple[list[dict], dict]:
+    candidates: list[dict] = []
+    for index, item in enumerate(items, 1):
+        path = _article_markdown_path_for_completed_item(item)
+        if path is None:
+            continue
+        candidates.append({
+            "paper_index": int(item.get("paper_index") or index),
+            "title": _article_title_for_log(item),
+            "article_markdown_path": path.resolve(strict=False).relative_to(directory.resolve(strict=False)).as_posix(),
+        })
+    if claude_mode == "prepare" or not candidates:
+        ranked = _apply_reading_scores_and_rank(items, {})
+        return ranked, {
+            "status": "not_started_prepare_mode" if claude_mode == "prepare" else "skipped_no_completed_reading_artifacts",
+            "attempted": False,
+            "expected_article_count": len(candidates),
+            "scored_article_count": 0,
+        }
+    if not any(value not in (None, "", [], {}) for value in research_context.values()):
+        ranked = _apply_reading_scores_and_rank(items, {})
+        return ranked, {
+            "status": "skipped_missing_research_context",
+            "attempted": False,
+            "required": True,
+            "expected_article_count": len(candidates),
+            "scored_article_count": 0,
+        }
+
+    scoring_dir = directory / "scoring"
+    scoring_dir.mkdir(parents=True, exist_ok=True)
+    prompt_path = scoring_dir / "prompt.md"
+    output_path = directory / "outputs" / "reading_scores.json"
+    write_text(prompt_path, build_reading_score_prompt(
+        research_context=research_context,
+        articles=candidates,
+        run_path=directory,
+        output_path=output_path,
+    ))
+    log(f"Final Reading scoring phase: {len(candidates)} completed reading artifacts")
+    try:
+        receipt = run_claude_deep_read(
+            prompt_path=prompt_path,
+            run_path=directory,
+            expected_output_path=output_path,
+            timeout_sec=timeout_sec,
+            mode=claude_mode,
+            receipt_dir_name="claude_scoring",
+        )
+    except Exception as exc:
+        ranked = _apply_reading_scores_and_rank(items, {}, rerank=False)
+        error = _read_exception_payload("final_scoring", exc)
+        write_json(output_path, {
+            "status": "complete_with_warnings",
+            "scores": [],
+            "expected_article_count": len(candidates),
+            "scored_article_count": 0,
+            "error": error,
+        })
+        log(f"Warning: Final Reading scoring failed: {exc.__class__.__name__}: {str(exc)[:300]}")
+        return ranked, {
+            "status": "complete_with_warnings",
+            "attempted": True,
+            "expected_article_count": len(candidates),
+            "scored_article_count": 0,
+            "score_artifact": str(output_path),
+            "ranking_policy": "preserve_input_ranking_when_scoring_fails",
+            "receipt_gate": {"accepted": False, "reason": "scoring_exception"},
+            "error": error,
+        }
+    raw_payload = read_json(output_path, {})
+    if not isinstance(raw_payload, dict) or not raw_payload:
+        raw_payload = receipt.get("result_payload") if isinstance(receipt.get("result_payload"), dict) else {}
+    receipt_gate = _reading_scoring_receipt_gate(receipt)
+    scores = _normalize_reading_scores(raw_payload, items) if receipt_gate.get("accepted") is True else {}
+    candidate_indices = {int(candidate["paper_index"]) for candidate in candidates}
+    scores = {paper_index: score for paper_index, score in scores.items() if paper_index in candidate_indices}
+    scoring_complete = receipt_gate.get("accepted") is True and set(scores) == candidate_indices
+    ranked = _apply_reading_scores_and_rank(items, scores, rerank=scoring_complete)
+    canonical_scores = [
+        {"paper_index": paper_index, **score}
+        for paper_index, score in sorted(scores.items())
+    ]
+    scoring_status = "complete" if scoring_complete else "complete_with_warnings"
+    ranking_policy = (
+        "descending_average_of_match_score_and_transferability_score"
+        if scoring_complete
+        else "preserve_input_ranking_when_scoring_incomplete_or_untrusted"
+    )
+    write_json(output_path, {
+        "status": scoring_status,
+        "scores": canonical_scores,
+        "expected_article_count": len(candidates),
+        "scored_article_count": len(scores),
+        "ranking_policy": ranking_policy,
+        "receipt_gate": receipt_gate,
+    })
+    log(f"Final Reading scoring complete: scored={len(scores)}/{len(candidates)}")
+    return ranked, {
+        "status": scoring_status,
+        "attempted": True,
+        "expected_article_count": len(candidates),
+        "scored_article_count": len(scores),
+        "score_artifact": str(output_path),
+        "ranking_policy": ranking_policy,
+        "receipt_gate": receipt_gate,
+        "claude": receipt,
+    }
+
+
+def _demote_article_markdown(text: str, *, index: int, title: str, item: dict | None = None) -> str:
     body = _sanitize_article_markdown_text(str(text or "")).strip()
     lines = body.splitlines()
     while lines and not lines[0].strip():
@@ -5258,6 +5514,16 @@ def _demote_article_markdown(text: str, *, index: int, title: str) -> str:
     if lines and lines[0].startswith("# "):
         article_title = lines.pop(0).lstrip("#").strip() or title
     output = [f"### {index}. {article_title}", ""]
+    item = item if isinstance(item, dict) else {}
+    match_score = _score_number(item.get("match_score"))
+    transferability_score = _score_number(item.get("transferability_score"))
+    if match_score is not None and transferability_score is not None:
+        output.extend([
+            f"**匹配度：** {match_score:g}/10",
+            "",
+            f"**可借鉴性：** {transferability_score:g}/10",
+            "",
+        ])
     for line in lines:
         if line.startswith("#"):
             hashes = len(line) - len(line.lstrip("#"))
@@ -5288,7 +5554,7 @@ def _aggregate_read_md_by_concatenation(
         text = path.read_text(encoding="utf-8", errors="replace")
         item = item_by_path.get(str(path.resolve(strict=False)), {})
         title = _article_title_for_log(item, fallback=path.parent.name)
-        article_body = _demote_article_markdown(text, index=index, title=title)
+        article_body = _demote_article_markdown(text, index=index, title=title, item=item)
         if article_body:
             sections.append(article_body)
             sections.append("")
@@ -5508,11 +5774,10 @@ def run_read(
             "Reading input and output run must match: "
             f"--input-json is under .runtime/output/{source_run_id}/input but --run-id resolves to {requested_run_id}."
         )
-    papers = _input_articles(input_payload)
-    if max_papers and max_papers > 0:
-        papers = papers[:max_papers]
+    all_input_papers, papers, selected_limit = _select_ranked_input_articles(input_payload, max_papers)
     if not papers:
-        raise SystemExit("输入 JSON 中没有 articles/input_articles/papers。")
+        raise SystemExit("输入 JSON 中没有 ranked_articles/ranked_papers/articles/input_articles/papers。")
+    research_context = _research_context_from_input(input_payload)
     directory = existing_run_dir(source_run_id)
     input_dir = directory / "input"
     input_dir.mkdir(parents=True, exist_ok=True)
@@ -5520,8 +5785,10 @@ def run_read(
     write_json(input_dir / "input_receipt.json", {
         "source_input": str(source_path),
         "local_snapshot": str(input_dir / "input.json"),
+        "available_ranked_article_count": len(all_input_papers),
         "input_article_count": len(papers),
-        "policy": "Input must already be inside this directory; Reading does not copy from external paths.",
+        "selected_max_papers": selected_limit,
+        "policy": "Input must already be inside this directory; Reading consumes the first N papers in caller-provided final ranking order and does not copy from external paths.",
     })
     worker_count = max(1, min(len(papers), int(max_workers or 1)))
     prepared_by_index: dict[int, dict] = {}
@@ -5664,15 +5931,24 @@ def run_read(
                     f"- {title}"
                 )
     items = [items_by_index[index] for index in range(1, len(papers) + 1)]
-    full_text_entries: list[dict] = [
-        item["full_text_packet"]
-        for item in items
-        if isinstance(item.get("full_text_packet"), dict)
-    ]
     complete_count = sum(1 for item in items if item.get("validation", {}).get("deep_read_complete"))
     ready_count = sum(1 for item in items if item.get("validation", {}).get("full_text_ready"))
-    status = "complete" if complete_count == len(items) else "complete_with_warnings"
-    warning_count = max(0, len(items) - complete_count)
+    _raise_if_cancelled(should_cancel)
+    items, reading_scoring = _run_final_reading_scoring(
+        directory=directory,
+        items=items,
+        research_context=research_context,
+        claude_mode=claude_mode,
+        timeout_sec=timeout_sec,
+        log=log,
+    )
+    scoring_warning = bool(
+        claude_mode != "prepare"
+        and complete_count > 0
+        and reading_scoring.get("status") != "complete"
+    )
+    status = "complete" if complete_count == len(items) and not scoring_warning else "complete_with_warnings"
+    warning_count = max(0, len(items) - complete_count) + int(scoring_warning)
     pending_full_text_count = max(0, len(items) - ready_count)
     pending_deep_read_count = max(0, ready_count - complete_count)
     warning_items = [
@@ -5680,6 +5956,16 @@ def run_read(
         for index, item in enumerate(items, 1)
         if item.get("validation", {}).get("deep_read_complete") is not True
     ]
+    if scoring_warning:
+        warning_items.append({
+            "index": 0,
+            "title": "final Reading scoring",
+            "phase": "final_scoring",
+            "status": str(reading_scoring.get("status") or "complete_with_warnings"),
+            "message": "统一评分未覆盖全部已完成精读；未伪造缺失分数，最终产物保留原输入排名。",
+            "expected_article_count": int(reading_scoring.get("expected_article_count") or 0),
+            "scored_article_count": int(reading_scoring.get("scored_article_count") or 0),
+        })
     error_items = [
         detail
         for detail in warning_items
@@ -5691,6 +5977,11 @@ def run_read(
             f"full_text_ready={ready_count}/{len(items)}, deep_read_complete={complete_count}/{len(items)}, "
             f"pending_full_text={pending_full_text_count}, pending_deep_read={pending_deep_read_count}."
         )
+    full_text_entries: list[dict] = [
+        item["full_text_packet"]
+        for item in items
+        if isinstance(item.get("full_text_packet"), dict)
+    ]
     full_text_dir = directory / "full_text_reading"
     write_json(full_text_dir / "full_text_packet.json", {
         "run_id": directory.name,
@@ -5704,7 +5995,13 @@ def run_read(
         "generated_at": _now_iso(),
         "input_json": str(source_path),
         "public_final_artifact": str(directory / "read.md"),
-        "machine_support_artifacts": [str(directory / "read_results.json"), str(full_text_dir / "full_text_packet.json")],
+        "machine_support_artifacts": [
+            str(directory / "read_results.json"),
+            str(full_text_dir / "full_text_packet.json"),
+            *([str(reading_scoring.get("score_artifact"))] if reading_scoring.get("score_artifact") else []),
+        ],
+        "available_ranked_article_count": len(all_input_papers),
+        "selected_max_papers": selected_limit,
         "input_article_count": len(items),
         "full_text_ready_count": ready_count,
         "deep_read_complete_count": complete_count,
@@ -5717,9 +6014,11 @@ def run_read(
         "continuation_policy": "Read emits final read.md from completed per-paper Markdown whenever possible. Incomplete papers and concatenation issues are recorded only as task-log/machine-state warnings.",
         "worker_count": worker_count,
         "reading_subagent_worker_count": reading_worker_count,
+        "reading_scoring": reading_scoring,
         "execution_phases": [
             "full_text_acquisition_for_all_inputs",
             "parallel_reading_subagents_after_full_text_collection",
+            *(["claude_scoring_over_all_completed_reading_artifacts"] if reading_scoring.get("attempted") is True else []),
             "final_read_md_deterministic_concatenation",
         ],
         "strict_input_contract": True,
@@ -5753,6 +6052,8 @@ def run_read(
             "run_id": directory.name,
             "run_dir": str(directory),
             "latest_run": str(latest_run),
+            "available_ranked_article_count": len(all_input_papers),
+            "selected_max_papers": selected_limit,
             "input_article_count": len(items),
             "full_text_ready_count": ready_count,
             "deep_read_complete_count": complete_count,
@@ -5761,6 +6062,7 @@ def run_read(
             "public_final_artifact_present": False,
             "latest_public_final_artifact_present": False,
             "read_results": str(directory / "read_results.json"),
+            "reading_scoring": reading_scoring,
             "read_markdown_aggregation": payload.get("read_markdown_aggregation"),
         })
     read_md_path = directory / "read.md"
@@ -5837,6 +6139,8 @@ def run_read(
         "run_id": directory.name,
         "run_dir": str(directory),
         "latest_run": str(latest_run),
+        "available_ranked_article_count": len(all_input_papers),
+        "selected_max_papers": selected_limit,
         "input_article_count": len(items),
         "full_text_ready_count": ready_count,
         "deep_read_complete_count": complete_count,
@@ -5845,6 +6149,7 @@ def run_read(
         "public_final_artifact_present": payload["public_final_artifact_present"],
         "latest_public_final_artifact_present": latest_public_final_artifact_present,
         "read_results": str(directory / "read_results.json"),
+        "reading_scoring": reading_scoring,
         "read_markdown_aggregation": payload.get("read_markdown_aggregation"),
     })
 

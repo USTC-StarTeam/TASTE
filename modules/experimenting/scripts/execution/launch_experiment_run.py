@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from project_paths import ROOT, build_paths, load_project_config, project_experiment_python_from_config
+from project.project_paths import ROOT, build_paths, load_project_config, project_experiment_python_from_config
 
 
 FORBIDDEN_LAUNCHERS = {"bash", "sh", "zsh", "fish", "nohup"}
@@ -460,9 +460,9 @@ def main() -> int:
         },
         "audit_refresh_required": [
             "python modules/experimenting/main.py --action watchdog",
-            "framework/scripts/run_module.py writing --action audit_evidence",
-            "framework/scripts/run_module.py writing --action submission_readiness",
-            "framework/scripts/run_module.py planning --action blocker_action",
+            "framework/scripts/main.py module writing --action audit_evidence",
+            "framework/scripts/main.py module writing --action submission_readiness",
+            "framework/scripts/main.py module planning --action blocker_action",
         ],
         "artifact_contract_required_fields": [
             "contract_schema_version",

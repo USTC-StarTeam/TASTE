@@ -18,9 +18,9 @@ from path_helpers import ensure_script_paths
 
 ensure_script_paths()
 
-from auto_research import project_bridge
-from auto_research import paper_state
-import project_config
+from bridges import project_bridge
+from project import project_config
+from reporting import paper_state
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -55,7 +55,7 @@ def _source_status_fixture_markdown() -> str:
 
 
 def test_ideation_framework_owns_normalized_input_and_explicit_run_sync(tmp_path):
-    from auto_research.ideation_bridge import prepare_current_find_ideation_input, sync_current_find_ideation_outputs
+    from bridges.ideation_bridge import prepare_current_find_ideation_input, sync_current_find_ideation_outputs
 
     projects = tmp_path / "projects"
     project_root = projects / "demo"
@@ -127,7 +127,7 @@ def test_ideation_framework_owns_normalized_input_and_explicit_run_sync(tmp_path
 
 
 def test_ideation_edit_rejects_artifact_from_stale_find(tmp_path):
-    from auto_research.ideation_bridge import current_find_ideation_run_dir
+    from bridges.ideation_bridge import current_find_ideation_run_dir
 
     projects = tmp_path / "projects"
     project_root = projects / "demo"
@@ -154,7 +154,7 @@ def test_ideation_edit_rejects_artifact_from_stale_find(tmp_path):
 
 
 def test_planning_framework_owns_approved_input_and_explicit_run_sync(tmp_path):
-    from auto_research.planning_bridge import (
+    from bridges.planning_bridge import (
         prepare_current_find_planning_input,
         prepare_planning_refresh_after_idea_change,
         sync_current_find_planning_outputs,
@@ -358,7 +358,7 @@ def test_planning_claude_writes_canonical_markdown_with_exact_repair_rounds(monk
 
 
 def test_framework_ideation_patch_regenerates_existing_plan(monkeypatch, tmp_path):
-    import run_module
+    from orchestration import run_module
 
     planning_calls: list[tuple[str, list[str]]] = []
     monkeypatch.setattr(run_module, "_project_module_lock", lambda stage, project: nullcontext())
@@ -400,7 +400,7 @@ def test_web_planning_is_framework_only_and_restores_editor_artifact_layout(monk
 
     server_text = (ROOT / "web" / "backend" / "auto_research" / "web" / "server.py").read_text(encoding="utf-8")
     app_text = (ROOT / "web" / "frontend" / "client" / "src" / "App.tsx").read_text(encoding="utf-8")
-    assert command[:5] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "run_module.py"), "planning", "--action", "select"]
+    assert command[:6] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "main.py"), "module", "planning", "--action", "select"]
     assert "modules/planning/main.py" not in server_text
     assert '"planning",\n        "--action"' in server_text
     assert '@app.put("/api/runs/{run_id}/plan-markdown")' in server_text
@@ -415,7 +415,7 @@ def test_web_planning_is_framework_only_and_restores_editor_artifact_layout(monk
     assert "planTitlesFromMarkdown(planMarkdownText)" in app_text
     assert "rejectHistoricalRunMutation()" in app_text
     assert 'return selected.startsWith("find_")' not in app_text
-    assert "prepare_planning_refresh_after_idea_change" in (ROOT / "framework" / "scripts" / "run_module.py").read_text(encoding="utf-8")
+    assert "prepare_planning_refresh_after_idea_change" in (ROOT / "framework" / "scripts" / "orchestration" / "run_module.py").read_text(encoding="utf-8")
 
 
 def test_ideation_module_has_one_decoupled_input_pipeline():
@@ -455,17 +455,17 @@ def test_ideation_module_has_one_decoupled_input_pipeline():
 def test_web_ideation_is_markdown_first_and_framework_only():
     from pydantic import ValidationError
 
-    from auto_research.models import IdeaPatch, IdeaRequest
+    from contracts.web_models import IdeaPatch, IdeaRequest
 
     server_text = (ROOT / "web" / "backend" / "auto_research" / "web" / "server.py").read_text(encoding="utf-8")
     app_text = (ROOT / "web" / "frontend" / "client" / "src" / "App.tsx").read_text(encoding="utf-8")
-    framework_bridge = ROOT / "framework" / "scripts" / "auto_research" / "project_bridge.py"
+    framework_bridge = ROOT / "framework" / "scripts" / "bridges" / "project_bridge.py"
 
     assert framework_bridge.exists()
     assert not (ROOT / "web" / "backend" / "auto_research" / "web" / "project_bridge.py").exists()
-    assert "from auto_research.project_bridge import" in server_text
+    assert "from bridges.project_bridge import" in server_text
     assert "modules/ideation/main.py" not in server_text
-    assert 'str(WORKSPACE_ROOT / "framework" / "scripts" / "run_module.py")' in server_text
+    assert 'str(WORKSPACE_ROOT / "framework" / "scripts" / "main.py")' in server_text
     assert 'currentArtifact.name === "idea.md" ? "idea-artifact-markdown"' in app_text
     assert "markdownRenderer.render(artifactPanelContent(currentArtifact))" in app_text
     assert "markdownRenderer.render(ideaMarkdownText)" not in app_text
@@ -518,6 +518,57 @@ def test_web_ideation_error_message_hides_traceback_and_local_paths():
     assert "/private/workspace" not in message
 
 
+def test_web_idea_and_plan_results_keep_project_and_plan_error_is_sanitized(monkeypatch):
+    from contracts.web_models import AppConfig, IdeaRequest, PlanRequest
+    from auto_research.web import server as web_server
+
+    monkeypatch.setattr(web_server, "_cleruntime_caches", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(web_server, "_clerun_caches", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(web_server, "_run_framework_process", lambda *_args, **_kwargs: (0, "", {}))
+    config = AppConfig()
+
+    idea = web_server._run_ideation_framework_job(
+        "demo",
+        IdeaRequest(run_id="find_demo", project="demo", max_ideas=2),
+        config,
+        lambda _message: None,
+        lambda: False,
+        lambda *_args: None,
+    )
+    plan = web_server._run_planning_module_job(
+        "demo",
+        PlanRequest(run_id="find_demo", idea_ids=["idea-1"], repair_rounds=1),
+        config,
+        "plan",
+        lambda _message: None,
+        lambda: False,
+        lambda *_args: None,
+    )
+
+    assert (idea["project"], idea["run_id"]) == ("demo", "find_demo")
+    assert (plan["project"], plan["run_id"]) == ("demo", "find_demo")
+
+    stdout = "\n".join([
+        "Traceback (most recent call last):",
+        '  File "/private/workspace/modules/planning/main.py", line 10, in main',
+        "ValueError: plan.md failed its contract: missing experiment section",
+    ])
+    monkeypatch.setattr(web_server, "_run_framework_process", lambda *_args, **_kwargs: (1, stdout, {}))
+    with pytest.raises(RuntimeError) as exc_info:
+        web_server._run_planning_module_job(
+            "demo",
+            PlanRequest(run_id="find_demo", idea_ids=["idea-1"], repair_rounds=1),
+            config,
+            "plan",
+            lambda _message: None,
+            lambda: False,
+            lambda *_args: None,
+        )
+    assert str(exc_info.value) == "plan.md failed its contract: missing experiment section"
+    assert "Traceback" not in str(exc_info.value)
+    assert "/private/workspace" not in str(exc_info.value)
+
+
 def _ready_environment_handoff(repo_path: Path, conda_prefix: Path, *, data_dir: Path | None = None, run_id: str = "env_run", selected: dict | None = None) -> dict:
     checks = [
         {"name": name, "passed": True, "reason": "pytest handoff fixture"}
@@ -564,7 +615,7 @@ def test_runtime_projection_keeps_configured_conda_env_without_current_handoff(m
     (root / "project.json").write_text(json.dumps(cfg), encoding="utf-8")
     monkeypatch.setattr(project_bridge, "PROJECTS", projects)
 
-    import runtime_env
+    from runtime import runtime_env
 
     runtime = runtime_env.project_runtime_config("demo", cfg)
     assert runtime["conda_env"] == "demo_env"
@@ -594,7 +645,7 @@ def test_environment_launch_runtime_excludes_stale_experiment_python_path(monkey
     monkeypatch.delenv("EXPERIMENT_PYTHON", raising=False)
     monkeypatch.delenv("PROJECT_PYTHON", raising=False)
 
-    import runtime_env
+    from runtime import runtime_env
 
     env = runtime_env.interactive_env("demo", cfg, include_experiment_python=False)
 
@@ -613,7 +664,7 @@ def test_web_environment_action_uses_framework_single_stage(monkeypatch, tmp_pat
     project, cmd = project_bridge.build_command({"project": "demo", "action": "environment", "venue": "ICLR"})
 
     assert project == "demo"
-    assert cmd[:3] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "orchestration" / "run_taste_framework.py"), "run"]
+    assert cmd[:4] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "main.py"), "workflow", "run"]
     assert "--only-stage" in cmd
     assert cmd[cmd.index("--only-stage") + 1] == "environment"
     module_arg = cmd[cmd.index("--module-arg") + 1]
@@ -646,7 +697,7 @@ def test_web_find_action_uses_framework_run_frontend(monkeypatch, tmp_path):
     })
 
     assert project == "demo"
-    assert cmd[:4] == ["/env/bin/python", str(project_bridge.SCRIPTS / "run_frontend.py"), "--project", "demo"]
+    assert cmd[:5] == ["/env/bin/python", str(project_bridge.SCRIPTS / "main.py"), "find", "--project", "demo"]
     assert "--max-papers" in cmd and cmd[cmd.index("--max-papers") + 1] == "7"
     assert "--max-ideas" in cmd and cmd[cmd.index("--max-ideas") + 1] == "3"
     assert "--web-job-id" in cmd and cmd[cmd.index("--web-job-id") + 1] == "find_test_web_action"
@@ -744,7 +795,7 @@ def test_web_paper_chat_action_uses_writing_module(monkeypatch, tmp_path):
     project, cmd = project_bridge.build_command(payload)
 
     assert project == "demo"
-    assert cmd[:5] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "run_module.py"), "writing", "--action", "chat"]
+    assert cmd[:6] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "main.py"), "module", "writing", "--action", "chat"]
     assert "--project" in cmd and cmd[cmd.index("--project") + 1] == "demo"
     assert "--message" in cmd and cmd[cmd.index("--message") + 1] == "检查当前论文状态"
     assert "--venue" in cmd and cmd[cmd.index("--venue") + 1] == "ICLR"
@@ -763,7 +814,7 @@ def test_web_paper_work_uses_framework_and_no_run_action(monkeypatch, tmp_path):
     project, cmd = project_bridge.build_command({"project": "demo", "action": "paper", "venue": "ICLR"})
 
     assert project == "demo"
-    assert cmd[:5] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "run_module.py"), "writing", "--action", "work"]
+    assert cmd[:6] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "main.py"), "module", "writing", "--action", "work"]
     assert "--project" in cmd and cmd[cmd.index("--project") + 1] == "demo"
     assert "--queue-if-busy" in cmd
     assert "run" not in cmd
@@ -780,7 +831,7 @@ def test_legacy_claude_message_environment_stage_routes_to_environment_chat(monk
 
     assert project == "demo"
     assert project_bridge.job_stage(payload) == "environment-chat"
-    assert cmd[:5] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "run_module.py"), "environment", "--action", "chat"]
+    assert cmd[:6] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "main.py"), "module", "environment", "--action", "chat"]
     assert "--project" in cmd and cmd[cmd.index("--project") + 1] == "demo"
     assert "--message" in cmd and cmd[cmd.index("--message") + 1] == "检查环境门控"
 
@@ -797,7 +848,7 @@ def test_legacy_claude_message_paper_stage_routes_to_writing_chat(monkeypatch, t
 
     assert project == "demo"
     assert project_bridge.job_stage(payload) == "writing-chat"
-    assert cmd[:5] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "run_module.py"), "writing", "--action", "chat"]
+    assert cmd[:6] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "main.py"), "module", "writing", "--action", "chat"]
     assert "--message" in cmd and cmd[cmd.index("--message") + 1] == "检查论文证据"
     assert "--venue" in cmd and cmd[cmd.index("--venue") + 1] == "ICLR"
 
@@ -813,7 +864,7 @@ def test_legacy_claude_message_experiment_stage_routes_to_experimenting_chat(mon
 
     assert project == "demo"
     assert project_bridge.job_stage(payload) == "experimenting-chat"
-    assert cmd[:5] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "run_module.py"), "experimenting", "--action", "chat"]
+    assert cmd[:6] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "main.py"), "module", "experimenting", "--action", "chat"]
     assert "--project" in cmd and cmd[cmd.index("--project") + 1] == "demo"
     assert "--stage" not in cmd
     assert "--queue-if-busy" in cmd
@@ -917,7 +968,7 @@ def test_web_find_mock_request_does_not_overwrite_local_llm_config(monkeypatch, 
 
 
 def test_run_frontend_finding_input_snapshot_omits_api_key():
-    text = (ROOT / "framework" / "scripts" / "run_frontend.py").read_text(encoding="utf-8")
+    text = (ROOT / "framework" / "scripts" / "orchestration" / "run_frontend.py").read_text(encoding="utf-8")
 
     assert '"api_key": "",' in text
     assert '"api_key": api_key' not in text
@@ -931,7 +982,7 @@ def test_web_find_settings_do_not_implicitly_force_deep_survey():
 
 
 def test_run_frontend_transmits_project_finding_budget_contract():
-    text = (ROOT / "framework" / "scripts" / "run_frontend.py").read_text(encoding="utf-8")
+    text = (ROOT / "framework" / "scripts" / "orchestration" / "run_frontend.py").read_text(encoding="utf-8")
 
     assert 'nonvenue_fetch_limit = config_positive_int("nonvenue_fetch_limit", 5000)' in text
     assert 'title_abstract_scoring_limit = config_positive_int("title_abstract_scoring_limit", 1000)' in text
@@ -946,9 +997,9 @@ def test_run_frontend_transmits_project_finding_budget_contract():
 
 
 def test_find_has_no_default_overall_3600_second_timeout():
-    frontend_text = (ROOT / "framework" / "scripts" / "run_frontend.py").read_text(encoding="utf-8")
-    project_text = (ROOT / "framework" / "scripts" / "run_project.py").read_text(encoding="utf-8")
-    bridge_text = (ROOT / "framework" / "scripts" / "auto_research" / "project_bridge.py").read_text(encoding="utf-8")
+    frontend_text = (ROOT / "framework" / "scripts" / "orchestration" / "run_frontend.py").read_text(encoding="utf-8")
+    project_text = (ROOT / "framework" / "scripts" / "orchestration" / "run_project.py").read_text(encoding="utf-8")
+    bridge_text = (ROOT / "framework" / "scripts" / "bridges" / "project_bridge.py").read_text(encoding="utf-8")
 
     assert 'parser.add_argument("--timeout-sec", type=int, default=0' in frontend_text
     assert 'if args.timeout_sec > 0:' in frontend_text
@@ -957,24 +1008,45 @@ def test_find_has_no_default_overall_3600_second_timeout():
     assert "run(taste_cmd, paths.root, paths.logs / '05a_finding_frontend.log', timeout=None)" in project_text
 
 
-def test_run_frontend_runtime_tuning_preserves_web_scoring_budget():
-    text = (ROOT / "framework" / "scripts" / "run_frontend.py").read_text(encoding="utf-8")
+def test_run_frontend_runtime_tuning_replaces_stale_abstract_scoring_values():
+    text = (ROOT / "framework" / "scripts" / "orchestration" / "run_frontend.py").read_text(encoding="utf-8")
 
     assert "elif name not in runtime_tuning and default is not None:" in text
     assert 'abstract_scoring_max_workers = env_int("ABSTRACT_SCORING_MAX_WORKERS", config_positive_int("abstract_scoring_max_workers"' in text
     assert 'abstract_scoring_batch_size = env_int("ABSTRACT_SCORING_BATCH_SIZE", config_positive_int("abstract_scoring_batch_size"' in text
-    assert 'runtime_default("ABSTRACT_SCORING_BATCH_SIZE", str(abstract_scoring_batch_size))' in text
-    assert 'runtime_default("ABSTRACT_SCORING_MAX_WORKERS", str(abstract_scoring_max_workers))' in text
-    assert 'runtime_default("ABSTRACT_SCORING_TIMEOUT_SEC", str(abstract_scoring_timeout_sec))' in text
+    assert 'runtime_tuning["ABSTRACT_SCORING_BATCH_SIZE"] = str(abstract_scoring_batch_size)' in text
+    assert 'runtime_tuning["ABSTRACT_SCORING_MAX_BATCH_SIZE"] = str(max(1, abstract_scoring_batch_size))' in text
+    assert 'runtime_tuning["ABSTRACT_SCORING_MAX_WORKERS"] = str(abstract_scoring_max_workers)' in text
+    assert 'runtime_tuning["ABSTRACT_SCORING_WORKER_CAP"] = str(max(1, abstract_scoring_max_workers))' in text
+    assert 'runtime_tuning["ABSTRACT_SCORING_TIMEOUT_SEC"] = str(abstract_scoring_timeout_sec)' in text
     assert 'runtime_tuning["ARXIV_FULL_SCAN"] = str(os.environ.get("ARXIV_FULL_SCAN") or "0")' in text
     assert 'runtime_tuning["ARXIV_MAX_QUERIES"] = str(arxiv_max_queries)' in text
     assert 'runtime_tuning["ARXIV_TIMEOUT_SEC"] = str(arxiv_timeout_sec)' in text
 
 
+def test_find_llm_concurrency_defaults_and_web_descriptions_are_ten():
+    app_text = (ROOT / "web" / "frontend" / "client" / "src" / "App.tsx").read_text(encoding="utf-8")
+    runtime_text = (ROOT / "modules" / "finding" / "scripts" / "core" / "finding_runtime.py").read_text(encoding="utf-8")
+    models_text = (ROOT / "framework" / "scripts" / "contracts" / "web_models.py").read_text(encoding="utf-8")
+    frontend_text = (ROOT / "framework" / "scripts" / "orchestration" / "run_frontend.py").read_text(encoding="utf-8")
+
+    assert "llm_concurrency: 10," in app_text
+    assert "abstract_scoring_max_workers: 10," in app_text
+    assert "abstract_scoring_batch_size: 10," in app_text
+    assert 'llmConcurrency: "标题 LLM 预筛并发数"' in app_text
+    assert "最终标题+摘要评分使用独立并发，默认同为 10" in app_text
+    assert "llm_concurrency: int = 10" in runtime_text
+    assert "abstract_scoring_max_workers: int = 10" in runtime_text
+    assert "llm_concurrency: int = 10" in models_text
+    assert "abstract_scoring_max_workers: int = 10" in models_text
+    assert 'config_positive_int("llm_concurrency", 10)' in frontend_text
+    assert 'config_positive_int("abstract_scoring_max_workers", 10)' in frontend_text
+
+
 def test_find_bridge_public_contract_has_no_legacy_budget_fields_or_env():
     paths = [
-        ROOT / "framework" / "scripts" / "auto_research" / "models.py",
-        ROOT / "framework" / "scripts" / "run_frontend.py",
+        ROOT / "framework" / "scripts" / "contracts" / "web_models.py",
+        ROOT / "framework" / "scripts" / "orchestration" / "run_frontend.py",
         ROOT / "web" / "backend" / "auto_research" / "web" / "server.py",
     ]
     text = "\n".join(path.read_text(encoding="utf-8") for path in paths)
@@ -1069,8 +1141,8 @@ def test_finding_main_streams_run_binding_before_pipeline_returns(monkeypatch, t
 
 
 def test_user_facing_find_markdown_is_canonical():
-    sync_text = (ROOT / "framework" / "scripts" / "sync_outputs.py").read_text(encoding="utf-8")
-    frontend_text = (ROOT / "framework" / "scripts" / "run_frontend.py").read_text(encoding="utf-8")
+    sync_text = (ROOT / "framework" / "scripts" / "bridges" / "sync_outputs.py").read_text(encoding="utf-8")
+    frontend_text = (ROOT / "framework" / "scripts" / "orchestration" / "run_frontend.py").read_text(encoding="utf-8")
     server_text = (ROOT / "web" / "backend" / "auto_research" / "web" / "server.py").read_text(encoding="utf-8")
     finding_text = (ROOT / "modules" / "finding" / "main.py").read_text(encoding="utf-8")
     pipeline_text = (ROOT / "modules" / "finding" / "scripts" / "flow" / "pipeline.py").read_text(encoding="utf-8")
@@ -1087,9 +1159,9 @@ def test_user_facing_find_markdown_is_canonical():
 
 
 def test_find_web_project_artifacts_do_not_expose_maintainer_status():
-    bridge_text = (ROOT / "framework" / "scripts" / "auto_research" / "project_bridge.py").read_text(encoding="utf-8")
-    frontend_text = (ROOT / "framework" / "scripts" / "run_frontend.py").read_text(encoding="utf-8")
-    sync_text = (ROOT / "framework" / "scripts" / "sync_outputs.py").read_text(encoding="utf-8")
+    bridge_text = (ROOT / "framework" / "scripts" / "bridges" / "project_bridge.py").read_text(encoding="utf-8")
+    frontend_text = (ROOT / "framework" / "scripts" / "orchestration" / "run_frontend.py").read_text(encoding="utf-8")
+    sync_text = (ROOT / "framework" / "scripts" / "bridges" / "sync_outputs.py").read_text(encoding="utf-8")
 
     assert '("工作状态.txt", ROOT / "工作状态.txt"' not in bridge_text
     assert 'root / "planning" / "finding_frontend.md"' in bridge_text
@@ -1102,8 +1174,8 @@ def test_find_web_project_artifacts_do_not_expose_maintainer_status():
 def test_web_framework_do_not_import_finding_private_backend():
     files = [
         ROOT / "web" / "backend" / "auto_research" / "web" / "server.py",
-        ROOT / "framework" / "scripts" / "auto_research" / "project_bridge.py",
-        ROOT / "framework" / "scripts" / "run_frontend.py",
+        ROOT / "framework" / "scripts" / "bridges" / "project_bridge.py",
+        ROOT / "framework" / "scripts" / "orchestration" / "run_frontend.py",
     ]
     forbidden = [
         "from finding_runtime",
@@ -1129,7 +1201,7 @@ def test_web_environment_init_alias_uses_framework_single_stage(monkeypatch, tmp
     project, cmd = project_bridge.build_command({"project": "demo", "action": "init", "venue": "ICLR", "conda_env": "demo_env"})
 
     assert project == "demo"
-    assert cmd[:3] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "orchestration" / "run_taste_framework.py"), "run"]
+    assert cmd[:4] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "main.py"), "workflow", "run"]
     assert "--only-stage" in cmd
     assert cmd[cmd.index("--only-stage") + 1] == "environment"
     module_arg = cmd[cmd.index("--module-arg") + 1]
@@ -1150,7 +1222,7 @@ def test_web_experiment_action_uses_framework_module_controller(monkeypatch, tmp
     project, cmd = project_bridge.build_command({"project": "demo", "action": "experiment", "venue": "ICLR", "iterations": 2, "skip_claude": True})
 
     assert project == "demo"
-    assert cmd[:5] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "run_module.py"), "experimenting", "--action", "work"]
+    assert cmd[:6] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "main.py"), "module", "experimenting", "--action", "work"]
     assert cmd[cmd.index("--project") + 1] == "demo"
     assert cmd[cmd.index("--iterations") + 1] == "2"
     assert "--queue-if-busy" in cmd
@@ -1230,14 +1302,14 @@ def test_web_experiment_action_leaves_handoff_consumption_to_module(monkeypatch,
 
     _project, cmd = project_bridge.build_command({"project": "demo", "action": "experiment", "venue": "ICLR", "iterations": 1, "skip_claude": True})
     assert "blocked_fresh_base_gate_required" not in " ".join(cmd)
-    assert cmd[:5] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "run_module.py"), "experimenting", "--action", "work"]
+    assert cmd[:6] == ["/env/bin/python", str(ROOT / "framework" / "scripts" / "main.py"), "module", "experimenting", "--action", "work"]
     assert "--repo-path" not in cmd
     assert "--conda-env" not in cmd
 
 
 def test_full_cycle_only_sequences_the_seven_framework_actions():
-    source = (ROOT / "framework" / "scripts" / "run_full_research_cycle.py").read_text(encoding="utf-8")
-    bridge_source = (ROOT / "framework" / "scripts" / "auto_research" / "project_bridge.py").read_text(encoding="utf-8")
+    source = (ROOT / "framework" / "scripts" / "orchestration" / "run_full_research_cycle.py").read_text(encoding="utf-8")
+    bridge_source = (ROOT / "framework" / "scripts" / "bridges" / "project_bridge.py").read_text(encoding="utf-8")
 
     assert 'STAGE_ACTIONS = ("find", "read", "idea", "plan", "environment", "experiment", "paper")' in source
     assert "build_command(payload)" in source
@@ -1273,7 +1345,7 @@ def test_full_cycle_is_not_preempted_by_a_stage_specific_literature_gate(monkeyp
 def test_framework_live_process_detection_matches_run_id_case_insensitively(monkeypatch):
     class Result:
         returncode = 0
-        stdout = "1234 S /env/bin/python framework/scripts/orchestration/run_taste_framework.py run --run-id web_environment_demo_20260621T104334Z"
+        stdout = "1234 S /env/bin/python framework/scripts/main.py workflow run --run-id web_environment_demo_20260621T104334Z"
 
     monkeypatch.setattr(project_bridge.subprocess, "run", lambda *args, **kwargs: Result())
     monkeypatch.setattr(project_bridge, "_pid_alive", lambda pid: pid == "1234")
@@ -1798,6 +1870,63 @@ def test_web_jobs_merges_live_environment_run_id_into_persisted_running_job(monk
     assert env_rows[0]["result"]["run_id"] == "web_environment_demo_20260621T060831Z"
 
 
+def test_web_job_finished_at_round_trips_and_survives_compaction(monkeypatch):
+    from auto_research.web import server as web_server
+
+    monkeypatch.setattr(web_server, "JOBS", {})
+    monkeypatch.setattr(web_server, "_persist_jobs", lambda: None)
+
+    def outcome(result_status: str):
+        if result_status == "error":
+            raise RuntimeError("duration sentinel")
+        return {"status": result_status}
+
+    for stage in ["find", "read", "idea", "plan"]:
+        for suffix, result_status, expected_status in [
+            ("done", "done", "done"),
+            ("blocked", "blocked_test_gate", "blocked"),
+            ("error", "error", "error"),
+        ]:
+            job = web_server.start_job(
+                stage,
+                lambda _log, _cancel, _progress, status=result_status: outcome(status),
+                job_id=f"{stage}_duration_{suffix}",
+            )
+            assert job.done.wait(2)
+            assert job.status == expected_status
+            assert job.finished_at
+            assert job.finished_at >= job.created_at
+
+            payload = job.as_dict(compact=False)
+            restored = web_server.JobState.from_dict(payload)
+            compact = web_server._compact_job_for_list(payload)
+            assert restored.finished_at == job.finished_at
+            assert compact["finished_at"] == job.finished_at
+
+
+def test_web_find_read_idea_plan_error_compaction_keeps_specific_exception():
+    from auto_research.web import server as web_server
+
+    for stage in ["find", "read", "idea", "plan"]:
+        raw_logs = [
+            "Traceback (most recent call last):",
+            '  File "/zssd/private/TASTE/module.py", line 10, in main',
+            f"RuntimeError: {stage} concrete failure sentinel.",
+            "research action failed with exit code 1",
+            "Traceback (most recent call last):\nRuntimeError: research action failed with exit code 1",
+        ]
+        progress = {"phase": "error", "current": 0, "total": 1, "percent": 0, "message": "research action failed with exit code 1"}
+        result = {"status": "error", "run_id": "find_demo"}
+
+        logs = web_server._public_job_logs(stage, raw_logs, progress, result)
+        assert any(f"错误详情：RuntimeError: {stage} concrete failure sentinel." in line for line in logs)
+        assert not any("错误详情：RuntimeError: research action failed with exit code 1" in line for line in logs)
+        assert not any("Traceback" in line or "/zssd/private" in line for line in logs)
+
+        repeated = web_server._public_job_logs(stage, logs, progress, result)
+        assert any(f"错误详情：RuntimeError: {stage} concrete failure sentinel." in line for line in repeated)
+
+
 def test_web_find_worker_tree_collapses_through_unclassified_wrappers():
     from auto_research.web import server as web_server
 
@@ -1904,7 +2033,7 @@ def test_web_find_worker_waits_for_current_web_job_run_binding(monkeypatch, tmp_
     row = web_server._active_project_worker_job(
         "demo",
         tmp_path,
-        {"pid": "100", "phase": "literature", "kind": "frontend_recovery", "cmd": "run_frontend.py --project demo --web-job-id find_web"},
+        {"pid": "100", "phase": "literature", "kind": "frontend_recovery", "cmd": "main.py find --project demo --web-job-id find_web"},
         {},
         {"run_id": "find_old"},
         old_complete,
@@ -1937,7 +2066,7 @@ def test_web_find_worker_reads_only_current_web_job_bound_run(monkeypatch, tmp_p
     row = web_server._active_project_worker_job(
         "demo",
         tmp_path,
-        {"pid": "100", "phase": "literature", "kind": "frontend_recovery", "cmd": "run_frontend.py --project demo --web-job-id find_web"},
+        {"pid": "100", "phase": "literature", "kind": "frontend_recovery", "cmd": "main.py find --project demo --web-job-id find_web"},
         {},
         {"run_id": "find_old"},
         {"run_id": "find_old", "phase": "complete"},
@@ -1965,7 +2094,7 @@ def test_web_find_worker_rejects_another_projects_execution_id(monkeypatch, tmp_
     row = web_server._active_project_worker_job(
         "project_a",
         tmp_path,
-        {"pid": "100", "phase": "literature", "kind": "frontend_recovery", "cmd": "run_frontend.py --project project_a --web-job-id find_b"},
+        {"pid": "100", "phase": "literature", "kind": "frontend_recovery", "cmd": "main.py find --project project_a --web-job-id find_b"},
         {},
         {},
         {"run_id": "run_old", "phase": "complete"},

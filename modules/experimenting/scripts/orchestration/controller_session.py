@@ -364,7 +364,7 @@ def _system_prompt(project: str) -> str:
 
 def _message_prompt(item: dict[str, Any], project_root: Path) -> str:
     module_main = MODULE_DIR / "main.py"
-    framework_entrypoint = WORKSPACE_ROOT / "framework" / "scripts" / "run_module.py"
+    framework_entrypoint = WORKSPACE_ROOT / "framework" / "scripts" / "main.py"
     common = f"""
 Project directory: {project_root}
 Experimenting public entrypoint: {module_main}
@@ -380,9 +380,9 @@ Mandatory experiment transaction order:
 7. Run `conda run -n taste python {module_main} --action audit_iteration --project {project_root.name}` and repair every failed gate before promoting a claim. Run `runtime_integrity` or `reference_reproduction` with the same project when that evidence changed.
 
 Only completed validation output may be recorded as completed experiment evidence.
-When a specific literature gap blocks the selected experiment, use `conda run -n taste python {framework_entrypoint} finding --action literature_tool --project {project_root.name} --query "<exact evidence gap>" --publish-current-find`.
-When current-Find reading is stale or incomplete, use `conda run -n taste python {framework_entrypoint} reading --action current_find_research_plan --project {project_root.name}`.
-When the current idea must be regenerated, use `conda run -n taste python {framework_entrypoint} ideation --action idea --project {project_root.name}`, then wait for one selected Plan and matching Environment handoff before launching experiments.
+When a specific literature gap blocks the selected experiment, use `conda run -n taste python {framework_entrypoint} module finding --action literature_tool --project {project_root.name} --query "<exact evidence gap>" --publish-current-find`.
+When current-Find reading is stale or incomplete, use `conda run -n taste python {framework_entrypoint} module reading --action current_find_research_plan --project {project_root.name}`.
+When the current idea must be regenerated, use `conda run -n taste python {framework_entrypoint} module ideation --action idea --project {project_root.name}`, then wait for one selected Plan and matching Environment handoff before launching experiments.
 After any refresh, re-read the resulting project files before continuing.
 Task subagents must omit worktree isolation unless their cwd is an independent Git repository whose top-level remains inside {project_root}.
 """.strip()

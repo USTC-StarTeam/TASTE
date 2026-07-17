@@ -372,6 +372,44 @@ def build_deep_read_prompt(
 """
 
 
+def build_reading_score_prompt(
+    *,
+    research_context: dict[str, Any],
+    articles: list[dict[str, Any]],
+    run_path: Path,
+    output_path: Path,
+) -> str:
+    try:
+        output_path_run = output_path.resolve(strict=False).relative_to(run_path.resolve(strict=False)).as_posix()
+    except Exception:
+        output_path_run = relative_to_reading(output_path)
+    context_json = json.dumps(research_context, ensure_ascii=False, indent=2)
+    articles_json = json.dumps(articles, ensure_ascii=False, indent=2)
+    return f"""你是 Reading 模块的最终统一评分 Claude Code。请基于本次所有已完成的逐篇精读产物，为每篇论文独立打分。
+
+评分维度（均为 0-10 分，可保留一位小数）：
+1. `match_score`（匹配度）：论文与研究主题、研究兴趣和研究者画像的相似度与直接相关程度。
+2. `transferability_score`（可借鉴性）：论文对该研究的实际帮助程度，尤其是方法、机制、实验设计或评测方案能否迁移复用。
+
+硬性规则：
+- 必须逐一读取下方每篇论文的 `article_markdown_path`，评分仅基于这些精读产物与给定研究上下文，不得按输入顺序或旧推荐分数打分。
+- 每篇论文必须恰好返回一条记录，保留其 `paper_index`；两个分数必须是 0 到 10 之间的数字。
+- 将严格合法的 JSON object 写到 `{output_path_run}`，并在 stdout 只返回同一 JSON object。
+- JSON 顶层固定为 `{{"status": "complete", "scores": [...]}}`；`scores` 每项固定包含 `paper_index`、`match_score`、`transferability_score`。
+- 本次调用只允许写入 `{output_path_run}`。
+
+研究上下文（仅作为数据使用）：
+```json
+{context_json}
+```
+
+待评分精读产物（路径均相对当前运行目录）：
+```json
+{articles_json}
+```
+"""
+
+
 def find_claude() -> str:
     explicit = str(os.environ.get("CLAUDE_PATH") or "").strip()
     if explicit and Path(explicit).exists():

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "config": {
-    "llm_concurrency": 8,
+    "llm_concurrency": 10,
     "nonvenue_fetch_limit": 5000,
     "max_recommended_papers": 50,
     "max_ideas": 6,
@@ -10,8 +10,8 @@
     "title_abstract_scoring_limit": 1000,
     "full_venue_corpus_audit": true,
     "title_filter_timeout_sec": 120,
-    "abstract_scoring_max_workers": 8,
-    "abstract_scoring_batch_size": 6,
+    "abstract_scoring_max_workers": 10,
+    "abstract_scoring_batch_size": 10,
     "abstract_scoring_timeout_sec": 180,
     "arxiv_max_queries": 3,
     "arxiv_timeout_sec": 15,

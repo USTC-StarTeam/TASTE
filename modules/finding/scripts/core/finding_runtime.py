@@ -210,7 +210,7 @@ class AppConfig(BaseModel):
     model: str = Field(default_factory=lambda: os.environ.get("LLM_MODEL") or "gpt-4o-mini")
     temperature: float = Field(default_factory=lambda: _env_float("LLM_TEMPERATURE", 0.4))
     llm_roles: dict[str, LLMRoleConfig] = Field(default_factory=dict)
-    llm_concurrency: int = 8
+    llm_concurrency: int = 10
     idea_parallel_workers: int = 2
     nonvenue_fetch_limit: int = 5000
     max_recommended_papers: int = 20
@@ -220,8 +220,8 @@ class AppConfig(BaseModel):
     title_abstract_scoring_limit: int = 1000
     full_venue_corpus_audit: bool = True
     title_filter_timeout_sec: int = 120
-    abstract_scoring_max_workers: int = 8
-    abstract_scoring_batch_size: int = 6
+    abstract_scoring_max_workers: int = 10
+    abstract_scoring_batch_size: int = 10
     abstract_scoring_timeout_sec: int = 180
     arxiv_max_queries: int = 3
     arxiv_timeout_sec: int = 15
@@ -931,7 +931,7 @@ def _extract_named_array(raw: str, key: str) -> list[Any]:
 
 
 def _recover_expected_json(raw: str) -> Any:
-    for key in ("evaluations", "selected", "ideas", "plans", "readings"):
+    for key in ("evaluations", "scored", "selected", "translations", "ideas", "plans", "readings"):
         rows = _extract_named_array(raw, key)
         if rows:
             return {key: rows}
@@ -1097,6 +1097,9 @@ class LLMClient:
         retry_empty_json = os.environ.get("LLM_RETRY_EMPTY_JSON_WITHOUT_RESPONSE_FORMAT", "1").lower() in {"1", "true", "yes", "on"}
         retry_unsupported_optional = os.environ.get("LLM_RETRY_UNSUPPORTED_OPTIONAL_PARAMS", "1").lower() in {"1", "true", "yes", "on"}
         retry_statuses = {408, 409, 429, 500, 502, 503, 504}
+        # A non-positive explicit value asks the provider to use its native output limit.
+        omit_max_tokens = max_tokens is not None and int(max_tokens) <= 0
+        output_tokens = int(self.max_tokens if max_tokens is None else max_tokens)
 
         def build_payload(*, include_response_format: bool, include_thinking_controls: bool) -> dict[str, Any]:
             wants_json_response = include_response_format and response_format in {"json", "json_object"}
@@ -1109,8 +1112,9 @@ class LLMClient:
                         {"role": "user", "content": [{"type": "input_text", "text": request_prompt}]},
                     ],
                     "temperature": self.temperature if temperature is None else temperature,
-                    "max_output_tokens": int(max_tokens or self.max_tokens),
                 }
+                if not omit_max_tokens:
+                    payload["max_output_tokens"] = output_tokens
                 if wants_json_response:
                     payload["text"] = {"format": {"type": "json_object"}}
             else:
@@ -1121,8 +1125,9 @@ class LLMClient:
                         {"role": "user", "content": request_prompt},
                     ],
                     "temperature": self.temperature if temperature is None else temperature,
-                    "max_tokens": int(max_tokens or self.max_tokens),
                 }
+                if not omit_max_tokens:
+                    payload["max_tokens"] = output_tokens
                 if wants_json_response:
                     payload["response_format"] = {"type": "json_object"}
             if is_deepseek and "v4-flash" in str(self.model or "").lower():
@@ -1131,10 +1136,11 @@ class LLMClient:
                 payload.pop("enable_thinking", None)
                 payload.pop("extra_body", None)
                 payload["temperature"] = self.temperature if temperature is None else temperature
-                if use_responses:
-                    payload["max_output_tokens"] = int(max_tokens or self.max_tokens)
-                else:
-                    payload["max_tokens"] = int(max_tokens or self.max_tokens)
+                if not omit_max_tokens:
+                    if use_responses:
+                        payload["max_output_tokens"] = output_tokens
+                    else:
+                        payload["max_tokens"] = output_tokens
             if reasoning_effort and reasoning_effort not in {"none", "off", "disable", "disabled", "0", "false", "no"}:
                 payload["reasoning_effort"] = reasoning_effort
             if include_thinking_controls and disable_thinking:
@@ -1225,7 +1231,7 @@ class LLMClient:
             parse_error = str(first_exc)
             if raw_text and any(token in parse_error.lower() for token in ["closing bracket", "unterminated", "expecting", "delimiter"]):
                 try:
-                    retry_tokens = max(self.max_tokens * 2, int(os.environ.get("LLM_PARSE_RETRY_MAX_TOKENS", "12000") or 12000))
+                    retry_tokens = 0 if max_tokens is not None and int(max_tokens) <= 0 else max(self.max_tokens * 2, int(os.environ.get("LLM_PARSE_RETRY_MAX_TOKENS", "12000") or 12000))
                     raw_text = self.chat(prompt, temperature=temperature, max_tokens=retry_tokens)
                     return {"ok": True, "data": extract_json(raw_text), "error": "", "raw_text": raw_text[:4000], "parse_retry": True}
                 except Exception as retry_exc:

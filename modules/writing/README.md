@@ -10,7 +10,7 @@ Writing 只负责论文撰写、修订、引用、图表、模板和论文质量
 
 ```bash
 cd <TASTE_ROOT>
-conda run -n taste python framework/scripts/run_module.py writing --contract
+conda run -n taste python framework/scripts/main.py module writing --contract
 ```
 
 Writing 没有文本模型降级写作路径。`claude` 不可用时会明确阻塞。
@@ -20,7 +20,7 @@ Writing 没有文本模型降级写作路径。`claude` 不可用时会明确阻
 项目需要已经存在目标 venue、唯一 selected Idea/Plan，以及可供论文使用的实验记录。通过 Framework 启动：
 
 ```bash
-conda run -n taste python framework/scripts/run_module.py writing \
+conda run -n taste python framework/scripts/main.py module writing \
   --action work \
   --project <project_id> \
   --venue "ICLR 2027"
@@ -52,7 +52,7 @@ Paper 页的 Writing 主控对话框直接向该项目唯一的 Writing 主控 C
 命令行等价调用：
 
 ```bash
-conda run -n taste python framework/scripts/run_module.py writing \
+conda run -n taste python framework/scripts/main.py module writing \
   --action chat \
   --project <project_id> \
   --message "检查引用真实性并修复发现的问题"
@@ -106,7 +106,7 @@ projects/<project>/state/writing_controller_history.json
 查看状态：
 
 ```bash
-conda run -n taste python framework/scripts/run_module.py writing \
+conda run -n taste python framework/scripts/main.py module writing \
   --action controller_status \
   --project <project_id>
 ```
@@ -134,7 +134,7 @@ conda run -n taste python framework/scripts/run_module.py writing \
 检查所有 skill 是否存在且都有路由：
 
 ```bash
-conda run -n taste python framework/scripts/run_module.py writing --action assets
+conda run -n taste python framework/scripts/main.py module writing --action assets
 ```
 
 当前 `modules/writing/scripts/` 不保留运行脚本。`skills/*/scripts/` 中仍存在的 Python 文件是 skill 明确调用的确定性环境工具，例如模板初始化、BibTeX/引用一致性、LaTeX 检查和证据门控；它们不管理会话、不决定论文结论，也不能作为 Writing 公共入口。

@@ -99,7 +99,7 @@ Prompt：
 - Environment 和 Framework 都不复制 run。
 - Framework 读取明确的 `run_dir`，只向 `projects/<project>/state/` 写轻量投影。
 - Web 部署：Web -> Framework 单阶段编排器 -> `modules/environment/main.py`。
-- Web 对话：Web -> Framework `run_module.py` -> `modules/environment/main.py --action chat` -> 模块队列。
+- Web 对话：Web -> Framework `python framework/scripts/main.py module` -> `modules/environment/main.py --action chat` -> 模块队列。
 
 ## Conda 名称口径
 

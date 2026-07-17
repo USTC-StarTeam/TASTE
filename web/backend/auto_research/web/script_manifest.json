@@ -9,9 +9,9 @@
       "owner": "web_frontend",
       "owner_reason": "HTTP/WebSocket transport, job connection, artifact delivery, and static frontend serving",
       "framework_dependencies": [
-        "framework/scripts/auto_research/project_bridge.py",
-        "framework/scripts/auto_research/paper_state.py",
-        "framework/scripts/run_module.py"
+        "framework/scripts/bridges/project_bridge.py",
+        "framework/scripts/reporting/paper_state.py",
+        "framework/scripts/main.py"
       ]
     }
   ]

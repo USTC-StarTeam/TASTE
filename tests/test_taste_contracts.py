@@ -38,7 +38,9 @@ def _cleanup_reading_output(name: str) -> None:
 
 def _write_reading_input(name: str, payload: dict) -> Path:
     run_id = name if re.fullmatch(r"\d{8}T\d{6}\d{6}Z", str(name or "")) else _reading_test_run_id()
-    path = ROOT / "modules" / "reading" / ".runtime" / "output" / run_id / "input" / "source_input.json"
+    run_root = ROOT / "modules" / "reading" / ".runtime" / "output" / run_id
+    shutil.rmtree(run_root, ignore_errors=True)
+    path = run_root / "input" / "source_input.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
@@ -1226,6 +1228,9 @@ def test_reading_run_read_uses_subagent_article_markdown_aggregation_and_audit(m
     read_pipeline = _load_reading_pipeline()
     paper_sources = _load_reading_paper_sources()
     input_path = _write_reading_input("pytest_read_subagent_md_contract", {
+        "research_topic": "偏好学习与直接模型优化",
+        "research_interest": "可迁移的训练目标与实验方法",
+        "researcher_profile": "关注机制、数学推导和方法创新",
         "articles": [
             {"source": "arxiv", "title": "subagent one", "paper_id": "p1", "url": "https://example.org/one"},
             {"source": "openreview", "title": "subagent two", "paper_id": "p2", "url": "https://example.org/two"},
@@ -1252,6 +1257,7 @@ def test_reading_run_read_uses_subagent_article_markdown_aggregation_and_audit(m
         return {
             "status": status,
             "run_executed": True,
+            "return_code": 0,
             "expected_output_path": str(expected_output_path),
             "expected_output_audit": {"exists": True, "valid_json": True},
             "nonruntime_artifact_audit": {"status": "passed", "problem_count": 0},
@@ -1259,8 +1265,26 @@ def test_reading_run_read_uses_subagent_article_markdown_aggregation_and_audit(m
             "result_payload": payload,
         }
 
-    def fake_run_claude_deep_read(prompt_path, run_path, expected_output_path, timeout_sec=1800, mode="auto"):
+    def fake_run_claude_deep_read(
+        prompt_path,
+        run_path,
+        expected_output_path,
+        timeout_sec=1800,
+        mode="auto",
+        receipt_dir_name="claude",
+    ):
         assert mode == "run"
+        if receipt_dir_name == "claude_scoring":
+            payload = {
+                "status": "complete",
+                "scores": [
+                    {"paper_index": 1, "match_score": 8, "transferability_score": 7},
+                    {"paper_index": 2, "match_score": 9, "transferability_score": 9},
+                ],
+            }
+            expected_output_path.parent.mkdir(parents=True, exist_ok=True)
+            expected_output_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            return fake_receipt("complete", expected_output_path, payload)
         article_md = run_path / "read.md"
         article_md.write_text(
             "# 论文精读：ARTICLE_MD_BY_SUBAGENT\n\n"
@@ -1320,6 +1344,9 @@ def test_reading_run_read_uses_subagent_article_markdown_aggregation_and_audit(m
 
     assert result["status"] == "complete"
     assert payload["status"] == "complete"
+    assert payload["reading_scoring"]["status"] == "complete"
+    assert [item["paper_index"] for item in payload["items"]] == [2, 1]
+    assert all(item["match_score"] is not None and item["transferability_score"] is not None for item in payload["items"])
     assert payload["read_markdown_aggregation"]["valid"] is True
     assert "method_summary_table" not in payload["read_markdown_aggregation"]
     assert "ARTICLE_MD_BY_SUBAGENT" in read_md
@@ -3901,6 +3928,235 @@ def _isolate_find_runtime(monkeypatch, find_pipeline, runtime: Path) -> None:
         monkeypatch.setattr(runtime_module, "CONFIG_PATH", runtime / ".config.json", raising=False)
 
 
+def test_find_title_prefilter_uses_local_ids_and_recovers_missing_rows(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("USE_LLM_TITLE_FILTER", "1")
+    monkeypatch.setenv("TITLE_FILTER_SEQUENTIAL", "1")
+    monkeypatch.setenv("FIND_TITLE_SCORE_CACHE", "0")
+
+    class IncompleteFirstAttemptLLM:
+        enabled = True
+        timeout_sec = 120
+        provider = "openai_compatible"
+
+        def __init__(self):
+            self.calls = []
+
+        def json_or_error(self, prompt, **kwargs):
+            aliases = re.findall(r"^- (p\d{3}):", prompt, flags=re.MULTILINE)
+            self.calls.append({"aliases": aliases, "max_tokens": kwargs.get("max_tokens"), "prompt": prompt})
+            omitted = min(3, len(aliases) - 1)
+            returned = aliases[:-omitted] if "attempt 1" in prompt and omitted else aliases
+            return {
+                "ok": True,
+                "data": {
+                    "scored": [
+                        {
+                            "id": alias,
+                            "fit_score": "7.0",
+                            "diversity_score": "5.0",
+                            "hit_directions": ["protein design"],
+                            "category": "protein",
+                            "reason": "标题与研究方向相关。",
+                        }
+                        for alias in returned
+                    ] + [{"id": "unknown-row", "fit_score": 1.0, "diversity_score": 1.0}]
+                },
+                "error": "",
+            }
+
+    items = [
+        {
+            "id": f"paper-{index}",
+            "title": f"Protein design paper {index}",
+            "abstract": "Protein generation with diffusion and reinforcement learning.",
+            "venue": "TestVenue",
+            "year": 2026,
+        }
+        for index in range(12)
+    ]
+    llm = IncompleteFirstAttemptLLM()
+    reports = []
+    selected = find_pipeline._prefilter_titles(
+        items,
+        find_pipeline.AppConfig(
+            provider="openai_compatible",
+            research_topic="protein design",
+            research_interest="protein diffusion and reinforcement learning",
+            llm_concurrency=1,
+        ),
+        llm,
+        "TestVenue",
+        lambda _message: None,
+        lambda: False,
+        scan_all=True,
+        title_filter_reports=reports,
+    )
+
+    assert len(selected) == 12
+    assert all(item["reason_source"] == "llm title filter" for item in selected)
+    assert reports[0]["llm_title_scored_papers"] == 12
+    assert [len(call["aliases"]) for call in llm.calls] == [10, 3, 2, 1]
+    assert all(call["max_tokens"] == 0 for call in llm.calls)
+    assert all("paper-0:" not in call["prompt"] for call in llm.calls)
+
+
+def test_find_title_prefilter_falls_back_locally_after_retry_exhaustion(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("USE_LLM_TITLE_FILTER", "1")
+    monkeypatch.setenv("TITLE_FILTER_SEQUENTIAL", "1")
+    monkeypatch.setenv("FIND_TITLE_SCORE_CACHE", "0")
+
+    class EmptyTitleLLM:
+        enabled = True
+        timeout_sec = 120
+        provider = "openai_compatible"
+
+        def __init__(self):
+            self.calls = 0
+
+        def json_or_error(self, _prompt, **_kwargs):
+            self.calls += 1
+            return {"ok": True, "data": {"scored": []}, "error": ""}
+
+    items = [
+        {
+            "id": f"paper-{index}",
+            "title": f"Protein design paper {index}",
+            "abstract": "Protein generation with diffusion.",
+            "venue": "TestVenue",
+            "year": 2026,
+        }
+        for index in range(3)
+    ]
+    llm = EmptyTitleLLM()
+    logs = []
+    reports = []
+    selected = find_pipeline._prefilter_titles(
+        items,
+        find_pipeline.AppConfig(
+            provider="openai_compatible",
+            research_topic="protein design",
+            research_interest="protein diffusion",
+            llm_concurrency=1,
+        ),
+        llm,
+        "TestVenue",
+        logs.append,
+        lambda: False,
+        scan_all=True,
+        title_filter_reports=reports,
+    )
+
+    assert llm.calls == 5
+    assert len(selected) == 3
+    assert all(item["reason_source"] == "local title screen" for item in selected)
+    assert all(item["title_filter_fallback_used"] for item in selected)
+    assert all(item["title_llm_retry_exhausted"] for item in selected)
+    assert reports[0]["mode"] == "llm_with_local_fallback"
+    assert reports[0]["llm_title_scored_papers"] == 0
+    assert reports[0]["local_title_ranked_papers"] == 3
+    assert any("local title scores retained" in message for message in logs)
+
+    scoring_groups = find_pipeline._select_title_abstract_scoring_groups(
+        [("TestVenue", selected, "venue")],
+        find_pipeline.AppConfig(provider="openai_compatible", title_abstract_scoring_limit=10),
+        require_title_llm_score=True,
+        log=lambda _message: None,
+    )
+    assert len(scoring_groups) == 1
+    assert len(scoring_groups[0][1]) == 3
+
+
+def test_find_json_recovery_keeps_completed_scoring_and_translation_rows():
+    finding_main = _load_finding_main()
+    finding_runtime = finding_main._private_import("finding_runtime")
+
+    scored = finding_runtime.extract_json('{"scored":[{"id":"p001","fit_score":7.0}')
+    translated = finding_runtime.extract_json('{"translations":[{"id":"p001","abstract_zh":"摘要"}')
+
+    assert scored == {"scored": [{"id": "p001", "fit_score": 7.0}]}
+    assert translated == {"translations": [{"id": "p001", "abstract_zh": "摘要"}]}
+
+
+def test_find_abstract_scoring_uses_local_ids_and_retries_mismatched_id(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("ABSTRACT_SCORING_BATCH_SIZE", "10")
+    monkeypatch.setenv("ABSTRACT_SCORING_MAX_BATCH_SIZE", "10")
+    monkeypatch.setenv("ABSTRACT_SCORING_MAX_WORKERS", "1")
+    monkeypatch.setenv("ABSTRACT_SCORING_WORKER_CAP", "1")
+    monkeypatch.setenv("OMITTED_ITEM_RETRY_ATTEMPTS", "1")
+    monkeypatch.setenv("FIND_FINAL_SCORE_CACHE", "0")
+
+    class MismatchedIdLLM:
+        enabled = True
+        timeout_sec = 120
+        retries = 1
+        provider = "openai_compatible"
+
+        def __init__(self):
+            self.calls = []
+
+        def json_or_error(self, prompt, **kwargs):
+            aliases = re.findall(r"^ID: (p\d{3})$", prompt, flags=re.MULTILINE)
+            self.calls.append({"aliases": aliases, "max_tokens": kwargs.get("max_tokens"), "prompt": prompt})
+            rows = []
+            for index, alias in enumerate(aliases):
+                returned_id = "rewritten-paper-id" if len(aliases) > 1 and index == len(aliases) - 1 else alias
+                rows.append({
+                    "id": returned_id,
+                    "category": "protein generation",
+                    "fit_score": 8.1,
+                    "diversity_score": 6.2,
+                    "recommend_for_deep_reading": True,
+                    "topic_evidence": "passed: protein diffusion",
+                    "topic_evidence_supported": True,
+                    "matched_topic_route": "protein diffusion",
+                    "topic_evidence_basis": "The abstract evaluates protein diffusion generation.",
+                    "missing_topic_evidence": [],
+                    "hit_directions_zh": ["蛋白质扩散生成"],
+                    "hit_directions_en": ["protein diffusion generation"],
+                    "fit_explanation_zh": "摘要给出了蛋白质扩散生成方法与实验结果。该方法可用于当前研究。",
+                    "fit_explanation_en": "The abstract presents a protein diffusion method and results. It is reusable for this project.",
+                    "reason_zh": "论文提供了可复用的蛋白质扩散生成方法和评测。摘要层面的风险是实验范围有限。",
+                    "reason_en": "The paper provides a reusable protein diffusion method and evaluation. The abstract indicates limited experimental scope.",
+                })
+            return {"ok": True, "data": {"evaluations": rows}, "error": ""}
+
+    items = [
+        {
+            "id": f"real-paper-{index}",
+            "title": f"Protein diffusion study {index}",
+            "abstract": "We develop and evaluate a diffusion method for controllable protein generation.",
+            "source": "test",
+            "venue": "TestVenue",
+            "year": 2026,
+        }
+        for index in range(10)
+    ]
+    llm = MismatchedIdLLM()
+    evaluated = find_pipeline._evaluate_items(
+        items,
+        find_pipeline.AppConfig(
+            provider="openai_compatible",
+            research_topic="protein diffusion",
+            research_interest="controllable protein generation",
+            title_abstract_scoring_limit=10,
+            abstract_scoring_batch_size=10,
+            abstract_scoring_max_workers=1,
+        ),
+        llm,
+        "TestVenue",
+        lambda _message: None,
+    )
+
+    assert len(evaluated) == 10
+    assert all(item["reason_source"] == "llm abstract evaluation" for item in evaluated)
+    assert [len(call["aliases"]) for call in llm.calls] == [10, 1]
+    assert all(call["max_tokens"] == 0 for call in llm.calls)
+    assert all("ID: real-paper-" not in call["prompt"] for call in llm.calls)
+
+
 def test_find_recommendations_rank_without_topic_or_score_gates():
     find_pipeline = _load_find_pipeline()
     config = find_pipeline.AppConfig(
@@ -4321,7 +4577,7 @@ def test_find_source_queries_use_one_equal_status_keyword_or_group():
 
 
 def test_find_framework_passes_only_the_saved_researcher_profile():
-    source = (ROOT / "framework" / "scripts" / "run_frontend.py").read_text(encoding="utf-8")
+    source = (ROOT / "framework" / "scripts" / "orchestration" / "run_frontend.py").read_text(encoding="utf-8")
 
     assert "feedback_profile" not in source
     assert "Previous TASTE frontend summary" not in source
@@ -4548,7 +4804,7 @@ def test_finding_backend_is_self_contained():
 
 
 def _load_framework_run_module():
-    import run_module
+    from orchestration import run_module
 
     return run_module
 
@@ -4701,6 +4957,97 @@ def test_find_neurips_legacy_tracks_skip_category_pruning(monkeypatch):
     assert online_reports[0]["category_pruning_applied"] is False
 
 
+def test_find_category_match_failure_retains_full_online_and_local_title_pools(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    venue = {"id": "test_venue", "name": "TestVenue"}
+    audit = {
+        "complete": True,
+        "has_official_categories": True,
+        "category_status": "official_or_cached_categories",
+        "official_title_index_verified": True,
+        "official_accepted_list_verified": True,
+    }
+    papers = [
+        {
+            "id": f"paper-{index}",
+            "title": f"Protein paper {index}",
+            "abstract": "A complete abstract about protein design.",
+            "venue": "TestVenue",
+            "year": 2026,
+            "primary_area": "Actual Category",
+            "category": "Actual Category",
+            "classification_source": "official",
+        }
+        for index in range(3)
+    ]
+
+    def mismatched_selection(*_args, **_kwargs):
+        return {
+            "venue": "TestVenue",
+            "year": 2026,
+            "category_count": 1,
+            "selected_paper_count": 3,
+            "ranked_categories": ["Missing Category"],
+            "useful_through_rank": 1,
+            "selected_categories": [{"name": "Missing Category", "reason": "test mismatch"}],
+            "rejected_categories": [],
+            "fallback_used": False,
+            "selection_mode": "llm_useful_prefix_then_minimum_paper_target",
+            "category_ranking_source": "llm",
+            "llm_error": "",
+        }
+
+    monkeypatch.setattr(find_pipeline, "select_relevant_categories", mismatched_selection)
+    logs = []
+    online_selected, online_reports = find_pipeline._select_official_category_title_index(
+        venue,
+        [2026],
+        [dict(paper) for paper in papers],
+        audit,
+        find_pipeline.AppConfig(provider="mock", research_topic="protein design"),
+        object(),
+        logs.append,
+    )
+
+    assert len(online_selected) == 3
+    assert online_reports[0]["used_all_categories_fallback"] is True
+    assert online_reports[0]["category_pruning_applied"] is False
+    assert online_reports[0]["selection"]["category_match_fallback_used"] is True
+
+    local = {
+        "venue_id": "test_venue",
+        "venue": "TestVenue",
+        "year": 2026,
+        "paper_count": len(papers),
+        "papers": [dict(paper) for paper in papers],
+        "source_adapter": "official_test_source",
+        "papers_path": "local/test/2026/papers.json",
+        "category_summary_path": "local/test/2026/category_summary.json",
+        "metadata_completeness_audit": dict(audit),
+        "category_summary": {
+            "paper_count": len(papers),
+            "category_summary": [{"name": "Actual Category", "count": len(papers)}],
+        },
+    }
+    monkeypatch.setattr(find_pipeline, "load_local_venue_year", lambda *_args, **_kwargs: local)
+    local_result = find_pipeline._load_local_category_guided_index(
+        venue,
+        [2026],
+        find_pipeline.AppConfig(provider="mock", research_topic="protein design"),
+        object(),
+        None,
+        logs.append,
+    )
+
+    assert local_result is not None
+    local_selected, local_reports, local_corpus = local_result
+    assert len(local_selected) == len(local_corpus) == 3
+    assert local_reports[0]["used_all_categories_fallback"] is True
+    assert local_reports[0]["category_pruning_applied"] is False
+    assert local_reports[0]["selection"]["category_match_fallback_used"] is True
+    assert any("retaining all 3 papers" in message for message in logs)
+
+
 def test_find_category_selection_keeps_complete_useful_prefix_above_1000(monkeypatch):
     finding_main = _load_finding_main()
     selection_module = finding_main._private_import("selection")
@@ -4726,7 +5073,7 @@ def test_find_category_selection_keeps_complete_useful_prefix_above_1000(monkeyp
         def json_or_none(self, prompt, *_args, **_kwargs):
             prompts.append(prompt)
             return {
-                "ranked_categories": [entry["name"] for entry in entries],
+                "ranked_category_ids": [f"c{index:03d}" for index in range(1, len(entries) + 1)],
                 "useful_through_rank": 3,
             }
 
@@ -4760,6 +5107,8 @@ def test_find_category_selection_keeps_complete_useful_prefix_above_1000(monkeyp
     assert "protein diffusion" in prompts[0]
     assert "controllable protein generation" in prompts[0]
     assert "Topic 04" in prompts[0]
+    assert '"id": "c005"' in prompts[0]
+    assert "ranked_category_ids" in prompts[0]
     assert "Rank every available category" in prompts[0]
     assert "useful_through_rank" in prompts[0]
     assert "fewer than 1000 categorized papers" in prompts[0]
@@ -4846,7 +5195,7 @@ def test_find_category_selection_keeps_all_categories_when_total_is_below_1000(m
     assert len(selection["selected_categories"]) == 4
 
 
-def test_find_category_selection_rejects_incomplete_llm_ranking(monkeypatch):
+def test_find_category_selection_falls_back_after_incomplete_llm_ranking(monkeypatch):
     finding_main = _load_finding_main()
     selection_module = finding_main._private_import("selection")
     finding_runtime = finding_main._private_import("finding_runtime")
@@ -4855,42 +5204,89 @@ def test_find_category_selection_rejects_incomplete_llm_ranking(monkeypatch):
 
     class IncompleteLLM:
         enabled = True
+        calls = 0
 
         def json_or_none(self, *_args, **_kwargs):
+            self.calls += 1
             return {"ranked_categories": ["Topic A"], "useful_through_rank": 1}
 
-    try:
-        selection_module.select_relevant_categories(
-            {
-                "venue_id": "venue",
-                "venue": "Venue",
-                "year": 2026,
-                "paper_count": 1200,
-                "category_summary": [
-                    {"name": "Topic A", "count": 600},
-                    {"name": "Topic B", "count": 600},
-                ],
-            },
-            finding_runtime.AppConfig(
-                provider="openai_compatible",
-                research_topic="protein diffusion",
-                research_interest="reinforcement learning",
-            ),
-            IncompleteLLM(),
-        )
-    except RuntimeError as exc:
-        assert "incomplete category ranking" in str(exc)
-    else:
-        raise AssertionError("Incomplete LLM category ranking must fail instead of using a fallback")
+    llm = IncompleteLLM()
+    selection = selection_module.select_relevant_categories(
+        {
+            "venue_id": "venue",
+            "venue": "Venue",
+            "year": 2026,
+            "paper_count": 1200,
+            "category_summary": [
+                {"name": "Topic A", "count": 600},
+                {"name": "Topic B", "count": 600},
+            ],
+        },
+        finding_runtime.AppConfig(
+            provider="openai_compatible",
+            research_topic="protein diffusion",
+            research_interest="reinforcement learning",
+        ),
+        llm,
+    )
+
+    assert llm.calls == 2
+    assert selection["fallback_used"] is True
+    assert selection["category_ranking_source"] == "deterministic_fallback"
+    assert set(selection["ranked_categories"]) == {"Topic A", "Topic B"}
+    assert selection["selected_paper_count"] == 1200
+    assert "incomplete category ranking" in selection["llm_error"]
 
 
-def test_find_category_selection_rejects_non_strict_llm_payloads(monkeypatch):
+def test_find_category_selection_repairs_one_non_strict_llm_ranking(monkeypatch):
+    finding_main = _load_finding_main()
+    selection_module = finding_main._private_import("selection")
+    finding_runtime = finding_main._private_import("finding_runtime")
+    monkeypatch.setenv("USE_LLM_CATEGORY_SELECT", "1")
+    monkeypatch.setenv("DISABLE_FIND_CATEGORY_SELECT_CACHE", "1")
+
+    class RepairingLLM:
+        enabled = True
+        calls = 0
+
+        def json_or_none(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return {"ranked_categories": ["Topic A ", "Unknown"], "useful_through_rank": 1}
+            return {"ranked_categories": ["Topic A", "Topic B"], "useful_through_rank": 1}
+
+    llm = RepairingLLM()
+    selection = selection_module.select_relevant_categories(
+        {
+            "venue": "Venue",
+            "year": 2026,
+            "paper_count": 1200,
+            "category_summary": [
+                {"name": "Topic A", "count": 600},
+                {"name": "Topic B", "count": 600},
+            ],
+        },
+        finding_runtime.AppConfig(provider="openai_compatible", research_topic="protein diffusion"),
+        llm,
+    )
+
+    assert llm.calls == 2
+    assert selection["ranked_categories"] == ["Topic A", "Topic B"]
+    assert selection["fallback_used"] is False
+    assert selection["category_ranking_source"] == "llm_repair"
+
+
+def test_find_category_selection_uses_fallback_after_two_non_strict_llm_payloads(monkeypatch):
     finding_main = _load_finding_main()
     selection_module = finding_main._private_import("selection")
     finding_runtime = finding_main._private_import("finding_runtime")
     monkeypatch.setenv("USE_LLM_CATEGORY_SELECT", "1")
     monkeypatch.setenv("DISABLE_FIND_CATEGORY_SELECT_CACHE", "1")
     invalid_payloads = [
+        {"ranked_category_ids": ["c001"], "useful_through_rank": 1},
+        {"ranked_category_ids": ["c001", "c001"], "useful_through_rank": 1},
+        {"ranked_category_ids": ["c001", "c999"], "useful_through_rank": 1},
+        {"ranked_category_ids": ["c001", "c002"], "useful_through_rank": 1, "reason": "extra"},
         {"ranked_categories": ["Topic A", "Topic B"]},
         {"ranked_categories": ["Topic A", "Topic B"], "useful_through_rank": True},
         {"ranked_categories": ["Topic A", "Topic B"], "useful_through_rank": "1"},
@@ -4914,16 +5310,120 @@ def test_find_category_selection_rejects_non_strict_llm_payloads(monkeypatch):
     for payload in invalid_payloads:
         class InvalidLLM:
             enabled = True
+            calls = 0
 
             def json_or_none(self, *_args, **_kwargs):
+                self.calls += 1
                 return payload
 
-        try:
-            selection_module.select_relevant_categories(category_summary, config, InvalidLLM())
-        except RuntimeError as exc:
-            assert "category ranking failed" in str(exc)
-        else:
-            raise AssertionError(f"Non-strict category payload must fail: {payload}")
+        llm = InvalidLLM()
+        selection = selection_module.select_relevant_categories(category_summary, config, llm)
+        assert llm.calls == 2
+        assert selection["fallback_used"] is True
+        assert selection["category_ranking_source"] == "deterministic_fallback"
+        assert set(selection["ranked_categories"]) == {"Topic A", "Topic B"}
+        assert selection["llm_error"]
+
+
+def test_find_category_selection_canonicalizes_safe_name_formatting_without_retry(monkeypatch):
+    finding_main = _load_finding_main()
+    selection_module = finding_main._private_import("selection")
+    finding_runtime = finding_main._private_import("finding_runtime")
+    monkeypatch.setenv("USE_LLM_CATEGORY_SELECT", "1")
+    monkeypatch.setenv("DISABLE_FIND_CATEGORY_SELECT_CACHE", "1")
+
+    class WhitespaceLLM:
+        enabled = True
+        calls = 0
+
+        def json_or_none(self, *_args, **_kwargs):
+            self.calls += 1
+            return {"ranked_categories": [" topic a ", "TOPIC B"], "useful_through_rank": 1}
+
+    llm = WhitespaceLLM()
+    selection = selection_module.select_relevant_categories(
+        {
+            "venue": "Venue",
+            "year": 2026,
+            "paper_count": 1200,
+            "category_summary": [
+                {"name": "Topic A", "count": 600},
+                {"name": "Topic B", "count": 600},
+            ],
+        },
+        finding_runtime.AppConfig(provider="openai_compatible", research_topic="protein diffusion"),
+        llm,
+    )
+
+    assert llm.calls == 1
+    assert selection["ranked_categories"] == ["Topic A", "Topic B"]
+    assert selection["fallback_used"] is False
+
+
+def test_find_category_selection_repairs_unparseable_first_response(monkeypatch):
+    finding_main = _load_finding_main()
+    selection_module = finding_main._private_import("selection")
+    finding_runtime = finding_main._private_import("finding_runtime")
+    monkeypatch.setenv("USE_LLM_CATEGORY_SELECT", "1")
+    monkeypatch.setenv("DISABLE_FIND_CATEGORY_SELECT_CACHE", "1")
+
+    class ParseRepairLLM:
+        enabled = True
+        calls = 0
+
+        def json_or_none(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return None
+            return {"ranked_category_ids": ["c002", "c001"], "useful_through_rank": 1}
+
+    llm = ParseRepairLLM()
+    selection = selection_module.select_relevant_categories(
+        {
+            "venue": "Venue",
+            "year": 2026,
+            "paper_count": 1200,
+            "category_summary": [
+                {"name": "Topic A", "count": 600},
+                {"name": "Topic B", "count": 600},
+            ],
+        },
+        finding_runtime.AppConfig(provider="openai_compatible", research_topic="protein diffusion"),
+        llm,
+    )
+
+    assert llm.calls == 2
+    assert selection["ranked_categories"] == ["Topic B", "Topic A"]
+    assert selection["category_ranking_source"] == "llm_repair"
+
+
+def test_find_category_selection_uses_deterministic_fallback_without_llm(monkeypatch):
+    finding_main = _load_finding_main()
+    selection_module = finding_main._private_import("selection")
+    finding_runtime = finding_main._private_import("finding_runtime")
+    monkeypatch.setenv("USE_LLM_CATEGORY_SELECT", "1")
+    monkeypatch.setenv("DISABLE_FIND_CATEGORY_SELECT_CACHE", "1")
+
+    class DisabledLLM:
+        enabled = False
+
+    selection = selection_module.select_relevant_categories(
+        {
+            "venue": "Venue",
+            "year": 2026,
+            "paper_count": 1200,
+            "category_summary": [
+                {"name": "Topic A", "count": 600},
+                {"name": "Topic B", "count": 600},
+            ],
+        },
+        finding_runtime.AppConfig(provider="openai_compatible", research_topic="protein diffusion"),
+        DisabledLLM(),
+    )
+
+    assert selection["fallback_used"] is True
+    assert selection["category_ranking_source"] == "deterministic_fallback"
+    assert selection["selected_paper_count"] == 1200
 
 
 def test_find_category_selection_cache_recomputes_prefix_from_cutoff():
@@ -7131,7 +7631,7 @@ def test_reading_module_has_no_project_projection_helpers():
 
 
 def test_framework_reading_bridge_prepares_input_and_syncs_outputs(tmp_path):
-    bridge = _load_framework_script("auto_research/reading_bridge.py", "framework_reading_bridge_contract")
+    bridge = _load_framework_script("bridges/reading_bridge.py", "framework_reading_bridge_contract")
 
     projects = tmp_path / "projects"
     reading_root = tmp_path / "modules" / "reading"
@@ -7172,6 +7672,7 @@ def test_framework_reading_bridge_prepares_input_and_syncs_outputs(tmp_path):
     (reading_run_dir / "read_results.json").write_text(json.dumps({
         "run_id": prepared["reading_run_id"],
         "read_markdown_aggregation": {"valid": True, "mode": "deterministic_concat"},
+        "reading_scoring": {"status": "complete", "expected_article_count": 1, "scored_article_count": 1},
         "items": [{
             "paper": prepared_payload["articles"][0],
             "full_text_packet": {"full_text_available": True, "full_text_chars": 1500},
@@ -7197,7 +7698,7 @@ def test_framework_reading_bridge_prepares_input_and_syncs_outputs(tmp_path):
 
 
 def test_framework_reading_bridge_only_passes_conference_presentation_metadata():
-    bridge = _load_framework_script("auto_research/reading_bridge.py", "framework_reading_presentation_contract")
+    bridge = _load_framework_script("bridges/reading_bridge.py", "framework_reading_presentation_contract")
 
     poster = bridge._article_for_reading({
         "title": "Conference Paper",
@@ -7277,7 +7778,7 @@ def test_framework_run_module_current_find_read_injects_runtime_input(monkeypatc
 
 
 def _load_claude_project_session():
-    return _load_framework_script("claude_project_session.py", "framework_claude_project_session_policy")
+    return _load_framework_script("runtime/claude_project_session.py", "framework_claude_project_session_policy")
 
 
 def test_current_find_allows_controlled_idea_scoring_audit_write():
@@ -7297,6 +7798,11 @@ def test_current_find_allows_controlled_idea_scoring_audit_write():
 
     unsafe = "/home/fmh/workspace/miniforge/envs/ar_taste/bin/python -c \"open('planning/finding/idea_scoring.json','w').write('{}')\""
     assert session.current_find_artifact_generator_policy_issue(unsafe, "current_find_read_idea_plan") == session.CURRENT_FIND_ARTIFACT_WRITER_POLICY
+
+def test_framework_scripts_exposes_only_main_entrypoint():
+    scripts = ROOT / "framework" / "scripts"
+    assert {path.name for path in scripts.iterdir() if path.is_file()} == {"main.py"}
+
 
 def test_all_stage_contracts_and_framework_dry_run_are_callable():
     for stage in STAGES:
@@ -7323,7 +7829,8 @@ def test_all_stage_contracts_and_framework_dry_run_are_callable():
     proc = subprocess.run(
         [
             sys.executable,
-            str(ROOT / "framework" / "scripts" / "orchestration" / "run_taste_framework.py"),
+            str(ROOT / "framework" / "scripts" / "main.py"),
+            "workflow",
             "run",
             "--mode",
             "dry-run",
@@ -7362,7 +7869,8 @@ def test_framework_only_stage_reports_single_stage_scope():
         proc = subprocess.run(
             [
                 sys.executable,
-                str(ROOT / "framework" / "scripts" / "orchestration" / "run_taste_framework.py"),
+                str(ROOT / "framework" / "scripts" / "main.py"),
+                "workflow",
                 "run",
                 "--mode",
                 "dry-run",
@@ -7637,7 +8145,7 @@ def test_experimenting_controller_owns_project_records_without_framework_run_cop
         ROOT / "modules" / "experimenting" / "scripts" / "orchestration" / "controller_session.py"
     ).read_text(encoding="utf-8")
     catalog_source = (
-        ROOT / "framework" / "scripts" / "taste_backend" / "contracts" / "module_catalog.py"
+        ROOT / "framework" / "scripts" / "contracts" / "module_catalog.py"
     ).read_text(encoding="utf-8")
 
     assert 'cwd=str(project_root)' in controller_source

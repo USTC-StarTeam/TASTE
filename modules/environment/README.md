@@ -72,7 +72,7 @@ projects/<project>/
 网页的 Environment 对话框直接向该项目的 Environment 主控 Claude 发送消息。等价命令是：
 
 ```bash
-conda run -n taste python framework/scripts/run_module.py environment \
+conda run -n taste python framework/scripts/main.py module environment \
   --action chat \
   --project <project> \
   --message "请检查当前环境门控并完成下一项环境工作。"
@@ -90,7 +90,7 @@ conda run -n taste python framework/scripts/run_module.py environment \
 直接调用抢占：
 
 ```bash
-conda run -n taste python framework/scripts/run_module.py environment \
+conda run -n taste python framework/scripts/main.py module environment \
   --action chat \
   --project <project> \
   --message "立即处理这条环境指令。" \
