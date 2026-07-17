@@ -1,17 +1,24 @@
 {
-  "generated_at": "2026-07-10T10:10:12+00:00",
+  "generated_at": "2026-07-17T05:10:00+00:00",
   "owner": "web_frontend",
-  "script_count": 1,
+  "script_count": 2,
   "scripts": [
+    {
+      "script": "auth.py",
+      "path": "web/backend/auto_research/web/auth.py",
+      "owner": "web_frontend",
+      "owner_reason": "Account registration, password verification, and persistent Web session storage",
+      "framework_dependencies": []
+    },
     {
       "script": "server.py",
       "path": "web/backend/auto_research/web/server.py",
       "owner": "web_frontend",
       "owner_reason": "HTTP/WebSocket transport, job connection, artifact delivery, and static frontend serving",
       "framework_dependencies": [
-        "framework/scripts/auto_research/project_bridge.py",
-        "framework/scripts/auto_research/paper_state.py",
-        "framework/scripts/run_module.py"
+        "framework/scripts/bridges/project_bridge.py",
+        "framework/scripts/reporting/paper_state.py",
+        "framework/scripts/main.py"
       ]
     }
   ]

@@ -259,7 +259,7 @@ def test_interrupt_runs_web_message_first_then_resumes_old_work(monkeypatch, tmp
 
 
 def test_web_public_receipt_uses_writing_controller_state(tmp_path):
-    from auto_research import project_bridge
+    from bridges import project_bridge
 
     root = tmp_path / "demo"
     state_dir = root / "state"

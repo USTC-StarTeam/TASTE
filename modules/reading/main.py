@@ -13,11 +13,11 @@ from typing import Any, Sequence
 STAGE_NAME = "reading"
 DISPLAY_NAME = "Reading"
 RESPONSIBILITY = "Acquire verified same-paper full text from generic local paper inputs and synthesize reading notes; a title is sufficient, optional locators accelerate resolution, and article replacement is forbidden."
-REQUIRED_EXTERNAL_INPUTS = ("local_input_json", "claude_or_prepare_mode")
+REQUIRED_EXTERNAL_INPUTS = ("local_input_json", "claude_or_prepare_mode", "research_topic_or_profile_for_final_scoring")
 ARTIFACTS_IN = ("local input JSON under this directory",)
 PUBLIC_FINAL_ARTIFACT = "read.md"
-ARTIFACTS_OUT = (PUBLIC_FINAL_ARTIFACT, "read_results.json", "full_text_reading/full_text_packet.json")
-MACHINE_SUPPORT_ARTIFACTS = ("read_results.json", "full_text_reading/full_text_packet.json")
+ARTIFACTS_OUT = (PUBLIC_FINAL_ARTIFACT, "read_results.json", "full_text_reading/full_text_packet.json", "outputs/reading_scores.json")
+MACHINE_SUPPORT_ARTIFACTS = ("read_results.json", "full_text_reading/full_text_packet.json", "outputs/reading_scores.json")
 PRIVATE_BACKEND_ROOTS = (
     "scripts/pipeline/read_pipeline.py",
     "scripts/core/common.py",
@@ -300,10 +300,10 @@ def _run_manifest(args: Sequence[str]) -> int:
 
 
 def _run_read(args: Sequence[str]) -> int:
-    parser = argparse.ArgumentParser(description="Read exactly the local input articles through the public main.py entrypoint.")
+    parser = argparse.ArgumentParser(description="Read the top-ranked local input articles through the public main.py entrypoint.")
     parser.add_argument("--input-json", required=True, help="Input JSON inside this directory, with articles/input_articles/papers.")
     parser.add_argument("--run-id", default="", help="Output run id under .runtime/output.")
-    parser.add_argument("--max-papers", type=int, default=0, help="Optional local truncation for smoke tests only; 0 means all input articles.")
+    parser.add_argument("--max-papers", type=int, default=0, help="Top-ranked papers to read; 0 uses the Reading module default (50).")
     parser.add_argument("--claude-mode", choices=["prepare", "run", "auto"], default="prepare")
     parser.add_argument("--timeout-sec", type=int, default=1800)
     parser.add_argument("--read-workers", type=int, default=0, help="Parallel paper workers; 0 uses READING_READ_WORKERS or the Reading default.")

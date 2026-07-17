@@ -33,19 +33,20 @@ for _entry in [str(path) for path in reversed(_IMPORT_PRIORITY_DIRS) if path.exi
         sys.path.remove(_entry)
     sys.path.insert(0, _entry)
 
-from auto_research.emailer import send_run_email
-from auto_research.finding_catalog import catalog_by_id, fetch_venue_sample, load_catalog
-from auto_research.jobs import JobCancelled
-from auto_research.llm import LLMClient, extract_json
-from auto_research.models import AppConfig, EmailJobRequest, FindRequest, IdeaMarkdownUpdate, IdeaPatch, IdeaRequest, LLMRoleConfig, PlanMarkdownUpdate, PlanPolishRequest, PlanRequest, ReadRequest, VenueHealthRequest
-from auto_research.source_selection import canonical_source_selection, normalize_source_selection, save_canonical_source_selection, project_config_path
-from auto_research.paths import CONFIG_PATH, FINDING_RUNS_DIR, RUNS_DIR, RUNS_SEARCH_DIRS, STATE_DIR, ensure_directories
-from auto_research.storage import delete_run, list_runs, read_json, redacted_config, run_dir, write_json
-from auto_research.project_bridge import action_gate_blocker, job_stage, create_project_config, detect_runtime_config, list_projects as list_projects, project_summary, run_action, runtime_status, update_project_config, update_runtime_config, _cleruntime_caches, _current_find_pipeline_summary, _current_find_source_status_rows, _venue_metadata_counts
-from auto_research.paper_state import active_paper_state as load_active_paper_state
-from auto_research.resource_locks import crawl_resource_lease
+from bridges.finding_catalog import catalog_by_id, fetch_venue_sample, load_catalog
+from bridges.project_bridge import action_gate_blocker, job_stage, create_project_config, detect_runtime_config, list_projects as list_projects, project_summary, run_action, runtime_status, update_project_config, update_runtime_config, _cleruntime_caches, _current_find_pipeline_summary, _current_find_source_status_rows, _venue_metadata_counts
+from contracts.web_models import AppConfig, EmailJobRequest, FindRequest, IdeaMarkdownUpdate, IdeaPatch, IdeaRequest, LLMRoleConfig, PlanMarkdownUpdate, PlanPolishRequest, PlanRequest, ReadRequest, VenueHealthRequest
+from integrations.emailer import send_run_email
+from integrations.web_llm import LLMClient, extract_json
+from policies.source_selection import canonical_source_selection, normalize_source_selection, save_canonical_source_selection, project_config_path
+from project.project_paths import configured_max_read_papers
+from reporting.paper_state import active_paper_state as load_active_paper_state
+from runtime.framework_paths import CONFIG_PATH, FINDING_RUNS_DIR, RUNS_DIR, RUNS_SEARCH_DIRS, STATE_DIR, ensure_directories
+from runtime.jobs import JobCancelled
+from runtime.resource_locks import crawl_resource_lease
+from runtime.run_storage import delete_run, list_runs, read_json, redacted_config, run_dir, write_json
+from runtime.taste_pythonpath import taste_pythonpath_string
 from auto_research.web.auth import AuthError, AuthStore, AuthUser, SESSION_COOKIE, SESSION_DAYS
-from taste_pythonpath import taste_pythonpath_string
 
 ensure_directories()
 
@@ -1120,7 +1121,13 @@ def _is_full_cycle_job(stage: Any = "", job_id: Any = "", result: Any = None, lo
     if isinstance(result, dict):
         kind_text = str(result.get("kind") or result.get("raw_stage") or "").lower().replace("_", "-")
         cmd_text = str(result.get("cmd") or result.get("command") or "").lower().replace("_", "-")
-        current_find_framework_cmd = "framework/scripts/run-module.py" in cmd_text and "current-find-research-plan" in cmd_text
+        current_find_framework_cmd = (
+            "current-find-research-plan" in cmd_text
+            and (
+                "run-module.py" in cmd_text
+                or ("framework/scripts/main.py" in cmd_text and " module " in f" {cmd_text} ")
+            )
+        )
         if kind_text.startswith("current-find") or current_find_framework_cmd:
             return False
     hay_parts = [str(stage or ""), str(job_id or "")]
@@ -1141,7 +1148,10 @@ def _is_full_cycle_job(stage: Any = "", job_id: Any = "", result: Any = None, lo
 
 def _current_find_worker_phase_and_kind(cmd: str) -> tuple[str, str, int]:
     lowered = str(cmd or "").lower().replace("_", "-")
-    if "framework/scripts/run-module.py" in lowered and "current-find-research-plan" in lowered:
+    framework_module = "run-module.py" in lowered or (
+        "framework/scripts/main.py" in lowered and " module " in f" {lowered} "
+    )
+    if framework_module and "current-find-research-plan" in lowered:
         return "read", "current_find_read_framework", 2
     return "", "", 99
 
@@ -1549,6 +1559,7 @@ def _reconcile_stale_cancelling_jobs(grace_seconds: float = 8.0) -> None:
             job.progress = {"phase": "cancelled", "current": 0, "total": 1, "percent": 0, "message": "research action cancelled by user."}
             job.progress_version += 1
             job.logs.append("Reconciled stale cancelling job: no active child process remains, so the web stage lock was released.")
+            job.mark_finished(job.cancelled_at)
             job.done.set()
             changed = True
     if changed:
@@ -1868,6 +1879,7 @@ class JobState:
         self.stage = stage
         self.status = "queued"
         self.created_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        self.finished_at = ""
         self.logs: list[str] = []
         self.result: Any = None
         self.error: str = ""
@@ -1887,6 +1899,7 @@ class JobState:
         job = cls(str(data.get("job_id") or "job_unknown"), str(data.get("stage") or "unknown"))
         job.status = str(data.get("status") or "queued")
         job.created_at = str(data.get("created_at") or job.created_at)
+        job.finished_at = str(data.get("finished_at") or "")
         job.logs = [str(line) for line in data.get("logs", [])]
         job.result = data.get("result")
         job.internal = bool(data.get("internal"))
@@ -1980,6 +1993,8 @@ class JobState:
                 result_payload = {**result_payload, "read_progress": progress_payload.get("read_progress")}
                 if self.status in {"cancelling", "cancelled"}:
                     result_payload["status"] = self.status
+                elif self.status == "error":
+                    result_payload["status"] = "error"
         log_stage = panel_stage or ("paper" if paper_job else self.stage)
         logs = _public_job_logs(log_stage, self.logs, progress_payload, result_payload if isinstance(result_payload, dict) else self.result, limit=80) if compact or public_stage == "read" else self.logs
         if public_stage != self.stage and isinstance(self.result, dict):
@@ -2004,6 +2019,7 @@ class JobState:
             "stage": public_stage,
             "status": public_status,
             "created_at": self.created_at,
+            "finished_at": self.finished_at,
             "logs": logs,
             "log_count": len(self.logs),
             "run_id": self.run_id or (str(result_payload.get("run_id") or "") if isinstance(result_payload, dict) else ""),
@@ -2027,6 +2043,10 @@ class JobState:
         self.status = "cancelling"
         self.log("Cancellation requested.")
         _persist_jobs()
+
+    def mark_finished(self, finished_at: str = "") -> None:
+        if not self.finished_at:
+            self.finished_at = str(finished_at or datetime.now(UTC).isoformat().replace("+00:00", "Z"))
 
     def set_progress(self, phase: str, current: int = 0, total: int = 0, message: str = "") -> None:
         percent = 0
@@ -3350,6 +3370,45 @@ def _public_stage_job_logs(stage: Any, logs: Any, progress: Any = None, result: 
 
 
 
+def _public_task_error_detail(logs: list[str], progress: dict[str, Any], result: dict[str, Any]) -> str:
+    """Select one concrete, redacted exception for the public taskbar."""
+    states = [progress.get("phase"), result.get("status")]
+    if not any(str(value or "").strip().lower() in {"error", "failed", "fail"} for value in states):
+        return ""
+    for raw_line in reversed([line for raw in logs for line in str(raw or "").splitlines()]):
+        detail = _redact_public_log_text(_public_text(raw_line)).strip()
+        if detail.startswith("错误详情："):
+            return detail[:505]
+        if not re.match(r"^[A-Za-z_][\w.]*?(?:Error|Exception):\s+.+$", detail):
+            continue
+        if re.search(
+            r"(?:research action|subprocess|task|framework\s+(?:read|ideation|planning))\s+failed with exit code",
+            detail,
+            flags=re.I,
+        ):
+            continue
+        detail = re.sub(r"(?<!:)/(?:zssd|home|tmp|var/tmp)(?:/[^\s,;'\"]+)+", "[local-path]", detail)
+        return "错误详情：" + detail[:500]
+    return ""
+
+
+def _with_public_task_error_detail(
+    lines: list[str],
+    logs: list[str],
+    progress: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    limit: int,
+) -> list[str]:
+    detail = _public_task_error_detail(logs, progress, result)
+    if not detail or detail in lines:
+        return lines
+    out = list(lines)
+    insert_at = next((index + 1 for index, line in enumerate(out) if line.startswith("运行编号：")), min(1, len(out)))
+    out.insert(insert_at, detail)
+    return out[:max(1, limit)]
+
+
 def _public_find_job_logs(logs: list[str], progress: dict[str, Any], result: dict[str, Any], *, limit: int = 8) -> list[str]:
     out: list[str] = []
     phase = str(progress.get("phase") or result.get("phase") or "find").strip()
@@ -3518,17 +3577,20 @@ def _read_job_artifact_progress(result: dict[str, Any], progress: dict[str, Any]
         message_pending_deep = as_int(msg_match.group(5))
 
     total = max(
-        as_int(read_payload.get("recommendation_count")),
-        as_int(read_payload.get("processed_recommendation_count")),
+        as_int(read_payload.get("selected_reading_count")),
+        as_int(read_payload.get("expected_reading_count")),
+        as_int(read_payload.get("processed_reading_count")),
         as_int(read_payload.get("input_article_count")),
-        as_int(result.get("recommendation_count")),
+        as_int(result.get("selected_reading_count")),
+        as_int(result.get("expected_reading_count")),
         as_int(result.get("input_article_count")),
+        as_int(prepared_input.get("selected_reading_count")),
+        as_int(prepared_input.get("expected_reading_count")),
         as_int(prepared_input.get("input_article_count")),
-        as_int(prepared_input.get("recommendation_count")),
-        as_int(validation.get("expected_recommendation_count")),
-        as_int(validation.get("recommended_reading_count")),
-        as_int(result_validation.get("expected_recommendation_count")),
-        as_int(result_validation.get("recommended_reading_count")),
+        as_int(validation.get("expected_reading_count")),
+        as_int(validation.get("selected_reading_count")),
+        as_int(result_validation.get("expected_reading_count")),
+        as_int(result_validation.get("selected_reading_count")),
         as_int(artifact_counts.get("recommended_reading")),
         as_int(artifact_counts.get("read")),
         len(readings),
@@ -4105,6 +4167,8 @@ def _public_read_job_logs(logs: list[str], progress: dict[str, Any], result: dic
     if not read_progress.get("has_signal"):
         out: list[str] = []
         action = str(read_progress.get("current_action") or progress.get("message") or result.get("summary") or "").strip()
+        if live_status in {"error", "failed", "fail"}:
+            action = _public_job_summary_text(action)
         if "准备当前 Find 输入" in action or "精读任务已启动" in action:
             action = ""
         out.append("当前状态：" + (action or "等待爬文章开始。"))
@@ -4115,6 +4179,10 @@ def _public_read_job_logs(logs: list[str], progress: dict[str, Any], result: dic
             text = _read_progress_title(_strip_public_taste_marker(line), max_len=300)
             lowered = text.lower()
             if not text or text.startswith(("{", "}", "[", "]", "$")) or '":' in text[:160]:
+                continue
+            if lowered.startswith("traceback") or re.match(r'^file\s+["\']', text, flags=re.I):
+                continue
+            if live_status in {"error", "failed", "fail"} and re.match(r"^[A-Za-z_][\w.]*?(?:Error|Exception):", text):
                 continue
             if "bin/python" in lowered or "claude -p" in lowered or lowered.startswith("delegating current find read/idea/plan"):
                 continue
@@ -4131,6 +4199,8 @@ def _public_read_job_logs(logs: list[str], progress: dict[str, Any], result: dic
         return dedup[:max(1, min(limit, 12))]
     header: list[str] = []
     action = str(read_progress.get("current_action") or "").strip()
+    if live_status in {"error", "failed", "fail"}:
+        action = _public_job_summary_text(action)
     if action:
         header.append("当前状态：" + action)
     run_id = str(result.get("run_id") or result.get("find_run_id") or "").strip()
@@ -4168,6 +4238,10 @@ def _public_read_job_logs(logs: list[str], progress: dict[str, Any], result: dic
     for error in read_progress.get("recent_errors") or []:
         text = _read_progress_title(error, max_len=300)
         if text:
+            if text.lower().startswith("traceback") or re.match(r'^file\s+["\']', text, flags=re.I):
+                continue
+            if live_status in {"error", "failed", "fail"} and re.match(r"^[A-Za-z_][\w.]*?(?:Error|Exception):", text):
+                continue
             while text.startswith("错误：错误："):
                 text = text.removeprefix("错误：")
             while text.startswith("错误：警告："):
@@ -4195,7 +4269,7 @@ def _public_plan_stage_detail(logs: list[str]) -> str:
         if line.startswith("Planning idea:"):
             title = line.split(":", 1)[1].strip() or "已批准 Idea"
             return f"正在为 Idea 生成 Plan：{title}"
-        if line == "Plan stage complete":
+        if line.startswith("Plan stage complete"):
             return "Plan 已产出，正在同步项目产物。"
     return ""
 
@@ -4205,18 +4279,26 @@ def _public_read_idea_plan_job_logs(stage: str, logs: list[str], progress: dict[
     label_map = {"read": "精读", "idea": "Idea", "plan": "Plan"}
     label = label_map.get(stage, "文献推理")
     out: list[str] = []
-    status = str(result.get("status") or progress.get("phase") or "").strip()
+    result_status = str(result.get("status") or "").strip()
+    progress_phase = str(progress.get("phase") or "").strip()
+    status = result_status or progress_phase
     message = str(progress.get("message") or result.get("summary") or status or "").strip()
     lowered = "\n".join([message, status, "\n".join(logs[-12:])]).lower()
     stage_detail = _public_plan_stage_detail(logs) if stage == "plan" else ""
-    if "claude_current_find_read_idea_plan_ready_waiting_for_environment_base_selection" in lowered or "claude_takeover_ready" in lowered:
+    error_state = any(value.lower() in {"error", "failed", "fail"} for value in [result_status, progress_phase] if value)
+    if error_state:
+        cleaned_message = _public_job_summary_text(_public_text(message))
+        out.append("当前状态：" + (cleaned_message[:220] if cleaned_message else f"{label}任务执行失败。"))
+    elif "claude_current_find_read_idea_plan_ready_waiting_for_environment_base_selection" in lowered or "claude_takeover_ready" in lowered:
         out.append("当前状态：精读、Idea 和 Plan 已完成，等待环境阶段选择基底。")
     elif any(marker in lowered for marker in ["blocked_current_find_deep_read_pending", "claude_deep_read_required", "pending_deep_read_synthesis"]):
         out.append("当前状态：当前 Find 的全文证据已覆盖，但仍有论文未完成精读；TASTE 需要继续运行 Reading subagent。")
     elif any(marker in lowered for marker in ["blocked_current_find_full_text_evidence_pending", "full_text_evidence_missing", "pending_full_text_reading"]):
         out.append("当前状态：当前 Find 仍缺少同篇全文证据，Read 已停在全文证据门控。")
     elif any(marker in lowered for marker in ["evidence gate", "waiting_for_environment", "waiting for environment", "blocked"]):
-        out.append("当前状态：当前阶段仍未完成，TASTE 已暂停下游发布。")
+        cleaned_message = _public_job_summary_text(_public_text(message))
+        generic_status = cleaned_message.lower().replace("-", "_") in {"blocked", "blocking", "阻塞"} or cleaned_message.lower().startswith("blocked_")
+        out.append("当前状态：" + (cleaned_message[:220] if cleaned_message and not generic_status else "当前阶段仍未完成，TASTE 已暂停下游发布。"))
     elif "complete" in lowered or "done" in lowered:
         out.append(f"当前状态：{label}阶段已完成。")
     elif stage_detail:
@@ -4272,13 +4354,16 @@ def _public_job_logs(stage: Any, logs: Any, progress: Any = None, result: Any = 
         return _public_stage_job_logs(public_stage, raw, progress, result, limit=min(limit, 8))
 
     if public_stage == "find" or raw_stage.startswith("find"):
-        return _public_find_job_logs(raw, progress, result, limit=min(limit, 8))
+        stage_limit = min(limit, 8)
+        return _with_public_task_error_detail(_public_find_job_logs(raw, progress, result, limit=stage_limit), raw, progress, result, limit=stage_limit)
 
     if public_stage == "read":
-        return _public_read_job_logs(raw, progress, result, limit=min(limit, 24))
+        stage_limit = min(limit, 24)
+        return _with_public_task_error_detail(_public_read_job_logs(raw, progress, result, limit=stage_limit), raw, progress, result, limit=stage_limit)
 
     if public_stage in {"idea", "plan"}:
-        return _public_read_idea_plan_job_logs(public_stage, raw, progress, result, limit=min(limit, 8))
+        stage_limit = min(limit, 8)
+        return _with_public_task_error_detail(_public_read_idea_plan_job_logs(public_stage, raw, progress, result, limit=stage_limit), raw, progress, result, limit=stage_limit)
 
     if public_stage == "paper" or raw_stage.startswith("paper"):
         out: list[str] = []
@@ -5562,8 +5647,8 @@ def _new_find_guard_blocker(request: FindRequest | None = None) -> dict[str, Any
         "recommendation_target_count": target,
         "recommendation_shortfall": shortfall,
         "approval_path": str(approval_path),
-        "message": "Current Find recommendation gate is short; use force_new_find/restart_full_cycle for an explicit fresh Find, or framework/scripts/run_module.py finding --action literature_tool for controlled targeted repair.",
-        "message_zh": "当前 Find 推荐门控未过；显式重新 Find 请使用 force_new_find/restart_full_cycle，受控补检索请走 framework/scripts/run_module.py finding --action literature_tool。",
+        "message": "Current Find recommendation gate is short; use force_new_find/restart_full_cycle for an explicit fresh Find, or framework/scripts/main.py module finding --action literature_tool for controlled targeted repair.",
+        "message_zh": "当前 Find 推荐门控未过；显式重新 Find 请使用 force_new_find/restart_full_cycle，受控补检索请走 framework/scripts/main.py module finding --action literature_tool。",
     }
 
 
@@ -8469,7 +8554,7 @@ def _live_jobs_from_projects(*, compact: bool = True, project_filter: str = "") 
             if child_phase == "paper" or str(full_job.get("kind") or "") in {"paper_pipeline", "paper_repair_loop", "paper_claude_session", "experiment_training"}:
                 phase = child_phase
                 raw_stage = child_kind or raw_stage or child_phase
-        # A Claude child can invoke framework/scripts/run_module.py finding --action literature_tool while the
+        # A Claude child can invoke framework/scripts/main.py module finding --action literature_tool while the
         # full-cycle remains in read/idea/experiment repair, and that wrapper may
         # spawn run_frontend/run_driver. Treat it as an auxiliary
         # literature subtask unless the public full-cycle phase is Find.
@@ -9475,12 +9560,19 @@ def _current_find_read_history_job(project_id: str, root: Path, run_id: str, sta
     if isinstance(embedded_validation, dict):
         validation = {**validation, **embedded_validation}
 
-    recommended_count = _first_positive_count(
-        validation.get("recommended_reading_count"),
-        validation.get("expected_recommendation_count"),
+    expected_reading_count = _first_positive_count(
+        validation.get("expected_reading_count"),
+        validation.get("selected_reading_count"),
         state_payload.get("current_find_reading_count"),
-        payload.get("recommended_reading_count"),
+        payload.get("selected_reading_count"),
+        payload.get("expected_reading_count"),
         default=count,
+    )
+    recommendation_count = _first_positive_count(
+        payload.get("recommendation_count"),
+        validation.get("expected_recommendation_count"),
+        validation.get("recommended_reading_count"),
+        default=0,
     )
     full_text_count = _first_positive_count(
         validation.get("full_text_reading_count"),
@@ -9517,7 +9609,7 @@ def _current_find_read_history_job(project_id: str, root: Path, run_id: str, sta
         read_md_present
         and pending_count > 0
         and pending_deep_count <= 0
-        and deep_read_count + pending_count >= (recommended_count or count)
+        and deep_read_count + pending_count >= (expected_reading_count or count)
     )
     if read_run_complete_with_missing_full_text:
         status = "done"
@@ -9529,14 +9621,14 @@ def _current_find_read_history_job(project_id: str, root: Path, run_id: str, sta
         status = "blocked"
 
     if read_run_complete_with_missing_full_text:
-        summary = f"Read 阶段已完成并有警告：爬文章已处理 {recommended_count or count}/{recommended_count or count} 篇，其中同篇全文可用 {full_text_count}/{recommended_count or count} 篇；读文章完成 {deep_read_count}/{deep_read_count} 篇；{pending_count} 篇全文未就绪，保留在下游证据门控。"
+        summary = f"Read 阶段已完成并有警告：爬文章已处理 {expected_reading_count or count}/{expected_reading_count or count} 篇，其中同篇全文可用 {full_text_count}/{expected_reading_count or count} 篇；读文章完成 {deep_read_count}/{deep_read_count} 篇；{pending_count} 篇全文未就绪，保留在下游证据门控。"
     elif read_complete_with_warnings:
-        summary = f"Read 阶段已完成并有警告：当前展示 {count}/{recommended_count or count} 篇；同篇全文证据 {full_text_count or count}/{recommended_count or count} 篇；精读完成 {deep_read_count or count}/{recommended_count or count} 篇；{pending_deep_count} 篇未进入最终 read.md，仅记录在任务日志和机器状态。"
+        summary = f"Read 阶段已完成并有警告：当前展示 {count}/{expected_reading_count or count} 篇；同篇全文证据 {full_text_count or count}/{expected_reading_count or count} 篇；精读完成 {deep_read_count or count}/{expected_reading_count or count} 篇；{pending_deep_count} 篇未进入最终 read.md，仅记录在任务日志和机器状态。"
     elif status == "done":
         warning_suffix = f"；warning {len(warning_details)} 项" if warning_details else ""
-        summary = f"Read 阶段已完成：当前展示 {count}/{recommended_count or count} 篇；同篇全文证据 {full_text_count or count}/{recommended_count or count} 篇；精读完成 {deep_read_count or count}/{recommended_count or count} 篇{warning_suffix}。"
+        summary = f"Read 阶段已完成：当前展示 {count}/{expected_reading_count or count} 篇；同篇全文证据 {full_text_count or count}/{expected_reading_count or count} 篇；精读完成 {deep_read_count or count}/{expected_reading_count or count} 篇{warning_suffix}。"
     else:
-        summary = f"Read 阶段仍需补证：当前展示 {count}/{recommended_count or count} 篇；同篇全文证据 {full_text_count}/{recommended_count or count} 篇；精读完成 {deep_read_count}/{recommended_count or count} 篇；待补全文 {pending_count} 篇，待精读 {pending_deep_count} 篇。"
+        summary = f"Read 阶段仍需补证：当前展示 {count}/{expected_reading_count or count} 篇；同篇全文证据 {full_text_count}/{expected_reading_count or count} 篇；精读完成 {deep_read_count}/{expected_reading_count or count} 篇；待补全文 {pending_count} 篇，待精读 {pending_deep_count} 篇。"
 
     created_at = _current_find_artifact_timestamp(
         [artifact_path, validation_path, root / "state" / "current_find_research_plan.json"],
@@ -9550,7 +9642,9 @@ def _current_find_read_history_job(project_id: str, root: Path, run_id: str, sta
         "status": status,
         "summary": summary,
         "read_count": count,
-        "recommended_reading_count": recommended_count,
+        "expected_reading_count": expected_reading_count,
+        "selected_reading_count": expected_reading_count,
+        "recommendation_count": recommendation_count,
         "full_text_reading_count": full_text_count,
         "pending_full_text_reading_count": pending_count,
         "deep_read_complete_count": deep_read_count,
@@ -9574,7 +9668,7 @@ def _current_find_read_history_job(project_id: str, root: Path, run_id: str, sta
         "progress": {
             "phase": "complete" if status == "done" else "blocked",
             "current": count,
-            "total": max(recommended_count, count, 1),
+                "total": max(expected_reading_count, count, 1),
             "percent": 100 if status == "done" else 0,
             "message": summary,
         },
@@ -10102,6 +10196,7 @@ def _reconcile_detached_launcher_jobs(dynamic_items: list[dict[str, Any]] | None
                     if text and text not in job.logs:
                         job.logs.append(text)
                 if job.status in {"done", "error", "cancelled", "blocked"}:
+                    job.mark_finished(str(dynamic.get("finished_at") or ""))
                     job.done.set()
                 else:
                     job.done.clear()
@@ -10127,6 +10222,7 @@ def _reconcile_detached_launcher_jobs(dynamic_items: list[dict[str, Any]] | None
                         message = f"Detached full-cycle worker stopped at gate={cycle_status}."
                     job.set_progress("blocked", 0, 1, message)
                     job.log("Detached full-cycle worker is no longer running; launcher job reconciled to blocked.")
+                job.mark_finished()
                 changed = True
     if changed:
         _persist_jobs()
@@ -10526,6 +10622,7 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
         "stage": public_stage,
         "status": public_status,
         "created_at": item.get("created_at", ""),
+        "finished_at": item.get("finished_at", ""),
         "logs": _public_job_logs(panel_stage or ("paper" if paper_job else ("full-cycle" if full_cycle_job else raw_stage)), item.get("logs"), public_progress, public_log_result, limit=40),
         "log_count": item.get("log_count", 0),
         "run_id": item.get("run_id", "") or compact_result.get("run_id", ""),
@@ -10715,6 +10812,7 @@ def _load_persisted_jobs() -> None:
         if _job_is_hollow_route(item):
             continue
         job = JobState.from_dict(item)
+        persisted_was_live = job.status in {"queued", "running", "cancelling"}
         stage = str(job.stage or "")
         error_text = str(job.error or "")
         error_lower = error_text.lower()
@@ -10776,6 +10874,8 @@ def _load_persisted_jobs() -> None:
                 job.log("Marked interrupted/cancelled after server restart.")
         if job.status in {"done", "blocked"}:
             job.result = _fresh_find_result_for_job(job)
+        if persisted_was_live and job.status not in {"queued", "running", "cancelling"}:
+            job.mark_finished(job.cancelled_at)
         with JOBS_LOCK:
             JOBS[job.job_id] = job
     _persist_jobs()
@@ -10834,6 +10934,8 @@ def start_job(stage: str, fn: Callable[[Callable[[str], None], Callable[[], bool
                         job.status = "done"
                 else:
                     job.status = "done"
+            if job.status not in {"queued", "running", "cancelling"}:
+                job.mark_finished(job.cancelled_at)
             _persist_jobs()
             if job.status == "cancelled":
                 job.cancelled_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -10859,18 +10961,22 @@ def start_job(stage: str, fn: Callable[[Callable[[str], None], Callable[[], bool
                 _auto_email_after_success(stage, job.result)
         except JobCancelled as exc:
             job.status = "cancelled"
-            _persist_jobs()
             job.error = str(exc)
             job.cancelled_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+            job.mark_finished(job.cancelled_at)
+            _persist_jobs()
             job.set_progress("cancelled", 0, 1, str(exc))
             job.log(str(exc))
         except Exception as exc:
             job.status = "error"
             job.error = str(exc)
+            job.mark_finished()
             job.set_progress("error", 0, 1, str(exc))
             job.log(str(exc))
             job.log(traceback.format_exc())
         finally:
+            if job.status not in {"queued", "running", "cancelling"}:
+                job.mark_finished(job.cancelled_at)
             job.done.set()
             _persist_jobs()
             if account_token is not None:
@@ -11374,6 +11480,7 @@ def _current_find_downstream_blocked_job(stage: str, blocker: dict[str, Any]) ->
         JOBS[job.job_id] = job
     job.set_progress("blocked", 1, 1, message)
     job.log(f"{stage} blocked: {message}")
+    job.mark_finished()
     job.done.set()
     _persist_jobs()
     return job
@@ -11405,6 +11512,8 @@ def _current_find_read_validation_requires_repair(root: Path, run_id: str) -> bo
         or validation.get("error_details")
         or validation.get("deep_read_content_gap_details")
         or validation.get("blockers")
+        or (validation.get("scoring_required") is True and validation.get("scoring_complete") is not True)
+        or (validation.get("scoring_required") is True and validation.get("read_quality_complete") is not True)
     )
 
 
@@ -11432,29 +11541,39 @@ def _run_current_find_claude_read_job(project: str, root: Path, request: ReadReq
     except Exception:
         configured_idea_count = 0
     idea_count = max(1, configured_idea_count or AppConfig().max_ideas)
+    read_limit = configured_max_read_papers(project, explicit=getattr(request, "max_papers", None))
     force_requested = bool(getattr(request, "force", False))
     repair_mode = _current_find_read_validation_requires_repair(root, run_id) or _current_find_read_is_incomplete(root, run_id, idea_count=idea_count, require_idea_plan=False)
     force_deep_read = force_requested
     plan_state = _read_project_json(root / "state" / "current_find_research_plan.json", {})
-    find_progress = _read_project_json(root / "planning" / "finding" / "find_progress.json", {})
-    prepared_count = next((count for count in [
-        _as_int((plan_state if isinstance(plan_state, dict) else {}).get("current_find_reading_count"), 0),
-        _as_int((find_progress if isinstance(find_progress, dict) else {}).get("strong_recommendation_count"), 0),
-        _as_int((find_progress if isinstance(find_progress, dict) else {}).get("recommendation_target_count"), 0),
-    ] if count > 0), 0)
+    find_results = _read_project_json(root / "planning" / "finding" / "find_results.json", {})
+    ranked_rows: list[Any] = []
+    if isinstance(find_results, dict):
+        for key in ("screened_ranking", "final_ranking", "ranked_papers", "evaluated_candidates", "strong_recommendations"):
+            candidate_rows = find_results.get(key)
+            if isinstance(candidate_rows, list) and candidate_rows:
+                ranked_rows = candidate_rows
+                break
+    persisted_selected_count = _as_int(
+        (plan_state if isinstance(plan_state, dict) else {}).get("selected_reading_count")
+        or (plan_state if isinstance(plan_state, dict) else {}).get("expected_reading_count"),
+        0,
+    )
+    prepared_count = persisted_selected_count or (min(read_limit, len(ranked_rows)) if ranked_rows else read_limit)
     if prepared_count > 0:
         log(f"Full-text acquisition phase: {prepared_count} papers")
         progress("full_text", 0, prepared_count, f"爬文章：当前 Find 共 {prepared_count} 篇。")
     cmd = [
         management_python,
-        str(WORKSPACE_ROOT / "framework" / "scripts" / "run_module.py"),
+        str(WORKSPACE_ROOT / "framework" / "scripts" / "main.py"),
+        "module",
         "reading",
         "--action",
         "current_find_research_plan",
         "--project",
         project,
         "--read-limit",
-        "0",
+        str(read_limit),
         "--idea-count",
         str(idea_count),
     ]
@@ -11540,7 +11659,17 @@ def _run_current_find_claude_read_job(project: str, root: Path, request: ReadReq
             summary = f"当前 Find 全文证据已覆盖，但仍有 {pending_deep or len(titles)} 篇论文未完成精读{title_hint}。"
         elif "full_text_evidence" in status or pending_full_text:
             summary = f"当前 Find 仍有 {pending_full_text} 篇缺少同篇全文证据，Read 已停在全文证据门控。"
-    read_valid = isinstance(validation, dict) and validation.get("valid") is True
+    read_valid = bool(
+        isinstance(validation, dict)
+        and validation.get("valid") is True
+        and (
+            validation.get("scoring_required") is not True
+            or (
+                validation.get("scoring_complete") is True
+                and validation.get("read_quality_complete") is True
+            )
+        )
+    )
     if read_valid and status.startswith("blocked_current_find_claude_read_failed"):
         status = str(validation.get("status") or "current_find_deep_read_complete")
     progress("complete" if read_valid or (rc == 0 and not status.startswith("blocked")) else "blocked", 1, 1, summary or status)
@@ -11552,10 +11681,14 @@ def _run_current_find_claude_read_job(project: str, root: Path, request: ReadReq
         "repair_mode": repair_mode,
         "force_deep_read_requested": force_requested,
         "idea_count": idea_count,
+        "max_read_papers": read_limit,
         "return_code": rc,
         "failure_type": (current_plan if isinstance(current_plan, dict) else {}).get("failure_type"),
         "pending_deep_read_synthesis_count": (validation if isinstance(validation, dict) else {}).get("pending_deep_read_synthesis_count"),
         "pending_full_text_reading_count": (validation if isinstance(validation, dict) else {}).get("pending_full_text_reading_count"),
+        "scoring_status": (validation if isinstance(validation, dict) else {}).get("scoring_status"),
+        "scoring_complete": (validation if isinstance(validation, dict) else {}).get("scoring_complete"),
+        "read_quality_complete": (validation if isinstance(validation, dict) else {}).get("read_quality_complete"),
         "readings": len((read_payload if isinstance(read_payload, dict) else {}).get("readings") or []),
         "ideas": len((idea_payload if isinstance(idea_payload, dict) else {}).get("ideas") or []),
         "plans": len((plan_payload if isinstance(plan_payload, dict) else {}).get("plans") or []),
@@ -11563,7 +11696,11 @@ def _run_current_find_claude_read_job(project: str, root: Path, request: ReadReq
         "read_md": str(root / "planning" / "finding" / "read.md"),
         "public_final_artifact": str(root / "planning" / "finding" / "read.md"),
         "read_results": str(root / "planning" / "finding" / "read_results.json"),
-        "prepared_reading_input": {"source": "framework", "recommendation_count": prepared_count},
+        "prepared_reading_input": {
+            "source": "framework",
+            "selected_reading_count": prepared_count,
+            "expected_reading_count": prepared_count,
+        },
         "reading_sync": result_payload.get("reading_sync") if isinstance(result_payload, dict) else {},
         "wrapper_result": result_payload,
         "stdout_tail": output_lines[-20:],
@@ -11584,12 +11721,13 @@ def _read_requires_current_find_job(request: ReadRequest) -> JobState:
         "source": "web_read_project_bridge",
         "message": message,
         "next_required_action": "select_or_adopt_project_current_find_then_run_read",
-        "policy": "Web sends Read commands only to framework/scripts/run_module.py; Framework prepares inputs, invokes Reading, and synchronizes project artifacts.",
+        "policy": "Web sends Read commands only to framework/scripts/main.py module; Framework prepares inputs, invokes Reading, and synchronizes project artifacts.",
     }
     with JOBS_LOCK:
         JOBS[job.job_id] = job
     job.set_progress("blocked", 1, 1, message)
     job.log(message)
+    job.mark_finished()
     job.done.set()
     _persist_jobs()
     return job
@@ -11726,7 +11864,8 @@ def _run_ideation_framework_job(
     management_python = os.environ.get("MANAGEMENT_PYTHON") or sys.executable
     cmd = [
         management_python,
-        str(WORKSPACE_ROOT / "framework" / "scripts" / "run_module.py"),
+        str(WORKSPACE_ROOT / "framework" / "scripts" / "main.py"),
+        "module",
         "ideation",
         "--action",
         "idea",
@@ -11747,6 +11886,7 @@ def _run_ideation_framework_job(
     progress("ideation", 1, 1, "Ideas 已生成。")
     return {
         "status": "ok",
+        "project": project,
         "run_id": request.run_id,
         "source": "framework_ideation_entrypoint",
         "framework": result_payload,
@@ -11767,7 +11907,8 @@ def _run_planning_module_job(
         raise RuntimeError("Planning requires an active project.")
     cmd = [
         os.environ.get("MANAGEMENT_PYTHON") or sys.executable,
-        str(WORKSPACE_ROOT / "framework" / "scripts" / "run_module.py"),
+        str(WORKSPACE_ROOT / "framework" / "scripts" / "main.py"),
+        "module",
         "planning",
         "--action",
         action,
@@ -11788,11 +11929,11 @@ def _run_planning_module_job(
     log("Delegating Planning to Framework: " + " ".join(cmd))
     rc, stdout_text, payload = _run_framework_process(cmd, _framework_module_env(config, project), log, should_cancel)
     if rc != 0:
-        raise RuntimeError(f"Framework Planning failed with exit code {rc}: {stdout_text[-2000:]}")
+        raise RuntimeError(_framework_user_error(stdout_text, f"Framework Planning failed with exit code {rc}."))
     _cleruntime_caches(project)
     _clerun_caches(request.run_id)
     progress("planning", 1, 1, "Planning 已完成。")
-    return {"status": "ok", "run_id": request.run_id, "source": "framework_planning_entrypoint", "framework": payload}
+    return {"status": "ok", "project": project, "run_id": request.run_id, "source": "framework_planning_entrypoint", "framework": payload}
 
 
 @app.post("/api/jobs/read")
@@ -11842,9 +11983,12 @@ def api_idea(request: IdeaRequest) -> dict:
         duplicate = _active_web_stage_job_blocker(project, "idea")
         if duplicate:
             return JSONResponse(status_code=409, content=duplicate)
-        job = start_job("idea", lambda log, should_cancel, progress: _run_ideation_framework_job(project, request, config, log, should_cancel, progress))
+        job = start_job(
+            "idea",
+            lambda log, should_cancel, progress: _run_ideation_framework_job(project, request, config, log, should_cancel, progress),
+            initial_result={"project": project, "run_id": request.run_id, "status": "running", "source": "framework_ideation_entrypoint"},
+        )
         job.run_id = request.run_id
-        job.result = {"project": project, "run_id": request.run_id, "status": "running", "source": "framework_ideation_entrypoint"}
         _persist_jobs()
         return _public_account_payload(job.as_dict())
 
@@ -11868,6 +12012,8 @@ def api_plan(request: PlanRequest) -> dict:
             lambda log, should_cancel, progress: _run_planning_module_job(project, request, config, "plan", log, should_cancel, progress),
             initial_result={"project": project, "run_id": request.run_id, "status": "running", "source": "framework_planning_entrypoint"},
         )
+    job.run_id = request.run_id
+    _persist_jobs()
     return _public_account_payload(job.as_dict())
 
 
@@ -11890,6 +12036,8 @@ def api_plan_polish(request: PlanPolishRequest) -> dict:
             lambda log, should_cancel, progress: _run_planning_module_job(project, request, config, "polish", log, should_cancel, progress),
             initial_result={"project": project, "run_id": request.run_id, "status": "running", "source": "framework_planning_entrypoint"},
         )
+    job.run_id = request.run_id
+    _persist_jobs()
     return _public_account_payload(job.as_dict())
 
 
@@ -12508,7 +12656,8 @@ def api_finish_plan(run_id: str, plan_id: str):
             raise ValueError("Plan selection requires an active project.")
         cmd = [
             os.environ.get("MANAGEMENT_PYTHON") or sys.executable,
-            str(WORKSPACE_ROOT / "framework" / "scripts" / "run_module.py"),
+            str(WORKSPACE_ROOT / "framework" / "scripts" / "main.py"),
+            "module",
             "planning",
             "--action",
             "finish",
@@ -13231,7 +13380,8 @@ def api_patch_idea(
         return JSONResponse(status_code=409, content=blocker)
     cmd = [
         os.environ.get("MANAGEMENT_PYTHON") or sys.executable,
-        str(WORKSPACE_ROOT / "framework" / "scripts" / "run_module.py"),
+        str(WORKSPACE_ROOT / "framework" / "scripts" / "main.py"),
+        "module",
         "ideation",
         "--action",
         "patch",
@@ -13270,7 +13420,8 @@ def api_update_idea_markdown(
         return JSONResponse(status_code=409, content=blocker)
     cmd = [
         os.environ.get("MANAGEMENT_PYTHON") or sys.executable,
-        str(WORKSPACE_ROOT / "framework" / "scripts" / "run_module.py"),
+        str(WORKSPACE_ROOT / "framework" / "scripts" / "main.py"),
+        "module",
         "ideation",
         "--action",
         "update_markdown",
@@ -13308,7 +13459,8 @@ def api_update_plan_markdown(run_id: str, update: PlanMarkdownUpdate, project: s
         return JSONResponse(status_code=409, content={"status": "error", "message": "Plan Markdown editing requires an active project."})
     cmd = [
         os.environ.get("MANAGEMENT_PYTHON") or sys.executable,
-        str(WORKSPACE_ROOT / "framework" / "scripts" / "run_module.py"),
+        str(WORKSPACE_ROOT / "framework" / "scripts" / "main.py"),
+        "module",
         "planning",
         "--action",
         "update_markdown",

@@ -94,6 +94,7 @@ export type Job = {
   display?: string;
   status: "queued" | "running" | "stale" | "interrupted" | "done" | "blocked" | "error" | "cancelling" | "cancelled" | "preview_available" | "needs_writing" | "preview_pdf_blocked";
   created_at: string;
+  finished_at?: string;
   logs: string[];
   result?: any;
   error?: string;
@@ -270,13 +271,14 @@ export async function startFind(config: Config, selection: any, options: Record<
   );
 }
 
-export async function startRead(runId: string, paperIds: string[]) {
+export async function startRead(runId: string, paperIds: string[], maxPapers = 0) {
   const selected = Array.isArray(paperIds) ? paperIds.filter(Boolean) : [];
+  const limit = Math.max(0, Math.trunc(Number(maxPapers) || 0));
   return json<Job>(
     await apiFetch("/api/jobs/read", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ run_id: runId, paper_ids: selected, max_papers: selected.length ? selected.length : 0 }),
+      body: JSON.stringify({ run_id: runId, paper_ids: selected, max_papers: limit || selected.length }),
     }),
   );
 }

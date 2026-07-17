@@ -17,7 +17,7 @@ conda activate taste
 
 ## 网页使用
 
-通常从 TASTE 网页点击 Ideas。网页只发送明确的项目、当前 Find run、idea 数量上限和任务指令；Framework 校验当前 Find/Read、构建规范化输入包，再通过 `framework/scripts/run_module.py ideation --action idea` 调用本模块。Framework 对同一项目的生成和编辑使用阻塞式文件锁，不同项目可以独立运行。Framework 随后把本次模块 run 复制到：
+通常从 TASTE 网页点击 Ideas。网页只发送明确的项目、当前 Find run、idea 数量上限和任务指令；Framework 校验当前 Find/Read、构建规范化输入包，再通过 `python framework/scripts/main.py module ideation --action idea` 调用本模块。Framework 对同一项目的生成和编辑使用阻塞式文件锁，不同项目可以独立运行。Framework 随后把本次模块 run 复制到：
 
 ```text
 projects/<project>/planning/finding/ideation_runs/<ideation_timestamp>/

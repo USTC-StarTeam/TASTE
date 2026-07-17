@@ -4,6 +4,10 @@
   "user_prompt": "replace me with a natural-language research goal",
   "conda_env": "",
   "python_executable": "python3",
+  "max_read_papers": 50,
+  "reading": {
+    "max_read_papers_source": "module_default"
+  },
   "runtime": {
     "management_python": "",
     "experiment_python": "",

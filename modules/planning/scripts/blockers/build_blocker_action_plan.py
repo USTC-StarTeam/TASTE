@@ -22,11 +22,11 @@ ROOT = _repo_root(Path(__file__).resolve())
 FRAMEWORK_SCRIPTS = ROOT / "framework" / "scripts"
 if str(FRAMEWORK_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(FRAMEWORK_SCRIPTS))
-from taste_pythonpath import ensure_taste_pythonpath, resolve_script_path, taste_pythonpath_string
+from runtime.taste_pythonpath import ensure_taste_pythonpath, resolve_script_path, taste_pythonpath_string
 
 ensure_taste_pythonpath(ROOT)
 
-from project_paths import CLAUDE_SKILL_ROOT, build_paths, management_python
+from project.project_paths import CLAUDE_SKILL_ROOT, build_paths, management_python
 
 
 def now_iso() -> str:
@@ -76,7 +76,8 @@ def load_skills() -> dict[str, str]:
 def module_command(project: str, stage: str, action: str, *extra: str) -> str:
     parts = [
         management_python(),
-        "framework/scripts/run_module.py",
+        "framework/scripts/main.py",
+        "module",
         stage,
         "--action",
         action,
@@ -106,7 +107,8 @@ PUBLIC_SCRIPT_ACTIONS: dict[tuple[str, str], str] = {
 def current_find_refresh_command(project: str) -> str:
     parts = [
         management_python(),
-        "framework/scripts/run_frontend.py",
+        "framework/scripts/main.py",
+        "find",
         "--project",
         project,
         "--deep-survey",
@@ -137,7 +139,7 @@ def command(project: str, script_or_venue: str, *extra: str) -> str:
     if len(rel_parts) >= 4 and rel_parts[0] == "modules" and rel_parts[2] == "scripts" and str(rel_parts[-1]).endswith(".py"):
         stage = rel_parts[1]
         action = PUBLIC_SCRIPT_ACTIONS.get((stage, str(rel_parts[-1])), Path(rel_parts[-1]).stem)
-        parts = [management_python(), "framework/scripts/run_module.py", stage, "--action", action, "--project", project]
+        parts = [management_python(), "framework/scripts/main.py", "module", stage, "--action", action, "--project", project]
     else:
         parts = [management_python(), str(rel), "--project", project]
     parts.extend(str(item) for item in tail if str(item).strip())
@@ -1785,7 +1787,7 @@ def enforce_literature_recommendation_gate(
                 ]
                 row["success_checks"] = [
                     "POST /api/config/llm-probe returns ok=true for the saved LLM config.",
-                    "framework/scripts/check_llm_ready.py --project " + project + " --live exits 0.",
+                    "framework/scripts/validation/check_llm_ready.py --project " + project + " --live exits 0.",
                     "A new complete Find run reaches mandatory LLM abstract scoring and writes current-run find_results/article outputs with real abstracts.",
                     "No targeted Find, base-selection, experiment, paper/citation/figure, paper-pipeline, or claim-promotion command is recommended or executed while LLM scoring is unavailable.",
                 ]
@@ -2305,7 +2307,7 @@ def build(project: str, venue: str) -> dict[str, Any]:
         "wrapper_managed_actions": [
             {
                 "id": "trajectory_supervisor",
-                "script": "framework/scripts/run_research_trajectory_supervisor.py",
+                "script": "framework/scripts/automation/run_research_trajectory_supervisor.py",
                 "policy": "wrapper/web/full-cycle owns trajectory supervisor invocation; project Claude workers must not spawn nested supervisors.",
             }
         ],

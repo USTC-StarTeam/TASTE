@@ -23,7 +23,7 @@
 | 路径 | 作用 |
 | --- | --- |
 | `backend/auto_research/web/server.py` | FastAPI 服务入口，负责配置、项目、job、artifact 和静态前端服务。 |
-| `framework/scripts/auto_research/project_bridge.py` | Framework 负责项目命令、运行编排和网页所需的项目状态投影；Web 只调用其公开函数。 |
+| `framework/scripts/bridges/project_bridge.py` | Framework 负责项目命令、运行编排和网页所需的项目状态投影；Web 只调用其公开函数。 |
 | `backend/auto_research/web/script_manifest.json` | 后端网页脚本清单。 |
 | `frontend/client/src/App.tsx` | React 单页应用主界面，包含七阶段页面和任务栏。 |
 | `frontend/client/src/api.ts` | 前端 API 客户端。 |
@@ -43,7 +43,7 @@
 7. Find 来源状态只能展示真实 Find run 的 `source_status` 或项目摘要；`检查可抓取性` 的 venue health sample 只能显示在出版渠道列表中，不能当作“题录总数/渠道候选”回退来源。
 8. 当前 Find 产物按页面作用域传输：Ideas 请求显式携带项目和当前 Find run，只读取 `idea.md` 和 `ideas.json`，不会为了渲染想法同时读取超大的 Find/Read 产物。Ideas 页面上方保留人工修改卡片，最终 `idea.md` 只在右下产物栏渲染。
 9. Plan 页面显示 Framework 确认的已批准 Ideas，并允许勾选一个或多个作为本次输入；没有选中项时禁用生成。页面保持三栏布局，右上“计划操作”直接修改 `plan.md`，右下产物栏渲染同一个项目文件；页面主体不得再复制一份正文。
-10. Plan 生成、润色、Claude 选择、人类选择和 Markdown 保存都调用 `framework/scripts/run_module.py planning`。Web 不读取模块 `.runtime`、不复制 run，也不自行判断 Read/Ideas 是否就绪。
+10. Plan 生成、润色、Claude 选择、人类选择和 Markdown 保存都调用 `python framework/scripts/main.py module planning`。Web 不读取模块 `.runtime`、不复制 run，也不自行判断 Read/Ideas 是否就绪。
 11. Plan 修复轮数是精确次数，默认 3，允许 0。切换到历史 Find run 后，Read/Idea/Plan 的生成、编辑、批准、保存和选择控件必须只读，不能借历史页面状态修改当前项目。
 12. Find 页面必须区分“来源覆盖总量”和“本 run 漏斗计数”：`source_status_totals` 用于说明渠道覆盖，`counts/survey_stats` 用于显示本次实际处理的标题入口、标题筛选、LLM 打分和推荐结果，二者不能互相覆盖。
 13. 测试网页时必须实际打开 `http://127.0.0.1:8879`，在相应 tab 视觉检查所有关键文本、按钮、计数和产物，不只看命令行输出。
@@ -51,7 +51,7 @@
 ## 运行与测试
 
 ```bash
-framework/scripts/start_web.sh
+python framework/scripts/main.py
 npm --prefix web/frontend/client run build
 ```
 
@@ -74,7 +74,7 @@ location / {
 默认只信任本机代理头；若代理来自容器或另一台可信主机，用 `WEB_FORWARDED_ALLOW_IPS` 设置其来源 IP。若需要让 TASTE 自己直接在 8879 提供 TLS，可同时指定证书和私钥（此模式下 8879 将只接受 HTTPS）：
 
 ```bash
-WEB_SSL_CERTFILE=/path/fullchain.pem WEB_SSL_KEYFILE=/path/privkey.pem framework/scripts/start_web.sh
+WEB_SSL_CERTFILE=/path/fullchain.pem WEB_SSL_KEYFILE=/path/privkey.pem python framework/scripts/main.py web
 ```
 
 账户数据采用 Web 到 Framework 的账户项目映射隔离：项目产物与任务访问按账户校验，账户的 LLM/邮件配置保存在 `web/.runtime/accounts/<account-id>/`。Find/Read 的公共下载、题录和全文缓存继续由所有账户共享，科研模块本身不为账户复制；共享缓存不包含其他账户项目产物的访问权限。

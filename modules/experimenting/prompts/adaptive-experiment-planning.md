@@ -25,7 +25,7 @@ Each Task request must contain the selected IDs, exact local paths, one bounded 
 
 - Use `adapted_within_selected_route` for a new execution-level experiment that preserves the selected research idea and plan.
 - Use `reuse_selected_plan` when the live plan already specifies the strongest next experiment.
-- Use `blocked_requires_reselection` when the useful proposal changes the research hypothesis or selected route. Invoke `framework/scripts/run_module.py reading --action current_find_research_plan --project <project>` and wait for one new selected contract plus a matching Environment handoff before execution.
+- Use `blocked_requires_reselection` when the useful proposal changes the research hypothesis or selected route. Invoke `python framework/scripts/main.py module reading --action current_find_research_plan --project <project>` and wait for one new selected contract plus a matching Environment handoff before execution.
 
 ## Required JSON
 

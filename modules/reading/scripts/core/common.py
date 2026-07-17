@@ -74,6 +74,9 @@ DEFAULT_READING_CONFIG: dict[str, Any] = {
         "output_dir": ".runtime/output",
         "latest_run_dir": ".runtime/latest_run",
     },
+    "reading": {
+        "default_max_papers": 50,
+    },
     "http": {
         "default_timeout_sec": 30,
         "max_retry_after_sec": 86400,

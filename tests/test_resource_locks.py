@@ -12,7 +12,7 @@ ensure_script_paths()
 
 
 def _hold_crawl_lease(lock_dir: str, acquired, release, events) -> None:
-    from auto_research import resource_locks
+    from runtime import resource_locks
 
     resource_locks.FRAMEWORK_LOCKS_DIR = Path(lock_dir)
     with resource_locks.crawl_resource_lease(operation="finding", project="alice"):
@@ -23,7 +23,7 @@ def _hold_crawl_lease(lock_dir: str, acquired, release, events) -> None:
 
 
 def _wait_for_crawl_lease(lock_dir: str, acquired, waiting, events) -> None:
-    from auto_research import resource_locks
+    from runtime import resource_locks
 
     resource_locks.FRAMEWORK_LOCKS_DIR = Path(lock_dir)
     acquired.wait(timeout=10)

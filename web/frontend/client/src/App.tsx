@@ -50,7 +50,7 @@ import {
 } from "./api";
 
 const STANDARD_FIND_DEFAULTS = {
-  llm_concurrency: 8,
+  llm_concurrency: 10,
   nonvenue_fetch_limit: 5000,
   max_recommended_papers: 20,
   venue_title_scan_limit: 0,
@@ -58,12 +58,14 @@ const STANDARD_FIND_DEFAULTS = {
   title_abstract_scoring_limit: 1000,
   full_venue_corpus_audit: true,
   title_filter_timeout_sec: 120,
-  abstract_scoring_max_workers: 8,
-  abstract_scoring_batch_size: 6,
+  abstract_scoring_max_workers: 10,
+  abstract_scoring_batch_size: 10,
   abstract_scoring_timeout_sec: 180,
   arxiv_max_queries: 3,
   arxiv_timeout_sec: 15,
 } as const;
+
+const DEFAULT_READ_PAPER_LIMIT = 50;
 
 const DEFAULT_CONFIG: Config = {
   research_interest: "",
@@ -1075,7 +1077,7 @@ const TEXT = {
     noLiteratureSurvey: "当前 Find run 尚未产出可展示的调研验收结果；Find 完成后这里会显示抓取、筛选、评分和推荐计数。",
     recommendationShortfall: "推荐不足",
     findRunBudget: "Find 运行设置",
-    findBudgetHelp: "标准使用只需设置最低推荐数量和 LLM 并发；arXiv/bioRxiv 抓取上限和综合评分上限已有标准值。高级设置用于调整抓取深度或评分成本。",
+    findBudgetHelp: "标准使用只需设置最低推荐数量和标题 LLM 预筛并发；最终标题+摘要评分独立采用每批 10 篇、默认 10 并发。高级设置用于调整抓取深度或评分成本。",
     advancedFindSettings: "高级预算",
     standardFindProfile: "标准配置",
     restoreStandardFindDefaults: "恢复标准值",
@@ -1083,8 +1085,8 @@ const TEXT = {
     ideaRunBudget: "想法生成预算",
     ideaBudgetHelp: "这些配置只影响想法阶段；Read/Plan/环境/实验/论文不会读取这里的数量上限。",
     projectRunHistoryHelp: "只显示当前项目的历史运行；run ID 保留用于定位具体产物。",
-    llmConcurrency: "LLM 评估并发数",
-    llmConcurrencyHelp: "发现等评估任务使用，范围 1-32，默认 8；慢速兼容 API 建议 4-8。",
+    llmConcurrency: "标题 LLM 预筛并发数",
+    llmConcurrencyHelp: "只控制 Find 标题预筛的 LLM 并发请求数，范围 1-32，默认 10。最终标题+摘要评分使用独立并发，默认同为 10。",
     repairRounds: "计划修复轮数",
     repairRoundsHelp: "Claude 生成初版后，精确执行这里设置的修复轮数；0 表示不追加修复。",
     polishRounds: "继续优化轮数",
@@ -1107,7 +1109,7 @@ const TEXT = {
     titleFilterTimeout: "标题筛选单批超时秒数",
     titleFilterTimeoutHelp: "LLM 标题筛选每个批次的最长等待时间。",
     abstractWorkers: "摘要评分最大并发",
-    abstractWorkersHelp: "最终评分阶段最大 LLM 并发；太大会触发限流，建议 4。",
+    abstractWorkersHelp: "最终标题+摘要评分阶段的最大 LLM 并发，默认 10；与标题预筛并发相互独立。",
     abstractTimeout: "摘要评分单批超时秒数",
     abstractTimeoutHelp: "最终评分每个批次的最长等待时间。",
     arxivMaxQueries: "arXiv 备用查询组上限",
@@ -1619,7 +1621,7 @@ const TEXT = {
     noLiteratureSurvey: "No current Find audit result is visible yet. Once Find completes, this panel shows retrieval, screening, scoring, and recommended papers.",
     recommendationShortfall: "recommendation shortfall",
     findRunBudget: "Find Settings",
-    findBudgetHelp: "Standard use only needs the minimum recommendation count and LLM concurrency. The arXiv/bioRxiv fetch cap and combined-scoring limit have standard defaults. Use advanced settings to adjust retrieval depth or scoring cost.",
+    findBudgetHelp: "Standard use only needs the minimum recommendation count and title-LLM prefilter concurrency. Final title+abstract scoring independently uses batches of 10 with 10 workers by default. Use advanced settings to adjust retrieval depth or scoring cost.",
     advancedFindSettings: "Advanced budgets",
     standardFindProfile: "standard profile",
     restoreStandardFindDefaults: "Restore standards",
@@ -1627,8 +1629,8 @@ const TEXT = {
     ideaRunBudget: "Idea Budget",
     ideaBudgetHelp: "These settings only affect Idea generation; Read/Plan/Environment/Experiment/Paper do not read these limits.",
     projectRunHistoryHelp: "Only runs for the current project are shown; run ID is kept for artifact lookup.",
-    llmConcurrency: "LLM evaluation concurrency",
-    llmConcurrencyHelp: "Used by Find-style evaluation tasks. Range 1-32, default 8; use 4-8 for slower compatible APIs.",
+    llmConcurrency: "Title-LLM prefilter concurrency",
+    llmConcurrencyHelp: "Controls only concurrent LLM requests for Find title prefiltering. Range: 1-32; default: 10. Final title+abstract scoring has separate concurrency, also defaulting to 10.",
     repairRounds: "Plan repair rounds",
     repairRoundsHelp: "After Claude writes the initial draft, run exactly this many repair rounds; 0 adds no repair round.",
     polishRounds: "Polish rounds",
@@ -1651,7 +1653,7 @@ const TEXT = {
     titleFilterTimeout: "Title filter timeout (sec)",
     titleFilterTimeoutHelp: "Maximum wait per LLM title-filter batch.",
     abstractWorkers: "Abstract scoring max workers",
-    abstractWorkersHelp: "Maximum LLM concurrency for final scoring. Recommended: 4 to avoid rate limits.",
+    abstractWorkersHelp: "Maximum LLM concurrency for final title+abstract scoring. Default: 10; independent of title-prefilter concurrency.",
     abstractTimeout: "Abstract scoring timeout (sec)",
     abstractTimeoutHelp: "Maximum wait per final-scoring batch.",
     arxivMaxQueries: "arXiv fallback query cap",
@@ -2954,10 +2956,20 @@ function nonFindTabFindJobSummary(job: any, lang: Lang = "zh") {
 
 function jobRecentLogs(job: any, lang: Lang = "zh", contextTab?: Tab) {
   if (isHistoricalStoppedResearchCycleJob(job)) return historicalResearchCycleSummary(job, lang);
-  if (contextTab && contextTab !== "find" && isFindRunJob(job) && !isLiveJob(job)) {
+  const status = String(job?.status || "").toLowerCase();
+  const foldableFindHistory = ["done", "cancelled", "stale", "interrupted"].includes(status);
+  if (contextTab && contextTab !== "find" && isFindRunJob(job) && foldableFindHistory) {
     return nonFindTabFindJobSummary(job, lang);
   }
-  const rawLogs = safeJobLogs(job).filter((line) => !isTransientFindServiceLine(line));
+  const rawLogs = safeJobLogs(job).filter((line) => {
+    if (isTransientFindServiceLine(line)) return false;
+    if (!(contextTab && contextTab !== "find" && isFindRunJob(job))) return true;
+    const text = String(line || "").trim();
+    return !text.startsWith("阶段数量：")
+      && !text.startsWith("推荐质量：")
+      && !text.startsWith("find_run_counts=")
+      && !text.startsWith("recommendations=");
+  });
   const scoringProgress = rawLogs.map((line) => String(line || "")).find((line) => line.startsWith("find_live_progress=") && /scored batch|scoring batch|abstract_scoring|LLM/i.test(line));
   const scoringBatch = scoringProgress?.match(/进度\s*([^；;]+)/)?.[1] || scoringProgress?.match(/batch\s+(\d+\/\d+)/i)?.[1] || "";
   return rawLogs
@@ -3067,6 +3079,28 @@ function isLiveJob(job: any) {
   return ["queued", "running", "cancelling"].includes(String(job?.status || ""));
 }
 
+function JobDuration({ createdAt, finishedAt = "", live, lang }: { createdAt: string; finishedAt?: string; live: boolean; lang: Lang }) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!live) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [live]);
+
+  const startedAt = Date.parse(createdAt);
+  const endedAt = live ? now : Date.parse(finishedAt);
+  if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt)) return null;
+  const totalSeconds = Math.max(0, Math.floor((endedAt - startedAt) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const elapsed = [hours, minutes, seconds].map((value) => String(value).padStart(2, "0")).join(":");
+
+  const label = live ? (lang === "zh" ? "已运行" : "Running") : (lang === "zh" ? "耗时" : "Elapsed");
+  return <time className="jobElapsed"> · {label} {elapsed}</time>;
+}
+
 function isStoppedWorkflowStatus(status: any) {
   const normalized = String(status || "").trim().toLowerCase();
   if (!normalized) return false;
@@ -3142,6 +3176,7 @@ function normalizeJobForState(job: any): Job | null {
     total: Number(job.progress.total || 0),
     percent: Number(job.progress.percent || 0),
     message: String(job.progress.message || ""),
+    read_progress: job.progress.read_progress && typeof job.progress.read_progress === "object" ? job.progress.read_progress : undefined,
   } : undefined;
   return {
     ...job,
@@ -3529,6 +3564,20 @@ function currentFindRunIdFromSummary(summary: any) {
   ).trim();
 }
 
+function projectReadPaperLimit(summary: any, fallback = DEFAULT_READ_PAPER_LIMIT) {
+  const candidates = [
+    summary?.run_preferences?.max_read_papers,
+    summary?.config?.max_read_papers,
+    summary?.state?.run_preferences?.max_read_papers,
+    summary?.state?.config?.max_read_papers,
+  ];
+  for (const candidate of candidates) {
+    const numeric = Math.trunc(Number(candidate));
+    if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  }
+  return fallback;
+}
+
 function defaultRunId(runData: RunInfo[], preferredFindRunId = "") {
   if (preferredFindRunId && runData.some((run) => !run.readonly && run.run_id === preferredFindRunId)) return preferredFindRunId;
   const readableFind = runData.find((run) => !run.readonly && run.run_id.startsWith("find_") && runHasReadableStages(run));
@@ -3634,6 +3683,9 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
   const [includeNature, setIncludeNature] = useState(false);
   const [includeScience, setIncludeScience] = useState(false);
   const [selectedPapers, setSelectedPapers] = useState<string[]>([]);
+  const [readPaperLimit, setReadPaperLimit] = useState(DEFAULT_READ_PAPER_LIMIT);
+  const [readPaperLimitDirty, setReadPaperLimitDirty] = useState(false);
+  const [readPaperLimitMessage, setReadPaperLimitMessage] = useState("");
   const [planIdeaIds, setPlanIdeaIds] = useState<string[]>([]);
   const [planRepairRounds, setPlanRepairRounds] = useState(3);
   const [polishRounds, setPolishRounds] = useState<Record<string, number>>({});
@@ -3815,6 +3867,12 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
   }, [tab, researchProject]);
 
   useEffect(() => {
+    if (!researchSummary || readPaperLimitDirty) return;
+    if (researchSummary.project && researchSummary.project !== researchProject) return;
+    setReadPaperLimit(projectReadPaperLimit(researchSummary));
+  }, [researchProject, researchSummary, readPaperLimitDirty]);
+
+  useEffect(() => {
     let cancelled = false;
     const refreshJobs = async () => {
       const projectId = activeProjectRef.current || researchProject || "";
@@ -3856,6 +3914,9 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
     setIncludeGithub(Boolean(selection.include_github));
     setIncludeNature(Boolean(selection.include_nature));
     setIncludeScience(Boolean(selection.include_science));
+    setReadPaperLimit(projectReadPaperLimit(summary));
+    setReadPaperLimitDirty(false);
+    setReadPaperLimitMessage("");
     setResearchRuntimeDraft(runtimeDraftFromSummary(summary));
     setResearchEnvDraft(environmentDraftFromSummary(summary));
   }
@@ -4371,6 +4432,28 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
     }
   }
 
+  async function persistReadPaperLimit(showMessage = false) {
+    const limit = Math.max(1, Math.trunc(Number(readPaperLimit) || DEFAULT_READ_PAPER_LIMIT));
+    if (!researchProject) return limit;
+    const summary = await saveProjectConfig(researchProject, { max_read_papers: limit });
+    const savedLimit = projectReadPaperLimit(summary, 0);
+    if (savedLimit !== limit) throw new Error("Project did not persist max_read_papers");
+    setProjectSummary(summary);
+    setReadPaperLimit(savedLimit);
+    setReadPaperLimitDirty(false);
+    if (showMessage) setReadPaperLimitMessage(lang === "zh" ? "已保存到当前项目。" : "Saved for this project.");
+    return savedLimit;
+  }
+
+  async function saveReadPaperLimit() {
+    try {
+      setReadPaperLimitMessage("");
+      await persistReadPaperLimit(true);
+    } catch {
+      setReadPaperLimitMessage(lang === "zh" ? "保存失败，请重试。" : "Save failed; please retry.");
+    }
+  }
+
   async function runRead() {
     if (rejectHistoricalRunMutation()) return;
     const readRunId = currentProjectFindRunId || runId;
@@ -4379,8 +4462,15 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
       setError(stageLaunchLockedText);
       return;
     }
-    const readPaperIds = readRunId === currentProjectFindRunId ? [] : selectedPapers;
-    attachJob(await startRead(readRunId, readPaperIds), "read");
+    try {
+      setError("");
+      const maxPapers = readPaperLimitDirty
+        ? await persistReadPaperLimit()
+        : Math.max(1, Math.trunc(Number(readPaperLimit) || DEFAULT_READ_PAPER_LIMIT));
+      attachJob(await startRead(readRunId, [], maxPapers), "read");
+    } catch (err) {
+      setError(String(err));
+    }
   }
 
   async function runIdeas() {
@@ -4392,7 +4482,12 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
       return;
     }
     const maxIdeas = Math.min(50, Math.max(1, Number(config.max_ideas) || 1));
-    attachJob(await startIdea(ideaRunId, maxIdeas, researchProject), "ideas");
+    try {
+      setError("");
+      attachJob(await startIdea(ideaRunId, maxIdeas, researchProject), "ideas");
+    } catch (err) {
+      setError(String(err));
+    }
   }
 
   async function runPlan() {
@@ -4407,7 +4502,12 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
       setError(lang === "zh" ? "请至少选择一个已批准的 Idea。" : "Select at least one approved Idea.");
       return;
     }
-    attachJob(await startPlan(planRunId, planIdeaIds, planRepairRounds), "plan");
+    try {
+      setError("");
+      attachJob(await startPlan(planRunId, planIdeaIds, planRepairRounds), "plan");
+    } catch (err) {
+      setError(String(err));
+    }
   }
 
   async function runPlanPolish(planId: string, versionId: string) {
@@ -4418,7 +4518,12 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
       setError(stageLaunchLockedText);
       return;
     }
-    attachJob(await startPlanPolish(planRunId, planId, versionId, polishRounds[planId] || 1), "plan");
+    try {
+      setError("");
+      attachJob(await startPlanPolish(planRunId, planId, versionId, polishRounds[planId] || 1), "plan");
+    } catch (err) {
+      setError(String(err));
+    }
   }
 
   async function runPlanFinish(planId: string) {
@@ -7621,7 +7726,40 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
           <section className="stage">
             <div className="toolbar">
               <h2>{t.read}</h2>
-              <button className="primary" data-testid="run-read-button" onClick={runRead} disabled={!(currentProjectFindRunId || runId) || stageLaunchDisabledByFullCycle || viewingSelectedHistoricalFindRun}>{t.runRead}</button>
+              <button className="primary" data-testid="run-read-button" onClick={runRead} disabled={!(currentProjectFindRunId || runId) || researchProjectConfigSaving || stageLaunchDisabledByFullCycle || viewingSelectedHistoricalFindRun}>{t.runRead}</button>
+            </div>
+            <div className="panel readSettingsPanel">
+              <h3>{lang === "zh" ? "精读设置" : "Read settings"}</h3>
+              <p className="help">{lang === "zh"
+                ? "默认 50 篇；排名论文不足时全部精读，超过时按 Find 最终排名取前 N 篇。Find 完成后，项目默认值会自动更新为推荐数量的 2 倍，你仍可单独修改。"
+                : "The module default is 50. Read all ranked papers when fewer are available, otherwise read the top N from Find's final ranking. After Find completes, the project default updates to 2× the recommendation count and remains editable."}</p>
+              <div className="row">
+                <div>
+                  <label htmlFor="read-paper-limit">{lang === "zh" ? "精读篇数" : "Papers to read"}</label>
+                  <input
+                    id="read-paper-limit"
+                    data-testid="read-paper-limit"
+                    value={readPaperLimit}
+                    onChange={(event) => {
+                      setReadPaperLimit(Math.max(1, Math.trunc(Number(event.target.value) || 1)));
+                      setReadPaperLimitDirty(true);
+                      setReadPaperLimitMessage("");
+                    }}
+                    type="number"
+                    min="1"
+                  />
+                </div>
+                <div>
+                  <label>{lang === "zh" ? "本次精读范围" : "This read scope"}</label>
+                  <p className="readScopeSummary">{lang === "zh" ? `Find 最终排名前 ${readPaperLimit} 篇` : `Top ${readPaperLimit} in Find's final ranking`}</p>
+                  <p className="help">{lang === "zh" ? "不再仅精读 Find 推荐文章。" : "Read is no longer limited to Find recommendations."}</p>
+                </div>
+              </div>
+              <div className="saveBar">
+                <button className="primary" onClick={saveReadPaperLimit} disabled={!researchProject || researchProjectConfigSaving || !readPaperLimitDirty}>{researchProjectConfigSaving ? t.saving : (lang === "zh" ? "保存到当前项目" : "Save for this project")}</button>
+                {readPaperLimitMessage && <span>{readPaperLimitMessage}</span>}
+                {readPaperLimitDirty && <span className="readLimitDirty">{lang === "zh" ? "未保存；运行精读时会自动保存。" : "Unsaved; running Read will save it automatically."}</span>}
+              </div>
             </div>
             <div className="panel readStatusPanel">
               <h3>{lang === "zh" ? "精读状态" : "Reading status"}</h3>
@@ -8115,9 +8253,16 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
                 {displayJobs.map((item) => {
                   const detailedFindProgress = findTaskProgressView(item, lang);
                   const showDetailedFindProgress = Boolean(detailedFindProgress);
-                  const taskLogLines = showDetailedFindProgress ? detailedFindProgress?.logLines || [] : [];
+                  const taskLogLines = showDetailedFindProgress
+                    ? (detailedFindProgress?.logLines || []).filter((line) => tab === "find" || !/^(?:实时计数[:：]|Live counts:)/.test(line))
+                    : [];
                   const consoleLines = [...taskLogLines, ...jobRecentLogs(item, lang, tab)]
                     .filter((line, index, rows) => Boolean(String(line || "").trim()) && rows.indexOf(line) === index);
+                  const readOverall = canonicalJobStage(item) === "read" && item.progress?.read_progress && typeof item.progress.read_progress === "object"
+                    ? item.progress.read_progress
+                    : null;
+                  const progressTotal = Number(readOverall?.overall_total ?? item.progress?.total ?? 0);
+                  const progressPercent = Number(readOverall?.overall_percent ?? item.progress?.percent ?? 0);
                   const progressView = detailedFindProgress ? {
                     message: `${lang === "zh" ? "当前阶段" : "Current stage"} ${detailedFindProgress.stageIndex}/${detailedFindProgress.stageCount} · ${detailedFindProgress.stageLabel}`,
                     percent: detailedFindProgress.stagePercent,
@@ -8126,9 +8271,9 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
                     ariaLabel: lang === "zh" ? "Find 当前阶段进度" : "Current Find stage progress",
                   } : item.progress ? {
                     message: displayJobProgressMessage(item, lang),
-                    percent: Number(item.progress.percent || 0),
-                    measured: Number(item.progress.total || 0) > 0,
-                    detail: Number(item.progress.total || 0) > 0
+                    percent: progressPercent,
+                    measured: progressTotal > 0,
+                    detail: progressTotal > 0
                       ? `${jobProgressPhaseLabel(item, lang)} / ${item.progress.current} / ${item.progress.total}`
                       : `${jobProgressPhaseLabel(item, lang)} ${jobStatusLabel(item.status, lang)}`,
                     ariaLabel: "",
@@ -8137,7 +8282,10 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
                     <article className="jobCard" key={item.job_id}>
                       <div className="jobHeader">
                         <strong>{jobDisplayTitle(item, lang)}</strong>
-                        <span>{jobStatusLabel(item.status, lang)}</span>
+                        <span>
+                          {jobStatusLabel(item.status, lang)}
+                          {(isLiveJob(item) || item.finished_at) && <JobDuration createdAt={item.created_at} finishedAt={item.finished_at} live={isLiveJob(item)} lang={lang} />}
+                        </span>
                       </div>
                       <small>{jobMetaLine(item, lang)}</small>
                       {["queued", "running", "cancelling"].includes(item.status) && (
