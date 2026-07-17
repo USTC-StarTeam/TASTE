@@ -349,8 +349,6 @@ def refresh_latest_run(source: Path) -> Path:
     source_dir = ensure_inside_output(source, label="latest_run 来源")
     if not source_dir.is_dir():
         raise ValueError("latest_run 来源必须是已存在的运行目录")
-    if os.environ.get("PYTEST_CURRENT_TEST") and not env_bool("READING_REFRESH_LATEST_DURING_TESTS", False):
-        return LATEST_RUN_ROOT
     LATEST_RUN_ROOT.parent.mkdir(parents=True, exist_ok=True)
     lock_path = LATEST_RUN_ROOT.parent / ".latest_run.lock"
     temp_dir = LATEST_RUN_ROOT.parent / f".latest_run.tmp.{os.getpid()}.{source_dir.name}"
