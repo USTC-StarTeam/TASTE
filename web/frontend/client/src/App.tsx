@@ -3193,6 +3193,13 @@ function normalizeJobForState(job: any): Job | null {
   };
 }
 
+function preserveLiveFindProgress(previous: Job | undefined, next: Job) {
+  if (!previous || !isLiveJob(next) || !isFindRunJob(next) || runIdFromJob(previous) !== runIdFromJob(next)) return next;
+  const previousProgress = previous.result?.find_progress;
+  if (!previousProgress || next.result?.find_progress) return next;
+  return { ...next, result: { ...(next.result || {}), find_progress: previousProgress } };
+}
+
 function isConfirmedLiveProcess(row: any) {
   if (!row || typeof row !== "object") return false;
   const status = String(row.status || "").toLowerCase();
@@ -3758,7 +3765,7 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
       const jobData = await getJobs(activeId);
       if ((options.isCurrent && !options.isCurrent()) || activeProjectRef.current !== activeId) return;
       const visibleJobData = jobsForProjectResponse(jobData, activeId);
-      setJobs(visibleJobData);
+      setJobs((prev) => visibleJobData.map((item) => preserveLiveFindProgress(prev.find((current) => current.job_id === item.job_id), item)));
       jobsLoadedAtRef.current[activeId] = Date.now();
       setJobsLoaded(true);
       visibleJobData.filter(isWatchableWebJob).forEach((item) => watchExistingJob(item.job_id));
@@ -4035,7 +4042,8 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
     if (activeFindArtifactsInFlightRef.current === id) return;
     activeFindArtifactsInFlightRef.current = id;
     try {
-      const data = await getArtifacts(id, { light: true });
+      const project = activeProjectRef.current || researchProject || "";
+      const data = await getArtifacts(id, { light: true, scope: "find", project: project || undefined });
       setActiveFindArtifacts(data.artifacts);
     } catch {
       setActiveFindArtifacts([]);
@@ -4302,7 +4310,7 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
     if (!normalizedJob) return;
     setJobs((prev) => {
       const exists = prev.some((item) => item.job_id === normalizedJob.job_id);
-      const merged = exists ? prev.map((item) => item.job_id === normalizedJob.job_id ? normalizedJob : item) : [normalizedJob, ...prev];
+      const merged = exists ? prev.map((item) => item.job_id === normalizedJob.job_id ? preserveLiveFindProgress(item, normalizedJob) : item) : [normalizedJob, ...prev];
       return jobsForProject(merged, activeProjectRef.current || researchProject || "");
     });
   }
@@ -6289,7 +6297,7 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [activeFindRunId, activeFindJobForRun]);
+  }, [activeFindRunId, activeFindJobForRun?.job_id]);
 
   useEffect(() => {
     if (!currentProjectFindRunId || activeFindRunId || userSelectedRunRef.current) return;
