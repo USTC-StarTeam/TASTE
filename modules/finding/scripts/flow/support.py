@@ -3748,7 +3748,7 @@ def enrich_acm_doi_with_indexed_abstracts(papers: list[dict], limit: int = 0) ->
     if public_pdf_search_enabled:
         public_pdf_search_limit = _positive_int_env("ACM_PUBLIC_PDF_SEARCH_MAX_ITEMS", limit if limit and limit > 0 else 0)
         papers, public_pdf_search_stats = enrich_acm_doi_with_public_pdf_search(papers, limit=public_pdf_search_limit)
-    chatpaper_enabled = str(os.environ.get("ACM_CHATPAPER_FALLBACK", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
+    chatpaper_enabled = str(os.environ.get("ACM_CHATPAPER_FALLBACK", "0") or "0").strip().lower() not in {"0", "false", "no", "off"}
     chatpaper_stats: dict[str, Any] = {"enabled": False, "attempted": 0, "abstracts_filled": 0}
     if chatpaper_enabled:
         papers, chatpaper_stats = enrich_acm_doi_with_chatpaper(papers, limit=limit)
@@ -3774,7 +3774,7 @@ def enrich_acm_doi_with_indexed_abstracts(papers: list[dict], limit: int = 0) ->
         "semantic_scholar": {"enabled": False, "attempted": 0, "abstracts_filled": 0},
         "arxiv_title_match": {"enabled": False, "attempted": 0, "abstracts_filled": 0},
     }
-    openalex_title_enabled = str(os.environ.get("ACM_OPENALEX_TITLE_FALLBACK") or "").strip().lower() in {"1", "true", "yes", "on"}
+    openalex_title_enabled = str(os.environ.get("ACM_OPENALEX_TITLE_FALLBACK", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
     if openalex_title_enabled:
         openalex_title_missing = [
             paper
@@ -3803,7 +3803,7 @@ def enrich_acm_doi_with_indexed_abstracts(papers: list[dict], limit: int = 0) ->
             "abstracts_filled": max(0, sum(1 for paper in openalex_title_missing if paper.get("abstract")) - before_openalex_title),
             "marked_filled": openalex_title_marked,
         }
-    enabled_text = str(os.environ.get("ACM_SEMANTIC_SCHOLAR_FALLBACK") or "").strip().lower()
+    enabled_text = str(os.environ.get("ACM_SEMANTIC_SCHOLAR_FALLBACK", "1") or "1").strip().lower()
     api_key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "").strip()
     semantic_enabled = bool(api_key) or enabled_text in {"1", "true", "yes", "on"}
     if semantic_enabled:
@@ -4891,11 +4891,12 @@ def fetch_neurips_title_index(year: int, max_items: int, raise_errors: bool = Fa
         if papers:
             for paper in papers:
                 paper["year"] = year
-            papers = _enrich_neurips_official_with_virtual_presentations(
-                papers,
-                year,
-                raise_errors=False,
-            )
+            if requested != 1:
+                papers = _enrich_neurips_official_with_virtual_presentations(
+                    papers,
+                    year,
+                    raise_errors=False,
+                )
             presentation_counts: dict[str, int] = {}
             for paper in papers:
                 metadata = paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}
@@ -5308,6 +5309,8 @@ def _dblp_toc_papers(venue: dict, years: list[int], max_items: int | None) -> li
 
 def fetch_dblp_venue(venue: dict, years: list[int], max_items: int | None) -> list[dict]:
     stream_papers = fetch_dblp_stream_api(venue, years, max_items)
+    if max_items == 1 and stream_papers:
+        return stream_papers[:1]
     toc_papers = _dblp_toc_papers(venue, years, max_items)
     papers = _merge_dblp_paper_sources(venue, stream_papers, toc_papers, max_items)
     if papers:
@@ -5325,6 +5328,135 @@ def fetch_acl_anthology(venue: dict, years: list[int], max_items: int) -> list[d
     yeaudits: list[dict[str, Any]] = []
     limit = int(max_items or 0)
     truncated = False
+    name = (venue.get("name") or "").lower()
+    collection = "emnlp" if "emnlp" in name else ("naacl" if "naacl" in name else "acl")
+
+    # ACL Anthology's event HTML can exceed 10 MB and arrive too slowly for a
+    # fresh-clone year probe. Its official source repository exposes the same
+    # records as compact XML, including authors and abstracts.
+    raw_checked = False
+    for year in years:
+        year_count = 0
+        source_reports: list[dict[str, Any]] = []
+        raw_sources = [
+            (f"https://raw.githubusercontent.com/acl-org/acl-anthology/master/data/xml/{year}.{collection}.xml", ""),
+            (f"https://raw.githubusercontent.com/acl-org/acl-anthology/master/data/xml/{year}.findings.xml", collection),
+        ]
+        for source_url, findings_volume in raw_sources:
+            report: dict[str, Any] = {"source_url": source_url, "paper_count": 0}
+            try:
+                root = ET.fromstring(_request(source_url).text)
+                raw_checked = True
+            except Exception as exc:
+                if _http_status_code(exc) == 404:
+                    raw_checked = True
+                report["error"] = str(exc)[:240]
+                source_reports.append(report)
+                continue
+            for volume in root.findall("volume"):
+                if findings_volume and str(volume.get("id") or "").lower() != findings_volume:
+                    continue
+                meta = volume.find("meta")
+                booktitle = _clean_text("".join(meta.find("booktitle").itertext())) if meta is not None and meta.find("booktitle") is not None else ""
+                for node in volume.findall("paper"):
+                    title_node = node.find("title")
+                    title = _clean_text("".join(title_node.itertext())) if title_node is not None else ""
+                    if not _looks_like_paper_title(title):
+                        continue
+                    anthology_id = _clean_text(node.findtext("url") or "")
+                    if not anthology_id:
+                        anthology_id = f"{year}.{collection}-{volume.get('id')}.{node.get('id')}"
+                    paper_url = f"https://aclanthology.org/{anthology_id.strip('/')}/"
+                    if paper_url in seen:
+                        continue
+                    seen.add(paper_url)
+                    authors: list[str] = []
+                    for author_node in node.findall("author"):
+                        parts = [
+                            _clean_text("".join(part.itertext()))
+                            for key in ("first", "middle", "last")
+                            for part in author_node.findall(key)
+                            if _clean_text("".join(part.itertext()))
+                        ]
+                        if parts:
+                            authors.append(" ".join(parts))
+                    abstract_node = node.find("abstract")
+                    abstract = _clean_text("".join(abstract_node.itertext())) if abstract_node is not None else ""
+                    doi = _clean_text(node.findtext("doi") or "")
+                    papers.append({
+                        "id": stable_id("paper", paper_url),
+                        "source": "acl_anthology",
+                        "title": title,
+                        "authors": ", ".join(authors),
+                        "abstract": abstract,
+                        "url": paper_url,
+                        "pdf_url": paper_url.rstrip("/") + ".pdf",
+                        "venue": venue.get("name", "ACL Anthology"),
+                        "year": year,
+                        "category": "",
+                        "classification_source": "llm_inferred",
+                        "metadata": {
+                            "venue_id": venue.get("id"),
+                            "anthology_id": anthology_id,
+                            "anthology_xml_url": source_url,
+                            "detail_url": paper_url,
+                            "booktitle": booktitle,
+                            "doi": doi,
+                            "abstract_source": "acl_anthology_xml" if abstract else "",
+                            "title_index_only": not bool(abstract),
+                        },
+                    })
+                    report["paper_count"] = int(report.get("paper_count") or 0) + 1
+                    year_count += 1
+                    if limit > 0 and len(papers) >= limit:
+                        truncated = True
+                        break
+                if truncated:
+                    break
+            source_reports.append(report)
+            if truncated:
+                break
+        yeaudits.append({
+            "year": int(year),
+            "sources": source_reports,
+            "paper_count": year_count,
+            "complete": year_count > 0 and not truncated,
+        })
+        if truncated:
+            break
+
+    if papers or raw_checked:
+        complete = bool(papers) and bool(yeaudits) and all(bool(item.get("complete")) for item in yeaudits) and not truncated
+        missing_abstracts = sum(1 for paper in papers if not _clean_text(paper.get("abstract")))
+        audit = _venue_metadata_audit(
+            status="complete" if complete and not missing_abstracts else "partial",
+            title_index_completeness_status="complete" if complete else "partial",
+            source_verified=bool(papers),
+            complete=complete,
+            title_index_complete=complete,
+            official_metadata_complete=bool(complete and not missing_abstracts),
+            adapter="acl_anthology",
+            source_adapter="acl_anthology",
+            source_url=";".join(str(item.get("source_url") or "") for year_audit in yeaudits for item in (year_audit.get("sources") or []) if item.get("source_url")),
+            requested_years=[int(year) for year in years if str(year).isdigit()],
+            source_yeaudits=yeaudits,
+            paper_count=len(papers),
+            missing_abstract_count=missing_abstracts,
+            has_abstracts=bool(papers and not missing_abstracts),
+            any_abstracts=any(bool(_clean_text(paper.get("abstract"))) for paper in papers),
+            has_official_categories=False,
+            category_status="no_official_categories",
+            source_scope="official_acl_anthology_xml",
+            official_title_index_verified=complete,
+            official_accepted_list_verified=complete,
+            truncated=truncated,
+            completeness_basis="ACL Anthology official source XML was parsed for titles, authors, abstracts, PDF links, Anthology IDs, and DOI metadata.",
+        )
+        return _attach_venue_metadata_audit(papers, audit) if papers else papers
+
+    # Preserve the public event-page fallback when raw.githubusercontent.com is
+    # unreachable, rather than making that mirror a new hard dependency.
+    yeaudits = []
     for year in years:
         year_count = 0
         event_reports: list[dict[str, Any]] = []
@@ -6154,7 +6286,7 @@ def fetch_venue_title_index(venue: dict, years: list[int], max_items: int) -> tu
         papers = fetch_openreview_iclr_2026(max_items)
         if papers:
             candidates.append(("openreview_reference", papers))
-            if _source_is_complete_official_title_index(papers, "openreview_reference") or _source_has_confident_official_categories(papers, "openreview_reference", max_items):
+            if max_items == 1 or _source_is_complete_official_title_index(papers, "openreview_reference") or _source_has_confident_official_categories(papers, "openreview_reference", max_items):
                 return papers, "openreview_reference"
 
     if is_neurips_venue(venue):
@@ -6165,7 +6297,7 @@ def fetch_venue_title_index(venue: dict, years: list[int], max_items: int) -> tu
                 break
         if papers:
             candidates.append(("neurips_virtual", papers[:max_items]))
-            if _source_is_complete_official_title_index(papers, "neurips_virtual"):
+            if max_items == 1 or _source_is_complete_official_title_index(papers, "neurips_virtual"):
                 return _choose_best_venue_source(candidates, max_items)
 
     if is_icml_venue(venue):
@@ -6173,7 +6305,7 @@ def fetch_venue_title_index(venue: dict, years: list[int], max_items: int) -> tu
             papers = fetch_icml_official_virtual_2026(max_items)
             if papers:
                 candidates.append(("icml_official_virtual", papers))
-                if _source_is_complete_official_title_index(papers, "icml_official_virtual"):
+                if max_items == 1 or _source_is_complete_official_title_index(papers, "icml_official_virtual"):
                     return _choose_best_venue_source(candidates, max_items)
         papers = fetch_icml_downloads(years, max_items)
         if papers:
@@ -6188,23 +6320,29 @@ def fetch_venue_title_index(venue: dict, years: list[int], max_items: int) -> tu
         papers = fetch_acl_anthology(venue, years, max_items)
         if papers:
             candidates.append(("acl_anthology", papers))
+            if max_items == 1:
+                return _choose_best_venue_source(candidates, max_items)
 
     if _is_cikm_venue(venue):
         papers = fetch_cikm_official_proceedings(venue, years, max_items)
         if papers:
             candidates.append(("cikm_official_proceedings", papers))
-            if _source_is_complete_official_title_index(papers, "cikm_official_proceedings"):
+            if max_items == 1 or _source_is_complete_official_title_index(papers, "cikm_official_proceedings"):
                 return _choose_best_venue_source(candidates, max_items)
 
     if _is_www_venue(venue):
         papers = fetch_www_official_accepted(venue, years, max_items)
         if papers:
             candidates.append(("www_official_accepted", papers))
+            if max_items == 1:
+                return _choose_best_venue_source(candidates, max_items)
 
     if _is_sigir_venue(venue):
         proceedings = fetch_sigir_official_proceedings(venue, years, max_items)
         if proceedings:
             candidates.append(("sigir_official_proceedings", proceedings))
+            if max_items == 1:
+                return _choose_best_venue_source(candidates, max_items)
         accepted = fetch_sigir_official_accepted(venue, years, max_items)
         if accepted:
             merged, used_adapters = _merge_enrichments(accepted, [("sigir_official_proceedings", proceedings)] if proceedings else [])
@@ -6217,37 +6355,41 @@ def fetch_venue_title_index(venue: dict, years: list[int], max_items: int) -> tu
         papers = fetch_aaai_ojs(venue, years, max_items)
         if papers:
             candidates.append(("aaai_ojs", papers))
-            if _source_is_complete_official_title_index(papers, "aaai_ojs"):
+            if max_items == 1 or _source_is_complete_official_title_index(papers, "aaai_ojs"):
                 return _choose_best_venue_source(candidates, max_items)
 
     if is_ijcai_venue(venue):
         papers = fetch_ijcai_proceedings(venue, years, max_items)
         if papers:
             candidates.append(("ijcai_proceedings", papers))
-            if _source_is_complete_official_title_index(papers, "ijcai_proceedings"):
+            if max_items == 1 or _source_is_complete_official_title_index(papers, "ijcai_proceedings"):
                 return _choose_best_venue_source(candidates, max_items)
 
-    if is_cvf_venue(venue):
+    if is_cvf_venue(venue) and (venue.get("name") or "").upper() != "ECCV":
         papers = fetch_cvf_openaccess(venue, years, max_items)
         if papers:
             candidates.append(("cvf_openaccess", papers))
-        if (venue.get("name") or "").upper() == "ECCV":
-            papers = fetch_eccv_virtual(years, max_items)
-            if papers:
-                candidates.append(("eccv_virtual", papers))
+            if max_items == 1:
+                return _choose_best_venue_source(candidates, max_items)
+    if (venue.get("name") or "").upper() == "ECCV":
+        papers = fetch_eccv_virtual(years, max_items)
+        if papers:
+            candidates.append(("eccv_virtual", papers))
+            if max_items == 1:
+                return _choose_best_venue_source(candidates, max_items)
 
     if is_pmlr_venue(venue):
         papers = fetch_pmlr_index(venue, years, max_items)
         if papers:
             candidates.append(("pmlr", papers))
-            if _source_is_complete_official_title_index(papers, "pmlr"):
+            if max_items == 1 or _source_is_complete_official_title_index(papers, "pmlr"):
                 return _choose_best_venue_source(candidates, max_items)
 
     if is_openreview_supported_venue(venue):
         papers = fetch_openreview_venue(venue, years, max_items)
         if papers:
             candidates.append(("openreview", papers))
-            if not candidates[:-1] and _source_has_confident_official_categories(papers, "openreview", max_items):
+            if max_items == 1 or (not candidates[:-1] and _source_has_confident_official_categories(papers, "openreview", max_items)):
                 return papers, "openreview"
 
     if venue.get("address"):
@@ -6292,14 +6434,14 @@ def _fetch_enrichment_sources(venue: dict, years: list[int]) -> list[tuple[str, 
         papers = fetch_ijcai_proceedings(venue, years, 100000)
         if papers:
             enrichments.append(("ijcai_proceedings", papers))
-    if is_cvf_venue(venue):
+    if is_cvf_venue(venue) and (venue.get("name") or "").upper() != "ECCV":
         papers = fetch_cvf_openaccess(venue, years, 100000)
         if papers:
             enrichments.append(("cvf_openaccess", papers))
-        if (venue.get("name") or "").upper() == "ECCV":
-            papers = fetch_eccv_virtual(years, 100000)
-            if papers:
-                enrichments.append(("eccv_virtual", papers))
+    if (venue.get("name") or "").upper() == "ECCV":
+        papers = fetch_eccv_virtual(years, 100000)
+        if papers:
+            enrichments.append(("eccv_virtual", papers))
     if is_icml_venue(venue):
         papers = fetch_icml_official_virtual_2026(100000) if 2026 in years else []
         if papers:
@@ -6382,14 +6524,14 @@ def fetch_venue_title_index_all(venue: dict, years: list[int]) -> tuple[list[dic
             if _source_is_complete_official_title_index(papers, "ijcai_proceedings"):
                 return _choose_best_venue_source(candidates, requested_limit)
 
-    if is_cvf_venue(venue):
+    if is_cvf_venue(venue) and (venue.get("name") or "").upper() != "ECCV":
         papers = fetch_cvf_openaccess(venue, years, requested_limit)
         if papers:
             candidates.append(("cvf_openaccess", papers))
-        if (venue.get("name") or "").upper() == "ECCV":
-            papers = fetch_eccv_virtual(years, requested_limit)
-            if papers:
-                candidates.append(("eccv_virtual", papers))
+    if (venue.get("name") or "").upper() == "ECCV":
+        papers = fetch_eccv_virtual(years, requested_limit)
+        if papers:
+            candidates.append(("eccv_virtual", papers))
 
     if is_icml_venue(venue):
         if 2026 in years:
@@ -7124,61 +7266,29 @@ def fetch_selected_venue_details(papers: list[dict], *, should_cancel: Callable[
 def fetch_venue_sample(venue: dict, year: int, sample_limit: int = 3) -> dict:
     adapter = "dblp"
     try:
-        if is_iclr_venue(venue):
-            papers = []
-            if year == 2026:
-                adapter = "openreview_reference"
-                papers = fetch_openreview_iclr_2026(sample_limit)
-            if not papers:
-                adapter = "openreview"
-                papers = fetch_openreview_venue(venue, [year], sample_limit)
-            if not papers and venue.get("address"):
-                adapter = "dblp"
-                papers = fetch_dblp_venue(venue, [year], sample_limit)
-        elif is_neurips_venue(venue):
-            adapter = "neurips_virtual"
-            papers = fetch_neurips_details(fetch_neurips_title_index(year, sample_limit), year)
-            if not papers:
-                adapter = "openreview"
-                papers = fetch_openreview_venue(venue, [year], sample_limit)
-            if not papers and venue.get("address"):
-                adapter = "dblp"
-                papers = fetch_dblp_venue(venue, [year], sample_limit)
-        else:
-            papers = []
-            if is_acl_family_venue(venue):
-                adapter = "acl_anthology"
-                papers = fetch_acl_anthology(venue, [year], sample_limit)
-            elif not papers and is_cvf_venue(venue):
-                adapter = "cvf_openaccess"
-                papers = fetch_cvf_openaccess(venue, [year], sample_limit)
-                if not papers and (venue.get("name") or "").upper() == "ECCV":
-                    adapter = "eccv_virtual"
-                    papers = fetch_eccv_virtual([year], sample_limit)
-            elif not papers and is_pmlr_venue(venue):
-                adapter = "pmlr"
-                papers = fetch_pmlr_index(venue, [year], sample_limit)
-            if not papers and is_openreview_supported_venue(venue):
-                adapter = "openreview"
-                papers = fetch_openreview_venue(venue, [year], sample_limit)
-            if not papers and venue.get("address"):
-                adapter = "dblp"
-                papers = fetch_dblp_venue(venue, [year], sample_limit)
+        limit = max(1, int(sample_limit or 1))
+        papers, adapter = fetch_venue_title_index(venue, [year], limit)
+        papers = fetch_selected_venue_details(
+            papers[:limit],
+            wall_timeout_sec=_positive_float_env("VENUE_HEALTH_DETAIL_WALL_TIMEOUT_SEC", 30.0),
+        )
         samples = [
             {
                 "title": paper.get("title", ""),
                 "url": paper.get("url", ""),
                 "abstract": (paper.get("abstract", "") or "")[:300],
             }
-            for paper in papers[:sample_limit]
+            for paper in papers[:limit]
         ]
+        missing_abstracts = sum(1 for sample in samples if not _clean_text(sample.get("abstract")))
+        metadata_ok = bool(samples) and missing_abstracts == 0
         return {
             "venue_id": venue.get("id", ""),
             "year": year,
-            "ok": bool(samples),
+            "ok": metadata_ok,
             "sample_count": len(samples),
             "source_adapter": adapter,
-            "message": "ok" if samples else f"No papers fetched via {adapter}.",
+            "message": "ok" if metadata_ok else (f"No papers fetched via {adapter}." if not samples else f"{missing_abstracts}/{len(samples)} sampled papers still lack abstracts after live detail enrichment via {adapter}."),
             "samples": samples,
         }
     except Exception as exc:

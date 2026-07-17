@@ -10,6 +10,7 @@ from typing import Any, Sequence
 from support.find_support import catalog_by_id
 from support.find_support import _apply_cached_acm_abstract_sources
 from support.find_support import enrich_acm_doi_with_indexed_abstracts
+from support.find_support import fetch_selected_venue_details
 from support.find_support import fetch_venue_title_index_all, venue_metadata_audit_from_papers
 from finding_runtime.paths import LOCAL_DATABASE_DIR, display_path, write_json
 from cache.build_venue_metadata_cache import _venue_metadata_status_fields, _write_cache
@@ -271,6 +272,10 @@ def _audit_one(
             else:
                 papers, local_acm_cache_stats = _apply_cached_acm_abstract_sources(papers)
             audit = venue_metadata_audit_from_papers(papers)
+            audit_fields = _venue_metadata_status_fields(audit)
+            if papers and audit_fields.get("metadata_completeness_status") in {"abstract_incomplete", "accepted_list_unverified"}:
+                papers = fetch_selected_venue_details(papers, wall_timeout_sec=0.0)
+                audit = venue_metadata_audit_from_papers(papers)
             if isinstance(audit, dict):
                 audit = dict(audit)
                 audit.setdefault("venue_id", venue_id)

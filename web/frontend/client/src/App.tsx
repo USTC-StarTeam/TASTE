@@ -7767,7 +7767,6 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
                 <div>
                   <label>{lang === "zh" ? "本次精读范围" : "This read scope"}</label>
                   <p className="readScopeSummary">{lang === "zh" ? `Find 最终排名前 ${readPaperLimit} 篇` : `Top ${readPaperLimit} in Find's final ranking`}</p>
-                  <p className="help">{lang === "zh" ? "不再仅精读 Find 推荐文章。" : "Read is no longer limited to Find recommendations."}</p>
                 </div>
               </div>
               <div className="saveBar">

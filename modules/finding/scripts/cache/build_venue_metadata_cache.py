@@ -523,7 +523,7 @@ def build_cache(
     if should_enrich_details:
         papers = fetch_selected_venue_details(
             papers,
-            wall_timeout_sec=detail_wall_timeout_sec if detail_wall_timeout_sec > 0 else None,
+            wall_timeout_sec=detail_wall_timeout_sec,
         )
         audit = _audit_with_venue_context(venue_metadata_audit_from_papers(papers), venue_id, venue)
     _metadata_ready_or_raise(audit, venue_id, year, papers=papers, adapter=adapter)

@@ -12,7 +12,7 @@ import threading
 import time
 from collections import Counter
 from math import ceil, isfinite
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, TimeoutError as FutureTimeoutError, wait
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -3368,20 +3368,19 @@ def _fetch_venue_title_index_for_find(
             return cached, cached_adapter
     timeout_sec = _timeout_env_value(("FIND_VENUE_TITLE_FETCH_TIMEOUT_SEC", "VENUE_TITLE_FETCH_TIMEOUT_SEC"), 120.0) if timeout_sec is None else max(0.0, float(timeout_sec or 0.0))
     if timeout_sec > 0:
-        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="venue-title-index")
-        future = executor.submit(_fetch_venue_title_index_online, venue, years, limit)
-        try:
-            papers, adapter = future.result(timeout=timeout_sec)
-        except FutureTimeoutError:
-            future.cancel()
-            executor.shutdown(wait=False, cancel_futures=True)
+        completed, value, error = _run_with_wall_timeout(
+            "venue-title-index",
+            lambda: _fetch_venue_title_index_online(venue, years, limit),
+            timeout_sec,
+        )
+        if not completed:
             cached, cached_adapter = _load_venue_title_index_cache(venue, years, limit)
             if cached:
                 return cached, cached_adapter
             return [], "timeout"
-        finally:
-            if not future.cancelled():
-                executor.shutdown(wait=False, cancel_futures=True)
+        if error is not None:
+            raise error
+        papers, adapter = value
     else:
         papers, adapter = _fetch_venue_title_index_online(venue, years, limit)
     if papers:
@@ -4334,7 +4333,7 @@ def _prefilter_titles(
         use_llm_title_filter = True
     if llm.enabled and interest and use_llm_title_filter:
         selected: list[dict] = []
-        batch_size = 10
+        batch_size = 100
         if title_groups:
             batches_with_context = [
                 (batch, _title_filter_prompt_context(group))
@@ -5323,7 +5322,7 @@ def _resolve_latest_available_venue_years(
                 venue,
                 [candidate],
                 1,
-                timeout_sec=_timeout_env_value(("FIND_VENUE_YEAR_PROBE_TIMEOUT_SEC", "VENUE_YEAR_PROBE_TIMEOUT_SEC"), 8.0),
+                timeout_sec=_timeout_env_value(("FIND_VENUE_YEAR_PROBE_TIMEOUT_SEC", "VENUE_YEAR_PROBE_TIMEOUT_SEC"), 30.0),
                 prefer_cache=True,
             )
         except Exception:
@@ -5374,12 +5373,12 @@ def _resolve_latest_available_venue_years(
                 as_of=cutoff,
                 requested_available=False,
             )
+            requested_available, requested_adapter = probe(requested)
+            if requested_available:
+                if requested not in resolved:
+                    resolved.append(requested)
+                continue
             if not fallback_basis:
-                requested_available, requested_adapter = probe(requested)
-                if requested_available:
-                    if requested not in resolved:
-                        resolved.append(requested)
-                    continue
                 continue
         else:
             requested_adapter = ""

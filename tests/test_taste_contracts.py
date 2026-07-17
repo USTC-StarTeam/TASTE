@@ -4038,7 +4038,7 @@ def test_find_title_prefilter_uses_local_ids_and_recovers_missing_rows(monkeypat
             "venue": "TestVenue",
             "year": 2026,
         }
-        for index in range(12)
+        for index in range(102)
     ]
     llm = IncompleteFirstAttemptLLM()
     reports = []
@@ -4058,10 +4058,10 @@ def test_find_title_prefilter_uses_local_ids_and_recovers_missing_rows(monkeypat
         title_filter_reports=reports,
     )
 
-    assert len(selected) == 12
+    assert len(selected) == 102
     assert all(item["reason_source"] == "llm title filter" for item in selected)
-    assert reports[0]["llm_title_scored_papers"] == 12
-    assert [len(call["aliases"]) for call in llm.calls] == [10, 3, 2, 1]
+    assert reports[0]["llm_title_scored_papers"] == 102
+    assert [len(call["aliases"]) for call in llm.calls] == [100, 3, 2, 1]
     assert all(call["max_tokens"] == 0 for call in llm.calls)
     assert all("paper-0:" not in call["prompt"] for call in llm.calls)
 
@@ -5825,6 +5825,346 @@ def test_find_title_index_cache_refreshes_weak_cache_for_official_venues(monkeyp
     assert calls["online"] == 1
     assert reused_adapter == "openreview_reference_cache"
     assert len(reused) == 120
+
+
+def test_find_neurips_year_probe_stops_after_one_official_title(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+
+    class Response:
+        text = "<html></html>"
+
+    row = {
+        "id": "neurips-2025-probe",
+        "source": "neurips_official_papers",
+        "title": "NeurIPS availability probe paper",
+        "authors": "",
+        "abstract": "",
+        "url": "https://papers.nips.cc/paper_files/paper/2025/hash/probe-Abstract-Conference.html",
+        "pdf_url": "",
+        "venue": "NeurIPS",
+        "year": 2025,
+        "category": "",
+        "classification_source": "llm_inferred",
+        "metadata": {},
+    }
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("one-paper availability probe continued into another source")
+
+    monkeypatch.setattr(find_support, "_request", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr(find_support, "_parse_neurips_official_papers_list", lambda *_args, **_kwargs: [dict(row)])
+    monkeypatch.setattr(find_support, "_enrich_neurips_official_with_virtual_presentations", unexpected)
+    monkeypatch.setattr(find_support, "fetch_openreview_venue", unexpected)
+    monkeypatch.setattr(find_support, "fetch_dblp_venue", unexpected)
+
+    papers, adapter = find_support.fetch_venue_title_index(
+        {"id": "openreview_neurips", "name": "NeurIPS", "address": "https://dblp.org/db/conf/nips/"},
+        [2025],
+        1,
+    )
+
+    assert [paper["title"] for paper in papers] == ["NeurIPS availability probe paper"]
+    assert adapter == "neurips_virtual"
+
+
+def test_find_icml_2026_prefers_fast_guide_before_large_official_downloads(monkeypatch):
+    _load_find_pipeline()
+    find_sources = sys.modules["sources"]
+    guide_rows = [{"id": "icml-guide", "title": "ICML guide paper", "year": 2026, "venue": "ICML"}]
+
+    monkeypatch.setattr(find_sources, "_icml2026_guide_papers", lambda _max_items: guide_rows)
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("official ICML static download ran despite an available guide corpus")
+
+    monkeypatch.setattr(find_sources, "_load_json_url_with_cache", unexpected)
+
+    assert find_sources.fetch_icml_official_virtual_2026(100000) == guide_rows
+
+
+def test_find_priority_venue_year_probes_stop_at_first_live_source(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    catalog = find_support.catalog_by_id()
+    cases = [
+        ("openreview_neurips", 2025, "neurips_virtual"),
+        ("openreview_iclr", 2026, "openreview_reference"),
+        ("dblp_icml", 2026, "icml_official_virtual"),
+        ("dblp_kdd", 2026, "dblp"),
+        ("dblp_www", 2026, "www_official_accepted"),
+        ("dblp_sigir", 2025, "sigir_official_proceedings"),
+        ("dblp_cikm", 2025, "cikm_official_proceedings"),
+        ("dblp_aaai", 2026, "aaai_ojs"),
+        ("dblp_iccv", 2025, "cvf_openaccess"),
+        ("dblp_cvpr", 2026, "cvf_openaccess"),
+        ("dblp_acl", 2026, "acl_anthology"),
+        ("dblp_ijcai", 2025, "ijcai_proceedings"),
+        ("dblp_eccv", 2024, "eccv_virtual"),
+        ("dblp_emnlp", 2025, "acl_anthology"),
+    ]
+
+    def row(venue_id, year, source):
+        venue = catalog[venue_id]
+        return [{
+            "id": f"{venue_id}-{year}",
+            "source": source,
+            "title": f"{venue.get('name')} live probe paper",
+            "abstract": "",
+            "url": f"https://example.test/{venue_id}/{year}",
+            "venue": venue.get("name"),
+            "year": year,
+            "metadata": {},
+        }]
+
+    monkeypatch.setattr(find_support, "fetch_openreview_iclr_2026", lambda _limit: row("openreview_iclr", 2026, "openreview"))
+    monkeypatch.setattr(find_support, "fetch_neurips_title_index", lambda year, _limit: row("openreview_neurips", year, "neurips_official_papers"))
+    monkeypatch.setattr(find_support, "fetch_icml_official_virtual_2026", lambda _limit: row("dblp_icml", 2026, "icml_official_virtual"))
+    monkeypatch.setattr(find_support, "fetch_acl_anthology", lambda venue, years, _limit: row(venue["id"], years[0], "acl_anthology") if venue["id"] in {"dblp_acl", "dblp_emnlp"} else [])
+    monkeypatch.setattr(find_support, "fetch_cikm_official_proceedings", lambda venue, years, _limit: row(venue["id"], years[0], "cikm_official_proceedings") if venue["id"] == "dblp_cikm" else [])
+    monkeypatch.setattr(find_support, "fetch_www_official_accepted", lambda venue, years, _limit: row(venue["id"], years[0], "www_official_accepted") if venue["id"] == "dblp_www" else [])
+    monkeypatch.setattr(find_support, "fetch_sigir_official_proceedings", lambda venue, years, _limit: row(venue["id"], years[0], "sigir_official_proceedings") if venue["id"] == "dblp_sigir" else [])
+    monkeypatch.setattr(find_support, "fetch_aaai_ojs", lambda venue, years, _limit: row(venue["id"], years[0], "aaai_ojs") if venue["id"] == "dblp_aaai" else [])
+    monkeypatch.setattr(find_support, "fetch_ijcai_proceedings", lambda venue, years, _limit: row(venue["id"], years[0], "ijcai_proceedings") if venue["id"] == "dblp_ijcai" else [])
+    def cvf_only(venue, years, _limit):
+        if venue["id"] == "dblp_eccv":
+            raise AssertionError("ECCV probe used the unrelated CVF Open Access adapter")
+        return row(venue["id"], years[0], "cvf_openaccess") if venue["id"] in {"dblp_iccv", "dblp_cvpr"} else []
+
+    monkeypatch.setattr(find_support, "fetch_cvf_openaccess", cvf_only)
+    monkeypatch.setattr(find_support, "fetch_eccv_virtual", lambda years, _limit: row("dblp_eccv", years[0], "eccv_virtual"))
+
+    def dblp_only_for_kdd(venue, years, _limit):
+        if venue["id"] != "dblp_kdd":
+            raise AssertionError(f"{venue['id']} availability probe continued into DBLP")
+        return row(venue["id"], years[0], "dblp")
+
+    monkeypatch.setattr(find_support, "fetch_dblp_venue", dblp_only_for_kdd)
+    monkeypatch.setattr(find_support, "fetch_icml_downloads", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("ICML probe did not stop")))
+    monkeypatch.setattr(find_support, "fetch_sigir_official_accepted", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("SIGIR probe did not stop")))
+    monkeypatch.setattr(find_support, "fetch_openreview_venue", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("official probe continued into OpenReview fallback")))
+
+    for venue_id, year, expected_adapter in cases:
+        papers, adapter = find_support.fetch_venue_title_index(catalog[venue_id], [year], 1)
+        assert len(papers) == 1, venue_id
+        assert adapter == expected_adapter, venue_id
+
+
+def test_find_acl_anthology_uses_official_xml_and_filters_findings_volume(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    main_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <collection id="2025.emnlp"><volume id="main"><meta><booktitle>EMNLP 2025</booktitle></meta>
+      <paper id="1"><title>Main <fixed-case>LLM</fixed-case> Paper</title>
+        <author><first>Ada</first><last>Lovelace</last></author>
+        <abstract>Main official abstract.</abstract><url>2025.emnlp-main.1</url><doi>10.18653/v1/test</doi>
+      </paper>
+    </volume></collection>"""
+    findings_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <collection id="2025.findings">
+      <volume id="acl"><meta><booktitle>Findings ACL</booktitle></meta>
+        <paper id="1"><title>Unrelated ACL Findings Paper</title><abstract>Wrong venue.</abstract><url>2025.findings-acl.1</url></paper>
+      </volume>
+      <volume id="emnlp"><meta><booktitle>Findings EMNLP</booktitle></meta>
+        <paper id="2"><title>Relevant EMNLP Findings Paper</title><abstract>Findings abstract.</abstract><url>2025.findings-emnlp.2</url></paper>
+      </volume>
+    </collection>"""
+
+    class Response:
+        def __init__(self, text):
+            self.text = text
+
+    def request(url, **_kwargs):
+        if url.endswith("2025.emnlp.xml"):
+            return Response(main_xml)
+        if url.endswith("2025.findings.xml"):
+            return Response(findings_xml)
+        raise AssertionError(f"unexpected ACL source: {url}")
+
+    monkeypatch.setattr(find_support, "_request", request)
+    papers = find_support.fetch_acl_anthology({"id": "dblp_emnlp", "name": "EMNLP"}, [2025], 10)
+
+    assert [paper["title"] for paper in papers] == ["Main LLM Paper", "Relevant EMNLP Findings Paper"]
+    assert papers[0]["authors"] == "Ada Lovelace"
+    assert papers[0]["abstract"] == "Main official abstract."
+    assert papers[0]["metadata"]["abstract_source"] == "acl_anthology_xml"
+    assert all("Unrelated ACL" not in paper["title"] for paper in papers)
+
+
+def test_find_acl_anthology_xml_does_not_treat_other_findings_as_emnlp(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    findings_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <collection id="2026.findings"><volume id="acl"><meta><booktitle>Findings ACL</booktitle></meta>
+      <paper id="1"><title>ACL Findings Paper Only</title><abstract>Not EMNLP.</abstract><url>2026.findings-acl.1</url></paper>
+    </volume></collection>"""
+
+    class Response:
+        def __init__(self, text="", status_code=200):
+            self.text = text
+            self.status_code = status_code
+
+    class NotFound(Exception):
+        def __init__(self):
+            self.response = Response(status_code=404)
+
+    def request(url, **_kwargs):
+        if url.endswith("2026.emnlp.xml"):
+            raise NotFound()
+        if url.endswith("2026.findings.xml"):
+            return Response(findings_xml)
+        raise AssertionError(f"slow event-page fallback ran after an authoritative XML check: {url}")
+
+    monkeypatch.setattr(find_support, "_request", request)
+    assert find_support.fetch_acl_anthology({"id": "dblp_emnlp", "name": "EMNLP"}, [2026], 1) == []
+
+
+def test_find_future_release_date_keeps_live_requested_year_without_cache(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    venue = find_pipeline.catalog_by_id()["dblp_kdd"]
+    calls = []
+    monkeypatch.delenv("FIND_VENUE_YEAR_FULL_RELEASE_PROBE", raising=False)
+    monkeypatch.setattr(find_pipeline, "load_local_venue_year", lambda *_args, **_kwargs: None)
+
+    def live_probe(_venue, years, limit, **_kwargs):
+        calls.append((list(years), limit))
+        assert years == [2026]
+        return [{"title": "Live KDD 2026 paper", "year": 2026}], "dblp"
+
+    monkeypatch.setattr(find_pipeline, "_fetch_venue_title_index_for_find", live_probe)
+    resolved, reason = find_pipeline._resolve_venue_years(venue, [2026], as_of=date(2026, 7, 18))
+
+    assert resolved == [2026]
+    assert reason == ""
+    assert calls == [([2026], 1)]
+
+
+def test_find_dblp_one_row_probe_skips_full_toc_fetch(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    row = {"title": "DBLP live probe", "year": 2026}
+    monkeypatch.setattr(find_support, "fetch_dblp_stream_api", lambda *_args, **_kwargs: [row])
+    monkeypatch.setattr(find_support, "_dblp_toc_papers", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("one-row DBLP probe fetched the full TOC")))
+
+    assert find_support.fetch_dblp_venue({"id": "dblp_kdd"}, [2026], 1) == [row]
+
+
+def test_find_venue_health_requires_live_abstract_enrichment(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    row = {"title": "Live metadata paper", "abstract": "", "url": "https://example.test/paper"}
+    monkeypatch.setattr(find_support, "fetch_venue_title_index", lambda *_args, **_kwargs: ([dict(row)], "official_test"))
+
+    def enrich(items, **kwargs):
+        assert kwargs["wall_timeout_sec"] == 30.0
+        items[0]["abstract"] = "A live detail-page abstract with enough metadata evidence."
+        return items
+
+    monkeypatch.setattr(find_support, "fetch_selected_venue_details", enrich)
+    ready = find_support.fetch_venue_sample({"id": "test", "name": "Test"}, 2026, 1)
+    assert ready["ok"] is True
+    assert ready["source_adapter"] == "official_test"
+    assert ready["samples"][0]["abstract"]
+
+    monkeypatch.setattr(find_support, "fetch_selected_venue_details", lambda items, **_kwargs: items)
+    missing = find_support.fetch_venue_sample({"id": "test", "name": "Test"}, 2026, 1)
+    assert missing["ok"] is False
+    assert "still lack abstracts" in missing["message"]
+
+
+def test_find_acm_live_defaults_use_targeted_fallbacks_not_full_venue_scan(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    for name in ("ACM_CHATPAPER_FALLBACK", "ACM_OPENALEX_TITLE_FALLBACK", "ACM_SEMANTIC_SCHOLAR_FALLBACK"):
+        monkeypatch.delenv(name, raising=False)
+    papers = [
+        {"title": "OpenAlex title match", "doi": "10.1145/1.1", "abstract": "", "metadata": {"doi": "10.1145/1.1"}},
+        {"title": "Semantic title match", "doi": "10.1145/1.2", "abstract": "", "metadata": {"doi": "10.1145/1.2"}},
+    ]
+    calls = {"openalex_title": 0, "semantic": 0}
+    empty_stats = {"attempted": 0, "abstracts_filled": 0}
+    monkeypatch.setattr(find_support, "_apply_cached_acm_abstract_sources", lambda items: (items, dict(empty_stats)))
+    monkeypatch.setattr(find_support, "enrich_acm_doi_with_hal", lambda items, **_kwargs: (items, dict(empty_stats)))
+    monkeypatch.setattr(find_support, "enrich_acm_doi_with_chatpaper", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("full-venue ChatPaper scan ran by default")))
+    monkeypatch.setattr(find_support, "enrich_acm_doi_with_openalex", lambda items, **_kwargs: (items, dict(empty_stats)))
+    monkeypatch.setattr(find_support, "enrich_acm_doi_with_openalex_oa_pdf", lambda items, **_kwargs: (items, dict(empty_stats)))
+    monkeypatch.setattr(find_support, "enrich_acm_doi_with_official_pdf", lambda items, **_kwargs: (items, dict(empty_stats)))
+
+    def openalex_title(items, **_kwargs):
+        calls["openalex_title"] += 1
+        items[0]["abstract"] = "OpenAlex title-matched abstract."
+        items[0].setdefault("metadata", {})["openalex_id"] = "W1"
+        return items
+
+    def semantic(items, **_kwargs):
+        calls["semantic"] += 1
+        for item in items:
+            item["abstract"] = "Semantic Scholar DOI-matched abstract."
+            item.setdefault("metadata", {})["abstract_source"] = "semantic_scholar_doi"
+        return items
+
+    monkeypatch.setattr(find_support, "enrich_with_openalex", openalex_title)
+    monkeypatch.setattr(find_support, "enrich_with_semantic_scholar", semantic)
+
+    enriched, _stats = find_support.enrich_acm_doi_with_indexed_abstracts(papers)
+    assert calls == {"openalex_title": 1, "semantic": 1}
+    assert all(paper["abstract"] for paper in enriched)
+
+
+def test_find_priority_live_audit_enriches_details_without_cache(monkeypatch, tmp_path):
+    finding_main = _load_finding_main()
+    audit_module = finding_main._private_import("cache.audit_priority_venue_metadata")
+    venue = {"id": "openreview_iclr", "name": "ICLR"}
+    rows = [{"id": "paper", "source": "openreview", "title": "Live audit paper", "abstract": "", "year": 2026, "venue": "ICLR", "metadata": {}}]
+    calls = {"details": 0}
+
+    def metadata_audit(items):
+        complete = bool(items and all(item.get("abstract") for item in items))
+        return {
+            "status": "complete",
+            "source_verified": True,
+            "complete": True,
+            "title_index_complete": True,
+            "official_metadata_complete": complete,
+            "adapter": "openreview_reference",
+            "paper_count": len(items),
+            "missing_abstract_count": sum(1 for item in items if not item.get("abstract")),
+            "has_abstracts": complete,
+            "any_abstracts": complete,
+            "has_official_categories": True,
+            "category_status": "official_or_cached_categories",
+            "source_scope": "official_openreview_metadata",
+            "official_title_index_verified": True,
+            "official_accepted_list_verified": True,
+            "venue_id": "openreview_iclr",
+            "venue": "ICLR",
+        }
+
+    def enrich(items, **kwargs):
+        calls["details"] += 1
+        assert kwargs["wall_timeout_sec"] == 0.0
+        items[0]["abstract"] = "Live official detail abstract."
+        return items
+
+    monkeypatch.setenv("ACM_PRIORITY_AUDIT_CACHE_ONLY", "1")
+    monkeypatch.setattr(audit_module, "catalog_by_id", lambda: {"openreview_iclr": venue})
+    monkeypatch.setattr(audit_module, "fetch_venue_title_index_all", lambda *_args, **_kwargs: (rows, "openreview_reference"))
+    monkeypatch.setattr(audit_module, "_apply_cached_acm_abstract_sources", lambda items: (items, {}))
+    monkeypatch.setattr(audit_module, "fetch_selected_venue_details", enrich)
+    monkeypatch.setattr(audit_module, "venue_metadata_audit_from_papers", metadata_audit)
+
+    result = audit_module._audit_one(
+        "openreview_iclr",
+        2026,
+        output_root=tmp_path / "empty-cache",
+        write_cache=False,
+        as_of=date(2026, 7, 18),
+        max_backfill_years=3,
+    )
+
+    assert calls["details"] == 1
+    assert result["ok"] is True
+    assert result["paper_count"] == 1
 
 
 def test_find_title_index_cache_reuses_verified_dblp_for_dblp_only_venue(monkeypatch, tmp_path):
