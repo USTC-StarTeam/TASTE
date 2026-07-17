@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 import smtplib
 import ssl
 from dataclasses import dataclass
 from email.message import EmailMessage
 from email.utils import formataddr
+from pathlib import Path
 
 
 class VerificationEmailError(RuntimeError):
@@ -23,14 +25,37 @@ class VerificationEmailSender:
     security: str = "ssl"
 
     @classmethod
-    def from_env(cls) -> VerificationEmailSender:
-        host = os.environ.get("TASTE_AUTH_SMTP_HOST", "").strip()
-        username = os.environ.get("TASTE_AUTH_SMTP_USERNAME", "").strip()
-        password = os.environ.get("TASTE_AUTH_SMTP_PASSWORD", "")
-        from_address = os.environ.get("TASTE_AUTH_SMTP_FROM", "").strip() or username
-        security_value = os.environ.get("TASTE_AUTH_SMTP_SECURITY", "").strip().lower()
+    def from_env(cls, config_path: Path | None = None) -> VerificationEmailSender:
+        config: dict[str, object] = {}
+        if config_path is not None and config_path.is_file():
+            try:
+                loaded = json.loads(config_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    config = loaded
+            except (OSError, ValueError):
+                config = {}
+
+        def setting(env_name: str, config_name: str, default: object = "") -> str:
+            if env_name in os.environ:
+                return os.environ[env_name]
+            return str(config.get(config_name, default) or "")
+
+        host = setting("TASTE_AUTH_SMTP_HOST", "host").strip()
+        username = setting("TASTE_AUTH_SMTP_USERNAME", "username").strip()
+        password = setting("TASTE_AUTH_SMTP_PASSWORD", "password")
+        password_file_value = setting("TASTE_AUTH_SMTP_PASSWORD_FILE", "password_file").strip()
+        if not password and password_file_value:
+            password_file = Path(password_file_value).expanduser()
+            if not password_file.is_absolute() and config_path is not None:
+                password_file = config_path.parent / password_file
+            try:
+                password = password_file.read_text(encoding="utf-8").strip()
+            except OSError:
+                password = ""
+        from_address = setting("TASTE_AUTH_SMTP_FROM", "from_address").strip() or username
+        security_value = setting("TASTE_AUTH_SMTP_SECURITY", "security").strip().lower()
         try:
-            port = int(os.environ.get("TASTE_AUTH_SMTP_PORT", "") or (465 if security_value != "starttls" else 587))
+            port = int(setting("TASTE_AUTH_SMTP_PORT", "port") or (465 if security_value != "starttls" else 587))
         except ValueError:
             port = 465
         security = security_value or ("ssl" if port == 465 else "starttls")
@@ -40,13 +65,19 @@ class VerificationEmailSender:
             username=username,
             password=password,
             from_address=from_address,
-            from_name=os.environ.get("TASTE_AUTH_SMTP_FROM_NAME", "TASTE").strip() or "TASTE",
+            from_name=setting("TASTE_AUTH_SMTP_FROM_NAME", "from_name", "TASTE").strip() or "TASTE",
             security=security,
         )
 
     @property
     def configured(self) -> bool:
-        return bool(self.host and self.from_address and self.security in {"ssl", "starttls", "plain"})
+        return bool(
+            self.host
+            and self.from_address
+            and self.security in {"ssl", "starttls", "plain"}
+            and 0 < self.port <= 65535
+            and (not self.username or self.password)
+        )
 
     def send_verification_code(self, recipient: str, code: str, expires_in: int) -> None:
         if not self.configured:

@@ -71,6 +71,7 @@ TASTE_AUTH_SMTP_FROM=taste@example.com
 ```
 
 `TASTE_AUTH_SMTP_SECURITY` 可取 `ssl`、`starttls` 或 `plain`；修改后需重启 Web 服务。旧账户无需补填邮箱，仍可继续使用用户名登录。
+也可将同名配置写入权限为 `600` 的 `web/.runtime/auth_smtp.json`，并用 `password_file` 指向单独保存的授权码文件；环境变量始终优先。
 
 推荐由反向代理终止 HTTPS，再转发到 `http://127.0.0.1:8879`。代理必须传递协议和 WebSocket 头，TASTE 才会设置 Secure Cookie，并让任务连接自动使用 WSS：
 

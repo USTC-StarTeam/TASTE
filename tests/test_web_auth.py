@@ -107,6 +107,39 @@ def test_email_verification_rate_limit_and_email_login(tmp_path, monkeypatch):
     assert login_response.json()["user"]["username"] == "verified"
 
 
+def test_verification_email_sender_loads_protected_runtime_config(tmp_path, monkeypatch):
+    from auto_research.web.verification_email import VerificationEmailSender
+
+    for key in (
+        "TASTE_AUTH_SMTP_HOST",
+        "TASTE_AUTH_SMTP_PORT",
+        "TASTE_AUTH_SMTP_SECURITY",
+        "TASTE_AUTH_SMTP_USERNAME",
+        "TASTE_AUTH_SMTP_PASSWORD",
+        "TASTE_AUTH_SMTP_PASSWORD_FILE",
+        "TASTE_AUTH_SMTP_FROM",
+        "TASTE_AUTH_SMTP_FROM_NAME",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    secret = tmp_path / "secrets" / "smtp_code"
+    secret.parent.mkdir()
+    secret.write_text("test-authorization-code", encoding="utf-8")
+    config = tmp_path / "auth_smtp.json"
+    config.write_text(json.dumps({
+        "host": "smtp.example.test",
+        "port": 465,
+        "security": "ssl",
+        "username": "taste@example.test",
+        "password_file": "secrets/smtp_code",
+        "from_address": "taste@example.test",
+    }), encoding="utf-8")
+
+    sender = VerificationEmailSender.from_env(config)
+    assert sender.configured is True
+    assert sender.host == "smtp.example.test"
+    assert sender.password == "test-authorization-code"
+
+
 def test_api_requires_login_and_filters_projects_by_account(tmp_path, monkeypatch):
     import auto_research.web.server as server
     projects_root = tmp_path / "projects"

@@ -62,7 +62,7 @@ app.add_middleware(
 )
 
 AUTH_STORE = AuthStore(Path(os.environ.get("TASTE_AUTH_DB") or WORKSPACE_ROOT / "web" / ".runtime" / "auth.sqlite3"))
-AUTH_EMAIL_SENDER = VerificationEmailSender.from_env()
+AUTH_EMAIL_SENDER = VerificationEmailSender.from_env(WORKSPACE_ROOT / "web" / ".runtime" / "auth_smtp.json")
 _CURRENT_ACCOUNT: ContextVar[AuthUser | None] = ContextVar("taste_current_account", default=None)
 
 
