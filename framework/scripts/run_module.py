@@ -43,6 +43,7 @@ from auto_research.environment_bridge import (  # noqa: E402
     sync_environment_outputs,
 )
 from auto_research.paths import FRAMEWORK_INPUTS_DIR, FRAMEWORK_LOCKS_DIR, FRAMEWORK_RUNTIME_DIR, WEB_RUNTIME_DIR  # noqa: E402
+from auto_research.resource_locks import crawl_resource_lease  # noqa: E402
 
 
 def _python_env() -> dict[str, str]:
@@ -489,6 +490,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif ns.action:
         cmd.extend(["--action", ns.action])
     cmd.extend(rest)
+    if not ns.contract and ns.stage in {"finding", "reading"}:
+        project = _arg_value(rest, "--project")
+        with crawl_resource_lease(
+            operation=ns.stage,
+            project=project,
+            on_wait=lambda: print("Waiting for the shared crawl resource.", flush=True),
+            on_acquired=lambda: print("Shared crawl resource acquired.", flush=True),
+        ):
+            return _run_module_dispatch(ns, rest, cmd)
+    return _run_module_dispatch(ns, rest, cmd)
+
+
+def _run_module_dispatch(ns: argparse.Namespace, rest: Sequence[str], cmd: list[str]) -> int:
     if not ns.contract and _current_find_read_action(ns.stage, ns.action):
         return _run_current_find_read_bridge(ns.action, rest)
     if not ns.contract and _current_find_ideation_action(ns.stage, ns.action):

@@ -15639,6 +15639,31 @@ def _runtime_env_overrides_from_payload(payload: dict[str, Any]) -> dict[str, st
     return overrides
 
 
+_AMBIENT_FIND_LLM_ENV_KEYS = {
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "LLM_API_KEY",
+    "LLM_API_KEY_ENV",
+    "LLM_API_BASE",
+    "OPENAI_API_BASE",
+    "LLM_MODEL",
+    "LLM_PROVIDER",
+    "LLM_API_MODE",
+    "LLM_TEMPERATURE",
+}
+
+
+def _apply_runtime_env_overrides(env: dict[str, str], payload: dict[str, Any]) -> dict[str, str]:
+    overrides = _runtime_env_overrides_from_payload(payload)
+    # An explicit Finding config is a complete trust boundary. Do not let a
+    # service-wide OpenAI/LLM environment silently override that user's file.
+    if overrides.get("FINDING_LLM_CONFIG"):
+        for key in _AMBIENT_FIND_LLM_ENV_KEYS:
+            env.pop(key, None)
+    env.update(overrides)
+    return env
+
+
 def run_action(payload: dict[str, Any], log: LogFn, should_cancel: CancelFn, progress: ProgressFn) -> dict[str, Any]:
     payload = _payload_with_project_config_venue(payload)
     action = _normalize_action(payload.get("action")) or "action"
@@ -15670,7 +15695,7 @@ def run_action(payload: dict[str, Any], log: LogFn, should_cancel: CancelFn, pro
     log("Workflow command: " + " ".join(cmd))
     append_agent_log(project, agent_id, "Workflow command: " + " ".join(cmd))
     env = interactive_env(project, include_experiment_python=action not in {"environment", "environment-chat", "environment_chat"})
-    env.update(_runtime_env_overrides_from_payload(payload))
+    env = _apply_runtime_env_overrides(env, payload)
     env.setdefault("PYTHONUNBUFFERED", "1")
     env["PROJECT_ID"] = project
     env["PROJECT_CONFIG"] = str(PROJECTS / project / "project.json")

@@ -43,7 +43,8 @@ from auto_research.paths import CONFIG_PATH, FINDING_RUNS_DIR, RUNS_DIR, RUNS_SE
 from auto_research.storage import delete_run, list_runs, read_json, redacted_config, run_dir, write_json
 from auto_research.project_bridge import action_gate_blocker, job_stage, create_project_config, detect_runtime_config, list_projects as list_projects, project_summary, run_action, runtime_status, update_project_config, update_runtime_config, _cleruntime_caches, _current_find_pipeline_summary, _current_find_source_status_rows, _venue_metadata_counts
 from auto_research.paper_state import active_paper_state as load_active_paper_state
-from auto_research.web.auth import AuthError, AuthStore, AuthUser, SESSION_COOKIE
+from auto_research.resource_locks import crawl_resource_lease
+from auto_research.web.auth import AuthError, AuthStore, AuthUser, SESSION_COOKIE, SESSION_DAYS
 from taste_pythonpath import taste_pythonpath_string
 
 ensure_directories()
@@ -79,6 +80,10 @@ def _account_runtime_dir(account: AuthUser | None = None) -> Path:
         return STATE_DIR.parent
     target = WORKSPACE_ROOT / "web" / ".runtime" / "accounts" / current.id
     target.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(target, 0o700)
+    except OSError:
+        pass
     return target
 
 
@@ -128,15 +133,17 @@ def _public_account_payload(value: Any) -> Any:
 
 
 def _request_uses_https(request: Request) -> bool:
-    forwarded = str(request.headers.get("x-forwarded-proto") or "").split(",", 1)[0].strip().lower()
-    return forwarded == "https" or request.url.scheme == "https"
+    # Uvicorn validates trusted proxy IPs and normalizes the ASGI scheme before
+    # this application sees the request. Reading the raw header here would let
+    # direct clients on port 8879 spoof proxy trust.
+    return request.url.scheme == "https"
 
 
 def _set_session_cookie(response: JSONResponse, request: Request, token: str) -> None:
     response.set_cookie(
         SESSION_COOKIE,
         token,
-        max_age=30 * 24 * 60 * 60,
+        max_age=SESSION_DAYS * 24 * 60 * 60,
         httponly=True,
         secure=_request_uses_https(request),
         samesite="lax",
@@ -197,6 +204,8 @@ def _config_with_env_overrides(config: AppConfig) -> AppConfig:
     variables are only a startup fallback for empty fields; otherwise a saved UI
     config would appear to revert after refresh and future jobs would ignore it.
     """
+    if _CURRENT_ACCOUNT.get() is not None:
+        return config
     updates: dict[str, Any] = {}
     provider = os.environ.get("LLM_PROVIDER")
     base_url = os.environ.get("LLM_API_BASE")
@@ -705,6 +714,29 @@ def _public_config_response(config: AppConfig) -> dict[str, Any]:
         email["smtp_password_saved"] = bool(str(email.get("smtp_password") or "").strip())
         email["smtp_password"] = ""
     return data
+
+
+def _find_llm_configuration_error(config: AppConfig) -> dict[str, Any] | None:
+    client = LLMClient(config, "find")
+    if str(client.provider or "").strip().lower() == "mock":
+        return None
+    missing = [
+        name
+        for name, value in (
+            ("base_url", client.base_url),
+            ("model", client.model),
+            ("api_key", client.api_key),
+        )
+        if not str(value or "").strip()
+    ]
+    if not missing:
+        return None
+    return {
+        "error": "user_llm_config_required",
+        "code": "user_llm_config_required",
+        "missing": missing,
+        "message": "请先保存当前账户自己的 Find LLM 配置；服务端不会使用其他账户或系统环境中的 LLM API key。",
+    }
 
 
 def _strip_legacy_recommendation_card_blocks(text: str) -> str:
@@ -2014,6 +2046,7 @@ class JobState:
 JOBS: dict[str, JobState] = {}
 JOBS_PATH = STATE_DIR / "web_jobs.json"
 JOBS_LOCK = threading.RLock()
+JOBS_PERSIST_LOCK = threading.RLock()
 LIVE_JOBS_TTL_SEC = float(os.environ.get("LIVE_JOBS_TTL_SEC", "5.0") or 5.0)
 _LIVE_JOBS_CACHE: dict[str, Any] = {"expires_at": 0.0, "items": []}
 JOB_PROJECT_ID_CACHE_TTL_SEC = float(os.environ.get("JOB_PROJECT_ID_CACHE_TTL_SEC", "30.0") or 30.0)
@@ -5535,9 +5568,9 @@ def _new_find_guard_blocker(request: FindRequest | None = None) -> dict[str, Any
 
 
 def _active_web_stage_job_blocker(project: str, stage: str) -> dict[str, Any] | None:
-    """Block duplicate in-process launches for the same project/stage."""
+    """Block overlapping in-process workflow writes for the same project."""
     project = str(project or "").strip()
-    stage_key = str(stage or "").strip().lower()
+    stage_key = _public_taste_stage(str(stage or "").strip().lower())
     if not stage_key:
         return None
     _reconcile_stale_cancelling_jobs()
@@ -5550,8 +5583,12 @@ def _active_web_stage_job_blocker(project: str, stage: str) -> dict[str, Any] | 
         status = str(getattr(job, "status", "") or "").strip().lower()
         if status not in {"queued", "running", "cancelling"}:
             continue
-        job_stage = str(getattr(job, "stage", "") or "").strip().lower()
-        if job_stage != stage_key:
+        job_stage = _public_taste_stage(str(getattr(job, "stage", "") or "").strip().lower())
+        literature_stages = {"find", "read", "idea", "plan"}
+        same_stage_or_literature_pipeline = job_stage == stage_key or (
+            job_stage in literature_stages and stage_key in literature_stages
+        )
+        if not same_stage_or_literature_pipeline:
             continue
         job_project = _project_from_job_payload(getattr(job, "job_id", ""), None, job)
         if project and job_project and job_project != project:
@@ -5566,8 +5603,8 @@ def _active_web_stage_job_blocker(project: str, stage: str) -> dict[str, Any] | 
             "existing_run_id": getattr(job, "run_id", ""),
             "existing_status": status,
             "progress": progress,
-            "message": "A job for this project stage is already running; duplicate launch is blocked.",
-            "message_zh": "当前项目已有同阶段任务正在运行；已阻止重复启动。",
+            "message": "A conflicting workflow job for this project is already running; overlapping writes are blocked.",
+            "message_zh": "当前项目已有会写入同一工作流状态的任务正在运行；已阻止重叠启动。",
         }
     return None
 
@@ -10504,6 +10541,11 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _persist_jobs() -> None:
+    with JOBS_PERSIST_LOCK:
+        _persist_jobs_locked()
+
+
+def _persist_jobs_locked() -> None:
     if not globals().get("JOBS_PATH"):
         return
     with JOBS_LOCK:
@@ -10734,7 +10776,8 @@ def _load_persisted_jobs() -> None:
                 job.log("Marked interrupted/cancelled after server restart.")
         if job.status in {"done", "blocked"}:
             job.result = _fresh_find_result_for_job(job)
-        JOBS[job.job_id] = job
+        with JOBS_LOCK:
+            JOBS[job.job_id] = job
     _persist_jobs()
 
 
@@ -10759,7 +10802,8 @@ def start_job(stage: str, fn: Callable[[Callable[[str], None], Callable[[], bool
     job = JobState(job_id, stage)
     if initial_result is not None:
         job.result = initial_result
-    JOBS[job_id] = job
+    with JOBS_LOCK:
+        JOBS[job_id] = job
     _persist_jobs()
     account = _CURRENT_ACCOUNT.get()
 
@@ -10870,7 +10914,13 @@ def api_auth_login(payload: dict[str, Any], request: Request):
 def api_auth_logout(request: Request):
     AUTH_STORE.delete_session(request.cookies.get(SESSION_COOKIE))
     response = JSONResponse({"status": "ok"})
-    response.delete_cookie(SESSION_COOKIE, path="/")
+    response.delete_cookie(
+        SESSION_COOKIE,
+        path="/",
+        httponly=True,
+        secure=_request_uses_https(request),
+        samesite="lax",
+    )
     return response
 
 
@@ -11087,12 +11137,14 @@ def api_venue_health(request: VenueHealthRequest) -> dict:
 
     results = []
     sample_limit = max(1, request.sample_limit)
-    for venue_id, year in normalize_pairs():
-        venue = catalog.get(venue_id)
-        if not venue:
-            results.append(_venue_health_failure(venue_id, year, "Unknown venue id.", adapter="unknown"))
-            continue
-        results.append(_fetch_venue_sample_with_timeout(venue, venue_id, year, sample_limit))
+    project = str(getattr(request, "project", "") or "")
+    with crawl_resource_lease(operation="venue_health", project=project):
+        for venue_id, year in normalize_pairs():
+            venue = catalog.get(venue_id)
+            if not venue:
+                results.append(_venue_health_failure(venue_id, year, "Unknown venue id.", adapter="unknown"))
+                continue
+            results.append(_fetch_venue_sample_with_timeout(venue, venue_id, year, sample_limit))
     _record_project_venue_health(getattr(request, "project", ""), results)
     return {"results": results}
 
@@ -11122,6 +11174,9 @@ def api_find(request: FindRequest) -> dict:
     # persist the non-secret Find request into project state so framework can
     # produce explicit config/selection JSON for the Finding public CLI.
     config = _request_config_with_persisted_secrets(request.config)
+    llm_error = _find_llm_configuration_error(config)
+    if llm_error:
+        return JSONResponse(status_code=400, content=llm_error)
     if not (str(config.research_interest or "").strip() or str(config.researcher_profile or "").strip()):
         return JSONResponse(
             status_code=400,
@@ -11139,11 +11194,9 @@ def api_find(request: FindRequest) -> dict:
     _sync_project_finding_config_from_request(config, project_path)
 
     def runtime_env_for_find() -> dict[str, str]:
-        env: dict[str, str] = {}
-        local_llm_config = _local_llm_config_path()
-        if local_llm_config.exists():
-            env["FINDING_LLM_CONFIG"] = str(local_llm_config)
-        return env
+        # Always pass the account-scoped path. project_bridge treats this as a
+        # trust boundary and removes service-wide OpenAI/LLM environment keys.
+        return {"FINDING_LLM_CONFIG": str(_local_llm_config_path())}
 
     project_context = current or _current_project_for_find_guard()
     if not project_context:
@@ -11169,12 +11222,16 @@ def api_find(request: FindRequest) -> dict:
             result.setdefault("web_job_id", job_id)
         return result
 
-    job = start_job(
-        "find",
-        run_find_and_adopt,
-        job_id=job_id,
-        initial_result={"project": project_id, "action": "find", "web_job_id": job_id},
-    )
+    with JOBS_LOCK:
+        active_blocker = _active_web_stage_job_blocker(project_id, "find")
+        if active_blocker:
+            return JSONResponse(status_code=409, content=active_blocker)
+        job = start_job(
+            "find",
+            run_find_and_adopt,
+            job_id=job_id,
+            initial_result={"project": project_id, "action": "find", "web_job_id": job_id},
+        )
     return _public_account_payload(job.as_dict())
 
 
@@ -11313,7 +11370,8 @@ def _current_find_downstream_blocked_job(stage: str, blocker: dict[str, Any]) ->
         "blocker": blocker,
         "summary": message,
     }
-    JOBS[job.job_id] = job
+    with JOBS_LOCK:
+        JOBS[job.job_id] = job
     job.set_progress("blocked", 1, 1, message)
     job.log(f"{stage} blocked: {message}")
     job.done.set()
@@ -11528,7 +11586,8 @@ def _read_requires_current_find_job(request: ReadRequest) -> JobState:
         "next_required_action": "select_or_adopt_project_current_find_then_run_read",
         "policy": "Web sends Read commands only to framework/scripts/run_module.py; Framework prepares inputs, invokes Reading, and synchronizes project artifacts.",
     }
-    JOBS[job.job_id] = job
+    with JOBS_LOCK:
+        JOBS[job.job_id] = job
     job.set_progress("blocked", 1, 1, message)
     job.log(message)
     job.done.set()
@@ -11544,7 +11603,7 @@ def _framework_module_env(config: AppConfig, project: str = "") -> dict[str, str
         env["DEFAULT_PROJECT_ID"] = project
     env.setdefault("MANAGEMENT_PYTHON", os.environ.get("MANAGEMENT_PYTHON") or sys.executable)
     env["PYTHONPATH"] = taste_pythonpath_string(WORKSPACE_ROOT, env.get("PYTHONPATH", ""))
-    config_json = json.dumps(config.model_dump(), ensure_ascii=False)
+    config_json = json.dumps(_strip_llm_secrets_from_config_payload(config.model_dump()), ensure_ascii=False)
     env["TASTE_IDEATION_CONFIG_JSON"] = config_json
     env["TASTE_APP_CONFIG_JSON"] = config_json
     return env
@@ -11748,15 +11807,19 @@ def api_read(request: ReadRequest) -> dict:
         project, root = current
         if _read_request_should_use_current_find_wrapper(request, project, root):
             current_run_id = _current_project_find_run_id(root)
-            job = start_job("read", lambda log, should_cancel, progress: _run_current_find_claude_read_job(project, root, request, log, should_cancel, progress))
-            job.run_id = current_run_id
-            job.result = {
-                "project": project,
-                "run_id": current_run_id,
-                "source": "current_find_claude_read_wrapper",
-                "status": "running",
-            }
-            _persist_jobs()
+            with JOBS_LOCK:
+                duplicate = _active_web_stage_job_blocker(project, "read")
+                if duplicate:
+                    return JSONResponse(status_code=409, content=duplicate)
+                job = start_job("read", lambda log, should_cancel, progress: _run_current_find_claude_read_job(project, root, request, log, should_cancel, progress))
+                job.run_id = current_run_id
+                job.result = {
+                    "project": project,
+                    "run_id": current_run_id,
+                    "source": "current_find_claude_read_wrapper",
+                    "status": "running",
+                }
+                _persist_jobs()
             return _public_account_payload(job.as_dict())
     return _public_account_payload(_read_requires_current_find_job(request).as_dict())
 
@@ -11796,7 +11859,15 @@ def api_plan(request: PlanRequest) -> dict:
     config = load_config()
     current = _project_context_for_find_run(request.run_id) or _current_project_for_find_guard()
     project = current[0] if current else ""
-    job = start_job("plan", lambda log, should_cancel, progress: _run_planning_module_job(project, request, config, "plan", log, should_cancel, progress))
+    with JOBS_LOCK:
+        duplicate = _active_web_stage_job_blocker(project, "plan")
+        if duplicate:
+            return JSONResponse(status_code=409, content=duplicate)
+        job = start_job(
+            "plan",
+            lambda log, should_cancel, progress: _run_planning_module_job(project, request, config, "plan", log, should_cancel, progress),
+            initial_result={"project": project, "run_id": request.run_id, "status": "running", "source": "framework_planning_entrypoint"},
+        )
     return _public_account_payload(job.as_dict())
 
 
@@ -11810,7 +11881,15 @@ def api_plan_polish(request: PlanPolishRequest) -> dict:
     config = load_config()
     current = _project_context_for_find_run(request.run_id) or _current_project_for_find_guard()
     project = current[0] if current else ""
-    job = start_job("plan-polish", lambda log, should_cancel, progress: _run_planning_module_job(project, request, config, "polish", log, should_cancel, progress))
+    with JOBS_LOCK:
+        duplicate = _active_web_stage_job_blocker(project, "plan")
+        if duplicate:
+            return JSONResponse(status_code=409, content=duplicate)
+        job = start_job(
+            "plan-polish",
+            lambda log, should_cancel, progress: _run_planning_module_job(project, request, config, "polish", log, should_cancel, progress),
+            initial_result={"project": project, "run_id": request.run_id, "status": "running", "source": "framework_planning_entrypoint"},
+        )
     return _public_account_payload(job.as_dict())
 
 
@@ -12352,13 +12431,29 @@ def api_job(payload: dict[str, Any]) -> dict:
     if blocker:
         return JSONResponse(status_code=409, content=blocker)
     stage = job_stage(payload)
+    action = str(payload.get("action") or "").strip().lower().replace("_", "-")
+    if action in {"find", "full-cycle", "full-research-cycle"}:
+        llm_error = _find_llm_configuration_error(load_config())
+        if llm_error:
+            return JSONResponse(status_code=400, content=llm_error)
     stage_blocker = _project_stage_running_blocker(payload, stage)
     if stage_blocker:
         return JSONResponse(status_code=409, content=stage_blocker)
     job_id = f"{stage}_{uuid4().hex[:10]}"
     payload_with_job = {**payload, "web_job_id": job_id}
     initial_result = _initial_module_controller_job_result(payload_with_job, stage)
-    job = start_job(stage, lambda log, should_cancel, progress: run_action(payload_with_job, log, should_cancel, progress), job_id=job_id)
+    if not initial_result:
+        initial_result = {
+            "project": payload["project"],
+            "action": str(payload.get("action") or stage),
+            "web_job_id": job_id,
+            "status": "running",
+        }
+    with JOBS_LOCK:
+        duplicate = _active_web_stage_job_blocker(payload["project"], stage)
+        if duplicate:
+            return JSONResponse(status_code=409, content=duplicate)
+        job = start_job(stage, lambda log, should_cancel, progress: run_action(payload_with_job, log, should_cancel, progress), job_id=job_id)
     if initial_result:
         job.result = initial_result
         panel_stage = str(initial_result.get("panel_stage") or "").strip()
@@ -12864,12 +12959,11 @@ def api_cancel_job(job_id: str) -> dict:
 
 @app.websocket("/ws/jobs/{job_id}")
 async def ws_job(websocket: WebSocket, job_id: str):
-    websocket_cookies = getattr(websocket, "cookies", None)
-    account = AUTH_STORE.user_for_session(websocket_cookies.get(SESSION_COOKIE)) if websocket_cookies is not None else None
-    if websocket_cookies is not None and account is None:
+    account = AUTH_STORE.user_for_session(websocket.cookies.get(SESSION_COOKIE))
+    if account is None:
         await websocket.close(code=4401)
         return
-    account_token = _CURRENT_ACCOUNT.set(account) if account is not None else None
+    account_token = _CURRENT_ACCOUNT.set(account)
     await websocket.accept()
     try:
         sent = 0
@@ -12960,8 +13054,7 @@ async def ws_job(websocket: WebSocket, job_id: str):
     except WebSocketDisconnect:
         return
     finally:
-        if account_token is not None:
-            _CURRENT_ACCOUNT.reset(account_token)
+        _CURRENT_ACCOUNT.reset(account_token)
 
 
 @app.get("/api/runs")

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import stat
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -75,16 +77,39 @@ def test_account_configuration_is_isolated(tmp_path, monkeypatch):
 
     monkeypatch.setattr(server, "AUTH_STORE", AuthStore(tmp_path / "auth.sqlite3"))
     monkeypatch.setattr(server, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "service-global-key-must-not-leak")
     alice = TestClient(server.app)
     bob = TestClient(server.app)
-    assert alice.post("/api/auth/register", json={"username": "alice2", "password": "password-a"}).status_code == 200
-    assert bob.post("/api/auth/register", json={"username": "bob2", "password": "password-b"}).status_code == 200
+    alice_user = alice.post("/api/auth/register", json={"username": "alice2", "password": "password-a"}).json()["user"]
+    bob_user = bob.post("/api/auth/register", json={"username": "bob2", "password": "password-b"}).json()["user"]
 
     alice_config = alice.get("/api/config").json()
-    alice_config["research_interest"] = "alice-only-interest"
+    alice_config.update({
+        "research_interest": "alice-only-interest",
+        "provider": "openai_compatible",
+        "base_url": "https://alice-llm.test/v1",
+        "model": "alice-model",
+        "api_key": "alice-secret",
+    })
     assert alice.post("/api/config", json=alice_config).status_code == 200
+    bob_config = bob.get("/api/config").json()
+    assert bob_config["api_key_saved"] is False
+    bob_config.update({
+        "provider": "openai_compatible",
+        "base_url": "https://bob-llm.test/v1",
+        "model": "bob-model",
+        "api_key": "bob-secret",
+    })
+    assert bob.post("/api/config", json=bob_config).status_code == 200
     assert alice.get("/api/config").json()["research_interest"] == "alice-only-interest"
     assert bob.get("/api/config").json()["research_interest"] != "alice-only-interest"
+
+    alice_llm = tmp_path / "web" / ".runtime" / "accounts" / alice_user["id"] / "llm.local.json"
+    bob_llm = tmp_path / "web" / ".runtime" / "accounts" / bob_user["id"] / "llm.local.json"
+    assert json.loads(alice_llm.read_text(encoding="utf-8"))["api_key"] == "alice-secret"
+    assert json.loads(bob_llm.read_text(encoding="utf-8"))["api_key"] == "bob-secret"
+    assert stat.S_IMODE(alice_llm.stat().st_mode) == 0o600
+    assert stat.S_IMODE(alice_llm.parent.stat().st_mode) == 0o700
 
 
 def test_https_proxy_sets_secure_cookie_and_security_headers(tmp_path, monkeypatch):
@@ -92,10 +117,9 @@ def test_https_proxy_sets_secure_cookie_and_security_headers(tmp_path, monkeypat
     from auto_research.web.auth import AuthStore
 
     monkeypatch.setattr(server, "AUTH_STORE", AuthStore(tmp_path / "auth.sqlite3"))
-    client = TestClient(server.app)
+    client = TestClient(server.app, base_url="https://testserver")
     response = client.post(
         "/api/auth/register",
-        headers={"X-Forwarded-Proto": "https"},
         json={"username": "https_user", "password": "password-https"},
     )
     assert response.status_code == 200
@@ -104,3 +128,37 @@ def test_https_proxy_sets_secure_cookie_and_security_headers(tmp_path, monkeypat
     assert "Secure" in cookie
     assert "SameSite=lax" in cookie
     assert response.headers["strict-transport-security"] == "max-age=31536000"
+
+    direct_http = TestClient(server.app)
+    spoofed = direct_http.post(
+        "/api/auth/register",
+        headers={"X-Forwarded-Proto": "https"},
+        json={"username": "http_user", "password": "password-http"},
+    )
+    assert "Secure" not in spoofed.headers["set-cookie"]
+    assert "strict-transport-security" not in spoofed.headers
+
+
+def test_logout_invalidates_session_and_websocket_requires_login(tmp_path, monkeypatch):
+    import auto_research.web.server as server
+    from auto_research.web.auth import AuthStore
+
+    monkeypatch.setattr(server, "AUTH_STORE", AuthStore(tmp_path / "auth.sqlite3"))
+    client = TestClient(server.app)
+    assert client.post("/api/auth/register", json={"username": "logout_user", "password": "password-logout"}).status_code == 200
+    assert client.get("/api/auth/me").status_code == 200
+    assert client.post("/api/auth/logout").status_code == 200
+    assert client.get("/api/auth/me").status_code == 401
+
+    class AnonymousWebSocket:
+        cookies: dict[str, str] = {}
+
+        def __init__(self):
+            self.closed_with = None
+
+        async def close(self, code: int):
+            self.closed_with = code
+
+    socket = AnonymousWebSocket()
+    asyncio.run(server.ws_job(socket, "missing"))
+    assert socket.closed_with == 4401
