@@ -46,7 +46,8 @@ from runtime.jobs import JobCancelled
 from runtime.resource_locks import crawl_resource_lease
 from runtime.run_storage import delete_run, list_runs, read_json, redacted_config, run_dir, write_json
 from runtime.taste_pythonpath import taste_pythonpath_string
-from auto_research.web.auth import AuthError, AuthStore, AuthUser, SESSION_COOKIE, SESSION_DAYS
+from auto_research.web.auth import AuthError, AuthRateLimitError, AuthStore, AuthUser, SESSION_COOKIE, SESSION_DAYS
+from auto_research.web.verification_email import VerificationEmailError, VerificationEmailSender
 
 ensure_directories()
 
@@ -61,6 +62,7 @@ app.add_middleware(
 )
 
 AUTH_STORE = AuthStore(Path(os.environ.get("TASTE_AUTH_DB") or WORKSPACE_ROOT / "web" / ".runtime" / "auth.sqlite3"))
+AUTH_EMAIL_SENDER = VerificationEmailSender.from_env()
 _CURRENT_ACCOUNT: ContextVar[AuthUser | None] = ContextVar("taste_current_account", default=None)
 
 
@@ -10990,13 +10992,44 @@ _load_persisted_jobs()
 
 
 def _auth_response(user: AuthUser) -> dict[str, str]:
-    return {"id": user.id, "username": user.username}
+    return {"id": user.id, "username": user.username, "email": user.email}
+
+
+@app.post("/api/auth/verification-code")
+def api_auth_verification_code(payload: dict[str, Any], request: Request):
+    if not AUTH_EMAIL_SENDER.configured:
+        return JSONResponse({"error": "服务器尚未配置注册邮件服务，请联系管理员。"}, status_code=503)
+    requester = request.client.host if request.client is not None else "unknown"
+    try:
+        verification = AUTH_STORE.begin_email_verification(payload.get("email"), requester)
+        AUTH_EMAIL_SENDER.send_verification_code(
+            verification.email,
+            verification.code,
+            verification.expires_in,
+        )
+    except AuthRateLimitError as exc:
+        return JSONResponse({"error": str(exc), "retry_after": exc.retry_after}, status_code=429)
+    except AuthError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except VerificationEmailError as exc:
+        AUTH_STORE.cancel_email_verification(verification)
+        return JSONResponse({"error": str(exc)}, status_code=503)
+    return {
+        "status": "sent",
+        "expires_in": verification.expires_in,
+        "retry_after": verification.retry_after,
+    }
 
 
 @app.post("/api/auth/register")
 def api_auth_register(payload: dict[str, Any], request: Request):
     try:
-        user = AUTH_STORE.register(payload.get("username"), payload.get("password"))
+        user = AUTH_STORE.register(
+            payload.get("username"),
+            payload.get("email"),
+            payload.get("password"),
+            payload.get("verification_code"),
+        )
     except AuthError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     token = AUTH_STORE.create_session(user)
@@ -11007,9 +11040,9 @@ def api_auth_register(payload: dict[str, Any], request: Request):
 
 @app.post("/api/auth/login")
 def api_auth_login(payload: dict[str, Any], request: Request):
-    user = AUTH_STORE.authenticate(payload.get("username"), payload.get("password"))
+    user = AUTH_STORE.authenticate(payload.get("identifier", payload.get("username")), payload.get("password"))
     if user is None:
-        return JSONResponse({"error": "用户名或密码错误。"}, status_code=401)
+        return JSONResponse({"error": "用户名/邮箱或密码错误。"}, status_code=401)
     token = AUTH_STORE.create_session(user)
     response = JSONResponse({"user": _auth_response(user)})
     _set_session_cookie(response, request, token)

@@ -1,13 +1,20 @@
 {
-  "generated_at": "2026-07-17T05:10:00+00:00",
+  "generated_at": "2026-07-17T09:36:51+00:00",
   "owner": "web_frontend",
-  "script_count": 2,
+  "script_count": 3,
   "scripts": [
     {
       "script": "auth.py",
       "path": "web/backend/auto_research/web/auth.py",
       "owner": "web_frontend",
       "owner_reason": "Account registration, password verification, and persistent Web session storage",
+      "framework_dependencies": []
+    },
+    {
+      "script": "verification_email.py",
+      "path": "web/backend/auto_research/web/verification_email.py",
+      "owner": "web_frontend",
+      "owner_reason": "System SMTP transport for account registration verification emails",
       "framework_dependencies": []
     },
     {

@@ -31,8 +31,8 @@ body {
 }
 
 .authCard {
-  width: min(100%, 420px);
-  padding: 1.5rem;
+  width: min(100%, 440px);
+  padding: 1.65rem;
   border: 1px solid #d7dee7;
   border-radius: 10px;
   background: #ffffff;
@@ -43,7 +43,7 @@ body {
   display: flex;
   align-items: center;
   gap: 0.9rem;
-  margin-bottom: 1.2rem;
+  margin-bottom: 1.3rem;
 }
 
 .authHeading h1,
@@ -89,14 +89,53 @@ body {
   margin-top: 1rem;
 }
 
+.authCodeRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.55rem;
+}
+
+.authCodeRow button {
+  min-width: 108px;
+  white-space: nowrap;
+}
+
+.authCard input:focus,
+.authCard button:focus-visible {
+  border-color: #1e5a5a;
+  outline: 3px solid rgba(30, 90, 90, 0.13);
+  outline-offset: 1px;
+}
+
 .authError {
   margin: 0.75rem 0 0;
   color: #a33a32;
   font-size: 0.86rem;
 }
 
+.authNotice {
+  margin: 0.75rem 0 0;
+  color: #26705c;
+  font-size: 0.86rem;
+}
+
 .authHelp {
   margin-top: 0.8rem !important;
+}
+
+@media (max-width: 480px) {
+  .authShell {
+    padding: 0.85rem;
+  }
+
+  .authCard {
+    padding: 1.25rem;
+  }
+
+  .authCodeRow button {
+    min-width: 100px;
+    padding-inline: 0.65rem;
+  }
 }
 
 button,

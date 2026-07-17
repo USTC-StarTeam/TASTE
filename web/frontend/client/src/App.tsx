@@ -31,6 +31,7 @@ import {
   getVenues,
   probeLLMConfig,
   patchIdea,
+  requestEmailVerification,
   updateIdeaMarkdown,
   updatePlanMarkdown,
   saveConfig,
@@ -8389,11 +8390,17 @@ function authErrorMessage(error: unknown) {
 function App() {
   const [account, setAccount] = useState<AuthUser | null | undefined>(undefined);
   const [mode, setMode] = useState<"login" | "register">("login");
-  const [username, setUsername] = useState("");
+  const [identifier, setIdentifier] = useState("");
+  const [registerUsername, setRegisterUsername] = useState("");
+  const [email, setEmail] = useState("");
+  const [verificationCode, setVerificationCode] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [authError, setAuthError] = useState("");
+  const [authNotice, setAuthNotice] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [sendingCode, setSendingCode] = useState(false);
+  const [codeRetryAfter, setCodeRetryAfter] = useState(0);
 
   useEffect(() => {
     void getCurrentUser()
@@ -8407,6 +8414,37 @@ function App() {
     return () => window.removeEventListener("taste:auth-required", requireAuth);
   }, []);
 
+  useEffect(() => {
+    if (codeRetryAfter <= 0) return;
+    const timer = window.setInterval(() => {
+      setCodeRetryAfter((value) => Math.max(0, value - 1));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [codeRetryAfter]);
+
+  function switchAuthMode(nextMode: "login" | "register") {
+    setMode(nextMode);
+    setAuthError("");
+    setAuthNotice("");
+  }
+
+  async function sendVerificationCode() {
+    const emailInput = document.getElementById("auth-email") as HTMLInputElement | null;
+    if (!emailInput?.reportValidity()) return;
+    setSendingCode(true);
+    setAuthError("");
+    setAuthNotice("");
+    try {
+      const response = await requestEmailVerification(email.trim());
+      setCodeRetryAfter(Math.max(1, response.retry_after || 60));
+      setAuthNotice("验证码已发送，请查看邮箱。");
+    } catch (error) {
+      setAuthError(authErrorMessage(error));
+    } finally {
+      setSendingCode(false);
+    }
+  }
+
   async function submitAuth(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (mode === "register" && password !== confirmPassword) {
@@ -8415,8 +8453,11 @@ function App() {
     }
     setSubmitting(true);
     setAuthError("");
+    setAuthNotice("");
     try {
-      const response = mode === "login" ? await login(username, password) : await register(username, password);
+      const response = mode === "login"
+        ? await login(identifier, password)
+        : await register(registerUsername, email, password, verificationCode);
       localStorage.removeItem("selected_project");
       setAccount(response.user);
       setPassword("");
@@ -8447,15 +8488,38 @@ function App() {
         <section className="authCard">
           <div className="authHeading">
             <div className="authMark">T</div>
-            <div><h1>TASTE</h1><p>服务器版 · 账户数据独立</p></div>
+            <div><h1>TASTE</h1></div>
           </div>
           <div className="authTabs">
-            <button type="button" className={mode === "login" ? "active" : ""} onClick={() => { setMode("login"); setAuthError(""); }}>登录</button>
-            <button type="button" className={mode === "register" ? "active" : ""} onClick={() => { setMode("register"); setAuthError(""); }}>注册</button>
+            <button type="button" className={mode === "login" ? "active" : ""} onClick={() => switchAuthMode("login")}>登录</button>
+            <button type="button" className={mode === "register" ? "active" : ""} onClick={() => switchAuthMode("register")}>注册</button>
           </div>
           <form onSubmit={submitAuth}>
-            <label htmlFor="auth-username">用户名</label>
-            <input id="auth-username" value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required minLength={3} maxLength={64} autoFocus />
+            {mode === "login" ? (
+              <>
+                <label htmlFor="auth-identifier">用户名或邮箱</label>
+                <input id="auth-identifier" value={identifier} onChange={(event) => setIdentifier(event.target.value)} autoComplete="username" required maxLength={254} autoFocus />
+              </>
+            ) : (
+              <>
+                <label htmlFor="auth-username">用户名</label>
+                <input id="auth-username" value={registerUsername} onChange={(event) => setRegisterUsername(event.target.value)} autoComplete="username" required minLength={3} maxLength={64} autoFocus />
+                <label htmlFor="auth-email">邮箱</label>
+                <input id="auth-email" type="email" value={email} onChange={(event) => {
+                  setEmail(event.target.value);
+                  setVerificationCode("");
+                  setCodeRetryAfter(0);
+                  setAuthNotice("");
+                }} autoComplete="email" required maxLength={254} />
+                <label htmlFor="auth-verification-code">邮箱验证码</label>
+                <div className="authCodeRow">
+                  <input id="auth-verification-code" value={verificationCode} onChange={(event) => setVerificationCode(event.target.value.replace(/\D/g, "").slice(0, 6))} autoComplete="one-time-code" inputMode="numeric" pattern="[0-9]{6}" title="请输入 6 位验证码" required maxLength={6} />
+                  <button type="button" onClick={() => void sendVerificationCode()} disabled={sendingCode || codeRetryAfter > 0}>
+                    {sendingCode ? "发送中…" : codeRetryAfter > 0 ? `${codeRetryAfter} 秒` : "获取验证码"}
+                  </button>
+                </div>
+              </>
+            )}
             <label htmlFor="auth-password">密码</label>
             <input id="auth-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === "login" ? "current-password" : "new-password"} required minLength={8} maxLength={128} />
             {mode === "register" && (
@@ -8465,9 +8529,10 @@ function App() {
               </>
             )}
             {authError && <p className="authError" role="alert">{authError}</p>}
+            {authNotice && <p className="authNotice" role="status">{authNotice}</p>}
             <button className="primary authSubmit" disabled={submitting}>{submitting ? "请稍候…" : mode === "login" ? "登录" : "创建账户"}</button>
           </form>
-          {mode === "register" && <p className="authHelp">用户名 3-64 个字符；密码至少 8 个字符。</p>}
+          {mode === "register" && <p className="authHelp">验证码 10 分钟内有效；密码至少 8 个字符。</p>}
         </section>
       </main>
     );

@@ -190,7 +190,7 @@ function asObjectResponse<T extends Record<string, any>>(value: any, fallback: T
   return value && typeof value === "object" && !Array.isArray(value) ? value as T : fallback;
 }
 
-export type AuthUser = { id: string; username: string };
+export type AuthUser = { id: string; username: string; email?: string };
 
 export async function getCurrentUser(): Promise<AuthUser | null> {
   const response = await apiFetch("/api/auth/me");
@@ -199,19 +199,27 @@ export async function getCurrentUser(): Promise<AuthUser | null> {
   return payload.user;
 }
 
-export async function login(username: string, password: string) {
+export async function login(identifier: string, password: string) {
   return json<{ user: AuthUser }>(await apiFetch("/api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ identifier, password }),
   }));
 }
 
-export async function register(username: string, password: string) {
+export async function requestEmailVerification(email: string) {
+  return json<{ status: string; expires_in: number; retry_after: number }>(await apiFetch("/api/auth/verification-code", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  }));
+}
+
+export async function register(username: string, email: string, password: string, verificationCode: string) {
   return json<{ user: AuthUser }>(await apiFetch("/api/auth/register", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ username, email, password, verification_code: verificationCode }),
   }));
 }
 

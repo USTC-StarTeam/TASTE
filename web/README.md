@@ -23,6 +23,8 @@
 | 路径 | 作用 |
 | --- | --- |
 | `backend/auto_research/web/server.py` | FastAPI 服务入口，负责配置、项目、job、artifact 和静态前端服务。 |
+| `backend/auto_research/web/auth.py` | 账户、邮箱验证码、密码哈希和会话存储。 |
+| `backend/auto_research/web/verification_email.py` | 注册验证码的系统 SMTP 发送组件。 |
 | `framework/scripts/bridges/project_bridge.py` | Framework 负责项目命令、运行编排和网页所需的项目状态投影；Web 只调用其公开函数。 |
 | `backend/auto_research/web/script_manifest.json` | 后端网页脚本清单。 |
 | `frontend/client/src/App.tsx` | React 单页应用主界面，包含七阶段页面和任务栏。 |
@@ -56,6 +58,19 @@ npm --prefix web/frontend/client run build
 ```
 
 启动脚本默认监听 `0.0.0.0:8879`，可直接通过 `http://服务器地址:8879` 检查，也可由 Nginx/Caddy 反向代理到 HTTPS 域名；仍可通过 `WEB_HOST=127.0.0.1` 限制为仅本机访问。网页提供注册、登录和退出功能，会话保存在 HttpOnly Cookie 中。
+
+新账户使用邮箱验证码注册，验证码只以加盐哈希保存；登录框同时接受用户名和邮箱。发送注册邮件前，在服务环境中配置系统 SMTP（这些是服务器级注册配置，不会读取或覆盖任何用户自己的项目邮件配置）：
+
+```bash
+TASTE_AUTH_SMTP_HOST=smtp.example.com
+TASTE_AUTH_SMTP_PORT=465
+TASTE_AUTH_SMTP_SECURITY=ssl
+TASTE_AUTH_SMTP_USERNAME=taste@example.com
+TASTE_AUTH_SMTP_PASSWORD=your-smtp-authorization-code
+TASTE_AUTH_SMTP_FROM=taste@example.com
+```
+
+`TASTE_AUTH_SMTP_SECURITY` 可取 `ssl`、`starttls` 或 `plain`；修改后需重启 Web 服务。旧账户无需补填邮箱，仍可继续使用用户名登录。
 
 推荐由反向代理终止 HTTPS，再转发到 `http://127.0.0.1:8879`。代理必须传递协议和 WebSocket 头，TASTE 才会设置 Secure Cookie，并让任务连接自动使用 WSS：
 
