@@ -1984,6 +1984,39 @@ def test_web_job_finished_at_round_trips_and_survives_compaction(monkeypatch):
             assert compact["finished_at"] == job.finished_at
 
 
+def test_web_job_persistence_acquires_registry_lock_before_persistence_lock(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    events = []
+
+    class RecordingRLock:
+        def __init__(self, name):
+            self.name = name
+            self.lock = threading.RLock()
+
+        def __enter__(self):
+            self.lock.acquire()
+            events.append(("enter", self.name))
+            return self
+
+        def __exit__(self, _exc_type, _exc, _traceback):
+            events.append(("exit", self.name))
+            self.lock.release()
+
+    monkeypatch.setattr(web_server, "JOBS", {})
+    monkeypatch.setattr(web_server, "JOBS_PATH", tmp_path / "web_jobs.json")
+    monkeypatch.setattr(web_server, "JOBS_LOCK", RecordingRLock("registry"))
+    monkeypatch.setattr(web_server, "JOBS_PERSIST_LOCK", RecordingRLock("persistence"))
+
+    web_server._persist_jobs()
+
+    assert events[:3] == [
+        ("enter", "registry"),
+        ("enter", "persistence"),
+        ("enter", "registry"),
+    ]
+
+
 def test_web_find_read_idea_plan_error_compaction_keeps_specific_exception():
     from auto_research.web import server as web_server
 

@@ -10640,8 +10640,12 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _persist_jobs() -> None:
-    with JOBS_PERSIST_LOCK:
-        _persist_jobs_locked()
+    # Keep the registry/persistence lock order identical to API launch paths.
+    # Otherwise a newly started runner can hold JOBS_PERSIST_LOCK while the
+    # request thread still holds JOBS_LOCK, leaving both sides waiting forever.
+    with JOBS_LOCK:
+        with JOBS_PERSIST_LOCK:
+            _persist_jobs_locked()
 
 
 def _persist_jobs_locked() -> None:
