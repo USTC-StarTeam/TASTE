@@ -5296,7 +5296,7 @@ def _resolve_latest_available_venue_years(
     venue_name = str(venue.get("name") or venue.get("id") or "venue")
     resolved: list[int] = []
     reasons: list[str] = []
-    probe_cache: dict[int, tuple[bool, str]] = {}
+    probe_cache: dict[int, tuple[str, str, str]] = {}
     local_probe_cache: dict[int, tuple[bool, str]] = {}
     complete_probe_cache: dict[int, tuple[bool, str]] = {}
 
@@ -5310,24 +5310,34 @@ def _resolve_latest_available_venue_years(
             local_probe_cache[candidate] = (False, "")
         return local_probe_cache[candidate]
 
-    def probe(candidate: int) -> tuple[bool, str]:
+    def probe(candidate: int) -> tuple[str, str, str]:
         if candidate in probe_cache:
             return probe_cache[candidate]
         local_available, local_adapter = local_probe(candidate)
         if local_available:
-            probe_cache[candidate] = (True, local_adapter)
+            probe_cache[candidate] = ("available", local_adapter, "")
             return probe_cache[candidate]
+        probe_timeout = _timeout_env_value(("FIND_VENUE_YEAR_PROBE_TIMEOUT_SEC", "VENUE_YEAR_PROBE_TIMEOUT_SEC"), 30.0)
         try:
             titles, adapter = _fetch_venue_title_index_for_find(
                 venue,
                 [candidate],
                 1,
-                timeout_sec=_timeout_env_value(("FIND_VENUE_YEAR_PROBE_TIMEOUT_SEC", "VENUE_YEAR_PROBE_TIMEOUT_SEC"), 30.0),
+                timeout_sec=probe_timeout,
                 prefer_cache=True,
             )
-        except Exception:
+        except Exception as exc:
             titles, adapter = [], "error"
-        probe_cache[candidate] = (bool(titles), adapter)
+            detail = " ".join(str(exc).split()).strip()[:240] or exc.__class__.__name__
+            probe_cache[candidate] = ("transient_failure", adapter, f"{exc.__class__.__name__}: {detail}")
+            return probe_cache[candidate]
+        transient_reason = ""
+        if not titles and adapter == "timeout":
+            transient_reason = f"wall timeout after {probe_timeout:g}s"
+        elif not titles and adapter == "error":
+            transient_reason = "source adapter returned an error without a usable title row"
+        state = "available" if titles else ("transient_failure" if transient_reason else "empty")
+        probe_cache[candidate] = (state, adapter, transient_reason)
         return probe_cache[candidate]
 
     def complete_probe(candidate: int) -> tuple[bool, str]:
@@ -5373,12 +5383,26 @@ def _resolve_latest_available_venue_years(
                 as_of=cutoff,
                 requested_available=False,
             )
-            requested_available, requested_adapter = probe(requested)
-            if requested_available:
+            requested_probe_state, requested_adapter, requested_probe_failure = probe(requested)
+            if requested_probe_state == "available":
                 if requested not in resolved:
                     resolved.append(requested)
                 continue
+            if requested_probe_state == "transient_failure":
+                if requested not in resolved:
+                    resolved.append(requested)
+                reasons.append(
+                    f"{venue_name} {requested} year availability probe failed transiently ({requested_probe_failure}); "
+                    f"retaining requested year {requested} for the main fetch and not backfilling to an older year."
+                )
+                continue
             if not fallback_basis:
+                if requested not in resolved:
+                    resolved.append(requested)
+                reasons.append(
+                    f"{venue_name} {requested} year availability probe returned no title rows without an authoritative absence signal; "
+                    f"retaining requested year {requested} for the main fetch and not backfilling to an older year."
+                )
                 continue
         else:
             requested_adapter = ""
@@ -5391,8 +5415,34 @@ def _resolve_latest_available_venue_years(
         for candidate in _venue_yewindow(venue, [requested], max_backfill_years=max_backfill_years):
             if candidate == requested:
                 continue
-            available, adapter = probe(candidate)
-            if not available:
+            candidate_probe_state, adapter, candidate_probe_failure = probe(candidate)
+            if candidate_probe_state == "transient_failure":
+                if candidate not in resolved:
+                    resolved.append(candidate)
+                prefix = f"requested years [{requested}] had no usable {venue_name} title index as of {cutoff.isoformat()} ({fallback_basis})"
+                reasons.append(
+                    f"{prefix}; {venue_name} {candidate} year availability probe failed transiently "
+                    f"({candidate_probe_failure}); retaining year {candidate} for the main fetch and not backfilling further."
+                )
+                break
+            if candidate_probe_state == "empty":
+                candidate_unavailable_basis = _venue_year_objective_unavailable_reason(
+                    venue,
+                    candidate,
+                    as_of=cutoff,
+                    requested_available=False,
+                )
+                if candidate_unavailable_basis:
+                    continue
+                if candidate not in resolved:
+                    resolved.append(candidate)
+                prefix = f"requested years [{requested}] had no usable {venue_name} title index as of {cutoff.isoformat()} ({fallback_basis})"
+                reasons.append(
+                    f"{prefix}; {venue_name} {candidate} year availability probe returned no title rows without an authoritative absence signal; "
+                    f"retaining year {candidate} for the main fetch and not backfilling further."
+                )
+                break
+            if candidate_probe_state != "available":
                 continue
             if candidate not in resolved:
                 resolved.append(candidate)
@@ -7678,6 +7728,17 @@ def _source_status_message_text(text: str) -> str:
         )
     if lowered.startswith("using latest available"):
         return text.replace("using latest available", "使用最新可用").replace("title index year", "标题索引年份").replace(" via ", "，适配器 ").rstrip(".")
+    if "year availability probe failed transiently" in lowered:
+        return (
+            text.replace("year availability probe failed transiently", "年份可用性探测发生瞬时失败")
+            .replace("wall timeout after", "总等待超时")
+        )
+    if "year availability probe returned no title rows without an authoritative absence signal" in lowered:
+        return text.replace("year availability probe returned no title rows without an authoritative absence signal", "年份可用性探测未返回题录，且没有权威证据确认该年份不存在")
+    if lowered.startswith("retaining requested year"):
+        return text.replace("retaining requested year", "保留请求年份").replace("for the main fetch and not backfilling to an older year", "交给正式抓取重试，不向更早年份回退")
+    if lowered.startswith("retaining year"):
+        return text.replace("retaining year", "保留年份").replace("for the main fetch and not backfilling further", "交给正式抓取重试，不再继续向更早年份回退")
     if lowered.startswith("official icml downloads/virtual page is reachable"):
         return "ICML 官方下载页可访问，已扫描符合条件的论文链接"
     if lowered.startswith("dblp paginated stream search over the current dblp index"):
@@ -8271,7 +8332,8 @@ def run_find(
                 if online_category_reports:
                     category_selected_papers_for_report = _as_int(online_category_reports[-1].get("selected_category_papers"), len(title_index))
             if not title_index:
-                year_fallback_reason = f"requested years {requested_years} had no usable papers via {adapter}; no fallback year was used"
+                fetch_failure_reason = f"requested years {requested_years} had no usable papers via {adapter}; no fallback year was used"
+                year_fallback_reason = " ".join(part for part in (year_fallback_reason, fetch_failure_reason) if part)
                 log(f"{venue.get('name')}: {year_fallback_reason}")
         metadata_fields = _venue_metadata_status_fields(venue_metadata_audit)
         metadata_limited = bool(metadata_fields.get("metadata_completeness_limited"))

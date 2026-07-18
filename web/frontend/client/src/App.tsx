@@ -807,6 +807,24 @@ function sourceStatusMessageText(value: any, lang: Lang) {
       .replace(/ via /i, "，适配器 ")
       .replace(/\.$/, "");
   }
+  if (lowered.includes("year availability probe failed transiently")) {
+    return text
+      .replace(/year availability probe failed transiently/i, "年份可用性探测发生瞬时失败")
+      .replace(/wall timeout after/i, "总等待超时");
+  }
+  if (lowered.includes("year availability probe returned no title rows without an authoritative absence signal")) {
+    return text.replace(/year availability probe returned no title rows without an authoritative absence signal/i, "年份可用性探测未返回题录，且没有权威证据确认该年份不存在");
+  }
+  if (lowered.startsWith("retaining requested year")) {
+    return text
+      .replace(/^retaining requested year/i, "保留请求年份")
+      .replace(/for the main fetch and not backfilling to an older year/i, "交给正式抓取重试，不向更早年份回退");
+  }
+  if (lowered.startsWith("retaining year")) {
+    return text
+      .replace(/^retaining year/i, "保留年份")
+      .replace(/for the main fetch and not backfilling further/i, "交给正式抓取重试，不再继续向更早年份回退");
+  }
   if (lowered === "no fallback year was used") return "未使用年份回退";
   if (lowered === "no title index found.") return "未找到标题索引。";
   if (lowered.startsWith("adapter did not provide an explicit venue metadata completeness audit")) return "";

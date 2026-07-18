@@ -6039,6 +6039,111 @@ def test_find_future_release_date_keeps_live_requested_year_without_cache(monkey
     assert calls == [([2026], 1)]
 
 
+@pytest.mark.parametrize(
+    ("venue_id", "failure_mode", "expected_detail"),
+    [
+        ("openreview_neurips", "timeout", "wall timeout after 30s"),
+        ("dblp_cikm", "exception", "temporary DNS failure"),
+    ],
+)
+def test_find_transient_year_probe_failure_does_not_skip_to_an_older_year(
+    monkeypatch, venue_id, failure_mode, expected_detail
+):
+    find_pipeline = _load_find_pipeline()
+    venue = find_pipeline.catalog_by_id()[venue_id]
+    calls = []
+    monkeypatch.delenv("FIND_VENUE_YEAR_FULL_RELEASE_PROBE", raising=False)
+    monkeypatch.delenv("FIND_VENUE_YEAR_PROBE_TIMEOUT_SEC", raising=False)
+    monkeypatch.delenv("VENUE_YEAR_PROBE_TIMEOUT_SEC", raising=False)
+    monkeypatch.setattr(find_pipeline, "load_local_venue_year", lambda *_args, **_kwargs: None)
+
+    def live_probe(_venue, years, limit, **_kwargs):
+        year = years[0]
+        calls.append((year, limit))
+        if year == 2026:
+            return [], "none"
+        if year == 2025 and failure_mode == "timeout":
+            return [], "timeout"
+        if year == 2025:
+            raise OSError("temporary DNS failure")
+        raise AssertionError(f"transient 2025 failure incorrectly skipped to {year}")
+
+    monkeypatch.setattr(find_pipeline, "_fetch_venue_title_index_for_find", live_probe)
+    resolved, reason = find_pipeline._resolve_venue_years(venue, [2026], as_of=date(2026, 7, 18))
+
+    assert resolved == [2025]
+    assert calls == [(2026, 1), (2025, 1)]
+    assert "2025 year availability probe failed transiently" in reason
+    assert expected_detail in reason
+    assert "retaining year 2025" in reason
+    assert "not backfilling further" in reason
+
+
+def test_find_transient_requested_year_probe_failure_keeps_requested_year(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    venue = find_pipeline.catalog_by_id()["dblp_kdd"]
+    calls = []
+    monkeypatch.delenv("FIND_VENUE_YEAR_FULL_RELEASE_PROBE", raising=False)
+    monkeypatch.delenv("FIND_VENUE_YEAR_PROBE_TIMEOUT_SEC", raising=False)
+    monkeypatch.delenv("VENUE_YEAR_PROBE_TIMEOUT_SEC", raising=False)
+    monkeypatch.setattr(find_pipeline, "load_local_venue_year", lambda *_args, **_kwargs: None)
+
+    def timed_out(_venue, years, limit, **_kwargs):
+        calls.append((years[0], limit))
+        return [], "timeout"
+
+    monkeypatch.setattr(find_pipeline, "_fetch_venue_title_index_for_find", timed_out)
+    resolved, reason = find_pipeline._resolve_venue_years(venue, [2026], as_of=date(2026, 7, 18))
+
+    assert resolved == [2026]
+    assert calls == [(2026, 1)]
+    assert "2026 year availability probe failed transiently" in reason
+    assert "retaining requested year 2026" in reason
+    assert "not backfilling to an older year" in reason
+
+
+def test_find_empty_released_year_probe_is_not_treated_as_authoritative_absence(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    venue = find_pipeline.catalog_by_id()["dblp_cikm"]
+    calls = []
+    monkeypatch.delenv("FIND_VENUE_YEAR_FULL_RELEASE_PROBE", raising=False)
+    monkeypatch.setattr(find_pipeline, "load_local_venue_year", lambda *_args, **_kwargs: None)
+
+    def empty_probe(_venue, years, limit, **_kwargs):
+        calls.append((years[0], limit))
+        if years[0] < 2025:
+            raise AssertionError("an unverified empty 2025 response incorrectly triggered an older fallback")
+        return [], "none"
+
+    monkeypatch.setattr(find_pipeline, "_fetch_venue_title_index_for_find", empty_probe)
+    resolved, reason = find_pipeline._resolve_venue_years(venue, [2026], as_of=date(2026, 7, 18))
+
+    assert resolved == [2025]
+    assert calls == [(2026, 1), (2025, 1)]
+    assert "2025 year availability probe returned no title rows without an authoritative absence signal" in reason
+    assert "retaining year 2025" in reason
+
+
+def test_find_empty_current_year_probe_records_unverified_absence(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    venue = find_pipeline.catalog_by_id()["dblp_aaai"]
+    calls = []
+    monkeypatch.delenv("FIND_VENUE_YEAR_FULL_RELEASE_PROBE", raising=False)
+    monkeypatch.setattr(find_pipeline, "load_local_venue_year", lambda *_args, **_kwargs: None)
+
+    def empty_probe(_venue, years, limit, **_kwargs):
+        calls.append((years[0], limit))
+        return [], "none"
+
+    monkeypatch.setattr(find_pipeline, "_fetch_venue_title_index_for_find", empty_probe)
+    resolved, reason = find_pipeline._resolve_venue_years(venue, [2026], as_of=date(2026, 7, 18))
+
+    assert resolved == [2026]
+    assert calls == [(2026, 1)]
+    assert "2026 year availability probe returned no title rows without an authoritative absence signal" in reason
+    assert "retaining requested year 2026" in reason
+
+
 def test_find_dblp_one_row_probe_skips_full_toc_fetch(monkeypatch):
     _load_find_pipeline()
     find_support = sys.modules["support.find_support"]
