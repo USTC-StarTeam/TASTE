@@ -67,7 +67,6 @@ if _core_common_spec is None:
     _core_common_spec.loader.exec_module(_core_common_module)
 
 from core.common import (
-    CONTACT_EMAIL,
     DEFAULT_USER_AGENT,
     FULL_TEXT_MIN_CHARS as CONFIG_FULL_TEXT_MIN_CHARS,
     ServiceCooldownActive,
@@ -75,17 +74,29 @@ from core.common import (
     config_float,
     config_int,
     env_bool,
+    jina_api_key_configured,
+    jina_request_headers,
+    mark_process_http_blocker,
     missing_official_access_reason,
+    process_backend_slot,
+    process_blocker,
     response_receipt,
+    service_contact_email,
     service_cooldown_remaining,
     service_from_url,
     service_get,
     service_request_slot,
 )
 try:
-    from acquisition.conference_sources import official_conference_pdf_candidates
+    from acquisition.conference_sources import (
+        official_conference_pdf_candidates,
+        official_conference_title_search_specs,
+    )
 except Exception:
     def official_conference_pdf_candidates(paper: dict) -> list[dict]:
+        return []
+
+    def official_conference_title_search_specs(paper: dict) -> list[dict[str, str]]:
         return []
 from core.common import read_json, safe_slug, scrub_reading_paths_under, write_json, write_text
 from core.common import CACHE_BATCH_TEST_ROOTS, CACHE_RUN_ROOTS, OUTPUT_ROOT, create_run_dir, existing_run_dir, make_reading_paths_relative, refresh_latest_run, resolve_reading_path, ensure_inside_input, ensure_inside_output, ensure_inside_reading, run_dir, validate_run_id
@@ -154,6 +165,20 @@ class ReadingCancelled(RuntimeError):
 READ_USER_AGENT = DEFAULT_USER_AGENT
 ACM_BROWSER_USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
 OPENREVIEW_ATTACHMENT_PDF_NAMES = ("pdf", "originally_submitted_PDF")
+
+
+def _backend_blocker_receipt(kind: str, query: str, backend: str) -> list[dict]:
+    blocker = process_blocker(backend)
+    if not blocker:
+        return []
+    return [{
+        "kind": kind,
+        "query": query,
+        "accepted": False,
+        "reason": "skipped_after_prior_backend_access_failure",
+        "backend": backend,
+        "prior_reason": blocker.get("reason"),
+    }]
 
 
 def _is_openreview_url(url: object) -> bool:
@@ -1251,7 +1276,8 @@ def _crossref_pdf_candidates(paper: dict) -> list[dict]:
     if not doi:
         return []
     url = "https://api.crossref.org/works/" + quote(doi, safe="")
-    params = {"mailto": CONTACT_EMAIL} if CONTACT_EMAIL else None
+    crossref_mailto = service_contact_email("crossref")
+    params = {"mailto": crossref_mailto} if crossref_mailto else None
     payload, receipt = _request_json(url, params=params, timeout=35)
     message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
     if message and not _same_paper_identity_ok(
@@ -1266,12 +1292,28 @@ def _crossref_pdf_candidates(paper: dict) -> list[dict]:
             continue
         pdf_url = str(link.get("URL") or "").strip()
         content_type = str(link.get("content-type") or "").lower()
+        intended_application = str(link.get("intended-application") or "").strip().lower()
+        content_version = str(link.get("content-version") or "").strip().lower()
+        if pdf_url.startswith("http") and intended_application == "similarity-checking":
+            candidates.append({
+                "kind": "crossref_same_paper_pdf_link",
+                "pdf_url": pdf_url,
+                "doi": doi,
+                "crossref_content_type": content_type,
+                "crossref_content_version": content_version,
+                "crossref_intended_application": intended_application,
+                "accepted": False,
+                "reason": "crossref_similarity_checking_link_not_authorized_for_tdm",
+            })
+            continue
         if pdf_url.startswith("http") and ("pdf" in content_type or pdf_url.lower().endswith(".pdf") or "/pdf" in pdf_url.lower()):
             candidates.append({
                 "kind": "crossref_same_paper_pdf_link",
                 "pdf_url": pdf_url,
                 "doi": doi,
                 "crossref_content_type": content_type,
+                "crossref_content_version": content_version,
+                "crossref_intended_application": intended_application,
                 "accepted": True,
             })
     return candidates or [{**receipt, "kind": "crossref_same_paper_pdf_link", "accepted": False, "reason": "no_pdf_link"}]
@@ -1282,7 +1324,8 @@ def _crossref_metadata_hints(paper: dict) -> dict:
     if not doi:
         return {"accepted": False, "reason": "missing_doi"}
     url = "https://api.crossref.org/works/" + quote(doi, safe="")
-    params = {"mailto": CONTACT_EMAIL} if CONTACT_EMAIL else None
+    crossref_mailto = service_contact_email("crossref")
+    params = {"mailto": crossref_mailto} if crossref_mailto else None
     payload, receipt = _request_json(url, params=params, timeout=35)
     message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
     if not message:
@@ -1367,6 +1410,15 @@ def _is_likely_infrastructure_pdf_url(url: object) -> bool:
     return False
 
 
+def _is_conference_presentation_pdf_url(url: object) -> bool:
+    path = unquote(urlparse(str(url or "")).path).lower()
+    filename = Path(path).name
+    return bool(
+        any(marker in path for marker in ["/slides/", "/posters/", "/posterpdfs/", "/slide_decks/"])
+        or re.search(r"(^|[-_.])(poster|slides?|presentation)([-_.]|$)", filename)
+    )
+
+
 def _append_unique_url(urls: list[str], value: object, base_url: str = "") -> None:
     absolute = urljoin(base_url, unescape(str(value or "").strip()))
     parsed = urlparse(absolute)
@@ -1420,15 +1472,30 @@ def _duckduckgo_reader_result_urls(query: str, *, limit: int = 8) -> list[dict]:
     q = str(query or "").strip()
     if not q:
         return []
+    access_backend = "jina_reader_authenticated" if jina_api_key_configured() else "jina_reader_anonymous"
+    backend = "duckduckgo_reader_search"
     reader_url = "https://r.jina.ai/http://duckduckgo.com/html/?q=" + quote(q, safe="")
-    try:
-        response = service_get(reader_url, timeout=35, headers={"Accept": "text/plain,*/*"})
-    except Exception as exc:
-        return [{"kind": "duckduckgo_reader_search", "query": q, "accepted": False, "url": reader_url, "error": exc.__class__.__name__}]
-    receipt = {"kind": "duckduckgo_reader_search", "query": q, **response_receipt(response), "accepted": response.status_code == 200}
-    if response.status_code != 200:
-        return [receipt]
-    text = response.text or ""
+    with process_backend_slot(backend) as blocker:
+        if blocker:
+            return _backend_blocker_receipt("duckduckgo_reader_search", q, backend)
+        access_blocked = _backend_blocker_receipt("duckduckgo_reader_search", q, access_backend)
+        if access_blocked:
+            return access_blocked
+        try:
+            response = service_get(reader_url, timeout=35, headers=jina_request_headers())
+        except Exception as exc:
+            return [{"kind": "duckduckgo_reader_search", "query": q, "accepted": False, "url": reader_url, "error": exc.__class__.__name__}]
+        receipt = {"kind": "duckduckgo_reader_search", "query": q, **response_receipt(response), "accepted": response.status_code == 200}
+        if response.status_code != 200:
+            if response.status_code in {401, 403, 429}:
+                mark_process_http_blocker(access_backend, response, f"http_{response.status_code}")
+                mark_process_http_blocker(backend, response, f"http_{response.status_code}")
+            return [receipt]
+        text = response.text or ""
+        challenge_reason = _duckduckgo_challenge_reason(text)
+        if challenge_reason:
+            mark_process_http_blocker(backend, response, challenge_reason)
+            return [{**receipt, "accepted": False, "reason": challenge_reason}]
     out: list[dict] = []
     seen: set[str] = set()
     raw_urls = [
@@ -1447,14 +1514,45 @@ def _duckduckgo_reader_result_urls(query: str, *, limit: int = 8) -> list[dict]:
         out.append({"kind": "duckduckgo_reader_result_url", "query": q, "url": target, "accepted": True, "reader_url": reader_url})
         if len(out) >= limit:
             break
-    reason = _duckduckgo_challenge_reason(text) or "no_duckduckgo_reader_results"
-    return out or [{**receipt, "accepted": False, "reason": reason}]
+    return out or [{**receipt, "accepted": False, "reason": "no_duckduckgo_reader_results"}]
+
+
+def _jina_search_result_urls(query: str, *, limit: int = 8) -> list[dict]:
+    q = str(query or "").strip()
+    if not q or not jina_api_key_configured():
+        return []
+    backend = "jina_search_authenticated"
+    search_url = "https://s.jina.ai/" + quote(q, safe="")
+    with process_backend_slot(backend) as blocker:
+        if blocker:
+            return _backend_blocker_receipt("jina_search", q, backend)
+        try:
+            response = service_get(search_url, timeout=35, headers=jina_request_headers())
+        except Exception as exc:
+            return [{"kind": "jina_search", "query": q, "accepted": False, "url": search_url, "error": exc.__class__.__name__}]
+        receipt = {"kind": "jina_search", "query": q, **response_receipt(response), "accepted": response.status_code == 200}
+        if response.status_code != 200:
+            if response.status_code in {401, 403, 429}:
+                mark_process_http_blocker(backend, response, f"http_{response.status_code}")
+            return [receipt]
+    out: list[dict] = []
+    seen: set[str] = set()
+    for target in _duckduckgo_markdown_urls(response.text or ""):
+        host = urlparse(target).netloc.lower()
+        if not host or host in {"jina.ai", "www.jina.ai", "s.jina.ai", "r.jina.ai"} or target in seen:
+            continue
+        seen.add(target)
+        out.append({"kind": "jina_search_result_url", "query": q, "url": target, "accepted": True, "search_url": search_url})
+        if len(out) >= limit:
+            break
+    return out or [{**receipt, "accepted": False, "reason": "no_jina_search_results"}]
 
 
 def _duckduckgo_result_urls(query: str, *, limit: int = 8) -> list[dict]:
     q = str(query or "").strip()
     if not q:
         return []
+    backend = "duckduckgo_direct"
     try:
         max_attempts = int(os.environ.get("READING_DDG_DIRECT_ATTEMPTS", str(config_int("search.duckduckgo_direct_attempts", 1))) or config_int("search.duckduckgo_direct_attempts", 1))
     except ValueError:
@@ -1470,46 +1568,57 @@ def _duckduckgo_result_urls(query: str, *, limit: int = 8) -> list[dict]:
         "Accept": "text/html,application/xhtml+xml,*/*",
         "Accept-Language": "en-US,en;q=0.9",
     }
-    session = requests.Session()
     attempts: list[dict] = []
-    for attempt_index in range(max_attempts):
-        try:
-            response = session.get(
-                "https://html.duckduckgo.com/html/",
-                params={"q": q},
-                timeout=(min(3.0, timeout_sec), timeout_sec),
-                headers=headers,
-            )
-        except Exception as exc:
-            attempts.append({"kind": "duckduckgo_search", "query": q, "accepted": False, "error": exc.__class__.__name__})
-            time.sleep(0.8 + attempt_index * 0.8)
-            continue
-        receipt = {"kind": "duckduckgo_search", "query": q, "accepted": response.status_code == 200, **response_receipt(response)}
-        attempts.append(receipt)
-        if response.status_code != 200:
-            time.sleep(0.8 + attempt_index * 0.8)
-            continue
-        html = response.text or ""
-        challenge_reason = _duckduckgo_challenge_reason(html)
-        if challenge_reason:
-            attempts[-1] = {**receipt, "accepted": False, "reason": challenge_reason}
-            time.sleep(0.8 + attempt_index * 0.8)
-            continue
-        out: list[dict] = []
-        seen: set[str] = set()
-        for match in re.finditer(r'href=["\'](//duckduckgo\.com/l/\?uddg=[^"\']+)["\']', html, flags=re.I):
-            target = _duckduckgo_redirect_target(match.group(1))
-            if not target or target in seen or not target.startswith("http"):
+    with process_backend_slot(backend) as blocker:
+        if blocker:
+            return _backend_blocker_receipt("duckduckgo_search", q, backend)
+        for attempt_index in range(max_attempts):
+            try:
+                response = service_get(
+                    "https://html.duckduckgo.com/html/",
+                    params={"q": q},
+                    timeout=(min(3.0, timeout_sec), timeout_sec),
+                    headers=headers,
+                    service="web_search",
+                )
+            except Exception as exc:
+                attempts.append({"kind": "duckduckgo_search", "query": q, "accepted": False, "error": exc.__class__.__name__})
+                time.sleep(0.8 + attempt_index * 0.8)
                 continue
-            seen.add(target)
-            out.append({"kind": "duckduckgo_result_url", "query": q, "url": target, "accepted": True})
-            if len(out) >= limit:
-                break
-        if out:
-            return out
-        if "result__a" in html or "uddg=" in html:
-            return [{**receipt, "accepted": False, "reason": "no_parseable_duckduckgo_results"}]
-        time.sleep(0.8 + attempt_index * 0.8)
+            receipt = {
+                "kind": "duckduckgo_search",
+                "query": q,
+                "accepted": response.status_code == 200,
+                **response_receipt(response, service="web_search"),
+            }
+            attempts.append(receipt)
+            if response.status_code != 200:
+                if response.status_code in {202, 403, 429}:
+                    mark_process_http_blocker(backend, response, f"http_{response.status_code}")
+                time.sleep(0.8 + attempt_index * 0.8)
+                continue
+            html = response.text or ""
+            challenge_reason = _duckduckgo_challenge_reason(html)
+            if challenge_reason:
+                attempts[-1] = {**receipt, "accepted": False, "reason": challenge_reason}
+                mark_process_http_blocker(backend, response, challenge_reason)
+                time.sleep(0.8 + attempt_index * 0.8)
+                continue
+            out: list[dict] = []
+            seen: set[str] = set()
+            for match in re.finditer(r'href=["\'](//duckduckgo\.com/l/\?uddg=[^"\']+)["\']', html, flags=re.I):
+                target = _duckduckgo_redirect_target(match.group(1))
+                if not target or target in seen or not target.startswith("http"):
+                    continue
+                seen.add(target)
+                out.append({"kind": "duckduckgo_result_url", "query": q, "url": target, "accepted": True})
+                if len(out) >= limit:
+                    break
+            if out:
+                return out
+            if "result__a" in html or "uddg=" in html:
+                return [{**receipt, "accepted": False, "reason": "no_parseable_duckduckgo_results"}]
+            time.sleep(0.8 + attempt_index * 0.8)
     return attempts or [{"kind": "duckduckgo_search", "query": q, "accepted": False, "reason": "no_duckduckgo_results"}]
 
 
@@ -1517,6 +1626,7 @@ def _startpage_result_urls(query: str, *, limit: int = 8) -> list[dict]:
     q = str(query or "").strip()
     if not q:
         return []
+    backend = "startpage"
     try:
         timeout_sec = float(os.environ.get("READING_STARTPAGE_TIMEOUT_SEC", str(config_float("search.startpage_timeout_sec", 5.0))) or config_float("search.startpage_timeout_sec", 5.0))
     except ValueError:
@@ -1527,20 +1637,30 @@ def _startpage_result_urls(query: str, *, limit: int = 8) -> list[dict]:
         "Accept": "text/html,application/xhtml+xml,*/*",
         "Accept-Language": "en-US,en;q=0.9",
     }
-    try:
-        response = service_get(
-            "https://www.startpage.com/sp/search",
-            params={"query": q},
-            timeout=(min(3.0, timeout_sec), timeout_sec),
-            headers=headers,
-            service="generic",
-        )
-    except Exception as exc:
-        return [{"kind": "startpage_search", "query": q, "accepted": False, "error": exc.__class__.__name__}]
-    receipt = {"kind": "startpage_search", "query": q, "accepted": response.status_code == 200, **response_receipt(response, service="generic")}
-    if response.status_code != 200:
-        return [receipt]
-    html = response.text or ""
+    with process_backend_slot(backend) as blocker:
+        if blocker:
+            return _backend_blocker_receipt("startpage_search", q, backend)
+        try:
+            response = service_get(
+                "https://www.startpage.com/sp/search",
+                params={"query": q},
+                timeout=(min(3.0, timeout_sec), timeout_sec),
+                headers=headers,
+                service="web_search",
+            )
+        except Exception as exc:
+            return [{"kind": "startpage_search", "query": q, "accepted": False, "error": exc.__class__.__name__}]
+        receipt = {"kind": "startpage_search", "query": q, "accepted": response.status_code == 200, **response_receipt(response, service="web_search")}
+        if response.status_code != 200:
+            if response.status_code in {202, 403, 429}:
+                mark_process_http_blocker(backend, response, f"http_{response.status_code}")
+            return [receipt]
+        html = response.text or ""
+        lowered = html.lower()
+        if "enable javascript" in lowered or "detected unusual traffic" in lowered or "captcha" in lowered:
+            reason = "startpage_challenge_or_automation_page"
+            mark_process_http_blocker(backend, response, reason)
+            return [{**receipt, "accepted": False, "reason": reason}]
     raw_urls: list[str] = []
     for match in re.finditer(r"\bhref=['\"]([^'\"]+)['\"]", html, flags=re.I):
         raw_urls.append(unescape(match.group(1)))
@@ -1593,11 +1713,7 @@ def _startpage_result_urls(query: str, *, limit: int = 8) -> list[dict]:
         out.append({"kind": "startpage_result_url", "query": q, "url": target, "accepted": True})
         if len(out) >= limit:
             break
-    lowered = html.lower()
-    reason = "no_startpage_results"
-    if "enable javascript" in lowered or "detected unusual traffic" in lowered or "captcha" in lowered:
-        reason = "startpage_challenge_or_automation_page"
-    return out or [{**receipt, "accepted": False, "reason": reason}]
+    return out or [{**receipt, "accepted": False, "reason": "no_startpage_results"}]
 
 
 def _asset_pdf_links(html: str, base_url: str, *, max_assets: int = 8, max_bytes: int = 500_000) -> list[dict]:
@@ -1661,13 +1777,30 @@ def _github_repo_hints(url: str, *, limit: int = 6) -> list[dict]:
     api_url = _github_repo_api_url(url)
     if not api_url:
         return []
-    try:
-        response = service_get(api_url, timeout=30, headers={"Accept": "application/vnd.github+json,*/*"})
-    except Exception as exc:
-        return [{"kind": "project_page_github_repo_scan", "source_url": url, "api_url": api_url, "accepted": False, "error": exc.__class__.__name__}]
-    receipt = {"kind": "project_page_github_repo_scan", "source_url": url, "api_url": api_url, "accepted": response.status_code == 200, **response_receipt(response)}
-    if response.status_code != 200:
-        return [receipt]
+    headers = {"Accept": "application/vnd.github+json,*/*", "X-GitHub-Api-Version": "2022-11-28"}
+    github_token = str(os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or "").strip()
+    if github_token:
+        headers["Authorization"] = "Bearer " + github_token
+    backend = "github_api_authenticated" if github_token else "github_api_anonymous"
+    with process_backend_slot(backend) as blocker:
+        if blocker:
+            return [{
+                "kind": "project_page_github_repo_scan",
+                "source_url": url,
+                "api_url": api_url,
+                "accepted": False,
+                "reason": "skipped_after_prior_backend_access_failure",
+                "prior_reason": blocker.get("reason"),
+            }]
+        try:
+            response = service_get(api_url, timeout=30, headers=headers)
+        except Exception as exc:
+            return [{"kind": "project_page_github_repo_scan", "source_url": url, "api_url": api_url, "accepted": False, "error": exc.__class__.__name__}]
+        receipt = {"kind": "project_page_github_repo_scan", "source_url": url, "api_url": api_url, "accepted": response.status_code == 200, **response_receipt(response)}
+        if response.status_code != 200:
+            if response.status_code in {401, 403, 429}:
+                mark_process_http_blocker(backend, response, f"http_{response.status_code}")
+            return [receipt]
     try:
         payload = response.json()
     except Exception as exc:
@@ -1793,7 +1926,17 @@ def _search_result_pdf_candidates(paper: dict, *, limit: int = 6) -> list[dict]:
         crossref_hints = _crossref_metadata_hints(paper)
         if crossref_hints.get("accepted") and not authors:
             authors = [str(author) for author in crossref_hints.get("authors") or [] if str(author).strip()]
-    search_queries: list[str] = [f"\"{title}\" PDF", f"\"{title}\""]
+    official_search_specs = official_conference_title_search_specs(paper)
+    official_query_domains = {
+        str(spec.get("query") or ""): str(spec.get("domain") or "").lower()
+        for spec in official_search_specs
+        if spec.get("query") and spec.get("domain")
+    }
+    search_queries: list[str] = [
+        *official_query_domains,
+        f"\"{title}\" PDF",
+        f"\"{title}\"",
+    ]
     if _doi_from_paper(paper):
         search_queries.insert(0, f"\"{title}\" {_doi_from_paper(paper)}")
     if _is_acm_doi_input(paper):
@@ -1820,9 +1963,11 @@ def _search_result_pdf_candidates(paper: dict, *, limit: int = 6) -> list[dict]:
             deduped_queries.append(query)
     try:
         default_query_limit = config_int("search.acm_query_limit", 8) if _is_acm_doi_input(paper) else config_int("search.query_limit", 3)
+        default_query_limit += len(official_search_specs)
         query_limit = int(os.environ.get("READING_SEARCH_QUERY_LIMIT", str(default_query_limit)) or default_query_limit)
     except ValueError:
         query_limit = config_int("search.acm_query_limit", 8) if _is_acm_doi_input(paper) else config_int("search.query_limit", 3)
+        query_limit += len(official_search_specs)
     query_limit = max(2, min(12, query_limit))
     if len(deduped_queries) > query_limit:
         scans.append({
@@ -1855,6 +2000,14 @@ def _search_result_pdf_candidates(paper: dict, *, limit: int = 6) -> list[dict]:
                 "message_zh": "搜索结果指向 DOI/站点政策等基础设施 PDF，不是论文正文；跳过该候选。",
             })
             return
+        if _is_conference_presentation_pdf_url(pdf_url):
+            scans.append({
+                **candidate,
+                "accepted": False,
+                "reason": "conference_presentation_pdf_not_article_body",
+                "message_zh": "会议搜索结果指向海报或演示文稿 PDF，不是论文正文；继续查找同篇论文全文。",
+            })
+            return
         candidate_openreview_id = _openreview_note_id_from_url(pdf_url)
         if expected_openreview_ids and candidate_openreview_id and candidate_openreview_id not in expected_openreview_ids:
             scans.append({
@@ -1873,6 +2026,7 @@ def _search_result_pdf_candidates(paper: dict, *, limit: int = 6) -> list[dict]:
 
     def consume_result_items(items: list[dict], query: str) -> bool:
         candidate_count_before = len(candidates)
+        official_domain = official_query_domains.get(query, "")
         for item in items:
             if not item.get("accepted"):
                 scans.append(item)
@@ -1880,8 +2034,23 @@ def _search_result_pdf_candidates(paper: dict, *, limit: int = 6) -> list[dict]:
             url = str(item.get("url") or "")
             if not url or url in seen_result_urls:
                 continue
-            seen_result_urls.add(url)
             lowered = url.lower()
+            result_host = urlparse(url).netloc.lower()
+            if official_domain and not (
+                result_host == official_domain or result_host.endswith("." + official_domain)
+            ):
+                scans.append({
+                    **item,
+                    "accepted": False,
+                    "reason": "official_title_search_off_domain_result",
+                    "official_domain": official_domain,
+                })
+                continue
+            seen_result_urls.add(url)
+            search_metadata = {
+                "official_conference_title_search": bool(official_domain),
+                "official_domain": official_domain,
+            }
             if "openreview.net" in lowered:
                 candidate_openreview_id = _openreview_note_id_from_url(url)
                 if expected_openreview_ids and candidate_openreview_id and candidate_openreview_id not in expected_openreview_ids:
@@ -1901,6 +2070,7 @@ def _search_result_pdf_candidates(paper: dict, *, limit: int = 6) -> list[dict]:
                         "pdf_url": url,
                         "accepted": True,
                         "requires_pdf_text_identity_check": True,
+                        **search_metadata,
                     })
                 elif _is_openreview_static_pdf_url(url):
                     append_candidate({
@@ -1911,6 +2081,7 @@ def _search_result_pdf_candidates(paper: dict, *, limit: int = 6) -> list[dict]:
                         "accepted": True,
                         "requires_pdf_text_identity_check": True,
                         "message_zh": "搜索结果指向 OpenReview 静态 PDF；URL 不含 note id，必须通过 PDF 正文标题/作者校验后才可使用。",
+                        **search_metadata,
                     })
                 continue
             if "github.com" in lowered:
@@ -1921,6 +2092,7 @@ def _search_result_pdf_candidates(paper: dict, *, limit: int = 6) -> list[dict]:
                             **repo_item,
                             "kind": "search_result_github_repo_pdf_requires_text_identity",
                             "requires_pdf_text_identity_check": True,
+                            **search_metadata,
                         })
                     else:
                         scans.append(repo_item)
@@ -1933,6 +2105,7 @@ def _search_result_pdf_candidates(paper: dict, *, limit: int = 6) -> list[dict]:
                     "pdf_url": url,
                     "accepted": True,
                     "requires_pdf_text_identity_check": True,
+                    **search_metadata,
                 })
                 continue
             page_candidates = _publisher_page_candidates_from_url(
@@ -1945,6 +2118,7 @@ def _search_result_pdf_candidates(paper: dict, *, limit: int = 6) -> list[dict]:
             for candidate in page_candidates:
                 candidate["source_search_query"] = query
                 candidate["source_result_url"] = url
+                candidate.update(search_metadata)
                 if candidate.get("accepted"):
                     append_candidate(candidate)
                 else:
@@ -1954,6 +2128,7 @@ def _search_result_pdf_candidates(paper: dict, *, limit: int = 6) -> list[dict]:
         return len(candidates) > candidate_count_before
 
     for query in deduped_queries:
+        official_query = query in official_query_domains
         direct_items = _duckduckgo_result_urls(query, limit=limit)
         direct_done = consume_result_items(direct_items, query)
         direct_blocked = any(
@@ -1961,13 +2136,17 @@ def _search_result_pdf_candidates(paper: dict, *, limit: int = 6) -> list[dict]:
             for item in direct_items
         )
         if not direct_done or direct_blocked:
-            reader_done = consume_result_items(_duckduckgo_reader_result_urls(query, limit=limit), query)
-            if reader_done:
+            jina_done = consume_result_items(_jina_search_result_urls(query, limit=limit), query) if jina_api_key_configured() else False
+            if jina_done and not official_query:
                 return candidates + scans
-            startpage_done = consume_result_items(_startpage_result_urls(query, limit=limit), query)
-            if startpage_done:
-                return candidates + scans
-        elif direct_done:
+            if not jina_done:
+                reader_done = consume_result_items(_duckduckgo_reader_result_urls(query, limit=limit), query)
+                if reader_done and not official_query:
+                    return candidates + scans
+                startpage_done = consume_result_items(_startpage_result_urls(query, limit=limit), query)
+                if startpage_done and not official_query:
+                    return candidates + scans
+        elif direct_done and not official_query:
             return candidates + scans
     return candidates + scans if candidates else scans
 
@@ -2122,6 +2301,7 @@ def _iclr_mlanthology_candidates(paper: dict, *, limit: int = 3) -> list[dict]:
             kind="iclr_mlanthology_page",
             scan_assets=False,
             allow_pdf_text_identity_check=True,
+            include_openreview_locators=True,
         ):
             candidate["mlanthology_slug"] = slug
             candidate["source_url"] = page_url
@@ -2167,6 +2347,12 @@ def _iclr_openreview_ids(paper: dict) -> set[str]:
         if re.fullmatch(r"[A-Za-z0-9_-]{8,}", text.strip()):
             out.add(text.strip())
     return {item for item in out if item}
+
+
+def _paper_with_discovered_openreview_id(paper: dict, note_ids: set[str]) -> dict:
+    if not note_ids or _iclr_openreview_ids(paper):
+        return paper
+    return {**paper, "openreview_id": sorted(note_ids)[0]}
 
 
 def _openreview_attachment_pdf_candidates(paper: dict) -> list[dict]:
@@ -2217,6 +2403,7 @@ def _publisher_page_candidates_from_url(
     kind: str,
     scan_assets: bool = False,
     allow_pdf_text_identity_check: bool = False,
+    include_openreview_locators: bool = False,
 ) -> list[dict]:
     if "openreview.net" in str(url).lower() and not _openreview_anonymous_http_enabled():
         return [{
@@ -2242,6 +2429,16 @@ def _publisher_page_candidates_from_url(
         if pdf_url.startswith("http"):
             pdf_links.append(pdf_url)
     pdf_links.extend(_html_pdf_links(html, resolved_url or url))
+    openreview_locators: dict[str, str] = {}
+    if include_openreview_locators:
+        for link in _anchor_links(html, resolved_url or url):
+            note_id = _openreview_note_id_from_url(link.get("url"))
+            if not note_id:
+                continue
+            pdf_url = f"https://openreview.net/pdf?id={quote(note_id, safe='')}"
+            openreview_locators[pdf_url] = str(link.get("url") or "")
+            if pdf_url not in pdf_links:
+                pdf_links.append(pdf_url)
     asset_scan = _asset_pdf_links(html, resolved_url or url) if scan_assets else []
     for item in asset_scan:
         pdf_url = str(item.get("pdf_url") or "")
@@ -2266,6 +2463,8 @@ def _publisher_page_candidates_from_url(
                     "requires_pdf_text_identity_check": True,
                     "asset_scan": asset_scan[:8],
                     "linked_research_page_scan": linked_pdf_candidates[:8],
+                    "openreview_note_id": _openreview_note_id_from_url(pdf_url),
+                    "source_openreview_url": openreview_locators.get(pdf_url, ""),
                 }
                 for pdf_url in pdf_links[:5]
             ]
@@ -2284,12 +2483,14 @@ def _publisher_page_candidates_from_url(
     candidates: list[dict] = []
     for pdf_url in pdf_links:
         candidates.append({
-            "kind": kind + "_pdf_link",
+            "kind": kind + ("_openreview_pdf_link" if pdf_url in openreview_locators else "_pdf_link"),
             "pdf_url": pdf_url,
             "landing_page_url": resolved_url or url,
             "accepted": True,
             "asset_scan": asset_scan[:8],
             "linked_research_page_scan": linked_pdf_candidates[:8],
+            "openreview_note_id": _openreview_note_id_from_url(pdf_url),
+            "source_openreview_url": openreview_locators.get(pdf_url, ""),
         })
     html_urls = _meta_content_values(html, {"citation_fulltext_html_url"})
     if resolved_url or html_urls:
@@ -2566,7 +2767,7 @@ def _openalex_api_params(extra: dict[str, str] | None = None) -> dict[str, str]:
     api_key = str(os.environ.get("OPENALEX_API_KEY") or "").strip()
     if api_key:
         params["api_key"] = api_key
-    mailto = str(os.environ.get("OPENALEX_MAILTO") or os.environ.get("CROSSREF_MAILTO") or CONTACT_EMAIL or "").strip()
+    mailto = service_contact_email("openalex")
     if mailto:
         params["mailto"] = mailto
     return params
@@ -2784,7 +2985,16 @@ def _pdf_candidates_for_reading(paper: dict, *, fast_only: bool = False) -> list
         or str(paper.get("arxiv_id") or metadata.get("arxiv_id") or "").strip()
         or has_openreview_locator
     )
-    title_only_lookup = bool(len(str(paper.get("title") or "").split()) >= 3 and not has_explicit_locator)
+    has_metadata_only_locator = bool(
+        metadata.get("title_index_only")
+        or ("/virtual/" in lowered_url and "/poster/" in lowered_url)
+        or ("/virtual/" in lowered_url and "/oral/" in lowered_url)
+    )
+    title_only_lookup = bool(
+        len(str(paper.get("title") or "").split()) >= 3
+        and (not has_explicit_locator or has_metadata_only_locator)
+    )
+    conference_title_lookup = bool(official_conference_title_search_specs(paper))
     prefer_arxiv_title_search = bool(
         str(paper.get("title") or "").strip()
         and (
@@ -2795,6 +3005,7 @@ def _pdf_candidates_for_reading(paper: dict, *, fast_only: bool = False) -> list
     )
     arxiv_title_search_attempted = False
     openreview_official_attempted = False
+    semantic_scholar_attempted = False
     search_result_attempted = False
     source_lower = str(paper.get("source") or "").lower()
     venue_lower = str(paper.get("venue") or "").lower()
@@ -2948,6 +3159,8 @@ def _pdf_candidates_for_reading(paper: dict, *, fast_only: bool = False) -> list
                 requires_pdf_text_identity_check=candidate.get("requires_pdf_text_identity_check"),
             )
     if fast_only:
+        paper.pop("_same_paper_semantic_scholar_attempted", None)
+        paper.pop("_same_paper_search_result_attempted", None)
         paper["_same_paper_pdf_candidate_discovery"] = discovery
         return candidates
     for candidate in _springer_nature_api_candidates(paper):
@@ -2986,7 +3199,11 @@ def _pdf_candidates_for_reading(paper: dict, *, fast_only: bool = False) -> list
                 )
             else:
                 discovery.append(candidate)
+    mlanthology_openreview_ids: set[str] = set()
     for candidate in _iclr_mlanthology_candidates(paper):
+        mlanthology_note_id = str(candidate.get("openreview_note_id") or "").strip()
+        if mlanthology_note_id:
+            mlanthology_openreview_ids.add(mlanthology_note_id)
         if candidate.get("accepted") and candidate.get("pdf_url"):
             add(
                 str(candidate.get("kind") or "iclr_mlanthology_pdf"),
@@ -2996,8 +3213,9 @@ def _pdf_candidates_for_reading(paper: dict, *, fast_only: bool = False) -> list
             )
         else:
             discovery.append(candidate)
+    chatpaper_paper = _paper_with_discovered_openreview_id(paper, mlanthology_openreview_ids)
     if has_openreview_locator or is_iclr_like:
-        for candidate in _chatpaper_openreview_cached_pdf_candidates(paper):
+        for candidate in _chatpaper_openreview_cached_pdf_candidates(chatpaper_paper):
             if candidate.get("accepted") and candidate.get("pdf_url"):
                 add(
                     str(candidate.get("kind") or "chatpaper_openreview_cached_pdf"),
@@ -3016,9 +3234,29 @@ def _pdf_candidates_for_reading(paper: dict, *, fast_only: bool = False) -> list
         and not candidate.get("requires_pdf_text_identity_check")
         for candidate in candidates
     )
-    if ((has_openreview_locator or is_iclr_like) and not has_verified_non_openreview_candidate):
+    if conference_title_lookup and not candidates and not search_result_attempted:
+        search_result_attempted = True
+        for candidate in _search_result_pdf_candidates(paper):
+            if candidate.get("accepted") and candidate.get("pdf_url"):
+                add(
+                    str(candidate.get("kind") or "search_result_pdf"),
+                    candidate.get("pdf_url"),
+                    search_result_match=candidate,
+                    requires_pdf_text_identity_check=True,
+                )
+            else:
+                discovery.append(candidate)
+    semantic_scholar_needed = bool(
+        (
+            (conference_title_lookup and not candidates)
+            or ((has_openreview_locator or is_iclr_like) and not conference_title_lookup)
+        )
+        and not has_verified_non_openreview_candidate
+    )
+    if semantic_scholar_needed:
+        semantic_scholar_attempted = True
         semantic_added_verified = False
-        for candidate in _semantic_scholar_pdf_candidates_for_reading(paper, enabled=True):
+        for candidate in _semantic_scholar_pdf_candidates_for_reading(paper):
             if candidate.get("accepted"):
                 add(str(candidate.get("kind") or "semantic_scholar_open_access_pdf"), candidate.get("pdf_url"), semantic_scholar_match=candidate)
                 semantic_added_verified = True
@@ -3026,7 +3264,7 @@ def _pdf_candidates_for_reading(paper: dict, *, fast_only: bool = False) -> list
                 discovery.append(candidate)
         if semantic_added_verified:
             has_verified_non_openreview_candidate = True
-    if ((has_openreview_locator or is_iclr_like) and not has_verified_non_openreview_candidate):
+    if ((has_openreview_locator or is_iclr_like) and not has_verified_non_openreview_candidate and not search_result_attempted):
         search_result_attempted = True
         for candidate in _search_result_pdf_candidates(paper):
             if candidate.get("accepted") and candidate.get("pdf_url"):
@@ -3078,7 +3316,7 @@ def _pdf_candidates_for_reading(paper: dict, *, fast_only: bool = False) -> list
                 add(str(candidate.get("kind") or "openreview_official_pdf"), candidate.get("pdf_url"), openreview_official_match=candidate)
             else:
                 discovery.append(candidate)
-    if title_only_lookup and not candidates and not search_result_attempted:
+    if (title_only_lookup or conference_title_lookup) and not candidates and not search_result_attempted:
         search_result_attempted = True
         for candidate in _search_result_pdf_candidates(paper):
             if candidate.get("accepted") and candidate.get("pdf_url"):
@@ -3099,6 +3337,14 @@ def _pdf_candidates_for_reading(paper: dict, *, fast_only: bool = False) -> list
                 requires_pdf_text_identity_check=candidate.get("requires_pdf_text_identity_check"),
             )
     paper["_same_paper_pdf_candidate_discovery"] = discovery
+    if semantic_scholar_attempted:
+        paper["_same_paper_semantic_scholar_attempted"] = True
+    else:
+        paper.pop("_same_paper_semantic_scholar_attempted", None)
+    if search_result_attempted:
+        paper["_same_paper_search_result_attempted"] = True
+    else:
+        paper.pop("_same_paper_search_result_attempted", None)
     return candidates
 
 
@@ -3107,10 +3353,14 @@ def _download_first_readable_pdf(paper: dict, pdf_dir: Path, log: LogFn) -> tupl
     attempts: list[dict] = []
     candidates = _pdf_candidates_for_reading(paper, fast_only=True)
     discovery = paper.pop("_same_paper_pdf_candidate_discovery", [])
+    semantic_scholar_attempted = bool(paper.pop("_same_paper_semantic_scholar_attempted", False))
+    search_result_attempted = bool(paper.pop("_same_paper_search_result_attempted", False))
     deferred_discovery = bool(candidates)
     if not candidates:
         candidates = _pdf_candidates_for_reading(paper)
         discovery.extend(paper.pop("_same_paper_pdf_candidate_discovery", []))
+        semantic_scholar_attempted = bool(paper.pop("_same_paper_semantic_scholar_attempted", False))
+        search_result_attempted = bool(paper.pop("_same_paper_search_result_attempted", False))
         deferred_discovery = False
     seen_candidate_urls = {str(candidate.get("pdf_url") or "").strip() for candidate in candidates if str(candidate.get("pdf_url") or "").strip()}
     search_after_acm_403_done = False
@@ -3174,10 +3424,11 @@ def _download_first_readable_pdf(paper: dict, pdf_dir: Path, log: LogFn) -> tupl
         return seen_failure
 
     def append_acm_403_search_candidates() -> None:
-        nonlocal search_after_acm_403_done
+        nonlocal search_after_acm_403_done, search_result_attempted
         if not _is_acm_doi_input(paper) or search_after_acm_403_done or not acm_403_seen():
             return
         search_after_acm_403_done = True
+        search_result_attempted = True
         for page_candidate in _publisher_page_pdf_candidates(paper):
             if page_candidate.get("accepted") and page_candidate.get("pdf_url"):
                 candidate_url = str(page_candidate.get("pdf_url") or "").strip()
@@ -3251,6 +3502,44 @@ def _download_first_readable_pdf(paper: dict, pdf_dir: Path, log: LogFn) -> tupl
             else:
                 discovery.append({**search_candidate, "late_fallback_after_biorxiv_official_blocker": True})
 
+    def append_conference_title_search_candidates() -> None:
+        nonlocal semantic_scholar_attempted, search_result_attempted
+        if not official_conference_title_search_specs(paper):
+            return
+        if not search_result_attempted:
+            search_result_attempted = True
+            search_candidate_added = False
+            for search_candidate in _search_result_pdf_candidates(paper):
+                if search_candidate.get("accepted") and search_candidate.get("pdf_url"):
+                    candidate_url = str(search_candidate.get("pdf_url") or "").strip()
+                    if candidate_url and candidate_url not in seen_candidate_urls:
+                        seen_candidate_urls.add(candidate_url)
+                        candidates.append({
+                            **search_candidate,
+                            "kind": str(search_candidate.get("kind") or "search_result_pdf_requires_text_identity"),
+                            "requires_pdf_text_identity_check": True,
+                            "late_fallback_after_conference_candidates": True,
+                        })
+                        search_candidate_added = True
+                else:
+                    discovery.append({**search_candidate, "late_fallback_after_conference_candidates": True})
+            if search_candidate_added:
+                return
+        if not semantic_scholar_attempted:
+            semantic_scholar_attempted = True
+            for semantic_candidate in _semantic_scholar_pdf_candidates_for_reading(paper):
+                if semantic_candidate.get("accepted") and semantic_candidate.get("pdf_url"):
+                    candidate_url = str(semantic_candidate.get("pdf_url") or "").strip()
+                    if candidate_url and candidate_url not in seen_candidate_urls:
+                        seen_candidate_urls.add(candidate_url)
+                        candidates.append({
+                            **semantic_candidate,
+                            "requires_pdf_text_identity_check": True,
+                            "late_fallback_after_conference_candidates": True,
+                        })
+                else:
+                    discovery.append({**semantic_candidate, "late_fallback_after_conference_candidates": True})
+
     index = 0
     while True:
         if index >= len(candidates):
@@ -3263,8 +3552,17 @@ def _download_first_readable_pdf(paper: dict, pdf_dir: Path, log: LogFn) -> tupl
                     seen_candidate_urls.add(candidate_url)
                     candidates.append(candidate)
                 discovery.extend(paper.pop("_same_paper_pdf_candidate_discovery", []))
+                semantic_scholar_attempted = semantic_scholar_attempted or bool(
+                    paper.pop("_same_paper_semantic_scholar_attempted", False)
+                )
+                search_result_attempted = search_result_attempted or bool(
+                    paper.pop("_same_paper_search_result_attempted", False)
+                )
                 if index < len(candidates):
                     continue
+            append_conference_title_search_candidates()
+            if index < len(candidates):
+                continue
             break
         candidate = candidates[index]
         index += 1
@@ -5750,6 +6048,97 @@ def _aggregate_read_md_from_article_markdown(
     }
 
 
+_COOLDOWN_REQUEUE_REASONS = {
+    "http_429_rate_limited",
+    "openreview_service_cooldown_active",
+    "service_cooldown_active",
+    "skipped_due_to_active_challenge_cooldown",
+    "skipped_due_to_openreview_service_cooldown",
+    "skipped_due_to_prior_cloudflare_challenge",
+    "skipped_due_to_prior_service_access_blocker",
+}
+
+
+def _nested_route_items(value: object):
+    if isinstance(value, dict):
+        yield value
+        for nested in value.values():
+            yield from _nested_route_items(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from _nested_route_items(nested)
+
+
+def _cooldown_requeue_services(item: dict) -> list[str]:
+    validation = item.get("validation") if isinstance(item.get("validation"), dict) else {}
+    if validation.get("full_text_ready") is True:
+        return []
+    packet = item.get("full_text_packet") if isinstance(item.get("full_text_packet"), dict) else {}
+    blocker = packet.get("blocked_full_text_reason") if isinstance(packet.get("blocked_full_text_reason"), dict) else {}
+    retryable = blocker.get("retryable_after_cooldown") is True
+    services = {
+        str(service).strip()
+        for service in blocker.get("cooldown_services", [])
+        if str(service).strip()
+    } if isinstance(blocker.get("cooldown_services"), list) else set()
+    for route in _nested_route_items(packet):
+        reasons = {
+            str(route.get(key) or "").strip()
+            for key in ("reason", "download_failure_reason")
+            if str(route.get(key) or "").strip()
+        }
+        route_retryable = bool(
+            reasons & _COOLDOWN_REQUEUE_REASONS
+            or int(route.get("status_code") or 0) == 429
+            or route.get("challenge_type") == "cloudflare"
+        )
+        if not route_retryable:
+            continue
+        retryable = True
+        service = str(route.get("service") or "").strip()
+        url = str(route.get("url") or route.get("source_url") or route.get("pdf_url") or "").strip()
+        if not service and url.startswith("openreview://"):
+            service = "openreview"
+        if not service and url:
+            service = service_from_url(url)
+        if service:
+            services.add(service)
+    if retryable and not services:
+        paper = item.get("paper") if isinstance(item.get("paper"), dict) else {}
+        for key in ("pdf_url", "url", "abs_url", "html_url"):
+            url = str(paper.get(key) or "").strip()
+            if not url:
+                continue
+            services.add("openreview" if url.startswith("openreview://") else service_from_url(url))
+            break
+    return sorted(services) if retryable else []
+
+
+def _wait_for_cooldown_requeue(
+    services: set[str],
+    *,
+    log: LogFn,
+    should_cancel: CancelFn,
+) -> float:
+    started = time.monotonic()
+    announced = False
+    while services:
+        _raise_if_cancelled(should_cancel)
+        remaining_by_service = {
+            service: service_cooldown_remaining(service)
+            for service in sorted(services)
+        }
+        longest = max(remaining_by_service.values(), default=0.0)
+        if longest <= 0:
+            break
+        if not announced:
+            summary = ", ".join(f"{service}={remaining:.1f}s" for service, remaining in remaining_by_service.items())
+            log(f"Cooldown recovery wait before batch requeue: {summary}")
+            announced = True
+        time.sleep(min(1.0, max(0.05, longest)))
+    return round(time.monotonic() - started, 3)
+
+
 def run_read(
     *,
     run_id: str,
@@ -5861,6 +6250,97 @@ def run_read(
                     f"{result.get('status')} / full_text={result.get('validation', {}).get('full_text_ready')} "
                     f"- {row.get('title') or row.get('url') or row.get('pdf_url') or row.get('doi')}"
                 )
+    cooldown_requeue_by_index = {
+        index: _cooldown_requeue_services(prepared_by_index[index])
+        for index in range(1, len(papers) + 1)
+    }
+    cooldown_requeue_by_index = {
+        index: services
+        for index, services in cooldown_requeue_by_index.items()
+        if services
+    }
+    cooldown_requeue_summary = {
+        "status": "not_needed",
+        "attempted_paper_count": 0,
+        "recovered_full_text_count": 0,
+        "worker_count": 0,
+        "services": [],
+        "waited_sec": 0.0,
+    }
+    if cooldown_requeue_by_index:
+        retry_services = {
+            service
+            for services in cooldown_requeue_by_index.values()
+            for service in services
+        }
+        log(
+            "Cooldown recovery phase: "
+            f"requeueing {len(cooldown_requeue_by_index)} papers with 1 recovery worker"
+        )
+        recovered_count = 0
+        waited_sec = 0.0
+        for index, services in cooldown_requeue_by_index.items():
+            _raise_if_cancelled(should_cancel)
+            # A prior recovery request may have opened a fresh shared cooldown.
+            # Wait again before each queued paper so its one retry is a real request,
+            # not another immediate cooldown skip caused by the preceding paper.
+            waited_sec += _wait_for_cooldown_requeue(
+                set(services),
+                log=log,
+                should_cancel=should_cancel,
+            )
+            row = papers[index - 1]
+            initial = prepared_by_index[index]
+            initial_packet = initial.get("full_text_packet") if isinstance(initial.get("full_text_packet"), dict) else {}
+            initial_blocker = initial_packet.get("blocked_full_text_reason") if isinstance(initial_packet.get("blocked_full_text_reason"), dict) else {}
+            try:
+                result = _prepare_local_read_paper(
+                    run_id=directory.name,
+                    directory=directory,
+                    index=index,
+                    row=row,
+                    log=log,
+                    force_deep_read=force_deep_read,
+                )
+            except ReadingCancelled:
+                raise
+            except Exception as exc:
+                log(f"Error: cooldown recovery failed {index}/{len(papers)}: {exc.__class__.__name__}: {str(exc)[:300]}")
+                result = _failed_prepare_item(
+                    run_id=directory.name,
+                    directory=directory,
+                    index=index,
+                    row=row,
+                    exc=exc,
+                )
+            result_validation = result.get("validation") if isinstance(result.get("validation"), dict) else {}
+            result_validation["cooldown_requeue"] = {
+                "attempted": True,
+                "attempt": 1,
+                "services": services,
+                "initial_status": str(initial.get("status") or ""),
+                "initial_blocked_reason_code": str(initial_blocker.get("code") or ""),
+            }
+            result["validation"] = result_validation
+            artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
+            read_results_path = str(artifacts.get("read_results") or "").strip()
+            if read_results_path:
+                _write_read_result(resolve_reading_path(read_results_path), result)
+            prepared_by_index[index] = result
+            if result_validation.get("full_text_ready") is True:
+                recovered_count += 1
+            log(
+                f"Finished cooldown recovery {index}/{len(papers)}: "
+                f"{result.get('status')} / full_text={result_validation.get('full_text_ready')}"
+            )
+        cooldown_requeue_summary = {
+            "status": "complete",
+            "attempted_paper_count": len(cooldown_requeue_by_index),
+            "recovered_full_text_count": recovered_count,
+            "worker_count": 1,
+            "services": sorted(retry_services),
+            "waited_sec": round(waited_sec, 3),
+        }
     prepared_items = [prepared_by_index[index] for index in range(1, len(papers) + 1)]
     read_candidates = [
         item for item in prepared_items
@@ -6013,10 +6493,12 @@ def run_read(
         "pending_deep_read_count": pending_deep_read_count,
         "continuation_policy": "Read emits final read.md from completed per-paper Markdown whenever possible. Incomplete papers and concatenation issues are recorded only as task-log/machine-state warnings.",
         "worker_count": worker_count,
+        "cooldown_requeue": cooldown_requeue_summary,
         "reading_subagent_worker_count": reading_worker_count,
         "reading_scoring": reading_scoring,
         "execution_phases": [
             "full_text_acquisition_for_all_inputs",
+            *(["cooldown_expiry_batch_requeue"] if cooldown_requeue_summary["attempted_paper_count"] else []),
             "parallel_reading_subagents_after_full_text_collection",
             *(["claude_scoring_over_all_completed_reading_artifacts"] if reading_scoring.get("attempted") is True else []),
             "final_read_md_deterministic_concatenation",
@@ -6058,6 +6540,7 @@ def run_read(
             "full_text_ready_count": ready_count,
             "deep_read_complete_count": complete_count,
             "worker_count": worker_count,
+            "cooldown_requeue": cooldown_requeue_summary,
             "read_md": str(directory / "read.md"),
             "public_final_artifact_present": False,
             "latest_public_final_artifact_present": False,

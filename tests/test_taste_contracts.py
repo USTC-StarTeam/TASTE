@@ -288,7 +288,82 @@ def test_reading_http_client_classifies_jina_reader_service():
     http_client = _load_reading_common()
 
     assert http_client.service_from_url("https://r.jina.ai/http://duckduckgo.com/html/?q=test") == "reader"
+    assert http_client.service_from_url("https://s.jina.ai/exact%20paper%20title") == "reader"
     assert http_client.SERVICE_MIN_INTERVAL_SEC["reader"] >= 1.0
+
+
+def test_reading_http_client_serializes_search_and_github_backends():
+    http_client = _load_reading_common()
+
+    assert http_client.service_from_url("https://html.duckduckgo.com/html/") == "web_search"
+    assert http_client.service_from_url("https://www.startpage.com/sp/search") == "web_search"
+    assert http_client.service_from_url("https://api.github.com/repos/org/repo/contents") == "github"
+    assert http_client.SERVICE_MIN_INTERVAL_SEC["web_search"] >= 1.0
+    assert http_client.SERVICE_MIN_INTERVAL_SEC["github"] >= 1.0
+
+
+def test_reading_read_env_loads_supported_integration_settings(monkeypatch, tmp_path):
+    common = _load_reading_common()
+    settings = {
+        "OPENREVIEW_USERNAME": "account@example.test",
+        "OPENREVIEW_PASSWORD": "secret",
+        "READING_OPENREVIEW_ALLOW_ANONYMOUS_OFFICIAL_CLIENT": "0",
+        "UNPAYWALL_EMAIL": "unpaywall@example.test",
+        "OPENALEX_MAILTO": "openalex@example.test",
+        "CROSSREF_MAILTO": "crossref@example.test",
+        "READING_CONTACT_EMAIL": "reading@example.test",
+    }
+    for key in settings:
+        monkeypatch.delenv(key, raising=False)
+    path = tmp_path / "read.env"
+    path.write_text("\n".join(f"{key}={value}" for key, value in settings.items()) + "\n", encoding="utf-8")
+
+    loaded = common.load_read_env_file(path)
+
+    assert loaded == settings
+    assert {key: os.environ.get(key) for key in settings} == settings
+
+
+def test_reading_service_contact_emails_keep_provider_boundaries(monkeypatch):
+    common = _load_reading_common()
+    monkeypatch.setenv("READING_CONTACT_EMAIL", "reading@example.test")
+    monkeypatch.setenv("OPENALEX_MAILTO", "openalex@example.test")
+    monkeypatch.setenv("CROSSREF_MAILTO", "crossref@example.test")
+
+    assert common.service_contact_email() == "reading@example.test"
+    assert common.service_contact_email("openalex") == "openalex@example.test"
+    assert common.service_contact_email("crossref") == "crossref@example.test"
+
+    monkeypatch.delenv("OPENALEX_MAILTO")
+    monkeypatch.delenv("CROSSREF_MAILTO")
+    assert common.service_contact_email("openalex") == "reading@example.test"
+    assert common.service_contact_email("crossref") == "reading@example.test"
+
+
+def test_reading_process_http_blocker_uses_retry_after_for_429(monkeypatch):
+    common = _load_reading_common()
+
+    class RetryAfterResponse:
+        status_code = 429
+        headers = {"retry-after": "17"}
+
+    class NoRetryAfterResponse:
+        status_code = 429
+        headers = {}
+
+    class ForbiddenResponse:
+        status_code = 403
+        headers = {}
+
+    monkeypatch.setattr(common, "_PROCESS_BLOCKERS", {})
+
+    rate_limited = common.mark_process_http_blocker("rate-limited", RetryAfterResponse(), "http_429")
+    fallback = common.mark_process_http_blocker("rate-limited-fallback", NoRetryAfterResponse(), "http_429")
+    forbidden = common.mark_process_http_blocker("forbidden", ForbiddenResponse(), "http_403")
+
+    assert rate_limited["ttl_sec"] == 17.0
+    assert fallback["ttl_sec"] == common.SERVICE_RATE_LIMIT_COOLDOWN_SEC
+    assert forbidden["ttl_sec"] == common.PROCESS_ACCESS_BLOCKER_SEC
 
 
 def test_reading_http_client_classifies_biorxiv_service():
@@ -1139,6 +1214,64 @@ def test_reading_conference_source_only_derives_full_text_from_input_metadata():
     assert candidates[0]["kind"] == "conference_official_pdf_from_input_metadata"
 
 
+def test_reading_official_title_search_covers_all_conference_channels():
+    conference_sources = _load_reading_conference_sources()
+    channels = [
+        "nips", "iclr", "icml", "sigkdd", "sigir", "cikm", "aaai",
+        "iccv", "www", "cvpr", "acl", "ijcai", "eccv", "emnlp",
+    ]
+
+    specs_by_channel = {
+        channel: conference_sources.official_conference_title_search_specs({
+            "source": channel,
+            "title": "A Complete Conference Paper Title",
+        })
+        for channel in channels
+    }
+
+    assert all(specs_by_channel[channel] for channel in channels)
+    assert specs_by_channel["iclr"][0]["domain"] == "proceedings.iclr.cc"
+    assert specs_by_channel["icml"][0]["domain"] == "proceedings.mlr.press"
+    assert specs_by_channel["cvpr"][0]["domain"] == "openaccess.thecvf.com"
+    assert specs_by_channel["acl"][0]["domain"] == "aclanthology.org"
+
+
+def test_reading_iclr_proceedings_abstract_derives_official_pdf():
+    conference_sources = _load_reading_conference_sources()
+    abstract_url = (
+        "https://proceedings.iclr.cc/paper_files/paper/2025/hash/"
+        "a9b0e4e205bdf232da9f74bfb9469539-Abstract-Conference.html"
+    )
+
+    candidates = conference_sources.official_conference_pdf_candidates({
+        "source": "iclr",
+        "title": "An Official ICLR Proceedings Paper",
+        "url": abstract_url,
+    })
+
+    assert candidates[0]["pdf_url"] == (
+        "https://proceedings.iclr.cc/paper_files/paper/2025/file/"
+        "a9b0e4e205bdf232da9f74bfb9469539-Paper-Conference.pdf"
+    )
+    assert candidates[0]["official_source"] == "ICLR Proceedings"
+
+
+def test_reading_pmlr_landing_derives_both_official_storage_layouts():
+    conference_sources = _load_reading_conference_sources()
+
+    candidates = conference_sources.official_conference_pdf_candidates({
+        "source": "icml",
+        "title": "A Paper Stored In A PMLR Volume Repository",
+        "url": "https://proceedings.mlr.press/v235/example-paper.html",
+    })
+    urls = [candidate["pdf_url"] for candidate in candidates]
+
+    assert urls == [
+        "https://proceedings.mlr.press/v235/example-paper/example-paper.pdf",
+        "https://raw.githubusercontent.com/mlresearch/v235/main/assets/example-paper/example-paper.pdf",
+    ]
+
+
 def test_reading_module_scripts_do_not_contain_test_or_batch_audit_scripts():
     scripts_root = ROOT / "modules" / "reading" / "scripts"
     bad = [
@@ -1278,6 +1411,85 @@ def test_reading_run_read_prepare_splits_full_text_and_reading_subagent_phases(m
     assert not (isolated_reading_latest_run / "read.md").exists()
     _cleanup_reading_output(run_id)
     _cleanup_reading_input("pytest_read_prepare_two_phase_contract")
+
+
+def test_reading_batch_requeues_cooldown_papers_once_with_one_recovery_worker(monkeypatch, isolated_reading_latest_run):
+    monkeypatch.setenv("READING_DISABLE_ARTICLE_CACHE", "1")
+    read_pipeline = _load_reading_pipeline()
+    paper_sources = _load_reading_paper_sources()
+    input_path = _write_reading_input("pytest_read_cooldown_batch_requeue", {
+        "articles": [
+            {"source": "arxiv", "title": "cooldown one", "paper_id": "cool-1", "pdf_url": "https://arxiv.org/pdf/2601.00001"},
+            {"source": "arxiv", "title": "cooldown two", "paper_id": "cool-2", "pdf_url": "https://arxiv.org/pdf/2601.00002"},
+        ]
+    })
+    run_id = _reading_run_id_from_input(input_path)
+    calls: dict[str, int] = {}
+    call_lock = threading.Lock()
+
+    def fake_acquire_full_text(paper, item_dir, log=print):
+        paper_id = str(paper["paper_id"])
+        with call_lock:
+            calls[paper_id] = calls.get(paper_id, 0) + 1
+            attempt = calls[paper_id]
+        if attempt == 1:
+            return {
+                "paper_id": paper_id,
+                "title": paper["title"],
+                "full_text_available": False,
+                "full_text_status": "deferred_service_cooldown_retry",
+                "full_text_chars": 0,
+                "blocked_full_text_reason": {
+                    "code": "deferred_service_cooldown_before_full_text_request",
+                    "retryable_after_cooldown": True,
+                    "cooldown_services": ["arxiv"],
+                },
+                "pdf_acquisition": {
+                    "attempts": [{
+                        "service": "arxiv",
+                        "pdf_url": paper["pdf_url"],
+                        "download_failure_reason": "skipped_due_to_active_challenge_cooldown",
+                    }]
+                },
+            }
+        text = "recovered full text evidence " * 100
+        text_path = item_dir / "extracted" / "full_text.txt"
+        text_path.parent.mkdir(parents=True, exist_ok=True)
+        text_path.write_text(text, encoding="utf-8")
+        return {
+            "paper_id": paper_id,
+            "title": paper["title"],
+            "full_text_available": True,
+            "full_text_status": "pdf_text_read",
+            "full_text_chars": len(text),
+            "text_path": str(text_path),
+            "pdf_downloaded": True,
+        }
+
+    monkeypatch.setattr(paper_sources, "acquire_full_text", fake_acquire_full_text)
+    monkeypatch.setattr(read_pipeline, "service_cooldown_remaining", lambda _service: 0.0)
+    result = read_pipeline.run_read(
+        run_id=run_id,
+        input_json=str(input_path),
+        claude_mode="prepare",
+        max_workers=16,
+        log=lambda _message: None,
+    )
+
+    payload = json.loads((input_path.parent.parent / "read_results.json").read_text(encoding="utf-8"))
+    assert calls == {"cool-1": 2, "cool-2": 2}
+    assert result["full_text_ready_count"] == 2
+    assert payload["cooldown_requeue"] == {
+        "status": "complete",
+        "attempted_paper_count": 2,
+        "recovered_full_text_count": 2,
+        "worker_count": 1,
+        "services": ["arxiv"],
+        "waited_sec": 0.0,
+    }
+    assert "cooldown_expiry_batch_requeue" in payload["execution_phases"]
+    assert all(item["validation"]["cooldown_requeue"]["attempted"] is True for item in payload["items"])
+    _cleanup_reading_output(run_id)
 
 
 def test_reading_run_read_uses_subagent_article_markdown_aggregation_and_audit(monkeypatch, isolated_reading_latest_run):
@@ -1680,7 +1892,7 @@ def test_reading_blocked_reason_reports_openreview_network_barrier_after_browser
     assert "未配置" not in reason["message_zh"]
 
 
-def test_reading_blocked_reason_carries_prior_openreview_browser_cooldown():
+def test_reading_deferred_reason_carries_prior_openreview_browser_cooldown():
     paper_sources = _load_reading_paper_sources()
     reason = paper_sources._blocked_full_text_reason(
         {
@@ -1706,8 +1918,10 @@ def test_reading_blocked_reason_carries_prior_openreview_browser_cooldown():
         {},
     )
 
-    assert reason["code"] == "blocked_openreview_403_no_verified_open_full_text"
-    assert any(item.get("cooldown_reason") == "openreview_login_page_network_error" for item in reason["openreview_reasons"])
+    assert reason["code"] == "deferred_service_cooldown_before_full_text_request"
+    assert reason["cooldown_services"] == ["openreview"]
+    assert reason["pdf_request_count"] == 0
+    assert any(item.get("cooldown_reason") == "openreview_login_page_network_error" for item in reason["cooldown_origins"])
 
 
 def test_reading_pdf_candidate_without_cache_downloads_url(monkeypatch, tmp_path):
@@ -1950,6 +2164,7 @@ def test_reading_openreview_note_id_adds_attachment_pdf_candidates(monkeypatch):
 def test_reading_title_only_uses_generic_same_paper_resolution(monkeypatch):
     read_pipeline = _load_reading_pipeline()
     calls: list[str] = []
+    semantic_calls: list[str] = []
 
     monkeypatch.setattr(read_pipeline, "official_conference_pdf_candidates", lambda _paper: [])
     monkeypatch.setattr(read_pipeline, "_publisher_direct_pdf_candidates", lambda _paper: [])
@@ -1962,6 +2177,11 @@ def test_reading_title_only_uses_generic_same_paper_resolution(monkeypatch):
     monkeypatch.setattr(read_pipeline, "_unpaywall_pdf_candidates", lambda _paper: [])
     monkeypatch.setattr(read_pipeline, "_arxiv_pdf_candidates", lambda _paper: [])
     monkeypatch.setattr(read_pipeline, "_runtime_cached_pdf_candidates", lambda _paper: [])
+    monkeypatch.setattr(
+        read_pipeline,
+        "_semantic_scholar_pdf_candidates_for_reading",
+        lambda paper, **_kwargs: semantic_calls.append(str(paper.get("source") or "")) or [],
+    )
     monkeypatch.setattr(
         read_pipeline,
         "openreview_official_pdf_candidates",
@@ -1983,6 +2203,7 @@ def test_reading_title_only_uses_generic_same_paper_resolution(monkeypatch):
     })
 
     assert calls == ["openreview", "search"]
+    assert semantic_calls == []
     assert candidates == [{
         "kind": "search_result_pdf_requires_text_identity",
         "pdf_url": "https://authors.example.test/paper.pdf",
@@ -1994,6 +2215,32 @@ def test_reading_title_only_uses_generic_same_paper_resolution(monkeypatch):
         },
         "requires_pdf_text_identity_check": True,
     }]
+
+    calls.clear()
+    candidates = read_pipeline._pdf_candidates_for_reading({
+        "title": "A Protein Design Paper Presented at ICML",
+        "source": "icml_official_virtual",
+        "venue": "ICML",
+        "url": "https://icml.cc/virtual/2026/poster/12345",
+    })
+
+    assert calls == ["openreview", "search"]
+    assert semantic_calls == []
+    assert candidates[0]["pdf_url"] == "https://authors.example.test/paper.pdf"
+    assert candidates[0]["requires_pdf_text_identity_check"] is True
+
+    calls.clear()
+    semantic_calls.clear()
+    candidates = read_pipeline._pdf_candidates_for_reading({
+        "title": "An ACL Paper With Only A Metadata Page",
+        "source": "acl",
+        "venue": "ACL",
+        "url": "https://aclanthology.org/events/acl-2026/",
+    })
+
+    assert calls == ["search"]
+    assert semantic_calls == []
+    assert candidates[0]["pdf_url"] == "https://authors.example.test/paper.pdf"
 
 
 def test_reading_broad_search_scans_each_result_page_once(monkeypatch):
@@ -2014,6 +2261,52 @@ def test_reading_broad_search_scans_each_result_page_once(monkeypatch):
     read_pipeline._search_result_pdf_candidates({"title": "A Paper Title With Repeated Search Results"})
 
     assert scans == ["https://icml.cc/virtual/2026/poster/61459"]
+
+
+def test_reading_conference_title_search_prioritizes_official_domains(monkeypatch):
+    read_pipeline = _load_reading_pipeline()
+    queries: list[str] = []
+
+    def fake_search(query, limit=8):
+        queries.append(query)
+        if query.startswith("site:proceedings.iclr.cc"):
+            url = "https://proceedings.iclr.cc/paper_files/paper/2025/file/official.pdf"
+        elif query.startswith("site:iclr.cc"):
+            url = "https://iclr.cc/media/iclr-2026/Papers/paper.pdf"
+        else:
+            url = "https://authors.example.test/paper.pdf"
+        return [{"kind": "search_result", "url": url, "accepted": True}]
+
+    monkeypatch.setattr(read_pipeline, "_duckduckgo_result_urls", fake_search)
+    monkeypatch.setattr(read_pipeline, "_duckduckgo_reader_result_urls", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(read_pipeline, "_startpage_result_urls", lambda *_args, **_kwargs: [])
+
+    candidates = read_pipeline._search_result_pdf_candidates({
+        "title": "A Verified ICLR Conference Paper",
+        "source": "iclr",
+        "venue": "ICLR",
+    })
+    accepted = [item for item in candidates if item.get("accepted")]
+
+    assert queries == [
+        'site:proceedings.iclr.cc "A Verified ICLR Conference Paper"',
+        'site:iclr.cc "A Verified ICLR Conference Paper"',
+        '"A Verified ICLR Conference Paper" PDF',
+    ]
+    assert [item["pdf_url"] for item in accepted] == [
+        "https://proceedings.iclr.cc/paper_files/paper/2025/file/official.pdf",
+        "https://iclr.cc/media/iclr-2026/Papers/paper.pdf",
+        "https://authors.example.test/paper.pdf",
+    ]
+    assert accepted[0]["official_conference_title_search"] is True
+    assert accepted[1]["official_conference_title_search"] is True
+    assert accepted[2]["official_conference_title_search"] is False
+    assert read_pipeline._is_conference_presentation_pdf_url(
+        "https://iclr.cc/media/iclr-2026/Slides/10009623.pdf"
+    ) is True
+    assert read_pipeline._is_conference_presentation_pdf_url(
+        "https://proceedings.iclr.cc/paper_files/paper/2025/file/official.pdf"
+    ) is False
 
 
 def test_reading_optional_openreview_metadata_accelerates_resolution(monkeypatch):
@@ -2248,6 +2541,65 @@ def test_reading_acm_403_late_search_fallback_requires_identity(monkeypatch, tmp
     assert receipt["selected"]["pdf_text_identity_check"] is True
 
 
+def test_reading_failed_conference_candidate_triggers_title_search(monkeypatch, tmp_path):
+    read_pipeline = _load_reading_pipeline()
+    search_calls: list[str] = []
+    semantic_calls: list[str] = []
+
+    monkeypatch.setattr(read_pipeline, "_pdf_candidates_for_reading", lambda _paper, **_kwargs: [{
+        "kind": "indexed_pdf",
+        "pdf_url": "https://broken.example.test/acl-paper.pdf",
+        "accepted": True,
+    }])
+    monkeypatch.setattr(
+        read_pipeline,
+        "_search_result_pdf_candidates",
+        lambda paper: search_calls.append(str(paper.get("title"))) or [{
+            "kind": "search_result_pdf_requires_text_identity",
+            "pdf_url": "https://aclanthology.org/2026.acl-long.1.pdf",
+            "accepted": True,
+            "requires_pdf_text_identity_check": True,
+        }],
+    )
+    monkeypatch.setattr(
+        read_pipeline,
+        "_semantic_scholar_pdf_candidates_for_reading",
+        lambda paper, **_kwargs: semantic_calls.append(str(paper.get("title"))) or [],
+    )
+
+    def fake_download(url, target):
+        if "broken.example.test" in url:
+            return False, {"accepted": False, "reason": "http_404"}
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"%PDF fake")
+        return True, {"accepted": True}
+
+    monkeypatch.setattr(read_pipeline, "_download_pdf_with_receipt", fake_download)
+    monkeypatch.setattr(read_pipeline, "_extract_pdf_text", lambda _path, max_chars=None: "ACL Paper Title\nAlice Example\nAbstract\n" + "paper body " * 300)
+    monkeypatch.setattr(read_pipeline, "_pdf_text_identity_ok", lambda _paper, _text: True)
+    monkeypatch.setattr(read_pipeline.time, "sleep", lambda _seconds: None)
+
+    downloaded, _pdf_path, pdf_url, receipt = read_pipeline._download_first_readable_pdf(
+        {
+            "title": "ACL Paper Title",
+            "authors": ["Alice Example"],
+            "source": "acl",
+            "venue": "ACL",
+            "url": "https://aclanthology.org/events/acl-2026/",
+            "pdf_url": "https://broken.example.test/acl-paper.pdf",
+        },
+        tmp_path,
+        lambda _msg: None,
+    )
+
+    assert downloaded is True
+    assert pdf_url == "https://aclanthology.org/2026.acl-long.1.pdf"
+    assert semantic_calls == []
+    assert search_calls == ["ACL Paper Title"]
+    assert receipt["selected"]["late_fallback_after_conference_candidates"] is True
+    assert receipt["selected"]["pdf_text_identity_check"] is True
+
+
 def test_reading_acm_search_uses_crossref_authors_and_authorizer_queries(monkeypatch):
     read_pipeline = _load_reading_pipeline()
 
@@ -2272,6 +2624,43 @@ def test_reading_acm_search_uses_crossref_authors_and_authorizer_queries(monkeyp
     assert any("Author-Izer" in query for query in seen_queries)
     assert any("Alice Example" in query for query in seen_queries)
     assert len(seen_queries) >= 6
+
+
+def test_reading_crossref_similarity_checking_link_is_not_a_pdf_candidate(monkeypatch):
+    read_pipeline = _load_reading_pipeline()
+
+    monkeypatch.setattr(read_pipeline, "_request_json", lambda *_args, **_kwargs: ({
+        "message": {
+            "DOI": "10.1145/3711896.3736799",
+            "title": ["Causality - Exploiting Multi-Modal Data"],
+            "link": [
+                {
+                    "URL": "https://dl.acm.org/doi/pdf/10.1145/3711896.3736799",
+                    "content-type": "application/pdf",
+                    "content-version": "vor",
+                    "intended-application": "similarity-checking",
+                },
+                {
+                    "URL": "https://publisher.example.test/text-mining/paper.pdf",
+                    "content-type": "application/pdf",
+                    "content-version": "vor",
+                    "intended-application": "text-mining",
+                },
+            ],
+        },
+    }, {"status_code": 200, "accepted": True}))
+
+    candidates = read_pipeline._crossref_pdf_candidates({
+        "title": "Causality - Exploiting Multi-Modal Data",
+        "doi": "10.1145/3711896.3736799",
+    })
+
+    similarity_link = candidates[0]
+    assert similarity_link["accepted"] is False
+    assert similarity_link["reason"] == "crossref_similarity_checking_link_not_authorized_for_tdm"
+    assert similarity_link["crossref_intended_application"] == "similarity-checking"
+    assert candidates[1]["accepted"] is True
+    assert candidates[1]["crossref_intended_application"] == "text-mining"
 
 
 def test_reading_official_pdf_keeps_priority_over_runtime_cache_duplicate(monkeypatch):
@@ -2327,11 +2716,7 @@ def test_reading_duckduckgo_result_urls_parses_redirect_links(monkeypatch):
             "</body></html>"
         )
 
-    class FakeSession:
-        def get(self, *_args, **_kwargs):
-            return FakeResponse()
-
-    monkeypatch.setattr(read_pipeline.requests, "Session", lambda: FakeSession())
+    monkeypatch.setattr(read_pipeline, "service_get", lambda *_args, **_kwargs: FakeResponse())
 
     urls = read_pipeline._duckduckgo_result_urls('"exact title"', limit=5)
 
@@ -2340,6 +2725,7 @@ def test_reading_duckduckgo_result_urls_parses_redirect_links(monkeypatch):
 
 
 def test_reading_duckduckgo_result_urls_rejects_challenge_page(monkeypatch):
+    common = _load_reading_common()
     read_pipeline = _load_reading_pipeline()
 
     class FakeResponse:
@@ -2349,11 +2735,8 @@ def test_reading_duckduckgo_result_urls_rejects_challenge_page(monkeypatch):
         content = b"<html></html>"
         text = "<html><body>Unfortunately, bots use DuckDuckGo too. Please complete the following challenge.</body></html>"
 
-    class FakeSession:
-        def get(self, *_args, **_kwargs):
-            return FakeResponse()
-
-    monkeypatch.setattr(read_pipeline.requests, "Session", lambda: FakeSession())
+    monkeypatch.setattr(common, "_PROCESS_BLOCKERS", {})
+    monkeypatch.setattr(read_pipeline, "service_get", lambda *_args, **_kwargs: FakeResponse())
 
     urls = read_pipeline._duckduckgo_result_urls('"exact title"', limit=5)
 
@@ -2367,14 +2750,13 @@ def test_reading_duckduckgo_direct_search_defaults_to_one_attempt(monkeypatch):
 
     calls: list[dict] = []
 
-    class FakeSession:
-        def get(self, *_args, **kwargs):
-            calls.append(kwargs)
-            raise read_pipeline.requests.exceptions.SSLError("synthetic ssl eof")
+    def fake_service_get(*_args, **kwargs):
+        calls.append(kwargs)
+        raise read_pipeline.requests.exceptions.SSLError("synthetic ssl eof")
 
     monkeypatch.delenv("READING_DDG_DIRECT_ATTEMPTS", raising=False)
     monkeypatch.delenv("READING_DDG_TIMEOUT_SEC", raising=False)
-    monkeypatch.setattr(read_pipeline.requests, "Session", lambda: FakeSession())
+    monkeypatch.setattr(read_pipeline, "service_get", fake_service_get)
 
     urls = read_pipeline._duckduckgo_result_urls('"exact title"', limit=5)
 
@@ -2405,7 +2787,113 @@ def test_reading_duckduckgo_reader_result_urls_parses_markdown_redirects(monkeyp
     assert all(item["kind"] == "duckduckgo_reader_result_url" for item in urls)
 
 
+def test_reading_jina_search_uses_optional_api_key(monkeypatch):
+    common = _load_reading_common()
+    read_pipeline = _load_reading_pipeline()
+    captured: dict = {}
+
+    class FakeResponse:
+        status_code = 200
+        url = "https://s.jina.ai/exact%20title"
+        headers = {"content-type": "text/plain; charset=utf-8", "retry-after": ""}
+        content = b"markdown"
+        text = "[Paper](https://authors.example.test/paper.pdf)"
+
+    def fake_service_get(url, **kwargs):
+        captured.update({"url": url, **kwargs})
+        return FakeResponse()
+
+    monkeypatch.setattr(common, "_PROCESS_BLOCKERS", {})
+    monkeypatch.setenv("JINA_API_KEY", "test-jina-key")
+    monkeypatch.setattr(read_pipeline, "service_get", fake_service_get)
+
+    urls = read_pipeline._jina_search_result_urls('"exact title"', limit=5)
+
+    assert urls[0]["url"] == "https://authors.example.test/paper.pdf"
+    assert captured["url"].startswith("https://s.jina.ai/")
+    assert captured["headers"]["Authorization"] == "Bearer test-jina-key"
+
+
+def test_reading_jina_search_429_blocker_uses_retry_after(monkeypatch):
+    common = _load_reading_common()
+    read_pipeline = _load_reading_pipeline()
+
+    class FakeResponse:
+        status_code = 429
+        url = "https://s.jina.ai/exact%20title"
+        headers = {"content-type": "text/plain", "retry-after": "23"}
+        content = b"rate limited"
+        text = "rate limited"
+
+    monkeypatch.setattr(common, "_PROCESS_BLOCKERS", {})
+    monkeypatch.setenv("JINA_API_KEY", "test-jina-key")
+    monkeypatch.setattr(read_pipeline, "service_get", lambda *_args, **_kwargs: FakeResponse())
+
+    result = read_pipeline._jina_search_result_urls('"exact title"')
+    blocker = common.process_blocker("jina_search_authenticated")
+
+    assert result[0]["status_code"] == 429
+    assert blocker["reason"] == "http_429"
+    assert blocker["ttl_sec"] == 23.0
+
+
+def test_reading_reader_access_failure_is_not_repeated_in_process(monkeypatch):
+    common = _load_reading_common()
+    read_pipeline = _load_reading_pipeline()
+    calls: list[str] = []
+
+    class FakeResponse:
+        status_code = 401
+        url = "https://r.jina.ai/http://duckduckgo.com/html/?q=test"
+        headers = {"content-type": "text/plain", "retry-after": ""}
+        content = b"unauthorized"
+        text = "unauthorized"
+
+    def fake_service_get(url, **_kwargs):
+        calls.append(url)
+        return FakeResponse()
+
+    monkeypatch.setattr(common, "_PROCESS_BLOCKERS", {})
+    monkeypatch.delenv("JINA_API_KEY", raising=False)
+    monkeypatch.setattr(read_pipeline, "service_get", fake_service_get)
+
+    first = read_pipeline._duckduckgo_reader_result_urls('"first title"')
+    second = read_pipeline._duckduckgo_reader_result_urls('"second title"')
+
+    assert len(calls) == 1
+    assert first[0]["status_code"] == 401
+    assert second[0]["reason"] == "skipped_after_prior_backend_access_failure"
+
+
+def test_reading_github_repo_scan_uses_optional_token(monkeypatch):
+    common = _load_reading_common()
+    read_pipeline = _load_reading_pipeline()
+    captured: dict = {}
+
+    class FakeResponse:
+        status_code = 404
+        url = "https://api.github.com/repos/org/repo/contents"
+        headers = {"content-type": "application/json", "retry-after": ""}
+        content = b"{}"
+        text = "{}"
+
+    def fake_service_get(url, **kwargs):
+        captured.update({"url": url, **kwargs})
+        return FakeResponse()
+
+    monkeypatch.setattr(common, "_PROCESS_BLOCKERS", {})
+    monkeypatch.setenv("GITHUB_TOKEN", "test-github-token")
+    monkeypatch.setattr(read_pipeline, "service_get", fake_service_get)
+
+    result = read_pipeline._github_repo_hints("https://github.com/org/repo")
+
+    assert result[0]["status_code"] == 404
+    assert captured["headers"]["Authorization"] == "Bearer test-github-token"
+    assert captured["headers"]["X-GitHub-Api-Version"] == "2022-11-28"
+
+
 def test_reading_duckduckgo_reader_no_results_is_not_accepted(monkeypatch):
+    common = _load_reading_common()
     read_pipeline = _load_reading_pipeline()
 
     class FakeResponse:
@@ -2415,6 +2903,7 @@ def test_reading_duckduckgo_reader_no_results_is_not_accepted(monkeypatch):
         content = b"challenge"
         text = "Markdown Content:\nUnfortunately, bots use DuckDuckGo too.\nPlease complete the following challenge."
 
+    monkeypatch.setattr(common, "_PROCESS_BLOCKERS", {})
     monkeypatch.setattr(read_pipeline, "service_get", lambda *_args, **_kwargs: FakeResponse())
 
     urls = read_pipeline._duckduckgo_reader_result_urls('"exact title"', limit=5)
@@ -3018,11 +3507,13 @@ def test_reading_search_result_fallback_limits_author_queries(monkeypatch):
     )
 
     assert queries == [
+        'site:proceedings.iclr.cc "Differentiable Lifting for Topological Neural Networks"',
+        'site:iclr.cc "Differentiable Lifting for Topological Neural Networks"',
         '"Differentiable Lifting for Topological Neural Networks" PDF',
         '"Differentiable Lifting for Topological Neural Networks"',
         '"Differentiable Lifting for Topological Neural Networks" "Jorge Franco"',
     ]
-    assert any(item.get("kind") == "search_query_budget" and item.get("used_query_count") == 3 for item in candidates)
+    assert any(item.get("kind") == "search_query_budget" and item.get("used_query_count") == 5 for item in candidates)
 
 
 def test_reading_iclr_source_without_venue_uses_search_fallback(monkeypatch):
@@ -3105,7 +3596,7 @@ def test_reading_iclr_uses_semantic_scholar_late_fallback(monkeypatch):
     read_pipeline._pdf_candidates_for_reading(paper)
 
     discovery = paper.get("_same_paper_pdf_candidate_discovery")
-    assert enabled_values == [True]
+    assert enabled_values == [None]
     assert any(
         item.get("kind") == "semantic_scholar_open_access_pdf"
         and item.get("reason") == "http_429_rate_limited"
@@ -3465,7 +3956,7 @@ def test_reading_cloudflare_challenge_services_are_detected():
     assert services == {"biorxiv", "science"}
 
 
-def test_reading_biorxiv_cooldown_skip_uses_challenge_blocker():
+def test_reading_cooldown_skip_is_deferred_not_reported_as_unreadable_pdf():
     paper_sources = _load_reading_paper_sources()
 
     reason = paper_sources._blocked_full_text_reason(
@@ -3482,6 +3973,7 @@ def test_reading_biorxiv_cooldown_skip_uses_challenge_blocker():
                     "service": "biorxiv",
                     "url": "https://www.biorxiv.org/content/10.64898/2026.05.27.727191.full.pdf",
                     "download_failure_reason": "skipped_due_to_active_challenge_cooldown",
+                    "cooldown_remaining_sec": 30.0,
                 }
             ],
             "selected": {},
@@ -3490,7 +3982,11 @@ def test_reading_biorxiv_cooldown_skip_uses_challenge_blocker():
         {},
     )
 
-    assert reason["code"] == "blocked_biorxiv_official_challenge_no_verified_open_full_text"
+    assert reason["code"] == "deferred_service_cooldown_before_full_text_request"
+    assert reason["retryable_after_cooldown"] is True
+    assert reason["cooldown_services"] == ["biorxiv"]
+    assert reason["pdf_request_count"] == 0
+    assert "不是 PDF 不可读" in reason["message_zh"]
 
 
 def test_reading_active_challenge_cooldown_skips_pdf_request(monkeypatch, tmp_path):
@@ -3586,6 +4082,7 @@ def test_reading_pdf_text_identity_accepts_iclr_header_and_wrapped_title():
 
 def test_reading_reader_pdf_text_fallback_requires_identity(monkeypatch, tmp_path):
     reading_root = ROOT / "modules" / "reading"
+    common = _load_reading_common()
     paper_sources = _load_reading_paper_sources()
 
     pdf_url = "https://iris.unito.it/retrieve/dc916e27-4a93-4f88-a328-64084c513c0a/5673_CheckMate_Watermarking_Gr%20%281%29.pdf"
@@ -3629,6 +4126,7 @@ def test_reading_reader_pdf_text_fallback_requires_identity(monkeypatch, tmp_pat
         )
         content = text.encode("utf-8")
 
+    monkeypatch.setattr(common, "_PROCESS_BLOCKERS", {})
     monkeypatch.setattr(paper_sources, "_download_first_readable_pdf", fake_download)
     monkeypatch.setattr(paper_sources, "_openalex_full_text_hints", lambda _paper: {"status": "no_openalex_full_text_hints", "hints": []})
     monkeypatch.setattr(paper_sources, "_same_paper_html_hints", lambda _paper: {"status": "no_same_paper_html_hints", "hints": [], "attempts": []})
@@ -3660,6 +4158,7 @@ def test_reading_reader_pdf_text_fallback_requires_identity(monkeypatch, tmp_pat
 
 
 def test_reading_openreview_reader_pdf_text_accepts_verified_body(monkeypatch):
+    common = _load_reading_common()
     paper_sources = _load_reading_paper_sources()
 
     pdf_url = "https://openreview.net/pdf/8a993afd3ac54dd1e47a9dfe5181476339338afa.pdf"
@@ -3684,6 +4183,7 @@ def test_reading_openreview_reader_pdf_text_accepts_verified_body(monkeypatch):
         )
         content = text.encode("utf-8")
 
+    monkeypatch.setattr(common, "_PROCESS_BLOCKERS", {})
     monkeypatch.setattr(paper_sources, "service_get", lambda *_args, **_kwargs: FakeResponse())
 
     text, receipt = paper_sources._fetch_reader_pdf_text(
@@ -3701,6 +4201,7 @@ def test_reading_openreview_reader_pdf_text_accepts_verified_body(monkeypatch):
 
 
 def test_reading_openreview_reader_pdf_text_rejects_challenge(monkeypatch):
+    common = _load_reading_common()
     paper_sources = _load_reading_paper_sources()
 
     class FakeResponse:
@@ -3710,6 +4211,7 @@ def test_reading_openreview_reader_pdf_text_rejects_challenge(monkeypatch):
         text = "Verifying your browser before accessing OpenReview. Complete the check below."
         content = text.encode("utf-8")
 
+    monkeypatch.setattr(common, "_PROCESS_BLOCKERS", {})
     monkeypatch.setattr(paper_sources, "service_get", lambda *_args, **_kwargs: FakeResponse())
 
     text, receipt = paper_sources._fetch_reader_pdf_text(
@@ -3833,9 +4335,19 @@ def test_reading_iclr_mlanthology_slug_route_uses_first_author_and_title(monkeyp
     read_pipeline = _load_reading_pipeline()
 
     seen_urls: list[str] = []
+    locator_flags: list[bool] = []
 
-    def fake_page_candidates(_paper, url, *, kind, scan_assets=False, allow_pdf_text_identity_check=False):
+    def fake_page_candidates(
+        _paper,
+        url,
+        *,
+        kind,
+        scan_assets=False,
+        allow_pdf_text_identity_check=False,
+        include_openreview_locators=False,
+    ):
         seen_urls.append(url)
+        locator_flags.append(include_openreview_locators)
         return [{
             "kind": kind + "_pdf_link",
             "pdf_url": "https://openreview.net/pdf/hash.pdf",
@@ -3853,8 +4365,39 @@ def test_reading_iclr_mlanthology_slug_route_uses_first_author_and_title(monkeyp
     })
 
     assert seen_urls == ["https://mlanthology.org/iclr/2026/gheda2026iclr-checkmate/"]
+    assert locator_flags == [True]
     assert candidates[0]["pdf_url"] == "https://openreview.net/pdf/hash.pdf"
     assert candidates[0]["requires_pdf_text_identity_check"] is True
+
+
+def test_reading_mlanthology_openreview_locator_feeds_same_paper_mirrors(monkeypatch):
+    read_pipeline = _load_reading_pipeline()
+    page_url = "https://mlanthology.org/iclr/2026/gheda2026iclr-checkmate/"
+    html = (
+        '<meta name="citation_title" content="CheckMate! Watermarking Graph Diffusion Models in Polynomial Time">'
+        '<a href="https://openreview.net/forum?id=92fliNrbxY">OpenReview</a>'
+    )
+    monkeypatch.setattr(
+        read_pipeline,
+        "_request_html",
+        lambda *_args, **_kwargs: (page_url, html, {"status_code": 200, "accepted": True}),
+    )
+
+    candidates = read_pipeline._publisher_page_candidates_from_url(
+        {"title": "CheckMate! Watermarking Graph Diffusion Models in Polynomial Time"},
+        page_url,
+        kind="iclr_mlanthology_page",
+        allow_pdf_text_identity_check=True,
+        include_openreview_locators=True,
+    )
+    enriched = read_pipeline._paper_with_discovered_openreview_id(
+        {"title": "CheckMate! Watermarking Graph Diffusion Models in Polynomial Time"},
+        {str(candidates[0].get("openreview_note_id") or "")},
+    )
+
+    assert candidates[0]["pdf_url"] == "https://openreview.net/pdf?id=92fliNrbxY"
+    assert candidates[0]["openreview_note_id"] == "92fliNrbxY"
+    assert enriched["openreview_id"] == "92fliNrbxY"
 
 
 def test_reading_search_result_pdf_candidate_downloads_only_after_identity_check(monkeypatch, tmp_path):
@@ -3954,18 +4497,19 @@ def test_reading_runtime_cached_pdf_candidates_index_read_results(monkeypatch, t
     shutil.rmtree(cache_root, ignore_errors=True)
 
 
-def test_reading_classifies_conference_virtual_without_full_text_locator():
+def test_reading_does_not_blame_conference_metadata_for_missing_full_text():
     paper_sources = _load_reading_paper_sources()
 
     reason = paper_sources._blocked_full_text_reason(
         {"title": "Flexibility-Aware Geometric Latent Diffusion for Full-Atom Peptide Design", "url": "https://icml.cc/virtual/2026/poster/62058"},
         {"attempts": [], "candidate_discovery": []},
-        {"attempts": [{"accepted": False, "url": "https://icml.cc/virtual/2026/poster/62058", "reason": "conference_poster_page_is_not_paper_full_text"}]},
+        {"attempts": []},
         {},
     )
 
-    assert reason["code"] == "blocked_conference_virtual_without_full_text_locator"
-    assert "不能使用摘要" not in reason["message_zh"]
+    assert reason["code"] == "blocked_no_same_paper_full_text_locator"
+    assert "virtual" not in reason["message_zh"]
+    assert "poster" not in reason["message_zh"]
 
 
 def _load_find_pipeline():

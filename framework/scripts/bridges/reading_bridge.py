@@ -533,6 +533,7 @@ def _project_reading_row(
     if average_score is None and match_score is not None and transferability_score is not None:
         average_score = round((match_score + transferability_score) / 2.0, 4)
     final_read_rank = _as_int(reading.get("final_read_rank") or item.get("final_read_rank"), index) or index
+    paper_index = _as_int(item.get("paper_index") or source_row.get("paper_index"), index) or index
     return {
         "id": paper_id,
         "paper_id": paper_id,
@@ -540,6 +541,7 @@ def _project_reading_row(
         "source_run_id": find_run_id,
         "reading_run_id": reading_run_id,
         "input_index": index,
+        "paper_index": paper_index,
         "title": str(reading.get("title") or paper.get("title") or _title_of(source_row)),
         "authors": paper.get("authors") or source_row.get("authors") or [],
         "source": paper.get("source") or source_row.get("source") or "",
@@ -578,11 +580,13 @@ def _project_packet_entry(
 ) -> dict[str, Any]:
     paper = item.get("paper") if isinstance(item.get("paper"), dict) else {}
     packet = dict(item.get("full_text_packet")) if isinstance(item.get("full_text_packet"), dict) else {}
+    paper_index = _as_int(item.get("paper_index") or source_row.get("paper_index"), index) or index
     packet.update({
         "run_id": find_run_id,
         "source_run_id": find_run_id,
         "reading_run_id": reading_run_id,
         "input_index": index,
+        "paper_index": paper_index,
         "paper_id": packet.get("paper_id") or paper.get("paper_id") or paper.get("id") or source_row.get("paper_id") or source_row.get("id") or f"paper_{index:03d}",
         "title": packet.get("title") or paper.get("title") or _title_of(source_row),
         "url": packet.get("url") or paper.get("url") or source_row.get("url") or source_row.get("abs_url") or "",

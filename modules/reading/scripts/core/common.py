@@ -24,10 +24,10 @@ except ImportError:  # pragma: no cover - Linux is the supported TASTE runtime.
 READING_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_ROOT = READING_ROOT / "config"
 CONFIG_FILE = CONFIG_ROOT / "reading.json"
-LOCAL_ENV_FILE = CONFIG_ROOT / "local" / "openreview.env"
+READ_ENV_FILE = CONFIG_ROOT / "read.env"
 
 
-def load_local_env_file(path: Path = LOCAL_ENV_FILE) -> dict[str, str]:
+def load_read_env_file(path: Path = READ_ENV_FILE) -> dict[str, str]:
     loaded: dict[str, str] = {}
     if not path.exists():
         return loaded
@@ -50,7 +50,7 @@ def load_local_env_file(path: Path = LOCAL_ENV_FILE) -> dict[str, str]:
     return loaded
 
 
-LOCAL_ENV = load_local_env_file()
+READ_ENV = load_read_env_file()
 
 DEFAULT_READING_CONFIG: dict[str, Any] = {
     "default_channels": [
@@ -97,6 +97,8 @@ DEFAULT_READING_CONFIG: dict[str, Any] = {
             "acm": 5.0,
             "reader": 2.0,
             "chatpaper": 1.0,
+            "github": 1.0,
+            "web_search": 1.0,
             "generic": 0.05,
         },
         "challenge_cooldown_sec": {
@@ -113,6 +115,7 @@ DEFAULT_READING_CONFIG: dict[str, Any] = {
             "iclr": 600.0,
             "icml": 600.0,
         },
+        "process_access_blocker_sec": 300.0,
         "rate_limit_cooldown_sec": 120.0,
         "batch_challenge_cooldown_wait_cap_sec": 240.0,
     },
@@ -482,10 +485,23 @@ def first_json_object(text: str) -> dict[str, Any]:
 
 
 DEFAULT_TIMEOUT = config_int("http.default_timeout_sec", 30)
-CONTACT_EMAIL = str(os.environ.get("READING_CONTACT_EMAIL") or os.environ.get("OPENALEX_MAILTO") or os.environ.get("CROSSREF_MAILTO") or "").strip()
+
+
+def service_contact_email(service: str = "") -> str:
+    general = str(os.environ.get("READING_CONTACT_EMAIL") or "").strip()
+    service_name = str(service or "").strip().lower()
+    if service_name == "openalex":
+        return str(os.environ.get("OPENALEX_MAILTO") or general).strip()
+    if service_name == "crossref":
+        return str(os.environ.get("CROSSREF_MAILTO") or general).strip()
+    return general
+
+
+CONTACT_EMAIL = service_contact_email()
+USER_AGENT_CONTACT_EMAIL = CONTACT_EMAIL or service_contact_email("openalex") or service_contact_email("crossref")
 DEFAULT_USER_AGENT = (
     str(os.environ.get("READING_HTTP_USER_AGENT") or "").strip()
-    or (str(config_value("http.user_agent", "TASTE-Reading/1.0")).strip() + (f" (mailto:{CONTACT_EMAIL})" if CONTACT_EMAIL else ""))
+    or (str(config_value("http.user_agent", "TASTE-Reading/1.0")).strip() + (f" (mailto:{USER_AGENT_CONTACT_EMAIL})" if USER_AGENT_CONTACT_EMAIL else ""))
 )
 FULL_TEXT_MIN_CHARS = config_int("full_text_min_chars", 1200)
 
@@ -505,12 +521,18 @@ SERVICE_MIN_INTERVAL_SEC = {
     "acm": _env_float("READING_ACM_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.acm", 5.0)),
     "reader": _env_float("READING_READER_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.reader", 2.0)),
     "chatpaper": _env_float("READING_CHATPAPER_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.chatpaper", 1.0)),
+    "github": _env_float("READING_GITHUB_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.github", 1.0)),
+    "web_search": _env_float("READING_WEB_SEARCH_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.web_search", 1.0)),
     "generic": _env_float("READING_GENERIC_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.generic", 0.05)),
 }
 
 _SERVICE_LOCKS_LOCK = threading.Lock()
 _SERVICE_LOCKS: dict[str, threading.Lock] = {}
 _SERVICE_STATE_ROOT = READING_ROOT / "cache" / "http_locks"
+_PROCESS_BLOCKERS_LOCK = threading.Lock()
+_PROCESS_BLOCKERS: dict[str, dict[str, Any]] = {}
+_PROCESS_BACKEND_LOCKS_LOCK = threading.Lock()
+_PROCESS_BACKEND_LOCKS: dict[str, threading.Lock] = {}
 
 SERVICE_CHALLENGE_COOLDOWN_SEC = {
     "biorxiv": _env_float("READING_BIORXIV_CHALLENGE_COOLDOWN_SEC", config_float("http.challenge_cooldown_sec.biorxiv", 180.0)),
@@ -530,6 +552,10 @@ SERVICE_ACCESS_DENIED_COOLDOWN_SEC = {
 SERVICE_RATE_LIMIT_COOLDOWN_SEC = _env_float(
     "READING_RATE_LIMIT_COOLDOWN_SEC",
     config_float("http.rate_limit_cooldown_sec", 120.0),
+)
+PROCESS_ACCESS_BLOCKER_SEC = _env_float(
+    "READING_PROCESS_ACCESS_BLOCKER_SEC",
+    config_float("http.process_access_blocker_sec", 300.0),
 )
 
 
@@ -561,8 +587,12 @@ def service_from_url(url: str) -> str:
         return "unpaywall"
     if "dl.acm.org" in host:
         return "acm"
-    if host == "r.jina.ai":
+    if host in {"r.jina.ai", "s.jina.ai"}:
         return "reader"
+    if host == "api.github.com" or host == "raw.githubusercontent.com":
+        return "github"
+    if host.endswith("duckduckgo.com") or host.endswith("startpage.com"):
+        return "web_search"
     if host == "chatpaper.com" or host.endswith(".chatpaper.com"):
         return "chatpaper"
     return "generic"
@@ -681,6 +711,55 @@ def service_cooldown_remaining(service: str) -> float:
     return round(max(0.0, remaining), 3)
 
 
+def process_blocker(name: str) -> dict[str, Any]:
+    key = re.sub(r"[^a-z0-9_.-]+", "_", str(name or "").lower())
+    if not key:
+        return {}
+    with _PROCESS_BLOCKERS_LOCK:
+        blocker = dict(_PROCESS_BLOCKERS.get(key) or {})
+        if blocker and float(blocker.get("until_monotonic") or 0.0) <= time.monotonic():
+            _PROCESS_BLOCKERS.pop(key, None)
+            return {}
+    return blocker
+
+
+def mark_process_blocker(name: str, reason: str, *, ttl_sec: float | None = None) -> dict[str, Any]:
+    key = re.sub(r"[^a-z0-9_.-]+", "_", str(name or "").lower())
+    if not key:
+        return {}
+    ttl = max(1.0, float(PROCESS_ACCESS_BLOCKER_SEC if ttl_sec is None else ttl_sec))
+    blocker = {
+        "reason": str(reason or "session_backend_unavailable"),
+        "ttl_sec": round(ttl, 3),
+        "until_monotonic": time.monotonic() + ttl,
+    }
+    with _PROCESS_BLOCKERS_LOCK:
+        _PROCESS_BLOCKERS[key] = blocker
+    return dict(blocker)
+
+
+@contextmanager
+def process_backend_slot(name: str) -> Iterator[dict[str, Any]]:
+    """Serialize one fallback backend so queued workers see its first failure."""
+    key = re.sub(r"[^a-z0-9_.-]+", "_", str(name or "backend").lower()) or "backend"
+    with _PROCESS_BACKEND_LOCKS_LOCK:
+        backend_lock = _PROCESS_BACKEND_LOCKS.setdefault(key, threading.Lock())
+    with backend_lock:
+        yield process_blocker(key)
+
+
+def jina_api_key_configured() -> bool:
+    return bool(str(os.environ.get("JINA_API_KEY") or "").strip())
+
+
+def jina_request_headers(*, accept: str = "text/plain,*/*") -> dict[str, str]:
+    headers = {"Accept": accept}
+    api_key = str(os.environ.get("JINA_API_KEY") or "").strip()
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+    return headers
+
+
 def _headers(headers: dict[str, str] | None = None) -> dict[str, str]:
     out = {"User-Agent": DEFAULT_USER_AGENT}
     if headers:
@@ -706,6 +785,22 @@ def retry_after_seconds(value: object, *, cap: float | None = None) -> float:
     if max_wait is None:
         max_wait = _env_float("READING_MAX_RETRY_AFTER_SEC", config_float("http.max_retry_after_sec", 20.0))
     return min(max(0.0, seconds), max_wait)
+
+
+def process_http_blocker_ttl(response: requests.Response) -> float:
+    status_code = int(getattr(response, "status_code", 0) or 0)
+    if status_code == 429:
+        retry_after = retry_after_seconds(getattr(response, "headers", {}).get("retry-after"))
+        return retry_after if retry_after > 0 else SERVICE_RATE_LIMIT_COOLDOWN_SEC
+    return PROCESS_ACCESS_BLOCKER_SEC
+
+
+def mark_process_http_blocker(name: str, response: requests.Response, reason: str) -> dict[str, Any]:
+    return mark_process_blocker(
+        name,
+        reason,
+        ttl_sec=process_http_blocker_ttl(response),
+    )
 
 
 def service_get(

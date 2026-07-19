@@ -146,12 +146,14 @@ def test_framework_sync_uses_selected_count_and_preserves_scored_output_order(tm
                 "reading_scoring": {"status": "complete", "expected_article_count": 2, "scored_article_count": 2},
                 "items": [
                     {
+                        "paper_index": 2,
                         "paper": {"id": "b", "title": "Paper B"},
                         "reading": {"match_score": 9, "transferability_score": 8, "average_score": 8.5, "final_read_rank": 1},
                         "full_text_packet": {"full_text_available": True, "full_text_chars": 2000},
                         "validation": {"full_text_ready": True, "deep_read_complete": True},
                     },
                     {
+                        "paper_index": 1,
                         "paper": {"id": "a", "title": "Paper A"},
                         "reading": {"match_score": 7, "transferability_score": 6, "average_score": 6.5, "final_read_rank": 2},
                         "full_text_packet": {"full_text_available": True, "full_text_chars": 2000},
@@ -180,6 +182,10 @@ def test_framework_sync_uses_selected_count_and_preserves_scored_output_order(tm
     assert rows[0]["transferability_score"] == 8
     assert rows[0]["average_score"] == 8.5
     assert rows[0]["final_read_rank"] == 1
+    assert [row["input_index"] for row in rows] == [1, 2]
+    assert [row["paper_index"] for row in rows] == [2, 1]
+    packets = json.loads((finding / "full_text_reading" / "full_text_packet.json").read_text(encoding="utf-8"))["papers"]
+    assert [row["paper_index"] for row in packets] == [2, 1]
     assert projected["reading_validation"]["scoring_complete"] is True
 
 
