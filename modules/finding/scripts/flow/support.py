@@ -153,7 +153,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from finding_runtime import STATE_DIR, write_json_cache
-
+from runtime.resource_locks import crawl_service_get as finding_service_get
 
 def _contact_mailto() -> str:
     """Contact email for API polite pools (Crossref/OpenAlex/Europe PMC)."""
@@ -1109,7 +1109,7 @@ def _apply_cached_acm_abstract_sources(papers: list[dict]) -> tuple[list[dict], 
 def _chatpaper_request(url: str, timeout: int = 25) -> requests.Response:
     headers = dict(HEADERS)
     headers.setdefault("Referer", "https://chatpaper.com/venues")
-    response = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+    response = finding_service_get(url, headers=headers, timeout=timeout, allow_redirects=True)
     response.raise_for_status()
     return response
 
@@ -1916,7 +1916,7 @@ def _fetch_author_pdf_text(url: str, timeout: int, *, max_pages: int = 2) -> tup
     except Exception:
         return "", "", "pymupdf_unavailable"
     try:
-        response = requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
+        response = finding_service_get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
     except Exception as exc:
         return "", "", "request_error:" + str(exc)[:160]
     status = int(getattr(response, "status_code", 0) or 0)
@@ -2648,7 +2648,7 @@ def _public_pdf_search_reader_url(query: str) -> str:
 
 
 def _public_pdf_request_once(url: str, timeout: int) -> requests.Response:
-    response = requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
+    response = finding_service_get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
     response.raise_for_status()
     return response
 
@@ -3290,7 +3290,7 @@ def enrich_acm_doi_with_openalex(papers: list[dict], limit: int = 0) -> tuple[li
         last_error = ""
         for attempt in range(1, retries + 1):
             try:
-                response = requests.get(url, headers=HEADERS, timeout=timeout)
+                response = finding_service_get(url, headers=HEADERS, timeout=timeout)
                 if response.status_code in {408, 409, 425, 429, 500, 502, 503, 504}:
                     raise RuntimeError(f"HTTP {response.status_code}")
                 response.raise_for_status()
@@ -3547,7 +3547,7 @@ def _fetch_acm_pdf_text(url: str, timeout: int, *, max_pages: int = 2) -> tuple[
     if doi and "dl.acm.org" in urlparse(url).netloc.lower():
         headers.setdefault("Referer", f"https://dl.acm.org/doi/abs/{doi}")
     try:
-        response = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+        response = finding_service_get(url, headers=headers, timeout=timeout, allow_redirects=True)
     except Exception as exc:
         return "", "request_error:" + str(exc)[:160]
     status = int(getattr(response, "status_code", 0) or 0)
@@ -3947,13 +3947,13 @@ def enrich_with_openalex(papers: list[dict], limit: int = 80) -> list[dict]:
         try:
             if doi:
                 doi_url = f"https://api.openalex.org/works/doi:{doi}"
-                response = requests.get(doi_url, headers=HEADERS, timeout=_metadata_timeout(6))
+                response = finding_service_get(doi_url, headers=HEADERS, timeout=_metadata_timeout(6))
                 doi_status = response.status_code
                 if response.status_code == 200:
                     item = _openalex_item_from_payload(response.json(), paper, from_search=False)
             if not item and query:
                 search_url = f"https://api.openalex.org/works?search={query}&per-page=3"
-                response = requests.get(search_url, headers=HEADERS, timeout=_metadata_timeout(6))
+                response = finding_service_get(search_url, headers=HEADERS, timeout=_metadata_timeout(6))
                 if response.status_code == 200:
                     item = _openalex_item_from_payload(response.json(), paper, from_search=True)
             if not item:
@@ -4056,7 +4056,7 @@ def _request(url: str, timeout: int = 12) -> requests.Response:
     last_exc: Exception | None = None
     for attempt in range(retries):
         try:
-            response = requests.get(url, headers=HEADERS, timeout=timeout)
+            response = finding_service_get(url, headers=HEADERS, timeout=timeout)
             response.raise_for_status()
             return response
         except Exception as exc:
@@ -4088,7 +4088,7 @@ def _dblp_search_hits(stream_id: str, *, year: int | None, max_items: int | None
         last_error = ""
         for attempt in range(request_retries):
             try:
-                response = requests.get(
+                response = finding_service_get(
                     "https://dblp.org/search/publ/api",
                     params={"q": _dblp_stream_query(stream_id, year), "h": page_size, "f": offset, "format": "json"},
                     headers=HEADERS,
@@ -4249,7 +4249,7 @@ def _openreview_probe_notes(url: str, base_params: dict[str, object], *, route: 
         "ok": False,
     }
     try:
-        response = requests.get(url, params=params, headers=HEADERS, timeout=_openreview_probe_timeout())
+        response = finding_service_get(url, params=params, headers=HEADERS, timeout=_openreview_probe_timeout())
         audit["status_code"] = response.status_code
         audit["elapsed_sec"] = round(time.monotonic() - started, 3)
         if response.status_code in {401, 403, 429}:
@@ -4343,7 +4343,7 @@ def _openreview_notes_paginated(url: str, base_params: dict[str, object], max_it
         params = dict(base_params)
         params["limit"] = min(page_size, requested - len(notes))
         params["offset"] = offset
-        response = requests.get(url, params=params, headers=HEADERS, timeout=12)
+        response = finding_service_get(url, params=params, headers=HEADERS, timeout=12)
         response.raise_for_status()
         batch = response.json().get("notes", [])
         if not isinstance(batch, list) or not batch:
@@ -7403,7 +7403,7 @@ def enrich_with_semantic_scholar(papers: list[dict], limit: int = 20, api_key: s
         lookup_errors: list[str] = []
         for source, url in urls:
             try:
-                response = requests.get(url, headers=headers, timeout=_metadata_timeout(6))
+                response = finding_service_get(url, headers=headers, timeout=_metadata_timeout(6))
                 if response.status_code != 200:
                     lookup_errors.append(f"{source}:http_{response.status_code}")
                     continue
@@ -7491,7 +7491,7 @@ def enrich_with_arxiv_title_match(papers: list[dict], limit: int = 40) -> list[d
             url = "https://export.arxiv.org/api/query?search_query=" + quote_plus(query_text) + f"&sortBy=submittedDate&sortOrder=descending&start=0&max_results={max_results}"
             try:
                 network_requests += 1
-                response = requests.get(url, headers=HEADERS, timeout=(min(5, timeout), timeout))
+                response = finding_service_get(url, headers=HEADERS, timeout=(min(5, timeout), timeout))
                 if response.status_code == 429:
                     query_errors.append("http_429")
                     rate_limited = True
@@ -7578,7 +7578,7 @@ def enrich_with_arxiv_web_title_match(papers: list[dict], limit: int = 40) -> li
         )
         try:
             network_requests += 1
-            response = requests.get(url, headers=HEADERS, timeout=(min(5, timeout), timeout))
+            response = finding_service_get(url, headers=HEADERS, timeout=(min(5, timeout), timeout))
             if response.status_code == 429:
                 paper.setdefault("metadata", {})["arxiv_web_title_match_error"] = "http_429"
                 rate_limited = True
@@ -8493,7 +8493,7 @@ def fetch_science_family(
             last_error = ""
             for attempt in range(1, max(1, retries) + 1):
                 try:
-                    response = requests.get(page_url, headers=HEADERS, timeout=(connect_timeout, read_timeout), allow_redirects=True)
+                    response = finding_service_get(page_url, headers=HEADERS, timeout=(connect_timeout, read_timeout), allow_redirects=True)
                     response.raise_for_status()
                     html_text = response.text
                     break
@@ -8548,7 +8548,7 @@ def fetch_science_family(
             return
         current_payload = ""
         try:
-            current_payload = requests.get(science_toc_url(slug), headers=HEADERS, timeout=(5, max(5, min(12, timeout))), allow_redirects=True).text
+            current_payload = finding_service_get(science_toc_url(slug), headers=HEADERS, timeout=(5, max(5, min(12, timeout))), allow_redirects=True).text
         except Exception as exc:
             status["errors"].append(f"{slug}/boundary_toc/current: {exc}")
             return
@@ -8585,7 +8585,7 @@ def fetch_science_family(
             last_error = ""
             for attempt in range(1, 4):
                 try:
-                    response = requests.get(url, headers=HEADERS, timeout=(5, max(5, min(12, timeout))), allow_redirects=True)
+                    response = finding_service_get(url, headers=HEADERS, timeout=(5, max(5, min(12, timeout))), allow_redirects=True)
                     response.raise_for_status()
                     soup = BeautifulSoup(response.text, "html.parser")
                     break

@@ -61,7 +61,7 @@ if _core_common_spec is None:
     sys.modules["core.common"] = _core_common_module
     _core_common_spec.loader.exec_module(_core_common_module)
 
-from core.common import DEFAULT_USER_AGENT, FULL_TEXT_MIN_CHARS as CONFIG_FULL_TEXT_MIN_CHARS, config_bool, config_value, env_bool, jina_api_key_configured, jina_request_headers, mark_process_http_blocker, process_backend_slot, process_blocker, response_receipt, service_cooldown_remaining, service_from_url, service_get
+from core.common import DEFAULT_USER_AGENT, FULL_TEXT_MIN_CHARS as CONFIG_FULL_TEXT_MIN_CHARS, batch_cooldown_wait_cap, config_bool, config_value, env_bool, jina_api_key_configured, jina_request_headers, mark_process_http_blocker, process_backend_slot, process_blocker, response_receipt, service_cooldown_remaining, service_from_url, service_get
 from core.common import coerce_str_list, read_json, safe_slug, write_text
 from core.common import OUTPUT_ROOT, relative_to_reading, resolve_reading_path
 from acquisition.semantic_scholar import semantic_scholar_enrich_paper
@@ -343,7 +343,7 @@ def _wait_for_biorxiv_challenge_cooldown(doi: str, stage: str) -> dict[str, Any]
     remaining = service_cooldown_remaining("biorxiv")
     if remaining <= 0:
         return {}
-    cap = max(0.0, _config_float("http.batch_challenge_cooldown_wait_cap_sec", 120.0))
+    cap = batch_cooldown_wait_cap("biorxiv")
     if cap <= 0 or remaining > cap:
         return {
             "kind": "biorxiv_challenge_cooldown_wait",

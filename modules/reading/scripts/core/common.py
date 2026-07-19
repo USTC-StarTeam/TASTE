@@ -82,42 +82,76 @@ DEFAULT_READING_CONFIG: dict[str, Any] = {
         "max_retry_after_sec": 86400,
         "user_agent": "TASTE-Reading/1.0",
         "min_interval_sec": {
-            "arxiv": 3.2,
-            "biorxiv": 30.0,
-            "science": 10.0,
-            "openreview": 20.0,
-            "iclr": 10.0,
-            "icml": 10.0,
-            "crossref": 1.0,
-            "openalex": 1.0,
+            "arxiv": 3.1,
+            "biorxiv": 3.0,
+            "science": 3.0,
+            "openreview": 1.0,
+            "iclr": 3.0,
+            "icml": 3.0,
+            "crossref": 0.34,
+            "openalex": 0.05,
             "semanticscholar": 1.0,
             "europepmc": 0.25,
             "springernature": 0.7,
             "unpaywall": 0.25,
-            "acm": 5.0,
-            "reader": 2.0,
-            "chatpaper": 1.0,
+            "acm": 2.0,
+            "reader": 1.0,
+            "chatpaper": 0.5,
             "github": 1.0,
             "web_search": 1.0,
             "generic": 0.05,
         },
         "challenge_cooldown_sec": {
-            "biorxiv": 180.0,
-            "science": 90.0,
-            "openreview": 120.0,
-            "iclr": 600.0,
-            "icml": 600.0,
-            "acm": 60.0,
-            "generic": 20.0,
+            "biorxiv": 60.0,
+            "science": 30.0,
+            "openreview": 30.0,
+            "iclr": 60.0,
+            "icml": 60.0,
+            "acm": 30.0,
+            "generic": 10.0,
         },
         "access_denied_cooldown_sec": {
-            "openreview": 60.0,
-            "iclr": 600.0,
-            "icml": 600.0,
+            "openreview": 30.0,
+            "iclr": 30.0,
+            "icml": 30.0,
         },
-        "process_access_blocker_sec": 300.0,
-        "rate_limit_cooldown_sec": 120.0,
-        "batch_challenge_cooldown_wait_cap_sec": 240.0,
+        "process_access_blocker_sec": {
+            "reader": 60.0,
+            "web_search": 30.0,
+            "github": 60.0,
+            "generic": 30.0,
+        },
+        "rate_limit_cooldown_sec": {
+            "arxiv": 6.0,
+            "biorxiv": 15.0,
+            "science": 15.0,
+            "openreview": 10.0,
+            "iclr": 15.0,
+            "icml": 15.0,
+            "crossref": 2.0,
+            "openalex": 2.0,
+            "semanticscholar": 5.0,
+            "europepmc": 2.0,
+            "springernature": 5.0,
+            "unpaywall": 2.0,
+            "acm": 15.0,
+            "reader": 10.0,
+            "chatpaper": 5.0,
+            "github": 60.0,
+            "web_search": 30.0,
+            "generic": 10.0,
+        },
+        "batch_challenge_cooldown_wait_cap_sec": {
+            "arxiv": 10.0,
+            "biorxiv": 60.0,
+            "science": 30.0,
+            "openreview": 30.0,
+            "iclr": 60.0,
+            "icml": 60.0,
+            "acm": 30.0,
+            "github": 60.0,
+            "generic": 20.0,
+        },
     },
     "openreview": {
         "allow_anonymous_http": True,
@@ -514,21 +548,21 @@ DEFAULT_USER_AGENT = (
 FULL_TEXT_MIN_CHARS = config_int("full_text_min_chars", 1200)
 
 SERVICE_MIN_INTERVAL_SEC = {
-    "arxiv": _env_float("READING_ARXIV_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.arxiv", 3.2)),
-    "biorxiv": _env_float("READING_BIORXIV_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.biorxiv", 30.0)),
-    "science": _env_float("READING_SCIENCE_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.science", 10.0)),
-    "openreview": _env_float("READING_OPENREVIEW_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.openreview", 10.0)),
-    "iclr": _env_float("READING_ICLR_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.iclr", 10.0)),
-    "icml": _env_float("READING_ICML_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.icml", 10.0)),
-    "crossref": _env_float("READING_CROSSREF_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.crossref", 1.0)),
-    "openalex": _env_float("READING_OPENALEX_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.openalex", 1.0)),
+    "arxiv": _env_float("READING_ARXIV_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.arxiv", 3.1)),
+    "biorxiv": _env_float("READING_BIORXIV_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.biorxiv", 3.0)),
+    "science": _env_float("READING_SCIENCE_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.science", 3.0)),
+    "openreview": _env_float("READING_OPENREVIEW_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.openreview", 1.0)),
+    "iclr": _env_float("READING_ICLR_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.iclr", 3.0)),
+    "icml": _env_float("READING_ICML_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.icml", 3.0)),
+    "crossref": _env_float("READING_CROSSREF_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.crossref", 0.34)),
+    "openalex": _env_float("READING_OPENALEX_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.openalex", 0.05)),
     "semanticscholar": _env_float("READING_SEMANTIC_SCHOLAR_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.semanticscholar", 1.0)),
     "europepmc": _env_float("READING_EUROPEPMC_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.europepmc", 0.25)),
     "springernature": _env_float("READING_SPRINGER_NATURE_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.springernature", 0.7)),
     "unpaywall": _env_float("READING_UNPAYWALL_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.unpaywall", 0.25)),
-    "acm": _env_float("READING_ACM_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.acm", 5.0)),
-    "reader": _env_float("READING_READER_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.reader", 2.0)),
-    "chatpaper": _env_float("READING_CHATPAPER_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.chatpaper", 1.0)),
+    "acm": _env_float("READING_ACM_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.acm", 2.0)),
+    "reader": _env_float("READING_READER_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.reader", 1.0)),
+    "chatpaper": _env_float("READING_CHATPAPER_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.chatpaper", 0.5)),
     "github": _env_float("READING_GITHUB_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.github", 1.0)),
     "web_search": _env_float("READING_WEB_SEARCH_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.web_search", 1.0)),
     "generic": _env_float("READING_GENERIC_MIN_INTERVAL_SEC", config_float("http.min_interval_sec.generic", 0.05)),
@@ -536,35 +570,98 @@ SERVICE_MIN_INTERVAL_SEC = {
 
 _SERVICE_LOCKS_LOCK = threading.Lock()
 _SERVICE_LOCKS: dict[str, threading.Lock] = {}
-_SERVICE_STATE_ROOT = READING_ROOT / "cache" / "http_locks"
+_SERVICE_STATE_ROOT = Path(
+    os.environ.get("FRAMEWORK_RUNTIME_DIR")
+    or READING_ROOT.parents[1] / "framework" / ".runtime"
+) / "locks" / "crawl_services"
 _PROCESS_BLOCKERS_LOCK = threading.Lock()
 _PROCESS_BLOCKERS: dict[str, dict[str, Any]] = {}
 _PROCESS_BACKEND_LOCKS_LOCK = threading.Lock()
 _PROCESS_BACKEND_LOCKS: dict[str, threading.Lock] = {}
 
 SERVICE_CHALLENGE_COOLDOWN_SEC = {
-    "biorxiv": _env_float("READING_BIORXIV_CHALLENGE_COOLDOWN_SEC", config_float("http.challenge_cooldown_sec.biorxiv", 180.0)),
-    "science": _env_float("READING_SCIENCE_CHALLENGE_COOLDOWN_SEC", config_float("http.challenge_cooldown_sec.science", 90.0)),
-    "openreview": _env_float("READING_OPENREVIEW_CHALLENGE_COOLDOWN_SEC", config_float("http.challenge_cooldown_sec.openreview", 120.0)),
-    "iclr": _env_float("READING_ICLR_CHALLENGE_COOLDOWN_SEC", config_float("http.challenge_cooldown_sec.iclr", 600.0)),
-    "icml": _env_float("READING_ICML_CHALLENGE_COOLDOWN_SEC", config_float("http.challenge_cooldown_sec.icml", 600.0)),
-    "acm": _env_float("READING_ACM_CHALLENGE_COOLDOWN_SEC", config_float("http.challenge_cooldown_sec.acm", 60.0)),
-    "generic": _env_float("READING_GENERIC_CHALLENGE_COOLDOWN_SEC", config_float("http.challenge_cooldown_sec.generic", 20.0)),
+    "biorxiv": _env_float("READING_BIORXIV_CHALLENGE_COOLDOWN_SEC", config_float("http.challenge_cooldown_sec.biorxiv", 60.0)),
+    "science": _env_float("READING_SCIENCE_CHALLENGE_COOLDOWN_SEC", config_float("http.challenge_cooldown_sec.science", 30.0)),
+    "openreview": _env_float("READING_OPENREVIEW_CHALLENGE_COOLDOWN_SEC", config_float("http.challenge_cooldown_sec.openreview", 30.0)),
+    "iclr": _env_float("READING_ICLR_CHALLENGE_COOLDOWN_SEC", config_float("http.challenge_cooldown_sec.iclr", 60.0)),
+    "icml": _env_float("READING_ICML_CHALLENGE_COOLDOWN_SEC", config_float("http.challenge_cooldown_sec.icml", 60.0)),
+    "acm": _env_float("READING_ACM_CHALLENGE_COOLDOWN_SEC", config_float("http.challenge_cooldown_sec.acm", 30.0)),
+    "generic": _env_float("READING_GENERIC_CHALLENGE_COOLDOWN_SEC", config_float("http.challenge_cooldown_sec.generic", 10.0)),
 }
 
 SERVICE_ACCESS_DENIED_COOLDOWN_SEC = {
-    "openreview": _env_float("READING_OPENREVIEW_ACCESS_DENIED_COOLDOWN_SEC", config_float("http.access_denied_cooldown_sec.openreview", 60.0)),
-    "iclr": _env_float("READING_ICLR_ACCESS_DENIED_COOLDOWN_SEC", config_float("http.access_denied_cooldown_sec.iclr", 600.0)),
-    "icml": _env_float("READING_ICML_ACCESS_DENIED_COOLDOWN_SEC", config_float("http.access_denied_cooldown_sec.icml", 600.0)),
+    "openreview": _env_float("READING_OPENREVIEW_ACCESS_DENIED_COOLDOWN_SEC", config_float("http.access_denied_cooldown_sec.openreview", 30.0)),
+    "iclr": _env_float("READING_ICLR_ACCESS_DENIED_COOLDOWN_SEC", config_float("http.access_denied_cooldown_sec.iclr", 30.0)),
+    "icml": _env_float("READING_ICML_ACCESS_DENIED_COOLDOWN_SEC", config_float("http.access_denied_cooldown_sec.icml", 30.0)),
 }
-SERVICE_RATE_LIMIT_COOLDOWN_SEC = _env_float(
-    "READING_RATE_LIMIT_COOLDOWN_SEC",
-    config_float("http.rate_limit_cooldown_sec", 120.0),
-)
-PROCESS_ACCESS_BLOCKER_SEC = _env_float(
-    "READING_PROCESS_ACCESS_BLOCKER_SEC",
-    config_float("http.process_access_blocker_sec", 300.0),
-)
+_RATE_LIMIT_DEFAULTS = {
+    "arxiv": 6.0, "biorxiv": 15.0, "science": 15.0, "openreview": 10.0,
+    "iclr": 15.0, "icml": 15.0, "crossref": 2.0, "openalex": 2.0,
+    "semanticscholar": 5.0, "europepmc": 2.0, "springernature": 5.0,
+    "unpaywall": 2.0, "acm": 15.0, "reader": 10.0, "chatpaper": 5.0,
+    "github": 60.0, "web_search": 30.0, "generic": 10.0,
+}
+_GLOBAL_RATE_LIMIT_OVERRIDE = str(os.environ.get("READING_RATE_LIMIT_COOLDOWN_SEC") or "").strip()
+SERVICE_RATE_LIMIT_COOLDOWN_SEC_BY_SERVICE = {
+    service: _env_float(
+        f"READING_{service.upper()}_RATE_LIMIT_COOLDOWN_SEC",
+        _env_float("READING_RATE_LIMIT_COOLDOWN_SEC", default)
+        if _GLOBAL_RATE_LIMIT_OVERRIDE
+        else config_float(f"http.rate_limit_cooldown_sec.{service}", default),
+    )
+    for service, default in _RATE_LIMIT_DEFAULTS.items()
+}
+SERVICE_RATE_LIMIT_COOLDOWN_SEC = SERVICE_RATE_LIMIT_COOLDOWN_SEC_BY_SERVICE["generic"]
+_PROCESS_ACCESS_DEFAULTS = {"reader": 60.0, "web_search": 30.0, "github": 60.0, "generic": 30.0}
+_GLOBAL_PROCESS_ACCESS_OVERRIDE = str(os.environ.get("READING_PROCESS_ACCESS_BLOCKER_SEC") or "").strip()
+PROCESS_ACCESS_BLOCKER_SEC_BY_SERVICE = {
+    service: _env_float(
+        f"READING_{service.upper()}_PROCESS_ACCESS_BLOCKER_SEC",
+        _env_float("READING_PROCESS_ACCESS_BLOCKER_SEC", default)
+        if _GLOBAL_PROCESS_ACCESS_OVERRIDE
+        else config_float(f"http.process_access_blocker_sec.{service}", default),
+    )
+    for service, default in _PROCESS_ACCESS_DEFAULTS.items()
+}
+PROCESS_ACCESS_BLOCKER_SEC = PROCESS_ACCESS_BLOCKER_SEC_BY_SERVICE["generic"]
+
+
+def service_rate_limit_cooldown(service: str) -> float:
+    return max(
+        0.0,
+        SERVICE_RATE_LIMIT_COOLDOWN_SEC_BY_SERVICE.get(
+            str(service or "generic").strip().lower(),
+            SERVICE_RATE_LIMIT_COOLDOWN_SEC,
+        ),
+    )
+
+
+def batch_cooldown_wait_cap(service: str) -> float:
+    service_name = str(service or "generic").strip().lower() or "generic"
+    default = {
+        "arxiv": 10.0, "biorxiv": 60.0, "science": 30.0, "openreview": 30.0,
+        "iclr": 60.0, "icml": 60.0, "acm": 30.0, "github": 60.0,
+        "generic": 20.0,
+    }.get(service_name, 20.0)
+    return max(0.0, config_float(
+        f"http.batch_challenge_cooldown_wait_cap_sec.{service_name}",
+        config_float("http.batch_challenge_cooldown_wait_cap_sec.generic", default),
+    ))
+
+
+def _rate_limit_reset_seconds(response: requests.Response, service: str) -> float:
+    headers = getattr(response, "headers", {}) or {}
+    retry_after = retry_after_seconds(headers.get("retry-after"))
+    if retry_after > 0:
+        return retry_after
+    reset_text = str(headers.get("x-ratelimit-reset") or "").strip()
+    try:
+        reset_value = float(reset_text)
+    except ValueError:
+        return 0.0
+    if str(service or "").lower() == "openalex":
+        return retry_after_seconds(reset_value)
+    return retry_after_seconds(max(0.0, reset_value - time.time()))
 
 
 def service_from_url(url: str) -> str:
@@ -603,7 +700,8 @@ def service_from_url(url: str) -> str:
         return "web_search"
     if host == "chatpaper.com" or host.endswith(".chatpaper.com"):
         return "chatpaper"
-    return "generic"
+    normalized_host = re.sub(r"[^a-z0-9_.-]+", "_", host).strip("_.-")
+    return f"host_{normalized_host}" if normalized_host else "generic"
 
 
 class ServiceCooldownActive(RuntimeError):
@@ -686,8 +784,16 @@ def service_request_slot(service: str, *, allow_during_cooldown: bool = False) -
                         cooldown = max(cooldown, SERVICE_CHALLENGE_COOLDOWN_SEC.get(service_name, SERVICE_CHALLENGE_COOLDOWN_SEC["generic"]))
                         reason = reason or "cloudflare_challenge"
                     if status_code == 429:
-                        cooldown = max(cooldown, retry_after_seconds(headers.get("retry-after")), SERVICE_RATE_LIMIT_COOLDOWN_SEC)
+                        provider_wait = _rate_limit_reset_seconds(response, service_name) if response is not None else 0.0
+                        cooldown = max(cooldown, provider_wait or service_rate_limit_cooldown(service_name))
                         reason = reason or "http_429"
+                    if (
+                        status_code == 403
+                        and service_name == "github"
+                        and str(headers.get("x-ratelimit-remaining") or "").strip() == "0"
+                    ):
+                        cooldown = max(cooldown, _rate_limit_reset_seconds(response, service_name) or service_rate_limit_cooldown(service_name))
+                        reason = reason or "github_rate_limit_exhausted"
                     if status_code == 403 and service_name in SERVICE_ACCESS_DENIED_COOLDOWN_SEC:
                         cooldown = max(cooldown, SERVICE_ACCESS_DENIED_COOLDOWN_SEC[service_name])
                         reason = reason or "http_403"
@@ -797,10 +903,11 @@ def retry_after_seconds(value: object, *, cap: float | None = None) -> float:
 
 def process_http_blocker_ttl(response: requests.Response) -> float:
     status_code = int(getattr(response, "status_code", 0) or 0)
+    service = service_from_url(str(getattr(response, "url", "") or ""))
     if status_code == 429:
-        retry_after = retry_after_seconds(getattr(response, "headers", {}).get("retry-after"))
-        return retry_after if retry_after > 0 else SERVICE_RATE_LIMIT_COOLDOWN_SEC
-    return PROCESS_ACCESS_BLOCKER_SEC
+        provider_wait = _rate_limit_reset_seconds(response, service)
+        return provider_wait if provider_wait > 0 else service_rate_limit_cooldown(service)
+    return PROCESS_ACCESS_BLOCKER_SEC_BY_SERVICE.get(service, PROCESS_ACCESS_BLOCKER_SEC)
 
 
 def mark_process_http_blocker(name: str, response: requests.Response, reason: str) -> dict[str, Any]:

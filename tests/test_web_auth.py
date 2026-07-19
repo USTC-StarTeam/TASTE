@@ -14,10 +14,18 @@ class CapturingEmailSender:
 
     def __init__(self):
         self.codes: dict[str, str] = {}
+        self.purposes: dict[str, str] = {}
 
-    def send_verification_code(self, recipient: str, code: str, expires_in: int) -> None:
+    def send_verification_code(
+        self,
+        recipient: str,
+        code: str,
+        expires_in: int,
+        purpose: str = "register",
+    ) -> None:
         assert expires_in > 0
         self.codes[recipient.casefold()] = code
+        self.purposes[recipient.casefold()] = purpose
 
 
 def configure_api_auth(server, tmp_path, monkeypatch):
@@ -126,6 +134,125 @@ def test_email_verification_rate_limit_and_email_login(tmp_path, monkeypatch):
     assert login_response.json()["user"]["username"] == "verified"
 
 
+def test_email_can_only_register_one_account_case_insensitively(tmp_path):
+    from auto_research.web.auth import AuthError, AuthStore
+
+    store = AuthStore(tmp_path / "auth.sqlite3")
+    verification = store.begin_email_verification("Unique@Example.com", "test-client")
+    store.register("first_user", "Unique@Example.com", "password-one", verification.code)
+
+    try:
+        store.begin_email_verification("unique@example.com", "another-client")
+    except AuthError as exc:
+        assert "已注册" in str(exc)
+    else:
+        raise AssertionError("one normalized email must not register more than one account")
+
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM users WHERE email_key = ?",
+            ("unique@example.com",),
+        ).fetchone()[0] == 1
+
+
+def test_password_reset_code_is_purpose_bound_one_time_and_expires(tmp_path):
+    from auto_research.web.auth import (
+        AuthError,
+        AuthStore,
+        VERIFICATION_PURPOSE_PASSWORD_RESET,
+    )
+
+    store = AuthStore(tmp_path / "auth.sqlite3")
+    registration = store.begin_email_verification("reset@example.com", "test-client")
+    user = store.register("reset_user", "reset@example.com", "password-old", registration.code)
+    session = store.create_session(user)
+
+    reset = store.begin_email_verification(
+        "RESET@example.com",
+        "test-client",
+        VERIFICATION_PURPOSE_PASSWORD_RESET,
+    )
+    try:
+        store.register("another_user", "reset@example.com", "password-other", reset.code)
+    except AuthError as exc:
+        assert "先获取" in str(exc)
+    else:
+        raise AssertionError("a password-reset code must not be accepted for registration")
+
+    store.reset_password("reset@example.com", "password-new", reset.code)
+    assert store.authenticate("reset@example.com", "password-old") is None
+    assert store.authenticate("reset@example.com", "password-new") == user
+    assert store.user_for_session(session) is None
+    try:
+        store.reset_password("reset@example.com", "password-newer", reset.code)
+    except AuthError as exc:
+        assert "先获取" in str(exc)
+    else:
+        raise AssertionError("a used password-reset code must be invalid immediately")
+
+    expired = store.begin_email_verification(
+        "reset@example.com",
+        "test-client",
+        VERIFICATION_PURPOSE_PASSWORD_RESET,
+    )
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE email_verifications SET expires_at = ? WHERE email_key = ?",
+            ("2000-01-01T00:00:00+00:00", "reset@example.com"),
+        )
+    try:
+        store.reset_password("reset@example.com", "password-expired", expired.code)
+    except AuthError as exc:
+        assert "已过期" in str(exc)
+    else:
+        raise AssertionError("an expired password-reset code must be rejected")
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT 1 FROM email_verifications WHERE email_key = ?",
+            ("reset@example.com",),
+        ).fetchone() is None
+
+
+def test_password_reset_api_uses_registered_email_and_new_password(tmp_path, monkeypatch):
+    import auto_research.web.server as server
+
+    _, sender = configure_api_auth(server, tmp_path, monkeypatch)
+    client = TestClient(server.app)
+    register_account(client, sender, "api_reset", "api-reset@example.com", "password-old")
+    assert client.post("/api/auth/logout").status_code == 200
+
+    missing = client.post(
+        "/api/auth/password-reset/verification-code",
+        json={"email": "missing@example.com"},
+    )
+    assert missing.status_code == 400
+    assert "尚未注册" in missing.json()["error"]
+
+    code_response = client.post(
+        "/api/auth/password-reset/verification-code",
+        json={"email": "API-RESET@example.com"},
+    )
+    assert code_response.status_code == 200
+    assert sender.purposes["api-reset@example.com"] == "password_reset"
+    reset_response = client.post(
+        "/api/auth/password-reset",
+        json={
+            "email": "api-reset@example.com",
+            "password": "password-new",
+            "verification_code": sender.codes["api-reset@example.com"],
+        },
+    )
+    assert reset_response.status_code == 200
+    assert client.post(
+        "/api/auth/login",
+        json={"identifier": "api_reset", "password": "password-old"},
+    ).status_code == 401
+    assert client.post(
+        "/api/auth/login",
+        json={"identifier": "api_reset", "password": "password-new"},
+    ).status_code == 200
+
+
 def test_verification_email_sender_loads_protected_runtime_config(tmp_path, monkeypatch):
     from auto_research.web.verification_email import VerificationEmailSender
 
@@ -172,6 +299,7 @@ def test_server_email_sender_reuses_authenticated_connection_across_mail_types(m
             self.context = context
             self.login_calls = []
             self.recipients = []
+            self.subjects = []
             self.closed = False
             self.instances.append(self)
 
@@ -180,6 +308,7 @@ def test_server_email_sender_reuses_authenticated_connection_across_mail_types(m
 
         def send_message(self, message):
             self.recipients.append(message["To"])
+            self.subjects.append(message["Subject"])
 
         def close(self):
             self.closed = True
@@ -200,10 +329,20 @@ def test_server_email_sender_reuses_authenticated_connection_across_mail_types(m
         "Report body",
         "<p>Report body</p>",
     )
+    sender.send_verification_code("third@example.test", "654321", 600, "password_reset")
 
     assert len(FakeSMTP.instances) == 1
     assert FakeSMTP.instances[0].login_calls == [("taste@example.test", "authorization-code")]
-    assert FakeSMTP.instances[0].recipients == ["first@example.test", "second@example.test"]
+    assert FakeSMTP.instances[0].recipients == [
+        "first@example.test",
+        "second@example.test",
+        "third@example.test",
+    ]
+    assert FakeSMTP.instances[0].subjects == [
+        "TASTE 注册验证码",
+        "TASTE report",
+        "TASTE 重置密码验证码",
+    ]
 
 
 def test_verification_email_sender_reconnects_once_after_stale_connection(monkeypatch):

@@ -43,7 +43,7 @@ from bridges.environment_bridge import (  # noqa: E402
 )
 from runtime.framework_paths import FRAMEWORK_INPUTS_DIR, FRAMEWORK_RUNTIME_DIR, WEB_RUNTIME_DIR  # noqa: E402
 from project.project_paths import configured_max_read_papers  # noqa: E402
-from runtime.resource_locks import crawl_resource_lease, project_workflow_lease  # noqa: E402
+from runtime.resource_locks import project_workflow_lease  # noqa: E402
 from runtime.taste_pythonpath import resolve_script_path  # noqa: E402
 
 
@@ -483,14 +483,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     cmd.extend(rest)
     if not ns.contract and ns.stage in {"finding", "reading"}:
         project = _arg_value(rest, "--project")
-        with crawl_resource_lease(
-            operation=ns.stage,
-            project=project,
-            on_wait=lambda: print("Waiting for the shared crawl resource.", flush=True),
-            on_acquired=lambda: print("Shared crawl resource acquired.", flush=True),
-        ):
-            with (_project_module_lock("current_find", project) if project else nullcontext()):
-                return _run_module_dispatch(ns, rest, cmd)
+        with (_project_module_lock("current_find", project) if project else nullcontext()):
+            return _run_module_dispatch(ns, rest, cmd)
     return _run_module_dispatch(ns, rest, cmd)
 
 

@@ -215,11 +215,27 @@ export async function requestEmailVerification(email: string) {
   }));
 }
 
+export async function requestPasswordResetVerification(email: string) {
+  return json<{ status: string; expires_in: number; retry_after: number }>(await apiFetch("/api/auth/password-reset/verification-code", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  }));
+}
+
 export async function register(username: string, email: string, password: string, verificationCode: string) {
   return json<{ user: AuthUser }>(await apiFetch("/api/auth/register", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username, email, password, verification_code: verificationCode }),
+  }));
+}
+
+export async function resetPassword(email: string, password: string, verificationCode: string) {
+  return json<{ status: string }>(await apiFetch("/api/auth/password-reset", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password, verification_code: verificationCode }),
   }));
 }
 

@@ -1391,7 +1391,7 @@
         "_load_local_llm_config",
         "driver_python_command",
         "run",
-        "_run_with_crawl_lease",
+        "_run_process",
         "read_focus_queries",
         "merge_extra_queries",
         "write_driver",
@@ -2618,23 +2618,40 @@
       "category": "runtime",
       "kind": "python",
       "functions": [
+        "_crawl_service_name",
+        "_crawl_service_state",
+        "_write_crawl_service_state",
+        "_crawl_service_root",
+        "crawl_service_slot",
+        "crawl_service_cooldown_remaining",
+        "crawl_service_from_url",
+        "_crawl_policy_value",
+        "_crawl_retry_after_seconds",
+        "crawl_service_get",
         "project_workflow_lease",
-        "crawl_resource_lease"
+        "__init__"
       ],
-      "classes": [],
+      "classes": [
+        "CrawlServiceCooldownActive"
+      ],
       "imports": [
         "__future__",
         "contextlib",
-        "datetime",
+        "email.utils",
         "fcntl",
         "framework_paths",
         "json",
         "os",
+        "pathlib",
         "re",
-        "typing"
+        "requests",
+        "threading",
+        "time",
+        "typing",
+        "urllib.parse"
       ],
-      "function_count": 2,
-      "class_count": 0
+      "function_count": 12,
+      "class_count": 1
     },
     {
       "path": "scripts/runtime/run_storage.py",

@@ -70,6 +70,7 @@ from core.common import (
     DEFAULT_USER_AGENT,
     FULL_TEXT_MIN_CHARS as CONFIG_FULL_TEXT_MIN_CHARS,
     ServiceCooldownActive,
+    batch_cooldown_wait_cap,
     config_bool,
     config_float,
     config_int,
@@ -6113,9 +6114,10 @@ def _wait_for_cooldown_requeue(
     *,
     log: LogFn,
     should_cancel: CancelFn,
-) -> float:
+) -> dict[str, object]:
     started = time.monotonic()
     announced = False
+    wait_caps = {service: batch_cooldown_wait_cap(service) for service in services}
     while services:
         _raise_if_cancelled(should_cancel)
         remaining_by_service = {
@@ -6125,12 +6127,35 @@ def _wait_for_cooldown_requeue(
         longest = max(remaining_by_service.values(), default=0.0)
         if longest <= 0:
             break
+        elapsed = time.monotonic() - started
+        over_cap = {
+            service: remaining
+            for service, remaining in remaining_by_service.items()
+            if wait_caps.get(service, 0.0) <= 0 or elapsed + remaining > wait_caps[service]
+        }
+        if over_cap:
+            summary = ", ".join(
+                f"{service}={remaining:.1f}s>cap {wait_caps.get(service, 0.0):.1f}s"
+                for service, remaining in over_cap.items()
+            )
+            log(f"Cooldown recovery deferred without blocking the Read job: {summary}")
+            return {
+                "ready": False,
+                "waited_sec": round(elapsed, 3),
+                "remaining_by_service": remaining_by_service,
+                "wait_caps": wait_caps,
+            }
         if not announced:
             summary = ", ".join(f"{service}={remaining:.1f}s" for service, remaining in remaining_by_service.items())
             log(f"Cooldown recovery wait before batch requeue: {summary}")
             announced = True
         time.sleep(min(1.0, max(0.05, longest)))
-    return round(time.monotonic() - started, 3)
+    return {
+        "ready": True,
+        "waited_sec": round(time.monotonic() - started, 3),
+        "remaining_by_service": {},
+        "wait_caps": wait_caps,
+    }
 
 
 def run_read(
@@ -6272,21 +6297,43 @@ def run_read(
             f"requeueing {len(cooldown_requeue_by_index)} papers with 1 recovery worker"
         )
         recovered_count = 0
+        attempted_count = 0
+        deferred_count = 0
         waited_sec = 0.0
         for index, services in cooldown_requeue_by_index.items():
             _raise_if_cancelled(should_cancel)
             # A prior recovery request may have opened a fresh shared cooldown.
             # Wait again before each queued paper so its one retry is a real request,
             # not another immediate cooldown skip caused by the preceding paper.
-            waited_sec += _wait_for_cooldown_requeue(
+            wait_result = _wait_for_cooldown_requeue(
                 set(services),
                 log=log,
                 should_cancel=should_cancel,
             )
+            waited_sec += float(wait_result.get("waited_sec") or 0.0)
             row = papers[index - 1]
             initial = prepared_by_index[index]
             initial_packet = initial.get("full_text_packet") if isinstance(initial.get("full_text_packet"), dict) else {}
             initial_blocker = initial_packet.get("blocked_full_text_reason") if isinstance(initial_packet.get("blocked_full_text_reason"), dict) else {}
+            if wait_result.get("ready") is not True:
+                deferred_count += 1
+                initial_validation = initial.get("validation") if isinstance(initial.get("validation"), dict) else {}
+                initial_validation["cooldown_requeue"] = {
+                    "attempted": False,
+                    "deferred": True,
+                    "services": services,
+                    "initial_status": str(initial.get("status") or ""),
+                    "initial_blocked_reason_code": str(initial_blocker.get("code") or ""),
+                    "remaining_by_service": wait_result.get("remaining_by_service") or {},
+                    "wait_caps": wait_result.get("wait_caps") or {},
+                }
+                initial["validation"] = initial_validation
+                artifacts = initial.get("artifacts") if isinstance(initial.get("artifacts"), dict) else {}
+                read_results_path = str(artifacts.get("read_results") or "").strip()
+                if read_results_path:
+                    _write_read_result(resolve_reading_path(read_results_path), initial)
+                continue
+            attempted_count += 1
             try:
                 result = _prepare_local_read_paper(
                     run_id=directory.name,
@@ -6328,13 +6375,15 @@ def run_read(
                 f"{result.get('status')} / full_text={result_validation.get('full_text_ready')}"
             )
         cooldown_requeue_summary = {
-            "status": "complete",
-            "attempted_paper_count": len(cooldown_requeue_by_index),
+            "status": "complete" if deferred_count == 0 else "complete_with_deferred",
+            "attempted_paper_count": attempted_count,
             "recovered_full_text_count": recovered_count,
             "worker_count": 1,
             "services": sorted(retry_services),
             "waited_sec": round(waited_sec, 3),
         }
+        if deferred_count:
+            cooldown_requeue_summary["deferred_paper_count"] = deferred_count
     prepared_items = [prepared_by_index[index] for index in range(1, len(papers) + 1)]
     read_candidates = [
         item for item in prepared_items

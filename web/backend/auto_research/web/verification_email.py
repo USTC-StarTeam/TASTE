@@ -110,23 +110,31 @@ class VerificationEmailSender:
         except (OSError, smtplib.SMTPException) as exc:
             raise VerificationEmailError("邮件发送失败，请稍后重试。") from exc
 
-    def send_verification_code(self, recipient: str, code: str, expires_in: int) -> None:
+    def send_verification_code(
+        self,
+        recipient: str,
+        code: str,
+        expires_in: int,
+        purpose: str = "register",
+    ) -> None:
         if not self.configured:
-            raise VerificationEmailError("服务器尚未配置注册邮件服务，请联系管理员。")
+            raise VerificationEmailError("服务器尚未配置邮件服务，请联系管理员。")
 
         minutes = max(1, expires_in // 60)
-        text_body = f"你的 TASTE 注册验证码是：{code}\n\n验证码 {minutes} 分钟内有效。若非本人操作，请忽略此邮件。"
+        resetting_password = purpose == "password_reset"
+        action = "重置密码" if resetting_password else "注册"
+        text_body = f"你的 TASTE {action}验证码是：{code}\n\n验证码 {minutes} 分钟内有效。若非本人操作，请忽略此邮件。"
         html_body = """
             <div style="font-family:system-ui,-apple-system,sans-serif;color:#172033;line-height:1.6">
-              <h2 style="margin:0 0 16px">TASTE 注册验证码</h2>
-              <p>你的注册验证码是：</p>
+              <h2 style="margin:0 0 16px">TASTE {action}验证码</h2>
+              <p>你的{action}验证码是：</p>
               <p style="font-size:30px;font-weight:700;letter-spacing:8px;margin:18px 0">{code}</p>
               <p>验证码 {minutes} 分钟内有效。若非本人操作，请忽略此邮件。</p>
             </div>
-            """.format(code=code, minutes=minutes)
+            """.format(action=action, code=code, minutes=minutes)
 
         try:
-            self.send_email([recipient], "TASTE 注册验证码", text_body, html_body)
+            self.send_email([recipient], f"TASTE {action}验证码", text_body, html_body)
         except VerificationEmailError as exc:
             raise VerificationEmailError("验证码邮件发送失败，请稍后重试。") from exc
 

@@ -43,10 +43,18 @@ from project.project_paths import configured_max_read_papers
 from reporting.paper_state import active_paper_state as load_active_paper_state
 from runtime.framework_paths import CONFIG_PATH, FINDING_RUNS_DIR, RUNS_DIR, RUNS_SEARCH_DIRS, STATE_DIR, ensure_directories
 from runtime.jobs import JobCancelled
-from runtime.resource_locks import crawl_resource_lease
 from runtime.run_storage import delete_run, list_runs, read_json, redacted_config, run_dir, write_json
 from runtime.taste_pythonpath import taste_pythonpath_string
-from auto_research.web.auth import AuthError, AuthRateLimitError, AuthStore, AuthUser, SESSION_COOKIE, SESSION_DAYS
+from auto_research.web.auth import (
+    AuthError,
+    AuthRateLimitError,
+    AuthStore,
+    AuthUser,
+    SESSION_COOKIE,
+    SESSION_DAYS,
+    VERIFICATION_PURPOSE_PASSWORD_RESET,
+    VERIFICATION_PURPOSE_REGISTER,
+)
 from auto_research.web.verification_email import VerificationEmailError, VerificationEmailSender
 
 ensure_directories()
@@ -11109,30 +11117,42 @@ def _auth_response(user: AuthUser) -> dict[str, str]:
     return {"id": user.id, "username": user.username, "email": user.email}
 
 
-@app.post("/api/auth/verification-code")
-def api_auth_verification_code(payload: dict[str, Any], request: Request):
+def _send_auth_verification_code(payload: dict[str, Any], request: Request, purpose: str):
     if not AUTH_EMAIL_SENDER.configured:
-        return JSONResponse({"error": "服务器尚未配置注册邮件服务，请联系管理员。"}, status_code=503)
+        return JSONResponse({"error": "服务器尚未配置邮件服务，请联系管理员。"}, status_code=503)
     requester = request.client.host if request.client is not None else "unknown"
+    verification = None
     try:
-        verification = AUTH_STORE.begin_email_verification(payload.get("email"), requester)
+        verification = AUTH_STORE.begin_email_verification(payload.get("email"), requester, purpose)
         AUTH_EMAIL_SENDER.send_verification_code(
             verification.email,
             verification.code,
             verification.expires_in,
+            purpose,
         )
     except AuthRateLimitError as exc:
         return JSONResponse({"error": str(exc), "retry_after": exc.retry_after}, status_code=429)
     except AuthError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     except VerificationEmailError as exc:
-        AUTH_STORE.cancel_email_verification(verification)
+        if verification is not None:
+            AUTH_STORE.cancel_email_verification(verification)
         return JSONResponse({"error": str(exc)}, status_code=503)
     return {
         "status": "sent",
         "expires_in": verification.expires_in,
         "retry_after": verification.retry_after,
     }
+
+
+@app.post("/api/auth/verification-code")
+def api_auth_verification_code(payload: dict[str, Any], request: Request):
+    return _send_auth_verification_code(payload, request, VERIFICATION_PURPOSE_REGISTER)
+
+
+@app.post("/api/auth/password-reset/verification-code")
+def api_auth_password_reset_verification_code(payload: dict[str, Any], request: Request):
+    return _send_auth_verification_code(payload, request, VERIFICATION_PURPOSE_PASSWORD_RESET)
 
 
 @app.post("/api/auth/register")
@@ -11150,6 +11170,19 @@ def api_auth_register(payload: dict[str, Any], request: Request):
     response = JSONResponse({"user": _auth_response(user)})
     _set_session_cookie(response, request, token)
     return response
+
+
+@app.post("/api/auth/password-reset")
+def api_auth_password_reset(payload: dict[str, Any]):
+    try:
+        AUTH_STORE.reset_password(
+            payload.get("email"),
+            payload.get("password"),
+            payload.get("verification_code"),
+        )
+    except AuthError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return {"status": "ok"}
 
 
 @app.post("/api/auth/login")
@@ -11391,13 +11424,12 @@ def api_venue_health(request: VenueHealthRequest) -> dict:
     results = []
     sample_limit = max(1, request.sample_limit)
     project = str(getattr(request, "project", "") or "")
-    with crawl_resource_lease(operation="venue_health", project=project):
-        for venue_id, year in normalize_pairs():
-            venue = catalog.get(venue_id)
-            if not venue:
-                results.append(_venue_health_failure(venue_id, year, "Unknown venue id.", adapter="unknown"))
-                continue
-            results.append(_fetch_venue_sample_with_timeout(venue, venue_id, year, sample_limit))
+    for venue_id, year in normalize_pairs():
+        venue = catalog.get(venue_id)
+        if not venue:
+            results.append(_venue_health_failure(venue_id, year, "Unknown venue id.", adapter="unknown"))
+            continue
+        results.append(_fetch_venue_sample_with_timeout(venue, venue_id, year, sample_limit))
     _record_project_venue_health(getattr(request, "project", ""), results)
     return {"results": results}
 

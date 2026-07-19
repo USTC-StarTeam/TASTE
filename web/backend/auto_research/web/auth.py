@@ -24,6 +24,9 @@ VERIFICATION_CODE_WINDOW = timedelta(hours=1)
 VERIFICATION_CODE_EMAIL_LIMIT = 5
 VERIFICATION_CODE_REQUESTER_LIMIT = 20
 VERIFICATION_CODE_ATTEMPT_LIMIT = 5
+VERIFICATION_PURPOSE_REGISTER = "register"
+VERIFICATION_PURPOSE_PASSWORD_RESET = "password_reset"
+VERIFICATION_PURPOSES = {VERIFICATION_PURPOSE_REGISTER, VERIFICATION_PURPOSE_PASSWORD_RESET}
 USERNAME_PATTERN = re.compile(r"^[\w.@+-]{3,64}$", re.UNICODE)
 EMAIL_LOCAL_PATTERN = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}$")
 
@@ -101,6 +104,7 @@ class AuthStore:
                 CREATE TABLE IF NOT EXISTS email_verifications (
                     email_key TEXT PRIMARY KEY,
                     email TEXT NOT NULL,
+                    purpose TEXT NOT NULL DEFAULT 'register',
                     code_salt BLOB NOT NULL,
                     code_hash BLOB NOT NULL,
                     expires_at TEXT NOT NULL,
@@ -114,6 +118,13 @@ class AuthStore:
                 );
                 """
             )
+            verification_columns = {
+                str(row["name"]) for row in connection.execute("PRAGMA table_info(email_verifications)")
+            }
+            if "purpose" not in verification_columns:
+                connection.execute(
+                    "ALTER TABLE email_verifications ADD COLUMN purpose TEXT NOT NULL DEFAULT 'register'"
+                )
         try:
             os.chmod(self.path, 0o600)
         except OSError:
@@ -208,8 +219,15 @@ class AuthStore:
             (scope_key,),
         )
 
-    def begin_email_verification(self, email_value: object, requester: object = "") -> EmailVerification:
+    def begin_email_verification(
+        self,
+        email_value: object,
+        requester: object = "",
+        purpose: str = VERIFICATION_PURPOSE_REGISTER,
+    ) -> EmailVerification:
         email, email_key = self.normalize_email(email_value)
+        if purpose not in VERIFICATION_PURPOSES:
+            raise AuthError("不支持的邮箱验证用途。")
         requester_key = str(requester or "unknown").strip() or "unknown"
         now = datetime.now(UTC)
         code = f"{secrets.randbelow(1_000_000):06d}"
@@ -218,11 +236,17 @@ class AuthStore:
         expires_at = now + VERIFICATION_CODE_TTL
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            if connection.execute(
-                "SELECT 1 FROM users WHERE email_key = ? OR username_key = ?",
-                (email_key, email_key),
-            ).fetchone():
-                raise AuthError("该邮箱已注册或已作为用户名使用。")
+            if purpose == VERIFICATION_PURPOSE_REGISTER:
+                if connection.execute(
+                    "SELECT 1 FROM users WHERE email_key = ? OR username_key = ?",
+                    (email_key, email_key),
+                ).fetchone():
+                    raise AuthError("该邮箱已注册或已作为用户名使用。")
+            elif connection.execute(
+                "SELECT 1 FROM users WHERE email_key = ?",
+                (email_key,),
+            ).fetchone() is None:
+                raise AuthError("该邮箱尚未注册。")
             previous = connection.execute(
                 "SELECT sent_at FROM email_verifications WHERE email_key = ?",
                 (email_key,),
@@ -245,17 +269,20 @@ class AuthStore:
             )
             connection.execute(
                 """
-                INSERT INTO email_verifications(email_key, email, code_salt, code_hash, expires_at, sent_at, attempts)
-                VALUES (?, ?, ?, ?, ?, ?, 0)
+                INSERT INTO email_verifications(
+                    email_key, email, purpose, code_salt, code_hash, expires_at, sent_at, attempts
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 0)
                 ON CONFLICT(email_key) DO UPDATE SET
                     email = excluded.email,
+                    purpose = excluded.purpose,
                     code_salt = excluded.code_salt,
                     code_hash = excluded.code_hash,
                     expires_at = excluded.expires_at,
                     sent_at = excluded.sent_at,
                     attempts = 0
                 """,
-                (email_key, email, salt, code_hash, expires_at.isoformat(), now.isoformat()),
+                (email_key, email, purpose, salt, code_hash, expires_at.isoformat(), now.isoformat()),
             )
             connection.execute(
                 "DELETE FROM email_verification_limits WHERE window_started_at < ?",
@@ -277,6 +304,48 @@ class AuthStore:
                 (email_key, verification.code_hash),
             )
 
+    def _verify_email_code(
+        self,
+        connection: sqlite3.Connection,
+        email_key: str,
+        verification_code_value: object,
+        purpose: str,
+        now: datetime,
+    ) -> None:
+        verification_code = str(verification_code_value or "").strip()
+        if not re.fullmatch(r"\d{6}", verification_code):
+            raise AuthError("请输入 6 位邮箱验证码。")
+        verification = connection.execute(
+            """
+            SELECT code_salt, code_hash, expires_at, attempts
+            FROM email_verifications WHERE email_key = ? AND purpose = ?
+            """,
+            (email_key, purpose),
+        ).fetchone()
+        if verification is None:
+            raise AuthError("请先获取邮箱验证码。")
+        if now >= datetime.fromisoformat(str(verification["expires_at"])):
+            connection.execute("DELETE FROM email_verifications WHERE email_key = ?", (email_key,))
+            connection.commit()
+            raise AuthError("邮箱验证码已过期，请重新获取。")
+        attempts = int(verification["attempts"])
+        candidate = self._code_hash(verification_code, bytes(verification["code_salt"]))
+        if attempts >= VERIFICATION_CODE_ATTEMPT_LIMIT or not hmac.compare_digest(
+            candidate, bytes(verification["code_hash"])
+        ):
+            attempts += 1
+            if attempts >= VERIFICATION_CODE_ATTEMPT_LIMIT:
+                connection.execute("DELETE FROM email_verifications WHERE email_key = ?", (email_key,))
+                message = "验证码错误次数过多，请重新获取。"
+            else:
+                connection.execute(
+                    "UPDATE email_verifications SET attempts = ? WHERE email_key = ?",
+                    (attempts, email_key),
+                )
+                message = "邮箱验证码错误。"
+            connection.commit()
+            raise AuthError(message)
+
     def register(
         self,
         username_value: object,
@@ -287,41 +356,18 @@ class AuthStore:
         username, username_key = self.normalize_username(username_value)
         email, email_key = self.normalize_email(email_value)
         password = self.validate_password(password_value)
-        verification_code = str(verification_code_value or "").strip()
-        if not re.fullmatch(r"\d{6}", verification_code):
-            raise AuthError("请输入 6 位邮箱验证码。")
         salt = secrets.token_bytes(16)
         user = AuthUser(id=uuid4().hex, username=username, email=email)
         now = datetime.now(UTC)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            verification = connection.execute(
-                "SELECT code_salt, code_hash, expires_at, attempts FROM email_verifications WHERE email_key = ?",
-                (email_key,),
-            ).fetchone()
-            if verification is None:
-                raise AuthError("请先获取邮箱验证码。")
-            if now >= datetime.fromisoformat(str(verification["expires_at"])):
-                connection.execute("DELETE FROM email_verifications WHERE email_key = ?", (email_key,))
-                connection.commit()
-                raise AuthError("邮箱验证码已过期，请重新获取。")
-            attempts = int(verification["attempts"])
-            candidate = self._code_hash(verification_code, bytes(verification["code_salt"]))
-            if attempts >= VERIFICATION_CODE_ATTEMPT_LIMIT or not hmac.compare_digest(
-                candidate, bytes(verification["code_hash"])
-            ):
-                attempts += 1
-                if attempts >= VERIFICATION_CODE_ATTEMPT_LIMIT:
-                    connection.execute("DELETE FROM email_verifications WHERE email_key = ?", (email_key,))
-                    message = "验证码错误次数过多，请重新获取。"
-                else:
-                    connection.execute(
-                        "UPDATE email_verifications SET attempts = ? WHERE email_key = ?",
-                        (attempts, email_key),
-                    )
-                    message = "邮箱验证码错误。"
-                connection.commit()
-                raise AuthError(message)
+            self._verify_email_code(
+                connection,
+                email_key,
+                verification_code_value,
+                VERIFICATION_PURPOSE_REGISTER,
+                now,
+            )
             conflict = connection.execute(
                 """
                 SELECT username_key, email_key FROM users
@@ -354,6 +400,38 @@ class AuthStore:
             )
             connection.execute("DELETE FROM email_verifications WHERE email_key = ?", (email_key,))
         return user
+
+    def reset_password(
+        self,
+        email_value: object,
+        password_value: object,
+        verification_code_value: object,
+    ) -> None:
+        _, email_key = self.normalize_email(email_value)
+        password = self.validate_password(password_value)
+        salt = secrets.token_bytes(16)
+        now = datetime.now(UTC)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._verify_email_code(
+                connection,
+                email_key,
+                verification_code_value,
+                VERIFICATION_PURPOSE_PASSWORD_RESET,
+                now,
+            )
+            user = connection.execute(
+                "SELECT id FROM users WHERE email_key = ?",
+                (email_key,),
+            ).fetchone()
+            if user is None:
+                raise AuthError("该邮箱尚未注册。")
+            connection.execute(
+                "UPDATE users SET password_salt = ?, password_hash = ? WHERE id = ?",
+                (salt, self._password_hash(password, salt), str(user["id"])),
+            )
+            connection.execute("DELETE FROM sessions WHERE user_id = ?", (str(user["id"]),))
+            connection.execute("DELETE FROM email_verifications WHERE email_key = ?", (email_key,))
 
     def authenticate(self, identifier_value: object, password_value: object) -> AuthUser | None:
         identifier = unicodedata.normalize("NFKC", str(identifier_value or "")).strip()

@@ -32,6 +32,8 @@ import {
   probeLLMConfig,
   patchIdea,
   requestEmailVerification,
+  requestPasswordResetVerification,
+  resetPassword,
   updateIdeaMarkdown,
   updatePlanMarkdown,
   saveConfig,
@@ -8506,19 +8508,24 @@ function authErrorMessage(error: unknown) {
 
 function App() {
   const [account, setAccount] = useState<AuthUser | null | undefined>(undefined);
-  const [mode, setMode] = useState<"login" | "register">("login");
+  const [mode, setMode] = useState<"login" | "register" | "reset">("login");
   const [identifier, setIdentifier] = useState("");
   const [registerUsername, setRegisterUsername] = useState("");
   const [email, setEmail] = useState("");
   const [verificationCode, setVerificationCode] = useState("");
+  const [resetEmail, setResetEmail] = useState("");
+  const [resetVerificationCode, setResetVerificationCode] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   const [registerPassword, setRegisterPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [resetPasswordValue, setResetPasswordValue] = useState("");
+  const [resetConfirmPassword, setResetConfirmPassword] = useState("");
   const [authError, setAuthError] = useState("");
   const [authNotice, setAuthNotice] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [sendingCode, setSendingCode] = useState(false);
-  const [codeRetryAfter, setCodeRetryAfter] = useState(0);
+  const [registerCodeRetryAfter, setRegisterCodeRetryAfter] = useState(0);
+  const [resetCodeRetryAfter, setResetCodeRetryAfter] = useState(0);
 
   useEffect(() => {
     void getCurrentUser()
@@ -8533,28 +8540,34 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (codeRetryAfter <= 0) return;
+    if (registerCodeRetryAfter <= 0 && resetCodeRetryAfter <= 0) return;
     const timer = window.setInterval(() => {
-      setCodeRetryAfter((value) => Math.max(0, value - 1));
+      setRegisterCodeRetryAfter((value) => Math.max(0, value - 1));
+      setResetCodeRetryAfter((value) => Math.max(0, value - 1));
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [codeRetryAfter]);
+  }, [registerCodeRetryAfter, resetCodeRetryAfter]);
 
-  function switchAuthMode(nextMode: "login" | "register") {
+  function switchAuthMode(nextMode: "login" | "register" | "reset") {
     setMode(nextMode);
     setAuthError("");
     setAuthNotice("");
   }
 
-  async function sendVerificationCode() {
-    const emailInput = document.getElementById("auth-email") as HTMLInputElement | null;
+  async function sendVerificationCode(purpose: "register" | "password_reset") {
+    const resetting = purpose === "password_reset";
+    const emailInput = document.getElementById(resetting ? "auth-reset-email" : "auth-email") as HTMLInputElement | null;
     if (!emailInput?.reportValidity()) return;
     setSendingCode(true);
     setAuthError("");
     setAuthNotice("");
     try {
-      const response = await requestEmailVerification(email.trim());
-      setCodeRetryAfter(Math.max(1, response.retry_after || 60));
+      const response = resetting
+        ? await requestPasswordResetVerification(resetEmail.trim())
+        : await requestEmailVerification(email.trim());
+      const retryAfter = Math.max(1, response.retry_after || 60);
+      if (resetting) setResetCodeRetryAfter(retryAfter);
+      else setRegisterCodeRetryAfter(retryAfter);
       setAuthNotice("验证码已发送，请查看邮箱。");
     } catch (error) {
       setAuthError(authErrorMessage(error));
@@ -8569,10 +8582,25 @@ function App() {
       setAuthError("两次输入的密码不一致。");
       return;
     }
+    if (mode === "reset" && resetPasswordValue !== resetConfirmPassword) {
+      setAuthError("两次输入的密码不一致。");
+      return;
+    }
     setSubmitting(true);
     setAuthError("");
     setAuthNotice("");
     try {
+      if (mode === "reset") {
+        await resetPassword(resetEmail, resetPasswordValue, resetVerificationCode);
+        setIdentifier(resetEmail.trim());
+        setResetVerificationCode("");
+        setResetPasswordValue("");
+        setResetConfirmPassword("");
+        setResetCodeRetryAfter(0);
+        setMode("login");
+        setAuthNotice("密码已重置，请使用新密码登录。");
+        return;
+      }
       const response = mode === "login"
         ? await login(identifier, loginPassword)
         : await register(registerUsername, email, registerPassword, verificationCode);
@@ -8609,17 +8637,24 @@ function App() {
             <div className="authMark">T</div>
             <div><h1>TASTE</h1></div>
           </div>
-          <div className="authTabs">
-            <button type="button" className={mode === "login" ? "active" : ""} onClick={() => switchAuthMode("login")}>登录</button>
-            <button type="button" className={mode === "register" ? "active" : ""} onClick={() => switchAuthMode("register")}>注册</button>
-          </div>
+          {mode === "reset" ? (
+            <div className="authResetHeading">
+              <h2>重置密码</h2>
+              <p>使用注册邮箱验证身份</p>
+            </div>
+          ) : (
+            <div className="authTabs">
+              <button type="button" className={mode === "login" ? "active" : ""} onClick={() => switchAuthMode("login")}>登录</button>
+              <button type="button" className={mode === "register" ? "active" : ""} onClick={() => switchAuthMode("register")}>注册</button>
+            </div>
+          )}
           <form onSubmit={submitAuth}>
             {mode === "login" ? (
               <>
                 <label htmlFor="auth-identifier">用户名或邮箱</label>
                 <input id="auth-identifier" value={identifier} onChange={(event) => setIdentifier(event.target.value)} autoComplete="username" required maxLength={254} autoFocus />
               </>
-            ) : (
+            ) : mode === "register" ? (
               <>
                 <label htmlFor="auth-username">用户名</label>
                 <input id="auth-username" value={registerUsername} onChange={(event) => setRegisterUsername(event.target.value)} autoComplete="username" required minLength={3} maxLength={64} autoFocus />
@@ -8627,41 +8662,74 @@ function App() {
                 <input id="auth-email" type="email" value={email} onChange={(event) => {
                   setEmail(event.target.value);
                   setVerificationCode("");
-                  setCodeRetryAfter(0);
+                  setRegisterCodeRetryAfter(0);
                   setAuthNotice("");
                 }} autoComplete="email" required maxLength={254} />
                 <label htmlFor="auth-verification-code">邮箱验证码</label>
                 <div className="authCodeRow">
                   <input id="auth-verification-code" value={verificationCode} onChange={(event) => setVerificationCode(event.target.value.replace(/\D/g, "").slice(0, 6))} autoComplete="one-time-code" inputMode="numeric" pattern="[0-9]{6}" title="请输入 6 位验证码" required maxLength={6} />
-                  <button type="button" onClick={() => void sendVerificationCode()} disabled={sendingCode || codeRetryAfter > 0}>
-                    {sendingCode ? "发送中…" : codeRetryAfter > 0 ? `${codeRetryAfter} 秒` : "获取验证码"}
+                  <button type="button" onClick={() => void sendVerificationCode("register")} disabled={sendingCode || registerCodeRetryAfter > 0}>
+                    {sendingCode ? "发送中…" : registerCodeRetryAfter > 0 ? `${registerCodeRetryAfter} 秒` : "获取验证码"}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <label htmlFor="auth-reset-email">注册邮箱</label>
+                <input id="auth-reset-email" type="email" value={resetEmail} onChange={(event) => {
+                  setResetEmail(event.target.value);
+                  setResetVerificationCode("");
+                  setResetCodeRetryAfter(0);
+                  setAuthNotice("");
+                }} autoComplete="email" required maxLength={254} autoFocus />
+                <label htmlFor="auth-reset-verification-code">邮箱验证码</label>
+                <div className="authCodeRow">
+                  <input id="auth-reset-verification-code" value={resetVerificationCode} onChange={(event) => setResetVerificationCode(event.target.value.replace(/\D/g, "").slice(0, 6))} autoComplete="one-time-code" inputMode="numeric" pattern="[0-9]{6}" title="请输入 6 位验证码" required maxLength={6} />
+                  <button type="button" onClick={() => void sendVerificationCode("password_reset")} disabled={sendingCode || resetCodeRetryAfter > 0}>
+                    {sendingCode ? "发送中…" : resetCodeRetryAfter > 0 ? `${resetCodeRetryAfter} 秒` : "获取验证码"}
                   </button>
                 </div>
               </>
             )}
-            <label htmlFor={mode === "login" ? "auth-login-password" : "auth-register-password"}>密码</label>
+            <label htmlFor={mode === "login" ? "auth-login-password" : mode === "register" ? "auth-register-password" : "auth-reset-password"}>{mode === "reset" ? "新密码" : "密码"}</label>
             <input
               key={mode}
-              id={mode === "login" ? "auth-login-password" : "auth-register-password"}
+              id={mode === "login" ? "auth-login-password" : mode === "register" ? "auth-register-password" : "auth-reset-password"}
               type="password"
-              value={mode === "login" ? loginPassword : registerPassword}
-              onChange={(event) => mode === "login" ? setLoginPassword(event.target.value) : setRegisterPassword(event.target.value)}
+              value={mode === "login" ? loginPassword : mode === "register" ? registerPassword : resetPasswordValue}
+              onChange={(event) => mode === "login" ? setLoginPassword(event.target.value) : mode === "register" ? setRegisterPassword(event.target.value) : setResetPasswordValue(event.target.value)}
               autoComplete={mode === "login" ? "current-password" : "new-password"}
               required
               minLength={8}
               maxLength={128}
             />
+            {mode === "login" && (
+              <div className="authForgotRow">
+                <button type="button" onClick={() => switchAuthMode("reset")}>忘记密码？</button>
+              </div>
+            )}
             {mode === "register" && (
               <>
                 <label htmlFor="auth-password-confirm">确认密码</label>
                 <input id="auth-password-confirm" type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} autoComplete="new-password" required minLength={8} maxLength={128} />
               </>
             )}
+            {mode === "reset" && (
+              <>
+                <label htmlFor="auth-reset-password-confirm">确认新密码</label>
+                <input id="auth-reset-password-confirm" type="password" value={resetConfirmPassword} onChange={(event) => setResetConfirmPassword(event.target.value)} autoComplete="new-password" required minLength={8} maxLength={128} />
+              </>
+            )}
             {authError && <p className="authError" role="alert">{authError}</p>}
             {authNotice && <p className="authNotice" role="status">{authNotice}</p>}
-            <button className="primary authSubmit" disabled={submitting}>{submitting ? "请稍候…" : mode === "login" ? "登录" : "创建账户"}</button>
+            <button className="primary authSubmit" disabled={submitting}>{submitting ? "请稍候…" : mode === "login" ? "登录" : mode === "register" ? "创建账户" : "重置密码"}</button>
           </form>
           {mode === "register" && <p className="authHelp">验证码 10 分钟内有效；密码至少 8 个字符。</p>}
+          {mode === "reset" && (
+            <div className="authBackRow">
+              <button type="button" onClick={() => switchAuthMode("login")}>返回登录</button>
+            </div>
+          )}
         </section>
       </main>
     );

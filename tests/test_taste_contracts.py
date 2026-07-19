@@ -366,6 +366,60 @@ def test_reading_process_http_blocker_uses_retry_after_for_429(monkeypatch):
     assert forbidden["ttl_sec"] == common.PROCESS_ACCESS_BLOCKER_SEC
 
 
+def test_reading_explicit_retry_after_is_not_inflated_by_default_cooldown():
+    common = _load_reading_common()
+
+    class Response:
+        status_code = 429
+        url = "https://api.semanticscholar.org/graph/v1/paper/test"
+        headers = {"retry-after": "1"}
+
+    assert common._rate_limit_reset_seconds(Response(), "semanticscholar") == 1.0
+    assert common.service_rate_limit_cooldown("semanticscholar") > 1.0
+
+
+def test_finding_requests_use_shared_per_service_slot(monkeypatch):
+    from runtime import resource_locks
+
+    captured: dict[str, object] = {}
+
+    class Slot:
+        def __enter__(self):
+            captured["entered"] = True
+            return {}
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_slot(service, *, min_interval_sec=0.0):
+        captured["service"] = service
+        captured["min_interval_sec"] = min_interval_sec
+        return Slot()
+
+    class Response:
+        status_code = 200
+        headers = {}
+
+    monkeypatch.setattr(resource_locks, "crawl_service_slot", fake_slot)
+    monkeypatch.setattr(resource_locks.requests, "get", lambda *_args, **_kwargs: Response())
+
+    response = resource_locks.crawl_service_get("https://api.crossref.org/works?query=test")
+
+    assert response.status_code == 200
+    assert captured == {"service": "crossref", "min_interval_sec": 0.34, "entered": True}
+
+
+def test_find_and_read_share_service_cooldown_state(monkeypatch, tmp_path):
+    from runtime import resource_locks
+
+    common = _load_reading_common()
+    monkeypatch.setattr(common, "_SERVICE_STATE_ROOT", tmp_path)
+    with resource_locks.crawl_service_slot("openreview", state_root=tmp_path) as gate:
+        gate.update({"cooldown_sec": 5.0, "cooldown_reason": "test_shared_cooldown"})
+
+    assert common.service_cooldown_remaining("openreview") > 0
+
+
 def test_reading_http_client_classifies_biorxiv_service():
     http_client = _load_reading_common()
 
@@ -380,8 +434,9 @@ def test_reading_official_conference_hosts_are_single_request_services():
     assert http_client.service_from_url("https://api2.openreview.net/notes?id=paper") == "openreview"
     assert http_client.service_from_url("https://iclr.cc/virtual/2026/papers.html") == "iclr"
     assert http_client.service_from_url("https://icml.cc/virtual/2026/poster/61459") == "icml"
-    for service in ["openreview", "iclr", "icml"]:
-        assert http_client.SERVICE_MIN_INTERVAL_SEC[service] >= 10.0
+    assert http_client.SERVICE_MIN_INTERVAL_SEC["openreview"] >= 1.0
+    for service in ["iclr", "icml"]:
+        assert http_client.SERVICE_MIN_INTERVAL_SEC[service] >= 3.0
     assert not hasattr(conference_sources, "crawl_conference_channel")
     assert not hasattr(conference_sources, "conference_channel_report")
 
@@ -1490,6 +1545,23 @@ def test_reading_batch_requeues_cooldown_papers_once_with_one_recovery_worker(mo
     assert "cooldown_expiry_batch_requeue" in payload["execution_phases"]
     assert all(item["validation"]["cooldown_requeue"]["attempted"] is True for item in payload["items"])
     _cleanup_reading_output(run_id)
+
+
+def test_reading_batch_requeue_defers_when_service_cooldown_exceeds_wait_cap(monkeypatch):
+    read_pipeline = _load_reading_pipeline()
+    monkeypatch.setattr(read_pipeline, "service_cooldown_remaining", lambda _service: 120.0)
+    monkeypatch.setattr(read_pipeline, "batch_cooldown_wait_cap", lambda _service: 10.0)
+    monkeypatch.setattr(read_pipeline.time, "sleep", lambda _seconds: (_ for _ in ()).throw(AssertionError("must not sleep past the wait cap")))
+
+    result = read_pipeline._wait_for_cooldown_requeue(
+        {"arxiv"},
+        log=lambda _message: None,
+        should_cancel=lambda: False,
+    )
+
+    assert result["ready"] is False
+    assert result["remaining_by_service"] == {"arxiv": 120.0}
+    assert result["wait_caps"] == {"arxiv": 10.0}
 
 
 def test_reading_run_read_uses_subagent_article_markdown_aggregation_and_audit(monkeypatch, isolated_reading_latest_run):

@@ -20,7 +20,7 @@ from runtime.taste_pythonpath import ensure_taste_pythonpath
 ensure_taste_pythonpath(ROOT)
 from policies.source_selection import canonical_source_selection, normalize_source_selection
 from project.project_paths import build_paths as _build_project_paths
-from runtime.resource_locks import crawl_resource_lease, project_workflow_lease
+from runtime.resource_locks import project_workflow_lease
 
 DEFAULT_ENV = os.environ.get("FIND_ENV_NAME") or os.environ.get("CONDA_ENV_NAME", "")
 DEFAULT_CORE_VENUE_IDS = ["openreview_iclr_2026", "openreview_neurips", "dblp_icml", "dblp_kdd"]
@@ -730,17 +730,11 @@ def driver_python_command(args: argparse.Namespace, cfg: dict, driver: Path) -> 
 
 def run(cmd: list[str], cwd: Path = ROOT, env: dict[str, str] | None = None, timeout_sec: int = 900, live_log_path: Path | None = None) -> subprocess.CompletedProcess[str]:
     project = str((env or {}).get("PROJECT_ID") or (env or {}).get("DEFAULT_PROJECT_ID") or "")
-    with crawl_resource_lease(
-        operation="finding",
-        project=project,
-        on_wait=lambda: print("Waiting for the shared crawl resource.", flush=True),
-        on_acquired=lambda: print("Shared crawl resource acquired.", flush=True),
-    ):
-        with project_workflow_lease(workflow="current_find", project=project):
-            return _run_with_crawl_lease(cmd, cwd=cwd, env=env, timeout_sec=timeout_sec, live_log_path=live_log_path)
+    with project_workflow_lease(workflow="current_find", project=project):
+        return _run_process(cmd, cwd=cwd, env=env, timeout_sec=timeout_sec, live_log_path=live_log_path)
 
 
-def _run_with_crawl_lease(cmd: list[str], cwd: Path = ROOT, env: dict[str, str] | None = None, timeout_sec: int = 900, live_log_path: Path | None = None) -> subprocess.CompletedProcess[str]:
+def _run_process(cmd: list[str], cwd: Path = ROOT, env: dict[str, str] | None = None, timeout_sec: int = 900, live_log_path: Path | None = None) -> subprocess.CompletedProcess[str]:
     proc = subprocess.Popen(cmd, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, start_new_session=True, bufsize=1)
     started = time.monotonic()
     lines: list[str] = []
@@ -1224,13 +1218,7 @@ def main() -> int:
             db_update_timeout = int(os.environ.get("DB_UPDATE_TIMEOUT_SEC", "1800")) + 60
             if args.timeout_sec > 0:
                 db_update_timeout = min(args.timeout_sec, db_update_timeout)
-            with crawl_resource_lease(
-                operation="finding_local_database",
-                project=args.project,
-                on_wait=lambda: print("Waiting for the shared crawl resource.", flush=True),
-                on_acquired=lambda: print("Shared crawl resource acquired.", flush=True),
-            ):
-                subprocess.run(refresh_cmd, cwd=ROOT, text=True, capture_output=True, timeout=db_update_timeout)
+            subprocess.run(refresh_cmd, cwd=ROOT, text=True, capture_output=True, timeout=db_update_timeout)
 
     if args.fast_mode:
         args.max_papers = min(args.max_papers, 3)
