@@ -61,7 +61,7 @@ if _core_common_spec is None:
     sys.modules["core.common"] = _core_common_module
     _core_common_spec.loader.exec_module(_core_common_module)
 
-from core.common import DEFAULT_USER_AGENT, FULL_TEXT_MIN_CHARS as CONFIG_FULL_TEXT_MIN_CHARS, config_bool, config_value, env_bool, response_receipt, service_cooldown_remaining, service_from_url, service_get
+from core.common import DEFAULT_USER_AGENT, FULL_TEXT_MIN_CHARS as CONFIG_FULL_TEXT_MIN_CHARS, config_bool, config_value, env_bool, jina_api_key_configured, jina_request_headers, mark_process_http_blocker, process_backend_slot, process_blocker, response_receipt, service_cooldown_remaining, service_from_url, service_get
 from core.common import coerce_str_list, read_json, safe_slug, write_text
 from core.common import OUTPUT_ROOT, relative_to_reading, resolve_reading_path
 from acquisition.semantic_scholar import semantic_scholar_enrich_paper
@@ -566,8 +566,6 @@ def _fetch_html_text(url: str, timeout: int = 30) -> tuple[str, dict[str, Any]]:
         }
     if "arxiv.org/abs/" in lowered_url:
         return "", {"accepted": False, "url": url, "reason": "arxiv_abs_page_is_metadata_not_paper_full_text"}
-    if "/virtual/" in lowered_url and "/poster/" in lowered_url:
-        return "", {"accepted": False, "url": url, "reason": "conference_poster_page_is_not_paper_full_text"}
     if ("papers.nips.cc" in lowered_url or "proceedings.neurips.cc" in lowered_url) and "-abstract-" in lowered_url:
         return "", {"accepted": False, "url": url, "reason": "conference_abstract_page_is_not_paper_full_text"}
     service_name = service_from_url(url)
@@ -652,6 +650,24 @@ def _reader_pdf_text_url(pdf_url: str) -> str:
     return "https://r.jina.ai/http://" + quote(target, safe="/?&=%:~")
 
 
+def _reader_backend_name() -> str:
+    return "jina_reader_authenticated" if jina_api_key_configured() else "jina_reader_anonymous"
+
+
+def _reader_process_blocker_receipt(*, kind: str, source_url: str, reader_url: str) -> dict[str, Any]:
+    blocker = process_blocker(_reader_backend_name())
+    if not blocker:
+        return {}
+    return {
+        "kind": kind,
+        "accepted": False,
+        "source_url": source_url,
+        "reader_url": reader_url,
+        "reason": "skipped_after_prior_backend_access_failure",
+        "prior_reason": blocker.get("reason"),
+    }
+
+
 def _openreview_reader_pdf_text_enabled() -> bool:
     return env_bool(
         "READING_OPENREVIEW_READER_PDF_TEXT",
@@ -676,14 +692,22 @@ def _fetch_reader_pdf_text(paper: dict[str, Any], pdf_url: str, timeout: int = 4
     if "openreview.net" in lowered and not _openreview_reader_pdf_text_enabled():
         return "", {"kind": "reader_pdf_text", "accepted": False, "pdf_url": pdf_url, "reason": "openreview_reader_pdf_skipped"}
     reader_url = _reader_pdf_text_url(pdf_url)
-    try:
-        response = service_get(reader_url, timeout=timeout, headers={"Accept": "text/plain,*/*"})
-    except Exception as exc:
-        return "", {"kind": "reader_pdf_text", "accepted": False, "pdf_url": pdf_url, "reader_url": reader_url, "error": exc.__class__.__name__}
-    receipt: dict[str, Any] = {"kind": "reader_pdf_text", "pdf_url": pdf_url, "reader_url": reader_url, **response_receipt(response)}
-    if response.status_code != 200:
-        receipt.update({"accepted": False})
-        return "", receipt
+    backend = _reader_backend_name()
+    with process_backend_slot(backend) as blocker:
+        if blocker:
+            blocker_receipt = _reader_process_blocker_receipt(kind="reader_pdf_text", source_url=pdf_url, reader_url=reader_url)
+            blocker_receipt["pdf_url"] = pdf_url
+            return "", blocker_receipt
+        try:
+            response = service_get(reader_url, timeout=timeout, headers=jina_request_headers())
+        except Exception as exc:
+            return "", {"kind": "reader_pdf_text", "accepted": False, "pdf_url": pdf_url, "reader_url": reader_url, "error": exc.__class__.__name__}
+        receipt: dict[str, Any] = {"kind": "reader_pdf_text", "pdf_url": pdf_url, "reader_url": reader_url, **response_receipt(response)}
+        if response.status_code != 200:
+            if response.status_code in {401, 403, 429}:
+                mark_process_http_blocker(backend, response, f"http_{response.status_code}")
+            receipt.update({"accepted": False})
+            return "", receipt
     raw_text = response.text or ""
     if "Warning: Target URL returned error 404" in raw_text[:1500] or "Warning: Target URL returned error 403" in raw_text[:1500]:
         receipt.update({"accepted": False, "reason": "reader_target_error_page", "text_chars": len(raw_text)})
@@ -714,56 +738,67 @@ def _fetch_biorxiv_reader_full_text(paper: dict[str, Any], timeout: int = 45) ->
     if not doi or not _is_biorxiv_like_paper(paper):
         return "", {"kind": "biorxiv_reader_full_html", "accepted": False, "reason": "missing_biorxiv_doi"}
     attempts: list[dict[str, Any]] = []
-    for suffix in [".full", ".full.txt"]:
-        source_url = f"https://www.biorxiv.org/content/{doi}{suffix}"
-        reader_url = _reader_pdf_text_url(source_url)
-        try:
-            response = service_get(reader_url, timeout=timeout, headers={"Accept": "text/plain,*/*"})
-        except Exception as exc:
-            attempts.append({
-                "kind": "biorxiv_reader_full_html",
-                "accepted": False,
-                "source_url": source_url,
-                "reader_url": reader_url,
-                "error": exc.__class__.__name__,
-            })
-            continue
-        raw_text = response.text or ""
-        receipt: dict[str, Any] = {
-            "kind": "biorxiv_reader_full_html",
-            "source_url": source_url,
-            "reader_url": reader_url,
-            **response_receipt(response),
-        }
-        if response.status_code != 200:
-            receipt.update({"accepted": False, "reason": f"http_{response.status_code}"})
-            attempts.append(receipt)
-            continue
-        if "Warning: Target URL returned error 404" in raw_text[:1500] or "Warning: Target URL returned error 403" in raw_text[:1500]:
-            receipt.update({"accepted": False, "reason": "reader_target_error_page", "text_chars": len(raw_text)})
-            attempts.append(receipt)
-            continue
-        text = raw_text.split("Markdown Content:", 1)[-1].strip() if "Markdown Content:" in raw_text else raw_text.strip()
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        paper_body_markers = _looks_like_paper_body(text)
-        identity_ok = _read_pipeline_func("_pdf_text_identity_ok")(paper, text)
-        # Jina's markdown view of bioRxiv full HTML can omit the title line while
-        # preserving the full article body. For the official /content/<doi>.full
-        # route constructed from the input DOI, the exact DOI URL is a stronger
-        # same-paper signal than a title found in the first few rendered lines.
-        exact_official_doi_source = doi in source_url and "www.biorxiv.org/content/" in source_url
-        accepted = len(text) >= MIN_FULL_TEXT_CHARS and paper_body_markers and (identity_ok or exact_official_doi_source)
-        receipt.update({
-            "accepted": accepted,
-            "text_chars": len(text),
-            "paper_body_markers": paper_body_markers,
-            "pdf_text_identity_check": identity_ok,
-            "biorxiv_exact_official_doi_source_check": exact_official_doi_source,
-        })
-        attempts.append(receipt)
-        if accepted:
-            return text, {"attempts": attempts, "selected": receipt}
-        receipt["reason"] = "biorxiv_reader_full_html_identity_or_body_mismatch"
+    backend = _reader_backend_name()
+    with process_backend_slot(backend) as blocker:
+        if blocker:
+            source_url = f"https://www.biorxiv.org/content/{doi}.full"
+            reader_url = _reader_pdf_text_url(source_url)
+            attempts.append(_reader_process_blocker_receipt(kind="biorxiv_reader_full_html", source_url=source_url, reader_url=reader_url))
+        else:
+            for suffix in [".full", ".full.txt"]:
+                source_url = f"https://www.biorxiv.org/content/{doi}{suffix}"
+                reader_url = _reader_pdf_text_url(source_url)
+                try:
+                    response = service_get(reader_url, timeout=timeout, headers=jina_request_headers())
+                except Exception as exc:
+                    attempts.append({
+                        "kind": "biorxiv_reader_full_html",
+                        "accepted": False,
+                        "source_url": source_url,
+                        "reader_url": reader_url,
+                        "error": exc.__class__.__name__,
+                    })
+                    continue
+                raw_text = response.text or ""
+                receipt: dict[str, Any] = {
+                    "kind": "biorxiv_reader_full_html",
+                    "source_url": source_url,
+                    "reader_url": reader_url,
+                    **response_receipt(response),
+                }
+                if response.status_code != 200:
+                    if response.status_code in {401, 403, 429}:
+                        mark_process_http_blocker(backend, response, f"http_{response.status_code}")
+                    receipt.update({"accepted": False, "reason": f"http_{response.status_code}"})
+                    attempts.append(receipt)
+                    if response.status_code in {401, 403, 429}:
+                        break
+                    continue
+                if "Warning: Target URL returned error 404" in raw_text[:1500] or "Warning: Target URL returned error 403" in raw_text[:1500]:
+                    receipt.update({"accepted": False, "reason": "reader_target_error_page", "text_chars": len(raw_text)})
+                    attempts.append(receipt)
+                    continue
+                text = raw_text.split("Markdown Content:", 1)[-1].strip() if "Markdown Content:" in raw_text else raw_text.strip()
+                text = re.sub(r"\n{3,}", "\n\n", text)
+                paper_body_markers = _looks_like_paper_body(text)
+                identity_ok = _read_pipeline_func("_pdf_text_identity_ok")(paper, text)
+                # Jina's markdown view of bioRxiv full HTML can omit the title line while
+                # preserving the full article body. For the official /content/<doi>.full
+                # route constructed from the input DOI, the exact DOI URL is a stronger
+                # same-paper signal than a title found in the first few rendered lines.
+                exact_official_doi_source = doi in source_url and "www.biorxiv.org/content/" in source_url
+                accepted = len(text) >= MIN_FULL_TEXT_CHARS and paper_body_markers and (identity_ok or exact_official_doi_source)
+                receipt.update({
+                    "accepted": accepted,
+                    "text_chars": len(text),
+                    "paper_body_markers": paper_body_markers,
+                    "pdf_text_identity_check": identity_ok,
+                    "biorxiv_exact_official_doi_source_check": exact_official_doi_source,
+                })
+                attempts.append(receipt)
+                if accepted:
+                    return text, {"attempts": attempts, "selected": receipt}
+                receipt["reason"] = "biorxiv_reader_full_html_identity_or_body_mismatch"
     return "", {"attempts": attempts, "selected": {}}
 
 
@@ -1045,6 +1080,61 @@ def _route_is_cvf(item: dict[str, Any]) -> bool:
     return "openaccess.thecvf.com" in str(item.get("url") or item.get("source_url") or item.get("pdf_url") or "").lower()
 
 
+_COOLDOWN_DEFERRED_REASONS = {
+    "openreview_service_cooldown_active",
+    "service_cooldown_active",
+    "skipped_due_to_active_challenge_cooldown",
+    "skipped_due_to_openreview_service_cooldown",
+    "skipped_due_to_prior_cloudflare_challenge",
+    "skipped_due_to_prior_service_access_blocker",
+}
+
+
+def _route_failure_reason(item: dict[str, Any]) -> str:
+    return str(
+        item.get("reason")
+        or item.get("download_failure_reason")
+        or item.get("rejected_reason")
+        or item.get("error")
+        or ""
+    ).strip()
+
+
+def _route_is_cooldown_deferred(item: dict[str, Any]) -> bool:
+    return _route_failure_reason(item) in _COOLDOWN_DEFERRED_REASONS
+
+
+def _route_service(item: dict[str, Any]) -> str:
+    service = str(item.get("service") or "").strip()
+    if service:
+        return service
+    kind = str(item.get("kind") or "").lower()
+    for known_service in ("openreview", "biorxiv", "arxiv", "science", "iclr", "icml", "acm"):
+        if known_service in kind:
+            return known_service
+    url = str(item.get("url") or item.get("source_url") or item.get("pdf_url") or "").strip()
+    if url.startswith("openreview://"):
+        return "openreview"
+    return service_from_url(url) if url else ""
+
+
+def _pdf_request_was_made(item: dict[str, Any]) -> bool:
+    reason = _route_failure_reason(item)
+    download_receipt = item.get("download_receipt") if isinstance(item.get("download_receipt"), dict) else {}
+    receipt_reason = _route_failure_reason(download_receipt)
+    if reason in _COOLDOWN_DEFERRED_REASONS or reason in {
+        "conference_presentation_pdf_not_article_body",
+        "supplementary_material_pdf_not_article_body",
+    } or receipt_reason in _COOLDOWN_DEFERRED_REASONS:
+        return False
+    return bool(
+        item.get("downloaded") is True
+        or item.get("status_code")
+        or item.get("download_receipt")
+        or item.get("downloaded") is False
+    )
+
+
 def _blocked_full_text_reason(
     paper: dict[str, Any],
     acquisition: dict[str, Any],
@@ -1068,7 +1158,17 @@ def _blocked_full_text_reason(
         for item in all_route_items
         if isinstance(item, dict) and int(item.get("status_code") or 0) > 0
     ]
-    pdf_attempt_count = len(attempts)
+    pdf_attempt_count = sum(1 for item in attempts if isinstance(item, dict) and _pdf_request_was_made(item))
+    cooldown_deferred_items = [
+        item
+        for item in all_route_items
+        if isinstance(item, dict) and _route_is_cooldown_deferred(item)
+    ]
+    cooldown_services = sorted({service for item in cooldown_deferred_items for service in [_route_service(item)] if service})
+    cooldown_remaining_sec = max(
+        (float(item.get("cooldown_remaining_sec") or 0.0) for item in cooldown_deferred_items),
+        default=0.0,
+    )
     discovery_reasons = _route_summary(all_route_items)
     openreview_related = [
         item for item in all_route_items
@@ -1102,6 +1202,37 @@ def _blocked_full_text_reason(
         for item in openreview_related
         if item.get("reason") or item.get("download_failure_reason") or item.get("error") or item.get("cooldown_reason") or item.get("status_code") or item.get("message_zh")
     ][:12]
+    if cooldown_deferred_items and not any(
+        int(item.get("status_code") or 0) in {403, 429}
+        or item.get("challenge_type") == "cloudflare"
+        for item in all_route_items
+        if isinstance(item, dict)
+    ):
+        return {
+            "code": "deferred_service_cooldown_before_full_text_request",
+            "message_zh": "全文来源仍处于共享访问冷却期，本轮未向这些 PDF/HTML 来源发起请求；这不是 PDF 不可读。系统将在冷却结束后把本论文重新入队一次。",
+            "retryable_after_cooldown": True,
+            "cooldown_services": cooldown_services,
+            "cooldown_remaining_sec": round(cooldown_remaining_sec, 3),
+            "cooldown_deferred_route_count": len(cooldown_deferred_items),
+            "cooldown_origins": [
+                {
+                    key: value
+                    for key, value in {
+                        "service": _route_service(item),
+                        "kind": item.get("kind"),
+                        "reason": _route_failure_reason(item),
+                        "cooldown_reason": item.get("cooldown_reason"),
+                    }.items()
+                    if value not in (None, "")
+                }
+                for item in cooldown_deferred_items[:12]
+            ],
+            "pdf_request_count": pdf_attempt_count,
+            "failed_route_summary": discovery_reasons,
+            "next_research_action": "等待共享冷却结束后由 Reading 批处理协调器自动重新入队；不要把未请求的候选诊断为 PDF 损坏。",
+            "title": title,
+        }
     if acm_related and any(int(item.get("status_code") or 0) == 403 or item.get("reason") == "http_403" or item.get("download_failure_reason") == "http_403" for item in acm_related):
         return {
             "code": "blocked_acm_official_pdf_403_no_verified_open_full_text",
@@ -1224,10 +1355,11 @@ def _blocked_full_text_reason(
     if any(item.get("reason") == "http_429_rate_limited" or int(item.get("status_code") or 0) == 429 for item in all_route_items if isinstance(item, dict)):
         return {
             "code": "blocked_rate_limited_before_same_paper_full_text",
-            "message_zh": "官方或开放索引路线返回 429 限流；系统已停止继续高频请求并保留阻塞，避免提高 IP/账号风险。",
+            "message_zh": "官方或开放索引路线返回 429 限流；系统已停止继续高频请求并进入共享冷却，冷却结束后会将本论文重新入队一次。",
+            "retryable_after_cooldown": True,
             "site_status_codes": sorted(set(statuses)),
             "failed_route_summary": discovery_reasons,
-            "next_research_action": "按站点要求降低并发和频率后重试；arXiv 至少 3 秒间隔，OpenReview 使用官方登录 client，OpenAlex 配置 API key。",
+            "next_research_action": "先等待 Reading 批处理协调器完成冷却后自动重试；若仍限流，再检查共享出口上的其它请求。arXiv 至少 3 秒间隔，OpenReview 使用官方登录 client，OpenAlex 配置 API key。",
             "title": title,
         }
     if any(item.get("reason") == "missing_springer_nature_api_key" for item in all_route_items if isinstance(item, dict)):
@@ -1255,15 +1387,6 @@ def _blocked_full_text_reason(
             "site_status_codes": sorted(set(statuses)),
             "failed_route_summary": discovery_reasons,
             "next_research_action": "优先使用 Science article HTML 正文；若必须 PDF，低频尝试 DOI PDF 并记录 403，不使用补充材料 PDF 代替正文。",
-            "title": title,
-        }
-    if ("/virtual/" in urls and "/poster/" in urls) or "icml.cc/virtual" in urls:
-        return {
-            "code": "blocked_conference_virtual_without_full_text_locator",
-            "message_zh": "会议 virtual/poster 页面只提供摘要或展示页，未公开论文 PDF/HTML 正文定位；同篇 arXiv/OpenAlex/Semantic Scholar/EuropePMC/PMC 路线也未找到可验证全文。",
-            "failed_route_summary": discovery_reasons,
-            "openreview_reasons": openreview_reasons,
-            "next_research_action": "对会议 virtual/poster 输入，优先查 OpenReview 官方附件、arXiv 标题作者匹配、PMLR/proceedings、作者主页；找不到时保持阻塞，不补读其它论文。",
             "title": title,
         }
     if pdf_attempt_count == 0 and not html_attempts:
@@ -1353,22 +1476,26 @@ def acquire_full_text(paper: dict[str, Any], run_path: Path, log: LogFn = print)
     if len(text) < MIN_FULL_TEXT_CHARS:
         html_urls: list[str] = []
         challenged_services = _cloudflare_challenged_services(acquisition)
-        for value in [paper.get("html_url"), paper.get("url"), paper.get("abs_url")]:
+
+        def add_html_url(value: object) -> None:
             item = str(value or "").strip()
-            if item and item not in html_urls:
-                html_urls.append(item)
+            lowered_item = item.lower()
+            if not item or item in html_urls:
+                return
+            if "/virtual/" in lowered_item and ("/poster/" in lowered_item or "/oral/" in lowered_item):
+                return
+            html_urls.append(item)
+
+        for value in [paper.get("html_url"), paper.get("url"), paper.get("abs_url")]:
+            add_html_url(value)
         if isinstance(openalex_hints.get("hints"), list):
             for hint in openalex_hints.get("hints") or []:
                 if isinstance(hint, dict):
-                    item = str(hint.get("landing_page_url") or "").strip()
-                    if item and item not in html_urls:
-                        html_urls.append(item)
+                    add_html_url(hint.get("landing_page_url"))
         if isinstance(same_paper_html_hints.get("hints"), list):
             for hint in same_paper_html_hints.get("hints") or []:
                 if isinstance(hint, dict):
-                    item = str(hint.get("landing_page_url") or "").strip()
-                    if item and item not in html_urls:
-                        html_urls.append(item)
+                    add_html_url(hint.get("landing_page_url"))
         html_attempts: list[dict[str, Any]] = []
         attempted_html_urls: set[str] = set()
         if science_html_first_attempt:
@@ -1439,8 +1566,19 @@ def acquire_full_text(paper: dict[str, Any], run_path: Path, log: LogFn = print)
     if text:
         write_text(text_path, text.rstrip() + "\n")
     html_body_ok = text_kind not in {"html", "full_text_xml"} or _looks_like_paper_body(text)
-    if len(text) >= MIN_FULL_TEXT_CHARS and html_body_ok:
+    full_text_available = len(text) >= MIN_FULL_TEXT_CHARS and html_body_ok
+    blocked_full_text_reason = None if full_text_available else _blocked_full_text_reason(
+        paper,
+        acquisition,
+        html_attempt,
+        pmc_xml_attempt,
+        openalex_hints,
+        same_paper_html_hints,
+    )
+    if full_text_available:
         status = "pdf_text_read" if text_kind == "pdf" else "html_text_read" if text_kind == "html" else "full_text_read"
+    elif blocked_full_text_reason.get("retryable_after_cooldown") is True:
+        status = "deferred_service_cooldown_retry"
     elif text_kind == "html" and text:
         status = "html_metadata_or_abstract_only"
     elif downloaded:
@@ -1464,7 +1602,7 @@ def acquire_full_text(paper: dict[str, Any], run_path: Path, log: LogFn = print)
         "non_pdf_full_text_note_zh": "" if downloaded and text_kind == "pdf" else ("已通过 reader 镜像提取公开 PDF 文本并通过正文 identity 检查；这是可精读正文文本，但不是本地下载的 PDF 文件。" if reader_pdf_selected else "已复用 Reading runtime 中已验证的同篇全文文本，并重新通过正文 identity 检查；这是 cache-assisted 正文，不是本次重新下载的 PDF。" if runtime_cache_selected else "已取得 HTML/XML 正文，可用于精读；但这不是论文 PDF。" if len(text) >= MIN_FULL_TEXT_CHARS else ""),
         "text_chars": len(text),
         "full_text_chars": len(text),
-        "full_text_available": len(text) >= MIN_FULL_TEXT_CHARS and html_body_ok,
+        "full_text_available": full_text_available,
         "full_text_status": status,
         "source": "reading_standalone_acquisition",
         "acquisition_seconds": round(time.time() - started, 3),
@@ -1476,13 +1614,6 @@ def acquire_full_text(paper: dict[str, Any], run_path: Path, log: LogFn = print)
         "same_paper_html_hints": same_paper_html_hints,
         "same_paper_repair_policy": "PDF/HTML/XML full-text fallback may use DOI, publisher metadata, OpenAlex/Unpaywall, EuropePMC/PMC, OpenReview, or arXiv title-author verification only for the same paper; article replacement is forbidden.",
     }
-    if not packet["full_text_available"]:
-        packet["blocked_full_text_reason"] = _blocked_full_text_reason(
-            paper,
-            acquisition,
-            html_attempt,
-            pmc_xml_attempt,
-            openalex_hints,
-            same_paper_html_hints,
-        )
+    if blocked_full_text_reason is not None:
+        packet["blocked_full_text_reason"] = blocked_full_text_reason
     return packet

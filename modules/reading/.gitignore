@@ -16,5 +16,5 @@ workspace/
 *.log
 .DS_Store
 
-# 本机敏感配置，允许在 config/ 下统一管理但禁止入 git
-config/local/
+# Reading 本机敏感配置，禁止入 git
+config/read.env

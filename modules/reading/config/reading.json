@@ -43,6 +43,8 @@
       "acm": 5.0,
       "reader": 2.0,
       "chatpaper": 1.0,
+      "github": 1.0,
+      "web_search": 1.0,
       "generic": 0.05
     },
     "challenge_cooldown_sec": {
@@ -59,6 +61,7 @@
       "iclr": 600.0,
       "icml": 600.0
     },
+    "process_access_blocker_sec": 300.0,
     "rate_limit_cooldown_sec": 120.0,
     "batch_challenge_cooldown_wait_cap_sec": 240.0
   },

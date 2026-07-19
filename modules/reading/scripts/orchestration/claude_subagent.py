@@ -264,8 +264,8 @@ def article_metadata_markdown_lines(paper: dict[str, Any], packet: dict[str, Any
     paper_url = _paper_url_for_prompt(paper, packet)
     pdf_url = _pdf_url_for_prompt(paper, packet)
     return [
-        f"**来源：** {_source_label_for_prompt(paper)}",
-        f"**论文链接：** URL：{_markdown_link('论文页面', paper_url)}；PDF：{_markdown_link('PDF', pdf_url)}",
+        f"- **来源：** {_source_label_for_prompt(paper)}",
+        f"- **论文链接：** URL：{_markdown_link('论文页面', paper_url)}；PDF：{_markdown_link('PDF', pdf_url)}",
     ]
 
 
@@ -313,8 +313,7 @@ def build_deep_read_prompt(
     source_label = _source_label_for_prompt(paper)
     paper_url = _paper_url_for_prompt(paper, packet)
     pdf_url = _pdf_url_for_prompt(paper, packet)
-    paper_url_md = _markdown_link("论文页面", paper_url)
-    pdf_url_md = _markdown_link("PDF", pdf_url)
+    metadata_lines = article_metadata_markdown_lines(paper, packet)
     return f"""你是 Reading 模块为这一篇论文启动的专用精读 subagent。请只处理下面这一篇论文，并直接产出单篇 Markdown 精读正文。
 
 硬性规则：
@@ -325,15 +324,15 @@ def build_deep_read_prompt(
 5. 精读必须基于正文文件 `{text_path_run or text_path_local}` 的全量内容；可以分段读取，覆盖范围必须超过文件开头、节选和摘要。正文证据充分时完成精读；证据缺口写入机器回执。
 6. 单篇 Markdown 必须是完整用户阅读正文，并按顺序使用固定结构：
    - `# 论文标题`
-   - `**来源：** {source_label}`
-   - `**论文链接：** URL：{paper_url_md}；PDF：{pdf_url_md}`
+   - `{metadata_lines[0]}`
+   - `{metadata_lines[1]}`
    - `## 摘要`
    - `## 动机与核心创新`
    - `## 方法`
    - `## 实验结果`
    - `## 优缺点总结`
-   单篇 `read.md` 的 Markdown 元素严格限定为上述固定标题、两行元数据、正文段落、数学公式和论文链接；标题、来源、论文链接三行后各保留一个空行，栏目之间只保留一个空行。
-7. 顶部元数据只写上面两行：`来源` 和 `论文链接`。`来源` 必须精简为会议/期刊加年份，例如 `ICLR 2026`、`NeurIPS 2025`；预印本或期刊流使用来源名加精确日期，例如 `arXiv 2026-06-01`、`Nature 2026-07-03`。`论文链接` 必须把输入/元数据中给出的 URL 和 PDF 写成 Markdown 链接，格式为 `URL：[论文页面](<...>)；PDF：[PDF](<...>)`；缺失项写 `未提供`。顶部元数据的完整内容就是这两行。
+   单篇 `read.md` 的 Markdown 元素严格限定为上述固定标题、两行元数据、正文段落、数学公式和论文链接；标题后保留一个空行，两行元数据连续书写，元数据后保留一个空行，栏目之间只保留一个空行。
+7. 顶部元数据只写上面两行：`来源` 和 `论文链接`，并使用 `- ` 项目符号。`来源` 必须精简为会议/期刊加年份，例如 `ICLR 2026`、`NeurIPS 2025`；预印本或期刊流使用来源名加精确日期，例如 `arXiv 2026-06-01`、`Nature 2026-07-03`。`论文链接` 必须把输入/元数据中给出的 URL 和 PDF 写成 Markdown 链接，格式为 `URL：[论文页面](<...>)；PDF：[PDF](<...>)`；缺失项写 `未提供`。顶部元数据的完整内容就是这两行。
 8. 上述每个正文栏目都必须有内容，正文风格必须简明、论文内容导向：
    - {abstract_rule}
    - `动机与核心创新` 写两段：第一段以 `动机：` 开头，第二段以 `核心创新：` 开头。两段合计必须控制在 200-250 个中文字符，只写为什么需要这项工作以及本文真正新增的东西。
