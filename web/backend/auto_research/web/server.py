@@ -3787,6 +3787,7 @@ def _read_job_progress_from_logs(
     errors: list[str] = []
     completed_full_text: set[int] = set()
     completed_deep_read: set[int] = set()
+    reused_deep_read: set[int] = set()
     exact_totals: set[str] = set()
     signal_seen = False
     scoring_seen = False
@@ -3857,7 +3858,20 @@ def _read_job_progress_from_logs(
             status_text = _read_progress_status_label(raw_status_text, phase="full_text")
             title = _read_progress_title(full_done.group(4) or "")
             mark_completed("full_text", completed_full_text, index, total, title, status_text)
+            if "full_text=true" in raw_status_text.lower() and re.match(r"complete(?:_with_warnings)?\b", raw_status_text, flags=re.I):
+                completed_deep_read.add(index)
+                reused_deep_read.add(index)
             details.append(_read_log_detail("文章爬取完成", index, total, title, status_text))
+            continue
+        cached_read = re.search(r"(?:复用单篇精读缓存|已更新全文并复用单篇精读缓存)\s+(\d+)\s*:\s*(.+)", text)
+        if cached_read:
+            signal_seen = True
+            index = int(cached_read.group(1))
+            completed_deep_read.add(index)
+            reused_deep_read.add(index)
+            phases["deep_read"]["last_index"] = index
+            phases["deep_read"]["last_title"] = _read_progress_title(cached_read.group(2))
+            phases["deep_read"]["last_status"] = "已复用精读缓存"
             continue
         read_phase = re.search(r"reading subagent phase:\s*(\d+)\s+papers(?:,\s*(\d+)\s+workers)?", text, flags=re.I)
         if read_phase:
@@ -3902,6 +3916,15 @@ def _read_job_progress_from_logs(
         if scoring_phase:
             signal_seen = True
             scoring_seen = True
+            candidate_total = int(phases["deep_read"].get("total") or 0)
+            deep_total = max(len(completed_deep_read), candidate_total + len(reused_deep_read))
+            if deep_total:
+                phases["deep_read"]["total"] = deep_total
+                exact_totals.add("deep_read")
+                details.append(
+                    f"读文章完成：精读结果 {len(completed_deep_read)}/{deep_total} 已就绪"
+                    + (f"，其中复用缓存 {len(reused_deep_read)} 篇" if reused_deep_read else "")
+                )
             phases["deep_read"]["active_index"] = 0
             phases["deep_read"]["active_title"] = ""
             continue
@@ -4075,7 +4098,10 @@ def _read_job_progress_from_logs(
             cancelled_current = int(cancelled_phase.get("current") or 0)
             cancelled_total = int(cancelled_phase.get("total") or 0)
             current_action = f"任务已取消：{cancelled_label}停在 {cancelled_current}/{cancelled_total}。" if cancelled_total else "任务已取消。"
-    elif scoring_seen:
+    elif scoring_seen and finished_read_status:
+        current_stage = "complete"
+        current_action = _job_status_message("read", "complete")
+    elif scoring_seen and live_read_status:
         current_stage = "scoring"
         current_action = "重新打分"
     elif (

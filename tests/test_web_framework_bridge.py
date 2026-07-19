@@ -2589,6 +2589,46 @@ def test_web_read_scoring_is_a_label_only_third_phase():
     assert all("重新打分" not in line for line in public_logs)
 
 
+def test_web_read_scoring_counts_reused_deep_reads_before_third_phase():
+    from auto_research.web import server as web_server
+
+    progress = web_server._read_job_progress_from_logs(
+        [
+            "Full-text acquisition phase: 2 papers, 2 workers",
+            "复用单篇精读缓存 1: Paper One",
+            "Finished full-text acquisition 1/2: complete / full_text=True - Paper One",
+            "已更新全文并复用单篇精读缓存 2: Paper Two",
+            "Finished full-text acquisition 2/2: complete / full_text=True - Paper Two",
+            "Final Reading scoring phase: 2 completed reading artifacts",
+        ],
+        {"phase": "full_text"},
+        {"status": "running", "run_id": "find_demo"},
+        status="running",
+    )
+
+    deep_read = progress["phases"]["deep_read"]
+    assert (deep_read["current"], deep_read["total"], deep_read["status"]) == (2, 2, "complete")
+    assert progress["current_stage"] == "scoring"
+    assert progress["overall_percent"] == 100
+    assert any("读文章完成：精读结果 2/2 已就绪，其中复用缓存 2 篇" == line for line in progress["recent_details"])
+
+    finished = web_server._read_job_progress_from_logs(
+        [
+            "Full-text acquisition phase: 1 papers, 1 workers",
+            "Finished full-text acquisition 1/1: full_text=true - Paper One",
+            "Reading subagent phase: 1 papers, 1 workers",
+            "Finished reading subagent 1/1: complete / deep_read=True - Paper One",
+            "Final Reading scoring phase: 1 completed reading artifacts",
+            "Final Reading scoring complete: scored=1/1",
+        ],
+        {"phase": "complete"},
+        {"status": "framework_synced_reading_outputs", "run_id": "find_demo"},
+        status="done",
+    )
+    assert finished["current_stage"] == "complete"
+    assert finished["current_action"] == "精读任务已完成"
+
+
 def test_web_cancelled_read_keeps_completed_phase_and_current_run_logs():
     from auto_research.web import server as web_server
 
