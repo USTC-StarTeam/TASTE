@@ -120,7 +120,6 @@ def _ranking_html(directory: Path) -> str:
     return (
         "<section>"
         "<h2>筛选后完整排名 / Full Screened Ranking</h2>"
-        "<p>仅包含 fit_score &gt; 6 的候选，并按最终 score 降序排列。</p>"
         "<table><thead><tr>"
         "<th>#</th><th>Title</th><th>Venue/Year</th><th>Fit</th><th>Diversity</th><th>Score</th><th>Hit Directions</th><th>Explanation</th>"
         "</tr></thead><tbody>"
@@ -151,8 +150,8 @@ def _email_shell(title: str, body: str) -> str:
 </html>"""
 
 
-def build_run_email_html(request: EmailJobRequest) -> str:
-    directory = run_dir(request.run_id)
+def build_run_email_html(request: EmailJobRequest, artifact_directory: Path) -> str:
+    directory = artifact_directory
     artifact_names = request.artifact_names or DEFAULT_EMAIL_ARTIFACTS
     sections: list[str] = []
     if request.include_ranking:
@@ -186,6 +185,7 @@ def send_run_email(
     request: EmailJobRequest,
     config: AppConfig,
     email_sender: ServerEmailSender,
+    artifact_directory: Path,
     log: LogFn = print,
     should_cancel: CancelFn = lambda: False,
 ) -> dict:
@@ -198,7 +198,9 @@ def send_run_email(
         raise ValueError("At least one email receiver is required.")
 
     subject = request.subject or f"Report: {request.run_id}"
-    html_body = build_run_email_html(request)
+    if not artifact_directory.is_dir():
+        raise ValueError("Project email artifact directory is not available.")
+    html_body = build_run_email_html(request, artifact_directory)
     log(f"Sending rendered HTML email to {len(receivers)} receiver(s) via the server mail service")
     email_sender.send_email(
         recipients=receivers,
@@ -210,6 +212,7 @@ def send_run_email(
     sent_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     report = {
         "run_id": request.run_id,
+        "artifact_scope": request.artifact_scope,
         "sent_at": sent_at,
         "subject": subject,
         "receivers": receivers,

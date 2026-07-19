@@ -10914,6 +10914,46 @@ def _load_persisted_jobs() -> None:
     _persist_jobs()
 
 
+EMAIL_PROJECT_ARTIFACTS_BY_SCOPE = {
+    "find": ["find.md", "source_status.md"],
+    "read": ["read.md"],
+    "idea": ["idea.md"],
+    "plan": ["plan.md"],
+}
+
+
+def _normalized_email_request(request: EmailJobRequest) -> EmailJobRequest:
+    scope = request.artifact_scope
+    stage_artifacts = EMAIL_PROJECT_ARTIFACTS_BY_SCOPE.get(scope)
+    updates: dict[str, Any] = {"include_ranking": scope == "find" and request.include_ranking}
+    if stage_artifacts is not None:
+        updates["artifact_names"] = stage_artifacts
+    return request.model_copy(update=updates)
+
+
+def _email_artifact_directory(request: EmailJobRequest, project_hint: str = "") -> Path:
+    if request.artifact_scope not in EMAIL_PROJECT_ARTIFACTS_BY_SCOPE:
+        return run_dir(request.run_id)
+    if project_hint:
+        if not _account_owns_project(project_hint):
+            raise ValueError("Project email artifacts are not available for this account.")
+        project_root = _safe_project_root(project_hint)
+    else:
+        context = _project_context_for_find_run(request.run_id)
+        if not context:
+            raise ValueError("Project email artifacts are not available for this run.")
+        _, project_root = context
+    if _project_current_find_run_id(project_root) != request.run_id:
+        raise ValueError("Email artifacts are available only for the project's current Find run.")
+    directory = project_root / "planning" / "finding"
+    if not directory.is_dir():
+        raise ValueError("Project email artifact directory is not available.")
+    primary_artifact = EMAIL_PROJECT_ARTIFACTS_BY_SCOPE[request.artifact_scope][0]
+    if _project_taste_artifact_path(project_root, request.run_id, primary_artifact) is None:
+        raise ValueError(f"Current project {request.artifact_scope} artifact is not available for email.")
+    return directory
+
+
 def _auto_email_after_success(stage: str, result: Any) -> None:
     if stage == "email" or not isinstance(result, dict):
         return
@@ -10926,13 +10966,21 @@ def _auto_email_after_success(stage: str, result: Any) -> None:
         return
     if not AUTH_EMAIL_SENDER.configured or not email_config.receivers:
         return
-    request = EmailJobRequest(run_id=run_id, subject=f"TASTE {stage} complete: {run_id}")
+    if stage not in EMAIL_PROJECT_ARTIFACTS_BY_SCOPE:
+        return
+    request = _normalized_email_request(EmailJobRequest(
+        run_id=run_id,
+        artifact_scope=stage,
+        subject=f"TASTE {stage} complete: {run_id}",
+    ))
+    project_hint = str(result.get("project") or "").strip()
     start_job(
         "email",
         lambda log, should_cancel, _progress: send_run_email(
             request,
             config,
             AUTH_EMAIL_SENDER,
+            _email_artifact_directory(request, project_hint),
             log,
             should_cancel,
         ),
@@ -12120,13 +12168,15 @@ def api_email(request: EmailJobRequest) -> dict:
         return JSONResponse({"error": "run not found"}, status_code=404)
     config = load_config()
     try:
+        request = _normalized_email_request(request)
         send_run_email(
             request,
             config,
             AUTH_EMAIL_SENDER,
+            _email_artifact_directory(request),
             log=lambda _message: None,
         )
-    except ValueError as exc:
+    except (FileNotFoundError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     except VerificationEmailError as exc:
         return JSONResponse({"error": str(exc)}, status_code=502)

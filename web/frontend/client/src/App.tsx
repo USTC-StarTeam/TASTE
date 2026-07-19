@@ -7413,13 +7413,15 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
       await saveConfig(nextConfig);
       setConfig(nextConfig);
       const receivers = emailReceiversOverride.trim() ? splitList(emailReceiversOverride) : [];
-      const artifactNames = visibleRunArtifacts.map((artifact) => artifact.name);
+      const artifactScope = tab === "ideas" ? "idea" : tab === "paperWrite" ? "paper" : tab;
+      const artifactNames = renderedRunArtifacts.map((artifact) => artifact.name);
       await startEmail({
         run_id: artifactRunId,
+        artifact_scope: artifactScope,
         artifact_names: artifactNames,
         receivers,
         subject: emailSubject,
-        include_ranking: true,
+        include_ranking: artifactScope === "find",
       });
       setEmailSendState("success");
     } catch (err) {
