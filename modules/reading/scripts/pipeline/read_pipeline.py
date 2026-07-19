@@ -4133,7 +4133,7 @@ def _normalize_article_markdown_metadata(text: str, paper: dict, packet: dict | 
     rest = lines[section_start:]
     while rest and not rest[0].strip():
         rest.pop(0)
-    output = [lines[first].rstrip(), "", metadata_lines[0], "", metadata_lines[1], ""]
+    output = [lines[first].rstrip(), "", metadata_lines[0], metadata_lines[1], ""]
     output.extend(rest)
     return "\n".join(output).strip() + "\n"
 
@@ -5811,16 +5811,16 @@ def _demote_article_markdown(text: str, *, index: int, title: str, item: dict | 
     article_title = title
     if lines and lines[0].startswith("# "):
         article_title = lines.pop(0).lstrip("#").strip() or title
+    while lines and not lines[0].strip():
+        lines.pop(0)
     output = [f"### {index}. {article_title}", ""]
     item = item if isinstance(item, dict) else {}
     match_score = _score_number(item.get("match_score"))
     transferability_score = _score_number(item.get("transferability_score"))
     if match_score is not None and transferability_score is not None:
         output.extend([
-            f"**匹配度：** {match_score:g}/10",
-            "",
-            f"**可借鉴性：** {transferability_score:g}/10",
-            "",
+            f"- **匹配度：** {match_score:g}/10",
+            f"- **可借鉴性：** {transferability_score:g}/10",
         ])
     for line in lines:
         if line.startswith("#"):
@@ -5839,7 +5839,7 @@ def _aggregate_read_md_by_concatenation(
     article_md_paths: list[Path],
     items: list[dict],
 ) -> dict:
-    sections: list[str] = ["# 论文精读", "", "## 逐篇精读", ""]
+    sections: list[str] = ["# 论文精读", ""]
     completed_items = [
         item for item in items if item.get("validation", {}).get("deep_read_complete") is True
     ]
@@ -5910,10 +5910,7 @@ def _run_warning_detail(item: dict, index: int) -> dict:
 def _final_read_md_structure_audit(read_md_text: str, expected_article_count: int) -> dict[str, object]:
     h2_matches = list(re.finditer(r"(?m)^##\s+(.+?)\s*$", read_md_text))
     h2_titles = [match.group(1).strip() for match in h2_matches]
-    per_paper_match = next((match for match in h2_matches if "逐篇精读" in match.group(1)), None)
-    per_paper_text = ""
-    if per_paper_match:
-        per_paper_text = read_md_text[per_paper_match.end():]
+    per_paper_text = read_md_text
     per_paper_section_count = len(re.findall(r"(?m)^###\s+", per_paper_text))
     required_heading_groups = {
         "摘要": ["摘要", "速览", "原论文摘要"],
@@ -5942,14 +5939,11 @@ def _final_read_md_structure_audit(read_md_text: str, expected_article_count: in
     preserved = required_preserved
     valid = (
         read_md_text.lstrip().startswith("# 论文精读")
-        and per_paper_match is not None
         and preserved
     )
     issues: list[str] = []
     if not read_md_text.lstrip().startswith("# 论文精读"):
         issues.append("missing_top_level_reading_title")
-    if not per_paper_match:
-        issues.append("missing_per_paper_deep_read_section")
     if expected_count and per_paper_section_count < expected_count:
         issues.append(f"per_paper_section_count {per_paper_section_count} < expected {expected_count}")
     for heading in required_heading_groups:

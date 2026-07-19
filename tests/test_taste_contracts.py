@@ -619,8 +619,8 @@ def test_reading_single_paper_prompt_uses_fixed_source_and_link_metadata():
     }
     metadata_lines = claude_subagent.article_metadata_markdown_lines(arxiv_paper, arxiv_packet)
     assert metadata_lines == [
-        "**来源：** arXiv 2026-06-01",
-        "**论文链接：** URL：[论文页面](<https://arxiv.org/abs/2606.02386v2>)；PDF：[PDF](<https://arxiv.org/pdf/2606.02386v2>)",
+        "- **来源：** arXiv 2026-06-01",
+        "- **论文链接：** URL：[论文页面](<https://arxiv.org/abs/2606.02386v2>)；PDF：[PDF](<https://arxiv.org/pdf/2606.02386v2>)",
     ]
 
     iclr_lines = claude_subagent.article_metadata_markdown_lines(
@@ -634,7 +634,7 @@ def test_reading_single_paper_prompt_uses_fixed_source_and_link_metadata():
         },
         {},
     )
-    assert iclr_lines[0] == "**来源：** ICLR 2026"
+    assert iclr_lines[0] == "- **来源：** ICLR 2026"
 
     spotlight_lines = claude_subagent.article_metadata_markdown_lines(
         {
@@ -646,7 +646,7 @@ def test_reading_single_paper_prompt_uses_fixed_source_and_link_metadata():
         },
         {},
     )
-    assert spotlight_lines[0] == "**来源：** ICML 2026 Spotlight"
+    assert spotlight_lines[0] == "- **来源：** ICML 2026 Spotlight"
 
     poster_lines = claude_subagent.article_metadata_markdown_lines(
         {
@@ -658,7 +658,7 @@ def test_reading_single_paper_prompt_uses_fixed_source_and_link_metadata():
         },
         {},
     )
-    assert poster_lines[0] == "**来源：** NeurIPS 2025 Poster"
+    assert poster_lines[0] == "- **来源：** NeurIPS 2025 Poster"
 
     dated_source_with_stray_presentation = claude_subagent.article_metadata_markdown_lines(
         {
@@ -667,7 +667,7 @@ def test_reading_single_paper_prompt_uses_fixed_source_and_link_metadata():
         },
         {},
     )
-    assert dated_source_with_stray_presentation[0] == "**来源：** arXiv 2026-06-01"
+    assert dated_source_with_stray_presentation[0] == "- **来源：** arXiv 2026-06-01"
 
     journal_with_stray_tier = claude_subagent.article_metadata_markdown_lines(
         {
@@ -679,7 +679,7 @@ def test_reading_single_paper_prompt_uses_fixed_source_and_link_metadata():
         },
         {},
     )
-    assert journal_with_stray_tier[0] == "**来源：** Cell 2026"
+    assert journal_with_stray_tier[0] == "- **来源：** Cell 2026"
 
     acquired_pdf_lines = claude_subagent.article_metadata_markdown_lines(
         {
@@ -692,7 +692,7 @@ def test_reading_single_paper_prompt_uses_fixed_source_and_link_metadata():
         },
         {"pdf_url": "https://arxiv.org/pdf/2605.00001"},
     )
-    assert acquired_pdf_lines[1] == "**论文链接：** URL：[论文页面](<https://icml.cc/virtual/2026/poster/1>)；PDF：[PDF](<https://arxiv.org/pdf/2605.00001>)"
+    assert acquired_pdf_lines[1] == "- **论文链接：** URL：[论文页面](<https://icml.cc/virtual/2026/poster/1>)；PDF：[PDF](<https://arxiv.org/pdf/2605.00001>)"
 
     openreview_official_pdf_lines = claude_subagent.article_metadata_markdown_lines(
         {
@@ -705,7 +705,7 @@ def test_reading_single_paper_prompt_uses_fixed_source_and_link_metadata():
         },
         {"pdf_url": "openreview://officialNote/pdf"},
     )
-    assert openreview_official_pdf_lines[1] == "**论文链接：** URL：[论文页面](<https://openreview.net/forum?id=officialNote>)；PDF：[PDF](<https://openreview.net/pdf?id=officialNote>)"
+    assert openreview_official_pdf_lines[1] == "- **论文链接：** URL：[论文页面](<https://openreview.net/forum?id=officialNote>)；PDF：[PDF](<https://openreview.net/pdf?id=officialNote>)"
 
     conference_with_arxiv_pdf_lines = claude_subagent.article_metadata_markdown_lines(
         {
@@ -719,7 +719,7 @@ def test_reading_single_paper_prompt_uses_fixed_source_and_link_metadata():
         },
         {},
     )
-    assert conference_with_arxiv_pdf_lines[0] == "**来源：** ICML 2026 Poster"
+    assert conference_with_arxiv_pdf_lines[0] == "- **来源：** ICML 2026 Poster"
 
     run_path = reading_root / ".runtime" / "output" / run_id / "papers" / "001"
     prompt = claude_subagent.build_deep_read_prompt(
@@ -731,8 +731,8 @@ def test_reading_single_paper_prompt_uses_fixed_source_and_link_metadata():
     )
     assert "论文来源、PDF、DOI、URL、代码等元数据" not in prompt
     assert "DOI" not in prompt.split("单篇 Markdown 必须是完整用户阅读正文", 1)[1].split("## 摘要", 1)[0]
-    assert "`**来源：** arXiv 2026-06-01`" in prompt
-    assert "`**论文链接：** URL：[论文页面](<https://arxiv.org/abs/2606.02386v2>)；PDF：[PDF](<https://arxiv.org/pdf/2606.02386v2>)`" in prompt
+    assert "`- **来源：** arXiv 2026-06-01`" in prompt
+    assert "`- **论文链接：** URL：[论文页面](<https://arxiv.org/abs/2606.02386v2>)；PDF：[PDF](<https://arxiv.org/pdf/2606.02386v2>)`" in prompt
     assert "两个 `$` 分别紧贴公式的首字符和尾字符" in prompt
     assert "开始行和结束行各自只写 `$$`" in prompt
     assert "可逆关系固定写成 `\\rightleftharpoons`" in prompt
@@ -1624,7 +1624,9 @@ def test_reading_run_read_uses_subagent_article_markdown_aggregation_and_audit(m
     assert payload["read_markdown_aggregation"]["valid"] is True
     assert "method_summary_table" not in payload["read_markdown_aggregation"]
     assert "ARTICLE_MD_BY_SUBAGENT" in read_md
-    assert "## 逐篇精读" in read_md
+    assert "## 逐篇精读" not in read_md
+    assert "- **匹配度：** 9/10\n- **可借鉴性：** 9/10\n- **来源：**" in read_md
+    assert "- **论文链接：** URL：[论文页面](<https://example.org/two>)" in read_md
     assert "## 方法总结表格" not in read_md
     assert "| 序号 | 论文 | 来源 | 方法类别 | 核心机制 | 关键实验/指标 | 主要优点 | 主要局限 | 可借鉴点 |" not in read_md
     assert "原论文摘要（中文）" not in read_md

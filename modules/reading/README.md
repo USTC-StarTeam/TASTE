@@ -280,13 +280,12 @@ projects/<project>/planning/finding/reading_runs/<run-id>/
 ```markdown
 # 论文精读
 
-## 逐篇精读
-
 ### 001. Paper Title
 
-**来源：** ICLR 2026 Oral
-
-**论文链接：** URL：[论文页面](<https://example.org/paper>)；PDF：[PDF](<https://example.org/paper.pdf>)
+- **匹配度：** 9/10
+- **可借鉴性：** 8/10
+- **来源：** ICLR 2026 Oral
+- **论文链接：** URL：[论文页面](<https://example.org/paper>)；PDF：[PDF](<https://example.org/paper.pdf>)
 
 #### 摘要
 
