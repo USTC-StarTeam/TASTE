@@ -2557,6 +2557,38 @@ def test_web_read_startup_is_human_facing_and_deduplicated():
     assert started["recent_details"] == ["爬文章启动：共 90 篇，并发 16"]
 
 
+def test_web_read_scoring_is_a_label_only_third_phase():
+    from auto_research.web import server as web_server
+
+    logs = [
+        "Full-text acquisition phase: 2 papers, 2 workers",
+        "Finished full-text acquisition 1/2: full_text=true - Paper One",
+        "Finished full-text acquisition 2/2: full_text=true - Paper Two",
+        "Reading subagent phase: 2 papers, 2 workers",
+        "Finished reading subagent 1/2: complete / deep_read=True - Paper One",
+        "Finished reading subagent 2/2: complete / deep_read=True - Paper Two",
+        "Final Reading scoring phase: 2 completed reading artifacts",
+    ]
+
+    progress = web_server._read_job_progress_from_logs(
+        logs,
+        {"phase": "deep_read"},
+        {"status": "running", "run_id": "find_demo"},
+        status="running",
+    )
+    public_logs = web_server._public_read_job_logs(
+        logs,
+        {"phase": "deep_read"},
+        {"status": "running", "run_id": "find_demo"},
+    )
+
+    assert progress["current_stage"] == "scoring"
+    assert progress["current_action"] == "重新打分"
+    assert progress["overall_percent"] == 100
+    assert "scoring" not in progress["phases"]
+    assert all("重新打分" not in line for line in public_logs)
+
+
 def test_web_cancelled_read_keeps_completed_phase_and_current_run_logs():
     from auto_research.web import server as web_server
 

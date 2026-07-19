@@ -85,7 +85,7 @@ class ReadingScoringTests(unittest.TestCase):
             title="Paper",
             item={"match_score": 8.5, "transferability_score": 9},
         )
-        self.assertIn("### 1. Paper\n\n- **匹配度：** 8.5/10", rendered)
+        self.assertIn("## 1. Paper\n\n- **匹配度：** 8.5/10", rendered)
         self.assertIn("- **可借鉴性：** 9/10", rendered)
 
     def test_score_prompt_requires_every_reading_artifact_and_two_dimensions(self) -> None:
@@ -178,7 +178,7 @@ class ReadingScoringTests(unittest.TestCase):
             self.assertEqual("complete", scoring["status"])
             self.assertTrue(aggregation["valid"])
             self.assertEqual(["p2", "p1"], [item["paper"]["paper_id"] for item in machine_items])
-            self.assertLess(read_md.index("### 1. Second input"), read_md.index("### 2. First input"))
+            self.assertLess(read_md.index("## 1. Second input"), read_md.index("## 2. First input"))
             self.assertIn("**匹配度：** 9/10", read_md)
             self.assertIn("**可借鉴性：** 9/10", read_md)
             self.assertEqual(9.0, machine_items[0]["reading"]["average_score"])

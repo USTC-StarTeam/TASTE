@@ -5813,7 +5813,7 @@ def _demote_article_markdown(text: str, *, index: int, title: str, item: dict | 
         article_title = lines.pop(0).lstrip("#").strip() or title
     while lines and not lines[0].strip():
         lines.pop(0)
-    output = [f"### {index}. {article_title}", ""]
+    output = [f"## {index}. {article_title}", ""]
     item = item if isinstance(item, dict) else {}
     match_score = _score_number(item.get("match_score"))
     transferability_score = _score_number(item.get("transferability_score"))
@@ -5826,7 +5826,7 @@ def _demote_article_markdown(text: str, *, index: int, title: str, item: dict | 
         if line.startswith("#"):
             hashes = len(line) - len(line.lstrip("#"))
             rest = line[hashes:].lstrip()
-            new_level = min(6, hashes + 2)
+            new_level = min(6, hashes + 1)
             output.append("#" * new_level + " " + rest)
         else:
             output.append(line)
@@ -5911,7 +5911,7 @@ def _final_read_md_structure_audit(read_md_text: str, expected_article_count: in
     h2_matches = list(re.finditer(r"(?m)^##\s+(.+?)\s*$", read_md_text))
     h2_titles = [match.group(1).strip() for match in h2_matches]
     per_paper_text = read_md_text
-    per_paper_section_count = len(re.findall(r"(?m)^###\s+", per_paper_text))
+    per_paper_section_count = len(re.findall(r"(?m)^##\s+\d+\.\s+", per_paper_text))
     required_heading_groups = {
         "摘要": ["摘要", "速览", "原论文摘要"],
         "动机与核心创新": ["动机与核心创新", "动机和核心创新", "动机及核心创新"],
@@ -5922,7 +5922,7 @@ def _final_read_md_structure_audit(read_md_text: str, expected_article_count: in
 
     def _heading_group_count(aliases: list[str]) -> int:
         pattern = "|".join(re.escape(alias) for alias in aliases)
-        return len(re.findall(rf"(?m)^####\s+.*(?:{pattern})", per_paper_text))
+        return len(re.findall(rf"(?m)^###\s+.*(?:{pattern})", per_paper_text))
 
     heading_counts = {
         heading: _heading_group_count(aliases)
