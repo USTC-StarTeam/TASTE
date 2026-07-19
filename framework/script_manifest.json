@@ -1208,23 +1208,24 @@
         "build_run_email_html",
         "_resolve_receivers",
         "send_run_email",
+        "send_email",
         "close_list"
       ],
-      "classes": [],
+      "classes": [
+        "ServerEmailSender"
+      ],
       "imports": [
         "__future__",
         "contracts.web_models",
         "datetime",
-        "email.mime.text",
         "html",
         "pathlib",
         "re",
         "runtime.run_storage",
-        "smtplib",
         "typing"
       ],
-      "function_count": 9,
-      "class_count": 0
+      "function_count": 10,
+      "class_count": 1
     },
     {
       "path": "scripts/integrations/llm_client.py",

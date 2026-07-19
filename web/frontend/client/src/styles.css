@@ -554,6 +554,15 @@ label {
   min-width: 86px;
 }
 
+.tabs .unsupportedTabHint {
+  display: inline-flex;
+  cursor: not-allowed;
+}
+
+.tabs .unsupportedTabHint button {
+  pointer-events: none;
+}
+
 
 .tabs button.active,
 .primary {
@@ -1017,6 +1026,26 @@ label {
   gap: 0.45rem;
   align-items: center;
   margin: 0.75rem 0;
+}
+
+.emailSendAction {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.emailSendStatus {
+  color: #607083;
+  font-size: 0.84rem;
+  white-space: nowrap;
+}
+
+.emailSendStatus.success {
+  color: #2d6b55;
+}
+
+.emailSendStatus.error {
+  color: #9d2b2b;
 }
 
 details {

@@ -4,10 +4,11 @@ import json
 import os
 import smtplib
 import ssl
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from email.message import EmailMessage
 from email.utils import formataddr
 from pathlib import Path
+from threading import Lock
 
 
 class VerificationEmailError(RuntimeError):
@@ -23,6 +24,9 @@ class VerificationEmailSender:
     from_address: str
     from_name: str = "TASTE"
     security: str = "ssl"
+    _connection: smtplib.SMTP | None = field(default=None, init=False, repr=False, compare=False)
+    _connection_lock: Lock = field(default_factory=Lock, init=False, repr=False, compare=False)
+    _ssl_context: ssl.SSLContext = field(default_factory=ssl.create_default_context, init=False, repr=False, compare=False)
 
     @classmethod
     def from_env(cls, config_path: Path | None = None) -> VerificationEmailSender:
@@ -79,44 +83,112 @@ class VerificationEmailSender:
             and (not self.username or self.password)
         )
 
+    def send_email(
+        self,
+        recipients: list[str],
+        subject: str,
+        text_body: str,
+        html_body: str | None = None,
+    ) -> None:
+        """Send all server mail through the configured, reusable SMTP session."""
+        if not self.configured:
+            raise VerificationEmailError("服务器尚未配置邮件服务，请联系管理员。")
+        normalized_recipients = [recipient.strip() for recipient in recipients if recipient.strip()]
+        if not normalized_recipients:
+            raise VerificationEmailError("至少需要一个收件邮箱。")
+
+        message = EmailMessage()
+        message["Subject"] = subject
+        message["From"] = formataddr((self.from_name, self.from_address))
+        message["To"] = ", ".join(normalized_recipients)
+        message.set_content(text_body)
+        if html_body is not None:
+            message.add_alternative(html_body, subtype="html")
+
+        try:
+            self._send_message(message)
+        except (OSError, smtplib.SMTPException) as exc:
+            raise VerificationEmailError("邮件发送失败，请稍后重试。") from exc
+
     def send_verification_code(self, recipient: str, code: str, expires_in: int) -> None:
         if not self.configured:
             raise VerificationEmailError("服务器尚未配置注册邮件服务，请联系管理员。")
 
         minutes = max(1, expires_in // 60)
-        message = EmailMessage()
-        message["Subject"] = "TASTE 注册验证码"
-        message["From"] = formataddr((self.from_name, self.from_address))
-        message["To"] = recipient
-        message.set_content(
-            f"你的 TASTE 注册验证码是：{code}\n\n验证码 {minutes} 分钟内有效。若非本人操作，请忽略此邮件。"
-        )
-        message.add_alternative(
-            """
+        text_body = f"你的 TASTE 注册验证码是：{code}\n\n验证码 {minutes} 分钟内有效。若非本人操作，请忽略此邮件。"
+        html_body = """
             <div style="font-family:system-ui,-apple-system,sans-serif;color:#172033;line-height:1.6">
               <h2 style="margin:0 0 16px">TASTE 注册验证码</h2>
               <p>你的注册验证码是：</p>
               <p style="font-size:30px;font-weight:700;letter-spacing:8px;margin:18px 0">{code}</p>
               <p>验证码 {minutes} 分钟内有效。若非本人操作，请忽略此邮件。</p>
             </div>
-            """.format(code=code, minutes=minutes),
-            subtype="html",
-        )
+            """.format(code=code, minutes=minutes)
 
-        context = ssl.create_default_context()
         try:
-            if self.security == "ssl":
-                with smtplib.SMTP_SSL(self.host, self.port, timeout=15, context=context) as smtp:
-                    self._authenticate_and_send(smtp, message)
-            else:
-                with smtplib.SMTP(self.host, self.port, timeout=15) as smtp:
-                    if self.security == "starttls":
-                        smtp.starttls(context=context)
-                    self._authenticate_and_send(smtp, message)
-        except (OSError, smtplib.SMTPException) as exc:
+            self.send_email([recipient], "TASTE 注册验证码", text_body, html_body)
+        except VerificationEmailError as exc:
             raise VerificationEmailError("验证码邮件发送失败，请稍后重试。") from exc
 
-    def _authenticate_and_send(self, smtp: smtplib.SMTP, message: EmailMessage) -> None:
-        if self.username:
-            smtp.login(self.username, self.password)
-        smtp.send_message(message)
+    def _open_connection(self) -> smtplib.SMTP:
+        smtp: smtplib.SMTP | None = None
+        try:
+            if self.security == "ssl":
+                smtp = smtplib.SMTP_SSL(
+                    self.host,
+                    self.port,
+                    timeout=15,
+                    context=self._ssl_context,
+                )
+            else:
+                smtp = smtplib.SMTP(self.host, self.port, timeout=15)
+                if self.security == "starttls":
+                    smtp.starttls(context=self._ssl_context)
+            if self.username:
+                smtp.login(self.username, self.password)
+            return smtp
+        except (OSError, smtplib.SMTPException):
+            if smtp is not None:
+                smtp.close()
+            raise
+
+    def _discard_connection(self) -> None:
+        connection = self._connection
+        object.__setattr__(self, "_connection", None)
+        if connection is not None:
+            try:
+                connection.close()
+            except OSError:
+                pass
+
+    @staticmethod
+    def _should_retry_connection(exc: BaseException) -> bool:
+        return (
+            isinstance(exc, (OSError, smtplib.SMTPServerDisconnected))
+            or isinstance(exc, smtplib.SMTPResponseException) and exc.smtp_code == 421
+        )
+
+    def _send_message(self, message: EmailMessage) -> None:
+        # SMTP connections are expensive because they include TCP, TLS and login
+        # round trips. Serialize access and reuse a healthy connection; if the
+        # provider expired it, reconnect once and send the same code immediately.
+        with self._connection_lock:
+            reused_connection = self._connection is not None
+            if not reused_connection:
+                object.__setattr__(self, "_connection", self._open_connection())
+            try:
+                assert self._connection is not None
+                self._connection.send_message(message)
+                return
+            except (OSError, smtplib.SMTPException) as exc:
+                self._discard_connection()
+                if not reused_connection or not self._should_retry_connection(exc):
+                    raise
+
+            object.__setattr__(self, "_connection", self._open_connection())
+            try:
+                assert self._connection is not None
+                self._connection.send_message(message)
+            except (OSError, smtplib.SMTPException):
+                self._discard_connection()
+                raise

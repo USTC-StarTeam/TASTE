@@ -159,6 +159,92 @@ def test_verification_email_sender_loads_protected_runtime_config(tmp_path, monk
     assert sender.password == "test-authorization-code"
 
 
+def test_server_email_sender_reuses_authenticated_connection_across_mail_types(monkeypatch):
+    import auto_research.web.verification_email as verification_email
+
+    class FakeSMTP:
+        instances = []
+
+        def __init__(self, host, port, *, timeout, context):
+            self.host = host
+            self.port = port
+            self.timeout = timeout
+            self.context = context
+            self.login_calls = []
+            self.recipients = []
+            self.closed = False
+            self.instances.append(self)
+
+        def login(self, username, password):
+            self.login_calls.append((username, password))
+
+        def send_message(self, message):
+            self.recipients.append(message["To"])
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(verification_email.smtplib, "SMTP_SSL", FakeSMTP)
+    sender = verification_email.VerificationEmailSender(
+        host="smtp.example.test",
+        port=465,
+        username="taste@example.test",
+        password="authorization-code",
+        from_address="taste@example.test",
+    )
+
+    sender.send_verification_code("first@example.test", "123456", 600)
+    sender.send_email(
+        ["second@example.test"],
+        "TASTE report",
+        "Report body",
+        "<p>Report body</p>",
+    )
+
+    assert len(FakeSMTP.instances) == 1
+    assert FakeSMTP.instances[0].login_calls == [("taste@example.test", "authorization-code")]
+    assert FakeSMTP.instances[0].recipients == ["first@example.test", "second@example.test"]
+
+
+def test_verification_email_sender_reconnects_once_after_stale_connection(monkeypatch):
+    import auto_research.web.verification_email as verification_email
+
+    class FakeSMTP:
+        instances = []
+
+        def __init__(self, host, port, *, timeout, context):
+            self.send_count = 0
+            self.closed = False
+            self.instances.append(self)
+
+        def login(self, username, password):
+            pass
+
+        def send_message(self, message):
+            self.send_count += 1
+            if self is self.instances[0] and self.send_count == 2:
+                raise verification_email.smtplib.SMTPServerDisconnected("idle connection expired")
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(verification_email.smtplib, "SMTP_SSL", FakeSMTP)
+    sender = verification_email.VerificationEmailSender(
+        host="smtp.example.test",
+        port=465,
+        username="taste@example.test",
+        password="authorization-code",
+        from_address="taste@example.test",
+    )
+
+    sender.send_verification_code("first@example.test", "123456", 600)
+    sender.send_verification_code("second@example.test", "654321", 600)
+
+    assert len(FakeSMTP.instances) == 2
+    assert FakeSMTP.instances[0].closed is True
+    assert FakeSMTP.instances[1].send_count == 1
+
+
 def test_api_requires_login_and_filters_projects_by_account(tmp_path, monkeypatch):
     import auto_research.web.server as server
     projects_root = tmp_path / "projects"

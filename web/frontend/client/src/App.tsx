@@ -220,9 +220,24 @@ const SCIENCE_JOURNAL_NAMES = Object.fromEntries([...SCIENCE_JOURNALS, ...SCIENC
 
 type Tab = "find" | "read" | "ideas" | "plan" | "environment" | "experiment" | "paperWrite";
 type Lang = "zh" | "en";
+type UiDisplayMode = "main" | "server";
 type ArtifactPanelSnapshot = { runId: string; artifacts: Artifact[] };
 type CurrentFindArtifactScope = "find" | "read" | "ideas" | "plan";
 type IdeaEditorDraft = { title: string; new_method: string; initial_experiment: string };
+
+// Built-in UI profile: "main" keeps the original full UI, while "server"
+// hides server-managed settings and temporarily unavailable stages.
+const UI_DISPLAY_MODE = "server" as UiDisplayMode;
+const SERVER_UNSUPPORTED_TABS = new Set<Tab>(["environment", "experiment", "paperWrite"]);
+const EMAIL_AUTO_STAGES = ["find", "read", "idea", "plan"] as const;
+
+function isServerDisplayMode() {
+  return UI_DISPLAY_MODE === "server";
+}
+
+function isUnsupportedTab(tab: Tab) {
+  return isServerDisplayMode() && SERVER_UNSUPPORTED_TABS.has(tab);
+}
 
 const markdownRenderer = new MarkdownIt({
   html: false,
@@ -1046,6 +1061,8 @@ const TEXT = {
     sendEmail: "发送邮件",
     sendingEmail: "发送中...",
     emailSubject: "邮件主题",
+    emailSent: "发送成功！",
+    emailSendFailed: "发送失败",
     emailReceiversHelp: "多个收件人用逗号或空格分隔。手动发送时可临时覆盖配置中的收件人。",
     artifactPath: "文件位置",
     openPdf: "打开 PDF",
@@ -1590,6 +1607,8 @@ const TEXT = {
     sendEmail: "Send Email",
     sendingEmail: "Sending...",
     emailSubject: "Email subject",
+    emailSent: "Sent successfully!",
+    emailSendFailed: "Send failed",
     emailReceiversHelp: "Separate multiple recipients with commas or spaces. Manual send can override config recipients.",
     artifactPath: "File location",
     openPdf: "Open PDF",
@@ -2256,14 +2275,14 @@ function canonicalJobStage(job: any) {
   const haystack = `${stage} ${phase} ${rawStage}`;
   if (stage === "literature" || (stage === "find" && phase === "literature")) return "find";
   if (stage === "plan-polish") return "plan";
-  if (stage === "email") return "paper";
+  if (stage === "email") return "email";
   if (PUBLIC_STAGES.includes(stage)) return stage;
   if (haystack.includes("find") || haystack.includes("literature")) return "find";
   if (haystack.includes("read")) return "read";
   if (haystack.includes("idea") || haystack.includes("ideation")) return "idea";
   if (haystack.includes("plan")) return "plan";
   if (/(environment|loader|reference|fresh-base|base-selection|research-base-selection|safe-unblock)/.test(haystack)) return "environment";
-  if (/(paper-pipeline|paper-preview|paper-figure|conference-preview|latex|email)/.test(haystack)) return "paper";
+  if (/(paper-pipeline|paper-preview|paper-figure|conference-preview|latex)/.test(haystack)) return "paper";
   if (/(experiment|autonomous|trajectory|evidence|blocker|research|guidance|full-cycle|full-research-cycle|paper-evidence-audit|paper-normality-audit|submission-readiness)/.test(haystack)) return "experiment";
   return "experiment";
 }
@@ -2534,6 +2553,7 @@ function publicStatusText(value: any, lang: Lang = "zh") {
 function publicLogLineText(line: string, lang: Lang, contextTab?: Tab) {
   const text = String(line || "").trim();
   if (!text) return "";
+  if (isServerDisplayMode() && (contextTab === "find" || contextTab === "read") && containsDisplayedFilePath(text)) return "";
   const lowered = text.toLowerCase();
   const referenceReproductionLine = lowered.includes("selected-base full reference reproduction") || lowered.includes("selected-base full reproduction");
   if (referenceReproductionLine) {
@@ -2617,10 +2637,11 @@ function stableJobProgressSummary(job: any, lang: Lang = "zh") {
   return `${phase} ${status}`;
 }
 
-function displayJobProgressMessage(job: any, lang: Lang = "zh") {
+function displayJobProgressMessage(job: any, lang: Lang = "zh", contextTab?: Tab) {
   if (isHistoricalStoppedResearchCycleJob(job)) return historicalResearchCycleSummary(job, lang)[0].replace(/^[^:：]+[:：]\s*/, "");
   const message = String(job?.progress?.message || "").trim();
   if (!message) return "";
+  if (isServerDisplayMode() && (contextTab === "find" || contextTab === "read") && containsDisplayedFilePath(message)) return stableJobProgressSummary(job, lang);
   const containsTasteLog = message.includes("[TASTE]") || message.startsWith("find_activity=");
   if (!containsTasteLog && !isTransientFindServiceLine(message)) return publicJobMessageText(job, lang);
   const prefix = containsTasteLog ? message.slice(0, Math.max(0, message.indexOf("[TASTE]")).valueOf()).trim().replace(/[；;]\s*$/, "") : "";
@@ -2739,7 +2760,7 @@ function jobDisplayTitle(job: any, lang: Lang) {
     idea: { zh: "idea", en: "idea" },
     plan: { zh: "plan", en: "plan" },
     "plan-polish": { zh: "plan", en: "plan" },
-    email: { zh: "paper", en: "paper" },
+    email: { zh: "email", en: "email" },
     literature: { zh: "find", en: "find" },
     environment: { zh: "environment", en: "environment" },
     experiment: { zh: "experiment", en: "experiment" },
@@ -3370,6 +3391,22 @@ function isPathLikeText(value: any): boolean {
   return /^\/[^\s]+/.test(text) || /^~\/[^\s]+/.test(text) || /^[A-Za-z]:[\\/][^\s]+/.test(text);
 }
 
+function containsDisplayedFilePath(value: any): boolean {
+  const text = String(value ?? "").trim();
+  if (!text) return false;
+  const labeledPath = /(?:文件(?:路径|位置)|本地(?:文件)?路径|file\s*(?:path|location)|artifact\s*path|output\s*path|log\s*path|\bpath)\s*[:：=]/i;
+  const unixPath = /(?:^|[\s"'`(=：:])(?:~\/|\/(?:home|tmp|var|opt|mnt|media|srv|root|workspace|Users|data|projects|framework|modules|web|state|runs)\/)[^\s"'`，；;,)\]]+/;
+  const windowsPath = /(?:^|[\s"'`(=：:])[A-Za-z]:[\\/][^\s"'`，；;,)\]]+/;
+  return labeledPath.test(text) || unixPath.test(text) || windowsPath.test(text);
+}
+
+function withoutDisplayedFilePathLines(value: any): string {
+  return String(value ?? "")
+    .split(/\r?\n/)
+    .filter((line) => !containsDisplayedFilePath(line))
+    .join("\n");
+}
+
 function publicArtifactPath(value: any, fallback = "", lang: Lang = "zh"): string {
   const text = String(value ?? "").trim();
   if (!text) return fallback;
@@ -3650,7 +3687,7 @@ function initialTabFromLocation(): Tab {
   const params = new URLSearchParams(window.location.search);
   const raw = params.get("tab") || params.get("stage") || localStorage.getItem("active_tab") || "find";
   const normalized = raw === "paper" || raw === "paper-write" || raw === "paper_write" ? "paperWrite" : raw === "idea" ? "ideas" : raw;
-  return allowed.has(normalized as Tab) ? normalized as Tab : "find";
+  return allowed.has(normalized as Tab) && !isUnsupportedTab(normalized as Tab) ? normalized as Tab : "find";
 }
 
 function tabUrlValue(tab: Tab) {
@@ -3761,10 +3798,12 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
   const [activeArtifact, setActiveArtifact] = useState("");
   const [emailReceiversOverride, setEmailReceiversOverride] = useState("");
   const [emailSubject, setEmailSubject] = useState("");
+  const [emailSendState, setEmailSendState] = useState<"idle" | "sending" | "success" | "error">("idle");
   const t = TEXT[lang];
   const unsavedLLMConfigDraft = hasUnsavedLLMConfigDraft(config);
 
   function setTab(nextTab: Tab) {
+    if (isUnsupportedTab(nextTab)) return;
     setTabState(nextTab);
     localStorage.setItem("active_tab", nextTab);
     const params = new URLSearchParams(window.location.search);
@@ -4222,6 +4261,14 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
       },
     }));
     setSaveMessage("");
+  }
+
+  function updateAutoEmailStage(stage: string, checked: boolean) {
+    const current = asArray(config.email?.auto_send_stages).map(String);
+    updateEmailConfig(
+      "auto_send_stages",
+      checked ? [...new Set([...current, stage])] : current.filter((item) => item !== stage),
+    );
   }
 
   function updateRuntimeDraft(key: string, value: any) {
@@ -6719,20 +6766,21 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
 
   function artifactPanelContent(artifact: any, options: { raw?: boolean } = {}) {
     const rawContent = String(artifact?.content ?? "");
-    if (artifact?.name === "idea.md") return rawContent;
+    const forCurrentTab = (content: string) => isServerDisplayMode() && (tab === "find" || tab === "read") ? withoutDisplayedFilePathLines(content) : content;
+    if (artifact?.name === "idea.md") return forCurrentTab(rawContent);
     const localizedContent = lang === "zh"
       ? String(artifact?.content_zh ?? artifact?.content ?? "")
       : String(artifact?.content_en ?? artifact?.content ?? "");
     if (artifact?.name === "source_status.md") {
       const structuredRows = expandedSourceStatusRows(findResults || findProgress);
       const localizedSourceStatus = sourceStatusArtifactMarkdown(structuredRows, lang);
-      if (localizedSourceStatus) return options.raw ? publicMarkdownArtifact(localizedSourceStatus) : localizedSourceStatus;
+      if (localizedSourceStatus) return forCurrentTab(options.raw ? publicMarkdownArtifact(localizedSourceStatus) : localizedSourceStatus);
     }
-    if (options.raw) return publicMarkdownArtifact(rawContent);
+    if (options.raw) return forCurrentTab(publicMarkdownArtifact(rawContent));
     if (artifact?.name !== "find.md" && lang === "en" && containsCJKText(localizedContent)) {
       return "This artifact is authored in Chinese by a module controller. The structured English projection for this step is shown above; use Raw to inspect the original artifact. No scientific status is changed by this display fallback.";
     }
-    return publicLogText(localizedContent, lang);
+    return forCurrentTab(publicLogText(localizedContent, lang));
   }
 
 
@@ -7356,23 +7404,25 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
 
   async function runEmail() {
     const artifactRunId = renderedRunArtifactsRunId || runId;
-    if (!artifactRunId) return;
+    if (!artifactRunId || emailSendState === "sending") return;
     try {
+      setEmailSendState("sending");
       setError("");
       const nextConfig = configWithCurrentFindSelection();
       await saveConfig(nextConfig);
       setConfig(nextConfig);
       const receivers = emailReceiversOverride.trim() ? splitList(emailReceiversOverride) : [];
       const artifactNames = visibleRunArtifacts.map((artifact) => artifact.name);
-      const nextJob = await startEmail({
+      await startEmail({
         run_id: artifactRunId,
         artifact_names: artifactNames,
         receivers,
         subject: emailSubject,
         include_ranking: true,
       });
-      attachJob(nextJob);
+      setEmailSendState("success");
     } catch (err) {
+      setEmailSendState("error");
       setError(String(err));
     }
   }
@@ -7475,33 +7525,56 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
           </div>
           <details className="roleSettings">
             <summary>{t.emailSettings}</summary>
-            <p className="help">{t.emailHelp}</p>
-            <label>{t.smtpServer}</label>
-            <input value={config.email.smtp_server} onChange={(e) => updateEmailConfig("smtp_server", e.target.value)} placeholder="smtp.example.com" />
-            <label>{t.smtpPort}</label>
-            <input value={config.email.smtp_port} onChange={(e) => updateEmailConfig("smtp_port", Number(e.target.value))} type="number" min="1" />
-            <label>{t.emailSender}</label>
-            <input value={config.email.sender} onChange={(e) => updateEmailConfig("sender", e.target.value)} placeholder="sender@example.com" />
+            {!isServerDisplayMode() && (
+              <>
+                <p className="help">{t.emailHelp}</p>
+                <label>{t.smtpServer}</label>
+                <input value={config.email.smtp_server} onChange={(e) => updateEmailConfig("smtp_server", e.target.value)} placeholder="smtp.example.com" />
+                <label>{t.smtpPort}</label>
+                <input value={config.email.smtp_port} onChange={(e) => updateEmailConfig("smtp_port", Number(e.target.value))} type="number" min="1" />
+                <label>{t.emailSender}</label>
+                <input value={config.email.sender} onChange={(e) => updateEmailConfig("sender", e.target.value)} placeholder="sender@example.com" />
+              </>
+            )}
             <label>{t.emailReceivers}</label>
-            <p className="help">{t.emailReceiversHelp}</p>
+            {!isServerDisplayMode() && <p className="help">{t.emailReceiversHelp}</p>}
             <input value={asArray(config.email?.receivers).join(", ")} onChange={(e) => updateEmailConfig("receivers", splitList(e.target.value))} placeholder="receiver@example.com" />
-            <label>{t.smtpPassword}</label>
-            <input value={config.email.smtp_password || ""} onChange={(e) => updateEmailConfig("smtp_password", e.target.value)} placeholder={config.email.smtp_password_saved ? (lang === "zh" ? "已保存，输入新密码替换" : "Saved, enter a new password to replace") : ""} type="password" autoComplete="new-password" />
-            {config.email.smtp_password_saved && !config.email.smtp_password && <p className="help">{savedSecretHint(config.email.smtp_password_saved)}</p>}
-            <label className="switch">
-              <input type="checkbox" checked={config.email.manual_enabled} onChange={(e) => updateEmailConfig("manual_enabled", e.target.checked)} />
-              {t.sendEmail}
-            </label>
+            {!isServerDisplayMode() && (
+              <>
+                <label>{t.smtpPassword}</label>
+                <input value={config.email.smtp_password || ""} onChange={(e) => updateEmailConfig("smtp_password", e.target.value)} placeholder={config.email.smtp_password_saved ? (lang === "zh" ? "已保存，输入新密码替换" : "Saved, enter a new password to replace") : ""} type="password" autoComplete="new-password" />
+                {config.email.smtp_password_saved && !config.email.smtp_password && <p className="help">{savedSecretHint(config.email.smtp_password_saved)}</p>}
+                <label className="switch">
+                  <input type="checkbox" checked={config.email.manual_enabled} onChange={(e) => updateEmailConfig("manual_enabled", e.target.checked)} />
+                  {t.sendEmail}
+                </label>
+              </>
+            )}
             <label className="switch">
               <input type="checkbox" checked={config.email.auto_send_enabled} onChange={(e) => updateEmailConfig("auto_send_enabled", e.target.checked)} />
               {t.autoEmail}
             </label>
             <label>{t.autoEmailStages}</label>
-            <input value={asArray(config.email?.auto_send_stages).join(", ")} onChange={(e) => updateEmailConfig("auto_send_stages", splitList(e.target.value))} placeholder="find, read, idea, plan" />
+            {isServerDisplayMode() ? (
+              <div className="checkGrid">
+                {EMAIL_AUTO_STAGES.map((stage) => (
+                  <label className="checkItem" key={stage}>
+                    <input
+                      type="checkbox"
+                      checked={asArray(config.email?.auto_send_stages).includes(stage)}
+                      onChange={(e) => updateAutoEmailStage(stage, e.target.checked)}
+                    />
+                    <span>{stage}</span>
+                  </label>
+                ))}
+              </div>
+            ) : (
+              <input value={asArray(config.email?.auto_send_stages).join(", ")} onChange={(e) => updateEmailConfig("auto_send_stages", splitList(e.target.value))} placeholder="find, read, idea, plan" />
+            )}
           </details>
         </details>
 
-        {renderARRuntimePanel()}
+        {!isServerDisplayMode() && renderARRuntimePanel()}
 
         <details className="panel runs sidebarDetails">
           <summary><span>{t.runs}</span><small>{runId || (lang === "zh" ? "未选择" : "none")}</small></summary>
@@ -7524,11 +7597,15 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
 
       <section className="workspace">
         <nav className="tabs">
-          {(["find", "read", "ideas", "plan", "environment", "experiment", "paperWrite"] as Tab[]).map((item) => (
-            <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>
-              {t[item]}
-            </button>
-          ))}
+          {(["find", "read", "ideas", "plan", "environment", "experiment", "paperWrite"] as Tab[]).map((item) => {
+            const unsupported = isUnsupportedTab(item);
+            if (unsupported) return (
+              <span className="unsupportedTabHint" title="暂不支持" key={item}>
+                <button disabled title="暂不支持">{t[item]}</button>
+              </span>
+            );
+            return <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{t[item]}</button>;
+          })}
         </nav>
 
         {error && <div className="error">{error}</div>}
@@ -8302,7 +8379,7 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
                     detail: `${lang === "zh" ? "具体步骤" : "Step"}：${detailedFindProgress.stepLabel} · ${lang === "zh" ? "正在进行" : "Now"}：${detailedFindProgress.action}`,
                     ariaLabel: lang === "zh" ? "Find 当前阶段进度" : "Current Find stage progress",
                   } : item.progress ? {
-                    message: displayJobProgressMessage(item, lang),
+                    message: displayJobProgressMessage(item, lang, tab),
                     percent: progressPercent,
                     measured: progressTotal > 0,
                     detail: progressTotal > 0
@@ -8358,7 +8435,12 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
                 <div className="emailBox">
                   <input value={emailSubject} onChange={(e) => setEmailSubject(e.target.value)} placeholder={t.emailSubject} />
                   <input value={emailReceiversOverride} onChange={(e) => setEmailReceiversOverride(e.target.value)} placeholder={t.emailReceivers} />
-                  <button className="primary" onClick={runEmail} disabled={!renderedRunArtifactsRunId || !config.email.manual_enabled}>{t.sendEmail}</button>
+                  <div className="emailSendAction">
+                    <button className="primary" onClick={runEmail} disabled={!renderedRunArtifactsRunId || emailSendState === "sending" || (!isServerDisplayMode() && !config.email.manual_enabled)}>{t.sendEmail}</button>
+                    {emailSendState === "sending" && <span className="emailSendStatus">{t.sendingEmail}</span>}
+                    {emailSendState === "success" && <span className="emailSendStatus success">{t.emailSent}</span>}
+                    {emailSendState === "error" && <span className="emailSendStatus error">{t.emailSendFailed}</span>}
+                  </div>
                 </div>
                 <div className="artifactTabs">
                   {renderedRunArtifacts.map((artifact) => (
@@ -8369,7 +8451,7 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
                 </div>
                 {currentArtifact && (
                   <div className="artifactView">
-                    {currentArtifact.path && (
+                    {currentArtifact.path && (!isServerDisplayMode() || (tab !== "find" && tab !== "read")) && (
                       <p className="artifactPath"><strong>{t.artifactPath}:</strong> {publicArtifactPath(currentArtifact.path, "", lang)}</p>
                     )}
                     <div className="artifactToggle">
@@ -8425,7 +8507,8 @@ function App() {
   const [registerUsername, setRegisterUsername] = useState("");
   const [email, setEmail] = useState("");
   const [verificationCode, setVerificationCode] = useState("");
-  const [password, setPassword] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [registerPassword, setRegisterPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [authError, setAuthError] = useState("");
   const [authNotice, setAuthNotice] = useState("");
@@ -8478,7 +8561,7 @@ function App() {
 
   async function submitAuth(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (mode === "register" && password !== confirmPassword) {
+    if (mode === "register" && registerPassword !== confirmPassword) {
       setAuthError("两次输入的密码不一致。");
       return;
     }
@@ -8487,11 +8570,12 @@ function App() {
     setAuthNotice("");
     try {
       const response = mode === "login"
-        ? await login(identifier, password)
-        : await register(registerUsername, email, password, verificationCode);
+        ? await login(identifier, loginPassword)
+        : await register(registerUsername, email, registerPassword, verificationCode);
       localStorage.removeItem("selected_project");
       setAccount(response.user);
-      setPassword("");
+      setLoginPassword("");
+      setRegisterPassword("");
       setConfirmPassword("");
     } catch (error) {
       setAuthError(authErrorMessage(error));
@@ -8551,8 +8635,18 @@ function App() {
                 </div>
               </>
             )}
-            <label htmlFor="auth-password">密码</label>
-            <input id="auth-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === "login" ? "current-password" : "new-password"} required minLength={8} maxLength={128} />
+            <label htmlFor={mode === "login" ? "auth-login-password" : "auth-register-password"}>密码</label>
+            <input
+              key={mode}
+              id={mode === "login" ? "auth-login-password" : "auth-register-password"}
+              type="password"
+              value={mode === "login" ? loginPassword : registerPassword}
+              onChange={(event) => mode === "login" ? setLoginPassword(event.target.value) : setRegisterPassword(event.target.value)}
+              autoComplete={mode === "login" ? "current-password" : "new-password"}
+              required
+              minLength={8}
+              maxLength={128}
+            />
             {mode === "register" && (
               <>
                 <label htmlFor="auth-password-confirm">确认密码</label>

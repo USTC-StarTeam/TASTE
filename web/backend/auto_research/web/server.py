@@ -1806,7 +1806,7 @@ def _public_taste_stage(stage: Any) -> str:
     if lowered in {'healthcheck', 'status', 'init'}:
         return 'environment'
     if lowered == 'email':
-        return 'paper'
+        return 'email'
     if lowered in {"writing-chat", "paper-chat"} or lowered == 'paper' or lowered.startswith('paper-') or lowered.startswith('paper_'):
         return 'paper'
     if lowered in {"environment-chat"}:
@@ -1837,7 +1837,7 @@ def _public_taste_stage(stage: Any) -> str:
         return 'environment'
     if any(marker in lowered for marker in ['paper-evidence-audit', 'paper-normality-audit', 'submission-readiness']):
         return 'experiment'
-    if any(marker in lowered for marker in ['paper-pipeline', 'paper-preview', 'paper-figure', 'conference-preview', 'latex', 'email']):
+    if any(marker in lowered for marker in ['paper-pipeline', 'paper-preview', 'paper-figure', 'conference-preview', 'latex']):
         return 'paper'
     if any(marker in lowered for marker in ['experiment', 'autonomous', 'trajectory', 'evidence', 'blocker', 'research', 'guidance']):
         return 'experiment'
@@ -1877,6 +1877,8 @@ def _public_full_cycle_stage(raw_stage: Any, progress: Any = None, result: Any =
 
 class JobState:
     def __init__(self, job_id: str, stage: str):
+        if str(job_id or "").startswith(("email_", "email-")):
+            stage = "email"
         self.job_id = job_id
         self.stage = stage
         self.status = "queued"
@@ -1889,8 +1891,8 @@ class JobState:
         self.cancelled_at = ""
         self.run_id = ""
         self.progress = {"phase": "queued", "current": 0, "total": 0, "percent": 0, "message": "Queued"}
-        self.internal = False
-        self.display = ""
+        self.internal = stage == "email"
+        self.display = "hidden" if self.internal else ""
         self.progress_version = 0
         self.done = threading.Event()
         account = _CURRENT_ACCOUNT.get()
@@ -1907,7 +1909,9 @@ class JobState:
         job.internal = bool(data.get("internal"))
         job.display = str(data.get("display") or "")
         job.owner_id = str(data.get("owner_id") or "")
-        if job.stage == "safe-unblock" or job.job_id.startswith("safe-unblock_"):
+        if job.stage in {"safe-unblock", "email"} or job.job_id.startswith(("safe-unblock_", "email_", "email-")):
+            if job.job_id.startswith(("email_", "email-")):
+                job.stage = "email"
             job.internal = True
             job.display = job.display or "hidden"
         job.error = str(data.get("error") or "")
@@ -10897,10 +10901,19 @@ def _auto_email_after_success(stage: str, result: Any) -> None:
     email_config = config.email
     if not email_config.auto_send_enabled or stage not in set(email_config.auto_send_stages):
         return
-    if not email_config.smtp_server or not email_config.sender or not email_config.smtp_password or not email_config.receivers:
+    if not AUTH_EMAIL_SENDER.configured or not email_config.receivers:
         return
     request = EmailJobRequest(run_id=run_id, subject=f"TASTE {stage} complete: {run_id}")
-    start_job("email", lambda log, should_cancel, _progress: send_run_email(request, config, log, should_cancel))
+    start_job(
+        "email",
+        lambda log, should_cancel, _progress: send_run_email(
+            request,
+            config,
+            AUTH_EMAIL_SENDER,
+            log,
+            should_cancel,
+        ),
+    )
 
 
 def start_job(stage: str, fn: Callable[[Callable[[str], None], Callable[[], bool], Callable[[str, int, int, str], None]], Any], job_id: str | None = None, initial_result: Any = None) -> JobState:
@@ -12083,8 +12096,18 @@ def api_email(request: EmailJobRequest) -> dict:
     if not _account_owns_run(request.run_id):
         return JSONResponse({"error": "run not found"}, status_code=404)
     config = load_config()
-    job = start_job("email", lambda log, should_cancel, _progress: send_run_email(request, config, log, should_cancel))
-    return _public_account_payload(job.as_dict())
+    try:
+        send_run_email(
+            request,
+            config,
+            AUTH_EMAIL_SENDER,
+            log=lambda _message: None,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except VerificationEmailError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    return {"status": "done", "run_id": request.run_id}
 
 
 @app.get("/api/projects")

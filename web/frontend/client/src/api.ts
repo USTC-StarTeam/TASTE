@@ -322,7 +322,7 @@ export async function startPlanPolish(runId: string, planId: string, versionId: 
 }
 
 export async function startEmail(payload: { run_id: string; artifact_names?: string[]; receivers?: string[]; subject?: string; include_ranking?: boolean }) {
-  return json<Job>(
+  return json<{ status: "done"; run_id: string }>(
     await apiFetch("/api/jobs/email", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
