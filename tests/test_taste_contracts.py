@@ -1625,6 +1625,9 @@ def test_reading_run_read_uses_subagent_article_markdown_aggregation_and_audit(m
     assert "method_summary_table" not in payload["read_markdown_aggregation"]
     assert "ARTICLE_MD_BY_SUBAGENT" in read_md
     assert "## 逐篇精读" not in read_md
+    assert "## 1. 论文精读：ARTICLE_MD_BY_SUBAGENT" in read_md
+    assert "### 摘要" in read_md
+    assert "#### 摘要" not in read_md
     assert "- **匹配度：** 9/10\n- **可借鉴性：** 9/10\n- **来源：**" in read_md
     assert "- **论文链接：** URL：[论文页面](<https://example.org/two>)" in read_md
     assert "## 方法总结表格" not in read_md

@@ -2279,6 +2279,7 @@ function jobProgressPhaseLabel(job: any, lang: Lang = "zh") {
   if (normalized === "current_find_read") return lang === "zh" ? "当前 Find 精读" : "current Find reading";
   if (normalized === "full_text") return lang === "zh" ? "爬文章" : "acquire papers";
   if (normalized === "deep_read") return lang === "zh" ? "读文章" : "read papers";
+  if (normalized === "scoring") return lang === "zh" ? "重新打分" : "rescore papers";
   return phase.replace(/_/g, " ");
 }
 
@@ -8269,6 +8270,7 @@ function App() {
                   const readOverall = canonicalJobStage(item) === "read" && item.progress?.read_progress && typeof item.progress.read_progress === "object"
                     ? item.progress.read_progress
                     : null;
+                  const readScoring = canonicalJobStage(item) === "read" && String(item.progress?.phase || "").toLowerCase().replace(/[\s-]+/g, "_") === "scoring";
                   const progressTotal = Number(readOverall?.overall_total ?? item.progress?.total ?? 0);
                   const progressPercent = Number(readOverall?.overall_percent ?? item.progress?.percent ?? 0);
                   const progressView = detailedFindProgress ? {
@@ -8278,10 +8280,10 @@ function App() {
                     detail: `${lang === "zh" ? "具体步骤" : "Step"}：${detailedFindProgress.stepLabel} · ${lang === "zh" ? "正在进行" : "Now"}：${detailedFindProgress.action}`,
                     ariaLabel: lang === "zh" ? "Find 当前阶段进度" : "Current Find stage progress",
                   } : item.progress ? {
-                    message: displayJobProgressMessage(item, lang),
+                    message: readScoring ? jobProgressPhaseLabel(item, lang) : displayJobProgressMessage(item, lang),
                     percent: progressPercent,
                     measured: progressTotal > 0,
-                    detail: progressTotal > 0
+                    detail: readScoring ? "" : progressTotal > 0
                       ? `${jobProgressPhaseLabel(item, lang)} / ${item.progress.current} / ${item.progress.total}`
                       : `${jobProgressPhaseLabel(item, lang)} ${jobStatusLabel(item.status, lang)}`,
                     ariaLabel: "",
@@ -8305,10 +8307,10 @@ function App() {
                         <div className="progressBlock" data-testid={detailedFindProgress ? "find-task-progress" : undefined}>
                           <div className="progressMeta">
                             <span>{progressView.message}</span>
-                            {progressView.measured && <strong>{progressView.percent}%</strong>}
+                            {progressView.measured && !readScoring && <strong>{progressView.percent}%</strong>}
                           </div>
                           {progressView.measured && <progress aria-label={progressView.ariaLabel || undefined} value={progressView.percent} max="100" />}
-                          <small>{progressView.detail}</small>
+                          {progressView.detail && <small>{progressView.detail}</small>}
                         </div>
                       )}
                       <pre>{consoleLines.join("\n")}</pre>

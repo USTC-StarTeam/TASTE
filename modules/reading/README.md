@@ -280,30 +280,30 @@ projects/<project>/planning/finding/reading_runs/<run-id>/
 ```markdown
 # 论文精读
 
-### 001. Paper Title
+## 001. Paper Title
 
 - **匹配度：** 9/10
 - **可借鉴性：** 8/10
 - **来源：** ICLR 2026 Oral
 - **论文链接：** URL：[论文页面](<https://example.org/paper>)；PDF：[PDF](<https://example.org/paper.pdf>)
 
-#### 摘要
+### 摘要
 
 ...
 
-#### 动机与核心创新
+### 动机与核心创新
 
 ...
 
-#### 方法
+### 方法
 
 ...
 
-#### 实验结果
+### 实验结果
 
 ...
 
-#### 优缺点总结
+### 优缺点总结
 
 ...
 ```

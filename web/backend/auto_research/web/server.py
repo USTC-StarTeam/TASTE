@@ -3647,6 +3647,7 @@ def _read_job_progress_from_logs(
     completed_deep_read: set[int] = set()
     exact_totals: set[str] = set()
     signal_seen = False
+    scoring_seen = False
 
     def mark_total(key: str, total: int, workers: int = 0, *, exact: bool = False) -> None:
         if total > 0:
@@ -3755,6 +3756,21 @@ def _read_job_progress_from_logs(
                 phases["deep_read"]["last_status"] = status_text
             details.append(_read_log_detail("文章阅读完成", index, total, title, status_text, count_label=f"第{index}篇"))
             continue
+        scoring_phase = re.search(r"final reading scoring phase:\s*(\d+)\s+completed reading artifacts", text, flags=re.I)
+        if scoring_phase:
+            signal_seen = True
+            scoring_seen = True
+            phases["deep_read"]["active_index"] = 0
+            phases["deep_read"]["active_title"] = ""
+            continue
+        scoring_done = re.search(r"final reading scoring complete:\s*scored\s*=\s*(\d+)\s*/\s*(\d+)", text, flags=re.I)
+        if scoring_done:
+            signal_seen = True
+            scoring_seen = True
+            continue
+        if re.search(r"warning:\s*final reading scoring failed", text, flags=re.I):
+            signal_seen = True
+            scoring_seen = True
         if re.search(r"final read\.md aggregation phase", text, flags=re.I):
             signal_seen = True
             details.append("正在生成最终 read.md：汇总所有论文精读结果")
@@ -3907,12 +3923,19 @@ def _read_job_progress_from_logs(
     full_total_for_stage = int(phases["full_text"].get("total") or 0)
     full_current_for_stage = int(phases["full_text"].get("current") or 0)
     if cancelled_status:
-        current_stage = "deep_read" if str(phases["deep_read"].get("status") or "") == "cancelled" else "full_text"
-        cancelled_phase = phases[current_stage]
-        cancelled_label = str(cancelled_phase.get("label") or ("读文章" if current_stage == "deep_read" else "爬文章"))
-        cancelled_current = int(cancelled_phase.get("current") or 0)
-        cancelled_total = int(cancelled_phase.get("total") or 0)
-        current_action = f"任务已取消：{cancelled_label}停在 {cancelled_current}/{cancelled_total}。" if cancelled_total else "任务已取消。"
+        if scoring_seen:
+            current_stage = "scoring"
+            current_action = "任务已取消：重新打分已停止。"
+        else:
+            current_stage = "deep_read" if str(phases["deep_read"].get("status") or "") == "cancelled" else "full_text"
+            cancelled_phase = phases[current_stage]
+            cancelled_label = str(cancelled_phase.get("label") or ("读文章" if current_stage == "deep_read" else "爬文章"))
+            cancelled_current = int(cancelled_phase.get("current") or 0)
+            cancelled_total = int(cancelled_phase.get("total") or 0)
+            current_action = f"任务已取消：{cancelled_label}停在 {cancelled_current}/{cancelled_total}。" if cancelled_total else "任务已取消。"
+    elif scoring_seen:
+        current_stage = "scoring"
+        current_action = "重新打分"
     elif (
         str(phases["full_text"].get("status") or "") == "blocked"
         and phases["full_text"].get("last_status")
@@ -4027,7 +4050,7 @@ def _read_job_progress_payload(logs: Any, progress: Any = None, result: Any = No
 def _public_read_job_logs(logs: list[str], progress: dict[str, Any], result: dict[str, Any], *, limit: int = 24) -> list[str]:
     read_progress = _read_job_progress_from_logs(logs, progress, result, status=result.get("status") or progress.get("phase"))
     live_status = str(result.get("status") or progress.get("phase") or "").strip().lower()
-    live_read_job = live_status in {"queued", "running", "cancelling", "full_text", "deep_read", "read"}
+    live_read_job = live_status in {"queued", "running", "cancelling", "full_text", "deep_read", "scoring", "read"}
     if not read_progress.get("has_signal"):
         out: list[str] = []
         action = str(read_progress.get("current_action") or progress.get("message") or result.get("summary") or "").strip()
@@ -4065,7 +4088,7 @@ def _public_read_job_logs(logs: list[str], progress: dict[str, Any], result: dic
     action = str(read_progress.get("current_action") or "").strip()
     if live_status in {"error", "failed", "fail"}:
         action = _public_job_summary_text(action)
-    if action:
+    if action and str(read_progress.get("current_stage") or "") != "scoring":
         header.append("当前状态：" + action)
     run_id = str(result.get("run_id") or result.get("find_run_id") or "").strip()
     if run_id:
@@ -4086,7 +4109,7 @@ def _public_read_job_logs(logs: list[str], progress: dict[str, Any], result: dic
             header.append(f"阶段进度：{label} {int(current_phase.get('current') or 0)}/{total}")
         else:
             header.append(f"阶段进度：{label} 准备中")
-    else:
+    elif current_stage != "scoring":
         full_total = int(full_text.get("total") or 0)
         if full_total > 0:
             header.append(f"阶段进度：爬文章 {int(full_text.get('current') or 0)}/{full_total}")
