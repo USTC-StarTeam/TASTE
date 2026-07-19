@@ -85,8 +85,8 @@ class ReadingScoringTests(unittest.TestCase):
             title="Paper",
             item={"match_score": 8.5, "transferability_score": 9},
         )
-        self.assertIn("### 1. Paper\n\n**匹配度：** 8.5/10", rendered)
-        self.assertIn("**可借鉴性：** 9/10", rendered)
+        self.assertIn("### 1. Paper\n\n- **匹配度：** 8.5/10", rendered)
+        self.assertIn("- **可借鉴性：** 9/10", rendered)
 
     def test_score_prompt_requires_every_reading_artifact_and_two_dimensions(self) -> None:
         runtime_root = READING_ROOT / ".runtime"
