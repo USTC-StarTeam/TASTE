@@ -442,6 +442,9 @@ export function watchJob(jobId: string, onMessage: (message: any) => void) {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const socket = new WebSocket(`${protocol}://${window.location.host}/ws/jobs/${jobId}`);
   socket.onmessage = (event) => onMessage(JSON.parse(event.data));
+  socket.addEventListener("close", (event) => {
+    if (event.code === 4401) window.dispatchEvent(new Event("taste:auth-required"));
+  });
   return socket;
 }
 

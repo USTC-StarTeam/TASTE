@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import stat
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -72,7 +73,7 @@ def test_auth_store_hashes_passwords_and_expires_sessions(tmp_path):
     middle = store.create_session(user)
     newest = store.create_session(user)
     assert store.user_for_session(oldest) is None
-    assert store.user_for_session(middle) == user
+    assert store.user_for_session(middle) is None
     assert store.user_for_session(newest) == user
 
     try:
@@ -92,7 +93,112 @@ def test_session_limit_holds_for_concurrent_logins(tmp_path):
     user = store.register("concurrent", "concurrent@example.com", "correct-horse", verification.code)
     with ThreadPoolExecutor(max_workers=6) as executor:
         tokens = list(executor.map(lambda _: store.create_session(user), range(6)))
-    assert sum(store.user_for_session(token) == user for token in tokens) == 2
+    assert sum(store.user_for_session(token) == user for token in tokens) == 1
+
+
+def test_new_login_invalidates_previous_session_immediately(tmp_path, monkeypatch):
+    import auto_research.web.server as server
+
+    _, sender = configure_api_auth(server, tmp_path, monkeypatch)
+    first = TestClient(server.app)
+    second = TestClient(server.app)
+    register_account(first, sender, "single_session", "single-session@example.com", "password-one")
+    assert first.get("/api/auth/me").status_code == 200
+
+    login_response = second.post(
+        "/api/auth/login",
+        json={"identifier": "single_session", "password": "password-one"},
+    )
+    assert login_response.status_code == 200
+    assert second.get("/api/auth/me").status_code == 200
+    assert first.get("/api/auth/me").status_code == 401
+
+
+def test_websocket_closes_when_session_is_replaced(monkeypatch):
+    import auto_research.web.server as server
+    from auto_research.web.auth import AuthUser, SESSION_COOKIE
+
+    account = AuthUser(id="a" * 32, username="alice")
+    lookups = iter([account, None])
+    monkeypatch.setattr(server.AUTH_STORE, "user_for_session", lambda _token: next(lookups))
+
+    class RevokedWebSocket:
+        cookies = {SESSION_COOKIE: "replaced-session"}
+
+        def __init__(self):
+            self.accepted = False
+            self.closed_with = None
+
+        async def accept(self):
+            self.accepted = True
+
+        async def close(self, code: int):
+            self.closed_with = code
+
+    socket = RevokedWebSocket()
+    asyncio.run(server.ws_job(socket, "active-job"))
+    assert socket.accepted is True
+    assert socket.closed_with == 4401
+
+
+def test_password_reset_revokes_a_login_that_started_before_reset(tmp_path, monkeypatch):
+    from auto_research.web.auth import (
+        AuthStore,
+        VERIFICATION_PURPOSE_PASSWORD_RESET,
+    )
+
+    store = AuthStore(tmp_path / "auth.sqlite3")
+    registration = store.begin_email_verification("login-race@example.com", "test-client")
+    store.register("login_race", "login-race@example.com", "password-old", registration.code)
+    reset = store.begin_email_verification(
+        "login-race@example.com",
+        "test-client",
+        VERIFICATION_PURPOSE_PASSWORD_RESET,
+    )
+
+    password_checked = threading.Event()
+    reset_started = threading.Event()
+    original_authenticate = store._authenticate_with_connection
+
+    def paused_authenticate(connection, identifier, password):
+        user = original_authenticate(connection, identifier, password)
+        password_checked.set()
+        assert reset_started.wait(timeout=5)
+        return user
+
+    monkeypatch.setattr(store, "_authenticate_with_connection", paused_authenticate)
+    login_result = {}
+    reset_errors = []
+
+    login_thread = threading.Thread(
+        target=lambda: login_result.setdefault(
+            "value",
+            store.authenticate_and_create_session("login_race", "password-old"),
+        )
+    )
+
+    def run_reset():
+        reset_started.set()
+        try:
+            store.reset_password("login-race@example.com", "password-new", reset.code)
+        except Exception as exc:  # pragma: no cover - asserted below for clearer thread failures
+            reset_errors.append(exc)
+
+    login_thread.start()
+    assert password_checked.wait(timeout=5)
+    reset_thread = threading.Thread(target=run_reset)
+    reset_thread.start()
+    login_thread.join(timeout=10)
+    reset_thread.join(timeout=10)
+
+    assert login_thread.is_alive() is False
+    assert reset_thread.is_alive() is False
+    assert reset_errors == []
+    logged_in = login_result["value"]
+    assert logged_in is not None
+    assert store.user_for_session(logged_in[1]) is None
+    assert store.authenticate("login_race", "password-old") is None
+    assert store.authenticate("login_race", "password-new") is not None
 
 
 def test_email_verification_rate_limit_and_email_login(tmp_path, monkeypatch):
@@ -219,7 +325,7 @@ def test_password_reset_api_uses_registered_email_and_new_password(tmp_path, mon
     _, sender = configure_api_auth(server, tmp_path, monkeypatch)
     client = TestClient(server.app)
     register_account(client, sender, "api_reset", "api-reset@example.com", "password-old")
-    assert client.post("/api/auth/logout").status_code == 200
+    assert client.get("/api/auth/me").status_code == 200
 
     missing = client.post(
         "/api/auth/password-reset/verification-code",
@@ -243,6 +349,7 @@ def test_password_reset_api_uses_registered_email_and_new_password(tmp_path, mon
         },
     )
     assert reset_response.status_code == 200
+    assert client.get("/api/auth/me").status_code == 401
     assert client.post(
         "/api/auth/login",
         json={"identifier": "api_reset", "password": "password-old"},

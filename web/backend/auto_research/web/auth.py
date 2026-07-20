@@ -15,7 +15,7 @@ from uuid import uuid4
 
 SESSION_COOKIE = "taste_session"
 SESSION_DAYS = 7
-SESSION_LIMIT_PER_USER = 2
+SESSION_LIMIT_PER_USER = 1
 PASSWORD_ITERATIONS = 310_000
 VERIFICATION_CODE_ITERATIONS = 120_000
 VERIFICATION_CODE_TTL = timedelta(minutes=10)
@@ -433,7 +433,12 @@ class AuthStore:
             connection.execute("DELETE FROM sessions WHERE user_id = ?", (str(user["id"]),))
             connection.execute("DELETE FROM email_verifications WHERE email_key = ?", (email_key,))
 
-    def authenticate(self, identifier_value: object, password_value: object) -> AuthUser | None:
+    def _authenticate_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        identifier_value: object,
+        password_value: object,
+    ) -> AuthUser | None:
         identifier = unicodedata.normalize("NFKC", str(identifier_value or "")).strip()
         username_key: str | None = None
         email_key: str | None = None
@@ -448,24 +453,23 @@ class AuthStore:
         if username_key is None and email_key is None:
             return None
         password = str(password_value or "")
-        with self._connect() as connection:
-            row = None
-            if username_key is not None:
-                row = connection.execute(
-                    """
-                    SELECT id, username, email, password_salt, password_hash
-                    FROM users WHERE username_key = ?
-                    """,
-                    (username_key,),
-                ).fetchone()
-            if row is None and email_key is not None:
-                row = connection.execute(
-                    """
-                    SELECT id, username, email, password_salt, password_hash
-                    FROM users WHERE email_key = ?
-                    """,
-                    (email_key,),
-                ).fetchone()
+        row = None
+        if username_key is not None:
+            row = connection.execute(
+                """
+                SELECT id, username, email, password_salt, password_hash
+                FROM users WHERE username_key = ?
+                """,
+                (username_key,),
+            ).fetchone()
+        if row is None and email_key is not None:
+            row = connection.execute(
+                """
+                SELECT id, username, email, password_salt, password_hash
+                FROM users WHERE email_key = ?
+                """,
+                (email_key,),
+            ).fetchone()
         if row is None:
             return None
         candidate = self._password_hash(password, bytes(row["password_salt"]))
@@ -473,30 +477,49 @@ class AuthStore:
             return None
         return AuthUser(id=str(row["id"]), username=str(row["username"]), email=str(row["email"] or ""))
 
-    def create_session(self, user: AuthUser) -> str:
+    def authenticate(self, identifier_value: object, password_value: object) -> AuthUser | None:
+        with self._connect() as connection:
+            return self._authenticate_with_connection(connection, identifier_value, password_value)
+
+    def _create_session_with_connection(self, connection: sqlite3.Connection, user: AuthUser) -> str:
         token = secrets.token_urlsafe(32)
         now = datetime.now(UTC)
         expires = now + timedelta(days=SESSION_DAYS)
+        connection.execute("DELETE FROM sessions WHERE expires_at <= ?", (now.isoformat(),))
+        connection.execute(
+            "INSERT INTO sessions(token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
+            (self._token_hash(token), user.id, expires.isoformat(), now.isoformat()),
+        )
+        connection.execute(
+            """
+            DELETE FROM sessions
+            WHERE user_id = ? AND token_hash NOT IN (
+                SELECT token_hash FROM sessions
+                WHERE user_id = ?
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?
+            )
+            """,
+            (user.id, user.id, SESSION_LIMIT_PER_USER),
+        )
+        return token
+
+    def create_session(self, user: AuthUser) -> str:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute("DELETE FROM sessions WHERE expires_at <= ?", (now.isoformat(),))
-            connection.execute(
-                "INSERT INTO sessions(token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
-                (self._token_hash(token), user.id, expires.isoformat(), now.isoformat()),
-            )
-            connection.execute(
-                """
-                DELETE FROM sessions
-                WHERE user_id = ? AND token_hash NOT IN (
-                    SELECT token_hash FROM sessions
-                    WHERE user_id = ?
-                    ORDER BY created_at DESC, rowid DESC
-                    LIMIT ?
-                )
-                """,
-                (user.id, user.id, SESSION_LIMIT_PER_USER),
-            )
-        return token
+            return self._create_session_with_connection(connection, user)
+
+    def authenticate_and_create_session(
+        self,
+        identifier_value: object,
+        password_value: object,
+    ) -> tuple[AuthUser, str] | None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            user = self._authenticate_with_connection(connection, identifier_value, password_value)
+            if user is None:
+                return None
+            return user, self._create_session_with_connection(connection, user)
 
     def user_for_session(self, token: object) -> AuthUser | None:
         raw_token = str(token or "").strip()

@@ -11187,10 +11187,13 @@ def api_auth_password_reset(payload: dict[str, Any]):
 
 @app.post("/api/auth/login")
 def api_auth_login(payload: dict[str, Any], request: Request):
-    user = AUTH_STORE.authenticate(payload.get("identifier", payload.get("username")), payload.get("password"))
-    if user is None:
+    authenticated = AUTH_STORE.authenticate_and_create_session(
+        payload.get("identifier", payload.get("username")),
+        payload.get("password"),
+    )
+    if authenticated is None:
         return JSONResponse({"error": "用户名/邮箱或密码错误。"}, status_code=401)
-    token = AUTH_STORE.create_session(user)
+    user, token = authenticated
     response = JSONResponse({"user": _auth_response(user)})
     _set_session_cookie(response, request, token)
     return response
@@ -13299,7 +13302,8 @@ def api_cancel_job(job_id: str) -> dict:
 
 @app.websocket("/ws/jobs/{job_id}")
 async def ws_job(websocket: WebSocket, job_id: str):
-    account = AUTH_STORE.user_for_session(websocket.cookies.get(SESSION_COOKIE))
+    session_token = websocket.cookies.get(SESSION_COOKIE)
+    account = AUTH_STORE.user_for_session(session_token)
     if account is None:
         await websocket.close(code=4401)
         return
@@ -13309,6 +13313,10 @@ async def ws_job(websocket: WebSocket, job_id: str):
         sent = 0
         sent_progress = -1
         while True:
+            current_account = AUTH_STORE.user_for_session(session_token)
+            if current_account is None or current_account.id != account.id:
+                await websocket.close(code=4401)
+                return
             live_job = None
             live_items: list[dict[str, Any]] = []
             if job_id:
