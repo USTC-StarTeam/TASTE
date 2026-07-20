@@ -6111,7 +6111,14 @@ def _has_internal_find_public_text(text: object, *, zh: bool = True) -> bool:
         return False
     markers = _INTERNAL_FIND_PUBLIC_TEXT_MARKERS_ZH if zh else _INTERNAL_FIND_PUBLIC_TEXT_MARKERS_EN
     lowered = raw.lower()
-    return any(str(marker).lower() in lowered for marker in markers)
+    for marker in markers:
+        if marker == "Find":
+            if re.search(r"\bFind\b", raw):
+                return True
+            continue
+        if str(marker).lower() in lowered:
+            return True
+    return False
 
 
 def _public_route_text(item: dict, *, en: bool = False) -> str:

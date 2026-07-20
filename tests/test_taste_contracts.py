@@ -8688,6 +8688,14 @@ def test_find_preserves_natural_llm_recommendation_reason_without_template_rewri
     fixed_opener = "对当前研究方向来说，该论文提供可借鉴的方法结构、评测信号和实验设计参考，能够支持后续研究。"
     assert find_pipeline._recommendation_reason_has_generic_opener(fixed_opener, zh=True) is True
     assert find_pipeline._recommendation_reason_unusable(fixed_opener, zh=True) is True
+    natural_finding_reason_en = (
+        "The paper's findings provide reusable evidence for controlled protein generation and help compare conditioning strategies. "
+        "The authors find that structural constraints improve generation quality, which informs baseline and ablation choices. "
+        "Its conditioning mechanism, evaluation metrics, and experimental protocol are transferable to subsequent research."
+    )
+    assert find_pipeline._has_internal_find_public_text(natural_finding_reason_en, zh=False) is False
+    assert find_pipeline._recommendation_reason_unusable(natural_finding_reason_en, zh=False) is False
+    assert find_pipeline._has_internal_find_public_text("The Find stage produced this recommendation.", zh=False) is True
     assert find_pipeline.FINAL_LLM_SCORE_CACHE_PROMPT_POLICY == "final_title_abstract_prompt_v32_natural_recommendation_reason"
     source = (ROOT / "modules" / "finding" / "scripts" / "flow" / "pipeline.py").read_text(encoding="utf-8")
     assert "do not use a prescribed opening, generic research-direction boilerplate" in source
