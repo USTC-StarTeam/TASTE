@@ -98,7 +98,7 @@ except Exception:
 
     def official_conference_title_search_specs(paper: dict) -> list[dict[str, str]]:
         return []
-from core.common import read_json, safe_slug, scrub_reading_paths_under, write_json, write_text
+from core.common import has_unresolved_prose_latex_markup, read_json, safe_slug, scrub_reading_paths_under, write_json, write_text
 from core.common import CACHE_BATCH_TEST_ROOTS, CACHE_RUN_ROOTS, OUTPUT_ROOT, create_run_dir, existing_run_dir, make_reading_paths_relative, refresh_latest_run, resolve_reading_path, ensure_inside_input, ensure_inside_output, ensure_inside_reading, run_dir, validate_run_id
 try:
     from orchestration.claude_subagent import (
@@ -3748,6 +3748,12 @@ _READ_PUBLIC_SECTION_RE = re.compile(
     re.I | re.S,
 )
 
+READING_CONTENT_QUALITY_POLICY_VERSION = "read_markdown_quality_v1"
+
+
+def _has_chinese_prose(value: object, *, minimum: int = 4) -> bool:
+    return len(re.findall(r"[\u4e00-\u9fff]", str(value or ""))) >= minimum
+
 
 def _sanitize_read_public_text(text: object, max_chars: int = 4000) -> str:
     value = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
@@ -4016,6 +4022,12 @@ def _normalize_local_input_paper(row: dict) -> dict:
     input_metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
     if normalized_metadata or input_metadata:
         paper["metadata"] = {**normalized_metadata, **input_metadata}
+    for mapping in [paper, paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}]:
+        if mapping.get("abstract_zh") and (
+            has_unresolved_prose_latex_markup(mapping.get("abstract_zh"))
+            or not _has_chinese_prose(mapping.get("abstract_zh"))
+        ):
+            mapping.pop("abstract_zh", None)
     return paper
 
 
@@ -4104,7 +4116,7 @@ def _normalize_article_markdown_metadata(text: str, paper: dict, packet: dict | 
     cleaned = _sanitize_article_markdown_text(text)
     metadata = paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}
     abstract_zh = str(paper.get("abstract_zh") or metadata.get("abstract_zh") or "").strip()
-    if abstract_zh:
+    if abstract_zh and _has_chinese_prose(abstract_zh) and not has_unresolved_prose_latex_markup(abstract_zh):
         abstract_lines = cleaned.splitlines()
         abstract_index = next((index for index, line in enumerate(abstract_lines) if line.strip() == "## 摘要"), -1)
         next_section_index = next(
@@ -4158,6 +4170,17 @@ def _deep_read_complete(receipt: dict, result_payload: dict) -> bool:
     )
 
 
+def _article_markdown_quality_issue(text: str) -> str:
+    if has_unresolved_prose_latex_markup(text):
+        return "unresolved_prose_latex_markup"
+    abstract = re.search(r"(?ms)^##\s+摘要\s*$\s*(.*?)(?=^##\s+|\Z)", text)
+    if not abstract:
+        return "missing_abstract_section"
+    if not _has_chinese_prose(abstract.group(1)):
+        return "abstract_missing_chinese"
+    return ""
+
+
 def _article_markdown_ready(path: Path, result_payload: dict) -> bool:
     audit = result_payload.get("deep_read_audit") if isinstance(result_payload.get("deep_read_audit"), dict) else {}
     declared = str(result_payload.get("article_markdown_path") or audit.get("article_markdown_path") or "").strip()
@@ -4172,6 +4195,7 @@ def _article_markdown_ready(path: Path, result_payload: dict) -> bool:
         declared_ok
         and bool(text.strip())
         and text.lstrip().startswith("#")
+        and not _article_markdown_quality_issue(text)
     )
 
 
@@ -4686,6 +4710,8 @@ def _publish_article_read_cache(item_dir: Path, paper: dict, result: dict) -> di
         content_fingerprints = _article_cache_content_fingerprints(cache_dir)
         packet.update(content_fingerprints)
         cleaned = _normalize_article_markdown_metadata(article_md_path.read_text(encoding="utf-8", errors="replace"), paper, packet)
+        if _article_markdown_quality_issue(cleaned):
+            return {}
         if cleaned != article_md_path.read_text(encoding="utf-8", errors="replace"):
             article_md_path.write_text(cleaned, encoding="utf-8")
         (cache_dir / "read.md").write_text(cleaned, encoding="utf-8")
@@ -4710,6 +4736,7 @@ def _publish_article_read_cache(item_dir: Path, paper: dict, result: dict) -> di
             "full_text_sha256": content_fingerprints.get("full_text_sha256", ""),
             "pdf_sha256": content_fingerprints.get("pdf_sha256", ""),
             "read_content_revision": content_fingerprints.get("content_revision", ""),
+            "read_quality_policy_version": READING_CONTENT_QUALITY_POLICY_VERSION,
             "read_invalidated_at": "",
             "read_invalidation_reason": "",
         })
@@ -4808,6 +4835,22 @@ def _restore_article_read_cache(item_dir: Path, paper: dict, *, run_id: str, pap
     if not _article_cache_same_paper_ok(cache_dir, paper):
         return {}
     manifest = _article_cache_manifest(cache_dir)
+    cached_read_text = (cache_dir / "read.md").read_text(encoding="utf-8", errors="replace")
+    quality_issue = _article_markdown_quality_issue(cached_read_text)
+    if quality_issue:
+        with _ARTICLE_CACHE_LOCK:
+            _invalidate_article_read_artifacts(cache_dir)
+            manifest = _article_cache_manifest(cache_dir)
+            manifest.update({
+                "updated_at": _now_iso(),
+                "has_read_md": False,
+                "read_content_revision": "",
+                "read_quality_policy_version": READING_CONTENT_QUALITY_POLICY_VERSION,
+                "read_invalidated_at": _now_iso(),
+                "read_invalidation_reason": "read_content_quality:" + quality_issue,
+            })
+            write_json(cache_dir / "manifest.json", manifest)
+        return {}
     content_fingerprints = _article_cache_content_fingerprints(cache_dir)
     current_revision = str(content_fingerprints.get("content_revision") or "")
     read_revision = str(manifest.get("read_content_revision") or "")
@@ -4853,6 +4896,7 @@ def _restore_article_read_cache(item_dir: Path, paper: dict, *, run_id: str, pap
         "full_text_sha256": str(content_fingerprints.get("full_text_sha256") or ""),
         "pdf_sha256": str(content_fingerprints.get("pdf_sha256") or ""),
         "read_content_revision": current_revision,
+        "read_quality_policy_version": READING_CONTENT_QUALITY_POLICY_VERSION,
         "full_text_source_kind": _packet_acquisition_source_kind(restored_packet) or str(manifest.get("full_text_source_kind") or ""),
         "full_text_pdf_url": str(restored_packet.get("pdf_url") or manifest.get("full_text_pdf_url") or ""),
         "read_invalidated_at": "",
@@ -4965,7 +5009,10 @@ def _deep_read_cache_index() -> dict[str, list[Path]]:
                 article_md_path = ensure_inside_output(resolve_reading_path(article_md_value), label="deep-read cache article Markdown")
             except Exception:
                 continue
-            if not article_md_path.is_file() or not article_md_path.read_text(encoding="utf-8", errors="replace").strip():
+            if not article_md_path.is_file():
+                continue
+            article_text = article_md_path.read_text(encoding="utf-8", errors="replace")
+            if not article_text.strip() or _article_markdown_quality_issue(article_text):
                 continue
             item_dir = result_path.parent
             for key in _deep_read_cache_keys_for_paper(cached_paper):

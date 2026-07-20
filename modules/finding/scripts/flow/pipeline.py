@@ -6865,19 +6865,6 @@ def _clean_chinese_translation_output(text: str) -> str:
     return cleaned.strip()
 
 
-_TRANSLATION_LATEX_TEXT_COMMAND_NAMES = (
-    "textit", "emph", "textbf", "texttt", "textsc", "underline",
-    "mathrm", "mathbf", "mathit", "mathtt", "mathbb", "mathcal", "operatorname", "text",
-)
-_TRANSLATION_LATEX_COMMAND_START_RE = re.compile(r"\\(?:" + "|".join(_TRANSLATION_LATEX_TEXT_COMMAND_NAMES) + r")\s*\{")
-_TRANSLATION_MALFORMED_LATEX_COMMAND_MAP = {
-    "extit": "textit",
-    "extbf": "textbf",
-    "exttt": "texttt",
-    "extsc": "textsc",
-    "ext": "text",
-}
-_TRANSLATION_MALFORMED_LATEX_COMMAND_RE = re.compile(r"(?<![A-Za-z\\])(extit|extbf|exttt|extsc|ext)\{")
 _TRANSLATION_LATEX_REGEXES = [
     re.compile(r"\\begin\{([A-Za-z*]+)\}[\s\S]{1,1600}?\\end\{\1\}"),
     re.compile(r"\$\$[\s\S]{1,1600}?\$\$"),
@@ -6885,6 +6872,7 @@ _TRANSLATION_LATEX_REGEXES = [
     re.compile(r"\\\([\s\S]{1,800}?\\\)"),
     re.compile(r"(?<!\\)\$[^$\n]{1,800}(?<!\\)\$"),
 ]
+_TRANSLATION_PROSE_LATEX_COMMAND_RE = re.compile(r"\\[A-Za-z]+")
 _TRANSLATION_SCIENTIFIC_TOKEN_REGEXES = [
     re.compile(r"\b(?:NDCG|HR|Hit(?:[-\s]?Rate)?|Recall|Precision|MRR|AUC|MAP|DCG|RMSE|MAE|F1|BLEU|ROUGE|FID|IS)@?\s*\d+\b", re.IGNORECASE),
     re.compile(r"\bp\s*(?:<|>|=|<=|>=|≤|≥)\s*[-+]?\d+(?:\.\d+)?\b", re.IGNORECASE),
@@ -6894,39 +6882,10 @@ _TRANSLATION_SCIENTIFIC_TOKEN_REGEXES = [
 ]
 
 
-def _repair_translation_latex_commands(text: object) -> str:
-    value = str(text or "")
-
-    def repl(match: re.Match[str]) -> str:
-        return "\\" + _TRANSLATION_MALFORMED_LATEX_COMMAND_MAP.get(match.group(1), "text") + "{"
-
-    return _TRANSLATION_MALFORMED_LATEX_COMMAND_RE.sub(repl, value)
-
-
-def _balanced_latex_command_spans(text: str) -> list[tuple[int, int]]:
-    spans: list[tuple[int, int]] = []
-    for match in _TRANSLATION_LATEX_COMMAND_START_RE.finditer(text):
-        open_index = text.find("{", match.start(), match.end())
-        if open_index < 0:
-            continue
-        depth = 0
-        for index in range(open_index, len(text)):
-            char = text[index]
-            if char == "{":
-                depth += 1
-            elif char == "}":
-                depth -= 1
-                if depth == 0:
-                    spans.append((match.start(), index + 1))
-                    break
-    return spans
-
-
 def _latex_translation_spans(text: str) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     for pattern in _TRANSLATION_LATEX_REGEXES:
         spans.extend((match.start(), match.end()) for match in pattern.finditer(text))
-    spans.extend(_balanced_latex_command_spans(text))
     for pattern in _TRANSLATION_SCIENTIFIC_TOKEN_REGEXES:
         spans.extend((match.start(), match.end()) for match in pattern.finditer(text))
     merged: list[tuple[int, int]] = []
@@ -6941,8 +6900,21 @@ def _latex_translation_spans(text: str) -> list[tuple[int, int]]:
     return merged
 
 
+def _has_unresolved_prose_latex_markup(text: object) -> bool:
+    value = str(text or "")
+    protected = [
+        (match.start(), match.end())
+        for pattern in _TRANSLATION_LATEX_REGEXES
+        for match in pattern.finditer(value)
+    ]
+    return any(
+        not any(start <= match.start() < end for start, end in protected)
+        for match in _TRANSLATION_PROSE_LATEX_COMMAND_RE.finditer(value)
+    )
+
+
 def _prepare_abstract_translation_prompt_text(item: dict, limit: int) -> str:
-    source = _repair_translation_latex_commands(item.get("abstract_en") or item.get("abstract") or "")
+    source = str(item.get("abstract_en") or item.get("abstract") or "")
     spans = _latex_translation_spans(source)
     replacements: list[dict[str, str]] = []
     if not spans:
@@ -7026,6 +6998,8 @@ def _chinese_translation_reject_reason(text: str, source: str, item: dict | None
         return "leaked_translation_placeholder"
     if item is not None and not _translation_preserves_latex_segments(item, cleaned):
         return "missing_preserved_latex_segment"
+    if _has_unresolved_prose_latex_markup(cleaned):
+        return "unresolved_prose_latex_markup"
     return ""
 
 
@@ -7073,10 +7047,12 @@ def _attach_abstract_language_fields(items: list[dict], llm: LLMClient, log: Log
     for item in unique_items:
         abstract = _clean_abstract_text(item.get("abstract_en") or item.get("abstract"))
         if abstract:
-            abstract = _repair_translation_latex_commands(abstract)
             item["abstract"] = abstract
             item["abstract_en"] = abstract
             _prepare_abstract_translation_prompt_text(item, 2600)
+            existing_zh = str(item.get("abstract_zh") or "").strip()
+            if existing_zh and _chinese_translation_reject_reason(existing_zh, abstract, item):
+                item.pop("abstract_zh", None)
             targets.append(item)
             continue
         item.pop("abstract_en", None)
@@ -7136,6 +7112,7 @@ Rules:
 - Translate the complete abstract; do not summarize, shorten, omit sentences, or turn it into a recommendation rationale.
 - Preserve technical terms, model names, method names, dataset names, and abbreviations from the original abstract when appropriate.
 - Preserve every LaTeX/math/scientific-notation placeholder such as [[LATEX_1]] exactly as written; do not translate, remove, reorder, or reformat it. These placeholders will be restored to the original formulas, numbers, percentages, metrics, model names, and code-like terms after translation.
+- Treat every LaTeX command still visible outside those placeholders as source formatting: interpret its arguments together with adjacent characters as continuous original text, and return readable translated text without copying the formatting command syntax.
 - Keep Arabic digits, percentages, p-values, metric names such as NDCG@10/HR@5, model names, and terms like top-K in their original notation; never spell scientific numbers as Chinese words.
 - Keep the original meaning, motivation, method, experiment, and limitation/result statements present in the abstract.
 - Do not add claims or commentary.
@@ -7214,6 +7191,7 @@ Rules:
 - Translate the complete abstract; do not summarize, shorten, omit sentences, or turn it into a recommendation rationale.
 - Preserve technical terms, model names, method names, dataset names, and abbreviations from the original abstract when appropriate.
 - Preserve every LaTeX/math/scientific-notation placeholder such as [[LATEX_1]] exactly as written; do not translate, remove, reorder, or reformat it. These placeholders will be restored to the original formulas, numbers, percentages, metrics, model names, and code-like terms after translation.
+- Treat every LaTeX command still visible outside those placeholders as source formatting: interpret its arguments together with adjacent characters as continuous original text, and return readable translated text without copying the formatting command syntax.
 - Keep Arabic digits, percentages, p-values, metric names such as NDCG@10/HR@5, model names, and terms like top-K in their original notation; never spell scientific numbers as Chinese words.
 - Keep the original meaning, motivation, method, experiment, and limitation/result statements present in the abstract.
 - Do not add claims or commentary.
@@ -7265,6 +7243,7 @@ Translate the complete paper abstract into faithful academic Chinese for the Chi
 Rules:
 - Translate the whole abstract; do not summarize, shorten, or add commentary.
 - Preserve method names, dataset names, model names, abbreviations, URLs, Arabic digits, percentages, p-values, metrics, and every LaTeX/math/scientific-notation placeholder such as [[LATEX_1]] exactly as written; never spell scientific numbers as Chinese words.
+- Treat every LaTeX command still visible outside those placeholders as source formatting: interpret its arguments together with adjacent characters as continuous original text, and return readable translated text without copying the formatting command syntax.
 - Return JSON only, exactly as {{"abstract_zh":"中文摘要"}}.
 
 Title: {item.get('title')}
