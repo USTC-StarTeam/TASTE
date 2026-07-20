@@ -70,7 +70,7 @@ FIND_TITLE_FILTER_TEMPERATURE = 0.0
 FINAL_LLM_SCORE_CACHE_SCHEMA_VERSION = "find_final_llm_score_cache_v1"
 FIND_INPUT_FIELDS = {"research_topic", "research_interest", "researcher_profile", "arxiv_queries"}
 FIND_LLM_CONFIG_FIELDS = {"provider", "base_url", "api_key", "model", "temperature", "llm_roles"}
-FINAL_LLM_SCORE_CACHE_PROMPT_POLICY = "final_title_abstract_prompt_v31_topic_audit_only"
+FINAL_LLM_SCORE_CACHE_PROMPT_POLICY = "final_title_abstract_prompt_v32_natural_recommendation_reason"
 FINAL_LLM_SCORE_CACHE_MAX_ENTRIES = 50000
 FINAL_LLM_SCORE_CACHE_FIELDS = (
     "category",
@@ -3196,11 +3196,7 @@ def _load_final_llm_score_cache() -> tuple[Path, dict]:
 
 
 def _final_llm_cache_reason_unusable(value: object) -> bool:
-    text = " ".join(str(value or "").split()).strip()
-    min_chars = int(os.environ.get("FINAL_LLM_SCORE_CACHE_REASON_MIN_CHARS", "4") or 4)
-    if len("".join(text.split())) < min_chars:
-        return True
-    return _has_internal_find_public_text(text, zh=True) or _has_internal_find_public_text(text, zh=False)
+    return _recommendation_reason_unusable(value, zh=True)
 
 
 def _final_llm_cache_entry_valid(entry: object) -> bool:
@@ -3215,7 +3211,7 @@ def _final_llm_cache_entry_valid(entry: object) -> bool:
     if entry.get("fit_score") in (None, "") or entry.get("diversity_score") in (None, ""):
         return False
     reason_zh = entry.get("reason_zh") or entry.get("reason")
-    if _final_llm_cache_reason_unusable(reason_zh):
+    if _final_llm_cache_reason_unusable(reason_zh) or _recommendation_reason_unusable(entry.get("reason_en"), zh=False):
         return False
     return True
 
@@ -3251,7 +3247,7 @@ def _final_llm_score_cache_entry(item: dict, cache_key: str, config: AppConfig) 
     if item.get("fit_score") in (None, "") or item.get("diversity_score") in (None, ""):
         return {}
     reason_zh = item.get("reason_zh") or item.get("reason")
-    if _final_llm_cache_reason_unusable(reason_zh):
+    if _final_llm_cache_reason_unusable(reason_zh) or _recommendation_reason_unusable(item.get("reason_en"), zh=False):
         return {}
     entry = {
         "schema": FINAL_LLM_SCORE_CACHE_SCHEMA_VERSION,
@@ -5578,7 +5574,7 @@ Candidate items, batch {batch_index}:
 {item_lines}
 
 Return exactly this schema. The evaluations array is the final LLM evaluation rows; include one row for every candidate ID in the batch and never return an empty object. fit_score is the final calibrated recommendation score; use one decimal place and avoid default integer or x.5 scores:
-{{"evaluations":[{{"id":"p001","category":"short category","fit_score":7.3,"diversity_score":6.4,"recommend_for_deep_reading":true,"topic_evidence":"passed: direct title+abstract evidence for a current topic route, or weak: missing adaptive topic evidence","topic_evidence_supported":true,"matched_topic_route":"the specific configured/adaptive route supported by the abstract, or empty","topic_evidence_basis":"short title/abstract evidence used for the route decision","missing_topic_evidence":["missing route component if unsupported"],"hit_directions_zh":["中文命中方向"],"hit_directions_en":["English hit direction"],"fit_explanation_zh":"2-3句中文：面向用户说明摘要中的具体证据、为什么与当前调研主题相关、以及可复用价值","fit_explanation_en":"2-3 English sentences for the user with title/abstract evidence, relevance, and reusable value","reason_zh":"2-4句中文：面向用户说明该论文对当前研究方向的具体价值、可借鉴的方法/数据/协议/理论/评测信息，以及摘要层面的风险或不确定性；不要写给 reader 的精读指令","reason_en":"2-4 English sentences for the user: concrete value to the current research direction, reusable method/data/protocol/theory/evaluation value, and abstract-level risks or uncertainty; do not write reader instructions"}}]}}
+{{"evaluations":[{{"id":"p001","category":"short category","fit_score":7.3,"diversity_score":6.4,"recommend_for_deep_reading":true,"topic_evidence":"passed: direct title+abstract evidence for a current topic route, or weak: missing adaptive topic evidence","topic_evidence_supported":true,"matched_topic_route":"the specific configured/adaptive route supported by the abstract, or empty","topic_evidence_basis":"short title/abstract evidence used for the route decision","missing_topic_evidence":["missing route component if unsupported"],"hit_directions_zh":["中文命中方向"],"hit_directions_en":["English hit direction"],"fit_explanation_zh":"2-3句中文：面向用户说明摘要中的具体证据、为什么与当前调研主题相关、以及可复用价值","fit_explanation_en":"2-3 English sentences for the user with title/abstract evidence, relevance, and reusable value","reason_zh":"2-4句自然中文推荐理由：结合本文具体内容说明主题为何契合当前研究主题、能为研究提供什么帮助、有哪些可迁移借鉴价值","reason_en":"2-4 natural English sentences grounded in this paper: explain why its topic fits the research topic, how it helps the research, and what is transferable"}}]}}
 
 Rules:
 - Return exactly {len(batch)} evaluation rows. IDs are opaque request-local identifiers; copy every pNNN ID exactly once and never rewrite or invent an ID.
@@ -5589,7 +5585,7 @@ Rules:
 - Set topic_evidence_supported=true only when the title+abstract directly supports one complete configured/adaptive core route from the list above. Copy that full route into matched_topic_route; never use a short subphrase, method component, desideratum, or hint as matched_topic_route. If the route contains a colon, do not require every post-colon evidence axis; require direct support for the pre-colon core route plus concrete reusable value. Set topic_evidence to passed:/strong: and give a concise topic_evidence_basis. This evidence annotation is diagnostic and must not replace your calibrated fit_score.
 - If the abstract is generic, background-only, venue/title-only, or does not directly support the current core route, set topic_evidence_supported=false, topic_evidence="weak: missing adaptive topic evidence", and list concrete missing_topic_evidence.
 - Score fit independently from the topic-evidence audit fields. Do not cap or otherwise change fit_score because topic_evidence_supported=false or topic_evidence starts with weak:.
-- User-facing recommendation reasons must explain concrete value for the user research project first, then summarize abstract-level uncertainty as a user-facing risk. Do not write reader instructions such as Reading note, full-text reading must verify, or the abstract is not a substitute for full-text reading.
+- Write each recommendation reason freshly from this paper's title/abstract and the supplied research topic. Naturally cover why the paper topic fits the research topic, how the paper can help the research, and what methods/data/protocols/theory/evaluation ideas are transferable. Lead with concrete paper content; do not use a prescribed opening, generic research-direction boilerplate, or a fixed sentence order. Do not write reader instructions.
 - Missing abstract, metadata-only evidence, or title-only evidence cannot be recommended.
 {FIND_FINAL_SCORING_ROUTE_RULES}
 """)
@@ -5643,9 +5639,9 @@ Title: {item.get('title')}
 Abstract/Description: {(item.get('abstract') or '')[:900]}
 
 Return strict JSON only:
-{{"evaluations":[{{"id":"p001","category":"short category","fit_score":7.3,"diversity_score":6.4,"recommend_for_deep_reading":true,"topic_evidence":"passed: direct title+abstract evidence for a current topic route, or weak: missing adaptive topic evidence","topic_evidence_supported":true,"matched_topic_route":"the specific configured/adaptive route supported by the abstract, or empty","topic_evidence_basis":"short title/abstract evidence used for the route decision","missing_topic_evidence":["missing route component if unsupported"],"hit_directions_zh":["中文命中方向"],"hit_directions_en":["English hit direction"],"fit_explanation":"2-3句中文：面向用户说明摘要证据、相关性和可复用价值","fit_explanation_zh":"2-3句中文：面向用户说明摘要证据、相关性和可复用价值","fit_explanation_en":"2-3 English sentences for the user with title/abstract evidence, relevance, and reusable value","reason":"2-4句中文：面向用户说明对当前研究方向的价值、可借鉴什么、以及摘要层面的风险或不确定性","reason_zh":"2-4句中文：面向用户说明对当前研究方向的价值、可借鉴什么、以及摘要层面的风险或不确定性","reason_en":"2-4 English sentences for the user: value to the current research direction, reusable content, and abstract-level risks or uncertainty"}}]}}
+{{"evaluations":[{{"id":"p001","category":"short category","fit_score":7.3,"diversity_score":6.4,"recommend_for_deep_reading":true,"topic_evidence":"passed: direct title+abstract evidence for a current topic route, or weak: missing adaptive topic evidence","topic_evidence_supported":true,"matched_topic_route":"the specific configured/adaptive route supported by the abstract, or empty","topic_evidence_basis":"short title/abstract evidence used for the route decision","missing_topic_evidence":["missing route component if unsupported"],"hit_directions_zh":["中文命中方向"],"hit_directions_en":["English hit direction"],"fit_explanation":"2-3句中文：面向用户说明摘要证据、相关性和可复用价值","fit_explanation_zh":"2-3句中文：面向用户说明摘要证据、相关性和可复用价值","fit_explanation_en":"2-3 English sentences for the user with title/abstract evidence, relevance, and reusable value","reason":"2-4句自然中文推荐理由：结合本文具体内容说明主题契合、研究帮助和可迁移借鉴价值","reason_zh":"2-4句自然中文推荐理由：结合本文具体内容说明主题为何契合当前研究主题、能为研究提供什么帮助、有哪些可迁移借鉴价值","reason_en":"2-4 natural English sentences grounded in this paper: explain topic fit, help to the research, and transferable value"}}]}}
 
-Scoring rules: judge this item independently from its real title and abstract. fit_score is the final ranking score used by the workflow; use one decimal place: 9.0-10.0 exact center, 7.0-8.9 strong match, 5.0-6.9 partial/background usefulness, 3.0-4.9 weak/generic, <=2.9 unrelated. Do not default to integer or x.5 scores when evidence supports a finer distinction. recommend_for_deep_reading and topic_evidence_supported are audit fields only; the workflow ranks all valid final title+abstract rows with no topic-evidence or absolute-score eligibility gate. Set topic_evidence_supported=true only when the title+abstract directly supports one complete configured/adaptive core route from the list above; copy the full route into matched_topic_route, never a short subphrase or component. If the route contains a colon, treat the pre-colon text as the core route and the post-colon details as evidence axes/preferences, not mandatory all-of conditions. Otherwise set it false with weak topic_evidence and concrete missing_topic_evidence. Never cap or alter fit_score because of that audit verdict. User-facing recommendation reasons must explain reusable value before limitations, and must not contain reader instructions such as Reading note, full-text reading must verify, or the abstract is not a substitute for full-text reading. Provide both Chinese and English explanation fields, plus hit_directions_zh in Chinese and hit_directions_en in English.
+Scoring rules: judge this item independently from its real title and abstract. fit_score is the final ranking score used by the workflow; use one decimal place: 9.0-10.0 exact center, 7.0-8.9 strong match, 5.0-6.9 partial/background usefulness, 3.0-4.9 weak/generic, <=2.9 unrelated. Do not default to integer or x.5 scores when evidence supports a finer distinction. recommend_for_deep_reading and topic_evidence_supported are audit fields only; the workflow ranks all valid final title+abstract rows with no topic-evidence or absolute-score eligibility gate. Set topic_evidence_supported=true only when the title+abstract directly supports one complete configured/adaptive core route from the list above; copy the full route into matched_topic_route, never a short subphrase or component. If the route contains a colon, treat the pre-colon text as the core route and the post-colon details as evidence axes/preferences, not mandatory all-of conditions. Otherwise set it false with weak topic_evidence and concrete missing_topic_evidence. Never cap or alter fit_score because of that audit verdict. Write the recommendation reason naturally from this paper's concrete content and cover topic fit, help to the research, and transferable value; do not use a prescribed opening, generic research-direction boilerplate, or reader instructions. Provide both Chinese and English explanation fields, plus hit_directions_zh in Chinese and hit_directions_en in English.
 {FIND_FINAL_SCORING_ROUTE_RULES}
 """
 
@@ -5756,7 +5752,7 @@ Scoring rules: judge this item independently from its real title and abstract. f
                         ):
                             continue
                         row_reason_zh = row.get("reason_zh") or row.get("reason")
-                        if _final_llm_cache_reason_unusable(row_reason_zh):
+                        if _final_llm_cache_reason_unusable(row_reason_zh) or _recommendation_reason_unusable(row.get("reason_en"), zh=False):
                             continue
                         assigned_items.add(id(item))
                         item.pop("llm_retry_exhausted", None)
@@ -5990,6 +5986,22 @@ def _reason_is_too_short(value: object, *, zh: bool = True) -> bool:
     return (not has_positive_marker) and any(marker in text.lower() for marker in negative_only_markers)
 
 
+def _recommendation_reason_has_generic_opener(value: object, *, zh: bool = True) -> bool:
+    text = " ".join(str(value or "").split()).strip()
+    if zh:
+        return bool(re.match(r"^(?:对|就|针对)\s*(?:当前|本(?:项|次))?\s*(?:研究方向|研究主题|研究画像).{0,8}(?:来说|而言|的(?:核心|具体)?价值)", text))
+    return bool(re.match(r"^(?:for|regarding|with respect to)\s+(?:the\s+)?(?:current\s+)?research\s+(?:direction|topic|profile)\b", text, re.I))
+
+
+def _recommendation_reason_unusable(value: object, *, zh: bool = True) -> bool:
+    return (
+        _reason_is_too_short(value, zh=zh)
+        or _has_internal_find_public_text(value, zh=zh)
+        or _has_unsupported_availability_claim(value, zh=zh)
+        or _recommendation_reason_has_generic_opener(value, zh=zh)
+    )
+
+
 def _has_unsupported_availability_claim(text: object, *, zh: bool = True) -> bool:
     raw = str(text or "").strip()
     if not raw:
@@ -6168,12 +6180,6 @@ def _ensure_recommendation_readability(item: dict, config: AppConfig | None = No
     if _has_internal_find_public_text(fit_en, zh=False):
         fallback_fit_en = _first_nonempty_text(item, ["fit_explanation_en_original", "fit_explanation_original"])
         fit_en = "" if _has_internal_find_public_text(fallback_fit_en, zh=False) else fallback_fit_en
-    note_zh = _first_nonempty_text(item, ["recommendation_note_zh", "recommendation_note"])
-    note_en = _first_nonempty_text(item, ["recommendation_note_en", "recommendation_note"])
-    if _has_internal_find_public_text(note_zh, zh=True):
-        note_zh = ""
-    if _has_internal_find_public_text(note_en, zh=False):
-        note_en = ""
     missing_raw = _list_text(item.get("unmatched_topic_routes") or item.get("missing_topic_evidence"))
     missing = "" if _has_internal_find_public_text(missing_raw, zh=True) else missing_raw
     tier = str(item.get("evidence_tier") or "").strip()
@@ -6184,23 +6190,6 @@ def _ensure_recommendation_readability(item: dict, config: AppConfig | None = No
 
     def _sentence_join(parts: list[str]) -> str:
         return "".join(part if part.endswith(("。", "！", "？")) else part + "。" for part in parts if part)
-
-    def zh_reason() -> str:
-        signal = hit_zh or matched_route or "方法、数据、评测或问题边界"
-        parts = [
-            f"对{interest_zh}来说，《{title}》的价值在于它把{signal}落到一个可比较的研究对象上。",
-            fit_zh or (f"它与当前研究目标的连接点是 {matched_route}。" if matched_route else "它提供了可被后续方案选择引用的具体方法线索、数据线索、评测线索或失败边界。"),
-            "可直接借鉴的部分包括方法结构、数据或反馈构造、评价指标、消融设计和风险边界；这些信息能帮助确定当前路线的基线、改造点和风险控制。",
-        ]
-        if boundary:
-            parts.append("目前它更适合作为对照或边界案例，避免把局部相关信号误当成核心方法依据。")
-        if missing:
-            parts.append(f"摘要层面的未覆盖信息是：{missing}；这会影响它能否作为核心证据。")
-        elif note_zh and note_zh != _PUBLIC_FIND_RECOMMENDATION_NOTE_ZH:
-            parts.append(f"补充判断：{note_zh}")
-        else:
-            parts.append("摘要层面已经给出相关信号，但具体收益、复现实验条件和适用边界仍是后续科研决策中的风险点。")
-        return _sentence_join(parts)
 
     def zh_fit_explanation() -> str:
         parts: list[str] = []
@@ -6224,23 +6213,6 @@ def _ensure_recommendation_readability(item: dict, config: AppConfig | None = No
         parts.append("The abstract-level evidence makes it more than generic background, while the main risk is that transfer to the current project is not yet proven by the abstract alone.")
         return " ".join(part if part.endswith((".", "!", "?")) else part + "." for part in parts if part)
 
-    def en_reason() -> str:
-        signal = hit_en or matched_route_en or "method, data, evaluation, or problem-boundary evidence"
-        parts = [
-            f"For {interest_en}, {title} is useful because it turns {signal} into a concrete object for comparison.",
-            fit_en or (f"Its connection to the current research goal is {matched_route_en}." if matched_route_en else "It offers concrete method, data, evaluation, or boundary signals that can inform later research decisions."),
-            "Reusable value includes method structure, data or feedback construction, metrics, ablations, and risk boundaries; these help choose baselines, modification points, and risk controls for the project.",
-        ]
-        if boundary:
-            parts.append("At this stage it is better treated as a contrast or boundary case, so a partial signal is not mistaken for core method evidence.")
-        if missing:
-            parts.append(f"The abstract-level missing information is: {missing}; this affects whether it can serve as core evidence.")
-        elif note_en and note_en != _PUBLIC_FIND_RECOMMENDATION_NOTE_EN:
-            parts.append(f"Additional judgment: {note_en}")
-        else:
-            parts.append("The abstract provides relevant signals, but concrete gains, reproducibility conditions, and scope remain project risks.")
-        return " ".join(part if part.endswith((".", "!", "?")) else part + "." for part in parts if part)
-
     def reader_instruction_zh() -> str:
         parts = [_READER_FIND_RECOMMENDATION_INSTRUCTION_ZH, f"论文：《{title}》。"]
         if hit_zh:
@@ -6261,21 +6233,6 @@ def _ensure_recommendation_readability(item: dict, config: AppConfig | None = No
             parts.append(f"Pay special attention to abstract-level missing information: {missing}.")
         return " ".join(part if part.endswith((".", "!", "?")) else part + "." for part in parts if part)
 
-    current_reason_zh = item.get("reason_zh") or item.get("reason")
-    if _reason_is_too_short(current_reason_zh, zh=True) or _has_internal_find_public_text(current_reason_zh, zh=True):
-        original = str(current_reason_zh or "").strip()
-        if original:
-            item.setdefault("reason_zh_original", original)
-        item["reason_zh"] = zh_reason()
-        item["reason"] = item["reason_zh"]
-        item["reason_quality_repaired"] = True
-    current_reason_en = item.get("reason_en")
-    if _reason_is_too_short(current_reason_en, zh=False) or _has_internal_find_public_text(current_reason_en, zh=False):
-        original_en = str(current_reason_en or "").strip()
-        if original_en:
-            item.setdefault("reason_en_original", original_en)
-        item["reason_en"] = en_reason()
-        item["reason_quality_repaired"] = True
     current_fit_zh = item.get("fit_explanation_zh")
     if _reason_is_too_short(current_fit_zh, zh=True) or _has_internal_find_public_text(current_fit_zh, zh=True):
         base = fit_zh or zh_fit_explanation()
@@ -6298,25 +6255,16 @@ def _ensure_recommendation_readability(item: dict, config: AppConfig | None = No
         item["recommendation_note"] = item["recommendation_note_zh"]
     if (not str(current_note_en or "").strip()) or _has_internal_find_public_text(current_note_en, zh=False):
         item["recommendation_note_en"] = _PUBLIC_FIND_RECOMMENDATION_NOTE_EN
-    for key in ("reason_zh", "reason", "fit_explanation", "fit_explanation_zh", "recommendation_note_zh", "recommendation_note"):
+    for key in ("fit_explanation", "fit_explanation_zh", "recommendation_note_zh", "recommendation_note"):
         if item.get(key):
             item[key] = _sanitize_public_recommendation_text(item.get(key), zh=True)
-    for key in ("reason_en", "fit_explanation_en", "recommendation_note_en"):
+    for key in ("fit_explanation_en", "recommendation_note_en"):
         if item.get(key):
             item[key] = _sanitize_public_recommendation_text(item.get(key), zh=False)
-    if _reason_is_too_short(item.get("reason_zh") or item.get("reason"), zh=True) or _has_internal_find_public_text(item.get("reason_zh") or item.get("reason"), zh=True) or _has_unsupported_availability_claim(item.get("reason_zh") or item.get("reason"), zh=True):
-        original = str(item.get("reason_zh") or item.get("reason") or "").strip()
-        if original:
-            item.setdefault("reason_zh_original", original)
-        item["reason_zh"] = _sanitize_public_recommendation_text(zh_reason(), zh=True)
-        item["reason"] = item["reason_zh"]
-        item["reason_quality_repaired"] = True
-    if _reason_is_too_short(item.get("reason_en"), zh=False) or _has_internal_find_public_text(item.get("reason_en"), zh=False) or _has_unsupported_availability_claim(item.get("reason_en"), zh=False):
-        original_en = str(item.get("reason_en") or "").strip()
-        if original_en:
-            item.setdefault("reason_en_original", original_en)
-        item["reason_en"] = _sanitize_public_recommendation_text(en_reason(), zh=False)
-        item["reason_quality_repaired"] = True
+    if _recommendation_reason_unusable(item.get("reason_zh") or item.get("reason"), zh=True) or _recommendation_reason_unusable(item.get("reason_en"), zh=False):
+        item["reason_quality_invalid"] = True
+    else:
+        item.pop("reason_quality_invalid", None)
     item.setdefault("recommendation_audit_role", "boundary_or_borrowing" if boundary else (role or "direct_or_foundation"))
     return item
 
@@ -6329,12 +6277,8 @@ def _recommendation_quality_audit(items: list[dict]) -> dict:
         str(item.get("id") or item.get("title") or "")
         for item in rows
         if (
-            _reason_is_too_short(item.get("reason_zh") or item.get("reason"), zh=True)
-            or _reason_is_too_short(item.get("reason_en"), zh=False)
-            or _has_internal_find_public_text(item.get("reason_zh") or item.get("reason"), zh=True)
-            or _has_internal_find_public_text(item.get("reason_en"), zh=False)
-            or _has_unsupported_availability_claim(item.get("reason_zh") or item.get("reason"), zh=True)
-            or _has_unsupported_availability_claim(item.get("reason_en"), zh=False)
+            _recommendation_reason_unusable(item.get("reason_zh") or item.get("reason"), zh=True)
+            or _recommendation_reason_unusable(item.get("reason_en"), zh=False)
         )
     ]
     return {
@@ -6347,7 +6291,7 @@ def _recommendation_quality_audit(items: list[dict]) -> dict:
         "missing_real_abstract_ids": missing_real_abstract[:50],
         "missing_chinese_abstract_ids": missing_zh_abstract[:50],
         "short_or_negative_reason_ids": short_reason[:50],
-        "policy": "User-facing recommendations must come from the final title+abstract LLM score ranking, show a real abstract, complete Chinese abstracts before marking translation completed, and give a specific multi-sentence recommendation reason covering concrete title/abstract evidence, value for the current research direction, reusable method/data/protocol/theory/evaluation value, and abstract-level risks. Reader-only full-text instructions must stay in reader_instruction_* fields. Topic/debug fields cannot create a second recommendation gate.",
+        "policy": "User-facing recommendations must come from the final title+abstract LLM score ranking, show a real abstract, complete Chinese abstracts before marking translation completed, and preserve the LLM's natural multi-sentence recommendation reason covering topic fit, help to the research, and transferable method/data/protocol/theory/evaluation value. Reader-only full-text instructions must stay in reader_instruction_* fields. Topic/debug fields cannot create a second recommendation gate.",
     }
 
 
