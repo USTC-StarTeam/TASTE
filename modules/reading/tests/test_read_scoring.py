@@ -120,7 +120,7 @@ class ReadingScoringTests(unittest.TestCase):
                 article_path = item_dir / "read.md"
                 article_path.write_text(
                     f"# {title}\n\n"
-                    "## 摘要\n\n摘要。\n\n"
+                    "## 摘要\n\n这是中文摘要。\n\n"
                     "## 动机与核心创新\n\n动机与创新。\n\n"
                     "## 方法\n\n方法。\n\n"
                     "## 实验结果\n\n实验。\n\n"
@@ -193,7 +193,7 @@ class ReadingScoringTests(unittest.TestCase):
                 item_dir = run_path / "papers" / f"{paper_index:03d}"
                 item_dir.mkdir(parents=True)
                 article_path = item_dir / "read.md"
-                article_path.write_text(f"# Paper {paper_index}\n\n## 摘要\n\n摘要。\n", encoding="utf-8")
+                article_path.write_text(f"# Paper {paper_index}\n\n## 摘要\n\n这是中文摘要。\n", encoding="utf-8")
                 items.append({
                     "paper_index": paper_index,
                     "paper": {"paper_id": f"p{paper_index}", "title": f"Paper {paper_index}"},
