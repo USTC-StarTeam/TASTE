@@ -847,6 +847,57 @@ English abstract awaiting translation.
     assert "English abstract awaiting translation." in fallback
 
 
+def test_reading_routes_unresolved_prose_latex_back_to_the_llm():
+    read_pipeline = _load_reading_pipeline()
+    claude_subagent = _load_reading_claude_subagent()
+    paper = read_pipeline._normalize_local_input_paper({
+        "title": r"\textbf{Prot}ein design",
+        "abstract": r"We introduce \textbf{Prot}ein-Ligand Conditioned Diffusion.",
+        "abstract_zh": r"\textbf{Prot}蛋白质\textbf{L}配体条件\textbf{D}离散\textbf{D}扩散模型。",
+    })
+
+    assert paper["title"] == r"\textbf{Prot}ein design"
+    assert paper["abstract"] == r"We introduce \textbf{Prot}ein-Ligand Conditioned Diffusion."
+    assert "abstract_zh" not in paper
+    assert read_pipeline.has_unresolved_prose_latex_markup(r"plain \sourceformat{word}") is True
+    assert read_pipeline.has_unresolved_prose_latex_markup(r"plain \unknowncommand text") is True
+    assert read_pipeline.has_unresolved_prose_latex_markup(r"formula $\sourceformat{x}$") is False
+
+    run_path = ROOT / "modules" / "reading" / ".runtime" / "output" / _reading_test_run_id() / "papers" / "001"
+    prompt = claude_subagent.build_deep_read_prompt(
+        paper=paper,
+        packet={"title": paper["title"]},
+        run_path=run_path,
+        output_path=run_path / "outputs" / "reading_result.json",
+        article_md_path=run_path / "read.md",
+    )
+    assert "英文原文摘要（翻译为中文）" in prompt
+    assert "中文摘要（固定输入）" not in prompt
+    assert "公式定界符之外的任意 LaTeX 命令均视为来源排版标记" in prompt
+
+
+def test_reading_article_markdown_requires_a_chinese_abstract(tmp_path):
+    read_pipeline = _load_reading_pipeline()
+    article_path = tmp_path / "read.md"
+    result_payload = {"article_markdown_path": str(article_path)}
+    article_path.write_text(
+        "# Paper\n\n## 摘要\n\nEnglish abstract copied without translation.\n\n## 动机与核心创新\n\n中文分析。\n",
+        encoding="utf-8",
+    )
+
+    assert read_pipeline._article_markdown_quality_issue(article_path.read_text(encoding="utf-8")) == "abstract_missing_chinese"
+    assert read_pipeline._article_markdown_ready(article_path, result_payload) is False
+    assert read_pipeline._article_markdown_quality_issue(
+        "# Paper\n\n## 摘要\n\n包含 \\sourceformat{来源排版} 的中文摘要。\n",
+    ) == "unresolved_prose_latex_markup"
+
+    article_path.write_text(
+        "# Paper\n\n## 摘要\n\n这是经过翻译的中文摘要。\n\n## 动机与核心创新\n\n中文分析。\n",
+        encoding="utf-8",
+    )
+    assert read_pipeline._article_markdown_ready(article_path, result_payload) is True
+
+
 def test_reading_machine_result_excludes_markdown_body_content():
     read_pipeline = _load_reading_pipeline()
     cleaned = read_pipeline._machine_read_result({
@@ -1193,6 +1244,39 @@ def test_reading_article_cache_restore_backfills_content_binding(monkeypatch, tm
     assert manifest["pdf_sha256"] == fingerprints["pdf_sha256"]
     assert manifest["full_text_source_kind"] == "openreview_official_note_pdf"
     assert manifest["full_text_pdf_url"] == "openreview://official-note/pdf"
+
+
+def test_reading_article_cache_invalidates_non_chinese_abstract(monkeypatch, tmp_path):
+    read_pipeline = _load_reading_pipeline()
+    cache_dir = tmp_path / "cache"
+    item_dir = tmp_path / "item"
+    cache_dir.mkdir()
+    (cache_dir / "read.md").write_text(
+        "# Cached Paper\n\n## 摘要\n\nEnglish abstract copied without translation.\n\n## 方法\n\n中文分析。\n",
+        encoding="utf-8",
+    )
+    (cache_dir / "manifest.json").write_text(json.dumps({
+        "has_read_md": True,
+        "read_content_revision": "legacy",
+    }), encoding="utf-8")
+
+    monkeypatch.setattr(read_pipeline, "_article_cache_enabled", lambda: True)
+    monkeypatch.setattr(read_pipeline, "_locate_article_cache_dir", lambda *_args, **_kwargs: cache_dir)
+    monkeypatch.setattr(read_pipeline, "_article_cache_same_paper_ok", lambda *_args, **_kwargs: True)
+
+    result = read_pipeline._restore_article_read_cache(
+        item_dir,
+        {"paper_id": "paper-1", "title": "Cached Paper"},
+        run_id=_reading_test_run_id(),
+        paper_index=1,
+    )
+
+    manifest = json.loads((cache_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert result == {}
+    assert not (cache_dir / "read.md").exists()
+    assert manifest["has_read_md"] is False
+    assert manifest["read_invalidation_reason"] == "read_content_quality:abstract_missing_chinese"
+    assert manifest["read_quality_policy_version"] == read_pipeline.READING_CONTENT_QUALITY_POLICY_VERSION
 
 
 def test_reading_title_only_cache_keeps_cached_source_and_locators():
@@ -4612,6 +4696,33 @@ def _isolate_find_runtime(monkeypatch, find_pipeline, runtime: Path) -> None:
         monkeypatch.setattr(runtime_module, "STATE_DIR", runtime / "state", raising=False)
         monkeypatch.setattr(runtime_module, "LOCAL_DATABASE_DIR", runtime / "local_database", raising=False)
         monkeypatch.setattr(runtime_module, "CONFIG_PATH", runtime / ".config.json", raising=False)
+
+
+def test_find_translation_keeps_prose_markup_visible_to_llm_without_splitting_words():
+    find_pipeline = _load_find_pipeline()
+    item = {
+        "abstract_en": (
+            r"We introduce \textbf{Prot}ein-\textbf{L}igand Conditioned "
+            r"\textbf{D}iscrete \textbf{D}iffusion (ProtLiD²) with $p_\theta$."
+        ),
+    }
+
+    prompt_text = find_pipeline._prepare_abstract_translation_prompt_text(item, 2600)
+
+    assert r"\textbf{Prot}ein-\textbf{L}igand Conditioned \textbf{D}iscrete \textbf{D}iffusion (ProtLiD²)" in prompt_text
+    assert prompt_text.endswith("with [[LATEX_1]].")
+    assert item["_abstract_translation_latex_segments"] == [
+        {"placeholder": "[[LATEX_1]]", "latex": r"$p_\theta$"},
+    ]
+    restored = find_pipeline._restore_latex_translation_placeholders(item, "该方法保留 ProtLiD² 和 [[LATEX_1]]。")
+    assert restored == r"该方法保留 ProtLiD² 和 $p_\theta$。"
+    assert find_pipeline._has_unresolved_prose_latex_markup(r"plain \sourceformat{word}") is True
+    assert find_pipeline._has_unresolved_prose_latex_markup(r"formula $\sourceformat{x}$") is False
+    assert find_pipeline._chinese_translation_reject_reason(
+        r"这是包含 \sourceformat{来源排版标记} 的完整中文翻译，必须交回模型重新处理，并保留公式 $p_\theta$。",
+        str(item["abstract_en"]),
+        item,
+    ) == "unresolved_prose_latex_markup"
 
 
 def test_find_title_prefilter_uses_local_ids_and_recovers_missing_rows(monkeypatch):

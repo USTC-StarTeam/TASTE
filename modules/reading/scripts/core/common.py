@@ -499,6 +499,21 @@ def safe_slug(value: Any, fallback: str = "paper", max_len: int = 90) -> str:
     return (text or fallback)[:max_len]
 
 
+_PROSE_LATEX_COMMAND_RE = re.compile(r"\\[A-Za-z]+")
+_MARKDOWN_PROTECTED_SPAN_RE = re.compile(
+    r"```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`|\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]|\\\([^\n]*?\\\)|(?<!\\)\$[^$\n]*?(?<!\\)\$"
+)
+
+
+def has_unresolved_prose_latex_markup(value: object) -> bool:
+    text = str(value or "")
+    protected = [(match.start(), match.end()) for match in _MARKDOWN_PROTECTED_SPAN_RE.finditer(text)]
+    return any(
+        not any(start <= match.start() < end for start, end in protected)
+        for match in _PROSE_LATEX_COMMAND_RE.finditer(text)
+    )
+
+
 def coerce_str_list(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item or "").strip()]

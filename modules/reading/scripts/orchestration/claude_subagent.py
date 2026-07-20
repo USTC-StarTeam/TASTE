@@ -55,7 +55,7 @@ if _core_common_spec is None:
     sys.modules["core.common"] = _core_common_module
     _core_common_spec.loader.exec_module(_core_common_module)
 
-from core.common import first_json_object, write_json, write_text
+from core.common import first_json_object, has_unresolved_prose_latex_markup, write_json, write_text
 from core.common import READING_ROOT, RUNTIME_ROOT, ensure_inside_output, ensure_inside_runtime, make_reading_paths_relative, relative_to_reading
 
 
@@ -301,7 +301,10 @@ def build_deep_read_prompt(
     title = str(paper.get("title") or packet.get("title") or "未命名论文")
     metadata = _paper_metadata(paper)
     abstract_en = str(paper.get("abstract") or paper.get("abstract_en") or metadata.get("abstract") or "").strip()
-    abstract_zh = str(paper.get("abstract_zh") or metadata.get("abstract_zh") or "").strip()
+    raw_abstract_zh = str(paper.get("abstract_zh") or metadata.get("abstract_zh") or "").strip()
+    abstract_zh = raw_abstract_zh
+    if abstract_zh and (has_unresolved_prose_latex_markup(abstract_zh) or len(re.findall(r"[\u4e00-\u9fff]", abstract_zh)) < 4):
+        abstract_zh = ""
     if abstract_zh:
         abstract_rule = "`摘要` 固定逐字写入下方中文摘要全文，包含原有标点。"
         abstract_label = "中文摘要（固定输入）"
@@ -340,6 +343,7 @@ def build_deep_read_prompt(
    - `实验结果` 只用几句话概括作者做了哪类实验以及总体效果，控制在 150 字以内。
    - `优缺点总结` 控制在 100 字以下，同时点出主要优点和主要缺点/风险边界。
 9. 必须在本次调用内一次性写出格式正确的单篇 Markdown 和机器回执 JSON，并完成 Markdown/LaTeX 格式整理。
+- 输入正文或摘要中，公式定界符之外的任意 LaTeX 命令均视为来源排版标记；理解其参数与相邻字符组成的完整原文后再翻译或概括，输出可读 Markdown，不得逐字复制这些命令。
 {FORMULA_STYLE_RULES}
 {JSON_OUTPUT_RULES}
 10. `{output_path_run}` 必须是严格合法 JSON 对象；stdout 最终内容也必须返回同一份严格合法 JSON 对象。stdout 第一个非空字符必须是 `{{`，最后一个非空字符必须是 `}}`。stdout 内容严格限定为 JSON 对象本身。
