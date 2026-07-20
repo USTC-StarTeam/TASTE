@@ -4812,6 +4812,8 @@ def test_find_abstract_scoring_uses_local_ids_and_retries_mismatched_id(monkeypa
     monkeypatch.setenv("ABSTRACT_SCORING_WORKER_CAP", "1")
     monkeypatch.setenv("OMITTED_ITEM_RETRY_ATTEMPTS", "1")
     monkeypatch.setenv("FIND_FINAL_SCORE_CACHE", "0")
+    monkeypatch.setenv("RECOMMENDATION_REASON_MIN_ZH_CHARS", "20")
+    monkeypatch.setenv("RECOMMENDATION_REASON_MIN_EN_CHARS", "40")
 
     class MismatchedIdLLM:
         enabled = True
@@ -4843,8 +4845,8 @@ def test_find_abstract_scoring_uses_local_ids_and_retries_mismatched_id(monkeypa
                     "hit_directions_en": ["protein diffusion generation"],
                     "fit_explanation_zh": "摘要给出了蛋白质扩散生成方法与实验结果。该方法可用于当前研究。",
                     "fit_explanation_en": "The abstract presents a protein diffusion method and results. It is reusable for this project.",
-                    "reason_zh": "论文提供了可复用的蛋白质扩散生成方法和评测。摘要层面的风险是实验范围有限。",
-                    "reason_en": "The paper provides a reusable protein diffusion method and evaluation. The abstract indicates limited experimental scope.",
+                    "reason_zh": "论文聚焦可控蛋白质扩散生成，与研究主题中的条件生成和结构质量控制直接契合。其生成机制与实验结果能够帮助比较不同条件约束的有效性，并为模型选择和实验设计提供依据。扩散建模方式、条件注入策略、评价指标及消融方案都具有可迁移的借鉴价值。",
+                    "reason_en": "The paper focuses on controllable protein diffusion generation, directly matching the research topic of conditional generation and structural quality control. Its generation mechanism and experiments help compare alternative constraints and inform model selection and experimental design. The diffusion formulation, conditioning strategy, evaluation metrics, and ablations are transferable to subsequent research.",
                 })
             return {"ok": True, "data": {"evaluations": rows}, "error": ""}
 
@@ -8584,35 +8586,40 @@ def test_find_dynamic_source_raw_cache_helpers_are_removed(monkeypatch, tmp_path
     assert "cache_min_count_required" not in status
 
 
-def test_find_public_recommendation_text_allows_implementation_and_hides_profile_label():
+def test_find_preserves_natural_llm_recommendation_reason_without_template_rewrite(monkeypatch):
     find_pipeline = _load_find_pipeline()
-
+    monkeypatch.setenv("RECOMMENDATION_REASON_MIN_ZH_CHARS", "20")
+    monkeypatch.setenv("RECOMMENDATION_REASON_MIN_EN_CHARS", "40")
+    reason_zh = (
+        "论文研究条件蛋白生成中的结构约束，与项目关注的可控蛋白设计问题直接契合。"
+        "其条件编码与生成评测能够帮助比较现有路线的约束表达能力，并为实验基线选择提供依据。"
+        "方法中的条件注入方式、消融设置和结构质量指标都可迁移到后续模型设计与验证。"
+    )
     reason_en = (
-        "This open-source implementation is useful for the current research direction "
-        "because it provides reusable method structure, evaluation signals, and scope risks."
+        "The paper studies structural constraints for conditional protein generation, directly matching the controlled protein-design topic. "
+        "Its conditioning and evaluation setup helps compare constraint representations and choose experimental baselines. "
+        "The conditioning mechanism, ablations, and structure-quality metrics are transferable to later model design and validation."
     )
-    reason_zh = "对当前研究画像的核心价值：它提供可复用的方法结构、评测信号和摘要层面的风险边界。"
-
-    assert find_pipeline._has_internal_find_public_text(reason_en, zh=False) is False
-    sanitized = find_pipeline._sanitize_public_recommendation_text(reason_zh, zh=True)
-    assert "当前研究画像" not in sanitized
-    assert "当前研究方向" in sanitized
-    assert "当前项目的" in find_pipeline._sanitize_public_recommendation_text("其方法可复用于您的模型开发。", zh=True)
-    sanitized_en = find_pipeline._sanitize_public_recommendation_text(
-        "The title and abstract connect clearly to the research profile and offer reusable method value.",
-        zh=False,
-    )
-    assert "research profile" not in sanitized_en.lower()
-    assert "current research direction" in sanitized_en.lower()
     item = {
         "title": "Reusable protein design implementation",
         "abstract": "This work studies reusable protein design methods.",
-        "reason_zh": "对当前研究方向来说，该工作提供可复用的方法结构、评测信号、风险边界和实验设计参考。",
-        "reason_en": "This work provides reusable method structure, evaluation signals, risk boundaries, and project guidance for the current research direction.",
+        "reason_zh": reason_zh,
+        "reason_en": reason_en,
         "fit_explanation": "其方法可复用于您的模型开发。",
     }
     find_pipeline._ensure_recommendation_readability(item, None)
+
+    assert item["reason_zh"] == reason_zh
+    assert item["reason_en"] == reason_en
+    assert item.get("reason_quality_invalid") is None
     assert "您的" not in item["fit_explanation"]
+    fixed_opener = "对当前研究方向来说，该论文提供可借鉴的方法结构、评测信号和实验设计参考，能够支持后续研究。"
+    assert find_pipeline._recommendation_reason_has_generic_opener(fixed_opener, zh=True) is True
+    assert find_pipeline._recommendation_reason_unusable(fixed_opener, zh=True) is True
+    assert find_pipeline.FINAL_LLM_SCORE_CACHE_PROMPT_POLICY == "final_title_abstract_prompt_v32_natural_recommendation_reason"
+    source = (ROOT / "modules" / "finding" / "scripts" / "flow" / "pipeline.py").read_text(encoding="utf-8")
+    assert "do not use a prescribed opening, generic research-direction boilerplate" in source
+    assert "def zh_reason()" not in source
 
 
 def test_find_arxiv_title_match_does_not_write_cross_run_cache(monkeypatch, tmp_path):
