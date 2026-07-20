@@ -4891,12 +4891,6 @@ def fetch_neurips_title_index(year: int, max_items: int, raise_errors: bool = Fa
         if papers:
             for paper in papers:
                 paper["year"] = year
-            if requested != 1:
-                papers = _enrich_neurips_official_with_virtual_presentations(
-                    papers,
-                    year,
-                    raise_errors=False,
-                )
             presentation_counts: dict[str, int] = {}
             for paper in papers:
                 metadata = paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}
@@ -4926,8 +4920,8 @@ def fetch_neurips_title_index(year: int, max_items: int, raise_errors: bool = Fa
                 official_accepted_list_verified=complete,
                 presentation_metadata_count=sum(presentation_counts.values()) if presentation_counts else 0,
                 presentation_type_counts=presentation_counts,
-                presentation_metadata_source="neurips.cc_virtual_pages" if presentation_counts else "",
-                completeness_basis="NeurIPS official papers.nips.cc yearly paper index was parsed from paper_files/paper/{year}; it exposes accepted paper titles, authors, URLs, and presentation/acceptance tracks, but no topical category taxonomy or abstracts in the index. NeurIPS virtual pages are merged by title to attach item-level oral/spotlight/poster presentation metadata when available.",
+                presentation_metadata_source="papers.nips.cc" if presentation_counts else "",
+                completeness_basis="NeurIPS official papers.nips.cc yearly paper index was parsed from paper_files/paper/{year}; it exposes accepted paper titles, authors, URLs, and presentation/acceptance tracks, but no topical category taxonomy or abstracts in the index.",
             )
             return _attach_venue_metadata_audit(papers, audit)
     except Exception as exc:
@@ -4961,7 +4955,30 @@ def fetch_neurips_title_index(year: int, max_items: int, raise_errors: bool = Fa
         }
         _set_presentation_metadata(paper, _presentation_type_from_url(detail_url), source="neurips_virtual_url")
         papers.append(paper)
-    return papers
+    complete = requested <= 0 or len(candidates) < limit
+    audit = _venue_metadata_audit(
+        status="complete" if complete else "partial",
+        title_index_completeness_status="complete" if complete else "partial",
+        source_verified=bool(papers),
+        complete=complete,
+        title_index_complete=complete,
+        official_metadata_complete=False,
+        adapter="neurips_virtual",
+        source_url=list_url,
+        requested_years=[year],
+        paper_count=len(papers),
+        source_total_count=len(papers),
+        missing_abstract_count=len(papers),
+        has_abstracts=False,
+        any_abstracts=False,
+        has_official_categories=False,
+        category_status="no_official_categories",
+        source_scope="official_neurips_virtual_papers_index",
+        official_title_index_verified=complete,
+        official_accepted_list_verified=complete,
+        completeness_basis="NeurIPS official virtual papers page was parsed completely for the requested year; it exposes accepted paper titles and presentation URLs, but no topical category taxonomy or abstracts in the index.",
+    )
+    return _attach_venue_metadata_audit(papers, audit)
 
 
 _NEURIPS_PRESENTATION_PRIORITY = {
@@ -6297,7 +6314,7 @@ def fetch_venue_title_index(venue: dict, years: list[int], max_items: int) -> tu
                 break
         if papers:
             candidates.append(("neurips_virtual", papers[:max_items]))
-            if max_items == 1 or _source_is_complete_official_title_index(papers, "neurips_virtual"):
+            if len(papers) >= max_items or _source_is_complete_official_title_index(papers, "neurips_virtual"):
                 return _choose_best_venue_source(candidates, max_items)
 
     if is_icml_venue(venue):

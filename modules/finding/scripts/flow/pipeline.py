@@ -71,6 +71,8 @@ FINAL_LLM_SCORE_CACHE_SCHEMA_VERSION = "find_final_llm_score_cache_v1"
 FIND_INPUT_FIELDS = {"research_topic", "research_interest", "researcher_profile", "arxiv_queries"}
 FIND_LLM_CONFIG_FIELDS = {"provider", "base_url", "api_key", "model", "temperature", "llm_roles"}
 FINAL_LLM_SCORE_CACHE_PROMPT_POLICY = "final_title_abstract_prompt_v32_natural_recommendation_reason"
+RECOMMENDATION_REASON_MIN_ZH_CHARS = 20
+RECOMMENDATION_REASON_MIN_EN_CHARS = 40
 FINAL_LLM_SCORE_CACHE_MAX_ENTRIES = 50000
 FINAL_LLM_SCORE_CACHE_FIELDS = (
     "category",
@@ -5975,15 +5977,8 @@ def _reason_is_too_short(value: object, *, zh: bool = True) -> bool:
     text = " ".join(str(value or "").split())
     if not text:
         return True
-    min_chars = int(os.environ.get("RECOMMENDATION_REASON_MIN_ZH_CHARS" if zh else "RECOMMENDATION_REASON_MIN_EN_CHARS", "120" if zh else "220") or (120 if zh else 220))
-    if _readable_text_len(text) < min_chars:
-        return True
-    negative_only_markers = [
-        "缺少", "没有", "未涉及", "不含", "不包含", "无",
-        "lacks", "missing", "does not", "no ", "without",
-    ]
-    has_positive_marker = any(marker in text for marker in ["可", "提供", "借鉴", "支持", "展示", "提出", "验证", "启发", "useful", "reusable", "provides", "offers", "demonstrates"])
-    return (not has_positive_marker) and any(marker in text.lower() for marker in negative_only_markers)
+    min_chars = RECOMMENDATION_REASON_MIN_ZH_CHARS if zh else RECOMMENDATION_REASON_MIN_EN_CHARS
+    return _readable_text_len(text) < min_chars
 
 
 def _recommendation_reason_has_generic_opener(value: object, *, zh: bool = True) -> bool:

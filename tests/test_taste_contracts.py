@@ -4884,8 +4884,6 @@ def test_find_abstract_scoring_uses_local_ids_and_retries_mismatched_id(monkeypa
     monkeypatch.setenv("ABSTRACT_SCORING_WORKER_CAP", "1")
     monkeypatch.setenv("OMITTED_ITEM_RETRY_ATTEMPTS", "1")
     monkeypatch.setenv("FIND_FINAL_SCORE_CACHE", "0")
-    monkeypatch.setenv("RECOMMENDATION_REASON_MIN_ZH_CHARS", "20")
-    monkeypatch.setenv("RECOMMENDATION_REASON_MIN_EN_CHARS", "40")
 
     class MismatchedIdLLM:
         enabled = True
@@ -4917,8 +4915,8 @@ def test_find_abstract_scoring_uses_local_ids_and_retries_mismatched_id(monkeypa
                     "hit_directions_en": ["protein diffusion generation"],
                     "fit_explanation_zh": "摘要给出了蛋白质扩散生成方法与实验结果。该方法可用于当前研究。",
                     "fit_explanation_en": "The abstract presents a protein diffusion method and results. It is reusable for this project.",
-                    "reason_zh": "论文聚焦可控蛋白质扩散生成，与研究主题中的条件生成和结构质量控制直接契合。其生成机制与实验结果能够帮助比较不同条件约束的有效性，并为模型选择和实验设计提供依据。扩散建模方式、条件注入策略、评价指标及消融方案都具有可迁移的借鉴价值。",
-                    "reason_en": "The paper focuses on controllable protein diffusion generation, directly matching the research topic of conditional generation and structural quality control. Its generation mechanism and experiments help compare alternative constraints and inform model selection and experimental design. The diffusion formulation, conditioning strategy, evaluation metrics, and ablations are transferable to subsequent research.",
+                    "reason_zh": "论文提出可控生成方法，可帮助比较约束策略，并借鉴其评测设计。",
+                    "reason_en": "The method fits controlled generation and provides reusable evaluation design.",
                 })
             return {"ok": True, "data": {"evaluations": rows}, "error": ""}
 
@@ -6600,6 +6598,78 @@ def test_find_neurips_year_probe_stops_after_one_official_title(monkeypatch):
 
     assert [paper["title"] for paper in papers] == ["NeurIPS availability probe paper"]
     assert adapter == "neurips_virtual"
+
+
+def test_find_neurips_official_index_returns_before_optional_presentation_lookup(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+
+    class Response:
+        text = "<html></html>"
+
+    row = {
+        "id": "neurips-2025-official",
+        "source": "neurips_official_papers",
+        "title": "NeurIPS official index paper",
+        "authors": "",
+        "abstract": "",
+        "url": "https://papers.nips.cc/paper_files/paper/2025/hash/official-Abstract-Conference.html",
+        "pdf_url": "",
+        "venue": "NeurIPS",
+        "year": 2025,
+        "category": "",
+        "classification_source": "llm_inferred",
+        "metadata": {},
+    }
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("valid official titles waited for optional presentation metadata")
+
+    monkeypatch.setattr(find_support, "_request", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr(find_support, "_parse_neurips_official_papers_list", lambda *_args, **_kwargs: [dict(row)])
+    monkeypatch.setattr(find_support, "_enrich_neurips_official_with_virtual_presentations", unexpected)
+
+    papers = find_support.fetch_neurips_title_index(2025, 100000)
+
+    assert [paper["title"] for paper in papers] == ["NeurIPS official index paper"]
+    assert papers[0]["metadata"]["venue_metadata_audit"]["official_title_index_verified"] is True
+
+
+def test_find_neurips_full_fetch_keeps_virtual_rows_after_official_tls_failure(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+
+    class Response:
+        text = "<html></html>"
+
+    def request(url, *_args, **_kwargs):
+        if "papers.nips.cc" in url:
+            raise OSError("TLS handshake failed")
+        if url == "https://neurips.cc/virtual/2025/papers.html":
+            return Response()
+        raise AssertionError(f"NeurIPS fetch continued into an unnecessary source: {url}")
+
+    def parse_virtual(_html, page_url, _limit):
+        return [(f"{page_url}#paper-1", "Recovered NeurIPS virtual paper")]
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("NeurIPS virtual rows were discarded in favor of a slower fallback")
+
+    monkeypatch.setattr(find_support, "_request", request)
+    monkeypatch.setattr(find_support, "_parse_neurips_list", parse_virtual)
+    monkeypatch.setattr(find_support, "fetch_openreview_venue", unexpected)
+    monkeypatch.setattr(find_support, "fetch_dblp_venue", unexpected)
+
+    papers, adapter = find_support.fetch_venue_title_index_all(
+        {"id": "openreview_neurips", "name": "NeurIPS", "address": "https://dblp.org/db/conf/nips/"},
+        [2025],
+    )
+
+    assert adapter == "neurips_virtual"
+    assert [paper["title"] for paper in papers] == ["Recovered NeurIPS virtual paper"]
+    audit = papers[0]["metadata"]["venue_metadata_audit"]
+    assert audit["official_title_index_verified"] is True
+    assert "TLS handshake failed" in papers[0]["metadata"]["official_papers_error"]
 
 
 def test_find_icml_2026_prefers_fast_guide_before_large_official_downloads(monkeypatch):
@@ -8660,8 +8730,20 @@ def test_find_dynamic_source_raw_cache_helpers_are_removed(monkeypatch, tmp_path
 
 def test_find_preserves_natural_llm_recommendation_reason_without_template_rewrite(monkeypatch):
     find_pipeline = _load_find_pipeline()
-    monkeypatch.setenv("RECOMMENDATION_REASON_MIN_ZH_CHARS", "20")
-    monkeypatch.setenv("RECOMMENDATION_REASON_MIN_EN_CHARS", "40")
+    monkeypatch.setenv("RECOMMENDATION_REASON_MIN_ZH_CHARS", "999")
+    monkeypatch.setenv("RECOMMENDATION_REASON_MIN_EN_CHARS", "999")
+    assert find_pipeline.RECOMMENDATION_REASON_MIN_ZH_CHARS == 20
+    assert find_pipeline.RECOMMENDATION_REASON_MIN_EN_CHARS == 40
+    concise_reason_zh = "论文提出可控生成方法，可帮助比较约束策略，并借鉴其评测设计。"
+    concise_reason_en = "The method fits controlled generation and provides reusable evaluation design."
+    assert find_pipeline._recommendation_reason_unusable(concise_reason_zh, zh=True) is False
+    assert find_pipeline._recommendation_reason_unusable(concise_reason_en, zh=False) is False
+    assert find_pipeline._recommendation_reason_unusable(
+        "论文在无需额外标注的条件下完成生成，并帮助迁移评测设计。", zh=True
+    ) is False
+    assert find_pipeline._recommendation_reason_unusable(
+        "The method works without extra labels and helps transfer its evaluation design.", zh=False
+    ) is False
     reason_zh = (
         "论文研究条件蛋白生成中的结构约束，与项目关注的可控蛋白设计问题直接契合。"
         "其条件编码与生成评测能够帮助比较现有路线的约束表达能力，并为实验基线选择提供依据。"
