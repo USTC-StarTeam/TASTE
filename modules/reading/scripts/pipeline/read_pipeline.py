@@ -83,7 +83,6 @@ from core.common import (
     env_bool,
     has_substantive_chinese,
     is_placeholder_paper_title,
-    is_all_caps_paper_title,
     jina_api_key_configured,
     jina_request_headers,
     mark_process_http_blocker,
@@ -1039,43 +1038,28 @@ def _pdf_text_identity_ok(paper: dict, extracted_text: str) -> bool:
     return bool(_best_full_text_title(paper, extracted_text))
 
 
-def _apply_verified_full_text_title(paper: dict, verified_title: object) -> str:
-    title = display_paper_title(verified_title)
-    if not title or is_placeholder_paper_title(title):
-        return ""
-    original_title = display_paper_title(paper.get("title"))
-    metadata = paper.setdefault("metadata", {})
-    if original_title and normalized_paper_title(original_title) == normalized_paper_title(title):
-        title = original_title
-    elif original_title:
-        metadata.setdefault("original_bibliographic_title", original_title)
-        metadata["title_correction_reason"] = "verified_full_text_title"
-    metadata["reading_verified_full_text_title"] = title
-    paper["title"] = title
-    return title
-
-
-def _verify_packet_full_text_title(paper: dict, packet: dict) -> str:
+def _audit_packet_full_text_title(paper: dict, packet: dict) -> str:
     if not isinstance(packet, dict) or not packet.get("full_text_available"):
         return ""
-    verified_title = str(packet.get("verified_full_text_title") or "").strip()
-    if not verified_title:
+    legacy_extracted_title = packet.pop("verified_full_text_title", "")
+    extracted_title = str(packet.get("extracted_full_text_title") or legacy_extracted_title or "").strip()
+    if not extracted_title:
         text_path = _packet_path(packet, "text_path")
         if text_path is not None and text_path.is_file():
             try:
-                verified_title = _best_full_text_title(
+                extracted_title = _best_full_text_title(
                     paper,
                     text_path.read_text(encoding="utf-8", errors="replace"),
                 )
             except OSError:
-                verified_title = ""
-    if not verified_title:
-        return ""
-    verified_title = _apply_verified_full_text_title(paper, verified_title)
-    if verified_title:
-        packet["verified_full_text_title"] = verified_title
-        packet["title"] = verified_title
-    return verified_title
+                extracted_title = ""
+    extracted_title = display_paper_title(extracted_title)
+    if extracted_title and not is_placeholder_paper_title(extracted_title):
+        packet["extracted_full_text_title"] = extracted_title
+    canonical_title = display_paper_title(paper.get("title"))
+    if canonical_title:
+        packet["title"] = canonical_title
+    return extracted_title
 
 
 def _reading_acquisition_services() -> dict[str, Callable]:
@@ -4043,6 +4027,10 @@ def _normalize_local_input_paper(row: dict) -> dict:
     input_metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
     if normalized_metadata or input_metadata:
         paper["metadata"] = {**normalized_metadata, **input_metadata}
+        paper["metadata"].pop("reading_verified_full_text_title", None)
+        if paper["metadata"].get("title_correction_reason") == "verified_full_text_title":
+            paper["metadata"].pop("title_correction_reason", None)
+            paper["metadata"].pop("original_bibliographic_title", None)
     source_abstract_en = _article_source_abstract_en(paper)
     for mapping in [paper, paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}]:
         if mapping.get("abstract_zh"):
@@ -4172,12 +4160,7 @@ def _normalize_article_markdown_metadata(text: str, paper: dict, packet: dict | 
     metadata_lines = article_metadata_markdown_lines(paper, packet if isinstance(packet, dict) else {})
     expected_title, _expected_abstract, _source_abstract_en = _article_quality_expectations(paper)
     current_title = display_paper_title(lines[first].lstrip("#").strip())
-    canonical_title = current_title if (
-        current_title
-        and expected_title
-        and normalized_paper_title(current_title) == normalized_paper_title(expected_title)
-        and not (is_all_caps_paper_title(current_title) and not is_all_caps_paper_title(expected_title))
-    ) else expected_title or current_title or "未命名论文"
+    canonical_title = expected_title or current_title or "未命名论文"
     rest = lines[section_start:]
     while rest and not rest[0].strip():
         rest.pop(0)
@@ -4364,7 +4347,7 @@ def _article_source_abstract_en(paper: dict | None) -> str:
 def _article_quality_expectations(paper: dict | None) -> tuple[str, str, str]:
     paper = paper if isinstance(paper, dict) else {}
     metadata = paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}
-    title = display_paper_title(paper.get("title") or metadata.get("reading_verified_full_text_title"))
+    title = display_paper_title(paper.get("title"))
     source_abstract_en = _article_source_abstract_en(paper)
     abstract_zh = clean_fixed_chinese_abstract(paper.get("abstract_zh") or metadata.get("abstract_zh"))
     if abstract_zh and (
@@ -4968,15 +4951,7 @@ def _restore_article_full_text_cache(paper: dict, item_dir: Path) -> dict:
             restored["pdf_path"] = _rel_reading_path(pdf_target)
     if not copied_text and not copied_pdf:
         return {}
-    verified_title = str(restored.get("verified_full_text_title") or "").strip()
-    if not verified_title and copied_text:
-        try:
-            verified_title = _best_full_text_title(paper, text_target.read_text(encoding="utf-8", errors="replace"))
-        except OSError:
-            verified_title = ""
-    if verified_title:
-        restored["verified_full_text_title"] = _apply_verified_full_text_title(paper, verified_title)
-        restored["title"] = paper.get("title") or restored.get("title") or ""
+    _audit_packet_full_text_title(paper, restored)
     restored.update(_article_cache_content_fingerprints(cache_dir))
     restored["article_cache_hit"] = True
     restored["article_cache_dir"] = _rel_reading_path(cache_dir)
@@ -5115,6 +5090,10 @@ def _merge_cached_paper_hints(paper: dict, cached_paper: dict) -> dict:
     input_metadata = input_paper.get("metadata") if isinstance(input_paper.get("metadata"), dict) else {}
     if cached_metadata or input_metadata:
         merged["metadata"] = {**cached_metadata, **input_metadata}
+        merged["metadata"].pop("reading_verified_full_text_title", None)
+        if merged["metadata"].get("title_correction_reason") == "verified_full_text_title":
+            merged["metadata"].pop("title_correction_reason", None)
+            merged["metadata"].pop("original_bibliographic_title", None)
     return merged
 
 
@@ -5265,15 +5244,7 @@ def _existing_full_text_packet_for_deep_read(item_dir: Path, paper: dict, *, all
     ):
         return {}
     reused = dict(packet)
-    verified_title = str(reused.get("verified_full_text_title") or "").strip()
-    if not verified_title:
-        try:
-            verified_title = _best_full_text_title(paper, text_path.read_text(encoding="utf-8", errors="replace"))
-        except OSError:
-            verified_title = ""
-    if verified_title:
-        reused["verified_full_text_title"] = _apply_verified_full_text_title(paper, verified_title)
-        reused["title"] = paper.get("title") or reused.get("title") or ""
+    _audit_packet_full_text_title(paper, reused)
     reused["reused_existing_full_text_packet_for_deep_read"] = True
     reused["reuse_policy"] = "Only reused because the same Reading run already has verified same-paper full-text evidence and this pass is rerunning Claude/subagent deep-read synthesis."
     return reused
@@ -5510,7 +5481,7 @@ def _process_local_read_paper(
             log(f"复用文章缓存全文/PDF {index}: {paper.get('title') or paper.get('paper_id')}")
     if not packet:
         packet = acquire_full_text(paper, item_dir, log=log, services=_reading_acquisition_services())
-    _verify_packet_full_text_title(paper, packet)
+    _audit_packet_full_text_title(paper, packet)
     write_json(item_dir / "paper.json", paper)
     cache_publication = _publish_article_full_text_cache(item_dir, paper, packet)
     write_json(item_dir / "full_text_packet.json", {"run_id": run_id, "paper_index": index, "papers": [packet], "generated_at": _now_iso()})
@@ -5632,7 +5603,7 @@ def _prepare_local_read_paper(
             log(f"复用文章缓存全文/PDF {index}: {paper.get('title') or paper.get('paper_id')}")
     if not packet:
         packet = acquire_full_text(paper, item_dir, log=log, services=_reading_acquisition_services())
-    _verify_packet_full_text_title(paper, packet)
+    _audit_packet_full_text_title(paper, packet)
     write_json(item_dir / "paper.json", paper)
     cache_publication = _publish_article_full_text_cache(item_dir, paper, packet)
     write_json(item_dir / "full_text_packet.json", {"run_id": run_id, "paper_index": index, "papers": [packet], "generated_at": _now_iso()})
@@ -7314,10 +7285,10 @@ def run_standalone_deep_read(args: object) -> dict:
     packet_entry = _restore_article_full_text_cache(paper, current_run_dir)
     if not packet_entry:
         packet_entry = acquire_full_text(paper, current_run_dir, services=_reading_acquisition_services())
-        _verify_packet_full_text_title(paper, packet_entry)
+        _audit_packet_full_text_title(paper, packet_entry)
         _publish_article_full_text_cache(current_run_dir, paper, packet_entry)
     else:
-        _verify_packet_full_text_title(paper, packet_entry)
+        _audit_packet_full_text_title(paper, packet_entry)
     write_json(current_run_dir / "paper.json", paper)
     write_json(current_run_dir / "full_text_packet.json", {
         "run_id": current_run_dir.name,

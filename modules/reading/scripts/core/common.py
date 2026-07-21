@@ -96,11 +96,6 @@ def is_placeholder_paper_title(value: object) -> bool:
     }
 
 
-def is_all_caps_paper_title(value: object) -> bool:
-    letters = "".join(re.findall(r"[A-Za-z]", display_paper_title(value)))
-    return bool(letters) and letters.isupper()
-
-
 def paper_title_tokens(value: object) -> set[str]:
     stop = {"a", "an", "and", "for", "in", "of", "on", "the", "to", "towards", "toward", "with"}
     normalized = re.sub(r"[\u2010-\u2015]", "-", str(value or ""))

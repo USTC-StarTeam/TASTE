@@ -927,6 +927,7 @@ def test_reading_routes_unresolved_prose_latex_back_to_the_llm():
 
 def test_reading_article_markdown_requires_a_chinese_abstract(tmp_path):
     read_pipeline = _load_reading_pipeline()
+    claude_subagent = _load_reading_claude_subagent()
     article_path = tmp_path / "read.md"
     result_payload = {"article_markdown_path": str(article_path)}
     article_path.write_text(
@@ -972,22 +973,35 @@ def test_reading_article_markdown_requires_a_chinese_abstract(tmp_path):
         f"{full_text_title}\nAlice Smith, Bob Lee\nAbstract\nFull paper body.",
     )
     assert verified_title == full_text_title
-    read_pipeline._apply_verified_full_text_title(bibliographic_paper, verified_title)
-    assert bibliographic_paper["title"] == full_text_title
-    assert bibliographic_paper["metadata"]["original_bibliographic_title"].endswith("Backbone Representations for General Structure Design")
+    packet = {
+        "full_text_available": True,
+        "title": verified_title,
+        "verified_full_text_title": verified_title,
+    }
+    assert read_pipeline._audit_packet_full_text_title(bibliographic_paper, packet) == full_text_title
+    assert bibliographic_paper["title"].endswith("Backbone Representations for General Structure Design")
+    assert packet["title"] == bibliographic_paper["title"]
+    assert packet["extracted_full_text_title"] == full_text_title
+    assert "verified_full_text_title" not in packet
     assert read_pipeline._article_markdown_quality_issue(
-        valid_text.replace("# Paper", f"# {full_text_title}", 1), bibliographic_paper,
+        valid_text.replace("# Paper", f"# {bibliographic_paper['title']}", 1), bibliographic_paper,
     ) == ""
-    mixed_case_title = "Escaping Policy Contraction for Stable Language Model Fine-Tuning"
-    uppercase_title = mixed_case_title.upper()
-    casing_paper = {"title": mixed_case_title, "abstract_zh": paper["abstract_zh"]}
-    assert read_pipeline._apply_verified_full_text_title(casing_paper, uppercase_title) == mixed_case_title
-    assert casing_paper["title"] == mixed_case_title
-    normalized_casing = read_pipeline._normalize_article_markdown_metadata(
-        valid_text.replace("# Paper", f"# {uppercase_title}", 1),
-        casing_paper,
+    canonical_title = "Robust Conditional Diffusion for Protein Design"
+    polluted_title = "1 " + canonical_title
+    canonical_paper = {"title": canonical_title, "abstract_zh": paper["abstract_zh"]}
+    normalized_title = read_pipeline._normalize_article_markdown_metadata(
+        valid_text.replace("# Paper", f"# {polluted_title}", 1),
+        canonical_paper,
     )
-    assert normalized_casing.startswith(f"# {mixed_case_title}\n")
+    assert normalized_title.startswith(f"# {canonical_title}\n")
+    title_prompt = claude_subagent.build_deep_read_prompt(
+        paper=canonical_paper,
+        packet={"title": polluted_title, "extracted_full_text_title": polluted_title},
+        run_path=tmp_path,
+        output_path=tmp_path / "outputs" / "reading_result.json",
+    )
+    assert f"`# {canonical_title}`" in title_prompt
+    assert f"`# {polluted_title}`" not in title_prompt
     assert read_pipeline._article_markdown_quality_issue(
         valid_text.replace("中文方法分析。", "The method remains entirely in English.", 1), paper,
     ) == "section_missing_chinese"
