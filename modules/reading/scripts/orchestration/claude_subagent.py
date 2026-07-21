@@ -55,7 +55,7 @@ if _core_common_spec is None:
     sys.modules["core.common"] = _core_common_module
     _core_common_spec.loader.exec_module(_core_common_module)
 
-from core.common import first_json_object, has_substantive_chinese, has_unresolved_prose_latex_markup, write_json, write_text
+from core.common import chinese_translation_quality_issue, display_paper_title, first_json_object, has_unresolved_prose_latex_markup, write_json, write_text
 from core.common import READING_ROOT, RUNTIME_ROOT, ensure_inside_output, ensure_inside_runtime, make_reading_paths_relative, relative_to_reading
 
 
@@ -299,19 +299,28 @@ def build_deep_read_prompt(
         article_md_run = article_md_path.resolve(strict=False).relative_to(run_path.resolve(strict=False)).as_posix()
     except Exception:
         article_md_run = relative_to_reading(article_md_path)
-    title = str(paper.get("title") or packet.get("title") or "未命名论文")
     metadata = _paper_metadata(paper)
-    abstract_en = str(paper.get("abstract") or paper.get("abstract_en") or metadata.get("abstract") or "").strip()
+    title = display_paper_title(
+        metadata.get("reading_verified_full_text_title")
+        or packet.get("verified_full_text_title")
+        or paper.get("title")
+        or packet.get("title")
+        or "未命名论文"
+    )
+    abstract_en = str(paper.get("abstract_en") or paper.get("abstract") or metadata.get("abstract_en") or metadata.get("abstract") or "").strip()
     raw_abstract_zh = str(paper.get("abstract_zh") or metadata.get("abstract_zh") or "").strip()
     abstract_zh = raw_abstract_zh
-    if abstract_zh and (has_unresolved_prose_latex_markup(abstract_zh) or not has_substantive_chinese(abstract_zh)):
+    if abstract_zh and (
+        has_unresolved_prose_latex_markup(abstract_zh)
+        or chinese_translation_quality_issue(abstract_zh, abstract_en)
+    ):
         abstract_zh = ""
     if abstract_zh:
         abstract_rule = "`摘要` 固定逐字写入下方中文摘要全文，包含原有标点。"
         abstract_label = "中文摘要（固定输入）"
         abstract_input = abstract_zh
     else:
-        abstract_rule = "`摘要` 固定写成下方英文原文摘要的完整中文翻译。"
+        abstract_rule = "`摘要` 固定写成下方英文原文摘要的完整中文翻译；不得附带或复制英文原文句群，专有名词、模型名、数据集名和缩写可保留英文。"
         abstract_label = "英文原文摘要（翻译为中文）"
         abstract_input = abstract_en or "未提供"
     source_label = _source_label_for_prompt(paper)
@@ -393,15 +402,20 @@ def build_deep_read_repair_prompt(
         article_md_run = article_md_path.resolve(strict=False).relative_to(run_path.resolve(strict=False)).as_posix()
     except Exception:
         article_md_run = relative_to_reading(article_md_path)
-    title = str(paper.get("title") or "未命名论文")
-    paper_id = str(paper.get("paper_id") or paper.get("id") or "")
     metadata = _paper_metadata(paper)
+    title = display_paper_title(metadata.get("reading_verified_full_text_title") or paper.get("title") or "未命名论文")
+    paper_id = str(paper.get("paper_id") or paper.get("id") or "")
+    source_abstract_en = str(paper.get("abstract_en") or paper.get("abstract") or metadata.get("abstract_en") or metadata.get("abstract") or "").strip()
     fixed_abstract_zh = str(paper.get("abstract_zh") or metadata.get("abstract_zh") or "").strip()
+    if chinese_translation_quality_issue(fixed_abstract_zh, source_abstract_en):
+        fixed_abstract_zh = ""
     fixed_abstract_block = f"\n必须逐字恢复的固定中文摘要：\n{fixed_abstract_zh}\n" if fixed_abstract_zh else ""
     repair_rule = {
         "abstract_missing_chinese": "只把 `## 摘要` 下尚未翻译的英文摘要完整翻译为中文。",
+        "abstract_contains_english_original": "只删除 `## 摘要` 中附带或复制的英文原文句群，保留完整准确的中文翻译；专有名词、模型名、数据集名和缩写可保留英文。",
         "missing_abstract_section": "只补齐缺失的 `## 摘要` 栏目及其完整中文摘要。",
         "fixed_abstract_modified": "只将 `## 摘要` 恢复为不合格原因中要求的固定中文摘要，不得概括或改写。",
+        "article_title_placeholder": f"只将占位一级标题恢复为 `# {title}`。",
         "article_title_mismatch": f"只将一级标题恢复为 `# {title}`，不得使用占位标题或自行改写。",
         "invalid_section_structure": "只补齐、去重并按不合格原因恢复固定栏目顺序，保留现有正确内容。",
         "section_missing_chinese": "只将不合格原因点名的英文正文栏目完整转为中文，专有名词、缩写和公式可保留原文。",

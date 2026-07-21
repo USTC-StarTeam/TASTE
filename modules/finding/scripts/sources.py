@@ -665,7 +665,9 @@ def _conference_virtual_detail_source(paper: dict) -> str:
     if not url or "/virtual/" not in url:
         return ""
     metadata = paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}
-    if source in {"icml_downloads", "icml_downloads_cache", "eccv_virtual", "neurips_virtual"}:
+    if source in {"icml_downloads", "icml_downloads_cache", "icml_official_virtual", "eccv_virtual", "neurips_virtual"}:
+        if source == "icml_official_virtual":
+            return source
         if metadata.get("title_index_only") or not (paper.get("abstract") and paper.get("pdf_url")):
             return source
     lowered = url.lower()
@@ -1619,9 +1621,6 @@ def _icml_official_paper_url(item: dict[str, Any], year: int) -> str:
 
 
 def fetch_icml_official_virtual_2026(max_items: int) -> list[dict]:
-    guide_papers = _icml2026_guide_papers(max_items)
-    if guide_papers:
-        return guide_papers
     try:
         raw, source_url = _load_json_url_with_cache(
             ICML2026_OFFICIAL_ORALS_POSTERS_URL,
@@ -1632,10 +1631,10 @@ def fetch_icml_official_virtual_2026(max_items: int) -> list[dict]:
             _icml2026_official_cache_path("icml-2026-abstracts.json"),
         )
     except Exception:
-        return []
+        return _icml2026_guide_papers(max_items)
     results = raw.get("results") if isinstance(raw, dict) else []
     if not isinstance(results, list) or not results:
-        return []
+        return _icml2026_guide_papers(max_items)
     if not isinstance(abstracts, dict):
         abstracts = {}
     try:
@@ -1728,7 +1727,7 @@ def fetch_icml_official_virtual_2026(max_items: int) -> list[dict]:
             "to accepted papers."
         ),
     )
-    return _attach_venue_metadata_audit(accepted, audit)
+    return _attach_venue_metadata_audit(accepted, audit) if accepted else _icml2026_guide_papers(max_items)
 
 
 def _dblp_page_url(url: str) -> str:

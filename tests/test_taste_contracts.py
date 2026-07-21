@@ -921,13 +921,52 @@ def test_reading_article_markdown_requires_a_chinese_abstract(tmp_path):
     assert read_pipeline._article_markdown_quality_issue(valid_text, paper) == ""
     assert read_pipeline._article_markdown_quality_issue(
         valid_text.replace("# Paper", "# 论文标题", 1), paper,
-    ) == "article_title_mismatch"
+    ) == "article_title_placeholder"
+    format_title = "N <sup>6</sup> Fine- Grained <i>De Novo</i> Design – Study"
+    rendered_title = "N⁶ Fine-Grained *De Novo* Design - Study"
+    assert read_pipeline._article_markdown_quality_issue(
+        valid_text.replace("# Paper", f"# {rendered_title}", 1),
+        {"title": format_title, "abstract_zh": paper["abstract_zh"]},
+    ) == ""
+    bibliographic_paper = {
+        "title": "Learning Reliable Protein Surface and Backbone Representations for General Structure Design",
+        "authors": "Alice Smith, Bob Lee",
+        "abstract_zh": paper["abstract_zh"],
+    }
+    full_text_title = "Learning Reliable Protein Surface and Structure Representations for General Structure Design"
+    verified_title = read_pipeline._best_full_text_title(
+        bibliographic_paper,
+        f"{full_text_title}\nAlice Smith, Bob Lee\nAbstract\nFull paper body.",
+    )
+    assert verified_title == full_text_title
+    read_pipeline._apply_verified_full_text_title(bibliographic_paper, verified_title)
+    assert bibliographic_paper["title"] == full_text_title
+    assert bibliographic_paper["metadata"]["original_bibliographic_title"].endswith("Backbone Representations for General Structure Design")
+    assert read_pipeline._article_markdown_quality_issue(
+        valid_text.replace("# Paper", f"# {full_text_title}", 1), bibliographic_paper,
+    ) == ""
     assert read_pipeline._article_markdown_quality_issue(
         valid_text.replace("中文方法分析。", "The method remains entirely in English.", 1), paper,
     ) == "section_missing_chinese"
     assert read_pipeline._article_markdown_quality_issue(
         valid_text.replace("这是经过翻译的中文摘要。", "这是被模型改写过的摘要。", 1), paper,
     ) == "fixed_abstract_modified"
+
+    source_abstract = (
+        "We introduce a unified framework for protein design that learns structural constraints "
+        "from experimental data and evaluates generated candidates across multiple benchmarks."
+    )
+    mixed_abstract = source_abstract + "\n\n我们提出统一的蛋白质设计框架，从实验数据学习结构约束，并在多个基准上评估生成候选。"
+    assert read_pipeline.has_substantive_chinese(mixed_abstract) is True
+    assert read_pipeline._article_markdown_quality_issue(
+        valid_text.replace("这是经过翻译的中文摘要。", mixed_abstract, 1),
+        {"title": "Paper", "abstract": source_abstract},
+    ) == "abstract_contains_english_original"
+    technical_terms_abstract = "本文使用 AlphaFold2、ProteinMPNN 和 CATH 数据集完成蛋白质结构设计，并报告性能提升。"
+    assert read_pipeline._article_markdown_quality_issue(
+        valid_text.replace("这是经过翻译的中文摘要。", technical_terms_abstract, 1),
+        {"title": "Paper"},
+    ) == ""
 
 
 def test_reading_article_markdown_rejects_invalid_web_katex(monkeypatch):
@@ -1396,14 +1435,21 @@ def test_reading_article_cache_restore_backfills_content_binding(monkeypatch, tm
 
 
 @pytest.mark.parametrize(
-    ("cached_abstract", "fixed_abstract", "expected_issue"),
+    ("cached_abstract", "fixed_abstract", "source_abstract", "expected_issue"),
     [
-        ("English abstract copied without translation.", "", "abstract_missing_chinese"),
-        ("这是被模型改写过的摘要。", "这是必须逐字保留的固定摘要。", "fixed_abstract_modified"),
+        ("English abstract copied without translation.", "", "", "abstract_missing_chinese"),
+        ("这是被模型改写过的摘要。", "这是必须逐字保留的固定摘要。", "", "fixed_abstract_modified"),
+        (
+            "We present a method for protein design that learns from structural data and evaluates generated candidates.\n\n"
+            "我们提出一种从结构数据学习并评估生成候选的蛋白质设计方法。",
+            "",
+            "We present a method for protein design that learns from structural data and evaluates generated candidates.",
+            "abstract_contains_english_original",
+        ),
     ],
 )
 def test_reading_article_cache_invalidates_content_quality_defects(
-    monkeypatch, tmp_path, cached_abstract, fixed_abstract, expected_issue,
+    monkeypatch, tmp_path, cached_abstract, fixed_abstract, source_abstract, expected_issue,
 ):
     read_pipeline = _load_reading_pipeline()
     cache_dir = tmp_path / "cache"
@@ -1421,6 +1467,7 @@ def test_reading_article_cache_invalidates_content_quality_defects(
         "paper_id": "paper-1",
         "title": "Cached Paper",
         "abstract_zh": fixed_abstract,
+        "abstract": source_abstract,
     }), encoding="utf-8")
     (cache_dir / "manifest.json").write_text(json.dumps({
         "has_read_md": True,
@@ -1434,7 +1481,7 @@ def test_reading_article_cache_invalidates_content_quality_defects(
 
     result = read_pipeline._restore_article_read_cache(
         item_dir,
-        {"paper_id": "paper-1", "title": "Cached Paper"},
+        {"paper_id": "paper-1", "title": "Cached Paper", "abstract": source_abstract},
         run_id=_reading_test_run_id(),
         paper_index=1,
     )
@@ -1665,7 +1712,7 @@ def test_reading_run_read_prepare_splits_full_text_and_reading_subagent_phases(m
     (isolated_reading_latest_run / "read.md").write_text("# stale read\n", encoding="utf-8")
     (isolated_reading_latest_run / "run_manifest.json").write_text('{"run_id":"stale"}\n', encoding="utf-8")
 
-    def fake_acquire_full_text(paper, item_dir, log=print):
+    def fake_acquire_full_text(paper, item_dir, log=print, *, services=None):
         text = "full text evidence " * 120
         text_path = item_dir / "extracted" / "full_text.txt"
         text_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1734,7 +1781,7 @@ def test_reading_batch_requeues_cooldown_papers_once_with_one_recovery_worker(mo
     calls: dict[str, int] = {}
     call_lock = threading.Lock()
 
-    def fake_acquire_full_text(paper, item_dir, log=print):
+    def fake_acquire_full_text(paper, item_dir, log=print, *, services=None):
         paper_id = str(paper["paper_id"])
         with call_lock:
             calls[paper_id] = calls.get(paper_id, 0) + 1
@@ -1836,7 +1883,7 @@ def test_reading_run_read_uses_subagent_article_markdown_aggregation_and_audit(m
     (isolated_reading_latest_run / "read.md").write_text("# stale read\n", encoding="utf-8")
     (isolated_reading_latest_run / "run_manifest.json").write_text('{"run_id":"stale"}\n', encoding="utf-8")
 
-    def fake_acquire_full_text(paper, item_dir, log=print):
+    def fake_acquire_full_text(paper, item_dir, log=print, *, services=None):
         text = "这是用于精读的完整正文证据，包含方法、实验、局限和证据边界。 " * 120
         text_path = item_dir / "extracted" / "full_text.txt"
         text_path.parent.mkdir(parents=True, exist_ok=True)
@@ -4165,7 +4212,7 @@ def test_reading_biorxiv_api_jatsxml_can_supply_official_xml_text(monkeypatch):
     monkeypatch.setattr(paper_sources, "service_cooldown_remaining", lambda _service: remaining_values.pop(0) if remaining_values else 0.0)
     monkeypatch.setattr(paper_sources.time, "sleep", lambda seconds: sleeps.append(seconds))
     monkeypatch.setattr(paper_sources, "service_get", fake_service_get)
-    monkeypatch.setattr(paper_sources, "_read_pipeline_func", lambda _name: (lambda _paper, _text: True))
+    monkeypatch.setattr(paper_sources, "_pdf_text_identity_ok", lambda _paper, _text: True)
 
     text, receipt = paper_sources._fetch_biorxiv_jats_xml_text({
         "source": "biorxiv",
@@ -4939,6 +4986,24 @@ def test_find_translation_keeps_prose_markup_visible_to_llm_without_splitting_wo
     assert "abstract_zh" not in untranslated
     assert untranslated["abstract_zh_source"] == "missing_after_translation_attempts"
     assert find_pipeline._recommendation_translation_status([untranslated], "completed") == "partial"
+
+
+def test_find_bound_official_detail_can_correct_a_stale_bibliographic_title():
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    paper = {
+        "title": "Learning Reliable Protein Surface and Backbone Representations for General Structure Design",
+        "metadata": {},
+    }
+    official_title = "Learning Reliable Protein Surface and Structure Representations for General Structure Design"
+
+    assert find_support._reconcile_official_detail_title(paper, official_title, "icml_virtual") == "corrected"
+    assert paper["title"] == official_title
+    assert paper["metadata"]["original_bibliographic_title"].endswith("Backbone Representations for General Structure Design")
+
+    unrelated = {"title": "Completely Different Paper on Language Models", "metadata": {}}
+    assert find_support._reconcile_official_detail_title(unrelated, official_title, "icml_virtual") == "mismatch"
+    assert unrelated["title"] == "Completely Different Paper on Language Models"
 
 
 def test_find_title_prefilter_uses_local_ids_and_recovers_missing_rows(monkeypatch):
@@ -6891,19 +6956,30 @@ def test_find_neurips_full_fetch_keeps_virtual_rows_after_official_tls_failure(m
     assert "TLS handshake failed" in papers[0]["metadata"]["official_papers_error"]
 
 
-def test_find_icml_2026_prefers_fast_guide_before_large_official_downloads(monkeypatch):
+def test_find_icml_2026_prefers_official_metadata_before_guide_fallback(monkeypatch):
     _load_find_pipeline()
     find_sources = sys.modules["sources"]
-    guide_rows = [{"id": "icml-guide", "title": "ICML guide paper", "year": 2026, "venue": "ICML"}]
+    monkeypatch.setattr(
+        find_sources,
+        "_icml2026_guide_papers",
+        lambda _max_items: (_ for _ in ()).throw(AssertionError("guide used before live official metadata")),
+    )
 
-    monkeypatch.setattr(find_sources, "_icml2026_guide_papers", lambda _max_items: guide_rows)
+    def official_payload(url, _cache_path):
+        if "orals-posters" in url:
+            return ({"results": [{
+                "id": "official-1",
+                "name": "Official ICML Paper Title",
+                "decision": "Accept (Poster)",
+                "authors": [{"fullname": "Alice Smith"}],
+                "virtualsite_url": "/virtual/2026/poster/1",
+            }]}, url)
+        return ({"official-1": "Official abstract text."}, url)
 
-    def unexpected(*_args, **_kwargs):
-        raise AssertionError("official ICML static download ran despite an available guide corpus")
+    monkeypatch.setattr(find_sources, "_load_json_url_with_cache", official_payload)
 
-    monkeypatch.setattr(find_sources, "_load_json_url_with_cache", unexpected)
-
-    assert find_sources.fetch_icml_official_virtual_2026(100000) == guide_rows
+    papers = find_sources.fetch_icml_official_virtual_2026(100000)
+    assert [paper["title"] for paper in papers] == ["Official ICML Paper Title"]
 
 
 def test_find_priority_venue_year_probes_stop_at_first_live_source(monkeypatch):
