@@ -2511,6 +2511,47 @@ def test_web_read_scoring_counts_reused_deep_reads_before_third_phase():
     assert finished["current_action"] == "精读任务已完成"
 
 
+def test_web_read_start_does_not_count_reused_reads_against_pending_total():
+    from auto_research.web import server as web_server
+
+    logs = ["Full-text acquisition phase: 26 papers, 13 workers"]
+    for index in range(1, 14):
+        logs.extend([
+            f"复用单篇精读缓存 {index}: Cached {index}",
+            f"Finished full-text acquisition {index}/26: complete / full_text=True - Cached {index}",
+        ])
+    for index in range(14, 27):
+        logs.append(
+            f"Finished full-text acquisition {index}/26: "
+            f"prepared_full_text_for_reading_subagent / full_text=True - Fresh {index}"
+        )
+    logs.append("Reading subagent phase: 13 papers, 13 workers")
+
+    progress = web_server._read_job_progress_from_logs(
+        logs,
+        {"phase": "deep_read"},
+        {"status": "running", "run_id": "find_demo"},
+        status="running",
+    )
+
+    deep_read = progress["phases"]["deep_read"]
+    assert (deep_read["current"], deep_read["total"], deep_read["percent"], deep_read["status"]) == (13, 26, 50, "running")
+    assert progress["current_action"] == "读文章启动：共 13 篇，并发 13"
+    assert progress["overall_percent"] == 75
+
+    for index in range(14, 27):
+        logs.append(f"Finished reading subagent {index}/26: complete / deep_read=True - Fresh {index}")
+    logs.append("Final Reading scoring phase: 26 completed reading artifacts")
+    scored_progress = web_server._read_job_progress_from_logs(
+        logs,
+        {"phase": "scoring"},
+        {"status": "running", "run_id": "find_demo"},
+        status="running",
+    )
+    assert scored_progress["phases"]["deep_read"]["total"] == 26
+    assert scored_progress["overall_percent"] == 100
+
+
 def test_web_finished_read_does_not_hide_incomplete_reading_and_scoring(monkeypatch):
     from auto_research.web import server as web_server
 
