@@ -55,7 +55,7 @@ if _core_common_spec is None:
     sys.modules["core.common"] = _core_common_module
     _core_common_spec.loader.exec_module(_core_common_module)
 
-from core.common import chinese_translation_quality_issue, display_paper_title, first_json_object, has_unresolved_prose_latex_markup, write_json, write_text
+from core.common import chinese_translation_quality_issue, clean_fixed_chinese_abstract, display_paper_title, first_json_object, has_unresolved_prose_latex_markup, write_json, write_text
 from core.common import READING_ROOT, RUNTIME_ROOT, ensure_inside_output, ensure_inside_runtime, make_reading_paths_relative, relative_to_reading
 
 
@@ -301,14 +301,14 @@ def build_deep_read_prompt(
         article_md_run = relative_to_reading(article_md_path)
     metadata = _paper_metadata(paper)
     title = display_paper_title(
-        metadata.get("reading_verified_full_text_title")
+        paper.get("title")
+        or metadata.get("reading_verified_full_text_title")
         or packet.get("verified_full_text_title")
-        or paper.get("title")
         or packet.get("title")
         or "未命名论文"
     )
     abstract_en = str(paper.get("abstract_en") or paper.get("abstract") or metadata.get("abstract_en") or metadata.get("abstract") or "").strip()
-    raw_abstract_zh = str(paper.get("abstract_zh") or metadata.get("abstract_zh") or "").strip()
+    raw_abstract_zh = clean_fixed_chinese_abstract(paper.get("abstract_zh") or metadata.get("abstract_zh"))
     abstract_zh = raw_abstract_zh
     if abstract_zh and (
         has_unresolved_prose_latex_markup(abstract_zh)
@@ -403,10 +403,10 @@ def build_deep_read_repair_prompt(
     except Exception:
         article_md_run = relative_to_reading(article_md_path)
     metadata = _paper_metadata(paper)
-    title = display_paper_title(metadata.get("reading_verified_full_text_title") or paper.get("title") or "未命名论文")
+    title = display_paper_title(paper.get("title") or metadata.get("reading_verified_full_text_title") or "未命名论文")
     paper_id = str(paper.get("paper_id") or paper.get("id") or "")
     source_abstract_en = str(paper.get("abstract_en") or paper.get("abstract") or metadata.get("abstract_en") or metadata.get("abstract") or "").strip()
-    fixed_abstract_zh = str(paper.get("abstract_zh") or metadata.get("abstract_zh") or "").strip()
+    fixed_abstract_zh = clean_fixed_chinese_abstract(paper.get("abstract_zh") or metadata.get("abstract_zh"))
     if chinese_translation_quality_issue(fixed_abstract_zh, source_abstract_en):
         fixed_abstract_zh = ""
     fixed_abstract_block = f"\n必须逐字恢复的固定中文摘要：\n{fixed_abstract_zh}\n" if fixed_abstract_zh else ""
