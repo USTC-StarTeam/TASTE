@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-20T08:49:27.952452+00:00",
+  "generated_at": "2026-07-21T05:53:34.475036+00:00",
   "module": "reading",
   "purpose": "论文全文获取、精读准备和 Reading 正式执行脚本清单。",
   "boundary": "scripts 只保留 Reading 内部全文获取、精读和 Claude prompt 运行代码；测试/批测脚本不得放入模块 scripts 目录。配置在 config/，运行输入和产物在 .runtime/output/<UTC精确时间run-id>/；latest_run 只是人工审查副本，程序不得从中同步。",
@@ -399,13 +399,14 @@
       "module": "pipeline.read_pipeline",
       "category": "pipeline",
       "role": "implementation",
-      "line_count": 6921,
-      "function_count": 189,
+      "line_count": 6935,
+      "function_count": 190,
       "functions": [
         "_semantic_scholar_pdf_candidates_for_reading",
         "_raise_if_cancelled",
         "_backend_blocker_receipt",
         "_is_openreview_url",
+        "_normalize_arxiv_https_url",
         "_is_openreview_challenge_response",
         "_is_openreview_static_pdf_url",
         "_is_openreview_browser_access_barrier",

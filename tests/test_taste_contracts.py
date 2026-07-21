@@ -2120,6 +2120,39 @@ def test_reading_pdf_candidate_without_cache_downloads_url(monkeypatch, tmp_path
     assert receipt["selected"]["downloaded"] is True
 
 
+def test_reading_upgrades_arxiv_http_pdf_before_download(monkeypatch, tmp_path):
+    read_pipeline = _load_reading_pipeline()
+    calls = []
+
+    class Response:
+        status_code = 200
+        content = b"%PDF-1.5\n"
+        headers = {"content-type": "application/pdf"}
+        url = "https://arxiv.org/pdf/2606.00001v1"
+
+    def get(url, **kwargs):
+        calls.append((url, kwargs.get("timeout")))
+        return Response()
+
+    monkeypatch.setattr(read_pipeline, "service_cooldown_remaining", lambda _service: 0)
+    monkeypatch.setattr(read_pipeline, "service_get", get)
+
+    target = tmp_path / "paper.pdf"
+    downloaded, receipt = read_pipeline._download_pdf_with_receipt(
+        "http://arxiv.org/pdf/2606.00001v1",
+        target,
+    )
+
+    assert downloaded is True
+    assert target.exists()
+    assert calls == [("https://arxiv.org/pdf/2606.00001v1", 45)]
+    assert receipt["url"] == "https://arxiv.org/pdf/2606.00001v1"
+    assert read_pipeline._normalize_arxiv_https_url("http://export.arxiv.org/pdf/2606.00001v1") == "https://export.arxiv.org/pdf/2606.00001v1"
+    assert read_pipeline._normalize_arxiv_https_url("http://mirror.arxiv.org/paper.pdf") == "http://mirror.arxiv.org/paper.pdf"
+    assert read_pipeline._normalize_arxiv_https_url("http://[invalid") == "http://[invalid"
+    assert read_pipeline._normalize_arxiv_https_url("http://example.org/paper.pdf") == "http://example.org/paper.pdf"
+
+
 def test_reading_exact_openreview_locator_downloads_before_broad_discovery(monkeypatch, tmp_path):
     read_pipeline = _load_reading_pipeline()
     discovery_modes: list[bool] = []
@@ -5415,6 +5448,9 @@ def test_find_arxiv_atom_categories_are_official_not_query_labels():
     assert papers[0]["category"] == "q-bio.BM"
     assert papers[0]["categories"] == ["q-bio.BM", "cs.LG"]
     assert papers[0]["classification_source"] == "official"
+    assert papers[0]["url"] == "https://arxiv.org/abs/2606.00001v1"
+    assert papers[0]["pdf_url"] == "https://arxiv.org/pdf/2606.00001v1"
+    assert papers[0]["id"] == sources.stable_id("paper", "http://arxiv.org/abs/2606.00001v1")
     assert "keywords" not in papers[0]["categories"]
     assert papers[0]["metadata"]["matched_queries"][0]["label"] == "keywords"
     assert "fallback" not in papers[0]["metadata"]["matched_queries"][0]

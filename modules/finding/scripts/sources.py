@@ -2210,7 +2210,13 @@ def _append_arxiv_entry(papers: list[dict], by_key: dict[str, dict], entry, ns: 
         return
     title = " ".join((entry.findtext("a:title", default="", namespaces=ns) or "").split())
     abstract = " ".join((entry.findtext("a:summary", default="", namespaces=ns) or "").split())
-    entry_id = entry.findtext("a:id", default="", namespaces=ns) or ""
+    raw_entry_id = (entry.findtext("a:id", default="", namespaces=ns) or "").strip()
+    entry_id = re.sub(
+        r"^http://((?:(?:www|export)\.)?arxiv\.org)(?=[:/]|$)",
+        r"https://\1",
+        raw_entry_id,
+        flags=re.I,
+    )
     arxiv_id = _arxiv_entry_id(entry_id)
     key = arxiv_id or title.lower()
     if not key:
@@ -2238,7 +2244,7 @@ def _append_arxiv_entry(papers: list[dict], by_key: dict[str, dict], entry, ns: 
         return
     pdf_url = entry_id.replace("/abs/", "/pdf/") if "/abs/" in entry_id else ""
     paper = {
-        "id": stable_id("paper", entry_id or title),
+        "id": stable_id("paper", raw_entry_id or title),
         "source": "arxiv",
         "arxiv_id": arxiv_id,
         "title": title,
