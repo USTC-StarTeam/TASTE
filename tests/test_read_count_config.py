@@ -289,12 +289,34 @@ def test_run_module_passes_resolved_project_count_to_reading(monkeypatch, tmp_pa
     monkeypatch.setattr(
         run_module,
         "sync_current_find_read_outputs",
-        lambda *_args, **_kwargs: {"public_final_artifact_present": True},
+        lambda *_args, **_kwargs: {
+            "status": "current_find_deep_read_complete",
+            "public_final_artifact_present": True,
+        },
     )
     assert run_module._run_current_find_read_bridge("current_find_research_plan", ["--project", "demo"]) == 0
     cmd = captured["cmd"]
     assert isinstance(cmd, list)
     assert cmd[cmd.index("--max-papers") + 1] == "88"
+
+
+def test_run_module_keeps_read_complete_with_warnings_nonzero(monkeypatch, tmp_path):
+    input_json = tmp_path / "input.json"
+    input_json.write_text(json.dumps({"articles": [{"title": "A"}]}), encoding="utf-8")
+    monkeypatch.setattr(run_module, "configured_max_read_papers", lambda *_args, **_kwargs: 50)
+    monkeypatch.setattr(run_module, "prepare_current_find_read_input", lambda *_args, **_kwargs: {"input_json": input_json})
+    monkeypatch.setattr(run_module, "module_entry", lambda _stage: tmp_path / "reading_main.py")
+    monkeypatch.setattr(run_module, "_run_streaming", lambda *_args, **_kwargs: (0, "{}"))
+    monkeypatch.setattr(
+        run_module,
+        "sync_current_find_read_outputs",
+        lambda *_args, **_kwargs: {
+            "status": "current_find_deep_read_complete_with_warnings",
+            "public_final_artifact_present": True,
+        },
+    )
+
+    assert run_module._run_current_find_read_bridge("current_find_research_plan", ["--project", "demo"]) == 2
 
 
 def test_project_summary_exposes_read_count_in_config_and_preferences(tmp_path):

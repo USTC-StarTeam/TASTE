@@ -240,9 +240,12 @@ def _run_current_find_read_bridge(action: str, rest: Sequence[str]) -> int:
     except Exception as exc:
         print(f"framework failed to sync Reading outputs: {exc}", file=sys.stderr)
         return 1 if rc == 0 else rc
-    if sync_result.get("public_final_artifact_present") is True:
+    if (
+        sync_result.get("status") == "current_find_deep_read_complete"
+        and sync_result.get("public_final_artifact_present") is True
+    ):
         return 0
-    return rc
+    return rc if rc != 0 else 2
 
 
 @contextmanager
