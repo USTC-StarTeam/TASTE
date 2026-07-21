@@ -3901,11 +3901,12 @@ def _read_job_progress_from_logs(
         read_phase = re.search(r"reading subagent phase:\s*(\d+)\s+papers(?:,\s*(\d+)\s+workers)?", text, flags=re.I)
         if read_phase:
             signal_seen = True
-            total = int(read_phase.group(1))
+            pending_total = int(read_phase.group(1))
+            total = pending_total + len(reused_deep_read)
             workers = int(read_phase.group(2) or 0)
             mark_total("deep_read", total, workers, exact=True)
             phases["deep_read"]["status"] = "running" if total else "complete"
-            details.append(f"读文章启动：共 {total} 篇" + (f"，并发 {workers}" if workers else ""))
+            details.append(f"读文章启动：共 {pending_total} 篇" + (f"，并发 {workers}" if workers else ""))
             continue
         read_start = re.search(r"(starting|queueing)\s+reading subagent\s+(\d+)\s*/\s*(\d+)\s*:\s*(.+)", text, flags=re.I)
         if read_start:
@@ -3943,7 +3944,7 @@ def _read_job_progress_from_logs(
             scoring_seen = True
             scoring_expected_count = max(scoring_expected_count, int(scoring_phase.group(1)))
             candidate_total = int(phases["deep_read"].get("total") or 0)
-            deep_total = max(len(completed_deep_read), candidate_total + len(reused_deep_read))
+            deep_total = max(len(completed_deep_read), candidate_total)
             if deep_total:
                 phases["deep_read"]["total"] = deep_total
                 exact_totals.add("deep_read")
