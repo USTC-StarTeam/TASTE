@@ -3484,7 +3484,8 @@ def _read_progress_percent(current: Any, total: Any) -> int:
         return 0
     if total_int <= 0:
         return 0
-    return max(0, min(100, int(round((current_int / total_int) * 100))))
+    percent = max(0, min(100, int(round((current_int / total_int) * 100))))
+    return min(percent, 99) if current_int < total_int else percent
 
 
 def _read_progress_title(value: Any, *, max_len: int = 180) -> str:

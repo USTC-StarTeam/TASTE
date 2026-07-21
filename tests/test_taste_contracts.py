@@ -829,6 +829,7 @@ def test_reading_single_paper_prompt_uses_fixed_source_and_link_metadata():
 
 def test_reading_uses_abstract_zh_verbatim_and_keeps_translation_fallback():
     read_pipeline = _load_reading_pipeline()
+    claude_subagent = _load_reading_claude_subagent()
     markdown = """# Paper
 
 **来源：** arXiv 2026-07-12
@@ -855,6 +856,38 @@ English abstract awaiting translation.
     )
     assert "## 摘要\n\n固定“中文”摘要，标点保持一致。\n\n## 动机与核心创新" in fixed
     assert "English abstract awaiting translation." not in fixed
+
+    legacy_html_paper = read_pipeline._normalize_local_input_paper({
+        "title": "Legacy Find Paper",
+        "abstract": "English source abstract.",
+        "abstract_zh": "<h4> 摘要 </h4><p>这是旧 Find 保存的<b>中文摘要</b>。</p>",
+    })
+    assert legacy_html_paper["abstract_zh"] == "这是旧 Find 保存的中文摘要。"
+    legacy_fixed = read_pipeline._normalize_article_markdown_metadata(markdown, legacy_html_paper)
+    assert "## 摘要\n\n这是旧 Find 保存的中文摘要。\n\n## 动机与核心创新" in legacy_fixed
+    assert "<h4>" not in legacy_fixed
+    run_path = ROOT / "modules" / "reading" / ".runtime" / "output" / _reading_test_run_id()
+    prompt = claude_subagent.build_deep_read_prompt(
+        paper=legacy_html_paper,
+        packet={},
+        run_path=run_path,
+        output_path=run_path / "outputs" / "reading_result.json",
+    )
+    assert "中文摘要（固定输入）：\n这是旧 Find 保存的中文摘要。" in prompt
+    assert "<h4>" not in prompt
+    repair_prompt = claude_subagent.build_deep_read_repair_prompt(
+        paper={
+            "title": "Legacy Find Paper",
+            "abstract_zh": "<h4>摘要</h4><p>这是旧 Find 保存的中文摘要。</p>",
+        },
+        run_path=run_path,
+        output_path=run_path / "outputs" / "reading_result.json",
+        article_md_path=run_path / "read.md",
+        quality_issue="fixed_abstract_modified",
+        quality_reason="固定摘要不一致",
+    )
+    assert "必须逐字恢复的固定中文摘要：\n这是旧 Find 保存的中文摘要。" in repair_prompt
+    assert "<h4>" not in repair_prompt
 
     fallback = read_pipeline._normalize_article_markdown_metadata(
         markdown,
@@ -945,6 +978,16 @@ def test_reading_article_markdown_requires_a_chinese_abstract(tmp_path):
     assert read_pipeline._article_markdown_quality_issue(
         valid_text.replace("# Paper", f"# {full_text_title}", 1), bibliographic_paper,
     ) == ""
+    mixed_case_title = "Escaping Policy Contraction for Stable Language Model Fine-Tuning"
+    uppercase_title = mixed_case_title.upper()
+    casing_paper = {"title": mixed_case_title, "abstract_zh": paper["abstract_zh"]}
+    assert read_pipeline._apply_verified_full_text_title(casing_paper, uppercase_title) == mixed_case_title
+    assert casing_paper["title"] == mixed_case_title
+    normalized_casing = read_pipeline._normalize_article_markdown_metadata(
+        valid_text.replace("# Paper", f"# {uppercase_title}", 1),
+        casing_paper,
+    )
+    assert normalized_casing.startswith(f"# {mixed_case_title}\n")
     assert read_pipeline._article_markdown_quality_issue(
         valid_text.replace("中文方法分析。", "The method remains entirely in English.", 1), paper,
     ) == "section_missing_chinese"

@@ -2532,6 +2532,13 @@ def test_web_read_job_compaction_preserves_phase_progress_when_repeated():
     assert "阶段进度：读文章 0/2" in second["logs"]
 
 
+def test_web_read_progress_does_not_round_incomplete_work_to_one_hundred():
+    from auto_research.web import server as web_server
+
+    assert web_server._read_progress_percent(199, 200) == 99
+    assert web_server._read_progress_percent(200, 200) == 100
+
+
 def test_web_read_startup_is_human_facing_and_deduplicated():
     from auto_research.web import server as web_server
 

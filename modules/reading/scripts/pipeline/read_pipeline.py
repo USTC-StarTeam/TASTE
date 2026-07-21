@@ -70,6 +70,7 @@ if _core_common_spec is None:
 
 from core.common import (
     best_full_text_title,
+    clean_fixed_chinese_abstract,
     DEFAULT_USER_AGENT,
     FULL_TEXT_MIN_CHARS as CONFIG_FULL_TEXT_MIN_CHARS,
     ServiceCooldownActive,
@@ -82,6 +83,7 @@ from core.common import (
     env_bool,
     has_substantive_chinese,
     is_placeholder_paper_title,
+    is_all_caps_paper_title,
     jina_api_key_configured,
     jina_request_headers,
     mark_process_http_blocker,
@@ -1043,7 +1045,9 @@ def _apply_verified_full_text_title(paper: dict, verified_title: object) -> str:
         return ""
     original_title = display_paper_title(paper.get("title"))
     metadata = paper.setdefault("metadata", {})
-    if original_title and normalized_paper_title(original_title) != normalized_paper_title(title):
+    if original_title and normalized_paper_title(original_title) == normalized_paper_title(title):
+        title = original_title
+    elif original_title:
         metadata.setdefault("original_bibliographic_title", original_title)
         metadata["title_correction_reason"] = "verified_full_text_title"
     metadata["reading_verified_full_text_title"] = title
@@ -4041,9 +4045,11 @@ def _normalize_local_input_paper(row: dict) -> dict:
         paper["metadata"] = {**normalized_metadata, **input_metadata}
     source_abstract_en = _article_source_abstract_en(paper)
     for mapping in [paper, paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}]:
+        if mapping.get("abstract_zh"):
+            mapping["abstract_zh"] = clean_fixed_chinese_abstract(mapping.get("abstract_zh"))
         if mapping.get("abstract_zh") and (
-            has_unresolved_prose_latex_markup(mapping.get("abstract_zh"))
-            or chinese_translation_quality_issue(mapping.get("abstract_zh"), source_abstract_en)
+            has_unresolved_prose_latex_markup(mapping["abstract_zh"])
+            or chinese_translation_quality_issue(mapping["abstract_zh"], source_abstract_en)
         ):
             mapping.pop("abstract_zh", None)
     return paper
@@ -4133,7 +4139,7 @@ def _sanitize_article_markdown_text(text: str) -> str:
 def _normalize_article_markdown_metadata(text: str, paper: dict, packet: dict | None = None) -> str:
     cleaned = _sanitize_article_markdown_text(text)
     metadata = paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}
-    abstract_zh = str(paper.get("abstract_zh") or metadata.get("abstract_zh") or "").strip()
+    abstract_zh = clean_fixed_chinese_abstract(paper.get("abstract_zh") or metadata.get("abstract_zh"))
     if (
         abstract_zh
         and not chinese_translation_quality_issue(abstract_zh, _article_source_abstract_en(paper))
@@ -4170,6 +4176,7 @@ def _normalize_article_markdown_metadata(text: str, paper: dict, packet: dict | 
         current_title
         and expected_title
         and normalized_paper_title(current_title) == normalized_paper_title(expected_title)
+        and not (is_all_caps_paper_title(current_title) and not is_all_caps_paper_title(expected_title))
     ) else expected_title or current_title or "未命名论文"
     rest = lines[section_start:]
     while rest and not rest[0].strip():
@@ -4357,9 +4364,9 @@ def _article_source_abstract_en(paper: dict | None) -> str:
 def _article_quality_expectations(paper: dict | None) -> tuple[str, str, str]:
     paper = paper if isinstance(paper, dict) else {}
     metadata = paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}
-    title = display_paper_title(metadata.get("reading_verified_full_text_title") or paper.get("title"))
+    title = display_paper_title(paper.get("title") or metadata.get("reading_verified_full_text_title"))
     source_abstract_en = _article_source_abstract_en(paper)
-    abstract_zh = str(paper.get("abstract_zh") or metadata.get("abstract_zh") or "").strip()
+    abstract_zh = clean_fixed_chinese_abstract(paper.get("abstract_zh") or metadata.get("abstract_zh"))
     if abstract_zh and (
         chinese_translation_quality_issue(abstract_zh, source_abstract_en)
         or has_unresolved_prose_latex_markup(abstract_zh)
