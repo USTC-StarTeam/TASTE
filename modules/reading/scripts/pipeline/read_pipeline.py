@@ -186,6 +186,18 @@ def _is_openreview_url(url: object) -> bool:
     return host == "openreview.net" or host.endswith(".openreview.net")
 
 
+def _normalize_arxiv_https_url(url: object) -> str:
+    text = str(url or "").strip()
+    try:
+        parsed = urlparse(text)
+        host = str(parsed.hostname or "").lower()
+    except ValueError:
+        return text
+    if parsed.scheme.lower() == "http" and host in {"arxiv.org", "www.arxiv.org", "export.arxiv.org"}:
+        return parsed._replace(scheme="https").geturl()
+    return text
+
+
 def _is_openreview_challenge_response(response: requests.Response) -> bool:
     parsed = urlparse(str(response.url or ""))
     if not _is_openreview_url(response.url):
@@ -715,6 +727,7 @@ def _download_openreview_pdf_with_browser_login_unlocked(url: str, target: Path)
 
 
 def _download_pdf_with_receipt(url: str, target: Path) -> tuple[bool, dict[str, object]]:
+    url = _normalize_arxiv_https_url(url)
     receipt: dict[str, object] = {"url": url, "attempts": []}
     if not url or not url.startswith("http"):
         receipt.update({"accepted": False, "reason": "missing_pdf_url"})
@@ -3028,7 +3041,7 @@ def _pdf_candidates_for_reading(paper: dict, *, fast_only: bool = False) -> list
     )
 
     def add(kind: str, url: object, **extra: object) -> None:
-        pdf_url = str(url or "").strip()
+        pdf_url = _normalize_arxiv_https_url(url)
         if not pdf_url or not (pdf_url.startswith("http") or pdf_url.startswith("openreview://")):
             return
         if pdf_url in seen:
@@ -3566,7 +3579,8 @@ def _download_first_readable_pdf(paper: dict, pdf_dir: Path, log: LogFn) -> tupl
             break
         candidate = candidates[index]
         index += 1
-        pdf_url = str(candidate.get("pdf_url") or "")
+        pdf_url = _normalize_arxiv_https_url(candidate.get("pdf_url"))
+        candidate["pdf_url"] = pdf_url
         pdf_path = pdf_dir / f"{safe_id}_{index}.pdf"
         lowered_pdf_url = pdf_url.lower()
         candidate_service = "openreview" if pdf_url.startswith("openreview://") else service_from_url(pdf_url)
