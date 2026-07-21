@@ -8,6 +8,8 @@ import html
 import re
 from datetime import date, datetime
 
+from finding_runtime import normalize_metadata_text
+
 
 def stable_id(prefix: str, value: str) -> str:
     digest = hashlib.sha1(value.encode("utf-8", errors="ignore")).hexdigest()[:12]
@@ -15,7 +17,7 @@ def stable_id(prefix: str, value: str) -> str:
 
 
 def _clean_text(value: str) -> str:
-    return " ".join((value or "").split())
+    return normalize_metadata_text(value)
 
 
 _ABSTRACT_UI_CONTROL_RE = re.compile(

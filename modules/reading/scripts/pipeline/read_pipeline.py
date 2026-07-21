@@ -76,6 +76,7 @@ from core.common import (
     config_float,
     config_int,
     env_bool,
+    has_substantive_chinese,
     jina_api_key_configured,
     jina_request_headers,
     mark_process_http_blocker,
@@ -3766,11 +3767,7 @@ _READ_PUBLIC_SECTION_RE = re.compile(
     re.I | re.S,
 )
 
-READING_CONTENT_QUALITY_POLICY_VERSION = "read_markdown_quality_v2"
-
-
-def _has_chinese_prose(value: object, *, minimum: int = 4) -> bool:
-    return len(re.findall(r"[\u4e00-\u9fff]", str(value or ""))) >= minimum
+READING_CONTENT_QUALITY_POLICY_VERSION = "read_markdown_quality_v3"
 
 
 def _sanitize_read_public_text(text: object, max_chars: int = 4000) -> str:
@@ -4043,7 +4040,7 @@ def _normalize_local_input_paper(row: dict) -> dict:
     for mapping in [paper, paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}]:
         if mapping.get("abstract_zh") and (
             has_unresolved_prose_latex_markup(mapping.get("abstract_zh"))
-            or not _has_chinese_prose(mapping.get("abstract_zh"))
+            or not has_substantive_chinese(mapping.get("abstract_zh"))
         ):
             mapping.pop("abstract_zh", None)
     return paper
@@ -4134,7 +4131,7 @@ def _normalize_article_markdown_metadata(text: str, paper: dict, packet: dict | 
     cleaned = _sanitize_article_markdown_text(text)
     metadata = paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}
     abstract_zh = str(paper.get("abstract_zh") or metadata.get("abstract_zh") or "").strip()
-    if abstract_zh and _has_chinese_prose(abstract_zh) and not has_unresolved_prose_latex_markup(abstract_zh):
+    if abstract_zh and has_substantive_chinese(abstract_zh) and not has_unresolved_prose_latex_markup(abstract_zh):
         abstract_lines = cleaned.splitlines()
         abstract_index = next((index for index, line in enumerate(abstract_lines) if line.strip() == "## 摘要"), -1)
         next_section_index = next(
@@ -4160,10 +4157,11 @@ def _normalize_article_markdown_metadata(text: str, paper: dict, packet: dict | 
     if section_start <= first:
         return cleaned
     metadata_lines = article_metadata_markdown_lines(paper, packet if isinstance(packet, dict) else {})
+    canonical_title = " ".join(str(paper.get("title") or lines[first].lstrip("#").strip() or "未命名论文").split())
     rest = lines[section_start:]
     while rest and not rest[0].strip():
         rest.pop(0)
-    output = [lines[first].rstrip(), "", metadata_lines[0], metadata_lines[1], ""]
+    output = [f"# {canonical_title}", "", metadata_lines[0], metadata_lines[1], ""]
     output.extend(rest)
     return "\n".join(output).strip() + "\n"
 
@@ -4322,8 +4320,47 @@ def _markdown_katex_syntax_error(text: str) -> str:
     return ""
 
 
+_REQUIRED_ARTICLE_SECTIONS = (
+    "摘要",
+    "动机与核心创新",
+    "方法",
+    "实验结果",
+    "优缺点总结",
+)
+
+
+def _article_quality_expectations(paper: dict | None) -> tuple[str, str]:
+    paper = paper if isinstance(paper, dict) else {}
+    metadata = paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}
+    title = " ".join(str(paper.get("title") or "").split())
+    abstract_zh = str(paper.get("abstract_zh") or metadata.get("abstract_zh") or "").strip()
+    if abstract_zh and (not has_substantive_chinese(abstract_zh) or has_unresolved_prose_latex_markup(abstract_zh)):
+        abstract_zh = ""
+    return title, abstract_zh
+
+
+def _article_section_bodies(text: str) -> tuple[list[str], dict[str, str]]:
+    matches = list(re.finditer(r"(?m)^##\s+(.+?)\s*$", str(text or "")))
+    headings: list[str] = []
+    bodies: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        heading = match.group(1).strip()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        headings.append(heading)
+        bodies.setdefault(heading, text[match.end():end].strip())
+    return headings, bodies
+
+
+def _normalized_article_title(value: str) -> str:
+    return " ".join(unescape(re.sub(r"[*_`]", "", str(value or ""))).split()).casefold()
+
+
 @functools.lru_cache(maxsize=1024)
-def _article_markdown_quality_findings(text: str) -> tuple[tuple[str, str], ...]:
+def _article_markdown_quality_findings(
+    text: str,
+    expected_title: str = "",
+    expected_abstract_zh: str = "",
+) -> tuple[tuple[str, str], ...]:
     findings: list[tuple[str, str]] = []
     if has_unresolved_prose_latex_markup(text):
         findings.append(("unresolved_prose_latex_markup", "公式外仍残留 LaTeX 排版命令"))
@@ -4333,22 +4370,50 @@ def _article_markdown_quality_findings(text: str) -> tuple[tuple[str, str], ...]
     abstract = re.search(r"(?ms)^##\s+摘要\s*$\s*(.*?)(?=^##\s+|\Z)", text)
     if not abstract:
         findings.append(("missing_abstract_section", "缺少 `## 摘要` 栏目"))
-    elif not _has_chinese_prose(abstract.group(1)):
+    elif not has_substantive_chinese(abstract.group(1)):
         findings.append(("abstract_missing_chinese", "`## 摘要` 未包含合格的中文摘要"))
+    elif expected_abstract_zh and abstract.group(1).strip() != expected_abstract_zh.strip():
+        findings.append(("fixed_abstract_modified", "`## 摘要` 未逐字保留 Framework 提供的固定中文摘要"))
+
+    h1_matches = re.findall(r"(?m)^#(?!#)\s+(.+?)\s*$", text)
+    actual_title = h1_matches[0].strip() if len(h1_matches) == 1 else ""
+    if len(h1_matches) != 1:
+        findings.append(("article_title_mismatch", "单篇产物必须且只能有一个一级论文标题"))
+    elif expected_title and _normalized_article_title(actual_title) != _normalized_article_title(expected_title):
+        findings.append(("article_title_mismatch", f"一级标题必须逐字使用题录标题 `{expected_title}`"))
+
+    headings, section_bodies = _article_section_bodies(text)
+    if headings != list(_REQUIRED_ARTICLE_SECTIONS):
+        findings.append((
+            "invalid_section_structure",
+            "二级栏目必须按固定顺序且各出现一次：" + "、".join(_REQUIRED_ARTICLE_SECTIONS),
+        ))
+    else:
+        non_chinese_sections = [
+            heading for heading in _REQUIRED_ARTICLE_SECTIONS
+            if not has_substantive_chinese(section_bodies.get(heading, ""))
+        ]
+        if non_chinese_sections:
+            findings.append((
+                "section_missing_chinese",
+                "以下栏目不是合格的中文论述：" + "、".join(non_chinese_sections),
+            ))
     return tuple(findings)
 
 
-def _article_markdown_quality_issue(text: str) -> str:
-    findings = _article_markdown_quality_findings(str(text or ""))
+def _article_markdown_quality_issue(text: str, paper: dict | None = None) -> str:
+    expected_title, expected_abstract_zh = _article_quality_expectations(paper)
+    findings = _article_markdown_quality_findings(str(text or ""), expected_title, expected_abstract_zh)
     return findings[0][0] if findings else ""
 
 
-def _article_markdown_quality_reason(text: str) -> str:
-    findings = _article_markdown_quality_findings(str(text or ""))
+def _article_markdown_quality_reason(text: str, paper: dict | None = None) -> str:
+    expected_title, expected_abstract_zh = _article_quality_expectations(paper)
+    findings = _article_markdown_quality_findings(str(text or ""), expected_title, expected_abstract_zh)
     return "；".join(reason for _issue, reason in findings)
 
 
-def _article_markdown_ready(path: Path, result_payload: dict) -> bool:
+def _article_markdown_ready(path: Path, result_payload: dict, paper: dict | None = None) -> bool:
     audit = result_payload.get("deep_read_audit") if isinstance(result_payload.get("deep_read_audit"), dict) else {}
     declared = str(result_payload.get("article_markdown_path") or audit.get("article_markdown_path") or "").strip()
     if not declared:
@@ -4362,7 +4427,7 @@ def _article_markdown_ready(path: Path, result_payload: dict) -> bool:
         declared_ok
         and bool(text.strip())
         and text.lstrip().startswith("#")
-        and not _article_markdown_quality_issue(text)
+        and not _article_markdown_quality_issue(text, paper)
     )
 
 
@@ -4877,7 +4942,7 @@ def _publish_article_read_cache(item_dir: Path, paper: dict, result: dict) -> di
         content_fingerprints = _article_cache_content_fingerprints(cache_dir)
         packet.update(content_fingerprints)
         cleaned = _normalize_article_markdown_metadata(article_md_path.read_text(encoding="utf-8", errors="replace"), paper, packet)
-        if _article_markdown_quality_issue(cleaned):
+        if _article_markdown_quality_issue(cleaned, paper):
             return {}
         if cleaned != article_md_path.read_text(encoding="utf-8", errors="replace"):
             article_md_path.write_text(cleaned, encoding="utf-8")
@@ -5002,8 +5067,9 @@ def _restore_article_read_cache(item_dir: Path, paper: dict, *, run_id: str, pap
     if not _article_cache_same_paper_ok(cache_dir, paper):
         return {}
     manifest = _article_cache_manifest(cache_dir)
+    paper = _merge_cached_paper_hints(paper, read_json(cache_dir / "paper.json", {}))
     cached_read_text = (cache_dir / "read.md").read_text(encoding="utf-8", errors="replace")
-    quality_issue = _article_markdown_quality_issue(cached_read_text)
+    quality_issue = _article_markdown_quality_issue(cached_read_text, paper)
     if quality_issue:
         with _ARTICLE_CACHE_LOCK:
             _invalidate_article_read_artifacts(cache_dir)
@@ -5034,7 +5100,6 @@ def _restore_article_read_cache(item_dir: Path, paper: dict, *, run_id: str, pap
             })
             write_json(cache_dir / "manifest.json", manifest)
         return {}
-    paper = _merge_cached_paper_hints(paper, read_json(cache_dir / "paper.json", {}))
     restored_packet = _restore_article_full_text_cache(paper, item_dir)
     restored_text_path = _packet_path(restored_packet, "text_path") if restored_packet else None
     if restored_text_path is None or not restored_text_path.is_file() or restored_text_path.stat().st_size < FULL_TEXT_MIN_CHARS:
@@ -5266,7 +5331,7 @@ def _complete_read_result_from_item_dir(item_dir: Path, paper: dict, *, run_id: 
     except Exception:
         return {}
     claude_result = result.get("claude_result") if isinstance(result.get("claude_result"), dict) else {}
-    if not _article_markdown_ready(article_md_path, claude_result):
+    if not _article_markdown_ready(article_md_path, claude_result, paper):
         return {}
     existing_paper = result.get("paper") if isinstance(result.get("paper"), dict) else {}
     if not _same_paper_identity_ok(
@@ -5394,7 +5459,7 @@ def _process_local_read_paper(
         mode=mode,
     )
     result_payload = _load_result_payload(output_path, receipt)
-    article_markdown_ready = _article_markdown_ready(article_md_path, result_payload)
+    article_markdown_ready = _article_markdown_ready(article_md_path, result_payload, paper)
     complete = (
         _deep_read_complete(receipt, result_payload)
         and article_markdown_ready
@@ -5670,10 +5735,12 @@ def _run_content_quality_repair_once(
     log: LogFn,
     index: int,
 ) -> dict:
-    article_text = _normalize_article_markdown_file(article_md_path, paper, packet)
-    quality_issue = _article_markdown_quality_issue(article_text) if article_text else ""
-    quality_reason = _article_markdown_quality_reason(article_text) if quality_issue else ""
+    article_text = article_md_path.read_text(encoding="utf-8", errors="replace") if article_md_path.is_file() else ""
+    quality_issue = _article_markdown_quality_issue(article_text, paper) if article_text else ""
+    quality_reason = _article_markdown_quality_reason(article_text, paper) if quality_issue else ""
     if mode == "prepare" or not quality_issue:
+        if article_text:
+            _normalize_article_markdown_file(article_md_path, paper, packet)
         return {
             "receipt": receipt,
             "result_payload": result_payload,
@@ -5703,9 +5770,11 @@ def _run_content_quality_repair_once(
             receipt_dir_name="claude_content_quality_retry",
         )
         retry_payload = _load_result_payload(output_path, retry_receipt)
-        repaired_text = _normalize_article_markdown_file(article_md_path, paper, packet)
-        final_issue = _article_markdown_quality_issue(repaired_text) if repaired_text else quality_issue
-        final_reason = _article_markdown_quality_reason(repaired_text) if repaired_text and final_issue else quality_reason
+        repaired_text = article_md_path.read_text(encoding="utf-8", errors="replace") if article_md_path.is_file() else ""
+        final_issue = _article_markdown_quality_issue(repaired_text, paper) if repaired_text else quality_issue
+        final_reason = _article_markdown_quality_reason(repaired_text, paper) if repaired_text and final_issue else quality_reason
+        if repaired_text and not final_issue:
+            _normalize_article_markdown_file(article_md_path, paper, packet)
         quality_retry = {
             "attempted": True,
             "attempt_count": 1,
@@ -5832,7 +5901,7 @@ def _run_reading_subagent_for_prepared_paper(
     quality_issue = str(quality["quality_issue"] or "")
     quality_reason = str(quality["quality_reason"] or "")
     quality_retry = quality["quality_retry"]
-    article_markdown_ready = _article_markdown_ready(article_md_path, result_payload)
+    article_markdown_ready = _article_markdown_ready(article_md_path, result_payload, paper)
     complete = (
         _deep_read_complete(receipt, result_payload)
         and article_markdown_ready
@@ -5906,7 +5975,8 @@ def _article_markdown_path_for_completed_item(item: dict) -> Path | None:
             path = ensure_inside_output(resolve_reading_path(value), label="单篇 read.md")
         except Exception:
             continue
-        if _article_markdown_ready(path, claude_result):
+        paper = item.get("paper") if isinstance(item.get("paper"), dict) else {}
+        if _article_markdown_ready(path, claude_result, paper):
             return path
     return None
 
@@ -6147,7 +6217,7 @@ def _demote_article_markdown(text: str, *, index: int, title: str, item: dict | 
         lines.pop(0)
     article_title = title
     if lines and lines[0].startswith("# "):
-        article_title = lines.pop(0).lstrip("#").strip() or title
+        lines.pop(0)
     while lines and not lines[0].strip():
         lines.pop(0)
     output = [f"## {index}. {article_title}", ""]
@@ -7161,7 +7231,7 @@ def run_standalone_deep_read(args: object) -> dict:
     claude_result = quality["result_payload"]
     quality_issue = str(quality["quality_issue"] or "")
     status = _standalone_final_status(packet_entry, claude_receipt, claude_result)
-    article_markdown_ready = _article_markdown_ready(read_md_path, claude_result)
+    article_markdown_ready = _article_markdown_ready(read_md_path, claude_result, paper)
     if quality_issue:
         status = quality_issue
     if status == "complete" and not article_markdown_ready:

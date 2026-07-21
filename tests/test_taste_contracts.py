@@ -853,28 +853,45 @@ def test_reading_article_markdown_requires_a_chinese_abstract(tmp_path):
     ) == "unresolved_prose_latex_markup"
 
     article_path.write_text(
-        "# Paper\n\n## 摘要\n\n这是经过翻译的中文摘要。\n\n## 动机与核心创新\n\n中文分析。\n",
+        "# Paper\n\n## 摘要\n\n这是经过翻译的中文摘要。"
+        "\n\n## 动机与核心创新\n\n中文分析。"
+        "\n\n## 方法\n\n中文方法分析。"
+        "\n\n## 实验结果\n\n中文实验结果。"
+        "\n\n## 优缺点总结\n\n中文优缺点总结。\n",
         encoding="utf-8",
     )
     assert read_pipeline._article_markdown_ready(article_path, result_payload) is True
+    valid_text = article_path.read_text(encoding="utf-8")
+    paper = {"title": "Paper", "abstract_zh": "这是经过翻译的中文摘要。"}
+    assert read_pipeline._article_markdown_quality_issue(valid_text, paper) == ""
+    assert read_pipeline._article_markdown_quality_issue(
+        valid_text.replace("# Paper", "# 论文标题", 1), paper,
+    ) == "article_title_mismatch"
+    assert read_pipeline._article_markdown_quality_issue(
+        valid_text.replace("中文方法分析。", "The method remains entirely in English.", 1), paper,
+    ) == "section_missing_chinese"
+    assert read_pipeline._article_markdown_quality_issue(
+        valid_text.replace("这是经过翻译的中文摘要。", "这是被模型改写过的摘要。", 1), paper,
+    ) == "fixed_abstract_modified"
 
 
 def test_reading_article_markdown_rejects_invalid_web_katex(monkeypatch):
     frontend_modules = ROOT / "web" / "frontend" / "client" / "node_modules"
     monkeypatch.setenv("NODE_PATH", str(frontend_modules))
     read_pipeline = _load_reading_pipeline()
-    prefix = "# Paper\n\n## 摘要\n\n这是完整的中文摘要。\n\n## 方法\n\n"
+    prefix = "# Paper\n\n## 摘要\n\n这是完整的中文摘要。\n\n## 动机与核心创新\n\n中文分析。\n\n## 方法\n\n"
+    suffix = "\n\n## 实验结果\n\n中文实验结果。\n\n## 优缺点总结\n\n中文优缺点总结。\n"
 
     assert read_pipeline._article_markdown_quality_issue(
-        prefix + r"目标函数为 $L=\lVert x-y\rVert_2^2$。",
+        prefix + r"目标函数为 $L=\lVert x-y\rVert_2^2$。" + suffix,
     ) == ""
-    assert read_pipeline._article_markdown_quality_issue(prefix + r"目标函数为 $x_{a$。") == "invalid_katex_syntax"
-    assert "公式定界符 `$` 未闭合" in read_pipeline._article_markdown_quality_reason(prefix + r"目标函数为 $x+1。")
+    assert read_pipeline._article_markdown_quality_issue(prefix + r"目标函数为 $x_{a$。" + suffix) == "invalid_katex_syntax"
+    assert "`$...$` 未在同一行闭合" in read_pipeline._article_markdown_quality_reason(prefix + r"目标函数为 $x+1。" + suffix)
 
     katex_dir = frontend_modules / "katex"
     if shutil.which("node") and katex_dir.is_dir():
         assert read_pipeline._article_markdown_quality_issue(
-            prefix + r"目标函数为 $\notacommand{x}$。",
+            prefix + r"目标函数为 $\notacommand{x}$。" + suffix,
         ) == "invalid_katex_syntax"
 
 
@@ -906,7 +923,10 @@ def test_reading_retries_content_quality_failure_and_preserves_exact_status(monk
             assert "不要重新精读或重写整篇文章" in prompt_text
         abstract = "这是完整的中文摘要翻译。" if is_retry and repair_succeeds else "English abstract copied without translation."
         (run_path / "read.md").write_text(
-            f"# Paper\n\n## 摘要\n\n{abstract}\n\n## 动机与核心创新\n\n中文分析。\n",
+            f"# Paper\n\n## 摘要\n\n{abstract}\n\n## 动机与核心创新\n\n中文分析。"
+            "\n\n## 方法\n\n中文方法分析。"
+            "\n\n## 实验结果\n\n中文实验结果。"
+            "\n\n## 优缺点总结\n\n中文优缺点总结。\n",
             encoding="utf-8",
         )
         payload = {
@@ -1283,7 +1303,11 @@ def test_reading_article_cache_restore_backfills_content_binding(monkeypatch, tm
     (cache_dir / "paper.json").write_text(json.dumps(paper), encoding="utf-8")
     (cache_dir / "full_text_packet.json").write_text(json.dumps({"papers": [packet]}), encoding="utf-8")
     (cache_dir / "read.md").write_text(
-        f"# {paper['title']}\n\n## 摘要\n\n缓存阅读产物。\n",
+        f"# {paper['title']}\n\n## 摘要\n\n缓存阅读产物。"
+        "\n\n## 动机与核心创新\n\n中文分析。"
+        "\n\n## 方法\n\n中文方法分析。"
+        "\n\n## 实验结果\n\n中文实验结果。"
+        "\n\n## 优缺点总结\n\n中文优缺点总结。\n",
         encoding="utf-8",
     )
     (cache_dir / "manifest.json").write_text(json.dumps({
@@ -1316,18 +1340,37 @@ def test_reading_article_cache_restore_backfills_content_binding(monkeypatch, tm
     assert manifest["full_text_pdf_url"] == "openreview://official-note/pdf"
 
 
-def test_reading_article_cache_invalidates_non_chinese_abstract(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("cached_abstract", "fixed_abstract", "expected_issue"),
+    [
+        ("English abstract copied without translation.", "", "abstract_missing_chinese"),
+        ("这是被模型改写过的摘要。", "这是必须逐字保留的固定摘要。", "fixed_abstract_modified"),
+    ],
+)
+def test_reading_article_cache_invalidates_content_quality_defects(
+    monkeypatch, tmp_path, cached_abstract, fixed_abstract, expected_issue,
+):
     read_pipeline = _load_reading_pipeline()
     cache_dir = tmp_path / "cache"
     item_dir = tmp_path / "item"
     cache_dir.mkdir()
     (cache_dir / "read.md").write_text(
-        "# Cached Paper\n\n## 摘要\n\nEnglish abstract copied without translation.\n\n## 方法\n\n中文分析。\n",
+        f"# Cached Paper\n\n## 摘要\n\n{cached_abstract}"
+        "\n\n## 动机与核心创新\n\n中文分析。"
+        "\n\n## 方法\n\n中文方法分析。"
+        "\n\n## 实验结果\n\n中文实验结果。"
+        "\n\n## 优缺点总结\n\n中文优缺点总结。\n",
         encoding="utf-8",
     )
+    (cache_dir / "paper.json").write_text(json.dumps({
+        "paper_id": "paper-1",
+        "title": "Cached Paper",
+        "abstract_zh": fixed_abstract,
+    }), encoding="utf-8")
     (cache_dir / "manifest.json").write_text(json.dumps({
         "has_read_md": True,
         "read_content_revision": "legacy",
+        "read_quality_policy_version": "read_markdown_quality_v2",
     }), encoding="utf-8")
 
     monkeypatch.setattr(read_pipeline, "_article_cache_enabled", lambda: True)
@@ -1345,7 +1388,7 @@ def test_reading_article_cache_invalidates_non_chinese_abstract(monkeypatch, tmp
     assert result == {}
     assert not (cache_dir / "read.md").exists()
     assert manifest["has_read_md"] is False
-    assert manifest["read_invalidation_reason"] == "read_content_quality:abstract_missing_chinese"
+    assert manifest["read_invalidation_reason"] == "read_content_quality:" + expected_issue
     assert manifest["read_quality_policy_version"] == read_pipeline.READING_CONTENT_QUALITY_POLICY_VERSION
 
 
@@ -1769,8 +1812,9 @@ def test_reading_run_read_uses_subagent_article_markdown_aggregation_and_audit(m
             expected_output_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             return fake_receipt("complete", expected_output_path, payload)
         article_md = run_path / "read.md"
+        paper_title = json.loads((run_path / "paper.json").read_text(encoding="utf-8"))["title"]
         article_md.write_text(
-            "# 论文精读：ARTICLE_MD_BY_SUBAGENT\n\n"
+            f"# {paper_title}\n\n"
             "## 摘要\n\n"
             "ARTICLE_MD_BY_SUBAGENT 是对原文摘要的中文翻译，说明论文提出一种直接利用偏好样本优化模型的方法，并在目标任务中展示出比传统分阶段流程更紧凑的训练路径。\n\n"
             "## 动机与核心创新\n\n"
@@ -1834,7 +1878,7 @@ def test_reading_run_read_uses_subagent_article_markdown_aggregation_and_audit(m
     assert "method_summary_table" not in payload["read_markdown_aggregation"]
     assert "ARTICLE_MD_BY_SUBAGENT" in read_md
     assert "## 逐篇精读" not in read_md
-    assert "## 1. 论文精读：ARTICLE_MD_BY_SUBAGENT" in read_md
+    assert "## 1. subagent two" in read_md
     assert "### 摘要" in read_md
     assert "#### 摘要" not in read_md
     assert "- **匹配度：** 9/10\n- **可借鉴性：** 9/10\n- **来源：**" in read_md
@@ -4786,6 +4830,7 @@ def _isolate_find_runtime(monkeypatch, find_pipeline, runtime: Path) -> None:
 
 def test_find_translation_keeps_prose_markup_visible_to_llm_without_splitting_words():
     find_pipeline = _load_find_pipeline()
+    find_runtime = sys.modules["finding_runtime"]
     item = {
         "abstract_en": (
             r"We introduce \textbf{Prot}ein-\textbf{L}igand Conditioned "
@@ -4809,6 +4854,19 @@ def test_find_translation_keeps_prose_markup_visible_to_llm_without_splitting_wo
         str(item["abstract_en"]),
         item,
     ) == "unresolved_prose_latex_markup"
+    assert find_runtime.normalize_metadata_text(
+        "An <i>s</i>-structure at Å<sup>2</sup> &amp; scale",
+    ) == "An s-structure at Å² & scale"
+    assert find_pipeline._chinese_translation_reject_reason(
+        "这是中文提示。The complete abstract is still copied in English without translation.",
+        str(item["abstract_en"]),
+    ) == "mostly_non_chinese_translation"
+
+    untranslated = {"id": "paper-1", "abstract": "A complete English abstract remains available."}
+    find_pipeline._mark_missing_chinese_abstracts([untranslated], lambda _message: None, "translation_llm_exhausted")
+    assert "abstract_zh" not in untranslated
+    assert untranslated["abstract_zh_source"] == "missing_after_translation_attempts"
+    assert find_pipeline._recommendation_translation_status([untranslated], "completed") == "partial"
 
 
 def test_find_title_prefilter_uses_local_ids_and_recovers_missing_rows(monkeypatch):

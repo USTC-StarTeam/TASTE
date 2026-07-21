@@ -23,7 +23,7 @@ from finding_runtime import AppConfig, FindRequest
 from finding_runtime import JobCancelled
 from finding_runtime import LOCAL_DATABASE_DIR, RUNTIME_DIR, STATE_DIR
 from finding_runtime import create_run_dir, json_file_lock, publish_latest_run_for_review, read_json, read_json_safely, redacted_config, update_manifest, write_json, write_json_cache, write_text
-from finding_runtime import display_path
+from finding_runtime import display_path, normalize_metadata_text
 
 from support.find_support import catalog_by_id
 from support.find_support import filter_papers_by_selected_categories, select_relevant_categories
@@ -403,6 +403,9 @@ def _dedupe_items(items: list[dict]) -> list[dict]:
     seen: set[str] = set()
     result: list[dict] = []
     for item in items:
+        for field in ("title", "abstract", "abstract_en", "abstract_zh", "summary", "summary_zh", "tldr", "tldr_zh"):
+            if field in item:
+                item[field] = normalize_metadata_text(item.get(field))
         key = str(item.get("id") or item.get("url") or item.get("title") or "")
         if not key or key in seen:
             continue
@@ -6266,7 +6269,7 @@ def _ensure_recommendation_readability(item: dict, config: AppConfig | None = No
 
 def _recommendation_quality_audit(items: list[dict]) -> dict:
     rows = [item for item in items if isinstance(item, dict)]
-    missing_zh_abstract = [str(item.get("id") or item.get("title") or "") for item in rows if _clean_abstract_text(item.get("abstract_en") or item.get("abstract")) and not str(item.get("abstract_zh") or "").strip()]
+    missing_zh_abstract = _missing_chinese_abstract_ids(rows)
     missing_real_abstract = [str(item.get("id") or item.get("title") or "") for item in rows if not _has_real_abstract(item)]
     short_reason = [
         str(item.get("id") or item.get("title") or "")
@@ -6295,8 +6298,8 @@ def _missing_chinese_abstract_ids(items: list[dict]) -> list[str]:
     return [
         str(item.get("id") or item.get("title") or "")
         for item in rows
-        if _clean_abstract_text(item.get("abstract_en") or item.get("abstract"))
-        and not str(item.get("abstract_zh") or "").strip()
+        if (source := _clean_abstract_text(item.get("abstract_en") or item.get("abstract")))
+        and _chinese_translation_reject_reason(str(item.get("abstract_zh") or ""), source, item)
     ]
 
 
@@ -6308,35 +6311,21 @@ def _recommendation_translation_status(items: list[dict], stored_status: str = "
         return "completed"
     return str(stored_status or "not_needed")
 
-def _metadata_chinese_abstract_fallback(item: dict, reason: str = "") -> str:
-    title = " ".join(str(item.get("title") or "该论文").split()).strip()
-    venue = " ".join(str(item.get(key) or "").strip() for key in ("venue", "year")).strip()
-    venue_text = f"（{venue}）" if venue else ""
-    topic = f"《{title}》" if title and title != "该论文" else "该论文"
-    text = (
-        f"本文{venue_text}围绕{topic}所对应的研究问题展开。"
-        "根据已抓取到的真实论文摘要和题名信息，该工作主要说明研究动机、方法设计、实验验证与结果边界；"
-        "其中模型名称、数据集、指标和关键术语以论文原文为准。"
-        "后续精读需要继续核查具体实现、数据设置、评测协议、适用条件和局限性。"
-    )
-    return _clean_chinese_translation_output(text)
-
-
-def _fill_missing_chinese_abstracts_with_metadata(items: list[dict], log: LogFn, reason: str) -> int:
-    filled = 0
+def _mark_missing_chinese_abstracts(items: list[dict], log: LogFn, reason: str) -> int:
+    missing = 0
     for item in items:
         if not isinstance(item, dict):
             continue
         abstract = _clean_abstract_text(item.get("abstract_en") or item.get("abstract"))
-        if not abstract or str(item.get("abstract_zh") or "").strip():
+        if not abstract or not _chinese_translation_reject_reason(str(item.get("abstract_zh") or ""), abstract, item):
             continue
-        item["abstract_zh"] = _metadata_chinese_abstract_fallback(item, reason)
-        item["abstract_zh_source"] = "same_run_metadata_fallback"
-        item["abstract_zh_fallback_reason"] = reason
-        filled += 1
-    if filled:
-        log(f"articles: filled {filled} remaining recommendation Chinese abstracts with same-run metadata fallback after {reason}")
-    return filled
+        item.pop("abstract_zh", None)
+        item["abstract_zh_source"] = "missing_after_translation_attempts"
+        item["abstract_zh_failure_reason"] = reason
+        missing += 1
+    if missing:
+        log(f"articles: {missing} recommendation abstracts remain untranslated after {reason}; no summary fallback was substituted")
+    return missing
 
 
 def _has_strong_topic_evidence(item: dict) -> bool:
@@ -6724,7 +6713,7 @@ def _looks_english(text: str) -> bool:
 
 
 def _clean_abstract_text(value: object) -> str:
-    text = " ".join(str(value or "").split())
+    text = normalize_metadata_text(value)
     if not text:
         return ""
     placeholders = {
@@ -6788,13 +6777,8 @@ def _chinese_translation_min_len(source: str) -> int:
 
 
 def _clean_chinese_translation_output(text: str) -> str:
-    cleaned = str(text or "").strip()
-    # Some providers leak JSON escape residue at the very end of otherwise valid
-    # Chinese strings, e.g. a decoded \n becoming a trailing "n". Remove only
-    # isolated wrapper residue from long Chinese text, then normalize a missing
-    # terminal punctuation mark. Length/CJK checks still reject short placeholders.
+    cleaned = normalize_metadata_text(text)
     if len(cleaned) >= 24 and re.search(r"[一-鿿]", cleaned):
-        cleaned = re.sub(r"[\s\\]*[nrt]+$", "", cleaned).strip()
         tail = cleaned[-1:]
         allowed_tail = set("。！？.!?)）]】”’")
         allowed_tail.add(chr(34))
@@ -6853,7 +6837,7 @@ def _has_unresolved_prose_latex_markup(text: object) -> bool:
 
 
 def _prepare_abstract_translation_prompt_text(item: dict, limit: int) -> str:
-    source = str(item.get("abstract_en") or item.get("abstract") or "")
+    source = _clean_abstract_text(item.get("abstract_en") or item.get("abstract"))
     spans = _latex_translation_spans(source)
     replacements: list[dict[str, str]] = []
     if not spans:
@@ -6922,8 +6906,12 @@ def _chinese_translation_reject_reason(text: str, source: str, item: dict | None
     cleaned = _clean_chinese_translation_output(text)
     if not cleaned:
         return "empty_translation"
-    if not re.search(r"[一-鿿]", cleaned):
+    chinese_count = len(re.findall(r"[一-鿿]", cleaned))
+    latin_count = len(re.findall(r"[A-Za-z]", cleaned))
+    if not chinese_count:
         return "missing_chinese_text"
+    if latin_count and chinese_count / (chinese_count + latin_count) < 0.15:
+        return "mostly_non_chinese_translation"
     min_len = _chinese_translation_min_len(source)
     if len(cleaned) < min_len:
         return f"too_short:{len(cleaned)}<{min_len}"
@@ -7205,7 +7193,7 @@ Abstract: {_translation_prompt_abstract(item, 2600)}
                         break
             still_missing = [item for item in missing if not str(item.get("abstract_zh") or "").strip()]
             if still_missing:
-                _fill_missing_chinese_abstracts_with_metadata(still_missing, log, "translation_llm_exhausted")
+                _mark_missing_chinese_abstracts(still_missing, log, "translation_llm_exhausted")
         translated = sum(1 for item in missing if str(item.get("abstract_zh") or "").strip())
         missing_after = [item for item in missing if not str(item.get("abstract_zh") or "").strip()]
         visible_missing_after = [item for item in missing_after if item.get("_user_visible_recommendation") or item.get("find_recommendation")]
@@ -8925,13 +8913,13 @@ def run_find(
             translation_status = str(translation_result.get("status") or translation_status)
     except Exception as exc:
         translation_status = "pending"
-        _fill_missing_chinese_abstracts_with_metadata(article_items, log, "translation_exception")
+        _mark_missing_chinese_abstracts(article_items, log, "translation_exception")
         log(f"articles: abstract translation failed; final translation status will be recomputed from recommendation rows: {str(exc)[:240]}")
 
     translation_status = _recommendation_translation_status(article_items, translation_status)
     missing_translation_ids = _missing_chinese_abstract_ids(article_items)
     if missing_translation_ids:
-        _fill_missing_chinese_abstracts_with_metadata(article_items, log, "final_visibility_gate")
+        _mark_missing_chinese_abstracts(article_items, log, "final_visibility_gate")
         translation_status = _recommendation_translation_status(article_items, translation_status)
         missing_translation_ids = _missing_chinese_abstract_ids(article_items)
         if missing_translation_ids:
