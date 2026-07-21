@@ -13,6 +13,8 @@ import traceback
 import xml.etree.ElementTree as ET
 import datetime as dt
 import json
+import functools
+import subprocess
 from concurrent import futures
 from html import unescape
 from pathlib import Path
@@ -105,6 +107,7 @@ try:
     from orchestration.claude_subagent import (
         article_metadata_markdown_lines,
         build_deep_read_prompt,
+        build_deep_read_repair_prompt,
         build_reading_score_prompt,
         run_claude_deep_read,
     )
@@ -117,6 +120,7 @@ except ModuleNotFoundError:
     _CLAUDE_SUBAGENT_SPEC.loader.exec_module(_CLAUDE_SUBAGENT)
     article_metadata_markdown_lines = _CLAUDE_SUBAGENT.article_metadata_markdown_lines
     build_deep_read_prompt = _CLAUDE_SUBAGENT.build_deep_read_prompt
+    build_deep_read_repair_prompt = _CLAUDE_SUBAGENT.build_deep_read_repair_prompt
     build_reading_score_prompt = _CLAUDE_SUBAGENT.build_reading_score_prompt
     run_claude_deep_read = _CLAUDE_SUBAGENT.run_claude_deep_read
 
@@ -3763,7 +3767,7 @@ _READ_PUBLIC_SECTION_RE = re.compile(
     re.I | re.S,
 )
 
-READING_CONTENT_QUALITY_POLICY_VERSION = "read_markdown_quality_v1"
+READING_CONTENT_QUALITY_POLICY_VERSION = "read_markdown_quality_v2"
 
 
 def _has_chinese_prose(value: object, *, minimum: int = 4) -> bool:
@@ -4185,15 +4189,164 @@ def _deep_read_complete(receipt: dict, result_payload: dict) -> bool:
     )
 
 
-def _article_markdown_quality_issue(text: str) -> str:
+_MARKDOWN_FENCED_CODE_RE = re.compile(r"```[\s\S]*?```|~~~[\s\S]*?~~~")
+_MARKDOWN_INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+_KATEX_VALIDATOR_JS = r"""
+const fs = require('fs');
+const MarkdownIt = require('markdown-it');
+const katex = require('katex');
+const texmath = require('markdown-it-texmath');
+const source = fs.readFileSync(0, 'utf8');
+const renderer = new MarkdownIt({html:false, linkify:true, breaks:false, typographer:false})
+  .use(texmath, {
+    engine:katex,
+    delimiters:['dollars', 'brackets', 'beg_end'],
+    katexOptions:{throwOnError:false, strict:'ignore', trust:false, output:'html'},
+  });
+const formulas = [];
+const visit = (tokens) => {
+  for (const token of tokens || []) {
+    if (String(token.type || '').startsWith('math_')) formulas.push(token);
+    if (token.children) visit(token.children);
+  }
+};
+try {
+  visit(renderer.parse(source, {}));
+  for (const token of formulas) {
+    katex.renderToString(String(token.content || ''), {
+      throwOnError:true,
+      strict:'ignore',
+      trust:false,
+      output:'html',
+      displayMode:token.type !== 'math_inline',
+    });
+  }
+  process.stdout.write(JSON.stringify({ok:true, formula_count:formulas.length}));
+} catch (error) {
+  process.stdout.write(JSON.stringify({ok:false, formula_count:formulas.length, error:String(error && error.message || error)}));
+}
+"""
+
+
+def _markdown_math_fragments(text: str) -> tuple[list[str], str]:
+    scrubbed = _MARKDOWN_FENCED_CODE_RE.sub("", str(text or ""))
+    scrubbed = _MARKDOWN_INLINE_CODE_RE.sub("", scrubbed)
+    fragments: list[str] = []
+    outside = list(scrubbed)
+    opened = ""
+    opened_at = -1
+    index = 0
+    while index < len(scrubbed):
+        if scrubbed[index] == "\\":
+            index += 2
+            continue
+        if scrubbed[index] != "$":
+            if opened == "$" and scrubbed[index] == "\n":
+                return fragments, "行内公式的 `$...$` 未在同一行闭合"
+            index += 1
+            continue
+        marker = "$$" if scrubbed.startswith("$$", index) else "$"
+        if opened:
+            if marker != opened:
+                return fragments, f"公式定界符不匹配：以 `{opened}` 开始却遇到 `{marker}`"
+            fragment = scrubbed[opened_at + len(opened):index]
+            if not fragment.strip():
+                return fragments, f"存在空的 `{marker}...{marker}` 公式"
+            fragments.append(fragment)
+            for position in range(opened_at, min(len(outside), index + len(marker))):
+                outside[position] = " "
+            opened = ""
+            opened_at = -1
+        else:
+            opened = marker
+            opened_at = index
+        index += len(marker)
+    if opened:
+        return fragments, f"公式定界符 `{opened}` 未闭合"
+
+    outside_text = "".join(outside)
+    bracket_pairs = {"\\(": "\\)", "\\[": "\\]"}
+    bracket_opened = ""
+    bracket_at = -1
+    index = 0
+    while index < len(outside_text):
+        marker = next((candidate for candidate in ["\\(", "\\)", "\\[", "\\]"] if outside_text.startswith(candidate, index)), "")
+        if not marker:
+            index += 1
+            continue
+        if marker in bracket_pairs:
+            if bracket_opened:
+                return fragments, f"公式定界符嵌套或不匹配：`{bracket_opened}` 后遇到 `{marker}`"
+            bracket_opened = marker
+            bracket_at = index
+        else:
+            if not bracket_opened or bracket_pairs[bracket_opened] != marker:
+                return fragments, f"公式结束定界符 `{marker}` 没有匹配的开始定界符"
+            fragment = outside_text[bracket_at + 2:index]
+            if not fragment.strip():
+                return fragments, f"存在空的 `{bracket_opened}...{marker}` 公式"
+            fragments.append(fragment)
+            bracket_opened = ""
+            bracket_at = -1
+        index += 2
+    if bracket_opened:
+        return fragments, f"公式定界符 `{bracket_opened}` 未闭合"
+    return fragments, ""
+
+
+def _markdown_katex_syntax_error(text: str) -> str:
+    fragments, structural_error = _markdown_math_fragments(text)
+    if structural_error:
+        return structural_error
+    if not fragments:
+        return ""
+    node = shutil.which("node")
+    if not node:
+        return ""
+    try:
+        proc = subprocess.run(
+            [node, "-e", _KATEX_VALIDATOR_JS],
+            input=str(text or ""),
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+        if proc.returncode != 0:
+            return ""
+        payload = json.loads(proc.stdout) if proc.stdout.strip() else {}
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return ""
+    if payload.get("ok") is not True:
+        return str(payload.get("error") or "KaTeX 解析失败")[:500]
+    if int(payload.get("formula_count") or 0) != len(fragments):
+        return "网页 Markdown 解析器未识别全部公式定界符"
+    return ""
+
+
+@functools.lru_cache(maxsize=1024)
+def _article_markdown_quality_findings(text: str) -> tuple[tuple[str, str], ...]:
+    findings: list[tuple[str, str]] = []
     if has_unresolved_prose_latex_markup(text):
-        return "unresolved_prose_latex_markup"
+        findings.append(("unresolved_prose_latex_markup", "公式外仍残留 LaTeX 排版命令"))
+    katex_error = _markdown_katex_syntax_error(text)
+    if katex_error:
+        findings.append(("invalid_katex_syntax", f"网页 KaTeX 语法校验失败：{katex_error}"))
     abstract = re.search(r"(?ms)^##\s+摘要\s*$\s*(.*?)(?=^##\s+|\Z)", text)
     if not abstract:
-        return "missing_abstract_section"
-    if not _has_chinese_prose(abstract.group(1)):
-        return "abstract_missing_chinese"
-    return ""
+        findings.append(("missing_abstract_section", "缺少 `## 摘要` 栏目"))
+    elif not _has_chinese_prose(abstract.group(1)):
+        findings.append(("abstract_missing_chinese", "`## 摘要` 未包含合格的中文摘要"))
+    return tuple(findings)
+
+
+def _article_markdown_quality_issue(text: str) -> str:
+    findings = _article_markdown_quality_findings(str(text or ""))
+    return findings[0][0] if findings else ""
+
+
+def _article_markdown_quality_reason(text: str) -> str:
+    findings = _article_markdown_quality_findings(str(text or ""))
+    return "；".join(reason for _issue, reason in findings)
 
 
 def _article_markdown_ready(path: Path, result_payload: dict) -> bool:
@@ -5027,7 +5180,7 @@ def _deep_read_cache_index() -> dict[str, list[Path]]:
             if not article_md_path.is_file():
                 continue
             article_text = article_md_path.read_text(encoding="utf-8", errors="replace")
-            if not article_text.strip() or _article_markdown_quality_issue(article_text):
+            if not article_text.strip():
                 continue
             item_dir = result_path.parent
             for key in _deep_read_cache_keys_for_paper(cached_paper):
@@ -5494,11 +5647,111 @@ def _failed_reading_subagent_item(prepared: dict, exc: BaseException) -> dict:
     return result
 
 
+def _normalize_article_markdown_file(path: Path, paper: dict, packet: dict) -> str:
+    if not path.is_file():
+        return ""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    normalized = _normalize_article_markdown_metadata(text, paper, packet)
+    if normalized != text:
+        path.write_text(normalized, encoding="utf-8")
+    return normalized
+
+
+def _run_content_quality_repair_once(
+    *,
+    paper: dict,
+    packet: dict,
+    item_dir: Path,
+    article_md_path: Path,
+    output_path: Path,
+    receipt: dict,
+    result_payload: dict,
+    mode: str,
+    timeout_sec: int,
+    log: LogFn,
+    index: int,
+) -> dict:
+    article_text = _normalize_article_markdown_file(article_md_path, paper, packet)
+    quality_issue = _article_markdown_quality_issue(article_text) if article_text else ""
+    quality_reason = _article_markdown_quality_reason(article_text) if quality_issue else ""
+    if mode == "prepare" or not quality_issue:
+        return {
+            "receipt": receipt,
+            "result_payload": result_payload,
+            "quality_issue": quality_issue,
+            "quality_reason": quality_reason,
+            "quality_retry": {},
+        }
+
+    repair_prompt_path = item_dir / "prompts" / "content_quality_repair_prompt.md"
+    repair_prompt = build_deep_read_repair_prompt(
+        paper=paper,
+        run_path=item_dir,
+        output_path=output_path,
+        article_md_path=article_md_path,
+        quality_issue=quality_issue,
+        quality_reason=quality_reason,
+    )
+    write_text(repair_prompt_path, repair_prompt)
+    log(f"Retrying reading subagent {index} with a new repair Claude: content_quality_issue={quality_issue} - {paper.get('title') or paper.get('paper_id')}")
+    try:
+        retry_receipt = run_claude_deep_read(
+            prompt_path=repair_prompt_path,
+            run_path=item_dir,
+            expected_output_path=output_path,
+            timeout_sec=timeout_sec,
+            mode=mode,
+            receipt_dir_name="claude_content_quality_retry",
+        )
+        retry_payload = _load_result_payload(output_path, retry_receipt)
+        repaired_text = _normalize_article_markdown_file(article_md_path, paper, packet)
+        final_issue = _article_markdown_quality_issue(repaired_text) if repaired_text else quality_issue
+        final_reason = _article_markdown_quality_reason(repaired_text) if repaired_text and final_issue else quality_reason
+        quality_retry = {
+            "attempted": True,
+            "attempt_count": 1,
+            "new_claude_process": True,
+            "repair_prompt": _rel_reading_path(repair_prompt_path),
+            "initial_issue": quality_issue,
+            "initial_reason": quality_reason,
+            "final_issue": final_issue,
+            "final_reason": final_reason,
+            "resolved": not final_issue,
+        }
+        receipt = {**retry_receipt, "content_quality_retry": quality_retry}
+        result_payload = retry_payload
+        quality_issue = final_issue
+        quality_reason = final_reason
+    except Exception as exc:
+        quality_retry = {
+            "attempted": True,
+            "attempt_count": 1,
+            "new_claude_process": True,
+            "repair_prompt": _rel_reading_path(repair_prompt_path),
+            "initial_issue": quality_issue,
+            "initial_reason": quality_reason,
+            "final_issue": quality_issue,
+            "final_reason": quality_reason,
+            "resolved": False,
+            "error": _read_exception_payload("reading_content_quality_retry", exc),
+        }
+        receipt = {**receipt, "content_quality_retry": quality_retry}
+    log(f"Finished reading content-quality retry {index}: {quality_issue or 'resolved'}")
+    return {
+        "receipt": receipt,
+        "result_payload": result_payload,
+        "quality_issue": quality_issue,
+        "quality_reason": quality_reason,
+        "quality_retry": quality_retry,
+    }
+
+
 def _run_reading_subagent_for_prepared_paper(
     *,
     prepared: dict,
     claude_mode: str,
     timeout_sec: int,
+    log: LogFn = print,
 ) -> dict:
     if prepared.get("validation", {}).get("deep_read_complete") is True:
         return prepared
@@ -5562,15 +5815,35 @@ def _run_reading_subagent_for_prepared_paper(
         mode=mode,
     )
     result_payload = _load_result_payload(output_path, receipt)
+    quality = _run_content_quality_repair_once(
+        paper=paper,
+        packet=packet,
+        item_dir=item_dir,
+        article_md_path=article_md_path,
+        output_path=output_path,
+        receipt=receipt,
+        result_payload=result_payload,
+        mode=mode,
+        timeout_sec=timeout_sec,
+        log=log,
+        index=index,
+    )
+    receipt = quality["receipt"]
+    result_payload = quality["result_payload"]
+    quality_issue = str(quality["quality_issue"] or "")
+    quality_reason = str(quality["quality_reason"] or "")
+    quality_retry = quality["quality_retry"]
     article_markdown_ready = _article_markdown_ready(article_md_path, result_payload)
     complete = (
         _deep_read_complete(receipt, result_payload)
         and article_markdown_ready
     )
-    status = "complete" if complete else str(receipt.get("status") or "prepared_full_text_for_main_claude_subagent")
+    status = "complete" if complete else quality_issue or str(receipt.get("status") or "prepared_full_text_for_main_claude_subagent")
     note_zh = (
         "已完成 Claude/subagent 精读，用户正文只保存在单篇 read.md。"
         if complete
+        else f"精读产物内容质量未通过：{quality_issue}。"
+        if quality_issue
         else "已取得可精读正文证据，但当前未完成 Claude/subagent 精读或未直接写出单篇 read.md，不能报告为精读完成。"
     )
     merged_reading = _reading_machine_state(
@@ -5592,7 +5865,10 @@ def _run_reading_subagent_for_prepared_paper(
             **(prepared.get("validation") if isinstance(prepared.get("validation"), dict) else {}),
             "full_text_ready": True,
             "deep_read_complete": complete,
-            "phase": "reading_subagent_completed_after_full_text_collection",
+            "phase": "reading_subagent_content_quality_failed" if quality_issue else "reading_subagent_completed_after_full_text_collection",
+            "content_quality_issue": quality_issue,
+            "content_quality_reason": quality_reason,
+            "content_quality_retry": quality_retry,
         },
         "artifacts": {
             **artifacts,
@@ -5946,9 +6222,13 @@ def _run_warning_detail(item: dict, index: int) -> dict:
         }
     full_text_ready = validation.get("full_text_ready") is True
     deep_read_complete = validation.get("deep_read_complete") is True
+    content_quality_issue = str(validation.get("content_quality_issue") or "")
     if not full_text_ready:
         phase = "full_text_acquisition"
         message = "未取得同篇全文证据"
+    elif content_quality_issue:
+        phase = "reading_content_quality"
+        message = f"精读产物内容质量未通过：{content_quality_issue}"
     elif not deep_read_complete:
         phase = "reading_subagent"
         message = "未完成 Reading subagent 精读"
@@ -5959,8 +6239,9 @@ def _run_warning_detail(item: dict, index: int) -> dict:
         "index": int(item.get("paper_index") or index),
         "title": _article_title_for_log(item),
         "phase": phase,
-        "status": str(item.get("status") or ""),
+        "status": content_quality_issue or str(item.get("status") or ""),
         "message": message,
+        "content_quality_issue": content_quality_issue,
         "full_text_ready": full_text_ready,
         "deep_read_complete": deep_read_complete,
         "full_text_status": str(reading.get("full_text_status") or packet.get("full_text_status") or ""),
@@ -6470,6 +6751,7 @@ def run_read(
                     prepared=item,
                     claude_mode=claude_mode,
                     timeout_sec=timeout_sec,
+                    log=log,
                 )
             except ReadingCancelled:
                 raise
@@ -6492,6 +6774,7 @@ def run_read(
                     prepared=item,
                     claude_mode=claude_mode,
                     timeout_sec=timeout_sec,
+                    log=log,
                 )
                 pending_read[future] = item
             for future in futures.as_completed(pending_read):
@@ -6540,6 +6823,12 @@ def run_read(
         for index, item in enumerate(items, 1)
         if item.get("validation", {}).get("deep_read_complete") is not True
     ]
+    content_quality_failures = [
+        str(item.get("validation", {}).get("content_quality_issue") or "")
+        for item in items
+        if str(item.get("validation", {}).get("content_quality_issue") or "")
+    ]
+    content_quality_issues = list(dict.fromkeys(content_quality_failures))
     if scoring_warning:
         warning_items.append({
             "index": 0,
@@ -6595,6 +6884,8 @@ def run_read(
         "error_items": error_items,
         "pending_full_text_count": pending_full_text_count,
         "pending_deep_read_count": pending_deep_read_count,
+        "content_quality_issue_count": len(content_quality_failures),
+        "content_quality_issues": content_quality_issues,
         "continuation_policy": "Read emits final read.md from completed per-paper Markdown whenever possible. Incomplete papers and concatenation issues are recorded only as task-log/machine-state warnings.",
         "worker_count": worker_count,
         "cooldown_requeue": cooldown_requeue_summary,
@@ -6901,8 +7192,26 @@ def run_standalone_deep_read(args: object) -> dict:
         mode=claude_mode,
     )
     claude_result = _load_standalone_claude_result(output_path, claude_receipt)
+    quality = _run_content_quality_repair_once(
+        paper=paper,
+        packet=packet_entry,
+        item_dir=current_run_dir,
+        article_md_path=read_md_path,
+        output_path=output_path,
+        receipt=claude_receipt,
+        result_payload=claude_result,
+        mode=claude_mode,
+        timeout_sec=args.timeout_sec,
+        log=lambda _message: None,
+        index=1,
+    )
+    claude_receipt = quality["receipt"]
+    claude_result = quality["result_payload"]
+    quality_issue = str(quality["quality_issue"] or "")
     status = _standalone_final_status(packet_entry, claude_receipt, claude_result)
     article_markdown_ready = _article_markdown_ready(read_md_path, claude_result)
+    if quality_issue:
+        status = quality_issue
     if status == "complete" and not article_markdown_ready:
         status = "blocked_article_markdown_missing_for_standalone_deep_read"
     result_payload = {
@@ -6915,6 +7224,11 @@ def run_standalone_deep_read(args: object) -> dict:
         "full_text_packet": packet_entry,
         "claude": claude_receipt,
         "claude_result": claude_result,
+        "validation": {
+            "content_quality_issue": quality_issue,
+            "content_quality_reason": str(quality["quality_reason"] or ""),
+            "content_quality_retry": quality["quality_retry"],
+        },
         "public_final_artifact": str(current_run_dir / "read.md"),
         "machine_support_artifacts": [str(current_run_dir / "read_results.json")],
     }

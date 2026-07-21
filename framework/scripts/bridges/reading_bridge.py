@@ -618,16 +618,19 @@ def _warning_detail(item: dict[str, Any], source_row: dict[str, Any], index: int
         return None
     paper = item.get("paper") if isinstance(item.get("paper"), dict) else {}
     packet = item.get("full_text_packet") if isinstance(item.get("full_text_packet"), dict) else {}
+    validation = item.get("validation") if isinstance(item.get("validation"), dict) else {}
     full_text_ready = _item_full_text_ready(item)
+    content_quality_issue = str(validation.get("content_quality_issue") or "")
     error = item.get("read_error") if isinstance(item.get("read_error"), dict) else {}
     if not error and isinstance(packet.get("error"), dict):
         error = packet["error"]
     return {
         "index": int(item.get("paper_index") or index),
         "title": str(paper.get("title") or _title_of(source_row)),
-        "phase": "reading_subagent" if full_text_ready else "full_text_acquisition",
-        "status": str(item.get("status") or ""),
-        "message": "已取得全文，等待精读" if full_text_ready else "未取得同篇全文证据",
+        "phase": "reading_content_quality" if content_quality_issue else "reading_subagent" if full_text_ready else "full_text_acquisition",
+        "status": content_quality_issue or str(item.get("status") or ""),
+        "message": f"精读产物内容质量未通过：{content_quality_issue}" if content_quality_issue else "已取得全文，等待精读" if full_text_ready else "未取得同篇全文证据",
+        "content_quality_issue": content_quality_issue,
         "full_text_ready": full_text_ready,
         "deep_read_complete": _item_deep_read_complete(item),
         "full_text_status": str(packet.get("full_text_status") or ""),
@@ -667,6 +670,16 @@ def _build_validation(
     )
     pending_full_text = max(0, expected_count - len(full_text_rows))
     pending_deep_titles = [str(row.get("title") or "Untitled") for row in readings if row.get("full_text_available") and not row.get("deep_read_complete")]
+    content_quality_issues: list[str] = []
+    content_quality_titles: list[str] = []
+    for item in items:
+        item_validation = item.get("validation") if isinstance(item.get("validation"), dict) else {}
+        issue = str(item_validation.get("content_quality_issue") or "")
+        if issue:
+            if issue not in content_quality_issues:
+                content_quality_issues.append(issue)
+            paper = item.get("paper") if isinstance(item.get("paper"), dict) else {}
+            content_quality_titles.append(str(paper.get("title") or "Untitled"))
     details = [
         detail
         for index, item in enumerate(items, 1)
@@ -705,6 +718,8 @@ def _build_validation(
         warnings.append(f"{pending_full_text} 篇输入论文仍缺少同篇全文证据。")
     if pending_deep_titles:
         warnings.append(f"{len(pending_deep_titles)} 篇已有全文但尚未完成精读。")
+    if content_quality_titles:
+        warnings.append(f"{len(content_quality_titles)} 篇精读产物内容质量未通过：{', '.join(content_quality_issues)}。")
     if not scoring_complete:
         warnings.append(f"统一评分仅覆盖 {scoring_scored_count}/{scoring_expected_count} 篇，最终排名未宣称完整。")
     valid = bool(readings) and public_final_artifact_present
@@ -734,6 +749,9 @@ def _build_validation(
         "full_text_reading_titles": [str(row.get("title") or "Untitled") for row in full_text_rows[:20]],
         "pending_full_text_reading_titles": [str(row.get("title") or "Untitled") for row in readings if not row.get("full_text_available")][:20],
         "pending_deep_read_synthesis_titles": pending_deep_titles[:20],
+        "content_quality_issue_count": len(content_quality_titles),
+        "content_quality_issues": content_quality_issues,
+        "content_quality_issue_titles": content_quality_titles[:20],
         "read_quality_complete": read_quality_complete,
         "scoring_status": scoring_status,
         "scoring_required": scoring_required,
@@ -753,6 +771,9 @@ def _build_validation(
 
 
 def _project_read_status(validation: dict[str, Any]) -> tuple[str, str, str]:
+    content_quality_issues = validation.get("content_quality_issues") if isinstance(validation.get("content_quality_issues"), list) else []
+    if content_quality_issues:
+        return str(validation.get("status") or "current_find_deep_read_complete_with_warnings"), str(content_quality_issues[0]), "rerun_current_find_read"
     if validation.get("valid") is not True:
         status = str(validation.get("status") or "blocked_current_find_read_incomplete")
         if validation.get("pending_full_text_reading_count"):
@@ -760,6 +781,10 @@ def _project_read_status(validation: dict[str, Any]) -> tuple[str, str, str]:
         if validation.get("pending_deep_read_synthesis_count"):
             return status, "claude_deep_read_required", "rerun_current_find_read"
         return status, "current_find_read_incomplete", "run_read_for_current_find"
+    if validation.get("pending_full_text_reading_count"):
+        return str(validation.get("status") or "current_find_deep_read_complete_with_warnings"), "full_text_evidence_missing", "acquire_current_find_full_text_evidence"
+    if validation.get("pending_deep_read_synthesis_count"):
+        return str(validation.get("status") or "current_find_deep_read_complete_with_warnings"), "claude_deep_read_required", "rerun_current_find_read"
     if validation.get("scoring_required") is True and validation.get("scoring_complete") is not True:
         return str(validation.get("status") or "current_find_deep_read_complete_with_warnings"), "reading_scoring_incomplete", "rerun_current_find_read"
     if validation.get("read_quality_complete") is not True:

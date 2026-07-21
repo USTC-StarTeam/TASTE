@@ -54,6 +54,8 @@ def _runtime_env() -> dict[str, str]:
             merged.append(value)
     env["WORKSPACE_ROOT"] = str(WORKSPACE_ROOT)
     env["PYTHONPATH"] = os.pathsep.join(merged)
+    frontend_modules = WORKSPACE_ROOT / "web" / "frontend" / "client" / "node_modules"
+    env["NODE_PATH"] = os.pathsep.join([str(frontend_modules), *[part for part in env.get("NODE_PATH", "").split(os.pathsep) if part]])
     return env
 
 

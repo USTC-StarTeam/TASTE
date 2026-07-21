@@ -95,7 +95,8 @@ FORMULA_STYLE_RULES = """数学公式格式：
 - 反引号只承载真实代码、文件路径和字面 token；数学记号直接使用公式定界符，例如 `$v_\\theta$`、`$x_{\\mathrm{C}\\alpha}$`、`$t_x$`。
 - 关系符、数值和量纲组成一个完整公式，例如 `$x \\approx 12\\%$`；百分号在公式内写成 `\\%`。
 - 模型名、数据集名、指标名、蛋白/化学/材料标识、突变记号、版本号和单位按论文中的普通文本写法呈现；它们参与数学表达时放入完整公式。
-- 所有符号、数值、量纲和解释均来自论文正文语境，Markdown 定界符、LaTeX 命令边界和环境必须完整闭合。
+- 网页使用 `markdown-it-texmath` 和 KaTeX 0.16 渲染；不得使用自定义宏或 KaTeX 不支持的命令。若复杂写法不能确定有效，改用含义相同的更简单标准 KaTeX 写法。
+- 所有符号、数值、量纲和解释均来自论文正文语境；完成前逐个检查 `$...$`、`$$...$$` 中的公式，确保 Markdown 定界符、花括号、LaTeX 命令边界和环境完整闭合且能由 KaTeX 解析。
 """
 
 JSON_OUTPUT_RULES = """机器回执格式：
@@ -342,7 +343,7 @@ def build_deep_read_prompt(
    - `方法` 聚焦作者自己提出的创新方法或机制。必须结合数学公式，用通俗中文解释公式如何支持创新机制；控制在 300-400 个中文字符内。
    - `实验结果` 只用几句话概括作者做了哪类实验以及总体效果，控制在 150 字以内。
    - `优缺点总结` 控制在 100 字以下，同时点出主要优点和主要缺点/风险边界。
-9. 必须在本次调用内一次性写出格式正确的单篇 Markdown 和机器回执 JSON，并完成 Markdown/LaTeX 格式整理。
+9. 必须在本次调用内一次性写出格式正确的单篇 Markdown 和机器回执 JSON，并完成 Markdown/LaTeX 格式整理。只有中文摘要和每个 KaTeX 公式均自检通过后，才能在机器回执中报告完成；进程退出码为 0 不代表内容合格。
 - 输入正文或摘要中，公式定界符之外的任意 LaTeX 命令均视为来源排版标记；理解其参数与相邻字符组成的完整原文后再翻译或概括，输出可读 Markdown，不得逐字复制这些命令。
 {FORMULA_STYLE_RULES}
 {JSON_OUTPUT_RULES}
@@ -372,6 +373,59 @@ def build_deep_read_prompt(
 其中 `subagent_used=true` 表示本次 Claude 调用本身就是专用阅读 subagent；`evidence_chars` 必须是你实际检查过的正文字符数，若成功完成全文精读，应不小于上方“正文字数”。
 
 读取全文后写出 `{article_md_run}`，再写出 `{output_path_run}`，最后只在 stdout 回复同一份严格合法 JSON 机器回执。stdout 第一个非空字符必须是 `{{`，最后一个非空字符必须是 `}}`。本次调用的文件写入范围严格限定为 `{article_md_run}` 和 `{output_path_run}`。
+"""
+
+
+def build_deep_read_repair_prompt(
+    *,
+    paper: dict[str, Any],
+    run_path: Path,
+    output_path: Path,
+    article_md_path: Path,
+    quality_issue: str,
+    quality_reason: str,
+) -> str:
+    try:
+        output_path_run = output_path.resolve(strict=False).relative_to(run_path.resolve(strict=False)).as_posix()
+    except Exception:
+        output_path_run = relative_to_reading(output_path)
+    try:
+        article_md_run = article_md_path.resolve(strict=False).relative_to(run_path.resolve(strict=False)).as_posix()
+    except Exception:
+        article_md_run = relative_to_reading(article_md_path)
+    title = str(paper.get("title") or "未命名论文")
+    paper_id = str(paper.get("paper_id") or paper.get("id") or "")
+    repair_rule = {
+        "abstract_missing_chinese": "只把 `## 摘要` 下尚未翻译的英文摘要完整翻译为中文。",
+        "missing_abstract_section": "只补齐缺失的 `## 摘要` 栏目及其完整中文摘要。",
+        "unresolved_prose_latex_markup": "只将公式外残留的 LaTeX 排版命令还原为可读 Markdown 文本。",
+        "invalid_katex_syntax": "只修复未通过网页 KaTeX 语法校验的公式；逐式检查，复杂写法不确定时改为含义相同的标准 KaTeX 写法。",
+    }.get(str(quality_issue), "只修复机器指出的内容质量问题。")
+    return f"""你是一次全新的 Reading 单篇产物质量修复 Claude。你的唯一输入产物是当前目录中的 `{article_md_run}`，唯一任务是依据机器给出的不合格原因做最小合格修复；不要重新精读或重写整篇文章。
+
+不合格代码：`{quality_issue}`
+不合格原因：{quality_reason}
+
+硬性规则：
+1. 先完整读取现有 `{article_md_run}`，定位与不合格原因直接对应的位置。{repair_rule}
+2. 除修复失败处所必需的字符或句子外，标题、元数据、栏目、论述、结论、篇幅和所有已经正确的内容必须保持不变。
+3. 公式仍只使用 `$...$` 或 `$$...$$`；必须能由 `markdown-it-texmath` 和 KaTeX 0.16 解析，定界符、花括号、命令边界及环境必须完整闭合，不得使用自定义宏或不支持的命令。
+4. 修改后重新检查整篇 `{article_md_run}`；不得通过删除必要内容、公式或栏目来绕过校验。
+5. 可写文件严格限定为修复后的 `{article_md_run}` 和机器回执 `{output_path_run}`，不得读取其他论文或调用其他 agent。
+6. `{output_path_run}` 与 stdout 必须是同一份严格合法 JSON 对象；stdout 不得包含 JSON 之外的文字。
+
+机器回执顶层字段必须包括：
+`status`, `source`, `paper_id`, `title`, `subagent_deep_read`, `article_markdown_path`, `deep_read_audit`。
+
+固定元数据：
+- `source`：`reading_content_quality_repair`
+- `paper_id`：`{paper_id}`
+- `title`：`{title}`
+- `article_markdown_path`：`{article_md_run}`
+- `subagent_deep_read`：修复并自检通过后写 `true`
+- `deep_read_audit` 至少包含 `mode="dedicated_claude_content_quality_repair"`, `subagent_used=true`, `status`, `article_markdown_path="{article_md_run}"`, `article_markdown_written=true`
+
+现在读取 `{article_md_run}`，只做上述最小修复，再写出 `{output_path_run}`，最后只在 stdout 返回同一 JSON 对象。
 """
 
 
