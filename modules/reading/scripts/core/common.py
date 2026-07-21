@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import html
 import os
 import re
 import shutil
@@ -53,6 +54,109 @@ def load_read_env_file(path: Path = READ_ENV_FILE) -> dict[str, str]:
 READ_ENV = load_read_env_file()
 
 
+_TITLE_SUPERSCRIPT_TRANSLATION = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾", "0123456789+-=()")
+_TITLE_SUBSCRIPT_TRANSLATION = str.maketrans("₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎", "0123456789+-=()")
+
+
+def display_paper_title(value: object) -> str:
+    text = html.unescape(str(value or ""))
+    text = re.sub(r"\s*<sup\b[^>]*>(.*?)</sup\s*>", lambda match: match.group(1).translate(str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")), text, flags=re.I | re.S)
+    text = re.sub(r"\s*<sub\b[^>]*>(.*?)</sub\s*>", lambda match: match.group(1).translate(str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")), text, flags=re.I | re.S)
+    text = re.sub(r"</?[A-Za-z][^>]*>", "", text)
+    text = re.sub(r"(?<!\\)[*_`]", "", text)
+    return " ".join(text.split()).strip()
+
+
+def normalized_paper_title(value: object) -> str:
+    text = display_paper_title(value).translate(_TITLE_SUPERSCRIPT_TRANSLATION).translate(_TITLE_SUBSCRIPT_TRANSLATION)
+    text = re.sub(r"[\u2010-\u2015\u2212]", "-", text)
+    text = re.sub(r"\s*-\s*", "-", text)
+    text = re.sub(r"[^\w-]+", " ", text, flags=re.UNICODE)
+    return " ".join(text.casefold().split())
+
+
+def is_placeholder_paper_title(value: object) -> bool:
+    return normalized_paper_title(value) in {
+        "论文标题",
+        "未命名论文",
+        "paper title",
+        "title",
+        "untitled",
+    }
+
+
+def paper_title_tokens(value: object) -> set[str]:
+    stop = {"a", "an", "and", "for", "in", "of", "on", "the", "to", "towards", "toward", "with"}
+    normalized = re.sub(r"[\u2010-\u2015]", "-", str(value or ""))
+    return {
+        token.lower()
+        for token in re.findall(r"[A-Za-z0-9]+", normalized)
+        if len(token) >= 2 and token.lower() not in stop
+    }
+
+
+def paper_title_similarity(left: object, right: object) -> float:
+    left_tokens = paper_title_tokens(left)
+    right_tokens = paper_title_tokens(right)
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / max(1, len(left_tokens | right_tokens))
+
+
+def paper_author_family_tokens(value: object) -> set[str]:
+    names = [str(item or "") for item in value] if isinstance(value, list) else re.split(r"[,;]", str(value or ""))
+    tokens: set[str] = set()
+    for name in names:
+        parts = [part.lower() for part in re.findall(r"[A-Za-z][A-Za-z-]+", name)]
+        if parts:
+            tokens.add(parts[-1])
+    return tokens
+
+
+def best_full_text_title(paper: dict[str, Any], extracted_text: object) -> str:
+    lines: list[str] = []
+    for raw_line in str(extracted_text or "").splitlines():
+        line = re.sub(r"-\s*\n\s*", "", raw_line)
+        line = re.sub(r"\s+", " ", line).strip()[:240].rstrip()
+        if not line:
+            continue
+        lowered = line.lower()
+        if lowered.startswith(("abstract", "references", "acknowledgments", "acknowledgements")):
+            break
+        if lowered.startswith(("keywords", "introduction")) and lines:
+            break
+        lines.append(line)
+        if len(lines) >= 36:
+            break
+    if not lines:
+        return ""
+    expected_title = str(paper.get("title") or "").strip()
+    best_title = ""
+    best_similarity = 0.0
+    for start in range(min(10, len(lines))):
+        for count in range(1, min(10, len(lines) - start) + 1):
+            candidate = " ".join(lines[start:start + count]).strip()
+            candidate = re.sub(r"([A-Za-z]{2,})-\s+([A-Za-z]{1,3})(?=\b)", r"\1\2", candidate)
+            candidate = re.sub(r"([A-Za-z])-\s+([A-Za-z])", r"\1 \2", candidate)
+            candidate = re.sub(r"\s+", " ", candidate).strip()
+            similarity = paper_title_similarity(expected_title, candidate)
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_title = candidate
+    expected_authors = paper_author_family_tokens(paper.get("authors"))
+    found_authors = paper_author_family_tokens(", ".join(lines[:36]))
+    if expected_authors:
+        overlap = expected_authors & found_authors
+        accepted = (
+            (best_similarity >= 0.82 and bool(overlap))
+            or (best_similarity >= 0.78 and len(overlap) >= 2)
+            or (best_similarity >= 0.70 and len(overlap) >= 4)
+        )
+    else:
+        accepted = best_similarity >= 0.92
+    return best_title if accepted else ""
+
+
 def has_substantive_chinese(value: object, *, minimum: int = 4) -> bool:
     text = str(value or "")
     chinese_count = len(re.findall(r"[\u4e00-\u9fff]", text))
@@ -60,6 +164,57 @@ def has_substantive_chinese(value: object, *, minimum: int = 4) -> bool:
     return chinese_count >= minimum and (
         latin_count == 0 or chinese_count / (chinese_count + latin_count) >= 0.15
     )
+
+
+_ENGLISH_WORD_RE = re.compile(r"[A-Za-z]+(?:[-'][A-Za-z]+)*")
+_ENGLISH_FUNCTION_WORDS = {
+    "a", "an", "and", "are", "as", "by", "for", "from", "in", "is", "of",
+    "on", "our", "that", "the", "this", "to", "we", "which", "with",
+}
+
+
+def _english_words(value: object) -> list[str]:
+    return [word.casefold() for word in _ENGLISH_WORD_RE.findall(str(value or ""))]
+
+
+def _copies_english_source(candidate: str, source: str) -> bool:
+    source_words = _english_words(source)
+    candidate_words = _english_words(candidate)
+    window = 10
+    if len(source_words) < window or len(candidate_words) < window:
+        return False
+    source_windows = {
+        tuple(source_words[index:index + window])
+        for index in range(len(source_words) - window + 1)
+    }
+    return any(
+        tuple(candidate_words[index:index + window]) in source_windows
+        for index in range(len(candidate_words) - window + 1)
+    )
+
+
+def _contains_long_english_prose(value: str) -> bool:
+    text = re.sub(r"https?://\S+|`[^`]*`|\$[^$]*\$", " ", str(value or ""))
+    for segment in re.split(r"(?<=[.!?])\s+|\n+", text):
+        words = _english_words(segment)
+        if len(words) < 12:
+            continue
+        chinese_count = len(re.findall(r"[\u4e00-\u9fff]", segment))
+        function_word_count = sum(word in _ENGLISH_FUNCTION_WORDS for word in words)
+        if chinese_count <= 2 and function_word_count >= 2:
+            return True
+    return False
+
+
+def chinese_translation_quality_issue(value: object, source_english: object = "") -> str:
+    text = str(value or "").strip()
+    if not has_substantive_chinese(text):
+        return "missing_substantive_chinese"
+    if _copies_english_source(text, str(source_english or "")):
+        return "copied_english_source"
+    if _contains_long_english_prose(text):
+        return "long_english_prose"
+    return ""
 
 
 DEFAULT_READING_CONFIG: dict[str, Any] = {

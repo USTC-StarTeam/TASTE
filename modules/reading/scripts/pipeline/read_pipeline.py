@@ -69,14 +69,18 @@ if _core_common_spec is None:
     _core_common_spec.loader.exec_module(_core_common_module)
 
 from core.common import (
+    best_full_text_title,
     DEFAULT_USER_AGENT,
     FULL_TEXT_MIN_CHARS as CONFIG_FULL_TEXT_MIN_CHARS,
     ServiceCooldownActive,
     config_bool,
     config_float,
     config_int,
+    chinese_translation_quality_issue,
+    display_paper_title,
     env_bool,
     has_substantive_chinese,
+    is_placeholder_paper_title,
     jina_api_key_configured,
     jina_request_headers,
     mark_process_http_blocker,
@@ -89,6 +93,10 @@ from core.common import (
     service_from_url,
     service_get,
     service_request_slot,
+    normalized_paper_title,
+    paper_author_family_tokens,
+    paper_title_similarity,
+    paper_title_tokens,
 )
 try:
     from acquisition.conference_sources import (
@@ -945,35 +953,8 @@ def _copy_pdf(source: Path, target: Path) -> bool:
         return False
 
 
-def _title_tokens(value: object) -> set[str]:
-    stop = {"a", "an", "and", "for", "in", "of", "on", "the", "to", "towards", "toward", "with"}
-    normalized = re.sub(r"[\u2010-\u2015]", "-", str(value or ""))
-    return {token.lower() for token in re.findall(r"[A-Za-z0-9]+", normalized) if len(token) >= 2 and token.lower() not in stop}
-
-
-def _title_similarity(left: object, right: object) -> float:
-    left_tokens = _title_tokens(left)
-    right_tokens = _title_tokens(right)
-    if not left_tokens or not right_tokens:
-        return 0.0
-    return len(left_tokens & right_tokens) / max(1, len(left_tokens | right_tokens))
-
-
 def _normalized_title_key(value: object) -> str:
-    return " ".join(sorted(_title_tokens(value)))
-
-
-def _author_family_tokens(value: object) -> set[str]:
-    if isinstance(value, list):
-        names = [str(item or "") for item in value]
-    else:
-        names = re.split(r"[,;]", str(value or ""))
-    tokens: set[str] = set()
-    for name in names:
-        parts = [part.lower() for part in re.findall(r"[A-Za-z][A-Za-z-]+", name)]
-        if parts:
-            tokens.add(parts[-1])
-    return tokens
+    return " ".join(sorted(paper_title_tokens(value)))
 
 
 def _content_value(value: object) -> object:
@@ -996,9 +977,9 @@ def _same_paper_identity_ok(
     title = str(paper.get("title") or "").strip()
     if not title or not str(candidate_title or "").strip():
         return False
-    similarity = _title_similarity(title, candidate_title)
-    expected_authors = _author_family_tokens(paper.get("authors"))
-    found_authors = _author_family_tokens(candidate_authors)
+    similarity = paper_title_similarity(title, candidate_title)
+    expected_authors = paper_author_family_tokens(paper.get("authors"))
+    found_authors = paper_author_family_tokens(candidate_authors)
     if expected_authors:
         overlap = expected_authors & found_authors
         return bool(
@@ -1047,37 +1028,57 @@ def _matches_declared_landing_url(paper: dict, *urls: object) -> bool:
     return any(_url_identity_key(url) in declared for url in urls if _url_identity_key(url))
 
 
+def _best_full_text_title(paper: dict, extracted_text: str) -> str:
+    return best_full_text_title(paper, extracted_text)
+
+
 def _pdf_text_identity_ok(paper: dict, extracted_text: str) -> bool:
-    lines: list[str] = []
-    for raw_line in str(extracted_text or "").splitlines():
-        line = _clean_text(raw_line, max_chars=240)
-        if not line:
-            continue
-        lowered = line.lower()
-        if lowered.startswith(("abstract", "references", "acknowledgments", "acknowledgements")):
-            break
-        if lowered.startswith(("keywords", "introduction")) and lines:
-            break
-        lines.append(line)
-        if len(lines) >= 36:
-            break
-    if not lines:
-        return False
-    expected_title = str(paper.get("title") or "").strip()
-    best_title = ""
-    best_similarity = 0.0
-    for start in range(min(10, len(lines))):
-        max_count = min(10, len(lines) - start)
-        for count in range(1, max_count + 1):
-            candidate_title = " ".join(lines[start : start + count]).strip()
-            candidate_title = re.sub(r"([A-Za-z]{2,})-\s+([A-Za-z]{1,3})(?=\b)", r"\1\2", candidate_title)
-            candidate_title = re.sub(r"([A-Za-z])-\s+([A-Za-z])", r"\1 \2", candidate_title)
-            candidate_title = re.sub(r"\s+", " ", candidate_title).strip()
-            similarity = _title_similarity(expected_title, candidate_title)
-            if similarity > best_similarity:
-                best_similarity = similarity
-                best_title = candidate_title
-    return _same_paper_identity_ok(paper, candidate_title=best_title, candidate_authors=lines[:36])
+    return bool(_best_full_text_title(paper, extracted_text))
+
+
+def _apply_verified_full_text_title(paper: dict, verified_title: object) -> str:
+    title = display_paper_title(verified_title)
+    if not title or is_placeholder_paper_title(title):
+        return ""
+    original_title = display_paper_title(paper.get("title"))
+    metadata = paper.setdefault("metadata", {})
+    if original_title and normalized_paper_title(original_title) != normalized_paper_title(title):
+        metadata.setdefault("original_bibliographic_title", original_title)
+        metadata["title_correction_reason"] = "verified_full_text_title"
+    metadata["reading_verified_full_text_title"] = title
+    paper["title"] = title
+    return title
+
+
+def _verify_packet_full_text_title(paper: dict, packet: dict) -> str:
+    if not isinstance(packet, dict) or not packet.get("full_text_available"):
+        return ""
+    verified_title = str(packet.get("verified_full_text_title") or "").strip()
+    if not verified_title:
+        text_path = _packet_path(packet, "text_path")
+        if text_path is not None and text_path.is_file():
+            try:
+                verified_title = _best_full_text_title(
+                    paper,
+                    text_path.read_text(encoding="utf-8", errors="replace"),
+                )
+            except OSError:
+                verified_title = ""
+    if not verified_title:
+        return ""
+    verified_title = _apply_verified_full_text_title(paper, verified_title)
+    if verified_title:
+        packet["verified_full_text_title"] = verified_title
+        packet["title"] = verified_title
+    return verified_title
+
+
+def _reading_acquisition_services() -> dict[str, Callable]:
+    return {
+        "download_first_readable_pdf": _download_first_readable_pdf,
+        "openalex_pdf_candidates": _openalex_pdf_candidates,
+        "same_paper_landing_page_candidates": _same_paper_landing_page_candidates,
+    }
 
 
 def _openreview_pdf_url(paper: dict) -> str:
@@ -2441,7 +2442,7 @@ def _publisher_page_candidates_from_url(
     if not identity_ok and doi_values:
         identity_ok = any(_doi_from_paper(paper) and _doi_from_paper(paper) == _doi_from_text(value) for value in doi_values)
     if not identity_ok and title_values and _matches_declared_landing_url(paper, url, resolved_url):
-        identity_ok = any(_title_similarity(paper.get("title"), title) >= 0.97 for title in title_values)
+        identity_ok = any(paper_title_similarity(paper.get("title"), title) >= 0.97 for title in title_values)
     pdf_links = []
     for pdf_url in _meta_content_values(html, {"citation_pdf_url"}):
         if pdf_url.startswith("http"):
@@ -2675,7 +2676,7 @@ def _arxiv_pdf_candidates(paper: dict, max_results: int = 5) -> list[dict]:
     if not queries:
         return []
     ns = {"a": "http://www.w3.org/2005/Atom"}
-    expected_authors = _author_family_tokens(paper.get("authors"))
+    expected_authors = paper_author_family_tokens(paper.get("authors"))
     candidates: list[dict] = []
     seen_entries: set[str] = set()
     attempts: list[dict] = []
@@ -2717,8 +2718,8 @@ def _arxiv_pdf_candidates(paper: dict, max_results: int = 5) -> list[dict]:
                     break
             if not pdf_url and "/abs/" in entry_id:
                 pdf_url = entry_id.replace("/abs/", "/pdf/")
-            similarity = _title_similarity(title, candidate_title)
-            author_overlap = sorted(expected_authors & _author_family_tokens(candidate_authors))
+            similarity = paper_title_similarity(title, candidate_title)
+            author_overlap = sorted(expected_authors & paper_author_family_tokens(candidate_authors))
             accepted = bool(pdf_url and (similarity >= 0.95 if not expected_authors else (similarity >= 0.82 and author_overlap) or (similarity >= 0.78 and len(author_overlap) >= 2)))
             candidates.append({
                 "kind": "arxiv_title_search_candidate",
@@ -2794,7 +2795,7 @@ def _openalex_api_params(extra: dict[str, str] | None = None) -> dict[str, str]:
 def _openalex_work_candidates(work: dict, paper: dict, *, source_kind: str) -> list[dict]:
     title = str(paper.get("title") or "")
     work_title = str(work.get("display_name") or work.get("title") or "")
-    if title and work_title and _title_similarity(title, work_title) < 0.72:
+    if title and work_title and paper_title_similarity(title, work_title) < 0.72:
         return []
     candidates: list[dict] = []
     locations = []
@@ -4037,10 +4038,11 @@ def _normalize_local_input_paper(row: dict) -> dict:
     input_metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
     if normalized_metadata or input_metadata:
         paper["metadata"] = {**normalized_metadata, **input_metadata}
+    source_abstract_en = _article_source_abstract_en(paper)
     for mapping in [paper, paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}]:
         if mapping.get("abstract_zh") and (
             has_unresolved_prose_latex_markup(mapping.get("abstract_zh"))
-            or not has_substantive_chinese(mapping.get("abstract_zh"))
+            or chinese_translation_quality_issue(mapping.get("abstract_zh"), source_abstract_en)
         ):
             mapping.pop("abstract_zh", None)
     return paper
@@ -4131,7 +4133,11 @@ def _normalize_article_markdown_metadata(text: str, paper: dict, packet: dict | 
     cleaned = _sanitize_article_markdown_text(text)
     metadata = paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}
     abstract_zh = str(paper.get("abstract_zh") or metadata.get("abstract_zh") or "").strip()
-    if abstract_zh and has_substantive_chinese(abstract_zh) and not has_unresolved_prose_latex_markup(abstract_zh):
+    if (
+        abstract_zh
+        and not chinese_translation_quality_issue(abstract_zh, _article_source_abstract_en(paper))
+        and not has_unresolved_prose_latex_markup(abstract_zh)
+    ):
         abstract_lines = cleaned.splitlines()
         abstract_index = next((index for index, line in enumerate(abstract_lines) if line.strip() == "## 摘要"), -1)
         next_section_index = next(
@@ -4157,7 +4163,13 @@ def _normalize_article_markdown_metadata(text: str, paper: dict, packet: dict | 
     if section_start <= first:
         return cleaned
     metadata_lines = article_metadata_markdown_lines(paper, packet if isinstance(packet, dict) else {})
-    canonical_title = " ".join(str(paper.get("title") or lines[first].lstrip("#").strip() or "未命名论文").split())
+    expected_title, _expected_abstract, _source_abstract_en = _article_quality_expectations(paper)
+    current_title = display_paper_title(lines[first].lstrip("#").strip())
+    canonical_title = current_title if (
+        current_title
+        and expected_title
+        and normalized_paper_title(current_title) == normalized_paper_title(expected_title)
+    ) else expected_title or current_title or "未命名论文"
     rest = lines[section_start:]
     while rest and not rest[0].strip():
         rest.pop(0)
@@ -4329,14 +4341,30 @@ _REQUIRED_ARTICLE_SECTIONS = (
 )
 
 
-def _article_quality_expectations(paper: dict | None) -> tuple[str, str]:
+def _article_source_abstract_en(paper: dict | None) -> str:
     paper = paper if isinstance(paper, dict) else {}
     metadata = paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}
-    title = " ".join(str(paper.get("title") or "").split())
+    return str(
+        paper.get("abstract_en")
+        or paper.get("abstract")
+        or metadata.get("abstract_en")
+        or metadata.get("abstract")
+        or ""
+    ).strip()
+
+
+def _article_quality_expectations(paper: dict | None) -> tuple[str, str, str]:
+    paper = paper if isinstance(paper, dict) else {}
+    metadata = paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}
+    title = display_paper_title(metadata.get("reading_verified_full_text_title") or paper.get("title"))
+    source_abstract_en = _article_source_abstract_en(paper)
     abstract_zh = str(paper.get("abstract_zh") or metadata.get("abstract_zh") or "").strip()
-    if abstract_zh and (not has_substantive_chinese(abstract_zh) or has_unresolved_prose_latex_markup(abstract_zh)):
+    if abstract_zh and (
+        chinese_translation_quality_issue(abstract_zh, source_abstract_en)
+        or has_unresolved_prose_latex_markup(abstract_zh)
+    ):
         abstract_zh = ""
-    return title, abstract_zh
+    return title, abstract_zh, source_abstract_en
 
 
 def _article_section_bodies(text: str) -> tuple[list[str], dict[str, str]]:
@@ -4352,7 +4380,7 @@ def _article_section_bodies(text: str) -> tuple[list[str], dict[str, str]]:
 
 
 def _normalized_article_title(value: str) -> str:
-    return " ".join(unescape(re.sub(r"[*_`]", "", str(value or ""))).split()).casefold()
+    return normalized_paper_title(value)
 
 
 @functools.lru_cache(maxsize=1024)
@@ -4360,6 +4388,7 @@ def _article_markdown_quality_findings(
     text: str,
     expected_title: str = "",
     expected_abstract_zh: str = "",
+    source_abstract_en: str = "",
 ) -> tuple[tuple[str, str], ...]:
     findings: list[tuple[str, str]] = []
     if has_unresolved_prose_latex_markup(text):
@@ -4368,19 +4397,29 @@ def _article_markdown_quality_findings(
     if katex_error:
         findings.append(("invalid_katex_syntax", f"网页 KaTeX 语法校验失败：{katex_error}"))
     abstract = re.search(r"(?ms)^##\s+摘要\s*$\s*(.*?)(?=^##\s+|\Z)", text)
+    abstract_quality_issue = ""
     if not abstract:
         findings.append(("missing_abstract_section", "缺少 `## 摘要` 栏目"))
-    elif not has_substantive_chinese(abstract.group(1)):
+    else:
+        abstract_quality_issue = chinese_translation_quality_issue(abstract.group(1), source_abstract_en)
+    if abstract and abstract_quality_issue == "missing_substantive_chinese":
         findings.append(("abstract_missing_chinese", "`## 摘要` 未包含合格的中文摘要"))
-    elif expected_abstract_zh and abstract.group(1).strip() != expected_abstract_zh.strip():
+    elif abstract and abstract_quality_issue in {"copied_english_source", "long_english_prose"}:
+        findings.append((
+            "abstract_contains_english_original",
+            "`## 摘要` 含英文原文句群；摘要只能保留完整中文翻译，专有名词、模型名、数据集名和缩写除外",
+        ))
+    elif abstract and expected_abstract_zh and abstract.group(1).strip() != expected_abstract_zh.strip():
         findings.append(("fixed_abstract_modified", "`## 摘要` 未逐字保留 Framework 提供的固定中文摘要"))
 
     h1_matches = re.findall(r"(?m)^#(?!#)\s+(.+?)\s*$", text)
     actual_title = h1_matches[0].strip() if len(h1_matches) == 1 else ""
     if len(h1_matches) != 1:
         findings.append(("article_title_mismatch", "单篇产物必须且只能有一个一级论文标题"))
+    elif is_placeholder_paper_title(actual_title):
+        findings.append(("article_title_placeholder", "一级标题仍是占位文字，必须恢复为已核验的论文标题"))
     elif expected_title and _normalized_article_title(actual_title) != _normalized_article_title(expected_title):
-        findings.append(("article_title_mismatch", f"一级标题必须逐字使用题录标题 `{expected_title}`"))
+        findings.append(("article_title_mismatch", f"一级标题与已核验论文标题 `{expected_title}` 不一致"))
 
     headings, section_bodies = _article_section_bodies(text)
     if headings != list(_REQUIRED_ARTICLE_SECTIONS):
@@ -4402,14 +4441,18 @@ def _article_markdown_quality_findings(
 
 
 def _article_markdown_quality_issue(text: str, paper: dict | None = None) -> str:
-    expected_title, expected_abstract_zh = _article_quality_expectations(paper)
-    findings = _article_markdown_quality_findings(str(text or ""), expected_title, expected_abstract_zh)
+    expected_title, expected_abstract_zh, source_abstract_en = _article_quality_expectations(paper)
+    findings = _article_markdown_quality_findings(
+        str(text or ""), expected_title, expected_abstract_zh, source_abstract_en
+    )
     return findings[0][0] if findings else ""
 
 
 def _article_markdown_quality_reason(text: str, paper: dict | None = None) -> str:
-    expected_title, expected_abstract_zh = _article_quality_expectations(paper)
-    findings = _article_markdown_quality_findings(str(text or ""), expected_title, expected_abstract_zh)
+    expected_title, expected_abstract_zh, source_abstract_en = _article_quality_expectations(paper)
+    findings = _article_markdown_quality_findings(
+        str(text or ""), expected_title, expected_abstract_zh, source_abstract_en
+    )
     return "；".join(reason for _issue, reason in findings)
 
 
@@ -4917,6 +4960,15 @@ def _restore_article_full_text_cache(paper: dict, item_dir: Path) -> dict:
             restored["pdf_path"] = _rel_reading_path(pdf_target)
     if not copied_text and not copied_pdf:
         return {}
+    verified_title = str(restored.get("verified_full_text_title") or "").strip()
+    if not verified_title and copied_text:
+        try:
+            verified_title = _best_full_text_title(paper, text_target.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            verified_title = ""
+    if verified_title:
+        restored["verified_full_text_title"] = _apply_verified_full_text_title(paper, verified_title)
+        restored["title"] = paper.get("title") or restored.get("title") or ""
     restored.update(_article_cache_content_fingerprints(cache_dir))
     restored["article_cache_hit"] = True
     restored["article_cache_dir"] = _rel_reading_path(cache_dir)
@@ -5069,8 +5121,8 @@ def _restore_article_read_cache(item_dir: Path, paper: dict, *, run_id: str, pap
     manifest = _article_cache_manifest(cache_dir)
     paper = _merge_cached_paper_hints(paper, read_json(cache_dir / "paper.json", {}))
     cached_read_text = (cache_dir / "read.md").read_text(encoding="utf-8", errors="replace")
-    quality_issue = _article_markdown_quality_issue(cached_read_text, paper)
-    if quality_issue:
+    initial_quality_issue = _article_markdown_quality_issue(cached_read_text, paper)
+    if initial_quality_issue and initial_quality_issue != "article_title_mismatch":
         with _ARTICLE_CACHE_LOCK:
             _invalidate_article_read_artifacts(cache_dir)
             manifest = _article_cache_manifest(cache_dir)
@@ -5080,7 +5132,7 @@ def _restore_article_read_cache(item_dir: Path, paper: dict, *, run_id: str, pap
                 "read_content_revision": "",
                 "read_quality_policy_version": READING_CONTENT_QUALITY_POLICY_VERSION,
                 "read_invalidated_at": _now_iso(),
-                "read_invalidation_reason": "read_content_quality:" + quality_issue,
+                "read_invalidation_reason": "read_content_quality:" + initial_quality_issue,
             })
             write_json(cache_dir / "manifest.json", manifest)
         return {}
@@ -5103,6 +5155,21 @@ def _restore_article_read_cache(item_dir: Path, paper: dict, *, run_id: str, pap
     restored_packet = _restore_article_full_text_cache(paper, item_dir)
     restored_text_path = _packet_path(restored_packet, "text_path") if restored_packet else None
     if restored_text_path is None or not restored_text_path.is_file() or restored_text_path.stat().st_size < FULL_TEXT_MIN_CHARS:
+        return {}
+    quality_issue = _article_markdown_quality_issue(cached_read_text, paper)
+    if quality_issue:
+        with _ARTICLE_CACHE_LOCK:
+            _invalidate_article_read_artifacts(cache_dir)
+            manifest = _article_cache_manifest(cache_dir)
+            manifest.update({
+                "updated_at": _now_iso(),
+                "has_read_md": False,
+                "read_content_revision": "",
+                "read_quality_policy_version": READING_CONTENT_QUALITY_POLICY_VERSION,
+                "read_invalidated_at": _now_iso(),
+                "read_invalidation_reason": "read_content_quality:" + quality_issue,
+            })
+            write_json(cache_dir / "manifest.json", manifest)
         return {}
     item_dir.mkdir(parents=True, exist_ok=True)
     write_json(item_dir / "paper.json", paper)
@@ -5190,6 +5257,15 @@ def _existing_full_text_packet_for_deep_read(item_dir: Path, paper: dict, *, all
     ):
         return {}
     reused = dict(packet)
+    verified_title = str(reused.get("verified_full_text_title") or "").strip()
+    if not verified_title:
+        try:
+            verified_title = _best_full_text_title(paper, text_path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            verified_title = ""
+    if verified_title:
+        reused["verified_full_text_title"] = _apply_verified_full_text_title(paper, verified_title)
+        reused["title"] = paper.get("title") or reused.get("title") or ""
     reused["reused_existing_full_text_packet_for_deep_read"] = True
     reused["reuse_policy"] = "Only reused because the same Reading run already has verified same-paper full-text evidence and this pass is rerunning Claude/subagent deep-read synthesis."
     return reused
@@ -5425,7 +5501,9 @@ def _process_local_read_paper(
         if packet:
             log(f"复用文章缓存全文/PDF {index}: {paper.get('title') or paper.get('paper_id')}")
     if not packet:
-        packet = acquire_full_text(paper, item_dir, log=log)
+        packet = acquire_full_text(paper, item_dir, log=log, services=_reading_acquisition_services())
+    _verify_packet_full_text_title(paper, packet)
+    write_json(item_dir / "paper.json", paper)
     cache_publication = _publish_article_full_text_cache(item_dir, paper, packet)
     write_json(item_dir / "full_text_packet.json", {"run_id": run_id, "paper_index": index, "papers": [packet], "generated_at": _now_iso()})
     if not force_deep_read and cache_publication.get("read_cache_invalidated") is not True:
@@ -5545,7 +5623,9 @@ def _prepare_local_read_paper(
         if packet:
             log(f"复用文章缓存全文/PDF {index}: {paper.get('title') or paper.get('paper_id')}")
     if not packet:
-        packet = acquire_full_text(paper, item_dir, log=log)
+        packet = acquire_full_text(paper, item_dir, log=log, services=_reading_acquisition_services())
+    _verify_packet_full_text_title(paper, packet)
+    write_json(item_dir / "paper.json", paper)
     cache_publication = _publish_article_full_text_cache(item_dir, paper, packet)
     write_json(item_dir / "full_text_packet.json", {"run_id": run_id, "paper_index": index, "papers": [packet], "generated_at": _now_iso()})
     if not force_deep_read and cache_publication.get("read_cache_invalidated") is not True:
@@ -7178,8 +7258,12 @@ def run_standalone_deep_read(args: object) -> dict:
         return cached_read
     packet_entry = _restore_article_full_text_cache(paper, current_run_dir)
     if not packet_entry:
-        packet_entry = acquire_full_text(paper, current_run_dir)
+        packet_entry = acquire_full_text(paper, current_run_dir, services=_reading_acquisition_services())
+        _verify_packet_full_text_title(paper, packet_entry)
         _publish_article_full_text_cache(current_run_dir, paper, packet_entry)
+    else:
+        _verify_packet_full_text_title(paper, packet_entry)
+    write_json(current_run_dir / "paper.json", paper)
     write_json(current_run_dir / "full_text_packet.json", {
         "run_id": current_run_dir.name,
         "source": "Reading standalone deep_read",

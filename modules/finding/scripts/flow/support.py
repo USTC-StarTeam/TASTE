@@ -6591,13 +6591,19 @@ def fetch_venue_title_index_all(venue: dict, years: list[int]) -> tuple[list[dic
 def _fetch_one_conference_virtual_detail(paper: dict, request_timeout: int) -> dict:
     url = _conference_virtual_detail_url(paper)
     detail_label = _conference_virtual_detail_label(paper)
-    result = {"abstract_filled": False, "authors_filled": False, "pdf_filled": False, "error": ""}
+    result = {"abstract_filled": False, "authors_filled": False, "pdf_filled": False, "title_corrected": False, "error": ""}
     try:
         soup = BeautifulSoup(_request(url, timeout=request_timeout).text, "html.parser")
     except Exception as exc:
         result["error"] = str(exc)[:240]
         return result
     metadata = paper.setdefault("metadata", {})
+    title_status = _reconcile_official_detail_title(paper, _official_detail_title(soup), detail_label)
+    if title_status == "mismatch":
+        result["error"] = "official_detail_title_mismatch"
+        metadata["detail_fetch_error"] = result["error"]
+        return result
+    result["title_corrected"] = title_status == "corrected"
     presentation = _presentation_type_from_url(url)
     if not presentation:
         snippets: list[str] = []
@@ -6711,6 +6717,28 @@ def _same_title_evidence(expected: object, observed: object) -> bool:
     overlap = expected_tokens & observed_tokens
     containment = len(overlap) / max(1, min(len(expected_tokens), len(observed_tokens)))
     return _title_token_similarity(expected_key, observed_key) >= 0.82 or (len(overlap) >= 3 and containment >= 0.9)
+
+
+def _reconcile_official_detail_title(paper: dict, detail_title: object, source: str) -> str:
+    observed = _clean_text(detail_title)
+    expected = _clean_text(paper.get("title"))
+    if not observed or not _looks_like_paper_title(observed):
+        return "missing"
+    metadata = paper.setdefault("metadata", {})
+    expected_key = _title_key(expected)
+    observed_key = _title_key(observed)
+    if expected_key == observed_key or expected_key in observed_key or observed_key in expected_key:
+        metadata["detail_title_verified"] = observed
+        return "matched"
+    if not _same_title_evidence(expected, observed):
+        metadata["detail_title_mismatch"] = observed
+        return "mismatch"
+    metadata.setdefault("original_bibliographic_title", expected)
+    metadata["detail_title_verified"] = observed
+    metadata["title_source"] = source
+    metadata["title_correction_reason"] = "bound_official_detail_title"
+    paper["title"] = observed
+    return "corrected"
 
 
 def _extract_aaai_abstract(soup: BeautifulSoup) -> str:
@@ -6867,7 +6895,7 @@ def _official_detail_request(url: str, request_timeout: int, source: str) -> str
 def _fetch_one_official_detail(paper: dict, request_timeout: int) -> dict:
     source = _official_detail_source(paper)
     url = _official_detail_url(paper)
-    result = {"abstract_filled": False, "authors_filled": False, "pdf_filled": False, "error": ""}
+    result = {"abstract_filled": False, "authors_filled": False, "pdf_filled": False, "title_corrected": False, "error": ""}
     if not source or not url:
         return result
     acm_cache_key = ""
@@ -6879,9 +6907,11 @@ def _fetch_one_official_detail(paper: dict, request_timeout: int) -> dict:
                 cached = _load_acm_detail_abstract_cache().get(acm_cache_key)
             if isinstance(cached, dict) and cached.get("abstract") and not paper.get("abstract"):
                 cached_title = _clean_text(cached.get("title"))
-                if cached_title and not _same_title_evidence(paper.get("title"), cached_title):
+                title_status = _reconcile_official_detail_title(paper, cached_title, "acm_dl_detail_cache")
+                if title_status == "mismatch":
                     paper.setdefault("metadata", {})["detail_title_mismatch"] = cached_title
                 elif _apply_acm_detail_cached_abstract(paper, cached):
+                    result["title_corrected"] = title_status == "corrected"
                     result["abstract_filled"] = True
                     if cached.get("pdf_url") and not paper.get("pdf_url"):
                         paper["pdf_url"] = str(cached.get("pdf_url") or "")
@@ -6922,13 +6952,13 @@ def _fetch_one_official_detail(paper: dict, request_timeout: int) -> dict:
         return result
     metadata = paper.setdefault("metadata", {})
     detail_title = _official_detail_title(soup)
-    if detail_title and not _same_title_evidence(paper.get("title"), detail_title):
+    title_status = _reconcile_official_detail_title(paper, detail_title, source)
+    if title_status == "mismatch":
         result["error"] = "official_detail_title_mismatch"
         metadata["detail_fetch_error"] = result["error"]
         metadata["detail_title_mismatch"] = detail_title
         return result
-    if detail_title:
-        metadata["detail_title_verified"] = detail_title
+    result["title_corrected"] = title_status == "corrected"
     if source == "neurips_official_papers":
         parsed = _parse_neurips_detail(detail_html, url, str(paper.get("title") or ""), int(paper.get("year") or 0))
         if parsed.get("title") and not paper.get("title"):

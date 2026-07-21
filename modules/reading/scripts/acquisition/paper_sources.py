@@ -61,13 +61,14 @@ if _core_common_spec is None:
     sys.modules["core.common"] = _core_common_module
     _core_common_spec.loader.exec_module(_core_common_module)
 
-from core.common import DEFAULT_USER_AGENT, FULL_TEXT_MIN_CHARS as CONFIG_FULL_TEXT_MIN_CHARS, config_bool, config_value, env_bool, jina_api_key_configured, jina_request_headers, mark_process_http_blocker, process_backend_slot, process_blocker, response_receipt, service_cooldown_remaining, service_from_url, service_get
+from core.common import DEFAULT_USER_AGENT, FULL_TEXT_MIN_CHARS as CONFIG_FULL_TEXT_MIN_CHARS, best_full_text_title, config_bool, config_value, env_bool, jina_api_key_configured, jina_request_headers, mark_process_http_blocker, process_backend_slot, process_blocker, response_receipt, service_cooldown_remaining, service_from_url, service_get
 from core.common import coerce_str_list, read_json, safe_slug, write_text
 from core.common import OUTPUT_ROOT, relative_to_reading, resolve_reading_path
 from acquisition.semantic_scholar import semantic_scholar_enrich_paper
 
 
 LogFn = Callable[[str], None]
+AcquisitionServices = dict[str, Callable[..., Any]]
 
 PMC_ID_RE = re.compile(r"\b(PMC\d{5,})\b", re.I)
 
@@ -77,42 +78,26 @@ ARXIV_LINK_RE = re.compile(r"(?:arxiv\.org/(?:abs|pdf)/|arxiv:)\s*([0-9]{4}\.[0-
 READ_USER_AGENT = DEFAULT_USER_AGENT
 MIN_FULL_TEXT_CHARS = CONFIG_FULL_TEXT_MIN_CHARS
 _FULL_TEXT_CACHE_INDEX: dict[str, list[dict[str, Any]]] | None = None
-_READ_PIPELINE_MODULE: Any = None
-
-
-def _read_pipeline_module() -> Any:
-    global _READ_PIPELINE_MODULE
-    if _READ_PIPELINE_MODULE is not None:
-        return _READ_PIPELINE_MODULE
-    try:
-        from pipeline import read_pipeline
-
-        module_path = Path(str(getattr(read_pipeline, "__file__", ""))).resolve(strict=False)
-        scripts_root = Path(__file__).resolve().parents[1]
-        try:
-            module_path.relative_to(scripts_root)
-            _READ_PIPELINE_MODULE = read_pipeline
-            return _READ_PIPELINE_MODULE
-        except ValueError:
-            pass
-    except Exception:
-        pass
-    pipeline_path = Path(__file__).resolve().parents[1] / "pipeline" / "read_pipeline.py"
-    spec = importlib.util.spec_from_file_location("reading_read_pipeline_fallback", pipeline_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot load Reading read_pipeline from {pipeline_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    _READ_PIPELINE_MODULE = module
-    return module
-
-
-def _read_pipeline_func(name: str) -> Any:
-    return getattr(_read_pipeline_module(), name)
 
 
 def _download_first_readable_pdf(paper: dict[str, Any], pdf_dir: Path, log: LogFn) -> tuple[bool, Path, str, dict[str, Any]]:
-    return _read_pipeline_func("_download_first_readable_pdf")(paper, pdf_dir, log)
+    raise RuntimeError("PDF acquisition service was not supplied by the Reading orchestrator")
+
+
+def _pdf_text_identity_ok(paper: dict[str, Any], text: str) -> bool:
+    return bool(best_full_text_title(paper, text))
+
+
+def _extract_pdf_text(path: Path) -> str:
+    try:
+        import fitz
+    except Exception:
+        return ""
+    try:
+        document = fitz.open(path)
+        return "\n".join(page.get_text("text") for page in document)
+    except Exception:
+        return ""
 
 
 def arxiv_id_from_text(value: Any) -> str:
@@ -141,15 +126,16 @@ def pmc_id_from_paper(paper: dict[str, Any], acquisition: dict[str, Any] | None 
 
 
 def doi_from_paper(paper: dict[str, Any]) -> str:
-    try:
-        return _read_pipeline_func("_doi_from_paper")(paper)
-    except Exception:
-        metadata = paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}
-        for value in [paper.get("doi"), paper.get("published_doi"), metadata.get("doi"), paper.get("url"), paper.get("pdf_url")]:
-            text = str(value or "")
-            match = re.search(r"\b(10\.\d{4,9}/[^\s\"<>]+)", text, re.I)
-            if match:
-                return match.group(1).strip().rstrip(".,;:)]}").lower()
+    metadata = paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}
+    for value in [
+        paper.get("doi"), paper.get("published_doi"), paper.get("url"), paper.get("abs_url"),
+        paper.get("pdf_url"), paper.get("input_article"), metadata.get("doi"),
+        metadata.get("published_doi"), metadata.get("crossref_url"), metadata.get("url"), metadata.get("pdf_url"),
+    ]:
+        text = str(value or "")
+        match = re.search(r"\b(10\.\d{4,9}/[^\s\"<>]+)", text, re.I)
+        if match:
+            return match.group(1).strip().rstrip(".,;:)]}").lower()
     return ""
 
 
@@ -441,10 +427,7 @@ def _fetch_biorxiv_jats_xml_text(paper: dict[str, Any], timeout: int = 30) -> tu
         return "", {"kind": "biorxiv_api_jatsxml", "accepted": False, "doi": doi, "api_attempt": api_receipt, "xml_attempt": xml_receipt, "cooldown_waits": cooldown_waits, "reason": f"http_{xml_response.status_code}"}
     text = _xml_to_text(xml_response.text)
     body_ok = len(text) >= MIN_FULL_TEXT_CHARS and _looks_like_paper_body(text)
-    try:
-        identity_ok = bool(_read_pipeline_func("_pdf_text_identity_ok")(paper, text))
-    except Exception:
-        identity_ok = True
+    identity_ok = _pdf_text_identity_ok(paper, text)
     accepted = body_ok and identity_ok
     return text if accepted else "", {
         "kind": "biorxiv_api_jatsxml",
@@ -503,13 +486,18 @@ def _pmc_xml_candidates_from_europepmc(doi: str, title: str = "", timeout: int =
     return deduped, receipt
 
 
-def _openalex_full_text_hints(paper: dict[str, Any]) -> dict[str, Any]:
+def _openalex_full_text_hints(
+    paper: dict[str, Any],
+    candidate_provider: Callable[[dict[str, Any]], list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
     doi = doi_from_paper(paper)
     if not doi:
         return {"status": "skipped_missing_doi", "doi": ""}
     hints: list[dict[str, Any]] = []
+    if candidate_provider is None:
+        return {"status": "unavailable_missing_acquisition_service", "doi": doi, "hints": hints}
     try:
-        candidates = _read_pipeline_func("_openalex_pdf_candidates")({**paper, "doi": doi})
+        candidates = candidate_provider({**paper, "doi": doi})
     except Exception as exc:
         return {"status": "failed", "doi": doi, "error": exc.__class__.__name__, "hints": hints}
     for candidate in candidates:
@@ -528,11 +516,16 @@ def _openalex_full_text_hints(paper: dict[str, Any]) -> dict[str, Any]:
     return {"status": "ok" if hints else "no_openalex_full_text_hints", "doi": doi, "hints": hints}
 
 
-def _same_paper_html_hints(paper: dict[str, Any]) -> dict[str, Any]:
+def _same_paper_html_hints(
+    paper: dict[str, Any],
+    candidate_provider: Callable[[dict[str, Any]], list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
     hints: list[dict[str, Any]] = []
     attempts: list[dict[str, Any]] = []
+    if candidate_provider is None:
+        return {"status": "unavailable_missing_acquisition_service", "hints": hints, "attempts": attempts}
     try:
-        candidates = _read_pipeline_func("_same_paper_landing_page_candidates")(paper)
+        candidates = candidate_provider(paper)
     except Exception as exc:
         return {"status": "failed", "error": exc.__class__.__name__, "hints": hints, "attempts": attempts}
     for candidate in candidates:
@@ -719,7 +712,7 @@ def _fetch_reader_pdf_text(paper: dict[str, Any], pdf_url: str, timeout: int = 4
     text = raw_text.split("Markdown Content:", 1)[-1].strip() if "Markdown Content:" in raw_text else raw_text.strip()
     text = re.sub(r"\n{3,}", "\n\n", text)
     paper_body_markers = _looks_like_paper_body(text)
-    identity_ok = _read_pipeline_func("_pdf_text_identity_ok")(paper, text)
+    identity_ok = _pdf_text_identity_ok(paper, text)
     accepted = len(text) >= MIN_FULL_TEXT_CHARS and paper_body_markers and identity_ok
     receipt.update({
         "accepted": accepted,
@@ -781,7 +774,7 @@ def _fetch_biorxiv_reader_full_text(paper: dict[str, Any], timeout: int = 45) ->
                 text = raw_text.split("Markdown Content:", 1)[-1].strip() if "Markdown Content:" in raw_text else raw_text.strip()
                 text = re.sub(r"\n{3,}", "\n\n", text)
                 paper_body_markers = _looks_like_paper_body(text)
-                identity_ok = _read_pipeline_func("_pdf_text_identity_ok")(paper, text)
+                identity_ok = _pdf_text_identity_ok(paper, text)
                 # Jina's markdown view of bioRxiv full HTML can omit the title line while
                 # preserving the full article body. For the official /content/<doi>.full
                 # route constructed from the input DOI, the exact DOI URL is a stronger
@@ -962,7 +955,7 @@ def _runtime_cached_full_text(paper: dict[str, Any], limit: int = 4) -> tuple[st
             attempts.append(attempt)
             continue
         paper_body_markers = _looks_like_paper_body(text)
-        identity_ok = _read_pipeline_func("_pdf_text_identity_ok")(paper, text)
+        identity_ok = _pdf_text_identity_ok(paper, text)
         accepted = len(text) >= MIN_FULL_TEXT_CHARS and paper_body_markers and identity_ok
         attempt.update({
             "accepted": accepted,
@@ -1414,7 +1407,13 @@ def _blocked_full_text_reason(
         "title": title,
     }
 
-def acquire_full_text(paper: dict[str, Any], run_path: Path, log: LogFn = print) -> dict[str, Any]:
+def acquire_full_text(
+    paper: dict[str, Any],
+    run_path: Path,
+    log: LogFn = print,
+    *,
+    services: AcquisitionServices | None = None,
+) -> dict[str, Any]:
     downloads = run_path / "downloads"
     texts = run_path / "extracted"
     downloads.mkdir(parents=True, exist_ok=True)
@@ -1443,15 +1442,30 @@ def acquire_full_text(paper: dict[str, Any], run_path: Path, log: LogFn = print)
         text_kind = "pdf"
         html_attempt = {}
     else:
-        downloaded, pdf_path, resolved_pdf_url, acquisition = _download_first_readable_pdf(paper, downloads, log)
+        download_pdf = (services or {}).get("download_first_readable_pdf") or _download_first_readable_pdf
+        downloaded, pdf_path, resolved_pdf_url, acquisition = download_pdf(paper, downloads, log)
         if science_html_first_attempt:
             acquisition["html_first"] = science_html_first_attempt
-        text = _read_pipeline_func("_extract_pdf_text")(pdf_path) if downloaded else ""
+        text = _extract_pdf_text(pdf_path) if downloaded else ""
         text_kind = "pdf"
         html_attempt = {}
     pmc_xml_attempt: dict[str, Any] = {}
-    openalex_hints = _openalex_full_text_hints(paper) if len(text) < MIN_FULL_TEXT_CHARS else {"status": "skipped_pdf_text_ready"}
-    same_paper_html_hints = _same_paper_html_hints(paper) if len(text) < MIN_FULL_TEXT_CHARS else {"status": "skipped_pdf_text_ready"}
+    if len(text) < MIN_FULL_TEXT_CHARS:
+        openalex_provider = (services or {}).get("openalex_pdf_candidates")
+        landing_page_provider = (services or {}).get("same_paper_landing_page_candidates")
+        openalex_hints = (
+            _openalex_full_text_hints(paper, openalex_provider)
+            if openalex_provider
+            else _openalex_full_text_hints(paper)
+        )
+        same_paper_html_hints = (
+            _same_paper_html_hints(paper, landing_page_provider)
+            if landing_page_provider
+            else _same_paper_html_hints(paper)
+        )
+    else:
+        openalex_hints = {"status": "skipped_pdf_text_ready"}
+        same_paper_html_hints = {"status": "skipped_pdf_text_ready"}
     reader_pdf_attempt: dict[str, Any] = {}
     if len(text) < MIN_FULL_TEXT_CHARS:
         reader_text, reader_pdf_attempt = _reader_pdf_text_from_failed_pdf_attempts(paper, acquisition)
