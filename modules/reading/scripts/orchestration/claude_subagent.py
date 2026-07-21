@@ -302,8 +302,6 @@ def build_deep_read_prompt(
     metadata = _paper_metadata(paper)
     title = display_paper_title(
         paper.get("title")
-        or metadata.get("reading_verified_full_text_title")
-        or packet.get("verified_full_text_title")
         or packet.get("title")
         or "未命名论文"
     )
@@ -403,7 +401,7 @@ def build_deep_read_repair_prompt(
     except Exception:
         article_md_run = relative_to_reading(article_md_path)
     metadata = _paper_metadata(paper)
-    title = display_paper_title(paper.get("title") or metadata.get("reading_verified_full_text_title") or "未命名论文")
+    title = display_paper_title(paper.get("title") or "未命名论文")
     paper_id = str(paper.get("paper_id") or paper.get("id") or "")
     source_abstract_en = str(paper.get("abstract_en") or paper.get("abstract") or metadata.get("abstract_en") or metadata.get("abstract") or "").strip()
     fixed_abstract_zh = clean_fixed_chinese_abstract(paper.get("abstract_zh") or metadata.get("abstract_zh"))
