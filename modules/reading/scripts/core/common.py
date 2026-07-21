@@ -52,6 +52,16 @@ def load_read_env_file(path: Path = READ_ENV_FILE) -> dict[str, str]:
 
 READ_ENV = load_read_env_file()
 
+
+def has_substantive_chinese(value: object, *, minimum: int = 4) -> bool:
+    text = str(value or "")
+    chinese_count = len(re.findall(r"[\u4e00-\u9fff]", text))
+    latin_count = len(re.findall(r"[A-Za-z]", text))
+    return chinese_count >= minimum and (
+        latin_count == 0 or chinese_count / (chinese_count + latin_count) >= 0.15
+    )
+
+
 DEFAULT_READING_CONFIG: dict[str, Any] = {
     "default_channels": [
         "nips",

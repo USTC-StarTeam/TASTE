@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from finding_runtime import LOCAL_DATABASE_DIR
+from finding_runtime import LOCAL_DATABASE_DIR, normalize_metadata_text
 from finding_runtime import display_path
 from finding_runtime import read_json_safely
 
@@ -137,9 +137,9 @@ def normalize_cached_paper(paper: dict[str, Any], venue: dict[str, Any], year: i
     row = {
         "id": str(paper.get("id") or ""),
         "source": str(paper.get("source") or adapter or ""),
-        "title": str(paper.get("title") or "Untitled"),
+        "title": normalize_metadata_text(paper.get("title") or "Untitled"),
         "authors": paper.get("authors") if isinstance(paper.get("authors"), str) else ", ".join(str(item) for item in paper.get("authors", []) if item),
-        "abstract": str(paper.get("abstract") or ""),
+        "abstract": normalize_metadata_text(paper.get("abstract") or ""),
         "url": str(paper.get("url") or ""),
         "pdf_url": str(paper.get("pdf_url") or ""),
         "venue": str(paper.get("venue") or venue.get("name") or ""),

@@ -546,8 +546,39 @@ def update_manifest(path: Path, stage: str) -> None:
 
 # ---- markdown ----
 
+import html
 import re
 from typing import Iterable
+
+
+_HTML_BLOCK_TAG_RE = re.compile(
+    r"</?(?:address|article|aside|blockquote|br|div|dl|dt|dd|figcaption|figure|footer|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|table|tbody|td|tfoot|th|thead|tr|ul)\b[^>]*>",
+    re.IGNORECASE,
+)
+_HTML_TAG_RE = re.compile(r"</?[A-Za-z][^>]*>")
+_HTML_COMMENT_RE = re.compile(r"<!--[\s\S]*?-->")
+_HTML_SCRIPT_STYLE_RE = re.compile(r"<(script|style)\b[^>]*>[\s\S]*?</\1\s*>", re.IGNORECASE)
+_HTML_SUP_RE = re.compile(r"<sup\b[^>]*>([\s\S]*?)</sup\s*>", re.IGNORECASE)
+_HTML_SUB_RE = re.compile(r"<sub\b[^>]*>([\s\S]*?)</sub\s*>", re.IGNORECASE)
+_SUPERSCRIPT_TRANSLATION = str.maketrans("0123456789+-=()", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾")
+_SUBSCRIPT_TRANSLATION = str.maketrans("0123456789+-=()", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎")
+
+
+def normalize_metadata_text(value: object) -> str:
+    """Normalize source title/abstract text without changing scientific wording."""
+    text = html.unescape(str(value or "")).replace("\u00a0", " ")
+    text = _HTML_SCRIPT_STYLE_RE.sub(" ", text)
+    text = _HTML_COMMENT_RE.sub(" ", text)
+
+    def semantic_script(match: re.Match[str], translation: dict[int, str]) -> str:
+        inner = html.unescape(_HTML_TAG_RE.sub("", match.group(1))).strip()
+        return inner.translate(translation) if inner and all(char in "0123456789+-=()" for char in inner) else inner
+
+    text = _HTML_SUP_RE.sub(lambda match: semantic_script(match, _SUPERSCRIPT_TRANSLATION), text)
+    text = _HTML_SUB_RE.sub(lambda match: semantic_script(match, _SUBSCRIPT_TRANSLATION), text)
+    text = _HTML_BLOCK_TAG_RE.sub(" ", text)
+    text = _HTML_TAG_RE.sub("", text)
+    return " ".join(html.unescape(text).split()).strip()
 
 
 _PLACEHOLDER_ABSTRACT_MARKERS = (
@@ -565,7 +596,7 @@ _ABSTRACT_UI_CONTROL_RE = re.compile(
 
 
 def _strip_abstract_ui_controls(value: object) -> str:
-    return _ABSTRACT_UI_CONTROL_RE.sub("", " ".join(str(value or "").split())).strip()
+    return _ABSTRACT_UI_CONTROL_RE.sub("", normalize_metadata_text(value)).strip()
 
 
 def table(headers: list[str], rows: Iterable[list[object]]) -> str:
@@ -580,7 +611,7 @@ def table(headers: list[str], rows: Iterable[list[object]]) -> str:
 
 
 def _normalize_public_latex_markup(value: object) -> str:
-    text = str(value or "")
+    text = normalize_metadata_text(value)
     text = re.sub(r"\\url\{(https?://[^{}\s]+)\}", lambda match: f"[{match.group(1)}]({match.group(1)})", text)
     text = re.sub(r"\\href\{(https?://[^{}\s]+)\}\{([^{}]+)\}", lambda match: f"[{match.group(2)}]({match.group(1)})", text)
     text = re.sub(r"\\([A-Za-z][A-Za-z0-9]*)\{\}", lambda match: match.group(1), text)

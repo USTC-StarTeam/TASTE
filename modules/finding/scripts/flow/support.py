@@ -6684,6 +6684,35 @@ def _meta_values(soup: BeautifulSoup, name: str) -> list[str]:
     return values
 
 
+def _official_detail_title(soup: BeautifulSoup) -> str:
+    for attrs in [
+        {"name": "citation_title"},
+        {"name": "DC.Title"},
+        {"name": "dc.title"},
+        {"property": "og:title"},
+    ]:
+        node = soup.find("meta", attrs=attrs)
+        title = _clean_text(str(node.get("content") or "")) if node else ""
+        if title:
+            return title
+    heading = soup.find("h1")
+    return _clean_text(heading.get_text(" ", strip=True)) if heading else ""
+
+
+def _same_title_evidence(expected: object, observed: object) -> bool:
+    expected_key = _title_key(str(expected or ""))
+    observed_key = _title_key(str(observed or ""))
+    if not expected_key or not observed_key:
+        return False
+    if expected_key in observed_key or observed_key in expected_key:
+        return True
+    expected_tokens = set(expected_key.split())
+    observed_tokens = set(observed_key.split())
+    overlap = expected_tokens & observed_tokens
+    containment = len(overlap) / max(1, min(len(expected_tokens), len(observed_tokens)))
+    return _title_token_similarity(expected_key, observed_key) >= 0.82 or (len(overlap) >= 3 and containment >= 0.9)
+
+
 def _extract_aaai_abstract(soup: BeautifulSoup) -> str:
     for name in ["DC.Description", "description"]:
         for value in _meta_values(soup, name):
@@ -6849,12 +6878,15 @@ def _fetch_one_official_detail(paper: dict, request_timeout: int) -> dict:
             with _ACM_DETAIL_CACHE_LOCK:
                 cached = _load_acm_detail_abstract_cache().get(acm_cache_key)
             if isinstance(cached, dict) and cached.get("abstract") and not paper.get("abstract"):
-                if _apply_acm_detail_cached_abstract(paper, cached):
+                cached_title = _clean_text(cached.get("title"))
+                if cached_title and not _same_title_evidence(paper.get("title"), cached_title):
+                    paper.setdefault("metadata", {})["detail_title_mismatch"] = cached_title
+                elif _apply_acm_detail_cached_abstract(paper, cached):
                     result["abstract_filled"] = True
-                if cached.get("pdf_url") and not paper.get("pdf_url"):
-                    paper["pdf_url"] = str(cached.get("pdf_url") or "")
-                    result["pdf_filled"] = True
-                return result
+                    if cached.get("pdf_url") and not paper.get("pdf_url"):
+                        paper["pdf_url"] = str(cached.get("pdf_url") or "")
+                        result["pdf_filled"] = True
+                    return result
         if str(os.environ.get("ACM_DETAIL_CACHE_ONLY") or "").strip().lower() in {"1", "true", "yes", "on"}:
             metadata = paper.setdefault("metadata", {})
             if not paper.get("pdf_url") and str(metadata.get("acm_pdf_url") or "").strip():
@@ -6889,6 +6921,14 @@ def _fetch_one_official_detail(paper: dict, request_timeout: int) -> dict:
                     _save_acm_detail_abstract_cache(cache)
         return result
     metadata = paper.setdefault("metadata", {})
+    detail_title = _official_detail_title(soup)
+    if detail_title and not _same_title_evidence(paper.get("title"), detail_title):
+        result["error"] = "official_detail_title_mismatch"
+        metadata["detail_fetch_error"] = result["error"]
+        metadata["detail_title_mismatch"] = detail_title
+        return result
+    if detail_title:
+        metadata["detail_title_verified"] = detail_title
     if source == "neurips_official_papers":
         parsed = _parse_neurips_detail(detail_html, url, str(paper.get("title") or ""), int(paper.get("year") or 0))
         if parsed.get("title") and not paper.get("title"):

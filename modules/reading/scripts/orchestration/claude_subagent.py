@@ -55,7 +55,7 @@ if _core_common_spec is None:
     sys.modules["core.common"] = _core_common_module
     _core_common_spec.loader.exec_module(_core_common_module)
 
-from core.common import first_json_object, has_unresolved_prose_latex_markup, write_json, write_text
+from core.common import first_json_object, has_substantive_chinese, has_unresolved_prose_latex_markup, write_json, write_text
 from core.common import READING_ROOT, RUNTIME_ROOT, ensure_inside_output, ensure_inside_runtime, make_reading_paths_relative, relative_to_reading
 
 
@@ -304,7 +304,7 @@ def build_deep_read_prompt(
     abstract_en = str(paper.get("abstract") or paper.get("abstract_en") or metadata.get("abstract") or "").strip()
     raw_abstract_zh = str(paper.get("abstract_zh") or metadata.get("abstract_zh") or "").strip()
     abstract_zh = raw_abstract_zh
-    if abstract_zh and (has_unresolved_prose_latex_markup(abstract_zh) or len(re.findall(r"[\u4e00-\u9fff]", abstract_zh)) < 4):
+    if abstract_zh and (has_unresolved_prose_latex_markup(abstract_zh) or not has_substantive_chinese(abstract_zh)):
         abstract_zh = ""
     if abstract_zh:
         abstract_rule = "`摘要` 固定逐字写入下方中文摘要全文，包含原有标点。"
@@ -324,10 +324,10 @@ def build_deep_read_prompt(
 1. 你就是本篇论文的阅读 subagent，本次调用由你直接完成阅读和落盘。
 2. 固定只在当前单篇运行目录工作；读取范围限定为当前运行目录下的文件。
 3. 可写文件严格限定为两个：用户阅读正文 `{article_md_run}`，以及同一篇论文的机器回执 `{output_path_run}`。临时目录限定为当前运行目录下的 `tmp`。
-4. 输出必须是中文、论文内容导向，内容范围限定为论文精读正文和机器回执。
+4. 输出必须是中文、论文内容导向；不仅是摘要，下方每个正文栏目都必须使用中文论述，专有名词、缩写和公式可保留原文。内容范围限定为论文精读正文和机器回执。
 5. 精读必须基于正文文件 `{text_path_run or text_path_local}` 的全量内容；可以分段读取，覆盖范围必须超过文件开头、节选和摘要。正文证据充分时完成精读；证据缺口写入机器回执。
 6. 单篇 Markdown 必须是完整用户阅读正文，并按顺序使用固定结构：
-   - `# 论文标题`
+   - `# {title}`（必须逐字复制这个已给定标题，不得写成占位文字或自行改写的标题）
    - `{metadata_lines[0]}`
    - `{metadata_lines[1]}`
    - `## 摘要`
@@ -343,7 +343,7 @@ def build_deep_read_prompt(
    - `方法` 聚焦作者自己提出的创新方法或机制。必须结合数学公式，用通俗中文解释公式如何支持创新机制；控制在 300-400 个中文字符内。
    - `实验结果` 只用几句话概括作者做了哪类实验以及总体效果，控制在 150 字以内。
    - `优缺点总结` 控制在 100 字以下，同时点出主要优点和主要缺点/风险边界。
-9. 必须在本次调用内一次性写出格式正确的单篇 Markdown 和机器回执 JSON，并完成 Markdown/LaTeX 格式整理。只有中文摘要和每个 KaTeX 公式均自检通过后，才能在机器回执中报告完成；进程退出码为 0 不代表内容合格。
+9. 必须在本次调用内一次性写出格式正确的单篇 Markdown 和机器回执 JSON，并完成 Markdown/LaTeX 格式整理。只有精确标题、固定栏目、整篇中文、摘要完整性、各栏目篇幅和每个 KaTeX 公式均自检通过后，才能在机器回执中报告完成；进程退出码为 0 不代表内容合格。
 - 输入正文或摘要中，公式定界符之外的任意 LaTeX 命令均视为来源排版标记；理解其参数与相邻字符组成的完整原文后再翻译或概括，输出可读 Markdown，不得逐字复制这些命令。
 {FORMULA_STYLE_RULES}
 {JSON_OUTPUT_RULES}
@@ -395,9 +395,16 @@ def build_deep_read_repair_prompt(
         article_md_run = relative_to_reading(article_md_path)
     title = str(paper.get("title") or "未命名论文")
     paper_id = str(paper.get("paper_id") or paper.get("id") or "")
+    metadata = _paper_metadata(paper)
+    fixed_abstract_zh = str(paper.get("abstract_zh") or metadata.get("abstract_zh") or "").strip()
+    fixed_abstract_block = f"\n必须逐字恢复的固定中文摘要：\n{fixed_abstract_zh}\n" if fixed_abstract_zh else ""
     repair_rule = {
         "abstract_missing_chinese": "只把 `## 摘要` 下尚未翻译的英文摘要完整翻译为中文。",
         "missing_abstract_section": "只补齐缺失的 `## 摘要` 栏目及其完整中文摘要。",
+        "fixed_abstract_modified": "只将 `## 摘要` 恢复为不合格原因中要求的固定中文摘要，不得概括或改写。",
+        "article_title_mismatch": f"只将一级标题恢复为 `# {title}`，不得使用占位标题或自行改写。",
+        "invalid_section_structure": "只补齐、去重并按不合格原因恢复固定栏目顺序，保留现有正确内容。",
+        "section_missing_chinese": "只将不合格原因点名的英文正文栏目完整转为中文，专有名词、缩写和公式可保留原文。",
         "unresolved_prose_latex_markup": "只将公式外残留的 LaTeX 排版命令还原为可读 Markdown 文本。",
         "invalid_katex_syntax": "只修复未通过网页 KaTeX 语法校验的公式；逐式检查，复杂写法不确定时改为含义相同的标准 KaTeX 写法。",
     }.get(str(quality_issue), "只修复机器指出的内容质量问题。")
@@ -405,9 +412,10 @@ def build_deep_read_repair_prompt(
 
 不合格代码：`{quality_issue}`
 不合格原因：{quality_reason}
+{fixed_abstract_block}
 
 硬性规则：
-1. 先完整读取现有 `{article_md_run}`，定位与不合格原因直接对应的位置。{repair_rule}
+1. 先完整读取现有 `{article_md_run}`，定位并修复“不合格原因”列出的全部问题。{repair_rule}
 2. 除修复失败处所必需的字符或句子外，标题、元数据、栏目、论述、结论、篇幅和所有已经正确的内容必须保持不变。
 3. 公式仍只使用 `$...$` 或 `$$...$$`；必须能由 `markdown-it-texmath` 和 KaTeX 0.16 解析，定界符、花括号、命令边界及环境必须完整闭合，不得使用自定义宏或不支持的命令。
 4. 修改后重新检查整篇 `{article_md_run}`；不得通过删除必要内容、公式或栏目来绕过校验。
