@@ -739,6 +739,8 @@ def test_reading_single_paper_prompt_uses_fixed_source_and_link_metadata():
     assert "行末使用 `\\\\`；附加行距写成 `\\\\[4pt]`" in prompt
     assert "栏目之间只保留一个空行" in prompt
     assert "英文原文摘要（翻译为中文）：" in prompt
+    assert "markdown-it-texmath` 和 KaTeX 0.16" in prompt
+    assert "进程退出码为 0 不代表内容合格" in prompt
 
     fixed_abstract_prompt = claude_subagent.build_deep_read_prompt(
         paper={
@@ -754,6 +756,20 @@ def test_reading_single_paper_prompt_uses_fixed_source_and_link_metadata():
     assert "`摘要` 固定逐字写入下方中文摘要全文，包含原有标点。" in fixed_abstract_prompt
     assert "中文摘要（固定输入）：\n这是 Framework 提供的固定中文摘要。" in fixed_abstract_prompt
     assert "English abstract must not replace" not in fixed_abstract_prompt
+
+    repair_prompt = claude_subagent.build_deep_read_repair_prompt(
+        paper=arxiv_paper,
+        run_path=run_path,
+        output_path=run_path / "outputs" / "reading_result.json",
+        article_md_path=run_path / "read.md",
+        quality_issue="invalid_katex_syntax",
+        quality_reason="网页 KaTeX 语法校验失败：Expected '}', got 'EOF'。",
+    )
+    assert "唯一输入产物是当前目录中的 `read.md`" in repair_prompt
+    assert "不要重新精读或重写整篇文章" in repair_prompt
+    assert "Expected '}', got 'EOF'" in repair_prompt
+    assert "除修复失败处所必需的字符或句子外" in repair_prompt
+    assert "正文路径（当前运行目录相对）" not in repair_prompt
 
 
 def test_reading_uses_abstract_zh_verbatim_and_keeps_translation_fallback():
@@ -841,6 +857,115 @@ def test_reading_article_markdown_requires_a_chinese_abstract(tmp_path):
         encoding="utf-8",
     )
     assert read_pipeline._article_markdown_ready(article_path, result_payload) is True
+
+
+def test_reading_article_markdown_rejects_invalid_web_katex(monkeypatch):
+    frontend_modules = ROOT / "web" / "frontend" / "client" / "node_modules"
+    monkeypatch.setenv("NODE_PATH", str(frontend_modules))
+    read_pipeline = _load_reading_pipeline()
+    prefix = "# Paper\n\n## 摘要\n\n这是完整的中文摘要。\n\n## 方法\n\n"
+
+    assert read_pipeline._article_markdown_quality_issue(
+        prefix + r"目标函数为 $L=\lVert x-y\rVert_2^2$。",
+    ) == ""
+    assert read_pipeline._article_markdown_quality_issue(prefix + r"目标函数为 $x_{a$。") == "invalid_katex_syntax"
+    assert "公式定界符 `$` 未闭合" in read_pipeline._article_markdown_quality_reason(prefix + r"目标函数为 $x+1。")
+
+    katex_dir = frontend_modules / "katex"
+    if shutil.which("node") and katex_dir.is_dir():
+        assert read_pipeline._article_markdown_quality_issue(
+            prefix + r"目标函数为 $\notacommand{x}$。",
+        ) == "invalid_katex_syntax"
+
+
+@pytest.mark.parametrize("repair_succeeds", [True, False])
+def test_reading_retries_content_quality_failure_and_preserves_exact_status(monkeypatch, repair_succeeds):
+    read_pipeline = _load_reading_pipeline()
+    run_id = _reading_test_run_id()
+    item_dir = ROOT / "modules" / "reading" / ".runtime" / "output" / run_id / "papers" / "001_paper"
+    item_dir.mkdir(parents=True)
+    read_results_path = item_dir / "read_results.json"
+    calls: list[str] = []
+    logs: list[str] = []
+
+    def fake_run_claude_deep_read(
+        prompt_path,
+        run_path,
+        expected_output_path,
+        timeout_sec=1800,
+        mode="auto",
+        receipt_dir_name="claude",
+    ):
+        calls.append(receipt_dir_name)
+        is_retry = receipt_dir_name == "claude_content_quality_retry"
+        if is_retry:
+            prompt_text = Path(prompt_path).read_text(encoding="utf-8")
+            assert "abstract_missing_chinese" in prompt_text
+            assert "完整翻译为中文" in prompt_text
+            assert "唯一输入产物是当前目录中的 `read.md`" in prompt_text
+            assert "不要重新精读或重写整篇文章" in prompt_text
+        abstract = "这是完整的中文摘要翻译。" if is_retry and repair_succeeds else "English abstract copied without translation."
+        (run_path / "read.md").write_text(
+            f"# Paper\n\n## 摘要\n\n{abstract}\n\n## 动机与核心创新\n\n中文分析。\n",
+            encoding="utf-8",
+        )
+        payload = {
+            "status": "completed",
+            "subagent_deep_read": True,
+            "article_markdown_path": "read.md",
+            "deep_read_audit": {
+                "subagent_used": True,
+                "article_markdown_path": "read.md",
+                "article_markdown_written": True,
+            },
+        }
+        expected_output_path.parent.mkdir(parents=True, exist_ok=True)
+        expected_output_path.write_text(json.dumps(payload), encoding="utf-8")
+        return {
+            "status": "completed",
+            "run_executed": True,
+            "return_code": 0,
+            "expected_output_audit": {"exists": True, "valid_json": True},
+            "nonruntime_artifact_audit": {"status": "passed", "problem_count": 0},
+            "external_temp_artifact_audit": {"status": "passed", "problem_count": 0},
+            "result_payload": payload,
+        }
+
+    monkeypatch.setattr(read_pipeline, "run_claude_deep_read", fake_run_claude_deep_read)
+    prepared = {
+        "run_id": run_id,
+        "paper_index": 1,
+        "paper": {"paper_id": "paper-1", "title": "Paper", "abstract": "English abstract."},
+        "full_text_packet": {"full_text_available": True, "full_text_chars": 2000},
+        "reading": {},
+        "validation": {"full_text_ready": True, "deep_read_complete": False},
+        "artifacts": {"read_results": str(read_results_path)},
+    }
+    try:
+        result = read_pipeline._run_reading_subagent_for_prepared_paper(
+            prepared=prepared,
+            claude_mode="run",
+            timeout_sec=60,
+            log=logs.append,
+        )
+        assert calls == ["claude", "claude_content_quality_retry"]
+        retry = result["validation"]["content_quality_retry"]
+        assert retry["attempted"] is True
+        assert retry["new_claude_process"] is True
+        assert retry["initial_issue"] == "abstract_missing_chinese"
+        assert "未包含合格的中文摘要" in retry["initial_reason"]
+        if repair_succeeds:
+            assert result["status"] == "complete"
+            assert result["validation"]["deep_read_complete"] is True
+            assert retry["resolved"] is True
+        else:
+            assert result["status"] == "abstract_missing_chinese"
+            assert result["validation"]["phase"] == "reading_subagent_content_quality_failed"
+            assert result["validation"]["content_quality_issue"] == "abstract_missing_chinese"
+            assert retry["resolved"] is False
+        assert any("content_quality_issue=abstract_missing_chinese" in line for line in logs)
+    finally:
+        _cleanup_reading_output(run_id)
 
 
 def test_reading_machine_result_excludes_markdown_body_content():

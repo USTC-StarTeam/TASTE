@@ -245,6 +245,36 @@ def test_framework_validation_downgrades_incomplete_final_scoring():
     assert missing["read_quality_complete"] is False
 
 
+def test_framework_prioritizes_read_content_quality_over_scoring():
+    item = {
+        "paper": {"id": "a", "title": "Paper A"},
+        "full_text_packet": {"full_text_available": True, "full_text_chars": 2000},
+        "status": "abstract_missing_chinese",
+        "validation": {
+            "full_text_ready": True,
+            "deep_read_complete": False,
+            "content_quality_issue": "abstract_missing_chinese",
+        },
+    }
+    validation = reading_bridge._build_validation(
+        find_run_id="find_quality",
+        expected_count=1,
+        find_recommendation_count=1,
+        source_rows=[item["paper"]],
+        items=[item],
+        readings=[{"title": "Paper A", "full_text_available": True, "deep_read_complete": False}],
+        claude_mode="run",
+        limited=False,
+        public_final_artifact_present=True,
+        reading_scoring={"status": "complete_with_warnings", "expected_article_count": 0, "scored_article_count": 0},
+        scoring_required=True,
+    )
+
+    assert validation["content_quality_issues"] == ["abstract_missing_chinese"]
+    assert validation["warning_details"][0]["status"] == "abstract_missing_chinese"
+    assert reading_bridge._project_read_status(validation)[1:] == ("abstract_missing_chinese", "rerun_current_find_read")
+
+
 def test_web_validation_accepts_nonrecommended_rows_selected_from_final_ranking():
     selected = [
         {"id": "recommended", "title": "Recommended", "find_recommendation": True},
