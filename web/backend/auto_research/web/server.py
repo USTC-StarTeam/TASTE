@@ -3539,6 +3539,17 @@ def _read_job_artifact_progress(result: dict[str, Any], progress: dict[str, Any]
         "warning_count": max(as_int(read_payload.get("warning_count")), len(warning_details)),
         "error_count": max(as_int(read_payload.get("error_count")), len(error_details)),
     })
+    scoring = read_payload.get("reading_scoring") if isinstance(read_payload.get("reading_scoring"), dict) else {}
+    for key in ("scoring_required", "scoring_complete", "read_quality_complete"):
+        for source in (validation, result_validation, result):
+            if key in source:
+                projection[key] = source.get(key) is True
+                break
+    for key, scoring_key in (("scoring_expected_count", "expected_article_count"), ("scoring_scored_count", "scored_article_count")):
+        for source, source_key in ((validation, key), (result_validation, key), (result, key), (scoring, scoring_key)):
+            if source_key in source:
+                projection[key] = as_int(source.get(source_key))
+                break
     return projection
 
 
@@ -3649,6 +3660,12 @@ def _read_job_progress_from_logs(
     exact_totals: set[str] = set()
     signal_seen = False
     scoring_seen = False
+    scoring_required: bool | None = None
+    scoring_complete: bool | None = None
+    scoring_expected_count = 0
+    scoring_scored_count = 0
+    artifact_expected_total = 0
+    read_quality_complete: bool | None = None
 
     def mark_total(key: str, total: int, workers: int = 0, *, exact: bool = False) -> None:
         if total > 0:
@@ -3774,6 +3791,7 @@ def _read_job_progress_from_logs(
         if scoring_phase:
             signal_seen = True
             scoring_seen = True
+            scoring_expected_count = max(scoring_expected_count, int(scoring_phase.group(1)))
             candidate_total = int(phases["deep_read"].get("total") or 0)
             deep_total = max(len(completed_deep_read), candidate_total + len(reused_deep_read))
             if deep_total:
@@ -3790,10 +3808,14 @@ def _read_job_progress_from_logs(
         if scoring_done:
             signal_seen = True
             scoring_seen = True
+            scoring_scored_count = int(scoring_done.group(1))
+            scoring_expected_count = max(scoring_expected_count, int(scoring_done.group(2)))
+            scoring_complete = scoring_expected_count > 0 and scoring_scored_count >= scoring_expected_count
             continue
         if re.search(r"warning:\s*final reading scoring failed", text, flags=re.I):
             signal_seen = True
             scoring_seen = True
+            scoring_complete = False
         if re.search(r"final read\.md aggregation phase", text, flags=re.I):
             signal_seen = True
             details.append("正在生成最终 read.md：汇总所有论文精读结果")
@@ -3901,6 +3923,7 @@ def _read_job_progress_from_logs(
         if artifact_progress:
             signal_seen = True
             total = int(artifact_progress.get("total") or 0)
+            artifact_expected_total = total
             full_current = int(artifact_progress.get("full_text_current") or 0)
             deep_current = int(artifact_progress.get("deep_read_current") or 0)
             deep_attempted = int(artifact_progress.get("deep_read_attempted") or 0)
@@ -3909,6 +3932,17 @@ def _read_job_progress_from_logs(
             public_read_md_present = artifact_progress.get("public_read_md_present") is True
             validation_valid = artifact_progress.get("validation_valid") is True
             warning_count = int(artifact_progress.get("warning_count") or 0)
+            if "scoring_required" in artifact_progress:
+                scoring_required = artifact_progress.get("scoring_required") is True
+                scoring_seen = scoring_seen or scoring_required
+            if "scoring_complete" in artifact_progress:
+                scoring_complete = artifact_progress.get("scoring_complete") is True
+            if "scoring_expected_count" in artifact_progress:
+                scoring_expected_count = int(artifact_progress.get("scoring_expected_count") or 0)
+            if "scoring_scored_count" in artifact_progress:
+                scoring_scored_count = int(artifact_progress.get("scoring_scored_count") or 0)
+            if "read_quality_complete" in artifact_progress:
+                read_quality_complete = artifact_progress.get("read_quality_complete") is True
             warning_suffix = f"；warning {warning_count} 项" if warning_count else ""
             readable_total = max(0, total - pending_full) if total else max(deep_attempted, deep_current)
             if total:
@@ -3943,6 +3977,21 @@ def _read_job_progress_from_logs(
 
     current_stage = ""
     current_action = ""
+    deep_current_for_completion = int(phases["deep_read"].get("current") or 0)
+    deep_total_for_completion = artifact_expected_total or int(phases["deep_read"].get("total") or 0)
+    deep_read_complete = deep_total_for_completion > 0 and deep_current_for_completion >= deep_total_for_completion
+    scoring_is_required = scoring_required is True or scoring_seen
+    scoring_is_complete = bool(
+        not scoring_is_required
+        or (
+            scoring_complete is True
+            and scoring_expected_count == deep_total_for_completion
+            and scoring_scored_count == scoring_expected_count
+        )
+    )
+    completion_verified = deep_read_complete and scoring_is_complete
+    if read_quality_complete is not None:
+        completion_verified = completion_verified and read_quality_complete
     full_total_for_stage = int(phases["full_text"].get("total") or 0)
     full_current_for_stage = int(phases["full_text"].get("current") or 0)
     if cancelled_status:
@@ -3956,9 +4005,15 @@ def _read_job_progress_from_logs(
             cancelled_current = int(cancelled_phase.get("current") or 0)
             cancelled_total = int(cancelled_phase.get("total") or 0)
             current_action = f"任务已取消：{cancelled_label}停在 {cancelled_current}/{cancelled_total}。" if cancelled_total else "任务已取消。"
-    elif scoring_seen and finished_read_status:
+    elif scoring_seen and finished_read_status and completion_verified:
         current_stage = "complete"
         current_action = _job_status_message("read", "complete")
+    elif scoring_seen and finished_read_status:
+        current_stage = "deep_read"
+        unfinished = [f"精读 {deep_current_for_completion}/{deep_total_for_completion}"] if deep_total_for_completion else []
+        if scoring_is_required and scoring_expected_count:
+            unfinished.append(f"重新打分 {scoring_scored_count}/{scoring_expected_count}")
+        current_action = "精读任务有未完成项" + ("：" + "；".join(unfinished) if unfinished else "") + "。"
     elif scoring_seen and live_read_status:
         current_stage = "scoring"
         current_action = "重新打分"
@@ -9523,6 +9578,16 @@ def _current_find_read_history_job(project_id: str, root: Path, run_id: str, sta
         read_md_present = False
     warning_details = validation.get("warning_details") if isinstance(validation.get("warning_details"), list) else []
     status = _current_find_stage_job_status(state_payload, count)
+    validation_status = str(validation.get("status") or state_payload.get("status") or "").strip()
+    scoring_required = validation.get("scoring_required") is True
+    scoring_complete = validation.get("scoring_complete") is True
+    scoring_expected_count = _json_count_value(validation.get("scoring_expected_count"))
+    scoring_scored_count = _json_count_value(validation.get("scoring_scored_count"))
+    quality_incomplete = bool(
+        validation.get("read_quality_complete") is False
+        or (scoring_required and not scoring_complete)
+        or validation_status.endswith("complete_with_warnings")
+    )
     read_complete_with_warnings = bool(validation_valid is True and read_md_present and pending_count <= 0 and pending_deep_count > 0)
     read_run_complete_with_missing_full_text = bool(
         read_md_present
@@ -9530,19 +9595,24 @@ def _current_find_read_history_job(project_id: str, root: Path, run_id: str, sta
         and pending_deep_count <= 0
         and deep_read_count + pending_count >= (expected_reading_count or count)
     )
-    if read_run_complete_with_missing_full_text:
+    if quality_incomplete:
+        status = "blocked"
+    elif read_run_complete_with_missing_full_text:
         status = "done"
     elif pending_count > 0 or validation_valid is False:
         status = "blocked"
     elif read_complete_with_warnings:
-        status = "done"
+        status = "blocked"
     elif pending_deep_count > 0:
         status = "blocked"
 
-    if read_run_complete_with_missing_full_text:
+    if quality_incomplete:
+        scoring_suffix = f"；重新打分 {scoring_scored_count}/{scoring_expected_count}" if scoring_required or scoring_expected_count else ""
+        summary = f"Read 阶段有未完成项：当前展示 {count}/{expected_reading_count or count} 篇；同篇全文证据 {full_text_count}/{expected_reading_count or count} 篇；精读完成 {deep_read_count}/{expected_reading_count or count} 篇{scoring_suffix}。"
+    elif read_run_complete_with_missing_full_text:
         summary = f"Read 阶段已完成并有警告：爬文章已处理 {expected_reading_count or count}/{expected_reading_count or count} 篇，其中同篇全文可用 {full_text_count}/{expected_reading_count or count} 篇；读文章完成 {deep_read_count}/{deep_read_count} 篇；{pending_count} 篇全文未就绪，保留在下游证据门控。"
     elif read_complete_with_warnings:
-        summary = f"Read 阶段已完成并有警告：当前展示 {count}/{expected_reading_count or count} 篇；同篇全文证据 {full_text_count or count}/{expected_reading_count or count} 篇；精读完成 {deep_read_count or count}/{expected_reading_count or count} 篇；{pending_deep_count} 篇未进入最终 read.md，仅记录在任务日志和机器状态。"
+        summary = f"Read 阶段有未完成项：当前展示 {count}/{expected_reading_count or count} 篇；同篇全文证据 {full_text_count or count}/{expected_reading_count or count} 篇；精读完成 {deep_read_count}/{expected_reading_count or count} 篇；待精读 {pending_deep_count} 篇。"
     elif status == "done":
         warning_suffix = f"；warning {len(warning_details)} 项" if warning_details else ""
         summary = f"Read 阶段已完成：当前展示 {count}/{expected_reading_count or count} 篇；同篇全文证据 {full_text_count or count}/{expected_reading_count or count} 篇；精读完成 {deep_read_count or count}/{expected_reading_count or count} 篇{warning_suffix}。"
@@ -9569,6 +9639,11 @@ def _current_find_read_history_job(project_id: str, root: Path, run_id: str, sta
         "deep_read_complete_count": deep_read_count,
         "pending_deep_read_synthesis_count": pending_deep_count,
         "reading_validation_valid": validation_valid,
+        "scoring_required": scoring_required,
+        "scoring_complete": scoring_complete,
+        "scoring_expected_count": scoring_expected_count,
+        "scoring_scored_count": scoring_scored_count,
+        "read_quality_complete": validation.get("read_quality_complete"),
     }
     return {
         "job_id": f"current-find-read_{_safe_job_fragment(project_id)}_{_safe_job_fragment(run_id)}",
@@ -10827,7 +10902,7 @@ def start_job(stage: str, fn: Callable[[Callable[[str], None], Callable[[], bool
             result_status = str(job.result.get("status") or "").lower() if isinstance(job.result, dict) else ""
             if job.cancel_requested:
                 job.status = "cancelled"
-            elif result_status.startswith("blocked"):
+            elif result_status.startswith("blocked") or (stage == "read" and result_status.endswith("complete_with_warnings")):
                 job.status = "blocked"
             elif result_status == "running":
                 job.status = "running"
@@ -11475,8 +11550,9 @@ def _run_current_find_claude_read_job(project: str, root: Path, request: ReadReq
     plan_payload = _read_project_json(root / "planning" / "finding" / "plans.json", {})
     current_plan = _read_project_json(root / "state" / "current_find_research_plan.json", {})
     validation = _read_project_json(root / "state" / "current_find_claude_reading_validation.json", {})
-    status = str((result_payload if isinstance(result_payload, dict) else {}).get("status") or (current_plan if isinstance(current_plan, dict) else {}).get("status") or "").strip()
-    if rc != 0 and not status.startswith("blocked"):
+    reading_sync = result_payload.get("reading_sync") if isinstance(result_payload.get("reading_sync"), dict) else {}
+    status = str(reading_sync.get("status") or (current_plan if isinstance(current_plan, dict) else {}).get("status") or result_payload.get("status") or "").strip()
+    if rc != 0 and not status.startswith("blocked") and not status.endswith("complete_with_warnings"):
         status, failure_summary = _current_find_wrapper_failure_summary(output_lines)
     elif not status:
         status = "current_find_claude_read_complete"

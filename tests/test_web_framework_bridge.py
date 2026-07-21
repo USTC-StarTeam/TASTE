@@ -2511,6 +2511,44 @@ def test_web_read_scoring_counts_reused_deep_reads_before_third_phase():
     assert finished["current_action"] == "精读任务已完成"
 
 
+def test_web_finished_read_does_not_hide_incomplete_reading_and_scoring(monkeypatch):
+    from auto_research.web import server as web_server
+
+    monkeypatch.setattr(
+        web_server,
+        "_read_job_artifact_progress",
+        lambda result, progress: {
+            "total": 100,
+            "full_text_current": 100,
+            "deep_read_current": 41,
+            "deep_read_attempted": 41,
+            "pending_full_text": 0,
+            "pending_deep_read": 59,
+            "public_read_md_present": True,
+            "validation_valid": True,
+            "scoring_required": True,
+            "scoring_complete": False,
+            "scoring_expected_count": 41,
+            "scoring_scored_count": 0,
+            "read_quality_complete": False,
+            "warning_count": 59,
+        },
+    )
+
+    finished = web_server._read_job_progress_from_logs(
+        [
+            "Final Reading scoring phase: 41 completed reading artifacts",
+            "Final Reading scoring complete: scored=0/41",
+        ],
+        {"phase": "complete"},
+        {"status": "current_find_deep_read_complete_with_warnings", "run_id": "find_demo"},
+        status="done",
+    )
+
+    assert finished["current_stage"] == "deep_read"
+    assert finished["current_action"] == "精读任务有未完成项：精读 41/100；重新打分 0/41。"
+
+
 def test_web_cancelled_read_keeps_completed_phase_and_current_run_logs():
     from auto_research.web import server as web_server
 
@@ -3645,6 +3683,47 @@ def test_web_completed_read_job_keeps_detailed_logs_after_history_refresh():
 
     assert collapsed == [completed]
     assert collapsed[0]["logs"] == ["阶段进度：读文章 20/20", "细节：已完成精读 20/20"]
+
+
+def test_web_read_history_keeps_incomplete_scoring_blocked(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    root = tmp_path / "projects" / "demo"
+    finding = root / "planning" / "finding"
+    state = root / "state"
+    finding.mkdir(parents=True)
+    state.mkdir(parents=True)
+    run_id = "find_incomplete_scoring"
+    readings = [
+        {"title": f"Paper {index}", "full_text_available": True, "deep_read_complete": index <= 41}
+        for index in range(1, 101)
+    ]
+    validation = {
+        "run_id": run_id,
+        "status": "current_find_deep_read_complete_with_warnings",
+        "valid": True,
+        "expected_reading_count": 100,
+        "full_text_reading_count": 100,
+        "deep_read_complete_count": 41,
+        "pending_full_text_reading_count": 0,
+        "pending_deep_read_synthesis_count": 59,
+        "scoring_required": True,
+        "scoring_complete": False,
+        "scoring_expected_count": 41,
+        "scoring_scored_count": 0,
+        "read_quality_complete": False,
+    }
+    (finding / "read.md").write_text("# 论文精读\n", encoding="utf-8")
+    (finding / "read_results.json").write_text(json.dumps({"run_id": run_id, "readings": readings}), encoding="utf-8")
+    (state / "current_find_claude_reading_validation.json").write_text(json.dumps(validation), encoding="utf-8")
+    (state / "current_find_research_plan.json").write_text(json.dumps({"run_id": run_id, "status": validation["status"]}), encoding="utf-8")
+
+    history = web_server._current_find_read_history_job("demo", root, run_id, {"run_id": run_id, "status": validation["status"]})
+
+    assert history is not None
+    assert history["status"] == "blocked"
+    assert "精读完成 41/100 篇" in history["progress"]["message"]
+    assert "重新打分 0/41" in history["progress"]["message"]
 
 
 def test_web_read_machine_warnings_are_human_facing(monkeypatch):
