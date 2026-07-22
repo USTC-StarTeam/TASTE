@@ -124,13 +124,13 @@ _CRAWL_MIN_INTERVAL_DEFAULTS = {
     "arxiv": 3.1, "biorxiv": 3.0, "science": 3.0, "openreview": 1.0,
     "iclr": 3.0, "icml": 3.0, "crossref": 0.34, "openalex": 0.05,
     "semanticscholar": 1.0, "europepmc": 0.25, "springernature": 0.7,
-    "unpaywall": 0.25, "acm": 2.0, "github": 1.0, "generic": 0.05,
+    "unpaywall": 0.25, "acm": 2.0, "dblp": 1.0, "github": 1.0, "generic": 0.05,
 }
 _CRAWL_RATE_LIMIT_DEFAULTS = {
     "arxiv": 6.0, "biorxiv": 15.0, "science": 15.0, "openreview": 10.0,
     "iclr": 15.0, "icml": 15.0, "crossref": 2.0, "openalex": 2.0,
     "semanticscholar": 5.0, "europepmc": 2.0, "springernature": 5.0,
-    "unpaywall": 2.0, "acm": 15.0, "github": 60.0, "generic": 10.0,
+    "unpaywall": 2.0, "acm": 15.0, "dblp": 10.0, "github": 60.0, "generic": 10.0,
 }
 _CRAWL_CHALLENGE_DEFAULTS = {
     "biorxiv": 60.0, "science": 30.0, "openreview": 30.0,
@@ -150,7 +150,9 @@ def crawl_service_from_url(url: str) -> str:
         ("europepmc.org", "europepmc"), ("ebi.ac.uk", "europepmc"),
         ("springernature.com", "springernature"), ("springer.com", "springernature"),
         ("nature.com", "springernature"), ("unpaywall.org", "unpaywall"),
-        ("dl.acm.org", "acm"), ("github.com", "github"),
+        ("dl.acm.org", "acm"), ("dblp.org", "dblp"),
+        ("dblp.uni-trier.de", "dblp"), ("dblp.dagstuhl.de", "dblp"),
+        ("github.com", "github"),
         ("githubusercontent.com", "github"),
     )
     for suffix, service in rules:

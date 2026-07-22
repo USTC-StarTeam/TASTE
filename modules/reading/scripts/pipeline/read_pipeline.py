@@ -5107,7 +5107,9 @@ def _restore_article_read_cache(item_dir: Path, paper: dict, *, run_id: str, pap
         return {}
     manifest = _article_cache_manifest(cache_dir)
     paper = _merge_cached_paper_hints(paper, read_json(cache_dir / "paper.json", {}))
-    cached_read_text = (cache_dir / "read.md").read_text(encoding="utf-8", errors="replace")
+    cached_read_text = _normalize_article_markdown_metadata(
+        (cache_dir / "read.md").read_text(encoding="utf-8", errors="replace"), paper
+    )
     initial_quality_issue = _article_markdown_quality_issue(cached_read_text, paper)
     if initial_quality_issue and initial_quality_issue != "article_title_mismatch":
         with _ARTICLE_CACHE_LOCK:
@@ -5385,7 +5387,11 @@ def _complete_read_result_from_item_dir(item_dir: Path, paper: dict, *, run_id: 
         article_md_path = ensure_inside_output(resolve_reading_path(article_md_value), label="单篇 read.md")
     except Exception:
         return {}
+    if (item_dir / "read.md").is_file():
+        article_md_path = item_dir / "read.md"
     claude_result = result.get("claude_result") if isinstance(result.get("claude_result"), dict) else {}
+    packet = result.get("full_text_packet") if isinstance(result.get("full_text_packet"), dict) else {}
+    _normalize_article_markdown_file(article_md_path, paper, packet)
     if not _article_markdown_ready(article_md_path, claude_result, paper):
         return {}
     existing_paper = result.get("paper") if isinstance(result.get("paper"), dict) else {}
@@ -5516,6 +5522,7 @@ def _process_local_read_paper(
         mode=mode,
     )
     result_payload = _load_result_payload(output_path, receipt)
+    _normalize_article_markdown_file(article_md_path, paper, packet)
     article_markdown_ready = _article_markdown_ready(article_md_path, result_payload, paper)
     complete = (
         _deep_read_complete(receipt, result_payload)
@@ -5794,12 +5801,10 @@ def _run_content_quality_repair_once(
     log: LogFn,
     index: int,
 ) -> dict:
-    article_text = article_md_path.read_text(encoding="utf-8", errors="replace") if article_md_path.is_file() else ""
+    article_text = _normalize_article_markdown_file(article_md_path, paper, packet)
     quality_issue = _article_markdown_quality_issue(article_text, paper) if article_text else ""
     quality_reason = _article_markdown_quality_reason(article_text, paper) if quality_issue else ""
     if mode == "prepare" or not quality_issue:
-        if article_text:
-            _normalize_article_markdown_file(article_md_path, paper, packet)
         return {
             "receipt": receipt,
             "result_payload": result_payload,
@@ -5829,11 +5834,9 @@ def _run_content_quality_repair_once(
             receipt_dir_name="claude_content_quality_retry",
         )
         retry_payload = _load_result_payload(output_path, retry_receipt)
-        repaired_text = article_md_path.read_text(encoding="utf-8", errors="replace") if article_md_path.is_file() else ""
+        repaired_text = _normalize_article_markdown_file(article_md_path, paper, packet)
         final_issue = _article_markdown_quality_issue(repaired_text, paper) if repaired_text else quality_issue
         final_reason = _article_markdown_quality_reason(repaired_text, paper) if repaired_text and final_issue else quality_reason
-        if repaired_text and not final_issue:
-            _normalize_article_markdown_file(article_md_path, paper, packet)
         quality_retry = {
             "attempted": True,
             "attempt_count": 1,
