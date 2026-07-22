@@ -1893,10 +1893,12 @@ def test_reading_batch_requeues_cooldown_papers_once_with_one_recovery_worker(mo
     assert payload["cooldown_requeue"] == {
         "status": "complete",
         "attempted_paper_count": 2,
+        "skipped_long_cooldown_count": 0,
         "recovered_full_text_count": 2,
         "worker_count": 1,
         "services": ["arxiv"],
         "waited_sec": 0.0,
+        "wait_cap_sec": 30.0,
     }
     assert "cooldown_expiry_batch_requeue" in payload["execution_phases"]
     assert all(item["validation"]["cooldown_requeue"]["attempted"] is True for item in payload["items"])
@@ -1913,11 +1915,95 @@ def test_reading_batch_requeue_defers_when_service_cooldown_exceeds_wait_cap(mon
         {"arxiv"},
         log=lambda _message: None,
         should_cancel=lambda: False,
+        wait_cap_sec=200.0,
     )
 
     assert result["ready"] is False
+    assert result["reason"] == "cooldown_exceeds_service_wait_cap"
+    assert result["wait_cap_sec"] == 200.0
     assert result["remaining_by_service"] == {"arxiv": 120.0}
     assert result["wait_caps"] == {"arxiv": 10.0}
+
+
+def test_reading_batch_does_not_wait_or_requeue_when_cooldown_exceeds_run_budget(monkeypatch, isolated_reading_latest_run):
+    monkeypatch.setenv("READING_DISABLE_ARTICLE_CACHE", "1")
+    read_pipeline = _load_reading_pipeline()
+    paper_sources = _load_reading_paper_sources()
+    input_path = _write_reading_input("pytest_read_long_cooldown_no_wait", {
+        "articles": [{
+            "source": "openalex",
+            "title": "long cooldown paper",
+            "paper_id": "long-cooldown",
+            "pdf_url": "https://example.org/paper.pdf",
+        }]
+    })
+    run_id = _reading_run_id_from_input(input_path)
+    calls = 0
+
+    def fake_acquire_full_text(paper, item_dir, log=print, *, services=None):
+        nonlocal calls
+        calls += 1
+        return {
+            "paper_id": paper["paper_id"],
+            "title": paper["title"],
+            "full_text_available": False,
+            "full_text_status": "deferred_service_cooldown_retry",
+            "full_text_chars": 0,
+            "blocked_full_text_reason": {
+                "code": "blocked_rate_limited_before_same_paper_full_text",
+                "retryable_after_cooldown": True,
+                "cooldown_services": ["openalex"],
+            },
+            "pdf_acquisition": {
+                "attempts": [{
+                    "service": "openalex",
+                    "status_code": 429,
+                    "reason": "http_429_rate_limited",
+                }]
+            },
+        }
+
+    cooldown_checks = 0
+
+    def long_then_clear(_service):
+        nonlocal cooldown_checks
+        cooldown_checks += 1
+        return 64000.0 if cooldown_checks == 1 else 0.0
+
+    sleeps = []
+    monkeypatch.setattr(paper_sources, "acquire_full_text", fake_acquire_full_text)
+    monkeypatch.setattr(read_pipeline, "service_cooldown_remaining", long_then_clear)
+    monkeypatch.setattr(read_pipeline.time, "sleep", lambda seconds: sleeps.append(seconds))
+    read_pipeline.run_read(
+        run_id=run_id,
+        input_json=str(input_path),
+        claude_mode="prepare",
+        max_workers=1,
+        log=lambda _message: None,
+    )
+
+    payload = json.loads((input_path.parent.parent / "read_results.json").read_text(encoding="utf-8"))
+    assert calls == 1
+    assert sleeps == []
+    assert payload["cooldown_requeue"] == {
+        "status": "complete_with_skipped_long_cooldown",
+        "attempted_paper_count": 0,
+        "skipped_long_cooldown_count": 1,
+        "deferred_paper_count": 1,
+        "recovered_full_text_count": 0,
+        "worker_count": 0,
+        "services": ["openalex"],
+        "waited_sec": 0.0,
+        "wait_cap_sec": 30.0,
+    }
+    requeue = payload["items"][0]["validation"]["cooldown_requeue"]
+    assert requeue["attempted"] is False
+    assert requeue["skipped"] is True
+    assert requeue["reason"] == "cooldown_exceeds_run_wait_budget"
+    assert requeue["remaining_by_service"] == {"openalex": 64000.0}
+    assert "cooldown_expiry_batch_requeue" not in payload["execution_phases"]
+    _cleanup_reading_output(run_id)
+    _cleanup_reading_input("pytest_read_long_cooldown_no_wait")
 
 
 def test_reading_run_read_uses_subagent_article_markdown_aggregation_and_audit(monkeypatch, isolated_reading_latest_run):

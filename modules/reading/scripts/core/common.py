@@ -328,6 +328,7 @@ DEFAULT_READING_CONFIG: dict[str, Any] = {
             "github": 60.0,
             "generic": 20.0,
         },
+        "batch_cooldown_requeue_wait_cap_sec": 30.0,
     },
     "openreview": {
         "allow_anonymous_http": True,

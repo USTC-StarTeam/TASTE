@@ -87,6 +87,7 @@
       "web_search": 30.0,
       "generic": 10.0
     },
+    "batch_cooldown_requeue_wait_cap_sec": 30.0,
     "batch_challenge_cooldown_wait_cap_sec": {
       "arxiv": 10.0,
       "biorxiv": 60.0,
