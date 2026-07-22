@@ -144,6 +144,7 @@ import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from datetime import date, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from threading import Lock
 from urllib.parse import parse_qs, quote, quote_plus, unquote, urlencode, urljoin, urlparse
@@ -4070,6 +4071,106 @@ def _request(url: str, timeout: int = 12) -> requests.Response:
     raise RuntimeError(f"request failed without response: {url}")
 
 
+_DBLP_HOSTS = ("dblp.org", "dblp.uni-trier.de", "dblp.dagstuhl.de")
+_DBLP_REQUEST_LOCK = Lock()
+_DBLP_NEXT_REQUEST_AT = 0.0
+_DBLP_COOLDOWN_UNTIL = 0.0
+
+
+class _DblpRequestDeferred(RuntimeError):
+    pass
+
+
+def _dblp_url_candidates(url: str) -> list[str]:
+    parsed = urlparse(str(url or "").strip())
+    hostname = (parsed.hostname or "").lower()
+    if hostname == "www.dblp.org":
+        hostname = "dblp.org"
+    if hostname not in _DBLP_HOSTS:
+        return [str(url or "").strip()]
+    ordered_hosts = [hostname, *[host for host in _DBLP_HOSTS if host != hostname]]
+    return [parsed._replace(scheme="https", netloc=host).geturl() for host in ordered_hosts]
+
+
+def _dblp_retry_after_seconds(response: requests.Response) -> float:
+    value = str(getattr(response, "headers", {}).get("Retry-After") or "").strip()
+    if not value:
+        return 0.0
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        try:
+            return max(0.0, parsedate_to_datetime(value).timestamp() - time.time())
+        except Exception:
+            return 0.0
+
+
+def _dblp_set_cooldown(seconds: float) -> None:
+    global _DBLP_COOLDOWN_UNTIL
+    if seconds <= 0:
+        return
+    with _DBLP_REQUEST_LOCK:
+        _DBLP_COOLDOWN_UNTIL = max(_DBLP_COOLDOWN_UNTIL, time.monotonic() + seconds)
+
+
+def _dblp_wait_for_request_slot() -> None:
+    global _DBLP_NEXT_REQUEST_AT
+    spacing = _positive_float_env("DBLP_REQUEST_SPACING_SEC", 1.0)
+    max_wait = _positive_float_env("DBLP_MAX_RETRY_AFTER_WAIT_SEC", 10.0)
+    with _DBLP_REQUEST_LOCK:
+        now = time.monotonic()
+        cooldown_remaining = max(0.0, _DBLP_COOLDOWN_UNTIL - now)
+        if cooldown_remaining > max_wait:
+            raise _DblpRequestDeferred(
+                f"DBLP request deferred for Retry-After cooldown ({cooldown_remaining:.0f}s remaining)"
+            )
+        wait_seconds = max(0.0, _DBLP_NEXT_REQUEST_AT - now, cooldown_remaining)
+        if wait_seconds:
+            time.sleep(wait_seconds)
+        _DBLP_NEXT_REQUEST_AT = time.monotonic() + spacing
+
+
+def _dblp_request(
+    url: str,
+    *,
+    params: dict[str, Any] | None = None,
+    timeout: int = 12,
+    max_attempts: int | None = None,
+) -> requests.Response:
+    attempts_allowed = max_attempts or _positive_int_env("DBLP_REQUEST_RETRIES", 3)
+    attempts_allowed = max(1, int(attempts_allowed))
+    candidates = _dblp_url_candidates(url)
+    candidate_index = 0
+    last_error: requests.RequestException | None = None
+    for attempt in range(attempts_allowed):
+        candidate = candidates[min(candidate_index, len(candidates) - 1)]
+        _dblp_wait_for_request_slot()
+        try:
+            response = requests.get(candidate, params=params, headers=HEADERS, timeout=timeout)
+        except requests.RequestException as exc:
+            last_error = exc
+            candidate_index = min(candidate_index + 1, len(candidates) - 1)
+            continue
+        if response.status_code == 429:
+            retry_after = max(_dblp_retry_after_seconds(response), _positive_float_env("DBLP_REQUEST_SPACING_SEC", 1.0))
+            _dblp_set_cooldown(retry_after)
+            max_wait = _positive_float_env("DBLP_MAX_RETRY_AFTER_WAIT_SEC", 10.0)
+            if retry_after > max_wait or attempt + 1 >= attempts_allowed:
+                raise _DblpRequestDeferred(f"DBLP rate limited; Retry-After={retry_after:.0f}s")
+            continue
+        if response.status_code in {408, 425, 500, 502, 503, 504} and attempt + 1 < attempts_allowed:
+            last_error = requests.HTTPError(
+                f"{response.status_code} response from {candidate}", response=response
+            )
+            candidate_index = min(candidate_index + 1, len(candidates) - 1)
+            continue
+        response.raise_for_status()
+        return response
+    if last_error:
+        raise last_error
+    raise RuntimeError(f"DBLP request failed without response: {url}")
+
+
 def _dblp_search_hits(stream_id: str, *, year: int | None, max_items: int | None) -> tuple[list[dict], dict[str, Any]]:
     page_size = 100
     max_pages = max(1, int(os.environ.get("DBLP_SEARCH_MAX_PAGES", "50") or 50))
@@ -4086,22 +4187,16 @@ def _dblp_search_hits(stream_id: str, *, year: int | None, max_items: int | None
         page_hits: list[dict] = []
         stats: dict[str, int] = {}
         last_error = ""
-        for attempt in range(request_retries):
-            try:
-                response = requests.get(
-                    "https://dblp.org/search/publ/api",
-                    params={"q": _dblp_stream_query(stream_id, year), "h": page_size, "f": offset, "format": "json"},
-                    headers=HEADERS,
-                    timeout=12,
-                )
-                response.raise_for_status()
-                page_hits, stats = _dblp_hits_payload(response)
-                last_error = ""
-                break
-            except Exception as exc:
-                last_error = str(exc)[:240]
-                if attempt + 1 < request_retries:
-                    time.sleep(0.5 * (attempt + 1))
+        try:
+            response = _dblp_request(
+                "https://dblp.org/search/publ/api",
+                params={"q": _dblp_stream_query(stream_id, year), "h": page_size, "f": offset, "format": "json"},
+                timeout=12,
+                max_attempts=request_retries,
+            )
+            page_hits, stats = _dblp_hits_payload(response)
+        except Exception as exc:
+            last_error = str(exc)[:240]
         if last_error:
             errors.append(last_error)
             return hits, {
@@ -4125,7 +4220,6 @@ def _dblp_search_hits(stream_id: str, *, year: int | None, max_items: int | None
         if not page_hits or sent <= 0 or len(hits) >= total:
             exhausted = True
             break
-        time.sleep(0.15)
     else:
         truncated = bool(total and len(hits) < total)
     return hits, {
@@ -4155,6 +4249,9 @@ def fetch_dblp_stream_api(venue: dict, years: list[int], max_items: int | None) 
         search_audits.append(search_audit)
         for hit in hits:
             info = hit.get("info", {}) if isinstance(hit, dict) else {}
+            record_type = _clean_text(str(info.get("type") or "")).lower()
+            if record_type in {"editorship", "books and theses", "reference works"}:
+                continue
             year = str(info.get("year") or "")
             if wanted_years and year not in {str(value) for value in wanted_years}:
                 continue
@@ -5129,7 +5226,7 @@ def _parse_dblp_yelinks(address: str, years: list[int], max_years: int = 4) -> l
         return [(year, f"{cleaned}/{key}{year}.html") for year in years[:max_years]]
 
     try:
-        soup = BeautifulSoup(_request(_dblp_page_url(address)).text, "html.parser")
+        soup = BeautifulSoup(_dblp_request(_dblp_page_url(address)).text, "html.parser")
     except Exception:
         return direct_links()
 
@@ -5181,7 +5278,7 @@ def _dblp_toc_papers(venue: dict, years: list[int], max_items: int | None) -> li
                 continue
             companion_xml = re.sub(r"\.html?$", ".xml", companion_url)
             try:
-                companion_text = _request(companion_xml, timeout=_metadata_timeout(8)).text
+                companion_text = _dblp_request(companion_xml, timeout=_metadata_timeout(8)).text
             except Exception:
                 continue
             if re.search(r"<(?:article|inproceedings)[^>]*>.*?</(?:article|inproceedings)>", companion_text, flags=re.S):
@@ -5200,7 +5297,7 @@ def _dblp_toc_papers(venue: dict, years: list[int], max_items: int | None) -> li
         count_before_page = len(papers)
         xml_url = str(page_audit["xml_url"])
         try:
-            xml_text = _request(xml_url).text
+            xml_text = _dblp_request(xml_url).text
             for record in re.findall(r"<(?:article|inproceedings)[^>]*>.*?</(?:article|inproceedings)>", xml_text, flags=re.S):
                 title_match = re.search(r"<title>(.*?)</title>", record, flags=re.S)
                 if not title_match:
@@ -5249,7 +5346,7 @@ def _dblp_toc_papers(venue: dict, years: list[int], max_items: int | None) -> li
         except Exception as exc:
             page_audit["xml_error"] = str(exc)[:240]
         try:
-            soup = BeautifulSoup(_request(url).text, "html.parser")
+            soup = BeautifulSoup(_dblp_request(url).text, "html.parser")
         except Exception as exc:
             page_audit["html_error"] = str(exc)[:240]
             page_audit["status"] = "failed"
@@ -5296,7 +5393,6 @@ def _dblp_toc_papers(venue: dict, years: list[int], max_items: int | None) -> li
                 break
         page_audit["status"] = "html" if len(papers) > count_before_page else "empty"
         page_audits.append(page_audit)
-        time.sleep(0.5)
     complete = bool(papers) and bool(page_audits) and not any(str(item.get("status")) == "failed" for item in page_audits) and not (max_items is not None and len(papers) >= max_items)
     audit = _venue_metadata_audit(
         status="complete" if complete else "partial",

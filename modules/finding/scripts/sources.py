@@ -1732,10 +1732,13 @@ def fetch_icml_official_virtual_2026(max_items: int) -> list[dict]:
 
 def _dblp_page_url(url: str) -> str:
     cleaned = (url or "").strip()
-    for prefix in ("https://dblp.org", "http://dblp.org", "http://dblp.uni-trier.de"):
-        if cleaned.startswith(prefix):
-            return cleaned.replace(prefix, "https://dblp.uni-trier.de", 1)
-    return cleaned
+    return re.sub(
+        r"^https?://(?:www\.)?(?:dblp\.org|dblp\.uni-trier\.de|dblp\.dagstuhl\.de)(?=/|$)",
+        "https://dblp.uni-trier.de",
+        cleaned,
+        count=1,
+        flags=re.IGNORECASE,
+    )
 
 
 def _dblp_stream_id(address: str) -> str:

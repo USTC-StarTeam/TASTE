@@ -882,6 +882,52 @@ English abstract awaiting translation.
     assert "English abstract awaiting translation." in fallback
 
 
+@pytest.mark.parametrize(
+    ("fixed_abstract", "claude_abstract"),
+    [
+        ("固定“中文”摘要。", '固定"中文"摘要。'),
+        ("帮助读者“看懂”方法。", '帮助读者"看懂"方法。'),
+        (r"准确率达到87\%。", "准确率达到87%。"),
+    ],
+)
+def test_reading_canonicalizes_fixed_abstract_before_quality_retry(
+    monkeypatch, tmp_path, fixed_abstract, claude_abstract,
+):
+    read_pipeline = _load_reading_pipeline()
+    article_path = tmp_path / "read.md"
+    article_path.write_text(
+        f"# Paper\n\n## 摘要\n\n{claude_abstract}"
+        "\n\n## 动机与核心创新\n\n中文分析。"
+        "\n\n## 方法\n\n中文方法分析。"
+        "\n\n## 实验结果\n\n中文实验结果。"
+        "\n\n## 优缺点总结\n\n中文优缺点总结。\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        read_pipeline,
+        "run_claude_deep_read",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("fixed metadata must not trigger Claude repair")),
+    )
+
+    quality = read_pipeline._run_content_quality_repair_once(
+        paper={"title": "Paper", "abstract_zh": fixed_abstract},
+        packet={},
+        item_dir=tmp_path,
+        article_md_path=article_path,
+        output_path=tmp_path / "outputs" / "reading_result.json",
+        receipt={},
+        result_payload={},
+        mode="run",
+        timeout_sec=60,
+        log=lambda _message: None,
+        index=1,
+    )
+
+    assert quality["quality_issue"] == ""
+    assert quality["quality_retry"] == {}
+    assert f"## 摘要\n\n{fixed_abstract}\n\n## 动机与核心创新" in article_path.read_text(encoding="utf-8")
+
+
 def test_reading_routes_unresolved_prose_latex_back_to_the_llm():
     read_pipeline = _load_reading_pipeline()
     claude_subagent = _load_reading_claude_subagent()
@@ -1421,6 +1467,7 @@ def test_reading_article_cache_restore_backfills_content_binding(monkeypatch, tm
     paper = {
         "paper_id": "paper-1",
         "title": "Legacy Cache With Current Official Full Text",
+        "abstract_zh": r"固定“中文”摘要含87\%。",
         "source": "openreview",
         "venue": "ICLR",
         "year": 2026,
@@ -1440,7 +1487,7 @@ def test_reading_article_cache_restore_backfills_content_binding(monkeypatch, tm
     (cache_dir / "paper.json").write_text(json.dumps(paper), encoding="utf-8")
     (cache_dir / "full_text_packet.json").write_text(json.dumps({"papers": [packet]}), encoding="utf-8")
     (cache_dir / "read.md").write_text(
-        f"# {paper['title']}\n\n## 摘要\n\n缓存阅读产物。"
+        f"# {paper['title']}\n\n## 摘要\n\n固定\"中文\"摘要含87%。"
         "\n\n## 动机与核心创新\n\n中文分析。"
         "\n\n## 方法\n\n中文方法分析。"
         "\n\n## 实验结果\n\n中文实验结果。"
@@ -1475,13 +1522,14 @@ def test_reading_article_cache_restore_backfills_content_binding(monkeypatch, tm
     assert manifest["pdf_sha256"] == fingerprints["pdf_sha256"]
     assert manifest["full_text_source_kind"] == "openreview_official_note_pdf"
     assert manifest["full_text_pdf_url"] == "openreview://official-note/pdf"
+    assert paper["abstract_zh"] in (item_dir / "read.md").read_text(encoding="utf-8")
+    assert paper["abstract_zh"] in (cache_dir / "read.md").read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(
     ("cached_abstract", "fixed_abstract", "source_abstract", "expected_issue"),
     [
         ("English abstract copied without translation.", "", "", "abstract_missing_chinese"),
-        ("这是被模型改写过的摘要。", "这是必须逐字保留的固定摘要。", "", "fixed_abstract_modified"),
         (
             "We present a method for protein design that learns from structural data and evaluates generated candidates.\n\n"
             "我们提出一种从结构数据学习并评估生成候选的蛋白质设计方法。",
@@ -7359,6 +7407,137 @@ def test_find_dblp_one_row_probe_skips_full_toc_fetch(monkeypatch):
     monkeypatch.setattr(find_support, "_dblp_toc_papers", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("one-row DBLP probe fetched the full TOC")))
 
     assert find_support.fetch_dblp_venue({"id": "dblp_kdd"}, [2026], 1) == [row]
+
+
+def test_find_dblp_request_uses_official_mirror_after_transient_failure(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    calls = []
+
+    class FakeResponse:
+        headers = {}
+
+        def __init__(self, status_code, url):
+            self.status_code = status_code
+            self.url = url
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise find_support.requests.HTTPError(
+                    f"{self.status_code} response", response=self
+                )
+
+    def fake_get(url, **_kwargs):
+        calls.append(url)
+        return FakeResponse(503 if len(calls) == 1 else 200, url)
+
+    monkeypatch.setattr(find_support, "_dblp_wait_for_request_slot", lambda: None)
+    monkeypatch.setattr(find_support.requests, "get", fake_get)
+
+    response = find_support._dblp_request("https://dblp.org/search/publ/api", max_attempts=3)
+
+    assert response.status_code == 200
+    assert calls == [
+        "https://dblp.org/search/publ/api",
+        "https://dblp.uni-trier.de/search/publ/api",
+    ]
+
+
+def test_find_dblp_long_retry_after_defers_without_mirror_bypass(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    calls = []
+
+    class RateLimitedResponse:
+        status_code = 429
+        headers = {"Retry-After": "3600"}
+
+        def raise_for_status(self):
+            raise find_support.requests.HTTPError("429 response", response=self)
+
+    monkeypatch.setenv("DBLP_MAX_RETRY_AFTER_WAIT_SEC", "5")
+    monkeypatch.setattr(find_support, "_DBLP_NEXT_REQUEST_AT", 0.0)
+    monkeypatch.setattr(find_support, "_DBLP_COOLDOWN_UNTIL", 0.0)
+    monkeypatch.setattr(
+        find_support.requests,
+        "get",
+        lambda url, **_kwargs: calls.append(url) or RateLimitedResponse(),
+    )
+
+    with pytest.raises(RuntimeError, match="Retry-After=3600s"):
+        find_support._dblp_request("https://dblp.org/search/publ/api", max_attempts=3)
+
+    assert calls == ["https://dblp.org/search/publ/api"]
+
+
+def test_find_dblp_search_keeps_completed_pages_after_later_failure(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    calls = []
+
+    class FirstPageResponse:
+        def json(self):
+            return {
+                "result": {
+                    "hits": {
+                        "@total": "2",
+                        "@sent": "1",
+                        "@first": "0",
+                        "hit": [{"info": {"title": "First DBLP paper"}}],
+                    }
+                }
+            }
+
+    def request(_url, **_kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            return FirstPageResponse()
+        raise RuntimeError("temporary DBLP failure")
+
+    monkeypatch.setattr(find_support, "_dblp_request", request)
+    hits, audit = find_support._dblp_search_hits("conf/kdd", year=2026, max_items=None)
+
+    assert [hit["info"]["title"] for hit in hits] == ["First DBLP paper"]
+    assert audit["complete"] is False
+    assert audit["pages_fetched"] == 1
+    assert audit["error"] == "temporary DBLP failure"
+
+
+def test_find_dblp_stream_excludes_proceedings_editorship_records(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    hits = [
+        {
+            "info": {
+                "title": "Proceedings of the Example Conference 2026",
+                "year": "2026",
+                "type": "Editorship",
+                "key": "conf/example/2026",
+            }
+        },
+        {
+            "info": {
+                "title": "A Real Conference Paper",
+                "year": "2026",
+                "type": "Conference and Workshop Papers",
+                "key": "conf/example/Author26",
+            }
+        },
+    ]
+    audit = {"total": 2, "complete": True, "truncated": False, "errors": []}
+    monkeypatch.setattr(find_support, "_dblp_search_hits", lambda *_args, **_kwargs: (hits, audit))
+
+    papers = find_support.fetch_dblp_stream_api(
+        {
+            "id": "dblp_example",
+            "name": "Example",
+            "address": "https://dblp.org/db/conf/example/",
+        },
+        [2026],
+        None,
+    )
+
+    assert [paper["title"] for paper in papers] == ["A Real Conference Paper"]
 
 
 def test_find_venue_health_requires_live_abstract_enrichment(monkeypatch):
