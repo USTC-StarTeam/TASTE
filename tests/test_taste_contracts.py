@@ -478,6 +478,47 @@ def test_reading_service_get_serializes_same_host(monkeypatch, tmp_path):
     assert maximum_active == 1
 
 
+def test_reading_service_get_allows_different_hosts_concurrently(monkeypatch, tmp_path):
+    http_client = _load_reading_common()
+    monkeypatch.setattr(http_client, "_SERVICE_STATE_ROOT", tmp_path)
+    monkeypatch.setitem(http_client.SERVICE_MIN_INTERVAL_SEC, "generic", 0.0)
+    active = 0
+    maximum_active = 0
+    counter_lock = threading.Lock()
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "application/pdf"}
+        content = b"%PDF-fake"
+
+        def __init__(self, url):
+            self.url = url
+
+    def fake_get(url, **_kwargs):
+        nonlocal active, maximum_active
+        with counter_lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        time.sleep(0.03)
+        with counter_lock:
+            active -= 1
+        return FakeResponse(url)
+
+    urls = [
+        "https://proceedings.neurips.cc/paper.pdf",
+        "https://aclanthology.org/paper.pdf",
+    ]
+    assert http_client.service_from_url(urls[0]) != http_client.service_from_url(urls[1])
+    monkeypatch.setattr(http_client.requests, "get", fake_get)
+    threads = [threading.Thread(target=http_client.service_get, args=(url,)) for url in urls]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert maximum_active == 2
+
+
 def test_reading_service_get_serializes_same_host_across_processes(monkeypatch, tmp_path):
     http_client = _load_reading_common()
     context = multiprocessing.get_context("fork")

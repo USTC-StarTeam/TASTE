@@ -85,7 +85,7 @@ OPENREVIEW_PASSWORD=your_password
 | `READING_DISABLE_ARTICLE_CACHE=1` | 本次运行跳过文章级缓存。 |
 | `READING_DISABLE_RUNTIME_CACHE=1` | 本次运行重新获取全文材料。 |
 
-所有外部论文渠道都在共享的按服务请求层排队；同一服务跨 Find、Read worker 和跨进程并发上限为 `1`，不同服务可以并行。arXiv API 保持至少 3 秒间隔；OpenReview 为 1 秒，ICLR/ICML 为 3 秒。收到 `429` 时优先严格使用服务端 `Retry-After`/额度重置时间，没有响应头时才使用分渠道短冷却；`403` 与 Cloudflare challenge 使用独立的分渠道冷却。批次补抓只在对应服务的等待上限内等待，超过上限会留给后续任务重试，不会长期阻塞当前 Read。
+所有外部论文渠道都在共享的按已知服务或未知主机请求层排队；同一服务或主机跨 Find、Read worker 和跨进程并发上限为 `1`，不同渠道可以并行。arXiv API 保持至少 3 秒间隔；OpenReview 为 1 秒，ICLR/ICML 为 3 秒。收到 `429` 时优先严格使用服务端 `Retry-After`/额度重置时间，没有响应头时才使用分渠道短冷却；`403` 与 Cloudflare challenge 使用独立的分渠道冷却。批次补抓同时受对应渠道等待上限和全阶段 30 秒总预算约束，超过任一上限会留给后续任务重试，不会长期阻塞当前 Read。`read-workers` 也用于并行处理后续单篇精读。
 
 Jina、网页搜索和 GitHub 等可选后备源的进程内熔断按服务和响应类型计算：`429` 优先使用服务端等待时间；没有响应头时分别使用 10、30、60 秒。普通网络异常不会触发进程熔断。
 
