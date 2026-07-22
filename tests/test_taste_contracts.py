@@ -366,6 +366,64 @@ def test_reading_process_http_blocker_uses_retry_after_for_429(monkeypatch):
     assert forbidden["ttl_sec"] == common.PROCESS_ACCESS_BLOCKER_SEC
 
 
+def test_reading_explicit_retry_after_is_not_inflated_by_default_cooldown():
+    common = _load_reading_common()
+
+    class Response:
+        status_code = 429
+        url = "https://api.semanticscholar.org/graph/v1/paper/test"
+        headers = {"retry-after": "1"}
+
+    assert common._rate_limit_reset_seconds(Response(), "semanticscholar") == 1.0
+    assert common.service_rate_limit_cooldown("semanticscholar") > 1.0
+
+
+def test_finding_requests_use_shared_per_service_slot(monkeypatch):
+    from runtime import resource_locks
+
+    captured: dict[str, object] = {}
+
+    class Slot:
+        def __enter__(self):
+            captured["entered"] = True
+            return {}
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_slot(service, *, min_interval_sec=0.0):
+        captured["service"] = service
+        captured["min_interval_sec"] = min_interval_sec
+        return Slot()
+
+    class Response:
+        status_code = 200
+        headers = {}
+
+    monkeypatch.setattr(resource_locks, "crawl_service_slot", fake_slot)
+    monkeypatch.setattr(resource_locks.requests, "get", lambda *_args, **_kwargs: Response())
+
+    response = resource_locks.crawl_service_get("https://api.crossref.org/works?query=test")
+
+    assert response.status_code == 200
+    assert captured == {"service": "crossref", "min_interval_sec": 0.34, "entered": True}
+    assert resource_locks.crawl_service_from_url("https://dblp.org/search/publ/api") == "dblp"
+    assert resource_locks.crawl_service_from_url("https://dblp.uni-trier.de/db/conf/kdd/") == "dblp"
+    assert resource_locks.crawl_service_from_url("https://dblp.dagstuhl.de/db/conf/kdd/") == "dblp"
+    assert resource_locks.crawl_service_from_url("https://chatpaper.com/venues?id=1") == "chatpaper"
+
+
+def test_find_and_read_share_service_cooldown_state(monkeypatch, tmp_path):
+    from runtime import resource_locks
+
+    common = _load_reading_common()
+    monkeypatch.setattr(common, "_SERVICE_STATE_ROOT", tmp_path)
+    with resource_locks.crawl_service_slot("openreview", state_root=tmp_path) as gate:
+        gate.update({"cooldown_sec": 5.0, "cooldown_reason": "test_shared_cooldown"})
+
+    assert common.service_cooldown_remaining("openreview") > 0
+
+
 def test_reading_http_client_classifies_biorxiv_service():
     http_client = _load_reading_common()
 
@@ -380,8 +438,9 @@ def test_reading_official_conference_hosts_are_single_request_services():
     assert http_client.service_from_url("https://api2.openreview.net/notes?id=paper") == "openreview"
     assert http_client.service_from_url("https://iclr.cc/virtual/2026/papers.html") == "iclr"
     assert http_client.service_from_url("https://icml.cc/virtual/2026/poster/61459") == "icml"
-    for service in ["openreview", "iclr", "icml"]:
-        assert http_client.SERVICE_MIN_INTERVAL_SEC[service] >= 10.0
+    assert http_client.SERVICE_MIN_INTERVAL_SEC["openreview"] >= 1.0
+    for service in ["iclr", "icml"]:
+        assert http_client.SERVICE_MIN_INTERVAL_SEC[service] >= 3.0
     assert not hasattr(conference_sources, "crawl_conference_channel")
     assert not hasattr(conference_sources, "conference_channel_report")
 
@@ -1971,6 +2030,26 @@ def test_reading_batch_requeues_cooldown_papers_once_with_one_recovery_worker(mo
     _cleanup_reading_output(run_id)
 
 
+def test_reading_batch_requeue_defers_when_service_cooldown_exceeds_wait_cap(monkeypatch):
+    read_pipeline = _load_reading_pipeline()
+    monkeypatch.setattr(read_pipeline, "service_cooldown_remaining", lambda _service: 120.0)
+    monkeypatch.setattr(read_pipeline, "batch_cooldown_wait_cap", lambda _service: 10.0)
+    monkeypatch.setattr(read_pipeline.time, "sleep", lambda _seconds: (_ for _ in ()).throw(AssertionError("must not sleep past the wait cap")))
+
+    result = read_pipeline._wait_for_cooldown_requeue(
+        {"arxiv"},
+        log=lambda _message: None,
+        should_cancel=lambda: False,
+        wait_cap_sec=200.0,
+    )
+
+    assert result["ready"] is False
+    assert result["reason"] == "cooldown_exceeds_service_wait_cap"
+    assert result["wait_cap_sec"] == 200.0
+    assert result["remaining_by_service"] == {"arxiv": 120.0}
+    assert result["wait_caps"] == {"arxiv": 10.0}
+
+
 def test_reading_batch_does_not_wait_or_requeue_when_cooldown_exceeds_run_budget(monkeypatch, isolated_reading_latest_run):
     monkeypatch.setenv("READING_DISABLE_ARTICLE_CACHE", "1")
     read_pipeline = _load_reading_pipeline()
@@ -2035,6 +2114,7 @@ def test_reading_batch_does_not_wait_or_requeue_when_cooldown_exceeds_run_budget
         "status": "complete_with_skipped_long_cooldown",
         "attempted_paper_count": 0,
         "skipped_long_cooldown_count": 1,
+        "deferred_paper_count": 1,
         "recovered_full_text_count": 0,
         "worker_count": 0,
         "services": ["openalex"],
@@ -7464,7 +7544,7 @@ def test_find_dblp_request_uses_official_mirror_after_transient_failure(monkeypa
         return FakeResponse(503 if len(calls) == 1 else 200, url)
 
     monkeypatch.setattr(find_support, "_dblp_wait_for_request_slot", lambda: None)
-    monkeypatch.setattr(find_support.requests, "get", fake_get)
+    monkeypatch.setattr(find_support, "finding_service_get", fake_get)
 
     response = find_support._dblp_request("https://dblp.org/search/publ/api", max_attempts=3)
 
@@ -7491,8 +7571,8 @@ def test_find_dblp_long_retry_after_defers_without_mirror_bypass(monkeypatch):
     monkeypatch.setattr(find_support, "_DBLP_NEXT_REQUEST_AT", 0.0)
     monkeypatch.setattr(find_support, "_DBLP_COOLDOWN_UNTIL", 0.0)
     monkeypatch.setattr(
-        find_support.requests,
-        "get",
+        find_support,
+        "finding_service_get",
         lambda url, **_kwargs: calls.append(url) or RateLimitedResponse(),
     )
 
@@ -7650,6 +7730,23 @@ def test_find_chatpaper_respects_robots_crawl_delay(monkeypatch):
     monkeypatch.setenv("CHATPAPER_REQUEST_SPACING_SEC", "12.5")
     assert find_support._chatpaper_request_spacing_sec() == 12.5
 
+    calls = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(find_support, "_chatpaper_wait_for_request_slot", lambda: calls.append("local_wait"))
+    monkeypatch.setattr(
+        find_support,
+        "finding_service_get",
+        lambda url, **_kwargs: calls.append(("shared_get", url)) or Response(),
+    )
+
+    find_support._chatpaper_request("https://chatpaper.com/venues?id=1")
+
+    assert calls == ["local_wait", ("shared_get", "https://chatpaper.com/venues?id=1")]
+
 
 def test_find_openalex_batch_stops_immediately_on_first_429(monkeypatch):
     _load_find_pipeline()
@@ -7667,7 +7764,7 @@ def test_find_openalex_batch_stops_immediately_on_first_429(monkeypatch):
     monkeypatch.setattr(find_support, "_load_openalex_cache", lambda: {})
     monkeypatch.setattr(find_support, "_save_openalex_cache", lambda _cache: None)
     monkeypatch.setattr(find_support, "_refresh_acm_doi_abstract_enrichment_audit", lambda *_args: None)
-    monkeypatch.setattr(find_support.requests, "get", lambda url, **_kwargs: calls.append(url) or Response())
+    monkeypatch.setattr(find_support, "finding_service_get", lambda url, **_kwargs: calls.append(url) or Response())
     monkeypatch.setattr(find_support.time, "sleep", lambda *_args: (_ for _ in ()).throw(AssertionError("429 must not wait")))
     papers = [
         {"title": f"Paper {index}", "doi": f"10.1145/1.{index}", "abstract": ""}
@@ -7692,7 +7789,7 @@ def test_find_openalex_title_fallback_stops_batch_on_first_429(monkeypatch):
 
     monkeypatch.setattr(find_support, "_load_openalex_cache", lambda: {})
     monkeypatch.setattr(find_support, "_save_openalex_cache", lambda _cache: None)
-    monkeypatch.setattr(find_support.requests, "get", lambda url, **_kwargs: calls.append(url) or Response())
+    monkeypatch.setattr(find_support, "finding_service_get", lambda url, **_kwargs: calls.append(url) or Response())
     papers = [
         {"title": "First paper", "doi": "10.1145/1.1", "abstract": ""},
         {"title": "Second paper", "doi": "10.1145/1.2", "abstract": ""},
@@ -7715,7 +7812,7 @@ def test_find_semantic_scholar_stops_batch_on_first_429(monkeypatch):
 
     monkeypatch.setattr(find_support, "_load_semantic_scholar_cache", lambda: {})
     monkeypatch.setattr(find_support, "_save_semantic_scholar_cache", lambda _cache: None)
-    monkeypatch.setattr(find_support.requests, "get", lambda url, **_kwargs: calls.append(url) or Response())
+    monkeypatch.setattr(find_support, "finding_service_get", lambda url, **_kwargs: calls.append(url) or Response())
     monkeypatch.setattr(find_support.time, "sleep", lambda *_args: (_ for _ in ()).throw(AssertionError("429 must not wait")))
     papers = [
         {"title": "First paper", "doi": "10.1145/1.1", "abstract": ""},
@@ -7739,7 +7836,7 @@ def test_find_arxiv_title_fallback_stops_batch_on_first_429(monkeypatch):
         status_code = 429
 
     monkeypatch.setattr(find_support, "_arxiv_wait_for_request_slot", lambda: slots.append(True))
-    monkeypatch.setattr(find_support.requests, "get", lambda url, **_kwargs: calls.append(url) or Response())
+    monkeypatch.setattr(find_support, "finding_service_get", lambda url, **_kwargs: calls.append(url) or Response())
     papers = [{"title": "First paper"}, {"title": "Second paper"}]
 
     find_support.enrich_with_arxiv_title_match(papers, limit=2)
@@ -9583,6 +9680,14 @@ def test_find_preserves_natural_llm_recommendation_reason_without_template_rewri
     fixed_opener = "对当前研究方向来说，该论文提供可借鉴的方法结构、评测信号和实验设计参考，能够支持后续研究。"
     assert find_pipeline._recommendation_reason_has_generic_opener(fixed_opener, zh=True) is True
     assert find_pipeline._recommendation_reason_unusable(fixed_opener, zh=True) is True
+    natural_finding_reason_en = (
+        "The paper's findings provide reusable evidence for controlled protein generation and help compare conditioning strategies. "
+        "The authors find that structural constraints improve generation quality, which informs baseline and ablation choices. "
+        "Its conditioning mechanism, evaluation metrics, and experimental protocol are transferable to subsequent research."
+    )
+    assert find_pipeline._has_internal_find_public_text(natural_finding_reason_en, zh=False) is False
+    assert find_pipeline._recommendation_reason_unusable(natural_finding_reason_en, zh=False) is False
+    assert find_pipeline._has_internal_find_public_text("The Find stage produced this recommendation.", zh=False) is True
     assert find_pipeline.FINAL_LLM_SCORE_CACHE_PROMPT_POLICY == "final_title_abstract_prompt_v32_natural_recommendation_reason"
     source = (ROOT / "modules" / "finding" / "scripts" / "flow" / "pipeline.py").read_text(encoding="utf-8")
     assert "do not use a prescribed opening, generic research-direction boilerplate" in source
@@ -9612,7 +9717,7 @@ def test_find_arxiv_title_match_does_not_write_cross_run_cache(monkeypatch, tmp_
         def raise_for_status(self):
             return None
 
-    monkeypatch.setattr(find_support.requests, "get", lambda *_args, **_kwargs: FakeResponse())
+    monkeypatch.setattr(find_support, "finding_service_get", lambda *_args, **_kwargs: FakeResponse())
     papers = [{"title": "Universal Topic Retrieval for Research Workflows", "authors": ""}]
 
     find_support.enrich_with_arxiv_title_match(papers, limit=1)

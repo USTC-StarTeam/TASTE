@@ -59,7 +59,7 @@ modules/reading/config/reading.json
 modules/reading/config/read.env
 ```
 
-该文件统一保存 Reading 实际使用的本机环境变量。例如：
+该文件统一保存 Reading 实际使用的本机环境变量，并对本服务器上的所有用户生效。例如：
 
 ```bash
 OPENREVIEW_USERNAME=your_email@example.com
@@ -85,9 +85,9 @@ OPENREVIEW_PASSWORD=your_password
 | `READING_DISABLE_ARTICLE_CACHE=1` | 本次运行跳过文章级缓存。 |
 | `READING_DISABLE_RUNTIME_CACHE=1` | 本次运行重新获取全文材料。 |
 
-全文下载按服务或主机分别门控，不同渠道可由不同 Read worker 同时下载；同一渠道按自身请求间隔串行访问，跨 worker 和跨进程的并发上限为 `1`。收到 `403` 或 `429` 后会进入该渠道的共享冷却期，后续同渠道候选直接跳过。`read-workers` 也用于并行处理后续单篇精读。
+所有外部论文渠道都在共享的按已知服务或未知主机请求层排队；同一服务或主机跨 Find、Read worker 和跨进程并发上限为 `1`，不同渠道可以并行。arXiv API 保持至少 3 秒间隔；OpenReview 为 1 秒，ICLR/ICML 为 3 秒。收到 `429` 时优先严格使用服务端 `Retry-After`/额度重置时间，没有响应头时才使用分渠道短冷却；`403` 与 Cloudflare challenge 使用独立的分渠道冷却。批次补抓同时受对应渠道等待上限和全阶段 30 秒总预算约束，超过任一上限会留给后续任务重试，不会长期阻塞当前 Read。`read-workers` 也用于并行处理后续单篇精读。
 
-Jina、网页搜索和 GitHub 等可选后备源的进程内熔断按响应类型计算：`401/403` 或挑战页默认 300 秒；`429` 优先使用服务端 `Retry-After`，未提供时使用 120 秒。普通网络异常不会触发进程熔断。
+Jina、网页搜索和 GitHub 等可选后备源的进程内熔断按服务和响应类型计算：`429` 优先使用服务端等待时间；没有响应头时分别使用 10、30、60 秒。普通网络异常不会触发进程熔断。
 
 ## 网页使用
 

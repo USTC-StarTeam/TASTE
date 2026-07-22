@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import MarkdownIt from "markdown-it";
 import katex from "katex";
 import texmath from "markdown-it-texmath";
@@ -6,6 +6,7 @@ import "katex/dist/katex.min.css";
 import {
   Project,
   ProjectSummary,
+  AuthUser,
   Artifact,
   Config,
   Job,
@@ -24,16 +25,23 @@ import {
   getConfigMeta,
   getClaudeLatestResponse,
   getFrontendVersion,
+  getCurrentUser,
   getJobs,
   getRuns,
   getVenues,
   probeLLMConfig,
   patchIdea,
+  requestEmailVerification,
+  requestPasswordResetVerification,
+  resetPassword,
   updateIdeaMarkdown,
   updatePlanMarkdown,
   saveConfig,
   saveRuntime,
   saveProjectConfig,
+  login,
+  logout,
+  register,
   startProjectJob,
   startEmail,
   startFind,
@@ -214,9 +222,24 @@ const SCIENCE_JOURNAL_NAMES = Object.fromEntries([...SCIENCE_JOURNALS, ...SCIENC
 
 type Tab = "find" | "read" | "ideas" | "plan" | "environment" | "experiment" | "paperWrite";
 type Lang = "zh" | "en";
+type UiDisplayMode = "main" | "server";
 type ArtifactPanelSnapshot = { runId: string; artifacts: Artifact[] };
 type CurrentFindArtifactScope = "find" | "read" | "ideas" | "plan";
 type IdeaEditorDraft = { title: string; new_method: string; initial_experiment: string };
+
+// Built-in UI profile: "main" keeps the original full UI, while "server"
+// hides server-managed settings and temporarily unavailable stages.
+const UI_DISPLAY_MODE = "server" as UiDisplayMode;
+const SERVER_UNSUPPORTED_TABS = new Set<Tab>(["environment", "experiment", "paperWrite"]);
+const EMAIL_AUTO_STAGES = ["find", "read", "idea", "plan"] as const;
+
+function isServerDisplayMode() {
+  return UI_DISPLAY_MODE === "server";
+}
+
+function isUnsupportedTab(tab: Tab) {
+  return isServerDisplayMode() && SERVER_UNSUPPORTED_TABS.has(tab);
+}
 
 const markdownRenderer = new MarkdownIt({
   html: false,
@@ -1040,6 +1063,8 @@ const TEXT = {
     sendEmail: "发送邮件",
     sendingEmail: "发送中...",
     emailSubject: "邮件主题",
+    emailSent: "发送成功！",
+    emailSendFailed: "发送失败",
     emailReceiversHelp: "多个收件人用逗号或空格分隔。手动发送时可临时覆盖配置中的收件人。",
     artifactPath: "文件位置",
     openPdf: "打开 PDF",
@@ -1584,6 +1609,8 @@ const TEXT = {
     sendEmail: "Send Email",
     sendingEmail: "Sending...",
     emailSubject: "Email subject",
+    emailSent: "Sent successfully!",
+    emailSendFailed: "Send failed",
     emailReceiversHelp: "Separate multiple recipients with commas or spaces. Manual send can override config recipients.",
     artifactPath: "File location",
     openPdf: "Open PDF",
@@ -2250,14 +2277,14 @@ function canonicalJobStage(job: any) {
   const haystack = `${stage} ${phase} ${rawStage}`;
   if (stage === "literature" || (stage === "find" && phase === "literature")) return "find";
   if (stage === "plan-polish") return "plan";
-  if (stage === "email") return "paper";
+  if (stage === "email") return "email";
   if (PUBLIC_STAGES.includes(stage)) return stage;
   if (haystack.includes("find") || haystack.includes("literature")) return "find";
   if (haystack.includes("read")) return "read";
   if (haystack.includes("idea") || haystack.includes("ideation")) return "idea";
   if (haystack.includes("plan")) return "plan";
   if (/(environment|loader|reference|fresh-base|base-selection|research-base-selection|safe-unblock)/.test(haystack)) return "environment";
-  if (/(paper-pipeline|paper-preview|paper-figure|conference-preview|latex|email)/.test(haystack)) return "paper";
+  if (/(paper-pipeline|paper-preview|paper-figure|conference-preview|latex)/.test(haystack)) return "paper";
   if (/(experiment|autonomous|trajectory|evidence|blocker|research|guidance|full-cycle|full-research-cycle|paper-evidence-audit|paper-normality-audit|submission-readiness)/.test(haystack)) return "experiment";
   return "experiment";
 }
@@ -2529,6 +2556,7 @@ function publicStatusText(value: any, lang: Lang = "zh") {
 function publicLogLineText(line: string, lang: Lang, contextTab?: Tab) {
   const text = String(line || "").trim();
   if (!text) return "";
+  if (isServerDisplayMode() && (contextTab === "find" || contextTab === "read") && containsDisplayedFilePath(text)) return "";
   const lowered = text.toLowerCase();
   const referenceReproductionLine = lowered.includes("selected-base full reference reproduction") || lowered.includes("selected-base full reproduction");
   if (referenceReproductionLine) {
@@ -2612,10 +2640,11 @@ function stableJobProgressSummary(job: any, lang: Lang = "zh") {
   return `${phase} ${status}`;
 }
 
-function displayJobProgressMessage(job: any, lang: Lang = "zh") {
+function displayJobProgressMessage(job: any, lang: Lang = "zh", contextTab?: Tab) {
   if (isHistoricalStoppedResearchCycleJob(job)) return historicalResearchCycleSummary(job, lang)[0].replace(/^[^:：]+[:：]\s*/, "");
   const message = String(job?.progress?.message || "").trim();
   if (!message) return "";
+  if (isServerDisplayMode() && (contextTab === "find" || contextTab === "read") && containsDisplayedFilePath(message)) return stableJobProgressSummary(job, lang);
   const containsTasteLog = message.includes("[TASTE]") || message.startsWith("find_activity=");
   if (!containsTasteLog && !isTransientFindServiceLine(message)) return publicJobMessageText(job, lang);
   const prefix = containsTasteLog ? message.slice(0, Math.max(0, message.indexOf("[TASTE]")).valueOf()).trim().replace(/[；;]\s*$/, "") : "";
@@ -2734,7 +2763,7 @@ function jobDisplayTitle(job: any, lang: Lang) {
     idea: { zh: "idea", en: "idea" },
     plan: { zh: "plan", en: "plan" },
     "plan-polish": { zh: "plan", en: "plan" },
-    email: { zh: "paper", en: "paper" },
+    email: { zh: "email", en: "email" },
     literature: { zh: "find", en: "find" },
     environment: { zh: "environment", en: "environment" },
     experiment: { zh: "experiment", en: "experiment" },
@@ -3206,6 +3235,19 @@ function normalizeJobForState(job: any): Job | null {
   };
 }
 
+function mergeFindJobSnapshot(previous: Job | undefined, next: Job) {
+  if (!previous || !isFindRunJob(next) || runIdFromJob(previous) !== runIdFromJob(next)) return next;
+  const previousProgress = previous.result?.find_progress;
+  return {
+    ...next,
+    result: {
+      ...(next.result || {}),
+      project: previous.result?.project || next.result?.project,
+      find_progress: next.result?.find_progress || previousProgress,
+    },
+  };
+}
+
 function isConfirmedLiveProcess(row: any) {
   if (!row || typeof row !== "object") return false;
   const status = String(row.status || "").toLowerCase();
@@ -3350,6 +3392,22 @@ function isPathLikeText(value: any): boolean {
   const text = String(value ?? "").trim();
   if (!text) return false;
   return /^\/[^\s]+/.test(text) || /^~\/[^\s]+/.test(text) || /^[A-Za-z]:[\\/][^\s]+/.test(text);
+}
+
+function containsDisplayedFilePath(value: any): boolean {
+  const text = String(value ?? "").trim();
+  if (!text) return false;
+  const labeledPath = /(?:文件(?:路径|位置)|本地(?:文件)?路径|file\s*(?:path|location)|artifact\s*path|output\s*path|log\s*path|\bpath)\s*[:：=]/i;
+  const unixPath = /(?:^|[\s"'`(=：:])(?:~\/|\/(?:home|tmp|var|opt|mnt|media|srv|root|workspace|Users|data|projects|framework|modules|web|state|runs)\/)[^\s"'`，；;,)\]]+/;
+  const windowsPath = /(?:^|[\s"'`(=：:])[A-Za-z]:[\\/][^\s"'`，；;,)\]]+/;
+  return labeledPath.test(text) || unixPath.test(text) || windowsPath.test(text);
+}
+
+function withoutDisplayedFilePathLines(value: any): string {
+  return String(value ?? "")
+    .split(/\r?\n/)
+    .filter((line) => !containsDisplayedFilePath(line))
+    .join("\n");
 }
 
 function publicArtifactPath(value: any, fallback = "", lang: Lang = "zh"): string {
@@ -3632,14 +3690,14 @@ function initialTabFromLocation(): Tab {
   const params = new URLSearchParams(window.location.search);
   const raw = params.get("tab") || params.get("stage") || localStorage.getItem("active_tab") || "find";
   const normalized = raw === "paper" || raw === "paper-write" || raw === "paper_write" ? "paperWrite" : raw === "idea" ? "ideas" : raw;
-  return allowed.has(normalized as Tab) ? normalized as Tab : "find";
+  return allowed.has(normalized as Tab) && !isUnsupportedTab(normalized as Tab) ? normalized as Tab : "find";
 }
 
 function tabUrlValue(tab: Tab) {
   return tab;
 }
 
-function App() {
+function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => void }) {
   const [tab, setTabState] = useState<Tab>(() => initialTabFromLocation());
   const [lang, setLang] = useState<Lang>(() => (localStorage.getItem("ui_lang") as Lang) || (localStorage.getItem("auto_research_lang") as Lang) || "zh");
   const [config, setConfig] = useState<Config>(DEFAULT_CONFIG);
@@ -3743,10 +3801,12 @@ function App() {
   const [activeArtifact, setActiveArtifact] = useState("");
   const [emailReceiversOverride, setEmailReceiversOverride] = useState("");
   const [emailSubject, setEmailSubject] = useState("");
+  const [emailSendState, setEmailSendState] = useState<"idle" | "sending" | "success" | "error">("idle");
   const t = TEXT[lang];
   const unsavedLLMConfigDraft = hasUnsavedLLMConfigDraft(config);
 
   function setTab(nextTab: Tab) {
+    if (isUnsupportedTab(nextTab)) return;
     setTabState(nextTab);
     localStorage.setItem("active_tab", nextTab);
     const params = new URLSearchParams(window.location.search);
@@ -3771,7 +3831,7 @@ function App() {
       const jobData = await getJobs(activeId);
       if ((options.isCurrent && !options.isCurrent()) || activeProjectRef.current !== activeId) return;
       const visibleJobData = jobsForProjectResponse(jobData, activeId);
-      setJobs(visibleJobData);
+      setJobs((prev) => visibleJobData.map((item) => mergeFindJobSnapshot(prev.find((current) => current.job_id === item.job_id), item)));
       jobsLoadedAtRef.current[activeId] = Date.now();
       setJobsLoaded(true);
       visibleJobData.filter(isWatchableWebJob).forEach((item) => watchExistingJob(item.job_id));
@@ -4048,7 +4108,8 @@ function App() {
     if (activeFindArtifactsInFlightRef.current === id) return;
     activeFindArtifactsInFlightRef.current = id;
     try {
-      const data = await getArtifacts(id, { light: true });
+      const project = activeProjectRef.current || researchProject || "";
+      const data = await getArtifacts(id, { light: true, scope: "find", project: project || undefined });
       setActiveFindArtifacts(data.artifacts);
     } catch {
       setActiveFindArtifacts([]);
@@ -4205,6 +4266,14 @@ function App() {
     setSaveMessage("");
   }
 
+  function updateAutoEmailStage(stage: string, checked: boolean) {
+    const current = asArray(config.email?.auto_send_stages).map(String);
+    updateEmailConfig(
+      "auto_send_stages",
+      checked ? [...new Set([...current, stage])] : current.filter((item) => item !== stage),
+    );
+  }
+
   function updateRuntimeDraft(key: string, value: any) {
     setResearchRuntimeDraft((prev) => ({ ...prev, [key]: value }));
     setResearchRuntimeMessage("");
@@ -4315,7 +4384,7 @@ function App() {
     if (!normalizedJob) return;
     setJobs((prev) => {
       const exists = prev.some((item) => item.job_id === normalizedJob.job_id);
-      const merged = exists ? prev.map((item) => item.job_id === normalizedJob.job_id ? normalizedJob : item) : [normalizedJob, ...prev];
+      const merged = exists ? prev.map((item) => item.job_id === normalizedJob.job_id ? mergeFindJobSnapshot(item, normalizedJob) : item) : [normalizedJob, ...prev];
       return jobsForProject(merged, activeProjectRef.current || researchProject || "");
     });
   }
@@ -6302,7 +6371,7 @@ function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [activeFindRunId, activeFindJobForRun]);
+  }, [activeFindRunId, activeFindJobForRun?.job_id]);
 
   useEffect(() => {
     if (!currentProjectFindRunId || activeFindRunId || userSelectedRunRef.current) return;
@@ -6700,20 +6769,21 @@ function App() {
 
   function artifactPanelContent(artifact: any, options: { raw?: boolean } = {}) {
     const rawContent = String(artifact?.content ?? "");
-    if (artifact?.name === "idea.md") return rawContent;
+    const forCurrentTab = (content: string) => isServerDisplayMode() && (tab === "find" || tab === "read") ? withoutDisplayedFilePathLines(content) : content;
+    if (artifact?.name === "idea.md") return forCurrentTab(rawContent);
     const localizedContent = lang === "zh"
       ? String(artifact?.content_zh ?? artifact?.content ?? "")
       : String(artifact?.content_en ?? artifact?.content ?? "");
     if (artifact?.name === "source_status.md") {
       const structuredRows = expandedSourceStatusRows(findResults || findProgress);
       const localizedSourceStatus = sourceStatusArtifactMarkdown(structuredRows, lang);
-      if (localizedSourceStatus) return options.raw ? publicMarkdownArtifact(localizedSourceStatus) : localizedSourceStatus;
+      if (localizedSourceStatus) return forCurrentTab(options.raw ? publicMarkdownArtifact(localizedSourceStatus) : localizedSourceStatus);
     }
-    if (options.raw) return publicMarkdownArtifact(rawContent);
+    if (options.raw) return forCurrentTab(publicMarkdownArtifact(rawContent));
     if (artifact?.name !== "find.md" && lang === "en" && containsCJKText(localizedContent)) {
       return "This artifact is authored in Chinese by a module controller. The structured English projection for this step is shown above; use Raw to inspect the original artifact. No scientific status is changed by this display fallback.";
     }
-    return publicLogText(localizedContent, lang);
+    return forCurrentTab(publicLogText(localizedContent, lang));
   }
 
 
@@ -7337,23 +7407,27 @@ function App() {
 
   async function runEmail() {
     const artifactRunId = renderedRunArtifactsRunId || runId;
-    if (!artifactRunId) return;
+    if (!artifactRunId || emailSendState === "sending") return;
     try {
+      setEmailSendState("sending");
       setError("");
       const nextConfig = configWithCurrentFindSelection();
       await saveConfig(nextConfig);
       setConfig(nextConfig);
       const receivers = emailReceiversOverride.trim() ? splitList(emailReceiversOverride) : [];
-      const artifactNames = visibleRunArtifacts.map((artifact) => artifact.name);
-      const nextJob = await startEmail({
+      const artifactScope = tab === "ideas" ? "idea" : tab === "paperWrite" ? "paper" : tab;
+      const artifactNames = renderedRunArtifacts.map((artifact) => artifact.name);
+      await startEmail({
         run_id: artifactRunId,
+        artifact_scope: artifactScope,
         artifact_names: artifactNames,
         receivers,
         subject: emailSubject,
-        include_ranking: true,
+        include_ranking: artifactScope === "find",
       });
-      attachJob(nextJob);
+      setEmailSendState("success");
     } catch (err) {
+      setEmailSendState("error");
       setError(String(err));
     }
   }
@@ -7375,6 +7449,10 @@ function App() {
             <h1>TASTE</h1>
             <p>{window.location.host}</p>
           </div>
+        </div>
+        <div className="accountBar">
+          <span title={account.username}>{account.username}</span>
+          <button className="smallButton" onClick={onLogout}>{lang === "zh" ? "退出" : "Sign out"}</button>
         </div>
         <div className="langSwitch" aria-label="Language">
           <button className={lang === "zh" ? "active" : ""} onClick={() => setLang("zh")}>{t.languageChinese}</button>
@@ -7452,33 +7530,56 @@ function App() {
           </div>
           <details className="roleSettings">
             <summary>{t.emailSettings}</summary>
-            <p className="help">{t.emailHelp}</p>
-            <label>{t.smtpServer}</label>
-            <input value={config.email.smtp_server} onChange={(e) => updateEmailConfig("smtp_server", e.target.value)} placeholder="smtp.example.com" />
-            <label>{t.smtpPort}</label>
-            <input value={config.email.smtp_port} onChange={(e) => updateEmailConfig("smtp_port", Number(e.target.value))} type="number" min="1" />
-            <label>{t.emailSender}</label>
-            <input value={config.email.sender} onChange={(e) => updateEmailConfig("sender", e.target.value)} placeholder="sender@example.com" />
+            {!isServerDisplayMode() && (
+              <>
+                <p className="help">{t.emailHelp}</p>
+                <label>{t.smtpServer}</label>
+                <input value={config.email.smtp_server} onChange={(e) => updateEmailConfig("smtp_server", e.target.value)} placeholder="smtp.example.com" />
+                <label>{t.smtpPort}</label>
+                <input value={config.email.smtp_port} onChange={(e) => updateEmailConfig("smtp_port", Number(e.target.value))} type="number" min="1" />
+                <label>{t.emailSender}</label>
+                <input value={config.email.sender} onChange={(e) => updateEmailConfig("sender", e.target.value)} placeholder="sender@example.com" />
+              </>
+            )}
             <label>{t.emailReceivers}</label>
-            <p className="help">{t.emailReceiversHelp}</p>
+            {!isServerDisplayMode() && <p className="help">{t.emailReceiversHelp}</p>}
             <input value={asArray(config.email?.receivers).join(", ")} onChange={(e) => updateEmailConfig("receivers", splitList(e.target.value))} placeholder="receiver@example.com" />
-            <label>{t.smtpPassword}</label>
-            <input value={config.email.smtp_password || ""} onChange={(e) => updateEmailConfig("smtp_password", e.target.value)} placeholder={config.email.smtp_password_saved ? (lang === "zh" ? "已保存，输入新密码替换" : "Saved, enter a new password to replace") : ""} type="password" autoComplete="new-password" />
-            {config.email.smtp_password_saved && !config.email.smtp_password && <p className="help">{savedSecretHint(config.email.smtp_password_saved)}</p>}
-            <label className="switch">
-              <input type="checkbox" checked={config.email.manual_enabled} onChange={(e) => updateEmailConfig("manual_enabled", e.target.checked)} />
-              {t.sendEmail}
-            </label>
+            {!isServerDisplayMode() && (
+              <>
+                <label>{t.smtpPassword}</label>
+                <input value={config.email.smtp_password || ""} onChange={(e) => updateEmailConfig("smtp_password", e.target.value)} placeholder={config.email.smtp_password_saved ? (lang === "zh" ? "已保存，输入新密码替换" : "Saved, enter a new password to replace") : ""} type="password" autoComplete="new-password" />
+                {config.email.smtp_password_saved && !config.email.smtp_password && <p className="help">{savedSecretHint(config.email.smtp_password_saved)}</p>}
+                <label className="switch">
+                  <input type="checkbox" checked={config.email.manual_enabled} onChange={(e) => updateEmailConfig("manual_enabled", e.target.checked)} />
+                  {t.sendEmail}
+                </label>
+              </>
+            )}
             <label className="switch">
               <input type="checkbox" checked={config.email.auto_send_enabled} onChange={(e) => updateEmailConfig("auto_send_enabled", e.target.checked)} />
               {t.autoEmail}
             </label>
             <label>{t.autoEmailStages}</label>
-            <input value={asArray(config.email?.auto_send_stages).join(", ")} onChange={(e) => updateEmailConfig("auto_send_stages", splitList(e.target.value))} placeholder="find, read, idea, plan" />
+            {isServerDisplayMode() ? (
+              <div className="checkGrid">
+                {EMAIL_AUTO_STAGES.map((stage) => (
+                  <label className="checkItem" key={stage}>
+                    <input
+                      type="checkbox"
+                      checked={asArray(config.email?.auto_send_stages).includes(stage)}
+                      onChange={(e) => updateAutoEmailStage(stage, e.target.checked)}
+                    />
+                    <span>{stage}</span>
+                  </label>
+                ))}
+              </div>
+            ) : (
+              <input value={asArray(config.email?.auto_send_stages).join(", ")} onChange={(e) => updateEmailConfig("auto_send_stages", splitList(e.target.value))} placeholder="find, read, idea, plan" />
+            )}
           </details>
         </details>
 
-        {renderARRuntimePanel()}
+        {!isServerDisplayMode() && renderARRuntimePanel()}
 
         <details className="panel runs sidebarDetails">
           <summary><span>{t.runs}</span><small>{runId || (lang === "zh" ? "未选择" : "none")}</small></summary>
@@ -7501,11 +7602,15 @@ function App() {
 
       <section className="workspace">
         <nav className="tabs">
-          {(["find", "read", "ideas", "plan", "environment", "experiment", "paperWrite"] as Tab[]).map((item) => (
-            <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>
-              {t[item]}
-            </button>
-          ))}
+          {(["find", "read", "ideas", "plan", "environment", "experiment", "paperWrite"] as Tab[]).map((item) => {
+            const unsupported = isUnsupportedTab(item);
+            if (unsupported) return (
+              <span className="unsupportedTabHint" title="暂不支持" key={item}>
+                <button disabled title="暂不支持">{t[item]}</button>
+              </span>
+            );
+            return <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{t[item]}</button>;
+          })}
         </nav>
 
         {error && <div className="error">{error}</div>}
@@ -8280,7 +8385,7 @@ function App() {
                     detail: `${lang === "zh" ? "具体步骤" : "Step"}：${detailedFindProgress.stepLabel} · ${lang === "zh" ? "正在进行" : "Now"}：${detailedFindProgress.action}`,
                     ariaLabel: lang === "zh" ? "Find 当前阶段进度" : "Current Find stage progress",
                   } : item.progress ? {
-                    message: readScoring ? jobProgressPhaseLabel(item, lang) : displayJobProgressMessage(item, lang),
+                    message: readScoring ? jobProgressPhaseLabel(item, lang) : displayJobProgressMessage(item, lang, tab),
                     percent: progressPercent,
                     measured: progressTotal > 0,
                     detail: readScoring ? "" : progressTotal > 0
@@ -8336,7 +8441,12 @@ function App() {
                 <div className="emailBox">
                   <input value={emailSubject} onChange={(e) => setEmailSubject(e.target.value)} placeholder={t.emailSubject} />
                   <input value={emailReceiversOverride} onChange={(e) => setEmailReceiversOverride(e.target.value)} placeholder={t.emailReceivers} />
-                  <button className="primary" onClick={runEmail} disabled={!renderedRunArtifactsRunId || !config.email.manual_enabled}>{t.sendEmail}</button>
+                  <div className="emailSendAction">
+                    <button className="primary" onClick={runEmail} disabled={!renderedRunArtifactsRunId || emailSendState === "sending" || (!isServerDisplayMode() && !config.email.manual_enabled)}>{t.sendEmail}</button>
+                    {emailSendState === "sending" && <span className="emailSendStatus">{t.sendingEmail}</span>}
+                    {emailSendState === "success" && <span className="emailSendStatus success">{t.emailSent}</span>}
+                    {emailSendState === "error" && <span className="emailSendStatus error">{t.emailSendFailed}</span>}
+                  </div>
                 </div>
                 <div className="artifactTabs">
                   {renderedRunArtifacts.map((artifact) => (
@@ -8347,7 +8457,7 @@ function App() {
                 </div>
                 {currentArtifact && (
                   <div className="artifactView">
-                    {currentArtifact.path && (
+                    {currentArtifact.path && (!isServerDisplayMode() || (tab !== "find" && tab !== "read")) && (
                       <p className="artifactPath"><strong>{t.artifactPath}:</strong> {publicArtifactPath(currentArtifact.path, "", lang)}</p>
                     )}
                     <div className="artifactToggle">
@@ -8380,6 +8490,252 @@ function App() {
       </section>
     </main>
   );
+}
+
+function authErrorMessage(error: unknown) {
+  const raw = String(error || "");
+  const jsonStart = raw.indexOf("{");
+  if (jsonStart >= 0) {
+    try {
+      const payload = JSON.parse(raw.slice(jsonStart));
+      if (payload?.error) return String(payload.error);
+    } catch {
+      // Keep the original network error when the response is not JSON.
+    }
+  }
+  return raw.replace(/^Error:\s*/, "") || "请求失败，请稍后重试。";
+}
+
+function App() {
+  const [account, setAccount] = useState<AuthUser | null | undefined>(undefined);
+  const [mode, setMode] = useState<"login" | "register" | "reset">("login");
+  const [identifier, setIdentifier] = useState("");
+  const [registerUsername, setRegisterUsername] = useState("");
+  const [email, setEmail] = useState("");
+  const [verificationCode, setVerificationCode] = useState("");
+  const [resetEmail, setResetEmail] = useState("");
+  const [resetVerificationCode, setResetVerificationCode] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [registerPassword, setRegisterPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [resetPasswordValue, setResetPasswordValue] = useState("");
+  const [resetConfirmPassword, setResetConfirmPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [authNotice, setAuthNotice] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [sendingCode, setSendingCode] = useState(false);
+  const [registerCodeRetryAfter, setRegisterCodeRetryAfter] = useState(0);
+  const [resetCodeRetryAfter, setResetCodeRetryAfter] = useState(0);
+
+  useEffect(() => {
+    void getCurrentUser()
+      .then(setAccount)
+      .catch((error) => {
+        setAuthError(authErrorMessage(error));
+        setAccount(null);
+      });
+    const requireAuth = () => setAccount(null);
+    window.addEventListener("taste:auth-required", requireAuth);
+    return () => window.removeEventListener("taste:auth-required", requireAuth);
+  }, []);
+
+  useEffect(() => {
+    if (registerCodeRetryAfter <= 0 && resetCodeRetryAfter <= 0) return;
+    const timer = window.setInterval(() => {
+      setRegisterCodeRetryAfter((value) => Math.max(0, value - 1));
+      setResetCodeRetryAfter((value) => Math.max(0, value - 1));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [registerCodeRetryAfter, resetCodeRetryAfter]);
+
+  function switchAuthMode(nextMode: "login" | "register" | "reset") {
+    setMode(nextMode);
+    setAuthError("");
+    setAuthNotice("");
+  }
+
+  async function sendVerificationCode(purpose: "register" | "password_reset") {
+    const resetting = purpose === "password_reset";
+    const emailInput = document.getElementById(resetting ? "auth-reset-email" : "auth-email") as HTMLInputElement | null;
+    if (!emailInput?.reportValidity()) return;
+    setSendingCode(true);
+    setAuthError("");
+    setAuthNotice("");
+    try {
+      const response = resetting
+        ? await requestPasswordResetVerification(resetEmail.trim())
+        : await requestEmailVerification(email.trim());
+      const retryAfter = Math.max(1, response.retry_after || 60);
+      if (resetting) setResetCodeRetryAfter(retryAfter);
+      else setRegisterCodeRetryAfter(retryAfter);
+      setAuthNotice("验证码已发送，请查看邮箱。");
+    } catch (error) {
+      setAuthError(authErrorMessage(error));
+    } finally {
+      setSendingCode(false);
+    }
+  }
+
+  async function submitAuth(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (mode === "register" && registerPassword !== confirmPassword) {
+      setAuthError("两次输入的密码不一致。");
+      return;
+    }
+    if (mode === "reset" && resetPasswordValue !== resetConfirmPassword) {
+      setAuthError("两次输入的密码不一致。");
+      return;
+    }
+    setSubmitting(true);
+    setAuthError("");
+    setAuthNotice("");
+    try {
+      if (mode === "reset") {
+        await resetPassword(resetEmail, resetPasswordValue, resetVerificationCode);
+        setIdentifier(resetEmail.trim());
+        setResetVerificationCode("");
+        setResetPasswordValue("");
+        setResetConfirmPassword("");
+        setResetCodeRetryAfter(0);
+        setMode("login");
+        setAuthNotice("密码已重置，请使用新密码登录。");
+        return;
+      }
+      const response = mode === "login"
+        ? await login(identifier, loginPassword)
+        : await register(registerUsername, email, registerPassword, verificationCode);
+      localStorage.removeItem("selected_project");
+      setAccount(response.user);
+      setLoginPassword("");
+      setRegisterPassword("");
+      setConfirmPassword("");
+    } catch (error) {
+      setAuthError(authErrorMessage(error));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function signOut() {
+    try {
+      await logout();
+    } finally {
+      localStorage.removeItem("selected_project");
+      setAccount(null);
+    }
+  }
+
+  if (account === undefined) {
+    return <main className="authShell"><section className="authCard"><div className="authMark">T</div><p>正在连接 TASTE…</p></section></main>;
+  }
+
+  if (!account) {
+    return (
+      <main className="authShell">
+        <section className="authCard">
+          <div className="authHeading">
+            <div className="authMark">T</div>
+            <div><h1>TASTE</h1></div>
+          </div>
+          {mode === "reset" ? (
+            <div className="authResetHeading">
+              <h2>重置密码</h2>
+              <p>使用注册邮箱验证身份</p>
+            </div>
+          ) : (
+            <div className="authTabs">
+              <button type="button" className={mode === "login" ? "active" : ""} onClick={() => switchAuthMode("login")}>登录</button>
+              <button type="button" className={mode === "register" ? "active" : ""} onClick={() => switchAuthMode("register")}>注册</button>
+            </div>
+          )}
+          <form onSubmit={submitAuth}>
+            {mode === "login" ? (
+              <>
+                <label htmlFor="auth-identifier">用户名或邮箱</label>
+                <input id="auth-identifier" value={identifier} onChange={(event) => setIdentifier(event.target.value)} autoComplete="username" required maxLength={254} autoFocus />
+              </>
+            ) : mode === "register" ? (
+              <>
+                <label htmlFor="auth-username">用户名</label>
+                <input id="auth-username" value={registerUsername} onChange={(event) => setRegisterUsername(event.target.value)} autoComplete="username" required minLength={3} maxLength={64} autoFocus />
+                <label htmlFor="auth-email">邮箱</label>
+                <input id="auth-email" type="email" value={email} onChange={(event) => {
+                  setEmail(event.target.value);
+                  setVerificationCode("");
+                  setRegisterCodeRetryAfter(0);
+                  setAuthNotice("");
+                }} autoComplete="email" required maxLength={254} />
+                <label htmlFor="auth-verification-code">邮箱验证码</label>
+                <div className="authCodeRow">
+                  <input id="auth-verification-code" value={verificationCode} onChange={(event) => setVerificationCode(event.target.value.replace(/\D/g, "").slice(0, 6))} autoComplete="one-time-code" inputMode="numeric" pattern="[0-9]{6}" title="请输入 6 位验证码" required maxLength={6} />
+                  <button type="button" onClick={() => void sendVerificationCode("register")} disabled={sendingCode || registerCodeRetryAfter > 0}>
+                    {sendingCode ? "发送中…" : registerCodeRetryAfter > 0 ? `${registerCodeRetryAfter} 秒` : "获取验证码"}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <label htmlFor="auth-reset-email">注册邮箱</label>
+                <input id="auth-reset-email" type="email" value={resetEmail} onChange={(event) => {
+                  setResetEmail(event.target.value);
+                  setResetVerificationCode("");
+                  setResetCodeRetryAfter(0);
+                  setAuthNotice("");
+                }} autoComplete="email" required maxLength={254} autoFocus />
+                <label htmlFor="auth-reset-verification-code">邮箱验证码</label>
+                <div className="authCodeRow">
+                  <input id="auth-reset-verification-code" value={resetVerificationCode} onChange={(event) => setResetVerificationCode(event.target.value.replace(/\D/g, "").slice(0, 6))} autoComplete="one-time-code" inputMode="numeric" pattern="[0-9]{6}" title="请输入 6 位验证码" required maxLength={6} />
+                  <button type="button" onClick={() => void sendVerificationCode("password_reset")} disabled={sendingCode || resetCodeRetryAfter > 0}>
+                    {sendingCode ? "发送中…" : resetCodeRetryAfter > 0 ? `${resetCodeRetryAfter} 秒` : "获取验证码"}
+                  </button>
+                </div>
+              </>
+            )}
+            <label htmlFor={mode === "login" ? "auth-login-password" : mode === "register" ? "auth-register-password" : "auth-reset-password"}>{mode === "reset" ? "新密码" : "密码"}</label>
+            <input
+              key={mode}
+              id={mode === "login" ? "auth-login-password" : mode === "register" ? "auth-register-password" : "auth-reset-password"}
+              type="password"
+              value={mode === "login" ? loginPassword : mode === "register" ? registerPassword : resetPasswordValue}
+              onChange={(event) => mode === "login" ? setLoginPassword(event.target.value) : mode === "register" ? setRegisterPassword(event.target.value) : setResetPasswordValue(event.target.value)}
+              autoComplete={mode === "login" ? "current-password" : "new-password"}
+              required
+              minLength={8}
+              maxLength={128}
+            />
+            {mode === "login" && (
+              <div className="authForgotRow">
+                <button type="button" onClick={() => switchAuthMode("reset")}>忘记密码？</button>
+              </div>
+            )}
+            {mode === "register" && (
+              <>
+                <label htmlFor="auth-password-confirm">确认密码</label>
+                <input id="auth-password-confirm" type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} autoComplete="new-password" required minLength={8} maxLength={128} />
+              </>
+            )}
+            {mode === "reset" && (
+              <>
+                <label htmlFor="auth-reset-password-confirm">确认新密码</label>
+                <input id="auth-reset-password-confirm" type="password" value={resetConfirmPassword} onChange={(event) => setResetConfirmPassword(event.target.value)} autoComplete="new-password" required minLength={8} maxLength={128} />
+              </>
+            )}
+            {authError && <p className="authError" role="alert">{authError}</p>}
+            {authNotice && <p className="authNotice" role="status">{authNotice}</p>}
+            <button className="primary authSubmit" disabled={submitting}>{submitting ? "请稍候…" : mode === "login" ? "登录" : mode === "register" ? "创建账户" : "重置密码"}</button>
+          </form>
+          {mode === "register" && <p className="authHelp">验证码 10 分钟内有效；密码至少 8 个字符。</p>}
+          {mode === "reset" && (
+            <div className="authBackRow">
+              <button type="button" onClick={() => switchAuthMode("login")}>返回登录</button>
+            </div>
+          )}
+        </section>
+      </main>
+    );
+  }
+
+  return <TasteApp key={account.id} account={account} onLogout={() => void signOut()} />;
 }
 
 export default App;

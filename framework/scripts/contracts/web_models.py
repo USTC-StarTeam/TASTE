@@ -149,6 +149,7 @@ class VenueHealthRequest(BaseModel):
 
 class EmailJobRequest(BaseModel):
     run_id: str
+    artifact_scope: Literal["find", "read", "idea", "plan", "environment", "experiment", "paper"] = "find"
     artifact_names: list[str] = Field(default_factory=list)
     receivers: list[str] = Field(default_factory=list)
     subject: str = ""

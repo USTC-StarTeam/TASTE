@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,20 @@ DEFAULT_READING_ROOT = ROOT / "modules" / "reading"
 READING_POLICY_VERSION = "full_text_required_v5_detailed_deep_read"
 READING_SOURCE = "framework_current_find_read_adapter"
 DEFAULT_MAX_READ_PAPERS = 50
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temp = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def _timestamp_run_id() -> str:
@@ -937,11 +953,8 @@ def sync_current_find_read_outputs(
 
     _write_json(project_read_results, read_payload)
     _write_json(project_full_text, packet_payload)
-    _write_json(state_dir / "current_find_claude_reading_validation.json", validation)
-    _write_json(state_dir / "current_find_research_plan.json", plan_payload)
     if public_final:
-        project_read_md.parent.mkdir(parents=True, exist_ok=True)
-        project_read_md.write_text(read_md_text, encoding="utf-8")
+        _atomic_write_text(project_read_md, read_md_text)
     else:
         project_read_md.unlink(missing_ok=True)
 
@@ -957,6 +970,8 @@ def sync_current_find_read_outputs(
             shutil.rmtree(project_run_copy)
     project_run_copy.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(run_dir, project_run_copy, ignore=shutil.ignore_patterns("__pycache__"))
+    _write_json(state_dir / "current_find_claude_reading_validation.json", validation)
+    _write_json(state_dir / "current_find_research_plan.json", plan_payload)
     return {
         "status": status,
         "project": project,

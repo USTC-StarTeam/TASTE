@@ -16,7 +16,10 @@ if [[ -n "$CONDA_EXE" ]]; then
 fi
 ENV_NAME="${CONDA_ENV_NAME:-}"
 PORT="${WEB_PORT:-8879}"
-HOST="${WEB_HOST:-127.0.0.1}"
+HOST="${WEB_HOST:-0.0.0.0}"
+FORWARDED_ALLOW_IPS="${WEB_FORWARDED_ALLOW_IPS:-127.0.0.1}"
+SSL_CERTFILE="${WEB_SSL_CERTFILE:-}"
+SSL_KEYFILE="${WEB_SSL_KEYFILE:-}"
 
 activate_conda_env_if_available() {
   if [[ -z "$ENV_NAME" || -z "$CONDA" || ! -f "$CONDA/etc/profile.d/conda.sh" ]]; then
@@ -89,4 +92,22 @@ export MANAGEMENT_PYTHON="${MANAGEMENT_PYTHON:-$PYTHON}"
 PY_ROOTS=("$ROOT/framework" "$ROOT/web/backend" "$ROOT" "$ROOT/framework/scripts")
 PY_JOINED="$(IFS=:; echo "${PY_ROOTS[*]}")"
 export PYTHONPATH="$PY_JOINED${PYTHONPATH:+:$PYTHONPATH}"
-exec "$PYTHON" -m uvicorn auto_research.web.server:app --host "$HOST" --port "$PORT"
+UVICORN_ARGS=(
+  auto_research.web.server:app
+  --host "$HOST"
+  --port "$PORT"
+  --proxy-headers
+  --forwarded-allow-ips "$FORWARDED_ALLOW_IPS"
+)
+if [[ -n "$SSL_CERTFILE" || -n "$SSL_KEYFILE" ]]; then
+  if [[ -z "$SSL_CERTFILE" || -z "$SSL_KEYFILE" ]]; then
+    echo "WEB_SSL_CERTFILE and WEB_SSL_KEYFILE must be set together" >&2
+    exit 2
+  fi
+  if [[ ! -r "$SSL_CERTFILE" || ! -r "$SSL_KEYFILE" ]]; then
+    echo "HTTPS certificate or key is not readable" >&2
+    exit 2
+  fi
+  UVICORN_ARGS+=(--ssl-certfile "$SSL_CERTFILE" --ssl-keyfile "$SSL_KEYFILE")
+fi
+exec "$PYTHON" -m uvicorn "${UVICORN_ARGS[@]}"

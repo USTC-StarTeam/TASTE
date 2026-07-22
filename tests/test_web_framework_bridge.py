@@ -7,6 +7,7 @@ import io
 import json
 import os
 import sys
+import threading
 import time
 from contextlib import nullcontext
 from pathlib import Path
@@ -726,6 +727,7 @@ def test_web_find_request_passes_project_selection_to_framework(monkeypatch, tmp
     request = web_server.FindRequest(
         project="demo",
         config=web_server.AppConfig(
+            provider="mock",
             research_interest="protein design",
             arxiv_queries=["protein inverse folding"],
             nonvenue_fetch_limit=2400,
@@ -782,6 +784,65 @@ def test_web_find_request_passes_project_selection_to_framework(monkeypatch, tmp
     assert persisted_config["nonvenue_fetch_limit"] == 2400
     assert persisted_config["title_abstract_scoring_limit"] == 1800
     assert persisted_config["venue_title_scan_limit"] == 0
+
+
+def test_project_job_start_is_atomic_per_project_but_allows_other_accounts(monkeypatch):
+    from auto_research.web import server as web_server
+    from auto_research.web.auth import AuthUser
+
+    monkeypatch.setattr(web_server, "JOBS", {})
+    monkeypatch.setattr(web_server, "_persist_jobs", lambda: None)
+    monkeypatch.setattr(web_server, "_reconcile_stale_cancelling_jobs", lambda: None)
+    monkeypatch.setattr(web_server, "action_gate_blocker", lambda payload: None)
+    monkeypatch.setattr(web_server, "job_stage", lambda payload: "custom")
+    monkeypatch.setattr(web_server, "_project_stage_running_blocker", lambda payload, stage: None)
+    monkeypatch.setattr(
+        web_server,
+        "_account_project_id",
+        lambda value, require_exists=False: f"u_{web_server._current_account().id}__{value}",
+    )
+    release = threading.Event()
+
+    def fake_run_action(payload, _log, _should_cancel, _progress):
+        release.wait(timeout=10)
+        return {"status": "done", "project": payload["project"]}
+
+    monkeypatch.setattr(web_server, "run_action", fake_run_action)
+    alice = AuthUser(id="a" * 32, username="alice")
+    bob = AuthUser(id="b" * 32, username="bob")
+    project_job_endpoint = next(route.endpoint for route in web_server.app.routes if getattr(route, "path", "") == "/api/jobs/project")
+
+    def launch(account):
+        token = web_server._CURRENT_ACCOUNT.set(account)
+        try:
+            return project_job_endpoint({"project": "demo", "action": "custom"})
+        finally:
+            web_server._CURRENT_ACCOUNT.reset(token)
+
+    barrier = threading.Barrier(3)
+    same_project_results = []
+
+    def simultaneous_alice_launch():
+        barrier.wait(timeout=5)
+        same_project_results.append(launch(alice))
+
+    first = threading.Thread(target=simultaneous_alice_launch)
+    second = threading.Thread(target=simultaneous_alice_launch)
+    first.start()
+    second.start()
+    barrier.wait(timeout=5)
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert sorted(getattr(result, "status_code", 200) for result in same_project_results) == [200, 409]
+    bob_result = launch(bob)
+    assert getattr(bob_result, "status_code", 200) == 200
+    assert len(web_server.JOBS) == 2
+    assert {job.owner_id for job in web_server.JOBS.values()} == {alice.id, bob.id}
+
+    release.set()
+    for job in web_server.JOBS.values():
+        assert job.done.wait(timeout=5)
 
 
 def test_web_paper_chat_action_uses_writing_module(monkeypatch, tmp_path):
@@ -887,6 +948,25 @@ def test_project_bridge_runtime_env_overrides_are_llm_only():
     assert env["LLM_API_BASE"] == "https://llm.example/v1"
     assert "PATH" not in env
     assert "PYTHONPATH" not in env
+
+    service_env = {
+        "OPENAI_API_KEY": "service-openai-key",
+        "OPENAI_BASE_URL": "https://service-openai.test/v1",
+        "LLM_API_KEY": "service-llm-key",
+        "LLM_MODEL": "service-model",
+        "ANTHROPIC_API_KEY": "shared-claude-key",
+        "PATH": "/usr/bin",
+    }
+    isolated = project_bridge._apply_runtime_env_overrides(service_env, {
+        "runtime_env": {"FINDING_LLM_CONFIG": "/accounts/alice/llm.local.json"},
+    })
+    assert isolated["FINDING_LLM_CONFIG"] == "/accounts/alice/llm.local.json"
+    assert isolated["ANTHROPIC_API_KEY"] == "shared-claude-key"
+    assert isolated["PATH"] == "/usr/bin"
+    assert "OPENAI_API_KEY" not in isolated
+    assert "OPENAI_BASE_URL" not in isolated
+    assert "LLM_API_KEY" not in isolated
+    assert "LLM_MODEL" not in isolated
 
 
 def test_web_config_saves_llm_secret_to_local_finding_config(monkeypatch, tmp_path):
@@ -1904,6 +1984,39 @@ def test_web_job_finished_at_round_trips_and_survives_compaction(monkeypatch):
             assert compact["finished_at"] == job.finished_at
 
 
+def test_web_job_persistence_acquires_registry_lock_before_persistence_lock(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    events = []
+
+    class RecordingRLock:
+        def __init__(self, name):
+            self.name = name
+            self.lock = threading.RLock()
+
+        def __enter__(self):
+            self.lock.acquire()
+            events.append(("enter", self.name))
+            return self
+
+        def __exit__(self, _exc_type, _exc, _traceback):
+            events.append(("exit", self.name))
+            self.lock.release()
+
+    monkeypatch.setattr(web_server, "JOBS", {})
+    monkeypatch.setattr(web_server, "JOBS_PATH", tmp_path / "web_jobs.json")
+    monkeypatch.setattr(web_server, "JOBS_LOCK", RecordingRLock("registry"))
+    monkeypatch.setattr(web_server, "JOBS_PERSIST_LOCK", RecordingRLock("persistence"))
+
+    web_server._persist_jobs()
+
+    assert events[:3] == [
+        ("enter", "registry"),
+        ("enter", "persistence"),
+        ("enter", "registry"),
+    ]
+
+
 def test_web_find_read_idea_plan_error_compaction_keeps_specific_exception():
     from auto_research.web import server as web_server
 
@@ -2233,6 +2346,7 @@ def test_web_jobs_merges_live_find_worker_and_run_progress_into_primary_job(monk
 
 def test_web_find_websocket_keeps_live_merged_snapshot(monkeypatch):
     from auto_research.web import server as web_server
+    from auto_research.web.auth import AuthUser, SESSION_COOKIE
 
     projection = {
         "raw_phase": "abstract_scoring",
@@ -2265,6 +2379,9 @@ def test_web_find_websocket_keeps_live_merged_snapshot(monkeypatch):
         "progress": {"phase": "find", "current": 80, "total": 100, "percent": 80, "message": "NeurIPS: scoring batch 3/4"},
     }
     monkeypatch.setattr(web_server, "_live_jobs_from_projects", lambda **kwargs: [worker])
+    monkeypatch.setattr(web_server.AUTH_STORE, "user_for_session", lambda token: AuthUser(id="a" * 32, username="alice") if token == "session" else None)
+    monkeypatch.setattr(web_server, "_account_owns_job_payload", lambda payload: True)
+    monkeypatch.setattr(web_server, "_account_owns_job_state", lambda state: True)
     job = web_server.JobState("find_web", "find")
     job.status = "cancelled"
     job.run_id = "find_live"
@@ -2274,6 +2391,7 @@ def test_web_find_websocket_keeps_live_merged_snapshot(monkeypatch):
     class FakeWebSocket:
         def __init__(self):
             self.messages = []
+            self.cookies = {SESSION_COOKIE: "session"}
 
         async def accept(self):
             return None
@@ -2412,6 +2530,13 @@ def test_web_read_job_compaction_preserves_phase_progress_when_repeated():
     assert second_phase == first_phase
     assert first["progress"]["read_progress"]["current_stage"] == "deep_read"
     assert "阶段进度：读文章 0/2" in second["logs"]
+
+
+def test_web_read_progress_does_not_round_incomplete_work_to_one_hundred():
+    from auto_research.web import server as web_server
+
+    assert web_server._read_progress_percent(199, 200) == 99
+    assert web_server._read_progress_percent(200, 200) == 100
 
 
 def test_web_read_startup_is_human_facing_and_deduplicated():

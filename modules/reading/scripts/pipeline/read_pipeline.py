@@ -74,6 +74,7 @@ from core.common import (
     DEFAULT_USER_AGENT,
     FULL_TEXT_MIN_CHARS as CONFIG_FULL_TEXT_MIN_CHARS,
     ServiceCooldownActive,
+    batch_cooldown_wait_cap,
     config_bool,
     config_float,
     config_int,
@@ -6596,10 +6597,11 @@ def _wait_for_cooldown_requeue(
     log: LogFn,
     should_cancel: CancelFn,
     wait_cap_sec: float,
-) -> dict:
+) -> dict[str, object]:
     started = time.monotonic()
     announced = False
     cap = max(0.0, float(wait_cap_sec or 0.0))
+    wait_caps = {service: batch_cooldown_wait_cap(service) for service in services}
     while services:
         _raise_if_cancelled(should_cancel)
         remaining_by_service = {
@@ -6613,21 +6615,37 @@ def _wait_for_cooldown_requeue(
                 "waited_sec": round(time.monotonic() - started, 3),
                 "wait_cap_sec": cap,
                 "remaining_by_service": remaining_by_service,
+                "wait_caps": wait_caps,
             }
         elapsed = time.monotonic() - started
         remaining_budget = max(0.0, cap - elapsed)
-        if remaining_budget <= 0 or longest > remaining_budget:
-            summary = ", ".join(f"{service}={remaining:.1f}s" for service, remaining in remaining_by_service.items())
+        over_service_cap = {
+            service: remaining
+            for service, remaining in remaining_by_service.items()
+            if wait_caps.get(service, 0.0) <= 0 or elapsed + remaining > wait_caps[service]
+        }
+        exceeds_run_budget = remaining_budget <= 0 or longest > remaining_budget
+        if exceeds_run_budget or over_service_cap:
+            summary = ", ".join(
+                f"{service}={remaining:.1f}s/service_cap={wait_caps.get(service, 0.0):.1f}s"
+                for service, remaining in remaining_by_service.items()
+            )
+            reason = (
+                "cooldown_exceeds_run_wait_budget"
+                if exceeds_run_budget
+                else "cooldown_exceeds_service_wait_cap"
+            )
             log(
-                "Cooldown recovery skipped because the service cooldown exceeds "
-                f"the remaining run wait budget ({remaining_budget:.1f}s): {summary}"
+                "Cooldown recovery deferred without blocking the Read job because "
+                f"the cooldown exceeds its wait budget (run_remaining={remaining_budget:.1f}s): {summary}"
             )
             return {
                 "ready": False,
                 "waited_sec": round(elapsed, 3),
                 "wait_cap_sec": cap,
                 "remaining_by_service": remaining_by_service,
-                "reason": "cooldown_exceeds_run_wait_budget",
+                "wait_caps": wait_caps,
+                "reason": reason,
             }
         if not announced:
             summary = ", ".join(f"{service}={remaining:.1f}s" for service, remaining in remaining_by_service.items())
@@ -6639,6 +6657,7 @@ def _wait_for_cooldown_requeue(
         "waited_sec": round(time.monotonic() - started, 3),
         "wait_cap_sec": cap,
         "remaining_by_service": {},
+        "wait_caps": wait_caps,
     }
 
 
@@ -6787,12 +6806,14 @@ def run_read(
         )
         recovered_count = 0
         attempted_count = 0
+        deferred_count = 0
         skipped_long_cooldown_count = 0
         waited_sec = 0.0
         for index, services in cooldown_requeue_by_index.items():
             _raise_if_cancelled(should_cancel)
             # A prior recovery request may have opened a fresh shared cooldown.
-            # Only retry when that cooldown can expire inside the run-wide wait budget.
+            # Retry only when both its service-specific cap and the run-wide
+            # recovery budget can accommodate the remaining cooldown.
             wait_result = _wait_for_cooldown_requeue(
                 set(services),
                 log=log,
@@ -6805,10 +6826,12 @@ def run_read(
             initial_packet = initial.get("full_text_packet") if isinstance(initial.get("full_text_packet"), dict) else {}
             initial_blocker = initial_packet.get("blocked_full_text_reason") if isinstance(initial_packet.get("blocked_full_text_reason"), dict) else {}
             if wait_result.get("ready") is not True:
+                deferred_count += 1
                 skipped_long_cooldown_count += 1
                 initial_validation = initial.get("validation") if isinstance(initial.get("validation"), dict) else {}
                 initial_validation["cooldown_requeue"] = {
                     "attempted": False,
+                    "deferred": True,
                     "skipped": True,
                     "attempt": 0,
                     "services": services,
@@ -6817,6 +6840,7 @@ def run_read(
                     "reason": str(wait_result.get("reason") or "cooldown_wait_budget_exhausted"),
                     "wait_cap_sec": cooldown_wait_cap_sec,
                     "remaining_by_service": wait_result.get("remaining_by_service") or {},
+                    "wait_caps": wait_result.get("wait_caps") or {},
                 }
                 initial["validation"] = initial_validation
                 artifacts = initial.get("artifacts") if isinstance(initial.get("artifacts"), dict) else {}
@@ -6876,6 +6900,8 @@ def run_read(
             "waited_sec": round(waited_sec, 3),
             "wait_cap_sec": cooldown_wait_cap_sec,
         }
+        if deferred_count:
+            cooldown_requeue_summary["deferred_paper_count"] = deferred_count
     prepared_items = [prepared_by_index[index] for index in range(1, len(papers) + 1)]
     read_candidates = [
         item for item in prepared_items
@@ -7155,10 +7181,9 @@ def run_read(
     write_json(directory / "read_results.json", payload)
     scrub_reading_paths_under(directory)
     latest_run = refresh_latest_run(directory)
-    latest_read_md = Path(str(latest_run)) / "read.md"
-    latest_public_final_artifact_present = bool(latest_read_md.exists() and latest_read_md.read_text(encoding="utf-8", errors="replace").strip())
-    if payload["public_final_artifact_present"] and not latest_public_final_artifact_present:
-        raise RuntimeError(f"latest_run did not receive final read.md: {latest_read_md}")
+    # latest_run is a shared human-review copy. Another process may refresh it
+    # immediately, so program success must only depend on this explicit run.
+    latest_public_final_artifact_present = payload["public_final_artifact_present"]
     return make_reading_paths_relative({
         "status": status,
         "run_id": directory.name,
@@ -7303,7 +7328,7 @@ def run_standalone_deep_read(args: object) -> dict:
         scrub_reading_paths_under(current_run_dir)
         latest_run = refresh_latest_run(current_run_dir)
         cached_read["latest_run"] = str(latest_run)
-        cached_read["latest_public_final_artifact_present"] = (latest_run / "read.md").is_file()
+        cached_read["latest_public_final_artifact_present"] = (current_run_dir / "read.md").is_file()
         return cached_read
     packet_entry = _restore_article_full_text_cache(paper, current_run_dir)
     if not packet_entry:
@@ -7399,10 +7424,6 @@ def run_standalone_deep_read(args: object) -> dict:
     write_json(current_run_dir / "read_results.json", result_payload)
     scrub_reading_paths_under(current_run_dir)
     latest_run = refresh_latest_run(current_run_dir)
-    latest_read_md = Path(str(latest_run)) / "read.md"
-    latest_public_final_artifact_present = bool(latest_read_md.exists() and latest_read_md.read_text(encoding="utf-8", errors="replace").strip())
-    if result_payload["public_final_artifact_present"] and not latest_public_final_artifact_present:
-        raise RuntimeError(f"latest_run did not receive final read.md: {latest_read_md}")
     result_payload["latest_run"] = str(latest_run)
-    result_payload["latest_public_final_artifact_present"] = latest_public_final_artifact_present
+    result_payload["latest_public_final_artifact_present"] = result_payload["public_final_artifact_present"]
     return result_payload

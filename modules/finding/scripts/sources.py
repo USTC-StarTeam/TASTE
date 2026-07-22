@@ -1359,9 +1359,9 @@ from typing import Any
 
 import requests
 from finding_runtime import FINDING_CACHE_DIR, read_json_safely, write_json_cache
+from runtime.resource_locks import crawl_service_get as finding_service_get
 from finding_runtime import display_path
 from bs4 import BeautifulSoup
-
 
 
 ICLR2026_GUIDE_URLS = (
@@ -1390,7 +1390,7 @@ def _load_json_url_with_cache(url: str, cache_path: Any, *, user_agent: str = "T
         cached = read_json_safely(path, None)
         if cached is not None:
             return cached, display_path(path)
-    response = requests.get(url, headers={"User-Agent": user_agent}, timeout=30)
+    response = finding_service_get(url, headers={"User-Agent": user_agent}, timeout=30)
     response.raise_for_status()
     payload = response.json()
     write_json_cache(path, payload)
@@ -1410,7 +1410,7 @@ def _load_iclr2026_guide_payload() -> tuple[dict[str, Any], str]:
     last_error = ""
     for url in ICLR2026_GUIDE_URLS:
         try:
-            response = requests.get(url, headers={"User-Agent": "TASTE-Finding/1.0"}, timeout=30)
+            response = finding_service_get(url, headers={"User-Agent": "TASTE-Finding/1.0"}, timeout=30)
             response.raise_for_status()
             payload = response.json()
             write_json_cache(cache_path, payload)

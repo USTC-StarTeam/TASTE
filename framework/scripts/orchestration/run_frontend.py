@@ -20,6 +20,7 @@ from runtime.taste_pythonpath import ensure_taste_pythonpath
 ensure_taste_pythonpath(ROOT)
 from policies.source_selection import canonical_source_selection, normalize_source_selection
 from project.project_paths import build_paths as _build_project_paths
+from runtime.resource_locks import project_workflow_lease
 
 DEFAULT_ENV = os.environ.get("FIND_ENV_NAME") or os.environ.get("CONDA_ENV_NAME", "")
 DEFAULT_CORE_VENUE_IDS = ["openreview_iclr_2026", "openreview_neurips", "dblp_icml", "dblp_kdd"]
@@ -728,6 +729,12 @@ def driver_python_command(args: argparse.Namespace, cfg: dict, driver: Path) -> 
 
 
 def run(cmd: list[str], cwd: Path = ROOT, env: dict[str, str] | None = None, timeout_sec: int = 900, live_log_path: Path | None = None) -> subprocess.CompletedProcess[str]:
+    project = str((env or {}).get("PROJECT_ID") or (env or {}).get("DEFAULT_PROJECT_ID") or "")
+    with project_workflow_lease(workflow="current_find", project=project):
+        return _run_process(cmd, cwd=cwd, env=env, timeout_sec=timeout_sec, live_log_path=live_log_path)
+
+
+def _run_process(cmd: list[str], cwd: Path = ROOT, env: dict[str, str] | None = None, timeout_sec: int = 900, live_log_path: Path | None = None) -> subprocess.CompletedProcess[str]:
     proc = subprocess.Popen(cmd, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, start_new_session=True, bufsize=1)
     started = time.monotonic()
     lines: list[str] = []
@@ -1261,6 +1268,7 @@ def main() -> int:
     log_path = (internal_output_dir / "finding_frontend.log") if internal_output_dir is not None else paths.logs / "finding_frontend.log"
     start = time.time()
     run_env = os.environ.copy()
+    run_env.setdefault("PROJECT_ID", args.project)
     run_env["WORKFLOW_RUNTIME_DIR"] = run_env.get("FINDING_RUNTIME_DIR") or str(ROOT / "modules" / "finding" / ".runtime")
     run_env["TASTE_FIND_INPUT_DIR"] = str(tmp_dir / "input")
     if internal_output_dir is not None:

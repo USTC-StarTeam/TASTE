@@ -169,6 +169,9 @@ function apiFetch(url: string, options: RequestOptions = {}): Promise<ApiRespons
 
 async function json<T>(response: ApiResponse | Response): Promise<T> {
   if (!response.ok) {
+    if (response.status === 401 && typeof window !== "undefined") {
+      window.dispatchEvent(new Event("taste:auth-required"));
+    }
     throw new Error(await response.text());
   }
   return response.json() as Promise<T>;
@@ -185,6 +188,59 @@ function asArrayResponse<T>(value: any, key = "items"): T[] {
 
 function asObjectResponse<T extends Record<string, any>>(value: any, fallback: T): T {
   return value && typeof value === "object" && !Array.isArray(value) ? value as T : fallback;
+}
+
+export type AuthUser = { id: string; username: string; email?: string };
+
+export async function getCurrentUser(): Promise<AuthUser | null> {
+  const response = await apiFetch("/api/auth/me");
+  if (response.status === 401) return null;
+  const payload = await json<{ user: AuthUser }>(response);
+  return payload.user;
+}
+
+export async function login(identifier: string, password: string) {
+  return json<{ user: AuthUser }>(await apiFetch("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ identifier, password }),
+  }));
+}
+
+export async function requestEmailVerification(email: string) {
+  return json<{ status: string; expires_in: number; retry_after: number }>(await apiFetch("/api/auth/verification-code", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  }));
+}
+
+export async function requestPasswordResetVerification(email: string) {
+  return json<{ status: string; expires_in: number; retry_after: number }>(await apiFetch("/api/auth/password-reset/verification-code", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  }));
+}
+
+export async function register(username: string, email: string, password: string, verificationCode: string) {
+  return json<{ user: AuthUser }>(await apiFetch("/api/auth/register", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, email, password, verification_code: verificationCode }),
+  }));
+}
+
+export async function resetPassword(email: string, password: string, verificationCode: string) {
+  return json<{ status: string }>(await apiFetch("/api/auth/password-reset", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password, verification_code: verificationCode }),
+  }));
+}
+
+export async function logout() {
+  return json<{ status: string }>(await apiFetch("/api/auth/logout", { method: "POST" }));
 }
 
 export async function getFrontendVersion() {
@@ -281,8 +337,8 @@ export async function startPlanPolish(runId: string, planId: string, versionId: 
   );
 }
 
-export async function startEmail(payload: { run_id: string; artifact_names?: string[]; receivers?: string[]; subject?: string; include_ranking?: boolean }) {
-  return json<Job>(
+export async function startEmail(payload: { run_id: string; artifact_scope: "find" | "read" | "idea" | "plan" | "environment" | "experiment" | "paper"; artifact_names?: string[]; receivers?: string[]; subject?: string; include_ranking?: boolean }) {
+  return json<{ status: "done"; run_id: string }>(
     await apiFetch("/api/jobs/email", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -386,6 +442,9 @@ export function watchJob(jobId: string, onMessage: (message: any) => void) {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const socket = new WebSocket(`${protocol}://${window.location.host}/ws/jobs/${jobId}`);
   socket.onmessage = (event) => onMessage(JSON.parse(event.data));
+  socket.addEventListener("close", (event) => {
+    if (event.code === 4401) window.dispatchEvent(new Event("taste:auth-required"));
+  });
   return socket;
 }
 

@@ -12,12 +12,13 @@ import sys
 import time
 import threading
 import traceback
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -44,23 +45,147 @@ from runtime.framework_paths import CONFIG_PATH, FINDING_RUNS_DIR, RUNS_DIR, RUN
 from runtime.jobs import JobCancelled
 from runtime.run_storage import delete_run, list_runs, read_json, redacted_config, run_dir, write_json
 from runtime.taste_pythonpath import taste_pythonpath_string
+from auto_research.web.auth import (
+    AuthError,
+    AuthRateLimitError,
+    AuthStore,
+    AuthUser,
+    SESSION_COOKIE,
+    SESSION_DAYS,
+    VERIFICATION_PURPOSE_PASSWORD_RESET,
+    VERIFICATION_PURPOSE_REGISTER,
+)
+from auto_research.web.verification_email import VerificationEmailError, VerificationEmailSender
 
 ensure_directories()
 
 app = FastAPI(title="TASTE Local API", version="0.1.0")
+_cors_origins = [origin.strip() for origin in os.environ.get("TASTE_CORS_ORIGINS", "").split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=bool(_cors_origins),
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+AUTH_STORE = AuthStore(Path(os.environ.get("TASTE_AUTH_DB") or WORKSPACE_ROOT / "web" / ".runtime" / "auth.sqlite3"))
+AUTH_EMAIL_SENDER = VerificationEmailSender.from_env(WORKSPACE_ROOT / "web" / ".runtime" / "auth_smtp.json")
+_CURRENT_ACCOUNT: ContextVar[AuthUser | None] = ContextVar("taste_current_account", default=None)
+
+
+def _current_account() -> AuthUser:
+    account = _CURRENT_ACCOUNT.get()
+    if account is None:
+        raise RuntimeError("Authenticated account context is required.")
+    return account
+
+
+def _account_prefix(account: AuthUser | None = None) -> str:
+    return f"u_{(account or _current_account()).id}__"
+
+
+def _account_runtime_dir(account: AuthUser | None = None) -> Path:
+    current = account or _CURRENT_ACCOUNT.get()
+    if current is None:
+        return STATE_DIR.parent
+    target = WORKSPACE_ROOT / "web" / ".runtime" / "accounts" / current.id
+    target.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(target, 0o700)
+    except OSError:
+        pass
+    return target
+
+
+def _account_project_id(value: Any, *, require_exists: bool = False) -> str:
+    raw = str(value or "").strip()
+    if not raw or not re.fullmatch(r"[A-Za-z0-9_.-]+", raw):
+        raise ValueError("Invalid project name. Use only letters, numbers, dash, underscore, and dot.")
+    account = _CURRENT_ACCOUNT.get()
+    if account is None:
+        return raw
+    prefix = _account_prefix(account)
+    if raw.startswith(prefix):
+        project = raw
+    elif re.match(r"^u_[0-9a-f]{32}__", raw):
+        raise ValueError("Project not found.")
+    else:
+        if len(raw) > 80:
+            raise ValueError("Project name must be at most 80 characters.")
+        project = prefix + raw
+    if require_exists and not (PROJECT_IDS_ROOT / project).is_dir():
+        raise ValueError("Project not found.")
+    return project
+
+
+def _account_owns_project(project: Any) -> bool:
+    account = _CURRENT_ACCOUNT.get()
+    return bool(account is not None and str(project or "").strip().startswith(_account_prefix(account)))
+
+
+def _public_account_payload(value: Any) -> Any:
+    account = _CURRENT_ACCOUNT.get()
+    if account is None:
+        return value
+    prefix = _account_prefix(account)
+    if isinstance(value, dict):
+        return {key: _public_account_payload(item) for key, item in value.items() if key != "owner_id"}
+    if isinstance(value, list):
+        return [_public_account_payload(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_public_account_payload(item) for item in value)
+    if isinstance(value, str):
+        if value.startswith(prefix):
+            return value[len(prefix):]
+        value = value.replace(f"/projects/{prefix}", "/projects/")
+        value = value.replace(f"projects/{prefix}", "projects/")
+    return value
+
+
+def _request_uses_https(request: Request) -> bool:
+    # Uvicorn validates trusted proxy IPs and normalizes the ASGI scheme before
+    # this application sees the request. Reading the raw header here would let
+    # direct clients on port 8879 spoof proxy trust.
+    return request.url.scheme == "https"
+
+
+def _set_session_cookie(response: JSONResponse, request: Request, token: str) -> None:
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=SESSION_DAYS * 24 * 60 * 60,
+        httponly=True,
+        secure=_request_uses_https(request),
+        samesite="lax",
+        path="/",
+    )
+
+
+@app.middleware("http")
+async def _authenticate_api_requests(request: Request, call_next):
+    path = str(request.url.path or "")
+    if not path.startswith("/api/") or path.startswith("/api/auth/"):
+        return await call_next(request)
+    account = AUTH_STORE.user_for_session(request.cookies.get(SESSION_COOKIE))
+    if account is None:
+        return JSONResponse({"error": "authentication_required"}, status_code=401)
+    request.state.account = account
+    token = _CURRENT_ACCOUNT.set(account)
+    try:
+        return await call_next(request)
+    finally:
+        _CURRENT_ACCOUNT.reset(token)
 
 
 @app.middleware("http")
 async def _prevent_stale_frontend_cache(request, call_next):
     response = await call_next(request)
     path = str(request.url.path or "")
+    if _request_uses_https(request):
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
     if path == "/" or path.startswith("/assets/") or path.endswith((".html", ".js", ".css")):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
@@ -90,6 +215,8 @@ def _config_with_env_overrides(config: AppConfig) -> AppConfig:
     variables are only a startup fallback for empty fields; otherwise a saved UI
     config would appear to revert after refresh and future jobs would ignore it.
     """
+    if _CURRENT_ACCOUNT.get() is not None:
+        return config
     updates: dict[str, Any] = {}
     provider = os.environ.get("LLM_PROVIDER")
     base_url = os.environ.get("LLM_API_BASE")
@@ -116,8 +243,10 @@ def _config_with_env_overrides(config: AppConfig) -> AppConfig:
 
 
 def _local_llm_config_path() -> Path:
-    raw = os.environ.get("FINDING_LLM_CONFIG", "").strip()
-    return Path(raw).expanduser() if raw else DEFAULT_LOCAL_LLM_CONFIG_PATH
+    if _CURRENT_ACCOUNT.get() is None:
+        raw = os.environ.get("FINDING_LLM_CONFIG", "").strip()
+        return Path(raw).expanduser() if raw else DEFAULT_LOCAL_LLM_CONFIG_PATH
+    return _account_runtime_dir() / "llm.local.json"
 
 
 def _read_local_llm_config() -> dict[str, Any]:
@@ -244,20 +373,25 @@ FIND_CONFIG_EXCLUDED_FIELDS = FIND_CONFIG_INPUT_FIELDS | FIND_CONFIG_LLM_FIELDS 
 
 
 def _finding_config_path() -> Path:
-    raw = os.environ.get("FINDING_CONFIG", "").strip()
-    if raw:
-        return Path(raw).expanduser()
-    llm_raw = os.environ.get("FINDING_LLM_CONFIG", "").strip()
-    if llm_raw:
-        return Path(llm_raw).expanduser().parent / "find.config.json"
-    return DEFAULT_FIND_CONFIG_PATH
+    if _CURRENT_ACCOUNT.get() is None:
+        raw = os.environ.get("FINDING_CONFIG", "").strip()
+        if raw:
+            return Path(raw).expanduser()
+        llm_raw = os.environ.get("FINDING_LLM_CONFIG", "").strip()
+        if llm_raw:
+            return Path(llm_raw).expanduser().parent / "find.config.json"
+        return DEFAULT_FIND_CONFIG_PATH
+    return _account_runtime_dir() / "find.config.json"
+
+
+def _account_config_path() -> Path:
+    return _account_runtime_dir() / "config.json" if _CURRENT_ACCOUNT.get() is not None else CONFIG_PATH
 
 
 def _project_finding_config_path(project_root: Path | None = None, project_path: Path | None = None) -> Path | None:
     if project_root is not None:
         return project_root / "config" / "finding.json"
-    target_project_path = project_path if project_path is not None else project_config_path()
-    return target_project_path.parent / "config" / "finding.json" if target_project_path else None
+    return project_path.parent / "config" / "finding.json" if project_path else None
 
 
 def _read_finding_config_payload(path: Path | None = None) -> dict[str, Any]:
@@ -313,11 +447,6 @@ def _ensure_project_finding_config(project_root: Path | None = None, project_pat
 
 
 def _active_finding_config_path(*, create_project_copy: bool = False) -> Path:
-    project_path = project_config_path()
-    if project_path is not None:
-        project_config = _ensure_project_finding_config(project_path=project_path) if create_project_copy else _project_finding_config_path(project_path=project_path)
-        if project_config is not None and project_config.exists():
-            return project_config
     return _finding_config_path()
 
 
@@ -332,11 +461,11 @@ def load_config() -> AppConfig:
     config_path = _active_finding_config_path(create_project_copy=True)
     finding_payload = _read_finding_config_payload(config_path)
     config_payload, selection_payload = _split_finding_config_payload(finding_payload)
-    legacy_payload = read_json(CONFIG_PATH, {})
-    if isinstance(legacy_payload, dict) and isinstance(legacy_payload.get("email"), dict):
-        config_payload["email"] = legacy_payload["email"]
+    legacy_payload = read_json(_account_config_path(), {})
+    if isinstance(legacy_payload, dict):
+        config_payload = {**legacy_payload, **config_payload}
     config = AppConfig(**config_payload) if config_payload else AppConfig()
-    canonical = normalize_source_selection(selection_payload) if selection_payload else canonical_source_selection(project_config_path=project_config_path())
+    canonical = normalize_source_selection(selection_payload or {})
     if config.default_find_selection != canonical:
         config = config.model_copy(update={"default_find_selection": canonical})
     config = _config_with_project_research_preferences(config)
@@ -444,17 +573,7 @@ def _sync_project_llm_from_config(config: AppConfig) -> None:
 
 
 def _current_project_research_preferences() -> dict[str, str]:
-    project_path = project_config_path()
-    if project_path is None:
-        return {}
-    project_config = read_json(project_path, {})
-    if not isinstance(project_config, dict):
-        return {}
-    return {
-        "research_interest": str(project_config.get("research_interest") or ""),
-        "researcher_profile": str(project_config.get("researcher_profile") or ""),
-        "topic": str(project_config.get("topic") or ""),
-    }
+    return {}
 
 
 def _config_with_project_research_preferences(config: AppConfig, provided_fields: set[str] | None = None) -> AppConfig:
@@ -477,7 +596,7 @@ def _config_with_project_research_preferences(config: AppConfig, provided_fields
 
 
 def _sync_project_research_preferences_from_config(config: AppConfig, target_project_path: Path | None = None) -> None:
-    project_path = target_project_path or project_config_path()
+    project_path = target_project_path
     if project_path is None:
         return
     project_config = read_json(project_path, {})
@@ -503,7 +622,7 @@ def _sync_project_research_preferences_from_config(config: AppConfig, target_pro
 
 
 def _sync_project_finding_config_from_request(config: AppConfig, target_project_path: Path | None = None) -> None:
-    project_path = target_project_path or project_config_path()
+    project_path = target_project_path
     if project_path is None:
         return
     _persist_finding_config_from_config(config, config.default_find_selection, project_root=project_path.parent)
@@ -514,8 +633,8 @@ def _sync_project_finding_config_from_request(config: AppConfig, target_project_
 
 
 def save_config(config: AppConfig) -> AppConfig:
-    project_path = project_config_path()
-    canonical = save_canonical_source_selection(config.default_find_selection, project_config_path=project_path)
+    project_path = None
+    canonical = normalize_source_selection(config.default_find_selection)
     config = config.model_copy(update={"default_find_selection": canonical})
     _persist_local_llm_config_from_config(config)
     _persist_finding_config_from_config(config, canonical, project_root=project_path.parent if project_path is not None else None)
@@ -524,8 +643,8 @@ def save_config(config: AppConfig) -> AppConfig:
         # Source selection is project state. LLM secrets live in the local
         # modules/finding/config/llm.local.json file, not project/runtime state.
         payload.pop("default_find_selection", None)
-    if read_json(CONFIG_PATH, {}) != payload:
-        write_json(CONFIG_PATH, payload)
+    if read_json(_account_config_path(), {}) != payload:
+        write_json(_account_config_path(), payload)
     _sync_project_research_preferences_from_config(config)
     _sync_project_finding_config_from_request(config)
     return config
@@ -606,6 +725,29 @@ def _public_config_response(config: AppConfig) -> dict[str, Any]:
         email["smtp_password_saved"] = bool(str(email.get("smtp_password") or "").strip())
         email["smtp_password"] = ""
     return data
+
+
+def _find_llm_configuration_error(config: AppConfig) -> dict[str, Any] | None:
+    client = LLMClient(config, "find")
+    if str(client.provider or "").strip().lower() == "mock":
+        return None
+    missing = [
+        name
+        for name, value in (
+            ("base_url", client.base_url),
+            ("model", client.model),
+            ("api_key", client.api_key),
+        )
+        if not str(value or "").strip()
+    ]
+    if not missing:
+        return None
+    return {
+        "error": "user_llm_config_required",
+        "code": "user_llm_config_required",
+        "missing": missing,
+        "message": "请先保存当前账户自己的 Find LLM 配置；服务端不会使用其他账户或系统环境中的 LLM API key。",
+    }
 
 
 def _strip_legacy_recommendation_card_blocks(text: str) -> str:
@@ -1672,7 +1814,7 @@ def _public_taste_stage(stage: Any) -> str:
     if lowered in {'healthcheck', 'status', 'init'}:
         return 'environment'
     if lowered == 'email':
-        return 'paper'
+        return 'email'
     if lowered in {"writing-chat", "paper-chat"} or lowered == 'paper' or lowered.startswith('paper-') or lowered.startswith('paper_'):
         return 'paper'
     if lowered in {"environment-chat"}:
@@ -1703,7 +1845,7 @@ def _public_taste_stage(stage: Any) -> str:
         return 'environment'
     if any(marker in lowered for marker in ['paper-evidence-audit', 'paper-normality-audit', 'submission-readiness']):
         return 'experiment'
-    if any(marker in lowered for marker in ['paper-pipeline', 'paper-preview', 'paper-figure', 'conference-preview', 'latex', 'email']):
+    if any(marker in lowered for marker in ['paper-pipeline', 'paper-preview', 'paper-figure', 'conference-preview', 'latex']):
         return 'paper'
     if any(marker in lowered for marker in ['experiment', 'autonomous', 'trajectory', 'evidence', 'blocker', 'research', 'guidance']):
         return 'experiment'
@@ -1743,6 +1885,8 @@ def _public_full_cycle_stage(raw_stage: Any, progress: Any = None, result: Any =
 
 class JobState:
     def __init__(self, job_id: str, stage: str):
+        if str(job_id or "").startswith(("email_", "email-")):
+            stage = "email"
         self.job_id = job_id
         self.stage = stage
         self.status = "queued"
@@ -1755,10 +1899,12 @@ class JobState:
         self.cancelled_at = ""
         self.run_id = ""
         self.progress = {"phase": "queued", "current": 0, "total": 0, "percent": 0, "message": "Queued"}
-        self.internal = False
-        self.display = ""
+        self.internal = stage == "email"
+        self.display = "hidden" if self.internal else ""
         self.progress_version = 0
         self.done = threading.Event()
+        account = _CURRENT_ACCOUNT.get()
+        self.owner_id = account.id if account is not None else ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "JobState":
@@ -1770,7 +1916,10 @@ class JobState:
         job.result = data.get("result")
         job.internal = bool(data.get("internal"))
         job.display = str(data.get("display") or "")
-        if job.stage == "safe-unblock" or job.job_id.startswith("safe-unblock_"):
+        job.owner_id = str(data.get("owner_id") or "")
+        if job.stage in {"safe-unblock", "email"} or job.job_id.startswith(("safe-unblock_", "email_", "email-")):
+            if job.job_id.startswith(("email_", "email-")):
+                job.stage = "email"
             job.internal = True
             job.display = job.display or "hidden"
         job.error = str(data.get("error") or "")
@@ -1931,6 +2080,7 @@ class JobState:
 JOBS: dict[str, JobState] = {}
 JOBS_PATH = STATE_DIR / "web_jobs.json"
 JOBS_LOCK = threading.RLock()
+JOBS_PERSIST_LOCK = threading.RLock()
 LIVE_JOBS_TTL_SEC = float(os.environ.get("LIVE_JOBS_TTL_SEC", "5.0") or 5.0)
 _LIVE_JOBS_CACHE: dict[str, Any] = {"expires_at": 0.0, "items": []}
 JOB_PROJECT_ID_CACHE_TTL_SEC = float(os.environ.get("JOB_PROJECT_ID_CACHE_TTL_SEC", "30.0") or 30.0)
@@ -3334,7 +3484,8 @@ def _read_progress_percent(current: Any, total: Any) -> int:
         return 0
     if total_int <= 0:
         return 0
-    return max(0, min(100, int(round((current_int / total_int) * 100))))
+    percent = max(0, min(100, int(round((current_int / total_int) * 100))))
+    return min(percent, 99) if current_int < total_int else percent
 
 
 def _read_progress_title(value: Any, *, max_len: int = 180) -> str:
@@ -5472,17 +5623,7 @@ def _as_int(value: Any, default: int = 0) -> int:
 
 def _current_project_for_find_guard() -> tuple[str, Path] | None:
     try:
-        cfg_path = project_config_path()
-    except Exception:
-        cfg_path = None
-    if cfg_path:
-        root = Path(cfg_path).resolve().parent
-        cfg = _read_project_json(Path(cfg_path), {})
-        project = str((cfg if isinstance(cfg, dict) else {}).get("id") or root.name).strip()
-        if project and (root / "state").exists():
-            return project, root
-    try:
-        projects = list_projects()
+        projects = [row for row in list_projects() if _account_owns_project(row.get("id"))]
     except Exception:
         projects = []
     if len(projects) == 1 and isinstance(projects[0], dict):
@@ -5505,7 +5646,7 @@ def _project_for_find_request(request: FindRequest) -> tuple[str, Path] | None:
 
 def _project_context_for_find_run(run_id: str) -> tuple[str, Path] | None:
     project = _project_id_for_find_run(run_id)
-    if not project:
+    if not project or not _account_owns_project(project):
         return None
     root = (PROJECT_IDS_ROOT / project).resolve()
     if project and (root / "state").exists():
@@ -5632,9 +5773,9 @@ def _new_find_guard_blocker(request: FindRequest | None = None) -> dict[str, Any
 
 
 def _active_web_stage_job_blocker(project: str, stage: str) -> dict[str, Any] | None:
-    """Block duplicate in-process launches for the same project/stage."""
+    """Block overlapping in-process workflow writes for the same project."""
     project = str(project or "").strip()
-    stage_key = str(stage or "").strip().lower()
+    stage_key = _public_taste_stage(str(stage or "").strip().lower())
     if not stage_key:
         return None
     _reconcile_stale_cancelling_jobs()
@@ -5647,8 +5788,12 @@ def _active_web_stage_job_blocker(project: str, stage: str) -> dict[str, Any] | 
         status = str(getattr(job, "status", "") or "").strip().lower()
         if status not in {"queued", "running", "cancelling"}:
             continue
-        job_stage = str(getattr(job, "stage", "") or "").strip().lower()
-        if job_stage != stage_key:
+        job_stage = _public_taste_stage(str(getattr(job, "stage", "") or "").strip().lower())
+        literature_stages = {"find", "read", "idea", "plan"}
+        same_stage_or_literature_pipeline = job_stage == stage_key or (
+            job_stage in literature_stages and stage_key in literature_stages
+        )
+        if not same_stage_or_literature_pipeline:
             continue
         job_project = _project_from_job_payload(getattr(job, "job_id", ""), None, job)
         if project and job_project and job_project != project:
@@ -5663,8 +5808,8 @@ def _active_web_stage_job_blocker(project: str, stage: str) -> dict[str, Any] | 
             "existing_run_id": getattr(job, "run_id", ""),
             "existing_status": status,
             "progress": progress,
-            "message": "A job for this project stage is already running; duplicate launch is blocked.",
-            "message_zh": "当前项目已有同阶段任务正在运行；已阻止重复启动。",
+            "message": "A conflicting workflow job for this project is already running; overlapping writes are blocked.",
+            "message_zh": "当前项目已有会写入同一工作流状态的任务正在运行；已阻止重叠启动。",
         }
     return None
 
@@ -10633,6 +10778,15 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _persist_jobs() -> None:
+    # Keep the registry/persistence lock order identical to API launch paths.
+    # Otherwise a newly started runner can hold JOBS_PERSIST_LOCK while the
+    # request thread still holds JOBS_LOCK, leaving both sides waiting forever.
+    with JOBS_LOCK:
+        with JOBS_PERSIST_LOCK:
+            _persist_jobs_locked()
+
+
+def _persist_jobs_locked() -> None:
     if not globals().get("JOBS_PATH"):
         return
     with JOBS_LOCK:
@@ -10642,6 +10796,7 @@ def _persist_jobs() -> None:
         public_stage = _public_taste_stage(getattr(job, "stage", ""))
         compact = not (public_stage == "read" and str(getattr(job, "status", "") or "").lower() in {"queued", "running", "cancelling"})
         item = job.as_dict(compact=compact)
+        item["owner_id"] = job.owner_id
         if not _job_is_hollow_route(item):
             persisted_snapshot.append(item)
     items = sorted(
@@ -10865,8 +11020,49 @@ def _load_persisted_jobs() -> None:
             job.result = _fresh_find_result_for_job(job)
         if persisted_was_live and job.status not in {"queued", "running", "cancelling"}:
             job.mark_finished(job.cancelled_at)
-        JOBS[job.job_id] = job
+        with JOBS_LOCK:
+            JOBS[job.job_id] = job
     _persist_jobs()
+
+
+EMAIL_PROJECT_ARTIFACTS_BY_SCOPE = {
+    "find": ["find.md", "source_status.md"],
+    "read": ["read.md"],
+    "idea": ["idea.md"],
+    "plan": ["plan.md"],
+}
+
+
+def _normalized_email_request(request: EmailJobRequest) -> EmailJobRequest:
+    scope = request.artifact_scope
+    stage_artifacts = EMAIL_PROJECT_ARTIFACTS_BY_SCOPE.get(scope)
+    updates: dict[str, Any] = {"include_ranking": scope == "find" and request.include_ranking}
+    if stage_artifacts is not None:
+        updates["artifact_names"] = stage_artifacts
+    return request.model_copy(update=updates)
+
+
+def _email_artifact_directory(request: EmailJobRequest, project_hint: str = "") -> Path:
+    if request.artifact_scope not in EMAIL_PROJECT_ARTIFACTS_BY_SCOPE:
+        return run_dir(request.run_id)
+    if project_hint:
+        if not _account_owns_project(project_hint):
+            raise ValueError("Project email artifacts are not available for this account.")
+        project_root = _safe_project_root(project_hint)
+    else:
+        context = _project_context_for_find_run(request.run_id)
+        if not context:
+            raise ValueError("Project email artifacts are not available for this run.")
+        _, project_root = context
+    if _project_current_find_run_id(project_root) != request.run_id:
+        raise ValueError("Email artifacts are available only for the project's current Find run.")
+    directory = project_root / "planning" / "finding"
+    if not directory.is_dir():
+        raise ValueError("Project email artifact directory is not available.")
+    primary_artifact = EMAIL_PROJECT_ARTIFACTS_BY_SCOPE[request.artifact_scope][0]
+    if _project_taste_artifact_path(project_root, request.run_id, primary_artifact) is None:
+        raise ValueError(f"Current project {request.artifact_scope} artifact is not available for email.")
+    return directory
 
 
 def _auto_email_after_success(stage: str, result: Any) -> None:
@@ -10879,10 +11075,27 @@ def _auto_email_after_success(stage: str, result: Any) -> None:
     email_config = config.email
     if not email_config.auto_send_enabled or stage not in set(email_config.auto_send_stages):
         return
-    if not email_config.smtp_server or not email_config.sender or not email_config.smtp_password or not email_config.receivers:
+    if not AUTH_EMAIL_SENDER.configured or not email_config.receivers:
         return
-    request = EmailJobRequest(run_id=run_id, subject=f"TASTE {stage} complete: {run_id}")
-    start_job("email", lambda log, should_cancel, _progress: send_run_email(request, config, log, should_cancel))
+    if stage not in EMAIL_PROJECT_ARTIFACTS_BY_SCOPE:
+        return
+    request = _normalized_email_request(EmailJobRequest(
+        run_id=run_id,
+        artifact_scope=stage,
+        subject=f"TASTE {stage} complete: {run_id}",
+    ))
+    project_hint = str(result.get("project") or "").strip()
+    start_job(
+        "email",
+        lambda log, should_cancel, _progress: send_run_email(
+            request,
+            config,
+            AUTH_EMAIL_SENDER,
+            _email_artifact_directory(request, project_hint),
+            log,
+            should_cancel,
+        ),
+    )
 
 
 def start_job(stage: str, fn: Callable[[Callable[[str], None], Callable[[], bool], Callable[[str, int, int, str], None]], Any], job_id: str | None = None, initial_result: Any = None) -> JobState:
@@ -10890,10 +11103,13 @@ def start_job(stage: str, fn: Callable[[Callable[[str], None], Callable[[], bool
     job = JobState(job_id, stage)
     if initial_result is not None:
         job.result = initial_result
-    JOBS[job_id] = job
+    with JOBS_LOCK:
+        JOBS[job_id] = job
     _persist_jobs()
+    account = _CURRENT_ACCOUNT.get()
 
     def runner() -> None:
+        account_token = _CURRENT_ACCOUNT.set(account) if account is not None else None
         job.status = "running"
         _persist_jobs()
         job.log(_job_status_message(stage, "started"))
@@ -10964,12 +11180,122 @@ def start_job(stage: str, fn: Callable[[Callable[[str], None], Callable[[], bool
                 job.mark_finished(job.cancelled_at)
             job.done.set()
             _persist_jobs()
+            if account_token is not None:
+                _CURRENT_ACCOUNT.reset(account_token)
 
     threading.Thread(target=runner, daemon=True).start()
     return job
 
 
 _load_persisted_jobs()
+
+
+def _auth_response(user: AuthUser) -> dict[str, str]:
+    return {"id": user.id, "username": user.username, "email": user.email}
+
+
+def _send_auth_verification_code(payload: dict[str, Any], request: Request, purpose: str):
+    if not AUTH_EMAIL_SENDER.configured:
+        return JSONResponse({"error": "服务器尚未配置邮件服务，请联系管理员。"}, status_code=503)
+    requester = request.client.host if request.client is not None else "unknown"
+    verification = None
+    try:
+        verification = AUTH_STORE.begin_email_verification(payload.get("email"), requester, purpose)
+        AUTH_EMAIL_SENDER.send_verification_code(
+            verification.email,
+            verification.code,
+            verification.expires_in,
+            purpose,
+        )
+    except AuthRateLimitError as exc:
+        return JSONResponse({"error": str(exc), "retry_after": exc.retry_after}, status_code=429)
+    except AuthError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except VerificationEmailError as exc:
+        if verification is not None:
+            AUTH_STORE.cancel_email_verification(verification)
+        return JSONResponse({"error": str(exc)}, status_code=503)
+    return {
+        "status": "sent",
+        "expires_in": verification.expires_in,
+        "retry_after": verification.retry_after,
+    }
+
+
+@app.post("/api/auth/verification-code")
+def api_auth_verification_code(payload: dict[str, Any], request: Request):
+    return _send_auth_verification_code(payload, request, VERIFICATION_PURPOSE_REGISTER)
+
+
+@app.post("/api/auth/password-reset/verification-code")
+def api_auth_password_reset_verification_code(payload: dict[str, Any], request: Request):
+    return _send_auth_verification_code(payload, request, VERIFICATION_PURPOSE_PASSWORD_RESET)
+
+
+@app.post("/api/auth/register")
+def api_auth_register(payload: dict[str, Any], request: Request):
+    try:
+        user = AUTH_STORE.register(
+            payload.get("username"),
+            payload.get("email"),
+            payload.get("password"),
+            payload.get("verification_code"),
+        )
+    except AuthError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    token = AUTH_STORE.create_session(user)
+    response = JSONResponse({"user": _auth_response(user)})
+    _set_session_cookie(response, request, token)
+    return response
+
+
+@app.post("/api/auth/password-reset")
+def api_auth_password_reset(payload: dict[str, Any]):
+    try:
+        AUTH_STORE.reset_password(
+            payload.get("email"),
+            payload.get("password"),
+            payload.get("verification_code"),
+        )
+    except AuthError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return {"status": "ok"}
+
+
+@app.post("/api/auth/login")
+def api_auth_login(payload: dict[str, Any], request: Request):
+    authenticated = AUTH_STORE.authenticate_and_create_session(
+        payload.get("identifier", payload.get("username")),
+        payload.get("password"),
+    )
+    if authenticated is None:
+        return JSONResponse({"error": "用户名/邮箱或密码错误。"}, status_code=401)
+    user, token = authenticated
+    response = JSONResponse({"user": _auth_response(user)})
+    _set_session_cookie(response, request, token)
+    return response
+
+
+@app.post("/api/auth/logout")
+def api_auth_logout(request: Request):
+    AUTH_STORE.delete_session(request.cookies.get(SESSION_COOKIE))
+    response = JSONResponse({"status": "ok"})
+    response.delete_cookie(
+        SESSION_COOKIE,
+        path="/",
+        httponly=True,
+        secure=_request_uses_https(request),
+        samesite="lax",
+    )
+    return response
+
+
+@app.get("/api/auth/me")
+def api_auth_me(request: Request):
+    user = AUTH_STORE.user_for_session(request.cookies.get(SESSION_COOKIE))
+    if user is None:
+        return JSONResponse({"error": "authentication_required"}, status_code=401)
+    return {"user": _auth_response(user)}
 
 
 @app.get("/api/config")
@@ -11131,6 +11457,11 @@ def _fetch_venue_sample_with_timeout(venue: dict, venue_id: str, year: int, samp
 
 @app.post("/api/catalog/venue-health")
 def api_venue_health(request: VenueHealthRequest) -> dict:
+    if request.project:
+        try:
+            request = request.model_copy(update={"project": _account_project_id(request.project, require_exists=True)})
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
     catalog = catalog_by_id()
 
     def normalize_pairs() -> list[tuple[str, int]]:
@@ -11172,6 +11503,7 @@ def api_venue_health(request: VenueHealthRequest) -> dict:
 
     results = []
     sample_limit = max(1, request.sample_limit)
+    project = str(getattr(request, "project", "") or "")
     for venue_id, year in normalize_pairs():
         venue = catalog.get(venue_id)
         if not venue:
@@ -11186,9 +11518,13 @@ def api_venue_health(request: VenueHealthRequest) -> dict:
 @app.post("/api/jobs/find")
 def api_find(request: FindRequest) -> dict:
     try:
+        if request.project:
+            request = request.model_copy(update={"project": _account_project_id(request.project, require_exists=True)})
         current = _project_for_find_request(request)
     except ValueError as exc:
         return JSONResponse(status_code=404, content={"error": str(exc)})
+    if not current:
+        return JSONResponse(status_code=400, content={"error": "No current project is selected for Find."})
     active_blocker = _active_web_stage_job_blocker(current[0] if current else "", "find")
     if active_blocker:
         return JSONResponse(status_code=409, content=active_blocker)
@@ -11203,6 +11539,9 @@ def api_find(request: FindRequest) -> dict:
     # persist the non-secret Find request into project state so framework can
     # produce explicit config/selection JSON for the Finding public CLI.
     config = _request_config_with_persisted_secrets(request.config)
+    llm_error = _find_llm_configuration_error(config)
+    if llm_error:
+        return JSONResponse(status_code=400, content=llm_error)
     if not (str(config.research_interest or "").strip() or str(config.researcher_profile or "").strip()):
         return JSONResponse(
             status_code=400,
@@ -11211,8 +11550,8 @@ def api_find(request: FindRequest) -> dict:
                 "message": "Research interest/profile is required before starting Find; otherwise final title+abstract LLM scoring is skipped.",
             },
         )
-    selection = normalize_source_selection(request.selection.model_dump() if request.selection else canonical_source_selection(project_config_path=project_config_path()))
-    project_path = current[1] / "project.json" if current else project_config_path()
+    selection = normalize_source_selection(request.selection.model_dump() if request.selection else {})
+    project_path = current[1] / "project.json" if current else None
     save_canonical_source_selection(selection, project_config_path=project_path)
     config = config.model_copy(update={"default_find_selection": selection})
     _persist_local_llm_config_from_find_request(config, request.config)
@@ -11220,11 +11559,9 @@ def api_find(request: FindRequest) -> dict:
     _sync_project_finding_config_from_request(config, project_path)
 
     def runtime_env_for_find() -> dict[str, str]:
-        env: dict[str, str] = {}
-        local_llm_config = _local_llm_config_path()
-        if local_llm_config.exists():
-            env["FINDING_LLM_CONFIG"] = str(local_llm_config)
-        return env
+        # Always pass the account-scoped path. project_bridge treats this as a
+        # trust boundary and removes service-wide OpenAI/LLM environment keys.
+        return {"FINDING_LLM_CONFIG": str(_local_llm_config_path())}
 
     project_context = current or _current_project_for_find_guard()
     if not project_context:
@@ -11250,13 +11587,17 @@ def api_find(request: FindRequest) -> dict:
             result.setdefault("web_job_id", job_id)
         return result
 
-    job = start_job(
-        "find",
-        run_find_and_adopt,
-        job_id=job_id,
-        initial_result={"project": project_id, "action": "find", "web_job_id": job_id},
-    )
-    return job.as_dict()
+    with JOBS_LOCK:
+        active_blocker = _active_web_stage_job_blocker(project_id, "find")
+        if active_blocker:
+            return JSONResponse(status_code=409, content=active_blocker)
+        job = start_job(
+            "find",
+            run_find_and_adopt,
+            job_id=job_id,
+            initial_result={"project": project_id, "action": "find", "web_job_id": job_id},
+        )
+    return _public_account_payload(job.as_dict())
 
 
 def _current_project_find_run_id(root: Path) -> str:
@@ -11394,7 +11735,8 @@ def _current_find_downstream_blocked_job(stage: str, blocker: dict[str, Any]) ->
         "blocker": blocker,
         "summary": message,
     }
-    JOBS[job.job_id] = job
+    with JOBS_LOCK:
+        JOBS[job.job_id] = job
     job.set_progress("blocked", 1, 1, message)
     job.log(f"{stage} blocked: {message}")
     job.mark_finished()
@@ -11641,7 +11983,8 @@ def _read_requires_current_find_job(request: ReadRequest) -> JobState:
         "next_required_action": "select_or_adopt_project_current_find_then_run_read",
         "policy": "Web sends Read commands only to framework/scripts/main.py module; Framework prepares inputs, invokes Reading, and synchronizes project artifacts.",
     }
-    JOBS[job.job_id] = job
+    with JOBS_LOCK:
+        JOBS[job.job_id] = job
     job.set_progress("blocked", 1, 1, message)
     job.log(message)
     job.mark_finished()
@@ -11658,7 +12001,7 @@ def _framework_module_env(config: AppConfig, project: str = "") -> dict[str, str
         env["DEFAULT_PROJECT_ID"] = project
     env.setdefault("MANAGEMENT_PYTHON", os.environ.get("MANAGEMENT_PYTHON") or sys.executable)
     env["PYTHONPATH"] = taste_pythonpath_string(WORKSPACE_ROOT, env.get("PYTHONPATH", ""))
-    config_json = json.dumps(config.model_dump(), ensure_ascii=False)
+    config_json = json.dumps(_strip_llm_secrets_from_config_payload(config.model_dump()), ensure_ascii=False)
     env["TASTE_IDEATION_CONFIG_JSON"] = config_json
     env["TASTE_APP_CONFIG_JSON"] = config_json
     return env
@@ -11855,6 +12198,8 @@ def _run_planning_module_job(
 
 @app.post("/api/jobs/read")
 def api_read(request: ReadRequest) -> dict:
+    if not _account_owns_run(request.run_id):
+        return JSONResponse({"error": "run not found"}, status_code=404)
     blocker = _taste_stage_live_full_cycle_blocker("read")
     if blocker:
         return JSONResponse(status_code=409, content=blocker)
@@ -11863,21 +12208,32 @@ def api_read(request: ReadRequest) -> dict:
         project, root = current
         if _read_request_should_use_current_find_wrapper(request, project, root):
             current_run_id = _current_project_find_run_id(root)
-            job = start_job("read", lambda log, should_cancel, progress: _run_current_find_claude_read_job(project, root, request, log, should_cancel, progress))
-            job.run_id = current_run_id
-            job.result = {
-                "project": project,
-                "run_id": current_run_id,
-                "source": "current_find_claude_read_wrapper",
-                "status": "running",
-            }
-            _persist_jobs()
-            return job.as_dict()
-    return _read_requires_current_find_job(request).as_dict()
+            with JOBS_LOCK:
+                duplicate = _active_web_stage_job_blocker(project, "read")
+                if duplicate:
+                    return JSONResponse(status_code=409, content=duplicate)
+                job = start_job("read", lambda log, should_cancel, progress: _run_current_find_claude_read_job(project, root, request, log, should_cancel, progress))
+                job.run_id = current_run_id
+                job.result = {
+                    "project": project,
+                    "run_id": current_run_id,
+                    "source": "current_find_claude_read_wrapper",
+                    "status": "running",
+                }
+                _persist_jobs()
+            return _public_account_payload(job.as_dict())
+    return _public_account_payload(_read_requires_current_find_job(request).as_dict())
 
 
 @app.post("/api/jobs/idea")
 def api_idea(request: IdeaRequest) -> dict:
+    try:
+        project = _account_project_id(request.project, require_exists=True)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    if not _account_owns_run(request.run_id) or not _run_belongs_to_project(request.run_id, project):
+        return JSONResponse({"error": "run not found"}, status_code=404)
+    request = request.model_copy(update={"project": project})
     blocker = _taste_stage_live_full_cycle_blocker("idea")
     if blocker:
         return JSONResponse(status_code=409, content=blocker)
@@ -11894,61 +12250,93 @@ def api_idea(request: IdeaRequest) -> dict:
         )
         job.run_id = request.run_id
         _persist_jobs()
-        return job.as_dict()
+        return _public_account_payload(job.as_dict())
 
 
 @app.post("/api/jobs/plan")
 def api_plan(request: PlanRequest) -> dict:
+    if not _account_owns_run(request.run_id):
+        return JSONResponse({"error": "run not found"}, status_code=404)
     blocker = _taste_stage_live_full_cycle_blocker("plan")
     if blocker:
         return JSONResponse(status_code=409, content=blocker)
     config = load_config()
     current = _project_context_for_find_run(request.run_id) or _current_project_for_find_guard()
     project = current[0] if current else ""
-    job = start_job(
-        "plan",
-        lambda log, should_cancel, progress: _run_planning_module_job(project, request, config, "plan", log, should_cancel, progress),
-        initial_result={"project": project, "run_id": request.run_id, "status": "running", "source": "framework_planning_entrypoint"},
-    )
+    with JOBS_LOCK:
+        duplicate = _active_web_stage_job_blocker(project, "plan")
+        if duplicate:
+            return JSONResponse(status_code=409, content=duplicate)
+        job = start_job(
+            "plan",
+            lambda log, should_cancel, progress: _run_planning_module_job(project, request, config, "plan", log, should_cancel, progress),
+            initial_result={"project": project, "run_id": request.run_id, "status": "running", "source": "framework_planning_entrypoint"},
+        )
     job.run_id = request.run_id
     _persist_jobs()
-    return job.as_dict()
+    return _public_account_payload(job.as_dict())
 
 
 @app.post("/api/jobs/plan-polish")
 def api_plan_polish(request: PlanPolishRequest) -> dict:
+    if not _account_owns_run(request.run_id):
+        return JSONResponse({"error": "run not found"}, status_code=404)
     blocker = _taste_stage_live_full_cycle_blocker("plan-polish")
     if blocker:
         return JSONResponse(status_code=409, content=blocker)
     config = load_config()
     current = _project_context_for_find_run(request.run_id) or _current_project_for_find_guard()
     project = current[0] if current else ""
-    job = start_job(
-        "plan-polish",
-        lambda log, should_cancel, progress: _run_planning_module_job(project, request, config, "polish", log, should_cancel, progress),
-        initial_result={"project": project, "run_id": request.run_id, "status": "running", "source": "framework_planning_entrypoint"},
-    )
+    with JOBS_LOCK:
+        duplicate = _active_web_stage_job_blocker(project, "plan")
+        if duplicate:
+            return JSONResponse(status_code=409, content=duplicate)
+        job = start_job(
+            "plan-polish",
+            lambda log, should_cancel, progress: _run_planning_module_job(project, request, config, "polish", log, should_cancel, progress),
+            initial_result={"project": project, "run_id": request.run_id, "status": "running", "source": "framework_planning_entrypoint"},
+        )
     job.run_id = request.run_id
     _persist_jobs()
-    return job.as_dict()
+    return _public_account_payload(job.as_dict())
 
 
 @app.post("/api/jobs/email")
 def api_email(request: EmailJobRequest) -> dict:
+    if not _account_owns_run(request.run_id):
+        return JSONResponse({"error": "run not found"}, status_code=404)
     config = load_config()
-    job = start_job("email", lambda log, should_cancel, _progress: send_run_email(request, config, log, should_cancel))
-    return job.as_dict()
+    try:
+        request = _normalized_email_request(request)
+        send_run_email(
+            request,
+            config,
+            AUTH_EMAIL_SENDER,
+            _email_artifact_directory(request),
+            log=lambda _message: None,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except VerificationEmailError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    return {"status": "done", "run_id": request.run_id}
 
 
 @app.get("/api/projects")
 def api_projects() -> list[dict]:
-    return _strip_public_taste_marker(list_projects())
+    rows = [row for row in list_projects() if _account_owns_project(row.get("id"))]
+    return _public_account_payload(_strip_public_taste_marker(rows))
 
 
 @app.post("/api/projects")
 def api_project_create(payload: dict[str, Any]) -> dict:
     try:
-        return create_project_config(payload)
+        project_payload = dict(payload)
+        raw_name = project_payload.get("id") or project_payload.get("name")
+        project_id = _account_project_id(raw_name)
+        project_payload["id"] = project_id
+        project_payload["name"] = project_id
+        return _public_account_payload(create_project_config(project_payload))
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     except Exception as exc:
@@ -11958,7 +12346,8 @@ def api_project_create(payload: dict[str, Any]) -> dict:
 @app.get("/api/projects/{project}")
 def api_project(project: str, compact: bool = Query(True)) -> dict:
     try:
-        return _strip_public_taste_marker(project_summary(project, compact=compact))
+        project_id = _account_project_id(project, require_exists=True)
+        return _public_account_payload(_strip_public_taste_marker(project_summary(project_id, compact=compact)))
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
 
@@ -11974,6 +12363,62 @@ def _safe_project_root(project: str) -> Path:
     if not root.exists() or not root.is_dir():
         raise ValueError(f"Project not found: {project_id}")
     return root
+
+
+def _account_project_ids() -> list[str]:
+    if not PROJECT_IDS_ROOT.exists():
+        return []
+    account = _CURRENT_ACCOUNT.get()
+    if account is None:
+        return [path.name for path in PROJECT_IDS_ROOT.iterdir() if path.is_dir()]
+    prefix = _account_prefix(account)
+    return [path.name for path in PROJECT_IDS_ROOT.iterdir() if path.is_dir() and path.name.startswith(prefix)]
+
+
+def _account_project_for_run(run_id: Any) -> str:
+    run = str(run_id or "").strip()
+    if not run:
+        return ""
+    project = _project_id_for_find_run(run)
+    if project and _account_owns_project(project):
+        return project
+    for candidate in _account_project_ids():
+        if _run_belongs_to_project(run, candidate):
+            return candidate
+    return ""
+
+
+def _account_owns_run(run_id: Any) -> bool:
+    if _CURRENT_ACCOUNT.get() is None:
+        return True
+    return bool(_account_project_for_run(run_id))
+
+
+def _account_owns_job_state(job: JobState | None) -> bool:
+    if job is None:
+        return False
+    if _CURRENT_ACCOUNT.get() is None:
+        return True
+    account = _current_account()
+    if job.owner_id:
+        return job.owner_id == account.id
+    return _account_owns_job_payload(job.as_dict(compact=True))
+
+
+def _account_owns_job_payload(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    if _CURRENT_ACCOUNT.get() is None:
+        return True
+    owner_id = str(item.get("owner_id") or "").strip()
+    if owner_id:
+        return owner_id == _current_account().id
+    result = item.get("result") if isinstance(item.get("result"), dict) else {}
+    project = str(item.get("project") or result.get("project") or "").strip()
+    if project:
+        return _account_owns_project(project)
+    run_id = str(item.get("run_id") or result.get("run_id") or result.get("find_run_id") or "").strip()
+    return bool(run_id and _account_owns_run(run_id))
 
 
 PROJECT_STAGE_EXCLUSIVE_ACTIONS = {"environment", "experiment", "paper", "full-cycle", "full_research_cycle", "autonomous"}
@@ -12345,7 +12790,7 @@ def _latest_claude_response_payload(root: Path, *, max_chars: int = 1000000, sta
 @app.get("/api/projects/{project}/claude/latest-response")
 def api_project_claude_latest_response(project: str, max_chars: int = Query(1000000, ge=1000, le=2000000), stage: str = Query("")) -> dict:
     try:
-        root = _safe_project_root(project)
+        root = _safe_project_root(_account_project_id(project, require_exists=True))
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
     try:
@@ -12358,7 +12803,7 @@ def api_project_claude_latest_response(project: str, max_chars: int = Query(1000
 @app.get("/api/projects/{project}/runtime")
 def api_project_runtime(project: str) -> dict:
     try:
-        return runtime_status(project)
+        return _public_account_payload(runtime_status(_account_project_id(project, require_exists=True)))
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
 
@@ -12366,8 +12811,9 @@ def api_project_runtime(project: str) -> dict:
 @app.post("/api/projects/{project}/runtime/detect")
 def api_project_runtime_detect(project: str) -> dict:
     try:
-        runtime = detect_runtime_config(project)
-        return runtime_status(project) | {"runtime": runtime}
+        project_id = _account_project_id(project, require_exists=True)
+        runtime = detect_runtime_config(project_id)
+        return _public_account_payload(runtime_status(project_id) | {"runtime": runtime})
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
 
@@ -12375,8 +12821,9 @@ def api_project_runtime_detect(project: str) -> dict:
 @app.post("/api/projects/{project}/runtime")
 def api_project_runtime_update(project: str, payload: dict[str, Any]) -> dict:
     try:
-        runtime = update_runtime_config(project, payload)
-        return runtime_status(project) | {"runtime": runtime}
+        project_id = _account_project_id(project, require_exists=True)
+        runtime = update_runtime_config(project_id, payload)
+        return _public_account_payload(runtime_status(project_id) | {"runtime": runtime})
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
 
@@ -12384,7 +12831,8 @@ def api_project_runtime_update(project: str, payload: dict[str, Any]) -> dict:
 @app.post("/api/projects/{project}/config")
 def api_project_config_update(project: str, payload: dict[str, Any]) -> dict:
     try:
-        return update_project_config(project, payload)
+        project_id = _account_project_id(project, require_exists=True)
+        return _public_account_payload(update_project_config(project_id, payload))
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
 
@@ -12392,19 +12840,40 @@ def api_project_config_update(project: str, payload: dict[str, Any]) -> dict:
 @app.post("/api/jobs/project")
 def api_job(payload: dict[str, Any]) -> dict:
     try:
+        payload = dict(payload)
+        payload["project"] = _account_project_id(payload.get("project"), require_exists=True)
+        runtime_env = dict(payload.get("runtime_env") or {}) if isinstance(payload.get("runtime_env"), dict) else {}
+        runtime_env["FINDING_LLM_CONFIG"] = str(_local_llm_config_path())
+        payload["runtime_env"] = runtime_env
         blocker = action_gate_blocker(payload)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if blocker:
         return JSONResponse(status_code=409, content=blocker)
     stage = job_stage(payload)
+    action = str(payload.get("action") or "").strip().lower().replace("_", "-")
+    if action in {"find", "full-cycle", "full-research-cycle"}:
+        llm_error = _find_llm_configuration_error(load_config())
+        if llm_error:
+            return JSONResponse(status_code=400, content=llm_error)
     stage_blocker = _project_stage_running_blocker(payload, stage)
     if stage_blocker:
         return JSONResponse(status_code=409, content=stage_blocker)
     job_id = f"{stage}_{uuid4().hex[:10]}"
     payload_with_job = {**payload, "web_job_id": job_id}
     initial_result = _initial_module_controller_job_result(payload_with_job, stage)
-    job = start_job(stage, lambda log, should_cancel, progress: run_action(payload_with_job, log, should_cancel, progress), job_id=job_id)
+    if not initial_result:
+        initial_result = {
+            "project": payload["project"],
+            "action": str(payload.get("action") or stage),
+            "web_job_id": job_id,
+            "status": "running",
+        }
+    with JOBS_LOCK:
+        duplicate = _active_web_stage_job_blocker(payload["project"], stage)
+        if duplicate:
+            return JSONResponse(status_code=409, content=duplicate)
+        job = start_job(stage, lambda log, should_cancel, progress: run_action(payload_with_job, log, should_cancel, progress), job_id=job_id)
     if initial_result:
         job.result = initial_result
         panel_stage = str(initial_result.get("panel_stage") or "").strip()
@@ -12413,13 +12882,13 @@ def api_job(payload: dict[str, Any]) -> dict:
             job.progress = {"phase": panel_stage, "current": 0, "total": 0, "percent": 0, "message": message}
             job.progress_version += 1
         _persist_jobs()
-    return job.as_dict()
+    return _public_account_payload(job.as_dict())
 
 
 @app.get("/api/projects/{project}/files/{file_path:path}")
 def api_project_file(project: str, file_path: str):
     try:
-        project_info = project_summary(project)
+        project_info = project_summary(_account_project_id(project, require_exists=True))
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
     root = Path(project_info["path"]).resolve()
@@ -12451,6 +12920,8 @@ def api_project_file(project: str, file_path: str):
 @app.post("/api/runs/{run_id}/plans/{plan_id}/finish")
 def api_finish_plan(run_id: str, plan_id: str):
     try:
+        if not _account_owns_run(run_id):
+            raise ValueError("Run not found.")
         current = _project_context_for_find_run(run_id) or _current_project_for_find_guard()
         project = current[0] if current else ""
         if not project:
@@ -12474,7 +12945,7 @@ def api_finish_plan(run_id: str, plan_id: str):
             return JSONResponse({"error": "Framework Planning selection failed", "stdout_tail": stdout_text[-4000:]}, status_code=500)
         _clerun_caches(run_id)
         _cleruntime_caches(project)
-        return payload
+        return _public_account_payload(payload)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
 
@@ -12488,7 +12959,14 @@ def api_jobs(
     include_history: bool = Query(True),
     project: str = Query(""),
 ) -> list[dict]:
-    project = _api_query_str(project)
+    raw_project = _api_query_str(project)
+    if raw_project:
+        try:
+            project = _account_project_id(raw_project, require_exists=True)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+    else:
+        project = ""
     try:
         dynamic = _live_jobs_from_projects(compact=True, project_filter=project)
     except TypeError as exc:
@@ -12503,6 +12981,7 @@ def api_jobs(
                 raise
             _reconcile_detached_launcher_jobs(dynamic)
     _reconcile_stale_cancelling_jobs()
+    dynamic = [item for item in dynamic if _account_owns_job_payload(item)]
     if project:
         dynamic = [item for item in dynamic if _job_belongs_to_project(item, project)]
 
@@ -12546,6 +13025,7 @@ def api_jobs(
 
     with JOBS_LOCK:
         job_snapshot = list(JOBS.values())
+    job_snapshot = [job for job in job_snapshot if _account_owns_job_state(job)]
     if project:
         job_snapshot = [job for job in job_snapshot if _job_state_belongs_to_project(job, project)]
     if compact:
@@ -12554,10 +13034,16 @@ def api_jobs(
         for job in job_snapshot:
             public_stage = _public_taste_stage(getattr(job, "stage", ""))
             source_item = job.as_dict(compact=False) if public_stage in {"read", "idea", "plan"} else job.as_dict(compact=True)
-            persisted.append(_compact_job_for_list(source_item))
+            compact_item = _compact_job_for_list(source_item)
+            compact_item["owner_id"] = job.owner_id
+            persisted.append(compact_item)
     else:
         effective_limit = limit
-        persisted = [job.as_dict(compact=False) for job in job_snapshot]
+        persisted = []
+        for job in job_snapshot:
+            item = job.as_dict(compact=False)
+            item["owner_id"] = job.owner_id
+            persisted.append(item)
     dynamic, persisted = _merge_live_find_workers_into_web_jobs(dynamic, persisted)
     hidden_taskbstages = set()
     dynamic_live_projects = {
@@ -12622,7 +13108,7 @@ def api_jobs(
         item_status = str(item.get("status") or result.get("status") or "").strip().lower()
         item_run_id = str(item.get("run_id") or result.get("run_id") or result.get("find_run_id") or "").strip()
         stopped = item_status not in {"queued", "running", "cancelling"}
-        if stopped and item_project and not (PROJECT_IDS_ROOT / item_project).is_dir():
+        if stopped and item_project and _CURRENT_ACCOUNT.get() is not None and not (PROJECT_IDS_ROOT / item_project).is_dir():
             return True
         if stopped and ("reading_web_smoke" in item_project or "find_reading_web_smoke" in item_run_id):
             return True
@@ -12770,7 +13256,8 @@ def api_jobs(
         items = [item for item in items if str(item.get("status") or "").lower() in {"queued", "running", "cancelling"}]
     if compact:
         items = [_compact_job_for_list(item) for item in items]
-    return [_public_job_api_payload(item) for item in items[:effective_limit]]
+    items = [item for item in items if _account_owns_job_payload(item)]
+    return _public_account_payload([_public_job_api_payload(item) for item in items[:effective_limit]])
 
 
 @app.get("/api/jobs/{job_id}")
@@ -12781,42 +13268,46 @@ def api_job(job_id: str, compact: bool = Query(True)) -> dict:
         if "force" not in str(exc):
             raise
         _reconcile_detached_launcher_jobs()
-    live_items = _live_jobs_from_projects(compact=compact)
+    live_items = [item for item in _live_jobs_from_projects(compact=compact) if _account_owns_job_payload(item)]
     if job_id:
         live_job = next((item for item in live_items if str(item.get("job_id") or "") == job_id), None)
         if not live_job and job_id.startswith("full_cycle_"):
             project_id = job_id[len("full_cycle_"):]
             live_job = next((item for item in live_items if str((item.get("result") if isinstance(item.get("result"), dict) else {}).get("project") or "") == project_id), None)
         if live_job:
-            return _public_job_api_payload(live_job)
+            return _public_account_payload(_public_job_api_payload(live_job))
         if job_id.startswith(("full-cycle_", "full-cycle-", "full_cycle_", "full_cycle-")):
             for item in live_items:
                 result = item.get("result") if isinstance(item.get("result"), dict) else {}
                 command_text = str(result.get("command") or result.get("cmd") or "")
                 if "run_full_research_cycle.py" in command_text and str(item.get("status") or "").lower() in {"queued", "running", "cancelling", "blocked"}:
-                    return _public_job_api_payload({**item, "job_id": job_id})
+                    return _public_account_payload(_public_job_api_payload({**item, "job_id": job_id}))
     job = JOBS.get(job_id)
+    if job is not None and not _account_owns_job_state(job):
+        job = None
     if not job:
         if job_id.startswith(("find-run-find_",)):
             run_id = job_id.removeprefix("find-run-")
             history = next((item for item in _find_run_history_jobs_from_runs(set(), limit=300) if str(item.get("run_id") or "") == run_id), None)
-            if history:
-                return _public_job_api_payload(_compact_job_for_list(history) if compact else history)
+            if history and _account_owns_job_payload(history):
+                return _public_account_payload(_public_job_api_payload(_compact_job_for_list(history) if compact else history))
         return JSONResponse({"error": "job not found"}, status_code=404)
     source_item = job.as_dict(compact=False) if not compact or _public_taste_stage(job.stage) in {"read", "idea", "plan"} else job.as_dict(compact=True)
     _, merged_items = _merge_live_find_workers_into_web_jobs(live_items, [source_item])
     merged_item = merged_items[0] if merged_items else source_item
     if compact:
         merged_item = _compact_job_for_list(merged_item)
-    return _public_job_api_payload(merged_item)
+    return _public_account_payload(_public_job_api_payload(merged_item))
 
 
 @app.post("/api/jobs/{job_id}/cancel")
 def api_cancel_job(job_id: str) -> dict:
     known_job = JOBS.get(job_id)
+    if known_job is not None and not _account_owns_job_state(known_job):
+        known_job = None
     if job_id:
         _LIVE_JOBS_CACHE.clear()
-        live_items = _live_jobs_from_projects(compact=False)
+        live_items = [item for item in _live_jobs_from_projects(compact=False) if _account_owns_job_payload(item)]
         live_job = next((item for item in live_items if str(item.get("job_id") or "") == job_id), None)
         worker_pid = _pid_from_project_worker_job_id(job_id)
         if not live_job and worker_pid:
@@ -12848,7 +13339,7 @@ def api_cancel_job(job_id: str) -> dict:
                 exact_job = known_job.as_dict(compact=False)
             _LIVE_JOBS_CACHE.clear()
             _persist_jobs()
-            return {**_strip_public_taste_marker(exact_job), "cancel_requested": True, "status": status, "termination": termination}
+            return _public_account_payload({**_strip_public_taste_marker(exact_job), "cancel_requested": True, "status": status, "termination": termination})
         project_id = _project_from_job_payload(job_id, live_job, known_job)
         phase_hint = _phase_hint_from_job(job_id, live_job, known_job)
         if not live_job and project_id and not worker_pid:
@@ -12858,7 +13349,7 @@ def api_cancel_job(job_id: str) -> dict:
             phase_hint = "paper"
             recovered_children: list[tuple[str, dict[str, Any]]] = []
             for root in sorted(PROJECT_IDS_ROOT.iterdir()) if PROJECT_IDS_ROOT.exists() else []:
-                if not root.is_dir():
+                if not root.is_dir() or not _account_owns_project(root.name):
                     continue
                 child = _active_project_child_process(root.name, root, phase_hint="paper")
                 if child:
@@ -12879,32 +13370,42 @@ def api_cancel_job(job_id: str) -> dict:
             pid = str(result.get("pid") or "").strip()
             termination = _terminate_process_tree(pid) if pid else {"requested_pid": "", "terminated_pids": [], "terminated_pgids": []}
             _LIVE_JOBS_CACHE.clear()
-            return {**_strip_public_taste_marker(live_job), "cancel_requested": True, "status": "cancelling", "termination": termination}
+            return _public_account_payload({**_strip_public_taste_marker(live_job), "cancel_requested": True, "status": "cancelling", "termination": termination})
     job = known_job
     if not job:
         return JSONResponse({"error": "job not found"}, status_code=404)
     job.request_cancel()
-    return job.as_dict()
+    return _public_account_payload(job.as_dict())
 
 
 @app.websocket("/ws/jobs/{job_id}")
 async def ws_job(websocket: WebSocket, job_id: str):
+    session_token = websocket.cookies.get(SESSION_COOKIE)
+    account = AUTH_STORE.user_for_session(session_token)
+    if account is None:
+        await websocket.close(code=4401)
+        return
+    account_token = _CURRENT_ACCOUNT.set(account)
     await websocket.accept()
     try:
         sent = 0
         sent_progress = -1
         while True:
+            current_account = AUTH_STORE.user_for_session(session_token)
+            if current_account is None or current_account.id != account.id:
+                await websocket.close(code=4401)
+                return
             live_job = None
             live_items: list[dict[str, Any]] = []
             if job_id:
-                live_items = _live_jobs_from_projects(compact=True)
+                live_items = [item for item in _live_jobs_from_projects(compact=True) if _account_owns_job_payload(item)]
                 live_job = next((item for item in live_items if str(item.get("job_id") or "") == job_id), None)
                 if not live_job and job_id.startswith("full_cycle_"):
                     project_id = job_id[len("full_cycle_"):]
                     live_job = next((item for item in live_items if str((item.get("result") if isinstance(item.get("result"), dict) else {}).get("project") or "") == project_id), None)
                 if not live_job:
                     known_job = JOBS.get(job_id)
-                    if known_job is not None and _public_taste_stage(known_job.stage) == "find":
+                    if known_job is not None and _account_owns_job_state(known_job) and _public_taste_stage(known_job.stage) == "find":
                         source_item = known_job.as_dict(compact=True)
                         _, merged_items = _merge_live_find_workers_into_web_jobs(live_items, [source_item])
                         merged_item = merged_items[0] if merged_items else {}
@@ -12919,10 +13420,10 @@ async def ws_job(websocket: WebSocket, job_id: str):
                     for line in (compact_live_job.get("logs") or []):
                         await websocket.send_json({"type": "log", "message": str(line)})
                     await websocket.send_json({"type": "progress", "progress": _public_job_api_payload(compact_live_job.get("progress") or {})})
-                    await websocket.send_json({"type": "complete", "job": compact_live_job})
+                    await websocket.send_json({"type": "complete", "job": _public_account_payload(compact_live_job)})
                     return
                 if live_stage in {"find", "read"}:
-                    snapshot = _public_job_api_payload(_compact_job_for_list(live_job))
+                    snapshot = _public_account_payload(_public_job_api_payload(_compact_job_for_list(live_job)))
                     await websocket.send_json({"type": "snapshot", "job": snapshot})
                     await asyncio.sleep(2.0)
                     continue
@@ -12943,7 +13444,7 @@ async def ws_job(websocket: WebSocket, job_id: str):
                 await asyncio.sleep(2.0)
                 continue
             job = JOBS.get(job_id)
-            if not job:
+            if not job or not _account_owns_job_state(job):
                 await websocket.send_json({"type": "error", "message": "job not found"})
                 return
             job_stage = _public_taste_stage(job.stage)
@@ -12953,10 +13454,10 @@ async def ws_job(websocket: WebSocket, job_id: str):
                 for line in (compact_job.get("logs") or []):
                     await websocket.send_json({"type": "log", "message": str(line)})
                 await websocket.send_json({"type": "progress", "progress": _public_job_api_payload(compact_job.get("progress") or {})})
-                await websocket.send_json({"type": "complete", "job": compact_job})
+                await websocket.send_json({"type": "complete", "job": _public_account_payload(compact_job)})
                 return
             if job_stage in {"read", "idea", "plan"}:
-                await websocket.send_json({"type": "snapshot", "job": _compact_job_for_list(job.as_dict(compact=False))})
+                await websocket.send_json({"type": "snapshot", "job": _public_account_payload(_compact_job_for_list(job.as_dict(compact=False)))})
                 await asyncio.sleep(2.0)
                 continue
             new_logs = _strip_public_taste_marker(job.logs[sent:])
@@ -12978,18 +13479,35 @@ async def ws_job(websocket: WebSocket, job_id: str):
             await asyncio.sleep(0.5)
     except WebSocketDisconnect:
         return
+    finally:
+        _CURRENT_ACCOUNT.reset(account_token)
 
 
 @app.get("/api/runs")
 def api_runs(project: str = Query("")) -> list[dict]:
-    return _filter_runs_for_project(_cached_list_runs(), _api_query_str(project))
+    raw_project = _api_query_str(project)
+    if raw_project:
+        try:
+            project_id = _account_project_id(raw_project, require_exists=True)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        items = _filter_runs_for_project(_cached_list_runs(), project_id)
+    else:
+        items = [item for item in _cached_list_runs() if _account_owns_run(item.get("run_id"))]
+    return _public_account_payload(items)
 
 
 @app.get("/api/runs/{run_id}/artifacts")
 def api_artifacts(run_id: str, light: bool = Query(False), scope: str = Query(""), project: str = Query("")) -> dict:
     light_mode = bool(light) if isinstance(light, bool) else bool(getattr(light, "default", False))
     artifact_scope = str(scope if isinstance(scope, str) else getattr(scope, "default", "") or "").strip().lower()
-    project_id = _api_query_str(project)
+    raw_project = _api_query_str(project)
+    try:
+        project_id = _account_project_id(raw_project, require_exists=True) if raw_project else ""
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    if not project_id and not _account_owns_run(run_id):
+        return JSONResponse({"error": "run not found"}, status_code=404)
     if artifact_scope and artifact_scope not in CURRENT_FIND_ARTIFACT_SCOPES:
         return JSONResponse({"error": f"Unknown artifact scope: {artifact_scope}"}, status_code=400)
     if project_id:
@@ -13109,11 +13627,13 @@ def api_artifacts(run_id: str, light: bool = Query(False), scope: str = Query(""
             artifacts.append({"name": name, "kind": "json", "content": _strip_public_taste_marker(content), "path": str(path), "content_truncated": False, "size_bytes": stat.st_size if stat is not None else 0})
     payload = {"run_id": run_id, "project": project_id, "scope": artifact_scope, "artifacts": artifacts, "artifact_roots": [str(path) for path in artifact_roots]}
     _RUN_ARTIFACTS_CACHE[cache_slot] = {"key": cache_key, "expires_at": now + RUN_ARTIFACTS_CACHE_TTL_SEC, "payload": payload}
-    return payload
+    return _public_account_payload(payload)
 
 
 @app.delete("/api/runs/{run_id}")
 def api_delete_run(run_id: str) -> dict:
+    if not _account_owns_run(run_id):
+        return JSONResponse({"error": "run not found"}, status_code=404)
     delete_run(run_id)
     _clerun_caches(run_id)
     return {"status": "ok", "run_id": run_id}
@@ -13126,7 +13646,12 @@ def api_patch_idea(
     patch: IdeaPatch,
     project: str = Query(..., min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.-]+$"),
 ) -> dict:
-    project_id = project
+    try:
+        project_id = _account_project_id(project, require_exists=True)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    if not _account_owns_run(run_id) or not _run_belongs_to_project(run_id, project_id):
+        return JSONResponse({"error": "run not found"}, status_code=404)
     blocker = _active_web_stage_job_blocker(project_id, "idea")
     if blocker:
         return JSONResponse(status_code=409, content=blocker)
@@ -13152,7 +13677,7 @@ def api_patch_idea(
         return JSONResponse(status_code=400, content={"status": "error", "message": detail})
     _clerun_caches(run_id)
     _cleruntime_caches(project_id)
-    return payload
+    return _public_account_payload(payload)
 
 
 @app.put("/api/runs/{run_id}/idea-markdown")
@@ -13161,7 +13686,12 @@ def api_update_idea_markdown(
     update: IdeaMarkdownUpdate,
     project: str = Query(..., min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.-]+$"),
 ) -> dict:
-    project_id = project
+    try:
+        project_id = _account_project_id(project, require_exists=True)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    if not _account_owns_run(run_id) or not _run_belongs_to_project(run_id, project_id):
+        return JSONResponse({"error": "run not found"}, status_code=404)
     blocker = _active_web_stage_job_blocker(project_id, "idea")
     if blocker:
         return JSONResponse(status_code=409, content=blocker)
@@ -13189,12 +13719,18 @@ def api_update_idea_markdown(
         return JSONResponse(status_code=400, content={"status": "error", "message": detail})
     _clerun_caches(run_id)
     _cleruntime_caches(project_id)
-    return payload
+    return _public_account_payload(payload)
 
 
 @app.put("/api/runs/{run_id}/plan-markdown")
 def api_update_plan_markdown(run_id: str, update: PlanMarkdownUpdate, project: str = "") -> dict:
-    current = (project, PROJECT_IDS_ROOT / project) if project else (_project_context_for_find_run(run_id) or ("", None))
+    if not _account_owns_run(run_id):
+        return JSONResponse({"error": "run not found"}, status_code=404)
+    try:
+        project_id_input = _account_project_id(project, require_exists=True) if project else ""
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    current = (project_id_input, PROJECT_IDS_ROOT / project_id_input) if project_id_input else (_project_context_for_find_run(run_id) or ("", None))
     project_id, _root = current
     if not project_id:
         return JSONResponse(status_code=409, content={"status": "error", "message": "Plan Markdown editing requires an active project."})
@@ -13221,7 +13757,7 @@ def api_update_plan_markdown(run_id: str, update: PlanMarkdownUpdate, project: s
         return JSONResponse(status_code=400, content={"status": "error", "message": "Framework rejected plan.md update.", "stdout_tail": stdout_text[-4000:]})
     _clerun_caches(run_id)
     _cleruntime_caches(project_id)
-    return payload
+    return _public_account_payload(payload)
 
 
 @app.get("/health")
