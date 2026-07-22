@@ -1180,7 +1180,12 @@ def _pdf_links_from_html_page(url: str) -> list[dict]:
     if not url.startswith("http"):
         return []
     lowered = url.lower()
-    if "papers.nips.cc" not in lowered and "proceedings.neurips.cc" not in lowered:
+    supported = (
+        "papers.nips.cc" in lowered
+        or "proceedings.neurips.cc" in lowered
+        or "eccv.ecva.net/virtual/" in lowered
+    )
+    if not supported:
         return []
     try:
         response = service_get(url, timeout=30)
@@ -1192,6 +1197,10 @@ def _pdf_links_from_html_page(url: str) -> list[dict]:
     out: list[dict] = []
     for href in links:
         absolute = urljoin(url, href)
+        if "eccv.ecva.net/virtual/" in lowered and any(
+            token in absolute.lower() for token in ["-supp.pdf", "supplement", "poster", "slides"]
+        ):
+            continue
         out.append({"kind": "html_page_pdf_link", "source_url": url, "pdf_url": absolute, "accepted": True})
     return out or [{"kind": "html_pdf_link_scan", "source_url": url, "accepted": False, "reason": "no_pdf_links"}]
 

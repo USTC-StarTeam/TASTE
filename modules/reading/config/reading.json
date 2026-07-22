@@ -25,7 +25,7 @@
   },
   "http": {
     "default_timeout_sec": 30,
-    "max_retry_after_sec": 86400,
+    "max_retry_after_sec": 120,
     "user_agent": "TASTE-Reading/1.0",
     "min_interval_sec": {
       "arxiv": 3.2,
@@ -42,7 +42,7 @@
       "unpaywall": 0.25,
       "acm": 5.0,
       "reader": 2.0,
-      "chatpaper": 1.0,
+      "chatpaper": 10.0,
       "github": 1.0,
       "web_search": 1.0,
       "generic": 0.05

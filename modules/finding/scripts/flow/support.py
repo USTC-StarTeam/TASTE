@@ -356,6 +356,12 @@ def _public_publication_page_search_cache_path() -> Path:
 
 
 _ACM_DETAIL_CACHE_LOCK = Lock()
+_CHATPAPER_REQUEST_LOCK = Lock()
+_CHATPAPER_NEXT_REQUEST_AT = 0.0
+_CHATPAPER_ROBOTS_CRAWL_DELAY_SEC = 10.0
+_ARXIV_REQUEST_LOCK = Lock()
+_ARXIV_NEXT_REQUEST_AT = 0.0
+_ARXIV_MIN_REQUEST_SPACING_SEC = 3.0
 
 
 def _save_state_cache(path: Path, cache: dict) -> None:
@@ -985,6 +991,10 @@ def _apply_cached_acm_abstract_sources(papers: list[dict]) -> tuple[list[dict], 
         abstract = _clean_text(cached.get("abstract"))
         if not abstract:
             return False
+        doi = _paper_doi(paper)
+        cached_doi = _doi_from_url(str(cached.get("doi") or cached.get("publisher_url") or ""))
+        if doi and cached_doi and doi != cached_doi.lower():
+            return False
         title = _clean_text(paper.get("title"))
         cached_title = _clean_text(cached.get("title"))
         if title and cached_title and _title_token_similarity(title, cached_title) < chatpaper_min_similarity:
@@ -1107,9 +1117,27 @@ def _apply_cached_acm_abstract_sources(papers: list[dict]) -> tuple[list[dict], 
     return papers, stats
 
 
+def _chatpaper_request_spacing_sec() -> float:
+    return max(
+        _CHATPAPER_ROBOTS_CRAWL_DELAY_SEC,
+        _positive_float_env("CHATPAPER_REQUEST_SPACING_SEC", _CHATPAPER_ROBOTS_CRAWL_DELAY_SEC),
+    )
+
+
+def _chatpaper_wait_for_request_slot() -> None:
+    global _CHATPAPER_NEXT_REQUEST_AT
+    with _CHATPAPER_REQUEST_LOCK:
+        now = time.monotonic()
+        wait_seconds = max(0.0, _CHATPAPER_NEXT_REQUEST_AT - now)
+        if wait_seconds:
+            time.sleep(wait_seconds)
+        _CHATPAPER_NEXT_REQUEST_AT = time.monotonic() + _chatpaper_request_spacing_sec()
+
+
 def _chatpaper_request(url: str, timeout: int = 25) -> requests.Response:
     headers = dict(HEADERS)
     headers.setdefault("Referer", "https://chatpaper.com/venues")
+    _chatpaper_wait_for_request_slot()
     response = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
     response.raise_for_status()
     return response
@@ -1165,6 +1193,118 @@ def _chatpaper_cache_venues(cache: dict) -> dict:
     return venues if isinstance(venues, dict) else {}
 
 
+def _chatpaper_nuxt_scalar(payload: list, reference: object) -> object:
+    value = reference
+    seen: set[int] = set()
+    while type(value) is int and 0 <= value < len(payload) and value not in seen:
+        seen.add(value)
+        value = payload[value]
+    if (
+        isinstance(value, list)
+        and len(value) == 2
+        and value[0] in {"ShallowReactive", "Reactive", "Ref", "ShallowRef"}
+    ):
+        return _chatpaper_nuxt_scalar(payload, value[1])
+    return value
+
+
+def _chatpaper_venue_page_papers(html_text: str, *, label: str, year: int) -> list[dict[str, Any]]:
+    soup = BeautifulSoup(html_text, "html.parser")
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    nuxt_node = soup.select_one("#__NUXT_DATA__")
+    try:
+        payload = json.loads((nuxt_node.string or nuxt_node.get_text()) if nuxt_node else "")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        payload = []
+    if isinstance(payload, list):
+        for value in payload:
+            if not isinstance(value, dict) or not {"title", "abstract"}.issubset(value):
+                continue
+            title = _clean_chatpaper_title(_chatpaper_nuxt_scalar(payload, value.get("title")))
+            abstract = _clean_text(_chatpaper_nuxt_scalar(payload, value.get("abstract")))
+            chatpaper_id = str(_chatpaper_nuxt_scalar(payload, value.get("id")) or "")
+            source_id = str(_chatpaper_nuxt_scalar(payload, value.get("source_id")) or "")
+            publisher_url = str(_chatpaper_nuxt_scalar(payload, value.get("article_url")) or "")
+            pdf_url = str(_chatpaper_nuxt_scalar(payload, value.get("pdf_url")) or "")
+            doi = _doi_from_url(source_id or publisher_url)
+            title_key = _semantic_scholar_cache_key(title)
+            identities = {item for item in (doi, title_key, chatpaper_id) if item}
+            if not title or not identities or identities & seen:
+                continue
+            seen.update(identities)
+            rows.append({
+                "url": f"https://chatpaper.com/paper/{chatpaper_id}" if chatpaper_id.isdigit() else "",
+                "title": title,
+                "abstract": abstract if len(abstract) >= 80 else "",
+                "doi": doi,
+                "publisher_url": publisher_url,
+                "pdf_url": pdf_url,
+                "venue": label,
+                "year": year,
+                "source": "chatpaper_title_for_acm",
+                "chatpaper_id": chatpaper_id,
+                "miss": len(abstract) < 80,
+                "miss_reason": "" if len(abstract) >= 80 else "missing_or_short_doc_abstract",
+                "updated_at": datetime.utcnow().isoformat() + "Z",
+            })
+    for link in soup.find_all("a", href=True):
+        href = str(link.get("href") or "")
+        chatpaper_id = _chatpaper_paper_id_from_href(href)
+        title = _clean_chatpaper_title(link.get_text(" ", strip=True))
+        title_key = _semantic_scholar_cache_key(title)
+        identities = {item for item in (title_key, chatpaper_id) if item}
+        if not chatpaper_id or not title or not identities or identities & seen:
+            continue
+        seen.update(identities)
+        rows.append({
+            "url": f"https://chatpaper.com/paper/{chatpaper_id}",
+            "title": title,
+            "abstract": "",
+            "doi": "",
+            "venue": label,
+            "year": year,
+            "source": "chatpaper_title_for_acm",
+            "chatpaper_id": chatpaper_id,
+            "miss": True,
+            "miss_reason": "venue_page_abstract_not_embedded",
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+        })
+    return rows
+
+
+def _chatpaper_cached_title_match(
+    titles: dict,
+    title: str,
+    *,
+    label: str,
+    year: int,
+    min_similarity: float,
+) -> dict:
+    cached = titles.get(_semantic_scholar_cache_key(title))
+    if isinstance(cached, dict) and cached.get("abstract"):
+        candidates = [cached]
+    else:
+        candidates = [
+            item
+            for item in titles.values()
+            if isinstance(item, dict)
+            and item.get("abstract")
+            and (not label or item.get("venue") == label)
+            and (not year or int(item.get("year") or 0) == int(year))
+        ]
+    if not candidates:
+        return {}
+    best = max(candidates, key=lambda item: _title_token_similarity(title, item.get("title")))
+    if _title_token_similarity(title, best.get("title")) < min_similarity:
+        return {}
+    if label and best.get("venue") != label:
+        return {}
+    if year and int(best.get("year") or 0) != int(year):
+        return {}
+    return best
+
+
 def _discover_chatpaper_venue_ids(label: str, year: int, cache: dict) -> tuple[list[int], int]:
     cache_key = f"{label}:{year}"
     venues = _chatpaper_cache_venues(cache)
@@ -1198,8 +1338,6 @@ def _discover_chatpaper_venue_ids(label: str, year: int, cache: dict) -> tuple[l
     page = _chatpaper_request(f"https://chatpaper.com/venues?id={first_id}&page=1")
     track_ids: list[int] = []
     final_id = _chatpaper_id_from_href(str(page.url))
-    if final_id:
-        track_ids.append(int(final_id))
     track_soup = BeautifulSoup(page.text, "html.parser")
     for link in track_soup.find_all("a", href=True):
         text = _clean_text(link.get_text(" ", strip=True))
@@ -1208,6 +1346,8 @@ def _discover_chatpaper_venue_ids(label: str, year: int, cache: dict) -> tuple[l
         track_id = _chatpaper_id_from_href(str(link.get("href") or ""))
         if track_id and int(track_id) not in track_ids:
             track_ids.append(int(track_id))
+    if not track_ids and final_id:
+        track_ids.append(int(final_id))
     venues[cache_key] = {
         "track_ids": track_ids,
         "expected_count": expected_count,
@@ -1217,26 +1357,56 @@ def _discover_chatpaper_venue_ids(label: str, year: int, cache: dict) -> tuple[l
     return track_ids, expected_count
 
 
-def _chatpaper_paper_links_for_track(track_id: int, *, max_pages: int = 80) -> list[str]:
-    links: list[str] = []
-    seen_pages_without_new = 0
+def _chatpaper_papers_for_track(
+    track_id: int,
+    *,
+    label: str,
+    year: int,
+    target_titles: list[str] | None = None,
+    max_pages: int = 80,
+) -> list[dict[str, Any]]:
+    papers: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    min_similarity = max(0.85, min(1.0, _positive_float_env("CHATPAPER_TITLE_MIN_SIMILARITY", 0.90)))
+    unresolved = [title for title in target_titles or [] if title]
     for page_index in range(1, max_pages + 1):
         url = f"https://chatpaper.com/venues?id={track_id}&page={page_index}"
         try:
             html_text = _chatpaper_request(url).text
         except Exception:
             break
-        found = list(dict.fromkeys(re.findall(r"/paper/\d+", html_text)))
-        new_links = [link for link in found if link not in links]
-        if not new_links:
-            seen_pages_without_new += 1
-            if seen_pages_without_new >= 1:
+        page_papers = _chatpaper_venue_page_papers(html_text, label=label, year=year)
+        new_papers: list[dict[str, Any]] = []
+        for paper in page_papers:
+            identities = {
+                str(item)
+                for item in (
+                    paper.get("doi"),
+                    _semantic_scholar_cache_key(paper.get("title")),
+                    paper.get("chatpaper_id"),
+                )
+                if item
+            }
+            if not identities or identities & seen:
+                continue
+            seen.update(identities)
+            papers.append(paper)
+            new_papers.append(paper)
+        if not new_papers:
+            break
+        if unresolved:
+            unresolved = [
+                title
+                for title in unresolved
+                if not any(
+                    paper.get("abstract")
+                    and _title_token_similarity(title, paper.get("title")) >= min_similarity
+                    for paper in new_papers
+                )
+            ]
+            if not unresolved:
                 break
-        else:
-            seen_pages_without_new = 0
-            links.extend(new_links)
-        time.sleep(_positive_float_env("CHATPAPER_REQUEST_SPACING_SEC", 0.15))
-    return links
+    return papers
 
 
 def _parse_chatpaper_paper_page(url: str, *, label: str, year: int) -> dict[str, Any]:
@@ -1270,47 +1440,67 @@ def _parse_chatpaper_paper_page(url: str, *, label: str, year: int) -> dict[str,
     }
 
 
-def _ensure_chatpaper_venue_cache(label: str, year: int, cache: dict) -> dict[str, Any]:
+def _ensure_chatpaper_venue_cache(label: str, year: int, cache: dict, target_papers: list[dict]) -> dict[str, Any]:
     cache_changed = False
-    track_ids, expected_count = _discover_chatpaper_venue_ids(label, year, cache)
     titles = _chatpaper_cache_titles(cache)
-    existing_for_venue = [
-        item for item in titles.values()
-        if isinstance(item, dict) and item.get("venue") == label and int(item.get("year") or 0) == int(year) and item.get("abstract")
+    min_similarity = max(0.85, min(1.0, _positive_float_env("CHATPAPER_TITLE_MIN_SIMILARITY", 0.90)))
+    target_titles = [_clean_text(paper.get("title")) for paper in target_papers if _clean_text(paper.get("title"))]
+    unresolved = [
+        title
+        for title in target_titles
+        if not _chatpaper_cached_title_match(
+            titles,
+            title,
+            label=label,
+            year=year,
+            min_similarity=min_similarity,
+        )
     ]
-    if expected_count and len(existing_for_venue) >= expected_count:
-        return {"track_ids": track_ids, "expected_count": expected_count, "cached_count": len(existing_for_venue), "cache_changed": False}
+    if not unresolved:
+        return {"track_ids": [], "expected_count": 0, "discovered_papers": 0, "fetched": 0, "cached_count": len(target_titles), "cache_changed": False}
 
-    max_papers = _positive_int_env("CHATPAPER_MAX_PAPERS", 20000)
-    paper_links: list[str] = []
+    track_ids, expected_count = _discover_chatpaper_venue_ids(label, year, cache)
+    discovered: list[dict[str, Any]] = []
     for track_id in track_ids:
-        for link in _chatpaper_paper_links_for_track(track_id):
-            if link not in paper_links:
-                paper_links.append(link)
-            if max_papers > 0 and len(paper_links) >= max_papers:
-                break
-        if max_papers > 0 and len(paper_links) >= max_papers:
+        track_papers = _chatpaper_papers_for_track(
+            track_id,
+            label=label,
+            year=year,
+            target_titles=unresolved,
+        )
+        discovered.extend(track_papers)
+        for item in track_papers:
+            title = _clean_text(item.get("title"))
+            if not title:
+                continue
+            if not item.get("abstract") and any(
+                _title_token_similarity(target, title) >= min_similarity for target in unresolved
+            ):
+                item = _parse_chatpaper_paper_page(str(item.get("url") or ""), label=label, year=year)
+            if item.get("abstract"):
+                item["chatpaper_id"] = item.get("chatpaper_id") or _chatpaper_paper_id_from_href(str(item.get("url") or ""))
+                titles[_semantic_scholar_cache_key(title)] = item
+                cache_changed = True
+        unresolved = [
+            title
+            for title in unresolved
+            if not _chatpaper_cached_title_match(
+                titles,
+                title,
+                label=label,
+                year=year,
+                min_similarity=min_similarity,
+            )
+        ]
+        if not unresolved:
             break
-    fetched = 0
-    for link in paper_links:
-        url = f"https://chatpaper.com{link}"
-        paper_id = _chatpaper_paper_id_from_href(link)
-        if any(isinstance(item, dict) and item.get("chatpaper_id") == paper_id and item.get("abstract") for item in titles.values()):
-            continue
-        parsed = _parse_chatpaper_paper_page(url, label=label, year=year)
-        fetched += 1
-        title = _clean_text(parsed.get("title"))
-        if title:
-            key = _semantic_scholar_cache_key(title)
-            parsed["chatpaper_id"] = paper_id
-            titles[key] = parsed
-            cache_changed = True
-        time.sleep(_positive_float_env("CHATPAPER_REQUEST_SPACING_SEC", 0.15))
     return {
         "track_ids": track_ids,
         "expected_count": expected_count,
-        "paper_links": len(paper_links),
-        "fetched": fetched,
+        "discovered_papers": len(discovered),
+        "fetched": len(discovered),
+        "target_count": len(target_titles),
+        "unresolved_count": len(unresolved),
         "cached_count": sum(
             1 for item in titles.values()
             if isinstance(item, dict) and item.get("venue") == label and int(item.get("year") or 0) == int(year) and item.get("abstract")
@@ -1342,7 +1532,12 @@ def enrich_acm_doi_with_chatpaper(papers: list[dict], limit: int = 0) -> tuple[l
     cache["query_version"] = PUBLIC_PDF_SEARCH_QUERY_VERSION
     cache_changed = False
     for label, year in _chatpaper_venue_years_for_papers(targets):
-        venue_stats = _ensure_chatpaper_venue_cache(label, year, cache)
+        venue_targets = [
+            paper
+            for paper in targets
+            if _chatpaper_venue_label_for_paper(paper) == label and int(paper.get("year") or 0) == year
+        ]
+        venue_stats = _ensure_chatpaper_venue_cache(label, year, cache, venue_targets)
         cache_changed = cache_changed or bool(venue_stats.get("cache_changed"))
         stats["venue_cache"][f"{label}:{year}"] = venue_stats
     titles = _chatpaper_cache_titles(cache)
@@ -1351,42 +1546,33 @@ def enrich_acm_doi_with_chatpaper(papers: list[dict], limit: int = 0) -> tuple[l
         title = _clean_text(paper.get("title"))
         if not title:
             continue
-        cached = titles.get(_semantic_scholar_cache_key(title))
-        if not isinstance(cached, dict):
-            label = _chatpaper_venue_label_for_paper(paper)
-            try:
-                year = int(paper.get("year") or 0)
-            except Exception:
-                year = 0
-            scored = sorted(
-                (
-                    (_title_token_similarity(title, item.get("title")), item)
-                    for item in titles.values()
-                    if isinstance(item, dict)
-                    and item.get("abstract")
-                    and (not label or item.get("venue") == label)
-                    and (not year or int(item.get("year") or 0) == year)
-                ),
-                key=lambda row: row[0],
-                reverse=True,
-            )
-            if scored and scored[0][0] >= min_similarity:
-                cached = scored[0][1]
+        label = _chatpaper_venue_label_for_paper(paper)
+        try:
+            year = int(paper.get("year") or 0)
+        except Exception:
+            year = 0
+        cached = _chatpaper_cached_title_match(
+            titles,
+            title,
+            label=label,
+            year=year,
+            min_similarity=min_similarity,
+        )
         if not isinstance(cached, dict) or not cached.get("abstract"):
             continue
         similarity = _title_token_similarity(title, cached.get("title"))
         if similarity < min_similarity:
             stats["mismatches"] = int(stats.get("mismatches") or 0) + 1
             continue
-        label = _chatpaper_venue_label_for_paper(paper)
-        try:
-            year = int(paper.get("year") or 0)
-        except Exception:
-            year = 0
         if label and cached.get("venue") != label:
             stats["mismatches"] = int(stats.get("mismatches") or 0) + 1
             continue
         if year and int(cached.get("year") or 0) != year:
+            stats["mismatches"] = int(stats.get("mismatches") or 0) + 1
+            continue
+        doi = _paper_doi(paper)
+        cached_doi = _doi_from_url(str(cached.get("doi") or cached.get("publisher_url") or ""))
+        if doi and cached_doi and doi != cached_doi.lower():
             stats["mismatches"] = int(stats.get("mismatches") or 0) + 1
             continue
         paper["abstract"] = str(cached.get("abstract") or "")
@@ -3241,6 +3427,7 @@ def enrich_acm_doi_with_openalex(papers: list[dict], limit: int = 0) -> tuple[li
         "abstracts_filled": 0,
         "records_without_abstract": 0,
         "missing_openalex_records": 0,
+        "rate_limited": False,
         "errors": [],
     }
     if not targets:
@@ -3273,8 +3460,9 @@ def enrich_acm_doi_with_openalex(papers: list[dict], limit: int = 0) -> tuple[li
 
     batch_size = max(1, min(50, _positive_int_env("OPENALEX_ACM_BATCH_SIZE", 50)))
     timeout = _positive_int_env("OPENALEX_REQUEST_TIMEOUT_SEC", 25)
-    retries = _positive_int_env("OPENALEX_REQUEST_RETRIES", 4)
+    retries = _positive_int_env("OPENALEX_REQUEST_RETRIES", 2)
     spacing = _positive_float_env("OPENALEX_REQUEST_SPACING_SEC", 0.2)
+    api_key = str(os.environ.get("OPENALEX_API_KEY") or "").strip()
     select = "id,doi,display_name,abstract_inverted_index,primary_location,open_access,locations,authorships"
     for start in range(0, len(pending), batch_size):
         batch = pending[start:start + batch_size]
@@ -3286,13 +3474,26 @@ def enrich_acm_doi_with_openalex(papers: list[dict], limit: int = 0) -> tuple[li
             "select": select,
             "mailto": _contact_mailto(),
         }
+        if api_key:
+            params["api_key"] = api_key
         url = "https://api.openalex.org/works?" + urlencode(params, safe=":/|,")
         payload: dict[str, Any] = {}
         last_error = ""
+        rate_limited = False
         for attempt in range(1, retries + 1):
             try:
                 response = requests.get(url, headers=HEADERS, timeout=timeout)
-                if response.status_code in {408, 409, 425, 429, 500, 502, 503, 504}:
+                if response.status_code == 429:
+                    rate_limited = True
+                    stats["rate_limited"] = True
+                    stats["retry_after_sec"] = str(
+                        response.headers.get("Retry-After") or response.headers.get("X-RateLimit-Reset") or ""
+                    )
+                    stats["rate_limit_remaining"] = str(response.headers.get("X-RateLimit-Remaining") or "")
+                    stats["rate_limit_remaining_usd"] = str(response.headers.get("X-RateLimit-Remaining-USD") or "")
+                    last_error = "HTTP 429"
+                    break
+                if response.status_code in {408, 409, 425, 500, 502, 503, 504}:
                     raise RuntimeError(f"HTTP {response.status_code}")
                 response.raise_for_status()
                 payload = response.json()
@@ -3301,9 +3502,11 @@ def enrich_acm_doi_with_openalex(papers: list[dict], limit: int = 0) -> tuple[li
             except Exception as exc:
                 last_error = str(exc)[:240]
                 if attempt < retries:
-                    time.sleep(min(30.0, max(1.0, spacing) * attempt))
+                    time.sleep(min(2.0, max(0.2, spacing) * attempt))
         if last_error:
             stats["errors"].append({"batch_start": start, "error": last_error})
+            if rate_limited:
+                break
             continue
         items_by_doi: dict[str, dict] = {}
         for item in payload.get("results") or []:
@@ -3749,10 +3952,8 @@ def enrich_acm_doi_with_indexed_abstracts(papers: list[dict], limit: int = 0) ->
     if public_pdf_search_enabled:
         public_pdf_search_limit = _positive_int_env("ACM_PUBLIC_PDF_SEARCH_MAX_ITEMS", limit if limit and limit > 0 else 0)
         papers, public_pdf_search_stats = enrich_acm_doi_with_public_pdf_search(papers, limit=public_pdf_search_limit)
-    chatpaper_enabled = str(os.environ.get("ACM_CHATPAPER_FALLBACK", "0") or "0").strip().lower() not in {"0", "false", "no", "off"}
+    chatpaper_enabled = str(os.environ.get("ACM_CHATPAPER_FALLBACK", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
     chatpaper_stats: dict[str, Any] = {"enabled": False, "attempted": 0, "abstracts_filled": 0}
-    if chatpaper_enabled:
-        papers, chatpaper_stats = enrich_acm_doi_with_chatpaper(papers, limit=limit)
     papers, openalex_stats = enrich_acm_doi_with_openalex(papers, limit=limit)
     openalex_oa_pdf_enabled = str(os.environ.get("ACM_OPENALEX_OA_PDF_FALLBACK", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
     openalex_oa_pdf_stats: dict[str, Any] = {"enabled": False, "attempted": 0, "abstracts_filled": 0}
@@ -3776,7 +3977,7 @@ def enrich_acm_doi_with_indexed_abstracts(papers: list[dict], limit: int = 0) ->
         "arxiv_title_match": {"enabled": False, "attempted": 0, "abstracts_filled": 0},
     }
     openalex_title_enabled = str(os.environ.get("ACM_OPENALEX_TITLE_FALLBACK", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
-    if openalex_title_enabled:
+    if openalex_title_enabled and not openalex_stats.get("rate_limited"):
         openalex_title_missing = [
             paper
             for paper in papers
@@ -3803,6 +4004,13 @@ def enrich_acm_doi_with_indexed_abstracts(papers: list[dict], limit: int = 0) ->
             "attempted": len(openalex_title_missing),
             "abstracts_filled": max(0, sum(1 for paper in openalex_title_missing if paper.get("abstract")) - before_openalex_title),
             "marked_filled": openalex_title_marked,
+        }
+    elif openalex_stats.get("rate_limited"):
+        stats["openalex_title_match"] = {
+            "enabled": False,
+            "attempted": 0,
+            "abstracts_filled": 0,
+            "disabled_reason": "openalex_batch_rate_limited",
         }
     enabled_text = str(os.environ.get("ACM_SEMANTIC_SCHOLAR_FALLBACK", "1") or "1").strip().lower()
     api_key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "").strip()
@@ -3843,6 +4051,22 @@ def enrich_acm_doi_with_indexed_abstracts(papers: list[dict], limit: int = 0) ->
             "abstracts_filled": max(0, sum(1 for paper in missing if paper.get("abstract")) - before_filled),
             "marked_filled": filled,
         }
+    if chatpaper_enabled:
+        chatpaper_missing = [
+            paper
+            for paper in papers
+            if isinstance(paper, dict) and not paper.get("abstract") and _paper_doi(paper).startswith("10.1145/")
+        ]
+        if limit and limit > 0:
+            chatpaper_missing = chatpaper_missing[:limit]
+        if chatpaper_missing:
+            _enriched, chatpaper_stats = enrich_acm_doi_with_chatpaper(
+                chatpaper_missing,
+                limit=len(chatpaper_missing),
+            )
+        else:
+            chatpaper_stats = {"enabled": True, "attempted": 0, "abstracts_filled": 0}
+        stats["chatpaper"] = chatpaper_stats
     arxiv_enabled = str(os.environ.get("ACM_ARXIV_TITLE_FALLBACK") or "").strip().lower() in {"1", "true", "yes", "on"}
     if arxiv_enabled:
         arxiv_missing = [
@@ -3912,6 +4136,12 @@ def enrich_acm_doi_with_indexed_abstracts(papers: list[dict], limit: int = 0) ->
 def enrich_with_openalex(papers: list[dict], limit: int = 80) -> list[dict]:
     cache = _load_openalex_cache()
     cache_changed = False
+    api_key = str(os.environ.get("OPENALEX_API_KEY") or "").strip()
+    max_network_requests = _positive_int_env("OPENALEX_MAX_NETWORK_REQUESTS", 40)
+    spacing = _positive_float_env("OPENALEX_REQUEST_SPACING_SEC", 0.2)
+    network_requests = 0
+    last_request_at = 0.0
+    rate_limited = False
     for paper in papers[:limit]:
         if paper.get("abstract") and paper.get("pdf_url"):
             continue
@@ -3943,18 +4173,44 @@ def enrich_with_openalex(papers: list[dict], limit: int = 80) -> list[dict]:
                 continue
         if not doi and not query:
             continue
+        if rate_limited or (max_network_requests > 0 and network_requests >= max_network_requests):
+            break
         item: dict = {}
         doi_status = 0
         try:
             if doi:
                 doi_url = f"https://api.openalex.org/works/doi:{doi}"
-                response = requests.get(doi_url, headers=HEADERS, timeout=_metadata_timeout(6))
+                params = {"api_key": api_key} if api_key else None
+                wait_seconds = max(0.0, spacing - (time.monotonic() - last_request_at))
+                if wait_seconds:
+                    time.sleep(wait_seconds)
+                network_requests += 1
+                last_request_at = time.monotonic()
+                response = requests.get(doi_url, params=params, headers=HEADERS, timeout=_metadata_timeout(6))
                 doi_status = response.status_code
+                if response.status_code == 429:
+                    metadata = paper.setdefault("metadata", {})
+                    metadata["openalex_lookup_error"] = "http_429"
+                    metadata["openalex_lookup_retryable"] = True
+                    rate_limited = True
+                    break
                 if response.status_code == 200:
                     item = _openalex_item_from_payload(response.json(), paper, from_search=False)
-            if not item and query:
+            if not item and query and not rate_limited and (max_network_requests <= 0 or network_requests < max_network_requests):
                 search_url = f"https://api.openalex.org/works?search={query}&per-page=3"
-                response = requests.get(search_url, headers=HEADERS, timeout=_metadata_timeout(6))
+                params = {"api_key": api_key} if api_key else None
+                wait_seconds = max(0.0, spacing - (time.monotonic() - last_request_at))
+                if wait_seconds:
+                    time.sleep(wait_seconds)
+                network_requests += 1
+                last_request_at = time.monotonic()
+                response = requests.get(search_url, params=params, headers=HEADERS, timeout=_metadata_timeout(6))
+                if response.status_code == 429:
+                    metadata = paper.setdefault("metadata", {})
+                    metadata["openalex_lookup_error"] = "http_429"
+                    metadata["openalex_lookup_retryable"] = True
+                    rate_limited = True
+                    break
                 if response.status_code == 200:
                     item = _openalex_item_from_payload(response.json(), paper, from_search=True)
             if not item:
@@ -7492,9 +7748,14 @@ def enrich_with_semantic_scholar(papers: list[dict], limit: int = 20, api_key: s
         headers["x-api-key"] = api_key
     cache = _load_semantic_scholar_cache()
     cache_changed = False
-    spacing = _positive_float_env("SEMANTIC_SCHOLAR_REQUEST_SPACING_SEC", 0.2 if api_key else 1.0)
+    # The documented introductory API-key limit is also 1 request/second.
+    spacing = _positive_float_env("SEMANTIC_SCHOLAR_REQUEST_SPACING_SEC", 1.0)
     cache_only = str(os.environ.get("SEMANTIC_SCHOLAR_CACHE_ONLY") or "").strip().lower() in {"1", "true", "yes", "on"}
     retry_misses = str(os.environ.get("SEMANTIC_SCHOLAR_RETRY_MISSES") or "").strip().lower() in {"1", "true", "yes", "on"}
+    max_network_requests = _positive_int_env("SEMANTIC_SCHOLAR_MAX_NETWORK_REQUESTS", 40)
+    network_requests = 0
+    last_request_at = 0.0
+    rate_limited = False
 
     def _cache_keys(paper: dict) -> list[str]:
         keys: list[str] = []
@@ -7568,6 +7829,8 @@ def enrich_with_semantic_scholar(papers: list[dict], limit: int = 20, api_key: s
             continue
         if cache_only:
             continue
+        if rate_limited or (max_network_requests > 0 and network_requests >= max_network_requests):
+            break
 
         doi = ""
         for key in keys:
@@ -7585,8 +7848,20 @@ def enrich_with_semantic_scholar(papers: list[dict], limit: int = 20, api_key: s
         found_cache: dict | None = None
         lookup_errors: list[str] = []
         for source, url in urls:
+            if max_network_requests > 0 and network_requests >= max_network_requests:
+                lookup_errors.append("network_request_budget_exhausted")
+                break
             try:
+                wait_seconds = max(0.0, spacing - (time.monotonic() - last_request_at))
+                if wait_seconds:
+                    time.sleep(wait_seconds)
+                network_requests += 1
+                last_request_at = time.monotonic()
                 response = requests.get(url, headers=headers, timeout=_metadata_timeout(6))
+                if response.status_code == 429:
+                    lookup_errors.append(f"{source}:http_429")
+                    rate_limited = True
+                    break
                 if response.status_code != 200:
                     lookup_errors.append(f"{source}:http_{response.status_code}")
                     continue
@@ -7633,8 +7908,8 @@ def enrich_with_semantic_scholar(papers: list[dict], limit: int = 20, api_key: s
                 for key in keys:
                     cache[key] = miss
                 cache_changed = True
-        if spacing > 0:
-            time.sleep(spacing)
+        if rate_limited:
+            break
     if cache_changed:
         _save_semantic_scholar_cache(cache)
     return papers
@@ -7645,7 +7920,7 @@ def enrich_with_arxiv_title_match(papers: list[dict], limit: int = 40) -> list[d
     ns = {"a": "http://www.w3.org/2005/Atom"}
     timeout = max(3, int(os.environ.get("ARXIV_TITLE_MATCH_TIMEOUT_SEC", "8") or 8))
     max_results = max(1, min(5, int(os.environ.get("ARXIV_TITLE_MATCH_MAX_RESULTS", "3") or 3)))
-    max_queries_per_paper = max(1, min(3, int(os.environ.get("ARXIV_TITLE_MATCH_MAX_QUERIES", "2") or 2)))
+    max_queries_per_paper = max(1, min(3, int(os.environ.get("ARXIV_TITLE_MATCH_MAX_QUERIES", "1") or 1)))
     min_similarity = max(0.5, min(0.99, _positive_float_env("ARXIV_TITLE_MATCH_MIN_SIMILARITY", 0.92)))
     max_network_requests = _positive_int_env("ARXIV_TITLE_MATCH_MAX_NETWORK_REQUESTS", 20)
     network_requests = 0
@@ -7673,6 +7948,7 @@ def enrich_with_arxiv_title_match(papers: list[dict], limit: int = 40) -> list[d
                 break
             url = "https://export.arxiv.org/api/query?search_query=" + quote_plus(query_text) + f"&sortBy=submittedDate&sortOrder=descending&start=0&max_results={max_results}"
             try:
+                _arxiv_wait_for_request_slot()
                 network_requests += 1
                 response = requests.get(url, headers=HEADERS, timeout=(min(5, timeout), timeout))
                 if response.status_code == 429:
@@ -7724,7 +8000,6 @@ def enrich_with_arxiv_title_match(papers: list[dict], limit: int = 40) -> list[d
         metadata["arxiv_title_match_title"] = best["title"]
         metadata["arxiv_title_match_query"] = best_query
         metadata["arxiv_title_match_author_overlap"] = best.get("author_overlap") or []
-        time.sleep(0.35)
     return papers
 
 
@@ -9979,10 +10254,29 @@ def fetch_biorxiv(
             break
     return finalize_biorxiv_status()
 
+def _arxiv_request_spacing_sec() -> float:
+    return max(
+        _ARXIV_MIN_REQUEST_SPACING_SEC,
+        _positive_float_env("ARXIV_REQUEST_SPACING_SEC", _ARXIV_MIN_REQUEST_SPACING_SEC),
+    )
+
+
+def _arxiv_wait_for_request_slot() -> None:
+    global _ARXIV_NEXT_REQUEST_AT
+    spacing = _arxiv_request_spacing_sec()
+    with _ARXIV_REQUEST_LOCK:
+        now = time.monotonic()
+        wait_seconds = max(0.0, _ARXIV_NEXT_REQUEST_AT - now)
+        if wait_seconds:
+            time.sleep(wait_seconds)
+        _ARXIV_NEXT_REQUEST_AT = time.monotonic() + spacing
+
+
 def _request_arxiv_page(url: str, timeout_sec: int, attempts: int = 3):
     last_error: Exception | None = None
     for attempt in range(1, max(1, attempts) + 1):
         try:
+            _arxiv_wait_for_request_slot()
             try:
                 return _request(url, timeout=timeout_sec)
             except TypeError:
@@ -10010,10 +10304,7 @@ def fetch_arxiv(categories: list[str], fetch_limit: int, start_date: str = "", e
     full_scan = os.environ.get("ARXIV_FULL_SCAN", "0").lower() in {"1", "true", "yes", "on"}
     env_max_queries = int(os.environ.get("ARXIV_MAX_QUERIES", "0") or 0)
     env_timeout = int(os.environ.get("ARXIV_TIMEOUT_SEC", "0") or 0)
-    try:
-        request_spacing_sec = max(0.0, float(os.environ.get("ARXIV_REQUEST_SPACING_SEC", "3.0") or 3.0))
-    except (TypeError, ValueError):
-        request_spacing_sec = 3.0
+    request_spacing_sec = _arxiv_request_spacing_sec()
     use_targeted = bool(targeted_queries)
     max_queries = max(1, env_max_queries or int(max_queries or (len(categories) + len(topic_queries or []) if full_scan else 3)))
     arxiv_timeout = max(20, env_timeout or int(timeout_sec or 45))
@@ -10107,8 +10398,6 @@ def fetch_arxiv(categories: list[str], fetch_limit: int, start_date: str = "", e
             if len(entries) < _ARXIV_PAGE_SIZE:
                 return
             start += _ARXIV_PAGE_SIZE
-            if request_spacing_sec:
-                time.sleep(request_spacing_sec)
 
     for query_index, (query_label, query_text) in enumerate(queries, 1):
         run_query(query_index, len(queries), query_label, query_text, sort_by=primary_sort)
