@@ -293,6 +293,7 @@ DEFAULT_READING_CONFIG: dict[str, Any] = {
         },
         "process_access_blocker_sec": 300.0,
         "rate_limit_cooldown_sec": 120.0,
+        "batch_cooldown_requeue_wait_cap_sec": 30.0,
         "batch_challenge_cooldown_wait_cap_sec": 240.0,
     },
     "openreview": {
