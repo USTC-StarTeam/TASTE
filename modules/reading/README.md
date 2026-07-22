@@ -85,7 +85,7 @@ OPENREVIEW_PASSWORD=your_password
 | `READING_DISABLE_ARTICLE_CACHE=1` | 本次运行跳过文章级缓存。 |
 | `READING_DISABLE_RUNTIME_CACHE=1` | 本次运行重新获取全文材料。 |
 
-OpenReview、ICLR 和 ICML 官方站点按主机串行访问，跨 Read worker 和跨进程的并发上限均为 `1`，相邻请求至少间隔 20 秒。收到 `403` 或 `429` 后会进入共享冷却期，后续同站点候选直接跳过。`read-workers` 仍可并行处理不同站点的全文获取和后续单篇精读。
+全文下载按服务或主机分别门控，不同渠道可由不同 Read worker 同时下载；同一渠道按自身请求间隔串行访问，跨 worker 和跨进程的并发上限为 `1`。收到 `403` 或 `429` 后会进入该渠道的共享冷却期，后续同渠道候选直接跳过。`read-workers` 也用于并行处理后续单篇精读。
 
 Jina、网页搜索和 GitHub 等可选后备源的进程内熔断按响应类型计算：`401/403` 或挑战页默认 300 秒；`429` 优先使用服务端 `Retry-After`，未提供时使用 120 秒。普通网络异常不会触发进程熔断。
 

@@ -787,6 +787,8 @@ def service_from_url(url: str) -> str:
         return "web_search"
     if host == "chatpaper.com" or host.endswith(".chatpaper.com"):
         return "chatpaper"
+    if host:
+        return "host_" + re.sub(r"[^a-z0-9_.-]+", "_", host)
     return "generic"
 
 
@@ -834,7 +836,7 @@ def _write_service_state(handle: Any, state: dict[str, Any]) -> None:
 
 @contextmanager
 def service_request_slot(service: str, *, allow_during_cooldown: bool = False) -> Iterator[dict[str, Any]]:
-    """Serialize one service across threads and processes, including external clients."""
+    """Serialize one service/host across threads and processes, including external clients."""
     service_name = re.sub(r"[^a-z0-9_.-]+", "_", str(service or "generic").lower()) or "generic"
     min_interval = max(0.0, SERVICE_MIN_INTERVAL_SEC.get(service_name, SERVICE_MIN_INTERVAL_SEC["generic"]))
     with _SERVICE_LOCKS_LOCK:
