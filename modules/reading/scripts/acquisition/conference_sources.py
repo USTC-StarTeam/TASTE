@@ -206,6 +206,14 @@ def _derived_official_pdf_urls(channel: str, blob: str) -> list[str]:
     for match in re.finditer(r"https?://openaccess\.thecvf\.com/content/([^/]+)/html/([^\"'<>\s]+)\.html", blob):
         event, paper_id = match.groups()
         urls.append(f"https://openaccess.thecvf.com/content/{event}/papers/{paper_id}.pdf")
+    for match in re.finditer(
+        r"https?://(?:www\.)?ecva\.net/papers/eccv_(\d{4})/papers_ECCV/html/(\d+)_ECCV_(\d{4})_paper\.php",
+        blob,
+        flags=re.I,
+    ):
+        year, paper_id, page_year = match.groups()
+        if year == page_year:
+            urls.append(f"https://www.ecva.net/papers/eccv_{year}/papers_ECCV/papers/{int(paper_id):05d}.pdf")
     for match in re.finditer(r"https?://aclanthology\.org/([0-9]{4}\.[A-Za-z0-9-]+\.\d+)/?", blob):
         urls.append(f"https://aclanthology.org/{match.group(1)}.pdf")
     doi_match = re.search(r"\b(10\.1145/\d+(?:\.\d+)?)\b", blob)

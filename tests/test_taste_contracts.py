@@ -410,6 +410,7 @@ def test_finding_requests_use_shared_per_service_slot(monkeypatch):
     assert resource_locks.crawl_service_from_url("https://dblp.org/search/publ/api") == "dblp"
     assert resource_locks.crawl_service_from_url("https://dblp.uni-trier.de/db/conf/kdd/") == "dblp"
     assert resource_locks.crawl_service_from_url("https://dblp.dagstuhl.de/db/conf/kdd/") == "dblp"
+    assert resource_locks.crawl_service_from_url("https://chatpaper.com/venues?id=1") == "chatpaper"
 
 
 def test_find_and_read_share_service_cooldown_state(monkeypatch, tmp_path):
@@ -1715,6 +1716,38 @@ def test_reading_conference_source_only_derives_full_text_from_input_metadata():
         "https://www.ecva.net/papers/eccv_2024/papers_ECCV/papers/00037.pdf"
     ]
     assert candidates[0]["kind"] == "conference_official_pdf_from_input_metadata"
+
+
+def test_reading_eccv_archive_page_derives_official_pdf():
+    conference_sources = _load_reading_conference_sources()
+
+    candidates = conference_sources.official_conference_pdf_candidates({
+        "source": "eccv",
+        "title": "An ECCV Paper",
+        "url": "https://www.ecva.net/papers/eccv_2024/papers_ECCV/html/19_ECCV_2024_paper.php",
+    })
+
+    assert candidates[0]["pdf_url"] == (
+        "https://www.ecva.net/papers/eccv_2024/papers_ECCV/papers/00019.pdf"
+    )
+
+
+def test_reading_eccv_virtual_page_uses_main_pdf_not_supplement(monkeypatch):
+    read_pipeline = _load_reading_pipeline()
+
+    class Response:
+        status_code = 200
+        text = (
+            '<a href="https://www.ecva.net/papers/eccv_2024/papers_ECCV/papers/00019.pdf">paper</a>'
+            '<a href="https://www.ecva.net/papers/eccv_2024/papers_ECCV/papers/00019-supp.pdf">supp</a>'
+        )
+
+    monkeypatch.setattr(read_pipeline, "service_get", lambda *_args, **_kwargs: Response())
+    candidates = read_pipeline._pdf_links_from_html_page("https://eccv.ecva.net/virtual/2024/poster/238")
+
+    assert [candidate["pdf_url"] for candidate in candidates] == [
+        "https://www.ecva.net/papers/eccv_2024/papers_ECCV/papers/00019.pdf"
+    ]
 
 
 def test_reading_official_title_search_covers_all_conference_channels():
@@ -7650,12 +7683,12 @@ def test_find_acm_live_defaults_use_targeted_fallbacks_not_full_venue_scan(monke
     papers = [
         {"title": "OpenAlex title match", "doi": "10.1145/1.1", "abstract": "", "metadata": {"doi": "10.1145/1.1"}},
         {"title": "Semantic title match", "doi": "10.1145/1.2", "abstract": "", "metadata": {"doi": "10.1145/1.2"}},
+        {"title": "ChatPaper residual match", "doi": "10.1145/1.3", "abstract": "", "metadata": {"doi": "10.1145/1.3"}},
     ]
-    calls = {"openalex_title": 0, "semantic": 0}
+    calls = {"openalex_title": 0, "semantic": 0, "chatpaper": 0}
     empty_stats = {"attempted": 0, "abstracts_filled": 0}
     monkeypatch.setattr(find_support, "_apply_cached_acm_abstract_sources", lambda items: (items, dict(empty_stats)))
     monkeypatch.setattr(find_support, "enrich_acm_doi_with_hal", lambda items, **_kwargs: (items, dict(empty_stats)))
-    monkeypatch.setattr(find_support, "enrich_acm_doi_with_chatpaper", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("full-venue ChatPaper scan ran by default")))
     monkeypatch.setattr(find_support, "enrich_acm_doi_with_openalex", lambda items, **_kwargs: (items, dict(empty_stats)))
     monkeypatch.setattr(find_support, "enrich_acm_doi_with_openalex_oa_pdf", lambda items, **_kwargs: (items, dict(empty_stats)))
     monkeypatch.setattr(find_support, "enrich_acm_doi_with_official_pdf", lambda items, **_kwargs: (items, dict(empty_stats)))
@@ -7669,16 +7702,232 @@ def test_find_acm_live_defaults_use_targeted_fallbacks_not_full_venue_scan(monke
     def semantic(items, **_kwargs):
         calls["semantic"] += 1
         for item in items:
-            item["abstract"] = "Semantic Scholar DOI-matched abstract."
-            item.setdefault("metadata", {})["abstract_source"] = "semantic_scholar_doi"
+            if item["title"] == "Semantic title match":
+                item["abstract"] = "Semantic Scholar DOI-matched abstract."
+                item.setdefault("metadata", {})["abstract_source"] = "semantic_scholar_doi"
         return items
+
+    def chatpaper(items, **_kwargs):
+        calls["chatpaper"] += 1
+        assert [item["title"] for item in items] == ["ChatPaper residual match"]
+        items[0]["abstract"] = "ChatPaper title-matched abstract."
+        return items, {"enabled": True, "attempted": 1, "abstracts_filled": 1}
 
     monkeypatch.setattr(find_support, "enrich_with_openalex", openalex_title)
     monkeypatch.setattr(find_support, "enrich_with_semantic_scholar", semantic)
+    monkeypatch.setattr(find_support, "enrich_acm_doi_with_chatpaper", chatpaper)
 
     enriched, _stats = find_support.enrich_acm_doi_with_indexed_abstracts(papers)
-    assert calls == {"openalex_title": 1, "semantic": 1}
+    assert calls == {"openalex_title": 1, "semantic": 1, "chatpaper": 1}
     assert all(paper["abstract"] for paper in enriched)
+
+
+def test_find_chatpaper_respects_robots_crawl_delay(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    monkeypatch.setenv("CHATPAPER_REQUEST_SPACING_SEC", "0.15")
+    assert find_support._chatpaper_request_spacing_sec() == 10.0
+    monkeypatch.setenv("CHATPAPER_REQUEST_SPACING_SEC", "12.5")
+    assert find_support._chatpaper_request_spacing_sec() == 12.5
+
+    calls = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(find_support, "_chatpaper_wait_for_request_slot", lambda: calls.append("local_wait"))
+    monkeypatch.setattr(
+        find_support,
+        "finding_service_get",
+        lambda url, **_kwargs: calls.append(("shared_get", url)) or Response(),
+    )
+
+    find_support._chatpaper_request("https://chatpaper.com/venues?id=1")
+
+    assert calls == ["local_wait", ("shared_get", "https://chatpaper.com/venues?id=1")]
+
+
+def test_find_openalex_batch_stops_immediately_on_first_429(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    calls = []
+
+    class Response:
+        status_code = 429
+        headers = {
+            "Retry-After": "27000",
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Remaining-USD": "0",
+        }
+
+    monkeypatch.setattr(find_support, "_load_openalex_cache", lambda: {})
+    monkeypatch.setattr(find_support, "_save_openalex_cache", lambda _cache: None)
+    monkeypatch.setattr(find_support, "_refresh_acm_doi_abstract_enrichment_audit", lambda *_args: None)
+    monkeypatch.setattr(find_support, "finding_service_get", lambda url, **_kwargs: calls.append(url) or Response())
+    monkeypatch.setattr(find_support.time, "sleep", lambda *_args: (_ for _ in ()).throw(AssertionError("429 must not wait")))
+    papers = [
+        {"title": f"Paper {index}", "doi": f"10.1145/1.{index}", "abstract": ""}
+        for index in range(60)
+    ]
+
+    _papers, stats = find_support.enrich_acm_doi_with_openalex(papers)
+
+    assert len(calls) == 1
+    assert stats["batches"] == 1
+    assert stats["rate_limited"] is True
+    assert stats["retry_after_sec"] == "27000"
+
+
+def test_find_openalex_title_fallback_stops_batch_on_first_429(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    calls = []
+
+    class Response:
+        status_code = 429
+
+    monkeypatch.setattr(find_support, "_load_openalex_cache", lambda: {})
+    monkeypatch.setattr(find_support, "_save_openalex_cache", lambda _cache: None)
+    monkeypatch.setattr(find_support, "finding_service_get", lambda url, **_kwargs: calls.append(url) or Response())
+    papers = [
+        {"title": "First paper", "doi": "10.1145/1.1", "abstract": ""},
+        {"title": "Second paper", "doi": "10.1145/1.2", "abstract": ""},
+    ]
+
+    find_support.enrich_with_openalex(papers, limit=2)
+
+    assert len(calls) == 1
+    assert papers[0]["metadata"]["openalex_lookup_error"] == "http_429"
+    assert papers[0]["metadata"]["openalex_lookup_retryable"] is True
+
+
+def test_find_semantic_scholar_stops_batch_on_first_429(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    calls = []
+
+    class Response:
+        status_code = 429
+
+    monkeypatch.setattr(find_support, "_load_semantic_scholar_cache", lambda: {})
+    monkeypatch.setattr(find_support, "_save_semantic_scholar_cache", lambda _cache: None)
+    monkeypatch.setattr(find_support, "finding_service_get", lambda url, **_kwargs: calls.append(url) or Response())
+    monkeypatch.setattr(find_support.time, "sleep", lambda *_args: (_ for _ in ()).throw(AssertionError("429 must not wait")))
+    papers = [
+        {"title": "First paper", "doi": "10.1145/1.1", "abstract": ""},
+        {"title": "Second paper", "doi": "10.1145/1.2", "abstract": ""},
+    ]
+
+    find_support.enrich_with_semantic_scholar(papers, limit=2)
+
+    assert len(calls) == 1
+    assert papers[0]["metadata"]["semantic_scholar_lookup_error"] == "semantic_scholar_doi:http_429"
+    assert papers[0]["metadata"]["semantic_scholar_lookup_retryable"] is True
+
+
+def test_find_arxiv_title_fallback_stops_batch_on_first_429(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    calls = []
+    slots = []
+
+    class Response:
+        status_code = 429
+
+    monkeypatch.setattr(find_support, "_arxiv_wait_for_request_slot", lambda: slots.append(True))
+    monkeypatch.setattr(find_support, "finding_service_get", lambda url, **_kwargs: calls.append(url) or Response())
+    papers = [{"title": "First paper"}, {"title": "Second paper"}]
+
+    find_support.enrich_with_arxiv_title_match(papers, limit=2)
+
+    assert len(calls) == 1
+    assert len(slots) == 1
+    assert papers[0]["metadata"]["arxiv_title_match_error"] == "http_429"
+    monkeypatch.setenv("ARXIV_REQUEST_SPACING_SEC", "0")
+    assert find_support._arxiv_request_spacing_sec() == 3.0
+
+
+def test_reading_retry_after_and_chatpaper_defaults_are_bounded(monkeypatch):
+    monkeypatch.delenv("READING_MAX_RETRY_AFTER_SEC", raising=False)
+    monkeypatch.delenv("READING_CHATPAPER_MIN_INTERVAL_SEC", raising=False)
+    common = _load_reading_common()
+
+    assert common.retry_after_seconds("86400") == 120.0
+    assert common.SERVICE_MIN_INTERVAL_SEC["chatpaper"] == 10.0
+
+
+def test_find_www_policy_declares_chatpaper_fallback():
+    policy = json.loads(
+        (ROOT / "modules" / "finding" / "data" / "priority_venue_metadata_sources.json").read_text(encoding="utf-8")
+    )
+
+    assert "chatpaper_title_for_acm" in policy["venues"]["dblp_www"]["indexed_abstract_enrichment_sources"]
+
+
+def test_find_chatpaper_reads_embedded_venue_abstracts_without_paper_requests(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    abstract = "A complete embedded conference abstract with enough substantive text for metadata enrichment. " * 2
+    payload = [
+        {"title": 1, "abstract": 2, "id": 3, "source_id": 4, "article_url": 5, "pdf_url": 6},
+        "Target Paper",
+        abstract,
+        280001,
+        "10.1145/1.3",
+        "https://dl.acm.org/doi/10.1145/1.3",
+        "https://dl.acm.org/doi/pdf/10.1145/1.3",
+    ]
+    html_text = f'<script id="__NUXT_DATA__" type="application/json">{json.dumps(payload)}</script>'
+    calls = []
+
+    class Response:
+        text = html_text
+
+    monkeypatch.setattr(
+        find_support,
+        "_chatpaper_request",
+        lambda url: calls.append(url) or Response(),
+    )
+
+    rows = find_support._chatpaper_papers_for_track(
+        100,
+        label="KDD",
+        year=2026,
+        target_titles=["Target Paper"],
+    )
+
+    assert calls == ["https://chatpaper.com/venues?id=100&page=1"]
+    assert len(rows) == 1
+    assert rows[0]["title"] == "Target Paper"
+    assert rows[0]["abstract"] == abstract.strip()
+    assert rows[0]["doi"] == "10.1145/1.3"
+    assert rows[0]["url"] == "https://chatpaper.com/paper/280001"
+
+
+def test_find_chatpaper_rejects_cached_doi_mismatch(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    title = "Same Conference Paper Title"
+    cache = {
+        "titles": {
+            find_support._semantic_scholar_cache_key(title): {
+                "title": title,
+                "abstract": "A complete but DOI-mismatched abstract that must not be applied to this paper. " * 2,
+                "doi": "10.1145/9.9",
+                "venue": "KDD",
+                "year": 2026,
+            }
+        }
+    }
+    monkeypatch.setattr(find_support, "_load_chatpaper_abstract_cache", lambda: cache)
+
+    papers, stats = find_support.enrich_acm_doi_with_chatpaper([
+        {"title": title, "doi": "10.1145/1.3", "abstract": "", "venue": "KDD", "year": 2026}
+    ])
+
+    assert papers[0]["abstract"] == ""
+    assert stats["mismatches"] == 1
 
 
 def test_find_priority_live_audit_enriches_details_without_cache(monkeypatch, tmp_path):
@@ -9468,7 +9717,7 @@ def test_find_arxiv_title_match_does_not_write_cross_run_cache(monkeypatch, tmp_
         def raise_for_status(self):
             return None
 
-    monkeypatch.setattr(find_support.requests, "get", lambda *_args, **_kwargs: FakeResponse())
+    monkeypatch.setattr(find_support, "finding_service_get", lambda *_args, **_kwargs: FakeResponse())
     papers = [{"title": "Universal Topic Retrieval for Research Workflows", "authors": ""}]
 
     find_support.enrich_with_arxiv_title_match(papers, limit=1)

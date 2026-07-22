@@ -96,7 +96,7 @@
       "official_categories_expected": false,
       "allow_title_only_verified_cache": false,
       "allow_indexed_abstract_enrichment": true,
-      "indexed_abstract_enrichment_sources": ["acm_dl_pdf", "openalex_doi_for_acm", "openalex_title_for_acm", "openalex_oa_pdf_for_acm", "semantic_scholar_doi_for_acm", "semantic_scholar_title_for_acm", "arxiv_title_match_for_acm", "hal_title_for_acm", "public_publication_page_for_acm", "public_pdf_search_for_acm"],
+      "indexed_abstract_enrichment_sources": ["acm_dl_pdf", "openalex_doi_for_acm", "openalex_title_for_acm", "openalex_oa_pdf_for_acm", "semantic_scholar_doi_for_acm", "semantic_scholar_title_for_acm", "arxiv_title_match_for_acm", "chatpaper_title_for_acm", "hal_title_for_acm", "public_publication_page_for_acm", "public_pdf_search_for_acm"],
       "fallback_policy": "DBLP title records are a fallback seed only; full cache requires ACM/official abstracts."
     },
     "dblp_sigir": {
