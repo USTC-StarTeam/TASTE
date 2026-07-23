@@ -63,8 +63,15 @@ def _normalize_action(action: str) -> str:
     return str(action or "").strip().replace("-", "_")
 
 
+def _running_in_taste_conda() -> bool:
+    if os.environ.get("CONDA_DEFAULT_ENV", "").strip() == "taste":
+        return True
+    executable = Path(sys.executable).expanduser().resolve()
+    return executable.parent.name == "bin" and executable.parent.parent.name == "taste" and executable.parent.parent.parent.name == "envs"
+
+
 def _require_taste_conda() -> None:
-    if os.environ.get("CONDA_DEFAULT_ENV", "").strip() != "taste":
+    if not _running_in_taste_conda():
         raise SystemExit("Ideation must run in the conda environment named 'taste'.")
 
 
