@@ -340,6 +340,29 @@ def test_reading_service_contact_emails_keep_provider_boundaries(monkeypatch):
     assert common.service_contact_email("crossref") == "reading@example.test"
 
 
+def test_reading_openalex_key_uses_an_independent_quota_state(monkeypatch, tmp_path):
+    common = _load_reading_common()
+    monkeypatch.setattr(common, "_SERVICE_STATE_ROOT", tmp_path)
+    monkeypatch.setattr(common, "_SERVICE_LOCKS", {})
+    monkeypatch.setitem(common.SERVICE_MIN_INTERVAL_SEC, "openalex", 0.0)
+    monkeypatch.delenv("OPENALEX_API_KEY", raising=False)
+
+    with common.service_request_slot("openalex") as gate:
+        gate["cooldown_sec"] = 60.0
+        gate["cooldown_reason"] = "anonymous_quota_exhausted"
+    assert common.service_cooldown_remaining("openalex") > 0
+
+    monkeypatch.setenv("OPENALEX_API_KEY", "private-test-key")
+    assert common.service_cooldown_remaining("openalex") == 0.0
+    with common.service_request_slot("openalex") as gate:
+        assert gate["service"] == "openalex"
+
+    state_names = sorted(path.name for path in tmp_path.glob("*.lock"))
+    assert "openalex.lock" in state_names
+    assert len(state_names) == 2
+    assert all("private-test-key" not in name for name in state_names)
+
+
 def test_reading_process_http_blocker_uses_retry_after_for_429(monkeypatch):
     common = _load_reading_common()
 
@@ -1454,6 +1477,54 @@ def test_reading_article_cache_keeps_read_when_full_text_is_identical(monkeypatc
     assert (cache_dir / "read.md").read_text(encoding="utf-8") == "# Valid cached read\n"
 
 
+def test_reading_article_cache_binds_exact_arxiv_version(monkeypatch, tmp_path):
+    read_pipeline = _load_reading_pipeline()
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    monkeypatch.setattr(read_pipeline, "ensure_inside_reading", lambda path, **_kwargs: Path(path))
+
+    cached_paper = {
+        "title": "Versioned arXiv Paper",
+        "arxiv_id": "2401.12345v1",
+        "url": "https://arxiv.org/abs/2401.12345v1",
+    }
+    (cache_dir / "manifest.json").write_text(json.dumps({
+        "schema_version": read_pipeline.ARTICLE_CACHE_SCHEMA_VERSION,
+        "paper": cached_paper,
+        "aliases": ["arxiv:2401.12345"],
+    }), encoding="utf-8")
+
+    assert read_pipeline._arxiv_identity_from_text("https://arxiv.org/pdf/2401.12345v2.pdf") == "2401.12345v2"
+    assert read_pipeline._article_cache_same_paper_ok(cache_dir, {
+        "title": cached_paper["title"],
+        "arxiv_id": "2401.12345v2",
+    }) is False
+    assert read_pipeline._article_cache_same_paper_ok(cache_dir, cached_paper) is True
+
+
+def test_reading_article_cache_rejects_content_hash_mismatch(monkeypatch, tmp_path):
+    read_pipeline = _load_reading_pipeline()
+    cache_dir = tmp_path / "cache"
+    (cache_dir / "downloads").mkdir(parents=True)
+    (cache_dir / "extracted").mkdir(parents=True)
+    (cache_dir / "downloads" / "article.pdf").write_bytes(b"%PDF-1.7\nofficial paper body")
+    text_path = cache_dir / "extracted" / "full_text.txt"
+    text_path.write_text("validated full text\n" * 100, encoding="utf-8")
+    monkeypatch.setattr(read_pipeline, "ensure_inside_reading", lambda path, **_kwargs: Path(path))
+
+    fingerprints = read_pipeline._article_cache_content_fingerprints(cache_dir)
+    (cache_dir / "manifest.json").write_text(json.dumps({
+        "schema_version": read_pipeline.ARTICLE_CACHE_SCHEMA_VERSION,
+        "full_text_content_revision": fingerprints["content_revision"],
+        "full_text_sha256": fingerprints["full_text_sha256"],
+        "pdf_sha256": fingerprints["pdf_sha256"],
+    }), encoding="utf-8")
+    assert read_pipeline._article_cache_integrity_ok(cache_dir) is True
+
+    text_path.write_text("different full text\n" * 100, encoding="utf-8")
+    assert read_pipeline._article_cache_integrity_ok(cache_dir) is False
+
+
 def test_reading_article_cache_restore_backfills_content_binding(monkeypatch, tmp_path):
     read_pipeline = _load_reading_pipeline()
     cache_dir = tmp_path / "cache"
@@ -1566,6 +1637,7 @@ def test_reading_article_cache_invalidates_content_quality_defects(
         "read_quality_policy_version": "read_markdown_quality_v2",
     }), encoding="utf-8")
 
+    monkeypatch.setattr(read_pipeline, "ensure_inside_reading", lambda path, **_kwargs: Path(path))
     monkeypatch.setattr(read_pipeline, "_article_cache_enabled", lambda: True)
     monkeypatch.setattr(read_pipeline, "_locate_article_cache_dir", lambda *_args, **_kwargs: cache_dir)
     monkeypatch.setattr(read_pipeline, "_article_cache_same_paper_ok", lambda *_args, **_kwargs: True)

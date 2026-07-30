@@ -16,6 +16,7 @@ import json
 import functools
 import subprocess
 from concurrent import futures
+from contextlib import contextmanager
 from html import unescape
 from pathlib import Path
 from typing import Callable
@@ -24,6 +25,11 @@ from urllib.parse import urljoin, urlparse
 from urllib.parse import parse_qs, unquote
 
 import requests
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Linux is the supported TASTE runtime.
+    fcntl = None
 
 _SCRIPTS_ROOT = Path(__file__).resolve().parents[1]
 if str(_SCRIPTS_ROOT) not in sys.path:
@@ -155,6 +161,7 @@ _DEEP_READ_DIR_CACHE_INDEX: dict[str, list[Path]] | None = None
 ARTICLE_CACHE_ROOT = OUTPUT_ROOT.parent.parent / "cache" / "article_cache"
 ARTICLE_CACHE_ARTICLES_ROOT = ARTICLE_CACHE_ROOT / "articles"
 ARTICLE_CACHE_ALIASES_ROOT = ARTICLE_CACHE_ROOT / "aliases"
+ARTICLE_CACHE_SCHEMA_VERSION = 1
 _ARTICLE_CACHE_LOCK = threading.Lock()
 LogFn = Callable[[str], None]
 CancelFn = Callable[[], bool]
@@ -4521,6 +4528,23 @@ def _article_cache_hash(value: str) -> str:
     return hashlib.sha256(str(value or "").strip().lower().encode("utf-8")).hexdigest()[:32]
 
 
+@contextmanager
+def _article_cache_process_lock(cache_dir: Path):
+    """Protect one article cache entry from concurrent Read processes."""
+    cache_dir = ensure_inside_reading(cache_dir, label="文章缓存目录")
+    lock_root = ensure_inside_reading(cache_dir.parent / ".locks", label="文章缓存锁目录")
+    lock_root.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_root / f"{_article_cache_hash(str(cache_dir.resolve(strict=False)))}.lock"
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def _article_cache_alias_path(alias: str) -> Path:
     _, aliases = _ensure_article_cache_dirs()
     digest = _article_cache_hash(alias)
@@ -4544,7 +4568,7 @@ def _arxiv_identity_from_text(value: object) -> str:
     for pattern in patterns:
         match = re.search(pattern, text, flags=re.I)
         if match:
-            return re.sub(r"v\d+$", "", match.group(1).strip(), flags=re.I).lower()
+            return match.group(1).strip().lower()
     return ""
 
 
@@ -4628,6 +4652,8 @@ def _article_cache_manifest(cache_dir: Path) -> dict:
 
 def _article_cache_same_paper_ok(cache_dir: Path, paper: dict) -> bool:
     manifest = _article_cache_manifest(cache_dir)
+    if manifest.get("schema_version") not in (None, "", ARTICLE_CACHE_SCHEMA_VERSION):
+        return False
     cached_paper = manifest.get("paper") if isinstance(manifest.get("paper"), dict) else {}
     if not cached_paper:
         cached_paper = read_json(cache_dir / "paper.json", {})
@@ -4639,8 +4665,18 @@ def _article_cache_same_paper_ok(cache_dir: Path, paper: dict) -> bool:
         for alias in (manifest.get("aliases") if isinstance(manifest.get("aliases"), list) else [])
         if str(alias).strip()
     }
-    if not cached_aliases:
-        cached_aliases = set(_article_cache_aliases(cached_paper))
+    cached_aliases.update(_article_cache_aliases(cached_paper))
+    wanted_arxiv_versions = {
+        alias for alias in wanted_aliases
+        if alias.startswith("arxiv:") and re.search(r"v\d+$", alias, flags=re.I)
+    }
+    if wanted_arxiv_versions:
+        cached_arxiv_versions = {
+            alias for alias in cached_aliases
+            if alias.startswith("arxiv:") and re.search(r"v\d+$", alias, flags=re.I)
+        }
+        if not (wanted_arxiv_versions & cached_arxiv_versions):
+            return False
     exact_prefixes = ("doi:", "arxiv:", "openreview:", "url:", "pdf:", "paperid:")
     if any(alias in cached_aliases for alias in wanted_aliases if alias.startswith(exact_prefixes)):
         return True
@@ -4668,16 +4704,23 @@ def _locate_article_cache_dir(paper: dict, packet: dict | None = None) -> Path |
     for alias in aliases:
         alias_path = alias_root / _article_cache_hash(alias)[:2] / f"{_article_cache_hash(alias)}.json"
         payload = read_json(alias_path, {})
+        if not isinstance(payload, dict):
+            payload = {}
+        if payload.get("schema_version") not in (None, "", ARTICLE_CACHE_SCHEMA_VERSION):
+            payload = {}
+        if payload and str(payload.get("alias") or "").strip() != alias:
+            payload = {}
         cache_dir_value = str(payload.get("cache_dir") or "").strip() if isinstance(payload, dict) else ""
         if cache_dir_value:
             try:
                 cache_dir = resolve_reading_path(cache_dir_value)
             except Exception:
                 cache_dir = Path(cache_dir_value)
-            key = str(cache_dir.resolve(strict=False))
-            if key not in seen:
-                seen.add(key)
-                candidates.append(cache_dir)
+            if cache_dir.resolve(strict=False).parent == articles_root.resolve(strict=False):
+                key = str(cache_dir.resolve(strict=False))
+                if key not in seen:
+                    seen.add(key)
+                    candidates.append(cache_dir)
         direct = _article_cache_dir_for_alias(alias)
         key = str(direct.resolve(strict=False))
         if key not in seen:
@@ -4715,6 +4758,7 @@ def _write_article_cache_aliases(cache_dir: Path, aliases: list[str]) -> None:
         if not alias:
             continue
         write_json(_article_cache_alias_path(alias), {
+            "schema_version": ARTICLE_CACHE_SCHEMA_VERSION,
             "alias": alias,
             "cache_dir": _rel_reading_path(cache_dir),
             "updated_at": _now_iso(),
@@ -4768,6 +4812,21 @@ def _article_cache_content_fingerprints(cache_dir: Path) -> dict[str, str]:
         text_path=cache_dir / "extracted" / "full_text.txt",
         pdf_path=cache_dir / "downloads" / "article.pdf",
     )
+
+
+def _article_cache_integrity_ok(cache_dir: Path) -> bool:
+    manifest = _article_cache_manifest(cache_dir)
+    if manifest.get("schema_version") not in (None, "", ARTICLE_CACHE_SCHEMA_VERSION):
+        return False
+    fingerprints = _article_cache_content_fingerprints(cache_dir)
+    for key in ("full_text_sha256", "pdf_sha256"):
+        expected = str(manifest.get(key) or "")
+        if expected and expected != str(fingerprints.get(key) or ""):
+            return False
+    expected_revision = str(manifest.get("full_text_content_revision") or "")
+    if expected_revision and expected_revision != str(fingerprints.get("content_revision") or ""):
+        return False
+    return True
 
 
 def _invalidate_article_read_artifacts(cache_dir: Path) -> bool:
@@ -4833,9 +4892,10 @@ def _publish_article_full_text_cache(item_dir: Path, paper: dict, packet: dict) 
         if cache_dir is not None and cache_dir.is_dir() and _article_cache_same_paper_ok(cache_dir, paper):
             fingerprints = _article_cache_content_fingerprints(cache_dir)
             packet.update(fingerprints)
-            with _ARTICLE_CACHE_LOCK:
+            with _ARTICLE_CACHE_LOCK, _article_cache_process_lock(cache_dir):
                 manifest = _article_cache_manifest(cache_dir)
                 manifest.update({
+                    "schema_version": ARTICLE_CACHE_SCHEMA_VERSION,
                     "updated_at": _now_iso(),
                     "cache_scope": "reading_article_cache",
                     "has_full_text": (cache_dir / "extracted" / "full_text.txt").is_file(),
@@ -4860,7 +4920,7 @@ def _publish_article_full_text_cache(item_dir: Path, paper: dict, packet: dict) 
     if (text_source is None or not text_source.is_file()) and (pdf_source is None or not pdf_source.is_file()):
         return {}
     cache_dir, aliases = _target_article_cache_dir(paper, packet)
-    with _ARTICLE_CACHE_LOCK:
+    with _ARTICLE_CACHE_LOCK, _article_cache_process_lock(cache_dir):
         cache_dir.mkdir(parents=True, exist_ok=True)
         previous_fingerprints = _article_cache_content_fingerprints(cache_dir)
         manifest = _article_cache_manifest(cache_dir)
@@ -4894,12 +4954,14 @@ def _publish_article_full_text_cache(item_dir: Path, paper: dict, packet: dict) 
         cached_packet["article_cache_published_at"] = _now_iso()
         write_json(cache_dir / "paper.json", paper)
         write_json(cache_dir / "full_text_packet.json", {
+            "schema_version": ARTICLE_CACHE_SCHEMA_VERSION,
             "paper": paper,
             "papers": [cached_packet],
             "generated_at": _now_iso(),
             "cache_scope": "reading_article_cache",
         })
         manifest.update({
+            "schema_version": ARTICLE_CACHE_SCHEMA_VERSION,
             "paper": paper,
             "aliases": aliases,
             "updated_at": _now_iso(),
@@ -4937,28 +4999,33 @@ def _restore_article_full_text_cache(paper: dict, item_dir: Path) -> dict:
     cache_dir = _locate_article_cache_dir(paper)
     if cache_dir is None:
         return {}
-    payload = read_json(cache_dir / "full_text_packet.json", {})
-    packet = _packet_from_full_text_payload(payload)
-    if not packet:
-        return {}
-    text_source = _packet_path(packet, "text_path")
-    pdf_source = _packet_path(packet, "pdf_path")
-    restored = dict(packet)
-    copied_text = False
-    copied_pdf = False
-    if text_source is not None and text_source.is_file():
-        text_target = item_dir / "extracted" / "full_text.txt"
-        copied_text = _copy_article_cache_file(text_source, text_target)
-        if copied_text:
-            restored["text_path"] = _rel_reading_path(text_target)
-    if pdf_source is not None and pdf_source.is_file():
-        suffix = pdf_source.suffix if pdf_source.suffix.lower() == ".pdf" else ".pdf"
-        pdf_target = item_dir / "downloads" / ("article" + suffix)
-        copied_pdf = _copy_article_cache_file(pdf_source, pdf_target)
-        if copied_pdf:
-            restored["pdf_path"] = _rel_reading_path(pdf_target)
-    if not copied_text and not copied_pdf:
-        return {}
+    with _article_cache_process_lock(cache_dir):
+        if not _article_cache_integrity_ok(cache_dir):
+            return {}
+        payload = read_json(cache_dir / "full_text_packet.json", {})
+        if not isinstance(payload, dict) or payload.get("schema_version") not in (None, "", ARTICLE_CACHE_SCHEMA_VERSION):
+            return {}
+        packet = _packet_from_full_text_payload(payload)
+        if not packet:
+            return {}
+        text_source = _packet_path(packet, "text_path")
+        pdf_source = _packet_path(packet, "pdf_path")
+        restored = dict(packet)
+        copied_text = False
+        copied_pdf = False
+        if text_source is not None and text_source.is_file():
+            text_target = item_dir / "extracted" / "full_text.txt"
+            copied_text = _copy_article_cache_file(text_source, text_target)
+            if copied_text:
+                restored["text_path"] = _rel_reading_path(text_target)
+        if pdf_source is not None and pdf_source.is_file():
+            suffix = pdf_source.suffix if pdf_source.suffix.lower() == ".pdf" else ".pdf"
+            pdf_target = item_dir / "downloads" / ("article" + suffix)
+            copied_pdf = _copy_article_cache_file(pdf_source, pdf_target)
+            if copied_pdf:
+                restored["pdf_path"] = _rel_reading_path(pdf_target)
+        if not copied_text and not copied_pdf:
+            return {}
     _audit_packet_full_text_title(paper, restored)
     restored.update(_article_cache_content_fingerprints(cache_dir))
     restored["article_cache_hit"] = True
@@ -4980,7 +5047,7 @@ def _publish_article_read_cache(item_dir: Path, paper: dict, result: dict) -> di
     packet = result.get("full_text_packet") if isinstance(result.get("full_text_packet"), dict) else {}
     _publish_article_full_text_cache(item_dir, paper, packet)
     cache_dir, aliases = _target_article_cache_dir(paper, packet)
-    with _ARTICLE_CACHE_LOCK:
+    with _ARTICLE_CACHE_LOCK, _article_cache_process_lock(cache_dir):
         cache_dir.mkdir(parents=True, exist_ok=True)
         content_fingerprints = _article_cache_content_fingerprints(cache_dir)
         packet.update(content_fingerprints)
@@ -5000,6 +5067,7 @@ def _publish_article_read_cache(item_dir: Path, paper: dict, result: dict) -> di
             _copy_article_support_file(item_dir, cache_dir, relative_path)
         manifest = _article_cache_manifest(cache_dir)
         manifest.update({
+            "schema_version": ARTICLE_CACHE_SCHEMA_VERSION,
             "paper": paper,
             "aliases": aliases,
             "updated_at": _now_iso(),
@@ -5120,10 +5188,11 @@ def _restore_article_read_cache(item_dir: Path, paper: dict, *, run_id: str, pap
     )
     initial_quality_issue = _article_markdown_quality_issue(cached_read_text, paper)
     if initial_quality_issue and initial_quality_issue != "article_title_mismatch":
-        with _ARTICLE_CACHE_LOCK:
+        with _ARTICLE_CACHE_LOCK, _article_cache_process_lock(cache_dir):
             _invalidate_article_read_artifacts(cache_dir)
             manifest = _article_cache_manifest(cache_dir)
             manifest.update({
+                "schema_version": ARTICLE_CACHE_SCHEMA_VERSION,
                 "updated_at": _now_iso(),
                 "has_read_md": False,
                 "read_content_revision": "",
@@ -5137,10 +5206,11 @@ def _restore_article_read_cache(item_dir: Path, paper: dict, *, run_id: str, pap
     current_revision = str(content_fingerprints.get("content_revision") or "")
     read_revision = str(manifest.get("read_content_revision") or "")
     if read_revision and (not current_revision or read_revision != current_revision):
-        with _ARTICLE_CACHE_LOCK:
+        with _ARTICLE_CACHE_LOCK, _article_cache_process_lock(cache_dir):
             _invalidate_article_read_artifacts(cache_dir)
             manifest = _article_cache_manifest(cache_dir)
             manifest.update({
+                "schema_version": ARTICLE_CACHE_SCHEMA_VERSION,
                 "updated_at": _now_iso(),
                 "has_read_md": False,
                 "read_content_revision": "",
@@ -5155,10 +5225,11 @@ def _restore_article_read_cache(item_dir: Path, paper: dict, *, run_id: str, pap
         return {}
     quality_issue = _article_markdown_quality_issue(cached_read_text, paper)
     if quality_issue:
-        with _ARTICLE_CACHE_LOCK:
+        with _ARTICLE_CACHE_LOCK, _article_cache_process_lock(cache_dir):
             _invalidate_article_read_artifacts(cache_dir)
             manifest = _article_cache_manifest(cache_dir)
             manifest.update({
+                "schema_version": ARTICLE_CACHE_SCHEMA_VERSION,
                 "updated_at": _now_iso(),
                 "has_read_md": False,
                 "read_content_revision": "",
@@ -5184,6 +5255,7 @@ def _restore_article_read_cache(item_dir: Path, paper: dict, *, run_id: str, pap
         (item_dir / "read.md").write_text(normalized_article_text, encoding="utf-8")
     cached_article_text = (cache_dir / "read.md").read_text(encoding="utf-8", errors="replace")
     manifest_updates = {
+        "schema_version": ARTICLE_CACHE_SCHEMA_VERSION,
         "cache_scope": "reading_article_cache",
         "has_read_md": True,
         "has_full_text": (cache_dir / "extracted" / "full_text.txt").is_file(),
@@ -5200,7 +5272,7 @@ def _restore_article_read_cache(item_dir: Path, paper: dict, *, run_id: str, pap
     }
     manifest_needs_update = any(manifest.get(key) != value for key, value in manifest_updates.items())
     if normalized_article_text != cached_article_text or manifest_needs_update:
-        with _ARTICLE_CACHE_LOCK:
+        with _ARTICLE_CACHE_LOCK, _article_cache_process_lock(cache_dir):
             if normalized_article_text != cached_article_text:
                 (cache_dir / "read.md").write_text(normalized_article_text, encoding="utf-8")
             manifest = _article_cache_manifest(cache_dir)
