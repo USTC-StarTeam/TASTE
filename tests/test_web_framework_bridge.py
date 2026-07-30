@@ -1894,14 +1894,56 @@ def test_web_job_finished_at_round_trips_and_survives_compaction(monkeypatch):
             )
             assert job.done.wait(2)
             assert job.status == expected_status
+            assert job.started_at
+            assert job.started_at >= job.created_at
             assert job.finished_at
-            assert job.finished_at >= job.created_at
+            assert job.finished_at >= job.started_at
 
             payload = job.as_dict(compact=False)
             restored = web_server.JobState.from_dict(payload)
             compact = web_server._compact_job_for_list(payload)
+            assert restored.started_at == job.started_at
+            assert compact["started_at"] == job.started_at
             assert restored.finished_at == job.finished_at
             assert compact["finished_at"] == job.finished_at
+
+
+def test_web_persisted_find_job_keeps_raw_logs(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    job = web_server.JobState("find_logs", "find")
+    job.status = "done"
+    job.started_at = "2026-07-30T01:00:01Z"
+    job.finished_at = "2026-07-30T01:00:02Z"
+    job.logs = ["Find started", "Concrete provider failure: sentinel detail"]
+    job.result = {"status": "done", "run_id": "find_20260730_010001_000001"}
+    path = tmp_path / "jobs.json"
+    monkeypatch.setattr(web_server, "JOBS", {job.job_id: job})
+    monkeypatch.setattr(web_server, "JOBS_PATH", path)
+
+    web_server._persist_jobs()
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))["jobs"][0]
+    assert persisted["logs"] == job.logs
+    assert persisted["log_count"] == 2
+
+
+def test_websocket_ignores_send_after_close_runtime_error(monkeypatch):
+    from auto_research.web import server as web_server
+
+    job = web_server.JobState("find_closed_socket", "find")
+    job.status = "running"
+    monkeypatch.setattr(web_server, "JOBS", {job.job_id: job})
+    monkeypatch.setattr(web_server, "_live_jobs_from_projects", lambda **_kwargs: [])
+
+    class ClosedWebSocket:
+        async def accept(self):
+            return None
+
+        async def send_json(self, _payload):
+            raise RuntimeError('Cannot call "send" once a close message has been sent.')
+
+    asyncio.run(web_server.ws_job(ClosedWebSocket(), job.job_id))
 
 
 def test_web_find_read_idea_plan_error_compaction_keeps_specific_exception():

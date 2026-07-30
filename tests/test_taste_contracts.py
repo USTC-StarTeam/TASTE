@@ -5152,6 +5152,8 @@ def test_find_translation_keeps_prose_markup_visible_to_llm_without_splitting_wo
     assert item["_abstract_translation_latex_segments"] == [
         {"placeholder": "[[LATEX_1]]", "latex": r"$p_\theta$"},
     ]
+    long_item = {"abstract_en": "A" * 3000 + " FULL_TRANSLATION_TAIL"}
+    assert find_pipeline._prepare_abstract_translation_prompt_text(long_item, 0).endswith("FULL_TRANSLATION_TAIL")
     restored = find_pipeline._restore_latex_translation_placeholders(item, "该方法保留 ProtLiD² 和 [[LATEX_1]]。")
     assert restored == r"该方法保留 ProtLiD² 和 $p_\theta$。"
     assert find_pipeline._has_unresolved_prose_latex_markup(r"plain \sourceformat{word}") is True
@@ -5168,6 +5170,18 @@ def test_find_translation_keeps_prose_markup_visible_to_llm_without_splitting_wo
         "这是中文提示。The complete abstract is still copied in English without translation.",
         str(item["abstract_en"]),
     ) == "mostly_non_chinese_translation"
+    numeric_source = "The method reaches 87% accuracy. A repeat also reaches 87% accuracy. It improves 12 benchmarks."
+    assert find_pipeline._chinese_translation_reject_reason(
+        "该方法达到87%准确率。重复实验同样保持较高准确率。它改进了12个基准。",
+        numeric_source,
+    ) == "missing_numeric_content"
+    copied_english = (
+        "This complete English sentence group keeps many ordinary words and remains a long copied paragraph instead of a Chinese-only translation. "
+        "这里随后附加足够多的中文说明，使简单字符比例检查可能误判为合格中文摘要，但英文原文仍被完整保留。"
+    )
+    assert find_pipeline._chinese_translation_reject_reason(copied_english, str(item["abstract_en"])) == "retained_long_english_passage"
+    assert find_pipeline._llm_schema_placeholder_leaked({"category": "short category"}) is True
+    assert find_pipeline._llm_schema_placeholder_leaked({"hit_directions_zh": ["具体蛋白质设计路线"]}) is False
 
     untranslated = {"id": "paper-1", "abstract": "A complete English abstract remains available."}
     find_pipeline._mark_missing_chinese_abstracts([untranslated], lambda _message: None, "translation_llm_exhausted")
@@ -5384,8 +5398,8 @@ def test_find_abstract_scoring_uses_local_ids_and_retries_mismatched_id(monkeypa
                     "hit_directions_en": ["protein diffusion generation"],
                     "fit_explanation_zh": "摘要给出了蛋白质扩散生成方法与实验结果。该方法可用于当前研究。",
                     "fit_explanation_en": "The abstract presents a protein diffusion method and results. It is reusable for this project.",
-                    "reason_zh": "论文提出可控生成方法，可帮助比较约束策略，并借鉴其评测设计。",
-                    "reason_en": "The method fits controlled generation and provides reusable evaluation design.",
+                    "reason_zh": "论文提出的可控生成方法与当前研究任务契合。其约束策略可帮助方法比较，并为评测设计提供可迁移借鉴。",
+                    "reason_en": "The controlled-generation method fits the current research task. Its constraint strategy helps compare methods and provides reusable evaluation design.",
                 })
             return {"ok": True, "data": {"evaluations": rows}, "error": ""}
 
@@ -5400,6 +5414,8 @@ def test_find_abstract_scoring_uses_local_ids_and_retries_mismatched_id(monkeypa
         }
         for index in range(10)
     ]
+    full_abstract_marker = "FULL_ABSTRACT_TAIL_EVIDENCE"
+    items[-1]["abstract"] = "A" * 1200 + " " + full_abstract_marker
     llm = MismatchedIdLLM()
     evaluated = find_pipeline._evaluate_items(
         items,
@@ -5421,9 +5437,10 @@ def test_find_abstract_scoring_uses_local_ids_and_retries_mismatched_id(monkeypa
     assert [len(call["aliases"]) for call in llm.calls] == [10, 1]
     assert all(call["max_tokens"] == 0 for call in llm.calls)
     assert all("ID: real-paper-" not in call["prompt"] for call in llm.calls)
+    assert full_abstract_marker in llm.calls[0]["prompt"]
 
 
-def test_find_recommendations_rank_without_topic_or_score_gates():
+def test_find_recommendations_require_topic_evidence_without_forcing_the_target():
     find_pipeline = _load_find_pipeline()
     config = find_pipeline.AppConfig(
         provider="openai_compatible",
@@ -5449,14 +5466,18 @@ def test_find_recommendations_rank_without_topic_or_score_gates():
             "llm_complete_route_guard_failed": True,
             "foundation_demoted_from_strong": True,
             "not_positive_support": True,
+            "reason_zh": "论文的方法直接针对蛋白质设计任务，主题与当前研究目标契合。其模型和实验评测可帮助比较约束策略，并为后续方法迁移提供借鉴。",
+            "reason_en": "The method directly addresses the protein-design task and fits the research target. Its model and experimental evaluation help compare constraint strategies and provide transferable design evidence.",
         }
         row.update(updates)
         return row
 
     ranked = find_pipeline._recommended(
         [
-            candidate("low", 2.1),
-            candidate("high", 4.9, title="Shared protein design paper"),
+            candidate("unsupported", 9.9),
+            candidate("scored-unrelated", 2.0, topic_evidence_supported=True, topic_evidence="passed: direct topic match", missing_topic_evidence=[], llm_complete_route_guard_failed=False, foundation_demoted_from_strong=False, not_positive_support=False),
+            candidate("low", 2.1, topic_evidence_supported=True, topic_evidence="passed: direct topic match", missing_topic_evidence=[], llm_complete_route_guard_failed=False, foundation_demoted_from_strong=False, not_positive_support=False),
+            candidate("high", 4.9, title="Shared protein design paper", topic_evidence_supported=True, topic_evidence="passed: direct topic match", missing_topic_evidence=[], llm_complete_route_guard_failed=False, foundation_demoted_from_strong=False, not_positive_support=False),
             candidate("duplicate", 1.0, title="Shared protein design paper"),
             candidate("missing-abstract", 10.0, abstract=""),
             candidate("unscored", 8.0, reason_source="llm title filter"),
@@ -5467,8 +5488,9 @@ def test_find_recommendations_rank_without_topic_or_score_gates():
 
     assert [item["id"] for item in ranked] == ["high", "low"]
     assert all(item["find_recommendation"] for item in ranked)
-    assert all(item["topic_evidence_supported"] is False for item in ranked)
-    assert all("foundation_demoted_from_strong" not in item for item in ranked)
+    assert all(item["topic_evidence_supported"] is True for item in ranked)
+    assert all(item["strict_strong_anchor"] is True for item in ranked)
+    assert find_pipeline._strict_strong_anchor_count(ranked) == 2
     assert all("not_positive_support" not in item for item in ranked)
     assert ranked[1]["fit_score"] == 2.1
 
@@ -5508,6 +5530,10 @@ def test_find_recommendation_target_is_at_least_five_per_selected_source():
             "llm_fit_score": 10.0 - index * 0.1,
             "diversity_score": 5.0,
             "recommendation_score": 10.0 - index * 0.1,
+            "topic_evidence_supported": True,
+            "topic_evidence": "passed: direct topic match",
+            "reason_zh": "论文的方法与当前研究任务直接相关，并提供了具体模型机制。其受控实验和评测协议可帮助比较候选方案，也能为后续方法迁移提供借鉴。",
+            "reason_en": "The method is directly relevant to the current research task and provides a concrete model mechanism. Its controlled experiments and evaluation protocol help compare candidates and provide transferable evidence.",
         }
         for index in range(30)
     ]
@@ -5537,7 +5563,7 @@ def test_find_weak_topic_audit_does_not_rewrite_final_llm_scores():
         "protein design",
     )
 
-    assert item["topic_evidence_audit_only"] is True
+    assert item["topic_evidence_audit_only"] is False
     assert item["topic_evidence_supported"] is False
     assert item["fit_score"] == 7.4
     assert item["diversity_score"] == 6.8
@@ -8071,8 +8097,8 @@ def test_find_collects_all_selected_sources_before_final_scoring(monkeypatch, tm
                 "topic_evidence_supported": True,
                 "topic_evidence": "passed: conditional de novo protein generation",
                 "matched_topic_route": "conditional de novo protein generation",
-                "reason_zh": "该条目直接支持条件蛋白生成。",
-                "reason_en": "This item directly supports conditional protein generation.",
+                "reason_zh": "该条目的生成方法直接支持条件蛋白研究任务。其模型与评测结果可帮助方案比较，并为后续迁移提供借鉴。",
+                "reason_en": "The generation method directly supports the conditional-protein research task. Its model and evaluation results help compare approaches and provide transferable evidence.",
                 "fit_explanation_zh": "摘要包含条件生成证据。",
                 "fit_explanation_en": "The abstract contains conditional generation evidence.",
             })
@@ -9547,15 +9573,15 @@ def test_find_preserves_natural_llm_recommendation_reason_without_template_rewri
     monkeypatch.setenv("RECOMMENDATION_REASON_MIN_EN_CHARS", "999")
     assert find_pipeline.RECOMMENDATION_REASON_MIN_ZH_CHARS == 20
     assert find_pipeline.RECOMMENDATION_REASON_MIN_EN_CHARS == 40
-    concise_reason_zh = "论文提出可控生成方法，可帮助比较约束策略，并借鉴其评测设计。"
-    concise_reason_en = "The method fits controlled generation and provides reusable evaluation design."
+    concise_reason_zh = "论文提出的可控生成方法与当前研究任务契合。其约束策略可帮助方法比较，并为评测设计提供可迁移借鉴。"
+    concise_reason_en = "The controlled-generation method fits the current research task. Its constraint strategy helps compare methods and provides reusable evaluation design."
     assert find_pipeline._recommendation_reason_unusable(concise_reason_zh, zh=True) is False
     assert find_pipeline._recommendation_reason_unusable(concise_reason_en, zh=False) is False
     assert find_pipeline._recommendation_reason_unusable(
-        "论文在无需额外标注的条件下完成生成，并帮助迁移评测设计。", zh=True
+        "论文的生成方法与当前研究任务相关，且无需额外标注。其模型评测可帮助方案比较，并为实验设计提供迁移参考。", zh=True
     ) is False
     assert find_pipeline._recommendation_reason_unusable(
-        "The method works without extra labels and helps transfer its evaluation design.", zh=False
+        "The generation method is relevant to the research task and works without extra labels. Its model evaluation helps compare approaches and supports transferable experimental design.", zh=False
     ) is False
     reason_zh = (
         "论文研究条件蛋白生成中的结构约束，与项目关注的可控蛋白设计问题直接契合。"
@@ -9583,7 +9609,7 @@ def test_find_preserves_natural_llm_recommendation_reason_without_template_rewri
     fixed_opener = "对当前研究方向来说，该论文提供可借鉴的方法结构、评测信号和实验设计参考，能够支持后续研究。"
     assert find_pipeline._recommendation_reason_has_generic_opener(fixed_opener, zh=True) is True
     assert find_pipeline._recommendation_reason_unusable(fixed_opener, zh=True) is True
-    assert find_pipeline.FINAL_LLM_SCORE_CACHE_PROMPT_POLICY == "final_title_abstract_prompt_v32_natural_recommendation_reason"
+    assert find_pipeline.FINAL_LLM_SCORE_CACHE_PROMPT_POLICY == "final_title_abstract_prompt_v33_unanchored_complete_abstract_strict_reason"
     source = (ROOT / "modules" / "finding" / "scripts" / "flow" / "pipeline.py").read_text(encoding="utf-8")
     assert "do not use a prescribed opening, generic research-direction boilerplate" in source
     assert "def zh_reason()" not in source

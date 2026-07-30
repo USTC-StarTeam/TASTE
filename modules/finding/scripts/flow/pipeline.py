@@ -63,14 +63,14 @@ from sources import _in_date_range, normalize_date
 LogFn = Callable[[str], None]
 CancelFn = Callable[[], bool]
 ProgressFn = Callable[..., None]
-SCORING_POLICY_VERSION = "direct_llm_title_abstract_ranked_topn_v24_no_topic_gate"
-FIND_RECOMMENDATION_POLICY = "topn_final_llm_real_abstract_no_topic_or_score_gate_v26"
+SCORING_POLICY_VERSION = "direct_llm_title_abstract_topic_supported_v25"
+FIND_RECOMMENDATION_POLICY = "topn_final_llm_real_abstract_strong_topic_evidence_v27"
 FIND_FINAL_SCORING_TEMPERATURE = 0.0
 FIND_TITLE_FILTER_TEMPERATURE = 0.0
 FINAL_LLM_SCORE_CACHE_SCHEMA_VERSION = "find_final_llm_score_cache_v1"
 FIND_INPUT_FIELDS = {"research_topic", "research_interest", "researcher_profile", "arxiv_queries"}
 FIND_LLM_CONFIG_FIELDS = {"provider", "base_url", "api_key", "model", "temperature", "llm_roles"}
-FINAL_LLM_SCORE_CACHE_PROMPT_POLICY = "final_title_abstract_prompt_v32_natural_recommendation_reason"
+FINAL_LLM_SCORE_CACHE_PROMPT_POLICY = "final_title_abstract_prompt_v33_unanchored_complete_abstract_strict_reason"
 RECOMMENDATION_REASON_MIN_ZH_CHARS = 20
 RECOMMENDATION_REASON_MIN_EN_CHARS = 40
 FINAL_LLM_SCORE_CACHE_MAX_ENTRIES = 50000
@@ -169,19 +169,19 @@ Final Find recommendation contract:
 - Use the current research interest/profile only as this run relevance definition. Do not apply a fixed global keyword table or project-specific hard-coded topic list.
 - Category selection, title filtering, local TF-IDF rank, source health, citations, and freshness are recall/audit signals only. They must never promote a paper into the user-visible recommendation list.
 - A user-visible recommendation must be judged from the real title plus real abstract/description in this final LLM scoring step.
-- fit_score is the final title+abstract ranking score. Use the full 0-10 range consistently with one decimal place: 9.0-10.0 exact center, 7.0-8.9 strong match, 5.0-6.9 partial/background usefulness, 3.0-4.9 weak/generic, and <=2.9 unrelated items. Do not default to integer or x.5 scores when evidence supports a finer distinction.
-- The workflow selects user-visible recommendations by sorting all valid final-scored rows. Eligibility requires a real title+abstract judgment and a finite final LLM fit score; topic-evidence annotations and score magnitude do not create additional gates.
+- fit_score is the final title+abstract ranking score. Use the full 0-10 range consistently with one decimal place. Judge each paper independently from its evidence; do not imitate sample scores, prefer round numbers, or cluster scores around a few values.
+- The workflow sorts eligible rows by the final score. Eligibility requires a real title+abstract judgment and direct, source-grounded support for one complete current topic route. Never fill the requested count with unsupported rows.
 - Broad background, inspiration-only, prerequisite-only, or partial-match papers should receive lower fit_score unless the abstract itself gives concrete reusable method/data/protocol/benchmark/evaluation/theory value.
 - Do not use venue prestige, citation count, local rank, title-only similarity, diversity_score, or route/foundation/claim labels to raise fit_score.
 - Missing abstract, metadata-only evidence, and title-only evidence cannot be recommended because they were not judged from real title+abstract content. Score magnitude affects ranking, not eligibility.
 - Treat the research profile as the relevance boundary before scoring. Shared surface terms are not enough for a high score unless the title+abstract tie them to the profile's concrete target problem, entities, data setting, evaluation protocol, or intended application.
-- Preference hints, evaluation preferences, implementation preferences, and generic desiderata such as reproducibility, efficiency, safety, interpretability, or lightweight experiments are modifiers, not standalone topic routes. They can increase usefulness only after the title+abstract also supports the profile's core research object; by themselves they must not make topic_evidence_supported=true or justify a 7+ fit_score.
+- Preference hints, evaluation preferences, implementation preferences, and generic desiderata such as reproducibility, efficiency, safety, interpretability, or lightweight experiments are modifiers, not standalone topic routes. They can increase usefulness only after the title+abstract also supports the profile's core research object; by themselves they must not make topic_evidence_supported=true or justify a high fit_score.
 - The generated route list is authoritative for matched_topic_route. When explicit routes are listed, copy one complete route from that list; do not return a short route fragment such as a subproblem, method component, desideratum, or hint as matched_topic_route.
 - If a route is written as "core route: evidence axes, desiderata, or examples", the text before the colon is the core route boundary. The comma-separated details after the colon are useful evidence axes and preferences, not mandatory components that every recommended paper must cover. A paper can support the route when the title+abstract directly addresses the core route and gives concrete reusable method/data/protocol/benchmark/evaluation/theory value, even if it covers only some listed axes.
 - A transferable method or foundation component is not a direct topic match by itself. If the title+abstract only shows that it might be adapted to the current profile, or does not directly address the core route boundary, set topic_evidence_supported=false; calibrate fit_score independently from the overall title+abstract relevance.
-- Mentions of the profile domain only as a possible application, benchmark/dataset domain, motivating example, or background use case are boundary/background usefulness only. Keep them at 5-6 or lower unless the title+abstract also provides a method, data construction, evaluation protocol, theory, or actionable analysis that is concretely reusable for the research profile.
+- Mentions of the profile domain only as a possible application, benchmark/dataset domain, motivating example, or background use case are boundary/background usefulness only. Give them a clearly lower score unless the title+abstract also provides a method, data construction, evaluation protocol, theory, or actionable analysis that is concretely reusable for the research profile.
 - For every high score, the topic_evidence_basis must name the concrete profile-specific evidence found in the title+abstract. If the abstract uses a shared term in a different or generic setting, score it as weak/generic and set topic_evidence_supported=false with the missing profile evidence named.
-- Keep topic_evidence_supported, missing_topic_evidence, and matched_topic_route as audit explanations only. They must not cap fit_score, alter ranking scores, or decide recommendation eligibility.
+- Keep topic_evidence_supported, missing_topic_evidence, and matched_topic_route independent from score calibration. They must not alter fit_score, but topic_evidence_supported=false means the row is not eligible for the user-visible recommendation list.
 - Do not decide downstream experimental support here. Find recommends papers for Read; later full-text reading, repo/data/env/reproduction, and local experiment gates decide usable evidence scope.
 """.strip()
 
@@ -343,6 +343,10 @@ def _compact_scoring_interest(config: AppConfig, interest: str) -> str:
     return text[:max_chars].strip()
 
 
+def _final_scoring_abstract_text(item: dict) -> str:
+    return _clean_abstract_text(item.get("abstract_en") or item.get("abstract"))
+
+
 def _adaptive_final_scoring_batch_size(config: AppConfig, scoring_items: list[dict], scoring_interest: str, topic_routes_block: str) -> int:
     env_value = _positive_int_env("ABSTRACT_SCORING_BATCH_SIZE", 0)
     configured_value = int(getattr(config, "abstract_scoring_batch_size", 0) or 0)
@@ -354,7 +358,7 @@ def _adaptive_final_scoring_batch_size(config: AppConfig, scoring_items: list[di
         return _clamp_int(configured_value, 1, max_batch)
     sample = scoring_items[: min(96, len(scoring_items))]
     if sample:
-        avg_item_chars = sum(len(str(item.get("title") or "")) + min(len(str(item.get("abstract") or "")), 650) + 120 for item in sample) / len(sample)
+        avg_item_chars = sum(len(str(item.get("title") or "")) + len(_final_scoring_abstract_text(item)) + 120 for item in sample) / len(sample)
     else:
         avg_item_chars = 650
     prompt_budget = _positive_int_env("ABSTRACT_SCORING_PROMPT_CHAR_BUDGET", 26000)
@@ -649,6 +653,44 @@ def _normalize_hit_directions(value: object) -> list[str]:
     if isinstance(value, str):
         return [item.strip() for item in value.replace("，", ",").split(",") if item.strip()]
     return []
+
+
+_LLM_SCHEMA_PLACEHOLDER_VALUES = {
+    "short category",
+    "direction",
+    "中文命中方向",
+    "english hit direction",
+    "the specific configured/adaptive route supported by the abstract, or empty",
+    "short title/abstract evidence used for the route decision",
+    "missing route component if unsupported",
+}
+
+
+def _llm_schema_placeholder_leaked(row: object) -> bool:
+    if not isinstance(row, dict):
+        return False
+    fields = (
+        "category", "hit_directions", "hit_directions_zh", "hit_directions_en",
+        "fit_explanation", "fit_explanation_zh", "fit_explanation_en",
+        "reason", "reason_zh", "reason_en", "matched_topic_route",
+        "topic_evidence_basis", "missing_topic_evidence",
+    )
+    values: list[str] = []
+    for field in fields:
+        value = row.get(field)
+        if isinstance(value, list):
+            values.extend(str(item or "").strip() for item in value)
+        else:
+            values.append(str(value or "").strip())
+    for value in values:
+        normalized = " ".join(value.lower().split())
+        if normalized in _LLM_SCHEMA_PLACEHOLDER_VALUES:
+            return True
+        if re.match(r"^\d+\s*[-–—]\s*\d+\s*(?:句|sentences?)\b", normalized, flags=re.I):
+            return True
+        if normalized.startswith("one concise chinese title-level reason"):
+            return True
+    return False
 
 
 def _hit_direction_i18n(value: object) -> tuple[list[str], list[str]]:
@@ -2300,7 +2342,7 @@ def _apply_llm_topic_evidence(item: dict, row: dict, interest: str) -> None:
         item["topic_evidence"] = "weak: missing real abstract evidence"
         item["topic_evidence_supported"] = False
         item["topic_evidence_basis"] = item.get("topic_evidence_basis") or "title_only"
-    item["topic_evidence_audit_only"] = True
+    item["topic_evidence_audit_only"] = False
 
 
 
@@ -3098,12 +3140,16 @@ def _title_llm_cache_entry_valid(entry: object, *, expected_policy: str | None =
         return False
     if entry.get("schema") != TITLE_LLM_SCORE_CACHE_SCHEMA_VERSION:
         return False
+    if entry.get("scoring_policy") != SCORING_POLICY_VERSION:
+        return False
     policy = str(entry.get("policy") or "")
     if expected_policy is not None and policy != expected_policy:
         return False
     if expected_policy is None and policy not in {TITLE_LLM_SCORE_CACHE_POLICY_TITLE_ONLY, TITLE_LLM_SCORE_CACHE_POLICY_WITH_SNIPPETS}:
         return False
     if entry.get("fit_score") in (None, "") or entry.get("diversity_score") in (None, ""):
+        return False
+    if _llm_schema_placeholder_leaked(entry):
         return False
     return True
 
@@ -3183,7 +3229,7 @@ def _final_llm_score_cache_key(item: dict, config: AppConfig, interest: str, top
         "interest": _cache_normalized_text(interest, limit=20000),
         "topic_routes": _cache_normalized_text(topic_routes_block, limit=12000),
         "title": _cache_normalized_text(item.get("title"), limit=2000),
-        "abstract": _cache_normalized_text(item.get("abstract_en") or item.get("abstract"), limit=14000),
+        "abstract": " ".join(str(item.get("abstract_en") or item.get("abstract") or "").split()),
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -3214,6 +3260,8 @@ def _final_llm_cache_entry_valid(entry: object) -> bool:
     if entry.get("prompt_policy") != FINAL_LLM_SCORE_CACHE_PROMPT_POLICY:
         return False
     if entry.get("fit_score") in (None, "") or entry.get("diversity_score") in (None, ""):
+        return False
+    if _llm_schema_placeholder_leaked(entry):
         return False
     reason_zh = entry.get("reason_zh") or entry.get("reason")
     if _final_llm_cache_reason_unusable(reason_zh) or _recommendation_reason_unusable(entry.get("reason_en"), zh=False):
@@ -4416,13 +4464,12 @@ Research interest/profile:
 Paper titles and available abstract snippets, {batch_label}:
 {title_lines}
 
-Return strict JSON:
-{{"scored":[{{"id":"p001","fit_score":7.3,"diversity_score":6.4,"hit_directions":["direction"],"category":"short category","reason":"one concise Chinese title-level reason"}}]}}
+Return one strict JSON object whose only top-level key is scored. scored must be an array. Each row must contain the input id, numeric fit_score and diversity_score in the 0-10 range, concrete hit_directions, a concise specific category, and a concise Chinese title-level reason. Every text field must contain the actual judgment, never a field description or placeholder.
 
 Rules:
 - Return exactly {len(batch)} scored rows, one for every input ID, including low-confidence papers.
 - IDs are opaque request-local identifiers. Copy each pNNN ID exactly once; never shorten, rewrite, or invent an ID.
-- fit_score is the metadata-level match to the profile, not a final recommendation score: 9-10 exceptional, 7-8 strong, 5-6 possible, <=4 weak/unrelated.
+- fit_score is the metadata-level match to the profile, not a final recommendation score. Use the full 0-10 range and judge each item independently; do not imitate example values or cluster scores around a few numbers.
 - When an abstract snippet is present, use it to decide whether a generic title actually supports the user's methods, domains, or constraints.
 - Generic AI/ML papers should score low unless the title or abstract concretely connects to the user's methods, domains, or constraints.
 - diversity_score only rewards hitting multiple real user directions or adding a complementary method/domain. It cannot rescue low fit.
@@ -4462,6 +4509,9 @@ Rules:
                 except (TypeError, ValueError):
                     scores_valid = False
                 if not scores_valid:
+                    missing.append(item)
+                    continue
+                if _llm_schema_placeholder_leaked(row):
                     missing.append(item)
                     continue
                 matched.append((item, row))
@@ -5564,7 +5614,7 @@ def _evaluate_items(
         scoring_batch_size = _adaptive_final_scoring_batch_size(config, scoring_items, scoring_interest, topic_routes_block)
         for batch_index, batch in enumerate(_chunks(scoring_items, scoring_batch_size), 1):
             item_lines = "\n\n".join(
-                f"ID: p{position:03d}\nTitle: {item.get('title')}\nAbstract/Description: {(item.get('abstract') or '')[:650]}"
+                f"ID: p{position:03d}\nTitle: {item.get('title')}\nAbstract/Description: {_final_scoring_abstract_text(item)}"
                 for position, item in enumerate(batch, 1)
             )
             prompts.append(f"""
@@ -5578,18 +5628,17 @@ Research interest/profile:
 Candidate items, batch {batch_index}:
 {item_lines}
 
-Return exactly this schema. The evaluations array is the final LLM evaluation rows; include one row for every candidate ID in the batch and never return an empty object. fit_score is the final calibrated recommendation score; use one decimal place and avoid default integer or x.5 scores:
-{{"evaluations":[{{"id":"p001","category":"short category","fit_score":7.3,"diversity_score":6.4,"recommend_for_deep_reading":true,"topic_evidence":"passed: direct title+abstract evidence for a current topic route, or weak: missing adaptive topic evidence","topic_evidence_supported":true,"matched_topic_route":"the specific configured/adaptive route supported by the abstract, or empty","topic_evidence_basis":"short title/abstract evidence used for the route decision","missing_topic_evidence":["missing route component if unsupported"],"hit_directions_zh":["中文命中方向"],"hit_directions_en":["English hit direction"],"fit_explanation_zh":"2-3句中文：面向用户说明摘要中的具体证据、为什么与当前调研主题相关、以及可复用价值","fit_explanation_en":"2-3 English sentences for the user with title/abstract evidence, relevance, and reusable value","reason_zh":"2-4句自然中文推荐理由：结合本文具体内容说明主题为何契合当前研究主题、能为研究提供什么帮助、有哪些可迁移借鉴价值","reason_en":"2-4 natural English sentences grounded in this paper: explain why its topic fits the research topic, how it helps the research, and what is transferable"}}]}}
+Return one strict JSON object whose only top-level key is evaluations. evaluations must contain one row per candidate. Each row must contain: the exact input id; a concise specific category; numeric fit_score and diversity_score in the 0-10 range with one decimal place; boolean recommend_for_deep_reading and topic_evidence_supported; a concrete topic_evidence verdict; the complete matched_topic_route or an empty string; a concise evidence basis; a list of concrete missing evidence when unsupported; concrete Chinese and English hit-direction lists; and natural Chinese and English fit explanations and recommendation reasons. Every text field must contain the actual judgment, never a field description or placeholder.
 
 Rules:
 - Return exactly {len(batch)} evaluation rows. IDs are opaque request-local identifiers; copy every pNNN ID exactly once and never rewrite or invent an ID.
 - Score by explicit title/abstract evidence only; venue prestige must not raise fit_score.
-- Use the whole 0-10 range consistently with one decimal place: 9.0-10.0 exact center, 7.0-8.9 strong match, 5.0-6.9 partial/background usefulness, 3.0-4.9 weak/generic, <=2.9 unrelated. Do not default to integer or x.5 scores when evidence supports a finer distinction.
+- Use the whole 0-10 range consistently with one decimal place. Judge each paper independently from its evidence; do not imitate sample scores, prefer round numbers, or cluster scores around a few values.
 - Broad background papers are weak unless the abstract itself gives concrete reusable method, data, benchmark, protocol, theory, or evaluation value for the current research interest.
-- recommend_for_deep_reading and topic_evidence_supported are audit fields only. The workflow chooses the user-visible list by ranking all valid final title+abstract scores; neither field is an eligibility gate and there is no absolute score cutoff.
+- topic_evidence_supported is an eligibility judgment independent from score calibration. A false or weak topic-evidence verdict excludes the row from the user-visible recommendation list; never mark it true merely to fill the requested count.
 - Set topic_evidence_supported=true only when the title+abstract directly supports one complete configured/adaptive core route from the list above. Copy that full route into matched_topic_route; never use a short subphrase, method component, desideratum, or hint as matched_topic_route. If the route contains a colon, do not require every post-colon evidence axis; require direct support for the pre-colon core route plus concrete reusable value. Set topic_evidence to passed:/strong: and give a concise topic_evidence_basis. This evidence annotation is diagnostic and must not replace your calibrated fit_score.
 - If the abstract is generic, background-only, venue/title-only, or does not directly support the current core route, set topic_evidence_supported=false, topic_evidence="weak: missing adaptive topic evidence", and list concrete missing_topic_evidence.
-- Score fit independently from the topic-evidence audit fields. Do not cap or otherwise change fit_score because topic_evidence_supported=false or topic_evidence starts with weak:.
+- Score fit independently from the topic-evidence fields. Do not cap or otherwise change fit_score because topic_evidence_supported=false or topic_evidence starts with weak:.
 - Write each recommendation reason freshly from this paper's title/abstract and the supplied research topic. Naturally cover why the paper topic fits the research topic, how the paper can help the research, and what methods/data/protocols/theory/evaluation ideas are transferable. Lead with concrete paper content; do not use a prescribed opening, generic research-direction boilerplate, or a fixed sentence order. Do not write reader instructions.
 - Missing abstract, metadata-only evidence, or title-only evidence cannot be recommended.
 {FIND_FINAL_SCORING_ROUTE_RULES}
@@ -5641,12 +5690,11 @@ Research interest/profile:
 Candidate item:
 ID: p001
 Title: {item.get('title')}
-Abstract/Description: {(item.get('abstract') or '')[:900]}
+Abstract/Description: {_final_scoring_abstract_text(item)}
 
-Return strict JSON only:
-{{"evaluations":[{{"id":"p001","category":"short category","fit_score":7.3,"diversity_score":6.4,"recommend_for_deep_reading":true,"topic_evidence":"passed: direct title+abstract evidence for a current topic route, or weak: missing adaptive topic evidence","topic_evidence_supported":true,"matched_topic_route":"the specific configured/adaptive route supported by the abstract, or empty","topic_evidence_basis":"short title/abstract evidence used for the route decision","missing_topic_evidence":["missing route component if unsupported"],"hit_directions_zh":["中文命中方向"],"hit_directions_en":["English hit direction"],"fit_explanation":"2-3句中文：面向用户说明摘要证据、相关性和可复用价值","fit_explanation_zh":"2-3句中文：面向用户说明摘要证据、相关性和可复用价值","fit_explanation_en":"2-3 English sentences for the user with title/abstract evidence, relevance, and reusable value","reason":"2-4句自然中文推荐理由：结合本文具体内容说明主题契合、研究帮助和可迁移借鉴价值","reason_zh":"2-4句自然中文推荐理由：结合本文具体内容说明主题为何契合当前研究主题、能为研究提供什么帮助、有哪些可迁移借鉴价值","reason_en":"2-4 natural English sentences grounded in this paper: explain topic fit, help to the research, and transferable value"}}]}}
+Return one strict JSON object whose only top-level key is evaluations. Its single row must contain the exact id and the same concrete fields required by the batch contract: category; numeric fit_score and diversity_score; boolean recommendation and topic-evidence verdicts; matched route and its evidence; missing evidence; bilingual hit directions, explanations, and recommendation reasons. Never return field descriptions or placeholders as values.
 
-Scoring rules: judge this item independently from its real title and abstract. fit_score is the final ranking score used by the workflow; use one decimal place: 9.0-10.0 exact center, 7.0-8.9 strong match, 5.0-6.9 partial/background usefulness, 3.0-4.9 weak/generic, <=2.9 unrelated. Do not default to integer or x.5 scores when evidence supports a finer distinction. recommend_for_deep_reading and topic_evidence_supported are audit fields only; the workflow ranks all valid final title+abstract rows with no topic-evidence or absolute-score eligibility gate. Set topic_evidence_supported=true only when the title+abstract directly supports one complete configured/adaptive core route from the list above; copy the full route into matched_topic_route, never a short subphrase or component. If the route contains a colon, treat the pre-colon text as the core route and the post-colon details as evidence axes/preferences, not mandatory all-of conditions. Otherwise set it false with weak topic_evidence and concrete missing_topic_evidence. Never cap or alter fit_score because of that audit verdict. Write the recommendation reason naturally from this paper's concrete content and cover topic fit, help to the research, and transferable value; do not use a prescribed opening, generic research-direction boilerplate, or reader instructions. Provide both Chinese and English explanation fields, plus hit_directions_zh in Chinese and hit_directions_en in English.
+Scoring rules: judge this item independently from its complete real title and abstract. fit_score is the final ranking score used by the workflow; use the full 0-10 range with one decimal place without imitating example values or clustering around a few numbers. Set topic_evidence_supported=true only when the title+abstract directly supports one complete configured/adaptive core route from the list above; copy the full route into matched_topic_route, never a short subphrase or component. If the route contains a colon, treat the pre-colon text as the core route and the post-colon details as evidence axes/preferences, not mandatory all-of conditions. Otherwise set it false with weak topic_evidence and concrete missing_topic_evidence; that row is ineligible for the user-visible recommendation list, but the verdict must not cap or alter fit_score. Write the recommendation reason naturally from this paper's concrete content and cover topic fit, help to the research, and transferable value; do not use a prescribed opening, generic research-direction boilerplate, or reader instructions. Provide both Chinese and English explanation fields, plus hit_directions_zh in Chinese and hit_directions_en in English.
 {FIND_FINAL_SCORING_ROUTE_RULES}
 """
 
@@ -5755,6 +5803,8 @@ Scoring rules: judge this item independently from its real title and abstract. f
                             or not 0 <= float(value) <= 10
                             for value in scores
                         ):
+                            continue
+                        if _llm_schema_placeholder_leaked(row):
                             continue
                         row_reason_zh = row.get("reason_zh") or row.get("reason")
                         if _final_llm_cache_reason_unusable(row_reason_zh) or _recommendation_reason_unusable(row.get("reason_en"), zh=False):
@@ -5991,9 +6041,30 @@ def _recommendation_reason_has_generic_opener(value: object, *, zh: bool = True)
     return bool(re.match(r"^(?:for|regarding|with respect to)\s+(?:the\s+)?(?:current\s+)?research\s+(?:direction|topic|profile)\b", text, re.I))
 
 
+def _recommendation_reason_sentence_count(value: object) -> int:
+    text = " ".join(str(value or "").split()).strip()
+    if not text:
+        return 0
+    fragments = [part.strip() for part in re.split(r"[。！？!?]+|(?<=[A-Za-z0-9)])\.(?=\s|$)", text) if _readable_text_len(part) >= 6]
+    return len(fragments)
+
+
+def _recommendation_reason_lacks_specificity(value: object, *, zh: bool = True) -> bool:
+    text = " ".join(str(value or "").split()).lower()
+    if zh:
+        content_signal = re.search(r"(方法|模型|数据|实验|评测|协议|理论|机制|算法|框架|训练|推理|结果|基准|分析)", text)
+        value_signal = re.search(r"(帮助|借鉴|迁移|复用|参考|支持|启发|用于|改进|比较|验证)", text)
+    else:
+        content_signal = re.search(r"\b(method|model|data|experiment|evaluat|protocol|theor|mechanism|algorithm|framework|train|infer|result|benchmark|analysis)\w*\b", text)
+        value_signal = re.search(r"\b(help|transfer|reuse|adapt|inform|support|apply|borrow|improve|compare|validat|inspir)\w*\b", text)
+    return not (content_signal and value_signal)
+
+
 def _recommendation_reason_unusable(value: object, *, zh: bool = True) -> bool:
     return (
         _reason_is_too_short(value, zh=zh)
+        or _recommendation_reason_sentence_count(value) < 2
+        or _recommendation_reason_lacks_specificity(value, zh=zh)
         or _has_internal_find_public_text(value, zh=zh)
         or _has_unsupported_availability_claim(value, zh=zh)
         or _recommendation_reason_has_generic_opener(value, zh=zh)
@@ -6289,7 +6360,7 @@ def _recommendation_quality_audit(items: list[dict]) -> dict:
         "missing_real_abstract_ids": missing_real_abstract[:50],
         "missing_chinese_abstract_ids": missing_zh_abstract[:50],
         "short_or_negative_reason_ids": short_reason[:50],
-        "policy": "User-facing recommendations must come from the final title+abstract LLM score ranking, show a real abstract, complete Chinese abstracts before marking translation completed, and preserve the LLM's natural multi-sentence recommendation reason covering topic fit, help to the research, and transferable method/data/protocol/theory/evaluation value. Reader-only full-text instructions must stay in reader_instruction_* fields. Topic/debug fields cannot create a second recommendation gate.",
+        "policy": "User-facing recommendations must come from the final title+abstract LLM score ranking, show a real abstract, directly support a current topic route, complete Chinese abstracts before marking translation completed, and preserve the LLM's natural multi-sentence recommendation reason covering topic fit, help to the research, and transferable method/data/protocol/theory/evaluation value. Reader-only full-text instructions must stay in reader_instruction_* fields.",
     }
 
 
@@ -6434,8 +6505,7 @@ def _find_recommendation_invalid_reason(item: dict, config: AppConfig | None) ->
     Find recommends papers for deep reading by one path only: the title screen
     supplies candidates, detail enrichment supplies a real abstract, the final
     title+abstract LLM judge scores them, and the UI/Read pool takes the top-N
-    ranked rows. Topic-evidence fields remain available for audit, but do not
-    create a second eligibility or score gate after the final LLM ranking.
+    ranked rows whose title+abstract directly support a current topic route.
     """
     if not _has_final_title_abstract_llm_scoring(item):
         return "missing_final_title_abstract_llm_scoring"
@@ -6445,6 +6515,10 @@ def _find_recommendation_invalid_reason(item: dict, config: AppConfig | None) ->
         return "missing_real_abstract"
     if item.get("abstract_fetch_failed"):
         return str(item.get("abstract_fetch_failed_reason") or "abstract_fetch_failed")
+    if item.get("not_positive_support"):
+        return str(item.get("strong_gate_reject_reason") or "not_positive_support")
+    if item.get("foundation_demoted_from_strong"):
+        return "foundation_demoted_from_strong"
     score_value = item.get("llm_fit_score")
     if score_value in (None, ""):
         score_value = item.get("fit_score")
@@ -6453,10 +6527,21 @@ def _find_recommendation_invalid_reason(item: dict, config: AppConfig | None) ->
     try:
         if not isfinite(float(score_value)):
             return "invalid_final_title_abstract_llm_fit_score"
+        if float(score_value) <= 2.0:
+            return "final_llm_score_marks_unrelated"
     except (TypeError, ValueError):
         return "invalid_final_title_abstract_llm_fit_score"
-    # Topic evidence, route guards, diversity, and source-quality signals are
-    # ranking/audit data only once a real abstract has a valid final LLM score.
+    if not _has_strong_topic_evidence(item):
+        return _strict_strong_invalid_reason(item) or "unsupported_topic_evidence"
+    if str(item.get("evidence_role") or "").lower() == "foundation_borrowing":
+        return "background_or_foundation_not_user_visible_recommendation"
+    strict_reason = _strict_strong_invalid_reason(item)
+    if strict_reason:
+        return strict_reason
+    if _recommendation_reason_unusable(item.get("reason_zh") or item.get("reason"), zh=True):
+        return "invalid_chinese_recommendation_reason"
+    if _recommendation_reason_unusable(item.get("reason_en"), zh=False):
+        return "invalid_english_recommendation_reason"
     return ""
 
 
@@ -6482,6 +6567,7 @@ def _recommendable_ranked(items: list[dict], config: AppConfig | None) -> list[d
         item.pop("recommended_by_llm_ranking", None)
         item.pop("find_recommendation", None)
         item.pop("_user_visible_recommendation", None)
+        item.pop("strict_strong_anchor", None)
         item["find_recommendation_candidate"] = True
         item["evidence_tier"] = "final_llm_scored_candidate"
         item["weak_candidate_for_critique"] = False
@@ -6577,6 +6663,7 @@ def _recommended(items: list[dict], config: AppConfig, source_count: int | None 
         item["find_recommendation"] = True
         item["_user_visible_recommendation"] = True
         item["evidence_tier"] = "strong_recommendation"
+        item["strict_strong_anchor"] = True
         item["weak_candidate_for_critique"] = False
         item["recommendation_note_zh"] = _PUBLIC_FIND_RECOMMENDATION_NOTE_ZH
         item["recommendation_note_en"] = _PUBLIC_FIND_RECOMMENDATION_NOTE_EN
@@ -6585,6 +6672,16 @@ def _recommended(items: list[dict], config: AppConfig, source_count: int | None 
         if len(recommended) >= target:
             break
     return recommended
+
+
+def _strict_strong_anchor_count(items: list[dict]) -> int:
+    return sum(
+        1
+        for item in items
+        if item.get("strict_strong_anchor") is True
+        and str(item.get("evidence_tier") or "").lower() == "strong_recommendation"
+        and not item.get("find_recommendation_reject_reason")
+    )
 
 
 
@@ -6842,7 +6939,7 @@ def _prepare_abstract_translation_prompt_text(item: dict, limit: int) -> str:
     replacements: list[dict[str, str]] = []
     if not spans:
         item.pop("_abstract_translation_latex_segments", None)
-        item["_abstract_translation_prompt_text"] = source[:limit]
+        item["_abstract_translation_prompt_text"] = source[:limit] if limit > 0 else source
         return item["_abstract_translation_prompt_text"]
     chunks: list[str] = []
     cursor = 0
@@ -6853,7 +6950,9 @@ def _prepare_abstract_translation_prompt_text(item: dict, limit: int) -> str:
         replacements.append({"placeholder": placeholder, "latex": source[start:end]})
         cursor = end
     chunks.append(source[cursor:])
-    prompt_text = "".join(chunks)[:limit]
+    prompt_text = "".join(chunks)
+    if limit > 0:
+        prompt_text = prompt_text[:limit]
     replacements = [row for row in replacements if row["placeholder"] in prompt_text]
     if replacements:
         item["_abstract_translation_latex_segments"] = replacements
@@ -6867,7 +6966,7 @@ def _translation_prompt_abstract(item: dict, limit: int) -> str:
     text = str(item.get("_abstract_translation_prompt_text") or "")
     if not text:
         text = _prepare_abstract_translation_prompt_text(item, limit)
-    return text[:limit]
+    return text[:limit] if limit > 0 else text
 
 
 def _restore_latex_translation_placeholders(item: dict, text: str) -> str:
@@ -6887,13 +6986,42 @@ def _translation_preserves_latex_segments(item: dict, text: str) -> bool:
     if not rows:
         return True
     value = str(text or "")
+    required: Counter[str] = Counter()
     for row in rows:
         if not isinstance(row, dict):
             continue
         latex = str(row.get("latex") or "")
-        if latex and latex not in value:
+        if latex:
+            required[latex] += 1
+    for latex, count in required.items():
+        if value.count(latex) < count:
             return False
     return True
+
+
+_TRANSLATION_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9_])[-+]?\d+(?:[.,]\d+)*(?:\s*(?:\\?%|％))?(?![A-Za-z0-9_])")
+
+
+def _translation_numeric_tokens(text: object) -> Counter[str]:
+    tokens: Counter[str] = Counter()
+    for match in _TRANSLATION_NUMBER_RE.finditer(str(text or "")):
+        token = re.sub(r"\s+", "", match.group(0)).replace("\\%", "%").replace("％", "%")
+        token = re.sub(r"(?<=\d),(?=\d{3}(?:\D|$))", "", token)
+        tokens[token] += 1
+    return tokens
+
+
+def _translation_retains_long_english_passage(text: str) -> bool:
+    for part in re.split(r"[。！？\n]+|(?<=[.!?])\s+", str(text or "")):
+        if len(re.findall(r"\b[A-Za-z][A-Za-z'-]*\b", part)) >= 20 and len(re.findall(r"[一-鿿]", part)) < 4:
+            return True
+    return False
+
+
+def _translation_sentence_coverage_too_low(text: str, source: str) -> bool:
+    source_sentences = len(re.findall(r"[^.!?]{20,}[.!?](?=\s|$)", str(source or "")))
+    translated_sentences = len([part for part in re.split(r"[。！？!?]+", str(text or "")) if len(part.strip()) >= 6])
+    return source_sentences >= 3 and translated_sentences < max(2, (source_sentences + 1) // 2)
 
 
 def _clear_translation_latex_state(items: list[dict]) -> None:
@@ -6912,6 +7040,8 @@ def _chinese_translation_reject_reason(text: str, source: str, item: dict | None
         return "missing_chinese_text"
     if latin_count and chinese_count / (chinese_count + latin_count) < 0.15:
         return "mostly_non_chinese_translation"
+    if _translation_retains_long_english_passage(cleaned):
+        return "retained_long_english_passage"
     min_len = _chinese_translation_min_len(source)
     if len(cleaned) < min_len:
         return f"too_short:{len(cleaned)}<{min_len}"
@@ -6923,6 +7053,12 @@ def _chinese_translation_reject_reason(text: str, source: str, item: dict | None
         return f"bad_sentence_tail:{tail}"
     if re.search(r"\[\[LATEX_\d+\]\]|@@TASTE_|TASTE_INLINE", cleaned):
         return "leaked_translation_placeholder"
+    source_numbers = _translation_numeric_tokens(source)
+    translated_numbers = _translation_numeric_tokens(cleaned)
+    if any(translated_numbers[token] < count for token, count in source_numbers.items()):
+        return "missing_numeric_content"
+    if _translation_sentence_coverage_too_low(cleaned, source):
+        return "incomplete_sentence_coverage"
     if item is not None and not _translation_preserves_latex_segments(item, cleaned):
         return "missing_preserved_latex_segment"
     if _has_unresolved_prose_latex_markup(cleaned):
@@ -6976,7 +7112,7 @@ def _attach_abstract_language_fields(items: list[dict], llm: LLMClient, log: Log
         if abstract:
             item["abstract"] = abstract
             item["abstract_en"] = abstract
-            _prepare_abstract_translation_prompt_text(item, 2600)
+            _prepare_abstract_translation_prompt_text(item, 0)
             existing_zh = str(item.get("abstract_zh") or "").strip()
             if existing_zh and _chinese_translation_reject_reason(existing_zh, abstract, item):
                 item.pop("abstract_zh", None)
@@ -7029,7 +7165,7 @@ def _attach_abstract_language_fields(items: list[dict], llm: LLMClient, log: Log
     prompt_batches: list[list[dict]] = []
     for batch_index, batch in enumerate(_chunks(missing, batch_size), 1):
         item_lines = "\n\n".join(
-            f"ID: {item.get('id')}\nTitle: {item.get('title')}\nAbstract: {_translation_prompt_abstract(item, 1800)}"
+            f"ID: {item.get('id')}\nTitle: {item.get('title')}\nAbstract: {_translation_prompt_abstract(item, 0)}"
             for item in batch
         )
         prompts.append(f"""
@@ -7126,7 +7262,7 @@ Rules:
 
 ID: {item.get('id')}
 Title: {item.get('title')}
-Abstract: {_translation_prompt_abstract(item, 2200)}
+Abstract: {_translation_prompt_abstract(item, 0)}
 
 Return one of these JSON shapes:
 {{"id":"paper id","abstract_zh":"中文摘要"}}
@@ -7174,7 +7310,7 @@ Rules:
 - Return JSON only, exactly as {{"abstract_zh":"中文摘要"}}.
 
 Title: {item.get('title')}
-Abstract: {_translation_prompt_abstract(item, 2600)}
+Abstract: {_translation_prompt_abstract(item, 0)}
 """
                     result = _json_or_error_wall_timeout(
                         llm,
@@ -7326,7 +7462,7 @@ def _run_diagnostics(artifacts: dict) -> dict:
         warnings.append({
             "code": "recommendation_shortfall",
             "severity": "warning",
-            "message": f"Only {recommendation_actual}/{recommendation_target} unique candidates with real abstracts and valid final LLM scores were available. Find applies no topic-evidence or absolute-score cutoff; inspect scoring coverage, abstract enrichment, and duplicate removal.",
+            "message": f"Only {recommendation_actual}/{recommendation_target} unique candidates with real abstracts, valid final LLM scores, and direct topic-route evidence were available. Find does not fill the requested count with unsupported rows; inspect scoring coverage, abstract enrichment, topic evidence, and duplicate removal.",
         })
     for item in failed_sources:
         message = str(item.get("message") or "")
@@ -8763,6 +8899,7 @@ def run_find(
         "policy": "Find publishes the final title+abstract recommendation ranking. Read owns full-text acquisition and may build a same-run full-text reading packet without rewriting Find recommendations.",
     }
     strong_recommendations = article_items
+    strict_strong_anchor_count = _strict_strong_anchor_count(strong_recommendations)
     triage_candidates = _triage_candidates(evaluated_candidates, config)
     critique_candidates = _critique_candidates(evaluated_candidates, config)
     for collection in (article_items, triage_candidates, critique_candidates):
@@ -8782,7 +8919,7 @@ def run_find(
             "recommendation_quality": recommendation_quality,
             "recommendation_target_count": recommendation_target,
             "recommendation_actual_count": len(strong_recommendations),
-            "strict_strong_anchor_count": len(strong_recommendations),
+            "strict_strong_anchor_count": strict_strong_anchor_count,
             "strong_recommendation_count": len(strong_recommendations),
             "recommendation_shortfall": recommendation_shortfall,
             "recommendation_policy": FIND_RECOMMENDATION_POLICY,
@@ -8811,7 +8948,7 @@ def run_find(
                 "strong_recommendation_source_count": source_count,
                 "recommendation_target_count": recommendation_target,
                 "recommendation_actual_count": len(strong_recommendations),
-                "strict_strong_anchor_count": len(strong_recommendations),
+                "strict_strong_anchor_count": strict_strong_anchor_count,
                 "recommendation_shortfall": recommendation_shortfall,
                 "recommendation_policy": FIND_RECOMMENDATION_POLICY,
                 "read_stage_full_text_policy": read_stage_full_text_policy,
@@ -8897,7 +9034,7 @@ def run_find(
     _write_run_json(run_dir, "final/find_results.json", preliminary_artifacts, root_alias="find_results.json")
     _write_run_text(run_dir, "reports/source_status.md", _status_markdown(source_status), root_alias="source_status.md")
     update_manifest(run_dir, "find")
-    _persist_find_progress("preliminary_artifacts_written", {"abstract_translation_status": "pending", "strong_recommendation_count": len(strong_recommendations), "strict_strong_anchor_count": len(strong_recommendations), "recommendation_target_count": _strong_recommendation_target_count(config, source_count), "recommendation_shortfall": max(0, _strong_recommendation_target_count(config, source_count) - len(strong_recommendations)), "recommendation_policy": FIND_RECOMMENDATION_POLICY})
+    _persist_find_progress("preliminary_artifacts_written", {"abstract_translation_status": "pending", "strong_recommendation_count": len(strong_recommendations), "strict_strong_anchor_count": strict_strong_anchor_count, "recommendation_target_count": _strong_recommendation_target_count(config, source_count), "recommendation_shortfall": max(0, _strong_recommendation_target_count(config, source_count) - len(strong_recommendations)), "recommendation_policy": FIND_RECOMMENDATION_POLICY})
     log("Find stage scored candidates; preliminary JSON persisted before Chinese abstract translation; user-facing recommendation Markdown waits for translated abstracts")
 
     translation_status = "completed"
@@ -8927,7 +9064,7 @@ def run_find(
 
     artifacts = _build_find_artifacts(translation_status)
     _write_find_outputs(artifacts)
-    _persist_find_progress("complete", {"abstract_translation_status": translation_status, "strong_recommendation_count": len(strong_recommendations), "strict_strong_anchor_count": len(strong_recommendations), "recommendation_target_count": _strong_recommendation_target_count(config, source_count), "recommendation_shortfall": max(0, _strong_recommendation_target_count(config, source_count) - len(strong_recommendations)), "recommendation_policy": FIND_RECOMMENDATION_POLICY})
+    _persist_find_progress("complete", {"abstract_translation_status": translation_status, "strong_recommendation_count": len(strong_recommendations), "strict_strong_anchor_count": strict_strong_anchor_count, "recommendation_target_count": _strong_recommendation_target_count(config, source_count), "recommendation_shortfall": max(0, _strong_recommendation_target_count(config, source_count) - len(strong_recommendations)), "recommendation_policy": FIND_RECOMMENDATION_POLICY})
     progress("complete", 1, 1, "find complete")
     log("Find stage complete")
     _publish_latest_review_copy(run_dir, log)
