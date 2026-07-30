@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
+import hashlib
 import html
+import json
 import os
 import re
 import shutil
@@ -11,6 +12,7 @@ import datetime as dt
 from contextlib import contextmanager
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any, Iterator
 from urllib.parse import urlparse
 
@@ -640,14 +642,38 @@ def read_json(path: Path, default: Any) -> Any:
         return default
 
 
-def write_json(path: Path, payload: Any) -> None:
+def _atomic_write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(make_reading_paths_relative(payload), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary = ""
+    try:
+        with NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = handle.name
+            handle.write(content)
+        os.replace(temporary, path)
+    finally:
+        if temporary:
+            try:
+                Path(temporary).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def write_json(path: Path, payload: Any) -> None:
+    _atomic_write_text(
+        path,
+        json.dumps(make_reading_paths_relative(payload), ensure_ascii=False, indent=2) + "\n",
+    )
 
 
 def write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(str(make_reading_paths_relative(str(text))), encoding="utf-8")
+    _atomic_write_text(path, str(make_reading_paths_relative(str(text))))
 
 
 def scrub_reading_paths_in_file(path: Path) -> None:
@@ -896,6 +922,17 @@ def service_from_url(url: str) -> str:
     return f"host_{normalized_host}" if normalized_host else "generic"
 
 
+def _effective_service_name(service: str) -> tuple[str, str]:
+    """Return the public service family and its private quota-state namespace."""
+    family = re.sub(r"[^a-z0-9_.-]+", "_", str(service or "generic").lower()) or "generic"
+    if family == "openalex":
+        api_key = str(os.environ.get("OPENALEX_API_KEY") or "").strip()
+        if api_key:
+            digest = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
+            return family, f"{family}--key-{digest}"
+    return family, family
+
+
 class ServiceCooldownActive(RuntimeError):
     def __init__(self, service: str, remaining: float, reason: str = "") -> None:
         self.service = service
@@ -941,8 +978,8 @@ def _write_service_state(handle: Any, state: dict[str, Any]) -> None:
 @contextmanager
 def service_request_slot(service: str, *, allow_during_cooldown: bool = False) -> Iterator[dict[str, Any]]:
     """Serialize one service/host across threads and processes, including external clients."""
-    service_name = re.sub(r"[^a-z0-9_.-]+", "_", str(service or "generic").lower()) or "generic"
-    min_interval = max(0.0, SERVICE_MIN_INTERVAL_SEC.get(service_name, SERVICE_MIN_INTERVAL_SEC["generic"]))
+    service_family, service_name = _effective_service_name(service)
+    min_interval = max(0.0, SERVICE_MIN_INTERVAL_SEC.get(service_family, SERVICE_MIN_INTERVAL_SEC["generic"]))
     with _SERVICE_LOCKS_LOCK:
         service_lock = _SERVICE_LOCKS.setdefault(service_name, threading.Lock())
     with service_lock:
@@ -956,11 +993,11 @@ def service_request_slot(service: str, *, allow_during_cooldown: bool = False) -
                 now = time.time()
                 cooldown_until = float(state.get("cooldown_until") or 0.0)
                 if cooldown_until > now and not allow_during_cooldown:
-                    raise ServiceCooldownActive(service_name, cooldown_until - now, str(state.get("cooldown_reason") or ""))
+                    raise ServiceCooldownActive(service_family, cooldown_until - now, str(state.get("cooldown_reason") or ""))
                 wait = max(0.0, min_interval - (now - float(state.get("last_finished_at") or 0.0)))
                 if wait:
                     time.sleep(wait)
-                gate: dict[str, Any] = {"service": service_name, "waited_sec": round(wait, 3)}
+                gate: dict[str, Any] = {"service": service_family, "waited_sec": round(wait, 3)}
                 try:
                     yield gate
                 finally:
@@ -973,7 +1010,7 @@ def service_request_slot(service: str, *, allow_during_cooldown: bool = False) -
                     cooldown = max(0.0, float(gate.get("cooldown_sec") or 0.0))
                     reason = str(gate.get("cooldown_reason") or "")
                     if str(headers.get("cf-mitigated") or "").lower() == "challenge":
-                        cooldown = max(cooldown, SERVICE_CHALLENGE_COOLDOWN_SEC.get(service_name, SERVICE_CHALLENGE_COOLDOWN_SEC["generic"]))
+                        cooldown = max(cooldown, SERVICE_CHALLENGE_COOLDOWN_SEC.get(service_family, SERVICE_CHALLENGE_COOLDOWN_SEC["generic"]))
                         reason = reason or "cloudflare_challenge"
                     if status_code == 429:
                         provider_wait = _rate_limit_reset_seconds(response, service_name) if response is not None else 0.0
@@ -981,13 +1018,13 @@ def service_request_slot(service: str, *, allow_during_cooldown: bool = False) -
                         reason = reason or "http_429"
                     if (
                         status_code == 403
-                        and service_name == "github"
+                        and service_family == "github"
                         and str(headers.get("x-ratelimit-remaining") or "").strip() == "0"
                     ):
                         cooldown = max(cooldown, _rate_limit_reset_seconds(response, service_name) or service_rate_limit_cooldown(service_name))
                         reason = reason or "github_rate_limit_exhausted"
-                    if status_code == 403 and service_name in SERVICE_ACCESS_DENIED_COOLDOWN_SEC:
-                        cooldown = max(cooldown, SERVICE_ACCESS_DENIED_COOLDOWN_SEC[service_name])
+                    if status_code == 403 and service_family in SERVICE_ACCESS_DENIED_COOLDOWN_SEC:
+                        cooldown = max(cooldown, SERVICE_ACCESS_DENIED_COOLDOWN_SEC[service_family])
                         reason = reason or "http_403"
                     if cooldown > 0:
                         state["cooldown_until"] = max(float(state.get("cooldown_until") or 0.0), finished_at + cooldown)
@@ -999,7 +1036,7 @@ def service_request_slot(service: str, *, allow_during_cooldown: bool = False) -
 
 
 def service_cooldown_remaining(service: str) -> float:
-    service_name = re.sub(r"[^a-z0-9_.-]+", "_", str(service or "generic").lower()) or "generic"
+    _service_family, service_name = _effective_service_name(service)
     with _SERVICE_LOCKS_LOCK:
         service_lock = _SERVICE_LOCKS.setdefault(service_name, threading.Lock())
     with service_lock:

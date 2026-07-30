@@ -94,6 +94,7 @@ export type Job = {
   display?: string;
   status: "queued" | "running" | "stale" | "interrupted" | "done" | "blocked" | "error" | "cancelling" | "cancelled" | "preview_available" | "needs_writing" | "preview_pdf_blocked";
   created_at: string;
+  started_at?: string;
   finished_at?: string;
   logs: string[];
   result?: any;

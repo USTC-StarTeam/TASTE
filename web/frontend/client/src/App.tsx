@@ -2201,6 +2201,26 @@ function normalizeMalformedLatexCommands(text: string) {
   return String(text ?? "").replace(/(^|[^A-Za-z\\])(extit|extbf|exttt|extsc|ext)\{/g, (_match, prefix, command) => String(prefix || "") + String.fromCharCode(92) + (commandMap[String(command)] || "text") + "{");
 }
 
+function normalizePlainTextLatexFormatting(text: string) {
+  const mathParts = String(text ?? "").split(/(\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\$[^$\n]*\$)/g);
+  return mathParts.map((part, index) => {
+    if (index % 2 === 1) return part;
+    let value = part;
+    for (let pass = 0; pass < 4; pass += 1) {
+      const previous = value;
+      value = value.replace(/\\(textbf|textit|emph|texttt|textsc|text)\{([^{}]*)\}/g, (_match, command, content) => {
+        const body = String(content || "");
+        if (command === "textbf") return `**${body}**`;
+        if (command === "textit" || command === "emph") return `*${body}*`;
+        if (command === "texttt") return `\`${body.replace(/`/g, "\\`")}\``;
+        return body;
+      });
+      if (value === previous) break;
+    }
+    return value;
+  }).join("");
+}
+
 function normalizePublicLatexLinks(text: string) {
   const value = normalizeMalformedLatexCommands(text)
     .replace(/\\href\{(https?:\/\/[^{}\s]+)\}\{([^{}]+)\}/g, (_match, url, label) => {
@@ -2212,7 +2232,7 @@ function normalizePublicLatexLinks(text: string) {
       const href = String(url || "").trim();
       return `[${href}](${href})`;
     });
-  return value.replace(/\\textemdash(?:\{\})?/g, " -- ");
+  return normalizePlainTextLatexFormatting(value).replace(/\\textemdash(?:\{\})?/g, " -- ");
 }
 
 function publicMarkdownArtifact(markdown: string) {
@@ -3227,6 +3247,7 @@ function normalizeJobForState(job: any): Job | null {
     stage: String(job.stage || "unknown"),
     status,
     created_at: String(job.created_at || ""),
+    started_at: String(job.started_at || ""),
     logs: safeJobLogs(job),
     internal: Boolean(job.internal),
     display: String(job.display || ""),
@@ -8399,7 +8420,7 @@ function TasteApp({ account, onLogout }: { account: AuthUser; onLogout: () => vo
                         <strong>{jobDisplayTitle(item, lang)}</strong>
                         <span>
                           {jobStatusLabel(item.status, lang)}
-                          {(isLiveJob(item) || item.finished_at) && <JobDuration createdAt={item.created_at} finishedAt={item.finished_at} live={isLiveJob(item)} lang={lang} />}
+                          {(isLiveJob(item) || item.finished_at) && <JobDuration createdAt={item.started_at || item.created_at} finishedAt={item.finished_at} live={isLiveJob(item)} lang={lang} />}
                         </span>
                       </div>
                       <small>{jobMetaLine(item, lang)}</small>

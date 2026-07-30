@@ -1891,6 +1891,7 @@ class JobState:
         self.stage = stage
         self.status = "queued"
         self.created_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        self.started_at = ""
         self.finished_at = ""
         self.logs: list[str] = []
         self.result: Any = None
@@ -1911,6 +1912,7 @@ class JobState:
         job = cls(str(data.get("job_id") or "job_unknown"), str(data.get("stage") or "unknown"))
         job.status = str(data.get("status") or "queued")
         job.created_at = str(data.get("created_at") or job.created_at)
+        job.started_at = str(data.get("started_at") or (job.created_at if job.status != "queued" else ""))
         job.finished_at = str(data.get("finished_at") or "")
         job.logs = [str(line) for line in data.get("logs", [])]
         job.result = data.get("result")
@@ -2033,6 +2035,7 @@ class JobState:
             "stage": public_stage,
             "status": public_status,
             "created_at": self.created_at,
+            "started_at": self.started_at,
             "finished_at": self.finished_at,
             "logs": logs,
             "log_count": len(self.logs),
@@ -2061,6 +2064,10 @@ class JobState:
     def mark_finished(self, finished_at: str = "") -> None:
         if not self.finished_at:
             self.finished_at = str(finished_at or datetime.now(UTC).isoformat().replace("+00:00", "Z"))
+
+    def mark_started(self, started_at: str = "") -> None:
+        if not self.started_at:
+            self.started_at = str(started_at or datetime.now(UTC).isoformat().replace("+00:00", "Z"))
 
     def set_progress(self, phase: str, current: int = 0, total: int = 0, message: str = "") -> None:
         percent = 0
@@ -10762,6 +10769,7 @@ def _compact_job_for_list(item: dict[str, Any]) -> dict[str, Any]:
         "stage": public_stage,
         "status": public_status,
         "created_at": item.get("created_at", ""),
+        "started_at": item.get("started_at", ""),
         "finished_at": item.get("finished_at", ""),
         "logs": _public_job_logs(panel_stage or ("paper" if paper_job else ("full-cycle" if full_cycle_job else raw_stage)), item.get("logs"), public_progress, public_log_result, limit=40),
         "log_count": item.get("log_count", 0),
@@ -10794,7 +10802,10 @@ def _persist_jobs_locked() -> None:
     persisted_snapshot: list[dict[str, Any]] = []
     for job in jobs_snapshot:
         public_stage = _public_taste_stage(getattr(job, "stage", ""))
-        compact = not (public_stage == "read" and str(getattr(job, "status", "") or "").lower() in {"queued", "running", "cancelling"})
+        preserve_logs = public_stage == "find" or (
+            public_stage == "read" and str(getattr(job, "status", "") or "").lower() in {"queued", "running", "cancelling"}
+        )
+        compact = not preserve_logs
         item = job.as_dict(compact=compact)
         item["owner_id"] = job.owner_id
         if not _job_is_hollow_route(item):
@@ -11110,6 +11121,7 @@ def start_job(stage: str, fn: Callable[[Callable[[str], None], Callable[[], bool
 
     def runner() -> None:
         account_token = _CURRENT_ACCOUNT.set(account) if account is not None else None
+        job.mark_started()
         job.status = "running"
         _persist_jobs()
         job.log(_job_status_message(stage, "started"))
@@ -13479,6 +13491,11 @@ async def ws_job(websocket: WebSocket, job_id: str):
             await asyncio.sleep(0.5)
     except WebSocketDisconnect:
         return
+    except RuntimeError as exc:
+        message = str(exc).lower()
+        if any(marker in message for marker in ("close message", "websocket.close", "websocket is closed", "websocket disconnected", "after response already completed")):
+            return
+        raise
     finally:
         _CURRENT_ACCOUNT.reset(account_token)
 
