@@ -2006,6 +2006,148 @@ def enrich_acm_doi_with_hal(papers: list[dict], limit: int = 0) -> tuple[list[di
     return papers, stats
 
 
+def _openaire_v3_dois(item: dict[str, Any]) -> set[str]:
+    dois: set[str] = set()
+    for value in item.get("pids") or []:
+        if isinstance(value, dict) and _clean_text(value.get("scheme")).lower() == "doi":
+            doi = _doi_from_url(_clean_text(value.get("value"))) or _clean_text(value.get("value")).lower()
+            if doi:
+                dois.add(doi)
+    for instance in item.get("instances") or []:
+        if not isinstance(instance, dict):
+            continue
+        for value in instance.get("alternateIdentifiers") or []:
+            if isinstance(value, dict) and _clean_text(value.get("scheme")).lower() == "doi":
+                doi = _doi_from_url(_clean_text(value.get("value"))) or _clean_text(value.get("value")).lower()
+                if doi:
+                    dois.add(doi)
+    return dois
+
+
+def _openaire_v3_repository_urls(item: dict[str, Any]) -> list[str]:
+    urls: list[str] = []
+    for instance in item.get("instances") or []:
+        if not isinstance(instance, dict):
+            continue
+        for value in instance.get("urls") or []:
+            url = _clean_text(value)
+            if (
+                url.startswith(("http://", "https://"))
+                and not re.fullmatch(r"https?://(?:dx\.)?doi\.org/.+", url, flags=re.I)
+                and url not in urls
+            ):
+                urls.append(url)
+    return urls
+
+
+def _openaire_author_family_tokens(value: object) -> set[str]:
+    names: list[str] = []
+    for author in value if isinstance(value, list) else []:
+        if isinstance(author, dict):
+            name = _clean_text(author.get("fullName") or author.get("name") or author.get("displayName"))
+        else:
+            name = _clean_text(author)
+        if name:
+            names.append(name)
+    return {
+        parts[-1].lower()
+        for name in names
+        if (parts := re.findall(r"[A-Za-z][A-Za-z-]+", name))
+    }
+
+
+def enrich_acm_doi_with_openaire(papers: list[dict], limit: int = 0) -> tuple[list[dict], dict[str, Any]]:
+    targets = [
+        paper
+        for paper in papers
+        if isinstance(paper, dict)
+        and _paper_doi(paper).startswith("10.1145/")
+        and not (
+            isinstance(paper.get("metadata"), dict)
+            and paper["metadata"].get("openaire_repository_urls")
+        )
+    ]
+    if limit and limit > 0:
+        targets = targets[:limit]
+    env_limit = _positive_int_env("ACM_OPENAIRE_MAX_ITEMS", 0)
+    if env_limit > 0:
+        targets = targets[:env_limit]
+    stats: dict[str, Any] = {
+        "source": "openaire_exact_identity_for_acm",
+        "enabled": True,
+        "attempted": len(targets),
+        "requests": 0,
+        "matched": 0,
+        "rate_limited": False,
+        "errors": [],
+    }
+    if not targets:
+        return papers, stats
+    by_title: dict[str, list[dict]] = {}
+    for paper in targets:
+        by_title.setdefault(_semantic_scholar_cache_key(str(paper.get("title") or "")), []).append(paper)
+    titles = [_clean_text(paper.get("title")).rstrip(".") for paper in targets if _clean_text(paper.get("title"))]
+    for offset in range(0, len(titles), 5):
+        chunk = [title.replace('"', " ") for title in titles[offset:offset + 5]]
+        if not chunk:
+            continue
+        expression = "(" + " OR ".join(f'"{title}"' for title in chunk) + ")"
+        stats["requests"] = int(stats.get("requests") or 0) + 1
+        try:
+            response = requests.get(
+                "https://api.openaire.eu/graph/v3/research-products",
+                params={"mainTitle": expression, "pageSize": 100},
+                headers=HEADERS,
+                timeout=_metadata_timeout(12),
+            )
+        except Exception as exc:
+            stats["errors"].append(type(exc).__name__ + ":" + str(exc)[:180])
+            break
+        if int(getattr(response, "status_code", 0) or 0) == 429:
+            stats["rate_limited"] = True
+            stats["errors"].append("http_429")
+            break
+        if not bool(getattr(response, "ok", False)):
+            stats["errors"].append(f"http_{int(getattr(response, 'status_code', 0) or 0)}")
+            continue
+        try:
+            results = response.json().get("results") or []
+        except Exception as exc:
+            stats["errors"].append("invalid_json:" + type(exc).__name__)
+            continue
+        for item in results if isinstance(results, list) else []:
+            if not isinstance(item, dict) or _clean_text(item.get("type")).lower() != "publication":
+                continue
+            title_key = _semantic_scholar_cache_key(_clean_text(item.get("mainTitle")))
+            candidate_rows = by_title.get(title_key) or []
+            if not candidate_rows:
+                continue
+            candidate_dois = _openaire_v3_dois(item)
+            candidate_authors = _openaire_author_family_tokens(item.get("authors") or item.get("creators"))
+            repository_urls = _openaire_v3_repository_urls(item)
+            if not repository_urls:
+                continue
+            for paper in candidate_rows:
+                expected_doi = _paper_doi(paper)
+                expected_authors = _openaire_author_family_tokens(paper.get("authors"))
+                if expected_doi:
+                    if expected_doi not in candidate_dois:
+                        continue
+                elif not expected_authors or not (expected_authors & candidate_authors):
+                    continue
+                metadata = paper.setdefault("metadata", {})
+                existing_urls = metadata.get("openaire_repository_urls")
+                existing_urls = existing_urls if isinstance(existing_urls, list) else []
+                metadata["openaire_repository_urls"] = list(dict.fromkeys([*existing_urls, *repository_urls]))
+                metadata.setdefault("indexed_enrichment", []).append({
+                    "source": "openaire_exact_identity_for_acm",
+                    "identity_basis": "doi_and_exact_title" if expected_doi else "exact_title_and_author",
+                    "url": str(getattr(response, "url", "") or ""),
+                })
+                stats["matched"] = int(stats.get("matched") or 0) + 1
+    return papers, stats
+
+
 def _author_pdf_urls_from_env() -> list[str]:
     raw = str(os.environ.get("ACM_EXTERNAL_PDF_URLS") or os.environ.get("ACM_AUTHOR_PDF_URLS") or "").strip()
     if not raw:
@@ -3926,6 +4068,10 @@ def enrich_acm_doi_with_official_pdf(papers: list[dict], limit: int = 0) -> tupl
 
 def enrich_acm_doi_with_indexed_abstracts(papers: list[dict], limit: int = 0) -> tuple[list[dict], dict[str, Any]]:
     papers, local_cache_stats = _apply_cached_acm_abstract_sources(papers)
+    openaire_enabled = str(os.environ.get("ACM_OPENAIRE_FALLBACK", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
+    openaire_stats: dict[str, Any] = {"enabled": False, "attempted": 0, "matched": 0}
+    if openaire_enabled:
+        papers, openaire_stats = enrich_acm_doi_with_openaire(papers, limit=limit)
     pure_stats: dict[str, Any] = {
         "enabled": False,
         "attempted": 0,
@@ -3963,6 +4109,7 @@ def enrich_acm_doi_with_indexed_abstracts(papers: list[dict], limit: int = 0) ->
     pdf_stats: dict[str, Any] = {"enabled": False, "attempted": 0, "abstracts_filled": 0}
     stats: dict[str, Any] = {
         "local_cache": local_cache_stats,
+        "openaire": openaire_stats,
         "pure_portal": pure_stats,
         "hal": hal_stats,
         "public_publication_page": public_page_search_stats,

@@ -7959,6 +7959,132 @@ def test_find_venue_health_requires_live_abstract_enrichment(monkeypatch):
     assert "still lack abstracts" in missing["message"]
 
 
+def test_find_acm_openaire_enrichment_keeps_only_exact_doi_publication(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    assert hasattr(find_support, "enrich_acm_doi_with_openaire"), "OpenAIRE ACM enricher is missing"
+
+    class Response:
+        status_code = 200
+        ok = True
+        url = "https://api.openaire.eu/graph/v3/research-products"
+        headers = {"Content-Type": "application/json"}
+
+        def json(self):
+            return {
+                "results": [
+                    {
+                        "type": "publication",
+                        "mainTitle": "Exact ACM Paper Title",
+                        "pids": [{"scheme": "doi", "value": "10.1145/123.456"}],
+                        "authors": [{"fullName": "Ada Lovelace"}],
+                        "instances": [{
+                            "urls": [
+                                "https://repository.example/record/1",
+                                "https://doi.org/10.1145/123.456",
+                            ],
+                            "alternateIdentifiers": [
+                                {"scheme": "doi", "value": "10.1145/123.456"},
+                            ],
+                        }],
+                    },
+                    {
+                        "type": "publication",
+                        "mainTitle": "Exact ACM Paper Title",
+                        "pids": [{"scheme": "doi", "value": "10.1145/999.999"}],
+                        "authors": [{"fullName": "Ada Lovelace"}],
+                        "instances": [{"urls": ["https://repository.example/record/wrong"]}],
+                    },
+                    {
+                        "type": "dataset",
+                        "mainTitle": "Exact ACM Paper Title",
+                        "pids": [{"scheme": "doi", "value": "10.1145/123.456"}],
+                        "instances": [{"urls": ["https://repository.example/dataset/wrong"]}],
+                    },
+                ]
+            }
+
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return Response()
+
+    monkeypatch.setattr(find_support.requests, "get", fake_get)
+    paper = {
+        "title": "Exact ACM Paper Title",
+        "doi": "10.1145/123.456",
+        "authors": ["Ada Lovelace", "Alan Turing"],
+        "abstract": "Existing abstract remains unchanged.",
+        "metadata": {"doi": "10.1145/123.456"},
+    }
+
+    enriched, stats = find_support.enrich_acm_doi_with_openaire([paper])
+
+    assert enriched[0]["title"] == "Exact ACM Paper Title"
+    assert enriched[0]["doi"] == "10.1145/123.456"
+    assert enriched[0]["abstract"] == "Existing abstract remains unchanged."
+    assert enriched[0]["metadata"]["openaire_repository_urls"] == [
+        "https://repository.example/record/1"
+    ]
+    assert stats["requests"] == 1
+    assert stats["matched"] == 1
+    assert len(calls) == 1
+    assert calls[0][1]["params"]["pageSize"] == 100
+
+
+def test_find_acm_openaire_429_stops_without_waiting_or_clearing_papers(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    assert hasattr(find_support, "enrich_acm_doi_with_openaire"), "OpenAIRE ACM enricher is missing"
+    calls = []
+
+    class Response:
+        status_code = 429
+        ok = False
+        url = "https://api.openaire.eu/graph/v3/research-products"
+        headers = {"Retry-After": "36000"}
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return Response()
+
+    monkeypatch.setattr(find_support.requests, "get", fake_get)
+    monkeypatch.setattr(find_support.time, "sleep", lambda *_args: (_ for _ in ()).throw(AssertionError("must not wait")))
+    papers = [{"title": "Rate Limited Paper", "doi": "10.1145/123.457", "metadata": {}}]
+
+    enriched, stats = find_support.enrich_acm_doi_with_openaire(papers)
+
+    assert enriched is papers
+    assert enriched[0]["title"] == "Rate Limited Paper"
+    assert stats["requests"] == 1
+    assert stats["rate_limited"] is True
+    assert len(calls) == 1
+
+
+def test_find_acm_openaire_connection_failure_stops_after_first_batch(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        raise find_support.requests.Timeout("OpenAIRE unavailable")
+
+    monkeypatch.setattr(find_support.requests, "get", fake_get)
+    papers = [
+        {"title": f"ACM Paper {index}", "doi": f"10.1145/123.{index}", "metadata": {}}
+        for index in range(6)
+    ]
+
+    enriched, stats = find_support.enrich_acm_doi_with_openaire(papers)
+
+    assert enriched is papers
+    assert stats["requests"] == 1
+    assert len(calls) == 1
+    assert stats["errors"] == ["Timeout:OpenAIRE unavailable"]
+
+
 def test_find_acm_live_defaults_use_targeted_fallbacks_not_full_venue_scan(monkeypatch):
     _load_find_pipeline()
     find_support = sys.modules["support.find_support"]
@@ -7969,13 +8095,18 @@ def test_find_acm_live_defaults_use_targeted_fallbacks_not_full_venue_scan(monke
         {"title": "Semantic title match", "doi": "10.1145/1.2", "abstract": "", "metadata": {"doi": "10.1145/1.2"}},
         {"title": "ChatPaper residual match", "doi": "10.1145/1.3", "abstract": "", "metadata": {"doi": "10.1145/1.3"}},
     ]
-    calls = {"openalex_title": 0, "semantic": 0, "chatpaper": 0}
+    calls = {"openaire": 0, "openalex_title": 0, "semantic": 0, "chatpaper": 0}
     empty_stats = {"attempted": 0, "abstracts_filled": 0}
     monkeypatch.setattr(find_support, "_apply_cached_acm_abstract_sources", lambda items: (items, dict(empty_stats)))
     monkeypatch.setattr(find_support, "enrich_acm_doi_with_hal", lambda items, **_kwargs: (items, dict(empty_stats)))
     monkeypatch.setattr(find_support, "enrich_acm_doi_with_openalex", lambda items, **_kwargs: (items, dict(empty_stats)))
     monkeypatch.setattr(find_support, "enrich_acm_doi_with_openalex_oa_pdf", lambda items, **_kwargs: (items, dict(empty_stats)))
     monkeypatch.setattr(find_support, "enrich_acm_doi_with_official_pdf", lambda items, **_kwargs: (items, dict(empty_stats)))
+
+    def openaire(items, **_kwargs):
+        calls["openaire"] += 1
+        items[0].setdefault("metadata", {})["openaire_repository_urls"] = ["https://repository.example/record/1"]
+        return items, {"enabled": True, "attempted": len(items), "matched": 1}
 
     def openalex_title(items, **_kwargs):
         calls["openalex_title"] += 1
@@ -8000,9 +8131,11 @@ def test_find_acm_live_defaults_use_targeted_fallbacks_not_full_venue_scan(monke
     monkeypatch.setattr(find_support, "enrich_with_openalex", openalex_title)
     monkeypatch.setattr(find_support, "enrich_with_semantic_scholar", semantic)
     monkeypatch.setattr(find_support, "enrich_acm_doi_with_chatpaper", chatpaper)
+    monkeypatch.setattr(find_support, "enrich_acm_doi_with_openaire", openaire)
 
     enriched, _stats = find_support.enrich_acm_doi_with_indexed_abstracts(papers)
-    assert calls == {"openalex_title": 1, "semantic": 1, "chatpaper": 1}
+    assert calls == {"openaire": 1, "openalex_title": 1, "semantic": 1, "chatpaper": 1}
+    assert _stats["openaire"]["matched"] == 1
     assert all(paper["abstract"] for paper in enriched)
 
 
