@@ -130,6 +130,14 @@ def _load_reading_conference_sources():
     return importlib.import_module("acquisition.conference_sources")
 
 
+def _load_reading_repository_sources():
+    reading_main = _load_reading_main()
+    reading_main._ensure_runtime_imports()
+    import importlib
+
+    return importlib.import_module("acquisition.repository_sources")
+
+
 def _load_reading_openreview_official():
     reading_main = _load_reading_main()
     reading_main._ensure_runtime_imports()
@@ -1584,7 +1592,140 @@ def test_reading_article_cache_rejects_content_hash_mismatch(monkeypatch, tmp_pa
     assert read_pipeline._article_cache_integrity_ok(cache_dir) is False
 
 
-def test_reading_article_cache_restore_backfills_content_binding(monkeypatch, tmp_path):
+def _publish_read_cache_fixture(read_pipeline, monkeypatch, tmp_path):
+    cache_dir = tmp_path / "cache"
+    source_dir = tmp_path / "source"
+    restore_dir = tmp_path / "restore"
+    for root in [cache_dir, source_dir]:
+        (root / "downloads").mkdir(parents=True)
+        (root / "extracted").mkdir(parents=True)
+    pdf_path = source_dir / "downloads" / "article.pdf"
+    text_path = source_dir / "extracted" / "full_text.txt"
+    pdf_path.write_bytes(b"%PDF-1.7\nofficial paper body")
+    text_path.write_text("official extracted full text\n" * 300, encoding="utf-8")
+    paper = {
+        "paper_id": "paper-1",
+        "title": "Cache Contract Paper",
+        "abstract": "We present the original source abstract for this paper.",
+        "abstract_zh": "我们提出该论文的固定中文摘要。",
+        "source": "openreview",
+        "venue": "ICLR",
+        "year": 2026,
+        "url": "https://openreview.net/forum?id=official-note",
+    }
+    packet = {
+        "paper_id": "paper-1",
+        "title": paper["title"],
+        "full_text_available": True,
+        "full_text_chars": text_path.stat().st_size,
+        "text_chars": text_path.stat().st_size,
+        "text_path": str(text_path),
+        "pdf_path": str(pdf_path),
+        "pdf_url": "openreview://official-note/pdf",
+        "pdf_acquisition": {"selected": {"kind": "openreview_official_note_pdf"}},
+    }
+    (source_dir / "read.md").write_text(
+        f"# {paper['title']}\n\n## 摘要\n\n{paper['abstract_zh']}"
+        "\n\n## 动机与核心创新\n\n该工作针对重要研究问题提出清晰创新。"
+        "\n\n## 方法\n\n该方法包含完整的建模与优化过程。"
+        "\n\n## 实验结果\n\n实验验证了方法的有效性。"
+        "\n\n## 优缺点总结\n\n优点明确，同时仍存在可改进之处。\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(read_pipeline, "ensure_inside_reading", lambda path, **_kwargs: Path(path))
+    monkeypatch.setattr(read_pipeline, "resolve_reading_path", lambda value: Path(value))
+    monkeypatch.setattr(read_pipeline, "_article_cache_enabled", lambda: True)
+    monkeypatch.setattr(read_pipeline, "_article_full_text_cache_enabled", lambda: True)
+    monkeypatch.setattr(read_pipeline, "_target_article_cache_dir", lambda *_args, **_kwargs: (cache_dir, ["title:paper"]))
+    monkeypatch.setattr(read_pipeline, "_locate_article_cache_dir", lambda *_args, **_kwargs: cache_dir)
+    monkeypatch.setattr(read_pipeline, "_article_cache_same_paper_ok", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(read_pipeline, "_write_article_cache_aliases", lambda *_args, **_kwargs: None)
+
+    publication = read_pipeline._publish_article_read_cache(
+        source_dir,
+        paper,
+        {"full_text_packet": packet},
+    )
+    assert publication
+    assert (cache_dir / "read.md").is_file()
+    return cache_dir, restore_dir, paper
+
+
+@pytest.mark.parametrize(
+    ("changed_field", "changed_value"),
+    [
+        ("abstract", "We present a corrected source abstract with materially different content."),
+        ("abstract_zh", "我们提供经过修订的固定中文摘要。"),
+    ],
+)
+def test_reading_article_cache_rejects_changed_abstract_without_deleting_full_text(
+    monkeypatch, tmp_path, changed_field, changed_value,
+):
+    read_pipeline = _load_reading_pipeline()
+    cache_dir, restore_dir, paper = _publish_read_cache_fixture(read_pipeline, monkeypatch, tmp_path)
+
+    result = read_pipeline._restore_article_read_cache(
+        restore_dir,
+        {**paper, changed_field: changed_value},
+        run_id=_reading_test_run_id(),
+        paper_index=1,
+    )
+
+    manifest = json.loads((cache_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert result == {}
+    assert not (cache_dir / "read.md").exists()
+    assert (cache_dir / "extracted" / "full_text.txt").is_file()
+    assert (cache_dir / "downloads" / "article.pdf").is_file()
+    assert manifest["read_invalidation_reason"] == "read_input_fingerprint_mismatch"
+
+
+def test_reading_article_cache_rejects_missing_read_input_fingerprints(monkeypatch, tmp_path):
+    read_pipeline = _load_reading_pipeline()
+    cache_dir, restore_dir, paper = _publish_read_cache_fixture(read_pipeline, monkeypatch, tmp_path)
+    manifest_path = cache_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("source_abstract_sha256", None)
+    manifest.pop("fixed_abstract_zh_sha256", None)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = read_pipeline._restore_article_read_cache(
+        restore_dir,
+        paper,
+        run_id=_reading_test_run_id(),
+        paper_index=1,
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert result == {}
+    assert manifest["has_read_md"] is False
+    assert manifest["read_invalidation_reason"] == "read_input_fingerprint_mismatch"
+    assert (cache_dir / "extracted" / "full_text.txt").is_file()
+
+
+def test_reading_article_cache_rejects_old_quality_policy_without_deleting_full_text(monkeypatch, tmp_path):
+    read_pipeline = _load_reading_pipeline()
+    cache_dir, restore_dir, paper = _publish_read_cache_fixture(read_pipeline, monkeypatch, tmp_path)
+    manifest_path = cache_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["read_quality_policy_version"] = "read_markdown_quality_v2"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = read_pipeline._restore_article_read_cache(
+        restore_dir,
+        paper,
+        run_id=_reading_test_run_id(),
+        paper_index=1,
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert result == {}
+    assert manifest["read_invalidation_reason"] == "read_quality_policy_mismatch"
+    assert (cache_dir / "extracted" / "full_text.txt").is_file()
+    assert (cache_dir / "downloads" / "article.pdf").is_file()
+
+
+def test_reading_article_cache_rejects_legacy_read_binding_but_preserves_full_text(monkeypatch, tmp_path):
     read_pipeline = _load_reading_pipeline()
     cache_dir = tmp_path / "cache"
     item_dir = tmp_path / "item"
@@ -1643,17 +1784,13 @@ def test_reading_article_cache_restore_backfills_content_binding(monkeypatch, tm
         paper_index=1,
     )
 
-    fingerprints = read_pipeline._article_cache_content_fingerprints(cache_dir)
     manifest = json.loads((cache_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert result["status"] == "complete"
-    assert manifest["full_text_content_revision"] == fingerprints["content_revision"]
-    assert manifest["read_content_revision"] == fingerprints["content_revision"]
-    assert manifest["full_text_sha256"] == fingerprints["full_text_sha256"]
-    assert manifest["pdf_sha256"] == fingerprints["pdf_sha256"]
-    assert manifest["full_text_source_kind"] == "openreview_official_note_pdf"
-    assert manifest["full_text_pdf_url"] == "openreview://official-note/pdf"
-    assert paper["abstract_zh"] in (item_dir / "read.md").read_text(encoding="utf-8")
-    assert paper["abstract_zh"] in (cache_dir / "read.md").read_text(encoding="utf-8")
+    assert result == {}
+    assert not (cache_dir / "read.md").exists()
+    assert (cache_dir / "extracted" / "full_text.txt").is_file()
+    assert (cache_dir / "downloads" / "article.pdf").is_file()
+    assert manifest["has_read_md"] is False
+    assert manifest["read_invalidation_reason"] == "read_quality_policy_mismatch"
 
 
 @pytest.mark.parametrize(
@@ -1684,16 +1821,20 @@ def test_reading_article_cache_invalidates_content_quality_defects(
         "\n\n## 优缺点总结\n\n中文优缺点总结。\n",
         encoding="utf-8",
     )
-    (cache_dir / "paper.json").write_text(json.dumps({
+    cached_paper = {
         "paper_id": "paper-1",
         "title": "Cached Paper",
         "abstract_zh": fixed_abstract,
         "abstract": source_abstract,
-    }), encoding="utf-8")
+    }
+    (cache_dir / "paper.json").write_text(json.dumps(cached_paper), encoding="utf-8")
+    fingerprints = read_pipeline._article_read_cache_fingerprints(cache_dir, cached_paper)
     (cache_dir / "manifest.json").write_text(json.dumps({
         "has_read_md": True,
-        "read_content_revision": "legacy",
-        "read_quality_policy_version": "read_markdown_quality_v2",
+        "read_content_revision": fingerprints["content_revision"],
+        "source_abstract_sha256": fingerprints["source_abstract_sha256"],
+        "fixed_abstract_zh_sha256": fingerprints["fixed_abstract_zh_sha256"],
+        "read_quality_policy_version": read_pipeline.READING_CONTENT_QUALITY_POLICY_VERSION,
     }), encoding="utf-8")
 
     monkeypatch.setattr(read_pipeline, "ensure_inside_reading", lambda path, **_kwargs: Path(path))
@@ -1820,6 +1961,221 @@ def test_reading_eccv_virtual_page_uses_main_pdf_not_supplement(monkeypatch):
     assert [candidate["pdf_url"] for candidate in candidates] == [
         "https://www.ecva.net/papers/eccv_2024/papers_ECCV/papers/00019.pdf"
     ]
+
+
+def test_reading_structured_repository_candidates_require_same_paper_identity():
+    try:
+        repository_sources = _load_reading_repository_sources()
+    except ModuleNotFoundError:
+        pytest.fail("Reading structured repository adapter is missing")
+
+    class Response:
+        def __init__(self, url, *, payload=None, text="", status_code=200, content_type="application/json"):
+            self.url = url
+            self._payload = payload
+            self.text = text
+            self.status_code = status_code
+            self.ok = 200 <= status_code < 300
+            self.headers = {"Content-Type": content_type}
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url, **_kwargs):
+        if "api.archives-ouvertes.fr" in url:
+            return Response(url, payload={
+                "response": {
+                    "docs": [
+                        {
+                            "title_s": ["Exact Paper Title"],
+                            "doiId_s": ["10.1145/123.456"],
+                            "authFullName_s": ["Ada Lovelace", "Alan Turing"],
+                            "fileMain_s": "https://hal.science/hal-1/file/paper.pdf",
+                            "uri_s": "https://hal.science/hal-1",
+                        },
+                        {
+                            "title_s": ["Exact Paper Title"],
+                            "doiId_s": ["10.1145/999.999"],
+                            "authFullName_s": ["Ada Lovelace"],
+                            "fileMain_s": "https://hal.science/hal-wrong/file/paper.pdf",
+                            "uri_s": "https://hal.science/hal-wrong",
+                        },
+                    ]
+                }
+            })
+        if url == "https://repo.example/item/1":
+            return Response(
+                url,
+                text='<html><head><meta name="citation_pdf_url" content="/files/paper.pdf"></head></html>',
+                content_type="text/html; charset=utf-8",
+            )
+        raise AssertionError(f"unexpected repository request: {url}")
+
+    candidates = repository_sources.structured_repository_pdf_candidates(
+        {
+            "title": "Exact Paper Title",
+            "authors": ["Ada Lovelace", "Alan Turing"],
+            "doi": "10.1145/123.456",
+            "metadata": {"openaire_repository_urls": ["https://repo.example/item/1"]},
+        },
+        request_get=fake_get,
+    )
+
+    accepted = [item for item in candidates if item.get("accepted")]
+    assert {(item["kind"], item["pdf_url"]) for item in accepted} == {
+        ("openaire_repository_pdf", "https://repo.example/files/paper.pdf"),
+        ("hal_exact_title_pdf", "https://hal.science/hal-1/file/paper.pdf"),
+    }
+    assert all(item["requires_pdf_text_identity_check"] is True for item in accepted)
+    assert not any("hal-wrong" in str(item.get("pdf_url") or "") for item in accepted)
+
+
+def test_reading_structured_repository_rate_limit_is_a_single_nonblocking_miss():
+    try:
+        repository_sources = _load_reading_repository_sources()
+    except ModuleNotFoundError:
+        pytest.fail("Reading structured repository adapter is missing")
+
+    calls = []
+
+    class Response:
+        url = "https://repo.example/item/1"
+        status_code = 429
+        ok = False
+        headers = {"Content-Type": "text/html", "Retry-After": "3600"}
+        text = ""
+
+    def fake_get(url, **_kwargs):
+        calls.append(url)
+        return Response()
+
+    candidates = repository_sources.structured_repository_pdf_candidates(
+        {
+            "title": "",
+            "metadata": {"openaire_repository_urls": ["https://repo.example/item/1"]},
+        },
+        request_get=fake_get,
+    )
+
+    assert calls == ["https://repo.example/item/1"]
+    assert candidates == [{
+        "kind": "openaire_repository_landing",
+        "accepted": False,
+        "url": "https://repo.example/item/1",
+        "reason": "http_429",
+        "status_code": 429,
+    }]
+
+
+def test_reading_structured_repository_skips_hal_without_acm_or_repository_evidence():
+    repository_sources = _load_reading_repository_sources()
+    calls = []
+
+    def fake_get(url, **_kwargs):
+        calls.append(url)
+        raise AssertionError("unrelated papers must not trigger repository lookup")
+
+    candidates = repository_sources.structured_repository_pdf_candidates(
+        {
+            "title": "An ICLR Paper",
+            "venue": "ICLR",
+            "url": "https://openreview.net/forum?id=paper",
+        },
+        request_get=fake_get,
+    )
+
+    assert candidates == []
+    assert calls == []
+
+
+def _isolate_reading_pdf_candidate_sources(monkeypatch, read_pipeline):
+    for name in [
+        "_publisher_direct_pdf_candidates",
+        "_arxiv_pdf_candidates",
+        "_runtime_cached_pdf_candidates",
+        "_springer_nature_api_candidates",
+        "_crossref_pdf_candidates",
+        "_publisher_page_pdf_candidates",
+        "_iclr_mlanthology_candidates",
+        "_openreview_title_pdf_candidates",
+        "_openalex_pdf_candidates",
+        "_unpaywall_pdf_candidates",
+        "_semantic_scholar_pdf_candidates_for_reading",
+    ]:
+        monkeypatch.setattr(read_pipeline, name, lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(read_pipeline, "openreview_official_pdf_candidates", lambda _paper: [])
+    monkeypatch.setattr(read_pipeline, "_pdf_links_from_html_page", lambda _url: [])
+
+
+def test_reading_structured_repository_route_follows_official_candidates(monkeypatch):
+    read_pipeline = _load_reading_pipeline()
+    _isolate_reading_pdf_candidate_sources(monkeypatch, read_pipeline)
+    monkeypatch.setattr(
+        read_pipeline,
+        "official_conference_pdf_candidates",
+        lambda _paper: [{
+            "kind": "conference_official_pdf",
+            "pdf_url": "https://dl.acm.org/doi/pdf/10.1145/123.456",
+            "accepted": True,
+        }],
+    )
+    monkeypatch.setattr(read_pipeline, "_search_result_pdf_candidates", lambda _paper: [])
+    monkeypatch.setattr(
+        read_pipeline,
+        "structured_repository_pdf_candidates",
+        lambda _paper: [{
+            "kind": "hal_exact_title_pdf",
+            "pdf_url": "https://hal.science/hal-1/file/paper.pdf",
+            "accepted": True,
+            "requires_pdf_text_identity_check": True,
+        }],
+        raising=False,
+    )
+
+    candidates = read_pipeline._pdf_candidates_for_reading({
+        "title": "Exact ACM Paper Title",
+        "source": "sigkdd",
+        "venue": "KDD",
+        "doi": "10.1145/123.456",
+    })
+
+    kinds = [candidate["kind"] for candidate in candidates]
+    assert kinds.index("conference_official_pdf") < kinds.index("hal_exact_title_pdf")
+    repository_candidate = next(item for item in candidates if item["kind"] == "hal_exact_title_pdf")
+    assert repository_candidate["requires_pdf_text_identity_check"] is True
+
+
+def test_reading_structured_repository_failure_falls_through_to_broad_search(monkeypatch):
+    read_pipeline = _load_reading_pipeline()
+    _isolate_reading_pdf_candidate_sources(monkeypatch, read_pipeline)
+    calls = []
+    monkeypatch.setattr(read_pipeline, "official_conference_pdf_candidates", lambda _paper: [])
+
+    def repository_candidates(_paper):
+        calls.append("repository")
+        raise RuntimeError("repository unavailable")
+
+    def search_candidates(_paper):
+        calls.append("search")
+        return [{
+            "kind": "search_result_pdf_requires_text_identity",
+            "pdf_url": "https://authors.example/paper.pdf",
+            "accepted": True,
+            "requires_pdf_text_identity_check": True,
+        }]
+
+    monkeypatch.setattr(read_pipeline, "structured_repository_pdf_candidates", repository_candidates, raising=False)
+    monkeypatch.setattr(read_pipeline, "_search_result_pdf_candidates", search_candidates)
+
+    candidates = read_pipeline._pdf_candidates_for_reading({
+        "title": "Exact ACM Paper Title",
+        "source": "sigkdd",
+        "venue": "KDD",
+        "doi": "10.1145/123.456",
+    })
+
+    assert calls == ["repository", "search"]
+    assert [item["kind"] for item in candidates] == ["search_result_pdf_requires_text_identity"]
 
 
 def test_reading_official_title_search_covers_all_conference_channels():
@@ -7773,6 +8129,132 @@ def test_find_venue_health_requires_live_abstract_enrichment(monkeypatch):
     assert "still lack abstracts" in missing["message"]
 
 
+def test_find_acm_openaire_enrichment_keeps_only_exact_doi_publication(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    assert hasattr(find_support, "enrich_acm_doi_with_openaire"), "OpenAIRE ACM enricher is missing"
+
+    class Response:
+        status_code = 200
+        ok = True
+        url = "https://api.openaire.eu/graph/v3/research-products"
+        headers = {"Content-Type": "application/json"}
+
+        def json(self):
+            return {
+                "results": [
+                    {
+                        "type": "publication",
+                        "mainTitle": "Exact ACM Paper Title",
+                        "pids": [{"scheme": "doi", "value": "10.1145/123.456"}],
+                        "authors": [{"fullName": "Ada Lovelace"}],
+                        "instances": [{
+                            "urls": [
+                                "https://repository.example/record/1",
+                                "https://doi.org/10.1145/123.456",
+                            ],
+                            "alternateIdentifiers": [
+                                {"scheme": "doi", "value": "10.1145/123.456"},
+                            ],
+                        }],
+                    },
+                    {
+                        "type": "publication",
+                        "mainTitle": "Exact ACM Paper Title",
+                        "pids": [{"scheme": "doi", "value": "10.1145/999.999"}],
+                        "authors": [{"fullName": "Ada Lovelace"}],
+                        "instances": [{"urls": ["https://repository.example/record/wrong"]}],
+                    },
+                    {
+                        "type": "dataset",
+                        "mainTitle": "Exact ACM Paper Title",
+                        "pids": [{"scheme": "doi", "value": "10.1145/123.456"}],
+                        "instances": [{"urls": ["https://repository.example/dataset/wrong"]}],
+                    },
+                ]
+            }
+
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return Response()
+
+    monkeypatch.setattr(find_support, "finding_service_get", fake_get)
+    paper = {
+        "title": "Exact ACM Paper Title",
+        "doi": "10.1145/123.456",
+        "authors": ["Ada Lovelace", "Alan Turing"],
+        "abstract": "Existing abstract remains unchanged.",
+        "metadata": {"doi": "10.1145/123.456"},
+    }
+
+    enriched, stats = find_support.enrich_acm_doi_with_openaire([paper])
+
+    assert enriched[0]["title"] == "Exact ACM Paper Title"
+    assert enriched[0]["doi"] == "10.1145/123.456"
+    assert enriched[0]["abstract"] == "Existing abstract remains unchanged."
+    assert enriched[0]["metadata"]["openaire_repository_urls"] == [
+        "https://repository.example/record/1"
+    ]
+    assert stats["requests"] == 1
+    assert stats["matched"] == 1
+    assert len(calls) == 1
+    assert calls[0][1]["params"]["pageSize"] == 100
+
+
+def test_find_acm_openaire_429_stops_without_waiting_or_clearing_papers(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    assert hasattr(find_support, "enrich_acm_doi_with_openaire"), "OpenAIRE ACM enricher is missing"
+    calls = []
+
+    class Response:
+        status_code = 429
+        ok = False
+        url = "https://api.openaire.eu/graph/v3/research-products"
+        headers = {"Retry-After": "36000"}
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return Response()
+
+    monkeypatch.setattr(find_support, "finding_service_get", fake_get)
+    monkeypatch.setattr(find_support.time, "sleep", lambda *_args: (_ for _ in ()).throw(AssertionError("must not wait")))
+    papers = [{"title": "Rate Limited Paper", "doi": "10.1145/123.457", "metadata": {}}]
+
+    enriched, stats = find_support.enrich_acm_doi_with_openaire(papers)
+
+    assert enriched is papers
+    assert enriched[0]["title"] == "Rate Limited Paper"
+    assert stats["requests"] == 1
+    assert stats["rate_limited"] is True
+    assert len(calls) == 1
+
+
+def test_find_acm_openaire_connection_failure_stops_after_first_batch(monkeypatch):
+    _load_find_pipeline()
+    find_support = sys.modules["support.find_support"]
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        raise find_support.requests.Timeout("OpenAIRE unavailable")
+
+    monkeypatch.setattr(find_support, "finding_service_get", fake_get)
+    papers = [
+        {"title": f"ACM Paper {index}", "doi": f"10.1145/123.{index}", "metadata": {}}
+        for index in range(6)
+    ]
+
+    enriched, stats = find_support.enrich_acm_doi_with_openaire(papers)
+
+    assert enriched is papers
+    assert stats["requests"] == 1
+    assert len(calls) == 1
+    assert stats["errors"] == ["Timeout:OpenAIRE unavailable"]
+
+
 def test_find_acm_live_defaults_use_targeted_fallbacks_not_full_venue_scan(monkeypatch):
     _load_find_pipeline()
     find_support = sys.modules["support.find_support"]
@@ -7783,13 +8265,18 @@ def test_find_acm_live_defaults_use_targeted_fallbacks_not_full_venue_scan(monke
         {"title": "Semantic title match", "doi": "10.1145/1.2", "abstract": "", "metadata": {"doi": "10.1145/1.2"}},
         {"title": "ChatPaper residual match", "doi": "10.1145/1.3", "abstract": "", "metadata": {"doi": "10.1145/1.3"}},
     ]
-    calls = {"openalex_title": 0, "semantic": 0, "chatpaper": 0}
+    calls = {"openaire": 0, "openalex_title": 0, "semantic": 0, "chatpaper": 0}
     empty_stats = {"attempted": 0, "abstracts_filled": 0}
     monkeypatch.setattr(find_support, "_apply_cached_acm_abstract_sources", lambda items: (items, dict(empty_stats)))
     monkeypatch.setattr(find_support, "enrich_acm_doi_with_hal", lambda items, **_kwargs: (items, dict(empty_stats)))
     monkeypatch.setattr(find_support, "enrich_acm_doi_with_openalex", lambda items, **_kwargs: (items, dict(empty_stats)))
     monkeypatch.setattr(find_support, "enrich_acm_doi_with_openalex_oa_pdf", lambda items, **_kwargs: (items, dict(empty_stats)))
     monkeypatch.setattr(find_support, "enrich_acm_doi_with_official_pdf", lambda items, **_kwargs: (items, dict(empty_stats)))
+
+    def openaire(items, **_kwargs):
+        calls["openaire"] += 1
+        items[0].setdefault("metadata", {})["openaire_repository_urls"] = ["https://repository.example/record/1"]
+        return items, {"enabled": True, "attempted": len(items), "matched": 1}
 
     def openalex_title(items, **_kwargs):
         calls["openalex_title"] += 1
@@ -7814,9 +8301,11 @@ def test_find_acm_live_defaults_use_targeted_fallbacks_not_full_venue_scan(monke
     monkeypatch.setattr(find_support, "enrich_with_openalex", openalex_title)
     monkeypatch.setattr(find_support, "enrich_with_semantic_scholar", semantic)
     monkeypatch.setattr(find_support, "enrich_acm_doi_with_chatpaper", chatpaper)
+    monkeypatch.setattr(find_support, "enrich_acm_doi_with_openaire", openaire)
 
     enriched, _stats = find_support.enrich_acm_doi_with_indexed_abstracts(papers)
-    assert calls == {"openalex_title": 1, "semantic": 1, "chatpaper": 1}
+    assert calls == {"openaire": 1, "openalex_title": 1, "semantic": 1, "chatpaper": 1}
+    assert _stats["openaire"]["matched"] == 1
     assert all(paper["abstract"] for paper in enriched)
 
 
