@@ -116,6 +116,11 @@ except Exception:
 
     def official_conference_title_search_specs(paper: dict) -> list[dict[str, str]]:
         return []
+try:
+    from acquisition.repository_sources import structured_repository_pdf_candidates
+except Exception:
+    def structured_repository_pdf_candidates(paper: dict) -> list[dict]:
+        return []
 from core.common import has_unresolved_prose_latex_markup, read_json, safe_slug, scrub_reading_paths_under, write_json, write_text
 from core.common import CACHE_BATCH_TEST_ROOTS, CACHE_RUN_ROOTS, OUTPUT_ROOT, create_run_dir, existing_run_dir, make_reading_paths_relative, refresh_latest_run, resolve_reading_path, ensure_inside_input, ensure_inside_output, ensure_inside_reading, run_dir, validate_run_id
 try:
@@ -3248,6 +3253,25 @@ def _pdf_candidates_for_reading(paper: dict, *, fast_only: bool = False) -> list
                 )
             else:
                 discovery.append(candidate)
+    try:
+        repository_candidates = structured_repository_pdf_candidates(paper)
+    except Exception as exc:
+        repository_candidates = [{
+            "kind": "structured_repository_discovery",
+            "accepted": False,
+            "reason": "structured_repository_lookup_failed",
+            "error": type(exc).__name__,
+        }]
+    for candidate in repository_candidates:
+        if candidate.get("accepted") and candidate.get("pdf_url"):
+            add(
+                str(candidate.get("kind") or "structured_repository_pdf"),
+                candidate.get("pdf_url"),
+                repository_match=candidate,
+                requires_pdf_text_identity_check=True,
+            )
+        else:
+            discovery.append(candidate)
     has_verified_non_openreview_candidate = any(
         candidate.get("accepted")
         and "openreview" not in " ".join(

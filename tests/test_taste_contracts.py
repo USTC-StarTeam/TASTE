@@ -2029,6 +2029,96 @@ def test_reading_structured_repository_skips_hal_without_acm_or_repository_evide
     assert calls == []
 
 
+def _isolate_reading_pdf_candidate_sources(monkeypatch, read_pipeline):
+    for name in [
+        "_publisher_direct_pdf_candidates",
+        "_arxiv_pdf_candidates",
+        "_runtime_cached_pdf_candidates",
+        "_springer_nature_api_candidates",
+        "_crossref_pdf_candidates",
+        "_publisher_page_pdf_candidates",
+        "_iclr_mlanthology_candidates",
+        "_openreview_title_pdf_candidates",
+        "_openalex_pdf_candidates",
+        "_unpaywall_pdf_candidates",
+        "_semantic_scholar_pdf_candidates_for_reading",
+    ]:
+        monkeypatch.setattr(read_pipeline, name, lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(read_pipeline, "openreview_official_pdf_candidates", lambda _paper: [])
+    monkeypatch.setattr(read_pipeline, "_pdf_links_from_html_page", lambda _url: [])
+
+
+def test_reading_structured_repository_route_follows_official_candidates(monkeypatch):
+    read_pipeline = _load_reading_pipeline()
+    _isolate_reading_pdf_candidate_sources(monkeypatch, read_pipeline)
+    monkeypatch.setattr(
+        read_pipeline,
+        "official_conference_pdf_candidates",
+        lambda _paper: [{
+            "kind": "conference_official_pdf",
+            "pdf_url": "https://dl.acm.org/doi/pdf/10.1145/123.456",
+            "accepted": True,
+        }],
+    )
+    monkeypatch.setattr(read_pipeline, "_search_result_pdf_candidates", lambda _paper: [])
+    monkeypatch.setattr(
+        read_pipeline,
+        "structured_repository_pdf_candidates",
+        lambda _paper: [{
+            "kind": "hal_exact_title_pdf",
+            "pdf_url": "https://hal.science/hal-1/file/paper.pdf",
+            "accepted": True,
+            "requires_pdf_text_identity_check": True,
+        }],
+        raising=False,
+    )
+
+    candidates = read_pipeline._pdf_candidates_for_reading({
+        "title": "Exact ACM Paper Title",
+        "source": "sigkdd",
+        "venue": "KDD",
+        "doi": "10.1145/123.456",
+    })
+
+    kinds = [candidate["kind"] for candidate in candidates]
+    assert kinds.index("conference_official_pdf") < kinds.index("hal_exact_title_pdf")
+    repository_candidate = next(item for item in candidates if item["kind"] == "hal_exact_title_pdf")
+    assert repository_candidate["requires_pdf_text_identity_check"] is True
+
+
+def test_reading_structured_repository_failure_falls_through_to_broad_search(monkeypatch):
+    read_pipeline = _load_reading_pipeline()
+    _isolate_reading_pdf_candidate_sources(monkeypatch, read_pipeline)
+    calls = []
+    monkeypatch.setattr(read_pipeline, "official_conference_pdf_candidates", lambda _paper: [])
+
+    def repository_candidates(_paper):
+        calls.append("repository")
+        raise RuntimeError("repository unavailable")
+
+    def search_candidates(_paper):
+        calls.append("search")
+        return [{
+            "kind": "search_result_pdf_requires_text_identity",
+            "pdf_url": "https://authors.example/paper.pdf",
+            "accepted": True,
+            "requires_pdf_text_identity_check": True,
+        }]
+
+    monkeypatch.setattr(read_pipeline, "structured_repository_pdf_candidates", repository_candidates, raising=False)
+    monkeypatch.setattr(read_pipeline, "_search_result_pdf_candidates", search_candidates)
+
+    candidates = read_pipeline._pdf_candidates_for_reading({
+        "title": "Exact ACM Paper Title",
+        "source": "sigkdd",
+        "venue": "KDD",
+        "doi": "10.1145/123.456",
+    })
+
+    assert calls == ["repository", "search"]
+    assert [item["kind"] for item in candidates] == ["search_result_pdf_requires_text_identity"]
+
+
 def test_reading_official_title_search_covers_all_conference_channels():
     conference_sources = _load_reading_conference_sources()
     channels = [
