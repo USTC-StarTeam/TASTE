@@ -130,6 +130,14 @@ def _load_reading_conference_sources():
     return importlib.import_module("acquisition.conference_sources")
 
 
+def _load_reading_repository_sources():
+    reading_main = _load_reading_main()
+    reading_main._ensure_runtime_imports()
+    import importlib
+
+    return importlib.import_module("acquisition.repository_sources")
+
+
 def _load_reading_openreview_official():
     reading_main = _load_reading_main()
     reading_main._ensure_runtime_imports()
@@ -1894,6 +1902,131 @@ def test_reading_eccv_virtual_page_uses_main_pdf_not_supplement(monkeypatch):
     assert [candidate["pdf_url"] for candidate in candidates] == [
         "https://www.ecva.net/papers/eccv_2024/papers_ECCV/papers/00019.pdf"
     ]
+
+
+def test_reading_structured_repository_candidates_require_same_paper_identity():
+    try:
+        repository_sources = _load_reading_repository_sources()
+    except ModuleNotFoundError:
+        pytest.fail("Reading structured repository adapter is missing")
+
+    class Response:
+        def __init__(self, url, *, payload=None, text="", status_code=200, content_type="application/json"):
+            self.url = url
+            self._payload = payload
+            self.text = text
+            self.status_code = status_code
+            self.ok = 200 <= status_code < 300
+            self.headers = {"Content-Type": content_type}
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url, **_kwargs):
+        if "api.archives-ouvertes.fr" in url:
+            return Response(url, payload={
+                "response": {
+                    "docs": [
+                        {
+                            "title_s": ["Exact Paper Title"],
+                            "doiId_s": ["10.1145/123.456"],
+                            "authFullName_s": ["Ada Lovelace", "Alan Turing"],
+                            "fileMain_s": "https://hal.science/hal-1/file/paper.pdf",
+                            "uri_s": "https://hal.science/hal-1",
+                        },
+                        {
+                            "title_s": ["Exact Paper Title"],
+                            "doiId_s": ["10.1145/999.999"],
+                            "authFullName_s": ["Ada Lovelace"],
+                            "fileMain_s": "https://hal.science/hal-wrong/file/paper.pdf",
+                            "uri_s": "https://hal.science/hal-wrong",
+                        },
+                    ]
+                }
+            })
+        if url == "https://repo.example/item/1":
+            return Response(
+                url,
+                text='<html><head><meta name="citation_pdf_url" content="/files/paper.pdf"></head></html>',
+                content_type="text/html; charset=utf-8",
+            )
+        raise AssertionError(f"unexpected repository request: {url}")
+
+    candidates = repository_sources.structured_repository_pdf_candidates(
+        {
+            "title": "Exact Paper Title",
+            "authors": ["Ada Lovelace", "Alan Turing"],
+            "doi": "10.1145/123.456",
+            "metadata": {"openaire_repository_urls": ["https://repo.example/item/1"]},
+        },
+        request_get=fake_get,
+    )
+
+    accepted = [item for item in candidates if item.get("accepted")]
+    assert {(item["kind"], item["pdf_url"]) for item in accepted} == {
+        ("openaire_repository_pdf", "https://repo.example/files/paper.pdf"),
+        ("hal_exact_title_pdf", "https://hal.science/hal-1/file/paper.pdf"),
+    }
+    assert all(item["requires_pdf_text_identity_check"] is True for item in accepted)
+    assert not any("hal-wrong" in str(item.get("pdf_url") or "") for item in accepted)
+
+
+def test_reading_structured_repository_rate_limit_is_a_single_nonblocking_miss():
+    try:
+        repository_sources = _load_reading_repository_sources()
+    except ModuleNotFoundError:
+        pytest.fail("Reading structured repository adapter is missing")
+
+    calls = []
+
+    class Response:
+        url = "https://repo.example/item/1"
+        status_code = 429
+        ok = False
+        headers = {"Content-Type": "text/html", "Retry-After": "3600"}
+        text = ""
+
+    def fake_get(url, **_kwargs):
+        calls.append(url)
+        return Response()
+
+    candidates = repository_sources.structured_repository_pdf_candidates(
+        {
+            "title": "",
+            "metadata": {"openaire_repository_urls": ["https://repo.example/item/1"]},
+        },
+        request_get=fake_get,
+    )
+
+    assert calls == ["https://repo.example/item/1"]
+    assert candidates == [{
+        "kind": "openaire_repository_landing",
+        "accepted": False,
+        "url": "https://repo.example/item/1",
+        "reason": "http_429",
+        "status_code": 429,
+    }]
+
+
+def test_reading_structured_repository_skips_hal_without_acm_or_repository_evidence():
+    repository_sources = _load_reading_repository_sources()
+    calls = []
+
+    def fake_get(url, **_kwargs):
+        calls.append(url)
+        raise AssertionError("unrelated papers must not trigger repository lookup")
+
+    candidates = repository_sources.structured_repository_pdf_candidates(
+        {
+            "title": "An ICLR Paper",
+            "venue": "ICLR",
+            "url": "https://openreview.net/forum?id=paper",
+        },
+        request_get=fake_get,
+    )
+
+    assert candidates == []
+    assert calls == []
 
 
 def test_reading_official_title_search_covers_all_conference_channels():
