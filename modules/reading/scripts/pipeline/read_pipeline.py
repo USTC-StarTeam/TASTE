@@ -4814,6 +4814,31 @@ def _article_cache_content_fingerprints(cache_dir: Path) -> dict[str, str]:
     )
 
 
+def _text_sha256(value: object) -> str:
+    normalized = " ".join(str(value or "").split())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _article_read_cache_fingerprints(cache_dir: Path, paper: dict) -> dict[str, str]:
+    file_fingerprints = _article_cache_content_fingerprints(cache_dir)
+    _title, fixed_abstract_zh, source_abstract_en = _article_quality_expectations(paper)
+    source_abstract_sha256 = _text_sha256(source_abstract_en)
+    fixed_abstract_zh_sha256 = _text_sha256(fixed_abstract_zh)
+    revision_source = (
+        f"full_text_sha256={file_fingerprints.get('full_text_sha256', '')}\n"
+        f"pdf_sha256={file_fingerprints.get('pdf_sha256', '')}\n"
+        f"source_abstract_sha256={source_abstract_sha256}\n"
+        f"fixed_abstract_zh_sha256={fixed_abstract_zh_sha256}\n"
+    )
+    return {
+        "full_text_sha256": str(file_fingerprints.get("full_text_sha256") or ""),
+        "pdf_sha256": str(file_fingerprints.get("pdf_sha256") or ""),
+        "source_abstract_sha256": source_abstract_sha256,
+        "fixed_abstract_zh_sha256": fixed_abstract_zh_sha256,
+        "content_revision": hashlib.sha256(revision_source.encode("ascii")).hexdigest(),
+    }
+
+
 def _article_cache_integrity_ok(cache_dir: Path) -> bool:
     manifest = _article_cache_manifest(cache_dir)
     if manifest.get("schema_version") not in (None, "", ARTICLE_CACHE_SCHEMA_VERSION):
@@ -4944,7 +4969,13 @@ def _publish_article_full_text_cache(item_dir: Path, paper: dict, packet: dict) 
         cached_packet.update(current_fingerprints)
         previous_revision = str(previous_fingerprints.get("content_revision") or "")
         current_revision = str(current_fingerprints.get("content_revision") or "")
-        bound_read_revision = str(manifest.get("read_content_revision") or "")
+        bound_read_revision = str(manifest.get("read_full_text_content_revision") or "")
+        if (
+            not bound_read_revision
+            and str(manifest.get("read_content_revision") or "")
+            == str(manifest.get("full_text_content_revision") or "")
+        ):
+            bound_read_revision = str(manifest.get("read_content_revision") or "")
         content_changed = bool(current_revision and (previous_revision or had_read_md) and current_revision != previous_revision)
         read_binding_mismatch = bool(bound_read_revision and current_revision and bound_read_revision != current_revision)
         read_cache_invalidated = False
@@ -4978,6 +5009,9 @@ def _publish_article_full_text_cache(item_dir: Path, paper: dict, packet: dict) 
         if read_cache_invalidated:
             manifest.update({
                 "read_content_revision": "",
+                "read_full_text_content_revision": "",
+                "source_abstract_sha256": "",
+                "fixed_abstract_zh_sha256": "",
                 "read_invalidated_at": _now_iso(),
                 "read_invalidation_reason": "full_text_content_replaced",
             })
@@ -5049,8 +5083,9 @@ def _publish_article_read_cache(item_dir: Path, paper: dict, result: dict) -> di
     cache_dir, aliases = _target_article_cache_dir(paper, packet)
     with _ARTICLE_CACHE_LOCK, _article_cache_process_lock(cache_dir):
         cache_dir.mkdir(parents=True, exist_ok=True)
-        content_fingerprints = _article_cache_content_fingerprints(cache_dir)
-        packet.update(content_fingerprints)
+        full_text_fingerprints = _article_cache_content_fingerprints(cache_dir)
+        read_fingerprints = _article_read_cache_fingerprints(cache_dir, paper)
+        packet.update(full_text_fingerprints)
         cleaned = _normalize_article_markdown_metadata(article_md_path.read_text(encoding="utf-8", errors="replace"), paper, packet)
         if _article_markdown_quality_issue(cleaned, paper):
             return {}
@@ -5075,10 +5110,13 @@ def _publish_article_read_cache(item_dir: Path, paper: dict, result: dict) -> di
             "has_read_md": True,
             "has_full_text": bool(manifest.get("has_full_text")) or (cache_dir / "extracted" / "full_text.txt").is_file(),
             "has_pdf": bool(manifest.get("has_pdf")) or any((cache_dir / "downloads").glob("*.pdf")),
-            "full_text_content_revision": content_fingerprints.get("content_revision", ""),
-            "full_text_sha256": content_fingerprints.get("full_text_sha256", ""),
-            "pdf_sha256": content_fingerprints.get("pdf_sha256", ""),
-            "read_content_revision": content_fingerprints.get("content_revision", ""),
+            "full_text_content_revision": full_text_fingerprints.get("content_revision", ""),
+            "full_text_sha256": full_text_fingerprints.get("full_text_sha256", ""),
+            "pdf_sha256": full_text_fingerprints.get("pdf_sha256", ""),
+            "read_content_revision": read_fingerprints.get("content_revision", ""),
+            "read_full_text_content_revision": full_text_fingerprints.get("content_revision", ""),
+            "source_abstract_sha256": read_fingerprints.get("source_abstract_sha256", ""),
+            "fixed_abstract_zh_sha256": read_fingerprints.get("fixed_abstract_zh_sha256", ""),
             "read_quality_policy_version": READING_CONTENT_QUALITY_POLICY_VERSION,
             "read_invalidated_at": "",
             "read_invalidation_reason": "",
@@ -5183,6 +5221,33 @@ def _restore_article_read_cache(item_dir: Path, paper: dict, *, run_id: str, pap
         return {}
     manifest = _article_cache_manifest(cache_dir)
     paper = _merge_cached_paper_hints(paper, read_json(cache_dir / "paper.json", {}))
+    read_fingerprints = _article_read_cache_fingerprints(cache_dir, paper)
+    policy_matches = manifest.get("read_quality_policy_version") == READING_CONTENT_QUALITY_POLICY_VERSION
+    fingerprints_match = (
+        str(manifest.get("read_content_revision") or "") == str(read_fingerprints.get("content_revision") or "")
+        and str(manifest.get("source_abstract_sha256") or "")
+        == str(read_fingerprints.get("source_abstract_sha256") or "")
+        and str(manifest.get("fixed_abstract_zh_sha256") or "")
+        == str(read_fingerprints.get("fixed_abstract_zh_sha256") or "")
+    )
+    if not policy_matches or not fingerprints_match:
+        invalidation_reason = "read_quality_policy_mismatch" if not policy_matches else "read_input_fingerprint_mismatch"
+        with _ARTICLE_CACHE_LOCK, _article_cache_process_lock(cache_dir):
+            _invalidate_article_read_artifacts(cache_dir)
+            manifest = _article_cache_manifest(cache_dir)
+            manifest.update({
+                "schema_version": ARTICLE_CACHE_SCHEMA_VERSION,
+                "updated_at": _now_iso(),
+                "has_read_md": False,
+                "read_content_revision": "",
+                "read_full_text_content_revision": "",
+                "source_abstract_sha256": "",
+                "fixed_abstract_zh_sha256": "",
+                "read_invalidated_at": _now_iso(),
+                "read_invalidation_reason": invalidation_reason,
+            })
+            write_json(cache_dir / "manifest.json", manifest)
+        return {}
     cached_read_text = _normalize_article_markdown_metadata(
         (cache_dir / "read.md").read_text(encoding="utf-8", errors="replace"), paper
     )
@@ -5196,6 +5261,9 @@ def _restore_article_read_cache(item_dir: Path, paper: dict, *, run_id: str, pap
                 "updated_at": _now_iso(),
                 "has_read_md": False,
                 "read_content_revision": "",
+                "read_full_text_content_revision": "",
+                "source_abstract_sha256": "",
+                "fixed_abstract_zh_sha256": "",
                 "read_quality_policy_version": READING_CONTENT_QUALITY_POLICY_VERSION,
                 "read_invalidated_at": _now_iso(),
                 "read_invalidation_reason": "read_content_quality:" + initial_quality_issue,
@@ -5204,21 +5272,6 @@ def _restore_article_read_cache(item_dir: Path, paper: dict, *, run_id: str, pap
         return {}
     content_fingerprints = _article_cache_content_fingerprints(cache_dir)
     current_revision = str(content_fingerprints.get("content_revision") or "")
-    read_revision = str(manifest.get("read_content_revision") or "")
-    if read_revision and (not current_revision or read_revision != current_revision):
-        with _ARTICLE_CACHE_LOCK, _article_cache_process_lock(cache_dir):
-            _invalidate_article_read_artifacts(cache_dir)
-            manifest = _article_cache_manifest(cache_dir)
-            manifest.update({
-                "schema_version": ARTICLE_CACHE_SCHEMA_VERSION,
-                "updated_at": _now_iso(),
-                "has_read_md": False,
-                "read_content_revision": "",
-                "read_invalidated_at": _now_iso(),
-                "read_invalidation_reason": "read_full_text_fingerprint_mismatch",
-            })
-            write_json(cache_dir / "manifest.json", manifest)
-        return {}
     restored_packet = _restore_article_full_text_cache(paper, item_dir)
     restored_text_path = _packet_path(restored_packet, "text_path") if restored_packet else None
     if restored_text_path is None or not restored_text_path.is_file() or restored_text_path.stat().st_size < FULL_TEXT_MIN_CHARS:
@@ -5233,6 +5286,9 @@ def _restore_article_read_cache(item_dir: Path, paper: dict, *, run_id: str, pap
                 "updated_at": _now_iso(),
                 "has_read_md": False,
                 "read_content_revision": "",
+                "read_full_text_content_revision": "",
+                "source_abstract_sha256": "",
+                "fixed_abstract_zh_sha256": "",
                 "read_quality_policy_version": READING_CONTENT_QUALITY_POLICY_VERSION,
                 "read_invalidated_at": _now_iso(),
                 "read_invalidation_reason": "read_content_quality:" + quality_issue,
@@ -5263,7 +5319,10 @@ def _restore_article_read_cache(item_dir: Path, paper: dict, *, run_id: str, pap
         "full_text_content_revision": current_revision,
         "full_text_sha256": str(content_fingerprints.get("full_text_sha256") or ""),
         "pdf_sha256": str(content_fingerprints.get("pdf_sha256") or ""),
-        "read_content_revision": current_revision,
+        "read_content_revision": str(read_fingerprints.get("content_revision") or ""),
+        "read_full_text_content_revision": current_revision,
+        "source_abstract_sha256": str(read_fingerprints.get("source_abstract_sha256") or ""),
+        "fixed_abstract_zh_sha256": str(read_fingerprints.get("fixed_abstract_zh_sha256") or ""),
         "read_quality_policy_version": READING_CONTENT_QUALITY_POLICY_VERSION,
         "full_text_source_kind": _packet_acquisition_source_kind(restored_packet) or str(manifest.get("full_text_source_kind") or ""),
         "full_text_pdf_url": str(restored_packet.get("pdf_url") or manifest.get("full_text_pdf_url") or ""),

@@ -1525,7 +1525,140 @@ def test_reading_article_cache_rejects_content_hash_mismatch(monkeypatch, tmp_pa
     assert read_pipeline._article_cache_integrity_ok(cache_dir) is False
 
 
-def test_reading_article_cache_restore_backfills_content_binding(monkeypatch, tmp_path):
+def _publish_read_cache_fixture(read_pipeline, monkeypatch, tmp_path):
+    cache_dir = tmp_path / "cache"
+    source_dir = tmp_path / "source"
+    restore_dir = tmp_path / "restore"
+    for root in [cache_dir, source_dir]:
+        (root / "downloads").mkdir(parents=True)
+        (root / "extracted").mkdir(parents=True)
+    pdf_path = source_dir / "downloads" / "article.pdf"
+    text_path = source_dir / "extracted" / "full_text.txt"
+    pdf_path.write_bytes(b"%PDF-1.7\nofficial paper body")
+    text_path.write_text("official extracted full text\n" * 300, encoding="utf-8")
+    paper = {
+        "paper_id": "paper-1",
+        "title": "Cache Contract Paper",
+        "abstract": "We present the original source abstract for this paper.",
+        "abstract_zh": "我们提出该论文的固定中文摘要。",
+        "source": "openreview",
+        "venue": "ICLR",
+        "year": 2026,
+        "url": "https://openreview.net/forum?id=official-note",
+    }
+    packet = {
+        "paper_id": "paper-1",
+        "title": paper["title"],
+        "full_text_available": True,
+        "full_text_chars": text_path.stat().st_size,
+        "text_chars": text_path.stat().st_size,
+        "text_path": str(text_path),
+        "pdf_path": str(pdf_path),
+        "pdf_url": "openreview://official-note/pdf",
+        "pdf_acquisition": {"selected": {"kind": "openreview_official_note_pdf"}},
+    }
+    (source_dir / "read.md").write_text(
+        f"# {paper['title']}\n\n## 摘要\n\n{paper['abstract_zh']}"
+        "\n\n## 动机与核心创新\n\n该工作针对重要研究问题提出清晰创新。"
+        "\n\n## 方法\n\n该方法包含完整的建模与优化过程。"
+        "\n\n## 实验结果\n\n实验验证了方法的有效性。"
+        "\n\n## 优缺点总结\n\n优点明确，同时仍存在可改进之处。\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(read_pipeline, "ensure_inside_reading", lambda path, **_kwargs: Path(path))
+    monkeypatch.setattr(read_pipeline, "resolve_reading_path", lambda value: Path(value))
+    monkeypatch.setattr(read_pipeline, "_article_cache_enabled", lambda: True)
+    monkeypatch.setattr(read_pipeline, "_article_full_text_cache_enabled", lambda: True)
+    monkeypatch.setattr(read_pipeline, "_target_article_cache_dir", lambda *_args, **_kwargs: (cache_dir, ["title:paper"]))
+    monkeypatch.setattr(read_pipeline, "_locate_article_cache_dir", lambda *_args, **_kwargs: cache_dir)
+    monkeypatch.setattr(read_pipeline, "_article_cache_same_paper_ok", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(read_pipeline, "_write_article_cache_aliases", lambda *_args, **_kwargs: None)
+
+    publication = read_pipeline._publish_article_read_cache(
+        source_dir,
+        paper,
+        {"full_text_packet": packet},
+    )
+    assert publication
+    assert (cache_dir / "read.md").is_file()
+    return cache_dir, restore_dir, paper
+
+
+@pytest.mark.parametrize(
+    ("changed_field", "changed_value"),
+    [
+        ("abstract", "We present a corrected source abstract with materially different content."),
+        ("abstract_zh", "我们提供经过修订的固定中文摘要。"),
+    ],
+)
+def test_reading_article_cache_rejects_changed_abstract_without_deleting_full_text(
+    monkeypatch, tmp_path, changed_field, changed_value,
+):
+    read_pipeline = _load_reading_pipeline()
+    cache_dir, restore_dir, paper = _publish_read_cache_fixture(read_pipeline, monkeypatch, tmp_path)
+
+    result = read_pipeline._restore_article_read_cache(
+        restore_dir,
+        {**paper, changed_field: changed_value},
+        run_id=_reading_test_run_id(),
+        paper_index=1,
+    )
+
+    manifest = json.loads((cache_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert result == {}
+    assert not (cache_dir / "read.md").exists()
+    assert (cache_dir / "extracted" / "full_text.txt").is_file()
+    assert (cache_dir / "downloads" / "article.pdf").is_file()
+    assert manifest["read_invalidation_reason"] == "read_input_fingerprint_mismatch"
+
+
+def test_reading_article_cache_rejects_missing_read_input_fingerprints(monkeypatch, tmp_path):
+    read_pipeline = _load_reading_pipeline()
+    cache_dir, restore_dir, paper = _publish_read_cache_fixture(read_pipeline, monkeypatch, tmp_path)
+    manifest_path = cache_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("source_abstract_sha256", None)
+    manifest.pop("fixed_abstract_zh_sha256", None)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = read_pipeline._restore_article_read_cache(
+        restore_dir,
+        paper,
+        run_id=_reading_test_run_id(),
+        paper_index=1,
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert result == {}
+    assert manifest["has_read_md"] is False
+    assert manifest["read_invalidation_reason"] == "read_input_fingerprint_mismatch"
+    assert (cache_dir / "extracted" / "full_text.txt").is_file()
+
+
+def test_reading_article_cache_rejects_old_quality_policy_without_deleting_full_text(monkeypatch, tmp_path):
+    read_pipeline = _load_reading_pipeline()
+    cache_dir, restore_dir, paper = _publish_read_cache_fixture(read_pipeline, monkeypatch, tmp_path)
+    manifest_path = cache_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["read_quality_policy_version"] = "read_markdown_quality_v2"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = read_pipeline._restore_article_read_cache(
+        restore_dir,
+        paper,
+        run_id=_reading_test_run_id(),
+        paper_index=1,
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert result == {}
+    assert manifest["read_invalidation_reason"] == "read_quality_policy_mismatch"
+    assert (cache_dir / "extracted" / "full_text.txt").is_file()
+    assert (cache_dir / "downloads" / "article.pdf").is_file()
+
+
+def test_reading_article_cache_rejects_legacy_read_binding_but_preserves_full_text(monkeypatch, tmp_path):
     read_pipeline = _load_reading_pipeline()
     cache_dir = tmp_path / "cache"
     item_dir = tmp_path / "item"
@@ -1584,17 +1717,13 @@ def test_reading_article_cache_restore_backfills_content_binding(monkeypatch, tm
         paper_index=1,
     )
 
-    fingerprints = read_pipeline._article_cache_content_fingerprints(cache_dir)
     manifest = json.loads((cache_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert result["status"] == "complete"
-    assert manifest["full_text_content_revision"] == fingerprints["content_revision"]
-    assert manifest["read_content_revision"] == fingerprints["content_revision"]
-    assert manifest["full_text_sha256"] == fingerprints["full_text_sha256"]
-    assert manifest["pdf_sha256"] == fingerprints["pdf_sha256"]
-    assert manifest["full_text_source_kind"] == "openreview_official_note_pdf"
-    assert manifest["full_text_pdf_url"] == "openreview://official-note/pdf"
-    assert paper["abstract_zh"] in (item_dir / "read.md").read_text(encoding="utf-8")
-    assert paper["abstract_zh"] in (cache_dir / "read.md").read_text(encoding="utf-8")
+    assert result == {}
+    assert not (cache_dir / "read.md").exists()
+    assert (cache_dir / "extracted" / "full_text.txt").is_file()
+    assert (cache_dir / "downloads" / "article.pdf").is_file()
+    assert manifest["has_read_md"] is False
+    assert manifest["read_invalidation_reason"] == "read_quality_policy_mismatch"
 
 
 @pytest.mark.parametrize(
@@ -1625,16 +1754,20 @@ def test_reading_article_cache_invalidates_content_quality_defects(
         "\n\n## 优缺点总结\n\n中文优缺点总结。\n",
         encoding="utf-8",
     )
-    (cache_dir / "paper.json").write_text(json.dumps({
+    cached_paper = {
         "paper_id": "paper-1",
         "title": "Cached Paper",
         "abstract_zh": fixed_abstract,
         "abstract": source_abstract,
-    }), encoding="utf-8")
+    }
+    (cache_dir / "paper.json").write_text(json.dumps(cached_paper), encoding="utf-8")
+    fingerprints = read_pipeline._article_read_cache_fingerprints(cache_dir, cached_paper)
     (cache_dir / "manifest.json").write_text(json.dumps({
         "has_read_md": True,
-        "read_content_revision": "legacy",
-        "read_quality_policy_version": "read_markdown_quality_v2",
+        "read_content_revision": fingerprints["content_revision"],
+        "source_abstract_sha256": fingerprints["source_abstract_sha256"],
+        "fixed_abstract_zh_sha256": fingerprints["fixed_abstract_zh_sha256"],
+        "read_quality_policy_version": read_pipeline.READING_CONTENT_QUALITY_POLICY_VERSION,
     }), encoding="utf-8")
 
     monkeypatch.setattr(read_pipeline, "ensure_inside_reading", lambda path, **_kwargs: Path(path))
