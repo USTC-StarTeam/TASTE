@@ -5639,11 +5639,28 @@ def _new_find_guard_blocker(request: FindRequest | None = None) -> dict[str, Any
 
 
 def _active_web_stage_job_blocker(project: str, stage: str) -> dict[str, Any] | None:
-    """Block duplicate in-process launches for the same project/stage."""
+    """Block duplicate in-process or recovered launches for one project/stage."""
     project = str(project or "").strip()
     stage_key = str(stage or "").strip().lower()
     if not stage_key:
         return None
+    requested_family = "plan" if stage_key in {"plan", "plan-polish"} else stage_key
+
+    def blocker_payload(*, job_id: str, job_stage: str, status: str, run_id: str = "", progress: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {
+            "error": "project_stage_already_running",
+            "status": "blocked_existing_project_stage_running",
+            "project": project,
+            "stage": stage_key,
+            "existing_stage": job_stage,
+            "existing_job_id": job_id,
+            "existing_run_id": run_id,
+            "existing_status": status,
+            "progress": progress or {},
+            "message": "A job for this project stage is already running; duplicate launch is blocked.",
+            "message_zh": "当前项目已有同阶段任务正在运行；已阻止重复启动。",
+        }
+
     _reconcile_stale_cancelling_jobs()
     try:
         with JOBS_LOCK:
@@ -5655,24 +5672,44 @@ def _active_web_stage_job_blocker(project: str, stage: str) -> dict[str, Any] | 
         if status not in {"queued", "running", "cancelling"}:
             continue
         job_stage = str(getattr(job, "stage", "") or "").strip().lower()
-        if job_stage != stage_key:
+        job_family = "plan" if job_stage in {"plan", "plan-polish"} else job_stage
+        if job_family != requested_family:
             continue
         job_project = _project_from_job_payload(getattr(job, "job_id", ""), None, job)
-        if project and job_project and job_project != project:
+        if project and job_project != project:
             continue
         progress = getattr(job, "progress", {}) if isinstance(getattr(job, "progress", {}), dict) else {}
-        return {
-            "error": "project_stage_already_running",
-            "status": "blocked_existing_project_stage_running",
-            "project": project or job_project,
-            "stage": stage_key,
-            "existing_job_id": getattr(job, "job_id", ""),
-            "existing_run_id": getattr(job, "run_id", ""),
-            "existing_status": status,
-            "progress": progress,
-            "message": "A job for this project stage is already running; duplicate launch is blocked.",
-            "message_zh": "当前项目已有同阶段任务正在运行；已阻止重复启动。",
-        }
+        return blocker_payload(
+            job_id=str(getattr(job, "job_id", "") or ""),
+            job_stage=job_stage,
+            run_id=str(getattr(job, "run_id", "") or ""),
+            status=status,
+            progress=progress,
+        )
+    if not project:
+        return None
+    root = PROJECT_IDS_ROOT / project
+    if not root.is_dir():
+        return None
+    try:
+        recovered_workers = _active_project_child_processes(project, root)
+    except NameError:
+        recovered_workers = []
+    for worker in recovered_workers:
+        worker_phase = str(worker.get("phase") or "").strip().lower()
+        worker_family = "find" if worker_phase in {"find", "finding", "literature"} else ("plan" if worker_phase in {"plan", "plan-polish", "planning"} else worker_phase)
+        if worker_family != requested_family:
+            continue
+        pid = str(worker.get("pid") or "").strip()
+        return blocker_payload(
+            job_id=f"recovered-{worker_family}-worker-{project}-{pid or 'unknown'}",
+            job_stage=worker_family,
+            status="running",
+            progress={
+                "phase": worker_family,
+                "message": f"Recovered active {worker_family} worker PID={pid or '-'} after web-service restart.",
+            },
+        )
     return None
 
 
@@ -5852,6 +5889,22 @@ def _run_id_from_command_line(command: Any) -> str:
     return ""
 
 
+def _project_id_from_command_line(command: Any) -> str:
+    text = str(command or "")
+    if not text:
+        return ""
+    matches = re.findall(r"(?:^|\s)--project(?:=|\s+)([^\s]+)", text)
+    return matches[-1].strip().strip("'\"") if matches else ""
+
+
+def _command_references_project_root(command: Any, root: Path) -> bool:
+    text = str(command or "")
+    if not text:
+        return False
+    root_text = str(root.resolve(strict=False)).rstrip("/")
+    return re.search(re.escape(root_text) + r"(?=$|[/\s'\"=:,])", text) is not None
+
+
 def _suppress_same_phase_descendant_workers(
     rows: list[dict[str, Any]],
     process_rows: list[dict[str, Any]] | None = None,
@@ -5891,7 +5944,6 @@ def _suppress_same_phase_descendant_workers(
 
 
 def _active_project_child_processes(project: str, root: Path, phase_hint: str = "") -> list[dict[str, Any]]:
-    markers = [str(project), str(root), str(root / "tmp" / "finding")]
     process_rows = _all_process_rows()
     rows: list[dict[str, Any]] = []
     for proc_row in process_rows:
@@ -5899,7 +5951,11 @@ def _active_project_child_processes(project: str, root: Path, phase_hint: str = 
         if _is_inspection_or_wrapper_cmd(cmd):
             continue
         cwd = str(proc_row.get("cwd") or "")
-        if not any(marker and (marker in cmd or marker in cwd) for marker in markers):
+        command_project = _project_id_from_command_line(cmd)
+        if command_project:
+            if command_project != project:
+                continue
+        elif not (_path_is_within(cwd, root) or _command_references_project_root(cmd, root)):
             continue
         lowered = cmd.lower()
         kind = ""
@@ -5911,6 +5967,18 @@ def _active_project_child_processes(project: str, root: Path, phase_hint: str = 
             kind = current_find_kind
             phase = current_find_phase
             priority = current_find_priority
+        elif re.search(r"\brun_module\.py\s+reading\b", lowered) or re.search(r"\bmodules[/\\]reading[/\\]main\.py\b", lowered):
+            kind = "reading_module"
+            phase = "read"
+            priority = 2
+        elif re.search(r"\brun_module\.py\s+ideation\b", lowered) or re.search(r"\bmodules[/\\]ideation[/\\]main\.py\b", lowered):
+            kind = "ideation_module"
+            phase = "idea"
+            priority = 2
+        elif re.search(r"\brun_module\.py\s+planning\b", lowered) or re.search(r"\bmodules[/\\]planning[/\\]main\.py\b", lowered):
+            kind = "planning_module"
+            phase = "plan"
+            priority = 2
         elif current_find_child:
             kind = "current_find_child"
             phase = "read"
@@ -11210,13 +11278,6 @@ def api_find(request: FindRequest) -> dict:
     active_blocker = _active_web_stage_job_blocker(current[0] if current else "", "find")
     if active_blocker:
         return JSONResponse(status_code=409, content=active_blocker)
-    blocker = _new_find_guard_blocker(request)
-    if blocker:
-        return JSONResponse(status_code=409, content=blocker)
-    explicit_reason = _new_find_request_reason(request)
-    if current and explicit_reason:
-        project, root = current
-        _record_new_find_restart_approval(root, project, source="api_jobs_find", reason=explicit_reason)
     # Web owns the user input surface. Before starting framework orchestration,
     # persist the non-secret Find request into project state so framework can
     # produce explicit config/selection JSON for the Finding public CLI.
@@ -11231,11 +11292,7 @@ def api_find(request: FindRequest) -> dict:
         )
     selection = normalize_source_selection(request.selection.model_dump() if request.selection else canonical_source_selection(project_config_path=project_config_path()))
     project_path = current[1] / "project.json" if current else project_config_path()
-    save_canonical_source_selection(selection, project_config_path=project_path)
     config = config.model_copy(update={"default_find_selection": selection})
-    _persist_local_llm_config_from_find_request(config, request.config)
-    _sync_project_research_preferences_from_config(config, project_path)
-    _sync_project_finding_config_from_request(config, project_path)
 
     def runtime_env_for_find() -> dict[str, str]:
         env: dict[str, str] = {}
@@ -11268,13 +11325,28 @@ def api_find(request: FindRequest) -> dict:
             result.setdefault("web_job_id", job_id)
         return result
 
-    job = start_job(
-        "find",
-        run_find_and_adopt,
-        job_id=job_id,
-        initial_result={"project": project_id, "action": "find", "web_job_id": job_id},
-    )
-    return job.as_dict()
+    with JOBS_LOCK:
+        active_blocker = _active_web_stage_job_blocker(project_id, "find")
+        if active_blocker:
+            return JSONResponse(status_code=409, content=active_blocker)
+        blocker = _new_find_guard_blocker(request)
+        if blocker:
+            return JSONResponse(status_code=409, content=blocker)
+        explicit_reason = _new_find_request_reason(request)
+        if current and explicit_reason:
+            project, root = current
+            _record_new_find_restart_approval(root, project, source="api_jobs_find", reason=explicit_reason)
+        save_canonical_source_selection(selection, project_config_path=project_path)
+        _persist_local_llm_config_from_find_request(config, request.config)
+        _sync_project_research_preferences_from_config(config, project_path)
+        _sync_project_finding_config_from_request(config, project_path)
+        job = start_job(
+            "find",
+            run_find_and_adopt,
+            job_id=job_id,
+            initial_result={"project": project_id, "action": "find", "web_job_id": job_id},
+        )
+        return job.as_dict()
 
 
 def _current_project_find_run_id(root: Path) -> str:
@@ -11880,17 +11952,24 @@ def api_read(request: ReadRequest) -> dict:
     if current:
         project, root = current
         if _read_request_should_use_current_find_wrapper(request, project, root):
-            current_run_id = _current_project_find_run_id(root)
-            job = start_job("read", lambda log, should_cancel, progress: _run_current_find_claude_read_job(project, root, request, log, should_cancel, progress))
-            job.run_id = current_run_id
-            job.result = {
-                "project": project,
-                "run_id": current_run_id,
-                "source": "current_find_claude_read_wrapper",
-                "status": "running",
-            }
-            _persist_jobs()
-            return job.as_dict()
+            with JOBS_LOCK:
+                duplicate = _active_web_stage_job_blocker(project, "read")
+                if duplicate:
+                    return JSONResponse(status_code=409, content=duplicate)
+                current_run_id = _current_project_find_run_id(root)
+                job = start_job(
+                    "read",
+                    lambda log, should_cancel, progress: _run_current_find_claude_read_job(project, root, request, log, should_cancel, progress),
+                    initial_result={
+                        "project": project,
+                        "run_id": current_run_id,
+                        "source": "current_find_claude_read_wrapper",
+                        "status": "running",
+                    },
+                )
+                job.run_id = current_run_id
+                _persist_jobs()
+                return job.as_dict()
     return _read_requires_current_find_job(request).as_dict()
 
 
@@ -11923,14 +12002,23 @@ def api_plan(request: PlanRequest) -> dict:
     config = load_config()
     current = _project_context_for_find_run(request.run_id) or _current_project_for_find_guard()
     project = current[0] if current else ""
-    job = start_job(
-        "plan",
-        lambda log, should_cancel, progress: _run_planning_module_job(project, request, config, "plan", log, should_cancel, progress),
-        initial_result={"project": project, "run_id": request.run_id, "status": "running", "source": "framework_planning_entrypoint"},
-    )
-    job.run_id = request.run_id
-    _persist_jobs()
-    return job.as_dict()
+    if not project:
+        return JSONResponse(status_code=400, content={
+            "error": "planning_project_required",
+            "message": "Planning requires an active project for the requested Find run.",
+        })
+    with JOBS_LOCK:
+        duplicate = _active_web_stage_job_blocker(project, "plan")
+        if duplicate:
+            return JSONResponse(status_code=409, content=duplicate)
+        job = start_job(
+            "plan",
+            lambda log, should_cancel, progress: _run_planning_module_job(project, request, config, "plan", log, should_cancel, progress),
+            initial_result={"project": project, "run_id": request.run_id, "status": "running", "source": "framework_planning_entrypoint"},
+        )
+        job.run_id = request.run_id
+        _persist_jobs()
+        return job.as_dict()
 
 
 @app.post("/api/jobs/plan-polish")
@@ -11941,14 +12029,23 @@ def api_plan_polish(request: PlanPolishRequest) -> dict:
     config = load_config()
     current = _project_context_for_find_run(request.run_id) or _current_project_for_find_guard()
     project = current[0] if current else ""
-    job = start_job(
-        "plan-polish",
-        lambda log, should_cancel, progress: _run_planning_module_job(project, request, config, "polish", log, should_cancel, progress),
-        initial_result={"project": project, "run_id": request.run_id, "status": "running", "source": "framework_planning_entrypoint"},
-    )
-    job.run_id = request.run_id
-    _persist_jobs()
-    return job.as_dict()
+    if not project:
+        return JSONResponse(status_code=400, content={
+            "error": "planning_project_required",
+            "message": "Planning requires an active project for the requested Find run.",
+        })
+    with JOBS_LOCK:
+        duplicate = _active_web_stage_job_blocker(project, "plan-polish")
+        if duplicate:
+            return JSONResponse(status_code=409, content=duplicate)
+        job = start_job(
+            "plan-polish",
+            lambda log, should_cancel, progress: _run_planning_module_job(project, request, config, "polish", log, should_cancel, progress),
+            initial_result={"project": project, "run_id": request.run_id, "status": "running", "source": "framework_planning_entrypoint"},
+        )
+        job.run_id = request.run_id
+        _persist_jobs()
+        return job.as_dict()
 
 
 @app.post("/api/jobs/email")

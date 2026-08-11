@@ -7,6 +7,7 @@ import io
 import json
 import os
 import sys
+import threading
 import time
 from contextlib import nullcontext
 from pathlib import Path
@@ -567,6 +568,285 @@ def test_web_idea_and_plan_results_keep_project_and_plan_error_is_sanitized(monk
     assert str(exc_info.value) == "plan.md failed its contract: missing experiment section"
     assert "Traceback" not in str(exc_info.value)
     assert "/private/workspace" not in str(exc_info.value)
+
+
+def test_web_read_endpoint_blocks_duplicate_project_read_job(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    existing = web_server.JobState("read_existing", "read")
+    existing.status = "running"
+    existing.run_id = "find_demo"
+    existing.result = {"project": "demo", "run_id": "find_demo", "status": "running"}
+    monkeypatch.setattr(web_server, "JOBS", {existing.job_id: existing})
+    monkeypatch.setattr(web_server, "_persist_jobs", lambda: None)
+    monkeypatch.setattr(web_server, "_reconcile_stale_cancelling_jobs", lambda: None)
+    monkeypatch.setattr(web_server, "_taste_stage_live_full_cycle_blocker", lambda _stage: None)
+    monkeypatch.setattr(web_server, "_project_context_for_find_run", lambda _run_id: ("demo", tmp_path))
+    monkeypatch.setattr(web_server, "_current_project_for_find_guard", lambda: None)
+    monkeypatch.setattr(web_server, "_read_request_should_use_current_find_wrapper", lambda *_args: True)
+    monkeypatch.setattr(web_server, "_current_project_find_run_id", lambda _root: "find_demo")
+
+    launches = 0
+
+    def fake_start_job(*_args, **_kwargs):
+        nonlocal launches
+        launches += 1
+        return web_server.JobState("read_new", "read")
+
+    monkeypatch.setattr(web_server, "start_job", fake_start_job)
+    response = web_server.api_read(web_server.ReadRequest(run_id="find_demo", max_papers=3))
+
+    assert response.status_code == 409
+    assert json.loads(response.body)["existing_job_id"] == "read_existing"
+    assert launches == 0
+
+
+def test_web_plan_family_endpoints_block_concurrent_plan_writes(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    existing = web_server.JobState("plan_polish_existing", "plan-polish")
+    existing.status = "running"
+    existing.run_id = "find_demo"
+    existing.result = {"project": "demo", "run_id": "find_demo", "status": "running"}
+    monkeypatch.setattr(web_server, "JOBS", {existing.job_id: existing})
+    monkeypatch.setattr(web_server, "_persist_jobs", lambda: None)
+    monkeypatch.setattr(web_server, "_reconcile_stale_cancelling_jobs", lambda: None)
+    monkeypatch.setattr(web_server, "_taste_stage_live_full_cycle_blocker", lambda _stage: None)
+    monkeypatch.setattr(web_server, "_project_context_for_find_run", lambda _run_id: ("demo", tmp_path))
+    monkeypatch.setattr(web_server, "_current_project_for_find_guard", lambda: None)
+    monkeypatch.setattr(web_server, "load_config", lambda: web_server.AppConfig())
+
+    launches = 0
+
+    def fake_start_job(*_args, **_kwargs):
+        nonlocal launches
+        launches += 1
+        return web_server.JobState("plan_new", "plan")
+
+    monkeypatch.setattr(web_server, "start_job", fake_start_job)
+    response = web_server.api_plan(web_server.PlanRequest(
+        run_id="find_demo",
+        idea_ids=["idea-001"],
+        repair_rounds=1,
+    ))
+
+    assert response.status_code == 409
+    assert json.loads(response.body)["existing_job_id"] == "plan_polish_existing"
+    assert launches == 0
+
+
+def test_web_plan_launch_guard_is_atomic_across_concurrent_requests(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    projects_root = tmp_path / "projects"
+    project_root = projects_root / "demo"
+    project_root.mkdir(parents=True)
+    monkeypatch.setattr(web_server, "PROJECT_IDS_ROOT", projects_root)
+    monkeypatch.setattr(web_server, "JOBS", {})
+    monkeypatch.setattr(web_server, "_persist_jobs", lambda: None)
+    monkeypatch.setattr(web_server, "_reconcile_stale_cancelling_jobs", lambda: None)
+    monkeypatch.setattr(web_server, "_active_project_child_processes", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(web_server, "_taste_stage_live_full_cycle_blocker", lambda _stage: None)
+    monkeypatch.setattr(web_server, "_project_context_for_find_run", lambda _run_id: ("demo", project_root))
+    monkeypatch.setattr(web_server, "_current_project_for_find_guard", lambda: None)
+    monkeypatch.setattr(web_server, "load_config", lambda: web_server.AppConfig())
+    launches = 0
+
+    def fake_start_job(stage, _fn, **_kwargs):
+        nonlocal launches
+        launches += 1
+        job = web_server.JobState(f"plan_new_{launches}", stage)
+        job.status = "running"
+        job.run_id = "find_demo"
+        job.result = {"project": "demo", "run_id": "find_demo", "status": "running"}
+        web_server.JOBS[job.job_id] = job
+        return job
+
+    monkeypatch.setattr(web_server, "start_job", fake_start_job)
+    start = threading.Barrier(3)
+    responses: list[object] = []
+
+    def launch() -> None:
+        start.wait()
+        responses.append(web_server.api_plan(web_server.PlanRequest(
+            run_id="find_demo",
+            idea_ids=["idea-001"],
+            repair_rounds=1,
+        )))
+
+    threads = [threading.Thread(target=launch) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert launches == 1
+    assert sum(getattr(response, "status_code", 200) == 409 for response in responses) == 1
+
+
+def test_web_stage_blocker_does_not_cross_projects_when_live_job_project_is_unknown(monkeypatch):
+    from auto_research.web import server as web_server
+
+    unknown_project_job = web_server.JobState("read_unknown_project", "read")
+    unknown_project_job.status = "running"
+    unknown_project_job.result = {"status": "running"}
+    monkeypatch.setattr(web_server, "JOBS", {unknown_project_job.job_id: unknown_project_job})
+    monkeypatch.setattr(web_server, "_reconcile_stale_cancelling_jobs", lambda: None)
+    monkeypatch.setattr(web_server, "_project_from_job_payload", lambda *_args, **_kwargs: "")
+
+    assert web_server._active_web_stage_job_blocker("demo", "read") is None
+
+
+def test_web_stage_blocker_recovers_detached_project_module_worker(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    projects_root = tmp_path / "projects"
+    project_root = projects_root / "demo"
+    project_root.mkdir(parents=True)
+    monkeypatch.setattr(web_server, "PROJECT_IDS_ROOT", projects_root)
+    monkeypatch.setattr(web_server, "JOBS", {})
+    monkeypatch.setattr(web_server, "_reconcile_stale_cancelling_jobs", lambda: None)
+    monkeypatch.setattr(web_server, "_active_project_child_processes", lambda *_args, **_kwargs: [{
+        "pid": "4321",
+        "phase": "plan",
+        "kind": "planning_module",
+        "cmd": "python framework/scripts/orchestration/run_module.py planning --project demo",
+    }])
+
+    blocker = web_server._active_web_stage_job_blocker("demo", "plan-polish")
+
+    assert blocker is not None
+    assert blocker["existing_job_id"] == "recovered-plan-worker-demo-4321"
+    assert blocker["existing_stage"] == "plan"
+    assert blocker["existing_status"] == "running"
+
+
+def test_web_process_discovery_classifies_detached_planning_module(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    project_root = tmp_path / "projects" / "demo"
+    project_root.mkdir(parents=True)
+    monkeypatch.setattr(web_server, "_all_process_rows", lambda: [{
+        "pid": "4321",
+        "ppid": "1",
+        "stat": "S",
+        "elapsed": "00:20",
+        "pcpu": "0.0",
+        "pmem": "0.1",
+        "cwd": str(tmp_path),
+        "cmd": "python framework/scripts/orchestration/run_module.py planning --project demo --run-id find_demo",
+    }])
+    monkeypatch.setattr(web_server, "_active_launcher_experiment_runs", lambda *_args, **_kwargs: [])
+
+    workers = web_server._active_project_child_processes("demo", project_root)
+
+    assert len(workers) == 1
+    assert workers[0]["phase"] == "plan"
+    assert workers[0]["kind"] == "planning_module"
+
+
+def test_web_process_discovery_does_not_match_project_id_substrings(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    project_root = tmp_path / "projects" / "demo"
+    project_root.mkdir(parents=True)
+    monkeypatch.setattr(web_server, "_all_process_rows", lambda: [{
+        "pid": "4321",
+        "ppid": "1",
+        "stat": "S",
+        "elapsed": "00:20",
+        "pcpu": "0.0",
+        "pmem": "0.1",
+        "cwd": str(tmp_path),
+        "cmd": "python framework/scripts/orchestration/run_module.py planning --project demo2 --run-id find_demo2",
+    }])
+    monkeypatch.setattr(web_server, "_active_launcher_experiment_runs", lambda *_args, **_kwargs: [])
+
+    assert web_server._active_project_child_processes("demo", project_root) == []
+
+
+@pytest.mark.parametrize("endpoint,request_factory", [
+    ("api_plan", lambda web_server: web_server.PlanRequest(run_id="find_missing", idea_ids=["idea-001"])),
+    ("api_plan_polish", lambda web_server: web_server.PlanPolishRequest(run_id="find_missing", plan_id="plan-001")),
+])
+def test_web_planning_endpoints_reject_missing_project_before_launch(monkeypatch, endpoint, request_factory):
+    from auto_research.web import server as web_server
+
+    monkeypatch.setattr(web_server, "_taste_stage_live_full_cycle_blocker", lambda _stage: None)
+    monkeypatch.setattr(web_server, "_project_context_for_find_run", lambda _run_id: None)
+    monkeypatch.setattr(web_server, "_current_project_for_find_guard", lambda: None)
+    monkeypatch.setattr(web_server, "load_config", lambda: web_server.AppConfig())
+    launches = 0
+
+    def fake_start_job(*_args, **_kwargs):
+        nonlocal launches
+        launches += 1
+        return web_server.JobState("plan_new", "plan")
+
+    monkeypatch.setattr(web_server, "start_job", fake_start_job)
+    response = getattr(web_server, endpoint)(request_factory(web_server))
+
+    assert response.status_code == 400
+    assert json.loads(response.body)["error"] == "planning_project_required"
+    assert launches == 0
+
+
+def test_web_find_rechecks_duplicate_guard_atomically_before_launch(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    project_root = tmp_path / "projects" / "demo"
+    project_root.mkdir(parents=True)
+    request = web_server.FindRequest(
+        project="demo",
+        config=web_server.AppConfig(research_interest="protein design"),
+        selection={"venue_ids": ["dblp_icml"], "years": [2026]},
+    )
+    monkeypatch.setattr(web_server, "_project_for_find_request", lambda _request: ("demo", project_root))
+    monkeypatch.setattr(web_server, "_new_find_guard_blocker", lambda _request: None)
+    monkeypatch.setattr(web_server, "_new_find_request_reason", lambda _request: "")
+    monkeypatch.setattr(web_server, "_request_config_with_persisted_secrets", lambda config: config)
+    persistence_calls: list[str] = []
+    monkeypatch.setattr(web_server, "save_canonical_source_selection", lambda value, project_config_path=None: persistence_calls.append("selection") or value)
+    monkeypatch.setattr(web_server, "_persist_local_llm_config_from_find_request", lambda *_args, **_kwargs: persistence_calls.append("llm"))
+    monkeypatch.setattr(web_server, "_sync_project_research_preferences_from_config", lambda *_args, **_kwargs: persistence_calls.append("preferences"))
+    monkeypatch.setattr(web_server, "_sync_project_finding_config_from_request", lambda *_args, **_kwargs: persistence_calls.append("finding_config"))
+
+    blocker_calls = 0
+    duplicate = {
+        "error": "project_stage_already_running",
+        "status": "blocked_existing_project_stage_running",
+        "project": "demo",
+        "stage": "find",
+        "existing_job_id": "find_other_tab",
+    }
+
+    def blocker(_project, _stage):
+        nonlocal blocker_calls
+        blocker_calls += 1
+        return None if blocker_calls == 1 else duplicate
+
+    launches = 0
+
+    class FakeJob:
+        def as_dict(self):
+            return {"job_id": "find_new", "status": "queued"}
+
+    def fake_start_job(*_args, **_kwargs):
+        nonlocal launches
+        launches += 1
+        return FakeJob()
+
+    monkeypatch.setattr(web_server, "_active_web_stage_job_blocker", blocker)
+    monkeypatch.setattr(web_server, "start_job", fake_start_job)
+    response = web_server.api_find(request)
+
+    assert response.status_code == 409
+    assert json.loads(response.body)["existing_job_id"] == "find_other_tab"
+    assert blocker_calls == 2
+    assert launches == 0
+    assert persistence_calls == []
 
 
 def _ready_environment_handoff(repo_path: Path, conda_prefix: Path, *, data_dir: Path | None = None, run_id: str = "env_run", selected: dict | None = None) -> dict:

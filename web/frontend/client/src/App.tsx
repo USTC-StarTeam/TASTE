@@ -214,6 +214,8 @@ const SCIENCE_JOURNAL_NAMES = Object.fromEntries([...SCIENCE_JOURNALS, ...SCIENC
 
 type Tab = "find" | "read" | "ideas" | "plan" | "environment" | "experiment" | "paperWrite";
 type Lang = "zh" | "en";
+type FollowupLaunchStage = "read" | "idea" | "plan";
+type FollowupLaunchPending = Record<string, Partial<Record<FollowupLaunchStage, string>>>;
 type ArtifactPanelSnapshot = { runId: string; artifacts: Artifact[] };
 type CurrentFindArtifactScope = "find" | "read" | "ideas" | "plan";
 type IdeaEditorDraft = { title: string; new_method: string; initial_experiment: string };
@@ -3731,6 +3733,7 @@ function App() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [jobsLoaded, setJobsLoaded] = useState(false);
   const [findLaunchPending, setFindLaunchPending] = useState(false);
+  const [followupLaunchPending, setFollowupLaunchPending] = useState<FollowupLaunchPending>({});
   const [ideaStatusSaving, setIdeaStatusSaving] = useState<Record<string, string>>({});
   const [ideaEditorDrafts, setIdeaEditorDrafts] = useState<Record<string, IdeaEditorDraft>>({});
   const [ideaEditorSaving, setIdeaEditorSaving] = useState<Record<string, boolean>>({});
@@ -4489,6 +4492,28 @@ function App() {
     }
   }
 
+  function beginFollowupLaunch(project: string, stage: FollowupLaunchStage) {
+    const token = `${stage}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    setFollowupLaunchPending((previous) => ({
+      ...previous,
+      [project]: { ...previous[project], [stage]: token },
+    }));
+    return token;
+  }
+
+  function endFollowupLaunch(project: string, stage: FollowupLaunchStage, token: string) {
+    setFollowupLaunchPending((previous) => {
+      const projectPending = previous[project];
+      if (!projectPending || projectPending[stage] !== token) return previous;
+      const nextProjectPending = { ...projectPending };
+      delete nextProjectPending[stage];
+      const next = { ...previous };
+      if (Object.keys(nextProjectPending).length) next[project] = nextProjectPending;
+      else delete next[project];
+      return next;
+    });
+  }
+
   async function runRead() {
     if (rejectHistoricalRunMutation()) return;
     const readRunId = currentProjectFindRunId || runId;
@@ -4497,6 +4522,12 @@ function App() {
       setError(stageLaunchLockedText);
       return;
     }
+    if (readLaunchLocked) {
+      setError(lang === "zh" ? "Read 正在启动或运行；请等待当前任务完成。" : "Read is starting or running; wait for the current job to finish.");
+      return;
+    }
+    const launchProject = researchProject;
+    const launchToken = beginFollowupLaunch(launchProject, "read");
     try {
       setError("");
       const maxPapers = readPaperLimitDirty
@@ -4505,6 +4536,8 @@ function App() {
       attachJob(await startRead(readRunId, [], maxPapers), "read");
     } catch (err) {
       setError(String(err));
+    } finally {
+      endFollowupLaunch(launchProject, "read", launchToken);
     }
   }
 
@@ -4516,19 +4549,27 @@ function App() {
       setError(stageLaunchLockedText);
       return;
     }
+    if (ideaLaunchLocked) {
+      setError(lang === "zh" ? "Idea 正在启动或运行；请等待当前任务完成。" : "Idea is starting or running; wait for the current job to finish.");
+      return;
+    }
     const maxIdeas = Math.min(50, Math.max(1, Number(config.max_ideas) || 1));
+    const launchProject = researchProject;
+    const launchToken = beginFollowupLaunch(launchProject, "idea");
     try {
       setError("");
       attachJob(await startIdea(ideaRunId, maxIdeas, researchProject), "ideas");
     } catch (err) {
       setError(String(err));
+    } finally {
+      endFollowupLaunch(launchProject, "idea", launchToken);
     }
   }
 
   async function runPlan() {
     if (rejectHistoricalRunMutation()) return;
     const planRunId = currentProjectFindRunId || runId;
-    if (!planRunId) return;
+    if (!planRunId || !researchProject) return;
     if (stageLaunchDisabledByFullCycle) {
       setError(stageLaunchLockedText);
       return;
@@ -4537,27 +4578,43 @@ function App() {
       setError(lang === "zh" ? "请至少选择一个已批准的 Idea。" : "Select at least one approved Idea.");
       return;
     }
+    if (planLaunchLocked) {
+      setError(lang === "zh" ? "Plan 正在启动或运行；请等待当前任务完成。" : "Plan is starting or running; wait for the current job to finish.");
+      return;
+    }
+    const launchProject = researchProject;
+    const launchToken = beginFollowupLaunch(launchProject, "plan");
     try {
       setError("");
       attachJob(await startPlan(planRunId, planIdeaIds, planRepairRounds), "plan");
     } catch (err) {
       setError(String(err));
+    } finally {
+      endFollowupLaunch(launchProject, "plan", launchToken);
     }
   }
 
   async function runPlanPolish(planId: string, versionId: string) {
     if (rejectHistoricalRunMutation()) return;
     const planRunId = currentProjectFindRunId || runId;
-    if (!planRunId) return;
+    if (!planRunId || !researchProject) return;
     if (stageLaunchDisabledByFullCycle) {
       setError(stageLaunchLockedText);
       return;
     }
+    if (planLaunchLocked) {
+      setError(lang === "zh" ? "Plan 正在启动或运行；请等待当前任务完成。" : "Plan is starting or running; wait for the current job to finish.");
+      return;
+    }
+    const launchProject = researchProject;
+    const launchToken = beginFollowupLaunch(launchProject, "plan");
     try {
       setError("");
       attachJob(await startPlanPolish(planRunId, planId, versionId, polishRounds[planId] || 1), "plan");
     } catch (err) {
       setError(String(err));
+    } finally {
+      endFollowupLaunch(launchProject, "plan", launchToken);
     }
   }
 
@@ -4579,6 +4636,24 @@ function App() {
     if (explicit) return explicit;
     return hasLiveFindJob(jobs) ? latestFindRunId(runs) : "";
   }, [jobs, runs]);
+  const liveFollowupStages = useMemo(() => {
+    const active: Record<FollowupLaunchStage, boolean> = { read: false, idea: false, plan: false };
+    for (const job of jobs) {
+      if (!isLiveJob(job) || jobProcessAliveValue(job) === false) continue;
+      const result = job.result && typeof job.result === "object" ? job.result : {};
+      const project = String(result.project || "").trim();
+      if (researchProject && project !== researchProject) continue;
+      const stage = String(job.stage || "").trim().toLowerCase();
+      if (stage === "read") active.read = true;
+      else if (stage === "idea" || stage === "ideas") active.idea = true;
+      else if (stage === "plan" || stage === "plan-polish") active.plan = true;
+    }
+    return active;
+  }, [jobs, researchProject]);
+  const currentProjectLaunchPending = followupLaunchPending[researchProject] || {};
+  const readLaunchLocked = Boolean(currentProjectLaunchPending.read || liveFollowupStages.read);
+  const ideaLaunchLocked = Boolean(currentProjectLaunchPending.idea || liveFollowupStages.idea);
+  const planLaunchLocked = Boolean(currentProjectLaunchPending.plan || liveFollowupStages.plan);
   const activeProjectInfo = useMemo(() => researchProjects.find((project) => project.id === researchProject), [researchProject, researchProjects]);
   const researchStages = useMemo(() => researchSummary?.stages || researchSummary?.state?.stages || {}, [researchSummary]);
   const humanSupervision = useMemo(() => researchSummary?.human_supervision || researchSummary?.state?.human_supervision || {}, [researchSummary]);
@@ -7757,7 +7832,7 @@ function App() {
           <section className="stage">
             <div className="toolbar">
               <h2>{t.read}</h2>
-              <button className="primary" data-testid="run-read-button" onClick={runRead} disabled={!(currentProjectFindRunId || runId) || researchProjectConfigSaving || stageLaunchDisabledByFullCycle || viewingSelectedHistoricalFindRun}>{t.runRead}</button>
+              <button className="primary" data-testid="run-read-button" onClick={runRead} disabled={!(currentProjectFindRunId || runId) || researchProjectConfigSaving || stageLaunchDisabledByFullCycle || readLaunchLocked || viewingSelectedHistoricalFindRun}>{t.runRead}</button>
             </div>
             <div className="panel readSettingsPanel">
               <h3>{lang === "zh" ? "精读设置" : "Read settings"}</h3>
@@ -7817,7 +7892,7 @@ function App() {
                     {ideaMarkdownEditing ? (lang === "zh" ? "返回字段编辑" : "Back to fields") : (lang === "zh" ? "编辑 Markdown 源文" : "Edit Markdown source")}
                   </button>
                 )}
-                <button className="primary" onClick={runIdeas} disabled={!(currentProjectFindRunId || runId) || !researchProject || stageLaunchDisabledByFullCycle || viewingSelectedHistoricalFindRun}>{t.runIdeas}</button>
+                <button className="primary" onClick={runIdeas} disabled={!(currentProjectFindRunId || runId) || !researchProject || stageLaunchDisabledByFullCycle || ideaLaunchLocked || viewingSelectedHistoricalFindRun}>{t.runIdeas}</button>
               </div>
             </div>
             <div className="panel ideaRunBudgetPanel">
@@ -7908,7 +7983,7 @@ function App() {
           <section className="stage">
             <div className="toolbar">
               <h2>{t.plan}</h2>
-              <button className="primary" onClick={runPlan} disabled={!runId || !planIdeaIds.length || stageLaunchDisabledByFullCycle || viewingSelectedHistoricalFindRun}>{t.runPlan}</button>
+              <button className="primary" onClick={runPlan} disabled={!(currentProjectFindRunId || runId) || !researchProject || !planIdeaIds.length || stageLaunchDisabledByFullCycle || planLaunchLocked || viewingSelectedHistoricalFindRun}>{t.runPlan}</button>
             </div>
             <div className="planControlGrid planTopGrid">
               <div className="panel planControlPanel planIdeasPanel">
@@ -7952,7 +8027,7 @@ function App() {
                 <p className="help">{t.repairRoundsHelp}</p>
                 <input value={planRepairRounds} onChange={(event) => setPlanRepairRounds(Math.max(0, Math.trunc(Number(event.target.value) || 0)))} type="number" min="0" disabled={viewingSelectedHistoricalFindRun} />
                 <div className="actions compactActions">
-                  <button className="primary" onClick={runPlan} disabled={!runId || !planIdeaIds.length || stageLaunchDisabledByFullCycle || viewingSelectedHistoricalFindRun}>{t.runPlan}</button>
+                  <button className="primary" onClick={runPlan} disabled={!(currentProjectFindRunId || runId) || !researchProject || !planIdeaIds.length || stageLaunchDisabledByFullCycle || planLaunchLocked || viewingSelectedHistoricalFindRun}>{t.runPlan}</button>
                 </div>
               </div>
               <div className="panel planControlPanel planActionsPanel" data-testid="plan-human-editor">
@@ -8008,7 +8083,7 @@ function App() {
                       />
                     </div>
                     <div className="actions compactActions">
-                      <button onClick={() => selectedPlanForControls && runPlanPolish(selectedPlanForControls.plan_id, selectedPlanLatest.version_id)} disabled={!selectedPlanForControls?.plan_id || !selectedPlanLatest?.version_id || stageLaunchDisabledByFullCycle || viewingSelectedHistoricalFindRun}>{t.polishFurther}</button>
+                      <button onClick={() => selectedPlanForControls && runPlanPolish(selectedPlanForControls.plan_id, selectedPlanLatest.version_id)} disabled={!(currentProjectFindRunId || runId) || !researchProject || !selectedPlanForControls?.plan_id || !selectedPlanLatest?.version_id || stageLaunchDisabledByFullCycle || planLaunchLocked || viewingSelectedHistoricalFindRun}>{t.polishFurther}</button>
                       <button className={selectedPlanForControls?.completed ? "" : "primary"} onClick={() => selectedPlanForControls && runPlanFinish(selectedPlanForControls.plan_id)} disabled={!selectedPlanForControls?.plan_id || selectedPlanForControls?.completed || stageLaunchDisabledByFullCycle || viewingSelectedHistoricalFindRun}>{selectedPlanForControls?.completed ? t.planCompleted : t.finishPlan}</button>
                     </div>
                   </>

@@ -87,6 +87,15 @@ def _load_reading_main():
     return module
 
 
+def _load_ideation_main():
+    spec = importlib.util.spec_from_file_location("ideation_main_cli", ROOT / "modules" / "ideation" / "main.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _load_reading_common():
     reading_main = _load_reading_main()
     return reading_main._common_module()
@@ -2633,6 +2642,190 @@ def test_reading_run_read_uses_subagent_article_markdown_aggregation_and_audit(m
     _assert_no_split_reading_math(read_md)
     _cleanup_reading_output(run_id)
     _cleanup_reading_input("pytest_read_subagent_md_contract")
+
+
+def test_reading_retries_transient_prompt_too_long_during_final_scoring(monkeypatch):
+    read_pipeline = _load_reading_pipeline()
+    run_id = _reading_test_run_id()
+    directory = ROOT / "modules" / "reading" / ".runtime" / "output" / run_id
+    article_path = directory / "papers" / "001_paper" / "read.md"
+    article_path.parent.mkdir(parents=True, exist_ok=True)
+    article_path.write_text(
+        "# Paper\n\n"
+        "## 摘要\n\n这是完整准确的中文摘要。\n\n"
+        "## 动机与核心创新\n\n中文动机与创新分析。\n\n"
+        "## 方法\n\n中文方法分析。\n\n"
+        "## 实验结果\n\n中文实验结果分析。\n\n"
+        "## 优缺点总结\n\n中文优缺点总结。\n",
+        encoding="utf-8",
+    )
+    items = [{
+        "paper_index": 1,
+        "paper": {"paper_id": "paper-1", "title": "Paper", "abstract_zh": "这是完整准确的中文摘要。"},
+        "reading": {"title": "Paper"},
+        "claude_result": {"article_markdown_path": "read.md"},
+        "validation": {"deep_read_complete": True},
+        "artifacts": {"article_markdown": str(article_path)},
+    }]
+    calls: list[str] = []
+
+    def fake_run_claude_deep_read(*, expected_output_path, receipt_dir_name, **_kwargs):
+        calls.append(receipt_dir_name)
+        if len(calls) == 1:
+            receipt_dir = directory / receipt_dir_name
+            receipt_dir.mkdir(parents=True, exist_ok=True)
+            (receipt_dir / "stdout.json").write_text(json.dumps({
+                "type": "result",
+                "subtype": "success",
+                "is_error": True,
+                "result": "Prompt is too long",
+            }), encoding="utf-8")
+            return {
+                "status": "claude_failed",
+                "run_executed": True,
+                "return_code": 1,
+                "stdout_path": str(receipt_dir / "stdout.json"),
+                "expected_output_audit": {"exists": False, "valid_json": False},
+                "nonruntime_artifact_audit": {"status": "passed", "problem_count": 0},
+                "external_temp_artifact_audit": {"status": "passed", "problem_count": 0},
+                "result_payload": {},
+            }
+        payload = {
+            "status": "complete",
+            "scores": [{"paper_index": 1, "match_score": 8.8, "transferability_score": 9.2}],
+        }
+        expected_output_path.parent.mkdir(parents=True, exist_ok=True)
+        expected_output_path.write_text(json.dumps(payload), encoding="utf-8")
+        return {
+            "status": "complete",
+            "run_executed": True,
+            "return_code": 0,
+            "expected_output_audit": {"exists": True, "valid_json": True},
+            "nonruntime_artifact_audit": {"status": "passed", "problem_count": 0},
+            "external_temp_artifact_audit": {"status": "passed", "problem_count": 0},
+            "result_payload": payload,
+        }
+
+    monkeypatch.setattr(read_pipeline, "run_claude_deep_read", fake_run_claude_deep_read)
+    try:
+        ranked, scoring = read_pipeline._run_final_reading_scoring(
+            directory=directory,
+            items=items,
+            research_context={"research_interest": "protein design"},
+            claude_mode="run",
+            timeout_sec=60,
+            log=lambda _message: None,
+        )
+        assert calls == ["claude_scoring", "claude_scoring_retry"]
+        assert scoring["status"] == "complete"
+        assert scoring["retry"] == {"attempted": True, "reason": "prompt_too_long", "resolved": True}
+        assert ranked[0]["match_score"] == 8.8
+        assert ranked[0]["transferability_score"] == 9.2
+    finally:
+        _cleanup_reading_output(run_id)
+
+
+def test_reading_scoring_ignores_stale_stdout_not_referenced_by_current_receipt(tmp_path):
+    read_pipeline = _load_reading_pipeline()
+    receipt_dir = tmp_path / "claude_scoring"
+    receipt_dir.mkdir(parents=True)
+    (receipt_dir / "stdout.json").write_text(json.dumps({
+        "type": "result",
+        "is_error": True,
+        "result": "Prompt is too long",
+    }), encoding="utf-8")
+    current_timeout_receipt = {
+        "status": "blocked_claude_timeout",
+        "run_executed": True,
+        "expected_output_audit": {"exists": False, "valid_json": False},
+    }
+
+    assert read_pipeline._reading_scoring_retryable_failure(
+        tmp_path,
+        "claude_scoring",
+        current_timeout_receipt,
+    ) == ""
+
+
+def test_reading_scoring_records_retry_when_retry_process_raises(monkeypatch):
+    read_pipeline = _load_reading_pipeline()
+    run_id = _reading_test_run_id()
+    directory = ROOT / "modules" / "reading" / ".runtime" / "output" / run_id
+    article_path = directory / "papers" / "001_paper" / "read.md"
+    article_path.parent.mkdir(parents=True, exist_ok=True)
+    (directory / "outputs").mkdir(parents=True, exist_ok=True)
+    article_path.write_text(
+        "# Paper\n\n"
+        "## 摘要\n\n这是完整准确的中文摘要。\n\n"
+        "## 动机与核心创新\n\n中文动机与创新分析。\n\n"
+        "## 方法\n\n中文方法分析。\n\n"
+        "## 实验结果\n\n中文实验结果分析。\n\n"
+        "## 优缺点总结\n\n中文优缺点总结。\n",
+        encoding="utf-8",
+    )
+    items = [{
+        "paper_index": 1,
+        "paper": {"paper_id": "paper-1", "title": "Paper"},
+        "reading": {"title": "Paper"},
+        "claude_result": {"article_markdown_path": "read.md"},
+        "validation": {"deep_read_complete": True},
+        "artifacts": {"article_markdown": str(article_path)},
+    }]
+    calls: list[str] = []
+
+    def fake_run_claude_deep_read(*, receipt_dir_name, **_kwargs):
+        calls.append(receipt_dir_name)
+        if receipt_dir_name == "claude_scoring_retry":
+            raise TimeoutError("retry timed out")
+        receipt_dir = directory / receipt_dir_name
+        receipt_dir.mkdir(parents=True, exist_ok=True)
+        stdout_path = receipt_dir / "stdout.json"
+        stdout_path.write_text(json.dumps({
+            "type": "result",
+            "is_error": True,
+            "result": "Prompt is too long",
+        }), encoding="utf-8")
+        return {
+            "status": "claude_failed",
+            "run_executed": True,
+            "return_code": 1,
+            "stdout_path": str(stdout_path),
+            "expected_output_audit": {"exists": False, "valid_json": False},
+            "nonruntime_artifact_audit": {"status": "passed", "problem_count": 0},
+            "external_temp_artifact_audit": {"status": "passed", "problem_count": 0},
+            "result_payload": {},
+        }
+
+    monkeypatch.setattr(read_pipeline, "run_claude_deep_read", fake_run_claude_deep_read)
+    try:
+        _ranked, scoring = read_pipeline._run_final_reading_scoring(
+            directory=directory,
+            items=items,
+            research_context={"research_interest": "protein design"},
+            claude_mode="run",
+            timeout_sec=60,
+            log=lambda _message: None,
+        )
+
+        score_artifact = json.loads((directory / "outputs" / "reading_scores.json").read_text(encoding="utf-8"))
+        assert calls == ["claude_scoring", "claude_scoring_retry"]
+        assert scoring["status"] == "complete_with_warnings"
+        assert scoring["retry"] == {"attempted": True, "reason": "prompt_too_long", "resolved": False}
+        assert score_artifact["retry"] == scoring["retry"]
+    finally:
+        _cleanup_reading_output(run_id)
+
+
+def test_ideation_accepts_taste_python_when_conda_name_is_stale(monkeypatch, tmp_path):
+    ideation_main = _load_ideation_main()
+    taste_python = tmp_path / "miniconda3" / "envs" / "taste" / "bin" / "python"
+    taste_python.parent.mkdir(parents=True)
+    taste_python.touch()
+    monkeypatch.setenv("CONDA_DEFAULT_ENV", "base")
+    monkeypatch.setattr(ideation_main.sys, "executable", str(taste_python))
+
+    assert ideation_main._running_in_taste_conda() is True
+    ideation_main._require_taste_conda()
 
 
 def test_reading_claude_subagent_runs_inside_single_runtime_item(monkeypatch, tmp_path):
