@@ -71,7 +71,7 @@ FIND_TITLE_FILTER_TEMPERATURE = 0.0
 FINAL_LLM_SCORE_CACHE_SCHEMA_VERSION = "find_final_llm_score_cache_v1"
 FIND_INPUT_FIELDS = {"research_topic", "research_interest", "researcher_profile", "arxiv_queries"}
 FIND_LLM_CONFIG_FIELDS = {"provider", "base_url", "api_key", "model", "temperature", "llm_roles"}
-FINAL_LLM_SCORE_CACHE_PROMPT_POLICY = "final_title_abstract_prompt_v33_unanchored_complete_abstract_strict_reason"
+FINAL_LLM_SCORE_CACHE_PROMPT_POLICY = "final_title_abstract_prompt_v34_canonical_fields_batched_repair"
 RECOMMENDATION_REASON_MIN_ZH_CHARS = 20
 RECOMMENDATION_REASON_MIN_EN_CHARS = 40
 FINAL_LLM_SCORE_CACHE_MAX_ENTRIES = 50000
@@ -692,6 +692,53 @@ def _llm_schema_placeholder_leaked(row: object) -> bool:
         if normalized.startswith("one concise chinese title-level reason"):
             return True
     return False
+
+
+_FINAL_SCORING_RESPONSE_ALIASES: dict[str, tuple[str, ...]] = {
+    "reason_zh": (
+        "recommendation_reason_zh",
+        "recommendation_reason_chinese",
+        "chinese_recommendation_reason",
+    ),
+    "reason_en": (
+        "recommendation_reason_en",
+        "recommendation_reason_english",
+        "english_recommendation_reason",
+    ),
+    "fit_explanation_zh": (
+        "fit_explanation_chinese",
+        "chinese_fit_explanation",
+    ),
+    "fit_explanation_en": (
+        "fit_explanation_english",
+        "english_fit_explanation",
+    ),
+    "hit_directions_zh": (
+        "hit_direction_zh",
+        "hit_direction_chinese",
+        "hit_directions_chinese",
+    ),
+    "hit_directions_en": (
+        "hit_direction_en",
+        "hit_direction_english",
+        "hit_directions_english",
+    ),
+}
+
+
+def _normalize_final_scoring_response_row(row: object) -> dict:
+    if not isinstance(row, dict):
+        return {}
+    normalized = dict(row)
+    for canonical, aliases in _FINAL_SCORING_RESPONSE_ALIASES.items():
+        if normalized.get(canonical) not in (None, "", []):
+            continue
+        for alias in aliases:
+            value = normalized.get(alias)
+            if value not in (None, "", []):
+                normalized[canonical] = value
+                break
+    return normalized
 
 
 def _hit_direction_i18n(value: object) -> tuple[list[str], list[str]]:
@@ -3325,7 +3372,7 @@ def _apply_cached_final_llm_score(item: dict, entry: object, interest: str) -> b
 def _final_llm_score_cache_entry(item: dict, cache_key: str, config: AppConfig) -> dict:
     if str(item.get("reason_source") or "") != "llm abstract evaluation":
         return {}
-    if item.get("llm_retry_exhausted") or item.get("llm_final_scoring_skipped"):
+    if item.get("llm_retry_exhausted") or item.get("llm_final_scoring_skipped") or item.get("reason_quality_invalid"):
         return {}
     if item.get("reason_zh") and _final_llm_cache_reason_unusable(item.get("reason")):
         item["reason"] = item["reason_zh"]
@@ -4417,9 +4464,8 @@ def _prefilter_titles(
         batch_size = 100
         if title_groups:
             batches_with_context = [
-                (batch, _title_filter_prompt_context(group))
-                for group in title_groups
-                for batch in _chunks(group["items"], batch_size)
+                (batch, "Each candidate line includes its own official venue/category context and dynamic strictness policy.")
+                for batch in _chunks(scanned, batch_size)
             ]
         else:
             batches_with_context = [(batch, "") for batch in _chunks(scanned, batch_size)]
@@ -4439,7 +4485,9 @@ def _prefilter_titles(
                 uncached_batch: list[dict] = []
                 for item in batch:
                     expected_policy = _title_llm_score_cache_policy(item)
-                    cache_key = _title_llm_score_cache_key(item, config, scoring_interest, context)
+                    item_group = group_by_id.get(str(item.get("id") or ""))
+                    cache_context = _title_filter_prompt_context(item_group) if item_group else context
+                    cache_key = _title_llm_score_cache_key(item, config, scoring_interest, cache_context)
                     title_cache_keys[id(item)] = cache_key
                     cache_hit = _apply_cached_title_llm_score(item, cache_entries.get(cache_key), interest, expected_policy=expected_policy)
                     if not cache_hit:
@@ -4472,7 +4520,9 @@ def _prefilter_titles(
                     f"{venue_name}: reused cached title scores {title_cache_hits}/{len(scanned)}",
                     count_updates={"llm_title_scored_papers": len(scored_rows)},
                 )
-            batches_with_context = uncached_batches_with_context
+            uncached_items = [item for batch, _context in uncached_batches_with_context for item in batch]
+            uncached_context = "Each candidate line includes its own official venue/category context and dynamic strictness policy." if title_groups else ""
+            batches_with_context = [(batch, uncached_context) for batch in _chunks(uncached_items, batch_size)]
         batches = [batch for batch, _context in batches_with_context]
 
         def build_title_prompt(batch: list[dict], context: str, batch_label: str) -> tuple[str, dict[str, dict]]:
@@ -4480,10 +4530,21 @@ def _prefilter_titles(
             paper_lines: list[str] = []
             for alias, item in alias_map.items():
                 abstract = _clean_abstract_text(item.get("abstract"))
+                item_group = group_by_id.get(str(item.get("id") or ""))
+                item_context = ""
+                if item_group:
+                    ratio_pct = round(float(item_group["category_ratio"]) * 100, 1)
+                    item_context = (
+                        f"\n  official_context: venue={item_group['venue']}; year={item_group['year']}; "
+                        f"category={item_group['category']}; category_share={ratio_pct}% "
+                        f"({item_group['category_size']}/{item_group['venue_yetotal']}); "
+                        f"dynamic_strictness={item_group['policy']['label']}; "
+                        f"policy={item_group['policy']['instruction']}"
+                    )
                 if abstract:
-                    paper_lines.append(f"- {alias}: {item.get('title')}\n  abstract: {abstract[:700]}")
+                    paper_lines.append(f"- {alias}: {item.get('title')}{item_context}\n  abstract: {abstract[:700]}")
                 else:
-                    paper_lines.append(f"- {alias}: {item.get('title')}")
+                    paper_lines.append(f"- {alias}: {item.get('title')}{item_context}")
             title_lines = "\n".join(paper_lines)
             context_block = f"\nBatch context:\n{context}\n" if context else ""
             prompt = f"""
@@ -4549,13 +4610,11 @@ Rules:
                 matched.append((item, row))
             return matched, missing
 
-        def score_title_batch(batch_index: int, batch: list[dict], context: str) -> tuple[list[tuple[dict, dict]], list[dict], list[str], int]:
+        title_repair_attempts = max(0, min(5, int(os.environ.get("TITLE_FILTER_BATCH_REPAIR_ATTEMPTS", "2") or 0)))
+
+        def score_title_request(batch: list[dict], context: str, request_label: str) -> tuple[list[tuple[dict, dict]], list[dict], list[str], int]:
             errors: list[str] = []
-            prompt, alias_map = build_title_prompt(
-                batch,
-                context,
-                f"batch {batch_index}/{len(batches_with_context)}",
-            )
+            prompt, alias_map = build_title_prompt(batch, context, request_label)
             result = _json_or_error_single_request(
                 llm,
                 prompt,
@@ -4569,61 +4628,140 @@ Rules:
             matched, unresolved = parsed_title_rows(result, alias_map)
             return matched, unresolved, errors, 1
 
+        def score_title_batch(batch_index: int, batch: list[dict], context: str) -> tuple[list[tuple[dict, dict]], list[dict], list[str], int]:
+            return score_title_request(
+                batch,
+                context,
+                f"batch {batch_index}/{len(batches_with_context)}, main request",
+            )
+
         workers = 1 if os.environ.get("TITLE_FILTER_SEQUENTIAL", "0").lower() in {"1", "true", "yes", "on"} else clamp_workers(config.llm_concurrency, default=10, maximum=32)
         title_timeout = int(os.environ.get("TITLE_FILTER_TIMEOUT_SEC", "0") or 0) or int(config.title_filter_timeout_sec or 120)
         original_timeout = getattr(llm, "timeout_sec", title_timeout)
         if hasattr(llm, "timeout_sec"):
             llm.timeout_sec = min(original_timeout, title_timeout)
         active_timeout = getattr(llm, "timeout_sec", title_timeout)
-        log(f"{venue_name}: starting LLM title prefilter for {len(scanned)} titles in {len(batches)} uncached batches with {workers} workers; cache_hits={title_cache_hits}; per-batch timeout={active_timeout}s")
-        progress("llm_title_filter", title_cache_hits, max(1, len(scanned)), f"{venue_name}: starting LLM title filter, uncached batches {len(batches)}, cache_hits {title_cache_hits}")
-        if workers == 1:
-            result_iter = []
-            for batch_index, (batch, context) in enumerate(batches_with_context, 1):
-                _raise_if_cancelled(should_cancel)
-                progress("llm_title_filter", batch_index - 1, len(batches), f"{venue_name}: scoring title batch {batch_index}/{len(batches)}")
-                result_iter.append((batch_index, batch, *score_title_batch(batch_index, batch, context)))
-        else:
-            result_iter = []
-            executor = ThreadPoolExecutor(max_workers=workers)
-            futures = {
-                executor.submit(score_title_batch, batch_index, batch, context): (batch_index, batch)
-                for batch_index, (batch, context) in enumerate(batches_with_context, 1)
-            }
-            pending = set(futures)
-            completed = 0
-            try:
-                while pending:
+        try:
+            log(f"{venue_name}: starting LLM title prefilter for {len(scanned)} titles in {len(batches)} uncached batches with {workers} workers; cache_hits={title_cache_hits}; per-batch timeout={active_timeout}s")
+            progress("llm_title_filter", title_cache_hits, max(1, len(scanned)), f"{venue_name}: starting LLM title filter, uncached batches {len(batches)}, cache_hits {title_cache_hits}")
+            if workers == 1:
+                result_iter = []
+                for batch_index, (batch, context) in enumerate(batches_with_context, 1):
                     _raise_if_cancelled(should_cancel)
-                    done, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
-                    if not done:
-                        continue
-                    for future in done:
-                        _raise_if_cancelled(should_cancel)
-                        batch_index, batch = futures[future]
-                        completed += 1
-                        try:
-                            matched, unresolved, errors, request_count = future.result()
-                        except Exception as exc:
-                            matched, unresolved, errors, request_count = [], list(batch), [str(exc)], 1
-                        result_iter.append((batch_index, batch, matched, unresolved, errors, request_count))
-                        progress("llm_title_filter", completed, len(batches), f"{venue_name}: scored title batch {completed}/{len(batches)}, workers {workers}")
-            except JobCancelled:
-                for future in pending:
-                    future.cancel()
-                executor.shutdown(wait=True, cancel_futures=True)
-                raise
+                    progress("llm_title_filter", batch_index - 1, len(batches), f"{venue_name}: scoring title batch {batch_index}/{len(batches)}")
+                    result_iter.append((batch_index, batch, *score_title_batch(batch_index, batch, context)))
             else:
-                executor.shutdown(wait=True)
-            result_iter.sort(key=lambda row: row[0])
-        if hasattr(llm, "timeout_sec"):
-            llm.timeout_sec = original_timeout
-        for batch_index, batch, matched, unresolved, errors, request_count in result_iter:
-            _raise_if_cancelled(should_cancel)
+                result_iter = []
+                executor = ThreadPoolExecutor(max_workers=workers)
+                futures = {
+                    executor.submit(score_title_batch, batch_index, batch, context): (batch_index, batch)
+                    for batch_index, (batch, context) in enumerate(batches_with_context, 1)
+                }
+                pending = set(futures)
+                completed = 0
+                try:
+                    while pending:
+                        _raise_if_cancelled(should_cancel)
+                        done, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
+                        if not done:
+                            continue
+                        for future in done:
+                            _raise_if_cancelled(should_cancel)
+                            batch_index, batch = futures[future]
+                            completed += 1
+                            try:
+                                matched, unresolved, errors, request_count = future.result()
+                            except Exception as exc:
+                                matched, unresolved, errors, request_count = [], list(batch), [str(exc)], 1
+                            result_iter.append((batch_index, batch, matched, unresolved, errors, request_count))
+                            progress("llm_title_filter", completed, len(batches), f"{venue_name}: scored title batch {completed}/{len(batches)}, workers {workers}")
+                except JobCancelled:
+                    for future in pending:
+                        future.cancel()
+                    executor.shutdown(wait=True, cancel_futures=True)
+                    raise
+                else:
+                    executor.shutdown(wait=True)
+                result_iter.sort(key=lambda row: row[0])
+
+            # A fatal provider/configuration failure is not repairable. Check all
+            # primary outcomes before constructing any repair request.
+            for _batch_index, _batch, _matched, _unresolved, errors, _request_count in result_iter:
+                for error in errors:
+                    _raise_if_fatal_llm_configuration_error(error, f"{venue_name} title filtering")
+
+            pending_title_repairs = [item for _batch_index, _batch, _matched, unresolved, _errors, _request_count in result_iter for item in unresolved]
+            repair_matched: list[tuple[dict, dict]] = []
+            repair_errors: list[str] = []
+            repair_request_count = 0
+            repair_context = "Each candidate line includes its own official venue/category context and dynamic strictness policy." if title_groups else ""
+            for repair_round in range(1, title_repair_attempts + 1):
+                _raise_if_cancelled(should_cancel)
+                if not pending_title_repairs:
+                    break
+                repair_batches = list(_chunks(pending_title_repairs, batch_size))
+                log(f"{venue_name}: starting consolidated title repair round {repair_round}/{title_repair_attempts} for {len(pending_title_repairs)} rows in {len(repair_batches)} requests")
+                round_results: list[tuple[int, list[tuple[dict, dict]], list[dict], list[str], int]] = []
+                if workers == 1:
+                    for repair_batch_index, repair_batch in enumerate(repair_batches, 1):
+                        _raise_if_cancelled(should_cancel)
+                        matched, unresolved, errors, request_count = score_title_request(
+                            repair_batch,
+                            repair_context,
+                            f"consolidated batched repair {repair_round}/{title_repair_attempts}, batch {repair_batch_index}/{len(repair_batches)}",
+                        )
+                        round_results.append((repair_batch_index, matched, unresolved, errors, request_count))
+                else:
+                    repair_executor = ThreadPoolExecutor(max_workers=workers)
+                    repair_futures = {
+                        repair_executor.submit(
+                            score_title_request,
+                            repair_batch,
+                            repair_context,
+                            f"consolidated batched repair {repair_round}/{title_repair_attempts}, batch {repair_batch_index}/{len(repair_batches)}",
+                        ): repair_batch_index
+                        for repair_batch_index, repair_batch in enumerate(repair_batches, 1)
+                    }
+                    repair_pending = set(repair_futures)
+                    try:
+                        while repair_pending:
+                            _raise_if_cancelled(should_cancel)
+                            done, repair_pending = wait(repair_pending, timeout=1.0, return_when=FIRST_COMPLETED)
+                            for future in done:
+                                repair_batch_index = repair_futures[future]
+                                try:
+                                    matched, unresolved, errors, request_count = future.result()
+                                except Exception as exc:
+                                    repair_batch = repair_batches[repair_batch_index - 1]
+                                    matched, unresolved, errors, request_count = [], list(repair_batch), [str(exc)], 1
+                                round_results.append((repair_batch_index, matched, unresolved, errors, request_count))
+                    except JobCancelled:
+                        for future in repair_pending:
+                            future.cancel()
+                        repair_executor.shutdown(wait=True, cancel_futures=True)
+                        raise
+                    else:
+                        repair_executor.shutdown(wait=True)
+                    round_results.sort(key=lambda row: row[0])
+
+                # Do not continue into another repair round after an auth, quota,
+                # billing, or other fatal provider/configuration response.
+                for _repair_batch_index, _matched, _unresolved, errors, _request_count in round_results:
+                    for error in errors:
+                        _raise_if_fatal_llm_configuration_error(error, f"{venue_name} title filtering repair")
+                pending_title_repairs = []
+                for _repair_batch_index, matched, unresolved, errors, request_count in round_results:
+                    repair_matched.extend(matched)
+                    pending_title_repairs.extend(unresolved)
+                    repair_errors.extend(errors)
+                    repair_request_count += request_count
+                log(f"{venue_name}: consolidated title repair round {repair_round}/{title_repair_attempts} recovered {sum(len(row[1]) for row in round_results)} rows; unresolved={len(pending_title_repairs)}")
+        finally:
+            if hasattr(llm, "timeout_sec"):
+                llm.timeout_sec = original_timeout
+
+        def apply_title_matches(matched: list[tuple[dict, dict]]) -> int:
             appended = 0
-            for error in errors:
-                _raise_if_fatal_llm_configuration_error(error, f"{venue_name} title filtering")
-                log(f"{venue_name}: title batch {batch_index}/{len(batches)} LLM attempt failed: {str(error)[:240]}")
             for item, row in matched:
                 item_id = str(item.get("id") or "")
                 if id(item) in seen_items:
@@ -4656,7 +4794,21 @@ Rules:
                 scored_rows.append(item)
                 seen_items.add(id(item))
                 appended += 1
+            return appended
+
+        for batch_index, batch, matched, unresolved, errors, request_count in result_iter:
+            _raise_if_cancelled(should_cancel)
+            for error in errors:
+                _raise_if_fatal_llm_configuration_error(error, f"{venue_name} title filtering")
+                log(f"{venue_name}: title batch {batch_index}/{len(batches)} LLM attempt failed: {str(error)[:240]}")
+            appended = apply_title_matches(matched)
             log(f"{venue_name}: title batch {batch_index}/{len(batches)} scored {appended}/{len(batch)}; requests={request_count}; scored_titles={len(scored_rows)}")
+        for error in repair_errors:
+            _raise_if_fatal_llm_configuration_error(error, f"{venue_name} title filtering repair")
+            log(f"{venue_name}: consolidated title repair request failed: {str(error)[:240]}")
+        repaired_count = apply_title_matches(repair_matched)
+        if repair_request_count:
+            log(f"{venue_name}: consolidated title repairs recovered {repaired_count} rows in {repair_request_count} requests; scored_titles={len(scored_rows)}")
         fallback_items = [
             item
             for item in scanned
@@ -4667,12 +4819,13 @@ Rules:
             item["title_llm_missing"] = True
             item["title_llm_retry_exhausted"] = True
             item["title_llm_single_request_unresolved"] = True
-            item["title_filter_fallback_reason"] = "LLM title row was invalid or missing in the batch's single request."
+            item["title_llm_batch_repair_exhausted"] = True
+            item["title_filter_fallback_reason"] = "LLM title row remained invalid or missing after bounded batched repair."
             item["title_local_rank"] = local_rank
         if fallback_items:
             unresolved_ids = [str(item.get("id") or "") for item in fallback_items]
             log(
-                f"{venue_name}: title LLM left {len(fallback_items)} rows unresolved after their single batch request; "
+                f"{venue_name}: title LLM left {len(fallback_items)} rows unresolved after bounded batched repair; "
                 f"local title scores retained them for downstream abstract scoring; sample={unresolved_ids[:10]}"
             )
         if batches:
@@ -5529,11 +5682,14 @@ def _evaluate_items(
     interest = _topic_interest_text(config)
     topic_routes_block = _adaptive_topic_routes_block(config, interest)
     scoring_interest = _compact_scoring_interest(config, interest)
-    prompts: list[str] = []
-    prompt_batches: list[list[dict]] = []
     for index, item in enumerate(items, 1):
         _raise_if_cancelled(should_cancel)
-        progress("final_ranking_prepare", index, len(items), f"Preparing {source_name}: {item.get('title', 'Untitled')[:80]}")
+        prepare_message = (
+            f"{source_name}: preparing {item.get('title', 'Untitled')[:80]}"
+            if source_name.strip().lower() in {"all sources", "all channels"}
+            else f"Preparing {source_name}: {item.get('title', 'Untitled')[:80]}"
+        )
+        progress("final_ranking_prepare", index, len(items), prepare_message)
         title = item.get("title", "")
         abstract = item.get("abstract", "")
         if item.get("classification_source") != "official":
@@ -5606,12 +5762,15 @@ def _evaluate_items(
                 item.setdefault("recommendation_note", item.get("recommendation_note_zh") or item.get("recommendation_note_en"))
         log(f"{source_name}: final LLM scoring pool {len(scoring_ids)}/{len(evaluated)} candidates; cache_hits={score_cache_hits}; uncached_items={len(scoring_items)}; skipped {skipped_items} retrieval-only candidates")
         scoring_batch_size = _adaptive_final_scoring_batch_size(config, scoring_items, scoring_interest, topic_routes_block)
-        for batch_index, batch in enumerate(_chunks(scoring_items, scoring_batch_size), 1):
+        primary_batches = list(_chunks(scoring_items, scoring_batch_size))
+        repair_attempts = max(0, min(5, int(os.environ.get("OMITTED_ITEM_RETRY_ATTEMPTS", os.environ.get("ABSTRACT_SCORING_BATCH_REPAIR_ATTEMPTS", "3")) or 0)))
+
+        def build_final_scoring_prompt(batch: list[dict], batch_label: str) -> str:
             item_lines = "\n\n".join(
                 f"ID: p{position:03d}\nTitle: {item.get('title')}\nAbstract/Description: {_final_scoring_abstract_text(item)}"
                 for position, item in enumerate(batch, 1)
             )
-            prompts.append(f"""
+            return f"""
 You are the final strict relevance judge for literature discovery. Return JSON only.
 
 Research interest/profile:
@@ -5619,10 +5778,10 @@ Research interest/profile:
 
 {topic_routes_block}
 
-Candidate items, batch {batch_index}:
+Candidate items, {batch_label}:
 {item_lines}
 
-Return one strict JSON object whose only top-level key is evaluations. evaluations must contain one row per candidate. Each row must contain: the exact input id; a concise specific category; numeric fit_score and diversity_score in the 0-10 range with one decimal place; boolean recommend_for_deep_reading and topic_evidence_supported; a concrete topic_evidence verdict; the complete matched_topic_route or an empty string; a concise evidence basis; a list of concrete missing evidence when unsupported; concrete Chinese and English hit-direction lists; and natural Chinese and English fit explanations and recommendation reasons. Every text field must contain the actual judgment, never a field description or placeholder.
+Return one strict JSON object whose only top-level key is evaluations. evaluations must contain one row per candidate. Every row must use these exact property names: id, category, fit_score, diversity_score, recommend_for_deep_reading, topic_evidence, topic_evidence_supported, matched_topic_route, topic_evidence_basis, missing_topic_evidence, hit_directions_zh, hit_directions_en, fit_explanation_zh, fit_explanation_en, reason_zh, reason_en. Do not translate, rename, expand, or replace these property names. Every text field must contain the actual judgment, never a field description or placeholder.
 
 Rules:
 - Return exactly {len(batch)} evaluation rows. IDs are opaque request-local identifiers; copy every pNNN ID exactly once and never rewrite or invent an ID.
@@ -5633,12 +5792,12 @@ Rules:
 - Set topic_evidence_supported=true only when the title+abstract directly supports one complete configured/adaptive core route from the list above. Copy that full route into matched_topic_route; never use a short subphrase, method component, desideratum, or hint as matched_topic_route. If the route contains a colon, do not require every post-colon evidence axis; require direct support for the pre-colon core route plus concrete reusable value. Set topic_evidence to passed:/strong: and give a concise topic_evidence_basis. This evidence annotation is diagnostic and must not replace your calibrated fit_score.
 - If the abstract is generic, background-only, venue/title-only, or does not directly support the current core route, set topic_evidence_supported=false, topic_evidence="weak: missing adaptive topic evidence", and list concrete missing_topic_evidence.
 - Score fit independently from the topic-evidence fields. Do not cap or otherwise change fit_score because topic_evidence_supported=false or topic_evidence starts with weak:.
-- Write each recommendation reason freshly from this paper's title/abstract and the supplied research topic. Naturally cover why the paper topic fits the research topic, how the paper can help the research, and what methods/data/protocols/theory/evaluation ideas are transferable. Lead with concrete paper content; do not use a prescribed opening, generic research-direction boilerplate, or a fixed sentence order. Do not write reader instructions.
+- Write reason_zh and reason_en freshly from this paper's title/abstract and the supplied research topic. Each reason must contain 2-4 natural sentences and cover why the paper topic fits the research topic, how the paper can help the research, and what methods/data/protocols/theory/evaluation ideas are transferable. Lead with concrete paper content; do not use a prescribed opening, generic research-direction boilerplate, or a fixed sentence order. Do not write reader instructions.
 - Missing abstract, metadata-only evidence, or title-only evidence cannot be recommended.
 {FIND_FINAL_SCORING_ROUTE_RULES}
-""")
-            prompt_batches.append(batch)
-        workers = _adaptive_final_scoring_workers(config, len(prompt_batches))
+"""
+
+        workers = _adaptive_final_scoring_workers(config, len(primary_batches))
         env_batch_timeout = _positive_int_env("ABSTRACT_SCORING_TIMEOUT_SEC", 0)
         configured_batch_timeout = int(getattr(config, "abstract_scoring_timeout_sec", 0) or 180)
         batch_timeout = max(30, env_batch_timeout or configured_batch_timeout or 180)
@@ -5646,176 +5805,270 @@ Rules:
         original_timeout = getattr(llm, "timeout_sec", batch_timeout)
         if hasattr(llm, "timeout_sec"):
             llm.timeout_sec = batch_timeout
-        log(f"{source_name}: starting LLM final scoring for {len(scoring_items)}/{len(evaluated)} items in {len(prompts)} batches with {workers} workers; batch_size={scoring_batch_size}; requests={len(prompts)}; single_request_per_batch=true; per-batch timeout={getattr(llm, 'timeout_sec', batch_timeout)}s; temperature={scoring_temperature}")
-        progress("abstract_scoring", 0, max(1, len(prompt_batches)), f"{source_name}: starting LLM final scoring")
+        primary_batch_count = len(primary_batches)
+        request_slot_total = max(1, primary_batch_count * (repair_attempts + 1))
+        log(f"{source_name}: starting LLM final scoring for {len(scoring_items)}/{len(evaluated)} items in {primary_batch_count} primary batches with {workers} workers; batch_size={scoring_batch_size}; primary_requests={primary_batch_count}; bounded_batch_repair_rounds={repair_attempts}; strict_single_request_per_batch=true; per-batch timeout={getattr(llm, 'timeout_sec', batch_timeout)}s; temperature={scoring_temperature}")
 
         scoring_max_tokens = 0
+        rejection_counts: dict[str, int] = {}
 
-        def mark_items_unscored(batch_index: int, items_to_mark: list[dict], reason: str, error: object = "") -> None:
+        def note_rejection(reason: str, count: int = 1) -> None:
+            rejection_counts[reason] = int(rejection_counts.get(reason) or 0) + max(0, int(count or 0))
+
+        def scored_count() -> int:
+            return score_cache_hits + sum(
+                1
+                for item in scoring_items
+                if str(item.get("reason_source") or "") == "llm abstract evaluation"
+            )
+
+        def emit_scoring_progress(current: int, message: str) -> None:
+            current = max(0, min(request_slot_total, int(current or 0)))
+            count = scored_count()
+            _emit_progress(
+                progress,
+                "abstract_scoring",
+                current,
+                request_slot_total,
+                message,
+                count_updates={
+                    "evaluated_candidates": len(evaluated),
+                    "abstract_scored_papers": count,
+                    "llm_scored_candidates": count,
+                    "llm_scoring_request_slots_current": current,
+                    "llm_scoring_request_slots_total": request_slot_total,
+                },
+            )
+
+        emit_scoring_progress(0, f"{source_name}: starting global LLM final scoring")
+
+        def mark_items_unscored(items_to_mark: list[dict]) -> None:
             for item in items_to_mark:
-                # Keep the legacy audit flag because downstream recommendation
-                # gates already consume it; strict scoring no longer retries.
+                reason = str(item.get("llm_repair_reason") or "omitted-item")
                 item["llm_retry_exhausted"] = True
                 item["llm_retry_reason"] = reason
-                item["llm_retry_attempts"] = 0
+                item["llm_retry_attempts"] = repair_attempts
                 item["llm_single_request_unresolved"] = True
-                if error:
-                    item["llm_retry_last_error"] = str(error)[:500]
+                item["llm_batch_repair_exhausted"] = True
                 _apply_relevance_guard(item)
                 _apply_topic_evidence_guard(item, interest)
                 _apply_quality_bonus(item)
             if items_to_mark:
-                log(f"{source_name}: batch {batch_index}/{len(prompt_batches)} marked {len(items_to_mark)} unresolved items after {reason}; no repair request was sent and unresolved items remain excluded from Find recommendations")
+                log(f"{source_name}: bounded batched repair exhausted for {len(items_to_mark)} rows without a valid score; unresolved rows remain excluded from Find recommendations")
 
-        def apply_result(batch_index: int, batch: list[dict], result: dict) -> None:
+        def apply_result(batch_label: str, batch: list[dict], result: dict, repair_round: int) -> list[dict]:
             by_id = {f"p{position:03d}": item for position, item in enumerate(batch, 1)}
-            assigned_items: set[int] = set()
             if not result.get("ok"):
-                error = result.get("error", "")
+                error = str(result.get("error") or "unknown LLM error")
                 _raise_if_fatal_llm_configuration_error(error, f"{source_name} final LLM scoring")
-                if _is_transient_llm_service_error(error):
-                    log(f"{source_name}: batch {batch_index}/{len(prompt_batches)} LLM scoring hit transient service error: {str(error)[:240]}; marking the batch unresolved without another request")
-                    mark_items_unscored(batch_index, batch, "transient-service-error", error)
-                    return
-                log(f"{source_name}: batch {batch_index}/{len(prompt_batches)} LLM scoring failed: {str(error)[:240]}; marking the batch unresolved without another request")
-                mark_items_unscored(batch_index, batch, "failed-batch", error)
-                return
+                reason = "transient-service-error" if _is_transient_llm_service_error(error) else "failed-batch"
+                note_rejection(reason, len(batch))
+                for item in batch:
+                    item["llm_repair_reason"] = reason
+                    item["llm_retry_last_error"] = error[:500]
+                log(f"{source_name}: {batch_label} failed for {len(batch)} rows: {error[:240]}; queued as one bounded repair batch")
+                return list(batch)
             data = result.get("data")
+            rows: list[dict] = []
             if isinstance(data, dict):
-                rows = data.get("evaluations")
-                if rows is None:
-                    rows = data.get("selected")
-                if isinstance(rows, dict):
-                    rows = [rows]
-                if isinstance(rows, list):
-                    seen_row_ids: set[str] = set()
-                    for row in rows:
-                        if not isinstance(row, dict):
-                            continue
-                        row_id = str(row.get("id") or "")
-                        item = by_id.get(row_id)
-                        if not item or row_id in seen_row_ids:
-                            continue
-                        seen_row_ids.add(row_id)
-                        scores = (row.get("fit_score"), row.get("diversity_score"))
-                        if any(
-                            isinstance(value, bool)
-                            or not isinstance(value, (int, float))
-                            or not isfinite(float(value))
-                            or not 0 <= float(value) <= 10
-                            for value in scores
-                        ):
-                            continue
-                        if _llm_schema_placeholder_leaked(row):
-                            continue
-                        row_reason_zh = row.get("reason_zh") or row.get("reason")
-                        if _final_llm_cache_reason_unusable(row_reason_zh) or _recommendation_reason_unusable(row.get("reason_en"), zh=False):
-                            continue
-                        assigned_items.add(id(item))
-                        item.pop("llm_retry_exhausted", None)
-                        item.pop("llm_retry_reason", None)
-                        item.pop("llm_retry_last_error", None)
-                        item.pop("llm_single_request_unresolved", None)
-                        item["category"] = str(row.get("category") or item.get("category") or "")
-                        item["fit_score"] = _as_float(row.get("fit_score"), item.get("fit_score") or 0)
-                        item["diversity_score"] = _as_float(row.get("diversity_score"), item.get("diversity_score") or 0)
-                        item["score"] = _combined_score(item["fit_score"], item["diversity_score"])
-                        if "recommend_for_deep_reading" in row:
-                            item["recommend_for_deep_reading"] = bool(row.get("recommend_for_deep_reading"))
-                        if "recommended_for_deep_reading" in row:
-                            item["recommend_for_deep_reading"] = bool(row.get("recommended_for_deep_reading"))
-                        if "supports_complete_requested_route" in row:
-                            item["supports_complete_requested_route"] = bool(row.get("supports_complete_requested_route"))
-                        hit_source = row.get("hit_directions_zh") or row.get("hit_directions")
-                        _set_hit_direction_language_fields(
-                            item,
-                            hit_source,
-                            zh_value=row.get("hit_directions_zh"),
-                            en_value=row.get("hit_directions_en"),
-                        )
-                        fit_explanation_zh = str(row.get("fit_explanation_zh") or row.get("fit_explanation") or item.get("fit_explanation_zh") or item.get("fit_explanation") or "")
-                        fit_explanation_en = str(row.get("fit_explanation_en") or item.get("fit_explanation_en") or "")
-                        item["fit_explanation_zh"] = fit_explanation_zh
-                        item["fit_explanation_en"] = fit_explanation_en
-                        item["fit_explanation"] = str(row.get("fit_explanation") or fit_explanation_zh or fit_explanation_en or item.get("fit_explanation") or "")
-                        reason_zh = str(row.get("reason_zh") or row.get("reason") or item.get("reason_zh") or item.get("reason") or "")
-                        reason_en = str(row.get("reason_en") or item.get("reason_en") or "")
-                        item["reason_zh"] = reason_zh
-                        item["reason_en"] = reason_en
-                        item["reason"] = str(row.get("reason") or reason_zh or reason_en or item.get("reason") or "")
-                        item["reason_source"] = "llm abstract evaluation"
-                        if item.get("classification_source") != "official":
-                            item["classification_source"] = "llm_inferred"
-                        _apply_relevance_guard(item)
-                        _apply_llm_topic_evidence(item, row, interest)
-                        _apply_quality_bonus(item)
-            missing = [item for item in batch if id(item) not in assigned_items and item.get("reason_source") != "llm abstract evaluation"]
-            if missing:
-                log(f"{source_name}: batch {batch_index}/{len(prompt_batches)} omitted or invalidated {len(missing)} items; marking them unresolved without another request")
-                mark_items_unscored(batch_index, missing, "omitted-item")
+                raw_rows = data.get("evaluations")
+                if raw_rows is None:
+                    raw_rows = data.get("selected")
+                if isinstance(raw_rows, dict):
+                    raw_rows = [raw_rows]
+                if isinstance(raw_rows, list):
+                    rows = [_normalize_final_scoring_response_row(row) for row in raw_rows if isinstance(row, dict)]
+            rows_by_id: dict[str, list[dict]] = {alias: [] for alias in by_id}
+            for row in rows:
+                row_id = str(row.get("id") or "")
+                if row_id in rows_by_id:
+                    rows_by_id[row_id].append(row)
+            unresolved: list[dict] = []
+            for row_id, item in by_id.items():
+                matching_rows = rows_by_id[row_id]
+                if len(matching_rows) != 1:
+                    reason = "duplicate-id" if len(matching_rows) > 1 else "omitted-item"
+                    note_rejection(reason)
+                    item["llm_repair_reason"] = reason
+                    unresolved.append(item)
+                    continue
+                row = matching_rows[0]
+                scores = (row.get("fit_score"), row.get("diversity_score"))
+                try:
+                    scores_valid = all(
+                        not isinstance(value, bool)
+                        and value not in (None, "")
+                        and isfinite(float(value))
+                        and 0 <= float(value) <= 10
+                        for value in scores
+                    )
+                except (TypeError, ValueError):
+                    scores_valid = False
+                if not scores_valid:
+                    note_rejection("invalid-score")
+                    item["llm_repair_reason"] = "invalid-score"
+                    unresolved.append(item)
+                    continue
+                schema_placeholder = _llm_schema_placeholder_leaked(row)
 
-        completed = 0
-        request_spacing_sec = max(0.0, float(os.environ.get("LLM_REQUEST_SPACING_SEC", "1.5" if _rate_limited_llm_provider(config) else "0") or 0))
-        if workers == 1:
-            for batch_index, (batch, prompt) in enumerate(zip(prompt_batches, prompts, strict=False), 1):
-                _raise_if_cancelled(should_cancel)
-                progress("abstract_scoring", completed, len(prompt_batches), f"{source_name}: scoring batch {batch_index}/{len(prompt_batches)}")
-                log(f"{source_name}: scoring batch {batch_index}/{len(prompt_batches)} started")
-                if request_spacing_sec and batch_index > 1:
-                    time.sleep(request_spacing_sec)
-                result = _json_or_error_single_request(llm, prompt, temperature=scoring_temperature, max_tokens=scoring_max_tokens)
-                apply_result(batch_index, batch, result)
-                completed += 1
-                log(f"{source_name}: scoring batch {batch_index}/{len(prompt_batches)} completed; ok={bool(result.get('ok'))}")
-                scored_count = score_cache_hits + sum(1 for item in scoring_items if str(item.get("reason_source") or "") == "llm abstract evaluation")
-                _emit_progress(
-                    progress,
-                    "abstract_scoring",
-                    completed,
-                    len(prompt_batches),
-                    f"{source_name}: scored batch {batch_index}/{len(prompt_batches)} with {workers} workers",
-                    count_updates={"evaluated_candidates": len(evaluated), "abstract_scored_papers": scored_count, "llm_scored_candidates": scored_count},
+                item.pop("llm_retry_exhausted", None)
+                item.pop("llm_retry_reason", None)
+                item.pop("llm_retry_last_error", None)
+                item.pop("llm_single_request_unresolved", None)
+                item.pop("llm_batch_repair_exhausted", None)
+                item["category"] = str(row.get("category") or item.get("category") or "")
+                item["fit_score"] = _as_float(row.get("fit_score"), item.get("fit_score") or 0)
+                item["diversity_score"] = _as_float(row.get("diversity_score"), item.get("diversity_score") or 0)
+                item["score"] = _combined_score(item["fit_score"], item["diversity_score"])
+                if "recommend_for_deep_reading" in row:
+                    item["recommend_for_deep_reading"] = bool(row.get("recommend_for_deep_reading"))
+                if "recommended_for_deep_reading" in row:
+                    item["recommend_for_deep_reading"] = bool(row.get("recommended_for_deep_reading"))
+                if "supports_complete_requested_route" in row:
+                    item["supports_complete_requested_route"] = bool(row.get("supports_complete_requested_route"))
+                hit_source = row.get("hit_directions_zh") or row.get("hit_directions")
+                _set_hit_direction_language_fields(
+                    item,
+                    hit_source,
+                    zh_value=row.get("hit_directions_zh"),
+                    en_value=row.get("hit_directions_en"),
                 )
-        else:
-            last_parallel_log = 0.0
-            executor = ThreadPoolExecutor(max_workers=workers)
-            futures = {executor.submit(_json_or_error_single_request, llm, prompt, temperature=scoring_temperature, max_tokens=scoring_max_tokens): (idx, batch) for idx, (batch, prompt) in enumerate(zip(prompt_batches, prompts, strict=False), 1)}
-            pending = set(futures)
-            try:
-                while pending:
+                fit_explanation_zh = str(row.get("fit_explanation_zh") or row.get("fit_explanation") or item.get("fit_explanation_zh") or item.get("fit_explanation") or "")
+                fit_explanation_en = str(row.get("fit_explanation_en") or item.get("fit_explanation_en") or "")
+                item["fit_explanation_zh"] = fit_explanation_zh
+                item["fit_explanation_en"] = fit_explanation_en
+                item["fit_explanation"] = str(row.get("fit_explanation") or fit_explanation_zh or fit_explanation_en or item.get("fit_explanation") or "")
+                reason_zh = str(row.get("reason_zh") or row.get("reason") or item.get("reason_zh") or item.get("reason") or "")
+                reason_en = str(row.get("reason_en") or item.get("reason_en") or "")
+                item["reason_zh"] = reason_zh
+                item["reason_en"] = reason_en
+                item["reason"] = str(row.get("reason") or reason_zh or reason_en or item.get("reason") or "")
+                item["reason_source"] = "llm abstract evaluation"
+                item["llm_repair_attempts"] = repair_round
+                if item.get("classification_source") != "official":
+                    item["classification_source"] = "llm_inferred"
+                _apply_relevance_guard(item)
+                _apply_llm_topic_evidence(item, row, interest)
+                _apply_quality_bonus(item)
+
+                reason_invalid = (
+                    schema_placeholder
+                    or _final_llm_cache_reason_unusable(reason_zh)
+                    or _recommendation_reason_unusable(reason_en, zh=False)
+                )
+                if reason_invalid:
+                    repair_reason = "schema-placeholder" if schema_placeholder else "invalid-recommendation-reason"
+                    note_rejection(repair_reason)
+                    item["reason_quality_invalid"] = True
+                    item["llm_repair_reason"] = repair_reason
+                    unresolved.append(item)
+                else:
+                    item.pop("reason_quality_invalid", None)
+                    item.pop("llm_repair_reason", None)
+                    item.pop("llm_reason_repair_exhausted", None)
+            if unresolved:
+                log(f"{source_name}: {batch_label} queued {len(unresolved)}/{len(batch)} rows for bounded batched repair")
+            return unresolved
+
+        request_spacing_sec = max(0.0, float(os.environ.get("LLM_REQUEST_SPACING_SEC", "1.5" if _rate_limited_llm_provider(config) else "0") or 0))
+        request_serial = 0
+
+        def execute_request_round(batches: list[list[dict]], round_index: int, slot_base: int) -> list[dict]:
+            nonlocal request_serial
+            if not batches:
+                return []
+            round_kind = "primary" if round_index == 0 else f"repair round {round_index}/{repair_attempts}"
+            request_rows = [
+                (
+                    batch_index,
+                    batch,
+                    build_final_scoring_prompt(batch, f"{round_kind}, batch {batch_index}/{len(batches)}"),
+                )
+                for batch_index, batch in enumerate(batches, 1)
+            ]
+            unresolved_rows: list[dict] = []
+            completed = 0
+            if workers == 1:
+                for batch_index, batch, prompt_text in request_rows:
                     _raise_if_cancelled(should_cancel)
-                    done, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
-                    if not done:
-                        continue
-                    for future in done:
-                        _raise_if_cancelled(should_cancel)
-                        batch_index, batch = futures[future]
-                        try:
-                            result = future.result()
-                        except Exception as exc:
-                            result = {"ok": False, "data": None, "error": str(exc)}
-                        apply_result(batch_index, batch, result)
-                        completed += 1
-                        now_progress = time.monotonic()
-                        if completed == 1 or completed == len(prompt_batches) or completed % 25 == 0 or now_progress - last_parallel_log >= 15:
-                            log(f"{source_name}: LLM scoring progress {completed}/{len(prompt_batches)} batches complete; latest completed batch {batch_index}; workers={workers}")
-                            last_parallel_log = now_progress
-                        scored_count = score_cache_hits + sum(1 for item in scoring_items if str(item.get("reason_source") or "") == "llm abstract evaluation")
-                        _emit_progress(
-                            progress,
-                            "abstract_scoring",
-                            completed,
-                            len(prompt_batches),
-                            f"{source_name}: scored batch {batch_index}/{len(prompt_batches)} with {workers} workers",
-                            count_updates={"evaluated_candidates": len(evaluated), "abstract_scored_papers": scored_count, "llm_scored_candidates": scored_count},
-                        )
-            except JobCancelled:
-                for future in pending:
-                    future.cancel()
-                executor.shutdown(wait=False, cancel_futures=True)
-                raise
+                    request_serial += 1
+                    if request_spacing_sec and request_serial > 1:
+                        time.sleep(request_spacing_sec)
+                    log(f"{source_name}: {round_kind} batch {batch_index}/{len(batches)} started with {len(batch)} rows")
+                    result = _json_or_error_single_request(llm, prompt_text, temperature=scoring_temperature, max_tokens=scoring_max_tokens)
+                    unresolved_rows.extend(apply_result(f"{round_kind} batch {batch_index}/{len(batches)}", batch, result, round_index))
+                    completed += 1
+                    emit_scoring_progress(
+                        slot_base + completed,
+                        f"{source_name}: {round_kind} request {batch_index}/{len(batches)} complete",
+                    )
             else:
-                executor.shutdown(wait=True)
+                executor = ThreadPoolExecutor(max_workers=workers)
+                futures = {
+                    executor.submit(_json_or_error_single_request, llm, prompt_text, temperature=scoring_temperature, max_tokens=scoring_max_tokens): (batch_index, batch)
+                    for batch_index, batch, prompt_text in request_rows
+                }
+                pending_futures = set(futures)
+                try:
+                    while pending_futures:
+                        _raise_if_cancelled(should_cancel)
+                        done, pending_futures = wait(pending_futures, timeout=1.0, return_when=FIRST_COMPLETED)
+                        if not done:
+                            continue
+                        for future in done:
+                            batch_index, batch = futures[future]
+                            try:
+                                result = future.result()
+                            except Exception as exc:
+                                result = {"ok": False, "data": None, "error": str(exc)}
+                            unresolved_rows.extend(apply_result(f"{round_kind} batch {batch_index}/{len(batches)}", batch, result, round_index))
+                            completed += 1
+                            emit_scoring_progress(
+                                slot_base + completed,
+                                f"{source_name}: {round_kind} requests {completed}/{len(batches)} complete with {workers} workers",
+                            )
+                except JobCancelled:
+                    for future in pending_futures:
+                        future.cancel()
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise
+                else:
+                    executor.shutdown(wait=True)
+            seen_pending: set[int] = set()
+            unique_unresolved: list[dict] = []
+            for item in unresolved_rows:
+                if id(item) in seen_pending:
+                    continue
+                seen_pending.add(id(item))
+                unique_unresolved.append(item)
+            return unique_unresolved
+
+        pending_repair = execute_request_round(primary_batches, 0, 0)
+        for repair_round in range(1, repair_attempts + 1):
+            if not pending_repair:
+                break
+            repair_batches = list(_chunks(pending_repair, scoring_batch_size))
+            slot_base = primary_batch_count * repair_round
+            log(f"{source_name}: starting batched repair round {repair_round}/{repair_attempts} for {len(pending_repair)} rows in {len(repair_batches)} requests")
+            pending_repair = execute_request_round(repair_batches, repair_round, slot_base)
+            reserved_round_end = min(request_slot_total, primary_batch_count * (repair_round + 1))
+            emit_scoring_progress(reserved_round_end, f"{source_name}: repair round {repair_round}/{repair_attempts} complete")
+
+        score_unresolved = [item for item in pending_repair if str(item.get("reason_source") or "") != "llm abstract evaluation"]
+        reason_unresolved = [item for item in pending_repair if str(item.get("reason_source") or "") == "llm abstract evaluation"]
+        mark_items_unscored(score_unresolved)
+        for item in reason_unresolved:
+            item["reason_quality_invalid"] = True
+            item["llm_reason_repair_exhausted"] = True
+            item["llm_repair_attempts"] = repair_attempts
+            item.pop("llm_retry_exhausted", None)
+            item.pop("llm_retry_reason", None)
+            item.pop("llm_single_request_unresolved", None)
+        if reason_unresolved:
+            log(f"{source_name}: {len(reason_unresolved)} rows retained valid LLM scores but failed recommendation-reason quality after batched repair; recommendation gate will exclude them")
+        emit_scoring_progress(request_slot_total, f"{source_name}: global final scoring and bounded batched repair complete")
+        if rejection_counts:
+            log(f"{source_name}: final scoring rejection/repair diagnostics {json.dumps(rejection_counts, ensure_ascii=False, sort_keys=True)}")
         if cache_path is not None and score_cache_keys:
             stored_cache_entries = _store_final_llm_score_cache_entries(score_cache, score_cache_keys, scoring_items, config)
             if stored_cache_entries:
@@ -6071,7 +6324,18 @@ def _has_internal_find_public_text(text: object, *, zh: bool = True) -> bool:
         return False
     markers = _INTERNAL_FIND_PUBLIC_TEXT_MARKERS_ZH if zh else _INTERNAL_FIND_PUBLIC_TEXT_MARKERS_EN
     lowered = raw.lower()
-    return any(str(marker).lower() in lowered for marker in markers)
+    for marker in markers:
+        marker_text = str(marker)
+        # `Find` is an internal stage name only when the model preserves the
+        # product's capitalization.  Lower-casing it made normal prose such as
+        # "we find" and "the findings" fail the recommendation contract.
+        if marker_text == "Find":
+            if re.search(r"(?<![A-Za-z0-9_])Find(?![A-Za-z0-9_])", raw):
+                return True
+            continue
+        if marker_text.lower() in lowered:
+            return True
+    return False
 
 
 def _public_route_text(item: dict, *, en: bool = False) -> str:
@@ -6221,9 +6485,10 @@ def _ensure_recommendation_readability(item: dict, config: AppConfig | None = No
     for key in ("fit_explanation_en", "recommendation_note_en"):
         if item.get(key):
             item[key] = _sanitize_public_recommendation_text(item.get(key), zh=False)
+    had_persistent_quality_failure = bool(item.get("reason_quality_invalid"))
     if _recommendation_reason_unusable(item.get("reason_zh") or item.get("reason"), zh=True) or _recommendation_reason_unusable(item.get("reason_en"), zh=False):
         item["reason_quality_invalid"] = True
-    else:
+    elif not had_persistent_quality_failure:
         item.pop("reason_quality_invalid", None)
     item.setdefault("recommendation_audit_role", "boundary_or_borrowing" if boundary else (role or "direct_or_foundation"))
     return item
@@ -6402,6 +6667,8 @@ def _find_recommendation_invalid_reason(item: dict, config: AppConfig | None) ->
         return "missing_final_title_abstract_llm_scoring"
     if item.get("llm_final_scoring_skipped") or item.get("llm_retry_exhausted"):
         return str(item.get("llm_final_scoring_skip_reason") or item.get("llm_retry_reason") or "final_llm_scoring_unavailable")
+    if item.get("reason_quality_invalid"):
+        return str(item.get("llm_repair_reason") or "invalid_llm_response_text_quality")
     if not _has_real_abstract(item):
         return "missing_real_abstract"
     if item.get("abstract_fetch_failed"):
@@ -7253,6 +7520,7 @@ def _run_diagnostics(artifacts: dict) -> dict:
     llm_scored_count = sum(1 for item in evaluated if str(item.get("reason_source") or "") == "llm abstract evaluation")
     llm_skipped_count = sum(1 for item in evaluated if item.get("llm_final_scoring_skipped"))
     llm_retry_exhausted_count = sum(1 for item in evaluated if item.get("llm_retry_exhausted"))
+    reason_quality_invalid_count = sum(1 for item in evaluated if item.get("reason_quality_invalid"))
     abstract_fetch_failed_count = sum(1 for item in evaluated if item.get("abstract_fetch_failed"))
     local_fallback_count = sum(
         1
@@ -7315,6 +7583,7 @@ def _run_diagnostics(artifacts: dict) -> dict:
         "detail_fetched_candidates": len(evaluated),
         "venue_detail_fetched_candidates": len(evaluated),
         "llm_scored_candidates": llm_scored_count,
+        "llm_reason_quality_invalid_candidates": reason_quality_invalid_count,
         "recommended_papers": len(strong),
         "abstract_fetch_failed_candidates": abstract_fetch_failed_count,
         "category_scan_reports": len(category_rows),
@@ -7336,7 +7605,19 @@ def _run_diagnostics(artifacts: dict) -> dict:
             warnings.append({
                 "code": "llm_scoring_fallback_failures",
                 "severity": "warning",
-                "message": f"{llm_retry_exhausted_count} candidates did not yield a valid row in their single final-scoring batch request and remain excluded from user-visible Find recommendations. Inspect job logs for JSON parse errors/timeouts.",
+                "message": f"{llm_retry_exhausted_count} candidates did not yield a valid numeric scoring row after bounded batched repair and remain excluded from user-visible Find recommendations. Inspect job logs for structured rejection counts, JSON parse errors, and service failures.",
+            })
+        if reason_quality_invalid_count:
+            warnings.append({
+                "code": "llm_reason_quality_repair_exhausted",
+                "severity": "warning",
+                "message": f"{reason_quality_invalid_count} candidates retained valid LLM scores but their recommendation reasons remained invalid after bounded batched repair; they are counted as scored for audit but excluded from user-visible recommendations.",
+            })
+        if int(scoring_runtime.get("title_abstract_scoring_selected_count") or 0) > 0 and llm_scored_count == 0:
+            warnings.append({
+                "code": "final_llm_zero_valid_scores",
+                "severity": "error",
+                "message": "The final title+abstract scoring pool was non-empty, but no candidate produced a valid numeric LLM score after bounded batched repair. The run artifacts remain available for diagnosis, but a zero-score result must not be interpreted as a successful recommendation evaluation.",
             })
         if abstract_fetch_failed_count:
             warnings.append({
@@ -8691,6 +8972,7 @@ def run_find(
         log=log,
     )
     title_abstract_scoring_selected_count = sum(len(items) for _source, items, _sink in deferred_scoring_groups)
+    prepared_scoring_groups: list[tuple[str, list[dict], str]] = []
     for source_name, source_items, sink_name in deferred_scoring_groups:
         _raise_if_cancelled(should_cancel)
         if sink_name == "venue":
@@ -8749,16 +9031,24 @@ def run_find(
                     break
             source_items = [attach_quality_metadata(item) for item in source_items]
             _progress(detail_phase, len(source_items), max(1, len(source_items)), f"{display_name}: detail enrichment complete")
-        scored_items = _evaluate_items(source_items, effective_config, scoring_llm, source_name, log, should_cancel, _progress)
+        prepared_scoring_groups.append((source_name, list(source_items), sink_name))
+
+    all_scoring_items = [item for _source_name, source_items, _sink_name in prepared_scoring_groups for item in source_items]
+    scored_items = _evaluate_items(all_scoring_items, effective_config, scoring_llm, "all sources", log, should_cancel, _progress)
+    scored_ids_by_sink: dict[str, set[int]] = {}
+    for _source_name, source_items, sink_name in prepared_scoring_groups:
+        scored_ids_by_sink.setdefault(sink_name, set()).update(id(item) for item in source_items)
+    for sink_name, sink_item_ids in scored_ids_by_sink.items():
+        sink_scored_items = [item for item in scored_items if id(item) in sink_item_ids]
         if sink_name == "huggingface":
-            hf_items = scored_items[: config.max_recommended_papers]
+            hf_items = sink_scored_items[: config.max_recommended_papers]
             evaluated_candidates.extend(hf_items)
         elif sink_name == "github":
-            github_items = scored_items[: config.max_recommended_papers]
+            github_items = sink_scored_items[: config.max_recommended_papers]
             evaluated_candidates.extend(github_items)
         else:
-            evaluated_candidates.extend(scored_items)
-        _persist_find_progress(f"{source_name}_llm_scoring_complete")
+            evaluated_candidates.extend(sink_scored_items)
+    _persist_find_progress("all_sources_llm_scoring_complete")
 
     venue_papers = _dedupe_items(venue_papers)
     if venue_year_groups:

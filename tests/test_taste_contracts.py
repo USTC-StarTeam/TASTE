@@ -5636,7 +5636,7 @@ def test_find_bound_official_detail_can_correct_a_stale_bibliographic_title():
     assert unrelated["title"] == "Completely Different Paper on Language Models"
 
 
-def test_find_title_prefilter_scores_each_batch_once_and_falls_back_missing_rows(monkeypatch):
+def test_find_title_prefilter_repairs_missing_rows_in_one_batch(monkeypatch):
     find_pipeline = _load_find_pipeline()
     monkeypatch.setenv("USE_LLM_TITLE_FILTER", "1")
     monkeypatch.setenv("TITLE_FILTER_SEQUENTIAL", "1")
@@ -5706,19 +5706,18 @@ def test_find_title_prefilter_scores_each_batch_once_and_falls_back_missing_rows
     )
 
     assert len(selected) == 102
-    assert sum(item["reason_source"] == "llm title filter" for item in selected) == 99
+    assert sum(item["reason_source"] == "llm title filter" for item in selected) == 102
     fallback_rows = [item for item in selected if item.get("title_filter_fallback_used")]
-    assert len(fallback_rows) == 3
-    assert all(item["reason_source"] == "local title screen" for item in fallback_rows)
-    assert reports[0]["llm_title_scored_papers"] == 99
-    assert reports[0]["local_title_ranked_papers"] == 3
-    assert [len(call["aliases"]) for call in llm.calls] == [100, 2]
+    assert fallback_rows == []
+    assert reports[0]["llm_title_scored_papers"] == 102
+    assert reports[0]["local_title_ranked_papers"] == 0
+    assert [len(call["aliases"]) for call in llm.calls] == [100, 2, 3]
     assert all(call["single_request"] is True for call in llm.calls)
     assert all(call["max_tokens"] == 0 for call in llm.calls)
     assert all("paper-0:" not in call["prompt"] for call in llm.calls)
 
 
-def test_find_title_prefilter_falls_back_locally_without_retry(monkeypatch):
+def test_find_title_prefilter_batch_repair_exhaustion_falls_back_locally(monkeypatch):
     find_pipeline = _load_find_pipeline()
     monkeypatch.setenv("USE_LLM_TITLE_FILTER", "1")
     monkeypatch.setenv("TITLE_FILTER_SEQUENTIAL", "1")
@@ -5767,8 +5766,8 @@ def test_find_title_prefilter_falls_back_locally_without_retry(monkeypatch):
         title_filter_reports=reports,
     )
 
-    assert llm.calls == 1
-    assert llm.single_request_flags == [True]
+    assert llm.calls == 3
+    assert llm.single_request_flags == [True, True, True]
     assert len(selected) == 3
     assert all(item["reason_source"] == "local title screen" for item in selected)
     assert all(item["title_filter_fallback_used"] for item in selected)
@@ -5786,6 +5785,286 @@ def test_find_title_prefilter_falls_back_locally_without_retry(monkeypatch):
     )
     assert len(scoring_groups) == 1
     assert len(scoring_groups[0][1]) == 3
+
+
+def test_find_title_prefilter_parallel_fatal_error_does_not_start_repairs(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("USE_LLM_TITLE_FILTER", "1")
+    monkeypatch.setenv("TITLE_FILTER_SEQUENTIAL", "0")
+    monkeypatch.setenv("FIND_TITLE_SCORE_CACHE", "0")
+
+    class UnauthorizedTitleLLM:
+        enabled = True
+        timeout_sec = 120
+        provider = "openai_compatible"
+
+        def __init__(self):
+            self.call_sizes = []
+
+        def json_or_error(self, prompt, *, single_request=False, **_kwargs):
+            aliases = re.findall(r"^- (p\d{3}):", prompt, flags=re.MULTILINE)
+            self.call_sizes.append(len(aliases))
+            return {"ok": False, "data": None, "error": "HTTP 401 incorrect API key"}
+
+    items = [{
+        "id": f"paper-{index}",
+        "title": f"Protein design paper {index}",
+        "abstract": "Protein generation with diffusion.",
+        "venue": "TestVenue",
+        "year": 2026,
+    } for index in range(200)]
+    llm = UnauthorizedTitleLLM()
+
+    with pytest.raises(find_pipeline.FatalLLMConfigurationError):
+        find_pipeline._prefilter_titles(
+            items,
+            find_pipeline.AppConfig(
+                provider="openai_compatible",
+                research_interest="protein diffusion",
+                llm_concurrency=2,
+            ),
+            llm,
+            "TestVenue",
+            lambda _message: None,
+            lambda: False,
+            scan_all=True,
+        )
+
+    assert sorted(llm.call_sizes) == [100, 100]
+
+
+def test_find_title_prefilter_cancels_between_batched_repairs_and_restores_timeout(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("USE_LLM_TITLE_FILTER", "1")
+    monkeypatch.setenv("TITLE_FILTER_SEQUENTIAL", "1")
+    monkeypatch.setenv("TITLE_FILTER_BATCH_REPAIR_ATTEMPTS", "3")
+    monkeypatch.setenv("FIND_TITLE_SCORE_CACHE", "0")
+
+    class EmptyTitleLLM:
+        enabled = True
+        timeout_sec = 333
+        provider = "openai_compatible"
+
+        def __init__(self):
+            self.calls = 0
+
+        def json_or_error(self, _prompt, *, single_request=False, **_kwargs):
+            self.calls += 1
+            return {"ok": True, "data": {"scored": []}, "error": ""}
+
+    llm = EmptyTitleLLM()
+    items = [{
+        "id": f"paper-{index}",
+        "title": f"Protein design paper {index}",
+        "abstract": "Protein generation with diffusion.",
+        "venue": "TestVenue",
+        "year": 2026,
+    } for index in range(3)]
+
+    with pytest.raises(find_pipeline.JobCancelled):
+        find_pipeline._prefilter_titles(
+            items,
+            find_pipeline.AppConfig(
+                provider="openai_compatible",
+                research_interest="protein diffusion",
+                llm_concurrency=1,
+                title_filter_timeout_sec=17,
+            ),
+            llm,
+            "TestVenue",
+            lambda _message: None,
+            lambda: llm.calls >= 2,
+            scan_all=True,
+        )
+
+    assert llm.calls == 2
+    assert llm.timeout_sec == 333
+
+
+def test_find_title_prefilter_fills_one_hundred_item_request_across_official_categories(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("USE_LLM_TITLE_FILTER", "1")
+    monkeypatch.setenv("TITLE_FILTER_SEQUENTIAL", "1")
+    monkeypatch.setenv("FIND_TITLE_SCORE_CACHE", "0")
+
+    class CompleteTitleLLM:
+        enabled = True
+        timeout_sec = 120
+        provider = "openai_compatible"
+
+        def __init__(self):
+            self.call_sizes = []
+
+        def json_or_error(self, prompt, *, single_request=False, **_kwargs):
+            aliases = re.findall(r"^- (p\d{3}):", prompt, flags=re.MULTILINE)
+            self.call_sizes.append(len(aliases))
+            return {
+                "ok": True,
+                "data": {"scored": [{
+                    "id": alias,
+                    "fit_score": 7.0,
+                    "diversity_score": 5.0,
+                    "hit_directions": ["protein design"],
+                    "category": "protein",
+                    "reason": "标题与蛋白质设计研究方向相关。",
+                } for alias in aliases]},
+                "error": "",
+            }
+
+    items = [{
+        "id": f"official-{index}",
+        "title": f"Protein design paper {index}",
+        "abstract": "Protein generation with diffusion and reinforcement learning.",
+        "venue": "TestVenue",
+        "year": 2026,
+        "category": "Generative models" if index < 60 else "Reinforcement learning",
+        "classification_source": "official",
+    } for index in range(100)]
+    llm = CompleteTitleLLM()
+
+    find_pipeline._prefilter_titles(
+        items,
+        find_pipeline.AppConfig(
+            provider="openai_compatible",
+            research_topic="protein design",
+            research_interest="protein diffusion and reinforcement learning",
+            llm_concurrency=1,
+        ),
+        llm,
+        "TestVenue",
+        lambda _message: None,
+        lambda: False,
+        dynamic_title_filter=True,
+        scan_all=True,
+    )
+
+    assert llm.call_sizes == [100]
+
+
+def test_find_title_prefilter_consolidates_repairs_across_primary_batches(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("USE_LLM_TITLE_FILTER", "1")
+    monkeypatch.setenv("TITLE_FILTER_SEQUENTIAL", "1")
+    monkeypatch.setenv("FIND_TITLE_SCORE_CACHE", "0")
+
+    class OmitOnePerPrimaryBatchLLM:
+        enabled = True
+        timeout_sec = 120
+        provider = "openai_compatible"
+
+        def __init__(self):
+            self.call_sizes = []
+
+        def json_or_error(self, prompt, *, single_request=False, **_kwargs):
+            aliases = re.findall(r"^- (p\d{3}):", prompt, flags=re.MULTILINE)
+            self.call_sizes.append(len(aliases))
+            returned = aliases[:-1] if "main request" in prompt else aliases
+            return {
+                "ok": True,
+                "data": {"scored": [{
+                    "id": alias,
+                    "fit_score": 7.0,
+                    "diversity_score": 5.0,
+                    "hit_directions": ["protein design"],
+                    "category": "protein",
+                    "reason": "标题与蛋白质设计研究方向相关。",
+                } for alias in returned]},
+                "error": "",
+            }
+
+    items = [{
+        "id": f"paper-{index}",
+        "title": f"Protein design paper {index}",
+        "abstract": "Protein generation with diffusion.",
+        "venue": "TestVenue",
+        "year": 2026,
+    } for index in range(200)]
+    llm = OmitOnePerPrimaryBatchLLM()
+
+    selected = find_pipeline._prefilter_titles(
+        items,
+        find_pipeline.AppConfig(
+            provider="openai_compatible",
+            research_topic="protein design",
+            research_interest="protein diffusion",
+            llm_concurrency=1,
+        ),
+        llm,
+        "TestVenue",
+        lambda _message: None,
+        lambda: False,
+        scan_all=True,
+    )
+
+    assert llm.call_sizes == [100, 100, 2]
+    assert sum(item["reason_source"] == "llm title filter" for item in selected) == 200
+
+
+def test_find_title_prefilter_refills_batches_after_cache_hits(monkeypatch, tmp_path):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("USE_LLM_TITLE_FILTER", "1")
+    monkeypatch.setenv("TITLE_FILTER_SEQUENTIAL", "1")
+    monkeypatch.setattr(find_pipeline, "_title_llm_score_cache_enabled", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(find_pipeline, "_load_title_llm_score_cache", lambda: (tmp_path / "title-cache.json", {"entries": {}}))
+    monkeypatch.setattr(find_pipeline, "_title_llm_cache_title_index", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(find_pipeline, "_store_title_llm_score_cache_entries", lambda *_args, **_kwargs: 0)
+
+    def fake_apply_cache(item, *_args, **_kwargs):
+        index = int(str(item.get("id") or "").split("-")[-1])
+        if index >= 50:
+            return False
+        item["title_llm_fit_score"] = 7.0
+        item["fit_score"] = 7.0
+        item["diversity_score"] = 5.0
+        item["reason_source"] = "llm title filter"
+        return True
+
+    monkeypatch.setattr(find_pipeline, "_apply_cached_title_llm_score", fake_apply_cache)
+
+    class CompleteTitleLLM:
+        enabled = True
+        timeout_sec = 120
+        provider = "openai_compatible"
+
+        def __init__(self):
+            self.call_sizes = []
+
+        def json_or_error(self, prompt, *, single_request=False, **_kwargs):
+            aliases = re.findall(r"^- (p\d{3}):", prompt, flags=re.MULTILINE)
+            self.call_sizes.append(len(aliases))
+            return {
+                "ok": True,
+                "data": {"scored": [{
+                    "id": alias,
+                    "fit_score": 7.0,
+                    "diversity_score": 5.0,
+                    "hit_directions": ["protein design"],
+                    "category": "protein",
+                    "reason": "标题与蛋白质设计研究方向相关。",
+                } for alias in aliases]},
+                "error": "",
+            }
+
+    items = [{
+        "id": f"paper-{index}",
+        "title": f"Protein design paper {index}",
+        "abstract": "Protein generation with diffusion.",
+        "venue": "TestVenue",
+        "year": 2026,
+    } for index in range(200)]
+    llm = CompleteTitleLLM()
+
+    find_pipeline._prefilter_titles(
+        items,
+        find_pipeline.AppConfig(provider="openai_compatible", research_interest="protein diffusion", llm_concurrency=1),
+        llm,
+        "TestVenue",
+        lambda _message: None,
+        lambda: False,
+        scan_all=True,
+    )
+
+    assert llm.call_sizes == [100, 50]
 
 
 def test_find_json_recovery_keeps_completed_scoring_and_translation_rows():
@@ -5895,7 +6174,7 @@ def test_find_single_request_wrapper_rejects_kwargs_only_client():
     assert llm.calls == 0
 
 
-def test_find_abstract_scoring_scores_each_batch_once_and_marks_mismatched_id(monkeypatch):
+def test_find_abstract_scoring_repairs_mismatched_rows_in_one_batch(monkeypatch):
     find_pipeline = _load_find_pipeline()
     monkeypatch.setenv("ABSTRACT_SCORING_BATCH_SIZE", "10")
     monkeypatch.setenv("ABSTRACT_SCORING_MAX_BATCH_SIZE", "10")
@@ -5922,8 +6201,9 @@ def test_find_abstract_scoring_scores_each_batch_once_and_marks_mismatched_id(mo
                 "prompt": prompt,
             })
             rows = []
+            first_request = len(self.calls) == 1
             for index, alias in enumerate(aliases):
-                returned_id = "rewritten-paper-id" if len(aliases) > 1 and index == len(aliases) - 1 else alias
+                returned_id = "rewritten-paper-id" if first_request and index >= len(aliases) - 3 else alias
                 rows.append({
                     "id": returned_id,
                     "category": "protein generation",
@@ -5974,13 +6254,10 @@ def test_find_abstract_scoring_scores_each_batch_once_and_marks_mismatched_id(mo
     )
 
     assert len(evaluated) == 10
-    assert sum(item["reason_source"] == "llm abstract evaluation" for item in evaluated) == 9
+    assert sum(item["reason_source"] == "llm abstract evaluation" for item in evaluated) == 10
     unresolved = [item for item in evaluated if item["reason_source"] != "llm abstract evaluation"]
-    assert len(unresolved) == 1
-    assert unresolved[0]["llm_retry_exhausted"] is True
-    assert unresolved[0]["llm_retry_reason"] == "omitted-item"
-    assert not unresolved[0].get("recommend_for_deep_reading", False)
-    assert [len(call["aliases"]) for call in llm.calls] == [10]
+    assert unresolved == []
+    assert [len(call["aliases"]) for call in llm.calls] == [10, 3]
     assert all(call["single_request"] is True for call in llm.calls)
     assert all(call["max_tokens"] == 0 for call in llm.calls)
     assert all("ID: real-paper-" not in call["prompt"] for call in llm.calls)
@@ -6006,7 +6283,7 @@ def test_find_abstract_scoring_batch_size_is_hard_capped_at_ten(monkeypatch):
     assert batch_size == 10
 
 
-def test_find_abstract_scoring_multibatch_type_error_never_reissues_request(monkeypatch):
+def test_find_abstract_scoring_multibatch_failure_uses_one_batched_repair(monkeypatch):
     find_pipeline = _load_find_pipeline()
     monkeypatch.setenv("ABSTRACT_SCORING_BATCH_SIZE", "20")
     monkeypatch.setenv("ABSTRACT_SCORING_MAX_BATCH_SIZE", "20")
@@ -6080,12 +6357,257 @@ def test_find_abstract_scoring_multibatch_type_error_never_reissues_request(monk
         lambda _message: None,
     )
 
-    assert [len(call["aliases"]) for call in llm.calls] == [10, 10, 1]
+    assert [len(call["aliases"]) for call in llm.calls] == [10, 10, 1, 10]
     assert all(call["single_request"] is True for call in llm.calls)
-    assert sum(item["reason_source"] == "llm abstract evaluation" for item in evaluated) == 11
+    assert sum(item["reason_source"] == "llm abstract evaluation" for item in evaluated) == 21
     unresolved = [item for item in evaluated if item.get("llm_single_request_unresolved")]
-    assert len(unresolved) == 10
-    assert all(item["llm_retry_reason"] == "failed-batch" for item in unresolved)
+    assert unresolved == []
+
+
+def test_find_final_scoring_normalizes_observed_live_response_aliases(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("ABSTRACT_SCORING_MAX_WORKERS", "1")
+    monkeypatch.setenv("ABSTRACT_SCORING_WORKER_CAP", "1")
+    monkeypatch.setenv("FIND_FINAL_SCORE_CACHE", "0")
+
+    class LiveShapeLLM:
+        enabled = True
+        timeout_sec = 120
+        provider = "openai_compatible"
+
+        def json_or_error(self, prompt, *, single_request=False, **_kwargs):
+            aliases = re.findall(r"^ID: (p\d{3})$", prompt, flags=re.MULTILINE)
+            return {
+                "ok": True,
+                "data": {
+                    "evaluations": [{
+                        "id": alias,
+                        "category": "protein generation",
+                        "fit_score": 8.4,
+                        "diversity_score": 6.8,
+                        "recommend_for_deep_reading": True,
+                        "topic_evidence": "passed: protein diffusion",
+                        "topic_evidence_supported": True,
+                        "matched_topic_route": "protein diffusion",
+                        "topic_evidence_basis": "The abstract reports a controllable protein diffusion method.",
+                        "missing_topic_evidence": [],
+                        "hit_direction_chinese": ["可控蛋白质扩散"],
+                        "hit_direction_english": ["controllable protein diffusion"],
+                        "fit_explanation_chinese": "摘要明确提出可控蛋白质扩散模型。实验直接比较了生成质量。",
+                        "fit_explanation_english": "The abstract specifies a controllable protein diffusion model. Its experiments directly compare generation quality.",
+                        "recommendation_reason_chinese": "论文提出可控蛋白质扩散模型，与当前生成任务直接相关。其约束机制和生成质量评测可帮助比较方案，并可迁移到后续实验设计。",
+                        "recommendation_reason_english": "The paper presents a controllable protein diffusion model that directly fits the generation task. Its constraint mechanism and generation-quality evaluation support method comparison and transfer to later experiments.",
+                    } for alias in aliases],
+                },
+                "error": "",
+            }
+
+    item = {
+        "id": "live-shape",
+        "title": "Controllable protein diffusion",
+        "abstract": "We develop and evaluate a diffusion model for controllable protein generation.",
+        "source": "test",
+        "venue": "TestVenue",
+        "year": 2026,
+    }
+    evaluated = find_pipeline._evaluate_items(
+        [item],
+        find_pipeline.AppConfig(provider="openai_compatible", research_interest="controllable protein diffusion"),
+        LiveShapeLLM(),
+        "all sources",
+        lambda _message: None,
+    )
+
+    assert evaluated[0]["reason_source"] == "llm abstract evaluation"
+    assert evaluated[0]["reason_zh"].startswith("论文提出可控蛋白质扩散模型")
+    assert evaluated[0]["reason_en"].startswith("The paper presents a controllable protein diffusion model")
+    assert evaluated[0]["hit_directions_zh"] == ["可控蛋白质扩散"]
+    assert evaluated[0]["hit_directions_en"] == ["controllable protein diffusion"]
+
+
+def test_find_reason_quality_repair_is_batched_and_scored_count_is_monotonic(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("ABSTRACT_SCORING_BATCH_SIZE", "10")
+    monkeypatch.setenv("ABSTRACT_SCORING_MAX_BATCH_SIZE", "10")
+    monkeypatch.setenv("ABSTRACT_SCORING_MAX_WORKERS", "1")
+    monkeypatch.setenv("ABSTRACT_SCORING_WORKER_CAP", "1")
+    monkeypatch.setenv("OMITTED_ITEM_RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("FIND_FINAL_SCORE_CACHE", "0")
+
+    class ShortReasonLLM:
+        enabled = True
+        timeout_sec = 120
+        provider = "openai_compatible"
+
+        def __init__(self):
+            self.call_sizes = []
+
+        def json_or_error(self, prompt, *, single_request=False, **_kwargs):
+            aliases = re.findall(r"^ID: (p\d{3})$", prompt, flags=re.MULTILINE)
+            self.call_sizes.append(len(aliases))
+            return {
+                "ok": True,
+                "data": {"evaluations": [{
+                    "id": alias,
+                    "category": "protein generation",
+                    "fit_score": 8.0,
+                    "diversity_score": 6.0,
+                    "recommend_for_deep_reading": True,
+                    "topic_evidence": "passed: protein diffusion",
+                    "topic_evidence_supported": True,
+                    "matched_topic_route": "protein diffusion",
+                    "topic_evidence_basis": "The abstract evaluates protein diffusion.",
+                    "missing_topic_evidence": [],
+                    "hit_directions_zh": ["蛋白质扩散"],
+                    "hit_directions_en": ["protein diffusion"],
+                    "fit_explanation_zh": "摘要给出了蛋白质扩散模型。实验比较了生成质量。",
+                    "fit_explanation_en": "The abstract gives a protein diffusion model. Experiments compare generation quality.",
+                    "reason_zh": "该模型可用于蛋白质生成评测。",
+                    "reason_en": "The model can help protein generation evaluation.",
+                } for alias in aliases]},
+                "error": "",
+            }
+
+    items = [{
+        "id": f"short-{index}",
+        "title": f"Protein diffusion {index}",
+        "abstract": "We develop and evaluate a diffusion model for controllable protein generation.",
+        "source": "source-a" if index < 6 else "source-b",
+        "venue": "A" if index < 6 else "B",
+        "year": 2026,
+    } for index in range(10)]
+    llm = ShortReasonLLM()
+    progress_events = []
+
+    def progress(phase, current, total, _message, **kwargs):
+        progress_events.append((phase, current, total, dict(kwargs.get("count_updates") or {})))
+
+    evaluated = find_pipeline._evaluate_items(
+        items,
+        find_pipeline.AppConfig(provider="openai_compatible", research_interest="controllable protein diffusion"),
+        llm,
+        "all sources",
+        lambda _message: None,
+        progress=progress,
+    )
+
+    assert llm.call_sizes == [10, 10, 10]
+    assert all(item["reason_source"] == "llm abstract evaluation" for item in evaluated)
+    assert all(item.get("reason_quality_invalid") for item in evaluated)
+    assert not any(item.get("llm_retry_exhausted") for item in evaluated)
+    scoring_progress = [event for event in progress_events if event[0] == "abstract_scoring"]
+    assert scoring_progress
+    assert len({event[2] for event in scoring_progress}) == 1
+    assert [event[1] for event in scoring_progress] == sorted(event[1] for event in scoring_progress)
+    scored_counts = [event[3].get("llm_scored_candidates", 0) for event in scoring_progress]
+    assert scored_counts == sorted(scored_counts)
+    assert scored_counts[-1] == 10
+
+
+def test_find_final_scoring_retains_valid_scores_when_placeholder_prose_repairs_exhaust(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("ABSTRACT_SCORING_MAX_WORKERS", "1")
+    monkeypatch.setenv("ABSTRACT_SCORING_WORKER_CAP", "1")
+    monkeypatch.setenv("OMITTED_ITEM_RETRY_ATTEMPTS", "1")
+    monkeypatch.setenv("FIND_FINAL_SCORE_CACHE", "0")
+
+    class PlaceholderProseLLM:
+        enabled = True
+        timeout_sec = 120
+        provider = "openai_compatible"
+
+        def __init__(self):
+            self.call_sizes = []
+
+        def json_or_error(self, prompt, *, single_request=False, **_kwargs):
+            aliases = re.findall(r"^ID: (p\d{3})$", prompt, flags=re.MULTILINE)
+            self.call_sizes.append(len(aliases))
+            return {
+                "ok": True,
+                "data": {"evaluations": [{
+                    "id": alias,
+                    "category": "short category",
+                    "fit_score": 8.4,
+                    "diversity_score": 6.8,
+                    "recommend_for_deep_reading": True,
+                    "topic_evidence": "passed: protein diffusion",
+                    "topic_evidence_supported": True,
+                    "matched_topic_route": "protein diffusion",
+                    "topic_evidence_basis": "The abstract reports a controllable protein diffusion method.",
+                    "missing_topic_evidence": [],
+                    "hit_directions_zh": ["可控蛋白质扩散"],
+                    "hit_directions_en": ["controllable protein diffusion"],
+                    "fit_explanation_zh": "摘要明确提出可控蛋白质扩散模型。实验直接比较了生成质量。",
+                    "fit_explanation_en": "The abstract specifies a controllable protein diffusion model. Its experiments directly compare generation quality.",
+                    "reason_zh": "论文提出可控蛋白质扩散模型，与当前生成任务直接相关。其约束机制和生成质量评测可帮助比较方案，并可迁移到后续实验设计。",
+                    "reason_en": "The paper presents a controllable protein diffusion model that directly fits the generation task. Its constraint mechanism and generation-quality evaluation support method comparison and transfer to later experiments.",
+                } for alias in aliases]},
+                "error": "",
+            }
+
+    item = {
+        "id": "placeholder-prose",
+        "title": "Controllable protein diffusion",
+        "abstract": "We develop and evaluate a diffusion model for controllable protein generation.",
+        "source": "test",
+        "venue": "TestVenue",
+        "year": 2026,
+    }
+    llm = PlaceholderProseLLM()
+    config = find_pipeline.AppConfig(
+        provider="openai_compatible",
+        research_interest="controllable protein diffusion",
+        max_recommended_papers=1,
+    )
+    evaluated = find_pipeline._evaluate_items(
+        [item],
+        config,
+        llm,
+        "all sources",
+        lambda _message: None,
+    )
+
+    assert llm.call_sizes == [1, 1]
+    assert evaluated[0]["reason_source"] == "llm abstract evaluation"
+    assert evaluated[0]["fit_score"] == 8.4
+    assert evaluated[0]["diversity_score"] == 6.8
+    assert evaluated[0]["reason_quality_invalid"] is True
+    assert evaluated[0]["llm_reason_repair_exhausted"] is True
+    assert not evaluated[0].get("llm_retry_exhausted")
+    assert find_pipeline._recommended(evaluated, config, source_count=1) == []
+    assert evaluated[0]["reason_quality_invalid"] is True
+    assert find_pipeline._final_llm_score_cache_entry(evaluated[0], "test-key", config) == {}
+
+
+def test_find_diagnostics_distinguishes_zero_scores_from_invalid_reason_quality():
+    find_pipeline = _load_find_pipeline()
+    zero_score_diagnostics = find_pipeline._run_diagnostics({
+        "evaluated_candidates": [{
+            "id": "missing-score",
+            "reason_source": "adaptive profile fallback",
+            "llm_retry_exhausted": True,
+        }],
+        "strong_recommendations": [],
+        "scoring_runtime": {"title_abstract_scoring_selected_count": 1},
+    })
+    warning_codes = {row["code"] for row in zero_score_diagnostics["warnings"]}
+    assert "final_llm_zero_valid_scores" in warning_codes
+    assert zero_score_diagnostics["survey_stats"]["llm_scored_candidates"] == 0
+
+    invalid_reason_diagnostics = find_pipeline._run_diagnostics({
+        "evaluated_candidates": [{
+            "id": "valid-score-invalid-reason",
+            "reason_source": "llm abstract evaluation",
+            "reason_quality_invalid": True,
+        }],
+        "strong_recommendations": [],
+        "scoring_runtime": {"title_abstract_scoring_selected_count": 1},
+    })
+    invalid_warning_codes = {row["code"] for row in invalid_reason_diagnostics["warnings"]}
+    assert "llm_reason_quality_repair_exhausted" in invalid_warning_codes
+    assert "final_llm_zero_valid_scores" not in invalid_warning_codes
+    assert invalid_reason_diagnostics["survey_stats"]["llm_scored_candidates"] == 1
+    assert invalid_reason_diagnostics["survey_stats"]["llm_reason_quality_invalid_candidates"] == 1
 
 
 def test_find_recommendations_require_topic_evidence_without_forcing_the_target():
@@ -8864,11 +9386,10 @@ def test_find_collects_all_selected_sources_before_final_scoring(monkeypatch, tm
         }
 
     def fake_evaluate_items(items, _config, _llm, source_name, *_args, **_kwargs):
-        events.append(f"score:{source_name}")
+        events.append(f"score:{source_name}:{len(items)}")
         rows = []
         for item in items:
-            row = dict(item)
-            row.update({
+            item.update({
                 "reason_source": "llm abstract evaluation",
                 "fit_score": 8.2,
                 "diversity_score": 6.4,
@@ -8883,7 +9404,7 @@ def test_find_collects_all_selected_sources_before_final_scoring(monkeypatch, tm
                 "fit_explanation_zh": "摘要包含条件生成证据。",
                 "fit_explanation_en": "The abstract contains conditional generation evidence.",
             })
-            rows.append(row)
+            rows.append(item)
         return rows
 
     monkeypatch.setattr(find_pipeline, "create_run_dir", fake_create_run_dir)
@@ -8937,12 +9458,9 @@ def test_find_collects_all_selected_sources_before_final_scoring(monkeypatch, tm
     source_collection_index = events.index("phase:source_collection_complete")
     first_score_index = min(index for index, event in enumerate(events) if event.startswith("score:"))
     assert source_collection_index < first_score_index
-    assert {event for event in events if event.startswith("score:")} == {
-        "score:nature",
-        "score:science",
-        "score:arxiv",
-        "score:biorxiv",
-    }
+    assert [event for event in events if event.startswith("score:")] == ["score:all sources:4"]
+    assert len(result["evaluated_candidates"]) == 4
+    assert {item["source"] for item in result["evaluated_candidates"]} == {"nature", "science", "arxiv", "biorxiv"}
 
 
 def test_find_title_abstract_scoring_groups_use_global_rank_and_deduplication():
@@ -10364,6 +10882,12 @@ def test_find_preserves_natural_llm_recommendation_reason_without_template_rewri
     assert find_pipeline._recommendation_reason_unusable(
         "The generation method is relevant to the research task and works without extra labels. Its model evaluation helps compare approaches and supports transferable experimental design.", zh=False
     ) is False
+    assert find_pipeline._has_internal_find_public_text(
+        "We find that the model improves the benchmark. The findings support reuse in later evaluation.", zh=False
+    ) is False
+    assert find_pipeline._has_internal_find_public_text(
+        "The Find-stage score is only an internal candidate signal.", zh=False
+    ) is True
     reason_zh = (
         "论文研究条件蛋白生成中的结构约束，与项目关注的可控蛋白设计问题直接契合。"
         "其条件编码与生成评测能够帮助比较现有路线的约束表达能力，并为实验基线选择提供依据。"
@@ -10390,7 +10914,7 @@ def test_find_preserves_natural_llm_recommendation_reason_without_template_rewri
     fixed_opener = "对当前研究方向来说，该论文提供可借鉴的方法结构、评测信号和实验设计参考，能够支持后续研究。"
     assert find_pipeline._recommendation_reason_has_generic_opener(fixed_opener, zh=True) is True
     assert find_pipeline._recommendation_reason_unusable(fixed_opener, zh=True) is True
-    assert find_pipeline.FINAL_LLM_SCORE_CACHE_PROMPT_POLICY == "final_title_abstract_prompt_v33_unanchored_complete_abstract_strict_reason"
+    assert find_pipeline.FINAL_LLM_SCORE_CACHE_PROMPT_POLICY == "final_title_abstract_prompt_v34_canonical_fields_batched_repair"
     source = (ROOT / "modules" / "finding" / "scripts" / "flow" / "pipeline.py").read_text(encoding="utf-8")
     assert "do not use a prescribed opening, generic research-direction boilerplate" in source
     assert "def zh_reason()" not in source

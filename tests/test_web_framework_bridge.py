@@ -1019,6 +1019,13 @@ def test_run_frontend_runtime_tuning_replaces_stale_abstract_scoring_values():
     assert 'runtime_tuning["ABSTRACT_SCORING_MAX_WORKERS"] = str(abstract_scoring_max_workers)' in text
     assert 'runtime_tuning["ABSTRACT_SCORING_WORKER_CAP"] = str(max(1, abstract_scoring_max_workers))' in text
     assert 'runtime_tuning["ABSTRACT_SCORING_TIMEOUT_SEC"] = str(abstract_scoring_timeout_sec)' in text
+
+
+def test_run_frontend_does_not_fabricate_llm_scored_count_from_evaluated_rows():
+    text = (ROOT / "framework" / "scripts" / "orchestration" / "run_frontend.py").read_text(encoding="utf-8")
+
+    assert '"llm_scored_candidates": llm_scored,' in text
+    assert '"llm_scored_candidates": llm_scored or len(evaluated),' not in text
     assert 'runtime_tuning["ARXIV_FULL_SCAN"] = str(os.environ.get("ARXIV_FULL_SCAN") or "0")' in text
     assert 'runtime_tuning["ARXIV_MAX_QUERIES"] = str(arxiv_max_queries)' in text
     assert 'runtime_tuning["ARXIV_TIMEOUT_SEC"] = str(arxiv_timeout_sec)' in text
@@ -2050,6 +2057,66 @@ def test_web_find_progress_projection_is_end_to_end_and_monotonic():
     assert venue_start["stage_key"] == "venue_pipeline"
     assert 0 < venue_start["stage_percent"] < venue_later["stage_percent"] < 34
     assert venue_later["overall_percent"] >= venue_start["overall_percent"]
+
+
+def test_web_find_progress_projects_all_source_scoring_as_one_global_stage():
+    from auto_research.web import server as web_server
+
+    web_server._FIND_OVERALL_PROGRESS_CACHE.clear()
+    base = {
+        "run_id": "find_global_scoring",
+        "selection": {
+            "venue_ids": ["iclr"],
+            "include_arxiv": True,
+            "include_biorxiv": True,
+            "include_nature": True,
+        },
+        "counts": {"evaluated_candidates": 1000, "llm_scored_candidates": 500},
+    }
+    halfway = web_server._find_progress_projection({
+        **base,
+        "live_progress": {
+            "phase": "abstract_scoring",
+            "current": 200,
+            "total": 400,
+            "percent": 50,
+            "message": "all sources: scored global request slot 200/400",
+        },
+    })
+    later_repair = web_server._find_progress_projection({
+        **base,
+        "counts": {"evaluated_candidates": 1000, "llm_scored_candidates": 900},
+        "live_progress": {
+            "phase": "abstract_scoring",
+            "current": 300,
+            "total": 400,
+            "percent": 75,
+            "message": "all sources: repair round 2 request slot 300/400",
+        },
+    })
+
+    assert halfway["stage_key"] == "llm_evaluation"
+    assert halfway["stage_percent"] == 55
+    assert later_repair["stage_percent"] == 72
+    assert later_repair["overall_percent"] > halfway["overall_percent"]
+    assert later_repair["raw_current"] == 300
+    assert later_repair["raw_total"] == 400
+
+    web_server._FIND_OVERALL_PROGRESS_CACHE.clear()
+    preparing = web_server._find_progress_projection({
+        **base,
+        "run_id": "find_global_prepare",
+        "live_progress": {
+            "phase": "final_ranking_prepare",
+            "current": 5,
+            "total": 10,
+            "percent": 50,
+            "message": "Preparing all sources: paper 5",
+        },
+    })
+
+    assert preparing["stage_key"] == "llm_evaluation"
+    assert preparing["stage_percent"] == 10
 
 
 def test_web_find_worker_waits_for_current_web_job_run_binding(monkeypatch, tmp_path):

@@ -1,5 +1,7 @@
 # Find Single-Request Scoring Implementation Plan
 
+> Superseded by `2026-08-11-find-batched-repair-and-progress.md`. This file records the earlier no-repair implementation and is not the current scoring contract.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Enforce one LLM network request for each title batch of at most 100 papers and each final title-plus-abstract batch of at most 10 papers.

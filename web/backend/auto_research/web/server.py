@@ -7502,8 +7502,11 @@ def _find_progress_projection(find_progress: dict[str, Any]) -> dict[str, Any]:
         ]
         source_match = re.match(r"^([^:]{1,40}):", message)
         source_name = str(source_match.group(1) if source_match else "").strip().lower().replace(" ", "_")
+        if re.match(r"^preparing\s+all\s+(?:sources|channels)\s*:", message, flags=re.IGNORECASE):
+            source_name = "all_sources"
         if raw_phase.endswith("_llm_scoring_complete"):
             source_name = raw_phase.removesuffix("_llm_scoring_complete")
+        global_scoring = source_name in {"all_sources", "all_channels"}
         source_index = scoring_sources.index(source_name) if source_name in scoring_sources else 0
         if raw_phase == "final_detail_fetch":
             source_fraction = 0.02 + (raw_percent / 100) * 0.08
@@ -7517,7 +7520,10 @@ def _find_progress_projection(find_progress: dict[str, Any]) -> dict[str, Any]:
             source_fraction = 0.90 + (raw_percent / 100) * 0.08
         else:
             source_fraction = 1.0
-        stage_percent = round(((source_index + source_fraction) / max(1, len(scoring_sources))) * 100)
+        if global_scoring:
+            stage_percent = round(source_fraction * 100)
+        else:
+            stage_percent = round(((source_index + source_fraction) / max(1, len(scoring_sources))) * 100)
     elif raw_phase in external_phases:
         stage_index = 3
         stage_key = "extended_sources"
