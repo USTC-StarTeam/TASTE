@@ -1684,9 +1684,13 @@ def _json_or_error_single_request(llm: LLMClient, prompt: str, *, temperature: f
         return {"ok": False, "data": None, "error": f"LLM client strict-mode capability inspection failed: {exc}"}
     except ValueError as exc:
         return {"ok": False, "data": None, "error": f"LLM client strict-mode capability inspection failed: {exc}"}
-    accepts_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
-    if "single_request" not in parameters and not accepts_kwargs:
+    single_request_parameter = parameters.get("single_request")
+    if single_request_parameter is None or single_request_parameter.kind not in {
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    }:
         return {"ok": False, "data": None, "error": "LLM client does not support strict single-request scoring"}
+    accepts_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
     kwargs: dict[str, object] = {"single_request": True}
     if "temperature" in parameters or accepts_kwargs:
         kwargs["temperature"] = temperature

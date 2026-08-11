@@ -5650,12 +5650,12 @@ def test_find_title_prefilter_scores_each_batch_once_and_falls_back_missing_rows
         def __init__(self):
             self.calls = []
 
-        def json_or_error(self, prompt, **kwargs):
+        def json_or_error(self, prompt, *, single_request=False, **kwargs):
             aliases = re.findall(r"^- (p\d{3}):", prompt, flags=re.MULTILINE)
             self.calls.append({
                 "aliases": aliases,
                 "max_tokens": kwargs.get("max_tokens"),
-                "single_request": kwargs.get("single_request"),
+                "single_request": single_request,
                 "prompt": prompt,
             })
             returned = aliases[:-3] if len(aliases) == 100 else aliases
@@ -5733,9 +5733,9 @@ def test_find_title_prefilter_falls_back_locally_without_retry(monkeypatch):
             self.calls = 0
             self.single_request_flags = []
 
-        def json_or_error(self, _prompt, **_kwargs):
+        def json_or_error(self, _prompt, *, single_request=False, **_kwargs):
             self.calls += 1
-            self.single_request_flags.append(_kwargs.get("single_request"))
+            self.single_request_flags.append(single_request)
             return {"ok": True, "data": {"scored": []}, "error": ""}
 
     items = [
@@ -5878,6 +5878,23 @@ def test_find_single_request_wrapper_does_not_invoke_legacy_client():
     assert llm.calls == 0
 
 
+def test_find_single_request_wrapper_rejects_kwargs_only_client():
+    find_pipeline = _load_find_pipeline()
+
+    class KwargsIgnoringLegacyClient:
+        calls = 0
+
+        def json_or_error(self, _prompt, **_kwargs):
+            self.calls += 1
+            return {"ok": True, "data": {}, "error": ""}
+
+    llm = KwargsIgnoringLegacyClient()
+    result = find_pipeline._json_or_error_single_request(llm, "score this batch", max_tokens=0)
+
+    assert result["ok"] is False
+    assert llm.calls == 0
+
+
 def test_find_abstract_scoring_scores_each_batch_once_and_marks_mismatched_id(monkeypatch):
     find_pipeline = _load_find_pipeline()
     monkeypatch.setenv("ABSTRACT_SCORING_BATCH_SIZE", "10")
@@ -5896,12 +5913,12 @@ def test_find_abstract_scoring_scores_each_batch_once_and_marks_mismatched_id(mo
         def __init__(self):
             self.calls = []
 
-        def json_or_error(self, prompt, **kwargs):
+        def json_or_error(self, prompt, *, single_request=False, **kwargs):
             aliases = re.findall(r"^ID: (p\d{3})$", prompt, flags=re.MULTILINE)
             self.calls.append({
                 "aliases": aliases,
                 "max_tokens": kwargs.get("max_tokens"),
-                "single_request": kwargs.get("single_request"),
+                "single_request": single_request,
                 "prompt": prompt,
             })
             rows = []
@@ -6007,10 +6024,10 @@ def test_find_abstract_scoring_multibatch_type_error_never_reissues_request(monk
             self.calls = []
             self.raised = False
 
-        def json_or_error(self, prompt, **kwargs):
+        def json_or_error(self, prompt, *, single_request=False, **kwargs):
             aliases = re.findall(r"^ID: (p\d{3})$", prompt, flags=re.MULTILINE)
-            self.calls.append({"aliases": aliases, "single_request": kwargs.get("single_request")})
-            if len(self.calls) == 2 and kwargs.get("single_request") and not self.raised:
+            self.calls.append({"aliases": aliases, "single_request": single_request})
+            if len(self.calls) == 2 and single_request and not self.raised:
                 self.raised = True
                 raise TypeError("single_request post-I/O failure")
             rows = [
