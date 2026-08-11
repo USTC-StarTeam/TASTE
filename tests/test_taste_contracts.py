@@ -1118,6 +1118,14 @@ def test_reading_article_markdown_rejects_invalid_web_katex(monkeypatch):
         ) == "invalid_katex_syntax"
 
 
+def test_frontend_contains_wide_display_math_inside_markdown_card():
+    styles = (ROOT / "web" / "frontend" / "client" / "src" / "styles.css").read_text(encoding="utf-8")
+
+    display_rule = styles.split(".markdownBody .katex-display {", 1)[1].split("}", 1)[0]
+    assert "overflow-x: auto;" in display_rule
+    assert "overflow-y: hidden;" in display_rule
+
+
 @pytest.mark.parametrize("repair_succeeds", [True, False])
 def test_reading_retries_content_quality_failure_and_preserves_exact_status(monkeypatch, repair_succeeds):
     read_pipeline = _load_reading_pipeline()
