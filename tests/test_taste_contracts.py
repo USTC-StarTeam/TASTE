@@ -5861,6 +5861,23 @@ def test_find_llm_client_single_request_disables_parse_retry(monkeypatch):
     assert calls == 1
 
 
+def test_find_single_request_wrapper_does_not_invoke_legacy_client():
+    find_pipeline = _load_find_pipeline()
+
+    class LegacyClient:
+        calls = 0
+
+        def json_or_error(self, _prompt):
+            self.calls += 1
+            return {"ok": True, "data": {}, "error": ""}
+
+    llm = LegacyClient()
+    result = find_pipeline._json_or_error_single_request(llm, "score this batch", max_tokens=0)
+
+    assert result["ok"] is False
+    assert llm.calls == 0
+
+
 def test_find_abstract_scoring_scores_each_batch_once_and_marks_mismatched_id(monkeypatch):
     find_pipeline = _load_find_pipeline()
     monkeypatch.setenv("ABSTRACT_SCORING_BATCH_SIZE", "10")
@@ -5970,6 +5987,88 @@ def test_find_abstract_scoring_batch_size_is_hard_capped_at_ten(monkeypatch):
     )
 
     assert batch_size == 10
+
+
+def test_find_abstract_scoring_multibatch_type_error_never_reissues_request(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("ABSTRACT_SCORING_BATCH_SIZE", "20")
+    monkeypatch.setenv("ABSTRACT_SCORING_MAX_BATCH_SIZE", "20")
+    monkeypatch.setenv("ABSTRACT_SCORING_MAX_WORKERS", "1")
+    monkeypatch.setenv("ABSTRACT_SCORING_WORKER_CAP", "1")
+    monkeypatch.setenv("FIND_FINAL_SCORE_CACHE", "0")
+
+    class TypeErrorAfterIoLLM:
+        enabled = True
+        timeout_sec = 120
+        retries = 3
+        provider = "openai_compatible"
+
+        def __init__(self):
+            self.calls = []
+            self.raised = False
+
+        def json_or_error(self, prompt, **kwargs):
+            aliases = re.findall(r"^ID: (p\d{3})$", prompt, flags=re.MULTILINE)
+            self.calls.append({"aliases": aliases, "single_request": kwargs.get("single_request")})
+            if len(self.calls) == 2 and kwargs.get("single_request") and not self.raised:
+                self.raised = True
+                raise TypeError("single_request post-I/O failure")
+            rows = [
+                {
+                    "id": alias,
+                    "category": "protein generation",
+                    "fit_score": 8.1,
+                    "diversity_score": 6.2,
+                    "recommend_for_deep_reading": True,
+                    "topic_evidence": "passed: protein diffusion",
+                    "topic_evidence_supported": True,
+                    "matched_topic_route": "protein diffusion",
+                    "topic_evidence_basis": "The abstract evaluates protein diffusion generation.",
+                    "missing_topic_evidence": [],
+                    "hit_directions_zh": ["蛋白质扩散生成"],
+                    "hit_directions_en": ["protein diffusion generation"],
+                    "fit_explanation_zh": "摘要给出了蛋白质扩散生成方法与实验结果。该方法可用于当前研究。",
+                    "fit_explanation_en": "The abstract presents a protein diffusion method and results. It is reusable for this project.",
+                    "reason_zh": "论文提出的可控生成方法与当前研究任务契合。其约束策略可帮助方法比较，并为评测设计提供可迁移借鉴。",
+                    "reason_en": "The controlled-generation method fits the current research task. Its constraint strategy helps compare methods and provides reusable evaluation design.",
+                }
+                for alias in aliases
+            ]
+            return {"ok": True, "data": {"evaluations": rows}, "error": ""}
+
+    items = [
+        {
+            "id": f"real-paper-{index}",
+            "title": f"Protein diffusion study {index}",
+            "abstract": "We develop and evaluate a diffusion method for controllable protein generation.",
+            "source": "test",
+            "venue": "TestVenue",
+            "year": 2026,
+        }
+        for index in range(21)
+    ]
+    llm = TypeErrorAfterIoLLM()
+    evaluated = find_pipeline._evaluate_items(
+        items,
+        find_pipeline.AppConfig(
+            provider="openai_compatible",
+            research_topic="protein diffusion",
+            research_interest="controllable protein generation",
+            title_abstract_scoring_limit=21,
+            abstract_scoring_batch_size=20,
+            abstract_scoring_max_workers=1,
+        ),
+        llm,
+        "TestVenue",
+        lambda _message: None,
+    )
+
+    assert [len(call["aliases"]) for call in llm.calls] == [10, 10, 1]
+    assert all(call["single_request"] is True for call in llm.calls)
+    assert sum(item["reason_source"] == "llm abstract evaluation" for item in evaluated) == 11
+    unresolved = [item for item in evaluated if item.get("llm_single_request_unresolved")]
+    assert len(unresolved) == 10
+    assert all(item["llm_retry_reason"] == "failed-batch" for item in unresolved)
 
 
 def test_find_recommendations_require_topic_evidence_without_forcing_the_target():

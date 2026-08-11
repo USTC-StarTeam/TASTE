@@ -4,6 +4,7 @@ from __future__ import annotations
 # ---- find pipeline ----
 
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -1674,17 +1675,30 @@ def _json_or_error(llm: LLMClient, prompt: str, *, temperature: float | None = N
 
 
 def _json_or_error_single_request(llm: LLMClient, prompt: str, *, temperature: float | None = None, max_tokens: int | None = None) -> dict:
+    method = getattr(llm, "json_or_error", None)
+    if not callable(method):
+        return {"ok": False, "data": None, "error": "LLM client does not provide json_or_error"}
     try:
-        return llm.json_or_error(
-            prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            single_request=True,
-        )
+        parameters = inspect.signature(method).parameters
     except TypeError as exc:
-        if "single_request" not in str(exc):
-            raise
-        return _json_or_error(llm, prompt, temperature=temperature, max_tokens=max_tokens)
+        return {"ok": False, "data": None, "error": f"LLM client strict-mode capability inspection failed: {exc}"}
+    except ValueError as exc:
+        return {"ok": False, "data": None, "error": f"LLM client strict-mode capability inspection failed: {exc}"}
+    accepts_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+    if "single_request" not in parameters and not accepts_kwargs:
+        return {"ok": False, "data": None, "error": "LLM client does not support strict single-request scoring"}
+    kwargs: dict[str, object] = {"single_request": True}
+    if "temperature" in parameters or accepts_kwargs:
+        kwargs["temperature"] = temperature
+    if "max_tokens" in parameters or accepts_kwargs:
+        kwargs["max_tokens"] = max_tokens
+    try:
+        result = method(prompt, **kwargs)
+    except TypeError as exc:
+        return {"ok": False, "data": None, "error": f"LLM strict single-request call failed: {exc}"}
+    if not isinstance(result, dict):
+        return {"ok": False, "data": None, "error": "LLM strict single-request call returned a non-object result"}
+    return result
 
 
 def _llm_live_gate(llm: LLMClient) -> dict:
