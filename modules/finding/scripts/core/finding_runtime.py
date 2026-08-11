@@ -1115,7 +1115,14 @@ class LLMClient:
             "api_mode": self.api_mode or "chat_completions",
         }
 
-    def chat(self, prompt: str, temperature: float | None = None, max_tokens: int | None = None) -> str:
+    def chat(
+        self,
+        prompt: str,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        *,
+        single_request: bool = False,
+    ) -> str:
         if not self.enabled:
             raise RuntimeError("LLM is not configured")
         api_mode = str(self.api_mode or "chat_completions").strip().lower()
@@ -1189,7 +1196,8 @@ class LLMClient:
                 method="POST",
             )
             last_error: Exception | None = None
-            for attempt in range(1, self.retries + 1):
+            request_attempts = 1 if single_request else self.retries
+            for attempt in range(1, request_attempts + 1):
                 try:
                     with urllib.request.urlopen(req, timeout=self.timeout_sec) as response:
                         raw = json.loads(response.read().decode("utf-8", "ignore"))
@@ -1200,12 +1208,12 @@ class LLMClient:
                 except urllib.error.HTTPError as exc:
                     body = exc.read().decode("utf-8", "ignore")[:800]
                     last_error = RuntimeError(f"LLM HTTP {exc.code} via {self.api_mode or 'chat_completions'}: {body}")
-                    if exc.code not in retry_statuses or attempt >= self.retries:
+                    if exc.code not in retry_statuses or attempt >= request_attempts:
                         raise last_error from exc
                 except (urllib.error.URLError, TimeoutError, RuntimeError) as exc:
                     last_error = exc
-                    if attempt >= self.retries:
-                        raise RuntimeError(f"LLM request failed via {self.api_mode or 'chat_completions'} after {self.retries} attempts: {exc}") from exc
+                    if attempt >= request_attempts:
+                        raise RuntimeError(f"LLM request failed via {self.api_mode or 'chat_completions'} after {request_attempts} attempts: {exc}") from exc
                 retry_text = str(last_error or "").lower()
                 slow_provider = any(marker in str(self.base_url or "").lower() for marker in ["sensenova", "xiaomi", "mi.com", "bigmodel.cn"])
                 rate_limited = any(marker in retry_text for marker in ["429", "rate", "rpm", "too many", "timeout", "timed out"])
@@ -1216,12 +1224,13 @@ class LLMClient:
             raise RuntimeError(f"LLM request failed via {self.api_mode or 'chat_completions'}: {last_error}")
 
         attempts: list[tuple[bool, bool]] = [(True, True)]
-        if response_format in {"json", "json_object"}:
-            attempts.append((False, True))
-        if disable_thinking:
-            attempts.append((response_format in {"json", "json_object"}, False))
+        if not single_request:
             if response_format in {"json", "json_object"}:
-                attempts.append((False, False))
+                attempts.append((False, True))
+            if disable_thinking:
+                attempts.append((response_format in {"json", "json_object"}, False))
+                if response_format in {"json", "json_object"}:
+                    attempts.append((False, False))
         last_error: Exception | None = None
         seen: set[tuple[bool, bool]] = set()
         for include_response_format, include_thinking_controls in attempts:
@@ -1253,14 +1262,26 @@ class LLMClient:
         except Exception:
             return None
 
-    def json_or_error(self, prompt: str, temperature: float | None = None, max_tokens: int | None = None) -> dict:
+    def json_or_error(
+        self,
+        prompt: str,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        *,
+        single_request: bool = False,
+    ) -> dict:
         raw_text = ""
         try:
-            raw_text = self.chat(prompt, temperature=temperature, max_tokens=max_tokens)
+            raw_text = self.chat(
+                prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                single_request=single_request,
+            )
             return {"ok": True, "data": extract_json(raw_text), "error": "", "raw_text": raw_text[:4000]}
         except Exception as first_exc:
             parse_error = str(first_exc)
-            if raw_text and any(token in parse_error.lower() for token in ["closing bracket", "unterminated", "expecting", "delimiter"]):
+            if not single_request and raw_text and any(token in parse_error.lower() for token in ["closing bracket", "unterminated", "expecting", "delimiter"]):
                 try:
                     retry_tokens = 0 if max_tokens is not None and int(max_tokens) <= 0 else max(self.max_tokens * 2, int(os.environ.get("LLM_PARSE_RETRY_MAX_TOKENS", "12000") or 12000))
                     raw_text = self.chat(prompt, temperature=temperature, max_tokens=retry_tokens)

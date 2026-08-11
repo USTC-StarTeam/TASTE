@@ -5636,13 +5636,13 @@ def test_find_bound_official_detail_can_correct_a_stale_bibliographic_title():
     assert unrelated["title"] == "Completely Different Paper on Language Models"
 
 
-def test_find_title_prefilter_uses_local_ids_and_recovers_missing_rows(monkeypatch):
+def test_find_title_prefilter_scores_each_batch_once_and_falls_back_missing_rows(monkeypatch):
     find_pipeline = _load_find_pipeline()
     monkeypatch.setenv("USE_LLM_TITLE_FILTER", "1")
     monkeypatch.setenv("TITLE_FILTER_SEQUENTIAL", "1")
     monkeypatch.setenv("FIND_TITLE_SCORE_CACHE", "0")
 
-    class IncompleteFirstAttemptLLM:
+    class IncompleteBatchLLM:
         enabled = True
         timeout_sec = 120
         provider = "openai_compatible"
@@ -5652,9 +5652,13 @@ def test_find_title_prefilter_uses_local_ids_and_recovers_missing_rows(monkeypat
 
         def json_or_error(self, prompt, **kwargs):
             aliases = re.findall(r"^- (p\d{3}):", prompt, flags=re.MULTILINE)
-            self.calls.append({"aliases": aliases, "max_tokens": kwargs.get("max_tokens"), "prompt": prompt})
-            omitted = min(3, len(aliases) - 1)
-            returned = aliases[:-omitted] if "attempt 1" in prompt and omitted else aliases
+            self.calls.append({
+                "aliases": aliases,
+                "max_tokens": kwargs.get("max_tokens"),
+                "single_request": kwargs.get("single_request"),
+                "prompt": prompt,
+            })
+            returned = aliases[:-3] if len(aliases) == 100 else aliases
             return {
                 "ok": True,
                 "data": {
@@ -5683,7 +5687,7 @@ def test_find_title_prefilter_uses_local_ids_and_recovers_missing_rows(monkeypat
         }
         for index in range(102)
     ]
-    llm = IncompleteFirstAttemptLLM()
+    llm = IncompleteBatchLLM()
     reports = []
     selected = find_pipeline._prefilter_titles(
         items,
@@ -5702,14 +5706,19 @@ def test_find_title_prefilter_uses_local_ids_and_recovers_missing_rows(monkeypat
     )
 
     assert len(selected) == 102
-    assert all(item["reason_source"] == "llm title filter" for item in selected)
-    assert reports[0]["llm_title_scored_papers"] == 102
-    assert [len(call["aliases"]) for call in llm.calls] == [100, 3, 2, 1]
+    assert sum(item["reason_source"] == "llm title filter" for item in selected) == 99
+    fallback_rows = [item for item in selected if item.get("title_filter_fallback_used")]
+    assert len(fallback_rows) == 3
+    assert all(item["reason_source"] == "local title screen" for item in fallback_rows)
+    assert reports[0]["llm_title_scored_papers"] == 99
+    assert reports[0]["local_title_ranked_papers"] == 3
+    assert [len(call["aliases"]) for call in llm.calls] == [100, 2]
+    assert all(call["single_request"] is True for call in llm.calls)
     assert all(call["max_tokens"] == 0 for call in llm.calls)
     assert all("paper-0:" not in call["prompt"] for call in llm.calls)
 
 
-def test_find_title_prefilter_falls_back_locally_after_retry_exhaustion(monkeypatch):
+def test_find_title_prefilter_falls_back_locally_without_retry(monkeypatch):
     find_pipeline = _load_find_pipeline()
     monkeypatch.setenv("USE_LLM_TITLE_FILTER", "1")
     monkeypatch.setenv("TITLE_FILTER_SEQUENTIAL", "1")
@@ -5722,9 +5731,11 @@ def test_find_title_prefilter_falls_back_locally_after_retry_exhaustion(monkeypa
 
         def __init__(self):
             self.calls = 0
+            self.single_request_flags = []
 
         def json_or_error(self, _prompt, **_kwargs):
             self.calls += 1
+            self.single_request_flags.append(_kwargs.get("single_request"))
             return {"ok": True, "data": {"scored": []}, "error": ""}
 
     items = [
@@ -5756,7 +5767,8 @@ def test_find_title_prefilter_falls_back_locally_after_retry_exhaustion(monkeypa
         title_filter_reports=reports,
     )
 
-    assert llm.calls == 5
+    assert llm.calls == 1
+    assert llm.single_request_flags == [True]
     assert len(selected) == 3
     assert all(item["reason_source"] == "local title screen" for item in selected)
     assert all(item["title_filter_fallback_used"] for item in selected)
@@ -5787,13 +5799,75 @@ def test_find_json_recovery_keeps_completed_scoring_and_translation_rows():
     assert translated == {"translations": [{"id": "p001", "abstract_zh": "摘要"}]}
 
 
-def test_find_abstract_scoring_uses_local_ids_and_retries_mismatched_id(monkeypatch):
+def test_find_llm_client_single_request_disables_transport_retries(monkeypatch):
+    finding_main = _load_finding_main()
+    finding_runtime = finding_main._private_import("finding_runtime")
+    monkeypatch.setenv("LLM_RETRIES", "3")
+    calls = 0
+
+    def failing_urlopen(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise finding_runtime.urllib.error.URLError("temporary outage")
+
+    monkeypatch.setattr(finding_runtime.urllib.request, "urlopen", failing_urlopen)
+    monkeypatch.setattr(finding_runtime.time, "sleep", lambda _seconds: None)
+    llm = finding_runtime.LLMClient(finding_runtime.AppConfig(
+        provider="openai_compatible",
+        base_url="https://llm.invalid/v1",
+        api_key="test-key",
+        model="test-model",
+    ))
+
+    result = llm.json_or_error("Return JSON only.", single_request=True)
+
+    assert result["ok"] is False
+    assert calls == 1
+
+
+def test_find_llm_client_single_request_disables_parse_retry(monkeypatch):
+    finding_main = _load_finding_main()
+    finding_runtime = finding_main._private_import("finding_runtime")
+    monkeypatch.setenv("LLM_RETRIES", "3")
+    calls = 0
+
+    class InvalidJsonResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            payload = {"choices": [{"message": {"content": '{"evaluations": ['}}]}
+            return json.dumps(payload).encode("utf-8")
+
+    def invalid_json_urlopen(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return InvalidJsonResponse()
+
+    monkeypatch.setattr(finding_runtime.urllib.request, "urlopen", invalid_json_urlopen)
+    llm = finding_runtime.LLMClient(finding_runtime.AppConfig(
+        provider="openai_compatible",
+        base_url="https://llm.invalid/v1",
+        api_key="test-key",
+        model="test-model",
+    ))
+
+    result = llm.json_or_error("Return JSON only.", single_request=True)
+
+    assert result["ok"] is False
+    assert calls == 1
+
+
+def test_find_abstract_scoring_scores_each_batch_once_and_marks_mismatched_id(monkeypatch):
     find_pipeline = _load_find_pipeline()
     monkeypatch.setenv("ABSTRACT_SCORING_BATCH_SIZE", "10")
     monkeypatch.setenv("ABSTRACT_SCORING_MAX_BATCH_SIZE", "10")
     monkeypatch.setenv("ABSTRACT_SCORING_MAX_WORKERS", "1")
     monkeypatch.setenv("ABSTRACT_SCORING_WORKER_CAP", "1")
-    monkeypatch.setenv("OMITTED_ITEM_RETRY_ATTEMPTS", "1")
+    monkeypatch.setenv("OMITTED_ITEM_RETRY_ATTEMPTS", "3")
     monkeypatch.setenv("FIND_FINAL_SCORE_CACHE", "0")
 
     class MismatchedIdLLM:
@@ -5807,7 +5881,12 @@ def test_find_abstract_scoring_uses_local_ids_and_retries_mismatched_id(monkeypa
 
         def json_or_error(self, prompt, **kwargs):
             aliases = re.findall(r"^ID: (p\d{3})$", prompt, flags=re.MULTILINE)
-            self.calls.append({"aliases": aliases, "max_tokens": kwargs.get("max_tokens"), "prompt": prompt})
+            self.calls.append({
+                "aliases": aliases,
+                "max_tokens": kwargs.get("max_tokens"),
+                "single_request": kwargs.get("single_request"),
+                "prompt": prompt,
+            })
             rows = []
             for index, alias in enumerate(aliases):
                 returned_id = "rewritten-paper-id" if len(aliases) > 1 and index == len(aliases) - 1 else alias
@@ -5861,11 +5940,36 @@ def test_find_abstract_scoring_uses_local_ids_and_retries_mismatched_id(monkeypa
     )
 
     assert len(evaluated) == 10
-    assert all(item["reason_source"] == "llm abstract evaluation" for item in evaluated)
-    assert [len(call["aliases"]) for call in llm.calls] == [10, 1]
+    assert sum(item["reason_source"] == "llm abstract evaluation" for item in evaluated) == 9
+    unresolved = [item for item in evaluated if item["reason_source"] != "llm abstract evaluation"]
+    assert len(unresolved) == 1
+    assert unresolved[0]["llm_retry_exhausted"] is True
+    assert unresolved[0]["llm_retry_reason"] == "omitted-item"
+    assert not unresolved[0].get("recommend_for_deep_reading", False)
+    assert [len(call["aliases"]) for call in llm.calls] == [10]
+    assert all(call["single_request"] is True for call in llm.calls)
     assert all(call["max_tokens"] == 0 for call in llm.calls)
     assert all("ID: real-paper-" not in call["prompt"] for call in llm.calls)
     assert full_abstract_marker in llm.calls[0]["prompt"]
+
+
+def test_find_abstract_scoring_batch_size_is_hard_capped_at_ten(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("ABSTRACT_SCORING_BATCH_SIZE", "20")
+    monkeypatch.setenv("ABSTRACT_SCORING_MAX_BATCH_SIZE", "20")
+    items = [
+        {"title": f"Paper {index}", "abstract": "A complete abstract."}
+        for index in range(20)
+    ]
+
+    batch_size = find_pipeline._adaptive_final_scoring_batch_size(
+        find_pipeline.AppConfig(provider="openai_compatible", abstract_scoring_batch_size=20),
+        items,
+        "protein design",
+        "protein generation route",
+    )
+
+    assert batch_size == 10
 
 
 def test_find_recommendations_require_topic_evidence_without_forcing_the_target():

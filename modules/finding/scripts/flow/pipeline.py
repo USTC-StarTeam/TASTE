@@ -351,7 +351,7 @@ def _adaptive_final_scoring_batch_size(config: AppConfig, scoring_items: list[di
     env_value = _positive_int_env("ABSTRACT_SCORING_BATCH_SIZE", 0)
     configured_value = int(getattr(config, "abstract_scoring_batch_size", 0) or 0)
     max_batch = _positive_int_env("ABSTRACT_SCORING_MAX_BATCH_SIZE", max(10, configured_value))
-    max_batch = _clamp_int(max_batch, 1, 20)
+    max_batch = _clamp_int(max_batch, 1, 10)
     if env_value > 0:
         return _clamp_int(env_value, 1, max_batch)
     if configured_value > 0:
@@ -1671,6 +1671,20 @@ def _json_or_error(llm: LLMClient, prompt: str, *, temperature: float | None = N
             return llm.json_or_error(prompt, temperature=temperature)
         except TypeError:
             return llm.json_or_error(prompt)
+
+
+def _json_or_error_single_request(llm: LLMClient, prompt: str, *, temperature: float | None = None, max_tokens: int | None = None) -> dict:
+    try:
+        return llm.json_or_error(
+            prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            single_request=True,
+        )
+    except TypeError as exc:
+        if "single_request" not in str(exc):
+            raise
+        return _json_or_error(llm, prompt, temperature=temperature, max_tokens=max_tokens)
 
 
 def _llm_live_gate(llm: LLMClient) -> dict:
@@ -4518,57 +4532,24 @@ Rules:
             return matched, missing
 
         def score_title_batch(batch_index: int, batch: list[dict], context: str) -> tuple[list[tuple[dict, dict]], list[dict], list[str], int]:
-            pending_items = list(batch)
-            matched: list[tuple[dict, dict]] = []
             errors: list[str] = []
-            request_count = 0
-            for attempt in range(1, 3):
-                if not pending_items:
-                    break
-                prompt, alias_map = build_title_prompt(
-                    pending_items,
-                    context,
-                    f"batch {batch_index}/{len(batches_with_context)}, attempt {attempt}",
-                )
-                result = _json_or_error_wall_timeout(
-                    llm,
-                    prompt,
-                    temperature=FIND_TITLE_FILTER_TEMPERATURE,
-                    max_tokens=0,
-                    timeout_sec=wall_timeout,
-                )
-                request_count += 1
-                if not result.get("ok"):
-                    error = str(result.get("error") or "unknown LLM error")
-                    _raise_if_fatal_llm_configuration_error(error, f"{venue_name} title filtering")
-                    errors.append(error)
-                recovered, pending_items = parsed_title_rows(result, alias_map)
-                matched.extend(recovered)
-            if pending_items:
-                unresolved: list[dict] = []
-                for item in pending_items:
-                    prompt, alias_map = build_title_prompt(
-                        [item],
-                        context,
-                        f"batch {batch_index}/{len(batches_with_context)}, single-item completion",
-                    )
-                    result = _json_or_error_wall_timeout(
-                        llm,
-                        prompt,
-                        temperature=FIND_TITLE_FILTER_TEMPERATURE,
-                        max_tokens=0,
-                        timeout_sec=wall_timeout,
-                    )
-                    request_count += 1
-                    if not result.get("ok"):
-                        error = str(result.get("error") or "unknown LLM error")
-                        _raise_if_fatal_llm_configuration_error(error, f"{venue_name} title filtering")
-                        errors.append(error)
-                    recovered, missing = parsed_title_rows(result, alias_map)
-                    matched.extend(recovered)
-                    unresolved.extend(missing)
-                pending_items = unresolved
-            return matched, pending_items, errors, request_count
+            prompt, alias_map = build_title_prompt(
+                batch,
+                context,
+                f"batch {batch_index}/{len(batches_with_context)}",
+            )
+            result = _json_or_error_single_request(
+                llm,
+                prompt,
+                temperature=FIND_TITLE_FILTER_TEMPERATURE,
+                max_tokens=0,
+            )
+            if not result.get("ok"):
+                error = str(result.get("error") or "unknown LLM error")
+                _raise_if_fatal_llm_configuration_error(error, f"{venue_name} title filtering")
+                errors.append(error)
+            matched, unresolved = parsed_title_rows(result, alias_map)
+            return matched, unresolved, errors, 1
 
         workers = 1 if os.environ.get("TITLE_FILTER_SEQUENTIAL", "0").lower() in {"1", "true", "yes", "on"} else clamp_workers(config.llm_concurrency, default=10, maximum=32)
         title_timeout = int(os.environ.get("TITLE_FILTER_TIMEOUT_SEC", "0") or 0) or int(config.title_filter_timeout_sec or 120)
@@ -4578,11 +4559,6 @@ Rules:
         active_timeout = getattr(llm, "timeout_sec", title_timeout)
         log(f"{venue_name}: starting LLM title prefilter for {len(scanned)} titles in {len(batches)} uncached batches with {workers} workers; cache_hits={title_cache_hits}; per-batch timeout={active_timeout}s")
         progress("llm_title_filter", title_cache_hits, max(1, len(scanned)), f"{venue_name}: starting LLM title filter, uncached batches {len(batches)}, cache_hits {title_cache_hits}")
-        wall_timeout = max(
-            10,
-            int(os.environ.get("TITLE_FILTER_WALL_TIMEOUT_SEC", "0") or 0)
-            or int(active_timeout or title_timeout or 120),
-        )
         if workers == 1:
             result_iter = []
             for batch_index, (batch, context) in enumerate(batches_with_context, 1):
@@ -4662,8 +4638,7 @@ Rules:
                 scored_rows.append(item)
                 seen_items.add(id(item))
                 appended += 1
-            retry_note = f"; requests={request_count}" if request_count > 1 else ""
-            log(f"{venue_name}: title batch {batch_index}/{len(batches)} scored {appended}/{len(batch)}{retry_note}; scored_titles={len(scored_rows)}")
+            log(f"{venue_name}: title batch {batch_index}/{len(batches)} scored {appended}/{len(batch)}; requests={request_count}; scored_titles={len(scored_rows)}")
         fallback_items = [
             item
             for item in scanned
@@ -4673,12 +4648,13 @@ Rules:
             item["title_filter_fallback_used"] = True
             item["title_llm_missing"] = True
             item["title_llm_retry_exhausted"] = True
-            item["title_filter_fallback_reason"] = "LLM title row remained invalid or missing after bounded batch and single-item retries."
+            item["title_llm_single_request_unresolved"] = True
+            item["title_filter_fallback_reason"] = "LLM title row was invalid or missing in the batch's single request."
             item["title_local_rank"] = local_rank
         if fallback_items:
             unresolved_ids = [str(item.get("id") or "") for item in fallback_items]
             log(
-                f"{venue_name}: title LLM left {len(fallback_items)} rows unresolved after bounded retries; "
+                f"{venue_name}: title LLM left {len(fallback_items)} rows unresolved after their single batch request; "
                 f"local title scores retained them for downstream abstract scoring; sample={unresolved_ids[:10]}"
             )
         if batches:
@@ -5610,7 +5586,7 @@ def _evaluate_items(
                 item.setdefault("recommendation_note_zh", "该条目未进入最终相关性评分；只保留为排查线索，不展示为推荐论文。")
                 item.setdefault("recommendation_note_en", "This row did not enter final relevance scoring; retained only for troubleshooting, not as a recommendation.")
                 item.setdefault("recommendation_note", item.get("recommendation_note_zh") or item.get("recommendation_note_en"))
-        log(f"{source_name}: final LLM scoring pool {len(scoring_ids)}/{len(evaluated)} candidates; cache_hits={score_cache_hits}; llm_requests={len(scoring_items)}; skipped {skipped_items} retrieval-only candidates")
+        log(f"{source_name}: final LLM scoring pool {len(scoring_ids)}/{len(evaluated)} candidates; cache_hits={score_cache_hits}; uncached_items={len(scoring_items)}; skipped {skipped_items} retrieval-only candidates")
         scoring_batch_size = _adaptive_final_scoring_batch_size(config, scoring_items, scoring_interest, topic_routes_block)
         for batch_index, batch in enumerate(_chunks(scoring_items, scoring_batch_size), 1):
             item_lines = "\n\n".join(
@@ -5650,133 +5626,41 @@ Rules:
         batch_timeout = max(30, env_batch_timeout or configured_batch_timeout or 180)
         scoring_temperature = FIND_FINAL_SCORING_TEMPERATURE
         original_timeout = getattr(llm, "timeout_sec", batch_timeout)
-        original_retries = getattr(llm, "retries", None)
         if hasattr(llm, "timeout_sec"):
             llm.timeout_sec = batch_timeout
-        if hasattr(llm, "retries"):
-            llm.retries = max(1, int(os.environ.get("ABSTRACT_SCORING_LLM_RETRIES", "2") or 2))
-        log(f"{source_name}: starting LLM final scoring for {len(scoring_items)}/{len(evaluated)} items in {len(prompts)} batches with {workers} workers; batch_size={scoring_batch_size}; per-batch timeout={getattr(llm, 'timeout_sec', batch_timeout)}s; retries={getattr(llm, 'retries', 'n/a')}; temperature={scoring_temperature}")
+        log(f"{source_name}: starting LLM final scoring for {len(scoring_items)}/{len(evaluated)} items in {len(prompts)} batches with {workers} workers; batch_size={scoring_batch_size}; requests={len(prompts)}; single_request_per_batch=true; per-batch timeout={getattr(llm, 'timeout_sec', batch_timeout)}s; temperature={scoring_temperature}")
         progress("abstract_scoring", 0, max(1, len(prompt_batches)), f"{source_name}: starting LLM final scoring")
 
-        single_retry_attempts = max(0, int(os.environ.get("OMITTED_ITEM_RETRY_ATTEMPTS", os.environ.get("ABSTRACT_SCORING_SINGLE_RETRY_ATTEMPTS", "3")) or 0))
         scoring_max_tokens = 0
-        single_scoring_max_tokens = 0
-        scoring_wall_timeout = max(0, int(os.environ.get("ABSTRACT_SCORING_WALL_TIMEOUT_SEC", "0") or 0))
-        single_scoring_timeout = max(10, int(os.environ.get("SINGLE_ABSTRACT_SCORING_TIMEOUT_SEC", "75") or 75))
-        pending_single_retries: list[tuple[int, list[dict], str]] = []
 
         def mark_items_unscored(batch_index: int, items_to_mark: list[dict], reason: str, error: object = "") -> None:
             for item in items_to_mark:
+                # Keep the legacy audit flag because downstream recommendation
+                # gates already consume it; strict scoring no longer retries.
                 item["llm_retry_exhausted"] = True
                 item["llm_retry_reason"] = reason
                 item["llm_retry_attempts"] = 0
+                item["llm_single_request_unresolved"] = True
                 if error:
                     item["llm_retry_last_error"] = str(error)[:500]
                 _apply_relevance_guard(item)
                 _apply_topic_evidence_guard(item, interest)
                 _apply_quality_bonus(item)
             if items_to_mark:
-                log(f"{source_name}: batch {batch_index}/{len(prompt_batches)} marked {len(items_to_mark)} unresolved items after {reason}; unresolved items remain excluded from Find recommendations")
+                log(f"{source_name}: batch {batch_index}/{len(prompt_batches)} marked {len(items_to_mark)} unresolved items after {reason}; no repair request was sent and unresolved items remain excluded from Find recommendations")
 
-        def single_scoring_prompt(item: dict) -> str:
-            return f"""
-You are the final strict relevance judge for research recommendations.
-
-Research interest/profile:
-{scoring_interest}
-
-{topic_routes_block}
-
-Candidate item:
-ID: p001
-Title: {item.get('title')}
-Abstract/Description: {_final_scoring_abstract_text(item)}
-
-Return one strict JSON object whose only top-level key is evaluations. Its single row must contain the exact id and the same concrete fields required by the batch contract: category; numeric fit_score and diversity_score; boolean recommendation and topic-evidence verdicts; matched route and its evidence; missing evidence; bilingual hit directions, explanations, and recommendation reasons. Never return field descriptions or placeholders as values.
-
-Scoring rules: judge this item independently from its complete real title and abstract. fit_score is the final ranking score used by the workflow; use the full 0-10 range with one decimal place without imitating example values or clustering around a few numbers. Set topic_evidence_supported=true only when the title+abstract directly supports one complete configured/adaptive core route from the list above; copy the full route into matched_topic_route, never a short subphrase or component. If the route contains a colon, treat the pre-colon text as the core route and the post-colon details as evidence axes/preferences, not mandatory all-of conditions. Otherwise set it false with weak topic_evidence and concrete missing_topic_evidence; that row is ineligible for the user-visible recommendation list, but the verdict must not cap or alter fit_score. Write the recommendation reason naturally from this paper's concrete content and cover topic fit, help to the research, and transferable value; do not use a prescribed opening, generic research-direction boilerplate, or reader instructions. Provide both Chinese and English explanation fields, plus hit_directions_zh in Chinese and hit_directions_en in English.
-{FIND_FINAL_SCORING_ROUTE_RULES}
-"""
-
-        def retry_items_singly(batch_index: int, items_to_retry: list[dict], reason: str) -> int:
-            if not items_to_retry:
-                return 0
-            if single_retry_attempts <= 0:
-                mark_items_unscored(batch_index, items_to_retry, reason)
-                return 0
-            recovered = 0
-            remaining = list(items_to_retry)
-            original_single_timeout = getattr(llm, "timeout_sec", single_scoring_timeout)
-            original_single_retries = getattr(llm, "retries", None)
-            if hasattr(llm, "timeout_sec"):
-                llm.timeout_sec = single_scoring_timeout
-            if hasattr(llm, "retries"):
-                llm.retries = 1
-            try:
-                for attempt in range(1, single_retry_attempts + 1):
-                    next_remaining: list[dict] = []
-                    for item in remaining:
-                        before_source = item.get("reason_source")
-                        single_result = _json_or_error_wall_timeout(
-                            llm,
-                            single_scoring_prompt(item),
-                            temperature=scoring_temperature,
-                            max_tokens=single_scoring_max_tokens,
-                            timeout_sec=scoring_wall_timeout or single_scoring_timeout,
-                        )
-                        if single_result.get("ok"):
-                            apply_result(batch_index, [item], single_result, allow_missing_retry=False)
-                        if item.get("reason_source") == "llm abstract evaluation" and item.get("reason_source") != before_source:
-                            item["llm_retry_attempts"] = attempt
-                            recovered += 1
-                        else:
-                            item["llm_retry_attempts"] = attempt
-                            item["llm_retry_last_error"] = str(single_result.get("error") or "missing evaluation row")[:500]
-                            next_remaining.append(item)
-                    remaining = next_remaining
-                    if not remaining:
-                        break
-            finally:
-                if hasattr(llm, "timeout_sec"):
-                    llm.timeout_sec = original_single_timeout
-                if original_single_retries is not None and hasattr(llm, "retries"):
-                    llm.retries = original_single_retries
-            for item in remaining:
-                item["llm_retry_exhausted"] = True
-                item["llm_retry_reason"] = reason
-                item["llm_retry_attempts"] = single_retry_attempts
-                _apply_relevance_guard(item)
-                _apply_topic_evidence_guard(item, interest)
-                _apply_quality_bonus(item)
-            if remaining:
-                log(f"{source_name}: batch {batch_index}/{len(prompt_batches)} {reason} retry exhausted {len(remaining)}/{len(items_to_retry)} items after {single_retry_attempts} attempts")
-            return recovered
-
-        def queue_single_retry(batch_index: int, items_to_retry: list[dict], reason: str) -> None:
-            if not items_to_retry:
-                return
-            if single_retry_attempts <= 0:
-                mark_items_unscored(batch_index, items_to_retry, reason)
-                return
-            pending_single_retries.append((batch_index, list(items_to_retry), reason))
-
-        def retry_policy_text() -> str:
-            if single_retry_attempts > 0:
-                return "queued for bounded single-item retry before unresolved-item audit marking"
-            return "single-item retry disabled; marking unresolved items for audit"
-
-        def apply_result(batch_index: int, batch: list[dict], result: dict, allow_missing_retry: bool = True) -> None:
+        def apply_result(batch_index: int, batch: list[dict], result: dict) -> None:
             by_id = {f"p{position:03d}": item for position, item in enumerate(batch, 1)}
             assigned_items: set[int] = set()
             if not result.get("ok"):
                 error = result.get("error", "")
                 _raise_if_fatal_llm_configuration_error(error, f"{source_name} final LLM scoring")
                 if _is_transient_llm_service_error(error):
-                    log(f"{source_name}: batch {batch_index}/{len(prompt_batches)} LLM scoring hit transient service error: {str(error)[:240]}; {retry_policy_text()}")
-                    queue_single_retry(batch_index, batch, "transient-service-error")
+                    log(f"{source_name}: batch {batch_index}/{len(prompt_batches)} LLM scoring hit transient service error: {str(error)[:240]}; marking the batch unresolved without another request")
+                    mark_items_unscored(batch_index, batch, "transient-service-error", error)
                     return
-                log(f"{source_name}: batch {batch_index}/{len(prompt_batches)} LLM scoring failed: {str(error)[:240]}; {retry_policy_text()}")
-                queue_single_retry(batch_index, batch, "failed-batch")
+                log(f"{source_name}: batch {batch_index}/{len(prompt_batches)} LLM scoring failed: {str(error)[:240]}; marking the batch unresolved without another request")
+                mark_items_unscored(batch_index, batch, "failed-batch", error)
                 return
             data = result.get("data")
             if isinstance(data, dict):
@@ -5813,6 +5697,7 @@ Scoring rules: judge this item independently from its complete real title and ab
                         item.pop("llm_retry_exhausted", None)
                         item.pop("llm_retry_reason", None)
                         item.pop("llm_retry_last_error", None)
+                        item.pop("llm_single_request_unresolved", None)
                         item["category"] = str(row.get("category") or item.get("category") or "")
                         item["fit_score"] = _as_float(row.get("fit_score"), item.get("fit_score") or 0)
                         item["diversity_score"] = _as_float(row.get("diversity_score"), item.get("diversity_score") or 0)
@@ -5846,11 +5731,10 @@ Scoring rules: judge this item independently from its complete real title and ab
                         _apply_relevance_guard(item)
                         _apply_llm_topic_evidence(item, row, interest)
                         _apply_quality_bonus(item)
-            if allow_missing_retry:
-                missing = [item for item in batch if id(item) not in assigned_items and item.get("reason_source") != "llm abstract evaluation"]
-                if missing:
-                    log(f"{source_name}: batch {batch_index}/{len(prompt_batches)} omitted {len(missing)} items; {retry_policy_text()}")
-                    queue_single_retry(batch_index, missing, "omitted-item")
+            missing = [item for item in batch if id(item) not in assigned_items and item.get("reason_source") != "llm abstract evaluation"]
+            if missing:
+                log(f"{source_name}: batch {batch_index}/{len(prompt_batches)} omitted or invalidated {len(missing)} items; marking them unresolved without another request")
+                mark_items_unscored(batch_index, missing, "omitted-item")
 
         completed = 0
         request_spacing_sec = max(0.0, float(os.environ.get("LLM_REQUEST_SPACING_SEC", "1.5" if _rate_limited_llm_provider(config) else "0") or 0))
@@ -5861,7 +5745,7 @@ Scoring rules: judge this item independently from its complete real title and ab
                 log(f"{source_name}: scoring batch {batch_index}/{len(prompt_batches)} started")
                 if request_spacing_sec and batch_index > 1:
                     time.sleep(request_spacing_sec)
-                result = _json_or_error_wall_timeout(llm, prompt, temperature=scoring_temperature, max_tokens=scoring_max_tokens, timeout_sec=scoring_wall_timeout)
+                result = _json_or_error_single_request(llm, prompt, temperature=scoring_temperature, max_tokens=scoring_max_tokens)
                 apply_result(batch_index, batch, result)
                 completed += 1
                 log(f"{source_name}: scoring batch {batch_index}/{len(prompt_batches)} completed; ok={bool(result.get('ok'))}")
@@ -5877,7 +5761,7 @@ Scoring rules: judge this item independently from its complete real title and ab
         else:
             last_parallel_log = 0.0
             executor = ThreadPoolExecutor(max_workers=workers)
-            futures = {executor.submit(_json_or_error_wall_timeout, llm, prompt, temperature=scoring_temperature, max_tokens=scoring_max_tokens, timeout_sec=scoring_wall_timeout): (idx, batch) for idx, (batch, prompt) in enumerate(zip(prompt_batches, prompts, strict=False), 1)}
+            futures = {executor.submit(_json_or_error_single_request, llm, prompt, temperature=scoring_temperature, max_tokens=scoring_max_tokens): (idx, batch) for idx, (batch, prompt) in enumerate(zip(prompt_batches, prompts, strict=False), 1)}
             pending = set(futures)
             try:
                 while pending:
@@ -5914,15 +5798,6 @@ Scoring rules: judge this item independently from its complete real title and ab
                 raise
             else:
                 executor.shutdown(wait=True)
-        if pending_single_retries:
-            total_retry_items = sum(len(items_to_retry) for _batch_index, items_to_retry, _reason in pending_single_retries)
-            log(f"{source_name}: running bounded single-item retries for {total_retry_items} items from {len(pending_single_retries)} batches")
-            for retry_index, (batch_index, items_to_retry, reason) in enumerate(pending_single_retries, 1):
-                _raise_if_cancelled(should_cancel)
-                progress("abstract_scoring_retry", retry_index - 1, len(pending_single_retries), f"{source_name}: retrying batch {batch_index}/{len(prompt_batches)} {reason}")
-                recovered = retry_items_singly(batch_index, items_to_retry, reason)
-                log(f"{source_name}: batch {batch_index}/{len(prompt_batches)} single-item retry recovered {recovered}/{len(items_to_retry)} after {reason}")
-            progress("abstract_scoring_retry", len(pending_single_retries), len(pending_single_retries), f"{source_name}: bounded single-item retries complete")
         if cache_path is not None and score_cache_keys:
             stored_cache_entries = _store_final_llm_score_cache_entries(score_cache, score_cache_keys, scoring_items, config)
             if stored_cache_entries:
@@ -5930,8 +5805,6 @@ Scoring rules: judge this item independently from its complete real title and ab
                 log(f"{source_name}: stored {stored_cache_entries} stable final LLM scores for reuse")
         if hasattr(llm, "timeout_sec"):
             llm.timeout_sec = original_timeout
-        if original_retries is not None and hasattr(llm, "retries"):
-            llm.retries = original_retries
     _apply_mock_final_scoring(evaluated, config, interest)
     for item in evaluated:
         _normalize_llm_supported_text_fields(item)
@@ -7445,7 +7318,7 @@ def _run_diagnostics(artifacts: dict) -> dict:
             warnings.append({
                 "code": "llm_scoring_fallback_failures",
                 "severity": "warning",
-                "message": f"{llm_retry_exhausted_count} candidates failed final LLM scoring after retries and remain excluded from user-visible Find recommendations. Inspect job logs for JSON parse errors/timeouts.",
+                "message": f"{llm_retry_exhausted_count} candidates did not yield a valid row in their single final-scoring batch request and remain excluded from user-visible Find recommendations. Inspect job logs for JSON parse errors/timeouts.",
             })
         if abstract_fetch_failed_count:
             warnings.append({
