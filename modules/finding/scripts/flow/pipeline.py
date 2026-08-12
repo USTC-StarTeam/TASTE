@@ -64,14 +64,14 @@ from sources import _in_date_range, normalize_date
 LogFn = Callable[[str], None]
 CancelFn = Callable[[], bool]
 ProgressFn = Callable[..., None]
-SCORING_POLICY_VERSION = "direct_llm_title_abstract_topic_supported_v25"
-FIND_RECOMMENDATION_POLICY = "topn_final_llm_real_abstract_strong_topic_evidence_v27"
+SCORING_POLICY_VERSION = "direct_llm_title_abstract_ranked_topn_v26_topic_audit"
+FIND_RECOMMENDATION_POLICY = "topn_final_llm_real_abstract_valid_reason_v28"
 FIND_FINAL_SCORING_TEMPERATURE = 0.0
 FIND_TITLE_FILTER_TEMPERATURE = 0.0
 FINAL_LLM_SCORE_CACHE_SCHEMA_VERSION = "find_final_llm_score_cache_v1"
 FIND_INPUT_FIELDS = {"research_topic", "research_interest", "researcher_profile", "arxiv_queries"}
 FIND_LLM_CONFIG_FIELDS = {"provider", "base_url", "api_key", "model", "temperature", "llm_roles"}
-FINAL_LLM_SCORE_CACHE_PROMPT_POLICY = "final_title_abstract_prompt_v34_canonical_fields_batched_repair"
+FINAL_LLM_SCORE_CACHE_PROMPT_POLICY = "final_title_abstract_prompt_v35_ranked_topn_topic_audit"
 RECOMMENDATION_REASON_MIN_ZH_CHARS = 20
 RECOMMENDATION_REASON_MIN_EN_CHARS = 40
 FINAL_LLM_SCORE_CACHE_MAX_ENTRIES = 50000
@@ -97,6 +97,9 @@ FINAL_LLM_SCORE_CACHE_FIELDS = (
     "missing_topic_evidence",
 )
 TITLE_LLM_SCORE_CACHE_SCHEMA_VERSION = "find_title_llm_score_cache_v1"
+# Final recommendation policy changes must not invalidate stable title-screen
+# scores.  Title cache identity is owned by the title prompt policies below.
+TITLE_LLM_SCORING_POLICY_VERSION = "direct_llm_title_abstract_topic_supported_v25"
 TITLE_LLM_SCORE_CACHE_POLICY_TITLE_ONLY = "llm_title_filter_profile_context_v1"
 TITLE_LLM_SCORE_CACHE_POLICY_WITH_SNIPPETS = "llm_title_filter_profile_context_v2_metadata_snippets"
 TITLE_LLM_SCORE_CACHE_POLICY = TITLE_LLM_SCORE_CACHE_POLICY_WITH_SNIPPETS
@@ -170,19 +173,19 @@ Final Find recommendation contract:
 - Use the current research interest/profile only as this run relevance definition. Do not apply a fixed global keyword table or project-specific hard-coded topic list.
 - Category selection, title filtering, local TF-IDF rank, source health, citations, and freshness are recall/audit signals only. They must never promote a paper into the user-visible recommendation list.
 - A user-visible recommendation must be judged from the real title plus real abstract/description in this final LLM scoring step.
-- fit_score is the final title+abstract ranking score. Use the full 0-10 range consistently with one decimal place. Judge each paper independently from its evidence; do not imitate sample scores, prefer round numbers, or cluster scores around a few values.
-- The workflow sorts eligible rows by the final score. Eligibility requires a real title+abstract judgment and direct, source-grounded support for one complete current topic route. Never fill the requested count with unsupported rows.
+- fit_score is the final title+abstract ranking score. Use the full 0-10 range consistently with one decimal place: 9.0-10.0 exact center, 7.0-8.9 strong match, 5.0-6.9 partial/background usefulness, 3.0-4.9 weak/generic, and <=2.9 unrelated items. Do not default to integer or x.5 scores when evidence supports a finer distinction.
+- The workflow selects user-visible recommendations by sorting all valid final-scored rows. Eligibility requires a real title+abstract judgment, finite final LLM scores, and usable recommendation reasons; topic-evidence annotations and score magnitude do not create additional gates.
 - Broad background, inspiration-only, prerequisite-only, or partial-match papers should receive lower fit_score unless the abstract itself gives concrete reusable method/data/protocol/benchmark/evaluation/theory value.
 - Do not use venue prestige, citation count, local rank, title-only similarity, diversity_score, or route/foundation/claim labels to raise fit_score.
 - Missing abstract, metadata-only evidence, and title-only evidence cannot be recommended because they were not judged from real title+abstract content. Score magnitude affects ranking, not eligibility.
 - Treat the research profile as the relevance boundary before scoring. Shared surface terms are not enough for a high score unless the title+abstract tie them to the profile's concrete target problem, entities, data setting, evaluation protocol, or intended application.
-- Preference hints, evaluation preferences, implementation preferences, and generic desiderata such as reproducibility, efficiency, safety, interpretability, or lightweight experiments are modifiers, not standalone topic routes. They can increase usefulness only after the title+abstract also supports the profile's core research object; by themselves they must not make topic_evidence_supported=true or justify a high fit_score.
+- Preference hints, evaluation preferences, implementation preferences, and generic desiderata such as reproducibility, efficiency, safety, interpretability, or lightweight experiments are modifiers, not standalone topic routes. They can increase usefulness only after the title+abstract also supports the profile's core research object; by themselves they must not make topic_evidence_supported=true or justify a 7+ fit_score.
 - The generated route list is authoritative for matched_topic_route. When explicit routes are listed, copy one complete route from that list; do not return a short route fragment such as a subproblem, method component, desideratum, or hint as matched_topic_route.
 - If a route is written as "core route: evidence axes, desiderata, or examples", the text before the colon is the core route boundary. The comma-separated details after the colon are useful evidence axes and preferences, not mandatory components that every recommended paper must cover. A paper can support the route when the title+abstract directly addresses the core route and gives concrete reusable method/data/protocol/benchmark/evaluation/theory value, even if it covers only some listed axes.
 - A transferable method or foundation component is not a direct topic match by itself. If the title+abstract only shows that it might be adapted to the current profile, or does not directly address the core route boundary, set topic_evidence_supported=false; calibrate fit_score independently from the overall title+abstract relevance.
-- Mentions of the profile domain only as a possible application, benchmark/dataset domain, motivating example, or background use case are boundary/background usefulness only. Give them a clearly lower score unless the title+abstract also provides a method, data construction, evaluation protocol, theory, or actionable analysis that is concretely reusable for the research profile.
+- Mentions of the profile domain only as a possible application, benchmark/dataset domain, motivating example, or background use case are boundary/background usefulness only. Keep them at 5-6 or lower unless the title+abstract also provides a method, data construction, evaluation protocol, theory, or actionable analysis that is concretely reusable for the research profile.
 - For every high score, the topic_evidence_basis must name the concrete profile-specific evidence found in the title+abstract. If the abstract uses a shared term in a different or generic setting, score it as weak/generic and set topic_evidence_supported=false with the missing profile evidence named.
-- Keep topic_evidence_supported, missing_topic_evidence, and matched_topic_route independent from score calibration. They must not alter fit_score, but topic_evidence_supported=false means the row is not eligible for the user-visible recommendation list.
+- Keep topic_evidence_supported, missing_topic_evidence, and matched_topic_route as audit explanations only. They must not cap fit_score, alter ranking scores, or decide recommendation eligibility.
 - Do not decide downstream experimental support here. Find recommends papers for Read; later full-text reading, repo/data/env/reproduction, and local experiment gates decide usable evidence scope.
 """.strip()
 
@@ -1538,7 +1541,12 @@ def _explicit_llm_negative_strong_reason(item: dict) -> str:
     judgment_text = _candidate_judgment_text(item)
     absolute_negative_patterns = [
         r"\b(?:unrelated|irrelevant|out of scope|not relevant|not a good fit)\b",
-        r"无关|不相关|主题偏离|严重偏离",
+        # A bare `无关` also occurs in positive method names such as
+        # `梯度无关优化` (gradient-free optimization).  Require an explicit
+        # topic/relevance subject so those methods are not rejected.
+        r"(?:工作|论文|方法|内容|研究|结果|结论|主题|方向).{0,12}(?:无关|不相关)",
+        r"(?:无关|不相关)(?:于|当前).{0,12}(?:主题|方向|研究|任务)",
+        r"主题偏离|严重偏离",
     ]
     if _contains_any(judgment_text, absolute_negative_patterns):
         return "LLM explanation explicitly says this item is unrelated or not useful evidence for the current topic."
@@ -2421,7 +2429,7 @@ def _apply_llm_topic_evidence(item: dict, row: dict, interest: str) -> None:
         item["topic_evidence"] = "weak: missing real abstract evidence"
         item["topic_evidence_supported"] = False
         item["topic_evidence_basis"] = item.get("topic_evidence_basis") or "title_only"
-    item["topic_evidence_audit_only"] = False
+    item["topic_evidence_audit_only"] = True
 
 
 
@@ -3173,7 +3181,7 @@ def _title_llm_score_cache_key(item: dict, config: AppConfig, scoring_interest: 
     payload = {
         "schema": TITLE_LLM_SCORE_CACHE_SCHEMA_VERSION,
         "policy": policy,
-        "scoring_policy": SCORING_POLICY_VERSION,
+        "scoring_policy": TITLE_LLM_SCORING_POLICY_VERSION,
         "temperature": FIND_TITLE_FILTER_TEMPERATURE,
         "model": _final_llm_score_model_identity(config),
         "interest": _cache_normalized_text(scoring_interest, limit=20000),
@@ -3219,7 +3227,7 @@ def _title_llm_cache_entry_valid(entry: object, *, expected_policy: str | None =
         return False
     if entry.get("schema") != TITLE_LLM_SCORE_CACHE_SCHEMA_VERSION:
         return False
-    if entry.get("scoring_policy") != SCORING_POLICY_VERSION:
+    if entry.get("scoring_policy") != TITLE_LLM_SCORING_POLICY_VERSION:
         return False
     policy = str(entry.get("policy") or "")
     if expected_policy is not None and policy != expected_policy:
@@ -3264,7 +3272,7 @@ def _title_llm_score_cache_entry(item: dict, cache_key: str, config: AppConfig) 
         "schema": TITLE_LLM_SCORE_CACHE_SCHEMA_VERSION,
         "cache_key": cache_key,
         "policy": _title_llm_score_cache_policy(item),
-        "scoring_policy": SCORING_POLICY_VERSION,
+        "scoring_policy": TITLE_LLM_SCORING_POLICY_VERSION,
         "temperature": FIND_TITLE_FILTER_TEMPERATURE,
         "model": _final_llm_score_model_identity(config),
         "title": _cache_normalized_text(item.get("title"), limit=2000),
@@ -5786,12 +5794,12 @@ Return one strict JSON object whose only top-level key is evaluations. evaluatio
 Rules:
 - Return exactly {len(batch)} evaluation rows. IDs are opaque request-local identifiers; copy every pNNN ID exactly once and never rewrite or invent an ID.
 - Score by explicit title/abstract evidence only; venue prestige must not raise fit_score.
-- Use the whole 0-10 range consistently with one decimal place. Judge each paper independently from its evidence; do not imitate sample scores, prefer round numbers, or cluster scores around a few values.
+- Use the whole 0-10 range consistently with one decimal place: 9.0-10.0 exact center, 7.0-8.9 strong match, 5.0-6.9 partial/background usefulness, 3.0-4.9 weak/generic, <=2.9 unrelated. Judge each paper independently and do not cluster scores around a few values.
 - Broad background papers are weak unless the abstract itself gives concrete reusable method, data, benchmark, protocol, theory, or evaluation value for the current research interest.
-- topic_evidence_supported is an eligibility judgment independent from score calibration. A false or weak topic-evidence verdict excludes the row from the user-visible recommendation list; never mark it true merely to fill the requested count.
+- recommend_for_deep_reading and topic_evidence_supported are audit fields only. The workflow chooses the user-visible list by ranking all valid final title+abstract scores; neither field is an eligibility gate and there is no absolute score cutoff.
 - Set topic_evidence_supported=true only when the title+abstract directly supports one complete configured/adaptive core route from the list above. Copy that full route into matched_topic_route; never use a short subphrase, method component, desideratum, or hint as matched_topic_route. If the route contains a colon, do not require every post-colon evidence axis; require direct support for the pre-colon core route plus concrete reusable value. Set topic_evidence to passed:/strong: and give a concise topic_evidence_basis. This evidence annotation is diagnostic and must not replace your calibrated fit_score.
 - If the abstract is generic, background-only, venue/title-only, or does not directly support the current core route, set topic_evidence_supported=false, topic_evidence="weak: missing adaptive topic evidence", and list concrete missing_topic_evidence.
-- Score fit independently from the topic-evidence fields. Do not cap or otherwise change fit_score because topic_evidence_supported=false or topic_evidence starts with weak:.
+- Score fit independently from the topic-evidence audit fields. Do not cap or otherwise change fit_score because topic_evidence_supported=false or topic_evidence starts with weak:.
 - Write reason_zh and reason_en freshly from this paper's title/abstract and the supplied research topic. Each reason must contain 2-4 natural sentences and cover why the paper topic fits the research topic, how the paper can help the research, and what methods/data/protocols/theory/evaluation ideas are transferable. Lead with concrete paper content; do not use a prescribed opening, generic research-direction boilerplate, or a fixed sentence order. Do not write reader instructions.
 - Missing abstract, metadata-only evidence, or title-only evidence cannot be recommended.
 {FIND_FINAL_SCORING_ROUTE_RULES}
@@ -6516,7 +6524,7 @@ def _recommendation_quality_audit(items: list[dict]) -> dict:
         "missing_real_abstract_ids": missing_real_abstract[:50],
         "missing_chinese_abstract_ids": missing_zh_abstract[:50],
         "short_or_negative_reason_ids": short_reason[:50],
-        "policy": "User-facing recommendations must come from the final title+abstract LLM score ranking, show a real abstract, directly support a current topic route, complete Chinese abstracts before marking translation completed, and preserve the LLM's natural multi-sentence recommendation reason covering topic fit, help to the research, and transferable method/data/protocol/theory/evaluation value. Reader-only full-text instructions must stay in reader_instruction_* fields.",
+        "policy": "User-facing recommendations must come from the final title+abstract LLM score ranking, show a real abstract, complete Chinese abstracts before marking translation completed, and preserve the LLM's natural multi-sentence recommendation reason covering topic fit, help to the research, and transferable method/data/protocol/theory/evaluation value. Topic/debug fields remain audit explanations and cannot create a second recommendation gate. Reader-only full-text instructions must stay in reader_instruction_* fields.",
     }
 
 
@@ -6661,7 +6669,8 @@ def _find_recommendation_invalid_reason(item: dict, config: AppConfig | None) ->
     Find recommends papers for deep reading by one path only: the title screen
     supplies candidates, detail enrichment supplies a real abstract, the final
     title+abstract LLM judge scores them, and the UI/Read pool takes the top-N
-    ranked rows whose title+abstract directly support a current topic route.
+    ranked rows. Topic-evidence fields remain available for audit, but do not
+    create a second eligibility or score gate after the final LLM ranking.
     """
     if not _has_final_title_abstract_llm_scoring(item):
         return "missing_final_title_abstract_llm_scoring"
@@ -6673,10 +6682,6 @@ def _find_recommendation_invalid_reason(item: dict, config: AppConfig | None) ->
         return "missing_real_abstract"
     if item.get("abstract_fetch_failed"):
         return str(item.get("abstract_fetch_failed_reason") or "abstract_fetch_failed")
-    if item.get("not_positive_support"):
-        return str(item.get("strong_gate_reject_reason") or "not_positive_support")
-    if item.get("foundation_demoted_from_strong"):
-        return "foundation_demoted_from_strong"
     score_value = item.get("llm_fit_score")
     if score_value in (None, ""):
         score_value = item.get("fit_score")
@@ -6685,21 +6690,14 @@ def _find_recommendation_invalid_reason(item: dict, config: AppConfig | None) ->
     try:
         if not isfinite(float(score_value)):
             return "invalid_final_title_abstract_llm_fit_score"
-        if float(score_value) <= 2.0:
-            return "final_llm_score_marks_unrelated"
     except (TypeError, ValueError):
         return "invalid_final_title_abstract_llm_fit_score"
-    if not _has_strong_topic_evidence(item):
-        return _strict_strong_invalid_reason(item) or "unsupported_topic_evidence"
-    if str(item.get("evidence_role") or "").lower() == "foundation_borrowing":
-        return "background_or_foundation_not_user_visible_recommendation"
-    strict_reason = _strict_strong_invalid_reason(item)
-    if strict_reason:
-        return strict_reason
     if _recommendation_reason_unusable(item.get("reason_zh") or item.get("reason"), zh=True):
         return "invalid_chinese_recommendation_reason"
     if _recommendation_reason_unusable(item.get("reason_en"), zh=False):
         return "invalid_english_recommendation_reason"
+    # Topic evidence, route guards, diversity, and source-quality signals are
+    # ranking/audit data only once a real abstract has a valid final LLM score.
     return ""
 
 
@@ -7634,7 +7632,7 @@ def _run_diagnostics(artifacts: dict) -> dict:
         warnings.append({
             "code": "recommendation_shortfall",
             "severity": "warning",
-            "message": f"Only {recommendation_actual}/{recommendation_target} unique candidates with real abstracts, valid final LLM scores, and direct topic-route evidence were available. Find does not fill the requested count with unsupported rows; inspect scoring coverage, abstract enrichment, topic evidence, and duplicate removal.",
+            "message": f"Only {recommendation_actual}/{recommendation_target} unique candidates with real abstracts, valid final LLM scores, and usable recommendation reasons were available. Inspect scoring coverage, abstract enrichment, reason repair, and duplicate removal.",
         })
     for item in failed_sources:
         message = str(item.get("message") or "")

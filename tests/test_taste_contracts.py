@@ -6268,6 +6268,35 @@ def test_find_title_prefilter_refills_batches_after_cache_hits(monkeypatch, tmp_
     assert llm.call_sizes == [100, 50]
 
 
+def test_find_title_score_cache_is_independent_from_final_recommendation_policy(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    config = find_pipeline.AppConfig(
+        provider="openai_compatible",
+        base_url="https://llm.example.test/v1",
+        model="test-model",
+    )
+    item = {
+        "id": "paper-1",
+        "title": "Discrete Diffusion for Protein Design",
+        "abstract": "We evaluate a discrete diffusion model for protein sequence design.",
+        "venue": "TestVenue",
+        "year": 2026,
+        "category": "protein generation",
+    }
+    original_key = find_pipeline._title_llm_score_cache_key(item, config, "protein diffusion", "")
+
+    monkeypatch.setattr(find_pipeline, "SCORING_POLICY_VERSION", "future-final-ranking-policy")
+
+    assert find_pipeline._title_llm_score_cache_key(item, config, "protein diffusion", "") == original_key
+    assert find_pipeline._title_llm_cache_entry_valid({
+        "schema": find_pipeline.TITLE_LLM_SCORE_CACHE_SCHEMA_VERSION,
+        "policy": find_pipeline.TITLE_LLM_SCORE_CACHE_POLICY_WITH_SNIPPETS,
+        "scoring_policy": find_pipeline.TITLE_LLM_SCORING_POLICY_VERSION,
+        "fit_score": 7.2,
+        "diversity_score": 6.1,
+    }) is True
+
+
 def test_find_json_recovery_keeps_completed_scoring_and_translation_rows():
     finding_main = _load_finding_main()
     finding_runtime = finding_main._private_import("finding_runtime")
@@ -6811,15 +6840,8 @@ def test_find_diagnostics_distinguishes_zero_scores_from_invalid_reason_quality(
     assert invalid_reason_diagnostics["survey_stats"]["llm_reason_quality_invalid_candidates"] == 1
 
 
-def test_find_recommendations_require_topic_evidence_without_forcing_the_target():
+def test_find_recommendations_fill_dynamic_minimum_target_from_valid_final_scores_with_topic_audit_only():
     find_pipeline = _load_find_pipeline()
-    config = find_pipeline.AppConfig(
-        provider="openai_compatible",
-        api_key="test-key",
-        model="test-model",
-        max_recommended_papers=2,
-        research_interest="protein design",
-    )
 
     def candidate(item_id: str, score: float, **updates) -> dict:
         row = {
@@ -6832,38 +6854,56 @@ def test_find_recommendations_require_topic_evidence_without_forcing_the_target(
             "diversity_score": score,
             "recommendation_score": score,
             "topic_evidence_supported": False,
+            "topic_evidence_audit_only": True,
             "topic_evidence": "weak: missing adaptive topic evidence",
-            "missing_topic_evidence": ["protein target"],
+            "missing_topic_evidence": ["complete current topic route"],
             "llm_complete_route_guard_failed": True,
             "foundation_demoted_from_strong": True,
             "not_positive_support": True,
-            "reason_zh": "论文的方法直接针对蛋白质设计任务，主题与当前研究目标契合。其模型和实验评测可帮助比较约束策略，并为后续方法迁移提供借鉴。",
-            "reason_en": "The method directly addresses the protein-design task and fits the research target. Its model and experimental evaluation help compare constraint strategies and provide transferable design evidence.",
+            "reason_zh": "论文提出了与当前研究任务相关的具体方法和实验机制。其受控评测可帮助比较候选方案，并为后续方法迁移提供借鉴。",
+            "reason_en": "The paper presents a concrete method and experimental mechanism relevant to the current research task. Its controlled evaluation helps compare candidates and provides transferable evidence.",
         }
         row.update(updates)
         return row
 
-    ranked = find_pipeline._recommended(
-        [
-            candidate("unsupported", 9.9),
-            candidate("scored-unrelated", 2.0, topic_evidence_supported=True, topic_evidence="passed: direct topic match", missing_topic_evidence=[], llm_complete_route_guard_failed=False, foundation_demoted_from_strong=False, not_positive_support=False),
-            candidate("low", 2.1, topic_evidence_supported=True, topic_evidence="passed: direct topic match", missing_topic_evidence=[], llm_complete_route_guard_failed=False, foundation_demoted_from_strong=False, not_positive_support=False),
-            candidate("high", 4.9, title="Shared protein design paper", topic_evidence_supported=True, topic_evidence="passed: direct topic match", missing_topic_evidence=[], llm_complete_route_guard_failed=False, foundation_demoted_from_strong=False, not_positive_support=False),
-            candidate("duplicate", 1.0, title="Shared protein design paper"),
-            candidate("missing-abstract", 10.0, abstract=""),
-            candidate("unscored", 8.0, reason_source="llm title filter"),
-        ],
-        config,
-        source_count=1,
-    )
+    cases = [
+        (1, 1, 5),
+        (7, 3, 15),
+        (20, 5, 25),
+        (37, 2, 37),
+        (50, 5, 50),
+        (137, 8, 137),
+        (200, 1, 200),
+    ]
+    for webpage_value, source_count, expected_target in cases:
+        config = find_pipeline.AppConfig(
+            provider="openai_compatible",
+            api_key="test-key",
+            model="test-model",
+            max_recommended_papers=webpage_value,
+            research_interest="current research task",
+        )
+        valid = [candidate(f"ranked-{index:03d}", 10.0 - index * 0.001) for index in range(220)]
+        ranked = find_pipeline._recommended(
+            [
+                candidate("invalid-reason", 99.0, reason_quality_invalid=True),
+                candidate("missing-abstract", 98.0, abstract=""),
+                candidate("unscored", 97.0, reason_source="llm title filter"),
+                *valid,
+            ],
+            config,
+            source_count=source_count,
+        )
 
-    assert [item["id"] for item in ranked] == ["high", "low"]
-    assert all(item["find_recommendation"] for item in ranked)
-    assert all(item["topic_evidence_supported"] is True for item in ranked)
-    assert all(item["strict_strong_anchor"] is True for item in ranked)
-    assert find_pipeline._strict_strong_anchor_count(ranked) == 2
-    assert all("not_positive_support" not in item for item in ranked)
-    assert ranked[1]["fit_score"] == 2.1
+        assert len(ranked) == expected_target
+        assert [item["id"] for item in ranked] == [f"ranked-{index:03d}" for index in range(expected_target)]
+        assert all(item["find_recommendation"] for item in ranked)
+        assert all(item["topic_evidence_supported"] is False for item in ranked)
+        assert all(item["topic_evidence_audit_only"] is True for item in ranked)
+        assert all(item["strict_strong_anchor"] is True for item in ranked)
+        assert find_pipeline._strict_strong_anchor_count(ranked) == expected_target
+        assert all("not_positive_support" not in item for item in ranked)
+        assert all("foundation_demoted_from_strong" not in item for item in ranked)
 
     local_only = candidate("local-only", 9.9, reason_source="adaptive profile fallback")
     assert find_pipeline._recommended(
@@ -6871,6 +6911,26 @@ def test_find_recommendations_require_topic_evidence_without_forcing_the_target(
         find_pipeline.AppConfig(provider="mock", api_key="", max_recommended_papers=1),
         source_count=1,
     ) == []
+
+
+def test_find_negative_topic_regex_does_not_reject_gradient_free_method():
+    find_pipeline = _load_find_pipeline()
+    gradient_free = {
+        "title": "Gradient-Free RL Fine-Tuning for Discrete Diffusion",
+        "abstract": "We introduce gradient-free reinforcement learning for discrete diffusion sequence design.",
+        "topic_evidence": "passed: discrete diffusion post-training",
+        "topic_evidence_supported": True,
+        "reason_zh": "本文提出梯度无关优化和奖励塑形方法，与离散扩散后训练直接相关。",
+        "reason_en": "The method directly supports discrete diffusion post-training.",
+        "evidence_role": "direct_target",
+    }
+    unrelated = {
+        **gradient_free,
+        "reason_zh": "这项工作与当前研究主题无关，只研究图像分类。",
+    }
+
+    assert find_pipeline._explicit_llm_negative_strong_reason(gradient_free) == ""
+    assert find_pipeline._explicit_llm_negative_strong_reason(unrelated)
 
 
 def test_find_recommendation_target_is_at_least_five_per_selected_source():
@@ -6934,7 +6994,7 @@ def test_find_weak_topic_audit_does_not_rewrite_final_llm_scores():
         "protein design",
     )
 
-    assert item["topic_evidence_audit_only"] is False
+    assert item["topic_evidence_audit_only"] is True
     assert item["topic_evidence_supported"] is False
     assert item["fit_score"] == 7.4
     assert item["diversity_score"] == 6.8
@@ -11115,7 +11175,7 @@ def test_find_preserves_natural_llm_recommendation_reason_without_template_rewri
     fixed_opener = "对当前研究方向来说，该论文提供可借鉴的方法结构、评测信号和实验设计参考，能够支持后续研究。"
     assert find_pipeline._recommendation_reason_has_generic_opener(fixed_opener, zh=True) is True
     assert find_pipeline._recommendation_reason_unusable(fixed_opener, zh=True) is True
-    assert find_pipeline.FINAL_LLM_SCORE_CACHE_PROMPT_POLICY == "final_title_abstract_prompt_v34_canonical_fields_batched_repair"
+    assert find_pipeline.FINAL_LLM_SCORE_CACHE_PROMPT_POLICY == "final_title_abstract_prompt_v35_ranked_topn_topic_audit"
     source = (ROOT / "modules" / "finding" / "scripts" / "flow" / "pipeline.py").read_text(encoding="utf-8")
     assert "do not use a prescribed opening, generic research-direction boilerplate" in source
     assert "def zh_reason()" not in source
