@@ -2724,6 +2724,89 @@ def test_web_jobs_hides_stale_environment_history_when_live_environment_running(
     assert rows[0]["run_id"] == "web_environment_demo_20260621T054118Z"
 
 
+def test_web_jobs_does_not_surface_owned_plan_worker_as_recovered_job(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    projects_root = tmp_path / "projects"
+    (projects_root / "demo").mkdir(parents=True)
+    monkeypatch.setattr(web_server, "PROJECT_IDS_ROOT", projects_root)
+    monkeypatch.setattr(web_server, "_reconcile_detached_launcher_jobs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(web_server, "_reconcile_stale_cancelling_jobs", lambda: None)
+    monkeypatch.setattr(web_server, "_find_run_history_jobs_from_runs", lambda *args, **kwargs: [])
+    monkeypatch.setattr(web_server, "_current_find_downstream_stage_history_jobs", lambda *args, **kwargs: [])
+    monkeypatch.setattr(web_server, "_environment_decision_public_projection", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        web_server,
+        "_live_jobs_from_projects",
+        lambda **_kwargs: [{
+            "job_id": "project-worker_demo_4321",
+            "stage": "plan",
+            "status": "running",
+            "created_at": "2026-08-12T08:40:21Z",
+            "run_id": "find_demo",
+            "result": {
+                "project": "demo",
+                "run_id": "find_demo",
+                "phase": "plan",
+                "kind": "planning_module",
+                "process_alive": True,
+                "not_full_cycle_controller": True,
+            },
+            "progress": {"phase": "plan", "message": "plan worker running"},
+            "logs": ["project=demo", "stage=plan", "pid=4321"],
+        }],
+    )
+    job = web_server.JobState("plan_web", "plan")
+    job.status = "running"
+    job.created_at = "2026-08-12T08:40:20Z"
+    job.run_id = "find_demo"
+    job.result = {"project": "demo", "run_id": "find_demo", "status": "running"}
+    monkeypatch.setattr(web_server, "JOBS", {job.job_id: job})
+
+    rows = web_server.api_jobs(compact=True, limit=10, include_history=True, project="demo")
+
+    assert [row["job_id"] for row in rows] == ["plan_web"]
+
+
+def test_web_jobs_keeps_detached_plan_worker_as_recovered_job(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    projects_root = tmp_path / "projects"
+    (projects_root / "demo").mkdir(parents=True)
+    monkeypatch.setattr(web_server, "PROJECT_IDS_ROOT", projects_root)
+    monkeypatch.setattr(web_server, "_reconcile_detached_launcher_jobs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(web_server, "_reconcile_stale_cancelling_jobs", lambda: None)
+    monkeypatch.setattr(web_server, "_find_run_history_jobs_from_runs", lambda *args, **kwargs: [])
+    monkeypatch.setattr(web_server, "_current_find_downstream_stage_history_jobs", lambda *args, **kwargs: [])
+    monkeypatch.setattr(web_server, "_environment_decision_public_projection", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        web_server,
+        "_live_jobs_from_projects",
+        lambda **_kwargs: [{
+            "job_id": "project-worker_demo_4321",
+            "stage": "plan",
+            "status": "running",
+            "created_at": "2026-08-12T08:40:21Z",
+            "run_id": "find_demo",
+            "result": {
+                "project": "demo",
+                "run_id": "find_demo",
+                "phase": "plan",
+                "kind": "planning_module",
+                "process_alive": True,
+                "not_full_cycle_controller": True,
+            },
+            "progress": {"phase": "plan", "message": "plan worker running"},
+            "logs": ["project=demo", "stage=plan", "pid=4321"],
+        }],
+    )
+    monkeypatch.setattr(web_server, "JOBS", {})
+
+    rows = web_server.api_jobs(compact=True, limit=10, include_history=True, project="demo")
+
+    assert [row["job_id"] for row in rows] == ["project-worker_demo_4321"]
+
+
 def test_web_jobs_lists_handoff_environment_worker_as_nonexclusive(monkeypatch):
     from auto_research.web import server as web_server
 

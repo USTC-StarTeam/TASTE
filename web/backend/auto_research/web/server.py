@@ -12259,6 +12259,43 @@ def _merge_live_find_workers_into_web_jobs(
     return visible_dynamic, merged_persisted
 
 
+def _exclude_owned_workers_from_recovery_rows(
+    dynamic: list[dict[str, Any]],
+    persisted: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Only surface process-discovery rows when no active Web job owns them."""
+
+    def identity(item: dict[str, Any]) -> tuple[str, str, str] | None:
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        project_id = str(result.get("project") or _project_from_job_payload(item.get("job_id"), item) or "").strip()
+        stage_id = _public_taste_stage(item.get("stage"))
+        run_id = str(item.get("run_id") or result.get("run_id") or "").strip()
+        if not project_id or not stage_id or not run_id:
+            return None
+        return project_id, stage_id, run_id
+
+    owned_identities = {
+        item_identity
+        for item in persisted
+        if str(item.get("status") or "").strip().lower() in {"queued", "running", "cancelling"}
+        if (item_identity := identity(item)) is not None
+    }
+    if not owned_identities:
+        return dynamic
+    visible: list[dict[str, Any]] = []
+    for item in dynamic:
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        is_recovery_worker = bool(
+            result.get("not_full_cycle_controller") is True
+            and result.get("process_alive") is True
+            and str(item.get("status") or "").strip().lower() in {"queued", "running", "cancelling"}
+        )
+        if is_recovery_worker and identity(item) in owned_identities:
+            continue
+        visible.append(item)
+    return visible
+
+
 def _project_stage_running_blocker(payload: dict[str, Any], stage: str) -> dict[str, Any] | None:
     stage_key = str(stage or "").strip().lower()
     if stage_key not in PROJECT_STAGE_EXCLUSIVE_ACTIONS:
@@ -12674,6 +12711,7 @@ def api_jobs(
         effective_limit = limit
         persisted = [job.as_dict(compact=False) for job in job_snapshot]
     dynamic, persisted = _merge_live_find_workers_into_web_jobs(dynamic, persisted)
+    dynamic = _exclude_owned_workers_from_recovery_rows(dynamic, persisted)
     hidden_taskbstages = set()
     dynamic_live_projects = {
         str((item.get("result") if isinstance(item.get("result"), dict) else {}).get("project") or "")
