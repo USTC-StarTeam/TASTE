@@ -1815,6 +1815,13 @@ def _llm_live_gate(llm: LLMClient) -> dict:
             llm.retries = original_retries
 
 
+def _llm_live_gate_requires_fallback(llm: LLMClient, live_gate: dict) -> bool:
+    if not llm.enabled or live_gate.get("ok"):
+        return False
+    error = live_gate.get("error") or live_gate.get("reason") or ""
+    return _is_fatal_llm_configuration_error(error)
+
+
 def _json_or_error_wall_timeout(llm: LLMClient, prompt: str, *, temperature: float | None = None, max_tokens: int | None = None, timeout_sec: int = 0) -> dict:
     timeout = max(0, int(timeout_sec or 0))
     if timeout <= 0:
@@ -8316,11 +8323,8 @@ def run_find(
     llm_live = _llm_live_gate(llm)
     if llm.enabled and not llm_live.get("ok"):
         log("LLM live gate failed before Find scoring: " + str(llm_live.get("error") or llm_live.get("reason") or "unknown"))
-    active_llm = (
-        llm
-        if (not llm.enabled or llm_live.get("ok"))
-        else LLMClient(config.model_copy(update={"api_key": ""}), "find")
-    )
+    llm_live_gate_fallback = _llm_live_gate_requires_fallback(llm, llm_live)
+    active_llm = LLMClient(config.model_copy(update={"api_key": ""}), "find") if llm_live_gate_fallback else llm
     cached_stage0_profile = _load_stage0_profile_cache(config)
     if cached_stage0_profile:
         stage0_profile = cached_stage0_profile
@@ -8345,7 +8349,7 @@ def run_find(
     }
     _write_run_json(run_dir, "intermediate/stage0_profile.json", stage0_result)
     log("Stage 0 profile normalization complete")
-    if llm.enabled and not llm_live.get("ok") and _is_fatal_llm_configuration_error(llm_live.get("error") or llm_live.get("reason")):
+    if llm_live_gate_fallback:
         warning = _fatal_llm_configuration_message(llm_live.get("error") or llm_live.get("reason"), "Find live gate")
         log(warning + "; continuing with local fallback scoring")
     catalog = catalog_by_id()
@@ -8673,7 +8677,7 @@ def run_find(
     venue_papers = _dedupe_items(venue_papers)
     _persist_find_progress("venue_scan_complete")
 
-    if llm.enabled and not llm_live.get("ok"):
+    if llm_live_gate_fallback:
         source_status.append(_source_status("llm_final_scoring", False, 0, "LLM live gate failed; continuing with local fallback scoring where real title/abstract metadata is available. " + str(llm_live.get("error") or llm_live.get("reason") or "unknown"), limited=True))
     latest_released_venue = _latest_released_venue_context(venue_health_report)
     venue_title_candidates = [item for _source, items, sink in deferred_scoring_groups if sink == "venue" for item in items]
@@ -9133,7 +9137,7 @@ def run_find(
     _normalize_presentation_fields(evaluated_candidates)
     _normalize_presentation_fields(venue_papers)
     source_count = _selection_source_count(request.selection)
-    llm_fallback_mode = bool(llm.enabled and not llm_live.get("ok"))
+    llm_fallback_mode = llm_live_gate_fallback
     recommendation_config = effective_config.model_copy(update={"api_key": ""}) if llm_fallback_mode else effective_config
     article_items = _recommended(evaluated_candidates, recommendation_config, source_count=source_count)
     if llm_fallback_mode:
@@ -9209,7 +9213,7 @@ def run_find(
                 "llm": llm.summary(),
                 "abstract_translation_status": translation_status,
                 "llm_live_gate": llm_live,
-                "llm_final_scoring_available": bool((not llm.enabled) or llm_live.get("ok")),
+                "llm_final_scoring_available": not llm_live_gate_fallback,
                 "llm_fallback_mode": "local_profile_scoring" if llm_fallback_mode else "",
             },
             "huggingface": hf_items,
@@ -9238,10 +9242,15 @@ def run_find(
             scoring_runtime["source_integrity_gate"] = source_integrity_gate
             artifacts["scoring_runtime"] = scoring_runtime
         if llm.enabled and not llm_live.get("ok"):
+            live_gate_message = (
+                "LLM live gate failed with a fatal configuration error; Find used local fallback scoring where metadata allowed it. "
+                if llm_live_gate_fallback
+                else "LLM live gate had a transient failure; downstream scoring remained enabled and used its normal batch repair policy. "
+            )
             artifacts["diagnostics"].setdefault("warnings", []).append({
                 "code": "llm_live_gate_failed",
                 "severity": "warning",
-                "message": "LLM live gate failed; normal Find continued with local fallback scoring where metadata allowed it. " + str(llm_live.get("error") or llm_live.get("reason") or "unknown"),
+                "message": live_gate_message + str(llm_live.get("error") or llm_live.get("reason") or "unknown"),
             })
         artifacts["survey_stats"] = artifacts["diagnostics"].get("survey_stats", {})
         return artifacts

@@ -6589,6 +6589,29 @@ def test_find_llm_client_streams_one_chat_completion_request(monkeypatch):
     assert requests[0].get_header("Accept") == "text/event-stream"
 
 
+def test_find_live_gate_only_disables_scoring_for_fatal_configuration_errors():
+    find_pipeline = _load_find_pipeline()
+
+    class EnabledLLM:
+        enabled = True
+
+    llm = EnabledLLM()
+
+    assert find_pipeline._llm_live_gate_requires_fallback(
+        llm,
+        {"ok": False, "error": "LLM HTTP 502 via chat_completions: upstream unavailable"},
+    ) is False
+    assert find_pipeline._llm_live_gate_requires_fallback(
+        llm,
+        {"ok": False, "error": "LLM request timed out"},
+    ) is False
+    assert find_pipeline._llm_live_gate_requires_fallback(
+        llm,
+        {"ok": False, "error": "LLM HTTP 401 via chat_completions: invalid API key"},
+    ) is True
+    assert find_pipeline._llm_live_gate_requires_fallback(llm, {"ok": True, "error": ""}) is False
+
+
 def test_find_single_request_wrapper_does_not_invoke_legacy_client():
     find_pipeline = _load_find_pipeline()
 
