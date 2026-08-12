@@ -5575,6 +5575,43 @@ def test_reading_reader_pdf_text_fallback_requires_identity(monkeypatch, tmp_pat
     shutil.rmtree(run_dir, ignore_errors=True)
 
 
+def test_reading_arxiv_indexed_pdf_uses_reader_after_rate_limit(monkeypatch):
+    paper_sources = _load_reading_paper_sources()
+    pdf_url = "https://arxiv.org/pdf/2607.04780v1"
+    seen_urls: list[str] = []
+
+    def fake_fetch(_paper, candidate_url, timeout=45):
+        seen_urls.append(candidate_url)
+        return "verified arxiv paper body", {
+            "kind": "reader_pdf_text",
+            "pdf_url": candidate_url,
+            "accepted": True,
+            "paper_body_markers": True,
+            "pdf_text_identity_check": True,
+        }
+
+    monkeypatch.setattr(paper_sources, "_fetch_reader_pdf_text", fake_fetch)
+    text, receipt = paper_sources._reader_pdf_text_from_failed_pdf_attempts(
+        {
+            "paper_id": "2607.04780v1",
+            "title": "Non-Asymptotic Error Bounds for SMC with Biased Proposals: Application to Conditional Diffusion Sampling",
+        },
+        {
+            "attempts": [{
+                "kind": "indexed_pdf",
+                "pdf_url": pdf_url,
+                "accepted": True,
+                "downloaded": False,
+                "download_failure_reason": "http_429_rate_limited",
+            }]
+        },
+    )
+
+    assert seen_urls == [pdf_url]
+    assert text == "verified arxiv paper body"
+    assert receipt["selected"]["pdf_text_identity_check"] is True
+
+
 def test_reading_openreview_reader_pdf_text_accepts_verified_body(monkeypatch):
     common = _load_reading_common()
     paper_sources = _load_reading_paper_sources()

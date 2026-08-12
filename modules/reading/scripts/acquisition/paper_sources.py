@@ -854,6 +854,9 @@ def _reader_pdf_text_from_failed_pdf_attempts(paper: dict[str, Any], acquisition
         kind = str(attempt.get("kind") or "").lower()
         lowered_url = pdf_url.lower()
         is_biorxiv_official_pdf = "biorxiv.org/content/" in lowered_url and kind == "doi_direct_biorxiv_full_pdf"
+        is_arxiv_official_pdf = kind == "indexed_pdf" and bool(
+            re.match(r"^https?://(?:export\.)?arxiv\.org/pdf/", lowered_url)
+        )
         if not (
             attempt.get("requires_pdf_text_identity_check")
             or "search_result" in kind
@@ -862,6 +865,7 @@ def _reader_pdf_text_from_failed_pdf_attempts(paper: dict[str, Any], acquisition
             or "openreview" in kind
             or "openreview.net" in lowered_url
             or is_biorxiv_official_pdf
+            or is_arxiv_official_pdf
         ):
             continue
         eligible_attempts.append((priority(attempt), attempt_index, attempt))
