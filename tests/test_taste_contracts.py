@@ -6034,7 +6034,7 @@ def test_find_title_prefilter_parallel_fatal_error_does_not_start_repairs(monkey
     assert sorted(llm.call_sizes) == [100, 100]
 
 
-def test_find_title_prefilter_adapts_batched_repair_concurrency_to_primary_success_capacity(monkeypatch):
+def test_find_title_prefilter_adapts_batched_repair_concurrency_to_primary_success_rate(monkeypatch):
     find_pipeline = _load_find_pipeline()
     monkeypatch.setenv("USE_LLM_TITLE_FILTER", "1")
     monkeypatch.setenv("TITLE_FILTER_SEQUENTIAL", "0")
@@ -6111,7 +6111,9 @@ def test_find_title_prefilter_adapts_batched_repair_concurrency_to_primary_succe
 
     assert llm.primary_calls == 8
     assert llm.repair_call_sizes == [100] * 6
-    assert llm.max_active_repairs == 2
+    # Two complete responses among eight primary requests at concurrency four
+    # imply an estimated safe repair capacity of one, not two.
+    assert llm.max_active_repairs == 1
     assert sum(item["reason_source"] == "llm title filter" for item in selected) == 800
     repair_events = [event for event in progress_events if "title repair round 1/1" in event[3]]
     assert repair_events

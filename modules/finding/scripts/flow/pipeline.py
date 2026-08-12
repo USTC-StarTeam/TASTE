@@ -4710,7 +4710,8 @@ Rules:
             )
             repair_workers = workers
             if workers > 1 and primary_transport_failure_count:
-                repair_workers = max(1, min(workers, primary_complete_request_count or 1))
+                transport_outcome_count = primary_complete_request_count + primary_transport_failure_count
+                repair_workers = max(1, min(workers, ceil(workers * primary_complete_request_count / transport_outcome_count)))
                 if repair_workers < workers:
                     log(
                         f"{venue_name}: reducing title repair concurrency from {workers} to {repair_workers} "
