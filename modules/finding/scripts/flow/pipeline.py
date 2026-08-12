@@ -102,7 +102,7 @@ TITLE_LLM_SCORE_CACHE_SCHEMA_VERSION = "find_title_llm_score_cache_v1"
 TITLE_LLM_SCORING_POLICY_VERSION = "direct_llm_title_abstract_topic_supported_v25"
 TITLE_LLM_SCORE_CACHE_POLICY_TITLE_ONLY = "llm_title_filter_profile_context_v1"
 TITLE_LLM_SCORE_CACHE_POLICY_WITH_SNIPPETS = "llm_title_filter_profile_context_v2_metadata_snippets"
-TITLE_LLM_SCORE_CACHE_POLICY = TITLE_LLM_SCORE_CACHE_POLICY_WITH_SNIPPETS
+TITLE_LLM_SCORE_CACHE_POLICY = TITLE_LLM_SCORE_CACHE_POLICY_TITLE_ONLY
 TITLE_LLM_SCORE_CACHE_MAX_ENTRIES = 100000
 STAGE0_PROFILE_CACHE_SCHEMA_VERSION = "find_stage0_profile_cache_v1"
 VENUE_TITLE_INDEX_CACHE_SCHEMA_VERSION = "find_venue_title_index_cache_v1"
@@ -1729,7 +1729,14 @@ def _json_or_error(llm: LLMClient, prompt: str, *, temperature: float | None = N
             return llm.json_or_error(prompt)
 
 
-def _json_or_error_single_request(llm: LLMClient, prompt: str, *, temperature: float | None = None, max_tokens: int | None = None) -> dict:
+def _json_or_error_single_request(
+    llm: LLMClient,
+    prompt: str,
+    *,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    stream: bool = False,
+) -> dict:
     method = getattr(llm, "json_or_error", None)
     if not callable(method):
         return {"ok": False, "data": None, "error": "LLM client does not provide json_or_error"}
@@ -1751,6 +1758,10 @@ def _json_or_error_single_request(llm: LLMClient, prompt: str, *, temperature: f
         kwargs["temperature"] = temperature
     if "max_tokens" in parameters or accepts_kwargs:
         kwargs["max_tokens"] = max_tokens
+    if stream:
+        if "stream" not in parameters and not accepts_kwargs:
+            return {"ok": False, "data": None, "error": "LLM client does not support streaming single-request scoring"}
+        kwargs["stream"] = True
     try:
         result = method(prompt, **kwargs)
     except TypeError as exc:
@@ -3168,11 +3179,8 @@ def _title_llm_score_cache_enabled(config: AppConfig | None = None, llm: LLMClie
 
 
 def _title_llm_score_cache_policy(item: dict) -> str:
-    # The prompt only changes semantically when an abstract snippet is present.
-    # Title-index-only venues such as ICML Downloads should keep using the
-    # stable title-only cache instead of re-scoring thousands of unchanged rows.
-    if _clean_abstract_text(item.get("abstract")):
-        return TITLE_LLM_SCORE_CACHE_POLICY_WITH_SNIPPETS
+    # Title filtering is deliberately title-only. Real abstracts are evaluated
+    # later in bounded batches by the final scoring stage.
     return TITLE_LLM_SCORE_CACHE_POLICY_TITLE_ONLY
 
 
@@ -4537,7 +4545,6 @@ def _prefilter_titles(
             alias_map = {f"p{position:03d}": item for position, item in enumerate(batch, 1)}
             paper_lines: list[str] = []
             for alias, item in alias_map.items():
-                abstract = _clean_abstract_text(item.get("abstract"))
                 item_group = group_by_id.get(str(item.get("id") or ""))
                 item_context = ""
                 if item_group:
@@ -4549,10 +4556,7 @@ def _prefilter_titles(
                         f"dynamic_strictness={item_group['policy']['label']}; "
                         f"policy={item_group['policy']['instruction']}"
                     )
-                if abstract:
-                    paper_lines.append(f"- {alias}: {item.get('title')}{item_context}\n  abstract: {abstract[:700]}")
-                else:
-                    paper_lines.append(f"- {alias}: {item.get('title')}{item_context}")
+                paper_lines.append(f"- {alias}: {item.get('title')}{item_context}")
             title_lines = "\n".join(paper_lines)
             context_block = f"\nBatch context:\n{context}\n" if context else ""
             prompt = f"""
@@ -4562,7 +4566,7 @@ Research interest/profile:
 {scoring_interest}
 {context_block}
 
-Paper titles and available abstract snippets, {batch_label}:
+Paper titles, {batch_label}:
 {title_lines}
 
 Return one strict JSON object whose only top-level key is scored. scored must be an array. Each row must contain the input id, numeric fit_score and diversity_score in the 0-10 range, concrete hit_directions, a concise specific category, and a concise Chinese title-level reason. Every text field must contain the actual judgment, never a field description or placeholder.
@@ -4571,8 +4575,7 @@ Rules:
 - Return exactly {len(batch)} scored rows, one for every input ID, including low-confidence papers.
 - IDs are opaque request-local identifiers. Copy each pNNN ID exactly once; never shorten, rewrite, or invent an ID.
 - fit_score is the metadata-level match to the profile, not a final recommendation score. Use the full 0-10 range and judge each item independently; do not imitate example values or cluster scores around a few numbers.
-- When an abstract snippet is present, use it to decide whether a generic title actually supports the user's methods, domains, or constraints.
-- Generic AI/ML papers should score low unless the title or abstract concretely connects to the user's methods, domains, or constraints.
+- Generic AI/ML papers should score low unless the title concretely connects to the user's methods, domains, or constraints.
 - diversity_score only rewards hitting multiple real user directions or adding a complementary method/domain. It cannot rescue low fit.
 - This title screen only decides which papers receive abstract/detail fetching. Final recommendations are decided later from real abstracts and final relevance scoring.
 """
@@ -4628,6 +4631,7 @@ Rules:
                 prompt,
                 temperature=FIND_TITLE_FILTER_TEMPERATURE,
                 max_tokens=0,
+                stream=True,
             )
             if not result.get("ok"):
                 error = str(result.get("error") or "unknown LLM error")

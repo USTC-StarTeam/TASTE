@@ -1081,6 +1081,88 @@ def _extract_chat_text(raw: Any) -> str:
     return ""
 
 
+def _stream_content_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        chunks: list[str] = []
+        for part in value:
+            if isinstance(part, str):
+                chunks.append(part)
+            elif isinstance(part, dict):
+                for key in ["text", "content", "output_text"]:
+                    inner = part.get(key)
+                    if isinstance(inner, str):
+                        chunks.append(inner)
+                        break
+        return "".join(chunks)
+    if isinstance(value, dict):
+        for key in ["text", "content", "output_text"]:
+            inner = value.get(key)
+            if isinstance(inner, str):
+                return inner
+    return ""
+
+
+def _read_streaming_chat_text(response: Any, *, use_responses: bool) -> str:
+    chunks: list[str] = []
+    fallback_text = ""
+    non_sse_lines: list[bytes] = []
+    event_count = 0
+    finish_reasons: list[str] = []
+    for raw_line in response:
+        line = raw_line.strip()
+        if not line:
+            continue
+        if not line.startswith(b"data:"):
+            non_sse_lines.append(line)
+            continue
+        data = line[5:].strip()
+        if not data or data == b"[DONE]":
+            continue
+        try:
+            event = json.loads(data.decode("utf-8", "ignore"))
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        event_count += 1
+        if use_responses and str(event.get("type") or "") == "response.output_text.delta":
+            text = _stream_content_text(event.get("delta"))
+            if text:
+                chunks.append(text)
+        for choice in event.get("choices", []) or []:
+            if not isinstance(choice, dict):
+                continue
+            if choice.get("finish_reason") is not None:
+                finish_reasons.append(str(choice.get("finish_reason")))
+            delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+            text = _stream_content_text(delta.get("content"))
+            if text:
+                chunks.append(text)
+        if not fallback_text:
+            fallback_text = _extract_chat_text(event)
+            if not fallback_text and isinstance(event.get("response"), dict):
+                fallback_text = _extract_chat_text(event["response"])
+    if chunks:
+        return "".join(chunks)
+    if fallback_text:
+        return fallback_text
+    if non_sse_lines:
+        try:
+            raw = json.loads(b"\n".join(non_sse_lines).decode("utf-8", "ignore"))
+        except (TypeError, ValueError):
+            raw = None
+        text = _extract_chat_text(raw)
+        if text:
+            return text
+    finish_summary = ",".join(finish_reasons[:4]) or "none"
+    raise RuntimeError(
+        "Streaming API returned no extractable text; "
+        f"events={event_count}; finish_reasons={finish_summary}; non_sse_lines={len(non_sse_lines)}"
+    )
+
+
 class LLMClient:
     def __init__(self, config: AppConfig, role: LLMRole | str | None = None):
         self.config = config
@@ -1122,6 +1204,7 @@ class LLMClient:
         max_tokens: int | None = None,
         *,
         single_request: bool = False,
+        stream: bool = False,
     ) -> str:
         if not self.enabled:
             raise RuntimeError("LLM is not configured")
@@ -1179,6 +1262,8 @@ class LLMClient:
                         payload["max_output_tokens"] = output_tokens
                     else:
                         payload["max_tokens"] = output_tokens
+            if stream:
+                payload["stream"] = True
             if reasoning_effort and reasoning_effort not in {"none", "off", "disable", "disabled", "0", "false", "no"}:
                 payload["reasoning_effort"] = reasoning_effort
             if include_thinking_controls and disable_thinking:
@@ -1192,7 +1277,11 @@ class LLMClient:
             req = urllib.request.Request(
                 _responses_url(self.base_url) if use_responses else _chat_url(self.base_url),
                 data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"},
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.api_key}",
+                    **({"Accept": "text/event-stream"} if stream else {}),
+                },
                 method="POST",
             )
             last_error: Exception | None = None
@@ -1200,8 +1289,12 @@ class LLMClient:
             for attempt in range(1, request_attempts + 1):
                 try:
                     with urllib.request.urlopen(req, timeout=self.timeout_sec) as response:
-                        raw = json.loads(response.read().decode("utf-8", "ignore"))
-                    text = _extract_chat_text(raw)
+                        if stream:
+                            text = _read_streaming_chat_text(response, use_responses=use_responses)
+                            raw = None
+                        else:
+                            raw = json.loads(response.read().decode("utf-8", "ignore"))
+                            text = _extract_chat_text(raw)
                     if text:
                         return text
                     raise RuntimeError("Chat Completions API returned no extractable text; " + _chat_response_debug(raw))
@@ -1269,6 +1362,7 @@ class LLMClient:
         max_tokens: int | None = None,
         *,
         single_request: bool = False,
+        stream: bool = False,
     ) -> dict:
         raw_text = ""
         try:
@@ -1277,6 +1371,7 @@ class LLMClient:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 single_request=single_request,
+                stream=stream,
             )
             return {"ok": True, "data": extract_json(raw_text), "error": "", "raw_text": raw_text[:4000]}
         except Exception as first_exc:
@@ -1284,7 +1379,7 @@ class LLMClient:
             if not single_request and raw_text and any(token in parse_error.lower() for token in ["closing bracket", "unterminated", "expecting", "delimiter"]):
                 try:
                     retry_tokens = 0 if max_tokens is not None and int(max_tokens) <= 0 else max(self.max_tokens * 2, int(os.environ.get("LLM_PARSE_RETRY_MAX_TOKENS", "12000") or 12000))
-                    raw_text = self.chat(prompt, temperature=temperature, max_tokens=retry_tokens)
+                    raw_text = self.chat(prompt, temperature=temperature, max_tokens=retry_tokens, stream=stream)
                     return {"ok": True, "data": extract_json(raw_text), "error": "", "raw_text": raw_text[:4000], "parse_retry": True}
                 except Exception as retry_exc:
                     return {"ok": False, "data": None, "error": f"{parse_error}; retry_failed: {retry_exc}", "raw_text": raw_text[:4000]}

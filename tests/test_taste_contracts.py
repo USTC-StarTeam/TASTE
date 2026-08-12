@@ -5857,6 +5857,7 @@ def test_find_title_prefilter_repairs_missing_rows_in_one_batch(monkeypatch):
                 "aliases": aliases,
                 "max_tokens": kwargs.get("max_tokens"),
                 "single_request": single_request,
+                "stream": kwargs.get("stream"),
                 "prompt": prompt,
             })
             returned = aliases[:-3] if len(aliases) == 100 else aliases
@@ -5914,8 +5915,10 @@ def test_find_title_prefilter_repairs_missing_rows_in_one_batch(monkeypatch):
     assert reports[0]["local_title_ranked_papers"] == 0
     assert [len(call["aliases"]) for call in llm.calls] == [100, 2, 3]
     assert all(call["single_request"] is True for call in llm.calls)
+    assert all(call["stream"] is True for call in llm.calls)
     assert all(call["max_tokens"] == 0 for call in llm.calls)
     assert all("paper-0:" not in call["prompt"] for call in llm.calls)
+    assert all("Protein generation with diffusion and reinforcement learning." not in call["prompt"] for call in llm.calls)
 
 
 def test_find_title_prefilter_batch_repair_exhaustion_falls_back_locally(monkeypatch):
@@ -6457,6 +6460,7 @@ def test_find_title_score_cache_is_independent_from_final_recommendation_policy(
 
     monkeypatch.setattr(find_pipeline, "SCORING_POLICY_VERSION", "future-final-ranking-policy")
 
+    assert find_pipeline._title_llm_score_cache_policy(item) == find_pipeline.TITLE_LLM_SCORE_CACHE_POLICY_TITLE_ONLY
     assert find_pipeline._title_llm_score_cache_key(item, config, "protein diffusion", "") == original_key
     assert find_pipeline._title_llm_cache_entry_valid({
         "schema": find_pipeline.TITLE_LLM_SCORE_CACHE_SCHEMA_VERSION,
@@ -6538,6 +6542,51 @@ def test_find_llm_client_single_request_disables_parse_retry(monkeypatch):
 
     assert result["ok"] is False
     assert calls == 1
+
+
+def test_find_llm_client_streams_one_chat_completion_request(monkeypatch):
+    finding_main = _load_finding_main()
+    finding_runtime = finding_main._private_import("finding_runtime")
+    requests = []
+
+    class StreamingResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def __iter__(self):
+            return iter([
+                b'data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}\n',
+                b'data: {"choices":[{"delta":{"content":"{\\\"scored\\\":"},"finish_reason":null}]}\n',
+                b'data: {"choices":[{"delta":{"content":"[{\\\"id\\\":\\\"p001\\\"}]}"},"finish_reason":null}]}\n',
+                b'data: {"choices":[{"delta":{"content":""},"finish_reason":"stop"}]}\n',
+                b'data: [DONE]\n',
+            ])
+
+    def streaming_urlopen(request, **_kwargs):
+        requests.append(request)
+        return StreamingResponse()
+
+    monkeypatch.setattr(finding_runtime.urllib.request, "urlopen", streaming_urlopen)
+    llm = finding_runtime.LLMClient(finding_runtime.AppConfig(
+        provider="openai_compatible",
+        base_url="https://llm.invalid/v1",
+        api_key="test-key",
+        model="test-model",
+    ))
+
+    result = llm.json_or_error("Score this title batch.", single_request=True, stream=True)
+
+    assert result["ok"] is True
+    assert result["data"] == {"scored": [{"id": "p001"}]}
+    assert len(requests) == 1
+    payload = json.loads(requests[0].data.decode("utf-8"))
+    assert payload["stream"] is True
+    assert requests[0].get_header("Accept") == "text/event-stream"
 
 
 def test_find_single_request_wrapper_does_not_invoke_legacy_client():
