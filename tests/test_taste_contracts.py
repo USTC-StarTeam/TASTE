@@ -2409,7 +2409,7 @@ def test_reading_batch_requeues_cooldown_papers_once_with_one_recovery_worker(mo
         "worker_count": 1,
         "services": ["arxiv"],
         "waited_sec": 0.0,
-        "wait_cap_sec": 120.0,
+        "wait_cap_sec": 240.0,
     }
     assert "cooldown_expiry_batch_requeue" in payload["execution_phases"]
     assert all(item["validation"]["cooldown_requeue"]["attempted"] is True for item in payload["items"])
@@ -2505,6 +2505,105 @@ def test_reading_batch_wait_budget_covers_configured_rate_limit_cooldown(monkeyp
         "wait_cap_sec": 120.0,
     }
     assert payload["items"][0]["validation"]["cooldown_requeue"]["attempted"] is True
+    _cleanup_reading_output(run_id)
+
+
+def test_reading_batch_wait_budget_covers_fresh_cooldown_opened_by_prior_recovery(monkeypatch, isolated_reading_latest_run):
+    monkeypatch.setenv("READING_DISABLE_ARTICLE_CACHE", "1")
+    read_pipeline = _load_reading_pipeline()
+    paper_sources = _load_reading_paper_sources()
+    input_path = _write_reading_input("pytest_read_fresh_recovery_cooldown", {
+        "articles": [
+            {"source": "arxiv", "title": "first recovery", "paper_id": "recover-1", "pdf_url": "https://arxiv.org/pdf/2601.00011"},
+            {"source": "arxiv", "title": "fresh rate limit", "paper_id": "fresh-429", "pdf_url": "https://arxiv.org/pdf/2601.00012"},
+            {"source": "arxiv", "title": "recovery after fresh cooldown", "paper_id": "recover-3", "pdf_url": "https://arxiv.org/pdf/2601.00013"},
+        ]
+    })
+    run_id = _reading_run_id_from_input(input_path)
+    calls: dict[str, int] = {}
+    clock = 0.0
+    cooldown_until = 90.0
+
+    def deferred(paper):
+        return {
+            "paper_id": paper["paper_id"],
+            "title": paper["title"],
+            "full_text_available": False,
+            "full_text_status": "deferred_service_cooldown_retry",
+            "full_text_chars": 0,
+            "blocked_full_text_reason": {
+                "code": "deferred_service_cooldown_before_full_text_request",
+                "retryable_after_cooldown": True,
+                "cooldown_services": ["arxiv"],
+            },
+            "pdf_acquisition": {
+                "attempts": [{
+                    "service": "arxiv",
+                    "pdf_url": paper["pdf_url"],
+                    "status_code": 429,
+                    "download_failure_reason": "http_429_rate_limited",
+                }]
+            },
+        }
+
+    def fake_acquire_full_text(paper, item_dir, log=print, *, services=None):
+        nonlocal cooldown_until
+        paper_id = str(paper["paper_id"])
+        calls[paper_id] = calls.get(paper_id, 0) + 1
+        attempt = calls[paper_id]
+        if attempt == 1:
+            return deferred(paper)
+        if paper_id == "fresh-429":
+            cooldown_until = clock + 119.0
+            return deferred(paper)
+        text = f"recovered full text for {paper_id} " * 100
+        text_path = item_dir / "extracted" / "full_text.txt"
+        text_path.parent.mkdir(parents=True, exist_ok=True)
+        text_path.write_text(text, encoding="utf-8")
+        return {
+            "paper_id": paper_id,
+            "title": paper["title"],
+            "full_text_available": True,
+            "full_text_status": "pdf_text_read",
+            "full_text_chars": len(text),
+            "text_path": str(text_path),
+            "pdf_downloaded": True,
+        }
+
+    def cooldown_remaining(_service):
+        return max(0.0, cooldown_until - clock)
+
+    def advance_clock(seconds):
+        nonlocal clock
+        clock += seconds
+
+    monkeypatch.setattr(paper_sources, "acquire_full_text", fake_acquire_full_text)
+    monkeypatch.setattr(read_pipeline, "service_cooldown_remaining", cooldown_remaining)
+    monkeypatch.setattr(read_pipeline.time, "monotonic", lambda: clock)
+    monkeypatch.setattr(read_pipeline.time, "sleep", advance_clock)
+    result = read_pipeline.run_read(
+        run_id=run_id,
+        input_json=str(input_path),
+        claude_mode="prepare",
+        max_workers=1,
+        log=lambda _message: None,
+    )
+
+    payload = json.loads((input_path.parent.parent / "read_results.json").read_text(encoding="utf-8"))
+    assert calls == {"recover-1": 2, "fresh-429": 2, "recover-3": 2}
+    assert result["full_text_ready_count"] == 2
+    assert payload["cooldown_requeue"] == {
+        "status": "complete",
+        "attempted_paper_count": 3,
+        "skipped_long_cooldown_count": 0,
+        "recovered_full_text_count": 2,
+        "worker_count": 1,
+        "services": ["arxiv"],
+        "waited_sec": 209.0,
+        "wait_cap_sec": 360.0,
+    }
+    assert payload["items"][1]["validation"]["cooldown_requeue"]["attempted"] is True
+    assert payload["items"][2]["validation"]["cooldown_requeue"]["attempted"] is True
     _cleanup_reading_output(run_id)
 
 
