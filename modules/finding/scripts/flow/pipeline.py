@@ -4698,6 +4698,26 @@ Rules:
                 for error in errors:
                     _raise_if_fatal_llm_configuration_error(error, f"{venue_name} title filtering")
 
+            primary_transport_failure_count = sum(
+                1
+                for _batch_index, _batch, _matched, _unresolved, errors, _request_count in result_iter
+                if errors
+            )
+            primary_complete_request_count = sum(
+                1
+                for _batch_index, batch, matched, unresolved, errors, _request_count in result_iter
+                if not errors and not unresolved and len(matched) == len(batch)
+            )
+            repair_workers = workers
+            if workers > 1 and primary_transport_failure_count:
+                repair_workers = max(1, min(workers, primary_complete_request_count or 1))
+                if repair_workers < workers:
+                    log(
+                        f"{venue_name}: reducing title repair concurrency from {workers} to {repair_workers} "
+                        f"after {primary_complete_request_count} complete and {primary_transport_failure_count} "
+                        "transport-failed primary requests"
+                    )
+
             pending_title_repairs = [item for _batch_index, _batch, _matched, unresolved, _errors, _request_count in result_iter for item in unresolved]
             repair_matched: list[tuple[dict, dict]] = []
             repair_errors: list[str] = []
@@ -4708,9 +4728,15 @@ Rules:
                 if not pending_title_repairs:
                     break
                 repair_batches = list(_chunks(pending_title_repairs, batch_size))
-                log(f"{venue_name}: starting consolidated title repair round {repair_round}/{title_repair_attempts} for {len(pending_title_repairs)} rows in {len(repair_batches)} requests")
+                log(f"{venue_name}: starting consolidated title repair round {repair_round}/{title_repair_attempts} for {len(pending_title_repairs)} rows in {len(repair_batches)} requests with {repair_workers} workers")
+                progress(
+                    "llm_title_filter",
+                    0,
+                    len(repair_batches),
+                    f"{venue_name}: starting title repair round {repair_round}/{title_repair_attempts}, workers {repair_workers}",
+                )
                 round_results: list[tuple[int, list[tuple[dict, dict]], list[dict], list[str], int]] = []
-                if workers == 1:
+                if repair_workers == 1:
                     for repair_batch_index, repair_batch in enumerate(repair_batches, 1):
                         _raise_if_cancelled(should_cancel)
                         matched, unresolved, errors, request_count = score_title_request(
@@ -4719,8 +4745,14 @@ Rules:
                             f"consolidated batched repair {repair_round}/{title_repair_attempts}, batch {repair_batch_index}/{len(repair_batches)}",
                         )
                         round_results.append((repair_batch_index, matched, unresolved, errors, request_count))
+                        progress(
+                            "llm_title_filter",
+                            repair_batch_index,
+                            len(repair_batches),
+                            f"{venue_name}: title repair round {repair_round}/{title_repair_attempts} batch {repair_batch_index}/{len(repair_batches)}, workers {repair_workers}",
+                        )
                 else:
-                    repair_executor = ThreadPoolExecutor(max_workers=workers)
+                    repair_executor = ThreadPoolExecutor(max_workers=repair_workers)
                     repair_futures = {
                         repair_executor.submit(
                             score_title_request,
@@ -4731,11 +4763,13 @@ Rules:
                         for repair_batch_index, repair_batch in enumerate(repair_batches, 1)
                     }
                     repair_pending = set(repair_futures)
+                    repair_completed = 0
                     try:
                         while repair_pending:
                             _raise_if_cancelled(should_cancel)
                             done, repair_pending = wait(repair_pending, timeout=1.0, return_when=FIRST_COMPLETED)
                             for future in done:
+                                repair_completed += 1
                                 repair_batch_index = repair_futures[future]
                                 try:
                                     matched, unresolved, errors, request_count = future.result()
@@ -4743,6 +4777,12 @@ Rules:
                                     repair_batch = repair_batches[repair_batch_index - 1]
                                     matched, unresolved, errors, request_count = [], list(repair_batch), [str(exc)], 1
                                 round_results.append((repair_batch_index, matched, unresolved, errors, request_count))
+                                progress(
+                                    "llm_title_filter",
+                                    repair_completed,
+                                    len(repair_batches),
+                                    f"{venue_name}: title repair round {repair_round}/{title_repair_attempts} batch {repair_completed}/{len(repair_batches)}, workers {repair_workers}",
+                                )
                     except JobCancelled:
                         for future in repair_pending:
                             future.cancel()
