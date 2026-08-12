@@ -2867,9 +2867,11 @@ def test_reading_retries_transient_prompt_too_long_during_final_scoring(monkeypa
         "artifacts": {"article_markdown": str(article_path)},
     }]
     calls: list[str] = []
+    prompts: list[str] = []
 
-    def fake_run_claude_deep_read(*, expected_output_path, receipt_dir_name, **_kwargs):
+    def fake_run_claude_deep_read(*, prompt_path, expected_output_path, receipt_dir_name, **_kwargs):
         calls.append(receipt_dir_name)
+        prompts.append(prompt_path.read_text(encoding="utf-8"))
         if len(calls) == 1:
             receipt_dir = directory / receipt_dir_name
             receipt_dir.mkdir(parents=True, exist_ok=True)
@@ -2916,6 +2918,9 @@ def test_reading_retries_transient_prompt_too_long_during_final_scoring(monkeypa
             log=lambda _message: None,
         )
         assert calls == ["claude_scoring", "claude_scoring_retry"]
+        assert "每个工具调用只读取一个 `article_markdown_path`" in prompts[0]
+        assert "上一次评分请求因一次注入过多精读文本而失败" in prompts[1]
+        assert prompts[1] != prompts[0]
         assert scoring["status"] == "complete"
         assert scoring["retry"] == {"attempted": True, "reason": "prompt_too_long", "resolved": True}
         assert ranked[0]["match_score"] == 8.8
@@ -3195,6 +3200,121 @@ def test_reading_rejects_arxiv_abs_html_as_full_text():
     assert text == ""
     assert receipt["accepted"] is False
     assert receipt["reason"] == "arxiv_abs_page_is_metadata_not_paper_full_text"
+
+
+def test_reading_complete_arxiv_input_skips_redundant_metadata_request(monkeypatch):
+    paper_sources = _load_reading_paper_sources()
+    read_pipeline = _load_reading_pipeline()
+    metadata_requests: list[str] = []
+
+    def fake_fetch_arxiv_metadata(arxiv_id):
+        metadata_requests.append(arxiv_id)
+        return {}
+
+    monkeypatch.setattr(paper_sources, "fetch_arxiv_metadata", fake_fetch_arxiv_metadata)
+    paper = read_pipeline._normalize_local_input_paper({
+        "source": "arxiv",
+        "paper_id": "2607.02998v2",
+        "title": "CONFLUX: A Unified Flow-Matching Framework",
+        "authors": ["Ada Researcher", "Lin Scientist"],
+        "abstract": "We present a complete abstract supplied by the upstream Find result.",
+        "url": "https://arxiv.org/abs/2607.02998v2",
+        "pdf_url": "https://arxiv.org/pdf/2607.02998v2",
+    })
+
+    assert metadata_requests == []
+    assert paper["title"] == "CONFLUX: A Unified Flow-Matching Framework"
+    assert paper["authors"] == ["Ada Researcher", "Lin Scientist"]
+    assert paper["pdf_url"] == "https://arxiv.org/pdf/2607.02998v2"
+
+
+def test_reading_incomplete_arxiv_input_still_fetches_metadata(monkeypatch):
+    paper_sources = _load_reading_paper_sources()
+    metadata_requests: list[str] = []
+
+    def fake_fetch_arxiv_metadata(arxiv_id):
+        metadata_requests.append(arxiv_id)
+        return {
+            "metadata_status": "arxiv_metadata_ready",
+            "source": "arxiv",
+            "paper_id": arxiv_id,
+            "title": "Metadata supplied title",
+            "authors": ["Metadata Author"],
+            "abstract": "Metadata supplied abstract.",
+            "url": f"https://arxiv.org/abs/{arxiv_id}",
+            "abs_url": f"https://arxiv.org/abs/{arxiv_id}",
+            "pdf_url": f"https://arxiv.org/pdf/{arxiv_id}",
+        }
+
+    monkeypatch.setattr(paper_sources, "fetch_arxiv_metadata", fake_fetch_arxiv_metadata)
+    paper = paper_sources.build_paper_record(article="arXiv:2607.02998")
+
+    assert metadata_requests == ["2607.02998"]
+    assert paper["title"] == "Metadata supplied title"
+    assert paper["authors"] == ["Metadata Author"]
+    assert paper["pdf_url"] == "https://arxiv.org/pdf/2607.02998"
+
+
+def test_reading_arxiv_official_html_is_tried_before_pdf(monkeypatch):
+    reading_root = ROOT / "modules" / "reading"
+    paper_sources = _load_reading_paper_sources()
+    title = "CONFLUX: A Unified Flow-Matching Framework"
+    body = (
+        f"{title}\nAda Researcher, Lin Scientist\n\nAbstract\nIntroduction\nMethods\nResults\nDiscussion\nConclusion\nReferences\n"
+        + ("This is verified full paper body evidence for the same arXiv paper. " * 300)
+    )
+    seen_urls: list[str] = []
+    download_calls: list[str] = []
+
+    def fake_fetch_html(url, timeout=30):
+        seen_urls.append(url)
+        if url == "https://arxiv.org/html/2607.02998v2":
+            return body, {
+                "accepted": True,
+                "url": url,
+                "service": "arxiv",
+                "status_code": 200,
+                "content_type": "text/html",
+                "text_chars": len(body),
+                "paper_body_markers": True,
+            }
+        return "", {"accepted": False, "url": url, "reason": "not_full_text"}
+
+    def fake_download(paper, downloads, log):
+        download_calls.append(str(paper.get("paper_id") or ""))
+        return False, downloads / "unused.pdf", "", {"attempts": [], "selected": {}}
+
+    monkeypatch.setattr(paper_sources, "_fetch_html_text", fake_fetch_html)
+    run_dir = reading_root / ".runtime" / "output" / _reading_test_run_id()
+    shutil.rmtree(run_dir, ignore_errors=True)
+    packet = paper_sources.acquire_full_text(
+        {
+            "source": "arxiv",
+            "paper_id": "2607.02998v2",
+            "title": title,
+            "authors": ["Ada Researcher", "Lin Scientist"],
+            "abstract": "A supplied abstract.",
+            "url": "https://arxiv.org/abs/2607.02998v2",
+            "pdf_url": "https://arxiv.org/pdf/2607.02998v2",
+        },
+        run_dir,
+        log=lambda _message: None,
+        services={
+            "download_first_readable_pdf": fake_download,
+            "openalex_pdf_candidates": lambda *_args, **_kwargs: [],
+            "same_paper_landing_page_candidates": lambda *_args, **_kwargs: [],
+        },
+    )
+
+    assert seen_urls[0] == "https://arxiv.org/html/2607.02998v2"
+    assert download_calls == []
+    assert packet["full_text_available"] is True
+    assert packet["full_text_status"] == "html_text_read"
+    assert packet["full_text_evidence_kind"] == "html"
+    assert packet["pdf_downloaded"] is False
+    assert packet["pdf_acquisition"]["skipped"] == "arxiv_official_html_ready_before_pdf"
+    assert packet["html_acquisition"]["selected"]["kind"] == "arxiv_official_html_before_pdf"
+    shutil.rmtree(run_dir, ignore_errors=True)
 
 
 def test_reading_blocked_reason_prefers_acm_403_over_openreview_probe_403():
@@ -6045,6 +6165,29 @@ def test_find_translation_keeps_prose_markup_visible_to_llm_without_splitting_wo
     assert "abstract_zh" not in untranslated
     assert untranslated["abstract_zh_source"] == "missing_after_translation_attempts"
     assert find_pipeline._recommendation_translation_status([untranslated], "completed") == "partial"
+
+
+def test_find_relevance_label_cannot_replace_method_topic_category():
+    find_pipeline = _load_find_pipeline()
+
+    assert find_pipeline._llm_method_topic_category(
+        "strong_match",
+        fallback="蛋白质离散扩散后训练",
+        title="Continuous-Time RL for Discrete Diffusion",
+        abstract="A complete abstract.",
+    ) == "蛋白质离散扩散后训练"
+    assert find_pipeline._llm_method_topic_category(
+        "partial match",
+        fallback="",
+        title="Continuous-Time RL for Discrete Diffusion",
+        abstract="A complete abstract.",
+    ).startswith("Local topic:")
+    assert find_pipeline._llm_method_topic_category(
+        "离散扩散强化学习",
+        fallback="cs.LG",
+        title="Continuous-Time RL for Discrete Diffusion",
+        abstract="A complete abstract.",
+    ) == "离散扩散强化学习"
 
 
 def test_find_bound_official_detail_can_correct_a_stale_bibliographic_title():

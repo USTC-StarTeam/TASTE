@@ -6403,6 +6403,13 @@ def _run_final_reading_scoring(
                 "reason": retry_reason,
                 "resolved": False,
             }
+            write_text(prompt_path, build_reading_score_prompt(
+                research_context=research_context,
+                articles=candidates,
+                run_path=directory,
+                output_path=output_path,
+                prompt_too_long_recovery=True,
+            ))
             receipt = run_claude_deep_read(
                 prompt_path=prompt_path,
                 run_path=directory,

@@ -659,6 +659,50 @@ def _normalize_hit_directions(value: object) -> list[str]:
     return []
 
 
+_RELEVANCE_ONLY_CATEGORY_LABELS = {
+    "exact_match",
+    "strong_match",
+    "moderate_match",
+    "partial_match",
+    "weak_match",
+    "generic_match",
+    "high_relevance",
+    "medium_relevance",
+    "low_relevance",
+    "highly_relevant",
+    "relevant",
+    "irrelevant",
+    "unrelated",
+    "高度相关",
+    "强相关",
+    "中等相关",
+    "部分相关",
+    "弱相关",
+    "不相关",
+}
+
+
+def _is_relevance_only_category(value: object) -> bool:
+    normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "_", str(value or "").strip().casefold()).strip("_")
+    return normalized in _RELEVANCE_ONLY_CATEGORY_LABELS
+
+
+def _llm_method_topic_category(
+    value: object,
+    *,
+    fallback: object = "",
+    title: object = "",
+    abstract: object = "",
+) -> str:
+    category = str(value or "").strip()
+    if category and not _is_relevance_only_category(category):
+        return category
+    prior = str(fallback or "").strip()
+    if prior and not _is_relevance_only_category(prior):
+        return prior
+    return keyword_category(str(title or ""), str(abstract or ""))
+
+
 _LLM_SCHEMA_PLACEHOLDER_VALUES = {
     "short category",
     "direction",
@@ -3260,9 +3304,16 @@ def _apply_cached_title_llm_score(item: dict, entry: object, interest: str, *, e
     if not _title_llm_cache_entry_valid(entry, expected_policy=expected_policy):
         return False
     cached = dict(entry)
+    prior_category = item.get("category")
     for field in TITLE_LLM_SCORE_CACHE_FIELDS:
         if field in cached:
             item[field] = cached[field]
+    item["category"] = _llm_method_topic_category(
+        item.get("category"),
+        fallback=prior_category,
+        title=item.get("title"),
+        abstract=item.get("abstract"),
+    )
     item["fit_score"] = _as_float(item.get("fit_score"))
     item["title_llm_fit_score"] = _as_float(item.get("title_llm_fit_score"), item.get("fit_score"))
     item["diversity_score"] = _as_float(item.get("diversity_score"))
@@ -3375,9 +3426,16 @@ def _apply_cached_final_llm_score(item: dict, entry: object, interest: str) -> b
     if not _final_llm_cache_entry_valid(entry):
         return False
     cached = dict(entry)
+    prior_category = item.get("category")
     for field in FINAL_LLM_SCORE_CACHE_FIELDS:
         if field in cached:
             item[field] = cached[field]
+    item["category"] = _llm_method_topic_category(
+        item.get("category"),
+        fallback=prior_category,
+        title=item.get("title"),
+        abstract=item.get("abstract"),
+    )
     if item.get("reason_zh") and _final_llm_cache_reason_unusable(item.get("reason")):
         item["reason"] = item["reason_zh"]
     item["fit_score"] = _as_float(item.get("fit_score"))
@@ -4856,7 +4914,12 @@ Rules:
                 item["diversity_score"] = _as_float(row.get("diversity_score"), item.get("diversity_score") or 0)
                 item["score"] = _combined_score(item["fit_score"], item["diversity_score"])
                 item["hit_directions"] = _normalize_hit_directions(row.get("hit_directions"))
-                item["category"] = str(row.get("category") or item.get("category") or "")
+                item["category"] = _llm_method_topic_category(
+                    row.get("category"),
+                    fallback=item.get("category"),
+                    title=item.get("title"),
+                    abstract=item.get("abstract"),
+                )
                 item["title_reason"] = str(row.get("reason") or item.get("title_reason") or "")
                 item["fit_explanation"] = item["title_reason"]
                 item["reason_source"] = "llm title filter"
@@ -6001,7 +6064,12 @@ Rules:
                 item.pop("llm_retry_last_error", None)
                 item.pop("llm_single_request_unresolved", None)
                 item.pop("llm_batch_repair_exhausted", None)
-                item["category"] = str(row.get("category") or item.get("category") or "")
+                item["category"] = _llm_method_topic_category(
+                    row.get("category"),
+                    fallback=item.get("category"),
+                    title=item.get("title"),
+                    abstract=item.get("abstract"),
+                )
                 item["fit_score"] = _as_float(row.get("fit_score"), item.get("fit_score") or 0)
                 item["diversity_score"] = _as_float(row.get("diversity_score"), item.get("diversity_score") or 0)
                 item["score"] = _combined_score(item["fit_score"], item["diversity_score"])
