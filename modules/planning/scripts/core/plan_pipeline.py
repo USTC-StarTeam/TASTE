@@ -162,6 +162,8 @@ def _run_claude_markdown_writer(
     target_path: Path,
     label: str,
     log: LogFn,
+    *,
+    expected_plans: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     executable = _find_claude_executable()
     run_root = _claude_run_root(directory, label)
@@ -191,6 +193,39 @@ def _run_claude_markdown_writer(
     write_json(run_root / "command.json", meta)
     try:
         proc = subprocess.run(command, input=prompt, cwd=directory, env=_claude_env(), text=True, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if exc.stdout is not None else exc.output
+        stderr = exc.stderr
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        write_text(run_root / "stdout.json", stdout or "")
+        if stderr:
+            write_text(run_root / "stderr.log", stderr)
+        after_text = target_path.read_text(encoding="utf-8", errors="replace") if target_path.is_file() else ""
+        after_mtime = target_path.stat().st_mtime_ns if target_path.is_file() else 0
+        target_changed = bool(after_text.strip()) and (after_text != before_text or after_mtime > before_mtime)
+        meta.update({
+            "status": "timeout_target_not_written",
+            "error": str(exc),
+            "stdout_chars": len(stdout or ""),
+            "stderr_chars": len(stderr or ""),
+            "target_changed": target_changed,
+        })
+        if target_changed and expected_plans is not None:
+            audit = _plan_markdown_audit(after_text, expected_plans)
+            meta["post_timeout_audit"] = audit
+            if audit.get("status") == "pass":
+                meta["status"] = "timeout_file_written_and_validated"
+                write_json(run_root / "result.json", {"meta": meta, "source": PUBLIC_FINAL_PLAN_ARTIFACT})
+                log(f"Claude Code timed out after writing an audited {target_path.name}: {label}")
+                return meta
+            meta["status"] = "timeout_target_invalid"
+        elif target_changed:
+            meta["status"] = "timeout_target_unvalidated"
+        write_json(run_root / "result.json", meta)
+        raise RuntimeError(f"Claude Code timed out while writing plan.md: {exc}") from exc
     except Exception as exc:
         meta.update({"status": "failed_to_launch", "error": str(exc)})
         write_json(run_root / "result.json", meta)
@@ -828,12 +863,26 @@ def run_plan_at_directory(
     _raise_if_cancelled(should_cancel)
     if _use_claude_code_backend():
         log(f"Asking Claude Code to write plan.md for {len(ideas)} approved Idea(s).")
-        _run_claude_markdown_writer(_plan_markdown_prompt(ideas, config, directory), directory, target, "plan_md_initial", log)
+        _run_claude_markdown_writer(
+            _plan_markdown_prompt(ideas, config, directory),
+            directory,
+            target,
+            "plan_md_initial",
+            log,
+            expected_plans=expected,
+        )
         for round_index in range(1, rounds + 1):
             _raise_if_cancelled(should_cancel)
             current = target.read_text(encoding="utf-8", errors="replace")
             issues = list(_plan_markdown_audit(current, expected).get("issues") or [])
-            _run_claude_markdown_writer(_repair_markdown_prompt(directory, round_index, issues), directory, target, f"plan_md_repair_{round_index}", log)
+            _run_claude_markdown_writer(
+                _repair_markdown_prompt(directory, round_index, issues),
+                directory,
+                target,
+                f"plan_md_repair_{round_index}",
+                log,
+                expected_plans=expected,
+            )
     else:
         write_text(target, render_plan_markdown(ideas))
     markdown = target.read_text(encoding="utf-8", errors="replace")
@@ -870,7 +919,14 @@ def polish_plan_at_directory(
         _raise_if_cancelled(should_cancel)
         current = target.read_text(encoding="utf-8", errors="replace")
         issues = list(_plan_markdown_audit(current, expected).get("issues") or [])
-        _run_claude_markdown_writer(_repair_markdown_prompt(directory, round_index, issues, request.plan_id, target_version), directory, target, f"polish_{request.plan_id}_{round_index}", log)
+        _run_claude_markdown_writer(
+            _repair_markdown_prompt(directory, round_index, issues, request.plan_id, target_version),
+            directory,
+            target,
+            f"polish_{request.plan_id}_{round_index}",
+            log,
+            expected_plans=expected,
+        )
     markdown = target.read_text(encoding="utf-8", errors="replace")
     data = _projection_from_markdown(markdown, request.run_id, expected, previous=previous, source="claude_code_direct_polish", repair_rounds=rounds)
     ideas_data = _load_ideas_data(directory, request.run_id)
@@ -905,7 +961,14 @@ def _apply_selection(directory: Path, run_id: str, plan_id: str, actor: str, rat
     if plan_id not in {str(row.get("plan_id") or "") for row in expected}:
         raise ValueError(f"Plan not found: {plan_id}")
     target = directory / PUBLIC_FINAL_PLAN_ARTIFACT
-    _run_claude_markdown_writer(_selection_edit_prompt(directory, plan_id), directory, target, f"select_{plan_id}", log)
+    _run_claude_markdown_writer(
+        _selection_edit_prompt(directory, plan_id),
+        directory,
+        target,
+        f"select_{plan_id}",
+        log,
+        expected_plans=expected,
+    )
     markdown = target.read_text(encoding="utf-8", errors="replace")
     data = _projection_from_markdown(markdown, run_id, expected, previous=previous, source="claude_code_direct_selection", selection_actor=actor, selection_rationale=rationale)
     ideas_data = _load_ideas_data(directory, run_id)

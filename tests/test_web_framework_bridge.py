@@ -332,7 +332,7 @@ def test_planning_claude_writes_canonical_markdown_with_exact_repair_rounds(monk
     (tmp_path / "ideas.json").write_text(json.dumps({"run_id": run_id, "ideas": [idea]}), encoding="utf-8")
     calls: list[str] = []
 
-    def fake_claude_writer(prompt, directory, target_path, label, log):
+    def fake_claude_writer(prompt, directory, target_path, label, log, *, expected_plans=None):
         calls.append(label)
         if not target_path.exists():
             target_path.write_text(module.render_plan_markdown([idea]), encoding="utf-8")
@@ -356,6 +356,92 @@ def test_planning_claude_writes_canonical_markdown_with_exact_repair_rounds(monk
     assert result["plans"][0]["versions"][-1]["version_id"] == "v1"
     assert not ({"title", "new_method", "initial_experiment", "steps", "risks", "metrics"} & set(result["plans"][0]))
     assert (tmp_path / "plan.md").read_text(encoding="utf-8").startswith("# Research Plans")
+
+
+def test_planning_claude_timeout_accepts_changed_plan_only_after_publication_audit(monkeypatch, tmp_path):
+    module_path = ROOT / "modules" / "planning" / "scripts" / "core" / "plan_pipeline.py"
+    spec = importlib.util.spec_from_file_location("test_plan_pipeline_timeout_valid", module_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    target = tmp_path / "plan.md"
+    idea = {
+        "id": "idea-a",
+        "title": "Candidate A",
+        "new_method": "Use a falsifiable intervention.",
+        "initial_experiment": "Compare candidate, baseline, and ablation.",
+    }
+    expected = [{
+        "plan_id": "plan-idea-a",
+        "idea_id": "idea-a",
+        "title": "Candidate A",
+        "latest_version": "v1",
+    }]
+
+    def timeout_after_valid_write(command, **kwargs):
+        target.write_text(module.render_plan_markdown([idea]), encoding="utf-8")
+        raise module.subprocess.TimeoutExpired(command, kwargs["timeout"], output='{"result":"done"}', stderr="")
+
+    monkeypatch.setattr(module, "_find_claude_executable", lambda: Path("/fake/claude"))
+    monkeypatch.setattr(module, "_claude_env", lambda: {})
+    monkeypatch.setattr(module.subprocess, "run", timeout_after_valid_write)
+    meta = module._run_claude_markdown_writer(
+        "write the plan",
+        tmp_path,
+        target,
+        "timeout_valid",
+        lambda _message: None,
+        expected_plans=expected,
+    )
+
+    result_path = next((tmp_path / "claude_runs").glob("*_timeout_valid/result.json"))
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert meta["status"] == "timeout_file_written_and_validated"
+    assert meta["target_changed"] is True
+    assert meta["post_timeout_audit"]["status"] == "pass"
+    assert result["source"] == "plan.md"
+
+
+def test_planning_claude_timeout_rejects_changed_plan_that_fails_publication_audit(monkeypatch, tmp_path):
+    module_path = ROOT / "modules" / "planning" / "scripts" / "core" / "plan_pipeline.py"
+    spec = importlib.util.spec_from_file_location("test_plan_pipeline_timeout_invalid", module_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    target = tmp_path / "plan.md"
+    expected = [{
+        "plan_id": "plan-idea-a",
+        "idea_id": "idea-a",
+        "title": "Candidate A",
+        "latest_version": "v1",
+    }]
+
+    def timeout_after_partial_write(command, **kwargs):
+        target.write_text("# Research Plans\n\n## 1. incomplete\n", encoding="utf-8")
+        raise module.subprocess.TimeoutExpired(command, kwargs["timeout"], output="", stderr="timed out")
+
+    monkeypatch.setattr(module, "_find_claude_executable", lambda: Path("/fake/claude"))
+    monkeypatch.setattr(module, "_claude_env", lambda: {})
+    monkeypatch.setattr(module.subprocess, "run", timeout_after_partial_write)
+    with pytest.raises(RuntimeError, match="timed out"):
+        module._run_claude_markdown_writer(
+            "write the plan",
+            tmp_path,
+            target,
+            "timeout_invalid",
+            lambda _message: None,
+            expected_plans=expected,
+        )
+
+    result_path = next((tmp_path / "claude_runs").glob("*_timeout_invalid/result.json"))
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert result["status"] == "timeout_target_invalid"
+    assert result["target_changed"] is True
+    assert result["post_timeout_audit"]["status"] == "fail"
 
 
 def test_framework_ideation_patch_regenerates_existing_plan(monkeypatch, tmp_path):
