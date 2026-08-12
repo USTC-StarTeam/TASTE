@@ -6983,7 +6983,8 @@ def run_read(
         }
         cooldown_wait_cap_sec = max(
             0.0,
-            min(60.0, config_float("http.batch_cooldown_requeue_wait_cap_sec", 30.0)),
+            config_float("http.batch_cooldown_requeue_wait_cap_sec", 120.0),
+            config_float("http.rate_limit_cooldown_sec", 120.0),
         )
         log(
             "Cooldown recovery phase: "
