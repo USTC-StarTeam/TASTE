@@ -6120,6 +6120,90 @@ def test_find_title_prefilter_adapts_batched_repair_concurrency_to_primary_succe
     assert repair_events[-1][1:3] == (6, 6)
 
 
+def test_find_title_prefilter_readapts_concurrency_between_batched_repair_rounds(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("USE_LLM_TITLE_FILTER", "1")
+    monkeypatch.setenv("TITLE_FILTER_SEQUENTIAL", "0")
+    monkeypatch.setenv("TITLE_FILTER_BATCH_REPAIR_ATTEMPTS", "2")
+    monkeypatch.setenv("FIND_TITLE_SCORE_CACHE", "0")
+
+    class ChangingCapacityTitleLLM:
+        enabled = True
+        timeout_sec = 120
+        provider = "openai_compatible"
+
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.primary_calls = 0
+            self.repair_round_calls = {1: 0, 2: 0}
+            self.active_repairs = {1: 0, 2: 0}
+            self.max_active_repairs = {1: 0, 2: 0}
+
+        def json_or_error(self, prompt, *, single_request=False, **_kwargs):
+            aliases = re.findall(r"^- (p\d{3}):", prompt, flags=re.MULTILINE)
+            if "main request" in prompt:
+                with self.lock:
+                    self.primary_calls += 1
+                    call_number = self.primary_calls
+                if call_number > 4:
+                    return {"ok": False, "data": None, "error": "The read operation timed out"}
+            else:
+                repair_round = 1 if "repair 1/2" in prompt else 2
+                with self.lock:
+                    self.repair_round_calls[repair_round] += 1
+                    call_number = self.repair_round_calls[repair_round]
+                    self.active_repairs[repair_round] += 1
+                    self.max_active_repairs[repair_round] = max(
+                        self.max_active_repairs[repair_round],
+                        self.active_repairs[repair_round],
+                    )
+                time.sleep(0.03)
+                with self.lock:
+                    self.active_repairs[repair_round] -= 1
+                if repair_round == 1 and call_number > 1:
+                    return {"ok": False, "data": None, "error": "The read operation timed out"}
+            return {
+                "ok": True,
+                "data": {"scored": [{
+                    "id": alias,
+                    "fit_score": 7.0,
+                    "diversity_score": 5.0,
+                    "hit_directions": ["current research task"],
+                    "category": "relevant method",
+                    "reason": "标题显示该方法与当前研究任务相关，并提供可检查的技术路线。",
+                } for alias in aliases]},
+                "error": "",
+            }
+
+    items = [{
+        "id": f"paper-{index}",
+        "title": f"Research method paper {index}",
+        "abstract": "This paper develops and evaluates a method for the current research task.",
+        "venue": "TestVenue",
+        "year": 2026,
+    } for index in range(800)]
+    llm = ChangingCapacityTitleLLM()
+
+    selected = find_pipeline._prefilter_titles(
+        items,
+        find_pipeline.AppConfig(
+            provider="openai_compatible",
+            research_interest="current research task",
+            llm_concurrency=4,
+        ),
+        llm,
+        "TestVenue",
+        lambda _message: None,
+        lambda: False,
+        scan_all=True,
+    )
+
+    assert llm.primary_calls == 8
+    assert llm.repair_round_calls == {1: 4, 2: 3}
+    assert llm.max_active_repairs == {1: 2, 2: 1}
+    assert sum(item["reason_source"] == "llm title filter" for item in selected) == 800
+
+
 def test_find_title_prefilter_cancels_between_batched_repairs_and_restores_timeout(monkeypatch):
     find_pipeline = _load_find_pipeline()
     monkeypatch.setenv("USE_LLM_TITLE_FILTER", "1")

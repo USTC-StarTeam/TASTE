@@ -4805,6 +4805,31 @@ Rules:
                     repair_errors.extend(errors)
                     repair_request_count += request_count
                 log(f"{venue_name}: consolidated title repair round {repair_round}/{title_repair_attempts} recovered {sum(len(row[1]) for row in round_results)} rows; unresolved={len(pending_title_repairs)}")
+                round_transport_failure_count = sum(1 for _index, _matched, _unresolved, errors, _count in round_results if errors)
+                round_complete_request_count = sum(
+                    1
+                    for _index, matched, unresolved, errors, _count in round_results
+                    if not errors and not unresolved and matched
+                )
+                round_transport_outcome_count = round_complete_request_count + round_transport_failure_count
+                if (
+                    repair_round < title_repair_attempts
+                    and pending_title_repairs
+                    and repair_workers > 1
+                    and round_transport_failure_count
+                    and round_transport_outcome_count
+                ):
+                    next_repair_workers = max(
+                        1,
+                        min(repair_workers, ceil(repair_workers * round_complete_request_count / round_transport_outcome_count)),
+                    )
+                    if next_repair_workers < repair_workers:
+                        log(
+                            f"{venue_name}: reducing next title repair concurrency from {repair_workers} to {next_repair_workers} "
+                            f"after {round_complete_request_count} complete and {round_transport_failure_count} "
+                            f"transport-failed round {repair_round} requests"
+                        )
+                        repair_workers = next_repair_workers
         finally:
             if hasattr(llm, "timeout_sec"):
                 llm.timeout_sec = original_timeout
