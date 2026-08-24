@@ -31,12 +31,12 @@ DEFAULT_FIND_CONFIG_PATH = MODULE_CONFIG_DIR / "find.config.json"
 LOCAL_LLM_CONFIG_PATH = MODULE_CONFIG_DIR / "llm.local.json"
 SCRIPTS = MODULE_ROOT / "scripts"
 SCRIPT_IMPORT_DIRS = (
+    MODULE_ROOT.parents[1] / "framework" / "scripts",
     SCRIPTS / "core",
     SCRIPTS / "flow",
     SCRIPTS / "cache",
     SCRIPTS,
 )
-
 
 def contract() -> dict[str, Any]:
     return {

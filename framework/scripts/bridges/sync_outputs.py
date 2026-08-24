@@ -4,7 +4,9 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,18 @@ STANDARD_ARTIFACTS = [
     "biorxiv_prefiltered.json", "nature.md", "nature_raw.json", "nature_prefiltered.json",
     "science.md", "science_raw.json", "science_prefiltered.json",
 ]
+
+
+def _atomic_copyfile(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+    os.close(fd)
+    temp = Path(temp_name)
+    try:
+        shutil.copyfile(source, temp)
+        os.replace(temp, target)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def resolve_taste_run_dir(run_id: str, state: Any | None = None) -> Path | None:
@@ -64,7 +78,7 @@ def adopt_taste_find_run(paths: Any, state: Any, run_id: str) -> dict[str, Any]:
     for name in STANDARD_ARTIFACTS:
         source = run_dir / name
         if source.exists():
-            shutil.copyfile(source, taste_dir / name)
+            _atomic_copyfile(source, taste_dir / name)
             copied.append(name)
     find_results = load_json(taste_dir / "find_results.json", {})
     progress = load_json(taste_dir / "find_progress.json", {})
@@ -133,8 +147,7 @@ def sync_current_find_progress(state: Any, taste_dir: Path) -> dict[str, Any]:
             continue
         existing = load_json(target, {})
         if source.resolve() != target.resolve() and (not isinstance(existing, dict) or existing.get("run_id") != payload.get("run_id") or existing.get("updated_at") != payload.get("updated_at") or existing.get("counts") != payload.get("counts")):
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, target)
+            _atomic_copyfile(source, target)
             return {"synced": True, "source": str(source), "target": str(target), "run_id": payload.get("run_id") if isinstance(payload, dict) else run_id}
         return {"synced": False, "reason": "already_current", "source": str(source), "target": str(target), "run_id": payload.get("run_id") if isinstance(payload, dict) else run_id}
     return {"synced": False, "reason": "current_run_progress_not_found", "run_id": run_id, "target": str(target)}

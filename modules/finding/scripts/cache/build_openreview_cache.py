@@ -11,6 +11,7 @@ from typing import Any, Sequence
 import requests
 
 from finding_runtime.paths import LOCAL_DATABASE_DIR, write_json_cache
+from runtime.resource_locks import crawl_service_get as finding_service_get
 from support.find_support import HEADERS, stable_id
 from support.find_support import OPENREVIEW_VENUE_PATTERNS
 from support.find_support import VENUE_METADATA_AUDIT_KEY
@@ -18,7 +19,6 @@ from support.find_support import fetch_icml_official_virtual_2026
 from support.find_support import fetch_neurips_title_index
 from support.find_support import fetch_openreview_iclr_2026
 from support.find_support import venue_metadata_audit_from_papers
-
 
 DEFAULT_OUTPUT_ROOT = LOCAL_DATABASE_DIR
 OPENREVIEW_VENUES: dict[str, dict[str, Any]] = {
@@ -249,7 +249,7 @@ def _request_json(url: str, params: dict[str, Any], timeout: int, retries: int) 
     last_error: Exception | None = None
     for attempt in range(retries + 1):
         try:
-            response = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
+            response = finding_service_get(url, params=params, headers=HEADERS, timeout=timeout)
             response.raise_for_status()
             return response.json()
         except Exception as exc:
@@ -286,7 +286,7 @@ def _probe_openreview_route(url: str, base_params: dict[str, Any], *, route: str
         "ok": False,
     }
     try:
-        response = requests.get(url, params=params, headers=HEADERS, timeout=_probe_timeout(timeout))
+        response = finding_service_get(url, params=params, headers=HEADERS, timeout=_probe_timeout(timeout))
         audit["status_code"] = response.status_code
         audit["elapsed_sec"] = round(time.monotonic() - started, 3)
         if response.status_code in {401, 403, 429}:

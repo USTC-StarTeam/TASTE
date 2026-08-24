@@ -355,6 +355,7 @@ class JobCancelled(Exception):
 # ---- storage ----
 
 import json
+import fcntl
 import os
 import shutil
 import time
@@ -393,22 +394,20 @@ def publish_latest_run_for_review(run_path: str | Path) -> Path:
         source.resolve().relative_to(RUNS_DIR.resolve())
     except ValueError as exc:
         raise ValueError(f"latest_run can only mirror a directory under {display_path(RUNS_DIR)}") from exc
-    temp_dir = RUNTIME_DIR / f".latest_run_{source.name}_{utc_run_id()}.tmp"
-    _remove_path(temp_dir)
-    try:
-        shutil.copytree(source, temp_dir)
-        for _attempt in range(2):
-            try:
-                _remove_path(LATEST_RUN_DIR)
-                temp_dir.rename(LATEST_RUN_DIR)
-                return LATEST_RUN_DIR
-            except FileExistsError:
-                _remove_path(LATEST_RUN_DIR)
-        temp_dir.rename(LATEST_RUN_DIR)
-        return LATEST_RUN_DIR
-    except Exception:
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = RUNTIME_DIR / ".latest_run.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        temp_dir = RUNTIME_DIR / f".latest_run_{source.name}_{utc_run_id()}.tmp"
         _remove_path(temp_dir)
-        raise
+        try:
+            shutil.copytree(source, temp_dir)
+            _remove_path(LATEST_RUN_DIR)
+            temp_dir.rename(LATEST_RUN_DIR)
+            return LATEST_RUN_DIR
+        finally:
+            _remove_path(temp_dir)
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
 
 def run_dir(run_id: str) -> Path:

@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import html
 import re
-import smtplib
 from datetime import datetime, timezone
-from email.mime.text import MIMEText
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Protocol
 
 from contracts.web_models import AppConfig, EmailJobRequest
 from runtime.run_storage import read_json, run_dir, write_json
@@ -14,6 +12,21 @@ from runtime.run_storage import read_json, run_dir, write_json
 
 LogFn = Callable[[str], None]
 CancelFn = Callable[[], bool]
+
+
+class ServerEmailSender(Protocol):
+    configured: bool
+    host: str
+    port: int
+    from_address: str
+
+    def send_email(
+        self,
+        recipients: list[str],
+        subject: str,
+        text_body: str,
+        html_body: str | None = None,
+    ) -> None: ...
 
 
 DEFAULT_EMAIL_ARTIFACTS = ["find.md", "read.md", "idea.md", "plan.md", "biorxiv.md", "nature.md", "science.md", "hf.md", "github.md", "source_status.md"]
@@ -107,7 +120,6 @@ def _ranking_html(directory: Path) -> str:
     return (
         "<section>"
         "<h2>筛选后完整排名 / Full Screened Ranking</h2>"
-        "<p>仅包含 fit_score &gt; 6 的候选，并按最终 score 降序排列。</p>"
         "<table><thead><tr>"
         "<th>#</th><th>Title</th><th>Venue/Year</th><th>Fit</th><th>Diversity</th><th>Score</th><th>Hit Directions</th><th>Explanation</th>"
         "</tr></thead><tbody>"
@@ -138,8 +150,8 @@ def _email_shell(title: str, body: str) -> str:
 </html>"""
 
 
-def build_run_email_html(request: EmailJobRequest) -> str:
-    directory = run_dir(request.run_id)
+def build_run_email_html(request: EmailJobRequest, artifact_directory: Path) -> str:
+    directory = artifact_directory
     artifact_names = request.artifact_names or DEFAULT_EMAIL_ARTIFACTS
     sections: list[str] = []
     if request.include_ranking:
@@ -172,53 +184,43 @@ def _resolve_receivers(request: EmailJobRequest, config: AppConfig) -> list[str]
 def send_run_email(
     request: EmailJobRequest,
     config: AppConfig,
+    email_sender: ServerEmailSender,
+    artifact_directory: Path,
     log: LogFn = print,
     should_cancel: CancelFn = lambda: False,
 ) -> dict:
     if should_cancel():
         raise RuntimeError("Email job cancelled before SMTP send.")
-    email_config = config.email
     receivers = _resolve_receivers(request, config)
-    if not email_config.smtp_server or not email_config.sender or not email_config.smtp_password:
-        raise ValueError("SMTP server, sender, and password are required.")
+    if not email_sender.configured:
+        raise ValueError("Server email service is not configured.")
     if not receivers:
         raise ValueError("At least one email receiver is required.")
 
     subject = request.subject or f"Report: {request.run_id}"
-    html_body = build_run_email_html(request)
-    message = MIMEText(html_body, "html", "utf-8")
-    message["Subject"] = subject
-    message["From"] = email_config.sender
-    message["To"] = ", ".join(receivers)
-
-    port = int(email_config.smtp_port or 465)
-    log(f"Sending rendered HTML email to {len(receivers)} receiver(s) via {email_config.smtp_server}:{port}")
-    try:
-        if port == 465:
-            with smtplib.SMTP_SSL(email_config.smtp_server, port, timeout=30) as server:
-                server.login(email_config.sender, email_config.smtp_password)
-                server.sendmail(email_config.sender, receivers, message.as_string())
-        else:
-            with smtplib.SMTP(email_config.smtp_server, port, timeout=30) as server:
-                server.ehlo()
-                server.starttls()
-                server.ehlo()
-                server.login(email_config.sender, email_config.smtp_password)
-                server.sendmail(email_config.sender, receivers, message.as_string())
-    except smtplib.SMTPException as exc:
-        raise RuntimeError(f"SMTP send failed: {exc}") from exc
+    if not artifact_directory.is_dir():
+        raise ValueError("Project email artifact directory is not available.")
+    html_body = build_run_email_html(request, artifact_directory)
+    log(f"Sending rendered HTML email to {len(receivers)} receiver(s) via the server mail service")
+    email_sender.send_email(
+        recipients=receivers,
+        subject=subject,
+        text_body=f"TASTE run {request.run_id} report. Please view this message in an HTML-capable email client.",
+        html_body=html_body,
+    )
 
     sent_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     report = {
         "run_id": request.run_id,
+        "artifact_scope": request.artifact_scope,
         "sent_at": sent_at,
         "subject": subject,
         "receivers": receivers,
         "artifact_names": request.artifact_names or DEFAULT_EMAIL_ARTIFACTS,
         "include_ranking": request.include_ranking,
-        "smtp_server": email_config.smtp_server,
-        "smtp_port": port,
-        "sender": email_config.sender,
+        "smtp_server": email_sender.host,
+        "smtp_port": email_sender.port,
+        "sender": email_sender.from_address,
     }
     write_json(run_dir(request.run_id) / "email_report.json", report)
     log("Email sent successfully.")

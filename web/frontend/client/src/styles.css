@@ -22,6 +22,166 @@ body {
   overflow-y: auto;
 }
 
+.authShell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 1.25rem;
+  background: #eef2f5;
+}
+
+.authCard {
+  width: min(100%, 440px);
+  padding: 1.65rem;
+  border: 1px solid #d7dee7;
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 16px 40px rgba(24, 33, 47, 0.08);
+}
+
+.authHeading {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  margin-bottom: 1.3rem;
+}
+
+.authHeading h1,
+.authHeading p,
+.authCard > p {
+  margin: 0;
+}
+
+.authHeading p,
+.authHelp,
+.authCard > p {
+  color: #607083;
+  font-size: 0.86rem;
+}
+
+.authMark {
+  width: 50px;
+  height: 50px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: #1e5a5a;
+  color: #ffffff;
+  font-size: 1.55rem;
+  font-weight: 800;
+}
+
+.authTabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+  margin-bottom: 0.9rem;
+}
+
+.authTabs button.active {
+  border-color: #1e5a5a;
+  background: #1e5a5a;
+  color: #ffffff;
+}
+
+.authResetHeading {
+  margin-bottom: 0.9rem;
+}
+
+.authResetHeading h2,
+.authResetHeading p {
+  margin: 0;
+}
+
+.authResetHeading h2 {
+  font-size: 1.1rem;
+}
+
+.authResetHeading p {
+  margin-top: 0.25rem;
+  color: #607083;
+  font-size: 0.86rem;
+}
+
+.authSubmit {
+  width: 100%;
+  margin-top: 1rem;
+}
+
+.authCodeRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.55rem;
+}
+
+.authCodeRow button {
+  min-width: 108px;
+  white-space: nowrap;
+}
+
+.authForgotRow,
+.authBackRow {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.authForgotRow button,
+.authBackRow button {
+  border: 0;
+  padding: 0.3rem 0 0;
+  background: transparent;
+  color: #32706f;
+  font-size: 0.82rem;
+}
+
+.authForgotRow button:hover,
+.authBackRow button:hover {
+  color: #1e5a5a;
+  text-decoration: underline;
+}
+
+.authBackRow {
+  margin-top: 0.8rem;
+}
+
+.authCard input:focus,
+.authCard button:focus-visible {
+  border-color: #1e5a5a;
+  outline: 3px solid rgba(30, 90, 90, 0.13);
+  outline-offset: 1px;
+}
+
+.authError {
+  margin: 0.75rem 0 0;
+  color: #a33a32;
+  font-size: 0.86rem;
+}
+
+.authNotice {
+  margin: 0.75rem 0 0;
+  color: #26705c;
+  font-size: 0.86rem;
+}
+
+.authHelp {
+  margin-top: 0.8rem !important;
+}
+
+@media (max-width: 480px) {
+  .authShell {
+    padding: 0.85rem;
+  }
+
+  .authCard {
+    padding: 1.25rem;
+  }
+
+  .authCodeRow button {
+    min-width: 100px;
+    padding-inline: 0.65rem;
+  }
+}
+
 button,
 input,
 textarea,
@@ -96,6 +256,26 @@ label {
   gap: 0.8rem;
   align-items: center;
   margin-bottom: 1rem;
+}
+
+.accountBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin: -0.35rem 0 0.9rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 7px;
+  background: #eef3f7;
+  color: #46576a;
+}
+
+.accountBar span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
 }
 
 .langSwitch {
@@ -416,6 +596,15 @@ label {
 
 .tabs button {
   min-width: 86px;
+}
+
+.tabs .unsupportedTabHint {
+  display: inline-flex;
+  cursor: not-allowed;
+}
+
+.tabs .unsupportedTabHint button {
+  pointer-events: none;
 }
 
 
@@ -881,6 +1070,26 @@ label {
   gap: 0.45rem;
   align-items: center;
   margin: 0.75rem 0;
+}
+
+.emailSendAction {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.emailSendStatus {
+  color: #607083;
+  font-size: 0.84rem;
+  white-space: nowrap;
+}
+
+.emailSendStatus.success {
+  color: #2d6b55;
+}
+
+.emailSendStatus.error {
+  color: #9d2b2b;
 }
 
 details {
