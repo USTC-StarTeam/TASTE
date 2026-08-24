@@ -1167,24 +1167,31 @@ class LLMClient:
     def __init__(self, config: AppConfig, role: LLMRole | str | None = None):
         self.config = config
         self.role = role or "global"
-        self.provider = config.provider
-        self.base_url = config.base_url
-        self.api_key = config.api_key
-        self.model = config.model
+        self.provider = str(config.provider or "").strip()
+        self.base_url = str(config.base_url or "").strip()
+        self.api_key = str(config.api_key or "").strip()
+        self.model = str(config.model or "").strip()
         self.temperature = config.temperature
         if role:
             override = config.llm_roles.get(str(role))
             if override:
-                self.provider = override.provider or self.provider
-                self.base_url = override.base_url or self.base_url
-                self.api_key = override.api_key or self.api_key
-                self.model = override.model or self.model
+                self.provider = str(override.provider or self.provider).strip()
+                self.base_url = str(override.base_url or self.base_url).strip()
+                self.api_key = str(override.api_key or self.api_key).strip()
+                self.model = str(override.model or self.model).strip()
                 self.temperature = config.temperature if override.temperature is None else override.temperature
         self.api_mode = os.environ.get("LLM_API_MODE", "chat_completions")
+        direct_deepseek = "deepseek" in self.provider.lower() or "api.deepseek.com" in self.base_url.lower()
+        # The DeepSeek endpoint exposed by the web form is Chat Completions.
+        # Do not let a stale process-wide Responses override survive a provider
+        # switch made in the UI and redirect the request to a nonexistent path.
+        if direct_deepseek:
+            self.api_mode = "chat_completions"
         self.timeout_sec = int(os.environ.get("LLM_TIMEOUT_SEC", "120"))
         self.max_tokens = int(os.environ.get("LLM_MAX_TOKENS", "2000"))
         self.retries = max(1, int(os.environ.get("LLM_RETRIES", "3")))
-        self.enabled = bool(self.api_key and self.model and self.provider.lower() != "mock")
+        self.enabled = bool(self.api_key and self.base_url and self.model and self.provider.lower() not in {"", "mock", "none"})
+        self._response_format_supported: bool | None = None
 
     def summary(self) -> dict:
         return {
@@ -1211,13 +1218,17 @@ class LLMClient:
         api_mode = str(self.api_mode or "chat_completions").strip().lower()
         use_responses = api_mode in {"responses", "response", "openai_responses"}
         response_format = os.environ.get("LLM_RESPONSE_FORMAT", "json_object").strip().lower()
-        provider_text = str(self.provider or "").lower()
-        is_deepseek = "deepseek" in provider_text or "api.deepseek.com" in str(self.base_url or "").lower() or "deepseek" in str(self.model or "").lower()
+        provider_fingerprint = " ".join([self.provider, self.base_url, self.model]).lower()
+        is_deepseek_v4 = (
+            ("deepseek" in self.provider.lower() or "api.deepseek.com" in self.base_url.lower())
+            and "deepseek-v4" in self.model.lower()
+        )
+        is_qwen_compatible = any(marker in provider_fingerprint for marker in ["qwen", "dashscope", "aliyun", "alibabacloud"])
         reasoning_effort = os.environ.get("LLM_REASONING_EFFORT", "").strip().lower()
         disable_thinking = os.environ.get("LLM_DISABLE_THINKING", "0").lower() in {"1", "true", "yes", "on"}
         retry_empty_json = os.environ.get("LLM_RETRY_EMPTY_JSON_WITHOUT_RESPONSE_FORMAT", "1").lower() in {"1", "true", "yes", "on"}
         retry_unsupported_optional = os.environ.get("LLM_RETRY_UNSUPPORTED_OPTIONAL_PARAMS", "1").lower() in {"1", "true", "yes", "on"}
-        retry_statuses = {408, 409, 429, 500, 502, 503, 504}
+        retry_statuses = {408, 409, 429, 500, 502, 503, 504, 520, 522, 524, 529}
         # A non-positive explicit value asks the provider to use its native output limit.
         omit_max_tokens = max_tokens is not None and int(max_tokens) <= 0
         output_tokens = int(self.max_tokens if max_tokens is None else max_tokens)
@@ -1251,25 +1262,17 @@ class LLMClient:
                     payload["max_tokens"] = output_tokens
                 if wants_json_response:
                     payload["response_format"] = {"type": "json_object"}
-            if is_deepseek and "v4-flash" in str(self.model or "").lower():
-                payload.pop("reasoning_effort", None)
-                payload.pop("thinking", None)
-                payload.pop("enable_thinking", None)
-                payload.pop("extra_body", None)
-                payload["temperature"] = self.temperature if temperature is None else temperature
-                if not omit_max_tokens:
-                    if use_responses:
-                        payload["max_output_tokens"] = output_tokens
-                    else:
-                        payload["max_tokens"] = output_tokens
             if stream:
                 payload["stream"] = True
-            if reasoning_effort and reasoning_effort not in {"none", "off", "disable", "disabled", "0", "false", "no"}:
+            if not disable_thinking and reasoning_effort and reasoning_effort not in {"none", "off", "disable", "disabled", "0", "false", "no"}:
                 payload["reasoning_effort"] = reasoning_effort
             if include_thinking_controls and disable_thinking:
-                payload["thinking"] = {"type": "disabled"}
-                payload["enable_thinking"] = False
-                payload["extra_body"] = {"thinking": {"type": "disabled"}}
+                # These are wire-level JSON requests, not OpenAI SDK calls:
+                # `extra_body` is an SDK argument and must never be serialized.
+                if is_deepseek_v4:
+                    payload["thinking"] = {"type": "disabled"}
+                elif is_qwen_compatible:
+                    payload["enable_thinking"] = False
             return payload
 
         def request_once(*, include_response_format: bool, include_thinking_controls: bool) -> str:
@@ -1303,7 +1306,7 @@ class LLMClient:
                     last_error = RuntimeError(f"LLM HTTP {exc.code} via {self.api_mode or 'chat_completions'}: {body}")
                     if exc.code not in retry_statuses or attempt >= request_attempts:
                         raise last_error from exc
-                except (urllib.error.URLError, TimeoutError, RuntimeError) as exc:
+                except (urllib.error.URLError, TimeoutError, RuntimeError, json.JSONDecodeError) as exc:
                     last_error = exc
                     if attempt >= request_attempts:
                         raise RuntimeError(f"LLM request failed via {self.api_mode or 'chat_completions'} after {request_attempts} attempts: {exc}") from exc
@@ -1316,15 +1319,18 @@ class LLMClient:
                 time.sleep(base_sleep)
             raise RuntimeError(f"LLM request failed via {self.api_mode or 'chat_completions'}: {last_error}")
 
-        attempts: list[tuple[bool, bool]] = [(True, True)]
+        configured_json_mode = response_format in {"json", "json_object"}
+        initial_json_mode = configured_json_mode and self._response_format_supported is not False
+        attempts: list[tuple[bool, bool]] = [(initial_json_mode, True)]
         if not single_request:
-            if response_format in {"json", "json_object"}:
+            if initial_json_mode:
                 attempts.append((False, True))
             if disable_thinking:
-                attempts.append((response_format in {"json", "json_object"}, False))
-                if response_format in {"json", "json_object"}:
+                attempts.append((initial_json_mode, False))
+                if initial_json_mode:
                     attempts.append((False, False))
         last_error: Exception | None = None
+        response_format_fallback_needed = False
         seen: set[tuple[bool, bool]] = set()
         for include_response_format, include_thinking_controls in attempts:
             key = (include_response_format, include_thinking_controls)
@@ -1335,12 +1341,25 @@ class LLMClient:
                 text = request_once(include_response_format=include_response_format, include_thinking_controls=include_thinking_controls)
                 if include_response_format and retry_empty_json and response_format in {"json", "json_object"} and text.strip() == "{}":
                     last_error = RuntimeError("LLM returned empty JSON object with response_format")
+                    response_format_fallback_needed = True
                     continue
+                if include_response_format and configured_json_mode:
+                    self._response_format_supported = True
+                elif response_format_fallback_needed:
+                    # The ordinary live gate runs before strict title/final
+                    # batches. Remember a successful prompt-only fallback so
+                    # those later batches still use exactly one HTTP request.
+                    self._response_format_supported = False
                 return text
             except RuntimeError as exc:
                 last_error = exc
                 message = str(exc).lower()
-                if retry_unsupported_optional and include_thinking_controls and any(token in message for token in ["unsupported parameter", "enable_thinking", "thinking"]):
+                if include_response_format and configured_json_mode and (
+                    any(token in message for token in ["response_format", "json_object"])
+                    or any(token in message for token in ["http 400", "http 404", "http 405"])
+                ):
+                    response_format_fallback_needed = True
+                if retry_unsupported_optional and include_thinking_controls and any(token in message for token in ["enable_thinking", "extra_body", "parameter: thinking", '"thinking"']):
                     continue
                 if retry_unsupported_optional and include_response_format and any(token in message for token in ["response_format", "json_object", "unsupported parameter"]):
                     continue

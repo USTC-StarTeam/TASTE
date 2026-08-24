@@ -615,11 +615,17 @@ def _is_transient_llm_service_error(error: object) -> bool:
     return any(
         token in text
         for token in [
+            "http 408",
+            "http 409",
             "http 429",
             "http 500",
             "http 502",
             "http 503",
             "http 504",
+            "http 520",
+            "http 522",
+            "http 524",
+            "http 529",
             "rpm exhausted",
             "service_unavailable",
             "service unavailable",

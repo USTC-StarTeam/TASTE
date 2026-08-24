@@ -1289,6 +1289,82 @@ def test_web_config_saves_llm_secret_to_local_finding_config(monkeypatch, tmp_pa
     assert public["api_key_saved"] is True
 
 
+def test_web_llm_client_retries_gateway_524_and_invalid_json_response(monkeypatch):
+    from auto_research.web import server as web_server
+    from integrations import web_llm
+
+    monkeypatch.setenv("LLM_RETRIES", "3")
+    monkeypatch.setattr(web_llm.time, "sleep", lambda _seconds: None)
+    calls = 0
+
+    class BodyResponse:
+        def __init__(self, body: bytes):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return self.body
+
+    def fake_urlopen(request, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise web_llm.urllib.error.HTTPError(request.full_url, 524, "timeout", {}, io.BytesIO(b"gateway timeout"))
+        if calls == 2:
+            return BodyResponse(b"<html>temporary gateway page</html>")
+        return BodyResponse(json.dumps({"choices": [{"message": {"content": '{"ok":true}'}}]}).encode("utf-8"))
+
+    monkeypatch.setattr(web_llm.urllib.request, "urlopen", fake_urlopen)
+    llm = web_server.LLMClient(web_server.AppConfig(
+        provider="openai_compatible",
+        base_url="https://llm.example.test/v1",
+        api_key="test-key",
+        model="test-model",
+    ), "find")
+
+    assert llm.json_or_error("Return JSON only.")["data"] == {"ok": True}
+    assert calls == 3
+
+
+def test_web_saved_deepseek_switch_reaches_probe_client_without_old_endpoint(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    monkeypatch.setenv("LLM_API_MODE", "responses")
+    local_llm_config = tmp_path / "llm.local.json"
+    local_llm_config.write_text(json.dumps({
+        "provider": "openai",
+        "base_url": "https://api.openai.com/v1",
+        "model": "gpt-old",
+        "api_key": "old-key",
+    }), encoding="utf-8")
+    monkeypatch.setenv("FINDING_LLM_CONFIG", str(local_llm_config))
+
+    web_server._persist_local_llm_config_from_config(web_server.AppConfig(
+        provider="deepseek",
+        base_url="https://api.deepseek.com",
+        model="deepseek-v4-flash",
+        api_key="deepseek-key",
+        temperature=0.1,
+    ))
+    loaded = web_server._config_with_local_llm_config(web_server.AppConfig(
+        provider="openai",
+        base_url="https://api.openai.com/v1",
+        model="gpt-4o-mini",
+    ), override_defaults=True)
+    llm = web_server.LLMClient(loaded, "find")
+
+    assert llm.provider == "deepseek"
+    assert llm.base_url == "https://api.deepseek.com"
+    assert llm.model == "deepseek-v4-flash"
+    assert llm.api_key == "deepseek-key"
+    assert llm.api_mode == "chat_completions"
+
+
 def test_web_find_mock_request_does_not_overwrite_local_llm_config(monkeypatch, tmp_path):
     from auto_research.web import server as web_server
 

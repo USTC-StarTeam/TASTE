@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import argparse
 import importlib.util
+import io
 import json
 import multiprocessing
 import os
@@ -6879,15 +6880,24 @@ def test_find_json_recovery_keeps_completed_scoring_and_translation_rows():
     assert translated == {"translations": [{"id": "p001", "abstract_zh": "摘要"}]}
 
 
-def test_find_llm_client_single_request_disables_transport_retries(monkeypatch):
+@pytest.mark.parametrize("failure_kind", ["connection", "http_524"])
+def test_find_llm_client_single_request_disables_transport_retries(monkeypatch, failure_kind):
     finding_main = _load_finding_main()
     finding_runtime = finding_main._private_import("finding_runtime")
     monkeypatch.setenv("LLM_RETRIES", "3")
     calls = 0
 
-    def failing_urlopen(*_args, **_kwargs):
+    def failing_urlopen(request, **_kwargs):
         nonlocal calls
         calls += 1
+        if failure_kind == "http_524":
+            raise finding_runtime.urllib.error.HTTPError(
+                request.full_url,
+                524,
+                "gateway timeout",
+                {},
+                io.BytesIO(b"gateway timeout"),
+            )
         raise finding_runtime.urllib.error.URLError("temporary outage")
 
     monkeypatch.setattr(finding_runtime.urllib.request, "urlopen", failing_urlopen)
@@ -6986,6 +6996,150 @@ def test_find_llm_client_streams_one_chat_completion_request(monkeypatch):
     assert requests[0].get_header("Accept") == "text/event-stream"
 
 
+def test_find_llm_client_direct_deepseek_forces_chat_and_uses_native_thinking_control(monkeypatch):
+    finding_main = _load_finding_main()
+    finding_runtime = finding_main._private_import("finding_runtime")
+    monkeypatch.setenv("LLM_API_MODE", "responses")
+    monkeypatch.setenv("LLM_DISABLE_THINKING", "1")
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "max")
+    requests = []
+
+    class JsonResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": '{"ok":true}'}}]}).encode("utf-8")
+
+    def fake_urlopen(request, **_kwargs):
+        requests.append(request)
+        return JsonResponse()
+
+    monkeypatch.setattr(finding_runtime.urllib.request, "urlopen", fake_urlopen)
+    llm = finding_runtime.LLMClient(finding_runtime.AppConfig(
+        provider="deepseek",
+        base_url="https://api.deepseek.com/v1/",
+        api_key="test-key",
+        model="deepseek-v4-flash",
+    ))
+
+    result = llm.json_or_error("Return JSON only.", single_request=True)
+
+    assert result["ok"] is True
+    assert llm.summary()["api_mode"] == "chat_completions"
+    assert len(requests) == 1
+    assert requests[0].full_url == "https://api.deepseek.com/v1/chat/completions"
+    payload = json.loads(requests[0].data.decode("utf-8"))
+    assert payload["thinking"] == {"type": "disabled"}
+    assert "enable_thinking" not in payload
+    assert "extra_body" not in payload
+    assert "reasoning_effort" not in payload
+
+
+def test_find_llm_client_qwen_uses_top_level_enable_thinking_without_sdk_wrapper(monkeypatch):
+    finding_main = _load_finding_main()
+    finding_runtime = finding_main._private_import("finding_runtime")
+    monkeypatch.setenv("LLM_DISABLE_THINKING", "1")
+    requests = []
+
+    class JsonResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": '{"ok":true}'}}]}).encode("utf-8")
+
+    def fake_urlopen(request, **_kwargs):
+        requests.append(request)
+        return JsonResponse()
+
+    monkeypatch.setattr(finding_runtime.urllib.request, "urlopen", fake_urlopen)
+    llm = finding_runtime.LLMClient(finding_runtime.AppConfig(
+        provider="openai_compatible",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        api_key="test-key",
+        model="qwen3.7-plus",
+    ))
+
+    result = llm.json_or_error("Return JSON only.", single_request=True)
+
+    assert result["ok"] is True
+    payload = json.loads(requests[0].data.decode("utf-8"))
+    assert payload["enable_thinking"] is False
+    assert "thinking" not in payload
+    assert "extra_body" not in payload
+
+
+def test_find_llm_client_requires_base_url_even_with_key_and_model():
+    finding_main = _load_finding_main()
+    finding_runtime = finding_main._private_import("finding_runtime")
+    llm = finding_runtime.LLMClient(finding_runtime.AppConfig(
+        provider="deepseek",
+        base_url="",
+        api_key="test-key",
+        model="deepseek-v4-flash",
+    ))
+
+    assert llm.enabled is False
+    assert llm.json_or_error("Return JSON only.")["error"] == "LLM is not configured"
+
+
+def test_find_llm_client_learns_unsupported_json_mode_before_strict_scoring(monkeypatch):
+    finding_main = _load_finding_main()
+    finding_runtime = finding_main._private_import("finding_runtime")
+    monkeypatch.setattr(finding_runtime.time, "sleep", lambda _seconds: None)
+    requests = []
+
+    class JsonResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": '{"ok":true}'}}]}).encode("utf-8")
+
+    def fake_urlopen(request, **_kwargs):
+        requests.append(request)
+        payload = json.loads(request.data.decode("utf-8"))
+        if "response_format" in payload:
+            raise finding_runtime.urllib.error.HTTPError(
+                request.full_url,
+                400,
+                "bad request",
+                {},
+                io.BytesIO(b'{"error":{"message":"unsupported parameter: response_format"}}'),
+            )
+        return JsonResponse()
+
+    monkeypatch.setattr(finding_runtime.urllib.request, "urlopen", fake_urlopen)
+    llm = finding_runtime.LLMClient(finding_runtime.AppConfig(
+        provider="openai_compatible",
+        base_url="https://generic.example.test/v1",
+        api_key="test-key",
+        model="generic-model",
+    ))
+
+    probe = llm.json_or_error("Return JSON only.")
+    before_strict = len(requests)
+    strict = llm.json_or_error("Return JSON only.", single_request=True)
+
+    assert probe["ok"] is True, probe
+    assert strict["ok"] is True
+    assert before_strict == 2
+    assert len(requests) == 3
+    assert "response_format" in json.loads(requests[0].data.decode("utf-8"))
+    assert "response_format" not in json.loads(requests[1].data.decode("utf-8"))
+    assert "response_format" not in json.loads(requests[2].data.decode("utf-8"))
+
+
 def test_find_live_gate_only_disables_scoring_for_fatal_configuration_errors():
     find_pipeline = _load_find_pipeline()
 
@@ -7007,6 +7161,13 @@ def test_find_live_gate_only_disables_scoring_for_fatal_configuration_errors():
         {"ok": False, "error": "LLM HTTP 401 via chat_completions: invalid API key"},
     ) is True
     assert find_pipeline._llm_live_gate_requires_fallback(llm, {"ok": True, "error": ""}) is False
+
+
+@pytest.mark.parametrize("status", [408, 409, 500, 502, 503, 504, 520, 522, 524, 529])
+def test_find_gateway_failures_are_classified_as_transient(status):
+    find_pipeline = _load_find_pipeline()
+
+    assert find_pipeline._is_transient_llm_service_error(f"LLM HTTP {status} via chat_completions") is True
 
 
 def test_find_single_request_wrapper_does_not_invoke_legacy_client():
