@@ -37,7 +37,7 @@ from bridges.finding_catalog import catalog_by_id, fetch_venue_sample, load_cata
 from bridges.project_bridge import action_gate_blocker, job_stage, create_project_config, detect_runtime_config, list_projects as list_projects, project_summary, run_action, runtime_status, update_project_config, update_runtime_config, _cleruntime_caches, _current_find_pipeline_summary, _current_find_source_status_rows, _venue_metadata_counts
 from contracts.web_models import AppConfig, EmailJobRequest, FindRequest, IdeaMarkdownUpdate, IdeaPatch, IdeaRequest, LLMRoleConfig, PlanMarkdownUpdate, PlanPolishRequest, PlanRequest, ReadRequest, VenueHealthRequest
 from integrations.emailer import send_run_email
-from integrations.web_llm import LLMClient, extract_json
+from integrations.web_llm import LLMClient
 from policies.source_selection import canonical_source_selection, normalize_source_selection, save_canonical_source_selection, project_config_path
 from project.project_paths import configured_max_read_papers
 from reporting.paper_state import active_paper_state as load_active_paper_state
@@ -11402,27 +11402,53 @@ def api_save_config(config: AppConfig) -> dict:
 
 @app.post("/api/config/llm-probe")
 def api_llm_probe() -> dict:
-    """Validate the saved Find LLM config through the framework LLM client."""
-    cfg = load_config()
-    llm = LLMClient(cfg, "find")
-    summary = llm.summary()
+    """Validate saved LLM settings through Find's real scoring protocol."""
+    env = os.environ.copy()
+    # The probe is part of the authenticated, multi-user Web surface. Keep the
+    # account's saved file as the complete LLM trust boundary, just as a real
+    # Find job does, while retaining unrelated service environment such as the
+    # proxy and conda settings loaded from .bashrc.
+    for key in {
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "LLM_API_KEY",
+        "LLM_API_KEY_ENV",
+        "LLM_API_BASE",
+        "OPENAI_API_BASE",
+        "LLM_MODEL",
+        "LLM_PROVIDER",
+        "LLM_API_MODE",
+        "LLM_TEMPERATURE",
+    }:
+        env.pop(key, None)
+    env["FINDING_LLM_CONFIG"] = str(_local_llm_config_path())
+    env["WORKSPACE_ROOT"] = str(WORKSPACE_ROOT)
+    env["PYTHONPATH"] = taste_pythonpath_string(WORKSPACE_ROOT, env.get("PYTHONPATH", ""))
+    cmd = [
+        sys.executable,
+        str(WORKSPACE_ROOT / "modules" / "finding" / "main.py"),
+        "--action",
+        "llm_probe",
+    ]
+    proc = None
     try:
-        if not llm.enabled:
-            result = {"ok": False, "error": "LLM is not configured", "probe": "framework_json_live_probe"}
-        else:
-            raw = llm.chat(
-                'Return exactly this JSON object with no markdown: {"ok": true, "score": 1, "reason": "ready"}',
-                temperature=0,
-                max_tokens=120,
-            )
-            parsed = extract_json(raw)
-            result = {"ok": bool(isinstance(parsed, dict) and parsed.get("ok")), "probe": "framework_json_live_probe"}
+        proc = subprocess.run(cmd, cwd=WORKSPACE_ROOT, env=env, text=True, capture_output=True)
+        result = json.loads(str(proc.stdout or "").strip())
+        if not isinstance(result, dict):
+            raise ValueError("Finding LLM probe returned a non-object result")
     except Exception as exc:
-        result = {"ok": False, "error": str(exc), "probe": "framework_json_live_probe"}
+        stderr = str(getattr(proc, "stderr", "") or "").strip()
+        result = {
+            "ok": False,
+            "error": stderr or str(exc),
+            "probe": "find_title_scoring_protocol",
+            "summary": {},
+        }
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
     return {
         "ok": bool(isinstance(result, dict) and result.get("ok")),
         "error": str(result.get("error") or result.get("reason") or "")[:800] if isinstance(result, dict) else "LLM probe failed",
-        "probe": str(result.get("probe") or "framework_json_live_probe") if isinstance(result, dict) else "framework_json_live_probe",
+        "probe": str(result.get("probe") or "find_title_scoring_protocol") if isinstance(result, dict) else "find_title_scoring_protocol",
         "summary": {key: summary.get(key) for key in ["role", "provider", "base_url", "model", "temperature", "enabled", "api_mode"]},
     }
 

@@ -1821,6 +1821,68 @@ def _json_or_error_single_request(
     return result
 
 
+def probe_find_llm_protocol(llm: LLMClient) -> dict:
+    """Probe the real Find title-scoring protocol without running Find itself."""
+    summary = llm.summary()
+    probe_name = "find_title_scoring_protocol"
+    if not llm.enabled:
+        return {
+            "ok": False,
+            "error": "LLM is not configured",
+            "probe": probe_name,
+            "summary": summary,
+        }
+
+    # Keep this deliberately small, but use the same strict JSON schema,
+    # single-request mode, native output limit, and streaming transport as the
+    # real title batches. Validation must not enter Find's retry/repair loops.
+    prompt = """
+Score this paper title for relevance to reliable scientific machine learning:
+- p001: Reliable Scientific Machine Learning Systems
+
+Return JSON only with the single top-level key scored. It must contain exactly one row with id p001 and numeric fit_score and diversity_score from 0 to 10. Copy the ID exactly.
+""".strip()
+    result = _json_or_error_single_request(
+        llm,
+        prompt,
+        temperature=FIND_TITLE_FILTER_TEMPERATURE,
+        max_tokens=0,
+        stream=True,
+    )
+    if not result.get("ok"):
+        return {
+            "ok": False,
+            "error": str(result.get("error") or "LLM scoring-protocol probe failed"),
+            "probe": probe_name,
+            "summary": summary,
+        }
+
+    data = result.get("data")
+    rows = data.get("scored") if isinstance(data, dict) else None
+    row = rows[0] if isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], dict) else None
+    error = ""
+    if row is None or str(row.get("id") or "") != "p001":
+        error = "LLM scoring-protocol probe returned an invalid scored-row contract"
+    else:
+        try:
+            scores_valid = all(
+                not isinstance(value, bool)
+                and isfinite(float(value))
+                and 0 <= float(value) <= 10
+                for value in (row.get("fit_score"), row.get("diversity_score"))
+            )
+        except (TypeError, ValueError):
+            scores_valid = False
+        if not scores_valid or _llm_schema_placeholder_leaked(row):
+            error = "LLM scoring-protocol probe returned invalid title scores"
+    return {
+        "ok": not error,
+        "error": error,
+        "probe": probe_name,
+        "summary": summary,
+    }
+
+
 def _llm_live_gate(llm: LLMClient) -> dict:
     if not llm.enabled:
         return {"ok": False, "reason": "llm-not-configured", "summary": llm.summary()}

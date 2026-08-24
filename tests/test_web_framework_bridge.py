@@ -1399,7 +1399,7 @@ def test_web_llm_client_retries_gateway_524_and_invalid_json_response(monkeypatc
         return BodyResponse(json.dumps({"choices": [{"message": {"content": '{"ok":true}'}}]}).encode("utf-8"))
 
     monkeypatch.setattr(web_llm.urllib.request, "urlopen", fake_urlopen)
-    llm = web_server.LLMClient(web_server.AppConfig(
+    llm = web_llm.LLMClient(web_server.AppConfig(
         provider="openai_compatible",
         base_url="https://llm.example.test/v1",
         api_key="test-key",
@@ -1410,7 +1410,49 @@ def test_web_llm_client_retries_gateway_524_and_invalid_json_response(monkeypatc
     assert calls == 3
 
 
-def test_web_saved_deepseek_switch_reaches_probe_client_without_old_endpoint(monkeypatch, tmp_path):
+def test_web_llm_probe_routes_through_finding_public_entry_with_isolated_saved_config(monkeypatch, tmp_path):
+    from auto_research.web import server as web_server
+
+    calls: list[tuple[list[str], dict]] = []
+    account_llm_config = tmp_path / "accounts" / "alice" / "llm.local.json"
+    monkeypatch.setattr(web_server, "_local_llm_config_path", lambda: account_llm_config)
+    monkeypatch.setenv("OPENAI_API_KEY", "service-global-key-must-not-leak")
+    monkeypatch.setenv("LLM_API_BASE", "https://service-global.invalid/v1")
+    monkeypatch.setenv("LLM_API_MODE", "responses")
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps({
+            "ok": True,
+            "probe": "find_title_scoring_protocol",
+            "summary": {
+                "role": "find",
+                "provider": "openai_compatible",
+                "base_url": "https://llm.example.test/v1",
+                "model": "test-model",
+                "temperature": 0.2,
+                "enabled": True,
+                "api_mode": "chat_completions",
+            },
+        }))
+
+    monkeypatch.setattr(web_server.subprocess, "run", fake_run)
+
+    result = web_server.api_llm_probe()
+
+    assert result["ok"] is True
+    assert result["probe"] == "find_title_scoring_protocol"
+    assert len(calls) == 1
+    cmd, kwargs = calls[0]
+    assert cmd[-2:] == ["--action", "llm_probe"]
+    assert cmd[1].endswith("modules/finding/main.py")
+    assert kwargs["capture_output"] is True
+    assert kwargs["env"]["FINDING_LLM_CONFIG"] == str(account_llm_config)
+    for key in ("OPENAI_API_KEY", "LLM_API_BASE", "LLM_API_MODE"):
+        assert key not in kwargs["env"]
+
+
+def test_web_saved_deepseek_switch_replaces_old_probe_config(monkeypatch, tmp_path):
     from auto_research.web import server as web_server
 
     monkeypatch.setenv("LLM_API_MODE", "responses")
@@ -1430,18 +1472,12 @@ def test_web_saved_deepseek_switch_reaches_probe_client_without_old_endpoint(mon
         api_key="deepseek-key",
         temperature=0.1,
     ))
-    loaded = web_server._config_with_local_llm_config(web_server.AppConfig(
-        provider="openai",
-        base_url="https://api.openai.com/v1",
-        model="gpt-4o-mini",
-    ), override_defaults=True)
-    llm = web_server.LLMClient(loaded, "find")
+    saved = json.loads(local_llm_config.read_text(encoding="utf-8"))
 
-    assert llm.provider == "deepseek"
-    assert llm.base_url == "https://api.deepseek.com"
-    assert llm.model == "deepseek-v4-flash"
-    assert llm.api_key == "deepseek-key"
-    assert llm.api_mode == "chat_completions"
+    assert saved["provider"] == "deepseek"
+    assert saved["base_url"] == "https://api.deepseek.com"
+    assert saved["model"] == "deepseek-v4-flash"
+    assert saved["api_key"] == "deepseek-key"
 
 
 def test_web_find_mock_request_does_not_overwrite_local_llm_config(monkeypatch, tmp_path):
