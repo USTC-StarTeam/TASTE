@@ -2578,9 +2578,22 @@ def test_reading_batch_wait_budget_covers_fresh_cooldown_opened_by_prior_recover
         clock += seconds
 
     monkeypatch.setattr(paper_sources, "acquire_full_text", fake_acquire_full_text)
+    monkeypatch.setattr(paper_sources, "fetch_arxiv_metadata", lambda _arxiv_id: {})
     monkeypatch.setattr(read_pipeline, "service_cooldown_remaining", cooldown_remaining)
-    monkeypatch.setattr(read_pipeline.time, "monotonic", lambda: clock)
-    monkeypatch.setattr(read_pipeline.time, "sleep", advance_clock)
+
+    class LocalClock:
+        @staticmethod
+        def monotonic():
+            return clock
+
+        @staticmethod
+        def sleep(seconds):
+            advance_clock(seconds)
+
+    # Replace this module's clock reference instead of mutating the process-wide
+    # stdlib time module. Background threads may legitimately sleep while this
+    # integration test runs and must not advance its deterministic fake clock.
+    monkeypatch.setattr(read_pipeline, "time", LocalClock())
     result = read_pipeline.run_read(
         run_id=run_id,
         input_json=str(input_path),
@@ -2868,10 +2881,12 @@ def test_reading_retries_transient_prompt_too_long_during_final_scoring(monkeypa
     }]
     calls: list[str] = []
     prompts: list[str] = []
+    prompt_paths: list[str] = []
 
     def fake_run_claude_deep_read(*, prompt_path, expected_output_path, receipt_dir_name, **_kwargs):
         calls.append(receipt_dir_name)
         prompts.append(prompt_path.read_text(encoding="utf-8"))
+        prompt_paths.append(prompt_path.name)
         if len(calls) == 1:
             receipt_dir = directory / receipt_dir_name
             receipt_dir.mkdir(parents=True, exist_ok=True)
@@ -2918,6 +2933,7 @@ def test_reading_retries_transient_prompt_too_long_during_final_scoring(monkeypa
             log=lambda _message: None,
         )
         assert calls == ["claude_scoring", "claude_scoring_retry"]
+        assert prompt_paths == ["prompt.md", "retry_prompt.md"]
         assert "每个工具调用只读取一个 `article_markdown_path`" in prompts[0]
         assert "上一次评分请求因一次注入过多精读文本而失败" in prompts[1]
         assert prompts[1] != prompts[0]
@@ -3315,6 +3331,16 @@ def test_reading_arxiv_official_html_is_tried_before_pdf(monkeypatch):
     assert packet["pdf_acquisition"]["skipped"] == "arxiv_official_html_ready_before_pdf"
     assert packet["html_acquisition"]["selected"]["kind"] == "arxiv_official_html_before_pdf"
     shutil.rmtree(run_dir, ignore_errors=True)
+
+
+def test_reading_arxiv_html_prefers_versioned_locator_over_unversioned_field():
+    paper_sources = _load_reading_paper_sources()
+
+    assert paper_sources._versioned_arxiv_id_from_paper({
+        "arxiv_id": "2607.02998",
+        "url": "https://arxiv.org/abs/2607.02998v2",
+        "pdf_url": "https://arxiv.org/pdf/2607.02998v2",
+    }) == "2607.02998v2"
 
 
 def test_reading_blocked_reason_prefers_acm_403_over_openreview_probe_403():

@@ -124,11 +124,14 @@ def _versioned_arxiv_id_from_text(value: Any) -> str:
 
 
 def _versioned_arxiv_id_from_paper(paper: dict[str, Any]) -> str:
+    unversioned = ""
     for key in ["arxiv_id", "paper_id", "id", "url", "abs_url", "pdf_url", "input_article", "entry_id"]:
         arxiv_id = _versioned_arxiv_id_from_text(paper.get(key))
-        if arxiv_id:
+        if arxiv_id and re.search(r"v\d+$", arxiv_id, flags=re.I):
             return arxiv_id
-    return ""
+        if arxiv_id and not unversioned:
+            unversioned = arxiv_id
+    return unversioned
 
 
 def pmc_id_from_text(value: Any) -> str:
