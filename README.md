@@ -116,13 +116,14 @@ http://127.0.0.1:8879
 | 公开模板 | `framework/resources/templates/project.json` | 给新项目提供默认结构，不含真实密钥和真实项目内容。 |
 | 本机兼容配置 | `framework/.runtime/.config.json` | 保存邮件配置和兼容副本；Find 参数以当前项目配置为准。 |
 | 本机 LLM 私有配置 | `modules/finding/config/llm.local.json` 或 `FINDING_LLM_CONFIG` 指定路径 | 保存 Find LLM 配置；默认文件被忽略。API key 不写入项目文件，自定义路径也应放在 Git 忽略范围内。 |
-| Read 本机私有配置 | `modules/reading/config/read.env` | 由每位用户自行创建，保存自己的 OpenReview 登录信息和 OpenAlex API key；默认文件被忽略。 |
+| Read 本机私有配置 | `modules/reading/config/read.env` | 由用户自行创建并写入自己的 OpenReview 登录信息。 |
 | 具体科研项目 | `projects/<project>/` | 保存 `project.json`、`config/finding.json`、状态、运行记录、产物、仓库、数据和论文草稿。 |
 | 前端静态产物 | `web/frontend/client/dist/` | 由启动脚本或 `npm run build` 生成，网页服务读取这里的文件。 |
 
-### Read 私有服务配置
+### 配置 Read 的 OpenReview 账户
 
-Read 会优先使用论文自身的 URL、PDF、DOI 和 OpenReview ID；OpenReview 登录及开放全文索引的私有配置不在网页中填写。每位用户应在仓库根目录自行创建本机文件，并限制其读取权限：
+1. 在 <https://openreview.net/signup> 注册账户，并完成邮件确认和 Profile 激活。
+2. 在仓库根目录创建私有配置文件：
 
 ```bash
 mkdir -p modules/reading/config
@@ -130,20 +131,12 @@ touch modules/reading/config/read.env
 chmod 600 modules/reading/config/read.env
 ```
 
-然后用文本编辑器写入自己的值；不要复制仓库维护者或其他用户的邮箱、账号与密钥：
+3. 将自己的 OpenReview 登录邮箱和密码写入该文件：
 
 ```dotenv
-# OpenReview：使用已激活账户的登录邮箱（或用户名）和登录密码
 OPENREVIEW_USERNAME=your_openreview_email@example.com
 OPENREVIEW_PASSWORD=your_openreview_password
-
-# OpenAlex 2026 年起使用免费 API key 标识配额；在账户设置页创建并复制
-OPENALEX_API_KEY=your_openalex_api_key
 ```
-
-OpenReview 新用户先到 <https://openreview.net/signup> 注册，完成邮件确认和 Profile 激活后再填写；这里使用的是正常登录密码，不需要手工提取 Token。OpenAlex API key 在 <https://openalex.org/settings/api> 创建，当前认证与配额规则见其[官方说明](https://developers.openalex.org/api-reference/authentication)。
-
-`read.env` 使用简单的 `KEY=value` 格式，不需要写 `export`。已经存在于启动 shell 中的同名环境变量优先于文件值；修改配置后应重启网页服务再运行 Read。该文件已被 Git 忽略，不应提交、共享或写入项目目录。可选的其他全文来源密钥见模块内部参考 [modules/reading/README.md](modules/reading/README.md)。
 
 ### 左侧栏配置
 
