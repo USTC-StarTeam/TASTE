@@ -75,6 +75,8 @@ PMC_ID_RE = re.compile(r"\b(PMC\d{5,})\b", re.I)
 
 ARXIV_ID_RE = re.compile(r"([0-9]{4}\.[0-9]{4,5}|[a-z\-]+(?:\.[A-Z]{2})?/\d{7})(?:v\d+)?", re.I)
 ARXIV_LINK_RE = re.compile(r"(?:arxiv\.org/(?:abs|pdf)/|arxiv:)\s*([0-9]{4}\.[0-9]{4,5}|[a-z\-]+(?:\.[A-Z]{2})?/\d{7})(?:v\d+)?", re.I)
+ARXIV_VERSIONED_ID_RE = re.compile(r"([0-9]{4}\.[0-9]{4,5}|[a-z\-]+(?:\.[A-Z]{2})?/\d{7})(v\d+)?", re.I)
+ARXIV_VERSIONED_LINK_RE = re.compile(r"(?:arxiv\.org/(?:abs|pdf|html)/|arxiv:)\s*([0-9]{4}\.[0-9]{4,5}|[a-z\-]+(?:\.[A-Z]{2})?/\d{7})(v\d+)?", re.I)
 READ_USER_AGENT = DEFAULT_USER_AGENT
 MIN_FULL_TEXT_CHARS = CONFIG_FULL_TEXT_MIN_CHARS
 _FULL_TEXT_CACHE_INDEX: dict[str, list[dict[str, Any]]] | None = None
@@ -107,6 +109,29 @@ def arxiv_id_from_text(value: Any) -> str:
         return match.group(1)
     match = ARXIV_ID_RE.fullmatch(text.removeprefix("arXiv:").strip())
     return match.group(1) if match else ""
+
+
+def _versioned_arxiv_id_from_text(value: Any) -> str:
+    text = str(value or "").strip()
+    match = ARXIV_VERSIONED_LINK_RE.search(text)
+    if not match:
+        normalized = text.removeprefix("arXiv:").strip()
+        normalized = re.sub(r"\.pdf(?:[?#].*)?$", "", normalized, flags=re.I)
+        match = ARXIV_VERSIONED_ID_RE.fullmatch(normalized)
+    if not match:
+        return ""
+    return f"{match.group(1)}{match.group(2) or ''}"
+
+
+def _versioned_arxiv_id_from_paper(paper: dict[str, Any]) -> str:
+    unversioned = ""
+    for key in ["arxiv_id", "paper_id", "id", "url", "abs_url", "pdf_url", "input_article", "entry_id"]:
+        arxiv_id = _versioned_arxiv_id_from_text(paper.get(key))
+        if arxiv_id and re.search(r"v\d+$", arxiv_id, flags=re.I):
+            return arxiv_id
+        if arxiv_id and not unversioned:
+            unversioned = arxiv_id
+    return unversioned
 
 
 def pmc_id_from_text(value: Any) -> str:
@@ -202,7 +227,15 @@ def build_paper_record(
 ) -> dict[str, Any]:
     article_text = str(article or "").strip()
     arxiv_id = arxiv_id_from_text(article_text) or arxiv_id_from_text(url) or arxiv_id_from_text(pdf_url)
-    arxiv = fetch_arxiv_metadata(arxiv_id) if arxiv_id else {}
+    supplied_arxiv_record_complete = bool(
+        arxiv_id
+        and str(title or "").strip()
+        and coerce_str_list(authors)
+        and str(abstract or "").strip()
+        and (str(url or "").strip().startswith("http") or article_text.startswith("http"))
+        and (_looks_like_pdf_url(pdf_url) or _looks_like_pdf_url(article_text))
+    )
+    arxiv = fetch_arxiv_metadata(arxiv_id) if arxiv_id and not supplied_arxiv_record_complete else {}
     record: dict[str, Any] = {}
     if arxiv.get("metadata_status") == "arxiv_metadata_ready":
         record.update(arxiv)
@@ -638,6 +671,38 @@ def _try_science_official_html_first(paper: dict[str, Any]) -> tuple[str, dict[s
     }
 
 
+def _try_arxiv_official_html_first(paper: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    arxiv_id = _versioned_arxiv_id_from_paper(paper)
+    if not arxiv_id:
+        return "", {}
+    html_url = f"https://arxiv.org/html/{arxiv_id}"
+    html_text, raw_attempt = _fetch_html_text(html_url)
+    body_ok = len(html_text) >= MIN_FULL_TEXT_CHARS and _looks_like_paper_body(html_text)
+    identity_ok = bool(html_text) and _pdf_text_identity_ok(paper, html_text)
+    accepted = bool(raw_attempt.get("accepted")) and body_ok and identity_ok
+    attempt = {
+        **raw_attempt,
+        "kind": "arxiv_official_html_before_pdf",
+        "url": html_url,
+        "arxiv_id": arxiv_id,
+        "accepted": accepted,
+        "paper_body_markers": body_ok,
+        "paper_title_identity_check": identity_ok,
+    }
+    if not accepted and raw_attempt.get("accepted"):
+        attempt["reason"] = "arxiv_official_html_identity_or_body_mismatch"
+    receipt = {
+        "attempts": [attempt],
+        "selected": attempt if accepted else {},
+        "policy": (
+            "exact_arxiv_id_official_html_is_tried_before_pdf; official PDF and existing same-paper fallbacks remain enabled"
+            if accepted
+            else "arxiv_official_html_first_failed; fallback_to_existing_pdf_html_xml_acquisition"
+        ),
+    }
+    return (html_text if accepted else ""), receipt
+
+
 def _reader_pdf_text_url(pdf_url: str) -> str:
     target = re.sub(r"^https?://", "", str(pdf_url or "").strip(), flags=re.I)
     return "https://r.jina.ai/http://" + quote(target, safe="/?&=%:~")
@@ -854,6 +919,9 @@ def _reader_pdf_text_from_failed_pdf_attempts(paper: dict[str, Any], acquisition
         kind = str(attempt.get("kind") or "").lower()
         lowered_url = pdf_url.lower()
         is_biorxiv_official_pdf = "biorxiv.org/content/" in lowered_url and kind == "doi_direct_biorxiv_full_pdf"
+        is_arxiv_official_pdf = kind == "indexed_pdf" and bool(
+            re.match(r"^https?://(?:export\.)?arxiv\.org/pdf/", lowered_url)
+        )
         if not (
             attempt.get("requires_pdf_text_identity_check")
             or "search_result" in kind
@@ -862,6 +930,7 @@ def _reader_pdf_text_from_failed_pdf_attempts(paper: dict[str, Any], acquisition
             or "openreview" in kind
             or "openreview.net" in lowered_url
             or is_biorxiv_official_pdf
+            or is_arxiv_official_pdf
         ):
             continue
         eligible_attempts.append((priority(attempt), attempt_index, attempt))
@@ -1419,8 +1488,22 @@ def acquire_full_text(
     downloads.mkdir(parents=True, exist_ok=True)
     texts.mkdir(parents=True, exist_ok=True)
     started = time.time()
+    arxiv_html_first_text, arxiv_html_first_attempt = _try_arxiv_official_html_first(paper)
     science_html_first_text, science_html_first_attempt = _try_science_official_html_first(paper)
-    if science_html_first_text:
+    if arxiv_html_first_text:
+        downloaded = False
+        pdf_path = downloads / f"{safe_slug(paper.get('paper_id') or paper.get('title'), fallback='paper')}.pdf"
+        resolved_pdf_url = ""
+        acquisition = {
+            "attempts": [],
+            "selected": {},
+            "skipped": "arxiv_official_html_ready_before_pdf",
+            "arxiv_html_first": arxiv_html_first_attempt,
+        }
+        text = arxiv_html_first_text
+        text_kind = "html"
+        html_attempt: dict[str, Any] = arxiv_html_first_attempt
+    elif science_html_first_text:
         downloaded = False
         pdf_path = downloads / f"{safe_slug(paper.get('paper_id') or paper.get('title'), fallback='paper')}.pdf"
         resolved_pdf_url = ""
@@ -1444,6 +1527,8 @@ def acquire_full_text(
     else:
         download_pdf = (services or {}).get("download_first_readable_pdf") or _download_first_readable_pdf
         downloaded, pdf_path, resolved_pdf_url, acquisition = download_pdf(paper, downloads, log)
+        if arxiv_html_first_attempt:
+            acquisition["arxiv_html_first"] = arxiv_html_first_attempt
         if science_html_first_attempt:
             acquisition["html_first"] = science_html_first_attempt
         text = _extract_pdf_text(pdf_path) if downloaded else ""
@@ -1512,8 +1597,10 @@ def acquire_full_text(
                     add_html_url(hint.get("landing_page_url"))
         html_attempts: list[dict[str, Any]] = []
         attempted_html_urls: set[str] = set()
-        if science_html_first_attempt:
-            prior_attempts = science_html_first_attempt.get("attempts") if isinstance(science_html_first_attempt.get("attempts"), list) else []
+        for html_first_attempt in [arxiv_html_first_attempt, science_html_first_attempt]:
+            if not html_first_attempt:
+                continue
+            prior_attempts = html_first_attempt.get("attempts") if isinstance(html_first_attempt.get("attempts"), list) else []
             html_attempts.extend(prior_attempts)
             attempted_html_urls.update(str(item.get("url") or "") for item in prior_attempts if isinstance(item, dict))
         if reader_pdf_attempt:

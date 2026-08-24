@@ -249,24 +249,26 @@ class LLMClient:
     def __init__(self, config: AppConfig, role: LLMRole | str | None = None):
         self.config = config
         self.role = role or "global"
-        self.provider = config.provider
-        self.base_url = config.base_url
-        self.api_key = config.api_key
-        self.model = config.model
+        self.provider = str(config.provider or "").strip()
+        self.base_url = str(config.base_url or "").strip()
+        self.api_key = str(config.api_key or "").strip()
+        self.model = str(config.model or "").strip()
         self.temperature = config.temperature
         if role:
             override = config.llm_roles.get(str(role))
             if override:
-                self.provider = override.provider or self.provider
-                self.base_url = override.base_url or self.base_url
-                self.api_key = override.api_key or self.api_key
-                self.model = override.model or self.model
+                self.provider = str(override.provider or self.provider).strip()
+                self.base_url = str(override.base_url or self.base_url).strip()
+                self.api_key = str(override.api_key or self.api_key).strip()
+                self.model = str(override.model or self.model).strip()
                 self.temperature = config.temperature if override.temperature is None else override.temperature
         self.api_mode = os.environ.get("LLM_API_MODE", "chat_completions")
+        if "deepseek" in self.provider.lower() or "api.deepseek.com" in self.base_url.lower():
+            self.api_mode = "chat_completions"
         self.timeout_sec = int(os.environ.get("LLM_TIMEOUT_SEC", "120"))
         self.max_tokens = int(os.environ.get("LLM_MAX_TOKENS", "2000"))
         self.retries = max(1, int(os.environ.get("LLM_RETRIES", "3")))
-        self.enabled = bool(self.api_key and self.model and self.provider.lower() != "mock")
+        self.enabled = bool(self.api_key and self.base_url and self.model and self.provider.lower() not in {"", "mock", "none"})
 
     def summary(self) -> dict:
         return {
@@ -286,11 +288,17 @@ class LLMClient:
         api_mode = str(self.api_mode or "chat_completions").strip().lower()
         use_responses = api_mode in {"responses", "response", "openai_responses"}
         response_format = os.environ.get("LLM_RESPONSE_FORMAT", "json_object").strip().lower()
+        provider_fingerprint = " ".join([self.provider, self.base_url, self.model]).lower()
+        is_deepseek_v4 = (
+            ("deepseek" in self.provider.lower() or "api.deepseek.com" in self.base_url.lower())
+            and "deepseek-v4" in self.model.lower()
+        )
+        is_qwen_compatible = any(marker in provider_fingerprint for marker in ["qwen", "dashscope", "aliyun", "alibabacloud"])
         reasoning_effort = os.environ.get("LLM_REASONING_EFFORT", "").strip().lower()
         disable_thinking = os.environ.get("LLM_DISABLE_THINKING", "0").lower() in {"1", "true", "yes", "on"}
         retry_empty_json = os.environ.get("LLM_RETRY_EMPTY_JSON_WITHOUT_RESPONSE_FORMAT", "1").lower() in {"1", "true", "yes", "on"}
         retry_unsupported_optional = os.environ.get("LLM_RETRY_UNSUPPORTED_OPTIONAL_PARAMS", "1").lower() in {"1", "true", "yes", "on"}
-        retry_statuses = {408, 409, 429, 500, 502, 503, 504}
+        retry_statuses = {408, 409, 429, 500, 502, 503, 504, 520, 522, 524, 529}
 
         def build_payload(*, include_response_format: bool, include_thinking_controls: bool) -> dict[str, Any]:
             wants_json_response = include_response_format and response_format in {"json", "json_object"}
@@ -319,12 +327,13 @@ class LLMClient:
                 }
                 if wants_json_response:
                     payload["response_format"] = {"type": "json_object"}
-            if reasoning_effort and reasoning_effort not in {"none", "off", "disable", "disabled", "0", "false", "no"}:
+            if not disable_thinking and reasoning_effort and reasoning_effort not in {"none", "off", "disable", "disabled", "0", "false", "no"}:
                 payload["reasoning_effort"] = reasoning_effort
             if include_thinking_controls and disable_thinking:
-                payload["thinking"] = {"type": "disabled"}
-                payload["enable_thinking"] = False
-                payload["extra_body"] = {"thinking": {"type": "disabled"}}
+                if is_deepseek_v4:
+                    payload["thinking"] = {"type": "disabled"}
+                elif is_qwen_compatible:
+                    payload["enable_thinking"] = False
             return payload
 
         def request_once(*, include_response_format: bool, include_thinking_controls: bool) -> str:
@@ -352,7 +361,7 @@ class LLMClient:
                     last_error = RuntimeError(f"LLM HTTP {exc.code} via {self.api_mode or 'chat_completions'}: {body}")
                     if exc.code not in retry_statuses or attempt >= self.retries:
                         raise last_error from exc
-                except (urllib.error.URLError, TimeoutError, RuntimeError) as exc:
+                except (urllib.error.URLError, TimeoutError, RuntimeError, json.JSONDecodeError) as exc:
                     last_error = exc
                     if attempt >= self.retries:
                         raise RuntimeError(f"LLM request failed via {self.api_mode or 'chat_completions'} after {self.retries} attempts: {exc}") from exc

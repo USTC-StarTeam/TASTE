@@ -2796,9 +2796,6 @@ def _openalex_api_params(extra: dict[str, str] | None = None) -> dict[str, str]:
     api_key = str(os.environ.get("OPENALEX_API_KEY") or "").strip()
     if api_key:
         params["api_key"] = api_key
-    mailto = service_contact_email("openalex")
-    if mailto:
-        params["mailto"] = mailto
     return params
 
 
@@ -6251,6 +6248,26 @@ def _reading_scoring_receipt_gate(receipt: dict) -> dict[str, object]:
     }
 
 
+def _reading_scoring_retryable_failure(directory: Path, receipt_dir_name: str, receipt: dict) -> str:
+    if _reading_scoring_receipt_gate(receipt).get("accepted") is True:
+        return ""
+    stdout_value = str(receipt.get("stdout_path") or "").strip()
+    if not stdout_value:
+        return ""
+    expected_stdout = (directory / receipt_dir_name / "stdout.json").resolve(strict=False)
+    try:
+        receipt_stdout = resolve_reading_path(stdout_value).resolve(strict=False)
+    except Exception:
+        return ""
+    if receipt_stdout != expected_stdout:
+        return ""
+    stdout_payload = read_json(receipt_stdout, {})
+    if not isinstance(stdout_payload, dict) or stdout_payload.get("is_error") is not True:
+        return ""
+    result = str(stdout_payload.get("result") or "").strip().lower()
+    return "prompt_too_long" if result == "prompt is too long" else ""
+
+
 def _normalize_reading_scores(payload: dict, items: list[dict]) -> dict[int, dict[str, float]]:
     valid_indices = {
         int(item.get("paper_index") or index)
@@ -6366,6 +6383,7 @@ def _run_final_reading_scoring(
         output_path=output_path,
     ))
     log(f"Final Reading scoring phase: {len(candidates)} completed reading artifacts")
+    retry: dict[str, object] | None = None
     try:
         receipt = run_claude_deep_read(
             prompt_path=prompt_path,
@@ -6375,18 +6393,46 @@ def _run_final_reading_scoring(
             mode=claude_mode,
             receipt_dir_name="claude_scoring",
         )
+        retry_reason = _reading_scoring_retryable_failure(directory, "claude_scoring", receipt)
+        if retry_reason:
+            log(f"Final Reading scoring received transient {retry_reason}; retrying once in a fresh Claude process")
+            retry = {
+                "attempted": True,
+                "reason": retry_reason,
+                "resolved": False,
+            }
+            retry_prompt_path = scoring_dir / "retry_prompt.md"
+            write_text(retry_prompt_path, build_reading_score_prompt(
+                research_context=research_context,
+                articles=candidates,
+                run_path=directory,
+                output_path=output_path,
+                prompt_too_long_recovery=True,
+            ))
+            receipt = run_claude_deep_read(
+                prompt_path=retry_prompt_path,
+                run_path=directory,
+                expected_output_path=output_path,
+                timeout_sec=timeout_sec,
+                mode=claude_mode,
+                receipt_dir_name="claude_scoring_retry",
+            )
+            retry["resolved"] = _reading_scoring_receipt_gate(receipt).get("accepted") is True
     except Exception as exc:
         ranked = _apply_reading_scores_and_rank(items, {}, rerank=False)
         error = _read_exception_payload("final_scoring", exc)
-        write_json(output_path, {
+        warning_payload = {
             "status": "complete_with_warnings",
             "scores": [],
             "expected_article_count": len(candidates),
             "scored_article_count": 0,
             "error": error,
-        })
+        }
+        if retry is not None:
+            warning_payload["retry"] = retry
+        write_json(output_path, warning_payload)
         log(f"Warning: Final Reading scoring failed: {exc.__class__.__name__}: {str(exc)[:300]}")
-        return ranked, {
+        result = {
             "status": "complete_with_warnings",
             "attempted": True,
             "expected_article_count": len(candidates),
@@ -6396,6 +6442,9 @@ def _run_final_reading_scoring(
             "receipt_gate": {"accepted": False, "reason": "scoring_exception"},
             "error": error,
         }
+        if retry is not None:
+            result["retry"] = retry
+        return ranked, result
     raw_payload = read_json(output_path, {})
     if not isinstance(raw_payload, dict) or not raw_payload:
         raw_payload = receipt.get("result_payload") if isinstance(receipt.get("result_payload"), dict) else {}
@@ -6415,16 +6464,19 @@ def _run_final_reading_scoring(
         if scoring_complete
         else "preserve_input_ranking_when_scoring_incomplete_or_untrusted"
     )
-    write_json(output_path, {
+    score_payload = {
         "status": scoring_status,
         "scores": canonical_scores,
         "expected_article_count": len(candidates),
         "scored_article_count": len(scores),
         "ranking_policy": ranking_policy,
         "receipt_gate": receipt_gate,
-    })
+    }
+    if retry is not None:
+        score_payload["retry"] = retry
+    write_json(output_path, score_payload)
     log(f"Final Reading scoring complete: scored={len(scores)}/{len(candidates)}")
-    return ranked, {
+    result = {
         "status": scoring_status,
         "attempted": True,
         "expected_article_count": len(candidates),
@@ -6434,6 +6486,9 @@ def _run_final_reading_scoring(
         "receipt_gate": receipt_gate,
         "claude": receipt,
     }
+    if retry is not None:
+        result["retry"] = retry
+    return ranked, result
 
 
 def _demote_article_markdown(text: str, *, index: int, title: str, item: dict | None = None) -> str:
@@ -6952,7 +7007,8 @@ def run_read(
         }
         cooldown_wait_cap_sec = max(
             0.0,
-            min(60.0, config_float("http.batch_cooldown_requeue_wait_cap_sec", 30.0)),
+            config_float("http.batch_cooldown_requeue_wait_cap_sec", 120.0),
+            config_float("http.rate_limit_cooldown_sec", 120.0) * len(cooldown_requeue_by_index),
         )
         log(
             "Cooldown recovery phase: "

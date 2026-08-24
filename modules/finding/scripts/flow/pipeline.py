@@ -4,6 +4,7 @@ from __future__ import annotations
 # ---- find pipeline ----
 
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -63,14 +64,14 @@ from sources import _in_date_range, normalize_date
 LogFn = Callable[[str], None]
 CancelFn = Callable[[], bool]
 ProgressFn = Callable[..., None]
-SCORING_POLICY_VERSION = "direct_llm_title_abstract_topic_supported_v25"
-FIND_RECOMMENDATION_POLICY = "topn_final_llm_real_abstract_strong_topic_evidence_v27"
+SCORING_POLICY_VERSION = "direct_llm_title_abstract_ranked_topn_v26_topic_audit"
+FIND_RECOMMENDATION_POLICY = "topn_final_llm_real_abstract_valid_reason_v28"
 FIND_FINAL_SCORING_TEMPERATURE = 0.0
 FIND_TITLE_FILTER_TEMPERATURE = 0.0
 FINAL_LLM_SCORE_CACHE_SCHEMA_VERSION = "find_final_llm_score_cache_v1"
 FIND_INPUT_FIELDS = {"research_topic", "research_interest", "researcher_profile", "arxiv_queries"}
 FIND_LLM_CONFIG_FIELDS = {"provider", "base_url", "api_key", "model", "temperature", "llm_roles"}
-FINAL_LLM_SCORE_CACHE_PROMPT_POLICY = "final_title_abstract_prompt_v33_unanchored_complete_abstract_strict_reason"
+FINAL_LLM_SCORE_CACHE_PROMPT_POLICY = "final_title_abstract_prompt_v35_ranked_topn_topic_audit"
 RECOMMENDATION_REASON_MIN_ZH_CHARS = 20
 RECOMMENDATION_REASON_MIN_EN_CHARS = 40
 FINAL_LLM_SCORE_CACHE_MAX_ENTRIES = 50000
@@ -96,9 +97,12 @@ FINAL_LLM_SCORE_CACHE_FIELDS = (
     "missing_topic_evidence",
 )
 TITLE_LLM_SCORE_CACHE_SCHEMA_VERSION = "find_title_llm_score_cache_v1"
+# Final recommendation policy changes must not invalidate stable title-screen
+# scores.  Title cache identity is owned by the title prompt policies below.
+TITLE_LLM_SCORING_POLICY_VERSION = "direct_llm_title_abstract_topic_supported_v25"
 TITLE_LLM_SCORE_CACHE_POLICY_TITLE_ONLY = "llm_title_filter_profile_context_v1"
 TITLE_LLM_SCORE_CACHE_POLICY_WITH_SNIPPETS = "llm_title_filter_profile_context_v2_metadata_snippets"
-TITLE_LLM_SCORE_CACHE_POLICY = TITLE_LLM_SCORE_CACHE_POLICY_WITH_SNIPPETS
+TITLE_LLM_SCORE_CACHE_POLICY = TITLE_LLM_SCORE_CACHE_POLICY_TITLE_ONLY
 TITLE_LLM_SCORE_CACHE_MAX_ENTRIES = 100000
 STAGE0_PROFILE_CACHE_SCHEMA_VERSION = "find_stage0_profile_cache_v1"
 VENUE_TITLE_INDEX_CACHE_SCHEMA_VERSION = "find_venue_title_index_cache_v1"
@@ -169,19 +173,19 @@ Final Find recommendation contract:
 - Use the current research interest/profile only as this run relevance definition. Do not apply a fixed global keyword table or project-specific hard-coded topic list.
 - Category selection, title filtering, local TF-IDF rank, source health, citations, and freshness are recall/audit signals only. They must never promote a paper into the user-visible recommendation list.
 - A user-visible recommendation must be judged from the real title plus real abstract/description in this final LLM scoring step.
-- fit_score is the final title+abstract ranking score. Use the full 0-10 range consistently with one decimal place. Judge each paper independently from its evidence; do not imitate sample scores, prefer round numbers, or cluster scores around a few values.
-- The workflow sorts eligible rows by the final score. Eligibility requires a real title+abstract judgment and direct, source-grounded support for one complete current topic route. Never fill the requested count with unsupported rows.
+- fit_score is the final title+abstract ranking score. Use the full 0-10 range consistently with one decimal place: 9.0-10.0 exact center, 7.0-8.9 strong match, 5.0-6.9 partial/background usefulness, 3.0-4.9 weak/generic, and <=2.9 unrelated items. Do not default to integer or x.5 scores when evidence supports a finer distinction.
+- The workflow selects user-visible recommendations by sorting all valid final-scored rows. Eligibility requires a real title+abstract judgment, finite final LLM scores, and usable recommendation reasons; topic-evidence annotations and score magnitude do not create additional gates.
 - Broad background, inspiration-only, prerequisite-only, or partial-match papers should receive lower fit_score unless the abstract itself gives concrete reusable method/data/protocol/benchmark/evaluation/theory value.
 - Do not use venue prestige, citation count, local rank, title-only similarity, diversity_score, or route/foundation/claim labels to raise fit_score.
 - Missing abstract, metadata-only evidence, and title-only evidence cannot be recommended because they were not judged from real title+abstract content. Score magnitude affects ranking, not eligibility.
 - Treat the research profile as the relevance boundary before scoring. Shared surface terms are not enough for a high score unless the title+abstract tie them to the profile's concrete target problem, entities, data setting, evaluation protocol, or intended application.
-- Preference hints, evaluation preferences, implementation preferences, and generic desiderata such as reproducibility, efficiency, safety, interpretability, or lightweight experiments are modifiers, not standalone topic routes. They can increase usefulness only after the title+abstract also supports the profile's core research object; by themselves they must not make topic_evidence_supported=true or justify a high fit_score.
+- Preference hints, evaluation preferences, implementation preferences, and generic desiderata such as reproducibility, efficiency, safety, interpretability, or lightweight experiments are modifiers, not standalone topic routes. They can increase usefulness only after the title+abstract also supports the profile's core research object; by themselves they must not make topic_evidence_supported=true or justify a 7+ fit_score.
 - The generated route list is authoritative for matched_topic_route. When explicit routes are listed, copy one complete route from that list; do not return a short route fragment such as a subproblem, method component, desideratum, or hint as matched_topic_route.
 - If a route is written as "core route: evidence axes, desiderata, or examples", the text before the colon is the core route boundary. The comma-separated details after the colon are useful evidence axes and preferences, not mandatory components that every recommended paper must cover. A paper can support the route when the title+abstract directly addresses the core route and gives concrete reusable method/data/protocol/benchmark/evaluation/theory value, even if it covers only some listed axes.
 - A transferable method or foundation component is not a direct topic match by itself. If the title+abstract only shows that it might be adapted to the current profile, or does not directly address the core route boundary, set topic_evidence_supported=false; calibrate fit_score independently from the overall title+abstract relevance.
-- Mentions of the profile domain only as a possible application, benchmark/dataset domain, motivating example, or background use case are boundary/background usefulness only. Give them a clearly lower score unless the title+abstract also provides a method, data construction, evaluation protocol, theory, or actionable analysis that is concretely reusable for the research profile.
+- Mentions of the profile domain only as a possible application, benchmark/dataset domain, motivating example, or background use case are boundary/background usefulness only. Keep them at 5-6 or lower unless the title+abstract also provides a method, data construction, evaluation protocol, theory, or actionable analysis that is concretely reusable for the research profile.
 - For every high score, the topic_evidence_basis must name the concrete profile-specific evidence found in the title+abstract. If the abstract uses a shared term in a different or generic setting, score it as weak/generic and set topic_evidence_supported=false with the missing profile evidence named.
-- Keep topic_evidence_supported, missing_topic_evidence, and matched_topic_route independent from score calibration. They must not alter fit_score, but topic_evidence_supported=false means the row is not eligible for the user-visible recommendation list.
+- Keep topic_evidence_supported, missing_topic_evidence, and matched_topic_route as audit explanations only. They must not cap fit_score, alter ranking scores, or decide recommendation eligibility.
 - Do not decide downstream experimental support here. Find recommends papers for Read; later full-text reading, repo/data/env/reproduction, and local experiment gates decide usable evidence scope.
 """.strip()
 
@@ -351,7 +355,7 @@ def _adaptive_final_scoring_batch_size(config: AppConfig, scoring_items: list[di
     env_value = _positive_int_env("ABSTRACT_SCORING_BATCH_SIZE", 0)
     configured_value = int(getattr(config, "abstract_scoring_batch_size", 0) or 0)
     max_batch = _positive_int_env("ABSTRACT_SCORING_MAX_BATCH_SIZE", max(10, configured_value))
-    max_batch = _clamp_int(max_batch, 1, 20)
+    max_batch = _clamp_int(max_batch, 1, 10)
     if env_value > 0:
         return _clamp_int(env_value, 1, max_batch)
     if configured_value > 0:
@@ -611,11 +615,17 @@ def _is_transient_llm_service_error(error: object) -> bool:
     return any(
         token in text
         for token in [
+            "http 408",
+            "http 409",
             "http 429",
             "http 500",
             "http 502",
             "http 503",
             "http 504",
+            "http 520",
+            "http 522",
+            "http 524",
+            "http 529",
             "rpm exhausted",
             "service_unavailable",
             "service unavailable",
@@ -655,6 +665,50 @@ def _normalize_hit_directions(value: object) -> list[str]:
     return []
 
 
+_RELEVANCE_ONLY_CATEGORY_LABELS = {
+    "exact_match",
+    "strong_match",
+    "moderate_match",
+    "partial_match",
+    "weak_match",
+    "generic_match",
+    "high_relevance",
+    "medium_relevance",
+    "low_relevance",
+    "highly_relevant",
+    "relevant",
+    "irrelevant",
+    "unrelated",
+    "高度相关",
+    "强相关",
+    "中等相关",
+    "部分相关",
+    "弱相关",
+    "不相关",
+}
+
+
+def _is_relevance_only_category(value: object) -> bool:
+    normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "_", str(value or "").strip().casefold()).strip("_")
+    return normalized in _RELEVANCE_ONLY_CATEGORY_LABELS
+
+
+def _llm_method_topic_category(
+    value: object,
+    *,
+    fallback: object = "",
+    title: object = "",
+    abstract: object = "",
+) -> str:
+    category = str(value or "").strip()
+    if category and not _is_relevance_only_category(category):
+        return category
+    prior = str(fallback or "").strip()
+    if prior and not _is_relevance_only_category(prior):
+        return prior
+    return keyword_category(str(title or ""), str(abstract or ""))
+
+
 _LLM_SCHEMA_PLACEHOLDER_VALUES = {
     "short category",
     "direction",
@@ -691,6 +745,53 @@ def _llm_schema_placeholder_leaked(row: object) -> bool:
         if normalized.startswith("one concise chinese title-level reason"):
             return True
     return False
+
+
+_FINAL_SCORING_RESPONSE_ALIASES: dict[str, tuple[str, ...]] = {
+    "reason_zh": (
+        "recommendation_reason_zh",
+        "recommendation_reason_chinese",
+        "chinese_recommendation_reason",
+    ),
+    "reason_en": (
+        "recommendation_reason_en",
+        "recommendation_reason_english",
+        "english_recommendation_reason",
+    ),
+    "fit_explanation_zh": (
+        "fit_explanation_chinese",
+        "chinese_fit_explanation",
+    ),
+    "fit_explanation_en": (
+        "fit_explanation_english",
+        "english_fit_explanation",
+    ),
+    "hit_directions_zh": (
+        "hit_direction_zh",
+        "hit_direction_chinese",
+        "hit_directions_chinese",
+    ),
+    "hit_directions_en": (
+        "hit_direction_en",
+        "hit_direction_english",
+        "hit_directions_english",
+    ),
+}
+
+
+def _normalize_final_scoring_response_row(row: object) -> dict:
+    if not isinstance(row, dict):
+        return {}
+    normalized = dict(row)
+    for canonical, aliases in _FINAL_SCORING_RESPONSE_ALIASES.items():
+        if normalized.get(canonical) not in (None, "", []):
+            continue
+        for alias in aliases:
+            value = normalized.get(alias)
+            if value not in (None, "", []):
+                normalized[canonical] = value
+                break
+    return normalized
 
 
 def _hit_direction_i18n(value: object) -> tuple[list[str], list[str]]:
@@ -1490,7 +1591,12 @@ def _explicit_llm_negative_strong_reason(item: dict) -> str:
     judgment_text = _candidate_judgment_text(item)
     absolute_negative_patterns = [
         r"\b(?:unrelated|irrelevant|out of scope|not relevant|not a good fit)\b",
-        r"无关|不相关|主题偏离|严重偏离",
+        # A bare `无关` also occurs in positive method names such as
+        # `梯度无关优化` (gradient-free optimization).  Require an explicit
+        # topic/relevance subject so those methods are not rejected.
+        r"(?:工作|论文|方法|内容|研究|结果|结论|主题|方向).{0,12}(?:无关|不相关)",
+        r"(?:无关|不相关)(?:于|当前).{0,12}(?:主题|方向|研究|任务)",
+        r"主题偏离|严重偏离",
     ]
     if _contains_any(judgment_text, absolute_negative_patterns):
         return "LLM explanation explicitly says this item is unrelated or not useful evidence for the current topic."
@@ -1673,6 +1779,48 @@ def _json_or_error(llm: LLMClient, prompt: str, *, temperature: float | None = N
             return llm.json_or_error(prompt)
 
 
+def _json_or_error_single_request(
+    llm: LLMClient,
+    prompt: str,
+    *,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    stream: bool = False,
+) -> dict:
+    method = getattr(llm, "json_or_error", None)
+    if not callable(method):
+        return {"ok": False, "data": None, "error": "LLM client does not provide json_or_error"}
+    try:
+        parameters = inspect.signature(method).parameters
+    except TypeError as exc:
+        return {"ok": False, "data": None, "error": f"LLM client strict-mode capability inspection failed: {exc}"}
+    except ValueError as exc:
+        return {"ok": False, "data": None, "error": f"LLM client strict-mode capability inspection failed: {exc}"}
+    single_request_parameter = parameters.get("single_request")
+    if single_request_parameter is None or single_request_parameter.kind not in {
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    }:
+        return {"ok": False, "data": None, "error": "LLM client does not support strict single-request scoring"}
+    accepts_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+    kwargs: dict[str, object] = {"single_request": True}
+    if "temperature" in parameters or accepts_kwargs:
+        kwargs["temperature"] = temperature
+    if "max_tokens" in parameters or accepts_kwargs:
+        kwargs["max_tokens"] = max_tokens
+    if stream:
+        if "stream" not in parameters and not accepts_kwargs:
+            return {"ok": False, "data": None, "error": "LLM client does not support streaming single-request scoring"}
+        kwargs["stream"] = True
+    try:
+        result = method(prompt, **kwargs)
+    except TypeError as exc:
+        return {"ok": False, "data": None, "error": f"LLM strict single-request call failed: {exc}"}
+    if not isinstance(result, dict):
+        return {"ok": False, "data": None, "error": "LLM strict single-request call returned a non-object result"}
+    return result
+
+
 def _llm_live_gate(llm: LLMClient) -> dict:
     if not llm.enabled:
         return {"ok": False, "reason": "llm-not-configured", "summary": llm.summary()}
@@ -1715,6 +1863,13 @@ def _llm_live_gate(llm: LLMClient) -> dict:
             llm.timeout_sec = original_timeout
         if original_retries is not None and hasattr(llm, "retries"):
             llm.retries = original_retries
+
+
+def _llm_live_gate_requires_fallback(llm: LLMClient, live_gate: dict) -> bool:
+    if not llm.enabled or live_gate.get("ok"):
+        return False
+    error = live_gate.get("error") or live_gate.get("reason") or ""
+    return _is_fatal_llm_configuration_error(error)
 
 
 def _json_or_error_wall_timeout(llm: LLMClient, prompt: str, *, temperature: float | None = None, max_tokens: int | None = None, timeout_sec: int = 0) -> dict:
@@ -2342,7 +2497,7 @@ def _apply_llm_topic_evidence(item: dict, row: dict, interest: str) -> None:
         item["topic_evidence"] = "weak: missing real abstract evidence"
         item["topic_evidence_supported"] = False
         item["topic_evidence_basis"] = item.get("topic_evidence_basis") or "title_only"
-    item["topic_evidence_audit_only"] = False
+    item["topic_evidence_audit_only"] = True
 
 
 
@@ -3081,11 +3236,8 @@ def _title_llm_score_cache_enabled(config: AppConfig | None = None, llm: LLMClie
 
 
 def _title_llm_score_cache_policy(item: dict) -> str:
-    # The prompt only changes semantically when an abstract snippet is present.
-    # Title-index-only venues such as ICML Downloads should keep using the
-    # stable title-only cache instead of re-scoring thousands of unchanged rows.
-    if _clean_abstract_text(item.get("abstract")):
-        return TITLE_LLM_SCORE_CACHE_POLICY_WITH_SNIPPETS
+    # Title filtering is deliberately title-only. Real abstracts are evaluated
+    # later in bounded batches by the final scoring stage.
     return TITLE_LLM_SCORE_CACHE_POLICY_TITLE_ONLY
 
 
@@ -3094,7 +3246,7 @@ def _title_llm_score_cache_key(item: dict, config: AppConfig, scoring_interest: 
     payload = {
         "schema": TITLE_LLM_SCORE_CACHE_SCHEMA_VERSION,
         "policy": policy,
-        "scoring_policy": SCORING_POLICY_VERSION,
+        "scoring_policy": TITLE_LLM_SCORING_POLICY_VERSION,
         "temperature": FIND_TITLE_FILTER_TEMPERATURE,
         "model": _final_llm_score_model_identity(config),
         "interest": _cache_normalized_text(scoring_interest, limit=20000),
@@ -3140,7 +3292,7 @@ def _title_llm_cache_entry_valid(entry: object, *, expected_policy: str | None =
         return False
     if entry.get("schema") != TITLE_LLM_SCORE_CACHE_SCHEMA_VERSION:
         return False
-    if entry.get("scoring_policy") != SCORING_POLICY_VERSION:
+    if entry.get("scoring_policy") != TITLE_LLM_SCORING_POLICY_VERSION:
         return False
     policy = str(entry.get("policy") or "")
     if expected_policy is not None and policy != expected_policy:
@@ -3158,9 +3310,16 @@ def _apply_cached_title_llm_score(item: dict, entry: object, interest: str, *, e
     if not _title_llm_cache_entry_valid(entry, expected_policy=expected_policy):
         return False
     cached = dict(entry)
+    prior_category = item.get("category")
     for field in TITLE_LLM_SCORE_CACHE_FIELDS:
         if field in cached:
             item[field] = cached[field]
+    item["category"] = _llm_method_topic_category(
+        item.get("category"),
+        fallback=prior_category,
+        title=item.get("title"),
+        abstract=item.get("abstract"),
+    )
     item["fit_score"] = _as_float(item.get("fit_score"))
     item["title_llm_fit_score"] = _as_float(item.get("title_llm_fit_score"), item.get("fit_score"))
     item["diversity_score"] = _as_float(item.get("diversity_score"))
@@ -3185,7 +3344,7 @@ def _title_llm_score_cache_entry(item: dict, cache_key: str, config: AppConfig) 
         "schema": TITLE_LLM_SCORE_CACHE_SCHEMA_VERSION,
         "cache_key": cache_key,
         "policy": _title_llm_score_cache_policy(item),
-        "scoring_policy": SCORING_POLICY_VERSION,
+        "scoring_policy": TITLE_LLM_SCORING_POLICY_VERSION,
         "temperature": FIND_TITLE_FILTER_TEMPERATURE,
         "model": _final_llm_score_model_identity(config),
         "title": _cache_normalized_text(item.get("title"), limit=2000),
@@ -3273,9 +3432,16 @@ def _apply_cached_final_llm_score(item: dict, entry: object, interest: str) -> b
     if not _final_llm_cache_entry_valid(entry):
         return False
     cached = dict(entry)
+    prior_category = item.get("category")
     for field in FINAL_LLM_SCORE_CACHE_FIELDS:
         if field in cached:
             item[field] = cached[field]
+    item["category"] = _llm_method_topic_category(
+        item.get("category"),
+        fallback=prior_category,
+        title=item.get("title"),
+        abstract=item.get("abstract"),
+    )
     if item.get("reason_zh") and _final_llm_cache_reason_unusable(item.get("reason")):
         item["reason"] = item["reason_zh"]
     item["fit_score"] = _as_float(item.get("fit_score"))
@@ -3293,7 +3459,7 @@ def _apply_cached_final_llm_score(item: dict, entry: object, interest: str) -> b
 def _final_llm_score_cache_entry(item: dict, cache_key: str, config: AppConfig) -> dict:
     if str(item.get("reason_source") or "") != "llm abstract evaluation":
         return {}
-    if item.get("llm_retry_exhausted") or item.get("llm_final_scoring_skipped"):
+    if item.get("llm_retry_exhausted") or item.get("llm_final_scoring_skipped") or item.get("reason_quality_invalid"):
         return {}
     if item.get("reason_zh") and _final_llm_cache_reason_unusable(item.get("reason")):
         item["reason"] = item["reason_zh"]
@@ -4385,9 +4551,8 @@ def _prefilter_titles(
         batch_size = 100
         if title_groups:
             batches_with_context = [
-                (batch, _title_filter_prompt_context(group))
-                for group in title_groups
-                for batch in _chunks(group["items"], batch_size)
+                (batch, "Each candidate line includes its own official venue/category context and dynamic strictness policy.")
+                for batch in _chunks(scanned, batch_size)
             ]
         else:
             batches_with_context = [(batch, "") for batch in _chunks(scanned, batch_size)]
@@ -4407,7 +4572,9 @@ def _prefilter_titles(
                 uncached_batch: list[dict] = []
                 for item in batch:
                     expected_policy = _title_llm_score_cache_policy(item)
-                    cache_key = _title_llm_score_cache_key(item, config, scoring_interest, context)
+                    item_group = group_by_id.get(str(item.get("id") or ""))
+                    cache_context = _title_filter_prompt_context(item_group) if item_group else context
+                    cache_key = _title_llm_score_cache_key(item, config, scoring_interest, cache_context)
                     title_cache_keys[id(item)] = cache_key
                     cache_hit = _apply_cached_title_llm_score(item, cache_entries.get(cache_key), interest, expected_policy=expected_policy)
                     if not cache_hit:
@@ -4440,18 +4607,27 @@ def _prefilter_titles(
                     f"{venue_name}: reused cached title scores {title_cache_hits}/{len(scanned)}",
                     count_updates={"llm_title_scored_papers": len(scored_rows)},
                 )
-            batches_with_context = uncached_batches_with_context
+            uncached_items = [item for batch, _context in uncached_batches_with_context for item in batch]
+            uncached_context = "Each candidate line includes its own official venue/category context and dynamic strictness policy." if title_groups else ""
+            batches_with_context = [(batch, uncached_context) for batch in _chunks(uncached_items, batch_size)]
         batches = [batch for batch, _context in batches_with_context]
 
         def build_title_prompt(batch: list[dict], context: str, batch_label: str) -> tuple[str, dict[str, dict]]:
             alias_map = {f"p{position:03d}": item for position, item in enumerate(batch, 1)}
             paper_lines: list[str] = []
             for alias, item in alias_map.items():
-                abstract = _clean_abstract_text(item.get("abstract"))
-                if abstract:
-                    paper_lines.append(f"- {alias}: {item.get('title')}\n  abstract: {abstract[:700]}")
-                else:
-                    paper_lines.append(f"- {alias}: {item.get('title')}")
+                item_group = group_by_id.get(str(item.get("id") or ""))
+                item_context = ""
+                if item_group:
+                    ratio_pct = round(float(item_group["category_ratio"]) * 100, 1)
+                    item_context = (
+                        f"\n  official_context: venue={item_group['venue']}; year={item_group['year']}; "
+                        f"category={item_group['category']}; category_share={ratio_pct}% "
+                        f"({item_group['category_size']}/{item_group['venue_yetotal']}); "
+                        f"dynamic_strictness={item_group['policy']['label']}; "
+                        f"policy={item_group['policy']['instruction']}"
+                    )
+                paper_lines.append(f"- {alias}: {item.get('title')}{item_context}")
             title_lines = "\n".join(paper_lines)
             context_block = f"\nBatch context:\n{context}\n" if context else ""
             prompt = f"""
@@ -4461,7 +4637,7 @@ Research interest/profile:
 {scoring_interest}
 {context_block}
 
-Paper titles and available abstract snippets, {batch_label}:
+Paper titles, {batch_label}:
 {title_lines}
 
 Return one strict JSON object whose only top-level key is scored. scored must be an array. Each row must contain the input id, numeric fit_score and diversity_score in the 0-10 range, concrete hit_directions, a concise specific category, and a concise Chinese title-level reason. Every text field must contain the actual judgment, never a field description or placeholder.
@@ -4470,8 +4646,7 @@ Rules:
 - Return exactly {len(batch)} scored rows, one for every input ID, including low-confidence papers.
 - IDs are opaque request-local identifiers. Copy each pNNN ID exactly once; never shorten, rewrite, or invent an ID.
 - fit_score is the metadata-level match to the profile, not a final recommendation score. Use the full 0-10 range and judge each item independently; do not imitate example values or cluster scores around a few numbers.
-- When an abstract snippet is present, use it to decide whether a generic title actually supports the user's methods, domains, or constraints.
-- Generic AI/ML papers should score low unless the title or abstract concretely connects to the user's methods, domains, or constraints.
+- Generic AI/ML papers should score low unless the title concretely connects to the user's methods, domains, or constraints.
 - diversity_score only rewards hitting multiple real user directions or adding a complementary method/domain. It cannot rescue low fit.
 - This title screen only decides which papers receive abstract/detail fetching. Final recommendations are decided later from real abstracts and final relevance scoring.
 """
@@ -4517,58 +4692,31 @@ Rules:
                 matched.append((item, row))
             return matched, missing
 
-        def score_title_batch(batch_index: int, batch: list[dict], context: str) -> tuple[list[tuple[dict, dict]], list[dict], list[str], int]:
-            pending_items = list(batch)
-            matched: list[tuple[dict, dict]] = []
+        title_repair_attempts = max(0, min(5, int(os.environ.get("TITLE_FILTER_BATCH_REPAIR_ATTEMPTS", "2") or 0)))
+
+        def score_title_request(batch: list[dict], context: str, request_label: str) -> tuple[list[tuple[dict, dict]], list[dict], list[str], int]:
             errors: list[str] = []
-            request_count = 0
-            for attempt in range(1, 3):
-                if not pending_items:
-                    break
-                prompt, alias_map = build_title_prompt(
-                    pending_items,
-                    context,
-                    f"batch {batch_index}/{len(batches_with_context)}, attempt {attempt}",
-                )
-                result = _json_or_error_wall_timeout(
-                    llm,
-                    prompt,
-                    temperature=FIND_TITLE_FILTER_TEMPERATURE,
-                    max_tokens=0,
-                    timeout_sec=wall_timeout,
-                )
-                request_count += 1
-                if not result.get("ok"):
-                    error = str(result.get("error") or "unknown LLM error")
-                    _raise_if_fatal_llm_configuration_error(error, f"{venue_name} title filtering")
-                    errors.append(error)
-                recovered, pending_items = parsed_title_rows(result, alias_map)
-                matched.extend(recovered)
-            if pending_items:
-                unresolved: list[dict] = []
-                for item in pending_items:
-                    prompt, alias_map = build_title_prompt(
-                        [item],
-                        context,
-                        f"batch {batch_index}/{len(batches_with_context)}, single-item completion",
-                    )
-                    result = _json_or_error_wall_timeout(
-                        llm,
-                        prompt,
-                        temperature=FIND_TITLE_FILTER_TEMPERATURE,
-                        max_tokens=0,
-                        timeout_sec=wall_timeout,
-                    )
-                    request_count += 1
-                    if not result.get("ok"):
-                        error = str(result.get("error") or "unknown LLM error")
-                        _raise_if_fatal_llm_configuration_error(error, f"{venue_name} title filtering")
-                        errors.append(error)
-                    recovered, missing = parsed_title_rows(result, alias_map)
-                    matched.extend(recovered)
-                    unresolved.extend(missing)
-                pending_items = unresolved
-            return matched, pending_items, errors, request_count
+            prompt, alias_map = build_title_prompt(batch, context, request_label)
+            result = _json_or_error_single_request(
+                llm,
+                prompt,
+                temperature=FIND_TITLE_FILTER_TEMPERATURE,
+                max_tokens=0,
+                stream=True,
+            )
+            if not result.get("ok"):
+                error = str(result.get("error") or "unknown LLM error")
+                _raise_if_fatal_llm_configuration_error(error, f"{venue_name} title filtering")
+                errors.append(error)
+            matched, unresolved = parsed_title_rows(result, alias_map)
+            return matched, unresolved, errors, 1
+
+        def score_title_batch(batch_index: int, batch: list[dict], context: str) -> tuple[list[tuple[dict, dict]], list[dict], list[str], int]:
+            return score_title_request(
+                batch,
+                context,
+                f"batch {batch_index}/{len(batches_with_context)}, main request",
+            )
 
         workers = 1 if os.environ.get("TITLE_FILTER_SEQUENTIAL", "0").lower() in {"1", "true", "yes", "on"} else clamp_workers(config.llm_concurrency, default=10, maximum=32)
         title_timeout = int(os.environ.get("TITLE_FILTER_TIMEOUT_SEC", "0") or 0) or int(config.title_filter_timeout_sec or 120)
@@ -4576,60 +4724,193 @@ Rules:
         if hasattr(llm, "timeout_sec"):
             llm.timeout_sec = min(original_timeout, title_timeout)
         active_timeout = getattr(llm, "timeout_sec", title_timeout)
-        log(f"{venue_name}: starting LLM title prefilter for {len(scanned)} titles in {len(batches)} uncached batches with {workers} workers; cache_hits={title_cache_hits}; per-batch timeout={active_timeout}s")
-        progress("llm_title_filter", title_cache_hits, max(1, len(scanned)), f"{venue_name}: starting LLM title filter, uncached batches {len(batches)}, cache_hits {title_cache_hits}")
-        wall_timeout = max(
-            10,
-            int(os.environ.get("TITLE_FILTER_WALL_TIMEOUT_SEC", "0") or 0)
-            or int(active_timeout or title_timeout or 120),
-        )
-        if workers == 1:
-            result_iter = []
-            for batch_index, (batch, context) in enumerate(batches_with_context, 1):
-                _raise_if_cancelled(should_cancel)
-                progress("llm_title_filter", batch_index - 1, len(batches), f"{venue_name}: scoring title batch {batch_index}/{len(batches)}")
-                result_iter.append((batch_index, batch, *score_title_batch(batch_index, batch, context)))
-        else:
-            result_iter = []
-            executor = ThreadPoolExecutor(max_workers=workers)
-            futures = {
-                executor.submit(score_title_batch, batch_index, batch, context): (batch_index, batch)
-                for batch_index, (batch, context) in enumerate(batches_with_context, 1)
-            }
-            pending = set(futures)
-            completed = 0
-            try:
-                while pending:
+        try:
+            log(f"{venue_name}: starting LLM title prefilter for {len(scanned)} titles in {len(batches)} uncached batches with {workers} workers; cache_hits={title_cache_hits}; per-batch timeout={active_timeout}s")
+            progress("llm_title_filter", title_cache_hits, max(1, len(scanned)), f"{venue_name}: starting LLM title filter, uncached batches {len(batches)}, cache_hits {title_cache_hits}")
+            if workers == 1:
+                result_iter = []
+                for batch_index, (batch, context) in enumerate(batches_with_context, 1):
                     _raise_if_cancelled(should_cancel)
-                    done, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
-                    if not done:
-                        continue
-                    for future in done:
-                        _raise_if_cancelled(should_cancel)
-                        batch_index, batch = futures[future]
-                        completed += 1
-                        try:
-                            matched, unresolved, errors, request_count = future.result()
-                        except Exception as exc:
-                            matched, unresolved, errors, request_count = [], list(batch), [str(exc)], 1
-                        result_iter.append((batch_index, batch, matched, unresolved, errors, request_count))
-                        progress("llm_title_filter", completed, len(batches), f"{venue_name}: scored title batch {completed}/{len(batches)}, workers {workers}")
-            except JobCancelled:
-                for future in pending:
-                    future.cancel()
-                executor.shutdown(wait=True, cancel_futures=True)
-                raise
+                    progress("llm_title_filter", batch_index - 1, len(batches), f"{venue_name}: scoring title batch {batch_index}/{len(batches)}")
+                    result_iter.append((batch_index, batch, *score_title_batch(batch_index, batch, context)))
             else:
-                executor.shutdown(wait=True)
-            result_iter.sort(key=lambda row: row[0])
-        if hasattr(llm, "timeout_sec"):
-            llm.timeout_sec = original_timeout
-        for batch_index, batch, matched, unresolved, errors, request_count in result_iter:
-            _raise_if_cancelled(should_cancel)
+                result_iter = []
+                executor = ThreadPoolExecutor(max_workers=workers)
+                futures = {
+                    executor.submit(score_title_batch, batch_index, batch, context): (batch_index, batch)
+                    for batch_index, (batch, context) in enumerate(batches_with_context, 1)
+                }
+                pending = set(futures)
+                completed = 0
+                try:
+                    while pending:
+                        _raise_if_cancelled(should_cancel)
+                        done, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
+                        if not done:
+                            continue
+                        for future in done:
+                            _raise_if_cancelled(should_cancel)
+                            batch_index, batch = futures[future]
+                            completed += 1
+                            try:
+                                matched, unresolved, errors, request_count = future.result()
+                            except Exception as exc:
+                                matched, unresolved, errors, request_count = [], list(batch), [str(exc)], 1
+                            result_iter.append((batch_index, batch, matched, unresolved, errors, request_count))
+                            progress("llm_title_filter", completed, len(batches), f"{venue_name}: scored title batch {completed}/{len(batches)}, workers {workers}")
+                except JobCancelled:
+                    for future in pending:
+                        future.cancel()
+                    executor.shutdown(wait=True, cancel_futures=True)
+                    raise
+                else:
+                    executor.shutdown(wait=True)
+                result_iter.sort(key=lambda row: row[0])
+
+            # A fatal provider/configuration failure is not repairable. Check all
+            # primary outcomes before constructing any repair request.
+            for _batch_index, _batch, _matched, _unresolved, errors, _request_count in result_iter:
+                for error in errors:
+                    _raise_if_fatal_llm_configuration_error(error, f"{venue_name} title filtering")
+
+            primary_transport_failure_count = sum(
+                1
+                for _batch_index, _batch, _matched, _unresolved, errors, _request_count in result_iter
+                if errors
+            )
+            primary_complete_request_count = sum(
+                1
+                for _batch_index, batch, matched, unresolved, errors, _request_count in result_iter
+                if not errors and not unresolved and len(matched) == len(batch)
+            )
+            repair_workers = workers
+            if workers > 1 and primary_transport_failure_count:
+                transport_outcome_count = primary_complete_request_count + primary_transport_failure_count
+                repair_workers = max(1, min(workers, ceil(workers * primary_complete_request_count / transport_outcome_count)))
+                if repair_workers < workers:
+                    log(
+                        f"{venue_name}: reducing title repair concurrency from {workers} to {repair_workers} "
+                        f"after {primary_complete_request_count} complete and {primary_transport_failure_count} "
+                        "transport-failed primary requests"
+                    )
+
+            pending_title_repairs = [item for _batch_index, _batch, _matched, unresolved, _errors, _request_count in result_iter for item in unresolved]
+            repair_matched: list[tuple[dict, dict]] = []
+            repair_errors: list[str] = []
+            repair_request_count = 0
+            repair_context = "Each candidate line includes its own official venue/category context and dynamic strictness policy." if title_groups else ""
+            for repair_round in range(1, title_repair_attempts + 1):
+                _raise_if_cancelled(should_cancel)
+                if not pending_title_repairs:
+                    break
+                repair_batches = list(_chunks(pending_title_repairs, batch_size))
+                log(f"{venue_name}: starting consolidated title repair round {repair_round}/{title_repair_attempts} for {len(pending_title_repairs)} rows in {len(repair_batches)} requests with {repair_workers} workers")
+                progress(
+                    "llm_title_filter",
+                    0,
+                    len(repair_batches),
+                    f"{venue_name}: starting title repair round {repair_round}/{title_repair_attempts}, workers {repair_workers}",
+                )
+                round_results: list[tuple[int, list[tuple[dict, dict]], list[dict], list[str], int]] = []
+                if repair_workers == 1:
+                    for repair_batch_index, repair_batch in enumerate(repair_batches, 1):
+                        _raise_if_cancelled(should_cancel)
+                        matched, unresolved, errors, request_count = score_title_request(
+                            repair_batch,
+                            repair_context,
+                            f"consolidated batched repair {repair_round}/{title_repair_attempts}, batch {repair_batch_index}/{len(repair_batches)}",
+                        )
+                        round_results.append((repair_batch_index, matched, unresolved, errors, request_count))
+                        progress(
+                            "llm_title_filter",
+                            repair_batch_index,
+                            len(repair_batches),
+                            f"{venue_name}: title repair round {repair_round}/{title_repair_attempts} batch {repair_batch_index}/{len(repair_batches)}, workers {repair_workers}",
+                        )
+                else:
+                    repair_executor = ThreadPoolExecutor(max_workers=repair_workers)
+                    repair_futures = {
+                        repair_executor.submit(
+                            score_title_request,
+                            repair_batch,
+                            repair_context,
+                            f"consolidated batched repair {repair_round}/{title_repair_attempts}, batch {repair_batch_index}/{len(repair_batches)}",
+                        ): repair_batch_index
+                        for repair_batch_index, repair_batch in enumerate(repair_batches, 1)
+                    }
+                    repair_pending = set(repair_futures)
+                    repair_completed = 0
+                    try:
+                        while repair_pending:
+                            _raise_if_cancelled(should_cancel)
+                            done, repair_pending = wait(repair_pending, timeout=1.0, return_when=FIRST_COMPLETED)
+                            for future in done:
+                                repair_completed += 1
+                                repair_batch_index = repair_futures[future]
+                                try:
+                                    matched, unresolved, errors, request_count = future.result()
+                                except Exception as exc:
+                                    repair_batch = repair_batches[repair_batch_index - 1]
+                                    matched, unresolved, errors, request_count = [], list(repair_batch), [str(exc)], 1
+                                round_results.append((repair_batch_index, matched, unresolved, errors, request_count))
+                                progress(
+                                    "llm_title_filter",
+                                    repair_completed,
+                                    len(repair_batches),
+                                    f"{venue_name}: title repair round {repair_round}/{title_repair_attempts} batch {repair_completed}/{len(repair_batches)}, workers {repair_workers}",
+                                )
+                    except JobCancelled:
+                        for future in repair_pending:
+                            future.cancel()
+                        repair_executor.shutdown(wait=True, cancel_futures=True)
+                        raise
+                    else:
+                        repair_executor.shutdown(wait=True)
+                    round_results.sort(key=lambda row: row[0])
+
+                # Do not continue into another repair round after an auth, quota,
+                # billing, or other fatal provider/configuration response.
+                for _repair_batch_index, _matched, _unresolved, errors, _request_count in round_results:
+                    for error in errors:
+                        _raise_if_fatal_llm_configuration_error(error, f"{venue_name} title filtering repair")
+                pending_title_repairs = []
+                for _repair_batch_index, matched, unresolved, errors, request_count in round_results:
+                    repair_matched.extend(matched)
+                    pending_title_repairs.extend(unresolved)
+                    repair_errors.extend(errors)
+                    repair_request_count += request_count
+                log(f"{venue_name}: consolidated title repair round {repair_round}/{title_repair_attempts} recovered {sum(len(row[1]) for row in round_results)} rows; unresolved={len(pending_title_repairs)}")
+                round_transport_failure_count = sum(1 for _index, _matched, _unresolved, errors, _count in round_results if errors)
+                round_complete_request_count = sum(
+                    1
+                    for _index, matched, unresolved, errors, _count in round_results
+                    if not errors and not unresolved and matched
+                )
+                round_transport_outcome_count = round_complete_request_count + round_transport_failure_count
+                if (
+                    repair_round < title_repair_attempts
+                    and pending_title_repairs
+                    and repair_workers > 1
+                    and round_transport_failure_count
+                    and round_transport_outcome_count
+                ):
+                    next_repair_workers = max(
+                        1,
+                        min(repair_workers, ceil(repair_workers * round_complete_request_count / round_transport_outcome_count)),
+                    )
+                    if next_repair_workers < repair_workers:
+                        log(
+                            f"{venue_name}: reducing next title repair concurrency from {repair_workers} to {next_repair_workers} "
+                            f"after {round_complete_request_count} complete and {round_transport_failure_count} "
+                            f"transport-failed round {repair_round} requests"
+                        )
+                        repair_workers = next_repair_workers
+        finally:
+            if hasattr(llm, "timeout_sec"):
+                llm.timeout_sec = original_timeout
+
+        def apply_title_matches(matched: list[tuple[dict, dict]]) -> int:
             appended = 0
-            for error in errors:
-                _raise_if_fatal_llm_configuration_error(error, f"{venue_name} title filtering")
-                log(f"{venue_name}: title batch {batch_index}/{len(batches)} LLM attempt failed: {str(error)[:240]}")
             for item, row in matched:
                 item_id = str(item.get("id") or "")
                 if id(item) in seen_items:
@@ -4639,7 +4920,12 @@ Rules:
                 item["diversity_score"] = _as_float(row.get("diversity_score"), item.get("diversity_score") or 0)
                 item["score"] = _combined_score(item["fit_score"], item["diversity_score"])
                 item["hit_directions"] = _normalize_hit_directions(row.get("hit_directions"))
-                item["category"] = str(row.get("category") or item.get("category") or "")
+                item["category"] = _llm_method_topic_category(
+                    row.get("category"),
+                    fallback=item.get("category"),
+                    title=item.get("title"),
+                    abstract=item.get("abstract"),
+                )
                 item["title_reason"] = str(row.get("reason") or item.get("title_reason") or "")
                 item["fit_explanation"] = item["title_reason"]
                 item["reason_source"] = "llm title filter"
@@ -4662,8 +4948,21 @@ Rules:
                 scored_rows.append(item)
                 seen_items.add(id(item))
                 appended += 1
-            retry_note = f"; requests={request_count}" if request_count > 1 else ""
-            log(f"{venue_name}: title batch {batch_index}/{len(batches)} scored {appended}/{len(batch)}{retry_note}; scored_titles={len(scored_rows)}")
+            return appended
+
+        for batch_index, batch, matched, unresolved, errors, request_count in result_iter:
+            _raise_if_cancelled(should_cancel)
+            for error in errors:
+                _raise_if_fatal_llm_configuration_error(error, f"{venue_name} title filtering")
+                log(f"{venue_name}: title batch {batch_index}/{len(batches)} LLM attempt failed: {str(error)[:240]}")
+            appended = apply_title_matches(matched)
+            log(f"{venue_name}: title batch {batch_index}/{len(batches)} scored {appended}/{len(batch)}; requests={request_count}; scored_titles={len(scored_rows)}")
+        for error in repair_errors:
+            _raise_if_fatal_llm_configuration_error(error, f"{venue_name} title filtering repair")
+            log(f"{venue_name}: consolidated title repair request failed: {str(error)[:240]}")
+        repaired_count = apply_title_matches(repair_matched)
+        if repair_request_count:
+            log(f"{venue_name}: consolidated title repairs recovered {repaired_count} rows in {repair_request_count} requests; scored_titles={len(scored_rows)}")
         fallback_items = [
             item
             for item in scanned
@@ -4673,12 +4972,14 @@ Rules:
             item["title_filter_fallback_used"] = True
             item["title_llm_missing"] = True
             item["title_llm_retry_exhausted"] = True
-            item["title_filter_fallback_reason"] = "LLM title row remained invalid or missing after bounded batch and single-item retries."
+            item["title_llm_single_request_unresolved"] = True
+            item["title_llm_batch_repair_exhausted"] = True
+            item["title_filter_fallback_reason"] = "LLM title row remained invalid or missing after bounded batched repair."
             item["title_local_rank"] = local_rank
         if fallback_items:
             unresolved_ids = [str(item.get("id") or "") for item in fallback_items]
             log(
-                f"{venue_name}: title LLM left {len(fallback_items)} rows unresolved after bounded retries; "
+                f"{venue_name}: title LLM left {len(fallback_items)} rows unresolved after bounded batched repair; "
                 f"local title scores retained them for downstream abstract scoring; sample={unresolved_ids[:10]}"
             )
         if batches:
@@ -5535,11 +5836,14 @@ def _evaluate_items(
     interest = _topic_interest_text(config)
     topic_routes_block = _adaptive_topic_routes_block(config, interest)
     scoring_interest = _compact_scoring_interest(config, interest)
-    prompts: list[str] = []
-    prompt_batches: list[list[dict]] = []
     for index, item in enumerate(items, 1):
         _raise_if_cancelled(should_cancel)
-        progress("final_ranking_prepare", index, len(items), f"Preparing {source_name}: {item.get('title', 'Untitled')[:80]}")
+        prepare_message = (
+            f"{source_name}: preparing {item.get('title', 'Untitled')[:80]}"
+            if source_name.strip().lower() in {"all sources", "all channels"}
+            else f"Preparing {source_name}: {item.get('title', 'Untitled')[:80]}"
+        )
+        progress("final_ranking_prepare", index, len(items), prepare_message)
         title = item.get("title", "")
         abstract = item.get("abstract", "")
         if item.get("classification_source") != "official":
@@ -5610,14 +5914,17 @@ def _evaluate_items(
                 item.setdefault("recommendation_note_zh", "该条目未进入最终相关性评分；只保留为排查线索，不展示为推荐论文。")
                 item.setdefault("recommendation_note_en", "This row did not enter final relevance scoring; retained only for troubleshooting, not as a recommendation.")
                 item.setdefault("recommendation_note", item.get("recommendation_note_zh") or item.get("recommendation_note_en"))
-        log(f"{source_name}: final LLM scoring pool {len(scoring_ids)}/{len(evaluated)} candidates; cache_hits={score_cache_hits}; llm_requests={len(scoring_items)}; skipped {skipped_items} retrieval-only candidates")
+        log(f"{source_name}: final LLM scoring pool {len(scoring_ids)}/{len(evaluated)} candidates; cache_hits={score_cache_hits}; uncached_items={len(scoring_items)}; skipped {skipped_items} retrieval-only candidates")
         scoring_batch_size = _adaptive_final_scoring_batch_size(config, scoring_items, scoring_interest, topic_routes_block)
-        for batch_index, batch in enumerate(_chunks(scoring_items, scoring_batch_size), 1):
+        primary_batches = list(_chunks(scoring_items, scoring_batch_size))
+        repair_attempts = max(0, min(5, int(os.environ.get("OMITTED_ITEM_RETRY_ATTEMPTS", os.environ.get("ABSTRACT_SCORING_BATCH_REPAIR_ATTEMPTS", "3")) or 0)))
+
+        def build_final_scoring_prompt(batch: list[dict], batch_label: str) -> str:
             item_lines = "\n\n".join(
                 f"ID: p{position:03d}\nTitle: {item.get('title')}\nAbstract/Description: {_final_scoring_abstract_text(item)}"
                 for position, item in enumerate(batch, 1)
             )
-            prompts.append(f"""
+            return f"""
 You are the final strict relevance judge for literature discovery. Return JSON only.
 
 Research interest/profile:
@@ -5625,304 +5932,302 @@ Research interest/profile:
 
 {topic_routes_block}
 
-Candidate items, batch {batch_index}:
+Candidate items, {batch_label}:
 {item_lines}
 
-Return one strict JSON object whose only top-level key is evaluations. evaluations must contain one row per candidate. Each row must contain: the exact input id; a concise specific category; numeric fit_score and diversity_score in the 0-10 range with one decimal place; boolean recommend_for_deep_reading and topic_evidence_supported; a concrete topic_evidence verdict; the complete matched_topic_route or an empty string; a concise evidence basis; a list of concrete missing evidence when unsupported; concrete Chinese and English hit-direction lists; and natural Chinese and English fit explanations and recommendation reasons. Every text field must contain the actual judgment, never a field description or placeholder.
+Return one strict JSON object whose only top-level key is evaluations. evaluations must contain one row per candidate. Every row must use these exact property names: id, category, fit_score, diversity_score, recommend_for_deep_reading, topic_evidence, topic_evidence_supported, matched_topic_route, topic_evidence_basis, missing_topic_evidence, hit_directions_zh, hit_directions_en, fit_explanation_zh, fit_explanation_en, reason_zh, reason_en. Do not translate, rename, expand, or replace these property names. Every text field must contain the actual judgment, never a field description or placeholder.
 
 Rules:
 - Return exactly {len(batch)} evaluation rows. IDs are opaque request-local identifiers; copy every pNNN ID exactly once and never rewrite or invent an ID.
 - Score by explicit title/abstract evidence only; venue prestige must not raise fit_score.
-- Use the whole 0-10 range consistently with one decimal place. Judge each paper independently from its evidence; do not imitate sample scores, prefer round numbers, or cluster scores around a few values.
+- Use the whole 0-10 range consistently with one decimal place: 9.0-10.0 exact center, 7.0-8.9 strong match, 5.0-6.9 partial/background usefulness, 3.0-4.9 weak/generic, <=2.9 unrelated. Judge each paper independently and do not cluster scores around a few values.
 - Broad background papers are weak unless the abstract itself gives concrete reusable method, data, benchmark, protocol, theory, or evaluation value for the current research interest.
-- topic_evidence_supported is an eligibility judgment independent from score calibration. A false or weak topic-evidence verdict excludes the row from the user-visible recommendation list; never mark it true merely to fill the requested count.
+- recommend_for_deep_reading and topic_evidence_supported are audit fields only. The workflow chooses the user-visible list by ranking all valid final title+abstract scores; neither field is an eligibility gate and there is no absolute score cutoff.
 - Set topic_evidence_supported=true only when the title+abstract directly supports one complete configured/adaptive core route from the list above. Copy that full route into matched_topic_route; never use a short subphrase, method component, desideratum, or hint as matched_topic_route. If the route contains a colon, do not require every post-colon evidence axis; require direct support for the pre-colon core route plus concrete reusable value. Set topic_evidence to passed:/strong: and give a concise topic_evidence_basis. This evidence annotation is diagnostic and must not replace your calibrated fit_score.
 - If the abstract is generic, background-only, venue/title-only, or does not directly support the current core route, set topic_evidence_supported=false, topic_evidence="weak: missing adaptive topic evidence", and list concrete missing_topic_evidence.
-- Score fit independently from the topic-evidence fields. Do not cap or otherwise change fit_score because topic_evidence_supported=false or topic_evidence starts with weak:.
-- Write each recommendation reason freshly from this paper's title/abstract and the supplied research topic. Naturally cover why the paper topic fits the research topic, how the paper can help the research, and what methods/data/protocols/theory/evaluation ideas are transferable. Lead with concrete paper content; do not use a prescribed opening, generic research-direction boilerplate, or a fixed sentence order. Do not write reader instructions.
+- Score fit independently from the topic-evidence audit fields. Do not cap or otherwise change fit_score because topic_evidence_supported=false or topic_evidence starts with weak:.
+- Write reason_zh and reason_en freshly from this paper's title/abstract and the supplied research topic. Each reason must contain 2-4 natural sentences and cover why the paper topic fits the research topic, how the paper can help the research, and what methods/data/protocols/theory/evaluation ideas are transferable. Lead with concrete paper content; do not use a prescribed opening, generic research-direction boilerplate, or a fixed sentence order. Do not write reader instructions.
 - Missing abstract, metadata-only evidence, or title-only evidence cannot be recommended.
 {FIND_FINAL_SCORING_ROUTE_RULES}
-""")
-            prompt_batches.append(batch)
-        workers = _adaptive_final_scoring_workers(config, len(prompt_batches))
+"""
+
+        workers = _adaptive_final_scoring_workers(config, len(primary_batches))
         env_batch_timeout = _positive_int_env("ABSTRACT_SCORING_TIMEOUT_SEC", 0)
         configured_batch_timeout = int(getattr(config, "abstract_scoring_timeout_sec", 0) or 180)
         batch_timeout = max(30, env_batch_timeout or configured_batch_timeout or 180)
         scoring_temperature = FIND_FINAL_SCORING_TEMPERATURE
         original_timeout = getattr(llm, "timeout_sec", batch_timeout)
-        original_retries = getattr(llm, "retries", None)
         if hasattr(llm, "timeout_sec"):
             llm.timeout_sec = batch_timeout
-        if hasattr(llm, "retries"):
-            llm.retries = max(1, int(os.environ.get("ABSTRACT_SCORING_LLM_RETRIES", "2") or 2))
-        log(f"{source_name}: starting LLM final scoring for {len(scoring_items)}/{len(evaluated)} items in {len(prompts)} batches with {workers} workers; batch_size={scoring_batch_size}; per-batch timeout={getattr(llm, 'timeout_sec', batch_timeout)}s; retries={getattr(llm, 'retries', 'n/a')}; temperature={scoring_temperature}")
-        progress("abstract_scoring", 0, max(1, len(prompt_batches)), f"{source_name}: starting LLM final scoring")
+        primary_batch_count = len(primary_batches)
+        request_slot_total = max(1, primary_batch_count * (repair_attempts + 1))
+        log(f"{source_name}: starting LLM final scoring for {len(scoring_items)}/{len(evaluated)} items in {primary_batch_count} primary batches with {workers} workers; batch_size={scoring_batch_size}; primary_requests={primary_batch_count}; bounded_batch_repair_rounds={repair_attempts}; strict_single_request_per_batch=true; per-batch timeout={getattr(llm, 'timeout_sec', batch_timeout)}s; temperature={scoring_temperature}")
 
-        single_retry_attempts = max(0, int(os.environ.get("OMITTED_ITEM_RETRY_ATTEMPTS", os.environ.get("ABSTRACT_SCORING_SINGLE_RETRY_ATTEMPTS", "3")) or 0))
         scoring_max_tokens = 0
-        single_scoring_max_tokens = 0
-        scoring_wall_timeout = max(0, int(os.environ.get("ABSTRACT_SCORING_WALL_TIMEOUT_SEC", "0") or 0))
-        single_scoring_timeout = max(10, int(os.environ.get("SINGLE_ABSTRACT_SCORING_TIMEOUT_SEC", "75") or 75))
-        pending_single_retries: list[tuple[int, list[dict], str]] = []
+        rejection_counts: dict[str, int] = {}
 
-        def mark_items_unscored(batch_index: int, items_to_mark: list[dict], reason: str, error: object = "") -> None:
+        def note_rejection(reason: str, count: int = 1) -> None:
+            rejection_counts[reason] = int(rejection_counts.get(reason) or 0) + max(0, int(count or 0))
+
+        def scored_count() -> int:
+            return score_cache_hits + sum(
+                1
+                for item in scoring_items
+                if str(item.get("reason_source") or "") == "llm abstract evaluation"
+            )
+
+        def emit_scoring_progress(current: int, message: str) -> None:
+            current = max(0, min(request_slot_total, int(current or 0)))
+            count = scored_count()
+            _emit_progress(
+                progress,
+                "abstract_scoring",
+                current,
+                request_slot_total,
+                message,
+                count_updates={
+                    "evaluated_candidates": len(evaluated),
+                    "abstract_scored_papers": count,
+                    "llm_scored_candidates": count,
+                    "llm_scoring_request_slots_current": current,
+                    "llm_scoring_request_slots_total": request_slot_total,
+                },
+            )
+
+        emit_scoring_progress(0, f"{source_name}: starting global LLM final scoring")
+
+        def mark_items_unscored(items_to_mark: list[dict]) -> None:
             for item in items_to_mark:
+                reason = str(item.get("llm_repair_reason") or "omitted-item")
                 item["llm_retry_exhausted"] = True
                 item["llm_retry_reason"] = reason
-                item["llm_retry_attempts"] = 0
-                if error:
-                    item["llm_retry_last_error"] = str(error)[:500]
+                item["llm_retry_attempts"] = repair_attempts
+                item["llm_single_request_unresolved"] = True
+                item["llm_batch_repair_exhausted"] = True
                 _apply_relevance_guard(item)
                 _apply_topic_evidence_guard(item, interest)
                 _apply_quality_bonus(item)
             if items_to_mark:
-                log(f"{source_name}: batch {batch_index}/{len(prompt_batches)} marked {len(items_to_mark)} unresolved items after {reason}; unresolved items remain excluded from Find recommendations")
+                log(f"{source_name}: bounded batched repair exhausted for {len(items_to_mark)} rows without a valid score; unresolved rows remain excluded from Find recommendations")
 
-        def single_scoring_prompt(item: dict) -> str:
-            return f"""
-You are the final strict relevance judge for research recommendations.
-
-Research interest/profile:
-{scoring_interest}
-
-{topic_routes_block}
-
-Candidate item:
-ID: p001
-Title: {item.get('title')}
-Abstract/Description: {_final_scoring_abstract_text(item)}
-
-Return one strict JSON object whose only top-level key is evaluations. Its single row must contain the exact id and the same concrete fields required by the batch contract: category; numeric fit_score and diversity_score; boolean recommendation and topic-evidence verdicts; matched route and its evidence; missing evidence; bilingual hit directions, explanations, and recommendation reasons. Never return field descriptions or placeholders as values.
-
-Scoring rules: judge this item independently from its complete real title and abstract. fit_score is the final ranking score used by the workflow; use the full 0-10 range with one decimal place without imitating example values or clustering around a few numbers. Set topic_evidence_supported=true only when the title+abstract directly supports one complete configured/adaptive core route from the list above; copy the full route into matched_topic_route, never a short subphrase or component. If the route contains a colon, treat the pre-colon text as the core route and the post-colon details as evidence axes/preferences, not mandatory all-of conditions. Otherwise set it false with weak topic_evidence and concrete missing_topic_evidence; that row is ineligible for the user-visible recommendation list, but the verdict must not cap or alter fit_score. Write the recommendation reason naturally from this paper's concrete content and cover topic fit, help to the research, and transferable value; do not use a prescribed opening, generic research-direction boilerplate, or reader instructions. Provide both Chinese and English explanation fields, plus hit_directions_zh in Chinese and hit_directions_en in English.
-{FIND_FINAL_SCORING_ROUTE_RULES}
-"""
-
-        def retry_items_singly(batch_index: int, items_to_retry: list[dict], reason: str) -> int:
-            if not items_to_retry:
-                return 0
-            if single_retry_attempts <= 0:
-                mark_items_unscored(batch_index, items_to_retry, reason)
-                return 0
-            recovered = 0
-            remaining = list(items_to_retry)
-            original_single_timeout = getattr(llm, "timeout_sec", single_scoring_timeout)
-            original_single_retries = getattr(llm, "retries", None)
-            if hasattr(llm, "timeout_sec"):
-                llm.timeout_sec = single_scoring_timeout
-            if hasattr(llm, "retries"):
-                llm.retries = 1
-            try:
-                for attempt in range(1, single_retry_attempts + 1):
-                    next_remaining: list[dict] = []
-                    for item in remaining:
-                        before_source = item.get("reason_source")
-                        single_result = _json_or_error_wall_timeout(
-                            llm,
-                            single_scoring_prompt(item),
-                            temperature=scoring_temperature,
-                            max_tokens=single_scoring_max_tokens,
-                            timeout_sec=scoring_wall_timeout or single_scoring_timeout,
-                        )
-                        if single_result.get("ok"):
-                            apply_result(batch_index, [item], single_result, allow_missing_retry=False)
-                        if item.get("reason_source") == "llm abstract evaluation" and item.get("reason_source") != before_source:
-                            item["llm_retry_attempts"] = attempt
-                            recovered += 1
-                        else:
-                            item["llm_retry_attempts"] = attempt
-                            item["llm_retry_last_error"] = str(single_result.get("error") or "missing evaluation row")[:500]
-                            next_remaining.append(item)
-                    remaining = next_remaining
-                    if not remaining:
-                        break
-            finally:
-                if hasattr(llm, "timeout_sec"):
-                    llm.timeout_sec = original_single_timeout
-                if original_single_retries is not None and hasattr(llm, "retries"):
-                    llm.retries = original_single_retries
-            for item in remaining:
-                item["llm_retry_exhausted"] = True
-                item["llm_retry_reason"] = reason
-                item["llm_retry_attempts"] = single_retry_attempts
-                _apply_relevance_guard(item)
-                _apply_topic_evidence_guard(item, interest)
-                _apply_quality_bonus(item)
-            if remaining:
-                log(f"{source_name}: batch {batch_index}/{len(prompt_batches)} {reason} retry exhausted {len(remaining)}/{len(items_to_retry)} items after {single_retry_attempts} attempts")
-            return recovered
-
-        def queue_single_retry(batch_index: int, items_to_retry: list[dict], reason: str) -> None:
-            if not items_to_retry:
-                return
-            if single_retry_attempts <= 0:
-                mark_items_unscored(batch_index, items_to_retry, reason)
-                return
-            pending_single_retries.append((batch_index, list(items_to_retry), reason))
-
-        def retry_policy_text() -> str:
-            if single_retry_attempts > 0:
-                return "queued for bounded single-item retry before unresolved-item audit marking"
-            return "single-item retry disabled; marking unresolved items for audit"
-
-        def apply_result(batch_index: int, batch: list[dict], result: dict, allow_missing_retry: bool = True) -> None:
+        def apply_result(batch_label: str, batch: list[dict], result: dict, repair_round: int) -> list[dict]:
             by_id = {f"p{position:03d}": item for position, item in enumerate(batch, 1)}
-            assigned_items: set[int] = set()
             if not result.get("ok"):
-                error = result.get("error", "")
+                error = str(result.get("error") or "unknown LLM error")
                 _raise_if_fatal_llm_configuration_error(error, f"{source_name} final LLM scoring")
-                if _is_transient_llm_service_error(error):
-                    log(f"{source_name}: batch {batch_index}/{len(prompt_batches)} LLM scoring hit transient service error: {str(error)[:240]}; {retry_policy_text()}")
-                    queue_single_retry(batch_index, batch, "transient-service-error")
-                    return
-                log(f"{source_name}: batch {batch_index}/{len(prompt_batches)} LLM scoring failed: {str(error)[:240]}; {retry_policy_text()}")
-                queue_single_retry(batch_index, batch, "failed-batch")
-                return
+                reason = "transient-service-error" if _is_transient_llm_service_error(error) else "failed-batch"
+                note_rejection(reason, len(batch))
+                for item in batch:
+                    item["llm_repair_reason"] = reason
+                    item["llm_retry_last_error"] = error[:500]
+                log(f"{source_name}: {batch_label} failed for {len(batch)} rows: {error[:240]}; queued as one bounded repair batch")
+                return list(batch)
             data = result.get("data")
+            rows: list[dict] = []
             if isinstance(data, dict):
-                rows = data.get("evaluations")
-                if rows is None:
-                    rows = data.get("selected")
-                if isinstance(rows, dict):
-                    rows = [rows]
-                if isinstance(rows, list):
-                    seen_row_ids: set[str] = set()
-                    for row in rows:
-                        if not isinstance(row, dict):
-                            continue
-                        row_id = str(row.get("id") or "")
-                        item = by_id.get(row_id)
-                        if not item or row_id in seen_row_ids:
-                            continue
-                        seen_row_ids.add(row_id)
-                        scores = (row.get("fit_score"), row.get("diversity_score"))
-                        if any(
-                            isinstance(value, bool)
-                            or not isinstance(value, (int, float))
-                            or not isfinite(float(value))
-                            or not 0 <= float(value) <= 10
-                            for value in scores
-                        ):
-                            continue
-                        if _llm_schema_placeholder_leaked(row):
-                            continue
-                        row_reason_zh = row.get("reason_zh") or row.get("reason")
-                        if _final_llm_cache_reason_unusable(row_reason_zh) or _recommendation_reason_unusable(row.get("reason_en"), zh=False):
-                            continue
-                        assigned_items.add(id(item))
-                        item.pop("llm_retry_exhausted", None)
-                        item.pop("llm_retry_reason", None)
-                        item.pop("llm_retry_last_error", None)
-                        item["category"] = str(row.get("category") or item.get("category") or "")
-                        item["fit_score"] = _as_float(row.get("fit_score"), item.get("fit_score") or 0)
-                        item["diversity_score"] = _as_float(row.get("diversity_score"), item.get("diversity_score") or 0)
-                        item["score"] = _combined_score(item["fit_score"], item["diversity_score"])
-                        if "recommend_for_deep_reading" in row:
-                            item["recommend_for_deep_reading"] = bool(row.get("recommend_for_deep_reading"))
-                        if "recommended_for_deep_reading" in row:
-                            item["recommend_for_deep_reading"] = bool(row.get("recommended_for_deep_reading"))
-                        if "supports_complete_requested_route" in row:
-                            item["supports_complete_requested_route"] = bool(row.get("supports_complete_requested_route"))
-                        hit_source = row.get("hit_directions_zh") or row.get("hit_directions")
-                        _set_hit_direction_language_fields(
-                            item,
-                            hit_source,
-                            zh_value=row.get("hit_directions_zh"),
-                            en_value=row.get("hit_directions_en"),
-                        )
-                        fit_explanation_zh = str(row.get("fit_explanation_zh") or row.get("fit_explanation") or item.get("fit_explanation_zh") or item.get("fit_explanation") or "")
-                        fit_explanation_en = str(row.get("fit_explanation_en") or item.get("fit_explanation_en") or "")
-                        item["fit_explanation_zh"] = fit_explanation_zh
-                        item["fit_explanation_en"] = fit_explanation_en
-                        item["fit_explanation"] = str(row.get("fit_explanation") or fit_explanation_zh or fit_explanation_en or item.get("fit_explanation") or "")
-                        reason_zh = str(row.get("reason_zh") or row.get("reason") or item.get("reason_zh") or item.get("reason") or "")
-                        reason_en = str(row.get("reason_en") or item.get("reason_en") or "")
-                        item["reason_zh"] = reason_zh
-                        item["reason_en"] = reason_en
-                        item["reason"] = str(row.get("reason") or reason_zh or reason_en or item.get("reason") or "")
-                        item["reason_source"] = "llm abstract evaluation"
-                        if item.get("classification_source") != "official":
-                            item["classification_source"] = "llm_inferred"
-                        _apply_relevance_guard(item)
-                        _apply_llm_topic_evidence(item, row, interest)
-                        _apply_quality_bonus(item)
-            if allow_missing_retry:
-                missing = [item for item in batch if id(item) not in assigned_items and item.get("reason_source") != "llm abstract evaluation"]
-                if missing:
-                    log(f"{source_name}: batch {batch_index}/{len(prompt_batches)} omitted {len(missing)} items; {retry_policy_text()}")
-                    queue_single_retry(batch_index, missing, "omitted-item")
+                raw_rows = data.get("evaluations")
+                if raw_rows is None:
+                    raw_rows = data.get("selected")
+                if isinstance(raw_rows, dict):
+                    raw_rows = [raw_rows]
+                if isinstance(raw_rows, list):
+                    rows = [_normalize_final_scoring_response_row(row) for row in raw_rows if isinstance(row, dict)]
+            rows_by_id: dict[str, list[dict]] = {alias: [] for alias in by_id}
+            for row in rows:
+                row_id = str(row.get("id") or "")
+                if row_id in rows_by_id:
+                    rows_by_id[row_id].append(row)
+            unresolved: list[dict] = []
+            for row_id, item in by_id.items():
+                matching_rows = rows_by_id[row_id]
+                if len(matching_rows) != 1:
+                    reason = "duplicate-id" if len(matching_rows) > 1 else "omitted-item"
+                    note_rejection(reason)
+                    item["llm_repair_reason"] = reason
+                    unresolved.append(item)
+                    continue
+                row = matching_rows[0]
+                scores = (row.get("fit_score"), row.get("diversity_score"))
+                try:
+                    scores_valid = all(
+                        not isinstance(value, bool)
+                        and value not in (None, "")
+                        and isfinite(float(value))
+                        and 0 <= float(value) <= 10
+                        for value in scores
+                    )
+                except (TypeError, ValueError):
+                    scores_valid = False
+                if not scores_valid:
+                    note_rejection("invalid-score")
+                    item["llm_repair_reason"] = "invalid-score"
+                    unresolved.append(item)
+                    continue
+                schema_placeholder = _llm_schema_placeholder_leaked(row)
 
-        completed = 0
-        request_spacing_sec = max(0.0, float(os.environ.get("LLM_REQUEST_SPACING_SEC", "1.5" if _rate_limited_llm_provider(config) else "0") or 0))
-        if workers == 1:
-            for batch_index, (batch, prompt) in enumerate(zip(prompt_batches, prompts, strict=False), 1):
-                _raise_if_cancelled(should_cancel)
-                progress("abstract_scoring", completed, len(prompt_batches), f"{source_name}: scoring batch {batch_index}/{len(prompt_batches)}")
-                log(f"{source_name}: scoring batch {batch_index}/{len(prompt_batches)} started")
-                if request_spacing_sec and batch_index > 1:
-                    time.sleep(request_spacing_sec)
-                result = _json_or_error_wall_timeout(llm, prompt, temperature=scoring_temperature, max_tokens=scoring_max_tokens, timeout_sec=scoring_wall_timeout)
-                apply_result(batch_index, batch, result)
-                completed += 1
-                log(f"{source_name}: scoring batch {batch_index}/{len(prompt_batches)} completed; ok={bool(result.get('ok'))}")
-                scored_count = score_cache_hits + sum(1 for item in scoring_items if str(item.get("reason_source") or "") == "llm abstract evaluation")
-                _emit_progress(
-                    progress,
-                    "abstract_scoring",
-                    completed,
-                    len(prompt_batches),
-                    f"{source_name}: scored batch {batch_index}/{len(prompt_batches)} with {workers} workers",
-                    count_updates={"evaluated_candidates": len(evaluated), "abstract_scored_papers": scored_count, "llm_scored_candidates": scored_count},
+                item.pop("llm_retry_exhausted", None)
+                item.pop("llm_retry_reason", None)
+                item.pop("llm_retry_last_error", None)
+                item.pop("llm_single_request_unresolved", None)
+                item.pop("llm_batch_repair_exhausted", None)
+                item["category"] = _llm_method_topic_category(
+                    row.get("category"),
+                    fallback=item.get("category"),
+                    title=item.get("title"),
+                    abstract=item.get("abstract"),
                 )
-        else:
-            last_parallel_log = 0.0
-            executor = ThreadPoolExecutor(max_workers=workers)
-            futures = {executor.submit(_json_or_error_wall_timeout, llm, prompt, temperature=scoring_temperature, max_tokens=scoring_max_tokens, timeout_sec=scoring_wall_timeout): (idx, batch) for idx, (batch, prompt) in enumerate(zip(prompt_batches, prompts, strict=False), 1)}
-            pending = set(futures)
-            try:
-                while pending:
+                item["fit_score"] = _as_float(row.get("fit_score"), item.get("fit_score") or 0)
+                item["diversity_score"] = _as_float(row.get("diversity_score"), item.get("diversity_score") or 0)
+                item["score"] = _combined_score(item["fit_score"], item["diversity_score"])
+                if "recommend_for_deep_reading" in row:
+                    item["recommend_for_deep_reading"] = bool(row.get("recommend_for_deep_reading"))
+                if "recommended_for_deep_reading" in row:
+                    item["recommend_for_deep_reading"] = bool(row.get("recommended_for_deep_reading"))
+                if "supports_complete_requested_route" in row:
+                    item["supports_complete_requested_route"] = bool(row.get("supports_complete_requested_route"))
+                hit_source = row.get("hit_directions_zh") or row.get("hit_directions")
+                _set_hit_direction_language_fields(
+                    item,
+                    hit_source,
+                    zh_value=row.get("hit_directions_zh"),
+                    en_value=row.get("hit_directions_en"),
+                )
+                fit_explanation_zh = str(row.get("fit_explanation_zh") or row.get("fit_explanation") or item.get("fit_explanation_zh") or item.get("fit_explanation") or "")
+                fit_explanation_en = str(row.get("fit_explanation_en") or item.get("fit_explanation_en") or "")
+                item["fit_explanation_zh"] = fit_explanation_zh
+                item["fit_explanation_en"] = fit_explanation_en
+                item["fit_explanation"] = str(row.get("fit_explanation") or fit_explanation_zh or fit_explanation_en or item.get("fit_explanation") or "")
+                reason_zh = str(row.get("reason_zh") or row.get("reason") or item.get("reason_zh") or item.get("reason") or "")
+                reason_en = str(row.get("reason_en") or item.get("reason_en") or "")
+                item["reason_zh"] = reason_zh
+                item["reason_en"] = reason_en
+                item["reason"] = str(row.get("reason") or reason_zh or reason_en or item.get("reason") or "")
+                item["reason_source"] = "llm abstract evaluation"
+                item["llm_repair_attempts"] = repair_round
+                if item.get("classification_source") != "official":
+                    item["classification_source"] = "llm_inferred"
+                _apply_relevance_guard(item)
+                _apply_llm_topic_evidence(item, row, interest)
+                _apply_quality_bonus(item)
+
+                reason_invalid = (
+                    schema_placeholder
+                    or _final_llm_cache_reason_unusable(reason_zh)
+                    or _recommendation_reason_unusable(reason_en, zh=False)
+                )
+                if reason_invalid:
+                    repair_reason = "schema-placeholder" if schema_placeholder else "invalid-recommendation-reason"
+                    note_rejection(repair_reason)
+                    item["reason_quality_invalid"] = True
+                    item["llm_repair_reason"] = repair_reason
+                    unresolved.append(item)
+                else:
+                    item.pop("reason_quality_invalid", None)
+                    item.pop("llm_repair_reason", None)
+                    item.pop("llm_reason_repair_exhausted", None)
+            if unresolved:
+                log(f"{source_name}: {batch_label} queued {len(unresolved)}/{len(batch)} rows for bounded batched repair")
+            return unresolved
+
+        request_spacing_sec = max(0.0, float(os.environ.get("LLM_REQUEST_SPACING_SEC", "1.5" if _rate_limited_llm_provider(config) else "0") or 0))
+        request_serial = 0
+
+        def execute_request_round(batches: list[list[dict]], round_index: int, slot_base: int) -> list[dict]:
+            nonlocal request_serial
+            if not batches:
+                return []
+            round_kind = "primary" if round_index == 0 else f"repair round {round_index}/{repair_attempts}"
+            request_rows = [
+                (
+                    batch_index,
+                    batch,
+                    build_final_scoring_prompt(batch, f"{round_kind}, batch {batch_index}/{len(batches)}"),
+                )
+                for batch_index, batch in enumerate(batches, 1)
+            ]
+            unresolved_rows: list[dict] = []
+            completed = 0
+            if workers == 1:
+                for batch_index, batch, prompt_text in request_rows:
                     _raise_if_cancelled(should_cancel)
-                    done, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
-                    if not done:
-                        continue
-                    for future in done:
-                        _raise_if_cancelled(should_cancel)
-                        batch_index, batch = futures[future]
-                        try:
-                            result = future.result()
-                        except Exception as exc:
-                            result = {"ok": False, "data": None, "error": str(exc)}
-                        apply_result(batch_index, batch, result)
-                        completed += 1
-                        now_progress = time.monotonic()
-                        if completed == 1 or completed == len(prompt_batches) or completed % 25 == 0 or now_progress - last_parallel_log >= 15:
-                            log(f"{source_name}: LLM scoring progress {completed}/{len(prompt_batches)} batches complete; latest completed batch {batch_index}; workers={workers}")
-                            last_parallel_log = now_progress
-                        scored_count = score_cache_hits + sum(1 for item in scoring_items if str(item.get("reason_source") or "") == "llm abstract evaluation")
-                        _emit_progress(
-                            progress,
-                            "abstract_scoring",
-                            completed,
-                            len(prompt_batches),
-                            f"{source_name}: scored batch {batch_index}/{len(prompt_batches)} with {workers} workers",
-                            count_updates={"evaluated_candidates": len(evaluated), "abstract_scored_papers": scored_count, "llm_scored_candidates": scored_count},
-                        )
-            except JobCancelled:
-                for future in pending:
-                    future.cancel()
-                executor.shutdown(wait=False, cancel_futures=True)
-                raise
+                    request_serial += 1
+                    if request_spacing_sec and request_serial > 1:
+                        time.sleep(request_spacing_sec)
+                    log(f"{source_name}: {round_kind} batch {batch_index}/{len(batches)} started with {len(batch)} rows")
+                    result = _json_or_error_single_request(llm, prompt_text, temperature=scoring_temperature, max_tokens=scoring_max_tokens)
+                    unresolved_rows.extend(apply_result(f"{round_kind} batch {batch_index}/{len(batches)}", batch, result, round_index))
+                    completed += 1
+                    emit_scoring_progress(
+                        slot_base + completed,
+                        f"{source_name}: {round_kind} request {batch_index}/{len(batches)} complete",
+                    )
             else:
-                executor.shutdown(wait=True)
-        if pending_single_retries:
-            total_retry_items = sum(len(items_to_retry) for _batch_index, items_to_retry, _reason in pending_single_retries)
-            log(f"{source_name}: running bounded single-item retries for {total_retry_items} items from {len(pending_single_retries)} batches")
-            for retry_index, (batch_index, items_to_retry, reason) in enumerate(pending_single_retries, 1):
-                _raise_if_cancelled(should_cancel)
-                progress("abstract_scoring_retry", retry_index - 1, len(pending_single_retries), f"{source_name}: retrying batch {batch_index}/{len(prompt_batches)} {reason}")
-                recovered = retry_items_singly(batch_index, items_to_retry, reason)
-                log(f"{source_name}: batch {batch_index}/{len(prompt_batches)} single-item retry recovered {recovered}/{len(items_to_retry)} after {reason}")
-            progress("abstract_scoring_retry", len(pending_single_retries), len(pending_single_retries), f"{source_name}: bounded single-item retries complete")
+                executor = ThreadPoolExecutor(max_workers=workers)
+                futures = {
+                    executor.submit(_json_or_error_single_request, llm, prompt_text, temperature=scoring_temperature, max_tokens=scoring_max_tokens): (batch_index, batch)
+                    for batch_index, batch, prompt_text in request_rows
+                }
+                pending_futures = set(futures)
+                try:
+                    while pending_futures:
+                        _raise_if_cancelled(should_cancel)
+                        done, pending_futures = wait(pending_futures, timeout=1.0, return_when=FIRST_COMPLETED)
+                        if not done:
+                            continue
+                        for future in done:
+                            batch_index, batch = futures[future]
+                            try:
+                                result = future.result()
+                            except Exception as exc:
+                                result = {"ok": False, "data": None, "error": str(exc)}
+                            unresolved_rows.extend(apply_result(f"{round_kind} batch {batch_index}/{len(batches)}", batch, result, round_index))
+                            completed += 1
+                            emit_scoring_progress(
+                                slot_base + completed,
+                                f"{source_name}: {round_kind} requests {completed}/{len(batches)} complete with {workers} workers",
+                            )
+                except JobCancelled:
+                    for future in pending_futures:
+                        future.cancel()
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise
+                else:
+                    executor.shutdown(wait=True)
+            seen_pending: set[int] = set()
+            unique_unresolved: list[dict] = []
+            for item in unresolved_rows:
+                if id(item) in seen_pending:
+                    continue
+                seen_pending.add(id(item))
+                unique_unresolved.append(item)
+            return unique_unresolved
+
+        pending_repair = execute_request_round(primary_batches, 0, 0)
+        for repair_round in range(1, repair_attempts + 1):
+            if not pending_repair:
+                break
+            repair_batches = list(_chunks(pending_repair, scoring_batch_size))
+            slot_base = primary_batch_count * repair_round
+            log(f"{source_name}: starting batched repair round {repair_round}/{repair_attempts} for {len(pending_repair)} rows in {len(repair_batches)} requests")
+            pending_repair = execute_request_round(repair_batches, repair_round, slot_base)
+            reserved_round_end = min(request_slot_total, primary_batch_count * (repair_round + 1))
+            emit_scoring_progress(reserved_round_end, f"{source_name}: repair round {repair_round}/{repair_attempts} complete")
+
+        score_unresolved = [item for item in pending_repair if str(item.get("reason_source") or "") != "llm abstract evaluation"]
+        reason_unresolved = [item for item in pending_repair if str(item.get("reason_source") or "") == "llm abstract evaluation"]
+        mark_items_unscored(score_unresolved)
+        for item in reason_unresolved:
+            item["reason_quality_invalid"] = True
+            item["llm_reason_repair_exhausted"] = True
+            item["llm_repair_attempts"] = repair_attempts
+            item.pop("llm_retry_exhausted", None)
+            item.pop("llm_retry_reason", None)
+            item.pop("llm_single_request_unresolved", None)
+        if reason_unresolved:
+            log(f"{source_name}: {len(reason_unresolved)} rows retained valid LLM scores but failed recommendation-reason quality after batched repair; recommendation gate will exclude them")
+        emit_scoring_progress(request_slot_total, f"{source_name}: global final scoring and bounded batched repair complete")
+        if rejection_counts:
+            log(f"{source_name}: final scoring rejection/repair diagnostics {json.dumps(rejection_counts, ensure_ascii=False, sort_keys=True)}")
         if cache_path is not None and score_cache_keys:
             stored_cache_entries = _store_final_llm_score_cache_entries(score_cache, score_cache_keys, scoring_items, config)
             if stored_cache_entries:
@@ -5930,8 +6235,6 @@ Scoring rules: judge this item independently from its complete real title and ab
                 log(f"{source_name}: stored {stored_cache_entries} stable final LLM scores for reuse")
         if hasattr(llm, "timeout_sec"):
             llm.timeout_sec = original_timeout
-        if original_retries is not None and hasattr(llm, "retries"):
-            llm.retries = original_retries
     _apply_mock_final_scoring(evaluated, config, interest)
     for item in evaluated:
         _normalize_llm_supported_text_fields(item)
@@ -6181,11 +6484,15 @@ def _has_internal_find_public_text(text: object, *, zh: bool = True) -> bool:
     markers = _INTERNAL_FIND_PUBLIC_TEXT_MARKERS_ZH if zh else _INTERNAL_FIND_PUBLIC_TEXT_MARKERS_EN
     lowered = raw.lower()
     for marker in markers:
-        if marker == "Find":
-            if re.search(r"\bFind\b", raw):
+        marker_text = str(marker)
+        # `Find` is an internal stage name only when the model preserves the
+        # product's capitalization.  Lower-casing it made normal prose such as
+        # "we find" and "the findings" fail the recommendation contract.
+        if marker_text == "Find":
+            if re.search(r"(?<![A-Za-z0-9_])Find(?![A-Za-z0-9_])", raw):
                 return True
             continue
-        if str(marker).lower() in lowered:
+        if marker_text.lower() in lowered:
             return True
     return False
 
@@ -6337,9 +6644,10 @@ def _ensure_recommendation_readability(item: dict, config: AppConfig | None = No
     for key in ("fit_explanation_en", "recommendation_note_en"):
         if item.get(key):
             item[key] = _sanitize_public_recommendation_text(item.get(key), zh=False)
+    had_persistent_quality_failure = bool(item.get("reason_quality_invalid"))
     if _recommendation_reason_unusable(item.get("reason_zh") or item.get("reason"), zh=True) or _recommendation_reason_unusable(item.get("reason_en"), zh=False):
         item["reason_quality_invalid"] = True
-    else:
+    elif not had_persistent_quality_failure:
         item.pop("reason_quality_invalid", None)
     item.setdefault("recommendation_audit_role", "boundary_or_borrowing" if boundary else (role or "direct_or_foundation"))
     return item
@@ -6367,7 +6675,7 @@ def _recommendation_quality_audit(items: list[dict]) -> dict:
         "missing_real_abstract_ids": missing_real_abstract[:50],
         "missing_chinese_abstract_ids": missing_zh_abstract[:50],
         "short_or_negative_reason_ids": short_reason[:50],
-        "policy": "User-facing recommendations must come from the final title+abstract LLM score ranking, show a real abstract, directly support a current topic route, complete Chinese abstracts before marking translation completed, and preserve the LLM's natural multi-sentence recommendation reason covering topic fit, help to the research, and transferable method/data/protocol/theory/evaluation value. Reader-only full-text instructions must stay in reader_instruction_* fields.",
+        "policy": "User-facing recommendations must come from the final title+abstract LLM score ranking, show a real abstract, complete Chinese abstracts before marking translation completed, and preserve the LLM's natural multi-sentence recommendation reason covering topic fit, help to the research, and transferable method/data/protocol/theory/evaluation value. Topic/debug fields remain audit explanations and cannot create a second recommendation gate. Reader-only full-text instructions must stay in reader_instruction_* fields.",
     }
 
 
@@ -6512,20 +6820,19 @@ def _find_recommendation_invalid_reason(item: dict, config: AppConfig | None) ->
     Find recommends papers for deep reading by one path only: the title screen
     supplies candidates, detail enrichment supplies a real abstract, the final
     title+abstract LLM judge scores them, and the UI/Read pool takes the top-N
-    ranked rows whose title+abstract directly support a current topic route.
+    ranked rows. Topic-evidence fields remain available for audit, but do not
+    create a second eligibility or score gate after the final LLM ranking.
     """
     if not _has_final_title_abstract_llm_scoring(item):
         return "missing_final_title_abstract_llm_scoring"
     if item.get("llm_final_scoring_skipped") or item.get("llm_retry_exhausted"):
         return str(item.get("llm_final_scoring_skip_reason") or item.get("llm_retry_reason") or "final_llm_scoring_unavailable")
+    if item.get("reason_quality_invalid"):
+        return str(item.get("llm_repair_reason") or "invalid_llm_response_text_quality")
     if not _has_real_abstract(item):
         return "missing_real_abstract"
     if item.get("abstract_fetch_failed"):
         return str(item.get("abstract_fetch_failed_reason") or "abstract_fetch_failed")
-    if item.get("not_positive_support"):
-        return str(item.get("strong_gate_reject_reason") or "not_positive_support")
-    if item.get("foundation_demoted_from_strong"):
-        return "foundation_demoted_from_strong"
     score_value = item.get("llm_fit_score")
     if score_value in (None, ""):
         score_value = item.get("fit_score")
@@ -6534,21 +6841,14 @@ def _find_recommendation_invalid_reason(item: dict, config: AppConfig | None) ->
     try:
         if not isfinite(float(score_value)):
             return "invalid_final_title_abstract_llm_fit_score"
-        if float(score_value) <= 2.0:
-            return "final_llm_score_marks_unrelated"
     except (TypeError, ValueError):
         return "invalid_final_title_abstract_llm_fit_score"
-    if not _has_strong_topic_evidence(item):
-        return _strict_strong_invalid_reason(item) or "unsupported_topic_evidence"
-    if str(item.get("evidence_role") or "").lower() == "foundation_borrowing":
-        return "background_or_foundation_not_user_visible_recommendation"
-    strict_reason = _strict_strong_invalid_reason(item)
-    if strict_reason:
-        return strict_reason
     if _recommendation_reason_unusable(item.get("reason_zh") or item.get("reason"), zh=True):
         return "invalid_chinese_recommendation_reason"
     if _recommendation_reason_unusable(item.get("reason_en"), zh=False):
         return "invalid_english_recommendation_reason"
+    # Topic evidence, route guards, diversity, and source-quality signals are
+    # ranking/audit data only once a real abstract has a valid final LLM score.
     return ""
 
 
@@ -7369,6 +7669,7 @@ def _run_diagnostics(artifacts: dict) -> dict:
     llm_scored_count = sum(1 for item in evaluated if str(item.get("reason_source") or "") == "llm abstract evaluation")
     llm_skipped_count = sum(1 for item in evaluated if item.get("llm_final_scoring_skipped"))
     llm_retry_exhausted_count = sum(1 for item in evaluated if item.get("llm_retry_exhausted"))
+    reason_quality_invalid_count = sum(1 for item in evaluated if item.get("reason_quality_invalid"))
     abstract_fetch_failed_count = sum(1 for item in evaluated if item.get("abstract_fetch_failed"))
     local_fallback_count = sum(
         1
@@ -7431,6 +7732,7 @@ def _run_diagnostics(artifacts: dict) -> dict:
         "detail_fetched_candidates": len(evaluated),
         "venue_detail_fetched_candidates": len(evaluated),
         "llm_scored_candidates": llm_scored_count,
+        "llm_reason_quality_invalid_candidates": reason_quality_invalid_count,
         "recommended_papers": len(strong),
         "abstract_fetch_failed_candidates": abstract_fetch_failed_count,
         "category_scan_reports": len(category_rows),
@@ -7452,7 +7754,19 @@ def _run_diagnostics(artifacts: dict) -> dict:
             warnings.append({
                 "code": "llm_scoring_fallback_failures",
                 "severity": "warning",
-                "message": f"{llm_retry_exhausted_count} candidates failed final LLM scoring after retries and remain excluded from user-visible Find recommendations. Inspect job logs for JSON parse errors/timeouts.",
+                "message": f"{llm_retry_exhausted_count} candidates did not yield a valid numeric scoring row after bounded batched repair and remain excluded from user-visible Find recommendations. Inspect job logs for structured rejection counts, JSON parse errors, and service failures.",
+            })
+        if reason_quality_invalid_count:
+            warnings.append({
+                "code": "llm_reason_quality_repair_exhausted",
+                "severity": "warning",
+                "message": f"{reason_quality_invalid_count} candidates retained valid LLM scores but their recommendation reasons remained invalid after bounded batched repair; they are counted as scored for audit but excluded from user-visible recommendations.",
+            })
+        if int(scoring_runtime.get("title_abstract_scoring_selected_count") or 0) > 0 and llm_scored_count == 0:
+            warnings.append({
+                "code": "final_llm_zero_valid_scores",
+                "severity": "error",
+                "message": "The final title+abstract scoring pool was non-empty, but no candidate produced a valid numeric LLM score after bounded batched repair. The run artifacts remain available for diagnosis, but a zero-score result must not be interpreted as a successful recommendation evaluation.",
             })
         if abstract_fetch_failed_count:
             warnings.append({
@@ -7469,7 +7783,7 @@ def _run_diagnostics(artifacts: dict) -> dict:
         warnings.append({
             "code": "recommendation_shortfall",
             "severity": "warning",
-            "message": f"Only {recommendation_actual}/{recommendation_target} unique candidates with real abstracts, valid final LLM scores, and direct topic-route evidence were available. Find does not fill the requested count with unsupported rows; inspect scoring coverage, abstract enrichment, topic evidence, and duplicate removal.",
+            "message": f"Only {recommendation_actual}/{recommendation_target} unique candidates with real abstracts, valid final LLM scores, and usable recommendation reasons were available. Inspect scoring coverage, abstract enrichment, reason repair, and duplicate removal.",
         })
     for item in failed_sources:
         message = str(item.get("message") or "")
@@ -8083,11 +8397,8 @@ def run_find(
     llm_live = _llm_live_gate(llm)
     if llm.enabled and not llm_live.get("ok"):
         log("LLM live gate failed before Find scoring: " + str(llm_live.get("error") or llm_live.get("reason") or "unknown"))
-    active_llm = (
-        llm
-        if (not llm.enabled or llm_live.get("ok"))
-        else LLMClient(config.model_copy(update={"api_key": ""}), "find")
-    )
+    llm_live_gate_fallback = _llm_live_gate_requires_fallback(llm, llm_live)
+    active_llm = LLMClient(config.model_copy(update={"api_key": ""}), "find") if llm_live_gate_fallback else llm
     cached_stage0_profile = _load_stage0_profile_cache(config)
     if cached_stage0_profile:
         stage0_profile = cached_stage0_profile
@@ -8112,7 +8423,7 @@ def run_find(
     }
     _write_run_json(run_dir, "intermediate/stage0_profile.json", stage0_result)
     log("Stage 0 profile normalization complete")
-    if llm.enabled and not llm_live.get("ok") and _is_fatal_llm_configuration_error(llm_live.get("error") or llm_live.get("reason")):
+    if llm_live_gate_fallback:
         warning = _fatal_llm_configuration_message(llm_live.get("error") or llm_live.get("reason"), "Find live gate")
         log(warning + "; continuing with local fallback scoring")
     catalog = catalog_by_id()
@@ -8440,7 +8751,7 @@ def run_find(
     venue_papers = _dedupe_items(venue_papers)
     _persist_find_progress("venue_scan_complete")
 
-    if llm.enabled and not llm_live.get("ok"):
+    if llm_live_gate_fallback:
         source_status.append(_source_status("llm_final_scoring", False, 0, "LLM live gate failed; continuing with local fallback scoring where real title/abstract metadata is available. " + str(llm_live.get("error") or llm_live.get("reason") or "unknown"), limited=True))
     latest_released_venue = _latest_released_venue_context(venue_health_report)
     venue_title_candidates = [item for _source, items, sink in deferred_scoring_groups if sink == "venue" for item in items]
@@ -8807,6 +9118,7 @@ def run_find(
         log=log,
     )
     title_abstract_scoring_selected_count = sum(len(items) for _source, items, _sink in deferred_scoring_groups)
+    prepared_scoring_groups: list[tuple[str, list[dict], str]] = []
     for source_name, source_items, sink_name in deferred_scoring_groups:
         _raise_if_cancelled(should_cancel)
         if sink_name == "venue":
@@ -8865,16 +9177,24 @@ def run_find(
                     break
             source_items = [attach_quality_metadata(item) for item in source_items]
             _progress(detail_phase, len(source_items), max(1, len(source_items)), f"{display_name}: detail enrichment complete")
-        scored_items = _evaluate_items(source_items, effective_config, scoring_llm, source_name, log, should_cancel, _progress)
+        prepared_scoring_groups.append((source_name, list(source_items), sink_name))
+
+    all_scoring_items = [item for _source_name, source_items, _sink_name in prepared_scoring_groups for item in source_items]
+    scored_items = _evaluate_items(all_scoring_items, effective_config, scoring_llm, "all sources", log, should_cancel, _progress)
+    scored_ids_by_sink: dict[str, set[int]] = {}
+    for _source_name, source_items, sink_name in prepared_scoring_groups:
+        scored_ids_by_sink.setdefault(sink_name, set()).update(id(item) for item in source_items)
+    for sink_name, sink_item_ids in scored_ids_by_sink.items():
+        sink_scored_items = [item for item in scored_items if id(item) in sink_item_ids]
         if sink_name == "huggingface":
-            hf_items = scored_items[: config.max_recommended_papers]
+            hf_items = sink_scored_items[: config.max_recommended_papers]
             evaluated_candidates.extend(hf_items)
         elif sink_name == "github":
-            github_items = scored_items[: config.max_recommended_papers]
+            github_items = sink_scored_items[: config.max_recommended_papers]
             evaluated_candidates.extend(github_items)
         else:
-            evaluated_candidates.extend(scored_items)
-        _persist_find_progress(f"{source_name}_llm_scoring_complete")
+            evaluated_candidates.extend(sink_scored_items)
+    _persist_find_progress("all_sources_llm_scoring_complete")
 
     venue_papers = _dedupe_items(venue_papers)
     if venue_year_groups:
@@ -8891,7 +9211,7 @@ def run_find(
     _normalize_presentation_fields(evaluated_candidates)
     _normalize_presentation_fields(venue_papers)
     source_count = _selection_source_count(request.selection)
-    llm_fallback_mode = bool(llm.enabled and not llm_live.get("ok"))
+    llm_fallback_mode = llm_live_gate_fallback
     recommendation_config = effective_config.model_copy(update={"api_key": ""}) if llm_fallback_mode else effective_config
     article_items = _recommended(evaluated_candidates, recommendation_config, source_count=source_count)
     if llm_fallback_mode:
@@ -8967,7 +9287,7 @@ def run_find(
                 "llm": llm.summary(),
                 "abstract_translation_status": translation_status,
                 "llm_live_gate": llm_live,
-                "llm_final_scoring_available": bool((not llm.enabled) or llm_live.get("ok")),
+                "llm_final_scoring_available": not llm_live_gate_fallback,
                 "llm_fallback_mode": "local_profile_scoring" if llm_fallback_mode else "",
             },
             "huggingface": hf_items,
@@ -8996,10 +9316,15 @@ def run_find(
             scoring_runtime["source_integrity_gate"] = source_integrity_gate
             artifacts["scoring_runtime"] = scoring_runtime
         if llm.enabled and not llm_live.get("ok"):
+            live_gate_message = (
+                "LLM live gate failed with a fatal configuration error; Find used local fallback scoring where metadata allowed it. "
+                if llm_live_gate_fallback
+                else "LLM live gate had a transient failure; downstream scoring remained enabled and used its normal batch repair policy. "
+            )
             artifacts["diagnostics"].setdefault("warnings", []).append({
                 "code": "llm_live_gate_failed",
                 "severity": "warning",
-                "message": "LLM live gate failed; normal Find continued with local fallback scoring where metadata allowed it. " + str(llm_live.get("error") or llm_live.get("reason") or "unknown"),
+                "message": live_gate_message + str(llm_live.get("error") or llm_live.get("reason") or "unknown"),
             })
         artifacts["survey_stats"] = artifacts["diagnostics"].get("survey_stats", {})
         return artifacts

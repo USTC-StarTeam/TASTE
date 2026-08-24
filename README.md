@@ -59,7 +59,7 @@ npm --version
 
 ### 4. 安装并登录 Claude Code
 
-TASTE 不配置 Claude Code 账号/API，也不会覆盖用户已有 Claude Code 设置。按 Claude Code 官方文档安装并登录即可：<https://docs.anthropic.com/en/docs/claude-code/setup>。
+按 Claude Code 官方文档安装并登录即可：<https://docs.anthropic.com/en/docs/claude-code/setup>。
 
 常用 npm 安装方式：
 
@@ -80,7 +80,7 @@ conda activate taste
 python framework/scripts/main.py
 ```
 
-启动脚本使用默认地址 `127.0.0.1:8879`。缺少前端 `dist/` 时会执行构建；如果 `node_modules/` 也不存在，会先运行 `npm install`。需要改端口时只设置端口变量：
+启动脚本使用默认地址 `127.0.0.1:8879`。需要改端口时只设置端口变量：
 
 ```bash
 WEB_PORT=<port> python framework/scripts/main.py
@@ -116,9 +116,27 @@ http://127.0.0.1:8879
 | 公开模板 | `framework/resources/templates/project.json` | 给新项目提供默认结构，不含真实密钥和真实项目内容。 |
 | 本机兼容配置 | `framework/.runtime/.config.json` | 保存邮件配置和兼容副本；Find 参数以当前项目配置为准。 |
 | 本机 LLM 私有配置 | `modules/finding/config/llm.local.json` 或 `FINDING_LLM_CONFIG` 指定路径 | 保存 Find LLM 配置；默认文件被忽略。API key 不写入项目文件，自定义路径也应放在 Git 忽略范围内。 |
-| Read 本机私有配置 | `modules/reading/config/read.env` | 保存 Reading 实际使用的 OpenReview 登录信息和全文索引联系邮箱；默认文件被忽略。 |
+| Read 本机私有配置 | `modules/reading/config/read.env` | 由用户自行创建并写入自己的 OpenReview 登录信息。 |
 | 具体科研项目 | `projects/<project>/` | 保存 `project.json`、`config/finding.json`、状态、运行记录、产物、仓库、数据和论文草稿。 |
 | 前端静态产物 | `web/frontend/client/dist/` | 由启动脚本或 `npm run build` 生成，网页服务读取这里的文件。 |
+
+### 配置 Read 的 OpenReview 账户
+
+1. 在 <https://openreview.net/signup> 注册账户，并完成邮件确认和 Profile 激活。
+2. 在仓库根目录创建私有配置文件：
+
+```bash
+mkdir -p modules/reading/config
+touch modules/reading/config/read.env
+chmod 600 modules/reading/config/read.env
+```
+
+3. 将自己的 OpenReview 登录邮箱和密码写入该文件：
+
+```dotenv
+OPENREVIEW_USERNAME=your_openreview_email@example.com
+OPENREVIEW_PASSWORD=your_openreview_password
+```
 
 ### 左侧栏配置
 
@@ -196,7 +214,7 @@ Find 页面同时展示来源状态、调研验收计数和当前 run 产物。�
 
 ### Read：精读最终排名前 N 篇
 
-网页中的 Read 由 Framework 按项目配置把当前 Find 最终排名前 N 篇转换成通用论文输入，再调用 Reading 获取同篇全文并生成精读；模块默认 N=50，Find 完成后 Framework 默认更新为推荐数的两倍，用户可按项目修改。全部逐篇产物完成后，Reading 使用 Claude Code 给出匹配度和可借鉴性并按两项均分重排。Find 已提供的 URL、PDF、DOI、OpenReview ID、作者和来源会用于加快全文定位；缺少这些字段时仍可从标题开始查找。需要配置 OpenReview 登录或开放全文索引时，使用 `modules/reading/config/read.env`，具体变量见 [Reading 使用说明](modules/reading/README.md)。Reading 命令行也可独立接收标题或论文列表，不读取项目或 Find 状态。页面只展示当前 Find 对应的精读状态，避免把历史 run 的内容混入当前项目判断。
+网页中的 Read 由 Framework 按项目配置把当前 Find 最终排名前 N 篇转换成通用论文输入，再调用 Reading 获取同篇全文并生成精读；模块默认 N=50，Find 完成后 Framework 默认更新为推荐数的两倍，用户可按项目修改。全部逐篇产物完成后，Reading 使用 Claude Code 给出匹配度和可借鉴性并按两项均分重排。Find 已提供的 URL、PDF、DOI、OpenReview ID、作者和来源会用于加快全文定位；缺少这些字段时仍可从标题开始查找。需要配置 OpenReview 登录或开放全文索引时，按上面的“Read 私有服务配置”自行创建 `modules/reading/config/read.env`。Reading 命令行也可独立接收标题或论文列表，不读取项目或 Find 状态。页面只展示当前 Find 对应的精读状态，避免把历史 run 的内容混入当前项目判断。
 
 ### Ideas：生成和筛选研究想法
 

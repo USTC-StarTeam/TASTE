@@ -455,6 +455,7 @@ def build_reading_score_prompt(
     articles: list[dict[str, Any]],
     run_path: Path,
     output_path: Path,
+    prompt_too_long_recovery: bool = False,
 ) -> str:
     try:
         output_path_run = output_path.resolve(strict=False).relative_to(run_path.resolve(strict=False)).as_posix()
@@ -462,6 +463,11 @@ def build_reading_score_prompt(
         output_path_run = relative_to_reading(output_path)
     context_json = json.dumps(research_context, ensure_ascii=False, indent=2)
     articles_json = json.dumps(articles, ensure_ascii=False, indent=2)
+    recovery_rule = (
+        "- 上一次评分请求因一次注入过多精读文本而失败；本次必须严格串行读取，不能重复相同的并行读取方式。\n"
+        if prompt_too_long_recovery
+        else ""
+    )
     return f"""你是 Reading 模块的最终统一评分 Claude Code。请基于本次所有已完成的逐篇精读产物，为每篇论文独立打分。
 
 评分维度（均为 0-10 分，可保留一位小数）：
@@ -470,7 +476,9 @@ def build_reading_score_prompt(
 
 硬性规则：
 - 必须逐一读取下方每篇论文的 `article_markdown_path`，评分仅基于这些精读产物与给定研究上下文，不得按输入顺序或旧推荐分数打分。
-- 每篇论文必须恰好返回一条记录，保留其 `paper_index`；两个分数必须是 0 到 10 之间的数字。
+- 必须串行读取：每个工具调用只读取一个 `article_markdown_path`，读完并记录该篇的两个暂定分数后再读取下一篇；禁止在同一回合并行或批量读取多篇。
+- 禁止读取运行目录顶层的聚合 `read.md`；它包含所有论文，单次注入会超过工具消息限制。只读取下方明确列出的逐篇路径。
+{recovery_rule}- 每篇论文必须恰好返回一条记录，保留其 `paper_index`；两个分数必须是 0 到 10 之间的数字。
 - 将严格合法的 JSON object 写到 `{output_path_run}`，并在 stdout 只返回同一 JSON object。
 - JSON 顶层固定为 `{{"status": "complete", "scores": [...]}}`；`scores` 每项固定包含 `paper_index`、`match_score`、`transferability_score`。
 - 本次调用只允许写入 `{output_path_run}`。

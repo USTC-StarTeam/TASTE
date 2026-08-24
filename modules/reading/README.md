@@ -59,26 +59,27 @@ modules/reading/config/reading.json
 modules/reading/config/read.env
 ```
 
-该文件统一保存 Reading 实际使用的本机环境变量，并对本服务器上的所有用户生效。例如：
+该文件由私有服务管理员创建，统一保存 Reading 实际使用的本机环境变量，并对该服务器上的所有用户生效。例如：
 
 ```bash
 OPENREVIEW_USERNAME=your_email@example.com
 OPENREVIEW_PASSWORD=your_password
 ```
 
+账户注册、文件权限和推荐内容以项目根目录 [README](../../README.md#read-私有服务配置) 为准。本节只保留模块支持的环境变量索引。
+
 常用环境变量：
 
 | 变量 | 用途 |
 | --- | --- |
-| `OPENREVIEW_USERNAME` / `OPENREVIEW_PASSWORD` | 访问需要登录的 OpenReview 页面或附件。 |
+| `OPENREVIEW_USERNAME` / `OPENREVIEW_PASSWORD` | 通过官方客户端或浏览器后备访问需要登录的 OpenReview 页面或附件。 |
 | `READING_OPENREVIEW_ALLOW_ANONYMOUS_OFFICIAL_CLIENT` | 控制未配置账号时是否允许 OpenReview 官方客户端匿名访问。 |
 | `READING_OPENREVIEW_COOKIE` / `OPENREVIEW_COOKIE` | 使用已有 OpenReview Cookie。 |
 | `SEMANTIC_SCHOLAR_API_KEY` / `S2_API_KEY` | 查找同篇论文的开放 PDF 候选。 |
 | `UNPAYWALL_EMAIL` | 通过 Unpaywall 查找 DOI 对应开放全文。 |
-| `OPENALEX_API_KEY` / `OPENALEX_MAILTO` | 提高 OpenAlex 查询稳定性；`OPENALEX_MAILTO` 只用于 OpenAlex。 |
+| `OPENALEX_API_KEY` | OpenAlex 当前用于配额识别的免费 API key。 |
 | `SPRINGER_API_KEY` / `SPRINGER_NATURE_API_KEY` | 启用 Springer Nature Open Access API。 |
 | `CROSSREF_MAILTO` | 进入 Crossref polite pool，只用于 Crossref。 |
-| `READING_CONTACT_EMAIL` | Reading 通用联系邮箱；专用服务未配置邮箱时作为回退。 |
 | `JINA_API_KEY` | 启用 Jina Search，并认证 Jina Reader PDF/网页文本后备。 |
 | `GITHUB_TOKEN` / `GH_TOKEN` | 提高作者项目页 GitHub API 的请求额度。 |
 | `READING_READ_WORKERS` | 设置多篇论文并发处理数量。 |

@@ -504,7 +504,7 @@ def _survey_stats_from_find(find_result):
         "venue_final_title_candidates": sum(_safe_int(row.get("final_title_candidates"), 0) for row in title_filter_rows if isinstance(row, dict)),
         "venue_detail_fetched_candidates": len(evaluated),
         "venue_evaluated_candidates": len(evaluated),
-        "llm_scored_candidates": llm_scored or len(evaluated),
+        "llm_scored_candidates": llm_scored,
         "full_venue_corpus_audit": bool(raw_count),
         "llm_scoring_policy": "Full venue corpus is audited; category/title-screened candidates are batch-scored by LLM for efficiency.",
         "venue_read_candidates": len(find_result.get("strong_recommendations", []) or find_result.get("articles", [])) if isinstance(find_result, dict) else 0,

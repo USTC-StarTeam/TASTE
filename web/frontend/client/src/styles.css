@@ -1451,6 +1451,8 @@ summary {
 .markdownBody .katex-display {
   max-width: 100%;
   margin: 0.72rem 0;
+  overflow-x: auto;
+  overflow-y: hidden;
   padding: 0.18rem 0;
 }
 

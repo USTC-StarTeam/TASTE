@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import argparse
 import importlib.util
+import io
 import json
 import multiprocessing
 import os
@@ -80,6 +81,15 @@ def _load_experimenting_main():
 
 def _load_reading_main():
     spec = importlib.util.spec_from_file_location("reading_main_cli", ROOT / "modules" / "reading" / "main.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_ideation_main():
+    spec = importlib.util.spec_from_file_location("ideation_main_cli", ROOT / "modules" / "ideation" / "main.py")
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -317,9 +327,8 @@ def test_reading_read_env_loads_supported_integration_settings(monkeypatch, tmp_
         "OPENREVIEW_PASSWORD": "secret",
         "READING_OPENREVIEW_ALLOW_ANONYMOUS_OFFICIAL_CLIENT": "0",
         "UNPAYWALL_EMAIL": "unpaywall@example.test",
-        "OPENALEX_MAILTO": "openalex@example.test",
+        "OPENALEX_API_KEY": "openalex-test-key",
         "CROSSREF_MAILTO": "crossref@example.test",
-        "READING_CONTACT_EMAIL": "reading@example.test",
     }
     for key in settings:
         monkeypatch.delenv(key, raising=False)
@@ -332,20 +341,28 @@ def test_reading_read_env_loads_supported_integration_settings(monkeypatch, tmp_
     assert {key: os.environ.get(key) for key in settings} == settings
 
 
-def test_reading_service_contact_emails_keep_provider_boundaries(monkeypatch):
+def test_reading_crossref_contact_email_stays_provider_scoped(monkeypatch):
     common = _load_reading_common()
-    monkeypatch.setenv("READING_CONTACT_EMAIL", "reading@example.test")
-    monkeypatch.setenv("OPENALEX_MAILTO", "openalex@example.test")
     monkeypatch.setenv("CROSSREF_MAILTO", "crossref@example.test")
 
-    assert common.service_contact_email() == "reading@example.test"
-    assert common.service_contact_email("openalex") == "openalex@example.test"
+    assert common.service_contact_email() == ""
+    assert common.service_contact_email("openalex") == ""
     assert common.service_contact_email("crossref") == "crossref@example.test"
+    assert "crossref@example.test" not in common.DEFAULT_USER_AGENT
 
-    monkeypatch.delenv("OPENALEX_MAILTO")
     monkeypatch.delenv("CROSSREF_MAILTO")
-    assert common.service_contact_email("openalex") == "reading@example.test"
-    assert common.service_contact_email("crossref") == "reading@example.test"
+    assert common.service_contact_email("crossref") == ""
+
+
+def test_reading_openalex_params_use_api_key_not_legacy_mailto(monkeypatch):
+    read_pipeline = _load_reading_pipeline()
+    monkeypatch.setenv("OPENALEX_API_KEY", "openalex-test-key")
+    monkeypatch.setenv("OPENALEX_MAILTO", "legacy@example.test")
+
+    assert read_pipeline._openalex_api_params({"search": "test"}) == {
+        "search": "test",
+        "api_key": "openalex-test-key",
+    }
 
 
 def test_reading_openalex_key_uses_an_independent_quota_state(monkeypatch, tmp_path):
@@ -1166,6 +1183,14 @@ def test_reading_article_markdown_rejects_invalid_web_katex(monkeypatch):
         assert read_pipeline._article_markdown_quality_issue(
             prefix + r"目标函数为 $\notacommand{x}$。" + suffix,
         ) == "invalid_katex_syntax"
+
+
+def test_frontend_contains_wide_display_math_inside_markdown_card():
+    styles = (ROOT / "web" / "frontend" / "client" / "src" / "styles.css").read_text(encoding="utf-8")
+
+    display_rule = styles.split(".markdownBody .katex-display {", 1)[1].split("}", 1)[0]
+    assert "overflow-x: auto;" in display_rule
+    assert "overflow-y: hidden;" in display_rule
 
 
 @pytest.mark.parametrize("repair_succeeds", [True, False])
@@ -2451,7 +2476,7 @@ def test_reading_batch_requeues_cooldown_papers_once_with_one_recovery_worker(mo
         "worker_count": 1,
         "services": ["arxiv"],
         "waited_sec": 0.0,
-        "wait_cap_sec": 30.0,
+        "wait_cap_sec": 240.0,
     }
     assert "cooldown_expiry_batch_requeue" in payload["execution_phases"]
     assert all(item["validation"]["cooldown_requeue"]["attempted"] is True for item in payload["items"])
@@ -2476,6 +2501,210 @@ def test_reading_batch_requeue_defers_when_service_cooldown_exceeds_wait_cap(mon
     assert result["wait_cap_sec"] == 200.0
     assert result["remaining_by_service"] == {"arxiv": 120.0}
     assert result["wait_caps"] == {"arxiv": 10.0}
+
+
+def test_reading_batch_wait_budget_covers_configured_rate_limit_cooldown(monkeypatch, isolated_reading_latest_run):
+    monkeypatch.setenv("READING_DISABLE_ARTICLE_CACHE", "1")
+    read_pipeline = _load_reading_pipeline()
+    paper_sources = _load_reading_paper_sources()
+    input_path = _write_reading_input("pytest_read_rate_limit_cooldown_requeue", {
+        "articles": [{
+            "source": "arxiv",
+            "title": "rate limit cooldown paper",
+            "paper_id": "rate-limit-cooldown",
+            "pdf_url": "https://arxiv.org/pdf/2601.00003",
+        }]
+    })
+    run_id = _reading_run_id_from_input(input_path)
+    calls = 0
+
+    def fake_acquire_full_text(paper, item_dir, log=print, *, services=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "paper_id": paper["paper_id"],
+                "title": paper["title"],
+                "full_text_available": False,
+                "full_text_status": "deferred_service_cooldown_retry",
+                "full_text_chars": 0,
+                "blocked_full_text_reason": {
+                    "code": "deferred_service_cooldown_before_full_text_request",
+                    "retryable_after_cooldown": True,
+                    "cooldown_services": ["arxiv"],
+                },
+                "pdf_acquisition": {
+                    "attempts": [{
+                        "service": "arxiv",
+                        "pdf_url": paper["pdf_url"],
+                        "download_failure_reason": "skipped_due_to_active_challenge_cooldown",
+                    }]
+                },
+            }
+        text = "recovered after configured rate limit cooldown " * 100
+        text_path = item_dir / "extracted" / "full_text.txt"
+        text_path.parent.mkdir(parents=True, exist_ok=True)
+        text_path.write_text(text, encoding="utf-8")
+        return {
+            "paper_id": paper["paper_id"],
+            "title": paper["title"],
+            "full_text_available": True,
+            "full_text_status": "pdf_text_read",
+            "full_text_chars": len(text),
+            "text_path": str(text_path),
+            "pdf_downloaded": True,
+        }
+
+    cooldown_checks = 0
+
+    def cooldown_then_clear(_service):
+        nonlocal cooldown_checks
+        cooldown_checks += 1
+        return 119.0 if cooldown_checks == 1 else 0.0
+
+    configured_values = {
+        "http.batch_cooldown_requeue_wait_cap_sec": 30.0,
+        "http.rate_limit_cooldown_sec": 120.0,
+    }
+    monkeypatch.setattr(paper_sources, "acquire_full_text", fake_acquire_full_text)
+    monkeypatch.setattr(read_pipeline, "service_cooldown_remaining", cooldown_then_clear)
+    monkeypatch.setattr(read_pipeline, "config_float", lambda key, default: configured_values.get(key, default))
+    monkeypatch.setattr(read_pipeline.time, "sleep", lambda _seconds: None)
+    result = read_pipeline.run_read(
+        run_id=run_id,
+        input_json=str(input_path),
+        claude_mode="prepare",
+        max_workers=1,
+        log=lambda _message: None,
+    )
+
+    payload = json.loads((input_path.parent.parent / "read_results.json").read_text(encoding="utf-8"))
+    assert calls == 2
+    assert result["full_text_ready_count"] == 1
+    assert payload["cooldown_requeue"] == {
+        "status": "complete",
+        "attempted_paper_count": 1,
+        "skipped_long_cooldown_count": 0,
+        "recovered_full_text_count": 1,
+        "worker_count": 1,
+        "services": ["arxiv"],
+        "waited_sec": 0.0,
+        "wait_cap_sec": 120.0,
+    }
+    assert payload["items"][0]["validation"]["cooldown_requeue"]["attempted"] is True
+    _cleanup_reading_output(run_id)
+
+
+def test_reading_batch_wait_budget_covers_fresh_cooldown_opened_by_prior_recovery(monkeypatch, isolated_reading_latest_run):
+    monkeypatch.setenv("READING_DISABLE_ARTICLE_CACHE", "1")
+    read_pipeline = _load_reading_pipeline()
+    paper_sources = _load_reading_paper_sources()
+    input_path = _write_reading_input("pytest_read_fresh_recovery_cooldown", {
+        "articles": [
+            {"source": "arxiv", "title": "first recovery", "paper_id": "recover-1", "pdf_url": "https://arxiv.org/pdf/2601.00011"},
+            {"source": "arxiv", "title": "fresh rate limit", "paper_id": "fresh-429", "pdf_url": "https://arxiv.org/pdf/2601.00012"},
+            {"source": "arxiv", "title": "recovery after fresh cooldown", "paper_id": "recover-3", "pdf_url": "https://arxiv.org/pdf/2601.00013"},
+        ]
+    })
+    run_id = _reading_run_id_from_input(input_path)
+    calls: dict[str, int] = {}
+    clock = 0.0
+    cooldown_until = 90.0
+
+    def deferred(paper):
+        return {
+            "paper_id": paper["paper_id"],
+            "title": paper["title"],
+            "full_text_available": False,
+            "full_text_status": "deferred_service_cooldown_retry",
+            "full_text_chars": 0,
+            "blocked_full_text_reason": {
+                "code": "deferred_service_cooldown_before_full_text_request",
+                "retryable_after_cooldown": True,
+                "cooldown_services": ["arxiv"],
+            },
+            "pdf_acquisition": {
+                "attempts": [{
+                    "service": "arxiv",
+                    "pdf_url": paper["pdf_url"],
+                    "status_code": 429,
+                    "download_failure_reason": "http_429_rate_limited",
+                }]
+            },
+        }
+
+    def fake_acquire_full_text(paper, item_dir, log=print, *, services=None):
+        nonlocal cooldown_until
+        paper_id = str(paper["paper_id"])
+        calls[paper_id] = calls.get(paper_id, 0) + 1
+        attempt = calls[paper_id]
+        if attempt == 1:
+            return deferred(paper)
+        if paper_id == "fresh-429":
+            cooldown_until = clock + 119.0
+            return deferred(paper)
+        text = f"recovered full text for {paper_id} " * 100
+        text_path = item_dir / "extracted" / "full_text.txt"
+        text_path.parent.mkdir(parents=True, exist_ok=True)
+        text_path.write_text(text, encoding="utf-8")
+        return {
+            "paper_id": paper_id,
+            "title": paper["title"],
+            "full_text_available": True,
+            "full_text_status": "pdf_text_read",
+            "full_text_chars": len(text),
+            "text_path": str(text_path),
+            "pdf_downloaded": True,
+        }
+
+    def cooldown_remaining(_service):
+        return max(0.0, cooldown_until - clock)
+
+    def advance_clock(seconds):
+        nonlocal clock
+        clock += seconds
+
+    monkeypatch.setattr(paper_sources, "acquire_full_text", fake_acquire_full_text)
+    monkeypatch.setattr(paper_sources, "fetch_arxiv_metadata", lambda _arxiv_id: {})
+    monkeypatch.setattr(read_pipeline, "service_cooldown_remaining", cooldown_remaining)
+
+    class LocalClock:
+        @staticmethod
+        def monotonic():
+            return clock
+
+        @staticmethod
+        def sleep(seconds):
+            advance_clock(seconds)
+
+    # Replace this module's clock reference instead of mutating the process-wide
+    # stdlib time module. Background threads may legitimately sleep while this
+    # integration test runs and must not advance its deterministic fake clock.
+    monkeypatch.setattr(read_pipeline, "time", LocalClock())
+    result = read_pipeline.run_read(
+        run_id=run_id,
+        input_json=str(input_path),
+        claude_mode="prepare",
+        max_workers=1,
+        log=lambda _message: None,
+    )
+
+    payload = json.loads((input_path.parent.parent / "read_results.json").read_text(encoding="utf-8"))
+    assert calls == {"recover-1": 2, "fresh-429": 2, "recover-3": 2}
+    assert result["full_text_ready_count"] == 2
+    assert payload["cooldown_requeue"] == {
+        "status": "complete",
+        "attempted_paper_count": 3,
+        "skipped_long_cooldown_count": 0,
+        "recovered_full_text_count": 2,
+        "worker_count": 1,
+        "services": ["arxiv"],
+        "waited_sec": 209.0,
+        "wait_cap_sec": 360.0,
+    }
+    assert payload["items"][1]["validation"]["cooldown_requeue"]["attempted"] is True
+    assert payload["items"][2]["validation"]["cooldown_requeue"]["attempted"] is True
+    _cleanup_reading_output(run_id)
 
 
 def test_reading_batch_does_not_wait_or_requeue_when_cooldown_exceeds_run_budget(monkeypatch, isolated_reading_latest_run):
@@ -2547,7 +2776,7 @@ def test_reading_batch_does_not_wait_or_requeue_when_cooldown_exceeds_run_budget
         "worker_count": 0,
         "services": ["openalex"],
         "waited_sec": 0.0,
-        "wait_cap_sec": 30.0,
+        "wait_cap_sec": 120.0,
     }
     requeue = payload["items"][0]["validation"]["cooldown_requeue"]
     assert requeue["attempted"] is False
@@ -2713,6 +2942,198 @@ def test_reading_run_read_uses_subagent_article_markdown_aggregation_and_audit(m
     _assert_no_split_reading_math(read_md)
     _cleanup_reading_output(run_id)
     _cleanup_reading_input("pytest_read_subagent_md_contract")
+
+
+def test_reading_retries_transient_prompt_too_long_during_final_scoring(monkeypatch):
+    read_pipeline = _load_reading_pipeline()
+    run_id = _reading_test_run_id()
+    directory = ROOT / "modules" / "reading" / ".runtime" / "output" / run_id
+    article_path = directory / "papers" / "001_paper" / "read.md"
+    article_path.parent.mkdir(parents=True, exist_ok=True)
+    article_path.write_text(
+        "# Paper\n\n"
+        "## 摘要\n\n这是完整准确的中文摘要。\n\n"
+        "## 动机与核心创新\n\n中文动机与创新分析。\n\n"
+        "## 方法\n\n中文方法分析。\n\n"
+        "## 实验结果\n\n中文实验结果分析。\n\n"
+        "## 优缺点总结\n\n中文优缺点总结。\n",
+        encoding="utf-8",
+    )
+    items = [{
+        "paper_index": 1,
+        "paper": {"paper_id": "paper-1", "title": "Paper", "abstract_zh": "这是完整准确的中文摘要。"},
+        "reading": {"title": "Paper"},
+        "claude_result": {"article_markdown_path": "read.md"},
+        "validation": {"deep_read_complete": True},
+        "artifacts": {"article_markdown": str(article_path)},
+    }]
+    calls: list[str] = []
+    prompts: list[str] = []
+    prompt_paths: list[str] = []
+
+    def fake_run_claude_deep_read(*, prompt_path, expected_output_path, receipt_dir_name, **_kwargs):
+        calls.append(receipt_dir_name)
+        prompts.append(prompt_path.read_text(encoding="utf-8"))
+        prompt_paths.append(prompt_path.name)
+        if len(calls) == 1:
+            receipt_dir = directory / receipt_dir_name
+            receipt_dir.mkdir(parents=True, exist_ok=True)
+            (receipt_dir / "stdout.json").write_text(json.dumps({
+                "type": "result",
+                "subtype": "success",
+                "is_error": True,
+                "result": "Prompt is too long",
+            }), encoding="utf-8")
+            return {
+                "status": "claude_failed",
+                "run_executed": True,
+                "return_code": 1,
+                "stdout_path": str(receipt_dir / "stdout.json"),
+                "expected_output_audit": {"exists": False, "valid_json": False},
+                "nonruntime_artifact_audit": {"status": "passed", "problem_count": 0},
+                "external_temp_artifact_audit": {"status": "passed", "problem_count": 0},
+                "result_payload": {},
+            }
+        payload = {
+            "status": "complete",
+            "scores": [{"paper_index": 1, "match_score": 8.8, "transferability_score": 9.2}],
+        }
+        expected_output_path.parent.mkdir(parents=True, exist_ok=True)
+        expected_output_path.write_text(json.dumps(payload), encoding="utf-8")
+        return {
+            "status": "complete",
+            "run_executed": True,
+            "return_code": 0,
+            "expected_output_audit": {"exists": True, "valid_json": True},
+            "nonruntime_artifact_audit": {"status": "passed", "problem_count": 0},
+            "external_temp_artifact_audit": {"status": "passed", "problem_count": 0},
+            "result_payload": payload,
+        }
+
+    monkeypatch.setattr(read_pipeline, "run_claude_deep_read", fake_run_claude_deep_read)
+    try:
+        ranked, scoring = read_pipeline._run_final_reading_scoring(
+            directory=directory,
+            items=items,
+            research_context={"research_interest": "protein design"},
+            claude_mode="run",
+            timeout_sec=60,
+            log=lambda _message: None,
+        )
+        assert calls == ["claude_scoring", "claude_scoring_retry"]
+        assert prompt_paths == ["prompt.md", "retry_prompt.md"]
+        assert "每个工具调用只读取一个 `article_markdown_path`" in prompts[0]
+        assert "上一次评分请求因一次注入过多精读文本而失败" in prompts[1]
+        assert prompts[1] != prompts[0]
+        assert scoring["status"] == "complete"
+        assert scoring["retry"] == {"attempted": True, "reason": "prompt_too_long", "resolved": True}
+        assert ranked[0]["match_score"] == 8.8
+        assert ranked[0]["transferability_score"] == 9.2
+    finally:
+        _cleanup_reading_output(run_id)
+
+
+def test_reading_scoring_ignores_stale_stdout_not_referenced_by_current_receipt(tmp_path):
+    read_pipeline = _load_reading_pipeline()
+    receipt_dir = tmp_path / "claude_scoring"
+    receipt_dir.mkdir(parents=True)
+    (receipt_dir / "stdout.json").write_text(json.dumps({
+        "type": "result",
+        "is_error": True,
+        "result": "Prompt is too long",
+    }), encoding="utf-8")
+    current_timeout_receipt = {
+        "status": "blocked_claude_timeout",
+        "run_executed": True,
+        "expected_output_audit": {"exists": False, "valid_json": False},
+    }
+
+    assert read_pipeline._reading_scoring_retryable_failure(
+        tmp_path,
+        "claude_scoring",
+        current_timeout_receipt,
+    ) == ""
+
+
+def test_reading_scoring_records_retry_when_retry_process_raises(monkeypatch):
+    read_pipeline = _load_reading_pipeline()
+    run_id = _reading_test_run_id()
+    directory = ROOT / "modules" / "reading" / ".runtime" / "output" / run_id
+    article_path = directory / "papers" / "001_paper" / "read.md"
+    article_path.parent.mkdir(parents=True, exist_ok=True)
+    (directory / "outputs").mkdir(parents=True, exist_ok=True)
+    article_path.write_text(
+        "# Paper\n\n"
+        "## 摘要\n\n这是完整准确的中文摘要。\n\n"
+        "## 动机与核心创新\n\n中文动机与创新分析。\n\n"
+        "## 方法\n\n中文方法分析。\n\n"
+        "## 实验结果\n\n中文实验结果分析。\n\n"
+        "## 优缺点总结\n\n中文优缺点总结。\n",
+        encoding="utf-8",
+    )
+    items = [{
+        "paper_index": 1,
+        "paper": {"paper_id": "paper-1", "title": "Paper"},
+        "reading": {"title": "Paper"},
+        "claude_result": {"article_markdown_path": "read.md"},
+        "validation": {"deep_read_complete": True},
+        "artifacts": {"article_markdown": str(article_path)},
+    }]
+    calls: list[str] = []
+
+    def fake_run_claude_deep_read(*, receipt_dir_name, **_kwargs):
+        calls.append(receipt_dir_name)
+        if receipt_dir_name == "claude_scoring_retry":
+            raise TimeoutError("retry timed out")
+        receipt_dir = directory / receipt_dir_name
+        receipt_dir.mkdir(parents=True, exist_ok=True)
+        stdout_path = receipt_dir / "stdout.json"
+        stdout_path.write_text(json.dumps({
+            "type": "result",
+            "is_error": True,
+            "result": "Prompt is too long",
+        }), encoding="utf-8")
+        return {
+            "status": "claude_failed",
+            "run_executed": True,
+            "return_code": 1,
+            "stdout_path": str(stdout_path),
+            "expected_output_audit": {"exists": False, "valid_json": False},
+            "nonruntime_artifact_audit": {"status": "passed", "problem_count": 0},
+            "external_temp_artifact_audit": {"status": "passed", "problem_count": 0},
+            "result_payload": {},
+        }
+
+    monkeypatch.setattr(read_pipeline, "run_claude_deep_read", fake_run_claude_deep_read)
+    try:
+        _ranked, scoring = read_pipeline._run_final_reading_scoring(
+            directory=directory,
+            items=items,
+            research_context={"research_interest": "protein design"},
+            claude_mode="run",
+            timeout_sec=60,
+            log=lambda _message: None,
+        )
+
+        score_artifact = json.loads((directory / "outputs" / "reading_scores.json").read_text(encoding="utf-8"))
+        assert calls == ["claude_scoring", "claude_scoring_retry"]
+        assert scoring["status"] == "complete_with_warnings"
+        assert scoring["retry"] == {"attempted": True, "reason": "prompt_too_long", "resolved": False}
+        assert score_artifact["retry"] == scoring["retry"]
+    finally:
+        _cleanup_reading_output(run_id)
+
+
+def test_ideation_accepts_taste_python_when_conda_name_is_stale(monkeypatch, tmp_path):
+    ideation_main = _load_ideation_main()
+    taste_python = tmp_path / "miniconda3" / "envs" / "taste" / "bin" / "python"
+    taste_python.parent.mkdir(parents=True)
+    taste_python.touch()
+    monkeypatch.setenv("CONDA_DEFAULT_ENV", "base")
+    monkeypatch.setattr(ideation_main.sys, "executable", str(taste_python))
+
+    assert ideation_main._running_in_taste_conda() is True
+    ideation_main._require_taste_conda()
 
 
 def test_reading_claude_subagent_runs_inside_single_runtime_item(monkeypatch, tmp_path):
@@ -2883,6 +3304,131 @@ def test_reading_rejects_arxiv_abs_html_as_full_text():
     assert text == ""
     assert receipt["accepted"] is False
     assert receipt["reason"] == "arxiv_abs_page_is_metadata_not_paper_full_text"
+
+
+def test_reading_complete_arxiv_input_skips_redundant_metadata_request(monkeypatch):
+    paper_sources = _load_reading_paper_sources()
+    read_pipeline = _load_reading_pipeline()
+    metadata_requests: list[str] = []
+
+    def fake_fetch_arxiv_metadata(arxiv_id):
+        metadata_requests.append(arxiv_id)
+        return {}
+
+    monkeypatch.setattr(paper_sources, "fetch_arxiv_metadata", fake_fetch_arxiv_metadata)
+    paper = read_pipeline._normalize_local_input_paper({
+        "source": "arxiv",
+        "paper_id": "2607.02998v2",
+        "title": "CONFLUX: A Unified Flow-Matching Framework",
+        "authors": ["Ada Researcher", "Lin Scientist"],
+        "abstract": "We present a complete abstract supplied by the upstream Find result.",
+        "url": "https://arxiv.org/abs/2607.02998v2",
+        "pdf_url": "https://arxiv.org/pdf/2607.02998v2",
+    })
+
+    assert metadata_requests == []
+    assert paper["title"] == "CONFLUX: A Unified Flow-Matching Framework"
+    assert paper["authors"] == ["Ada Researcher", "Lin Scientist"]
+    assert paper["pdf_url"] == "https://arxiv.org/pdf/2607.02998v2"
+
+
+def test_reading_incomplete_arxiv_input_still_fetches_metadata(monkeypatch):
+    paper_sources = _load_reading_paper_sources()
+    metadata_requests: list[str] = []
+
+    def fake_fetch_arxiv_metadata(arxiv_id):
+        metadata_requests.append(arxiv_id)
+        return {
+            "metadata_status": "arxiv_metadata_ready",
+            "source": "arxiv",
+            "paper_id": arxiv_id,
+            "title": "Metadata supplied title",
+            "authors": ["Metadata Author"],
+            "abstract": "Metadata supplied abstract.",
+            "url": f"https://arxiv.org/abs/{arxiv_id}",
+            "abs_url": f"https://arxiv.org/abs/{arxiv_id}",
+            "pdf_url": f"https://arxiv.org/pdf/{arxiv_id}",
+        }
+
+    monkeypatch.setattr(paper_sources, "fetch_arxiv_metadata", fake_fetch_arxiv_metadata)
+    paper = paper_sources.build_paper_record(article="arXiv:2607.02998")
+
+    assert metadata_requests == ["2607.02998"]
+    assert paper["title"] == "Metadata supplied title"
+    assert paper["authors"] == ["Metadata Author"]
+    assert paper["pdf_url"] == "https://arxiv.org/pdf/2607.02998"
+
+
+def test_reading_arxiv_official_html_is_tried_before_pdf(monkeypatch):
+    reading_root = ROOT / "modules" / "reading"
+    paper_sources = _load_reading_paper_sources()
+    title = "CONFLUX: A Unified Flow-Matching Framework"
+    body = (
+        f"{title}\nAda Researcher, Lin Scientist\n\nAbstract\nIntroduction\nMethods\nResults\nDiscussion\nConclusion\nReferences\n"
+        + ("This is verified full paper body evidence for the same arXiv paper. " * 300)
+    )
+    seen_urls: list[str] = []
+    download_calls: list[str] = []
+
+    def fake_fetch_html(url, timeout=30):
+        seen_urls.append(url)
+        if url == "https://arxiv.org/html/2607.02998v2":
+            return body, {
+                "accepted": True,
+                "url": url,
+                "service": "arxiv",
+                "status_code": 200,
+                "content_type": "text/html",
+                "text_chars": len(body),
+                "paper_body_markers": True,
+            }
+        return "", {"accepted": False, "url": url, "reason": "not_full_text"}
+
+    def fake_download(paper, downloads, log):
+        download_calls.append(str(paper.get("paper_id") or ""))
+        return False, downloads / "unused.pdf", "", {"attempts": [], "selected": {}}
+
+    monkeypatch.setattr(paper_sources, "_fetch_html_text", fake_fetch_html)
+    run_dir = reading_root / ".runtime" / "output" / _reading_test_run_id()
+    shutil.rmtree(run_dir, ignore_errors=True)
+    packet = paper_sources.acquire_full_text(
+        {
+            "source": "arxiv",
+            "paper_id": "2607.02998v2",
+            "title": title,
+            "authors": ["Ada Researcher", "Lin Scientist"],
+            "abstract": "A supplied abstract.",
+            "url": "https://arxiv.org/abs/2607.02998v2",
+            "pdf_url": "https://arxiv.org/pdf/2607.02998v2",
+        },
+        run_dir,
+        log=lambda _message: None,
+        services={
+            "download_first_readable_pdf": fake_download,
+            "openalex_pdf_candidates": lambda *_args, **_kwargs: [],
+            "same_paper_landing_page_candidates": lambda *_args, **_kwargs: [],
+        },
+    )
+
+    assert seen_urls[0] == "https://arxiv.org/html/2607.02998v2"
+    assert download_calls == []
+    assert packet["full_text_available"] is True
+    assert packet["full_text_status"] == "html_text_read"
+    assert packet["full_text_evidence_kind"] == "html"
+    assert packet["pdf_downloaded"] is False
+    assert packet["pdf_acquisition"]["skipped"] == "arxiv_official_html_ready_before_pdf"
+    assert packet["html_acquisition"]["selected"]["kind"] == "arxiv_official_html_before_pdf"
+    shutil.rmtree(run_dir, ignore_errors=True)
+
+
+def test_reading_arxiv_html_prefers_versioned_locator_over_unversioned_field():
+    paper_sources = _load_reading_paper_sources()
+
+    assert paper_sources._versioned_arxiv_id_from_paper({
+        "arxiv_id": "2607.02998",
+        "url": "https://arxiv.org/abs/2607.02998v2",
+        "pdf_url": "https://arxiv.org/pdf/2607.02998v2",
+    }) == "2607.02998v2"
 
 
 def test_reading_blocked_reason_prefers_acm_403_over_openreview_probe_403():
@@ -5263,6 +5809,43 @@ def test_reading_reader_pdf_text_fallback_requires_identity(monkeypatch, tmp_pat
     shutil.rmtree(run_dir, ignore_errors=True)
 
 
+def test_reading_arxiv_indexed_pdf_uses_reader_after_rate_limit(monkeypatch):
+    paper_sources = _load_reading_paper_sources()
+    pdf_url = "https://arxiv.org/pdf/2607.04780v1"
+    seen_urls: list[str] = []
+
+    def fake_fetch(_paper, candidate_url, timeout=45):
+        seen_urls.append(candidate_url)
+        return "verified arxiv paper body", {
+            "kind": "reader_pdf_text",
+            "pdf_url": candidate_url,
+            "accepted": True,
+            "paper_body_markers": True,
+            "pdf_text_identity_check": True,
+        }
+
+    monkeypatch.setattr(paper_sources, "_fetch_reader_pdf_text", fake_fetch)
+    text, receipt = paper_sources._reader_pdf_text_from_failed_pdf_attempts(
+        {
+            "paper_id": "2607.04780v1",
+            "title": "Non-Asymptotic Error Bounds for SMC with Biased Proposals: Application to Conditional Diffusion Sampling",
+        },
+        {
+            "attempts": [{
+                "kind": "indexed_pdf",
+                "pdf_url": pdf_url,
+                "accepted": True,
+                "downloaded": False,
+                "download_failure_reason": "http_429_rate_limited",
+            }]
+        },
+    )
+
+    assert seen_urls == [pdf_url]
+    assert text == "verified arxiv paper body"
+    assert receipt["selected"]["pdf_text_identity_check"] is True
+
+
 def test_reading_openreview_reader_pdf_text_accepts_verified_body(monkeypatch):
     common = _load_reading_common()
     paper_sources = _load_reading_paper_sources()
@@ -5698,6 +6281,29 @@ def test_find_translation_keeps_prose_markup_visible_to_llm_without_splitting_wo
     assert find_pipeline._recommendation_translation_status([untranslated], "completed") == "partial"
 
 
+def test_find_relevance_label_cannot_replace_method_topic_category():
+    find_pipeline = _load_find_pipeline()
+
+    assert find_pipeline._llm_method_topic_category(
+        "strong_match",
+        fallback="蛋白质离散扩散后训练",
+        title="Continuous-Time RL for Discrete Diffusion",
+        abstract="A complete abstract.",
+    ) == "蛋白质离散扩散后训练"
+    assert find_pipeline._llm_method_topic_category(
+        "partial match",
+        fallback="",
+        title="Continuous-Time RL for Discrete Diffusion",
+        abstract="A complete abstract.",
+    ).startswith("Local topic:")
+    assert find_pipeline._llm_method_topic_category(
+        "离散扩散强化学习",
+        fallback="cs.LG",
+        title="Continuous-Time RL for Discrete Diffusion",
+        abstract="A complete abstract.",
+    ) == "离散扩散强化学习"
+
+
 def test_find_bound_official_detail_can_correct_a_stale_bibliographic_title():
     _load_find_pipeline()
     find_support = sys.modules["support.find_support"]
@@ -5716,13 +6322,13 @@ def test_find_bound_official_detail_can_correct_a_stale_bibliographic_title():
     assert unrelated["title"] == "Completely Different Paper on Language Models"
 
 
-def test_find_title_prefilter_uses_local_ids_and_recovers_missing_rows(monkeypatch):
+def test_find_title_prefilter_repairs_missing_rows_in_one_batch(monkeypatch):
     find_pipeline = _load_find_pipeline()
     monkeypatch.setenv("USE_LLM_TITLE_FILTER", "1")
     monkeypatch.setenv("TITLE_FILTER_SEQUENTIAL", "1")
     monkeypatch.setenv("FIND_TITLE_SCORE_CACHE", "0")
 
-    class IncompleteFirstAttemptLLM:
+    class IncompleteBatchLLM:
         enabled = True
         timeout_sec = 120
         provider = "openai_compatible"
@@ -5730,11 +6336,16 @@ def test_find_title_prefilter_uses_local_ids_and_recovers_missing_rows(monkeypat
         def __init__(self):
             self.calls = []
 
-        def json_or_error(self, prompt, **kwargs):
+        def json_or_error(self, prompt, *, single_request=False, **kwargs):
             aliases = re.findall(r"^- (p\d{3}):", prompt, flags=re.MULTILINE)
-            self.calls.append({"aliases": aliases, "max_tokens": kwargs.get("max_tokens"), "prompt": prompt})
-            omitted = min(3, len(aliases) - 1)
-            returned = aliases[:-omitted] if "attempt 1" in prompt and omitted else aliases
+            self.calls.append({
+                "aliases": aliases,
+                "max_tokens": kwargs.get("max_tokens"),
+                "single_request": single_request,
+                "stream": kwargs.get("stream"),
+                "prompt": prompt,
+            })
+            returned = aliases[:-3] if len(aliases) == 100 else aliases
             return {
                 "ok": True,
                 "data": {
@@ -5763,7 +6374,7 @@ def test_find_title_prefilter_uses_local_ids_and_recovers_missing_rows(monkeypat
         }
         for index in range(102)
     ]
-    llm = IncompleteFirstAttemptLLM()
+    llm = IncompleteBatchLLM()
     reports = []
     selected = find_pipeline._prefilter_titles(
         items,
@@ -5782,14 +6393,20 @@ def test_find_title_prefilter_uses_local_ids_and_recovers_missing_rows(monkeypat
     )
 
     assert len(selected) == 102
-    assert all(item["reason_source"] == "llm title filter" for item in selected)
+    assert sum(item["reason_source"] == "llm title filter" for item in selected) == 102
+    fallback_rows = [item for item in selected if item.get("title_filter_fallback_used")]
+    assert fallback_rows == []
     assert reports[0]["llm_title_scored_papers"] == 102
-    assert [len(call["aliases"]) for call in llm.calls] == [100, 3, 2, 1]
+    assert reports[0]["local_title_ranked_papers"] == 0
+    assert [len(call["aliases"]) for call in llm.calls] == [100, 2, 3]
+    assert all(call["single_request"] is True for call in llm.calls)
+    assert all(call["stream"] is True for call in llm.calls)
     assert all(call["max_tokens"] == 0 for call in llm.calls)
     assert all("paper-0:" not in call["prompt"] for call in llm.calls)
+    assert all("Protein generation with diffusion and reinforcement learning." not in call["prompt"] for call in llm.calls)
 
 
-def test_find_title_prefilter_falls_back_locally_after_retry_exhaustion(monkeypatch):
+def test_find_title_prefilter_batch_repair_exhaustion_falls_back_locally(monkeypatch):
     find_pipeline = _load_find_pipeline()
     monkeypatch.setenv("USE_LLM_TITLE_FILTER", "1")
     monkeypatch.setenv("TITLE_FILTER_SEQUENTIAL", "1")
@@ -5802,9 +6419,11 @@ def test_find_title_prefilter_falls_back_locally_after_retry_exhaustion(monkeypa
 
         def __init__(self):
             self.calls = 0
+            self.single_request_flags = []
 
-        def json_or_error(self, _prompt, **_kwargs):
+        def json_or_error(self, _prompt, *, single_request=False, **_kwargs):
             self.calls += 1
+            self.single_request_flags.append(single_request)
             return {"ok": True, "data": {"scored": []}, "error": ""}
 
     items = [
@@ -5836,7 +6455,8 @@ def test_find_title_prefilter_falls_back_locally_after_retry_exhaustion(monkeypa
         title_filter_reports=reports,
     )
 
-    assert llm.calls == 5
+    assert llm.calls == 3
+    assert llm.single_request_flags == [True, True, True]
     assert len(selected) == 3
     assert all(item["reason_source"] == "local title screen" for item in selected)
     assert all(item["title_filter_fallback_used"] for item in selected)
@@ -5856,6 +6476,486 @@ def test_find_title_prefilter_falls_back_locally_after_retry_exhaustion(monkeypa
     assert len(scoring_groups[0][1]) == 3
 
 
+def test_find_title_prefilter_parallel_fatal_error_does_not_start_repairs(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("USE_LLM_TITLE_FILTER", "1")
+    monkeypatch.setenv("TITLE_FILTER_SEQUENTIAL", "0")
+    monkeypatch.setenv("FIND_TITLE_SCORE_CACHE", "0")
+
+    class UnauthorizedTitleLLM:
+        enabled = True
+        timeout_sec = 120
+        provider = "openai_compatible"
+
+        def __init__(self):
+            self.call_sizes = []
+
+        def json_or_error(self, prompt, *, single_request=False, **_kwargs):
+            aliases = re.findall(r"^- (p\d{3}):", prompt, flags=re.MULTILINE)
+            self.call_sizes.append(len(aliases))
+            return {"ok": False, "data": None, "error": "HTTP 401 incorrect API key"}
+
+    items = [{
+        "id": f"paper-{index}",
+        "title": f"Protein design paper {index}",
+        "abstract": "Protein generation with diffusion.",
+        "venue": "TestVenue",
+        "year": 2026,
+    } for index in range(200)]
+    llm = UnauthorizedTitleLLM()
+
+    with pytest.raises(find_pipeline.FatalLLMConfigurationError):
+        find_pipeline._prefilter_titles(
+            items,
+            find_pipeline.AppConfig(
+                provider="openai_compatible",
+                research_interest="protein diffusion",
+                llm_concurrency=2,
+            ),
+            llm,
+            "TestVenue",
+            lambda _message: None,
+            lambda: False,
+            scan_all=True,
+        )
+
+    assert sorted(llm.call_sizes) == [100, 100]
+
+
+def test_find_title_prefilter_adapts_batched_repair_concurrency_to_primary_success_rate(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("USE_LLM_TITLE_FILTER", "1")
+    monkeypatch.setenv("TITLE_FILTER_SEQUENTIAL", "0")
+    monkeypatch.setenv("TITLE_FILTER_BATCH_REPAIR_ATTEMPTS", "1")
+    monkeypatch.setenv("FIND_TITLE_SCORE_CACHE", "0")
+
+    class CapacityLimitedTitleLLM:
+        enabled = True
+        timeout_sec = 120
+        provider = "openai_compatible"
+
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.primary_calls = 0
+            self.repair_call_sizes = []
+            self.active_repairs = 0
+            self.max_active_repairs = 0
+
+        def json_or_error(self, prompt, *, single_request=False, **_kwargs):
+            aliases = re.findall(r"^- (p\d{3}):", prompt, flags=re.MULTILINE)
+            if "main request" in prompt:
+                with self.lock:
+                    self.primary_calls += 1
+                    primary_call = self.primary_calls
+                if primary_call > 2:
+                    return {"ok": False, "data": None, "error": "The read operation timed out"}
+            else:
+                with self.lock:
+                    self.repair_call_sizes.append(len(aliases))
+                    self.active_repairs += 1
+                    self.max_active_repairs = max(self.max_active_repairs, self.active_repairs)
+                time.sleep(0.03)
+                with self.lock:
+                    self.active_repairs -= 1
+            return {
+                "ok": True,
+                "data": {"scored": [{
+                    "id": alias,
+                    "fit_score": 7.0,
+                    "diversity_score": 5.0,
+                    "hit_directions": ["current research task"],
+                    "category": "relevant method",
+                    "reason": "标题显示该方法与当前研究任务相关，并提供可检查的技术路线。",
+                } for alias in aliases]},
+                "error": "",
+            }
+
+    items = [{
+        "id": f"paper-{index}",
+        "title": f"Research method paper {index}",
+        "abstract": "This paper develops and evaluates a method for the current research task.",
+        "venue": "TestVenue",
+        "year": 2026,
+    } for index in range(800)]
+    llm = CapacityLimitedTitleLLM()
+    progress_events = []
+
+    selected = find_pipeline._prefilter_titles(
+        items,
+        find_pipeline.AppConfig(
+            provider="openai_compatible",
+            research_interest="current research task",
+            llm_concurrency=4,
+        ),
+        llm,
+        "TestVenue",
+        lambda _message: None,
+        lambda: False,
+        progress=lambda phase, current, total, message, *_args, **_kwargs: progress_events.append(
+            (phase, current, total, message)
+        ),
+        scan_all=True,
+    )
+
+    assert llm.primary_calls == 8
+    assert llm.repair_call_sizes == [100] * 6
+    # Two complete responses among eight primary requests at concurrency four
+    # imply an estimated safe repair capacity of one, not two.
+    assert llm.max_active_repairs == 1
+    assert sum(item["reason_source"] == "llm title filter" for item in selected) == 800
+    repair_events = [event for event in progress_events if "title repair round 1/1" in event[3]]
+    assert repair_events
+    assert repair_events[-1][1:3] == (6, 6)
+
+
+def test_find_title_prefilter_readapts_concurrency_between_batched_repair_rounds(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("USE_LLM_TITLE_FILTER", "1")
+    monkeypatch.setenv("TITLE_FILTER_SEQUENTIAL", "0")
+    monkeypatch.setenv("TITLE_FILTER_BATCH_REPAIR_ATTEMPTS", "2")
+    monkeypatch.setenv("FIND_TITLE_SCORE_CACHE", "0")
+
+    class ChangingCapacityTitleLLM:
+        enabled = True
+        timeout_sec = 120
+        provider = "openai_compatible"
+
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.primary_calls = 0
+            self.repair_round_calls = {1: 0, 2: 0}
+            self.active_repairs = {1: 0, 2: 0}
+            self.max_active_repairs = {1: 0, 2: 0}
+
+        def json_or_error(self, prompt, *, single_request=False, **_kwargs):
+            aliases = re.findall(r"^- (p\d{3}):", prompt, flags=re.MULTILINE)
+            if "main request" in prompt:
+                with self.lock:
+                    self.primary_calls += 1
+                    call_number = self.primary_calls
+                if call_number > 4:
+                    return {"ok": False, "data": None, "error": "The read operation timed out"}
+            else:
+                repair_round = 1 if "repair 1/2" in prompt else 2
+                with self.lock:
+                    self.repair_round_calls[repair_round] += 1
+                    call_number = self.repair_round_calls[repair_round]
+                    self.active_repairs[repair_round] += 1
+                    self.max_active_repairs[repair_round] = max(
+                        self.max_active_repairs[repair_round],
+                        self.active_repairs[repair_round],
+                    )
+                time.sleep(0.03)
+                with self.lock:
+                    self.active_repairs[repair_round] -= 1
+                if repair_round == 1 and call_number > 1:
+                    return {"ok": False, "data": None, "error": "The read operation timed out"}
+            return {
+                "ok": True,
+                "data": {"scored": [{
+                    "id": alias,
+                    "fit_score": 7.0,
+                    "diversity_score": 5.0,
+                    "hit_directions": ["current research task"],
+                    "category": "relevant method",
+                    "reason": "标题显示该方法与当前研究任务相关，并提供可检查的技术路线。",
+                } for alias in aliases]},
+                "error": "",
+            }
+
+    items = [{
+        "id": f"paper-{index}",
+        "title": f"Research method paper {index}",
+        "abstract": "This paper develops and evaluates a method for the current research task.",
+        "venue": "TestVenue",
+        "year": 2026,
+    } for index in range(800)]
+    llm = ChangingCapacityTitleLLM()
+
+    selected = find_pipeline._prefilter_titles(
+        items,
+        find_pipeline.AppConfig(
+            provider="openai_compatible",
+            research_interest="current research task",
+            llm_concurrency=4,
+        ),
+        llm,
+        "TestVenue",
+        lambda _message: None,
+        lambda: False,
+        scan_all=True,
+    )
+
+    assert llm.primary_calls == 8
+    assert llm.repair_round_calls == {1: 4, 2: 3}
+    assert llm.max_active_repairs == {1: 2, 2: 1}
+    assert sum(item["reason_source"] == "llm title filter" for item in selected) == 800
+
+
+def test_find_title_prefilter_cancels_between_batched_repairs_and_restores_timeout(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("USE_LLM_TITLE_FILTER", "1")
+    monkeypatch.setenv("TITLE_FILTER_SEQUENTIAL", "1")
+    monkeypatch.setenv("TITLE_FILTER_BATCH_REPAIR_ATTEMPTS", "3")
+    monkeypatch.setenv("FIND_TITLE_SCORE_CACHE", "0")
+
+    class EmptyTitleLLM:
+        enabled = True
+        timeout_sec = 333
+        provider = "openai_compatible"
+
+        def __init__(self):
+            self.calls = 0
+
+        def json_or_error(self, _prompt, *, single_request=False, **_kwargs):
+            self.calls += 1
+            return {"ok": True, "data": {"scored": []}, "error": ""}
+
+    llm = EmptyTitleLLM()
+    items = [{
+        "id": f"paper-{index}",
+        "title": f"Protein design paper {index}",
+        "abstract": "Protein generation with diffusion.",
+        "venue": "TestVenue",
+        "year": 2026,
+    } for index in range(3)]
+
+    with pytest.raises(find_pipeline.JobCancelled):
+        find_pipeline._prefilter_titles(
+            items,
+            find_pipeline.AppConfig(
+                provider="openai_compatible",
+                research_interest="protein diffusion",
+                llm_concurrency=1,
+                title_filter_timeout_sec=17,
+            ),
+            llm,
+            "TestVenue",
+            lambda _message: None,
+            lambda: llm.calls >= 2,
+            scan_all=True,
+        )
+
+    assert llm.calls == 2
+    assert llm.timeout_sec == 333
+
+
+def test_find_title_prefilter_fills_one_hundred_item_request_across_official_categories(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("USE_LLM_TITLE_FILTER", "1")
+    monkeypatch.setenv("TITLE_FILTER_SEQUENTIAL", "1")
+    monkeypatch.setenv("FIND_TITLE_SCORE_CACHE", "0")
+
+    class CompleteTitleLLM:
+        enabled = True
+        timeout_sec = 120
+        provider = "openai_compatible"
+
+        def __init__(self):
+            self.call_sizes = []
+
+        def json_or_error(self, prompt, *, single_request=False, **_kwargs):
+            aliases = re.findall(r"^- (p\d{3}):", prompt, flags=re.MULTILINE)
+            self.call_sizes.append(len(aliases))
+            return {
+                "ok": True,
+                "data": {"scored": [{
+                    "id": alias,
+                    "fit_score": 7.0,
+                    "diversity_score": 5.0,
+                    "hit_directions": ["protein design"],
+                    "category": "protein",
+                    "reason": "标题与蛋白质设计研究方向相关。",
+                } for alias in aliases]},
+                "error": "",
+            }
+
+    items = [{
+        "id": f"official-{index}",
+        "title": f"Protein design paper {index}",
+        "abstract": "Protein generation with diffusion and reinforcement learning.",
+        "venue": "TestVenue",
+        "year": 2026,
+        "category": "Generative models" if index < 60 else "Reinforcement learning",
+        "classification_source": "official",
+    } for index in range(100)]
+    llm = CompleteTitleLLM()
+
+    find_pipeline._prefilter_titles(
+        items,
+        find_pipeline.AppConfig(
+            provider="openai_compatible",
+            research_topic="protein design",
+            research_interest="protein diffusion and reinforcement learning",
+            llm_concurrency=1,
+        ),
+        llm,
+        "TestVenue",
+        lambda _message: None,
+        lambda: False,
+        dynamic_title_filter=True,
+        scan_all=True,
+    )
+
+    assert llm.call_sizes == [100]
+
+
+def test_find_title_prefilter_consolidates_repairs_across_primary_batches(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("USE_LLM_TITLE_FILTER", "1")
+    monkeypatch.setenv("TITLE_FILTER_SEQUENTIAL", "1")
+    monkeypatch.setenv("FIND_TITLE_SCORE_CACHE", "0")
+
+    class OmitOnePerPrimaryBatchLLM:
+        enabled = True
+        timeout_sec = 120
+        provider = "openai_compatible"
+
+        def __init__(self):
+            self.call_sizes = []
+
+        def json_or_error(self, prompt, *, single_request=False, **_kwargs):
+            aliases = re.findall(r"^- (p\d{3}):", prompt, flags=re.MULTILINE)
+            self.call_sizes.append(len(aliases))
+            returned = aliases[:-1] if "main request" in prompt else aliases
+            return {
+                "ok": True,
+                "data": {"scored": [{
+                    "id": alias,
+                    "fit_score": 7.0,
+                    "diversity_score": 5.0,
+                    "hit_directions": ["protein design"],
+                    "category": "protein",
+                    "reason": "标题与蛋白质设计研究方向相关。",
+                } for alias in returned]},
+                "error": "",
+            }
+
+    items = [{
+        "id": f"paper-{index}",
+        "title": f"Protein design paper {index}",
+        "abstract": "Protein generation with diffusion.",
+        "venue": "TestVenue",
+        "year": 2026,
+    } for index in range(200)]
+    llm = OmitOnePerPrimaryBatchLLM()
+
+    selected = find_pipeline._prefilter_titles(
+        items,
+        find_pipeline.AppConfig(
+            provider="openai_compatible",
+            research_topic="protein design",
+            research_interest="protein diffusion",
+            llm_concurrency=1,
+        ),
+        llm,
+        "TestVenue",
+        lambda _message: None,
+        lambda: False,
+        scan_all=True,
+    )
+
+    assert llm.call_sizes == [100, 100, 2]
+    assert sum(item["reason_source"] == "llm title filter" for item in selected) == 200
+
+
+def test_find_title_prefilter_refills_batches_after_cache_hits(monkeypatch, tmp_path):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("USE_LLM_TITLE_FILTER", "1")
+    monkeypatch.setenv("TITLE_FILTER_SEQUENTIAL", "1")
+    monkeypatch.setattr(find_pipeline, "_title_llm_score_cache_enabled", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(find_pipeline, "_load_title_llm_score_cache", lambda: (tmp_path / "title-cache.json", {"entries": {}}))
+    monkeypatch.setattr(find_pipeline, "_title_llm_cache_title_index", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(find_pipeline, "_store_title_llm_score_cache_entries", lambda *_args, **_kwargs: 0)
+
+    def fake_apply_cache(item, *_args, **_kwargs):
+        index = int(str(item.get("id") or "").split("-")[-1])
+        if index >= 50:
+            return False
+        item["title_llm_fit_score"] = 7.0
+        item["fit_score"] = 7.0
+        item["diversity_score"] = 5.0
+        item["reason_source"] = "llm title filter"
+        return True
+
+    monkeypatch.setattr(find_pipeline, "_apply_cached_title_llm_score", fake_apply_cache)
+
+    class CompleteTitleLLM:
+        enabled = True
+        timeout_sec = 120
+        provider = "openai_compatible"
+
+        def __init__(self):
+            self.call_sizes = []
+
+        def json_or_error(self, prompt, *, single_request=False, **_kwargs):
+            aliases = re.findall(r"^- (p\d{3}):", prompt, flags=re.MULTILINE)
+            self.call_sizes.append(len(aliases))
+            return {
+                "ok": True,
+                "data": {"scored": [{
+                    "id": alias,
+                    "fit_score": 7.0,
+                    "diversity_score": 5.0,
+                    "hit_directions": ["protein design"],
+                    "category": "protein",
+                    "reason": "标题与蛋白质设计研究方向相关。",
+                } for alias in aliases]},
+                "error": "",
+            }
+
+    items = [{
+        "id": f"paper-{index}",
+        "title": f"Protein design paper {index}",
+        "abstract": "Protein generation with diffusion.",
+        "venue": "TestVenue",
+        "year": 2026,
+    } for index in range(200)]
+    llm = CompleteTitleLLM()
+
+    find_pipeline._prefilter_titles(
+        items,
+        find_pipeline.AppConfig(provider="openai_compatible", research_interest="protein diffusion", llm_concurrency=1),
+        llm,
+        "TestVenue",
+        lambda _message: None,
+        lambda: False,
+        scan_all=True,
+    )
+
+    assert llm.call_sizes == [100, 50]
+
+
+def test_find_title_score_cache_is_independent_from_final_recommendation_policy(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    config = find_pipeline.AppConfig(
+        provider="openai_compatible",
+        base_url="https://llm.example.test/v1",
+        model="test-model",
+    )
+    item = {
+        "id": "paper-1",
+        "title": "Discrete Diffusion for Protein Design",
+        "abstract": "We evaluate a discrete diffusion model for protein sequence design.",
+        "venue": "TestVenue",
+        "year": 2026,
+        "category": "protein generation",
+    }
+    original_key = find_pipeline._title_llm_score_cache_key(item, config, "protein diffusion", "")
+
+    monkeypatch.setattr(find_pipeline, "SCORING_POLICY_VERSION", "future-final-ranking-policy")
+
+    assert find_pipeline._title_llm_score_cache_policy(item) == find_pipeline.TITLE_LLM_SCORE_CACHE_POLICY_TITLE_ONLY
+    assert find_pipeline._title_llm_score_cache_key(item, config, "protein diffusion", "") == original_key
+    assert find_pipeline._title_llm_cache_entry_valid({
+        "schema": find_pipeline.TITLE_LLM_SCORE_CACHE_SCHEMA_VERSION,
+        "policy": find_pipeline.TITLE_LLM_SCORE_CACHE_POLICY_WITH_SNIPPETS,
+        "scoring_policy": find_pipeline.TITLE_LLM_SCORING_POLICY_VERSION,
+        "fit_score": 7.2,
+        "diversity_score": 6.1,
+    }) is True
+
+
 def test_find_json_recovery_keeps_completed_scoring_and_translation_rows():
     finding_main = _load_finding_main()
     finding_runtime = finding_main._private_import("finding_runtime")
@@ -5867,13 +6967,337 @@ def test_find_json_recovery_keeps_completed_scoring_and_translation_rows():
     assert translated == {"translations": [{"id": "p001", "abstract_zh": "摘要"}]}
 
 
-def test_find_abstract_scoring_uses_local_ids_and_retries_mismatched_id(monkeypatch):
+@pytest.mark.parametrize("failure_kind", ["connection", "http_524"])
+def test_find_llm_client_single_request_disables_transport_retries(monkeypatch, failure_kind):
+    finding_main = _load_finding_main()
+    finding_runtime = finding_main._private_import("finding_runtime")
+    monkeypatch.setenv("LLM_RETRIES", "3")
+    calls = 0
+
+    def failing_urlopen(request, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if failure_kind == "http_524":
+            raise finding_runtime.urllib.error.HTTPError(
+                request.full_url,
+                524,
+                "gateway timeout",
+                {},
+                io.BytesIO(b"gateway timeout"),
+            )
+        raise finding_runtime.urllib.error.URLError("temporary outage")
+
+    monkeypatch.setattr(finding_runtime.urllib.request, "urlopen", failing_urlopen)
+    monkeypatch.setattr(finding_runtime.time, "sleep", lambda _seconds: None)
+    llm = finding_runtime.LLMClient(finding_runtime.AppConfig(
+        provider="openai_compatible",
+        base_url="https://llm.invalid/v1",
+        api_key="test-key",
+        model="test-model",
+    ))
+
+    result = llm.json_or_error("Return JSON only.", single_request=True)
+
+    assert result["ok"] is False
+    assert calls == 1
+
+
+def test_find_llm_client_single_request_disables_parse_retry(monkeypatch):
+    finding_main = _load_finding_main()
+    finding_runtime = finding_main._private_import("finding_runtime")
+    monkeypatch.setenv("LLM_RETRIES", "3")
+    calls = 0
+
+    class InvalidJsonResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            payload = {"choices": [{"message": {"content": '{"evaluations": ['}}]}
+            return json.dumps(payload).encode("utf-8")
+
+    def invalid_json_urlopen(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return InvalidJsonResponse()
+
+    monkeypatch.setattr(finding_runtime.urllib.request, "urlopen", invalid_json_urlopen)
+    llm = finding_runtime.LLMClient(finding_runtime.AppConfig(
+        provider="openai_compatible",
+        base_url="https://llm.invalid/v1",
+        api_key="test-key",
+        model="test-model",
+    ))
+
+    result = llm.json_or_error("Return JSON only.", single_request=True)
+
+    assert result["ok"] is False
+    assert calls == 1
+
+
+def test_find_llm_client_streams_one_chat_completion_request(monkeypatch):
+    finding_main = _load_finding_main()
+    finding_runtime = finding_main._private_import("finding_runtime")
+    requests = []
+
+    class StreamingResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def __iter__(self):
+            return iter([
+                b'data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}\n',
+                b'data: {"choices":[{"delta":{"content":"{\\\"scored\\\":"},"finish_reason":null}]}\n',
+                b'data: {"choices":[{"delta":{"content":"[{\\\"id\\\":\\\"p001\\\"}]}"},"finish_reason":null}]}\n',
+                b'data: {"choices":[{"delta":{"content":""},"finish_reason":"stop"}]}\n',
+                b'data: [DONE]\n',
+            ])
+
+    def streaming_urlopen(request, **_kwargs):
+        requests.append(request)
+        return StreamingResponse()
+
+    monkeypatch.setattr(finding_runtime.urllib.request, "urlopen", streaming_urlopen)
+    llm = finding_runtime.LLMClient(finding_runtime.AppConfig(
+        provider="openai_compatible",
+        base_url="https://llm.invalid/v1",
+        api_key="test-key",
+        model="test-model",
+    ))
+
+    result = llm.json_or_error("Score this title batch.", single_request=True, stream=True)
+
+    assert result["ok"] is True
+    assert result["data"] == {"scored": [{"id": "p001"}]}
+    assert len(requests) == 1
+    payload = json.loads(requests[0].data.decode("utf-8"))
+    assert payload["stream"] is True
+    assert requests[0].get_header("Accept") == "text/event-stream"
+
+
+def test_find_llm_client_direct_deepseek_forces_chat_and_uses_native_thinking_control(monkeypatch):
+    finding_main = _load_finding_main()
+    finding_runtime = finding_main._private_import("finding_runtime")
+    monkeypatch.setenv("LLM_API_MODE", "responses")
+    monkeypatch.setenv("LLM_DISABLE_THINKING", "1")
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "max")
+    requests = []
+
+    class JsonResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": '{"ok":true}'}}]}).encode("utf-8")
+
+    def fake_urlopen(request, **_kwargs):
+        requests.append(request)
+        return JsonResponse()
+
+    monkeypatch.setattr(finding_runtime.urllib.request, "urlopen", fake_urlopen)
+    llm = finding_runtime.LLMClient(finding_runtime.AppConfig(
+        provider="deepseek",
+        base_url="https://api.deepseek.com/v1/",
+        api_key="test-key",
+        model="deepseek-v4-flash",
+    ))
+
+    result = llm.json_or_error("Return JSON only.", single_request=True)
+
+    assert result["ok"] is True
+    assert llm.summary()["api_mode"] == "chat_completions"
+    assert len(requests) == 1
+    assert requests[0].full_url == "https://api.deepseek.com/v1/chat/completions"
+    payload = json.loads(requests[0].data.decode("utf-8"))
+    assert payload["thinking"] == {"type": "disabled"}
+    assert "enable_thinking" not in payload
+    assert "extra_body" not in payload
+    assert "reasoning_effort" not in payload
+
+
+def test_find_llm_client_qwen_uses_top_level_enable_thinking_without_sdk_wrapper(monkeypatch):
+    finding_main = _load_finding_main()
+    finding_runtime = finding_main._private_import("finding_runtime")
+    monkeypatch.setenv("LLM_DISABLE_THINKING", "1")
+    requests = []
+
+    class JsonResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": '{"ok":true}'}}]}).encode("utf-8")
+
+    def fake_urlopen(request, **_kwargs):
+        requests.append(request)
+        return JsonResponse()
+
+    monkeypatch.setattr(finding_runtime.urllib.request, "urlopen", fake_urlopen)
+    llm = finding_runtime.LLMClient(finding_runtime.AppConfig(
+        provider="openai_compatible",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        api_key="test-key",
+        model="qwen3.7-plus",
+    ))
+
+    result = llm.json_or_error("Return JSON only.", single_request=True)
+
+    assert result["ok"] is True
+    payload = json.loads(requests[0].data.decode("utf-8"))
+    assert payload["enable_thinking"] is False
+    assert "thinking" not in payload
+    assert "extra_body" not in payload
+
+
+def test_find_llm_client_requires_base_url_even_with_key_and_model():
+    finding_main = _load_finding_main()
+    finding_runtime = finding_main._private_import("finding_runtime")
+    llm = finding_runtime.LLMClient(finding_runtime.AppConfig(
+        provider="deepseek",
+        base_url="",
+        api_key="test-key",
+        model="deepseek-v4-flash",
+    ))
+
+    assert llm.enabled is False
+    assert llm.json_or_error("Return JSON only.")["error"] == "LLM is not configured"
+
+
+def test_find_llm_client_learns_unsupported_json_mode_before_strict_scoring(monkeypatch):
+    finding_main = _load_finding_main()
+    finding_runtime = finding_main._private_import("finding_runtime")
+    monkeypatch.setattr(finding_runtime.time, "sleep", lambda _seconds: None)
+    requests = []
+
+    class JsonResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": '{"ok":true}'}}]}).encode("utf-8")
+
+    def fake_urlopen(request, **_kwargs):
+        requests.append(request)
+        payload = json.loads(request.data.decode("utf-8"))
+        if "response_format" in payload:
+            raise finding_runtime.urllib.error.HTTPError(
+                request.full_url,
+                400,
+                "bad request",
+                {},
+                io.BytesIO(b'{"error":{"message":"unsupported parameter: response_format"}}'),
+            )
+        return JsonResponse()
+
+    monkeypatch.setattr(finding_runtime.urllib.request, "urlopen", fake_urlopen)
+    llm = finding_runtime.LLMClient(finding_runtime.AppConfig(
+        provider="openai_compatible",
+        base_url="https://generic.example.test/v1",
+        api_key="test-key",
+        model="generic-model",
+    ))
+
+    probe = llm.json_or_error("Return JSON only.")
+    before_strict = len(requests)
+    strict = llm.json_or_error("Return JSON only.", single_request=True)
+
+    assert probe["ok"] is True, probe
+    assert strict["ok"] is True
+    assert before_strict == 2
+    assert len(requests) == 3
+    assert "response_format" in json.loads(requests[0].data.decode("utf-8"))
+    assert "response_format" not in json.loads(requests[1].data.decode("utf-8"))
+    assert "response_format" not in json.loads(requests[2].data.decode("utf-8"))
+
+
+def test_find_live_gate_only_disables_scoring_for_fatal_configuration_errors():
+    find_pipeline = _load_find_pipeline()
+
+    class EnabledLLM:
+        enabled = True
+
+    llm = EnabledLLM()
+
+    assert find_pipeline._llm_live_gate_requires_fallback(
+        llm,
+        {"ok": False, "error": "LLM HTTP 502 via chat_completions: upstream unavailable"},
+    ) is False
+    assert find_pipeline._llm_live_gate_requires_fallback(
+        llm,
+        {"ok": False, "error": "LLM request timed out"},
+    ) is False
+    assert find_pipeline._llm_live_gate_requires_fallback(
+        llm,
+        {"ok": False, "error": "LLM HTTP 401 via chat_completions: invalid API key"},
+    ) is True
+    assert find_pipeline._llm_live_gate_requires_fallback(llm, {"ok": True, "error": ""}) is False
+
+
+@pytest.mark.parametrize("status", [408, 409, 500, 502, 503, 504, 520, 522, 524, 529])
+def test_find_gateway_failures_are_classified_as_transient(status):
+    find_pipeline = _load_find_pipeline()
+
+    assert find_pipeline._is_transient_llm_service_error(f"LLM HTTP {status} via chat_completions") is True
+
+
+def test_find_single_request_wrapper_does_not_invoke_legacy_client():
+    find_pipeline = _load_find_pipeline()
+
+    class LegacyClient:
+        calls = 0
+
+        def json_or_error(self, _prompt):
+            self.calls += 1
+            return {"ok": True, "data": {}, "error": ""}
+
+    llm = LegacyClient()
+    result = find_pipeline._json_or_error_single_request(llm, "score this batch", max_tokens=0)
+
+    assert result["ok"] is False
+    assert llm.calls == 0
+
+
+def test_find_single_request_wrapper_rejects_kwargs_only_client():
+    find_pipeline = _load_find_pipeline()
+
+    class KwargsIgnoringLegacyClient:
+        calls = 0
+
+        def json_or_error(self, _prompt, **_kwargs):
+            self.calls += 1
+            return {"ok": True, "data": {}, "error": ""}
+
+    llm = KwargsIgnoringLegacyClient()
+    result = find_pipeline._json_or_error_single_request(llm, "score this batch", max_tokens=0)
+
+    assert result["ok"] is False
+    assert llm.calls == 0
+
+
+def test_find_abstract_scoring_repairs_mismatched_rows_in_one_batch(monkeypatch):
     find_pipeline = _load_find_pipeline()
     monkeypatch.setenv("ABSTRACT_SCORING_BATCH_SIZE", "10")
     monkeypatch.setenv("ABSTRACT_SCORING_MAX_BATCH_SIZE", "10")
     monkeypatch.setenv("ABSTRACT_SCORING_MAX_WORKERS", "1")
     monkeypatch.setenv("ABSTRACT_SCORING_WORKER_CAP", "1")
-    monkeypatch.setenv("OMITTED_ITEM_RETRY_ATTEMPTS", "1")
+    monkeypatch.setenv("OMITTED_ITEM_RETRY_ATTEMPTS", "3")
     monkeypatch.setenv("FIND_FINAL_SCORE_CACHE", "0")
 
     class MismatchedIdLLM:
@@ -5885,12 +7309,18 @@ def test_find_abstract_scoring_uses_local_ids_and_retries_mismatched_id(monkeypa
         def __init__(self):
             self.calls = []
 
-        def json_or_error(self, prompt, **kwargs):
+        def json_or_error(self, prompt, *, single_request=False, **kwargs):
             aliases = re.findall(r"^ID: (p\d{3})$", prompt, flags=re.MULTILINE)
-            self.calls.append({"aliases": aliases, "max_tokens": kwargs.get("max_tokens"), "prompt": prompt})
+            self.calls.append({
+                "aliases": aliases,
+                "max_tokens": kwargs.get("max_tokens"),
+                "single_request": single_request,
+                "prompt": prompt,
+            })
             rows = []
+            first_request = len(self.calls) == 1
             for index, alias in enumerate(aliases):
-                returned_id = "rewritten-paper-id" if len(aliases) > 1 and index == len(aliases) - 1 else alias
+                returned_id = "rewritten-paper-id" if first_request and index >= len(aliases) - 3 else alias
                 rows.append({
                     "id": returned_id,
                     "category": "protein generation",
@@ -5941,22 +7371,364 @@ def test_find_abstract_scoring_uses_local_ids_and_retries_mismatched_id(monkeypa
     )
 
     assert len(evaluated) == 10
-    assert all(item["reason_source"] == "llm abstract evaluation" for item in evaluated)
-    assert [len(call["aliases"]) for call in llm.calls] == [10, 1]
+    assert sum(item["reason_source"] == "llm abstract evaluation" for item in evaluated) == 10
+    unresolved = [item for item in evaluated if item["reason_source"] != "llm abstract evaluation"]
+    assert unresolved == []
+    assert [len(call["aliases"]) for call in llm.calls] == [10, 3]
+    assert all(call["single_request"] is True for call in llm.calls)
     assert all(call["max_tokens"] == 0 for call in llm.calls)
     assert all("ID: real-paper-" not in call["prompt"] for call in llm.calls)
     assert full_abstract_marker in llm.calls[0]["prompt"]
 
 
-def test_find_recommendations_require_topic_evidence_without_forcing_the_target():
+def test_find_abstract_scoring_batch_size_is_hard_capped_at_ten(monkeypatch):
     find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("ABSTRACT_SCORING_BATCH_SIZE", "20")
+    monkeypatch.setenv("ABSTRACT_SCORING_MAX_BATCH_SIZE", "20")
+    items = [
+        {"title": f"Paper {index}", "abstract": "A complete abstract."}
+        for index in range(20)
+    ]
+
+    batch_size = find_pipeline._adaptive_final_scoring_batch_size(
+        find_pipeline.AppConfig(provider="openai_compatible", abstract_scoring_batch_size=20),
+        items,
+        "protein design",
+        "protein generation route",
+    )
+
+    assert batch_size == 10
+
+
+def test_find_abstract_scoring_multibatch_failure_uses_one_batched_repair(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("ABSTRACT_SCORING_BATCH_SIZE", "20")
+    monkeypatch.setenv("ABSTRACT_SCORING_MAX_BATCH_SIZE", "20")
+    monkeypatch.setenv("ABSTRACT_SCORING_MAX_WORKERS", "1")
+    monkeypatch.setenv("ABSTRACT_SCORING_WORKER_CAP", "1")
+    monkeypatch.setenv("FIND_FINAL_SCORE_CACHE", "0")
+
+    class TypeErrorAfterIoLLM:
+        enabled = True
+        timeout_sec = 120
+        retries = 3
+        provider = "openai_compatible"
+
+        def __init__(self):
+            self.calls = []
+            self.raised = False
+
+        def json_or_error(self, prompt, *, single_request=False, **kwargs):
+            aliases = re.findall(r"^ID: (p\d{3})$", prompt, flags=re.MULTILINE)
+            self.calls.append({"aliases": aliases, "single_request": single_request})
+            if len(self.calls) == 2 and single_request and not self.raised:
+                self.raised = True
+                raise TypeError("single_request post-I/O failure")
+            rows = [
+                {
+                    "id": alias,
+                    "category": "protein generation",
+                    "fit_score": 8.1,
+                    "diversity_score": 6.2,
+                    "recommend_for_deep_reading": True,
+                    "topic_evidence": "passed: protein diffusion",
+                    "topic_evidence_supported": True,
+                    "matched_topic_route": "protein diffusion",
+                    "topic_evidence_basis": "The abstract evaluates protein diffusion generation.",
+                    "missing_topic_evidence": [],
+                    "hit_directions_zh": ["蛋白质扩散生成"],
+                    "hit_directions_en": ["protein diffusion generation"],
+                    "fit_explanation_zh": "摘要给出了蛋白质扩散生成方法与实验结果。该方法可用于当前研究。",
+                    "fit_explanation_en": "The abstract presents a protein diffusion method and results. It is reusable for this project.",
+                    "reason_zh": "论文提出的可控生成方法与当前研究任务契合。其约束策略可帮助方法比较，并为评测设计提供可迁移借鉴。",
+                    "reason_en": "The controlled-generation method fits the current research task. Its constraint strategy helps compare methods and provides reusable evaluation design.",
+                }
+                for alias in aliases
+            ]
+            return {"ok": True, "data": {"evaluations": rows}, "error": ""}
+
+    items = [
+        {
+            "id": f"real-paper-{index}",
+            "title": f"Protein diffusion study {index}",
+            "abstract": "We develop and evaluate a diffusion method for controllable protein generation.",
+            "source": "test",
+            "venue": "TestVenue",
+            "year": 2026,
+        }
+        for index in range(21)
+    ]
+    llm = TypeErrorAfterIoLLM()
+    evaluated = find_pipeline._evaluate_items(
+        items,
+        find_pipeline.AppConfig(
+            provider="openai_compatible",
+            research_topic="protein diffusion",
+            research_interest="controllable protein generation",
+            title_abstract_scoring_limit=21,
+            abstract_scoring_batch_size=20,
+            abstract_scoring_max_workers=1,
+        ),
+        llm,
+        "TestVenue",
+        lambda _message: None,
+    )
+
+    assert [len(call["aliases"]) for call in llm.calls] == [10, 10, 1, 10]
+    assert all(call["single_request"] is True for call in llm.calls)
+    assert sum(item["reason_source"] == "llm abstract evaluation" for item in evaluated) == 21
+    unresolved = [item for item in evaluated if item.get("llm_single_request_unresolved")]
+    assert unresolved == []
+
+
+def test_find_final_scoring_normalizes_observed_live_response_aliases(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("ABSTRACT_SCORING_MAX_WORKERS", "1")
+    monkeypatch.setenv("ABSTRACT_SCORING_WORKER_CAP", "1")
+    monkeypatch.setenv("FIND_FINAL_SCORE_CACHE", "0")
+
+    class LiveShapeLLM:
+        enabled = True
+        timeout_sec = 120
+        provider = "openai_compatible"
+
+        def json_or_error(self, prompt, *, single_request=False, **_kwargs):
+            aliases = re.findall(r"^ID: (p\d{3})$", prompt, flags=re.MULTILINE)
+            return {
+                "ok": True,
+                "data": {
+                    "evaluations": [{
+                        "id": alias,
+                        "category": "protein generation",
+                        "fit_score": 8.4,
+                        "diversity_score": 6.8,
+                        "recommend_for_deep_reading": True,
+                        "topic_evidence": "passed: protein diffusion",
+                        "topic_evidence_supported": True,
+                        "matched_topic_route": "protein diffusion",
+                        "topic_evidence_basis": "The abstract reports a controllable protein diffusion method.",
+                        "missing_topic_evidence": [],
+                        "hit_direction_chinese": ["可控蛋白质扩散"],
+                        "hit_direction_english": ["controllable protein diffusion"],
+                        "fit_explanation_chinese": "摘要明确提出可控蛋白质扩散模型。实验直接比较了生成质量。",
+                        "fit_explanation_english": "The abstract specifies a controllable protein diffusion model. Its experiments directly compare generation quality.",
+                        "recommendation_reason_chinese": "论文提出可控蛋白质扩散模型，与当前生成任务直接相关。其约束机制和生成质量评测可帮助比较方案，并可迁移到后续实验设计。",
+                        "recommendation_reason_english": "The paper presents a controllable protein diffusion model that directly fits the generation task. Its constraint mechanism and generation-quality evaluation support method comparison and transfer to later experiments.",
+                    } for alias in aliases],
+                },
+                "error": "",
+            }
+
+    item = {
+        "id": "live-shape",
+        "title": "Controllable protein diffusion",
+        "abstract": "We develop and evaluate a diffusion model for controllable protein generation.",
+        "source": "test",
+        "venue": "TestVenue",
+        "year": 2026,
+    }
+    evaluated = find_pipeline._evaluate_items(
+        [item],
+        find_pipeline.AppConfig(provider="openai_compatible", research_interest="controllable protein diffusion"),
+        LiveShapeLLM(),
+        "all sources",
+        lambda _message: None,
+    )
+
+    assert evaluated[0]["reason_source"] == "llm abstract evaluation"
+    assert evaluated[0]["reason_zh"].startswith("论文提出可控蛋白质扩散模型")
+    assert evaluated[0]["reason_en"].startswith("The paper presents a controllable protein diffusion model")
+    assert evaluated[0]["hit_directions_zh"] == ["可控蛋白质扩散"]
+    assert evaluated[0]["hit_directions_en"] == ["controllable protein diffusion"]
+
+
+def test_find_reason_quality_repair_is_batched_and_scored_count_is_monotonic(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("ABSTRACT_SCORING_BATCH_SIZE", "10")
+    monkeypatch.setenv("ABSTRACT_SCORING_MAX_BATCH_SIZE", "10")
+    monkeypatch.setenv("ABSTRACT_SCORING_MAX_WORKERS", "1")
+    monkeypatch.setenv("ABSTRACT_SCORING_WORKER_CAP", "1")
+    monkeypatch.setenv("OMITTED_ITEM_RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("FIND_FINAL_SCORE_CACHE", "0")
+
+    class ShortReasonLLM:
+        enabled = True
+        timeout_sec = 120
+        provider = "openai_compatible"
+
+        def __init__(self):
+            self.call_sizes = []
+
+        def json_or_error(self, prompt, *, single_request=False, **_kwargs):
+            aliases = re.findall(r"^ID: (p\d{3})$", prompt, flags=re.MULTILINE)
+            self.call_sizes.append(len(aliases))
+            return {
+                "ok": True,
+                "data": {"evaluations": [{
+                    "id": alias,
+                    "category": "protein generation",
+                    "fit_score": 8.0,
+                    "diversity_score": 6.0,
+                    "recommend_for_deep_reading": True,
+                    "topic_evidence": "passed: protein diffusion",
+                    "topic_evidence_supported": True,
+                    "matched_topic_route": "protein diffusion",
+                    "topic_evidence_basis": "The abstract evaluates protein diffusion.",
+                    "missing_topic_evidence": [],
+                    "hit_directions_zh": ["蛋白质扩散"],
+                    "hit_directions_en": ["protein diffusion"],
+                    "fit_explanation_zh": "摘要给出了蛋白质扩散模型。实验比较了生成质量。",
+                    "fit_explanation_en": "The abstract gives a protein diffusion model. Experiments compare generation quality.",
+                    "reason_zh": "该模型可用于蛋白质生成评测。",
+                    "reason_en": "The model can help protein generation evaluation.",
+                } for alias in aliases]},
+                "error": "",
+            }
+
+    items = [{
+        "id": f"short-{index}",
+        "title": f"Protein diffusion {index}",
+        "abstract": "We develop and evaluate a diffusion model for controllable protein generation.",
+        "source": "source-a" if index < 6 else "source-b",
+        "venue": "A" if index < 6 else "B",
+        "year": 2026,
+    } for index in range(10)]
+    llm = ShortReasonLLM()
+    progress_events = []
+
+    def progress(phase, current, total, _message, **kwargs):
+        progress_events.append((phase, current, total, dict(kwargs.get("count_updates") or {})))
+
+    evaluated = find_pipeline._evaluate_items(
+        items,
+        find_pipeline.AppConfig(provider="openai_compatible", research_interest="controllable protein diffusion"),
+        llm,
+        "all sources",
+        lambda _message: None,
+        progress=progress,
+    )
+
+    assert llm.call_sizes == [10, 10, 10]
+    assert all(item["reason_source"] == "llm abstract evaluation" for item in evaluated)
+    assert all(item.get("reason_quality_invalid") for item in evaluated)
+    assert not any(item.get("llm_retry_exhausted") for item in evaluated)
+    scoring_progress = [event for event in progress_events if event[0] == "abstract_scoring"]
+    assert scoring_progress
+    assert len({event[2] for event in scoring_progress}) == 1
+    assert [event[1] for event in scoring_progress] == sorted(event[1] for event in scoring_progress)
+    scored_counts = [event[3].get("llm_scored_candidates", 0) for event in scoring_progress]
+    assert scored_counts == sorted(scored_counts)
+    assert scored_counts[-1] == 10
+
+
+def test_find_final_scoring_retains_valid_scores_when_placeholder_prose_repairs_exhaust(monkeypatch):
+    find_pipeline = _load_find_pipeline()
+    monkeypatch.setenv("ABSTRACT_SCORING_MAX_WORKERS", "1")
+    monkeypatch.setenv("ABSTRACT_SCORING_WORKER_CAP", "1")
+    monkeypatch.setenv("OMITTED_ITEM_RETRY_ATTEMPTS", "1")
+    monkeypatch.setenv("FIND_FINAL_SCORE_CACHE", "0")
+
+    class PlaceholderProseLLM:
+        enabled = True
+        timeout_sec = 120
+        provider = "openai_compatible"
+
+        def __init__(self):
+            self.call_sizes = []
+
+        def json_or_error(self, prompt, *, single_request=False, **_kwargs):
+            aliases = re.findall(r"^ID: (p\d{3})$", prompt, flags=re.MULTILINE)
+            self.call_sizes.append(len(aliases))
+            return {
+                "ok": True,
+                "data": {"evaluations": [{
+                    "id": alias,
+                    "category": "short category",
+                    "fit_score": 8.4,
+                    "diversity_score": 6.8,
+                    "recommend_for_deep_reading": True,
+                    "topic_evidence": "passed: protein diffusion",
+                    "topic_evidence_supported": True,
+                    "matched_topic_route": "protein diffusion",
+                    "topic_evidence_basis": "The abstract reports a controllable protein diffusion method.",
+                    "missing_topic_evidence": [],
+                    "hit_directions_zh": ["可控蛋白质扩散"],
+                    "hit_directions_en": ["controllable protein diffusion"],
+                    "fit_explanation_zh": "摘要明确提出可控蛋白质扩散模型。实验直接比较了生成质量。",
+                    "fit_explanation_en": "The abstract specifies a controllable protein diffusion model. Its experiments directly compare generation quality.",
+                    "reason_zh": "论文提出可控蛋白质扩散模型，与当前生成任务直接相关。其约束机制和生成质量评测可帮助比较方案，并可迁移到后续实验设计。",
+                    "reason_en": "The paper presents a controllable protein diffusion model that directly fits the generation task. Its constraint mechanism and generation-quality evaluation support method comparison and transfer to later experiments.",
+                } for alias in aliases]},
+                "error": "",
+            }
+
+    item = {
+        "id": "placeholder-prose",
+        "title": "Controllable protein diffusion",
+        "abstract": "We develop and evaluate a diffusion model for controllable protein generation.",
+        "source": "test",
+        "venue": "TestVenue",
+        "year": 2026,
+    }
+    llm = PlaceholderProseLLM()
     config = find_pipeline.AppConfig(
         provider="openai_compatible",
-        api_key="test-key",
-        model="test-model",
-        max_recommended_papers=2,
-        research_interest="protein design",
+        research_interest="controllable protein diffusion",
+        max_recommended_papers=1,
     )
+    evaluated = find_pipeline._evaluate_items(
+        [item],
+        config,
+        llm,
+        "all sources",
+        lambda _message: None,
+    )
+
+    assert llm.call_sizes == [1, 1]
+    assert evaluated[0]["reason_source"] == "llm abstract evaluation"
+    assert evaluated[0]["fit_score"] == 8.4
+    assert evaluated[0]["diversity_score"] == 6.8
+    assert evaluated[0]["reason_quality_invalid"] is True
+    assert evaluated[0]["llm_reason_repair_exhausted"] is True
+    assert not evaluated[0].get("llm_retry_exhausted")
+    assert find_pipeline._recommended(evaluated, config, source_count=1) == []
+    assert evaluated[0]["reason_quality_invalid"] is True
+    assert find_pipeline._final_llm_score_cache_entry(evaluated[0], "test-key", config) == {}
+
+
+def test_find_diagnostics_distinguishes_zero_scores_from_invalid_reason_quality():
+    find_pipeline = _load_find_pipeline()
+    zero_score_diagnostics = find_pipeline._run_diagnostics({
+        "evaluated_candidates": [{
+            "id": "missing-score",
+            "reason_source": "adaptive profile fallback",
+            "llm_retry_exhausted": True,
+        }],
+        "strong_recommendations": [],
+        "scoring_runtime": {"title_abstract_scoring_selected_count": 1},
+    })
+    warning_codes = {row["code"] for row in zero_score_diagnostics["warnings"]}
+    assert "final_llm_zero_valid_scores" in warning_codes
+    assert zero_score_diagnostics["survey_stats"]["llm_scored_candidates"] == 0
+
+    invalid_reason_diagnostics = find_pipeline._run_diagnostics({
+        "evaluated_candidates": [{
+            "id": "valid-score-invalid-reason",
+            "reason_source": "llm abstract evaluation",
+            "reason_quality_invalid": True,
+        }],
+        "strong_recommendations": [],
+        "scoring_runtime": {"title_abstract_scoring_selected_count": 1},
+    })
+    invalid_warning_codes = {row["code"] for row in invalid_reason_diagnostics["warnings"]}
+    assert "llm_reason_quality_repair_exhausted" in invalid_warning_codes
+    assert "final_llm_zero_valid_scores" not in invalid_warning_codes
+    assert invalid_reason_diagnostics["survey_stats"]["llm_scored_candidates"] == 1
+    assert invalid_reason_diagnostics["survey_stats"]["llm_reason_quality_invalid_candidates"] == 1
+
+
+def test_find_recommendations_fill_dynamic_minimum_target_from_valid_final_scores_with_topic_audit_only():
+    find_pipeline = _load_find_pipeline()
 
     def candidate(item_id: str, score: float, **updates) -> dict:
         row = {
@@ -5969,38 +7741,56 @@ def test_find_recommendations_require_topic_evidence_without_forcing_the_target(
             "diversity_score": score,
             "recommendation_score": score,
             "topic_evidence_supported": False,
+            "topic_evidence_audit_only": True,
             "topic_evidence": "weak: missing adaptive topic evidence",
-            "missing_topic_evidence": ["protein target"],
+            "missing_topic_evidence": ["complete current topic route"],
             "llm_complete_route_guard_failed": True,
             "foundation_demoted_from_strong": True,
             "not_positive_support": True,
-            "reason_zh": "论文的方法直接针对蛋白质设计任务，主题与当前研究目标契合。其模型和实验评测可帮助比较约束策略，并为后续方法迁移提供借鉴。",
-            "reason_en": "The method directly addresses the protein-design task and fits the research target. Its model and experimental evaluation help compare constraint strategies and provide transferable design evidence.",
+            "reason_zh": "论文提出了与当前研究任务相关的具体方法和实验机制。其受控评测可帮助比较候选方案，并为后续方法迁移提供借鉴。",
+            "reason_en": "The paper presents a concrete method and experimental mechanism relevant to the current research task. Its controlled evaluation helps compare candidates and provides transferable evidence.",
         }
         row.update(updates)
         return row
 
-    ranked = find_pipeline._recommended(
-        [
-            candidate("unsupported", 9.9),
-            candidate("scored-unrelated", 2.0, topic_evidence_supported=True, topic_evidence="passed: direct topic match", missing_topic_evidence=[], llm_complete_route_guard_failed=False, foundation_demoted_from_strong=False, not_positive_support=False),
-            candidate("low", 2.1, topic_evidence_supported=True, topic_evidence="passed: direct topic match", missing_topic_evidence=[], llm_complete_route_guard_failed=False, foundation_demoted_from_strong=False, not_positive_support=False),
-            candidate("high", 4.9, title="Shared protein design paper", topic_evidence_supported=True, topic_evidence="passed: direct topic match", missing_topic_evidence=[], llm_complete_route_guard_failed=False, foundation_demoted_from_strong=False, not_positive_support=False),
-            candidate("duplicate", 1.0, title="Shared protein design paper"),
-            candidate("missing-abstract", 10.0, abstract=""),
-            candidate("unscored", 8.0, reason_source="llm title filter"),
-        ],
-        config,
-        source_count=1,
-    )
+    cases = [
+        (1, 1, 5),
+        (7, 3, 15),
+        (20, 5, 25),
+        (37, 2, 37),
+        (50, 5, 50),
+        (137, 8, 137),
+        (200, 1, 200),
+    ]
+    for webpage_value, source_count, expected_target in cases:
+        config = find_pipeline.AppConfig(
+            provider="openai_compatible",
+            api_key="test-key",
+            model="test-model",
+            max_recommended_papers=webpage_value,
+            research_interest="current research task",
+        )
+        valid = [candidate(f"ranked-{index:03d}", 10.0 - index * 0.001) for index in range(220)]
+        ranked = find_pipeline._recommended(
+            [
+                candidate("invalid-reason", 99.0, reason_quality_invalid=True),
+                candidate("missing-abstract", 98.0, abstract=""),
+                candidate("unscored", 97.0, reason_source="llm title filter"),
+                *valid,
+            ],
+            config,
+            source_count=source_count,
+        )
 
-    assert [item["id"] for item in ranked] == ["high", "low"]
-    assert all(item["find_recommendation"] for item in ranked)
-    assert all(item["topic_evidence_supported"] is True for item in ranked)
-    assert all(item["strict_strong_anchor"] is True for item in ranked)
-    assert find_pipeline._strict_strong_anchor_count(ranked) == 2
-    assert all("not_positive_support" not in item for item in ranked)
-    assert ranked[1]["fit_score"] == 2.1
+        assert len(ranked) == expected_target
+        assert [item["id"] for item in ranked] == [f"ranked-{index:03d}" for index in range(expected_target)]
+        assert all(item["find_recommendation"] for item in ranked)
+        assert all(item["topic_evidence_supported"] is False for item in ranked)
+        assert all(item["topic_evidence_audit_only"] is True for item in ranked)
+        assert all(item["strict_strong_anchor"] is True for item in ranked)
+        assert find_pipeline._strict_strong_anchor_count(ranked) == expected_target
+        assert all("not_positive_support" not in item for item in ranked)
+        assert all("foundation_demoted_from_strong" not in item for item in ranked)
 
     local_only = candidate("local-only", 9.9, reason_source="adaptive profile fallback")
     assert find_pipeline._recommended(
@@ -6008,6 +7798,26 @@ def test_find_recommendations_require_topic_evidence_without_forcing_the_target(
         find_pipeline.AppConfig(provider="mock", api_key="", max_recommended_papers=1),
         source_count=1,
     ) == []
+
+
+def test_find_negative_topic_regex_does_not_reject_gradient_free_method():
+    find_pipeline = _load_find_pipeline()
+    gradient_free = {
+        "title": "Gradient-Free RL Fine-Tuning for Discrete Diffusion",
+        "abstract": "We introduce gradient-free reinforcement learning for discrete diffusion sequence design.",
+        "topic_evidence": "passed: discrete diffusion post-training",
+        "topic_evidence_supported": True,
+        "reason_zh": "本文提出梯度无关优化和奖励塑形方法，与离散扩散后训练直接相关。",
+        "reason_en": "The method directly supports discrete diffusion post-training.",
+        "evidence_role": "direct_target",
+    }
+    unrelated = {
+        **gradient_free,
+        "reason_zh": "这项工作与当前研究主题无关，只研究图像分类。",
+    }
+
+    assert find_pipeline._explicit_llm_negative_strong_reason(gradient_free) == ""
+    assert find_pipeline._explicit_llm_negative_strong_reason(unrelated)
 
 
 def test_find_recommendation_target_is_at_least_five_per_selected_source():
@@ -6071,7 +7881,7 @@ def test_find_weak_topic_audit_does_not_rewrite_final_llm_scores():
         "protein design",
     )
 
-    assert item["topic_evidence_audit_only"] is False
+    assert item["topic_evidence_audit_only"] is True
     assert item["topic_evidence_supported"] is False
     assert item["fit_score"] == 7.4
     assert item["diversity_score"] == 6.8
@@ -8741,11 +10551,10 @@ def test_find_collects_all_selected_sources_before_final_scoring(monkeypatch, tm
         }
 
     def fake_evaluate_items(items, _config, _llm, source_name, *_args, **_kwargs):
-        events.append(f"score:{source_name}")
+        events.append(f"score:{source_name}:{len(items)}")
         rows = []
         for item in items:
-            row = dict(item)
-            row.update({
+            item.update({
                 "reason_source": "llm abstract evaluation",
                 "fit_score": 8.2,
                 "diversity_score": 6.4,
@@ -8760,7 +10569,7 @@ def test_find_collects_all_selected_sources_before_final_scoring(monkeypatch, tm
                 "fit_explanation_zh": "摘要包含条件生成证据。",
                 "fit_explanation_en": "The abstract contains conditional generation evidence.",
             })
-            rows.append(row)
+            rows.append(item)
         return rows
 
     monkeypatch.setattr(find_pipeline, "create_run_dir", fake_create_run_dir)
@@ -8814,12 +10623,9 @@ def test_find_collects_all_selected_sources_before_final_scoring(monkeypatch, tm
     source_collection_index = events.index("phase:source_collection_complete")
     first_score_index = min(index for index, event in enumerate(events) if event.startswith("score:"))
     assert source_collection_index < first_score_index
-    assert {event for event in events if event.startswith("score:")} == {
-        "score:nature",
-        "score:science",
-        "score:arxiv",
-        "score:biorxiv",
-    }
+    assert [event for event in events if event.startswith("score:")] == ["score:all sources:4"]
+    assert len(result["evaluated_candidates"]) == 4
+    assert {item["source"] for item in result["evaluated_candidates"]} == {"nature", "science", "arxiv", "biorxiv"}
 
 
 def test_find_title_abstract_scoring_groups_use_global_rank_and_deduplication():
@@ -10241,6 +12047,12 @@ def test_find_preserves_natural_llm_recommendation_reason_without_template_rewri
     assert find_pipeline._recommendation_reason_unusable(
         "The generation method is relevant to the research task and works without extra labels. Its model evaluation helps compare approaches and supports transferable experimental design.", zh=False
     ) is False
+    assert find_pipeline._has_internal_find_public_text(
+        "We find that the model improves the benchmark. The findings support reuse in later evaluation.", zh=False
+    ) is False
+    assert find_pipeline._has_internal_find_public_text(
+        "The Find-stage score is only an internal candidate signal.", zh=False
+    ) is True
     reason_zh = (
         "论文研究条件蛋白生成中的结构约束，与项目关注的可控蛋白设计问题直接契合。"
         "其条件编码与生成评测能够帮助比较现有路线的约束表达能力，并为实验基线选择提供依据。"
@@ -10275,7 +12087,7 @@ def test_find_preserves_natural_llm_recommendation_reason_without_template_rewri
     assert find_pipeline._has_internal_find_public_text(natural_finding_reason_en, zh=False) is False
     assert find_pipeline._recommendation_reason_unusable(natural_finding_reason_en, zh=False) is False
     assert find_pipeline._has_internal_find_public_text("The Find stage produced this recommendation.", zh=False) is True
-    assert find_pipeline.FINAL_LLM_SCORE_CACHE_PROMPT_POLICY == "final_title_abstract_prompt_v33_unanchored_complete_abstract_strict_reason"
+    assert find_pipeline.FINAL_LLM_SCORE_CACHE_PROMPT_POLICY == "final_title_abstract_prompt_v35_ranked_topn_topic_audit"
     source = (ROOT / "modules" / "finding" / "scripts" / "flow" / "pipeline.py").read_text(encoding="utf-8")
     assert "do not use a prescribed opening, generic research-direction boilerplate" in source
     assert "def zh_reason()" not in source

@@ -1080,28 +1080,117 @@ def _extract_chat_text(raw: Any) -> str:
     return ""
 
 
+def _stream_content_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        chunks: list[str] = []
+        for part in value:
+            if isinstance(part, str):
+                chunks.append(part)
+            elif isinstance(part, dict):
+                for key in ["text", "content", "output_text"]:
+                    inner = part.get(key)
+                    if isinstance(inner, str):
+                        chunks.append(inner)
+                        break
+        return "".join(chunks)
+    if isinstance(value, dict):
+        for key in ["text", "content", "output_text"]:
+            inner = value.get(key)
+            if isinstance(inner, str):
+                return inner
+    return ""
+
+
+def _read_streaming_chat_text(response: Any, *, use_responses: bool) -> str:
+    chunks: list[str] = []
+    fallback_text = ""
+    non_sse_lines: list[bytes] = []
+    event_count = 0
+    finish_reasons: list[str] = []
+    for raw_line in response:
+        line = raw_line.strip()
+        if not line:
+            continue
+        if not line.startswith(b"data:"):
+            non_sse_lines.append(line)
+            continue
+        data = line[5:].strip()
+        if not data or data == b"[DONE]":
+            continue
+        try:
+            event = json.loads(data.decode("utf-8", "ignore"))
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        event_count += 1
+        if use_responses and str(event.get("type") or "") == "response.output_text.delta":
+            text = _stream_content_text(event.get("delta"))
+            if text:
+                chunks.append(text)
+        for choice in event.get("choices", []) or []:
+            if not isinstance(choice, dict):
+                continue
+            if choice.get("finish_reason") is not None:
+                finish_reasons.append(str(choice.get("finish_reason")))
+            delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+            text = _stream_content_text(delta.get("content"))
+            if text:
+                chunks.append(text)
+        if not fallback_text:
+            fallback_text = _extract_chat_text(event)
+            if not fallback_text and isinstance(event.get("response"), dict):
+                fallback_text = _extract_chat_text(event["response"])
+    if chunks:
+        return "".join(chunks)
+    if fallback_text:
+        return fallback_text
+    if non_sse_lines:
+        try:
+            raw = json.loads(b"\n".join(non_sse_lines).decode("utf-8", "ignore"))
+        except (TypeError, ValueError):
+            raw = None
+        text = _extract_chat_text(raw)
+        if text:
+            return text
+    finish_summary = ",".join(finish_reasons[:4]) or "none"
+    raise RuntimeError(
+        "Streaming API returned no extractable text; "
+        f"events={event_count}; finish_reasons={finish_summary}; non_sse_lines={len(non_sse_lines)}"
+    )
+
+
 class LLMClient:
     def __init__(self, config: AppConfig, role: LLMRole | str | None = None):
         self.config = config
         self.role = role or "global"
-        self.provider = config.provider
-        self.base_url = config.base_url
-        self.api_key = config.api_key
-        self.model = config.model
+        self.provider = str(config.provider or "").strip()
+        self.base_url = str(config.base_url or "").strip()
+        self.api_key = str(config.api_key or "").strip()
+        self.model = str(config.model or "").strip()
         self.temperature = config.temperature
         if role:
             override = config.llm_roles.get(str(role))
             if override:
-                self.provider = override.provider or self.provider
-                self.base_url = override.base_url or self.base_url
-                self.api_key = override.api_key or self.api_key
-                self.model = override.model or self.model
+                self.provider = str(override.provider or self.provider).strip()
+                self.base_url = str(override.base_url or self.base_url).strip()
+                self.api_key = str(override.api_key or self.api_key).strip()
+                self.model = str(override.model or self.model).strip()
                 self.temperature = config.temperature if override.temperature is None else override.temperature
         self.api_mode = os.environ.get("LLM_API_MODE", "chat_completions")
+        direct_deepseek = "deepseek" in self.provider.lower() or "api.deepseek.com" in self.base_url.lower()
+        # The DeepSeek endpoint exposed by the web form is Chat Completions.
+        # Do not let a stale process-wide Responses override survive a provider
+        # switch made in the UI and redirect the request to a nonexistent path.
+        if direct_deepseek:
+            self.api_mode = "chat_completions"
         self.timeout_sec = int(os.environ.get("LLM_TIMEOUT_SEC", "120"))
         self.max_tokens = int(os.environ.get("LLM_MAX_TOKENS", "2000"))
         self.retries = max(1, int(os.environ.get("LLM_RETRIES", "3")))
-        self.enabled = bool(self.api_key and self.model and self.provider.lower() != "mock")
+        self.enabled = bool(self.api_key and self.base_url and self.model and self.provider.lower() not in {"", "mock", "none"})
+        self._response_format_supported: bool | None = None
 
     def summary(self) -> dict:
         return {
@@ -1114,19 +1203,31 @@ class LLMClient:
             "api_mode": self.api_mode or "chat_completions",
         }
 
-    def chat(self, prompt: str, temperature: float | None = None, max_tokens: int | None = None) -> str:
+    def chat(
+        self,
+        prompt: str,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        *,
+        single_request: bool = False,
+        stream: bool = False,
+    ) -> str:
         if not self.enabled:
             raise RuntimeError("LLM is not configured")
         api_mode = str(self.api_mode or "chat_completions").strip().lower()
         use_responses = api_mode in {"responses", "response", "openai_responses"}
         response_format = os.environ.get("LLM_RESPONSE_FORMAT", "json_object").strip().lower()
-        provider_text = str(self.provider or "").lower()
-        is_deepseek = "deepseek" in provider_text or "api.deepseek.com" in str(self.base_url or "").lower() or "deepseek" in str(self.model or "").lower()
+        provider_fingerprint = " ".join([self.provider, self.base_url, self.model]).lower()
+        is_deepseek_v4 = (
+            ("deepseek" in self.provider.lower() or "api.deepseek.com" in self.base_url.lower())
+            and "deepseek-v4" in self.model.lower()
+        )
+        is_qwen_compatible = any(marker in provider_fingerprint for marker in ["qwen", "dashscope", "aliyun", "alibabacloud"])
         reasoning_effort = os.environ.get("LLM_REASONING_EFFORT", "").strip().lower()
         disable_thinking = os.environ.get("LLM_DISABLE_THINKING", "0").lower() in {"1", "true", "yes", "on"}
         retry_empty_json = os.environ.get("LLM_RETRY_EMPTY_JSON_WITHOUT_RESPONSE_FORMAT", "1").lower() in {"1", "true", "yes", "on"}
         retry_unsupported_optional = os.environ.get("LLM_RETRY_UNSUPPORTED_OPTIONAL_PARAMS", "1").lower() in {"1", "true", "yes", "on"}
-        retry_statuses = {408, 409, 429, 500, 502, 503, 504}
+        retry_statuses = {408, 409, 429, 500, 502, 503, 504, 520, 522, 524, 529}
         # A non-positive explicit value asks the provider to use its native output limit.
         omit_max_tokens = max_tokens is not None and int(max_tokens) <= 0
         output_tokens = int(self.max_tokens if max_tokens is None else max_tokens)
@@ -1160,23 +1261,17 @@ class LLMClient:
                     payload["max_tokens"] = output_tokens
                 if wants_json_response:
                     payload["response_format"] = {"type": "json_object"}
-            if is_deepseek and "v4-flash" in str(self.model or "").lower():
-                payload.pop("reasoning_effort", None)
-                payload.pop("thinking", None)
-                payload.pop("enable_thinking", None)
-                payload.pop("extra_body", None)
-                payload["temperature"] = self.temperature if temperature is None else temperature
-                if not omit_max_tokens:
-                    if use_responses:
-                        payload["max_output_tokens"] = output_tokens
-                    else:
-                        payload["max_tokens"] = output_tokens
-            if reasoning_effort and reasoning_effort not in {"none", "off", "disable", "disabled", "0", "false", "no"}:
+            if stream:
+                payload["stream"] = True
+            if not disable_thinking and reasoning_effort and reasoning_effort not in {"none", "off", "disable", "disabled", "0", "false", "no"}:
                 payload["reasoning_effort"] = reasoning_effort
             if include_thinking_controls and disable_thinking:
-                payload["thinking"] = {"type": "disabled"}
-                payload["enable_thinking"] = False
-                payload["extra_body"] = {"thinking": {"type": "disabled"}}
+                # These are wire-level JSON requests, not OpenAI SDK calls:
+                # `extra_body` is an SDK argument and must never be serialized.
+                if is_deepseek_v4:
+                    payload["thinking"] = {"type": "disabled"}
+                elif is_qwen_compatible:
+                    payload["enable_thinking"] = False
             return payload
 
         def request_once(*, include_response_format: bool, include_thinking_controls: bool) -> str:
@@ -1184,27 +1279,36 @@ class LLMClient:
             req = urllib.request.Request(
                 _responses_url(self.base_url) if use_responses else _chat_url(self.base_url),
                 data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"},
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.api_key}",
+                    **({"Accept": "text/event-stream"} if stream else {}),
+                },
                 method="POST",
             )
             last_error: Exception | None = None
-            for attempt in range(1, self.retries + 1):
+            request_attempts = 1 if single_request else self.retries
+            for attempt in range(1, request_attempts + 1):
                 try:
                     with urllib.request.urlopen(req, timeout=self.timeout_sec) as response:
-                        raw = json.loads(response.read().decode("utf-8", "ignore"))
-                    text = _extract_chat_text(raw)
+                        if stream:
+                            text = _read_streaming_chat_text(response, use_responses=use_responses)
+                            raw = None
+                        else:
+                            raw = json.loads(response.read().decode("utf-8", "ignore"))
+                            text = _extract_chat_text(raw)
                     if text:
                         return text
                     raise RuntimeError("Chat Completions API returned no extractable text; " + _chat_response_debug(raw))
                 except urllib.error.HTTPError as exc:
                     body = exc.read().decode("utf-8", "ignore")[:800]
                     last_error = RuntimeError(f"LLM HTTP {exc.code} via {self.api_mode or 'chat_completions'}: {body}")
-                    if exc.code not in retry_statuses or attempt >= self.retries:
+                    if exc.code not in retry_statuses or attempt >= request_attempts:
                         raise last_error from exc
-                except (urllib.error.URLError, TimeoutError, RuntimeError) as exc:
+                except (urllib.error.URLError, TimeoutError, RuntimeError, json.JSONDecodeError) as exc:
                     last_error = exc
-                    if attempt >= self.retries:
-                        raise RuntimeError(f"LLM request failed via {self.api_mode or 'chat_completions'} after {self.retries} attempts: {exc}") from exc
+                    if attempt >= request_attempts:
+                        raise RuntimeError(f"LLM request failed via {self.api_mode or 'chat_completions'} after {request_attempts} attempts: {exc}") from exc
                 retry_text = str(last_error or "").lower()
                 slow_provider = any(marker in str(self.base_url or "").lower() for marker in ["sensenova", "xiaomi", "mi.com", "bigmodel.cn"])
                 rate_limited = any(marker in retry_text for marker in ["429", "rate", "rpm", "too many", "timeout", "timed out"])
@@ -1214,14 +1318,18 @@ class LLMClient:
                 time.sleep(base_sleep)
             raise RuntimeError(f"LLM request failed via {self.api_mode or 'chat_completions'}: {last_error}")
 
-        attempts: list[tuple[bool, bool]] = [(True, True)]
-        if response_format in {"json", "json_object"}:
-            attempts.append((False, True))
-        if disable_thinking:
-            attempts.append((response_format in {"json", "json_object"}, False))
-            if response_format in {"json", "json_object"}:
-                attempts.append((False, False))
+        configured_json_mode = response_format in {"json", "json_object"}
+        initial_json_mode = configured_json_mode and self._response_format_supported is not False
+        attempts: list[tuple[bool, bool]] = [(initial_json_mode, True)]
+        if not single_request:
+            if initial_json_mode:
+                attempts.append((False, True))
+            if disable_thinking:
+                attempts.append((initial_json_mode, False))
+                if initial_json_mode:
+                    attempts.append((False, False))
         last_error: Exception | None = None
+        response_format_fallback_needed = False
         seen: set[tuple[bool, bool]] = set()
         for include_response_format, include_thinking_controls in attempts:
             key = (include_response_format, include_thinking_controls)
@@ -1232,12 +1340,25 @@ class LLMClient:
                 text = request_once(include_response_format=include_response_format, include_thinking_controls=include_thinking_controls)
                 if include_response_format and retry_empty_json and response_format in {"json", "json_object"} and text.strip() == "{}":
                     last_error = RuntimeError("LLM returned empty JSON object with response_format")
+                    response_format_fallback_needed = True
                     continue
+                if include_response_format and configured_json_mode:
+                    self._response_format_supported = True
+                elif response_format_fallback_needed:
+                    # The ordinary live gate runs before strict title/final
+                    # batches. Remember a successful prompt-only fallback so
+                    # those later batches still use exactly one HTTP request.
+                    self._response_format_supported = False
                 return text
             except RuntimeError as exc:
                 last_error = exc
                 message = str(exc).lower()
-                if retry_unsupported_optional and include_thinking_controls and any(token in message for token in ["unsupported parameter", "enable_thinking", "thinking"]):
+                if include_response_format and configured_json_mode and (
+                    any(token in message for token in ["response_format", "json_object"])
+                    or any(token in message for token in ["http 400", "http 404", "http 405"])
+                ):
+                    response_format_fallback_needed = True
+                if retry_unsupported_optional and include_thinking_controls and any(token in message for token in ["enable_thinking", "extra_body", "parameter: thinking", '"thinking"']):
                     continue
                 if retry_unsupported_optional and include_response_format and any(token in message for token in ["response_format", "json_object", "unsupported parameter"]):
                     continue
@@ -1252,17 +1373,31 @@ class LLMClient:
         except Exception:
             return None
 
-    def json_or_error(self, prompt: str, temperature: float | None = None, max_tokens: int | None = None) -> dict:
+    def json_or_error(
+        self,
+        prompt: str,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        *,
+        single_request: bool = False,
+        stream: bool = False,
+    ) -> dict:
         raw_text = ""
         try:
-            raw_text = self.chat(prompt, temperature=temperature, max_tokens=max_tokens)
+            raw_text = self.chat(
+                prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                single_request=single_request,
+                stream=stream,
+            )
             return {"ok": True, "data": extract_json(raw_text), "error": "", "raw_text": raw_text[:4000]}
         except Exception as first_exc:
             parse_error = str(first_exc)
-            if raw_text and any(token in parse_error.lower() for token in ["closing bracket", "unterminated", "expecting", "delimiter"]):
+            if not single_request and raw_text and any(token in parse_error.lower() for token in ["closing bracket", "unterminated", "expecting", "delimiter"]):
                 try:
                     retry_tokens = 0 if max_tokens is not None and int(max_tokens) <= 0 else max(self.max_tokens * 2, int(os.environ.get("LLM_PARSE_RETRY_MAX_TOKENS", "12000") or 12000))
-                    raw_text = self.chat(prompt, temperature=temperature, max_tokens=retry_tokens)
+                    raw_text = self.chat(prompt, temperature=temperature, max_tokens=retry_tokens, stream=stream)
                     return {"ok": True, "data": extract_json(raw_text), "error": "", "raw_text": raw_text[:4000], "parse_retry": True}
                 except Exception as retry_exc:
                     return {"ok": False, "data": None, "error": f"{parse_error}; retry_failed: {retry_exc}", "raw_text": raw_text[:4000]}

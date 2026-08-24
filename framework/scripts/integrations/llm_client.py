@@ -165,7 +165,7 @@ def call_llm(prompt: str, cfg: dict[str, Any] | None = None, system_prompt: str 
         method='POST',
     )
     attempts = max(1, int(os.environ.get('LLM_RETRIES', '4')))
-    retry_statuses = {408, 409, 429, 500, 502, 503, 504}
+    retry_statuses = {408, 409, 429, 500, 502, 503, 504, 520, 522, 524, 529}
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
@@ -183,7 +183,7 @@ def call_llm(prompt: str, cfg: dict[str, Any] | None = None, system_prompt: str 
                 return call_llm(prompt, {'llm': settings}, system_prompt=system_prompt)
             if exc.code not in retry_statuses or attempt >= attempts:
                 raise RuntimeError(f'LLM HTTP {exc.code} via {"chat" if use_chat else "responses"}: {body}') from exc
-        except (urllib.error.URLError, TimeoutError) as exc:
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             last_error = exc
             if attempt >= attempts:
                 raise RuntimeError(f'LLM request failed via {"chat" if use_chat else "responses"} after {attempts} attempts: {exc}') from exc

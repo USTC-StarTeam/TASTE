@@ -5780,11 +5780,35 @@ def _new_find_guard_blocker(request: FindRequest | None = None) -> dict[str, Any
 
 
 def _active_web_stage_job_blocker(project: str, stage: str) -> dict[str, Any] | None:
-    """Block overlapping in-process workflow writes for the same project."""
+    """Block overlapping in-process or recovered workflow writes for one project."""
     project = str(project or "").strip()
     stage_key = _public_taste_stage(str(stage or "").strip().lower())
     if not stage_key:
         return None
+    requested_family = "plan" if stage_key in {"plan", "plan-polish"} else stage_key
+    literature_stages = {"find", "read", "idea", "plan"}
+
+    def conflicts_with_requested(existing_stage: str) -> bool:
+        existing_family = "plan" if existing_stage in {"plan", "plan-polish"} else existing_stage
+        return existing_family == requested_family or (
+            existing_family in literature_stages and requested_family in literature_stages
+        )
+
+    def blocker_payload(*, job_id: str, job_stage: str, status: str, run_id: str = "", progress: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {
+            "error": "project_stage_already_running",
+            "status": "blocked_existing_project_stage_running",
+            "project": project,
+            "stage": stage_key,
+            "existing_stage": job_stage,
+            "existing_job_id": job_id,
+            "existing_run_id": run_id,
+            "existing_status": status,
+            "progress": progress or {},
+            "message": "A conflicting workflow job for this project is already running; overlapping writes are blocked.",
+            "message_zh": "当前项目已有会写入同一工作流状态的任务正在运行；已阻止重叠启动。",
+        }
+
     _reconcile_stale_cancelling_jobs()
     try:
         with JOBS_LOCK:
@@ -5796,28 +5820,46 @@ def _active_web_stage_job_blocker(project: str, stage: str) -> dict[str, Any] | 
         if status not in {"queued", "running", "cancelling"}:
             continue
         job_stage = _public_taste_stage(str(getattr(job, "stage", "") or "").strip().lower())
-        literature_stages = {"find", "read", "idea", "plan"}
-        same_stage_or_literature_pipeline = job_stage == stage_key or (
-            job_stage in literature_stages and stage_key in literature_stages
-        )
-        if not same_stage_or_literature_pipeline:
+        if not conflicts_with_requested(job_stage):
             continue
         job_project = _project_from_job_payload(getattr(job, "job_id", ""), None, job)
-        if project and job_project and job_project != project:
+        if project and job_project != project:
             continue
         progress = getattr(job, "progress", {}) if isinstance(getattr(job, "progress", {}), dict) else {}
-        return {
-            "error": "project_stage_already_running",
-            "status": "blocked_existing_project_stage_running",
-            "project": project or job_project,
-            "stage": stage_key,
-            "existing_job_id": getattr(job, "job_id", ""),
-            "existing_run_id": getattr(job, "run_id", ""),
-            "existing_status": status,
-            "progress": progress,
-            "message": "A conflicting workflow job for this project is already running; overlapping writes are blocked.",
-            "message_zh": "当前项目已有会写入同一工作流状态的任务正在运行；已阻止重叠启动。",
-        }
+        return blocker_payload(
+            job_id=str(getattr(job, "job_id", "") or ""),
+            job_stage=job_stage,
+            run_id=str(getattr(job, "run_id", "") or ""),
+            status=status,
+            progress=progress,
+        )
+    if not project:
+        return None
+    root = PROJECT_IDS_ROOT / project
+    if not root.is_dir():
+        return None
+    try:
+        recovered_workers = _active_project_child_processes(project, root)
+    except NameError:
+        recovered_workers = []
+    for worker in recovered_workers:
+        worker_phase = str(worker.get("phase") or "").strip().lower()
+        worker_family = _public_taste_stage(
+            "find" if worker_phase in {"find", "finding", "literature"}
+            else ("plan" if worker_phase in {"plan", "plan-polish", "planning"} else worker_phase)
+        )
+        if not conflicts_with_requested(worker_family):
+            continue
+        pid = str(worker.get("pid") or "").strip()
+        return blocker_payload(
+            job_id=f"recovered-{worker_family}-worker-{project}-{pid or 'unknown'}",
+            job_stage=worker_family,
+            status="running",
+            progress={
+                "phase": worker_family,
+                "message": f"Recovered active {worker_family} worker PID={pid or '-'} after web-service restart.",
+            },
+        )
     return None
 
 
@@ -5997,6 +6039,22 @@ def _run_id_from_command_line(command: Any) -> str:
     return ""
 
 
+def _project_id_from_command_line(command: Any) -> str:
+    text = str(command or "")
+    if not text:
+        return ""
+    matches = re.findall(r"(?:^|\s)--project(?:=|\s+)([^\s]+)", text)
+    return matches[-1].strip().strip("'\"") if matches else ""
+
+
+def _command_references_project_root(command: Any, root: Path) -> bool:
+    text = str(command or "")
+    if not text:
+        return False
+    root_text = str(root.resolve(strict=False)).rstrip("/")
+    return re.search(re.escape(root_text) + r"(?=$|[/\s'\"=:,])", text) is not None
+
+
 def _suppress_same_phase_descendant_workers(
     rows: list[dict[str, Any]],
     process_rows: list[dict[str, Any]] | None = None,
@@ -6036,7 +6094,6 @@ def _suppress_same_phase_descendant_workers(
 
 
 def _active_project_child_processes(project: str, root: Path, phase_hint: str = "") -> list[dict[str, Any]]:
-    markers = [str(project), str(root), str(root / "tmp" / "finding")]
     process_rows = _all_process_rows()
     rows: list[dict[str, Any]] = []
     for proc_row in process_rows:
@@ -6044,7 +6101,11 @@ def _active_project_child_processes(project: str, root: Path, phase_hint: str = 
         if _is_inspection_or_wrapper_cmd(cmd):
             continue
         cwd = str(proc_row.get("cwd") or "")
-        if not any(marker and (marker in cmd or marker in cwd) for marker in markers):
+        command_project = _project_id_from_command_line(cmd)
+        if command_project:
+            if command_project != project:
+                continue
+        elif not (_path_is_within(cwd, root) or _command_references_project_root(cmd, root)):
             continue
         lowered = cmd.lower()
         kind = ""
@@ -6056,6 +6117,18 @@ def _active_project_child_processes(project: str, root: Path, phase_hint: str = 
             kind = current_find_kind
             phase = current_find_phase
             priority = current_find_priority
+        elif re.search(r"\brun_module\.py\s+reading\b", lowered) or re.search(r"\bmodules[/\\]reading[/\\]main\.py\b", lowered):
+            kind = "reading_module"
+            phase = "read"
+            priority = 2
+        elif re.search(r"\brun_module\.py\s+ideation\b", lowered) or re.search(r"\bmodules[/\\]ideation[/\\]main\.py\b", lowered):
+            kind = "ideation_module"
+            phase = "idea"
+            priority = 2
+        elif re.search(r"\brun_module\.py\s+planning\b", lowered) or re.search(r"\bmodules[/\\]planning[/\\]main\.py\b", lowered):
+            kind = "planning_module"
+            phase = "plan"
+            priority = 2
         elif current_find_child:
             kind = "current_find_child"
             phase = "read"
@@ -7647,8 +7720,11 @@ def _find_progress_projection(find_progress: dict[str, Any]) -> dict[str, Any]:
         ]
         source_match = re.match(r"^([^:]{1,40}):", message)
         source_name = str(source_match.group(1) if source_match else "").strip().lower().replace(" ", "_")
+        if re.match(r"^preparing\s+all\s+(?:sources|channels)\s*:", message, flags=re.IGNORECASE):
+            source_name = "all_sources"
         if raw_phase.endswith("_llm_scoring_complete"):
             source_name = raw_phase.removesuffix("_llm_scoring_complete")
+        global_scoring = source_name in {"all_sources", "all_channels"}
         source_index = scoring_sources.index(source_name) if source_name in scoring_sources else 0
         if raw_phase == "final_detail_fetch":
             source_fraction = 0.02 + (raw_percent / 100) * 0.08
@@ -7662,7 +7738,10 @@ def _find_progress_projection(find_progress: dict[str, Any]) -> dict[str, Any]:
             source_fraction = 0.90 + (raw_percent / 100) * 0.08
         else:
             source_fraction = 1.0
-        stage_percent = round(((source_index + source_fraction) / max(1, len(scoring_sources))) * 100)
+        if global_scoring:
+            stage_percent = round(source_fraction * 100)
+        else:
+            stage_percent = round(((source_index + source_fraction) / max(1, len(scoring_sources))) * 100)
     elif raw_phase in external_phases:
         stage_index = 3
         stage_key = "extended_sources"
@@ -11540,13 +11619,6 @@ def api_find(request: FindRequest) -> dict:
     active_blocker = _active_web_stage_job_blocker(current[0] if current else "", "find")
     if active_blocker:
         return JSONResponse(status_code=409, content=active_blocker)
-    blocker = _new_find_guard_blocker(request)
-    if blocker:
-        return JSONResponse(status_code=409, content=blocker)
-    explicit_reason = _new_find_request_reason(request)
-    if current and explicit_reason:
-        project, root = current
-        _record_new_find_restart_approval(root, project, source="api_jobs_find", reason=explicit_reason)
     # Web owns the user input surface. Before starting framework orchestration,
     # persist the non-secret Find request into project state so framework can
     # produce explicit config/selection JSON for the Finding public CLI.
@@ -11562,13 +11634,13 @@ def api_find(request: FindRequest) -> dict:
                 "message": "Research interest/profile is required before starting Find; otherwise final title+abstract LLM scoring is skipped.",
             },
         )
-    selection = normalize_source_selection(request.selection.model_dump() if request.selection else {})
     project_path = current[1] / "project.json" if current else None
-    save_canonical_source_selection(selection, project_config_path=project_path)
+    selection = normalize_source_selection(
+        request.selection.model_dump()
+        if request.selection
+        else canonical_source_selection(project_config_path=project_path)
+    )
     config = config.model_copy(update={"default_find_selection": selection})
-    _persist_local_llm_config_from_find_request(config, request.config)
-    _sync_project_research_preferences_from_config(config, project_path)
-    _sync_project_finding_config_from_request(config, project_path)
 
     def runtime_env_for_find() -> dict[str, str]:
         # Always pass the account-scoped path. project_bridge treats this as a
@@ -11603,6 +11675,17 @@ def api_find(request: FindRequest) -> dict:
         active_blocker = _active_web_stage_job_blocker(project_id, "find")
         if active_blocker:
             return JSONResponse(status_code=409, content=active_blocker)
+        blocker = _new_find_guard_blocker(request)
+        if blocker:
+            return JSONResponse(status_code=409, content=blocker)
+        explicit_reason = _new_find_request_reason(request)
+        if current and explicit_reason:
+            project, root = current
+            _record_new_find_restart_approval(root, project, source="api_jobs_find", reason=explicit_reason)
+        save_canonical_source_selection(selection, project_config_path=project_path)
+        _persist_local_llm_config_from_find_request(config, request.config)
+        _sync_project_research_preferences_from_config(config, project_path)
+        _sync_project_finding_config_from_request(config, project_path)
         job = start_job(
             "find",
             run_find_and_adopt,
@@ -12219,19 +12302,22 @@ def api_read(request: ReadRequest) -> dict:
     if current:
         project, root = current
         if _read_request_should_use_current_find_wrapper(request, project, root):
-            current_run_id = _current_project_find_run_id(root)
             with JOBS_LOCK:
                 duplicate = _active_web_stage_job_blocker(project, "read")
                 if duplicate:
                     return JSONResponse(status_code=409, content=duplicate)
-                job = start_job("read", lambda log, should_cancel, progress: _run_current_find_claude_read_job(project, root, request, log, should_cancel, progress))
+                current_run_id = _current_project_find_run_id(root)
+                job = start_job(
+                    "read",
+                    lambda log, should_cancel, progress: _run_current_find_claude_read_job(project, root, request, log, should_cancel, progress),
+                    initial_result={
+                        "project": project,
+                        "run_id": current_run_id,
+                        "source": "current_find_claude_read_wrapper",
+                        "status": "running",
+                    },
+                )
                 job.run_id = current_run_id
-                job.result = {
-                    "project": project,
-                    "run_id": current_run_id,
-                    "source": "current_find_claude_read_wrapper",
-                    "status": "running",
-                }
                 _persist_jobs()
             return _public_account_payload(job.as_dict())
     return _public_account_payload(_read_requires_current_find_job(request).as_dict())
@@ -12275,6 +12361,11 @@ def api_plan(request: PlanRequest) -> dict:
     config = load_config()
     current = _project_context_for_find_run(request.run_id) or _current_project_for_find_guard()
     project = current[0] if current else ""
+    if not project:
+        return JSONResponse(status_code=400, content={
+            "error": "planning_project_required",
+            "message": "Planning requires an active project for the requested Find run.",
+        })
     with JOBS_LOCK:
         duplicate = _active_web_stage_job_blocker(project, "plan")
         if duplicate:
@@ -12284,8 +12375,8 @@ def api_plan(request: PlanRequest) -> dict:
             lambda log, should_cancel, progress: _run_planning_module_job(project, request, config, "plan", log, should_cancel, progress),
             initial_result={"project": project, "run_id": request.run_id, "status": "running", "source": "framework_planning_entrypoint"},
         )
-    job.run_id = request.run_id
-    _persist_jobs()
+        job.run_id = request.run_id
+        _persist_jobs()
     return _public_account_payload(job.as_dict())
 
 
@@ -12299,8 +12390,13 @@ def api_plan_polish(request: PlanPolishRequest) -> dict:
     config = load_config()
     current = _project_context_for_find_run(request.run_id) or _current_project_for_find_guard()
     project = current[0] if current else ""
+    if not project:
+        return JSONResponse(status_code=400, content={
+            "error": "planning_project_required",
+            "message": "Planning requires an active project for the requested Find run.",
+        })
     with JOBS_LOCK:
-        duplicate = _active_web_stage_job_blocker(project, "plan")
+        duplicate = _active_web_stage_job_blocker(project, "plan-polish")
         if duplicate:
             return JSONResponse(status_code=409, content=duplicate)
         job = start_job(
@@ -12308,8 +12404,8 @@ def api_plan_polish(request: PlanPolishRequest) -> dict:
             lambda log, should_cancel, progress: _run_planning_module_job(project, request, config, "polish", log, should_cancel, progress),
             initial_result={"project": project, "run_id": request.run_id, "status": "running", "source": "framework_planning_entrypoint"},
         )
-    job.run_id = request.run_id
-    _persist_jobs()
+        job.run_id = request.run_id
+        _persist_jobs()
     return _public_account_payload(job.as_dict())
 
 
@@ -12599,6 +12695,43 @@ def _merge_live_find_workers_into_web_jobs(
             continue
         visible_dynamic.append(item)
     return visible_dynamic, merged_persisted
+
+
+def _exclude_owned_workers_from_recovery_rows(
+    dynamic: list[dict[str, Any]],
+    persisted: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Only surface process-discovery rows when no active Web job owns them."""
+
+    def identity(item: dict[str, Any]) -> tuple[str, str, str] | None:
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        project_id = str(result.get("project") or _project_from_job_payload(item.get("job_id"), item) or "").strip()
+        stage_id = _public_taste_stage(item.get("stage"))
+        run_id = str(item.get("run_id") or result.get("run_id") or "").strip()
+        if not project_id or not stage_id or not run_id:
+            return None
+        return project_id, stage_id, run_id
+
+    owned_identities = {
+        item_identity
+        for item in persisted
+        if str(item.get("status") or "").strip().lower() in {"queued", "running", "cancelling"}
+        if (item_identity := identity(item)) is not None
+    }
+    if not owned_identities:
+        return dynamic
+    visible: list[dict[str, Any]] = []
+    for item in dynamic:
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        is_recovery_worker = bool(
+            result.get("not_full_cycle_controller") is True
+            and result.get("process_alive") is True
+            and str(item.get("status") or "").strip().lower() in {"queued", "running", "cancelling"}
+        )
+        if is_recovery_worker and identity(item) in owned_identities:
+            continue
+        visible.append(item)
+    return visible
 
 
 def _project_stage_running_blocker(payload: dict[str, Any], stage: str) -> dict[str, Any] | None:
@@ -13057,6 +13190,7 @@ def api_jobs(
             item["owner_id"] = job.owner_id
             persisted.append(item)
     dynamic, persisted = _merge_live_find_workers_into_web_jobs(dynamic, persisted)
+    dynamic = _exclude_owned_workers_from_recovery_rows(dynamic, persisted)
     hidden_taskbstages = set()
     dynamic_live_projects = {
         str((item.get("result") if isinstance(item.get("result"), dict) else {}).get("project") or "")
