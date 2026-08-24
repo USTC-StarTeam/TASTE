@@ -136,10 +136,8 @@ chmod 600 modules/reading/config/read.env
 # OpenReview：使用已激活账户的登录邮箱（或用户名）和登录密码
 OPENREVIEW_USERNAME=your_openreview_email@example.com
 OPENREVIEW_PASSWORD=your_openreview_password
-# 账号缺失时不再匿名调用 official client，避免继续慢试或遇到访问限制
-READING_OPENREVIEW_ALLOW_ANONYMOUS_OFFICIAL_CLIENT=0
 
-# Unpaywall 要求每个 API 请求提供可联系邮箱
+# Unpaywall 无需注册，但要求每个 API 请求提供可联系邮箱
 UNPAYWALL_EMAIL=your_contact_email@example.com
 # OpenAlex 2026 年起使用免费 API key 标识配额；在账户设置页创建并复制
 OPENALEX_API_KEY=your_openalex_api_key
