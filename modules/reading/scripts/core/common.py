@@ -706,20 +706,15 @@ DEFAULT_TIMEOUT = config_int("http.default_timeout_sec", 30)
 
 
 def service_contact_email(service: str = "") -> str:
-    general = str(os.environ.get("READING_CONTACT_EMAIL") or "").strip()
     service_name = str(service or "").strip().lower()
-    if service_name == "openalex":
-        return str(os.environ.get("OPENALEX_MAILTO") or general).strip()
     if service_name == "crossref":
-        return str(os.environ.get("CROSSREF_MAILTO") or general).strip()
-    return general
+        return str(os.environ.get("CROSSREF_MAILTO") or "").strip()
+    return ""
 
 
-CONTACT_EMAIL = service_contact_email()
-USER_AGENT_CONTACT_EMAIL = CONTACT_EMAIL or service_contact_email("openalex") or service_contact_email("crossref")
 DEFAULT_USER_AGENT = (
     str(os.environ.get("READING_HTTP_USER_AGENT") or "").strip()
-    or (str(config_value("http.user_agent", "TASTE-Reading/1.0")).strip() + (f" (mailto:{USER_AGENT_CONTACT_EMAIL})" if USER_AGENT_CONTACT_EMAIL else ""))
+    or str(config_value("http.user_agent", "TASTE-Reading/1.0")).strip()
 )
 FULL_TEXT_MIN_CHARS = config_int("full_text_min_chars", 1200)
 

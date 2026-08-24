@@ -2795,9 +2795,6 @@ def _openalex_api_params(extra: dict[str, str] | None = None) -> dict[str, str]:
     api_key = str(os.environ.get("OPENALEX_API_KEY") or "").strip()
     if api_key:
         params["api_key"] = api_key
-    mailto = service_contact_email("openalex")
-    if mailto:
-        params["mailto"] = mailto
     return params
 
 

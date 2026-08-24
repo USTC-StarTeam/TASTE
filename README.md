@@ -116,9 +116,40 @@ http://127.0.0.1:8879
 | 公开模板 | `framework/resources/templates/project.json` | 给新项目提供默认结构，不含真实密钥和真实项目内容。 |
 | 本机兼容配置 | `framework/.runtime/.config.json` | 保存邮件配置和兼容副本；Find 参数以当前项目配置为准。 |
 | 本机 LLM 私有配置 | `modules/finding/config/llm.local.json` 或 `FINDING_LLM_CONFIG` 指定路径 | 保存 Find LLM 配置；默认文件被忽略。API key 不写入项目文件，自定义路径也应放在 Git 忽略范围内。 |
-| Read 本机私有配置 | `modules/reading/config/read.env` | 保存 Reading 实际使用的 OpenReview 登录信息和全文索引联系邮箱；默认文件被忽略。 |
+| Read 本机私有配置 | `modules/reading/config/read.env` | 由每位用户自行创建，保存自己的 OpenReview 登录信息、OpenAlex API key 和服务联系邮箱；默认文件被忽略。 |
 | 具体科研项目 | `projects/<project>/` | 保存 `project.json`、`config/finding.json`、状态、运行记录、产物、仓库、数据和论文草稿。 |
 | 前端静态产物 | `web/frontend/client/dist/` | 由启动脚本或 `npm run build` 生成，网页服务读取这里的文件。 |
+
+### Read 私有服务配置
+
+Read 会优先使用论文自身的 URL、PDF、DOI 和 OpenReview ID；OpenReview 登录及开放全文索引的私有配置不在网页中填写。每位用户应在仓库根目录自行创建本机文件，并限制其读取权限：
+
+```bash
+mkdir -p modules/reading/config
+touch modules/reading/config/read.env
+chmod 600 modules/reading/config/read.env
+```
+
+然后用文本编辑器写入自己的值；不要复制仓库维护者或其他用户的邮箱、账号与密钥：
+
+```dotenv
+# OpenReview：使用已激活账户的登录邮箱（或用户名）和登录密码
+OPENREVIEW_USERNAME=your_openreview_email@example.com
+OPENREVIEW_PASSWORD=your_openreview_password
+# 账号缺失时不再匿名调用 official client，避免继续慢试或遇到访问限制
+READING_OPENREVIEW_ALLOW_ANONYMOUS_OFFICIAL_CLIENT=0
+
+# Unpaywall 要求每个 API 请求提供可联系邮箱
+UNPAYWALL_EMAIL=your_contact_email@example.com
+# OpenAlex 2026 年起使用免费 API key 标识配额；在账户设置页创建并复制
+OPENALEX_API_KEY=your_openalex_api_key
+# Crossref 的可联系邮箱，用于 polite pool
+CROSSREF_MAILTO=your_contact_email@example.com
+```
+
+OpenReview 新用户先到 <https://openreview.net/signup> 注册，完成邮件确认和 Profile 激活后再填写；这里使用的是正常登录密码，不需要手工提取 Token。OpenAlex API key 在 <https://openalex.org/settings/api> 创建，当前认证与配额规则见其[官方说明](https://developers.openalex.org/api-reference/authentication)。[Unpaywall API](https://unpaywall.org/api) 要求请求携带邮箱；[Crossref REST API](https://www.crossref.org/documentation/retrieve-metadata/rest-api/access-and-authentication/) 则用 `mailto` 识别 polite pool。`UNPAYWALL_EMAIL` 和 `CROSSREF_MAILTO` 可以使用同一个属于当前用户且能正常收信的地址，但仍应分别填写，因为它们只会发送给对应服务。
+
+`read.env` 使用简单的 `KEY=value` 格式，不需要写 `export`。已经存在于启动 shell 中的同名环境变量优先于文件值；修改配置后应重启网页服务再运行 Read。该文件已被 Git 忽略，不应提交、共享或写入项目目录。可选的其他全文来源密钥见模块内部参考 [modules/reading/README.md](modules/reading/README.md)。
 
 ### 左侧栏配置
 
@@ -196,7 +227,7 @@ Find 页面同时展示来源状态、调研验收计数和当前 run 产物。�
 
 ### Read：精读最终排名前 N 篇
 
-网页中的 Read 由 Framework 按项目配置把当前 Find 最终排名前 N 篇转换成通用论文输入，再调用 Reading 获取同篇全文并生成精读；模块默认 N=50，Find 完成后 Framework 默认更新为推荐数的两倍，用户可按项目修改。全部逐篇产物完成后，Reading 使用 Claude Code 给出匹配度和可借鉴性并按两项均分重排。Find 已提供的 URL、PDF、DOI、OpenReview ID、作者和来源会用于加快全文定位；缺少这些字段时仍可从标题开始查找。需要配置 OpenReview 登录或开放全文索引时，使用 `modules/reading/config/read.env`，具体变量见 [Reading 使用说明](modules/reading/README.md)。Reading 命令行也可独立接收标题或论文列表，不读取项目或 Find 状态。页面只展示当前 Find 对应的精读状态，避免把历史 run 的内容混入当前项目判断。
+网页中的 Read 由 Framework 按项目配置把当前 Find 最终排名前 N 篇转换成通用论文输入，再调用 Reading 获取同篇全文并生成精读；模块默认 N=50，Find 完成后 Framework 默认更新为推荐数的两倍，用户可按项目修改。全部逐篇产物完成后，Reading 使用 Claude Code 给出匹配度和可借鉴性并按两项均分重排。Find 已提供的 URL、PDF、DOI、OpenReview ID、作者和来源会用于加快全文定位；缺少这些字段时仍可从标题开始查找。需要配置 OpenReview 登录或开放全文索引时，按上面的“Read 私有服务配置”自行创建 `modules/reading/config/read.env`。Reading 命令行也可独立接收标题或论文列表，不读取项目或 Find 状态。页面只展示当前 Find 对应的精读状态，避免把历史 run 的内容混入当前项目判断。
 
 ### Ideas：生成和筛选研究想法
 

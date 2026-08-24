@@ -327,9 +327,8 @@ def test_reading_read_env_loads_supported_integration_settings(monkeypatch, tmp_
         "OPENREVIEW_PASSWORD": "secret",
         "READING_OPENREVIEW_ALLOW_ANONYMOUS_OFFICIAL_CLIENT": "0",
         "UNPAYWALL_EMAIL": "unpaywall@example.test",
-        "OPENALEX_MAILTO": "openalex@example.test",
+        "OPENALEX_API_KEY": "openalex-test-key",
         "CROSSREF_MAILTO": "crossref@example.test",
-        "READING_CONTACT_EMAIL": "reading@example.test",
     }
     for key in settings:
         monkeypatch.delenv(key, raising=False)
@@ -342,20 +341,28 @@ def test_reading_read_env_loads_supported_integration_settings(monkeypatch, tmp_
     assert {key: os.environ.get(key) for key in settings} == settings
 
 
-def test_reading_service_contact_emails_keep_provider_boundaries(monkeypatch):
+def test_reading_crossref_contact_email_stays_provider_scoped(monkeypatch):
     common = _load_reading_common()
-    monkeypatch.setenv("READING_CONTACT_EMAIL", "reading@example.test")
-    monkeypatch.setenv("OPENALEX_MAILTO", "openalex@example.test")
     monkeypatch.setenv("CROSSREF_MAILTO", "crossref@example.test")
 
-    assert common.service_contact_email() == "reading@example.test"
-    assert common.service_contact_email("openalex") == "openalex@example.test"
+    assert common.service_contact_email() == ""
+    assert common.service_contact_email("openalex") == ""
     assert common.service_contact_email("crossref") == "crossref@example.test"
+    assert "crossref@example.test" not in common.DEFAULT_USER_AGENT
 
-    monkeypatch.delenv("OPENALEX_MAILTO")
     monkeypatch.delenv("CROSSREF_MAILTO")
-    assert common.service_contact_email("openalex") == "reading@example.test"
-    assert common.service_contact_email("crossref") == "reading@example.test"
+    assert common.service_contact_email("crossref") == ""
+
+
+def test_reading_openalex_params_use_api_key_not_legacy_mailto(monkeypatch):
+    read_pipeline = _load_reading_pipeline()
+    monkeypatch.setenv("OPENALEX_API_KEY", "openalex-test-key")
+    monkeypatch.setenv("OPENALEX_MAILTO", "legacy@example.test")
+
+    assert read_pipeline._openalex_api_params({"search": "test"}) == {
+        "search": "test",
+        "api_key": "openalex-test-key",
+    }
 
 
 def test_reading_openalex_key_uses_an_independent_quota_state(monkeypatch, tmp_path):
