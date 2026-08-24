@@ -59,7 +59,7 @@ npm --version
 
 ### 4. 安装并登录 Claude Code
 
-TASTE 不配置 Claude Code 账号/API，也不会覆盖用户已有 Claude Code 设置。按 Claude Code 官方文档安装并登录即可：<https://docs.anthropic.com/en/docs/claude-code/setup>。
+按 Claude Code 官方文档安装并登录即可：<https://docs.anthropic.com/en/docs/claude-code/setup>。
 
 常用 npm 安装方式：
 
@@ -80,7 +80,7 @@ conda activate taste
 python framework/scripts/main.py
 ```
 
-启动脚本使用默认地址 `127.0.0.1:8879`。缺少前端 `dist/` 时会执行构建；如果 `node_modules/` 也不存在，会先运行 `npm install`。需要改端口时只设置端口变量：
+启动脚本使用默认地址 `127.0.0.1:8879`。需要改端口时只设置端口变量：
 
 ```bash
 WEB_PORT=<port> python framework/scripts/main.py
