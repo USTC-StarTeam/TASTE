@@ -1029,7 +1029,7 @@ const TEXT = {
     temperatureHelp: "控制生成随机性；精读和筛选建议 0.2-0.6。",
     validateLLM: "验证 LLM",
     validatingLLM: "验证中...",
-    llmProbeHelp: "使用 Find 相同的 JSON 评分探针验证当前保存的 LLM 配置；不会显示 API key。",
+    llmProbeHelp: "用 Find 实际客户端发送一次单篇标题评分探针；不启动 Find、不重试或修补，只验证基础协议和 JSON 格式。",
     emailSettings: "邮件配置",
     emailHelp: "可选通知/导出配置，只影响底部产物面板的手动发送和任务完成后的自动发送；不参与科研主流程。SMTP 密码只保存在本地配置文件。",
     smtpServer: "SMTP 服务器",
@@ -1573,7 +1573,7 @@ const TEXT = {
     temperatureHelp: "Controls generation randomness; 0.2-0.6 is usually better for reading and filtering.",
     validateLLM: "Validate LLM",
     validatingLLM: "Validating...",
-    llmProbeHelp: "Uses the same JSON scoring probe as Find against the saved LLM config; API keys are never shown.",
+    llmProbeHelp: "Send one single-title scoring probe through Find's real client; Find is not started and no retry or repair is used. This checks only the basic protocol and JSON shape.",
     emailSettings: "Email Settings",
     emailHelp: "Optional notification/export settings for the bottom artifact panel and completion emails. They do not participate in the research workflow. The SMTP password is stored only in the local config file.",
     smtpServer: "SMTP Server",
@@ -4417,7 +4417,7 @@ function App() {
       if (researchProject) {
         void loadProject(researchProject, { resetDrafts: false }).catch(() => {});
       }
-      setSaveMessage(result.ok ? (lang === "zh" ? "LLM 验证通过" : "LLM probe passed") : (lang === "zh" ? "LLM 验证失败" : "LLM probe failed"));
+      setSaveMessage(result.ok ? (lang === "zh" ? "LLM 基础验证通过" : "LLM basic probe passed") : (lang === "zh" ? "LLM 基础验证失败" : "LLM basic probe failed"));
     } catch (err) {
       setLLMProbeResult({ ok: false, error: String(err) });
       setError(String(err));
@@ -7536,7 +7536,7 @@ function App() {
           <div className="saveBar">
             <button className="primary" onClick={handleSaveConfig} disabled={savingConfig}>{savingConfig ? t.saving : t.saveConfig}</button>
             <button onClick={handleProbeLLMConfig} disabled={llmProbeLoading || savingConfig}>{llmProbeLoading ? t.validatingLLM : t.validateLLM}</button>
-            {llmProbeResult && <span className={llmProbeResult.ok ? "okText" : "errorText"}>{llmProbeResult.ok ? (lang === "zh" ? "可用" : "available") : (llmProbeResult.error || (lang === "zh" ? "不可用" : "unavailable"))}</span>}
+            {llmProbeResult && <span className={llmProbeResult.ok ? "okText" : "errorText"}>{llmProbeResult.ok ? (lang === "zh" ? "基础兼容通过" : "basic compatibility passed") : (llmProbeResult.error || (lang === "zh" ? "基础验证失败" : "basic probe failed"))}</span>}
             {saveMessage && <span>{saveMessage}</span>}
           </div>
           <p className="help">{t.llmProbeHelp}</p>

@@ -7003,6 +7003,106 @@ def test_find_llm_client_streams_one_chat_completion_request(monkeypatch):
     assert requests[0].get_header("Accept") == "text/event-stream"
 
 
+@pytest.mark.parametrize("api_mode", ["chat_completions", "responses"])
+def test_find_llm_protocol_probe_uses_real_title_scoring_wire_contract(monkeypatch, api_mode):
+    finding_main = _load_finding_main()
+    finding_runtime = finding_main._private_import("finding_runtime")
+    find_pipeline = finding_main._private_import("flow.pipeline")
+    monkeypatch.setenv("LLM_API_MODE", api_mode)
+    monkeypatch.setenv("LLM_RETRIES", "4")
+    requests = []
+    scored = json.dumps({
+        "scored": [{
+            "id": "p001",
+            "fit_score": 8,
+            "diversity_score": 6,
+            "hit_directions": ["scientific machine learning"],
+            "category": "可靠科学机器学习",
+            "reason": "题目直接匹配可靠科学机器学习系统。",
+        }],
+    }, ensure_ascii=False)
+
+    class StreamingResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def __iter__(self):
+            if api_mode == "responses":
+                return iter([
+                    ("data: " + json.dumps({"type": "response.output_text.delta", "delta": scored}) + "\n").encode(),
+                    b"data: [DONE]\n",
+                ])
+            return iter([
+                ("data: " + json.dumps({"choices": [{"delta": {"content": scored}, "finish_reason": None}]}) + "\n").encode(),
+                b'data: {"choices":[{"delta":{"content":""},"finish_reason":"stop"}]}\n',
+                b"data: [DONE]\n",
+            ])
+
+    def fake_urlopen(request, **_kwargs):
+        requests.append(request)
+        return StreamingResponse()
+
+    monkeypatch.setattr(finding_runtime.urllib.request, "urlopen", fake_urlopen)
+    llm = finding_runtime.LLMClient(finding_runtime.AppConfig(
+        provider="openai_compatible",
+        base_url="https://llm.invalid/v1",
+        api_key="test-key",
+        model="test-model",
+    ), "find")
+
+    result = find_pipeline.probe_find_llm_protocol(llm)
+
+    assert result["ok"] is True
+    assert result["probe"] == "find_title_scoring_protocol"
+    assert len(requests) == 1
+    request = requests[0]
+    payload = json.loads(request.data.decode("utf-8"))
+    assert payload["stream"] is True
+    assert payload["temperature"] == find_pipeline.FIND_TITLE_FILTER_TEMPERATURE
+    assert request.get_header("Accept") == "text/event-stream"
+    if api_mode == "responses":
+        assert request.full_url == "https://llm.invalid/v1/responses"
+        assert "max_output_tokens" not in payload
+        assert payload["text"] == {"format": {"type": "json_object"}}
+        assert payload["input"][0]["role"] == "system"
+        assert "scored" in payload["input"][1]["content"][0]["text"]
+    else:
+        assert request.full_url == "https://llm.invalid/v1/chat/completions"
+        assert "max_tokens" not in payload
+        assert payload["response_format"] == {"type": "json_object"}
+        assert payload["messages"][0]["role"] == "system"
+        assert "scored" in payload["messages"][1]["content"]
+
+
+def test_find_llm_protocol_probe_rejects_non_scoring_json_without_retry():
+    finding_main = _load_finding_main()
+    find_pipeline = finding_main._private_import("flow.pipeline")
+
+    class WrongShapeLLM:
+        enabled = True
+        calls = 0
+
+        def summary(self):
+            return {"role": "find", "enabled": True, "api_mode": "chat_completions"}
+
+        def json_or_error(self, _prompt, temperature=None, max_tokens=None, *, single_request=False, stream=False):
+            self.calls += 1
+            assert single_request is True
+            assert stream is True
+            assert max_tokens == 0
+            return {"ok": True, "data": {"ok": True}, "error": ""}
+
+    llm = WrongShapeLLM()
+    result = find_pipeline.probe_find_llm_protocol(llm)
+
+    assert result["ok"] is False
+    assert "scored-row contract" in result["error"]
+    assert llm.calls == 1
+
+
 def test_find_llm_client_direct_deepseek_forces_chat_and_uses_native_thinking_control(monkeypatch):
     finding_main = _load_finding_main()
     finding_runtime = finding_main._private_import("finding_runtime")
@@ -8272,6 +8372,17 @@ def test_finding_llm_local_config_is_generic_and_local_only(monkeypatch, tmp_pat
     assert config["temperature"] == 0
     assert config["research_topic"] == "explicit topic"
     assert "default_find_selection" not in config
+
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("LLM_API_BASE", "https://process-account.example/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "process-account-secret")
+    monkeypatch.setenv("LLM_MODEL", "process-account-model")
+    saved_config = finding_main._with_llm_env_defaults({})
+
+    assert saved_config["provider"] == "openai_compatible"
+    assert saved_config["base_url"] == "https://llm.example.test/v1"
+    assert saved_config["model"] == "generic-model"
+    assert saved_config["api_key"] == "local-secret"
 
 
 def _venue_cache_rows(count: int, audit: dict, *, with_abstract: bool = False) -> list[dict]:

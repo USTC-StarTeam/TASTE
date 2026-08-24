@@ -421,6 +421,23 @@ def _run_venue_health(args: Sequence[str]) -> int:
     return 0
 
 
+def _run_llm_probe(args: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(description="Validate the saved LLM through Find's title-scoring protocol.")
+    parser.add_argument("--config-json", default="", help="Optional Find config JSON. Defaults to config/find.config.json.")
+    ns = parser.parse_args(list(args))
+    models = _private_import("finding_runtime.models")
+    finding_runtime = _private_import("finding_runtime")
+    find_pipeline = _private_import("flow.pipeline")
+
+    config_payload, _selection_payload = _find_request_payloads(config_json=ns.config_json)
+    config = models.AppConfig(**_with_llm_env_defaults(config_payload))
+    models.apply_runtime_tuning_env(config)
+    llm = finding_runtime.LLMClient(config, "find")
+    result = find_pipeline.probe_find_llm_protocol(llm)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _run_find(args: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(description="Run Finding.")
     parser.add_argument("--config-json", default="", help="Optional Find config JSON. Defaults to config/find.config.json.")
@@ -483,6 +500,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_catalog(rest)
     if action in {"venue_health", "check_venue_health"}:
         return _run_venue_health(rest)
+    if action in {"llm_probe", "probe_llm"}:
+        return _run_llm_probe(rest)
     return _run_action_module(ACTION_ALIASES.get(action, action), rest)
 
 
