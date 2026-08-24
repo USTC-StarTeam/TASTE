@@ -137,15 +137,13 @@ chmod 600 modules/reading/config/read.env
 OPENREVIEW_USERNAME=your_openreview_email@example.com
 OPENREVIEW_PASSWORD=your_openreview_password
 
-# Unpaywall 无需注册，但要求每个 API 请求提供可联系邮箱
-UNPAYWALL_EMAIL=your_contact_email@example.com
 # OpenAlex 2026 年起使用免费 API key 标识配额；在账户设置页创建并复制
 OPENALEX_API_KEY=your_openalex_api_key
 # Crossref 的可联系邮箱，用于 polite pool
 CROSSREF_MAILTO=your_contact_email@example.com
 ```
 
-OpenReview 新用户先到 <https://openreview.net/signup> 注册，完成邮件确认和 Profile 激活后再填写；这里使用的是正常登录密码，不需要手工提取 Token。OpenAlex API key 在 <https://openalex.org/settings/api> 创建，当前认证与配额规则见其[官方说明](https://developers.openalex.org/api-reference/authentication)。[Unpaywall API](https://unpaywall.org/api) 要求请求携带邮箱；[Crossref REST API](https://www.crossref.org/documentation/retrieve-metadata/rest-api/access-and-authentication/) 则用 `mailto` 识别 polite pool。`UNPAYWALL_EMAIL` 和 `CROSSREF_MAILTO` 可以使用同一个属于当前用户且能正常收信的地址，但仍应分别填写，因为它们只会发送给对应服务。
+OpenReview 新用户先到 <https://openreview.net/signup> 注册，完成邮件确认和 Profile 激活后再填写；这里使用的是正常登录密码，不需要手工提取 Token。OpenAlex API key 在 <https://openalex.org/settings/api> 创建，当前认证与配额规则见其[官方说明](https://developers.openalex.org/api-reference/authentication)。[Crossref REST API](https://www.crossref.org/documentation/retrieve-metadata/rest-api/access-and-authentication/) 用 `mailto` 识别 polite pool，因此 `CROSSREF_MAILTO` 应填写属于当前用户且能正常收信的地址。
 
 `read.env` 使用简单的 `KEY=value` 格式，不需要写 `export`。已经存在于启动 shell 中的同名环境变量优先于文件值；修改配置后应重启网页服务再运行 Read。该文件已被 Git 忽略，不应提交、共享或写入项目目录。可选的其他全文来源密钥见模块内部参考 [modules/reading/README.md](modules/reading/README.md)。
 
