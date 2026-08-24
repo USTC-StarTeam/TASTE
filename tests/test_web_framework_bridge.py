@@ -1365,6 +1365,27 @@ def test_web_llm_probe_routes_through_finding_public_entry(monkeypatch):
     assert kwargs["capture_output"] is True
 
 
+def test_web_llm_probe_preserves_finding_error_detail(monkeypatch):
+    from auto_research.web import server as web_server
+
+    error = 'LLM HTTP 503 via chat_completions: {"error":{"code":"model_not_found"}}'
+    monkeypatch.setattr(web_server.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(
+        returncode=0,
+        stderr="",
+        stdout=json.dumps({
+            "ok": False,
+            "error": error,
+            "probe": "find_title_scoring_protocol",
+            "summary": {"role": "find", "enabled": True, "api_mode": "chat_completions"},
+        }),
+    ))
+
+    result = web_server.api_llm_probe()
+
+    assert result["ok"] is False
+    assert result["error"] == error
+
+
 def test_web_saved_deepseek_switch_replaces_old_probe_config(monkeypatch, tmp_path):
     from auto_research.web import server as web_server
 

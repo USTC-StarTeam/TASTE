@@ -4409,6 +4409,7 @@ function App() {
     try {
       setLLMProbeLoading(true);
       setError("");
+      setSaveMessage("");
       const nextConfig = configWithCurrentFindSelection();
       const savedConfig = await saveConfig(nextConfig);
       setConfig(savedConfig);
@@ -4417,10 +4418,8 @@ function App() {
       if (researchProject) {
         void loadProject(researchProject, { resetDrafts: false }).catch(() => {});
       }
-      setSaveMessage(result.ok ? (lang === "zh" ? "LLM 基础验证通过" : "LLM basic probe passed") : (lang === "zh" ? "LLM 基础验证失败" : "LLM basic probe failed"));
     } catch (err) {
       setLLMProbeResult({ ok: false, error: String(err) });
-      setError(String(err));
     } finally {
       setLLMProbeLoading(false);
     }
@@ -7536,7 +7535,7 @@ function App() {
           <div className="saveBar">
             <button className="primary" onClick={handleSaveConfig} disabled={savingConfig}>{savingConfig ? t.saving : t.saveConfig}</button>
             <button onClick={handleProbeLLMConfig} disabled={llmProbeLoading || savingConfig}>{llmProbeLoading ? t.validatingLLM : t.validateLLM}</button>
-            {llmProbeResult && <span className={llmProbeResult.ok ? "okText" : "errorText"}>{llmProbeResult.ok ? (lang === "zh" ? "基础兼容通过" : "basic compatibility passed") : (llmProbeResult.error || (lang === "zh" ? "基础验证失败" : "basic probe failed"))}</span>}
+            {llmProbeResult && <span className={llmProbeResult.ok ? "okText" : "errorText"}>{llmProbeResult.ok ? (lang === "zh" ? "LLM 基础验证通过" : "LLM basic validation passed") : (llmProbeResult.error || (lang === "zh" ? "LLM 基础验证失败：未返回具体错误" : "LLM basic validation failed without an error detail"))}</span>}
             {saveMessage && <span>{saveMessage}</span>}
           </div>
           <p className="help">{t.llmProbeHelp}</p>
